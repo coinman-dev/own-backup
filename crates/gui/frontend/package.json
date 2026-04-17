@@ -1,0 +1,19 @@
+{
+  "name": "own-backup-frontend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^4",
+    "svelte": "^5",
+    "typescript": "^5.7",
+    "vite": "^6"
+  }
+}

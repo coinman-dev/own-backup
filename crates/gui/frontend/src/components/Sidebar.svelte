@@ -1,0 +1,187 @@
+<script lang="ts">
+  import type { ViewName } from '../lib/types';
+
+  interface Props {
+    currentView: ViewName;
+    onNavigate: (view: ViewName) => void;
+  }
+
+  let { currentView, onNavigate }: Props = $props();
+
+  interface NavItem {
+    id: ViewName;
+    label: string;
+    icon: string;
+  }
+
+  const navItems: NavItem[] = [
+    {
+      id: 'dashboard',
+      label: 'Dashboard',
+      icon: 'M4 5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5zm10 0a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1h-4a1 1 0 0 1-1-1V5zM4 15a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-4zm10 0a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1h-4a1 1 0 0 1-1-1v-4z',
+    },
+    {
+      id: 'activity',
+      label: 'Activity',
+      icon: 'M12 6v6l4 2m6-2a10 10 0 1 1-20 0 10 10 0 0 1 20 0z',
+    },
+    {
+      id: 'restore',
+      label: 'Restore',
+      icon: 'M4 4v5h5M20 20v-5h-5M4 9a8 8 0 0 1 14-4M20 15a8 8 0 0 1-14 4',
+    },
+    {
+      id: 'settings',
+      label: 'Settings',
+      icon: 'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zm-1.5-5.3a1.5 1.5 0 0 1 3 0l.2 1.5a7 7 0 0 1 2 1.2l1.4-.6a1.5 1.5 0 0 1 2 .6l.6 1a1.5 1.5 0 0 1-.5 2l-1.2.9a7 7 0 0 1 0 2.4l1.2.9a1.5 1.5 0 0 1 .5 2l-.6 1a1.5 1.5 0 0 1-2 .6l-1.4-.6a7 7 0 0 1-2 1.2l-.2 1.5a1.5 1.5 0 0 1-3 0l-.2-1.5a7 7 0 0 1-2-1.2l-1.4.6a1.5 1.5 0 0 1-2-.6l-.6-1a1.5 1.5 0 0 1 .5-2l1.2-.9a7 7 0 0 1 0-2.4l-1.2-.9a1.5 1.5 0 0 1-.5-2l.6-1a1.5 1.5 0 0 1 2-.6l1.4.6a7 7 0 0 1 2-1.2l.2-1.5z',
+    },
+    {
+      id: 'about',
+      label: 'About',
+      icon: 'M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 5a1.25 1.25 0 1 1 0 2.5A1.25 1.25 0 0 1 12 7zm-1 4h2v6h-2v-6z',
+    },
+  ];
+</script>
+
+<nav class="sidebar">
+  <div class="sidebar-header">
+    <div class="logo">
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#2d7dd2" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="2" y="6" width="20" height="12" rx="2" />
+        <path d="M12 6V2M8 6V4M16 6V4" />
+        <circle cx="12" cy="12" r="3" />
+      </svg>
+    </div>
+    <span class="app-title">MY OWN BACKUP</span>
+  </div>
+
+  <ul class="nav-list">
+    {#each navItems as item}
+      <li>
+        <button
+          class="nav-item"
+          class:active={currentView === item.id}
+          onclick={() => onNavigate(item.id)}
+        >
+          <svg
+            class="nav-icon"
+            width="20"
+            height="20"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.8"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d={item.icon} />
+          </svg>
+          <span class="nav-label">{item.label}</span>
+        </button>
+      </li>
+    {/each}
+  </ul>
+
+  <div class="sidebar-footer">
+    <div class="version-text">v0.1.0</div>
+  </div>
+</nav>
+
+<style>
+  .sidebar {
+    width: var(--sidebar-width);
+    min-width: var(--sidebar-width);
+    height: 100%;
+    background: var(--sidebar-bg);
+    display: flex;
+    flex-direction: column;
+    user-select: none;
+  }
+
+  .sidebar-header {
+    padding: 20px 16px 24px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  }
+
+  .logo {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .app-title {
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+    color: #ffffff;
+    white-space: nowrap;
+  }
+
+  .nav-list {
+    list-style: none;
+    padding: 8px 0;
+    flex: 1;
+    overflow-y: auto;
+  }
+
+  .nav-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    padding: 11px 20px;
+    background: none;
+    border: none;
+    color: var(--sidebar-text);
+    font-size: 14px;
+    font-weight: 400;
+    text-align: left;
+    cursor: pointer;
+    transition: background-color 0.12s ease, color 0.12s ease;
+    border-left: 3px solid transparent;
+  }
+
+  .nav-item:hover {
+    background: var(--sidebar-hover);
+    color: #ccdbe8;
+  }
+
+  .nav-item.active {
+    background: var(--sidebar-active);
+    color: var(--sidebar-text-active);
+    border-left-color: var(--primary);
+  }
+
+  .nav-icon {
+    flex-shrink: 0;
+    color: var(--sidebar-icon);
+    transition: color 0.12s ease;
+  }
+
+  .nav-item.active .nav-icon {
+    color: var(--sidebar-text-active);
+  }
+
+  .nav-item:hover .nav-icon {
+    color: #8eb4d8;
+  }
+
+  .nav-label {
+    white-space: nowrap;
+  }
+
+  .sidebar-footer {
+    padding: 12px 20px;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+  }
+
+  .version-text {
+    font-size: 11px;
+    color: var(--sidebar-text);
+    opacity: 0.6;
+  }
+</style>

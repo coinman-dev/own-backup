@@ -1,0 +1,80 @@
+[workspace]
+members = [
+    "crates/common",
+    "crates/inventory",
+    "crates/snapshot",
+    "crates/backup",
+    "crates/restore",
+    "crates/metadata",
+    "crates/scheduler",
+    "crates/service",
+    "crates/cli",
+    "crates/gui",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["My Own Backup Contributors"]
+
+[workspace.dependencies]
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# IDs and time
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Async
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+
+# gRPC
+tonic = "0.12"
+tonic-build = "0.12"
+prost = "0.13"
+prost-types = "0.13"
+
+# Compression
+zstd = "0.13"
+
+# Encryption
+aes-gcm = "0.10"
+argon2 = "0.5"
+
+# Database
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Checksums
+xxhash-rust = { version = "0.8", features = ["xxh64"] }
+sha2 = "0.10"
+
+# Partition tables
+gpt = "3"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Cron
+cron = "0.13"
+
+# Internal crates
+own-backup-common = { path = "crates/common" }
+own-backup-inventory = { path = "crates/inventory" }
+own-backup-snapshot = { path = "crates/snapshot" }
+own-backup-backup = { path = "crates/backup" }
+own-backup-restore = { path = "crates/restore" }
+own-backup-metadata = { path = "crates/metadata" }
+own-backup-scheduler = { path = "crates/scheduler" }

@@ -1,0 +1,24 @@
+{
+  "productName": "My Own Backup",
+  "version": "0.1.0",
+  "identifier": "com.ownbackup.gui",
+  "build": {
+    "frontendDist": "frontend/dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "",
+    "beforeBuildCommand": ""
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "My Own Backup",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 600,
+        "resizable": true,
+        "decorations": true
+      }
+    ]
+  }
+}

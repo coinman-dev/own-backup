@@ -1,0 +1,29 @@
+[package]
+name = "own-backup-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "own-backup-cli"
+path = "src/main.rs"
+
+[dependencies]
+own-backup-common = { workspace = true }
+own-backup-inventory = { workspace = true }
+own-backup-snapshot = { workspace = true }
+own-backup-backup = { workspace = true }
+own-backup-restore = { workspace = true }
+own-backup-metadata = { workspace = true }
+clap = { workspace = true }
+tonic = { workspace = true }
+prost = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+rpassword = "7"
+zeroize = { version = "1", features = ["derive"] }

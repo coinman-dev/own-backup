@@ -1,0 +1,23 @@
+:root {
+  --sidebar-width: 220px;
+  --sidebar-bg: #1a2332;
+  --sidebar-active: #2d5aa0;
+  --sidebar-hover: #243447;
+  --sidebar-text: #8899aa;
+  --sidebar-text-active: #ffffff;
+  --sidebar-icon: #5577aa;
+  --content-bg: #f5f6f8;
+  --card-bg: #ffffff;
+  --primary: #2d7dd2;
+  --primary-hover: #2569b3;
+  --success: #34a853;
+  --warning: #fbbc05;
+  --error: #ea4335;
+  --text: #333333;
+  --text-secondary: #666666;
+  --text-muted: #999999;
+  --border: #e0e0e0;
+  --shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  --radius: 8px;
+  --font: 'Segoe UI', system-ui, -apple-system, sans-serif;
+}

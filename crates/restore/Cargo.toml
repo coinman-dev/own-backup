@@ -1,0 +1,28 @@
+[package]
+name = "own-backup-restore"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+own-backup-common = { workspace = true }
+own-backup-backup = { workspace = true }
+gpt = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+sha2 = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+] }
+
+[dev-dependencies]
+tempfile = "3"

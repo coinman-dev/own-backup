@@ -1,0 +1,18 @@
+[package]
+name = "own-backup-scheduler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+own-backup-common = { workspace = true }
+own-backup-metadata = { workspace = true }
+cron = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+rusqlite = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
