@@ -103,9 +103,55 @@ export interface ServiceStatus {
 }
 
 export type ViewName =
-  | 'dashboard'
-  | 'activity'
-  | 'restore'
+  | 'backup'
+  | 'tools'
   | 'job-settings'
   | 'settings'
   | 'about';
+
+export type BackupTab = 'copy' | 'activity' | 'recovery';
+
+export interface EngineProgress {
+  percent: number;
+  blocks_done: number;
+  blocks_total: number;
+  bytes_done: number;
+  speed_mbps: number;
+}
+
+export interface BackupSummary {
+  image_path: string;
+  sidecar_path: string;
+  source_bytes: number;
+  total_blocks: number;
+  used_blocks: number;
+  bytes_copied: number;
+  duration_secs: number;
+  smart_mode: boolean;
+  vss_used: boolean;
+}
+
+export interface RestoreSummary {
+  blocks_restored: number;
+  bytes_restored: number;
+  duration_secs: number;
+}
+
+export interface VerifySummary {
+  valid: boolean;
+  blocks_checked: number;
+  mismatched_blocks: number[];
+  duration_secs: number;
+}
+
+export interface ImageInfo {
+  image_file_name: string;
+  chain_role: string;
+  created_at: string;
+  source_device: string;
+  source_bytes: number;
+  block_size: number;
+  used_blocks: number;
+  total_blocks: number;
+  backup_mode: string;
+}

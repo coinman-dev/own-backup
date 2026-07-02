@@ -1,7 +1,10 @@
 pub mod backup;
 pub mod list_backups;
 pub mod list_disks;
+pub mod mount;
 pub mod preflight;
 pub mod restore;
 pub mod service;
+pub mod unmount;
 pub mod validate;
+pub mod verify;

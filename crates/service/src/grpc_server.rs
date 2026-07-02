@@ -69,6 +69,28 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
+/// Validate that a string looks like a device path for the current platform.
+///
+/// Windows: `\\.\PhysicalDrive0`, `\\.\C:`, or a plain volume letter `C:` / `C:\`.
+/// Linux: `/dev/...`.
+fn is_valid_device_path(path: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        if path.starts_with(r"\\.\") {
+            return true;
+        }
+        let b = path.as_bytes();
+        matches!(b.len(), 2 | 3)
+            && b[0].is_ascii_alphabetic()
+            && b[1] == b':'
+            && (b.len() == 2 || b[2] == b'\\')
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        path.starts_with("/dev/")
+    }
+}
+
 #[tonic::async_trait]
 impl BackupService for BackupServiceImpl {
     async fn list_disks(
@@ -153,19 +175,12 @@ impl BackupService for BackupServiceImpl {
         if req.source_device.is_empty() || req.source_device.len() > 512 {
             return Err(Status::invalid_argument("source_device must be 1-512 characters"));
         }
-        // Validate source_device looks like a block device path, not a filesystem path.
-        // On Windows: must start with \\.\PhysicalDrive or \\.\Volume
-        // On Linux: must start with /dev/
-        #[cfg(target_os = "windows")]
-        if !req.source_device.starts_with(r"\\.\") {
+        // Validate source_device looks like a device path, not a filesystem path.
+        // Windows: \\.\PhysicalDrive0, \\.\C: or a volume letter C: / C:\
+        // Linux: /dev/...
+        if !is_valid_device_path(&req.source_device) {
             return Err(Status::invalid_argument(
-                "source_device must be a device path (e.g. \\\\.\\PhysicalDrive0)"
-            ));
-        }
-        #[cfg(not(target_os = "windows"))]
-        if !req.source_device.starts_with("/dev/") {
-            return Err(Status::invalid_argument(
-                "source_device must be a device path (e.g. /dev/sda)"
+                "source_device must be a device path (e.g. \\\\.\\PhysicalDrive0, C: or /dev/sda)",
             ));
         }
         if req.target_path.is_empty() || req.target_path.len() > 1024 {
@@ -266,18 +281,11 @@ impl BackupService for BackupServiceImpl {
             target: "security",
             job_id = %req.job_id,
             backup_type = %req.backup_type,
-            "gRPC: StartBackup"
+            "gRPC: StartBackup rejected — engine not wired up yet"
         );
-        Ok(Response::new(BackupProgressResponse {
-            backup_id: uuid::Uuid::new_v4().to_string(),
-            status: "running".into(),
-            blocks_done: 0,
-            blocks_total: 0,
-            bytes_written: 0,
-            speed_mbps: 0.0,
-            eta: String::new(),
-            error_message: String::new(),
-        }))
+        Err(Status::unimplemented(
+            "StartBackup is not implemented yet (backup engine wiring: plan v2, phase 4)",
+        ))
     }
 
     async fn get_backup_progress(
@@ -285,8 +293,9 @@ impl BackupService for BackupServiceImpl {
         request: Request<BackupId>,
     ) -> Result<Response<BackupProgressResponse>, Status> {
         check_auth(&request, &self.service_token)?;
-        let _id = request.into_inner().id;
-        Ok(Response::new(BackupProgressResponse::default()))
+        Err(Status::unimplemented(
+            "GetBackupProgress is not implemented yet (plan v2, phase 4)",
+        ))
     }
 
     async fn cancel_backup(
@@ -294,9 +303,9 @@ impl BackupService for BackupServiceImpl {
         request: Request<BackupId>,
     ) -> Result<Response<Empty>, Status> {
         check_auth(&request, &self.service_token)?;
-        let _id = request.into_inner().id;
-        info!("gRPC: CancelBackup");
-        Ok(Response::new(Empty {}))
+        Err(Status::unimplemented(
+            "CancelBackup is not implemented yet (plan v2, phase 4)",
+        ))
     }
 
     type StreamBackupProgressStream =
@@ -307,8 +316,9 @@ impl BackupService for BackupServiceImpl {
         request: Request<BackupId>,
     ) -> Result<Response<Self::StreamBackupProgressStream>, Status> {
         check_auth(&request, &self.service_token)?;
-        let (_tx, rx) = tokio::sync::mpsc::channel(16);
-        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        Err(Status::unimplemented(
+            "StreamBackupProgress is not implemented yet (plan v2, phase 4)",
+        ))
     }
 
     async fn list_backup_sets(
@@ -360,19 +370,10 @@ impl BackupService for BackupServiceImpl {
         if req.target_device.is_empty() || req.target_device.len() > 512 {
             return Err(Status::invalid_argument("target_device must be 1-512 characters"));
         }
-        // Validate target_device looks like a block device path, not a filesystem path.
-        // On Windows: must start with \\.\PhysicalDrive or \\.\Volume
-        // On Linux: must start with /dev/
-        #[cfg(target_os = "windows")]
-        if !req.target_device.starts_with(r"\\.\") {
+        // Validate target_device looks like a device path, not a filesystem path.
+        if !is_valid_device_path(&req.target_device) {
             return Err(Status::invalid_argument(
-                "target_device must be a device path (e.g. \\\\.\\PhysicalDrive0)"
-            ));
-        }
-        #[cfg(not(target_os = "windows"))]
-        if !req.target_device.starts_with("/dev/") {
-            return Err(Status::invalid_argument(
-                "target_device must be a device path (e.g. /dev/sda)"
+                "target_device must be a device path (e.g. \\\\.\\PhysicalDrive0, C: or /dev/sda)",
             ));
         }
 
@@ -380,9 +381,11 @@ impl BackupService for BackupServiceImpl {
             target: "security",
             backup_set_id = %req.backup_set_id,
             target_device = %req.target_device,
-            "gRPC: StartRestore — destructive operation initiated"
+            "gRPC: StartRestore rejected — engine not wired up yet"
         );
-        Ok(Response::new(RestoreProgressResponse::default()))
+        Err(Status::unimplemented(
+            "StartRestore is not implemented yet (restore engine wiring: plan v2, phase 4)",
+        ))
     }
 
     type StreamRestoreProgressStream =
@@ -393,8 +396,9 @@ impl BackupService for BackupServiceImpl {
         request: Request<RestoreId>,
     ) -> Result<Response<Self::StreamRestoreProgressStream>, Status> {
         check_auth(&request, &self.service_token)?;
-        let (_tx, rx) = tokio::sync::mpsc::channel(16);
-        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        Err(Status::unimplemented(
+            "StreamRestoreProgress is not implemented yet (plan v2, phase 4)",
+        ))
     }
 
     async fn validate_backup(
@@ -402,13 +406,11 @@ impl BackupService for BackupServiceImpl {
         request: Request<BackupSetId>,
     ) -> Result<Response<ValidationResponse>, Status> {
         check_auth(&request, &self.service_token)?;
-        info!("gRPC: ValidateBackup");
-        Ok(Response::new(ValidationResponse {
-            valid: true,
-            message: "Not yet implemented".into(),
-            blocks_checked: 0,
-            blocks_total: 0,
-        }))
+        info!("gRPC: ValidateBackup rejected — not wired up yet");
+        // Never report `valid: true` for a validation that did not run.
+        Err(Status::unimplemented(
+            "ValidateBackup is not implemented yet (plan v2, phase 4)",
+        ))
     }
 
     async fn set_schedule(
@@ -427,8 +429,10 @@ impl BackupService for BackupServiceImpl {
             }
         }
 
-        info!("gRPC: SetSchedule job_id={}", req.job_id);
-        Ok(Response::new(Empty {}))
+        info!("gRPC: SetSchedule job_id={} rejected — persistence not wired up yet", req.job_id);
+        Err(Status::unimplemented(
+            "SetSchedule is not implemented yet (plan v2, phase 4)",
+        ))
     }
 
     async fn get_schedule(
@@ -436,7 +440,9 @@ impl BackupService for BackupServiceImpl {
         request: Request<JobId>,
     ) -> Result<Response<ScheduleResponse>, Status> {
         check_auth(&request, &self.service_token)?;
-        Ok(Response::new(ScheduleResponse::default()))
+        Err(Status::unimplemented(
+            "GetSchedule is not implemented yet (plan v2, phase 4)",
+        ))
     }
 
     async fn get_service_status(

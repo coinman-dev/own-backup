@@ -4,6 +4,8 @@
 // that are not available on Linux.
 
 #![cfg(target_os = "windows")]
+// Stub pending real Win32 data collection (plan v2); imports document intent.
+#![allow(unused_imports)]
 
 use own_backup_common::preflight::PreflightReport;
 use own_backup_common::types::{BootMode, DiskType, FileSystem, PartitionTable, SupportTier};

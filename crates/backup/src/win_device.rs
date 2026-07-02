@@ -1,0 +1,378 @@
+//! Raw Windows device I/O shared by the backup reader, the restore writer and
+//! the VHDX raw writer.
+//!
+//! Opens physical drives (`\\.\PhysicalDrive0`), volumes (`\\.\C:`) or VSS
+//! snapshot device paths with `FILE_FLAG_NO_BUFFERING` and performs
+//! sector-aligned reads/writes through an internally-allocated aligned buffer.
+
+#![cfg(target_os = "windows")]
+
+use std::alloc::{alloc, dealloc, Layout};
+
+use tracing::{debug, warn};
+use windows::core::PCWSTR;
+use windows::Win32::Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE};
+use windows::Win32::Storage::FileSystem::{
+    CreateFileW, FlushFileBuffers, ReadFile, SetFilePointerEx, WriteFile, FILE_BEGIN,
+    FILE_FLAG_NO_BUFFERING, FILE_FLAG_WRITE_THROUGH, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    OPEN_EXISTING,
+};
+use windows::Win32::System::Ioctl::{
+    DISK_GEOMETRY, GET_LENGTH_INFORMATION, IOCTL_DISK_GET_DRIVE_GEOMETRY,
+    IOCTL_DISK_GET_LENGTH_INFO,
+};
+use windows::Win32::System::IO::DeviceIoControl;
+
+use own_backup_common::{OwnBackupError, Result};
+
+/// Convert a Rust string to a NUL-terminated UTF-16 buffer for Win32 calls.
+pub(crate) fn to_wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// Normalize a user-supplied device spec to a Win32 device path.
+///
+/// `C:` / `C:\` -> `\\.\C:`; paths already starting with `\\` are kept as-is
+/// (covers `\\.\PhysicalDrive0`, `\\.\C:` and VSS snapshot device paths like
+/// `\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopyN`).
+pub fn normalize_device_path(path: &str) -> String {
+    if path.starts_with('\\') {
+        return path.to_string();
+    }
+    let bytes = path.as_bytes();
+    if matches!(bytes.len(), 2 | 3)
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes.len() == 2 || bytes[2] == b'\\')
+    {
+        return format!(r"\\.\{}:", bytes[0] as char);
+    }
+    path.to_string()
+}
+
+/// Heap buffer aligned for `FILE_FLAG_NO_BUFFERING` I/O.
+struct AlignedBuf {
+    ptr: *mut u8,
+    layout: Layout,
+}
+
+impl AlignedBuf {
+    fn new(size: usize, align: usize) -> Result<Self> {
+        let layout = Layout::from_size_align(size, align)
+            .map_err(|e| OwnBackupError::Device(format!("bad buffer layout: {e}")))?;
+        // SAFETY: layout has non-zero size (callers guarantee size > 0).
+        let ptr = unsafe { alloc(layout) };
+        if ptr.is_null() {
+            return Err(OwnBackupError::Device("aligned buffer allocation failed".into()));
+        }
+        Ok(Self { ptr, layout })
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        // SAFETY: ptr is valid for layout.size() bytes for the lifetime of self.
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.layout.size()) }
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        // SAFETY: same as above.
+        unsafe { std::slice::from_raw_parts(self.ptr, self.layout.size()) }
+    }
+}
+
+impl Drop for AlignedBuf {
+    fn drop(&mut self) {
+        // SAFETY: allocated with the same layout in new().
+        unsafe { dealloc(self.ptr, self.layout) };
+    }
+}
+
+/// A raw device opened for direct, sector-aligned I/O.
+pub struct WinRawDevice {
+    handle: HANDLE,
+    path: String,
+    length: u64,
+    sector_size: u32,
+}
+
+// SAFETY: the HANDLE is owned exclusively by this struct and all access goes
+// through &mut self; moving it across threads is safe.
+unsafe impl Send for WinRawDevice {}
+
+impl WinRawDevice {
+    /// Open a device for reading (backup source, attached VHDX for verify).
+    pub fn open_read(device_path: &str) -> Result<Self> {
+        Self::open(device_path, false)
+    }
+
+    /// Open a device for writing (restore target, attached VHDX for backup).
+    pub fn open_write(device_path: &str) -> Result<Self> {
+        Self::open(device_path, true)
+    }
+
+    fn open(device_path: &str, writable: bool) -> Result<Self> {
+        let path = normalize_device_path(device_path);
+        let wide = to_wide(&path);
+
+        let access = if writable {
+            GENERIC_READ.0 | GENERIC_WRITE.0
+        } else {
+            GENERIC_READ.0
+        };
+        let flags = if writable {
+            FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH
+        } else {
+            FILE_FLAG_NO_BUFFERING
+        };
+
+        // SAFETY: `wide` outlives the call; all pointers are valid.
+        let handle = unsafe {
+            CreateFileW(
+                PCWSTR(wide.as_ptr()),
+                access,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                flags,
+                None,
+            )
+        }
+        .map_err(|e| {
+            OwnBackupError::Device(format!("CreateFileW({path}) failed: {e}"))
+        })?;
+
+        let mut device = Self {
+            handle,
+            path: path.clone(),
+            length: 0,
+            sector_size: 512,
+        };
+
+        device.length = device.query_length()?;
+        device.sector_size = device.query_sector_size();
+        debug!(
+            path = %device.path,
+            length = device.length,
+            sector_size = device.sector_size,
+            "Opened raw device"
+        );
+        Ok(device)
+    }
+
+    /// Total device length in bytes (`IOCTL_DISK_GET_LENGTH_INFO`).
+    pub fn length(&self) -> u64 {
+        self.length
+    }
+
+    /// Logical sector size in bytes.
+    pub fn sector_size(&self) -> u32 {
+        self.sector_size
+    }
+
+    /// The normalized device path this device was opened with.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub(crate) fn handle(&self) -> HANDLE {
+        self.handle
+    }
+
+    fn query_length(&self) -> Result<u64> {
+        let mut info = GET_LENGTH_INFORMATION::default();
+        let mut returned = 0u32;
+        // SAFETY: out pointer is valid for the size passed.
+        unsafe {
+            DeviceIoControl(
+                self.handle,
+                IOCTL_DISK_GET_LENGTH_INFO,
+                None,
+                0,
+                Some(&mut info as *mut _ as *mut _),
+                std::mem::size_of::<GET_LENGTH_INFORMATION>() as u32,
+                Some(&mut returned),
+                None,
+            )
+        }
+        .map_err(|e| {
+            OwnBackupError::Device(format!(
+                "IOCTL_DISK_GET_LENGTH_INFO({}) failed: {e}",
+                self.path
+            ))
+        })?;
+        Ok(info.Length as u64)
+    }
+
+    fn query_sector_size(&self) -> u32 {
+        let mut geometry = DISK_GEOMETRY::default();
+        let mut returned = 0u32;
+        // SAFETY: out pointer is valid for the size passed.
+        let result = unsafe {
+            DeviceIoControl(
+                self.handle,
+                IOCTL_DISK_GET_DRIVE_GEOMETRY,
+                None,
+                0,
+                Some(&mut geometry as *mut _ as *mut _),
+                std::mem::size_of::<DISK_GEOMETRY>() as u32,
+                Some(&mut returned),
+                None,
+            )
+        };
+        match result {
+            Ok(()) if geometry.BytesPerSector > 0 => geometry.BytesPerSector,
+            _ => {
+                warn!(path = %self.path, "IOCTL_DISK_GET_DRIVE_GEOMETRY failed, assuming 512-byte sectors");
+                512
+            }
+        }
+    }
+
+    fn seek(&mut self, offset: u64) -> Result<()> {
+        // SAFETY: handle is valid.
+        unsafe { SetFilePointerEx(self.handle, offset as i64, None, FILE_BEGIN) }.map_err(|e| {
+            OwnBackupError::Device(format!("seek({}) to {offset} failed: {e}", self.path))
+        })
+    }
+
+    /// Read exactly `buf.len()` bytes at `offset`.
+    ///
+    /// `offset` must be sector-aligned. `buf.len()` may have any length up to
+    /// the device end; the read is internally rounded up to sector size.
+    pub fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        let sector = self.sector_size as u64;
+        if offset % sector != 0 {
+            return Err(OwnBackupError::Device(format!(
+                "read offset {offset} is not aligned to sector size {sector}"
+            )));
+        }
+        if offset + buf.len() as u64 > self.length {
+            return Err(OwnBackupError::Device(format!(
+                "read of {} bytes at {offset} exceeds device length {}",
+                buf.len(),
+                self.length
+            )));
+        }
+
+        let padded = (buf.len() as u64).div_ceil(sector) * sector;
+        // Never read past the device end even when rounding up.
+        let padded = padded.min(self.length - offset) as usize;
+        let mut aligned = AlignedBuf::new(padded, self.sector_size as usize)?;
+
+        self.seek(offset)?;
+        let mut read = 0u32;
+        // SAFETY: buffer is valid for `padded` bytes.
+        unsafe {
+            ReadFile(
+                self.handle,
+                Some(&mut aligned.as_mut_slice()[..padded]),
+                Some(&mut read),
+                None,
+            )
+        }
+        .map_err(|e| {
+            OwnBackupError::Device(format!(
+                "ReadFile({}) {padded} bytes at {offset} failed: {e}",
+                self.path
+            ))
+        })?;
+        let read = read as usize;
+        if read < buf.len() {
+            // A volume handle opened with FILE_FLAG_NO_BUFFERING can return
+            // slightly fewer bytes than IOCTL_DISK_GET_LENGTH_INFO reports for
+            // the final sector(s) — NTFS keeps its backup boot sector at the very
+            // end and it is not always readable through the volume handle. Only
+            // at the device tail do we tolerate this: copy what we got and
+            // zero-fill the remainder (the primary structures live at offset 0,
+            // so a zeroed tail sector does not stop the image from mounting).
+            let at_tail = offset + padded as u64 >= self.length;
+            if at_tail && read > 0 {
+                buf[..read].copy_from_slice(&aligned.as_slice()[..read]);
+                for b in &mut buf[read..] {
+                    *b = 0;
+                }
+                tracing::debug!(
+                    path = %self.path,
+                    offset,
+                    wanted = buf.len(),
+                    got = read,
+                    "Short read at device tail — zero-filled remainder"
+                );
+                return Ok(());
+            }
+            return Err(OwnBackupError::Device(format!(
+                "short read on {}: wanted {} got {read} at offset {offset}",
+                self.path,
+                buf.len()
+            )));
+        }
+
+        buf.copy_from_slice(&aligned.as_slice()[..buf.len()]);
+        Ok(())
+    }
+
+    /// Write `data` at `offset`. Both must be sector-aligned; a write must not
+    /// extend past the device end.
+    pub fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()> {
+        let sector = self.sector_size as u64;
+        if offset % sector != 0 || data.len() as u64 % sector != 0 {
+            return Err(OwnBackupError::Device(format!(
+                "write of {} bytes at {offset} is not aligned to sector size {sector}",
+                data.len()
+            )));
+        }
+        if offset + data.len() as u64 > self.length {
+            return Err(OwnBackupError::Device(format!(
+                "write of {} bytes at {offset} exceeds device length {}",
+                data.len(),
+                self.length
+            )));
+        }
+        if data.is_empty() {
+            return Ok(());
+        }
+
+        let mut aligned = AlignedBuf::new(data.len(), self.sector_size as usize)?;
+        aligned.as_mut_slice().copy_from_slice(data);
+
+        self.seek(offset)?;
+        let mut written = 0u32;
+        // SAFETY: buffer valid for data.len() bytes.
+        unsafe {
+            WriteFile(
+                self.handle,
+                Some(&aligned.as_slice()[..data.len()]),
+                Some(&mut written),
+                None,
+            )
+        }
+        .map_err(|e| {
+            OwnBackupError::Device(format!(
+                "WriteFile({}) {} bytes at {offset} failed: {e}",
+                self.path,
+                data.len()
+            ))
+        })?;
+        if (written as usize) != data.len() {
+            return Err(OwnBackupError::Device(format!(
+                "short write on {}: wanted {} wrote {written} at offset {offset}",
+                self.path,
+                data.len()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Flush OS buffers for this handle.
+    pub fn flush(&mut self) -> Result<()> {
+        // SAFETY: handle is valid.
+        unsafe { FlushFileBuffers(self.handle) }
+            .map_err(|e| OwnBackupError::Device(format!("flush({}) failed: {e}", self.path)))
+    }
+}
+
+impl Drop for WinRawDevice {
+    fn drop(&mut self) {
+        // SAFETY: handle owned by us and closed exactly once.
+        let _ = unsafe { CloseHandle(self.handle) };
+    }
+}

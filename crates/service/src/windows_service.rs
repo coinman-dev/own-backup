@@ -14,10 +14,10 @@ mod imp {
     use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
     use windows_service::service_dispatcher;
 
-    use crate::shutdown::ShutdownController;
-
     pub const SERVICE_NAME: &str = "MyOwnBackup";
+    #[allow(dead_code)] // used by the MSI/service installer (plan v2, phase 7)
     pub const SERVICE_DISPLAY_NAME: &str = "My Own Backup Service";
+    #[allow(dead_code)] // used by the MSI/service installer (plan v2, phase 7)
     pub const SERVICE_DESCRIPTION: &str =
         "Block-level backup service for My Own Backup";
 

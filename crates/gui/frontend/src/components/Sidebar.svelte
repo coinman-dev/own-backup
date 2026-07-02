@@ -16,28 +16,23 @@
 
   const navItems: NavItem[] = [
     {
-      id: 'dashboard',
-      label: 'Dashboard',
+      id: 'backup',
+      label: 'РЕЗЕРВНОЕ КОПИРОВАНИЕ',
+      icon: 'M8 8h12v12H8zM16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2',
+    },
+    {
+      id: 'tools',
+      label: 'ИНСТРУМЕНТЫ',
       icon: 'M4 5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5zm10 0a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1h-4a1 1 0 0 1-1-1V5zM4 15a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-4zm10 0a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1h-4a1 1 0 0 1-1-1v-4z',
     },
     {
-      id: 'activity',
-      label: 'Activity',
-      icon: 'M12 6v6l4 2m6-2a10 10 0 1 1-20 0 10 10 0 0 1 20 0z',
-    },
-    {
-      id: 'restore',
-      label: 'Restore',
-      icon: 'M4 4v5h5M20 20v-5h-5M4 9a8 8 0 0 1 14-4M20 15a8 8 0 0 1-14 4',
-    },
-    {
       id: 'settings',
-      label: 'Settings',
+      label: 'ПАРАМЕТРЫ',
       icon: 'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zm-1.5-5.3a1.5 1.5 0 0 1 3 0l.2 1.5a7 7 0 0 1 2 1.2l1.4-.6a1.5 1.5 0 0 1 2 .6l.6 1a1.5 1.5 0 0 1-.5 2l-1.2.9a7 7 0 0 1 0 2.4l1.2.9a1.5 1.5 0 0 1 .5 2l-.6 1a1.5 1.5 0 0 1-2 .6l-1.4-.6a7 7 0 0 1-2 1.2l-.2 1.5a1.5 1.5 0 0 1-3 0l-.2-1.5a7 7 0 0 1-2-1.2l-1.4.6a1.5 1.5 0 0 1-2-.6l-.6-1a1.5 1.5 0 0 1 .5-2l1.2-.9a7 7 0 0 1 0-2.4l-1.2-.9a1.5 1.5 0 0 1-.5-2l.6-1a1.5 1.5 0 0 1 2-.6l1.4.6a7 7 0 0 1 2-1.2l.2-1.5z',
     },
     {
       id: 'about',
-      label: 'About',
+      label: 'СПРАВКА',
       icon: 'M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 5a1.25 1.25 0 1 1 0 2.5A1.25 1.25 0 0 1 12 7zm-1 4h2v6h-2v-6z',
     },
   ];
@@ -137,8 +132,9 @@
     background: none;
     border: none;
     color: var(--sidebar-text);
-    font-size: 14px;
-    font-weight: 400;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.03em;
     text-align: left;
     cursor: pointer;
     transition: background-color 0.12s ease, color 0.12s ease;

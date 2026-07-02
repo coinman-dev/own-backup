@@ -55,8 +55,8 @@ impl<'k, R: Read + Seek> RestorePipeline<'k, R> {
 mod tests {
     use super::*;
     use crate::block_writer::MockBlockWriter;
-    use own_backup_backup::{compress_block, compute_block_checksum, ImageWriter};
-    use own_backup_common::disk::{DiskInfo, PartitionInfo};
+    use own_backup_backup::ImageWriter;
+    use own_backup_common::disk::DiskInfo;
     use own_backup_common::image::*;
     use own_backup_common::types::*;
     use std::io::Cursor;

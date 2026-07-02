@@ -6,8 +6,10 @@ use own_backup_common::config::AppConfig;
 
 /// Shared application state accessible from gRPC handlers and scheduler.
 pub struct AppState {
+    #[allow(dead_code)] // read once real backup orchestration lands (plan v2, phase 4)
     pub config: AppConfig,
     pub db_path: PathBuf,
+    #[allow(dead_code)] // read once real backup orchestration lands (plan v2, phase 4)
     pub active_backup_id: Mutex<Option<String>>,
     pub start_time: std::time::Instant,
 }

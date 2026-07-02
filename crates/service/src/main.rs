@@ -24,11 +24,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    let args: Vec<String> = std::env::args().collect();
-    let foreground = args.iter().any(|a| a == "--foreground" || a == "-f");
-
     #[cfg(target_os = "windows")]
     {
+        let args: Vec<String> = std::env::args().collect();
+        let foreground = args.iter().any(|a| a == "--foreground" || a == "-f");
         if !foreground {
             info!("Starting as Windows Service...");
             windows_service::run_as_service()?;
@@ -63,12 +62,13 @@ pub async fn run_main_loop(mut shutdown: ShutdownSignal) -> Result<(), Box<dyn s
     // On Unix: use Unix Domain Socket (no TCP, prevents local privilege escalation).
     // On Windows: Named Pipe (TODO), falls back to TCP localhost for now.
     // Dev/foreground mode: always uses TCP for easy debugging.
-    let args: Vec<String> = std::env::args().collect();
-    let use_tcp = args.iter().any(|a| a == "--foreground" || a == "-f" || a == "--tcp");
-
     #[cfg(unix)]
-    if !use_tcp {
-        return serve_uds(config, state, shutdown).await;
+    {
+        let args: Vec<String> = std::env::args().collect();
+        let use_tcp = args.iter().any(|a| a == "--foreground" || a == "-f" || a == "--tcp");
+        if !use_tcp {
+            return serve_uds(config, state, shutdown).await;
+        }
     }
 
     // TCP fallback (dev mode / Windows placeholder)

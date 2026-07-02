@@ -1,5 +1,6 @@
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 
 use own_backup_common::config::AppConfig;
 
@@ -9,7 +10,10 @@ pub struct GuiState {
     pub db_path: PathBuf,
     pub config_path: PathBuf,
     /// Cached gRPC connection status
+    #[allow(dead_code)] // read once the GUI gets a real gRPC client (plan v2, phase 6)
     pub service_connected: Mutex<bool>,
+    /// Set to true to cancel the currently running engine operation.
+    pub cancel_flag: Arc<AtomicBool>,
 }
 
 impl GuiState {
@@ -21,6 +25,7 @@ impl GuiState {
             db_path,
             config_path,
             service_connected: Mutex::new(false),
+            cancel_flag: Arc::new(AtomicBool::new(false)),
         }
     }
 

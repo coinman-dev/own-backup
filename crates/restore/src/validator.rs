@@ -96,7 +96,7 @@ mod tests {
     use own_backup_common::disk::DiskInfo;
     use own_backup_common::image::ImageManifest;
     use own_backup_common::types::*;
-    use std::io::{Cursor, Write};
+    use std::io::Write;
     use tempfile::TempDir;
     use uuid::Uuid;
 

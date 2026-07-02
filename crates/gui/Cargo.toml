@@ -8,14 +8,22 @@ license.workspace = true
 name = "own-backup-gui"
 path = "src/main.rs"
 
+[features]
+# Production builds embed the frontend and serve it over the custom protocol.
+# `tauri dev` runs with --no-default-features to use the vite dev server instead.
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
 [dependencies]
 own-backup-common = { workspace = true }
 own-backup-inventory = { workspace = true }
 own-backup-metadata = { workspace = true }
 own-backup-scheduler = { workspace = true }
 own-backup-restore = { workspace = true }
+own-backup-backup = { workspace = true }
 tauri = { version = "2", features = ["devtools"] }
 tauri-plugin-shell = "2"
+tauri-plugin-dialog = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

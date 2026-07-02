@@ -48,6 +48,12 @@ pub enum OwnBackupError {
     #[error("Serialization error: {0}")]
     Serialization(String),
 
+    #[error("Device I/O error: {0}")]
+    Device(String),
+
+    #[error("Virtual disk (VHDX) error: {0}")]
+    Vhdx(String),
+
     #[error("Cancelled by user")]
     Cancelled,
 }

@@ -1,4 +1,7 @@
+/.ai
+/.claude
 /target
+/image
 **/target
 **/node_modules
 **/dist
@@ -21,7 +24,10 @@
 .DS_Store
 Thumbs.db
 
-.ai
-.cargo
-.claude
+cargo
 .codex
+/design
+/log
+*.vhdx
+*.avhdx
+*.obkm

@@ -1,459 +1,354 @@
 <script lang="ts">
-  import StatusBadge from '../components/StatusBadge.svelte';
-  import Modal from '../components/Modal.svelte';
+  import { open } from '@tauri-apps/plugin-dialog';
   import { api } from '../lib/api';
   import { formatBytes, formatDate } from '../lib/format';
-  import type { BackupJob, BackupSet, DiskInfo } from '../lib/types';
+  import { engine, runRestore, cancelCurrent, clearRestoreResult } from '../lib/engineStore.svelte';
+  import type { ImageInfo } from '../lib/types';
 
-  let jobs: BackupJob[] = $state([]);
-  let disks: DiskInfo[] = $state([]);
-  let selectedJobId: string = $state('');
-  let sets: BackupSet[] = $state([]);
-  let selectedSetId: string = $state('');
-  let isLoading = $state(true);
-  let isSetsLoading = $state(false);
-  let error: string | null = $state(null);
+  let imagePath = $state('');
+  let target = $state('');
+  let info: ImageInfo | null = $state(null);
+  let infoError: string | null = $state(null);
 
-  // Restore modal
-  let showRestoreModal = $state(false);
-  let restoreTarget = $state('');
-  let restorePassword = $state('');
-  let isRestoring = $state(false);
+  let confirmOpen = $state(false);
+  let confirmText = $state('');
 
-  async function loadData() {
-    isLoading = true;
-    error = null;
+  const running = $derived(engine.op === 'restore');
+  const progress = $derived(engine.restoreProgress);
+  const summary = $derived(engine.restoreSummary);
+  let formError: string | null = $state(null);
+  const errorMsg = $derived(formError ?? engine.restoreError);
+
+  async function browseImage() {
     try {
-      const [jobsResult, disksResult] = await Promise.allSettled([
-        api.listJobs(),
-        api.listDisks(),
-      ]);
-      jobs = jobsResult.status === 'fulfilled' ? jobsResult.value : [];
-      disks = disksResult.status === 'fulfilled' ? disksResult.value : [];
-    } catch (e: unknown) {
-      error = e instanceof Error ? e.message : String(e);
-    } finally {
-      isLoading = false;
+      const picked = await open({
+        title: 'Выберите образ',
+        multiple: false,
+        filters: [{ name: 'Образ VHDX', extensions: ['vhdx', 'avhdx'] }],
+      });
+      if (typeof picked === 'string') {
+        imagePath = picked;
+        await loadInfo();
+      }
+    } catch (e) {
+      infoError = String(e);
     }
   }
 
-  $effect(() => {
-    loadData();
-  });
-
-  $effect(() => {
-    if (selectedJobId) {
-      loadSets(selectedJobId);
-    } else {
-      sets = [];
-      selectedSetId = '';
-    }
-  });
-
-  async function loadSets(jobId: string) {
-    isSetsLoading = true;
+  async function loadInfo() {
+    info = null;
+    infoError = null;
+    clearRestoreResult();
     try {
-      const result = await api.listSets(jobId);
-      sets = result
-        .filter((s) => s.status === 'completed')
-        .sort((a, b) => {
-          const aDate = a.completed_at ?? '';
-          const bDate = b.completed_at ?? '';
-          return bDate > aDate ? 1 : bDate < aDate ? -1 : 0;
-        });
-      selectedSetId = sets.length > 0 ? sets[0].id : '';
-    } catch (e: unknown) {
-      error = e instanceof Error ? e.message : String(e);
-      sets = [];
-    } finally {
-      isSetsLoading = false;
+      info = await api.readImageInfo(imagePath);
+    } catch (e) {
+      infoError = String(e);
     }
   }
 
-  let selectedSet = $derived(sets.find((s) => s.id === selectedSetId) ?? null);
-
-  let selectedJob = $derived(jobs.find((j) => j.id === selectedJobId) ?? null);
-
-  function openRestoreModal() {
-    if (!selectedSet) return;
-    restoreTarget = '';
-    restorePassword = '';
-    showRestoreModal = true;
+  function askConfirm() {
+    if (!info || !target) {
+      formError = 'Загрузите образ и укажите целевой том.';
+      return;
+    }
+    formError = null;
+    confirmText = '';
+    confirmOpen = true;
   }
 
-  async function handleRestore() {
-    if (!selectedSetId || !restoreTarget) return;
-    isRestoring = true;
-    try {
-      await api.startRestore(selectedSetId, restoreTarget, restorePassword);
-      showRestoreModal = false;
-    } catch (e: unknown) {
-      error = e instanceof Error ? e.message : String(e);
-    } finally {
-      isRestoring = false;
-    }
+  async function doRestore() {
+    if (confirmText !== 'ДА') return;
+    confirmOpen = false;
+    await runRestore(imagePath, target);
   }
 </script>
 
-<div class="restore-view">
-  <div class="page-header">
-    <h1 class="page-title">Restore</h1>
+<div class="page">
+  <div class="row">
+    <label for="img">Образ (.vhdx):</label>
+    <input
+      id="img"
+      type="text"
+      bind:value={imagePath}
+      placeholder="D:\OwnBackup\disk_C_20260702.vhdx"
+      spellcheck="false"
+      disabled={running}
+    />
+    <button class="btn outline" onclick={browseImage} disabled={running}>Обзор…</button>
+    <button class="btn outline" onclick={loadInfo} disabled={running || !imagePath}>
+      Загрузить
+    </button>
   </div>
 
-  {#if error}
-    <div class="error-banner">
-      <span>{error}</span>
-      <button class="dismiss-btn" onclick={() => (error = null)}>Dismiss</button>
-    </div>
+  {#if infoError}
+    <div class="banner err">{infoError}</div>
   {/if}
 
-  {#if isLoading}
-    <div class="loading-state">
-      <div class="spinner"></div>
-      <p>Loading restore options...</p>
-    </div>
-  {:else}
-    <div class="restore-layout">
-      <!-- Left: Selection -->
-      <div class="card selection-panel">
-        <h2 class="panel-title">Select Backup</h2>
-
-        <div class="form-group">
-          <label for="restore-job">Backup Job</label>
-          <select id="restore-job" class="form-select" bind:value={selectedJobId}>
-            <option value="">Choose a job...</option>
-            {#each jobs as job}
-              <option value={job.id}>{job.name}</option>
-            {/each}
-          </select>
+  {#if info}
+    <div class="info-card">
+      <div class="info-grid">
+        <div><span class="k">Файл:</span> {info.image_file_name}</div>
+        <div><span class="k">Создан:</span> {formatDate(info.created_at)}</div>
+        <div><span class="k">Источник:</span> {info.source_device}</div>
+        <div><span class="k">Размер тома:</span> {formatBytes(info.source_bytes)}</div>
+        <div>
+          <span class="k">Занято:</span>
+          {info.used_blocks} из {info.total_blocks} блоков
+          ({formatBytes(info.used_blocks * info.block_size)})
         </div>
-
-        {#if selectedJobId}
-          <div class="form-group">
-            <label for="restore-version">Version</label>
-            {#if isSetsLoading}
-              <p class="text-muted">Loading versions...</p>
-            {:else if sets.length === 0}
-              <p class="text-muted">No completed backups found.</p>
-            {:else}
-              <div class="version-list">
-                {#each sets as set (set.id)}
-                  <button
-                    class="version-item"
-                    class:selected={selectedSetId === set.id}
-                    onclick={() => (selectedSetId = set.id)}
-                  >
-                    <div class="version-info">
-                      <span class="version-date">
-                        {set.completed_at ? formatDate(set.completed_at) : '---'}
-                      </span>
-                      <span class="version-meta">
-                        {set.backup_type} | {set.file_size != null ? formatBytes(set.file_size) : '---'}
-                      </span>
-                    </div>
-                    <StatusBadge status="success" />
-                  </button>
-                {/each}
-              </div>
-            {/if}
-          </div>
-        {/if}
-      </div>
-
-      <!-- Right: Details + Action -->
-      <div class="details-panel">
-        {#if selectedSet && selectedJob}
-          <div class="card">
-            <h2 class="panel-title">Backup Details</h2>
-            <div class="detail-grid">
-              <div class="detail-item">
-                <span class="detail-label">Job</span>
-                <span class="detail-value">{selectedJob.name}</span>
-              </div>
-              <div class="detail-item">
-                <span class="detail-label">Type</span>
-                <span class="detail-value">{selectedSet.backup_type}</span>
-              </div>
-              <div class="detail-item">
-                <span class="detail-label">Source</span>
-                <span class="detail-value">{selectedJob.source_device}</span>
-              </div>
-              <div class="detail-item">
-                <span class="detail-label">Source Size</span>
-                <span class="detail-value">{formatBytes(selectedSet.source_size)}</span>
-              </div>
-              <div class="detail-item">
-                <span class="detail-label">Backup Size</span>
-                <span class="detail-value">
-                  {selectedSet.file_size != null ? formatBytes(selectedSet.file_size) : '---'}
-                </span>
-              </div>
-              <div class="detail-item">
-                <span class="detail-label">Blocks</span>
-                <span class="detail-value">
-                  {selectedSet.block_count.toLocaleString()}
-                  {#if selectedSet.changed_block_count != null}
-                    ({selectedSet.changed_block_count.toLocaleString()} changed)
-                  {/if}
-                </span>
-              </div>
-              <div class="detail-item">
-                <span class="detail-label">File</span>
-                <span class="detail-value file-path">{selectedSet.file_path}</span>
-              </div>
-              {#if selectedSet.checksum}
-                <div class="detail-item">
-                  <span class="detail-label">Checksum</span>
-                  <span class="detail-value file-path">{selectedSet.checksum}</span>
-                </div>
-              {/if}
-              <div class="detail-item">
-                <span class="detail-label">Encrypted</span>
-                <span class="detail-value">{selectedJob.encryption_enabled ? 'Yes (AES-256-GCM)' : 'No'}</span>
-              </div>
-            </div>
-
-            <div class="action-row">
-              <button class="btn btn-primary" onclick={openRestoreModal}>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-                  <path d="M4 4v5h5M20 20v-5h-5M4 9a8 8 0 0 1 14-4M20 15a8 8 0 0 1-14 4" />
-                </svg>
-                Restore This Backup
-              </button>
-            </div>
-          </div>
-        {:else}
-          <div class="card empty-details">
-            <div class="empty-icon">
-              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="1" stroke-linecap="round">
-                <path d="M4 4v5h5M20 20v-5h-5M4 9a8 8 0 0 1 14-4M20 15a8 8 0 0 1-14 4" />
-              </svg>
-            </div>
-            <p class="text-muted">Select a backup job and version to view details.</p>
-          </div>
-        {/if}
+        <div><span class="k">Режим:</span> {info.backup_mode} · {info.chain_role}</div>
       </div>
     </div>
+
+    <div class="row">
+      <label for="tgt">Восстановить в:</label>
+      <select id="tgt" bind:value={target} disabled={running}>
+        <option value="" disabled selected>— выберите том (будет ПОЛНОСТЬЮ перезаписан) —</option>
+        {#each engine.volumes as v}
+          <option value={v.device}>{v.label}</option>
+        {/each}
+      </select>
+      {#if running}
+        <button class="btn danger" onclick={cancelCurrent}>Отмена</button>
+      {:else}
+        <button class="btn primary-green" onclick={askConfirm}>Восстановить</button>
+      {/if}
+    </div>
   {/if}
+
+  {#if running && progress}
+    <div class="progress-wrap">
+      <div class="progress-info">
+        <span>Восстановление… (контрольные суммы проверяются)</span>
+        <span>
+          {progress.blocks_done} / {progress.blocks_total} блоков ·
+          {progress.speed_mbps.toFixed(1)} МБ/с
+        </span>
+      </div>
+      <div class="bar"><div class="bar-fill" style="width:{progress.percent}%"></div></div>
+    </div>
+  {/if}
+
+  {#if summary}
+    <div class="banner ok">
+      Восстановление завершено: {summary.blocks_restored} блоков,
+      {formatBytes(summary.bytes_restored)} за {summary.duration_secs.toFixed(1)} с.
+    </div>
+  {/if}
+
+  {#if errorMsg}
+    <div class="banner err">{errorMsg}</div>
+  {/if}
+
+  <div class="note">
+    Отдельные файлы: подключите образ как диск (Инструменты → Подключить) и
+    скопируйте нужное в проводнике.
+  </div>
 </div>
 
-<Modal
-  open={showRestoreModal}
-  title="Restore Backup"
-  onClose={() => (showRestoreModal = false)}
-  onConfirm={handleRestore}
-  confirmLabel={isRestoring ? 'Restoring...' : 'Start Restore'}
-  danger
->
-  <p style="margin-bottom: 16px; color: var(--text-secondary);">
-    This will overwrite the target device with the backup data.
-    Make sure you have selected the correct target.
-  </p>
-
-  <div class="form-group">
-    <label for="restore-target">Target Device</label>
-    <select id="restore-target" class="form-select" bind:value={restoreTarget}>
-      <option value="">Select target disk...</option>
-      {#each disks as disk}
-        <option value={disk.device_id}>
-          {disk.model || disk.device_id} ({formatBytes(disk.size_bytes)})
-        </option>
-      {/each}
-    </select>
-  </div>
-
-  {#if selectedJob?.encryption_enabled}
-    <div class="form-group">
-      <label for="restore-password">Encryption Password</label>
-      <input
-        id="restore-password"
-        class="form-input"
-        type="password"
-        placeholder="Enter backup password"
-        bind:value={restorePassword}
-      />
+{#if confirmOpen}
+  <div class="overlay">
+    <div class="dialog">
+      <div class="dialog-title">Подтверждение восстановления</div>
+      <p>
+        Все данные на томе <b>{target}</b> будут безвозвратно перезаписаны
+        содержимым образа <b>{info?.image_file_name}</b>.
+      </p>
+      <p>Введите <b>ДА</b> (заглавными), чтобы продолжить:</p>
+      <input type="text" bind:value={confirmText} spellcheck="false" />
+      <div class="dialog-actions">
+        <button class="btn outline" onclick={() => (confirmOpen = false)}>Отмена</button>
+        <button class="btn danger-solid" disabled={confirmText !== 'ДА'} onclick={doRestore}>
+          Восстановить
+        </button>
+      </div>
     </div>
-  {/if}
-</Modal>
+  </div>
+{/if}
 
 <style>
-  .restore-view {
-    padding: 28px 32px;
-    height: 100%;
-    overflow-y: auto;
+  .page {
+    padding: 30px 44px;
+    max-width: 860px;
   }
 
-  .page-header {
-    margin-bottom: 24px;
-  }
-
-  .page-title {
-    font-size: 24px;
-    font-weight: 600;
-    color: var(--text);
-    margin: 0;
-  }
-
-  .error-banner {
+  .row {
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 12px 16px;
-    background: rgba(234, 67, 53, 0.08);
-    border: 1px solid rgba(234, 67, 53, 0.2);
-    border-radius: var(--radius);
-    color: var(--error);
-    margin-bottom: 20px;
+    gap: 12px;
+    margin-bottom: 18px;
+  }
+
+  .row label {
+    font-size: 14px;
+    color: var(--head);
+    min-width: 130px;
+  }
+
+  .row input,
+  .row select {
+    flex: 1;
+    padding: 9px 12px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
     font-size: 13px;
+    font-family: var(--font);
+    background: #fff;
+    color: var(--text);
   }
 
-  .dismiss-btn {
-    margin-left: auto;
-    background: none;
-    border: none;
-    color: var(--error);
-    font-size: 12px;
-    font-weight: 500;
-    text-decoration: underline;
-    cursor: pointer;
+  .info-card {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--panel2);
+    padding: 16px 20px;
+    margin-bottom: 20px;
   }
 
-  .loading-state {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    padding: 80px 20px;
+  .info-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px 24px;
+    font-size: 13px;
+    color: var(--text);
+  }
+
+  .k {
     color: var(--text-muted);
   }
 
-  .spinner {
-    width: 36px;
-    height: 36px;
-    border: 3px solid var(--border);
-    border-top-color: var(--primary);
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
+  .progress-wrap {
+    margin-top: 10px;
     margin-bottom: 16px;
   }
 
-  .restore-layout {
-    display: grid;
-    grid-template-columns: 380px 1fr;
-    gap: 24px;
-    align-items: start;
-  }
-
-  .panel-title {
-    font-size: 16px;
-    font-weight: 600;
-    color: var(--text);
-    margin: 0 0 16px;
-  }
-
-  .version-list {
+  .progress-info {
     display: flex;
-    flex-direction: column;
-    gap: 6px;
-    max-height: 360px;
-    overflow-y: auto;
-  }
-
-  .version-item {
-    display: flex;
-    align-items: center;
     justify-content: space-between;
-    padding: 10px 12px;
-    background: var(--content-bg);
-    border: 2px solid transparent;
-    border-radius: 6px;
-    cursor: pointer;
-    text-align: left;
-    transition: border-color 0.12s ease;
-    width: 100%;
-  }
-
-  .version-item:hover {
-    border-color: var(--border);
-  }
-
-  .version-item.selected {
-    border-color: var(--primary);
-    background: rgba(45, 125, 210, 0.06);
-  }
-
-  .version-info {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-
-  .version-date {
     font-size: 13px;
-    font-weight: 500;
-    color: var(--text);
+    color: var(--head);
+    margin-bottom: 8px;
   }
 
-  .version-meta {
-    font-size: 11px;
-    color: var(--text-muted);
-    text-transform: uppercase;
+  .bar {
+    height: 8px;
+    border-radius: 4px;
+    background: var(--tabbg);
+    overflow: hidden;
   }
 
-  .detail-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 14px;
-    margin-bottom: 20px;
+  .bar-fill {
+    height: 100%;
+    background: var(--green);
+    transition: width 0.15s linear;
   }
 
-  .detail-item {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-
-  .detail-label {
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.3px;
-    color: var(--text-muted);
-  }
-
-  .detail-value {
-    font-size: 14px;
-    color: var(--text);
-  }
-
-  .file-path {
-    font-family: 'Consolas', 'Monaco', monospace;
-    font-size: 12px;
+  .banner {
+    border-radius: var(--radius);
+    padding: 13px 16px;
+    font-size: 13px;
+    margin-bottom: 14px;
     word-break: break-all;
   }
 
-  .action-row {
-    display: flex;
-    justify-content: flex-end;
-    padding-top: 8px;
-    border-top: 1px solid var(--border);
+  .banner.ok {
+    background: rgba(90, 176, 47, 0.1);
+    color: #2c5b12;
   }
 
-  .empty-details {
+  .banner.err {
+    background: rgba(216, 74, 74, 0.08);
+    color: #8c1d1d;
+  }
+
+  .note {
+    margin-top: 20px;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+
+  .btn {
+    border-radius: 4px;
+    padding: 9px 22px;
+    font-size: 14px;
+    font-weight: 600;
+    font-family: var(--font);
+    cursor: pointer;
+    border: none;
+    white-space: nowrap;
+  }
+
+  .btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+
+  .btn.outline {
+    background: transparent;
+    border: 1px solid var(--primary);
+    color: var(--primary);
+  }
+
+  .btn.primary-green {
+    background: var(--green);
+    color: #fff;
+  }
+
+  .btn.danger {
+    background: transparent;
+    border: 1px solid var(--error);
+    color: var(--error);
+  }
+
+  .btn.danger-solid {
+    background: var(--error);
+    color: #fff;
+  }
+
+  .overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(20, 17, 44, 0.5);
     display: flex;
-    flex-direction: column;
     align-items: center;
     justify-content: center;
-    min-height: 300px;
-    text-align: center;
+    z-index: 100;
   }
 
-  .empty-icon {
+  .dialog {
+    width: 440px;
+    background: #fff;
+    border-radius: 8px;
+    padding: 24px;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+  }
+
+  .dialog-title {
+    font-size: 17px;
+    font-weight: 600;
+    color: var(--head);
+    margin-bottom: 12px;
+  }
+
+  .dialog p {
+    font-size: 13px;
+    color: var(--text);
+    margin-bottom: 10px;
+    line-height: 1.5;
+  }
+
+  .dialog input {
+    width: 100%;
+    padding: 9px 12px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-size: 14px;
     margin-bottom: 16px;
-    opacity: 0.4;
   }
 
-  @keyframes spin {
-    to { transform: rotate(360deg); }
+  .dialog-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
   }
 </style>

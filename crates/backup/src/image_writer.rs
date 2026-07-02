@@ -38,7 +38,7 @@ pub struct ImageWriter<'k, W: Write + Seek> {
 impl<'k, W: Write + Seek> ImageWriter<'k, W> {
     pub fn new(
         mut writer: W,
-        mut manifest: ImageManifest,
+        manifest: ImageManifest,
         encryption_key: Option<&'k EncryptionKey>,
     ) -> Result<Self> {
         let mut flags: u32 = 0;

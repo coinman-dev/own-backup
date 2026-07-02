@@ -1,4 +1,5 @@
 use own_backup_common::preflight::{resolve_support_tier, PreflightReport};
+#[cfg(not(target_os = "windows"))]
 use own_backup_common::types::{BootMode, DiskType, FileSystem, PartitionTable, SupportTier};
 use own_backup_common::Result;
 use tracing::info;
@@ -77,7 +78,7 @@ impl Default for PreflightAnalyzer {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "windows")))]
 mod tests {
     use super::*;
     use own_backup_common::types::SupportTier;

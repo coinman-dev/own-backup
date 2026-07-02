@@ -1,14 +1,15 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
+  import { initEngine } from './lib/engineStore.svelte';
   import Sidebar from './components/Sidebar.svelte';
-  import Dashboard from './views/Dashboard.svelte';
-  import Activity from './views/Activity.svelte';
-  import Restore from './views/Restore.svelte';
+  import BackupSection from './views/BackupSection.svelte';
+  import Tools from './views/Tools.svelte';
   import JobSettings from './views/JobSettings.svelte';
   import Settings from './views/Settings.svelte';
   import About from './views/About.svelte';
   import type { ViewName } from './lib/types';
 
-  let currentView: ViewName = $state('dashboard');
+  let currentView: ViewName = $state('backup');
   let selectedJobId: string = $state('');
 
   function handleNavigate(view: ViewName, jobId?: string) {
@@ -17,18 +18,20 @@
       selectedJobId = jobId;
     }
   }
+
+  onMount(() => {
+    initEngine();
+  });
 </script>
 
 <div class="app-layout">
   <Sidebar {currentView} onNavigate={handleNavigate} />
 
   <main class="content-area">
-    {#if currentView === 'dashboard'}
-      <Dashboard onNavigate={handleNavigate} />
-    {:else if currentView === 'activity'}
-      <Activity />
-    {:else if currentView === 'restore'}
-      <Restore />
+    {#if currentView === 'backup'}
+      <BackupSection onNavigate={handleNavigate} />
+    {:else if currentView === 'tools'}
+      <Tools />
     {:else if currentView === 'job-settings'}
       <JobSettings jobId={selectedJobId} onNavigate={handleNavigate} />
     {:else if currentView === 'settings'}

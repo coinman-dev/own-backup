@@ -27,7 +27,16 @@ enum Commands {
     /// Restore from a backup
     Restore(commands::restore::RestoreArgs),
 
-    /// Validate a backup file
+    /// Verify a VHDX backup image against its sidecar checksums
+    Verify(commands::verify::VerifyArgs),
+
+    /// Mount a VHDX backup image read-only as a disk
+    Mount(commands::mount::MountArgs),
+
+    /// Detach a mounted VHDX backup image
+    Unmount(commands::unmount::UnmountArgs),
+
+    /// Validate a legacy .obk backup file
     Validate(commands::validate::ValidateArgs),
 
     /// List backup jobs and sets
@@ -53,6 +62,9 @@ async fn main() {
         Commands::Preflight(args) => commands::preflight::run(args).await,
         Commands::Backup(args) => commands::backup::run(args).await,
         Commands::Restore(args) => commands::restore::run(args).await,
+        Commands::Verify(args) => commands::verify::run(args).await,
+        Commands::Mount(args) => commands::mount::run(args).await,
+        Commands::Unmount(args) => commands::unmount::run(args).await,
         Commands::Validate(args) => commands::validate::run(args).await,
         Commands::ListBackups(args) => commands::list_backups::run(args).await,
         Commands::Service(args) => commands::service::run(args).await,

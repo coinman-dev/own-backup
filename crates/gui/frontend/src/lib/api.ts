@@ -4,14 +4,19 @@ import type {
   BackupJob,
   BackupSet,
   PreflightReport,
-  BackupProgress,
   ServiceStatus,
   ValidationResult,
   RetentionPolicy,
+  BackupSummary,
+  RestoreSummary,
+  VerifySummary,
+  ImageInfo,
 } from './types';
 
 export const api = {
   listDisks: () => invoke<DiskInfo[]>('list_disks'),
+
+  driveSignature: () => invoke<number>('drive_signature'),
 
   listJobs: () => invoke<BackupJob[]>('list_jobs'),
 
@@ -65,4 +70,26 @@ export const api = {
 
   setSchedule: (jobId: string, cronExpression: string) =>
     invoke<void>('set_schedule', { jobId, cronExpression }),
+
+  // --- VHDX engine (direct, plan v2 phase 1) ---
+
+  backupNow: (source: string, outputPath: string, allSectors: boolean) =>
+    invoke<BackupSummary>('backup_now', { source, outputPath, allSectors }),
+
+  restoreNow: (imagePath: string, target: string) =>
+    invoke<RestoreSummary>('restore_now', { imagePath, target }),
+
+  verifyNow: (imagePath: string) =>
+    invoke<VerifySummary>('verify_now', { imagePath }),
+
+  mountBackup: (imagePath: string) =>
+    invoke<string>('mount_backup', { imagePath }),
+
+  unmountBackup: (imagePath: string) =>
+    invoke<void>('unmount_backup', { imagePath }),
+
+  readImageInfo: (imagePath: string) =>
+    invoke<ImageInfo>('read_image_info', { imagePath }),
+
+  cancelEngineOp: () => invoke<void>('cancel_engine_op'),
 };

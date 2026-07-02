@@ -1,3 +1,4 @@
+pub mod engine;
 pub mod backup;
 pub mod disks;
 pub mod jobs;

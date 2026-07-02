@@ -43,46 +43,52 @@ impl BlockWriter for MockBlockWriter {
     }
 }
 
-// Windows-specific block writer using CreateFile + WriteFile
+/// Windows block writer over raw device I/O
+/// (`CreateFileW` + `FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH`).
+///
+/// Targets a restore destination (`\\.\PhysicalDriveN`, `\\.\D:`) or an
+/// attached VHDX being written during a backup.
 #[cfg(target_os = "windows")]
 pub struct WinBlockWriter {
-    // handle: windows::Win32::Foundation::HANDLE,
-    // block_size: u32,
+    device: own_backup_backup::win_device::WinRawDevice,
+    block_size: u32,
 }
 
 #[cfg(target_os = "windows")]
 impl WinBlockWriter {
     /// Open a device for raw block writing.
-    /// Uses CreateFile with GENERIC_WRITE, FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH
-    pub fn open(_device_path: &str, _block_size: u32) -> Result<Self> {
-        // TODO: Implement with windows-rs
-        // let handle = unsafe {
-        //     CreateFileW(
-        //         device_path,
-        //         GENERIC_WRITE.0,
-        //         FILE_SHARE_READ | FILE_SHARE_WRITE,
-        //         None,
-        //         OPEN_EXISTING,
-        //         FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH,
-        //         None,
-        //     )?
-        // };
-        todo!("WinBlockWriter::open")
+    ///
+    /// `block_size` must be a multiple of the device sector size.
+    pub fn open(device_path: &str, block_size: u32) -> Result<Self> {
+        let device = own_backup_backup::win_device::WinRawDevice::open_write(device_path)?;
+        if block_size == 0 || block_size % device.sector_size() != 0 {
+            return Err(own_backup_common::OwnBackupError::Device(format!(
+                "block size {block_size} is not a multiple of the device sector size {}",
+                device.sector_size()
+            )));
+        }
+        Ok(Self { device, block_size })
+    }
+
+    /// Total device length in bytes.
+    pub fn device_length(&self) -> u64 {
+        self.device.length()
     }
 }
 
 #[cfg(target_os = "windows")]
 impl BlockWriter for WinBlockWriter {
-    fn write_block(&mut self, _block_number: u64, _data: &[u8]) -> Result<()> {
-        todo!("WinBlockWriter::write_block")
+    fn write_block(&mut self, block_number: u64, data: &[u8]) -> Result<()> {
+        let offset = block_number * self.block_size as u64;
+        self.device.write_at(offset, data)
     }
 
     fn block_size(&self) -> u32 {
-        todo!("WinBlockWriter::block_size")
+        self.block_size
     }
 
     fn flush(&mut self) -> Result<()> {
-        todo!("WinBlockWriter::flush")
+        self.device.flush()
     }
 }
 
