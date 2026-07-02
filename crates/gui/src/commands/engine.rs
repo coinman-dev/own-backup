@@ -1,10 +1,8 @@
-//! Tauri commands that drive the VHDX backup engine directly (plan v2).
+//! Tauri commands for restore/verify/mount used by the Restore & Tools views
+//! (plan v2). Backups themselves run through the job queue (`jobs.rs`).
 //!
-//! For now the GUI calls the engine in-process; the gRPC service split comes
-//! in phase 4. Long operations run on blocking threads and report progress
-//! through Tauri events:
-//! - `backup-progress`, `restore-progress`, `verify-progress` — payload
-//!   [`EngineProgress`].
+//! Long operations run on blocking threads and report progress through Tauri
+//! events `restore-progress` / `verify-progress` (payload [`EngineProgress`]).
 
 use serde::Serialize;
 use tauri::State;
@@ -20,22 +18,6 @@ pub struct EngineProgress {
     pub blocks_total: u64,
     pub bytes_done: u64,
     pub speed_mbps: f64,
-}
-
-/// Result of a completed backup, for the summary panel.
-#[derive(Debug, Clone, Serialize)]
-pub struct BackupSummaryDto {
-    pub image_path: String,
-    pub sidecar_path: String,
-    pub source_bytes: u64,
-    pub total_blocks: u64,
-    pub used_blocks: u64,
-    pub bytes_copied: u64,
-    pub duration_secs: f64,
-    /// False = sector-by-sector (requested or non-NTFS fallback).
-    pub smart_mode: bool,
-    /// True = data was read from a VSS shadow copy.
-    pub vss_used: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -109,8 +91,7 @@ mod win {
     use tauri::{AppHandle, Emitter, State};
 
     use own_backup_backup::engine_win::{
-        backup_volume, mount_image, restore_volume, unmount_image, verify_image,
-        VolumeBackupRequest, VolumeRestoreRequest,
+        mount_image, restore_volume, unmount_image, verify_image, VolumeRestoreRequest,
     };
     use own_backup_common::OwnBackupError;
 
@@ -122,72 +103,6 @@ mod win {
         } else {
             Ok(())
         }
-    }
-
-    #[tauri::command]
-    pub async fn backup_now(
-        app: AppHandle,
-        state: State<'_, GuiState>,
-        source: String,
-        output_path: String,
-        all_sectors: bool,
-    ) -> Result<BackupSummaryDto, String> {
-        state.cancel_flag.store(false, Ordering::SeqCst);
-        let cancel: Arc<AtomicBool> = state.cancel_flag.clone();
-
-        let request = VolumeBackupRequest {
-            source,
-            image_path: std::path::PathBuf::from(&output_path),
-            block_size: own_backup_backup::engine_win::DEFAULT_BLOCK_SIZE,
-            all_sectors,
-            use_vss: true, // auto-fallback to live volume inside the engine
-        };
-
-        let summary = tauri::async_runtime::spawn_blocking(move || {
-            // Emit on every 0.1% change OR at least every 400 ms, so the ETA in
-            // the UI gets enough samples to stabilise within a couple seconds
-            // even on huge, slow volumes.
-            let mut last_permille = u64::MAX;
-            let mut last_emit = std::time::Instant::now();
-            backup_volume(&request, |p| {
-                check_cancel(&cancel)?;
-                let permille = if p.blocks_total > 0 {
-                    p.blocks_done * 1000 / p.blocks_total
-                } else {
-                    0
-                };
-                if permille != last_permille || last_emit.elapsed().as_millis() >= 400 {
-                    last_permille = permille;
-                    last_emit = std::time::Instant::now();
-                    let _ = app.emit(
-                        "backup-progress",
-                        EngineProgress {
-                            percent: permille / 10,
-                            blocks_done: p.blocks_done,
-                            blocks_total: p.blocks_total,
-                            bytes_done: p.bytes_written,
-                            speed_mbps: p.speed_bps as f64 / 1_000_000.0,
-                        },
-                    );
-                }
-                Ok(())
-            })
-        })
-        .await
-        .map_err(|e| format!("задача бэкапа прервана: {e}"))?
-        .map_err(|e| e.to_string())?;
-
-        Ok(BackupSummaryDto {
-            image_path: summary.image_path.display().to_string(),
-            sidecar_path: summary.sidecar_path.display().to_string(),
-            source_bytes: summary.source_bytes,
-            total_blocks: summary.total_blocks,
-            used_blocks: summary.used_blocks,
-            bytes_copied: summary.bytes_copied,
-            duration_secs: summary.duration.as_secs_f64(),
-            smart_mode: summary.smart_mode,
-            vss_used: summary.vss_used,
-        })
     }
 
     #[tauri::command]
@@ -320,17 +235,6 @@ mod stub {
 
     const MSG: &str = "Эта операция требует Windows (движок VHDX). \
                        Поддержка Linux запланирована (план v2, фаза 8).";
-
-    #[tauri::command]
-    pub async fn backup_now(
-        _app: AppHandle,
-        _state: State<'_, GuiState>,
-        _source: String,
-        _output_path: String,
-        _all_sectors: bool,
-    ) -> Result<BackupSummaryDto, String> {
-        Err(MSG.into())
-    }
 
     #[tauri::command]
     pub async fn restore_now(

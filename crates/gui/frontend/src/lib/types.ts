@@ -104,12 +104,11 @@ export interface ServiceStatus {
 
 export type ViewName =
   | 'backup'
+  | 'restore'
   | 'tools'
-  | 'job-settings'
+  | 'activity'
   | 'settings'
   | 'about';
-
-export type BackupTab = 'copy' | 'activity' | 'recovery';
 
 export interface EngineProgress {
   percent: number;
@@ -154,4 +153,90 @@ export interface ImageInfo {
   used_blocks: number;
   total_blocks: number;
   backup_mode: string;
+}
+
+// ===== Job model (phase 6) =====
+
+export interface ScheduleConfig {
+  kind: 'none' | 'daily' | 'weekly' | 'monthly' | 'event' | 'nonstop';
+  days: string[];
+  time: string;
+  only_when_locked: boolean;
+  wake_to_run: boolean;
+  prevent_sleep: boolean;
+  run_missed: boolean;
+  missed_delay_min: number;
+}
+
+export interface SchemeConfig {
+  method: 'full' | 'incremental' | 'differential';
+  only_incremental: boolean;
+  full_every_n: number;
+  cleanup_older_than_days: number | null;
+  keep_chains: number | null;
+  keep_first: boolean;
+}
+
+export interface ExclusionsConfig {
+  enabled: boolean;
+  patterns: string[];
+}
+
+export interface AdvancedConfig {
+  sector_by_sector: boolean;
+  validate_after: boolean;
+  backup_unallocated: boolean;
+  password_enabled: boolean;
+  pre_command: string;
+  post_command: string;
+  error_handling: string;
+  shutdown_after: boolean;
+  performance: string;
+}
+
+export interface JobRun {
+  id: string;
+  job_id: string;
+  job_name: string;
+  started_at: string;
+  finished_at: string;
+  status: 'success' | 'error' | 'cancelled' | string;
+  image_path: string;
+  source_bytes: number;
+  bytes_copied: number;
+  used_blocks: number;
+  total_blocks: number;
+  duration_secs: number;
+  smart_mode: boolean;
+  vss_used: boolean;
+  error: string;
+}
+
+export interface Job {
+  id: string;
+  name: string;
+  source: string;
+  source_label: string;
+  dest_folder: string;
+  schedule: ScheduleConfig;
+  scheme: SchemeConfig;
+  exclusions: ExclusionsConfig;
+  advanced: AdvancedConfig;
+  created_at: string;
+  updated_at: string;
+  last_run: JobRun | null;
+}
+
+export interface QueueSnapshot {
+  current: string | null;
+  pending: string[];
+}
+
+export interface JobProgress {
+  job_id: string;
+  phase: 'backup' | 'verify' | string;
+  percent: number;
+  blocks_done: number;
+  blocks_total: number;
+  speed_mbps: number;
 }
