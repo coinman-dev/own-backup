@@ -30,21 +30,59 @@
   const summary = $derived(engine.backupSummary);
   const errorMsg = $derived(localError ?? engine.backupError);
 
-  // Ticking clock for elapsed/ETA while a backup runs.
+  // Elapsed clock + ETA from RECENT throughput (a sliding window), not the
+  // cumulative average — the first samples include VSS setup time and a single
+  // early data point extrapolates to absurd values. We show «оценка…» until
+  // the window is wide enough to trust.
   let nowMs = $state(Date.now());
+  let etaMs = $state(NaN);
+  let samples: { t: number; blocks: number }[] = [];
+
+  // Collect a throughput sample whenever the block count advances.
   $effect(() => {
-    if (!running) return;
-    const id = setInterval(() => (nowMs = Date.now()), 500);
+    const p = engine.backupProgress;
+    if (!running) {
+      samples = [];
+      return;
+    }
+    if (!p) return;
+    const last = samples[samples.length - 1];
+    if (last && last.blocks === p.blocks_done) return;
+    const now = Date.now();
+    samples.push({ t: now, blocks: p.blocks_done });
+    const cutoff = now - 12000; // ~12s window
+    while (samples.length > 2 && samples[0].t < cutoff) samples.shift();
+  });
+
+  // Tick elapsed and recompute ETA from the window twice a second.
+  $effect(() => {
+    if (!running) {
+      etaMs = NaN;
+      return;
+    }
+    const tick = () => {
+      nowMs = Date.now();
+      const p = engine.backupProgress;
+      if (!p || samples.length < 2) {
+        etaMs = NaN;
+        return;
+      }
+      const first = samples[0];
+      const last = samples[samples.length - 1];
+      const dt = last.t - first.t;
+      const db = last.blocks - first.blocks;
+      if (dt < 1500 || db <= 0) {
+        etaMs = NaN;
+        return;
+      }
+      etaMs = ((p.blocks_total - p.blocks_done) * dt) / db;
+    };
+    tick();
+    const id = setInterval(tick, 500);
     return () => clearInterval(id);
   });
 
   const elapsedMs = $derived(running ? nowMs - engine.backupStartMs : 0);
-  const etaMs = $derived.by(() => {
-    const p = progress;
-    if (!p || p.blocks_done < 1 || p.blocks_total < 1) return NaN;
-    const perBlock = elapsedMs / p.blocks_done;
-    return perBlock * (p.blocks_total - p.blocks_done);
-  });
 
   $effect(() => {
     if (!source && engine.volumes.length > 0) {
@@ -220,7 +258,9 @@
           {engine.backupFrom} → {engine.backupTo}
         </span>
         <span class="times">
-          Прошло {formatClock(elapsedMs)} · Осталось ~{formatClock(etaMs)}
+          Прошло {formatClock(elapsedMs)} · Осталось {Number.isFinite(etaMs)
+            ? '~' + formatClock(etaMs)
+            : 'оценка…'}
         </span>
       </div>
     </div>

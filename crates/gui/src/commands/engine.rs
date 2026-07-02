@@ -144,20 +144,25 @@ mod win {
         };
 
         let summary = tauri::async_runtime::spawn_blocking(move || {
-            let mut last_percent = u64::MAX;
+            // Emit on every 0.1% change OR at least every 400 ms, so the ETA in
+            // the UI gets enough samples to stabilise within a couple seconds
+            // even on huge, slow volumes.
+            let mut last_permille = u64::MAX;
+            let mut last_emit = std::time::Instant::now();
             backup_volume(&request, |p| {
                 check_cancel(&cancel)?;
-                let percent = if p.blocks_total > 0 {
-                    p.blocks_done * 100 / p.blocks_total
+                let permille = if p.blocks_total > 0 {
+                    p.blocks_done * 1000 / p.blocks_total
                 } else {
                     0
                 };
-                if percent != last_percent {
-                    last_percent = percent;
+                if permille != last_permille || last_emit.elapsed().as_millis() >= 400 {
+                    last_permille = permille;
+                    last_emit = std::time::Instant::now();
                     let _ = app.emit(
                         "backup-progress",
                         EngineProgress {
-                            percent,
+                            percent: permille / 10,
                             blocks_done: p.blocks_done,
                             blocks_total: p.blocks_total,
                             bytes_done: p.bytes_written,
@@ -202,20 +207,22 @@ mod win {
         };
 
         let summary = tauri::async_runtime::spawn_blocking(move || {
-            let mut last_percent = u64::MAX;
+            let mut last_permille = u64::MAX;
+            let mut last_emit = std::time::Instant::now();
             restore_volume(&request, |p| {
                 check_cancel(&cancel)?;
-                let percent = if p.blocks_total > 0 {
-                    p.blocks_done * 100 / p.blocks_total
+                let permille = if p.blocks_total > 0 {
+                    p.blocks_done * 1000 / p.blocks_total
                 } else {
                     0
                 };
-                if percent != last_percent {
-                    last_percent = percent;
+                if permille != last_permille || last_emit.elapsed().as_millis() >= 400 {
+                    last_permille = permille;
+                    last_emit = std::time::Instant::now();
                     let _ = app.emit(
                         "restore-progress",
                         EngineProgress {
-                            percent,
+                            percent: permille / 10,
                             blocks_done: p.blocks_done,
                             blocks_total: p.blocks_total,
                             bytes_done: p.bytes_written,
@@ -248,16 +255,18 @@ mod win {
         let path = std::path::PathBuf::from(&image_path);
 
         let summary = tauri::async_runtime::spawn_blocking(move || {
-            let mut last_percent = u64::MAX;
+            let mut last_permille = u64::MAX;
+            let mut last_emit = std::time::Instant::now();
             verify_image(&path, |done, total| {
                 check_cancel(&cancel)?;
-                let percent = if total > 0 { done * 100 / total } else { 0 };
-                if percent != last_percent {
-                    last_percent = percent;
+                let permille = if total > 0 { done * 1000 / total } else { 0 };
+                if permille != last_permille || last_emit.elapsed().as_millis() >= 400 {
+                    last_permille = permille;
+                    last_emit = std::time::Instant::now();
                     let _ = app.emit(
                         "verify-progress",
                         EngineProgress {
-                            percent,
+                            percent: permille / 10,
                             blocks_done: done,
                             blocks_total: total,
                             bytes_done: 0,
