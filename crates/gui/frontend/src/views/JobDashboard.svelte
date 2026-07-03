@@ -21,6 +21,17 @@
   const verifying = $derived(progress?.phase === 'verify');
   const lastRun = $derived(job.last_run);
 
+  // The round indicator spans BOTH phases when "проверять после создания" is on:
+  // 0–50 % = backup, 50–100 % = verify. The bar below stays per-phase.
+  const ringPercent = $derived.by(() => {
+    const p = progress;
+    if (!p) return 0;
+    if (job.advanced.validate_after) {
+      return Math.round(p.phase === 'verify' ? 50 + p.percent / 2 : p.percent / 2);
+    }
+    return p.percent;
+  });
+
   // Elapsed clock + ETA from recent throughput (a sliding window), reset each
   // time a run (or a new phase) starts. "оценка…" until the window is wide.
   let nowMs = $state(Date.now());
@@ -126,8 +137,8 @@
 
     <div class="connector">
       {#if running && progress}
-        <div class="ring" style="background: conic-gradient(var(--green) {progress.percent}%, var(--border) 0)">
-          <div class="ring-inner">{progress.percent}%</div>
+        <div class="ring" style="background: conic-gradient(var(--green) {ringPercent}%, var(--border) 0)">
+          <div class="ring-inner">{ringPercent}%</div>
         </div>
       {:else if running}
         <div class="ring" style="background: conic-gradient(var(--green) 0%, var(--border) 0)">

@@ -1,354 +1,83 @@
 <script lang="ts">
-  import { open } from '@tauri-apps/plugin-dialog';
-  import { api } from '../lib/api';
-  import { formatBytes, formatDate } from '../lib/format';
-  import { engine, runRestore, cancelCurrent, clearRestoreResult } from '../lib/engineStore.svelte';
-  import type { ImageInfo } from '../lib/types';
+  import { jobs, jobStatus } from '../lib/jobStore.svelte';
+  import RestoreDashboard from './RestoreDashboard.svelte';
 
-  let imagePath = $state('');
-  let target = $state('');
-  let info: ImageInfo | null = $state(null);
-  let infoError: string | null = $state(null);
+  let selectedId: string | null = $state(null);
+  const selectedJob = $derived(jobs.list.find((j) => j.id === selectedId) ?? null);
 
-  let confirmOpen = $state(false);
-  let confirmText = $state('');
-
-  const running = $derived(engine.op === 'restore');
-  const progress = $derived(engine.restoreProgress);
-  const summary = $derived(engine.restoreSummary);
-  let formError: string | null = $state(null);
-  const errorMsg = $derived(formError ?? engine.restoreError);
-
-  async function browseImage() {
-    try {
-      const picked = await open({
-        title: 'Выберите образ',
-        multiple: false,
-        filters: [{ name: 'Образ VHDX', extensions: ['vhdx', 'avhdx'] }],
-      });
-      if (typeof picked === 'string') {
-        imagePath = picked;
-        await loadInfo();
-      }
-    } catch (e) {
-      infoError = String(e);
+  $effect(() => {
+    if (!selectedId && jobs.list.length > 0) selectedId = jobs.list[0].id;
+    if (selectedId && !jobs.list.some((j) => j.id === selectedId)) {
+      selectedId = jobs.list[0]?.id ?? null;
     }
-  }
+  });
 
-  async function loadInfo() {
-    info = null;
-    infoError = null;
-    clearRestoreResult();
-    try {
-      info = await api.readImageInfo(imagePath);
-    } catch (e) {
-      infoError = String(e);
-    }
-  }
-
-  function askConfirm() {
-    if (!info || !target) {
-      formError = 'Загрузите образ и укажите целевой том.';
-      return;
-    }
-    formError = null;
-    confirmText = '';
-    confirmOpen = true;
-  }
-
-  async function doRestore() {
-    if (confirmText !== 'ДА') return;
-    confirmOpen = false;
-    await runRestore(imagePath, target);
+  function statusColor(s: string): string {
+    return s === 'running' ? 'var(--primary)'
+      : s === 'queued' ? '#5a8fd8'
+      : s === 'success' ? 'var(--green)'
+      : s === 'error' ? 'var(--error)'
+      : 'var(--text-muted)';
   }
 </script>
 
-<div class="page">
-  <div class="row">
-    <label for="img">Образ (.vhdx):</label>
-    <input
-      id="img"
-      type="text"
-      bind:value={imagePath}
-      placeholder="D:\OwnBackup\disk_C_20260702.vhdx"
-      spellcheck="false"
-      disabled={running}
-    />
-    <button class="btn outline" onclick={browseImage} disabled={running}>Обзор…</button>
-    <button class="btn outline" onclick={loadInfo} disabled={running || !imagePath}>
-      Загрузить
-    </button>
+<div class="layout">
+  <!-- middle column: backups list (same as Backup) -->
+  <div class="jobs-col">
+    <div class="col-title">Резервные копии</div>
+    <div class="this-pc">
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="var(--text-muted)"><path d="M6 9l6 6 6-6z"/></svg>
+      Этот компьютер
+    </div>
+    <div class="jobs-list">
+      {#if jobs.list.length === 0}
+        <div class="empty-list">Нет резервных копий.<br/>Создайте их в разделе «Резервное копирование».</div>
+      {/if}
+      {#each jobs.list as job (job.id)}
+        <button class="job-item" class:sel={selectedId === job.id} onclick={() => (selectedId = job.id)}>
+          <div class="job-icon">
+            <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="1.4"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="12" cy="12" r="3.2"/></svg>
+            <span class="status-dot" style="background:{statusColor(jobStatus(job))}"></span>
+          </div>
+          <div class="job-meta">
+            <div class="job-name">{job.name}</div>
+            <div class="job-path">{job.dest_folder}</div>
+          </div>
+        </button>
+      {/each}
+    </div>
   </div>
 
-  {#if infoError}
-    <div class="banner err">{infoError}</div>
-  {/if}
-
-  {#if info}
-    <div class="info-card">
-      <div class="info-grid">
-        <div><span class="k">Файл:</span> {info.image_file_name}</div>
-        <div><span class="k">Создан:</span> {formatDate(info.created_at)}</div>
-        <div><span class="k">Источник:</span> {info.source_device}</div>
-        <div><span class="k">Размер тома:</span> {formatBytes(info.source_bytes)}</div>
-        <div>
-          <span class="k">Занято:</span>
-          {info.used_blocks} из {info.total_blocks} блоков
-          ({formatBytes(info.used_blocks * info.block_size)})
-        </div>
-        <div><span class="k">Режим:</span> {info.backup_mode} · {info.chain_role}</div>
+  <!-- right: restore panel -->
+  <div class="dash-col">
+    {#if selectedJob}
+      {#key selectedJob.id}
+        <RestoreDashboard job={selectedJob} />
+      {/key}
+    {:else}
+      <div class="empty-dash">
+        <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="var(--border)" stroke-width="1.4"><path d="M4 4v5h5M20 20v-5h-5M4 9a8 8 0 0 1 14-4M20 15a8 8 0 0 1-14 4"/></svg>
+        <div>Нет резервных копий для восстановления</div>
       </div>
-    </div>
-
-    <div class="row">
-      <label for="tgt">Восстановить в:</label>
-      <select id="tgt" bind:value={target} disabled={running}>
-        <option value="" disabled selected>— выберите том (будет ПОЛНОСТЬЮ перезаписан) —</option>
-        {#each engine.volumes as v}
-          <option value={v.device}>{v.label}</option>
-        {/each}
-      </select>
-      {#if running}
-        <button class="btn danger" onclick={cancelCurrent}>Отмена</button>
-      {:else}
-        <button class="btn primary-green" onclick={askConfirm}>Восстановить</button>
-      {/if}
-    </div>
-  {/if}
-
-  {#if running && progress}
-    <div class="progress-wrap">
-      <div class="progress-info">
-        <span>Восстановление… (контрольные суммы проверяются)</span>
-        <span>
-          {progress.blocks_done} / {progress.blocks_total} блоков ·
-          {progress.speed_mbps.toFixed(1)} МБ/с
-        </span>
-      </div>
-      <div class="bar"><div class="bar-fill" style="width:{progress.percent}%"></div></div>
-    </div>
-  {/if}
-
-  {#if summary}
-    <div class="banner ok">
-      Восстановление завершено: {summary.blocks_restored} блоков,
-      {formatBytes(summary.bytes_restored)} за {summary.duration_secs.toFixed(1)} с.
-    </div>
-  {/if}
-
-  {#if errorMsg}
-    <div class="banner err">{errorMsg}</div>
-  {/if}
-
-  <div class="note">
-    Отдельные файлы: подключите образ как диск (Инструменты → Подключить) и
-    скопируйте нужное в проводнике.
+    {/if}
   </div>
 </div>
 
-{#if confirmOpen}
-  <div class="overlay">
-    <div class="dialog">
-      <div class="dialog-title">Подтверждение восстановления</div>
-      <p>
-        Все данные на томе <b>{target}</b> будут безвозвратно перезаписаны
-        содержимым образа <b>{info?.image_file_name}</b>.
-      </p>
-      <p>Введите <b>ДА</b> (заглавными), чтобы продолжить:</p>
-      <input type="text" bind:value={confirmText} spellcheck="false" />
-      <div class="dialog-actions">
-        <button class="btn outline" onclick={() => (confirmOpen = false)}>Отмена</button>
-        <button class="btn danger-solid" disabled={confirmText !== 'ДА'} onclick={doRestore}>
-          Восстановить
-        </button>
-      </div>
-    </div>
-  </div>
-{/if}
-
 <style>
-  .page {
-    padding: 30px 44px;
-    max-width: 860px;
-  }
-
-  .row {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    margin-bottom: 18px;
-  }
-
-  .row label {
-    font-size: 14px;
-    color: var(--head);
-    min-width: 130px;
-  }
-
-  .row input,
-  .row select {
-    flex: 1;
-    padding: 9px 12px;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    font-size: 13px;
-    font-family: var(--font);
-    background: #fff;
-    color: var(--text);
-  }
-
-  .info-card {
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    background: var(--panel2);
-    padding: 16px 20px;
-    margin-bottom: 20px;
-  }
-
-  .info-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 8px 24px;
-    font-size: 13px;
-    color: var(--text);
-  }
-
-  .k {
-    color: var(--text-muted);
-  }
-
-  .progress-wrap {
-    margin-top: 10px;
-    margin-bottom: 16px;
-  }
-
-  .progress-info {
-    display: flex;
-    justify-content: space-between;
-    font-size: 13px;
-    color: var(--head);
-    margin-bottom: 8px;
-  }
-
-  .bar {
-    height: 8px;
-    border-radius: 4px;
-    background: var(--tabbg);
-    overflow: hidden;
-  }
-
-  .bar-fill {
-    height: 100%;
-    background: var(--green);
-    transition: width 0.15s linear;
-  }
-
-  .banner {
-    border-radius: var(--radius);
-    padding: 13px 16px;
-    font-size: 13px;
-    margin-bottom: 14px;
-    word-break: break-all;
-  }
-
-  .banner.ok {
-    background: rgba(90, 176, 47, 0.1);
-    color: #2c5b12;
-  }
-
-  .banner.err {
-    background: rgba(216, 74, 74, 0.08);
-    color: #8c1d1d;
-  }
-
-  .note {
-    margin-top: 20px;
-    font-size: 12px;
-    color: var(--text-muted);
-  }
-
-  .btn {
-    border-radius: 4px;
-    padding: 9px 22px;
-    font-size: 14px;
-    font-weight: 600;
-    font-family: var(--font);
-    cursor: pointer;
-    border: none;
-    white-space: nowrap;
-  }
-
-  .btn:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
-
-  .btn.outline {
-    background: transparent;
-    border: 1px solid var(--primary);
-    color: var(--primary);
-  }
-
-  .btn.primary-green {
-    background: var(--green);
-    color: #fff;
-  }
-
-  .btn.danger {
-    background: transparent;
-    border: 1px solid var(--error);
-    color: var(--error);
-  }
-
-  .btn.danger-solid {
-    background: var(--error);
-    color: #fff;
-  }
-
-  .overlay {
-    position: fixed;
-    inset: 0;
-    background: rgba(20, 17, 44, 0.5);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 100;
-  }
-
-  .dialog {
-    width: 440px;
-    background: #fff;
-    border-radius: 8px;
-    padding: 24px;
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-  }
-
-  .dialog-title {
-    font-size: 17px;
-    font-weight: 600;
-    color: var(--head);
-    margin-bottom: 12px;
-  }
-
-  .dialog p {
-    font-size: 13px;
-    color: var(--text);
-    margin-bottom: 10px;
-    line-height: 1.5;
-  }
-
-  .dialog input {
-    width: 100%;
-    padding: 9px 12px;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    font-size: 14px;
-    margin-bottom: 16px;
-  }
-
-  .dialog-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 10px;
-  }
+  .layout { display: flex; height: 100%; }
+  .jobs-col { width: 240px; flex-shrink: 0; background: var(--column-bg); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
+  .col-title { font-size: 22px; font-weight: 300; color: var(--head); padding: 22px 18px 12px; }
+  .this-pc { display: flex; align-items: center; gap: 8px; padding: 6px 18px; font-size: 13px; font-weight: 600; color: var(--head); }
+  .jobs-list { flex: 1; overflow: auto; padding: 8px 8px; }
+  .empty-list { text-align: center; color: var(--text-muted); font-size: 13px; padding: 30px 10px; line-height: 1.6; }
+  .job-item { width: 100%; display: flex; align-items: center; gap: 10px; padding: 10px 8px; border: 1px solid transparent; border-radius: 6px; background: none; cursor: pointer; margin-bottom: 4px; text-align: left; font-family: var(--font); }
+  .job-item:hover { background: var(--hover, #f2f2f8); }
+  .job-item.sel { background: var(--accent-soft); border-color: var(--primary); }
+  .job-icon { position: relative; flex-shrink: 0; }
+  .status-dot { position: absolute; right: -2px; bottom: 0; width: 11px; height: 11px; border-radius: 50%; border: 2px solid var(--column-bg); }
+  .job-meta { flex: 1; min-width: 0; }
+  .job-name { font-size: 14px; font-weight: 600; color: var(--head); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .job-path { font-size: 12px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .dash-col { flex: 1; min-width: 0; overflow: auto; }
+  .empty-dash { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; color: var(--text-muted); font-size: 15px; }
 </style>
