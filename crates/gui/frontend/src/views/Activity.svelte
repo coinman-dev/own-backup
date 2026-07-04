@@ -4,6 +4,9 @@
 
   const speed = (r: { bytes_copied: number; duration_secs: number }) =>
     r.duration_secs > 0 ? (r.bytes_copied / r.duration_secs / 1_000_000).toFixed(0) : '0';
+
+  const kindLabel = (k: string) =>
+    k === 'incremental' ? 'инкрементная' : k === 'differential' ? 'дифференциальная' : 'полная';
 </script>
 
 <div class="page">
@@ -39,6 +42,7 @@
           {/if}
           {#if r.status === 'success'}
             <div class="stats">
+              <div><span class="k">Тип</span><span class="v">{kindLabel(r.backup_kind)}</span></div>
               <div><span class="k">Размер</span><span class="v">{formatBytes(r.bytes_copied)}</span></div>
               <div><span class="k">Скорость</span><span class="v">{speed(r)} МБ/с</span></div>
               <div><span class="k">Время</span><span class="v">{formatDuration(r.duration_secs)}</span></div>

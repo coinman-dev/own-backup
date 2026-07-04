@@ -194,6 +194,16 @@ export interface AdvancedConfig {
   performance: string;
 }
 
+/** Byte totals per file category — real data from the backup walk. */
+export interface CategorySizes {
+  images: number;
+  video: number;
+  audio: number;
+  documents: number;
+  system: number;
+  other: number;
+}
+
 export interface JobRun {
   id: string;
   job_id: string;
@@ -210,6 +220,15 @@ export interface JobRun {
   smart_mode: boolean;
   vss_used: boolean;
   error: string;
+  /** full | incremental | differential; '' in pre-phase-5 runs (= full) */
+  backup_kind: string;
+  base_image_path: string;
+  increment_index: number;
+  blocks_unchanged: number;
+  excluded_files: number;
+  excluded_bytes: number;
+  /** null when the walk did not run (exclusions off / non-NTFS / sector mode) */
+  categories: CategorySizes | null;
 }
 
 export interface Job {
@@ -234,7 +253,13 @@ export interface QueueSnapshot {
 
 export interface JobProgress {
   job_id: string;
-  phase: 'backup' | 'verify' | string;
+  /**
+   * 'prepare'  = exclusion scan (blocks_done counts scanned entries)
+   * 'backup'   = copying blocks
+   * 'finalize' = flushing the image to disk / detaching (no granular progress)
+   * 'verify'   = post-backup validation
+   */
+  phase: 'prepare' | 'backup' | 'finalize' | 'verify' | string;
   percent: number;
   blocks_done: number;
   blocks_total: number;

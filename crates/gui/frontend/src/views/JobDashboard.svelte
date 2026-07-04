@@ -19,13 +19,24 @@
   const running = $derived(status === 'running');
   const progress = $derived(jobs.progress[job.id] ?? null);
   const verifying = $derived(progress?.phase === 'verify');
+  const preparing = $derived(progress?.phase === 'prepare');
+  const finalizing = $derived(progress?.phase === 'finalize');
   const lastRun = $derived(job.last_run);
+
+  const KIND_LABELS: Record<string, string> = {
+    incremental: 'инкрементная',
+    differential: 'дифференциальная',
+  };
+  const kindLabel = (k: string) => KIND_LABELS[k] ?? 'полная';
 
   // The round indicator spans BOTH phases when "проверять после создания" is on:
   // 0–50 % = backup, 50–100 % = verify. The bar below stays per-phase.
+  // "prepare" (exclusion scan) sits at 0 %; "finalize" (flush to disk) means the
+  // copy is done, so the ring holds at the end of the backup half.
   const ringPercent = $derived.by(() => {
     const p = progress;
-    if (!p) return 0;
+    if (!p || p.phase === 'prepare') return 0;
+    if (p.phase === 'finalize') return job.advanced.validate_after ? 50 : 100;
     if (job.advanced.validate_after) {
       return Math.round(p.phase === 'verify' ? 50 + p.percent / 2 : p.percent / 2);
     }
@@ -88,25 +99,25 @@
 
   const elapsedMs = $derived(running && startMs ? nowMs - startMs : 0);
 
-  // Random data-category breakdown — placeholder for looks (feature "в разработке").
-  const cats = [
-    { name: 'Изображения', color: '#5ab02f' },
-    { name: 'Видео', color: '#d8c81e' },
-    { name: 'Аудио', color: '#e07a2f' },
-    { name: 'Документы', color: '#8b5cf6' },
-    { name: 'Система', color: '#4f9be8' },
-    { name: 'Другое', color: '#9aa0ad' },
-  ];
-  // Deterministic pseudo-random per job id, so it doesn't flicker on re-render.
-  function seeded(i: number): number {
-    let h = 0;
-    for (const ch of job.id + i) h = (h * 31 + ch.charCodeAt(0)) & 0xffff;
-    return (h % 90) + 10;
-  }
-  const totalWeight = cats.reduce((s, _, i) => s + seeded(i), 0);
-  const catData = cats.map((c, i) => {
-    const w = seeded(i);
-    return { ...c, pct: (w / totalWeight) * 100 };
+  // Real data-category breakdown, collected during the backup's file walk.
+  const CAT_META = [
+    { key: 'images', name: 'Изображения', color: '#5ab02f' },
+    { key: 'video', name: 'Видео', color: '#d8c81e' },
+    { key: 'audio', name: 'Аудио', color: '#e07a2f' },
+    { key: 'documents', name: 'Документы', color: '#8b5cf6' },
+    { key: 'system', name: 'Система', color: '#4f9be8' },
+    { key: 'other', name: 'Другое', color: '#9aa0ad' },
+  ] as const;
+  const catData = $derived.by(() => {
+    const c = lastRun?.categories;
+    if (!c) return null;
+    const total = CAT_META.reduce((s, m) => s + (c[m.key] ?? 0), 0);
+    if (total <= 0) return null;
+    return CAT_META.map((m) => ({
+      ...m,
+      bytes: c[m.key] ?? 0,
+      pct: ((c[m.key] ?? 0) / total) * 100,
+    }));
   });
 
   async function backup() {
@@ -169,14 +180,25 @@
   {#if running}
     <div class="progress-wrap">
       <div class="progress-info">
-        <span>{verifying ? 'Проверка резервной копии…' : 'Резервное копирование…'}</span>
+        <span>
+          {#if preparing}Подготовка: поиск исключаемых файлов…
+          {:else if finalizing}Завершение: запись образа на диск…
+          {:else if verifying}Проверка резервной копии…
+          {:else}Резервное копирование…{/if}
+        </span>
         {#if progress}
           <span>
-            {progress.blocks_done} / {progress.blocks_total} блоков{#if progress.speed_mbps > 0} · {progress.speed_mbps.toFixed(1)} МБ/с{/if}
+            {#if preparing}
+              {progress.blocks_done.toLocaleString('ru-RU')} объектов просмотрено
+            {:else if finalizing}
+              сброс кэша на диск, подождите…
+            {:else}
+              {progress.blocks_done} / {progress.blocks_total} блоков{#if progress.speed_mbps > 0} · {progress.speed_mbps.toFixed(1)} МБ/с{/if}
+            {/if}
           </span>
         {/if}
       </div>
-      <div class="bar"><div class="bar-fill" class:verify={verifying} style="width:{progress?.percent ?? 0}%"></div></div>
+      <div class="bar"><div class="bar-fill" class:verify={verifying} class:indet={finalizing} style="width:{finalizing ? 100 : (progress?.percent ?? 0)}%"></div></div>
       <div class="progress-meta">
         <span class="route" title="{job.source_label || job.source} → {job.dest_folder}">
           {job.source_label || job.source} → {job.dest_folder}
@@ -195,28 +217,43 @@
       </span>
       <span class="reco">
         Данные для восстановления:
-        <b>{lastRun ? formatBytes(lastRun.bytes_copied) : '—'}</b>
-        <button class="q" title="Разбивка по типам — в разработке" onclick={() => (stubMsg = 'Разбивка данных по типам (изображения, видео, документы…) — в разработке. Сейчас показаны примерные данные для наглядности.')}>?</button>
+        <b>{lastRun ? formatBytes(lastRun.used_blocks > 0 ? lastRun.used_blocks * 1048576 : lastRun.bytes_copied) : '—'}</b>
+        <button class="q" title="О разбивке по типам" onclick={() => (stubMsg = 'Разбивка по типам считается по файлам, вошедшим в копию (по расширениям), во время сканирования тома. Исключённые файлы не учитываются.')}>?</button>
       </span>
     </div>
-    <div class="catbar">
-      {#each catData as c}
-        <div style="width:{c.pct}%; background:{c.color}"></div>
-      {/each}
-    </div>
-    <div class="cats">
-      {#each catData as c}
-        <div class="cat">
-          <span class="dot" style="background:{c.color}"></span>
-          <span class="cat-name">{c.name}</span>
-        </div>
-      {/each}
-    </div>
+    {#if catData}
+      <div class="catbar">
+        {#each catData as c}
+          <div style="width:{c.pct}%; background:{c.color}" title="{c.name}: {formatBytes(c.bytes)}"></div>
+        {/each}
+      </div>
+      <div class="cats">
+        {#each catData as c}
+          <div class="cat">
+            <span class="dot" style="background:{c.color}"></span>
+            <span class="cat-name">{c.name}</span>
+            <span class="cat-size">{formatBytes(c.bytes)}</span>
+          </div>
+        {/each}
+      </div>
+    {:else}
+      <div class="catbar empty-catbar"></div>
+      <div class="cats-note">Разбивка по типам появится после следующего копирования (считается при сканировании тома).</div>
+    {/if}
 
     {#if lastRun?.status === 'success'}
       <div class="banner ok">
         <span class="bdot"></span>
-        <span>Копия создана{lastRun.vss_used ? ' (снимок VSS)' : ''}. {lastRun.smart_mode ? 'Только занятые секторы.' : 'Посекторно.'}</span>
+        <span>
+          Копия создана — {kindLabel(lastRun.backup_kind)}{lastRun.vss_used ? ', снимок VSS' : ''}.
+          {lastRun.smart_mode ? 'Только занятые секторы.' : 'Посекторно.'}
+          {#if lastRun.backup_kind === 'incremental' || lastRun.backup_kind === 'differential'}
+            Записано только изменённое: {formatBytes(lastRun.bytes_copied)}.
+          {/if}
+          {#if lastRun.excluded_files > 0}
+            Исключено файлов: {lastRun.excluded_files} ({formatBytes(lastRun.excluded_bytes)}).
+          {/if}
+        </span>
       </div>
     {:else if lastRun?.status === 'error'}
       <div class="banner err"><span class="bdot red"></span><span>Ошибка: {lastRun.error}</span></div>
@@ -265,6 +302,8 @@
   .bar { height: 8px; border-radius: 4px; background: var(--tabbg); overflow: hidden; }
   .bar-fill { height: 100%; background: var(--green); transition: width .15s linear; }
   .bar-fill.verify { background: #5a8fd8; }
+  .bar-fill.indet { background-image: linear-gradient(90deg, rgba(255,255,255,.35) 25%, transparent 25%, transparent 50%, rgba(255,255,255,.35) 50%, rgba(255,255,255,.35) 75%, transparent 75%); background-size: 28px 28px; animation: indet-move 0.8s linear infinite; }
+  @keyframes indet-move { from { background-position: 0 0; } to { background-position: 28px 0; } }
   .progress-meta { display: flex; justify-content: space-between; gap: 16px; margin-top: 8px; font-size: 12px; color: var(--text-muted); }
   .progress-meta .route { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%; }
   .progress-meta .times { white-space: nowrap; flex-shrink: 0; }
@@ -274,9 +313,12 @@
   .q { width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--text-muted); background: none; color: var(--text-muted); font-size: 10px; cursor: pointer; padding: 0; }
   .catbar { height: 9px; border-radius: 5px; overflow: hidden; display: flex; margin-top: 10px; }
   .cats { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
-  .cat { flex: 1; min-width: 110px; display: flex; align-items: center; gap: 7px; }
-  .dot { width: 9px; height: 9px; border-radius: 50%; }
+  .cat { flex: 1; min-width: 130px; display: flex; align-items: center; gap: 7px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
   .cat-name { font-size: 13px; color: var(--head); }
+  .cat-size { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
+  .empty-catbar { background: var(--tabbg); }
+  .cats-note { font-size: 12px; color: var(--text-muted); margin-top: 12px; }
   .banner { margin-top: 22px; border-radius: 6px; padding: 13px 16px; display: flex; align-items: center; gap: 12px; background: var(--accent-soft); font-size: 13px; color: var(--head); }
   .banner.err { background: rgba(216,74,74,.08); }
   .bdot { width: 18px; height: 18px; border-radius: 50%; background: var(--green); flex-shrink: 0; }

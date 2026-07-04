@@ -124,6 +124,9 @@ pub fn create_differencing_vhdx(path: &Path, parent: &Path) -> Result<()> {
     let mut params = CREATE_VIRTUAL_DISK_PARAMETERS::default();
     params.Version = CREATE_VIRTUAL_DISK_VERSION_2;
     params.Anonymous.Version2.ParentPath = PCWSTR(parent_wide.as_ptr());
+    // Same 1 MiB VHDX block as the base image: the default for differencing
+    // disks (2 MiB+) would allocate more than necessary per touched block.
+    params.Anonymous.Version2.BlockSizeInBytes = 1024 * 1024;
 
     let mut handle = HANDLE::default();
     // SAFETY: all pointers (incl. parent_wide) valid for the duration of the call.

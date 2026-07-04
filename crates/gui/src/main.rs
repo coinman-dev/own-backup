@@ -25,6 +25,16 @@ fn init_logging() {
             .into()
     });
 
+    // Rotate at startup once the log grows past a few MB: keep exactly one
+    // previous generation as `.old` so the file the user sends stays small
+    // but the prior session is never lost.
+    const ROTATE_AT: u64 = 4 * 1024 * 1024;
+    if std::fs::metadata(&log_path).map(|m| m.len() > ROTATE_AT).unwrap_or(false) {
+        let old = log_path.with_extension("log.old");
+        let _ = std::fs::remove_file(&old);
+        let _ = std::fs::rename(&log_path, &old);
+    }
+
     let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

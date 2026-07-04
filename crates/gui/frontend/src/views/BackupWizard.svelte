@@ -75,6 +75,20 @@
     job.exclusions.patterns = await api.defaultExclusionPatterns();
   }
 
+  // Uppercase drive letter of a path/device, or null (UNC/no letter).
+  function driveLetter(s: string): string | null {
+    const t = s.trim().replace(/^\\\\[.?]\\/, '');
+    return t.length >= 2 && /[a-zA-Z]/.test(t[0]) && t[1] === ':'
+      ? t[0].toUpperCase()
+      : null;
+  }
+
+  const sameDrive = $derived.by(() => {
+    const src = driveLetter(job.source);
+    const dst = driveLetter(job.dest_folder);
+    return !!(src && dst && src === dst);
+  });
+
   function validate(): boolean {
     if (!job.name.trim()) {
       error = 'Укажите имя задания.';
@@ -88,6 +102,13 @@
     }
     if (!job.dest_folder.trim()) {
       error = 'Выберите папку назначения.';
+      step = 0;
+      return false;
+    }
+    const src = driveLetter(job.source);
+    const dst = driveLetter(job.dest_folder);
+    if (src && dst && src === dst) {
+      error = `Нельзя сохранять копию на тот же диск, который копируется (${src}:). Выберите для назначения другой диск.`;
       step = 0;
       return false;
     }
@@ -152,6 +173,9 @@
           </div>
         </div>
         <div class="note">Каждый запуск создаёт файл <code>&lt;имя&gt;_&lt;буква&gt;_&lt;дата&gt;.vhdx</code> в этой папке.</div>
+        {#if sameDrive}
+          <div class="warn-note">⛔ Назначение на том же диске ({driveLetter(job.source)}:), что и источник. Копию нужно писать на другой диск — выберите другую папку.</div>
+        {/if}
       {/if}
 
       <!-- 1: schedule -->
@@ -187,25 +211,31 @@
       <!-- 2: scheme -->
       {#if step === 2}
         <div class="field-label">Метод резервного копирования:</div>
-        <select bind:value={job.scheme.method} class="wide" onchange={stub}>
+        <select bind:value={job.scheme.method} class="wide">
           <option value="full">Полное</option>
           <option value="incremental">Инкрементное</option>
           <option value="differential">Дифференциальное</option>
         </select>
-        <div class="dev-note">⚙ Инкремент/дифференциал и очистка версий — в разработке (сохраняется, применится позже). Пока каждый запуск создаёт полную копию.</div>
+        {#if job.scheme.method === 'incremental'}
+          <div class="note">Каждый запуск сохраняет только изменения относительно предыдущей версии (цепочка полная → И1 → И2 …).</div>
+        {:else if job.scheme.method === 'differential'}
+          <div class="note">Каждый запуск сохраняет изменения относительно полной копии (полная → Д1, Д2 …).</div>
+        {/if}
         {#if job.scheme.method !== 'full'}
           <label class="radio blk"><input type="radio" checked={job.scheme.only_incremental} onchange={() => (job.scheme.only_incremental = true)} /> Только инкрементные версии после первой полной</label>
           <label class="radio blk"><input type="radio" checked={!job.scheme.only_incremental} onchange={() => (job.scheme.only_incremental = false)} /> Полная версия после каждых <input type="number" min="1" bind:value={job.scheme.full_every_n} class="num" /> версий</label>
         {/if}
         <div class="field-label mt">Правила очистки старых версий:</div>
         <label class="chk"><input type="checkbox" checked={job.scheme.keep_chains !== null} onchange={(e) => (job.scheme.keep_chains = (e.target as HTMLInputElement).checked ? 3 : null)} /> Хранить не более <input type="number" min="1" value={job.scheme.keep_chains ?? 3} oninput={(e) => (job.scheme.keep_chains = +(e.target as HTMLInputElement).value)} class="num" disabled={job.scheme.keep_chains === null} /> последних цепочек</label>
-        <label class="chk"><input type="checkbox" bind:checked={job.scheme.keep_first} /> Не удалять первую (полную) версию</label>
+        <label class="chk"><input type="checkbox" checked={job.scheme.cleanup_older_than_days !== null} onchange={(e) => (job.scheme.cleanup_older_than_days = (e.target as HTMLInputElement).checked ? 90 : null)} /> Удалять цепочки старше <input type="number" min="1" value={job.scheme.cleanup_older_than_days ?? 90} oninput={(e) => (job.scheme.cleanup_older_than_days = +(e.target as HTMLInputElement).value)} class="num" disabled={job.scheme.cleanup_older_than_days === null} /> дней</label>
+        <label class="chk"><input type="checkbox" bind:checked={job.scheme.keep_first} /> Не удалять первую (самую старую) цепочку</label>
+        <div class="note">Цепочка удаляется целиком (полная копия вместе с её инкрементами) после успешного завершения очередного копирования. Цепочка, к которой относится свежая копия, не удаляется никогда.</div>
       {/if}
 
       <!-- 3: exclusions -->
       {#if step === 3}
         <label class="chk"><input type="checkbox" bind:checked={job.exclusions.enabled} /> Исключить файлы по следующим критериям:</label>
-        <div class="dev-note">⚙ Исключение файлов из образа — в разработке (список сохраняется, применится позже).</div>
+        <div class="note">Маска без пути (<code>*.tmp</code>, <code>pagefile.sys</code>) действует по всему тому; маска с путём (<code>Temp\*.log</code>) — от корня тома. Работает для NTFS; в посекторном режиме исключения не применяются.</div>
         <div class="excl-list">
           {#each job.exclusions.patterns as p, i}
             <div class="excl-row"><span>{p}</span><button class="x" onclick={() => removePattern(i)}>×</button></div>
@@ -277,6 +307,7 @@
   .loading-note { font-size: 13px; color: var(--text-muted); padding: 9px 0; }
   .note, .dev-note { font-size: 12px; color: var(--text-muted); margin-top: 18px; }
   .dev-note { color: #a06a10; background: rgba(251,188,5,.1); padding: 8px 12px; border-radius: 5px; }
+  .warn-note { font-size: 13px; color: #8c1d1d; background: rgba(216,74,74,.1); padding: 10px 14px; border-radius: 5px; margin-top: 14px; font-weight: 600; }
   code { background: var(--panel2); padding: 1px 5px; border-radius: 3px; }
   .sched { display: flex; gap: 50px; }
   .sched-kinds { display: flex; flex-direction: column; gap: 14px; }

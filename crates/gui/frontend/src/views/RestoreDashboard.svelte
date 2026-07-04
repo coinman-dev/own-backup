@@ -23,23 +23,27 @@
 
   const lastRun = $derived(job.last_run);
 
-  // Same placeholder file-category breakdown as the backup dashboard (feature
-  // "в разработке"); deterministic per job id so it doesn't flicker.
-  const cats = [
-    { name: 'Изображения', color: '#5ab02f' },
-    { name: 'Видео', color: '#d8c81e' },
-    { name: 'Аудио', color: '#e07a2f' },
-    { name: 'Документы', color: '#8b5cf6' },
-    { name: 'Система', color: '#4f9be8' },
-    { name: 'Другое', color: '#9aa0ad' },
-  ];
-  function seeded(i: number): number {
-    let h = 0;
-    for (const ch of job.id + i) h = (h * 31 + ch.charCodeAt(0)) & 0xffff;
-    return (h % 90) + 10;
-  }
-  const totalWeight = cats.reduce((s, _, i) => s + seeded(i), 0);
-  const catData = cats.map((c, i) => ({ ...c, pct: (seeded(i) / totalWeight) * 100 }));
+  // Real file-category breakdown of the archived data — same source as the
+  // backup dashboard (collected during the backup's file walk).
+  const CAT_META = [
+    { key: 'images', name: 'Изображения', color: '#5ab02f' },
+    { key: 'video', name: 'Видео', color: '#d8c81e' },
+    { key: 'audio', name: 'Аудио', color: '#e07a2f' },
+    { key: 'documents', name: 'Документы', color: '#8b5cf6' },
+    { key: 'system', name: 'Система', color: '#4f9be8' },
+    { key: 'other', name: 'Другое', color: '#9aa0ad' },
+  ] as const;
+  const catData = $derived.by(() => {
+    const c = lastRun?.categories;
+    if (!c) return null;
+    const total = CAT_META.reduce((s, m) => s + (c[m.key] ?? 0), 0);
+    if (total <= 0) return null;
+    return CAT_META.map((m) => ({
+      ...m,
+      bytes: c[m.key] ?? 0,
+      pct: ((c[m.key] ?? 0) / total) * 100,
+    }));
+  });
   const canRestore = $derived(lastRun?.status === 'success' && !!lastRun.image_path);
   const backupBusy = $derived(
     jobs.queue.current !== null || jobs.queue.pending.length > 0,
@@ -188,18 +192,23 @@
     <div class="stats">
       <span>Последнее копирование: <b>{lastRun?.status === 'success' ? formatDate(lastRun.finished_at) : '—'}</b></span>
       <span class="reco">
-        Данные для восстановления: <b>{lastRun?.status === 'success' ? formatBytes(lastRun.bytes_copied) : '—'}</b>
-        <button class="q" title="Разбивка по типам — в разработке" onclick={() => (stubMsg = 'Разбивка данных по типам (изображения, видео, документы…) — в разработке. Сейчас показаны примерные данные для наглядности.')}>?</button>
+        Данные для восстановления: <b>{lastRun?.status === 'success' ? formatBytes(lastRun.used_blocks > 0 ? lastRun.used_blocks * 1048576 : lastRun.bytes_copied) : '—'}</b>
+        <button class="q" title="О разбивке по типам" onclick={() => (stubMsg = 'Разбивка по типам считается по файлам, вошедшим в копию (по расширениям), во время сканирования тома. Исключённые файлы не учитываются.')}>?</button>
       </span>
     </div>
-    <div class="catbar">
-      {#each catData as c}<div style="width:{c.pct}%; background:{c.color}"></div>{/each}
-    </div>
-    <div class="cats">
-      {#each catData as c}
-        <div class="cat"><span class="dot" style="background:{c.color}"></span><span class="cat-name">{c.name}</span></div>
-      {/each}
-    </div>
+    {#if catData}
+      <div class="catbar">
+        {#each catData as c}<div style="width:{c.pct}%; background:{c.color}" title="{c.name}: {formatBytes(c.bytes)}"></div>{/each}
+      </div>
+      <div class="cats">
+        {#each catData as c}
+          <div class="cat"><span class="dot" style="background:{c.color}"></span><span class="cat-name">{c.name}</span><span class="cat-size">{formatBytes(c.bytes)}</span></div>
+        {/each}
+      </div>
+    {:else}
+      <div class="catbar empty-catbar"></div>
+      <div class="cats-note">Разбивка по типам появится после следующего копирования.</div>
+    {/if}
   {/if}
 
   {#if running}
@@ -270,9 +279,12 @@
   .q { width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--text-muted); background: none; color: var(--text-muted); font-size: 10px; cursor: pointer; padding: 0; }
   .catbar { height: 9px; border-radius: 5px; overflow: hidden; display: flex; margin-top: 10px; }
   .cats { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
-  .cat { flex: 1; min-width: 110px; display: flex; align-items: center; gap: 7px; }
-  .dot { width: 9px; height: 9px; border-radius: 50%; }
+  .cat { flex: 1; min-width: 130px; display: flex; align-items: center; gap: 7px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
   .cat-name { font-size: 13px; color: var(--head); }
+  .cat-size { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
+  .empty-catbar { background: var(--tabbg); }
+  .cats-note { font-size: 12px; color: var(--text-muted); margin-top: 12px; }
   .connector { width: 130px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; gap: 8px; }
   .dash-line { width: 26px; height: 2px; background: repeating-linear-gradient(90deg, var(--text-muted) 0 4px, transparent 4px 8px); }
   .arrow-circle { width: 52px; height: 52px; border-radius: 50%; background: var(--primary); display: flex; align-items: center; justify-content: center; }

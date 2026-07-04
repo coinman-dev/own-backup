@@ -3,9 +3,22 @@
 use tauri::State;
 
 use crate::jobs::{
-    default_exclusions, Job, JobRun, QueueSnapshot, ScheduleConfig, SchemeConfig,
+    default_exclusions, dest_on_source_volume, drive_letter_of, Job, JobRun, QueueSnapshot,
+    ScheduleConfig, SchemeConfig,
 };
 use crate::state::GuiState;
+
+/// Reject a destination that lives on the volume being backed up.
+fn check_dest_not_on_source(source: &str, dest_folder: &str) -> Result<(), String> {
+    if dest_on_source_volume(source, dest_folder) {
+        let letter = drive_letter_of(source).unwrap_or('?');
+        return Err(format!(
+            "Нельзя сохранять копию на тот же диск, который копируется ({letter}:). \
+             Выберите для назначения другой диск."
+        ));
+    }
+    Ok(())
+}
 
 #[tauri::command]
 pub async fn list_backup_jobs(state: State<'_, GuiState>) -> Result<Vec<Job>, String> {
@@ -52,6 +65,7 @@ pub async fn save_backup_job(state: State<'_, GuiState>, job: Job) -> Result<Job
     if job.dest_folder.trim().is_empty() {
         return Err("Выберите папку назначения.".into());
     }
+    check_dest_not_on_source(&job.source, &job.dest_folder)?;
     Ok(state.job_store.upsert(job))
 }
 
@@ -64,9 +78,13 @@ pub async fn delete_backup_job(state: State<'_, GuiState>, id: String) -> Result
 /// Enqueue a job for backup. Runs immediately if idle, otherwise queues.
 #[tauri::command]
 pub async fn run_backup_job(state: State<'_, GuiState>, id: String) -> Result<(), String> {
-    if state.job_store.get(&id).is_none() {
-        return Err("Задание не найдено.".into());
-    }
+    // Guard again at run time: a job could have been saved before this rule
+    // existed, or edited on disk, or point at a since-relettered drive.
+    let job = state
+        .job_store
+        .get(&id)
+        .ok_or_else(|| "Задание не найдено.".to_string())?;
+    check_dest_not_on_source(&job.source, &job.dest_folder)?;
     // Avoid enqueuing the same job twice while it is pending/running.
     {
         let pending = state.run_queue.pending.lock().unwrap();

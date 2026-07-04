@@ -39,6 +39,12 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
         block_size: args.block_size_mib * 1024 * 1024,
         all_sectors: args.all_sectors,
         use_vss: !args.no_vss,
+        // Chains, exclusions and retention are driven by the GUI job model;
+        // the CLI creates plain full backups for now.
+        kind: own_backup_common::types::BackupType::Full,
+        parent_image: None,
+        exclusion_patterns: Vec::new(),
+        job_id: None,
     };
 
     println!("Backing up {} -> {}", args.source, args.output);

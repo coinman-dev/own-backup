@@ -20,6 +20,7 @@ use windows::Win32::System::IO::DeviceIoControl;
 
 use own_backup_common::{OwnBackupError, Result};
 
+use crate::exclusions::ByteRanges;
 use crate::used_sectors::UsedSectorMap;
 use crate::win_device::WinRawDevice;
 
@@ -31,6 +32,13 @@ pub struct NtfsUsedSectorMap {
     block_used: Vec<bool>,
     used_count: u64,
     cluster_size: u32,
+    /// Raw cluster allocation bitmap, retained so that file exclusions can
+    /// clear cluster bits after the fact. Freed via [`Self::release_bitmap`]
+    /// once exclusions are applied (or immediately when there are none).
+    bitmap: Option<Vec<u8>>,
+    total_clusters: u64,
+    volume_len: u64,
+    block_size: u32,
 }
 
 impl NtfsUsedSectorMap {
@@ -148,50 +156,11 @@ impl NtfsUsedSectorMap {
             "NTFS volume bitmap loaded"
         );
 
-        // --- Fold clusters into backup blocks ---
-        let total_blocks = volume_len.div_ceil(block_size as u64);
-        let mut block_used = vec![false; total_blocks as usize];
-
-        // Bytes past the last cluster (e.g. the NTFS backup boot sector at the
-        // end of the volume) are not covered by the bitmap — always copy them.
-        let clusters_end = total_clusters * cluster_size as u64;
-        if clusters_end < volume_len {
-            let first_tail_block = clusters_end / block_size as u64;
-            for b in block_used.iter_mut().skip(first_tail_block as usize) {
-                *b = true;
-            }
-        }
-
-        for (byte_idx, &byte) in bitmap.iter().enumerate() {
-            if byte == 0 {
-                continue;
-            }
-            for bit in 0..8u32 {
-                if byte & (1 << bit) == 0 {
-                    continue;
-                }
-                let cluster = byte_idx as u64 * 8 + bit as u64;
-                if cluster >= total_clusters {
-                    break;
-                }
-                let start = cluster * cluster_size as u64;
-                let end = start + cluster_size as u64 - 1;
-                let first_block = (start / block_size as u64) as usize;
-                let last_block = (end / block_size as u64) as usize;
-                for b in block_used
-                    .iter_mut()
-                    .take(last_block + 1)
-                    .skip(first_block)
-                {
-                    *b = true;
-                }
-            }
-        }
-
-        let used_count = block_used.iter().filter(|&&u| u).count() as u64;
+        let (block_used, used_count) =
+            fold_bitmap(&bitmap, total_clusters, cluster_size, volume_len, block_size);
         info!(
             volume = volume_path,
-            total_blocks,
+            total_blocks = block_used.len(),
             used_blocks = used_count,
             "NTFS used-sector map ready"
         );
@@ -200,6 +169,10 @@ impl NtfsUsedSectorMap {
             block_used,
             used_count,
             cluster_size,
+            bitmap: Some(bitmap),
+            total_clusters,
+            volume_len,
+            block_size,
         })
     }
 
@@ -212,6 +185,97 @@ impl NtfsUsedSectorMap {
     pub fn total_blocks(&self) -> u64 {
         self.block_used.len() as u64
     }
+
+    /// Clear the allocation bits of every cluster fully covered by `ranges`
+    /// (byte offsets on the volume; extents from `FSCTL_GET_RETRIEVAL_POINTERS`
+    /// are cluster-aligned by construction) and re-fold the per-block map.
+    /// Blocks that only carried excluded clusters drop out of the backup
+    /// entirely; partially-affected blocks stay and get their excluded bytes
+    /// zeroed by [`crate::exclusions::ZeroingBlockReader`].
+    pub fn apply_excluded_ranges(&mut self, ranges: &ByteRanges) {
+        let Some(bitmap) = self.bitmap.as_mut() else {
+            debug!("apply_excluded_ranges called after release_bitmap — ignored");
+            return;
+        };
+        let cs = self.cluster_size as u64;
+        for (start, end) in ranges.iter() {
+            // Defensive: only whole clusters inside the range.
+            let first = start.div_ceil(cs);
+            let last = end / cs; // exclusive
+            for cluster in first..last.min(self.total_clusters) {
+                let byte = (cluster / 8) as usize;
+                if let Some(b) = bitmap.get_mut(byte) {
+                    *b &= !(1u8 << (cluster % 8));
+                }
+            }
+        }
+        let (block_used, used_count) = fold_bitmap(
+            bitmap,
+            self.total_clusters,
+            self.cluster_size,
+            self.volume_len,
+            self.block_size,
+        );
+        self.block_used = block_used;
+        self.used_count = used_count;
+    }
+
+    /// Free the retained cluster bitmap (tens of MB per TB of volume). Call
+    /// once exclusions have been applied — the folded block map stays valid.
+    pub fn release_bitmap(&mut self) {
+        self.bitmap = None;
+    }
+}
+
+/// Fold a cluster allocation bitmap into a per-backup-block used map.
+fn fold_bitmap(
+    bitmap: &[u8],
+    total_clusters: u64,
+    cluster_size: u32,
+    volume_len: u64,
+    block_size: u32,
+) -> (Vec<bool>, u64) {
+    let total_blocks = volume_len.div_ceil(block_size as u64);
+    let mut block_used = vec![false; total_blocks as usize];
+
+    // Bytes past the last cluster (e.g. the NTFS backup boot sector at the
+    // end of the volume) are not covered by the bitmap — always copy them.
+    let clusters_end = total_clusters * cluster_size as u64;
+    if clusters_end < volume_len {
+        let first_tail_block = clusters_end / block_size as u64;
+        for b in block_used.iter_mut().skip(first_tail_block as usize) {
+            *b = true;
+        }
+    }
+
+    for (byte_idx, &byte) in bitmap.iter().enumerate() {
+        if byte == 0 {
+            continue;
+        }
+        for bit in 0..8u32 {
+            if byte & (1 << bit) == 0 {
+                continue;
+            }
+            let cluster = byte_idx as u64 * 8 + bit as u64;
+            if cluster >= total_clusters {
+                break;
+            }
+            let start = cluster * cluster_size as u64;
+            let end = start + cluster_size as u64 - 1;
+            let first_block = (start / block_size as u64) as usize;
+            let last_block = (end / block_size as u64) as usize;
+            for b in block_used
+                .iter_mut()
+                .take(last_block + 1)
+                .skip(first_block)
+            {
+                *b = true;
+            }
+        }
+    }
+
+    let used_count = block_used.iter().filter(|&&u| u).count() as u64;
+    (block_used, used_count)
 }
 
 impl UsedSectorMap for NtfsUsedSectorMap {

@@ -56,6 +56,11 @@ pub struct SidecarInfo {
     /// begins (the GPT partition start; 0 for whole-disk images).
     #[serde(default)]
     pub volume_data_offset: u64,
+    /// Id of the GUI job that produced this image. Retention only ever touches
+    /// sidecars carrying a matching job id; images without one (older builds,
+    /// CLI runs) are never auto-deleted.
+    #[serde(default)]
+    pub job_id: Option<String>,
 }
 
 impl SidecarInfo {
@@ -67,6 +72,7 @@ impl SidecarInfo {
             chain_role: ChainRole::Full,
             parent_image_file_name: None,
             volume_data_offset,
+            job_id: None,
         }
     }
 
@@ -83,6 +89,7 @@ impl SidecarInfo {
             chain_role: role,
             parent_image_file_name: Some(parent.into()),
             volume_data_offset,
+            job_id: None,
         }
     }
 }
@@ -168,6 +175,34 @@ const MAX_JSON_LEN: u32 = 100 * 1024 * 1024;
 pub fn read_sidecar(path: &Path) -> Result<Sidecar> {
     let file = File::open(path)?;
     read_sidecar_from(&mut BufReader::new(file))
+}
+
+/// Read only the JSON header (info + manifest) of a sidecar, skipping the
+/// checksum table. Cheap enough for scanning whole folders (retention, chain
+/// discovery, image info).
+pub fn read_sidecar_header(path: &Path) -> Result<(SidecarInfo, ImageManifest)> {
+    let file = File::open(path)?;
+    let mut r = BufReader::new(file);
+
+    let mut magic = [0u8; 8];
+    r.read_exact(&mut magic)?;
+    if &magic != SIDECAR_MAGIC {
+        return Err(OwnBackupError::ImageFormat(
+            "not a sidecar file (bad magic)".into(),
+        ));
+    }
+    let mut len_buf = [0u8; 4];
+    r.read_exact(&mut len_buf)?;
+    let json_len = u32::from_le_bytes(len_buf);
+    if json_len == 0 || json_len > MAX_JSON_LEN {
+        return Err(OwnBackupError::ImageFormat(format!(
+            "sidecar JSON length {json_len} out of range"
+        )));
+    }
+    let mut json = vec![0u8; json_len as usize];
+    r.read_exact(&mut json)?;
+    let header: JsonHeader = serde_json::from_slice(&json)?;
+    Ok((header.info, header.manifest))
 }
 
 /// Read a sidecar from any reader.

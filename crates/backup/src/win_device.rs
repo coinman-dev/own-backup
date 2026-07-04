@@ -11,15 +11,16 @@ use std::alloc::{alloc, dealloc, Layout};
 
 use tracing::{debug, warn};
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE};
+use windows::Win32::Foundation::{BOOLEAN, CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FlushFileBuffers, ReadFile, SetFilePointerEx, WriteFile, FILE_BEGIN,
     FILE_FLAG_NO_BUFFERING, FILE_FLAG_WRITE_THROUGH, FILE_SHARE_READ, FILE_SHARE_WRITE,
     OPEN_EXISTING,
 };
 use windows::Win32::System::Ioctl::{
-    DISK_GEOMETRY, GET_LENGTH_INFORMATION, IOCTL_DISK_GET_DRIVE_GEOMETRY,
-    IOCTL_DISK_GET_LENGTH_INFO,
+    DISK_ATTRIBUTE_OFFLINE, DISK_ATTRIBUTE_READ_ONLY, DISK_GEOMETRY, GET_LENGTH_INFORMATION,
+    IOCTL_DISK_GET_DRIVE_GEOMETRY, IOCTL_DISK_GET_LENGTH_INFO, IOCTL_DISK_SET_DISK_ATTRIBUTES,
+    IOCTL_DISK_UPDATE_PROPERTIES, SET_DISK_ATTRIBUTES,
 };
 use windows::Win32::System::IO::DeviceIoControl;
 
@@ -367,6 +368,104 @@ impl WinRawDevice {
         // SAFETY: handle is valid.
         unsafe { FlushFileBuffers(self.handle) }
             .map_err(|e| OwnBackupError::Device(format!("flush({}) failed: {e}", self.path)))
+    }
+
+    fn set_disk_attributes(&self, attrs: &SET_DISK_ATTRIBUTES, what: &str) -> Result<()> {
+        let mut returned = 0u32;
+        // SAFETY: input buffer valid for the size passed; no output buffer.
+        unsafe {
+            DeviceIoControl(
+                self.handle,
+                IOCTL_DISK_SET_DISK_ATTRIBUTES,
+                Some(attrs as *const _ as *const _),
+                std::mem::size_of::<SET_DISK_ATTRIBUTES>() as u32,
+                None,
+                0,
+                Some(&mut returned),
+                None,
+            )
+        }
+        .map_err(|e| {
+            OwnBackupError::Device(format!(
+                "IOCTL_DISK_SET_DISK_ATTRIBUTES({what}) on {} failed: {e}",
+                self.path
+            ))
+        })
+    }
+
+    /// Take this (attached virtual) disk offline and clear its read-only flag
+    /// so raw sector writes through the handle are not blocked by a mounted
+    /// filesystem.
+    ///
+    /// A differencing VHDX inherits a complete NTFS filesystem from its parent;
+    /// Windows auto-mounts that volume the instant the disk is attached, and
+    /// afterwards raw writes to the volume's sectors fail with
+    /// `ERROR_ACCESS_DENIED (0x80070005)`. Setting the disk offline dismounts
+    /// the inner volume(s) while leaving this physical-drive handle writable.
+    ///
+    /// With `persist = true` the offline attribute is stored in the registry
+    /// keyed by the disk's GPT GUID, so the NEXT attach of this disk — or of
+    /// any differencing child inheriting the same GPT — arrives offline from
+    /// the start: no transient auto-mount at all (and no slow detach waiting
+    /// for the mounted volume's teardown). Call it only once partmgr knows
+    /// the disk's partition table (see [`Self::update_properties`]).
+    pub fn set_offline_writable(&self, persist: bool) -> Result<()> {
+        let attrs = SET_DISK_ATTRIBUTES {
+            Version: std::mem::size_of::<SET_DISK_ATTRIBUTES>() as u32,
+            Persist: BOOLEAN(persist as u8),
+            Attributes: DISK_ATTRIBUTE_OFFLINE as u64,
+            AttributesMask: (DISK_ATTRIBUTE_OFFLINE | DISK_ATTRIBUTE_READ_ONLY) as u64,
+            ..Default::default()
+        };
+        self.set_disk_attributes(&attrs, "offline")?;
+        debug!(path = %self.path, persist, "Attached disk set offline (writable) for raw imaging");
+        Ok(())
+    }
+
+    /// Bring the disk online for THIS session only (registry state untouched,
+    /// read-only flag untouched): volumes surface and mount. Used when the
+    /// user mounts a backup image to browse it — backup attaches keep the
+    /// disk offline via the persisted attribute.
+    pub fn set_online_this_session(&self) -> Result<()> {
+        let attrs = SET_DISK_ATTRIBUTES {
+            Version: std::mem::size_of::<SET_DISK_ATTRIBUTES>() as u32,
+            Persist: BOOLEAN(0),
+            Attributes: 0,
+            AttributesMask: DISK_ATTRIBUTE_OFFLINE as u64,
+            ..Default::default()
+        };
+        self.set_disk_attributes(&attrs, "online")?;
+        debug!(path = %self.path, "Attached disk brought online for browsing");
+        Ok(())
+    }
+
+    /// Ask partmgr to re-read the partition table (`IOCTL_DISK_UPDATE_PROPERTIES`).
+    /// Needed after writing a GPT to a raw attached disk, so the disk gains its
+    /// identity (GPT GUID) and a subsequent persisted attribute has a key to
+    /// stick to. Safe while the disk is offline — no volumes surface.
+    pub fn update_properties(&self) -> Result<()> {
+        let mut returned = 0u32;
+        // SAFETY: no in/out buffers.
+        unsafe {
+            DeviceIoControl(
+                self.handle,
+                IOCTL_DISK_UPDATE_PROPERTIES,
+                None,
+                0,
+                None,
+                0,
+                Some(&mut returned),
+                None,
+            )
+        }
+        .map_err(|e| {
+            OwnBackupError::Device(format!(
+                "IOCTL_DISK_UPDATE_PROPERTIES on {} failed: {e}",
+                self.path
+            ))
+        })?;
+        debug!(path = %self.path, "Partition table re-read by partmgr");
+        Ok(())
     }
 }
 

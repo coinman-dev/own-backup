@@ -31,3 +31,6 @@ cargo
 *.vhdx
 *.avhdx
 *.obkm
+
+# Mounted Windows test folder (exe, logs, multi-GB backup images)
+win-files/
