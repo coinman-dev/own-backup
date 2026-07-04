@@ -14,12 +14,7 @@ mod imp {
     use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
     use windows_service::service_dispatcher;
 
-    pub const SERVICE_NAME: &str = "MyOwnBackup";
-    #[allow(dead_code)] // used by the MSI/service installer (plan v2, phase 7)
-    pub const SERVICE_DISPLAY_NAME: &str = "My Own Backup Service";
-    #[allow(dead_code)] // used by the MSI/service installer (plan v2, phase 7)
-    pub const SERVICE_DESCRIPTION: &str =
-        "Block-level backup service for My Own Backup";
+    use crate::SERVICE_NAME;
 
     windows_service::define_windows_service!(ffi_service_main, service_main);
 
@@ -68,9 +63,10 @@ mod imp {
 
         info!("Service started");
 
-        // Run the main application loop
+        // Run the main application loop (TCP placeholder until the Windows
+        // named-pipe transport lands).
         let runtime = tokio::runtime::Runtime::new()?;
-        runtime.block_on(crate::run_main_loop(shutdown_signal))?;
+        runtime.block_on(crate::run_main_loop(shutdown_signal, true))?;
 
         // Report Stopped
         status_handle.set_service_status(ServiceStatus {

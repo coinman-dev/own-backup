@@ -1,0 +1,19 @@
+[package]
+name = "own-backup-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+own-backup-core = { workspace = true }
+tonic = { workspace = true }
+prost = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = "0.1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[build-dependencies]
+tonic-build = { workspace = true }
+prost-build = "0.13"

@@ -1,4 +1,5 @@
 pub mod backup;
+pub mod jobs;
 pub mod list_backups;
 pub mod list_disks;
 pub mod mount;

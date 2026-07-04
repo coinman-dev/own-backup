@@ -1,27 +1,51 @@
-use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::time::Instant;
+
+use tokio::sync::broadcast;
+use tokio::sync::mpsc::UnboundedSender;
 
 use own_backup_common::config::AppConfig;
+use own_backup_core::{JobStore, RunQueue};
 
-/// Shared application state accessible from gRPC handlers and scheduler.
+use crate::grpc_server::proto;
+
+/// Shared state for the gRPC handlers, the queue worker and (later) the
+/// scheduler. Owns the orchestrator: the job store, the serial run queue, the
+/// enqueue channel, the cancel flag and the event fan-out.
 pub struct AppState {
-    #[allow(dead_code)] // read once real backup orchestration lands (plan v2, phase 4)
+    #[allow(dead_code)] // data_dir/paths read as the service grows (scheduler, logs)
     pub config: AppConfig,
-    pub db_path: PathBuf,
-    #[allow(dead_code)] // read once real backup orchestration lands (plan v2, phase 4)
-    pub active_backup_id: Mutex<Option<String>>,
-    pub start_time: std::time::Instant,
+    /// Persisted jobs + activity.
+    pub store: Arc<JobStore>,
+    /// Serial run queue shared with the worker.
+    pub queue: RunQueue,
+    /// Enqueue a job id for the background worker.
+    pub job_tx: UnboundedSender<String>,
+    /// Set true to cancel the currently running backup.
+    pub cancel: Arc<AtomicBool>,
+    /// Fan-out of orchestration events to `StreamEvents` subscribers.
+    pub events: broadcast::Sender<proto::Event>,
+    pub start_time: Instant,
 }
 
 impl AppState {
-    pub fn new(config: AppConfig) -> Arc<Self> {
-        let db_path = config.db_path();
+    pub fn new(
+        config: AppConfig,
+        store: Arc<JobStore>,
+        queue: RunQueue,
+        job_tx: UnboundedSender<String>,
+        cancel: Arc<AtomicBool>,
+        events: broadcast::Sender<proto::Event>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             config,
-            db_path,
-            active_backup_id: Mutex::new(None),
-            start_time: std::time::Instant::now(),
+            store,
+            queue,
+            job_tx,
+            cancel,
+            events,
+            start_time: Instant::now(),
         })
     }
 

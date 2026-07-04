@@ -168,10 +168,12 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(gui_state)
         .setup(move |app| {
-            // Spawn the background run-queue worker.
-            let handle = app.handle().clone();
+            // Spawn the background run-queue worker, bridging core events to
+            // Tauri window events via the sink.
+            let sink: std::sync::Arc<dyn jobs::EventSink> =
+                std::sync::Arc::new(jobs::TauriEventSink { app: app.handle().clone() });
             tauri::async_runtime::spawn(jobs::run_queue_worker(
-                handle, job_store, run_queue, cancel_flag, job_rx,
+                sink, job_store, run_queue, cancel_flag, job_rx,
             ));
             Ok(())
         })

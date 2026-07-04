@@ -42,6 +42,9 @@ enum Commands {
     /// List backup jobs and sets
     ListBackups(commands::list_backups::ListBackupsArgs),
 
+    /// Manage backup jobs via the running service (gRPC client)
+    Jobs(commands::jobs::JobsArgs),
+
     /// Manage the background service
     Service(commands::service::ServiceArgs),
 }
@@ -67,6 +70,7 @@ async fn main() {
         Commands::Unmount(args) => commands::unmount::run(args).await,
         Commands::Validate(args) => commands::validate::run(args).await,
         Commands::ListBackups(args) => commands::list_backups::run(args).await,
+        Commands::Jobs(args) => commands::jobs::run(args).await,
         Commands::Service(args) => commands::service::run(args).await,
     };
 

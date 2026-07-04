@@ -4,12 +4,14 @@ pub mod checksum;
 pub mod compression;
 pub mod encryption;
 pub mod exclusions;
+pub mod fat_map;
 pub mod gpt_writer;
 pub mod image_reader;
 pub mod image_writer;
 pub mod incremental;
 pub mod pipeline;
 pub mod raw_copy;
+pub mod san_policy;
 pub mod sidecar;
 pub mod used_sectors;
 

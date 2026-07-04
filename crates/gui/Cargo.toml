@@ -21,6 +21,7 @@ own-backup-metadata = { workspace = true }
 own-backup-scheduler = { workspace = true }
 own-backup-restore = { workspace = true }
 own-backup-backup = { workspace = true }
+own-backup-core = { workspace = true }
 tauri = { version = "2", features = ["devtools"] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"

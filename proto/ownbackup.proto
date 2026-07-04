@@ -1,178 +1,45 @@
 syntax = "proto3";
 package ownbackup;
 
+// Backup service API (plan v2, phase 4).
+//
+// The rich types (Job, JobRun, QueueSnapshot, JobProgress, DiskInfo) are the
+// Rust structs in `own-backup-core` / `own-backup-common`; both the service and
+// its clients are Rust and share those crates, so they travel as JSON strings
+// inside thin envelopes rather than being re-declared field-by-field here. This
+// keeps the wire format in lock-step with the model as it evolves. Simple
+// parameters (ids) stay typed.
 service BackupService {
-    rpc ListDisks(Empty) returns (DiskListResponse);
-    rpc RunPreflight(PreflightRequest) returns (PreflightResponse);
-    rpc CreateBackupJob(CreateJobRequest) returns (BackupJobResponse);
-    rpc ListBackupJobs(Empty) returns (JobListResponse);
-    rpc StartBackup(StartBackupRequest) returns (BackupProgressResponse);
-    rpc GetBackupProgress(BackupId) returns (BackupProgressResponse);
-    rpc CancelBackup(BackupId) returns (Empty);
-    rpc StreamBackupProgress(BackupId) returns (stream BackupProgressResponse);
-    rpc ListBackupSets(JobId) returns (BackupSetListResponse);
-    rpc StartRestore(StartRestoreRequest) returns (RestoreProgressResponse);
-    rpc StreamRestoreProgress(RestoreId) returns (stream RestoreProgressResponse);
-    rpc ValidateBackup(BackupSetId) returns (ValidationResponse);
-    rpc SetSchedule(SetScheduleRequest) returns (Empty);
-    rpc GetSchedule(JobId) returns (ScheduleResponse);
-    rpc GetServiceStatus(Empty) returns (ServiceStatusResponse);
+  // --- Jobs ---
+  rpc ListJobs(Empty) returns (JsonReply);           // JSON: [Job]
+  rpc GetJob(IdRequest) returns (JsonReply);         // JSON: Job | null
+  rpc SaveJob(JsonRequest) returns (JsonReply);      // in: Job JSON -> out: stored Job JSON
+  rpc DeleteJob(IdRequest) returns (Empty);
+  rpc NewJobTemplate(Empty) returns (JsonReply);     // JSON: Job (default template)
+  rpc DefaultExclusions(Empty) returns (JsonReply);  // JSON: [string]
+
+  // --- Queue / runs ---
+  rpc RunJob(IdRequest) returns (Empty);             // enqueue a backup
+  rpc CancelQueued(IdRequest) returns (Empty);       // drop a still-pending job
+  rpc CancelRunning(Empty) returns (Empty);          // signal-cancel the running job
+  rpc GetQueue(Empty) returns (JsonReply);           // JSON: QueueSnapshot
+  rpc ListActivity(Empty) returns (JsonReply);       // JSON: [JobRun]
+  rpc StreamEvents(Empty) returns (stream Event);    // progress / queue / finished
+
+  // --- Inventory ---
+  rpc ListDisks(Empty) returns (JsonReply);          // JSON: [DiskInfo]
+
+  rpc GetServiceStatus(Empty) returns (JsonReply);   // JSON: { version, uptime_secs, queue }
 }
 
 message Empty {}
+message IdRequest { string id = 1; }
+message JsonRequest { string json = 1; }
+message JsonReply { string json = 1; }
 
-message BackupId { string id = 1; }
-message JobId { string id = 1; }
-message RestoreId { string id = 1; }
-message BackupSetId { string id = 1; }
-
-message DiskInfo {
-    string device_id = 1;
-    string model = 2;
-    string serial = 3;
-    uint64 size_bytes = 4;
-    uint32 sector_size_logical = 5;
-    uint32 sector_size_physical = 6;
-    string media_type = 7;
-    string partition_table = 8;
-    string disk_guid = 9;
-    repeated PartitionInfo partitions = 10;
-}
-
-message PartitionInfo {
-    uint32 index = 1;
-    uint64 offset_bytes = 2;
-    uint64 size_bytes = 3;
-    string gpt_type_guid = 4;
-    string gpt_partition_guid = 5;
-    string filesystem = 6;
-    string volume_letter = 7;
-    string volume_label = 8;
-    string fs_uuid = 9;
-    bool is_system = 10;
-    bool is_boot = 11;
-}
-
-message DiskListResponse {
-    repeated DiskInfo disks = 1;
-}
-
-message PreflightRequest {
-    string source_device = 1;
-}
-
-message PreflightResponse {
-    string boot_mode = 1;
-    string partition_table = 2;
-    string disk_type = 3;
-    string filesystem = 4;
-    string support_tier = 5;
-    bool vss_service_running = 6;
-    bool vss_writers_healthy = 7;
-    uint64 free_space_on_target = 8;
-    repeated string warnings = 9;
-    repeated string blockers = 10;
-}
-
-message CreateJobRequest {
-    string name = 1;
-    string source_device = 2;
-    string target_path = 3;
-    string schedule = 4;
-    int32 compression_level = 5;
-    bool encryption_enabled = 6;
-}
-
-message BackupJobResponse {
-    string id = 1;
-    string name = 2;
-    string source_device = 3;
-    string target_path = 4;
-    string schedule = 5;
-    string created_at = 6;
-}
-
-message JobListResponse {
-    repeated BackupJobResponse jobs = 1;
-}
-
-message StartBackupRequest {
-    string job_id = 1;
-    string backup_type = 2;
-    // Field 3 reserved. Passwords go through OS credential store (Windows Credential
-    // Manager / key_file), never over the gRPC channel. Do not reuse field 3.
-    reserved 3;
-    reserved "password";
-}
-
-message BackupProgressResponse {
-    string backup_id = 1;
-    string status = 2;
-    uint64 blocks_done = 3;
-    uint64 blocks_total = 4;
-    uint64 bytes_written = 5;
-    double speed_mbps = 6;
-    string eta = 7;
-    string error_message = 8;
-}
-
-message BackupSetInfo {
-    string id = 1;
-    string job_id = 2;
-    string backup_type = 3;
-    string parent_set_id = 4;
-    string file_path = 5;
-    uint64 file_size = 6;
-    uint64 source_size = 7;
-    string status = 8;
-    string started_at = 9;
-    string completed_at = 10;
-}
-
-message BackupSetListResponse {
-    repeated BackupSetInfo sets = 1;
-}
-
-message StartRestoreRequest {
-    string backup_set_id = 1;
-    string target_device = 2;
-    // Field 3 reserved. Passwords go through OS credential store (Windows Credential
-    // Manager / key_file), never over the gRPC channel. Do not reuse field 3.
-    reserved 3;
-    reserved "password";
-}
-
-message RestoreProgressResponse {
-    string restore_id = 1;
-    string status = 2;
-    uint64 blocks_done = 3;
-    uint64 blocks_total = 4;
-    uint64 bytes_written = 5;
-    double speed_mbps = 6;
-    string error_message = 7;
-}
-
-message ValidationResponse {
-    bool valid = 1;
-    string message = 2;
-    uint64 blocks_checked = 3;
-    uint64 blocks_total = 4;
-}
-
-message SetScheduleRequest {
-    string job_id = 1;
-    string cron_expression = 2;
-}
-
-message ScheduleResponse {
-    string job_id = 1;
-    string cron_expression = 2;
-    string next_run = 3;
-}
-
-message ServiceStatusResponse {
-    string version = 1;
-    string uptime = 2;
-    uint32 active_jobs = 3;
-    uint64 total_backups_completed = 4;
+// One orchestration event. `kind` selects how to read `json`:
+//   "progress" -> JobProgress, "queue" -> QueueSnapshot, "finished" -> JobRun.
+message Event {
+  string kind = 1;
+  string json = 2;
 }

@@ -34,6 +34,7 @@ use crate::exclusions::{ByteRanges, ZeroingBlockReader};
 use crate::exclusions_win::collect_excluded_ranges;
 use crate::gpt_writer::{gpt_write_ops, GptLayout, DEFAULT_PARTITION_OFFSET};
 use crate::raw_copy::copy_used_blocks;
+use crate::san_policy::SanPolicyGuard;
 use crate::sidecar::{
     read_sidecar, sidecar_path_for, write_sidecar, ChainRole, Sidecar, SidecarInfo,
 };
@@ -285,8 +286,9 @@ fn backup_volume_inner(
         }
     }
 
-    // --- Used-sector map (NTFS bitmap or full copy) ---
+    // --- Used-sector map: NTFS bitmap → FAT32/exFAT structures → full copy ---
     let mut ntfs_map: Option<NtfsUsedSectorMap> = None;
+    let mut fat_map: Option<crate::fat_map::FatUsedMap> = None;
     let smart_mode = if req.all_sectors {
         info!("Sector-by-sector mode requested; copying all blocks");
         false
@@ -296,12 +298,26 @@ fn backup_volume_inner(
                 ntfs_map = Some(map);
                 true
             }
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    "NTFS bitmap unavailable (non-NTFS volume?), falling back to sector-by-sector"
-                );
-                false
+            Err(ntfs_err) => {
+                // Not NTFS — try parsing FAT32/exFAT structures directly.
+                let fat_attempt = WinRawDevice::open_read(&read_path).and_then(|mut dev| {
+                    crate::fat_map::build_fat_used_map(&mut dev, req.block_size)
+                });
+                match fat_attempt {
+                    Ok(map) => {
+                        info!(fs = map.filesystem, "Using FAT used-cluster map");
+                        fat_map = Some(map);
+                        true
+                    }
+                    Err(fat_err) => {
+                        warn!(
+                            ntfs = %ntfs_err,
+                            fat = %fat_err,
+                            "no used-cluster map available, falling back to sector-by-sector"
+                        );
+                        false
+                    }
+                }
             }
         }
     };
@@ -342,9 +358,10 @@ fn backup_volume_inner(
         warn!("file exclusions are only supported on NTFS in smart mode — ignored for this run");
     }
 
-    let used: Box<dyn UsedSectorMap> = match ntfs_map {
-        Some(map) => Box::new(map),
-        None => Box::new(AllUsedMap::new(total_blocks)),
+    let used: Box<dyn UsedSectorMap> = match (ntfs_map, fat_map) {
+        (Some(map), _) => Box::new(map),
+        (None, Some(map)) => Box::new(map),
+        (None, None) => Box::new(AllUsedMap::new(total_blocks)),
     };
     let used_blocks = used.used_block_count();
 
@@ -370,17 +387,24 @@ fn backup_volume_inner(
         }
     };
 
+    // A differencing (child) image inherits a full NTFS filesystem from its
+    // parent, which Windows auto-mounts the instant the disk is attached. That
+    // transient mount is what makes DetachVirtualDisk block on a fixed ~180 s
+    // volume-teardown timeout when the backup ends (full images start blank and
+    // never mount, so they detach in milliseconds). Force new disks to arrive
+    // OFFLINE for the attach window so the volume never surfaces at all; the
+    // guard restores the machine policy the moment the disk is attached and
+    // confirmed offline (and on the error/unwind path).
+    let san_guard = SanPolicyGuard::offline_all();
     let attached = attach_vhdx(&req.image_path, AttachMode::RawWrite)?;
     let mut writer = open_write_with_retry(attached.physical_path())?;
-    // A differencing (child) image inherits a full NTFS filesystem from its
-    // parent, which Windows auto-mounts on attach and then locks against raw
-    // writes (ERROR_ACCESS_DENIED). Take the disk offline so we own its
-    // sectors. For children the disk carries the chain's GPT GUID, so ALSO
-    // persist the offline attribute: every future attach of this chain then
-    // arrives offline from the start — no transient mount, no NTFS
-    // "self-heal" writes into the image, no slow volume teardown at detach.
-    // (Full images do the persist step after their GPT is written below.)
+    // Belt-and-suspenders: take the disk offline explicitly (in case the SAN
+    // policy could not be changed) so raw sector writes are not blocked by a
+    // mounted filesystem (ERROR_ACCESS_DENIED). For children the disk carries
+    // the chain's GPT GUID, so ALSO persist the offline attribute. (Full images
+    // do the persist step after their GPT is written below.)
     writer.set_offline_writable(parent.is_some())?;
+    drop(san_guard);
     if writer.length() < data_offset + volume_len {
         return Err(OwnBackupError::Vhdx(format!(
             "attached image is {} bytes — too small for the volume ({} bytes at offset {data_offset})",

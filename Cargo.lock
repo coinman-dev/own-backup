@@ -2689,7 +2689,9 @@ dependencies = [
  "chrono",
  "clap",
  "own-backup-backup",
+ "own-backup-client",
  "own-backup-common",
+ "own-backup-core",
  "own-backup-inventory",
  "own-backup-metadata",
  "own-backup-restore",
@@ -2699,11 +2701,28 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tracing",
  "tracing-subscriber",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "own-backup-client"
+version = "0.1.0"
+dependencies = [
+ "own-backup-core",
+ "prost",
+ "prost-build",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-build",
+ "tracing",
 ]
 
 [[package]]
@@ -2719,12 +2738,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "own-backup-core"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "own-backup-backup",
+ "own-backup-common",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "own-backup-gui"
 version = "0.1.0"
 dependencies = [
  "chrono",
  "own-backup-backup",
  "own-backup-common",
+ "own-backup-core",
  "own-backup-inventory",
  "own-backup-metadata",
  "own-backup-restore",
@@ -2803,6 +2838,7 @@ dependencies = [
  "chrono",
  "cron",
  "own-backup-common",
+ "own-backup-core",
  "own-backup-metadata",
  "rusqlite",
  "tempfile",
@@ -2819,6 +2855,7 @@ dependencies = [
  "getrandom 0.2.17",
  "own-backup-backup",
  "own-backup-common",
+ "own-backup-core",
  "own-backup-inventory",
  "own-backup-metadata",
  "own-backup-restore",
@@ -2829,6 +2866,7 @@ dependencies = [
  "prost-types",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tonic",
@@ -4752,6 +4790,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

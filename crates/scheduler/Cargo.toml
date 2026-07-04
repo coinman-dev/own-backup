@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 own-backup-common = { workspace = true }
 own-backup-metadata = { workspace = true }
+own-backup-core = { workspace = true }
 cron = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

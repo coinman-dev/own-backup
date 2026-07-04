@@ -59,6 +59,13 @@ pub struct CredentialsConfig {
 }
 
 fn default_data_dir() -> PathBuf {
+    // Env override lets the service run without root (tests) and lets the GUI
+    // point a spawned service at a user-writable directory.
+    if let Ok(dir) = std::env::var("OWN_BACKUP_DATA_DIR") {
+        if !dir.trim().is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
     #[cfg(target_os = "windows")]
     {
         PathBuf::from(r"C:\ProgramData\MyOwnBackup")

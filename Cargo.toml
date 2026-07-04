@@ -7,6 +7,8 @@ members = [
     "crates/restore",
     "crates/metadata",
     "crates/scheduler",
+    "crates/core",
+    "crates/client",
     "crates/service",
     "crates/cli",
     "crates/gui",
@@ -78,3 +80,5 @@ own-backup-backup = { path = "crates/backup" }
 own-backup-restore = { path = "crates/restore" }
 own-backup-metadata = { path = "crates/metadata" }
 own-backup-scheduler = { path = "crates/scheduler" }
+own-backup-core = { path = "crates/core" }
+own-backup-client = { path = "crates/client" }

@@ -1,5 +1,16 @@
+//! gRPC surface over the orchestrator core (plan v2, phase 4).
+//!
+//! Handlers are thin: they delegate to [`own_backup_core`] (jobs, queue,
+//! activity) and serialize the shared Rust types to JSON envelopes. Progress
+//! and lifecycle events are fanned out to `StreamEvents` subscribers via a
+//! broadcast channel fed by [`GrpcEventSink`].
+
+use std::pin::Pin;
 use std::sync::Arc;
 
+use tokio::sync::broadcast;
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::{Stream, StreamExt};
 use tonic::{Request, Response, Status};
 use tracing::info;
 
@@ -28,40 +39,53 @@ impl BackupServiceImpl {
     }
 }
 
-/// Per-request auth interceptor that checks the token stored in the service instance.
-/// This is a workaround since tonic's interceptor API requires static closures.
-/// The auth check happens within each RPC handler via the service_token field.
-/// If token is empty (dev mode), auth is skipped.
+/// Bridges core orchestration events onto the broadcast channel that
+/// `StreamEvents` reads. `send` errors only when there are no subscribers,
+/// which is fine — the events are simply dropped until a client connects.
+pub struct GrpcEventSink {
+    pub tx: broadcast::Sender<proto::Event>,
+}
 
-/// Authenticate an incoming gRPC request via bearer token in Authorization metadata.
-///
-/// If `expected_token` is empty, auth is disabled (dev/TCP mode).
-/// Otherwise, the request must include `Authorization: Bearer <token>` where token matches.
-/// Returns Ok(()) if auth succeeds, or Status::unauthenticated if auth fails.
-fn check_auth<T>(req: &tonic::Request<T>, expected_token: &str) -> Result<(), Status> {
-    // Auth is disabled in dev mode (empty token).
-    if expected_token.is_empty() {
+impl own_backup_core::EventSink for GrpcEventSink {
+    fn job_progress(&self, progress: own_backup_core::JobProgress) {
+        let _ = self.tx.send(Event {
+            kind: "progress".into(),
+            json: serde_json::to_string(&progress).unwrap_or_default(),
+        });
+    }
+    fn queue_changed(&self, snapshot: own_backup_core::QueueSnapshot) {
+        let _ = self.tx.send(Event {
+            kind: "queue".into(),
+            json: serde_json::to_string(&snapshot).unwrap_or_default(),
+        });
+    }
+    fn job_finished(&self, run: own_backup_core::JobRun) {
+        let _ = self.tx.send(Event {
+            kind: "finished".into(),
+            json: serde_json::to_string(&run).unwrap_or_default(),
+        });
+    }
+}
+
+/// Authenticate an incoming request via bearer token. Empty expected token =
+/// auth disabled (dev/TCP mode). Constant-time comparison avoids a timing oracle.
+fn check_auth<T>(req: &Request<T>, expected: &str) -> Result<(), Status> {
+    if expected.is_empty() {
         return Ok(());
     }
-
     let provided = req
         .metadata()
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|h| h.strip_prefix("Bearer "))
         .unwrap_or("");
-
-    // Constant-time comparison to prevent timing oracle on the token value.
-    if !constant_time_eq(provided.as_bytes(), expected_token.as_bytes()) {
+    if !constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
         tracing::warn!(target: "security", "gRPC request rejected: invalid bearer token");
         return Err(Status::unauthenticated("Invalid or missing token"));
     }
-
     Ok(())
 }
 
-/// Constant-time byte slice comparison.
-/// Both slices must have equal length; if not, returns false without leaking which byte differed.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -69,424 +93,291 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-/// Validate that a string looks like a device path for the current platform.
-///
-/// Windows: `\\.\PhysicalDrive0`, `\\.\C:`, or a plain volume letter `C:` / `C:\`.
-/// Linux: `/dev/...`.
-fn is_valid_device_path(path: &str) -> bool {
-    #[cfg(target_os = "windows")]
-    {
-        if path.starts_with(r"\\.\") {
-            return true;
-        }
-        let b = path.as_bytes();
-        matches!(b.len(), 2 | 3)
-            && b[0].is_ascii_alphabetic()
-            && b[1] == b':'
-            && (b.len() == 2 || b[2] == b'\\')
+/// Serialize any value into a `JsonReply`.
+fn json_reply<T: serde::Serialize>(value: &T) -> Result<Response<JsonReply>, Status> {
+    let json = serde_json::to_string(value)
+        .map_err(|e| Status::internal(format!("serialize failed: {e}")))?;
+    Ok(Response::new(JsonReply { json }))
+}
+
+/// Shared save/run validation: `source`/`dest` non-empty, dest not on source.
+fn validate_job(source: &str, dest_folder: &str, name_empty: bool) -> Result<(), Status> {
+    if name_empty {
+        return Err(Status::invalid_argument("Укажите имя задания."));
     }
-    #[cfg(not(target_os = "windows"))]
-    {
-        path.starts_with("/dev/")
+    if source.trim().is_empty() {
+        return Err(Status::invalid_argument("Выберите источник (том)."));
     }
+    if dest_folder.trim().is_empty() {
+        return Err(Status::invalid_argument("Выберите папку назначения."));
+    }
+    if own_backup_core::dest_on_source_volume(source, dest_folder) {
+        let letter = own_backup_core::drive_letter_of(source).unwrap_or('?');
+        return Err(Status::invalid_argument(format!(
+            "Нельзя сохранять копию на тот же диск, который копируется ({letter}:). \
+             Выберите для назначения другой диск."
+        )));
+    }
+    Ok(())
 }
 
 #[tonic::async_trait]
 impl BackupService for BackupServiceImpl {
-    async fn list_disks(
-        &self,
-        request: Request<Empty>,
-    ) -> Result<Response<DiskListResponse>, Status> {
-        check_auth(&request, &self.service_token)?;
-        info!("gRPC: ListDisks");
+    // --- Jobs -------------------------------------------------------------
 
-        #[cfg(target_os = "windows")]
-        {
-            use own_backup_inventory::DiskInventory;
-            let inventory = own_backup_inventory::WmiInventory::new()
-                .map_err(|e| Status::internal(e.to_string()))?;
-            match inventory.enumerate_disks().await {
-                Ok(disks) => {
-                    let proto_disks: Vec<DiskInfo> = disks.into_iter().map(disk_to_proto).collect();
-                    Ok(Response::new(DiskListResponse { disks: proto_disks }))
-                }
-                Err(e) => Err(Status::internal(e.to_string())),
-            }
-        }
-
-        #[cfg(not(target_os = "windows"))]
-        {
-            use own_backup_inventory::DiskInventory;
-            let inventory = own_backup_inventory::MockInventory::default();
-            match inventory.enumerate_disks().await {
-                Ok(disks) => {
-                    let proto_disks = disks.into_iter().map(disk_to_proto).collect();
-                    Ok(Response::new(DiskListResponse { disks: proto_disks }))
-                }
-                Err(e) => Err(Status::internal(e.to_string())),
-            }
-        }
+    async fn list_jobs(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        json_reply(&self.state.store.list())
     }
 
-    async fn run_preflight(
-        &self,
-        request: Request<PreflightRequest>,
-    ) -> Result<Response<PreflightResponse>, Status> {
-        check_auth(&request, &self.service_token)?;
-        let req = request.into_inner();
-        info!("gRPC: RunPreflight for {}", req.source_device);
-
-        let analyzer = own_backup_inventory::PreflightAnalyzer::new();
-        match analyzer.analyze(&req.source_device) {
-            Ok(report) => Ok(Response::new(PreflightResponse {
-                boot_mode: format!("{}", report.boot_mode),
-                partition_table: format!("{:?}", report.partition_table),
-                disk_type: format!("{:?}", report.disk_type),
-                filesystem: format!("{:?}", report.filesystem),
-                support_tier: format!("{}", report.support_tier),
-                vss_service_running: report.vss_service_running,
-                vss_writers_healthy: report.vss_writers_healthy,
-                free_space_on_target: report.free_space_on_target,
-                warnings: report.warnings,
-                blockers: report.blockers,
-            })),
-            Err(e) => Err(Status::internal(e.to_string())),
-        }
+    async fn get_job(&self, req: Request<IdRequest>) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        json_reply(&self.state.store.get(&req.into_inner().id))
     }
 
-    async fn create_backup_job(
-        &self,
-        request: Request<CreateJobRequest>,
-    ) -> Result<Response<BackupJobResponse>, Status> {
-        check_auth(&request, &self.service_token)?;
-        let req = request.into_inner();
-        tracing::info!(
-            target: "security",
-            job_name = %req.name,
-            source_device = %req.source_device,
-            encryption_enabled = req.encryption_enabled,
-            "gRPC: CreateBackupJob"
-        );
-
-        // Input validation
-        if req.name.is_empty() || req.name.len() > 256 {
-            return Err(Status::invalid_argument("name must be 1-256 characters"));
-        }
-        if req.source_device.is_empty() || req.source_device.len() > 512 {
-            return Err(Status::invalid_argument("source_device must be 1-512 characters"));
-        }
-        // Validate source_device looks like a device path, not a filesystem path.
-        // Windows: \\.\PhysicalDrive0, \\.\C: or a volume letter C: / C:\
-        // Linux: /dev/...
-        if !is_valid_device_path(&req.source_device) {
-            return Err(Status::invalid_argument(
-                "source_device must be a device path (e.g. \\\\.\\PhysicalDrive0, C: or /dev/sda)",
-            ));
-        }
-        if req.target_path.is_empty() || req.target_path.len() > 1024 {
-            return Err(Status::invalid_argument("target_path must be 1-1024 characters"));
-        }
-        if !req.schedule.is_empty() {
-            if let Err(e) = own_backup_scheduler::parse_schedule(&req.schedule) {
-                return Err(Status::invalid_argument(format!("Invalid schedule: {}", e)));
-            }
-        }
-        if req.compression_level < 0 || req.compression_level > 19 {
-            return Err(Status::invalid_argument("compression_level must be 0-19"));
-        }
-
-        let job_id = uuid::Uuid::new_v4();
-        let now = chrono::Utc::now();
-
-        let conn = own_backup_metadata::open_database(&self.state.db_path)
-            .map_err(|e| Status::internal(e.to_string()))?;
-
-        let job = own_backup_metadata::BackupJob {
-            id: job_id,
-            name: req.name.clone(),
-            source_type: "partition".into(),
-            source_device: req.source_device.clone(),
-            target_path: req.target_path.clone(),
-            schedule: if req.schedule.is_empty() {
-                None
-            } else {
-                Some(req.schedule.clone())
-            },
-            compression_level: req.compression_level,
-            encryption_enabled: req.encryption_enabled,
-            created_at: now,
-            updated_at: now,
-        };
-
-        own_backup_metadata::insert_job(&conn, &job)
-            .map_err(|e| Status::internal(e.to_string()))?;
-
-        Ok(Response::new(BackupJobResponse {
-            id: job_id.to_string(),
-            name: req.name,
-            source_device: req.source_device,
-            target_path: req.target_path,
-            schedule: req.schedule,
-            created_at: now.to_rfc3339(),
-        }))
+    async fn save_job(&self, req: Request<JsonRequest>) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        let job: own_backup_core::Job = serde_json::from_str(&req.into_inner().json)
+            .map_err(|e| Status::invalid_argument(format!("bad job JSON: {e}")))?;
+        validate_job(&job.source, &job.dest_folder, job.name.trim().is_empty())?;
+        json_reply(&self.state.store.upsert(job))
     }
 
-    async fn list_backup_jobs(
-        &self,
-        request: Request<Empty>,
-    ) -> Result<Response<JobListResponse>, Status> {
-        check_auth(&request, &self.service_token)?;
-        info!("gRPC: ListBackupJobs");
-
-        let conn = own_backup_metadata::open_database(&self.state.db_path)
-            .map_err(|e| Status::internal(e.to_string()))?;
-
-        let jobs = own_backup_metadata::list_jobs(&conn)
-            .map_err(|e| Status::internal(e.to_string()))?;
-
-        let proto_jobs = jobs
-            .into_iter()
-            .map(|j| BackupJobResponse {
-                id: j.id.to_string(),
-                name: j.name,
-                source_device: j.source_device,
-                target_path: j.target_path,
-                schedule: j.schedule.unwrap_or_default(),
-                created_at: j.created_at.to_rfc3339(),
-            })
-            .collect();
-
-        Ok(Response::new(JobListResponse { jobs: proto_jobs }))
+    async fn delete_job(&self, req: Request<IdRequest>) -> Result<Response<Empty>, Status> {
+        check_auth(&req, &self.service_token)?;
+        self.state.store.delete(&req.into_inner().id);
+        Ok(Response::new(Empty {}))
     }
 
-    async fn start_backup(
-        &self,
-        request: Request<StartBackupRequest>,
-    ) -> Result<Response<BackupProgressResponse>, Status> {
-        check_auth(&request, &self.service_token)?;
-        let req = request.into_inner();
+    async fn new_job_template(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        let name = std::env::var("COMPUTERNAME")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| std::env::var("HOSTNAME").ok().filter(|s| !s.trim().is_empty()))
+            .unwrap_or_else(|| "Этот компьютер".into());
+        json_reply(&own_backup_core::Job {
+            name,
+            ..Default::default()
+        })
+    }
 
-        // Input validation
-        uuid::Uuid::parse_str(&req.job_id)
-            .map_err(|e| Status::invalid_argument(format!("Invalid job_id: {}", e)))?;
-        let valid_backup_types = ["full", "incremental", "differential", ""];
-        if !valid_backup_types.contains(&req.backup_type.to_lowercase().as_str()) {
-            return Err(Status::invalid_argument(format!(
-                "Invalid backup_type '{}'. Must be: full, incremental, or differential",
-                req.backup_type
+    async fn default_exclusions(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        json_reply(&own_backup_core::default_exclusions())
+    }
+
+    // --- Queue / runs -----------------------------------------------------
+
+    async fn run_job(&self, req: Request<IdRequest>) -> Result<Response<Empty>, Status> {
+        check_auth(&req, &self.service_token)?;
+        let id = req.into_inner().id;
+        let job = self
+            .state
+            .store
+            .get(&id)
+            .ok_or_else(|| Status::not_found("Задание не найдено."))?;
+        // Guard against writing onto the source volume (mirrors save-time check).
+        if own_backup_core::dest_on_source_volume(&job.source, &job.dest_folder) {
+            let letter = own_backup_core::drive_letter_of(&job.source).unwrap_or('?');
+            return Err(Status::failed_precondition(format!(
+                "Копия пишется на тот же диск ({letter}:), что и источник — запуск отменён."
             )));
         }
-
-        tracing::info!(
-            target: "security",
-            job_id = %req.job_id,
-            backup_type = %req.backup_type,
-            "gRPC: StartBackup rejected — engine not wired up yet"
-        );
-        Err(Status::unimplemented(
-            "StartBackup is not implemented yet (backup engine wiring: plan v2, phase 4)",
-        ))
-    }
-
-    async fn get_backup_progress(
-        &self,
-        request: Request<BackupId>,
-    ) -> Result<Response<BackupProgressResponse>, Status> {
-        check_auth(&request, &self.service_token)?;
-        Err(Status::unimplemented(
-            "GetBackupProgress is not implemented yet (plan v2, phase 4)",
-        ))
-    }
-
-    async fn cancel_backup(
-        &self,
-        request: Request<BackupId>,
-    ) -> Result<Response<Empty>, Status> {
-        check_auth(&request, &self.service_token)?;
-        Err(Status::unimplemented(
-            "CancelBackup is not implemented yet (plan v2, phase 4)",
-        ))
-    }
-
-    type StreamBackupProgressStream =
-        tokio_stream::wrappers::ReceiverStream<Result<BackupProgressResponse, Status>>;
-
-    async fn stream_backup_progress(
-        &self,
-        request: Request<BackupId>,
-    ) -> Result<Response<Self::StreamBackupProgressStream>, Status> {
-        check_auth(&request, &self.service_token)?;
-        Err(Status::unimplemented(
-            "StreamBackupProgress is not implemented yet (plan v2, phase 4)",
-        ))
-    }
-
-    async fn list_backup_sets(
-        &self,
-        request: Request<JobId>,
-    ) -> Result<Response<BackupSetListResponse>, Status> {
-        check_auth(&request, &self.service_token)?;
-        let job_id_str = request.into_inner().id;
-        info!("gRPC: ListBackupSets for job {}", job_id_str);
-
-        let job_uuid = uuid::Uuid::parse_str(&job_id_str)
-            .map_err(|e| Status::invalid_argument(format!("Invalid job_id: {}", e)))?;
-
-        let conn = own_backup_metadata::open_database(&self.state.db_path)
-            .map_err(|e| Status::internal(e.to_string()))?;
-
-        let sets = own_backup_metadata::list_sets_for_job(&conn, &job_uuid)
-            .map_err(|e| Status::internal(e.to_string()))?;
-
-        let proto_sets = sets
-            .into_iter()
-            .map(|s| BackupSetInfo {
-                id: s.id.to_string(),
-                job_id: s.job_id.to_string(),
-                backup_type: format!("{:?}", s.backup_type),
-                parent_set_id: s.parent_set_id.map(|u| u.to_string()).unwrap_or_default(),
-                file_path: s.file_path,
-                file_size: s.file_size.unwrap_or(0) as u64,
-                source_size: s.source_size as u64,
-                status: format!("{:?}", s.status),
-                started_at: s.started_at.map(|t| t.to_rfc3339()).unwrap_or_default(),
-                completed_at: s.completed_at.map(|t| t.to_rfc3339()).unwrap_or_default(),
-            })
-            .collect();
-
-        Ok(Response::new(BackupSetListResponse { sets: proto_sets }))
-    }
-
-    async fn start_restore(
-        &self,
-        request: Request<StartRestoreRequest>,
-    ) -> Result<Response<RestoreProgressResponse>, Status> {
-        check_auth(&request, &self.service_token)?;
-        let req = request.into_inner();
-
-        // Input validation
-        uuid::Uuid::parse_str(&req.backup_set_id)
-            .map_err(|e| Status::invalid_argument(format!("Invalid backup_set_id: {}", e)))?;
-        if req.target_device.is_empty() || req.target_device.len() > 512 {
-            return Err(Status::invalid_argument("target_device must be 1-512 characters"));
-        }
-        // Validate target_device looks like a device path, not a filesystem path.
-        if !is_valid_device_path(&req.target_device) {
-            return Err(Status::invalid_argument(
-                "target_device must be a device path (e.g. \\\\.\\PhysicalDrive0, C: or /dev/sda)",
-            ));
-        }
-
-        tracing::info!(
-            target: "security",
-            backup_set_id = %req.backup_set_id,
-            target_device = %req.target_device,
-            "gRPC: StartRestore rejected — engine not wired up yet"
-        );
-        Err(Status::unimplemented(
-            "StartRestore is not implemented yet (restore engine wiring: plan v2, phase 4)",
-        ))
-    }
-
-    type StreamRestoreProgressStream =
-        tokio_stream::wrappers::ReceiverStream<Result<RestoreProgressResponse, Status>>;
-
-    async fn stream_restore_progress(
-        &self,
-        request: Request<RestoreId>,
-    ) -> Result<Response<Self::StreamRestoreProgressStream>, Status> {
-        check_auth(&request, &self.service_token)?;
-        Err(Status::unimplemented(
-            "StreamRestoreProgress is not implemented yet (plan v2, phase 4)",
-        ))
-    }
-
-    async fn validate_backup(
-        &self,
-        request: Request<BackupSetId>,
-    ) -> Result<Response<ValidationResponse>, Status> {
-        check_auth(&request, &self.service_token)?;
-        info!("gRPC: ValidateBackup rejected — not wired up yet");
-        // Never report `valid: true` for a validation that did not run.
-        Err(Status::unimplemented(
-            "ValidateBackup is not implemented yet (plan v2, phase 4)",
-        ))
-    }
-
-    async fn set_schedule(
-        &self,
-        request: Request<SetScheduleRequest>,
-    ) -> Result<Response<Empty>, Status> {
-        check_auth(&request, &self.service_token)?;
-        let req = request.into_inner();
-
-        // Input validation
-        uuid::Uuid::parse_str(&req.job_id)
-            .map_err(|e| Status::invalid_argument(format!("Invalid job_id: {}", e)))?;
-        if !req.cron_expression.is_empty() {
-            if let Err(e) = own_backup_scheduler::parse_schedule(&req.cron_expression) {
-                return Err(Status::invalid_argument(format!("Invalid cron expression: {}", e)));
+        // Skip if already pending or running.
+        {
+            let pending = self.state.queue.pending.lock().unwrap();
+            let current = self.state.queue.current.lock().unwrap();
+            if pending.iter().any(|j| *j == id) || current.as_deref() == Some(id.as_str()) {
+                return Ok(Response::new(Empty {}));
             }
         }
-
-        info!("gRPC: SetSchedule job_id={} rejected — persistence not wired up yet", req.job_id);
-        Err(Status::unimplemented(
-            "SetSchedule is not implemented yet (plan v2, phase 4)",
-        ))
+        self.state.queue.pending.lock().unwrap().push_back(id.clone());
+        self.state
+            .job_tx
+            .send(id)
+            .map_err(|e| Status::internal(format!("enqueue failed: {e}")))?;
+        Ok(Response::new(Empty {}))
     }
 
-    async fn get_schedule(
+    async fn cancel_queued(&self, req: Request<IdRequest>) -> Result<Response<Empty>, Status> {
+        check_auth(&req, &self.service_token)?;
+        let id = req.into_inner().id;
+        self.state.queue.pending.lock().unwrap().retain(|j| *j != id);
+        Ok(Response::new(Empty {}))
+    }
+
+    async fn cancel_running(&self, req: Request<Empty>) -> Result<Response<Empty>, Status> {
+        check_auth(&req, &self.service_token)?;
+        self.state
+            .cancel
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(Response::new(Empty {}))
+    }
+
+    async fn get_queue(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        json_reply(&self.state.queue.snapshot())
+    }
+
+    async fn list_activity(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        json_reply(&self.state.store.activity())
+    }
+
+    type StreamEventsStream = Pin<Box<dyn Stream<Item = Result<Event, Status>> + Send>>;
+
+    async fn stream_events(
         &self,
-        request: Request<JobId>,
-    ) -> Result<Response<ScheduleResponse>, Status> {
-        check_auth(&request, &self.service_token)?;
-        Err(Status::unimplemented(
-            "GetSchedule is not implemented yet (plan v2, phase 4)",
-        ))
+        req: Request<Empty>,
+    ) -> Result<Response<Self::StreamEventsStream>, Status> {
+        check_auth(&req, &self.service_token)?;
+        // Drop "lagged" notices silently; a slow client just misses old events.
+        let stream = BroadcastStream::new(self.state.events.subscribe())
+            .filter_map(|r| r.ok().map(Ok));
+        Ok(Response::new(Box::pin(stream)))
+    }
+
+    // --- Inventory --------------------------------------------------------
+
+    async fn list_disks(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        info!("gRPC: ListDisks");
+        use own_backup_inventory::DiskInventory;
+
+        #[cfg(target_os = "windows")]
+        let disks = own_backup_inventory::WmiInventory::new()
+            .map_err(|e| Status::internal(e.to_string()))?
+            .enumerate_disks()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        #[cfg(not(target_os = "windows"))]
+        let disks = own_backup_inventory::MockInventory::default()
+            .enumerate_disks()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        json_reply(&disks)
     }
 
     async fn get_service_status(
         &self,
-        request: Request<Empty>,
-    ) -> Result<Response<ServiceStatusResponse>, Status> {
-        check_auth(&request, &self.service_token)?;
-        let uptime = self.state.uptime_seconds();
-        Ok(Response::new(ServiceStatusResponse {
-            version: env!("CARGO_PKG_VERSION").into(),
-            uptime: format!("{}s", uptime),
-            active_jobs: 0,
-            total_backups_completed: 0,
-        }))
+        req: Request<Empty>,
+    ) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        let status = serde_json::json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "uptime_secs": self.state.uptime_seconds(),
+            "queue": self.state.queue.snapshot(),
+        });
+        Ok(Response::new(JsonReply { json: status.to_string() }))
     }
 }
 
-fn disk_to_proto(disk: own_backup_common::disk::DiskInfo) -> DiskInfo {
-    DiskInfo {
-        device_id: disk.device_id,
-        model: disk.model,
-        serial: disk.serial,
-        size_bytes: disk.size_bytes,
-        sector_size_logical: disk.sector_size_logical,
-        sector_size_physical: disk.sector_size_physical,
-        media_type: disk.media_type,
-        partition_table: format!("{:?}", disk.partition_table),
-        disk_guid: disk.disk_guid,
-        partitions: disk
-            .partitions
-            .into_iter()
-            .map(|p| PartitionInfo {
-                index: p.index,
-                offset_bytes: p.offset_bytes,
-                size_bytes: p.size_bytes,
-                gpt_type_guid: p.gpt_type_guid,
-                gpt_partition_guid: p.gpt_partition_guid,
-                filesystem: format!("{:?}", p.filesystem),
-                volume_letter: p.volume_letter.map(|c| c.to_string()).unwrap_or_default(),
-                volume_label: p.volume_label,
-                fs_uuid: p.fs_uuid,
-                is_system: p.is_system,
-                is_boot: p.is_boot,
-            })
-            .collect(),
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_service(dir: &std::path::Path) -> BackupServiceImpl {
+        let mut config = own_backup_common::config::AppConfig::default();
+        config.data_dir = dir.to_path_buf();
+        let store = own_backup_core::JobStore::load(dir);
+        let queue = own_backup_core::RunQueue::new();
+        let (job_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (events, _r) = broadcast::channel(16);
+        let state = AppState::new(config, store, queue, job_tx, cancel, events);
+        BackupServiceImpl::new(state, String::new())
+    }
+
+    fn job(name: &str, source: &str, dest: &str) -> String {
+        serde_json::to_string(&own_backup_core::Job {
+            name: name.into(),
+            source: source.into(),
+            dest_folder: dest.into(),
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn jobs_roundtrip_over_grpc() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = make_service(dir.path());
+
+        // Empty to start.
+        let json = svc.list_jobs(Request::new(Empty {})).await.unwrap().into_inner().json;
+        assert_eq!(json, "[]");
+
+        // Save a job, get a generated id back.
+        let saved = svc
+            .save_job(Request::new(JsonRequest { json: job("T", "E:", r"D:\bk") }))
+            .await
+            .unwrap()
+            .into_inner()
+            .json;
+        let saved: own_backup_core::Job = serde_json::from_str(&saved).unwrap();
+        assert!(!saved.id.is_empty());
+
+        // It is listed and fetchable.
+        let listed: Vec<own_backup_core::Job> = serde_json::from_str(
+            &svc.list_jobs(Request::new(Empty {})).await.unwrap().into_inner().json,
+        )
+        .unwrap();
+        assert_eq!(listed.len(), 1);
+        let got = svc
+            .get_job(Request::new(IdRequest { id: saved.id.clone() }))
+            .await
+            .unwrap()
+            .into_inner()
+            .json;
+        assert!(got.contains(&saved.id));
+
+        // dest-on-source is rejected at the boundary.
+        let err = svc
+            .save_job(Request::new(JsonRequest { json: job("B", "E:", r"E:\bk") }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+        // Delete it.
+        svc.delete_job(Request::new(IdRequest { id: saved.id }))
+            .await
+            .unwrap();
+        let json = svc.list_jobs(Request::new(Empty {})).await.unwrap().into_inner().json;
+        assert_eq!(json, "[]");
+    }
+
+    #[tokio::test]
+    async fn run_missing_job_is_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = make_service(dir.path());
+        let err = svc
+            .run_job(Request::new(IdRequest { id: "nope".into() }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn status_and_template_and_exclusions() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = make_service(dir.path());
+
+        let status = svc.get_service_status(Request::new(Empty {})).await.unwrap().into_inner().json;
+        assert!(status.contains("version"));
+
+        let tmpl: own_backup_core::Job = serde_json::from_str(
+            &svc.new_job_template(Request::new(Empty {})).await.unwrap().into_inner().json,
+        )
+        .unwrap();
+        assert!(!tmpl.name.is_empty());
+
+        let excl: Vec<String> = serde_json::from_str(
+            &svc.default_exclusions(Request::new(Empty {})).await.unwrap().into_inner().json,
+        )
+        .unwrap();
+        assert!(excl.iter().any(|p| p.contains("Temp")));
     }
 }
