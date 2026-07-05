@@ -41,6 +41,7 @@ pub async fn service_health(state: State<'_, GuiState>) -> Result<ServiceHealth,
     let installed = tokio::task::spawn_blocking(crate::service_link::service_installed)
         .await
         .unwrap_or(false);
+    tracing::info!(reachable, installed, "service_health check");
     Ok(ServiceHealth { reachable, installed })
 }
 

@@ -45,7 +45,15 @@ impl ServiceLink {
     }
 
     async fn connect(&self) -> Result<BackupClient, String> {
-        BackupClient::connect(self.endpoint.clone(), self.read_token()).await
+        let token = self.read_token();
+        let r = BackupClient::connect(self.endpoint.clone(), token.clone()).await;
+        tracing::debug!(
+            endpoint = %self.endpoint,
+            token_len = token.len(),
+            ok = r.is_ok(),
+            "service connect attempt"
+        );
+        r
     }
 
     /// A connected client. Connects on first use; if the service is unreachable
@@ -62,6 +70,7 @@ impl ServiceLink {
         }
         // Not reachable — try to start the installed service, then wait (~5s).
         // `sc`/`net` block, so run them off the async runtime.
+        tracing::info!("service not reachable; attempting to start the installed service");
         let _ = tokio::task::spawn_blocking(start_installed_service).await;
         for _ in 0..25 {
             tokio::time::sleep(Duration::from_millis(200)).await;

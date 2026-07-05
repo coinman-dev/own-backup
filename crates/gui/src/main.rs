@@ -6,54 +6,107 @@ mod jobs;
 mod service_link;
 mod state;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use own_backup_common::config::AppConfig;
 use service_link::ServiceLink;
 use state::GuiState;
 
-/// Diagnostic log next to the exe: `own-backup-gui.log`.
-///
-/// Test-phase debugging channel (decision 2026-07-02) — the user sends this
-/// file back when something misbehaves. Reduce to warn/off before release
-/// (plan v2, phase 7). `RUST_LOG` overrides the default filter.
-fn init_logging() {
-    let log_path = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("own-backup-gui.log")))
-        .unwrap_or_else(|| std::path::PathBuf::from("own-backup-gui.log"));
+/// Bump this on any build you hand over for testing. It is printed at the top of
+/// the log so we can tell from the log alone WHICH binary actually ran (a common
+/// trap: an old exe left in another folder still gets launched).
+const BUILD_TAG: &str = "diag-2026-07-06a";
 
+const ROTATE_AT: u64 = 4 * 1024 * 1024;
+
+/// Candidate log locations, most-preferred first. Next to the exe is what the
+/// user expects, but that can be read-only (a network / WSL / Program Files
+/// path), so we fall back to a per-user dir and finally the temp dir.
+fn candidate_log_paths() -> Vec<PathBuf> {
+    let mut v = Vec::new();
+    if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+        v.push(dir.join("own-backup-gui.log"));
+    }
+    #[cfg(windows)]
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        if !local.trim().is_empty() {
+            v.push(PathBuf::from(local).join("OwnBackup").join("own-backup-gui.log"));
+        }
+    }
+    v.push(std::env::temp_dir().join("own-backup-gui.log"));
+    v
+}
+
+/// Open the first writable log location, rotating it if large. Returns the open
+/// file and the path used.
+fn open_log() -> Option<(std::fs::File, PathBuf)> {
+    for path in candidate_log_paths() {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if std::fs::metadata(&path).map(|m| m.len() > ROTATE_AT).unwrap_or(false) {
+            let old = path.with_extension("log.old");
+            let _ = std::fs::remove_file(&old);
+            let _ = std::fs::rename(&path, &old);
+        }
+        if let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            return Some((f, path));
+        }
+    }
+    None
+}
+
+/// Best-effort elevation check (Windows) so the log records whether the process
+/// is running elevated — a plain unelevated GUI is the expected state.
+#[cfg(windows)]
+fn elevation_state() -> Option<bool> {
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::Security::{
+        GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
+    };
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    // SAFETY: standard token-elevation query; the handle is closed after use.
+    unsafe {
+        let mut token = HANDLE::default();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
+            return None;
+        }
+        let mut elevation = TOKEN_ELEVATION::default();
+        let mut ret_len = 0u32;
+        let ok = GetTokenInformation(
+            token,
+            TokenElevation,
+            Some(&mut elevation as *mut _ as *mut _),
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut ret_len,
+        )
+        .is_ok();
+        let _ = CloseHandle(token);
+        ok.then_some(elevation.TokenIsElevated != 0)
+    }
+}
+
+/// Diagnostic log (test-phase channel, decision 2026-07-02). The user sends this
+/// file back when something misbehaves. `RUST_LOG` overrides the default filter.
+fn init_logging() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         "info,own_backup_gui=debug,own_backup_backup=debug,own_backup_inventory=debug,\
          own_backup_restore=debug,own_backup_metadata=debug"
             .into()
     });
 
-    // Rotate at startup once the log grows past a few MB: keep exactly one
-    // previous generation as `.old` so the file the user sends stays small
-    // but the prior session is never lost.
-    const ROTATE_AT: u64 = 4 * 1024 * 1024;
-    if std::fs::metadata(&log_path).map(|m| m.len() > ROTATE_AT).unwrap_or(false) {
-        let old = log_path.with_extension("log.old");
-        let _ = std::fs::remove_file(&old);
-        let _ = std::fs::rename(&log_path, &old);
-    }
-
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path);
-
-    match file {
-        Ok(f) => {
+    let opened = open_log();
+    let log_path = opened.as_ref().map(|(_, p)| p.clone());
+    match opened {
+        Some((f, _)) => {
             tracing_subscriber::fmt()
                 .with_env_filter(filter)
                 .with_ansi(false)
                 .with_writer(std::sync::Mutex::new(f))
                 .init();
         }
-        Err(_) => {
-            // Fall back to stderr if the exe directory is not writable.
+        None => {
             tracing_subscriber::fmt().with_env_filter(filter).init();
         }
     }
@@ -65,11 +118,25 @@ fn init_logging() {
         default_hook(info);
     }));
 
+    // Startup diagnostics: which binary, from where, elevated or not. If the
+    // build_tag here is not the one we handed over, an old exe is being run.
+    tracing::info!("=== Own Backup GUI started ===");
     tracing::info!(
+        build_tag = BUILD_TAG,
         version = env!("CARGO_PKG_VERSION"),
         os = std::env::consts::OS,
-        "=== My Own Backup GUI started ==="
+        pid = std::process::id(),
+        "build / runtime"
     );
+    match std::env::current_exe() {
+        Ok(exe) => tracing::info!(exe = %exe.display(), "running executable"),
+        Err(e) => tracing::warn!(error = %e, "current_exe() failed"),
+    }
+    if let Some(p) = &log_path {
+        tracing::info!(log = %p.display(), "log file");
+    }
+    #[cfg(windows)]
+    tracing::info!(elevated = ?elevation_state(), "process elevation (expected: Some(false))");
 }
 
 fn main() {
