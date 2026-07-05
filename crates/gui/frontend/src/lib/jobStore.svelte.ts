@@ -79,16 +79,6 @@ export async function deleteJob(id: string): Promise<void> {
   await reloadJobs();
 }
 
-/** Supply a password for an encrypted source volume. Cached for this session;
- *  `remember` also persists it OS-protected so scheduled backups can use it. */
-export async function provideVolumePassword(
-  volume: string,
-  password: string,
-  remember: boolean,
-): Promise<void> {
-  await api.provideVolumePassword(volume, password, remember);
-}
-
 /** Unlock an encrypted source and read its inner volume label / used bytes.
  *  On success the password is cached (and persisted when `remember`). */
 export async function decryptVolume(

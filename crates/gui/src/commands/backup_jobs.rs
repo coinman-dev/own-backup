@@ -74,23 +74,6 @@ pub async fn delete_backup_job(state: State<'_, GuiState>, id: String) -> Result
     Ok(())
 }
 
-/// Provide a password to unlock an encrypted (LUKS) source volume. Cached for
-/// this session; `remember` also persists it OS-protected so scheduled backups
-/// can use it. `volume` is the source device (e.g. a `part:` spec).
-#[tauri::command]
-pub async fn provide_volume_password(
-    state: State<'_, GuiState>,
-    volume: String,
-    password: String,
-    remember: bool,
-) -> Result<(), String> {
-    let token = own_backup_core::source_token(&volume);
-    state
-        .passwords
-        .remember(&token, password, remember)
-        .map_err(|e| e.to_string())
-}
-
 /// Result of a decrypt attempt for the wizard: whether it unlocked, plus the
 /// inner volume's filesystem / label / used bytes (to show like a normal volume).
 #[derive(serde::Serialize)]

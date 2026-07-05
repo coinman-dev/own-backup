@@ -356,6 +356,18 @@
     return encryptedSelected().every(({ device }) => decryptedVolumes[device]);
   }
 
+  // The source step is complete: a source is chosen, any encrypted volume is
+  // unlocked, and a destination folder is set. "Далее" stays disabled until then.
+  function canLeaveSource(): boolean {
+    return job.sources.length > 0 && allEncryptedDecrypted() && !!job.dest_folder.trim();
+  }
+  function nextHint(): string {
+    if (job.sources.length === 0) return 'Выберите том-источник';
+    if (!allEncryptedDecrypted()) return 'Сначала расшифруйте выбранный зашифрованный том';
+    if (!job.dest_folder.trim()) return 'Выберите папку назначения';
+    return '';
+  }
+
   async function finish(run: boolean) {
     if (!validate()) return;
     // A run needs every encrypted source unlocked first — the password is
@@ -479,7 +491,7 @@
             <div class="pw-panel">
               <div class="pw-head">🔒 Зашифрованные тома — введите пароль для расшифровки</div>
               {#each encryptedSelected() as e (e.device)}
-                <div class="pw-row">
+                <div class="pw-row" class:done={!!decryptedVolumes[e.device]}>
                   <span class="pw-vol" title={e.device}>{e.label}</span>
                   {#if decryptedVolumes[e.device]}
                     <span class="pw-done">✓ Расшифровано</span>
@@ -663,8 +675,8 @@
           <button
             class="btn primary"
             onclick={() => (step += 1)}
-            disabled={step === 0 && !allEncryptedDecrypted()}
-            title={step === 0 && !allEncryptedDecrypted() ? 'Сначала расшифруйте выбранный зашифрованный том' : ''}
+            disabled={step === 0 && !canLeaveSource()}
+            title={step === 0 ? nextHint() : ''}
           >Дальше</button>
         {:else}
           <button class="btn green" onclick={() => finish(true)}>Создать копию</button>
@@ -724,6 +736,9 @@
   .pw-panel { margin-top: 16px; padding: 16px 18px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2, rgba(127,127,127,.06)); }
   .pw-head { font-size: 13px; font-weight: 700; margin-bottom: 12px; }
   .pw-row { display: flex; align-items: center; gap: 14px; margin-bottom: 6px; }
+  /* Once decrypted, centre the "<метка> ✓ Расшифровано" pair. */
+  .pw-row.done { justify-content: center; gap: 16px; }
+  .pw-row.done .pw-vol { flex: 0 0 auto; }
   .pw-vol { flex: 0 0 190px; font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .pw-input { flex: 1; padding: 8px 12px; border: 1px solid var(--border); border-radius: 5px; font-size: 13px; }
   .pw-input.err { border-color: #d84a4a; }

@@ -188,7 +188,6 @@ fn main() {
             commands::backup_jobs::default_exclusion_patterns,
             commands::backup_jobs::save_backup_job,
             commands::backup_jobs::delete_backup_job,
-            commands::backup_jobs::provide_volume_password,
             commands::backup_jobs::decrypt_volume,
             commands::backup_jobs::run_backup_job,
             commands::backup_jobs::cancel_queued_job,
