@@ -113,6 +113,8 @@
     // Keep the primary source in sync (used for file naming / back-compat).
     job.source = job.sources[0] ?? '';
     job.source_label = job.source_labels[0] ?? '';
+    // Hand-picking a single volume leaves whole-disk (bootable) mode.
+    job.disk_source = null;
   }
 
   // Proportional segments of a disk: partitions plus hatched gaps for
@@ -153,17 +155,42 @@
     return t;
   }
 
-  // Click a disk header → select ALL its lettered partitions, or clear them
-  // all if they are already selected.
+  // Physical drive number from the device id (`\\.\PhysicalDrive3` → 3).
+  function diskNumber(d: DiskInfo): number {
+    const m = d.device_id.match(/(\d+)\s*$/);
+    return m ? parseInt(m[1], 10) : 0;
+  }
+  function isWholeDisk(d: DiskInfo): boolean {
+    return job.disk_source != null && job.disk_source.disk_number === diskNumber(d);
+  }
+
+  // Click a disk header → back up the WHOLE disk (bootable): select every
+  // backable partition AND capture the GPT layout so the disk can be restored
+  // and boot from scratch. Clicking again turns it off.
   function toggleDisk(d: DiskInfo) {
     const parts = d.partitions.filter((p) => partDevice(p));
     if (parts.length === 0) return;
-    const allSelected = parts.every((p) => isSelected(partDevice(p)!));
-    for (const p of parts) {
-      const dev = partDevice(p)!;
-      const selected = isSelected(dev);
-      if (allSelected ? selected : !selected) toggleSource(dev, partLabel(p));
+    if (isWholeDisk(d)) {
+      job.disk_source = null;
+      job.sources = [];
+      job.source_labels = [];
+      job.source = '';
+      job.source_label = '';
+      return;
     }
+    job.sources = parts.map((p) => partDevice(p)!);
+    job.source_labels = parts.map((p) => partLabel(p));
+    job.source = job.sources[0] ?? '';
+    job.source_label = job.source_labels[0] ?? '';
+    job.disk_source = {
+      disk_number: diskNumber(d),
+      disk_model: d.model || d.device_id,
+      parts: parts.map((p) => ({
+        part_index: p.index,
+        device: partDevice(p)!,
+        filesystem: p.filesystem,
+      })),
+    };
   }
 
   async function browseDest() {
@@ -447,9 +474,23 @@
             <div class="disks">
               {#each engine.disks as d}
                 <div class="disk-card">
-                  <button type="button" class="disk-head" onclick={() => toggleDisk(d)} title="Выбрать / снять все тома диска">
-                    <span class="disk-model">{d.model || d.device_id}</span>
-                    <span class="disk-meta">{formatBytes(d.size_bytes)} · {tableLabel(d.partition_table)}</span>
+                  <button
+                    type="button"
+                    class="disk-head"
+                    class:whole={isWholeDisk(d)}
+                    onclick={() => toggleDisk(d)}
+                    title="Копировать диск целиком (загрузочный) — все разделы + таблица разделов"
+                  >
+                    <span class="disk-model">
+                      {#if isWholeDisk(d)}
+                        <svg width="13" height="13" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M20 6 9 17l-5-5"/></svg>
+                      {/if}
+                      {d.model || d.device_id}
+                    </span>
+                    <span class="disk-meta">
+                      {#if isWholeDisk(d)}<span class="whole-badge">диск целиком · загрузочный</span>{/if}
+                      {formatBytes(d.size_bytes)} · {tableLabel(d.partition_table)}
+                    </span>
                   </button>
                   <div class="disk-body">
                     <div class="disk-ico">
@@ -710,6 +751,9 @@
   .disk-card { border: 1px solid var(--border); border-radius: 6px; overflow: hidden; background: var(--card-bg); }
   .disk-head { width: 100%; display: flex; align-items: center; justify-content: space-between; padding: 6px 12px; background: var(--panel2); border: 0; border-bottom: 1px solid var(--border); margin: 0; font-family: inherit; cursor: pointer; text-align: left; }
   .disk-head:hover { background: var(--hover, rgba(45,125,210,.06)); }
+  .disk-head.whole { background: rgba(45,125,210,.12); color: var(--primary); }
+  .disk-head.whole .disk-model { color: var(--primary); }
+  .whole-badge { font-size: 11px; font-weight: 700; color: #fff; background: var(--primary); padding: 2px 8px; border-radius: 10px; margin-right: 8px; }
   .disk-model { font-size: 13px; font-weight: 600; color: var(--head); }
   .disk-meta { font-size: 12px; color: var(--text-muted); }
   .disk-body { display: flex; align-items: center; gap: 14px; padding: 7px 12px; }

@@ -8,6 +8,7 @@ pub mod encryption;
 pub mod exclusions;
 pub mod ext_map;
 pub mod fat_map;
+pub mod gpt_reader;
 pub mod gpt_writer;
 pub mod image_reader;
 pub mod image_writer;

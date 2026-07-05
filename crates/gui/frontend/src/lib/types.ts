@@ -239,6 +239,20 @@ export interface JobRun {
   categories: CategorySizes | null;
 }
 
+/** One partition of a whole-disk backup: its GPT slot and source device. */
+export interface DiskPartSpec {
+  part_index: number;
+  device: string;
+  filesystem: string;
+}
+
+/** Whole-disk (bootable) backup metadata attached to a job. */
+export interface DiskSourceSpec {
+  disk_number: number;
+  disk_model: string;
+  parts: DiskPartSpec[];
+}
+
 export interface Job {
   id: string;
   name: string;
@@ -250,6 +264,8 @@ export interface Job {
   source_labels: string[];
   /** At least one selected source is encrypted (needs a password to back up). */
   requires_password: boolean;
+  /** Set for a whole-disk (bootable) backup: which disk + how partitions map. */
+  disk_source: DiskSourceSpec | null;
   dest_folder: string;
   schedule: ScheduleConfig;
   scheme: SchemeConfig;

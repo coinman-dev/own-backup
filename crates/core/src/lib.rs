@@ -237,6 +237,29 @@ pub struct JobRun {
 }
 
 /// A persisted backup job (task).
+/// Whole-disk (bootable) backup metadata attached to a [`Job`]: which physical
+/// disk it captures and how each backed-up partition maps to a GPT slot. Used
+/// after the run to write the `.obdm` disk-restore manifest.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DiskSourceSpec {
+    /// Physical drive number (`\\.\PhysicalDrive{disk_number}`).
+    pub disk_number: u32,
+    pub disk_model: String,
+    pub parts: Vec<DiskPartSpec>,
+}
+
+/// One partition of a whole-disk backup: its GPT slot and its source device.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiskPartSpec {
+    /// GPT partition number (matches the entry index in the disk's GPT).
+    pub part_index: u32,
+    /// The partition's source device (letter "C:", volume GUID path, or
+    /// `part:<disk>:<off>:<len>`) — the join key to the backed-up image.
+    pub device: String,
+    /// Filesystem name for display / the manifest.
+    pub filesystem: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Job {
@@ -260,6 +283,12 @@ pub struct Job {
     /// saved (the GUI then makes schedule setup read-only until one is).
     #[serde(default)]
     pub requires_password: bool,
+    /// Set when this is a whole-disk (bootable) backup: which physical disk and
+    /// how its partitions map to the backed-up images. `sources` still holds the
+    /// per-partition devices (so the backup loop is unchanged); this adds the
+    /// GPT/partition metadata needed to write the disk-restore manifest.
+    #[serde(default)]
+    pub disk_source: Option<DiskSourceSpec>,
     /// Destination FOLDER; each run creates `<name>_<letter>_<stamp>.vhdx`.
     pub dest_folder: String,
     pub schedule: ScheduleConfig,
@@ -281,6 +310,7 @@ impl Default for Job {
             sources: Vec::new(),
             source_labels: Vec::new(),
             requires_password: false,
+            disk_source: None,
             dest_folder: String::new(),
             schedule: ScheduleConfig::default(),
             scheme: SchemeConfig::default(),
@@ -1025,6 +1055,9 @@ async fn perform_backup(
 
     // Aggregates across all volumes of this run.
     let mut protected: Vec<(String, PathBuf)> = Vec::new();
+    // (source device, image path) per success — used to build the whole-disk
+    // restore manifest, joining images to GPT partitions by device.
+    let mut run_images: Vec<(String, PathBuf)> = Vec::new();
     let mut kinds: Vec<&'static str> = Vec::new();
     let mut total_dur = 0.0f64;
     let mut all_smart = true;
@@ -1186,6 +1219,7 @@ async fn perform_backup(
                 }
                 // Retention matches images by their file-name token (label for
                 // encrypted volumes), not the device password key.
+                run_images.push((device.clone(), image_path.clone()));
                 protected.push((file_token(job, device), image_path));
             }
             Ok(Err(OwnBackupError::Cancelled)) => {
@@ -1225,11 +1259,77 @@ async fn perform_backup(
         None => "full".into(),
     };
 
+    // Whole-disk (bootable) backup: capture the GPT and write the `.obdm`
+    // manifest that links it to the per-partition images. Best-effort — a good
+    // per-volume backup is not discarded if only the layout capture fails.
+    if let Some(ds) = &job.disk_source {
+        if let Err(e) = write_disk_manifest(job, ds, &folder, &run_images) {
+            warn!(job = %job.name, disk = ds.disk_number, error = %e,
+                "Whole-disk backup: failed to write the disk restore manifest (.obdm)");
+        }
+    }
+
     // Retention runs after a fully successful backup, independently per volume.
     // Its failures are logged, never surfaced as a run failure.
     apply_retention(job, &protected);
 
     run
+}
+
+/// Read the source disk's GPT and write the `.obdm` disk-restore manifest that
+/// ties the captured layout to the per-partition images just created.
+#[cfg(target_os = "windows")]
+fn write_disk_manifest(
+    job: &Job,
+    ds: &DiskSourceSpec,
+    folder: &Path,
+    run_images: &[(String, PathBuf)],
+) -> Result<(), Box<dyn std::error::Error>> {
+    use own_backup_common::gpt::{DiskBackupManifest, DiskImageRef};
+
+    let layout = own_backup_backup::gpt_reader::read_disk_layout(ds.disk_number)?;
+
+    // Join each backed-up image (by source device) to its GPT partition slot.
+    let mut images = Vec::new();
+    for (device, image_path) in run_images {
+        let Some(part) = ds.parts.iter().find(|p| p.device == *device) else {
+            continue; // not part of this disk selection
+        };
+        images.push(DiskImageRef {
+            part_index: part.part_index,
+            token: file_token(job, device),
+            image_file_name: image_path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            filesystem: part.filesystem.clone(),
+        });
+    }
+
+    let safe_name: String = job
+        .name
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect();
+    let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+    let path = folder.join(format!(
+        "{safe_name}_disk{}_{stamp}.{}",
+        ds.disk_number,
+        DiskBackupManifest::EXTENSION
+    ));
+
+    let manifest = DiskBackupManifest {
+        format_version: DiskBackupManifest::FORMAT_VERSION,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        job_id: Some(job.id.clone()),
+        disk_number: ds.disk_number,
+        disk_model: ds.disk_model.clone(),
+        layout,
+        images,
+    };
+    std::fs::write(&path, serde_json::to_vec_pretty(&manifest)?)?;
+    info!(job = %job.name, path = %path.display(), "Whole-disk restore manifest written");
+    Ok(())
 }
 
 #[cfg(not(target_os = "windows"))]

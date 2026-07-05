@@ -22,6 +22,7 @@
 
 use uuid::Uuid;
 
+use own_backup_common::gpt::DiskLayout;
 use own_backup_common::{OwnBackupError, Result};
 
 /// GPT type GUID for a Basic Data partition (Windows).
@@ -104,8 +105,9 @@ fn build_entries(layout: &GptLayout) -> Result<Vec<u8>> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_header(
-    layout: &GptLayout,
+fn build_header_raw(
+    sector_size: u32,
+    disk_guid: &Uuid,
     current_lba: u64,
     backup_lba: u64,
     first_usable_lba: u64,
@@ -113,7 +115,7 @@ fn build_header(
     entries_lba: u64,
     entries_crc: u32,
 ) -> Vec<u8> {
-    let mut h = vec![0u8; layout.sector_size as usize];
+    let mut h = vec![0u8; sector_size as usize];
     h[0..8].copy_from_slice(GPT_SIGNATURE);
     put_u32(&mut h, 8, GPT_REVISION);
     put_u32(&mut h, 12, GPT_HEADER_SIZE);
@@ -122,7 +124,7 @@ fn build_header(
     put_u64(&mut h, 32, backup_lba);
     put_u64(&mut h, 40, first_usable_lba);
     put_u64(&mut h, 48, last_usable_lba);
-    put_guid(&mut h, 56, &layout.disk_guid);
+    put_guid(&mut h, 56, disk_guid);
     put_u64(&mut h, 72, entries_lba);
     put_u32(&mut h, 80, NUM_ENTRIES);
     put_u32(&mut h, 84, ENTRY_SIZE);
@@ -133,11 +135,33 @@ fn build_header(
     h
 }
 
-fn build_protective_mbr(layout: &GptLayout) -> Vec<u8> {
-    let sector = layout.sector_size as u64;
-    let total_lba = layout.disk_size / sector;
+#[allow(clippy::too_many_arguments)]
+fn build_header(
+    layout: &GptLayout,
+    current_lba: u64,
+    backup_lba: u64,
+    first_usable_lba: u64,
+    last_usable_lba: u64,
+    entries_lba: u64,
+    entries_crc: u32,
+) -> Vec<u8> {
+    build_header_raw(
+        layout.sector_size,
+        &layout.disk_guid,
+        current_lba,
+        backup_lba,
+        first_usable_lba,
+        last_usable_lba,
+        entries_lba,
+        entries_crc,
+    )
+}
 
-    let mut mbr = vec![0u8; layout.sector_size as usize];
+fn build_protective_mbr_raw(disk_size: u64, sector_size: u32) -> Vec<u8> {
+    let sector = sector_size as u64;
+    let total_lba = disk_size / sector;
+
+    let mut mbr = vec![0u8; sector_size as usize];
     let entry = &mut mbr[0x1BE..0x1BE + 16];
     entry[0] = 0x00; // not bootable
     entry[1..4].copy_from_slice(&[0x00, 0x02, 0x00]); // CHS of LBA 1
@@ -149,6 +173,10 @@ fn build_protective_mbr(layout: &GptLayout) -> Vec<u8> {
     mbr[510] = 0x55;
     mbr[511] = 0xAA;
     mbr
+}
+
+fn build_protective_mbr(layout: &GptLayout) -> Vec<u8> {
+    build_protective_mbr_raw(layout.disk_size, layout.sector_size)
 }
 
 /// Build the raw write operations for a single-partition GPT disk.
@@ -238,9 +266,97 @@ pub fn gpt_write_ops(layout: &GptLayout) -> Result<Vec<WriteOp>> {
     ])
 }
 
+/// Build the raw write operations that recreate a whole disk's GPT from a
+/// captured [`DiskLayout`] — protective MBR + primary/backup headers + a full
+/// 128-entry array with every partition's original type/unique GUIDs, LBAs,
+/// attributes and name. Preserving the unique GUIDs keeps a UEFI system
+/// bootable (BCD references partitions by GUID). The layout may be restored to
+/// the same disk or a larger one (offsets/sizes are kept; the backup GPT moves
+/// to the target's end); a smaller target, a different sector size, or a
+/// partition that would fall off the end is rejected.
+pub fn disk_gpt_write_ops(layout: &DiskLayout, target_disk_size: u64) -> Result<Vec<WriteOp>> {
+    let sector_size = layout.sector_size;
+    if sector_size != 512 && sector_size != 4096 {
+        return Err(OwnBackupError::ImageFormat(format!(
+            "unsupported sector size {sector_size}"
+        )));
+    }
+    let sector = sector_size as u64;
+    if target_disk_size % sector != 0 {
+        return Err(OwnBackupError::ImageFormat(
+            "target disk size is not a multiple of the sector size".into(),
+        ));
+    }
+
+    let total_lba = target_disk_size / sector;
+    let entries_sectors = ((NUM_ENTRIES * ENTRY_SIZE) as u64).div_ceil(sector); // 16 KiB
+
+    let primary_entries_lba = 2u64;
+    let first_usable_lba = primary_entries_lba + entries_sectors;
+    let backup_header_lba = total_lba
+        .checked_sub(1)
+        .ok_or_else(|| OwnBackupError::ImageFormat("target disk has no sectors".into()))?;
+    let backup_entries_lba = backup_header_lba - entries_sectors;
+    let last_usable_lba = backup_entries_lba - 1;
+
+    // Fill the 128-entry array, each partition at its GPT slot (index − 1).
+    let mut entries = vec![0u8; (NUM_ENTRIES * ENTRY_SIZE) as usize];
+    for p in &layout.partitions {
+        if p.index == 0 || p.index > NUM_ENTRIES {
+            return Err(OwnBackupError::ImageFormat(format!(
+                "partition index {} out of GPT range 1..={NUM_ENTRIES}",
+                p.index
+            )));
+        }
+        if p.first_lba < first_usable_lba || p.last_lba > last_usable_lba {
+            return Err(OwnBackupError::RestoreIncompatible(format!(
+                "partition {} [{}..{}] does not fit the target disk (usable {}..{})",
+                p.index, p.first_lba, p.last_lba, first_usable_lba, last_usable_lba
+            )));
+        }
+        let type_guid = Uuid::parse_str(&p.type_guid)
+            .map_err(|e| OwnBackupError::ImageFormat(format!("bad type GUID: {e}")))?;
+        let part_guid = Uuid::parse_str(&p.part_guid)
+            .map_err(|e| OwnBackupError::ImageFormat(format!("bad partition GUID: {e}")))?;
+
+        let slot = (p.index - 1) as usize;
+        let e = &mut entries[slot * ENTRY_SIZE as usize..(slot + 1) * ENTRY_SIZE as usize];
+        put_guid(e, 0, &type_guid);
+        put_guid(e, 16, &part_guid);
+        put_u64(e, 32, p.first_lba);
+        put_u64(e, 40, p.last_lba);
+        put_u64(e, 48, p.attributes);
+        for (i, unit) in p.name.encode_utf16().take(36).enumerate() {
+            e[56 + i * 2..56 + i * 2 + 2].copy_from_slice(&unit.to_le_bytes());
+        }
+    }
+
+    let entries_crc = crc32(&entries);
+    let disk_guid = Uuid::parse_str(&layout.disk_guid)
+        .map_err(|e| OwnBackupError::ImageFormat(format!("bad disk GUID: {e}")))?;
+
+    let primary_header = build_header_raw(
+        sector_size, &disk_guid, 1, backup_header_lba,
+        first_usable_lba, last_usable_lba, primary_entries_lba, entries_crc,
+    );
+    let backup_header = build_header_raw(
+        sector_size, &disk_guid, backup_header_lba, 1,
+        first_usable_lba, last_usable_lba, backup_entries_lba, entries_crc,
+    );
+
+    Ok(vec![
+        WriteOp { offset: 0, bytes: build_protective_mbr_raw(target_disk_size, sector_size) },
+        WriteOp { offset: sector, bytes: primary_header },
+        WriteOp { offset: primary_entries_lba * sector, bytes: entries.clone() },
+        WriteOp { offset: backup_entries_lba * sector, bytes: entries },
+        WriteOp { offset: backup_header_lba * sector, bytes: backup_header },
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use own_backup_common::gpt::GptPartitionEntry;
     use std::io::Cursor;
 
     fn apply_ops(disk: &mut [u8], ops: &[WriteOp]) {
@@ -314,5 +430,81 @@ mod tests {
         assert_eq!(mbr[510], 0x55);
         assert_eq!(mbr[511], 0xAA);
         assert_eq!(mbr[0x1BE + 4], 0xEE);
+    }
+
+    // ---- whole-disk GPT recreation (Phase B) ----
+
+    fn disk_layout_two_parts(disk_size: u64) -> DiskLayout {
+        DiskLayout {
+            disk_guid: Uuid::from_u128(0xDDDD_1111_2222_3333_4444_5555_6666_7777)
+                .to_string()
+                .to_uppercase(),
+            sector_size: 512,
+            size_bytes: disk_size,
+            partitions: vec![
+                // EFI System Partition (100 MiB at 1 MiB), required-flag set.
+                GptPartitionEntry {
+                    index: 1,
+                    type_guid: own_backup_common::gpt::GPT_TYPE_EFI_SYSTEM.into(),
+                    part_guid: Uuid::from_u128(0xEF01).to_string().to_uppercase(),
+                    first_lba: 2048,
+                    last_lba: 2048 + 100 * 1024 * 1024 / 512 - 1,
+                    attributes: 1, // required/system partition
+                    name: "EFI system partition".into(),
+                },
+                // Basic data (Windows), immediately after.
+                GptPartitionEntry {
+                    index: 2,
+                    type_guid: BASIC_DATA_GUID.into(),
+                    part_guid: Uuid::from_u128(0xC0FE).to_string().to_uppercase(),
+                    first_lba: 2048 + 100 * 1024 * 1024 / 512,
+                    last_lba: 2048 + 300 * 1024 * 1024 / 512 - 1,
+                    attributes: 0,
+                    name: "Basic data partition".into(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn disk_gpt_round_trips_all_partitions() {
+        let disk_size = 512 * 1024 * 1024u64; // 512 MiB
+        let layout = disk_layout_two_parts(disk_size);
+
+        let mut disk = vec![0u8; disk_size as usize];
+        apply_ops(&mut disk, &disk_gpt_write_ops(&layout, disk_size).unwrap());
+
+        // Our own reader recovers every field verbatim.
+        let parsed = crate::gpt_reader::parse_disk_layout(&disk, 512, disk_size).unwrap();
+        assert_eq!(parsed.disk_guid, layout.disk_guid);
+        assert_eq!(parsed.partitions, layout.partitions);
+
+        // …and the independent `gpt` crate accepts the table.
+        let gpt_disk = gpt::GptConfig::new()
+            .writable(false)
+            .open_from_device(Box::new(Cursor::new(disk)))
+            .expect("gpt crate must accept the recreated table");
+        assert_eq!(gpt_disk.partitions().len(), 2);
+    }
+
+    #[test]
+    fn disk_gpt_restores_to_a_larger_disk() {
+        // Captured on a 512 MiB disk, restored to a 1 GiB disk: partitions keep
+        // their offsets; the backup GPT relocates to the larger disk's end.
+        let layout = disk_layout_two_parts(512 * 1024 * 1024);
+        let bigger = 1024 * 1024 * 1024u64;
+        let ops = disk_gpt_write_ops(&layout, bigger).unwrap();
+        // Backup header sits at the last sector of the *target* disk.
+        assert_eq!(ops.last().unwrap().offset, bigger - 512);
+    }
+
+    #[test]
+    fn disk_gpt_rejects_partition_off_the_end() {
+        let mut layout = disk_layout_two_parts(512 * 1024 * 1024);
+        // Shrink the target so partition 2 no longer fits.
+        assert!(disk_gpt_write_ops(&layout, 64 * 1024 * 1024).is_err());
+        // A partition index beyond the GPT array is rejected too.
+        layout.partitions[0].index = 999;
+        assert!(disk_gpt_write_ops(&layout, 512 * 1024 * 1024).is_err());
     }
 }
