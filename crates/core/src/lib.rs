@@ -1356,6 +1356,7 @@ async fn perform_backup(
     };
     use own_backup_common::progress::BackupProgress;
     use own_backup_common::OwnBackupError;
+    use own_backup_snapshot::SnapshotProvider;
 
     let mut run = run_skeleton(job);
     let volumes = job.source_list();
@@ -1381,8 +1382,18 @@ async fn perform_backup(
             .collect();
         let image_path = folder.join(format!("{safe}_{}_full_{stamp}.vhdx", file_token(job, device)));
 
+        // Take a point-in-time snapshot (LVM/fsfreeze) so a live filesystem is
+        // read consistently; degrades to a crash-consistent copy of the device
+        // when snapshotting isn't possible (non-root / no LVM / unmounted).
+        let snap_provider = own_backup_snapshot::LinuxSnapshotProvider::new();
+        let snapshot = snap_provider.create_snapshot(device).await.ok();
+        let read_source = snapshot
+            .as_ref()
+            .map(|s| s.snapshot_device_path.clone())
+            .unwrap_or_else(|| device.clone());
+
         let req = LinuxBackupRequest {
-            source: device.clone(),
+            source: read_source,
             image_path: image_path.clone(),
             block_size: DEFAULT_BLOCK_SIZE,
             all_sectors: job.advanced.sector_by_sector,
@@ -1437,6 +1448,13 @@ async fn perform_backup(
             Ok(summary)
         })
         .await;
+
+        // Release the snapshot (thaw / lvremove) regardless of the outcome.
+        if let Some(s) = &snapshot {
+            if let Err(e) = snap_provider.release_snapshot(s).await {
+                warn!(error = %e, "snapshot release failed");
+            }
+        }
 
         match result {
             Ok(Ok(summary)) => {

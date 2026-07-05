@@ -8,6 +8,7 @@ license.workspace = true
 own-backup-common = { workspace = true }
 own-backup-backup = { workspace = true }
 own-backup-metadata = { workspace = true }
+own-backup-snapshot = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
