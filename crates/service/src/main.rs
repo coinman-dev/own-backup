@@ -34,6 +34,11 @@ pub const LINUX_UNIT_NAME: &str = "own-backup";
 enum Mode {
     Install,
     Uninstall,
+    /// Control the already-installed service (SCM on Windows / systemd on Linux).
+    Start,
+    Stop,
+    Restart,
+    Status,
     /// Console run for development, or systemd `ExecStart … --run`.
     Foreground,
     /// Launched by the SCM (Windows) with no args, or as a plain daemon.
@@ -41,8 +46,8 @@ enum Mode {
 }
 
 /// Accept both Windows-style (`/install`) and Unix-style (`--install`) flags on
-/// every platform, so muscle memory works either way; the actual install path
-/// is platform-specific.
+/// every platform, so muscle memory works either way; the actual work is
+/// platform-specific.
 fn parse_mode(args: &[String]) -> Mode {
     for a in args {
         match a.as_str() {
@@ -50,6 +55,10 @@ fn parse_mode(args: &[String]) -> Mode {
             "/uninstall" | "--uninstall" | "uninstall" | "/remove" | "--remove" => {
                 return Mode::Uninstall
             }
+            "/start" | "--start" | "start" => return Mode::Start,
+            "/stop" | "--stop" | "stop" => return Mode::Stop,
+            "/restart" | "--restart" | "restart" => return Mode::Restart,
+            "/status" | "--status" | "status" => return Mode::Status,
             "-f" | "--foreground" | "--run" | "run" => return Mode::Foreground,
             _ => {}
         }
@@ -69,6 +78,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match parse_mode(&args) {
         Mode::Install => install::install(),
         Mode::Uninstall => install::uninstall(),
+        Mode::Start => install::start(),
+        Mode::Stop => install::stop(),
+        Mode::Restart => install::restart(),
+        Mode::Status => install::status(),
         // Foreground/dev uses TCP on localhost for easy debugging.
         Mode::Foreground => run_loop(true),
         Mode::Service => run_service_mode(),

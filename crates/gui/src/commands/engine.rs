@@ -35,6 +35,97 @@ pub struct VerifySummaryDto {
     pub duration_secs: f64,
 }
 
+/// One partition of a whole-disk (`.obdm`) backup, for the restore list.
+#[derive(Debug, Clone, Serialize)]
+pub struct DiskBackupPartDto {
+    pub index: u32,
+    pub name: String,
+    pub filesystem: String,
+    pub size_bytes: u64,
+}
+
+/// A whole-disk backup discovered in the destination folder (from a `.obdm`).
+#[derive(Debug, Clone, Serialize)]
+pub struct DiskBackupDto {
+    pub manifest_path: String,
+    pub disk_model: String,
+    pub disk_number: u32,
+    pub created_at: String,
+    pub total_bytes: u64,
+    pub partitions: Vec<DiskBackupPartDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DiskRestoreSummaryDto {
+    pub partitions: u64,
+    pub bytes_written: u64,
+    pub duration_secs: f64,
+}
+
+/// Progress payload for a whole-disk restore (event `restore-disk-progress`).
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub struct DiskRestoreProgressDto {
+    pub phase: String,
+    pub partition_index: u64,
+    pub partition_count: u64,
+    pub part_label: String,
+    pub percent: u64,
+    pub bytes_written: u64,
+}
+
+/// List whole-disk (`.obdm`) backups found in `folder`. Cross-platform: it only
+/// reads/parses the JSON manifests (restore itself is Windows-only for now).
+#[tauri::command]
+pub async fn list_disk_backups(folder: String) -> Result<Vec<DiskBackupDto>, String> {
+    use own_backup_common::gpt::DiskBackupManifest;
+
+    let dir = std::path::Path::new(&folder);
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return Ok(Vec::new()), // missing folder → no disk backups
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some(DiskBackupManifest::EXTENSION) {
+            continue;
+        }
+        let Ok(raw) = std::fs::read(&path) else { continue };
+        let Ok(m) = serde_json::from_slice::<DiskBackupManifest>(&raw) else {
+            continue;
+        };
+        let sector = m.layout.sector_size;
+        let partitions: Vec<DiskBackupPartDto> = m
+            .images
+            .iter()
+            .filter_map(|img| {
+                m.layout
+                    .partitions
+                    .iter()
+                    .find(|p| p.index == img.part_index)
+                    .map(|p| DiskBackupPartDto {
+                        index: p.index,
+                        name: p.name.clone(),
+                        filesystem: img.filesystem.clone(),
+                        size_bytes: p.size_bytes(sector),
+                    })
+            })
+            .collect();
+        let total_bytes = partitions.iter().map(|p| p.size_bytes).sum();
+        out.push(DiskBackupDto {
+            manifest_path: path.display().to_string(),
+            disk_model: m.disk_model,
+            disk_number: m.disk_number,
+            created_at: m.created_at,
+            total_bytes,
+            partitions,
+        });
+    }
+    out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Ok(out)
+}
+
 /// Metadata about an image, read from its `.obkm` sidecar (works on any OS).
 #[derive(Debug, Clone, Serialize)]
 pub struct ImageInfoDto {
@@ -91,7 +182,8 @@ mod win {
     use tauri::{AppHandle, Emitter, State};
 
     use own_backup_backup::engine_win::{
-        mount_image, restore_volume, unmount_image, verify_image, VolumeRestoreRequest,
+        mount_image, restore_disk, restore_volume, unmount_image, verify_image, DiskRestoreRequest,
+        VolumeRestoreRequest,
     };
     use own_backup_common::OwnBackupError;
 
@@ -221,6 +313,62 @@ mod win {
             .map_err(|e| format!("задача отключения прервана: {e}"))?
             .map_err(|e| e.to_string())
     }
+
+    /// Restore a WHOLE disk from a `.obdm` manifest onto `target_disk`.
+    /// DESTRUCTIVE. Blocked on the live system disk unless `force` (the guard
+    /// still refuses the running Windows disk outside a recovery environment).
+    #[tauri::command]
+    pub async fn restore_disk_now(
+        app: AppHandle,
+        manifest_path: String,
+        target_disk: u32,
+        force: bool,
+    ) -> Result<DiskRestoreSummaryDto, String> {
+        if !force {
+            own_backup_restore::guard_target_disk(target_disk).map_err(|e| e.to_string())?;
+        }
+        let request = DiskRestoreRequest {
+            manifest_path: std::path::PathBuf::from(&manifest_path),
+            target_disk,
+            verify_checksums: true,
+        };
+
+        let summary = tauri::async_runtime::spawn_blocking(move || {
+            let mut last = String::new();
+            restore_disk(&request, |p| {
+                let percent = if p.blocks_total > 0 {
+                    p.blocks_done * 100 / p.blocks_total
+                } else {
+                    0
+                };
+                let key = format!("{}:{}:{}", p.phase, p.partition_index, percent);
+                if key != last {
+                    last = key;
+                    let _ = app.emit(
+                        "restore-disk-progress",
+                        DiskRestoreProgressDto {
+                            phase: p.phase.clone(),
+                            partition_index: p.partition_index as u64,
+                            partition_count: p.partition_count as u64,
+                            part_label: p.part_label.clone(),
+                            percent,
+                            bytes_written: p.bytes_written,
+                        },
+                    );
+                }
+                Ok(())
+            })
+        })
+        .await
+        .map_err(|e| format!("задача восстановления диска прервана: {e}"))?
+        .map_err(|e| e.to_string())?;
+
+        Ok(DiskRestoreSummaryDto {
+            partitions: summary.partitions as u64,
+            bytes_written: summary.bytes_written,
+            duration_secs: summary.duration.as_secs_f64(),
+        })
+    }
 }
 
 // Glob re-export is required: #[tauri::command] generates hidden __cmd__*
@@ -262,6 +410,16 @@ mod stub {
 
     #[tauri::command]
     pub async fn unmount_backup(_image_path: String) -> Result<(), String> {
+        Err(MSG.into())
+    }
+
+    #[tauri::command]
+    pub async fn restore_disk_now(
+        _app: AppHandle,
+        _manifest_path: String,
+        _target_disk: u32,
+        _force: bool,
+    ) -> Result<DiskRestoreSummaryDto, String> {
         Err(MSG.into())
     }
 }

@@ -239,6 +239,35 @@ export interface JobRun {
   categories: CategorySizes | null;
 }
 
+/** A whole-disk (`.obdm`) backup discovered for restore. */
+export interface DiskBackupPart {
+  index: number;
+  name: string;
+  filesystem: string;
+  size_bytes: number;
+}
+export interface DiskBackup {
+  manifest_path: string;
+  disk_model: string;
+  disk_number: number;
+  created_at: string;
+  total_bytes: number;
+  partitions: DiskBackupPart[];
+}
+export interface DiskRestoreSummary {
+  partitions: number;
+  bytes_written: number;
+  duration_secs: number;
+}
+export interface DiskRestoreProgress {
+  phase: string;
+  partition_index: number;
+  partition_count: number;
+  part_label: string;
+  percent: number;
+  bytes_written: number;
+}
+
 /** One partition of a whole-disk backup: its GPT slot and source device. */
 export interface DiskPartSpec {
   part_index: number;

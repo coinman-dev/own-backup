@@ -8,6 +8,8 @@ import type {
   JobRun,
   QueueSnapshot,
   DecryptResult,
+  DiskBackup,
+  DiskRestoreSummary,
 } from './types';
 
 export const api = {
@@ -35,6 +37,9 @@ export const api = {
   mountBackup: (imagePath: string) => invoke<string>('mount_backup', { imagePath }),
   unmountBackup: (imagePath: string) => invoke<void>('unmount_backup', { imagePath }),
   readImageInfo: (imagePath: string) => invoke<ImageInfo>('read_image_info', { imagePath }),
+  listDiskBackups: (folder: string) => invoke<DiskBackup[]>('list_disk_backups', { folder }),
+  restoreDiskNow: (manifestPath: string, targetDisk: number, force: boolean) =>
+    invoke<DiskRestoreSummary>('restore_disk_now', { manifestPath, targetDisk, force }),
   cancelEngineOp: () => invoke<void>('cancel_engine_op'),
 
   // --- misc ---

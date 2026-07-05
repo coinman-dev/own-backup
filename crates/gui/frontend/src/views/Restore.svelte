@@ -1,7 +1,9 @@
 <script lang="ts">
   import { jobs, jobStatus } from '../lib/jobStore.svelte';
   import RestoreDashboard from './RestoreDashboard.svelte';
+  import DiskRestore from './DiskRestore.svelte';
 
+  let mode: 'volume' | 'disk' = $state('volume');
   let selectedId: string | null = $state(null);
   const selectedJob = $derived(jobs.list.find((j) => j.id === selectedId) ?? null);
 
@@ -21,6 +23,15 @@
   }
 </script>
 
+<div class="restore-root">
+<div class="mode-bar">
+  <button class="mode" class:on={mode === 'volume'} onclick={() => (mode = 'volume')}>Тома</button>
+  <button class="mode" class:on={mode === 'disk'} onclick={() => (mode = 'disk')}>Диск целиком (загрузочный)</button>
+</div>
+
+{#if mode === 'disk'}
+  <div class="disk-wrap"><DiskRestore /></div>
+{:else}
 <div class="layout">
   <!-- middle column: backups list (same as Backup) -->
   <div class="jobs-col">
@@ -62,9 +73,16 @@
     {/if}
   </div>
 </div>
+{/if}
+</div>
 
 <style>
-  .layout { display: flex; height: 100%; }
+  .restore-root { display: flex; flex-direction: column; height: 100%; }
+  .mode-bar { display: flex; gap: 4px; padding: 10px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  .mode { padding: 7px 16px; border: 1px solid var(--border); border-radius: 6px; background: none; color: var(--text-muted); font-size: 13px; font-weight: 600; font-family: var(--font); cursor: pointer; }
+  .mode.on { background: var(--primary); color: #fff; border-color: var(--primary); }
+  .disk-wrap { flex: 1; overflow: auto; }
+  .layout { display: flex; flex: 1; min-height: 0; }
   .jobs-col { width: 240px; flex-shrink: 0; background: var(--column-bg); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
   .col-title { font-size: 22px; font-weight: 300; color: var(--head); padding: 22px 18px 12px; }
   .this-pc { display: flex; align-items: center; gap: 8px; padding: 6px 18px; font-size: 13px; font-weight: 600; color: var(--head); }

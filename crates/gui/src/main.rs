@@ -199,6 +199,8 @@ fn main() {
             commands::engine::mount_backup,
             commands::engine::unmount_backup,
             commands::engine::read_image_info,
+            commands::engine::list_disk_backups,
+            commands::engine::restore_disk_now,
             commands::engine::cancel_engine_op,
             // --- misc ---
             commands::settings::get_config,

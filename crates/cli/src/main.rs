@@ -27,6 +27,12 @@ enum Commands {
     /// Restore from a backup
     Restore(commands::restore::RestoreArgs),
 
+    /// Restore a WHOLE disk (bootable) from a .obdm manifest — DESTRUCTIVE
+    RestoreDisk(commands::restore_disk::RestoreDiskArgs),
+
+    /// Recreate Windows boot files (bcdboot) after a whole-disk restore
+    FinalizeBoot(commands::finalize_boot::FinalizeBootArgs),
+
     /// Verify a VHDX backup image against its sidecar checksums
     Verify(commands::verify::VerifyArgs),
 
@@ -65,6 +71,8 @@ async fn main() {
         Commands::Preflight(args) => commands::preflight::run(args).await,
         Commands::Backup(args) => commands::backup::run(args).await,
         Commands::Restore(args) => commands::restore::run(args).await,
+        Commands::RestoreDisk(args) => commands::restore_disk::run(args).await,
+        Commands::FinalizeBoot(args) => commands::finalize_boot::run(args).await,
         Commands::Verify(args) => commands::verify::run(args).await,
         Commands::Mount(args) => commands::mount::run(args).await,
         Commands::Unmount(args) => commands::unmount::run(args).await,

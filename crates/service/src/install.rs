@@ -101,6 +101,65 @@ pub fn uninstall() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+fn open_service(
+    access: windows_service::service::ServiceAccess,
+) -> Result<windows_service::service::Service, Box<dyn std::error::Error>> {
+    use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
+    Ok(manager.open_service(crate::SERVICE_NAME, access)?)
+}
+
+#[cfg(target_os = "windows")]
+pub fn start() -> Result<(), Box<dyn std::error::Error>> {
+    use windows_service::service::{ServiceAccess, ServiceState};
+    let service = open_service(ServiceAccess::QUERY_STATUS | ServiceAccess::START)?;
+    if service.query_status()?.current_state == ServiceState::Running {
+        println!("Служба «{}» уже запущена.", crate::SERVICE_DISPLAY_NAME);
+        return Ok(());
+    }
+    let no_args: [&std::ffi::OsStr; 0] = [];
+    service.start(&no_args)?;
+    println!("Служба «{}» запущена.", crate::SERVICE_DISPLAY_NAME);
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+pub fn stop() -> Result<(), Box<dyn std::error::Error>> {
+    use std::time::Duration;
+    use windows_service::service::{ServiceAccess, ServiceState};
+    let service = open_service(ServiceAccess::QUERY_STATUS | ServiceAccess::STOP)?;
+    if service.query_status()?.current_state == ServiceState::Stopped {
+        println!("Служба «{}» уже остановлена.", crate::SERVICE_DISPLAY_NAME);
+        return Ok(());
+    }
+    service.stop()?;
+    for _ in 0..20 {
+        std::thread::sleep(Duration::from_millis(300));
+        if let Ok(s) = service.query_status() {
+            if s.current_state == ServiceState::Stopped {
+                break;
+            }
+        }
+    }
+    println!("Служба «{}» остановлена.", crate::SERVICE_DISPLAY_NAME);
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+pub fn status() -> Result<(), Box<dyn std::error::Error>> {
+    use windows_service::service::ServiceAccess;
+    let service = open_service(ServiceAccess::QUERY_STATUS)?;
+    let s = service.query_status()?;
+    println!(
+        "Служба «{}» ({}): {:?}",
+        crate::SERVICE_DISPLAY_NAME,
+        crate::SERVICE_NAME,
+        s.current_state
+    );
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Linux: systemd unit
 // ---------------------------------------------------------------------------
@@ -155,10 +214,42 @@ pub fn uninstall() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[cfg(not(target_os = "windows"))]
+pub fn start() -> Result<(), Box<dyn std::error::Error>> {
+    systemctl(&["start", crate::LINUX_UNIT_NAME])?;
+    println!("systemd-юнит {}.service запущен.", crate::LINUX_UNIT_NAME);
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn stop() -> Result<(), Box<dyn std::error::Error>> {
+    systemctl(&["stop", crate::LINUX_UNIT_NAME])?;
+    println!("systemd-юнит {}.service остановлен.", crate::LINUX_UNIT_NAME);
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn status() -> Result<(), Box<dyn std::error::Error>> {
+    // `systemctl status` prints its own report to stdout/stderr; ignore the
+    // non-zero exit it returns when the unit is stopped.
+    let _ = std::process::Command::new("systemctl")
+        .args(["status", "--no-pager", crate::LINUX_UNIT_NAME])
+        .status();
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
 fn systemctl(args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
     let status = std::process::Command::new("systemctl").args(args).status()?;
     if !status.success() {
         return Err(format!("`systemctl {}` failed ({status})", args.join(" ")).into());
     }
     Ok(())
+}
+
+/// Stop the service and start it again. Stop failures (e.g. already stopped) are
+/// tolerated so a restart still (re)starts the service.
+pub fn restart() -> Result<(), Box<dyn std::error::Error>> {
+    let _ = stop();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    start()
 }

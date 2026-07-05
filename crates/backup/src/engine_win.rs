@@ -20,6 +20,7 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use own_backup_common::disk::DiskInfo;
+use own_backup_common::gpt::DiskBackupManifest;
 use own_backup_common::image::ImageManifest;
 use own_backup_common::progress::{BackupProgress, RestoreProgress};
 use own_backup_common::types::{
@@ -33,7 +34,7 @@ use crate::block_reader_win::WinBlockReader;
 use crate::checksum::compute_block_checksum;
 use crate::exclusions::{ByteRanges, ZeroingBlockReader};
 use crate::exclusions_win::collect_excluded_ranges;
-use crate::gpt_writer::{gpt_write_ops, GptLayout, DEFAULT_PARTITION_OFFSET};
+use crate::gpt_writer::{disk_gpt_write_ops, gpt_write_ops, GptLayout, DEFAULT_PARTITION_OFFSET};
 use crate::raw_copy::copy_used_blocks;
 use crate::san_policy::SanPolicyGuard;
 use crate::sidecar::{
@@ -908,6 +909,210 @@ pub fn restore_volume(
         bytes_restored,
         duration: started.elapsed(),
     })
+}
+
+// ---------------------------------------------------------------------------
+// Whole-disk (bootable) restore
+// ---------------------------------------------------------------------------
+
+/// Restore a whole disk from a `.obdm` manifest onto a target physical drive.
+/// DESTRUCTIVE — the target is repartitioned and every partition overwritten.
+pub struct DiskRestoreRequest {
+    /// Path to the `.obdm` disk-backup manifest (its images live alongside).
+    pub manifest_path: PathBuf,
+    /// Target physical drive number (`\\.\PhysicalDrive{target_disk}`).
+    pub target_disk: u32,
+    pub verify_checksums: bool,
+}
+
+/// Progress for a whole-disk restore.
+pub struct DiskRestoreProgress {
+    /// "gpt" while writing the partition table, "partition" while copying data.
+    pub phase: String,
+    /// 0-based index of the partition being restored, and the total count.
+    pub partition_index: usize,
+    pub partition_count: usize,
+    pub part_label: String,
+    pub blocks_done: u64,
+    pub blocks_total: u64,
+    /// Bytes written across the whole disk so far.
+    pub bytes_written: u64,
+}
+
+pub struct DiskRestoreSummary {
+    pub partitions: usize,
+    pub bytes_written: u64,
+    pub duration: Duration,
+}
+
+/// Recreate a disk from its `.obdm`: write the captured GPT, then restore each
+/// partition's image into its original offset. The target is taken offline for
+/// the duration so Windows does not auto-mount (and lock) partitions mid-write,
+/// then brought back online. The GUID-preserving GPT keeps a UEFI system
+/// bootable without touching the BCD.
+///
+/// The caller is responsible for the destructive confirmation and the
+/// [`crate`]-external system-disk guard (`own_backup_restore::guard`).
+pub fn restore_disk(
+    req: &DiskRestoreRequest,
+    mut progress: impl FnMut(&DiskRestoreProgress) -> Result<()>,
+) -> Result<DiskRestoreSummary> {
+    let started = Instant::now();
+
+    let raw = std::fs::read(&req.manifest_path).map_err(|e| {
+        OwnBackupError::ImageFormat(format!(
+            "cannot read disk manifest {}: {e}",
+            req.manifest_path.display()
+        ))
+    })?;
+    let manifest: DiskBackupManifest = serde_json::from_slice(&raw)
+        .map_err(|e| OwnBackupError::ImageFormat(format!("bad .obdm manifest: {e}")))?;
+    let folder = req
+        .manifest_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_default();
+    let layout = &manifest.layout;
+    let sector = layout.sector_size as u64;
+
+    let target_path = format!(r"\\.\PhysicalDrive{}", req.target_disk);
+
+    // Probe the target size and build the GPT (validates every partition fits).
+    let target_size = WinRawDevice::open_read(&target_path)?.length();
+    let ops = disk_gpt_write_ops(layout, target_size)?;
+
+    info!(
+        target = %target_path,
+        model = %manifest.disk_model,
+        partitions = manifest.images.len(),
+        "Whole-disk restore: writing GPT"
+    );
+    progress(&DiskRestoreProgress {
+        phase: "gpt".into(),
+        partition_index: 0,
+        partition_count: manifest.images.len(),
+        part_label: "Таблица разделов (GPT)".into(),
+        blocks_done: 0,
+        blocks_total: 0,
+        bytes_written: 0,
+    })?;
+
+    // Take the target offline (session-only), write the protective MBR + GPT,
+    // then refresh so the OS re-reads the (offline) table.
+    {
+        let mut td = WinRawDevice::open_write(&target_path)?;
+        td.set_offline_writable(false)?;
+        for op in &ops {
+            td.write_at(op.offset, &op.bytes)?;
+        }
+        td.flush()?;
+        let _ = td.update_properties();
+    }
+
+    // Restore each partition image into its window on the (offline) target.
+    let count = manifest.images.len();
+    let mut total_bytes = 0u64;
+    for (i, img) in manifest.images.iter().enumerate() {
+        let entry = layout
+            .partitions
+            .iter()
+            .find(|p| p.index == img.part_index)
+            .ok_or_else(|| {
+                OwnBackupError::RestoreIncompatible(format!(
+                    "manifest references partition {} which is not in the GPT layout",
+                    img.part_index
+                ))
+            })?;
+        let off = entry.first_lba * sector;
+        let len = (entry.last_lba + 1 - entry.first_lba) * sector;
+        let target = format!("part:{}:{off}:{len}", req.target_disk);
+        let label = if entry.name.is_empty() {
+            format!("Раздел {} ({})", img.part_index, img.filesystem)
+        } else {
+            format!("{} ({})", entry.name, img.filesystem)
+        };
+        info!(
+            image = %img.image_file_name,
+            part = img.part_index,
+            offset = off,
+            "Whole-disk restore: restoring partition"
+        );
+
+        let vreq = VolumeRestoreRequest {
+            image_path: folder.join(&img.image_file_name),
+            target,
+            verify_checksums: req.verify_checksums,
+        };
+        let base = total_bytes;
+        let summary = restore_volume(&vreq, |p| {
+            progress(&DiskRestoreProgress {
+                phase: "partition".into(),
+                partition_index: i,
+                partition_count: count,
+                part_label: label.clone(),
+                blocks_done: p.blocks_done,
+                blocks_total: p.blocks_total,
+                bytes_written: base + p.bytes_written,
+            })
+        })?;
+        total_bytes += summary.bytes_restored;
+    }
+
+    // Bring the target back online and refresh so the restored volumes appear.
+    if let Ok(td) = WinRawDevice::open_write(&target_path) {
+        let _ = td.set_online_this_session();
+        let _ = td.update_properties();
+    }
+
+    info!(
+        target = %target_path,
+        partitions = count,
+        bytes = total_bytes,
+        secs = started.elapsed().as_secs(),
+        "Whole-disk restore complete"
+    );
+    Ok(DiskRestoreSummary {
+        partitions: count,
+        bytes_written: total_bytes,
+        duration: started.elapsed(),
+    })
+}
+
+/// Recreate the boot files (and, on UEFI, the firmware NVRAM entry) for a
+/// restored Windows via `bcdboot`. Needed only for a **fresh disk / new
+/// hardware** — a same-disk restore that preserved the partition GUIDs boots
+/// as-is. `windows_volume` is the restored OS volume ("C:"); `system_volume`
+/// is the EFI System Partition mount ("S:") for UEFI (omit to let bcdboot pick
+/// the current one). Typically run from WinPE.
+pub fn finalize_boot(
+    windows_volume: &str,
+    system_volume: Option<&str>,
+    uefi: bool,
+) -> Result<()> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let win_dir = format!(r"{}\Windows", windows_volume.trim_end_matches(['\\', '/']));
+    let mut cmd = std::process::Command::new("bcdboot");
+    cmd.arg(&win_dir);
+    if let Some(esp) = system_volume {
+        cmd.args(["/s", esp]);
+    }
+    cmd.args(["/f", if uefi { "UEFI" } else { "BIOS" }]);
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    let out = cmd
+        .output()
+        .map_err(|e| OwnBackupError::Device(format!("failed to run bcdboot: {e}")))?;
+    if !out.status.success() {
+        return Err(OwnBackupError::RestoreIncompatible(format!(
+            "bcdboot failed (exit {}): {}",
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    info!(win_dir, uefi, "bcdboot: boot files recreated");
+    Ok(())
 }
 
 /// Result of verifying an image against its sidecar checksums.
