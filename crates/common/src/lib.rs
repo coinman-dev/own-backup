@@ -1,5 +1,6 @@
 pub mod config;
 pub mod disk;
+pub mod engine_dto;
 pub mod error;
 pub mod gpt;
 pub mod image;

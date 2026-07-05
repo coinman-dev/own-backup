@@ -156,7 +156,7 @@ impl VhdxWriter {
         let mut b = vec![0u8; 64 * 1024];
         b[..8].copy_from_slice(b"vhdxfile");
         // Creator: UTF-16LE, 512 bytes at offset 8.
-        for (i, u) in "MyOwnBackup".encode_utf16().enumerate() {
+        for (i, u) in "OwnBackup".encode_utf16().enumerate() {
             b[8 + i * 2..8 + i * 2 + 2].copy_from_slice(&u.to_le_bytes());
         }
         self.at(0, &b)

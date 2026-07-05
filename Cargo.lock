@@ -2727,6 +2727,7 @@ dependencies = [
 name = "own-backup-client"
 version = "0.1.0"
 dependencies = [
+ "own-backup-common",
  "own-backup-core",
  "prost",
  "prost-build",

@@ -46,7 +46,7 @@ pub struct DpapiSecretStore;
 /// Application-specific DPAPI entropy — mixed into every blob so another app on
 /// the same machine cannot unprotect our secrets without also knowing this.
 #[cfg(target_os = "windows")]
-const ENTROPY: &[u8] = b"MyOwnBackup/secret/v1";
+const ENTROPY: &[u8] = b"OwnBackup/secret/v1";
 
 #[cfg(target_os = "windows")]
 mod imp {

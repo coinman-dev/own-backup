@@ -24,6 +24,10 @@ pub struct AppState {
     pub job_tx: UnboundedSender<String>,
     /// Set true to cancel the currently running backup.
     pub cancel: Arc<AtomicBool>,
+    /// Set true to cancel the currently running direct engine op (restore /
+    /// verify / disk restore). Separate from `cancel` so cancelling a restore
+    /// never touches a running backup and vice-versa.
+    pub engine_cancel: Arc<AtomicBool>,
     /// Fan-out of orchestration events to `StreamEvents` subscribers.
     pub events: broadcast::Sender<proto::Event>,
     /// Passwords for encrypted volumes (in-memory cache + OS-protected store).
@@ -48,6 +52,7 @@ impl AppState {
             queue,
             job_tx,
             cancel,
+            engine_cancel: Arc::new(AtomicBool::new(false)),
             events,
             passwords,
             start_time: Instant::now(),

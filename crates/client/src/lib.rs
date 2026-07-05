@@ -205,6 +205,94 @@ impl BackupClient {
         Ok(())
     }
 
+    // --- Direct engine ops (run in the privileged service) ---------------
+
+    /// Restore a volume image onto `target` (DESTRUCTIVE). Blocks until done;
+    /// progress arrives on [`stream_events`](Self::stream_events) as `"restore"`.
+    pub async fn restore_volume(
+        &mut self,
+        image_path: &str,
+        target: &str,
+    ) -> Result<own_backup_common::engine_dto::RestoreSummaryDto> {
+        let json = serde_json::json!({ "image_path": image_path, "target": target }).to_string();
+        let reply = self
+            .inner
+            .restore_volume(self.request(proto::JsonRequest { json }))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
+
+    /// Verify an image against its sidecar checksums. Progress arrives as `"verify"`.
+    pub async fn verify_image(
+        &mut self,
+        image_path: &str,
+    ) -> Result<own_backup_common::engine_dto::VerifySummaryDto> {
+        let json = serde_json::json!({ "image_path": image_path }).to_string();
+        let reply = self
+            .inner
+            .verify_image(self.request(proto::JsonRequest { json }))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
+
+    /// Mount an image read-only; returns where it appeared.
+    pub async fn mount_image(&mut self, image_path: &str) -> Result<String> {
+        let json = serde_json::json!({ "image_path": image_path }).to_string();
+        let reply = self
+            .inner
+            .mount_image(self.request(proto::JsonRequest { json }))
+            .await
+            .map_err(status)?
+            .into_inner();
+        let m: own_backup_common::engine_dto::MountResultDto = parse(&reply.json)?;
+        Ok(m.mount_point)
+    }
+
+    pub async fn unmount_image(&mut self, image_path: &str) -> Result<()> {
+        let json = serde_json::json!({ "image_path": image_path }).to_string();
+        self.inner
+            .unmount_image(self.request(proto::JsonRequest { json }))
+            .await
+            .map_err(status)?;
+        Ok(())
+    }
+
+    /// Restore a whole disk from an `.obdm` manifest onto `target_disk`
+    /// (DESTRUCTIVE). Progress arrives as `"restore-disk"`.
+    pub async fn restore_disk(
+        &mut self,
+        manifest_path: &str,
+        target_disk: u32,
+        force: bool,
+    ) -> Result<own_backup_common::engine_dto::DiskRestoreSummaryDto> {
+        let json = serde_json::json!({
+            "manifest_path": manifest_path,
+            "target_disk": target_disk,
+            "force": force,
+        })
+        .to_string();
+        let reply = self
+            .inner
+            .restore_disk(self.request(proto::JsonRequest { json }))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
+
+    /// Signal-cancel the running restore/verify/disk-restore.
+    pub async fn cancel_engine_op(&mut self) -> Result<()> {
+        self.inner
+            .cancel_engine_op(self.request(proto::Empty {}))
+            .await
+            .map_err(status)?;
+        Ok(())
+    }
+
     // --- Misc -------------------------------------------------------------
 
     /// Disk inventory as raw JSON (a `[DiskInfo]` array) — callers that need

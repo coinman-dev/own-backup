@@ -169,7 +169,19 @@ async fn bridge_service_events(app: tauri::AppHandle, link: Arc<ServiceLink>) {
                         ClientEvent::Finished(r) => {
                             let _ = app.emit("job-finished", r);
                         }
-                        ClientEvent::Unknown { .. } => {}
+                        // Direct-engine progress (restore / verify / disk restore):
+                        // forward the raw JSON payload to the matching Tauri event.
+                        ClientEvent::Unknown { kind, json } => {
+                            let tauri_event = match kind.as_str() {
+                                "restore" => "restore-progress",
+                                "verify" => "verify-progress",
+                                "restore-disk" => "restore-disk-progress",
+                                _ => continue,
+                            };
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) {
+                                let _ = app.emit(tauri_event, v);
+                            }
+                        }
                     }
                 }
                 tracing::info!("service event stream ended; reconnecting");

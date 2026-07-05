@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+own-backup-common = { workspace = true }
 own-backup-core = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }

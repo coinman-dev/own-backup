@@ -100,6 +100,26 @@ fn json_reply<T: serde::Serialize>(value: &T) -> Result<Response<JsonReply>, Sta
     Ok(Response::new(JsonReply { json }))
 }
 
+/// Message returned by the direct engine RPCs when built off Windows (the VHDX
+/// engine is Windows-only for now — see plan phase 8).
+#[cfg(not(target_os = "windows"))]
+const ENGINE_MSG: &str = "Эта операция требует Windows (движок VHDX). \
+                          Поддержка Linux запланирована (план v2, фаза 8).";
+
+/// Broadcast one engine-progress event (`restore` / `verify` / `restore-disk`)
+/// to `StreamEvents` subscribers. Called from the blocking engine thread.
+#[cfg(target_os = "windows")]
+fn emit_engine<T: serde::Serialize>(
+    events: &broadcast::Sender<proto::Event>,
+    kind: &str,
+    payload: &T,
+) {
+    let _ = events.send(Event {
+        kind: kind.into(),
+        json: serde_json::to_string(payload).unwrap_or_default(),
+    });
+}
+
 /// Shared save/run validation: name + at least one source, dest non-empty, and
 /// the destination not on ANY of the job's source volumes.
 fn validate_job(job: &own_backup_core::Job) -> Result<(), Status> {
@@ -302,6 +322,287 @@ impl BackupService for BackupServiceImpl {
             "queue": self.state.queue.snapshot(),
         });
         Ok(Response::new(JsonReply { json: status.to_string() }))
+    }
+
+    // --- Direct engine operations ----------------------------------------
+
+    async fn restore_volume(
+        &self,
+        req: Request<JsonRequest>,
+    ) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        #[cfg(target_os = "windows")]
+        {
+            use std::sync::atomic::Ordering;
+            use own_backup_backup::engine_win::{restore_volume, VolumeRestoreRequest};
+            use own_backup_common::engine_dto::{EngineProgress, RestoreSummaryDto};
+
+            #[derive(serde::Deserialize)]
+            struct In {
+                image_path: String,
+                target: String,
+            }
+            let p: In = serde_json::from_str(&req.into_inner().json)
+                .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+
+            self.state.engine_cancel.store(false, Ordering::SeqCst);
+            let cancel = self.state.engine_cancel.clone();
+            let events = self.state.events.clone();
+            let request = VolumeRestoreRequest {
+                image_path: std::path::PathBuf::from(&p.image_path),
+                target: p.target,
+                verify_checksums: true,
+            };
+
+            let summary = tokio::task::spawn_blocking(move || {
+                let mut last_permille = u64::MAX;
+                let mut last_emit = std::time::Instant::now();
+                restore_volume(&request, |pr| {
+                    if cancel.swap(false, Ordering::SeqCst) {
+                        return Err(own_backup_common::OwnBackupError::Cancelled);
+                    }
+                    let permille = if pr.blocks_total > 0 {
+                        pr.blocks_done * 1000 / pr.blocks_total
+                    } else {
+                        0
+                    };
+                    if permille != last_permille || last_emit.elapsed().as_millis() >= 400 {
+                        last_permille = permille;
+                        last_emit = std::time::Instant::now();
+                        emit_engine(
+                            &events,
+                            "restore",
+                            &EngineProgress {
+                                percent: permille / 10,
+                                blocks_done: pr.blocks_done,
+                                blocks_total: pr.blocks_total,
+                                bytes_done: pr.bytes_written,
+                                speed_mbps: pr.speed_bps as f64 / 1_000_000.0,
+                            },
+                        );
+                    }
+                    Ok(())
+                })
+            })
+            .await
+            .map_err(|e| Status::internal(format!("restore task panicked: {e}")))?
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+            json_reply(&RestoreSummaryDto {
+                blocks_restored: summary.blocks_restored,
+                bytes_restored: summary.bytes_restored,
+                duration_secs: summary.duration.as_secs_f64(),
+            })
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = req;
+            Err(Status::unimplemented(ENGINE_MSG))
+        }
+    }
+
+    async fn verify_image(&self, req: Request<JsonRequest>) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        #[cfg(target_os = "windows")]
+        {
+            use std::sync::atomic::Ordering;
+            use own_backup_backup::engine_win::verify_image;
+            use own_backup_common::engine_dto::{EngineProgress, VerifySummaryDto};
+
+            #[derive(serde::Deserialize)]
+            struct In {
+                image_path: String,
+            }
+            let p: In = serde_json::from_str(&req.into_inner().json)
+                .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+
+            self.state.engine_cancel.store(false, Ordering::SeqCst);
+            let cancel = self.state.engine_cancel.clone();
+            let events = self.state.events.clone();
+            let path = std::path::PathBuf::from(&p.image_path);
+
+            let summary = tokio::task::spawn_blocking(move || {
+                let mut last_permille = u64::MAX;
+                let mut last_emit = std::time::Instant::now();
+                verify_image(&path, |done, total| {
+                    if cancel.swap(false, Ordering::SeqCst) {
+                        return Err(own_backup_common::OwnBackupError::Cancelled);
+                    }
+                    let permille = if total > 0 { done * 1000 / total } else { 0 };
+                    if permille != last_permille || last_emit.elapsed().as_millis() >= 400 {
+                        last_permille = permille;
+                        last_emit = std::time::Instant::now();
+                        emit_engine(
+                            &events,
+                            "verify",
+                            &EngineProgress {
+                                percent: permille / 10,
+                                blocks_done: done,
+                                blocks_total: total,
+                                bytes_done: 0,
+                                speed_mbps: 0.0,
+                            },
+                        );
+                    }
+                    Ok(())
+                })
+            })
+            .await
+            .map_err(|e| Status::internal(format!("verify task panicked: {e}")))?
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+            json_reply(&VerifySummaryDto {
+                valid: summary.valid(),
+                blocks_checked: summary.blocks_checked,
+                mismatched_blocks: summary.mismatched_blocks,
+                duration_secs: summary.duration.as_secs_f64(),
+            })
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = req;
+            Err(Status::unimplemented(ENGINE_MSG))
+        }
+    }
+
+    async fn mount_image(&self, req: Request<JsonRequest>) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        #[cfg(target_os = "windows")]
+        {
+            use own_backup_backup::engine_win::mount_image;
+            use own_backup_common::engine_dto::MountResultDto;
+
+            #[derive(serde::Deserialize)]
+            struct In {
+                image_path: String,
+            }
+            let p: In = serde_json::from_str(&req.into_inner().json)
+                .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+            let path = std::path::PathBuf::from(&p.image_path);
+            let mount_point = tokio::task::spawn_blocking(move || mount_image(&path))
+                .await
+                .map_err(|e| Status::internal(format!("mount task panicked: {e}")))?
+                .map_err(|e| Status::internal(e.to_string()))?;
+            json_reply(&MountResultDto { mount_point })
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = req;
+            Err(Status::unimplemented(ENGINE_MSG))
+        }
+    }
+
+    async fn unmount_image(&self, req: Request<JsonRequest>) -> Result<Response<Empty>, Status> {
+        check_auth(&req, &self.service_token)?;
+        #[cfg(target_os = "windows")]
+        {
+            use own_backup_backup::engine_win::unmount_image;
+            #[derive(serde::Deserialize)]
+            struct In {
+                image_path: String,
+            }
+            let p: In = serde_json::from_str(&req.into_inner().json)
+                .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+            let path = std::path::PathBuf::from(&p.image_path);
+            tokio::task::spawn_blocking(move || unmount_image(&path))
+                .await
+                .map_err(|e| Status::internal(format!("unmount task panicked: {e}")))?
+                .map_err(|e| Status::internal(e.to_string()))?;
+            Ok(Response::new(Empty {}))
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = req;
+            Err(Status::unimplemented(ENGINE_MSG))
+        }
+    }
+
+    async fn restore_disk(&self, req: Request<JsonRequest>) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        #[cfg(target_os = "windows")]
+        {
+            use std::sync::atomic::Ordering;
+            use own_backup_backup::engine_win::{restore_disk, DiskRestoreRequest};
+            use own_backup_common::engine_dto::{DiskRestoreProgressDto, DiskRestoreSummaryDto};
+
+            #[derive(serde::Deserialize)]
+            struct In {
+                manifest_path: String,
+                target_disk: u32,
+                #[serde(default)]
+                force: bool,
+            }
+            let p: In = serde_json::from_str(&req.into_inner().json)
+                .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+
+            // Guard the live system disk (unless forced) where the restore runs.
+            if !p.force {
+                own_backup_restore::guard_target_disk(p.target_disk)
+                    .map_err(|e| Status::failed_precondition(e.to_string()))?;
+            }
+
+            self.state.engine_cancel.store(false, Ordering::SeqCst);
+            let cancel = self.state.engine_cancel.clone();
+            let events = self.state.events.clone();
+            let request = DiskRestoreRequest {
+                manifest_path: std::path::PathBuf::from(&p.manifest_path),
+                target_disk: p.target_disk,
+                verify_checksums: true,
+            };
+
+            let summary = tokio::task::spawn_blocking(move || {
+                let mut last = String::new();
+                restore_disk(&request, |pr| {
+                    if cancel.swap(false, Ordering::SeqCst) {
+                        return Err(own_backup_common::OwnBackupError::Cancelled);
+                    }
+                    let percent = if pr.blocks_total > 0 {
+                        pr.blocks_done * 100 / pr.blocks_total
+                    } else {
+                        0
+                    };
+                    let key = format!("{}:{}:{}", pr.phase, pr.partition_index, percent);
+                    if key != last {
+                        last = key;
+                        emit_engine(
+                            &events,
+                            "restore-disk",
+                            &DiskRestoreProgressDto {
+                                phase: pr.phase.clone(),
+                                partition_index: pr.partition_index as u64,
+                                partition_count: pr.partition_count as u64,
+                                part_label: pr.part_label.clone(),
+                                percent,
+                                bytes_written: pr.bytes_written,
+                            },
+                        );
+                    }
+                    Ok(())
+                })
+            })
+            .await
+            .map_err(|e| Status::internal(format!("disk restore task panicked: {e}")))?
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+            json_reply(&DiskRestoreSummaryDto {
+                partitions: summary.partitions as u64,
+                bytes_written: summary.bytes_written,
+                duration_secs: summary.duration.as_secs_f64(),
+            })
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = req;
+            Err(Status::unimplemented(ENGINE_MSG))
+        }
+    }
+
+    async fn cancel_engine_op(&self, req: Request<Empty>) -> Result<Response<Empty>, Status> {
+        check_auth(&req, &self.service_token)?;
+        self.state
+            .engine_cancel
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(Response::new(Empty {}))
     }
 }
 

@@ -37,6 +37,18 @@ service BackupService {
   rpc ListDisks(Empty) returns (JsonReply);          // JSON: [DiskInfo]
 
   rpc GetServiceStatus(Empty) returns (JsonReply);   // JSON: { version, uptime_secs, queue }
+
+  // --- Direct engine operations (run in the privileged service) ---
+  // Long-running; progress is streamed on StreamEvents with kinds
+  //   "restore" / "verify" -> EngineProgress, "restore-disk" -> DiskRestoreProgress.
+  // CancelEngineOp signal-cancels the running restore/verify (separate from a
+  // backup's CancelRunning).
+  rpc RestoreVolume(JsonRequest) returns (JsonReply);  // in: {image_path,target} -> RestoreSummary
+  rpc VerifyImage(JsonRequest) returns (JsonReply);    // in: {image_path} -> VerifySummary
+  rpc MountImage(JsonRequest) returns (JsonReply);     // in: {image_path} -> {mount_point}
+  rpc UnmountImage(JsonRequest) returns (Empty);       // in: {image_path}
+  rpc RestoreDisk(JsonRequest) returns (JsonReply);    // in: {manifest_path,target_disk,force} -> DiskRestoreSummary
+  rpc CancelEngineOp(Empty) returns (Empty);
 }
 
 message Empty {}
