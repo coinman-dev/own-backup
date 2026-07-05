@@ -88,7 +88,7 @@ fn main() {
     // The orchestrator (job store, queue, scheduler, backup worker) lives in the
     // service; connect to it, spawning a private foreground instance if none is
     // installed/running so the GUI still works standalone.
-    let link = Arc::new(ServiceLink::new(&config.grpc_address, ""));
+    let link = Arc::new(ServiceLink::new(&config.grpc_address, config.token_path()));
     let gui_state = GuiState::new(config, link.clone());
 
     tauri::Builder::default()

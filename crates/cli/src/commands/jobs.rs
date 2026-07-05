@@ -15,7 +15,8 @@ pub struct JobsArgs {
     #[arg(long, default_value = "http://127.0.0.1:50051", global = true)]
     pub endpoint: String,
 
-    /// Bearer token (empty for dev/TCP mode).
+    /// Bearer token. When omitted, read from the service's token file
+    /// (`<data_dir>/service.token` on Windows) so interactive use just works.
     #[arg(long, default_value = "", global = true)]
     pub token: String,
 
@@ -49,7 +50,16 @@ pub enum JobsCommand {
 }
 
 pub async fn run(args: JobsArgs) -> Result<()> {
-    let mut client = BackupClient::connect(args.endpoint.clone(), args.token.clone())
+    // Use the explicit token, else read the service's per-boot token file.
+    let token = if args.token.is_empty() {
+        let cfg = own_backup_common::config::AppConfig::default();
+        std::fs::read_to_string(cfg.token_path())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
+    } else {
+        args.token.clone()
+    };
+    let mut client = BackupClient::connect(args.endpoint.clone(), token)
         .await
         .map_err(|e| {
             OwnBackupError::Config(format!(

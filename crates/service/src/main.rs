@@ -293,10 +293,25 @@ pub async fn run_main_loop(
     #[cfg(not(unix))]
     let _ = use_tcp;
 
-    // TCP fallback (dev mode / Windows placeholder)
+    // TCP on loopback. On Windows this is the production transport (until a
+    // named pipe lands): require a per-boot bearer token stored in an ACL'd file
+    // that only the service, admins and interactive users can read. On other
+    // platforms the TCP path is dev/foreground only and stays token-less (the
+    // real Unix transport is the UDS above).
     let addr: SocketAddr = config.grpc_address.parse()?;
-    info!("gRPC server (TCP/localhost) listening on {}", addr);
-    let service = BackupServiceImpl::new(state, String::new()).into_service();
+    #[cfg(windows)]
+    let token = write_service_token(&config).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "could not write service token — running WITHOUT auth");
+        String::new()
+    });
+    #[cfg(not(windows))]
+    let token = String::new();
+    info!(
+        "gRPC server (TCP/localhost) listening on {} (auth: {})",
+        addr,
+        if token.is_empty() { "off" } else { "token" }
+    );
+    let service = BackupServiceImpl::new(state, token).into_service();
     Server::builder()
         .add_service(service)
         .serve_with_shutdown(addr, async move {
@@ -304,7 +319,51 @@ pub async fn run_main_loop(
         })
         .await?;
 
+    #[cfg(windows)]
+    let _ = std::fs::remove_file(config.token_path());
     Ok(())
+}
+
+/// Generate a per-boot bearer token, write it to the (ACL-restricted) token
+/// file, and return it. Windows loopback-TCP transport only.
+#[cfg(windows)]
+fn write_service_token(config: &AppConfig) -> Result<String, Box<dyn std::error::Error>> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let mut raw = [0u8; 32];
+    getrandom::getrandom(&mut raw).map_err(|e| format!("OS RNG failed: {e}"))?;
+    let token: String = raw.iter().map(|b| format!("{:02x}", b)).collect();
+
+    let path = config.token_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, token.as_bytes())?;
+
+    // Lock down the DACL: strip inheritance (ProgramData grants Users:read),
+    // then allow only SYSTEM + Administrators (full) and INTERACTIVE (read) — so
+    // the unelevated GUI/CLI in the desktop session can read the token, but
+    // services, network logons and other sessions cannot. Best-effort.
+    let ok = std::process::Command::new("icacls")
+        .arg(&path)
+        .args([
+            "/inheritance:r",
+            "/grant:r",
+            "*S-1-5-18:F",     // NT AUTHORITY\SYSTEM
+            "*S-1-5-32-544:F", // BUILTIN\Administrators
+            "*S-1-5-4:R",      // NT AUTHORITY\INTERACTIVE
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !ok {
+        tracing::warn!(?path, "icacls failed on token file — it may be world-readable");
+    }
+
+    info!("Service token written to {:?}", path);
+    Ok(token)
 }
 
 /// Generate a random 32-byte token, write it to the well-known path with 0o640 permissions.

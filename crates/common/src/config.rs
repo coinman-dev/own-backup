@@ -134,11 +134,21 @@ impl AppConfig {
         }
     }
 
-    /// Path for the per-boot service authentication token (Unix only).
-    /// File permissions: 0o640. Readable by root and the own-backup group.
-    /// Regenerated on every service start; deleted on clean exit.
-    #[cfg(unix)]
+    /// Path for the per-boot service authentication token.
+    ///
+    /// Unix: alongside the UDS in the runtime dir (0o640, root + own-backup
+    /// group). Windows: in the data dir, ACL'd by the service so only SYSTEM /
+    /// Administrators / interactive users can read it (the unelevated GUI is an
+    /// interactive process, other sessions and services are not). Regenerated on
+    /// every service start.
     pub fn token_path(&self) -> PathBuf {
-        PathBuf::from("/run/own-backup/service.token")
+        #[cfg(unix)]
+        {
+            PathBuf::from("/run/own-backup/service.token")
+        }
+        #[cfg(not(unix))]
+        {
+            self.data_dir.join("service.token")
+        }
     }
 }

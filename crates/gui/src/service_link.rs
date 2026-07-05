@@ -9,6 +9,7 @@
 //! process: the whole point is a single, system-managed, privileged service. If
 //! it is not installed at all, the GUI warns the user to install it.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use tokio::sync::Mutex as AsyncMutex;
@@ -17,24 +18,34 @@ use own_backup_client::BackupClient;
 
 pub struct ServiceLink {
     endpoint: String,
-    token: String,
+    /// Per-boot bearer token file written by the service (Windows). Read fresh on
+    /// each connect so a token that appears after startup is picked up; empty
+    /// when absent (dev/foreground TCP has no token).
+    token_path: PathBuf,
     /// Cached client (cheap to clone; shares the HTTP/2 channel, auto-reconnects).
     client: AsyncMutex<Option<BackupClient>>,
 }
 
 impl ServiceLink {
     /// `grpc_address` is a bare `host:port` (as configured for the TCP bind); we
-    /// address it over http. Token is empty on the TCP path (dev / Windows).
-    pub fn new(grpc_address: &str, token: impl Into<String>) -> Self {
+    /// address it over http. `token_path` is where the service writes its
+    /// per-boot token.
+    pub fn new(grpc_address: &str, token_path: PathBuf) -> Self {
         Self {
             endpoint: format!("http://{grpc_address}"),
-            token: token.into(),
+            token_path,
             client: AsyncMutex::new(None),
         }
     }
 
+    fn read_token(&self) -> String {
+        std::fs::read_to_string(&self.token_path)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
+    }
+
     async fn connect(&self) -> Result<BackupClient, String> {
-        BackupClient::connect(self.endpoint.clone(), self.token.clone()).await
+        BackupClient::connect(self.endpoint.clone(), self.read_token()).await
     }
 
     /// A connected client. Connects on first use; if the service is unreachable
