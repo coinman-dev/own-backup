@@ -68,7 +68,7 @@ fn default_data_dir() -> PathBuf {
     }
     #[cfg(target_os = "windows")]
     {
-        PathBuf::from(r"C:\ProgramData\MyOwnBackup")
+        PathBuf::from(r"C:\ProgramData\OwnBackup")
     }
     #[cfg(not(target_os = "windows"))]
     {

@@ -18,9 +18,24 @@ mod imp {
 
     windows_service::define_windows_service!(ffi_service_main, service_main);
 
-    pub fn run_as_service() -> Result<(), Box<dyn std::error::Error>> {
-        service_dispatcher::start(SERVICE_NAME, ffi_service_main)?;
-        Ok(())
+    /// `ERROR_FAILED_SERVICE_CONTROLLER_CONNECT` — returned by
+    /// `StartServiceCtrlDispatcher` when the process was NOT launched by the SCM
+    /// (i.e. a human ran the exe in a console).
+    const ERROR_FAILED_SERVICE_CONTROLLER_CONNECT: i32 = 1063;
+
+    /// Run under the Service Control Manager. Returns `Ok(true)` when we were
+    /// launched by the SCM and have now stopped; `Ok(false)` when we were run
+    /// from a console (so the caller can show info instead).
+    pub fn run_as_service() -> Result<bool, Box<dyn std::error::Error>> {
+        match service_dispatcher::start(SERVICE_NAME, ffi_service_main) {
+            Ok(()) => Ok(true),
+            Err(windows_service::Error::Winapi(e))
+                if e.raw_os_error() == Some(ERROR_FAILED_SERVICE_CONTROLLER_CONNECT) =>
+            {
+                Ok(false)
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     fn service_main(arguments: Vec<OsString>) {

@@ -21,37 +21,26 @@ pub enum ServiceCommand {
 }
 
 pub async fn run(args: ServiceArgs) -> own_backup_common::Result<()> {
+    // The service manages itself; the CLI just points at the right command.
+    // (`own-backup-service /install` self-elevates via UAC on Windows.)
+    let name = own_backup_common::WINDOWS_SERVICE_DISPLAY_NAME;
     match args.command {
         ServiceCommand::Install => {
-            #[cfg(target_os = "windows")]
-            {
-                let exe = std::env::current_exe()
-                    .map_err(|e| own_backup_common::OwnBackupError::Io(e))?;
-                println!("Installing service...");
-                println!(
-                    "Run: sc create MyOwnBackup binPath= \"{}\" start= auto",
-                    exe.display()
-                );
-                println!(
-                    "Run: sc description MyOwnBackup \"My Own Backup - Block-level backup service\""
-                );
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                println!("Service installation is only supported on Windows.");
-            }
+            println!("Установка службы «{name}»:");
+            println!("  own-backup-service.exe /install   (Windows — запросит права администратора)");
+            println!("  own-backup-service --install       (Linux — от root)");
         }
         ServiceCommand::Uninstall => {
-            println!("Run: sc delete MyOwnBackup");
+            println!("own-backup-service.exe /uninstall");
         }
         ServiceCommand::Start => {
-            println!("Run: sc start MyOwnBackup");
+            println!("own-backup-service.exe /start   (или: net start \"{name}\")");
         }
         ServiceCommand::Stop => {
-            println!("Run: sc stop MyOwnBackup");
+            println!("own-backup-service.exe /stop    (или: net stop \"{name}\")");
         }
         ServiceCommand::Status => {
-            println!("Run: sc query MyOwnBackup");
+            println!("own-backup-service.exe /status  (или: sc query {})", own_backup_common::WINDOWS_SERVICE_NAME);
         }
     }
     Ok(())

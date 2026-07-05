@@ -10,6 +10,7 @@ import type {
   DecryptResult,
   DiskBackup,
   DiskRestoreSummary,
+  ServiceHealth,
 } from './types';
 
 export const api = {
@@ -46,4 +47,5 @@ export const api = {
   // --- misc ---
   getConfig: () => invoke<Record<string, unknown>>('get_config'),
   saveConfig: (config: Record<string, unknown>) => invoke<void>('save_config', { config }),
+  serviceHealth: () => invoke<ServiceHealth>('service_health'),
 };

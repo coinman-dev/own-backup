@@ -1,15 +1,14 @@
 //! Connection from the GUI to the backup service (the orchestrator core).
 //!
 //! The GUI is a thin client: jobs, the run queue, activity and the scheduler all
-//! live in `own-backup-service`. This link connects to that service over gRPC
-//! (localhost TCP). When nothing is listening — e.g. the app is run without
-//! installing the Windows service / systemd unit — it spawns a private
-//! foreground instance so the GUI still works, at the cost of the scheduler only
-//! running while the GUI is open. On a normal install the auto-start service is
-//! already running as LocalSystem/root and we simply attach to it.
+//! live in `own-backup-service`, which is installed as an auto-start Windows
+//! service (LocalSystem) / systemd unit (root). On a normal machine it is
+//! already running when the GUI opens and we simply attach over gRPC (localhost
+//! TCP). If it is installed but stopped we ask the OS to start it (best effort —
+//! starting a service needs admin). We never launch the service as a child
+//! process: the whole point is a single, system-managed, privileged service. If
+//! it is not installed at all, the GUI warns the user to install it.
 
-use std::process::Child;
-use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
 use tokio::sync::Mutex as AsyncMutex;
@@ -21,8 +20,6 @@ pub struct ServiceLink {
     token: String,
     /// Cached client (cheap to clone; shares the HTTP/2 channel, auto-reconnects).
     client: AsyncMutex<Option<BackupClient>>,
-    /// A foreground service we spawned ourselves, kept alive for our lifetime.
-    child: StdMutex<Option<Child>>,
 }
 
 impl ServiceLink {
@@ -33,84 +30,112 @@ impl ServiceLink {
             endpoint: format!("http://{grpc_address}"),
             token: token.into(),
             client: AsyncMutex::new(None),
-            child: StdMutex::new(None),
         }
     }
 
-    /// A connected client. Connects on first use, spawning a foreground service
-    /// if the endpoint is unreachable, then polls until it accepts.
+    async fn connect(&self) -> Result<BackupClient, String> {
+        BackupClient::connect(self.endpoint.clone(), self.token.clone()).await
+    }
+
+    /// A connected client. Connects on first use; if the service is unreachable
+    /// it nudges the OS to start the installed service and retries. Fails with a
+    /// user-facing message (incl. an install hint) when it still can't connect.
     pub async fn client(&self) -> Result<BackupClient, String> {
         let mut guard = self.client.lock().await;
         if let Some(c) = guard.as_ref() {
             return Ok(c.clone());
         }
-        if let Ok(c) = BackupClient::connect(self.endpoint.clone(), self.token.clone()).await {
+        if let Ok(c) = self.connect().await {
             *guard = Some(c.clone());
             return Ok(c);
         }
-        // Nothing listening — start our own and wait for it to accept (~6s).
-        self.spawn_service()?;
-        for _ in 0..30 {
+        // Not reachable — try to start the installed service, then wait (~5s).
+        // `sc`/`net` block, so run them off the async runtime.
+        let _ = tokio::task::spawn_blocking(start_installed_service).await;
+        for _ in 0..25 {
             tokio::time::sleep(Duration::from_millis(200)).await;
-            if let Ok(c) = BackupClient::connect(self.endpoint.clone(), self.token.clone()).await {
+            if let Ok(c) = self.connect().await {
                 *guard = Some(c.clone());
                 return Ok(c);
             }
         }
-        Err("Не удалось подключиться к службе резервного копирования (localhost:50051).".into())
+        Err(tokio::task::spawn_blocking(unreachable_message)
+            .await
+            .unwrap_or_else(|_| "Служба резервного копирования недоступна.".into()))
     }
 
-    /// Drop the cached client so the next [`client`](Self::client) reconnects
-    /// (and re-spawns the service if it has since exited).
+    /// Drop the cached client so the next [`client`](Self::client) reconnects.
     pub async fn invalidate(&self) {
         *self.client.lock().await = None;
     }
 
-    /// Spawn `own-backup-service --foreground` next to our exe, at most once
-    /// (re-spawns only if a previously spawned child has exited).
-    fn spawn_service(&self) -> Result<(), String> {
-        let mut child = self.child.lock().unwrap();
-        if let Some(existing) = child.as_mut() {
-            if matches!(existing.try_wait(), Ok(None)) {
-                return Ok(()); // still running
-            }
+    /// Quick probe: can we reach the service right now? (Does not try to start
+    /// it — used by the startup health check to decide whether to warn.)
+    pub async fn is_reachable(&self) -> bool {
+        if self.client.lock().await.is_some() {
+            return true;
         }
-        let exe = service_exe_path()?;
-        let mut cmd = std::process::Command::new(&exe);
-        cmd.arg("--foreground");
-        #[cfg(target_os = "windows")]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
-        let spawned = cmd
-            .spawn()
-            .map_err(|e| format!("не удалось запустить службу {}: {e}", exe.display()))?;
-        tracing::info!(exe = %exe.display(), "spawned foreground backup service");
-        *child = Some(spawned);
-        Ok(())
+        self.connect().await.is_ok()
     }
 }
 
-/// `own-backup-service[.exe]` next to the running GUI executable.
-fn service_exe_path() -> Result<std::path::PathBuf, String> {
-    let dir = std::env::current_exe()
-        .map_err(|e| e.to_string())?
-        .parent()
-        .ok_or("у исполняемого файла нет родительского каталога")?
-        .to_path_buf();
-    let name = if cfg!(windows) {
-        "own-backup-service.exe"
+/// Message shown when the service can't be reached, tailored to whether it is
+/// installed (stopped) or missing entirely.
+fn unreachable_message() -> String {
+    let name = own_backup_common::WINDOWS_SERVICE_DISPLAY_NAME;
+    if service_installed() {
+        format!(
+            "Служба «{name}» установлена, но не запущена. Запустите её \
+             (нужны права администратора) или перезагрузите компьютер."
+        )
     } else {
-        "own-backup-service"
-    };
-    let path = dir.join(name);
-    if !path.exists() {
-        return Err(format!(
-            "не найден исполняемый файл службы: {}",
-            path.display()
-        ));
+        format!(
+            "Служба «{name}» не установлена. Для работы программы установите её: \
+             запустите own-backup-service.exe /install (появится запрос прав администратора)."
+        )
     }
-    Ok(path)
+}
+
+/// Whether the backup service is registered with the OS (regardless of running).
+pub fn service_installed() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        // `sc query <name>` exits 0 if the service exists, 1060 if it does not.
+        run_hidden("sc", &["query", own_backup_common::WINDOWS_SERVICE_NAME])
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::path::Path::new("/etc/systemd/system/own-backup.service").exists()
+    }
+}
+
+/// Best-effort nudge to start the installed service. Starting a service needs
+/// admin, so this only succeeds if the GUI is elevated or the service DACL
+/// allows it; the auto-start service is normally already running anyway.
+fn start_installed_service() {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = run_hidden("net", &["start", own_backup_common::WINDOWS_SERVICE_DISPLAY_NAME]);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = std::process::Command::new("systemctl")
+            .args(["start", "own-backup"])
+            .status();
+    }
+}
+
+/// Run a console helper (`sc` / `net`) without flashing a console window and
+/// capturing its output (so nothing prints into the GUI).
+#[cfg(target_os = "windows")]
+fn run_hidden(program: &str, args: &[&str]) -> Option<std::process::Output> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    std::process::Command::new(program)
+        .args(args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()
 }

@@ -24,6 +24,26 @@ pub struct ServiceStatusDto {
     pub total_backups_completed: u64,
 }
 
+/// Startup health of the backup service, so the GUI can warn the user when it
+/// isn't running (installed-but-stopped) or isn't installed at all.
+#[derive(serde::Serialize)]
+pub struct ServiceHealth {
+    /// gRPC endpoint answers right now.
+    pub reachable: bool,
+    /// The service is registered with the OS (SCM / systemd), regardless of state.
+    pub installed: bool,
+}
+
+#[tauri::command]
+pub async fn service_health(state: State<'_, GuiState>) -> Result<ServiceHealth, String> {
+    let reachable = state.link.is_reachable().await;
+    // `sc query` blocks — keep it off the async runtime.
+    let installed = tokio::task::spawn_blocking(crate::service_link::service_installed)
+        .await
+        .unwrap_or(false);
+    Ok(ServiceHealth { reachable, installed })
+}
+
 #[tauri::command]
 pub async fn get_service_status(state: State<'_, GuiState>) -> Result<ServiceStatusDto, String> {
     let disconnected = || ServiceStatusDto {

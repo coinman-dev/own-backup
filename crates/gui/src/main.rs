@@ -72,82 +72,11 @@ fn init_logging() {
     );
 }
 
-/// If the process is not elevated, relaunch it via UAC ("runas") and exit the
-/// current instance. Backups need admin rights for VSS + raw device I/O, so we
-/// self-elevate at startup rather than failing later with access-denied.
-#[cfg(target_os = "windows")]
-fn ensure_admin() {
-    use std::os::windows::ffi::OsStrExt;
-    use windows::core::{w, PCWSTR};
-    use windows::Win32::Foundation::{CloseHandle, HANDLE};
-    use windows::Win32::Security::{
-        GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
-    };
-    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-    use windows::Win32::UI::Shell::ShellExecuteW;
-    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-
-    // SAFETY: standard token-elevation query; handles are closed after use.
-    let elevated = unsafe {
-        let mut token = HANDLE::default();
-        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
-            return; // can't determine — let the app try and surface errors
-        }
-        let mut elevation = TOKEN_ELEVATION::default();
-        let mut ret_len = 0u32;
-        let ok = GetTokenInformation(
-            token,
-            TokenElevation,
-            Some(&mut elevation as *mut _ as *mut _),
-            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
-            &mut ret_len,
-        )
-        .is_ok();
-        let _ = CloseHandle(token);
-        if !ok {
-            return;
-        }
-        elevation.TokenIsElevated != 0
-    };
-
-    if elevated {
-        return;
-    }
-
-    // Relaunch elevated. The current (non-elevated) instance then exits — no
-    // window has been created yet, so there is no flicker.
-    let Ok(exe) = std::env::current_exe() else {
-        return;
-    };
-    let exe_w: Vec<u16> = exe.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-    let params: String = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
-    let params_w: Vec<u16> = params.encode_utf16().chain(std::iter::once(0)).collect();
-    let params_ptr = if params.is_empty() {
-        PCWSTR::null()
-    } else {
-        PCWSTR(params_w.as_ptr())
-    };
-
-    // SAFETY: all string pointers are valid NUL-terminated buffers.
-    unsafe {
-        ShellExecuteW(
-            None,
-            w!("runas"),
-            PCWSTR(exe_w.as_ptr()),
-            params_ptr,
-            PCWSTR::null(),
-            SW_SHOWNORMAL,
-        );
-    }
-    // Whether the user accepted (elevated instance launched) or declined the
-    // UAC prompt, this non-elevated instance must not continue.
-    std::process::exit(0);
-}
-
 fn main() {
-    #[cfg(target_os = "windows")]
-    ensure_admin();
-
+    // No UAC elevation at startup: backups, disk enumeration and passwords all
+    // run in the privileged service (LocalSystem), which the GUI reaches over
+    // gRPC. The GUI itself runs as the normal user. (In-process restore/verify
+    // still need the service — see plan stage 2e.)
     init_logging();
 
     // Load config (or use defaults)
@@ -202,6 +131,7 @@ fn main() {
             commands::settings::get_config,
             commands::settings::save_config,
             commands::settings::get_service_status,
+            commands::settings::service_health,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

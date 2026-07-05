@@ -18,17 +18,18 @@ use own_backup_common::config::AppConfig;
 use shutdown::{create_shutdown_channel, ShutdownSignal};
 
 /// Service identity — shared by the SCM registration, the systemd unit and the
-/// Windows service dispatcher.
+/// Windows service dispatcher. Names live in `own-backup-common` so the GUI and
+/// CLI address the exact same service.
 #[allow(dead_code)] // some are per-platform; the others' cfg peers still read them
-pub const SERVICE_NAME: &str = "MyOwnBackup";
+pub const SERVICE_NAME: &str = own_backup_common::WINDOWS_SERVICE_NAME;
 #[allow(dead_code)]
-pub const SERVICE_DISPLAY_NAME: &str = "My Own Backup";
+pub const SERVICE_DISPLAY_NAME: &str = own_backup_common::WINDOWS_SERVICE_DISPLAY_NAME;
 #[allow(dead_code)]
 pub const SERVICE_DESCRIPTION: &str =
-    "Block-level backup engine for My Own Backup: runs scheduled backups and serves the GUI/CLI.";
+    "Block-level backup engine for Own Backup: runs scheduled backups and serves the GUI/CLI.";
 /// systemd unit base name on Linux (`own-backup.service`).
 #[allow(dead_code)]
-pub const LINUX_UNIT_NAME: &str = "own-backup";
+pub const LINUX_UNIT_NAME: &str = own_backup_common::LINUX_UNIT_NAME;
 
 /// How the binary was invoked.
 enum Mode {
@@ -67,7 +68,9 @@ fn parse_mode(args: &[String]) -> Mode {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Logs go to stderr so `own-backup-service.exe` (info to stdout) stays clean.
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info".into()),
@@ -75,7 +78,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
-    match parse_mode(&args) {
+    let mode = parse_mode(&args);
+
+    // The SCM control operations (register/remove/start/stop) require admin on
+    // Windows. Self-elevate via UAC rather than failing with access-denied.
+    #[cfg(target_os = "windows")]
+    if matches!(
+        mode,
+        Mode::Install | Mode::Uninstall | Mode::Start | Mode::Stop | Mode::Restart
+    ) && elevate::relaunch_elevated(&args)
+    {
+        return Ok(()); // an elevated copy is doing the work; this one is done
+    }
+
+    match mode {
         Mode::Install => install::install(),
         Mode::Uninstall => install::uninstall(),
         Mode::Start => install::start(),
@@ -86,6 +102,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Mode::Foreground => run_loop(true),
         Mode::Service => run_service_mode(),
     }
+}
+
+/// Human-facing description printed when the binary is launched directly in a
+/// console (rather than by the SCM). It is a background service, so a bare run
+/// should explain itself and list its commands instead of trying to serve.
+fn print_info() {
+    println!("{} v{}", SERVICE_DISPLAY_NAME, env!("CARGO_PKG_VERSION"));
+    println!("{SERVICE_DESCRIPTION}");
+    println!();
+    println!(
+        "Это фоновая служба «{SERVICE_DISPLAY_NAME}». Обычно ею управляет система \
+         (автозапуск при загрузке). Запускать вручную из консоли не нужно."
+    );
+    println!();
+    println!("Команды (принимаются и /flag, и --flag):");
+    println!("  /install      установить и запустить службу (запросит права администратора)");
+    println!("  /uninstall    остановить и удалить службу");
+    println!("  /start        запустить службу");
+    println!("  /stop         остановить службу");
+    println!("  /restart      перезапустить службу");
+    println!("  /status       показать состояние службы");
+    println!("  --foreground  запустить в консоли для отладки (TCP localhost:50051)");
 }
 
 /// Build a tokio runtime and run the gRPC loop until shutdown. `use_tcp`
@@ -104,19 +142,98 @@ fn run_loop(use_tcp: bool) -> Result<(), Box<dyn std::error::Error>> {
     })
 }
 
-/// Default entry when no mode flag is given: the SCM launches us this way on
-/// Windows; on Unix a systemd unit runs us in the foreground with `--run`, so
-/// this bare form (a plain daemon over UDS) is mostly a fallback.
+/// Default entry when no mode flag is given. On Windows the SCM launches us this
+/// way; if instead a human ran the exe in a console, the service-control
+/// dispatcher reports "not started by the SCM" and we show the info screen. On
+/// Unix the systemd unit uses `--run`, so a bare run here is also a human — show
+/// info rather than silently daemonizing.
 fn run_service_mode() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_os = "windows")]
     {
-        info!("Starting as Windows Service...");
-        windows_service::run_as_service()?;
-        Ok(())
+        if windows_service::run_as_service()? {
+            Ok(()) // ran under the SCM and has now stopped
+        } else {
+            print_info(); // launched from a console — explain and exit
+            Ok(())
+        }
     }
     #[cfg(not(target_os = "windows"))]
     {
-        run_loop(false)
+        print_info();
+        Ok(())
+    }
+}
+
+/// Windows UAC self-elevation for the SCM control commands.
+#[cfg(target_os = "windows")]
+mod elevate {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows::core::{w, PCWSTR};
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::Security::{
+        GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
+    };
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    /// Is this process already running elevated?
+    fn is_elevated() -> bool {
+        // SAFETY: standard token-elevation query; the handle is closed after use.
+        unsafe {
+            let mut token = HANDLE::default();
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
+                return true; // can't tell — assume elevated and let the op surface errors
+            }
+            let mut elevation = TOKEN_ELEVATION::default();
+            let mut ret_len = 0u32;
+            let ok = GetTokenInformation(
+                token,
+                TokenElevation,
+                Some(&mut elevation as *mut _ as *mut _),
+                std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+                &mut ret_len,
+            )
+            .is_ok();
+            let _ = CloseHandle(token);
+            if !ok {
+                return true;
+            }
+            elevation.TokenIsElevated != 0
+        }
+    }
+
+    /// If not elevated, relaunch this exe with the same args via UAC ("runas")
+    /// and return `true` (the caller should exit). Returns `false` when already
+    /// elevated so the caller proceeds normally.
+    pub fn relaunch_elevated(args: &[String]) -> bool {
+        if is_elevated() {
+            return false;
+        }
+        let Ok(exe) = std::env::current_exe() else {
+            return false; // can't relaunch — let the op run and report access-denied
+        };
+        let exe_w: Vec<u16> = exe.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        let params = args.join(" ");
+        let params_w: Vec<u16> = params.encode_utf16().chain(std::iter::once(0)).collect();
+        let params_ptr = if params.is_empty() {
+            PCWSTR::null()
+        } else {
+            PCWSTR(params_w.as_ptr())
+        };
+        // SAFETY: all pointers are valid NUL-terminated wide buffers.
+        unsafe {
+            ShellExecuteW(
+                None,
+                w!("runas"),
+                PCWSTR(exe_w.as_ptr()),
+                params_ptr,
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            );
+        }
+        true
     }
 }
 

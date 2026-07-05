@@ -110,6 +110,12 @@ export interface ServiceStatus {
   total_backups_completed: number;
 }
 
+/** Startup health of the backup service (for the "install/start the service" warning). */
+export interface ServiceHealth {
+  reachable: boolean;
+  installed: boolean;
+}
+
 export type ViewName =
   | 'backup'
   | 'restore'
