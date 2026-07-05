@@ -1,77 +1,49 @@
 //! Tauri commands for the job model (plan v2, phase 6).
+//!
+//! These are thin proxies onto the backup service over gRPC: the job store, run
+//! queue, activity log and encrypted-volume passwords all live there, so the
+//! scheduler and manual runs share one source of truth. Validation (name /
+//! source / dest-not-on-source) is enforced service-side.
 
 use tauri::State;
 
-use crate::jobs::{
-    default_exclusions, dest_collision_letter, Job, JobRun, QueueSnapshot, ScheduleConfig,
-    SchemeConfig,
-};
+use crate::jobs::{Job, JobRun, QueueSnapshot};
 use crate::state::GuiState;
-
-/// Reject a destination that lives on any of the volumes being backed up.
-fn check_dest_not_on_source(job: &Job) -> Result<(), String> {
-    if let Some(letter) = dest_collision_letter(job, &job.dest_folder) {
-        return Err(format!(
-            "Нельзя сохранять копию на тот же диск, который копируется ({letter}:). \
-             Выберите для назначения другой диск."
-        ));
-    }
-    Ok(())
-}
 
 #[tauri::command]
 pub async fn list_backup_jobs(state: State<'_, GuiState>) -> Result<Vec<Job>, String> {
-    Ok(state.job_store.list())
+    state.link.client().await?.list_jobs().await
 }
 
 #[tauri::command]
 pub async fn get_backup_job(state: State<'_, GuiState>, id: String) -> Result<Option<Job>, String> {
-    Ok(state.job_store.get(&id))
+    state.link.client().await?.get_job(&id).await
 }
 
-/// A blank job pre-filled with sensible defaults (default exclusions etc.),
-/// used to seed the wizard. Default name = the computer name (like Acronis).
+/// A blank job pre-filled with sensible defaults (default exclusions etc.), used
+/// to seed the wizard. Default name = the computer name (like Acronis).
 #[tauri::command]
-pub async fn new_job_template() -> Result<Job, String> {
-    let name = std::env::var("COMPUTERNAME")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| std::env::var("HOSTNAME").ok().filter(|s| !s.trim().is_empty()))
-        .unwrap_or_else(|| "Этот компьютер".into());
-    Ok(Job {
-        name,
-        schedule: ScheduleConfig::default(),
-        scheme: SchemeConfig::default(),
-        ..Default::default()
-    })
+pub async fn new_job_template(state: State<'_, GuiState>) -> Result<Job, String> {
+    state.link.client().await?.new_job_template().await
 }
 
 /// The default exclusion list (for the "reset" button on the Exclusions step).
 #[tauri::command]
-pub async fn default_exclusion_patterns() -> Result<Vec<String>, String> {
-    Ok(default_exclusions())
+pub async fn default_exclusion_patterns(state: State<'_, GuiState>) -> Result<Vec<String>, String> {
+    state.link.client().await?.default_exclusions().await
 }
 
 /// Create or update a job. Returns the stored job (with generated id/dates).
+/// The service validates name / source / dest-not-on-source and rejects invalid
+/// jobs with a message we surface verbatim.
 #[tauri::command]
 pub async fn save_backup_job(state: State<'_, GuiState>, job: Job) -> Result<Job, String> {
-    if job.name.trim().is_empty() {
-        return Err("Укажите имя задания.".into());
-    }
-    if job.source_list().is_empty() {
-        return Err("Выберите источник (том).".into());
-    }
-    if job.dest_folder.trim().is_empty() {
-        return Err("Выберите папку назначения.".into());
-    }
-    check_dest_not_on_source(&job)?;
-    Ok(state.job_store.upsert(job))
+    state.link.client().await?.save_job(&job).await
 }
 
 #[tauri::command]
 pub async fn delete_backup_job(state: State<'_, GuiState>, id: String) -> Result<(), String> {
-    state.job_store.delete(&id);
-    Ok(())
+    state.link.client().await?.delete_job(&id).await
 }
 
 /// Result of a decrypt attempt for the wizard: whether it unlocked, plus the
@@ -84,9 +56,10 @@ pub struct DecryptResult {
     pub used_bytes: u64,
 }
 
-/// Unlock an encrypted (LUKS) source `volume` with `password` and probe the
-/// decrypted filesystem. On success the password is cached for this session
-/// (and persisted OS-protected when `remember`), so the backup can use it.
+/// Unlock an encrypted (LUKS/BitLocker) source `volume` with `password` and
+/// probe the decrypted filesystem, then hand the password to the service so the
+/// backup — which runs there — can unlock the volume. When `remember` is set the
+/// service persists it OS-protected for scheduled runs.
 #[tauri::command]
 pub async fn decrypt_volume(
     state: State<'_, GuiState>,
@@ -94,8 +67,10 @@ pub async fn decrypt_volume(
     password: String,
     remember: bool,
 ) -> Result<DecryptResult, String> {
+    // Probe the inner filesystem locally so the wizard can show it like a normal
+    // volume. This needs the engine (Windows only); off Windows we skip it.
     #[cfg(target_os = "windows")]
-    {
+    let result = {
         let (vol, pw) = (volume.clone(), password.clone());
         let probe = tokio::task::spawn_blocking(move || {
             own_backup_backup::engine_win::unlock_and_probe(&vol, &pw)
@@ -103,73 +78,58 @@ pub async fn decrypt_volume(
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
-        if probe.ok {
-            let token = own_backup_core::source_token(&volume);
-            state
-                .passwords
-                .remember(&token, password, remember)
-                .map_err(|e| e.to_string())?;
-        }
-        Ok(DecryptResult {
+        DecryptResult {
             ok: probe.ok,
             filesystem: probe.filesystem,
             label: probe.label,
             used_bytes: probe.used_bytes,
-        })
-    }
+        }
+    };
     #[cfg(not(target_os = "windows"))]
-    {
-        // No engine off Windows — cannot actually decrypt; cache the password so
-        // the wizard flow works and report no inner-FS details.
-        let token = own_backup_core::source_token(&volume);
+    let result = DecryptResult {
+        ok: true,
+        filesystem: String::new(),
+        label: String::new(),
+        used_bytes: 0,
+    };
+
+    // Only forward a password that actually unlocked the volume.
+    if result.ok {
         state
-            .passwords
-            .remember(&token, password, remember)
-            .map_err(|e| e.to_string())?;
-        Ok(DecryptResult { ok: true, filesystem: String::new(), label: String::new(), used_bytes: 0 })
+            .link
+            .client()
+            .await?
+            .provide_volume_password(&volume, &password, remember)
+            .await?;
     }
+    Ok(result)
 }
 
 /// Enqueue a job for backup. Runs immediately if idle, otherwise queues.
 #[tauri::command]
 pub async fn run_backup_job(state: State<'_, GuiState>, id: String) -> Result<(), String> {
-    // Guard again at run time: a job could have been saved before this rule
-    // existed, or edited on disk, or point at a since-relettered drive.
-    let job = state
-        .job_store
-        .get(&id)
-        .ok_or_else(|| "Задание не найдено.".to_string())?;
-    check_dest_not_on_source(&job)?;
-    // Avoid enqueuing the same job twice while it is pending/running.
-    {
-        let pending = state.run_queue.pending.lock().unwrap();
-        let current = state.run_queue.current.lock().unwrap();
-        if pending.iter().any(|j| *j == id) || current.as_deref() == Some(id.as_str()) {
-            return Ok(());
-        }
-    }
-    state.run_queue.pending.lock().unwrap().push_back(id.clone());
-    state
-        .job_tx
-        .send(id)
-        .map_err(|e| format!("Не удалось поставить в очередь: {e}"))?;
-    Ok(())
+    state.link.client().await?.run_job(&id).await
 }
 
-/// Remove a still-pending job from the queue (cannot cancel the running one
-/// here — use cancel_engine_op for that).
+/// Remove a still-pending job from the queue.
 #[tauri::command]
 pub async fn cancel_queued_job(state: State<'_, GuiState>, id: String) -> Result<(), String> {
-    state.run_queue.pending.lock().unwrap().retain(|j| *j != id);
-    Ok(())
+    state.link.client().await?.cancel_queued(&id).await
+}
+
+/// Signal-cancel the backup currently running in the service. (In-process engine
+/// ops — restore/verify — are cancelled separately via `cancel_engine_op`.)
+#[tauri::command]
+pub async fn cancel_running_backup(state: State<'_, GuiState>) -> Result<(), String> {
+    state.link.client().await?.cancel_running().await
 }
 
 #[tauri::command]
 pub async fn get_run_queue(state: State<'_, GuiState>) -> Result<QueueSnapshot, String> {
-    Ok(state.run_queue.snapshot())
+    state.link.client().await?.get_queue().await
 }
 
 #[tauri::command]
 pub async fn list_activity(state: State<'_, GuiState>) -> Result<Vec<JobRun>, String> {
-    Ok(state.job_store.activity())
+    state.link.client().await?.list_activity().await
 }

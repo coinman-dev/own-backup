@@ -22,12 +22,14 @@ own-backup-scheduler = { workspace = true }
 own-backup-restore = { workspace = true }
 own-backup-backup = { workspace = true }
 own-backup-core = { workspace = true }
+own-backup-client = { workspace = true }
 tauri = { version = "2", features = ["devtools"] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+tokio-stream = "0.1"
 tonic = { workspace = true }
 prost = { workspace = true }
 uuid = { workspace = true }

@@ -109,7 +109,7 @@ export async function cancelQueued(id: string): Promise<void> {
 
 export async function cancelRunning(): Promise<void> {
   try {
-    await api.cancelEngineOp();
+    await api.cancelRunningBackup();
   } catch {
     /* ignore */
   }

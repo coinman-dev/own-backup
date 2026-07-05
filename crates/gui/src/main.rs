@@ -3,9 +3,13 @@
 
 mod commands;
 mod jobs;
+mod service_link;
 mod state;
 
+use std::sync::Arc;
+
 use own_backup_common::config::AppConfig;
+use service_link::ServiceLink;
 use state::GuiState;
 
 /// Diagnostic log next to the exe: `own-backup-gui.log`.
@@ -149,33 +153,24 @@ fn main() {
     // Load config (or use defaults)
     let config = AppConfig::default();
 
-    // Ensure data directory exists
+    // Ensure data directory exists (config.toml is written here).
     let _ = std::fs::create_dir_all(&config.data_dir);
 
-    // Initialize metadata DB (legacy path; kept until the service rewrite)
-    let _ = own_backup_metadata::open_database(&config.db_path());
-
-    // Job store + serial run queue.
-    let job_store = jobs::JobStore::load(&config.data_dir);
-    let run_queue = jobs::RunQueue::new();
-    let (job_tx, job_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-
-    let gui_state = GuiState::new(config, job_store.clone(), run_queue.clone(), job_tx);
-    let cancel_flag = gui_state.cancel_flag.clone();
-    let passwords = gui_state.passwords.clone();
+    // The orchestrator (job store, queue, scheduler, backup worker) lives in the
+    // service; connect to it, spawning a private foreground instance if none is
+    // installed/running so the GUI still works standalone.
+    let link = Arc::new(ServiceLink::new(&config.grpc_address, ""));
+    let gui_state = GuiState::new(config, link.clone());
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(gui_state)
         .setup(move |app| {
-            // Spawn the background run-queue worker, bridging core events to
-            // Tauri window events via the sink.
-            let sink: std::sync::Arc<dyn jobs::EventSink> =
-                std::sync::Arc::new(jobs::TauriEventSink { app: app.handle().clone() });
-            tauri::async_runtime::spawn(jobs::run_queue_worker(
-                sink, job_store, run_queue, cancel_flag, passwords, job_rx,
-            ));
+            // Bridge the service's event stream (progress / queue / finished) to
+            // the Tauri window events the frontend already listens for.
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(bridge_service_events(handle, link.clone()));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -191,6 +186,7 @@ fn main() {
             commands::backup_jobs::decrypt_volume,
             commands::backup_jobs::run_backup_job,
             commands::backup_jobs::cancel_queued_job,
+            commands::backup_jobs::cancel_running_backup,
             commands::backup_jobs::get_run_queue,
             commands::backup_jobs::list_activity,
             // --- engine ops used by Restore/Tools ---
@@ -209,4 +205,49 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Long-lived task: subscribe to the service's orchestration event stream and
+/// re-emit each event as the Tauri window event the frontend listens for
+/// (`job-progress` / `queue-changed` / `job-finished`). Reconnects if the stream
+/// ends (e.g. the service restarts).
+async fn bridge_service_events(app: tauri::AppHandle, link: Arc<ServiceLink>) {
+    use own_backup_client::ClientEvent;
+    use tauri::Emitter;
+    use tokio_stream::StreamExt;
+
+    loop {
+        let mut client = match link.client().await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "event bridge: service unreachable, retrying");
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                continue;
+            }
+        };
+        match client.stream_events().await {
+            Ok(stream) => {
+                let mut stream = Box::pin(stream);
+                while let Some(ev) = stream.next().await {
+                    match ev {
+                        ClientEvent::Progress(p) => {
+                            let _ = app.emit("job-progress", p);
+                        }
+                        ClientEvent::Queue(q) => {
+                            let _ = app.emit("queue-changed", q);
+                        }
+                        ClientEvent::Finished(r) => {
+                            let _ = app.emit("job-finished", r);
+                        }
+                        ClientEvent::Unknown { .. } => {}
+                    }
+                }
+                tracing::info!("service event stream ended; reconnecting");
+            }
+            Err(e) => tracing::warn!(error = %e, "stream_events failed"),
+        }
+        // Stream closed — the cached channel may be dead; drop it and retry.
+        link.invalidate().await;
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
 }

@@ -181,6 +181,30 @@ impl BackupClient {
         Ok(stream.filter_map(|item| item.ok().map(decode_event)))
     }
 
+    // --- Encrypted volumes ------------------------------------------------
+
+    /// Hand a password for an encrypted (LUKS/BitLocker) source `volume` to the
+    /// service, so a backup running there can unlock it. Cached for the session;
+    /// `remember` also persists it OS-protected for scheduled runs.
+    pub async fn provide_volume_password(
+        &mut self,
+        volume: &str,
+        password: &str,
+        remember: bool,
+    ) -> Result<()> {
+        let json = serde_json::json!({
+            "volume": volume,
+            "password": password,
+            "remember": remember,
+        })
+        .to_string();
+        self.inner
+            .provide_volume_password(self.request(proto::JsonRequest { json }))
+            .await
+            .map_err(status)?;
+        Ok(())
+    }
+
     // --- Misc -------------------------------------------------------------
 
     /// Disk inventory as raw JSON (a `[DiskInfo]` array) — callers that need

@@ -2775,6 +2775,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "own-backup-backup",
+ "own-backup-client",
  "own-backup-common",
  "own-backup-core",
  "own-backup-inventory",
@@ -2792,6 +2793,7 @@ dependencies = [
  "tauri-plugin-shell",
  "tempfile",
  "tokio",
+ "tokio-stream",
  "toml 0.8.2",
  "tonic",
  "tonic-build",
