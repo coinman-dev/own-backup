@@ -636,4 +636,99 @@ mod tests {
         let mut vol = MemVolume(vec![0u8; 8192]);
         assert!(open_luks(&mut vol, b"x").is_err());
     }
+
+    /// Cross-check master-key recovery against the reference implementation:
+    /// `cryptsetup` formats a real LUKS1/LUKS2 container (root-free, on a file)
+    /// and dumps its master key; [`open_luks`] must recover the same bytes.
+    /// `cargo test -p own-backup-backup -- --ignored` (needs `cryptsetup`).
+    #[test]
+    #[ignore]
+    fn unlock_matches_cryptsetup() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        fn cryptsetup(args: &[&str], password: &str) -> std::process::Output {
+            let mut child = Command::new("cryptsetup")
+                .args(args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn cryptsetup");
+            child.stdin.take().unwrap().write_all(password.as_bytes()).unwrap();
+            child.wait_with_output().unwrap()
+        }
+        fn push_hex(s: &str, out: &mut Vec<u8>) {
+            for tok in s.split_whitespace() {
+                if let Ok(b) = u8::from_str_radix(tok, 16) {
+                    out.push(b);
+                }
+            }
+        }
+        // Parse the hex bytes under a `luksDump --dump-master-key`'s "MK dump:".
+        fn parse_mk(dump: &str) -> Vec<u8> {
+            let mut bytes = Vec::new();
+            let mut in_mk = false;
+            for line in dump.lines() {
+                if let Some(rest) = line.split_once("MK dump:") {
+                    in_mk = true;
+                    push_hex(rest.1, &mut bytes);
+                } else if in_mk {
+                    let t = line.trim();
+                    if t.is_empty() || !t.starts_with(|c: char| c.is_ascii_hexdigit()) {
+                        break;
+                    }
+                    push_hex(t, &mut bytes);
+                }
+            }
+            bytes
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let pw = "correct horse battery";
+        let cases: [(&str, Vec<&str>); 2] = [
+            (
+                "luks1",
+                vec![
+                    "luksFormat", "-q", "--type", "luks1", "--pbkdf", "pbkdf2",
+                    "--pbkdf-force-iterations", "1000", "--key-file", "-",
+                ],
+            ),
+            (
+                "luks2-argon2id",
+                vec![
+                    "luksFormat", "-q", "--type", "luks2", "--pbkdf", "argon2id",
+                    "--pbkdf-force-iterations", "4", "--pbkdf-memory", "32",
+                    "--pbkdf-parallel", "1", "--key-file", "-",
+                ],
+            ),
+        ];
+
+        for (label, fmt) in cases {
+            let path = dir.path().join(format!("{label}.luks"));
+            std::fs::File::create(&path).unwrap().set_len(32 * 1024 * 1024).unwrap();
+            let mut args = fmt.clone();
+            args.push(path.to_str().unwrap());
+            let out = cryptsetup(&args, pw);
+            assert!(
+                out.status.success(),
+                "{label} luksFormat: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+
+            let dump = cryptsetup(
+                &["luksDump", "--dump-master-key", "-q", "--key-file", "-", path.to_str().unwrap()],
+                pw,
+            );
+            assert!(dump.status.success(), "{label} dump: {}", String::from_utf8_lossy(&dump.stderr));
+            let mk = parse_mk(&String::from_utf8_lossy(&dump.stdout));
+            assert_eq!(mk.len(), 64, "{label}: parsed MK is {} bytes", mk.len());
+
+            let mut vol = MemVolume(std::fs::read(&path).unwrap());
+            let params = open_luks(&mut vol, pw.as_bytes())
+                .unwrap_or_else(|e| panic!("{label} open_luks: {e}"));
+            assert_eq!(&params.master_key[..], &mk[..], "{label}: master key mismatch");
+            assert!(open_luks(&mut vol, b"wrong pass").is_err(), "{label}: wrong pw must fail");
+        }
+    }
 }
