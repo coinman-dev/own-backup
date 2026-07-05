@@ -19,6 +19,7 @@ pub mod san_policy;
 pub mod secrets;
 pub mod sidecar;
 pub mod used_sectors;
+pub mod xfs_map;
 
 #[cfg(target_os = "windows")]
 pub mod block_reader_win;

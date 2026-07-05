@@ -325,11 +325,12 @@ fn backup_volume_inner(
         }
     }
 
-    // --- Used-sector map: NTFS → FAT32/exFAT → ext2/3/4 → btrfs → full copy ---
+    // --- Used-sector map: NTFS → FAT32/exFAT → ext → btrfs → xfs → full copy ---
     let mut ntfs_map: Option<NtfsUsedSectorMap> = None;
     let mut fat_map: Option<crate::fat_map::FatUsedMap> = None;
     let mut ext_map: Option<crate::ext_map::ExtUsedMap> = None;
     let mut btrfs_map: Option<crate::btrfs_map::BtrfsUsedMap> = None;
+    let mut xfs_map: Option<crate::xfs_map::XfsUsedMap> = None;
     // For an encrypted source the map is built over the decrypting view and
     // returned boxed directly (no exclusions apply to a Linux volume).
     let mut luks_used: Option<Box<dyn UsedSectorMap>> = None;
@@ -349,6 +350,9 @@ fn backup_volume_inner(
                 Some(Box::new(m))
             } else if let Ok(m) = crate::btrfs_map::build_btrfs_used_map(src.as_mut(), req.block_size) {
                 info!(fs = "btrfs", "Using btrfs map over decrypted volume");
+                Some(Box::new(m))
+            } else if let Ok(m) = crate::xfs_map::build_xfs_used_map(src.as_mut(), req.block_size) {
+                info!(fs = "xfs", "Using xfs map over decrypted volume");
                 Some(Box::new(m))
             } else {
                 warn!("no used-block map for the decrypted volume — sector-by-sector");
@@ -397,14 +401,28 @@ fn backup_volume_inner(
                                         true
                                     }
                                     Err(btrfs_err) => {
-                                        warn!(
-                                            ntfs = %ntfs_err,
-                                            fat = %fat_err,
-                                            ext = %ext_err,
-                                            btrfs = %btrfs_err,
-                                            "no used-block map available, falling back to sector-by-sector"
-                                        );
-                                        false
+                                        let xfs_attempt =
+                                            WinRawDevice::open_read(&read_path).and_then(|mut dev| {
+                                                crate::xfs_map::build_xfs_used_map(&mut dev, req.block_size)
+                                            });
+                                        match xfs_attempt {
+                                            Ok(map) => {
+                                                info!(fs = "xfs", "Using xfs used-block map");
+                                                xfs_map = Some(map);
+                                                true
+                                            }
+                                            Err(xfs_err) => {
+                                                warn!(
+                                                    ntfs = %ntfs_err,
+                                                    fat = %fat_err,
+                                                    ext = %ext_err,
+                                                    btrfs = %btrfs_err,
+                                                    xfs = %xfs_err,
+                                                    "no used-block map available, falling back to sector-by-sector"
+                                                );
+                                                false
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -454,12 +472,13 @@ fn backup_volume_inner(
     let used: Box<dyn UsedSectorMap> = if let Some(map) = luks_used {
         map
     } else {
-        match (ntfs_map, fat_map, ext_map, btrfs_map) {
+        match (ntfs_map, fat_map, ext_map, btrfs_map, xfs_map) {
             (Some(map), ..) => Box::new(map),
             (None, Some(map), ..) => Box::new(map),
-            (None, None, Some(map), _) => Box::new(map),
-            (None, None, None, Some(map)) => Box::new(map),
-            (None, None, None, None) => Box::new(AllUsedMap::new(total_blocks)),
+            (None, None, Some(map), ..) => Box::new(map),
+            (None, None, None, Some(map), _) => Box::new(map),
+            (None, None, None, None, Some(map)) => Box::new(map),
+            (None, None, None, None, None) => Box::new(AllUsedMap::new(total_blocks)),
         }
     };
     let used_blocks = used.used_block_count();

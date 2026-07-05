@@ -79,6 +79,22 @@ fn ext_used_bytes(buf: &[u8]) -> Option<u64> {
     total.checked_sub(free)?.checked_mul(block_size)
 }
 
+/// Used bytes of an XFS volume, from its (big-endian) superblock at offset 0:
+/// `(sb_dblocks - sb_fdblocks) * sb_blocksize`. `None` if fields are missing or
+/// inconsistent.
+fn xfs_used_bytes(buf: &[u8]) -> Option<u64> {
+    let be32 = |o: usize| -> Option<u64> {
+        buf.get(o..o + 4).map(|s| u32::from_be_bytes(s.try_into().unwrap()) as u64)
+    };
+    let be64 = |o: usize| -> Option<u64> {
+        buf.get(o..o + 8).map(|s| u64::from_be_bytes(s.try_into().unwrap()))
+    };
+    let block_size = be32(0x04)?;
+    let dblocks = be64(0x08)?;
+    let fdblocks = be64(0x90)?;
+    dblocks.checked_sub(fdblocks)?.checked_mul(block_size)
+}
+
 /// Match well-known filesystem signatures. `buf` starts at the partition's
 /// very first byte.
 pub fn identify(buf: &[u8]) -> Option<ProbedFs> {
@@ -96,9 +112,15 @@ pub fn identify(buf: &[u8]) -> Option<ProbedFs> {
         // FAT32 boot-sector label: 11 bytes at 0x47.
         return some(FileSystem::Fat32, read_label(buf, 0x47, 11));
     }
-    // XFS: "XFSB" at offset 0.
+    // XFS (big-endian): "XFSB" at offset 0. Label `sb_fname` (12 bytes) at 0x6C;
+    // used bytes = (sb_dblocks - sb_fdblocks) * sb_blocksize.
     if at(0, b"XFSB") {
-        return some(FileSystem::Xfs, None);
+        return Some(ProbedFs {
+            fs: FileSystem::Xfs,
+            label: read_label(buf, 0x6C, 12),
+            used_bytes: xfs_used_bytes(buf),
+            encrypted: false,
+        });
     }
     // LUKS1/2 container: "LUKS\xba\xbe" at offset 0. Not a filesystem we can
     // back up smartly — reported as Unknown, but with a telling label so the
@@ -248,6 +270,22 @@ mod tests {
         assert_eq!(p.label.as_deref(), Some("kubuntu_boot"));
         // (262144 - 200000) blocks * 4096 bytes.
         assert_eq!(p.used_bytes, Some((262_144 - 200_000) * 4096));
+    }
+
+    #[test]
+    fn detects_xfs_with_label_and_used() {
+        // XFS is big-endian: magic@0, blocksize@0x04, dblocks@0x08, label@0x6C,
+        // fdblocks@0x90.
+        let mut buf = vec![0u8; 4096];
+        buf[0..4].copy_from_slice(b"XFSB");
+        buf[0x04..0x08].copy_from_slice(&4096u32.to_be_bytes());
+        buf[0x08..0x10].copy_from_slice(&1000u64.to_be_bytes());
+        buf[0x90..0x98].copy_from_slice(&400u64.to_be_bytes());
+        buf[0x6C..0x6C + 6].copy_from_slice(b"mydata");
+        let p = identify(&buf).expect("xfs detected");
+        assert_eq!(p.fs, FileSystem::Xfs);
+        assert_eq!(p.label.as_deref(), Some("mydata"));
+        assert_eq!(p.used_bytes, Some((1000 - 400) * 4096));
     }
 
     #[test]
