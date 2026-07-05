@@ -19,7 +19,7 @@ use base64::Engine;
 use pbkdf2::pbkdf2_hmac;
 use serde_json::Value;
 use sha2::{Digest, Sha256, Sha512};
-use xts_mode::{get_tweak_default, Xts128};
+use xts_mode::Xts128;
 use zeroize::Zeroizing;
 
 use own_backup_common::image::VolumeEncryptionKind;
@@ -58,8 +58,12 @@ impl LuksParams {
         if data_off % ss != 0 {
             return Err(bad("decrypt offset not sector-aligned"));
         }
-        let first = data_off / ss + self.iv_offset;
-        xts_decrypt(&self.master_key, self.sector_size as usize, first as u128, buf)
+        // plain64 counts the XTS tweak in 512-byte units, regardless of the
+        // filesystem/segment sector size. So the first unit's tweak is
+        // `data_off / 512 + iv_tweak`, and consecutive `sector_size` units step
+        // by `sector_size / 512` (8 for a 4096-byte-sector container).
+        let first_512 = data_off / 512 + self.iv_offset;
+        xts_decrypt(&self.master_key, self.sector_size as usize, first_512 as u128, buf)
     }
 }
 
@@ -173,22 +177,27 @@ fn af_merge(hash: Hash, src: &[u8], blocksize: usize, stripes: usize) -> Result<
     Ok(d)
 }
 
-/// AES-XTS-plain64 decrypt of `buf` in place. `buf.len()` must be a multiple of
-/// `sector_size`; each sector `k` uses tweak `first_sector + k`.
-fn xts_decrypt(key: &[u8], sector_size: usize, first_sector: u128, buf: &mut [u8]) -> Result<()> {
-    if sector_size == 0 || buf.len() % sector_size != 0 {
-        return Err(bad("XTS buffer not a multiple of the sector size"));
+/// AES-XTS-plain64 decrypt of `buf` in place. `sector_size` must be a multiple
+/// of 512 and divide `buf.len()`. `first_512_unit` is the plain64 tweak of the
+/// first unit, counted in 512-byte units; the k-th `sector_size` unit uses
+/// tweak `first_512_unit + k * (sector_size / 512)` — plain64 always counts the
+/// tweak in 512-byte units, so a 4096-byte-sector container steps by 8.
+fn xts_decrypt(key: &[u8], sector_size: usize, first_512_unit: u128, buf: &mut [u8]) -> Result<()> {
+    if sector_size == 0 || sector_size % 512 != 0 || buf.len() % sector_size != 0 {
+        return Err(bad("XTS buffer/sector size not a valid multiple of 512"));
     }
+    let step = (sector_size / 512) as u128;
+    let tweak = |unit_index: u128| (first_512_unit + unit_index * step).to_le_bytes();
     match key.len() {
         32 => {
             let c1 = Aes128::new(GenericArray::from_slice(&key[..16]));
             let c2 = Aes128::new(GenericArray::from_slice(&key[16..]));
-            Xts128::new(c1, c2).decrypt_area(buf, sector_size, first_sector, get_tweak_default);
+            Xts128::new(c1, c2).decrypt_area(buf, sector_size, 0, tweak);
         }
         64 => {
             let c1 = Aes256::new(GenericArray::from_slice(&key[..32]));
             let c2 = Aes256::new(GenericArray::from_slice(&key[32..]));
-            Xts128::new(c1, c2).decrypt_area(buf, sector_size, first_sector, get_tweak_default);
+            Xts128::new(c1, c2).decrypt_area(buf, sector_size, 0, tweak);
         }
         n => return Err(bad(format!("unsupported AES-XTS key length {n}"))),
     }
@@ -372,10 +381,18 @@ fn unlock_luks2(vol: &mut dyn RawVolume, hdr: &[u8], pass: &[u8]) -> Result<Luks
         });
 
         // Decrypt the keyslot's AF area and merge it into a candidate master key.
-        let want = area_size.min(stripes * key_size).next_multiple_of(512);
-        let mut material = Zeroizing::new(read_at(vol, area_off, want)?);
+        // Guard the split size: a malformed header must error, never panic or
+        // read a huge buffer.
+        let need = stripes
+            .checked_mul(key_size)
+            .filter(|&n| n > 0 && n <= 64 * 1024 * 1024)
+            .ok_or_else(|| bad("implausible AF material size"))?;
+        if area_size < need {
+            return Err(bad("keyslot area is smaller than its AF key material"));
+        }
+        let mut material = Zeroizing::new(read_at(vol, area_off, need.next_multiple_of(512))?);
         xts_decrypt(&slot_key, 512, 0, &mut material)?;
-        let mk = Zeroizing::new(af_merge(af_hash, &material[..stripes * key_size], key_size, stripes)?);
+        let mk = Zeroizing::new(af_merge(af_hash, &material[..need], key_size, stripes)?);
 
         // Verify against a digest that references this keyslot.
         for digest in digests.values() {
@@ -405,6 +422,7 @@ fn unlock_luks2(vol: &mut dyn RawVolume, hdr: &[u8], pass: &[u8]) -> Result<Luks
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xts_mode::get_tweak_default;
 
     struct MemVolume(Vec<u8>);
     impl RawVolume for MemVolume {
@@ -447,6 +465,39 @@ mod tests {
         let mk: Vec<u8> = (0..64u8).collect();
         let split = af_split(hash, &mk, 8);
         assert_eq!(af_merge(hash, &split, 64, 8).unwrap(), mk);
+    }
+
+    #[test]
+    fn xts_4096_sector_steps_tweak_in_512_units() {
+        // plain64 counts the tweak in 512-byte units, so a 4096-byte-sector
+        // volume must step the tweak by 8 per unit. Encrypt each 4096 unit at
+        // data offset D with tweak D/512, then LuksParams::decrypt must recover
+        // it. (This fails if decrypt steps the tweak by 1.)
+        use zeroize::Zeroizing;
+        let key: Vec<u8> = (0..64u8).collect();
+        let ss = 4096usize;
+        let units = 3usize;
+        let plain: Vec<u8> = (0..(units * ss)).map(|i| (i * 7 + 1) as u8).collect();
+
+        let c1 = Aes256::new(GenericArray::from_slice(&key[..32]));
+        let c2 = Aes256::new(GenericArray::from_slice(&key[32..]));
+        let xts = Xts128::new(c1, c2);
+        let mut enc = plain.clone();
+        for (i, unit) in enc.chunks_mut(ss).enumerate() {
+            let tweak_512 = (i * (ss / 512)) as u128; // D/512 with D = i*ss
+            xts.encrypt_sector(unit, tweak_512.to_le_bytes());
+        }
+
+        let params = LuksParams {
+            data_offset: 0,
+            sector_size: 4096,
+            iv_offset: 0,
+            master_key: Zeroizing::new(key),
+            kind: VolumeEncryptionKind::Luks2,
+        };
+        let mut dec = enc.clone();
+        params.decrypt(0, &mut dec).unwrap();
+        assert_eq!(dec, plain);
     }
 
     #[test]

@@ -7,6 +7,7 @@ import type {
   Job,
   JobRun,
   QueueSnapshot,
+  DecryptResult,
 } from './types';
 
 export const api = {
@@ -22,6 +23,8 @@ export const api = {
   deleteBackupJob: (id: string) => invoke<void>('delete_backup_job', { id }),
   provideVolumePassword: (volume: string, password: string, remember: boolean) =>
     invoke<void>('provide_volume_password', { volume, password, remember }),
+  decryptVolume: (volume: string, password: string, remember: boolean) =>
+    invoke<DecryptResult>('decrypt_volume', { volume, password, remember }),
   runBackupJob: (id: string) => invoke<void>('run_backup_job', { id }),
   cancelQueuedJob: (id: string) => invoke<void>('cancel_queued_job', { id }),
   getRunQueue: () => invoke<QueueSnapshot>('get_run_queue'),

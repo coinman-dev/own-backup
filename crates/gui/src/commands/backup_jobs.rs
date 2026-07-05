@@ -91,6 +91,62 @@ pub async fn provide_volume_password(
         .map_err(|e| e.to_string())
 }
 
+/// Result of a decrypt attempt for the wizard: whether it unlocked, plus the
+/// inner volume's filesystem / label / used bytes (to show like a normal volume).
+#[derive(serde::Serialize)]
+pub struct DecryptResult {
+    pub ok: bool,
+    pub filesystem: String,
+    pub label: String,
+    pub used_bytes: u64,
+}
+
+/// Unlock an encrypted (LUKS) source `volume` with `password` and probe the
+/// decrypted filesystem. On success the password is cached for this session
+/// (and persisted OS-protected when `remember`), so the backup can use it.
+#[tauri::command]
+pub async fn decrypt_volume(
+    state: State<'_, GuiState>,
+    volume: String,
+    password: String,
+    remember: bool,
+) -> Result<DecryptResult, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let (vol, pw) = (volume.clone(), password.clone());
+        let probe = tokio::task::spawn_blocking(move || {
+            own_backup_backup::engine_win::unlock_and_probe(&vol, &pw)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+        if probe.ok {
+            let token = own_backup_core::source_token(&volume);
+            state
+                .passwords
+                .remember(&token, password, remember)
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(DecryptResult {
+            ok: probe.ok,
+            filesystem: probe.filesystem,
+            label: probe.label,
+            used_bytes: probe.used_bytes,
+        })
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // No engine off Windows — cannot actually decrypt; cache the password so
+        // the wizard flow works and report no inner-FS details.
+        let token = own_backup_core::source_token(&volume);
+        state
+            .passwords
+            .remember(&token, password, remember)
+            .map_err(|e| e.to_string())?;
+        Ok(DecryptResult { ok: true, filesystem: String::new(), label: String::new(), used_bytes: 0 })
+    }
+}
+
 /// Enqueue a job for backup. Runs immediately if idle, otherwise queues.
 #[tauri::command]
 pub async fn run_backup_job(state: State<'_, GuiState>, id: String) -> Result<(), String> {

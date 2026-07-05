@@ -280,6 +280,20 @@ pub fn build_btrfs_used_map(vol: &mut dyn RawVolume, block_size: u32) -> Result<
     if num_devices != 1 {
         return Err(bad(format!("multi-device filesystem ({num_devices} devices)")));
     }
+    // Refuse any incompat feature that could change how allocated space is
+    // recorded. Only features that leave the extent-tree walk correct are
+    // allowed (mixed_backref, default_subvol, mixed_groups, compress lzo/zstd,
+    // big_metadata, extended_iref, skinny_metadata, no_holes, metadata_uuid);
+    // RAID56/RAID1C34/zoned/extent_tree_v2/raid_stripe_tree and any future flag
+    // fall back to a full copy per this module's policy.
+    const INCOMPAT_SUPPORTED: u64 =
+        0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | 0x40 | 0x100 | 0x200 | 0x400;
+    let unknown_incompat = u64at(&sb, 0xBC) & !INCOMPAT_SUPPORTED;
+    if unknown_incompat != 0 {
+        return Err(bad(format!(
+            "unsupported btrfs incompat features {unknown_incompat:#x}"
+        )));
+    }
     if !(512..=MAX_NODE).contains(&(nodesize as u64)) || !nodesize.is_power_of_two() {
         return Err(bad(format!("implausible nodesize {nodesize}")));
     }

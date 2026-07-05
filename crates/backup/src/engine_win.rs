@@ -1005,6 +1005,55 @@ pub fn unmount_image(image_path: &Path) -> Result<()> {
     detach_vhdx(image_path)
 }
 
+/// Outcome of decrypting an encrypted source: whether the passphrase unlocked
+/// it, and (on success) the inner filesystem's name / volume label / used bytes
+/// so the UI can show them like any other volume.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct DecryptedProbe {
+    pub ok: bool,
+    pub filesystem: String,
+    pub label: String,
+    pub used_bytes: u64,
+}
+
+/// Unlock the LUKS container at `device_path` with `passphrase` and probe the
+/// decrypted filesystem. `ok = false` means the passphrase was rejected. A
+/// source that is not LUKS returns `ok = true` with empty info (nothing to
+/// unlock). Errors only on I/O so the UI can tell "wrong password" from
+/// "could not read the device".
+pub fn unlock_and_probe(device_path: &str, passphrase: &str) -> Result<DecryptedProbe> {
+    use crate::fat_map::RawVolume;
+
+    let src = normalize_device_path(device_path);
+    let mut dev = WinRawDevice::open_read(&src)?;
+    let mut header = vec![0u8; 4096];
+    dev.read_at(0, &mut header)?;
+    if !crate::luks::is_luks(&header) {
+        return Ok(DecryptedProbe { ok: true, ..Default::default() });
+    }
+    let params = match crate::luks::open_luks(&mut dev, passphrase.as_bytes()) {
+        Ok(p) => p,
+        Err(_) => return Ok(DecryptedProbe { ok: false, ..Default::default() }),
+    };
+    drop(dev);
+
+    // Read the decrypted superblock region and identify the inner filesystem.
+    let mut view =
+        crate::decrypt::DecryptingVolume::new(Box::new(WinRawDevice::open_read(&src)?), params);
+    let want = (own_backup_inventory::fs_probe::PROBE_LEN as u64).min(view.len()) as usize;
+    let mut buf = vec![0u8; want];
+    view.read_at(0, &mut buf)?;
+    let (filesystem, label, used_bytes) = match own_backup_inventory::fs_probe::identify(&buf) {
+        Some(p) => (
+            format!("{:?}", p.fs).to_lowercase(),
+            p.label.unwrap_or_default(),
+            p.used_bytes.unwrap_or(0),
+        ),
+        None => (String::new(), String::new(), 0),
+    };
+    Ok(DecryptedProbe { ok: true, filesystem, label, used_bytes })
+}
+
 fn load_sidecar_of(image_path: &Path) -> Result<Sidecar> {
     let sidecar_path = sidecar_path_for(image_path);
     if !sidecar_path.exists() {

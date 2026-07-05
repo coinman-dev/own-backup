@@ -260,6 +260,14 @@ export interface Job {
   last_run: JobRun | null;
 }
 
+/** Result of decrypting an encrypted source in the wizard. */
+export interface DecryptResult {
+  ok: boolean;
+  filesystem: string;
+  label: string;
+  used_bytes: number;
+}
+
 export interface QueueSnapshot {
   current: string | null;
   pending: string[];

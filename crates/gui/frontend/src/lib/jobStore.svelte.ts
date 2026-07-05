@@ -4,7 +4,7 @@
 
 import { listen } from '@tauri-apps/api/event';
 import { api } from './api';
-import type { Job, JobRun, JobProgress, QueueSnapshot } from './types';
+import type { Job, JobRun, JobProgress, QueueSnapshot, DecryptResult } from './types';
 
 export const jobs = $state({
   list: [] as Job[],
@@ -14,6 +14,15 @@ export const jobs = $state({
   activity: [] as JobRun[],
   error: null as string | null,
 });
+
+/** Encrypted volumes unlocked during this GUI session: device → inner volume
+ *  info (label / used bytes / filesystem). Kept until the app closes, so
+ *  reopening the backup wizard shows the disk already decrypted without asking
+ *  for the password again (the backend also caches the password for the
+ *  session). Keyed by the source device string. */
+export const decryptedVolumes = $state<
+  Record<string, { label: string; used_bytes: number; filesystem: string }>
+>({});
 
 let inited = false;
 
@@ -78,6 +87,16 @@ export async function provideVolumePassword(
   remember: boolean,
 ): Promise<void> {
   await api.provideVolumePassword(volume, password, remember);
+}
+
+/** Unlock an encrypted source and read its inner volume label / used bytes.
+ *  On success the password is cached (and persisted when `remember`). */
+export async function decryptVolume(
+  volume: string,
+  password: string,
+  remember: boolean,
+): Promise<DecryptResult> {
+  return api.decryptVolume(volume, password, remember);
 }
 
 export async function runJob(id: string): Promise<void> {

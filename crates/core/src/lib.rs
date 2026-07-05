@@ -770,6 +770,27 @@ pub fn source_token(device: &str) -> String {
         .unwrap_or_else(|| "X".to_string())
 }
 
+/// Filename identifier for a source volume. Same as [`source_token`] for
+/// lettered / GUID volumes; a letterless (encrypted) `part:` source uses its
+/// sanitized volume label when the job knows one — so its image is named
+/// `Job_kubuntu_full_…` like a lettered `Job_C_full_…`, not `Job_P4AB…`. The
+/// result is underscore-free (the token is delimited by `_` in the file name).
+/// Distinct from [`source_token`], which stays the stable device key used for
+/// passwords and cross-run identity.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))] // used by the Windows backup path
+fn file_token(job: &Job, device: &str) -> String {
+    if device.trim_start().starts_with("part:") {
+        let label = job.label_for(device);
+        if label != device {
+            let safe: String = label.chars().filter(|c| c.is_alphanumeric()).collect();
+            if !safe.is_empty() {
+                return safe;
+            }
+        }
+    }
+    source_token(device)
+}
+
 /// Recover the source token that an image file name encodes. Names are
 /// `<name>_<token>_<tag>_<stamp>.<ext>`; token/tag/stamp are always the last
 /// three underscore-separated segments, so we read from the end — robust even
@@ -792,7 +813,7 @@ fn image_token(path: &Path) -> Option<String> {
 /// `<name>_<token>_<full|inc|diff>_<stamp>.<vhdx|avhdx>`.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))] // used by the Windows backup path
 fn output_path_for(job: &Job, device: &str, kind: &str) -> PathBuf {
-    let token = source_token(device);
+    let token = file_token(job, device);
     let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
     let safe_name: String = job
         .name
@@ -822,16 +843,20 @@ pub fn plan_run_for_volume(job: &Job, folder: &Path, device: &str) -> RunPlan {
         _ => return RunPlan::full(),
     };
 
-    let token = source_token(device);
+    let token = file_token(job, device);
     let chains = match list_job_chains(folder, &job.id) {
         Ok(c) => c,
         Err(_) => return RunPlan::full(),
     };
     // Chains are oldest-first; keep only this volume's, then take the newest.
+    // Case-insensitive: the token read back from a file name is upper-cased.
     let Some(chain) = chains
         .into_iter()
         .filter(|c| {
-            c.images.first().and_then(|i| image_token(&i.image_path)).as_deref() == Some(&token)
+            c.images
+                .first()
+                .and_then(|i| image_token(&i.image_path))
+                .is_some_and(|t| t.eq_ignore_ascii_case(&token))
         })
         .next_back()
     else {
@@ -909,8 +934,10 @@ fn apply_retention(job: &Job, protected: &[(String, PathBuf)]) {
         let vol_chains: Vec<_> = all_chains
             .iter()
             .filter(|c| {
-                c.images.first().and_then(|i| image_token(&i.image_path)).as_deref()
-                    == Some(token.as_str())
+                c.images
+                    .first()
+                    .and_then(|i| image_token(&i.image_path))
+                    .is_some_and(|t| t.eq_ignore_ascii_case(token))
             })
             .cloned()
             .collect();
@@ -1157,7 +1184,9 @@ async fn perform_backup(
                         }
                     }
                 }
-                protected.push((token, image_path));
+                // Retention matches images by their file-name token (label for
+                // encrypted volumes), not the device password key.
+                protected.push((file_token(job, device), image_path));
             }
             Ok(Err(OwnBackupError::Cancelled)) => {
                 fatal = Some(("cancelled".into(), "Отменено пользователем".into()));
@@ -1405,6 +1434,29 @@ mod tests {
             Some("V1A2B3C4D")
         );
         assert_eq!(image_token(Path::new("no_underscores.vhdx")), None);
+    }
+
+    #[test]
+    fn file_token_uses_label_for_encrypted_sources() {
+        let dev = "part:4:1048576:1000";
+        let mut job = Job::default();
+        job.sources = vec![dev.into()];
+        // A label with an underscore is stripped to an underscore-free token.
+        job.source_labels = vec!["kubuntu_boot".into()];
+        let token = file_token(&job, dev);
+        assert_eq!(token, "kubuntuboot");
+        // The file name round-trips: image_token reads it back (case-insensitive).
+        let name = output_path_for(&job, dev, "full");
+        assert!(image_token(&name).unwrap().eq_ignore_ascii_case(&token));
+
+        // No label → falls back to the stable device token.
+        let bare = Job::default();
+        assert_eq!(file_token(&bare, dev), source_token(dev));
+        // A lettered volume is unaffected by any label.
+        let mut lettered = Job::default();
+        lettered.sources = vec!["C:".into()];
+        lettered.source_labels = vec!["Windows".into()];
+        assert_eq!(file_token(&lettered, "C:"), "C");
     }
 
     #[test]

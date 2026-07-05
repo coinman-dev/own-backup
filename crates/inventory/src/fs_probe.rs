@@ -123,9 +123,18 @@ pub fn identify(buf: &[u8]) -> Option<ProbedFs> {
             encrypted: false,
         });
     }
-    // btrfs: "_BHRfS_M" at 0x10040; label: 256 bytes at superblock offset 0x12B.
+    // btrfs: "_BHRfS_M" at 0x10040; label: 256 bytes at superblock offset 0x12B;
+    // used bytes: s_bytes_used (u64) at superblock offset 0x78.
     if at(0x10040, b"_BHRfS_M") {
-        return some(FileSystem::Btrfs, read_label(buf, 0x10000 + 0x12B, 256));
+        let used = buf
+            .get(0x10078..0x10080)
+            .map(|s| u64::from_le_bytes(s.try_into().unwrap()));
+        return Some(ProbedFs {
+            fs: FileSystem::Btrfs,
+            label: read_label(buf, 0x10000 + 0x12B, 256),
+            used_bytes: used,
+            encrypted: false,
+        });
     }
     None
 }

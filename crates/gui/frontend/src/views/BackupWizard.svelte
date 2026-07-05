@@ -2,7 +2,7 @@
   import { open } from '@tauri-apps/plugin-dialog';
   import { api } from '../lib/api';
   import { engine } from '../lib/engineStore.svelte';
-  import { saveJob, runJob, provideVolumePassword } from '../lib/jobStore.svelte';
+  import { saveJob, runJob, decryptVolume, decryptedVolumes } from '../lib/jobStore.svelte';
   import { formatBytes } from '../lib/format';
   import InfoModal from '../components/InfoModal.svelte';
   import type { Job, DiskInfo, PartitionInfo } from '../lib/types';
@@ -66,12 +66,25 @@
     return p.volume_device ? p.volume_device : null;
   }
   function partLabel(p: PartitionInfo): string {
+    // A decrypted encrypted volume shows its real inner label.
+    const dec = p.volume_device ? decryptedVolumes[p.volume_device] : undefined;
+    if (dec?.label) return dec.label;
     if (p.volume_letter) {
       const name = p.volume_label || fsLabel(p.filesystem) || 'Том';
       return `${p.volume_letter}: ${name}`;
     }
     // Letterless (EFI / ext4 / hidden): its on-disk label, else the filesystem.
     return p.volume_label || fsLabel(p.filesystem) || 'Раздел';
+  }
+  // Used bytes / filesystem for a partition, preferring decrypted info when the
+  // volume has been unlocked.
+  function partUsed(p: PartitionInfo): number {
+    const dec = p.volume_device ? decryptedVolumes[p.volume_device] : undefined;
+    return dec ? dec.used_bytes : p.used_bytes;
+  }
+  function partFs(p: PartitionInfo): string {
+    const dec = p.volume_device ? decryptedVolumes[p.volume_device] : undefined;
+    return fsLabel(dec ? dec.filesystem : p.filesystem);
   }
   // Per-source token used in the file-name preview (mirrors core's source_token:
   // letter for lettered volumes, V+8 hex of the GUID for letterless volumes,
@@ -92,6 +105,7 @@
       const i = job.sources.indexOf(dev);
       job.sources = job.sources.filter((x) => x !== dev);
       job.source_labels = job.source_labels.filter((_, idx) => idx !== i);
+      // Keep the decrypted state (session-wide) so re-selecting it stays unlocked.
     } else {
       job.sources = [...job.sources, dev];
       job.source_labels = [...job.source_labels, label];
@@ -126,14 +140,15 @@
 
   // Fraction (0..100) of a partition that is in use, for the fill overlay.
   function usedPct(p: PartitionInfo): number {
-    if (p.used_bytes <= 0 || p.size_bytes <= 0) return 0;
-    return Math.min(100, (p.used_bytes / p.size_bytes) * 100);
+    const used = partUsed(p);
+    if (used <= 0 || p.size_bytes <= 0) return 0;
+    return Math.min(100, (used / p.size_bytes) * 100);
   }
   // Full text for the segment tooltip (shown when the label/size is truncated).
   function segTitle(p: PartitionInfo): string {
     let t = partLabel(p) + ' — ' + formatBytes(p.size_bytes);
-    if (p.used_bytes > 0) t += ` (${formatBytes(p.used_bytes)} занято)`;
-    const fs = fsLabel(p.filesystem);
+    if (partUsed(p) > 0) t += ` (${formatBytes(partUsed(p))} занято)`;
+    const fs = partFs(p);
     if (fs) t += ` ${fs}`;
     return t;
   }
@@ -286,6 +301,11 @@
       .map((dev, i) => ({ device: dev, label: job.source_labels[i] ?? dev }))
       .filter(({ device }) => findPart(device)?.is_encrypted);
   }
+  // Unlocked-volume info lives in a GUI-session store (`decryptedVolumes`), so
+  // it survives closing and reopening the wizard. Per-device wrong-password
+  // markers and the in-flight device are local to this wizard instance.
+  let pwErrors = $state<Record<string, boolean>>({});
+  let decrypting = $state<string | null>(null);
 
   // Keep the "needs a password" job flag in sync with the selection.
   $effect(() => {
@@ -294,6 +314,7 @@
 
   function setPw(dev: string, value: string) {
     pwInputs[dev] = { password: value, remember: pwInputs[dev]?.remember ?? false };
+    delete pwErrors[dev]; // editing clears a previous "wrong password"
   }
   function setRemember(dev: string, remember: boolean) {
     pwInputs[dev] = { password: pwInputs[dev]?.password ?? '', remember };
@@ -304,21 +325,47 @@
     return enc.length > 0 && enc.every(({ device }) => pwInputs[device]?.remember && pwInputs[device]?.password);
   }
 
+  // Unlock one encrypted volume: verify the password and read its label + used
+  // bytes. On success the segment then shows them like any other volume, the
+  // label flows into the file name, and "Далее" unlocks.
+  async function decrypt(device: string) {
+    const pw = pwInputs[device]?.password;
+    if (!pw) { pwErrors[device] = true; return; }
+    decrypting = device;
+    delete pwErrors[device];
+    try {
+      const r = await decryptVolume(device, pw, pwInputs[device]?.remember ?? false);
+      if (!r.ok) { pwErrors[device] = true; return; }
+      // Remember for the whole GUI session (survives reopening the wizard).
+      decryptedVolumes[device] = { label: r.label, used_bytes: r.used_bytes, filesystem: r.filesystem };
+      // Carry the volume label into the job (file name + display), like C:/D:.
+      const i = job.sources.indexOf(device);
+      if (i >= 0 && r.label) {
+        job.source_labels[i] = r.label;
+        if (i === 0) job.source_label = r.label;
+      }
+    } catch (e) {
+      error = String(e);
+    } finally {
+      decrypting = null;
+    }
+  }
+
+  // Every selected encrypted volume has been decrypted (gates "Далее").
+  function allEncryptedDecrypted(): boolean {
+    return encryptedSelected().every(({ device }) => decryptedVolumes[device]);
+  }
+
   async function finish(run: boolean) {
     if (!validate()) return;
-    const enc = encryptedSelected();
-    // A run cannot proceed without a password for every encrypted source.
-    if (run && enc.some(({ device }) => !pwInputs[device]?.password)) {
-      error = 'Для зашифрованного тома введите пароль перед запуском.';
+    // A run needs every encrypted source unlocked first — the password is
+    // stored (and verified) when the user clicks "Расшифровать".
+    if (run && !allEncryptedDecrypted()) {
+      error = 'Сначала расшифруйте выбранный зашифрованный том.';
       step = 0;
       return;
     }
     try {
-      // Hand any entered passwords to the backend (cached; persisted if "remember").
-      for (const { device } of enc) {
-        const pw = pwInputs[device];
-        if (pw?.password) await provideVolumePassword(device, pw.password, pw.remember);
-      }
       const saved = await saveJob(job);
       if (run) await runJob(saved.id);
       onDone(saved);
@@ -350,7 +397,7 @@
     {/if}
     <span class="seg-label">{partLabel(p)}</span>
   </div>
-  <div class="seg-meta">{formatBytes(p.size_bytes)}{#if p.used_bytes > 0}<span class="muted">&nbsp;({formatBytes(p.used_bytes)} занято)</span>{/if}{#if fsLabel(p.filesystem)}<span class="muted">&nbsp;{fsLabel(p.filesystem)}</span>{/if}</div>
+  <div class="seg-meta">{formatBytes(p.size_bytes)}{#if partUsed(p) > 0}<span class="muted">&nbsp;({formatBytes(partUsed(p))} занято)</span>{/if}{#if partFs(p)}<span class="muted">&nbsp;{partFs(p)}</span>{/if}</div>
   {#if selected}
     <div class="check"><svg width="10" height="10" viewBox="0 0 24 24" stroke="#fff" stroke-width="3.6" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></div>
   {/if}
@@ -434,25 +481,39 @@
               {#each encryptedSelected() as e (e.device)}
                 <div class="pw-row">
                   <span class="pw-vol" title={e.device}>{e.label}</span>
-                  <input
-                    type="password"
-                    class="pw-input"
-                    placeholder="Пароль"
-                    autocomplete="off"
-                    value={pwInputs[e.device]?.password ?? ''}
-                    oninput={(ev) => setPw(e.device, (ev.target as HTMLInputElement).value)}
-                  />
-                  <label class="pw-remember">
+                  {#if decryptedVolumes[e.device]}
+                    <span class="pw-done">✓ Расшифровано</span>
+                  {:else}
                     <input
-                      type="checkbox"
-                      checked={pwInputs[e.device]?.remember ?? false}
-                      onchange={(ev) => setRemember(e.device, (ev.target as HTMLInputElement).checked)}
-                    /> Запомнить
-                  </label>
+                      type="password"
+                      class="pw-input"
+                      class:err={pwErrors[e.device]}
+                      placeholder="Пароль"
+                      autocomplete="off"
+                      value={pwInputs[e.device]?.password ?? ''}
+                      oninput={(ev) => setPw(e.device, (ev.target as HTMLInputElement).value)}
+                    />
+                    <label class="pw-remember">
+                      <input
+                        type="checkbox"
+                        checked={pwInputs[e.device]?.remember ?? false}
+                        onchange={(ev) => setRemember(e.device, (ev.target as HTMLInputElement).checked)}
+                      /> Запомнить
+                    </label>
+                    <button
+                      type="button"
+                      class="btn small primary"
+                      onclick={() => decrypt(e.device)}
+                      disabled={decrypting === e.device || !pwInputs[e.device]?.password}
+                    >{decrypting === e.device ? 'Расшифровка…' : 'Расшифровать'}</button>
+                  {/if}
                 </div>
+                {#if pwErrors[e.device]}
+                  <div class="pw-err">Пароль не подходит</div>
+                {/if}
               {/each}
               <div class="pw-hint">
-                Пароль хранится в памяти до перезапуска службы. «Запомнить» сохраняет его
+                Пароль хранится в памяти до закрытия программы. «Запомнить» сохраняет его
                 в защищённом хранилище ОС — это нужно, чтобы копия работала по расписанию.
               </div>
             </div>
@@ -599,7 +660,12 @@
       {#if mode === 'wizard'}
         {#if step > 0}<button class="btn ghost" onclick={() => (step -= 1)}>Назад</button>{/if}
         {#if step < steps.length - 1}
-          <button class="btn primary" onclick={() => (step += 1)}>Дальше</button>
+          <button
+            class="btn primary"
+            onclick={() => (step += 1)}
+            disabled={step === 0 && !allEncryptedDecrypted()}
+            title={step === 0 && !allEncryptedDecrypted() ? 'Сначала расшифруйте выбранный зашифрованный том' : ''}
+          >Дальше</button>
         {:else}
           <button class="btn green" onclick={() => finish(true)}>Создать копию</button>
         {/if}
@@ -655,13 +721,17 @@
   .lock { color: var(--text-muted); flex-shrink: 0; }
   .enc { font-size: 10px; line-height: 1; flex-shrink: 0; }
 
-  .pw-panel { margin-top: 16px; padding: 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2, rgba(127,127,127,.06)); }
-  .pw-head { font-size: 13px; font-weight: 700; margin-bottom: 10px; }
-  .pw-row { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
-  .pw-vol { flex: 0 0 200px; font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .pw-input { flex: 1; padding: 6px 10px; border: 1px solid var(--border); border-radius: 5px; font-size: 13px; }
+  .pw-panel { margin-top: 16px; padding: 16px 18px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2, rgba(127,127,127,.06)); }
+  .pw-head { font-size: 13px; font-weight: 700; margin-bottom: 12px; }
+  .pw-row { display: flex; align-items: center; gap: 14px; margin-bottom: 6px; }
+  .pw-vol { flex: 0 0 190px; font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pw-input { flex: 1; padding: 8px 12px; border: 1px solid var(--border); border-radius: 5px; font-size: 13px; }
+  .pw-input.err { border-color: #d84a4a; }
   .pw-remember { display: flex; align-items: center; gap: 6px; font-size: 13px; white-space: nowrap; }
-  .pw-hint { font-size: 12px; color: var(--text-muted); margin-top: 8px; }
+  .pw-done { font-size: 13px; font-weight: 600; color: var(--green, #2e7d32); }
+  .pw-err { font-size: 12px; color: #d84a4a; font-weight: 600; margin: 0 0 6px 204px; }
+  .pw-hint { font-size: 12px; color: var(--text-muted); margin-top: 10px; }
+  .btn:disabled { opacity: .5; cursor: default; }
   .seg-label { font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .seg-meta { position: relative; z-index: 1; font-size: 11px; color: var(--head); line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .seg-meta .muted { color: var(--text-muted); }
