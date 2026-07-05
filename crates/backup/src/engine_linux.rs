@@ -42,6 +42,8 @@ use crate::used_sectors::{AllUsedMap, UsedSectorMap};
 /// Default backup block size: 1 MiB.
 pub const DEFAULT_BLOCK_SIZE: u32 = 1024 * 1024;
 const MIB: u64 = 1024 * 1024;
+/// VHDX payload block size (allocation granularity of the dynamic image).
+const VHDX_BLOCK_SIZE: u64 = 2 * MIB;
 
 /// Parameters for a Linux volume backup.
 pub struct LinuxBackupRequest {
@@ -97,11 +99,6 @@ pub fn backup_volume(
         let _ = std::fs::remove_file(&req.image_path);
     }
     result
-}
-
-fn path_str(p: &Path) -> Result<&str> {
-    p.to_str()
-        .ok_or_else(|| OwnBackupError::Config(format!("non-UTF-8 path: {}", p.display())))
 }
 
 fn backup_inner(
@@ -183,16 +180,20 @@ fn backup_inner(
     };
     let used_blocks = used.used_block_count();
 
-    // --- Create the raw image: 1 MiB GPT head + volume + 1 MiB tail ---
+    // --- Create the dynamic VHDX: 1 MiB GPT head + volume + 1 MiB tail ---
     let disk_size = DEFAULT_PARTITION_OFFSET + volume_len.div_ceil(MIB) * MIB + MIB;
-    std::fs::File::create(&req.image_path)?.set_len(disk_size)?;
-    let mut writer = LinuxRawDevice::open_write(path_str(&req.image_path)?)?;
+    let mut writer = crate::vhdx_format::VhdxWriter::create(
+        &req.image_path,
+        disk_size,
+        VHDX_BLOCK_SIZE,
+        sector_size,
+    )?;
     let data_offset = DEFAULT_PARTITION_OFFSET;
 
     // --- GPT with a single Basic Data partition wrapping the volume ---
     let disk_guid = Uuid::new_v4();
     let layout = GptLayout {
-        disk_size: writer.length(),
+        disk_size,
         sector_size,
         partition_offset: DEFAULT_PARTITION_OFFSET,
         partition_size: volume_len,
@@ -216,8 +217,7 @@ fn backup_inner(
         |block_number, data| writer.write_at(data_offset + block_number * req.block_size as u64, data),
         &mut progress,
     )?;
-    writer.flush()?;
-    drop(writer);
+    writer.finish()?;
 
     // --- Sidecar + manifest ---
     let manifest = ImageManifest {
@@ -335,7 +335,7 @@ pub fn restore_volume(
     let volume_len = sidecar.manifest.source_disk.size_bytes;
     let data_offset = sidecar.info.volume_data_offset;
 
-    let image = LinuxRawDevice::open_read(path_str(&req.image_path)?)?;
+    let image = crate::vhdx_format::VhdxReader::open(&req.image_path)?;
     let mut target = LinuxRawDevice::open_write(&req.target)?;
     if target.length() < volume_len {
         return Err(OwnBackupError::RestoreIncompatible(format!(
@@ -425,7 +425,7 @@ pub fn verify_image(
     let volume_len = sidecar.manifest.source_disk.size_bytes;
     let data_offset = sidecar.info.volume_data_offset;
 
-    let dev = LinuxRawDevice::open_read(path_str(image_path)?)?;
+    let dev = crate::vhdx_format::VhdxReader::open(image_path)?;
     let total = sidecar.checksums.len() as u64;
     let mut checked = 0u64;
     let mut mismatched = Vec::new();
@@ -485,7 +485,7 @@ mod tests {
 
         // The image's partition (at the 1 MiB GPT head) holds a recognisable
         // ext4 — proof the superblock/metadata were copied to the right place.
-        let dev = LinuxRawDevice::open_read(img.to_str().unwrap()).unwrap();
+        let dev = crate::vhdx_format::VhdxReader::open(&img).unwrap();
         let mut head = vec![0u8; own_backup_inventory::fs_probe::PROBE_LEN];
         dev.read_at(DEFAULT_PARTITION_OFFSET, &mut head).unwrap();
         let probed = own_backup_inventory::fs_probe::identify(&head).expect("image holds a filesystem");

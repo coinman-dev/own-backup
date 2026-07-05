@@ -1379,7 +1379,7 @@ async fn perform_backup(
             .chars()
             .map(|c| if c.is_alphanumeric() { c } else { '_' })
             .collect();
-        let image_path = folder.join(format!("{safe}_{}_full_{stamp}.img", file_token(job, device)));
+        let image_path = folder.join(format!("{safe}_{}_full_{stamp}.vhdx", file_token(job, device)));
 
         let req = LinuxBackupRequest {
             source: device.clone(),
