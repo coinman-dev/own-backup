@@ -89,13 +89,21 @@ impl ServiceLink {
         *self.client.lock().await = None;
     }
 
-    /// Quick probe: can we reach the service right now? (Does not try to start
-    /// it — used by the startup health check to decide whether to warn.)
+    /// Quick probe: can we reach the service right now? Always does a fresh
+    /// connect (never trusts a stale cached client) and updates the cache to
+    /// match, so the startup health check reflects reality. Does not try to
+    /// start the service.
     pub async fn is_reachable(&self) -> bool {
-        if self.client.lock().await.is_some() {
-            return true;
+        match self.connect().await {
+            Ok(c) => {
+                *self.client.lock().await = Some(c);
+                true
+            }
+            Err(_) => {
+                *self.client.lock().await = None;
+                false
+            }
         }
-        self.connect().await.is_ok()
     }
 }
 

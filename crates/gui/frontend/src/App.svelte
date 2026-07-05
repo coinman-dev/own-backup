@@ -26,17 +26,21 @@
     checking = true;
     try {
       const h = await api.serviceHealth();
-      if (h.reachable) {
-        serviceWarn = null;
-      } else if (!h.installed) {
-        serviceWarn =
-          'Служба «Own Backup» не установлена. Для работы программы установите её: ' +
-          'запустите own-backup-service.exe /install (появится запрос прав администратора), ' +
-          'затем нажмите «Повторить».';
-      } else {
+      if (!h.installed) {
+        // Not installed is always worth flagging: even if a temporary/foreground
+        // instance answers, the scheduler only runs from the installed service.
+        serviceWarn = h.reachable
+          ? 'Служба «Own Backup» не установлена (сейчас отвечает временный экземпляр). ' +
+            'Установите её: own-backup-service.exe /install — иначе не будет работать расписание.'
+          : 'Служба «Own Backup» не установлена. Для работы программы установите её: ' +
+            'запустите own-backup-service.exe /install (появится запрос прав администратора), ' +
+            'затем нажмите «Повторить».';
+      } else if (!h.reachable) {
         serviceWarn =
           'Служба «Own Backup» установлена, но не запущена. Запустите её ' +
           '(нужны права администратора) или перезагрузите компьютер, затем нажмите «Повторить».';
+      } else {
+        serviceWarn = null;
       }
     } catch (e) {
       serviceWarn = `Не удалось проверить службу: ${e}`;
