@@ -59,13 +59,16 @@ impl ServiceLink {
     /// A connected client. Connects on first use; if the service is unreachable
     /// it nudges the OS to start the installed service and retries. Fails with a
     /// user-facing message (incl. an install hint) when it still can't connect.
+    ///
+    /// The `client` mutex is only ever held for the brief cache read/write — NEVER
+    /// across a connect or sleep — so a concurrent caller (e.g. the startup health
+    /// check) is never blocked behind this method's retry loop.
     pub async fn client(&self) -> Result<BackupClient, String> {
-        let mut guard = self.client.lock().await;
-        if let Some(c) = guard.as_ref() {
-            return Ok(c.clone());
+        if let Some(c) = self.cached().await {
+            return Ok(c);
         }
         if let Ok(c) = self.connect().await {
-            *guard = Some(c.clone());
+            self.store(c.clone()).await;
             return Ok(c);
         }
         // Not reachable — try to start the installed service, then wait (~5s).
@@ -75,13 +78,21 @@ impl ServiceLink {
         for _ in 0..25 {
             tokio::time::sleep(Duration::from_millis(200)).await;
             if let Ok(c) = self.connect().await {
-                *guard = Some(c.clone());
+                self.store(c.clone()).await;
                 return Ok(c);
             }
         }
         Err(tokio::task::spawn_blocking(unreachable_message)
             .await
             .unwrap_or_else(|_| "Служба резервного копирования недоступна.".into()))
+    }
+
+    async fn cached(&self) -> Option<BackupClient> {
+        self.client.lock().await.as_ref().cloned()
+    }
+
+    async fn store(&self, c: BackupClient) {
+        *self.client.lock().await = Some(c);
     }
 
     /// Drop the cached client so the next [`client`](Self::client) reconnects.

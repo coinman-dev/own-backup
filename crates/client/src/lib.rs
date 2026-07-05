@@ -44,6 +44,9 @@ impl BackupClient {
     pub async fn connect(endpoint: impl Into<String>, token: impl Into<String>) -> Result<Self> {
         let channel = Channel::from_shared(endpoint.into())
             .map_err(|e| format!("bad endpoint: {e}"))?
+            // Fail fast when nothing is listening (service down) so the GUI's
+            // health check and retries stay snappy instead of hanging ~seconds.
+            .connect_timeout(std::time::Duration::from_millis(800))
             .connect()
             .await
             .map_err(|e| format!("cannot reach service: {e}"))?;
