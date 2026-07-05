@@ -162,6 +162,7 @@ fn main() {
 
     let gui_state = GuiState::new(config, job_store.clone(), run_queue.clone(), job_tx);
     let cancel_flag = gui_state.cancel_flag.clone();
+    let passwords = gui_state.passwords.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -173,7 +174,7 @@ fn main() {
             let sink: std::sync::Arc<dyn jobs::EventSink> =
                 std::sync::Arc::new(jobs::TauriEventSink { app: app.handle().clone() });
             tauri::async_runtime::spawn(jobs::run_queue_worker(
-                sink, job_store, run_queue, cancel_flag, job_rx,
+                sink, job_store, run_queue, cancel_flag, passwords, job_rx,
             ));
             Ok(())
         })
@@ -187,6 +188,7 @@ fn main() {
             commands::backup_jobs::default_exclusion_patterns,
             commands::backup_jobs::save_backup_job,
             commands::backup_jobs::delete_backup_job,
+            commands::backup_jobs::provide_volume_password,
             commands::backup_jobs::run_backup_job,
             commands::backup_jobs::cancel_queued_job,
             commands::backup_jobs::get_run_queue,

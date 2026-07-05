@@ -15,7 +15,7 @@ use chrono::Duration as ChronoDuration;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{info, warn};
 
-use own_backup_core::{JobStore, RunQueue};
+use own_backup_core::{JobStore, PasswordStore, RunQueue};
 
 use crate::shutdown::ShutdownSignal;
 
@@ -26,6 +26,7 @@ pub fn spawn(
     store: Arc<JobStore>,
     queue: RunQueue,
     job_tx: UnboundedSender<String>,
+    passwords: Arc<PasswordStore>,
     mut shutdown: ShutdownSignal,
 ) {
     info!("Scheduler started (tick {}s)", TICK.as_secs());
@@ -36,7 +37,7 @@ pub fn spawn(
         let mut interval = tokio::time::interval(TICK);
         loop {
             tokio::select! {
-                _ = interval.tick() => tick(&store, &queue, &job_tx),
+                _ = interval.tick() => tick(&store, &queue, &job_tx, &passwords),
                 _ = shutdown.wait_for_shutdown() => {
                     info!("Scheduler stopping");
                     break;
@@ -46,7 +47,7 @@ pub fn spawn(
     });
 }
 
-fn tick(store: &JobStore, queue: &RunQueue, job_tx: &UnboundedSender<String>) {
+fn tick(store: &JobStore, queue: &RunQueue, job_tx: &UnboundedSender<String>, passwords: &PasswordStore) {
     let now = chrono::Local::now().fixed_offset();
     // A slot counts as "fresh" for two ticks, so one is never missed between
     // ticks even without catch-up.
@@ -65,6 +66,21 @@ fn tick(store: &JobStore, queue: &RunQueue, job_tx: &UnboundedSender<String>) {
             .and_then(|r| chrono::DateTime::parse_from_rfc3339(&r.started_at).ok());
 
         if own_backup_scheduler::is_due(&sched, now, last_fired, job.schedule.run_missed, fresh) {
+            // Gate encrypted jobs: without a saved password the run cannot
+            // decrypt the volume unattended, so skip it (the user must save a
+            // password to enable scheduling).
+            if job.requires_password
+                && job
+                    .source_list()
+                    .iter()
+                    .any(|s| !passwords.has(&own_backup_core::source_token(s)))
+            {
+                warn!(
+                    job = %job.name,
+                    "Scheduler: skipping — encrypted source has no saved password"
+                );
+                continue;
+            }
             enqueue(queue, job_tx, &job.id, &job.name);
         }
     }

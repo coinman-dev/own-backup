@@ -15,14 +15,22 @@ export interface PartitionInfo {
   index: number;
   offset_bytes: number;
   size_bytes: number;
+  /** Bytes in use within the volume (size − free); 0 when unknown/letterless. */
+  used_bytes: number;
   gpt_type_guid: string;
   gpt_partition_guid: string;
   filesystem: string;
   volume_letter: string | null;
+  /** Openable device: "C:" for lettered, `\\?\Volume{GUID}` for letterless
+   *  system/hidden volumes (EFI, Recovery), "" when not backable (MSR, Linux). */
+  volume_device: string;
   volume_label: string;
   fs_uuid: string;
   is_system: boolean;
   is_boot: boolean;
+  /** Encrypted container (LUKS/BitLocker): filesystem is Unknown, but it can be
+   *  backed up after supplying a password to decrypt it. */
+  is_encrypted: boolean;
 }
 
 export interface BackupJob {
@@ -234,8 +242,14 @@ export interface JobRun {
 export interface Job {
   id: string;
   name: string;
+  /** Primary source volume, e.g. "E:" (used for file naming / back-compat). */
   source: string;
   source_label: string;
+  /** All selected source volumes; each becomes its own image in one run. */
+  sources: string[];
+  source_labels: string[];
+  /** At least one selected source is encrypted (needs a password to back up). */
+  requires_password: boolean;
   dest_folder: string;
   schedule: ScheduleConfig;
   scheme: SchemeConfig;
@@ -264,4 +278,10 @@ export interface JobProgress {
   blocks_done: number;
   blocks_total: number;
   speed_mbps: number;
+  /** 0-based index of the volume being copied in a multi-volume job. */
+  volume_index?: number;
+  /** Total volumes in this run (1 for single-volume jobs). */
+  volume_count?: number;
+  /** Label of the current volume, e.g. "C: Windows". */
+  volume?: string;
 }

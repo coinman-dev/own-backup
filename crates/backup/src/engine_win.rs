@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use tracing::{info, warn};
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use own_backup_common::disk::DiskInfo;
 use own_backup_common::image::ImageManifest;
@@ -87,6 +88,11 @@ pub struct VolumeBackupRequest {
     /// GUI job id, stamped into the sidecar so retention can find this
     /// job's chains later.
     pub job_id: Option<String>,
+    /// Passphrase for an encrypted (LUKS) source. When present and the source
+    /// is a LUKS container, the volume is unlocked and its *decrypted* data is
+    /// backed up (used blocks only); on restore, encryption must be re-applied
+    /// manually. Ignored for non-encrypted sources.
+    pub passphrase: Option<Zeroizing<String>>,
 }
 
 /// Outcome of a completed volume backup.
@@ -245,11 +251,44 @@ fn backup_volume_inner(
     };
     let vss_used = vss.is_some();
 
-    // --- Source geometry (read from the snapshot when we have one) ---
-    let src_probe = WinRawDevice::open_read(&read_path)?;
-    let volume_len = src_probe.length();
+    // --- Optional LUKS unlock ---
+    // When a passphrase is supplied and the source is a LUKS container, we back
+    // up its DECRYPTED data area (used blocks only). The inner filesystem is
+    // Linux (btrfs/ext/xfs), so the NTFS-specific steps below are skipped.
+    let mut src_probe = WinRawDevice::open_read(&read_path)?;
+    let luks: Option<crate::luks::LuksParams> = match &req.passphrase {
+        Some(pass) => {
+            let mut header = vec![0u8; 4096];
+            src_probe.read_at(0, &mut header)?;
+            if crate::luks::is_luks(&header) {
+                let params = crate::luks::open_luks(&mut src_probe, pass.as_bytes())?;
+                info!(kind = ?params.kind, "LUKS source unlocked; backing up decrypted data");
+                Some(params)
+            } else {
+                None
+            }
+        }
+        None => None,
+    };
+    let device_len = src_probe.length();
     let sector_size = src_probe.sector_size();
     drop(src_probe);
+
+    // For an encrypted source the backed-up "volume" is the decrypted data area.
+    let volume_len = match &luks {
+        Some(p) => device_len.saturating_sub(p.data_offset),
+        None => device_len,
+    };
+
+    // Opens a fresh read source for the used-map builders and the block reader:
+    // a plain device, or a decrypting view over it for a LUKS source.
+    let open_source = |luks: &Option<crate::luks::LuksParams>| -> Result<Box<dyn crate::fat_map::RawVolume + Send>> {
+        let dev = WinRawDevice::open_read(&read_path)?;
+        Ok(match luks {
+            Some(p) => Box::new(crate::decrypt::DecryptingVolume::new(Box::new(dev), p.clone())),
+            None => Box::new(dev),
+        })
+    };
 
     if req.block_size == 0 || req.block_size % sector_size != 0 {
         return Err(OwnBackupError::Config(format!(
@@ -286,12 +325,38 @@ fn backup_volume_inner(
         }
     }
 
-    // --- Used-sector map: NTFS bitmap → FAT32/exFAT structures → full copy ---
+    // --- Used-sector map: NTFS → FAT32/exFAT → ext2/3/4 → btrfs → full copy ---
     let mut ntfs_map: Option<NtfsUsedSectorMap> = None;
     let mut fat_map: Option<crate::fat_map::FatUsedMap> = None;
+    let mut ext_map: Option<crate::ext_map::ExtUsedMap> = None;
+    let mut btrfs_map: Option<crate::btrfs_map::BtrfsUsedMap> = None;
+    // For an encrypted source the map is built over the decrypting view and
+    // returned boxed directly (no exclusions apply to a Linux volume).
+    let mut luks_used: Option<Box<dyn UsedSectorMap>> = None;
     let smart_mode = if req.all_sectors {
         info!("Sector-by-sector mode requested; copying all blocks");
         false
+    } else if luks.is_some() {
+        // Decrypted Linux volume: only the RawVolume-based parsers apply
+        // (FAT/ext/btrfs); NTFS FSCTL and file exclusions do not.
+        let mut src = open_source(&luks)?;
+        let map: Option<Box<dyn UsedSectorMap>> =
+            if let Ok(m) = crate::fat_map::build_fat_used_map(src.as_mut(), req.block_size) {
+                info!(fs = m.filesystem, "Using FAT map over decrypted volume");
+                Some(Box::new(m))
+            } else if let Ok(m) = crate::ext_map::build_ext_used_map(src.as_mut(), req.block_size) {
+                info!(fs = "ext4", "Using ext map over decrypted volume");
+                Some(Box::new(m))
+            } else if let Ok(m) = crate::btrfs_map::build_btrfs_used_map(src.as_mut(), req.block_size) {
+                info!(fs = "btrfs", "Using btrfs map over decrypted volume");
+                Some(Box::new(m))
+            } else {
+                warn!("no used-block map for the decrypted volume — sector-by-sector");
+                None
+            };
+        let smart = map.is_some();
+        luks_used = map;
+        smart
     } else {
         match NtfsUsedSectorMap::open(&read_path, req.block_size) {
             Ok(map) => {
@@ -299,7 +364,8 @@ fn backup_volume_inner(
                 true
             }
             Err(ntfs_err) => {
-                // Not NTFS — try parsing FAT32/exFAT structures directly.
+                // Not NTFS — try parsing FAT32/exFAT, then ext2/3/4, structures
+                // directly (each on its own device handle).
                 let fat_attempt = WinRawDevice::open_read(&read_path).and_then(|mut dev| {
                     crate::fat_map::build_fat_used_map(&mut dev, req.block_size)
                 });
@@ -310,12 +376,39 @@ fn backup_volume_inner(
                         true
                     }
                     Err(fat_err) => {
-                        warn!(
-                            ntfs = %ntfs_err,
-                            fat = %fat_err,
-                            "no used-cluster map available, falling back to sector-by-sector"
-                        );
-                        false
+                        let ext_attempt = WinRawDevice::open_read(&read_path).and_then(|mut dev| {
+                            crate::ext_map::build_ext_used_map(&mut dev, req.block_size)
+                        });
+                        match ext_attempt {
+                            Ok(map) => {
+                                info!(fs = "ext4", "Using ext used-block map");
+                                ext_map = Some(map);
+                                true
+                            }
+                            Err(ext_err) => {
+                                let btrfs_attempt =
+                                    WinRawDevice::open_read(&read_path).and_then(|mut dev| {
+                                        crate::btrfs_map::build_btrfs_used_map(&mut dev, req.block_size)
+                                    });
+                                match btrfs_attempt {
+                                    Ok(map) => {
+                                        info!(fs = "btrfs", "Using btrfs used-block map");
+                                        btrfs_map = Some(map);
+                                        true
+                                    }
+                                    Err(btrfs_err) => {
+                                        warn!(
+                                            ntfs = %ntfs_err,
+                                            fat = %fat_err,
+                                            ext = %ext_err,
+                                            btrfs = %btrfs_err,
+                                            "no used-block map available, falling back to sector-by-sector"
+                                        );
+                                        false
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -358,10 +451,16 @@ fn backup_volume_inner(
         warn!("file exclusions are only supported on NTFS in smart mode — ignored for this run");
     }
 
-    let used: Box<dyn UsedSectorMap> = match (ntfs_map, fat_map) {
-        (Some(map), _) => Box::new(map),
-        (None, Some(map)) => Box::new(map),
-        (None, None) => Box::new(AllUsedMap::new(total_blocks)),
+    let used: Box<dyn UsedSectorMap> = if let Some(map) = luks_used {
+        map
+    } else {
+        match (ntfs_map, fat_map, ext_map, btrfs_map) {
+            (Some(map), ..) => Box::new(map),
+            (None, Some(map), ..) => Box::new(map),
+            (None, None, Some(map), _) => Box::new(map),
+            (None, None, None, Some(map)) => Box::new(map),
+            (None, None, None, None) => Box::new(AllUsedMap::new(total_blocks)),
+        }
     };
     let used_blocks = used.used_block_count();
 
@@ -457,8 +556,15 @@ fn backup_volume_inner(
     });
 
     let backup_id = Uuid::new_v4();
-    let mut reader: Box<dyn BlockReader> =
-        Box::new(WinBlockReader::open(&read_path, req.block_size)?);
+    let mut reader: Box<dyn BlockReader> = if luks.is_some() {
+        // Read decrypted blocks through the LUKS view.
+        Box::new(crate::block_reader::RawVolumeBlockReader::new(
+            open_source(&luks)?,
+            req.block_size,
+        )?)
+    } else {
+        Box::new(WinBlockReader::open(&read_path, req.block_size)?)
+    };
     if let Some(ranges) = zero_ranges {
         reader = Box::new(ZeroingBlockReader::new(reader, ranges));
     }
@@ -473,7 +579,8 @@ fn backup_volume_inner(
     // exactly one healed sector, at TotalSectors, byte-equal to sector 0).
     // Store the correct copy ourselves: NTFS finds a valid backup boot sector
     // and writes nothing — and even if it writes, the bytes are identical.
-    if volume_len > sector_size as u64 {
+    // (Skipped for a decrypted LUKS source — its inner FS is never NTFS.)
+    if luks.is_none() && volume_len > sector_size as u64 {
         let mut sector0 = vec![0u8; sector_size as usize];
         let mut probe = WinRawDevice::open_read(&read_path)?;
         probe.read_at(0, &mut sector0)?;
@@ -612,7 +719,19 @@ fn backup_volume_inner(
         },
         checksum_algorithm: "xxhash64".into(),
         preflight_report: None,
-        volume_encryption: None,
+        // Encrypted source captured in the clear (used blocks only): record the
+        // kind and that encryption must be re-applied after restore. The LUKS
+        // header is intentionally not stored — a plaintext capture restores to
+        // an unencrypted volume, so the original header is not needed.
+        volume_encryption: luks.as_ref().map(|p| {
+            use own_backup_common::image::{VolumeCaptureMode, VolumeEncryptionState};
+            VolumeEncryptionState {
+                kind: p.kind.clone(),
+                capture_mode: VolumeCaptureMode::Plaintext,
+                luks_header_backup_b64: None,
+                note: Some("Decrypted at backup; re-enable encryption after restore".into()),
+            }
+        }),
     };
 
     let mut sidecar_info = match &parent {

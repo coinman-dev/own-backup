@@ -100,19 +100,19 @@ fn json_reply<T: serde::Serialize>(value: &T) -> Result<Response<JsonReply>, Sta
     Ok(Response::new(JsonReply { json }))
 }
 
-/// Shared save/run validation: `source`/`dest` non-empty, dest not on source.
-fn validate_job(source: &str, dest_folder: &str, name_empty: bool) -> Result<(), Status> {
-    if name_empty {
+/// Shared save/run validation: name + at least one source, dest non-empty, and
+/// the destination not on ANY of the job's source volumes.
+fn validate_job(job: &own_backup_core::Job) -> Result<(), Status> {
+    if job.name.trim().is_empty() {
         return Err(Status::invalid_argument("Укажите имя задания."));
     }
-    if source.trim().is_empty() {
+    if job.source_list().is_empty() {
         return Err(Status::invalid_argument("Выберите источник (том)."));
     }
-    if dest_folder.trim().is_empty() {
+    if job.dest_folder.trim().is_empty() {
         return Err(Status::invalid_argument("Выберите папку назначения."));
     }
-    if own_backup_core::dest_on_source_volume(source, dest_folder) {
-        let letter = own_backup_core::drive_letter_of(source).unwrap_or('?');
+    if let Some(letter) = own_backup_core::dest_collision_letter(job, &job.dest_folder) {
         return Err(Status::invalid_argument(format!(
             "Нельзя сохранять копию на тот же диск, который копируется ({letter}:). \
              Выберите для назначения другой диск."
@@ -139,7 +139,7 @@ impl BackupService for BackupServiceImpl {
         check_auth(&req, &self.service_token)?;
         let job: own_backup_core::Job = serde_json::from_str(&req.into_inner().json)
             .map_err(|e| Status::invalid_argument(format!("bad job JSON: {e}")))?;
-        validate_job(&job.source, &job.dest_folder, job.name.trim().is_empty())?;
+        validate_job(&job)?;
         json_reply(&self.state.store.upsert(job))
     }
 
@@ -177,9 +177,8 @@ impl BackupService for BackupServiceImpl {
             .store
             .get(&id)
             .ok_or_else(|| Status::not_found("Задание не найдено."))?;
-        // Guard against writing onto the source volume (mirrors save-time check).
-        if own_backup_core::dest_on_source_volume(&job.source, &job.dest_folder) {
-            let letter = own_backup_core::drive_letter_of(&job.source).unwrap_or('?');
+        // Guard against writing onto any source volume (mirrors save-time check).
+        if let Some(letter) = own_backup_core::dest_collision_letter(&job, &job.dest_folder) {
             return Err(Status::failed_precondition(format!(
                 "Копия пишется на тот же диск ({letter}:), что и источник — запуск отменён."
             )));
@@ -238,6 +237,31 @@ impl BackupService for BackupServiceImpl {
         Ok(Response::new(Box::pin(stream)))
     }
 
+    // --- Encrypted volumes ------------------------------------------------
+
+    async fn provide_volume_password(
+        &self,
+        req: Request<JsonRequest>,
+    ) -> Result<Response<Empty>, Status> {
+        check_auth(&req, &self.service_token)?;
+        #[derive(serde::Deserialize)]
+        struct Payload {
+            volume: String,
+            password: String,
+            #[serde(default)]
+            remember: bool,
+        }
+        let p: Payload = serde_json::from_str(&req.into_inner().json)
+            .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+        // Key by the same token the backup path resolves against.
+        let token = own_backup_core::source_token(&p.volume);
+        self.state
+            .passwords
+            .remember(&token, p.password, p.remember)
+            .map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(Empty {}))
+    }
+
     // --- Inventory --------------------------------------------------------
 
     async fn list_disks(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
@@ -287,7 +311,9 @@ mod tests {
         let (job_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (events, _r) = broadcast::channel(16);
-        let state = AppState::new(config, store, queue, job_tx, cancel, events);
+        let passwords =
+            std::sync::Arc::new(own_backup_core::PasswordStore::new(dir.join("meta.db")));
+        let state = AppState::new(config, store, queue, job_tx, cancel, events, passwords);
         BackupServiceImpl::new(state, String::new())
     }
 

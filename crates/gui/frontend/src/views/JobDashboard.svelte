@@ -1,7 +1,7 @@
 <script lang="ts">
   import { api } from '../lib/api';
   import { formatBytes, formatDate, formatClock } from '../lib/format';
-  import { jobs, jobStatus, runJob, cancelRunning } from '../lib/jobStore.svelte';
+  import { jobs, jobStatus, sourceSummary, runJob, cancelRunning } from '../lib/jobStore.svelte';
   import InfoModal from '../components/InfoModal.svelte';
   import type { Job } from '../lib/types';
 
@@ -22,6 +22,14 @@
   const preparing = $derived(progress?.phase === 'prepare');
   const finalizing = $derived(progress?.phase === 'finalize');
   const lastRun = $derived(job.last_run);
+
+  // "Том 2/3 · C: Windows — " prefix while a multi-volume job runs.
+  const volTag = $derived.by(() => {
+    const p = progress;
+    if (!p || !p.volume_count || p.volume_count <= 1) return '';
+    const n = (p.volume_index ?? 0) + 1;
+    return `Том ${n}/${p.volume_count}${p.volume ? ` · ${p.volume}` : ''} — `;
+  });
 
   const KIND_LABELS: Record<string, string> = {
     incremental: 'инкрементная',
@@ -143,7 +151,7 @@
         <circle cx="12" cy="12" r="1" fill="#9aa0b4" />
       </svg>
       <div class="card-title">{job.name}</div>
-      <div class="card-sub">{job.source_label || job.source}</div>
+      <div class="card-sub">{sourceSummary(job)}</div>
     </div>
 
     <div class="connector">
@@ -181,7 +189,7 @@
     <div class="progress-wrap">
       <div class="progress-info">
         <span>
-          {#if preparing}Подготовка: поиск исключаемых файлов…
+          {volTag}{#if preparing}Подготовка: поиск исключаемых файлов…
           {:else if finalizing}Завершение: запись образа на диск…
           {:else if verifying}Проверка резервной копии…
           {:else}Резервное копирование…{/if}
@@ -200,8 +208,8 @@
       </div>
       <div class="bar"><div class="bar-fill" class:verify={verifying} class:indet={finalizing} style="width:{finalizing ? 100 : (progress?.percent ?? 0)}%"></div></div>
       <div class="progress-meta">
-        <span class="route" title="{job.source_label || job.source} → {job.dest_folder}">
-          {job.source_label || job.source} → {job.dest_folder}
+        <span class="route" title="{sourceSummary(job)} → {job.dest_folder}">
+          {sourceSummary(job)} → {job.dest_folder}
         </span>
         <span class="times">
           Прошло {formatClock(elapsedMs)} · Осталось {Number.isFinite(etaMs) ? '~' + formatClock(etaMs) : 'оценка…'}

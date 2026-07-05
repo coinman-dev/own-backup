@@ -26,6 +26,13 @@ service BackupService {
   rpc ListActivity(Empty) returns (JsonReply);       // JSON: [JobRun]
   rpc StreamEvents(Empty) returns (stream Event);    // progress / queue / finished
 
+  // --- Encrypted volumes ---
+  // Provide a password to unlock an encrypted (LUKS) source volume.
+  // JSON in: { "volume": string, "password": string, "remember": bool }.
+  // Cached in the service for this session; when "remember" is set it is also
+  // persisted OS-protected so scheduled runs can use it.
+  rpc ProvideVolumePassword(JsonRequest) returns (Empty);
+
   // --- Inventory ---
   rpc ListDisks(Empty) returns (JsonReply);          // JSON: [DiskInfo]
 

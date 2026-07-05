@@ -2,6 +2,7 @@ pub mod mock;
 pub mod preflight;
 pub mod traits;
 
+pub mod fs_probe;
 #[cfg(target_os = "windows")]
 pub mod preflight_windows;
 #[cfg(target_os = "windows")]

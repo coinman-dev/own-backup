@@ -20,6 +20,11 @@ pub struct BackupArgs {
     /// Do not take a VSS shadow copy (crash-consistent copy of a live volume)
     #[arg(long)]
     pub no_vss: bool,
+
+    /// Passphrase for an encrypted (LUKS) source. When given and the source is
+    /// a LUKS container, its decrypted data is backed up (used blocks only).
+    #[arg(long)]
+    pub password: Option<String>,
 }
 
 #[cfg(target_os = "windows")]
@@ -45,6 +50,7 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
         parent_image: None,
         exclusion_patterns: Vec::new(),
         job_id: None,
+        passphrase: args.password.clone().map(zeroize::Zeroizing::new),
     };
 
     println!("Backing up {} -> {}", args.source, args.output);

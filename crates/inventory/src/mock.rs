@@ -23,42 +23,51 @@ impl MockInventory {
             index: 1,
             offset_bytes: 1_048_576, // 1 MiB
             size_bytes: 104_857_600, // 100 MiB
+            used_bytes: 0,           // letterless — UI shows "—"
             gpt_type_guid: "C12A7328-F81F-11D2-BA4B-00A0C93EC93B".into(),
             gpt_partition_guid: "A1B2C3D4-0001-4000-8000-000000000001".into(),
             filesystem: FileSystem::Fat32,
             volume_letter: None,
+            volume_device: String::new(),
             volume_label: "EFI System Partition".into(),
             fs_uuid: "1234-ABCD".into(),
             is_system: false,
             is_boot: true,
+            is_encrypted: false,
         };
 
         let msr_partition = PartitionInfo {
             index: 2,
             offset_bytes: 105_906_176, // right after EFI
             size_bytes: 16_777_216,    // 16 MiB
+            used_bytes: 0,
             gpt_type_guid: "E3C9E316-0B5C-4DB8-817D-F92DF00215AE".into(),
             gpt_partition_guid: "A1B2C3D4-0002-4000-8000-000000000002".into(),
             filesystem: FileSystem::Unknown,
             volume_letter: None,
+            volume_device: String::new(),
             volume_label: "Microsoft Reserved".into(),
             fs_uuid: String::new(),
             is_system: false,
             is_boot: false,
+            is_encrypted: false,
         };
 
         let ntfs_partition = PartitionInfo {
             index: 3,
             offset_bytes: 122_683_392,   // after MSR
             size_bytes: 499_877_316_608, // ~465 GB
+            used_bytes: 187_904_819_200, // ~175 GB used
             gpt_type_guid: "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7".into(),
             gpt_partition_guid: "A1B2C3D4-0003-4000-8000-000000000003".into(),
             filesystem: FileSystem::Ntfs,
             volume_letter: Some('C'),
+            volume_device: "C:".into(),
             volume_label: "Windows".into(),
             fs_uuid: "AABB1122CCDD3344".into(),
             is_system: true,
             is_boot: false,
+            is_encrypted: false,
         };
 
         DiskInfo {

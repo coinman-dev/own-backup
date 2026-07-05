@@ -14,6 +14,9 @@ export interface VolumeOption {
 export const engine = $state({
   // --- volume cache (shared by wizard source + restore target) ---
   volumes: [] as VolumeOption[],
+  // Raw physical disks with their partitions — the Paragon-style source map in
+  // the wizard renders from this; `volumes` is the flattened letter list.
+  disks: [] as DiskInfo[],
   volumesLoaded: false,
   volumesLoading: false,
   volumesError: null as string | null,
@@ -63,6 +66,12 @@ export async function refreshVolumes(): Promise<void> {
   engine.volumesError = null;
   try {
     const disks: DiskInfo[] = await api.listDisks();
+    // Show disks in physical-drive order (0, 1, 2, …) rather than WMI order.
+    const diskNumber = (d: DiskInfo): number => {
+      const m = d.device_id.match(/(\d+)\s*$/);
+      return m ? parseInt(m[1], 10) : 0;
+    };
+    engine.disks = [...disks].sort((a, b) => diskNumber(a) - diskNumber(b));
     engine.volumes = disks
       .flatMap((d) =>
         d.partitions

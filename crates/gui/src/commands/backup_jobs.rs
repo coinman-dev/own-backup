@@ -3,15 +3,14 @@
 use tauri::State;
 
 use crate::jobs::{
-    default_exclusions, dest_on_source_volume, drive_letter_of, Job, JobRun, QueueSnapshot,
-    ScheduleConfig, SchemeConfig,
+    default_exclusions, dest_collision_letter, Job, JobRun, QueueSnapshot, ScheduleConfig,
+    SchemeConfig,
 };
 use crate::state::GuiState;
 
-/// Reject a destination that lives on the volume being backed up.
-fn check_dest_not_on_source(source: &str, dest_folder: &str) -> Result<(), String> {
-    if dest_on_source_volume(source, dest_folder) {
-        let letter = drive_letter_of(source).unwrap_or('?');
+/// Reject a destination that lives on any of the volumes being backed up.
+fn check_dest_not_on_source(job: &Job) -> Result<(), String> {
+    if let Some(letter) = dest_collision_letter(job, &job.dest_folder) {
         return Err(format!(
             "Нельзя сохранять копию на тот же диск, который копируется ({letter}:). \
              Выберите для назначения другой диск."
@@ -59,13 +58,13 @@ pub async fn save_backup_job(state: State<'_, GuiState>, job: Job) -> Result<Job
     if job.name.trim().is_empty() {
         return Err("Укажите имя задания.".into());
     }
-    if job.source.trim().is_empty() {
+    if job.source_list().is_empty() {
         return Err("Выберите источник (том).".into());
     }
     if job.dest_folder.trim().is_empty() {
         return Err("Выберите папку назначения.".into());
     }
-    check_dest_not_on_source(&job.source, &job.dest_folder)?;
+    check_dest_not_on_source(&job)?;
     Ok(state.job_store.upsert(job))
 }
 
@@ -73,6 +72,23 @@ pub async fn save_backup_job(state: State<'_, GuiState>, job: Job) -> Result<Job
 pub async fn delete_backup_job(state: State<'_, GuiState>, id: String) -> Result<(), String> {
     state.job_store.delete(&id);
     Ok(())
+}
+
+/// Provide a password to unlock an encrypted (LUKS) source volume. Cached for
+/// this session; `remember` also persists it OS-protected so scheduled backups
+/// can use it. `volume` is the source device (e.g. a `part:` spec).
+#[tauri::command]
+pub async fn provide_volume_password(
+    state: State<'_, GuiState>,
+    volume: String,
+    password: String,
+    remember: bool,
+) -> Result<(), String> {
+    let token = own_backup_core::source_token(&volume);
+    state
+        .passwords
+        .remember(&token, password, remember)
+        .map_err(|e| e.to_string())
 }
 
 /// Enqueue a job for backup. Runs immediately if idle, otherwise queues.
@@ -84,7 +100,7 @@ pub async fn run_backup_job(state: State<'_, GuiState>, id: String) -> Result<()
         .job_store
         .get(&id)
         .ok_or_else(|| "Задание не найдено.".to_string())?;
-    check_dest_not_on_source(&job.source, &job.dest_folder)?;
+    check_dest_not_on_source(&job)?;
     // Avoid enqueuing the same job twice while it is pending/running.
     {
         let pending = state.run_queue.pending.lock().unwrap();

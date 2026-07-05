@@ -70,6 +70,16 @@ export async function deleteJob(id: string): Promise<void> {
   await reloadJobs();
 }
 
+/** Supply a password for an encrypted source volume. Cached for this session;
+ *  `remember` also persists it OS-protected so scheduled backups can use it. */
+export async function provideVolumePassword(
+  volume: string,
+  password: string,
+  remember: boolean,
+): Promise<void> {
+  await api.provideVolumePassword(volume, password, remember);
+}
+
 export async function runJob(id: string): Promise<void> {
   await api.runBackupJob(id);
   try {
@@ -94,6 +104,16 @@ export async function cancelRunning(): Promise<void> {
   } catch {
     /* ignore */
   }
+}
+
+/** Human summary of a job's source volume(s): one label, or "C: Windows, EFI"
+ *  for many (prefers labels over raw device paths like `\\?\Volume{…}`). */
+export function sourceSummary(job: Job): string {
+  const devs = job.sources && job.sources.length ? job.sources : job.source ? [job.source] : [];
+  if (devs.length === 0) return '—';
+  const labels = job.source_labels && job.source_labels.length === devs.length ? job.source_labels : devs;
+  if (devs.length === 1) return job.source_label || labels[0] || devs[0];
+  return labels.join(', ');
 }
 
 /** Status of a job for the list: running / queued / result of last run. */

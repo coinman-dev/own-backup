@@ -6,7 +6,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use own_backup_common::config::AppConfig;
 
-use crate::jobs::{JobStore, RunQueue};
+use crate::jobs::{JobStore, PasswordStore, RunQueue};
 
 /// Shared state for all Tauri commands.
 pub struct GuiState {
@@ -24,6 +24,8 @@ pub struct GuiState {
     pub run_queue: RunQueue,
     /// Sends job ids to the queue worker.
     pub job_tx: UnboundedSender<String>,
+    /// Passwords for encrypted volumes (cache + OS-protected store).
+    pub passwords: Arc<PasswordStore>,
 }
 
 impl GuiState {
@@ -35,6 +37,7 @@ impl GuiState {
     ) -> Self {
         let db_path = config.db_path();
         let config_path = config.data_dir.join("config.toml");
+        let passwords = Arc::new(PasswordStore::new(db_path.clone()));
         Self {
             config,
             db_path,
@@ -44,6 +47,7 @@ impl GuiState {
             job_store,
             run_queue,
             job_tx,
+            passwords,
         }
     }
 

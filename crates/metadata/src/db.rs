@@ -4,7 +4,7 @@ use rusqlite::Connection;
 
 use own_backup_common::error::{OwnBackupError, Result};
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Open (or create) the SQLite database at `path`, enable WAL mode, and run migrations.
 pub fn open_database(path: &Path) -> Result<Connection> {
@@ -52,6 +52,9 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     if current_version < 1 {
         apply_v1(conn)?;
     }
+    if current_version < 2 {
+        apply_v2(conn)?;
+    }
 
     Ok(())
 }
@@ -98,6 +101,25 @@ fn apply_v1(conn: &Connection) -> Result<()> {
 
         INSERT INTO schema_version (version, applied_at)
         VALUES (1, datetime('now'));",
+    )
+    .map_err(|e| OwnBackupError::Database(e.to_string()))?;
+
+    Ok(())
+}
+
+/// v2: saved passwords for encrypted (LUKS/BitLocker) volumes. The blob is
+/// OS-protected (DPAPI on Windows) — never a plaintext password — so scheduled
+/// backups can unlock the volume unattended.
+fn apply_v2(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS volume_secrets (
+            volume_key TEXT PRIMARY KEY,
+            protected_blob BLOB NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        INSERT INTO schema_version (version, applied_at)
+        VALUES (2, datetime('now'));",
     )
     .map_err(|e| OwnBackupError::Database(e.to_string()))?;
 

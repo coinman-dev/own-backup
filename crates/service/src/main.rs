@@ -129,19 +129,29 @@ pub async fn run_main_loop(
 
     let sink: std::sync::Arc<dyn own_backup_core::EventSink> =
         std::sync::Arc::new(grpc_server::GrpcEventSink { tx: events.clone() });
+    // Passwords for encrypted volumes: cached for this session, plus the
+    // OS-protected store (metadata DB) for remembered ones.
+    let passwords = std::sync::Arc::new(own_backup_core::PasswordStore::new(config.db_path()));
     tokio::spawn(own_backup_core::run_queue_worker(
         sink,
         store.clone(),
         queue.clone(),
         cancel.clone(),
+        passwords.clone(),
         job_rx,
     ));
     info!("Backup orchestrator ready ({} job(s) loaded)", store.list().len());
 
     // The scheduler enqueues due jobs on a timer (stops on shutdown).
-    scheduler::spawn(store.clone(), queue.clone(), job_tx.clone(), shutdown.clone());
+    scheduler::spawn(
+        store.clone(),
+        queue.clone(),
+        job_tx.clone(),
+        passwords.clone(),
+        shutdown.clone(),
+    );
 
-    let state = AppState::new(config.clone(), store, queue, job_tx, cancel, events);
+    let state = AppState::new(config.clone(), store, queue, job_tx, cancel, events, passwords);
 
     // Production transport: Unix Domain Socket on Linux (no TCP, prevents local
     // privilege escalation). Dev/foreground uses TCP on localhost. Windows

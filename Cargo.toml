@@ -55,6 +55,11 @@ zstd = "0.13"
 # Encryption
 aes-gcm = "0.10"
 argon2 = "0.5"
+# Volume decryption (LUKS): AES-XTS + LUKS KDFs
+aes = "0.8"
+xts-mode = "0.5"
+pbkdf2 = "0.12"
+base64 = "0.22"
 
 # Database
 rusqlite = { version = "0.32", features = ["bundled"] }

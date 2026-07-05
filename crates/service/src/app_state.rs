@@ -6,7 +6,7 @@ use tokio::sync::broadcast;
 use tokio::sync::mpsc::UnboundedSender;
 
 use own_backup_common::config::AppConfig;
-use own_backup_core::{JobStore, RunQueue};
+use own_backup_core::{JobStore, PasswordStore, RunQueue};
 
 use crate::grpc_server::proto;
 
@@ -26,10 +26,13 @@ pub struct AppState {
     pub cancel: Arc<AtomicBool>,
     /// Fan-out of orchestration events to `StreamEvents` subscribers.
     pub events: broadcast::Sender<proto::Event>,
+    /// Passwords for encrypted volumes (in-memory cache + OS-protected store).
+    pub passwords: Arc<PasswordStore>,
     pub start_time: Instant,
 }
 
 impl AppState {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: AppConfig,
         store: Arc<JobStore>,
@@ -37,6 +40,7 @@ impl AppState {
         job_tx: UnboundedSender<String>,
         cancel: Arc<AtomicBool>,
         events: broadcast::Sender<proto::Event>,
+        passwords: Arc<PasswordStore>,
     ) -> Arc<Self> {
         Arc::new(Self {
             config,
@@ -45,6 +49,7 @@ impl AppState {
             job_tx,
             cancel,
             events,
+            passwords,
             start_time: Instant::now(),
         })
     }

@@ -8,6 +8,50 @@ use own_backup_common::types::{BackupStatus, BackupType};
 use crate::models::{BackupJob, BackupSet, RetentionPolicy};
 
 // ---------------------------------------------------------------------------
+// Volume secrets (OS-protected passwords for encrypted volumes)
+// ---------------------------------------------------------------------------
+
+/// Store (or replace) the OS-protected password blob for `volume_key`.
+/// The blob must already be encrypted (e.g. via DPAPI) — never a plaintext
+/// password.
+pub fn upsert_volume_secret(conn: &Connection, volume_key: &str, blob: &[u8]) -> Result<()> {
+    conn.execute(
+        "INSERT INTO volume_secrets (volume_key, protected_blob, created_at)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(volume_key) DO UPDATE SET
+             protected_blob = excluded.protected_blob,
+             created_at = excluded.created_at",
+        params![volume_key, blob, Utc::now().to_rfc3339()],
+    )
+    .map_err(|e| OwnBackupError::Database(e.to_string()))?;
+    Ok(())
+}
+
+/// Fetch the protected password blob for `volume_key`, if one is saved.
+pub fn get_volume_secret(conn: &Connection, volume_key: &str) -> Result<Option<Vec<u8>>> {
+    conn.query_row(
+        "SELECT protected_blob FROM volume_secrets WHERE volume_key = ?1",
+        params![volume_key],
+        |row| row.get::<_, Vec<u8>>(0),
+    )
+    .map(Some)
+    .or_else(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => Ok(None),
+        other => Err(OwnBackupError::Database(other.to_string())),
+    })
+}
+
+/// Remove any saved password for `volume_key` (idempotent).
+pub fn delete_volume_secret(conn: &Connection, volume_key: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM volume_secrets WHERE volume_key = ?1",
+        params![volume_key],
+    )
+    .map_err(|e| OwnBackupError::Database(e.to_string()))?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // BackupJob CRUD
 // ---------------------------------------------------------------------------
 
@@ -489,6 +533,24 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let conn = open_database(&dir.path().join("test.db")).unwrap();
         (dir, conn)
+    }
+
+    #[test]
+    fn volume_secret_roundtrip() {
+        let (_d, conn) = setup_db();
+        assert_eq!(get_volume_secret(&conn, "vol1").unwrap(), None);
+
+        upsert_volume_secret(&conn, "vol1", b"blob-A").unwrap();
+        assert_eq!(get_volume_secret(&conn, "vol1").unwrap().as_deref(), Some(&b"blob-A"[..]));
+
+        // Upsert replaces.
+        upsert_volume_secret(&conn, "vol1", b"blob-B").unwrap();
+        assert_eq!(get_volume_secret(&conn, "vol1").unwrap().as_deref(), Some(&b"blob-B"[..]));
+
+        delete_volume_secret(&conn, "vol1").unwrap();
+        assert_eq!(get_volume_secret(&conn, "vol1").unwrap(), None);
+        // Delete is idempotent.
+        delete_volume_secret(&conn, "vol1").unwrap();
     }
 
     fn make_job() -> BackupJob {

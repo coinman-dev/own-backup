@@ -82,6 +82,61 @@ impl<R: BlockReader> BlockReader for PatchReader<R> {
     }
 }
 
+/// A [`BlockReader`] over any [`RawVolume`].
+///
+/// Used to read a decrypted (LUKS) volume: the source is a
+/// [`crate::decrypt::DecryptingVolume`] presenting the plaintext data area from
+/// offset 0, rather than a device path. Works over any `RawVolume`, so it is
+/// testable on non-Windows hosts.
+pub struct RawVolumeBlockReader {
+    vol: Box<dyn crate::fat_map::RawVolume + Send>,
+    block_size: u32,
+    length: u64,
+    total_blocks: u64,
+}
+
+impl RawVolumeBlockReader {
+    /// Read `block_size`-byte blocks over `vol`; the last block may be shorter.
+    pub fn new(vol: Box<dyn crate::fat_map::RawVolume + Send>, block_size: u32) -> Result<Self> {
+        if block_size == 0 {
+            return Err(own_backup_common::OwnBackupError::Device(
+                "block size must be non-zero".into(),
+            ));
+        }
+        let length = vol.len();
+        Ok(Self {
+            vol,
+            block_size,
+            length,
+            total_blocks: length.div_ceil(block_size as u64),
+        })
+    }
+}
+
+impl BlockReader for RawVolumeBlockReader {
+    fn read_block(&mut self, block_number: u64) -> Result<Vec<u8>> {
+        if block_number >= self.total_blocks {
+            return Err(own_backup_common::OwnBackupError::Device(format!(
+                "block {block_number} is beyond volume end ({} blocks)",
+                self.total_blocks
+            )));
+        }
+        let offset = block_number * self.block_size as u64;
+        let len = std::cmp::min(self.block_size as u64, self.length - offset) as usize;
+        let mut buf = vec![0u8; len];
+        self.vol.read_at(offset, &mut buf)?;
+        Ok(buf)
+    }
+
+    fn block_size(&self) -> u32 {
+        self.block_size
+    }
+
+    fn total_blocks(&self) -> u64 {
+        self.total_blocks
+    }
+}
+
 /// A mock block reader that reads from an in-memory `Vec<u8>`, splitting it
 /// into fixed-size blocks. Useful for testing.
 pub struct MockBlockReader {
@@ -134,6 +189,30 @@ impl BlockReader for MockBlockReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct MemVolume(Vec<u8>);
+    impl crate::fat_map::RawVolume for MemVolume {
+        fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
+            let (s, e) = (offset as usize, offset as usize + buf.len());
+            buf.copy_from_slice(&self.0[s..e]);
+            Ok(())
+        }
+        fn len(&self) -> u64 {
+            self.0.len() as u64
+        }
+    }
+
+    #[test]
+    fn raw_volume_reader_blocks_and_partial_tail() {
+        let data: Vec<u8> = (0..500u32).map(|i| i as u8).collect();
+        let mut r = RawVolumeBlockReader::new(Box::new(MemVolume(data.clone())), 256).unwrap();
+        assert_eq!(r.total_blocks(), 2);
+        assert_eq!(r.read_block(0).unwrap(), &data[0..256]);
+        let tail = r.read_block(1).unwrap();
+        assert_eq!(tail.len(), 244);
+        assert_eq!(tail, &data[256..500]);
+        assert!(r.read_block(2).is_err());
+    }
 
     #[test]
     fn mock_reader_exact_blocks() {

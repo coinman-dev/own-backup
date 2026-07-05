@@ -11,6 +11,10 @@ own-backup-inventory = { workspace = true }
 zstd = { workspace = true }
 aes-gcm = { workspace = true }
 argon2 = { workspace = true }
+aes = { workspace = true }
+xts-mode = { workspace = true }
+pbkdf2 = { workspace = true }
+base64 = { workspace = true }
 xxhash-rust = { workspace = true }
 sha2 = { workspace = true }
 serde = { workspace = true }
@@ -28,6 +32,7 @@ crc32fast = "1"
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_Security_Cryptography",
     "Win32_Storage_FileSystem",
     "Win32_Storage_Vhd",
     "Win32_System_Ioctl",

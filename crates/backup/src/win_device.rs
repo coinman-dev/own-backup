@@ -91,8 +91,25 @@ impl Drop for AlignedBuf {
 pub struct WinRawDevice {
     handle: HANDLE,
     path: String,
+    /// Accessible length in bytes. For a windowed partition source this is the
+    /// partition size, NOT the whole physical drive.
     length: u64,
+    /// Byte offset added to every seek — non-zero only for a windowed partition
+    /// source (`part:<disk>:<offset>:<len>`), so reads at logical offset 0 land
+    /// at the partition start on the physical drive.
+    base_offset: u64,
     sector_size: u32,
+}
+
+/// Parse a windowed partition source `part:<disk>:<offset>:<len>` into
+/// `(disk_number, offset_bytes, length_bytes)`.
+fn parse_partition_spec(device_path: &str) -> Option<(u32, u64, u64)> {
+    let rest = device_path.strip_prefix("part:")?;
+    let mut it = rest.split(':');
+    let disk = it.next()?.parse::<u32>().ok()?;
+    let offset = it.next()?.parse::<u64>().ok()?;
+    let len = it.next()?.parse::<u64>().ok()?;
+    Some((disk, offset, len))
 }
 
 // SAFETY: the HANDLE is owned exclusively by this struct and all access goes
@@ -111,6 +128,13 @@ impl WinRawDevice {
     }
 
     fn open(device_path: &str, writable: bool) -> Result<Self> {
+        // Windowed partition-by-offset source: open the physical drive and
+        // restrict I/O to [offset, offset+len). Used for letterless system
+        // partitions (EFI/hidden) that Windows exposes no volume for.
+        if let Some((disk, offset, len)) = parse_partition_spec(device_path) {
+            return Self::open_partition_window(disk, offset, len, writable);
+        }
+
         let path = normalize_device_path(device_path);
         let wide = to_wide(&path);
 
@@ -145,6 +169,7 @@ impl WinRawDevice {
             handle,
             path: path.clone(),
             length: 0,
+            base_offset: 0,
             sector_size: 512,
         };
 
@@ -157,6 +182,42 @@ impl WinRawDevice {
             "Opened raw device"
         );
         Ok(device)
+    }
+
+    /// Open a partition as a window over its physical drive: reads/writes at
+    /// logical offset 0 map to `offset` on `\\.\PhysicalDrive{disk}`, and the
+    /// accessible length is the partition size. VSS is not involved (callers
+    /// skip it for non-lettered sources).
+    fn open_partition_window(disk: u32, offset: u64, len: u64, writable: bool) -> Result<Self> {
+        let phys = format!(r"\\.\PhysicalDrive{disk}");
+        let mut dev = Self::open(&phys, writable)?;
+        let sector = dev.sector_size as u64;
+        if offset % sector != 0 {
+            return Err(OwnBackupError::Device(format!(
+                "partition offset {offset} is not aligned to sector size {sector}"
+            )));
+        }
+        // Round the window up to a whole sector; never past the physical end.
+        let full = dev.length;
+        let win = len.div_ceil(sector) * sector;
+        let end = offset.checked_add(win).ok_or_else(|| {
+            OwnBackupError::Device(format!("partition window {offset}+{win} overflows"))
+        })?;
+        if end > full {
+            return Err(OwnBackupError::Device(format!(
+                "partition window [{offset}, {end}) exceeds drive length {full}"
+            )));
+        }
+        dev.base_offset = offset;
+        dev.length = win;
+        dev.path = format!("part:{disk}:{offset}:{len}");
+        debug!(
+            drive = %phys,
+            offset,
+            length = win,
+            "Opened partition window"
+        );
+        Ok(dev)
     }
 
     /// Total device length in bytes (`IOCTL_DISK_GET_LENGTH_INFO`).
@@ -229,9 +290,12 @@ impl WinRawDevice {
     }
 
     fn seek(&mut self, offset: u64) -> Result<()> {
+        // Windowed partition sources add a base offset so logical 0 maps to the
+        // partition start on the physical drive.
+        let physical = self.base_offset + offset;
         // SAFETY: handle is valid.
-        unsafe { SetFilePointerEx(self.handle, offset as i64, None, FILE_BEGIN) }.map_err(|e| {
-            OwnBackupError::Device(format!("seek({}) to {offset} failed: {e}", self.path))
+        unsafe { SetFilePointerEx(self.handle, physical as i64, None, FILE_BEGIN) }.map_err(|e| {
+            OwnBackupError::Device(format!("seek({}) to {physical} failed: {e}", self.path))
         })
     }
 

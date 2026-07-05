@@ -1,17 +1,22 @@
 pub mod block_reader;
+pub mod btrfs_map;
 pub mod chains;
 pub mod checksum;
 pub mod compression;
+pub mod decrypt;
 pub mod encryption;
 pub mod exclusions;
+pub mod ext_map;
 pub mod fat_map;
 pub mod gpt_writer;
 pub mod image_reader;
 pub mod image_writer;
 pub mod incremental;
+pub mod luks;
 pub mod pipeline;
 pub mod raw_copy;
 pub mod san_policy;
+pub mod secrets;
 pub mod sidecar;
 pub mod used_sectors;
 
