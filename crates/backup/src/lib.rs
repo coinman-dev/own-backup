@@ -1,3 +1,4 @@
+pub mod bitlocker;
 pub mod block_reader;
 pub mod btrfs_map;
 pub mod chains;

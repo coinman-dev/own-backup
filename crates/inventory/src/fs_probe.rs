@@ -95,11 +95,35 @@ fn xfs_used_bytes(buf: &[u8]) -> Option<u64> {
     dblocks.checked_sub(fdblocks)?.checked_mul(block_size)
 }
 
+/// BitLocker volume GUIDs stored at boot-sector offset 0x160 (mixed-endian):
+/// `4967D63B-…-D001` (normal) and `4967D63C-…-D000` (BitLocker To Go).
+const BITLOCKER_GUID: [u8; 16] = [
+    0x3B, 0xD6, 0x67, 0x49, 0x29, 0x2E, 0xD8, 0x4A, 0x83, 0x99, 0xF6, 0xA3, 0x39, 0xE3, 0xD0, 0x01,
+];
+const BITLOCKER_TO_GO_GUID: [u8; 16] = [
+    0x3C, 0xD6, 0x67, 0x49, 0x29, 0x2E, 0xD8, 0x4A, 0x83, 0x99, 0xF6, 0xA3, 0x39, 0xE3, 0xD0, 0x00,
+];
+
 /// Match well-known filesystem signatures. `buf` starts at the partition's
 /// very first byte.
 pub fn identify(buf: &[u8]) -> Option<ProbedFs> {
     let at = |off: usize, tag: &[u8]| buf.len() >= off + tag.len() && &buf[off..off + tag.len()] == tag;
     let some = |fs, label| Some(ProbedFs { fs, label, used_bytes: None, encrypted: false });
+
+    // BitLocker must be checked before NTFS: Win8+ BitLocker volumes carry an
+    // "NTFS    " OEM id but the BitLocker GUID at 0x160 (Vista/7 use the
+    // "-FVE-FS-" signature at offset 3). Reported as an encrypted container.
+    if at(3, b"-FVE-FS-")
+        || (buf.len() >= 0x170
+            && (buf[0x160..0x170] == BITLOCKER_GUID || buf[0x160..0x170] == BITLOCKER_TO_GO_GUID))
+    {
+        return Some(ProbedFs {
+            fs: FileSystem::Unknown,
+            label: Some("BitLocker (зашифровано)".into()),
+            used_bytes: None,
+            encrypted: true,
+        });
+    }
 
     // OEM name / type strings in the boot sector.
     if at(3, b"NTFS    ") {

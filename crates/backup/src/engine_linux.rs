@@ -40,6 +40,19 @@ use crate::raw_copy::copy_used_blocks;
 use crate::sidecar::{read_sidecar, sidecar_path_for, write_sidecar, SidecarInfo};
 use crate::used_sectors::{AllUsedMap, UsedSectorMap};
 
+/// An unlocked encryption layer under the source volume, if any.
+enum Unlock {
+    None,
+    Luks(LuksParams),
+    BitLocker(crate::bitlocker::BitLockerParams),
+}
+
+impl Unlock {
+    fn is_encrypted(&self) -> bool {
+        !matches!(self, Unlock::None)
+    }
+}
+
 /// Default backup block size: 1 MiB.
 pub const DEFAULT_BLOCK_SIZE: u32 = 1024 * 1024;
 const MIB: u64 = 1024 * 1024;
@@ -56,8 +69,8 @@ pub struct LinuxBackupRequest {
     pub block_size: u32,
     /// Copy every block even when a used-block map is available.
     pub all_sectors: bool,
-    /// Passphrase for an encrypted (LUKS) source — its decrypted data is backed
-    /// up (used blocks only). Ignored for non-encrypted sources.
+    /// Passphrase for an encrypted source (LUKS or BitLocker) — its decrypted
+    /// data is backed up (used blocks only). Ignored for non-encrypted sources.
     pub passphrase: Option<Zeroizing<String>>,
     /// GUI job id, stamped into the sidecar.
     pub job_id: Option<String>,
@@ -109,29 +122,35 @@ fn backup_inner(
     let started = Instant::now();
     let read_path = req.source.clone();
 
-    // --- Optional LUKS unlock (back up the decrypted data area) ---
+    // --- Optional unlock of an encrypted source (LUKS or BitLocker); the
+    // decrypted data is what gets backed up (used blocks only) ---
     let mut probe = LinuxRawDevice::open_read(&read_path)?;
-    let luks: Option<LuksParams> = match &req.passphrase {
+    let unlock: Unlock = match &req.passphrase {
         Some(pass) => {
             let mut header = vec![0u8; 4096];
             probe.read_at(0, &mut header)?;
             if crate::luks::is_luks(&header) {
                 let params = crate::luks::open_luks(&mut probe, pass.as_bytes())?;
                 info!(kind = ?params.kind, "LUKS source unlocked; backing up decrypted data");
-                Some(params)
+                Unlock::Luks(params)
+            } else if crate::bitlocker::is_bitlocker(&header) {
+                let params = crate::bitlocker::open_bitlocker(&mut probe, pass.as_str())?;
+                info!(algo = format!("{:#x}", params.algorithm), "BitLocker source unlocked; backing up decrypted data");
+                Unlock::BitLocker(params)
             } else {
-                None
+                Unlock::None
             }
         }
-        None => None,
+        None => Unlock::None,
     };
     let device_len = probe.length();
     let sector_size = probe.sector_size();
     drop(probe);
 
-    let volume_len = match &luks {
-        Some(p) => device_len.saturating_sub(p.data_offset),
-        None => device_len,
+    let volume_len = match &unlock {
+        Unlock::None => device_len,
+        Unlock::Luks(p) => device_len.saturating_sub(p.data_offset),
+        Unlock::BitLocker(p) => p.encrypted_size.min(device_len),
     };
     if req.block_size == 0 || req.block_size % sector_size != 0 {
         return Err(OwnBackupError::Config(format!(
@@ -142,20 +161,23 @@ fn backup_inner(
     let total_blocks = volume_len.div_ceil(req.block_size as u64);
 
     // A fresh read source (device, or a decrypting view over it).
-    let open_source = |luks: &Option<LuksParams>| -> Result<Box<dyn RawVolume + Send>> {
+    let open_source = |unlock: &Unlock| -> Result<Box<dyn RawVolume + Send>> {
         let dev = LinuxRawDevice::open_read(&read_path)?;
-        Ok(match luks {
-            Some(p) => Box::new(DecryptingVolume::new(Box::new(dev), p.clone())),
-            None => Box::new(dev),
+        Ok(match unlock {
+            Unlock::None => Box::new(dev),
+            Unlock::Luks(p) => Box::new(DecryptingVolume::new(Box::new(dev), p.clone())),
+            Unlock::BitLocker(p) => {
+                Box::new(crate::bitlocker::BitLockerVolume::new(Box::new(dev), p.clone()))
+            }
         })
     };
 
-    // --- Used-block map: FAT/exFAT → ext → btrfs → xfs (NTFS copies whole) ---
+    // --- Used-block map: FAT/exFAT → ext → btrfs → xfs → NTFS (else whole) ---
     let (used, smart_mode): (Box<dyn UsedSectorMap>, bool) = if req.all_sectors {
         info!("Sector-by-sector mode requested; copying all blocks");
         (Box::new(AllUsedMap::new(total_blocks)), false)
     } else {
-        let mut src = open_source(&luks)?;
+        let mut src = open_source(&unlock)?;
         let map: Option<Box<dyn UsedSectorMap>> =
             if let Ok(m) = crate::fat_map::build_fat_used_map(src.as_mut(), req.block_size) {
                 info!(fs = m.filesystem, "Using FAT used-cluster map");
@@ -212,7 +234,7 @@ fn backup_inner(
     // --- Copy used blocks into the partition ---
     let backup_id = Uuid::new_v4();
     let mut reader: Box<dyn BlockReader> =
-        Box::new(RawVolumeBlockReader::new(open_source(&luks)?, req.block_size)?);
+        Box::new(RawVolumeBlockReader::new(open_source(&unlock)?, req.block_size)?);
     let outcome = copy_used_blocks(
         &backup_id.to_string(),
         reader.as_mut(),
@@ -258,15 +280,20 @@ fn backup_inner(
         },
         checksum_algorithm: "xxhash64".into(),
         preflight_report: None,
-        volume_encryption: luks.as_ref().map(|p| {
+        volume_encryption: {
             use own_backup_common::image::{VolumeCaptureMode, VolumeEncryptionState};
-            VolumeEncryptionState {
-                kind: p.kind.clone(),
+            let state = |kind| VolumeEncryptionState {
+                kind,
                 capture_mode: VolumeCaptureMode::Plaintext,
                 luks_header_backup_b64: None,
                 note: Some("Decrypted at backup; re-enable encryption after restore".into()),
+            };
+            match &unlock {
+                Unlock::None => None,
+                Unlock::Luks(p) => Some(state(p.kind.clone())),
+                Unlock::BitLocker(p) => Some(state(p.kind.clone())),
             }
-        }),
+        },
     };
 
     let image_file_name = req
@@ -297,7 +324,7 @@ fn backup_inner(
         bytes_copied: outcome.bytes_copied,
         duration: started.elapsed(),
         smart_mode,
-        encrypted: luks.is_some(),
+        encrypted: unlock.is_encrypted(),
     })
 }
 
