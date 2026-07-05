@@ -581,13 +581,20 @@ impl PasswordResolver for NoPasswords {
 pub struct PasswordStore {
     cache: std::sync::Mutex<std::collections::HashMap<String, zeroize::Zeroizing<String>>>,
     db_path: PathBuf,
+    /// Key-file path for the OS secret store (used only off Windows).
+    key_path: PathBuf,
 }
 
 impl PasswordStore {
     pub fn new(db_path: PathBuf) -> Self {
+        let key_path = db_path
+            .parent()
+            .map(|d| d.join("secret.key"))
+            .unwrap_or_else(|| PathBuf::from("secret.key"));
         Self {
             cache: std::sync::Mutex::new(std::collections::HashMap::new()),
             db_path,
+            key_path,
         }
     }
 
@@ -600,9 +607,9 @@ impl PasswordStore {
         password: String,
         remember: bool,
     ) -> own_backup_common::Result<()> {
-        use own_backup_backup::secrets::{DpapiSecretStore, SecretStore};
         if remember {
-            let blob = DpapiSecretStore.protect(password.as_bytes())?;
+            let blob = own_backup_backup::secrets::default_store(&self.key_path)
+                .protect(password.as_bytes())?;
             let conn = own_backup_metadata::open_database(&self.db_path)?;
             own_backup_metadata::upsert_volume_secret(&conn, volume_token, &blob)?;
         }
@@ -630,14 +637,15 @@ impl PasswordStore {
 
 impl PasswordResolver for PasswordStore {
     fn resolve(&self, volume_token: &str) -> Option<zeroize::Zeroizing<String>> {
-        use own_backup_backup::secrets::{DpapiSecretStore, SecretStore};
         if let Some(p) = self.cache.lock().unwrap().get(volume_token) {
             return Some(p.clone());
         }
         // Fall back to the OS-protected store (a remembered password).
         let conn = own_backup_metadata::open_database(&self.db_path).ok()?;
         let blob = own_backup_metadata::get_volume_secret(&conn, volume_token).ok()??;
-        let plain = DpapiSecretStore.unprotect(&blob).ok()?;
+        let plain = own_backup_backup::secrets::default_store(&self.key_path)
+            .unprotect(&blob)
+            .ok()?;
         Some(zeroize::Zeroizing::new(String::from_utf8(plain.to_vec()).ok()?))
     }
 }
@@ -1332,7 +1340,144 @@ fn write_disk_manifest(
     Ok(())
 }
 
-#[cfg(not(target_os = "windows"))]
+/// Linux backup driver: full backups into raw images (one per source volume),
+/// with progress + cancellation and optional post-backup verification. No chain
+/// planning / retention yet — those follow with the dynamic-VHDX writer.
+#[cfg(target_os = "linux")]
+async fn perform_backup(
+    sink: &Arc<dyn EventSink>,
+    job: &Job,
+    cancel: &Arc<AtomicBool>,
+    _last_success: Option<JobRun>,
+    passwords: &Arc<dyn PasswordResolver>,
+) -> JobRun {
+    use own_backup_backup::engine_linux::{
+        backup_volume, verify_image, LinuxBackupRequest, DEFAULT_BLOCK_SIZE,
+    };
+    use own_backup_common::progress::BackupProgress;
+    use own_backup_common::OwnBackupError;
+
+    let mut run = run_skeleton(job);
+    let volumes = job.source_list();
+    if volumes.is_empty() {
+        run.finished_at = chrono::Utc::now().to_rfc3339();
+        run.status = "error".into();
+        run.error = "У задания не выбран ни один том-источник".into();
+        return run;
+    }
+    let folder = PathBuf::from(&job.dest_folder);
+    let count = volumes.len() as u64;
+    let started = std::time::Instant::now();
+
+    for (idx, device) in volumes.iter().enumerate() {
+        let vidx = idx as u64;
+        let token = source_token(device);
+        let vol_label = job.label_for(device);
+        let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+        let safe: String = job
+            .name
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '_' })
+            .collect();
+        let image_path = folder.join(format!("{safe}_{}_full_{stamp}.img", file_token(job, device)));
+
+        let req = LinuxBackupRequest {
+            source: device.clone(),
+            image_path: image_path.clone(),
+            block_size: DEFAULT_BLOCK_SIZE,
+            all_sectors: job.advanced.sector_by_sector,
+            passphrase: passwords.resolve(&token),
+            job_id: Some(job.id.clone()),
+        };
+        let validate_after = job.advanced.validate_after;
+        let sink_bg = sink.clone();
+        let job_id = job.id.clone();
+        let cancel_bg = cancel.clone();
+        let vol_label_bg = vol_label.clone();
+        let image_for_verify = image_path.clone();
+
+        let result = tokio::task::spawn_blocking(move || {
+            let mut last_permille = u64::MAX;
+            let mut last_emit = std::time::Instant::now();
+            let summary = backup_volume(&req, |p: &BackupProgress| {
+                if cancel_bg.load(Ordering::SeqCst) {
+                    return Err(OwnBackupError::Cancelled);
+                }
+                let permille = if p.blocks_total > 0 {
+                    p.blocks_done * 1000 / p.blocks_total
+                } else {
+                    0
+                };
+                if permille != last_permille || last_emit.elapsed().as_millis() >= 400 {
+                    last_permille = permille;
+                    last_emit = std::time::Instant::now();
+                    sink_bg.job_progress(JobProgress {
+                        job_id: job_id.clone(),
+                        phase: "backup".into(),
+                        percent: permille / 10,
+                        blocks_done: p.blocks_done,
+                        blocks_total: p.blocks_total,
+                        speed_mbps: p.speed_bps as f64 / 1_000_000.0,
+                        volume_index: vidx,
+                        volume_count: count,
+                        volume: vol_label_bg.clone(),
+                    });
+                }
+                Ok(())
+            })?;
+            if validate_after {
+                let v = verify_image(&image_for_verify, |_, _| Ok(()))?;
+                if !v.valid() {
+                    return Err(OwnBackupError::ImageFormat(format!(
+                        "проверка после копирования не пройдена: {} повреждённых блоков",
+                        v.mismatched_blocks.len()
+                    )));
+                }
+            }
+            Ok(summary)
+        })
+        .await;
+
+        match result {
+            Ok(Ok(summary)) => {
+                run.image_path = summary.image_path.display().to_string();
+                run.base_image_path = run.image_path.clone();
+                run.source_bytes += summary.source_bytes;
+                run.bytes_copied += summary.bytes_copied;
+                run.used_blocks += summary.used_blocks;
+                run.total_blocks += summary.total_blocks;
+                run.smart_mode = summary.smart_mode;
+                run.backup_kind = "full".into();
+            }
+            Ok(Err(OwnBackupError::Cancelled)) => {
+                run.status = "cancelled".into();
+                run.error = "Отменено пользователем".into();
+                break;
+            }
+            Ok(Err(e)) => {
+                warn!(job = %job.name, volume = %device, error = %e, "Backup failed");
+                run.status = "error".into();
+                run.error = e.to_string();
+                break;
+            }
+            Err(e) => {
+                run.status = "error".into();
+                run.error = format!("задача прервана: {e}");
+                break;
+            }
+        }
+    }
+
+    if run.status.is_empty() {
+        run.status = "success".into();
+    }
+    run.duration_secs = started.elapsed().as_secs_f64();
+    run.finished_at = chrono::Utc::now().to_rfc3339();
+    run
+}
+
+/// Backup engine is unavailable on this platform (only Windows and Linux).
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 async fn perform_backup(
     _sink: &Arc<dyn EventSink>,
     job: &Job,
@@ -1343,7 +1488,7 @@ async fn perform_backup(
     let mut run = run_skeleton(job);
     run.finished_at = chrono::Utc::now().to_rfc3339();
     run.status = "error".into();
-    run.error = "Движок бэкапа доступен только на Windows".into();
+    run.error = "Движок бэкапа доступен только на Windows и Linux".into();
     run
 }
 
@@ -1351,6 +1496,26 @@ async fn perform_backup(
 mod tests {
     use super::*;
     use std::path::Path;
+
+    // Password persistence round-trips through the OS secret store; on non-Windows
+    // that is the key-file backend (testable here), on Windows it is DPAPI.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn password_store_remembers_across_instances() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("metadata.db");
+        PasswordStore::new(db.clone())
+            .remember("V123", "secret".into(), true)
+            .unwrap();
+
+        // A fresh store (cold cache) recovers it from the DB via the key file.
+        let store = PasswordStore::new(db.clone());
+        assert!(store.has("V123"));
+        assert_eq!(store.resolve("V123").map(|z| z.to_string()), Some("secret".into()));
+
+        store.forget("V123").unwrap();
+        assert!(!PasswordStore::new(db).has("V123"));
+    }
 
     /// A job with `method` plus a successful run that produced `kind` at
     /// `image` (image + sidecar files actually present in `dir` when `create`

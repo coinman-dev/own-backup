@@ -276,7 +276,13 @@ impl BackupService for BackupServiceImpl {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "linux")]
+        let disks = own_backup_inventory::LinuxInventory::new()
+            .enumerate_disks()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         let disks = own_backup_inventory::MockInventory::default()
             .enumerate_disks()
             .await

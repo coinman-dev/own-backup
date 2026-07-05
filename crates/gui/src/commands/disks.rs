@@ -19,7 +19,13 @@ pub async fn list_disks(_state: State<'_, GuiState>) -> Result<Vec<DiskInfo>, St
         };
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    {
+        let inventory = own_backup_inventory::LinuxInventory::new();
+        result = inventory.enumerate_disks().await.map_err(|e| e.to_string());
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         let inventory = own_backup_inventory::MockInventory::default();
         result = inventory.enumerate_disks().await.map_err(|e| e.to_string());

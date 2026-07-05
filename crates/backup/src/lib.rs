@@ -22,6 +22,11 @@ pub mod sidecar;
 pub mod used_sectors;
 pub mod xfs_map;
 
+#[cfg(target_os = "linux")]
+pub mod engine_linux;
+#[cfg(target_os = "linux")]
+pub mod linux_device;
+
 #[cfg(target_os = "windows")]
 pub mod block_reader_win;
 #[cfg(target_os = "windows")]

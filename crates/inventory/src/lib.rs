@@ -3,6 +3,8 @@ pub mod preflight;
 pub mod traits;
 
 pub mod fs_probe;
+#[cfg(target_os = "linux")]
+pub mod linux;
 #[cfg(target_os = "windows")]
 pub mod preflight_windows;
 #[cfg(target_os = "windows")]
@@ -12,6 +14,8 @@ pub use mock::MockInventory;
 pub use preflight::PreflightAnalyzer;
 pub use traits::DiskInventory;
 
+#[cfg(target_os = "linux")]
+pub use linux::LinuxInventory;
 #[cfg(target_os = "windows")]
 pub use wmi::WmiInventory;
 

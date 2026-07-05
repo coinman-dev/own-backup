@@ -122,11 +122,52 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
+    use own_backup_backup::engine_linux::{
+        backup_volume, verify_image, LinuxBackupRequest, DEFAULT_BLOCK_SIZE,
+    };
+
+    let block_size = if args.block_size_mib == 0 {
+        DEFAULT_BLOCK_SIZE
+    } else {
+        args.block_size_mib * 1024 * 1024
+    };
+    let image_path = std::path::PathBuf::from(&args.output);
+    let request = LinuxBackupRequest {
+        source: args.source.clone(),
+        image_path: image_path.clone(),
+        block_size,
+        all_sectors: args.all_sectors,
+        passphrase: args.password.clone().map(zeroize::Zeroizing::new),
+        job_id: None,
+    };
+
+    println!("Backing up {} -> {}", args.source, args.output);
+    let summary = backup_volume(&request, |_p| Ok(()))?;
+    println!(
+        "Done: {} of {} blocks used, {:.1} MiB copied in {:.1}s ({})",
+        summary.used_blocks,
+        summary.total_blocks,
+        summary.bytes_copied as f64 / 1_048_576.0,
+        summary.duration.as_secs_f64(),
+        if summary.smart_mode { "used-block" } else { "sector-by-sector" },
+    );
+    let v = verify_image(&image_path, |_, _| Ok(()))?;
+    println!(
+        "Verify: {}",
+        if v.valid() {
+            "OK".to_string()
+        } else {
+            format!("{} mismatched blocks", v.mismatched_blocks.len())
+        }
+    );
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub async fn run(_args: BackupArgs) -> own_backup_common::Result<()> {
     Err(own_backup_common::OwnBackupError::Config(
-        "The 'backup' command currently requires Windows (VHDX engine). \
-         Linux support is planned (plan v2, phase 8)."
-            .into(),
+        "The 'backup' command is only available on Windows and Linux.".into(),
     ))
 }

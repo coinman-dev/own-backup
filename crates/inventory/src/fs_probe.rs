@@ -250,6 +250,30 @@ mod win {
 #[cfg(target_os = "windows")]
 pub use win::probe_partition_fs;
 
+/// Probe a partition's filesystem by reading its device node directly
+/// (`/dev/sdb2`, a loop device, …). On Linux a partition is its own device
+/// starting at byte 0, so no physical-drive offset is needed. `None` when the
+/// device can't be read or nothing matched.
+#[cfg(target_os = "linux")]
+pub fn probe_partition_path(dev_path: &str) -> Option<ProbedFs> {
+    use std::os::unix::fs::FileExt;
+
+    let file = std::fs::File::open(dev_path).ok()?;
+    let mut buf = vec![0u8; PROBE_LEN];
+    // Read as much of the prefix as the device holds (a small partition may be
+    // shorter than PROBE_LEN); partial reads are normal for block devices.
+    let mut filled = 0usize;
+    while filled < buf.len() {
+        match file.read_at(&mut buf[filled..], filled as u64) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(_) => break,
+        }
+    }
+    buf.truncate(filled);
+    identify(&buf)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -28,6 +28,9 @@ getrandom = "0.2"
 zeroize = { version = "1", features = ["derive"] }
 crc32fast = "1"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.58", features = [
     "Win32_Foundation",
