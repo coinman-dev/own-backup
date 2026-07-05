@@ -1,0 +1,579 @@
+//! Used-cluster map for NTFS, parsed directly from the raw volume.
+//!
+//! On Windows the engine gets this bitmap for free from
+//! `FSCTL_GET_VOLUME_BITMAP` (see [`crate::used_sectors_win`]). On Linux there
+//! is no NTFS driver we can trust for the allocation bitmap, so — exactly as
+//! [`crate::ext_map`]/[`crate::fat_map`] do for their filesystems — we read the
+//! on-disk structures ourselves: the boot sector (BPB), MFT record #6
+//! (`$Bitmap`) and its non-resident `$DATA` cluster-allocation bitmap. Only
+//! allocated clusters (plus everything the bitmap does not cover) are copied.
+//!
+//! This is strictly read-only and reads no file data — only the boot sector,
+//! one MFT record and the bitmap stream it points at.
+//!
+//! Failure policy mirrors the other maps: ANY doubt — bad signature, geometry
+//! that does not fit the device, a failed update-sequence fixup, an attribute
+//! layout we don't handle, a bitmap that leaves the MFT or the boot sector
+//! marked free — is an error, and the engine falls back to sector-by-sector.
+//! Missing data in an image is far worse than a bigger image. NTFS on-disk
+//! integers are little-endian.
+
+use tracing::info;
+
+use own_backup_common::{OwnBackupError, Result};
+
+use crate::fat_map::RawVolume;
+use crate::used_sectors::UsedSectorMap;
+
+/// `$Bitmap` is fixed MFT record number 6 in every NTFS volume.
+const BITMAP_RECORD: u64 = 6;
+/// Attribute type code for `$DATA`.
+const ATTR_DATA: u64 = 0x80;
+/// Attribute-list end marker.
+const ATTR_END: u64 = 0xFFFF_FFFF;
+/// Attribute flag: the stream is compressed (we cannot follow its runs).
+const ATTR_FLAG_COMPRESSED: u64 = 0x0001;
+
+/// Largest MFT record we will read (real NTFS uses 1 KiB, occasionally 4 KiB).
+const MAX_MFT_RECORD_SIZE: u64 = 64 * 1024;
+/// Largest cluster-allocation bitmap we will assemble (512 MiB ≈ 4 billion
+/// clusters ≈ a 16 TiB volume at 4 KiB clusters — larger volumes use bigger
+/// clusters and stay well under this).
+const MAX_BITMAP_BYTES: u64 = 512 * 1024 * 1024;
+/// Largest NTFS cluster we accept (Windows tops out at 2 MiB).
+const MAX_CLUSTER_SIZE: u64 = 2 * 1024 * 1024;
+
+/// Per-backup-block used map for an NTFS volume.
+pub struct NtfsUsedMap {
+    block_used: Vec<bool>,
+    used_count: u64,
+    /// NTFS cluster size in bytes.
+    pub cluster_size: u32,
+}
+
+impl UsedSectorMap for NtfsUsedMap {
+    fn is_block_used(&self, block_number: u64) -> bool {
+        self.block_used.get(block_number as usize).copied().unwrap_or(false)
+    }
+    fn used_block_count(&self) -> u64 {
+        self.used_count
+    }
+}
+
+fn bad(msg: impl std::fmt::Display) -> OwnBackupError {
+    OwnBackupError::Device(format!("NTFS map: {msg}"))
+}
+
+fn u16at(b: &[u8], o: usize) -> u64 {
+    u16::from_le_bytes(b[o..o + 2].try_into().unwrap()) as u64
+}
+fn u32at(b: &[u8], o: usize) -> u64 {
+    u32::from_le_bytes(b[o..o + 4].try_into().unwrap()) as u64
+}
+fn u64at(b: &[u8], o: usize) -> u64 {
+    u64::from_le_bytes(b[o..o + 8].try_into().unwrap())
+}
+
+/// Mark the byte range `[start, end)` as used in the per-backup-block map.
+fn mark_bytes(map: &mut [bool], block_size: u32, start: u64, end: u64) {
+    if end <= start {
+        return;
+    }
+    let first = (start / block_size as u64) as usize;
+    let last = ((end - 1) / block_size as u64) as usize;
+    for b in map.iter_mut().take(last + 1).skip(first) {
+        *b = true;
+    }
+}
+
+/// Test one cluster's bit in the allocation bitmap.
+fn cluster_allocated(bitmap: &[u8], cluster: u64) -> bool {
+    bitmap
+        .get((cluster / 8) as usize)
+        .is_some_and(|b| b & (1 << (cluster % 8)) != 0)
+}
+
+/// A non-resident `$DATA` run: `count` clusters starting at LCN `lcn`. `hole`
+/// runs (sparse) contribute zero bytes to the stream and have no LCN.
+struct Run {
+    lcn: u64,
+    count: u64,
+    hole: bool,
+}
+
+/// Detect NTFS on `vol` and build the used map. Errors (→ caller falls back to
+/// sector-by-sector) on anything unrecognized or inconsistent.
+pub fn build_ntfs_used_map(vol: &mut dyn RawVolume, block_size: u32) -> Result<NtfsUsedMap> {
+    // --- Boot sector / BPB ---
+    let mut boot = [0u8; 512];
+    vol.read_at(0, &mut boot)?;
+    if &boot[3..11] != b"NTFS    " {
+        return Err(bad("no 'NTFS' OEM id in the boot sector"));
+    }
+    if boot[510] != 0x55 || boot[511] != 0xAA {
+        return Err(bad("no boot sector signature (55AA)"));
+    }
+
+    let bytes_per_sector = u16at(&boot, 0x0B);
+    if !bytes_per_sector.is_power_of_two() || !(256..=4096).contains(&bytes_per_sector) {
+        return Err(bad(format!("implausible bytes/sector {bytes_per_sector}")));
+    }
+    // Sectors/cluster: literal 1..=128, or (>0x80) the log form 2^(0x100-value).
+    let spc_raw = boot[0x0D] as u64;
+    let spc = if spc_raw <= 0x80 {
+        spc_raw
+    } else if (0xF4..=0xFF).contains(&spc_raw) {
+        1u64 << (0x100 - spc_raw)
+    } else {
+        return Err(bad(format!("implausible sectors/cluster byte {spc_raw:#x}")));
+    };
+    let cluster_size = bytes_per_sector
+        .checked_mul(spc)
+        .filter(|c| c.is_power_of_two() && (512..=MAX_CLUSTER_SIZE).contains(c))
+        .ok_or_else(|| bad(format!("implausible cluster size ({bytes_per_sector}*{spc})")))?;
+
+    let total_sectors = u64at(&boot, 0x28);
+    let mft_lcn = u64at(&boot, 0x30);
+    let total_clusters = total_sectors / spc;
+    if total_sectors == 0 || total_clusters == 0 {
+        return Err(bad("zero total sectors/clusters"));
+    }
+    // The clustered area must fit the device (the last sector — the backup boot
+    // sector — lives past it and is copied via the tail below).
+    let clusters_bytes = total_clusters
+        .checked_mul(cluster_size)
+        .ok_or_else(|| bad("total_clusters * cluster_size overflows"))?;
+    if clusters_bytes > vol.len() {
+        return Err(bad(format!(
+            "filesystem claims {clusters_bytes} clustered bytes but the device is {}",
+            vol.len()
+        )));
+    }
+    if mft_lcn >= total_clusters {
+        return Err(bad(format!("$MFT LCN {mft_lcn} outside the volume")));
+    }
+
+    // MFT record size: positive → clusters/record, negative → 2^|value| bytes.
+    let cpm = boot[0x40] as i8;
+    let mft_record_size = if cpm >= 0 {
+        (cpm as u64) * cluster_size
+    } else {
+        1u64 << ((-cpm) as u32)
+    };
+    if !mft_record_size.is_power_of_two() || !(256..=MAX_MFT_RECORD_SIZE).contains(&mft_record_size) {
+        return Err(bad(format!("implausible MFT record size {mft_record_size}")));
+    }
+
+    // --- Read MFT record #6 ($Bitmap). The first 16 records are guaranteed
+    // contiguous from the $MFT's first cluster, so this offset is exact. ---
+    let record_off = mft_lcn * cluster_size + BITMAP_RECORD * mft_record_size;
+    if record_off + mft_record_size > vol.len() {
+        return Err(bad("MFT record #6 runs past the device"));
+    }
+    let mut rec = vec![0u8; mft_record_size as usize];
+    vol.read_at(record_off, &mut rec)?;
+    apply_fixups(&mut rec, bytes_per_sector)?;
+
+    // --- Locate the unnamed non-resident $DATA ($Bitmap's cluster bitmap) ---
+    let needed = total_clusters.div_ceil(8);
+    if needed > MAX_BITMAP_BYTES {
+        return Err(bad(format!("bitmap would need {needed} bytes (volume too large)")));
+    }
+    let bitmap = read_bitmap_stream(vol, &rec, cluster_size, needed)?;
+
+    // Strong guards: a correctly parsed bitmap always marks the boot sector
+    // (cluster 0) and the $MFT itself as allocated. If either reads free we
+    // misaligned somewhere — refuse and let the engine copy every sector.
+    if !cluster_allocated(&bitmap, 0) {
+        return Err(bad("bitmap leaves cluster 0 (boot) free — parse misaligned"));
+    }
+    if !cluster_allocated(&bitmap, mft_lcn) {
+        return Err(bad("bitmap leaves the $MFT cluster free — parse misaligned"));
+    }
+
+    // --- Fold allocated clusters into the per-backup-block map ---
+    let total_blocks = vol.len().div_ceil(block_size as u64);
+    let mut map = vec![false; total_blocks as usize];
+
+    // Bytes past the last cluster (backup boot sector etc.) aren't in the
+    // bitmap — always copy them.
+    mark_bytes(&mut map, block_size, clusters_bytes, vol.len());
+
+    let mut used_clusters = 0u64;
+    for (byte_idx, &byte) in bitmap.iter().take(needed as usize).enumerate() {
+        if byte == 0 {
+            continue;
+        }
+        for bit in 0..8u64 {
+            if byte & (1 << bit) == 0 {
+                continue;
+            }
+            let cluster = byte_idx as u64 * 8 + bit;
+            if cluster >= total_clusters {
+                break;
+            }
+            used_clusters += 1;
+            let start = cluster * cluster_size;
+            mark_bytes(&mut map, block_size, start, start + cluster_size);
+        }
+    }
+
+    let used_count = map.iter().filter(|&&u| u).count() as u64;
+    info!(
+        fs = "ntfs",
+        cluster_size,
+        total_clusters,
+        used_clusters,
+        used_blocks = used_count,
+        total_blocks,
+        "NTFS used-cluster map ready"
+    );
+    Ok(NtfsUsedMap {
+        block_used: map,
+        used_count,
+        cluster_size: cluster_size as u32,
+    })
+}
+
+/// Apply the NTFS update-sequence (fixup) array to an MFT record in place. The
+/// last two bytes of every sector-sized stride hold a copy of the update
+/// sequence number and must be replaced by the real bytes stored in the array.
+fn apply_fixups(rec: &mut [u8], bytes_per_sector: u64) -> Result<()> {
+    if &rec[0..4] != b"FILE" {
+        return Err(bad("MFT record #6 lacks the 'FILE' signature"));
+    }
+    let usa_off = u16at(rec, 4) as usize;
+    let usa_count = u16at(rec, 6) as usize; // update sequence number + one entry per stride
+    if usa_count == 0 {
+        return Err(bad("zero update-sequence count"));
+    }
+    let fixups = usa_count - 1;
+    if fixups == 0 {
+        return Ok(());
+    }
+    if usa_off < 42 || usa_off + usa_count * 2 > rec.len() {
+        return Err(bad("update-sequence array outside the record"));
+    }
+    // Fixups sit at the end of each sector-sized stride; the record is a whole
+    // number of strides (or one sub-sector record → a single fixup).
+    let stride = if bytes_per_sector as usize <= rec.len() {
+        bytes_per_sector as usize
+    } else {
+        rec.len()
+    };
+    if stride == 0 || rec.len() % stride != 0 || rec.len() / stride != fixups {
+        return Err(bad("record size does not match the fixup count"));
+    }
+
+    let usn = [rec[usa_off], rec[usa_off + 1]];
+    for i in 0..fixups {
+        let pos = stride * (i + 1) - 2;
+        if rec[pos] != usn[0] || rec[pos + 1] != usn[1] {
+            return Err(bad("update-sequence fixup mismatch — corrupt MFT record"));
+        }
+        let src = usa_off + 2 * (i + 1);
+        rec[pos] = rec[src];
+        rec[pos + 1] = rec[src + 1];
+    }
+    Ok(())
+}
+
+/// Walk the record's attributes, find the unnamed `$DATA`, and return its
+/// cluster-allocation bitmap (`needed` bytes). Handles both the (usual)
+/// non-resident stream and the resident case for tiny volumes.
+fn read_bitmap_stream(
+    vol: &mut dyn RawVolume,
+    rec: &[u8],
+    cluster_size: u64,
+    needed: u64,
+) -> Result<Vec<u8>> {
+    let first_attr = u16at(rec, 0x14) as usize;
+    let used = u32at(rec, 0x18) as usize;
+    if first_attr < 42 || first_attr > rec.len() || used > rec.len() || used < first_attr {
+        return Err(bad("MFT record header offsets out of range"));
+    }
+
+    let mut off = first_attr;
+    while off + 8 <= used {
+        let atype = u32at(rec, off);
+        if atype == ATTR_END {
+            break;
+        }
+        let alen = u32at(rec, off + 4) as usize;
+        if alen < 24 || off + alen > rec.len() {
+            return Err(bad("attribute length out of range"));
+        }
+
+        if atype == ATTR_DATA && rec[off + 9] == 0 {
+            // Unnamed $DATA — the cluster bitmap.
+            let non_resident = rec[off + 8];
+            let attr_flags = u16at(rec, off + 0x0C);
+            if non_resident == 0 {
+                // Resident: tiny volume, bitmap sits inside the record.
+                let val_len = u32at(rec, off + 0x10) as usize;
+                let val_off = u16at(rec, off + 0x14) as usize;
+                if off + val_off + val_len > rec.len() || (val_len as u64) < needed {
+                    return Err(bad("resident $Bitmap too small or out of range"));
+                }
+                return Ok(rec[off + val_off..off + val_off + needed as usize].to_vec());
+            }
+            if attr_flags & ATTR_FLAG_COMPRESSED != 0 {
+                return Err(bad("$Bitmap $DATA is compressed"));
+            }
+            let start_vcn = u64at(rec, off + 0x10);
+            if start_vcn != 0 {
+                return Err(bad("$Bitmap $DATA does not start at VCN 0 (attribute list?)"));
+            }
+            let real_size = u64at(rec, off + 0x30);
+            if real_size < needed {
+                return Err(bad(format!("$Bitmap real size {real_size} < needed {needed}")));
+            }
+            let runs_off = u16at(rec, off + 0x20) as usize;
+            if runs_off < 24 || off + alen > rec.len() || runs_off >= alen {
+                return Err(bad("bad mapping-pairs offset"));
+            }
+            let runs = parse_data_runs(&rec[off + runs_off..off + alen])?;
+            return assemble_bitmap(vol, &runs, cluster_size, needed);
+        }
+        off += alen;
+    }
+    Err(bad("no unnamed $DATA attribute in the $Bitmap record"))
+}
+
+/// Parse an NTFS mapping-pairs (data-runs) list into absolute-LCN runs.
+fn parse_data_runs(runs: &[u8]) -> Result<Vec<Run>> {
+    let mut out = Vec::new();
+    let mut lcn: i64 = 0;
+    let mut i = 0usize;
+    while i < runs.len() {
+        let header = runs[i];
+        if header == 0 {
+            break;
+        }
+        let len_bytes = (header & 0x0F) as usize;
+        let off_bytes = (header >> 4) as usize;
+        i += 1;
+        if len_bytes == 0 || len_bytes > 8 || off_bytes > 8 || i + len_bytes + off_bytes > runs.len()
+        {
+            return Err(bad("truncated or malformed data run"));
+        }
+
+        let mut count: u64 = 0;
+        for b in 0..len_bytes {
+            count |= (runs[i + b] as u64) << (8 * b);
+        }
+        i += len_bytes;
+        if count == 0 {
+            return Err(bad("zero-length data run"));
+        }
+
+        if off_bytes == 0 {
+            out.push(Run { lcn: 0, count, hole: true });
+        } else {
+            let mut delta: i64 = 0;
+            for b in 0..off_bytes {
+                delta |= (runs[i + b] as i64) << (8 * b);
+            }
+            // Sign-extend the signed LCN delta.
+            let shift = 64 - 8 * off_bytes as u32;
+            delta = (delta << shift) >> shift;
+            i += off_bytes;
+            lcn = lcn.checked_add(delta).ok_or_else(|| bad("data run LCN overflow"))?;
+            if lcn < 0 {
+                return Err(bad("negative LCN in data run"));
+            }
+            out.push(Run { lcn: lcn as u64, count, hole: false });
+        }
+    }
+    if out.is_empty() {
+        return Err(bad("empty data-run list"));
+    }
+    Ok(out)
+}
+
+/// Read `needed` bytes of the bitmap stream from its runs (holes read as zero).
+fn assemble_bitmap(
+    vol: &mut dyn RawVolume,
+    runs: &[Run],
+    cluster_size: u64,
+    needed: u64,
+) -> Result<Vec<u8>> {
+    let mut bitmap = vec![0u8; needed as usize];
+    let mut filled: u64 = 0;
+    for run in runs {
+        if filled >= needed {
+            break;
+        }
+        let run_bytes = run
+            .count
+            .checked_mul(cluster_size)
+            .ok_or_else(|| bad("data run byte size overflows"))?;
+        let take = run_bytes.min(needed - filled);
+        if !run.hole {
+            let disk_off = run.lcn * cluster_size;
+            if disk_off + take > vol.len() {
+                return Err(bad("data run points past the device"));
+            }
+            vol.read_at(disk_off, &mut bitmap[filled as usize..(filled + take) as usize])?;
+        }
+        filled += take;
+    }
+    if filled < needed {
+        return Err(bad("data runs cover less than the $Bitmap size"));
+    }
+    Ok(bitmap)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct MemVolume(Vec<u8>);
+    impl RawVolume for MemVolume {
+        fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
+            let (s, e) = (offset as usize, offset as usize + buf.len());
+            if e > self.0.len() {
+                return Err(bad("read past end"));
+            }
+            buf.copy_from_slice(&self.0[s..e]);
+            Ok(())
+        }
+        fn len(&self) -> u64 {
+            self.0.len() as u64
+        }
+    }
+
+    fn put_u16(b: &mut [u8], o: usize, v: u16) {
+        b[o..o + 2].copy_from_slice(&v.to_le_bytes());
+    }
+    fn put_u32(b: &mut [u8], o: usize, v: u32) {
+        b[o..o + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    fn put_u64(b: &mut [u8], o: usize, v: u64) {
+        b[o..o + 8].copy_from_slice(&v.to_le_bytes());
+    }
+
+    /// A tiny NTFS volume: 512-byte sectors, 1 sector/cluster (512-byte
+    /// clusters), 64 clusters. $MFT at cluster 4, 1 KiB MFT records, so record
+    /// #6 sits at byte 8192 (cluster 16). Its $Bitmap $DATA is a single-run
+    /// non-resident stream living in cluster 20. Allocated clusters (per the
+    /// bitmap): 0, 4, 16, 17, 20, 21.
+    fn tiny_ntfs() -> MemVolume {
+        let bps = 512u64;
+        let spc = 1u64;
+        let cluster = bps * spc; // 512
+        let total_sectors = 64u64;
+        let mut img = vec![0u8; (total_sectors * bps) as usize];
+
+        // Boot sector.
+        img[3..11].copy_from_slice(b"NTFS    ");
+        put_u16(&mut img, 0x0B, bps as u16);
+        img[0x0D] = spc as u8;
+        put_u64(&mut img, 0x28, total_sectors);
+        put_u64(&mut img, 0x30, 4); // $MFT LCN
+        put_u64(&mut img, 0x38, 32); // $MFTMirr LCN
+        img[0x40] = (-10i8) as u8; // clusters_per_MFT_record → 2^10 = 1024 bytes
+        img[510] = 0x55;
+        img[511] = 0xAA;
+
+        // MFT record #6 at byte 8192 (1024 bytes, two 512-byte fixup strides).
+        let rec = 8192usize;
+        img[rec..rec + 4].copy_from_slice(b"FILE");
+        put_u16(&mut img, rec + 4, 0x30); // update-sequence array offset
+        put_u16(&mut img, rec + 6, 3); // USN + two fixups
+        put_u16(&mut img, rec + 0x14, 0x38); // first attribute offset
+        put_u32(&mut img, rec + 0x18, 0x38 + 0x48 + 4); // used size (attr + end marker)
+        // Update sequence array at 0x30: USN then two saved words (all zero here).
+        put_u16(&mut img, rec + 0x30, 0x0001); // USN
+        put_u16(&mut img, rec + 0x32, 0x0000); // saved word for stride 0
+        put_u16(&mut img, rec + 0x34, 0x0000); // saved word for stride 1
+        // Fixup slots (last 2 bytes of each 512-byte stride) carry the USN.
+        put_u16(&mut img, rec + 510, 0x0001);
+        put_u16(&mut img, rec + 1022, 0x0001);
+
+        // $DATA attribute at record+0x38 (non-resident, unnamed).
+        let a = rec + 0x38;
+        put_u32(&mut img, a + 0x00, 0x80); // type = $DATA
+        put_u32(&mut img, a + 0x04, 0x48); // attribute length
+        img[a + 0x08] = 1; // non-resident
+        img[a + 0x09] = 0; // name length
+        put_u64(&mut img, a + 0x10, 0); // starting VCN
+        put_u64(&mut img, a + 0x18, 0); // last VCN (1 cluster)
+        put_u16(&mut img, a + 0x20, 0x40); // mapping-pairs offset
+        put_u64(&mut img, a + 0x28, cluster); // allocated size
+        put_u64(&mut img, a + 0x30, 8); // real size = 8 bytes (64 clusters)
+        put_u64(&mut img, a + 0x38, 8); // initialized size
+        // Data runs at a+0x40: one run of 1 cluster at LCN 20.
+        img[a + 0x40] = 0x11; // 1 length byte, 1 offset byte
+        img[a + 0x41] = 0x01; // length = 1 cluster
+        img[a + 0x42] = 20; // LCN delta = 20
+        img[a + 0x43] = 0x00; // end of runs
+        // Attribute-list end marker just after the attribute.
+        put_u32(&mut img, a + 0x48, 0xFFFF_FFFF);
+
+        // Allocation bitmap in cluster 20 (byte 10240): clusters 0,4,16,17,20,21.
+        let bm = 20 * cluster as usize;
+        img[bm] = 0b0001_0001; // bits 0 and 4  → clusters 0, 4
+        img[bm + 2] = 0b0011_0011; // bits 0,1,4,5 → clusters 16,17,20,21
+        MemVolume(img)
+    }
+
+    #[test]
+    fn marks_allocated_clusters() {
+        let mut vol = tiny_ntfs();
+        // Backup block size == cluster size → block N maps to cluster N.
+        let map = build_ntfs_used_map(&mut vol, 512).unwrap();
+        assert_eq!(map.cluster_size, 512);
+
+        for c in [0u64, 4, 16, 17, 20, 21] {
+            assert!(map.is_block_used(c), "cluster {c} should be used");
+        }
+        for c in [1u64, 2, 3, 5, 15, 18, 22, 63] {
+            assert!(!map.is_block_used(c), "cluster {c} should be free");
+        }
+        assert_eq!(map.used_block_count(), 6);
+    }
+
+    #[test]
+    fn folds_clusters_into_larger_backup_blocks() {
+        let mut vol = tiny_ntfs();
+        // 4 KiB backup blocks over 512-byte clusters: 8 clusters per block.
+        let map = build_ntfs_used_map(&mut vol, 4096).unwrap();
+        // Clusters 0 & 4 → block 0; 16,17 → block 2; 20,21 → block 2.
+        assert!(map.is_block_used(0));
+        assert!(!map.is_block_used(1));
+        assert!(map.is_block_used(2));
+        for b in [3u64, 4, 5, 6, 7] {
+            assert!(!map.is_block_used(b), "block {b} should be free");
+        }
+        assert_eq!(map.used_block_count(), 2);
+    }
+
+    #[test]
+    fn rejects_non_ntfs() {
+        assert!(build_ntfs_used_map(&mut MemVolume(vec![0u8; 64 * 512]), 512).is_err());
+    }
+
+    #[test]
+    fn rejects_bad_fixup() {
+        // Corrupt a fixup slot so the update-sequence check fails.
+        let mut img = tiny_ntfs().0;
+        img[8192 + 510] = 0xAB;
+        assert!(build_ntfs_used_map(&mut MemVolume(img), 512).is_err());
+    }
+
+    #[test]
+    fn rejects_bitmap_with_free_mft() {
+        // Clear the $MFT's own bit (cluster 4) — the safety net must reject it.
+        let mut img = tiny_ntfs().0;
+        img[20 * 512] = 0b0000_0001; // keep cluster 0, drop cluster 4
+        assert!(build_ntfs_used_map(&mut MemVolume(img), 512).is_err());
+    }
+
+    #[test]
+    fn rejects_geometry_larger_than_device() {
+        let mut img = tiny_ntfs().0;
+        put_u64(&mut img, 0x28, 1_000_000); // total sectors far past the device
+        assert!(build_ntfs_used_map(&mut MemVolume(img), 512).is_err());
+    }
+}

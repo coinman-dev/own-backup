@@ -14,6 +14,7 @@ pub mod image_reader;
 pub mod image_writer;
 pub mod incremental;
 pub mod luks;
+pub mod ntfs_map;
 pub mod pipeline;
 pub mod raw_copy;
 pub mod san_policy;

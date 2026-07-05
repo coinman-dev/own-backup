@@ -7,9 +7,10 @@
 //! layer, the GPT writer, the block copier and the sidecar.
 //!
 //! v1 scope: full backups. No snapshot (reads the live device — crash
-//! consistent), no incremental chains yet, and NTFS is copied whole until the
-//! Linux `$Bitmap` reader lands. Dynamic-VHDX output (for Windows-side mounting)
-//! is a later phase.
+//! consistent) and no incremental chains yet. Used-block maps cover FAT/exFAT,
+//! ext, btrfs, xfs and NTFS (via [`crate::ntfs_map`]'s `$Bitmap` reader);
+//! anything else is copied whole. Output is a dynamic VHDX for Windows-side
+//! mounting.
 
 #![cfg(target_os = "linux")]
 
@@ -169,8 +170,11 @@ fn backup_inner(
             } else if let Ok(m) = crate::xfs_map::build_xfs_used_map(src.as_mut(), req.block_size) {
                 info!(fs = "xfs", "Using xfs used-block map");
                 Some(Box::new(m))
+            } else if let Ok(m) = crate::ntfs_map::build_ntfs_used_map(src.as_mut(), req.block_size) {
+                info!(fs = "ntfs", "Using NTFS used-cluster map");
+                Some(Box::new(m))
             } else {
-                warn!("no used-block map available (NTFS/unknown) — copying every block");
+                warn!("no used-block map available (unknown filesystem) — copying every block");
                 None
             };
         match map {
