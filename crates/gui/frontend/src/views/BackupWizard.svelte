@@ -635,12 +635,16 @@
             {/if}
           </div>
         </div>
-        <div class="dev-note">⚙ Автозапуск по расписанию — в разработке (сохраняется, но пока не срабатывает).</div>
+        {#if job.schedule.kind === 'event' || job.schedule.kind === 'nonstop'}
+          <div class="dev-note">⚙ «По событию» и «Непрерывно» — в разработке (сохраняется, но пока не срабатывает). Работают: Ежедневно / Еженедельно / Ежемесячно.</div>
+        {:else if job.schedule.kind !== 'none'}
+          <div class="note">✓ Автозапуск выполняет служба «Own Backup» (должна быть установлена и запущена). Для зашифрованных томов сохраните пароль на шаге «Источник».</div>
+        {/if}
         <div class="adv-schedule">
           <label class="chk"><input type="checkbox" bind:checked={job.schedule.only_when_locked} onchange={stub} /> Копировать только если компьютер заблокирован</label>
           <label class="chk"><input type="checkbox" bind:checked={job.schedule.wake_to_run} onchange={stub} /> Пробуждать компьютер из спящего режима</label>
           <label class="chk"><input type="checkbox" bind:checked={job.schedule.prevent_sleep} onchange={stub} /> Предотвращать переход в спящий режим</label>
-          <label class="chk"><input type="checkbox" bind:checked={job.schedule.run_missed} onchange={stub} /> Выполнять пропущенные операции при запуске</label>
+          <label class="chk"><input type="checkbox" bind:checked={job.schedule.run_missed} /> Выполнять пропущенные операции при запуске</label>
         </div>
       {/if}
 

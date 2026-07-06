@@ -276,7 +276,7 @@
       {#if status === 'queued'}
         В очереди на выполнение…
       {:else}
-        Расписание: {job.schedule.kind === 'none' ? 'не задано (автозапуск — в разработке)' : job.schedule.kind}
+        Расписание: {job.schedule.kind === 'none' ? 'не задано (запуск вручную)' : ({ daily: 'ежедневно', weekly: 'еженедельно', monthly: 'ежемесячно', event: 'по событию', nonstop: 'непрерывно' }[job.schedule.kind] ?? job.schedule.kind)}
       {/if}
     </div>
     <button class="btn outline" onclick={onEdit} disabled={running}>Параметры</button>
