@@ -87,8 +87,13 @@ pub fn is_due(
 ) -> bool {
     if run_missed {
         // Look back from the last run (or up to a year for a never-run job) and
-        // see whether a slot has come due since.
-        let floor = last_fired.unwrap_or_else(|| now - Duration::days(366));
+        // see whether a slot has come due since. `last_run.started_at` is stored
+        // in UTC, so normalize it to `now`'s offset first — otherwise the cron
+        // hour (e.g. 21:00) is interpreted in UTC and fires at the wrong local
+        // time (this is why a 21:15 job silently slipped to 00:15 at UTC+3).
+        let floor = last_fired
+            .map(|lf| lf.with_timezone(now.offset()))
+            .unwrap_or_else(|| now - Duration::days(366));
         matches!(sched.after(&floor).next(), Some(slot) if slot <= now)
     } else {
         // Only a slot inside (now - fresh, now] counts, and only if the last
@@ -166,5 +171,21 @@ mod tests {
         // Last run was after today's slot -> nothing owed -> not due.
         let ran = Some(at(2026, 7, 1, 15, 0, 0));
         assert!(!is_due(&sched, at(2026, 7, 1, 16, 0, 0), ran, true, fresh));
+    }
+
+    /// Regression: `now` is local (UTC+3) but `last_run.started_at` is stored in
+    /// UTC. A 21:15 daily job must be due at 21:16 local, not slip to the UTC
+    /// slot (00:15 next day). Before the fix the run_missed branch computed the
+    /// slot in UTC and never fired at the right local time.
+    #[test]
+    fn run_missed_uses_local_time_not_utc_last_run() {
+        let sched = parse(&schedule_to_cron(&cfg("daily", "21:15", &[], true)).unwrap()).unwrap();
+        let fresh = Duration::seconds(120);
+        let plus3 = FixedOffset::east_opt(3 * 3600).unwrap();
+        // 21:16 local (UTC+3).
+        let now = plus3.with_ymd_and_hms(2026, 7, 6, 21, 16, 0).unwrap();
+        // Last run at 18:07 UTC == 21:07 local, stored as UTC.
+        let last = Some(at(2026, 7, 6, 18, 7, 43));
+        assert!(is_due(&sched, now, last, true, fresh));
     }
 }

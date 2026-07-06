@@ -67,15 +67,74 @@ fn parse_mode(args: &[String]) -> Mode {
     Mode::Service
 }
 
+/// Open the service log file, most-preferred location first: next to the exe
+/// (what the user looks for), else the data dir (LocalSystem can always write
+/// there), else temp. Rotates at ~4 MB. Returns the open file and its path.
+fn open_service_log() -> Option<(std::fs::File, std::path::PathBuf)> {
+    use std::path::PathBuf;
+    const ROTATE_AT: u64 = 4 * 1024 * 1024;
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(dir) =
+        std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf()))
+    {
+        candidates.push(dir.join("own-backup-service.log"));
+    }
+    candidates.push(AppConfig::default().data_dir.join("own-backup-service.log"));
+    candidates.push(std::env::temp_dir().join("own-backup-service.log"));
+    for path in candidates {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if std::fs::metadata(&path).map(|m| m.len() > ROTATE_AT).unwrap_or(false) {
+            let old = path.with_extension("log.old");
+            let _ = std::fs::remove_file(&old);
+            let _ = std::fs::rename(&path, &old);
+        }
+        if let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            return Some((f, path));
+        }
+    }
+    None
+}
+
+/// Set up logging to a file next to the exe (so a service running under the SCM,
+/// which has no console, still produces a diagnosable log) and record startup
+/// facts. `RUST_LOG` overrides the default filter.
+fn init_logging() {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        "info,own_backup_service=debug,own_backup_scheduler=debug".into()
+    });
+    let log_path = match open_service_log() {
+        Some((f, path)) => {
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_ansi(false)
+                .with_writer(std::sync::Mutex::new(f))
+                .init();
+            Some(path)
+        }
+        None => {
+            tracing_subscriber::fmt().with_writer(std::io::stderr).with_env_filter(filter).init();
+            None
+        }
+    };
+    info!(
+        service = SERVICE_DISPLAY_NAME,
+        version = env!("CARGO_PKG_VERSION"),
+        os = std::env::consts::OS,
+        pid = std::process::id(),
+        "=== Own Backup service starting ==="
+    );
+    if let Ok(exe) = std::env::current_exe() {
+        info!(exe = %exe.display(), "running executable");
+    }
+    if let Some(p) = &log_path {
+        info!(log = %p.display(), "log file");
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Logs go to stderr so `own-backup-service.exe` (info to stdout) stays clean.
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    init_logging();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mode = parse_mode(&args);

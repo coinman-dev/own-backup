@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use chrono::Duration as ChronoDuration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use own_backup_core::{Job, JobStore, PasswordStore, RunQueue};
 
@@ -110,7 +110,19 @@ fn tick(
             uptime >= std::time::Duration::from_secs(job.schedule.missed_delay_min as u64 * 60);
         let run_missed = job.schedule.run_missed && grace_passed;
 
-        if own_backup_scheduler::is_due(&sched, now, last_fired, run_missed, fresh) {
+        let due = own_backup_scheduler::is_due(&sched, now, last_fired, run_missed, fresh);
+        // Diagnostic (own_backup_scheduler=debug): why a job fired or not. `now`
+        // and the cron slot are in the machine's local timezone (OS setting).
+        debug!(
+            job = %job.name,
+            kind = %job.schedule.kind,
+            time = %job.schedule.time,
+            run_missed,
+            due,
+            now = %now,
+            "scheduler evaluated job"
+        );
+        if due {
             if !has_passwords(&job, passwords) {
                 continue;
             }
