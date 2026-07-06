@@ -382,6 +382,9 @@ struct Pending {
     data_length: u64,
     no_fat_chain: bool,
     remaining: u8,
+    /// (volume offset, first byte) of every entry in the set — for clearing the
+    /// in-use bit (0x80) when the file is removed.
+    entries: Vec<(u64, u8)>,
 }
 
 /// Walk an exFAT volume, collecting the cluster byte-ranges of matched files.
@@ -405,6 +408,12 @@ pub fn scan_exfat_exclusions(
     let mut fat = vec![0u8; g.fat_bytes as usize];
     vol.read_at(g.fat_offset, &mut fat)?;
 
+    // Clusters freed by removed files: every one → an allocation-bitmap bit to
+    // clear; fragmented (FAT-chained) files additionally need their FAT entries
+    // zeroed (contiguous NoFatChain files are not represented in the FAT).
+    let mut freed_clusters: Vec<u64> = Vec::new();
+    let mut fat_frees: Vec<u64> = Vec::new();
+
     // (first cluster, contiguous?, max clusters, rel path, subtree excluded).
     // The root is walked via the FAT chain (bounded by the cluster count).
     let mut stack: Vec<(u64, bool, u64, Vec<String>, bool)> =
@@ -421,8 +430,10 @@ pub fn scan_exfat_exclusions(
         let mut walked = 0u64;
 
         'dir: while (2..g.cluster_count + 2).contains(&cluster) && walked < max_clusters {
-            vol.read_at(exfat_cluster_offset(&g, cluster), &mut buf)?;
-            for rec in buf.chunks_exact(32) {
+            let base = exfat_cluster_offset(&g, cluster);
+            vol.read_at(base, &mut buf)?;
+            for (i, rec) in buf.chunks_exact(32).enumerate() {
+                let rec_offset = base + (i as u64) * 32;
                 let etype = rec[0];
                 if etype == EXFAT_END {
                     break 'dir;
@@ -442,6 +453,7 @@ pub fn scan_exfat_exclusions(
                             data_length: 0,
                             no_fat_chain: false,
                             remaining: rec[1], // SecondaryCount
+                            entries: vec![(rec_offset, EXFAT_FILE)],
                         });
                     }
                     EXFAT_STREAM => {
@@ -451,6 +463,7 @@ pub fn scan_exfat_exclusions(
                             p.data_length = u64le(rec, 24);
                             p.first_cluster = u32le(rec, 20);
                             p.remaining = p.remaining.saturating_sub(1);
+                            p.entries.push((rec_offset, EXFAT_STREAM));
                         }
                     }
                     EXFAT_NAME => {
@@ -462,6 +475,7 @@ pub fn scan_exfat_exclusions(
                                 p.name.push(u16::from_le_bytes([rec[2 + i * 2], rec[3 + i * 2]]));
                             }
                             p.remaining = p.remaining.saturating_sub(1);
+                            p.entries.push((rec_offset, EXFAT_NAME));
                         }
                     }
                     _ => {
@@ -473,7 +487,10 @@ pub fn scan_exfat_exclusions(
                 // Entry set complete?
                 if pending.as_ref().is_some_and(|p| p.remaining == 0) {
                     let p = pending.take().unwrap();
-                    finalize_exfat_entry(&g, &fat, p, &rel, subtree_excluded, &parsed, &mut scan, &mut stack);
+                    finalize_exfat_entry(
+                        &g, &fat, p, &rel, subtree_excluded, &parsed, &mut scan,
+                        &mut freed_clusters, &mut fat_frees, &mut stack,
+                    );
                     scan.entries_scanned += 1;
                     if scan.entries_scanned % 512 == 0 {
                         tick(scan.entries_scanned)?;
@@ -491,14 +508,102 @@ pub fn scan_exfat_exclusions(
         }
     }
 
+    // --- Metadata patches for true removal ---
+    // Clearing the entry set alone would orphan the file's clusters in the
+    // bitmap. So both must happen together, and only if we can safely locate the
+    // bitmap; on any doubt keep the entries and fall back to zeroing (the data
+    // clusters are dropped either way).
+    if !freed_clusters.is_empty() {
+        match crate::fat_map::read_exfat_bitmap(vol, &g, &fat) {
+            Ok(bmp) => append_exfat_removal_patches(
+                &g, bmp, &mut freed_clusters, &mut fat_frees, &mut scan.patches,
+            ),
+            Err(e) => {
+                info!(error = %e, "exFAT: allocation bitmap unavailable — keeping directory entries (zeroing only)");
+                scan.patches.clear();
+            }
+        }
+    }
+
     scan.ranges.finalize();
     info!(
         files = scan.files_excluded,
         entries = scan.entries_scanned,
         excluded_mb = scan.bytes_excluded / (1024 * 1024),
+        patches = scan.patches.len(),
         "exFAT exclusion scan complete"
     );
     Ok(scan)
+}
+
+/// Build the exFAT true-removal patches: clear the freed clusters' bits in the
+/// allocation bitmap (read-modify, bit-level — neighbouring files' bits are
+/// preserved) and zero the FAT entries of any fragmented removed files.
+fn append_exfat_removal_patches(
+    g: &crate::fat_map::ExfatGeometry,
+    bmp: crate::fat_map::ExfatBitmap,
+    freed: &mut [u64],
+    fat_frees: &mut Vec<u64>,
+    patches: &mut Vec<(u64, Vec<u8>)>,
+) {
+    let mut bytes = bmp.bytes;
+    let mut modified: Vec<u64> = Vec::new();
+    for &c in freed.iter() {
+        if c < 2 {
+            continue;
+        }
+        let bit = c - 2;
+        let bidx = (bit / 8) as usize;
+        if bidx < bytes.len() {
+            bytes[bidx] &= !(1u8 << (bit % 8));
+            modified.push(bidx as u64);
+        }
+    }
+    modified.sort_unstable();
+    modified.dedup();
+
+    // Map a bitmap byte index to its volume offset via the bitmap's cluster
+    // list (the bitmap may be fragmented, so bytes are not one contiguous run).
+    let cs = g.cluster_size as u64;
+    let mut voff_val: Vec<(u64, u8)> = Vec::with_capacity(modified.len());
+    for &bidx in &modified {
+        let k = (bidx / cs) as usize;
+        if let Some(&cl) = bmp.clusters.get(k) {
+            let voff = g.heap_start + (cl - 2) * cs + (bidx % cs);
+            voff_val.push((voff, bytes[bidx as usize]));
+        }
+    }
+    // Coalesce consecutive volume offsets into single patches.
+    voff_val.sort_by_key(|(o, _)| *o);
+    let mut i = 0;
+    while i < voff_val.len() {
+        let start = voff_val[i].0;
+        let mut run = vec![voff_val[i].1];
+        let mut j = i;
+        while j + 1 < voff_val.len() && voff_val[j + 1].0 == voff_val[j].0 + 1 {
+            run.push(voff_val[j + 1].1);
+            j += 1;
+        }
+        patches.push((start, run));
+        i = j + 1;
+    }
+
+    // Fragmented files: zero their FAT chain entries in every FAT copy.
+    fat_frees.sort_unstable();
+    fat_frees.dedup();
+    let mut i = 0;
+    while i < fat_frees.len() {
+        let start = fat_frees[i];
+        let mut j = i;
+        while j + 1 < fat_frees.len() && fat_frees[j + 1] == fat_frees[j] + 1 {
+            j += 1;
+        }
+        let zeros = vec![0u8; ((j - i + 1) * 4) as usize];
+        for k in 0..g.num_fats {
+            patches.push((g.fat_offset + k * g.fat_bytes + start * 4, zeros.clone()));
+        }
+        i = j + 1;
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -510,6 +615,8 @@ fn finalize_exfat_entry(
     subtree_excluded: bool,
     parsed: &[crate::exclusions::ExclusionPattern],
     scan: &mut FatExclusionScan,
+    freed: &mut Vec<u64>,
+    fat_frees: &mut Vec<u64>,
     stack: &mut Vec<(u64, bool, u64, Vec<String>, bool)>,
 ) {
     let name = String::from_utf16_lossy(&p.name);
@@ -524,7 +631,12 @@ fn finalize_exfat_entry(
             stack.push((p.first_cluster, p.no_fat_chain, max_clusters, rel_child, matched));
         }
     } else if matched {
-        let bytes = exfat_file_ranges(g, fat, &p, &mut scan.ranges);
+        // Clear the in-use bit (0x80) on every entry of the set: 0x85→0x05,
+        // 0xC0→0x40, 0xC1→0x41. The clusters are freed via the bitmap (below).
+        for (off, first_byte) in &p.entries {
+            scan.patches.push((*off, vec![first_byte & 0x7F]));
+        }
+        let bytes = exfat_file_ranges(g, fat, &p, &mut scan.ranges, freed, fat_frees);
         scan.files_excluded += 1;
         scan.bytes_excluded += bytes;
     } else {
@@ -537,13 +649,18 @@ fn exfat_cluster_offset(g: &crate::fat_map::ExfatGeometry, cluster: u64) -> u64 
     g.heap_start + (cluster - 2) * g.cluster_size as u64
 }
 
-/// Add a matched exFAT file's clusters to `ranges`. Contiguous (NoFatChain)
-/// files span `data_length` bytes from `first_cluster`; otherwise follow the FAT.
+/// Add a matched exFAT file's clusters to `ranges` (for dropping + zeroing) and
+/// to `freed` (allocation-bitmap bits to clear). Contiguous (NoFatChain) files
+/// span `data_length` bytes from `first_cluster`; fragmented files follow the
+/// FAT and additionally record their clusters in `fat_frees` (FAT entries to
+/// zero). Returns the byte count.
 fn exfat_file_ranges(
     g: &crate::fat_map::ExfatGeometry,
     fat: &[u8],
     p: &Pending,
     ranges: &mut ByteRanges,
+    freed: &mut Vec<u64>,
+    fat_frees: &mut Vec<u64>,
 ) -> u64 {
     if !(2..g.cluster_count + 2).contains(&p.first_cluster) || p.data_length == 0 {
         return 0;
@@ -559,6 +676,7 @@ fn exfat_file_ranges(
             }
             let start = exfat_cluster_offset(g, c);
             ranges.add(start, start + cs);
+            freed.push(c);
             bytes += cs;
         }
     } else {
@@ -567,6 +685,8 @@ fn exfat_file_ranges(
         while (2..g.cluster_count + 2).contains(&c) {
             let start = exfat_cluster_offset(g, c);
             ranges.add(start, start + cs);
+            freed.push(c);
+            fat_frees.push(c);
             bytes += cs;
             c = fat_next(fat, c);
             guard += 1;
@@ -924,6 +1044,7 @@ mod tests {
         img[96..100].copy_from_slice(&2u32.to_le_bytes()); // root dir cluster
         img[108] = 9; // 512-B sectors
         img[109] = 0; // 1 sector/cluster
+        img[110] = 1; // number of FATs
         img[510] = 0x55;
         img[511] = 0xAA;
 
@@ -972,5 +1093,144 @@ mod tests {
         assert_eq!(scan.files_excluded, 0);
         assert!(scan.ranges.is_empty());
         assert!(scan.categories.total() > 0); // junk.tmp categorized instead
+    }
+
+    /// exFAT with a real Allocation Bitmap (needed for removal patches): 512-B
+    /// sectors, 32 clusters, root in cluster 2 holding the 0x81 bitmap entry, a
+    /// "junk.tmp" set (contiguous, cluster 5) and a "keep.log" set (contiguous,
+    /// cluster 6). Bitmap file lives in cluster 3, marking clusters 2,3,5,6 used.
+    fn exfat_tree_with_bitmap() -> MemVolume {
+        let bps = 512u64;
+        let heap_off = 8u64;
+        let clusters = 32u64;
+        let vol_len = heap_off + clusters; // sectors
+        let mut img = vec![0u8; (vol_len * bps) as usize];
+
+        img[3..11].copy_from_slice(b"EXFAT   ");
+        img[72..80].copy_from_slice(&vol_len.to_le_bytes());
+        img[80..84].copy_from_slice(&4u32.to_le_bytes()); // fat offset (sector)
+        img[84..88].copy_from_slice(&1u32.to_le_bytes()); // fat length (sector)
+        img[88..92].copy_from_slice(&(heap_off as u32).to_le_bytes());
+        img[92..96].copy_from_slice(&(clusters as u32).to_le_bytes());
+        img[96..100].copy_from_slice(&2u32.to_le_bytes()); // root dir cluster
+        img[108] = 9; // 512-B sectors
+        img[109] = 0; // 1 sector/cluster
+        img[110] = 1; // number of FATs
+        img[510] = 0x55;
+        img[511] = 0xAA;
+
+        // FAT: root (cluster 2) and the bitmap file (cluster 3) are EOC chains.
+        let fat_off = (4 * bps) as usize;
+        img[fat_off + 2 * 4..fat_off + 2 * 4 + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        img[fat_off + 3 * 4..fat_off + 3 * 4 + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+
+        let cl = |n: u64| ((heap_off + (n - 2)) * bps) as usize;
+
+        // Allocation bitmap in cluster 3: bits for clusters 2,3,5,6 (indices
+        // 0,1,3,4) → 0b0001_1011 = 0x1B.
+        img[cl(3)] = 0b0001_1011;
+
+        // A file entry set writer: File (0x85) + Stream (0xC0) + Name (0xC1).
+        let put_set = |img: &mut [u8], at: usize, name: &str, first: u32, len: u64| {
+            img[at] = 0x85;
+            img[at + 1] = 2; // SecondaryCount
+            img[at + 4..at + 6].copy_from_slice(&0x20u16.to_le_bytes()); // archive
+            let s = at + 32;
+            img[s] = 0xC0;
+            img[s + 1] = 0x02; // NoFatChain (contiguous)
+            img[s + 3] = name.encode_utf16().count() as u8;
+            img[s + 20..s + 24].copy_from_slice(&first.to_le_bytes());
+            img[s + 24..s + 32].copy_from_slice(&len.to_le_bytes());
+            let nm = at + 64;
+            img[nm] = 0xC1;
+            for (i, u) in name.encode_utf16().enumerate() {
+                img[nm + 2 + i * 2..nm + 2 + i * 2 + 2].copy_from_slice(&u.to_le_bytes());
+            }
+        };
+
+        let root = cl(2);
+        // Entry 0: allocation bitmap (0x81) → first cluster 3, 4 bytes.
+        img[root] = 0x81;
+        img[root + 20..root + 24].copy_from_slice(&3u32.to_le_bytes());
+        img[root + 24..root + 32].copy_from_slice(&4u64.to_le_bytes());
+        // Entries 1..4: junk.tmp (cluster 5). Entries 4..7: keep.log (cluster 6).
+        put_set(&mut img, root + 32, "junk.tmp", 5, 100);
+        put_set(&mut img, root + 128, "keep.log", 6, 100);
+        img[root + 224] = 0x00; // end of directory
+        MemVolume(img)
+    }
+
+    #[test]
+    fn exfat_removal_clears_entry_and_bitmap() {
+        use crate::used_sectors::UsedSectorMap;
+
+        let mut vol = exfat_tree_with_bitmap();
+        let scan = scan_fat_exclusions(&mut vol, &["*.tmp".into()], |_| Ok(())).unwrap();
+        assert_eq!(scan.files_excluded, 1);
+        assert!(!scan.patches.is_empty(), "removal must produce patches");
+
+        let mut img = vol.0.clone();
+        apply_patches(&mut img, &scan.patches);
+
+        let heap = 8 * 512u64;
+        let cl = |n: u64| (heap + (n - 2) * 512) as usize;
+        let root = cl(2);
+        // junk.tmp's set (entries 1..4 in root) has the in-use bit cleared.
+        assert_eq!(img[root + 32], 0x05, "File entry (0x85→0x05)");
+        assert_eq!(img[root + 64], 0x40, "Stream entry (0xC0→0x40)");
+        assert_eq!(img[root + 96], 0x41, "Name entry (0xC1→0x41)");
+        // keep.log's set (entries 4..7) is untouched.
+        assert_eq!(img[root + 128], 0x85, "keep.log File entry intact");
+
+        // Bitmap: cluster 5's bit (index 3) cleared; cluster 6's (index 4) kept.
+        // 0x1B & ~(1<<3) = 0x13.
+        assert_eq!(img[cl(3)], 0b0001_0011, "bitmap bit for cluster 5 cleared");
+
+        // Re-scan: junk.tmp gone; keep.log still findable.
+        let rescan_tmp =
+            scan_fat_exclusions(&mut MemVolume(img.clone()), &["*.tmp".into()], |_| Ok(())).unwrap();
+        assert_eq!(rescan_tmp.files_excluded, 0, "junk.tmp must be gone");
+        let rescan_log =
+            scan_fat_exclusions(&mut MemVolume(img.clone()), &["*.log".into()], |_| Ok(())).unwrap();
+        assert_eq!(rescan_log.files_excluded, 1, "keep.log must still be present");
+
+        // Used map: cluster 5 freed, cluster 6 still used.
+        let map = crate::fat_map::build_fat_used_map(&mut MemVolume(img), 512).unwrap();
+        assert!(!map.is_block_used((cl(5) / 512) as u64), "cluster 5 freed");
+        assert!(map.is_block_used((cl(6) / 512) as u64), "cluster 6 still used");
+    }
+
+    #[test]
+    fn exfat_removal_frees_fragmented_fat_chain() {
+        // A fragmented (FAT-chained) file must also get its FAT entries zeroed.
+        let mut base = exfat_tree_with_bitmap();
+        let bps = 512usize;
+        let heap_off = 8usize;
+        let cl = |n: usize| (heap_off + (n - 2)) * bps;
+        // Turn junk.tmp into a 2-cluster FAT-chained file: clusters 5 → 7.
+        let root = cl(2);
+        let s = root + 32 + 32; // its Stream entry
+        base.0[s + 1] = 0x00; // clear NoFatChain → follow the FAT
+        base.0[s + 24..s + 32].copy_from_slice(&600u64.to_le_bytes()); // 2 clusters
+        // FAT chain 5 → 7 → EOC.
+        let fat_off = 4 * bps;
+        base.0[fat_off + 5 * 4..fat_off + 5 * 4 + 4].copy_from_slice(&7u32.to_le_bytes());
+        base.0[fat_off + 7 * 4..fat_off + 7 * 4 + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        // Mark cluster 7 (index 5) used in the bitmap too: 0x1B | (1<<5) = 0x3B.
+        base.0[cl(3)] = 0b0011_1011;
+
+        let scan = scan_fat_exclusions(&mut base, &["*.tmp".into()], |_| Ok(())).unwrap();
+        assert_eq!(scan.files_excluded, 1);
+
+        let mut img = base.0.clone();
+        apply_patches(&mut img, &scan.patches);
+        // FAT entries for clusters 5 and 7 must be zeroed.
+        let e = |img: &[u8], n: usize| {
+            u32::from_le_bytes(img[fat_off + n * 4..fat_off + n * 4 + 4].try_into().unwrap())
+        };
+        assert_eq!(e(&img, 5), 0, "FAT entry for cluster 5 zeroed");
+        assert_eq!(e(&img, 7), 0, "FAT entry for cluster 7 zeroed");
+        // Bitmap bits for clusters 5 (idx 3) and 7 (idx 5) cleared: 0x3B & ~0x28 = 0x13.
+        assert_eq!(img[cl(3)], 0b0001_0011, "both fragmented clusters freed in bitmap");
     }
 }

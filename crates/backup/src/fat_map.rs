@@ -279,7 +279,10 @@ pub struct ExfatGeometry {
     pub heap_start: u64,
     /// Byte offset of the (first) FAT.
     pub fat_offset: u64,
+    /// Size of ONE FAT copy in bytes; FAT #k starts at `fat_offset + k*fat_bytes`.
     pub fat_bytes: u64,
+    /// Number of FAT copies (`NumberOfFats`, 1 for normal exFAT, 2 for TexFAT).
+    pub num_fats: u64,
     /// First cluster of the root directory.
     pub root_cluster: u64,
     pub volume_bytes: u64,
@@ -295,11 +298,15 @@ pub fn parse_exfat_geometry(boot: &[u8], vol_len: u64) -> Result<ExfatGeometry> 
     let root_first = u32at(boot, 96);
     let bps_shift = boot[108];
     let spc_shift = boot[109];
+    let num_fats = boot[110] as u64;
 
     if !(9..=12).contains(&bps_shift) || spc_shift > 16 {
         return Err(bad(format!(
             "implausible exFAT shifts bps=2^{bps_shift} spc=2^{spc_shift}"
         )));
+    }
+    if num_fats == 0 || num_fats > 2 {
+        return Err(bad(format!("implausible exFAT NumberOfFats {num_fats}")));
     }
     let bps = 1u64 << bps_shift;
     let cluster_size = (bps << spc_shift) as u32;
@@ -332,38 +339,45 @@ pub fn parse_exfat_geometry(boot: &[u8], vol_len: u64) -> Result<ExfatGeometry> 
         heap_start,
         fat_offset: fat_offset * bps,
         fat_bytes,
+        num_fats,
         root_cluster: root_first,
         volume_bytes: volume_length * bps,
     })
 }
 
-fn build_exfat(
-    vol: &mut dyn RawVolume,
-    boot: &[u8],
-    block_size: u32,
-    excluded: Option<&ByteRanges>,
-) -> Result<FatUsedMap> {
-    let g = parse_exfat_geometry(boot, vol.len())?;
-    let cluster_size = g.cluster_size;
-    let cluster_count = g.cluster_count;
-    let heap_start = g.heap_start;
-    let heap_end = heap_start + cluster_count * cluster_size as u64;
-    let root_first = g.root_cluster;
+/// The exFAT allocation bitmap, read into memory together with the cluster
+/// numbers it occupies — the cluster list is needed to map a bitmap byte index
+/// back to its volume offset when patching bits for file removal.
+pub struct ExfatBitmap {
+    /// Bitmap content, `ceil(cluster_count/8)` bytes (bit `c-2` ⇒ cluster `c`
+    /// allocated).
+    pub bytes: Vec<u8>,
+    /// Cluster numbers the bitmap file spans, in order.
+    pub clusters: Vec<u64>,
+}
 
-    // The FAT (for following cluster chains of the root dir / bitmap file).
-    let mut fat = vec![0u8; g.fat_bytes as usize];
-    vol.read_at(g.fat_offset, &mut fat)?;
+/// Locate and read the exFAT allocation bitmap. `fat` is the already-read FAT
+/// (for following the bitmap's cluster chain). Errors — so the caller keeps the
+/// whole volume / skips removal — if the bitmap entry is missing, too small, or
+/// out of range. Shared by the used-map builder and the exclusion walker.
+pub fn read_exfat_bitmap(
+    vol: &mut dyn RawVolume,
+    g: &ExfatGeometry,
+    fat: &[u8],
+) -> Result<ExfatBitmap> {
+    let cluster_count = g.cluster_count;
+    let cluster_size = g.cluster_size;
     let fat_entry = |n: u64| -> u64 {
         let idx = (n * 4) as usize;
-        if idx + 4 <= fat.len() { u32at(&fat, idx) } else { 0 }
+        if idx + 4 <= fat.len() { u32at(fat, idx) } else { 0 }
     };
-    let cluster_offset = |n: u64| heap_start + (n - 2) * cluster_size as u64;
+    let cluster_offset = |n: u64| g.heap_start + (n - 2) * cluster_size as u64;
 
-    // Walk the root directory chain looking for the Allocation Bitmap entry
-    // (type 0x81, BitmapFlags bit0 == 0 → the first/active bitmap).
+    // Walk the root directory chain for the Allocation Bitmap entry (type 0x81,
+    // BitmapFlags bit0 == 0 → the first/active bitmap).
     let mut bitmap_first = 0u64;
     let mut bitmap_len = 0u64;
-    let mut dir_cluster = root_first;
+    let mut dir_cluster = g.root_cluster;
     let mut buf = vec![0u8; cluster_size as usize];
     'walk: for _ in 0..4096 {
         vol.read_at(cluster_offset(dir_cluster), &mut buf)?;
@@ -398,15 +412,16 @@ fn build_exfat(
     }
 
     // Read the bitmap file, following its FAT chain; if the chain is invalid
-    // (bitmaps are almost always contiguous, some formatters do not chain
-    // them), continue contiguously with a warning.
-    let mut bitmap = Vec::with_capacity(needed as usize);
+    // (some formatters do not chain a contiguous bitmap), continue contiguously.
+    let mut bytes = Vec::with_capacity(needed as usize);
+    let mut clusters = Vec::new();
     let mut cluster = bitmap_first;
-    while (bitmap.len() as u64) < needed {
+    while (bytes.len() as u64) < needed {
+        clusters.push(cluster);
         vol.read_at(cluster_offset(cluster), &mut buf)?;
-        let take = (needed as usize - bitmap.len()).min(cluster_size as usize);
-        bitmap.extend_from_slice(&buf[..take]);
-        if (bitmap.len() as u64) >= needed {
+        let take = (needed as usize - bytes.len()).min(cluster_size as usize);
+        bytes.extend_from_slice(&buf[..take]);
+        if (bytes.len() as u64) >= needed {
             break;
         }
         cluster = match fat_entry(cluster) {
@@ -424,6 +439,25 @@ fn build_exfat(
             return Err(bad("allocation bitmap runs past the cluster heap"));
         }
     }
+    Ok(ExfatBitmap { bytes, clusters })
+}
+
+fn build_exfat(
+    vol: &mut dyn RawVolume,
+    boot: &[u8],
+    block_size: u32,
+    excluded: Option<&ByteRanges>,
+) -> Result<FatUsedMap> {
+    let g = parse_exfat_geometry(boot, vol.len())?;
+    let cluster_size = g.cluster_size;
+    let cluster_count = g.cluster_count;
+    let heap_start = g.heap_start;
+    let heap_end = heap_start + cluster_count * cluster_size as u64;
+
+    // The FAT (for following the bitmap's cluster chain), then the bitmap itself.
+    let mut fat = vec![0u8; g.fat_bytes as usize];
+    vol.read_at(g.fat_offset, &mut fat)?;
+    let bitmap = read_exfat_bitmap(vol, &g, &fat)?.bytes;
 
     let total_blocks = vol.len().div_ceil(block_size as u64);
     let mut map = vec![false; total_blocks as usize];
@@ -578,6 +612,7 @@ mod tests {
         img[96..100].copy_from_slice(&4u32.to_le_bytes()); // root dir cluster
         img[108] = 9; // 512 B sectors
         img[109] = 0; // 1 sector/cluster
+        img[110] = 1; // number of FATs
         img[510] = 0x55;
         img[511] = 0xAA;
 
@@ -625,5 +660,85 @@ mod tests {
         let root = ((8 + 2) * 512) as usize;
         img[root..root + 512].fill(0);
         assert!(build_fat_used_map(&mut MemVolume(img), 1024).is_err());
+    }
+
+    /// Cross-check `parse_exfat_geometry` + `read_exfat_bitmap` against a REAL
+    /// exFAT filesystem built by mkfs.exfat, using dump.exfat as the reference.
+    /// exFAT images cannot be populated without mounting (no mtools equivalent),
+    /// so this validates the parsing our removal patches depend on. Ignored by
+    /// default; run with `cargo test -- --ignored`.
+    #[test]
+    #[ignore = "needs exfatprogs (mkfs.exfat/dump.exfat) + truncate; run with --ignored"]
+    fn exfat_geometry_matches_mkfs_exfat() {
+        use std::process::Command;
+
+        fn have(tool: &str) -> bool {
+            Command::new(tool).arg("--version").output().is_ok()
+        }
+        for t in ["mkfs.exfat", "dump.exfat", "truncate"] {
+            if !have(t) {
+                eprintln!("SKIP exfat geometry: {t} not installed");
+                return;
+            }
+        }
+
+        let dir = std::env::temp_dir().join(format!("obk-exfat-geo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = dir.join("ex.img");
+        let imgs = img.to_str().unwrap();
+
+        assert!(Command::new("truncate")
+            .args(["-s", "48M", imgs])
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("mkfs.exfat")
+            .args(["-c", "4096", imgs])
+            .output()
+            .unwrap()
+            .status
+            .success());
+
+        // Our parse.
+        let bytes = std::fs::read(&img).unwrap();
+        let mut vol = MemVolume(bytes);
+        let mut boot = [0u8; 512];
+        vol.read_at(0, &mut boot).unwrap();
+        let g = parse_exfat_geometry(&boot, vol.len()).unwrap();
+
+        // dump.exfat reference.
+        let dump = Command::new("dump.exfat").arg(imgs).output().unwrap();
+        let text = String::from_utf8_lossy(&dump.stdout);
+        let field = |needle: &str| -> u64 {
+            text.lines()
+                .find(|l| l.contains(needle))
+                .and_then(|l| l.split_whitespace().last())
+                .and_then(|t| t.parse::<u64>().ok())
+                .unwrap_or_else(|| panic!("dump.exfat: field '{needle}' not found in:\n{text}"))
+        };
+
+        let bps = g.bytes_per_sector;
+        assert_eq!(g.volume_bytes / bps, field("Volume Length"), "volume length (sectors)");
+        assert_eq!(g.fat_offset / bps, field("FAT Offset"), "fat offset (sectors)");
+        assert_eq!(g.fat_bytes / bps, field("FAT Length"), "fat length (sectors)");
+        assert_eq!(g.heap_start / bps, field("Cluster Heap Offset"), "heap offset (sectors)");
+        assert_eq!(g.cluster_count, field("Cluster Count"), "cluster count");
+        assert_eq!(g.root_cluster, field("Root Cluster"), "root cluster");
+        assert_eq!(bps, 1u64 << field("Sector Size Bits"), "bytes/sector");
+        assert_eq!(
+            g.cluster_size as u64,
+            bps << field("Sector per Cluster bits"),
+            "cluster size"
+        );
+
+        // The bitmap our removal reads must be locatable on a real image.
+        let mut fat = vec![0u8; g.fat_bytes as usize];
+        vol.read_at(g.fat_offset, &mut fat).unwrap();
+        let bmp = read_exfat_bitmap(&mut vol, &g, &fat).unwrap();
+        assert!(!bmp.clusters.is_empty(), "bitmap should occupy at least one cluster");
+        assert_eq!(bmp.bytes.len() as u64, g.cluster_count.div_ceil(8), "bitmap size");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
