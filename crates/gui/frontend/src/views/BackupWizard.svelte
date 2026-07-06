@@ -723,7 +723,7 @@
       <!-- 3: exclusions -->
       {#if step === 3}
         <label class="chk"><input type="checkbox" bind:checked={job.exclusions.enabled} /> Исключить файлы по следующим критериям:</label>
-        <div class="note">Маска без пути (<code>*.tmp</code>, <code>pagefile.sys</code>) действует по всему тому; маска с путём (<code>Temp\*.log</code>) — от корня тома. Работает для NTFS и ReFS; в посекторном режиме исключения не применяются.</div>
+        <div class="note">Маска без пути (<code>*.tmp</code>, <code>pagefile.sys</code>) действует по всему тому; маска с путём (<code>Temp\*.log</code>) — от корня тома. Работает для NTFS, ReFS, FAT32 и exFAT; в посекторном режиме исключения не применяются.</div>
         <div class="excl-list">
           {#each job.exclusions.patterns as p, i}
             <div class="excl-row"><span>{p}</span><button class="x" onclick={() => removePattern(i)}>×</button></div>

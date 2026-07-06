@@ -457,8 +457,10 @@ fn backup_volume_inner(
             speed_bps: 0,
         })
     };
-    let fat32_exclusions =
-        fat_map.as_ref().is_some_and(|f| f.filesystem == "FAT32") && !req.exclusion_patterns.is_empty();
+    let fat_exclusions = fat_map
+        .as_ref()
+        .is_some_and(|f| f.filesystem == "FAT32" || f.filesystem == "exFAT")
+        && !req.exclusion_patterns.is_empty();
     if let Some(map) = ntfs_map.as_mut() {
         if !req.exclusion_patterns.is_empty() {
             let scan =
@@ -472,10 +474,10 @@ fn backup_volume_inner(
             }
         }
         map.release_bitmap();
-    } else if fat32_exclusions {
+    } else if fat_exclusions {
         let mut dev = WinRawDevice::open_read(&read_path)?;
         let scan =
-            crate::fat_exclusions::scan_fat32_exclusions(&mut dev, &req.exclusion_patterns, prepare_tick)?;
+            crate::fat_exclusions::scan_fat_exclusions(&mut dev, &req.exclusion_patterns, prepare_tick)?;
         excluded_files = scan.files_excluded;
         excluded_bytes = scan.bytes_excluded;
         categories = Some(scan.categories);

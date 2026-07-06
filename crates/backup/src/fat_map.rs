@@ -265,12 +265,24 @@ fn build_fat32(
 // exFAT
 // ---------------------------------------------------------------------------
 
-fn build_exfat(
-    vol: &mut dyn RawVolume,
-    boot: &[u8],
-    block_size: u32,
-    excluded: Option<&ByteRanges>,
-) -> Result<FatUsedMap> {
+/// exFAT on-disk geometry, shared by the used-map builder and the exclusion
+/// walker ([`crate::fat_exclusions`]).
+pub struct ExfatGeometry {
+    pub bytes_per_sector: u64,
+    pub cluster_size: u32,
+    pub cluster_count: u64,
+    /// Byte offset of cluster 2 (start of the cluster heap).
+    pub heap_start: u64,
+    /// Byte offset of the (first) FAT.
+    pub fat_offset: u64,
+    pub fat_bytes: u64,
+    /// First cluster of the root directory.
+    pub root_cluster: u64,
+    pub volume_bytes: u64,
+}
+
+/// Parse + validate exFAT geometry from the boot sector.
+pub fn parse_exfat_geometry(boot: &[u8], vol_len: u64) -> Result<ExfatGeometry> {
     let volume_length = u64at(boot, 72); // sectors
     let fat_offset = u32at(boot, 80); // sectors
     let fat_length = u32at(boot, 84); // sectors
@@ -290,11 +302,11 @@ fn build_exfat(
     if fat_offset == 0 || fat_length == 0 || heap_offset == 0 || cluster_count == 0 {
         return Err(bad("zero exFAT geometry fields"));
     }
-    if volume_length * bps > vol.len() {
+    if volume_length * bps > vol_len {
         return Err(bad(format!(
             "filesystem claims {} bytes but the device is {}",
             volume_length * bps,
-            vol.len()
+            vol_len
         )));
     }
     let heap_start = heap_offset * bps;
@@ -305,14 +317,38 @@ fn build_exfat(
     if !(2..cluster_count + 2).contains(&root_first) {
         return Err(bad("root directory cluster out of range"));
     }
-
-    // The FAT (for following cluster chains of the root dir / bitmap file).
     let fat_bytes = fat_length * bps;
     if fat_bytes > MAX_STRUCT_BYTES {
         return Err(bad("exFAT FAT is implausibly large"));
     }
-    let mut fat = vec![0u8; fat_bytes as usize];
-    vol.read_at(fat_offset * bps, &mut fat)?;
+    Ok(ExfatGeometry {
+        bytes_per_sector: bps,
+        cluster_size,
+        cluster_count,
+        heap_start,
+        fat_offset: fat_offset * bps,
+        fat_bytes,
+        root_cluster: root_first,
+        volume_bytes: volume_length * bps,
+    })
+}
+
+fn build_exfat(
+    vol: &mut dyn RawVolume,
+    boot: &[u8],
+    block_size: u32,
+    excluded: Option<&ByteRanges>,
+) -> Result<FatUsedMap> {
+    let g = parse_exfat_geometry(boot, vol.len())?;
+    let cluster_size = g.cluster_size;
+    let cluster_count = g.cluster_count;
+    let heap_start = g.heap_start;
+    let heap_end = heap_start + cluster_count * cluster_size as u64;
+    let root_first = g.root_cluster;
+
+    // The FAT (for following cluster chains of the root dir / bitmap file).
+    let mut fat = vec![0u8; g.fat_bytes as usize];
+    vol.read_at(g.fat_offset, &mut fat)?;
     let fat_entry = |n: u64| -> u64 {
         let idx = (n * 4) as usize;
         if idx + 4 <= fat.len() { u32at(&fat, idx) } else { 0 }

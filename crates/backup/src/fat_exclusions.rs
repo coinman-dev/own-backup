@@ -225,6 +225,9 @@ fn u16le(b: &[u8], o: usize) -> u64 {
 fn u32le(b: &[u8], o: usize) -> u64 {
     u32::from_le_bytes(b[o..o + 4].try_into().unwrap()) as u64
 }
+fn u64le(b: &[u8], o: usize) -> u64 {
+    u64::from_le_bytes(b[o..o + 8].try_into().unwrap())
+}
 
 /// The 13 UTF-16 code units carried by one LFN directory entry.
 fn lfn_chars(rec: &[u8]) -> Vec<u16> {
@@ -272,6 +275,244 @@ fn short_name(rec: &[u8]) -> String {
     } else {
         format!("{base}.{ext}")
     }
+}
+
+// ---------------------------------------------------------------------------
+// exFAT
+// ---------------------------------------------------------------------------
+
+/// Detect FAT32 vs exFAT and run the matching exclusion walk.
+pub fn scan_fat_exclusions(
+    vol: &mut dyn RawVolume,
+    patterns: &[String],
+    tick: impl FnMut(u64) -> Result<()>,
+) -> Result<FatExclusionScan> {
+    let mut boot = [0u8; 512];
+    vol.read_at(0, &mut boot)?;
+    if &boot[3..11] == b"EXFAT   " {
+        scan_exfat_exclusions(vol, patterns, tick)
+    } else {
+        scan_fat32_exclusions(vol, patterns, tick)
+    }
+}
+
+// exFAT directory entry types (with the in-use bit 0x80 set).
+const EXFAT_END: u8 = 0x00;
+const EXFAT_FILE: u8 = 0x85;
+const EXFAT_STREAM: u8 = 0xC0;
+const EXFAT_NAME: u8 = 0xC1;
+const EXFAT_ATTR_DIRECTORY: u64 = 0x10;
+const EXFAT_FLAG_NO_FAT_CHAIN: u8 = 0x02;
+
+/// One in-progress exFAT directory entry set (a File entry + its secondaries).
+struct Pending {
+    is_dir: bool,
+    name: Vec<u16>,
+    name_len: usize,
+    first_cluster: u64,
+    data_length: u64,
+    no_fat_chain: bool,
+    remaining: u8,
+}
+
+/// Walk an exFAT volume, collecting the cluster byte-ranges of matched files.
+pub fn scan_exfat_exclusions(
+    vol: &mut dyn RawVolume,
+    patterns: &[String],
+    mut tick: impl FnMut(u64) -> Result<()>,
+) -> Result<FatExclusionScan> {
+    use crate::fat_map::parse_exfat_geometry;
+
+    let mut scan = FatExclusionScan {
+        ranges: ByteRanges::new(),
+        files_excluded: 0,
+        entries_scanned: 0,
+        bytes_excluded: 0,
+        categories: CategorySizes::default(),
+    };
+    let parsed = parse_patterns(patterns);
+    if parsed.is_empty() {
+        scan.ranges.finalize();
+        return Ok(scan);
+    }
+
+    let mut boot = [0u8; 512];
+    vol.read_at(0, &mut boot)?;
+    let g = parse_exfat_geometry(&boot, vol.len())?;
+    let mut fat = vec![0u8; g.fat_bytes as usize];
+    vol.read_at(g.fat_offset, &mut fat)?;
+
+    // (first cluster, contiguous?, max clusters, rel path, subtree excluded).
+    // The root is walked via the FAT chain (bounded by the cluster count).
+    let mut stack: Vec<(u64, bool, u64, Vec<String>, bool)> =
+        vec![(g.root_cluster, false, g.cluster_count, Vec::new(), false)];
+    let mut visited: HashSet<u64> = HashSet::new();
+    let mut buf = vec![0u8; g.cluster_size as usize];
+
+    while let Some((first, contiguous, max_clusters, rel, subtree_excluded)) = stack.pop() {
+        if !visited.insert(first) {
+            continue;
+        }
+        let mut pending: Option<Pending> = None;
+        let mut cluster = first;
+        let mut walked = 0u64;
+
+        'dir: while (2..g.cluster_count + 2).contains(&cluster) && walked < max_clusters {
+            vol.read_at(exfat_cluster_offset(&g, cluster), &mut buf)?;
+            for rec in buf.chunks_exact(32) {
+                let etype = rec[0];
+                if etype == EXFAT_END {
+                    break 'dir;
+                }
+                if etype & 0x80 == 0 {
+                    pending = None; // not-in-use entry: drop any partial set
+                    continue;
+                }
+                match etype {
+                    EXFAT_FILE => {
+                        let attrs = u16le(rec, 4);
+                        pending = Some(Pending {
+                            is_dir: attrs & EXFAT_ATTR_DIRECTORY != 0,
+                            name: Vec::new(),
+                            name_len: 0,
+                            first_cluster: 0,
+                            data_length: 0,
+                            no_fat_chain: false,
+                            remaining: rec[1], // SecondaryCount
+                        });
+                    }
+                    EXFAT_STREAM => {
+                        if let Some(p) = pending.as_mut() {
+                            p.no_fat_chain = rec[1] & EXFAT_FLAG_NO_FAT_CHAIN != 0;
+                            p.name_len = rec[3] as usize;
+                            p.data_length = u64le(rec, 24);
+                            p.first_cluster = u32le(rec, 20);
+                            p.remaining = p.remaining.saturating_sub(1);
+                        }
+                    }
+                    EXFAT_NAME => {
+                        if let Some(p) = pending.as_mut() {
+                            for i in 0..15 {
+                                if p.name.len() >= p.name_len {
+                                    break;
+                                }
+                                p.name.push(u16::from_le_bytes([rec[2 + i * 2], rec[3 + i * 2]]));
+                            }
+                            p.remaining = p.remaining.saturating_sub(1);
+                        }
+                    }
+                    _ => {
+                        pending = None; // bitmap / upcase / volume label
+                        continue;
+                    }
+                }
+
+                // Entry set complete?
+                if pending.as_ref().is_some_and(|p| p.remaining == 0) {
+                    let p = pending.take().unwrap();
+                    finalize_exfat_entry(&g, &fat, p, &rel, subtree_excluded, &parsed, &mut scan, &mut stack);
+                    scan.entries_scanned += 1;
+                    if scan.entries_scanned % 512 == 0 {
+                        tick(scan.entries_scanned)?;
+                    }
+                }
+            }
+
+            // Next directory cluster.
+            cluster = if contiguous {
+                cluster + 1
+            } else {
+                fat_next(&fat, cluster)
+            };
+            walked += 1;
+        }
+    }
+
+    scan.ranges.finalize();
+    info!(
+        files = scan.files_excluded,
+        entries = scan.entries_scanned,
+        excluded_mb = scan.bytes_excluded / (1024 * 1024),
+        "exFAT exclusion scan complete"
+    );
+    Ok(scan)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finalize_exfat_entry(
+    g: &crate::fat_map::ExfatGeometry,
+    fat: &[u8],
+    p: Pending,
+    rel: &[String],
+    subtree_excluded: bool,
+    parsed: &[crate::exclusions::ExclusionPattern],
+    scan: &mut FatExclusionScan,
+    stack: &mut Vec<(u64, bool, u64, Vec<String>, bool)>,
+) {
+    let name = String::from_utf16_lossy(&p.name);
+    let name_lower = name.to_lowercase();
+    let mut rel_child = rel.to_vec();
+    rel_child.push(name_lower.clone());
+    let matched = subtree_excluded || parsed.iter().any(|q| q.matches(&name_lower, &rel_child));
+
+    let max_clusters = p.data_length.div_ceil(g.cluster_size as u64).max(1);
+    if p.is_dir {
+        if (2..g.cluster_count + 2).contains(&p.first_cluster) {
+            stack.push((p.first_cluster, p.no_fat_chain, max_clusters, rel_child, matched));
+        }
+    } else if matched {
+        let bytes = exfat_file_ranges(g, fat, &p, &mut scan.ranges);
+        scan.files_excluded += 1;
+        scan.bytes_excluded += bytes;
+    } else {
+        scan.categories.add(&name_lower, p.data_length);
+    }
+}
+
+/// Byte offset of an exFAT cluster.
+fn exfat_cluster_offset(g: &crate::fat_map::ExfatGeometry, cluster: u64) -> u64 {
+    g.heap_start + (cluster - 2) * g.cluster_size as u64
+}
+
+/// Add a matched exFAT file's clusters to `ranges`. Contiguous (NoFatChain)
+/// files span `data_length` bytes from `first_cluster`; otherwise follow the FAT.
+fn exfat_file_ranges(
+    g: &crate::fat_map::ExfatGeometry,
+    fat: &[u8],
+    p: &Pending,
+    ranges: &mut ByteRanges,
+) -> u64 {
+    if !(2..g.cluster_count + 2).contains(&p.first_cluster) || p.data_length == 0 {
+        return 0;
+    }
+    let cs = g.cluster_size as u64;
+    let mut bytes = 0u64;
+    if p.no_fat_chain {
+        let need = p.data_length.div_ceil(cs);
+        for i in 0..need {
+            let c = p.first_cluster + i;
+            if !(2..g.cluster_count + 2).contains(&c) {
+                break;
+            }
+            let start = exfat_cluster_offset(g, c);
+            ranges.add(start, start + cs);
+            bytes += cs;
+        }
+    } else {
+        let mut c = p.first_cluster;
+        let mut guard = 0u64;
+        while (2..g.cluster_count + 2).contains(&c) {
+            let start = exfat_cluster_offset(g, c);
+            ranges.add(start, start + cs);
+            bytes += cs;
+            c = fat_next(fat, c);
+            guard += 1;
+            if guard > g.cluster_count {
+                break;
+            }
+        }
+    }
+    bytes
 }
 
 #[cfg(test)]
@@ -429,5 +670,74 @@ mod tests {
         assert_eq!(scan.files_excluded, 1, "LFN name should match *cache*");
         let c8 = 8 * 512u64 + (8 - 2) * 512;
         assert!(ranges_of(&scan).contains(&(c8, c8 + 512)));
+    }
+
+    /// exFAT: 512-B sectors, 1 sector/cluster, FAT at sector 4, heap at sector 8,
+    /// 16 clusters, root dir in cluster 2 with a "junk.tmp" entry set (File +
+    /// Stream + Name), a contiguous file at cluster 5.
+    fn exfat_tree() -> MemVolume {
+        let bps = 512u64;
+        let heap_off = 8u64;
+        let clusters = 16u64;
+        let vol_len = heap_off + clusters; // sectors
+        let mut img = vec![0u8; (vol_len * bps) as usize];
+
+        img[3..11].copy_from_slice(b"EXFAT   ");
+        img[72..80].copy_from_slice(&vol_len.to_le_bytes());
+        img[80..84].copy_from_slice(&4u32.to_le_bytes()); // fat offset
+        img[84..88].copy_from_slice(&1u32.to_le_bytes()); // fat length
+        img[88..92].copy_from_slice(&(heap_off as u32).to_le_bytes());
+        img[92..96].copy_from_slice(&(clusters as u32).to_le_bytes());
+        img[96..100].copy_from_slice(&2u32.to_le_bytes()); // root dir cluster
+        img[108] = 9; // 512-B sectors
+        img[109] = 0; // 1 sector/cluster
+        img[510] = 0x55;
+        img[511] = 0xAA;
+
+        // FAT: root (cluster 2) is a single-cluster chain.
+        let fat_off = (4 * bps) as usize;
+        img[fat_off + 2 * 4..fat_off + 2 * 4 + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+
+        let cl = |n: u64| ((heap_off + (n - 2)) * bps) as usize;
+        let root = cl(2);
+        // File entry (0x85): SecondaryCount=2, attrs=archive.
+        img[root] = 0x85;
+        img[root + 1] = 2;
+        img[root + 4..root + 6].copy_from_slice(&0x20u16.to_le_bytes());
+        // Stream extension (0xC0): NoFatChain, name 8 chars, first cluster 5, 100 bytes.
+        let s = root + 32;
+        img[s] = 0xC0;
+        img[s + 1] = 0x02; // NoFatChain
+        img[s + 3] = 8; // NameLength
+        img[s + 20..s + 24].copy_from_slice(&5u32.to_le_bytes());
+        img[s + 24..s + 32].copy_from_slice(&100u64.to_le_bytes());
+        // File name (0xC1): "junk.tmp".
+        let nm = root + 64;
+        img[nm] = 0xC1;
+        for (i, u) in "junk.tmp".encode_utf16().enumerate() {
+            img[nm + 2 + i * 2..nm + 2 + i * 2 + 2].copy_from_slice(&u.to_le_bytes());
+        }
+        // End of directory.
+        img[root + 96] = 0x00;
+        MemVolume(img)
+    }
+
+    #[test]
+    fn exfat_excludes_matched_file() {
+        let mut vol = exfat_tree();
+        let scan = scan_fat_exclusions(&mut vol, &["*.tmp".into()], |_| Ok(())).unwrap();
+        assert_eq!(scan.files_excluded, 1);
+        // cluster 5 @ heap(8*512) + (5-2)*512.
+        let c5 = 8 * 512u64 + (5 - 2) * 512;
+        assert_eq!(ranges_of(&scan), vec![(c5, c5 + 512)]);
+    }
+
+    #[test]
+    fn exfat_keeps_unmatched_file() {
+        let mut vol = exfat_tree();
+        let scan = scan_fat_exclusions(&mut vol, &["*.log".into()], |_| Ok(())).unwrap();
+        assert_eq!(scan.files_excluded, 0);
+        assert!(scan.ranges.is_empty());
+        assert!(scan.categories.total() > 0); // junk.tmp categorized instead
     }
 }
