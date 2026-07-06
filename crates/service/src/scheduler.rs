@@ -15,22 +15,36 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use chrono::Duration as ChronoDuration;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::{info, warn};
 
-use own_backup_core::{JobStore, PasswordStore, RunQueue};
+use own_backup_core::{Job, JobStore, PasswordStore, RunQueue};
 
 use crate::shutdown::ShutdownSignal;
 
 const TICK: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// Spawn the scheduler loop; it stops on shutdown.
+/// OS events the Windows service control handler forwards to the scheduler, so
+/// `kind = event` jobs with a matching `event_trigger` can fire. (USB device
+/// arrival is not here — the `windows-service` crate doesn't decode device
+/// events; it needs a custom notification handler.)
+#[derive(Debug, Clone, Copy)]
+pub enum OsEvent {
+    Logon,
+    Logoff,
+    Shutdown,
+}
+
+/// Spawn the scheduler loop; it stops on shutdown. `os_rx` delivers OS events
+/// (logon/logoff/shutdown) from the Windows service control handler; on other
+/// platforms / foreground it simply never yields (its sender is kept alive).
 pub fn spawn(
     store: Arc<JobStore>,
     queue: RunQueue,
     job_tx: UnboundedSender<String>,
     passwords: Arc<PasswordStore>,
     mut shutdown: ShutdownSignal,
+    mut os_rx: UnboundedReceiver<OsEvent>,
 ) {
     info!("Scheduler started (tick {}s)", TICK.as_secs());
     tokio::spawn(async move {
@@ -46,6 +60,9 @@ pub fn spawn(
             tokio::select! {
                 _ = interval.tick() => {
                     tick(&store, &queue, &job_tx, &passwords, started.elapsed(), &mut fired_startup);
+                }
+                Some(ev) = os_rx.recv() => {
+                    handle_os_event(ev, &store, &queue, &job_tx, &passwords);
                 }
                 _ = shutdown.wait_for_shutdown() => {
                     info!("Scheduler stopping");
@@ -122,16 +139,9 @@ fn handle_event(
         return;
     }
     // At most once per day: if the last run started today, mark as done and skip.
-    if job.schedule.event_once_per_day {
-        let ran_today = job
-            .last_run
-            .as_ref()
-            .and_then(|r| chrono::DateTime::parse_from_rfc3339(&r.started_at).ok())
-            .is_some_and(|dt| dt.date_naive() == chrono::Local::now().date_naive());
-        if ran_today {
-            fired_startup.insert(job.id.clone());
-            return;
-        }
+    if job.schedule.event_once_per_day && ran_today(job) {
+        fired_startup.insert(job.id.clone());
+        return;
     }
     if !has_passwords(job, passwords) {
         return;
@@ -139,6 +149,45 @@ fn handle_event(
     fired_startup.insert(job.id.clone());
     info!(job = %job.name, "Scheduler: startup event fired");
     enqueue(queue, job_tx, &job.id, &job.name);
+}
+
+/// Handle a forwarded OS event: enqueue every `event` job whose trigger matches
+/// ("logon"/"logoff"/"shutdown"), respecting once-per-day and the password gate.
+/// (Shutdown is best-effort — the service is stopping, so the run may not get to
+/// complete; it never touches existing backups.)
+fn handle_os_event(
+    ev: OsEvent,
+    store: &JobStore,
+    queue: &RunQueue,
+    job_tx: &UnboundedSender<String>,
+    passwords: &PasswordStore,
+) {
+    let trigger = match ev {
+        OsEvent::Logon => "logon",
+        OsEvent::Logoff => "logoff",
+        OsEvent::Shutdown => "shutdown",
+    };
+    for job in store.list() {
+        if job.schedule.kind != "event" || job.schedule.event_trigger != trigger {
+            continue;
+        }
+        if job.schedule.event_once_per_day && ran_today(&job) {
+            continue;
+        }
+        if !has_passwords(&job, passwords) {
+            continue;
+        }
+        info!(job = %job.name, trigger, "Scheduler: OS event fired");
+        enqueue(queue, job_tx, &job.id, &job.name);
+    }
+}
+
+/// Did the job's most recent run start today (local time)?
+fn ran_today(job: &Job) -> bool {
+    job.last_run
+        .as_ref()
+        .and_then(|r| chrono::DateTime::parse_from_rfc3339(&r.started_at).ok())
+        .is_some_and(|dt| dt.date_naive() == chrono::Local::now().date_naive())
 }
 
 /// True unless an encrypted source is missing its saved password (an unattended

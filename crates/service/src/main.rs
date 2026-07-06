@@ -139,7 +139,10 @@ fn run_loop(use_tcp: bool) -> Result<(), Box<dyn std::error::Error>> {
             info!("Ctrl+C received, shutting down...");
             controller.trigger_shutdown();
         });
-        run_main_loop(signal, use_tcp).await
+        // No SCM control handler here (foreground/daemon), so no OS events — keep
+        // the sender alive so the scheduler's receiver simply never yields.
+        let (_os_tx, os_rx) = tokio::sync::mpsc::unbounded_channel::<scheduler::OsEvent>();
+        run_main_loop(signal, use_tcp, os_rx).await
     })
 }
 
@@ -241,6 +244,7 @@ mod elevate {
 pub async fn run_main_loop(
     mut shutdown: ShutdownSignal,
     use_tcp: bool,
+    os_rx: tokio::sync::mpsc::UnboundedReceiver<scheduler::OsEvent>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config = AppConfig::default();
 
@@ -273,13 +277,15 @@ pub async fn run_main_loop(
     ));
     info!("Backup orchestrator ready ({} job(s) loaded)", store.list().len());
 
-    // The scheduler enqueues due jobs on a timer (stops on shutdown).
+    // The scheduler enqueues due jobs on a timer (stops on shutdown) and reacts
+    // to OS events (logon/logoff/shutdown) forwarded from the service handler.
     scheduler::spawn(
         store.clone(),
         queue.clone(),
         job_tx.clone(),
         passwords.clone(),
         shutdown.clone(),
+        os_rx,
     );
 
     let state = AppState::new(config.clone(), store, queue, job_tx, cancel, events, passwords);

@@ -9,11 +9,12 @@ mod imp {
     use tracing::{error, info};
     use windows_service::service::{
         ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,
-        ServiceType,
+        ServiceType, SessionChangeReason,
     };
     use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
     use windows_service::service_dispatcher;
 
+    use crate::scheduler::OsEvent;
     use crate::SERVICE_NAME;
 
     windows_service::define_windows_service!(ffi_service_main, service_main);
@@ -47,6 +48,10 @@ mod imp {
     fn run_service(_arguments: Vec<OsString>) -> Result<(), Box<dyn std::error::Error>> {
         let (shutdown_controller, shutdown_signal) = crate::shutdown::create_shutdown_channel();
 
+        // Forward OS events (logon/logoff/shutdown) from the SCM control handler
+        // to the scheduler so `event`-kind jobs can fire on them.
+        let (os_tx, os_rx) = tokio::sync::mpsc::unbounded_channel::<OsEvent>();
+
         let event_handler = {
             let controller = shutdown_controller;
             move |control_event| -> ServiceControlHandlerResult {
@@ -54,6 +59,26 @@ mod imp {
                     ServiceControl::Stop => {
                         info!("Service stop requested");
                         controller.trigger_shutdown();
+                        ServiceControlHandlerResult::NoError
+                    }
+                    // Best-effort: the service is stopping, so a triggered run may
+                    // not complete — it never touches existing backups.
+                    ServiceControl::Shutdown | ServiceControl::Preshutdown => {
+                        info!("System shutdown");
+                        let _ = os_tx.send(OsEvent::Shutdown);
+                        controller.trigger_shutdown();
+                        ServiceControlHandlerResult::NoError
+                    }
+                    ServiceControl::SessionChange(param) => {
+                        match param.reason {
+                            SessionChangeReason::SessionLogon => {
+                                let _ = os_tx.send(OsEvent::Logon);
+                            }
+                            SessionChangeReason::SessionLogoff => {
+                                let _ = os_tx.send(OsEvent::Logoff);
+                            }
+                            _ => {}
+                        }
                         ServiceControlHandlerResult::NoError
                     }
                     ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
@@ -65,11 +90,14 @@ mod imp {
         let status_handle =
             service_control_handler::register(SERVICE_NAME, event_handler)?;
 
-        // Report Running
+        // Report Running. Accept session-change (logon/logoff) and shutdown so
+        // event-triggered jobs can react to them.
         status_handle.set_service_status(ServiceStatus {
             service_type: ServiceType::OWN_PROCESS,
             current_state: ServiceState::Running,
-            controls_accepted: ServiceControlAccept::STOP,
+            controls_accepted: ServiceControlAccept::STOP
+                | ServiceControlAccept::SHUTDOWN
+                | ServiceControlAccept::SESSION_CHANGE,
             exit_code: ServiceExitCode::Win32(0),
             checkpoint: 0,
             wait_hint: Duration::default(),
@@ -81,7 +109,7 @@ mod imp {
         // Run the main application loop (TCP placeholder until the Windows
         // named-pipe transport lands).
         let runtime = tokio::runtime::Runtime::new()?;
-        runtime.block_on(crate::run_main_loop(shutdown_signal, true))?;
+        runtime.block_on(crate::run_main_loop(shutdown_signal, true, os_rx))?;
 
         // Report Stopped
         status_handle.set_service_status(ServiceStatus {

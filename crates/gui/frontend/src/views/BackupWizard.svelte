@@ -40,13 +40,13 @@
     ['event', 'По событию'], ['none', 'Не планировать'],
   ];
 
-  // Event triggers for kind='event'. Third field = implemented (true) vs pending.
-  const eventTriggers: [string, string, boolean][] = [
-    ['usb_connect', 'После подключения внешнего устройства', false],
-    ['logon', 'При входе пользователя', false],
-    ['logoff', 'При выходе пользователя', false],
-    ['shutdown', 'При завершении работы / перезагрузке', false],
-    ['startup', 'При запуске системы (с задержкой)', true],
+  // Event triggers for kind='event'. Third field = badge text ('' = works).
+  const eventTriggers: [string, string, string][] = [
+    ['usb_connect', 'После подключения внешнего устройства', 'в разработке'],
+    ['logon', 'При входе пользователя', ''],
+    ['logoff', 'При выходе пользователя', ''],
+    ['shutdown', 'При завершении работы / перезагрузке', 'может не успеть при выключении'],
+    ['startup', 'При запуске системы (с задержкой)', ''],
   ];
 
   function toggleDay(d: string) {
@@ -654,10 +654,10 @@
             {#if job.schedule.kind === 'event'}
               <div class="event-opts">
                 <label class="chk"><input type="checkbox" bind:checked={job.schedule.event_once_per_day} /> Только один раз в день</label>
-                {#each eventTriggers as [val, lbl, done]}
+                {#each eventTriggers as [val, lbl, badge]}
                   <label class="radio">
                     <input type="radio" name="evtrig" value={val} checked={job.schedule.event_trigger === val} onchange={() => (job.schedule.event_trigger = val)} />
-                    {lbl}{#if !done}<span class="dev-badge">в разработке</span>{/if}
+                    {lbl}{#if badge}<span class="dev-badge">{badge}</span>{/if}
                   </label>
                   {#if val === 'startup' && job.schedule.event_trigger === 'startup'}
                     <label class="delay-min">Задержка:
@@ -675,7 +675,7 @@
           <div class="hint-sm">Число месяца — только 1–28: 29–31 есть не в каждом месяце, поэтому такие даты не выбираются.</div>
         {/if}
         {#if job.schedule.kind === 'event'}
-          <div class="note">✓ Сейчас срабатывает «При запуске системы» (служба «Own Backup»). Остальные события сохраняются, но пока не срабатывают — нужны системные хуки.</div>
+          <div class="note">✓ Работают: вход/выход пользователя и запуск системы. Завершение работы фиксируется, но копия может не успеть создаться при выключении. Подключение устройства — в разработке. Все триггеры выполняет служба «Own Backup».</div>
         {:else if job.schedule.kind !== 'none'}
           <div class="note">✓ Автозапуск выполняет служба «Own Backup» (должна быть установлена и запущена). Для зашифрованных томов сохраните пароль на шаге «Источник».</div>
         {/if}
