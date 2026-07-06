@@ -82,6 +82,79 @@ impl<R: BlockReader> BlockReader for PatchReader<R> {
     }
 }
 
+/// Wraps a [`BlockReader`] and overlays many byte-level patches at fixed volume
+/// offsets, replacing whatever the inner reader returned there.
+///
+/// Patches are the mechanism by which excluded files are truly *removed* from a
+/// filesystem image (rather than left as zero-filled ghosts): the directory
+/// entry is marked deleted and the allocation-table entries are freed — all in
+/// the copied *metadata* — while the file's own data clusters are dropped from
+/// the used map. The FS driver then sees no directory entry and free clusters:
+/// the file is gone and its space is reclaimed, exactly like a real delete.
+///
+/// Patches MUST NOT overlap each other (each targets a distinct metadata byte
+/// range). They are sorted by offset on construction so each `read_block` can
+/// jump straight to the few patches touching that block instead of scanning all
+/// of them — important because freeing a large file's chain can produce many
+/// small FAT-entry patches.
+pub struct MultiPatchReader<R: BlockReader> {
+    inner: R,
+    /// (offset, bytes), sorted by offset, non-overlapping.
+    patches: Vec<(u64, Vec<u8>)>,
+}
+
+impl<R: BlockReader> MultiPatchReader<R> {
+    pub fn new(inner: R, mut patches: Vec<(u64, Vec<u8>)>) -> Self {
+        patches.sort_by_key(|(off, _)| *off);
+        debug_assert!(
+            patches.windows(2).all(|w| w[0].0 + w[0].1.len() as u64 <= w[1].0),
+            "MultiPatchReader patches must not overlap"
+        );
+        Self { inner, patches }
+    }
+
+    pub fn patch_count(&self) -> usize {
+        self.patches.len()
+    }
+}
+
+impl<R: BlockReader> BlockReader for MultiPatchReader<R> {
+    fn read_block(&mut self, block_number: u64) -> Result<Vec<u8>> {
+        let mut data = self.inner.read_block(block_number)?;
+        let block_start = block_number * self.inner.block_size() as u64;
+        let block_end = block_start + data.len() as u64;
+
+        // Patches are sorted and non-overlapping, so each patch's END offset is
+        // non-decreasing: binary-search for the first patch whose end reaches
+        // into this block, then apply forward while the next patch still starts
+        // before the block ends.
+        let mut i = self
+            .patches
+            .partition_point(|(off, b)| off + b.len() as u64 <= block_start);
+        while i < self.patches.len() && self.patches[i].0 < block_end {
+            let (poff, pbytes) = &self.patches[i];
+            let patch_end = poff + pbytes.len() as u64;
+            let from = (*poff).max(block_start);
+            let to = patch_end.min(block_end);
+            if to > from {
+                let dst = (from - block_start) as usize..(to - block_start) as usize;
+                let src = (from - *poff) as usize..(to - *poff) as usize;
+                data[dst].copy_from_slice(&pbytes[src]);
+            }
+            i += 1;
+        }
+        Ok(data)
+    }
+
+    fn block_size(&self) -> u32 {
+        self.inner.block_size()
+    }
+
+    fn total_blocks(&self) -> u64 {
+        self.inner.total_blocks()
+    }
+}
+
 /// A [`BlockReader`] over any [`RawVolume`].
 ///
 /// Used to read a decrypted (LUKS) volume: the source is a
@@ -293,5 +366,63 @@ mod tests {
         assert_eq!(last.len(), 244);
         assert!(last[..228].iter().all(|&b| b == 7));
         assert!(last[228..].iter().all(|&b| b == 9));
+    }
+
+    #[test]
+    fn multi_patch_reader_applies_disjoint_patches() {
+        // 4 blocks of 256. Patch a byte in block 0, a run spanning blocks 1→2,
+        // and a byte in block 3. Order of construction is intentionally shuffled
+        // to prove the reader sorts them.
+        let data = vec![0u8; 1024];
+        let patches = vec![
+            (800u64, vec![0x33]),          // block 3
+            (10u64, vec![0x11, 0x11]),     // block 0
+            (250u64, vec![0x22; 12]),      // spans block 0/1 boundary at 256
+        ];
+        let mut r = MultiPatchReader::new(MockBlockReader::new(data, 256), patches);
+        assert_eq!(r.patch_count(), 3);
+
+        let b0 = r.read_block(0).unwrap();
+        assert_eq!(&b0[10..12], &[0x11, 0x11]);
+        assert!(b0[250..256].iter().all(|&b| b == 0x22)); // head of the spanning patch
+        assert!(b0[12..250].iter().all(|&b| b == 0));
+
+        let b1 = r.read_block(1).unwrap();
+        assert!(b1[..6].iter().all(|&b| b == 0x22)); // tail of the spanning patch
+        assert!(b1[6..].iter().all(|&b| b == 0));
+
+        let b2 = r.read_block(2).unwrap();
+        assert!(b2.iter().all(|&b| b == 0));
+
+        let b3 = r.read_block(3).unwrap();
+        assert_eq!(b3[800 - 768], 0x33);
+    }
+
+    #[test]
+    fn multi_patch_reader_no_patches_is_passthrough() {
+        let data: Vec<u8> = (0..512u32).map(|i| i as u8).collect();
+        let mut r = MultiPatchReader::new(MockBlockReader::new(data.clone(), 256), Vec::new());
+        assert_eq!(r.read_block(0).unwrap(), &data[0..256]);
+        assert_eq!(r.read_block(1).unwrap(), &data[256..512]);
+    }
+
+    #[test]
+    fn multi_patch_reader_many_small_patches_land_correctly() {
+        // Simulates freeing a fragmented FAT chain: many 4-byte zero patches
+        // scattered across the block. Every one must land at its exact offset.
+        let data = vec![0xFFu8; 4096];
+        let offsets: Vec<u64> = (0..64).map(|k| k * 63).collect(); // 0,63,126,... all in-bounds
+        let patches: Vec<(u64, Vec<u8>)> =
+            offsets.iter().map(|&o| (o, vec![0u8; 4])).collect();
+        let mut r = MultiPatchReader::new(MockBlockReader::new(data, 512), patches);
+        for blk in 0..8 {
+            let b = r.read_block(blk).unwrap();
+            let base = blk * 512;
+            for i in 0..512usize {
+                let abs = base as usize + i;
+                let patched = offsets.iter().any(|&o| (o as usize..o as usize + 4).contains(&abs));
+                assert_eq!(b[i], if patched { 0 } else { 0xFF }, "byte {abs}");
+            }
+        }
     }
 }

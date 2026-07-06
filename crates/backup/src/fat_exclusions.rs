@@ -28,6 +28,25 @@ pub struct FatExclusionScan {
     pub entries_scanned: u64,
     pub bytes_excluded: u64,
     pub categories: CategorySizes,
+    /// Byte-level metadata edits that make each excluded file truly *disappear*
+    /// (rather than remain a zero-filled ghost): the directory entry is marked
+    /// deleted and its allocation-table entries are freed. Applied to the copied
+    /// image via [`MultiPatchReader`](crate::block_reader::MultiPatchReader).
+    /// Offsets are volume-relative; patches never overlap.
+    pub patches: Vec<(u64, Vec<u8>)>,
+}
+
+impl FatExclusionScan {
+    fn empty() -> Self {
+        FatExclusionScan {
+            ranges: ByteRanges::new(),
+            files_excluded: 0,
+            entries_scanned: 0,
+            bytes_excluded: 0,
+            categories: CategorySizes::default(),
+            patches: Vec::new(),
+        }
+    }
 }
 
 const ATTR_DIRECTORY: u8 = 0x10;
@@ -42,13 +61,7 @@ pub fn scan_fat32_exclusions(
     patterns: &[String],
     mut tick: impl FnMut(u64) -> Result<()>,
 ) -> Result<FatExclusionScan> {
-    let mut scan = FatExclusionScan {
-        ranges: ByteRanges::new(),
-        files_excluded: 0,
-        entries_scanned: 0,
-        bytes_excluded: 0,
-        categories: CategorySizes::default(),
-    };
+    let mut scan = FatExclusionScan::empty();
     let parsed = parse_patterns(patterns);
     if parsed.is_empty() {
         scan.ranges.finalize();
@@ -60,6 +73,10 @@ pub fn scan_fat32_exclusions(
     let geom = parse_fat32_geometry(&boot, vol.len())?;
     let mut fat = vec![0u8; geom.fat_bytes as usize];
     vol.read_at(geom.fat_offset, &mut fat)?;
+
+    // Cluster numbers freed by the matched files' chains — turned into FAT-entry
+    // zeroing patches (in every FAT copy) once the whole tree is walked.
+    let mut freed_clusters: Vec<u64> = Vec::new();
 
     // (directory first cluster, lowercased path components, subtree excluded)
     let mut stack: Vec<(u64, Vec<String>, bool)> = vec![(geom.root_cluster, Vec::new(), false)];
@@ -80,19 +97,54 @@ pub fn scan_fat32_exclusions(
             subtree_excluded,
             &parsed,
             &mut scan,
+            &mut freed_clusters,
             &mut stack,
             &mut tick,
         )?;
     }
+
+    // Free every excluded cluster's FAT entry in all FAT copies.
+    append_fat32_free_patches(&geom, &mut freed_clusters, &mut scan.patches);
 
     scan.ranges.finalize();
     info!(
         files = scan.files_excluded,
         entries = scan.entries_scanned,
         excluded_mb = scan.bytes_excluded / (1024 * 1024),
+        patches = scan.patches.len(),
         "FAT32 exclusion scan complete"
     );
     Ok(scan)
+}
+
+/// Coalesce the sorted-unique freed cluster numbers into runs and emit one
+/// zero-fill patch per run per FAT copy (FAT entry for cluster N is 4 bytes at
+/// `fat_offset + k*fat_bytes + N*4`). Consumes/sorts `freed` in place.
+fn append_fat32_free_patches(
+    geom: &Fat32Geometry,
+    freed: &mut Vec<u64>,
+    patches: &mut Vec<(u64, Vec<u8>)>,
+) {
+    if freed.is_empty() {
+        return;
+    }
+    freed.sort_unstable();
+    freed.dedup();
+    let mut i = 0;
+    while i < freed.len() {
+        let start = freed[i];
+        let mut j = i;
+        while j + 1 < freed.len() && freed[j + 1] == freed[j] + 1 {
+            j += 1;
+        }
+        let run_len = (j - i + 1) as u64;
+        let zeros = vec![0u8; (run_len * 4) as usize];
+        for k in 0..geom.num_fats {
+            let off = geom.fat_offset + k * geom.fat_bytes + start * 4;
+            patches.push((off, zeros.clone()));
+        }
+        i = j + 1;
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -106,20 +158,27 @@ fn walk_directory(
     subtree_excluded: bool,
     parsed: &[crate::exclusions::ExclusionPattern],
     scan: &mut FatExclusionScan,
+    freed_clusters: &mut Vec<u64>,
     stack: &mut Vec<(u64, Vec<String>, bool)>,
     tick: &mut impl FnMut(u64) -> Result<()>,
 ) -> Result<()> {
+    // Running long-name fragments and their on-disk byte offsets (kept across
+    // cluster reads so an entry set spanning a cluster boundary still works).
     let mut lfn: Vec<(u8, Vec<u16>)> = Vec::new();
+    let mut lfn_offsets: Vec<u64> = Vec::new();
     let mut cluster = dir_cluster;
     let mut guard = 0u64;
 
     'dir: while (2..geom.cluster_count + 2).contains(&cluster) {
-        vol.read_at(cluster_offset(geom, cluster), buf)?;
-        for rec in buf.chunks_exact(32) {
+        let base = cluster_offset(geom, cluster);
+        vol.read_at(base, buf)?;
+        for (i, rec) in buf.chunks_exact(32).enumerate() {
+            let rec_offset = base + (i as u64) * 32;
             match rec[0] {
                 0x00 => break 'dir,          // end of directory
                 0xE5 => {
                     lfn.clear();
+                    lfn_offsets.clear();
                     continue;
                 }
                 _ => {}
@@ -128,10 +187,12 @@ fn walk_directory(
             if attr == ATTR_LFN {
                 // Long-name fragment: sequence in bits 0..4, chars are UTF-16.
                 lfn.push((rec[0] & 0x1F, lfn_chars(rec)));
+                lfn_offsets.push(rec_offset);
                 continue;
             }
             if attr & ATTR_VOLUME_ID != 0 || rec[0] == b'.' {
                 lfn.clear(); // volume label or "." / ".." — not a real entry
+                lfn_offsets.clear();
                 continue;
             }
 
@@ -141,6 +202,8 @@ fn walk_directory(
                 assemble_lfn(&mut lfn)
             };
             lfn.clear();
+            // The LFN entries belonging to THIS 8.3 record (in disk order).
+            let entry_lfn_offsets = std::mem::take(&mut lfn_offsets);
 
             scan.entries_scanned += 1;
             if scan.entries_scanned % 512 == 0 {
@@ -158,15 +221,19 @@ fn walk_directory(
                 if (2..geom.cluster_count + 2).contains(&first_cluster) {
                     stack.push((first_cluster, rel_child, matched));
                 }
-            } else {
-                let size = u32le(rec, 28);
-                if matched {
-                    let bytes = file_chain_ranges(geom, fat, first_cluster, &mut scan.ranges);
-                    scan.files_excluded += 1;
-                    scan.bytes_excluded += bytes;
-                } else {
-                    scan.categories.add(&name_lower, size);
+            } else if matched {
+                // True removal: mark the 8.3 record (and its long-name entries)
+                // deleted, and free the file's cluster chain. The data clusters
+                // are separately dropped from the used map + zeroed.
+                scan.patches.push((rec_offset, vec![0xE5]));
+                for off in entry_lfn_offsets {
+                    scan.patches.push((off, vec![0xE5]));
                 }
+                let bytes = file_chain_ranges(geom, fat, first_cluster, &mut scan.ranges, freed_clusters);
+                scan.files_excluded += 1;
+                scan.bytes_excluded += bytes;
+            } else {
+                scan.categories.add(&name_lower, u32le(rec, 28));
             }
         }
 
@@ -179,14 +246,15 @@ fn walk_directory(
     Ok(())
 }
 
-/// Add every cluster of a file's FAT chain (from `first`) to `ranges`; returns
-/// the allocated byte count. Bounded by the cluster count so a corrupt/looping
-/// chain can never spin forever.
+/// Add every cluster of a file's FAT chain (from `first`) to `ranges` and its
+/// cluster number to `freed`; returns the allocated byte count. Bounded by the
+/// cluster count so a corrupt/looping chain can never spin forever.
 fn file_chain_ranges(
     geom: &Fat32Geometry,
     fat: &[u8],
     first: u64,
     ranges: &mut ByteRanges,
+    freed: &mut Vec<u64>,
 ) -> u64 {
     let mut c = first;
     let mut bytes = 0u64;
@@ -194,6 +262,7 @@ fn file_chain_ranges(
     while (2..geom.cluster_count + 2).contains(&c) {
         let start = cluster_offset(geom, c);
         ranges.add(start, start + geom.cluster_size as u64);
+        freed.push(c);
         bytes += geom.cluster_size as u64;
         c = fat_next(fat, c);
         guard += 1;
@@ -323,13 +392,7 @@ pub fn scan_exfat_exclusions(
 ) -> Result<FatExclusionScan> {
     use crate::fat_map::parse_exfat_geometry;
 
-    let mut scan = FatExclusionScan {
-        ranges: ByteRanges::new(),
-        files_excluded: 0,
-        entries_scanned: 0,
-        bytes_excluded: 0,
-        categories: CategorySizes::default(),
-    };
+    let mut scan = FatExclusionScan::empty();
     let parsed = parse_patterns(patterns);
     if parsed.is_empty() {
         scan.ranges.finalize();
@@ -596,6 +659,13 @@ mod tests {
         scan.ranges.iter().collect()
     }
 
+    fn apply_patches(img: &mut [u8], patches: &[(u64, Vec<u8>)]) {
+        for (off, bytes) in patches {
+            let o = *off as usize;
+            img[o..o + bytes.len()].copy_from_slice(bytes);
+        }
+    }
+
     #[test]
     fn excludes_by_extension() {
         let mut vol = fat32_tree();
@@ -607,6 +677,73 @@ mod tests {
         assert_eq!(ranges_of(&scan), vec![(junk, junk + 512)]);
         // keep.bin stays and is categorized.
         assert!(scan.categories.total() > 0);
+    }
+
+    #[test]
+    fn fat32_removal_deletes_entry_and_frees_chain() {
+        let mut vol = fat32_tree();
+        let scan = scan_fat32_exclusions(&mut vol, &["*.tmp".into()], |_| Ok(())).unwrap();
+        assert_eq!(scan.files_excluded, 1);
+        assert!(!scan.patches.is_empty(), "removal must produce metadata patches");
+
+        // Apply the patches to a copy of the image (the source is never touched).
+        let mut img = vol.0.clone();
+        apply_patches(&mut img, &scan.patches);
+
+        // junk.tmp is the 2nd root entry (root cluster 2) → marked deleted.
+        let data = 8 * 512usize; // (reserved 4 + fatsz 4) * 512, single FAT
+        let junk_entry = data + 32;
+        assert_eq!(img[junk_entry], 0xE5, "directory entry should be deleted");
+
+        // Its FAT entry (cluster 6) is freed; keep.bin (cluster 5) is untouched.
+        let fat_off = 4 * 512usize;
+        let fat_ent = |img: &[u8], n: usize| {
+            u32::from_le_bytes(img[fat_off + n * 4..fat_off + n * 4 + 4].try_into().unwrap())
+                & 0x0FFF_FFFF
+        };
+        assert_eq!(fat_ent(&img, 6), 0, "freed cluster's FAT entry should be 0");
+        assert_eq!(fat_ent(&img, 5), 0x0FFF_FFFF, "keep.bin's chain intact");
+
+        // Re-scanning the patched image no longer finds the file.
+        let mut vol2 = MemVolume(img.clone());
+        let rescan = scan_fat32_exclusions(&mut vol2, &["*.tmp".into()], |_| Ok(())).unwrap();
+        assert_eq!(rescan.files_excluded, 0, "file must be gone after removal");
+
+        // The used-cluster map now shows the freed cluster's block as unused.
+        use crate::used_sectors::UsedSectorMap;
+        let map = crate::fat_map::build_fat_used_map(&mut MemVolume(img), 512).unwrap();
+        let c6_block = (data as u64 + (6 - 2) * 512) / 512;
+        assert!(!map.is_block_used(c6_block), "freed cluster's block must be unused");
+    }
+
+    #[test]
+    fn free_patches_cover_all_fat_copies_and_coalesce_runs() {
+        let geom = Fat32Geometry {
+            bytes_per_sector: 512,
+            cluster_size: 512,
+            cluster_count: 100,
+            data_start: 100 * 512,
+            fat_offset: 4 * 512,
+            fat_bytes: 8 * 512,
+            num_fats: 2,
+            root_cluster: 2,
+        };
+        // A contiguous run 10..=12 plus a singleton 20 (order/dup intentional).
+        let mut freed = vec![12u64, 10, 11, 20, 10];
+        let mut patches = Vec::new();
+        append_fat32_free_patches(&geom, &mut freed, &mut patches);
+        // 2 runs × 2 FAT copies.
+        assert_eq!(patches.len(), 4);
+        let run0 = geom.fat_offset + 10 * 4;
+        let run1 = geom.fat_offset + geom.fat_bytes + 10 * 4;
+        assert!(patches
+            .iter()
+            .any(|(o, b)| *o == run0 && b.len() == 12 && b.iter().all(|&x| x == 0)));
+        assert!(patches.iter().any(|(o, b)| *o == run1 && b.len() == 12));
+        let one0 = geom.fat_offset + 20 * 4;
+        let one1 = geom.fat_offset + geom.fat_bytes + 20 * 4;
+        assert!(patches.iter().any(|(o, b)| *o == one0 && b.len() == 4));
+        assert!(patches.iter().any(|(o, b)| *o == one1 && b.len() == 4));
     }
 
     #[test]
@@ -626,6 +763,102 @@ mod tests {
         let scan = scan_fat32_exclusions(&mut vol, &[], |_| Ok(())).unwrap();
         assert_eq!(scan.files_excluded, 0);
         assert!(scan.ranges.is_empty());
+    }
+
+    /// End-to-end on a REAL FAT32 image built with dosfstools + mtools. This is
+    /// the gold-standard check the plan calls for: `fsck.fat` validates BOTH FAT
+    /// copies agree (catches zeroing only one) and that no clusters were left
+    /// lost (catches deleting the entry without freeing the chain); `mdir`
+    /// confirms the excluded file is gone and the kept file remains. Ignored by
+    /// default (needs the tools); run with `cargo test -- --ignored`.
+    #[test]
+    #[ignore = "needs dosfstools + mtools; run with --ignored"]
+    fn fat32_removal_end_to_end_with_real_tools() {
+        use std::process::Command;
+
+        fn have(tool: &str) -> bool {
+            Command::new(tool).arg("--help").output().is_ok()
+        }
+        for t in ["mkfs.fat", "fsck.fat", "mcopy", "mdir", "mmd"] {
+            if !have(t) {
+                eprintln!("SKIP fat32 e2e: {t} not installed");
+                return;
+            }
+        }
+
+        let run = |cmd: &mut Command| -> std::process::Output {
+            let out = cmd.output().expect("spawn tool");
+            assert!(
+                out.status.success(),
+                "command failed {:?}:\nstdout: {}\nstderr: {}",
+                cmd,
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            out
+        };
+
+        let dir = std::env::temp_dir().join(format!("obk-fat32-e2e-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = dir.join("f.img");
+        let imgs = img.to_str().unwrap();
+
+        // 64 MiB FAT32 (mkfs.fat -F32 makes 2 FAT copies by default → the patch
+        // must zero both, which fsck.fat cross-checks).
+        run(Command::new("mkfs.fat").args(["-F", "32", "-C", imgs, "65536"]));
+
+        // Populate: keep.bin at root, junk.tmp inside a temp subdirectory.
+        let keep = dir.join("keep.bin");
+        let junk = dir.join("junk.tmp");
+        std::fs::write(&keep, vec![0xABu8; 200 * 1024]).unwrap();
+        std::fs::write(&junk, vec![0xCDu8; 300 * 1024]).unwrap();
+        run(Command::new("mmd").args(["-i", imgs, "::/temp"]));
+        run(Command::new("mcopy").args(["-i", imgs, keep.to_str().unwrap(), "::/keep.bin"]));
+        run(Command::new("mcopy").args(["-i", imgs, junk.to_str().unwrap(), "::/temp/junk.tmp"]));
+
+        // --- Our removal: scan, then apply zeroing + metadata patches to a copy.
+        let mut bytes = std::fs::read(&img).unwrap();
+        let scan = {
+            let mut vol = MemVolume(bytes.clone());
+            scan_fat_exclusions(&mut vol, &["*.tmp".into()], |_| Ok(())).unwrap()
+        };
+        assert_eq!(scan.files_excluded, 1, "junk.tmp should have been excluded");
+        // Excluded data clusters are dropped from the image (sparse VHDX zero) —
+        // mirror that by zeroing them here.
+        for (s, e) in scan.ranges.iter() {
+            bytes[s as usize..e as usize].fill(0);
+        }
+        apply_patches(&mut bytes, &scan.patches);
+        let out = dir.join("f.out.img");
+        let outs = out.to_str().unwrap();
+        std::fs::write(&out, &bytes).unwrap();
+
+        // --- Validate: fsck.fat clean (both FATs agree, no lost clusters).
+        let fsck = Command::new("fsck.fat").args(["-n", outs]).output().unwrap();
+        let report = format!(
+            "{}{}",
+            String::from_utf8_lossy(&fsck.stdout),
+            String::from_utf8_lossy(&fsck.stderr)
+        )
+        .to_lowercase();
+        for bad in ["lost cluster", "fats differ", "orphan", "truncat", "bad cluster"] {
+            assert!(!report.contains(bad), "fsck.fat reported '{bad}':\n{report}");
+        }
+
+        // --- mdir: junk.tmp gone from ::/temp, keep.bin still at root.
+        let temp_ls = String::from_utf8_lossy(
+            &run(Command::new("mdir").args(["-i", outs, "::/temp"])).stdout,
+        )
+        .to_uppercase();
+        assert!(!temp_ls.contains("JUNK"), "junk.tmp still listed:\n{temp_ls}");
+        let root_ls = String::from_utf8_lossy(
+            &run(Command::new("mdir").args(["-i", outs, "::/"])).stdout,
+        )
+        .to_uppercase();
+        assert!(root_ls.contains("KEEP"), "keep.bin should still be present:\n{root_ls}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

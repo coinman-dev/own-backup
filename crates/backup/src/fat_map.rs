@@ -101,7 +101,10 @@ pub struct Fat32Geometry {
     pub data_start: u64,
     /// Byte offset of the first FAT.
     pub fat_offset: u64,
+    /// Size of ONE FAT copy in bytes; FAT #k starts at `fat_offset + k*fat_bytes`.
     pub fat_bytes: u64,
+    /// Number of FAT copies (`BPB_NumFATs`) — a freed chain must be zeroed in all.
+    pub num_fats: u64,
     /// First cluster of the root directory (`BPB_RootClus`).
     pub root_cluster: u64,
 }
@@ -165,6 +168,7 @@ pub fn parse_fat32_geometry(boot: &[u8], vol_len: u64) -> Result<Fat32Geometry> 
         data_start: data_start_sec * bps,
         fat_offset: reserved * bps,
         fat_bytes,
+        num_fats: nfats,
         root_cluster,
     })
 }

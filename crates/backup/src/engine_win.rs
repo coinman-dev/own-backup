@@ -445,6 +445,10 @@ fn backup_volume_inner(
     let mut excluded_files = 0u64;
     let mut excluded_bytes = 0u64;
     let mut zero_ranges: Option<ByteRanges> = None;
+    // Byte-level metadata edits that make excluded FAT/exFAT files truly
+    // disappear (delete the directory entry, free the allocation table). Empty
+    // for NTFS/ReFS, which still use zeroing for now.
+    let mut fat_patches: Vec<(u64, Vec<u8>)> = Vec::new();
     let mut categories: Option<crate::exclusions::CategorySizes> = None;
     // "prepare"-phase progress tick (blocks_total == 0 marks it for the UI).
     let prepare_tick = |entries: u64| {
@@ -488,6 +492,9 @@ fn backup_volume_inner(
                 crate::fat_map::build_fat_used_map_excl(&mut dev2, req.block_size, Some(&scan.ranges))?;
             fat_map = Some(rebuilt);
             zero_ranges = Some(scan.ranges);
+            // Metadata patches: delete the directory entries + free the FAT
+            // chains so the files vanish instead of remaining zero-filled ghosts.
+            fat_patches = scan.patches;
         }
     } else if !req.exclusion_patterns.is_empty() {
         warn!("file exclusions are supported on NTFS/ReFS and FAT32 in smart mode — ignored for this run");
@@ -610,6 +617,17 @@ fn backup_volume_inner(
     };
     if let Some(ranges) = zero_ranges {
         reader = Box::new(ZeroingBlockReader::new(reader, ranges));
+    }
+    // FAT/exFAT true-removal metadata patches (directory entries + allocation
+    // table). Disjoint from the zeroed data clusters and from the NTFS boot-
+    // sector patch below (which only fires for NTFS sources), so ordering is
+    // immaterial — the patches win on their own byte ranges either way.
+    if !fat_patches.is_empty() {
+        info!(patches = fat_patches.len(), "Applying FAT/exFAT file-removal metadata patches");
+        reader = Box::new(crate::block_reader::MultiPatchReader::new(
+            reader,
+            std::mem::take(&mut fat_patches),
+        ));
     }
 
     // The NTFS backup boot sector lives at TotalSectors × BytesPerSector —
