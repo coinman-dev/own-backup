@@ -439,9 +439,25 @@ fn backup_volume_inner(
     };
 
     // --- File exclusions (phase 3) ---
-    // NTFS/ReFS: FSCTL_GET_RETRIEVAL_POINTERS per matched file. FAT32: walk the
-    // raw directory tree ourselves (no FSCTL / no ACLs) and rebuild the map with
-    // the matched clusters excluded.
+    // Two removal models, by filesystem:
+    //
+    // * FAT32/exFAT — TRUE removal (like Acronis): the raw directory tree is
+    //   walked ourselves and the matched files' metadata is patched out of the
+    //   image (directory entry deleted, allocation table / bitmap freed), so a
+    //   restored/mounted volume shows no file and reclaims the space. The
+    //   simple, fully-specified on-disk structures make this safe and testable.
+    //
+    // * NTFS/ReFS — CONTENT ZEROING only (as decided in CLAUDE.md: "exclusions
+    //   via FSCTL_GET_RETRIEVAL_POINTERS (clusters zeroed)"). The matched
+    //   clusters are dropped from the used map and zeroed, so the file's DATA
+    //   never leaves the machine, but its catalog entry survives — it appears as
+    //   a zero-filled file of the original size. True removal would mean editing
+    //   the $MFT record, $Bitmap, $MFT:$Bitmap AND rebalancing the parent
+    //   directory's B+-tree index ($INDEX_ROOT/$INDEX_ALLOCATION) — i.e. an
+    //   NTFS metadata writer, which the project deliberately forbids ("no NTFS
+    //   parser", CLAUDE.md) because a wrong index edit corrupts the catalog and
+    //   makes the restored volume unreadable. ReFS is closed/undocumented, so
+    //   zeroing is the only safe option there regardless.
     let mut excluded_files = 0u64;
     let mut excluded_bytes = 0u64;
     let mut zero_ranges: Option<ByteRanges> = None;
