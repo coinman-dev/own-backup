@@ -175,10 +175,13 @@ export interface ScheduleConfig {
   kind: 'none' | 'daily' | 'weekly' | 'monthly' | 'event' | 'nonstop';
   days: string[];
   time: string;
+  /** Day of month for `monthly`, 1–28 (limited so it exists in every month). */
+  day_of_month: number;
   only_when_locked: boolean;
   wake_to_run: boolean;
   prevent_sleep: boolean;
   run_missed: boolean;
+  /** Minutes after system/service start before catching up missed runs, 1–60. */
   missed_delay_min: number;
 }
 

@@ -35,10 +35,15 @@ pub struct ScheduleConfig {
     pub days: Vec<String>,
     /// "HH:MM"
     pub time: String,
+    /// Day of month for `monthly` (1–28 only, so it exists in every month —
+    /// avoids the "31st never fires in February" trap).
+    pub day_of_month: u32,
     pub only_when_locked: bool,
     pub wake_to_run: bool,
     pub prevent_sleep: bool,
     pub run_missed: bool,
+    /// Minutes to wait after the service (≈ system) starts before catching up
+    /// missed runs — lets the machine settle after boot. 1–60.
     pub missed_delay_min: u32,
 }
 
@@ -48,11 +53,12 @@ impl Default for ScheduleConfig {
             kind: "none".into(),
             days: vec!["mon".into(), "wed".into(), "fri".into()],
             time: "14:00".into(),
+            day_of_month: 1,
             only_when_locked: false,
             wake_to_run: true,
             prevent_sleep: true,
             run_missed: true,
-            missed_delay_min: 0,
+            missed_delay_min: 1,
         }
     }
 }

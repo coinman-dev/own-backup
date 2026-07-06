@@ -31,13 +31,17 @@ pub fn spawn(
 ) {
     info!("Scheduler started (tick {}s)", TICK.as_secs());
     tokio::spawn(async move {
-        // Let the store/worker settle, then the first tick handles any missed
-        // slots (run_missed) right away.
+        // Service start ≈ system boot (auto-start service). `uptime` measured
+        // from here gates each job's missed-run catch-up (`missed_delay_min`).
+        let started = tokio::time::Instant::now();
+        // Let the store/worker settle before the first tick.
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         let mut interval = tokio::time::interval(TICK);
         loop {
             tokio::select! {
-                _ = interval.tick() => tick(&store, &queue, &job_tx, &passwords),
+                _ = interval.tick() => {
+                    tick(&store, &queue, &job_tx, &passwords, started.elapsed());
+                }
                 _ = shutdown.wait_for_shutdown() => {
                     info!("Scheduler stopping");
                     break;
@@ -47,7 +51,13 @@ pub fn spawn(
     });
 }
 
-fn tick(store: &JobStore, queue: &RunQueue, job_tx: &UnboundedSender<String>, passwords: &PasswordStore) {
+fn tick(
+    store: &JobStore,
+    queue: &RunQueue,
+    job_tx: &UnboundedSender<String>,
+    passwords: &PasswordStore,
+    uptime: std::time::Duration,
+) {
     let now = chrono::Local::now().fixed_offset();
     // A slot counts as "fresh" for two ticks, so one is never missed between
     // ticks even without catch-up.
@@ -65,7 +75,13 @@ fn tick(store: &JobStore, queue: &RunQueue, job_tx: &UnboundedSender<String>, pa
             .as_ref()
             .and_then(|r| chrono::DateTime::parse_from_rfc3339(&r.started_at).ok());
 
-        if own_backup_scheduler::is_due(&sched, now, last_fired, job.schedule.run_missed, fresh) {
+        // Catching up missed runs waits `missed_delay_min` after startup so the
+        // machine can settle after boot; on-time slots still fire immediately.
+        let grace_passed =
+            uptime >= std::time::Duration::from_secs(job.schedule.missed_delay_min as u64 * 60);
+        let run_missed = job.schedule.run_missed && grace_passed;
+
+        if own_backup_scheduler::is_due(&sched, now, last_fired, run_missed, fresh) {
             // Gate encrypted jobs: without a saved password the run cannot
             // decrypt the volume unattended, so skip it (the user must save a
             // password to enable scheduling).

@@ -37,7 +37,7 @@
   ];
   const scheduleKinds = [
     ['daily', 'Ежедневно'], ['weekly', 'Еженедельно'], ['monthly', 'Ежемесячно'],
-    ['event', 'По событию'], ['nonstop', 'Непрерывно'], ['none', 'Не планировать'],
+    ['event', 'По событию'], ['none', 'Не планировать'],
   ];
 
   function toggleDay(d: string) {
@@ -630,13 +630,25 @@
                 {/each}
               </div>
             {/if}
+            {#if job.schedule.kind === 'monthly'}
+              <label class="at">Число
+                <select bind:value={job.schedule.day_of_month}>
+                  {#each Array.from({ length: 28 }, (_, i) => i + 1) as d}
+                    <option value={d}>{d}</option>
+                  {/each}
+                </select>
+              </label>
+            {/if}
             {#if job.schedule.kind === 'daily' || job.schedule.kind === 'weekly' || job.schedule.kind === 'monthly'}
               <label class="at">В <input type="time" bind:value={job.schedule.time} /></label>
             {/if}
           </div>
         </div>
-        {#if job.schedule.kind === 'event' || job.schedule.kind === 'nonstop'}
-          <div class="dev-note">⚙ «По событию» и «Непрерывно» — в разработке (сохраняется, но пока не срабатывает). Работают: Ежедневно / Еженедельно / Ежемесячно.</div>
+        {#if job.schedule.kind === 'monthly'}
+          <div class="hint-sm">Число месяца — только 1–28: 29–31 есть не в каждом месяце, поэтому такие даты не выбираются.</div>
+        {/if}
+        {#if job.schedule.kind === 'event'}
+          <div class="dev-note">⚙ «По событию» — в разработке (сохраняется, но пока не срабатывает). Работают: Ежедневно / Еженедельно / Ежемесячно.</div>
         {:else if job.schedule.kind !== 'none'}
           <div class="note">✓ Автозапуск выполняет служба «Own Backup» (должна быть установлена и запущена). Для зашифрованных томов сохраните пароль на шаге «Источник».</div>
         {/if}
@@ -644,7 +656,16 @@
           <label class="chk"><input type="checkbox" bind:checked={job.schedule.only_when_locked} onchange={stub} /> Копировать только если компьютер заблокирован</label>
           <label class="chk"><input type="checkbox" bind:checked={job.schedule.wake_to_run} onchange={stub} /> Пробуждать компьютер из спящего режима</label>
           <label class="chk"><input type="checkbox" bind:checked={job.schedule.prevent_sleep} onchange={stub} /> Предотвращать переход в спящий режим</label>
-          <label class="chk"><input type="checkbox" bind:checked={job.schedule.run_missed} /> Выполнять пропущенные операции при запуске</label>
+          <label class="chk"><input type="checkbox" bind:checked={job.schedule.run_missed} /> Выполнять пропущенные операции при запуске системы с задержкой (в минутах)</label>
+          {#if job.schedule.run_missed}
+            <label class="delay-min">Задержка после запуска системы:
+              <select bind:value={job.schedule.missed_delay_min}>
+                {#each Array.from({ length: 60 }, (_, i) => i + 1) as mn}
+                  <option value={mn}>{mn}</option>
+                {/each}
+              </select> мин
+            </label>
+          {/if}
         </div>
       {/if}
 
@@ -819,6 +840,9 @@
   .day { padding: 9px 12px; border: none; border-right: 1px solid var(--border); background: #fff; color: var(--head); font-size: 13px; cursor: pointer; font-family: var(--font); }
   .day.on { background: var(--primary); color: #fff; }
   .at { display: flex; align-items: center; gap: 10px; font-size: 14px; color: var(--head); }
+  .hint-sm { font-size: 12px; color: var(--text-muted); margin-top: 8px; }
+  .delay-min { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--head); margin-left: 26px; }
+  .delay-min select, .at select { padding: 3px 6px; }
   .at input { padding: 7px 10px; border: 1px solid var(--border); border-radius: 4px; }
   .adv-schedule { margin-top: 20px; display: flex; flex-direction: column; gap: 12px; }
   .chk { display: flex; align-items: center; gap: 9px; font-size: 14px; color: var(--head); cursor: pointer; }

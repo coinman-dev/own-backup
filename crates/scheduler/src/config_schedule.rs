@@ -47,9 +47,12 @@ pub fn schedule_to_cron(cfg: &ScheduleConfig) -> Option<String> {
                 Some(format!("0 {m} {h} * * {} *", dows.join(",")))
             }
         }
-        // Same day-of-month every month (the 1st). A configurable day-of-month
-        // can come later — the model has no field for it yet.
-        "monthly" => Some(format!("0 {m} {h} 1 * * *")),
+        // Configurable day-of-month, clamped to 1–28 so the slot exists in every
+        // month (a "31" would silently skip Feb/Apr/… — the UI limits it too).
+        "monthly" => {
+            let dom = cfg.day_of_month.clamp(1, 28);
+            Some(format!("0 {m} {h} {dom} * * *"))
+        }
         _ => None,
     }
 }
