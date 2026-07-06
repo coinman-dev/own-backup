@@ -172,6 +172,10 @@ pub fn backup_volume(
         }
     }
 
+    // Enable SeBackupPrivilege so the exclusion scan can read/list ACL-protected
+    // paths (System Volume Information, protected app data). Best-effort.
+    crate::privileges_win::enable_backup_privileges();
+
     let result = backup_volume_inner(req, progress);
     if result.is_err() {
         // Best-effort cleanup of a partial image.
@@ -434,29 +438,31 @@ fn backup_volume_inner(
         }
     };
 
-    // --- File exclusions (phase 3; smart NTFS mode only) ---
+    // --- File exclusions (phase 3) ---
+    // NTFS/ReFS: FSCTL_GET_RETRIEVAL_POINTERS per matched file. FAT32: walk the
+    // raw directory tree ourselves (no FSCTL / no ACLs) and rebuild the map with
+    // the matched clusters excluded.
     let mut excluded_files = 0u64;
     let mut excluded_bytes = 0u64;
     let mut zero_ranges: Option<ByteRanges> = None;
     let mut categories: Option<crate::exclusions::CategorySizes> = None;
+    // "prepare"-phase progress tick (blocks_total == 0 marks it for the UI).
+    let prepare_tick = |entries: u64| {
+        progress(&BackupProgress {
+            backup_id: "prepare".into(),
+            status: BackupStatus::Running,
+            blocks_done: entries,
+            blocks_total: 0,
+            bytes_written: 0,
+            speed_bps: 0,
+        })
+    };
+    let fat32_exclusions =
+        fat_map.as_ref().is_some_and(|f| f.filesystem == "FAT32") && !req.exclusion_patterns.is_empty();
     if let Some(map) = ntfs_map.as_mut() {
         if !req.exclusion_patterns.is_empty() {
-            let scan = collect_excluded_ranges(
-                &read_path,
-                map.cluster_size(),
-                &req.exclusion_patterns,
-                |entries| {
-                    // blocks_total == 0 marks the "prepare" phase for the UI.
-                    progress(&BackupProgress {
-                        backup_id: "prepare".into(),
-                        status: BackupStatus::Running,
-                        blocks_done: entries,
-                        blocks_total: 0,
-                        bytes_written: 0,
-                        speed_bps: 0,
-                    })
-                },
-            )?;
+            let scan =
+                collect_excluded_ranges(&read_path, map.cluster_size(), &req.exclusion_patterns, prepare_tick)?;
             excluded_files = scan.files_excluded;
             excluded_bytes = scan.bytes_excluded;
             categories = Some(scan.categories);
@@ -466,8 +472,23 @@ fn backup_volume_inner(
             }
         }
         map.release_bitmap();
+    } else if fat32_exclusions {
+        let mut dev = WinRawDevice::open_read(&read_path)?;
+        let scan =
+            crate::fat_exclusions::scan_fat32_exclusions(&mut dev, &req.exclusion_patterns, prepare_tick)?;
+        excluded_files = scan.files_excluded;
+        excluded_bytes = scan.bytes_excluded;
+        categories = Some(scan.categories);
+        if !scan.ranges.is_empty() {
+            // Rebuild the map so excluded clusters drop out (cluster-level).
+            let mut dev2 = WinRawDevice::open_read(&read_path)?;
+            let rebuilt =
+                crate::fat_map::build_fat_used_map_excl(&mut dev2, req.block_size, Some(&scan.ranges))?;
+            fat_map = Some(rebuilt);
+            zero_ranges = Some(scan.ranges);
+        }
     } else if !req.exclusion_patterns.is_empty() {
-        warn!("file exclusions need the volume-bitmap map (NTFS/ReFS) in smart mode — ignored for this run");
+        warn!("file exclusions are supported on NTFS/ReFS and FAT32 in smart mode — ignored for this run");
     }
 
     let used: Box<dyn UsedSectorMap> = if let Some(map) = luks_used {

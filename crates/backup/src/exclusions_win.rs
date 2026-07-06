@@ -17,10 +17,13 @@ use std::path::{Path, PathBuf};
 
 use tracing::{info, trace, warn};
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{CloseHandle, ERROR_HANDLE_EOF, ERROR_MORE_DATA, HANDLE};
+use windows::Win32::Foundation::{
+    CloseHandle, ERROR_HANDLE_EOF, ERROR_MORE_DATA, ERROR_NO_MORE_FILES, HANDLE,
+};
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    CreateFileW, FileFullDirectoryInfo, GetFileInformationByHandleEx, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows::Win32::System::Ioctl::{FSCTL_GET_RETRIEVAL_POINTERS, STARTING_VCN_INPUT_BUFFER};
 use windows::Win32::System::IO::DeviceIoControl;
@@ -31,6 +34,94 @@ use crate::exclusions::{parse_patterns, ByteRanges, CategorySizes};
 use crate::win_device::to_wide;
 
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+/// Right needed to enumerate a directory's contents.
+const FILE_LIST_DIRECTORY: u32 = 0x0001;
+
+/// One directory entry from [`list_dir_backup`].
+struct DirEntryInfo {
+    name: String,
+    size: u64,
+    attributes: u32,
+}
+
+/// List a directory using `FILE_FLAG_BACKUP_SEMANTICS` + a directory handle, so
+/// ACL-restricted folders (System Volume Information, protected app data) can be
+/// enumerated once SeBackupPrivilege is enabled — unlike `std::fs::read_dir`,
+/// which opens without backup semantics and is denied. Sizes/attributes come
+/// straight from the enumeration, so no per-file open is needed here.
+fn list_dir_backup(dir: &std::path::Path) -> Result<Vec<DirEntryInfo>> {
+    let wide = to_wide(&dir.to_string_lossy());
+    // SAFETY: `wide` outlives the call.
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            FILE_LIST_DIRECTORY,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            None,
+        )
+    }
+    .map_err(|e| own_backup_common::OwnBackupError::Device(format!("open dir: {e}")))?;
+    let handle = FileHandle(handle);
+
+    let mut out = Vec::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        // SAFETY: buffer valid for the size passed.
+        let call = unsafe {
+            GetFileInformationByHandleEx(
+                handle.0,
+                FileFullDirectoryInfo,
+                buf.as_mut_ptr() as *mut _,
+                buf.len() as u32,
+            )
+        };
+        match call {
+            Ok(()) => {}
+            Err(e) if e.code() == ERROR_NO_MORE_FILES.to_hresult() => break,
+            Err(e) => {
+                return Err(own_backup_common::OwnBackupError::Device(format!(
+                    "enumerate dir: {e}"
+                )))
+            }
+        }
+        // Parse the FILE_FULL_DIR_INFO chain in `buf`. Field offsets (x64):
+        //   NextEntryOffset@0, EndOfFile@40, FileAttributes@56,
+        //   FileNameLength(bytes)@60, FileName@68.
+        let mut off = 0usize;
+        loop {
+            let rec = &buf[off..];
+            if rec.len() < 68 {
+                break;
+            }
+            let next = u32::from_le_bytes(rec[0..4].try_into().unwrap()) as usize;
+            let size = i64::from_le_bytes(rec[40..48].try_into().unwrap()).max(0) as u64;
+            let attrs = u32::from_le_bytes(rec[56..60].try_into().unwrap());
+            let name_len = u32::from_le_bytes(rec[60..64].try_into().unwrap()) as usize;
+            if 68 + name_len <= rec.len() {
+                let name: Vec<u16> = rec[68..68 + name_len]
+                    .chunks_exact(2)
+                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                    .collect();
+                let name = String::from_utf16_lossy(&name);
+                if name != "." && name != ".." {
+                    out.push(DirEntryInfo { name, size, attributes: attrs });
+                }
+            }
+            if next == 0 {
+                break;
+            }
+            off += next;
+            if off >= buf.len() {
+                break;
+            }
+        }
+    }
+    Ok(out)
+}
 
 /// Outcome of an exclusion scan over a volume.
 pub struct ExclusionScan {
@@ -76,60 +167,54 @@ pub fn collect_excluded_ranges(
         vec![(PathBuf::from(&root), Vec::new(), false)];
 
     while let Some((dir, rel, subtree_excluded)) = stack.pop() {
-        let entries = match std::fs::read_dir(&dir) {
+        let entries = match list_dir_backup(&dir) {
             Ok(e) => e,
             Err(e) => {
                 warn!(dir = %dir.display(), error = %e, "Exclusion scan: cannot list directory");
                 continue;
             }
         };
-        for entry in entries.flatten() {
+        for info in entries {
             scan.entries_scanned += 1;
             if scan.entries_scanned % 512 == 0 {
                 tick(scan.entries_scanned)?;
             }
 
-            let name_lower = entry.file_name().to_string_lossy().to_lowercase();
+            let name_lower = info.name.to_lowercase();
             let mut rel_child = rel.clone();
             rel_child.push(name_lower.clone());
 
-            // DirEntry::metadata does not traverse symlinks on Windows.
-            let md = match entry.metadata() {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-            let is_reparse = {
-                use std::os::windows::fs::MetadataExt;
-                md.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-            };
+            let is_dir = info.attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+            let is_reparse = info.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0;
 
             let matched = subtree_excluded
                 || parsed.iter().any(|p| p.matches(&name_lower, &rel_child));
 
-            if md.is_dir() {
+            let child = dir.join(&info.name);
+            if is_dir {
                 // Never follow junctions/symlinks: their targets may live on
                 // another volume, and loops are possible.
                 if !is_reparse {
-                    stack.push((entry.path(), rel_child, matched));
+                    stack.push((child, rel_child, matched));
                 }
             } else if matched && !is_reparse {
-                match file_extent_ranges(&entry.path(), cluster_size, &mut scan.ranges) {
+                match file_extent_ranges(&child, cluster_size, &mut scan.ranges) {
                     Ok(bytes) => {
                         scan.files_excluded += 1;
                         scan.bytes_excluded += bytes;
                     }
                     Err(e) => {
                         warn!(
-                            file = %entry.path().display(),
+                            file = %child.display(),
                             error = %e,
                             "Exclusion scan: cannot resolve extents — file stays in the backup"
                         );
                         // Could not exclude it → it stays in the archive.
-                        scan.categories.add(&name_lower, md.len());
+                        scan.categories.add(&name_lower, info.size);
                     }
                 }
             } else if !is_reparse {
-                scan.categories.add(&name_lower, md.len());
+                scan.categories.add(&name_lower, info.size);
             }
         }
     }

@@ -18,6 +18,7 @@ use tracing::{debug, info, warn};
 
 use own_backup_common::{OwnBackupError, Result};
 
+use crate::exclusions::ByteRanges;
 use crate::used_sectors::UsedSectorMap;
 
 /// Raw random-access volume reads. Implemented by `WinRawDevice` on Windows
@@ -65,6 +66,17 @@ const MAX_STRUCT_BYTES: u64 = 256 * 1024 * 1024;
 /// neither, or if any structure fails validation — callers fall back to
 /// sector-by-sector.
 pub fn build_fat_used_map(vol: &mut dyn RawVolume, block_size: u32) -> Result<FatUsedMap> {
+    build_fat_used_map_excl(vol, block_size, None)
+}
+
+/// Like [`build_fat_used_map`], but every cluster fully covered by `excluded`
+/// (excluded file extents) is treated as free — so exclusions drop blocks and
+/// shrink the image cluster-by-cluster, exactly like the NTFS path.
+pub fn build_fat_used_map_excl(
+    vol: &mut dyn RawVolume,
+    block_size: u32,
+    excluded: Option<&ByteRanges>,
+) -> Result<FatUsedMap> {
     let mut boot = [0u8; 512];
     vol.read_at(0, &mut boot)?;
     if boot[510] != 0x55 || boot[511] != 0xAA {
@@ -72,10 +84,89 @@ pub fn build_fat_used_map(vol: &mut dyn RawVolume, block_size: u32) -> Result<Fa
     }
 
     if &boot[3..11] == b"EXFAT   " {
-        build_exfat(vol, &boot, block_size)
+        build_exfat(vol, &boot, block_size, excluded)
     } else {
-        build_fat32(vol, &boot, block_size)
+        build_fat32(vol, &boot, block_size, excluded)
     }
+}
+
+/// FAT32 on-disk geometry, shared by the used-map builder and the exclusion
+/// walker ([`crate::fat_exclusions`]).
+pub struct Fat32Geometry {
+    pub bytes_per_sector: u64,
+    pub cluster_size: u32,
+    /// Number of data clusters (cluster numbers run 2..cluster_count+2).
+    pub cluster_count: u64,
+    /// Byte offset of cluster 2 (start of the data area).
+    pub data_start: u64,
+    /// Byte offset of the first FAT.
+    pub fat_offset: u64,
+    pub fat_bytes: u64,
+    /// First cluster of the root directory (`BPB_RootClus`).
+    pub root_cluster: u64,
+}
+
+/// Parse + validate FAT32 geometry from the boot sector. `Err` (→ sector-by-
+/// sector fallback) on FAT12/16, bad signatures or geometry that overflows the
+/// device — never a silent guess.
+pub fn parse_fat32_geometry(boot: &[u8], vol_len: u64) -> Result<Fat32Geometry> {
+    let bps = u16at(boot, 11);
+    let spc = boot[13] as u64;
+    let reserved = u16at(boot, 14);
+    let nfats = boot[16] as u64;
+    let root_ent_cnt = u16at(boot, 17);
+    let tot_sec16 = u16at(boot, 19);
+    let fatsz16 = u16at(boot, 22);
+    let tot_sec32 = u32at(boot, 32);
+    let fatsz32 = u32at(boot, 36);
+    let root_cluster = u32at(boot, 44);
+
+    // FAT32 discriminators (FAT12/16 have fatsz16 != 0 and a fixed root dir).
+    if fatsz16 != 0 || fatsz32 == 0 || root_ent_cnt != 0 {
+        return Err(bad("not a FAT32 volume (FAT12/16 or unknown)"));
+    }
+    if !bps.is_power_of_two() || !(512..=4096).contains(&bps) {
+        return Err(bad(format!("implausible bytes/sector {bps}")));
+    }
+    if !spc.is_power_of_two() || spc > 128 || spc == 0 {
+        return Err(bad(format!("implausible sectors/cluster {spc}")));
+    }
+    if reserved == 0 || nfats == 0 || nfats > 4 {
+        return Err(bad(format!("implausible reserved={reserved} nfats={nfats}")));
+    }
+    let tot_sec = if tot_sec32 != 0 { tot_sec32 } else { tot_sec16 };
+    let data_start_sec = reserved + nfats * fatsz32;
+    if tot_sec <= data_start_sec {
+        return Err(bad("total sectors do not cover the data area"));
+    }
+    if tot_sec * bps > vol_len {
+        return Err(bad(format!(
+            "filesystem claims {} bytes but the device is {}",
+            tot_sec * bps,
+            vol_len
+        )));
+    }
+    let cluster_size = (bps * spc) as u32;
+    let cluster_count = (tot_sec - data_start_sec) / spc;
+    let fat_bytes = fatsz32 * bps;
+    if fat_bytes / 4 < cluster_count + 2 {
+        return Err(bad("FAT too small for the cluster count"));
+    }
+    if fat_bytes > MAX_STRUCT_BYTES {
+        return Err(bad(format!("FAT is implausibly large ({fat_bytes} bytes)")));
+    }
+    if root_cluster < 2 || root_cluster >= cluster_count + 2 {
+        return Err(bad(format!("root cluster {root_cluster} out of range")));
+    }
+    Ok(Fat32Geometry {
+        bytes_per_sector: bps,
+        cluster_size,
+        cluster_count,
+        data_start: data_start_sec * bps,
+        fat_offset: reserved * bps,
+        fat_bytes,
+        root_cluster,
+    })
 }
 
 fn bad(msg: impl std::fmt::Display) -> OwnBackupError {
@@ -108,87 +199,56 @@ fn mark_bytes(map: &mut [bool], block_size: u32, start: u64, end: u64) {
 // FAT32
 // ---------------------------------------------------------------------------
 
-fn build_fat32(vol: &mut dyn RawVolume, boot: &[u8], block_size: u32) -> Result<FatUsedMap> {
-    let bps = u16at(boot, 11);
-    let spc = boot[13] as u64;
-    let reserved = u16at(boot, 14);
-    let nfats = boot[16] as u64;
-    let root_ent_cnt = u16at(boot, 17);
-    let tot_sec16 = u16at(boot, 19);
-    let fatsz16 = u16at(boot, 22);
-    let tot_sec32 = u32at(boot, 32);
-    let fatsz32 = u32at(boot, 36);
-
-    // FAT32 discriminators (FAT12/16 have fatsz16 != 0 and a fixed root dir;
-    // those still fall back to sector-by-sector).
-    if fatsz16 != 0 || fatsz32 == 0 || root_ent_cnt != 0 {
-        return Err(bad("not a FAT32 volume (FAT12/16 or unknown)"));
-    }
-    if !bps.is_power_of_two() || !(512..=4096).contains(&bps) {
-        return Err(bad(format!("implausible bytes/sector {bps}")));
-    }
-    if !spc.is_power_of_two() || spc > 128 || spc == 0 {
-        return Err(bad(format!("implausible sectors/cluster {spc}")));
-    }
-    if reserved == 0 || nfats == 0 || nfats > 4 {
-        return Err(bad(format!("implausible reserved={reserved} nfats={nfats}")));
-    }
-    let tot_sec = if tot_sec32 != 0 { tot_sec32 } else { tot_sec16 };
-    let data_start_sec = reserved + nfats * fatsz32;
-    if tot_sec <= data_start_sec {
-        return Err(bad("total sectors do not cover the data area"));
-    }
-    if tot_sec * bps > vol.len() {
-        return Err(bad(format!(
-            "filesystem claims {} bytes but the device is {}",
-            tot_sec * bps,
-            vol.len()
-        )));
-    }
-
-    let cluster_size = (bps * spc) as u32;
-    let cluster_count = (tot_sec - data_start_sec) / spc;
-    // The FAT must be able to describe every cluster (entries 0,1 reserved).
-    let fat_bytes = fatsz32 * bps;
-    if fat_bytes / 4 < cluster_count + 2 {
-        return Err(bad("FAT too small for the cluster count"));
-    }
-    if fat_bytes > MAX_STRUCT_BYTES {
-        return Err(bad(format!("FAT is implausibly large ({fat_bytes} bytes)")));
-    }
+fn build_fat32(
+    vol: &mut dyn RawVolume,
+    boot: &[u8],
+    block_size: u32,
+    excluded: Option<&ByteRanges>,
+) -> Result<FatUsedMap> {
+    let g = parse_fat32_geometry(boot, vol.len())?;
+    let cluster_size = g.cluster_size;
+    let data_start = g.data_start;
 
     // Read FAT #1 and mark allocated clusters (entry & 0x0FFFFFFF != 0 —
     // includes bad-marked clusters: safer to copy them than to guess).
-    let mut fat = vec![0u8; fat_bytes as usize];
-    vol.read_at(reserved * bps, &mut fat)?;
+    let mut fat = vec![0u8; g.fat_bytes as usize];
+    vol.read_at(g.fat_offset, &mut fat)?;
 
     let total_blocks = vol.len().div_ceil(block_size as u64);
     let mut map = vec![false; total_blocks as usize];
 
     // Metadata area (boot + FSInfo + backup boot + FATs) is always copied.
-    let data_start = data_start_sec * bps;
     mark_bytes(&mut map, block_size, 0, data_start);
 
     let mut used_clusters = 0u64;
-    for n in 0..cluster_count {
+    let mut excluded_clusters = 0u64;
+    for n in 0..g.cluster_count {
         let e = u32at(&fat, ((n + 2) * 4) as usize) & 0x0FFF_FFFF;
         if e != 0 {
-            used_clusters += 1;
             let start = data_start + n * cluster_size as u64;
-            mark_bytes(&mut map, block_size, start, start + cluster_size as u64);
+            let end = start + cluster_size as u64;
+            // An excluded cluster is treated as free: its block may drop out, and
+            // any block still copied gets these bytes zeroed by ZeroingBlockReader.
+            if excluded.is_some_and(|ex| ex.covers(start, end)) {
+                excluded_clusters += 1;
+                continue;
+            }
+            used_clusters += 1;
+            mark_bytes(&mut map, block_size, start, end);
         }
     }
 
     // Anything past the cluster heap (slack to the device end) is copied too.
-    let heap_end = data_start + cluster_count * cluster_size as u64;
+    let heap_end = data_start + g.cluster_count * cluster_size as u64;
     mark_bytes(&mut map, block_size, heap_end, vol.len());
 
     let used_count = map.iter().filter(|&&u| u).count() as u64;
     info!(
         fs = "FAT32",
         cluster_size,
-        cluster_count,
+        cluster_count = g.cluster_count,
         used_clusters,
+        excluded_clusters,
         used_blocks = used_count,
         total_blocks,
         "FAT32 used-cluster map ready"
@@ -205,7 +265,12 @@ fn build_fat32(vol: &mut dyn RawVolume, boot: &[u8], block_size: u32) -> Result<
 // exFAT
 // ---------------------------------------------------------------------------
 
-fn build_exfat(vol: &mut dyn RawVolume, boot: &[u8], block_size: u32) -> Result<FatUsedMap> {
+fn build_exfat(
+    vol: &mut dyn RawVolume,
+    boot: &[u8],
+    block_size: u32,
+    excluded: Option<&ByteRanges>,
+) -> Result<FatUsedMap> {
     let volume_length = u64at(boot, 72); // sectors
     let fat_offset = u32at(boot, 80); // sectors
     let fat_length = u32at(boot, 84); // sectors
@@ -329,9 +394,13 @@ fn build_exfat(vol: &mut dyn RawVolume, boot: &[u8], block_size: u32) -> Result<
     let mut used_clusters = 0u64;
     for n in 0..cluster_count {
         if bitmap[(n / 8) as usize] & (1 << (n % 8)) != 0 {
-            used_clusters += 1;
             let start = heap_start + n * cluster_size as u64;
-            mark_bytes(&mut map, block_size, start, start + cluster_size as u64);
+            let end = start + cluster_size as u64;
+            if excluded.is_some_and(|ex| ex.covers(start, end)) {
+                continue;
+            }
+            used_clusters += 1;
+            mark_bytes(&mut map, block_size, start, end);
         }
     }
 
@@ -394,6 +463,7 @@ mod tests {
         img[22..24].copy_from_slice(&0u16.to_le_bytes()); // fatsz16 (0 => FAT32)
         img[32..36].copy_from_slice(&(tot_sec as u32).to_le_bytes());
         img[36..40].copy_from_slice(&(fatsz as u32).to_le_bytes());
+        img[44..48].copy_from_slice(&2u32.to_le_bytes()); // root cluster
         img[510] = 0x55;
         img[511] = 0xAA;
 

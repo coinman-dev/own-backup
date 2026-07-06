@@ -8,6 +8,7 @@ pub mod decrypt;
 pub mod encryption;
 pub mod exclusions;
 pub mod ext_map;
+pub mod fat_exclusions;
 pub mod fat_map;
 pub mod gpt_reader;
 pub mod gpt_writer;
@@ -37,6 +38,8 @@ pub mod block_reader_win;
 pub mod engine_win;
 #[cfg(target_os = "windows")]
 pub mod exclusions_win;
+#[cfg(target_os = "windows")]
+pub mod privileges_win;
 #[cfg(target_os = "windows")]
 pub mod used_sectors_win;
 #[cfg(target_os = "windows")]
