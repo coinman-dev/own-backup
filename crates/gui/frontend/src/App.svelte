@@ -116,9 +116,9 @@
     align-items: center;
     gap: 12px;
     padding: 10px 16px;
-    background: #fff4e5;
-    color: #7a4b00;
-    border-bottom: 1px solid #f0c98a;
+    background: #fdecea;
+    color: #8a1f1f;
+    border-bottom: 1px solid #f0b3b3;
     font-size: 13px;
   }
 
@@ -135,16 +135,16 @@
   .sw-retry {
     flex: 0 0 auto;
     padding: 5px 14px;
-    border: 1px solid #d99a3a;
+    border: 1px solid #d06a6a;
     border-radius: 6px;
-    background: #ffd9a8;
-    color: #7a4b00;
+    background: #f6c4c4;
+    color: #8a1f1f;
     cursor: pointer;
     font-size: 13px;
   }
 
   .sw-retry:hover:not(:disabled) {
-    background: #ffc880;
+    background: #f0a8a8;
   }
 
   .sw-retry:disabled {
