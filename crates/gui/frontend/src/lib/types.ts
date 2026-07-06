@@ -177,6 +177,10 @@ export interface ScheduleConfig {
   time: string;
   /** Day of month for `monthly`, 1–28 (limited so it exists in every month). */
   day_of_month: number;
+  /** For kind=event: 'usb_connect'|'logon'|'logoff'|'shutdown'|'startup'. */
+  event_trigger: string;
+  event_once_per_day: boolean;
+  event_startup_delay_min: number;
   only_when_locked: boolean;
   wake_to_run: boolean;
   prevent_sleep: boolean;

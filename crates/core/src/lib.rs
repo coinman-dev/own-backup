@@ -38,6 +38,14 @@ pub struct ScheduleConfig {
     /// Day of month for `monthly` (1–28 only, so it exists in every month —
     /// avoids the "31st never fires in February" trap).
     pub day_of_month: u32,
+    /// For `kind = event`: which OS event fires the run. One of "usb_connect",
+    /// "logon", "logoff", "shutdown", "startup". Only "startup" is wired up so
+    /// far (the others need session/device/shutdown hooks).
+    pub event_trigger: String,
+    /// Event runs at most once per calendar day when set (like Acronis).
+    pub event_once_per_day: bool,
+    /// Minutes to wait after startup before the "startup" event fires. 0–60.
+    pub event_startup_delay_min: u32,
     pub only_when_locked: bool,
     pub wake_to_run: bool,
     pub prevent_sleep: bool,
@@ -54,6 +62,9 @@ impl Default for ScheduleConfig {
             days: vec!["mon".into(), "wed".into(), "fri".into()],
             time: "14:00".into(),
             day_of_month: 1,
+            event_trigger: "startup".into(),
+            event_once_per_day: true,
+            event_startup_delay_min: 0,
             only_when_locked: false,
             wake_to_run: true,
             prevent_sleep: true,

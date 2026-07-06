@@ -40,6 +40,15 @@
     ['event', 'По событию'], ['none', 'Не планировать'],
   ];
 
+  // Event triggers for kind='event'. Third field = implemented (true) vs pending.
+  const eventTriggers: [string, string, boolean][] = [
+    ['usb_connect', 'После подключения внешнего устройства', false],
+    ['logon', 'При входе пользователя', false],
+    ['logoff', 'При выходе пользователя', false],
+    ['shutdown', 'При завершении работы / перезагрузке', false],
+    ['startup', 'При запуске системы (с задержкой)', true],
+  ];
+
   function toggleDay(d: string) {
     job.schedule.days = job.schedule.days.includes(d)
       ? job.schedule.days.filter((x) => x !== d)
@@ -642,13 +651,31 @@
             {#if job.schedule.kind === 'daily' || job.schedule.kind === 'weekly' || job.schedule.kind === 'monthly'}
               <label class="at">В <input type="time" bind:value={job.schedule.time} /></label>
             {/if}
+            {#if job.schedule.kind === 'event'}
+              <div class="event-opts">
+                <label class="chk"><input type="checkbox" bind:checked={job.schedule.event_once_per_day} /> Только один раз в день</label>
+                {#each eventTriggers as [val, lbl, done]}
+                  <label class="radio">
+                    <input type="radio" name="evtrig" value={val} checked={job.schedule.event_trigger === val} onchange={() => (job.schedule.event_trigger = val)} />
+                    {lbl}{#if !done}<span class="dev-badge">в разработке</span>{/if}
+                  </label>
+                  {#if val === 'startup' && job.schedule.event_trigger === 'startup'}
+                    <label class="delay-min">Задержка:
+                      <select bind:value={job.schedule.event_startup_delay_min}>
+                        {#each Array.from({ length: 61 }, (_, i) => i) as mn}<option value={mn}>{mn}</option>{/each}
+                      </select> мин
+                    </label>
+                  {/if}
+                {/each}
+              </div>
+            {/if}
           </div>
         </div>
         {#if job.schedule.kind === 'monthly'}
           <div class="hint-sm">Число месяца — только 1–28: 29–31 есть не в каждом месяце, поэтому такие даты не выбираются.</div>
         {/if}
         {#if job.schedule.kind === 'event'}
-          <div class="dev-note">⚙ «По событию» — в разработке (сохраняется, но пока не срабатывает). Работают: Ежедневно / Еженедельно / Ежемесячно.</div>
+          <div class="note">✓ Сейчас срабатывает «При запуске системы» (служба «Own Backup»). Остальные события сохраняются, но пока не срабатывают — нужны системные хуки.</div>
         {:else if job.schedule.kind !== 'none'}
           <div class="note">✓ Автозапуск выполняет служба «Own Backup» (должна быть установлена и запущена). Для зашифрованных томов сохраните пароль на шаге «Источник».</div>
         {/if}
@@ -843,6 +870,8 @@
   .hint-sm { font-size: 12px; color: var(--text-muted); margin-top: 8px; }
   .delay-min { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--head); margin-left: 26px; }
   .delay-min select, .at select { padding: 3px 6px; }
+  .event-opts { display: flex; flex-direction: column; gap: 12px; }
+  .event-opts .dev-badge { margin-left: 8px; }
   .at input { padding: 7px 10px; border: 1px solid var(--border); border-radius: 4px; }
   .adv-schedule { margin-top: 20px; display: flex; flex-direction: column; gap: 12px; }
   .chk { display: flex; align-items: center; gap: 9px; font-size: 14px; color: var(--head); cursor: pointer; }

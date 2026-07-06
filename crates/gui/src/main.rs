@@ -16,7 +16,7 @@ use state::GuiState;
 /// Bump this on any build you hand over for testing. It is printed at the top of
 /// the log so we can tell from the log alone WHICH binary actually ran (a common
 /// trap: an old exe left in another folder still gets launched).
-const BUILD_TAG: &str = "diag-2026-07-06f";
+const BUILD_TAG: &str = "diag-2026-07-06g";
 
 const ROTATE_AT: u64 = 4 * 1024 * 1024;
 
