@@ -467,7 +467,7 @@ fn backup_volume_inner(
         }
         map.release_bitmap();
     } else if !req.exclusion_patterns.is_empty() {
-        warn!("file exclusions are only supported on NTFS in smart mode — ignored for this run");
+        warn!("file exclusions need the volume-bitmap map (NTFS/ReFS) in smart mode — ignored for this run");
     }
 
     let used: Box<dyn UsedSectorMap> = if let Some(map) = luks_used {

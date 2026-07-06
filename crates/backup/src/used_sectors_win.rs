@@ -51,35 +51,33 @@ impl NtfsUsedSectorMap {
         let device = WinRawDevice::open_read(volume_path)?;
         let volume_len = device.length();
 
-        // --- NTFS volume data: cluster size and cluster count ---
-        let mut volume_data = NTFS_VOLUME_DATA_BUFFER::default();
-        let mut returned = 0u32;
-        // SAFETY: out pointer valid for the size passed.
-        unsafe {
-            DeviceIoControl(
-                device.handle(),
-                FSCTL_GET_NTFS_VOLUME_DATA,
-                None,
-                0,
-                Some(&mut volume_data as *mut _ as *mut _),
-                std::mem::size_of::<NTFS_VOLUME_DATA_BUFFER>() as u32,
-                Some(&mut returned),
-                None,
-            )
-        }
-        .map_err(|e| {
-            OwnBackupError::Device(format!(
-                "FSCTL_GET_NTFS_VOLUME_DATA({volume_path}) failed (not an NTFS volume?): {e}"
-            ))
-        })?;
-
-        let cluster_size = volume_data.BytesPerCluster;
-        let total_clusters = volume_data.TotalClusters as u64;
-        if cluster_size == 0 || total_clusters == 0 {
-            return Err(OwnBackupError::Device(format!(
-                "NTFS volume data for {volume_path} reports zero clusters"
-            )));
-        }
+        // Cluster size + count. NTFS exposes them via FSCTL_GET_NTFS_VOLUME_DATA.
+        // ReFS does NOT, but it DOES support FSCTL_GET_VOLUME_BITMAP — so on ReFS
+        // read the cluster count from the bitmap header and derive the cluster
+        // size from the volume length (validated). Any doubt → error → the engine
+        // falls back to sector-by-sector.
+        let (cluster_size, total_clusters) = match ntfs_volume_data(&device) {
+            Some((cs, tc)) if cs != 0 && tc != 0 => (cs, tc),
+            _ => {
+                let tc = probe_bitmap_cluster_count(&device).map_err(|e| {
+                    OwnBackupError::Device(format!(
+                        "{volume_path}: not NTFS and the volume-bitmap probe failed too: {e}"
+                    ))
+                })?;
+                let cs = derive_cluster_size(volume_len, tc).ok_or_else(|| {
+                    OwnBackupError::Device(format!(
+                        "{volume_path}: cannot derive a cluster size (len {volume_len}, {tc} clusters)"
+                    ))
+                })?;
+                info!(
+                    volume = volume_path,
+                    cluster_size = cs,
+                    total_clusters = tc,
+                    "volume-bitmap map for a non-NTFS filesystem (e.g. ReFS)"
+                );
+                (cs, tc)
+            }
+        };
 
         // --- Read the allocation bitmap in chunks ---
         let mut bitmap: Vec<u8> = Vec::with_capacity((total_clusters as usize).div_ceil(8));
@@ -153,7 +151,7 @@ impl NtfsUsedSectorMap {
             total_clusters,
             cluster_size,
             bitmap_bytes = bitmap.len(),
-            "NTFS volume bitmap loaded"
+            "volume bitmap loaded"
         );
 
         let (block_used, used_count) =
@@ -162,7 +160,7 @@ impl NtfsUsedSectorMap {
             volume = volume_path,
             total_blocks = block_used.len(),
             used_blocks = used_count,
-            "NTFS used-sector map ready"
+            "used-sector map ready (volume bitmap)"
         );
 
         Ok(Self {
@@ -225,6 +223,89 @@ impl NtfsUsedSectorMap {
     pub fn release_bitmap(&mut self) {
         self.bitmap = None;
     }
+}
+
+/// NTFS cluster size + count via `FSCTL_GET_NTFS_VOLUME_DATA`. `None` on any
+/// non-NTFS filesystem (ReFS, FAT, …), where the FSCTL is not supported.
+fn ntfs_volume_data(device: &WinRawDevice) -> Option<(u32, u64)> {
+    let mut vd = NTFS_VOLUME_DATA_BUFFER::default();
+    let mut returned = 0u32;
+    // SAFETY: out pointer valid for the size passed.
+    let ok = unsafe {
+        DeviceIoControl(
+            device.handle(),
+            FSCTL_GET_NTFS_VOLUME_DATA,
+            None,
+            0,
+            Some(&mut vd as *mut _ as *mut _),
+            std::mem::size_of::<NTFS_VOLUME_DATA_BUFFER>() as u32,
+            Some(&mut returned),
+            None,
+        )
+    }
+    .is_ok();
+    ok.then_some((vd.BytesPerCluster, vd.TotalClusters as u64))
+}
+
+/// Read just the cluster count from `FSCTL_GET_VOLUME_BITMAP` (the `BitmapSize`
+/// field of the reply header at LCN 0). Works on any filesystem that supports
+/// the volume bitmap — notably ReFS. The tiny output buffer means the call
+/// returns `ERROR_MORE_DATA`, but the fixed header (StartingLcn + BitmapSize) is
+/// always written first, which is all we need here.
+fn probe_bitmap_cluster_count(device: &WinRawDevice) -> Result<u64> {
+    let input = STARTING_LCN_INPUT_BUFFER { StartingLcn: 0 };
+    let header = 2 * std::mem::size_of::<i64>();
+    let mut out = vec![0u8; header + 16];
+    let mut returned = 0u32;
+    // SAFETY: in/out pointers valid for the sizes passed.
+    let call = unsafe {
+        DeviceIoControl(
+            device.handle(),
+            FSCTL_GET_VOLUME_BITMAP,
+            Some(&input as *const _ as *const _),
+            std::mem::size_of::<STARTING_LCN_INPUT_BUFFER>() as u32,
+            Some(out.as_mut_ptr() as *mut _),
+            out.len() as u32,
+            Some(&mut returned),
+            None,
+        )
+    };
+    match call {
+        Ok(()) => {}
+        Err(e) if e.code() == ERROR_MORE_DATA.to_hresult() => {}
+        Err(e) => {
+            return Err(OwnBackupError::Device(format!(
+                "FSCTL_GET_VOLUME_BITMAP probe failed: {e}"
+            )))
+        }
+    }
+    // BitmapSize (number of clusters) is the second i64 in the reply header.
+    let total = i64::from_le_bytes(out[8..16].try_into().unwrap());
+    if total <= 0 {
+        return Err(OwnBackupError::Device(
+            "volume bitmap reported zero clusters".into(),
+        ));
+    }
+    Ok(total as u64)
+}
+
+/// Infer the cluster size (bytes) from the volume length and cluster count when
+/// the filesystem doesn't report it (ReFS). Cluster sizes are always powers of
+/// two; the correct one is the unique candidate whose `count × size` covers the
+/// whole volume without exceeding it (bar a sub-two-cluster tail). Returns `None`
+/// if nothing fits — the caller then falls back to sector-by-sector, so a wrong
+/// guess can never silently corrupt a backup.
+fn derive_cluster_size(volume_len: u64, total_clusters: u64) -> Option<u32> {
+    if total_clusters == 0 {
+        return None;
+    }
+    for &cs in &[512u32, 1024, 2048, 4096, 8192, 16384, 32768, 65536] {
+        let covered = cs as u64 * total_clusters;
+        if covered <= volume_len && volume_len - covered < cs as u64 * 2 {
+            return Some(cs);
+        }
+    }
+    None
 }
 
 /// Fold a cluster allocation bitmap into a per-backup-block used map.

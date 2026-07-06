@@ -132,6 +132,11 @@ pub fn identify(buf: &[u8]) -> Option<ProbedFs> {
     if at(3, b"EXFAT   ") {
         return some(FileSystem::ExFat, None);
     }
+    // ReFS: FileSystemName "ReFS" at offset 3 + the "FSRS" structure signature at
+    // 0x10. Backed up smartly via the volume bitmap (like NTFS), incl. exclusions.
+    if at(3, b"ReFS") && at(0x10, b"FSRS") {
+        return some(FileSystem::ReFs, None);
+    }
     if at(0x52, b"FAT32   ") {
         // FAT32 boot-sector label: 11 bytes at 0x47.
         return some(FileSystem::Fat32, read_label(buf, 0x47, 11));
@@ -301,6 +306,18 @@ pub fn probe_partition_path(dev_path: &str) -> Option<ProbedFs> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_refs() {
+        let mut buf = vec![0u8; PROBE_LEN];
+        buf[3..7].copy_from_slice(b"ReFS");
+        buf[0x10..0x14].copy_from_slice(b"FSRS");
+        assert_eq!(identify(&buf).expect("refs detected").fs, FileSystem::ReFs);
+        // "ReFS" alone (without the FSRS structure signature) must not match.
+        let mut only_name = vec![0u8; PROBE_LEN];
+        only_name[3..7].copy_from_slice(b"ReFS");
+        assert!(identify(&only_name).is_none());
+    }
 
     #[test]
     fn detects_ext4_with_label() {
