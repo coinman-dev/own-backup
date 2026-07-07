@@ -23,6 +23,7 @@ pub mod san_policy;
 pub mod secrets;
 pub mod sidecar;
 pub mod used_sectors;
+pub mod vhdx_bat;
 pub mod xfs_map;
 
 #[cfg(target_os = "linux")]
@@ -40,6 +41,8 @@ pub mod engine_win;
 pub mod exclusions_win;
 #[cfg(target_os = "windows")]
 pub mod privileges_win;
+#[cfg(target_os = "windows")]
+pub mod true_removal_win;
 #[cfg(target_os = "windows")]
 pub mod used_sectors_win;
 #[cfg(target_os = "windows")]

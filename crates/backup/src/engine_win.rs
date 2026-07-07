@@ -439,25 +439,26 @@ fn backup_volume_inner(
     };
 
     // --- File exclusions (phase 3) ---
-    // Two removal models, by filesystem:
+    // Both families achieve TRUE removal (like Acronis) — a restored/mounted
+    // volume shows no excluded file and reclaims its space — by different,
+    // filesystem-appropriate means:
     //
-    // * FAT32/exFAT — TRUE removal (like Acronis): the raw directory tree is
-    //   walked ourselves and the matched files' metadata is patched out of the
-    //   image (directory entry deleted, allocation table / bitmap freed), so a
-    //   restored/mounted volume shows no file and reclaims the space. The
+    // * FAT32/exFAT — metadata patches: the raw directory tree is walked
+    //   ourselves and the matched files' metadata is patched out of the image
+    //   (directory entry deleted, allocation table / bitmap freed). The
     //   simple, fully-specified on-disk structures make this safe and testable.
     //
-    // * NTFS/ReFS — CONTENT ZEROING only (as decided in CLAUDE.md: "exclusions
-    //   via FSCTL_GET_RETRIEVAL_POINTERS (clusters zeroed)"). The matched
+    // * NTFS/ReFS — two steps. First, CONTENT ZEROING (CLAUDE.md: "exclusions
+    //   via FSCTL_GET_RETRIEVAL_POINTERS (clusters zeroed)"): the matched
     //   clusters are dropped from the used map and zeroed, so the file's DATA
-    //   never leaves the machine, but its catalog entry survives — it appears as
-    //   a zero-filled file of the original size. True removal would mean editing
-    //   the $MFT record, $Bitmap, $MFT:$Bitmap AND rebalancing the parent
-    //   directory's B+-tree index ($INDEX_ROOT/$INDEX_ALLOCATION) — i.e. an
-    //   NTFS metadata writer, which the project deliberately forbids ("no NTFS
-    //   parser", CLAUDE.md) because a wrong index edit corrupts the catalog and
-    //   makes the restored volume unreadable. ReFS is closed/undocumented, so
-    //   zeroing is the only safe option there regardless.
+    //   never leaves the machine. Then, after the copy, the mount-&-delete
+    //   pass (`true_removal_win`, decision 2026-07-07) lets the FS DRIVER
+    //   delete the catalog entries inside the image copy — we never parse or
+    //   write NTFS/ReFS structures ourselves ("no NTFS parser", CLAUDE.md,
+    //   still holds); the driver updates $MFT/$Bitmap/directory indexes (or
+    //   the ReFS equivalents) correctly by construction. If that pass cannot
+    //   run, the excluded files remain as zero-filled ghosts — a valid backup,
+    //   just without the space reclaim.
     let mut excluded_files = 0u64;
     let mut excluded_bytes = 0u64;
     let mut zero_ranges: Option<ByteRanges> = None;
@@ -481,13 +482,18 @@ fn backup_volume_inner(
         .as_ref()
         .is_some_and(|f| f.filesystem == "FAT32" || f.filesystem == "exFAT")
         && !req.exclusion_patterns.is_empty();
+    // Matched paths for the post-copy true-removal pass (NTFS/ReFS): the FS
+    // driver deletes them inside the finished image, so they vanish from the
+    // catalog and their space is reclaimed — see `true_removal_win`.
+    let mut removal_paths: Vec<crate::exclusions_win::ExcludedPath> = Vec::new();
     if let Some(map) = ntfs_map.as_mut() {
         if !req.exclusion_patterns.is_empty() {
-            let scan =
+            let mut scan =
                 collect_excluded_ranges(&read_path, map.cluster_size(), &req.exclusion_patterns, prepare_tick)?;
             excluded_files = scan.files_excluded;
             excluded_bytes = scan.bytes_excluded;
             categories = Some(scan.categories);
+            removal_paths = std::mem::take(&mut scan.paths);
             if !scan.ranges.is_empty() {
                 map.apply_excluded_ranges(&scan.ranges);
                 zero_ranges = Some(scan.ranges);
@@ -753,6 +759,43 @@ fn backup_volume_inner(
         "Image finalize timings"
     );
 
+    // --- True removal of excluded files (NTFS/ReFS) ---
+    // The FS driver deletes the recorded paths inside the image copy (the
+    // source is never touched): catalog entries disappear and the space is
+    // reclaimed on a restored volume. Failures before the merge fall back to
+    // the zero-filled ghosts — still a valid backup; failures after the merge
+    // fail the run (image/checksum mismatch must never be shipped). Checksums
+    // of the driver-touched blocks are updated in place, so the sidecar below
+    // describes the final image.
+    let mut checksums = outcome.checksums;
+    let mut used_blocks = used_blocks;
+    if !removal_paths.is_empty() {
+        let bytes_copied = outcome.bytes_copied;
+        let mut tick = |entries: u64| {
+            let _ = progress(&BackupProgress {
+                backup_id: "finalize".into(),
+                status: BackupStatus::Running,
+                blocks_done: entries,
+                blocks_total: 0,
+                bytes_written: bytes_copied,
+                speed_bps: 0,
+            });
+        };
+        if crate::true_removal_win::remove_excluded_from_image(
+            &req.image_path,
+            &removal_paths,
+            data_offset,
+            volume_len,
+            req.block_size,
+            &mut checksums,
+            &mut tick,
+        )?
+        .is_some()
+        {
+            used_blocks = checksums.len() as u64;
+        }
+    }
+
     // --- Sidecar ---
     // Child sidecars carry the FULL state checksums (every used block, written
     // or inherited), so verify/restore/mount treat the leaf exactly like a
@@ -828,7 +871,7 @@ fn backup_volume_inner(
     sidecar_info.job_id = req.job_id.clone();
 
     let sidecar_path = sidecar_path_for(&req.image_path);
-    write_sidecar(&sidecar_path, &sidecar_info, &manifest, &outcome.checksums)?;
+    write_sidecar(&sidecar_path, &sidecar_info, &manifest, &checksums)?;
 
     info!(
         image = %req.image_path.display(),

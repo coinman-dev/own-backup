@@ -39,10 +39,22 @@ const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 const FILE_LIST_DIRECTORY: u32 = 0x0001;
 
 /// One directory entry from [`list_dir_backup`].
-struct DirEntryInfo {
-    name: String,
-    size: u64,
-    attributes: u32,
+pub(crate) struct DirEntryInfo {
+    pub(crate) name: String,
+    pub(crate) size: u64,
+    pub(crate) attributes: u32,
+}
+
+/// A matched entry, recorded at its highest match point (a matched directory
+/// is one record — its contents are implied). Fed to the mount-&-delete pass
+/// ([`crate::true_removal_win`]) that truly removes NTFS/ReFS exclusions from
+/// the finished image.
+pub struct ExcludedPath {
+    /// Path relative to the volume root, original case, `\`-separated.
+    pub rel: String,
+    pub is_dir: bool,
+    /// Junction/symlink: delete the reparse entry itself, never its target.
+    pub is_reparse: bool,
 }
 
 /// List a directory using `FILE_FLAG_BACKUP_SEMANTICS` + a directory handle, so
@@ -50,7 +62,7 @@ struct DirEntryInfo {
 /// enumerated once SeBackupPrivilege is enabled — unlike `std::fs::read_dir`,
 /// which opens without backup semantics and is denied. Sizes/attributes come
 /// straight from the enumeration, so no per-file open is needed here.
-fn list_dir_backup(dir: &std::path::Path) -> Result<Vec<DirEntryInfo>> {
+pub(crate) fn list_dir_backup(dir: &std::path::Path) -> Result<Vec<DirEntryInfo>> {
     let wide = to_wide(&dir.to_string_lossy());
     // SAFETY: `wide` outlives the call.
     let handle = unsafe {
@@ -135,6 +147,12 @@ pub struct ExclusionScan {
     /// (excluded files are not part of the archive). Powers the dashboard
     /// breakdown — the walk visits every file anyway, so this is free.
     pub categories: CategorySizes,
+    /// Matched entries at their highest match point, for the true-removal
+    /// (mount-&-delete) pass over the finished image. Includes entries the
+    /// zeroing step cannot handle (resident files, reparse points, files
+    /// whose extents failed to resolve) — the driver deletes them all the
+    /// same.
+    pub paths: Vec<ExcludedPath>,
 }
 
 /// Walk `volume_read_path` (`\\.\E:` or a VSS snapshot device path) and
@@ -155,6 +173,7 @@ pub fn collect_excluded_ranges(
         entries_scanned: 0,
         bytes_excluded: 0,
         categories: CategorySizes::default(),
+        paths: Vec::new(),
     };
     if parsed.is_empty() {
         scan.ranges.finalize();
@@ -191,6 +210,20 @@ pub fn collect_excluded_ranges(
                 || parsed.iter().any(|p| p.matches(&name_lower, &rel_child));
 
             let child = dir.join(&info.name);
+            // Record every entry at its HIGHEST match point (a matched dir is
+            // one record; entries below it ride along) for the true-removal
+            // pass. Reparse points and unresolved/resident files are recorded
+            // too: zeroing cannot touch them, deletion can.
+            if matched && !subtree_excluded {
+                match child.to_string_lossy().strip_prefix(&root) {
+                    Some(rel_path) if !rel_path.is_empty() => scan.paths.push(ExcludedPath {
+                        rel: rel_path.to_string(),
+                        is_dir,
+                        is_reparse,
+                    }),
+                    _ => warn!(path = %child.display(), "matched path outside the scan root — not recorded for removal"),
+                }
+            }
             if is_dir {
                 // Never follow junctions/symlinks: their targets may live on
                 // another volume, and loops are possible.
