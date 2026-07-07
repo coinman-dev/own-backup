@@ -39,10 +39,31 @@ pub struct BackupClient {
 }
 
 impl BackupClient {
-    /// Connect to `endpoint` (e.g. `http://127.0.0.1:50051`). `token` is sent as
-    /// a bearer token on every call (empty = dev / no-auth).
+    /// Connect to the service. `token` is sent as a bearer token on every call
+    /// (empty = dev / no-auth).
+    ///
+    /// On Windows the production transport is a DACL-restricted named pipe (no
+    /// listening TCP port); we try it first and fall back to loopback TCP at
+    /// `endpoint` for foreground/dev service runs. On other platforms `endpoint`
+    /// (e.g. `http://127.0.0.1:50051`) is used directly.
     pub async fn connect(endpoint: impl Into<String>, token: impl Into<String>) -> Result<Self> {
-        let channel = Channel::from_shared(endpoint.into())
+        let endpoint = endpoint.into();
+        let token = token.into();
+        #[cfg(windows)]
+        {
+            match Self::connect_pipe(token.clone()).await {
+                Ok(c) => return Ok(c),
+                Err(e) => {
+                    tracing::debug!(error = %e, "named pipe unavailable, falling back to TCP")
+                }
+            }
+        }
+        Self::connect_tcp(endpoint, token).await
+    }
+
+    /// Connect over loopback TCP (dev/foreground; the only transport on non-Windows).
+    async fn connect_tcp(endpoint: String, token: String) -> Result<Self> {
+        let channel = Channel::from_shared(endpoint)
             .map_err(|e| format!("bad endpoint: {e}"))?
             // Fail fast when nothing is listening (service down) so the GUI's
             // health check and retries stay snappy instead of hanging ~seconds.
@@ -52,7 +73,51 @@ impl BackupClient {
             .map_err(|e| format!("cannot reach service: {e}"))?;
         Ok(Self {
             inner: BackupServiceClient::new(channel),
-            token: token.into(),
+            token,
+        })
+    }
+
+    /// Connect over the Windows named pipe (`\\.\pipe\OwnBackup`). Fails fast if
+    /// no pipe exists (service down or running foreground/TCP).
+    #[cfg(windows)]
+    async fn connect_pipe(token: String) -> Result<Self> {
+        use hyper_util::rt::TokioIo;
+        use tokio::net::windows::named_pipe::ClientOptions;
+        use tonic::transport::{Endpoint, Uri};
+        use tower::service_fn;
+
+        const ERROR_PIPE_BUSY: i32 = 231;
+        let pipe_path = own_backup_common::windows_pipe_path();
+
+        // The URI authority is a placeholder; the connector below dials the pipe.
+        let channel = Endpoint::try_from("http://ownbackup.pipe")
+            .map_err(|e| format!("bad pipe endpoint: {e}"))?
+            .connect_timeout(std::time::Duration::from_millis(800))
+            .connect_with_connector(service_fn(move |_: Uri| {
+                let pipe_path = pipe_path.clone();
+                async move {
+                    // Retry briefly if every instance is momentarily busy (a burst
+                    // of connects before the service opened the next instance).
+                    for _ in 0..20u32 {
+                        match ClientOptions::new().open(&pipe_path) {
+                            Ok(client) => return Ok(TokioIo::new(client)),
+                            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+                                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "named pipe busy (all instances)",
+                    ))
+                }
+            }))
+            .await
+            .map_err(|e| format!("cannot reach service (pipe): {e}"))?;
+        Ok(Self {
+            inner: BackupServiceClient::new(channel),
+            token,
         })
     }
 

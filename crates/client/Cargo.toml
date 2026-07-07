@@ -15,6 +15,12 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 
+# Named-pipe transport (Windows production): a tower connector feeds the
+# connected pipe to tonic via hyper-util's Tokio IO adapter.
+[target.'cfg(target_os = "windows")'.dependencies]
+hyper-util = { version = "0.1", features = ["tokio"] }
+tower = { version = "0.4", features = ["util"] }
+
 [build-dependencies]
 tonic-build = { workspace = true }
 prost-build = "0.13"

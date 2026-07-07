@@ -187,7 +187,8 @@ fn print_info() {
 }
 
 /// Build a tokio runtime and run the gRPC loop until shutdown. `use_tcp`
-/// selects the transport (TCP for dev; UDS for a real Unix daemon).
+/// selects the transport: loopback TCP for dev/foreground, else the OS
+/// production transport (UDS on Unix, a DACL-restricted named pipe on Windows).
 fn run_loop(use_tcp: bool) -> Result<(), Box<dyn std::error::Error>> {
     info!("Starting {SERVICE_DISPLAY_NAME} ({})", if use_tcp { "foreground/TCP" } else { "daemon/UDS" });
     let runtime = tokio::runtime::Runtime::new()?;
@@ -349,15 +350,18 @@ pub async fn run_main_loop(
 
     let state = AppState::new(config.clone(), store, queue, job_tx, cancel, events, passwords);
 
-    // Production transport: Unix Domain Socket on Linux (no TCP, prevents local
-    // privilege escalation). Dev/foreground uses TCP on localhost. Windows
-    // named-pipe transport is a TODO; it falls back to TCP for now.
+    // Production transport (no listening TCP port, so no local process can reach
+    // the privileged service by opening a socket): Unix Domain Socket on Linux,
+    // a DACL-restricted named pipe on Windows. Dev/foreground (`use_tcp`) uses
+    // loopback TCP on both.
     #[cfg(unix)]
     if !use_tcp {
         return serve_uds(config, state, shutdown).await;
     }
-    #[cfg(not(unix))]
-    let _ = use_tcp;
+    #[cfg(windows)]
+    if !use_tcp {
+        return serve_named_pipe(config, state, shutdown).await;
+    }
 
     // TCP on loopback. On Windows this is the production transport (until a
     // named pipe lands): require a per-boot bearer token stored in an ACL'd file
@@ -498,5 +502,220 @@ async fn serve_uds(
 
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_file(&config.token_path());
+    Ok(())
+}
+
+/// A connected named-pipe instance, adapted to tonic's connection trait. The
+/// pipe is a byte stream just like a socket, so read/write delegate straight to
+/// the inner [`NamedPipeServer`].
+#[cfg(windows)]
+struct NamedPipeConn(tokio::net::windows::named_pipe::NamedPipeServer);
+
+#[cfg(windows)]
+impl tonic::transport::server::Connected for NamedPipeConn {
+    type ConnectInfo = ();
+    fn connect_info(&self) -> Self::ConnectInfo {}
+}
+
+#[cfg(windows)]
+impl tokio::io::AsyncRead for NamedPipeConn {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.0).poll_read(cx, buf)
+    }
+}
+
+#[cfg(windows)]
+impl tokio::io::AsyncWrite for NamedPipeConn {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.0).poll_write(cx, buf)
+    }
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.0).poll_flush(cx)
+    }
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.0).poll_shutdown(cx)
+    }
+}
+
+/// A named-pipe security descriptor granting SYSTEM + Administrators full
+/// control and the interactive desktop user connect/read/write (but NOT the
+/// right to create pipe instances). This mirrors the token-file DACL exactly:
+/// the unelevated GUI/CLI in the console session can reach the service, while
+/// the network, other logon sessions and non-interactive local services cannot.
+/// Freed via `LocalFree` on drop.
+#[cfg(windows)]
+struct PipeSecurity(windows::Win32::Security::PSECURITY_DESCRIPTOR);
+
+// The descriptor is immutable after construction; only a raw pointer prevents
+// the auto-derive, so it is safe to move between threads.
+#[cfg(windows)]
+unsafe impl Send for PipeSecurity {}
+
+#[cfg(windows)]
+impl PipeSecurity {
+    fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        use windows::core::PCWSTR;
+        use windows::Win32::Security::Authorization::{
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+        };
+        use windows::Win32::Security::PSECURITY_DESCRIPTOR;
+
+        // D:P = protected DACL (no inheritance from ProgramData etc.);
+        // GA = GENERIC_ALL, GR|GW = GENERIC_READ|WRITE. SY=SYSTEM, BA=Builtin
+        // Administrators, IU=Interactive Users.
+        let sddl: Vec<u16> = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)\0"
+            .encode_utf16()
+            .collect();
+        let mut psd = PSECURITY_DESCRIPTOR::default();
+        // SAFETY: `sddl` is a NUL-terminated UTF-16 string; `psd` receives a
+        // freshly LocalAlloc'd descriptor that Drop frees.
+        unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                PCWSTR(sddl.as_ptr()),
+                SDDL_REVISION_1,
+                &mut psd,
+                None,
+            )?;
+        }
+        Ok(Self(psd))
+    }
+
+    /// A SECURITY_ATTRIBUTES referencing this descriptor. The returned value
+    /// borrows `self`'s pointer, so it must not outlive `self`.
+    fn attributes(&self) -> windows::Win32::Security::SECURITY_ATTRIBUTES {
+        windows::Win32::Security::SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<windows::Win32::Security::SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: self.0 .0,
+            bInheritHandle: windows::Win32::Foundation::FALSE,
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for PipeSecurity {
+    fn drop(&mut self) {
+        // SAFETY: the pointer came from ConvertString...SecurityDescriptorW,
+        // which documents LocalFree as the matching deallocator.
+        unsafe {
+            let _ = windows::Win32::Foundation::LocalFree(windows::Win32::Foundation::HLOCAL(
+                self.0 .0,
+            ));
+        }
+    }
+}
+
+/// Serve gRPC over a Windows named pipe (production transport — no listening TCP
+/// port). Access is gated by the pipe's DACL (see [`PipeSecurity`]); the bearer
+/// token is still written and required, as defence in depth. One listening pipe
+/// instance is always kept open ahead of the connected ones so clients are never
+/// refused with ERROR_PIPE_BUSY.
+#[cfg(windows)]
+async fn serve_named_pipe(
+    config: AppConfig,
+    state: std::sync::Arc<AppState>,
+    mut shutdown: ShutdownSignal,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::ffi::c_void;
+    use tokio::net::windows::named_pipe::ServerOptions;
+
+    let pipe_path = own_backup_common::windows_pipe_path();
+    let token = write_service_token(&config).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "could not write service token — running WITHOUT token auth");
+        String::new()
+    });
+    let security = PipeSecurity::new()?;
+
+    info!(
+        "gRPC server (named pipe) listening on {} (auth: {})",
+        pipe_path,
+        if token.is_empty() { "off" } else { "token" }
+    );
+
+    let incoming = async_stream::stream! {
+        // First instance uses FIRST_PIPE_INSTANCE so a pre-existing (squatted)
+        // pipe of the same name makes creation fail loudly instead of us
+        // adopting a rogue endpoint.
+        let sa = security.attributes();
+        let first = unsafe {
+            ServerOptions::new()
+                .first_pipe_instance(true)
+                .create_with_security_attributes_raw(
+                    &pipe_path,
+                    &sa as *const _ as *mut c_void,
+                )
+        };
+        let mut server = match first {
+            Ok(s) => s,
+            Err(e) => {
+                yield Err(e);
+                return;
+            }
+        };
+        loop {
+            match server.connect().await {
+                Ok(()) => {
+                    let connected = server;
+                    // Open the next listening instance BEFORE handing off the
+                    // connected one, so a client arriving now is not refused.
+                    let sa = security.attributes();
+                    server = match unsafe {
+                        ServerOptions::new().create_with_security_attributes_raw(
+                            &pipe_path,
+                            &sa as *const _ as *mut c_void,
+                        )
+                    } {
+                        Ok(s) => s,
+                        Err(e) => {
+                            yield Ok(NamedPipeConn(connected));
+                            yield Err(e);
+                            return;
+                        }
+                    };
+                    yield Ok(NamedPipeConn(connected));
+                }
+                Err(e) => {
+                    // Recreate the instance and keep serving.
+                    yield Err(e);
+                    let sa = security.attributes();
+                    server = match unsafe {
+                        ServerOptions::new().create_with_security_attributes_raw(
+                            &pipe_path,
+                            &sa as *const _ as *mut c_void,
+                        )
+                    } {
+                        Ok(s) => s,
+                        Err(e) => {
+                            yield Err(e);
+                            return;
+                        }
+                    };
+                }
+            }
+        }
+    };
+
+    let service = BackupServiceImpl::new(state, token).into_service();
+    Server::builder()
+        .add_service(service)
+        .serve_with_incoming_shutdown(incoming, async move {
+            shutdown.wait_for_shutdown().await
+        })
+        .await?;
+
+    let _ = std::fs::remove_file(config.token_path());
     Ok(())
 }

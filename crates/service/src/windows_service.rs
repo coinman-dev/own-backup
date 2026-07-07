@@ -106,10 +106,11 @@ mod imp {
 
         info!("Service started");
 
-        // Run the main application loop (TCP placeholder until the Windows
-        // named-pipe transport lands).
+        // Run the main application loop. use_tcp=false → production transport:
+        // a DACL-restricted named pipe (no listening TCP port). Foreground/dev
+        // (`--foreground`) still uses loopback TCP.
         let runtime = tokio::runtime::Runtime::new()?;
-        runtime.block_on(crate::run_main_loop(shutdown_signal, true, os_rx))?;
+        runtime.block_on(crate::run_main_loop(shutdown_signal, false, os_rx))?;
 
         // Report Stopped
         status_handle.set_service_status(ServiceStatus {

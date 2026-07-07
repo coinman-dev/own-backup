@@ -62,6 +62,8 @@ Cargo workspace with crates:
 - All traits (`BlockReader`, `BlockWriter`, `UsedSectorMap`, `SnapshotProvider`,
   `DiskInventory`) have mock implementations for Linux testing
 - Unimplemented gRPC methods must return `Status::unimplemented` — never fake success
-- gRPC on localhost:50051 (TCP + bearer token) / UDS on Unix; no TLS
+- gRPC production transport: DACL-restricted **named pipe** `\\.\pipe\OwnBackup`
+  on Windows, **UDS** on Unix — no listening TCP port. Foreground/dev uses
+  loopback TCP:50051. Bearer token still required (defence in depth); no TLS
 - SQLite with `bundled` feature for cross-compilation
 - No email notifications (decision 2026-07-01); local notifications only
