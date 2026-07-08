@@ -25,7 +25,7 @@ use own_backup_common::disk::DiskInfo;
 use own_backup_common::image::ImageManifest;
 use own_backup_common::progress::{BackupProgress, RestoreProgress};
 use own_backup_common::types::{
-    BackupMode, BackupStatus, BackupType, BootMode, CompressionAlgo, PartitionTable,
+    BackupMode, BackupStatus, BackupType, BootMode, CompressionAlgo, ImageFormat, PartitionTable,
 };
 use own_backup_common::{OwnBackupError, Result};
 
@@ -59,6 +59,90 @@ const MIB: u64 = 1024 * 1024;
 /// VHDX payload block size (allocation granularity of the dynamic image).
 const VHDX_BLOCK_SIZE: u64 = 2 * MIB;
 
+/// Image writer behind the format switch: dynamic VHDX (pure-Rust writer) or
+/// zstd-compressed qcow2 — both expose the byte-granular `write_at` the
+/// GPT/block pipeline uses.
+enum LinuxImageWriter {
+    Vhdx(crate::vhdx_format::VhdxWriter),
+    Qcow2(crate::qcow2::Qcow2StagedWriter<std::io::BufWriter<std::fs::File>>),
+}
+
+impl LinuxImageWriter {
+    fn create(format: ImageFormat, path: &Path, disk_size: u64, sector_size: u32) -> Result<Self> {
+        Ok(match format {
+            ImageFormat::Vhdx => Self::Vhdx(crate::vhdx_format::VhdxWriter::create(
+                path,
+                disk_size,
+                VHDX_BLOCK_SIZE,
+                sector_size,
+            )?),
+            ImageFormat::Qcow2 => Self::Qcow2(crate::qcow2::Qcow2StagedWriter::create(
+                path,
+                crate::qcow2::Qcow2WriterOptions {
+                    virtual_size: disk_size,
+                    ..Default::default()
+                },
+            )?),
+        })
+    }
+
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()> {
+        match self {
+            Self::Vhdx(w) => w.write_at(offset, data),
+            Self::Qcow2(w) => w.write_at(offset, data),
+        }
+    }
+
+    fn finish(self) -> Result<()> {
+        match self {
+            Self::Vhdx(w) => w.finish(),
+            Self::Qcow2(w) => w.finish().map(|_| ()),
+        }
+    }
+}
+
+/// Read side of the same switch, picked by the sidecar's `container` field.
+enum LinuxImageReader {
+    Vhdx(crate::vhdx_format::VhdxReader),
+    Qcow2(crate::qcow2::Qcow2RandomReader),
+}
+
+impl LinuxImageReader {
+    fn open(path: &Path, container: &str) -> Result<Self> {
+        match container {
+            "vhdx" => Ok(Self::Vhdx(crate::vhdx_format::VhdxReader::open(path)?)),
+            "qcow2" => Ok(Self::Qcow2(crate::qcow2::Qcow2RandomReader::open(path)?)),
+            other => Err(OwnBackupError::ImageFormat(format!(
+                "unknown image container '{other}' in sidecar"
+            ))),
+        }
+    }
+
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        match self {
+            Self::Vhdx(r) => r.read_at(offset, buf),
+            Self::Qcow2(r) => r.read_at(offset, buf),
+        }
+    }
+
+    fn virtual_size(&self) -> u64 {
+        match self {
+            Self::Vhdx(r) => r.virtual_size(),
+            Self::Qcow2(r) => r.virtual_size(),
+        }
+    }
+}
+
+impl crate::block_source::BlockSource for LinuxImageReader {
+    fn size(&self) -> u64 {
+        self.virtual_size()
+    }
+
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        LinuxImageReader::read_at(self, offset, buf)
+    }
+}
+
 /// Parameters for a Linux volume backup.
 pub struct LinuxBackupRequest {
     /// Source device (`/dev/sdb2`, a loop device, or an image file).
@@ -74,6 +158,8 @@ pub struct LinuxBackupRequest {
     pub passphrase: Option<Zeroizing<String>>,
     /// GUI job id, stamped into the sidecar.
     pub job_id: Option<String>,
+    /// Image container format: VHDX (default) or zstd-compressed qcow2.
+    pub image_format: ImageFormat,
 }
 
 /// Outcome of a completed Linux backup.
@@ -206,14 +292,9 @@ fn backup_inner(
     };
     let used_blocks = used.used_block_count();
 
-    // --- Create the dynamic VHDX: 1 MiB GPT head + volume + 1 MiB tail ---
+    // --- Create the image: 1 MiB GPT head + volume + 1 MiB tail ---
     let disk_size = DEFAULT_PARTITION_OFFSET + volume_len.div_ceil(MIB) * MIB + MIB;
-    let mut writer = crate::vhdx_format::VhdxWriter::create(
-        &req.image_path,
-        disk_size,
-        VHDX_BLOCK_SIZE,
-        sector_size,
-    )?;
+    let mut writer = LinuxImageWriter::create(req.image_format, &req.image_path, disk_size, sector_size)?;
     let data_offset = DEFAULT_PARTITION_OFFSET;
 
     // --- GPT with a single Basic Data partition wrapping the volume ---
@@ -266,8 +347,14 @@ fn backup_inner(
         },
         boot_mode: BootMode::Uefi,
         partition_table: PartitionTable::Gpt,
-        compression_algo: CompressionAlgo::None,
-        compression_level: 0,
+        compression_algo: match req.image_format {
+            ImageFormat::Vhdx => CompressionAlgo::None,
+            ImageFormat::Qcow2 => CompressionAlgo::Zstd,
+        },
+        compression_level: match req.image_format {
+            ImageFormat::Vhdx => 0,
+            ImageFormat::Qcow2 => crate::qcow2::DEFAULT_ZSTD_LEVEL,
+        },
         encryption_algo: None,
         encryption_salt: None,
         block_size: req.block_size,
@@ -302,6 +389,7 @@ fn backup_inner(
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let mut sidecar_info = SidecarInfo::new_full(image_file_name, data_offset);
+    sidecar_info.container = req.image_format.extension().into();
     sidecar_info.job_id = req.job_id.clone();
     let sidecar_path = sidecar_path_for(&req.image_path);
     write_sidecar(&sidecar_path, &sidecar_info, &manifest, &outcome.checksums)?;
@@ -366,7 +454,7 @@ pub fn restore_volume(
     let volume_len = sidecar.manifest.source_disk.size_bytes;
     let data_offset = sidecar.info.volume_data_offset;
 
-    let image = crate::vhdx_format::VhdxReader::open(&req.image_path)?;
+    let mut image = LinuxImageReader::open(&req.image_path, &sidecar.info.container)?;
     let mut target = LinuxRawDevice::open_write(&req.target)?;
     if target.length() < volume_len {
         return Err(OwnBackupError::RestoreIncompatible(format!(
@@ -427,6 +515,107 @@ pub fn restore_volume(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Mount / unmount (plan Q4): image → in-process NBD device → `mount -o ro`
+// ---------------------------------------------------------------------------
+
+struct ActiveMount {
+    nbd: crate::nbd_linux::NbdAttachment,
+    mount_dir: PathBuf,
+}
+
+/// Mounts served by THIS process — the NBD device dies with the serving
+/// process, so mounting only makes sense inside the long-running service.
+static ACTIVE_MOUNTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<PathBuf, ActiveMount>>> =
+    std::sync::OnceLock::new();
+
+fn active_mounts() -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, ActiveMount>> {
+    ACTIVE_MOUNTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Mount a backup image (qcow2 incl. chains, or VHDX) read-only and return
+/// the mount point. Requires root (mount(2) + /dev/nbdX). The volume inside
+/// is found via the sidecar's `volume_data_offset` — no partition probing.
+pub fn mount_image(image_path: &Path) -> Result<String> {
+    {
+        let mounts = active_mounts().lock().unwrap();
+        if let Some(existing) = mounts.get(image_path) {
+            return Ok(existing.mount_dir.display().to_string());
+        }
+    }
+
+    let sidecar_path = sidecar_path_for(image_path);
+    let (info, _manifest) = crate::sidecar::read_sidecar_header(&sidecar_path)?;
+    let reader = LinuxImageReader::open(image_path, &info.container)?;
+
+    let nbd = crate::nbd_linux::NbdAttachment::attach(Box::new(reader))?;
+
+    // SAFETY: geteuid is always safe.
+    let base = if unsafe { libc::geteuid() } == 0 {
+        PathBuf::from("/run/own-backup/mounts")
+    } else {
+        std::env::temp_dir().join("own-backup-mounts")
+    };
+    let stem = image_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "image".into());
+    let mount_dir = base.join(stem);
+    std::fs::create_dir_all(&mount_dir)?;
+
+    // `-o loop,offset=…` puts a loop device over the NBD disk at the volume
+    // start, so the filesystem mounts regardless of nbd partition support.
+    let out = std::process::Command::new("mount")
+        .arg("-o")
+        .arg(format!("ro,loop,offset={}", info.volume_data_offset))
+        .arg(&nbd.device)
+        .arg(&mount_dir)
+        .output()
+        .map_err(|e| OwnBackupError::Device(format!("failed to run mount: {e}")))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let _ = nbd.detach();
+        let _ = std::fs::remove_dir(&mount_dir);
+        return Err(OwnBackupError::Device(format!(
+            "mount failed (root required; NTFS needs the ntfs3 driver or ntfs-3g): {err}"
+        )));
+    }
+
+    info!(image = %image_path.display(), dir = %mount_dir.display(), "backup mounted read-only");
+    active_mounts()
+        .lock()
+        .unwrap()
+        .insert(image_path.to_path_buf(), ActiveMount { nbd, mount_dir: mount_dir.clone() });
+    Ok(mount_dir.display().to_string())
+}
+
+/// Unmount a previously mounted image and release its NBD device.
+pub fn unmount_image(image_path: &Path) -> Result<()> {
+    let entry = active_mounts().lock().unwrap().remove(image_path);
+    let Some(entry) = entry else {
+        return Err(OwnBackupError::Config(format!(
+            "{} is not mounted by this service",
+            image_path.display()
+        )));
+    };
+
+    let out = std::process::Command::new("umount")
+        .arg(&entry.mount_dir)
+        .output()
+        .map_err(|e| OwnBackupError::Device(format!("failed to run umount: {e}")))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        // Put the entry back so a later retry can still find it.
+        active_mounts().lock().unwrap().insert(image_path.to_path_buf(), entry);
+        return Err(OwnBackupError::Device(format!("umount failed: {err}")));
+    }
+
+    entry.nbd.detach()?;
+    let _ = std::fs::remove_dir(&entry.mount_dir);
+    info!(image = %image_path.display(), "backup unmounted");
+    Ok(())
+}
+
 /// Result of verifying an image against its sidecar checksums.
 pub struct VerifySummary {
     pub blocks_checked: u64,
@@ -456,7 +645,7 @@ pub fn verify_image(
     let volume_len = sidecar.manifest.source_disk.size_bytes;
     let data_offset = sidecar.info.volume_data_offset;
 
-    let dev = crate::vhdx_format::VhdxReader::open(image_path)?;
+    let mut dev = LinuxImageReader::open(image_path, &sidecar.info.container)?;
     let total = sidecar.checksums.len() as u64;
     let mut checked = 0u64;
     let mut mismatched = Vec::new();
@@ -506,6 +695,7 @@ mod tests {
             all_sectors: false,
             passphrase: None,
             job_id: None,
+            image_format: ImageFormat::Vhdx,
         };
         let sum = backup_volume(&req, no_progress).unwrap();
         assert!(sum.smart_mode);
@@ -546,6 +736,7 @@ mod tests {
                 all_sectors: false,
                 passphrase: None,
                 job_id: None,
+                image_format: ImageFormat::Vhdx,
             },
             no_progress,
         )
@@ -570,5 +761,133 @@ mod tests {
             own_backup_inventory::fs_probe::probe_partition_path(tgt.to_str().unwrap()).unwrap();
         assert_eq!(probed.fs, own_backup_common::types::FileSystem::Ext4);
         assert_eq!(probed.label.as_deref(), Some("roundtrip"));
+    }
+
+    /// Same full round trip through the **qcow2** container: backup → verify →
+    /// restore → valid ext4. Also checks the sidecar records the container and
+    /// that compression actually shrinks the image. `--ignored` (needs mkfs.ext4).
+    #[test]
+    #[ignore]
+    fn qcow2_backup_verify_restore_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.ext4");
+        std::fs::File::create(&src).unwrap().set_len(64 * 1024 * 1024).unwrap();
+        assert!(std::process::Command::new("mkfs.ext4")
+            .args(["-q", "-F", "-L", "qcowtrip", src.to_str().unwrap()])
+            .status()
+            .unwrap()
+            .success());
+
+        let img = dir.path().join("out.qcow2");
+        let sum = backup_volume(
+            &LinuxBackupRequest {
+                source: src.to_str().unwrap().to_string(),
+                image_path: img.clone(),
+                block_size: DEFAULT_BLOCK_SIZE,
+                all_sectors: false,
+                passphrase: None,
+                job_id: None,
+                image_format: ImageFormat::Qcow2,
+            },
+            no_progress,
+        )
+        .unwrap();
+        assert!(sum.smart_mode);
+
+        // Sidecar must say qcow2 + zstd, and the image must be smaller than
+        // the bytes that went in (ext4 metadata compresses well).
+        let sidecar = read_sidecar(&sidecar_path_for(&img)).unwrap();
+        assert_eq!(sidecar.info.container, "qcow2");
+        assert_eq!(
+            sidecar.manifest.compression_algo,
+            own_backup_common::types::CompressionAlgo::Zstd
+        );
+        let image_len = std::fs::metadata(&img).unwrap().len();
+        assert!(
+            image_len < sum.bytes_copied,
+            "qcow2 image ({image_len} B) not smaller than copied data ({} B)",
+            sum.bytes_copied
+        );
+
+        let v = verify_image(&img, |_, _| Ok(())).unwrap();
+        assert!(v.valid(), "verify mismatches: {:?}", v.mismatched_blocks);
+
+        let tgt = dir.path().join("restored.bin");
+        std::fs::File::create(&tgt).unwrap().set_len(sum.source_bytes).unwrap();
+        let r = restore_volume(
+            &LinuxRestoreRequest {
+                image_path: img,
+                target: tgt.to_str().unwrap().to_string(),
+                verify_checksums: true,
+            },
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(r.blocks_restored, sum.used_blocks);
+
+        let probed =
+            own_backup_inventory::fs_probe::probe_partition_path(tgt.to_str().unwrap()).unwrap();
+        assert_eq!(probed.fs, own_backup_common::types::FileSystem::Ext4);
+        assert_eq!(probed.label.as_deref(), Some("qcowtrip"));
+    }
+
+    /// The whole Q4 stack live: ext4 with a real file → qcow2 backup →
+    /// in-process NBD device → `mount -o ro,loop,offset` → the file reads
+    /// back byte-identical → clean unmount. Needs **root** and `nbd.ko`:
+    /// `sudo <test-binary> --ignored engine_linux::tests::qcow2_mount`.
+    #[test]
+    #[ignore]
+    fn qcow2_mount_roundtrip_via_nbd() {
+        assert_eq!(unsafe { libc::geteuid() }, 0, "this test needs root");
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.ext4");
+        std::fs::File::create(&src).unwrap().set_len(64 * 1024 * 1024).unwrap();
+        assert!(std::process::Command::new("mkfs.ext4")
+            .args(["-q", "-F", "-L", "mounttrip", src.to_str().unwrap()])
+            .status()
+            .unwrap()
+            .success());
+
+        // Put a recognisable file into the source volume.
+        let payload: Vec<u8> = (0..1_000_000u32).flat_map(|i| i.to_le_bytes()).collect();
+        let srcmnt = dir.path().join("srcmnt");
+        std::fs::create_dir(&srcmnt).unwrap();
+        assert!(std::process::Command::new("mount")
+            .args(["-o", "loop", src.to_str().unwrap(), srcmnt.to_str().unwrap()])
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(srcmnt.join("payload.bin"), &payload).unwrap();
+        assert!(std::process::Command::new("umount")
+            .arg(&srcmnt)
+            .status()
+            .unwrap()
+            .success());
+
+        // Back up into qcow2 and mount the backup through our NBD server.
+        let img = dir.path().join("backup.qcow2");
+        backup_volume(
+            &LinuxBackupRequest {
+                source: src.to_str().unwrap().to_string(),
+                image_path: img.clone(),
+                block_size: DEFAULT_BLOCK_SIZE,
+                all_sectors: false,
+                passphrase: None,
+                job_id: None,
+                image_format: ImageFormat::Qcow2,
+            },
+            no_progress,
+        )
+        .unwrap();
+
+        let mount_dir = mount_image(&img).unwrap();
+        let restored = std::fs::read(Path::new(&mount_dir).join("payload.bin")).unwrap();
+        assert_eq!(restored, payload, "file read from the mounted backup differs");
+
+        // Read-only is enforced end to end.
+        assert!(std::fs::write(Path::new(&mount_dir).join("x"), b"nope").is_err());
+
+        unmount_image(&img).unwrap();
+        assert!(!Path::new(&mount_dir).join("payload.bin").exists());
     }
 }

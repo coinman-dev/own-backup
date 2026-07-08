@@ -1,10 +1,12 @@
 pub mod bitlocker;
 pub mod block_reader;
+pub mod block_source;
 pub mod btrfs_map;
 pub mod chains;
 pub mod checksum;
 pub mod compression;
 pub mod decrypt;
+pub mod devio;
 pub mod encryption;
 pub mod exclusions;
 pub mod ext_map;
@@ -18,6 +20,7 @@ pub mod incremental;
 pub mod luks;
 pub mod ntfs_map;
 pub mod pipeline;
+pub mod qcow2;
 pub mod raw_copy;
 pub mod san_policy;
 pub mod secrets;
@@ -31,8 +34,14 @@ pub mod engine_linux;
 #[cfg(target_os = "linux")]
 pub mod linux_device;
 #[cfg(target_os = "linux")]
+pub mod nbd_linux;
+#[cfg(target_os = "linux")]
 pub mod vhdx_format;
 
+#[cfg(target_os = "windows")]
+pub mod aim_install;
+#[cfg(target_os = "windows")]
+pub mod aim_win;
 #[cfg(target_os = "windows")]
 pub mod block_reader_win;
 #[cfg(target_os = "windows")]
@@ -60,6 +69,7 @@ pub use image_reader::ImageReader;
 pub use image_writer::ImageWriter;
 pub use incremental::IncrementalEngine;
 pub use pipeline::BackupPipeline;
+pub use qcow2::{Qcow2Compression, Qcow2Reader, Qcow2Writer, Qcow2WriterOptions};
 pub use raw_copy::{copy_used_blocks, CopyOutcome};
 pub use sidecar::{
     read_sidecar, read_sidecar_header, sidecar_path_for, write_sidecar, BlockChecksum, ChainRole,

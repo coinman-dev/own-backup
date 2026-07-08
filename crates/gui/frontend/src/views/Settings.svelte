@@ -52,6 +52,70 @@
       error = e instanceof Error ? e.message : String(e);
     }
   }
+
+  // --- Arsenal Image Mounter driver card ---
+  let driverInstalled: boolean | null = $state(null);
+  let driverBusy = $state(false);
+  let driverMsg: string | null = $state(null);
+  let driverErr: string | null = $state(null);
+  let showInstallModal = $state(false);
+  // Modal-local install state: the modal stays open with a running progress
+  // bar during install, and closes only on success (or shows the error).
+  let installing = $state(false);
+  let installError: string | null = $state(null);
+
+  async function refreshDriver() {
+    try {
+      const st = await api.aimDriverStatus();
+      driverInstalled = st.installed;
+    } catch (e) {
+      driverInstalled = null;
+      driverErr = String(e);
+    }
+  }
+
+  $effect(() => {
+    refreshDriver();
+  });
+
+  async function confirmInstall() {
+    // Keep the modal open; run the progress bar; close only on success.
+    installing = true;
+    installError = null;
+    driverMsg = null;
+    driverErr = null;
+    try {
+      await api.installAimDriver();
+      await refreshDriver();
+      installing = false;
+      showInstallModal = false;
+      driverMsg = 'Драйвер установлен.';
+    } catch (e) {
+      installing = false;
+      installError = String(e);
+    }
+  }
+
+  function closeInstallModal() {
+    if (installing) return; // don't let the user close mid-install
+    showInstallModal = false;
+    installError = null;
+  }
+
+  async function uninstallDriver() {
+    driverBusy = true;
+    driverMsg = null;
+    driverErr = null;
+    try {
+      await api.uninstallAimDriver();
+      driverMsg = 'Драйвер удалён.';
+      await refreshDriver();
+    } catch (e) {
+      driverErr = String(e);
+    } finally {
+      driverBusy = false;
+    }
+  }
 </script>
 
 <div class="settings-view">
@@ -168,9 +232,83 @@
           </div>
         {/if}
       </div>
+
+      <div class="card">
+        <h2 class="section-title">Драйвер монтирования (Arsenal Image Mounter)</h2>
+        <p class="driver-desc">
+          Нужен для подключения резервных копий формата <b>qcow2</b> как диска.
+          Для формата VHDX не требуется — он монтируется средствами Windows.
+        </p>
+
+        <div class="driver-row">
+          <div class="driver-status">
+            {#if driverInstalled === null}
+              <span class="status-dot offline"></span><span>Статус неизвестен</span>
+            {:else if driverInstalled}
+              <span class="status-dot"></span><span>Установлен</span>
+            {:else}
+              <span class="status-dot offline"></span><span>Не установлен</span>
+            {/if}
+          </div>
+          <div class="driver-actions">
+            {#if driverInstalled}
+              <button class="btn btn-secondary" onclick={uninstallDriver} disabled={driverBusy}>
+                {driverBusy ? 'Удаление…' : 'Удалить'}
+              </button>
+            {:else}
+              <button class="btn btn-primary" onclick={() => (showInstallModal = true)} disabled={driverBusy}>
+                {driverBusy ? 'Установка…' : 'Установить'}
+              </button>
+            {/if}
+          </div>
+        </div>
+
+        {#if driverMsg}<div class="driver-note ok">{driverMsg}</div>{/if}
+        {#if driverErr}<div class="driver-note err">{driverErr}</div>{/if}
+      </div>
     </div>
   {/if}
 </div>
+
+{#if showInstallModal}
+  <div class="modal-backdrop" role="presentation" onclick={closeInstallModal}>
+    <div class="modal" role="dialog" aria-modal="true" onclick={(e) => e.stopPropagation()}>
+      <h3 class="modal-title">Установка Arsenal Image Mounter</h3>
+      <p>
+        <b>Arsenal Image Mounter</b> — это отдельная программа (драйвер) компании
+        Arsenal Recon, распространяемая на условиях <b>её собственной лицензии</b>.
+        Она работает бесплатно в режиме базовой функциональности (Free Mode).
+      </p>
+      <p>
+        Пакет будет загружен с официального репозитория GitHub:
+      </p>
+      <p class="modal-url">github.com/ArsenalRecon/Arsenal-Image-Mounter</p>
+      <p>
+        и установлен в систему — он нужен, чтобы подключать резервные копии
+        формата qcow2 как диск. My Own Backup не распространяет этот драйвер:
+        он скачивается напрямую от разработчика в момент установки.
+      </p>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" onclick={closeInstallModal} disabled={installing}>Отмена</button>
+        <button class="btn btn-primary" onclick={confirmInstall} disabled={installing}>
+          {installing ? 'Установка…' : 'Загрузить и установить'}
+        </button>
+      </div>
+
+      {#if installing}
+        <div class="modal-progress">
+          <div class="progress-caption">Загрузка и установка драйвера…</div>
+          <div class="progress-track"><div class="progress-bar"></div></div>
+        </div>
+      {:else if installError}
+        <div class="modal-install-error">
+          <div class="err-title">Не удалось установить драйвер</div>
+          <div class="err-detail">{installError}</div>
+        </div>
+      {/if}
+    </div>
+  </div>
+{/if}
 
 <style>
   .settings-view {
@@ -347,5 +485,128 @@
 
   @keyframes spin {
     to { transform: rotate(360deg); }
+  }
+
+  /* --- driver card --- */
+  .driver-desc {
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin: 0 0 16px;
+    line-height: 1.5;
+  }
+  .driver-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+  }
+  .driver-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 14px;
+    color: var(--text);
+  }
+  .driver-note {
+    margin-top: 12px;
+    padding: 10px 12px;
+    border-radius: 6px;
+    font-size: 13px;
+  }
+  .driver-note.ok { background: rgba(52, 168, 83, 0.1); color: #2e7d32; }
+  .driver-note.err { background: rgba(234, 67, 53, 0.08); color: #c62828; }
+
+  /* --- install modal --- */
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.45);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+  }
+  .modal {
+    background: var(--surface, #fff);
+    color: var(--text);
+    max-width: 480px;
+    width: calc(100% - 48px);
+    border-radius: 10px;
+    padding: 24px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
+  }
+  .modal-title {
+    margin: 0 0 12px;
+    font-size: 18px;
+    font-weight: 600;
+  }
+  .modal p {
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+    margin: 0 0 10px;
+  }
+  .modal-url {
+    font-family: monospace;
+    background: rgba(127, 127, 127, 0.1);
+    padding: 8px 10px;
+    border-radius: 6px;
+    word-break: break-all;
+  }
+  .modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 20px;
+  }
+
+  /* --- install progress / error (bottom of the modal) --- */
+  .modal-progress {
+    margin-top: 18px;
+  }
+  .progress-caption {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+  }
+  .progress-track {
+    position: relative;
+    height: 5px;
+    background: rgba(127, 127, 127, 0.15);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .progress-bar {
+    position: absolute;
+    top: 0;
+    height: 100%;
+    width: 32%;
+    border-radius: 3px;
+    background: var(--primary, #6c5ce7);
+    animation: indeterminate 1.1s ease-in-out infinite;
+  }
+  @keyframes indeterminate {
+    0% { left: -32%; }
+    100% { left: 100%; }
+  }
+  .modal-install-error {
+    margin-top: 18px;
+    padding: 12px 14px;
+    border-radius: 6px;
+    background: rgba(234, 67, 53, 0.08);
+    border: 1px solid rgba(234, 67, 53, 0.25);
+  }
+  .err-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #c62828;
+    margin-bottom: 6px;
+  }
+  .err-detail {
+    font-size: 12px;
+    font-family: monospace;
+    color: var(--text);
+    word-break: break-word;
+    line-height: 1.5;
   }
 </style>

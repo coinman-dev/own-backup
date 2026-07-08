@@ -2,7 +2,7 @@
 name = "own-backup-backup"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 
 [dependencies]
 own-backup-common = { workspace = true }
@@ -41,7 +41,12 @@ windows = { version = "0.58", features = [
     "Win32_System_Ioctl",
     "Win32_System_IO",
     "Win32_System_Threading",
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_System_Services",
 ] }
+# Driver-install feature (aim_install.rs): download DriverFiles.zip + extract.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+ureq = "2"
 
 [dev-dependencies]
 tempfile = "3"

@@ -21,12 +21,16 @@ use own_backup_common::Result;
 
 use crate::sidecar::{read_sidecar_header, ChainRole, SIDECAR_EXTENSION};
 
-/// One image (VHDX/AVHDX + sidecar) inside a chain.
+/// One image (VHDX/AVHDX/qcow2 + sidecar) inside a chain.
 #[derive(Debug, Clone)]
 pub struct ChainImage {
     pub image_path: PathBuf,
     pub sidecar_path: PathBuf,
     pub role: ChainRole,
+    /// Container format from the sidecar (`vhdx` / `qcow2`). A job's format
+    /// must never change over existing archives (decision 2026-07-08) — the
+    /// runners check every chain image against the job's format.
+    pub container: String,
     /// RFC3339 creation timestamp from the manifest.
     pub created_at: String,
     pub parent_file_name: Option<String>,
@@ -92,6 +96,7 @@ pub fn list_job_chains(folder: &Path, job_id: &str) -> Result<Vec<Chain>> {
             image_path: folder.join(&info.image_file_name),
             sidecar_path,
             role: info.chain_role,
+            container: info.container,
             created_at: manifest.created_at,
             parent_file_name: info.parent_image_file_name,
         });
@@ -317,6 +322,28 @@ mod tests {
     }
 
     #[test]
+    fn chain_images_carry_their_container() {
+        let dir = tempfile::tempdir().unwrap();
+        // A qcow2 full: sidecar container says "qcow2".
+        let image = dir.path().join("q_full.qcow2");
+        std::fs::write(&image, b"img").unwrap();
+        let mut info = SidecarInfo::new_full("q_full.qcow2", 0);
+        info.container = "qcow2".into();
+        info.job_id = Some("j1".into());
+        write_sidecar(&sidecar_path_for(&image), &info, &manifest("2026-01-01T00:00:00Z"), &[])
+            .unwrap();
+        put_image(dir.path(), "v_full.vhdx", ChainRole::Full, None, Some("j1"), "2026-02-01T00:00:00Z");
+
+        let chains = list_job_chains(dir.path(), "j1").unwrap();
+        let containers: Vec<&str> = chains
+            .iter()
+            .flat_map(|c| c.images.iter())
+            .map(|i| i.container.as_str())
+            .collect();
+        assert!(containers.contains(&"qcow2") && containers.contains(&"vhdx"));
+    }
+
+    #[test]
     fn orphans_group_into_own_chain() {
         let dir = tempfile::tempdir().unwrap();
         put_image(dir.path(), "lost_inc.avhdx", ChainRole::Incremental, Some("gone_full.vhdx"), Some("j1"), "2026-01-02T00:00:00Z");
@@ -334,6 +361,7 @@ mod tests {
                     image_path: PathBuf::from(format!("c{i}.vhdx")),
                     sidecar_path: PathBuf::from(format!("c{i}.vhdx.obkm")),
                     role: ChainRole::Full,
+                    container: "vhdx".into(),
                     created_at: s.to_string(),
                     parent_file_name: None,
                 }],

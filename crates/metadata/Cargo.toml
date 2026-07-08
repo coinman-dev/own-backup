@@ -2,7 +2,7 @@
 name = "own-backup-metadata"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 
 [dependencies]
 own-backup-common = { workspace = true }

@@ -138,6 +138,23 @@ fn validate_job(job: &own_backup_core::Job) -> Result<(), Status> {
              Выберите для назначения другой диск."
         )));
     }
+    // The image format must never change over existing archives (decision
+    // 2026-07-08): reject the save right away when the destination already
+    // holds this job's backups in a different container. The runners repeat
+    // the same check before every run (defence in depth).
+    let folder = std::path::Path::new(&job.dest_folder);
+    if folder.is_dir() {
+        if let Ok(chains) = own_backup_backup::chains::list_job_chains(folder, &job.id) {
+            let want = job.image_format.extension();
+            if chains.iter().flat_map(|c| c.images.iter()).any(|i| i.container != want) {
+                return Err(Status::invalid_argument(
+                    "Нельзя изменить формат образа: у задания уже есть резервные копии \
+                     в другом формате. Создайте новое задание (или удалите существующие \
+                     копии этого задания).",
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -485,7 +502,25 @@ impl BackupService for BackupServiceImpl {
                 .map_err(|e| Status::internal(e.to_string()))?;
             json_reply(&MountResultDto { mount_point })
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "linux")]
+        {
+            use own_backup_backup::engine_linux::mount_image;
+            use own_backup_common::engine_dto::MountResultDto;
+
+            #[derive(serde::Deserialize)]
+            struct In {
+                image_path: String,
+            }
+            let p: In = serde_json::from_str(&req.into_inner().json)
+                .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+            let path = std::path::PathBuf::from(&p.image_path);
+            let mount_point = tokio::task::spawn_blocking(move || mount_image(&path))
+                .await
+                .map_err(|e| Status::internal(format!("mount task panicked: {e}")))?
+                .map_err(|e| Status::internal(e.to_string()))?;
+            json_reply(&MountResultDto { mount_point })
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         {
             let _ = req;
             Err(Status::unimplemented(ENGINE_MSG))
@@ -510,7 +545,23 @@ impl BackupService for BackupServiceImpl {
                 .map_err(|e| Status::internal(e.to_string()))?;
             Ok(Response::new(Empty {}))
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "linux")]
+        {
+            use own_backup_backup::engine_linux::unmount_image;
+            #[derive(serde::Deserialize)]
+            struct In {
+                image_path: String,
+            }
+            let p: In = serde_json::from_str(&req.into_inner().json)
+                .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+            let path = std::path::PathBuf::from(&p.image_path);
+            tokio::task::spawn_blocking(move || unmount_image(&path))
+                .await
+                .map_err(|e| Status::internal(format!("unmount task panicked: {e}")))?
+                .map_err(|e| Status::internal(e.to_string()))?;
+            Ok(Response::new(Empty {}))
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         {
             let _ = req;
             Err(Status::unimplemented(ENGINE_MSG))
@@ -603,6 +654,60 @@ impl BackupService for BackupServiceImpl {
             .engine_cancel
             .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(Response::new(Empty {}))
+    }
+
+    // --- Arsenal Image Mounter driver management (Windows) ---
+
+    async fn aim_driver_status(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        #[cfg(target_os = "windows")]
+        {
+            json_reply(&own_backup_backup::aim_install::status())
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Err(Status::unimplemented(
+                "The Arsenal Image Mounter driver is a Windows component.",
+            ))
+        }
+    }
+
+    async fn install_aim_driver(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        #[cfg(target_os = "windows")]
+        {
+            // Download + SetupAPI install can take a few seconds; run it off the
+            // async runtime.
+            tokio::task::spawn_blocking(own_backup_backup::aim_install::install)
+                .await
+                .map_err(|e| Status::internal(format!("install task panicked: {e}")))?
+                .map_err(|e| Status::internal(e.to_string()))?;
+            json_reply(&own_backup_backup::aim_install::status())
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Err(Status::unimplemented(
+                "The Arsenal Image Mounter driver is a Windows component.",
+            ))
+        }
+    }
+
+    async fn uninstall_aim_driver(&self, req: Request<Empty>) -> Result<Response<Empty>, Status> {
+        check_auth(&req, &self.service_token)?;
+        #[cfg(target_os = "windows")]
+        {
+            tokio::task::spawn_blocking(own_backup_backup::aim_install::uninstall)
+                .await
+                .map_err(|e| Status::internal(format!("uninstall task panicked: {e}")))?
+                .map_err(|e| Status::internal(e.to_string()))?;
+            Ok(Response::new(Empty {}))
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Err(Status::unimplemented(
+                "The Arsenal Image Mounter driver is a Windows component.",
+            ))
+        }
     }
 }
 

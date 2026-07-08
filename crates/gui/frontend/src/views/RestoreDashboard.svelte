@@ -141,7 +141,7 @@
       <div class="card-title">{job.name}</div>
       <div class="card-sub">
         {#if lastRun?.status === 'success'}
-          Копия от {formatDate(lastRun.finished_at)} — {formatBytes(lastRun.bytes_copied)}
+          Копия от {formatDate(lastRun.finished_at)} — {formatBytes(lastRun.bytes_copied)}{lastRun.image_path.toLowerCase().endsWith('.qcow2') ? ' · qcow2' : ''}
         {:else}
           нет готовых копий
         {/if}

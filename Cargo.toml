@@ -18,8 +18,11 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "MIT"
-authors = ["My Own Backup Contributors"]
+# Source-available, free for noncommercial use (PolyForm Noncommercial 1.0.0);
+# commercial use requires a separate license — see LICENSE / COMMERCIAL-LICENSE.md.
+# PolyForm licenses are not in the SPDX list, so we point at the file.
+license-file = "LICENSE"
+authors = ["coinman.dev <coinman.dev@gmail.com>"]
 
 [workspace.dependencies]
 # Error handling

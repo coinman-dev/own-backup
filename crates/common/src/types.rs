@@ -57,6 +57,47 @@ pub enum CompressionAlgo {
     Zstd,
 }
 
+/// Backup image container format (decision #13, 2026-07-07).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageFormat {
+    /// Dynamic VHDX — Windows-native mounting, NTFS/ReFS true removal,
+    /// AVHDX chains; no compression.
+    #[default]
+    Vhdx,
+    /// qcow2 with per-cluster zstd compression — cross-platform, mounted via
+    /// the service; NTFS/ReFS exclusions are zeroing-only.
+    Qcow2,
+}
+
+impl ImageFormat {
+    /// Conventional image file extension (`vhdx` / `qcow2`).
+    pub fn extension(&self) -> &'static str {
+        match self {
+            ImageFormat::Vhdx => "vhdx",
+            ImageFormat::Qcow2 => "qcow2",
+        }
+    }
+}
+
+impl std::fmt::Display for ImageFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.extension())
+    }
+}
+
+impl std::str::FromStr for ImageFormat {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "vhdx" => Ok(ImageFormat::Vhdx),
+            "qcow2" => Ok(ImageFormat::Qcow2),
+            other => Err(format!("unknown image format '{other}' (expected vhdx or qcow2)")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackupMode {

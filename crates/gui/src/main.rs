@@ -16,7 +16,7 @@ use state::GuiState;
 /// Bump this on any build you hand over for testing. It is printed at the top of
 /// the log so we can tell from the log alone WHICH binary actually ran (a common
 /// trap: an old exe left in another folder still gets launched).
-const BUILD_TAG: &str = "diag-2026-07-07c-namedpipe";
+const BUILD_TAG: &str = "diag-2026-07-08g-installprogress";
 
 const ROTATE_AT: u64 = 4 * 1024 * 1024;
 
@@ -139,7 +139,49 @@ fn init_logging() {
     tracing::info!(elevated = ?elevation_state(), "process elevation (expected: Some(false))");
 }
 
+/// Refuse to run a second GUI instance: a named mutex (session-global) is held
+/// for the process lifetime; if it already exists, another instance is up, so
+/// tell the user and exit. Prevents two GUIs fighting over the same private
+/// service / config. Windows only (the packaged product is Windows-first).
+#[cfg(target_os = "windows")]
+fn enforce_single_instance() {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+    use windows::Win32::System::Threading::CreateMutexW;
+    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONINFORMATION, MB_OK};
+
+    let name: Vec<u16> = "Global\\OwnBackupGuiSingleInstance\0".encode_utf16().collect();
+    // SAFETY: name is null-terminated; we intentionally leak the handle so the
+    // mutex lives for the whole process (released by the OS on exit).
+    let handle = unsafe { CreateMutexW(None, true, PCWSTR(name.as_ptr())) };
+    let already = handle.is_err() || unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
+    if already {
+        let title: Vec<u16> = "My Own Backup\0".encode_utf16().collect();
+        let text: Vec<u16> =
+            "Программа уже запущена.\nОткройте существующее окно My Own Backup."
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+        // SAFETY: null-terminated strings; simple informational box.
+        unsafe {
+            MessageBoxW(
+                None,
+                PCWSTR(text.as_ptr()),
+                PCWSTR(title.as_ptr()),
+                MB_OK | MB_ICONINFORMATION,
+            );
+        }
+        std::process::exit(0);
+    }
+    // Handle intentionally leaked: the mutex must outlive this function.
+    std::mem::forget(handle);
+}
+
 fn main() {
+    // Only one GUI at a time (Windows).
+    #[cfg(target_os = "windows")]
+    enforce_single_instance();
+
     // No UAC elevation at startup: backups, disk enumeration and passwords all
     // run in the privileged service (LocalSystem), which the GUI reaches over
     // gRPC. The GUI itself runs as the normal user. (In-process restore/verify
@@ -190,6 +232,9 @@ fn main() {
             commands::engine::verify_now,
             commands::engine::mount_backup,
             commands::engine::unmount_backup,
+            commands::engine::aim_driver_status,
+            commands::engine::install_aim_driver,
+            commands::engine::uninstall_aim_driver,
             commands::engine::read_image_info,
             commands::engine::list_disk_backups,
             commands::engine::restore_disk_now,

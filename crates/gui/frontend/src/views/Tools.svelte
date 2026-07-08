@@ -14,12 +14,12 @@
   let verifyBusy = $state(false);
   const verifyProgress = $derived(engine.verifyProgress);
 
-  async function browse(setPath: (p: string) => void) {
+  async function browse(setPath: (p: string) => void, extensions = ['vhdx', 'avhdx', 'qcow2']) {
     try {
       const picked = await open({
         title: 'Выберите образ',
         multiple: false,
-        filters: [{ name: 'Образ VHDX', extensions: ['vhdx', 'avhdx'] }],
+        filters: [{ name: 'Образ резервной копии', extensions }],
       });
       if (typeof picked === 'string') setPath(picked);
     } catch {
@@ -31,6 +31,8 @@
     mountBusy = true;
     mountMsg = null;
     mountErr = null;
+    // qcow2 mounts through the Arsenal Image Mounter driver (must be installed);
+    // the service holds the connection open. VHDX mounts natively via vhdmp.
     try {
       const physical = await api.mountBackup(mountPath);
       mountMsg = `Подключено (только чтение): ${physical}. Буквы назначит Windows — смотрите проводник.`;
@@ -94,7 +96,7 @@
         spellcheck="false"
         disabled={mountBusy}
       />
-      <button class="btn outline" onclick={() => browse((p) => (mountPath = p))} disabled={mountBusy}>
+      <button class="btn outline" onclick={() => browse((p) => (mountPath = p), ['vhdx', 'avhdx', 'qcow2'])} disabled={mountBusy}>
         Обзор…
       </button>
       <button class="btn primary" onclick={mount} disabled={mountBusy || !mountPath}>

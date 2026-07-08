@@ -1,4 +1,6 @@
 mod commands;
+mod elevation;
+mod logging;
 
 use clap::{Parser, Subcommand};
 
@@ -11,6 +13,11 @@ use clap::{Parser, Subcommand};
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+
+    /// Set by the self-elevation relaunch (see `elevation.rs`): this process
+    /// owns a fresh console window, so hold it open on exit.
+    #[arg(long, hide = true, global = true)]
+    elevated: bool,
 }
 
 #[derive(Subcommand)]
@@ -39,6 +46,12 @@ enum Commands {
     /// Mount a VHDX backup image read-only as a disk
     Mount(commands::mount::MountArgs),
 
+    /// Serve a qcow2 backup to Arsenal Image Mounter over devio TCP (read-only)
+    DevioServe(commands::devio_serve::DevioServeArgs),
+
+    /// Install / uninstall the Arsenal Image Mounter driver (Windows)
+    Driver(commands::driver::DriverArgs),
+
     /// Detach a mounted VHDX backup image
     Unmount(commands::unmount::UnmountArgs),
 
@@ -55,16 +68,51 @@ enum Commands {
     Service(commands::service::ServiceArgs),
 }
 
+/// Commands that touch raw devices, VSS, virtual disks or the SCM directly —
+/// they fail with ERROR_ACCESS_DENIED in a non-elevated console, so the CLI
+/// requests elevation up front instead of surfacing 0x80070005 mid-run.
+/// (Mount/Unmount are NOT here: they are thin clients of the LocalSystem
+/// service, which does the privileged work.)
+#[cfg(target_os = "windows")]
+fn needs_admin(command: &Commands) -> bool {
+    matches!(
+        command,
+        Commands::Preflight(_)
+            | Commands::Backup(_)
+            | Commands::Restore(_)
+            | Commands::RestoreDisk(_)
+            | Commands::FinalizeBoot(_)
+            | Commands::Verify(_)
+            | Commands::Service(_)
+            | Commands::Driver(commands::driver::DriverArgs {
+                action: commands::driver::DriverAction::Install | commands::driver::DriverAction::Uninstall,
+            })
+    )
+}
+
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "warn".into()),
-        )
-        .init();
+    // Console stays quiet (warn); the full info log goes to own-backup-cli.log
+    // next to the exe — it survives the elevated console window closing.
+    let log_path = logging::init();
 
     let cli = Cli::parse();
+
+    // Admin-requiring command in a non-elevated console: relaunch through the
+    // UAC prompt, mirror the child's exit code. The child prints into its own
+    // console window and holds it open (see the `cli.elevated` block below).
+    #[cfg(target_os = "windows")]
+    if needs_admin(&cli.command) && !elevation::is_elevated() {
+        println!("Требуются права администратора — запрашиваю повышение (UAC)…");
+        println!("Результат появится в новом окне консоли.");
+        match elevation::relaunch_elevated() {
+            Ok(code) => std::process::exit(code),
+            Err(e) => {
+                eprintln!("Не удалось получить права администратора: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     let result = match cli.command {
         Commands::ListDisks(args) => commands::list_disks::run(args).await,
@@ -75,6 +123,8 @@ async fn main() {
         Commands::FinalizeBoot(args) => commands::finalize_boot::run(args).await,
         Commands::Verify(args) => commands::verify::run(args).await,
         Commands::Mount(args) => commands::mount::run(args).await,
+        Commands::DevioServe(args) => commands::devio_serve::run(args).await,
+        Commands::Driver(args) => commands::driver::run(args).await,
         Commands::Unmount(args) => commands::unmount::run(args).await,
         Commands::Validate(args) => commands::validate::run(args).await,
         Commands::ListBackups(args) => commands::list_backups::run(args).await,
@@ -82,8 +132,30 @@ async fn main() {
         Commands::Service(args) => commands::service::run(args).await,
     };
 
-    if let Err(e) = result {
-        eprintln!("Error: {}", e);
-        std::process::exit(1);
+    let code = match result {
+        Ok(()) => {
+            tracing::info!("command completed");
+            0
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "command failed");
+            eprintln!("Error: {}", e);
+            if let Some(p) = &log_path {
+                eprintln!("Подробный лог: {}", p.display());
+            }
+            1
+        }
+    };
+
+    // An elevated relaunch runs in its own console window that would vanish
+    // the instant the process exits — keep it open until the user has read
+    // the output.
+    if cli.elevated {
+        use std::io::{BufRead, Write};
+        print!("\nНажмите Enter для выхода…");
+        let _ = std::io::stdout().flush();
+        let _ = std::io::stdin().lock().read_line(&mut String::new());
     }
+
+    std::process::exit(code);
 }

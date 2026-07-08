@@ -1,4 +1,6 @@
 pub mod backup;
+pub mod devio_serve;
+pub mod driver;
 pub mod finalize_boot;
 pub mod jobs;
 pub mod list_backups;

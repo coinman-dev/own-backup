@@ -25,6 +25,11 @@ pub struct BackupArgs {
     /// a LUKS container, its decrypted data is backed up (used blocks only).
     #[arg(long)]
     pub password: Option<String>,
+
+    /// Image container format: vhdx (Windows-native mounting, no compression)
+    /// or qcow2 (zstd-compressed, cross-platform; full backups only for now)
+    #[arg(long, default_value = "vhdx")]
+    pub format: own_backup_common::types::ImageFormat,
 }
 
 #[cfg(target_os = "windows")]
@@ -51,9 +56,10 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
         exclusion_patterns: Vec::new(),
         job_id: None,
         passphrase: args.password.clone().map(zeroize::Zeroizing::new),
+        image_format: args.format,
     };
 
-    println!("Backing up {} -> {}", args.source, args.output);
+    println!("Backing up {} -> {} ({})", args.source, args.output, args.format);
     println!(
         "Mode: {}",
         if args.all_sectors {
@@ -141,9 +147,10 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
         all_sectors: args.all_sectors,
         passphrase: args.password.clone().map(zeroize::Zeroizing::new),
         job_id: None,
+        image_format: args.format,
     };
 
-    println!("Backing up {} -> {}", args.source, args.output);
+    println!("Backing up {} -> {} ({})", args.source, args.output, args.format);
     let summary = backup_volume(&request, |_p| Ok(()))?;
     println!(
         "Done: {} of {} blocks used, {:.1} MiB copied in {:.1}s ({})",

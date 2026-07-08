@@ -698,7 +698,24 @@
 
       <!-- 2: scheme -->
       {#if step === 2}
-        <div class="field-label">Метод резервного копирования:</div>
+        <div class="field-label">Формат образа:</div>
+        <select
+          bind:value={job.image_format}
+          class="wide"
+          disabled={mode === 'edit' && job.last_run !== null}
+        >
+          <option value="vhdx">VHDX — стандарт Windows (по умолчанию)</option>
+          <option value="qcow2">qcow2 — универсальный, со сжатием</option>
+        </select>
+        {#if mode === 'edit' && job.last_run !== null}
+          <div class="note">У задания уже есть резервные копии — менять формат существующего архива нельзя. Для другого формата создайте новое задание.</div>
+        {/if}
+        {#if job.image_format === 'qcow2'}
+          <div class="note">Встроенное сжатие (zstd): копия обычно на 30–50 % меньше, экономия видна сразу. Один и тот же файл одинаково открывается на Windows и Linux. Инкрементные и дифференциальные цепочки поддерживаются. Восстановление и проверка работают полностью; монтирование копии как диска появится в следующих версиях. Исключённые файлы на NTFS/ReFS: их содержимое в копию не попадает, но пустая запись с именем файла остаётся видна в каталоге.</div>
+        {:else}
+          <div class="note">Копия открывается самой Windows двойным кликом и видна как обычный диск — даже без Own Backup. Инкрементные цепочки и полное удаление исключённых файлов (NTFS/ReFS). Сжатия нет — файл больше; на Linux открывается через qemu-nbd.</div>
+        {/if}
+        <div class="field-label mt">Метод резервного копирования:</div>
         <select bind:value={job.scheme.method} class="wide">
           <option value="full">Полное</option>
           <option value="incremental">Инкрементное</option>

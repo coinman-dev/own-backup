@@ -7,6 +7,10 @@
 
   const kindLabel = (k: string) =>
     k === 'incremental' ? 'инкрементная' : k === 'differential' ? 'дифференциальная' : 'полная';
+
+  /** Container format of the produced image, derived from its file name. */
+  const formatLabel = (p: string) =>
+    p.toLowerCase().endsWith('.qcow2') ? 'qcow2 (сжатый)' : 'VHDX';
 </script>
 
 <div class="page">
@@ -43,6 +47,7 @@
           {#if r.status === 'success'}
             <div class="stats">
               <div><span class="k">Тип</span><span class="v">{kindLabel(r.backup_kind)}</span></div>
+              <div><span class="k">Формат</span><span class="v">{formatLabel(r.image_path)}</span></div>
               <div><span class="k">Размер</span><span class="v">{formatBytes(r.bytes_copied)}</span></div>
               <div><span class="k">Скорость</span><span class="v">{speed(r)} МБ/с</span></div>
               <div><span class="k">Время</span><span class="v">{formatDuration(r.duration_secs)}</span></div>

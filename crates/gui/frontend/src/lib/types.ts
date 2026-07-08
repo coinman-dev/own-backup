@@ -309,6 +309,8 @@ export interface Job {
   /** Set for a whole-disk (bootable) backup: which disk + how partitions map. */
   disk_source: DiskSourceSpec | null;
   dest_folder: string;
+  /** Image container: vhdx (Windows-native, chains) or qcow2 (zstd-compressed). */
+  image_format: 'vhdx' | 'qcow2';
   schedule: ScheduleConfig;
   scheme: SchemeConfig;
   exclusions: ExclusionsConfig;

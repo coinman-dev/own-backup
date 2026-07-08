@@ -24,7 +24,7 @@ use own_backup_common::gpt::DiskBackupManifest;
 use own_backup_common::image::ImageManifest;
 use own_backup_common::progress::{BackupProgress, RestoreProgress};
 use own_backup_common::types::{
-    BackupMode, BackupStatus, BackupType, BootMode, CompressionAlgo, PartitionTable,
+    BackupMode, BackupStatus, BackupType, BootMode, CompressionAlgo, ImageFormat, PartitionTable,
 };
 use own_backup_common::{OwnBackupError, Result};
 use own_backup_snapshot::VssSnapshotSession;
@@ -94,6 +94,11 @@ pub struct VolumeBackupRequest {
     /// backed up (used blocks only); on restore, encryption must be re-applied
     /// manually. Ignored for non-encrypted sources.
     pub passphrase: Option<Zeroizing<String>>,
+    /// Image container format (decision #13): VHDX — kernel-written, Windows-
+    /// native mounting, NTFS/ReFS true removal, AVHDX chains; qcow2 — written
+    /// in userspace with per-cluster zstd compression, no attach at all.
+    /// qcow2 limits for now: full backups only, exclusions are zeroing-only.
+    pub image_format: ImageFormat,
 }
 
 /// Outcome of a completed volume backup.
@@ -123,6 +128,114 @@ pub struct VolumeBackupSummary {
     /// Per-category byte totals of the files in the archive; None when no
     /// exclusion walk ran (exclusions disabled / non-NTFS / sector mode).
     pub categories: Option<crate::exclusions::CategorySizes>,
+}
+
+/// Write target behind the format switch. VHDX goes through the kernel
+/// (attach → raw writes to the PhysicalDrive node); qcow2 is written entirely
+/// in userspace with per-cluster zstd compression — no attach, no SAN-policy
+/// juggling, no flush pacing (the OS cache never holds a whole image).
+enum ImageTarget {
+    Vhdx {
+        attached: crate::vhdx::AttachedVhdx,
+        writer: WinRawDevice,
+        /// Bytes written since the last pacing flush (see FLUSH_INTERVAL_BYTES).
+        bytes_since_flush: u64,
+    },
+    Qcow2 {
+        writer: crate::qcow2::Qcow2StagedWriter<std::io::BufWriter<std::fs::File>>,
+    },
+}
+
+impl ImageTarget {
+    /// Virtual disk size of the image being written.
+    fn length(&self) -> u64 {
+        match self {
+            ImageTarget::Vhdx { writer, .. } => writer.length(),
+            ImageTarget::Qcow2 { writer } => writer.length(),
+        }
+    }
+
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()> {
+        match self {
+            ImageTarget::Vhdx { writer, bytes_since_flush, .. } => {
+                writer.write_at(offset, data)?;
+                // Drain the OS cache in bounded chunks so the end-of-backup
+                // flush stays short (see FLUSH_INTERVAL_BYTES).
+                *bytes_since_flush += data.len() as u64;
+                if *bytes_since_flush >= FLUSH_INTERVAL_BYTES {
+                    writer.flush()?;
+                    *bytes_since_flush = 0;
+                }
+                Ok(())
+            }
+            ImageTarget::Qcow2 { writer } => writer.write_at(offset, data),
+        }
+    }
+
+    /// Finalize the image and log per-step timings (the finalize stall lives
+    /// in ONE of these, and the log should say which).
+    fn finalize(self) -> Result<()> {
+        match self {
+            ImageTarget::Vhdx { attached, mut writer, .. } => {
+                let t = Instant::now();
+                writer.flush()?;
+                let flush_ms = t.elapsed().as_millis();
+                let t = Instant::now();
+                drop(writer);
+                let close_ms = t.elapsed().as_millis();
+                let t = Instant::now();
+                drop(attached); // detaches the image
+                let detach_ms = t.elapsed().as_millis();
+                info!(flush_ms, close_ms, detach_ms, "VHDX finalize timings");
+            }
+            ImageTarget::Qcow2 { writer } => {
+                let t = Instant::now();
+                // Write L2/L1/refcounts + header, then make the file durable.
+                let buf = writer.finish()?;
+                let file = buf
+                    .into_inner()
+                    .map_err(|e| OwnBackupError::Io(e.into_error()))?;
+                file.sync_all()?;
+                info!(finish_ms = t.elapsed().as_millis(), "qcow2 finalize timings");
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Read source behind the same format switch, picked by the sidecar's
+/// `container` field: VHDX images are attached read-only and read as a raw
+/// disk; qcow2 images are read directly in userspace (no attach).
+enum ImageReadSource {
+    Vhdx {
+        /// Keeps the read-only attachment alive; detaches on drop.
+        _attached: crate::vhdx::AttachedVhdx,
+        dev: WinRawDevice,
+    },
+    Qcow2(crate::qcow2::Qcow2RandomReader),
+}
+
+impl ImageReadSource {
+    fn open(image_path: &Path, container: &str) -> Result<Self> {
+        match container {
+            "qcow2" => Ok(Self::Qcow2(crate::qcow2::Qcow2RandomReader::open(image_path)?)),
+            "vhdx" => {
+                let attached = attach_vhdx(image_path, AttachMode::RawRead)?;
+                let dev = open_read_with_retry(attached.physical_path())?;
+                Ok(Self::Vhdx { _attached: attached, dev })
+            }
+            other => Err(OwnBackupError::ImageFormat(format!(
+                "unknown image container '{other}' in sidecar"
+            ))),
+        }
+    }
+
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        match self {
+            Self::Vhdx { dev, .. } => dev.read_at(offset, buf),
+            Self::Qcow2(r) => r.read_at(offset, buf),
+        }
+    }
 }
 
 /// Open a freshly-attached virtual disk for writing; the PhysicalDrive device
@@ -327,6 +440,22 @@ fn backup_volume_inner(
                     }
                 }
             }
+        }
+    }
+    // A chain must never cross container formats (decision 2026-07-08): the
+    // format of an existing archive cannot be changed — that is a hard error,
+    // not a fallback. The job runners refuse such runs before reaching the
+    // engine; this guards direct callers.
+    if let Some((parent_path, parent_sidecar)) = &parent {
+        if parent_sidecar.info.container != req.image_format.extension() {
+            return Err(OwnBackupError::Config(format!(
+                "parent image {} is '{}' but the requested format is '{}' — \
+                 changing the format of an existing backup chain is not allowed; \
+                 create a new job (or remove the old backups)",
+                parent_path.display(),
+                parent_sidecar.info.container,
+                req.image_format
+            )));
         }
     }
 
@@ -536,59 +665,100 @@ fn backup_volume_inner(
     };
     let used_blocks = used.used_block_count();
 
-    // --- Create and attach the image ---
-    let data_offset = match &parent {
-        None => {
-            // Disk = 1 MiB GPT head + volume + tail for the backup GPT.
-            let disk_size = DEFAULT_PARTITION_OFFSET + volume_len.div_ceil(MIB) * MIB + MIB;
-            create_dynamic_vhdx(
+    // --- Create the image target (and attach it, for VHDX) ---
+    // Disk = 1 MiB GPT head + volume + tail for the backup GPT.
+    let disk_size = DEFAULT_PARTITION_OFFSET + volume_len.div_ceil(MIB) * MIB + MIB;
+    let (mut target, data_offset) = match req.image_format {
+        ImageFormat::Qcow2 => {
+            // Userspace-written compressed image: no attach, no kernel writer.
+            // A child references its parent by FILE NAME (qemu resolves
+            // relative backing paths against the image's directory), so the
+            // backup folder stays relocatable — same convention as the sidecar.
+            let (backing_file, data_offset) = match &parent {
+                None => (None, DEFAULT_PARTITION_OFFSET),
+                Some((parent_path, parent_sidecar)) => {
+                    // Same folder (the normal case) → bare file name; a parent
+                    // elsewhere falls back to its absolute path.
+                    let backing = if parent_path.parent() == req.image_path.parent() {
+                        parent_path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .ok_or_else(|| {
+                                OwnBackupError::Config(format!(
+                                    "parent image path has no file name: {}",
+                                    parent_path.display()
+                                ))
+                            })?
+                    } else {
+                        parent_path.to_string_lossy().into_owned()
+                    };
+                    (Some(backing), parent_sidecar.info.volume_data_offset)
+                }
+            };
+            let writer = crate::qcow2::Qcow2StagedWriter::create(
                 &req.image_path,
-                &VhdxCreateOptions {
-                    max_size: disk_size,
-                    logical_sector_size: sector_size,
-                    physical_sector_size: std::cmp::max(sector_size, 4096),
+                crate::qcow2::Qcow2WriterOptions {
+                    virtual_size: disk_size,
+                    backing_file,
+                    ..Default::default()
                 },
             )?;
-            DEFAULT_PARTITION_OFFSET
+            (ImageTarget::Qcow2 { writer }, data_offset)
         }
-        Some((parent_path, parent_sidecar)) => {
-            // Child inherits geometry and the GPT from its chain.
-            create_differencing_vhdx(&req.image_path, parent_path)?;
-            parent_sidecar.info.volume_data_offset
+        ImageFormat::Vhdx => {
+            let data_offset = match &parent {
+                None => {
+                    create_dynamic_vhdx(
+                        &req.image_path,
+                        &VhdxCreateOptions {
+                            max_size: disk_size,
+                            logical_sector_size: sector_size,
+                            physical_sector_size: std::cmp::max(sector_size, 4096),
+                        },
+                    )?;
+                    DEFAULT_PARTITION_OFFSET
+                }
+                Some((parent_path, parent_sidecar)) => {
+                    // Child inherits geometry and the GPT from its chain.
+                    create_differencing_vhdx(&req.image_path, parent_path)?;
+                    parent_sidecar.info.volume_data_offset
+                }
+            };
+
+            // A differencing (child) image inherits a full NTFS filesystem from its
+            // parent, which Windows auto-mounts the instant the disk is attached. That
+            // transient mount is what makes DetachVirtualDisk block on a fixed ~180 s
+            // volume-teardown timeout when the backup ends (full images start blank and
+            // never mount, so they detach in milliseconds). Force new disks to arrive
+            // OFFLINE for the attach window so the volume never surfaces at all; the
+            // guard restores the machine policy the moment the disk is attached and
+            // confirmed offline (and on the error/unwind path).
+            let san_guard = SanPolicyGuard::offline_all();
+            let attached = attach_vhdx(&req.image_path, AttachMode::RawWrite)?;
+            let writer = open_write_with_retry(attached.physical_path())?;
+            // Belt-and-suspenders: take the disk offline explicitly (in case the SAN
+            // policy could not be changed) so raw sector writes are not blocked by a
+            // mounted filesystem (ERROR_ACCESS_DENIED). For children the disk carries
+            // the chain's GPT GUID, so ALSO persist the offline attribute. (Full images
+            // do the persist step after their GPT is written below.)
+            writer.set_offline_writable(parent.is_some())?;
+            drop(san_guard);
+            if writer.length() < data_offset + volume_len {
+                return Err(OwnBackupError::Vhdx(format!(
+                    "attached image is {} bytes — too small for the volume ({} bytes at offset {data_offset})",
+                    writer.length(),
+                    volume_len
+                )));
+            }
+            (ImageTarget::Vhdx { attached, writer, bytes_since_flush: 0 }, data_offset)
         }
     };
-
-    // A differencing (child) image inherits a full NTFS filesystem from its
-    // parent, which Windows auto-mounts the instant the disk is attached. That
-    // transient mount is what makes DetachVirtualDisk block on a fixed ~180 s
-    // volume-teardown timeout when the backup ends (full images start blank and
-    // never mount, so they detach in milliseconds). Force new disks to arrive
-    // OFFLINE for the attach window so the volume never surfaces at all; the
-    // guard restores the machine policy the moment the disk is attached and
-    // confirmed offline (and on the error/unwind path).
-    let san_guard = SanPolicyGuard::offline_all();
-    let attached = attach_vhdx(&req.image_path, AttachMode::RawWrite)?;
-    let mut writer = open_write_with_retry(attached.physical_path())?;
-    // Belt-and-suspenders: take the disk offline explicitly (in case the SAN
-    // policy could not be changed) so raw sector writes are not blocked by a
-    // mounted filesystem (ERROR_ACCESS_DENIED). For children the disk carries
-    // the chain's GPT GUID, so ALSO persist the offline attribute. (Full images
-    // do the persist step after their GPT is written below.)
-    writer.set_offline_writable(parent.is_some())?;
-    drop(san_guard);
-    if writer.length() < data_offset + volume_len {
-        return Err(OwnBackupError::Vhdx(format!(
-            "attached image is {} bytes — too small for the volume ({} bytes at offset {data_offset})",
-            writer.length(),
-            volume_len
-        )));
-    }
 
     let disk_guid = match &parent {
         None => {
             // --- GPT with a single Basic Data partition wrapping the volume ---
             let layout = GptLayout {
-                disk_size: writer.length(),
+                disk_size: target.length(),
                 sector_size,
                 partition_offset: DEFAULT_PARTITION_OFFSET,
                 partition_size: volume_len,
@@ -597,19 +767,22 @@ fn backup_volume_inner(
                 partition_name: "OwnBackup".into(),
             };
             for op in gpt_write_ops(&layout)? {
-                writer.write_at(op.offset, &op.bytes)?;
+                target.write_at(op.offset, &op.bytes)?;
             }
-            // Let partmgr re-read the fresh GPT (the disk stays offline, so
-            // no volumes surface), then persist the offline attribute keyed
-            // to the new disk GUID — future attaches of this image and of
-            // every differencing child arrive offline, closing the
-            // auto-mount race for the whole chain. Best-effort: a failure
-            // only means the next attach may transiently mount.
-            if let Err(e) = writer
-                .update_properties()
-                .and_then(|()| writer.set_offline_writable(true))
-            {
-                warn!(error = %e, "could not persist the offline attribute for the new image");
+            // VHDX only: let partmgr re-read the fresh GPT (the disk stays
+            // offline, so no volumes surface), then persist the offline
+            // attribute keyed to the new disk GUID — future attaches of this
+            // image and of every differencing child arrive offline, closing
+            // the auto-mount race for the whole chain. Best-effort: a failure
+            // only means the next attach may transiently mount. (qcow2 images
+            // are never attached, so there is nothing to persist.)
+            if let ImageTarget::Vhdx { writer, .. } = &mut target {
+                if let Err(e) = writer
+                    .update_properties()
+                    .and_then(|()| writer.set_offline_writable(true))
+                {
+                    warn!(error = %e, "could not persist the offline attribute for the new image");
+                }
             }
             layout.disk_guid.to_string()
         }
@@ -698,22 +871,13 @@ fn backup_volume_inner(
         }
     }
 
-    let mut bytes_since_flush = 0u64;
     let outcome = copy_used_blocks(
         &backup_id.to_string(),
         reader.as_mut(),
         used.as_ref(),
         parent_hashes.as_ref(),
         |block_number, data| {
-            writer.write_at(data_offset + block_number * req.block_size as u64, data)?;
-            // Drain the OS cache in bounded chunks so the end-of-backup flush
-            // stays short (see FLUSH_INTERVAL_BYTES).
-            bytes_since_flush += data.len() as u64;
-            if bytes_since_flush >= FLUSH_INTERVAL_BYTES {
-                writer.flush()?;
-                bytes_since_flush = 0;
-            }
-            Ok(())
+            target.write_at(data_offset + block_number * req.block_size as u64, data)
         },
         &mut progress,
     )?;
@@ -731,18 +895,10 @@ fn backup_volume_inner(
         bytes_written: outcome.bytes_copied,
         speed_bps: 0,
     });
-    // Timed step by step: the finalize stall lives in ONE of these, and the
-    // log should say which (flush of remaining cache vs handle close vs
-    // detach of the virtual disk vs VSS release).
-    let t = Instant::now();
-    writer.flush()?;
-    let flush_ms = t.elapsed().as_millis();
-    let t = Instant::now();
-    drop(writer);
-    let close_ms = t.elapsed().as_millis();
-    let t = Instant::now();
-    drop(attached); // detaches the image
-    let detach_ms = t.elapsed().as_millis();
+    // Timed step by step inside finalize(): the stall lives in ONE of the
+    // steps (flush of remaining cache vs handle close vs detach for VHDX;
+    // metadata write + sync for qcow2), and the log says which.
+    target.finalize()?;
 
     // Notify VSS writers of success and release the shadow copy.
     let t = Instant::now();
@@ -751,13 +907,7 @@ fn backup_volume_inner(
             warn!(error = %e, "VSS BackupComplete failed (backup data is already safe)");
         }
     }
-    info!(
-        flush_ms,
-        close_ms,
-        detach_ms,
-        vss_release_ms = t.elapsed().as_millis(),
-        "Image finalize timings"
-    );
+    info!(vss_release_ms = t.elapsed().as_millis(), "VSS released");
 
     // --- True removal of excluded files (NTFS/ReFS) ---
     // The FS driver deletes the recorded paths inside the image copy (the
@@ -769,7 +919,17 @@ fn backup_volume_inner(
     // describes the final image.
     let mut checksums = outcome.checksums;
     let mut used_blocks = used_blocks;
-    if !removal_paths.is_empty() {
+    if !removal_paths.is_empty() && req.image_format == ImageFormat::Qcow2 {
+        // The mount-&-delete pass needs the kernel VHDX driver (differencing
+        // child + MergeVirtualDisk) — impossible over a compressed userspace
+        // container. Honest behaviour, mirrored in the UI: the excluded
+        // files' DATA is already zeroed out of this image; only their
+        // zero-filled catalog ghosts remain.
+        warn!(
+            paths = removal_paths.len(),
+            "NTFS/ReFS true removal requires the VHDX container — excluded files remain as zero-filled ghosts in this qcow2 backup"
+        );
+    } else if !removal_paths.is_empty() {
         let bytes_copied = outcome.bytes_copied;
         let mut tick = |entries: u64| {
             let _ = progress(&BackupProgress {
@@ -825,8 +985,14 @@ fn backup_volume_inner(
         },
         boot_mode: BootMode::Uefi, // populated properly with inventory in phase 4
         partition_table: PartitionTable::Gpt,
-        compression_algo: CompressionAlgo::None,
-        compression_level: 0,
+        compression_algo: match req.image_format {
+            ImageFormat::Vhdx => CompressionAlgo::None,
+            ImageFormat::Qcow2 => CompressionAlgo::Zstd,
+        },
+        compression_level: match req.image_format {
+            ImageFormat::Vhdx => 0,
+            ImageFormat::Qcow2 => crate::qcow2::DEFAULT_ZSTD_LEVEL,
+        },
         encryption_algo: None,
         encryption_salt: None,
         block_size: req.block_size,
@@ -868,6 +1034,7 @@ fn backup_volume_inner(
             SidecarInfo::new_child(image_file_name, role, parent_file_name, data_offset)
         }
     };
+    sidecar_info.container = req.image_format.extension().into();
     sidecar_info.job_id = req.job_id.clone();
 
     let sidecar_path = sidecar_path_for(&req.image_path);
@@ -948,8 +1115,7 @@ pub fn restore_volume(
         )));
     }
 
-    let attached = attach_vhdx(&req.image_path, AttachMode::RawRead)?;
-    let mut image_dev = open_read_with_retry(attached.physical_path())?;
+    let mut image_dev = ImageReadSource::open(&req.image_path, &sidecar.info.container)?;
 
     let restore_id = Uuid::new_v4().to_string();
     let total = sidecar.checksums.len() as u64;
@@ -995,7 +1161,6 @@ pub fn restore_volume(
 
     target_dev.flush()?;
     drop(image_dev);
-    drop(attached);
 
     info!(
         image = %req.image_path.display(),
@@ -1239,8 +1404,7 @@ pub fn verify_image(
     let volume_len = sidecar.manifest.source_disk.size_bytes;
     let data_offset = sidecar.info.volume_data_offset;
 
-    let attached = attach_vhdx(image_path, AttachMode::RawRead)?;
-    let mut image_dev = open_read_with_retry(attached.physical_path())?;
+    let mut image_dev = ImageReadSource::open(image_path, &sidecar.info.container)?;
 
     let total = sidecar.checksums.len() as u64;
     let mut checked = 0u64;
@@ -1304,6 +1468,14 @@ pub fn verify_image(
 /// Mount an image read-only; volumes inside get drive letters from Windows.
 /// The attachment survives process exit — use [`unmount_image`] to detach.
 pub fn mount_image(image_path: &Path) -> Result<String> {
+    // qcow2 images cannot go through vhdmp; they mount via the Arsenal Image
+    // Mounter driver + our devio server (see `mount_qcow2_via_aim`). Cheap
+    // header-only sidecar check; an image without a sidecar is assumed VHDX.
+    if let Ok((info, _)) = crate::sidecar::read_sidecar_header(&sidecar_path_for(image_path)) {
+        if info.container == "qcow2" {
+            return mount_qcow2_via_aim(image_path);
+        }
+    }
     let attached = attach_vhdx(image_path, AttachMode::ReadOnlyMounted)?;
     // Backup images carry a persisted "offline" disk attribute (it keeps the
     // chain from auto-mounting during backups), so for browsing the disk must
@@ -1326,7 +1498,130 @@ pub fn mount_image(image_path: &Path) -> Result<String> {
 
 /// Detach a previously mounted image.
 pub fn unmount_image(image_path: &Path) -> Result<()> {
+    // qcow2 mounts are tracked in-process (AIM device + devio server).
+    if aim_mounts().lock().unwrap().contains_key(image_path) {
+        return unmount_qcow2_via_aim(image_path);
+    }
     detach_vhdx(image_path)
+}
+
+// ---------------------------------------------------------------------------
+// qcow2 mounting via Arsenal Image Mounter (plan Q5)
+// ---------------------------------------------------------------------------
+
+struct AimMount {
+    adapter: crate::aim_win::AimAdapter,
+    device_number: u32,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    server: Option<std::thread::JoinHandle<()>>,
+}
+
+/// qcow2 mounts served by THIS process: the devio server and AIM device die
+/// with the process, so this only makes sense inside the long-running service
+/// (or a foreground CLI command).
+static AIM_MOUNTS: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, AimMount>>> =
+    std::sync::OnceLock::new();
+
+fn aim_mounts() -> &'static std::sync::Mutex<HashMap<PathBuf, AimMount>> {
+    // Shadow the module-wide alias so the code above can name it directly.
+    AIM_MOUNTS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// Present a qcow2 backup (incl. its backing chain) to Windows as a real
+/// read-only disk: start a devio TCP server on an ephemeral loopback port,
+/// then have the AIM driver attach a proxy disk pointing at it. Windows mounts
+/// the NTFS volume inside and assigns a drive letter. Returns the physical
+/// disk path (`\\.\PhysicalDriveN`).
+fn mount_qcow2_via_aim(image_path: &Path) -> Result<String> {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    if let Some(existing) = aim_mounts().lock().unwrap().get(image_path) {
+        if let Some(n) = crate::aim_win::find_physical_drive(existing.device_number) {
+            return Ok(format!(r"\\.\PhysicalDrive{n}"));
+        }
+    }
+
+    // Open the image once to learn its virtual size, then hand a fresh reader
+    // to the server thread (the reader is not Sync).
+    let virtual_size = crate::qcow2::Qcow2RandomReader::open(image_path)?.virtual_size();
+    let reader = crate::qcow2::Qcow2RandomReader::open(image_path)?;
+
+    // Bind an ephemeral loopback port for the devio server.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .map_err(|e| OwnBackupError::Device(format!("devio bind: {e}")))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| OwnBackupError::Device(format!("devio local_addr: {e}")))?
+        .port();
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_bg = stop.clone();
+    let server = std::thread::Builder::new()
+        .name("aim-devio".into())
+        .spawn(move || {
+            if let Err(e) = crate::devio::serve_listener(listener, Box::new(reader), stop_bg) {
+                warn!(error = %e, "devio server for AIM mount ended with an error");
+            }
+        })
+        .map_err(|e| OwnBackupError::Device(format!("spawn devio server: {e}")))?;
+
+    // Create the AIM proxy disk pointing at our server.
+    let create = (|| -> Result<(crate::aim_win::AimAdapter, u32)> {
+        let adapter = crate::aim_win::AimAdapter::open()?;
+        let device_number = adapter.create_tcp_proxy(port, virtual_size)?;
+        Ok((adapter, device_number))
+    })();
+    let (adapter, device_number) = match create {
+        Ok(v) => v,
+        Err(e) => {
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = server.join();
+            return Err(e);
+        }
+    };
+
+    // Bring the disk online so Windows mounts the volume and assigns a letter
+    // (read-only attach → the volume is write-protected regardless).
+    let physical = crate::aim_win::find_physical_drive(device_number)
+        .map(|n| format!(r"\\.\PhysicalDrive{n}"));
+    if let Some(path) = &physical {
+        match open_write_with_retry(path) {
+            Ok(dev) => {
+                if let Err(e) = dev.set_online_this_session().and_then(|()| dev.update_properties()) {
+                    warn!(error = %e, "could not bring the AIM disk online — it may show offline in Disk Management");
+                }
+            }
+            Err(e) => warn!(error = %e, "could not open the AIM disk to bring it online"),
+        }
+    }
+
+    aim_mounts().lock().unwrap().insert(
+        image_path.to_path_buf(),
+        AimMount { adapter, device_number, stop, server: Some(server) },
+    );
+    info!(image = %image_path.display(), device_number = format!("{device_number:#08x}"), "qcow2 mounted via Arsenal Image Mounter");
+    Ok(physical.unwrap_or_else(|| "(disk created — see Disk Management)".into()))
+}
+
+fn unmount_qcow2_via_aim(image_path: &Path) -> Result<()> {
+    let entry = aim_mounts().lock().unwrap().remove(image_path);
+    let Some(mut entry) = entry else {
+        return Err(OwnBackupError::Config(format!(
+            "{} is not mounted by this service",
+            image_path.display()
+        )));
+    };
+    // Remove the AIM device first (stops the driver's proxy I/O), then the
+    // devio server, then join.
+    let removed = entry.adapter.remove_device(entry.device_number);
+    entry.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    if let Some(t) = entry.server.take() {
+        let _ = t.join();
+    }
+    removed?;
+    info!(image = %image_path.display(), "qcow2 unmounted (AIM device removed)");
+    Ok(())
 }
 
 /// Outcome of decrypting an encrypted source: whether the passphrase unlocked

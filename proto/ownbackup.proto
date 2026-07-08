@@ -49,6 +49,13 @@ service BackupService {
   rpc UnmountImage(JsonRequest) returns (Empty);       // in: {image_path}
   rpc RestoreDisk(JsonRequest) returns (JsonReply);    // in: {manifest_path,target_disk,force} -> DiskRestoreSummary
   rpc CancelEngineOp(Empty) returns (Empty);
+
+  // --- Arsenal Image Mounter driver (needed to mount qcow2 on Windows) ---
+  // Install downloads Arsenal Recon's signed driver package from GitHub and
+  // installs it (the service runs as LocalSystem, so no UAC in the GUI).
+  rpc AimDriverStatus(Empty) returns (JsonReply);      // JSON: { installed, version }
+  rpc InstallAimDriver(Empty) returns (JsonReply);     // JSON: { installed, version }
+  rpc UninstallAimDriver(Empty) returns (Empty);
 }
 
 message Empty {}

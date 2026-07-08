@@ -329,6 +329,36 @@ impl BackupClient {
         Ok(())
     }
 
+    /// Arsenal Image Mounter driver: is it installed? (JSON: {installed, version})
+    pub async fn aim_driver_status(&mut self) -> Result<serde_json::Value> {
+        let reply = self
+            .inner
+            .aim_driver_status(self.request(proto::Empty {}))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
+
+    /// Download + install the AIM driver (the service does the privileged work).
+    pub async fn install_aim_driver(&mut self) -> Result<serde_json::Value> {
+        let reply = self
+            .inner
+            .install_aim_driver(self.request(proto::Empty {}))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
+
+    pub async fn uninstall_aim_driver(&mut self) -> Result<()> {
+        self.inner
+            .uninstall_aim_driver(self.request(proto::Empty {}))
+            .await
+            .map_err(status)?;
+        Ok(())
+    }
+
     /// Restore a whole disk from an `.obdm` manifest onto `target_disk`
     /// (DESTRUCTIVE). Progress arrives as `"restore-disk"`.
     pub async fn restore_disk(

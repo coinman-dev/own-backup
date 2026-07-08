@@ -44,6 +44,12 @@ export const api = {
     invoke<DiskRestoreSummary>('restore_disk_now', { manifestPath, targetDisk, force }),
   cancelEngineOp: () => invoke<void>('cancel_engine_op'),
 
+  // --- Arsenal Image Mounter driver (qcow2 mounting on Windows) ---
+  aimDriverStatus: () => invoke<{ installed: boolean; version: string | null }>('aim_driver_status'),
+  installAimDriver: () =>
+    invoke<{ installed: boolean; version: string | null }>('install_aim_driver'),
+  uninstallAimDriver: () => invoke<void>('uninstall_aim_driver'),
+
   // --- misc ---
   getConfig: () => invoke<Record<string, unknown>>('get_config'),
   saveConfig: (config: Record<string, unknown>) => invoke<void>('save_config', { config }),

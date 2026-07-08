@@ -306,8 +306,14 @@ pub struct Job {
     /// GPT/partition metadata needed to write the disk-restore manifest.
     #[serde(default)]
     pub disk_source: Option<DiskSourceSpec>,
-    /// Destination FOLDER; each run creates `<name>_<letter>_<stamp>.vhdx`.
+    /// Destination FOLDER; each run creates `<name>_<letter>_<stamp>.<ext>`.
     pub dest_folder: String,
+    /// Image container format (decision #13): `vhdx` (default; Windows-native
+    /// mounting, chains, true removal) or `qcow2` (zstd-compressed,
+    /// cross-platform; full backups only until chains land). Old jobs
+    /// deserialize as vhdx.
+    #[serde(default)]
+    pub image_format: own_backup_common::types::ImageFormat,
     pub schedule: ScheduleConfig,
     pub scheme: SchemeConfig,
     pub exclusions: ExclusionsConfig,
@@ -329,6 +335,7 @@ impl Default for Job {
             requires_password: false,
             disk_source: None,
             dest_folder: String::new(),
+            image_format: own_backup_common::types::ImageFormat::default(),
             schedule: ScheduleConfig::default(),
             scheme: SchemeConfig::default(),
             exclusions: ExclusionsConfig::default(),
@@ -875,12 +882,45 @@ fn output_path_for(job: &Job, device: &str, kind: &str) -> PathBuf {
         .chars()
         .map(|c| if c.is_alphanumeric() { c } else { '_' })
         .collect();
+    // VHDX children are AVHDX (the Windows convention); qcow2 children stay
+    // .qcow2 (the qemu convention — chain role lives in the sidecar).
+    let child_ext = match job.image_format {
+        own_backup_common::types::ImageFormat::Vhdx => "avhdx",
+        own_backup_common::types::ImageFormat::Qcow2 => "qcow2",
+    };
     let (tag, ext) = match kind {
-        "incremental" => ("inc", "avhdx"),
-        "differential" => ("diff", "avhdx"),
-        _ => ("full", "vhdx"),
+        "incremental" => ("inc", child_ext),
+        "differential" => ("diff", child_ext),
+        _ => ("full", job.image_format.extension()),
     };
     PathBuf::from(&job.dest_folder).join(format!("{safe_name}_{token}_{tag}_{stamp}.{ext}"))
+}
+
+/// A job's image format must never change over existing archives (decision
+/// 2026-07-08): before every run the destination folder's sidecars are checked
+/// against the job's format, and any mismatch fails the run with a clear
+/// message. A different format means a new job (or removing the old backups).
+#[cfg_attr(not(any(target_os = "windows", target_os = "linux")), allow(dead_code))]
+fn format_change_error(job: &Job, folder: &Path) -> Option<String> {
+    let chains =
+        own_backup_backup::chains::list_job_chains(folder, &job.id).unwrap_or_default();
+    let want = job.image_format.extension();
+    for image in chains.iter().flat_map(|c| c.images.iter()) {
+        if image.container != want {
+            let name = image
+                .image_path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            return Some(format!(
+                "Формат образа задания ({want}) не совпадает с форматом уже существующих копий ({}, например {name}). \
+                 Менять формат у задания с копиями нельзя — создайте новое задание \
+                 (или удалите старые копии этого задания)."
+                , image.container
+            ));
+        }
+    }
+    None
 }
 
 /// Decide the next run's plan for one specific volume, reading the on-disk
@@ -1068,6 +1108,12 @@ async fn perform_backup(
         return run;
     }
     let folder = PathBuf::from(&job.dest_folder);
+    if let Some(msg) = format_change_error(job, &folder) {
+        run.finished_at = chrono::Utc::now().to_rfc3339();
+        run.status = "error".into();
+        run.error = msg;
+        return run;
+    }
     let count = volumes.len() as u64;
 
     // Exclusions only make sense in smart NTFS mode; a sector-by-sector image
@@ -1112,6 +1158,7 @@ async fn perform_backup(
             // A saved/cached passphrase for this volume, if any. The engine uses
             // it only when the source is actually a LUKS container.
             passphrase: passwords.resolve(&token),
+            image_format: job.image_format,
         };
         let validate_after = job.advanced.validate_after;
 
@@ -1384,6 +1431,12 @@ async fn perform_backup(
         return run;
     }
     let folder = PathBuf::from(&job.dest_folder);
+    if let Some(msg) = format_change_error(job, &folder) {
+        run.finished_at = chrono::Utc::now().to_rfc3339();
+        run.status = "error".into();
+        run.error = msg;
+        return run;
+    }
     let count = volumes.len() as u64;
     let started = std::time::Instant::now();
 
@@ -1397,7 +1450,11 @@ async fn perform_backup(
             .chars()
             .map(|c| if c.is_alphanumeric() { c } else { '_' })
             .collect();
-        let image_path = folder.join(format!("{safe}_{}_full_{stamp}.vhdx", file_token(job, device)));
+        let image_path = folder.join(format!(
+            "{safe}_{}_full_{stamp}.{}",
+            file_token(job, device),
+            job.image_format.extension()
+        ));
 
         // Take a point-in-time snapshot (LVM/fsfreeze) so a live filesystem is
         // read consistently; degrades to a crash-consistent copy of the device
@@ -1416,6 +1473,7 @@ async fn perform_backup(
             all_sectors: job.advanced.sector_by_sector,
             passphrase: passwords.resolve(&token),
             job_id: Some(job.id.clone()),
+            image_format: job.image_format,
         };
         let validate_after = job.advanced.validate_after;
         let sink_bg = sink.clone();

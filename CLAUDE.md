@@ -1,9 +1,17 @@
 # My Own Backup
 
-Open-source block-level backup system (Rust). Analogue of Acronis True Image.
+Source-available block-level backup system (Rust). Analogue of Acronis True Image.
 **Windows-first**: Linux support is deferred until the Windows version works end to end.
 
+**License (decision 2026-07-08): PolyForm Noncommercial 1.0.0** — free for
+noncommercial use (forks too, staying noncommercial); commercial use needs a
+separate license (`COMMERCIAL-LICENSE.md`). NOT OSI "open source" — say
+"source-available / free for noncommercial use". `aim_win.rs`/`devio.rs` are
+AGPL-derived (Arsenal Image Mounter) → **test-only, never distributed**; being
+replaced by wnbd (LGPL-2.1) before release. See `THIRD-PARTY-NOTICES.md`.
+
 Current roadmap: `.ai/implementation_plan_v2_2026-07-01.md` (phases 0–8, decisions log).
+qcow2 second format + mounting: `.ai/qcow2-second-format-plan_2026-07-07.md` (Q0–Q5).
 
 ## Build
 
@@ -35,10 +43,6 @@ tested on a Windows host — cross-compilation validates compilation only.
   `MergeVirtualDisk`.
 - The legacy `.obk` format (zstd + AES-256-GCM + Argon2id) is kept as a future
   **archival** export format (phase 8) — do not delete that code.
-- No kernel drivers, no WinFsp/Dokan, no NTFS parser: mounting and FS access go
-  through native Windows facilities only. (Confirmed 2026-07-07: this rule is
-  NOT an obstacle to Acronis-style full exclusion removal — the mount-&-delete
-  pass achieves it via the OS driver without parsing NTFS/ReFS.)
 
 ## Architecture
 
