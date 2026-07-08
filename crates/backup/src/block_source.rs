@@ -10,6 +10,13 @@ pub trait BlockSource: Send {
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()>;
 }
 
+/// A block source that also accepts writes — served RW to the mounter so the OS
+/// filesystem driver can delete excluded files (NTFS/ReFS true removal for the
+/// qcow2 container). Writes land in a scratch overlay, never the base image.
+pub trait WritableBlockSource: BlockSource {
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()>;
+}
+
 /// A qcow2 image (with its backing chain) is a block source directly — this
 /// is what the Windows mount path serves, sidecar not required.
 impl BlockSource for crate::qcow2::Qcow2RandomReader {

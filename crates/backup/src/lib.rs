@@ -19,6 +19,7 @@ pub mod image_writer;
 pub mod incremental;
 pub mod luks;
 pub mod ntfs_map;
+pub mod overlay;
 pub mod pipeline;
 pub mod qcow2;
 pub mod raw_copy;
