@@ -16,10 +16,12 @@
 //! All multi-byte integers in qcow2 are **big-endian** (unlike VHDX).
 
 pub mod io;
+pub mod merge;
 pub mod reader;
 pub mod writer;
 
 pub use io::{Qcow2RandomReader, Qcow2StagedWriter};
+pub use merge::Qcow2InPlaceMerge;
 pub use reader::Qcow2Reader;
 pub use writer::{Qcow2Compression, Qcow2Writer, Qcow2WriterOptions};
 

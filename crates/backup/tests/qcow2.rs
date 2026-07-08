@@ -8,7 +8,8 @@ use std::path::Path;
 use std::process::Command;
 
 use own_backup_backup::qcow2::{
-    Qcow2Compression, Qcow2RandomReader, Qcow2Reader, Qcow2Writer, Qcow2WriterOptions,
+    Qcow2Compression, Qcow2InPlaceMerge, Qcow2RandomReader, Qcow2Reader, Qcow2Writer,
+    Qcow2WriterOptions,
 };
 
 const CLUSTER: usize = 64 * 1024;
@@ -459,5 +460,145 @@ fn we_read_qemu_produced_images() {
             let read = reader.read_cluster(*index).unwrap().unwrap_or_else(|| vec![0u8; CLUSTER]);
             assert_eq!(&read, data, "cluster {index} from {}", qcow_path.display());
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// In-place merge (qcow2 NTFS/ReFS true removal folds touched blocks back in)
+// ---------------------------------------------------------------------------
+
+/// Read every expected cluster back through our own reader after a merge.
+fn assert_file_reads_back(path: &Path, expected: &[(u64, Vec<u8>)]) {
+    let mut reader = Qcow2Reader::open(std::fs::File::open(path).unwrap()).unwrap();
+    for (index, data) in expected {
+        let read = reader.read_cluster(*index).unwrap();
+        if data.iter().all(|&b| b == 0) {
+            assert!(read.is_none(), "cluster {index}: zeroed → unallocated");
+        } else {
+            assert_eq!(read.as_deref(), Some(data.as_slice()), "cluster {index} mismatch after merge");
+        }
+    }
+}
+
+#[test]
+fn merge_in_place_overwrite_add_and_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let virtual_size = 8 * 1024 * 1024u64;
+
+    let qemu = qemu_img_available();
+    let zstd_ok = qemu && qemu_supports_zstd(dir.path());
+    let (compression, zstd_level) = if zstd_ok {
+        (Qcow2Compression::Zstd { level: 3 }, Some(3))
+    } else {
+        (Qcow2Compression::None, None)
+    };
+
+    // Initial image: mix of compressible, incompressible, near and far clusters.
+    let initial = vec![
+        (0u64, text_cluster(0xAA)),
+        (1, noise_cluster(1)),
+        (5, text_cluster(0x55)),
+        (100, noise_cluster(2)),
+        (127, text_cluster(0x77)),
+    ];
+    let path = dir.path().join("img.qcow2");
+    std::fs::write(&path, build_image(virtual_size, compression, &initial)).unwrap();
+
+    // Merge: overwrite a compressible + an incompressible cluster, zero one out,
+    // and allocate a brand-new cluster.
+    {
+        let mut merge = Qcow2InPlaceMerge::open(&path, zstd_level).unwrap();
+        merge.write_cluster(0, &text_cluster(0xBB)).unwrap();
+        merge.write_cluster(1, &noise_cluster(42)).unwrap();
+        merge.write_cluster(100, &vec![0u8; CLUSTER]).unwrap(); // deleted → zeros
+        merge.write_cluster(3, &text_cluster(0x33)).unwrap();   // newly allocated
+        merge.commit().unwrap();
+    }
+
+    let expected = vec![
+        (0u64, text_cluster(0xBB)),
+        (1, noise_cluster(42)),
+        (3, text_cluster(0x33)),
+        (5, text_cluster(0x55)),   // untouched — kept in place
+        (100, vec![0u8; CLUSTER]), // zeroed
+        (127, text_cluster(0x77)), // untouched
+    ];
+
+    assert_file_reads_back(&path, &expected);
+
+    if qemu {
+        // qemu-img check must be clean (exit 0: no corruption AND no leaked
+        // clusters — dead old clusters are refcount-0 free space, not leaks).
+        qemu_validate(&path, virtual_size, &expected);
+    } else {
+        eprintln!("qemu-img not found — skipping conformance for merge test");
+    }
+}
+
+#[test]
+fn merge_no_writes_is_noop() {
+    let dir = tempfile::tempdir().unwrap();
+    let virtual_size = 4 * 1024 * 1024u64;
+    let clusters = vec![(0u64, text_cluster(0xAA)), (2, noise_cluster(5))];
+    let path = dir.path().join("noop.qcow2");
+    let original = build_image(virtual_size, Qcow2Compression::None, &clusters);
+    std::fs::write(&path, &original).unwrap();
+
+    Qcow2InPlaceMerge::open(&path, None).unwrap().commit().unwrap();
+
+    // Untouched byte-for-byte, and still valid.
+    assert_eq!(std::fs::read(&path).unwrap(), original, "no-write merge must not change the file");
+    if qemu_img_available() {
+        qemu_validate(&path, virtual_size, &clusters);
+    }
+}
+
+#[test]
+fn merge_spans_multiple_l2_tables_and_repeats() {
+    let dir = tempfile::tempdir().unwrap();
+    // 1 GiB: one L2 table covers 512 MiB → clusters 0 and 12288 sit in
+    // different L2 tables, so the merge must rebuild both + the L1.
+    let virtual_size = 1024 * 1024 * 1024u64;
+
+    let qemu = qemu_img_available();
+    let zstd_ok = qemu && qemu_supports_zstd(dir.path());
+    let (compression, zstd_level) = if zstd_ok {
+        (Qcow2Compression::Zstd { level: 3 }, Some(3))
+    } else {
+        (Qcow2Compression::None, None)
+    };
+
+    let initial = vec![
+        (0u64, text_cluster(0x11)),
+        (8192, text_cluster(0x22)), // first cluster of the 2nd L2 table
+        (12288, noise_cluster(4)),
+    ];
+    let path = dir.path().join("big.qcow2");
+    std::fs::write(&path, build_image(virtual_size, compression, &initial)).unwrap();
+
+    // First merge: touch a cluster in each L2 table + add a new far one.
+    {
+        let mut m = Qcow2InPlaceMerge::open(&path, zstd_level).unwrap();
+        m.write_cluster(0, &noise_cluster(100)).unwrap();
+        m.write_cluster(12288, &text_cluster(0x44)).unwrap();
+        m.write_cluster(9000, &text_cluster(0x99)).unwrap(); // new, 2nd table
+        m.commit().unwrap();
+    }
+    // Second merge on the already-merged image (idempotency / re-open works).
+    {
+        let mut m = Qcow2InPlaceMerge::open(&path, zstd_level).unwrap();
+        m.write_cluster(8192, &vec![0u8; CLUSTER]).unwrap(); // zero it out
+        m.commit().unwrap();
+    }
+
+    let expected = vec![
+        (0u64, noise_cluster(100)),
+        (8192, vec![0u8; CLUSTER]), // zeroed by the 2nd merge
+        (9000, text_cluster(0x99)),
+        (12288, text_cluster(0x44)),
+    ];
+    assert_file_reads_back(&path, &expected);
+    if qemu {
+        qemu_validate(&path, virtual_size, &expected);
     }
 }
