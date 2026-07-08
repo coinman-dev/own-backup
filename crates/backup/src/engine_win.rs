@@ -919,17 +919,7 @@ fn backup_volume_inner(
     // describes the final image.
     let mut checksums = outcome.checksums;
     let mut used_blocks = used_blocks;
-    if !removal_paths.is_empty() && req.image_format == ImageFormat::Qcow2 {
-        // The mount-&-delete pass needs the kernel VHDX driver (differencing
-        // child + MergeVirtualDisk) — impossible over a compressed userspace
-        // container. Honest behaviour, mirrored in the UI: the excluded
-        // files' DATA is already zeroed out of this image; only their
-        // zero-filled catalog ghosts remain.
-        warn!(
-            paths = removal_paths.len(),
-            "NTFS/ReFS true removal requires the VHDX container — excluded files remain as zero-filled ghosts in this qcow2 backup"
-        );
-    } else if !removal_paths.is_empty() {
+    if !removal_paths.is_empty() {
         let bytes_copied = outcome.bytes_copied;
         let mut tick = |entries: u64| {
             let _ = progress(&BackupProgress {
@@ -941,18 +931,41 @@ fn backup_volume_inner(
                 speed_bps: 0,
             });
         };
-        if crate::true_removal_win::remove_excluded_from_image(
-            &req.image_path,
-            &removal_paths,
-            data_offset,
-            volume_len,
-            req.block_size,
-            &mut checksums,
-            &mut tick,
-        )?
-        .is_some()
-        {
-            used_blocks = checksums.len() as u64;
+        match req.image_format {
+            ImageFormat::Vhdx => {
+                // Differencing child + MergeVirtualDisk via the kernel VHDX driver.
+                if crate::true_removal_win::remove_excluded_from_image(
+                    &req.image_path,
+                    &removal_paths,
+                    data_offset,
+                    volume_len,
+                    req.block_size,
+                    &mut checksums,
+                    &mut tick,
+                )?
+                .is_some()
+                {
+                    used_blocks = checksums.len() as u64;
+                }
+            }
+            ImageFormat::Qcow2 => {
+                // RW-mount via AIM over a CoW overlay, delete, fold the touched
+                // clusters back with Qcow2InPlaceMerge (Q-R3).
+                if crate::qcow2_removal_win::remove_excluded_from_qcow2(
+                    &req.image_path,
+                    &removal_paths,
+                    data_offset,
+                    volume_len,
+                    req.block_size,
+                    Some(crate::qcow2::DEFAULT_ZSTD_LEVEL),
+                    &mut checksums,
+                    &mut tick,
+                )?
+                .is_some()
+                {
+                    used_blocks = checksums.len() as u64;
+                }
+            }
         }
     }
 
@@ -1569,7 +1582,7 @@ fn mount_qcow2_via_aim(image_path: &Path) -> Result<String> {
     // Create the AIM proxy disk pointing at our server.
     let create = (|| -> Result<(crate::aim_win::AimAdapter, u32)> {
         let adapter = crate::aim_win::AimAdapter::open()?;
-        let device_number = adapter.create_tcp_proxy(port, virtual_size)?;
+        let device_number = adapter.create_tcp_proxy(port, virtual_size, true)?;
         Ok((adapter, device_number))
     })();
     let (adapter, device_number) = match create {

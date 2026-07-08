@@ -52,6 +52,8 @@ pub mod exclusions_win;
 #[cfg(target_os = "windows")]
 pub mod privileges_win;
 #[cfg(target_os = "windows")]
+pub mod qcow2_removal_win;
+#[cfg(target_os = "windows")]
 pub mod true_removal_win;
 #[cfg(target_os = "windows")]
 pub mod used_sectors_win;

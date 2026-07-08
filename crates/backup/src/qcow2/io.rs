@@ -165,6 +165,11 @@ impl Qcow2RandomReader {
         self.layers[0].virtual_size()
     }
 
+    /// Cluster size (uniform across the chain — enforced in `open`).
+    pub fn cluster_size(&self) -> u64 {
+        self.layers[0].cluster_size()
+    }
+
     /// Number of images in the chain (1 = standalone full).
     pub fn chain_len(&self) -> usize {
         self.layers.len()

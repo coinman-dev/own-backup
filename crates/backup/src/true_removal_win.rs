@@ -251,6 +251,26 @@ fn mount_and_delete(
     debug!(physical = %attached.physical_path(), "true removal: child attached RW and brought online");
 
     let disk_number = disk_number_of(attached.physical_path())?;
+    let (deleted, failed) = delete_paths_on_disk(disk_number, &dev, paths, tick)?;
+    drop(dev);
+    let t_detach = Instant::now();
+    drop(attached); // detaches the child
+    info!(detach_ms = t_detach.elapsed().as_millis(), "true removal: temp child detached");
+
+    Ok((deleted, failed))
+}
+
+/// Delete `paths` from the (already online) mounted volume on `disk_number`,
+/// then tear the volume down cleanly so the caller can detach/remove the disk
+/// without hitting the ~180 s PnP removal-veto timeout. `dev` is a write handle
+/// to the disk. Shared by the VHDX child path above and the qcow2 AIM path
+/// ([`crate::qcow2_removal_win`]). Returns (deleted, failed) entry counts.
+pub(crate) fn delete_paths_on_disk(
+    disk_number: u32,
+    dev: &WinRawDevice,
+    paths: &[ExcludedPath],
+    tick: &mut dyn FnMut(u64),
+) -> Result<(u64, u64)> {
     let volume_root = find_volume_on_disk(disk_number)?;
     info!(volume = %volume_root, disk = disk_number, "true removal: image volume mounted");
 
@@ -274,19 +294,14 @@ fn mount_and_delete(
 
     // Tear the mounted volume down BEFORE detaching, or DetachVirtualDisk hits
     // the fixed ~180 s PnP removal-veto timeout (the stall the main image
-    // avoids by never mounting — see engine_win / san_policy). Bringing the
-    // disk online mounted the volume, and system services (storsvc writing
-    // System Volume Information, Defender, the indexer) immediately opened
-    // handles on it — the busy-SVI delete warnings in the log are those very
-    // handles. Merely offlining the disk does NOT invalidate them (the
-    // original san_policy investigation proved that), so the detach's
-    // QUERY_REMOVE gets vetoed and waits out the full timeout. The one thing
-    // that DOES invalidate every foreign handle is a successful
-    // FSCTL_LOCK_VOLUME — so take the lock (retrying while the services
-    // finish their post-mount writes), dismount cleanly, offline the disk
-    // while still holding the lock (mountmgr must not re-mount when the lock
-    // drops), and only then detach. Every step is timed at info level.
-    teardown_volume(&volume_root, &dev);
+    // avoids by never mounting — see engine_win / san_policy). Bringing the disk
+    // online mounted the volume, and system services (storsvc writing System
+    // Volume Information, Defender, the indexer) immediately opened handles on
+    // it. Merely offlining does NOT invalidate them, so QUERY_REMOVE gets
+    // vetoed. A successful FSCTL_LOCK_VOLUME invalidates every foreign handle —
+    // take the lock (retrying while services finish their post-mount writes),
+    // dismount, offline while still holding the lock, then let the caller detach.
+    teardown_volume(&volume_root, dev);
     let t_gone = Instant::now();
     let gone = wait_volume_gone(disk_number, Duration::from_secs(10));
     info!(
@@ -294,11 +309,6 @@ fn mount_and_delete(
         gone_ms = t_gone.elapsed().as_millis(),
         "true removal: volume state before detach"
     );
-    drop(dev);
-    let t_detach = Instant::now();
-    drop(attached); // detaches the child
-    info!(detach_ms = t_detach.elapsed().as_millis(), "true removal: temp child detached");
-
     Ok((deleted, failed))
 }
 

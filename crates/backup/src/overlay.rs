@@ -139,6 +139,24 @@ impl WritableBlockSource for WritableOverlaySource {
     }
 }
 
+/// Share a writable source across the devio server thread and the merge step:
+/// the server locks it per request; after the server stops, the merge locks it
+/// to read `touched_clusters` / `read_cluster`.
+impl<W: WritableBlockSource> BlockSource for std::sync::Arc<std::sync::Mutex<W>> {
+    fn size(&self) -> u64 {
+        self.lock().unwrap().size()
+    }
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        self.lock().unwrap().read_at(offset, buf)
+    }
+}
+
+impl<W: WritableBlockSource> WritableBlockSource for std::sync::Arc<std::sync::Mutex<W>> {
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()> {
+        self.lock().unwrap().write_at(offset, data)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
