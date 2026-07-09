@@ -28,6 +28,9 @@ use own_backup_common::{OwnBackupError, Result};
 /// GPT type GUID for a Basic Data partition (Windows).
 pub const BASIC_DATA_GUID: &str = "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7";
 
+/// GPT type GUID for the OwnBackup embedded metadata partition.
+pub const OWN_BACKUP_META_GUID: &str = "5827248C-B5A1-42C4-82D0-377E1E788647";
+
 /// Conventional start of the first partition: 1 MiB.
 pub const DEFAULT_PARTITION_OFFSET: u64 = 1024 * 1024;
 
@@ -53,6 +56,10 @@ pub struct GptLayout {
     pub partition_guid: Uuid,
     /// Partition name (UTF-16, max 36 chars).
     pub partition_name: String,
+    /// Optional metadata partition size in bytes.
+    pub meta_partition_size: Option<u64>,
+    /// Optional metadata partition unique GUID.
+    pub meta_partition_guid: Option<Uuid>,
 }
 
 /// A single raw write to apply to the disk.
@@ -86,19 +93,42 @@ fn build_entries(layout: &GptLayout) -> Result<Vec<u8>> {
     let last_lba = (layout.partition_offset + layout.partition_size).div_ceil(sector) - 1;
 
     let mut entries = vec![0u8; (NUM_ENTRIES * ENTRY_SIZE) as usize];
-    let e = &mut entries[..ENTRY_SIZE as usize];
 
-    let type_guid = Uuid::parse_str(BASIC_DATA_GUID)
-        .map_err(|err| OwnBackupError::ImageFormat(format!("bad type GUID: {err}")))?;
-    put_guid(e, 0, &type_guid);
-    put_guid(e, 16, &layout.partition_guid);
-    put_u64(e, 32, first_lba);
-    put_u64(e, 40, last_lba);
-    put_u64(e, 48, 0); // attributes
+    // Entry 1: Basic Data Partition
+    {
+        let e = &mut entries[..ENTRY_SIZE as usize];
+        let type_guid = Uuid::parse_str(BASIC_DATA_GUID)
+            .map_err(|err| OwnBackupError::ImageFormat(format!("bad type GUID: {err}")))?;
+        put_guid(e, 0, &type_guid);
+        put_guid(e, 16, &layout.partition_guid);
+        put_u64(e, 32, first_lba);
+        put_u64(e, 40, last_lba);
+        put_u64(e, 48, 0); // attributes
 
-    // Partition name: UTF-16LE, max 36 code units.
-    for (i, unit) in layout.partition_name.encode_utf16().take(36).enumerate() {
-        e[56 + i * 2..56 + i * 2 + 2].copy_from_slice(&unit.to_le_bytes());
+        // Partition name: UTF-16LE, max 36 code units.
+        for (i, unit) in layout.partition_name.encode_utf16().take(36).enumerate() {
+            e[56 + i * 2..56 + i * 2 + 2].copy_from_slice(&unit.to_le_bytes());
+        }
+    }
+
+    // Entry 2: OwnBackupMeta Partition (if present)
+    if let (Some(meta_size), Some(meta_guid)) = (layout.meta_partition_size, layout.meta_partition_guid) {
+        let meta_first_lba = last_lba + 1;
+        let meta_last_lba = meta_first_lba + meta_size.div_ceil(sector) - 1;
+
+        let e = &mut entries[ENTRY_SIZE as usize..2 * ENTRY_SIZE as usize];
+        let type_guid = Uuid::parse_str(OWN_BACKUP_META_GUID)
+            .map_err(|err| OwnBackupError::ImageFormat(format!("bad type GUID: {err}")))?;
+        put_guid(e, 0, &type_guid);
+        put_guid(e, 16, &meta_guid);
+        put_u64(e, 32, meta_first_lba);
+        put_u64(e, 40, meta_last_lba);
+        put_u64(e, 48, 0); // attributes
+
+        // Partition name: UTF-16LE, max 36 code units.
+        for (i, unit) in "OwnBackupMeta".encode_utf16().take(36).enumerate() {
+            e[56 + i * 2..56 + i * 2 + 2].copy_from_slice(&unit.to_le_bytes());
+        }
     }
 
     Ok(entries)
@@ -213,9 +243,22 @@ pub fn gpt_write_ops(layout: &GptLayout) -> Result<Vec<WriteOp>> {
             "partition offset is not sector-aligned".into(),
         ));
     }
-    if part_first_lba < first_usable_lba || part_last_lba > last_usable_lba {
+
+    let mut overall_last_lba = part_last_lba;
+    if let Some(meta_size) = layout.meta_partition_size {
+        if meta_size % sector != 0 {
+            return Err(OwnBackupError::ImageFormat(
+                "meta partition size is not sector-aligned".into(),
+            ));
+        }
+        let meta_first_lba = part_last_lba + 1;
+        let meta_last_lba = meta_first_lba + (meta_size / sector) - 1;
+        overall_last_lba = meta_last_lba;
+    }
+
+    if part_first_lba < first_usable_lba || overall_last_lba > last_usable_lba {
         return Err(OwnBackupError::ImageFormat(format!(
-            "partition [{part_first_lba}..{part_last_lba}] does not fit usable range \
+            "partitions [{part_first_lba}..{overall_last_lba}] do not fit usable range \
              [{first_usable_lba}..{last_usable_lba}] of a {total_lba}-sector disk"
         )));
     }
@@ -375,6 +418,8 @@ mod tests {
             disk_guid: Uuid::from_u128(0x1111_2222_3333_4444_5555_6666_7777_8888),
             partition_guid: Uuid::from_u128(0xAAAA_BBBB_CCCC_DDDD_EEEE_0000_1111_2222),
             partition_name: "OwnBackup".into(),
+            meta_partition_size: None,
+            meta_partition_guid: None,
         }
     }
 

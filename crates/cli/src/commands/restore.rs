@@ -2,7 +2,7 @@ use clap::Args;
 
 #[derive(Args)]
 pub struct RestoreArgs {
-    /// Backup image (.vhdx) to restore from (sidecar .obkm must sit next to it)
+    /// Backup image (.vhdx/.qcow2) to restore from (with embedded metadata or sidecar .obkm)
     pub input: String,
 
     /// Target volume/device to OVERWRITE (e.g. D: or \\.\PhysicalDrive1)

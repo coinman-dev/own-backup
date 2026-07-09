@@ -107,6 +107,14 @@ pub fn read_disk_layout(disk_number: u32) -> Result<DiskLayout> {
     parse_disk_layout(&buf, sector, disk_size)
 }
 
+/// Find the first partition matching the OwnBackupMeta partition type GUID.
+/// Returns its guest offset (in bytes) and size (in bytes), or None if not found.
+pub fn find_meta_partition(layout: &DiskLayout) -> Option<(u64, u64)> {
+    layout.partitions.iter()
+        .find(|p| p.type_guid == crate::gpt_writer::OWN_BACKUP_META_GUID)
+        .map(|p| (p.offset_bytes(layout.sector_size), p.size_bytes(layout.sector_size)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,6 +136,8 @@ mod tests {
             disk_guid,
             partition_guid: part_guid,
             partition_name: "TESTVOL".into(),
+            meta_partition_size: None,
+            meta_partition_guid: None,
         };
         let ops = gpt_write_ops(&layout).unwrap();
 

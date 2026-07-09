@@ -38,7 +38,8 @@ use crate::gpt_writer::{disk_gpt_write_ops, gpt_write_ops, GptLayout, DEFAULT_PA
 use crate::raw_copy::copy_used_blocks;
 use crate::san_policy::SanPolicyGuard;
 use crate::sidecar::{
-    read_sidecar, sidecar_path_for, write_sidecar, ChainRole, Sidecar, SidecarInfo,
+    read_embedded_sidecar, read_sidecar, sidecar_path_for,
+    write_sidecar, ChainRole, Sidecar, SidecarInfo,
 };
 use crate::used_sectors::{AllUsedMap, UsedSectorMap};
 use crate::used_sectors_win::NtfsUsedSectorMap;
@@ -417,6 +418,7 @@ fn backup_volume_inner(
         )));
     }
     let total_blocks = volume_len.div_ceil(req.block_size as u64);
+    let meta_size = crate::sidecar::calculate_meta_partition_size(total_blocks);
 
     // --- Parent chain (incremental / differential) ---
     // A broken chain must not fail the run: fall back to a full backup and
@@ -668,8 +670,8 @@ fn backup_volume_inner(
     let used_blocks = used.used_block_count();
 
     // --- Create the image target (and attach it, for VHDX) ---
-    // Disk = 1 MiB GPT head + volume + tail for the backup GPT.
-    let disk_size = DEFAULT_PARTITION_OFFSET + volume_len.div_ceil(MIB) * MIB + MIB;
+    // Disk = 1 MiB GPT head + volume + meta partition + tail for the backup GPT.
+    let disk_size = DEFAULT_PARTITION_OFFSET + volume_len.div_ceil(MIB) * MIB + meta_size + MIB;
     let (mut target, data_offset) = match req.image_format {
         ImageFormat::Qcow2 => {
             // Userspace-written compressed image: no attach, no kernel writer.
@@ -758,7 +760,8 @@ fn backup_volume_inner(
 
     let disk_guid = match &parent {
         None => {
-            // --- GPT with a single Basic Data partition wrapping the volume ---
+            // --- GPT with Basic Data partition + OwnBackupMeta partition ---
+            let meta_partition_guid = Uuid::new_v4();
             let layout = GptLayout {
                 disk_size: target.length(),
                 sector_size,
@@ -767,6 +770,8 @@ fn backup_volume_inner(
                 disk_guid: Uuid::new_v4(),
                 partition_guid: Uuid::new_v4(),
                 partition_name: "OwnBackup".into(),
+                meta_partition_size: Some(meta_size),
+                meta_partition_guid: Some(meta_partition_guid),
             };
             for op in gpt_write_ops(&layout)? {
                 target.write_at(op.offset, &op.bytes)?;
@@ -883,6 +888,80 @@ fn backup_volume_inner(
         },
         &mut progress,
     )?;
+
+    // Pre-allocate the metadata partition blocks in the VHDX/qcow2 image
+    // by writing the initial sidecar blob before finalizing (prevents zero-write optimization).
+    let sector = sector_size as u64;
+    let last_lba = (DEFAULT_PARTITION_OFFSET + volume_len).div_ceil(sector) - 1;
+    let meta_offset = (last_lba + 1) * sector;
+
+    // Construct a temporary initial sidecar to allocate the block
+    let temp_manifest = ImageManifest {
+        backup_id,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        backup_type: kind,
+        parent_backup_id: parent.as_ref().map(|(_, s)| s.manifest.backup_id),
+        source_os: "windows".into(),
+        source_disk: DiskInfo {
+            device_id: source.clone(),
+            model: String::new(),
+            serial: String::new(),
+            size_bytes: volume_len,
+            sector_size_logical: sector_size,
+            sector_size_physical: std::cmp::max(sector_size, 4096),
+            media_type: "Volume".into(),
+            partition_table: PartitionTable::Gpt,
+            disk_guid: disk_guid.clone(),
+            partitions: vec![],
+        },
+        boot_mode: BootMode::Uefi,
+        partition_table: PartitionTable::Gpt,
+        compression_algo: CompressionAlgo::None,
+        compression_level: 0,
+        encryption_algo: None,
+        encryption_salt: None,
+        block_size: req.block_size,
+        total_blocks,
+        used_blocks,
+        backup_mode: if smart_mode {
+            BackupMode::UsedSectors
+        } else {
+            BackupMode::SectorBySector
+        },
+        checksum_algorithm: "xxhash64".into(),
+        preflight_report: None,
+        volume_encryption: None,
+    };
+    let temp_image_file_name = req.image_path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut temp_info = match &parent {
+        None => SidecarInfo::new_full(temp_image_file_name, data_offset),
+        Some((parent_path, _)) => {
+            let parent_name = parent_path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let role = match kind {
+                BackupType::Incremental => ChainRole::Incremental,
+                _ => ChainRole::Differential,
+            };
+            SidecarInfo::new_child(temp_image_file_name, role, parent_name, data_offset)
+        }
+    };
+    temp_info.container = req.image_format.extension().into();
+    let mut temp_blob = Vec::new();
+    crate::sidecar::write_sidecar_v2_to(&mut temp_blob, &temp_info, &temp_manifest, &outcome.checksums)?;
+
+    // Ensure the placeholder is at least meta_size to cover the entire partition space.
+    let mut placeholder = vec![0u8; meta_size as usize];
+    let placeholder_len = placeholder.len();
+    let temp_blob_len = temp_blob.len();
+    if temp_blob_len <= placeholder_len {
+        placeholder[..temp_blob_len].copy_from_slice(&temp_blob);
+    } else {
+        placeholder.copy_from_slice(&temp_blob[..placeholder_len]);
+    }
+    // Set a non-zero byte at the end of the placeholder to ensure it spans the whole allocation
+    if placeholder_len > 0 {
+        placeholder[placeholder_len - 1] = 1;
+    }
+    target.write_at(meta_offset, &placeholder)?;
 
     // Flushing a dynamic/differencing VHDX and detaching it writes all the
     // still-cached image data back to the destination drive — many seconds to
@@ -1050,10 +1129,23 @@ fn backup_volume_inner(
         }
     };
     sidecar_info.container = req.image_format.extension().into();
-    sidecar_info.job_id = req.job_id.clone();
-
     let sidecar_path = sidecar_path_for(&req.image_path);
-    write_sidecar(&sidecar_path, &sidecar_info, &manifest, &checksums)?;
+
+
+    // M0: Write embedded sidecar v2 to the meta partition in the finished image file
+    let sector = sector_size as u64;
+    let last_lba = (DEFAULT_PARTITION_OFFSET + volume_len).div_ceil(sector) - 1;
+    let meta_offset = (last_lba + 1) * sector;
+    let mut blob_bytes = Vec::new();
+    crate::sidecar::write_sidecar_v2_to(&mut blob_bytes, &sidecar_info, &manifest, &checksums)?;
+    match req.image_format {
+        ImageFormat::Vhdx => {
+            crate::vhdx_bat::write_vhdx_guest_at(&req.image_path, meta_offset, &blob_bytes)?;
+        }
+        ImageFormat::Qcow2 => {
+            crate::qcow2::merge::write_qcow2_guest_blob(&req.image_path, meta_offset, &blob_bytes)?;
+        }
+    }
 
     info!(
         image = %req.image_path.display(),
@@ -1558,9 +1650,20 @@ pub fn unmount_image(image_path: &Path) -> Result<()> {
             merge_into_parent(&child_path)?;
             let _ = std::fs::remove_file(&child_path);
 
-            // 4. Update the sidecar .obkm with rehashed checksums
-            let sidecar_path = sidecar_path_for(image_path);
-            if let Ok(mut sidecar) = read_sidecar(&sidecar_path) {
+            // 4. Update the sidecar with rehashed checksums (embedded or external)
+            let ext = image_path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_lowercase();
+            let mut read_from_embedded = false;
+            let sidecar_attempt = match read_embedded_sidecar(image_path, &ext) {
+                Ok(s) => {
+                    read_from_embedded = true;
+                    Ok(s)
+                }
+                Err(_) => {
+                    let sidecar_path = sidecar_path_for(image_path);
+                    read_sidecar(&sidecar_path)
+                }
+            };
+            if let Ok(mut sidecar) = sidecar_attempt {
                 let data_offset = sidecar.info.volume_data_offset;
                 let volume_len = sidecar.manifest.source_disk.size_bytes;
                 let block_size = sidecar.manifest.block_size;
@@ -1572,8 +1675,19 @@ pub fn unmount_image(image_path: &Path) -> Result<()> {
                     block_size,
                     &mut sidecar.checksums,
                 )?;
-                write_sidecar(&sidecar_path, &sidecar.info, &sidecar.manifest, &sidecar.checksums)?;
-                info!(image = %image_path.display(), "VHDX RW mount: .obkm sidecar updated successfully");
+                if read_from_embedded {
+                    let sector = 512u64;
+                    let last_lba = (DEFAULT_PARTITION_OFFSET + volume_len).div_ceil(sector) - 1;
+                    let meta_offset = (last_lba + 1) * sector;
+                    let mut blob_bytes = Vec::new();
+                    crate::sidecar::write_sidecar_v2_to(&mut blob_bytes, &sidecar.info, &sidecar.manifest, &sidecar.checksums)?;
+                    crate::vhdx_bat::write_vhdx_guest_at(image_path, meta_offset, &blob_bytes)?;
+                    info!(image = %image_path.display(), "VHDX RW mount: embedded sidecar updated successfully");
+                } else {
+                    let sidecar_path = sidecar_path_for(image_path);
+                    write_sidecar(&sidecar_path, &sidecar.info, &sidecar.manifest, &sidecar.checksums)?;
+                    info!(image = %image_path.display(), "VHDX RW mount: .obkm sidecar updated successfully");
+                }
             }
         } else {
             // No blocks touched, just delete child
@@ -1748,9 +1862,20 @@ fn unmount_qcow2_via_aim(image_path: &Path) -> Result<()> {
                 merge.commit()?;
             }
 
-            // Now rehash the touched regions and update the sidecar .obkm!
-            let sidecar_path = sidecar_path_for(image_path);
-            if let Ok(mut sidecar) = read_sidecar(&sidecar_path) {
+            // Now rehash the touched regions and update the sidecar (embedded or external)!
+            let ext = image_path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_lowercase();
+            let mut read_from_embedded = false;
+            let sidecar_attempt = match read_embedded_sidecar(image_path, &ext) {
+                Ok(s) => {
+                    read_from_embedded = true;
+                    Ok(s)
+                }
+                Err(_) => {
+                    let sidecar_path = sidecar_path_for(image_path);
+                    read_sidecar(&sidecar_path)
+                }
+            };
+            if let Ok(mut sidecar) = sidecar_attempt {
                 let cluster_size = {
                     let ov = overlay_arc.lock().unwrap();
                     ov.cluster_size()
@@ -1767,8 +1892,19 @@ fn unmount_qcow2_via_aim(image_path: &Path) -> Result<()> {
                     block_size,
                     &mut sidecar.checksums,
                 )?;
-                write_sidecar(&sidecar_path, &sidecar.info, &sidecar.manifest, &sidecar.checksums)?;
-                info!(image = %image_path.display(), "QCOW2 RW mount: .obkm sidecar updated successfully");
+                if read_from_embedded {
+                    let sector = 512u64;
+                    let last_lba = (DEFAULT_PARTITION_OFFSET + volume_len).div_ceil(sector) - 1;
+                    let meta_offset = (last_lba + 1) * sector;
+                    let mut blob_bytes = Vec::new();
+                    crate::sidecar::write_sidecar_v2_to(&mut blob_bytes, &sidecar.info, &sidecar.manifest, &sidecar.checksums)?;
+                    crate::qcow2::merge::write_qcow2_guest_blob(image_path, meta_offset, &blob_bytes)?;
+                    info!(image = %image_path.display(), "QCOW2 RW mount: embedded sidecar updated successfully");
+                } else {
+                    let sidecar_path = sidecar_path_for(image_path);
+                    write_sidecar(&sidecar_path, &sidecar.info, &sidecar.manifest, &sidecar.checksums)?;
+                    info!(image = %image_path.display(), "QCOW2 RW mount: .obkm sidecar updated successfully");
+                }
             }
         }
         // Delete scratch file
@@ -1830,14 +1966,20 @@ pub fn unlock_and_probe(device_path: &str, passphrase: &str) -> Result<Decrypted
 }
 
 fn load_sidecar_of(image_path: &Path) -> Result<Sidecar> {
-    let sidecar_path = sidecar_path_for(image_path);
-    if !sidecar_path.exists() {
-        return Err(OwnBackupError::ImageFormat(format!(
-            "sidecar not found: {} (needed for restore/verify)",
-            sidecar_path.display()
-        )));
+    let ext = image_path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_lowercase();
+    match read_embedded_sidecar(image_path, &ext) {
+        Ok(s) => Ok(s),
+        Err(e) => {
+            let sidecar_path = sidecar_path_for(image_path);
+            if !sidecar_path.exists() {
+                return Err(OwnBackupError::ImageFormat(format!(
+                    "embedded sidecar not found ({e}) and adjacent sidecar not found: {}",
+                    sidecar_path.display()
+                )));
+            }
+            read_sidecar(&sidecar_path)
+        }
     }
-    read_sidecar(&sidecar_path)
 }
 
 fn get_diskpart_virtual_disks() -> Vec<(u32, String)> {

@@ -352,3 +352,24 @@ impl Qcow2InPlaceMerge {
         Ok(())
     }
 }
+
+/// Write a blob to a qcow2 guest offset in-place, appending new clusters as needed and committing them.
+pub fn write_qcow2_guest_blob(path: &Path, guest_offset: u64, blob: &[u8]) -> Result<()> {
+    let mut merge = Qcow2InPlaceMerge::open(path, Some(super::DEFAULT_ZSTD_LEVEL))?;
+    let cs = merge.cluster_size();
+
+    let mut offset = 0;
+    while offset < blob.len() {
+        let chunk_len = std::cmp::min(blob.len() - offset, cs as usize);
+        let mut cluster_data = vec![0u8; cs as usize];
+        cluster_data[..chunk_len].copy_from_slice(&blob[offset..offset + chunk_len]);
+
+        let guest_cluster = (guest_offset + offset as u64) / cs;
+        merge.write_cluster(guest_cluster, &cluster_data)?;
+
+        offset += chunk_len;
+    }
+
+    merge.commit()?;
+    Ok(())
+}

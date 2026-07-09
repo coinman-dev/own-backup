@@ -25,6 +25,7 @@ use own_backup_common::image::ImageManifest;
 use own_backup_common::{OwnBackupError, Result};
 
 pub const SIDECAR_MAGIC: &[u8; 8] = b"OBKMSC01";
+pub const SIDECAR_MAGIC_V2: &[u8; 8] = b"OBKMSC02";
 pub const SIDECAR_EXTENSION: &str = "obkm";
 
 /// Role of an image inside a backup chain.
@@ -124,6 +125,13 @@ pub fn sidecar_path_for(image_path: &Path) -> std::path::PathBuf {
     std::path::PathBuf::from(name)
 }
 
+/// Calculate the size of the metadata partition based on the total number of blocks.
+pub fn calculate_meta_partition_size(total_blocks: u64) -> u64 {
+    let bytes = total_blocks * 16 + 65536;
+    let mib = 1024 * 1024;
+    bytes.div_ceil(mib) * mib
+}
+
 /// Write a sidecar to `path` (atomically via a `.tmp` rename).
 pub fn write_sidecar(
     path: &Path,
@@ -140,6 +148,42 @@ pub fn write_sidecar(
     }
     std::fs::rename(&tmp_path, path)?;
     Ok(())
+}
+
+fn write_varint<W: Write>(w: &mut W, mut val: u64) -> std::io::Result<usize> {
+    let mut bytes_written = 0;
+    loop {
+        let mut byte = (val & 0x7F) as u8;
+        val >>= 7;
+        if val != 0 {
+            byte |= 0x80;
+        }
+        w.write_all(&[byte])?;
+        bytes_written += 1;
+        if val == 0 {
+            break;
+        }
+    }
+    Ok(bytes_written)
+}
+
+fn read_varint<R: Read>(r: &mut R) -> std::io::Result<u64> {
+    let mut val = 0u64;
+    let mut shift = 0;
+    loop {
+        let mut byte = [0u8; 1];
+        r.read_exact(&mut byte)?;
+        let b = byte[0];
+        val |= ((b & 0x7F) as u64) << shift;
+        if b & 0x80 == 0 {
+            break;
+        }
+        shift += 7;
+        if shift >= 64 {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "varint overflow"));
+        }
+    }
+    Ok(val)
 }
 
 /// Write a sidecar to any writer.
@@ -168,6 +212,63 @@ pub fn write_sidecar_to<W: Write>(
     Ok(())
 }
 
+/// Write a sidecar format v2 blob (with compression and integrity check) to any writer.
+pub fn write_sidecar_v2_to<W: Write>(
+    w: &mut W,
+    info: &SidecarInfo,
+    manifest: &ImageManifest,
+    checksums: &[BlockChecksum],
+) -> Result<()> {
+    let mut info = info.clone();
+    info.format_version = 2;
+
+    let json = serde_json::to_vec(&JsonHeader {
+        info,
+        manifest: manifest.clone(),
+    })?;
+    let json_zstd = zstd::bulk::compress(&json, 3)
+        .map_err(|e| OwnBackupError::Compression(e.to_string()))?;
+    if json_zstd.len() > u32::MAX as usize {
+        return Err(OwnBackupError::ImageFormat("compressed sidecar JSON too large".into()));
+    }
+
+    let mut checksums = checksums.to_vec();
+    checksums.sort_by_key(|c| c.block_number);
+
+    let mut table_buf = Vec::new();
+    let mut prev = 0u64;
+    for entry in &checksums {
+        let delta = entry.block_number - prev;
+        write_varint(&mut table_buf, delta)?;
+        table_buf.write_all(&entry.checksum.to_le_bytes())?;
+        prev = entry.block_number;
+    }
+
+    let table_zstd = if !table_buf.is_empty() {
+        zstd::bulk::compress(&table_buf, 3)
+            .map_err(|e| OwnBackupError::Compression(e.to_string()))?
+    } else {
+        Vec::new()
+    };
+    if table_zstd.len() > u32::MAX as usize {
+        return Err(OwnBackupError::ImageFormat("compressed sidecar checksum table too large".into()));
+    }
+
+    let mut blob = Vec::new();
+    blob.write_all(SIDECAR_MAGIC_V2)?;
+    blob.write_all(&(json_zstd.len() as u32).to_le_bytes())?;
+    blob.write_all(&json_zstd)?;
+    blob.write_all(&(checksums.len() as u64).to_le_bytes())?;
+    blob.write_all(&(table_zstd.len() as u32).to_le_bytes())?;
+    blob.write_all(&table_zstd)?;
+
+    let hash = xxhash_rust::xxh64::xxh64(&blob, 0);
+    blob.write_all(&hash.to_le_bytes())?;
+
+    w.write_all(&blob)?;
+    Ok(())
+}
+
 /// Maximum accepted JSON header size (defensive cap, mirrors .obk reader).
 const MAX_JSON_LEN: u32 = 100 * 1024 * 1024;
 
@@ -177,76 +278,216 @@ pub fn read_sidecar(path: &Path) -> Result<Sidecar> {
     read_sidecar_from(&mut BufReader::new(file))
 }
 
+/// Read the embedded sidecar v2 from the virtual disk image.
+pub fn read_embedded_sidecar(image_path: &Path, container_format: &str) -> Result<Sidecar> {
+    match container_format {
+        "vhdx" | "avhdx" => {
+            let alloc = crate::vhdx_bat::allocated_payload_blocks(image_path)?;
+            let vsize = alloc.virtual_size;
+            let sector_size = 512;
+            let mut gpt_buf = vec![0u8; 34 * sector_size];
+            crate::vhdx_bat::read_vhdx_guest_at(image_path, 0, &mut gpt_buf)?;
+
+            let layout = crate::gpt_reader::parse_disk_layout(&gpt_buf, sector_size as u32, vsize)?;
+            let (meta_offset, meta_size) = crate::gpt_reader::find_meta_partition(&layout)
+                .ok_or_else(|| OwnBackupError::ImageFormat("OwnBackupMeta partition not found in GPT".into()))?;
+
+            let read_len = std::cmp::min(meta_size, 1024 * 1024);
+            let mut blob = vec![0u8; read_len as usize];
+            crate::vhdx_bat::read_vhdx_guest_at(image_path, meta_offset, &mut blob)?;
+
+            let mut cursor = std::io::Cursor::new(blob);
+            read_sidecar_from(&mut cursor)
+        }
+        "qcow2" => {
+            let mut reader = crate::qcow2::Qcow2RandomReader::open(image_path)?;
+            let vsize = reader.virtual_size();
+            let sector_size = 512;
+            let mut gpt_buf = vec![0u8; 34 * sector_size];
+            reader.read_at(0, &mut gpt_buf)?;
+
+            let layout = crate::gpt_reader::parse_disk_layout(&gpt_buf, sector_size as u32, vsize)?;
+            let (meta_offset, meta_size) = crate::gpt_reader::find_meta_partition(&layout)
+                .ok_or_else(|| OwnBackupError::ImageFormat("OwnBackupMeta partition not found in GPT".into()))?;
+
+            let read_len = std::cmp::min(meta_size, 1024 * 1024);
+            let mut blob = vec![0u8; read_len as usize];
+            reader.read_at(meta_offset, &mut blob)?;
+
+            let mut cursor = std::io::Cursor::new(blob);
+            read_sidecar_from(&mut cursor)
+        }
+        other => Err(OwnBackupError::ImageFormat(format!("unsupported container format: {other}"))),
+    }
+}
+
+/// Read only the SidecarInfo and ImageManifest from the embedded sidecar of the virtual disk image.
+pub fn read_embedded_sidecar_header(image_path: &Path, container_format: &str) -> Result<(SidecarInfo, ImageManifest)> {
+    match container_format {
+        "vhdx" | "avhdx" => {
+            let alloc = crate::vhdx_bat::allocated_payload_blocks(image_path)?;
+            let vsize = alloc.virtual_size;
+            let sector_size = 512;
+            let mut gpt_buf = vec![0u8; 34 * sector_size];
+            crate::vhdx_bat::read_vhdx_guest_at(image_path, 0, &mut gpt_buf)?;
+
+            let layout = crate::gpt_reader::parse_disk_layout(&gpt_buf, sector_size as u32, vsize)?;
+            let (meta_offset, meta_size) = crate::gpt_reader::find_meta_partition(&layout)
+                .ok_or_else(|| OwnBackupError::ImageFormat("OwnBackupMeta partition not found in GPT".into()))?;
+
+            let read_len = std::cmp::min(meta_size, 1024 * 1024);
+            let mut blob = vec![0u8; read_len as usize];
+            crate::vhdx_bat::read_vhdx_guest_at(image_path, meta_offset, &mut blob)?;
+
+            let mut cursor = std::io::Cursor::new(blob);
+            read_sidecar_header_from(&mut cursor)
+        }
+        "qcow2" => {
+            let mut reader = crate::qcow2::Qcow2RandomReader::open(image_path)?;
+            let vsize = reader.virtual_size();
+            let sector_size = 512;
+            let mut gpt_buf = vec![0u8; 34 * sector_size];
+            reader.read_at(0, &mut gpt_buf)?;
+
+            let layout = crate::gpt_reader::parse_disk_layout(&gpt_buf, sector_size as u32, vsize)?;
+            let (meta_offset, meta_size) = crate::gpt_reader::find_meta_partition(&layout)
+                .ok_or_else(|| OwnBackupError::ImageFormat("OwnBackupMeta partition not found in GPT".into()))?;
+
+            let read_len = std::cmp::min(meta_size, 1024 * 1024);
+            let mut blob = vec![0u8; read_len as usize];
+            reader.read_at(meta_offset, &mut blob)?;
+
+            let mut cursor = std::io::Cursor::new(blob);
+            read_sidecar_header_from(&mut cursor)
+        }
+        other => Err(OwnBackupError::ImageFormat(format!("unsupported container format: {other}"))),
+    }
+}
+
 /// Read only the JSON header (info + manifest) of a sidecar, skipping the
 /// checksum table. Cheap enough for scanning whole folders (retention, chain
 /// discovery, image info).
 pub fn read_sidecar_header(path: &Path) -> Result<(SidecarInfo, ImageManifest)> {
     let file = File::open(path)?;
-    let mut r = BufReader::new(file);
-
-    let mut magic = [0u8; 8];
-    r.read_exact(&mut magic)?;
-    if &magic != SIDECAR_MAGIC {
-        return Err(OwnBackupError::ImageFormat(
-            "not a sidecar file (bad magic)".into(),
-        ));
-    }
-    let mut len_buf = [0u8; 4];
-    r.read_exact(&mut len_buf)?;
-    let json_len = u32::from_le_bytes(len_buf);
-    if json_len == 0 || json_len > MAX_JSON_LEN {
-        return Err(OwnBackupError::ImageFormat(format!(
-            "sidecar JSON length {json_len} out of range"
-        )));
-    }
-    let mut json = vec![0u8; json_len as usize];
-    r.read_exact(&mut json)?;
-    let header: JsonHeader = serde_json::from_slice(&json)?;
-    Ok((header.info, header.manifest))
+    read_sidecar_header_from(&mut BufReader::new(file))
 }
 
-/// Read a sidecar from any reader.
-pub fn read_sidecar_from<R: Read>(r: &mut R) -> Result<Sidecar> {
+/// Read only the JSON header from any reader.
+pub fn read_sidecar_header_from<R: Read>(r: &mut R) -> Result<(SidecarInfo, ImageManifest)> {
     let mut magic = [0u8; 8];
     r.read_exact(&mut magic)?;
-    if &magic != SIDECAR_MAGIC {
-        return Err(OwnBackupError::ImageFormat(
+    if &magic == SIDECAR_MAGIC {
+        let mut len_buf = [0u8; 4];
+        r.read_exact(&mut len_buf)?;
+        let json_len = u32::from_le_bytes(len_buf);
+        if json_len == 0 || json_len > MAX_JSON_LEN {
+            return Err(OwnBackupError::ImageFormat(format!(
+                "sidecar JSON length {json_len} out of range"
+            )));
+        }
+        let mut json = vec![0u8; json_len as usize];
+        r.read_exact(&mut json)?;
+        let header: JsonHeader = serde_json::from_slice(&json)?;
+        Ok((header.info, header.manifest))
+    } else if &magic == SIDECAR_MAGIC_V2 {
+        let mut len_buf = [0u8; 4];
+        r.read_exact(&mut len_buf)?;
+        let json_len = u32::from_le_bytes(len_buf);
+        if json_len == 0 || json_len > MAX_JSON_LEN {
+            return Err(OwnBackupError::ImageFormat(format!(
+                "sidecar v2 JSON length {json_len} out of range"
+            )));
+        }
+        let mut json_zstd = vec![0u8; json_len as usize];
+        r.read_exact(&mut json_zstd)?;
+        let json_decompressed = zstd::bulk::decompress(&json_zstd, MAX_JSON_LEN as usize)
+            .map_err(|e| OwnBackupError::Compression(e.to_string()))?;
+        let header: JsonHeader = serde_json::from_slice(&json_decompressed)?;
+        Ok((header.info, header.manifest))
+    } else {
+        Err(OwnBackupError::ImageFormat(
             "not a sidecar file (bad magic)".into(),
-        ));
+        ))
     }
+}
+
+fn read_sidecar_v2_from_after_magic<R: Read>(r: &mut R) -> Result<Sidecar> {
+    let mut header_bytes = Vec::new();
+    header_bytes.write_all(SIDECAR_MAGIC_V2)?;
 
     let mut len_buf = [0u8; 4];
     r.read_exact(&mut len_buf)?;
+    header_bytes.write_all(&len_buf)?;
     let json_len = u32::from_le_bytes(len_buf);
     if json_len == 0 || json_len > MAX_JSON_LEN {
         return Err(OwnBackupError::ImageFormat(format!(
-            "sidecar JSON length {json_len} out of range"
+            "sidecar v2 JSON length {json_len} out of range"
         )));
     }
 
-    let mut json = vec![0u8; json_len as usize];
-    r.read_exact(&mut json)?;
-    let header: JsonHeader = serde_json::from_slice(&json)?;
+    let mut json_zstd = vec![0u8; json_len as usize];
+    r.read_exact(&mut json_zstd)?;
+    header_bytes.write_all(&json_zstd)?;
+
+    let json_decompressed = zstd::bulk::decompress(&json_zstd, MAX_JSON_LEN as usize)
+        .map_err(|e| OwnBackupError::Compression(e.to_string()))?;
+    let header: JsonHeader = serde_json::from_slice(&json_decompressed)?;
 
     let mut count_buf = [0u8; 8];
     r.read_exact(&mut count_buf)?;
+    header_bytes.write_all(&count_buf)?;
     let count = u64::from_le_bytes(count_buf);
-    // Defensive cap: 512 GiB of 4 KiB blocks is 134M entries; anything beyond
-    // a few hundred million entries means corruption.
     if count > 1u64 << 32 {
         return Err(OwnBackupError::ImageFormat(format!(
-            "sidecar checksum count {count} out of range"
+            "sidecar v2 checksum count {count} out of range"
+        )));
+    }
+
+    let mut table_len_buf = [0u8; 4];
+    r.read_exact(&mut table_len_buf)?;
+    header_bytes.write_all(&table_len_buf)?;
+    let table_zstd_len = u32::from_le_bytes(table_len_buf);
+    if table_zstd_len > 500 * 1024 * 1024 {
+        return Err(OwnBackupError::ImageFormat(format!(
+            "sidecar v2 table compressed length {table_zstd_len} too large"
+        )));
+    }
+
+    let mut table_zstd = vec![0u8; table_zstd_len as usize];
+    r.read_exact(&mut table_zstd)?;
+    header_bytes.write_all(&table_zstd)?;
+
+    let mut expected_hash_buf = [0u8; 8];
+    r.read_exact(&mut expected_hash_buf)?;
+    let expected_hash = u64::from_le_bytes(expected_hash_buf);
+
+    let actual_hash = xxhash_rust::xxh64::xxh64(&header_bytes, 0);
+    if actual_hash != expected_hash {
+        return Err(OwnBackupError::ImageFormat(format!(
+            "sidecar v2 integrity check failed (expected hash {expected_hash:x}, got {actual_hash:x})"
         )));
     }
 
     let mut checksums = Vec::with_capacity(count as usize);
-    let mut entry = [0u8; 16];
-    for _ in 0..count {
-        r.read_exact(&mut entry)?;
-        checksums.push(BlockChecksum {
-            block_number: u64::from_le_bytes(entry[0..8].try_into().unwrap()),
-            checksum: u64::from_le_bytes(entry[8..16].try_into().unwrap()),
-        });
+    if count > 0 {
+        let max_decompressed_table = (count * 16 + 10 * 1024 * 1024) as usize;
+        let table_decompressed = zstd::bulk::decompress(&table_zstd, max_decompressed_table)
+            .map_err(|e| OwnBackupError::Compression(e.to_string()))?;
+        
+        let mut cursor = std::io::Cursor::new(table_decompressed);
+        let mut prev = 0u64;
+        for _ in 0..count {
+            let delta = read_varint(&mut cursor)?;
+            let block_number = prev + delta;
+            let mut cksum_buf = [0u8; 8];
+            cursor.read_exact(&mut cksum_buf)?;
+            let checksum = u64::from_le_bytes(cksum_buf);
+            checksums.push(BlockChecksum {
+                block_number,
+                checksum,
+            });
+            prev = block_number;
+        }
     }
 
     Ok(Sidecar {
@@ -254,6 +495,57 @@ pub fn read_sidecar_from<R: Read>(r: &mut R) -> Result<Sidecar> {
         manifest: header.manifest,
         checksums,
     })
+}
+
+/// Read a sidecar from any reader.
+pub fn read_sidecar_from<R: Read>(r: &mut R) -> Result<Sidecar> {
+    let mut magic = [0u8; 8];
+    r.read_exact(&mut magic)?;
+    if &magic == SIDECAR_MAGIC {
+        let mut len_buf = [0u8; 4];
+        r.read_exact(&mut len_buf)?;
+        let json_len = u32::from_le_bytes(len_buf);
+        if json_len == 0 || json_len > MAX_JSON_LEN {
+            return Err(OwnBackupError::ImageFormat(format!(
+                "sidecar JSON length {json_len} out of range"
+            )));
+        }
+
+        let mut json = vec![0u8; json_len as usize];
+        r.read_exact(&mut json)?;
+        let header: JsonHeader = serde_json::from_slice(&json)?;
+
+        let mut count_buf = [0u8; 8];
+        r.read_exact(&mut count_buf)?;
+        let count = u64::from_le_bytes(count_buf);
+        if count > 1u64 << 32 {
+            return Err(OwnBackupError::ImageFormat(format!(
+                "sidecar checksum count {count} out of range"
+            )));
+        }
+
+        let mut checksums = Vec::with_capacity(count as usize);
+        let mut entry = [0u8; 16];
+        for _ in 0..count {
+            r.read_exact(&mut entry)?;
+            checksums.push(BlockChecksum {
+                block_number: u64::from_le_bytes(entry[0..8].try_into().unwrap()),
+                checksum: u64::from_le_bytes(entry[8..16].try_into().unwrap()),
+            });
+        }
+
+        Ok(Sidecar {
+            info: header.info,
+            manifest: header.manifest,
+            checksums,
+        })
+    } else if &magic == SIDECAR_MAGIC_V2 {
+        read_sidecar_v2_from_after_magic(r)
+    } else {
+        Err(OwnBackupError::ImageFormat(
+            "not a sidecar file (bad magic)".into(),
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -362,5 +654,158 @@ mod tests {
             .unwrap();
         buf.truncate(buf.len() - 4);
         assert!(read_sidecar_from(&mut Cursor::new(&buf)).is_err());
+    }
+
+    #[test]
+    fn sidecar_v2_roundtrip() {
+        let info = SidecarInfo::new_full("job_full.vhdx", 1024 * 1024);
+        let manifest = make_manifest();
+        let checksums = vec![
+            BlockChecksum { block_number: 0, checksum: 0xDEAD },
+            BlockChecksum { block_number: 5, checksum: 0xBEEF },
+            BlockChecksum { block_number: 15, checksum: u64::MAX },
+        ];
+
+        let mut buf = Vec::new();
+        write_sidecar_v2_to(&mut buf, &info, &manifest, &checksums).unwrap();
+
+        // 1. Read entire sidecar
+        let sidecar = read_sidecar_from(&mut Cursor::new(&buf)).unwrap();
+        assert_eq!(sidecar.info.container, "vhdx");
+        assert_eq!(sidecar.info.chain_role, ChainRole::Full);
+        assert_eq!(sidecar.info.image_file_name, "job_full.vhdx");
+        assert_eq!(sidecar.info.volume_data_offset, 1024 * 1024);
+        assert_eq!(sidecar.info.format_version, 2);
+        assert_eq!(sidecar.manifest.block_size, 65536);
+        assert_eq!(sidecar.checksums, checksums);
+
+        // 2. Read header only
+        let (read_info, read_manifest) = read_sidecar_header_from(&mut Cursor::new(&buf)).unwrap();
+        assert_eq!(read_info.format_version, 2);
+        assert_eq!(read_info.image_file_name, "job_full.vhdx");
+        assert_eq!(read_manifest.block_size, 65536);
+    }
+
+    #[test]
+    fn sidecar_v2_roundtrip_empty_checksums() {
+        let info = SidecarInfo::new_full("job_full.vhdx", 0);
+        let manifest = make_manifest();
+
+        let mut buf = Vec::new();
+        write_sidecar_v2_to(&mut buf, &info, &manifest, &[]).unwrap();
+
+        let sidecar = read_sidecar_from(&mut Cursor::new(&buf)).unwrap();
+        assert_eq!(sidecar.info.format_version, 2);
+        assert!(sidecar.checksums.is_empty());
+    }
+
+    #[test]
+    fn sidecar_v2_rejects_bad_magic() {
+        let mut buf = Vec::new();
+        write_sidecar_v2_to(&mut buf, &SidecarInfo::new_full("x.vhdx", 0), &make_manifest(), &[])
+            .unwrap();
+        buf[0] = b'X';
+        assert!(read_sidecar_from(&mut Cursor::new(&buf)).is_err());
+    }
+
+    #[test]
+    fn sidecar_v2_rejects_corrupted_hash() {
+        let mut buf = Vec::new();
+        write_sidecar_v2_to(&mut buf, &SidecarInfo::new_full("x.vhdx", 0), &make_manifest(), &[])
+            .unwrap();
+        let len = buf.len();
+        // Corrupt the xxhash64 at the end of the blob
+        buf[len - 1] ^= 0xFF;
+        assert!(read_sidecar_from(&mut Cursor::new(&buf)).is_err());
+    }
+
+    #[test]
+    fn test_read_embedded_sidecar_qcow2() {
+        use crate::gpt_writer::{gpt_write_ops, GptLayout, DEFAULT_PARTITION_OFFSET};
+        use crate::qcow2::{Qcow2Writer, Qcow2WriterOptions, Qcow2Compression};
+
+        let dir = tempfile::tempdir().unwrap();
+        let image_path = dir.path().join("test.qcow2");
+
+        // 1. Setup layout and construct sidecar info
+        let sector_size = 512;
+        let volume_len = 8 * 1024 * 1024; // 8 MiB volume
+        let block_size = 65536;
+        let total_blocks = volume_len / block_size;
+        let meta_size = calculate_meta_partition_size(total_blocks);
+        let disk_size = DEFAULT_PARTITION_OFFSET + volume_len + meta_size + 1024 * 1024; // 1 MiB tail
+
+        let meta_partition_guid = uuid::Uuid::new_v4();
+        let layout = GptLayout {
+            disk_size,
+            sector_size,
+            partition_offset: DEFAULT_PARTITION_OFFSET,
+            partition_size: volume_len,
+            disk_guid: uuid::Uuid::new_v4(),
+            partition_guid: uuid::Uuid::new_v4(),
+            partition_name: "OwnBackup".into(),
+            meta_partition_size: Some(meta_size),
+            meta_partition_guid: Some(meta_partition_guid),
+        };
+
+        // Initialize mock disk memory buffer
+        let mut disk_buf = vec![0u8; disk_size as usize];
+
+        // Write the GPT layout
+        for op in gpt_write_ops(&layout).unwrap() {
+            disk_buf[op.offset as usize..op.offset as usize + op.bytes.len()].copy_from_slice(&op.bytes);
+        }
+
+        // Setup the sidecar blob
+        let mut info = SidecarInfo::new_full("test.qcow2", DEFAULT_PARTITION_OFFSET);
+        info.container = "qcow2".into();
+        info.job_id = Some("test_job".into());
+        let manifest = make_manifest();
+        let checksums = vec![BlockChecksum { block_number: 2, checksum: 12345 }];
+
+        let mut sidecar_bytes = Vec::new();
+        write_sidecar_v2_to(&mut sidecar_bytes, &info, &manifest, &checksums).unwrap();
+
+        // Write the sidecar blob to the meta partition guest offset in our disk buffer
+        let last_lba = (DEFAULT_PARTITION_OFFSET + volume_len) / sector_size as u64 - 1;
+        let meta_offset = (last_lba + 1) * sector_size as u64;
+        disk_buf[meta_offset as usize..meta_offset as usize + sidecar_bytes.len()].copy_from_slice(&sidecar_bytes);
+
+        // 2. Build the qcow2 image file using Qcow2Writer
+        let file = std::fs::File::create(&image_path).unwrap();
+        let mut qcow_writer = Qcow2Writer::new(
+            std::io::BufWriter::new(file),
+            Qcow2WriterOptions {
+                virtual_size: disk_size,
+                compression: Qcow2Compression::None,
+                ..Default::default()
+            },
+        ).unwrap();
+
+        let cs = 64 * 1024;
+        let mut cluster_index = 0;
+        while cluster_index * cs < disk_size {
+            let chunk_start = (cluster_index * cs) as usize;
+            let chunk_end = std::cmp::min(disk_size as usize, chunk_start + cs as usize);
+            let chunk = &disk_buf[chunk_start..chunk_end];
+            if chunk.iter().any(|&b| b != 0) {
+                let mut cluster_data = vec![0u8; cs as usize];
+                cluster_data[..chunk.len()].copy_from_slice(chunk);
+                qcow_writer.write_cluster(cluster_index, &cluster_data).unwrap();
+            }
+            cluster_index += 1;
+        }
+        qcow_writer.finish().unwrap();
+
+        // 3. Read the embedded sidecar back and verify!
+        let read_sidecar = read_embedded_sidecar(&image_path, "qcow2").unwrap();
+        assert_eq!(read_sidecar.info.image_file_name, "test.qcow2");
+        assert_eq!(read_sidecar.info.container, "qcow2");
+        assert_eq!(read_sidecar.info.job_id.as_deref(), Some("test_job"));
+        assert_eq!(read_sidecar.checksums, checksums);
+
+        let (read_info, read_manifest) = read_embedded_sidecar_header(&image_path, "qcow2").unwrap();
+        assert_eq!(read_info.image_file_name, "test.qcow2");
+        assert_eq!(read_manifest.block_size, 65536);
     }
 }

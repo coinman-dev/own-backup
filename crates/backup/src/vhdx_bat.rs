@@ -12,7 +12,7 @@
 //! platform (unlike [`crate::vhdx_format`], which is Linux-only).
 
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use uuid::Uuid;
@@ -147,6 +147,112 @@ pub fn allocated_payload_blocks(path: &Path) -> Result<VhdxAllocation> {
     }
 
     Ok(VhdxAllocation { block_size: bsize, virtual_size: vsize, blocks })
+}
+
+fn guest_to_file_offset_in_file(file: &mut File, guest_offset: u64) -> Result<u64> {
+    // 1. File-type identifier.
+    let mut id = [0u8; 8];
+    read_exact_at(file, 0, &mut id)?;
+    if &id != b"vhdxfile" {
+        return Err(bad("not a VHDX file (no signature)"));
+    }
+
+    // 2. Region table.
+    let mut region = vec![0u8; 64 * 1024];
+    read_exact_at(file, REGION1_OFF, &mut region)?;
+    if &region[0..4] != b"regi" {
+        return Err(bad("no region table signature"));
+    }
+    let entry_count = u32::from_le_bytes(region[8..12].try_into().unwrap()) as usize;
+    let (mut bat_off, mut bat_len, mut meta_off, mut meta_len) = (0u64, 0u64, 0u64, 0u64);
+    for slot in 0..entry_count.min(2047) {
+        let base = 16 + slot * 32;
+        let guid = &region[base..base + 16];
+        let off = u64::from_le_bytes(region[base + 16..base + 24].try_into().unwrap());
+        let len = u32::from_le_bytes(region[base + 24..base + 28].try_into().unwrap()) as u64;
+        if guid == guid_le(BAT_GUID) {
+            (bat_off, bat_len) = (off, len);
+        } else if guid == guid_le(META_GUID) {
+            (meta_off, meta_len) = (off, len);
+        }
+    }
+    if bat_off == 0 || meta_off == 0 {
+        return Err(bad("region table missing BAT or metadata"));
+    }
+
+    // 3. Metadata.
+    let mut meta = vec![0u8; meta_len.min(1024 * 1024) as usize];
+    read_exact_at(file, meta_off, &mut meta)?;
+    if &meta[0..8] != b"metadata" {
+        return Err(bad("no metadata signature"));
+    }
+    let mcount = u16::from_le_bytes(meta[10..12].try_into().unwrap()) as usize;
+    let (mut vsize, mut bsize, mut ssize) = (0u64, 0u64, 512u32);
+    for slot in 0..mcount.min(2046) {
+        let e = 32 + slot * 32;
+        let guid = &meta[e..e + 16];
+        let ioff = u32::from_le_bytes(meta[e + 16..e + 20].try_into().unwrap()) as usize;
+        if ioff + 8 > meta.len() {
+            continue;
+        }
+        if guid == guid_le(MI_VDISK_SIZE) {
+            vsize = u64::from_le_bytes(meta[ioff..ioff + 8].try_into().unwrap());
+        } else if guid == guid_le(MI_FILE_PARAMS) {
+            bsize = u32::from_le_bytes(meta[ioff..ioff + 4].try_into().unwrap()) as u64;
+        } else if guid == guid_le(MI_LOG_SECTOR) {
+            ssize = u32::from_le_bytes(meta[ioff..ioff + 4].try_into().unwrap());
+        }
+    }
+    if vsize == 0 || bsize == 0 || ssize == 0 {
+        return Err(bad("metadata missing virtual/block/sector size"));
+    }
+
+    // 4. BAT lookup.
+    if guest_offset >= vsize {
+        return Err(bad(format!("guest offset {guest_offset} out of bounds (virtual size {vsize})")));
+    }
+
+    let payload_block_index = guest_offset / bsize;
+    let block_offset = guest_offset % bsize;
+
+    let chunk_ratio = (1u64 << 23) * ssize as u64 / bsize;
+    let bat_entry_index = (payload_block_index + payload_block_index / chunk_ratio) as usize;
+
+    if (bat_entry_index * 8 + 8) as u64 > bat_len {
+        return Err(bad("guest offset BAT entry out of BAT bounds"));
+    }
+
+    let mut entry_buf = [0u8; 8];
+    read_exact_at(file, bat_off + bat_entry_index as u64 * 8, &mut entry_buf)?;
+    let entry = u64::from_le_bytes(entry_buf);
+
+    let state = entry & 7;
+    if state != 6 && state != 7 {
+        return Err(bad(format!("block state {state} is not physically allocated in VHDX (cannot seek/write)")));
+    }
+
+    let file_offset = entry & 0xFFFFFFFFFFF00000;
+    Ok(file_offset + block_offset)
+}
+
+/// Read directly from a guest offset of a VHDX file without attaching.
+pub fn read_vhdx_guest_at(path: &Path, guest_offset: u64, buf: &mut [u8]) -> Result<()> {
+    let mut file = File::open(path).map_err(|e| bad(format!("open {}: {e}", path.display())))?;
+    let file_offset = guest_to_file_offset_in_file(&mut file, guest_offset)?;
+    read_exact_at(&mut file, file_offset, buf)
+}
+
+/// Write directly to a guest offset of a VHDX file without attaching.
+pub fn write_vhdx_guest_at(path: &Path, guest_offset: u64, buf: &[u8]) -> Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|e| bad(format!("open {}: {e}", path.display())))?;
+    let file_offset = guest_to_file_offset_in_file(&mut file, guest_offset)?;
+    file.seek(SeekFrom::Start(file_offset)).map_err(bad)?;
+    file.write_all(buf).map_err(bad)?;
+    file.sync_all().map_err(bad)
 }
 
 #[cfg(test)]

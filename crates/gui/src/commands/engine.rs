@@ -101,18 +101,25 @@ pub struct ImageInfoDto {
     pub backup_mode: String,
 }
 
-/// Read sidecar info for an image path — used by the Restore/Tools views.
 #[tauri::command]
 pub async fn read_image_info(image_path: String) -> Result<ImageInfoDto, String> {
     let path = std::path::PathBuf::from(&image_path);
-    let sidecar_path = own_backup_backup::sidecar_path_for(&path);
-    if !sidecar_path.exists() {
-        return Err(format!(
-            "Рядом с образом не найден файл метаданных: {}",
-            sidecar_path.display()
-        ));
-    }
-    let sidecar = own_backup_backup::read_sidecar(&sidecar_path).map_err(|e| e.to_string())?;
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_lowercase();
+    
+    let sidecar = match own_backup_backup::read_embedded_sidecar(&path, &ext) {
+        Ok(s) => s,
+        Err(_) => {
+            let sidecar_path = own_backup_backup::sidecar_path_for(&path);
+            if !sidecar_path.exists() {
+                return Err(format!(
+                    "В образе нет встроенных метаданных и рядом не найден файл метаданных: {}",
+                    sidecar_path.display()
+                ));
+            }
+            own_backup_backup::read_sidecar(&sidecar_path).map_err(|e| e.to_string())?
+        }
+    };
+
     Ok(ImageInfoDto {
         image_file_name: sidecar.info.image_file_name,
         chain_role: format!("{:?}", sidecar.info.chain_role),

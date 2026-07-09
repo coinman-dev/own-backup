@@ -19,7 +19,7 @@ use tracing::{info, warn};
 
 use own_backup_common::Result;
 
-use crate::sidecar::{read_sidecar_header, ChainRole, SIDECAR_EXTENSION};
+use crate::sidecar::{read_sidecar_header, ChainRole};
 
 /// One image (VHDX/AVHDX/qcow2 + sidecar) inside a chain.
 #[derive(Debug, Clone)]
@@ -78,22 +78,40 @@ pub fn list_job_chains(folder: &Path, job_id: &str) -> Result<Vec<Chain>> {
             Ok(e) => e,
             Err(_) => continue,
         };
-        let sidecar_path = dir_entry.path();
-        if sidecar_path.extension().and_then(|e| e.to_str()) != Some(SIDECAR_EXTENSION) {
+        let path = dir_entry.path();
+        let ext = match path.extension().and_then(|e| e.to_str()) {
+            Some(e) => e.to_lowercase(),
+            None => continue,
+        };
+        if ext != "vhdx" && ext != "avhdx" && ext != "qcow2" {
             continue;
         }
-        let (info, manifest) = match read_sidecar_header(&sidecar_path) {
+
+        // Try reading embedded sidecar first, fallback to external obkm sidecar
+        let (info, manifest) = match crate::sidecar::read_embedded_sidecar_header(&path, &ext) {
             Ok(h) => h,
-            Err(e) => {
-                warn!(path = %sidecar_path.display(), error = %e, "Skipping unreadable sidecar");
-                continue;
+            Err(_) => {
+                let sidecar_path = crate::sidecar::sidecar_path_for(&path);
+                match read_sidecar_header(&sidecar_path) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        warn!(
+                            path = %path.display(),
+                            error = %e,
+                            "Skipping unreadable image (no embedded sidecar and external sidecar failed)"
+                        );
+                        continue;
+                    }
+                }
             }
         };
+
         if info.job_id.as_deref() != Some(job_id) {
             continue;
         }
+        let sidecar_path = crate::sidecar::sidecar_path_for(&path);
         entries.push(ChainImage {
-            image_path: folder.join(&info.image_file_name),
+            image_path: path,
             sidecar_path,
             role: info.chain_role,
             container: info.container,

@@ -75,8 +75,8 @@ pub use pipeline::BackupPipeline;
 pub use qcow2::{Qcow2Compression, Qcow2Reader, Qcow2Writer, Qcow2WriterOptions};
 pub use raw_copy::{copy_used_blocks, CopyOutcome};
 pub use sidecar::{
-    read_sidecar, read_sidecar_header, sidecar_path_for, write_sidecar, BlockChecksum, ChainRole,
-    Sidecar, SidecarInfo,
+    read_embedded_sidecar, read_embedded_sidecar_header, read_sidecar, read_sidecar_header,
+    sidecar_path_for, write_sidecar, BlockChecksum, ChainRole, Sidecar, SidecarInfo,
 };
 pub use used_sectors::{AllUsedMap, UsedSectorMap};
 

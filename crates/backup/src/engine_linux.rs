@@ -37,7 +37,10 @@ use crate::gpt_writer::{gpt_write_ops, GptLayout, DEFAULT_PARTITION_OFFSET};
 use crate::linux_device::LinuxRawDevice;
 use crate::luks::LuksParams;
 use crate::raw_copy::copy_used_blocks;
-use crate::sidecar::{read_sidecar, sidecar_path_for, write_sidecar, SidecarInfo};
+use crate::sidecar::{
+    read_embedded_sidecar, read_embedded_sidecar_header, read_sidecar, sidecar_path_for,
+    SidecarInfo,
+};
 use crate::used_sectors::{AllUsedMap, UsedSectorMap};
 
 /// An unlocked encryption layer under the source volume, if any.
@@ -292,13 +295,15 @@ fn backup_inner(
     };
     let used_blocks = used.used_block_count();
 
-    // --- Create the image: 1 MiB GPT head + volume + 1 MiB tail ---
-    let disk_size = DEFAULT_PARTITION_OFFSET + volume_len.div_ceil(MIB) * MIB + MIB;
+    // --- Create the image: 1 MiB GPT head + volume + meta partition + 1 MiB tail ---
+    let meta_size = crate::sidecar::calculate_meta_partition_size(total_blocks);
+    let disk_size = DEFAULT_PARTITION_OFFSET + volume_len.div_ceil(MIB) * MIB + meta_size + MIB;
     let mut writer = LinuxImageWriter::create(req.image_format, &req.image_path, disk_size, sector_size)?;
     let data_offset = DEFAULT_PARTITION_OFFSET;
 
-    // --- GPT with a single Basic Data partition wrapping the volume ---
+    // --- GPT with Basic Data partition + OwnBackupMeta partition ---
     let disk_guid = Uuid::new_v4();
+    let meta_partition_guid = Uuid::new_v4();
     let layout = GptLayout {
         disk_size,
         sector_size,
@@ -307,6 +312,8 @@ fn backup_inner(
         disk_guid,
         partition_guid: Uuid::new_v4(),
         partition_name: "OwnBackup".into(),
+        meta_partition_size: Some(meta_size),
+        meta_partition_guid: Some(meta_partition_guid),
     };
     for op in gpt_write_ops(&layout)? {
         writer.write_at(op.offset, &op.bytes)?;
@@ -324,7 +331,6 @@ fn backup_inner(
         |block_number, data| writer.write_at(data_offset + block_number * req.block_size as u64, data),
         &mut progress,
     )?;
-    writer.finish()?;
 
     // --- Sidecar + manifest ---
     let manifest = ImageManifest {
@@ -392,7 +398,17 @@ fn backup_inner(
     sidecar_info.container = req.image_format.extension().into();
     sidecar_info.job_id = req.job_id.clone();
     let sidecar_path = sidecar_path_for(&req.image_path);
-    write_sidecar(&sidecar_path, &sidecar_info, &manifest, &outcome.checksums)?;
+
+
+    // M0: Write embedded sidecar v2 to the meta partition
+    let sector = sector_size as u64;
+    let last_lba = (DEFAULT_PARTITION_OFFSET + volume_len).div_ceil(sector) - 1;
+    let meta_offset = (last_lba + 1) * sector;
+    let mut blob_bytes = Vec::new();
+    crate::sidecar::write_sidecar_v2_to(&mut blob_bytes, &sidecar_info, &manifest, &outcome.checksums)?;
+    writer.write_at(meta_offset, &blob_bytes)?;
+
+    writer.finish()?;
 
     info!(
         image = %req.image_path.display(),
@@ -442,14 +458,20 @@ pub fn restore_volume(
     mut progress: impl FnMut(&RestoreProgress) -> Result<()>,
 ) -> Result<LinuxRestoreSummary> {
     let started = Instant::now();
-    let sidecar_path = sidecar_path_for(&req.image_path);
-    if !sidecar_path.exists() {
-        return Err(OwnBackupError::ImageFormat(format!(
-            "sidecar not found: {}",
-            sidecar_path.display()
-        )));
-    }
-    let sidecar = read_sidecar(&sidecar_path)?;
+    let ext = req.image_path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_lowercase();
+    let sidecar = match read_embedded_sidecar(&req.image_path, &ext) {
+        Ok(s) => s,
+        Err(e) => {
+            let sidecar_path = sidecar_path_for(&req.image_path);
+            if !sidecar_path.exists() {
+                return Err(OwnBackupError::ImageFormat(format!(
+                    "embedded sidecar not found ({e}) and adjacent sidecar not found: {}",
+                    sidecar_path.display()
+                )));
+            }
+            read_sidecar(&sidecar_path)?
+        }
+    };
     let block_size = sidecar.manifest.block_size as u64;
     let volume_len = sidecar.manifest.source_disk.size_bytes;
     let data_offset = sidecar.info.volume_data_offset;
@@ -544,8 +566,14 @@ pub fn mount_image(image_path: &Path, read_write: bool) -> Result<String> {
         }
     }
 
-    let sidecar_path = sidecar_path_for(image_path);
-    let (info, _manifest) = crate::sidecar::read_sidecar_header(&sidecar_path)?;
+    let ext = image_path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_lowercase();
+    let (info, _manifest) = match read_embedded_sidecar_header(image_path, &ext) {
+        Ok(h) => h,
+        Err(_) => {
+            let sidecar_path = sidecar_path_for(image_path);
+            crate::sidecar::read_sidecar_header(&sidecar_path)?
+        }
+    };
     let reader = LinuxImageReader::open(image_path, &info.container)?;
 
     let nbd = crate::nbd_linux::NbdAttachment::attach(Box::new(reader))?;
@@ -640,14 +668,20 @@ pub fn verify_image(
     image_path: &Path,
     mut progress: impl FnMut(u64, u64) -> Result<()>,
 ) -> Result<VerifySummary> {
-    let sidecar_path = sidecar_path_for(image_path);
-    if !sidecar_path.exists() {
-        return Err(OwnBackupError::ImageFormat(format!(
-            "sidecar not found: {}",
-            sidecar_path.display()
-        )));
-    }
-    let sidecar = read_sidecar(&sidecar_path)?;
+    let ext = image_path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_lowercase();
+    let sidecar = match read_embedded_sidecar(image_path, &ext) {
+        Ok(s) => s,
+        Err(e) => {
+            let sidecar_path = sidecar_path_for(image_path);
+            if !sidecar_path.exists() {
+                return Err(OwnBackupError::ImageFormat(format!(
+                    "embedded sidecar not found ({e}) and adjacent sidecar not found: {}",
+                    sidecar_path.display()
+                )));
+            }
+            read_sidecar(&sidecar_path)?
+        }
+    };
     let block_size = sidecar.manifest.block_size as u64;
     let volume_len = sidecar.manifest.source_disk.size_bytes;
     let data_offset = sidecar.info.volume_data_offset;
@@ -803,7 +837,7 @@ mod tests {
 
         // Sidecar must say qcow2 + zstd, and the image must be smaller than
         // the bytes that went in (ext4 metadata compresses well).
-        let sidecar = read_sidecar(&sidecar_path_for(&img)).unwrap();
+        let sidecar = read_embedded_sidecar(&img, "qcow2").unwrap();
         assert_eq!(sidecar.info.container, "qcow2");
         assert_eq!(
             sidecar.manifest.compression_algo,

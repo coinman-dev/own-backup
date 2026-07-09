@@ -2,7 +2,7 @@ use clap::Args;
 
 #[derive(Args)]
 pub struct VerifyArgs {
-    /// Backup image (.vhdx) to verify against its .obkm sidecar
+    /// Backup image (.vhdx/.qcow2) to verify (using embedded metadata or sidecar .obkm)
     pub image: String,
 }
 
