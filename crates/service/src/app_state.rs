@@ -32,6 +32,8 @@ pub struct AppState {
     pub events: broadcast::Sender<proto::Event>,
     /// Passwords for encrypted volumes (in-memory cache + OS-protected store).
     pub passwords: Arc<PasswordStore>,
+    /// In-memory active mounts tracked by the service.
+    pub active_mounts: std::sync::Mutex<Vec<own_backup_common::engine_dto::ActiveMountDto>>,
     pub start_time: Instant,
 }
 
@@ -55,6 +57,7 @@ impl AppState {
             engine_cancel: Arc::new(AtomicBool::new(false)),
             events,
             passwords,
+            active_mounts: std::sync::Mutex::new(Vec::new()),
             start_time: Instant::now(),
         })
     }

@@ -43,9 +43,11 @@ use crate::sidecar::{
 use crate::used_sectors::{AllUsedMap, UsedSectorMap};
 use crate::used_sectors_win::NtfsUsedSectorMap;
 use crate::vhdx::{
-    attach_vhdx, create_differencing_vhdx, create_dynamic_vhdx, detach_vhdx, AttachMode,
+    attach_vhdx, create_differencing_vhdx, create_dynamic_vhdx, detach_vhdx, merge_into_parent, AttachMode,
     VhdxCreateOptions,
 };
+use crate::block_source::BlockSource;
+use crate::vhdx_bat::allocated_payload_blocks;
 use crate::win_device::{normalize_device_path, WinRawDevice};
 
 /// Default backup block size: 1 MiB (multiple of every real sector size).
@@ -1478,23 +1480,43 @@ pub fn verify_image(
     })
 }
 
-/// Mount an image read-only; volumes inside get drive letters from Windows.
+fn child_path_for(image_path: &Path) -> PathBuf {
+    let mut name = image_path.file_name().unwrap_or_default().to_os_string();
+    name.push(".mount_rw.avhdx");
+    image_path.with_file_name(name)
+}
+
+fn scratch_path_for(image_path: &Path) -> PathBuf {
+    let mut name = image_path.file_name().unwrap_or_default().to_os_string();
+    name.push(".mount_rw.scratch");
+    image_path.with_file_name(name)
+}
+
+/// Mount an image; volumes inside get drive letters from Windows.
 /// The attachment survives process exit — use [`unmount_image`] to detach.
-pub fn mount_image(image_path: &Path) -> Result<String> {
+pub fn mount_image(image_path: &Path, read_write: bool) -> Result<String> {
     // qcow2 images cannot go through vhdmp; they mount via the Arsenal Image
     // Mounter driver + our devio server (see `mount_qcow2_via_aim`). Cheap
     // header-only sidecar check; an image without a sidecar is assumed VHDX.
     if let Ok((info, _)) = crate::sidecar::read_sidecar_header(&sidecar_path_for(image_path)) {
         if info.container == "qcow2" {
-            return mount_qcow2_via_aim(image_path);
+            return mount_qcow2_via_aim(image_path, read_write);
         }
     }
-    let attached = attach_vhdx(image_path, AttachMode::ReadOnlyMounted)?;
+
+    let attached = if read_write {
+        let child_path = child_path_for(image_path);
+        let _ = std::fs::remove_file(&child_path);
+        create_differencing_vhdx(&child_path, image_path)?;
+        attach_vhdx(&child_path, AttachMode::ReadWriteMounted)?
+    } else {
+        attach_vhdx(image_path, AttachMode::ReadOnlyMounted)?
+    };
+
     // Backup images carry a persisted "offline" disk attribute (it keeps the
     // chain from auto-mounting during backups), so for browsing the disk must
     // be brought online explicitly — for this session only, the registry
-    // attribute stays. The attach is read-only, so mounted volumes are
-    // write-protected either way. Requires a read-write device handle (IOCTL
+    // attribute stays. Requires a read-write device handle (IOCTL
     // access rights), which vhdmp grants even on a read-only attach.
     match open_write_with_retry(attached.physical_path()) {
         Ok(dev) => {
@@ -1515,7 +1537,52 @@ pub fn unmount_image(image_path: &Path) -> Result<()> {
     if aim_mounts().lock().unwrap().contains_key(image_path) {
         return unmount_qcow2_via_aim(image_path);
     }
-    detach_vhdx(image_path)
+
+    let child_path = child_path_for(image_path);
+    if child_path.exists() {
+        info!(image = %image_path.display(), "VHDX RW mount: unmounting child differencing VHDX");
+        
+        // 1. Detach child first
+        detach_vhdx(&child_path)?;
+
+        // 2. Read the touched blocks from BAT before we merge/delete it
+        let alloc = match allocated_payload_blocks(&child_path) {
+            Ok(a) if !a.blocks.is_empty() => Some(a),
+            _ => None,
+        };
+
+        if let Some(alloc) = alloc {
+            info!(image = %image_path.display(), count = alloc.blocks.len(), "VHDX RW mount: merging modified blocks back into base");
+            
+            // 3. Merge the child into the parent
+            merge_into_parent(&child_path)?;
+            let _ = std::fs::remove_file(&child_path);
+
+            // 4. Update the sidecar .obkm with rehashed checksums
+            let sidecar_path = sidecar_path_for(image_path);
+            if let Ok(mut sidecar) = read_sidecar(&sidecar_path) {
+                let data_offset = sidecar.info.volume_data_offset;
+                let volume_len = sidecar.manifest.source_disk.size_bytes;
+                let block_size = sidecar.manifest.block_size;
+                let _blocks_rehashed = crate::true_removal_win::rehash_touched_blocks(
+                    image_path,
+                    &alloc,
+                    data_offset,
+                    volume_len,
+                    block_size,
+                    &mut sidecar.checksums,
+                )?;
+                write_sidecar(&sidecar_path, &sidecar.info, &sidecar.manifest, &sidecar.checksums)?;
+                info!(image = %image_path.display(), "VHDX RW mount: .obkm sidecar updated successfully");
+            }
+        } else {
+            // No blocks touched, just delete child
+            let _ = std::fs::remove_file(&child_path);
+        }
+        Ok(())
+    } else {
+        detach_vhdx(image_path)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1527,6 +1594,7 @@ struct AimMount {
     device_number: u32,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     server: Option<std::thread::JoinHandle<()>>,
+    overlay: Option<std::sync::Arc<std::sync::Mutex<crate::overlay::WritableOverlaySource>>>,
 }
 
 /// qcow2 mounts served by THIS process: the devio server and AIM device die
@@ -1545,7 +1613,7 @@ fn aim_mounts() -> &'static std::sync::Mutex<HashMap<PathBuf, AimMount>> {
 /// then have the AIM driver attach a proxy disk pointing at it. Windows mounts
 /// the NTFS volume inside and assigns a drive letter. Returns the physical
 /// disk path (`\\.\PhysicalDriveN`).
-fn mount_qcow2_via_aim(image_path: &Path) -> Result<String> {
+fn mount_qcow2_via_aim(image_path: &Path, read_write: bool) -> Result<String> {
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
 
@@ -1555,10 +1623,33 @@ fn mount_qcow2_via_aim(image_path: &Path) -> Result<String> {
         }
     }
 
-    // Open the image once to learn its virtual size, then hand a fresh reader
-    // to the server thread (the reader is not Sync).
-    let virtual_size = crate::qcow2::Qcow2RandomReader::open(image_path)?.virtual_size();
-    let reader = crate::qcow2::Qcow2RandomReader::open(image_path)?;
+    let (virtual_size, cluster_size) = {
+        let r = crate::qcow2::Qcow2RandomReader::open(image_path)?;
+        (r.virtual_size(), r.cluster_size())
+    };
+
+    let overlay_opt = if read_write {
+        let scratch = scratch_path_for(image_path);
+        let _ = std::fs::remove_file(&scratch);
+        let overlay_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&scratch)
+            .map_err(|e| OwnBackupError::Device(format!("create scratch file: {e}")))?;
+        let base: Box<dyn BlockSource> = Box::new(crate::qcow2::Qcow2RandomReader::open(image_path)?);
+        let ov = std::sync::Arc::new(std::sync::Mutex::new(crate::overlay::WritableOverlaySource::new(base, cluster_size, overlay_file)));
+        Some(ov)
+    } else {
+        None
+    };
+
+    let reader = if overlay_opt.is_none() {
+        Some(crate::qcow2::Qcow2RandomReader::open(image_path)?)
+    } else {
+        None
+    };
 
     // Bind an ephemeral loopback port for the devio server.
     let listener = std::net::TcpListener::bind("127.0.0.1:0")
@@ -1570,11 +1661,18 @@ fn mount_qcow2_via_aim(image_path: &Path) -> Result<String> {
 
     let stop = Arc::new(AtomicBool::new(false));
     let stop_bg = stop.clone();
+    let overlay_bg = overlay_opt.clone();
     let server = std::thread::Builder::new()
         .name("aim-devio".into())
         .spawn(move || {
-            if let Err(e) = crate::devio::serve_listener(listener, Box::new(reader), stop_bg) {
-                warn!(error = %e, "devio server for AIM mount ended with an error");
+            if let Some(ov) = overlay_bg {
+                if let Err(e) = crate::devio::serve_listener_rw(listener, Box::new(ov), stop_bg) {
+                    warn!(error = %e, "devio server for AIM RW mount ended with an error");
+                }
+            } else {
+                if let Err(e) = crate::devio::serve_listener(listener, Box::new(reader.unwrap()), stop_bg) {
+                    warn!(error = %e, "devio server for AIM RO mount ended with an error");
+                }
             }
         })
         .map_err(|e| OwnBackupError::Device(format!("spawn devio server: {e}")))?;
@@ -1582,7 +1680,7 @@ fn mount_qcow2_via_aim(image_path: &Path) -> Result<String> {
     // Create the AIM proxy disk pointing at our server.
     let create = (|| -> Result<(crate::aim_win::AimAdapter, u32)> {
         let adapter = crate::aim_win::AimAdapter::open()?;
-        let device_number = adapter.create_tcp_proxy(port, virtual_size, true)?;
+        let device_number = adapter.create_tcp_proxy(port, virtual_size, !read_write)?;
         Ok((adapter, device_number))
     })();
     let (adapter, device_number) = match create {
@@ -1595,7 +1693,6 @@ fn mount_qcow2_via_aim(image_path: &Path) -> Result<String> {
     };
 
     // Bring the disk online so Windows mounts the volume and assigns a letter
-    // (read-only attach → the volume is write-protected regardless).
     let physical = crate::aim_win::find_physical_drive(device_number)
         .map(|n| format!(r"\\.\PhysicalDrive{n}"));
     if let Some(path) = &physical {
@@ -1611,7 +1708,7 @@ fn mount_qcow2_via_aim(image_path: &Path) -> Result<String> {
 
     aim_mounts().lock().unwrap().insert(
         image_path.to_path_buf(),
-        AimMount { adapter, device_number, stop, server: Some(server) },
+        AimMount { adapter, device_number, stop, server: Some(server), overlay: overlay_opt },
     );
     info!(image = %image_path.display(), device_number = format!("{device_number:#08x}"), "qcow2 mounted via Arsenal Image Mounter");
     Ok(physical.unwrap_or_else(|| "(disk created — see Disk Management)".into()))
@@ -1633,6 +1730,52 @@ fn unmount_qcow2_via_aim(image_path: &Path) -> Result<()> {
         let _ = t.join();
     }
     removed?;
+
+    // If it was mounted in RW mode, we have the overlay and need to merge + rehash + update sidecar!
+    if let Some(overlay_arc) = entry.overlay {
+        let touched = overlay_arc.lock().unwrap().touched_clusters();
+        if !touched.is_empty() {
+            info!(image = %image_path.display(), count = touched.len(), "QCOW2 RW mount: merging modified clusters back into base");
+            
+            let zstd_level = Some(crate::qcow2::DEFAULT_ZSTD_LEVEL);
+            {
+                let mut ov = overlay_arc.lock().unwrap();
+                let mut merge = crate::qcow2::Qcow2InPlaceMerge::open(image_path, zstd_level)?;
+                for &c in &touched {
+                    let data = ov.read_cluster(c)?;
+                    merge.write_cluster(c, &data)?;
+                }
+                merge.commit()?;
+            }
+
+            // Now rehash the touched regions and update the sidecar .obkm!
+            let sidecar_path = sidecar_path_for(image_path);
+            if let Ok(mut sidecar) = read_sidecar(&sidecar_path) {
+                let cluster_size = {
+                    let ov = overlay_arc.lock().unwrap();
+                    ov.cluster_size()
+                };
+                let data_offset = sidecar.info.volume_data_offset;
+                let volume_len = sidecar.manifest.source_disk.size_bytes;
+                let block_size = sidecar.manifest.block_size;
+                let _blocks_rehashed = crate::qcow2_removal_win::rehash_touched(
+                    image_path,
+                    &touched,
+                    cluster_size,
+                    data_offset,
+                    volume_len,
+                    block_size,
+                    &mut sidecar.checksums,
+                )?;
+                write_sidecar(&sidecar_path, &sidecar.info, &sidecar.manifest, &sidecar.checksums)?;
+                info!(image = %image_path.display(), "QCOW2 RW mount: .obkm sidecar updated successfully");
+            }
+        }
+        // Delete scratch file
+        let scratch = scratch_path_for(image_path);
+        let _ = std::fs::remove_file(&scratch);
+    }
+
     info!(image = %image_path.display(), "qcow2 unmounted (AIM device removed)");
     Ok(())
 }
@@ -1696,3 +1839,148 @@ fn load_sidecar_of(image_path: &Path) -> Result<Sidecar> {
     }
     read_sidecar(&sidecar_path)
 }
+
+fn get_diskpart_virtual_disks() -> Vec<(u32, String)> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let mut results = Vec::new();
+    tracing::info!("spawning diskpart to query virtual disks...");
+
+    let mut cmd = match std::process::Command::new("cmd")
+        .args(["/c", "chcp 65001 >nul && diskpart"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to spawn diskpart command proxy");
+            return results;
+        }
+    };
+
+    if let Some(mut stdin) = cmd.stdin.take() {
+        use std::io::Write;
+        if let Err(e) = writeln!(stdin, "list vdisk") {
+            tracing::error!(error = %e, "failed to write to diskpart stdin");
+        }
+    }
+
+    let mut byte_buf = Vec::new();
+    if let Some(mut stdout) = cmd.stdout.take() {
+        use std::io::Read;
+        if let Err(e) = stdout.read_to_end(&mut byte_buf) {
+            tracing::error!(error = %e, "failed to read from diskpart stdout");
+        }
+    }
+    let output = String::from_utf8_lossy(&byte_buf).to_string();
+
+    let mut stderr_output = String::new();
+    if let Some(mut stderr) = cmd.stderr.take() {
+        use std::io::Read;
+        let _ = stderr.read_to_string(&mut stderr_output);
+    }
+
+    let status = cmd.wait();
+    tracing::info!(
+        status = ?status,
+        stdout_len = output.len(),
+        stderr_len = stderr_output.len(),
+        stderr = %stderr_output.trim(),
+        "diskpart terminated"
+    );
+
+    for line in output.lines() {
+        let line_trimmed = line.trim();
+        if line_trimmed.is_empty() {
+            continue;
+        }
+        tracing::debug!(line = %line_trimmed, "diskpart output line");
+
+        let line_lower = line_trimmed.to_lowercase();
+        if !line_lower.contains(".vhdx") && !line_lower.contains(".vhd") && !line_lower.contains(".avhdx") {
+            continue;
+        }
+
+        tracing::info!(line = %line_trimmed, "found potential virtual disk line");
+
+        let disk_num = (|| {
+            let numeric_tokens: Vec<u32> = line_trimmed
+                .split_whitespace()
+                .filter_map(|t| t.parse::<u32>().ok())
+                .collect();
+            if numeric_tokens.len() >= 2 {
+                Some(numeric_tokens[1])
+            } else {
+                None
+            }
+        })();
+
+        let disk_num = match disk_num {
+            Some(n) => n,
+            None => {
+                tracing::warn!(line = %line_trimmed, "could not parse disk number from line");
+                continue;
+            }
+        };
+
+        let mut path_start = None;
+        let chars: Vec<char> = line_trimmed.chars().collect();
+        for i in 0..chars.len() {
+            if chars[i] == ':' && i > 0 && i + 1 < chars.len() && chars[i + 1] == '\\' {
+                path_start = Some(i - 1);
+                break;
+            }
+            if chars[i] == '\\' && i + 1 < chars.len() && chars[i + 1] == '\\' {
+                path_start = Some(i);
+                break;
+            }
+        }
+
+        if let Some(start) = path_start {
+            let path = chars[start..].iter().collect::<String>().trim().to_string();
+            tracing::info!(disk_num = disk_num, path = %path, "successfully parsed virtual disk");
+            results.push((disk_num, path));
+        } else {
+            tracing::warn!(line = %line_trimmed, "could not parse path from line");
+        }
+    }
+
+    results
+}
+
+pub fn get_all_active_mounts(
+    internal_mounts: &[own_backup_common::engine_dto::ActiveMountDto],
+) -> Vec<own_backup_common::engine_dto::ActiveMountDto> {
+    tracing::info!(internal_count = internal_mounts.len(), "get_all_active_mounts called");
+    let mut result = internal_mounts.to_vec();
+
+    for (disk_num, image_path) in get_diskpart_virtual_disks() {
+        let device_path = format!(r"\\.\PhysicalDrive{disk_num}");
+
+        let clean_item_path = image_path.replace('/', "\\");
+        let exists = result.iter().any(|m| {
+            let clean_m_path = m.image_path.replace('/', "\\");
+            clean_m_path.eq_ignore_ascii_case(&clean_item_path)
+        });
+
+        tracing::info!(disk_num = disk_num, path = %image_path, exists = exists, "processing diskpart disk");
+
+        if !exists {
+            result.push(own_backup_common::engine_dto::ActiveMountDto {
+                image_path,
+                physical_path: device_path,
+                read_write: false,
+            });
+        }
+    }
+
+    tracing::info!(total_count = result.len(), "get_all_active_mounts finished");
+    result
+}
+
+
+

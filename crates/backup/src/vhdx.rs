@@ -184,6 +184,10 @@ pub enum AttachMode {
     /// Survives process exit (`PERMANENT_LIFETIME`); detach explicitly via
     /// [`detach_vhdx`].
     ReadOnlyMounted,
+    /// Read-write, volumes get mounted (drive letters assigned by mountmgr).
+    /// Survives process exit (`PERMANENT_LIFETIME`); detach explicitly via
+    /// [`detach_vhdx`].
+    ReadWriteMounted,
     /// Read-only, no drive letter — for verify passes.
     /// Auto-detaches when the [`AttachedVhdx`] is dropped.
     RawRead,
@@ -236,6 +240,15 @@ pub fn attach_vhdx(path: &Path, mode: AttachMode) -> Result<AttachedVhdx> {
             ATTACH_VIRTUAL_DISK_FLAG(
                 ATTACH_VIRTUAL_DISK_FLAG_READ_ONLY.0
                     | ATTACH_VIRTUAL_DISK_FLAG_PERMANENT_LIFETIME.0,
+            ),
+            false,
+        ),
+        AttachMode::ReadWriteMounted => (
+            VIRTUAL_DISK_ACCESS_MASK(
+                VIRTUAL_DISK_ACCESS_ATTACH_RW.0 | VIRTUAL_DISK_ACCESS_GET_INFO.0,
+            ),
+            ATTACH_VIRTUAL_DISK_FLAG(
+                ATTACH_VIRTUAL_DISK_FLAG_PERMANENT_LIFETIME.0,
             ),
             false,
         ),

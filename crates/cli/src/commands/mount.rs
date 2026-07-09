@@ -5,8 +5,12 @@ use own_backup_common::{OwnBackupError, Result};
 
 #[derive(Args)]
 pub struct MountArgs {
-    /// Backup image (.vhdx / .qcow2) to mount read-only
+    /// Backup image (.vhdx / .qcow2) to mount
     pub image: String,
+
+    /// Mount in read-write mode
+    #[arg(long, default_value_t = false)]
+    pub rw: bool,
 
     /// Service endpoint (foreground/dev TCP; the installed service is reached
     /// over the named pipe automatically).
@@ -50,11 +54,12 @@ pub async fn run(args: MountArgs) -> Result<()> {
         )))?;
 
     let physical = client
-        .mount_image(&args.image)
+        .mount_image(&args.image, args.rw)
         .await
         .map_err(|e| OwnBackupError::Device(e.to_string()))?;
 
-    println!("Подключено (только чтение): {}", args.image);
+    let mode_str = if args.rw { "чтение и запись" } else { "только чтение" };
+    println!("Подключено ({}): {}", mode_str, args.image);
     println!("Виртуальный диск: {physical}");
     println!("Windows назначит буквы томам внутри — смотрите проводник.");
     println!("Диск смонтирован в фоне (службой). Отключить: own-backup-cli unmount \"{}\"", args.image);

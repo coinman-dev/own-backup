@@ -1,18 +1,71 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { open } from '@tauri-apps/plugin-dialog';
   import { api } from '../lib/api';
-  import { engine, runVerify } from '../lib/engineStore.svelte';
+  import { engine, runVerify, toolsState, refreshVolumes } from '../lib/engineStore.svelte';
+  import type { ActiveMount } from '../lib/types';
 
-  let mountPath = $state('');
   let mountMsg: string | null = $state(null);
   let mountErr: string | null = $state(null);
   let mountBusy = $state(false);
 
-  let verifyPath = $state('');
+  let activeMounts: ActiveMount[] = $state([]);
+
   let verifyMsg: string | null = $state(null);
   let verifyErr: string | null = $state(null);
   let verifyBusy = $state(false);
   const verifyProgress = $derived(engine.verifyProgress);
+
+  let isRefreshingDisks = $state(false);
+  let hasLoadedOnce = false;
+
+  const mountedItems = $derived(
+    activeMounts.map(m => {
+      const disk = engine.disks.find(d => 
+        d.device_id.toLowerCase() === m.physical_path.toLowerCase()
+      );
+      const letters: string[] = [];
+      if (disk) {
+        for (const p of disk.partitions) {
+          if (p.volume_letter) {
+            letters.push(p.volume_letter.toUpperCase() + ":");
+          }
+        }
+      }
+      if (letters.length === 0) {
+        const mMatch = m.physical_path.match(/PhysicalDrive(\d+)/i);
+        const diskName = mMatch ? `Диск ${mMatch[1]}` : 'Диск';
+        letters.push(diskName);
+      }
+      const active = toolsState.mountPath.toLowerCase() === m.image_path.toLowerCase();
+      return {
+        image_path: m.image_path,
+        letters,
+        active
+      };
+    })
+  );
+
+  async function loadData() {
+    if (!hasLoadedOnce) {
+      isRefreshingDisks = true;
+    }
+    try {
+      const status = await api.getServiceStatus();
+      activeMounts = status.active_mounts || [];
+      hasLoadedOnce = true;
+    } catch (e) {
+      console.error("Failed to load active mounts:", e);
+    } finally {
+      isRefreshingDisks = false;
+    }
+  }
+
+  onMount(() => {
+    loadData();
+    const interval = setInterval(loadData, 5000);
+    return () => clearInterval(interval);
+  });
 
   async function browse(setPath: (p: string) => void, extensions = ['vhdx', 'avhdx', 'qcow2']) {
     try {
@@ -31,15 +84,16 @@
     mountBusy = true;
     mountMsg = null;
     mountErr = null;
-    // qcow2 mounts through the Arsenal Image Mounter driver (must be installed);
-    // the service holds the connection open. VHDX mounts natively via vhdmp.
+    isRefreshingDisks = true;
     try {
-      const physical = await api.mountBackup(mountPath);
-      mountMsg = `Подключено (только чтение): ${physical}. Буквы назначит Windows — смотрите проводник.`;
+      const physical = await api.mountBackup(toolsState.mountPath, toolsState.rwMode);
+      mountMsg = `Подключено (${toolsState.rwMode ? 'чтение и запись' : 'только чтение'}): ${physical}. Буквы назначит Windows — смотрите проводник.`;
+      await Promise.all([loadData(), refreshVolumes()]);
     } catch (e) {
       mountErr = String(e);
     } finally {
       mountBusy = false;
+      isRefreshingDisks = false;
     }
   }
 
@@ -47,13 +101,16 @@
     mountBusy = true;
     mountMsg = null;
     mountErr = null;
+    isRefreshingDisks = true;
     try {
-      await api.unmountBackup(mountPath);
+      await api.unmountBackup(toolsState.mountPath);
       mountMsg = 'Образ отключён.';
+      await Promise.all([loadData(), refreshVolumes()]);
     } catch (e) {
       mountErr = String(e);
     } finally {
       mountBusy = false;
+      isRefreshingDisks = false;
     }
   }
 
@@ -62,7 +119,7 @@
     verifyMsg = null;
     verifyErr = null;
     try {
-      const v = await runVerify(verifyPath);
+      const v = await runVerify(toolsState.verifyPath);
       verifyMsg = v.valid
         ? `Целостность подтверждена: ${v.blocks_checked} блоков за ${v.duration_secs.toFixed(1)} с.`
         : `ОШИБКА: повреждено блоков — ${v.mismatched_blocks.length} из ${v.blocks_checked}.`;
@@ -83,7 +140,7 @@
       <div>
         <div class="tool-title">Подключить образ как диск</div>
         <div class="tool-desc">
-          Образ подключается только для чтения; тома внутри получают буквы и
+          Образ подключается как диск; тома внутри получают буквы и
           открываются в проводнике.
         </div>
       </div>
@@ -91,20 +148,51 @@
     <div class="row">
       <input
         type="text"
-        bind:value={mountPath}
+        bind:value={toolsState.mountPath}
         placeholder="D:\OwnBackup\disk_C_20260702.vhdx"
         spellcheck="false"
         disabled={mountBusy}
       />
-      <button class="btn outline" onclick={() => browse((p) => (mountPath = p), ['vhdx', 'avhdx', 'qcow2'])} disabled={mountBusy}>
+      <button class="btn outline btn-browse" onclick={() => browse((p) => (toolsState.mountPath = p), ['vhdx', 'avhdx', 'qcow2'])} disabled={mountBusy}>
         Обзор…
       </button>
-      <button class="btn primary" onclick={mount} disabled={mountBusy || !mountPath}>
-        Подключить
-      </button>
-      <button class="btn outline" onclick={unmount} disabled={mountBusy || !mountPath}>
-        Отключить
-      </button>
+    </div>
+    <div class="row row-actions">
+      <div class="mounted-info">
+        {#if isRefreshingDisks}
+          <span class="spinner-container">
+            <span class="spinner-icon">🔄</span>
+            <span>Поиск примонтированных дисков...</span>
+          </span>
+        {:else if mountedItems.length === 0}
+          <span class="muted-text">Нет примонтированных дисков</span>
+        {:else}
+          <span>Примонтировано: </span>
+          {#each mountedItems as item, i}
+            {#each item.letters as letter, j}
+              <button
+                class="btn btn-letter {item.active ? 'primary' : 'outline'}"
+                onclick={() => { toolsState.mountPath = item.image_path; }}
+                disabled={mountBusy}
+              >
+                {letter}
+              </button>
+            {/each}
+          {/each}
+        {/if}
+      </div>
+      <div class="actions-right">
+        <label class="rw-checkbox">
+          <input type="checkbox" bind:checked={toolsState.rwMode} disabled={mountBusy || mountedItems.length > 0} />
+          RW Mode
+        </label>
+        <button class="btn primary" onclick={mount} disabled={mountBusy || !toolsState.mountPath || mountedItems.length > 0}>
+          Подключить
+        </button>
+        <button class="btn outline" onclick={unmount} disabled={mountBusy || !toolsState.mountPath}>
+          Отключить
+        </button>
+      </div>
     </div>
     {#if mountMsg}<div class="banner ok">{mountMsg}</div>{/if}
     {#if mountErr}<div class="banner err">{mountErr}</div>{/if}
@@ -123,15 +211,15 @@
     <div class="row">
       <input
         type="text"
-        bind:value={verifyPath}
+        bind:value={toolsState.verifyPath}
         placeholder="D:\OwnBackup\disk_C_20260702.vhdx"
         spellcheck="false"
         disabled={verifyBusy}
       />
-      <button class="btn outline" onclick={() => browse((p) => (verifyPath = p))} disabled={verifyBusy}>
+      <button class="btn outline" onclick={() => browse((p) => (toolsState.verifyPath = p))} disabled={verifyBusy}>
         Обзор…
       </button>
-      <button class="btn primary" onclick={verify} disabled={verifyBusy || !verifyPath}>
+      <button class="btn primary" onclick={verify} disabled={verifyBusy || !toolsState.verifyPath}>
         {verifyBusy ? 'Проверка…' : 'Проверить'}
       </button>
     </div>
@@ -209,6 +297,73 @@
   .row {
     display: flex;
     gap: 10px;
+  }
+
+  .row-actions {
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 12px;
+  }
+
+  .btn-browse {
+    min-width: 95px;
+  }
+
+  .mounted-info {
+    font-size: 13px;
+    color: var(--text);
+  }
+
+  .muted-text {
+    color: var(--text-muted);
+  }
+
+  .btn-letter {
+    min-width: 36px !important;
+    height: 36px !important;
+    padding: 0 8px !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    font-size: 13px !important;
+    margin-right: 6px;
+    border-radius: 4px;
+    font-weight: 600;
+    box-sizing: border-box !important;
+  }
+
+  @keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
+
+  .spinner-container {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: var(--text-muted);
+  }
+
+  .spinner-icon {
+    display: inline-block;
+    animation: spin 1s linear infinite;
+  }
+
+  .actions-right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .rw-checkbox {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    user-select: none;
+    cursor: pointer;
+    color: var(--text);
   }
 
   .row input {

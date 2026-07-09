@@ -190,6 +190,15 @@ fn mount_delete(
             .map(|n| format!(r"\\.\PhysicalDrive{n}"))
             .ok_or_else(|| dev("AIM disk did not surface"))?;
         let d = open_write_retry(&physical)?;
+        // Never delete on anything but our proxy disk: a resolution bug here
+        // once pointed the pass at a LIVE host disk (2026-07-08). The proxy is
+        // created with exactly `virtual_size` bytes, so a mismatch = wrong disk.
+        if d.length() != virtual_size {
+            return Err(dev(format!(
+                "{physical} is {} bytes, expected {virtual_size} — refusing to touch a disk that is not the mounted image",
+                d.length()
+            )));
+        }
         let _ = d.update_properties();
         d.set_online_this_session()?;
         let disk_number: u32 = physical
@@ -224,7 +233,7 @@ fn open_write_retry(path: &str) -> Result<WinRawDevice> {
 /// Recompute checksums for the backup blocks overlapping the touched clusters,
 /// reading the FINAL (merged) image. Mirrors
 /// [`crate::true_removal_win`]'s `rehash_touched_blocks`.
-fn rehash_touched(
+pub(crate) fn rehash_touched(
     image_path: &Path,
     touched: &[u64],
     cluster_size: u64,

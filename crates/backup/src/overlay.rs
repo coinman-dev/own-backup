@@ -2,15 +2,20 @@
 //! analogue of the VHDX differencing child used by NTFS/ReFS true removal.
 //!
 //! During the RW mount the base qcow2 is served read-only; every write the OS
-//! filesystem driver makes (deleting the excluded files) lands in a sparse
-//! scratch file here, tracked per qcow2 cluster. The base image is never
-//! modified. After the deletions, [`WritableOverlaySource::touched_clusters`]
-//! is the exact set the [`crate::qcow2::Qcow2InPlaceMerge`] folds back in, and
+//! filesystem driver makes (deleting the excluded files) lands in a scratch
+//! file here, tracked per qcow2 cluster. The base image is never modified.
+//! After the deletions, [`WritableOverlaySource::touched_clusters`] is the
+//! exact set the [`crate::qcow2::Qcow2InPlaceMerge`] folds back in, and
 //! [`WritableOverlaySource::read_cluster`] yields each cluster's final content.
 //!
-//! Scratch size ≈ the deletion churn (directory metadata / $MFT / $Bitmap), not
-//! the whole image — the same order as a VHDX differencing child, and deleted
-//! when the pass ends.
+//! The scratch layout is COMPACT: a touched cluster is stored at the next free
+//! slot (slot = order of first touch), with the cluster→slot map in memory.
+//! Never at its virtual offset — a plain NTFS file is not sparse, and one write
+//! near the end of a 128 GiB disk would make NTFS physically zero-fill the
+//! whole gap (the 2026-07-08 incident: a ~137 GB scratch, the destination
+//! volume full, and the machine unresponsive). Scratch size therefore ≈ the
+//! deletion churn (directory metadata / $MFT / $Bitmap), the same order as a
+//! VHDX differencing child, and the file is deleted when the pass ends.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -19,16 +24,21 @@ use own_backup_common::Result;
 
 use crate::block_source::{BlockSource, WritableBlockSource};
 
+/// Sentinel in the cluster→slot map: cluster not touched yet.
+const NO_SLOT: u32 = u32::MAX;
+
 pub struct WritableOverlaySource {
     base: Box<dyn BlockSource>,
-    /// Sparse scratch file; touched clusters are stored here at their real
-    /// volume offset, initialised from the base on first touch.
+    /// Compact scratch file; touched cluster `c` lives at `slots[c] * cluster_size`,
+    /// initialised from the base on first touch. Every slot is a whole
+    /// `cluster_size` (the virtual tail cluster is zero-padded).
     overlay: File,
     virtual_size: u64,
     cluster_size: u64,
     total_clusters: u64,
-    touched: Vec<bool>,
-    touched_count: u64,
+    /// Cluster index → scratch slot, `NO_SLOT` when untouched.
+    slots: Vec<u32>,
+    slot_count: u32,
 }
 
 impl WritableOverlaySource {
@@ -43,51 +53,57 @@ impl WritableOverlaySource {
             virtual_size,
             cluster_size,
             total_clusters,
-            touched: vec![false; total_clusters as usize],
-            touched_count: 0,
+            slots: vec![NO_SLOT; total_clusters as usize],
+            slot_count: 0,
         }
     }
 
     pub fn touched_count(&self) -> u64 {
-        self.touched_count
+        self.slot_count as u64
+    }
+
+    pub fn cluster_size(&self) -> u64 {
+        self.cluster_size
     }
 
     /// Cluster indices that received at least one write, ascending.
     pub fn touched_clusters(&self) -> Vec<u64> {
-        (0..self.total_clusters).filter(|&c| self.touched[c as usize]).collect()
+        (0..self.total_clusters).filter(|&c| self.slots[c as usize] != NO_SLOT).collect()
     }
 
     /// Final content of one cluster (overlay if touched, else base), padded to a
     /// whole `cluster_size` for the merge writer.
     pub fn read_cluster(&mut self, cluster: u64) -> Result<Vec<u8>> {
-        let start = cluster * self.cluster_size;
-        let len = self.cluster_size.min(self.virtual_size - start) as usize;
-        let mut buf = vec![0u8; len];
-        if self.touched[cluster as usize] {
-            self.overlay.seek(SeekFrom::Start(start))?;
+        let mut buf = vec![0u8; self.cluster_size as usize];
+        let slot = self.slots[cluster as usize];
+        if slot != NO_SLOT {
+            self.overlay.seek(SeekFrom::Start(slot as u64 * self.cluster_size))?;
             self.overlay.read_exact(&mut buf)?;
         } else {
-            self.base.read_at(start, &mut buf)?;
+            let start = cluster * self.cluster_size;
+            let len = self.cluster_size.min(self.virtual_size - start) as usize;
+            self.base.read_at(start, &mut buf[..len])?;
         }
-        buf.resize(self.cluster_size as usize, 0);
         Ok(buf)
     }
 
-    /// On first write to a cluster, copy the base content into the overlay so a
-    /// later partial read still sees the untouched bytes.
-    fn ensure_cluster(&mut self, cluster: u64) -> Result<()> {
-        if self.touched[cluster as usize] {
-            return Ok(());
+    /// On first write to a cluster, copy the base content into a fresh scratch
+    /// slot so a later partial read still sees the untouched bytes.
+    fn ensure_cluster(&mut self, cluster: u64) -> Result<u32> {
+        let existing = self.slots[cluster as usize];
+        if existing != NO_SLOT {
+            return Ok(existing);
         }
         let start = cluster * self.cluster_size;
         let len = self.cluster_size.min(self.virtual_size - start) as usize;
-        let mut buf = vec![0u8; len];
-        self.base.read_at(start, &mut buf)?;
-        self.overlay.seek(SeekFrom::Start(start))?;
+        let mut buf = vec![0u8; self.cluster_size as usize];
+        self.base.read_at(start, &mut buf[..len])?;
+        let slot = self.slot_count;
+        self.overlay.seek(SeekFrom::Start(slot as u64 * self.cluster_size))?;
         self.overlay.write_all(&buf)?;
-        self.touched[cluster as usize] = true;
-        self.touched_count += 1;
-        Ok(())
+        self.slots[cluster as usize] = slot;
+        self.slot_count += 1;
+        Ok(slot)
     }
 
     fn cluster_range(&self, offset: u64, len: u64) -> (u64, u64) {
@@ -109,14 +125,16 @@ impl BlockSource for WritableOverlaySource {
         let end = offset + out.len() as u64;
         let (first, last) = self.cluster_range(offset, out.len() as u64);
         for c in first..=last {
-            if !self.touched[c as usize] {
+            let slot = self.slots[c as usize];
+            if slot == NO_SLOT {
                 continue;
             }
             let cstart = c * self.cluster_size;
             let from = cstart.max(offset);
             let to = (cstart + self.cluster_size).min(end);
             let mut tmp = vec![0u8; (to - from) as usize];
-            self.overlay.seek(SeekFrom::Start(from))?;
+            self.overlay
+                .seek(SeekFrom::Start(slot as u64 * self.cluster_size + (from - cstart)))?;
             self.overlay.read_exact(&mut tmp)?;
             out[(from - offset) as usize..(to - offset) as usize].copy_from_slice(&tmp);
         }
@@ -129,12 +147,18 @@ impl WritableBlockSource for WritableOverlaySource {
         if data.is_empty() {
             return Ok(());
         }
+        // Per touched cluster: land the piece inside that cluster's slot.
+        let end = offset + data.len() as u64;
         let (first, last) = self.cluster_range(offset, data.len() as u64);
         for c in first..=last {
-            self.ensure_cluster(c)?;
+            let slot = self.ensure_cluster(c)?;
+            let cstart = c * self.cluster_size;
+            let from = cstart.max(offset);
+            let to = (cstart + self.cluster_size).min(end);
+            self.overlay
+                .seek(SeekFrom::Start(slot as u64 * self.cluster_size + (from - cstart)))?;
+            self.overlay.write_all(&data[(from - offset) as usize..(to - offset) as usize])?;
         }
-        self.overlay.seek(SeekFrom::Start(offset))?;
-        self.overlay.write_all(data)?;
         Ok(())
     }
 }
@@ -221,5 +245,30 @@ mod tests {
         let c1 = ov.read_cluster(1).unwrap();
         assert_eq!(&c1[0..4], &[7; 4]); // second write, second half
         assert_eq!(&c1[4..16], &[0u8; 12]); // rest = base
+    }
+
+    #[test]
+    fn scratch_stays_compact_for_high_offset_writes() {
+        // 1 MiB virtual disk, 16-byte clusters. A write at the very END of the
+        // disk must cost ONE cluster of scratch, not a zero-fill of the whole
+        // span up to it (the 2026-07-08 full-destination incident).
+        let cs = 16u64;
+        let size = 1024 * 1024usize;
+        let file = scratch();
+        let probe = file.try_clone().unwrap();
+        let mut ov = WritableOverlaySource::new(Box::new(MemSource(vec![0xAA; size])), cs, file);
+
+        ov.write_at(size as u64 - 4, &[1, 2, 3, 4]).unwrap(); // last cluster
+        ov.write_at(0, &[9; 4]).unwrap(); // first cluster
+        assert_eq!(ov.touched_count(), 2);
+        assert_eq!(probe.metadata().unwrap().len(), 2 * cs);
+
+        // Slot indirection returns the right content for both extremes.
+        let last = ov.read_cluster(size as u64 / cs - 1).unwrap();
+        assert_eq!(&last[12..16], &[1, 2, 3, 4]);
+        assert_eq!(&ov.read_cluster(0).unwrap()[..4], &[9; 4]);
+        let mut out = vec![0u8; 8];
+        ov.read_at(size as u64 - 8, &mut out).unwrap();
+        assert_eq!(&out, &[0xAA, 0xAA, 0xAA, 0xAA, 1, 2, 3, 4]);
     }
 }

@@ -333,10 +333,22 @@ impl BackupService for BackupServiceImpl {
         req: Request<Empty>,
     ) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
+        let internal_mounts = self.state.active_mounts.lock().unwrap().clone();
+
+        #[cfg(target_os = "windows")]
+        let active_mounts = own_backup_backup::engine_win::get_all_active_mounts(&internal_mounts);
+
+        #[cfg(target_os = "linux")]
+        let active_mounts = own_backup_backup::engine_linux::get_all_active_mounts(&internal_mounts);
+
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+        let active_mounts = internal_mounts;
+
         let status = serde_json::json!({
             "version": env!("CARGO_PKG_VERSION"),
             "uptime_secs": self.state.uptime_seconds(),
             "queue": self.state.queue.snapshot(),
+            "active_mounts": active_mounts,
         });
         Ok(Response::new(JsonReply { json: status.to_string() }))
     }
@@ -492,14 +504,28 @@ impl BackupService for BackupServiceImpl {
             #[derive(serde::Deserialize)]
             struct In {
                 image_path: String,
+                read_write: Option<bool>,
             }
             let p: In = serde_json::from_str(&req.into_inner().json)
                 .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
             let path = std::path::PathBuf::from(&p.image_path);
-            let mount_point = tokio::task::spawn_blocking(move || mount_image(&path))
+            let rw = p.read_write.unwrap_or(false);
+            let image_path = p.image_path.clone();
+            let mount_point = tokio::task::spawn_blocking(move || mount_image(&path, rw))
                 .await
                 .map_err(|e| Status::internal(format!("mount task panicked: {e}")))?
                 .map_err(|e| Status::internal(e.to_string()))?;
+
+            {
+                let mut mounts = self.state.active_mounts.lock().unwrap();
+                mounts.retain(|m| m.image_path != image_path);
+                mounts.push(own_backup_common::engine_dto::ActiveMountDto {
+                    image_path,
+                    physical_path: mount_point.clone(),
+                    read_write: rw,
+                });
+            }
+
             json_reply(&MountResultDto { mount_point })
         }
         #[cfg(target_os = "linux")]
@@ -510,14 +536,28 @@ impl BackupService for BackupServiceImpl {
             #[derive(serde::Deserialize)]
             struct In {
                 image_path: String,
+                read_write: Option<bool>,
             }
             let p: In = serde_json::from_str(&req.into_inner().json)
                 .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
             let path = std::path::PathBuf::from(&p.image_path);
-            let mount_point = tokio::task::spawn_blocking(move || mount_image(&path))
+            let rw = p.read_write.unwrap_or(false);
+            let image_path = p.image_path.clone();
+            let mount_point = tokio::task::spawn_blocking(move || mount_image(&path, rw))
                 .await
                 .map_err(|e| Status::internal(format!("mount task panicked: {e}")))?
                 .map_err(|e| Status::internal(e.to_string()))?;
+
+            {
+                let mut mounts = self.state.active_mounts.lock().unwrap();
+                mounts.retain(|m| m.image_path != image_path);
+                mounts.push(own_backup_common::engine_dto::ActiveMountDto {
+                    image_path,
+                    physical_path: mount_point.clone(),
+                    read_write: rw,
+                });
+            }
+
             json_reply(&MountResultDto { mount_point })
         }
         #[cfg(not(any(target_os = "windows", target_os = "linux")))]
@@ -538,11 +578,18 @@ impl BackupService for BackupServiceImpl {
             }
             let p: In = serde_json::from_str(&req.into_inner().json)
                 .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+            let image_path = p.image_path.clone();
             let path = std::path::PathBuf::from(&p.image_path);
             tokio::task::spawn_blocking(move || unmount_image(&path))
                 .await
                 .map_err(|e| Status::internal(format!("unmount task panicked: {e}")))?
                 .map_err(|e| Status::internal(e.to_string()))?;
+
+            {
+                let mut mounts = self.state.active_mounts.lock().unwrap();
+                mounts.retain(|m| m.image_path != image_path);
+            }
+
             Ok(Response::new(Empty {}))
         }
         #[cfg(target_os = "linux")]
@@ -554,11 +601,18 @@ impl BackupService for BackupServiceImpl {
             }
             let p: In = serde_json::from_str(&req.into_inner().json)
                 .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+            let image_path = p.image_path.clone();
             let path = std::path::PathBuf::from(&p.image_path);
             tokio::task::spawn_blocking(move || unmount_image(&path))
                 .await
                 .map_err(|e| Status::internal(format!("unmount task panicked: {e}")))?
                 .map_err(|e| Status::internal(e.to_string()))?;
+
+            {
+                let mut mounts = self.state.active_mounts.lock().unwrap();
+                mounts.retain(|m| m.image_path != image_path);
+            }
+
             Ok(Response::new(Empty {}))
         }
         #[cfg(not(any(target_os = "windows", target_os = "linux")))]

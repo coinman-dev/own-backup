@@ -533,10 +533,10 @@ fn active_mounts() -> &'static std::sync::Mutex<std::collections::HashMap<PathBu
     ACTIVE_MOUNTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
-/// Mount a backup image (qcow2 incl. chains, or VHDX) read-only and return
+/// Mount a backup image (qcow2 incl. chains, or VHDX) and return
 /// the mount point. Requires root (mount(2) + /dev/nbdX). The volume inside
 /// is found via the sidecar's `volume_data_offset` — no partition probing.
-pub fn mount_image(image_path: &Path) -> Result<String> {
+pub fn mount_image(image_path: &Path, read_write: bool) -> Result<String> {
     {
         let mounts = active_mounts().lock().unwrap();
         if let Some(existing) = mounts.get(image_path) {
@@ -565,9 +565,10 @@ pub fn mount_image(image_path: &Path) -> Result<String> {
 
     // `-o loop,offset=…` puts a loop device over the NBD disk at the volume
     // start, so the filesystem mounts regardless of nbd partition support.
+    let mode_str = if read_write { "rw" } else { "ro" };
     let out = std::process::Command::new("mount")
         .arg("-o")
-        .arg(format!("ro,loop,offset={}", info.volume_data_offset))
+        .arg(format!("{},loop,offset={}", mode_str, info.volume_data_offset))
         .arg(&nbd.device)
         .arg(&mount_dir)
         .output()
@@ -581,7 +582,7 @@ pub fn mount_image(image_path: &Path) -> Result<String> {
         )));
     }
 
-    info!(image = %image_path.display(), dir = %mount_dir.display(), "backup mounted read-only");
+    info!(image = %image_path.display(), dir = %mount_dir.display(), "backup mounted ({})", mode_str);
     active_mounts()
         .lock()
         .unwrap()
@@ -614,6 +615,12 @@ pub fn unmount_image(image_path: &Path) -> Result<()> {
     let _ = std::fs::remove_dir(&entry.mount_dir);
     info!(image = %image_path.display(), "backup unmounted");
     Ok(())
+}
+
+pub fn get_all_active_mounts(
+    internal_mounts: &[own_backup_common::engine_dto::ActiveMountDto],
+) -> Vec<own_backup_common::engine_dto::ActiveMountDto> {
+    internal_mounts.to_vec()
 }
 
 /// Result of verifying an image against its sidecar checksums.
@@ -880,7 +887,7 @@ mod tests {
         )
         .unwrap();
 
-        let mount_dir = mount_image(&img).unwrap();
+        let mount_dir = mount_image(&img, false).unwrap();
         let restored = std::fs::read(Path::new(&mount_dir).join("payload.bin")).unwrap();
         assert_eq!(restored, payload, "file read from the mounted backup differs");
 

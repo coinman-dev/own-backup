@@ -109,11 +109,13 @@ const MAX_CHAIN_DEPTH: usize = 256;
 /// past the last layer it reads as zeros. Relative backing paths are resolved
 /// against the image's directory (the qemu convention — the engines store just
 /// the parent's file name, so a backup folder stays relocatable).
-/// Cap on cached decompressed clusters: 128 × 64 KiB = 8 MiB. Sequential
+/// Cap on cached decompressed clusters: 1024 × 64 KiB = 64 MiB. Sequential
 /// verify/restore touch each cluster once (cache-neutral); the win is the
-/// NBD mount path, where the kernel reads in 4 KiB chunks and would otherwise
-/// decompress the same cluster sixteen times.
-const CLUSTER_CACHE_MAX: usize = 128;
+/// mount paths (AIM devio on Windows, NBD on Linux), where the kernel reads
+/// in 4 KiB chunks and would otherwise decompress the same cluster sixteen
+/// times — an NTFS mount walks $MFT/$LogFile/$Bitmap this way and 8 MiB was
+/// too small to hold the mount's working set.
+const CLUSTER_CACHE_MAX: usize = 1024;
 
 pub struct Qcow2RandomReader {
     /// Leaf first, chain root last.

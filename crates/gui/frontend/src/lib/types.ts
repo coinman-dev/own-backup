@@ -102,12 +102,19 @@ export interface ValidationResult {
   blocks_total: number;
 }
 
+export interface ActiveMount {
+  image_path: string;
+  physical_path: string;
+  read_write: boolean;
+}
+
 export interface ServiceStatus {
   connected: boolean;
   version: string;
   uptime: string;
   active_jobs: number;
   total_backups_completed: number;
+  active_mounts: ActiveMount[];
 }
 
 /** Startup health of the backup service (for the "install/start the service" warning). */

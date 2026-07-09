@@ -154,8 +154,17 @@ pub async fn verify_now(
 }
 
 #[tauri::command]
-pub async fn mount_backup(state: State<'_, GuiState>, image_path: String) -> Result<String, String> {
-    state.link.client().await?.mount_image(&image_path).await
+pub async fn mount_backup(
+    state: State<'_, GuiState>,
+    image_path: String,
+    read_write: Option<bool>,
+) -> Result<String, String> {
+    state
+        .link
+        .client()
+        .await?
+        .mount_image(&image_path, read_write.unwrap_or(false))
+        .await
 }
 
 #[tauri::command]

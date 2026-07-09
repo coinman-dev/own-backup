@@ -307,9 +307,9 @@ impl BackupClient {
         parse(&reply.json)
     }
 
-    /// Mount an image read-only; returns where it appeared.
-    pub async fn mount_image(&mut self, image_path: &str) -> Result<String> {
-        let json = serde_json::json!({ "image_path": image_path }).to_string();
+    /// Mount an image; returns where it appeared.
+    pub async fn mount_image(&mut self, image_path: &str, read_write: bool) -> Result<String> {
+        let json = serde_json::json!({ "image_path": image_path, "read_write": read_write }).to_string();
         let reply = self
             .inner
             .mount_image(self.request(proto::JsonRequest { json }))

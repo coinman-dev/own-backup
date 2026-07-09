@@ -11,6 +11,7 @@ import type {
   DiskBackup,
   DiskRestoreSummary,
   ServiceHealth,
+  ServiceStatus,
 } from './types';
 
 export const api = {
@@ -36,7 +37,7 @@ export const api = {
   restoreNow: (imagePath: string, target: string) =>
     invoke<RestoreSummary>('restore_now', { imagePath, target }),
   verifyNow: (imagePath: string) => invoke<VerifySummary>('verify_now', { imagePath }),
-  mountBackup: (imagePath: string) => invoke<string>('mount_backup', { imagePath }),
+  mountBackup: (imagePath: string, readWrite?: boolean) => invoke<string>('mount_backup', { imagePath, readWrite }),
   unmountBackup: (imagePath: string) => invoke<void>('unmount_backup', { imagePath }),
   readImageInfo: (imagePath: string) => invoke<ImageInfo>('read_image_info', { imagePath }),
   listDiskBackups: (folder: string) => invoke<DiskBackup[]>('list_disk_backups', { folder }),
@@ -54,4 +55,5 @@ export const api = {
   getConfig: () => invoke<Record<string, unknown>>('get_config'),
   saveConfig: (config: Record<string, unknown>) => invoke<void>('save_config', { config }),
   serviceHealth: () => invoke<ServiceHealth>('service_health'),
+  getServiceStatus: () => invoke<ServiceStatus>('get_service_status'),
 };

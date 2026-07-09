@@ -22,6 +22,7 @@ pub struct ServiceStatusDto {
     pub uptime: String,
     pub active_jobs: u32,
     pub total_backups_completed: u64,
+    pub active_mounts: Vec<own_backup_common::engine_dto::ActiveMountDto>,
 }
 
 /// Startup health of the backup service, so the GUI can warn the user when it
@@ -53,6 +54,7 @@ pub async fn get_service_status(state: State<'_, GuiState>) -> Result<ServiceSta
         uptime: "not connected".into(),
         active_jobs: 0,
         total_backups_completed: 0,
+        active_mounts: Vec::new(),
     };
 
     // Ask the service directly (version / uptime / queue). Failure to reach it is
@@ -78,6 +80,10 @@ pub async fn get_service_status(state: State<'_, GuiState>) -> Result<ServiceSta
         .and_then(|q| q.get("current"))
         .map(|c| if c.is_null() { 0 } else { 1 })
         .unwrap_or(0);
+    let active_mounts = v
+        .get("active_mounts")
+        .and_then(|m| serde_json::from_value(m.clone()).ok())
+        .unwrap_or_default();
 
     Ok(ServiceStatusDto {
         connected: true,
@@ -85,5 +91,6 @@ pub async fn get_service_status(state: State<'_, GuiState>) -> Result<ServiceSta
         uptime: format!("{uptime_secs}s"),
         active_jobs,
         total_backups_completed: 0,
+        active_mounts,
     })
 }

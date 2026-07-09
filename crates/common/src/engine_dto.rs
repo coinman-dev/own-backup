@@ -41,6 +41,14 @@ pub struct MountResultDto {
     pub mount_point: String,
 }
 
+/// An active mounted image mapping.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActiveMountDto {
+    pub image_path: String,
+    pub physical_path: String,
+    pub read_write: bool,
+}
+
 /// Progress payload for a whole-disk restore (Tauri event `restore-disk-progress`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiskRestoreProgressDto {

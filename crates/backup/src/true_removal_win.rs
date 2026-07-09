@@ -52,7 +52,7 @@ use crate::win_device::{to_wide, WinRawDevice};
 
 /// Stamped into the start log line so a stale service exe is immediately
 /// visible in the log (see "Windows GUI testing gotchas").
-const BUILD_TAG: &str = "2026-07-09b-mount-wait";
+const BUILD_TAG: &str = "2026-07-09e-mount-wait-diag";
 
 /// Standard `DELETE` access right (generic, not in the FILE_* consts).
 const DELETE_ACCESS: u32 = 0x0001_0000;
@@ -286,6 +286,14 @@ pub(crate) fn delete_paths_on_disk(
         root_entries,
         "true removal: image volume mounted"
     );
+    if root_entries == 0 {
+        // The FS never came up — every path lookup below would fail (and on a
+        // stalled userspace-backed disk each failure can take seconds). Abort
+        // the pass; the caller keeps the image with zero-filled ghosts.
+        return Err(OwnBackupError::Device(format!(
+            "filesystem on {volume_root} did not become ready — aborting the delete pass"
+        )));
+    }
 
     let t_del = Instant::now();
     let mut deleted = 0u64;
@@ -325,6 +333,14 @@ pub(crate) fn delete_paths_on_disk(
     Ok((deleted, failed))
 }
 
+/// How long to wait for the filesystem inside the image to mount. A natively
+/// attached VHDX is ready in under a second; the userspace-backed AIM/devio
+/// disk (qcow2) decompresses a 64 KiB zstd cluster for every 4 KiB the kernel
+/// reads, and an RW mount additionally replays/writes the NTFS log — minutes,
+/// not seconds (the 23:55 run was still not ready at ~57 s while the same
+/// image mounted fine read-only for browsing).
+const VOLUME_READY_TIMEOUT: Duration = Duration::from_secs(180);
+
 /// Wait until the volume's filesystem is mounted and its root directory is
 /// readable, so deletions do not race an incomplete mount. Polls the root entry
 /// count until it is non-zero and stable across two reads, or a timeout. Returns
@@ -332,16 +348,37 @@ pub(crate) fn delete_paths_on_disk(
 fn wait_for_volume_ready(volume_root: &str) -> usize {
     let start = Instant::now();
     let mut last = 0usize;
+    let mut next_report = Duration::from_secs(15);
     loop {
-        let count = list_dir_backup(Path::new(volume_root)).map(|v| v.len()).unwrap_or(0);
-        if count > 0 && count == last {
-            return count; // mounted and settled
+        match list_dir_backup(Path::new(volume_root)) {
+            Ok(entries) => {
+                let count = entries.len();
+                if count > 0 && count == last {
+                    return count; // mounted and settled
+                }
+                last = count;
+            }
+            Err(e) => {
+                last = 0;
+                // Periodic breadcrumb: the exact error code distinguishes a
+                // slow mount from a failed one (RAW) from a device problem.
+                if start.elapsed() >= next_report {
+                    info!(
+                        elapsed_s = start.elapsed().as_secs(),
+                        error = %e,
+                        "true removal: filesystem not ready yet"
+                    );
+                    next_report += Duration::from_secs(15);
+                }
+            }
         }
-        last = count;
-        if start.elapsed() >= Duration::from_secs(30) {
-            return count;
+        if start.elapsed() >= VOLUME_READY_TIMEOUT {
+            if let Err(e) = list_dir_backup(Path::new(volume_root)) {
+                warn!(error = %e, "true removal: filesystem never became ready");
+            }
+            return last;
         }
-        std::thread::sleep(Duration::from_millis(250));
+        std::thread::sleep(Duration::from_millis(500));
     }
 }
 
@@ -667,7 +704,7 @@ fn teardown_volume(volume_root: &str, dev: &WinRawDevice) {
 /// Re-read every backup block overlapped by the child's touched regions from
 /// the merged image and update/insert its checksum. New all-zero blocks are
 /// skipped (nothing to restore for them).
-fn rehash_touched_blocks(
+pub(crate) fn rehash_touched_blocks(
     image_path: &Path,
     alloc: &crate::vhdx_bat::VhdxAllocation,
     data_offset: u64,

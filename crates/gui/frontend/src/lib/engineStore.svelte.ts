@@ -143,3 +143,9 @@ export function clearRestoreResult(): void {
   engine.restoreSummary = null;
   engine.restoreError = null;
 }
+
+export const toolsState = $state({
+  mountPath: "",
+  rwMode: false,
+  verifyPath: "",
+});
