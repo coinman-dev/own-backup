@@ -1845,7 +1845,6 @@ fn get_diskpart_virtual_disks() -> Vec<(u32, String)> {
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
     let mut results = Vec::new();
-    tracing::info!("spawning diskpart to query virtual disks...");
 
     let mut cmd = match std::process::Command::new("cmd")
         .args(["/c", "chcp 65001 >nul && diskpart"])
@@ -1884,28 +1883,18 @@ fn get_diskpart_virtual_disks() -> Vec<(u32, String)> {
         let _ = stderr.read_to_string(&mut stderr_output);
     }
 
-    let status = cmd.wait();
-    tracing::info!(
-        status = ?status,
-        stdout_len = output.len(),
-        stderr_len = stderr_output.len(),
-        stderr = %stderr_output.trim(),
-        "diskpart terminated"
-    );
+    let _ = cmd.wait();
 
     for line in output.lines() {
         let line_trimmed = line.trim();
         if line_trimmed.is_empty() {
             continue;
         }
-        tracing::debug!(line = %line_trimmed, "diskpart output line");
 
         let line_lower = line_trimmed.to_lowercase();
         if !line_lower.contains(".vhdx") && !line_lower.contains(".vhd") && !line_lower.contains(".avhdx") {
             continue;
         }
-
-        tracing::info!(line = %line_trimmed, "found potential virtual disk line");
 
         let disk_num = (|| {
             let numeric_tokens: Vec<u32> = line_trimmed
@@ -1921,10 +1910,7 @@ fn get_diskpart_virtual_disks() -> Vec<(u32, String)> {
 
         let disk_num = match disk_num {
             Some(n) => n,
-            None => {
-                tracing::warn!(line = %line_trimmed, "could not parse disk number from line");
-                continue;
-            }
+            None => continue,
         };
 
         let mut path_start = None;
@@ -1942,10 +1928,7 @@ fn get_diskpart_virtual_disks() -> Vec<(u32, String)> {
 
         if let Some(start) = path_start {
             let path = chars[start..].iter().collect::<String>().trim().to_string();
-            tracing::info!(disk_num = disk_num, path = %path, "successfully parsed virtual disk");
             results.push((disk_num, path));
-        } else {
-            tracing::warn!(line = %line_trimmed, "could not parse path from line");
         }
     }
 
@@ -1955,7 +1938,6 @@ fn get_diskpart_virtual_disks() -> Vec<(u32, String)> {
 pub fn get_all_active_mounts(
     internal_mounts: &[own_backup_common::engine_dto::ActiveMountDto],
 ) -> Vec<own_backup_common::engine_dto::ActiveMountDto> {
-    tracing::info!(internal_count = internal_mounts.len(), "get_all_active_mounts called");
     let mut result = internal_mounts.to_vec();
 
     for (disk_num, image_path) in get_diskpart_virtual_disks() {
@@ -1967,8 +1949,6 @@ pub fn get_all_active_mounts(
             clean_m_path.eq_ignore_ascii_case(&clean_item_path)
         });
 
-        tracing::info!(disk_num = disk_num, path = %image_path, exists = exists, "processing diskpart disk");
-
         if !exists {
             result.push(own_backup_common::engine_dto::ActiveMountDto {
                 image_path,
@@ -1978,7 +1958,6 @@ pub fn get_all_active_mounts(
         }
     }
 
-    tracing::info!(total_count = result.len(), "get_all_active_mounts finished");
     result
 }
 

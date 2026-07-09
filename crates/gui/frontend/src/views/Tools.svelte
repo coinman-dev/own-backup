@@ -46,6 +46,10 @@
     })
   );
 
+  const isCurrentPathMounted = $derived(
+    activeMounts.some(m => m.image_path.toLowerCase() === toolsState.mountPath.toLowerCase())
+  );
+
   async function loadData() {
     if (!hasLoadedOnce) {
       isRefreshingDisks = true;
@@ -183,10 +187,10 @@
       </div>
       <div class="actions-right">
         <label class="rw-checkbox">
-          <input type="checkbox" bind:checked={toolsState.rwMode} disabled={mountBusy || mountedItems.length > 0} />
+          <input type="checkbox" bind:checked={toolsState.rwMode} disabled={mountBusy || isCurrentPathMounted} />
           RW Mode
         </label>
-        <button class="btn primary" onclick={mount} disabled={mountBusy || !toolsState.mountPath || mountedItems.length > 0}>
+        <button class="btn primary" onclick={mount} disabled={mountBusy || !toolsState.mountPath || isCurrentPathMounted}>
           Подключить
         </button>
         <button class="btn outline" onclick={unmount} disabled={mountBusy || !toolsState.mountPath}>
