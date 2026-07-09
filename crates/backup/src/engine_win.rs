@@ -1141,6 +1141,24 @@ fn backup_volume_inner(
     match req.image_format {
         ImageFormat::Vhdx => {
             crate::vhdx_bat::write_vhdx_guest_at(&req.image_path, meta_offset, &blob_bytes)?;
+
+            // Automatically compress the finalized VHDX file using Windows compact.exe
+            info!("Running compact.exe to compress VHDX image path={}", req.image_path.display());
+            let status = std::process::Command::new("compact")
+                .arg("/c")
+                .arg(&req.image_path)
+                .status();
+            match status {
+                Ok(s) if s.success() => {
+                    info!("compact.exe compression completed successfully for {}", req.image_path.display());
+                }
+                Ok(s) => {
+                    warn!("compact.exe exited with status code: {:?}", s.code());
+                }
+                Err(e) => {
+                    warn!("Failed to execute compact.exe: {e}");
+                }
+            }
         }
         ImageFormat::Qcow2 => {
             crate::qcow2::merge::write_qcow2_guest_blob(&req.image_path, meta_offset, &blob_bytes)?;
