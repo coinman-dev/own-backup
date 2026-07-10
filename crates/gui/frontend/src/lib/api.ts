@@ -12,6 +12,7 @@ import type {
   DiskRestoreSummary,
   ServiceHealth,
   ServiceStatus,
+  MountBackendStatus,
 } from './types';
 
 export const api = {
@@ -45,10 +46,9 @@ export const api = {
     invoke<DiskRestoreSummary>('restore_disk_now', { manifestPath, targetDisk, force }),
   cancelEngineOp: () => invoke<void>('cancel_engine_op'),
 
-  // --- Arsenal Image Mounter driver (qcow2 mounting on Windows) ---
-  aimDriverStatus: () => invoke<{ installed: boolean; version: string | null }>('aim_driver_status'),
-  installAimDriver: () =>
-    invoke<{ installed: boolean; version: string | null }>('install_aim_driver'),
+  // --- Mount prerequisites: AIM driver (Windows) / NBD+NTFS status (Linux) ---
+  aimDriverStatus: () => invoke<MountBackendStatus>('aim_driver_status'),
+  installAimDriver: () => invoke<MountBackendStatus>('install_aim_driver'),
   uninstallAimDriver: () => invoke<void>('uninstall_aim_driver'),
 
   // --- misc ---

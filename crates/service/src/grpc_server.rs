@@ -716,15 +716,24 @@ impl BackupService for BackupServiceImpl {
 
     async fn aim_driver_status(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
+        // The GUI reads `platform` to pick the right card: Windows shows the AIM
+        // driver installer; Linux shows the (no-driver) NBD/NTFS status.
         #[cfg(target_os = "windows")]
         {
-            json_reply(&own_backup_backup::aim_install::status())
+            let st = own_backup_backup::aim_install::status();
+            json_reply(&serde_json::json!({
+                "platform": "windows",
+                "installed": st.installed,
+                "version": st.version,
+            }))
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "linux")]
         {
-            Err(Status::unimplemented(
-                "The Arsenal Image Mounter driver is a Windows component.",
-            ))
+            json_reply(&own_backup_backup::engine_linux::mount_support_status())
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+        {
+            Err(Status::unimplemented(ENGINE_MSG))
         }
     }
 
@@ -738,13 +747,25 @@ impl BackupService for BackupServiceImpl {
                 .await
                 .map_err(|e| Status::internal(format!("install task panicked: {e}")))?
                 .map_err(|e| Status::internal(e.to_string()))?;
-            json_reply(&own_backup_backup::aim_install::status())
+            let st = own_backup_backup::aim_install::status();
+            json_reply(&serde_json::json!({
+                "platform": "windows",
+                "installed": st.installed,
+                "version": st.version,
+            }))
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "linux")]
         {
-            Err(Status::unimplemented(
-                "The Arsenal Image Mounter driver is a Windows component.",
-            ))
+            // No driver to install — just load the in-tree NBD module (root).
+            tokio::task::spawn_blocking(own_backup_backup::engine_linux::ensure_nbd_loaded)
+                .await
+                .map_err(|e| Status::internal(format!("modprobe task panicked: {e}")))?
+                .map_err(|e| Status::internal(e.to_string()))?;
+            json_reply(&own_backup_backup::engine_linux::mount_support_status())
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+        {
+            Err(Status::unimplemented(ENGINE_MSG))
         }
     }
 

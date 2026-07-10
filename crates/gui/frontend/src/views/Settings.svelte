@@ -53,8 +53,10 @@
     }
   }
 
-  // --- Arsenal Image Mounter driver card ---
-  let driverInstalled: boolean | null = $state(null);
+  // --- Mount-prerequisites card (Windows: AIM driver; Linux: NBD/NTFS) ---
+  let mountStatus: import('$lib/types').MountBackendStatus | null = $state(null);
+  const isLinux = $derived(mountStatus?.platform === 'linux');
+  const driverInstalled = $derived(mountStatus ? (mountStatus.installed ?? null) : null);
   let driverBusy = $state(false);
   let driverMsg: string | null = $state(null);
   let driverErr: string | null = $state(null);
@@ -66,11 +68,25 @@
 
   async function refreshDriver() {
     try {
-      const st = await api.aimDriverStatus();
-      driverInstalled = st.installed;
+      mountStatus = await api.aimDriverStatus();
     } catch (e) {
-      driverInstalled = null;
+      mountStatus = null;
       driverErr = String(e);
+    }
+  }
+
+  // Linux: load the in-tree kernel NBD module (no driver to install).
+  async function loadNbd() {
+    driverBusy = true;
+    driverMsg = null;
+    driverErr = null;
+    try {
+      mountStatus = await api.installAimDriver();
+      driverMsg = 'Модуль NBD загружен.';
+    } catch (e) {
+      driverErr = String(e);
+    } finally {
+      driverBusy = false;
     }
   }
 
@@ -233,39 +249,83 @@
         {/if}
       </div>
 
-      <div class="card">
-        <h2 class="section-title">Драйвер монтирования (Arsenal Image Mounter)</h2>
-        <p class="driver-desc">
-          Нужен для подключения резервных копий формата <b>qcow2</b> как диска.
-          Для формата VHDX не требуется — он монтируется средствами Windows.
-        </p>
+      {#if isLinux}
+        <div class="card">
+          <h2 class="section-title">Поддержка монтирования (Linux)</h2>
+          <p class="driver-desc">
+            Отдельный драйвер не нужен: копии (VHDX и qcow2) монтируются через
+            встроенный в ядро модуль <b>NBD</b> — программа сама отдаёт блоки,
+            без qemu. Для просмотра <b>NTFS</b>-копий нужен драйвер ядра
+            <code>ntfs3</code> или пакет <code>ntfs-3g</code>.
+            {#if mountStatus?.kernel}<span class="kernel">Ядро: {mountStatus.kernel}</span>{/if}
+          </p>
 
-        <div class="driver-row">
-          <div class="driver-status">
-            {#if driverInstalled === null}
-              <span class="status-dot offline"></span><span>Статус неизвестен</span>
-            {:else if driverInstalled}
-              <span class="status-dot"></span><span>Установлен</span>
-            {:else}
-              <span class="status-dot offline"></span><span>Не установлен</span>
-            {/if}
+          <div class="driver-row">
+            <div class="driver-status">
+              {#if mountStatus?.nbd_ok}
+                <span class="status-dot"></span><span>Модуль NBD доступен</span>
+              {:else}
+                <span class="status-dot offline"></span><span>Модуль NBD не загружен</span>
+              {/if}
+            </div>
+            <div class="driver-actions">
+              {#if !mountStatus?.nbd_ok}
+                <button class="btn btn-primary" onclick={loadNbd} disabled={driverBusy}>
+                  {driverBusy ? 'Загрузка…' : 'Загрузить модуль NBD'}
+                </button>
+              {/if}
+            </div>
           </div>
-          <div class="driver-actions">
-            {#if driverInstalled}
-              <button class="btn btn-secondary" onclick={uninstallDriver} disabled={driverBusy}>
-                {driverBusy ? 'Удаление…' : 'Удалить'}
-              </button>
-            {:else}
-              <button class="btn btn-primary" onclick={() => (showInstallModal = true)} disabled={driverBusy}>
-                {driverBusy ? 'Установка…' : 'Установить'}
-              </button>
-            {/if}
+
+          <div class="driver-row">
+            <div class="driver-status">
+              {#if mountStatus?.ntfs_ok}
+                <span class="status-dot"></span><span>NTFS: {mountStatus.ntfs_backend}</span>
+              {:else}
+                <span class="status-dot offline"></span>
+                <span>NTFS не поддерживается — установите <code>ntfs-3g</code></span>
+              {/if}
+            </div>
           </div>
+
+          {#if driverMsg}<div class="driver-note ok">{driverMsg}</div>{/if}
+          {#if driverErr}<div class="driver-note err">{driverErr}</div>{/if}
         </div>
+      {:else}
+        <div class="card">
+          <h2 class="section-title">Драйвер монтирования (Arsenal Image Mounter)</h2>
+          <p class="driver-desc">
+            Нужен для подключения резервных копий формата <b>qcow2</b> как диска.
+            Для формата VHDX не требуется — он монтируется средствами Windows.
+          </p>
 
-        {#if driverMsg}<div class="driver-note ok">{driverMsg}</div>{/if}
-        {#if driverErr}<div class="driver-note err">{driverErr}</div>{/if}
-      </div>
+          <div class="driver-row">
+            <div class="driver-status">
+              {#if driverInstalled === null}
+                <span class="status-dot offline"></span><span>Статус неизвестен</span>
+              {:else if driverInstalled}
+                <span class="status-dot"></span><span>Установлен</span>
+              {:else}
+                <span class="status-dot offline"></span><span>Не установлен</span>
+              {/if}
+            </div>
+            <div class="driver-actions">
+              {#if driverInstalled}
+                <button class="btn btn-secondary" onclick={uninstallDriver} disabled={driverBusy}>
+                  {driverBusy ? 'Удаление…' : 'Удалить'}
+                </button>
+              {:else}
+                <button class="btn btn-primary" onclick={() => (showInstallModal = true)} disabled={driverBusy}>
+                  {driverBusy ? 'Установка…' : 'Установить'}
+                </button>
+              {/if}
+            </div>
+          </div>
+
+          {#if driverMsg}<div class="driver-note ok">{driverMsg}</div>{/if}
+          {#if driverErr}<div class="driver-note err">{driverErr}</div>{/if}
+        </div>
+      {/if}
     </div>
   {/if}
 </div>
@@ -494,11 +554,24 @@
     margin: 0 0 16px;
     line-height: 1.5;
   }
+  .driver-desc code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    background: var(--bg-secondary, rgba(127, 127, 127, 0.15));
+    padding: 1px 5px;
+    border-radius: 4px;
+  }
+  .driver-desc .kernel {
+    display: block;
+    margin-top: 6px;
+    opacity: 0.75;
+  }
   .driver-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 16px;
+    margin-bottom: 8px;
   }
   .driver-status {
     display: flex;

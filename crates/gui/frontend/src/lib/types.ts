@@ -109,6 +109,20 @@ export interface ActiveMount {
   volume_letters?: string[];
 }
 
+/// Mount prerequisites status. Windows returns the AIM driver fields; Linux
+/// returns the NBD/NTFS fields. `platform` selects which card to render.
+export interface MountBackendStatus {
+  platform: 'windows' | 'linux';
+  // Windows (Arsenal Image Mounter):
+  installed?: boolean;
+  version?: string | null;
+  // Linux (kernel NBD + NTFS backend):
+  nbd_ok?: boolean;
+  ntfs_ok?: boolean;
+  ntfs_backend?: string | null;
+  kernel?: string;
+}
+
 export interface ServiceStatus {
   connected: boolean;
   version: string;

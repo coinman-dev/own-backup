@@ -190,7 +190,7 @@ impl Drop for NbdAttachment {
 
 /// Load `nbd.ko` if `/dev/nbd0` is missing (in-tree module, present on every
 /// mainstream kernel incl. WSL2). Best effort — the follow-up check reports.
-fn ensure_nbd_module() -> Result<()> {
+pub(crate) fn ensure_nbd_module() -> Result<()> {
     if Path::new("/dev/nbd0").exists() {
         return Ok(());
     }

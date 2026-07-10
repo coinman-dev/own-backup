@@ -541,6 +541,59 @@ pub fn restore_volume(
 // Mount / unmount (plan Q4): image → in-process NBD device → `mount -o ro`
 // ---------------------------------------------------------------------------
 
+/// Linux mount-support status — the counterpart of the Windows AIM-driver
+/// status. There is no driver to install: mounting a backup uses the in-tree
+/// kernel NBD module (this process serves the blocks itself — no qemu), and
+/// browsing an NTFS backup needs the kernel `ntfs3` driver or `ntfs-3g`.
+#[derive(serde::Serialize)]
+pub struct MountSupport {
+    /// Always `"linux"` — lets the GUI pick the right card.
+    pub platform: &'static str,
+    /// `/dev/nbd0` is present (the NBD module is loaded / built in).
+    pub nbd_ok: bool,
+    /// An NTFS backend is available for mounting NTFS backups.
+    pub ntfs_ok: bool,
+    /// Which NTFS backend was found: `"ntfs3"` (kernel) or `"ntfs-3g"`.
+    pub ntfs_backend: Option<String>,
+    /// Running kernel release (diagnostic).
+    pub kernel: String,
+}
+
+/// Probe the host for the mounting prerequisites (read-only; loads nothing).
+pub fn mount_support_status() -> MountSupport {
+    let nbd_ok = Path::new("/dev/nbd0").exists()
+        || std::fs::read_to_string("/proc/modules")
+            .map(|m| m.lines().any(|l| l.starts_with("nbd ")))
+            .unwrap_or(false);
+
+    // Kernel ntfs3 shows up in /proc/filesystems; ntfs-3g is a userspace helper.
+    let kernel_ntfs = std::fs::read_to_string("/proc/filesystems")
+        .map(|f| f.split_whitespace().any(|t| t == "ntfs3" || t == "ntfs"))
+        .unwrap_or(false);
+    let ntfs3g = ["/sbin/mount.ntfs-3g", "/usr/sbin/mount.ntfs-3g", "/bin/ntfs-3g", "/usr/bin/ntfs-3g"]
+        .iter()
+        .any(|p| Path::new(p).exists());
+    let ntfs_backend = if kernel_ntfs {
+        Some("ntfs3".to_string())
+    } else if ntfs3g {
+        Some("ntfs-3g".to_string())
+    } else {
+        None
+    };
+
+    let kernel = std::fs::read_to_string("/proc/sys/kernel/osrelease")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+
+    MountSupport { platform: "linux", nbd_ok, ntfs_ok: ntfs_backend.is_some(), ntfs_backend, kernel }
+}
+
+/// Best-effort: load the kernel NBD module so `/dev/nbdX` appears. Needs root
+/// (the service already runs as root). Returns an error if it still isn't there.
+pub fn ensure_nbd_loaded() -> Result<()> {
+    crate::nbd_linux::ensure_nbd_module()
+}
+
 struct ActiveMount {
     nbd: crate::nbd_linux::NbdAttachment,
     mount_dir: PathBuf,

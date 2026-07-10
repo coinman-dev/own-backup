@@ -49,7 +49,7 @@ enum Commands {
     /// Serve a qcow2 backup to Arsenal Image Mounter over devio TCP (read-only)
     DevioServe(commands::devio_serve::DevioServeArgs),
 
-    /// Install / uninstall the Arsenal Image Mounter driver (Windows)
+    /// Mount prerequisites: AIM driver (Windows) / NBD & NTFS status (Linux)
     Driver(commands::driver::DriverArgs),
 
     /// Detach a mounted VHDX backup image
