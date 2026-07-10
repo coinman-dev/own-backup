@@ -58,7 +58,48 @@ impl BackupClient {
                 }
             }
         }
+        #[cfg(unix)]
+        {
+            // Production transport: the service's UDS. Fall back to loopback TCP
+            // for a foreground/dev service run (which binds TCP, not the socket).
+            match Self::connect_uds(token.clone()).await {
+                Ok(c) => return Ok(c),
+                Err(e) => {
+                    tracing::debug!(error = %e, "UDS unavailable, falling back to TCP")
+                }
+            }
+        }
         Self::connect_tcp(endpoint, token).await
+    }
+
+    /// Connect over the service's Unix Domain Socket (`/run/own-backup/service.sock`).
+    /// Fails fast if the socket is absent (service down or running foreground/TCP).
+    #[cfg(unix)]
+    async fn connect_uds(token: String) -> Result<Self> {
+        use hyper_util::rt::TokioIo;
+        use tokio::net::UnixStream;
+        use tonic::transport::{Endpoint, Uri};
+        use tower::service_fn;
+
+        let socket_path = own_backup_common::unix_socket_path();
+        if !socket_path.exists() {
+            return Err("service socket not present".into());
+        }
+
+        // The URI authority is a placeholder; the connector dials the socket.
+        let channel = Endpoint::try_from("http://ownbackup.uds")
+            .map_err(|e| format!("bad uds endpoint: {e}"))?
+            .connect_timeout(std::time::Duration::from_millis(800))
+            .connect_with_connector(service_fn(move |_: Uri| {
+                let socket_path = socket_path.clone();
+                async move { Ok::<_, std::io::Error>(TokioIo::new(UnixStream::connect(socket_path).await?)) }
+            }))
+            .await
+            .map_err(|e| format!("cannot reach service (uds): {e}"))?;
+        Ok(Self {
+            inner: BackupServiceClient::new(channel),
+            token,
+        })
     }
 
     /// Connect over loopback TCP (dev/foreground; the only transport on non-Windows).

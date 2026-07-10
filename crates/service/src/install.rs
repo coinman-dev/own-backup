@@ -185,6 +185,31 @@ pub fn install() -> Result<(), Box<dyn std::error::Error>> {
         exe = exe.display(),
     );
 
+    // Access group so the GUI/CLI reach the service's UDS without root (the
+    // Unix analogue of the named-pipe DACL). Create it and add the human who
+    // ran `sudo … --install` (SUDO_USER), else the current user.
+    let group = own_backup_common::UNIX_ACCESS_GROUP;
+    ensure_group(group)?;
+    let member = install_target_user();
+    let mut group_note = String::new();
+    if let Some(user) = &member {
+        match add_user_to_group(user, group) {
+            Ok(()) => {
+                group_note = format!(
+                    "\n  Пользователь «{user}» добавлен в группу «{group}».\n  \
+                     ВАЖНО: членство применяется после нового входа в систему \
+                     (или выполните `newgrp {group}`)."
+                );
+            }
+            Err(e) => {
+                group_note = format!(
+                    "\n  ВНИМАНИЕ: не удалось добавить «{user}» в группу «{group}»: {e}\n  \
+                     Добавьте вручную:  sudo usermod -aG {group} {user}"
+                );
+            }
+        }
+    }
+
     std::fs::write(&unit_path, unit)
         .map_err(|e| format!("cannot write {unit_path} (run as root?): {e}"))?;
     systemctl(&["daemon-reload"])?;
@@ -192,9 +217,60 @@ pub fn install() -> Result<(), Box<dyn std::error::Error>> {
 
     println!(
         "systemd-юнит установлен и запущен: {unit_path}\n  \
-         Статус:  systemctl status {}.service",
+         Статус:  systemctl status {}.service{group_note}",
         crate::LINUX_UNIT_NAME
     );
+    Ok(())
+}
+
+/// Create the access group if it does not exist (idempotent). A system group
+/// (no login, low GID). Missing `groupadd` is a hard error — without the group
+/// only root could reach the service.
+#[cfg(not(target_os = "windows"))]
+fn ensure_group(group: &str) -> Result<(), Box<dyn std::error::Error>> {
+    // `getent group <g>` exits 0 if it exists; skip creation then.
+    let exists = std::process::Command::new("getent")
+        .args(["group", group])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if exists {
+        return Ok(());
+    }
+    let status = std::process::Command::new("groupadd")
+        .args(["--system", group])
+        .status()
+        .map_err(|e| format!("cannot run groupadd (run as root?): {e}"))?;
+    if !status.success() {
+        return Err(format!("`groupadd --system {group}` failed ({status})").into());
+    }
+    Ok(())
+}
+
+/// The human to grant service access to: the user behind `sudo` if present,
+/// else `$USER`/`LOGNAME`. `None` when only a bare-root context is available.
+#[cfg(not(target_os = "windows"))]
+fn install_target_user() -> Option<String> {
+    for var in ["SUDO_USER", "USER", "LOGNAME"] {
+        if let Ok(v) = std::env::var(var) {
+            let v = v.trim();
+            if !v.is_empty() && v != "root" {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "windows"))]
+fn add_user_to_group(user: &str, group: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let status = std::process::Command::new("usermod")
+        .args(["-aG", group, user])
+        .status()
+        .map_err(|e| format!("cannot run usermod: {e}"))?;
+    if !status.success() {
+        return Err(format!("usermod exited {status}").into());
+    }
     Ok(())
 }
 
@@ -209,6 +285,10 @@ pub fn uninstall() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let _ = systemctl(&["daemon-reload"]);
+    // Best-effort: drop the access group we created (ignore if in use / absent).
+    let _ = std::process::Command::new("groupdel")
+        .arg(own_backup_common::UNIX_ACCESS_GROUP)
+        .status();
     println!("systemd-юнит {}.service удалён.", crate::LINUX_UNIT_NAME);
     Ok(())
 }

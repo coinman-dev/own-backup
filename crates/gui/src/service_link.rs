@@ -122,16 +122,24 @@ impl ServiceLink {
 /// installed (stopped) or missing entirely.
 fn unreachable_message() -> String {
     let name = own_backup_common::WINDOWS_SERVICE_DISPLAY_NAME;
+    #[cfg(target_os = "windows")]
+    let (start_hint, install_hint) = (
+        "Запустите её (нужны права администратора) или перезагрузите компьютер.".to_string(),
+        "запустите own-backup-service.exe /install (появится запрос прав администратора).".to_string(),
+    );
+    #[cfg(not(target_os = "windows"))]
+    let (start_hint, install_hint) = (
+        "Запустите её:  sudo systemctl start own-backup".to_string(),
+        format!(
+            "установите её:  sudo ./own-backup-service --install\n\
+             (после установки войдите в систему заново — вы будете добавлены в группу «{}»).",
+            own_backup_common::UNIX_ACCESS_GROUP
+        ),
+    );
     if service_installed() {
-        format!(
-            "Служба «{name}» установлена, но не запущена. Запустите её \
-             (нужны права администратора) или перезагрузите компьютер."
-        )
+        format!("Служба «{name}» установлена, но не запущена. {start_hint}")
     } else {
-        format!(
-            "Служба «{name}» не установлена. Для работы программы установите её: \
-             запустите own-backup-service.exe /install (появится запрос прав администратора)."
-        )
+        format!("Служба «{name}» не установлена. Для работы программы {install_hint}")
     }
 }
 
@@ -160,8 +168,14 @@ fn start_installed_service() {
     }
     #[cfg(not(target_os = "windows"))]
     {
+        // Deliberately NON-interactive: `systemctl start` of a system unit from
+        // an unprivileged GUI makes polkit pop a password dialog — exactly what
+        // a thin client must never do. `--no-ask-password` suppresses it; if the
+        // caller lacks rights the start simply fails and unreachable_message()
+        // tells the user to start it. The unit is `enable --now`, so it is
+        // normally already running anyway.
         let _ = std::process::Command::new("systemctl")
-            .args(["start", "own-backup"])
+            .args(["--no-ask-password", "start", own_backup_common::LINUX_UNIT_NAME])
             .status();
     }
 }

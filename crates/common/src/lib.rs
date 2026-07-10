@@ -31,3 +31,19 @@ pub const WINDOWS_PIPE_NAME: &str = "OwnBackup";
 pub fn windows_pipe_path() -> String {
     format!(r"\\.\pipe\{WINDOWS_PIPE_NAME}")
 }
+
+/// Unix group granted access to the service's UDS + token (the Linux analogue
+/// of the named-pipe DACL). `--install` creates it and adds the installing
+/// user; the service chowns the socket/token to it. Members reach the service
+/// without root; everyone else is refused by filesystem permissions.
+pub const UNIX_ACCESS_GROUP: &str = "own-backup";
+
+/// Runtime directory holding the UDS and the per-boot token on Unix.
+#[cfg(unix)]
+pub const UNIX_RUNTIME_DIR: &str = "/run/own-backup";
+
+/// Production UDS path the GUI/CLI dial on Unix (no listening TCP port).
+#[cfg(unix)]
+pub fn unix_socket_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(UNIX_RUNTIME_DIR).join("service.sock")
+}

@@ -122,9 +122,9 @@ impl AppConfig {
     pub fn socket_path(&self) -> PathBuf {
         #[cfg(unix)]
         {
-            // /run/own-backup/ is created by the service at startup.
-            // Permissions set to 0o660, group "own-backup" or "root".
-            PathBuf::from("/run/own-backup/service.sock")
+            // /run/own-backup/ is created by the service at startup; socket is
+            // 0o660, chowned to the `own-backup` group (see UNIX_ACCESS_GROUP).
+            crate::unix_socket_path()
         }
         #[cfg(not(unix))]
         {
@@ -144,7 +144,7 @@ impl AppConfig {
     pub fn token_path(&self) -> PathBuf {
         #[cfg(unix)]
         {
-            PathBuf::from("/run/own-backup/service.token")
+            PathBuf::from(crate::UNIX_RUNTIME_DIR).join("service.token")
         }
         #[cfg(not(unix))]
         {

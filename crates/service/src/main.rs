@@ -40,9 +40,13 @@ enum Mode {
     Stop,
     Restart,
     Status,
-    /// Console run for development, or systemd `ExecStart … --run`.
+    /// Console run for development: loopback TCP, no auth, easy to attach a
+    /// debugger/curl. `--foreground` / `-f`.
     Foreground,
-    /// Launched by the SCM (Windows) with no args, or as a plain daemon.
+    /// Production daemon (systemd `ExecStart … --run`): the OS transport — UDS
+    /// on Unix, named pipe on Windows — with a per-boot token, no TCP port.
+    Daemon,
+    /// Launched by the SCM (Windows) with no args, or a bare console run.
     Service,
 }
 
@@ -60,7 +64,8 @@ fn parse_mode(args: &[String]) -> Mode {
             "/stop" | "--stop" | "stop" => return Mode::Stop,
             "/restart" | "--restart" | "restart" => return Mode::Restart,
             "/status" | "--status" | "status" => return Mode::Status,
-            "-f" | "--foreground" | "--run" | "run" => return Mode::Foreground,
+            "-f" | "--foreground" => return Mode::Foreground,
+            "--run" | "run" | "--daemon" | "daemon" => return Mode::Daemon,
             _ => {}
         }
     }
@@ -159,6 +164,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Mode::Status => install::status(),
         // Foreground/dev uses TCP on localhost for easy debugging.
         Mode::Foreground => run_loop(true),
+        // Daemon (systemd) uses the OS production transport (UDS/named pipe).
+        Mode::Daemon => run_loop(false),
         Mode::Service => run_service_mode(),
     }
 }
@@ -184,6 +191,7 @@ fn print_info() {
     println!("  /restart      перезапустить службу");
     println!("  /status       показать состояние службы");
     println!("  --foreground  запустить в консоли для отладки (TCP localhost:50051)");
+    println!("  --run         режим демона (UDS/named pipe) — так её запускает systemd");
 }
 
 /// Build a tokio runtime and run the gRPC loop until shutdown. `use_tcp`
@@ -455,11 +463,42 @@ fn generate_and_write_token(config: &AppConfig) -> Result<String, Box<dyn std::e
     Ok(token)
 }
 
+/// GID of the `own-backup` access group, or `None` if it does not exist.
+#[cfg(unix)]
+fn own_backup_group_gid() -> Option<u32> {
+    let name = std::ffi::CString::new(own_backup_common::UNIX_ACCESS_GROUP).ok()?;
+    // SAFETY: `name` is a valid C string; getgrnam returns a pointer into a
+    // static buffer (read immediately, not stored) or null when absent.
+    let grp = unsafe { libc::getgrnam(name.as_ptr()) };
+    if grp.is_null() {
+        None
+    } else {
+        // SAFETY: non-null grp points at a valid `group` for this call.
+        Some(unsafe { (*grp).gr_gid })
+    }
+}
+
+/// Set a path's group owner to `gid`, leaving the user owner (root) unchanged.
+/// Best-effort: a failure only means group members cannot reach it (logged).
+#[cfg(unix)]
+fn chown_to_group(path: &std::path::Path, gid: u32) {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return;
+    };
+    // SAFETY: `c_path` is a valid C string; uid -1 leaves the owner unchanged.
+    let rc = unsafe { libc::chown(c_path.as_ptr(), u32::MAX, gid) };
+    if rc != 0 {
+        tracing::warn!(path = %path.display(), "could not chgrp to the access group");
+    }
+}
+
 /// Serve gRPC over Unix Domain Socket.
 ///
-/// Socket: /run/own-backup/service.sock, permissions 0o660.
-/// This prevents other local users (non-root, not in "own-backup" group)
-/// from connecting to the service and issuing privileged operations.
+/// Socket: /run/own-backup/service.sock, 0o660, chowned to the `own-backup`
+/// group — group members (added by `--install`) reach the service without
+/// root; everyone else is refused by filesystem permissions. There is no
+/// listening TCP port in this mode.
 #[cfg(unix)]
 async fn serve_uds(
     config: AppConfig,
@@ -472,8 +511,17 @@ async fn serve_uds(
 
     let socket_path = config.socket_path();
 
+    // Resolve the access group once; None if it does not exist (install failed
+    // or was skipped) — then only root reaches the socket, which we log.
+    let group_gid = own_backup_group_gid();
+
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
+        // 0o750 + group own-backup so members can traverse to the socket/token.
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o750))?;
+        if let Some(gid) = group_gid {
+            chown_to_group(parent, gid);
+        }
     }
 
     // Remove stale socket from previous run
@@ -483,11 +531,22 @@ async fn serve_uds(
 
     let uds = UnixListener::bind(&socket_path)?;
 
-    // 0o660: owner (root) and group (own-backup) can read/write; others cannot.
+    // 0o660 + group own-backup: root and group members read/write, others cannot.
     std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o660))?;
+    if let Some(gid) = group_gid {
+        chown_to_group(&socket_path, gid);
+    } else {
+        tracing::warn!(
+            group = own_backup_common::UNIX_ACCESS_GROUP,
+            "access group not found — only root can reach the service; run `--install` (as root) to create it"
+        );
+    }
 
-    // Generate per-boot service authentication token
+    // Generate per-boot service authentication token (chowned to the group too).
     let token = generate_and_write_token(&config)?;
+    if let Some(gid) = group_gid {
+        chown_to_group(&config.token_path(), gid);
+    }
 
     info!("gRPC server (UDS) listening on {:?}", socket_path);
 
