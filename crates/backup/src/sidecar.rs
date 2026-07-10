@@ -389,6 +389,52 @@ pub fn read_embedded_sidecar_header(
     read_sidecar_header_from(&mut std::io::Cursor::new(blob))
 }
 
+/// Read an image's full sidecar: embedded (inside the image) first, then the
+/// adjacent `.obkm` file (backups from before the embedded-sidecar change).
+pub fn read_image_sidecar(image_path: &Path) -> Result<Sidecar> {
+    let ext = image_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_lowercase();
+    match read_embedded_sidecar(image_path, &ext) {
+        Ok(s) => Ok(s),
+        Err(embedded_err) => {
+            let sidecar_path = sidecar_path_for(image_path);
+            if !sidecar_path.exists() {
+                return Err(OwnBackupError::ImageFormat(format!(
+                    "embedded sidecar not found ({embedded_err}) and adjacent sidecar not found: {}",
+                    sidecar_path.display()
+                )));
+            }
+            read_sidecar(&sidecar_path)
+        }
+    }
+}
+
+/// Header-only counterpart of [`read_image_sidecar`] (info + manifest, no
+/// checksum table) — cheap enough for folder scans and dispatch decisions.
+pub fn read_image_sidecar_header(image_path: &Path) -> Result<(SidecarInfo, ImageManifest)> {
+    let ext = image_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_lowercase();
+    match read_embedded_sidecar_header(image_path, &ext) {
+        Ok(h) => Ok(h),
+        Err(embedded_err) => {
+            let sidecar_path = sidecar_path_for(image_path);
+            if !sidecar_path.exists() {
+                return Err(OwnBackupError::ImageFormat(format!(
+                    "embedded sidecar not found ({embedded_err}) and adjacent sidecar not found: {}",
+                    sidecar_path.display()
+                )));
+            }
+            read_sidecar_header(&sidecar_path)
+        }
+    }
+}
+
 /// Can `image_path` serve as a chain parent / be restored? True when its
 /// sidecar metadata is readable — embedded (inside the image) or the adjacent
 /// `.obkm` file. Chain planners must accept either: images written since the

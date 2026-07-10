@@ -1591,13 +1591,28 @@ fn scratch_path_for(image_path: &Path) -> PathBuf {
 /// Mount an image; volumes inside get drive letters from Windows.
 /// The attachment survives process exit — use [`unmount_image`] to detach.
 pub fn mount_image(image_path: &Path, read_write: bool) -> Result<String> {
-    // qcow2 images cannot go through vhdmp; they mount via the Arsenal Image
-    // Mounter driver + our devio server (see `mount_qcow2_via_aim`). Cheap
-    // header-only sidecar check; an image without a sidecar is assumed VHDX.
-    if let Ok((info, _)) = crate::sidecar::read_sidecar_header(&sidecar_path_for(image_path)) {
-        if info.container == "qcow2" {
-            return mount_qcow2_via_aim(image_path, read_write);
-        }
+    // Dispatch by the container's OWN magic, never by sidecar metadata (new
+    // backups carry no external .obkm, and a silent fall-through once sent a
+    // qcow2 into vhdmp, which reported it as "file corrupted", error 1392).
+    // qcow2 cannot go through vhdmp; it mounts via the Arsenal Image Mounter
+    // driver + our devio server (see `mount_qcow2_via_aim`).
+    let mut magic = [0u8; 8];
+    {
+        use std::io::Read;
+        let mut f = std::fs::File::open(image_path)
+            .map_err(|e| OwnBackupError::Device(format!("open {}: {e}", image_path.display())))?;
+        f.read_exact(&mut magic)
+            .map_err(|e| OwnBackupError::Device(format!("read {}: {e}", image_path.display())))?;
+    }
+    if magic[..4] == [0x51, 0x46, 0x49, 0xFB] {
+        // "QFI\xfb"
+        return mount_qcow2_via_aim(image_path, read_write);
+    }
+    if &magic != b"vhdxfile" {
+        return Err(OwnBackupError::ImageFormat(format!(
+            "{} is neither a VHDX nor a qcow2 image (unrecognized signature)",
+            image_path.display()
+        )));
     }
 
     let attached = if read_write {
