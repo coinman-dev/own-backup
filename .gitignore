@@ -34,3 +34,6 @@ cargo
 
 # Mounted Windows test folder (exe, logs, multi-GB backup images)
 win-files/
+
+# Linux test binaries
+linux-files/
