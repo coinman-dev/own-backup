@@ -523,6 +523,7 @@ impl BackupService for BackupServiceImpl {
                     image_path,
                     physical_path: mount_point.clone(),
                     read_write: rw,
+                    volume_letters: Vec::new(),
                 });
             }
 
@@ -555,6 +556,7 @@ impl BackupService for BackupServiceImpl {
                     image_path,
                     physical_path: mount_point.clone(),
                     read_write: rw,
+                    volume_letters: Vec::new(),
                 });
             }
 

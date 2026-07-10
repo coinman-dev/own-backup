@@ -2115,11 +2115,28 @@ pub fn get_all_active_mounts(
                 image_path,
                 physical_path: device_path,
                 read_write: false,
+                volume_letters: Vec::new(),
             });
         }
     }
 
+    // Resolve the drive letters Windows assigned to each mounted disk so the UI
+    // can show "J:" instead of "PhysicalDrive5" / "Диск 5".
+    for m in &mut result {
+        if let Some(disk_num) = disk_number_from_physical(&m.physical_path) {
+            m.volume_letters = crate::true_removal_win::drive_letters_on_disk(disk_num);
+        }
+    }
+
     result
+}
+
+/// Parse `\\.\PhysicalDriveN` → `N`.
+fn disk_number_from_physical(physical_path: &str) -> Option<u32> {
+    physical_path
+        .rsplit("PhysicalDrive")
+        .next()
+        .and_then(|n| n.trim().parse().ok())
 }
 
 

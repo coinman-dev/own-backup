@@ -47,6 +47,10 @@ pub struct ActiveMountDto {
     pub image_path: String,
     pub physical_path: String,
     pub read_write: bool,
+    /// Drive letters Windows assigned to the volumes inside (e.g. `["J:"]`).
+    /// Empty when none are assigned yet or on non-Windows hosts.
+    #[serde(default)]
+    pub volume_letters: Vec<String>,
 }
 
 /// Progress payload for a whole-disk restore (Tauri event `restore-disk-progress`).

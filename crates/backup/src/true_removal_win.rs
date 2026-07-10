@@ -33,10 +33,10 @@ use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, ERROR_NO_MORE_FILES, GENERIC_READ, GENERIC_WRITE, HANDLE};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FileDispositionInfo, FileDispositionInfoEx, FindFirstVolumeW, FindNextVolumeW,
-    FindVolumeClose, FlushFileBuffers, SetFileAttributesW, SetFileInformationByHandle,
-    FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS, OPEN_EXISTING,
+    FindVolumeClose, FlushFileBuffers, GetVolumePathNamesForVolumeNameW, SetFileAttributesW,
+    SetFileInformationByHandle, FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS, OPEN_EXISTING,
 };
 use windows::Win32::System::Ioctl::{FSCTL_DISMOUNT_VOLUME, FSCTL_LOCK_VOLUME};
 use windows::Win32::System::IO::DeviceIoControl;
@@ -519,6 +519,85 @@ fn volume_on_disk(volume_root: &str, disk_number: u32) -> bool {
         let base = 8 + i * 24;
         u32::from_le_bytes(out[base..base + 4].try_into().unwrap()) == disk_number
     }) && count > 0
+}
+
+/// Drive letters (e.g. `"J:"`) of every volume that lives on `disk_number`.
+/// Empty if Windows has not assigned any yet (a freshly attached AIM disk can
+/// need a moment) — the caller then falls back to the disk number. Used to
+/// show the friendly mount target in the GUI/CLI instead of `PhysicalDriveN`.
+pub(crate) fn drive_letters_on_disk(disk_number: u32) -> Vec<String> {
+    let mut letters = Vec::new();
+    let mut name_buf = [0u16; 512];
+    // SAFETY: buffer valid for the call; handle closed below.
+    let Ok(find) = (unsafe { FindFirstVolumeW(&mut name_buf) }) else {
+        return letters;
+    };
+    loop {
+        let len = name_buf.iter().position(|&c| c == 0).unwrap_or(name_buf.len());
+        let volume_root = String::from_utf16_lossy(&name_buf[..len]);
+        if volume_on_disk(&volume_root, disk_number) {
+            letters.extend(volume_drive_letters(&volume_root));
+        }
+        name_buf = [0u16; 512];
+        // SAFETY: valid find handle and buffer.
+        if unsafe { FindNextVolumeW(find, &mut name_buf) }.is_err() {
+            break;
+        }
+    }
+    // SAFETY: handle from a successful FindFirstVolumeW.
+    let _ = unsafe { FindVolumeClose(find) };
+    letters
+}
+
+/// Path names mapped to `\\?\Volume{GUID}\`, reduced to bare drive letters.
+/// A volume may have several (drive letter + mount-point folders); we keep
+/// only `"X:"` entries.
+fn volume_drive_letters(volume_root: &str) -> Vec<String> {
+    let wide = to_wide(volume_root); // keeps the required trailing backslash
+    let mut buf = vec![0u16; 512];
+    let mut needed = 0u32;
+    // SAFETY: `wide` outlives the call; buffer sized by `buf.len()`.
+    let ok = unsafe {
+        GetVolumePathNamesForVolumeNameW(
+            PCWSTR(wide.as_ptr()),
+            Some(buf.as_mut_slice()),
+            &mut needed,
+        )
+    };
+    if ok.is_err() {
+        // Grow once if the buffer was too small, then give up quietly.
+        if needed as usize > buf.len() {
+            buf = vec![0u16; needed as usize];
+            // SAFETY: as above, larger buffer.
+            if unsafe {
+                GetVolumePathNamesForVolumeNameW(
+                    PCWSTR(wide.as_ptr()),
+                    Some(buf.as_mut_slice()),
+                    &mut needed,
+                )
+            }
+            .is_err()
+            {
+                return Vec::new();
+            }
+        } else {
+            return Vec::new();
+        }
+    }
+    // Double-null-terminated list of null-separated path names.
+    buf.split(|&c| c == 0)
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| {
+            let path = String::from_utf16_lossy(s);
+            let bytes = path.as_bytes();
+            // "X:\" → "X:"; ignore mount-point folder paths.
+            if bytes.len() == 3 && bytes[1] == b':' && bytes[2] == b'\\' && bytes[0].is_ascii_alphabetic() {
+                Some(format!("{}:", (bytes[0] as char).to_ascii_uppercase()))
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// Delete one filesystem entry (recursing into non-reparse directories first).

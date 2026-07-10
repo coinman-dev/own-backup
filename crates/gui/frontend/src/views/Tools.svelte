@@ -21,21 +21,24 @@
 
   const mountedItems = $derived(
     activeMounts.map(m => {
-      const disk = engine.disks.find(d => 
-        d.device_id.toLowerCase() === m.physical_path.toLowerCase()
-      );
-      const letters: string[] = [];
-      if (disk) {
-        for (const p of disk.partitions) {
-          if (p.volume_letter) {
-            letters.push(p.volume_letter.toUpperCase() + ":");
+      // Prefer the letters the service resolved on the mounted disk; fall back
+      // to the disk inventory, then to the bare disk number.
+      let letters: string[] = (m.volume_letters ?? []).map(l => l.toUpperCase());
+      if (letters.length === 0) {
+        const disk = engine.disks.find(d =>
+          d.device_id.toLowerCase() === m.physical_path.toLowerCase()
+        );
+        if (disk) {
+          for (const p of disk.partitions) {
+            if (p.volume_letter) {
+              letters.push(p.volume_letter.toUpperCase() + ":");
+            }
           }
         }
       }
       if (letters.length === 0) {
         const mMatch = m.physical_path.match(/PhysicalDrive(\d+)/i);
-        const diskName = mMatch ? `Диск ${mMatch[1]}` : 'Диск';
-        letters.push(diskName);
+        letters.push(mMatch ? `Диск ${mMatch[1]}` : 'Диск');
       }
       const active = toolsState.mountPath.toLowerCase() === m.image_path.toLowerCase();
       return {
@@ -49,6 +52,13 @@
   const isCurrentPathMounted = $derived(
     activeMounts.some(m => m.image_path.toLowerCase() === toolsState.mountPath.toLowerCase())
   );
+
+  function mountedLettersFor(imagePath: string): string[] {
+    const item = mountedItems.find(
+      m => m.image_path.toLowerCase() === imagePath.toLowerCase()
+    );
+    return item ? item.letters : [];
+  }
 
   async function loadData() {
     if (!hasLoadedOnce) {
@@ -90,9 +100,18 @@
     mountErr = null;
     isRefreshingDisks = true;
     try {
-      const physical = await api.mountBackup(toolsState.mountPath, toolsState.rwMode);
-      mountMsg = `Подключено (${toolsState.rwMode ? 'чтение и запись' : 'только чтение'}): ${physical}. Буквы назначит Windows — смотрите проводник.`;
+      await api.mountBackup(toolsState.mountPath, toolsState.rwMode);
       await Promise.all([loadData(), refreshVolumes()]);
+      // The disk may need a moment for Windows to assign a letter; poll briefly.
+      let letters = mountedLettersFor(toolsState.mountPath);
+      for (let i = 0; i < 10 && letters.every(l => l.startsWith('Диск')); i++) {
+        await new Promise(r => setTimeout(r, 500));
+        await loadData();
+        letters = mountedLettersFor(toolsState.mountPath);
+      }
+      const mode = toolsState.rwMode ? 'чтение и запись' : 'только чтение';
+      const where = letters.length ? letters.join(', ') : 'см. проводник';
+      mountMsg = `Подключено (${mode}): ${where}. Открыть можно в проводнике.`;
     } catch (e) {
       mountErr = String(e);
     } finally {

@@ -106,6 +106,7 @@ export interface ActiveMount {
   image_path: string;
   physical_path: string;
   read_write: boolean;
+  volume_letters?: string[];
 }
 
 export interface ServiceStatus {
