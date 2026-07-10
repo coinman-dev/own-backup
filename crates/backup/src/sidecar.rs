@@ -278,90 +278,129 @@ pub fn read_sidecar(path: &Path) -> Result<Sidecar> {
     read_sidecar_from(&mut BufReader::new(file))
 }
 
-/// Read the embedded sidecar v2 from the virtual disk image.
-pub fn read_embedded_sidecar(image_path: &Path, container_format: &str) -> Result<Sidecar> {
-    match container_format {
-        "vhdx" | "avhdx" => {
-            let alloc = crate::vhdx_bat::allocated_payload_blocks(image_path)?;
-            let vsize = alloc.virtual_size;
-            let sector_size = 512;
-            let mut gpt_buf = vec![0u8; 34 * sector_size];
-            crate::vhdx_bat::read_vhdx_guest_at(image_path, 0, &mut gpt_buf)?;
+/// Format-agnostic guest-byte reader for the embedded sidecar blob.
+enum GuestBlob {
+    Vhdx(std::path::PathBuf),
+    Qcow2(Box<crate::qcow2::Qcow2RandomReader>),
+}
 
-            let layout = crate::gpt_reader::parse_disk_layout(&gpt_buf, sector_size as u32, vsize)?;
-            let (meta_offset, meta_size) = crate::gpt_reader::find_meta_partition(&layout)
-                .ok_or_else(|| OwnBackupError::ImageFormat("OwnBackupMeta partition not found in GPT".into()))?;
-
-            let read_len = std::cmp::min(meta_size, 1024 * 1024);
-            let mut blob = vec![0u8; read_len as usize];
-            crate::vhdx_bat::read_vhdx_guest_at(image_path, meta_offset, &mut blob)?;
-
-            let mut cursor = std::io::Cursor::new(blob);
-            read_sidecar_from(&mut cursor)
+impl GuestBlob {
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        match self {
+            GuestBlob::Vhdx(path) => crate::vhdx_bat::read_vhdx_guest_at(path, offset, buf),
+            GuestBlob::Qcow2(reader) => reader.read_at(offset, buf),
         }
-        "qcow2" => {
-            let mut reader = crate::qcow2::Qcow2RandomReader::open(image_path)?;
-            let vsize = reader.virtual_size();
-            let sector_size = 512;
-            let mut gpt_buf = vec![0u8; 34 * sector_size];
-            reader.read_at(0, &mut gpt_buf)?;
-
-            let layout = crate::gpt_reader::parse_disk_layout(&gpt_buf, sector_size as u32, vsize)?;
-            let (meta_offset, meta_size) = crate::gpt_reader::find_meta_partition(&layout)
-                .ok_or_else(|| OwnBackupError::ImageFormat("OwnBackupMeta partition not found in GPT".into()))?;
-
-            let read_len = std::cmp::min(meta_size, 1024 * 1024);
-            let mut blob = vec![0u8; read_len as usize];
-            reader.read_at(meta_offset, &mut blob)?;
-
-            let mut cursor = std::io::Cursor::new(blob);
-            read_sidecar_from(&mut cursor)
-        }
-        other => Err(OwnBackupError::ImageFormat(format!("unsupported container format: {other}"))),
     }
 }
 
-/// Read only the SidecarInfo and ImageManifest from the embedded sidecar of the virtual disk image.
-pub fn read_embedded_sidecar_header(image_path: &Path, container_format: &str) -> Result<(SidecarInfo, ImageManifest)> {
-    match container_format {
+/// Locate the OwnBackupMeta partition of an image: returns a guest reader plus
+/// the partition's (offset, size) in guest bytes.
+fn open_meta_partition(image_path: &Path, container_format: &str) -> Result<(GuestBlob, u64, u64)> {
+    const SECTOR: usize = 512;
+    let (mut guest, vsize) = match container_format {
         "vhdx" | "avhdx" => {
             let alloc = crate::vhdx_bat::allocated_payload_blocks(image_path)?;
-            let vsize = alloc.virtual_size;
-            let sector_size = 512;
-            let mut gpt_buf = vec![0u8; 34 * sector_size];
-            crate::vhdx_bat::read_vhdx_guest_at(image_path, 0, &mut gpt_buf)?;
-
-            let layout = crate::gpt_reader::parse_disk_layout(&gpt_buf, sector_size as u32, vsize)?;
-            let (meta_offset, meta_size) = crate::gpt_reader::find_meta_partition(&layout)
-                .ok_or_else(|| OwnBackupError::ImageFormat("OwnBackupMeta partition not found in GPT".into()))?;
-
-            let read_len = std::cmp::min(meta_size, 1024 * 1024);
-            let mut blob = vec![0u8; read_len as usize];
-            crate::vhdx_bat::read_vhdx_guest_at(image_path, meta_offset, &mut blob)?;
-
-            let mut cursor = std::io::Cursor::new(blob);
-            read_sidecar_header_from(&mut cursor)
+            (GuestBlob::Vhdx(image_path.to_path_buf()), alloc.virtual_size)
         }
         "qcow2" => {
-            let mut reader = crate::qcow2::Qcow2RandomReader::open(image_path)?;
+            let reader = crate::qcow2::Qcow2RandomReader::open(image_path)?;
             let vsize = reader.virtual_size();
-            let sector_size = 512;
-            let mut gpt_buf = vec![0u8; 34 * sector_size];
-            reader.read_at(0, &mut gpt_buf)?;
-
-            let layout = crate::gpt_reader::parse_disk_layout(&gpt_buf, sector_size as u32, vsize)?;
-            let (meta_offset, meta_size) = crate::gpt_reader::find_meta_partition(&layout)
-                .ok_or_else(|| OwnBackupError::ImageFormat("OwnBackupMeta partition not found in GPT".into()))?;
-
-            let read_len = std::cmp::min(meta_size, 1024 * 1024);
-            let mut blob = vec![0u8; read_len as usize];
-            reader.read_at(meta_offset, &mut blob)?;
-
-            let mut cursor = std::io::Cursor::new(blob);
-            read_sidecar_header_from(&mut cursor)
+            (GuestBlob::Qcow2(Box::new(reader)), vsize)
         }
-        other => Err(OwnBackupError::ImageFormat(format!("unsupported container format: {other}"))),
+        other => {
+            return Err(OwnBackupError::ImageFormat(format!(
+                "unsupported container format: {other}"
+            )))
+        }
+    };
+    let mut gpt_buf = vec![0u8; 34 * SECTOR];
+    guest.read_at(0, &mut gpt_buf)?;
+    let layout = crate::gpt_reader::parse_disk_layout(&gpt_buf, SECTOR as u32, vsize)?;
+    let (meta_offset, meta_size) = crate::gpt_reader::find_meta_partition(&layout).ok_or_else(
+        || OwnBackupError::ImageFormat("OwnBackupMeta partition not found in GPT".into()),
+    )?;
+    Ok((guest, meta_offset, meta_size))
+}
+
+/// Read the embedded sidecar blob (exact size, derived from its own length
+/// fields — never a fixed cap: the checksum table of a large disk runs to tens
+/// of MiB). `header_only` stops after the JSON header.
+fn read_meta_blob(image_path: &Path, container_format: &str, header_only: bool) -> Result<Vec<u8>> {
+    let (mut guest, meta_offset, meta_size) = open_meta_partition(image_path, container_format)?;
+
+    // magic (8) + JSON length (4) — shared by v1 and v2 layouts.
+    if meta_size < 12 {
+        return Err(OwnBackupError::ImageFormat("meta partition too small for a sidecar".into()));
     }
+    let mut head = [0u8; 12];
+    guest.read_at(meta_offset, &mut head)?;
+    let json_len = u32::from_le_bytes(head[8..12].try_into().unwrap()) as u64;
+    if json_len == 0 || json_len > MAX_JSON_LEN as u64 || 12 + json_len > meta_size {
+        return Err(OwnBackupError::ImageFormat(format!(
+            "embedded sidecar JSON length {json_len} out of range"
+        )));
+    }
+
+    let total = if header_only {
+        12 + json_len
+    } else if &head[..8] == SIDECAR_MAGIC_V2 {
+        // ... + entry count (8) + compressed table length (4) + table + hash (8)
+        let mut mid = [0u8; 12];
+        guest.read_at(meta_offset + 12 + json_len, &mut mid)?;
+        let table_len = u32::from_le_bytes(mid[8..12].try_into().unwrap()) as u64;
+        12 + json_len + 8 + 4 + table_len + 8
+    } else if &head[..8] == SIDECAR_MAGIC {
+        // ... + entry count (8) + entries (16 each)
+        let mut cnt = [0u8; 8];
+        guest.read_at(meta_offset + 12 + json_len, &mut cnt)?;
+        let count = u64::from_le_bytes(cnt);
+        if count > 1u64 << 32 {
+            return Err(OwnBackupError::ImageFormat(format!(
+                "embedded sidecar checksum count {count} out of range"
+            )));
+        }
+        12 + json_len + 8 + count * 16
+    } else {
+        return Err(OwnBackupError::ImageFormat("no sidecar magic in the meta partition".into()));
+    };
+    if total > meta_size {
+        return Err(OwnBackupError::ImageFormat(format!(
+            "embedded sidecar ({total} bytes) exceeds the meta partition ({meta_size} bytes)"
+        )));
+    }
+
+    let mut blob = vec![0u8; total as usize];
+    guest.read_at(meta_offset, &mut blob)?;
+    Ok(blob)
+}
+
+/// Read the embedded sidecar v2 from the virtual disk image.
+pub fn read_embedded_sidecar(image_path: &Path, container_format: &str) -> Result<Sidecar> {
+    let blob = read_meta_blob(image_path, container_format, false)?;
+    read_sidecar_from(&mut std::io::Cursor::new(blob))
+}
+
+/// Read only the SidecarInfo and ImageManifest from the embedded sidecar of the virtual disk image.
+pub fn read_embedded_sidecar_header(
+    image_path: &Path,
+    container_format: &str,
+) -> Result<(SidecarInfo, ImageManifest)> {
+    let blob = read_meta_blob(image_path, container_format, true)?;
+    read_sidecar_header_from(&mut std::io::Cursor::new(blob))
+}
+
+/// Can `image_path` serve as a chain parent / be restored? True when its
+/// sidecar metadata is readable — embedded (inside the image) or the adjacent
+/// `.obkm` file. Chain planners must accept either: images written since the
+/// embedded-sidecar change carry no external file at all.
+pub fn image_sidecar_readable(image_path: &Path) -> bool {
+    let ext = image_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_lowercase();
+    read_embedded_sidecar_header(image_path, &ext).is_ok()
+        || sidecar_path_for(image_path).exists()
 }
 
 /// Read only the JSON header (info + manifest) of a sidecar, skipping the

@@ -27,8 +27,7 @@ use own_backup_common::Result;
 
 use super::{
     bad, decode_l2_entry, encode_compressed_l2_entry, ClusterDescriptor, COMPRESSION_TYPE_ZSTD,
-    HEADER_LENGTH_V3, HEXT_END, INCOMPAT_COMPRESSION_TYPE, OFLAG_COPIED, OFFSET_MASK,
-    QCOW2_MAGIC, REFCOUNT_ORDER,
+    HEADER_LENGTH_V3, INCOMPAT_COMPRESSION_TYPE, OFLAG_COPIED, OFFSET_MASK, QCOW2_MAGIC,
 };
 
 pub struct Qcow2InPlaceMerge {
@@ -40,6 +39,11 @@ pub struct Qcow2InPlaceMerge {
     l2_per_table: u64,
     /// Compress new clusters with zstd (matches the image's own type).
     zstd_level: Option<i32>,
+    /// Leaf of a backing chain (incremental/differential child).
+    has_backing: bool,
+    /// Original first cluster (header + extensions + backing name), the base
+    /// for the repointed header commit() writes.
+    header_cluster: Vec<u8>,
     /// guest cluster → current raw L2 entry (0 = unallocated, absent = 0).
     l2: BTreeMap<u64, u64>,
     /// Next append point (kept cluster-aligned by `pad`).
@@ -61,10 +65,12 @@ impl Qcow2InPlaceMerge {
         if u32::from_be_bytes(h[4..8].try_into().unwrap()) != 3 {
             return Err(bad("in-place merge requires a version-3 image"));
         }
+        // A backing chain is fine: only the LEAF's L1/L2/refcounts are loaded
+        // and rewritten; the parent is never touched. Remember its presence —
+        // zero-cluster writes must then SHADOW the parent (explicit zero entry)
+        // instead of dropping the entry (which would resurrect parent data).
         let backing_file_offset = u64::from_be_bytes(h[8..16].try_into().unwrap());
-        if backing_file_offset != 0 {
-            return Err(bad("in-place merge of a backing-chain qcow2 is not supported"));
-        }
+        let has_backing = backing_file_offset != 0;
         let cluster_bits = u32::from_be_bytes(h[20..24].try_into().unwrap());
         if !(9..=21).contains(&cluster_bits) {
             return Err(bad(format!("cluster_bits {cluster_bits} out of range")));
@@ -117,6 +123,13 @@ impl Qcow2InPlaceMerge {
             }
         }
 
+        // Keep the original header cluster: commit() must preserve everything
+        // it does not repoint — the backing-file link + name and the header
+        // extensions live here, and a child that loses them loses its chain.
+        let mut header_cluster = vec![0u8; cluster_size as usize];
+        file.seek(SeekFrom::Start(0))?;
+        file.read_exact(&mut header_cluster)?;
+
         let end = file.seek(SeekFrom::End(0))?;
         let append_offset = end.div_ceil(cluster_size) * cluster_size;
 
@@ -128,6 +141,8 @@ impl Qcow2InPlaceMerge {
             total_guest_clusters,
             l2_per_table,
             zstd_level: if incompatible & INCOMPAT_COMPRESSION_TYPE != 0 { zstd_level.or(Some(super::DEFAULT_ZSTD_LEVEL)) } else { None },
+            has_backing,
+            header_cluster,
             l2,
             append_offset,
             written: false,
@@ -166,8 +181,15 @@ impl Qcow2InPlaceMerge {
         self.written = true;
 
         if data.iter().all(|&b| b == 0) {
-            // No backing file → unallocated reads back as zeros; drop the entry.
-            self.l2.remove(&index);
+            if self.has_backing {
+                // A child must SHADOW the parent's version of the cluster: an
+                // explicit zero entry reads as zeros without allocating space.
+                // Dropping the entry would fall through to the parent.
+                self.l2.insert(index, super::OFLAG_ZERO);
+            } else {
+                // No backing file → unallocated reads back as zeros.
+                self.l2.remove(&index);
+            }
             return Ok(());
         }
 
@@ -322,28 +344,16 @@ impl Qcow2InPlaceMerge {
         self.file.sync_all()?;
 
         // --- Repoint the header (written last, then fsync'd). ---
-        let mut header = vec![0u8; cs as usize];
-        let incompat = if self.zstd_level.is_some() { INCOMPAT_COMPRESSION_TYPE } else { 0 };
-        // Header extensions: end-of-extensions marker only (no backing file).
-        header[HEADER_LENGTH_V3 as usize..HEADER_LENGTH_V3 as usize + 4].copy_from_slice(&HEXT_END.to_be_bytes());
+        // Start from the ORIGINAL first cluster and patch only the L1 and
+        // refcount pointers: the backing-file link + name and the header
+        // extensions must survive verbatim (a child stripped of them loses its
+        // whole chain). Magic/version/sizes/compression were validated at open.
+        let mut header = self.header_cluster.clone();
         let h = &mut header[..HEADER_LENGTH_V3 as usize];
-        h[0..4].copy_from_slice(&QCOW2_MAGIC.to_be_bytes());
-        h[4..8].copy_from_slice(&3u32.to_be_bytes());
-        h[8..16].copy_from_slice(&0u64.to_be_bytes()); // backing_file_offset
-        h[16..20].copy_from_slice(&0u32.to_be_bytes()); // backing_file_size
-        h[20..24].copy_from_slice(&self.cluster_bits.to_be_bytes());
-        h[24..32].copy_from_slice(&self.virtual_size.to_be_bytes());
-        h[32..36].copy_from_slice(&0u32.to_be_bytes()); // crypt_method
         h[36..40].copy_from_slice(&(l1_entries as u32).to_be_bytes());
         h[40..48].copy_from_slice(&l1_table_offset.to_be_bytes());
         h[48..56].copy_from_slice(&refcount_table_offset.to_be_bytes());
         h[56..60].copy_from_slice(&(rc_table_clusters as u32).to_be_bytes());
-        h[60..64].copy_from_slice(&0u32.to_be_bytes()); // nb_snapshots
-        h[64..72].copy_from_slice(&0u64.to_be_bytes()); // snapshots_offset
-        h[72..80].copy_from_slice(&incompat.to_be_bytes());
-        h[96..100].copy_from_slice(&REFCOUNT_ORDER.to_be_bytes());
-        h[100..104].copy_from_slice(&HEADER_LENGTH_V3.to_be_bytes());
-        h[104] = if self.zstd_level.is_some() { COMPRESSION_TYPE_ZSTD } else { 0 };
 
         self.file.seek(SeekFrom::Start(0))?;
         self.file.write_all(&header)?;
@@ -353,23 +363,151 @@ impl Qcow2InPlaceMerge {
     }
 }
 
-/// Write a blob to a qcow2 guest offset in-place, appending new clusters as needed and committing them.
+/// Write a blob to a qcow2 guest offset in-place, appending new clusters as
+/// needed and committing them.
+///
+/// `guest_offset` is only sector-aligned (the meta partition starts right
+/// after the volume), NOT cluster-aligned — so the touched cluster range is
+/// read first and the blob is overlaid at its true in-cluster position.
+/// Writing chunks at cluster starts instead would both misplace the data and
+/// zero the untouched remainder of the first/last clusters.
 pub fn write_qcow2_guest_blob(path: &Path, guest_offset: u64, blob: &[u8]) -> Result<()> {
-    let mut merge = Qcow2InPlaceMerge::open(path, Some(super::DEFAULT_ZSTD_LEVEL))?;
-    let cs = merge.cluster_size();
-
-    let mut offset = 0;
-    while offset < blob.len() {
-        let chunk_len = std::cmp::min(blob.len() - offset, cs as usize);
-        let mut cluster_data = vec![0u8; cs as usize];
-        cluster_data[..chunk_len].copy_from_slice(&blob[offset..offset + chunk_len]);
-
-        let guest_cluster = (guest_offset + offset as u64) / cs;
-        merge.write_cluster(guest_cluster, &cluster_data)?;
-
-        offset += chunk_len;
+    if blob.is_empty() {
+        return Ok(());
     }
+    let (cs, region) = {
+        let mut reader = super::Qcow2RandomReader::open(path)?;
+        let cs = reader.cluster_size();
+        let vsize = reader.virtual_size();
+        let end = guest_offset
+            .checked_add(blob.len() as u64)
+            .filter(|&e| e <= vsize)
+            .ok_or_else(|| {
+                own_backup_common::OwnBackupError::ImageFormat(format!(
+                    "guest blob [{guest_offset}, +{}) exceeds virtual disk ({vsize} bytes)",
+                    blob.len()
+                ))
+            })?;
+        let first = guest_offset / cs;
+        let last = (end - 1) / cs;
+        let start = first * cs;
+        let mut region = vec![0u8; ((last - first + 1) * cs) as usize];
+        // The tail cluster may reach past the virtual size; read what exists.
+        let readable = region.len().min((vsize - start) as usize);
+        reader.read_at(start, &mut region[..readable])?;
+        (cs, region)
+    };
 
+    let first = guest_offset / cs;
+    let shift = (guest_offset - first * cs) as usize;
+    let mut region = region;
+    region[shift..shift + blob.len()].copy_from_slice(blob);
+
+    let mut merge = Qcow2InPlaceMerge::open(path, Some(super::DEFAULT_ZSTD_LEVEL))?;
+    for (i, chunk) in region.chunks_exact(cs as usize).enumerate() {
+        merge.write_cluster(first + i as u64, chunk)?;
+    }
     merge.commit()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod guest_blob_tests {
+    use super::write_qcow2_guest_blob;
+    use crate::qcow2::{Qcow2RandomReader, Qcow2Writer, Qcow2WriterOptions};
+
+    /// The meta partition is only sector-aligned, so the blob write must
+    /// read-modify-write the touched clusters: data lands at the true
+    /// in-cluster position and the neighbouring bytes survive.
+    #[test]
+    fn unaligned_blob_write_preserves_neighbours() {
+        let cs = 65536u64;
+        let vsize = 8 * cs;
+        let mut w = Qcow2Writer::new(
+            std::io::Cursor::new(Vec::new()),
+            Qcow2WriterOptions { virtual_size: vsize, ..Default::default() },
+        )
+        .unwrap();
+        for c in 0..8 {
+            w.write_cluster(c, &vec![(c as u8) + 1; cs as usize]).unwrap();
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("img.qcow2");
+        std::fs::write(&path, w.finish().unwrap().into_inner()).unwrap();
+
+        // Blob straddles the cluster 2 → 3 boundary at a 512-aligned offset.
+        let offset = 3 * cs - 512;
+        let blob: Vec<u8> = (0..4096u32).map(|i| (i % 249) as u8).collect();
+        write_qcow2_guest_blob(&path, offset, &blob).unwrap();
+
+        let mut r = Qcow2RandomReader::open(&path).unwrap();
+        let mut back = vec![0u8; blob.len()];
+        r.read_at(offset, &mut back).unwrap();
+        assert_eq!(back, blob, "blob must read back from its true offset");
+
+        let mut edge = vec![0u8; 16];
+        r.read_at(offset - 16, &mut edge).unwrap();
+        assert_eq!(edge, [3u8; 16], "bytes before the blob must survive");
+        r.read_at(offset + blob.len() as u64, &mut edge).unwrap();
+        assert_eq!(edge, [4u8; 16], "bytes after the blob must survive");
+    }
+
+    /// Writing a blob into a CHILD image must keep its backing link (the
+    /// header commit preserves the original first cluster) and must SHADOW the
+    /// parent where the blob is zero (explicit zero entries, not dropped ones).
+    #[test]
+    fn child_blob_write_keeps_chain_and_shadows_zeros() {
+        let cs = 65536u64;
+        let vsize = 8 * cs;
+        let dir = tempfile::tempdir().unwrap();
+
+        let mut pw = Qcow2Writer::new(
+            std::io::Cursor::new(Vec::new()),
+            Qcow2WriterOptions { virtual_size: vsize, ..Default::default() },
+        )
+        .unwrap();
+        for c in 0..8 {
+            pw.write_cluster(c, &vec![(c as u8) + 1; cs as usize]).unwrap();
+        }
+        std::fs::write(dir.path().join("parent.qcow2"), pw.finish().unwrap().into_inner())
+            .unwrap();
+
+        let cw = Qcow2Writer::new(
+            std::io::Cursor::new(Vec::new()),
+            Qcow2WriterOptions {
+                virtual_size: vsize,
+                backing_file: Some("parent.qcow2".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let child = dir.path().join("child.qcow2");
+        std::fs::write(&child, cw.finish().unwrap().into_inner()).unwrap();
+
+        // Blob spans clusters 2..=4 (unaligned start); everything between the
+        // first and last byte is zero, so cluster 3 becomes an all-zero write.
+        let offset = 2 * cs + 256;
+        let mut blob = vec![0u8; (2 * cs) as usize];
+        blob[0] = 0xAB;
+        let blob_len = blob.len();
+        blob[blob_len - 1] = 0xCD;
+        write_qcow2_guest_blob(&child, offset, &blob).unwrap();
+
+        let mut r = Qcow2RandomReader::open(&child).unwrap();
+        assert_eq!(r.chain_len(), 2, "backing link must survive the commit");
+
+        let mut back = vec![0xFFu8; blob.len()];
+        r.read_at(offset, &mut back).unwrap();
+        assert_eq!(back, blob, "blob (incl. its zero middle) must shadow the parent");
+
+        let mut edge = vec![0u8; 16];
+        r.read_at(offset - 16, &mut edge).unwrap();
+        assert_eq!(edge, [3u8; 16], "pre-blob bytes come from the parent via RMW");
+        r.read_at(offset + blob.len() as u64, &mut edge).unwrap();
+        assert_eq!(edge, [5u8; 16], "post-blob bytes come from the parent via RMW");
+
+        // Untouched clusters still fall through to the parent.
+        r.read_at(0, &mut edge).unwrap();
+        assert_eq!(edge, [1u8; 16]);
+    }
 }

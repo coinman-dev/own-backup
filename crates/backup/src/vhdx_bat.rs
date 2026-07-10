@@ -28,6 +28,7 @@ const META_GUID: &str = "8b7ca206-4790-4b9a-b8fe-575f050f886e";
 const MI_FILE_PARAMS: &str = "caa16737-fa36-4d43-b3b6-33f0aa44e76b";
 const MI_VDISK_SIZE: &str = "2fa54224-cd1b-4876-b211-5dbed83bf4b8";
 const MI_LOG_SECTOR: &str = "8141bf1d-a96f-4709-ba47-f233a8faab5f";
+const MI_PARENT_LOCATOR: &str = "a8d35f2d-b30b-454d-abf7-d3d84834ab0c";
 
 /// BAT payload-block state `SB_BLOCK_NOT_PRESENT` — the only state that means
 /// "this file carries nothing for the block" (differencing: inherit from the
@@ -149,7 +150,22 @@ pub fn allocated_payload_blocks(path: &Path) -> Result<VhdxAllocation> {
     Ok(VhdxAllocation { block_size: bsize, virtual_size: vsize, blocks })
 }
 
-fn guest_to_file_offset_in_file(file: &mut File, guest_offset: u64) -> Result<u64> {
+/// Where one guest offset's bytes live, up to the end of its payload block.
+enum GuestRun {
+    /// THIS file carries the bytes at `file_offset`, for `run` bytes.
+    Data { file_offset: u64, run: u64 },
+    /// This file carries nothing for `run` bytes (differencing child: inherit
+    /// from the parent; dynamic image: reads as zeros). `state` is the raw BAT
+    /// block state, kept for error messages on the write path.
+    Absent { run: u64, state: u64 },
+}
+
+/// Translate one guest offset into a [`GuestRun`]: the bytes till the end of
+/// the containing payload block. VHDX payload blocks are NOT adjacent in the
+/// file, so any read/write spanning a block boundary must re-translate per
+/// block — a single contiguous file access past the run touches whatever
+/// happens to live there (BAT/bitmap/another block).
+fn guest_to_file_offset_in_file(file: &mut File, guest_offset: u64) -> Result<GuestRun> {
     // 1. File-type identifier.
     let mut id = [0u8; 8];
     read_exact_at(file, 0, &mut id)?;
@@ -227,31 +243,206 @@ fn guest_to_file_offset_in_file(file: &mut File, guest_offset: u64) -> Result<u6
     let entry = u64::from_le_bytes(entry_buf);
 
     let state = entry & 7;
+    let run = bsize - block_offset;
     if state != 6 && state != 7 {
-        return Err(bad(format!("block state {state} is not physically allocated in VHDX (cannot seek/write)")));
+        return Ok(GuestRun::Absent { run, state });
     }
-
     let file_offset = entry & 0xFFFFFFFFFFF00000;
-    Ok(file_offset + block_offset)
+    if file_offset == 0 {
+        return Err(bad(format!("block state {state} with a zero file offset — corrupt BAT")));
+    }
+    Ok(GuestRun::Data { file_offset: file_offset + block_offset, run })
 }
 
-/// Read directly from a guest offset of a VHDX file without attaching.
-pub fn read_vhdx_guest_at(path: &Path, guest_offset: u64, buf: &mut [u8]) -> Result<()> {
+/// Read the metadata region of an open VHDX file (signature-checked).
+fn read_metadata_region(file: &mut File) -> Result<Vec<u8>> {
+    let mut id = [0u8; 8];
+    read_exact_at(file, 0, &mut id)?;
+    if &id != b"vhdxfile" {
+        return Err(bad("not a VHDX file (no signature)"));
+    }
+    let mut region = vec![0u8; 64 * 1024];
+    read_exact_at(file, REGION1_OFF, &mut region)?;
+    if &region[0..4] != b"regi" {
+        return Err(bad("no region table signature"));
+    }
+    let entry_count = u32::from_le_bytes(region[8..12].try_into().unwrap()) as usize;
+    for slot in 0..entry_count.min(2047) {
+        let base = 16 + slot * 32;
+        if &region[base..base + 16] == guid_le(META_GUID) {
+            let off = u64::from_le_bytes(region[base + 16..base + 24].try_into().unwrap());
+            let len = u32::from_le_bytes(region[base + 24..base + 28].try_into().unwrap()) as u64;
+            let mut meta = vec![0u8; len.min(1024 * 1024) as usize];
+            read_exact_at(file, off, &mut meta)?;
+            if &meta[0..8] != b"metadata" {
+                return Err(bad("no metadata signature"));
+            }
+            return Ok(meta);
+        }
+    }
+    Err(bad("region table missing metadata"))
+}
+
+/// Extract the parent path string from a metadata region's parent locator
+/// (MS-VHDX §2.6.3), preferring `relative_path`. `None` for dynamic images.
+fn parse_parent_locator(meta: &[u8]) -> Option<String> {
+    let mcount = u16::from_le_bytes(meta.get(10..12)?.try_into().ok()?) as usize;
+    let (mut ioff, mut ilen) = (0usize, 0usize);
+    for slot in 0..mcount.min(2046) {
+        let e = 32 + slot * 32;
+        if meta.get(e..e + 16)? == guid_le(MI_PARENT_LOCATOR) {
+            ioff = u32::from_le_bytes(meta[e + 16..e + 20].try_into().ok()?) as usize;
+            ilen = u32::from_le_bytes(meta[e + 20..e + 24].try_into().ok()?) as usize;
+            break;
+        }
+    }
+    if ioff == 0 || ilen < 20 {
+        return None;
+    }
+    let locator = meta.get(ioff..ioff + ilen)?;
+    let count = u16::from_le_bytes(locator[18..20].try_into().ok()?) as usize;
+
+    let read_utf16 = |off: usize, len: usize| -> Option<String> {
+        let bytes = locator.get(off..off + len)?;
+        let units: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        Some(String::from_utf16_lossy(&units))
+    };
+
+    let mut best: Option<(u8, String)> = None; // (priority, value) — lower wins
+    for i in 0..count.min(64) {
+        let e = 20 + i * 12;
+        let entry = locator.get(e..e + 12)?;
+        let key_off = u32::from_le_bytes(entry[0..4].try_into().ok()?) as usize;
+        let val_off = u32::from_le_bytes(entry[4..8].try_into().ok()?) as usize;
+        let key_len = u16::from_le_bytes(entry[8..10].try_into().ok()?) as usize;
+        let val_len = u16::from_le_bytes(entry[10..12].try_into().ok()?) as usize;
+        let Some(key) = read_utf16(key_off, key_len) else { continue };
+        let priority = match key.as_str() {
+            "relative_path" => 0u8,
+            "absolute_win32_path" => 1,
+            "volume_path" => 2,
+            _ => continue,
+        };
+        if best.as_ref().map_or(true, |(p, _)| priority < *p) {
+            if let Some(value) = read_utf16(val_off, val_len) {
+                best = Some((priority, value));
+            }
+        }
+    }
+    best.map(|(_, v)| v)
+}
+
+/// Resolve a parent-locator path against the child image's directory.
+fn resolve_parent(child: &Path, raw: &str) -> std::path::PathBuf {
+    let s = raw.trim_start_matches(r"\\?\");
+    #[cfg(not(target_os = "windows"))]
+    let s = s.replace('\\', "/");
+    #[cfg(target_os = "windows")]
+    let s = s.to_string();
+    let p = Path::new(&s);
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        let rel = s.trim_start_matches("./").trim_start_matches(r".\");
+        child.parent().unwrap_or_else(|| Path::new(".")).join(rel)
+    }
+}
+
+/// Parent image path of a differencing VHDX (from its parent locator),
+/// resolved against the child's directory; `None` for dynamic images.
+pub fn vhdx_parent_path(path: &Path) -> Result<Option<std::path::PathBuf>> {
     let mut file = File::open(path).map_err(|e| bad(format!("open {}: {e}", path.display())))?;
-    let file_offset = guest_to_file_offset_in_file(&mut file, guest_offset)?;
-    read_exact_at(&mut file, file_offset, buf)
+    let meta = read_metadata_region(&mut file)?;
+    Ok(parse_parent_locator(&meta).map(|raw| resolve_parent(path, &raw)))
+}
+
+/// Longest accepted parent chain (a loop is corruption, real chains are short).
+const MAX_CHAIN_DEPTH: usize = 64;
+
+/// Read directly from a guest offset of a VHDX file without attaching.
+/// Handles ranges spanning payload-block boundaries (blocks are scattered in
+/// the file; each is translated separately) and WALKS THE PARENT CHAIN: a
+/// block a differencing child does not carry is read from its parent — e.g.
+/// the GPT of an incremental image, which only the full backup stores. Past a
+/// dynamic (parentless) image, absent blocks read as zeros.
+pub fn read_vhdx_guest_at(path: &Path, guest_offset: u64, buf: &mut [u8]) -> Result<()> {
+    read_guest_chain(path, guest_offset, buf, 0)
+}
+
+fn read_guest_chain(path: &Path, guest_offset: u64, buf: &mut [u8], depth: usize) -> Result<()> {
+    if depth >= MAX_CHAIN_DEPTH {
+        return Err(bad(format!(
+            "parent chain deeper than {MAX_CHAIN_DEPTH} images — corrupted chain?"
+        )));
+    }
+    let mut file = File::open(path).map_err(|e| bad(format!("open {}: {e}", path.display())))?;
+    let mut parent: Option<Option<std::path::PathBuf>> = None; // resolved once, lazily
+    let mut off = guest_offset;
+    let mut rest: &mut [u8] = buf;
+    while !rest.is_empty() {
+        match guest_to_file_offset_in_file(&mut file, off)? {
+            GuestRun::Data { file_offset, run } => {
+                let take = (run.min(rest.len() as u64)) as usize;
+                read_exact_at(&mut file, file_offset, &mut rest[..take])?;
+                off += take as u64;
+                rest = &mut rest[take..];
+            }
+            GuestRun::Absent { run, .. } => {
+                let take = (run.min(rest.len() as u64)) as usize;
+                let resolved = match &parent {
+                    Some(p) => p.clone(),
+                    None => {
+                        let p = vhdx_parent_path(path)?;
+                        parent = Some(p.clone());
+                        p
+                    }
+                };
+                match resolved {
+                    Some(parent_path) => {
+                        read_guest_chain(&parent_path, off, &mut rest[..take], depth + 1)?
+                    }
+                    None => rest[..take].fill(0),
+                }
+                off += take as u64;
+                rest = &mut rest[take..];
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Write directly to a guest offset of a VHDX file without attaching.
+/// Handles ranges spanning payload-block boundaries; every touched block must
+/// already be allocated IN THIS FILE (the engine pre-allocates the meta
+/// partition with a placeholder write during the copy) — writes never touch
+/// the parent chain.
 pub fn write_vhdx_guest_at(path: &Path, guest_offset: u64, buf: &[u8]) -> Result<()> {
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(path)
         .map_err(|e| bad(format!("open {}: {e}", path.display())))?;
-    let file_offset = guest_to_file_offset_in_file(&mut file, guest_offset)?;
-    file.seek(SeekFrom::Start(file_offset)).map_err(bad)?;
-    file.write_all(buf).map_err(bad)?;
+    let mut off = guest_offset;
+    let mut rest = buf;
+    while !rest.is_empty() {
+        match guest_to_file_offset_in_file(&mut file, off)? {
+            GuestRun::Data { file_offset, run } => {
+                let take = (run.min(rest.len() as u64)) as usize;
+                file.seek(SeekFrom::Start(file_offset)).map_err(bad)?;
+                file.write_all(&rest[..take]).map_err(bad)?;
+                off += take as u64;
+                rest = &rest[take..];
+            }
+            GuestRun::Absent { state, .. } => {
+                return Err(bad(format!(
+                    "block state {state} is not physically allocated in VHDX (cannot seek/write)"
+                )));
+            }
+        }
+    }
     file.sync_all().map_err(bad)
 }
 
@@ -289,5 +480,96 @@ mod tests {
         let path = dir.path().join("not.vhdx");
         std::fs::write(&path, b"garbage garbage garbage").unwrap();
         assert!(allocated_payload_blocks(&path).is_err());
+    }
+
+    /// Guest reads/writes spanning a payload-block boundary must translate
+    /// each block separately. Blocks are allocated OUT OF ORDER so their file
+    /// positions do not mirror guest order — a single contiguous file access
+    /// (the old behaviour) reads/writes the wrong bytes past the boundary.
+    #[test]
+    fn guest_io_across_payload_block_boundary() {
+        const MB: u64 = 1024 * 1024;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.vhdx");
+
+        let mut w = VhdxWriter::create(&path, 8 * MB, MB, 512).unwrap();
+        w.write_at(3 * MB, &vec![0x33u8; MB as usize]).unwrap(); // block 3 first
+        w.write_at(2 * MB, &vec![0x22u8; MB as usize]).unwrap(); // block 2 after
+        w.finish().unwrap();
+
+        // 8 KiB straddling the guest block 2 → 3 boundary at an odd offset.
+        let data: Vec<u8> = (0..8192u32).map(|i| (i % 251) as u8).collect();
+        write_vhdx_guest_at(&path, 3 * MB - 4096, &data).unwrap();
+
+        let mut back = vec![0u8; 8192];
+        read_vhdx_guest_at(&path, 3 * MB - 4096, &mut back).unwrap();
+        assert_eq!(back, data, "straddling write must read back intact");
+
+        // Neighbouring bytes on both sides keep their original fill.
+        let mut edge = vec![0u8; 16];
+        read_vhdx_guest_at(&path, 3 * MB - 4096 - 16, &mut edge).unwrap();
+        assert_eq!(edge, [0x22u8; 16]);
+        read_vhdx_guest_at(&path, 3 * MB + 4096, &mut edge).unwrap();
+        assert_eq!(edge, [0x33u8; 16]);
+
+        // An unallocated block of a dynamic (parentless) image reads as zeros
+        // (VHDX semantics), spanning allocated → absent across the boundary.
+        let mut span = vec![0xFFu8; 32];
+        read_vhdx_guest_at(&path, 4 * MB - 16, &mut span).unwrap();
+        assert_eq!(&span[..16], &[0x33u8; 16]);
+        assert_eq!(&span[16..], &[0u8; 16]);
+
+        // Writes must still refuse unallocated blocks.
+        assert!(write_vhdx_guest_at(&path, 5 * MB, &[1u8; 16]).is_err());
+    }
+
+    /// Parent-locator parsing on a hand-built metadata region (MS-VHDX §2.6.3):
+    /// entry offsets are relative to the locator header, strings are UTF-16LE.
+    #[test]
+    fn parent_locator_parses_relative_path() {
+        let mut meta = vec![0u8; 4096];
+        meta[0..8].copy_from_slice(b"metadata");
+        meta[10..12].copy_from_slice(&1u16.to_le_bytes()); // one table entry
+
+        // Table entry 0 at offset 32: parent locator item at 1024, length 256.
+        meta[32..48].copy_from_slice(&guid_le(MI_PARENT_LOCATOR));
+        meta[48..52].copy_from_slice(&1024u32.to_le_bytes());
+        meta[52..56].copy_from_slice(&256u32.to_le_bytes());
+
+        // Locator header at 1024: type GUID (16) + reserved (2) + count (2).
+        meta[1042..1044].copy_from_slice(&2u16.to_le_bytes());
+        let key1: Vec<u8> = "relative_path".encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        let val1: Vec<u8> = r".\parent.vhdx".encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        let key2: Vec<u8> = "parent_linkage".encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        let val2: Vec<u8> = "{GUID}".encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        // Strings packed after the two 12-byte entries (offsets locator-relative).
+        let mut cursor = 20 + 2 * 12;
+        let mut put = |bytes: &[u8], meta: &mut Vec<u8>| {
+            let at = cursor;
+            meta[1024 + at..1024 + at + bytes.len()].copy_from_slice(bytes);
+            cursor += bytes.len();
+            at
+        };
+        let k1 = put(&key1, &mut meta);
+        let v1 = put(&val1, &mut meta);
+        let k2 = put(&key2, &mut meta);
+        let v2 = put(&val2, &mut meta);
+        for (i, (ko, vo, kl, vl)) in [
+            (k1, v1, key1.len(), val1.len()),
+            (k2, v2, key2.len(), val2.len()),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let e = 1024 + 20 + i * 12;
+            meta[e..e + 4].copy_from_slice(&(ko as u32).to_le_bytes());
+            meta[e + 4..e + 8].copy_from_slice(&(vo as u32).to_le_bytes());
+            meta[e + 8..e + 10].copy_from_slice(&(kl as u16).to_le_bytes());
+            meta[e + 10..e + 12].copy_from_slice(&(vl as u16).to_le_bytes());
+        }
+
+        assert_eq!(parse_parent_locator(&meta).as_deref(), Some(r".\parent.vhdx"));
+        let resolved = resolve_parent(Path::new("/backups/child.avhdx"), r".\parent.vhdx");
+        assert_eq!(resolved, Path::new("/backups/parent.vhdx"));
     }
 }

@@ -776,9 +776,9 @@ pub fn plan_run(job: &Job, last_success: Option<&JobRun>) -> RunPlan {
         _ => base.clone(),
     };
 
-    // The parent must still exist with its sidecar; otherwise start fresh.
-    let sidecar = own_backup_backup::sidecar_path_for(&parent);
-    if !parent.exists() || !sidecar.exists() {
+    // The parent must still exist with readable sidecar metadata — embedded
+    // (inside the image) or the adjacent .obkm; otherwise start fresh.
+    if !parent.exists() || !own_backup_backup::image_sidecar_readable(&parent) {
         return RunPlan::full();
     }
 
@@ -980,9 +980,9 @@ pub fn plan_run_for_volume(job: &Job, folder: &Path, device: &str) -> RunPlan {
         _ => base.clone(),
     };
 
-    // The parent must still exist with its sidecar; otherwise start fresh.
-    let sidecar = own_backup_backup::sidecar_path_for(&parent);
-    if !parent.exists() || !sidecar.exists() {
+    // The parent must still exist with readable sidecar metadata — embedded
+    // (inside the image) or the adjacent .obkm; otherwise start fresh.
+    if !parent.exists() || !own_backup_backup::image_sidecar_readable(&parent) {
         return RunPlan::full();
     }
 

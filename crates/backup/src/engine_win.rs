@@ -945,6 +945,7 @@ fn backup_volume_inner(
         }
     };
     temp_info.container = req.image_format.extension().into();
+    temp_info.job_id = req.job_id.clone();
     let mut temp_blob = Vec::new();
     crate::sidecar::write_sidecar_v2_to(&mut temp_blob, &temp_info, &temp_manifest, &outcome.checksums)?;
 
@@ -1129,6 +1130,9 @@ fn backup_volume_inner(
         }
     };
     sidecar_info.container = req.image_format.extension().into();
+    // The job id is what ties images into this job's chains: list_job_chains
+    // filters on it, so without it every next run plans a FULL backup.
+    sidecar_info.job_id = req.job_id.clone();
     let sidecar_path = sidecar_path_for(&req.image_path);
 
 
