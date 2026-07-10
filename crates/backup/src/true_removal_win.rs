@@ -299,6 +299,16 @@ pub(crate) fn delete_paths_on_disk(
     let mut deleted = 0u64;
     let mut failed = 0u64;
     for p in paths {
+        // Skip System Volume Information and anything inside it.
+        // Windows automatically recreates and locks this folder upon mounting, so trying to
+        // delete it is futile and causes sharing violation warnings.
+        let is_sys_vol_info = p.rel.eq_ignore_ascii_case("System Volume Information")
+            || (p.rel.len() >= 26 && p.rel.as_bytes()[..26].eq_ignore_ascii_case(b"System Volume Information\\"));
+        if is_sys_vol_info {
+            debug!(path = %p.rel, "true removal: skipping System Volume Information to avoid sharing violations");
+            continue;
+        }
+
         let full = format!("{volume_root}{}", p.rel);
         delete_tree(&full, p.is_dir, p.is_reparse, &mut deleted, &mut failed);
         if (deleted + failed) % 64 == 0 {
