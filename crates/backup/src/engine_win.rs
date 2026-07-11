@@ -39,7 +39,7 @@ use crate::raw_copy::copy_used_blocks;
 use crate::san_policy::SanPolicyGuard;
 use crate::sidecar::{
     read_embedded_sidecar, read_sidecar, sidecar_path_for,
-    write_sidecar, ChainRole, Sidecar, SidecarInfo,
+    write_sidecar, BlockChecksum, ChainRole, Sidecar, SidecarInfo,
 };
 use crate::used_sectors::{AllUsedMap, UsedSectorMap};
 use crate::used_sectors_win::NtfsUsedSectorMap;
@@ -1179,6 +1179,483 @@ fn backup_volume_inner(
         excluded_bytes,
         categories,
     })
+}
+
+// ===========================================================================
+// Whole-disk backup: one image per disk (plan D1, .ai/whole-disk-single-image)
+// ===========================================================================
+
+/// One partition to include in a whole-disk backup.
+pub struct DiskPartitionBackup {
+    /// Source volume device (`\\.\Volume{…}`, a drive letter, or `part:…`).
+    pub device: String,
+    /// GPT slot (matches [`own_backup_common::gpt::GptPartitionEntry::index`]).
+    pub part_index: u32,
+    /// Passphrase for a LUKS partition (its decrypted data is captured).
+    pub passphrase: Option<String>,
+}
+
+/// Parameters for a whole-disk (bootable) backup into a single image.
+pub struct DiskBackupRequest {
+    pub disk_number: u32,
+    pub disk_model: String,
+    pub partitions: Vec<DiskPartitionBackup>,
+    pub image_path: PathBuf,
+    pub block_size: u32,
+    pub image_format: ImageFormat,
+    pub job_id: Option<String>,
+}
+
+/// Outcome of a completed whole-disk backup.
+pub struct DiskBackupSummary {
+    pub image_path: PathBuf,
+    pub bytes_copied: u64,
+    pub blocks_copied: u64,
+    pub partitions: u32,
+    pub duration: Duration,
+}
+
+/// One prepared partition: its VSS snapshot, decrypt params, used-map and the
+/// GPT entry it fills. Snapshots for all partitions are taken up front so the
+/// image is cross-volume consistent, then copied in one pass.
+struct PreparedPartition {
+    part_index: u32,
+    device: String,
+    read_path: String,
+    luks: Option<crate::luks::LuksParams>,
+    used: Box<dyn UsedSectorMap>,
+    volume_len: u64,
+    part_offset: u64,
+    filesystem: String,
+    #[allow(dead_code)]
+    vss: Option<VssSnapshotSession>, // kept alive until the copy is done
+}
+
+/// Short display token for a source device (mirrors core's source_token):
+/// a drive letter, `V`+8 hex of a volume GUID, or `P<disk><offsetHex>`.
+fn disk_source_token(device: &str) -> String {
+    let d = device.trim_start_matches(r"\\.\").trim_start_matches(r"\\?\");
+    if let Some(rest) = d.strip_prefix("part:") {
+        let mut it = rest.split(':');
+        if let (Some(disk), Some(off)) = (it.next(), it.next()) {
+            if let (Ok(dn), Ok(o)) = (disk.parse::<u32>(), off.parse::<u64>()) {
+                return format!("P{dn}{:X}", o);
+            }
+        }
+    }
+    let bytes = d.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        return bytes[0].to_ascii_uppercase().to_string();
+    }
+    if let Some(pos) = d.find("Volume{") {
+        let hex: String = d[pos + 7..].chars().take(8).collect();
+        return format!("V{}", hex.to_uppercase());
+    }
+    "X".into()
+}
+
+/// Boxed used-map for a volume (any filesystem), or `None` for sector-by-sector.
+/// Simplified twin of `backup_volume`'s inline chain — whole-disk v1 needs only
+/// the boxed map (no NTFS-typed handle for file exclusions; that is plan D2).
+fn build_boxed_used_map(
+    read_path: &str,
+    block_size: u32,
+    luks: &Option<crate::luks::LuksParams>,
+) -> Option<Box<dyn UsedSectorMap>> {
+    let open = || -> Result<Box<dyn crate::fat_map::RawVolume + Send>> {
+        let dev = WinRawDevice::open_read(read_path)?;
+        Ok(match luks {
+            Some(p) => Box::new(crate::decrypt::DecryptingVolume::new(Box::new(dev), p.clone())),
+            None => Box::new(dev),
+        })
+    };
+    // NTFS first (only on a plain, non-decrypted volume), then FAT/ext/btrfs/xfs.
+    if luks.is_none() {
+        if let Ok(m) = NtfsUsedSectorMap::open(read_path, block_size) {
+            return Some(Box::new(m));
+        }
+    }
+    let mut src = open().ok()?;
+    if let Ok(m) = crate::fat_map::build_fat_used_map(src.as_mut(), block_size) {
+        return Some(Box::new(m));
+    }
+    if let Ok(m) = crate::ext_map::build_ext_used_map(src.as_mut(), block_size) {
+        return Some(Box::new(m));
+    }
+    if let Ok(m) = crate::btrfs_map::build_btrfs_used_map(src.as_mut(), block_size) {
+        return Some(Box::new(m));
+    }
+    if let Ok(m) = crate::xfs_map::build_xfs_used_map(src.as_mut(), block_size) {
+        return Some(Box::new(m));
+    }
+    None
+}
+
+/// Back up a whole disk (several partitions of one physical drive) into ONE
+/// bootable image with the real GPT + an embedded restore manifest. Used
+/// sectors only (never a raw disk dump); each partition's data lands at its
+/// real offset, so mounting the image shows every volume with a drive letter.
+///
+/// v1 scope: full backups; NTFS/FAT/ext/btrfs/xfs + LUKS. File exclusions,
+/// true-removal and incremental chains are follow-up phases (D2/D5).
+pub fn backup_disk(
+    req: &DiskBackupRequest,
+    progress: impl FnMut(&BackupProgress) -> Result<()>,
+) -> Result<DiskBackupSummary> {
+    if req.image_path.exists() {
+        return Err(OwnBackupError::Config(format!(
+            "output image already exists: {}",
+            req.image_path.display()
+        )));
+    }
+    if let Some(parent) = req.image_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    crate::privileges_win::enable_backup_privileges();
+    let result = backup_disk_inner(req, progress);
+    if result.is_err() {
+        let _ = std::fs::remove_file(&req.image_path);
+    }
+    result
+}
+
+fn backup_disk_inner(
+    req: &DiskBackupRequest,
+    mut progress: impl FnMut(&BackupProgress) -> Result<()>,
+) -> Result<DiskBackupSummary> {
+    let started = Instant::now();
+    let bs = req.block_size as u64;
+
+    // 1. Real GPT, filtered to the selected partitions (variant B keeps MSR).
+    let mut layout = crate::gpt_reader::read_disk_layout(req.disk_number)?;
+    let kept: std::collections::HashSet<u32> =
+        req.partitions.iter().map(|p| p.part_index).collect();
+    layout.retain_for_backup(&kept);
+    let sector = layout.sector_size as u64;
+    if bs == 0 || bs % sector != 0 {
+        return Err(OwnBackupError::Config(format!(
+            "block size {} is not a multiple of the sector size {sector}",
+            req.block_size
+        )));
+    }
+
+    // 2. Snapshot + map every partition up front (cross-volume consistency).
+    info!(disk = req.disk_number, parts = req.partitions.len(), "whole-disk backup: preparing partitions");
+    let mut prepared: Vec<PreparedPartition> = Vec::new();
+    for p in &req.partitions {
+        let entry = layout
+            .partitions
+            .iter()
+            .find(|e| e.index == p.part_index)
+            .ok_or_else(|| {
+                OwnBackupError::Config(format!("partition {} not found in the disk GPT", p.part_index))
+            })?;
+        let part_offset = entry.first_lba * sector;
+        if part_offset % bs != 0 {
+            return Err(OwnBackupError::Config(format!(
+                "partition {} offset {part_offset} is not block-aligned ({bs})",
+                p.part_index
+            )));
+        }
+
+        let source = normalize_device_path(&p.device);
+        // VSS for a live lettered volume; else read the source directly.
+        let mut vss: Option<VssSnapshotSession> = None;
+        let read_path = match volume_root_of(&source) {
+            Some(root) => match VssSnapshotSession::create(&root) {
+                Ok(session) => {
+                    let path = session.device_path().to_string();
+                    vss = Some(session);
+                    path
+                }
+                Err(e) => {
+                    warn!(error = %e, device = %source, "VSS failed — reading the live volume");
+                    source.clone()
+                }
+            },
+            None => source.clone(),
+        };
+
+        // LUKS unlock (decrypted data area is captured).
+        let mut probe = WinRawDevice::open_read(&read_path)?;
+        let luks = match &p.passphrase {
+            Some(pass) => {
+                let mut header = vec![0u8; 4096];
+                probe.read_at(0, &mut header)?;
+                if crate::luks::is_luks(&header) {
+                    Some(crate::luks::open_luks(&mut probe, pass.as_bytes())?)
+                } else {
+                    None
+                }
+            }
+            None => None,
+        };
+        let device_len = probe.length();
+        drop(probe);
+        let volume_len = match &luks {
+            Some(l) => device_len.saturating_sub(l.data_offset),
+            None => device_len,
+        };
+        // The volume must fit the GPT slot it fills.
+        let slot_len = (entry.last_lba + 1 - entry.first_lba) * sector;
+        if volume_len > slot_len {
+            return Err(OwnBackupError::Config(format!(
+                "partition {} volume ({volume_len} B) exceeds its GPT slot ({slot_len} B)",
+                p.part_index
+            )));
+        }
+
+        let used = build_boxed_used_map(&read_path, req.block_size, &luks)
+            .unwrap_or_else(|| Box::new(AllUsedMap::new(volume_len.div_ceil(bs))));
+        info!(
+            part = p.part_index,
+            used_blocks = used.used_block_count(),
+            offset = part_offset,
+            "whole-disk backup: partition prepared"
+        );
+        prepared.push(PreparedPartition {
+            part_index: p.part_index,
+            device: source,
+            read_path,
+            luks,
+            volume_len,
+            part_offset,
+            filesystem: entry.type_guid.clone(),
+            used,
+            vss,
+        });
+    }
+
+    // 3. Size the image from the used-block total, plan the meta partition.
+    let total_used: u64 = prepared.iter().map(|p| p.used.used_block_count()).sum();
+    let meta_size = crate::sidecar::calculate_meta_partition_size(total_used.max(1));
+    let plan = own_backup_common::gpt::plan_whole_disk_image(&layout, meta_size);
+    let meta_offset = plan.meta_first_lba * sector;
+    let meta_guid = Uuid::new_v4();
+
+    // 4. Create the image and write the real GPT (+ appended OwnBackupMeta).
+    let (mut target, sector_size) = create_disk_image_target(&req.image_path, plan.image_size, req.image_format)?;
+    for op in crate::gpt_writer::whole_disk_gpt_ops(&layout, &plan, meta_guid)? {
+        target.write_at(op.offset, &op.bytes)?;
+    }
+    if let ImageTarget::Vhdx { writer, .. } = &mut target {
+        // Persist the offline attribute for the new disk GUID so future attaches
+        // (and the differencing children of D5) arrive offline — no auto-mount.
+        if let Err(e) = writer.update_properties().and_then(|()| writer.set_offline_writable(true)) {
+            warn!(error = %e, "could not persist the offline attribute for the disk image");
+        }
+    }
+
+    // 5. Copy each partition's used blocks into the image at its real offset.
+    let mut checksums: Vec<BlockChecksum> = Vec::new();
+    let mut bytes_copied = 0u64;
+    let mut blocks_copied = 0u64;
+    for prep in &prepared {
+        let part_block_base = prep.part_offset / bs;
+        let mut reader: Box<dyn BlockReader> = if prep.luks.is_some() {
+            let dev = WinRawDevice::open_read(&prep.read_path)?;
+            let view = crate::decrypt::DecryptingVolume::new(Box::new(dev), prep.luks.clone().unwrap());
+            Box::new(crate::block_reader::RawVolumeBlockReader::new(Box::new(view), req.block_size)?)
+        } else {
+            Box::new(WinBlockReader::open(&prep.read_path, req.block_size)?)
+        };
+        let outcome = copy_used_blocks(
+            &format!("disk{}", req.disk_number),
+            reader.as_mut(),
+            prep.used.as_ref(),
+            None, // full backup (parent chain = D5)
+            |vol_block, data| target.write_at(prep.part_offset + vol_block * bs, data),
+            &mut progress,
+        )?;
+        bytes_copied += outcome.bytes_copied;
+        blocks_copied += outcome.blocks_copied;
+        // Re-key each checksum from volume-relative to whole-disk block number.
+        for c in outcome.checksums {
+            checksums.push(BlockChecksum {
+                block_number: part_block_base + c.block_number,
+                checksum: c.checksum,
+            });
+        }
+        info!(part = prep.part_index, blocks = outcome.blocks_copied, "whole-disk backup: partition copied");
+    }
+
+    // 6. Reserve the meta partition region while the image is open (so the VHDX
+    //    BAT allocates it), then finalize and release the snapshots.
+    let placeholder = vec![0u8; meta_size as usize];
+    target.write_at(meta_offset, &placeholder)?;
+    let _ = progress(&BackupProgress {
+        backup_id: "finalize".into(),
+        status: BackupStatus::Running,
+        blocks_done: 0,
+        blocks_total: 0,
+        bytes_written: bytes_copied,
+        speed_bps: 0,
+    });
+    target.finalize()?;
+    for prep in &mut prepared {
+        if let Some(session) = prep.vss.take() {
+            if let Err(e) = session.complete() {
+                warn!(error = %e, "VSS release failed (data is already safe)");
+            }
+        }
+    }
+
+    // 7. Build the embedded manifest + sidecar and write it into the meta region.
+    let image_file_name = req
+        .image_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let images: Vec<own_backup_common::gpt::DiskImageRef> = prepared
+        .iter()
+        .map(|p| own_backup_common::gpt::DiskImageRef {
+            part_index: p.part_index,
+            token: disk_source_token(&p.device),
+            image_file_name: image_file_name.clone(),
+            filesystem: p.filesystem.clone(),
+        })
+        .collect();
+    let disk_manifest = own_backup_common::gpt::DiskBackupManifest {
+        format_version: own_backup_common::gpt::DiskBackupManifest::FORMAT_VERSION,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        job_id: req.job_id.clone(),
+        disk_number: req.disk_number,
+        disk_model: req.disk_model.clone(),
+        layout: layout.clone(),
+        images,
+    };
+
+    let total_blocks = plan.image_size.div_ceil(bs);
+    let manifest = whole_disk_image_manifest(
+        &layout,
+        req,
+        sector_size,
+        plan.image_size,
+        total_blocks,
+        total_used,
+    );
+    // A whole-disk image is disk-block absolute → volume_data_offset = 0.
+    let mut info = SidecarInfo::new_full(image_file_name, 0);
+    info.container = req.image_format.extension().into();
+    info.job_id = req.job_id.clone();
+
+    let mut blob = Vec::new();
+    crate::sidecar::write_sidecar_v2_full_to(&mut blob, &info, &manifest, &checksums, Some(&disk_manifest))?;
+    match req.image_format {
+        ImageFormat::Vhdx => crate::vhdx_bat::write_vhdx_guest_at(&req.image_path, meta_offset, &blob)?,
+        ImageFormat::Qcow2 => {
+            crate::qcow2::merge::write_qcow2_guest_blob(&req.image_path, meta_offset, &blob)?
+        }
+    }
+
+    info!(
+        image = %req.image_path.display(),
+        disk = req.disk_number,
+        partitions = prepared.len(),
+        blocks_written = blocks_copied,
+        bytes = bytes_copied,
+        secs = started.elapsed().as_secs(),
+        "Whole-disk backup complete"
+    );
+    Ok(DiskBackupSummary {
+        image_path: req.image_path.clone(),
+        bytes_copied,
+        blocks_copied,
+        partitions: prepared.len() as u32,
+        duration: started.elapsed(),
+    })
+}
+
+/// Create an image target of `disk_size` bytes with no parent (full backup).
+/// Returns the target and its logical sector size.
+fn create_disk_image_target(
+    image_path: &Path,
+    disk_size: u64,
+    format: ImageFormat,
+) -> Result<(ImageTarget, u32)> {
+    let sector_size = 512u32;
+    match format {
+        ImageFormat::Qcow2 => {
+            let writer = crate::qcow2::Qcow2StagedWriter::create(
+                image_path,
+                crate::qcow2::Qcow2WriterOptions { virtual_size: disk_size, backing_file: None, ..Default::default() },
+            )?;
+            Ok((ImageTarget::Qcow2 { writer }, sector_size))
+        }
+        ImageFormat::Vhdx => {
+            create_dynamic_vhdx(
+                image_path,
+                &VhdxCreateOptions {
+                    max_size: disk_size,
+                    logical_sector_size: sector_size,
+                    physical_sector_size: std::cmp::max(sector_size, 4096),
+                },
+            )?;
+            let san_guard = SanPolicyGuard::offline_all();
+            let attached = attach_vhdx(image_path, AttachMode::RawWrite)?;
+            let writer = open_write_with_retry(attached.physical_path())?;
+            writer.set_offline_writable(false)?;
+            drop(san_guard);
+            if writer.length() < disk_size {
+                return Err(OwnBackupError::Vhdx(format!(
+                    "attached image is {} bytes — smaller than the planned {disk_size}",
+                    writer.length()
+                )));
+            }
+            Ok((ImageTarget::Vhdx { attached, writer, bytes_since_flush: 0 }, sector_size))
+        }
+    }
+}
+
+/// Build the embedded [`ImageManifest`] describing the whole-disk image.
+fn whole_disk_image_manifest(
+    layout: &own_backup_common::gpt::DiskLayout,
+    req: &DiskBackupRequest,
+    sector_size: u32,
+    image_size: u64,
+    total_blocks: u64,
+    used_blocks: u64,
+) -> ImageManifest {
+    ImageManifest {
+        backup_id: Uuid::new_v4(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        backup_type: BackupType::Full,
+        parent_backup_id: None,
+        source_os: "windows".into(),
+        source_disk: DiskInfo {
+            device_id: format!(r"\\.\PhysicalDrive{}", req.disk_number),
+            model: req.disk_model.clone(),
+            serial: String::new(),
+            size_bytes: image_size,
+            sector_size_logical: sector_size,
+            sector_size_physical: std::cmp::max(sector_size, 4096),
+            media_type: "Disk".into(),
+            partition_table: PartitionTable::Gpt,
+            disk_guid: layout.disk_guid.clone(),
+            partitions: vec![],
+        },
+        boot_mode: BootMode::Uefi,
+        partition_table: PartitionTable::Gpt,
+        compression_algo: match req.image_format {
+            ImageFormat::Vhdx => CompressionAlgo::None,
+            ImageFormat::Qcow2 => CompressionAlgo::Zstd,
+        },
+        compression_level: match req.image_format {
+            ImageFormat::Vhdx => 0,
+            ImageFormat::Qcow2 => crate::qcow2::DEFAULT_ZSTD_LEVEL,
+        },
+        encryption_algo: None,
+        encryption_salt: None,
+        block_size: req.block_size,
+        total_blocks,
+        used_blocks,
+        backup_mode: BackupMode::UsedSectors,
+        checksum_algorithm: "xxhash64".into(),
+        preflight_report: None,
+        volume_encryption: None,
+    }
 }
 
 /// Parameters for a volume restore.
