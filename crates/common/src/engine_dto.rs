@@ -41,6 +41,21 @@ pub struct MountResultDto {
     pub mount_point: String,
 }
 
+/// Result of unlocking + probing an encrypted (LUKS) source volume. The probe
+/// opens the raw disk, so it runs in the privileged service (LocalSystem/root),
+/// never in the unelevated GUI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VolumeUnlockDto {
+    /// The password unlocked the container.
+    pub ok: bool,
+    /// Inner filesystem (`ext4`/`btrfs`/`ntfs`/…), empty if not identified.
+    pub filesystem: String,
+    /// Inner volume label, if any.
+    pub label: String,
+    /// Bytes in use inside the decrypted volume, 0 if unknown.
+    pub used_bytes: u64,
+}
+
 /// An active mounted image mapping.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActiveMountDto {

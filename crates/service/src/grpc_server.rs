@@ -279,8 +279,9 @@ impl BackupService for BackupServiceImpl {
     async fn provide_volume_password(
         &self,
         req: Request<JsonRequest>,
-    ) -> Result<Response<Empty>, Status> {
+    ) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
+        use own_backup_common::engine_dto::VolumeUnlockDto;
         #[derive(serde::Deserialize)]
         struct Payload {
             volume: String,
@@ -290,13 +291,43 @@ impl BackupService for BackupServiceImpl {
         }
         let p: Payload = serde_json::from_str(&req.into_inner().json)
             .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
-        // Key by the same token the backup path resolves against.
-        let token = own_backup_core::source_token(&p.volume);
-        self.state
-            .passwords
-            .remember(&token, p.password, p.remember)
+
+        // Unlock + probe HERE (LocalSystem/root has raw-disk access; the GUI does
+        // not — doing it there fails with CreateFileW access-denied on the disk).
+        #[cfg(target_os = "windows")]
+        let dto = {
+            let (vol, pw) = (p.volume.clone(), p.password.clone());
+            let probe = tokio::task::spawn_blocking(move || {
+                own_backup_backup::engine_win::unlock_and_probe(&vol, &pw)
+            })
+            .await
+            .map_err(|e| Status::internal(format!("probe task panicked: {e}")))?
             .map_err(|e| Status::internal(e.to_string()))?;
-        Ok(Response::new(Empty {}))
+            VolumeUnlockDto {
+                ok: probe.ok,
+                filesystem: probe.filesystem,
+                label: probe.label,
+                used_bytes: probe.used_bytes,
+            }
+        };
+        #[cfg(not(target_os = "windows"))]
+        let dto = VolumeUnlockDto {
+            ok: true,
+            filesystem: String::new(),
+            label: String::new(),
+            used_bytes: 0,
+        };
+
+        // Only cache a password that actually unlocked the volume. Key by the
+        // same token the backup path resolves against.
+        if dto.ok {
+            let token = own_backup_core::source_token(&p.volume);
+            self.state
+                .passwords
+                .remember(&token, p.password, p.remember)
+                .map_err(|e| Status::internal(e.to_string()))?;
+        }
+        json_reply(&dto)
     }
 
     // --- Inventory --------------------------------------------------------

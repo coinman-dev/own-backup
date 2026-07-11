@@ -300,18 +300,20 @@ impl BackupClient {
         volume: &str,
         password: &str,
         remember: bool,
-    ) -> Result<()> {
+    ) -> Result<own_backup_common::engine_dto::VolumeUnlockDto> {
         let json = serde_json::json!({
             "volume": volume,
             "password": password,
             "remember": remember,
         })
         .to_string();
-        self.inner
+        let reply = self
+            .inner
             .provide_volume_password(self.request(proto::JsonRequest { json }))
             .await
-            .map_err(status)?;
-        Ok(())
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
     }
 
     // --- Direct engine ops (run in the privileged service) ---------------

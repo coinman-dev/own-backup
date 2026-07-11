@@ -46,63 +46,25 @@ pub async fn delete_backup_job(state: State<'_, GuiState>, id: String) -> Result
     state.link.client().await?.delete_job(&id).await
 }
 
-/// Result of a decrypt attempt for the wizard: whether it unlocked, plus the
-/// inner volume's filesystem / label / used bytes (to show like a normal volume).
-#[derive(serde::Serialize)]
-pub struct DecryptResult {
-    pub ok: bool,
-    pub filesystem: String,
-    pub label: String,
-    pub used_bytes: u64,
-}
-
-/// Unlock an encrypted (LUKS/BitLocker) source `volume` with `password` and
-/// probe the decrypted filesystem, then hand the password to the service so the
-/// backup — which runs there — can unlock the volume. When `remember` is set the
-/// service persists it OS-protected for scheduled runs.
+/// Unlock an encrypted (LUKS/BitLocker) source `volume` with `password`. The
+/// unlock + inner-filesystem probe opens the raw disk, so it runs in the
+/// privileged service (LocalSystem/root) — never in the unelevated GUI, which
+/// would fail with a disk access-denied error. On success the service caches the
+/// password (and, with `remember`, persists it OS-protected for scheduled runs)
+/// and returns the inner volume's filesystem/label/used bytes for the wizard.
 #[tauri::command]
 pub async fn decrypt_volume(
     state: State<'_, GuiState>,
     volume: String,
     password: String,
     remember: bool,
-) -> Result<DecryptResult, String> {
-    // Probe the inner filesystem locally so the wizard can show it like a normal
-    // volume. This needs the engine (Windows only); off Windows we skip it.
-    #[cfg(target_os = "windows")]
-    let result = {
-        let (vol, pw) = (volume.clone(), password.clone());
-        let probe = tokio::task::spawn_blocking(move || {
-            own_backup_backup::engine_win::unlock_and_probe(&vol, &pw)
-        })
+) -> Result<own_backup_common::engine_dto::VolumeUnlockDto, String> {
+    state
+        .link
+        .client()
+        .await?
+        .provide_volume_password(&volume, &password, remember)
         .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())?;
-        DecryptResult {
-            ok: probe.ok,
-            filesystem: probe.filesystem,
-            label: probe.label,
-            used_bytes: probe.used_bytes,
-        }
-    };
-    #[cfg(not(target_os = "windows"))]
-    let result = DecryptResult {
-        ok: true,
-        filesystem: String::new(),
-        label: String::new(),
-        used_bytes: 0,
-    };
-
-    // Only forward a password that actually unlocked the volume.
-    if result.ok {
-        state
-            .link
-            .client()
-            .await?
-            .provide_volume_password(&volume, &password, remember)
-            .await?;
-    }
-    Ok(result)
 }
 
 /// Enqueue a job for backup. Runs immediately if idle, otherwise queues.
