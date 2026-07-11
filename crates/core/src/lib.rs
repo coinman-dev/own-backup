@@ -1432,8 +1432,37 @@ async fn perform_disk_backup(
             Ok(())
         })?;
 
+        // Optional post-backup verification — emit "verify" progress so the UI
+        // shows "Проверка…", and FAIL the run on any checksum mismatch (a bad
+        // image must never be reported as success).
         if validate_after {
-            verify_image(&image_for_verify, |_, _| Ok(()))?;
+            let mut v_permille = u64::MAX;
+            let mut v_emit = std::time::Instant::now();
+            let v = verify_image(&image_for_verify, |done, total| {
+                let permille = if total > 0 { done * 1000 / total } else { 0 };
+                if permille != v_permille || v_emit.elapsed().as_millis() >= 400 {
+                    v_permille = permille;
+                    v_emit = std::time::Instant::now();
+                    sink_bg.job_progress(JobProgress {
+                        job_id: job_id.clone(),
+                        phase: "verify".into(),
+                        percent: permille / 10,
+                        blocks_done: done,
+                        blocks_total: total,
+                        speed_mbps: 0.0,
+                        volume_index: 0,
+                        volume_count: 1,
+                        volume: format!("Диск {disk_number} · {model}"),
+                    });
+                }
+                Ok(())
+            })?;
+            if !v.valid() {
+                return Err(OwnBackupError::ImageFormat(format!(
+                    "проверка после копирования не пройдена: {} повреждённых блоков",
+                    v.mismatched_blocks.len()
+                )));
+            }
         }
         Ok::<_, OwnBackupError>(summary)
     })
