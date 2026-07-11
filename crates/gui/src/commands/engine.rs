@@ -35,8 +35,10 @@ pub struct DiskBackupDto {
     pub partitions: Vec<DiskBackupPartDto>,
 }
 
-/// List whole-disk (`.obdm`) backups found in `folder`. Cross-platform: it only
-/// reads/parses the JSON manifests.
+/// List whole-disk backups found in `folder`: single whole-disk IMAGES that
+/// carry an embedded manifest (plan D1), and legacy `.obdm` manifests. The
+/// returned `manifest_path` is what to hand to restore (the image itself for an
+/// embedded backup, the `.obdm` for a legacy one). Cross-platform read-only.
 #[tauri::command]
 pub async fn list_disk_backups(folder: String) -> Result<Vec<DiskBackupDto>, String> {
     use own_backup_common::gpt::DiskBackupManifest;
@@ -49,11 +51,27 @@ pub async fn list_disk_backups(folder: String) -> Result<Vec<DiskBackupDto>, Str
     let mut out = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some(DiskBackupManifest::EXTENSION) {
-            continue;
-        }
-        let Ok(raw) = std::fs::read(&path) else { continue };
-        let Ok(m) = serde_json::from_slice::<DiskBackupManifest>(&raw) else {
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default()
+            .to_lowercase();
+        // Whole-disk image (embedded manifest) OR legacy .obdm; skip the rest.
+        let m: DiskBackupManifest = if ext == DiskBackupManifest::EXTENSION {
+            let Ok(raw) = std::fs::read(&path) else { continue };
+            let Ok(m) = serde_json::from_slice::<DiskBackupManifest>(&raw) else {
+                continue;
+            };
+            m
+        } else if matches!(ext.as_str(), "vhdx" | "avhdx" | "qcow2") {
+            match own_backup_backup::read_embedded_sidecar(&path, &ext) {
+                Ok(sc) => match sc.disk_manifest {
+                    Some(m) => m,           // a whole-disk image
+                    None => continue,       // a plain per-volume image
+                },
+                Err(_) => continue,
+            }
+        } else {
             continue;
         };
         let sector = m.layout.sector_size;
