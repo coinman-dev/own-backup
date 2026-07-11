@@ -1357,7 +1357,7 @@ fn write_disk_manifest(
     folder: &Path,
     run_images: &[(String, PathBuf)],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use own_backup_common::gpt::{DiskBackupManifest, DiskImageRef, GPT_TYPE_MSR};
+    use own_backup_common::gpt::{DiskBackupManifest, DiskImageRef};
 
     let mut layout = own_backup_backup::gpt_reader::read_disk_layout(ds.disk_number)?;
 
@@ -1378,14 +1378,11 @@ fn write_disk_manifest(
         });
     }
 
-    // Behaviour B: keep in the GPT only the partitions being backed up (those
-    // with an image) plus the boot-essential no-filesystem MSR (which has no
-    // image but must exist for Windows). Deselected data volumes (e.g. D:) are
-    // dropped from the layout entirely — on restore their space is left free.
+    // Behaviour B: keep in the GPT only the partitions being backed up (plus the
+    // no-image MSR). Deselected data volumes (e.g. D:) are dropped — on restore
+    // their space is left free. Shared with the whole-disk image path (D1).
     let kept: std::collections::HashSet<u32> = images.iter().map(|i| i.part_index).collect();
-    layout.partitions.retain(|p| {
-        kept.contains(&p.index) || p.type_guid.eq_ignore_ascii_case(GPT_TYPE_MSR)
-    });
+    layout.retain_for_backup(&kept);
 
     let safe_name: String = job
         .name
