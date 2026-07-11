@@ -32,11 +32,12 @@ use tracing::{debug, info, warn};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, ERROR_NO_MORE_FILES, GENERIC_READ, GENERIC_WRITE, HANDLE};
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FileDispositionInfo, FileDispositionInfoEx, FindFirstVolumeW, FindNextVolumeW,
-    FindVolumeClose, FlushFileBuffers, GetVolumePathNamesForVolumeNameW, SetFileAttributesW,
-    SetFileInformationByHandle, FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS, OPEN_EXISTING,
+    CreateFileW, DeleteVolumeMountPointW, FileDispositionInfo, FileDispositionInfoEx,
+    FindFirstVolumeW, FindNextVolumeW, FindVolumeClose, FlushFileBuffers,
+    GetVolumePathNamesForVolumeNameW, SetFileAttributesW, SetFileInformationByHandle,
+    FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS, OPEN_EXISTING,
 };
 use windows::Win32::System::Ioctl::{FSCTL_DISMOUNT_VOLUME, FSCTL_LOCK_VOLUME};
 use windows::Win32::System::IO::DeviceIoControl;
@@ -239,6 +240,9 @@ fn mount_and_delete(
     paths: &[ExcludedPath],
     tick: &mut dyn FnMut(u64),
 ) -> Result<(u64, u64)> {
+    // Keep the surfacing volume off Explorer: no drive letter while we delete
+    // (we reach it via its \\?\Volume{GUID}\ path). Restored on drop.
+    let _no_letter = crate::automount::AutoMountGuard::disable();
     create_differencing_vhdx(temp, image_path)?;
     debug!(temp_child = %temp.display(), "true removal: temp differencing child created");
 
@@ -366,6 +370,8 @@ fn mount_and_delete_multi(
     partitions: &[(u64, Vec<ExcludedPath>)],
     tick: &mut dyn FnMut(u64),
 ) -> Result<(u64, u64)> {
+    // No drive letters while we delete (volumes reached via \\?\Volume{GUID}\).
+    let _no_letter = crate::automount::AutoMountGuard::disable();
     create_differencing_vhdx(temp, image_path)?;
     let attached = attach_vhdx(temp, AttachMode::RawWrite)?;
     let dev = open_write_retry(attached.physical_path())?;
@@ -395,6 +401,10 @@ pub(crate) fn delete_paths_on_disk_multi(
     partitions: &[(u64, Vec<ExcludedPath>)],
     tick: &mut dyn FnMut(u64),
 ) -> Result<(u64, u64)> {
+    // Letters can land on ANY volume of the disk (also partitions we are not
+    // deleting from) via remembered mappings — strip them all up front, and
+    // again before teardown for stragglers assigned mid-pass.
+    strip_letters_on_disk(disk_number);
     let mut deleted = 0u64;
     let mut failed = 0u64;
     for (part_offset, paths) in partitions {
@@ -422,6 +432,9 @@ pub(crate) fn delete_paths_on_disk_multi(
     }
 
     let roots = all_volume_roots_on_disk(disk_number);
+    for vr in &roots {
+        strip_drive_letters(vr); // stragglers assigned while we were deleting
+    }
     let handles: Vec<_> = roots.iter().filter_map(|vr| flush_lock_dismount_volume(vr)).collect();
     if let Err(e) = dev.set_offline_writable(false) {
         warn!(error = %e, "true removal: could not offline the mounted disk before detach");
@@ -531,6 +544,11 @@ fn delete_paths_on_volume_root(
     paths: &[ExcludedPath],
     tick: &mut dyn FnMut(u64),
 ) -> Result<(u64, u64)> {
+    // No lettered drive must surface for the image volume: strip any letter the
+    // MountManager already restored from its remembered mapping, and strip again
+    // after the FS mount settles (assignment can lag the volume's arrival). We
+    // work through the \\?\Volume{GUID}\ path, so no letter is ever needed.
+    strip_drive_letters(volume_root);
     // The volume DEVICE enumerating does not mean the filesystem is MOUNTED: a
     // natively-attached VHDX is ready instantly, but the userspace-backed
     // AIM/devio disk (qcow2) mounts asynchronously. Deleting before the FS is up
@@ -539,6 +557,7 @@ fn delete_paths_on_volume_root(
     // stable first; the logged count also tells us from the log alone whether the
     // FS was actually mounted.
     let root_entries = wait_for_volume_ready(volume_root);
+    strip_drive_letters(volume_root);
     info!(volume = %volume_root, root_entries, "true removal: image volume mounted");
     if root_entries == 0 {
         return Err(OwnBackupError::Device(format!(
@@ -814,6 +833,41 @@ pub(crate) fn drive_letters_on_disk(disk_number: u32) -> Vec<String> {
     // SAFETY: handle from a successful FindFirstVolumeW.
     let _ = unsafe { FindVolumeClose(find) };
     letters
+}
+
+/// Remove every auto-assigned drive letter of `volume_root` (a mounted image
+/// volume must never surface as a lettered drive during the removal pass).
+///
+/// `DeleteVolumeMountPoint` also deletes the REMEMBERED `MountedDevices`
+/// mapping (the `mountvol X: /D` semantics) — the actual reason a letter kept
+/// appearing despite auto-mount being disabled: a differencing chain reuses its
+/// parent's partition GUIDs, so once a letter was ever assigned to the chain's
+/// volume, mountmgr restored it from the database on every later attach,
+/// bypassing the auto-mount setting. Stripping once heals the chain for good.
+/// Folder mount points (`C:\mnt\…`) are never touched — only bare `X:\` roots,
+/// and only for volumes the caller verified live on OUR attached disk.
+fn strip_drive_letters(volume_root: &str) {
+    for letter in volume_drive_letters(volume_root) {
+        let root = format!("{letter}\\"); // "J:" → "J:\"
+        let wide = to_wide(&root);
+        // SAFETY: `wide` is NUL-terminated and outlives the call.
+        match unsafe { DeleteVolumeMountPointW(PCWSTR(wide.as_ptr())) } {
+            Ok(()) => info!(
+                letter = %letter,
+                volume = %volume_root,
+                "true removal: removed the volume's drive letter (and its remembered mapping)"
+            ),
+            Err(e) => warn!(letter = %letter, volume = %volume_root, error = %e, "true removal: could not remove the drive letter"),
+        }
+    }
+}
+
+/// Strip drive letters from EVERY volume on `disk_number` (partitions without
+/// exclusions surface too when the whole-disk image is brought online).
+fn strip_letters_on_disk(disk_number: u32) {
+    for vr in all_volume_roots_on_disk(disk_number) {
+        strip_drive_letters(&vr);
+    }
 }
 
 /// Path names mapped to `\\?\Volume{GUID}\`, reduced to bare drive letters.

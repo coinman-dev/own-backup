@@ -296,6 +296,8 @@ fn mount_delete(
     paths: &[ExcludedPath],
     tick: &mut dyn FnMut(u64),
 ) -> Result<(u64, u64)> {
+    // No drive letter while we delete (reached via \\?\Volume{GUID}\).
+    let _no_letter = crate::automount::AutoMountGuard::disable();
     let adapter = crate::aim_win::AimAdapter::open()?;
     let device_number = adapter.create_tcp_proxy(port, virtual_size, false)?;
     let result = (|| -> Result<(u64, u64)> {
@@ -338,6 +340,8 @@ fn mount_delete_multi(
     partitions: &[(u64, Vec<ExcludedPath>)],
     tick: &mut dyn FnMut(u64),
 ) -> Result<(u64, u64)> {
+    // No drive letters while we delete (reached via \\?\Volume{GUID}\).
+    let _no_letter = crate::automount::AutoMountGuard::disable();
     let adapter = crate::aim_win::AimAdapter::open()?;
     let device_number = adapter.create_tcp_proxy(port, virtual_size, false)?;
     let result = (|| -> Result<(u64, u64)> {

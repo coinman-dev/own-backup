@@ -1923,59 +1923,55 @@ fn backup_disk_inner(
     }
 
     // 6b. True removal of excluded NTFS/ReFS files inside the finished image
-    //     (plan D2, full VHDX only). Mount the whole-disk image once and let the
-    //     FS driver delete each partition's recorded paths on its own volume,
-    //     then merge + re-checksum the touched blocks — so excluded files vanish
-    //     from the catalog instead of remaining zero-filled ghosts. Same
-    //     graceful contract as the per-volume path: a pre-merge failure keeps
-    //     the ghosts (valid backup), only a post-merge failure fails the run.
-    //     qcow2 and incremental children keep ghosts for now (follow-ups); the
-    //     content is already zeroed either way, so no excluded data leaks.
+    //     (plan D2, both formats, full AND incremental). Mount the whole-disk
+    //     image once — an incremental is a differencing child, so the temp child
+    //     the removal pass creates over it resolves the WHOLE chain and every
+    //     partition's files are visible — let the FS driver delete each
+    //     partition's recorded paths on its own volume, then merge into THIS
+    //     image's leaf + re-checksum the touched blocks. So excluded files vanish
+    //     from the catalog instead of remaining zero-filled ghosts. Same graceful
+    //     contract as the per-volume path: a pre-merge failure keeps the ghosts
+    //     (valid backup), only a post-merge failure fails the run — cannot break
+    //     a working backup. The content is already zeroed either way, so no
+    //     excluded data leaks even when this pass is skipped.
     let removal: Vec<(u64, Vec<crate::exclusions_win::ExcludedPath>)> = prepared
         .iter_mut()
         .filter(|p| !p.removal_paths.is_empty())
         .map(|p| (p.part_offset, std::mem::take(&mut p.removal_paths)))
         .collect();
     if !removal.is_empty() {
-        if kind == BackupType::Full {
-            let mut tick = |entries: u64| {
-                let _ = progress(&BackupProgress {
-                    backup_id: "finalize".into(),
-                    status: BackupStatus::Running,
-                    blocks_done: entries,
-                    blocks_total: 0,
-                    bytes_written: bytes_copied,
-                    speed_bps: 0,
-                });
-            };
-            match req.image_format {
-                ImageFormat::Vhdx => {
-                    crate::true_removal_win::remove_excluded_from_disk_image(
-                        &req.image_path,
-                        &removal,
-                        plan.image_size,
-                        req.block_size,
-                        &mut checksums,
-                        &mut tick,
-                    )?;
-                }
-                ImageFormat::Qcow2 => {
-                    crate::qcow2_removal_win::remove_excluded_from_disk_image_qcow2(
-                        &req.image_path,
-                        &removal,
-                        plan.image_size,
-                        req.block_size,
-                        Some(crate::qcow2::DEFAULT_ZSTD_LEVEL),
-                        &mut checksums,
-                        &mut tick,
-                    )?;
-                }
+        let mut tick = |entries: u64| {
+            let _ = progress(&BackupProgress {
+                backup_id: "finalize".into(),
+                status: BackupStatus::Running,
+                blocks_done: entries,
+                blocks_total: 0,
+                bytes_written: bytes_copied,
+                speed_bps: 0,
+            });
+        };
+        match req.image_format {
+            ImageFormat::Vhdx => {
+                crate::true_removal_win::remove_excluded_from_disk_image(
+                    &req.image_path,
+                    &removal,
+                    plan.image_size,
+                    req.block_size,
+                    &mut checksums,
+                    &mut tick,
+                )?;
             }
-        } else {
-            info!(
-                partitions = removal.len(),
-                "whole-disk: catalog true-removal skipped (incremental child) — excluded files remain zero-filled ghosts"
-            );
+            ImageFormat::Qcow2 => {
+                crate::qcow2_removal_win::remove_excluded_from_disk_image_qcow2(
+                    &req.image_path,
+                    &removal,
+                    plan.image_size,
+                    req.block_size,
+                    Some(crate::qcow2::DEFAULT_ZSTD_LEVEL),
+                    &mut checksums,
+                    &mut tick,
+                )?;
+            }
         }
     }
 

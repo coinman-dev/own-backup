@@ -44,6 +44,8 @@ pub mod aim_install;
 #[cfg(target_os = "windows")]
 pub mod aim_win;
 #[cfg(target_os = "windows")]
+pub mod automount;
+#[cfg(target_os = "windows")]
 pub mod block_reader_win;
 #[cfg(target_os = "windows")]
 pub mod engine_win;
