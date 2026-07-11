@@ -1446,9 +1446,32 @@ fn prepare_partition_map(
         out.map = Some(Box::new(m));
         return out;
     }
-    if let Ok(m) = crate::btrfs_map::build_btrfs_used_map(src.as_mut(), block_size) {
-        linux_pending("btrfs");
-        return none("btrfs", Some(Box::new(m)));
+    if let Ok(mut m) = crate::btrfs_map::build_btrfs_used_map(src.as_mut(), block_size) {
+        // btrfs: CoW-safe file exclusions (Stage 1). Only extents PROVEN
+        // exclusively owned by matched files are zeroed + dropped; anything
+        // shared with a snapshot/reflink is kept. The checksum tree is patched
+        // for the zeroed ranges so the ghost data reads back cleanly. Catalog
+        // true-removal (Stage 2) is a follow-up.
+        drop(src);
+        let mut out = none("btrfs", None);
+        if !patterns_linux.is_empty() {
+            if let Ok(mut src2) = open() {
+                match crate::btrfs_exclusions::scan_btrfs_exclusions(src2.as_mut(), patterns_linux, tick) {
+                    Ok(scan) => {
+                        out.excluded_files = scan.files_excluded;
+                        out.excluded_bytes = scan.bytes_excluded;
+                        out.patches = scan.patches;
+                        if !scan.ranges.is_empty() {
+                            m.apply_excluded_ranges(&scan.ranges, block_size);
+                            out.zero_ranges = scan.ranges;
+                        }
+                    }
+                    Err(e) => warn!(part = %read_path, error = %e, "btrfs exclusions failed — keeping all files"),
+                }
+            }
+        }
+        out.map = Some(Box::new(m));
+        return out;
     }
     if let Ok(m) = crate::xfs_map::build_xfs_used_map(src.as_mut(), block_size) {
         linux_pending("xfs");

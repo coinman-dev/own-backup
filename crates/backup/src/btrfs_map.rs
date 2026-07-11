@@ -29,22 +29,22 @@ use crate::fat_map::RawVolume;
 use crate::used_sectors::UsedSectorMap;
 
 /// Primary superblock location and size.
-const SUPER_OFFSET: u64 = 0x1_0000; // 64 KiB
-const SUPER_SIZE: u64 = 0x1000; // 4 KiB
+pub(crate) const SUPER_OFFSET: u64 = 0x1_0000; // 64 KiB
+pub(crate) const SUPER_SIZE: u64 = 0x1000; // 4 KiB
 /// btrfs magic `_BHRfS_M`, at superblock offset 0x40.
-const MAGIC: &[u8; 8] = b"_BHRfS_M";
+pub(crate) const MAGIC: &[u8; 8] = b"_BHRfS_M";
 /// Physical offsets of the superblock mirror copies (written only if the device
 /// is large enough): 64 KiB, 64 MiB, 256 GiB.
-const SB_MIRRORS: [u64; 3] = [0x1_0000, 0x400_0000, 0x40_0000_0000];
+pub(crate) const SB_MIRRORS: [u64; 3] = [0x1_0000, 0x400_0000, 0x40_0000_0000];
 /// btrfs reserves the first 1 MiB of the device (holds the primary superblock).
 const RESERVED_HEAD: u64 = 0x10_0000;
 
 // Item key types.
-const CHUNK_ITEM: u8 = 228;
-const ROOT_ITEM: u8 = 132;
-const EXTENT_ITEM: u8 = 168;
-const METADATA_ITEM: u8 = 169;
-const EXTENT_TREE_OBJECTID: u64 = 2;
+pub(crate) const CHUNK_ITEM: u8 = 228;
+pub(crate) const ROOT_ITEM: u8 = 132;
+pub(crate) const EXTENT_ITEM: u8 = 168;
+pub(crate) const METADATA_ITEM: u8 = 169;
+pub(crate) const EXTENT_TREE_OBJECTID: u64 = 2;
 
 // Block-group / chunk `type` flag bits.
 const BG_DUP: u64 = 0x20;
@@ -52,7 +52,7 @@ const BG_DUP: u64 = 0x20;
 const BG_PROFILE_MASK: u64 = 0x8 | 0x10 | 0x20 | 0x40 | 0x80 | 0x100 | 0x200 | 0x400;
 
 /// btrfs B-tree header size (`struct btrfs_header`).
-const HEADER: usize = 0x65;
+pub(crate) const HEADER: usize = 0x65;
 
 // Guards against corrupt structures / cyclic trees.
 const MAX_NODE: u64 = 256 * 1024;
@@ -73,6 +73,29 @@ impl UsedSectorMap for BtrfsUsedMap {
     }
     fn used_block_count(&self) -> u64 {
         self.used_count
+    }
+}
+
+impl BtrfsUsedMap {
+    /// Drop every backup block that lies ENTIRELY within `ranges` (excluded,
+    /// exclusively-owned file data — plan D2) so it is not copied. A block only
+    /// partly excluded stays used and is zeroed by the caller instead.
+    /// `backup_block_size` is the block size the map was built with.
+    pub fn apply_excluded_ranges(
+        &mut self,
+        ranges: &crate::exclusions::ByteRanges,
+        backup_block_size: u32,
+    ) {
+        let bs = backup_block_size as u64;
+        for (i, used) in self.block_used.iter_mut().enumerate() {
+            if *used {
+                let start = i as u64 * bs;
+                if ranges.covers(start, start + bs) {
+                    *used = false;
+                    self.used_count -= 1;
+                }
+            }
+        }
     }
 }
 
@@ -103,30 +126,30 @@ fn mark_bytes(map: &mut [bool], block_size: u32, start: u64, end: u64) {
 
 /// A logical→physical chunk mapping on the (single) device. `stripes` holds one
 /// physical start offset for SINGLE, two for DUP.
-struct Chunk {
-    logical: u64,
-    length: u64,
-    stripes: Vec<u64>,
+pub(crate) struct Chunk {
+    pub(crate) logical: u64,
+    pub(crate) length: u64,
+    pub(crate) stripes: Vec<u64>,
 }
 
 /// Ordered set of chunks; lookups translate a logical range to physical offsets.
-struct ChunkMap {
-    chunks: Vec<Chunk>,
+pub(crate) struct ChunkMap {
+    pub(crate) chunks: Vec<Chunk>,
 }
 
 impl ChunkMap {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { chunks: Vec::new() }
     }
 
-    fn push(&mut self, c: Chunk) {
+    pub(crate) fn push(&mut self, c: Chunk) {
         self.chunks.push(c);
     }
 
     /// Physical start offset(s) of a `len`-byte logical range, which must fall
     /// entirely inside a single chunk. Returns one offset per mirror (SINGLE →
     /// 1, DUP → 2).
-    fn physical(&self, logical: u64, len: u64) -> Result<Vec<u64>> {
+    pub(crate) fn physical(&self, logical: u64, len: u64) -> Result<Vec<u64>> {
         let end = logical
             .checked_add(len)
             .ok_or_else(|| bad("logical range overflows"))?;
@@ -142,7 +165,7 @@ impl ChunkMap {
 
 /// Parse a `struct btrfs_chunk` at `data` (mapped to logical `logical`).
 /// Rejects anything but SINGLE/DUP on our single device.
-fn parse_chunk(logical: u64, data: &[u8], our_devid: u64) -> Result<Chunk> {
+pub(crate) fn parse_chunk(logical: u64, data: &[u8], our_devid: u64) -> Result<Chunk> {
     if data.len() < 48 {
         return Err(bad("truncated chunk item"));
     }
@@ -178,7 +201,7 @@ fn parse_chunk(logical: u64, data: &[u8], our_devid: u64) -> Result<Chunk> {
 }
 
 /// Read one B-tree block (`nodesize` bytes) at logical address `logical`.
-fn read_node(
+pub(crate) fn read_node(
     vol: &mut dyn RawVolume,
     map: &ChunkMap,
     logical: u64,
@@ -195,7 +218,7 @@ fn read_node(
 
 /// Walk a B-tree from `root` (logical), invoking `leaf` on every leaf node with
 /// `(node, nritems)`. Internal nodes are followed depth-first.
-fn walk_tree(
+pub(crate) fn walk_tree(
     vol: &mut dyn RawVolume,
     map: &ChunkMap,
     root: u64,
@@ -234,7 +257,7 @@ fn walk_tree(
 }
 
 /// Iterate a leaf's items as `(key_objectid, key_type, key_offset, data)`.
-fn for_each_item(node: &[u8], nritems: u64, mut f: impl FnMut(u64, u8, u64, &[u8]) -> Result<()>) -> Result<()> {
+pub(crate) fn for_each_item(node: &[u8], nritems: u64, mut f: impl FnMut(u64, u8, u64, &[u8]) -> Result<()>) -> Result<()> {
     for i in 0..nritems as usize {
         let it = HEADER + i * 25;
         let objectid = u64at(node, it);

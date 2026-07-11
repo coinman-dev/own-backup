@@ -1,6 +1,7 @@
 pub mod bitlocker;
 pub mod block_reader;
 pub mod block_source;
+pub mod btrfs_exclusions;
 pub mod btrfs_map;
 pub mod chains;
 pub mod checksum;
