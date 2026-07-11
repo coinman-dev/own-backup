@@ -22,7 +22,7 @@
 
 use uuid::Uuid;
 
-use own_backup_common::gpt::DiskLayout;
+use own_backup_common::gpt::{DiskLayout, GptPartitionEntry, WholeDiskImagePlan};
 use own_backup_common::{OwnBackupError, Result};
 
 /// GPT type GUID for a Basic Data partition (Windows).
@@ -396,6 +396,39 @@ pub fn disk_gpt_write_ops(layout: &DiskLayout, target_disk_size: u64) -> Result<
     ])
 }
 
+/// GPT write ops for a single **whole-disk backup image**: the source disk's
+/// real partitions (at their original offsets/GUIDs) PLUS an appended
+/// `OwnBackupMeta` partition (embedded sidecar) at `plan`'s LBAs. So the image
+/// mounts as the source disk — every volume gets a drive letter — with one
+/// extra hidden meta partition Windows ignores (custom type GUID).
+///
+/// `layout` must be the KEPT partitions only (variant B, no meta). The stored
+/// disk manifest keeps this same `layout`; restore recreates the source
+/// partitions and never the meta one.
+pub fn whole_disk_gpt_ops(
+    layout: &DiskLayout,
+    plan: &WholeDiskImagePlan,
+    meta_guid: Uuid,
+) -> Result<Vec<WriteOp>> {
+    let meta_index = (1..=NUM_ENTRIES)
+        .find(|i| !layout.partitions.iter().any(|p| p.index == *i))
+        .ok_or_else(|| {
+            OwnBackupError::ImageFormat("GPT has no free slot for the OwnBackupMeta partition".into())
+        })?;
+    let mut with_meta = layout.clone();
+    with_meta.size_bytes = plan.image_size;
+    with_meta.partitions.push(GptPartitionEntry {
+        index: meta_index,
+        type_guid: OWN_BACKUP_META_GUID.to_string(),
+        part_guid: meta_guid.to_string(),
+        first_lba: plan.meta_first_lba,
+        last_lba: plan.meta_last_lba,
+        attributes: 0,
+        name: "OwnBackupMeta".into(),
+    });
+    disk_gpt_write_ops(&with_meta, plan.image_size)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -530,6 +563,47 @@ mod tests {
             .open_from_device(Box::new(Cursor::new(disk)))
             .expect("gpt crate must accept the recreated table");
         assert_eq!(gpt_disk.partitions().len(), 2);
+    }
+
+    #[test]
+    fn whole_disk_gpt_ops_appends_mountable_meta_partition() {
+        use own_backup_common::gpt::plan_whole_disk_image;
+
+        // Kept partitions (variant B): ESP + one data volume. Meta appended.
+        let layout = disk_layout_two_parts(512 * 1024 * 1024);
+        let meta_size = 2 * 1024 * 1024u64; // 2 MiB embedded sidecar
+        let plan = plan_whole_disk_image(&layout, meta_size);
+        let meta_guid = Uuid::from_u128(0x5827_248C).to_string().to_uppercase();
+
+        let ops = whole_disk_gpt_ops(&layout, &plan, Uuid::from_u128(0x5827_248C)).unwrap();
+        let mut disk = vec![0u8; plan.image_size as usize];
+        apply_ops(&mut disk, &ops);
+
+        // Reader recovers all three partitions: ESP, data, and OwnBackupMeta.
+        let parsed = crate::gpt_reader::parse_disk_layout(&disk, 512, plan.image_size).unwrap();
+        assert_eq!(parsed.partitions.len(), 3);
+        // The two real partitions are byte-identical to the source layout.
+        assert_eq!(parsed.partitions[0], layout.partitions[0]);
+        assert_eq!(parsed.partitions[1], layout.partitions[1]);
+        // The meta partition sits at the planned LBAs with our type GUID.
+        let meta = &parsed.partitions[2];
+        assert_eq!(meta.type_guid, OWN_BACKUP_META_GUID);
+        assert_eq!(meta.part_guid, meta_guid);
+        assert_eq!(meta.first_lba, plan.meta_first_lba);
+        assert_eq!(meta.last_lba, plan.meta_last_lba);
+        assert_eq!(meta.name, "OwnBackupMeta");
+
+        // The embedded-sidecar reader locates the meta partition by type GUID.
+        let (off, size) = crate::gpt_reader::find_meta_partition(&parsed).unwrap();
+        assert_eq!(off, plan.meta_first_lba * 512);
+        assert!(size >= meta_size);
+
+        // The independent `gpt` crate accepts the whole table (3 partitions).
+        let gpt_disk = gpt::GptConfig::new()
+            .writable(false)
+            .open_from_device(Box::new(Cursor::new(disk)))
+            .expect("gpt crate must accept the whole-disk table");
+        assert_eq!(gpt_disk.partitions().len(), 3);
     }
 
     #[test]
