@@ -1254,14 +1254,18 @@ fn disk_source_token(device: &str) -> String {
     "X".into()
 }
 
-/// Boxed used-map for a volume (any filesystem), or `None` for sector-by-sector.
+/// Boxed used-map for a volume plus the detected filesystem name — determined
+/// from the map that actually parses (over the DECRYPTED view for a LUKS
+/// volume, so an unlocked Linux root reports e.g. "btrfs", not "unknown").
+/// `(None, "unknown")` means no map → sector-by-sector.
+///
 /// Simplified twin of `backup_volume`'s inline chain — whole-disk v1 needs only
 /// the boxed map (no NTFS-typed handle for file exclusions; that is plan D2).
 fn build_boxed_used_map(
     read_path: &str,
     block_size: u32,
     luks: &Option<crate::luks::LuksParams>,
-) -> Option<Box<dyn UsedSectorMap>> {
+) -> (Option<Box<dyn UsedSectorMap>>, String) {
     let open = || -> Result<Box<dyn crate::fat_map::RawVolume + Send>> {
         let dev = WinRawDevice::open_read(read_path)?;
         Ok(match luks {
@@ -1272,23 +1276,24 @@ fn build_boxed_used_map(
     // NTFS first (only on a plain, non-decrypted volume), then FAT/ext/btrfs/xfs.
     if luks.is_none() {
         if let Ok(m) = NtfsUsedSectorMap::open(read_path, block_size) {
-            return Some(Box::new(m));
+            return (Some(Box::new(m)), "ntfs".into());
         }
     }
-    let mut src = open().ok()?;
+    let Ok(mut src) = open() else { return (None, "unknown".into()) };
     if let Ok(m) = crate::fat_map::build_fat_used_map(src.as_mut(), block_size) {
-        return Some(Box::new(m));
+        let fs = m.filesystem.to_lowercase();
+        return (Some(Box::new(m)), fs);
     }
     if let Ok(m) = crate::ext_map::build_ext_used_map(src.as_mut(), block_size) {
-        return Some(Box::new(m));
+        return (Some(Box::new(m)), "ext4".into());
     }
     if let Ok(m) = crate::btrfs_map::build_btrfs_used_map(src.as_mut(), block_size) {
-        return Some(Box::new(m));
+        return (Some(Box::new(m)), "btrfs".into());
     }
     if let Ok(m) = crate::xfs_map::build_xfs_used_map(src.as_mut(), block_size) {
-        return Some(Box::new(m));
+        return (Some(Box::new(m)), "xfs".into());
     }
-    None
+    (None, "unknown".into())
 }
 
 /// Back up a whole disk (several partitions of one physical drive) into ONE
@@ -1407,10 +1412,11 @@ fn backup_disk_inner(
             )));
         }
 
-        let used = build_boxed_used_map(&read_path, req.block_size, &luks)
-            .unwrap_or_else(|| Box::new(AllUsedMap::new(volume_len.div_ceil(bs))));
+        let (map, filesystem) = build_boxed_used_map(&read_path, req.block_size, &luks);
+        let used = map.unwrap_or_else(|| Box::new(AllUsedMap::new(volume_len.div_ceil(bs))));
         info!(
             part = p.part_index,
+            fs = %filesystem,
             used_blocks = used.used_block_count(),
             offset = part_offset,
             "whole-disk backup: partition prepared"
@@ -1422,7 +1428,7 @@ fn backup_disk_inner(
             luks,
             volume_len,
             part_offset,
-            filesystem: entry.type_guid.clone(),
+            filesystem,
             used,
             vss,
         });
