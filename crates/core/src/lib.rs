@@ -1116,6 +1116,12 @@ async fn perform_backup(
     }
     let count = volumes.len() as u64;
 
+    // Whole-disk (bootable) copy → one image for the whole disk with the real
+    // GPT + embedded manifest (plan D1), instead of a per-volume image each.
+    if let Some(ds) = job.disk_source.clone() {
+        return perform_disk_backup(sink, job, &ds, cancel, passwords, run).await;
+    }
+
     // Exclusions only make sense in smart NTFS mode; a sector-by-sector image
     // is a verbatim copy by definition.
     let exclusion_patterns = if job.exclusions.enabled && !job.advanced.sector_by_sector {
@@ -1331,15 +1337,8 @@ async fn perform_backup(
         None => "full".into(),
     };
 
-    // Whole-disk (bootable) backup: capture the GPT and write the `.obdm`
-    // manifest that links it to the per-partition images. Best-effort — a good
-    // per-volume backup is not discarded if only the layout capture fails.
-    if let Some(ds) = &job.disk_source {
-        if let Err(e) = write_disk_manifest(job, ds, &folder, &run_images) {
-            warn!(job = %job.name, disk = ds.disk_number, error = %e,
-                "Whole-disk backup: failed to write the disk restore manifest (.obdm)");
-        }
-    }
+    // (Whole-disk bootable copies never reach here — they take the single
+    // whole-disk-image path above, which embeds the restore manifest.)
 
     // Retention runs after a fully successful backup, independently per volume.
     // Its failures are logged, never surfaced as a run failure.
@@ -1348,41 +1347,21 @@ async fn perform_backup(
     run
 }
 
-/// Read the source disk's GPT and write the `.obdm` disk-restore manifest that
-/// ties the captured layout to the per-partition images just created.
+/// Back up a whole disk (bootable copy) into ONE image with the real GPT and
+/// an embedded restore manifest — no per-volume files, no external `.obdm`.
 #[cfg(target_os = "windows")]
-fn write_disk_manifest(
+async fn perform_disk_backup(
+    sink: &Arc<dyn EventSink>,
     job: &Job,
     ds: &DiskSourceSpec,
-    folder: &Path,
-    run_images: &[(String, PathBuf)],
-) -> Result<(), Box<dyn std::error::Error>> {
-    use own_backup_common::gpt::{DiskBackupManifest, DiskImageRef};
-
-    let mut layout = own_backup_backup::gpt_reader::read_disk_layout(ds.disk_number)?;
-
-    // Join each backed-up image (by source device) to its GPT partition slot.
-    let mut images = Vec::new();
-    for (device, image_path) in run_images {
-        let Some(part) = ds.parts.iter().find(|p| p.device == *device) else {
-            continue; // not part of this disk selection
-        };
-        images.push(DiskImageRef {
-            part_index: part.part_index,
-            token: file_token(job, device),
-            image_file_name: image_path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-            filesystem: part.filesystem.clone(),
-        });
-    }
-
-    // Behaviour B: keep in the GPT only the partitions being backed up (plus the
-    // no-image MSR). Deselected data volumes (e.g. D:) are dropped — on restore
-    // their space is left free. Shared with the whole-disk image path (D1).
-    let kept: std::collections::HashSet<u32> = images.iter().map(|i| i.part_index).collect();
-    layout.retain_for_backup(&kept);
+    cancel: &Arc<AtomicBool>,
+    passwords: &Arc<dyn PasswordResolver>,
+    mut run: JobRun,
+) -> JobRun {
+    use own_backup_backup::engine_win::{
+        backup_disk, verify_image, DiskBackupRequest, DiskPartitionBackup,
+    };
+    use own_backup_common::OwnBackupError;
 
     let safe_name: String = job
         .name
@@ -1390,24 +1369,108 @@ fn write_disk_manifest(
         .map(|c| if c.is_alphanumeric() { c } else { '_' })
         .collect();
     let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
-    let path = folder.join(format!(
+    let image_path = PathBuf::from(&job.dest_folder).join(format!(
         "{safe_name}_disk{}_{stamp}.{}",
         ds.disk_number,
-        DiskBackupManifest::EXTENSION
+        job.image_format.extension()
     ));
 
-    let manifest = DiskBackupManifest {
-        format_version: DiskBackupManifest::FORMAT_VERSION,
-        created_at: chrono::Utc::now().to_rfc3339(),
-        job_id: Some(job.id.clone()),
+    let partitions: Vec<DiskPartitionBackup> = ds
+        .parts
+        .iter()
+        .map(|p| DiskPartitionBackup {
+            device: p.device.clone(),
+            part_index: p.part_index,
+            passphrase: passwords.resolve(&source_token(&p.device)),
+        })
+        .collect();
+
+    let request = DiskBackupRequest {
         disk_number: ds.disk_number,
         disk_model: ds.disk_model.clone(),
-        layout,
-        images,
+        partitions,
+        image_path: image_path.clone(),
+        block_size: own_backup_backup::engine_win::DEFAULT_BLOCK_SIZE,
+        image_format: job.image_format,
+        job_id: Some(job.id.clone()),
     };
-    std::fs::write(&path, serde_json::to_vec_pretty(&manifest)?)?;
-    info!(job = %job.name, path = %path.display(), "Whole-disk restore manifest written");
-    Ok(())
+    let validate_after = job.advanced.validate_after;
+    let image_for_verify = image_path.clone();
+
+    let sink_bg = sink.clone();
+    let job_id = job.id.clone();
+    let cancel_bg = cancel.clone();
+    let model = ds.disk_model.clone();
+    let disk_number = ds.disk_number;
+
+    let result = tokio::task::spawn_blocking(move || {
+        let mut last_permille = u64::MAX;
+        let mut last_emit = std::time::Instant::now();
+        let summary = backup_disk(&request, |p| {
+            if cancel_bg.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                return Err(OwnBackupError::Cancelled);
+            }
+            let phase = if p.backup_id == "finalize" { "finalize" } else { "backup" };
+            let permille =
+                if p.blocks_total > 0 { p.blocks_done * 1000 / p.blocks_total } else { 0 };
+            if phase == "finalize" || permille != last_permille || last_emit.elapsed().as_millis() >= 400
+            {
+                last_permille = permille;
+                last_emit = std::time::Instant::now();
+                sink_bg.job_progress(JobProgress {
+                    job_id: job_id.clone(),
+                    phase: phase.into(),
+                    percent: permille / 10,
+                    blocks_done: p.blocks_done,
+                    blocks_total: p.blocks_total,
+                    speed_mbps: p.speed_bps as f64 / 1_000_000.0,
+                    volume_index: 0,
+                    volume_count: 1,
+                    volume: format!("Диск {disk_number} · {model}"),
+                });
+            }
+            Ok(())
+        })?;
+
+        if validate_after {
+            verify_image(&image_for_verify, |_, _| Ok(()))?;
+        }
+        Ok::<_, OwnBackupError>(summary)
+    })
+    .await;
+
+    run.finished_at = chrono::Utc::now().to_rfc3339();
+    run.image_path = image_path.display().to_string();
+    run.base_image_path = image_path.display().to_string();
+    run.backup_kind = "full".into();
+    run.smart_mode = true;
+    run.vss_used = true;
+
+    match result {
+        Ok(Ok(summary)) => {
+            run.status = "success".into();
+            run.bytes_copied = summary.bytes_copied;
+            run.used_blocks = summary.blocks_copied;
+            run.duration_secs = summary.duration.as_secs_f64();
+            info!(job = %job.name, image = %image_path.display(), partitions = summary.partitions,
+                "Whole-disk backup complete");
+            apply_retention(job, &[(format!("disk{}", ds.disk_number), image_path)]);
+        }
+        Ok(Err(OwnBackupError::Cancelled)) => {
+            run.status = "cancelled".into();
+            run.error = "Отменено пользователем".into();
+            let _ = std::fs::remove_file(&image_path);
+        }
+        Ok(Err(e)) => {
+            run.status = "error".into();
+            run.error = e.to_string();
+        }
+        Err(e) => {
+            run.status = "error".into();
+            run.error = format!("задача прервана: {e}");
+        }
+    }
+    run
 }
 
 /// Linux backup driver: full backups into raw images (one per source volume),

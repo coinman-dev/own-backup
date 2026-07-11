@@ -1192,7 +1192,7 @@ pub struct DiskPartitionBackup {
     /// GPT slot (matches [`own_backup_common::gpt::GptPartitionEntry::index`]).
     pub part_index: u32,
     /// Passphrase for a LUKS partition (its decrypted data is captured).
-    pub passphrase: Option<String>,
+    pub passphrase: Option<Zeroizing<String>>,
 }
 
 /// Parameters for a whole-disk (bootable) backup into a single image.
