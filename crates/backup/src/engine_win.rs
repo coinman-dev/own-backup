@@ -1543,9 +1543,19 @@ fn backup_disk_inner(
     let meta_offset = plan.meta_first_lba * sector;
     let meta_guid = Uuid::new_v4();
 
-    // 4. Create the image and write the real GPT (+ appended OwnBackupMeta).
+    // 4. Create the image and write its GPT. The image GPT gets FRESH random
+    //    disk + partition GUIDs, NEVER the source disk's — a byte-clone of the
+    //    live disk's GUIDs collides with it (Windows offlines one of the two,
+    //    and if the destination lives on the source disk the whole disk, incl.
+    //    the backup drive, vanishes: the 2026-07-11 E: incident). The REAL GUIDs
+    //    are kept in the manifest below; restore writes them back (bootable).
+    let mut safe_layout = layout.clone();
+    safe_layout.disk_guid = Uuid::new_v4().to_string().to_uppercase();
+    for p in &mut safe_layout.partitions {
+        p.part_guid = Uuid::new_v4().to_string().to_uppercase();
+    }
     let (mut target, sector_size) = create_disk_image_target(&req.image_path, plan.image_size, req.image_format)?;
-    let gpt_ops: Vec<(u64, Vec<u8>)> = crate::gpt_writer::whole_disk_gpt_ops(&layout, &plan, meta_guid)?
+    let gpt_ops: Vec<(u64, Vec<u8>)> = crate::gpt_writer::whole_disk_gpt_ops(&safe_layout, &plan, meta_guid)?
         .into_iter()
         .map(|op| (op.offset, op.bytes))
         .collect();
@@ -1553,8 +1563,9 @@ fn backup_disk_inner(
         target.write_at(*off, bytes)?;
     }
     if let ImageTarget::Vhdx { writer, .. } = &mut target {
-        // Persist the offline attribute for the new disk GUID so future attaches
-        // (and the differencing children of D5) arrive offline — no auto-mount.
+        // Persist the offline attribute keyed to the image's OWN (random) disk
+        // GUID so future attaches arrive offline — safe now that the GUID is not
+        // the source disk's.
         if let Err(e) = writer.update_properties().and_then(|()| writer.set_offline_writable(true)) {
             warn!(error = %e, "could not persist the offline attribute for the disk image");
         }
