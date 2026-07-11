@@ -1935,6 +1935,145 @@ pub struct DiskRestoreSummary {
 /// [`crate`]-external system-disk guard (`own_backup_restore::guard`).
 pub fn restore_disk(
     req: &DiskRestoreRequest,
+    progress: impl FnMut(&DiskRestoreProgress) -> Result<()>,
+) -> Result<DiskRestoreSummary> {
+    // A single whole-disk image (plan D1) carries its GPT + data + manifest
+    // inside one file; the legacy path takes a `.obdm` + per-volume images.
+    let ext = req
+        .manifest_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_lowercase();
+    if matches!(ext.as_str(), "vhdx" | "avhdx" | "qcow2") {
+        return restore_disk_from_image(req, progress);
+    }
+    restore_disk_legacy(req, progress)
+}
+
+/// Restore a whole disk from a single embedded-manifest image (plan D3): copy
+/// the image's used blocks to the target at their real offsets, then overlay
+/// the REAL GPT (real disk + partition GUIDs from the manifest — the image
+/// itself carries random GUIDs to avoid colliding with the live source disk).
+/// The real GUIDs keep a UEFI system bootable without touching the BCD.
+fn restore_disk_from_image(
+    req: &DiskRestoreRequest,
+    mut progress: impl FnMut(&DiskRestoreProgress) -> Result<()>,
+) -> Result<DiskRestoreSummary> {
+    let started = Instant::now();
+    let ext = req
+        .manifest_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_lowercase();
+    let sidecar = read_embedded_sidecar(&req.manifest_path, &ext)?;
+    let dm = sidecar.disk_manifest.clone().ok_or_else(|| {
+        OwnBackupError::ImageFormat(
+            "image has no embedded whole-disk manifest — not a bootable disk image".into(),
+        )
+    })?;
+    let layout = &dm.layout; // real GUIDs
+    let bs = sidecar.manifest.block_size as u64;
+    let image_size = sidecar.manifest.source_disk.size_bytes;
+
+    let target_path = format!(r"\\.\PhysicalDrive{}", req.target_disk);
+    let target_size = WinRawDevice::open_read(&target_path)?.length();
+    // Validates every partition fits the target (and rejects a smaller disk).
+    let ops = disk_gpt_write_ops(layout, target_size)?;
+
+    info!(
+        target = %target_path,
+        model = %dm.disk_model,
+        partitions = dm.images.len(),
+        "Whole-disk restore (embedded manifest): copying data"
+    );
+
+    let mut image = ImageReadSource::open(&req.manifest_path, &sidecar.info.container)?;
+    let mut td = WinRawDevice::open_write(&target_path)?;
+    td.set_offline_writable(false)?;
+
+    // Copy every stored image block to the same offset on the target. A block
+    // straddling the GPT head carries the image's random GPT bytes — harmless,
+    // the real GPT below overwrites the GPT sectors while the partition data
+    // stays. (data_offset is 0 for a whole-disk image → block N is at N*bs.)
+    let total = sidecar.checksums.len() as u64;
+    let mut done = 0u64;
+    let mut bytes = 0u64;
+    for entry in &sidecar.checksums {
+        let offset = entry.block_number * bs;
+        let len = bs.min(image_size - offset) as usize;
+        if offset + len as u64 > target_size {
+            return Err(OwnBackupError::RestoreIncompatible(format!(
+                "image block at {offset} exceeds the target disk size {target_size}"
+            )));
+        }
+        let mut buf = vec![0u8; len];
+        image.read_at(offset, &mut buf)?;
+        if req.verify_checksums {
+            let actual = compute_block_checksum(&buf);
+            if actual != entry.checksum {
+                return Err(OwnBackupError::ChecksumMismatch {
+                    block_index: entry.block_number,
+                    expected: entry.checksum,
+                    actual,
+                });
+            }
+        }
+        td.write_at(offset, &buf)?;
+        done += 1;
+        bytes += len as u64;
+        progress(&DiskRestoreProgress {
+            phase: "partition".into(),
+            partition_index: 0,
+            partition_count: dm.images.len(),
+            part_label: "Данные разделов".into(),
+            blocks_done: done,
+            blocks_total: total,
+            bytes_written: bytes,
+        })?;
+    }
+
+    // Overlay the REAL GPT last, so the restored disk carries the source's disk
+    // and partition GUIDs (bootable) rather than the image's random ones.
+    progress(&DiskRestoreProgress {
+        phase: "gpt".into(),
+        partition_index: dm.images.len(),
+        partition_count: dm.images.len(),
+        part_label: "Таблица разделов (GPT)".into(),
+        blocks_done: total,
+        blocks_total: total,
+        bytes_written: bytes,
+    })?;
+    for op in &ops {
+        td.write_at(op.offset, &op.bytes)?;
+    }
+    td.flush()?;
+    let _ = td.update_properties();
+    drop(td);
+    drop(image);
+
+    if let Ok(td) = WinRawDevice::open_write(&target_path) {
+        let _ = td.set_online_this_session();
+        let _ = td.update_properties();
+    }
+    info!(
+        target = %target_path,
+        partitions = dm.images.len(),
+        bytes,
+        secs = started.elapsed().as_secs(),
+        "Whole-disk restore (embedded manifest) complete"
+    );
+    Ok(DiskRestoreSummary {
+        partitions: dm.images.len(),
+        bytes_written: bytes,
+        duration: started.elapsed(),
+    })
+}
+
+/// Legacy whole-disk restore from a `.obdm` manifest + per-volume images.
+fn restore_disk_legacy(
+    req: &DiskRestoreRequest,
     mut progress: impl FnMut(&DiskRestoreProgress) -> Result<()>,
 ) -> Result<DiskRestoreSummary> {
     let started = Instant::now();
