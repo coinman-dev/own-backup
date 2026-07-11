@@ -462,9 +462,14 @@
     }
   }
 
-  // Every selected encrypted volume has been decrypted (gates "Далее").
+  // Every encrypted volume shown in a per-disk password panel — selected, OR on
+  // a disk marked "Загрузочная копия" — must be unlocked before leaving the
+  // Source step. Otherwise an undecrypted LUKS root gives an incomplete
+  // bootable copy, so "Далее" stays disabled until every shown lock is opened.
   function allEncryptedDecrypted(): boolean {
-    return encryptedSelected().every(({ device }) => decryptedVolumes[device]);
+    return engine.disks.every((d) =>
+      encryptedForDisk(d).every(({ device }) => decryptedVolumes[device])
+    );
   }
 
   // The source step is complete: a source is chosen, any encrypted volume is
@@ -474,7 +479,7 @@
   }
   function nextHint(): string {
     if (job.sources.length === 0) return 'Выберите том-источник';
-    if (!allEncryptedDecrypted()) return 'Сначала расшифруйте выбранный зашифрованный том';
+    if (!allEncryptedDecrypted()) return 'Сначала расшифруйте зашифрованный том';
     if (!job.dest_folder.trim()) return 'Выберите папку назначения';
     return '';
   }
