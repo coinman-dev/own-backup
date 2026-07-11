@@ -108,12 +108,20 @@ pub struct Sidecar {
     pub info: SidecarInfo,
     pub manifest: ImageManifest,
     pub checksums: Vec<BlockChecksum>,
+    /// Whole-disk restore manifest, present when this image is a single
+    /// bootable disk image carrying several partitions (the embedded successor
+    /// of the standalone `.obdm`). `None` for a plain per-volume image.
+    pub disk_manifest: Option<own_backup_common::gpt::DiskBackupManifest>,
 }
 
 #[derive(Serialize, Deserialize)]
 struct JsonHeader {
     info: SidecarInfo,
     manifest: ImageManifest,
+    /// Embedded whole-disk manifest (see [`Sidecar::disk_manifest`]). Absent in
+    /// per-volume images and every pre-2026-07-11 sidecar.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    disk_manifest: Option<own_backup_common::gpt::DiskBackupManifest>,
 }
 
 /// The conventional sidecar path for an image: `<image>.obkm`
@@ -196,6 +204,7 @@ pub fn write_sidecar_to<W: Write>(
     let json = serde_json::to_vec(&JsonHeader {
         info: info.clone(),
         manifest: manifest.clone(),
+        disk_manifest: None, // legacy v1 sidecar never carries a whole-disk manifest
     })?;
     if json.len() > u32::MAX as usize {
         return Err(OwnBackupError::ImageFormat("sidecar JSON too large".into()));
@@ -212,12 +221,25 @@ pub fn write_sidecar_to<W: Write>(
     Ok(())
 }
 
-/// Write a sidecar format v2 blob (with compression and integrity check) to any writer.
+/// Write a sidecar format v2 blob (with compression and integrity check) to any
+/// writer. Per-volume images carry no whole-disk manifest.
 pub fn write_sidecar_v2_to<W: Write>(
     w: &mut W,
     info: &SidecarInfo,
     manifest: &ImageManifest,
     checksums: &[BlockChecksum],
+) -> Result<()> {
+    write_sidecar_v2_full_to(w, info, manifest, checksums, None)
+}
+
+/// Like [`write_sidecar_v2_to`] but also embeds a whole-disk restore manifest —
+/// used by a single bootable disk image so its `.obdm` lives inside the file.
+pub fn write_sidecar_v2_full_to<W: Write>(
+    w: &mut W,
+    info: &SidecarInfo,
+    manifest: &ImageManifest,
+    checksums: &[BlockChecksum],
+    disk_manifest: Option<&own_backup_common::gpt::DiskBackupManifest>,
 ) -> Result<()> {
     let mut info = info.clone();
     info.format_version = 2;
@@ -225,6 +247,7 @@ pub fn write_sidecar_v2_to<W: Write>(
     let json = serde_json::to_vec(&JsonHeader {
         info,
         manifest: manifest.clone(),
+        disk_manifest: disk_manifest.cloned(),
     })?;
     let json_zstd = zstd::bulk::compress(&json, 3)
         .map_err(|e| OwnBackupError::Compression(e.to_string()))?;
@@ -579,6 +602,7 @@ fn read_sidecar_v2_from_after_magic<R: Read>(r: &mut R) -> Result<Sidecar> {
         info: header.info,
         manifest: header.manifest,
         checksums,
+        disk_manifest: header.disk_manifest,
     })
 }
 
@@ -623,6 +647,7 @@ pub fn read_sidecar_from<R: Read>(r: &mut R) -> Result<Sidecar> {
             info: header.info,
             manifest: header.manifest,
             checksums,
+            disk_manifest: header.disk_manifest,
         })
     } else if &magic == SIDECAR_MAGIC_V2 {
         read_sidecar_v2_from_after_magic(r)
@@ -769,6 +794,58 @@ mod tests {
         assert_eq!(read_info.format_version, 2);
         assert_eq!(read_info.image_file_name, "job_full.vhdx");
         assert_eq!(read_manifest.block_size, 65536);
+
+        // Plain per-volume sidecar carries no whole-disk manifest.
+        assert!(sidecar.disk_manifest.is_none());
+    }
+
+    #[test]
+    fn sidecar_v2_embeds_disk_manifest() {
+        use own_backup_common::gpt::{
+            DiskBackupManifest, DiskImageRef, DiskLayout, GptPartitionEntry,
+        };
+        let info = SidecarInfo::new_full("modulator_disk3.vhdx", 1024 * 1024);
+        let manifest = make_manifest();
+        let checksums = vec![BlockChecksum { block_number: 0, checksum: 7 }];
+        let disk = DiskBackupManifest {
+            format_version: DiskBackupManifest::FORMAT_VERSION,
+            created_at: "2026-07-11T00:00:00Z".into(),
+            job_id: Some("job-1".into()),
+            disk_number: 3,
+            disk_model: "Samsung SSD 970 PRO 512GB".into(),
+            layout: DiskLayout {
+                disk_guid: "11111111-2222-3333-4444-555555555555".into(),
+                sector_size: 512,
+                size_bytes: 512 * 1024 * 1024 * 1024,
+                partitions: vec![GptPartitionEntry {
+                    index: 1,
+                    type_guid: own_backup_common::gpt::GPT_TYPE_EFI_SYSTEM.into(),
+                    part_guid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(),
+                    first_lba: 2048,
+                    last_lba: 4095,
+                    attributes: 0,
+                    name: "EFI".into(),
+                }],
+            },
+            images: vec![DiskImageRef {
+                part_index: 1,
+                token: "VE7F57C39".into(),
+                image_file_name: "modulator_disk3.vhdx".into(),
+                filesystem: "fat32".into(),
+            }],
+        };
+
+        let mut buf = Vec::new();
+        write_sidecar_v2_full_to(&mut buf, &info, &manifest, &checksums, Some(&disk)).unwrap();
+
+        let sidecar = read_sidecar_from(&mut Cursor::new(&buf)).unwrap();
+        let got = sidecar.disk_manifest.expect("embedded disk manifest");
+        assert_eq!(got.disk_number, 3);
+        assert_eq!(got.disk_model, "Samsung SSD 970 PRO 512GB");
+        assert_eq!(got.layout.partitions.len(), 1);
+        assert_eq!(got.layout.partitions[0].type_guid, own_backup_common::gpt::GPT_TYPE_EFI_SYSTEM);
+        assert_eq!(got.images[0].token, "VE7F57C39");
+        assert_eq!(sidecar.checksums, checksums);
     }
 
     #[test]
