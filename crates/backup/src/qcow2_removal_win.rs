@@ -175,6 +175,119 @@ pub fn remove_excluded_from_qcow2(
     }))
 }
 
+/// Multi-volume twin of [`remove_excluded_from_qcow2`] for a whole-disk qcow2
+/// image (plan D2): RW-mount the whole image once (AIM over a CoW overlay), let
+/// the FS driver delete each partition's paths on the volume at that partition's
+/// disk offset, then fold the touched clusters back into the base and re-checksum
+/// the affected image blocks. A whole-disk image is disk-block absolute, so the
+/// checksum grid covers `0..image_size` (`data_offset = 0`). Same graceful
+/// contract as [`remove_excluded_from_qcow2`].
+pub fn remove_excluded_from_disk_image_qcow2(
+    image_path: &Path,
+    partitions: &[(u64, Vec<ExcludedPath>)],
+    image_size: u64,
+    block_size: u32,
+    zstd_level: Option<i32>,
+    checksums: &mut Vec<BlockChecksum>,
+    tick: &mut dyn FnMut(u64),
+) -> Result<Option<Qcow2RemovalOutcome>> {
+    let total_paths: usize = partitions.iter().map(|(_, p)| p.len()).sum();
+    if total_paths == 0 {
+        return Ok(None);
+    }
+    let t0 = Instant::now();
+    let (virtual_size, cluster_size) = {
+        let r = Qcow2RandomReader::open(image_path)?;
+        (r.virtual_size(), r.cluster_size())
+    };
+    info!(
+        image = %image_path.display(),
+        partitions = partitions.iter().filter(|(_, p)| !p.is_empty()).count(),
+        paths = total_paths,
+        cluster_size,
+        "qcow2 true removal: starting whole-disk RW mount-&-delete"
+    );
+
+    // CoW scratch over the read-only base (deleted at the end).
+    let scratch = scratch_path(image_path);
+    let _ = std::fs::remove_file(&scratch);
+    let overlay_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&scratch)?;
+    let base: Box<dyn BlockSource> = Box::new(Qcow2RandomReader::open(image_path)?);
+    let overlay = Arc::new(Mutex::new(WritableOverlaySource::new(base, cluster_size, overlay_file)));
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| dev(format!("bind: {e}")))?;
+    let port = listener.local_addr().map_err(|e| dev(format!("local_addr: {e}")))?.port();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_bg = stop.clone();
+    let overlay_bg = overlay.clone();
+    let server = std::thread::Builder::new()
+        .name("aim-devio-rw".into())
+        .spawn(move || {
+            if let Err(e) = crate::devio::serve_listener_rw(listener, Box::new(overlay_bg), stop_bg) {
+                warn!(error = %e, "qcow2 true removal: devio RW server ended with an error");
+            }
+        })
+        .map_err(|e| dev(format!("spawn devio: {e}")))?;
+
+    let mount_del = mount_delete_multi(port, virtual_size, partitions, tick);
+    stop.store(true, Ordering::SeqCst);
+    let _ = server.join();
+
+    let (deleted, failed) = match mount_del {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(error = %e, "qcow2 true removal: whole-disk mount-&-delete failed — excluded files stay as zero-filled ghosts");
+            let _ = std::fs::remove_file(&scratch);
+            return Ok(None);
+        }
+    };
+
+    let touched = overlay.lock().unwrap().touched_clusters();
+    if deleted == 0 || touched.is_empty() {
+        warn!(deleted, failed, "qcow2 true removal: nothing deleted — image left with zero-filled ghosts");
+        let _ = std::fs::remove_file(&scratch);
+        return Ok(None);
+    }
+
+    let t_merge = Instant::now();
+    {
+        let mut ov = overlay.lock().unwrap();
+        let mut merge = Qcow2InPlaceMerge::open(image_path, zstd_level)?;
+        for &c in &touched {
+            let data = ov.read_cluster(c)?;
+            merge.write_cluster(c, &data)?;
+        }
+        merge.commit()?;
+    }
+    let merge_ms = t_merge.elapsed().as_millis();
+    let _ = std::fs::remove_file(&scratch);
+
+    // Whole-disk image is disk-block absolute: data_offset = 0, len = image_size.
+    let blocks_rehashed =
+        rehash_touched(image_path, &touched, cluster_size, 0, image_size, block_size, checksums)?;
+
+    info!(
+        deleted,
+        failed,
+        clusters = touched.len(),
+        blocks_rehashed,
+        merge_ms,
+        secs = t0.elapsed().as_secs(),
+        "qcow2 true removal: excluded files deleted from the whole-disk image by the FS driver"
+    );
+    Ok(Some(Qcow2RemovalOutcome {
+        entries_deleted: deleted,
+        entries_failed: failed,
+        clusters_merged: touched.len() as u64,
+        blocks_rehashed,
+    }))
+}
+
 /// AIM RW mount → online → delete (shared with the VHDX path) → teardown. The
 /// AIM device is always removed before returning.
 fn mount_delete(
@@ -207,6 +320,46 @@ fn mount_delete(
             .map_err(|_| dev(format!("unexpected physical path {physical}")))?;
         info!(physical = %physical, disk = disk_number, "qcow2 true removal: AIM disk attached RW and online");
         let counts = crate::true_removal_win::delete_paths_on_disk(disk_number, &d, paths, tick)?;
+        drop(d);
+        Ok(counts)
+    })();
+    let removed = adapter.remove_device(device_number);
+    let counts = result?;
+    removed?;
+    Ok(counts)
+}
+
+/// Multi-volume twin of [`mount_delete`]: AIM RW mount → online → per-partition
+/// delete on the volume at each partition's disk offset → teardown all volumes.
+/// The AIM device is always removed before returning.
+fn mount_delete_multi(
+    port: u16,
+    virtual_size: u64,
+    partitions: &[(u64, Vec<ExcludedPath>)],
+    tick: &mut dyn FnMut(u64),
+) -> Result<(u64, u64)> {
+    let adapter = crate::aim_win::AimAdapter::open()?;
+    let device_number = adapter.create_tcp_proxy(port, virtual_size, false)?;
+    let result = (|| -> Result<(u64, u64)> {
+        let physical = crate::aim_win::find_physical_drive(device_number)
+            .map(|n| format!(r"\\.\PhysicalDrive{n}"))
+            .ok_or_else(|| dev("AIM disk did not surface"))?;
+        let d = open_write_retry(&physical)?;
+        // Never touch anything but our proxy disk (size guard — 2026-07-08).
+        if d.length() != virtual_size {
+            return Err(dev(format!(
+                "{physical} is {} bytes, expected {virtual_size} — refusing to touch a disk that is not the mounted image",
+                d.length()
+            )));
+        }
+        let _ = d.update_properties();
+        d.set_online_this_session()?;
+        let disk_number: u32 = physical
+            .trim_start_matches(r"\\.\PhysicalDrive")
+            .parse()
+            .map_err(|_| dev(format!("unexpected physical path {physical}")))?;
+        info!(physical = %physical, disk = disk_number, "qcow2 true removal: whole-disk AIM disk attached RW and online");
+        let counts = crate::true_removal_win::delete_paths_on_disk_multi(disk_number, &d, partitions, tick)?;
         drop(d);
         Ok(counts)
     })();

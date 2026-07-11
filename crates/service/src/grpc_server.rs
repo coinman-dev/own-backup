@@ -201,7 +201,12 @@ impl BackupService for BackupServiceImpl {
 
     async fn default_exclusions(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
-        json_reply(&own_backup_core::default_exclusions())
+        // JSON: { "windows": [string], "linux": [string] } — one default list
+        // per OS family for the Windows/Linux exclusion tabs.
+        json_reply(&serde_json::json!({
+            "windows": own_backup_core::default_exclusions(),
+            "linux": own_backup_core::default_linux_exclusions(),
+        }))
     }
 
     // --- Queue / runs -----------------------------------------------------
@@ -920,10 +925,11 @@ mod tests {
         .unwrap();
         assert!(!tmpl.name.is_empty());
 
-        let excl: Vec<String> = serde_json::from_str(
+        let excl: serde_json::Value = serde_json::from_str(
             &svc.default_exclusions(Request::new(Empty {})).await.unwrap().into_inner().json,
         )
         .unwrap();
-        assert!(excl.iter().any(|p| p.contains("Temp")));
+        assert!(excl["windows"].as_array().unwrap().iter().any(|p| p.as_str().unwrap().contains("Temp")));
+        assert!(excl["linux"].as_array().unwrap().iter().any(|p| p.as_str().unwrap().contains("tmp")));
     }
 }

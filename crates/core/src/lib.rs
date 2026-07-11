@@ -101,12 +101,19 @@ impl Default for SchemeConfig {
     }
 }
 
-/// Exclusions tab.
+/// Exclusions tab. Patterns are kept in two OS-specific lists so a whole-disk
+/// backup that spans both worlds (Windows NTFS + Linux ext/btrfs partitions)
+/// excludes the right things on each: the engine applies `patterns` to
+/// Windows-family filesystems (NTFS/ReFS/FAT) and `patterns_linux` to Linux
+/// ones. `patterns` keeps its name for backward compatibility with saved jobs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ExclusionsConfig {
     pub enabled: bool,
+    /// Windows-filesystem exclusion masks.
     pub patterns: Vec<String>,
+    /// Linux-filesystem exclusion masks.
+    pub patterns_linux: Vec<String>,
 }
 
 impl Default for ExclusionsConfig {
@@ -114,6 +121,7 @@ impl Default for ExclusionsConfig {
         Self {
             enabled: true,
             patterns: default_exclusions(),
+            patterns_linux: default_linux_exclusions(),
         }
     }
 }
@@ -174,6 +182,46 @@ pub fn default_exclusions() -> Vec<String> {
         // Our own image files, in case the destination lives on the source.
         "*.vhdx",
         "*.avhdx",
+        "*.obk",
+        "*.obkm",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+/// Default exclusion masks for a Linux filesystem (ext/btrfs/xfs) — the same
+/// idea as [`default_exclusions`] but by Linux meaning. Paths are volume-root
+/// relative (the volume root is `/`), `/`-separated. Enforcement on ext/btrfs
+/// filesystems is a follow-up; today these are stored and applied once the
+/// Linux-FS exclusion scanner lands (NTFS/ReFS/FAT are enforced now).
+pub fn default_linux_exclusions() -> Vec<String> {
+    [
+        // Pseudo / volatile filesystems — mount points, normally empty on the
+        // image; listed for clarity and bind-mount edge cases.
+        "proc/**",
+        "sys/**",
+        "dev/**",
+        "run/**",
+        // Swap.
+        "swapfile",
+        "swap.img",
+        // Temp / scratch.
+        "tmp/**",
+        "var/tmp/**",
+        // Caches — rebuilt on demand.
+        "var/cache/**",
+        "**/.cache/**",
+        "**/.thumbnails/**",
+        // Trash.
+        "**/.local/share/Trash/**",
+        "**/.Trash-*/**",
+        // fsck leftovers.
+        "lost+found",
+        // Our own image files, in case the destination lives on the source.
+        "*.vhdx",
+        "*.avhdx",
+        "*.qcow2",
         "*.obk",
         "*.obkm",
     ]
@@ -1474,11 +1522,13 @@ async fn perform_disk_backup(
         .collect();
 
     // Exclusions only make sense in smart mode (a sector-by-sector image is a
-    // verbatim copy). Applied per partition inside the whole-disk image (D2).
-    let exclusion_patterns = if job.exclusions.enabled && !job.advanced.sector_by_sector {
-        job.exclusions.patterns.clone()
+    // verbatim copy). Applied per partition inside the whole-disk image (D2),
+    // chosen by filesystem family: Windows masks for NTFS/ReFS/FAT, Linux masks
+    // for ext/btrfs/xfs.
+    let (excl_win, excl_linux) = if job.exclusions.enabled && !job.advanced.sector_by_sector {
+        (job.exclusions.patterns.clone(), job.exclusions.patterns_linux.clone())
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
 
     let request = DiskBackupRequest {
@@ -1489,7 +1539,8 @@ async fn perform_disk_backup(
         block_size: own_backup_backup::engine_win::DEFAULT_BLOCK_SIZE,
         image_format: job.image_format,
         job_id: Some(job.id.clone()),
-        exclusion_patterns,
+        exclusion_patterns_windows: excl_win,
+        exclusion_patterns_linux: excl_linux,
         kind: match plan.kind {
             "incremental" => BackupType::Incremental,
             "differential" => BackupType::Differential,
@@ -1513,9 +1564,20 @@ async fn perform_disk_backup(
             if cancel_bg.swap(false, std::sync::atomic::Ordering::SeqCst) {
                 return Err(OwnBackupError::Cancelled);
             }
-            let phase = if p.backup_id == "finalize" { "finalize" } else { "backup" };
+            // The engine tags non-copy phases via backup_id: "prepare" for the
+            // per-partition exclusion scan ("Поиск исключаемых файлов…"),
+            // "finalize" for the flush/detach + true-removal pass. Everything
+            // else is the block copy.
+            let phase = match p.backup_id.as_str() {
+                "prepare" => "prepare",
+                "finalize" => "finalize",
+                _ => "backup",
+            };
             let permille =
                 if p.blocks_total > 0 { p.blocks_done * 1000 / p.blocks_total } else { 0 };
+            // "finalize" has no granular progress — always emit it so the UI
+            // leaves the frozen 100 %; "prepare" (permille 0) shows on its first
+            // tick then rides the 400 ms throttle, same as the per-volume path.
             if phase == "finalize" || permille != last_permille || last_emit.elapsed().as_millis() >= 400
             {
                 last_permille = permille;

@@ -260,6 +260,322 @@ fn mount_and_delete(
     Ok((deleted, failed))
 }
 
+/// Multi-volume twin of [`remove_excluded_from_image`] for a whole-disk image
+/// (plan D2). Mounts the whole-disk VHDX ONCE (a temp differencing child), and
+/// for each partition deletes its recorded paths on the volume sitting at that
+/// partition's disk offset, then merges the child down and re-checksums the
+/// touched image blocks. Same graceful contract as the single-volume version:
+///
+/// * `Ok(Some(outcome))` — deletions merged, `checksums` updated;
+/// * `Ok(None)` — SKIPPED before the merge (attach/mount/delete failure), the
+///   image is exactly as checksummed (excluded NTFS files stay as zero-filled
+///   ghosts) — safe to continue;
+/// * `Err(_)` — the merge or re-checksum failed → the caller must fail the run.
+///
+/// `partitions`: (partition disk byte offset, its excluded paths). `image_size`
+/// is the whole-disk image size (a whole-disk image is disk-block absolute, so
+/// the checksum grid covers `0..image_size`). VHDX only — a qcow2 whole-disk
+/// image keeps zero-filled ghosts for now (the AIM multi-volume path is a
+/// follow-up).
+pub fn remove_excluded_from_disk_image(
+    image_path: &Path,
+    partitions: &[(u64, Vec<ExcludedPath>)],
+    image_size: u64,
+    block_size: u32,
+    checksums: &mut Vec<BlockChecksum>,
+    tick: &mut dyn FnMut(u64),
+) -> Result<Option<RemovalOutcome>> {
+    let total_paths: usize = partitions.iter().map(|(_, p)| p.len()).sum();
+    if total_paths == 0 {
+        return Ok(None);
+    }
+    let temp = temp_child_path(image_path);
+    info!(
+        image = %image_path.display(),
+        temp_child = %temp.display(),
+        partitions = partitions.iter().filter(|(_, p)| !p.is_empty()).count(),
+        paths = total_paths,
+        build = BUILD_TAG,
+        "true removal: starting whole-disk mount-&-delete pass"
+    );
+    let _ = std::fs::remove_file(&temp);
+
+    // --- Phase A (transactional): all writes land in the temp child. ---
+    let t_mount = Instant::now();
+    let deleted = match mount_and_delete_multi(image_path, &temp, partitions, tick) {
+        Ok(counts) => counts,
+        Err(e) => {
+            warn!(error = %e, "true removal: whole-disk mount-&-delete failed — excluded files stay as zero-filled ghosts");
+            let _ = std::fs::remove_file(&temp);
+            return Ok(None);
+        }
+    };
+    let mount_delete_ms = t_mount.elapsed().as_millis();
+    if deleted.0 == 0 {
+        warn!(failed = deleted.1, "true removal: nothing deleted — image left with zero-filled ghosts");
+        let _ = std::fs::remove_file(&temp);
+        return Ok(None);
+    }
+
+    let alloc = match allocated_payload_blocks(&temp) {
+        Ok(a) if !a.blocks.is_empty() => a,
+        Ok(_) => {
+            warn!("true removal: child BAT empty after deletions — discarding");
+            let _ = std::fs::remove_file(&temp);
+            return Ok(None);
+        }
+        Err(e) => {
+            warn!(error = %e, "true removal: cannot read child BAT — discarding");
+            let _ = std::fs::remove_file(&temp);
+            return Ok(None);
+        }
+    };
+
+    // --- Phase B (commits): merge + re-checksum. A failure here means
+    // image/checksum inconsistency → hard error. A whole-disk image is
+    // disk-block absolute (data_offset = 0, volume_len = image_size). ---
+    merge_into_parent(&temp)?;
+    let _ = std::fs::remove_file(&temp);
+    let (rehashed, added) =
+        rehash_touched_blocks(image_path, &alloc, 0, image_size, block_size, checksums)?;
+
+    let outcome = RemovalOutcome {
+        entries_deleted: deleted.0,
+        entries_failed: deleted.1,
+        blocks_rehashed: rehashed,
+        blocks_added: added,
+    };
+    info!(
+        deleted = outcome.entries_deleted,
+        failed = outcome.entries_failed,
+        touched_regions = alloc.blocks.len(),
+        blocks_rehashed = outcome.blocks_rehashed,
+        blocks_added = outcome.blocks_added,
+        mount_delete_ms,
+        "true removal: excluded files deleted from the whole-disk image by the FS driver"
+    );
+    Ok(Some(outcome))
+}
+
+/// Attach a differencing child of the whole-disk image, bring it online (all
+/// partitions mount), delete each partition's paths on the volume at its disk
+/// offset, then dismount every volume and detach. Returns (deleted, failed).
+fn mount_and_delete_multi(
+    image_path: &Path,
+    temp: &Path,
+    partitions: &[(u64, Vec<ExcludedPath>)],
+    tick: &mut dyn FnMut(u64),
+) -> Result<(u64, u64)> {
+    create_differencing_vhdx(temp, image_path)?;
+    let attached = attach_vhdx(temp, AttachMode::RawWrite)?;
+    let dev = open_write_retry(attached.physical_path())?;
+    let _ = dev.update_properties();
+    dev.set_online_this_session()?;
+    let disk_number = disk_number_of(attached.physical_path())?;
+    debug!(physical = %attached.physical_path(), disk_number, "true removal: whole-disk child attached RW and online");
+
+    let counts = delete_paths_on_disk_multi(disk_number, &dev, partitions, tick)?;
+    drop(dev);
+    let t_detach = Instant::now();
+    drop(attached); // detaches the child
+    info!(detach_ms = t_detach.elapsed().as_millis(), "true removal: whole-disk temp child detached");
+    Ok(counts)
+}
+
+/// Multi-volume delete + teardown on an already-attached, online disk
+/// (`disk_number`, write handle `dev`). For each partition it finds the volume
+/// at that partition's disk offset and deletes its paths; then it locks +
+/// dismounts EVERY volume on the disk (invalidating foreign handles so the
+/// subsequent detach avoids the ~180 s PnP removal-veto), holding all locks
+/// across a single disk offline so nothing re-mounts. Shared by the whole-disk
+/// VHDX child path and the qcow2 AIM path. Returns (deleted, failed).
+pub(crate) fn delete_paths_on_disk_multi(
+    disk_number: u32,
+    dev: &WinRawDevice,
+    partitions: &[(u64, Vec<ExcludedPath>)],
+    tick: &mut dyn FnMut(u64),
+) -> Result<(u64, u64)> {
+    let mut deleted = 0u64;
+    let mut failed = 0u64;
+    for (part_offset, paths) in partitions {
+        if paths.is_empty() {
+            continue;
+        }
+        match volume_root_at_offset(disk_number, *part_offset) {
+            Some(vr) => match delete_paths_on_volume_root(&vr, paths, tick) {
+                Ok((d, f)) => {
+                    deleted += d;
+                    failed += f;
+                }
+                Err(e) => {
+                    // This volume never mounted (e.g. a filesystem Windows can't
+                    // mount) — keep its files as ghosts, continue with the rest.
+                    warn!(part_offset, error = %e, "true removal: skipping a partition whose volume did not mount");
+                    failed += paths.len() as u64;
+                }
+            },
+            None => {
+                warn!(part_offset, "true removal: no mounted volume at this partition offset — paths kept as ghosts");
+                failed += paths.len() as u64;
+            }
+        }
+    }
+
+    let roots = all_volume_roots_on_disk(disk_number);
+    let handles: Vec<_> = roots.iter().filter_map(|vr| flush_lock_dismount_volume(vr)).collect();
+    if let Err(e) = dev.set_offline_writable(false) {
+        warn!(error = %e, "true removal: could not offline the mounted disk before detach");
+    }
+    let _ = dev.update_properties();
+    drop(handles); // release all locks with the disk already offline
+    let t_gone = Instant::now();
+    let gone = wait_volume_gone(disk_number, Duration::from_secs(10));
+    info!(gone, gone_ms = t_gone.elapsed().as_millis(), "true removal: volumes torn down before detach");
+    Ok((deleted, failed))
+}
+
+/// `\\?\Volume{GUID}\` root of the volume that starts exactly at `part_offset`
+/// bytes on `disk_number`, or `None` if none does (yet). Retries briefly, since
+/// a freshly attached disk's volumes take a moment to enumerate.
+fn volume_root_at_offset(disk_number: u32, part_offset: u64) -> Option<String> {
+    for _ in 0..40 {
+        for vr in all_volume_roots_on_disk(disk_number) {
+            if volume_start_on_disk(&vr) == Some((disk_number, part_offset)) {
+                return Some(vr);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    None
+}
+
+/// Every `\\?\Volume{GUID}\` root that lives on `disk_number`.
+fn all_volume_roots_on_disk(disk_number: u32) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut name_buf = [0u16; 512];
+    // SAFETY: buffer valid for the call; handle closed below.
+    let Ok(find) = (unsafe { FindFirstVolumeW(&mut name_buf) }) else {
+        return out;
+    };
+    loop {
+        let len = name_buf.iter().position(|&c| c == 0).unwrap_or(name_buf.len());
+        let volume_root = String::from_utf16_lossy(&name_buf[..len]);
+        if volume_on_disk(&volume_root, disk_number) {
+            out.push(volume_root);
+        }
+        name_buf = [0u16; 512];
+        // SAFETY: valid find handle and buffer.
+        if unsafe { FindNextVolumeW(find, &mut name_buf) }.is_err() {
+            break;
+        }
+    }
+    // SAFETY: handle from a successful FindFirstVolumeW.
+    let _ = unsafe { FindVolumeClose(find) };
+    out
+}
+
+/// `(disk_number, starting_offset_bytes)` of a single-extent volume, or `None`
+/// (a spanned/striped volume — never one of our image partitions — or on error).
+fn volume_start_on_disk(volume_root: &str) -> Option<(u32, u64)> {
+    let device = volume_root.trim_end_matches('\\');
+    let wide = to_wide(device);
+    // SAFETY: `wide` outlives the call.
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAGS_AND_ATTRIBUTES(0),
+            None,
+        )
+    }
+    .ok()?;
+    let handle = FileHandle(handle);
+    // VOLUME_DISK_EXTENTS: u32 count, pad to 8, then 24-byte DISK_EXTENT[]
+    // (u32 DiskNumber, pad, i64 StartingOffset, i64 ExtentLength).
+    let mut out = [0u8; 8 + 24 * 8];
+    let mut returned = 0u32;
+    // SAFETY: out buffer valid for its size.
+    let ok = unsafe {
+        DeviceIoControl(
+            handle.0,
+            IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
+            None,
+            0,
+            Some(out.as_mut_ptr() as *mut _),
+            out.len() as u32,
+            Some(&mut returned),
+            None,
+        )
+    };
+    if ok.is_err() || returned < 8 + 24 {
+        return None;
+    }
+    let count = u32::from_le_bytes(out[0..4].try_into().unwrap());
+    if count != 1 {
+        return None; // multi-extent volume — not one of our image partitions
+    }
+    let disk = u32::from_le_bytes(out[8..12].try_into().unwrap());
+    let offset = i64::from_le_bytes(out[16..24].try_into().unwrap()).max(0) as u64;
+    Some((disk, offset))
+}
+
+/// Delete `paths` on one already-mounted volume (identified by its
+/// `\\?\Volume{GUID}\` root), waiting for its filesystem to become ready first.
+/// No teardown — the caller dismounts the volume(s). Returns (deleted, failed).
+/// `Err` if the filesystem never mounted (the caller keeps zero-filled ghosts).
+fn delete_paths_on_volume_root(
+    volume_root: &str,
+    paths: &[ExcludedPath],
+    tick: &mut dyn FnMut(u64),
+) -> Result<(u64, u64)> {
+    // The volume DEVICE enumerating does not mean the filesystem is MOUNTED: a
+    // natively-attached VHDX is ready instantly, but the userspace-backed
+    // AIM/devio disk (qcow2) mounts asynchronously. Deleting before the FS is up
+    // makes almost every path lookup fail with "not found" (root entries resolve
+    // but deeper directories do not). Wait for the root to become readable and
+    // stable first; the logged count also tells us from the log alone whether the
+    // FS was actually mounted.
+    let root_entries = wait_for_volume_ready(volume_root);
+    info!(volume = %volume_root, root_entries, "true removal: image volume mounted");
+    if root_entries == 0 {
+        return Err(OwnBackupError::Device(format!(
+            "filesystem on {volume_root} did not become ready — aborting the delete pass"
+        )));
+    }
+
+    let t_del = Instant::now();
+    let mut deleted = 0u64;
+    let mut failed = 0u64;
+    for p in paths {
+        // Skip System Volume Information and anything inside it. Windows
+        // automatically recreates and locks this folder upon mounting, so trying
+        // to delete it is futile and causes sharing-violation warnings.
+        let is_sys_vol_info = p.rel.eq_ignore_ascii_case("System Volume Information")
+            || (p.rel.len() >= 26 && p.rel.as_bytes()[..26].eq_ignore_ascii_case(b"System Volume Information\\"));
+        if is_sys_vol_info {
+            debug!(path = %p.rel, "true removal: skipping System Volume Information to avoid sharing violations");
+            continue;
+        }
+        let full = format!("{volume_root}{}", p.rel);
+        delete_tree(&full, p.is_dir, p.is_reparse, &mut deleted, &mut failed);
+        if (deleted + failed) % 64 == 0 {
+            tick(deleted);
+        }
+    }
+    tick(deleted);
+    info!(
+        volume = %volume_root,
+        deleted,
+        failed,
+        delete_ms = t_del.elapsed().as_millis(),
+        "true removal: deletions done on volume"
+    );
+    Ok((deleted, failed))
+}
+
 /// Delete `paths` from the (already online) mounted volume on `disk_number`,
 /// then tear the volume down cleanly so the caller can detach/remove the disk
 /// without hitting the ~180 s PnP removal-veto timeout. `dev` is a write handle
@@ -272,56 +588,7 @@ pub(crate) fn delete_paths_on_disk(
     tick: &mut dyn FnMut(u64),
 ) -> Result<(u64, u64)> {
     let volume_root = find_volume_on_disk(disk_number)?;
-    // The volume DEVICE enumerating does not mean the filesystem is MOUNTED: a
-    // natively-attached VHDX is ready instantly, but the userspace-backed
-    // AIM/devio disk (qcow2) mounts asynchronously. Deleting before the FS is up
-    // makes almost every path lookup fail with "not found" (root entries resolve
-    // but deeper directories do not). Wait for the root to become readable and
-    // stable first; the logged count also tells us from the log alone whether the
-    // FS was actually mounted.
-    let root_entries = wait_for_volume_ready(&volume_root);
-    info!(
-        volume = %volume_root,
-        disk = disk_number,
-        root_entries,
-        "true removal: image volume mounted"
-    );
-    if root_entries == 0 {
-        // The FS never came up — every path lookup below would fail (and on a
-        // stalled userspace-backed disk each failure can take seconds). Abort
-        // the pass; the caller keeps the image with zero-filled ghosts.
-        return Err(OwnBackupError::Device(format!(
-            "filesystem on {volume_root} did not become ready — aborting the delete pass"
-        )));
-    }
-
-    let t_del = Instant::now();
-    let mut deleted = 0u64;
-    let mut failed = 0u64;
-    for p in paths {
-        // Skip System Volume Information and anything inside it.
-        // Windows automatically recreates and locks this folder upon mounting, so trying to
-        // delete it is futile and causes sharing violation warnings.
-        let is_sys_vol_info = p.rel.eq_ignore_ascii_case("System Volume Information")
-            || (p.rel.len() >= 26 && p.rel.as_bytes()[..26].eq_ignore_ascii_case(b"System Volume Information\\"));
-        if is_sys_vol_info {
-            debug!(path = %p.rel, "true removal: skipping System Volume Information to avoid sharing violations");
-            continue;
-        }
-
-        let full = format!("{volume_root}{}", p.rel);
-        delete_tree(&full, p.is_dir, p.is_reparse, &mut deleted, &mut failed);
-        if (deleted + failed) % 64 == 0 {
-            tick(deleted);
-        }
-    }
-    tick(deleted);
-    info!(
-        deleted,
-        failed,
-        delete_ms = t_del.elapsed().as_millis(),
-        "true removal: deletions done; flushing and dismounting the volume"
-    );
+    let (deleted, failed) = delete_paths_on_volume_root(&volume_root, paths, tick)?;
 
     // Tear the mounted volume down BEFORE detaching, or DetachVirtualDisk hits
     // the fixed ~180 s PnP removal-veto timeout (the stall the main image
@@ -701,6 +968,27 @@ const LOCK_RETRY_TIMEOUT: Duration = Duration::from_secs(60);
 /// the lock is released with the handle. Best-effort throughout: on failure
 /// the detach may stall, but the backup data is already correct.
 fn teardown_volume(volume_root: &str, dev: &WinRawDevice) {
+    // Flush + lock + dismount, keeping the lock handle open across the disk
+    // offline so the filesystem cannot re-mount before the handle drops.
+    let handle = flush_lock_dismount_volume(volume_root);
+    let t = Instant::now();
+    if let Err(e) = dev.set_offline_writable(false) {
+        warn!(error = %e, "true removal: could not re-offline the temp disk before detach");
+    }
+    if let Err(e) = dev.update_properties() {
+        warn!(error = %e, "true removal: could not refresh the partition table after offline");
+    }
+    info!(offline_ms = t.elapsed().as_millis(), "true removal: temp disk offlined before detach");
+    // `handle` drops here: the lock is released with the disk already offline.
+    drop(handle);
+}
+
+/// Flush, lock (with retries) and dismount one volume, returning the still-open
+/// lock handle so the caller controls when the lock releases (typically after
+/// the disk is offlined, so the filesystem does not immediately re-mount). A
+/// successful `FSCTL_LOCK_VOLUME` invalidates every foreign handle, which is what
+/// lets the subsequent `DetachVirtualDisk` avoid the ~180 s PnP removal-veto.
+fn flush_lock_dismount_volume(volume_root: &str) -> Option<FileHandle> {
     let device = volume_root.trim_end_matches('\\');
     let wide = to_wide(device);
     // SAFETY: `wide` outlives the call.
@@ -717,7 +1005,7 @@ fn teardown_volume(volume_root: &str, dev: &WinRawDevice) {
     };
     let Ok(handle) = handle else {
         warn!(volume = %device, "true removal: cannot open volume for teardown");
-        return;
+        return None;
     };
     let handle = FileHandle(handle);
 
@@ -766,28 +1054,17 @@ fn teardown_volume(volume_root: &str, dev: &WinRawDevice) {
     .is_ok();
     let dismount_ms = t.elapsed().as_millis();
 
-    // Offline while the lock is still held: when the handle closes and the
-    // lock drops, an online disk would get its filesystem re-mounted at once.
-    let t = Instant::now();
-    if let Err(e) = dev.set_offline_writable(false) {
-        warn!(error = %e, "true removal: could not re-offline the temp disk before detach");
-    }
-    if let Err(e) = dev.update_properties() {
-        warn!(error = %e, "true removal: could not refresh the partition table after offline");
-    }
-    let offline_ms = t.elapsed().as_millis();
-
     info!(
+        volume = %device,
         locked,
         attempts,
         dismounted,
         flush_ms,
         lock_ms,
         dismount_ms,
-        offline_ms,
-        "true removal: volume teardown before detach"
+        "true removal: volume flushed/locked/dismounted"
     );
-    // `handle` drops here: the lock is released with the disk already offline.
+    Some(handle)
 }
 
 /// Re-read every backup block overlapped by the child's touched regions from

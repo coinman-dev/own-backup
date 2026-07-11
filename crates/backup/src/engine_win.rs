@@ -1204,11 +1204,16 @@ pub struct DiskBackupRequest {
     pub block_size: u32,
     pub image_format: ImageFormat,
     pub job_id: Option<String>,
-    /// File-exclusion glob patterns (plan D2), applied per partition: NTFS/ReFS
-    /// drop + zero the matched clusters (data never leaves the machine; the
-    /// catalog entry stays as a zero-filled ghost); FAT32/exFAT also patch the
-    /// metadata so the files fully disappear. Ignored for ext/btrfs/xfs/LUKS.
-    pub exclusion_patterns: Vec<String>,
+    /// File-exclusion glob patterns for Windows-family filesystems (NTFS/ReFS/
+    /// FAT), applied per partition (plan D2): NTFS/ReFS drop + zero the matched
+    /// clusters (data never leaves the machine; the catalog entry stays as a
+    /// zero-filled ghost); FAT32/exFAT also patch the metadata so the files
+    /// fully disappear.
+    pub exclusion_patterns_windows: Vec<String>,
+    /// File-exclusion masks for Linux filesystems (ext/btrfs/xfs). Selected per
+    /// partition by filesystem; enforcement on ext/btrfs/xfs is a follow-up
+    /// (stored/passed now, applied once the Linux-FS exclusion scanner lands).
+    pub exclusion_patterns_linux: Vec<String>,
     /// Full / Incremental / Differential (plan D5). A non-full kind needs
     /// `parent_image` to be the previous whole-disk image of the SAME disk; if
     /// the chain turns out unusable (missing parent, geometry changed, format
@@ -1254,6 +1259,8 @@ struct PreparedPartition {
     /// this partition (plan D2); empty when no exclusions apply.
     zero_ranges: ByteRanges,
     patches: Vec<(u64, Vec<u8>)>,
+    /// NTFS/ReFS matched paths for the post-copy true-removal pass (plan D2).
+    removal_paths: Vec<crate::exclusions_win::ExcludedPath>,
     #[allow(dead_code)]
     vss: Option<VssSnapshotSession>, // kept alive until the copy is done
 }
@@ -1295,6 +1302,11 @@ struct PreparedMap {
     /// directory entries + freed allocation-table chains, so excluded FAT files
     /// truly disappear instead of remaining zero-filled ghosts.
     patches: Vec<(u64, Vec<u8>)>,
+    /// NTFS/ReFS matched paths for the post-copy true-removal pass (plan D2):
+    /// the FS driver deletes them inside the finished image so the catalog
+    /// entry disappears too (not just a zero-filled ghost). Empty for FAT
+    /// (patched directly) and Linux filesystems.
+    removal_paths: Vec<crate::exclusions_win::ExcludedPath>,
     pub excluded_files: u64,
     pub excluded_bytes: u64,
 }
@@ -1303,24 +1315,31 @@ struct PreparedMap {
 /// filesystem is determined from the map that parses (over the DECRYPTED view
 /// for a LUKS volume, so an unlocked Linux root reports "btrfs", not "unknown").
 ///
-/// Exclusions match the same way as a per-volume backup: NTFS/ReFS drop + zero
+/// The exclusion mask set is chosen by filesystem family: `patterns_windows`
+/// for NTFS/ReFS/FAT, `patterns_linux` for ext/btrfs/xfs. NTFS/ReFS drop + zero
 /// the excluded clusters (the catalog entry survives as a zero-filled ghost —
 /// whole-disk NTFS catalog true-removal is a later step); FAT32/exFAT also patch
-/// the metadata so the files vanish. Patterns are ignored for ext/btrfs/xfs/LUKS.
+/// the metadata so the files vanish. Enforcement on ext/btrfs/xfs is a follow-up
+/// (no Linux-FS exclusion scanner yet), so Linux patterns are selected but not
+/// yet acted on; LUKS-decrypted volumes are captured whole.
 ///
 /// `tick` reports "prepare"-phase progress (and can cancel by returning `Err`).
 fn prepare_partition_map(
     read_path: &str,
     block_size: u32,
     luks: &Option<crate::luks::LuksParams>,
-    patterns: &[String],
+    patterns_windows: &[String],
+    patterns_linux: &[String],
     tick: impl FnMut(u64) -> Result<()>,
 ) -> PreparedMap {
+    // NTFS/ReFS/FAT use the Windows masks; ext/btrfs/xfs use the Linux masks.
+    let patterns = patterns_windows;
     let none = |fs: &str, map: Option<Box<dyn UsedSectorMap>>| PreparedMap {
         map,
         filesystem: fs.into(),
         zero_ranges: ByteRanges::new(),
         patches: Vec::new(),
+        removal_paths: Vec::new(),
         excluded_files: 0,
         excluded_bytes: 0,
     };
@@ -1339,6 +1358,7 @@ fn prepare_partition_map(
                 if let Ok(mut scan) = collect_excluded_ranges(read_path, m.cluster_size(), patterns, tick) {
                     out.excluded_files = scan.files_excluded;
                     out.excluded_bytes = scan.bytes_excluded;
+                    out.removal_paths = std::mem::take(&mut scan.paths);
                     if !scan.ranges.is_empty() {
                         m.apply_excluded_ranges(&scan.ranges);
                         out.zero_ranges = std::mem::take(&mut scan.ranges);
@@ -1387,13 +1407,29 @@ fn prepare_partition_map(
         }
         return none(&fs, Some(Box::new(m)));
     }
+    // Linux filesystems: the Linux mask set applies here, but the exclusion
+    // SCANNER for ext/btrfs/xfs is not written yet — capture the whole volume
+    // and note the pending masks so the behaviour is not silently misleading.
+    let linux_pending = |fs: &str| {
+        if !patterns_linux.is_empty() {
+            warn!(
+                part = %read_path,
+                fs,
+                masks = patterns_linux.len(),
+                "whole-disk: Linux-filesystem exclusions are not enforced yet — capturing the whole volume"
+            );
+        }
+    };
     if let Ok(m) = crate::ext_map::build_ext_used_map(src.as_mut(), block_size) {
+        linux_pending("ext4");
         return none("ext4", Some(Box::new(m)));
     }
     if let Ok(m) = crate::btrfs_map::build_btrfs_used_map(src.as_mut(), block_size) {
+        linux_pending("btrfs");
         return none("btrfs", Some(Box::new(m)));
     }
     if let Ok(m) = crate::xfs_map::build_xfs_used_map(src.as_mut(), block_size) {
+        linux_pending("xfs");
         return none("xfs", Some(Box::new(m)));
     }
     none("unknown", None)
@@ -1654,7 +1690,8 @@ fn backup_disk_inner(
             &read_path,
             req.block_size,
             &luks,
-            &req.exclusion_patterns,
+            &req.exclusion_patterns_windows,
+            &req.exclusion_patterns_linux,
             prepare_tick,
         );
         let used = pm.map.unwrap_or_else(|| Box::new(AllUsedMap::new(volume_len.div_ceil(bs))));
@@ -1678,6 +1715,7 @@ fn backup_disk_inner(
             filesystem: pm.filesystem,
             zero_ranges: pm.zero_ranges,
             patches: pm.patches,
+            removal_paths: pm.removal_paths,
             used,
             vss,
         });
@@ -1854,7 +1892,7 @@ fn backup_disk_inner(
         |block, data| target.write_at(block * bs, data),
         &mut progress,
     )?;
-    let checksums = outcome.checksums;
+    let mut checksums = outcome.checksums;
     let bytes_copied = outcome.bytes_copied;
     let blocks_copied = outcome.blocks_copied;
     let blocks_unchanged = outcome.blocks_unchanged;
@@ -1881,6 +1919,63 @@ fn backup_disk_inner(
             if let Err(e) = session.complete() {
                 warn!(error = %e, "VSS release failed (data is already safe)");
             }
+        }
+    }
+
+    // 6b. True removal of excluded NTFS/ReFS files inside the finished image
+    //     (plan D2, full VHDX only). Mount the whole-disk image once and let the
+    //     FS driver delete each partition's recorded paths on its own volume,
+    //     then merge + re-checksum the touched blocks — so excluded files vanish
+    //     from the catalog instead of remaining zero-filled ghosts. Same
+    //     graceful contract as the per-volume path: a pre-merge failure keeps
+    //     the ghosts (valid backup), only a post-merge failure fails the run.
+    //     qcow2 and incremental children keep ghosts for now (follow-ups); the
+    //     content is already zeroed either way, so no excluded data leaks.
+    let removal: Vec<(u64, Vec<crate::exclusions_win::ExcludedPath>)> = prepared
+        .iter_mut()
+        .filter(|p| !p.removal_paths.is_empty())
+        .map(|p| (p.part_offset, std::mem::take(&mut p.removal_paths)))
+        .collect();
+    if !removal.is_empty() {
+        if kind == BackupType::Full {
+            let mut tick = |entries: u64| {
+                let _ = progress(&BackupProgress {
+                    backup_id: "finalize".into(),
+                    status: BackupStatus::Running,
+                    blocks_done: entries,
+                    blocks_total: 0,
+                    bytes_written: bytes_copied,
+                    speed_bps: 0,
+                });
+            };
+            match req.image_format {
+                ImageFormat::Vhdx => {
+                    crate::true_removal_win::remove_excluded_from_disk_image(
+                        &req.image_path,
+                        &removal,
+                        plan.image_size,
+                        req.block_size,
+                        &mut checksums,
+                        &mut tick,
+                    )?;
+                }
+                ImageFormat::Qcow2 => {
+                    crate::qcow2_removal_win::remove_excluded_from_disk_image_qcow2(
+                        &req.image_path,
+                        &removal,
+                        plan.image_size,
+                        req.block_size,
+                        Some(crate::qcow2::DEFAULT_ZSTD_LEVEL),
+                        &mut checksums,
+                        &mut tick,
+                    )?;
+                }
+            }
+        } else {
+            info!(
+                partitions = removal.len(),
+                "whole-disk: catalog true-removal skipped (incremental child) — excluded files remain zero-filled ghosts"
+            );
         }
     }
 

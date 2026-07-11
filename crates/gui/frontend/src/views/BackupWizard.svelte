@@ -243,20 +243,33 @@
     }
   }
 
-  // Exclusions
+  // Exclusions — two OS-specific lists behind a Windows / Linux tab. The engine
+  // applies Windows masks to NTFS/ReFS/FAT partitions and Linux masks to
+  // ext/btrfs/xfs ones (Linux-FS enforcement is a follow-up).
+  let exclTab = $state<'windows' | 'linux'>('windows');
   let newPattern = $state('');
+  // Old jobs deserialize without patterns_linux — keep it an array defensively.
+  function exclList(): string[] {
+    if (exclTab === 'linux') return (job.exclusions.patterns_linux ??= []);
+    return job.exclusions.patterns;
+  }
+  function setExclList(v: string[]) {
+    if (exclTab === 'linux') job.exclusions.patterns_linux = v;
+    else job.exclusions.patterns = v;
+  }
   function addPattern() {
     const p = newPattern.trim();
     if (p) {
-      job.exclusions.patterns = [...job.exclusions.patterns, p];
+      setExclList([...exclList(), p]);
       newPattern = '';
     }
   }
   function removePattern(i: number) {
-    job.exclusions.patterns = job.exclusions.patterns.filter((_, idx) => idx !== i);
+    setExclList(exclList().filter((_, idx) => idx !== i));
   }
   async function resetExclusions() {
-    job.exclusions.patterns = await api.defaultExclusionPatterns();
+    const d = await api.defaultExclusionPatterns();
+    setExclList(exclTab === 'linux' ? d.linux : d.windows);
   }
 
   // Uppercase drive letter of a path/device, or null (UNC/no letter).
@@ -828,13 +841,25 @@
       {#if step === 3}
         <label class="chk"><input type="checkbox" bind:checked={job.exclusions.enabled} /> Исключить файлы по следующим критериям:</label>
         <div class="note">Маска без пути (<code>*.tmp</code>, <code>pagefile.sys</code>) действует по всему тому; маска с путём (<code>Temp\*.log</code>) — от корня тома. В посекторном режиме исключения не применяются.<br />Исключённые файлы удаляются из копии полностью — как в Acronis: место в архиве и на восстановленном томе освобождается. На <b>NTFS и ReFS</b> данные исключённых файлов в копию не попадают вовсе, а записи каталога в готовом образе удаляет сам драйвер файловой системы Windows; если этот шаг не удался, файлы остаются в каталоге копии пустыми (нулевыми) — резервная копия при этом полностью рабочая.</div>
+
+        <!-- Windows / Linux списки: движок применяет их по типу ФС раздела. -->
+        <div class="excl-tabs">
+          <button class="excl-tab" class:active={exclTab === 'windows'} onclick={() => (exclTab = 'windows')}>Windows</button>
+          <button class="excl-tab" class:active={exclTab === 'linux'} onclick={() => (exclTab = 'linux')}>Linux</button>
+        </div>
+        {#if exclTab === 'windows'}
+          <div class="note sub">Для разделов Windows (NTFS / ReFS / FAT).</div>
+        {:else}
+          <div class="note sub">Для разделов Linux (ext4 / btrfs / xfs). Маски от корня тома (<code>/</code>), напр. <code>var/cache/**</code>. Применение на ext/btrfs — в разработке; список сохраняется.</div>
+        {/if}
+
         <div class="excl-list">
-          {#each job.exclusions.patterns as p, i}
+          {#each exclList() as p, i (p + i)}
             <div class="excl-row"><span>{p}</span><button class="x" onclick={() => removePattern(i)}>×</button></div>
           {/each}
         </div>
         <div class="excl-add">
-          <input type="text" bind:value={newPattern} placeholder="Путь или маска, напр. *.tmp" spellcheck="false" onkeydown={(e) => e.key === 'Enter' && addPattern()} />
+          <input type="text" bind:value={newPattern} placeholder={exclTab === 'linux' ? 'Путь или маска, напр. var/tmp/**' : 'Путь или маска, напр. *.tmp'} spellcheck="false" onkeydown={(e) => e.key === 'Enter' && addPattern()} />
           <button class="btn small" onclick={addPattern}>+ Добавить</button>
           <button class="link" onclick={resetExclusions}>Исходный список</button>
         </div>
@@ -1004,6 +1029,10 @@
   .field-label { font-size: 15px; font-weight: 600; color: var(--head); margin-bottom: 10px; }
   .field-label.mt { margin-top: 26px; }
   .num { width: 60px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 4px; margin: 0 4px; }
+  .excl-tabs { display: flex; gap: 24px; margin-top: 18px; border-bottom: 1px solid var(--border); }
+  .excl-tab { padding: 8px 2px 10px; background: none; border: none; border-bottom: 2px solid transparent; color: var(--text-muted); font-size: 13px; font-weight: 600; font-family: var(--font); cursor: pointer; }
+  .excl-tab.active { color: var(--head); border-bottom-color: var(--primary); }
+  .note.sub { margin-top: 10px; }
   .excl-list { border: 1px solid var(--border); border-radius: 5px; background: #fff; max-height: 260px; overflow: auto; margin-top: 12px; }
   .excl-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 14px; font-size: 13px; color: var(--head); border-bottom: 1px solid var(--border); }
   .x { background: none; border: none; color: var(--text-muted); font-size: 18px; cursor: pointer; line-height: 1; }

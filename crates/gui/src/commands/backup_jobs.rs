@@ -27,9 +27,12 @@ pub async fn new_job_template(state: State<'_, GuiState>) -> Result<Job, String>
     state.link.client().await?.new_job_template().await
 }
 
-/// The default exclusion list (for the "reset" button on the Exclusions step).
+/// Default exclusion lists per OS family (`{ windows: [...], linux: [...] }`),
+/// for the "reset" buttons on the Windows / Linux exclusion tabs.
 #[tauri::command]
-pub async fn default_exclusion_patterns(state: State<'_, GuiState>) -> Result<Vec<String>, String> {
+pub async fn default_exclusion_patterns(
+    state: State<'_, GuiState>,
+) -> Result<serde_json::Value, String> {
     state.link.client().await?.default_exclusions().await
 }
 

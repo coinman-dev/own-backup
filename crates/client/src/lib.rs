@@ -223,7 +223,8 @@ impl BackupClient {
         parse(&reply.json)
     }
 
-    pub async fn default_exclusions(&mut self) -> Result<Vec<String>> {
+    /// Default exclusion masks per OS family: `{ "windows": [...], "linux": [...] }`.
+    pub async fn default_exclusions(&mut self) -> Result<serde_json::Value> {
         let reply = self
             .inner
             .default_exclusions(self.request(proto::Empty {}))

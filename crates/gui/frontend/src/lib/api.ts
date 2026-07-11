@@ -23,7 +23,8 @@ export const api = {
   listBackupJobs: () => invoke<Job[]>('list_backup_jobs'),
   getBackupJob: (id: string) => invoke<Job | null>('get_backup_job', { id }),
   newJobTemplate: () => invoke<Job>('new_job_template'),
-  defaultExclusionPatterns: () => invoke<string[]>('default_exclusion_patterns'),
+  defaultExclusionPatterns: () =>
+    invoke<{ windows: string[]; linux: string[] }>('default_exclusion_patterns'),
   saveBackupJob: (job: Job) => invoke<Job>('save_backup_job', { job }),
   deleteBackupJob: (id: string) => invoke<void>('delete_backup_job', { id }),
   decryptVolume: (volume: string, password: string, remember: boolean) =>

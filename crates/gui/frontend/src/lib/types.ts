@@ -222,7 +222,10 @@ export interface SchemeConfig {
 
 export interface ExclusionsConfig {
   enabled: boolean;
+  /** Windows-filesystem exclusion masks (NTFS/ReFS/FAT). */
   patterns: string[];
+  /** Linux-filesystem exclusion masks (ext/btrfs/xfs). */
+  patterns_linux: string[];
 }
 
 export interface AdvancedConfig {
