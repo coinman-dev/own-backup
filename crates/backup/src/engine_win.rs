@@ -1407,22 +1407,44 @@ fn prepare_partition_map(
         }
         return none(&fs, Some(Box::new(m)));
     }
-    // Linux filesystems: the Linux mask set applies here, but the exclusion
-    // SCANNER for ext/btrfs/xfs is not written yet — capture the whole volume
+    // btrfs/xfs: no file-level exclusion scanner yet — capture the whole volume
     // and note the pending masks so the behaviour is not silently misleading.
+    // (btrfs is CoW with shared extents; safe exclusion needs back-reference
+    // analysis. xfs is a follow-up.)
     let linux_pending = |fs: &str| {
         if !patterns_linux.is_empty() {
             warn!(
                 part = %read_path,
                 fs,
                 masks = patterns_linux.len(),
-                "whole-disk: Linux-filesystem exclusions are not enforced yet — capturing the whole volume"
+                "whole-disk: {fs} file exclusions are not enforced yet — capturing the whole volume"
             );
         }
     };
-    if let Ok(m) = crate::ext_map::build_ext_used_map(src.as_mut(), block_size) {
-        linux_pending("ext4");
-        return none("ext4", Some(Box::new(m)));
+    if let Ok(mut m) = crate::ext_map::build_ext_used_map(src.as_mut(), block_size) {
+        // ext2/3/4: full file-level exclusions (Stage 1 drop+zero, Stage 2
+        // metadata true-removal) — ext data blocks are exclusively owned, so
+        // this is safe (unlike btrfs). Scanned over the DECRYPTED view for LUKS.
+        drop(src);
+        let mut out = none("ext4", None);
+        if !patterns_linux.is_empty() {
+            if let Ok(mut src2) = open() {
+                match crate::ext_exclusions::scan_ext_exclusions(src2.as_mut(), patterns_linux, tick) {
+                    Ok(scan) => {
+                        out.excluded_files = scan.files_excluded;
+                        out.excluded_bytes = scan.bytes_excluded;
+                        out.patches = scan.patches;
+                        if !scan.ranges.is_empty() {
+                            m.apply_excluded_ranges(&scan.ranges, block_size);
+                            out.zero_ranges = scan.ranges;
+                        }
+                    }
+                    Err(e) => warn!(part = %read_path, error = %e, "ext exclusions failed — keeping all files"),
+                }
+            }
+        }
+        out.map = Some(Box::new(m));
+        return out;
     }
     if let Ok(m) = crate::btrfs_map::build_btrfs_used_map(src.as_mut(), block_size) {
         linux_pending("btrfs");

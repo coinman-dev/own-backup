@@ -850,7 +850,7 @@
         {#if exclTab === 'windows'}
           <div class="note sub">Для разделов Windows (NTFS / ReFS / FAT).</div>
         {:else}
-          <div class="note sub">Для разделов Linux (ext4 / btrfs / xfs). Маски от корня тома (<code>/</code>), напр. <code>var/cache/**</code>. Применение на ext/btrfs — в разработке; список сохраняется.</div>
+          <div class="note sub">Для разделов Linux. Маски от корня тома (<code>/</code>), напр. <code>var/cache/**</code>. <b>ext2/3/4</b> — исключения применяются полностью (данные не попадают в копию, файл удаляется из каталога). <b>btrfs / xfs</b> — пока только сохраняются (в разработке).</div>
         {/if}
 
         <div class="excl-list">

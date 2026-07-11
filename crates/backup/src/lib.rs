@@ -9,6 +9,7 @@ pub mod decrypt;
 pub mod devio;
 pub mod encryption;
 pub mod exclusions;
+pub mod ext_exclusions;
 pub mod ext_map;
 pub mod fat_exclusions;
 pub mod fat_map;
