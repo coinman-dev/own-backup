@@ -30,6 +30,7 @@ pub mod secrets;
 pub mod sidecar;
 pub mod used_sectors;
 pub mod vhdx_bat;
+pub mod xfs_exclusions;
 pub mod xfs_map;
 
 #[cfg(target_os = "linux")]

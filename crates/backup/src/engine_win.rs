@@ -1407,20 +1407,6 @@ fn prepare_partition_map(
         }
         return none(&fs, Some(Box::new(m)));
     }
-    // btrfs/xfs: no file-level exclusion scanner yet — capture the whole volume
-    // and note the pending masks so the behaviour is not silently misleading.
-    // (btrfs is CoW with shared extents; safe exclusion needs back-reference
-    // analysis. xfs is a follow-up.)
-    let linux_pending = |fs: &str| {
-        if !patterns_linux.is_empty() {
-            warn!(
-                part = %read_path,
-                fs,
-                masks = patterns_linux.len(),
-                "whole-disk: {fs} file exclusions are not enforced yet — capturing the whole volume"
-            );
-        }
-    };
     if let Ok(mut m) = crate::ext_map::build_ext_used_map(src.as_mut(), block_size) {
         // ext2/3/4: full file-level exclusions (Stage 1 drop+zero, Stage 2
         // metadata true-removal) — ext data blocks are exclusively owned, so
@@ -1473,9 +1459,29 @@ fn prepare_partition_map(
         out.map = Some(Box::new(m));
         return out;
     }
-    if let Ok(m) = crate::xfs_map::build_xfs_used_map(src.as_mut(), block_size) {
-        linux_pending("xfs");
-        return none("xfs", Some(Box::new(m)));
+    if let Ok(mut m) = crate::xfs_map::build_xfs_used_map(src.as_mut(), block_size) {
+        // xfs: reflink-aware Stage-1 zeroing (data is not checksummed on xfs, so
+        // no metadata edits) — only extents proven NOT shared (refcount==1) are
+        // zeroed + dropped. Catalog true-removal (Stage 2) is a follow-up.
+        drop(src);
+        let mut out = none("xfs", None);
+        if !patterns_linux.is_empty() {
+            if let Ok(mut src2) = open() {
+                match crate::xfs_exclusions::scan_xfs_exclusions(src2.as_mut(), patterns_linux, tick) {
+                    Ok(scan) => {
+                        out.excluded_files = scan.files_excluded;
+                        out.excluded_bytes = scan.bytes_excluded;
+                        if !scan.ranges.is_empty() {
+                            m.apply_excluded_ranges(&scan.ranges, block_size);
+                            out.zero_ranges = scan.ranges;
+                        }
+                    }
+                    Err(e) => warn!(part = %read_path, error = %e, "xfs exclusions failed — keeping all files"),
+                }
+            }
+        }
+        out.map = Some(Box::new(m));
+        return out;
     }
     none("unknown", None)
 }

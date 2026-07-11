@@ -287,6 +287,17 @@ impl ByteRanges {
         zeroed
     }
 
+    /// True if ANY part of `[start, end)` overlaps a range (used for btrfs/xfs
+    /// reflink-safety: an extent that touches a shared range must be kept).
+    pub fn overlaps(&self, start: u64, end: u64) -> bool {
+        debug_assert!(!self.dirty, "finalize() before querying");
+        if end <= start {
+            return false;
+        }
+        let idx = self.ranges.partition_point(|&(_, e)| e <= start);
+        matches!(self.ranges.get(idx), Some(&(s, _)) if s < end)
+    }
+
     /// True if the whole `[start, end)` interval is covered by excluded ranges
     /// (used to drop blocks whose used clusters are all excluded).
     pub fn covers(&self, start: u64, end: u64) -> bool {

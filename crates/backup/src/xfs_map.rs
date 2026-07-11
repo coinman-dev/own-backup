@@ -55,6 +55,28 @@ impl UsedSectorMap for XfsUsedMap {
     }
 }
 
+impl XfsUsedMap {
+    /// Drop every backup block that lies ENTIRELY within `ranges` (excluded,
+    /// exclusively-owned file data — plan D2) so it is not copied. `backup_block_size`
+    /// is the block size the map was built with.
+    pub fn apply_excluded_ranges(
+        &mut self,
+        ranges: &crate::exclusions::ByteRanges,
+        backup_block_size: u32,
+    ) {
+        let bs = backup_block_size as u64;
+        for (i, used) in self.block_used.iter_mut().enumerate() {
+            if *used {
+                let start = i as u64 * bs;
+                if ranges.covers(start, start + bs) {
+                    *used = false;
+                    self.used_count -= 1;
+                }
+            }
+        }
+    }
+}
+
 fn bad(msg: impl std::fmt::Display) -> OwnBackupError {
     OwnBackupError::Device(format!("xfs map: {msg}"))
 }

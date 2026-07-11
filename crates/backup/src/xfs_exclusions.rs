@@ -1,0 +1,653 @@
+//! xfs file exclusions (Stage 1) — the reflink-aware zeroing pass.
+//!
+//! xfs is big-endian on disk and, unlike btrfs, does **not** checksum file data
+//! (only metadata on v5). So Stage 1 needs no checksum fix-ups and no metadata
+//! edits at all: we walk the directory trees, match the patterns, resolve each
+//! matched file's data extents, and zero the ones that are **exclusively
+//! owned** — dropping them from the used-map. xfs supports reflink (shared
+//! extents), so before zeroing an extent we consult the AG's **refcount
+//! B+tree**: any block with refcount > 1 is shared (a reflink copy or CoW), and
+//! zeroing it would corrupt the sharer — so it is kept. Read-only; `xfs_repair`
+//! stays clean because only file *data* blocks are zeroed.
+//!
+//! Stage 2 (catalog true-removal — free-space/inode-btree/directory surgery) is
+//! deliberately deferred: xfs has no rebuild shortcut like btrfs's free-space
+//! tree, so it is the highest-risk of the three and xfs is the least-used.
+//!
+//! Scope: single filesystem, extents/btree inode forks, shortform + block/leaf/
+//! node (dir2 data-block) directories. Btree-format directories, non-crc (v4)
+//! filesystems, or any structural doubt keep the file — a bigger image is always
+//! better than a corrupted one.
+
+use std::collections::{HashMap, HashSet};
+
+use tracing::{info, warn};
+
+use own_backup_common::{OwnBackupError, Result};
+
+use crate::exclusions::{parse_patterns, ByteRanges, CategorySizes};
+use crate::fat_map::RawVolume;
+
+const SB_MAGIC: u32 = 0x5846_5342; // "XFSB"
+const DINODE_MAGIC: u16 = 0x494E; // "IN"
+const AGF_MAGIC: u32 = 0x5841_4746; // "XAGF"
+const DIR3_DATA_MAGIC: u32 = 0x5844_4433; // "XDD3"
+const DIR3_BLOCK_MAGIC: u32 = 0x5844_4233; // "XDB3"
+const BMBT_CRC_MAGIC: u32 = 0x424D_4133; // "BMA3"
+const REFC_CRC_MAGIC: u32 = 0x5233_4643; // "R3FC"
+
+// di_format
+const FMT_LOCAL: u8 = 1;
+const FMT_EXTENTS: u8 = 2;
+const FMT_BTREE: u8 = 3;
+
+const S_IFMT: u16 = 0xF000;
+const S_IFDIR: u16 = 0x4000;
+const S_IFREG: u16 = 0x8000;
+
+/// v5 inode: 176-byte core, then the literal (fork) area.
+const DINODE_CORE_V3: usize = 176;
+/// v5 dir data block header (xfs_dir3_data_hdr).
+const DIR3_DATA_HDR: usize = 64;
+/// v5 short-form btree block header (bmbt / refcount).
+const BTREE_HDR_V5: usize = 56;
+const BMBT_HDR_V5: usize = 72;
+
+/// refcount record COW-staging flag (top bit of rc_startblock).
+const REFC_COW_FLAG: u32 = 1 << 31;
+
+fn bad(msg: impl std::fmt::Display) -> OwnBackupError {
+    OwnBackupError::Device(format!("xfs exclusions: {msg}"))
+}
+
+fn be16(b: &[u8], o: usize) -> u64 {
+    u16::from_be_bytes(b[o..o + 2].try_into().unwrap()) as u64
+}
+fn be32(b: &[u8], o: usize) -> u64 {
+    u32::from_be_bytes(b[o..o + 4].try_into().unwrap()) as u64
+}
+fn be64(b: &[u8], o: usize) -> u64 {
+    u64::from_be_bytes(b[o..o + 8].try_into().unwrap())
+}
+
+/// Result of an xfs exclusion walk (Stage 1). `patches` is always empty — xfs
+/// Stage 1 edits no metadata.
+pub struct XfsExclusionScan {
+    /// PHYSICAL volume byte ranges of exclusive excluded extents (zero + drop).
+    pub ranges: ByteRanges,
+    pub files_excluded: u64,
+    pub entries_scanned: u64,
+    pub bytes_excluded: u64,
+    /// Files matched but kept because their data is shared (reflink/CoW).
+    pub files_kept_shared: u64,
+    pub categories: CategorySizes,
+    pub patches: Vec<(u64, Vec<u8>)>,
+}
+
+impl XfsExclusionScan {
+    fn empty() -> Self {
+        Self {
+            ranges: ByteRanges::new(),
+            files_excluded: 0,
+            entries_scanned: 0,
+            bytes_excluded: 0,
+            files_kept_shared: 0,
+            categories: CategorySizes::default(),
+            patches: Vec::new(),
+        }
+    }
+}
+
+struct Sb {
+    blocksize: u64,
+    inodesize: u64,
+    agblocks: u64,
+    agcount: u64,
+    agblklog: u32,
+    inopblog: u32,
+    rootino: u64,
+    sectsize: u64,
+    reflink: bool,
+    ftype: bool,
+}
+
+impl Sb {
+    /// Byte offset of inode `ino` on the volume.
+    fn inode_offset(&self, ino: u64) -> u64 {
+        let mask = (1u64 << (self.agblklog + self.inopblog)) - 1;
+        let agino = ino & mask;
+        let ag = ino >> (self.agblklog + self.inopblog);
+        let agblock = agino >> self.inopblog;
+        let off = agino & ((1u64 << self.inopblog) - 1);
+        (ag * self.agblocks + agblock) * self.blocksize + off * self.inodesize
+    }
+    /// Physical byte offset of an fs-block number (agno<<agblklog | agblock).
+    fn fsblock_to_phys(&self, fsblock: u64) -> u64 {
+        let ag = fsblock >> self.agblklog;
+        let agblock = fsblock & ((1u64 << self.agblklog) - 1);
+        (ag * self.agblocks + agblock) * self.blocksize
+    }
+}
+
+fn parse_sb(vol: &mut dyn RawVolume) -> Result<Sb> {
+    let mut sb = [0u8; 512];
+    vol.read_at(0, &mut sb)?;
+    if be32(&sb, 0) as u32 != SB_MAGIC {
+        return Err(bad("no XFSB superblock magic"));
+    }
+    let versionnum = be16(&sb, 0x64);
+    if versionnum & 0xF != 5 {
+        return Err(bad("not a v5 (crc) xfs — exclusions unsupported"));
+    }
+    let blocksize = be32(&sb, 0x04);
+    let inodesize = be16(&sb, 0x68);
+    let agblocks = be32(&sb, 0x54);
+    let agcount = be32(&sb, 0x58);
+    let rootino = be64(&sb, 0x38);
+    let sectsize = be16(&sb, 0x66);
+    let inopblog = sb[0x7B] as u32;
+    let agblklog = sb[0x7C] as u32;
+    let ro_compat = be32(&sb, 0xD4);
+    let incompat = be32(&sb, 0xD8);
+    if !(512..=65536).contains(&blocksize) || !blocksize.is_power_of_two() {
+        return Err(bad("implausible block size"));
+    }
+    if inodesize < 256 || !inodesize.is_power_of_two() {
+        return Err(bad("implausible inode size"));
+    }
+    if agblocks == 0 || agcount == 0 {
+        return Err(bad("zero AG geometry"));
+    }
+    if blocksize * agblocks * agcount > vol.len() {
+        return Err(bad("filesystem larger than the device"));
+    }
+    Ok(Sb {
+        blocksize,
+        inodesize,
+        agblocks,
+        agcount,
+        agblklog,
+        inopblog,
+        rootino,
+        sectsize,
+        reflink: ro_compat & 0x4 != 0,     // XFS_SB_FEAT_RO_COMPAT_REFLINK
+        ftype: incompat & 0x1 != 0,        // XFS_SB_FEAT_INCOMPAT_FTYPE
+    })
+}
+
+/// A resolved data extent (fs-block start + block count).
+#[derive(Clone, Copy)]
+struct Extent {
+    startblock: u64,
+    count: u64,
+}
+
+/// Decode one 16-byte bmbt record (packed 128-bit) → (startoff, extent).
+fn decode_bmbt_rec(b: &[u8], o: usize) -> (u64, Extent) {
+    let l0 = be64(b, o);
+    let l1 = be64(b, o + 8);
+    let startoff = (l0 >> 9) & ((1u64 << 54) - 1);
+    let startblock = ((l0 & 0x1FF) << 43) | (l1 >> 21);
+    let count = l1 & ((1u64 << 21) - 1);
+    (startoff, Extent { startblock, count })
+}
+
+/// Read inode `ino` (its `inodesize` bytes).
+fn read_inode(vol: &mut dyn RawVolume, sb: &Sb, ino: u64) -> Result<Vec<u8>> {
+    let off = sb.inode_offset(ino);
+    if off + sb.inodesize > vol.len() {
+        return Err(bad("inode past device"));
+    }
+    let mut buf = vec![0u8; sb.inodesize as usize];
+    vol.read_at(off, &mut buf)?;
+    if be16(&buf, 0) as u16 != DINODE_MAGIC {
+        return Err(bad("bad inode magic"));
+    }
+    Ok(buf)
+}
+
+/// The data fork literal area of an inode (`[176, 176 + forkoff*8)` or, when
+/// forkoff==0, to the end of the inode).
+fn data_fork(inode: &[u8], sb: &Sb) -> (usize, usize) {
+    let forkoff = inode[0x52] as usize;
+    let end = if forkoff == 0 { sb.inodesize as usize } else { DINODE_CORE_V3 + forkoff * 8 };
+    (DINODE_CORE_V3, end.min(inode.len()))
+}
+
+/// Resolve a data/attr fork of format EXTENTS or BTREE into extents. `nextents`
+/// bounds the extents-format reads; BTREE walks child bmbt blocks.
+fn fork_extents(vol: &mut dyn RawVolume, sb: &Sb, inode: &[u8], format: u8, nextents: u64) -> Result<Vec<Extent>> {
+    let (fs, fe) = data_fork(inode, sb);
+    let mut out = Vec::new();
+    match format {
+        FMT_EXTENTS => {
+            for i in 0..nextents as usize {
+                let o = fs + i * 16;
+                if o + 16 > fe {
+                    return Err(bad("extent list exceeds fork"));
+                }
+                let (_off, e) = decode_bmbt_rec(inode, o);
+                if e.count > 0 {
+                    out.push(e);
+                }
+            }
+        }
+        FMT_BTREE => {
+            // Inode bmdr root: bb_level(2) bb_numrecs(2) then keys[be64] + ptrs[be64].
+            let level = be16(inode, fs);
+            let numrecs = be16(inode, fs + 2) as usize;
+            // Pointers sit in the second half of the fork's usable area.
+            let maxrecs = ((fe - fs - 4) / 16).max(1);
+            let ptr_base = fs + 4 + maxrecs * 8;
+            let mut ptrs = Vec::new();
+            for i in 0..numrecs {
+                if ptr_base + i * 8 + 8 > fe {
+                    return Err(bad("bmbt root ptr out of range"));
+                }
+                ptrs.push(be64(inode, ptr_base + i * 8));
+            }
+            for p in ptrs {
+                walk_bmbt(vol, sb, p, level, &mut out, 0)?;
+            }
+        }
+        _ => return Err(bad("unsupported fork format")),
+    }
+    Ok(out)
+}
+
+/// Walk a bmbt btree block (fs-block `fsblock`) collecting leaf extents.
+fn walk_bmbt(vol: &mut dyn RawVolume, sb: &Sb, fsblock: u64, _parent_level: u64, out: &mut Vec<Extent>, depth: u32) -> Result<()> {
+    if depth > 16 {
+        return Err(bad("bmbt too deep"));
+    }
+    let mut blk = vec![0u8; sb.blocksize as usize];
+    vol.read_at(sb.fsblock_to_phys(fsblock), &mut blk)?;
+    if be32(&blk, 0) as u32 != BMBT_CRC_MAGIC {
+        return Err(bad("bad bmbt block magic"));
+    }
+    let level = be16(&blk, 4);
+    let numrecs = be16(&blk, 6) as usize;
+    if level == 0 {
+        for i in 0..numrecs {
+            let o = BMBT_HDR_V5 + i * 16;
+            if o + 16 > blk.len() {
+                return Err(bad("bmbt leaf rec out of range"));
+            }
+            let (_off, e) = decode_bmbt_rec(&blk, o);
+            if e.count > 0 {
+                out.push(e);
+            }
+        }
+    } else {
+        // keys[numrecs] (be64) then ptrs[numrecs] (be64).
+        let maxrecs = (sb.blocksize as usize - BMBT_HDR_V5) / 16;
+        let ptr_base = BMBT_HDR_V5 + maxrecs * 8;
+        for i in 0..numrecs {
+            if ptr_base + i * 8 + 8 > blk.len() {
+                return Err(bad("bmbt node ptr out of range"));
+            }
+            let child = be64(&blk, ptr_base + i * 8);
+            walk_bmbt(vol, sb, child, level - 1, out, depth + 1)?;
+        }
+    }
+    Ok(())
+}
+
+/// One directory entry.
+struct DirEnt {
+    ino: u64,
+    name: String,
+    is_dir: bool,
+}
+
+/// Enumerate a directory inode's entries (shortform or dir2 data blocks).
+/// Returns an error for btree-format directories (caller keeps the subtree).
+fn read_dir(vol: &mut dyn RawVolume, sb: &Sb, dir_inode: &[u8]) -> Result<Vec<DirEnt>> {
+    let format = dir_inode[5];
+    let mut out = Vec::new();
+    match format {
+        FMT_LOCAL => {
+            let (fs, fe) = data_fork(dir_inode, sb);
+            let sf = &dir_inode[fs..fe];
+            if sf.len() < 2 {
+                return Ok(out);
+            }
+            let count = sf[0] as usize;
+            let i8 = sf[1] != 0;
+            let ino_sz = if i8 { 8 } else { 4 };
+            let mut p = 2 + ino_sz; // skip parent
+            for _ in 0..count {
+                if p + 3 > sf.len() {
+                    break;
+                }
+                let namelen = sf[p] as usize;
+                // namelen(1) offset(2) name ftype(1?) inumber
+                let name_off = p + 3;
+                if name_off + namelen > sf.len() {
+                    break;
+                }
+                let name = String::from_utf8_lossy(&sf[name_off..name_off + namelen]).to_string();
+                let mut q = name_off + namelen;
+                let ftype = if sb.ftype { let t = sf.get(q).copied().unwrap_or(0); q += 1; t } else { 0 };
+                if q + ino_sz > sf.len() {
+                    break;
+                }
+                let ino = if i8 { be64(sf, q) } else { be32(sf, q) };
+                out.push(DirEnt { ino, name, is_dir: ftype == 2 });
+                p = q + ino_sz; // advance to the next shortform entry
+            }
+        }
+        FMT_EXTENTS | FMT_BTREE => {
+            let nextents = be32(dir_inode, 0x4C);
+            let extents = fork_extents(vol, sb, dir_inode, format, nextents)?;
+            let mut blk = vec![0u8; sb.blocksize as usize];
+            for e in extents {
+                for bi in 0..e.count {
+                    vol.read_at(sb.fsblock_to_phys(e.startblock + bi), &mut blk)?;
+                    let magic = be32(&blk, 0) as u32;
+                    if magic != DIR3_DATA_MAGIC && magic != DIR3_BLOCK_MAGIC {
+                        continue; // leaf/node/free block — skip
+                    }
+                    parse_dir2_data(&blk, sb, &mut out)?;
+                }
+            }
+        }
+        _ => return Err(bad("unsupported directory format")),
+    }
+    Ok(out)
+}
+
+/// Parse one dir2 data block's entries.
+fn parse_dir2_data(blk: &[u8], sb: &Sb, out: &mut Vec<DirEnt>) -> Result<()> {
+    let mut p = DIR3_DATA_HDR;
+    // A block-format single dir has a leaf/tail; we stop when entries run out.
+    while p + 8 <= blk.len() {
+        // Unused entry: freetag 0xFFFF then length(2).
+        if be16(blk, p) == 0xFFFF {
+            let len = be16(blk, p + 2) as usize;
+            if len == 0 {
+                break;
+            }
+            p += len;
+            continue;
+        }
+        // xfs_dir2_data_entry: inumber(8) namelen(1) name[] ftype(1?) tag(2).
+        let ino = be64(blk, p);
+        let namelen = blk[p + 8] as usize;
+        if namelen == 0 || p + 9 + namelen > blk.len() {
+            break;
+        }
+        let name = String::from_utf8_lossy(&blk[p + 9..p + 9 + namelen]).to_string();
+        let ftype = if sb.ftype { blk.get(p + 9 + namelen).copied().unwrap_or(0) } else { 0 };
+        if name != "." && name != ".." {
+            out.push(DirEnt { ino, name, is_dir: ftype == 2 });
+        }
+        // rec len = 8 + 1 + namelen + (ftype?1:0) + 2, rounded up to 8.
+        let raw = 8 + 1 + namelen + if sb.ftype { 1 } else { 0 } + 2;
+        p += (raw + 7) & !7;
+    }
+    Ok(())
+}
+
+/// Collect the shared block ranges (refcount > 1, non-COW) of every AG by
+/// walking each AG's refcount B+tree. Ranges are in fs-block numbers.
+fn collect_shared(vol: &mut dyn RawVolume, sb: &Sb) -> Result<ByteRanges> {
+    let mut shared = ByteRanges::new();
+    for ag in 0..sb.agcount {
+        // AGF is sector 1 of the AG.
+        let agf_off = ag * sb.agblocks * sb.blocksize + sb.sectsize;
+        let mut agf = vec![0u8; sb.sectsize as usize];
+        vol.read_at(agf_off, &mut agf)?;
+        if be32(&agf, 0) as u32 != AGF_MAGIC {
+            return Err(bad("bad AGF magic"));
+        }
+        let root = be32(&agf, 0x58);
+        let level = be32(&agf, 0x5C);
+        if root == 0 || level == 0 {
+            continue; // no refcount btree in this AG
+        }
+        walk_refcount(vol, sb, ag, root, &mut shared)?;
+    }
+    shared.finalize();
+    Ok(shared)
+}
+
+fn walk_refcount(vol: &mut dyn RawVolume, sb: &Sb, ag: u64, agblock: u64, shared: &mut ByteRanges) -> Result<()> {
+    let phys = (ag * sb.agblocks + agblock) * sb.blocksize;
+    let mut blk = vec![0u8; sb.blocksize as usize];
+    vol.read_at(phys, &mut blk)?;
+    if be32(&blk, 0) as u32 != REFC_CRC_MAGIC {
+        return Err(bad("bad refcount btree magic"));
+    }
+    let level = be16(&blk, 4);
+    let numrecs = be16(&blk, 6) as usize;
+    if level == 0 {
+        for i in 0..numrecs {
+            let o = BTREE_HDR_V5 + i * 12;
+            if o + 12 > blk.len() {
+                return Err(bad("refcount rec out of range"));
+            }
+            let start = be32(&blk, o) as u32;
+            let count = be32(&blk, o + 4);
+            let refc = be32(&blk, o + 8);
+            if start & REFC_COW_FLAG != 0 {
+                continue; // CoW staging extent, not a shared data extent
+            }
+            if refc > 1 {
+                // fs-block range → mark shared (as byte range in fs-block units).
+                let s = (ag << sb.agblklog) | start as u64;
+                shared.add(s, s + count);
+            }
+        }
+    } else {
+        // keys[numrecs] (xfs_refcount_key: startblock be32, 4 bytes) then
+        // ptrs[numrecs] (be32 agblock).
+        let maxrecs = (sb.blocksize as usize - BTREE_HDR_V5) / 8;
+        let ptr_base = BTREE_HDR_V5 + maxrecs * 4;
+        for i in 0..numrecs {
+            if ptr_base + i * 4 + 4 > blk.len() {
+                return Err(bad("refcount node ptr out of range"));
+            }
+            let child = be32(&blk, ptr_base + i * 4);
+            walk_refcount(vol, sb, ag, child, shared)?;
+        }
+    }
+    Ok(())
+}
+
+/// Walk the directory tree, match `patterns`, and zero exclusively-owned data
+/// extents of matched files (shared extents kept — reflink safety).
+pub fn scan_xfs_exclusions(
+    vol: &mut dyn RawVolume,
+    patterns: &[String],
+    mut tick: impl FnMut(u64) -> Result<()>,
+) -> Result<XfsExclusionScan> {
+    let mut scan = XfsExclusionScan::empty();
+    let parsed = parse_patterns(patterns);
+    if parsed.is_empty() {
+        scan.ranges.finalize();
+        return Ok(scan);
+    }
+    let sb = parse_sb(vol)?;
+    // Shared block set (fs-block ranges) — empty when reflink is off.
+    let shared = if sb.reflink { collect_shared(vol, &sb)? } else { ByteRanges::new() };
+
+    // BFS the directory tree from the root inode.
+    let mut visited: HashSet<u64> = HashSet::new();
+    let mut stack: Vec<(u64, Vec<String>, bool)> = vec![(sb.rootino, Vec::new(), false)];
+    // Per matched file: its extents (to zero if exclusive).
+    let mut matched_files: HashMap<u64, (Vec<Extent>, u64)> = HashMap::new(); // ino → (extents, size)
+
+    while let Some((ino, rel, sub_excluded)) = stack.pop() {
+        if !visited.insert(ino) {
+            continue;
+        }
+        let inode = match read_inode(vol, &sb, ino) {
+            Ok(i) => i,
+            Err(e) => {
+                warn!(ino, error = %e, "xfs exclusions: unreadable inode — skipping");
+                continue;
+            }
+        };
+        if be16(&inode, 2) as u16 & S_IFMT != S_IFDIR {
+            continue;
+        }
+        let ents = match read_dir(vol, &sb, &inode) {
+            Ok(e) => e,
+            Err(e) => {
+                warn!(ino, error = %e, "xfs exclusions: cannot read directory — keeping subtree");
+                continue;
+            }
+        };
+        for e in ents {
+            scan.entries_scanned += 1;
+            if scan.entries_scanned % 4096 == 0 {
+                tick(scan.entries_scanned)?;
+            }
+            let name_lower = e.name.to_lowercase();
+            let mut crel = rel.clone();
+            crel.push(name_lower.clone());
+            let hit = sub_excluded || parsed.iter().any(|p| p.matches(&name_lower, &crel));
+            if e.is_dir {
+                stack.push((e.ino, crel, hit));
+            } else if hit {
+                if let Ok(fi) = read_inode(vol, &sb, e.ino) {
+                    let mode = be16(&fi, 2) as u16;
+                    if mode & S_IFMT != S_IFREG {
+                        continue; // symlinks/devices: no data blocks to zero
+                    }
+                    let size = be64(&fi, 0x38);
+                    let format = fi[5];
+                    let nextents = be32(&fi, 0x4C);
+                    if let Ok(exts) = fork_extents(vol, &sb, &fi, format, nextents) {
+                        matched_files.insert(e.ino, (exts, size));
+                    }
+                }
+            } else if let Ok(fi) = read_inode(vol, &sb, e.ino) {
+                let size = be64(&fi, 0x38);
+                scan.categories.add(&name_lower, size);
+            }
+        }
+    }
+
+    // Zero exclusively-owned extents; keep any that overlap a shared range.
+    scan.files_excluded = matched_files.len() as u64;
+    for (_ino, (exts, size)) in &matched_files {
+        let mut any_shared = false;
+        let mut ranges: Vec<(u64, u64)> = Vec::new();
+        for e in exts {
+            let s = e.startblock;
+            if shared.overlaps(s, s + e.count) {
+                any_shared = true;
+                break;
+            }
+            ranges.push((sb.fsblock_to_phys(s), sb.fsblock_to_phys(s) + e.count * sb.blocksize));
+        }
+        if any_shared {
+            scan.files_kept_shared += 1;
+            continue;
+        }
+        for (a, b) in ranges {
+            scan.ranges.add(a, b);
+        }
+        scan.bytes_excluded += size;
+    }
+    scan.ranges.finalize();
+    info!(
+        files = scan.files_excluded,
+        kept_shared = scan.files_kept_shared,
+        bytes = scan.bytes_excluded,
+        ranges = scan.ranges.iter().count(),
+        "xfs exclusions: Stage-1 scan complete"
+    );
+    Ok(scan)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod xfs_integration {
+    use super::*;
+    use std::os::unix::fs::FileExt;
+    use std::path::Path;
+
+    struct FileVol {
+        f: std::fs::File,
+        len: u64,
+    }
+    impl RawVolume for FileVol {
+        fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
+            self.f.read_exact_at(buf, offset).map_err(|e| bad(format!("read: {e}")))
+        }
+        fn len(&self) -> u64 {
+            self.len
+        }
+    }
+
+    fn run(img: &Path, patterns: &[&str]) -> (XfsExclusionScan, FileVol) {
+        let f = std::fs::File::open(img).unwrap();
+        let len = f.metadata().unwrap().len();
+        let mut vol = FileVol { f, len };
+        let pats: Vec<String> = patterns.iter().map(|s| s.to_string()).collect();
+        let scan = scan_xfs_exclusions(&mut vol, &pats, |_| Ok(())).unwrap();
+        (scan, vol)
+    }
+
+    /// The reflink+private fixture is generated by tests/data/gen_xfs.sh (needs
+    /// root/mount) and stored compressed. private.bin → zeroed; the reflinked
+    /// shared file → kept; xfs_repair stays clean after zeroing.
+    #[test]
+    fn stage1_zeroes_private_keeps_shared_repair_clean() {
+        let zst = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/xfs_reflink.img.zst");
+        if !zst.exists() {
+            eprintln!("xfs_reflink.img.zst missing — skipping");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let img = dir.path().join("fs.img");
+        let raw = zstd::decode_all(std::fs::File::open(&zst).unwrap()).unwrap();
+        std::fs::write(&img, &raw).unwrap();
+
+        // Exclude the shared file (kept) AND the private one (zeroed).
+        let (scan, mut vol) = run(&img, &["secret.log", "cache/**"]);
+        assert!(scan.files_kept_shared >= 1, "shared file not detected as shared");
+        assert!(!scan.ranges.is_empty(), "private file not zeroed");
+
+        // No zeroed byte may be the kept file's 0xCD; must cover the private 0xAB.
+        let mut buf = vec![0u8; 65536];
+        for (s, e) in scan.ranges.iter() {
+            let mut o = s;
+            while o < e {
+                let n = ((e - o) as usize).min(buf.len());
+                vol.read_at(o, &mut buf[..n]).unwrap();
+                assert!(!buf[..n].contains(&0xCD), "zeroed a kept file's data");
+                o += n as u64;
+            }
+        }
+
+        // Apply zeroing → xfs_repair -n must stay clean (only data touched).
+        if std::process::Command::new("xfs_repair").arg("-V").output().is_err() {
+            return;
+        }
+        let mut data = std::fs::read(&img).unwrap();
+        for (s, e) in scan.ranges.iter() {
+            data[s as usize..e as usize].fill(0);
+        }
+        let patched = dir.path().join("patched.img");
+        std::fs::write(&patched, &data).unwrap();
+        let out = std::process::Command::new("xfs_repair").arg("-n").arg(&patched).output().unwrap();
+        assert!(out.status.success(), "xfs_repair found errors:\n{}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    #[test]
+    fn no_patterns_excludes_nothing() {
+        let zst = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/xfs_reflink.img.zst");
+        if !zst.exists() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let img = dir.path().join("fs.img");
+        std::fs::write(&img, zstd::decode_all(std::fs::File::open(&zst).unwrap()).unwrap()).unwrap();
+        let (scan, _) = run(&img, &[]);
+        assert_eq!(scan.files_excluded, 0);
+        assert!(scan.ranges.is_empty());
+    }
+}
