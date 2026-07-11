@@ -1593,9 +1593,13 @@ fn backup_disk_inner(
     let bytes_copied = outcome.bytes_copied;
     let blocks_copied = outcome.blocks_copied;
 
-    // 6. Reserve the meta partition region while the image is open (so the VHDX
-    //    BAT allocates it), then finalize and release the snapshots.
-    let placeholder = vec![0u8; meta_size as usize];
+    // 6. Reserve the meta partition region while the image is open so the VHDX
+    //    BAT physically allocates EVERY block of it (an all-zero write is
+    //    optimised away → the block stays ZERO/unallocated and the later
+    //    guest-write of the real blob fails with "block state 2"). A non-zero
+    //    fill across the whole region forces allocation; the guest-write below
+    //    then overwrites it with the actual sidecar. Then finalize + release.
+    let placeholder = vec![0x01u8; meta_size as usize];
     target.write_at(meta_offset, &placeholder)?;
     let _ = progress(&BackupProgress {
         backup_id: "finalize".into(),
