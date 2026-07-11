@@ -863,6 +863,10 @@ fn image_token(path: &Path) -> Option<String> {
     let mut it = stem.rsplit('_');
     let _stamp = it.next()?;
     let _tag = it.next()?;
+    // Both schemes put the token at the 3rd-from-last segment: per-volume
+    // `<name>_<token>_<tag>_<stamp>` (token = "C"/"V1A2…"), whole-disk
+    // `<name>_disk<N>_<tag>_<stamp>` (token = "disk<N>"). Reading from the end
+    // survives underscores inside `<name>`.
     let token = it.next()?;
     if token.is_empty() {
         None
@@ -982,6 +986,71 @@ pub fn plan_run_for_volume(job: &Job, folder: &Path, device: &str) -> RunPlan {
 
     // The parent must still exist with readable sidecar metadata — embedded
     // (inside the image) or the adjacent .obkm; otherwise start fresh.
+    if !parent.exists() || !own_backup_backup::image_sidecar_readable(&parent) {
+        return RunPlan::full();
+    }
+
+    RunPlan {
+        kind: method,
+        parent_image: Some(parent),
+        base_image: Some(base),
+        increment_index: child_count + 1,
+    }
+}
+
+/// Decide the next run's plan for a whole-disk (bootable) backup of `disk_number`
+/// (plan D5). Mirrors [`plan_run_for_volume`] but keys on the `disk<N>` file tag
+/// instead of a volume token: the newest chain of whole-disk images for this disk
+/// determines full vs incremental/differential. Any doubt (no chain, rollover,
+/// parent missing) resolves to a full — a whole-disk full is always self-contained.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))] // used by the Windows backup path
+pub fn plan_run_for_disk(job: &Job, folder: &Path, disk_number: u32) -> RunPlan {
+    use own_backup_backup::chains::list_job_chains;
+
+    let method: &'static str = match job.scheme.method.as_str() {
+        "incremental" => "incremental",
+        "differential" => "differential",
+        _ => return RunPlan::full(),
+    };
+
+    let tag = format!("disk{disk_number}");
+    let chains = match list_job_chains(folder, &job.id) {
+        Ok(c) => c,
+        Err(_) => return RunPlan::full(),
+    };
+    // Keep only this disk's chains (base image tagged `disk<N>`), newest last.
+    let Some(chain) = chains
+        .into_iter()
+        .filter(|c| {
+            c.images
+                .first()
+                .and_then(|i| image_token(&i.image_path))
+                .is_some_and(|t| t.eq_ignore_ascii_case(&tag))
+        })
+        .next_back()
+    else {
+        return RunPlan::full();
+    };
+
+    let base = match chain.images.first() {
+        Some(img) => img.image_path.clone(),
+        None => return RunPlan::full(),
+    };
+    let child_count = chain.images.len() as u32 - 1;
+
+    if !job.scheme.only_incremental && child_count >= job.scheme.full_every_n.max(1) {
+        return RunPlan::full();
+    }
+
+    let parent = match method {
+        "incremental" => chain
+            .images
+            .last()
+            .map(|i| i.image_path.clone())
+            .unwrap_or_else(|| base.clone()),
+        _ => base.clone(),
+    };
+
     if !parent.exists() || !own_backup_backup::image_sidecar_readable(&parent) {
         return RunPlan::full();
     }
@@ -1363,17 +1432,36 @@ async fn perform_disk_backup(
     };
     use own_backup_common::OwnBackupError;
 
+    use own_backup_common::types::BackupType;
+
     let safe_name: String = job
         .name
         .chars()
         .map(|c| if c.is_alphanumeric() { c } else { '_' })
         .collect();
+
+    // Chain planning (plan D5): a scheduled incremental/differential writes a
+    // differencing child over the previous whole-disk image of THIS disk; any
+    // doubt resolves to a full. VHDX children are `.avhdx` (Windows convention);
+    // qcow2 children stay `.qcow2` (the role lives in the sidecar).
+    let folder = PathBuf::from(&job.dest_folder);
+    let plan = plan_run_for_disk(job, &folder, ds.disk_number);
+    let child_ext = match job.image_format {
+        own_backup_common::types::ImageFormat::Vhdx => "avhdx",
+        own_backup_common::types::ImageFormat::Qcow2 => "qcow2",
+    };
+    // Name carries the kind tag (full/inc/diff) so a glance at the folder tells
+    // full from child — the extension alone can't (a qcow2 child is still
+    // `.qcow2`). Token position matches the per-volume scheme so `image_token`
+    // reads `disk<N>` from `<name>_disk<N>_<tag>_<stamp>`.
+    let (tag, ext) = match plan.kind {
+        "incremental" => ("inc", child_ext),
+        "differential" => ("diff", child_ext),
+        _ => ("full", job.image_format.extension()),
+    };
     let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
-    let image_path = PathBuf::from(&job.dest_folder).join(format!(
-        "{safe_name}_disk{}_{stamp}.{}",
-        ds.disk_number,
-        job.image_format.extension()
-    ));
+    let image_path =
+        folder.join(format!("{safe_name}_disk{}_{tag}_{stamp}.{ext}", ds.disk_number));
 
     let partitions: Vec<DiskPartitionBackup> = ds
         .parts
@@ -1385,6 +1473,14 @@ async fn perform_disk_backup(
         })
         .collect();
 
+    // Exclusions only make sense in smart mode (a sector-by-sector image is a
+    // verbatim copy). Applied per partition inside the whole-disk image (D2).
+    let exclusion_patterns = if job.exclusions.enabled && !job.advanced.sector_by_sector {
+        job.exclusions.patterns.clone()
+    } else {
+        Vec::new()
+    };
+
     let request = DiskBackupRequest {
         disk_number: ds.disk_number,
         disk_model: ds.disk_model.clone(),
@@ -1393,6 +1489,13 @@ async fn perform_disk_backup(
         block_size: own_backup_backup::engine_win::DEFAULT_BLOCK_SIZE,
         image_format: job.image_format,
         job_id: Some(job.id.clone()),
+        exclusion_patterns,
+        kind: match plan.kind {
+            "incremental" => BackupType::Incremental,
+            "differential" => BackupType::Differential,
+            _ => BackupType::Full,
+        },
+        parent_image: plan.parent_image.clone(),
     };
     let validate_after = job.advanced.validate_after;
     let image_for_verify = image_path.clone();
@@ -1480,8 +1583,27 @@ async fn perform_disk_backup(
             run.status = "success".into();
             run.bytes_copied = summary.bytes_copied;
             run.used_blocks = summary.blocks_copied;
+            run.blocks_unchanged = summary.blocks_unchanged;
+            run.excluded_files = summary.excluded_files;
+            run.excluded_bytes = summary.excluded_bytes;
             run.duration_secs = summary.duration.as_secs_f64();
-            info!(job = %job.name, image = %image_path.display(), partitions = summary.partitions,
+            // Record what was ACTUALLY produced (the engine may have fallen back
+            // to a full when the parent chain was unusable) so the next run plans
+            // correctly off the history.
+            let (kind_str, is_child) = match summary.backup_kind {
+                BackupType::Incremental => ("incremental", true),
+                BackupType::Differential => ("differential", true),
+                _ => ("full", false),
+            };
+            run.backup_kind = kind_str.into();
+            if is_child {
+                if let Some(base) = &plan.base_image {
+                    run.base_image_path = base.display().to_string();
+                }
+                run.increment_index = plan.increment_index;
+            }
+            info!(job = %job.name, image = %image_path.display(), kind = kind_str,
+                partitions = summary.partitions, unchanged = summary.blocks_unchanged,
                 "Whole-disk backup complete");
             apply_retention(job, &[(format!("disk{}", ds.disk_number), image_path)]);
         }
@@ -1890,6 +2012,11 @@ mod tests {
             Some("V1A2B3C4D")
         );
         assert_eq!(image_token(Path::new("no_underscores.vhdx")), None);
+
+        // Whole-disk images `<name>_disk<N>_<tag>_<stamp>` → token is `disk<N>`
+        // (3rd-from-last), for the full (.vhdx) and its child (.avhdx) alike.
+        assert_eq!(image_token(Path::new("MODULATOR_disk3_full_20260711-104244.vhdx")).as_deref(), Some("DISK3"));
+        assert_eq!(image_token(Path::new("My_Job_disk12_inc_20260711-104244.avhdx")).as_deref(), Some("DISK12"));
     }
 
     #[test]
@@ -2063,5 +2190,58 @@ mod tests {
         // Rollover: with N=1 the one-child chain is full already → new full.
         job.scheme.full_every_n = 1;
         assert_eq!(plan_run_for_volume(&job, d, "C:"), RunPlan::full());
+    }
+
+    #[test]
+    fn whole_disk_incremental_parents_newest_and_isolates_by_disk() {
+        use own_backup_backup::sidecar::ChainRole;
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+
+        // Disk 3 chain: full + one incremental child.
+        put_real_image(d, "job_disk3_full_20260101-000000.vhdx", ChainRole::Full, None, "job1", "2026-01-01T00:00:00Z");
+        put_real_image(
+            d,
+            "job_disk3_inc_20260102-000000.avhdx",
+            ChainRole::Incremental,
+            Some("job_disk3_full_20260101-000000.vhdx"),
+            "job1",
+            "2026-01-02T00:00:00Z",
+        );
+        // A different disk's full must never be picked as disk 3's parent.
+        put_real_image(d, "job_disk4_full_20260103-000000.vhdx", ChainRole::Full, None, "job1", "2026-01-03T00:00:00Z");
+
+        let mut job = Job::default();
+        job.id = "job1".into();
+        job.scheme.method = "incremental".into();
+        job.scheme.only_incremental = false;
+        job.scheme.full_every_n = 5;
+
+        let plan = plan_run_for_disk(&job, d, 3);
+        assert_eq!(plan.kind, "incremental");
+        assert_eq!(
+            plan.parent_image.as_deref(),
+            Some(d.join("job_disk3_inc_20260102-000000.avhdx").as_path())
+        );
+        assert_eq!(
+            plan.base_image.as_deref(),
+            Some(d.join("job_disk3_full_20260101-000000.vhdx").as_path())
+        );
+        assert_eq!(plan.increment_index, 2);
+
+        // Disk 4 has only a full → its next incremental parents that full.
+        let plan4 = plan_run_for_disk(&job, d, 4);
+        assert_eq!(plan4.increment_index, 1);
+        assert_eq!(
+            plan4.parent_image.as_deref(),
+            Some(d.join("job_disk4_full_20260103-000000.vhdx").as_path())
+        );
+
+        // A disk with no chain → full.
+        assert_eq!(plan_run_for_disk(&job, d, 9), RunPlan::full());
+
+        // Rollover: N=1 and the disk-3 chain already has a child → new full.
+        job.scheme.full_every_n = 1;
+        assert_eq!(plan_run_for_disk(&job, d, 3), RunPlan::full());
     }
 }

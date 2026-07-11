@@ -1204,6 +1204,20 @@ pub struct DiskBackupRequest {
     pub block_size: u32,
     pub image_format: ImageFormat,
     pub job_id: Option<String>,
+    /// File-exclusion glob patterns (plan D2), applied per partition: NTFS/ReFS
+    /// drop + zero the matched clusters (data never leaves the machine; the
+    /// catalog entry stays as a zero-filled ghost); FAT32/exFAT also patch the
+    /// metadata so the files fully disappear. Ignored for ext/btrfs/xfs/LUKS.
+    pub exclusion_patterns: Vec<String>,
+    /// Full / Incremental / Differential (plan D5). A non-full kind needs
+    /// `parent_image` to be the previous whole-disk image of the SAME disk; if
+    /// the chain turns out unusable (missing parent, geometry changed, format
+    /// mismatch) the engine falls back to a full backup and reports it in the
+    /// summary.
+    pub kind: BackupType,
+    /// Parent whole-disk image for an incremental (the previous version) or
+    /// differential (the chain's full). A differencing child is written over it.
+    pub parent_image: Option<PathBuf>,
 }
 
 /// Outcome of a completed whole-disk backup.
@@ -1213,6 +1227,15 @@ pub struct DiskBackupSummary {
     pub blocks_copied: u64,
     pub partitions: u32,
     pub duration: Duration,
+    /// What was actually produced — may differ from the requested kind when a
+    /// broken/incompatible parent forced a fallback to a full backup.
+    pub backup_kind: BackupType,
+    /// Used image blocks skipped because they matched the parent version.
+    pub blocks_unchanged: u64,
+    /// Files excluded across all partitions (plan D2).
+    pub excluded_files: u64,
+    /// Bytes their extents freed from the image.
+    pub excluded_bytes: u64,
 }
 
 /// One prepared partition: its VSS snapshot, decrypt params, used-map and the
@@ -1227,6 +1250,10 @@ struct PreparedPartition {
     volume_len: u64,
     part_offset: u64,
     filesystem: String,
+    /// Excluded byte ranges (VOLUME-relative) and FAT/exFAT metadata patches for
+    /// this partition (plan D2); empty when no exclusions apply.
+    zero_ranges: ByteRanges,
+    patches: Vec<(u64, Vec<u8>)>,
     #[allow(dead_code)]
     vss: Option<VssSnapshotSession>, // kept alive until the copy is done
 }
@@ -1254,18 +1281,49 @@ fn disk_source_token(device: &str) -> String {
     "X".into()
 }
 
-/// Boxed used-map for a volume plus the detected filesystem name — determined
-/// from the map that actually parses (over the DECRYPTED view for a LUKS
-/// volume, so an unlocked Linux root reports e.g. "btrfs", not "unknown").
-/// `(None, "unknown")` means no map → sector-by-sector.
+/// A prepared partition used-map plus its file-exclusion outcome (plan D2).
+struct PreparedMap {
+    /// Used-sector map (`None` → sector-by-sector). For NTFS/FAT with exclusions
+    /// the excluded clusters are already dropped from this map.
+    map: Option<Box<dyn UsedSectorMap>>,
+    /// Detected filesystem name for the manifest.
+    filesystem: String,
+    /// Excluded byte ranges (VOLUME-relative, finalized): zeroed in the image
+    /// copy so excluded file DATA never leaves the machine.
+    zero_ranges: ByteRanges,
+    /// FAT/exFAT metadata patches (VOLUME-relative offset → bytes): deleted
+    /// directory entries + freed allocation-table chains, so excluded FAT files
+    /// truly disappear instead of remaining zero-filled ghosts.
+    patches: Vec<(u64, Vec<u8>)>,
+    pub excluded_files: u64,
+    pub excluded_bytes: u64,
+}
+
+/// Build a partition's used-map and apply file exclusions (plan D2). The
+/// filesystem is determined from the map that parses (over the DECRYPTED view
+/// for a LUKS volume, so an unlocked Linux root reports "btrfs", not "unknown").
 ///
-/// Simplified twin of `backup_volume`'s inline chain — whole-disk v1 needs only
-/// the boxed map (no NTFS-typed handle for file exclusions; that is plan D2).
-fn build_boxed_used_map(
+/// Exclusions match the same way as a per-volume backup: NTFS/ReFS drop + zero
+/// the excluded clusters (the catalog entry survives as a zero-filled ghost —
+/// whole-disk NTFS catalog true-removal is a later step); FAT32/exFAT also patch
+/// the metadata so the files vanish. Patterns are ignored for ext/btrfs/xfs/LUKS.
+///
+/// `tick` reports "prepare"-phase progress (and can cancel by returning `Err`).
+fn prepare_partition_map(
     read_path: &str,
     block_size: u32,
     luks: &Option<crate::luks::LuksParams>,
-) -> (Option<Box<dyn UsedSectorMap>>, String) {
+    patterns: &[String],
+    tick: impl FnMut(u64) -> Result<()>,
+) -> PreparedMap {
+    let none = |fs: &str, map: Option<Box<dyn UsedSectorMap>>| PreparedMap {
+        map,
+        filesystem: fs.into(),
+        zero_ranges: ByteRanges::new(),
+        patches: Vec::new(),
+        excluded_files: 0,
+        excluded_bytes: 0,
+    };
     let open = || -> Result<Box<dyn crate::fat_map::RawVolume + Send>> {
         let dev = WinRawDevice::open_read(read_path)?;
         Ok(match luks {
@@ -1275,25 +1333,70 @@ fn build_boxed_used_map(
     };
     // NTFS first (only on a plain, non-decrypted volume), then FAT/ext/btrfs/xfs.
     if luks.is_none() {
-        if let Ok(m) = NtfsUsedSectorMap::open(read_path, block_size) {
-            return (Some(Box::new(m)), "ntfs".into());
+        if let Ok(mut m) = NtfsUsedSectorMap::open(read_path, block_size) {
+            let mut out = none("ntfs", None);
+            if !patterns.is_empty() {
+                if let Ok(mut scan) = collect_excluded_ranges(read_path, m.cluster_size(), patterns, tick) {
+                    out.excluded_files = scan.files_excluded;
+                    out.excluded_bytes = scan.bytes_excluded;
+                    if !scan.ranges.is_empty() {
+                        m.apply_excluded_ranges(&scan.ranges);
+                        out.zero_ranges = std::mem::take(&mut scan.ranges);
+                    }
+                } else {
+                    warn!(part = %read_path, "whole-disk: NTFS exclusion scan failed — keeping all files");
+                }
+            }
+            m.release_bitmap();
+            out.map = Some(Box::new(m));
+            return out;
         }
     }
-    let Ok(mut src) = open() else { return (None, "unknown".into()) };
+    let Ok(mut src) = open() else { return none("unknown", None) };
     if let Ok(m) = crate::fat_map::build_fat_used_map(src.as_mut(), block_size) {
         let fs = m.filesystem.to_lowercase();
-        return (Some(Box::new(m)), fs);
+        let is_fat = m.filesystem == "FAT32" || m.filesystem == "exFAT";
+        drop(src);
+        if is_fat && !patterns.is_empty() {
+            let mut out = none(&fs, None);
+            if let Ok(mut dev) = WinRawDevice::open_read(read_path) {
+                if let Ok(scan) = crate::fat_exclusions::scan_fat_exclusions(&mut dev, patterns, tick) {
+                    out.excluded_files = scan.files_excluded;
+                    out.excluded_bytes = scan.bytes_excluded;
+                    if !scan.ranges.is_empty() {
+                        // Rebuild the map so excluded clusters drop out.
+                        if let Ok(mut dev2) = WinRawDevice::open_read(read_path) {
+                            if let Ok(rebuilt) = crate::fat_map::build_fat_used_map_excl(&mut dev2, block_size, Some(&scan.ranges)) {
+                                out.map = Some(Box::new(rebuilt));
+                            }
+                        }
+                        out.zero_ranges = scan.ranges;
+                        out.patches = scan.patches;
+                    }
+                }
+            }
+            if out.map.is_none() {
+                // Exclusion rebuild failed → fall back to the full FAT map.
+                if let Ok(mut src2) = open() {
+                    if let Ok(m2) = crate::fat_map::build_fat_used_map(src2.as_mut(), block_size) {
+                        out.map = Some(Box::new(m2));
+                    }
+                }
+            }
+            return out;
+        }
+        return none(&fs, Some(Box::new(m)));
     }
     if let Ok(m) = crate::ext_map::build_ext_used_map(src.as_mut(), block_size) {
-        return (Some(Box::new(m)), "ext4".into());
+        return none("ext4", Some(Box::new(m)));
     }
     if let Ok(m) = crate::btrfs_map::build_btrfs_used_map(src.as_mut(), block_size) {
-        return (Some(Box::new(m)), "btrfs".into());
+        return none("btrfs", Some(Box::new(m)));
     }
     if let Ok(m) = crate::xfs_map::build_xfs_used_map(src.as_mut(), block_size) {
-        return (Some(Box::new(m)), "xfs".into());
+        return none("xfs", Some(Box::new(m)));
     }
-    (None, "unknown".into())
+    none("unknown", None)
 }
 
 /// One partition region inside the whole-disk image: its byte offset on the
@@ -1302,6 +1405,12 @@ struct DiskRegion {
     part_offset: u64,
     volume_len: u64,
     reader: Box<dyn crate::fat_map::RawVolume + Send>,
+    /// Excluded byte ranges (VOLUME-relative): zeroed after reading so excluded
+    /// file data never enters the image (plan D2).
+    zero_ranges: ByteRanges,
+    /// FAT/exFAT metadata patches (VOLUME-relative offset → bytes): applied over
+    /// the read data so excluded FAT files vanish from the directory/allocation.
+    patches: Vec<(u64, Vec<u8>)>,
 }
 
 /// A [`BlockReader`] over the WHOLE disk image: block `N` (bytes `N*bs..`) is
@@ -1339,10 +1448,28 @@ impl BlockReader for DiskCompositeReader {
             let from = start.max(r.part_offset);
             let to = end.min(p_end);
             if from < to {
-                r.reader.read_at(
-                    from - r.part_offset,
-                    &mut buf[(from - start) as usize..(to - start) as usize],
-                )?;
+                let vol_off = from - r.part_offset;
+                let dst = &mut buf[(from - start) as usize..(to - start) as usize];
+                r.reader.read_at(vol_off, dst)?;
+                // Plan D2 — content zeroing: excluded file clusters read as zero
+                // so their data never enters the image.
+                r.zero_ranges.zero_overlaps(vol_off, dst);
+                // FAT/exFAT metadata patches (deleted dir entries / freed
+                // chains), applied over the same volume-relative window.
+                let dst_end = vol_off + dst.len() as u64;
+                for (poff, bytes) in &r.patches {
+                    let p_start = *poff;
+                    let p_end2 = poff + bytes.len() as u64;
+                    let ov_start = vol_off.max(p_start);
+                    let ov_end = dst_end.min(p_end2);
+                    if ov_start < ov_end {
+                        let d0 = (ov_start - vol_off) as usize;
+                        let d1 = (ov_end - vol_off) as usize;
+                        let b0 = (ov_start - p_start) as usize;
+                        let b1 = b0 + (d1 - d0);
+                        dst[d0..d1].copy_from_slice(&bytes[b0..b1]);
+                    }
+                }
             }
         }
         Ok(buf)
@@ -1399,8 +1526,11 @@ impl UsedSectorMap for DiskUsedMap {
 /// sectors only (never a raw disk dump); each partition's data lands at its
 /// real offset, so mounting the image shows every volume with a drive letter.
 ///
-/// v1 scope: full backups; NTFS/FAT/ext/btrfs/xfs + LUKS. File exclusions,
-/// true-removal and incremental chains are follow-up phases (D2/D5).
+/// Scope: full + incremental/differential chains (plan D5); NTFS/FAT/ext/btrfs/
+/// xfs + LUKS. File exclusions (plan D2) drop + zero excluded clusters per
+/// partition, and patch FAT/exFAT metadata; NTFS/ReFS catalog true-removal
+/// inside the whole-disk image (mount-&-delete across volumes) is not yet done —
+/// excluded NTFS files remain as zero-filled ghosts (data still never leaves).
 pub fn backup_disk(
     req: &DiskBackupRequest,
     progress: impl FnMut(&BackupProgress) -> Result<()>,
@@ -1447,6 +1577,8 @@ fn backup_disk_inner(
     // 2. Snapshot + map every partition up front (cross-volume consistency).
     info!(disk = req.disk_number, parts = req.partitions.len(), "whole-disk backup: preparing partitions");
     let mut prepared: Vec<PreparedPartition> = Vec::new();
+    let mut excluded_files = 0u64;
+    let mut excluded_bytes = 0u64;
     for p in &req.partitions {
         let entry = layout
             .partitions
@@ -1508,12 +1640,31 @@ fn backup_disk_inner(
             )));
         }
 
-        let (map, filesystem) = build_boxed_used_map(&read_path, req.block_size, &luks);
-        let used = map.unwrap_or_else(|| Box::new(AllUsedMap::new(volume_len.div_ceil(bs))));
+        let prepare_tick = |entries: u64| {
+            progress(&BackupProgress {
+                backup_id: "prepare".into(),
+                status: BackupStatus::Running,
+                blocks_done: entries,
+                blocks_total: 0,
+                bytes_written: 0,
+                speed_bps: 0,
+            })
+        };
+        let pm = prepare_partition_map(
+            &read_path,
+            req.block_size,
+            &luks,
+            &req.exclusion_patterns,
+            prepare_tick,
+        );
+        let used = pm.map.unwrap_or_else(|| Box::new(AllUsedMap::new(volume_len.div_ceil(bs))));
+        excluded_files += pm.excluded_files;
+        excluded_bytes += pm.excluded_bytes;
         info!(
             part = p.part_index,
-            fs = %filesystem,
+            fs = %pm.filesystem,
             used_blocks = used.used_block_count(),
+            excluded_files = pm.excluded_files,
             offset = part_offset,
             "whole-disk backup: partition prepared"
         );
@@ -1524,13 +1675,37 @@ fn backup_disk_inner(
             luks,
             volume_len,
             part_offset,
-            filesystem,
+            filesystem: pm.filesystem,
+            zero_ranges: pm.zero_ranges,
+            patches: pm.patches,
             used,
             vss,
         });
     }
 
-    // 3. Size the image from the used-block total, plan the meta partition.
+    // 3a. Parent chain (plan D5). A non-full kind writes a differencing CHILD
+    // over the previous whole-disk image; a broken/incompatible parent falls
+    // back to a full backup (reported in the summary) rather than failing.
+    let mut kind = req.kind;
+    let mut parent: Option<(PathBuf, Sidecar)> = None;
+    if kind != BackupType::Full {
+        match &req.parent_image {
+            None => {
+                warn!("no parent image supplied for a {kind} whole-disk backup — creating a full backup");
+                kind = BackupType::Full;
+            }
+            Some(pp) => match validate_disk_parent(pp, req.block_size, req.image_format) {
+                Ok(sc) => parent = Some((pp.clone(), sc)),
+                Err(e) => {
+                    warn!(parent = %pp.display(), error = %e,
+                        "whole-disk parent chain unusable — creating a full backup instead");
+                    kind = BackupType::Full;
+                }
+            },
+        }
+    }
+
+    // 3b. Size the image from the used-block total, plan the meta partition.
     // Build the whole-disk used-map FIRST (over the partitions region) so the
     // meta partition is sized from the actual disk-block count: a partition not
     // aligned to the block size straddles two disk-blocks per volume block, so
@@ -1538,36 +1713,103 @@ fn backup_disk_inner(
     let part_end = prepared.iter().map(|p| p.part_offset + p.volume_len).max().unwrap_or(0);
     let part_end_blocks = part_end.div_ceil(bs);
     let disk_used = DiskUsedMap::build(&prepared, bs, part_end_blocks);
-    let meta_size = crate::sidecar::calculate_meta_partition_size(disk_used.count.max(1));
-    let plan = own_backup_common::gpt::plan_whole_disk_image(&layout, meta_size);
+    // A child inherits the parent's virtual size and GPT (the differencing image
+    // resolves them through the chain), so its geometry MUST match the parent
+    // exactly. Size the meta partition from the geometry the parent committed to
+    // (its full-state used count) — not this run's count, which for an
+    // incremental differs. If the resulting plan no longer matches the parent's
+    // size (the disk was repartitioned), fall back to a full backup.
+    let full_used = |used: u64| crate::sidecar::calculate_meta_partition_size(used.max(1));
+    let mut meta_size = full_used(match &parent {
+        Some((_, sc)) => sc.manifest.used_blocks,
+        None => disk_used.count,
+    });
+    let mut plan = own_backup_common::gpt::plan_whole_disk_image(&layout, meta_size);
+    if let Some((pp, sc)) = &parent {
+        if plan.image_size != sc.manifest.source_disk.size_bytes {
+            warn!(
+                parent = %pp.display(),
+                planned = plan.image_size,
+                parent_size = sc.manifest.source_disk.size_bytes,
+                "whole-disk parent geometry changed — creating a full backup instead"
+            );
+            kind = BackupType::Full;
+            parent = None;
+            meta_size = full_used(disk_used.count);
+            plan = own_backup_common::gpt::plan_whole_disk_image(&layout, meta_size);
+        }
+    }
     let meta_offset = plan.meta_first_lba * sector;
     let meta_guid = Uuid::new_v4();
 
-    // 4. Create the image and write its GPT. The image GPT gets FRESH random
-    //    disk + partition GUIDs, NEVER the source disk's — a byte-clone of the
-    //    live disk's GUIDs collides with it (Windows offlines one of the two,
-    //    and if the destination lives on the source disk the whole disk, incl.
-    //    the backup drive, vanishes: the 2026-07-11 E: incident). The REAL GUIDs
-    //    are kept in the manifest below; restore writes them back (bootable).
+    // 4. Create the image and (for a full) write its GPT. The image GPT gets
+    //    FRESH random disk + partition GUIDs, NEVER the source disk's — a
+    //    byte-clone of the live disk's GUIDs collides with it (Windows offlines
+    //    one of the two, and if the destination lives on the source disk the
+    //    whole disk, incl. the backup drive, vanishes: the 2026-07-11 E:
+    //    incident). The REAL GUIDs are kept in the manifest below; restore
+    //    writes them back (bootable).
     let mut safe_layout = layout.clone();
     safe_layout.disk_guid = Uuid::new_v4().to_string().to_uppercase();
     for p in &mut safe_layout.partitions {
         p.part_guid = Uuid::new_v4().to_string().to_uppercase();
     }
-    let (mut target, sector_size) = create_disk_image_target(&req.image_path, plan.image_size, req.image_format)?;
-    let gpt_ops: Vec<(u64, Vec<u8>)> = crate::gpt_writer::whole_disk_gpt_ops(&safe_layout, &plan, meta_guid)?
-        .into_iter()
-        .map(|op| (op.offset, op.bytes))
-        .collect();
-    for (off, bytes) in &gpt_ops {
-        target.write_at(*off, bytes)?;
-    }
-    if let ImageTarget::Vhdx { writer, .. } = &mut target {
-        // Persist the offline attribute keyed to the image's OWN (random) disk
-        // GUID so future attaches arrive offline — safe now that the GUID is not
-        // the source disk's.
-        if let Err(e) = writer.update_properties().and_then(|()| writer.set_offline_writable(true)) {
-            warn!(error = %e, "could not persist the offline attribute for the disk image");
+    // The GPT write-op grid (offsets + lengths) is deterministic from the plan
+    // and partition count — the GUID VALUES only change the bytes. A child
+    // reuses the PARENT's exact GPT bytes (read below) so any used block that
+    // overlaps the GPT head (a partition starting at LBA 34) matches the parent
+    // and is not needlessly rewritten; a full writes its own fresh GPT.
+    let mut gpt_ops: Vec<(u64, Vec<u8>)> =
+        crate::gpt_writer::whole_disk_gpt_ops(&safe_layout, &plan, meta_guid)?
+            .into_iter()
+            .map(|op| (op.offset, op.bytes))
+            .collect();
+
+    let (mut target, sector_size) = match &parent {
+        None => create_disk_image_target(&req.image_path, plan.image_size, req.image_format)?,
+        Some((pp, _)) => {
+            // Child inherits the parent's GPT through the chain — overwrite the
+            // op bytes with the parent's actual GPT so the composite reader
+            // reproduces them byte-for-byte. Drop the parent read handle before
+            // creating the differencing child (VHDX CreateVirtualDisk opens the
+            // parent itself).
+            {
+                let mut pimg = ImageReadSource::open(pp, &req.image_format.extension())?;
+                for (off, bytes) in &mut gpt_ops {
+                    pimg.read_at(*off, bytes)?;
+                }
+            }
+            create_disk_child_target(&req.image_path, pp, plan.image_size, req.image_format)?
+        }
+    };
+    if parent.is_none() {
+        // Full backup: lay down the fresh GPT — but ONLY into blocks the copy
+        // pass will NOT write. A partition that begins inside the first block
+        // (LBA 34, offset 17408) makes block 0 "used"; the composite copy then
+        // writes that block with the GPT bytes already baked in, so writing the
+        // GPT op there too would hit the same host cluster twice — fatal for the
+        // write-once qcow2 writer ("cluster 0 written twice") and merely
+        // redundant for VHDX. Unused GPT regions (an aligned primary GPT, the
+        // backup GPT at the image tail) still need this direct write.
+        for (off, bytes) in &gpt_ops {
+            let mut p = 0usize;
+            while p < bytes.len() {
+                let abs = off + p as u64;
+                let block = abs / bs;
+                let take = (((block + 1) * bs - abs) as usize).min(bytes.len() - p);
+                if !disk_used.is_block_used(block) {
+                    target.write_at(abs, &bytes[p..p + take])?;
+                }
+                p += take;
+            }
+        }
+        if let ImageTarget::Vhdx { writer, .. } = &mut target {
+            // Persist the offline attribute keyed to the image's OWN (random)
+            // disk GUID so future attaches arrive offline — safe now that the
+            // GUID is not the source disk's. Children inherit it via the chain.
+            if let Err(e) = writer.update_properties().and_then(|()| writer.set_offline_writable(true)) {
+                warn!(error = %e, "could not persist the offline attribute for the disk image");
+            }
         }
     }
 
@@ -1584,7 +1826,13 @@ fn backup_disk_inner(
             Some(l) => Box::new(crate::decrypt::DecryptingVolume::new(Box::new(dev), l.clone())),
             None => Box::new(dev),
         };
-        regions.push(DiskRegion { part_offset: prep.part_offset, volume_len: prep.volume_len, reader });
+        regions.push(DiskRegion {
+            part_offset: prep.part_offset,
+            volume_len: prep.volume_len,
+            reader,
+            zero_ranges: prep.zero_ranges.clone(),
+            patches: prep.patches.clone(),
+        });
     }
     let mut composite = DiskCompositeReader {
         block_size: req.block_size,
@@ -1592,17 +1840,24 @@ fn backup_disk_inner(
         gpt_ops,
         regions,
     };
+    // For a child only blocks that differ from the parent version are written;
+    // the rest resolve through the differencing chain. `outcome.checksums` still
+    // covers EVERY used block, so the child's sidecar describes the full image.
+    let parent_hashes: Option<HashMap<u64, u64>> = parent.as_ref().map(|(_, sc)| {
+        sc.checksums.iter().map(|c| (c.block_number, c.checksum)).collect()
+    });
     let outcome = copy_used_blocks(
         &format!("disk{}", req.disk_number),
         &mut composite,
         &disk_used,
-        None, // full backup (parent chain = D5)
+        parent_hashes.as_ref(),
         |block, data| target.write_at(block * bs, data),
         &mut progress,
     )?;
     let checksums = outcome.checksums;
     let bytes_copied = outcome.bytes_copied;
     let blocks_copied = outcome.blocks_copied;
+    let blocks_unchanged = outcome.blocks_unchanged;
 
     // 6. Reserve the meta partition region while the image is open so the VHDX
     //    BAT physically allocates EVERY block of it (an all-zero write is
@@ -1655,16 +1910,34 @@ fn backup_disk_inner(
     };
 
     let total_blocks = plan.image_size.div_ceil(bs);
+    // `used_blocks` is the FULL image state (every checksummed block), not just
+    // this run's writes — the next child sizes its meta partition from it, so it
+    // must stay stable across the chain (checksums.len() == disk_used.count).
     let manifest = whole_disk_image_manifest(
         &layout,
         req,
         sector_size,
         plan.image_size,
         total_blocks,
-        blocks_copied,
+        checksums.len() as u64,
+        kind,
+        parent.as_ref().map(|(_, sc)| sc.manifest.backup_id),
     );
     // A whole-disk image is disk-block absolute → volume_data_offset = 0.
-    let mut info = SidecarInfo::new_full(image_file_name, 0);
+    let mut info = match &parent {
+        None => SidecarInfo::new_full(image_file_name, 0),
+        Some((pp, _)) => {
+            let role = match kind {
+                BackupType::Differential => ChainRole::Differential,
+                _ => ChainRole::Incremental,
+            };
+            let parent_name = pp
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            SidecarInfo::new_child(image_file_name, role, parent_name, 0)
+        }
+    };
     info.container = req.image_format.extension().into();
     info.job_id = req.job_id.clone();
 
@@ -1680,8 +1953,10 @@ fn backup_disk_inner(
     info!(
         image = %req.image_path.display(),
         disk = req.disk_number,
+        kind = %kind,
         partitions = prepared.len(),
         blocks_written = blocks_copied,
+        blocks_unchanged,
         bytes = bytes_copied,
         secs = started.elapsed().as_secs(),
         "Whole-disk backup complete"
@@ -1692,7 +1967,110 @@ fn backup_disk_inner(
         blocks_copied,
         partitions: prepared.len() as u32,
         duration: started.elapsed(),
+        backup_kind: kind,
+        blocks_unchanged,
+        excluded_files,
+        excluded_bytes,
     })
+}
+
+/// Validate that `parent_image` can serve as the parent of a new whole-disk
+/// child: it exists, is itself a whole-disk image (carries an embedded disk
+/// manifest), uses the same block size and container format. The image-size
+/// (geometry) match is checked by the caller once the child's plan is known.
+/// Returns the parent's full sidecar (its checksums seed the incremental skip).
+fn validate_disk_parent(
+    parent_image: &Path,
+    block_size: u32,
+    format: ImageFormat,
+) -> Result<Sidecar> {
+    if !parent_image.exists() {
+        return Err(OwnBackupError::Config(format!(
+            "parent whole-disk image not found: {}",
+            parent_image.display()
+        )));
+    }
+    let ext = parent_image
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_lowercase();
+    let sidecar = read_embedded_sidecar(parent_image, &ext)?;
+    if sidecar.disk_manifest.is_none() {
+        return Err(OwnBackupError::Config(format!(
+            "parent {} is not a whole-disk image (no embedded disk manifest)",
+            parent_image.display()
+        )));
+    }
+    if sidecar.manifest.block_size != block_size {
+        return Err(OwnBackupError::Config(format!(
+            "parent block size {} != requested {block_size}",
+            sidecar.manifest.block_size
+        )));
+    }
+    if sidecar.info.container != format.extension() {
+        return Err(OwnBackupError::Config(format!(
+            "parent image is '{}' but the requested format is '{}' — a backup \
+             chain cannot change container format",
+            sidecar.info.container,
+            format.extension()
+        )));
+    }
+    Ok(sidecar)
+}
+
+/// Create a differencing CHILD target over `parent_path` for an incremental /
+/// differential whole-disk backup. The child inherits the parent's virtual size
+/// and its GPT (resolved through the chain), so no GPT is written here.
+/// `image_size` is the parent's virtual size (used only to size the qcow2 child).
+fn create_disk_child_target(
+    image_path: &Path,
+    parent_path: &Path,
+    image_size: u64,
+    format: ImageFormat,
+) -> Result<(ImageTarget, u32)> {
+    let sector_size = 512u32;
+    match format {
+        ImageFormat::Qcow2 => {
+            // Reference the parent by bare file name when it sits in the same
+            // folder (qemu resolves relative backing paths against the image's
+            // directory) — same convention as the per-volume path.
+            let backing = if parent_path.parent() == image_path.parent() {
+                parent_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .ok_or_else(|| {
+                        OwnBackupError::Config(format!(
+                            "parent image path has no file name: {}",
+                            parent_path.display()
+                        ))
+                    })?
+            } else {
+                parent_path.to_string_lossy().into_owned()
+            };
+            let writer = crate::qcow2::Qcow2StagedWriter::create(
+                image_path,
+                crate::qcow2::Qcow2WriterOptions {
+                    virtual_size: image_size,
+                    backing_file: Some(backing),
+                    ..Default::default()
+                },
+            )?;
+            Ok((ImageTarget::Qcow2 { writer }, sector_size))
+        }
+        ImageFormat::Vhdx => {
+            create_differencing_vhdx(image_path, parent_path)?;
+            // The child arrives offline (the chain's GPT GUID carries a persisted
+            // offline attribute), so raw sector writes are not blocked by an
+            // auto-mounted filesystem; persist it for the child too.
+            let san_guard = SanPolicyGuard::offline_all();
+            let attached = attach_vhdx(image_path, AttachMode::RawWrite)?;
+            let writer = open_write_with_retry(attached.physical_path())?;
+            writer.set_offline_writable(true)?;
+            drop(san_guard);
+            Ok((ImageTarget::Vhdx { attached, writer, bytes_since_flush: 0 }, sector_size))
+        }
+    }
 }
 
 /// Create an image target of `disk_size` bytes with no parent (full backup).
@@ -1737,6 +2115,7 @@ fn create_disk_image_target(
 }
 
 /// Build the embedded [`ImageManifest`] describing the whole-disk image.
+#[allow(clippy::too_many_arguments)]
 fn whole_disk_image_manifest(
     layout: &own_backup_common::gpt::DiskLayout,
     req: &DiskBackupRequest,
@@ -1744,12 +2123,14 @@ fn whole_disk_image_manifest(
     image_size: u64,
     total_blocks: u64,
     used_blocks: u64,
+    kind: BackupType,
+    parent_backup_id: Option<Uuid>,
 ) -> ImageManifest {
     ImageManifest {
         backup_id: Uuid::new_v4(),
         created_at: chrono::Utc::now().to_rfc3339(),
-        backup_type: BackupType::Full,
-        parent_backup_id: None,
+        backup_type: kind,
+        parent_backup_id,
         source_os: "windows".into(),
         source_disk: DiskInfo {
             device_id: format!(r"\\.\PhysicalDrive{}", req.disk_number),
