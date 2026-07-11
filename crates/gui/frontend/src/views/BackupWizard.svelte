@@ -45,7 +45,6 @@
     ['usb_connect', 'После подключения внешнего устройства', 'в разработке'],
     ['logon', 'При входе пользователя', ''],
     ['logoff', 'При выходе пользователя', ''],
-    ['shutdown', 'При завершении работы / перезагрузке', 'может не успеть при выключении'],
     ['startup', 'При запуске системы (с задержкой)', ''],
   ];
 
@@ -111,6 +110,9 @@
   }
   function toggleSource(dev: string, label: string) {
     if (job.sources.includes(dev)) {
+      // A boot-essential volume (ESP / OS) cannot be dropped while its disk is
+      // in bootable-copy mode — the restore would not boot without it.
+      if (isLockedSource(dev)) return;
       const i = job.sources.indexOf(dev);
       job.sources = job.sources.filter((x) => x !== dev);
       job.source_labels = job.source_labels.filter((_, idx) => idx !== i);
@@ -122,8 +124,11 @@
     // Keep the primary source in sync (used for file naming / back-compat).
     job.source = job.sources[0] ?? '';
     job.source_label = job.source_labels[0] ?? '';
-    // Hand-picking a single volume leaves whole-disk (bootable) mode.
-    job.disk_source = null;
+    // Decoupled from bootable-copy mode: picking a data volume no longer turns
+    // the boot layout off — it just updates which partitions the captured GPT
+    // keeps (behaviour B: a deselected volume drops out of the layout).
+    const d = diskOfDevice(dev);
+    if (d) syncDiskSourceParts(d);
   }
 
   // Proportional segments of a disk: partitions plus hatched gaps for
@@ -169,37 +174,64 @@
     const m = d.device_id.match(/(\d+)\s*$/);
     return m ? parseInt(m[1], 10) : 0;
   }
-  function isWholeDisk(d: DiskInfo): boolean {
+  // A disk can host a bootable OS only if it has an EFI System Partition; the
+  // "bootable copy" option is disabled (read-only) for pure data disks.
+  function isBootableDisk(d: DiskInfo): boolean {
+    return d.partitions.some((p) => p.is_boot);
+  }
+  // The ESP and the OS/system partition are required for a bootable restore, so
+  // while bootable-copy is on they are auto-included and cannot be deselected.
+  function isBootEssential(p: PartitionInfo): boolean {
+    return p.is_boot || p.is_system;
+  }
+  // The disk a selected source device lives on (matched by volume device).
+  function diskOfDevice(dev: string): DiskInfo | null {
+    return engine.disks.find((d) => d.partitions.some((p) => partDevice(p) === dev)) ?? null;
+  }
+  // "Bootable copy of this disk" is on when its layout (disk_source) is captured.
+  function isBootableCopy(d: DiskInfo): boolean {
     return job.disk_source != null && job.disk_source.disk_number === diskNumber(d);
   }
+  // A selected volume that is boot-essential AND on a disk in bootable-copy
+  // mode is locked: its checkbox stays checked and can't be turned off.
+  function isLockedSource(dev: string): boolean {
+    const d = diskOfDevice(dev);
+    if (!d || !isBootableCopy(d)) return false;
+    const p = d.partitions.find((pp) => partDevice(pp) === dev);
+    return !!p && isBootEssential(p);
+  }
 
-  // Click a disk header → back up the WHOLE disk (bootable): select every
-  // backable partition AND capture the GPT layout so the disk can be restored
-  // and boot from scratch. Clicking again turns it off.
-  function toggleDisk(d: DiskInfo) {
-    const parts = d.partitions.filter((p) => partDevice(p));
-    if (parts.length === 0) return;
-    if (isWholeDisk(d)) {
-      job.disk_source = null;
-      job.sources = [];
-      job.source_labels = [];
-      job.source = '';
-      job.source_label = '';
+  // Keep disk_source.parts in sync with the currently-selected backable
+  // partitions of a disk (behaviour B: only kept volumes stay in the layout).
+  function syncDiskSourceParts(d: DiskInfo) {
+    if (!job.disk_source || job.disk_source.disk_number !== diskNumber(d)) return;
+    const parts = d.partitions
+      .filter((p) => { const dev = partDevice(p); return !!dev && job.sources.includes(dev); })
+      .map((p) => ({ part_index: p.index, device: partDevice(p)!, filesystem: p.filesystem }));
+    job.disk_source = { ...job.disk_source, parts };
+  }
+
+  // Toggle the disk's "bootable copy": capture the GPT layout + boot partitions
+  // so the disk can be restored bootable to a new SSD. Independent of which
+  // data volumes are selected; disabled for non-bootable disks.
+  function toggleBootableCopy(d: DiskInfo) {
+    if (!isBootableDisk(d)) return; // read-only for pure data disks
+    if (isBootableCopy(d)) {
+      job.disk_source = null; // turn off; keep the user's volume selection
       return;
     }
-    job.sources = parts.map((p) => partDevice(p)!);
-    job.source_labels = parts.map((p) => partLabel(p));
+    // Turn on: auto-include the boot-essential volumes (ESP + OS), then capture.
+    for (const p of d.partitions) {
+      const dev = partDevice(p);
+      if (dev && isBootEssential(p) && !job.sources.includes(dev)) {
+        job.sources = [...job.sources, dev];
+        job.source_labels = [...job.source_labels, partLabel(p)];
+      }
+    }
     job.source = job.sources[0] ?? '';
     job.source_label = job.source_labels[0] ?? '';
-    job.disk_source = {
-      disk_number: diskNumber(d),
-      disk_model: d.model || d.device_id,
-      parts: parts.map((p) => ({
-        part_index: p.index,
-        device: partDevice(p)!,
-        filesystem: p.filesystem,
-      })),
-    };
+    job.disk_source = { disk_number: diskNumber(d), disk_model: d.model || d.device_id, parts: [] };
+    syncDiskSourceParts(d);
   }
 
   async function browseDest() {
@@ -337,6 +369,23 @@
       .map((dev, i) => ({ device: dev, label: job.source_labels[i] ?? dev }))
       .filter(({ device }) => findPart(device)?.is_encrypted);
   }
+  // Encrypted volumes shown in the password panel UNDER a disk: those already
+  // selected, plus — when the disk is a bootable copy — any still-unselected
+  // encrypted volume, so its Linux root can be decrypted and auto-included.
+  function encryptedForDisk(d: DiskInfo): { device: string; label: string }[] {
+    const boot = isBootableCopy(d);
+    return d.partitions
+      .filter((p) => p.is_encrypted && partDevice(p))
+      .filter((p) => boot || job.sources.includes(partDevice(p)!))
+      .map((p) => {
+        const dev = partDevice(p)!;
+        const i = job.sources.indexOf(dev);
+        return { device: dev, label: i >= 0 ? (job.source_labels[i] ?? partLabel(p)) : partLabel(p) };
+      });
+  }
+  // Linux OS filesystems: a decrypted volume of one of these on a bootable-copy
+  // disk is the system root and is auto-included.
+  const LINUX_OS_FS = ['ext4', 'xfs', 'btrfs'];
   // Unlocked-volume info lives in a GUI-session store (`decryptedVolumes`), so
   // it survives closing and reopening the wizard. Per-device wrong-password
   // markers and the in-flight device are local to this wizard instance.
@@ -346,6 +395,27 @@
   // Keep the "needs a password" job flag in sync with the selection.
   $effect(() => {
     job.requires_password = encryptedSelected().length > 0;
+  });
+
+  // Auto-include a decrypted Linux OS volume (ext4/xfs/btrfs) on a disk marked
+  // "Загрузочная копия" — the system root belongs in a bootable copy. Reactive,
+  // so it works no matter the order (toggle-then-decrypt or decrypt-then-toggle)
+  // and self-corrects if the disk was toggled after the volume was unlocked.
+  // Converges: once a volume is in `sources` the guard skips it (no loop).
+  $effect(() => {
+    for (const d of engine.disks) {
+      if (!isBootableCopy(d)) continue;
+      for (const p of d.partitions) {
+        const dev = partDevice(p);
+        if (!dev || job.sources.includes(dev)) continue;
+        const dec = decryptedVolumes[dev];
+        if (dec && LINUX_OS_FS.includes((dec.filesystem || '').toLowerCase())) {
+          job.sources = [...job.sources, dev];
+          job.source_labels = [...job.source_labels, dec.label || partLabel(p)];
+          syncDiskSourceParts(d);
+        }
+      }
+    }
   });
 
   function setPw(dev: string, value: string) {
@@ -372,14 +442,19 @@
     try {
       const r = await decryptVolume(device, pw, pwInputs[device]?.remember ?? false);
       if (!r.ok) { pwErrors[device] = true; return; }
-      // Remember for the whole GUI session (survives reopening the wizard).
+      // Remember for the whole GUI session (survives reopening the wizard). A
+      // decrypted Linux OS volume on a "Загрузочная копия" disk is then
+      // auto-included by the reactive effect below (any order of actions).
       decryptedVolumes[device] = { label: r.label, used_bytes: r.used_bytes, filesystem: r.filesystem };
+
       // Carry the volume label into the job (file name + display), like C:/D:.
       const i = job.sources.indexOf(device);
       if (i >= 0 && r.label) {
         job.source_labels[i] = r.label;
         if (i === 0) job.source_label = r.label;
       }
+      job.source = job.sources[0] ?? '';
+      job.source_label = job.source_labels[0] ?? '';
     } catch (e) {
       error = String(e);
     } finally {
@@ -451,6 +526,56 @@
   {/if}
 {/snippet}
 
+{#snippet pwPanel(list: { device: string; label: string }[])}
+  <div class="pw-panel under-disk">
+    <div class="pw-head">🔒 Зашифрованные тома — введите пароль для расшифровки</div>
+    {#each list as e (e.device)}
+      <div class="pw-row" class:done={!!decryptedVolumes[e.device]}>
+        <span class="pw-vol" title={e.device}>{e.label}</span>
+        {#if decryptedVolumes[e.device]}
+          <span class="pw-done">✓ Расшифровано</span>
+        {:else}
+          <input
+            type="password"
+            class="pw-input"
+            class:err={pwErrors[e.device]}
+            placeholder="Пароль"
+            autocomplete="off"
+            value={pwInputs[e.device]?.password ?? ''}
+            oninput={(ev) => setPw(e.device, (ev.target as HTMLInputElement).value)}
+            onkeydown={(ev) => {
+              if (ev.key === 'Enter' && decrypting !== e.device && pwInputs[e.device]?.password) {
+                ev.preventDefault();
+                decrypt(e.device);
+              }
+            }}
+          />
+          <label class="pw-remember">
+            <input
+              type="checkbox"
+              checked={pwInputs[e.device]?.remember ?? false}
+              onchange={(ev) => setRemember(e.device, (ev.target as HTMLInputElement).checked)}
+            /> Запомнить
+          </label>
+          <button
+            type="button"
+            class="btn small primary"
+            onclick={() => decrypt(e.device)}
+            disabled={decrypting === e.device || !pwInputs[e.device]?.password}
+          >{decrypting === e.device ? 'Расшифровка…' : 'Расшифровать'}</button>
+        {/if}
+      </div>
+      {#if pwErrors[e.device]}
+        <div class="pw-err">Пароль не подходит</div>
+      {/if}
+    {/each}
+    <div class="pw-hint">
+      Пароль хранится в памяти до закрытия программы. «Запомнить» сохраняет его
+      в защищённом хранилище ОС — это нужно, чтобы копия работала по расписанию.
+    </div>
+  </div>
+{/snippet}
+
 <div class="wizard">
     <div class="wz-head">
       <span class="wz-title">Параметры резервного копирования диска</span>
@@ -483,24 +608,28 @@
             <div class="disks">
               {#each engine.disks as d}
                 <div class="disk-card">
-                  <button
-                    type="button"
-                    class="disk-head"
-                    class:whole={isWholeDisk(d)}
-                    onclick={() => toggleDisk(d)}
-                    title="Копировать диск целиком (загрузочный) — все разделы + таблица разделов"
-                  >
-                    <span class="disk-model">
-                      {#if isWholeDisk(d)}
-                        <svg width="13" height="13" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M20 6 9 17l-5-5"/></svg>
-                      {/if}
-                      {d.model || d.device_id}
+                  <div class="disk-head" class:whole={isBootableCopy(d)}>
+                    <span class="disk-model">{d.model || d.device_id}</span>
+                    <span class="disk-head-right">
+                      {#if isBootableCopy(d)}<span class="whole-badge">загрузочный</span>{/if}
+                      <label
+                        class="boot-toggle"
+                        class:disabled={!isBootableDisk(d)}
+                        title={isBootableDisk(d)
+                          ? 'Сохранить таблицу разделов (GPT) и загрузочные разделы, чтобы восстановить систему на новый диск с сохранением загрузки. Разделы с данными (напр. D:) можно исключить.'
+                          : 'Диск не является загрузочным (нет EFI-раздела) — загрузочная копия недоступна.'}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={isBootableCopy(d)}
+                          disabled={!isBootableDisk(d)}
+                          onchange={() => toggleBootableCopy(d)}
+                        />
+                        <span>Загрузочная копия диска</span>
+                      </label>
+                      <span class="disk-meta">{formatBytes(d.size_bytes)} · {tableLabel(d.partition_table)}</span>
                     </span>
-                    <span class="disk-meta">
-                      {#if isWholeDisk(d)}<span class="whole-badge">диск целиком · загрузочный</span>{/if}
-                      {formatBytes(d.size_bytes)} · {tableLabel(d.partition_table)}
-                    </span>
-                  </button>
+                  </div>
                   <div class="disk-body">
                     <div class="disk-ico">
                       <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="1.3"><path d="M3 8a9 3 0 0 0 18 0M3 8a9 3 0 0 1 18 0v8a9 3 0 0 1-18 0z"/><path d="M3 12a9 3 0 0 0 18 0"/></svg>
@@ -517,8 +646,9 @@
                               type="button"
                               class="seg selectable"
                               class:selected={isSelected(dev)}
+                              class:locked={isLockedSource(dev)}
                               style="flex: {seg.size} 1 0"
-                              title={segTitle(seg.p)}
+                              title={isLockedSource(dev) ? segTitle(seg.p) + ' · обязателен для загрузки' : segTitle(seg.p)}
                               onclick={() => toggleSource(dev, partLabel(seg.p!))}
                             >
                               {@render segInner(seg.p, isSelected(dev))}
@@ -533,51 +663,10 @@
                     </div>
                   </div>
                 </div>
-              {/each}
-            </div>
-          {/if}
-
-          {#if encryptedSelected().length > 0}
-            <div class="pw-panel">
-              <div class="pw-head">🔒 Зашифрованные тома — введите пароль для расшифровки</div>
-              {#each encryptedSelected() as e (e.device)}
-                <div class="pw-row" class:done={!!decryptedVolumes[e.device]}>
-                  <span class="pw-vol" title={e.device}>{e.label}</span>
-                  {#if decryptedVolumes[e.device]}
-                    <span class="pw-done">✓ Расшифровано</span>
-                  {:else}
-                    <input
-                      type="password"
-                      class="pw-input"
-                      class:err={pwErrors[e.device]}
-                      placeholder="Пароль"
-                      autocomplete="off"
-                      value={pwInputs[e.device]?.password ?? ''}
-                      oninput={(ev) => setPw(e.device, (ev.target as HTMLInputElement).value)}
-                    />
-                    <label class="pw-remember">
-                      <input
-                        type="checkbox"
-                        checked={pwInputs[e.device]?.remember ?? false}
-                        onchange={(ev) => setRemember(e.device, (ev.target as HTMLInputElement).checked)}
-                      /> Запомнить
-                    </label>
-                    <button
-                      type="button"
-                      class="btn small primary"
-                      onclick={() => decrypt(e.device)}
-                      disabled={decrypting === e.device || !pwInputs[e.device]?.password}
-                    >{decrypting === e.device ? 'Расшифровка…' : 'Расшифровать'}</button>
-                  {/if}
-                </div>
-                {#if pwErrors[e.device]}
-                  <div class="pw-err">Пароль не подходит</div>
+                {#if encryptedForDisk(d).length > 0}
+                  {@render pwPanel(encryptedForDisk(d))}
                 {/if}
               {/each}
-              <div class="pw-hint">
-                Пароль хранится в памяти до закрытия программы. «Запомнить» сохраняет его
-                в защищённом хранилище ОС — это нужно, чтобы копия работала по расписанию.
-              </div>
             </div>
           {/if}
 
@@ -619,13 +708,6 @@
       <!-- 1: schedule -->
       {#if step === 1}
         <div class="sched">
-          {#if job.requires_password && !allRemembered()}
-            <div class="warn-note">
-              Среди источников есть зашифрованный том. Чтобы копия запускалась по
-              расписанию, отметьте «Запомнить» для его пароля на шаге «Источник» —
-              иначе служба пропустит запланированный запуск.
-            </div>
-          {/if}
           <div class="sched-kinds">
             {#each scheduleKinds as [k, lbl]}
               <label class="radio"><input type="radio" name="skind" value={k} checked={job.schedule.kind === k} onchange={() => (job.schedule.kind = k as Job['schedule']['kind'])} /> {lbl}</label>
@@ -775,6 +857,14 @@
 
     {#if error}<div class="wz-error">{error}</div>{/if}
 
+    {#if mode === 'wizard' && step === 1 && job.schedule.kind !== 'none' && job.requires_password && !allRemembered()}
+      <div class="warn-note footer-warn">
+        Среди источников есть зашифрованный том. Чтобы копия запускалась по
+        расписанию, отметьте «Запомнить» для его пароля на шаге «Источник» —
+        иначе служба пропустит запланированный запуск.
+      </div>
+    {/if}
+
     <!-- footer -->
     <div class="footer">
       <div class="spacer"></div>
@@ -818,11 +908,17 @@
   .sec-sub { font-size: 13px; color: var(--text-muted); }
   .disks { display: flex; flex-direction: column; gap: 14px; }
   .disk-card { border: 1px solid var(--border); border-radius: 6px; overflow: hidden; background: var(--card-bg); }
-  .disk-head { width: 100%; display: flex; align-items: center; justify-content: space-between; padding: 6px 12px; background: var(--panel2); border: 0; border-bottom: 1px solid var(--border); margin: 0; font-family: inherit; cursor: pointer; text-align: left; }
-  .disk-head:hover { background: var(--hover, rgba(45,125,210,.06)); }
+  .disk-head { width: 100%; display: flex; align-items: center; justify-content: space-between; padding: 6px 12px; background: var(--panel2); border: 0; border-bottom: 1px solid var(--border); margin: 0; font-family: inherit; text-align: left; }
   .disk-head.whole { background: rgba(45,125,210,.12); color: var(--primary); }
   .disk-head.whole .disk-model { color: var(--primary); }
-  .whole-badge { font-size: 11px; font-weight: 700; color: #fff; background: var(--primary); padding: 2px 8px; border-radius: 10px; margin-right: 8px; }
+  .disk-head-right { display: flex; align-items: center; gap: 10px; }
+  .boot-toggle { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--head); cursor: pointer; user-select: none; }
+  .boot-toggle input { cursor: pointer; margin: 0; }
+  .boot-toggle.disabled { color: var(--text-muted); cursor: not-allowed; opacity: .55; }
+  .boot-toggle.disabled input { cursor: not-allowed; }
+  .whole-badge { font-size: 11px; font-weight: 700; color: #fff; background: var(--primary); padding: 2px 8px; border-radius: 10px; }
+  .seg.locked { cursor: default; }
+  .seg.locked:hover { filter: none; }
   .disk-model { font-size: 13px; font-weight: 600; color: var(--head); }
   .disk-meta { font-size: 12px; color: var(--text-muted); }
   .disk-body { display: flex; align-items: center; gap: 14px; padding: 7px 12px; }
@@ -847,15 +943,21 @@
   .enc { font-size: 10px; line-height: 1; flex-shrink: 0; }
 
   .pw-panel { margin-top: 16px; padding: 16px 18px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2, rgba(127,127,127,.06)); }
+  /* Password panel rendered directly under its disk card: tighter top margin
+     and a primary-tinted border so the association with the disk is clear. */
+  .pw-panel.under-disk { margin-top: 6px; margin-bottom: 4px; border-color: rgba(45,125,210,.35); background: rgba(45,125,210,.05); }
   .pw-head { font-size: 13px; font-weight: 700; margin-bottom: 12px; }
-  .pw-row { display: flex; align-items: center; gap: 14px; margin-bottom: 6px; }
+  .pw-row { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; }
   /* Once decrypted, centre the "<метка> ✓ Расшифровано" pair. */
   .pw-row.done { justify-content: center; gap: 16px; }
   .pw-row.done .pw-vol { flex: 0 0 auto; }
-  .pw-vol { flex: 0 0 190px; font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .pw-input { flex: 1; padding: 8px 12px; border: 1px solid var(--border); border-radius: 5px; font-size: 13px; }
+  .pw-vol { flex: 0 0 auto; max-width: 240px; font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* One row: label + wide password field + remember + button. The input grows
+     to fill; the label, checkbox and button keep their natural width. */
+  .pw-input { flex: 1 1 auto; min-width: 120px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 5px; font-size: 13px; }
   .pw-input.err { border-color: #d84a4a; }
-  .pw-remember { display: flex; align-items: center; gap: 6px; font-size: 13px; white-space: nowrap; }
+  .pw-remember { flex-shrink: 0; display: flex; align-items: center; gap: 6px; font-size: 13px; white-space: nowrap; }
+  .pw-row .btn { flex-shrink: 0; white-space: nowrap; }
   .pw-done { font-size: 13px; font-weight: 600; color: var(--green, #2e7d32); }
   .pw-err { font-size: 12px; color: #d84a4a; font-weight: 600; margin: 0 0 6px 204px; }
   .pw-hint { font-size: 12px; color: var(--text-muted); margin-top: 10px; }
@@ -874,6 +976,8 @@
   .note, .dev-note { font-size: 12px; color: var(--text-muted); margin-top: 18px; }
   .dev-note { color: #a06a10; background: rgba(251,188,5,.1); padding: 8px 12px; border-radius: 5px; }
   .warn-note { font-size: 13px; color: #8c1d1d; background: rgba(216,74,74,.1); padding: 10px 14px; border-radius: 5px; margin-top: 14px; font-weight: 600; }
+  /* Same warning, docked just above the Отмена/Назад/Далее footer. */
+  .footer-warn { margin: 0 34px 12px; }
   code { background: var(--panel2); padding: 1px 5px; border-radius: 3px; }
   .sched { display: flex; gap: 50px; }
   .sched-kinds { display: flex; flex-direction: column; gap: 14px; }
