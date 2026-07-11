@@ -39,7 +39,7 @@ use crate::raw_copy::copy_used_blocks;
 use crate::san_policy::SanPolicyGuard;
 use crate::sidecar::{
     read_embedded_sidecar, read_sidecar, sidecar_path_for,
-    write_sidecar, BlockChecksum, ChainRole, Sidecar, SidecarInfo,
+    write_sidecar, ChainRole, Sidecar, SidecarInfo,
 };
 use crate::used_sectors::{AllUsedMap, UsedSectorMap};
 use crate::used_sectors_win::NtfsUsedSectorMap;
@@ -1296,6 +1296,104 @@ fn build_boxed_used_map(
     (None, "unknown".into())
 }
 
+/// One partition region inside the whole-disk image: its byte offset on the
+/// disk, its decrypted length, and a reader for its (decrypted) volume data.
+struct DiskRegion {
+    part_offset: u64,
+    volume_len: u64,
+    reader: Box<dyn crate::fat_map::RawVolume + Send>,
+}
+
+/// A [`BlockReader`] over the WHOLE disk image: block `N` (bytes `N*bs..`) is
+/// assembled from the GPT write-ops and the partition regions at their real
+/// offsets; bytes belonging to nothing read as zeros. This lets partitions sit
+/// at any sector offset while the checksum grid stays the image's own blocks.
+struct DiskCompositeReader {
+    block_size: u32,
+    image_size: u64,
+    gpt_ops: Vec<(u64, Vec<u8>)>,
+    regions: Vec<DiskRegion>,
+}
+
+impl BlockReader for DiskCompositeReader {
+    fn read_block(&mut self, n: u64) -> Result<Vec<u8>> {
+        let bs = self.block_size as u64;
+        let start = n * bs;
+        let len = bs.min(self.image_size - start) as usize;
+        let end = start + len as u64;
+        let mut buf = vec![0u8; len];
+        // GPT bytes (protective MBR, primary/backup headers + entry arrays).
+        for (off, bytes) in &self.gpt_ops {
+            let g_end = off + bytes.len() as u64;
+            let from = start.max(*off);
+            let to = end.min(g_end);
+            if from < to {
+                buf[(from - start) as usize..(to - start) as usize]
+                    .copy_from_slice(&bytes[(from - off) as usize..(to - off) as usize]);
+            }
+        }
+        // Partition data (overwrites any overlap — partitions never overlap the
+        // GPT head/tail in a valid layout, so order is immaterial).
+        for r in &mut self.regions {
+            let p_end = r.part_offset + r.volume_len;
+            let from = start.max(r.part_offset);
+            let to = end.min(p_end);
+            if from < to {
+                r.reader.read_at(
+                    from - r.part_offset,
+                    &mut buf[(from - start) as usize..(to - start) as usize],
+                )?;
+            }
+        }
+        Ok(buf)
+    }
+    fn block_size(&self) -> u32 {
+        self.block_size
+    }
+    fn total_blocks(&self) -> u64 {
+        self.image_size.div_ceil(self.block_size as u64)
+    }
+}
+
+/// Whole-disk used-map: a disk-image block is "used" if it overlaps a used
+/// block of any partition (straddling blocks count once).
+struct DiskUsedMap {
+    used: Vec<bool>,
+    count: u64,
+}
+
+impl DiskUsedMap {
+    fn build(prepared: &[PreparedPartition], bs: u64, total_blocks: u64) -> Self {
+        let mut used = vec![false; total_blocks as usize];
+        for prep in prepared {
+            let part_end = prep.part_offset + prep.volume_len;
+            let vblocks = prep.volume_len.div_ceil(bs);
+            for vb in 0..vblocks {
+                if prep.used.is_block_used(vb) {
+                    let d0 = prep.part_offset + vb * bs;
+                    let d1 = part_end.min(d0 + bs); // this volume block's disk byte span
+                    for db in d0 / bs..=(d1 - 1) / bs {
+                        if let Some(slot) = used.get_mut(db as usize) {
+                            *slot = true;
+                        }
+                    }
+                }
+            }
+        }
+        let count = used.iter().filter(|&&u| u).count() as u64;
+        Self { used, count }
+    }
+}
+
+impl UsedSectorMap for DiskUsedMap {
+    fn is_block_used(&self, block_number: u64) -> bool {
+        self.used.get(block_number as usize).copied().unwrap_or(false)
+    }
+    fn used_block_count(&self) -> u64 {
+        self.count
+    }
+}
+
 /// Back up a whole disk (several partitions of one physical drive) into ONE
 /// bootable image with the real GPT + an embedded restore manifest. Used
 /// sectors only (never a raw disk dump); each partition's data lands at its
@@ -1357,13 +1455,11 @@ fn backup_disk_inner(
             .ok_or_else(|| {
                 OwnBackupError::Config(format!("partition {} not found in the disk GPT", p.part_index))
             })?;
+        // Partitions sit at their REAL disk offset (sector-aligned, not
+        // necessarily block-aligned — a BOOT partition may start at LBA 34). The
+        // disk-composite reader below copies whole-disk blocks, so any offset is
+        // fine; the checksum block grid is the image itself.
         let part_offset = entry.first_lba * sector;
-        if part_offset % bs != 0 {
-            return Err(OwnBackupError::Config(format!(
-                "partition {} offset {part_offset} is not block-aligned ({bs})",
-                p.part_index
-            )));
-        }
 
         let source = normalize_device_path(&p.device);
         // VSS for a live lettered volume; else read the source directly.
@@ -1435,16 +1531,26 @@ fn backup_disk_inner(
     }
 
     // 3. Size the image from the used-block total, plan the meta partition.
-    let total_used: u64 = prepared.iter().map(|p| p.used.used_block_count()).sum();
-    let meta_size = crate::sidecar::calculate_meta_partition_size(total_used.max(1));
+    // Build the whole-disk used-map FIRST (over the partitions region) so the
+    // meta partition is sized from the actual disk-block count: a partition not
+    // aligned to the block size straddles two disk-blocks per volume block, so
+    // the count can exceed the sum of per-volume used counts.
+    let part_end = prepared.iter().map(|p| p.part_offset + p.volume_len).max().unwrap_or(0);
+    let part_end_blocks = part_end.div_ceil(bs);
+    let disk_used = DiskUsedMap::build(&prepared, bs, part_end_blocks);
+    let meta_size = crate::sidecar::calculate_meta_partition_size(disk_used.count.max(1));
     let plan = own_backup_common::gpt::plan_whole_disk_image(&layout, meta_size);
     let meta_offset = plan.meta_first_lba * sector;
     let meta_guid = Uuid::new_v4();
 
     // 4. Create the image and write the real GPT (+ appended OwnBackupMeta).
     let (mut target, sector_size) = create_disk_image_target(&req.image_path, plan.image_size, req.image_format)?;
-    for op in crate::gpt_writer::whole_disk_gpt_ops(&layout, &plan, meta_guid)? {
-        target.write_at(op.offset, &op.bytes)?;
+    let gpt_ops: Vec<(u64, Vec<u8>)> = crate::gpt_writer::whole_disk_gpt_ops(&layout, &plan, meta_guid)?
+        .into_iter()
+        .map(|op| (op.offset, op.bytes))
+        .collect();
+    for (off, bytes) in &gpt_ops {
+        target.write_at(*off, bytes)?;
     }
     if let ImageTarget::Vhdx { writer, .. } = &mut target {
         // Persist the offline attribute for the new disk GUID so future attaches
@@ -1454,38 +1560,38 @@ fn backup_disk_inner(
         }
     }
 
-    // 5. Copy each partition's used blocks into the image at its real offset.
-    let mut checksums: Vec<BlockChecksum> = Vec::new();
-    let mut bytes_copied = 0u64;
-    let mut blocks_copied = 0u64;
+    // 5. Copy the disk as whole-image blocks (block N = image offset N*bs). Each
+    //    block is assembled from the GPT and the partitions at their real
+    //    offsets, so partitions need no block alignment and the checksum grid is
+    //    the image itself (block_number * bs = disk offset — verifiable).
+    //    `disk_used` (built above) returns false past the partitions region, so
+    //    the meta/tail blocks (written separately) are not copied.
+    let mut regions: Vec<DiskRegion> = Vec::new();
     for prep in &prepared {
-        let part_block_base = prep.part_offset / bs;
-        let mut reader: Box<dyn BlockReader> = if prep.luks.is_some() {
-            let dev = WinRawDevice::open_read(&prep.read_path)?;
-            let view = crate::decrypt::DecryptingVolume::new(Box::new(dev), prep.luks.clone().unwrap());
-            Box::new(crate::block_reader::RawVolumeBlockReader::new(Box::new(view), req.block_size)?)
-        } else {
-            Box::new(WinBlockReader::open(&prep.read_path, req.block_size)?)
+        let dev = WinRawDevice::open_read(&prep.read_path)?;
+        let reader: Box<dyn crate::fat_map::RawVolume + Send> = match &prep.luks {
+            Some(l) => Box::new(crate::decrypt::DecryptingVolume::new(Box::new(dev), l.clone())),
+            None => Box::new(dev),
         };
-        let outcome = copy_used_blocks(
-            &format!("disk{}", req.disk_number),
-            reader.as_mut(),
-            prep.used.as_ref(),
-            None, // full backup (parent chain = D5)
-            |vol_block, data| target.write_at(prep.part_offset + vol_block * bs, data),
-            &mut progress,
-        )?;
-        bytes_copied += outcome.bytes_copied;
-        blocks_copied += outcome.blocks_copied;
-        // Re-key each checksum from volume-relative to whole-disk block number.
-        for c in outcome.checksums {
-            checksums.push(BlockChecksum {
-                block_number: part_block_base + c.block_number,
-                checksum: c.checksum,
-            });
-        }
-        info!(part = prep.part_index, blocks = outcome.blocks_copied, "whole-disk backup: partition copied");
+        regions.push(DiskRegion { part_offset: prep.part_offset, volume_len: prep.volume_len, reader });
     }
+    let mut composite = DiskCompositeReader {
+        block_size: req.block_size,
+        image_size: plan.image_size,
+        gpt_ops,
+        regions,
+    };
+    let outcome = copy_used_blocks(
+        &format!("disk{}", req.disk_number),
+        &mut composite,
+        &disk_used,
+        None, // full backup (parent chain = D5)
+        |block, data| target.write_at(block * bs, data),
+        &mut progress,
+    )?;
+    let checksums = outcome.checksums;
+    let bytes_copied = outcome.bytes_copied;
+    let blocks_copied = outcome.blocks_copied;
 
     // 6. Reserve the meta partition region while the image is open (so the VHDX
     //    BAT allocates it), then finalize and release the snapshots.
@@ -1540,7 +1646,7 @@ fn backup_disk_inner(
         sector_size,
         plan.image_size,
         total_blocks,
-        total_used,
+        blocks_copied,
     );
     // A whole-disk image is disk-block absolute → volume_data_offset = 0.
     let mut info = SidecarInfo::new_full(image_file_name, 0);
