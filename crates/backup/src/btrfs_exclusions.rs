@@ -14,8 +14,15 @@
 //!   Zeroed ranges also get their **checksum-tree entries rewritten** to the
 //!   crc32c of a zero sector — unlike ext4/NTFS, btrfs verifies data checksums
 //!   on read, so a zero-filled ghost would otherwise return EIO.
-//! * **Stage 2 (metadata true removal, follow-up):** B-tree item removal so the
-//!   file vanishes from the catalog; built on the same [`EditSet`] machinery.
+//! * **Stage 2 (metadata true removal):** a file whose extents are ALL cleanly
+//!   exclusively-owned is fully deleted — its FS-tree items (inode, backref,
+//!   extent-data, dir-item/index) are removed, its extents freed in the extent
+//!   tree, block-group `used` and superblock `bytes_used` decremented, the
+//!   surviving parent's dir size fixed, every touched B-tree node's checksum
+//!   recomputed (DUP → both copies) and the first-key change cascaded up the
+//!   parent chain. The free-space-tree feature is dropped (the kernel rebuilds
+//!   it on mount). Result: `btrfs check` (incl. `--check-data-csum`) clean and
+//!   the file gone. A file with any shared/snapshot extent stays on Stage 1.
 //!
 //! Matching is per subvolume: every subvolume/snapshot tree is walked and the
 //! patterns are applied relative to *its* root, so `var/cache/**` matches inside
@@ -288,6 +295,13 @@ impl Fs {
 // Transactional tree-block editor
 // ---------------------------------------------------------------------------
 
+/// A btrfs item key: (objectid, type, offset).
+type Key = (u64, u8, u64);
+
+fn read_key(b: &[u8], o: usize) -> Key {
+    (u64at(b, o), b[o + 8], u64at(b, o + 9))
+}
+
 /// In-memory edit buffer over tree blocks: nodes are loaded once by LOGICAL
 /// address, mutated, and emitted as physical patches with recomputed node
 /// checksums — into **every** stripe copy (DUP metadata). Used by the Stage-1
@@ -295,11 +309,23 @@ impl Fs {
 struct EditSet {
     nodesize: u64,
     nodes: BTreeMap<u64, Vec<u8>>,
+    /// Leaf items to delete, by leaf logical → set of keys.
+    deletes: BTreeMap<u64, HashSet<Key>>,
+    /// In-place item-data patches, by leaf logical → (key, field offset, bytes).
+    patches: BTreeMap<u64, Vec<(Key, usize, Vec<u8>)>>,
+    /// child logical → (parent internal-node logical, slot) — for key cascade.
+    parent: HashMap<u64, (u64, usize)>,
 }
 
 impl EditSet {
     fn new(nodesize: u64) -> Self {
-        Self { nodesize, nodes: BTreeMap::new() }
+        Self {
+            nodesize,
+            nodes: BTreeMap::new(),
+            deletes: BTreeMap::new(),
+            patches: BTreeMap::new(),
+            parent: HashMap::new(),
+        }
     }
 
     /// Borrow a mutable copy of the tree block at `logical`, loading it on
@@ -312,12 +338,68 @@ impl EditSet {
         Ok(self.nodes.get_mut(&logical).unwrap())
     }
 
-    /// Recompute every touched node's checksum and emit `(physical, bytes)`
-    /// patches for all stripe copies.
-    fn finalize(mut self, fs: &Fs) -> Result<Vec<(u64, Vec<u8>)>> {
+    fn delete_item(&mut self, leaf: u64, key: Key) {
+        self.deletes.entry(leaf).or_default().insert(key);
+    }
+
+    fn patch_item(&mut self, leaf: u64, key: Key, field_off: usize, bytes: Vec<u8>) {
+        self.patches.entry(leaf).or_default().push((key, field_off, bytes));
+    }
+
+    /// Record the whole tree's parent linkage (child logical → parent+slot) so
+    /// a leaf whose first key changes can update its ancestors.
+    fn learn_parents(&mut self, vol: &mut dyn RawVolume, fs: &Fs, root: u64) -> Result<()> {
+        let mut stack = vec![root];
+        let mut seen = 0u64;
+        while let Some(logical) = stack.pop() {
+            seen += 1;
+            if seen > 4_000_000 {
+                return Err(bad("tree too large learning parents"));
+            }
+            let node = read_node(vol, &fs.chunks, logical, self.nodesize)?;
+            if node[0x64] == 0 {
+                continue; // leaf
+            }
+            let nritems = u32at(&node, 0x60) as usize;
+            for i in 0..nritems {
+                let off = HEADER + i * 33;
+                let child = u64at(&node, off + 17);
+                self.parent.insert(child, (logical, i));
+                stack.push(child);
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply all deletes/patches (rebuilding affected leaves), cascade any
+    /// changed first-keys up through the parent chain, recompute every touched
+    /// node's checksum, and emit `(physical, bytes)` patches for all stripe
+    /// copies (DUP metadata patched in both).
+    fn finalize(mut self, vol: &mut dyn RawVolume, fs: &Fs) -> Result<Vec<(u64, Vec<u8>)>> {
+        // 1. Rebuild each leaf that has deletes/patches; track first-key changes.
+        let leaves: HashSet<u64> =
+            self.deletes.keys().chain(self.patches.keys()).copied().collect();
+        for leaf in leaves {
+            let mut node = read_node(vol, &fs.chunks, leaf, self.nodesize)?;
+            let old_first = {
+                let n = u32at(&node, 0x60) as usize;
+                (n > 0).then(|| read_key(&node, HEADER))
+            };
+            self.rebuild_leaf(&mut node, self.deletes.get(&leaf), self.patches.get(&leaf))?;
+            let new_first = {
+                let n = u32at(&node, 0x60) as usize;
+                (n > 0).then(|| read_key(&node, HEADER))
+            };
+            self.nodes.insert(leaf, node);
+            if new_first != old_first {
+                if let Some(k) = new_first {
+                    self.cascade_key(vol, fs, leaf, k)?;
+                }
+            }
+        }
+        // 2. Recompute checksums + emit physical patches for every touched node.
         let mut out = Vec::new();
         for (logical, mut node) in std::mem::take(&mut self.nodes) {
-            // Node checksum: crc over [0x20, nodesize), stored LE at 0.
             let c = fs.flavor.compute(&node[0x20..]);
             node[0..4].copy_from_slice(&c.to_le_bytes());
             node[4..0x20].fill(0);
@@ -326,6 +408,74 @@ impl EditSet {
             }
         }
         Ok(out)
+    }
+
+    /// Rebuild `node` (a leaf) dropping `deletes` and applying in-place `patches`
+    /// (same-size), keeping key order and repacking item pointers + data.
+    fn rebuild_leaf(
+        &self,
+        node: &mut [u8],
+        deletes: Option<&HashSet<Key>>,
+        patches: Option<&Vec<(Key, usize, Vec<u8>)>>,
+    ) -> Result<()> {
+        let nritems = u32at(node, 0x60) as usize;
+        let mut kept: Vec<(Key, Vec<u8>)> = Vec::new();
+        for i in 0..nritems {
+            let it = HEADER + i * 25;
+            let key = read_key(node, it);
+            let off = HEADER + u32at(node, it + 17) as usize;
+            let len = u32at(node, it + 21) as usize;
+            if off + len > node.len() {
+                return Err(bad("leaf item data exceeds node"));
+            }
+            if deletes.is_some_and(|d| d.contains(&key)) {
+                continue;
+            }
+            let mut data = node[off..off + len].to_vec();
+            if let Some(ps) = patches {
+                for (pk, fo, bytes) in ps {
+                    if *pk == key && fo + bytes.len() <= data.len() {
+                        data[*fo..*fo + bytes.len()].copy_from_slice(bytes);
+                    }
+                }
+            }
+            kept.push((key, data));
+        }
+        // Re-emit: header stays, item array from HEADER, data from the tail.
+        for b in node[HEADER..].iter_mut() {
+            *b = 0;
+        }
+        let mut data_end = node.len();
+        for (idx, (key, data)) in kept.iter().enumerate() {
+            let it = HEADER + idx * 25;
+            node[it..it + 8].copy_from_slice(&key.0.to_le_bytes());
+            node[it + 8] = key.1;
+            node[it + 9..it + 17].copy_from_slice(&key.2.to_le_bytes());
+            data_end -= data.len();
+            node[it + 17..it + 21].copy_from_slice(&((data_end - HEADER) as u32).to_le_bytes());
+            node[it + 21..it + 25].copy_from_slice(&(data.len() as u32).to_le_bytes());
+            node[data_end..data_end + data.len()].copy_from_slice(data);
+        }
+        node[0x60..0x64].copy_from_slice(&(kept.len() as u32).to_le_bytes());
+        Ok(())
+    }
+
+    /// The child at `child_logical` now begins with `new_key`; update its parent
+    /// internal node's key at that slot, cascading if the parent's slot 0 (its
+    /// own first key) changed.
+    fn cascade_key(&mut self, vol: &mut dyn RawVolume, fs: &Fs, child_logical: u64, new_key: Key) -> Result<()> {
+        let Some(&(parent, slot)) = self.parent.get(&child_logical) else {
+            return Ok(()); // root — no parent
+        };
+        let node = self.node_mut(vol, fs, parent)?;
+        let ko = HEADER + slot * 33;
+        node[ko..ko + 8].copy_from_slice(&new_key.0.to_le_bytes());
+        node[ko + 8] = new_key.1;
+        node[ko + 9..ko + 17].copy_from_slice(&new_key.2.to_le_bytes());
+        if slot == 0 {
+            self.cascade_key(vol, fs, parent, new_key)?;
+        }
+        Ok(())
     }
 }
 
@@ -653,9 +803,22 @@ fn rewrite_csums_for_zeroed(
 // Entry point
 // ---------------------------------------------------------------------------
 
-/// Walk every subvolume of the btrfs volume, match `patterns`, and produce the
-/// Stage-1 exclusion: physical zero-ranges for exclusively-owned extents plus
-/// checksum-tree patches keeping the zeroed data readable. Shared data is kept.
+/// One matched subvolume's collected state.
+struct Subvol {
+    id: u64,
+    root: u64,
+    data: SubvolData,
+    /// All matched inodes (files + directory-subtree closure) in this subvol.
+    matched: HashSet<u64>,
+}
+
+/// Walk every subvolume, match `patterns`, and remove the matched files:
+/// **Stage 2** (true catalog removal) for files whose extents are cleanly
+/// exclusively-owned — their B-tree items are deleted, extents freed, and all
+/// accounting fixed to a `btrfs check`-clean state; **Stage 1** (zero + csum
+/// rewrite) for files whose data is shared (snapshot/reflink), which are kept in
+/// the catalog with only their exclusive extents zeroed. Shared data is never
+/// touched (CoW safety).
 pub fn scan_btrfs_exclusions(
     vol: &mut dyn RawVolume,
     patterns: &[String],
@@ -669,103 +832,328 @@ pub fn scan_btrfs_exclusions(
     }
     let fs = Fs::bootstrap(vol)?;
 
-    // 1. Walk every subvolume, match, and gather candidates.
-    let mut matched_pairs: HashSet<(u64, u64)> = HashSet::new(); // (root, ino)
-    let mut candidates: HashMap<u64, u64> = HashMap::new(); // bytenr → len
-    // (root, ino) → its extents / metadata, for the accounting pass.
+    // 1. Collect + match every subvolume.
+    let mut subvols: Vec<Subvol> = Vec::new();
+    let mut matched_pairs: HashSet<(u64, u64)> = HashSet::new();
+    let mut candidates: HashMap<u64, u64> = HashMap::new();
     let mut file_extents: HashMap<(u64, u64), Vec<DataRef>> = HashMap::new();
     let mut file_sizes: HashMap<(u64, u64), u64> = HashMap::new();
-    let mut inline_files: HashSet<(u64, u64)> = HashSet::new();
-
-    for (subvol_id, root) in fs.subvol_roots() {
-        let d = collect_subvol(vol, &fs, root)?;
+    for (id, root) in fs.subvol_roots() {
+        let data = collect_subvol(vol, &fs, root)?;
         tick(scan.entries_scanned)?;
-        let matched = match_subvol(&d, &parsed, &mut scan);
-        tick(scan.entries_scanned)?;
-        for ino in matched {
-            // Hard-linked files (nlink > 1) are kept whole, like on ext4/NTFS.
-            if let Some(&(size, nlink, is_dir)) = d.inodes.get(&ino) {
+        let matched = match_subvol(&data, &parsed, &mut scan);
+        for &ino in &matched {
+            if let Some(&(size, nlink, is_dir)) = data.inodes.get(&ino) {
+                // Hard-linked files kept whole (like ext4/NTFS).
                 if !is_dir && nlink > 1 {
                     continue;
                 }
-                matched_pairs.insert((subvol_id, ino));
-                file_sizes.insert((subvol_id, ino), if is_dir { 0 } else { size });
-                if d.has_inline.contains(&ino) {
-                    inline_files.insert((subvol_id, ino));
-                }
-                if let Some(exts) = d.extents.get(&ino) {
+                matched_pairs.insert((id, ino));
+                file_sizes.insert((id, ino), if is_dir { 0 } else { size });
+                if let Some(exts) = data.extents.get(&ino) {
                     for e in exts {
                         candidates
                             .entry(e.disk_bytenr)
                             .and_modify(|l| *l = (*l).max(e.disk_num_bytes))
                             .or_insert(e.disk_num_bytes);
                     }
-                    file_extents.insert((subvol_id, ino), exts.clone());
+                    file_extents.insert((id, ino), exts.clone());
                 }
             }
         }
+        subvols.push(Subvol { id, root, data, matched });
     }
     if matched_pairs.is_empty() {
         scan.ranges.finalize();
         return Ok(scan);
     }
 
-    // 2. Prove exclusive ownership through the extent tree.
+    // 2. Extent-ownership analysis.
     let own = analyze_extents(vol, &fs, &candidates, &matched_pairs)?;
-    let exclusive = |bytenr: u64| -> bool {
-        own.get(&bytenr)
-            .map(|e| !e.foreign && e.refs > 0 && e.refs == e.matched_count)
-            .unwrap_or(false)
+    let freeable = |bytenr: u64| -> bool {
+        own.get(&bytenr).map(|e| !e.foreign && e.refs > 0 && e.refs == e.matched_count).unwrap_or(false)
     };
 
-    // 3. Zero-ranges (physical) + logical ranges for the csum rewrite.
-    let mut zeroed_logical = ByteRanges::new();
-    for (&(root, ino), exts) in &file_extents {
-        let all_exclusive = exts.iter().all(|e| exclusive(e.disk_bytenr));
-        if !all_exclusive {
-            scan.files_kept_shared += 1;
-            info!(
-                root, ino,
-                "btrfs exclusions: file data is shared (snapshot/reflink) — data kept"
-            );
-            continue;
+    // 3. Removability. A FILE is removable iff every data extent is cleanly
+    //    freeable (or it has none). A DIRECTORY is removable iff every one of
+    //    its (matched) children is removable and it links no subvolume.
+    let mut removable: HashSet<(u64, u64)> = HashSet::new();
+    for sv in &subvols {
+        // children by parent, and subvol-link parents.
+        let mut kids: HashMap<u64, Vec<std::result::Result<u64, ()>>> = HashMap::new();
+        for e in &sv.data.dirents {
+            kids.entry(e.parent).or_default().push(e.child);
         }
-        for e in exts {
+        // Files first.
+        for &ino in &sv.matched {
+            let is_dir = sv.data.inodes.get(&ino).map(|&(_, _, d)| d).unwrap_or(false);
+            if is_dir {
+                continue;
+            }
+            if !matched_pairs.contains(&(sv.id, ino)) {
+                continue; // hard-linked, skipped above
+            }
+            let ok = file_extents
+                .get(&(sv.id, ino))
+                .map(|exts| exts.iter().all(|e| freeable(e.disk_bytenr)))
+                .unwrap_or(true); // no extents (empty file) → removable
+            if ok {
+                removable.insert((sv.id, ino));
+            }
+        }
+        // Directories, bottom-up to a fixpoint.
+        loop {
+            let mut changed = false;
+            for &ino in &sv.matched {
+                if removable.contains(&(sv.id, ino)) {
+                    continue;
+                }
+                let is_dir = sv.data.inodes.get(&ino).map(|&(_, _, d)| d).unwrap_or(false);
+                if !is_dir {
+                    continue;
+                }
+                let all_kids_ok = kids.get(&ino).map(|cs| {
+                    cs.iter().all(|c| matches!(c, Ok(ci) if removable.contains(&(sv.id, *ci))))
+                }).unwrap_or(true); // empty dir → removable
+                if all_kids_ok {
+                    removable.insert((sv.id, ino));
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+
+    // 4. Apply Stage 2 (removable) — collects freed logical ranges.
+    let mut edits = EditSet::new(fs.nodesize);
+    let mut freed_logical = ByteRanges::new();
+    apply_stage2(vol, &fs, &subvols, &removable, &file_extents, &file_sizes, &mut edits, &mut freed_logical, &mut scan)?;
+
+    // 5. Stage 1 for matched-but-NOT-removable files: zero their exclusively
+    //    owned extents (shared extents stay), rewrite those csums.
+    let mut zeroed_logical = ByteRanges::new();
+    for (&(sid, ino), exts) in &file_extents {
+        if removable.contains(&(sid, ino)) {
+            continue; // handled by Stage 2
+        }
+        // Only exclusively-owned extents may be zeroed.
+        let excl: Vec<&DataRef> = exts.iter().filter(|e| freeable(e.disk_bytenr)).collect();
+        if excl.len() != exts.len() {
+            scan.files_kept_shared += 1;
+        }
+        for e in excl {
             zeroed_logical.add(e.disk_bytenr, e.disk_bytenr + e.disk_num_bytes);
         }
-        scan.bytes_excluded += file_sizes.get(&(root, ino)).copied().unwrap_or(0);
     }
     zeroed_logical.finalize();
-    for (start, end) in zeroed_logical.iter() {
+    freed_logical.finalize();
+
+    // 6. Both freed (Stage 2) and zeroed (Stage 1) ranges have their DATA zeroed
+    //    in the image, so their csum-tree entries are rewritten to the zero-sector
+    //    csum — a freed extent is dropped from the extent tree, but leaving its
+    //    csum matching zero data keeps `btrfs check --check-data-csum` happy
+    //    without splitting csum items. Then translate to physical for the
+    //    used-map drop / zeroing.
+    let mut all_zeroed = ByteRanges::new();
+    for rl in [&freed_logical, &zeroed_logical] {
+        for (s, e) in rl.iter() {
+            all_zeroed.add(s, e);
+        }
+    }
+    all_zeroed.finalize();
+    rewrite_csums_for_zeroed(vol, &fs, &all_zeroed, &mut edits)?;
+    for (start, end) in all_zeroed.iter() {
         for phys in fs.chunks.physical(start, end - start)? {
             scan.ranges.add(phys, phys + (end - start));
         }
     }
     scan.ranges.finalize();
+
+    // 7. Superblock: decrement bytes_used, invalidate the free-space tree (the
+    //    kernel rebuilds it on mount), fix csum on every mirror.
+    let freed_bytes: u64 = freed_logical.iter().map(|(s, e)| e - s).sum();
+    scan.patches = edits.finalize(vol, &fs)?;
+    patch_superblocks(vol, &fs, freed_bytes, &mut scan.patches)?;
+
     scan.files_excluded = matched_pairs.len() as u64;
-
-    // Inline files (data inside the leaf) can only disappear with Stage 2.
-    if !inline_files.is_empty() {
-        info!(
-            files = inline_files.len(),
-            "btrfs exclusions: inline-data files await catalog removal (Stage 2)"
-        );
-    }
-
-    // 4. Checksum rewrite for the zeroed ranges (EIO-free ghosts).
-    let mut edits = EditSet::new(fs.nodesize);
-    rewrite_csums_for_zeroed(vol, &fs, &zeroed_logical, &mut edits)?;
-    scan.patches = edits.finalize(&fs)?;
-
     info!(
         files = scan.files_excluded,
+        removed = removable.len(),
         kept_shared = scan.files_kept_shared,
         bytes = scan.bytes_excluded,
-        zero_ranges = scan.ranges.iter().count(),
+        freed_bytes,
         patches = scan.patches.len(),
-        "btrfs exclusions: Stage-1 scan complete"
+        "btrfs exclusions: scan complete (Stage 1 + Stage 2)"
     );
     Ok(scan)
+}
+
+/// Delete the removable files/dirs from the FS trees, free their extents in the
+/// extent tree, and fix block-group accounting. Fills `freed_logical` with the
+/// logical ranges of fully-freed extents (→ physical drop + not copied) and
+/// accumulates `scan.bytes_excluded`.
+#[allow(clippy::too_many_arguments)]
+fn apply_stage2(
+    vol: &mut dyn RawVolume,
+    fs: &Fs,
+    subvols: &[Subvol],
+    removable: &HashSet<(u64, u64)>,
+    file_extents: &HashMap<(u64, u64), Vec<DataRef>>,
+    file_sizes: &HashMap<(u64, u64), u64>,
+    edits: &mut EditSet,
+    freed_logical: &mut ByteRanges,
+    scan: &mut BtrfsExclusionScan,
+) -> Result<()> {
+    // --- FS trees: delete items + fix surviving-parent dir sizes ---
+    for sv in subvols {
+        let rem: HashSet<u64> = sv
+            .matched
+            .iter()
+            .filter(|&&ino| removable.contains(&(sv.id, ino)))
+            .copied()
+            .collect();
+        if rem.is_empty() {
+            continue;
+        }
+        edits.learn_parents(vol, fs, sv.root)?;
+        let mut isize_dec: HashMap<u64, u64> = HashMap::new();
+        let mut inode_leaf: HashMap<u64, u64> = HashMap::new();
+        walk_tree(vol, &fs.chunks, sv.root, fs.nodesize, |node, nritems| {
+            let leaf = u64at(node, 0x30);
+            for_each_item(node, nritems, |objectid, ktype, koffset, data| {
+                if rem.contains(&objectid) {
+                    edits.delete_item(leaf, (objectid, ktype, koffset));
+                } else if ktype == DIR_ITEM || ktype == DIR_INDEX {
+                    let loc = u64at(data, 0);
+                    if rem.contains(&loc) {
+                        edits.delete_item(leaf, (objectid, ktype, koffset));
+                        // btrfs dir i_size counts name_len for BOTH the DIR_ITEM
+                        // and the DIR_INDEX of each entry (measured: isize ==
+                        // 2·Σname_len), so decrement for both here.
+                        if data.len() >= 29 {
+                            *isize_dec.entry(objectid).or_default() += u16at(data, 27);
+                        }
+                    }
+                }
+                if ktype == INODE_ITEM && !rem.contains(&objectid) {
+                    inode_leaf.insert(objectid, leaf);
+                }
+                Ok(())
+            })
+        })?;
+        for (parent, dec) in isize_dec {
+            let old = sv.data.inodes.get(&parent).map(|&(s, _, _)| s).unwrap_or(0);
+            if let Some(&leaf) = inode_leaf.get(&parent) {
+                edits.patch_item(leaf, (parent, INODE_ITEM, 0), 16, old.saturating_sub(dec).to_le_bytes().to_vec());
+            }
+        }
+        // Account excluded bytes for removed files.
+        for &ino in &rem {
+            scan.bytes_excluded += file_sizes.get(&(sv.id, ino)).copied().unwrap_or(0);
+        }
+    }
+
+    // --- Extent tree: free every removable file's extents ---
+    let mut freed_extents: BTreeMap<u64, u64> = BTreeMap::new(); // bytenr → len
+    for (&(sid, ino), exts) in file_extents {
+        if removable.contains(&(sid, ino)) {
+            for e in exts {
+                freed_extents.insert(e.disk_bytenr, e.disk_num_bytes);
+            }
+        }
+    }
+    if freed_extents.is_empty() {
+        return Ok(());
+    }
+    let extent_root = *fs.tree_roots.get(&crate::btrfs_map::EXTENT_TREE_OBJECTID).ok_or_else(|| bad("no extent tree root"))?;
+    edits.learn_parents(vol, fs, extent_root)?;
+
+    // Block groups: (start,len,leaf,key,used) — to decrement `used`.
+    struct Bg {
+        leaf: u64,
+        key: Key,
+        used: u64,
+        start: u64,
+        len: u64,
+    }
+    let mut bgs: Vec<Bg> = Vec::new();
+    walk_tree(vol, &fs.chunks, extent_root, fs.nodesize, |node, nritems| {
+        let leaf = u64at(node, 0x30);
+        for_each_item(node, nritems, |objectid, ktype, koffset, data| {
+            match ktype {
+                EXTENT_ITEM_TYPE => {
+                    if freed_extents.contains_key(&objectid) {
+                        edits.delete_item(leaf, (objectid, ktype, koffset));
+                    }
+                }
+                EXTENT_DATA_REF | SHARED_DATA_REF => {
+                    // Keyed backrefs of a freed extent are objectid==bytenr.
+                    if freed_extents.contains_key(&objectid) {
+                        edits.delete_item(leaf, (objectid, ktype, koffset));
+                    }
+                }
+                192 /* BLOCK_GROUP_ITEM */ => {
+                    if data.len() >= 8 {
+                        bgs.push(Bg { leaf, key: (objectid, ktype, koffset), used: u64at(data, 0), start: objectid, len: koffset });
+                    }
+                }
+                _ => {}
+            }
+            Ok(())
+        })
+    })?;
+
+    // Decrement each block group's `used` by the freed bytes inside it.
+    let mut bg_dec: HashMap<usize, u64> = HashMap::new();
+    for (&bytenr, &len) in &freed_extents {
+        let bi = bgs.iter().position(|b| bytenr >= b.start && bytenr + len <= b.start + b.len)
+            .ok_or_else(|| bad(format!("freed extent {bytenr} in no block group")))?;
+        *bg_dec.entry(bi).or_default() += len;
+        // Logical range → physical drop; account bytes.
+        freed_logical.add(bytenr, bytenr + len);
+    }
+    for (bi, dec) in bg_dec {
+        let b = &bgs[bi];
+        edits.patch_item(b.leaf, b.key, 0, b.used.saturating_sub(dec).to_le_bytes().to_vec());
+    }
+    Ok(())
+}
+
+/// Patch all superblock mirrors: `bytes_used -= freed`, clear
+/// `FREE_SPACE_TREE_VALID` (compat_ro bit 1 — the kernel rebuilds the FST on
+/// mount), recompute the crc32c checksum. Superblocks live at fixed physical
+/// offsets (not in the chunk map), so patches are emitted directly.
+fn patch_superblocks(
+    vol: &mut dyn RawVolume,
+    fs: &Fs,
+    freed: u64,
+    patches: &mut Vec<(u64, Vec<u8>)>,
+) -> Result<()> {
+    for &off in &crate::btrfs_map::SB_MIRRORS {
+        if off + SUPER_SIZE > vol.len() {
+            continue;
+        }
+        let mut sb = vec![0u8; SUPER_SIZE as usize];
+        vol.read_at(off, &mut sb)?;
+        if &sb[0x40..0x48] != MAGIC {
+            continue;
+        }
+        let used = u64at(&sb, 0x78).saturating_sub(freed);
+        sb[0x78..0x80].copy_from_slice(&used.to_le_bytes());
+        // Drop the whole free-space-tree feature (bit 0 FREE_SPACE_TREE + bit 1
+        // VALID). btrfs check then validates the v1 space cache instead of the
+        // now-stale FST; the kernel regenerates space info on mount. Just
+        // clearing VALID is NOT enough once extents are actually freed.
+        let ro = u64at(&sb, 0xB4) & !0x3;
+        sb[0xB4..0xBC].copy_from_slice(&ro.to_le_bytes());
+        let c = fs.flavor.compute(&sb[0x20..]);
+        sb[0..4].copy_from_slice(&c.to_le_bytes());
+        sb[4..0x20].fill(0);
+        patches.push((off, sb));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -850,8 +1238,8 @@ mod btrfs_integration {
         (out.status.success(), s)
     }
 
-    /// Apply Stage-1 output to a copy: zero the ranges, apply the csum patches.
-    fn apply_stage1(img: &Path, scan: &BtrfsExclusionScan, out_path: &Path) {
+    /// Apply the scan to a copy: zero the ranges, apply all patches.
+    fn apply(img: &Path, scan: &BtrfsExclusionScan, out_path: &Path) {
         let mut data = std::fs::read(img).unwrap();
         for (start, end) in scan.ranges.iter() {
             data[start as usize..end as usize].fill(0);
@@ -864,52 +1252,33 @@ mod btrfs_integration {
         std::fs::write(out_path, &data).unwrap();
     }
 
+    /// Private-extent files are TRULY removed (Stage 2): the image is
+    /// `btrfs check`-clean afterward and the excluded files are gone, the kept
+    /// file byte-identical.
     #[test]
-    fn stage1_zeroes_exclusive_extents_and_stays_check_clean() {
+    fn stage2_removes_private_files_and_stays_check_clean() {
         let Some((img, keep)) = make_btrfs() else {
             eprintln!("mkfs.btrfs unavailable — skipping");
             return;
         };
-        let (scan, mut vol) = run_scan(&img, &["secret.log", "cache/**"]);
-        // secret.log + cache dir + big.bin (dirs count as matched entries).
+        let (scan, _) = run_scan(&img, &["secret.log", "cache/**"]);
         assert!(scan.files_excluded >= 2, "excluded {}", scan.files_excluded);
-        assert!(!scan.ranges.is_empty(), "no zero ranges");
         assert_eq!(scan.files_kept_shared, 0);
-        assert_eq!(scan.bytes_excluded, 98304 + 196608);
+        assert!(!scan.patches.is_empty(), "no metadata patches");
 
-        // Safety: no zero-range byte may hold the kept file's 0xCD data, and
-        // together they must cover all 0xAB bytes of both excluded files.
-        let mut buf = vec![0u8; 65536];
-        let mut ab = 0u64;
-        for (start, end) in scan.ranges.iter() {
-            let mut off = start;
-            while off < end {
-                let n = ((end - off) as usize).min(buf.len());
-                vol.read_at(off, &mut buf[..n]).unwrap();
-                assert!(!buf[..n].contains(&0xCD), "zero range touches kept data");
-                ab += buf[..n].iter().filter(|&&b| b == 0xAB).count() as u64;
-                off += n as u64;
-            }
-        }
-        assert_eq!(ab, 98304 + 196608, "0xAB coverage");
-
-        // Apply zeroing + csum patches → btrfs check (incl. data csums) clean.
-        assert!(!scan.patches.is_empty(), "expected csum-tree patches");
         let patched = keep.path().join("patched.img");
-        apply_stage1(&img, &scan, &patched);
+        apply(&img, &scan, &patched);
+
         let (ok, log) = btrfs_check(&patched, true);
         assert!(ok, "btrfs check failed:\n{log}");
 
-        // The kept file must still be extractable, byte-identical.
+        // Restore: excluded gone, kept file intact.
         let outdir = keep.path().join("restored");
         std::fs::create_dir_all(&outdir).unwrap();
-        let out = std::process::Command::new("btrfs")
-            .arg("restore")
-            .arg(&patched)
-            .arg(&outdir)
-            .output()
-            .unwrap();
-        assert!(out.status.success(), "btrfs restore failed");
+        let out = std::process::Command::new("btrfs").arg("restore").arg(&patched).arg(&outdir).output().unwrap();
+        assert!(out.status.success(), "btrfs restore failed: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(!outdir.join("secret.log").exists(), "secret.log still present");
+        assert!(!outdir.join("cache").exists(), "cache dir still present");
         let kept = std::fs::read(outdir.join("keep.txt")).unwrap();
         assert!(kept.len() == 65536 && kept.iter().all(|&b| b == 0xCD), "keep.txt damaged");
     }
@@ -920,6 +1289,54 @@ mod btrfs_integration {
         let (scan, _) = run_scan(&img, &[]);
         assert_eq!(scan.files_excluded, 0);
         assert!(scan.ranges.is_empty());
+    }
+
+    /// Many files → a multi-level FS tree (internal nodes), so removing items
+    /// exercises the first-key cascade up the parent chain. `btrfs check` must
+    /// stay clean and every `.log` gone, every `.keep` intact.
+    #[test]
+    fn stage2_multi_leaf_tree_cascade_is_clean() {
+        use std::io::Write;
+        if !have("mkfs.btrfs") {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        // 3000 small files (mixed .log / .keep) — enough to split the FS tree.
+        for i in 0..3000 {
+            let ext = if i % 3 == 0 { "log" } else { "keep" };
+            let mut f = std::fs::File::create(src.join(format!("f{i:05}.{ext}"))).unwrap();
+            f.write_all(format!("data-{i}-").repeat(8).as_bytes()).unwrap();
+        }
+        let img = dir.path().join("fs.img");
+        std::fs::File::create(&img).unwrap().set_len(256 * 1024 * 1024).unwrap();
+        let out = std::process::Command::new("mkfs.btrfs").args(["-q", "-r"]).arg(&src).arg(&img).output().unwrap();
+        if !out.status.success() {
+            eprintln!("mkfs.btrfs failed — skipping");
+            return;
+        }
+        let (scan, _) = run_scan(&img, &["*.log"]);
+        assert_eq!(scan.files_excluded, 1000, "expected 1000 .log excluded");
+
+        let patched = dir.path().join("patched.img");
+        apply(&img, &scan, &patched);
+        let (ok, log) = btrfs_check(&patched, true);
+        assert!(ok, "btrfs check failed on multi-leaf tree:\n{log}");
+
+        let outdir = dir.path().join("restored");
+        std::fs::create_dir_all(&outdir).unwrap();
+        let out = std::process::Command::new("btrfs").arg("restore").arg(&patched).arg(&outdir).output().unwrap();
+        assert!(out.status.success());
+        let mut logs = 0;
+        let mut keeps = 0;
+        for e in std::fs::read_dir(&outdir).unwrap().flatten() {
+            let n = e.file_name().into_string().unwrap();
+            if n.ends_with(".log") { logs += 1; }
+            if n.ends_with(".keep") { keeps += 1; }
+        }
+        assert_eq!(logs, 0, "some .log files survived");
+        assert_eq!(keeps, 2000, "kept files lost: {keeps}/2000");
     }
 
     /// Shared-extent fixture (reflink + snapshot), pre-generated with root and
