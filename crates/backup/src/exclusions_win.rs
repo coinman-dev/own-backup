@@ -243,11 +243,11 @@ pub fn collect_excluded_ranges(
                             "Exclusion scan: cannot resolve extents — file stays in the backup"
                         );
                         // Could not exclude it → it stays in the archive.
-                        scan.categories.add(&name_lower, info.size);
+                        scan.categories.add(&rel_child, info.size);
                     }
                 }
             } else if !is_reparse {
-                scan.categories.add(&name_lower, info.size);
+                scan.categories.add(&rel_child, info.size);
             }
         }
     }

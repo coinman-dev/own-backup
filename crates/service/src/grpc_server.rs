@@ -907,7 +907,7 @@ mod tests {
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
 
         // Delete it.
-        svc.delete_job(Request::new(IdRequest { id: saved.id }))
+        svc.delete_job(Request::new(DeleteJobRequest { id: saved.id, delete_files: false }))
             .await
             .unwrap();
         let json = svc.list_jobs(Request::new(Empty {})).await.unwrap().into_inner().json;

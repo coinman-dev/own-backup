@@ -11,6 +11,8 @@
 use serde::Serialize;
 use tauri::State;
 
+use own_backup_backup::exclusions::CategorySizes;
+use own_backup_common::disk::DiskInfo;
 use own_backup_common::engine_dto::{DiskRestoreSummaryDto, RestoreSummaryDto, VerifySummaryDto};
 
 use crate::state::GuiState;
@@ -108,6 +110,8 @@ pub async fn list_disk_backups(folder: String) -> Result<Vec<DiskBackupDto>, Str
 /// Metadata about an image, read from its `.obkm` sidecar (works on any OS).
 #[derive(Debug, Clone, Serialize)]
 pub struct ImageInfoDto {
+    /// Full path to the image file (what restore is handed).
+    pub image_path: String,
     pub image_file_name: String,
     pub chain_role: String,
     pub created_at: String,
@@ -117,17 +121,32 @@ pub struct ImageInfoDto {
     pub used_blocks: u64,
     pub total_blocks: u64,
     pub backup_mode: String,
+    /// Full physical-disk snapshot embedded at backup time (whole disk with its
+    /// partitions), so the restore card renders from the image alone — no
+    /// jobs.json. `None` for images written before snapshots existed.
+    pub source_disk_layout: Option<DiskInfo>,
+    /// Partition indices (into `source_disk_layout.partitions`) that this backup
+    /// actually contains — the ones the restore card highlights.
+    pub backed_up_parts: Vec<u32>,
+    /// File-type breakdown embedded in the image (for "по типам файлов").
+    pub categories: Option<CategorySizes>,
+    /// Files/bytes excluded from this image (for the "Исключено" legend line).
+    pub excluded_files: u64,
+    pub excluded_bytes: u64,
+    /// True when this image is a whole-disk (bootable) backup.
+    pub is_whole_disk: bool,
 }
 
-#[tauri::command]
-pub async fn read_image_info(image_path: String) -> Result<ImageInfoDto, String> {
-    let path = std::path::PathBuf::from(&image_path);
+/// Read one image's embedded metadata into an [`ImageInfoDto`] (direct file
+/// read: embedded meta partition first, then an adjacent `.obkm`). Shared by
+/// `read_image_info` (single file) and `list_image_backups` (folder scan).
+fn read_image_info_at(path: &std::path::Path) -> Result<ImageInfoDto, String> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_lowercase();
-    
-    let sidecar = match own_backup_backup::read_embedded_sidecar(&path, &ext) {
+
+    let sidecar = match own_backup_backup::read_embedded_sidecar(path, &ext) {
         Ok(s) => s,
         Err(_) => {
-            let sidecar_path = own_backup_backup::sidecar_path_for(&path);
+            let sidecar_path = own_backup_backup::sidecar_path_for(path);
             if !sidecar_path.exists() {
                 return Err(format!(
                     "В образе нет встроенных метаданных и рядом не найден файл метаданных: {}",
@@ -138,17 +157,79 @@ pub async fn read_image_info(image_path: String) -> Result<ImageInfoDto, String>
         }
     };
 
+    // Derived (compute before moving fields out of the sidecar): the archived
+    // disk snapshot and which of its partitions are in this backup — whole-disk
+    // images list them in the embedded disk manifest; a per-volume image holds
+    // the single partition matching its source device.
+    let source_disk_layout = sidecar.info.source_disk_layout.clone();
+    let is_whole_disk = sidecar.disk_manifest.is_some();
+    let src_dev = sidecar.manifest.source_disk.device_id.clone();
+    let backed_up_parts: Vec<u32> = if let Some(dm) = &sidecar.disk_manifest {
+        dm.images.iter().map(|i| i.part_index).collect()
+    } else if let Some(layout) = &source_disk_layout {
+        layout
+            .partitions
+            .iter()
+            .filter(|p| p.volume_device == src_dev)
+            .map(|p| p.index)
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     Ok(ImageInfoDto {
+        image_path: path.display().to_string(),
         image_file_name: sidecar.info.image_file_name,
         chain_role: format!("{:?}", sidecar.info.chain_role),
         created_at: sidecar.manifest.created_at,
-        source_device: sidecar.manifest.source_disk.device_id,
+        source_device: src_dev,
         source_bytes: sidecar.manifest.source_disk.size_bytes,
         block_size: sidecar.manifest.block_size,
         used_blocks: sidecar.manifest.used_blocks,
         total_blocks: sidecar.manifest.total_blocks,
         backup_mode: format!("{:?}", sidecar.manifest.backup_mode),
+        source_disk_layout,
+        backed_up_parts,
+        categories: sidecar.info.categories,
+        excluded_files: sidecar.info.excluded_files,
+        excluded_bytes: sidecar.info.excluded_bytes,
+        is_whole_disk,
     })
+}
+
+#[tauri::command]
+pub async fn read_image_info(image_path: String) -> Result<ImageInfoDto, String> {
+    read_image_info_at(&std::path::PathBuf::from(&image_path))
+}
+
+/// Scan `folder` for backup IMAGES (per-volume AND whole-disk) and return each
+/// one's embedded metadata. Direct file reads, no service / no jobs.json — the
+/// "Открыть папку с копиями" entry for a bare-system (Boot-CD) restore. Files
+/// without a readable sidecar are skipped; newest first.
+#[tauri::command]
+pub async fn list_image_backups(folder: String) -> Result<Vec<ImageInfoDto>, String> {
+    let dir = std::path::Path::new(&folder);
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default()
+            .to_lowercase();
+        if !matches!(ext.as_str(), "vhdx" | "avhdx" | "qcow2") {
+            continue;
+        }
+        if let Ok(info) = read_image_info_at(&path) {
+            out.push(info);
+        }
+    }
+    out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Ok(out)
 }
 
 // --- Proxies to the service's privileged engine --------------------------

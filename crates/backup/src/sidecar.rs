@@ -21,6 +21,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use own_backup_common::disk::DiskInfo;
 use own_backup_common::image::ImageManifest;
 use own_backup_common::{OwnBackupError, Result};
 
@@ -62,6 +63,28 @@ pub struct SidecarInfo {
     /// CLI runs) are never auto-deleted.
     #[serde(default)]
     pub job_id: Option<String>,
+    /// Full snapshot of the physical source disk this image came from — the
+    /// whole disk with its partition list, captured from the live inventory at
+    /// backup time. Present for BOTH per-volume images (the parent disk; the
+    /// backed-up partition is identified by the job's sources) and whole-disk
+    /// images. Lets a restore UI / Boot-CD render the archived disk and
+    /// highlight the backed-up partitions WITHOUT any external job database
+    /// (`jobs.json`). `None` for CLI runs / backups taken before snapshots.
+    #[serde(default)]
+    pub source_disk_layout: Option<DiskInfo>,
+    /// File-type breakdown (bytes per Изображения/Видео/Аудио/Документы/Система/
+    /// Другое) of what this image holds, from the backup's file walk. Embedded
+    /// so the restore card's "по типам файлов" renders from the image alone
+    /// (Boot-CD) without jobs.json. `None` when the walk didn't run.
+    #[serde(default)]
+    pub categories: Option<crate::exclusions::CategorySizes>,
+    /// Count of files dropped by exclusion rules for this image, embedded so the
+    /// restore card's "Исключено" line works from the image alone (no jobs.json).
+    #[serde(default)]
+    pub excluded_files: u64,
+    /// Total bytes of the excluded files (see `excluded_files`).
+    #[serde(default)]
+    pub excluded_bytes: u64,
 }
 
 impl SidecarInfo {
@@ -74,6 +97,10 @@ impl SidecarInfo {
             parent_image_file_name: None,
             volume_data_offset,
             job_id: None,
+            source_disk_layout: None,
+            categories: None,
+            excluded_files: 0,
+            excluded_bytes: 0,
         }
     }
 
@@ -91,6 +118,10 @@ impl SidecarInfo {
             parent_image_file_name: Some(parent.into()),
             volume_data_offset,
             job_id: None,
+            source_disk_layout: None,
+            categories: None,
+            excluded_files: 0,
+            excluded_bytes: 0,
         }
     }
 }
@@ -833,6 +864,7 @@ mod tests {
                 image_file_name: "modulator_disk3.vhdx".into(),
                 filesystem: "fat32".into(),
             }],
+            source_disk: None,
         };
 
         let mut buf = Vec::new();

@@ -180,6 +180,7 @@ export interface VerifySummary {
 }
 
 export interface ImageInfo {
+  image_path: string;
   image_file_name: string;
   chain_role: string;
   created_at: string;
@@ -189,6 +190,18 @@ export interface ImageInfo {
   used_blocks: number;
   total_blocks: number;
   backup_mode: string;
+  /** Full physical-disk snapshot embedded in the image (renders the restore
+   *  card without jobs.json). null for images written before snapshots. */
+  source_disk_layout: DiskInfo | null;
+  /** Partition indices this backup contains — the card highlights these. */
+  backed_up_parts: number[];
+  /** File-type breakdown embedded in the image. */
+  categories: CategorySizes | null;
+  /** Files/bytes excluded from this image (for the "Исключено" legend line). */
+  excluded_files: number;
+  excluded_bytes: number;
+  /** True for a whole-disk (bootable) backup. */
+  is_whole_disk: boolean;
 }
 
 // ===== Job model (phase 6) =====
@@ -246,7 +259,8 @@ export interface CategorySizes {
   video: number;
   audio: number;
   documents: number;
-  system: number;
+  windows: number;
+  linux: number;
   other: number;
 }
 
@@ -333,6 +347,9 @@ export interface Job {
   requires_password: boolean;
   /** Set for a whole-disk (bootable) backup: which disk + how partitions map. */
   disk_source: DiskSourceSpec | null;
+  /** Disk-layout snapshot captured at creation, so restore shows the archived
+   *  disk instantly without querying live disks. Empty for pre-phase jobs. */
+  source_disks: DiskInfo[];
   dest_folder: string;
   /** Image container: vhdx (Windows-native, chains) or qcow2 (zstd-compressed). */
   image_format: 'vhdx' | 'qcow2';

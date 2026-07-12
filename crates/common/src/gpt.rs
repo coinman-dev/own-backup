@@ -7,6 +7,7 @@
 //! references partitions by GUID, so with the GUIDs restored the boot chain
 //! keeps working without any BCD surgery.
 
+use crate::disk::DiskInfo;
 use serde::{Deserialize, Serialize};
 
 /// One partition as recorded in the source disk's GPT.
@@ -135,6 +136,14 @@ pub struct DiskBackupManifest {
     pub disk_model: String,
     pub layout: DiskLayout,
     pub images: Vec<DiskImageRef>,
+    /// Full snapshot of the source disk with rich per-partition detail (labels,
+    /// drive letters, used bytes, boot/system flags) captured from the live
+    /// inventory at backup time. `layout` above is enough to *recreate* the disk
+    /// byte-identically; this is what a restore UI / Boot-CD shows to identify
+    /// the archived disk WITHOUT any external job database (`jobs.json`). `None`
+    /// for CLI runs or backups taken before snapshots were captured.
+    #[serde(default)]
+    pub source_disk: Option<DiskInfo>,
 }
 
 impl DiskBackupManifest {

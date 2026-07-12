@@ -7,8 +7,10 @@
     clearRestoreResult,
   } from '../lib/engineStore.svelte';
   import { jobs } from '../lib/jobStore.svelte';
+  import { api } from '../lib/api';
   import InfoModal from '../components/InfoModal.svelte';
-  import type { Job } from '../lib/types';
+  import DiskMap from '../components/DiskMap.svelte';
+  import type { Job, DiskInfo, PartitionInfo, ImageInfo } from '../lib/types';
 
   interface Props {
     job: Job;
@@ -23,6 +25,31 @@
 
   const lastRun = $derived(job.last_run);
 
+  // The archived-disk card read from the IMAGE FILE's embedded metadata, so it
+  // works WITHOUT jobs.json (e.g. a Boot-CD restore). Reloaded whenever the
+  // selected copy's image path changes; null until loaded / for old images.
+  let imageInfo = $state<ImageInfo | null>(null);
+  $effect(() => {
+    const path = lastRun?.status === 'success' ? lastRun.image_path : '';
+    if (!path) {
+      imageInfo = null;
+      return;
+    }
+    let cancelled = false;
+    api.readImageInfo(path).then(
+      (info) => { if (!cancelled) imageInfo = info; },
+      () => { if (!cancelled) imageInfo = null; },
+    );
+    return () => { cancelled = true; };
+  });
+
+  // Excluded-files line: prefer the count embedded in the image (works from a
+  // file without jobs.json), fall back to the run record.
+  const excluded = $derived({
+    files: imageInfo?.excluded_files ?? lastRun?.excluded_files ?? 0,
+    bytes: imageInfo?.excluded_bytes ?? lastRun?.excluded_bytes ?? 0,
+  });
+
   // Real file-category breakdown of the archived data — same source as the
   // backup dashboard (collected during the backup's file walk).
   const CAT_META = [
@@ -30,11 +57,14 @@
     { key: 'video', name: 'Видео', color: '#d8c81e' },
     { key: 'audio', name: 'Аудио', color: '#e07a2f' },
     { key: 'documents', name: 'Документы', color: '#8b5cf6' },
-    { key: 'system', name: 'Система', color: '#4f9be8' },
+    { key: 'windows', name: 'Windows', color: '#4f9be8' },
+    { key: 'linux', name: 'Linux', color: '#14b8a6' },
     { key: 'other', name: 'Другое', color: '#9aa0ad' },
   ] as const;
   const catData = $derived.by(() => {
-    const c = lastRun?.categories;
+    // Prefer the breakdown embedded in the image (works without jobs.json);
+    // fall back to the run record for images taken before it was embedded.
+    const c = imageInfo?.categories ?? lastRun?.categories;
     if (!c) return null;
     const total = CAT_META.reduce((s, m) => s + (c[m.key] ?? 0), 0);
     if (total <= 0) return null;
@@ -44,6 +74,44 @@
       pct: ((c[m.key] ?? 0) / total) * 100,
     }));
   });
+  // --- Disk maps: top = the disk this copy captured (read-only), bottom = all
+  // system disks to pick a restore target from (same visuals as the source tab).
+  function diskNumber(d: DiskInfo): number {
+    const m = d.device_id.match(/(\d+)\s*$/);
+    return m ? parseInt(m[1], 10) : 0;
+  }
+  function partDevice(p: PartitionInfo): string | null {
+    return p.volume_device ? p.volume_device : null;
+  }
+  function isBootableCopy(d: DiskInfo): boolean {
+    return job.disk_source != null && job.disk_source.disk_number === diskNumber(d);
+  }
+  function diskHasSelection(d: DiskInfo): boolean {
+    if (isBootableCopy(d)) return true;
+    return d.partitions.some((p) => {
+      const dev = partDevice(p);
+      return !!dev && job.sources.includes(dev);
+    });
+  }
+  // The archived disk map, in priority order:
+  //  1. the snapshot embedded in the IMAGE FILE (works without jobs.json / on a
+  //     Boot-CD; also correct when the original disk is detached),
+  //  2. the snapshot stored on the job at creation (jobs.json),
+  //  3. a live query of currently-attached disks (pre-snapshot backups).
+  const backedUpDisks = $derived(
+    imageInfo?.source_disk_layout
+      ? [imageInfo.source_disk_layout]
+      : job.source_disks && job.source_disks.length > 0
+        ? job.source_disks
+        : engine.disks.filter(diskHasSelection),
+  );
+  const systemDisks = $derived(engine.disks);
+
+  // Single restore target for now (click a volume to select / clear it).
+  function pickTarget(dev: string) {
+    target = target === dev ? '' : dev;
+  }
+
   const canRestore = $derived(lastRun?.status === 'success' && !!lastRun.image_path);
   const backupBusy = $derived(
     jobs.queue.current !== null || jobs.queue.pending.length > 0,
@@ -133,82 +201,64 @@
 
 <div class="page">
 <div class="dash">
-  <div class="flow">
-    <!-- LEFT: archive (swapped) -->
-    <div class="card">
-      <svg width="110" height="102" viewBox="0 0 24 22" fill="#e6b34a">
-        <path d="M2 5a2 2 0 0 1 2-2h5l2 2.4h7a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2z" />
-      </svg>
-      <div class="card-title">{job.name}</div>
-      <div class="card-sub">
-        {#if lastRun?.status === 'success'}
-          Копия от {formatDate(lastRun.finished_at)} — {formatBytes(lastRun.bytes_copied)}{lastRun.image_path.toLowerCase().endsWith('.qcow2') ? ' · qcow2' : ''}
-        {:else}
-          нет готовых копий
-        {/if}
-      </div>
+  {#if !running}
+    <!-- WHAT: the disk this copy captured — same read-only map as Параметры → Источник -->
+    <div class="sec-head">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="12" cy="12" r="3.4"/></svg>
+      <span class="sec-title">Что восстановить</span>
+      <span class="sec-sub">разделы, вошедшие в эту копию</span>
     </div>
 
-    <div class="connector">
-      {#if running && progress}
-        <div class="ring" style="background: conic-gradient(var(--primary) {progress.percent}%, var(--border) 0)">
-          <div class="ring-inner">{progress.percent}%</div>
+    {#if engine.volumesLoading && engine.disks.length === 0}
+      <div class="loading-note">Загрузка списка дисков…</div>
+    {:else if backedUpDisks.length === 0}
+      <div class="warn-note">Диск этой копии сейчас не подключён — карту показать нельзя.</div>
+    {:else}
+      <div class="disks">
+        {#each backedUpDisks as d (d.device_id)}
+          <DiskMap disk={d} selected={job.sources} selectedIndices={imageInfo?.backed_up_parts ?? []} readonly boot={imageInfo?.is_whole_disk ?? isBootableCopy(d)} />
+        {/each}
+      </div>
+    {/if}
+
+    {#if catData}
+      <div class="cat-block">
+        <div class="cat-head">Что в копии — по типам файлов</div>
+        <div class="catbar">
+          {#each catData as c}<div style="width:{c.pct}%; background:{c.color}" title="{c.name}: {formatBytes(c.bytes)}"></div>{/each}
         </div>
-      {:else if running}
-        <div class="ring" style="background: conic-gradient(var(--primary) 0%, var(--border) 0)">
-          <div class="ring-inner">…</div>
-        </div>
-      {:else}
-        <div class="dash-line"></div>
-        <div class="arrow-circle" class:done={summary !== null}>
-          {#if summary}
-            <svg width="20" height="20" viewBox="0 0 24 24" stroke="#fff" stroke-width="2.6" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
-          {:else}
-            <svg width="20" height="20" viewBox="0 0 24 24" stroke="#fff" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+        <div class="cats">
+          {#each catData as c}
+            <div class="cat"><span class="dot" style="background:{c.color}"></span><span class="cat-name">{c.name}</span><span class="cat-size">{formatBytes(c.bytes)}</span></div>
+          {/each}
+          {#if excluded.files > 0}
+            <div class="cat"><span class="dot" style="background:#c0463f"></span><span class="cat-name">Исключено</span><span class="cat-size">{formatBytes(excluded.bytes)}</span></div>
           {/if}
         </div>
-        <div class="dash-line"></div>
-      {/if}
+      </div>
+    {/if}
+
+    <!-- arrow down: choose where to restore -->
+    <div class="connector">
+      <div class="v-dash"></div>
+      <div class="arrow-circle"><svg width="20" height="20" viewBox="0 0 24 24" stroke="#fff" stroke-width="2.6" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M19 12l-7 7-7-7"/></svg></div>
+      <div class="v-dash"></div>
     </div>
 
-    <!-- RIGHT: target disk (swapped) -->
-    <div class="card">
-      <svg width="110" height="110" viewBox="0 0 24 24" fill="none" stroke="#9aa0b4" stroke-width="1.1">
-        <rect x="3" y="5" width="18" height="14" rx="2" />
-        <circle cx="12" cy="12" r="4.4" />
-        <circle cx="12" cy="12" r="1" fill="#9aa0b4" />
-      </svg>
-      <div class="card-title">Восстановить в</div>
-      <select bind:value={target} disabled={running}>
-        <option value="" disabled selected>— выберите том —</option>
-        {#each engine.volumes as v}
-          <option value={v.device}>{v.label}</option>
-        {/each}
-      </select>
-      <div class="warn">Том будет полностью перезаписан</div>
+    <!-- WHERE: pick a target disk/volume from the system (like + Добавить копию) -->
+    <div class="sec-head">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="12" cy="12" r="3.4"/></svg>
+      <span class="sec-title">Куда восстановить</span>
+      <span class="sec-sub">выберите том — он будет полностью перезаписан</span>
     </div>
-  </div>
-
-  {#if !running}
-    <div class="stats">
-      <span>Последнее копирование: <b>{lastRun?.status === 'success' ? formatDate(lastRun.finished_at) : '—'}</b></span>
-      <span class="reco">
-        Данные для восстановления: <b>{lastRun?.status === 'success' ? formatBytes(lastRun.used_blocks > 0 ? lastRun.used_blocks * 1048576 : lastRun.bytes_copied) : '—'}</b>
-        <button class="q" title="О разбивке по типам" onclick={() => (stubMsg = 'Разбивка по типам считается по файлам, вошедшим в копию (по расширениям), во время сканирования тома. Исключённые файлы не учитываются.')}>?</button>
-      </span>
-    </div>
-    {#if catData}
-      <div class="catbar">
-        {#each catData as c}<div style="width:{c.pct}%; background:{c.color}" title="{c.name}: {formatBytes(c.bytes)}"></div>{/each}
-      </div>
-      <div class="cats">
-        {#each catData as c}
-          <div class="cat"><span class="dot" style="background:{c.color}"></span><span class="cat-name">{c.name}</span><span class="cat-size">{formatBytes(c.bytes)}</span></div>
-        {/each}
-      </div>
+    {#if systemDisks.length === 0}
+      <div class="warn-note">Диски не найдены.</div>
     {:else}
-      <div class="catbar empty-catbar"></div>
-      <div class="cats-note">Разбивка по типам появится после следующего копирования.</div>
+      <div class="disks">
+        {#each systemDisks as d (d.device_id)}
+          <DiskMap disk={d} selected={target ? [target] : []} onToggle={(dev) => pickTarget(dev)} />
+        {/each}
+      </div>
     {/if}
   {/if}
 
@@ -270,30 +320,23 @@
 <style>
   .page { height: 100%; display: flex; flex-direction: column; }
   .dash { flex: 1; overflow: auto; width: 100%; padding: 34px 44px; max-width: 900px; margin: 0 auto; display: flex; flex-direction: column; }
-  .flow { display: flex; align-items: stretch; justify-content: center; }
-  .card { flex: 1; max-width: 300px; border: 1px solid var(--border); border-radius: 6px; padding: 22px 18px; text-align: center; background: var(--card-bg); display: flex; flex-direction: column; align-items: center; gap: 8px; }
-  .card-title { font-size: 20px; font-weight: 600; color: var(--head); }
-  .card-sub { font-size: 12px; color: var(--text-muted); word-break: break-all; }
-  .card select { width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 4px; font-size: 13px; font-family: var(--font); background: #fff; color: var(--text); }
-  .warn { font-size: 11px; color: var(--error); }
-  .stats { display: flex; justify-content: space-between; font-size: 13px; color: var(--text-muted); margin-top: 34px; }
-  .stats b { color: var(--head); font-weight: 600; }
-  .reco { display: flex; align-items: center; gap: 6px; }
-  .q { width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--text-muted); background: none; color: var(--text-muted); font-size: 10px; cursor: pointer; padding: 0; }
+  .sec-head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+  .sec-title { font-size: 15px; font-weight: 700; color: var(--head); }
+  .sec-sub { font-size: 13px; color: var(--text-muted); }
+  .disks { display: flex; flex-direction: column; gap: 14px; }
+  .loading-note { font-size: 13px; color: var(--text-muted); padding: 9px 0; }
+  .warn-note { font-size: 13px; color: #8c1d1d; background: rgba(216,74,74,.08); padding: 10px 14px; border-radius: 5px; }
+  .cat-block { margin-top: 14px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 6px; background: var(--card-bg); }
+  .cat-head { font-size: 13px; font-weight: 600; color: var(--head); margin-bottom: 4px; }
   .catbar { height: 9px; border-radius: 5px; overflow: hidden; display: flex; margin-top: 10px; }
   .cats { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
   .cat { flex: 1; min-width: 130px; display: flex; align-items: center; gap: 7px; }
   .dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
   .cat-name { font-size: 13px; color: var(--head); }
   .cat-size { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
-  .empty-catbar { background: var(--tabbg); }
-  .cats-note { font-size: 12px; color: var(--text-muted); margin-top: 12px; }
-  .connector { width: 130px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; gap: 8px; }
-  .dash-line { width: 26px; height: 2px; background: repeating-linear-gradient(90deg, var(--text-muted) 0 4px, transparent 4px 8px); }
-  .arrow-circle { width: 52px; height: 52px; border-radius: 50%; background: var(--primary); display: flex; align-items: center; justify-content: center; }
-  .arrow-circle.done { background: var(--green); }
-  .ring { width: 60px; height: 60px; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
-  .ring-inner { width: 44px; height: 44px; border-radius: 50%; background: var(--card-bg); display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; color: var(--head); }
+  .connector { display: flex; flex-direction: column; align-items: center; margin: 20px 0; }
+  .connector .v-dash { width: 2px; height: 14px; background: repeating-linear-gradient(180deg, var(--text-muted) 0 4px, transparent 4px 8px); }
+  .arrow-circle { width: 44px; height: 44px; border-radius: 50%; background: var(--green); display: flex; align-items: center; justify-content: center; box-shadow: 0 4px 14px rgba(90,176,47,.35); margin: 4px 0; }
   .progress-wrap { margin-top: 30px; }
   .progress-info { display: flex; justify-content: space-between; font-size: 13px; color: var(--head); margin-bottom: 8px; }
   .bar { height: 8px; border-radius: 4px; background: var(--tabbg); overflow: hidden; }

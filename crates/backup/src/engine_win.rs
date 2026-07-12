@@ -102,6 +102,11 @@ pub struct VolumeBackupRequest {
     /// in userspace with per-cluster zstd compression, no attach at all.
     /// qcow2 limits for now: full backups only, exclusions are zeroing-only.
     pub image_format: ImageFormat,
+    /// Full source-disk layout snapshot (the parent physical disk of this
+    /// volume, from the GUI's live inventory) to embed in the sidecar, so a
+    /// restore can show the whole disk and flag the backed-up partition without
+    /// jobs.json. `None` for CLI runs (the sidecar then omits it).
+    pub source_disk: Option<own_backup_common::disk::DiskInfo>,
 }
 
 /// Outcome of a completed volume backup.
@@ -946,6 +951,7 @@ fn backup_volume_inner(
     };
     temp_info.container = req.image_format.extension().into();
     temp_info.job_id = req.job_id.clone();
+    temp_info.source_disk_layout = req.source_disk.clone();
     let mut temp_blob = Vec::new();
     crate::sidecar::write_sidecar_v2_to(&mut temp_blob, &temp_info, &temp_manifest, &outcome.checksums)?;
 
@@ -1133,6 +1139,10 @@ fn backup_volume_inner(
     // The job id is what ties images into this job's chains: list_job_chains
     // filters on it, so without it every next run plans a FULL backup.
     sidecar_info.job_id = req.job_id.clone();
+    sidecar_info.source_disk_layout = req.source_disk.clone();
+    sidecar_info.categories = categories;
+    sidecar_info.excluded_files = excluded_files;
+    sidecar_info.excluded_bytes = excluded_bytes;
     let sidecar_path = sidecar_path_for(&req.image_path);
 
 
@@ -1223,6 +1233,10 @@ pub struct DiskBackupRequest {
     /// Parent whole-disk image for an incremental (the previous version) or
     /// differential (the chain's full). A differencing child is written over it.
     pub parent_image: Option<PathBuf>,
+    /// Full source-disk layout snapshot (from the GUI's live inventory) to embed
+    /// in the disk manifest, so a bare-metal restore can identify the archived
+    /// disk without jobs.json. `None` for CLI runs (the manifest then omits it).
+    pub source_disk: Option<own_backup_common::disk::DiskInfo>,
 }
 
 /// Outcome of a completed whole-disk backup.
@@ -2065,6 +2079,7 @@ fn backup_disk_inner(
         disk_model: req.disk_model.clone(),
         layout: layout.clone(),
         images,
+        source_disk: req.source_disk.clone(),
     };
 
     let total_blocks = plan.image_size.div_ceil(bs);
@@ -2098,6 +2113,10 @@ fn backup_disk_inner(
     };
     info.container = req.image_format.extension().into();
     info.job_id = req.job_id.clone();
+    info.source_disk_layout = req.source_disk.clone();
+    info.categories = categories;
+    info.excluded_files = excluded_files;
+    info.excluded_bytes = excluded_bytes;
 
     let mut blob = Vec::new();
     crate::sidecar::write_sidecar_v2_full_to(&mut blob, &info, &manifest, &checksums, Some(&disk_manifest))?;

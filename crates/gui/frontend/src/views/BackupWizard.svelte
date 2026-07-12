@@ -226,7 +226,8 @@
     { key: 'video', name: 'Видео', color: '#d8c81e' },
     { key: 'audio', name: 'Аудио', color: '#e07a2f' },
     { key: 'documents', name: 'Документы', color: '#8b5cf6' },
-    { key: 'system', name: 'Система', color: '#4f9be8' },
+    { key: 'windows', name: 'Windows', color: '#4f9be8' },
+    { key: 'linux', name: 'Linux', color: '#14b8a6' },
     { key: 'other', name: 'Другое', color: '#9aa0ad' },
   ] as const;
   const catData = $derived.by(() => {
@@ -547,6 +548,13 @@
       step = 0;
       return;
     }
+    // Snapshot the source-disk layout(s) into the job once ("если её ещё нет"),
+    // so the restore screen can render the archived disk instantly later without
+    // querying live disks — and even if that disk is no longer attached.
+    if (!job.source_disks || job.source_disks.length === 0) {
+      const snap = engine.disks.filter(diskHasSelection);
+      if (snap.length > 0) job.source_disks = $state.snapshot(snap) as DiskInfo[];
+    }
     try {
       const saved = await saveJob(job);
       if (run) await runJob(saved.id);
@@ -755,6 +763,13 @@
                     <span class="cat-size">{formatBytes(c.bytes)}</span>
                   </div>
                 {/each}
+                {#if job.last_run && job.last_run.excluded_files > 0}
+                  <div class="cat">
+                    <span class="dot" style="background:#c0463f"></span>
+                    <span class="cat-name">Исключено</span>
+                    <span class="cat-size">{formatBytes(job.last_run.excluded_bytes)}</span>
+                  </div>
+                {/if}
               </div>
             </div>
           {/if}

@@ -57,6 +57,8 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
         job_id: None,
         passphrase: args.password.clone().map(zeroize::Zeroizing::new),
         image_format: args.format,
+        // CLI has no live disk-layout snapshot to embed (that comes from the GUI).
+        source_disk: None,
     };
 
     println!("Backing up {} -> {} ({})", args.source, args.output, args.format);

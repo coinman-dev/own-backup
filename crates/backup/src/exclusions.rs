@@ -37,41 +37,125 @@ pub struct CategorySizes {
     pub video: u64,
     pub audio: u64,
     pub documents: u64,
-    pub system: u64,
+    /// Windows OS / binary files (PE: exe/dll/sys/msi/…). `alias = "system"`
+    /// loads the old single "system" bucket into this one for pre-split data.
+    #[serde(default, alias = "system")]
+    pub windows: u64,
+    /// Linux OS / binary / package files (ELF/.so/.ko/.deb/.rpm/systemd units…).
+    #[serde(default)]
+    pub linux: u64,
     pub other: u64,
 }
 
 impl CategorySizes {
-    /// Attribute `bytes` of a file to a category by its (lowercase) name.
-    pub fn add(&mut self, name_lower: &str, bytes: u64) {
+    /// Attribute `bytes` of a kept file to a category. `rel` is the file's path
+    /// components from the volume root, lowercased (e.g.
+    /// `["windows", "system32", "kernel32.dll"]`).
+    ///
+    /// Rules (in order):
+    /// 1. **Media & documents win by extension**, wherever they live — a photo
+    ///    inside `Program Files` is still a photo, not a system file.
+    /// 2. Otherwise the file is classified by the **top-level OS system tree**
+    ///    it sits in (`Windows`, `Program Files`, … → Windows; `usr`, `etc`, …
+    ///    → Linux). Extension is deliberately NOT used to guess the OS here.
+    /// 3. Anything else (not media/docs, not inside an OS tree) is **other**.
+    pub fn add(&mut self, rel: &[String], bytes: u64) {
+        let name_lower = rel.last().map(String::as_str).unwrap_or("");
         let ext = match name_lower.rsplit_once('.') {
             Some((stem, ext)) if !stem.is_empty() => ext,
             _ => "",
         };
-        let slot = match ext {
+        // 1. Photo / video / audio / documents — by extension, any location.
+        match ext {
             "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" | "heic" | "heif" | "tif"
             | "tiff" | "svg" | "ico" | "raw" | "cr2" | "nef" | "arw" | "dng" | "psd" => {
-                &mut self.images
+                self.images += bytes;
+                return;
             }
             "mp4" | "mkv" | "avi" | "mov" | "wmv" | "flv" | "webm" | "m4v" | "mpg" | "mpeg"
-            | "3gp" | "ts" | "m2ts" | "vob" => &mut self.video,
+            | "3gp" | "ts" | "m2ts" | "vob" => {
+                self.video += bytes;
+                return;
+            }
             "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a" | "wma" | "opus" | "mid" | "midi"
-            | "ape" => &mut self.audio,
+            | "ape" => {
+                self.audio += bytes;
+                return;
+            }
             "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "pdf" | "txt" | "rtf" | "odt"
             | "ods" | "odp" | "csv" | "md" | "djvu" | "epub" | "fb2" | "xps" => {
-                &mut self.documents
+                self.documents += bytes;
+                return;
             }
-            "exe" | "dll" | "sys" | "msi" | "drv" | "ocx" | "cpl" | "efi" | "scr" | "com"
-            | "bat" | "cmd" | "ps1" | "vbs" | "lib" | "pdb" | "winmd" | "cat" | "mui"
-            | "mun" | "manifest" | "inf" | "msu" | "cab" | "appx" | "msix" | "etl" | "evtx"
-            | "ttf" | "otf" | "fon" => &mut self.system,
-            _ => &mut self.other,
-        };
-        *slot += bytes;
+            _ => {}
+        }
+        // 2. By the top-level folder — the OS system trees from the volume root.
+        let top = rel.first().map(String::as_str).unwrap_or("");
+        if Self::is_windows_dir(top) {
+            self.windows += bytes;
+        } else if Self::is_linux_dir(top) {
+            self.linux += bytes;
+        } else {
+            // 3. Not media/docs and outside any OS system tree.
+            self.other += bytes;
+        }
+    }
+
+    /// Top-level folders that make up a Windows installation (lowercased).
+    fn is_windows_dir(top: &str) -> bool {
+        matches!(
+            top,
+            "windows"
+                | "winnt"
+                | "program files"
+                | "program files (x86)"
+                | "programdata"
+                | "documents and settings"
+                | "windows.old"
+                | "$recycle.bin"
+                | "system volume information"
+                | "recovery"
+                | "perflogs"
+                | "msocache"
+                | "config.msi"
+                | "$windows.~bt"
+                | "$windows.~ws"
+                | "$sysreset"
+        )
+    }
+
+    /// Top-level folders of a Linux root filesystem (lowercased). `home`, `tmp`,
+    /// `mnt`, `media`, `boot` are intentionally excluded: `home` is user data,
+    /// the rest are transient/mount points or ambiguous with Windows.
+    fn is_linux_dir(top: &str) -> bool {
+        matches!(
+            top,
+            "usr" | "bin"
+                | "sbin"
+                | "lib"
+                | "lib32"
+                | "lib64"
+                | "libx32"
+                | "etc"
+                | "opt"
+                | "var"
+                | "srv"
+                | "run"
+                | "proc"
+                | "sys"
+                | "dev"
+                | "snap"
+        )
     }
 
     pub fn total(&self) -> u64 {
-        self.images + self.video + self.audio + self.documents + self.system + self.other
+        self.images
+            + self.video
+            + self.audio
+            + self.documents
+            + self.windows
+            + self.linux
+            + self.other
     }
 
     /// Add another breakdown into this one (whole-disk sums each partition's).
@@ -80,7 +164,8 @@ impl CategorySizes {
         self.video += o.video;
         self.audio += o.audio;
         self.documents += o.documents;
-        self.system += o.system;
+        self.windows += o.windows;
+        self.linux += o.linux;
         self.other += o.other;
     }
 }
@@ -464,23 +549,32 @@ mod tests {
     }
 
     #[test]
-    fn categories_by_extension() {
+    fn categories_by_type_and_folder() {
+        fn p(path: &str) -> Vec<String> {
+            path.split('/').map(|s| s.to_string()).collect()
+        }
         let mut c = CategorySizes::default();
-        c.add("photo.jpg", 100);
-        c.add("clip.mkv", 200);
-        c.add("song.flac", 30);
-        c.add("report.docx", 40);
-        c.add("kernel32.dll", 50);
-        c.add("data.bin", 60);
-        c.add("noext", 7);
-        c.add(".gitignore", 8); // dotfile: no stem → no extension → other
+        // Media/documents win by extension — even inside a system folder.
+        c.add(&p("users/me/photo.jpg"), 100); // images
+        c.add(&p("clip.mkv"), 200); // video
+        c.add(&p("music/song.flac"), 30); // audio
+        c.add(&p("windows/media/report.docx"), 40); // documents (media beats folder)
+        // System files by top-level folder (extension is not consulted here).
+        c.add(&p("windows/system32/kernel32.dll"), 50); // windows
+        c.add(&p("program files/app/data.pak"), 15); // windows (non-media in tree)
+        c.add(&p("usr/lib/libc.so.6"), 12); // linux
+        c.add(&p("etc/fstab"), 8); // linux (no extension, in /etc)
+        // Not media/docs and outside any OS tree → other (even a stray .exe).
+        c.add(&p("downloads/setup.exe"), 60); // other
+        c.add(&p("readme"), 7); // other
         assert_eq!(c.images, 100);
         assert_eq!(c.video, 200);
         assert_eq!(c.audio, 30);
         assert_eq!(c.documents, 40);
-        assert_eq!(c.system, 50);
-        assert_eq!(c.other, 75);
-        assert_eq!(c.total(), 495);
+        assert_eq!(c.windows, 65); // 50 + 15
+        assert_eq!(c.linux, 20); // 12 + 8
+        assert_eq!(c.other, 67); // 60 + 7
+        assert_eq!(c.total(), 522);
     }
 
     #[test]

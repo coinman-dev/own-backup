@@ -612,7 +612,7 @@ fn match_subvol(
                     } else if is_dir {
                         stack.push((ino, crel, false));
                     } else if let Some(&(size, _, _)) = d.inodes.get(&ino) {
-                        scan.categories.add(&name_lower, size);
+                        scan.categories.add(&crel, size);
                     }
                 }
                 Err(()) => {

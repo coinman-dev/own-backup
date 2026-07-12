@@ -1,18 +1,125 @@
 <script lang="ts">
+  import { open } from '@tauri-apps/plugin-dialog';
   import { jobs, jobStatus } from '../lib/jobStore.svelte';
+  import { api } from '../lib/api';
   import RestoreDashboard from './RestoreDashboard.svelte';
-  import DiskRestore from './DiskRestore.svelte';
+  import type { Job, ImageInfo } from '../lib/types';
 
-  let mode: 'volume' | 'disk' = $state('volume');
+  // Copies added by hand via "+ Добавить копию": a backup file picked from disk,
+  // read straight from its embedded metadata — no jobs.json needed (Boot-CD).
+  // Each becomes a synthetic Job whose last_run points at the picked image, so
+  // the existing RestoreDashboard renders its card (from the file) and restores.
+  let imported: { id: string; job: Job }[] = $state([]);
+  let addError: string | null = $state(null);
+  let addOpen = $state(false); // "Файл / Папка с копиями" choice modal
+
   let selectedId: string | null = $state(null);
-  const selectedJob = $derived(jobs.list.find((j) => j.id === selectedId) ?? null);
+  const selectedJob = $derived(
+    imported.find((x) => x.id === selectedId)?.job
+      ?? jobs.list.find((j) => j.id === selectedId)
+      ?? null,
+  );
 
   $effect(() => {
+    const known = (id: string) =>
+      jobs.list.some((j) => j.id === id) || imported.some((x) => x.id === id);
     if (!selectedId && jobs.list.length > 0) selectedId = jobs.list[0].id;
-    if (selectedId && !jobs.list.some((j) => j.id === selectedId)) {
-      selectedId = jobs.list[0]?.id ?? null;
-    }
+    if (selectedId && !known(selectedId)) selectedId = jobs.list[0]?.id ?? null;
   });
+
+  // Build a synthetic Job from an image's embedded metadata so the existing
+  // RestoreDashboard (which already reads its card from the file) can show and
+  // restore it — no jobs.json involved.
+  function makeJobFromInfo(info: ImageInfo): { id: string; job: Job } {
+    const path = info.image_path;
+    const id = 'file:' + path;
+    const name = info.image_file_name || path.split(/[\\/]/).pop() || path;
+    const job = {
+      id,
+      name,
+      source: '',
+      source_label: '',
+      sources: [],
+      source_labels: [],
+      requires_password: false,
+      disk_source: null,
+      source_disks: [],
+      dest_folder: path,
+      image_format: path.toLowerCase().endsWith('.qcow2') ? 'qcow2' : 'vhdx',
+      last_run: {
+        id,
+        job_id: id,
+        job_name: name,
+        started_at: '',
+        finished_at: info.created_at,
+        status: 'success',
+        image_path: path,
+        source_bytes: info.source_bytes,
+        bytes_copied: 0,
+        used_blocks: info.used_blocks,
+        total_blocks: info.total_blocks,
+        duration_secs: 0,
+        smart_mode: true,
+        vss_used: false,
+        error: '',
+        backup_kind: '',
+        base_image_path: '',
+        increment_index: 0,
+        blocks_unchanged: 0,
+        excluded_files: info.excluded_files,
+        excluded_bytes: info.excluded_bytes,
+        categories: info.categories,
+      },
+    } as unknown as Job;
+    return { id, job };
+  }
+
+  // Add an entry if it isn't already listed; returns its id either way.
+  function addEntry(entry: { id: string; job: Job }): string {
+    const dup = imported.some((x) => x.id === entry.id) || jobs.list.some((j) => j.id === entry.id);
+    if (!dup) imported = [...imported, entry];
+    return entry.id;
+  }
+
+  // "+ Добавить копию" → пользователь выбрал «Файл».
+  async function addFile() {
+    addOpen = false;
+    addError = null;
+    const picked = await open({
+      multiple: false,
+      filters: [{ name: 'Резервная копия', extensions: ['vhdx', 'avhdx', 'qcow2'] }],
+    });
+    if (typeof picked !== 'string') return;
+    try {
+      const info = await api.readImageInfo(picked);
+      selectedId = addEntry(makeJobFromInfo(info));
+    } catch (e) {
+      addError = String(e);
+    }
+  }
+
+  // "+ Добавить копию" → пользователь выбрал «Папка с копиями»: авто-скан.
+  async function addFolder() {
+    addOpen = false;
+    addError = null;
+    const picked = await open({ directory: true });
+    if (typeof picked !== 'string') return;
+    try {
+      const list = await api.listImageBackups(picked);
+      if (list.length === 0) {
+        addError = 'В выбранной папке не найдено копий с метаданными.';
+        return;
+      }
+      let first: string | null = null;
+      for (const info of list) {
+        const id = addEntry(makeJobFromInfo(info));
+        if (!first) first = id;
+      }
+      if (first) selectedId = first;
+    } catch (e) {
+      addError = String(e);
+    }
+  }
 
   function statusColor(s: string): string {
     return s === 'running' ? 'var(--primary)'
@@ -24,14 +131,6 @@
 </script>
 
 <div class="restore-root">
-<div class="mode-bar">
-  <button class="mode" class:on={mode === 'volume'} onclick={() => (mode = 'volume')}>Тома</button>
-  <button class="mode" class:on={mode === 'disk'} onclick={() => (mode = 'disk')}>Диск целиком (загрузочный)</button>
-</div>
-
-{#if mode === 'disk'}
-  <div class="disk-wrap"><DiskRestore /></div>
-{:else}
 <div class="layout">
   <!-- middle column: backups list (same as Backup) -->
   <div class="jobs-col">
@@ -41,8 +140,8 @@
       Этот компьютер
     </div>
     <div class="jobs-list">
-      {#if jobs.list.length === 0}
-        <div class="empty-list">Нет резервных копий.<br/>Создайте их в разделе «Резервное копирование».</div>
+      {#if jobs.list.length === 0 && imported.length === 0}
+        <div class="empty-list">Нет резервных копий.<br/>Создайте их в разделе «Резервное копирование» или нажмите «Добавить копию».</div>
       {/if}
       {#each jobs.list as job (job.id)}
         <button class="job-item" class:sel={selectedId === job.id} onclick={() => (selectedId = job.id)}>
@@ -56,7 +155,24 @@
           </div>
         </button>
       {/each}
+      {#each imported as it (it.id)}
+        <button class="job-item" class:sel={selectedId === it.id} onclick={() => (selectedId = it.id)}>
+          <div class="job-icon">
+            <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="1.4"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="12" cy="12" r="3.2"/></svg>
+            <span class="status-dot" style="background:var(--green)"></span>
+          </div>
+          <div class="job-meta">
+            <div class="job-name">{it.job.name}</div>
+            <div class="job-path">файл копии</div>
+          </div>
+        </button>
+      {/each}
     </div>
+    {#if addError}<div class="add-err">{addError}</div>{/if}
+    <button class="add-btn" onclick={() => { addError = null; addOpen = true; }}>
+      <svg width="18" height="18" viewBox="0 0 24 24" stroke="var(--primary)" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      Добавить копию
+    </button>
   </div>
 
   <!-- right: restore panel -->
@@ -73,15 +189,34 @@
     {/if}
   </div>
 </div>
+
+{#if addOpen}
+  <div class="overlay" role="presentation" onclick={() => (addOpen = false)}>
+    <div class="dialog" role="dialog" tabindex="-1" onclick={(e) => e.stopPropagation()}>
+      <div class="dialog-title">Добавить копию</div>
+      <p>Что открыть?</p>
+      <div class="choice-row">
+        <button class="choice" onclick={addFile}>
+          <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+          <span class="choice-title">Файл</span>
+          <span class="choice-sub">один образ копии</span>
+        </button>
+        <button class="choice" onclick={addFolder}>
+          <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+          <span class="choice-title">Папка с копиями</span>
+          <span class="choice-sub">найти все копии в папке</span>
+        </button>
+      </div>
+      <div class="dialog-actions">
+        <button class="ghost" onclick={() => (addOpen = false)}>Отмена</button>
+      </div>
+    </div>
+  </div>
 {/if}
 </div>
 
 <style>
   .restore-root { display: flex; flex-direction: column; height: 100%; }
-  .mode-bar { display: flex; gap: 4px; padding: 10px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
-  .mode { padding: 7px 16px; border: 1px solid var(--border); border-radius: 6px; background: none; color: var(--text-muted); font-size: 13px; font-weight: 600; font-family: var(--font); cursor: pointer; }
-  .mode.on { background: var(--primary); color: #fff; border-color: var(--primary); }
-  .disk-wrap { flex: 1; overflow: auto; }
   .layout { display: flex; flex: 1; min-height: 0; }
   .jobs-col { width: 240px; flex-shrink: 0; background: var(--column-bg); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
   .col-title { font-size: 22px; font-weight: 300; color: var(--head); padding: 22px 18px 12px; }
@@ -96,6 +231,20 @@
   .job-meta { flex: 1; min-width: 0; }
   .job-name { font-size: 14px; font-weight: 600; color: var(--head); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .job-path { font-size: 12px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .add-btn { display: flex; align-items: center; gap: 10px; padding: 15px 18px; background: none; border: none; border-top: 1px solid var(--border); cursor: pointer; font-size: 14px; font-weight: 600; color: var(--head); font-family: var(--font); }
+  .add-btn:hover { color: var(--primary); }
+  .add-err { margin: 0 8px 8px; padding: 8px 12px; font-size: 12px; color: #8c1d1d; background: rgba(216,74,74,.08); border-radius: 5px; }
   .dash-col { flex: 1; min-width: 0; overflow: auto; }
   .empty-dash { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; color: var(--text-muted); font-size: 15px; }
+  .overlay { position: fixed; inset: 0; background: rgba(20,17,44,.5); display: flex; align-items: center; justify-content: center; z-index: 150; }
+  .dialog { width: 460px; background: var(--card-bg); border-radius: 8px; padding: 24px; box-shadow: 0 20px 60px rgba(0,0,0,.3); }
+  .dialog-title { font-size: 17px; font-weight: 600; color: var(--head); margin-bottom: 6px; }
+  .dialog p { font-size: 13px; color: var(--text-muted); margin-bottom: 16px; }
+  .choice-row { display: flex; gap: 14px; }
+  .choice { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 20px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--card-bg); cursor: pointer; font-family: var(--font); }
+  .choice:hover { border-color: var(--primary); background: var(--accent-soft); }
+  .choice-title { font-size: 14px; font-weight: 600; color: var(--head); }
+  .choice-sub { font-size: 12px; color: var(--text-muted); }
+  .dialog-actions { display: flex; justify-content: flex-end; margin-top: 18px; }
+  .dialog-actions .ghost { background: none; border: 1px solid var(--border); color: var(--head); border-radius: 4px; padding: 8px 20px; font-size: 14px; font-weight: 600; font-family: var(--font); cursor: pointer; }
 </style>

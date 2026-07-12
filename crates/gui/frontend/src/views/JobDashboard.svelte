@@ -113,7 +113,8 @@
     { key: 'video', name: 'Видео', color: '#d8c81e' },
     { key: 'audio', name: 'Аудио', color: '#e07a2f' },
     { key: 'documents', name: 'Документы', color: '#8b5cf6' },
-    { key: 'system', name: 'Система', color: '#4f9be8' },
+    { key: 'windows', name: 'Windows', color: '#4f9be8' },
+    { key: 'linux', name: 'Linux', color: '#14b8a6' },
     { key: 'other', name: 'Другое', color: '#9aa0ad' },
   ] as const;
   const catData = $derived.by(() => {
@@ -126,6 +127,18 @@
       bytes: c[m.key] ?? 0,
       pct: ((c[m.key] ?? 0) / total) * 100,
     }));
+  });
+
+  // Collapsible "Копия создана…" summary card; its state is remembered across
+  // sessions (localStorage), per this job so hiding one doesn't hide others.
+  const SUMMARY_KEY = `hideRunSummary:${job.id}`;
+  let summaryHidden = $state(
+    typeof localStorage !== 'undefined' && localStorage.getItem(SUMMARY_KEY) === '1',
+  );
+  $effect(() => {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(SUMMARY_KEY, summaryHidden ? '1' : '0');
+    }
   });
 
   async function backup() {
@@ -244,6 +257,13 @@
             <span class="cat-size">{formatBytes(c.bytes)}</span>
           </div>
         {/each}
+        {#if lastRun && lastRun.excluded_files > 0}
+          <div class="cat">
+            <span class="dot" style="background:#c0463f"></span>
+            <span class="cat-name">Исключено</span>
+            <span class="cat-size">{formatBytes(lastRun.excluded_bytes)}</span>
+          </div>
+        {/if}
       </div>
     {:else}
       <div class="catbar empty-catbar"></div>
@@ -251,19 +271,26 @@
     {/if}
 
     {#if lastRun?.status === 'success'}
-      <div class="banner ok">
-        <span class="bdot"></span>
-        <span>
-          Копия создана — {kindLabel(lastRun.backup_kind)}{lastRun.vss_used ? ', снимок VSS' : ''}.
-          {lastRun.smart_mode ? 'Только занятые секторы.' : 'Посекторно.'}
-          {#if lastRun.backup_kind === 'incremental' || lastRun.backup_kind === 'differential'}
-            Записано только изменённое: {formatBytes(lastRun.bytes_copied)}.
-          {/if}
-          {#if lastRun.excluded_files > 0}
-            Исключено файлов: {lastRun.excluded_files} ({formatBytes(lastRun.excluded_bytes)}).
-          {/if}
-        </span>
-      </div>
+      {#if summaryHidden}
+        <button class="summary-show" onclick={() => (summaryHidden = false)}>
+          <span class="bdot small"></span> Показать сведения о копии
+        </button>
+      {:else}
+        <div class="banner ok">
+          <span class="bdot"></span>
+          <span>
+            Копия создана — {kindLabel(lastRun.backup_kind)}{lastRun.vss_used ? ', снимок VSS' : ''}.
+            {lastRun.smart_mode ? 'Только занятые секторы.' : 'Посекторно.'}
+            {#if lastRun.backup_kind === 'incremental' || lastRun.backup_kind === 'differential'}
+              Записано только изменённое: {formatBytes(lastRun.bytes_copied)}.
+            {/if}
+            {#if lastRun.excluded_files > 0}
+              Исключено файлов: {lastRun.excluded_files} ({formatBytes(lastRun.excluded_bytes)}).
+            {/if}
+          </span>
+          <button class="banner-x" title="Скрыть" aria-label="Скрыть" onclick={() => (summaryHidden = true)}>✕</button>
+        </div>
+      {/if}
     {:else if lastRun?.status === 'error'}
       <div class="banner err"><span class="bdot red"></span><span>Ошибка: {lastRun.error}</span></div>
     {/if}
@@ -334,6 +361,11 @@
   .banner.err { background: rgba(216,74,74,.08); }
   .bdot { width: 18px; height: 18px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
   .bdot.red { background: var(--error); }
+  .bdot.small { width: 10px; height: 10px; }
+  .banner .banner-x { margin-left: auto; flex-shrink: 0; width: 22px; height: 22px; border: none; background: none; color: var(--text-muted); font-size: 13px; line-height: 1; cursor: pointer; border-radius: 4px; }
+  .banner .banner-x:hover { background: rgba(0,0,0,.06); color: var(--head); }
+  .summary-show { margin-top: 22px; display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: none; border: 1px dashed var(--border); border-radius: 6px; color: var(--text-muted); font-size: 12px; font-weight: 600; font-family: var(--font); cursor: pointer; align-self: flex-start; }
+  .summary-show:hover { color: var(--head); border-color: var(--text-muted); }
   .bdot.blue { background: #5a8fd8; }
   /* .footer is global (styles/global.css) — full-width bar, same on every page. */
   .hint { flex: 1; font-size: 12px; color: var(--text-muted); }

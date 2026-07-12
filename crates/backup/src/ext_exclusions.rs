@@ -541,7 +541,7 @@ fn walk_dir_blocks(
                             } else if mode == S_IFREG {
                                 // Kept file — count its size for the dashboard.
                                 let size = u32at(&inode, 0x04) | (u32at(&inode, 0x6C) << 32);
-                                scan.categories.add(&name_lower, size);
+                                scan.categories.add(&child_rel, size);
                             }
                         }
                     }

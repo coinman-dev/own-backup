@@ -44,6 +44,7 @@ export const api = {
   unmountBackup: (imagePath: string) => invoke<void>('unmount_backup', { imagePath }),
   readImageInfo: (imagePath: string) => invoke<ImageInfo>('read_image_info', { imagePath }),
   listDiskBackups: (folder: string) => invoke<DiskBackup[]>('list_disk_backups', { folder }),
+  listImageBackups: (folder: string) => invoke<ImageInfo[]>('list_image_backups', { folder }),
   restoreDiskNow: (manifestPath: string, targetDisk: number, force: boolean) =>
     invoke<DiskRestoreSummary>('restore_disk_now', { manifestPath, targetDisk, force }),
   cancelEngineOp: () => invoke<void>('cancel_engine_op'),

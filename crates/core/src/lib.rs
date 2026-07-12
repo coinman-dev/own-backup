@@ -354,6 +354,13 @@ pub struct Job {
     /// GPT/partition metadata needed to write the disk-restore manifest.
     #[serde(default)]
     pub disk_source: Option<DiskSourceSpec>,
+    /// Snapshot of the source disk layout(s) captured when the job is saved, so
+    /// the restore screen can render the archived disk instantly — without
+    /// querying the live system, and even when that disk is no longer attached.
+    /// Written once by the GUI at creation (it already holds the enumerated
+    /// disks); empty for pre-existing jobs, which fall back to a live query.
+    #[serde(default)]
+    pub source_disks: Vec<own_backup_common::disk::DiskInfo>,
     /// Destination FOLDER; each run creates `<name>_<letter>_<stamp>.<ext>`.
     pub dest_folder: String,
     /// Image container format (decision #13): `vhdx` (default; Windows-native
@@ -382,6 +389,7 @@ impl Default for Job {
             source_labels: Vec::new(),
             requires_password: false,
             disk_source: None,
+            source_disks: Vec::new(),
             dest_folder: String::new(),
             image_format: own_backup_common::types::ImageFormat::default(),
             schedule: ScheduleConfig::default(),
@@ -1224,7 +1232,8 @@ fn merge_categories(
             video: a.video + b.video,
             audio: a.audio + b.audio,
             documents: a.documents + b.documents,
-            system: a.system + b.system,
+            windows: a.windows + b.windows,
+            linux: a.linux + b.linux,
             other: a.other + b.other,
         }),
     }
@@ -1293,9 +1302,20 @@ async fn perform_backup(
         let vol_label = job.label_for(device);
         let vidx = idx as u64;
 
+        // Physical disk this volume lives on, from the layout snapshot the GUI
+        // captured at job save — embedded in the sidecar so a restore shows the
+        // whole disk and highlights this partition without jobs.json. `None` on
+        // jobs saved before snapshots existed (the engine then omits it).
+        let source_disk = job
+            .source_disks
+            .iter()
+            .find(|d| d.partitions.iter().any(|p| p.volume_device == *device))
+            .cloned();
+
         let request = VolumeBackupRequest {
             source: device.clone(),
             image_path: image_path.clone(),
+            source_disk,
             block_size: own_backup_backup::engine_win::DEFAULT_BLOCK_SIZE,
             all_sectors: job.advanced.sector_by_sector,
             use_vss: true,
@@ -1560,10 +1580,26 @@ async fn perform_disk_backup(
         (Vec::new(), Vec::new())
     };
 
+    // Full disk-layout snapshot for THIS disk (captured by the GUI at job save)
+    // — embedded into the backup file so a Boot/Live-CD restore can identify the
+    // archived disk WITHOUT jobs.json. Matched by trailing PhysicalDrive number;
+    // None on jobs saved before snapshots existed (engine then omits it).
+    let source_disk = job
+        .source_disks
+        .iter()
+        .find(|d| {
+            let tail: String =
+                d.device_id.chars().rev().take_while(|c| c.is_ascii_digit()).collect();
+            let tail: String = tail.chars().rev().collect();
+            tail.parse::<u32>().ok() == Some(ds.disk_number)
+        })
+        .cloned();
+
     let request = DiskBackupRequest {
         disk_number: ds.disk_number,
         disk_model: ds.disk_model.clone(),
         partitions,
+        source_disk,
         image_path: image_path.clone(),
         block_size: own_backup_backup::engine_win::DEFAULT_BLOCK_SIZE,
         image_format: job.image_format,

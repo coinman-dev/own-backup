@@ -233,7 +233,7 @@ fn walk_directory(
                 scan.files_excluded += 1;
                 scan.bytes_excluded += bytes;
             } else {
-                scan.categories.add(&name_lower, u32le(rec, 28));
+                scan.categories.add(&rel_child, u32le(rec, 28));
             }
         }
 
@@ -640,7 +640,7 @@ fn finalize_exfat_entry(
         scan.files_excluded += 1;
         scan.bytes_excluded += bytes;
     } else {
-        scan.categories.add(&name_lower, p.data_length);
+        scan.categories.add(&rel_child, p.data_length);
     }
 }
 

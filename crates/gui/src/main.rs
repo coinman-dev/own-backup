@@ -237,6 +237,7 @@ fn main() {
             commands::engine::uninstall_aim_driver,
             commands::engine::read_image_info,
             commands::engine::list_disk_backups,
+            commands::engine::list_image_backups,
             commands::engine::restore_disk_now,
             commands::engine::cancel_engine_op,
             // --- misc ---

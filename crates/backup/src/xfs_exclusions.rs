@@ -525,7 +525,7 @@ pub fn scan_xfs_exclusions(
                 }
             } else if let Ok(fi) = read_inode(vol, &sb, e.ino) {
                 let size = be64(&fi, 0x38);
-                scan.categories.add(&name_lower, size);
+                scan.categories.add(&crel, size);
             }
         }
     }
