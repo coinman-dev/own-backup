@@ -493,6 +493,35 @@ impl JobStore {
         self.persist_jobs();
     }
 
+    /// Distinct image files this job has produced, gathered from its recorded
+    /// run history plus its last run, for the "delete related files" option.
+    /// Best-effort and precise: only paths the app itself wrote are returned (no
+    /// wildcard folder sweep), so an unrelated file can never be deleted. Bounded
+    /// by the retained activity history ([`ACTIVITY_CAP`] runs).
+    pub fn job_image_files(&self, job_id: &str) -> Vec<PathBuf> {
+        let mut set = std::collections::BTreeSet::new();
+        let add = |p: &str, set: &mut std::collections::BTreeSet<PathBuf>| {
+            if !p.is_empty() {
+                set.insert(PathBuf::from(p));
+            }
+        };
+        {
+            let activity = self.activity.lock().unwrap();
+            for r in activity.iter().filter(|r| r.job_id == job_id) {
+                add(&r.image_path, &mut set);
+                add(&r.base_image_path, &mut set);
+            }
+        }
+        {
+            let jobs = self.jobs.lock().unwrap();
+            if let Some(run) = jobs.iter().find(|j| j.id == job_id).and_then(|j| j.last_run.as_ref()) {
+                add(&run.image_path, &mut set);
+                add(&run.base_image_path, &mut set);
+            }
+        }
+        set.into_iter().collect()
+    }
+
     pub fn record_run(&self, run: JobRun) {
         {
             let mut jobs = self.jobs.lock().unwrap();

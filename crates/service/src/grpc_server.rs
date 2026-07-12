@@ -180,9 +180,23 @@ impl BackupService for BackupServiceImpl {
         json_reply(&self.state.store.upsert(job))
     }
 
-    async fn delete_job(&self, req: Request<IdRequest>) -> Result<Response<Empty>, Status> {
+    async fn delete_job(&self, req: Request<DeleteJobRequest>) -> Result<Response<Empty>, Status> {
         check_auth(&req, &self.service_token)?;
-        self.state.store.delete(&req.into_inner().id);
+        let DeleteJobRequest { id, delete_files } = req.into_inner();
+        if delete_files {
+            // Erase the images this job wrote (image + adjacent `.obkm` sidecar).
+            // Best-effort: a missing file is fine; we never fail the delete on it.
+            for f in self.state.store.job_image_files(&id) {
+                let sc = own_backup_backup::sidecar_path_for(&f);
+                if let Err(e) = std::fs::remove_file(&f) {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        tracing::warn!(file = %f.display(), error = %e, "delete_job: could not remove image file");
+                    }
+                }
+                let _ = std::fs::remove_file(&sc);
+            }
+        }
+        self.state.store.delete(&id);
         Ok(Response::new(Empty {}))
     }
 

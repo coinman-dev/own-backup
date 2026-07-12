@@ -82,6 +82,20 @@ button {
   font-family: var(--font);
 }
 
+/* Bottom action bar — identical on every page (Dashboard, Restore, Params).
+   Full-width 1px separator, right-aligned buttons. Single source of truth;
+   tune via --footer-padding / --footer-gap in variables.css. Each view's
+   footer must be a full-width child of a flex-column page shell (not inside a
+   centered max-width column) so the border spans the whole pane. */
+.footer {
+  display: flex;
+  align-items: center;
+  gap: var(--footer-gap);
+  padding: var(--footer-padding);
+  border-top: 1px solid var(--border);
+  background: var(--card-bg);
+}
+
 input,
 select,
 textarea {

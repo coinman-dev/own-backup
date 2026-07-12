@@ -3,6 +3,7 @@
   import { api } from '../lib/api';
   import JobDashboard from './JobDashboard.svelte';
   import BackupWizard from './BackupWizard.svelte';
+  import Modal from '../components/Modal.svelte';
   import type { Job } from '../lib/types';
 
   let selectedId: string | null = $state(null);
@@ -10,13 +11,67 @@
   let draftJob: Job | null = $state(null);
   let draftMode: 'wizard' | 'edit' | null = $state(null);
 
+  // Persisted list prefs.
+  const SEL_KEY = 'ob.backup.selectedJobId';
+  const SORT_KEY = 'ob.backup.sortKey';
+  type SortKey = 'name' | 'time' | 'size';
+  let sortKey = $state<SortKey>((localStorage.getItem(SORT_KEY) as SortKey) ?? 'name');
+  let sortOpen = $state(false);
+
+  // Delete-confirmation modal.
+  let deleteId: string | null = $state(null);
+  let deleteFiles = $state(false);
+  const deleteJobObj = $derived(jobs.list.find((j) => j.id === deleteId) ?? null);
+
   const selectedJob = $derived(jobs.list.find((j) => j.id === selectedId) ?? null);
 
   $effect(() => {
-    if (!draftJob && !selectedId && jobs.list.length > 0) selectedId = jobs.list[0].id;
-    if (selectedId && !jobs.list.some((j) => j.id === selectedId)) {
+    // Restore the remembered selection once the list has loaded; fall back to
+    // the first job only when there is nothing remembered.
+    if (!draftJob && !selectedId && jobs.list.length > 0) {
+      const stored = localStorage.getItem(SEL_KEY);
+      selectedId = stored && jobs.list.some((j) => j.id === stored) ? stored : jobs.list[0].id;
+    }
+    // Drop a stale selection only after the list is actually populated, so we
+    // never clobber a remembered id while jobs are still being fetched.
+    if (selectedId && jobs.list.length > 0 && !jobs.list.some((j) => j.id === selectedId)) {
       selectedId = jobs.list[0]?.id ?? null;
     }
+  });
+  // Persist the current selection and sort order across navigation / restarts.
+  $effect(() => {
+    if (selectedId) localStorage.setItem(SEL_KEY, selectedId);
+  });
+  $effect(() => {
+    localStorage.setItem(SORT_KEY, sortKey);
+  });
+
+  // Total on-disk footprint of a job = sum of every recorded run's written
+  // bytes (full + increments ≈ the size of all its archives), for size sort.
+  function jobSize(job: Job): number {
+    return jobs.activity
+      .filter((r) => r.job_id === job.id)
+      .reduce((s, r) => s + (r.bytes_copied || 0), 0);
+  }
+  const SORT_LABELS: Record<SortKey, string> = {
+    name: 'По имени',
+    time: 'По времени',
+    size: 'По размеру',
+  };
+  function setSort(k: SortKey) {
+    sortKey = k;
+    sortOpen = false;
+  }
+  const sortedJobs = $derived.by(() => {
+    const list = [...jobs.list];
+    if (sortKey === 'time') {
+      list.sort((a, b) => (b.last_run?.finished_at ?? '').localeCompare(a.last_run?.finished_at ?? ''));
+    } else if (sortKey === 'size') {
+      list.sort((a, b) => jobSize(b) - jobSize(a));
+    } else {
+      list.sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+    }
+    return list;
   });
 
   async function addJob() {
@@ -50,11 +105,15 @@
     selectedId = id;
   }
 
-  async function removeJob(id: string, e: Event) {
+  function askDelete(id: string, e: Event) {
     e.stopPropagation();
-    if (confirm('Удалить это задание? Файлы образов на диске останутся.')) {
-      await deleteJob(id);
-    }
+    deleteId = id;
+    deleteFiles = false;
+  }
+  async function confirmDelete() {
+    if (!deleteId) return;
+    await deleteJob(deleteId, deleteFiles);
+    deleteId = null;
   }
 
   function statusColor(s: string): string {
@@ -75,6 +134,19 @@
     <div class="this-pc">
       <svg width="11" height="11" viewBox="0 0 24 24" fill="var(--text-muted)"><path d="M6 9l6 6 6-6z"/></svg>
       Этот компьютер
+      <div class="sort">
+        <button class="sort-btn" title="Сортировка: {SORT_LABELS[sortKey]}" aria-label="Сортировка" onclick={() => (sortOpen = !sortOpen)}>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><line x1="4" y1="7" x2="16" y2="7"/><line x1="4" y1="12" x2="12" y2="12"/><line x1="4" y1="17" x2="8" y2="17"/></svg>
+        </button>
+        {#if sortOpen}
+          <button class="sort-backdrop" aria-label="Закрыть" onclick={() => (sortOpen = false)}></button>
+          <div class="sort-menu">
+            <button class:active={sortKey === 'name'} onclick={() => setSort('name')}>По имени</button>
+            <button class:active={sortKey === 'time'} onclick={() => setSort('time')}>По времени</button>
+            <button class:active={sortKey === 'size'} onclick={() => setSort('size')}>По размеру</button>
+          </div>
+        {/if}
+      </div>
     </div>
     <div class="jobs-list">
       <!-- draft (new) job appears here, name editable inline -->
@@ -91,7 +163,7 @@
         <div class="empty-list">Пока нет заданий.<br/>Нажмите «Добавить копию».</div>
       {/if}
 
-      {#each jobs.list as job (job.id)}
+      {#each sortedJobs as job (job.id)}
         <button class="job-item" class:sel={selectedId === job.id && !draftJob || editingId === job.id} onclick={() => selectJob(job.id)}>
           <div class="job-icon">
             <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="1.4"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="12" cy="12" r="3.2"/></svg>
@@ -104,7 +176,7 @@
               <div class="job-name">{job.name}</div>
               <div class="job-path">{job.dest_folder}</div>
             </div>
-            <span class="del" onclick={(e) => removeJob(job.id, e)} role="button" tabindex="0">×</span>
+            <span class="del" onclick={(e) => askDelete(job.id, e)} role="button" tabindex="0">×</span>
           {/if}
         </button>
       {/each}
@@ -133,11 +205,41 @@
   </div>
 </div>
 
+<Modal
+  open={deleteId !== null}
+  title="Удаление задания"
+  danger
+  confirmLabel="Удалить"
+  cancelLabel="Отмена"
+  onClose={() => (deleteId = null)}
+  onConfirm={confirmDelete}
+>
+  <p class="del-q">Вы уверены, что Вы хотите удалить это задание{deleteJobObj ? ` «${deleteJobObj.name}»` : ''}?</p>
+  <label class="del-files">
+    <input type="checkbox" bind:checked={deleteFiles} />
+    Удалить все связанные файлы
+  </label>
+  {#if deleteFiles}
+    <p class="del-warn">Файлы образов этой копии будут удалены с диска безвозвратно.</p>
+  {/if}
+</Modal>
+
 <style>
   .layout { display: flex; height: 100%; }
   .jobs-col { width: 240px; flex-shrink: 0; background: var(--column-bg); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
   .col-title { font-size: 22px; font-weight: 300; color: var(--head); padding: 22px 18px 12px; }
   .this-pc { display: flex; align-items: center; gap: 8px; padding: 6px 18px; font-size: 13px; font-weight: 600; color: var(--head); }
+  .sort { margin-left: auto; position: relative; display: flex; }
+  .sort-btn { background: none; border: none; padding: 3px 5px; cursor: pointer; color: var(--text-muted); display: flex; border-radius: 4px; }
+  .sort-btn:hover { color: var(--head); background: var(--hover, #f2f2f8); }
+  .sort-backdrop { position: fixed; inset: 0; z-index: 40; background: none; border: none; cursor: default; }
+  .sort-menu { position: absolute; top: 100%; right: 0; margin-top: 4px; z-index: 50; min-width: 150px; padding: 4px; display: flex; flex-direction: column; background: var(--card-bg); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 6px 20px rgba(0,0,0,.15); }
+  .sort-menu button { text-align: left; background: none; border: none; padding: 8px 12px; font-size: 13px; font-weight: 600; color: var(--head); cursor: pointer; border-radius: 4px; font-family: var(--font); }
+  .sort-menu button:hover { background: var(--hover, #f2f2f8); }
+  .sort-menu button.active { color: var(--primary); }
+  .del-q { font-size: 14px; color: var(--head); margin: 0 0 16px; }
+  .del-files { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--head); cursor: pointer; }
+  .del-warn { font-size: 13px; color: var(--error, #d84a4a); font-weight: 600; margin: 12px 0 0; }
   .jobs-list { flex: 1; overflow: auto; padding: 8px 8px; }
   .empty-list { text-align: center; color: var(--text-muted); font-size: 13px; padding: 30px 10px; line-height: 1.6; }
   .job-item { width: 100%; display: flex; align-items: center; gap: 10px; padding: 10px 8px; border: 1px solid transparent; border-radius: 6px; background: none; cursor: pointer; margin-bottom: 4px; text-align: left; font-family: var(--font); }

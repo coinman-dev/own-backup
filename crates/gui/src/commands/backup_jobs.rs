@@ -45,8 +45,12 @@ pub async fn save_backup_job(state: State<'_, GuiState>, job: Job) -> Result<Job
 }
 
 #[tauri::command]
-pub async fn delete_backup_job(state: State<'_, GuiState>, id: String) -> Result<(), String> {
-    state.link.client().await?.delete_job(&id).await
+pub async fn delete_backup_job(
+    state: State<'_, GuiState>,
+    id: String,
+    delete_files: bool,
+) -> Result<(), String> {
+    state.link.client().await?.delete_job(&id, delete_files).await
 }
 
 /// Unlock an encrypted (LUKS/BitLocker) source `volume` with `password`. The

@@ -14,7 +14,7 @@ service BackupService {
   rpc ListJobs(Empty) returns (JsonReply);           // JSON: [Job]
   rpc GetJob(IdRequest) returns (JsonReply);         // JSON: Job | null
   rpc SaveJob(JsonRequest) returns (JsonReply);      // in: Job JSON -> out: stored Job JSON
-  rpc DeleteJob(IdRequest) returns (Empty);
+  rpc DeleteJob(DeleteJobRequest) returns (Empty);
   rpc NewJobTemplate(Empty) returns (JsonReply);     // JSON: Job (default template)
   rpc DefaultExclusions(Empty) returns (JsonReply);  // JSON: [string]
 
@@ -62,6 +62,8 @@ service BackupService {
 
 message Empty {}
 message IdRequest { string id = 1; }
+// Delete a job; when delete_files is set, also erase the job's image files.
+message DeleteJobRequest { string id = 1; bool delete_files = 2; }
 message JsonRequest { string json = 1; }
 message JsonReply { string json = 1; }
 

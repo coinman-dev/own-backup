@@ -142,6 +142,7 @@
   }
 </script>
 
+<div class="page">
 <div class="dash">
   <div class="flow">
     <div class="card">
@@ -270,6 +271,7 @@
 
   {#if actionErr}<div class="banner err"><span class="bdot red"></span><span>{actionErr}</span></div>{/if}
   {#if actionMsg}<div class="banner info"><span class="bdot blue"></span><span>{actionMsg}</span></div>{/if}
+</div>
 
   <div class="footer">
     <div class="hint">
@@ -293,7 +295,8 @@
 {/if}
 
 <style>
-  .dash { padding: 34px 44px; max-width: 900px; margin: 0 auto; display: flex; flex-direction: column; height: 100%; }
+  .page { height: 100%; display: flex; flex-direction: column; }
+  .dash { flex: 1; overflow: auto; width: 100%; padding: 34px 44px; max-width: 900px; margin: 0 auto; display: flex; flex-direction: column; }
   .flow { display: flex; align-items: stretch; justify-content: center; }
   .card { flex: 1; max-width: 300px; border: 1px solid var(--border); border-radius: 6px; padding: 22px 18px; text-align: center; background: var(--card-bg); display: flex; flex-direction: column; align-items: center; gap: 8px; }
   .card-title { font-size: 20px; font-weight: 600; color: var(--head); }
@@ -332,7 +335,7 @@
   .bdot { width: 18px; height: 18px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
   .bdot.red { background: var(--error); }
   .bdot.blue { background: #5a8fd8; }
-  .footer { margin-top: auto; padding-top: 20px; border-top: 1px solid var(--border); display: flex; align-items: center; gap: 14px; }
+  /* .footer is global (styles/global.css) — full-width bar, same on every page. */
   .hint { flex: 1; font-size: 12px; color: var(--text-muted); }
   .btn { border-radius: 4px; padding: 10px 24px; font-size: 14px; font-weight: 600; font-family: var(--font); cursor: pointer; border: none; }
   .btn:disabled { opacity: .5; cursor: default; }

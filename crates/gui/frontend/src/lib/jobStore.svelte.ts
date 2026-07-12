@@ -74,8 +74,8 @@ export async function saveJob(job: Job): Promise<Job> {
   return saved;
 }
 
-export async function deleteJob(id: string): Promise<void> {
-  await api.deleteBackupJob(id);
+export async function deleteJob(id: string, deleteFiles = false): Promise<void> {
+  await api.deleteBackupJob(id, deleteFiles);
   await reloadJobs();
 }
 

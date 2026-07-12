@@ -26,7 +26,8 @@ export const api = {
   defaultExclusionPatterns: () =>
     invoke<{ windows: string[]; linux: string[] }>('default_exclusion_patterns'),
   saveBackupJob: (job: Job) => invoke<Job>('save_backup_job', { job }),
-  deleteBackupJob: (id: string) => invoke<void>('delete_backup_job', { id }),
+  deleteBackupJob: (id: string, deleteFiles: boolean) =>
+    invoke<void>('delete_backup_job', { id, deleteFiles }),
   decryptVolume: (volume: string, password: string, remember: boolean) =>
     invoke<DecryptResult>('decrypt_volume', { volume, password, remember }),
   runBackupJob: (id: string) => invoke<void>('run_backup_job', { id }),

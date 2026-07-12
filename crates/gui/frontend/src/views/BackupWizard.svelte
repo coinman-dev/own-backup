@@ -218,6 +218,29 @@
     sourceReadonly ? engine.disks.filter(diskHasSelection) : engine.disks,
   );
 
+  // Kept-files breakdown of the last run (same data the dashboard shows), drawn
+  // under the disk map on the read-only "Параметры" screen so the user sees what
+  // kind of files the copy holds without leaving the settings.
+  const CAT_META = [
+    { key: 'images', name: 'Изображения', color: '#5ab02f' },
+    { key: 'video', name: 'Видео', color: '#d8c81e' },
+    { key: 'audio', name: 'Аудио', color: '#e07a2f' },
+    { key: 'documents', name: 'Документы', color: '#8b5cf6' },
+    { key: 'system', name: 'Система', color: '#4f9be8' },
+    { key: 'other', name: 'Другое', color: '#9aa0ad' },
+  ] as const;
+  const catData = $derived.by(() => {
+    const c = job.last_run?.categories;
+    if (!c) return null;
+    const total = CAT_META.reduce((s, m) => s + (c[m.key] ?? 0), 0);
+    if (total <= 0) return null;
+    return CAT_META.map((m) => ({
+      ...m,
+      bytes: c[m.key] ?? 0,
+      pct: ((c[m.key] ?? 0) / total) * 100,
+    }));
+  });
+
   // Keep disk_source.parts in sync with the currently-selected backable
   // partitions of a disk (behaviour B: only kept volumes stay in the layout).
   function syncDiskSourceParts(d: DiskInfo) {
@@ -615,7 +638,10 @@
 <div class="wizard">
     <div class="wz-head">
       <span class="wz-title">Параметры резервного копирования диска</span>
-      <span class="wz-name">{job.name}</span>
+      <span class="wz-name">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="1.4"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="12" cy="12" r="3.2"/></svg>
+        {job.name}
+      </span>
     </div>
 
     <!-- tab bar -->
@@ -632,7 +658,7 @@
           <!-- SOURCE -->
           <div class="sec-head">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="12" cy="12" r="3.4"/></svg>
-            <span class="sec-title">Что копировать</span>
+            <span class="sec-title">{sourceReadonly ? 'Что скопировано' : 'Что копировать'}</span>
             <span class="sec-sub">{sourceReadonly ? 'разделы, включённые в эту копию (менять нельзя)' : 'выберите один или несколько томов'}</span>
           </div>
 
@@ -710,6 +736,26 @@
                   {@render pwPanel(encryptedForDisk(d))}
                 {/if}
               {/each}
+            </div>
+          {/if}
+
+          {#if sourceReadonly && catData}
+            <div class="cat-block">
+              <div class="cat-head">Что в копии — по типам файлов</div>
+              <div class="catbar">
+                {#each catData as c}
+                  <div style="width:{c.pct}%; background:{c.color}" title="{c.name}: {formatBytes(c.bytes)}"></div>
+                {/each}
+              </div>
+              <div class="cats">
+                {#each catData as c}
+                  <div class="cat">
+                    <span class="dot" style="background:{c.color}"></span>
+                    <span class="cat-name">{c.name}</span>
+                    <span class="cat-size">{formatBytes(c.bytes)}</span>
+                  </div>
+                {/each}
+              </div>
             </div>
           {/if}
 
@@ -946,9 +992,10 @@
 
 <style>
   .wizard { height: 100%; background: var(--content-bg); display: flex; flex-direction: column; overflow: hidden; }
-  .wz-head { padding: 22px 34px 14px; display: flex; align-items: baseline; gap: 14px; }
+  .wz-head { padding: 22px 34px 14px; display: flex; align-items: center; gap: 14px; }
   .wz-title { font-size: 24px; font-weight: 300; color: var(--head); }
-  .wz-name { font-size: 13px; color: var(--text-muted); }
+  .wz-name { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 600; color: var(--head); white-space: nowrap; }
+  .wz-name svg { flex-shrink: 0; }
   .tabs { display: flex; padding: 0 34px; border-bottom: 1px solid var(--border); }
   .tab { padding: 10px 4px 12px; margin-right: 28px; background: none; border: none; border-bottom: 3px solid transparent; color: var(--text-muted); font-size: 14px; font-weight: 600; font-family: var(--font); cursor: pointer; }
   .tab.active { color: var(--head); border-bottom-color: var(--primary); }
@@ -962,6 +1009,15 @@
   .sec-title { font-size: 15px; font-weight: 700; color: var(--head); }
   .sec-sub { font-size: 13px; color: var(--text-muted); }
   .disks { display: flex; flex-direction: column; gap: 14px; }
+  /* Kept-files category breakdown, shown under the disk map (read-only). */
+  .cat-block { margin-top: 14px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 6px; background: var(--card-bg); }
+  .cat-head { font-size: 13px; font-weight: 600; color: var(--head); margin-bottom: 4px; }
+  .catbar { height: 9px; border-radius: 5px; overflow: hidden; display: flex; margin-top: 10px; }
+  .cats { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+  .cat { flex: 1; min-width: 130px; display: flex; align-items: center; gap: 7px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+  .cat-name { font-size: 13px; color: var(--head); }
+  .cat-size { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
   .disk-card { border: 1px solid var(--border); border-radius: 6px; overflow: hidden; background: var(--card-bg); }
   .disk-head { width: 100%; display: flex; align-items: center; justify-content: space-between; padding: 6px 12px; background: var(--panel2); border: 0; border-bottom: 1px solid var(--border); margin: 0; font-family: inherit; text-align: left; }
   .disk-head.whole { background: rgba(45,125,210,.12); color: var(--primary); }
@@ -1073,7 +1129,7 @@
   .dev-badge { font-size: 11px; color: #a06a10; background: rgba(251,188,5,.15); padding: 3px 9px; border-radius: 10px; }
   .ok-badge { font-size: 11px; color: #2c5b12; background: rgba(90,176,47,.15); padding: 2px 8px; border-radius: 10px; margin-left: 6px; }
   .wz-error { padding: 8px 34px; color: #8c1d1d; font-size: 13px; background: rgba(216,74,74,.08); }
-  .footer { display: flex; align-items: center; gap: 12px; padding: 14px 34px; border-top: 1px solid var(--border); background: var(--card-bg); }
+  /* .footer is global (styles/global.css) — same bar on every page. */
   .spacer { flex: 1; }
   .btn { border-radius: 4px; padding: 10px 26px; font-size: 14px; font-weight: 600; font-family: var(--font); cursor: pointer; border: none; }
   .btn.small { padding: 7px 14px; font-size: 13px; }

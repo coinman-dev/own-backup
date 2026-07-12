@@ -131,6 +131,7 @@
   const targetLabel = $derived(engine.volumes.find((v) => v.device === target)?.label ?? target);
 </script>
 
+<div class="page">
 <div class="dash">
   <div class="flow">
     <!-- LEFT: archive (swapped) -->
@@ -231,6 +232,7 @@
     <div class="banner ok"><span class="bdot"></span><span>Восстановление завершено: {formatBytes(summary.bytes_restored)} за {summary.duration_secs.toFixed(1)} с.</span></div>
   {/if}
   {#if errorMsg}<div class="banner err"><span class="bdot red"></span><span>{errorMsg}</span></div>{/if}
+</div>
 
   <div class="footer">
     <div class="hint">
@@ -266,7 +268,8 @@
 {/if}
 
 <style>
-  .dash { padding: 34px 44px; max-width: 900px; margin: 0 auto; display: flex; flex-direction: column; height: 100%; }
+  .page { height: 100%; display: flex; flex-direction: column; }
+  .dash { flex: 1; overflow: auto; width: 100%; padding: 34px 44px; max-width: 900px; margin: 0 auto; display: flex; flex-direction: column; }
   .flow { display: flex; align-items: stretch; justify-content: center; }
   .card { flex: 1; max-width: 300px; border: 1px solid var(--border); border-radius: 6px; padding: 22px 18px; text-align: center; background: var(--card-bg); display: flex; flex-direction: column; align-items: center; gap: 8px; }
   .card-title { font-size: 20px; font-weight: 600; color: var(--head); }
@@ -301,7 +304,7 @@
   .banner.err { background: rgba(216,74,74,.08); }
   .bdot { width: 18px; height: 18px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
   .bdot.red { background: var(--error); }
-  .footer { margin-top: auto; padding-top: 20px; border-top: 1px solid var(--border); display: flex; align-items: center; gap: 14px; }
+  /* .footer is global (styles/global.css) — full-width bar, same on every page. */
   .hint { flex: 1; font-size: 12px; color: var(--text-muted); }
   .btn { border-radius: 4px; padding: 10px 24px; font-size: 14px; font-weight: 600; font-family: var(--font); cursor: pointer; border: none; }
   .btn:disabled { opacity: .5; cursor: default; }

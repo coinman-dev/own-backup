@@ -205,9 +205,12 @@ impl BackupClient {
         parse(&reply.json)
     }
 
-    pub async fn delete_job(&mut self, id: &str) -> Result<()> {
+    pub async fn delete_job(&mut self, id: &str, delete_files: bool) -> Result<()> {
         self.inner
-            .delete_job(self.request(proto::IdRequest { id: id.into() }))
+            .delete_job(self.request(proto::DeleteJobRequest {
+                id: id.into(),
+                delete_files,
+            }))
             .await
             .map_err(status)?;
         Ok(())
