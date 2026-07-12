@@ -109,6 +109,7 @@
     return job.sources.includes(dev);
   }
   function toggleSource(dev: string, label: string) {
+    if (sourceReadonly) return; // fixed source on the "Параметры" screen
     if (job.sources.includes(dev)) {
       // A boot-essential volume (ESP / OS) cannot be dropped while its disk is
       // in bootable-copy mode — the restore would not boot without it.
@@ -201,6 +202,22 @@
     return !!p && isBootEssential(p);
   }
 
+  // "Параметры" screen (edit mode): the source is fixed once a job is saved —
+  // changing which disks/volumes it captures would break the incremental chain.
+  // So show ONLY the disks this job actually backs up, and render the whole map
+  // read-only (for a different source the user creates a new job).
+  const sourceReadonly = $derived(mode === 'edit');
+  function diskHasSelection(d: DiskInfo): boolean {
+    if (isBootableCopy(d)) return true;
+    return d.partitions.some((p) => {
+      const dev = partDevice(p);
+      return !!dev && job.sources.includes(dev);
+    });
+  }
+  const visibleDisks = $derived(
+    sourceReadonly ? engine.disks.filter(diskHasSelection) : engine.disks,
+  );
+
   // Keep disk_source.parts in sync with the currently-selected backable
   // partitions of a disk (behaviour B: only kept volumes stay in the layout).
   function syncDiskSourceParts(d: DiskInfo) {
@@ -215,6 +232,7 @@
   // so the disk can be restored bootable to a new SSD. Independent of which
   // data volumes are selected; disabled for non-bootable disks.
   function toggleBootableCopy(d: DiskInfo) {
+    if (sourceReadonly) return; // fixed source on the "Параметры" screen
     if (!isBootableDisk(d)) return; // read-only for pure data disks
     if (isBootableCopy(d)) {
       job.disk_source = null; // turn off; keep the user's volume selection
@@ -615,16 +633,22 @@
           <div class="sec-head">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="12" cy="12" r="3.4"/></svg>
             <span class="sec-title">Что копировать</span>
-            <span class="sec-sub">выберите один или несколько томов</span>
+            <span class="sec-sub">{sourceReadonly ? 'разделы, включённые в эту копию (менять нельзя)' : 'выберите один или несколько томов'}</span>
           </div>
 
           {#if engine.volumesLoading && engine.disks.length === 0}
             <div class="loading-note">Загрузка списка дисков…</div>
           {:else if engine.volumesError && engine.disks.length === 0}
             <div class="warn-note">{engine.volumesError}</div>
+          {:else if visibleDisks.length === 0}
+            <div class="warn-note">
+              {sourceReadonly
+                ? 'Диски этой копии сейчас недоступны (не подключены) — источник показать нельзя.'
+                : 'Диски не найдены.'}
+            </div>
           {:else}
             <div class="disks">
-              {#each engine.disks as d}
+              {#each visibleDisks as d}
                 <div class="disk-card">
                   <div class="disk-head" class:whole={isBootableCopy(d)}>
                     <span class="disk-model">{d.model || d.device_id}</span>
@@ -640,7 +664,7 @@
                         <input
                           type="checkbox"
                           checked={isBootableCopy(d)}
-                          disabled={!isBootableDisk(d)}
+                          disabled={sourceReadonly || !isBootableDisk(d)}
                           onchange={() => toggleBootableCopy(d)}
                         />
                         <span>Загрузочная копия диска</span>
@@ -665,6 +689,7 @@
                               class="seg selectable"
                               class:selected={isSelected(dev)}
                               class:locked={isLockedSource(dev)}
+                              class:ro={sourceReadonly}
                               style="flex: {seg.size} 1 0"
                               title={isLockedSource(dev) ? segTitle(seg.p) + ' · обязателен для загрузки' : segTitle(seg.p)}
                               onclick={() => toggleSource(dev, partLabel(seg.p!))}
@@ -963,6 +988,9 @@
   .free-lbl { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
   .seg.selectable { cursor: pointer; }
   .seg.selectable:hover { filter: brightness(0.97); }
+  /* Read-only source map ("Параметры"): the selection is shown, not editable. */
+  .seg.ro { cursor: default; }
+  .seg.ro:hover { filter: none; }
   .seg.selected { background: rgba(45,125,210,.16); box-shadow: inset 0 0 0 2px var(--primary); }
   /* Left-to-right "used space" fill inside a partition — a subtle shaded strip
      with a defined right edge, so occupancy is readable at a glance. */
