@@ -1648,6 +1648,7 @@ async fn perform_disk_backup(
             run.blocks_unchanged = summary.blocks_unchanged;
             run.excluded_files = summary.excluded_files;
             run.excluded_bytes = summary.excluded_bytes;
+            run.categories = summary.categories;
             run.duration_secs = summary.duration.as_secs_f64();
             // Record what was ACTUALLY produced (the engine may have fallen back
             // to a full when the parent chain was unusable) so the next run plans

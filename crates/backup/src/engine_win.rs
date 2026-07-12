@@ -1241,6 +1241,9 @@ pub struct DiskBackupSummary {
     pub excluded_files: u64,
     /// Bytes their extents freed from the image.
     pub excluded_bytes: u64,
+    /// Per-category byte breakdown of kept files across all partitions (for the
+    /// dashboard); `None` when no exclusion walk ran on any partition.
+    pub categories: Option<crate::exclusions::CategorySizes>,
 }
 
 /// One prepared partition: its VSS snapshot, decrypt params, used-map and the
@@ -1309,6 +1312,9 @@ struct PreparedMap {
     removal_paths: Vec<crate::exclusions_win::ExcludedPath>,
     pub excluded_files: u64,
     pub excluded_bytes: u64,
+    /// Per-category byte breakdown of the KEPT files on this partition (powers
+    /// the dashboard's data breakdown); `None` when no exclusion walk ran.
+    categories: Option<crate::exclusions::CategorySizes>,
 }
 
 /// Build a partition's used-map and apply file exclusions (plan D2). The
@@ -1342,6 +1348,7 @@ fn prepare_partition_map(
         removal_paths: Vec::new(),
         excluded_files: 0,
         excluded_bytes: 0,
+        categories: None,
     };
     let open = || -> Result<Box<dyn crate::fat_map::RawVolume + Send>> {
         let dev = WinRawDevice::open_read(read_path)?;
@@ -1358,6 +1365,7 @@ fn prepare_partition_map(
                 if let Ok(mut scan) = collect_excluded_ranges(read_path, m.cluster_size(), patterns, tick) {
                     out.excluded_files = scan.files_excluded;
                     out.excluded_bytes = scan.bytes_excluded;
+                    out.categories = Some(scan.categories);
                     out.removal_paths = std::mem::take(&mut scan.paths);
                     if !scan.ranges.is_empty() {
                         m.apply_excluded_ranges(&scan.ranges);
@@ -1383,6 +1391,7 @@ fn prepare_partition_map(
                 if let Ok(scan) = crate::fat_exclusions::scan_fat_exclusions(&mut dev, patterns, tick) {
                     out.excluded_files = scan.files_excluded;
                     out.excluded_bytes = scan.bytes_excluded;
+                    out.categories = Some(scan.categories);
                     if !scan.ranges.is_empty() {
                         // Rebuild the map so excluded clusters drop out.
                         if let Ok(mut dev2) = WinRawDevice::open_read(read_path) {
@@ -1419,6 +1428,7 @@ fn prepare_partition_map(
                     Ok(scan) => {
                         out.excluded_files = scan.files_excluded;
                         out.excluded_bytes = scan.bytes_excluded;
+                        out.categories = Some(scan.categories);
                         out.patches = scan.patches;
                         if !scan.ranges.is_empty() {
                             m.apply_excluded_ranges(&scan.ranges, block_size);
@@ -1446,6 +1456,7 @@ fn prepare_partition_map(
                     Ok(scan) => {
                         out.excluded_files = scan.files_excluded;
                         out.excluded_bytes = scan.bytes_excluded;
+                        out.categories = Some(scan.categories);
                         out.patches = scan.patches;
                         if !scan.ranges.is_empty() {
                             m.apply_excluded_ranges(&scan.ranges, block_size);
@@ -1471,6 +1482,7 @@ fn prepare_partition_map(
                     Ok(scan) => {
                         out.excluded_files = scan.files_excluded;
                         out.excluded_bytes = scan.bytes_excluded;
+                        out.categories = Some(scan.categories);
                         if !scan.ranges.is_empty() {
                             m.apply_excluded_ranges(&scan.ranges, block_size);
                             out.zero_ranges = scan.ranges;
@@ -1666,6 +1678,7 @@ fn backup_disk_inner(
     let mut prepared: Vec<PreparedPartition> = Vec::new();
     let mut excluded_files = 0u64;
     let mut excluded_bytes = 0u64;
+    let mut categories: Option<crate::exclusions::CategorySizes> = None;
     for p in &req.partitions {
         let entry = layout
             .partitions
@@ -1748,6 +1761,9 @@ fn backup_disk_inner(
         let used = pm.map.unwrap_or_else(|| Box::new(AllUsedMap::new(volume_len.div_ceil(bs))));
         excluded_files += pm.excluded_files;
         excluded_bytes += pm.excluded_bytes;
+        if let Some(c) = &pm.categories {
+            categories.get_or_insert_with(Default::default).merge(c);
+        }
         info!(
             part = p.part_index,
             fs = %pm.filesystem,
@@ -2113,6 +2129,7 @@ fn backup_disk_inner(
         blocks_unchanged,
         excluded_files,
         excluded_bytes,
+        categories,
     })
 }
 

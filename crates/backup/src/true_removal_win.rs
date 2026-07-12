@@ -240,9 +240,11 @@ fn mount_and_delete(
     paths: &[ExcludedPath],
     tick: &mut dyn FnMut(u64),
 ) -> Result<(u64, u64)> {
-    // Keep the surfacing volume off Explorer: no drive letter while we delete
-    // (we reach it via its \\?\Volume{GUID}\ path). Restored on drop.
-    let _no_letter = crate::automount::AutoMountGuard::disable();
+    // NB: we do NOT disable auto-mount here — `mountvol /N` stops the NTFS
+    // volume from mounting at all (device-not-ready), so the delete pass would
+    // wait out the full 180 s and delete nothing. Instead the surfacing volume's
+    // drive letter (and its remembered mapping) is stripped once it mounts (see
+    // strip_drive_letters), so it only flashes briefly.
     create_differencing_vhdx(temp, image_path)?;
     debug!(temp_child = %temp.display(), "true removal: temp differencing child created");
 
@@ -370,8 +372,9 @@ fn mount_and_delete_multi(
     partitions: &[(u64, Vec<ExcludedPath>)],
     tick: &mut dyn FnMut(u64),
 ) -> Result<(u64, u64)> {
-    // No drive letters while we delete (volumes reached via \\?\Volume{GUID}\).
-    let _no_letter = crate::automount::AutoMountGuard::disable();
+    // Do NOT disable auto-mount (it blocks the NTFS volume from mounting at all
+    // → 180 s device-not-ready + nothing deleted). Letters are stripped after
+    // mount instead (strip_letters_on_disk below).
     create_differencing_vhdx(temp, image_path)?;
     let attached = attach_vhdx(temp, AttachMode::RawWrite)?;
     let dev = open_write_retry(attached.physical_path())?;

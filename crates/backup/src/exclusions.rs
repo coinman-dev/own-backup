@@ -73,6 +73,16 @@ impl CategorySizes {
     pub fn total(&self) -> u64 {
         self.images + self.video + self.audio + self.documents + self.system + self.other
     }
+
+    /// Add another breakdown into this one (whole-disk sums each partition's).
+    pub fn merge(&mut self, o: &CategorySizes) {
+        self.images += o.images;
+        self.video += o.video;
+        self.audio += o.audio;
+        self.documents += o.documents;
+        self.system += o.system;
+        self.other += o.other;
+    }
 }
 
 // ---------------------------------------------------------------------------
