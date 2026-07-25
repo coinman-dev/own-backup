@@ -112,6 +112,8 @@ pub async fn list_disk_backups(folder: String) -> Result<Vec<DiskBackupDto>, Str
 pub struct ImageInfoDto {
     /// Full path to the image file (what restore is handed).
     pub image_path: String,
+    /// Job id that produced this image (ties copies of one archive together).
+    pub job_id: Option<String>,
     pub image_file_name: String,
     pub chain_role: String,
     pub created_at: String,
@@ -179,6 +181,7 @@ fn read_image_info_at(path: &std::path::Path) -> Result<ImageInfoDto, String> {
 
     Ok(ImageInfoDto {
         image_path: path.display().to_string(),
+        job_id: sidecar.info.job_id.clone(),
         image_file_name: sidecar.info.image_file_name,
         chain_role: format!("{:?}", sidecar.info.chain_role),
         created_at: sidecar.manifest.created_at,

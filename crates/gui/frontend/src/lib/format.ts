@@ -1,9 +1,13 @@
 /**
- * Format bytes into a human-readable string such as "1.5 GB" or "350 MB".
+ * Format bytes into a human-readable string such as "1.5 GiB" or "350 MiB".
+ *
+ * Binary prefixes (KiB/MiB/GiB) — the divisor is 1024, so "KB/MB/GB" would be
+ * wrong: those mean powers of 1000. Disk and partition sizes here are all
+ * computed in 1024-based units, and the labels must say so.
  */
 export function formatBytes(bytes: number): string {
   if (bytes === 0) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
   const k = 1024;
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   const value = bytes / Math.pow(k, i);

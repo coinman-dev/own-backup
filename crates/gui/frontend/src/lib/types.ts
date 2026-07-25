@@ -181,6 +181,8 @@ export interface VerifySummary {
 
 export interface ImageInfo {
   image_path: string;
+  /** Job id that produced this image (groups copies of one archive). */
+  job_id: string | null;
   image_file_name: string;
   chain_role: string;
   created_at: string;

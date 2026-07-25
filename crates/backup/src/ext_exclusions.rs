@@ -308,6 +308,10 @@ fn walk_extent_node(
             if leaf == 0 || leaf >= sb.blocks_count {
                 return Err(bad("extent index points outside the filesystem"));
             }
+            // The interior extent-tree block is allocated to this inode too, so
+            // it must be zeroed and freed with the file — otherwise it stays
+            // marked in use in the block bitmap after removal (e2fsck errors).
+            out.push(Extent { first: leaf, count: 1 });
             let mut child = vec![0u8; sb.fs_block as usize];
             vol.read_at(leaf * sb.fs_block, &mut child)?;
             walk_extent_node(vol, sb, &child, out, depth_guard + 1)?;
@@ -343,6 +347,10 @@ fn indirect_blocks(vol: &mut dyn RawVolume, sb: &Sb, inode: &[u8], out: &mut Vec
         if ptr >= sb.blocks_count {
             return Err(bad("indirect pointer outside the filesystem"));
         }
+        // The indirect block itself belongs to the file (at every level), so it
+        // is zeroed and freed along with the data it points at — otherwise it
+        // stays marked in use in the block bitmap (e2fsck reports differences).
+        out.push(Extent { first: ptr, count: 1 });
         let mut buf = vec![0u8; sb.fs_block as usize];
         vol.read_at(ptr * sb.fs_block, &mut buf)?;
         for i in 0..ppb {
@@ -982,28 +990,63 @@ mod ext_integration {
                 return;
             };
             // Exclude by bare name (secret.log) and by path (cache/**).
-            let (scan, mut vol) = run_scan(&img, &["secret.log", "cache/**"]);
+            // The image is verified by reading the file directly (below), so the
+            // volume handle itself is not needed here.
+            let (scan, _vol) = run_scan(&img, &["secret.log", "cache/**"]);
             // secret.log + cache dir + cache/big.bin.
             assert_eq!(scan.files_excluded, 3, "bs={bs}");
             assert!(!scan.ranges.is_empty(), "bs={bs}: no ranges");
-            // Safety property: no excluded byte may belong to the KEPT file
-            // (keep.txt is 0xCD). Excluded ranges cover the 0xAB file data plus
-            // the excluded directory's own blocks (dir entries) — never 0xCD.
-            let mut buf = vec![0u8; bs as usize];
-            let mut ab_bytes = 0u64;
-            for (start, end) in scan.ranges.iter() {
-                let mut off = start;
-                while off < end {
-                    let n = ((end - off) as usize).min(buf.len());
-                    vol.read_at(off, &mut buf[..n]).unwrap();
-                    assert!(!buf[..n].contains(&0xCD),
-                        "bs={bs}: excluded range [{off},{}) touches the KEPT file (0xCD)", off + n as u64);
-                    ab_bytes += buf[..n].iter().filter(|&&b| b == 0xAB).count() as u64;
-                    off += n as u64;
+            // Find the files' data on disk by their long fill runs. Testing a
+            // byte VALUE inside the excluded ranges would be wrong: those ranges
+            // legitimately include the excluded directory's own block, whose
+            // dir-entry tail ends in a crc32c that is random per mke2fs run
+            // (random fs UUID) — it hits any given byte on ~1.6% of images.
+            // Only a long run is real file content.
+            let img_bytes = std::fs::read(&img).unwrap();
+            let runs = |fill: u8, min_len: usize| -> Vec<(u64, u64)> {
+                let mut out = Vec::new();
+                let (mut start, mut len) = (0usize, 0usize);
+                for (i, &b) in img_bytes.iter().chain(std::iter::once(&0u8)).enumerate() {
+                    if b == fill {
+                        if len == 0 { start = i; }
+                        len += 1;
+                    } else {
+                        if len >= min_len { out.push((start as u64, (start + len) as u64)); }
+                        len = 0;
+                    }
+                }
+                out
+            };
+            // keep.txt = 4 KiB of 0xCD; secret.log + cache/big.bin = 8 + 16 KiB of 0xAB.
+            let keep_runs = runs(0xCD, 4096);
+            let ab_runs = runs(0xAB, 4096);
+            assert_eq!(
+                keep_runs.iter().map(|(s, e)| e - s).sum::<u64>(), 4096,
+                "bs={bs}: keep.txt data not found in the image",
+            );
+            assert_eq!(
+                ab_runs.iter().map(|(s, e)| e - s).sum::<u64>(), 8192 + 16384,
+                "bs={bs}: excluded files' data not found in the image",
+            );
+
+            // Safety property 1: no excluded range may touch the KEPT file.
+            for &(ks, ke) in &keep_runs {
+                for (start, end) in scan.ranges.iter() {
+                    assert!(
+                        end <= ks || start >= ke,
+                        "bs={bs}: excluded range [{start},{end}) overlaps the KEPT file [{ks},{ke})",
+                    );
                 }
             }
-            // All of both 0xAB files' data is covered (8 KiB + 16 KiB).
-            assert_eq!(ab_bytes, 8192 + 16384, "bs={bs}: 0xAB data covered");
+            // Safety property 2: every byte of the excluded files IS covered.
+            for &(as_, ae) in &ab_runs {
+                let covered: u64 = scan
+                    .ranges
+                    .iter()
+                    .map(|(rs, re)| re.min(ae).saturating_sub(rs.max(as_)))
+                    .sum();
+                assert_eq!(covered, ae - as_, "bs={bs}: excluded data [{as_},{ae}) not fully covered");
+            }
             assert_eq!(scan.bytes_excluded, 8192 + 16384, "bs={bs}");
         }
     }
@@ -1080,5 +1123,75 @@ mod ext_integration {
             assert!(stat_out.contains("not found") || stat_out.contains("File not found"),
                 "bs={bs}: /secret.log still resolvable:\n{stat_out}");
         }
+    }
+
+    /// ext2/ext3 image (no extents): a file bigger than the 12 direct pointers
+    /// needs an *indirect* block, which belongs to the file just like its data.
+    /// `file_kib` KiB of 0xAB at `/big.bin`, plus a small kept file.
+    fn make_ext2(bs: u32, file_kib: usize) -> Option<(std::path::PathBuf, tempfile::TempDir)> {
+        use std::io::Write;
+        if std::process::Command::new("mke2fs").arg("-V").output().is_err() {
+            return None;
+        }
+        let dir = tempfile::tempdir().ok()?;
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).ok()?;
+        std::fs::File::create(src.join("keep.txt")).ok()?.write_all(&[0xCD; 4096]).ok()?;
+        std::fs::File::create(src.join("big.bin"))
+            .ok()?
+            .write_all(&vec![0xAB; file_kib * 1024])
+            .ok()?;
+        let img = dir.path().join("ext2.img");
+        let out = std::process::Command::new("mke2fs")
+            .args(["-q", "-F", "-t", "ext2", "-b"])
+            .arg(bs.to_string())
+            .arg("-d")
+            .arg(&src)
+            .arg(&img)
+            .arg("16384") // blocks
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            eprintln!("mke2fs (ext2) failed: {}", String::from_utf8_lossy(&out.stderr));
+            return None;
+        }
+        Some((img, dir))
+    }
+
+    /// Regression: on ext2/ext3 the indirect block is part of the file's
+    /// allocation. If it is not zeroed and freed with the data, it stays marked
+    /// in use in the block bitmap after removal — `e2fsck` then reports block
+    /// bitmap differences. 64 KiB at 1 KiB blocks = 64 data blocks: 12 direct +
+    /// 52 reached through exactly one single-indirect block.
+    #[test]
+    fn stage2_ext2_indirect_block_is_freed() {
+        if std::process::Command::new("e2fsck").arg("-V").output().is_err() {
+            eprintln!("e2fsck unavailable — skipping ext2 indirect-block test");
+            return;
+        }
+        let Some((img, keep)) = make_ext2(1024, 64) else { return };
+        let (scan, _vol) = run_scan(&img, &["big.bin"]);
+        assert_eq!(scan.files_excluded, 1);
+
+        // Stage 1 must cover the data blocks AND the indirect block.
+        let blocks: u64 = scan.ranges.iter().map(|(s, e)| (e - s) / 1024).sum();
+        assert_eq!(blocks, 64 + 1, "64 data blocks + 1 single-indirect block");
+
+        // Stage 2 must leave the filesystem consistent.
+        let mut data = std::fs::read(&img).unwrap();
+        for (off, bytes) in &scan.patches {
+            let o = *off as usize;
+            data[o..o + bytes.len()].copy_from_slice(bytes);
+        }
+        let patched = keep.path().join("patched_ext2.img");
+        std::fs::write(&patched, &data).unwrap();
+        let out = std::process::Command::new("e2fsck").args(["-fn"]).arg(&patched).output().unwrap();
+        assert!(
+            out.status.success(),
+            "e2fsck found problems (exit {:?}):\n{}\n{}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
     }
 }
