@@ -784,8 +784,15 @@
       // Same wording as the plan builder's rule, so the list and the plan
       // cannot describe different things.
       const byFiles = !!sp && !!dp && dp.size_bytes < sp.size_bytes;
+      const bits = [
+        formatBytes(sp?.size_bytes ?? 0),
+        byFiles ? 'пофайлово: приёмник меньше исходного' : 'посекторно, раздел перезаписывается целиком',
+      ];
+      if (!byFiles && reencrypt && reencryptable.includes(m.src)) {
+        bits.push('с возвратом шифрования');
+      }
       ops.push(
-        `Восстановить «${sp?.volume_label || sp?.volume_letter || 'раздел ' + m.src}» → «${dp?.volume_label || dp?.volume_letter || 'раздел ' + m.dst}» (${formatBytes(sp?.size_bytes ?? 0)}, ${byFiles ? 'пофайлово: приёмник меньше исходного' : 'посекторно'})`,
+        `Восстановить «${sp?.volume_label || sp?.volume_letter || 'раздел ' + m.src}» → «${dp?.volume_label || dp?.volume_letter || 'раздел ' + m.dst}» (${bits.join(', ')})`,
       );
     }
     return ops;
@@ -1011,6 +1018,15 @@
         })),
       taken_letters: [],
       target_is_system_disk: false,
+      // What the destinations hold RIGHT NOW — from the live disk, not from the
+      // edited layout, since that is what the restore will overwrite.
+      targets: (targetDisk?.partitions ?? []).map((p) => ({
+        index: p.index,
+        size_bytes: p.size_bytes,
+        used_bytes: p.used_bytes,
+        filesystem: p.filesystem,
+        label: p.volume_label || (p.volume_letter ? `${p.volume_letter}:` : ''),
+      })),
     };
   }
 

@@ -507,6 +507,15 @@ export interface CheckContext {
   }[];
   taken_letters: string[];
   target_is_system_disk: boolean;
+  /** The target disk's partitions as they are now, so the checks can say what
+   *  the restore is about to overwrite. */
+  targets: {
+    index: number;
+    size_bytes: number;
+    used_bytes: number;
+    filesystem: string;
+    label: string;
+  }[];
 }
 
 export interface DryRunResult {

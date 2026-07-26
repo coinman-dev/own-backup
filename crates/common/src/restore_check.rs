@@ -107,6 +107,11 @@ pub enum CheckCode {
     /// Putting the encryption back was asked for in file mode, where it cannot
     /// work.
     ReencryptNeedsSectors,
+    /// The destination partition currently holds a filesystem with data.
+    DestinationWillBeErased,
+    /// The destination changes families — a Windows partition becomes a Linux
+    /// one or the other way round.
+    PartitionChangesFamily,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,6 +157,17 @@ pub struct SourcePartition {
     pub luks_header_available: bool,
 }
 
+/// What a destination partition holds **right now**, before the restore.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TargetPartition {
+    pub index: u32,
+    pub size_bytes: u64,
+    /// Bytes in use. 0 when unknown or empty.
+    pub used_bytes: u64,
+    pub filesystem: FileSystem,
+    pub label: String,
+}
+
 /// Facts about the machine and the image that the pure checks cannot discover
 /// for themselves.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,11 +180,19 @@ pub struct CheckContext {
     /// The target disk is the one the running OS boots from — restoring onto it
     /// is refused outright; that job needs a Boot CD (D13).
     pub target_is_system_disk: bool,
+    /// The target disk's partitions as they are now, so the checks can say what
+    /// is about to be overwritten. Empty when the caller did not supply them.
+    #[serde(default)]
+    pub targets: Vec<TargetPartition>,
 }
 
 impl CheckContext {
     fn source(&self, index: u32) -> Option<&SourcePartition> {
         self.sources.iter().find(|s| s.index == index)
+    }
+
+    fn target(&self, index: u32) -> Option<&TargetPartition> {
+        self.targets.iter().find(|t| t.index == index)
     }
 }
 
@@ -467,6 +491,7 @@ fn check_ops(
                 };
                 check_fit(src, dst, *mode, out);
                 check_encryption(src, dst, *mode, *reencrypt, out);
+                check_destination(ctx, src, dst, out);
                 if *mode == RestoreMode::Files {
                     file_targets.push((dst.index, src.filesystem));
                 }
@@ -626,6 +651,82 @@ fn check_fit(src: &SourcePartition, dst: &PartRef, mode: RestoreMode, out: &mut 
                 ));
             }
         }
+    }
+}
+
+/// Say what the destination holds today, and what it becomes.
+///
+/// A partition the user deletes in the designer is listed in the queue as
+/// deleted, so its fate is obvious. A partition merely chosen as a destination
+/// is not: the queue says "restore A → B" and nothing about B's current
+/// contents, which the restore overwrites completely. Naming them — filesystem,
+/// label, how much is in use — is the difference between a decision and a
+/// surprise.
+///
+/// The second half matters when families cross. Restoring a Linux volume onto
+/// what is now an NTFS partition works exactly as intended, and the partition
+/// then stops being a Windows partition: its GPT type becomes Linux and
+/// Explorer no longer lists it. Without a word of warning that reads as a
+/// vanished drive.
+fn check_destination(
+    ctx: &CheckContext,
+    src: &SourcePartition,
+    dst: &PartRef,
+    out: &mut Vec<CheckResult>,
+) {
+    let Some(cur) = ctx.target(dst.index) else { return };
+    let has_content = cur.filesystem != FileSystem::Unknown || cur.used_bytes > 0;
+    if has_content {
+        let label = if cur.label.trim().is_empty() {
+            String::new()
+        } else {
+            format!(" «{}»", cur.label)
+        };
+        let used = if cur.used_bytes > 0 {
+            format!(", занято {}", human(cur.used_bytes))
+        } else {
+            String::new()
+        };
+        out.push(CheckResult::new(
+            CheckLevel::Warning,
+            CheckCode::DestinationWillBeErased,
+            Some(dst.index),
+            format!(
+                "На разделе {} сейчас {}{label}{used}. Восстановление перезапишет его \
+                 целиком — вернуть то, что там лежит, будет нельзя.",
+                dst.index,
+                cur.filesystem.label()
+            ),
+        ));
+    }
+
+    // Crossing families is legitimate and is what the user asked for; it is the
+    // consequence that needs saying.
+    if has_content && src.filesystem.is_windows_family() != cur.filesystem.is_windows_family() {
+        let becomes_linux = !src.filesystem.is_windows_family();
+        out.push(CheckResult::new(
+            CheckLevel::Warning,
+            CheckCode::PartitionChangesFamily,
+            Some(dst.index),
+            if becomes_linux {
+                format!(
+                    "Раздел {} перестанет быть разделом Windows: в него ляжет {}, и тип \
+                     раздела в таблице сменится на Linux. Windows больше не покажет его \
+                     как диск — это нормально для раздела Linux, но букву {} он потеряет.",
+                    dst.index,
+                    src.filesystem.label(),
+                    cur.label.trim()
+                )
+            } else {
+                format!(
+                    "Раздел {} сейчас размечен как {}, а в него ляжет {} — после \
+                     восстановления Windows начнёт показывать его как обычный диск.",
+                    dst.index,
+                    cur.filesystem.label(),
+                    src.filesystem.label()
+                )
+            },
+        ));
     }
 }
 
@@ -834,6 +935,7 @@ mod tests {
             sources,
             taken_letters: vec![],
             target_is_system_disk: false,
+            targets: vec![],
         }
     }
 
@@ -988,6 +1090,106 @@ mod tests {
         );
         let results = check_plan(&plan, &ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Btrfs)]));
         assert!(errors(&results).contains(&CheckCode::FileModeUnsupportedFs), "{results:#?}");
+    }
+
+    fn target(index: u32, fs: FileSystem, used: u64, label: &str) -> TargetPartition {
+        TargetPartition {
+            index,
+            size_bytes: 200 * MIB,
+            used_bytes: used,
+            filesystem: fs,
+            label: label.into(),
+        }
+    }
+
+    #[test]
+    fn what_the_destination_holds_today_is_spelled_out() {
+        // The queue says "restore A → B" and nothing about B. A partition the
+        // user did not explicitly delete still loses everything on it.
+        let t = table(vec![entry(1, 1, 200)]);
+        let p1 = part_ref(&t, 1);
+        let plan = plan_with(
+            t,
+            vec![RestoreOp::RestorePartition {
+                src_index: 1,
+                dst: p1,
+                mode: RestoreMode::Sectors,
+                wipe_free_space: false,
+                reencrypt: false,
+            }],
+        );
+        let mut c = ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ntfs)]);
+        c.targets = vec![target(1, FileSystem::Ntfs, 93 * MIB, "Данные")];
+        let results = check_plan(&plan, &c);
+        let found = results.iter().find(|r| r.code == CheckCode::DestinationWillBeErased).unwrap();
+        assert!(found.message.contains("Данные"), "{}", found.message);
+        assert!(found.message.contains("93"), "{}", found.message);
+        assert!(errors(&results).is_empty(), "a warning, not a veto");
+    }
+
+    #[test]
+    fn an_empty_destination_says_nothing() {
+        let t = table(vec![entry(1, 1, 200)]);
+        let p1 = part_ref(&t, 1);
+        let plan = plan_with(
+            t,
+            vec![RestoreOp::RestorePartition {
+                src_index: 1,
+                dst: p1,
+                mode: RestoreMode::Sectors,
+                wipe_free_space: false,
+                reencrypt: false,
+            }],
+        );
+        let mut c = ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ntfs)]);
+        c.targets = vec![target(1, FileSystem::Unknown, 0, "")];
+        let results = check_plan(&plan, &c);
+        assert!(!codes(&results).contains(&CheckCode::DestinationWillBeErased));
+    }
+
+    #[test]
+    fn restoring_linux_onto_an_ntfs_partition_warns_that_windows_will_lose_it() {
+        // Exactly the case in front of me: a btrfs volume mapped onto what is
+        // currently an NTFS partition. It works — and the partition stops being
+        // a Windows drive, which reads as a disappearance if nobody says so.
+        let t = table(vec![entry(1, 1, 200)]);
+        let p1 = part_ref(&t, 1);
+        let plan = plan_with(
+            t,
+            vec![RestoreOp::RestorePartition {
+                src_index: 1,
+                dst: p1,
+                mode: RestoreMode::Sectors,
+                wipe_free_space: false,
+                reencrypt: false,
+            }],
+        );
+        let mut c = ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Btrfs)]);
+        c.targets = vec![target(1, FileSystem::Ntfs, 50 * MIB, "NTFS")];
+        let results = check_plan(&plan, &c);
+        let found = results.iter().find(|r| r.code == CheckCode::PartitionChangesFamily).unwrap();
+        assert!(found.message.contains("Windows"), "{}", found.message);
+        assert!(errors(&results).is_empty(), "crossing families is allowed");
+    }
+
+    #[test]
+    fn two_windows_filesystems_do_not_trigger_the_family_warning() {
+        let t = table(vec![entry(1, 1, 200)]);
+        let p1 = part_ref(&t, 1);
+        let plan = plan_with(
+            t,
+            vec![RestoreOp::RestorePartition {
+                src_index: 1,
+                dst: p1,
+                mode: RestoreMode::Sectors,
+                wipe_free_space: false,
+                reencrypt: false,
+            }],
+        );
+        let mut c = ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ntfs)]);
+        c.targets = vec![target(1, FileSystem::ExFat, 50 * MIB, "Flash")];
+        let results = check_plan(&plan, &c);
+        assert!(!codes(&results).contains(&CheckCode::PartitionChangesFamily));
     }
 
     #[test]
