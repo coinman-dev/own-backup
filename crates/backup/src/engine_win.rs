@@ -477,6 +477,12 @@ fn backup_volume_inner(
     // For an encrypted source the map is built over the decrypting view and
     // returned boxed directly (no exclusions apply to a Linux volume).
     let mut luks_used: Option<Box<dyn UsedSectorMap>> = None;
+    // The filesystem actually found inside the volume. For a LUKS/BitLocker
+    // source this is what is INSIDE the container, because that is what the
+    // image holds — the partition table outside still says "unknown", and a
+    // restore screen reading only that would show a padlock over a plain
+    // btrfs (D14, R8).
+    let mut detected_fs: Option<String> = None;
     let smart_mode = if req.all_sectors {
         info!("Sector-by-sector mode requested; copying all blocks");
         false
@@ -487,15 +493,19 @@ fn backup_volume_inner(
         let map: Option<Box<dyn UsedSectorMap>> =
             if let Ok(m) = crate::fat_map::build_fat_used_map(src.as_mut(), req.block_size) {
                 info!(fs = m.filesystem, "Using FAT map over decrypted volume");
+                detected_fs = Some(m.filesystem.to_string());
                 Some(Box::new(m))
             } else if let Ok(m) = crate::ext_map::build_ext_used_map(src.as_mut(), req.block_size) {
                 info!(fs = "ext4", "Using ext map over decrypted volume");
+                detected_fs = Some("ext4".into());
                 Some(Box::new(m))
             } else if let Ok(m) = crate::btrfs_map::build_btrfs_used_map(src.as_mut(), req.block_size) {
                 info!(fs = "btrfs", "Using btrfs map over decrypted volume");
+                detected_fs = Some("btrfs".into());
                 Some(Box::new(m))
             } else if let Ok(m) = crate::xfs_map::build_xfs_used_map(src.as_mut(), req.block_size) {
                 info!(fs = "xfs", "Using xfs map over decrypted volume");
+                detected_fs = Some("xfs".into());
                 Some(Box::new(m))
             } else {
                 warn!("no used-block map for the decrypted volume — sector-by-sector");
@@ -508,6 +518,7 @@ fn backup_volume_inner(
         match NtfsUsedSectorMap::open(&read_path, req.block_size) {
             Ok(map) => {
                 ntfs_map = Some(map);
+                detected_fs = Some("NTFS".into());
                 true
             }
             Err(ntfs_err) => {
@@ -519,6 +530,7 @@ fn backup_volume_inner(
                 match fat_attempt {
                     Ok(map) => {
                         info!(fs = map.filesystem, "Using FAT used-cluster map");
+                        detected_fs = Some(map.filesystem.to_string());
                         fat_map = Some(map);
                         true
                     }
@@ -529,6 +541,7 @@ fn backup_volume_inner(
                         match ext_attempt {
                             Ok(map) => {
                                 info!(fs = "ext4", "Using ext used-block map");
+                                detected_fs = Some("ext4".into());
                                 ext_map = Some(map);
                                 true
                             }
@@ -540,6 +553,7 @@ fn backup_volume_inner(
                                 match btrfs_attempt {
                                     Ok(map) => {
                                         info!(fs = "btrfs", "Using btrfs used-block map");
+                                        detected_fs = Some("btrfs".into());
                                         btrfs_map = Some(map);
                                         true
                                     }
@@ -551,6 +565,7 @@ fn backup_volume_inner(
                                         match xfs_attempt {
                                             Ok(map) => {
                                                 info!(fs = "xfs", "Using xfs used-block map");
+                                                detected_fs = Some("xfs".into());
                                                 xfs_map = Some(map);
                                                 true
                                             }
@@ -1143,6 +1158,7 @@ fn backup_volume_inner(
     sidecar_info.categories = categories;
     sidecar_info.excluded_files = excluded_files;
     sidecar_info.excluded_bytes = excluded_bytes;
+    sidecar_info.filesystem = detected_fs;
     let sidecar_path = sidecar_path_for(&req.image_path);
 
 

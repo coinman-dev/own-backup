@@ -197,6 +197,11 @@ export interface ImageInfo {
   source_disk_layout: DiskInfo | null;
   /** Partition indices this backup contains — the card highlights these. */
   backed_up_parts: number[];
+  /** Filesystem inside each backed-up partition, as the IMAGE records it.
+   *  For a LUKS/BitLocker source this is the decrypted filesystem — the copy
+   *  holds the volume in the clear, so the disk snapshot's "Unknown +
+   *  encrypted" would misdescribe what a restore produces. */
+  part_filesystems: { index: number; filesystem: string }[];
   /** File-type breakdown embedded in the image. */
   categories: CategorySizes | null;
   /** Files/bytes excluded from this image (for the "Исключено" legend line). */

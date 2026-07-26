@@ -153,13 +153,31 @@
   //     Boot-CD; also correct when the original disk is detached),
   //  2. the snapshot stored on the job at creation (jobs.json),
   //  3. a live query of currently-attached disks (pre-snapshot backups).
-  const backedUpDisks = $derived(
+  const rawBackedUpDisks = $derived(
     activeInfo?.source_disk_layout
       ? [activeInfo.source_disk_layout]
       : job.source_disks && job.source_disks.length > 0
         ? job.source_disks
         : engine.disks.filter(diskHasSelection),
   );
+  // For a partition that is IN the copy, the image's manifest knows the
+  // filesystem better than the disk snapshot does. The snapshot is not wrong —
+  // before decryption `Unknown` + "зашифрован" is the only honest reading of a
+  // LUKS container — but the copy holds the volume in the clear, so showing a
+  // padlock over what restores as plain btrfs would mislead (D14, R8).
+  // Partitions outside the copy keep their padlock: nothing opened those.
+  const backedUpDisks = $derived.by(() => {
+    const fs = activeInfo?.part_filesystems ?? [];
+    if (fs.length === 0) return rawBackedUpDisks;
+    const byIndex = new Map(fs.map((f) => [f.index, f.filesystem]));
+    return rawBackedUpDisks.map((d) => ({
+      ...d,
+      partitions: d.partitions.map((p) => {
+        const known = byIndex.get(p.index);
+        return known ? { ...p, filesystem: known, is_encrypted: false } : p;
+      }),
+    }));
+  });
   const systemDisks = $derived(engine.disks);
 
   // --- Restore-mapping wizard (what → where) --------------------------------

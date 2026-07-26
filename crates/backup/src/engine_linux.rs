@@ -261,6 +261,9 @@ fn backup_inner(
         })
     };
 
+    // The filesystem found INSIDE the volume — the decrypted one for a LUKS or
+    // BitLocker source, since that is what the image holds (R8).
+    let mut detected_fs: Option<String> = None;
     // --- Used-block map: FAT/exFAT → ext → btrfs → xfs → NTFS (else whole) ---
     let (used, smart_mode): (Box<dyn UsedSectorMap>, bool) = if req.all_sectors {
         info!("Sector-by-sector mode requested; copying all blocks");
@@ -270,19 +273,24 @@ fn backup_inner(
         let map: Option<Box<dyn UsedSectorMap>> =
             if let Ok(m) = crate::fat_map::build_fat_used_map(src.as_mut(), req.block_size) {
                 info!(fs = m.filesystem, "Using FAT used-cluster map");
+                detected_fs = Some(m.filesystem.to_string());
                 Some(Box::new(m))
             } else if let Ok(m) = crate::ext_map::build_ext_used_map(src.as_mut(), req.block_size) {
                 info!(fs = "ext4", "Using ext used-block map");
+                detected_fs = Some("ext4".into());
                 Some(Box::new(m))
             } else if let Ok(m) = crate::btrfs_map::build_btrfs_used_map(src.as_mut(), req.block_size)
             {
                 info!(fs = "btrfs", "Using btrfs used-block map");
+                detected_fs = Some("btrfs".into());
                 Some(Box::new(m))
             } else if let Ok(m) = crate::xfs_map::build_xfs_used_map(src.as_mut(), req.block_size) {
                 info!(fs = "xfs", "Using xfs used-block map");
+                detected_fs = Some("xfs".into());
                 Some(Box::new(m))
             } else if let Ok(m) = crate::ntfs_map::build_ntfs_used_map(src.as_mut(), req.block_size) {
                 info!(fs = "ntfs", "Using NTFS used-cluster map");
+                detected_fs = Some("NTFS".into());
                 Some(Box::new(m))
             } else {
                 warn!("no used-block map available (unknown filesystem) — copying every block");
@@ -397,6 +405,7 @@ fn backup_inner(
     let mut sidecar_info = SidecarInfo::new_full(image_file_name, data_offset);
     sidecar_info.container = req.image_format.extension().into();
     sidecar_info.job_id = req.job_id.clone();
+    sidecar_info.filesystem = detected_fs;
     let sidecar_path = sidecar_path_for(&req.image_path);
 
 

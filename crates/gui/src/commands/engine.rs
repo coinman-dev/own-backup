@@ -29,6 +29,13 @@ pub struct DiskBackupPartDto {
     pub size_bytes: u64,
 }
 
+/// The filesystem the image records for one partition.
+#[derive(Debug, Clone, Serialize)]
+pub struct PartFsDto {
+    pub index: u32,
+    pub filesystem: String,
+}
+
 /// A whole-disk backup discovered in the destination folder (from a `.obdm`).
 #[derive(Debug, Clone, Serialize)]
 pub struct DiskBackupDto {
@@ -133,6 +140,15 @@ pub struct ImageInfoDto {
     /// Partition indices (into `source_disk_layout.partitions`) that this backup
     /// actually contains — the ones the restore card highlights.
     pub backed_up_parts: Vec<u32>,
+    /// Filesystem inside each backed-up partition, **as the image records it**.
+    ///
+    /// For a LUKS or BitLocker source this is the decrypted filesystem, because
+    /// that is what the image holds. The disk snapshot alongside says `Unknown`
+    /// and flags the partition encrypted, which is the only honest reading of a
+    /// container nobody has opened — but for a partition that is *in the copy*
+    /// the manifest knows better, and a padlock over what restores as plain
+    /// btrfs would be a lie (D14).
+    pub part_filesystems: Vec<PartFsDto>,
     /// File-type breakdown embedded in the image (for "по типам файлов").
     pub categories: Option<CategorySizes>,
     /// Files/bytes excluded from this image (for the "Исключено" legend line).
@@ -186,6 +202,23 @@ fn read_image_info_at(path: &std::path::Path) -> Result<ImageInfoDto, String> {
         Vec::new()
     };
 
+    // Whole-disk images carry a filesystem per partition in the disk manifest;
+    // a per-volume image carries the one filesystem it holds.
+    let part_filesystems: Vec<PartFsDto> = if let Some(dm) = &sidecar.disk_manifest {
+        dm.images
+            .iter()
+            .filter(|i| !i.filesystem.is_empty())
+            .map(|i| PartFsDto { index: i.part_index, filesystem: i.filesystem.clone() })
+            .collect()
+    } else {
+        match (&sidecar.info.filesystem, backed_up_parts.first()) {
+            (Some(fs), Some(&index)) if !fs.is_empty() => {
+                vec![PartFsDto { index, filesystem: fs.clone() }]
+            }
+            _ => Vec::new(),
+        }
+    };
+
     Ok(ImageInfoDto {
         image_path: path.display().to_string(),
         job_id: sidecar.info.job_id.clone(),
@@ -200,6 +233,7 @@ fn read_image_info_at(path: &std::path::Path) -> Result<ImageInfoDto, String> {
         backup_mode: format!("{:?}", sidecar.manifest.backup_mode),
         source_disk_layout,
         backed_up_parts,
+        part_filesystems,
         categories: sidecar.info.categories,
         excluded_files: sidecar.info.excluded_files,
         excluded_bytes: sidecar.info.excluded_bytes,

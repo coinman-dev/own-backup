@@ -85,6 +85,17 @@ pub struct SidecarInfo {
     /// Total bytes of the excluded files (see `excluded_files`).
     #[serde(default)]
     pub excluded_bytes: u64,
+    /// The filesystem actually found INSIDE the volume this image holds.
+    ///
+    /// For a LUKS or BitLocker source this is the *decrypted* filesystem,
+    /// because that is what the image contains — the backup stores the volume
+    /// in the clear. The partition table outside still reads `Unknown`, which
+    /// is the only honest answer before decryption, so a restore screen that
+    /// consulted the disk snapshot alone would draw a padlock over what is now
+    /// a plain btrfs (D14). `None` for images written before this field
+    /// existed, and for a sector-by-sector copy of an unrecognised filesystem.
+    #[serde(default)]
+    pub filesystem: Option<String>,
 }
 
 impl SidecarInfo {
@@ -101,6 +112,7 @@ impl SidecarInfo {
             categories: None,
             excluded_files: 0,
             excluded_bytes: 0,
+            filesystem: None,
         }
     }
 
@@ -122,6 +134,7 @@ impl SidecarInfo {
             categories: None,
             excluded_files: 0,
             excluded_bytes: 0,
+            filesystem: None,
         }
     }
 }
