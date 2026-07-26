@@ -188,11 +188,104 @@ pub fn sidecar_path_for(image_path: &Path) -> std::path::PathBuf {
     std::path::PathBuf::from(name)
 }
 
-/// Calculate the size of the metadata partition based on the total number of blocks.
-pub fn calculate_meta_partition_size(total_blocks: u64) -> u64 {
-    let bytes = total_blocks * 16 + 65536;
+/// Size the image's metadata partition.
+///
+/// It has to hold the whole sidecar blob, and it is reserved **before** that
+/// blob exists — the checksums inside it are produced by the copy the region is
+/// being reserved for. So this is an estimate, and it has to be an estimate
+/// that is never too small: the write at the end fails outright if the blob
+/// does not fit, after the copy has already run.
+///
+/// `extra_bytes` is room for anything beyond the checksum table and the small
+/// JSON header — today that means stored LUKS headers, which are megabytes
+/// rather than kilobytes (see [`luks_headers_reserve`]).
+pub fn calculate_meta_partition_size(total_blocks: u64, extra_bytes: u64) -> u64 {
+    let bytes = total_blocks * 16 + extra_bytes + 65536;
     let mib = 1024 * 1024;
     bytes.div_ceil(mib) * mib
+}
+
+/// Room to reserve for stored container headers (D19).
+///
+/// They travel base64-encoded inside the sidecar's JSON, which inflates them by
+/// a third; zstd then squeezes most of that back out, but the reserve is
+/// deliberately computed on the *un*compressed size. Betting on a compression
+/// ratio here would mean a backup that runs for an hour and then cannot write
+/// its own metadata — the estimate is allowed to be generous, and is not
+/// allowed to be optimistic.
+pub fn luks_headers_reserve(headers: &[own_backup_common::image::LuksHeaderBackup]) -> u64 {
+    headers.iter().map(|h| h.data_offset.div_ceil(3) * 4 + 65536).sum()
+}
+
+/// The same reserve computed straight from the container parameters, for the
+/// point in a backup where the headers have not been captured yet but their
+/// size is already known.
+pub fn luks_reserve_for(data_offsets: impl IntoIterator<Item = u64>) -> u64 {
+    data_offsets.into_iter().map(|d| d.div_ceil(3) * 4 + 65536).sum()
+}
+
+#[cfg(test)]
+mod meta_size_tests {
+    use super::*;
+    use own_backup_common::image::{LuksHeaderBackup, VolumeEncryptionKind};
+
+    const MIB: u64 = 1024 * 1024;
+
+    fn header(data_offset: u64) -> LuksHeaderBackup {
+        LuksHeaderBackup {
+            part_index: 1,
+            data_offset,
+            sector_size: 512,
+            kind: VolumeEncryptionKind::Luks2,
+            header_b64: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_plain_image_needs_room_for_its_checksums() {
+        // 14 219 blocks × 16 bytes + slack, rounded up to a whole mebibyte.
+        assert_eq!(calculate_meta_partition_size(14_219, 0), MIB);
+    }
+
+    #[test]
+    fn a_stored_luks2_header_dominates_the_reserve() {
+        // The failure this guards: a 16 MiB header inside a 1 MiB region.
+        // 14 219 blocks alone fit in 1 MiB; with the header they need 23.
+        let reserve = luks_headers_reserve(&[header(16 * MIB)]);
+        let size = calculate_meta_partition_size(14_219, reserve);
+        assert!(size >= 22 * MIB, "reserved only {size} bytes for a 16 MiB header");
+    }
+
+    #[test]
+    fn the_reserve_covers_base64_without_counting_on_compression() {
+        // base64 inflates by 4/3; zstd usually wins it back, but a reserve that
+        // assumes it would fail after the copy has already run.
+        let raw = 16 * MIB;
+        assert!(luks_headers_reserve(&[header(raw)]) >= raw * 4 / 3);
+    }
+
+    #[test]
+    fn several_encrypted_partitions_each_get_room() {
+        let one = luks_headers_reserve(&[header(16 * MIB)]);
+        let three = luks_headers_reserve(&[header(16 * MIB), header(16 * MIB), header(16 * MIB)]);
+        assert_eq!(three, one * 3);
+    }
+
+    #[test]
+    fn the_two_ways_of_computing_the_reserve_agree() {
+        // One is used after the headers are captured, the other before — they
+        // must not drift, or a child's geometry stops matching its parent's.
+        assert_eq!(
+            luks_headers_reserve(&[header(2 * MIB), header(16 * MIB)]),
+            luks_reserve_for([2 * MIB, 16 * MIB])
+        );
+    }
+
+    #[test]
+    fn no_encryption_reserves_nothing() {
+        assert_eq!(luks_headers_reserve(&[]), 0);
+        assert_eq!(luks_reserve_for([]), 0);
+    }
 }
 
 /// Write a sidecar to `path` (atomically via a `.tmp` rename).
@@ -950,7 +1043,7 @@ mod tests {
         let volume_len = 8 * 1024 * 1024; // 8 MiB volume
         let block_size = 65536;
         let total_blocks = volume_len / block_size;
-        let meta_size = calculate_meta_partition_size(total_blocks);
+        let meta_size = calculate_meta_partition_size(total_blocks, 0);
         let disk_size = DEFAULT_PARTITION_OFFSET + volume_len + meta_size + 1024 * 1024; // 1 MiB tail
 
         let meta_partition_guid = uuid::Uuid::new_v4();

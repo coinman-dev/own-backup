@@ -304,7 +304,13 @@ fn backup_inner(
     let used_blocks = used.used_block_count();
 
     // --- Create the image: 1 MiB GPT head + volume + meta partition + 1 MiB tail ---
-    let meta_size = crate::sidecar::calculate_meta_partition_size(total_blocks);
+    // The container's header goes into the sidecar (D19) and is measured in
+    // megabytes; reserve for it or the final metadata write has nowhere to go.
+    let luks_reserve = crate::sidecar::luks_reserve_for(match &unlock {
+        Unlock::Luks(p) => Some(p.data_offset),
+        _ => None,
+    });
+    let meta_size = crate::sidecar::calculate_meta_partition_size(total_blocks, luks_reserve);
     let disk_size = DEFAULT_PARTITION_OFFSET + volume_len.div_ceil(MIB) * MIB + meta_size + MIB;
     let mut writer = LinuxImageWriter::create(req.image_format, &req.image_path, disk_size, sector_size)?;
     let data_offset = DEFAULT_PARTITION_OFFSET;

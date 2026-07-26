@@ -423,7 +423,12 @@ fn backup_volume_inner(
         )));
     }
     let total_blocks = volume_len.div_ceil(req.block_size as u64);
-    let meta_size = crate::sidecar::calculate_meta_partition_size(total_blocks);
+    // The container's header is stored in the sidecar (D19), and it is measured
+    // in megabytes — the meta partition has to be reserved with that in mind or
+    // the metadata write at the very end has nowhere to go.
+    let luks_reserve =
+        crate::sidecar::luks_reserve_for(luks.as_ref().map(|p| p.data_offset));
+    let meta_size = crate::sidecar::calculate_meta_partition_size(total_blocks, luks_reserve);
 
     // --- Parent chain (incremental / differential) ---
     // A broken chain must not fail the run: fall back to a full backup and
@@ -1913,11 +1918,40 @@ fn backup_disk_inner(
     // (its full-state used count) — not this run's count, which for an
     // incremental differs. If the resulting plan no longer matches the parent's
     // size (the disk was repartitioned), fall back to a full backup.
-    let full_used = |used: u64| crate::sidecar::calculate_meta_partition_size(used.max(1));
-    let mut meta_size = full_used(match &parent {
-        Some((_, sc)) => sc.manifest.used_blocks,
-        None => disk_used.count,
-    });
+    // Stored container headers (D19) are megabytes each, so the reserve has to
+    // include them. A child takes the PARENT's reserve, for the same reason it
+    // takes the parent's block count: its geometry must match exactly.
+    let own_reserve = crate::sidecar::luks_reserve_for(
+        prepared.iter().filter_map(|p| p.luks_header.as_ref().map(|h| h.data_offset)),
+    );
+    let full_used = |used: u64, reserve: u64| {
+        crate::sidecar::calculate_meta_partition_size(used.max(1), reserve)
+    };
+    let mut meta_size = match &parent {
+        Some((_, sc)) => full_used(
+            sc.manifest.used_blocks,
+            crate::sidecar::luks_headers_reserve(&sc.info.luks_headers),
+        ),
+        None => full_used(disk_used.count, own_reserve),
+    };
+    // A chain started before container headers were stored has no room for one.
+    // The child cannot grow the image — its geometry is the parent's — so the
+    // only honest move is to start a new full backup rather than run for an
+    // hour and fail at the metadata write.
+    if let Some((pp, sc)) = &parent {
+        let parent_reserve = crate::sidecar::luks_headers_reserve(&sc.info.luks_headers);
+        if own_reserve > parent_reserve {
+            warn!(
+                parent = %pp.display(),
+                parent_reserve,
+                own_reserve,
+                "parent image has no room for the container header — creating a full backup instead"
+            );
+            kind = BackupType::Full;
+            parent = None;
+            meta_size = full_used(disk_used.count, own_reserve);
+        }
+    }
     let mut plan = own_backup_common::gpt::plan_whole_disk_image(&layout, meta_size);
     if let Some((pp, sc)) = &parent {
         if plan.image_size != sc.manifest.source_disk.size_bytes {
@@ -1929,7 +1963,7 @@ fn backup_disk_inner(
             );
             kind = BackupType::Full;
             parent = None;
-            meta_size = full_used(disk_used.count);
+            meta_size = full_used(disk_used.count, own_reserve);
             plan = own_backup_common::gpt::plan_whole_disk_image(&layout, meta_size);
         }
     }
