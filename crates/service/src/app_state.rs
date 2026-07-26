@@ -34,6 +34,15 @@ pub struct AppState {
     pub passwords: Arc<PasswordStore>,
     /// In-memory active mounts tracked by the service.
     pub active_mounts: std::sync::Mutex<Vec<own_backup_common::engine_dto::ActiveMountDto>>,
+    /// The restore plan being executed, or the last one that finished (D6).
+    ///
+    /// Kept rather than only broadcast: a restore is not something a user
+    /// should be able to lose by closing a window. `GetRestoreState` hands this
+    /// over, so reopening the screen shows the run in progress.
+    pub restore_run: std::sync::Mutex<Option<own_backup_common::restore_state::RestoreRunState>>,
+    /// Cancel token of the run in `restore_run`. A fresh one per run, addressed
+    /// by plan id, so a cancel that arrives late cannot hit the next run (D18).
+    pub restore_cancel: std::sync::Mutex<Option<own_backup_common::cancel::CancelToken>>,
     pub start_time: Instant,
 }
 
@@ -58,6 +67,8 @@ impl AppState {
             events,
             passwords,
             active_mounts: std::sync::Mutex::new(Vec::new()),
+            restore_run: std::sync::Mutex::new(None),
+            restore_cancel: std::sync::Mutex::new(None),
             start_time: Instant::now(),
         })
     }

@@ -14,6 +14,9 @@ use tauri::State;
 use own_backup_backup::exclusions::CategorySizes;
 use own_backup_common::disk::DiskInfo;
 use own_backup_common::engine_dto::{DiskRestoreSummaryDto, RestoreSummaryDto, VerifySummaryDto};
+use own_backup_common::restore_check::CheckContext;
+use own_backup_common::restore_plan::RestorePlan;
+use own_backup_common::restore_state::RestoreRunState;
 
 use crate::state::GuiState;
 
@@ -331,4 +334,61 @@ pub async fn restore_disk_now(
 #[tauri::command]
 pub async fn cancel_engine_op(state: State<'_, GuiState>) -> Result<(), String> {
     state.link.client().await?.cancel_engine_op().await
+}
+
+// ---------------------------------------------------------------------------
+// Restore plans (the partition designer)
+// ---------------------------------------------------------------------------
+
+/// Check a plan without writing anything (D5).
+///
+/// The reply contains the plan **back again**, because the dry run resolves
+/// drive-letter conflicts by editing it (D11). The frontend must apply the plan
+/// it got back, not the one it sent, or that fix is thrown away.
+#[tauri::command]
+pub async fn dry_run_restore_plan(
+    state: State<'_, GuiState>,
+    plan: RestorePlan,
+    context: Option<CheckContext>,
+) -> Result<serde_json::Value, String> {
+    state
+        .link
+        .client()
+        .await?
+        .dry_run_restore_plan(&plan, &context.unwrap_or_default())
+        .await
+}
+
+/// Execute a restore plan. DESTRUCTIVE — the caller is responsible for having
+/// shown the dry run's findings and got a confirmation.
+///
+/// Returns immediately with the run's initial state; progress arrives as
+/// `restore-plan-progress`, and [`get_restore_state`] gives the current state
+/// at any time (including after the window was closed and reopened).
+#[tauri::command]
+pub async fn apply_restore_plan(
+    state: State<'_, GuiState>,
+    plan: RestorePlan,
+) -> Result<RestoreRunState, String> {
+    state.link.client().await?.apply_restore_plan(&plan).await
+}
+
+/// The restore in progress, or the last one that finished. `None` when no plan
+/// has run since the service started.
+#[tauri::command]
+pub async fn get_restore_state(
+    state: State<'_, GuiState>,
+) -> Result<Option<RestoreRunState>, String> {
+    state.link.client().await?.get_restore_state().await
+}
+
+/// Ask the named run to stop. The reply says whether it was accepted: while a
+/// non-cancellable operation runs the service refuses outright rather than
+/// accepting the request and ignoring it.
+#[tauri::command]
+pub async fn cancel_restore_plan(
+    state: State<'_, GuiState>,
+    plan_id: String,
+) -> Result<serde_json::Value, String> {
+    state.link.client().await?.cancel_restore_plan(&plan_id).await
 }

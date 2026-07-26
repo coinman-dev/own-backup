@@ -429,6 +429,72 @@ impl BackupClient {
         parse(&reply.json)
     }
 
+    // --- Restore plans (the partition designer) ---------------------------
+
+    /// Check a plan without writing anything (D5).
+    ///
+    /// The reply carries the plan *back*, because the dry run resolves drive
+    /// letter conflicts by editing it (D11). Applying the plan that was sent
+    /// rather than the one that came back would throw that fix away.
+    pub async fn dry_run_restore_plan(
+        &mut self,
+        plan: &own_backup_common::restore_plan::RestorePlan,
+        context: &own_backup_common::restore_check::CheckContext,
+    ) -> Result<serde_json::Value> {
+        let json = serde_json::json!({ "plan": plan, "context": context }).to_string();
+        let reply = self
+            .inner
+            .dry_run_restore_plan(self.request(proto::JsonRequest { json }))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
+
+    /// Execute a plan. DESTRUCTIVE. Returns immediately with the run's initial
+    /// state; progress arrives on `StreamEvents` as `restore-plan`, and the
+    /// current state is always readable via [`Self::get_restore_state`].
+    pub async fn apply_restore_plan(
+        &mut self,
+        plan: &own_backup_common::restore_plan::RestorePlan,
+    ) -> Result<own_backup_common::restore_state::RestoreRunState> {
+        let json = serde_json::to_string(plan)
+            .map_err(|e| format!("serialize plan failed: {e}"))?;
+        let reply = self
+            .inner
+            .apply_restore_plan(self.request(proto::JsonRequest { json }))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
+
+    /// State of the restore in progress, or the last one that finished.
+    /// `None` when no plan has been applied since the service started.
+    pub async fn get_restore_state(
+        &mut self,
+    ) -> Result<Option<own_backup_common::restore_state::RestoreRunState>> {
+        let reply = self
+            .inner
+            .get_restore_state(self.request(proto::Empty {}))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
+
+    /// Ask the named run to stop. The reply says whether it was accepted — a
+    /// non-cancellable operation refuses outright rather than pretending.
+    pub async fn cancel_restore_plan(&mut self, plan_id: &str) -> Result<serde_json::Value> {
+        let reply = self
+            .inner
+            .cancel_restore_plan(self.request(proto::IdRequest { id: plan_id.into() }))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
+
     /// Signal-cancel the running restore/verify/disk-restore.
     pub async fn cancel_engine_op(&mut self) -> Result<()> {
         self.inner

@@ -240,6 +240,10 @@ fn main() {
             commands::engine::list_image_backups,
             commands::engine::restore_disk_now,
             commands::engine::cancel_engine_op,
+            commands::engine::dry_run_restore_plan,
+            commands::engine::apply_restore_plan,
+            commands::engine::get_restore_state,
+            commands::engine::cancel_restore_plan,
             // --- misc ---
             commands::settings::get_config,
             commands::settings::save_config,
@@ -289,6 +293,7 @@ async fn bridge_service_events(app: tauri::AppHandle, link: Arc<ServiceLink>) {
                                 "restore" => "restore-progress",
                                 "verify" => "verify-progress",
                                 "restore-disk" => "restore-disk-progress",
+                                "restore-plan" => "restore-plan-progress",
                                 _ => continue,
                             };
                             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) {

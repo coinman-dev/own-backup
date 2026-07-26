@@ -100,6 +100,26 @@ fn json_reply<T: serde::Serialize>(value: &T) -> Result<Response<JsonReply>, Sta
     Ok(Response::new(JsonReply { json }))
 }
 
+/// Drive letters in use on this machine. A dry run needs them to resolve
+/// conflicts (D11), and only the service can see them — the GUI runs
+/// unelevated and would be guessing.
+fn taken_drive_letters() -> Vec<char> {
+    #[cfg(target_os = "windows")]
+    {
+        own_backup_backup::letters_win::taken_letters()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Vec::new()
+    }
+}
+
+/// Whether `disk` is the one the running OS boots from. The guard returns an
+/// error for exactly that case, so its failure *is* the answer (D13).
+fn is_system_disk(disk: u32) -> bool {
+    own_backup_restore::guard_target_disk(disk).is_err()
+}
+
 /// Message returned by the direct engine RPCs when built off Windows (the VHDX
 /// engine is Windows-only for now — see plan phase 8).
 #[cfg(not(target_os = "windows"))]
@@ -760,6 +780,161 @@ impl BackupService for BackupServiceImpl {
             .engine_cancel
             .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(Response::new(Empty {}))
+    }
+
+    // --- Restore plans (the partition designer) --------------------------
+
+    async fn dry_run_restore_plan(
+        &self,
+        req: Request<JsonRequest>,
+    ) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        use own_backup_common::restore_check::{check_plan, resolve_letter_conflicts, CheckContext};
+        use own_backup_common::restore_plan::RestorePlan;
+
+        #[derive(serde::Deserialize)]
+        struct In {
+            plan: RestorePlan,
+            #[serde(default)]
+            context: CheckContext,
+        }
+        let mut p: In = serde_json::from_str(&req.into_inner().json)
+            .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+
+        // Letters the machine has taken are a service-side fact; a client that
+        // sent none gets the real list rather than an empty one.
+        let mut ctx = p.context;
+        if ctx.taken_letters.is_empty() {
+            ctx.taken_letters = taken_drive_letters();
+        }
+        ctx.target_is_system_disk =
+            ctx.target_is_system_disk || is_system_disk(p.plan.target_disk);
+
+        // Resolving letters mutates the plan, so the caller gets the adjusted
+        // plan back and applies *that* — otherwise the fix would be lost
+        // between the dry run and the real one.
+        let letter_changes = resolve_letter_conflicts(&mut p.plan, &ctx.taken_letters);
+        let results = check_plan(&p.plan, &ctx);
+
+        json_reply(&serde_json::json!({
+            "plan": p.plan,
+            "results": results,
+            "letter_changes": letter_changes,
+        }))
+    }
+
+    async fn apply_restore_plan(
+        &self,
+        req: Request<JsonRequest>,
+    ) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        use own_backup_common::cancel::CancelToken;
+        use own_backup_common::restore_plan::RestorePlan;
+        use own_backup_common::restore_state::RunStatus;
+
+        let plan: RestorePlan = serde_json::from_str(&req.into_inner().json)
+            .map_err(|e| Status::invalid_argument(format!("bad plan JSON: {e}")))?;
+
+        // One restore at a time. Two plans writing the same disk would be a
+        // race with no possible good outcome.
+        if let Some(run) = self.state.restore_run.lock().unwrap().as_ref() {
+            if run.status == RunStatus::Running {
+                return Err(Status::failed_precondition(format!(
+                    "восстановление уже выполняется (план {})",
+                    run.plan_id
+                )));
+            }
+        }
+
+        // A fresh token per run: nothing is ever reset, so a cancel cannot leak
+        // from the previous run into this one (D18).
+        let cancel = CancelToken::new(plan.id);
+        *self.state.restore_cancel.lock().unwrap() = Some(cancel.clone());
+        let initial = own_backup_core::restore_exec::initial_state(&plan);
+        *self.state.restore_run.lock().unwrap() = Some(initial.clone());
+
+        let state = self.state.clone();
+        let events = self.state.events.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut last_emit = std::time::Instant::now();
+            let outcome = own_backup_core::restore_exec::execute_plan(&plan, &cancel, |run| {
+                *state.restore_run.lock().unwrap() = Some(run.clone());
+                // Throttle the wire, never the stored state: the state is what
+                // a reconnecting window reads, and it must always be current.
+                if run.is_finished() || last_emit.elapsed().as_millis() >= 300 {
+                    last_emit = std::time::Instant::now();
+                    let _ = events.send(Event {
+                        kind: "restore-plan".into(),
+                        json: serde_json::to_string(run).unwrap_or_default(),
+                    });
+                }
+            });
+            if let Err(e) = outcome {
+                // The plan never started, so there is no run state describing
+                // it — say so instead of leaving the last run's state on screen.
+                tracing::error!(error = %e, "restore plan could not start");
+                let mut slot = state.restore_run.lock().unwrap();
+                if let Some(run) = slot.as_mut() {
+                    run.status = RunStatus::Failed;
+                    run.cancellable = false;
+                    run.follow_ups.push(format!("Восстановление не запустилось: {e}"));
+                    let _ = events.send(Event {
+                        kind: "restore-plan".into(),
+                        json: serde_json::to_string(&*run).unwrap_or_default(),
+                    });
+                }
+            }
+        });
+
+        json_reply(&initial)
+    }
+
+    async fn get_restore_state(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        let run = self.state.restore_run.lock().unwrap().clone();
+        json_reply(&run)
+    }
+
+    async fn cancel_restore_plan(
+        &self,
+        req: Request<IdRequest>,
+    ) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        let id = req.into_inner().id;
+        let plan_id = uuid::Uuid::parse_str(&id)
+            .map_err(|e| Status::invalid_argument(format!("bad plan id: {e}")))?;
+
+        // Refuse honestly while a non-cancellable operation runs (D12/D18).
+        // Accepting the request and doing nothing is how a user ends up
+        // pressing a dead button and believing the restore is stopping.
+        let cancellable = self
+            .state
+            .restore_run
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|r| r.cancellable)
+            .unwrap_or(false);
+        if !cancellable {
+            return json_reply(&serde_json::json!({
+                "cancelled": false,
+                "reason": "Сейчас идёт операция, которую нельзя прервать без потери данных.",
+            }));
+        }
+
+        let matched = self
+            .state
+            .restore_cancel
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|t| t.cancel_run(plan_id))
+            .unwrap_or(false);
+
+        json_reply(&serde_json::json!({
+            "cancelled": matched,
+            "reason": if matched { "" } else { "Этот запуск уже завершён." },
+        }))
     }
 
     // --- Arsenal Image Mounter driver management (Windows) ---

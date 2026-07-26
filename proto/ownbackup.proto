@@ -52,6 +52,20 @@ service BackupService {
   rpc RestoreDisk(JsonRequest) returns (JsonReply);    // in: {manifest_path,target_disk,force} -> DiskRestoreSummary
   rpc CancelEngineOp(Empty) returns (Empty);
 
+  // --- Restore plans (the partition designer) ---
+  // The GUI assembles a RestorePlan and sends it here. DryRun checks it and
+  // writes nothing; Apply executes it. Unlike the operations above, a plan's
+  // progress is also *retained*: GetRestoreState returns the run's full state,
+  // so a window that was closed mid-restore picks up where it left off instead
+  // of finding an empty screen.
+  rpc DryRunRestorePlan(JsonRequest) returns (JsonReply);  // in: {plan,context} -> {results,letter_changes}
+  rpc ApplyRestorePlan(JsonRequest) returns (JsonReply);   // in: RestorePlan -> RestoreRunState
+  rpc GetRestoreState(Empty) returns (JsonReply);          // JSON: RestoreRunState | null
+  // Cancel is addressed to a specific run, so a cancel arriving late cannot
+  // take down the run that started after it. Refused outright while a
+  // non-cancellable operation is in progress, rather than accepted and ignored.
+  rpc CancelRestorePlan(IdRequest) returns (JsonReply);    // in: plan id -> { cancelled, reason }
+
   // --- Arsenal Image Mounter driver (needed to mount qcow2 on Windows) ---
   // Install downloads Arsenal Recon's signed driver package from GitHub and
   // installs it (the service runs as LocalSystem, so no UAC in the GUI).
