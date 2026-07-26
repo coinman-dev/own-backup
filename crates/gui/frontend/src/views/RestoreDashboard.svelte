@@ -1404,7 +1404,12 @@
           onPart={clickTargetPart}
           stateOf={dstState}
           lockedIndices={[...mappings.map((m) => m.dst), ...previewIdx]}
-          onFree={wholeDiskRestore && previewIdx.length === 0 ? clickFreeSpace : undefined}
+          onFree={wholeDiskRestore
+            ? previewIdx.length === 0
+              ? clickFreeSpace
+              : undefined
+            : openCreate}
+          freeAction={wholeDiskRestore ? 'place' : 'create'}
           needBytes={wholeDiskRestore && previewIdx.length === 0 ? srcTotalBytes : undefined}
           onPartMenu={openPartMenu}
           onFreeMenu={openFreeMenu}
@@ -1426,7 +1431,13 @@
           </span>
         </div>
       {/if}
-      <div class="hint-small">Правый клик по разделу или свободному месту — создать / удалить раздел.</div>
+      <div class="hint-small">
+        {#if wholeDiskRestore}
+          Правый клик по разделу или свободному месту — создать / удалить раздел.
+        {:else}
+          Клик по свободному месту — создать раздел. Правый клик по разделу — расширить или удалить.
+        {/if}
+      </div>
       <!-- Undo everything and go back to step 1 (pick a disk). -->
       <div class="under-card">
         <button
@@ -1490,10 +1501,12 @@
   <div class="ctx-menu" style="left:{menu.x}px; top:{menu.y}px">
     <div class="ctx-title">Действия</div>
     {#if menu.part}
-      <button onclick={() => { const p = menu!.part!; menu = null; delConfirm = p; }}>Удалить раздел</button>
       {#if canExtend >= 0}
         <button onclick={() => extendPart(canExtend)}>Расширить раздел</button>
       {/if}
+      <!-- Last, and set off by a rule: the one item here that destroys
+           something should not sit under the cursor by default. -->
+      <button class="danger" onclick={() => { const p = menu!.part!; menu = null; delConfirm = p; }}>Удалить раздел</button>
     {:else}
       <button onclick={() => openCreate(menu!.offset ?? 0, menu!.size ?? 0)}>Создать раздел</button>
       {#if canExtend >= 0}
@@ -1741,6 +1754,8 @@
   .ctx-title { font-size: 11px; font-weight: 700; text-transform: uppercase; color: var(--text-muted); padding: 4px 10px 6px; }
   .ctx-menu button { display: block; width: 100%; text-align: left; padding: 8px 10px; border: none; background: none; border-radius: 4px; font-size: 13px; font-family: var(--font); color: var(--head); cursor: pointer; }
   .ctx-menu button:hover { background: var(--accent-soft); color: var(--primary); }
+  .ctx-menu button.danger { border-top: 1px solid var(--border); border-radius: 0 0 4px 4px; margin-top: 4px; padding-top: 10px; }
+  .ctx-menu button.danger:hover { background: rgba(216,74,74,.1); color: #b32b2b; }
   /* Create-partition form */
   .fld { display: block; margin-bottom: 12px; font-size: 13px; color: var(--head); }
   .fld > span:first-child { display: block; margin-bottom: 5px; font-weight: 600; }

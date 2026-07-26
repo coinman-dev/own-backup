@@ -59,9 +59,13 @@
      *  their colour but no longer respond to clicks — undo or "Отмена" to redo.
      *  The right-click editor menu still works. */
     lockedIndices?: number[];
-    /** Whole-disk mode: click a stretch of unallocated space to place the whole
-     *  backup layout there. Receives the gap's offset and size. */
+    /** Click a stretch of unallocated space. Receives the gap's offset and size.
+     *  What that means depends on the mode — see `freeAction`. */
     onFree?: (offset: number, size: number) => void;
+    /** What clicking free space does, so the tooltip can say it: drop the whole
+     *  backup layout there ('place'), or open the create-partition dialog
+     *  ('create'). */
+    freeAction?: 'place' | 'create';
     /** Bytes the copy needs: free regions smaller than this highlight in red on
      *  hover, so it is obvious before clicking that they do not fit. */
     needBytes?: number;
@@ -87,6 +91,7 @@
     inBackup,
     lockedIndices = [],
     onFree,
+    freeAction = 'place',
     needBytes,
     onPartMenu,
     onFreeMenu,
@@ -236,7 +241,9 @@
                 ? `Не распределено — ${formatBytes(seg.size)}`
                 : needBytes != null && seg.size < needBytes
                   ? `Не распределено — ${formatBytes(seg.size)}: не хватает ${formatBytes(needBytes - seg.size)} (нужно ${formatBytes(needBytes)})`
-                  : `Не распределено — ${formatBytes(seg.size)} (кликните, чтобы разместить здесь копию)`}
+                  : freeAction === 'create'
+                    ? `Не распределено — ${formatBytes(seg.size)} (кликните, чтобы создать здесь раздел)`
+                    : `Не распределено — ${formatBytes(seg.size)} (кликните, чтобы разместить здесь копию)`}
               onclick={(e) => { e.stopPropagation(); onFree?.(seg.offset ?? 0, seg.size); }}
               oncontextmenu={(e) => { if (onFreeMenu) { e.preventDefault(); e.stopPropagation(); onFreeMenu(seg.offset ?? 0, seg.size, e); } }}
             ><span class="free-lbl">Не занято · {formatBytes(seg.size)}</span></button>
