@@ -9,7 +9,9 @@ pub mod preflight;
 pub mod progress;
 pub mod restore_check;
 pub mod restore_plan;
+pub mod restore_state;
 pub mod types;
+pub mod units;
 
 pub use error::{OwnBackupError, Result};
 

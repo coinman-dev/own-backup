@@ -2784,6 +2784,7 @@ dependencies = [
  "own-backup-backup",
  "own-backup-common",
  "own-backup-metadata",
+ "own-backup-restore",
  "own-backup-snapshot",
  "serde",
  "serde_json",

@@ -20,6 +20,7 @@ use crate::restore_plan::{
     RestorePlan,
 };
 use crate::types::FileSystem;
+use crate::units::human_bytes as human;
 
 /// Conventional partition alignment. Not a hard requirement — a partition at
 /// any offset works — but on a 512e or 4Kn disk a misaligned filesystem turns
@@ -639,22 +640,6 @@ fn check_extend(
             part.index, fs_name
         ),
     ));
-}
-
-/// Binary units, matching what the interface shows.
-fn human(bytes: u64) -> String {
-    const UNITS: [&str; 6] = ["Б", "КиБ", "МиБ", "ГиБ", "ТиБ", "ПиБ"];
-    let mut v = bytes as f64;
-    let mut i = 0;
-    while v >= 1024.0 && i + 1 < UNITS.len() {
-        v /= 1024.0;
-        i += 1;
-    }
-    if i == 0 {
-        format!("{} {}", bytes, UNITS[0])
-    } else {
-        format!("{:.2} {}", v, UNITS[i])
-    }
 }
 
 #[cfg(test)]

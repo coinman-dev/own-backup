@@ -3286,7 +3286,9 @@ pub fn unlock_and_probe(device_path: &str, passphrase: &str) -> Result<Decrypted
     Ok(DecryptedProbe { ok: true, filesystem, label, used_bytes })
 }
 
-pub(crate) fn load_sidecar_of(image_path: &Path) -> Result<Sidecar> {
+/// Read an image's sidecar: embedded first, adjacent `.obkm` as a fallback
+/// for images written before the sidecar moved inside the container.
+pub fn load_sidecar_of(image_path: &Path) -> Result<Sidecar> {
     let ext = image_path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_lowercase();
     match read_embedded_sidecar(image_path, &ext) {
         Ok(s) => Ok(s),

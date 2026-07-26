@@ -56,6 +56,13 @@ pub enum OwnBackupError {
 
     #[error("Cancelled by user")]
     Cancelled,
+
+    /// A capability that is planned but not built yet. Distinct from an error:
+    /// the request was valid, the code simply does not exist. Returning success
+    /// here is how a partition silently ends up empty after a "successful"
+    /// restore.
+    #[error("Not implemented: {0}")]
+    NotImplemented(String),
 }
 
 pub type Result<T> = std::result::Result<T, OwnBackupError>;

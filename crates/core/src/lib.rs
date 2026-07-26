@@ -11,6 +11,8 @@
 //! Tauri. Runs are serialized through an mpsc queue processed by one worker,
 //! so a second "run" while a backup is in progress is queued, not rejected.
 
+pub mod restore_exec;
+
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};

@@ -252,6 +252,77 @@ impl RestoreOp {
         }
     }
 
+    /// Stable slug for logs, telemetry and the frontend — prose changes,
+    /// this does not.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            RestoreOp::WritePartitionTable { .. } => "write_partition_table",
+            RestoreOp::Format { .. } => "format",
+            RestoreOp::RestorePartition { mode: RestoreMode::Sectors, .. } => "restore_sectors",
+            RestoreOp::RestorePartition { mode: RestoreMode::Files, .. } => "restore_files",
+            RestoreOp::ExtendFilesystem { .. } => "extend_filesystem",
+            RestoreOp::AssignLetter { .. } => "assign_letter",
+            RestoreOp::FinalizeBoot { .. } => "finalize_boot",
+        }
+    }
+
+    /// One line describing the operation, in the words the user will read.
+    pub fn title(&self) -> String {
+        use crate::units::human_bytes;
+        match self {
+            RestoreOp::WritePartitionTable { table } => format!(
+                "Записать разметку {} ({} разд.)",
+                match table.scheme {
+                    PartitionScheme::Gpt => "GPT",
+                    PartitionScheme::Mbr => "MBR",
+                },
+                table.entries.len()
+            ),
+            RestoreOp::Format { part, fs, label, quick } => format!(
+                "Отформатировать раздел {} в {}{}{}",
+                part.index,
+                fs.as_str(),
+                if label.is_empty() { String::new() } else { format!(", метка «{label}»") },
+                if *quick { ", быстрое" } else { ", полное" }
+            ),
+            RestoreOp::RestorePartition { src_index, dst, mode, .. } => format!(
+                "Восстановить раздел {src_index} → {} ({}, {})",
+                dst.index,
+                human_bytes(dst.size),
+                match mode {
+                    RestoreMode::Sectors => "посекторно",
+                    RestoreMode::Files => "пофайлово",
+                }
+            ),
+            RestoreOp::ExtendFilesystem { part } => {
+                format!("Расширить файловую систему раздела {} на весь раздел", part.index)
+            }
+            RestoreOp::AssignLetter { part, letter } => {
+                format!("Назначить разделу {} букву {letter}:", part.index)
+            }
+            RestoreOp::FinalizeBoot { uefi, .. } => {
+                format!("Пересоздать загрузчик ({})", if *uefi { "UEFI" } else { "BIOS" })
+            }
+        }
+    }
+
+    /// Whether this operation needs the disk online and its volumes mounted.
+    ///
+    /// Raw sector writes go through the physical drive and are happiest with
+    /// the disk offline; everything after them talks to a *volume*, which only
+    /// exists once Windows has re-read the table and mounted it. The executor
+    /// flips the disk between the two groups.
+    pub fn needs_disk_online(&self) -> bool {
+        matches!(
+            self,
+            RestoreOp::Format { .. }
+                | RestoreOp::RestorePartition { mode: RestoreMode::Files, .. }
+                | RestoreOp::ExtendFilesystem { .. }
+                | RestoreOp::AssignLetter { .. }
+                | RestoreOp::FinalizeBoot { .. }
+        )
+    }
+
     /// Whether the user may cancel *while this operation runs*.
     ///
     /// Only the data restore is long enough for cancellation to mean anything;
