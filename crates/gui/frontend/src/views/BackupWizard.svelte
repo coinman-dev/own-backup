@@ -783,17 +783,20 @@
                             {@const inLayout = layoutOnlyParts(d).includes(seg.p.index)}
                             <!-- No volume to select and nothing inside to copy,
                                  but a whole-disk copy does keep its table entry.
-                                 Drawn as part of the copy: "unselected" would
-                                 read as "left out", and that would be wrong. -->
+                                 Drawn exactly like a selected partition — tick
+                                 and all — because that is what it is: part of
+                                 the copy. It just cannot be toggled, since
+                                 there is no volume to include or leave out. -->
                             <div
                               class="seg"
+                              class:selected={inLayout}
                               class:layout-only={inLayout}
                               style="flex: {seg.size} 1 0"
                               title={inLayout
                                 ? segTitle(seg.p) + ' · входит в копию: файловой системы нет, сохраняется только запись в таблице разделов'
                                 : segTitle(seg.p)}
                             >
-                              {@render segInner(seg.p, false, inLayout)}
+                              {@render segInner(seg.p, inLayout, inLayout)}
                             </div>
                           {/if}
                         {/if}
@@ -1123,9 +1126,9 @@
   .free-lbl { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
   .seg.selectable { cursor: pointer; }
   .seg.selectable:hover { filter: brightness(0.97); }
-  /* Kept in the copy as a table entry only — shown as part of it, but plainly
-     not a volume anyone selects. */
-  .seg.layout-only { background: rgba(45,125,210,.07); box-shadow: inset 0 0 0 1px rgba(45,125,210,.28); }
+  /* Kept in the copy as a table entry only. It looks selected because it IS in
+     the copy; the cursor says it is not something to click. */
+  .seg.layout-only { cursor: default; }
   /* Read-only source map ("Параметры"): the selection is shown, not editable. */
   .seg.ro { cursor: default; }
   .seg.ro:hover { filter: none; }

@@ -307,9 +307,10 @@
             >{@render segInner(seg.p, sel)}</button>
           {:else if layoutOnly.includes(seg.p.index)}
             <!-- No volume to select and nothing to copy, but the copy does keep
-                 its table entry — so it must not look excluded. -->
-            <div class="seg ro layout-only" style={flexOf(seg)} title={segTitle(seg.p)}>
-              {@render segInner(seg.p, false)}
+                 its table entry. Drawn like any other partition in the copy —
+                 tick and all — because that is what it is. -->
+            <div class="seg ro layout-only selected" style={flexOf(seg)} title={segTitle(seg.p)}>
+              {@render segInner(seg.p, true)}
             </div>
           {:else if dev && !readonly && onToggle}
             <button
@@ -377,9 +378,9 @@
   .seg.selectable.locked { cursor: default; }
   .seg.selectable.locked:hover { filter: none; }
   .seg.ro { cursor: default; }
-  /* Kept in the copy as a table entry only: shown as part of it, but plainly
-     not a volume anyone selects. */
-  .seg.layout-only { background: rgba(45,125,210,.07); box-shadow: inset 0 0 0 1px rgba(45,125,210,.28); }
+  /* Kept in the copy as a table entry only. It looks selected because it IS in
+     the copy; the cursor says it is not something to click. */
+  .seg.layout-only { cursor: default; }
   .seg.selected { background: rgba(45,125,210,.16); box-shadow: inset 0 0 0 2px var(--primary); }
   .usedfill { position: absolute; top: 0; bottom: 0; left: 0; z-index: 0; background: rgba(45,125,210,.14); border-right: 1px solid rgba(45,125,210,.45); pointer-events: none; }
   .seg.selected .usedfill { background: rgba(45,125,210,.24); border-right-color: rgba(45,125,210,.6); }
