@@ -73,6 +73,24 @@
   function partDevice(p: PartitionInfo): string | null {
     return p.volume_device ? p.volume_device : null;
   }
+  /** Partitions the system needs but never mounts: no filesystem, no letter, no
+   *  label. Their GPT type GUID is what they are, so say it instead of drawing
+   *  a nameless "Раздел 128 MiB" that reads like a mistake. */
+  const GPT_TYPE_NAMES: Record<string, string> = {
+    'C12A7328-F81F-11D2-BA4B-00A0C93EC93B': 'EFI (ESP)',
+    'E3C9E316-0B5C-4DB8-817D-F92DF00215AE': 'Зарезервировано системой (MSR)',
+    'DE94BBA4-06D1-4D40-A16A-BFD50179D6AC': 'Среда восстановления Windows',
+    '0FC63DAF-8483-4772-8E79-3D69D8477DE4': 'Linux',
+    '0657FD6D-A4AB-43C4-84E5-0933C84B4F4F': 'Linux swap',
+    'E6D6D379-F507-44C2-A23C-238F2A3DF928': 'Linux LVM',
+    'CA7D7CCB-63ED-4C53-861C-1742536059CC': 'LUKS',
+    '21686148-6449-6E6F-744E-656564454649': 'BIOS boot',
+  };
+  function gptTypeName(p: PartitionInfo): string {
+    const guid = (p.gpt_type_guid || '').replace(/[{}]/g, '').toUpperCase();
+    return GPT_TYPE_NAMES[guid] ?? '';
+  }
+
   function partLabel(p: PartitionInfo): string {
     // A decrypted encrypted volume shows its real inner label.
     const dec = p.volume_device ? decryptedVolumes[p.volume_device] : undefined;
@@ -81,8 +99,9 @@
       const name = p.volume_label || fsLabel(p.filesystem) || 'Том';
       return `${p.volume_letter}: ${name}`;
     }
-    // Letterless (EFI / ext4 / hidden): its on-disk label, else the filesystem.
-    return p.volume_label || fsLabel(p.filesystem) || 'Раздел';
+    // Letterless (EFI / ext4 / hidden): its on-disk label, else the filesystem,
+    // else what its GPT type says it is.
+    return p.volume_label || fsLabel(p.filesystem) || gptTypeName(p) || 'Раздел';
   }
   // Used bytes / filesystem for a partition, preferring decrypted info when the
   // volume has been unlocked.
@@ -184,6 +203,17 @@
   // while bootable-copy is on they are auto-included and cannot be deselected.
   function isBootEssential(p: PartitionInfo): boolean {
     return p.is_boot || p.is_system;
+  }
+  /** Microsoft Reserved: Windows expects the slot, there is no filesystem in it.
+   *  A whole-disk copy keeps its GPT entry (`DiskLayout::retain_for_backup`)
+   *  whatever the user selected — so the map must show it as part of the copy,
+   *  not as something left out. */
+  const MSR_GUID = 'E3C9E316-0B5C-4DB8-817D-F92DF00215AE';
+  function layoutOnlyParts(d: DiskInfo): number[] {
+    if (!isBootableCopy(d)) return [];
+    return d.partitions
+      .filter((p) => (p.gpt_type_guid || '').replace(/[{}]/g, '').toUpperCase() === MSR_GUID)
+      .map((p) => p.index);
   }
   // The disk a selected source device lives on (matched by volume device).
   function diskOfDevice(dev: string): DiskInfo | null {
@@ -593,7 +623,7 @@
   });
 </script>
 
-{#snippet segInner(p: PartitionInfo, selected: boolean)}
+{#snippet segInner(p: PartitionInfo, selected: boolean, layoutOnly = false)}
   {#if usedPct(p) > 0}
     <div class="usedfill" style="width: {usedPct(p)}%"></div>
   {/if}
@@ -606,7 +636,7 @@
     {/if}
     <span class="seg-label">{partLabel(p)}</span>
   </div>
-  <div class="seg-meta">{formatBytes(p.size_bytes)}{#if partUsed(p) > 0}<span class="muted">&nbsp;({formatBytes(partUsed(p))} занято)</span>{/if}{#if partFs(p)}<span class="muted">&nbsp;{partFs(p)}</span>{/if}</div>
+  <div class="seg-meta">{formatBytes(p.size_bytes)}{#if partUsed(p) > 0}<span class="muted">&nbsp;({formatBytes(partUsed(p))} занято)</span>{/if}{#if partFs(p)}<span class="muted">&nbsp;{partFs(p)}</span>{/if}{#if layoutOnly}<span class="muted">&nbsp;· в копии (только разметка)</span>{/if}</div>
   {#if selected}
     <div class="check"><svg width="10" height="10" viewBox="0 0 24 24" stroke="#fff" stroke-width="3.6" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></div>
   {/if}
@@ -747,11 +777,23 @@
                               title={isLockedSource(dev) ? segTitle(seg.p) + ' · обязателен для загрузки' : segTitle(seg.p)}
                               onclick={() => toggleSource(dev, partLabel(seg.p!))}
                             >
-                              {@render segInner(seg.p, isSelected(dev))}
+                              {@render segInner(seg.p, isSelected(dev), false)}
                             </button>
                           {:else}
-                            <div class="seg" style="flex: {seg.size} 1 0" title={segTitle(seg.p)}>
-                              {@render segInner(seg.p, false)}
+                            {@const inLayout = layoutOnlyParts(d).includes(seg.p.index)}
+                            <!-- No volume to select and nothing inside to copy,
+                                 but a whole-disk copy does keep its table entry.
+                                 Drawn as part of the copy: "unselected" would
+                                 read as "left out", and that would be wrong. -->
+                            <div
+                              class="seg"
+                              class:layout-only={inLayout}
+                              style="flex: {seg.size} 1 0"
+                              title={inLayout
+                                ? segTitle(seg.p) + ' · входит в копию: файловой системы нет, сохраняется только запись в таблице разделов'
+                                : segTitle(seg.p)}
+                            >
+                              {@render segInner(seg.p, false, inLayout)}
                             </div>
                           {/if}
                         {/if}
@@ -1081,6 +1123,9 @@
   .free-lbl { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
   .seg.selectable { cursor: pointer; }
   .seg.selectable:hover { filter: brightness(0.97); }
+  /* Kept in the copy as a table entry only — shown as part of it, but plainly
+     not a volume anyone selects. */
+  .seg.layout-only { background: rgba(45,125,210,.07); box-shadow: inset 0 0 0 1px rgba(45,125,210,.28); }
   /* Read-only source map ("Параметры"): the selection is shown, not editable. */
   .seg.ro { cursor: default; }
   .seg.ro:hover { filter: none; }

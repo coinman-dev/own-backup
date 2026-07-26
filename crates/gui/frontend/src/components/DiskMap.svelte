@@ -52,6 +52,12 @@
      *  (mapped ok), red (bad destination). `pair` is the mapping's ordinal —
      *  each pair gets a slightly lighter green so it's clear what maps to what. */
     stateOf?: (index: number) => { kind: 'yellow' | 'green' | 'red' | 'preview'; pair?: number } | undefined;
+    /** Partitions whose GPT entry the copy keeps although they hold no data —
+     *  the Microsoft Reserved partition above all. Windows expects the slot to
+     *  exist, so the restore recreates it; there is simply nothing inside to
+     *  copy. Drawn as part of the copy, because "unchecked" reads as "left
+     *  out" and would be wrong. */
+    layoutOnly?: number[];
     /** Partition indices actually present in the backup. When given, any other
      *  partition is drawn as an empty "не в бэкапе" slot (no data, not clickable). */
     inBackup?: number[];
@@ -89,6 +95,7 @@
     onPart,
     stateOf,
     inBackup,
+    layoutOnly = [],
     lockedIndices = [],
     onFree,
     freeAction = 'place',
@@ -113,6 +120,25 @@
   function fsLabel(fs: string): string {
     return FS_LABELS[fs] ?? (fs === 'unknown' ? '' : fs);
   }
+  /** Partitions the system needs but never mounts: no filesystem, no letter, no
+   *  label — and previously drawn as a nameless "Раздел 128 MiB" that looks like
+   *  a mistake. The GPT type GUID is what they are, so say it. */
+  const GPT_TYPE_NAMES: Record<string, string> = {
+    'C12A7328-F81F-11D2-BA4B-00A0C93EC93B': 'EFI (ESP)',
+    'E3C9E316-0B5C-4DB8-817D-F92DF00215AE': 'Зарезервировано системой (MSR)',
+    'DE94BBA4-06D1-4D40-A16A-BFD50179D6AC': 'Среда восстановления Windows',
+    '0FC63DAF-8483-4772-8E79-3D69D8477DE4': 'Linux',
+    '0657FD6D-A4AB-43C4-84E5-0933C84B4F4F': 'Linux swap',
+    'E6D6D379-F507-44C2-A23C-238F2A3DF928': 'Linux LVM',
+    'A19D880F-05FC-4D3B-A006-743F0F84911E': 'Linux RAID',
+    'CA7D7CCB-63ED-4C53-861C-1742536059CC': 'LUKS',
+    '21686148-6449-6E6F-744E-656564454649': 'BIOS boot',
+    '024DEE41-33E7-11D3-9D69-0008C781F39F': 'MBR-раздел внутри GPT',
+  };
+  function gptTypeName(p: PartitionInfo): string {
+    const guid = (p.gpt_type_guid || '').replace(/[{}]/g, '').toUpperCase();
+    return GPT_TYPE_NAMES[guid] ?? '';
+  }
   function tableLabel(t: string): string {
     return t === 'gpt' ? 'GPT' : t === 'mbr' ? 'MBR' : t.toUpperCase();
   }
@@ -124,7 +150,7 @@
       const name = p.volume_label || fsLabel(p.filesystem) || 'Том';
       return `${p.volume_letter}: ${name}`;
     }
-    return p.volume_label || fsLabel(p.filesystem) || 'Раздел';
+    return p.volume_label || fsLabel(p.filesystem) || gptTypeName(p) || 'Раздел';
   }
   function partFs(p: PartitionInfo): string {
     return fsLabel(p.filesystem);
@@ -138,6 +164,9 @@
     if (p.used_bytes > 0) t += ` (${formatBytes(p.used_bytes)} занято)`;
     const fs = partFs(p);
     if (fs) t += ` ${fs}`;
+    if (layoutOnly.includes(p.index)) {
+      t += ' · входит в копию: файловой системы нет, сохраняется только запись в таблице разделов';
+    }
     return t;
   }
 
@@ -191,7 +220,7 @@
     {#if p.is_encrypted}<span class="enc" title="Зашифрован">🔒</span>{/if}
     <span class="seg-label">{partLabel(p)}</span>
   </div>
-  <div class="seg-meta">{formatBytes(p.size_bytes)}{#if p.used_bytes > 0}<span class="muted">&nbsp;({formatBytes(p.used_bytes)} занято)</span>{/if}{#if partFs(p)}<span class="muted">&nbsp;{partFs(p)}</span>{/if}</div>
+  <div class="seg-meta">{formatBytes(p.size_bytes)}{#if p.used_bytes > 0}<span class="muted">&nbsp;({formatBytes(p.used_bytes)} занято)</span>{/if}{#if partFs(p)}<span class="muted">&nbsp;{partFs(p)}</span>{/if}{#if layoutOnly.includes(p.index)}<span class="muted">&nbsp;· в копии (только разметка)</span>{/if}</div>
   {#if sel}<div class="check"><svg width="10" height="10" viewBox="0 0 24 24" stroke="#fff" stroke-width="3.6" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></div>{/if}
 {/snippet}
 
@@ -276,6 +305,12 @@
               onclick={(e) => { e.stopPropagation(); if (!locked) onPart?.(seg.p!); }}
               oncontextmenu={(e) => { if (onPartMenu) { e.preventDefault(); e.stopPropagation(); onPartMenu(seg.p!, e); } }}
             >{@render segInner(seg.p, sel)}</button>
+          {:else if layoutOnly.includes(seg.p.index)}
+            <!-- No volume to select and nothing to copy, but the copy does keep
+                 its table entry — so it must not look excluded. -->
+            <div class="seg ro layout-only" style={flexOf(seg)} title={segTitle(seg.p)}>
+              {@render segInner(seg.p, false)}
+            </div>
           {:else if dev && !readonly && onToggle}
             <button
               type="button"
@@ -342,6 +377,9 @@
   .seg.selectable.locked { cursor: default; }
   .seg.selectable.locked:hover { filter: none; }
   .seg.ro { cursor: default; }
+  /* Kept in the copy as a table entry only: shown as part of it, but plainly
+     not a volume anyone selects. */
+  .seg.layout-only { background: rgba(45,125,210,.07); box-shadow: inset 0 0 0 1px rgba(45,125,210,.28); }
   .seg.selected { background: rgba(45,125,210,.16); box-shadow: inset 0 0 0 2px var(--primary); }
   .usedfill { position: absolute; top: 0; bottom: 0; left: 0; z-index: 0; background: rgba(45,125,210,.14); border-right: 1px solid rgba(45,125,210,.45); pointer-events: none; }
   .seg.selected .usedfill { background: rgba(45,125,210,.24); border-right-color: rgba(45,125,210,.6); }

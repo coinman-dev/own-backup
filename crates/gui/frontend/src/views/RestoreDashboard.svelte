@@ -227,6 +227,16 @@
   const sectorMismatch = $derived(
     srcSector > 0 && dstSector > 0 && srcSector !== dstSector,
   );
+  /** Microsoft Reserved: no filesystem, nothing to copy — but a whole-disk copy
+   *  keeps its GPT entry (`DiskLayout::retain_for_backup`), and the restore
+   *  recreates it. Shown as part of the copy so it does not read as omitted. */
+  const MSR_GUID = 'E3C9E316-0B5C-4DB8-817D-F92DF00215AE';
+  const layoutOnlyParts = $derived(
+    (rawBackedUpDisks[0]?.partitions ?? [])
+      .filter((p) => (p.gpt_type_guid || '').replace(/[{}]/g, '').toUpperCase() === MSR_GUID)
+      .map((p) => p.index),
+  );
+
   // Partitions of the copy whose ORIGINAL was an encrypted container. The
   // patched list above deliberately drops the padlock (the copy holds the
   // volume in the clear), so the fact has to be read off the raw snapshot —
@@ -1392,7 +1402,8 @@
             boot={activeInfo?.is_whole_disk ?? isBootableCopy(d)}
             bootChecked={wholeDiskRestore}
             onBootToggle={toggleWholeDisk}
-            inBackup={backedUpParts.length > 0 ? backedUpParts : undefined}
+            inBackup={backedUpParts.length > 0 ? [...backedUpParts, ...layoutOnlyParts] : undefined}
+            layoutOnly={layoutOnlyParts}
             lockedIndices={wholeDiskRestore ? backedUpParts : mappings.map((m) => m.src)}
             onPart={i === 0 && targetDiskId ? clickSourcePart : undefined}
             stateOf={i === 0 && targetDiskId ? srcState : undefined}
