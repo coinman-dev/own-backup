@@ -120,6 +120,47 @@ fn is_system_disk(disk: u32) -> bool {
     own_backup_restore::guard_target_disk(disk).is_err()
 }
 
+/// Replace the plan's idea of the target disk's size with the device's own.
+///
+/// The designer gets the figure from the inventory, and an inventory figure can
+/// be a little short of the truth. Every bound in the checks — where the backup
+/// GPT goes, whether the last partition fits — is measured against it, so a
+/// disk reported a few megabytes small makes a perfectly valid layout look as
+/// if its last partition runs off the end.
+///
+/// The executor already resolves this the same way when it writes the table
+/// (`DiskSession::write_partition_table`). Doing it here too means the dry run
+/// checks the same geometry that will actually be written, rather than a second
+/// opinion about it.
+fn correct_disk_size(plan: &mut own_backup_common::restore_plan::RestorePlan) {
+    #[cfg(target_os = "windows")]
+    {
+        use own_backup_common::restore_plan::RestoreOp;
+        let path = format!(r"\.\PhysicalDrive{}", plan.target_disk);
+        let Ok(dev) = own_backup_backup::win_device::WinRawDevice::open_read(&path) else {
+            return; // not reachable right now; the checks fall back to the plan's figure
+        };
+        let actual = dev.length();
+        for op in plan.ops.iter_mut() {
+            if let RestoreOp::WritePartitionTable { table } = op {
+                if table.disk_size_bytes != actual {
+                    tracing::debug!(
+                        disk = plan.target_disk,
+                        planned = table.disk_size_bytes,
+                        actual,
+                        "corrected the plan's disk size from the device"
+                    );
+                    table.disk_size_bytes = actual;
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = plan;
+    }
+}
+
 /// Message returned by the direct engine RPCs when built off Windows (the VHDX
 /// engine is Windows-only for now — see plan phase 8).
 #[cfg(not(target_os = "windows"))]
@@ -814,6 +855,7 @@ impl BackupService for BackupServiceImpl {
         // plan back and applies *that* — otherwise the fix would be lost
         // between the dry run and the real one.
         let letter_changes = resolve_letter_conflicts(&mut p.plan, &ctx.taken_letters);
+        correct_disk_size(&mut p.plan);
         let results = check_plan(&p.plan, &ctx);
 
         json_reply(&serde_json::json!({

@@ -1168,9 +1168,31 @@
     }
   }
 
-  const checkErrors = $derived(checks.filter((c) => c.level === 'error'));
-  const checkWarnings = $derived(checks.filter((c) => c.level === 'warning'));
-  const checkInfos = $derived(checks.filter((c) => c.level === 'info'));
+  /** Same finding on several partitions reads as noise repeated N times, and
+   *  buries the one line that is actually different. Collapse by code, naming
+   *  the partitions instead. */
+  function groupByCode(list: CheckResult[]): { message: string; parts: number[] }[] {
+    const out: { code: string; message: string; parts: number[] }[] = [];
+    for (const c of list) {
+      const seen = out.find((g) => g.code === c.code);
+      if (seen) {
+        if (c.part_index != null) seen.parts.push(c.part_index);
+      } else {
+        out.push({ code: c.code, message: c.message, parts: c.part_index != null ? [c.part_index] : [] });
+      }
+    }
+    return out.map(({ message, parts }) => ({ message, parts }));
+  }
+  /** "Раздел 5: ..." repeated for 5, 6 and 7 becomes "Разделы 5, 6, 7: ...". */
+  function mergedText(g: { message: string; parts: number[] }): string {
+    if (g.parts.length < 2) return g.message;
+    const tail = g.message.replace(/^Раздел \d+/, '').replace(/^\s*:\s*/, ': ');
+    return `Разделы ${g.parts.join(', ')}${tail}`;
+  }
+
+  const checkErrors = $derived(groupByCode(checks.filter((c) => c.level === 'error')));
+  const checkWarnings = $derived(groupByCode(checks.filter((c) => c.level === 'warning')));
+  const checkInfos = $derived(groupByCode(checks.filter((c) => c.level === 'info')));
 
   async function doRestore() {
     if (confirmText !== 'ДА') return;
@@ -1549,29 +1571,29 @@
       <div class="dialog-title">Проверка плана восстановления</div>
 
       {#if checking}
-        <div class="chk-line"><span class="spinner"></span> Проверяем план…</div>
+        <div class="finding-line"><span class="spinner"></span> Проверяем план…</div>
       {:else if checkError}
-        <div class="chk err">
+        <div class="finding err">
           <b>Проверить план не удалось</b>
           <div>{checkError}</div>
-          <div class="chk-note">Ниже — очередь операций, но она не проверена.</div>
+          <div class="finding-note">Ниже — очередь операций, но она не проверена.</div>
         </div>
       {:else if checks.length === 0}
-        <div class="chk ok">Проверки не нашли препятствий.</div>
+        <div class="finding ok">Проверки не нашли препятствий.</div>
       {:else}
-        {#each checkErrors as c}
-          <div class="chk err">{c.message}</div>
+        {#each checkErrors as g}
+          <div class="finding err">{mergedText(g)}</div>
         {/each}
-        {#each checkWarnings as c}
-          <div class="chk warn">{c.message}</div>
+        {#each checkWarnings as g}
+          <div class="finding warn">{mergedText(g)}</div>
         {/each}
-        {#each checkInfos as c}
-          <div class="chk info">{c.message}</div>
+        {#each checkInfos as g}
+          <div class="finding info">{mergedText(g)}</div>
         {/each}
       {/if}
 
       {#each letterChanges as lc}
-        <div class="chk info">
+        <div class="finding info">
           Раздел {lc.part_index}: буква {lc.requested}: занята —
           {lc.assigned ? `назначим ${lc.assigned}:` : 'свободных букв не осталось'}.
         </div>
@@ -1698,17 +1720,20 @@
   .chk { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; font-size: 13px; color: var(--head); cursor: pointer; white-space: nowrap; }
   .chk input { margin: 0; flex-shrink: 0; cursor: pointer; }
   .fld-note { font-size: 12px; color: var(--text-muted); line-height: 1.45; margin-bottom: 4px; }
-  .dialog.wide { width: 560px; }
+  .dialog.wide { width: 620px; max-height: 84vh; overflow-y: auto; }
   .ops { margin: 0 0 12px 18px; padding: 0; font-size: 13px; color: var(--head); line-height: 1.7; }
   .ops-note { font-size: 12px; color: var(--text-muted); }
   .dialog-title.sub { margin-top: 16px; font-size: 13px; }
-  .chk-line { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--text-muted); padding: 6px 0 12px; }
-  .chk { font-size: 13px; line-height: 1.5; padding: 9px 12px; border-radius: 6px; margin-bottom: 8px; }
-  .chk-note { font-size: 12px; opacity: .8; margin-top: 4px; }
-  .chk.err { background: rgba(216,74,74,.1); border: 1px solid rgba(216,74,74,.35); color: #8c1d1d; }
-  .chk.warn { background: rgba(214,158,46,.12); border: 1px solid rgba(214,158,46,.4); color: #7a5a10; }
-  .chk.info { background: rgba(45,125,210,.08); border: 1px solid rgba(45,125,210,.28); color: var(--head); }
-  .chk.ok { background: rgba(56,161,105,.1); border: 1px solid rgba(56,161,105,.32); color: #205e3b; }
+  .finding-line { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--text-muted); padding: 6px 0 12px; }
+  /* Deliberately not `.chk`: that name is a checkbox row in this file, and it
+     carries white-space: nowrap — which turned every finding into one long
+     line running off the dialog. */
+  .finding { font-size: 13px; line-height: 1.5; padding: 9px 12px; border-radius: 6px; margin-bottom: 8px; overflow-wrap: anywhere; }
+  .finding-note { font-size: 12px; opacity: .8; margin-top: 4px; }
+  .finding.err { background: rgba(216,74,74,.1); border: 1px solid rgba(216,74,74,.35); color: #8c1d1d; }
+  .finding.warn { background: rgba(214,158,46,.12); border: 1px solid rgba(214,158,46,.4); color: #7a5a10; }
+  .finding.info { background: rgba(45,125,210,.08); border: 1px solid rgba(45,125,210,.28); color: var(--head); }
+  .finding.ok { background: rgba(56,161,105,.1); border: 1px solid rgba(56,161,105,.32); color: #205e3b; }
   .opt { display: flex; align-items: flex-start; gap: 9px; font-size: 13px; color: var(--head); margin: 4px 0 10px; cursor: pointer; }
   .opt input { width: auto; margin-top: 2px; flex: 0 0 auto; }
   .opt em { display: block; font-style: normal; font-size: 12px; color: var(--text-muted); line-height: 1.45; margin-top: 2px; }
