@@ -149,6 +149,10 @@ pub struct ImageInfoDto {
     /// the manifest knows better, and a padlock over what restores as plain
     /// btrfs would be a lie (D14).
     pub part_filesystems: Vec<PartFsDto>,
+    /// Partitions whose encrypted container's header this copy kept, so a
+    /// restore can put the encryption back exactly as it was (D19). Empty for
+    /// copies taken before headers were stored — those restore decrypted only.
+    pub luks_header_parts: Vec<u32>,
     /// File-type breakdown embedded in the image (for "по типам файлов").
     pub categories: Option<CategorySizes>,
     /// Files/bytes excluded from this image (for the "Исключено" legend line).
@@ -219,6 +223,16 @@ fn read_image_info_at(path: &std::path::Path) -> Result<ImageInfoDto, String> {
         }
     };
 
+    // A per-volume image records index 0 (there was nothing to disambiguate at
+    // backup time), so its lone header answers for the partition it holds.
+    let luks_header_parts: Vec<u32> = if sidecar.disk_manifest.is_none()
+        && sidecar.info.luks_headers.len() == 1
+    {
+        backed_up_parts.clone()
+    } else {
+        sidecar.info.luks_headers.iter().map(|h| h.part_index).collect()
+    };
+
     Ok(ImageInfoDto {
         image_path: path.display().to_string(),
         job_id: sidecar.info.job_id.clone(),
@@ -234,6 +248,7 @@ fn read_image_info_at(path: &std::path::Path) -> Result<ImageInfoDto, String> {
         source_disk_layout,
         backed_up_parts,
         part_filesystems,
+        luks_header_parts,
         categories: sidecar.info.categories,
         excluded_files: sidecar.info.excluded_files,
         excluded_bytes: sidecar.info.excluded_bytes,
@@ -403,8 +418,14 @@ pub async fn dry_run_restore_plan(
 pub async fn apply_restore_plan(
     state: State<'_, GuiState>,
     plan: RestorePlan,
+    passphrases: Option<std::collections::HashMap<u32, String>>,
 ) -> Result<RestoreRunState, String> {
-    state.link.client().await?.apply_restore_plan(&plan).await
+    state
+        .link
+        .client()
+        .await?
+        .apply_restore_plan(&plan, &passphrases.unwrap_or_default())
+        .await
 }
 
 /// The restore in progress, or the last one that finished. `None` when no plan

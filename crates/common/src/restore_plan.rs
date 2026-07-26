@@ -204,6 +204,20 @@ pub enum RestoreOp {
         /// image — but the bytes are there.
         #[serde(default)]
         wipe_free_space: bool,
+        /// Put the encrypted container back (D19).
+        ///
+        /// The copy holds the volume decrypted. With this set, the restore
+        /// writes the container's saved header at the partition start and
+        /// re-encrypts the payload under the master key its keyslots yield —
+        /// producing a byte-identical container, so the restored system's
+        /// `crypttab` and initramfs keep working. Without it the partition ends
+        /// up holding a bare filesystem, readable but not bootable.
+        ///
+        /// The passphrase is **not** part of the plan: the plan is persisted to
+        /// the restore history, and a password written to disk in the clear is
+        /// not a trade worth making. It travels with the apply request instead.
+        #[serde(default)]
+        reencrypt: bool,
     },
     /// Grow an NTFS filesystem to fill its partition, after a sector restore
     /// into a larger target (D2).
@@ -457,6 +471,7 @@ mod tests {
                     dst: part(2, 200),
                     mode: RestoreMode::Files,
                     wipe_free_space: false,
+                    reencrypt: false,
                 },
                 RestoreOp::Format {
                     part: part(2, 200),
@@ -469,6 +484,7 @@ mod tests {
                     dst: part(1, 100),
                     mode: RestoreMode::Sectors,
                     wipe_free_space: false,
+                    reencrypt: false,
                 },
                 RestoreOp::WritePartitionTable { table: table() },
             ],
@@ -487,6 +503,7 @@ mod tests {
             dst: part(1, 0),
             mode: RestoreMode::Sectors,
             wipe_free_space: false,
+            reencrypt: false,
         };
         let fmt = RestoreOp::Format {
             part: part(2, 0),
@@ -499,6 +516,7 @@ mod tests {
             dst: part(2, 0),
             mode: RestoreMode::Files,
             wipe_free_space: false,
+            reencrypt: false,
         };
         assert!(raw.order_key() < fmt.order_key());
         assert!(fmt.order_key() < files.order_key());
@@ -552,6 +570,7 @@ mod tests {
             dst: part(1, 0),
             mode: RestoreMode::Sectors,
             wipe_free_space: false,
+            reencrypt: false,
         };
         assert!(restore.cancellable());
         assert!(!RestoreOp::WritePartitionTable { table: table() }.cancellable());
@@ -588,6 +607,7 @@ mod tests {
                     dst: part(1, 1024 * 1024),
                     mode: RestoreMode::Sectors,
                     wipe_free_space: true,
+                    reencrypt: false,
                 },
                 RestoreOp::ExtendFilesystem { part: part(1, 1024 * 1024) },
             ],

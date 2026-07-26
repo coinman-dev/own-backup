@@ -832,7 +832,23 @@ impl BackupService for BackupServiceImpl {
         use own_backup_common::restore_plan::RestorePlan;
         use own_backup_common::restore_state::RunStatus;
 
-        let plan: RestorePlan = serde_json::from_str(&req.into_inner().json)
+        // Passphrases arrive with the request, not inside the plan: the plan is
+        // persisted to the restore history, and a password written to disk in
+        // the clear is not a trade worth making (D19).
+        #[derive(serde::Deserialize)]
+        struct In {
+            plan: RestorePlan,
+            #[serde(default)]
+            passphrases: std::collections::HashMap<u32, String>,
+        }
+        let raw = req.into_inner().json;
+        // A bare plan is still accepted — nothing needs a passphrase unless it
+        // asks to put a container back.
+        let In { plan, passphrases } = serde_json::from_str::<In>(&raw)
+            .or_else(|_| {
+                serde_json::from_str::<RestorePlan>(&raw)
+                    .map(|plan| In { plan, passphrases: Default::default() })
+            })
             .map_err(|e| Status::invalid_argument(format!("bad plan JSON: {e}")))?;
 
         // One restore at a time. Two plans writing the same disk would be a
@@ -857,7 +873,7 @@ impl BackupService for BackupServiceImpl {
         let events = self.state.events.clone();
         tokio::task::spawn_blocking(move || {
             let mut last_emit = std::time::Instant::now();
-            let outcome = own_backup_core::restore_exec::execute_plan(&plan, &cancel, |run| {
+            let outcome = own_backup_core::restore_exec::execute_plan(&plan, &passphrases, &cancel, |run| {
                 *state.restore_run.lock().unwrap() = Some(run.clone());
                 // Throttle the wire, never the stored state: the state is what
                 // a reconnecting window reads, and it must always be current.

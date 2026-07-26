@@ -51,6 +51,44 @@ pub struct VolumeEncryptionState {
     pub note: Option<String>,
 }
 
+/// The encrypted container's own header, kept verbatim so a restore can put
+/// the encryption back (D19).
+///
+/// A backup of a LUKS volume stores the volume **decrypted** — that is what
+/// makes a used-block map possible and keeps the copy from being the size of
+/// the whole partition. The consequence used to be that a restore produced a
+/// bare filesystem where a container had been, and the system it belonged to
+/// no longer booted: `/etc/crypttab` and the initramfs wait for a device that
+/// is not there any more.
+///
+/// Keeping the header changes that completely. Written back at the partition
+/// start, with the payload re-encrypted under the master key its own keyslots
+/// yield, the container comes out **byte-identical**: same UUID, same
+/// passphrases, same everything. Nothing else on the restored system has to be
+/// touched.
+///
+/// Storing it leaks nothing. These are the same bytes that sit in the clear at
+/// the start of the partition, and the master key inside them is encrypted
+/// under the user's passphrase — which is *not* stored, and is asked for at
+/// restore time instead. (The copy already holds the plaintext data, so the
+/// header adds no exposure it does not already have.)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LuksHeaderBackup {
+    /// Partition index on the source disk. 0 for a per-volume image, where
+    /// there is only one volume and nothing to disambiguate.
+    #[serde(default)]
+    pub part_index: u32,
+    /// Byte offset where the encrypted data area starts — and therefore the
+    /// length of the stored blob. Redundant with the header's own contents,
+    /// kept so the restore can sanity-check sizes before parsing anything.
+    pub data_offset: u64,
+    /// XTS sector size of the data area (512 or 4096).
+    pub sector_size: u32,
+    pub kind: VolumeEncryptionKind,
+    /// The header area, verbatim, base64-encoded.
+    pub header_b64: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageManifest {
     pub backup_id: Uuid,

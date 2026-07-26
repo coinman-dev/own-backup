@@ -101,6 +101,12 @@ pub enum CheckCode {
     /// The source volume was an encrypted container, and the copy holds it
     /// decrypted — the restore produces a plain filesystem.
     EncryptionNotRestored,
+    /// Putting the encryption back was asked for, and the copy has no header
+    /// to do it with.
+    NoLuksHeader,
+    /// Putting the encryption back was asked for in file mode, where it cannot
+    /// work.
+    ReencryptNeedsSectors,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,6 +145,11 @@ pub struct SourcePartition {
     /// filesystem where an encrypted container used to be (D14).
     #[serde(default)]
     pub encrypted_at_source: bool,
+    /// The copy carries the container's own header, so the restore can put the
+    /// encryption back exactly as it was (D19). False for copies taken before
+    /// headers were kept — those can only be restored decrypted.
+    #[serde(default)]
+    pub luks_header_available: bool,
 }
 
 /// Facts about the machine and the image that the pure checks cannot discover
@@ -418,7 +429,7 @@ fn check_ops(
             check_part_ref(part, table, out);
         }
         match op {
-            RestoreOp::RestorePartition { src_index, dst, mode, wipe_free_space } => {
+            RestoreOp::RestorePartition { src_index, dst, mode, wipe_free_space, reencrypt } => {
                 if restored.contains(&dst.index) {
                     out.push(CheckResult::new(
                         CheckLevel::Error,
@@ -455,7 +466,7 @@ fn check_ops(
                     continue;
                 };
                 check_fit(src, dst, *mode, out);
-                check_encryption(src, dst, out);
+                check_encryption(src, dst, *mode, *reencrypt, out);
                 if *mode == RestoreMode::Files {
                     file_targets.push((dst.index, src.filesystem));
                 }
@@ -626,10 +637,57 @@ fn check_fit(src: &SourcePartition, dst: &PartRef, mode: RestoreMode, out: &mut 
 /// and the initramfs are waiting for a LUKS device that no longer exists.
 /// Saying so before the restore costs nothing; discovering it afterwards costs
 /// an evening.
-fn check_encryption(src: &SourcePartition, dst: &PartRef, out: &mut Vec<CheckResult>) {
+fn check_encryption(
+    src: &SourcePartition,
+    dst: &PartRef,
+    mode: RestoreMode,
+    reencrypt: bool,
+    out: &mut Vec<CheckResult>,
+) {
+    if reencrypt {
+        if !src.luks_header_available {
+            out.push(CheckResult::new(
+                CheckLevel::Error,
+                CheckCode::NoLuksHeader,
+                Some(dst.index),
+                format!(
+                    "Вернуть шифрование разделу {} нельзя: в этой копии не сохранён заголовок \
+                     контейнера. Так писались копии до того, как заголовок начали сохранять — \
+                     восстановить её можно только расшифрованной.",
+                    dst.index
+                ),
+            ));
+        }
+        if mode == RestoreMode::Files {
+            // File mode copies through the filesystem driver onto a mounted
+            // volume; there is no mounted volume inside a container we have
+            // only just written, and no way to hand Windows the master key.
+            out.push(CheckResult::new(
+                CheckLevel::Error,
+                CheckCode::ReencryptNeedsSectors,
+                Some(dst.index),
+                format!(
+                    "Раздел {}: вернуть шифрование можно только при посекторном \
+                     восстановлении — пофайловое пишет через файловую систему, а внутри \
+                     нового контейнера её ещё нет.",
+                    dst.index
+                ),
+            ));
+        }
+        return;
+    }
+
     if !src.encrypted_at_source {
         return;
     }
+    let remedy = if src.luks_header_available {
+        "Заголовок контейнера в копии есть — включите «вернуть шифрование», и раздел \
+         восстановится ровно таким, каким был, вместе с прежним паролем."
+    } else {
+        "Заголовок контейнера в этой копии не сохранён, поэтому вернуть шифрование \
+         нельзя. Понадобится Live CD: убрать запись из /etc/crypttab, поправить \
+         /etc/fstab на UUID самого раздела и пересобрать initramfs."
+    };
     out.push(CheckResult::new(
         CheckLevel::Warning,
         CheckCode::EncryptionNotRestored,
@@ -639,8 +697,7 @@ fn check_encryption(src: &SourcePartition, dst: &PartRef, out: &mut Vec<CheckRes
              восстановления в разделе {} окажется обычная {} без контейнера LUKS. \
              Данные будут целы и читаемы, но система с этого раздела не загрузится: \
              initramfs и /etc/crypttab ждут зашифрованное устройство, которого больше нет. \
-             Нужно загрузиться с Live CD, убрать запись из /etc/crypttab, поправить \
-             /etc/fstab на UUID самого раздела и пересобрать initramfs.",
+             {remedy}",
             src.label,
             dst.index,
             src.filesystem.label()
@@ -788,6 +845,7 @@ mod tests {
             filesystem: fs,
             label: "Data".into(),
             encrypted_at_source: false,
+            luks_header_available: false,
         }
     }
 
@@ -815,6 +873,7 @@ mod tests {
                 dst: p1,
                 mode: RestoreMode::Sectors,
                 wipe_free_space: false,
+                reencrypt: false,
             }],
         );
         let results = check_plan(&plan, &ctx(vec![source(1, 100 * MIB, 40 * MIB, FileSystem::Ntfs)]));
@@ -860,6 +919,7 @@ mod tests {
                 dst: p1,
                 mode: RestoreMode::Sectors,
                 wipe_free_space: false,
+                reencrypt: false,
             }],
         );
         let results = check_plan(&plan, &ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ntfs)]));
@@ -884,6 +944,7 @@ mod tests {
                     dst: p1,
                     mode: RestoreMode::Files,
                     wipe_free_space: false,
+                    reencrypt: false,
                 },
             ],
         );
@@ -903,6 +964,7 @@ mod tests {
                 dst: p1,
                 mode: RestoreMode::Files,
                 wipe_free_space: false,
+                reencrypt: false,
             }],
         );
         // 49 MiB * 1.05 = 51.45 MiB > 50 MiB.
@@ -921,6 +983,7 @@ mod tests {
                 dst: p1,
                 mode: RestoreMode::Files,
                 wipe_free_space: false,
+                reencrypt: false,
             }],
         );
         let results = check_plan(&plan, &ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Btrfs)]));
@@ -940,6 +1003,7 @@ mod tests {
                 dst: p1,
                 mode: RestoreMode::Sectors,
                 wipe_free_space: false,
+                reencrypt: false,
             }],
         );
         let mut src = source(1, 100 * MIB, 10 * MIB, FileSystem::Btrfs);
@@ -962,6 +1026,7 @@ mod tests {
                 dst: p1,
                 mode: RestoreMode::Sectors,
                 wipe_free_space: false,
+                reencrypt: false,
             }],
         );
         let results = check_plan(&plan, &ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ntfs)]));
@@ -979,6 +1044,7 @@ mod tests {
                 dst: p1,
                 mode: RestoreMode::Files,
                 wipe_free_space: false,
+                reencrypt: false,
             }],
         );
         let results = check_plan(&plan, &ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ntfs)]));
@@ -998,6 +1064,7 @@ mod tests {
                     dst: p1,
                     mode: RestoreMode::Files,
                     wipe_free_space: false,
+                    reencrypt: false,
                 },
             ],
         );
@@ -1018,6 +1085,7 @@ mod tests {
                     dst: p1,
                     mode: RestoreMode::Sectors,
                     wipe_free_space: false,
+                    reencrypt: false,
                 },
                 RestoreOp::ExtendFilesystem { part: p1 },
             ],
@@ -1038,6 +1106,7 @@ mod tests {
                     dst: p1,
                     mode: RestoreMode::Sectors,
                     wipe_free_space: false,
+                    reencrypt: false,
                 },
                 RestoreOp::ExtendFilesystem { part: p1 },
             ],
@@ -1058,6 +1127,7 @@ mod tests {
                     dst: p1,
                     mode: RestoreMode::Sectors,
                     wipe_free_space: false,
+                    reencrypt: false,
                 },
                 RestoreOp::Format { part: p1, fs: FormatFs::Ntfs, label: String::new(), quick: true },
             ],
@@ -1254,6 +1324,7 @@ mod tests {
                 dst: p1,
                 mode: RestoreMode::Sectors,
                 wipe_free_space: false,
+                reencrypt: false,
             }],
         );
         let results = check_plan(&plan, &ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ntfs)]));

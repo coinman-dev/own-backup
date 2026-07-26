@@ -50,6 +50,22 @@ pub struct LuksParams {
 }
 
 impl LuksParams {
+    /// Encrypt `buf` in place — the exact mirror of [`Self::decrypt`], used to
+    /// put a container back together on restore (D19).
+    ///
+    /// XTS is its own inverse in structure: the same tweak sequence, the other
+    /// direction. Getting the tweak wrong produces data that decrypts to noise
+    /// with no error anywhere, so the offset rules are identical to `decrypt`
+    /// and enforced the same way.
+    pub fn encrypt(&self, data_off: u64, buf: &mut [u8]) -> Result<()> {
+        let ss = self.sector_size as u64;
+        if data_off % ss != 0 {
+            return Err(bad("encrypt offset not sector-aligned"));
+        }
+        let first_512 = data_off / 512 + self.iv_offset;
+        xts_encrypt(&self.master_key, self.sector_size as usize, first_512 as u128, buf)
+    }
+
     /// Decrypt `buf` in place. `data_off` is the byte offset within the data
     /// area (0 = first encrypted sector); both `data_off` and `buf.len()` must
     /// be multiples of [`Self::sector_size`].
@@ -182,6 +198,28 @@ fn af_merge(hash: Hash, src: &[u8], blocksize: usize, stripes: usize) -> Result<
 /// first unit, counted in 512-byte units; the k-th `sector_size` unit uses
 /// tweak `first_512_unit + k * (sector_size / 512)` — plain64 always counts the
 /// tweak in 512-byte units, so a 4096-byte-sector container steps by 8.
+fn xts_encrypt(key: &[u8], sector_size: usize, first_512_unit: u128, buf: &mut [u8]) -> Result<()> {
+    if sector_size == 0 || sector_size % 512 != 0 || buf.len() % sector_size != 0 {
+        return Err(bad("XTS buffer/sector size not a valid multiple of 512"));
+    }
+    let step = (sector_size / 512) as u128;
+    let tweak = |unit_index: u128| (first_512_unit + unit_index * step).to_le_bytes();
+    match key.len() {
+        32 => {
+            let c1 = Aes128::new(GenericArray::from_slice(&key[..16]));
+            let c2 = Aes128::new(GenericArray::from_slice(&key[16..]));
+            Xts128::new(c1, c2).encrypt_area(buf, sector_size, 0, tweak);
+        }
+        64 => {
+            let c1 = Aes256::new(GenericArray::from_slice(&key[..32]));
+            let c2 = Aes256::new(GenericArray::from_slice(&key[32..]));
+            Xts128::new(c1, c2).encrypt_area(buf, sector_size, 0, tweak);
+        }
+        n => return Err(bad(format!("unsupported AES-XTS key length {n}"))),
+    }
+    Ok(())
+}
+
 fn xts_decrypt(key: &[u8], sector_size: usize, first_512_unit: u128, buf: &mut [u8]) -> Result<()> {
     if sector_size == 0 || sector_size % 512 != 0 || buf.len() % sector_size != 0 {
         return Err(bad("XTS buffer/sector size not a valid multiple of 512"));
@@ -202,6 +240,35 @@ fn xts_decrypt(key: &[u8], sector_size: usize, first_512_unit: u128, buf: &mut [
         n => return Err(bad(format!("unsupported AES-XTS key length {n}"))),
     }
     Ok(())
+}
+
+/// Read the container's own header area — everything before the encrypted data
+/// starts — so a restore can put the container back exactly as it was (D19).
+///
+/// These bytes are not secret: they sit in the clear at the start of the
+/// partition, and the master key inside them is wrapped under the passphrase,
+/// which is never stored. What they buy is a restore that reproduces the
+/// container's identity — its UUID and its keyslots — so `crypttab`, `fstab`
+/// and the initramfs of the restored system keep working untouched.
+pub fn read_header_area(vol: &mut dyn RawVolume, params: &LuksParams) -> Result<Vec<u8>> {
+    if params.data_offset == 0 {
+        return Err(bad("container reports a zero data offset — nothing to preserve"));
+    }
+    // A LUKS2 header area is 16 MiB by default, LUKS1's around 2 MiB. Refuse
+    // anything wilder rather than allocating whatever a corrupt header claims.
+    const MAX_HEADER: u64 = 64 * 1024 * 1024;
+    if params.data_offset > MAX_HEADER {
+        return Err(bad(format!(
+            "data offset {} exceeds the largest plausible header area ({MAX_HEADER})",
+            params.data_offset
+        )));
+    }
+    let mut buf = vec![0u8; params.data_offset as usize];
+    vol.read_at(0, &mut buf)?;
+    if !is_luks(&buf) {
+        return Err(bad("header area does not start with the LUKS magic"));
+    }
+    Ok(buf)
 }
 
 /// Only `aes-xts-plain64` is supported; return the master-key byte length.

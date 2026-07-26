@@ -235,6 +235,13 @@
       .map((p) => p.index),
   );
 
+  // Encrypted partitions whose container header the copy kept — those can be
+  // restored with their encryption intact (D19).
+  const reencryptable = $derived(
+    (activeInfo?.luks_header_parts ?? []).filter((i) => decryptedParts.includes(i)),
+  );
+  const canReencrypt = $derived(reencryptable.length > 0);
+
   // Source partitions that are actually inside this copy.
   const srcBackupParts = $derived(
     (srcDisk?.partitions ?? []).filter((p) => backedUpParts.includes(p.index)),
@@ -299,6 +306,10 @@
   let wipeFreeSpace = $state(false);
   /** D10 — verify what was written once the plan finishes. */
   let verifyAfter = $state(false);
+  /** D19 — put the encrypted container back. On by default whenever the copy
+   *  can do it: leaving encryption off silently is how a Linux install stops
+   *  booting after an otherwise perfect restore. */
+  let reencrypt = $state(true);
   /** Extra attributes of hand-created partitions, for the operations queue. */
   let newPartMeta = $state(
     new Map<number, { gptType: string; mbrKind: string; active: boolean; letter: string; quickFormat: boolean }>(),
@@ -914,6 +925,9 @@
         dst,
         mode,
         wipe_free_space: mode === 'sectors' && wipeFreeSpace,
+        // Only meaningful for a sector restore of a partition whose header the
+        // copy kept; the backend refuses the other combinations outright.
+        reencrypt: mode === 'sectors' && reencrypt && reencryptable.includes(m.src),
       });
       // A larger target leaves a tail the filesystem does not know about; only
       // NTFS can claim it automatically (D2). In file mode the filesystem was
@@ -993,6 +1007,7 @@
           filesystem: p.filesystem,
           label: p.volume_label || '',
           encrypted_at_source: decryptedParts.includes(p.index),
+          luks_header_available: reencryptable.includes(p.index),
         })),
       taken_letters: [],
       target_is_system_disk: false,
@@ -1221,7 +1236,37 @@
          container back. Said here, next to the card, rather than only in the
          confirmation dialog: this decides whether the restore is useful at
          all, and it should not come as news at the last click. -->
-    {#if decryptedParts.length > 0}
+    {#if canReencrypt}
+      <!-- The copy kept the container header, so the encryption can go back
+           exactly as it was. Offered here rather than buried in the final
+           dialog: it decides whether the restored system boots, and the
+           default is the one that keeps it working. -->
+      <div class="luks-box">
+        <label class="luks-opt">
+          <input type="checkbox" bind:checked={reencrypt} />
+          <span>
+            <b>Вернуть шифрование{reencryptable.length > 1 ? ` разделам ${reencryptable.join(', ')}` : ` разделу ${reencryptable[0]}`}</b>
+            <em>
+              Заголовок контейнера сохранён в копии. Раздел восстановится ровно таким, каким был —
+              тот же UUID, тот же пароль — и система загрузится без единой правки.
+              Пароль спросим перед запуском восстановления; в копии он не хранится.
+            </em>
+          </span>
+        </label>
+        {#if !reencrypt}
+          <div class="luks-warn inner">
+            <span class="sw-ico">🔓</span>
+            <span>
+              Без шифрования в разделе окажется обычная файловая система без контейнера.
+              Данные будут целы и читаемы, но <b>Linux с такого раздела не загрузится</b>:
+              initramfs и <code>/etc/crypttab</code> ждут зашифрованное устройство, которого больше нет.
+              Понадобится Live CD: убрать запись из <code>/etc/crypttab</code>, поправить
+              <code>/etc/fstab</code> на UUID самого раздела и пересобрать initramfs.
+            </span>
+          </div>
+        {/if}
+      </div>
+    {:else if decryptedParts.length > 0}
       <div class="luks-warn">
         <span class="sw-ico">🔓</span>
         <span>
@@ -1229,13 +1274,16 @@
           {decryptedParts.length === 1 ? 'Раздел' : 'Разделы'}
           {decryptedParts.join(', ')}
           {decryptedParts.length === 1 ? 'был зашифрован' : 'были зашифрованы'} (LUKS),
-          но в копию {decryptedParts.length === 1 ? 'попал' : 'попали'} в расшифрованном виде —
-          после восстановления там окажется обычная файловая система без контейнера.
+          но в копию {decryptedParts.length === 1 ? 'попал' : 'попали'} в расшифрованном виде,
+          а заголовок контейнера в ней не сохранён — так писались копии раньше.
           <br />
           Данные будут целы и читаемы, но <b>Linux с такого раздела не загрузится</b>:
           initramfs и <code>/etc/crypttab</code> ждут зашифрованное устройство, которого больше нет.
           Понадобится Live CD: убрать запись из <code>/etc/crypttab</code>, поправить
           <code>/etc/fstab</code> на UUID самого раздела и пересобрать initramfs.
+          <br />
+          Следующие копии этого задания сохранят заголовок — их можно будет восстановить
+          вместе с шифрованием.
         </span>
       </div>
     {/if}
@@ -1620,6 +1668,11 @@
   .sw-ico { flex-shrink: 0; font-size: 15px; line-height: 1.3; }
   .luks-warn { display: flex; gap: 10px; margin-top: 14px; padding: 12px 14px; border-radius: 6px; background: rgba(214,158,46,.12); border: 1px solid rgba(214,158,46,.4); font-size: 13px; color: #7a5a10; line-height: 1.55; }
   .luks-warn code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; background: rgba(0,0,0,.06); padding: 1px 4px; border-radius: 3px; }
+  .luks-warn.inner { margin-top: 10px; }
+  .luks-box { margin-top: 14px; padding: 12px 14px; border-radius: 6px; border: 1px solid var(--border); background: var(--card-bg); }
+  .luks-opt { display: flex; align-items: flex-start; gap: 10px; font-size: 13px; color: var(--head); cursor: pointer; line-height: 1.5; }
+  .luks-opt input { width: auto; margin-top: 2px; flex: 0 0 auto; }
+  .luks-opt em { display: block; font-style: normal; font-size: 12px; color: var(--text-muted); line-height: 1.5; margin-top: 3px; }
   /* Right-click partition menu */
   .menu-backdrop { position: fixed; inset: 0; z-index: 190; }
   .ctx-menu { position: fixed; z-index: 200; min-width: 180px; background: var(--card-bg); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 10px 30px rgba(0,0,0,.18); padding: 6px; }

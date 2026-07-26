@@ -96,6 +96,15 @@ pub struct SidecarInfo {
     /// existed, and for a sector-by-sector copy of an unrecognised filesystem.
     #[serde(default)]
     pub filesystem: Option<String>,
+    /// Headers of the encrypted containers this image holds, one per partition
+    /// that was decrypted for the copy (D19).
+    ///
+    /// Without them a restore can only produce a bare filesystem where the
+    /// container used to be — readable, but not bootable. With them the
+    /// container is put back exactly as it was. Empty for images written before
+    /// this existed, and for sources that were never encrypted.
+    #[serde(default)]
+    pub luks_headers: Vec<own_backup_common::image::LuksHeaderBackup>,
 }
 
 impl SidecarInfo {
@@ -113,6 +122,7 @@ impl SidecarInfo {
             excluded_files: 0,
             excluded_bytes: 0,
             filesystem: None,
+            luks_headers: Vec::new(),
         }
     }
 
@@ -135,6 +145,7 @@ impl SidecarInfo {
             excluded_files: 0,
             excluded_bytes: 0,
             filesystem: None,
+            luks_headers: Vec::new(),
         }
     }
 }

@@ -118,6 +118,33 @@ pub fn check_fits(copy: &BlockCopy, dst_size: u64) -> Result<()> {
     Ok(())
 }
 
+/// Length of the decrypted payload a copy holds for one encrypted partition
+/// (D19) — the number of bytes that have to be re-encrypted on restore.
+///
+/// The two image shapes measure their window differently, and the difference
+/// is exactly one header:
+///
+/// - a **whole-disk** image's window is the partition's full GPT slot, header
+///   included; the backup wrote the decrypted payload starting at the
+///   partition's first byte and simply never touched the tail, so the payload
+///   is the window minus the header;
+/// - a **per-volume** image's window *is* the payload — `source_disk.size_bytes`
+///   was already computed as `device_len - data_offset` at backup time.
+///
+/// Getting this wrong is not loud: taking the window's length in the whole-disk
+/// case makes the restore demand a target one header larger than the source
+/// partition, and refuse a same-size disk for no visible reason.
+pub fn payload_len(window_len: u64, data_offset: u64, whole_disk_image: bool) -> Result<u64> {
+    if !whole_disk_image {
+        return Ok(window_len);
+    }
+    window_len.checked_sub(data_offset).ok_or_else(|| {
+        OwnBackupError::ImageFormat(format!(
+            "раздел ({window_len} Б) меньше заголовка своего контейнера ({data_offset} Б)"
+        ))
+    })
+}
+
 /// The stretches of the target that no block covers.
 ///
 /// A sector restore writes only the blocks the backup stored — the gaps between
@@ -241,6 +268,24 @@ mod tests {
         };
         assert!(check_fits(&c, 10 * MIB).is_ok());
         assert!(check_fits(&c, 9 * MIB).is_err());
+    }
+
+    #[test]
+    fn a_whole_disk_window_holds_the_header_as_well_as_the_payload() {
+        // 128 MiB partition with a 16 MiB LUKS2 header: 112 MiB of payload.
+        assert_eq!(payload_len(128 * MIB, 16 * MIB, true).unwrap(), 112 * MIB);
+    }
+
+    #[test]
+    fn a_volume_image_window_is_already_the_payload() {
+        // Here the backup subtracted the header when it measured the volume,
+        // so subtracting it again would lose a header's worth of data.
+        assert_eq!(payload_len(112 * MIB, 16 * MIB, false).unwrap(), 112 * MIB);
+    }
+
+    #[test]
+    fn a_partition_smaller_than_its_own_header_is_refused() {
+        assert!(payload_len(8 * MIB, 16 * MIB, true).is_err());
     }
 
     #[test]

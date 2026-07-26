@@ -202,6 +202,9 @@ export interface ImageInfo {
    *  holds the volume in the clear, so the disk snapshot's "Unknown +
    *  encrypted" would misdescribe what a restore produces. */
   part_filesystems: { index: number; filesystem: string }[];
+  /** Partitions whose container header this copy kept — those can be restored
+   *  with their encryption intact, given the password. */
+  luks_header_parts: number[];
   /** File-type breakdown embedded in the image. */
   categories: CategorySizes | null;
   /** Files/bytes excluded from this image (for the "Исключено" legend line). */
@@ -452,6 +455,10 @@ export type RestoreOp =
       dst: PartRef;
       mode: RestoreMode;
       wipe_free_space: boolean;
+      /** Put the encrypted container back instead of leaving a bare
+       *  filesystem. The password travels with the apply request, never in
+       *  the plan — the plan is persisted. */
+      reencrypt: boolean;
     }
   | { op: 'extend_filesystem'; part: PartRef }
   | { op: 'assign_letter'; part: PartRef; letter: string }
@@ -494,6 +501,9 @@ export interface CheckContext {
     /** The source volume was a LUKS/BitLocker container and the copy holds it
      *  decrypted — the restore produces a plain filesystem. */
     encrypted_at_source: boolean;
+    /** The copy kept the container's header, so the encryption can be put
+     *  back given the password. */
+    luks_header_available: boolean;
   }[];
   taken_letters: string[];
   target_is_system_disk: boolean;

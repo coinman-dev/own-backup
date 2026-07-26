@@ -164,6 +164,7 @@ pub fn initial_state(plan: &RestorePlan) -> RestoreRunState {
 #[cfg(target_os = "windows")]
 pub fn execute_plan(
     plan: &RestorePlan,
+    passphrases: &std::collections::HashMap<u32, String>,
     cancel: &CancelToken,
     mut on_update: impl FnMut(&RestoreRunState),
 ) -> Result<RestoreRunState> {
@@ -213,7 +214,7 @@ pub fn execute_plan(
         state.cancellable = op.cancellable();
         on_update(&state);
 
-        let outcome = run_op(op, plan, &sidecar, session.as_mut(), cancel, &mut |percent, bytes| {
+        let outcome = run_op(op, plan, &sidecar, passphrases, session.as_mut(), cancel, &mut |percent, bytes| {
             state.ops[index].percent = percent;
             state.ops[index].bytes_done = bytes;
             on_update(&state);
@@ -402,6 +403,7 @@ fn run_verification(
 /// For every partition that came out of the copy, the values are taken from the
 /// image's own captured GPT, which is exactly the layout being reproduced.
 /// Hand-created partitions keep what the designer gave them.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn with_captured_gpt_fields(
     table: &own_backup_common::restore_plan::PartitionTableSpec,
     plan: &RestorePlan,
@@ -509,6 +511,22 @@ fn verify_files(
     state.follow_ups.push(format!("Раздел {dst_index}: перенос файлов неполный — {text}."));
 }
 
+/// The saved container header for one source partition, if the copy has one.
+///
+/// A per-volume image holds exactly one, and its recorded index is 0 because
+/// there was nothing to disambiguate at backup time — so a lone entry answers
+/// for whichever partition is asked about.
+pub fn luks_header_for(
+    sidecar: &own_backup_backup::sidecar::Sidecar,
+    src_index: u32,
+) -> Option<&own_backup_common::image::LuksHeaderBackup> {
+    let headers = &sidecar.info.luks_headers;
+    match headers.as_slice() {
+        [only] if sidecar.disk_manifest.is_none() => Some(only),
+        _ => headers.iter().find(|h| h.part_index == src_index),
+    }
+}
+
 /// What to tell the user when the copy held a decrypted container (D14).
 ///
 /// The restore is faithful — it writes exactly what the backup holds — and what
@@ -545,10 +563,15 @@ struct OpNote {
 }
 
 #[cfg(target_os = "windows")]
+#[allow(clippy::too_many_arguments)]
 fn run_op(
     op: &RestoreOp,
     plan: &RestorePlan,
     sidecar: &own_backup_backup::sidecar::Sidecar,
+    // Passphrase per target partition, for putting a container back (D19).
+    // Kept out of the plan on purpose: the plan is persisted to the restore
+    // history, and a password on disk in the clear is not a trade worth making.
+    passphrases: &std::collections::HashMap<u32, String>,
     session: Option<&mut own_backup_backup::disk_session_win::DiskSession>,
     cancel: &CancelToken,
     on_progress: &mut dyn FnMut(u32, u64),
@@ -572,7 +595,13 @@ fn run_op(
             Ok(OpNote::default())
         }
 
-        RestoreOp::RestorePartition { src_index, dst, mode: RestoreMode::Sectors, wipe_free_space } => {
+        RestoreOp::RestorePartition {
+            src_index,
+            dst,
+            mode: RestoreMode::Sectors,
+            wipe_free_space,
+            reencrypt,
+        } => {
             let target = PartitionTarget {
                 disk_number: plan.target_disk,
                 offset: dst.offset,
@@ -585,25 +614,65 @@ fn run_op(
                 // nothing left to dismount.
                 disk_already_offline: session.is_some(),
             };
-            let summary = restore_partition_sectors(
-                &plan.image_path,
-                sidecar,
-                *src_index,
-                target,
-                opts,
-                cancel,
-                |pr| {
-                    let percent = if pr.blocks_total > 0 {
-                        (pr.blocks_done * 100 / pr.blocks_total) as u32
-                    } else {
-                        0
-                    };
-                    on_progress(percent, pr.bytes_written);
-                    Ok(())
-                },
-            )?;
+            let report = |pr: &own_backup_backup::restore_win::SectorRestoreProgress,
+                          on_progress: &mut dyn FnMut(u32, u64)| {
+                let percent = if pr.blocks_total > 0 {
+                    (pr.blocks_done * 100 / pr.blocks_total) as u32
+                } else {
+                    0
+                };
+                on_progress(percent, pr.bytes_written);
+            };
+
+            let summary = if *reencrypt {
+                use own_backup_backup::restore_win::{restore_partition_encrypted, ReencryptRequest};
+                let header = luks_header_for(sidecar, *src_index).ok_or_else(|| {
+                    OwnBackupError::RestoreIncompatible(format!(
+                        "в копии нет сохранённого заголовка контейнера для раздела {src_index} — \
+                         вернуть шифрование нечем"
+                    ))
+                })?;
+                let passphrase = passphrases.get(&dst.index).ok_or_else(|| {
+                    OwnBackupError::Config(format!(
+                        "для раздела {} не передан пароль, а план требует вернуть шифрование",
+                        dst.index
+                    ))
+                })?;
+                restore_partition_encrypted(
+                    &plan.image_path,
+                    sidecar,
+                    *src_index,
+                    target,
+                    opts,
+                    &ReencryptRequest { header, passphrase },
+                    cancel,
+                    |pr| {
+                        report(pr, on_progress);
+                        Ok(())
+                    },
+                )?
+            } else {
+                restore_partition_sectors(
+                    &plan.image_path,
+                    sidecar,
+                    *src_index,
+                    target,
+                    opts,
+                    cancel,
+                    |pr| {
+                        report(pr, on_progress);
+                        Ok(())
+                    },
+                )?
+            };
             if summary.cancelled {
                 return Err(OwnBackupError::Cancelled);
+            }
+            if *reencrypt {
+                return Ok(OpNote {
+                    message: "Контейнер восстановлен вместе с прежним паролем".into(),
+                    follow_ups: Vec::new(),
+                });
             }
             Ok(OpNote { message: String::new(), follow_ups: encryption_follow_up(sidecar, dst.index) })
         }
@@ -803,6 +872,7 @@ fn add_failure_follow_ups(state: &mut RestoreRunState) {
 #[cfg(not(target_os = "windows"))]
 pub fn execute_plan(
     plan: &RestorePlan,
+    _passphrases: &std::collections::HashMap<u32, String>,
     _cancel: &CancelToken,
     mut on_update: impl FnMut(&RestoreRunState),
 ) -> Result<RestoreRunState> {
@@ -929,6 +999,7 @@ mod tests {
                     dst: part(),
                     mode: RestoreMode::Sectors,
                     wipe_free_space: false,
+                    reencrypt: false,
                 },
             ],
         );
@@ -946,6 +1017,7 @@ mod tests {
             dst: part(),
             mode: RestoreMode::Sectors,
             wipe_free_space: false,
+            reencrypt: false,
         };
         let mut plan = RestorePlan::new(
             1,
@@ -976,6 +1048,7 @@ mod tests {
                 dst: part(),
                 mode: RestoreMode::Files,
                 wipe_free_space: false,
+                reencrypt: false,
             }],
         );
         plan.verify_after = true;
@@ -1071,6 +1144,7 @@ mod tests {
                     dst: part(),
                     mode: RestoreMode::Sectors,
                     wipe_free_space: false,
+                    reencrypt: false,
                 },
             ],
         );

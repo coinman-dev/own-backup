@@ -454,12 +454,21 @@ impl BackupClient {
     /// Execute a plan. DESTRUCTIVE. Returns immediately with the run's initial
     /// state; progress arrives on `StreamEvents` as `restore-plan`, and the
     /// current state is always readable via [`Self::get_restore_state`].
+    ///
+    /// `passphrases` maps a target partition index to the pass phrase of the
+    /// container being put back (D19). They travel with the request rather than
+    /// inside the plan, because the plan is persisted to the restore history
+    /// and a password on disk in the clear is not a trade worth making.
     pub async fn apply_restore_plan(
         &mut self,
         plan: &own_backup_common::restore_plan::RestorePlan,
+        passphrases: &std::collections::HashMap<u32, String>,
     ) -> Result<own_backup_common::restore_state::RestoreRunState> {
-        let json = serde_json::to_string(plan)
-            .map_err(|e| format!("serialize plan failed: {e}"))?;
+        let json = serde_json::to_string(&serde_json::json!({
+            "plan": plan,
+            "passphrases": passphrases,
+        }))
+        .map_err(|e| format!("serialize plan failed: {e}"))?;
         let reply = self
             .inner
             .apply_restore_plan(self.request(proto::JsonRequest { json }))

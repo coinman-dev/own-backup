@@ -1159,6 +1159,35 @@ fn backup_volume_inner(
     sidecar_info.excluded_files = excluded_files;
     sidecar_info.excluded_bytes = excluded_bytes;
     sidecar_info.filesystem = detected_fs;
+    // The container's own header, kept so a restore can put the encryption
+    // back exactly as it was (D19). Failing to read it is not fatal — the
+    // copy is still a good copy — but it does mean this image can only be
+    // restored decrypted, so it is logged loudly.
+    let luks_headers: Vec<own_backup_common::image::LuksHeaderBackup> = match &luks {
+        Some(p) => {
+            match WinRawDevice::open_read(&read_path)
+                .and_then(|mut d| crate::luks::read_header_area(&mut d, p))
+            {
+                Ok(bytes) => {
+                    use base64::Engine;
+                    info!(bytes = bytes.len(), "LUKS header captured — restore can re-encrypt");
+                    vec![own_backup_common::image::LuksHeaderBackup {
+                        part_index: 0,
+                        data_offset: p.data_offset,
+                        sector_size: p.sector_size,
+                        kind: p.kind.clone(),
+                        header_b64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+                    }]
+                }
+                Err(e) => {
+                    warn!(error = %e, "could not read the LUKS header — this copy will only restore decrypted");
+                    Vec::new()
+                }
+            }
+        }
+        None => Vec::new(),
+    };
+    sidecar_info.luks_headers = luks_headers;
     let sidecar_path = sidecar_path_for(&req.image_path);
 
 
@@ -1284,6 +1313,10 @@ struct PreparedPartition {
     device: String,
     read_path: String,
     luks: Option<crate::luks::LuksParams>,
+    /// The container's own header, captured so a restore can put the
+    /// encryption back (D19). `None` when the partition was not encrypted or
+    /// the header could not be read.
+    luks_header: Option<own_backup_common::image::LuksHeaderBackup>,
     used: Box<dyn UsedSectorMap>,
     volume_len: u64,
     part_offset: u64,
@@ -1757,6 +1790,31 @@ fn backup_disk_inner(
         };
         let device_len = probe.length();
         drop(probe);
+        // The container's own header, kept verbatim so a restore can rebuild
+        // it byte-for-byte (D19). A failure here costs the ability to restore
+        // this partition encrypted, not the backup itself, so it only warns.
+        let luks_header = luks.as_ref().and_then(|l| {
+            match WinRawDevice::open_read(&read_path)
+                .and_then(|mut d| crate::luks::read_header_area(&mut d, l))
+            {
+                Ok(bytes) => {
+                    use base64::Engine;
+                    info!(part = p.part_index, bytes = bytes.len(), "LUKS header captured");
+                    Some(own_backup_common::image::LuksHeaderBackup {
+                        part_index: p.part_index,
+                        data_offset: l.data_offset,
+                        sector_size: l.sector_size,
+                        kind: l.kind.clone(),
+                        header_b64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+                    })
+                }
+                Err(e) => {
+                    warn!(part = p.part_index, error = %e,
+                          "could not read the LUKS header — this partition will only restore decrypted");
+                    None
+                }
+            }
+        });
         let volume_len = match &luks {
             Some(l) => device_len.saturating_sub(l.data_offset),
             None => device_len,
@@ -1810,6 +1868,7 @@ fn backup_disk_inner(
             volume_len,
             part_offset,
             filesystem: pm.filesystem,
+            luks_header,
             zero_ranges: pm.zero_ranges,
             patches: pm.patches,
             removal_paths: pm.removal_paths,
@@ -2133,6 +2192,10 @@ fn backup_disk_inner(
     info.categories = categories;
     info.excluded_files = excluded_files;
     info.excluded_bytes = excluded_bytes;
+    // One captured container header per encrypted partition (D19): with them a
+    // restore rebuilds the container byte-for-byte, so the restored system's
+    // crypttab and initramfs keep working untouched.
+    info.luks_headers = prepared.iter().filter_map(|p| p.luks_header.clone()).collect();
 
     let mut blob = Vec::new();
     crate::sidecar::write_sidecar_v2_full_to(&mut blob, &info, &manifest, &checksums, Some(&disk_manifest))?;

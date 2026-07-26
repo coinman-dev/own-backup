@@ -436,3 +436,175 @@ impl Drop for MountedImage {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Putting the encrypted container back (D19)
+// ---------------------------------------------------------------------------
+
+/// The container to rebuild on a partition, and the passphrase that opens it.
+pub struct ReencryptRequest<'a> {
+    pub header: &'a own_backup_common::image::LuksHeaderBackup,
+    /// Supplied by the user at restore time and never stored anywhere. The
+    /// backup keeps the header — public data — not the key to it.
+    pub passphrase: &'a str,
+}
+
+/// Restore a partition **with its encryption**: write the container's saved
+/// header back, then re-encrypt the payload under the master key its own
+/// keyslots yield (D19).
+///
+/// The result is byte-identical to the original container — same UUID, same
+/// keyslots, same passphrase — so nothing on the restored system has to change.
+/// That is the whole point: the alternative leaves a bare filesystem, and a
+/// Linux install whose `crypttab` and initramfs wait forever for a device that
+/// is not there.
+///
+/// The payload moves in two steps that must not be confused:
+/// - the image holds the volume **decrypted**, at offsets relative to the
+///   payload start;
+/// - the target holds it **encrypted**, at those offsets plus `data_offset`,
+///   with the XTS tweak derived from the payload-relative offset.
+///
+/// Mixing the two up produces a container that opens and decrypts to noise,
+/// with no error raised anywhere — hence the offsets are named apart and the
+/// tweak always comes from `payload_off`.
+pub fn restore_partition_encrypted(
+    image_path: &Path,
+    sidecar: &Sidecar,
+    src_index: u32,
+    target: PartitionTarget,
+    opts: SectorRestoreOptions,
+    req: &ReencryptRequest<'_>,
+    cancel: &CancelToken,
+    mut progress: impl FnMut(&SectorRestoreProgress) -> Result<()>,
+) -> Result<SectorRestoreSummary> {
+    use base64::Engine;
+
+    let started = Instant::now();
+    let block_size = sidecar.manifest.block_size as u64;
+    let image_len = sidecar.manifest.source_disk.size_bytes;
+    let data_offset = sidecar.info.volume_data_offset;
+    let window = source_window_for(sidecar, src_index)?;
+
+    let header = base64::engine::general_purpose::STANDARD
+        .decode(&req.header.header_b64)
+        .map_err(|e| OwnBackupError::ImageFormat(format!("повреждён сохранённый заголовок LUKS: {e}")))?;
+    if header.len() as u64 != req.header.data_offset {
+        return Err(OwnBackupError::ImageFormat(format!(
+            "сохранённый заголовок LUKS — {} Б, а контейнер начинал данные с {} Б",
+            header.len(),
+            req.header.data_offset
+        )));
+    }
+
+    // The payload no longer starts at the partition's first byte: the header
+    // takes the front. So the partition must hold both.
+    let payload_len = crate::restore_map::payload_len(
+        window.len,
+        req.header.data_offset,
+        sidecar.disk_manifest.is_some(),
+    )?;
+    let needed = req.header.data_offset + payload_len;
+    if target.size < needed {
+        return Err(OwnBackupError::RestoreIncompatible(format!(
+            "раздел-приёмник {} Б мал для контейнера: заголовок {} Б + данные {} Б",
+            target.size, req.header.data_offset, payload_len
+        )));
+    }
+
+    let _guard = if opts.disk_already_offline {
+        None
+    } else {
+        Some(VolumeDismountGuard::for_range(target.disk_number, target.offset, target.size))
+    };
+
+    let device_path = target.device_path();
+    let mut dev = WinRawDevice::open_write(&device_path)?;
+    dev.write_at(0, &header)?;
+    dev.flush()?;
+    info!(target = %device_path, bytes = header.len(), "LUKS header written back");
+
+    // Parsed off the target, not off the blob we just decoded: this proves the
+    // header actually landed and is readable where the system will look for it.
+    let params = {
+        let mut probe = WinRawDevice::open_read(&device_path)?;
+        crate::luks::open_luks(&mut probe, req.passphrase.as_bytes())?
+    };
+    if params.data_offset != req.header.data_offset {
+        return Err(OwnBackupError::ImageFormat(format!(
+            "восстановленный заголовок сообщает смещение данных {}, ожидалось {}",
+            params.data_offset, req.header.data_offset
+        )));
+    }
+
+    let mut image = ImageReadSource::open(image_path, &sidecar.info.container)?;
+    let total = sidecar.checksums.len() as u64;
+    let mut out = SectorRestoreSummary {
+        blocks_restored: 0,
+        bytes_restored: 0,
+        bytes_wiped: 0,
+        duration: Duration::ZERO,
+        cancelled: false,
+    };
+
+    for entry in &sidecar.checksums {
+        if cancel.is_cancelled() {
+            out.cancelled = true;
+            warn!(
+                blocks = out.blocks_restored,
+                "re-encrypting restore cancelled — the container is incomplete and will not open"
+            );
+            break;
+        }
+        let Some(copy) = plan_block_copy(entry.block_number, block_size, image_len, data_offset, window)
+        else {
+            continue;
+        };
+        // `dst_offset` is where the byte sits inside the *payload*; on disk it
+        // lands that far past the header.
+        let payload_off = copy.dst_offset;
+        if payload_off + copy.slice_len as u64 > payload_len {
+            continue; // beyond the container's data area
+        }
+
+        let mut buf = vec![0u8; copy.block_len];
+        image.read_at(copy.image_offset, &mut buf)?;
+        if opts.verify_checksums {
+            let actual = compute_block_checksum(&buf);
+            if actual != entry.checksum {
+                return Err(OwnBackupError::ChecksumMismatch {
+                    block_index: entry.block_number,
+                    expected: entry.checksum,
+                    actual,
+                });
+            }
+        }
+
+        let mut slice = buf[copy.slice_start..copy.slice_start + copy.slice_len].to_vec();
+        params.encrypt(payload_off, &mut slice)?;
+        dev.write_at(req.header.data_offset + payload_off, &slice)?;
+
+        out.blocks_restored += 1;
+        out.bytes_restored += copy.slice_len as u64;
+        progress(&SectorRestoreProgress {
+            blocks_done: out.blocks_restored,
+            blocks_total: total,
+            bytes_written: out.bytes_restored,
+        })?;
+    }
+
+    dev.flush()?;
+    drop(image);
+    out.duration = started.elapsed();
+    info!(
+        target = %device_path,
+        src_index,
+        blocks = out.blocks_restored,
+        bytes = out.bytes_restored,
+        cancelled = out.cancelled,
+        secs = out.duration.as_secs(),
+        "partition restored with its encryption intact"
+    );
+    Ok(out)
+}
+
