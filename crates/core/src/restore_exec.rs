@@ -30,9 +30,7 @@ use tracing::{error, info};
 use tracing::warn;
 
 use own_backup_common::cancel::CancelToken;
-#[cfg(target_os = "windows")]
-use own_backup_common::restore_plan::{RestoreMode, RestoreOp};
-use own_backup_common::restore_plan::RestorePlan;
+use own_backup_common::restore_plan::{RestoreMode, RestoreOp, RestorePlan};
 use own_backup_common::restore_state::{OpRecord, OpStatus, RestoreRunState, RunStatus};
 use own_backup_common::{OwnBackupError, Result};
 
@@ -42,7 +40,7 @@ use own_backup_common::{OwnBackupError, Result};
 /// that opens between "the user confirmed" and "the first byte was written"
 /// should see the run, not an empty screen.
 pub fn initial_state(plan: &RestorePlan) -> RestoreRunState {
-    let ops = plan
+    let mut ops: Vec<OpRecord> = plan
         .ordered()
         .iter()
         .enumerate()
@@ -60,6 +58,34 @@ pub fn initial_state(plan: &RestorePlan) -> RestoreRunState {
             destroys_data: op.destroys_data(),
         })
         .collect();
+
+    // Verification is not part of the plan the user assembled — it is a
+    // consequence of the "проверять после восстановления" checkbox (D10). It
+    // still belongs in the queue, so the user sees up front that it will run
+    // and how long the run really is.
+    if plan.verify_after {
+        for op in plan.ordered() {
+            let RestoreOp::RestorePartition { dst, mode: RestoreMode::Sectors, src_index, .. } = op
+            else {
+                continue;
+            };
+            ops.push(OpRecord {
+                index: ops.len(),
+                kind: "verify_sectors".into(),
+                title: format!("Проверить записанное в разделе {} (из раздела {src_index})", dst.index),
+                part_index: Some(dst.index),
+                status: OpStatus::Pending,
+                percent: 0,
+                bytes_done: 0,
+                bytes_total: dst.size,
+                message: String::new(),
+                cancellable: true,
+                // Reading back destroys nothing; cancelling only means the
+                // check did not finish.
+                destroys_data: false,
+            });
+        }
+    }
 
     RestoreRunState {
         plan_id: plan.id,
@@ -172,6 +198,11 @@ pub fn execute_plan(
         s.update_properties()?;
         s.bring_online()?;
     }
+    drop(session);
+
+    if plan.verify_after {
+        run_verification(plan, &sidecar, &ordered, &mut state, cancel, &mut on_update);
+    }
 
     state.current = None;
     state.cancellable = false;
@@ -184,6 +215,113 @@ pub fn execute_plan(
     info!(plan = %plan.id, ops = state.ops.len(), "restore plan finished");
     on_update(&state);
     Ok(state)
+}
+
+/// Read back every sector-restored partition and check it against the copy
+/// (R9, D10).
+///
+/// A verification failure does **not** mark the run failed: the restore itself
+/// finished, and what went wrong is a different fact. It is reported as the
+/// verify operation failing, with the follow-up spelling out which of the two
+/// possible causes it was — a damaged backup, or a target that did not take the
+/// write. Those call for different actions, so they are never merged.
+#[cfg(target_os = "windows")]
+fn run_verification(
+    plan: &RestorePlan,
+    sidecar: &own_backup_backup::sidecar::Sidecar,
+    ordered: &[RestoreOp],
+    state: &mut RestoreRunState,
+    cancel: &CancelToken,
+    on_update: &mut impl FnMut(&RestoreRunState),
+) {
+    use own_backup_backup::restore_win::{verify_partition_sectors, PartitionTarget};
+
+    let sector_ops: Vec<&RestoreOp> = ordered
+        .iter()
+        .filter(|op| matches!(op, RestoreOp::RestorePartition { mode: RestoreMode::Sectors, .. }))
+        .collect();
+    let first = ordered.len();
+
+    for (n, op) in sector_ops.iter().enumerate() {
+        let RestoreOp::RestorePartition { src_index, dst, .. } = op else { continue };
+        let index = first + n;
+        if index >= state.ops.len() {
+            break;
+        }
+        if cancel.is_cancelled() {
+            state.ops[index].status = OpStatus::Skipped;
+            continue;
+        }
+
+        state.current = Some(index);
+        state.ops[index].status = OpStatus::Running;
+        state.cancellable = true;
+        on_update(state);
+
+        let target =
+            PartitionTarget { disk_number: plan.target_disk, offset: dst.offset, size: dst.size };
+        let result = verify_partition_sectors(
+            &plan.image_path,
+            sidecar,
+            *src_index,
+            target,
+            cancel,
+            |pr| {
+                let percent = if pr.blocks_total > 0 {
+                    (pr.blocks_done * 100 / pr.blocks_total) as u32
+                } else {
+                    0
+                };
+                state.ops[index].percent = percent;
+                state.ops[index].bytes_done = pr.bytes_written;
+                on_update(state);
+                Ok(())
+            },
+        );
+
+        match result {
+            Ok(v) if v.ok() => {
+                state.ops[index].status = OpStatus::Done;
+                state.ops[index].percent = 100;
+                state.ops[index].message =
+                    format!("Сверено блоков: {}", v.blocks_checked);
+                info!(part = dst.index, blocks = v.blocks_checked, "verification passed");
+            }
+            Ok(v) if v.cancelled => {
+                state.ops[index].status = OpStatus::Skipped;
+                state.ops[index].message = "Проверка прервана.".into();
+            }
+            Ok(v) => {
+                state.ops[index].status = OpStatus::Failed;
+                let mut parts = Vec::new();
+                if !v.image_corrupt.is_empty() {
+                    parts.push(format!(
+                        "в самой копии повреждено блоков: {} (восстановление честно записало то,                          что в ней лежит)",
+                        v.image_corrupt.len()
+                    ));
+                }
+                if !v.mismatches.is_empty() {
+                    parts.push(format!(
+                        "не совпало блоков на диске: {} — запись не легла (проверьте накопитель)",
+                        v.mismatches.len()
+                    ));
+                }
+                let text = parts.join("; ");
+                error!(part = dst.index, %text, "verification failed");
+                state.ops[index].message = text.clone();
+                state.follow_ups.push(format!("Раздел {}: {text}.", dst.index));
+            }
+            Err(e) => {
+                state.ops[index].status = OpStatus::Failed;
+                state.ops[index].message = e.to_string();
+                state
+                    .follow_ups
+                    .push(format!("Раздел {}: проверку выполнить не удалось: {e}", dst.index));
+            }
+        }
+        on_update(state);
+    }
+    state.current = None;
 }
 
 /// Anything an operation wants to tell the user afterwards.
@@ -527,6 +665,49 @@ mod tests {
         state.ops[0].status = OpStatus::Failed;
         add_failure_follow_ups(&mut state);
         assert!(state.follow_ups[0].contains(": 1"), "{:?}", state.follow_ups);
+    }
+
+    #[test]
+    fn verification_is_queued_only_when_asked_for() {
+        let restore = RestoreOp::RestorePartition {
+            src_index: 1,
+            dst: part(),
+            mode: RestoreMode::Sectors,
+            wipe_free_space: false,
+        };
+        let mut plan = RestorePlan::new(
+            1,
+            "/tmp/img.vhdx".into(),
+            vec![RestoreOp::WritePartitionTable { table: table() }, restore],
+        );
+        assert_eq!(initial_state(&plan).ops.len(), 2);
+
+        plan.verify_after = true;
+        let state = initial_state(&plan);
+        assert_eq!(state.ops.len(), 3, "one verify op per sector restore");
+        assert_eq!(state.ops[2].kind, "verify_sectors");
+        // Reading back destroys nothing, so cancelling it costs the user only
+        // the check.
+        assert!(!state.ops[2].destroys_data);
+        assert!(state.ops[2].cancellable);
+    }
+
+    #[test]
+    fn a_file_mode_restore_gets_no_verify_op() {
+        // File-by-file verification compares counts and sizes, not blocks —
+        // a different check, and not this one (R4b).
+        let mut plan = RestorePlan::new(
+            1,
+            "/tmp/img.vhdx".into(),
+            vec![RestoreOp::RestorePartition {
+                src_index: 1,
+                dst: part(),
+                mode: RestoreMode::Files,
+                wipe_free_space: false,
+            }],
+        );
+        plan.verify_after = true;
+        assert_eq!(initial_state(&plan).ops.len(), 1);
     }
 
     #[test]

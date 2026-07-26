@@ -267,3 +267,105 @@ fn wipe_gaps(
     debug!(bytes = wiped, "free space between restored blocks zeroed");
     Ok(wiped)
 }
+
+// ---------------------------------------------------------------------------
+// Verification after a sector restore (R9, D10)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Default)]
+pub struct VerifySummary {
+    pub blocks_checked: u64,
+    pub bytes_checked: u64,
+    /// Block numbers that did not match. Kept rather than counted: "block
+    /// 41983 differs" is something a user can act on, "3 blocks differ" is not.
+    pub mismatches: Vec<u64>,
+    /// Blocks whose stored checksum did not match the image itself — the copy
+    /// is damaged, and the restore faithfully wrote damaged data.
+    pub image_corrupt: Vec<u64>,
+    pub cancelled: bool,
+}
+
+impl VerifySummary {
+    pub fn ok(&self) -> bool {
+        self.mismatches.is_empty() && self.image_corrupt.is_empty() && !self.cancelled
+    }
+}
+
+/// Read back what [`restore_partition_sectors`] wrote and check it.
+///
+/// Two different failures are worth telling apart, so both are checked:
+///
+/// - the block read from the *image* does not match its stored checksum → the
+///   backup itself is damaged, and the restore dutifully wrote damaged data;
+/// - the image block is fine but the *target* does not match it → the write did
+///   not land (a failing disk, a driver that lied about flushing).
+///
+/// Comparing the target against the image directly, rather than recomputing a
+/// checksum over it, is what makes a partial block checkable: only a slice of
+/// the first and last block belongs to the partition, and a checksum over a
+/// slice cannot be compared with one computed over the whole block.
+pub fn verify_partition_sectors(
+    image_path: &Path,
+    sidecar: &Sidecar,
+    src_index: u32,
+    target: PartitionTarget,
+    cancel: &CancelToken,
+    mut progress: impl FnMut(&SectorRestoreProgress) -> Result<()>,
+) -> Result<VerifySummary> {
+    let started = Instant::now();
+    let block_size = sidecar.manifest.block_size as u64;
+    let image_len = sidecar.manifest.source_disk.size_bytes;
+    let data_offset = sidecar.info.volume_data_offset;
+    let window = source_window_for(sidecar, src_index)?;
+
+    let device_path = target.device_path();
+    let mut dev = WinRawDevice::open_read(&device_path)?;
+    let mut image = ImageReadSource::open(image_path, &sidecar.info.container)?;
+
+    let mut out = VerifySummary::default();
+    let total = sidecar.checksums.len() as u64;
+
+    for entry in &sidecar.checksums {
+        if cancel.is_cancelled() {
+            out.cancelled = true;
+            break;
+        }
+        let Some(copy) = plan_block_copy(entry.block_number, block_size, image_len, data_offset, window)
+        else {
+            continue;
+        };
+
+        let mut from_image = vec![0u8; copy.block_len];
+        image.read_at(copy.image_offset, &mut from_image)?;
+        if compute_block_checksum(&from_image) != entry.checksum {
+            out.image_corrupt.push(entry.block_number);
+            continue; // no point comparing the target against a bad reference
+        }
+
+        let mut from_disk = vec![0u8; copy.slice_len];
+        dev.read_at(copy.dst_offset, &mut from_disk)?;
+        if from_disk != from_image[copy.slice_start..copy.slice_start + copy.slice_len] {
+            out.mismatches.push(entry.block_number);
+        }
+
+        out.blocks_checked += 1;
+        out.bytes_checked += copy.slice_len as u64;
+        progress(&SectorRestoreProgress {
+            blocks_done: out.blocks_checked,
+            blocks_total: total,
+            bytes_written: out.bytes_checked,
+        })?;
+    }
+
+    info!(
+        target = %device_path,
+        src_index,
+        blocks = out.blocks_checked,
+        mismatches = out.mismatches.len(),
+        image_corrupt = out.image_corrupt.len(),
+        cancelled = out.cancelled,
+        secs = started.elapsed().as_secs(),
+        "restore verified"
+    );
+    Ok(out)
+}
