@@ -574,7 +574,7 @@ mod tests {
             job_id,
             backup_type,
             parent_set_id: parent,
-            file_path: "/backups/test.obk".into(),
+            file_path: "/backups/test.vhdx".into(),
             file_size: None,
             source_size: 1_000_000,
             block_count: 100,

@@ -55,9 +55,6 @@ enum Commands {
     /// Detach a mounted VHDX backup image
     Unmount(commands::unmount::UnmountArgs),
 
-    /// Validate a legacy .obk backup file
-    Validate(commands::validate::ValidateArgs),
-
     /// List backup jobs and sets
     ListBackups(commands::list_backups::ListBackupsArgs),
 
@@ -126,7 +123,6 @@ async fn main() {
         Commands::DevioServe(args) => commands::devio_serve::run(args).await,
         Commands::Driver(args) => commands::driver::run(args).await,
         Commands::Unmount(args) => commands::unmount::run(args).await,
-        Commands::Validate(args) => commands::validate::run(args).await,
         Commands::ListBackups(args) => commands::list_backups::run(args).await,
         Commands::Jobs(args) => commands::jobs::run(args).await,
         Commands::Service(args) => commands::service::run(args).await,

@@ -162,7 +162,7 @@ mod tests {
             job_id,
             backup_type: BackupType::Full,
             parent_set_id: None,
-            file_path: format!("/backups/{}.obk", Uuid::new_v4()),
+            file_path: format!("/backups/{}.vhdx", Uuid::new_v4()),
             file_size: Some(1000),
             source_size: 10000,
             block_count: 10,

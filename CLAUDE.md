@@ -41,8 +41,11 @@ tested on a Windows host — cross-compilation validates compilation only.
   directly (`fat_exclusions.rs`).
 - Incremental/differential = differencing VHDX (AVHDX chains); consolidation via
   `MergeVirtualDisk`.
-- The legacy `.obk` format (zstd + AES-256-GCM + Argon2id) is kept as a future
-  **archival** export format (phase 8) — do not delete that code.
+- The legacy `.obk` format (zstd + AES-256-GCM + Argon2id) was **deleted**
+  (decision 2026-07-26, D8 in `.ai/restore-designer-plan_2026-07-26.md`): it had
+  no writer left in any live path and its dead reader confused the restore work.
+  `ImageManifest` (`common/src/image.rs`) survived it and is now the sidecar's
+  manifest. Do not resurrect the container format.
 
 ## Architecture
 
@@ -50,9 +53,9 @@ Cargo workspace with crates:
 - `common` — shared types, error, image/manifest structs, config
 - `inventory` — disk enumeration (WMI via wmic/PowerShell on Windows, mock for tests)
 - `snapshot` — snapshot providers (VSS on Windows — stub pending phase 2, mock for tests)
-- `backup` — block pipeline, used-sector maps, VHDX handling, checksums; plus
-  archival zstd/AES code (frozen)
-- `restore` — block writer, restore pipeline, validation
+- `backup` — block pipeline, used-sector maps, VHDX/qcow2 handling, checksums,
+  exclusion scanners, LUKS/BitLocker
+- `restore` — restore-target guards (system-disk protection)
 - `metadata` — SQLite DB for backup jobs, sets, retention, activity log
 - `scheduler` — cron-based job scheduling (wired into service in phase 4)
 - `service` — Windows Service + gRPC server (tonic)

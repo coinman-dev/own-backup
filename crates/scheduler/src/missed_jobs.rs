@@ -128,7 +128,7 @@ mod tests {
             job_id: job.id,
             backup_type: BackupType::Full,
             parent_set_id: None,
-            file_path: "/backups/test.obk".into(),
+            file_path: "/backups/test.vhdx".into(),
             file_size: Some(100),
             source_size: 10000,
             block_count: 10,

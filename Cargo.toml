@@ -54,10 +54,10 @@ prost-types = "0.13"
 
 # Compression
 zstd = "0.13"
-
-# Encryption
 aes-gcm = "0.10"
 argon2 = "0.5"
+
+# Encryption
 # Volume decryption (LUKS): AES-XTS + LUKS KDFs
 aes = "0.8"
 xts-mode = "0.5"

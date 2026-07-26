@@ -3,7 +3,7 @@
 //! VHDX has no per-block checksums and no room for our metadata, so every
 //! image gets a sidecar file carrying:
 //! - the JSON manifest (source disk layout, job parameters, chain links) —
-//!   reuses [`ImageManifest`] from the `.obk` era;
+//!   reuses [`ImageManifest`], which outlived the retired `.obk` container;
 //! - xxHash64 checksums of every backed-up block, for `verify`.
 //!
 //! File layout (all integers little-endian):
@@ -323,7 +323,7 @@ pub fn write_sidecar_v2_full_to<W: Write>(
     Ok(())
 }
 
-/// Maximum accepted JSON header size (defensive cap, mirrors .obk reader).
+/// Maximum accepted JSON header size (defensive cap against a corrupt length).
 const MAX_JSON_LEN: u32 = 100 * 1024 * 1024;
 
 /// Read a sidecar file from `path`.

@@ -9,6 +9,7 @@ own-backup-common = { workspace = true }
 own-backup-snapshot = { workspace = true }
 own-backup-inventory = { workspace = true }
 zstd = { workspace = true }
+# aes-gcm: secrets.rs (secret storage); argon2: luks.rs (LUKS2 key derivation)
 aes-gcm = { workspace = true }
 argon2 = { workspace = true }
 aes = { workspace = true }

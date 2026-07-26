@@ -11,5 +11,4 @@ pub mod restore;
 pub mod restore_disk;
 pub mod service;
 pub mod unmount;
-pub mod validate;
 pub mod verify;

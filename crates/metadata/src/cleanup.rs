@@ -155,7 +155,7 @@ mod tests {
         };
         insert_job(&conn, &job).unwrap();
 
-        let backup_file = dir.path().join("old.obk");
+        let backup_file = dir.path().join("old.vhdx");
         std::fs::write(&backup_file, b"fake backup data").unwrap();
 
         let old_set = BackupSet {
@@ -186,7 +186,7 @@ mod tests {
         .unwrap();
 
         // Recent set to satisfy min_keep_count
-        let new_set_path = dir.path().join("new.obk");
+        let new_set_path = dir.path().join("new.vhdx");
         std::fs::write(&new_set_path, b"new backup").unwrap();
         let new_set = BackupSet {
             id: Uuid::new_v4(),
@@ -255,7 +255,7 @@ mod tests {
         insert_job(&conn, &job).unwrap();
 
         // A file path that is outside the target directory
-        let outside_path = "/tmp/definitely_not_in_target.obk";
+        let outside_path = "/tmp/definitely_not_in_target.vhdx";
         // Create the file so canonicalize won't fail due to missing file
         std::fs::write(outside_path, b"important system file").unwrap();
 
@@ -287,7 +287,7 @@ mod tests {
         .unwrap();
 
         // Add recent set to satisfy min_keep_count
-        let legit_file = dir.path().join("legit.obk");
+        let legit_file = dir.path().join("legit.vhdx");
         std::fs::write(&legit_file, b"legit").unwrap();
         let legit_set = BackupSet {
             id: Uuid::new_v4(),

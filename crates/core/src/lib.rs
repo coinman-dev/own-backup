@@ -182,7 +182,6 @@ pub fn default_exclusions() -> Vec<String> {
         // Our own image files, in case the destination lives on the source.
         "*.vhdx",
         "*.avhdx",
-        "*.obk",
         "*.obkm",
     ]
     .iter()
@@ -222,7 +221,6 @@ pub fn default_linux_exclusions() -> Vec<String> {
         "*.vhdx",
         "*.avhdx",
         "*.qcow2",
-        "*.obk",
         "*.obkm",
     ]
     .iter()
