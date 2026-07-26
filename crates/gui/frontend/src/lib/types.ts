@@ -399,3 +399,102 @@ export interface JobProgress {
   /** Label of the current volume, e.g. "C: Windows". */
   volume?: string;
 }
+
+// ---------------------------------------------------------------------------
+// Restore plan (mirrors common::restore_plan / common::restore_check)
+// ---------------------------------------------------------------------------
+
+export type PartitionScheme = 'gpt' | 'mbr';
+
+export type PartitionKind =
+  | { scheme: 'gpt'; type_guid: string; part_guid: string; attributes: number; name: string }
+  | { scheme: 'mbr'; type_byte: number; bootable: boolean; logical: boolean };
+
+export interface PartitionSpec {
+  index: number;
+  first_lba: number;
+  /** Inclusive — the same convention the GPT itself uses. */
+  last_lba: number;
+  kind: PartitionKind;
+}
+
+export interface PartitionTableSpec {
+  scheme: PartitionScheme;
+  sector_size: number;
+  disk_size_bytes: number;
+  /** GPT disk GUID or MBR signature; empty means "generate one". */
+  disk_id: string;
+  entries: PartitionSpec[];
+}
+
+/** Only what we can actually create. "Не форматировать" is the absence of a
+ *  `format` operation, not a value here. */
+export type FormatFs = 'ntfs' | 'fat32' | 'exfat' | 'refs';
+export type RestoreMode = 'sectors' | 'files';
+
+export interface PartRef {
+  index: number;
+  offset: number;
+  size: number;
+}
+
+export type RestoreOp =
+  | { op: 'write_partition_table'; table: PartitionTableSpec }
+  | { op: 'format'; part: PartRef; fs: FormatFs; label: string; quick: boolean }
+  | {
+      op: 'restore_partition';
+      src_index: number;
+      dst: PartRef;
+      mode: RestoreMode;
+      wipe_free_space: boolean;
+    }
+  | { op: 'extend_filesystem'; part: PartRef }
+  | { op: 'assign_letter'; part: PartRef; letter: string }
+  | { op: 'finalize_boot'; windows_part: PartRef; esp: PartRef | null; uefi: boolean };
+
+export interface RestorePlan {
+  id: string;
+  target_disk: number;
+  image_path: string;
+  verify_after: boolean;
+  ops: RestoreOp[];
+}
+
+export type CheckLevel = 'info' | 'warning' | 'error';
+
+export interface CheckResult {
+  level: CheckLevel;
+  /** Stable slug, so behaviour can key off a finding without matching prose. */
+  code: string;
+  message: string;
+  part_index: number | null;
+}
+
+export interface LetterChange {
+  part_index: number;
+  requested: string;
+  assigned: string | null;
+}
+
+/** Facts the pure checks cannot discover for themselves. The service fills in
+ *  anything left empty — it can see the machine, the GUI cannot. */
+export interface CheckContext {
+  source_sector_size: number;
+  sources: {
+    index: number;
+    size_bytes: number;
+    used_bytes: number;
+    filesystem: string;
+    label: string;
+  }[];
+  taken_letters: string[];
+  target_is_system_disk: boolean;
+}
+
+export interface DryRunResult {
+  /** The plan **as checked**: the dry run resolves drive-letter conflicts by
+   *  editing it, so this is the one to apply — not the one that was sent. */
+  plan: RestorePlan;
+  results: CheckResult[];
+  letter_changes: LetterChange[];
+}

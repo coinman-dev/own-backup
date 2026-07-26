@@ -9,7 +9,10 @@
   import InfoModal from '../components/InfoModal.svelte';
   import DiskMap from '../components/DiskMap.svelte';
   import type { MapSlot } from '../components/DiskMap.svelte';
-  import type { Job, DiskInfo, PartitionInfo, ImageInfo } from '../lib/types';
+  import type {
+    Job, DiskInfo, PartitionInfo, ImageInfo,
+    RestorePlan, RestoreOp, PartitionSpec, PartRef, FormatFs, CheckContext, CheckResult, LetterChange,
+  } from '../lib/types';
 
   interface Props {
     job: Job;
@@ -257,6 +260,16 @@
     quickFormat: boolean;
   } | null>(null);
   let opsOpen = $state(false);
+  /** Findings from the last dry run, shown above the queue. */
+  let checks = $state<CheckResult[]>([]);
+  let letterChanges = $state<LetterChange[]>([]);
+  let checking = $state(false);
+  let checkError: string | null = $state(null);
+  /** D16 — off by default: a sector restore writes only the used blocks, so old
+   *  data physically survives in the gaps unless this is on. */
+  let wipeFreeSpace = $state(false);
+  /** D10 — verify what was written once the plan finishes. */
+  let verifyAfter = $state(false);
   /** Extra attributes of hand-created partitions, for the operations queue. */
   let newPartMeta = $state(
     new Map<number, { gptType: string; mbrKind: string; active: boolean; letter: string; quickFormat: boolean }>(),
@@ -731,6 +744,198 @@
     }
     return ops;
   });
+
+  // --- Building the typed plan the backend checks ---------------------------
+  // The list above is prose for the user; this is the same intent as data. The
+  // backend validates *this*, so the two must describe the same thing — hence
+  // both are derived from the identical state (curParts / mappings / previewIdx).
+
+  /** MBR partition type byte, picked from the filesystem the partition holds. */
+  function mbrTypeByte(p: PartitionInfo): number {
+    switch ((p.filesystem || '').toLowerCase()) {
+      case 'fat32':
+        return 0x0c; // FAT32 with LBA addressing
+      case 'ext4':
+      case 'xfs':
+      case 'btrfs':
+        return 0x83; // Linux
+      default:
+        return 0x07; // NTFS / exFAT / IFS
+    }
+  }
+
+  /** The filesystem name as `FormatFs` spells it, or null when we cannot
+   *  create it (Linux filesystems — Windows has no mkfs for them). */
+  function formatFsOf(fs: string): FormatFs | null {
+    switch ((fs || '').toLowerCase()) {
+      case 'ntfs':
+        return 'ntfs';
+      case 'fat32':
+        return 'fat32';
+      case 'exfat':
+        return 'exfat';
+      case 'refs':
+        return 'refs';
+      default:
+        return null;
+    }
+  }
+
+  /** Assemble the plan. Returns null when no target disk is chosen. */
+  function buildPlan(): RestorePlan | null {
+    const d = targetDisk;
+    if (!d) return null;
+    const sector = d.sector_size_logical || 512;
+    const cur = curParts;
+
+    // The table is built first and the operations' byte offsets are derived
+    // FROM it, so the two can never disagree — the backend cross-checks them
+    // and a mismatch is an error, not a rounding curiosity.
+    const entries: PartitionSpec[] = cur.map((p) => {
+      const first = Math.floor(p.offset_bytes / sector);
+      const last = Math.floor((p.offset_bytes + p.size_bytes) / sector) - 1;
+      const meta = newPartMeta.get(p.index);
+      return {
+        index: p.index,
+        first_lba: first,
+        last_lba: last,
+        kind: isGpt
+          ? {
+              scheme: 'gpt',
+              type_guid: p.gpt_type_guid || meta?.gptType || GPT_TYPES[0].guid,
+              // Kept verbatim for a partition that came out of the copy: the BCD
+              // and UEFI reference partitions by this GUID. Empty for a new one,
+              // and the writer then generates a fresh value.
+              part_guid: p.gpt_partition_guid || '',
+              attributes: 0,
+              name: p.volume_label || '',
+            }
+          : {
+              scheme: 'mbr',
+              type_byte: mbrTypeByte(p),
+              bootable: meta?.active ?? p.is_boot,
+              logical: meta?.mbrKind === 'logical',
+            },
+      };
+    });
+
+    const refOf = (index: number): PartRef | null => {
+      const e = entries.find((x) => x.index === index);
+      if (!e) return null;
+      return {
+        index,
+        offset: e.first_lba * sector,
+        size: (e.last_lba + 1 - e.first_lba) * sector,
+      };
+    };
+
+    const ops: RestoreOp[] = [
+      {
+        op: 'write_partition_table',
+        table: {
+          scheme: isGpt ? 'gpt' : 'mbr',
+          sector_size: sector,
+          disk_size_bytes: d.size_bytes,
+          // Never inherited from the source: two disks carrying the same GPT
+          // GUID make Windows take one of them offline.
+          disk_id: '',
+          entries,
+        },
+      },
+    ];
+
+    // Whole-disk mode: previewIdx[k] is the target partition created for
+    // srcBackupParts[k] — they are placed in order, so the index lines up.
+    const pairs: { src: number; dst: number }[] = wholeDiskRestore
+      ? previewIdx.map((dst, k) => ({ src: srcBackupParts[k]?.index ?? 0, dst }))
+      : mappings;
+
+    for (const m of pairs) {
+      const dst = refOf(m.dst);
+      const sp = srcDisk?.partitions.find((x) => x.index === m.src);
+      if (!dst || !sp) continue;
+      ops.push({
+        op: 'restore_partition',
+        src_index: m.src,
+        dst,
+        mode: 'sectors',
+        wipe_free_space: wipeFreeSpace,
+      });
+      // A larger target leaves a tail the filesystem does not know about.
+      // Windows can only claim it automatically for NTFS (D2).
+      if (dst.size > sp.size_bytes && (sp.filesystem || '').toLowerCase() === 'ntfs') {
+        ops.push({ op: 'extend_filesystem', part: dst });
+      }
+    }
+
+    const receivesData = new Set(pairs.map((m) => m.dst));
+    for (const p of cur) {
+      const meta = newPartMeta.get(p.index);
+      if (!meta) continue; // not a hand-created partition
+      const ref = refOf(p.index);
+      if (!ref) continue;
+      // A partition that is about to receive a sector restore must NOT be
+      // formatted: formatting runs later in the fixed order and would erase
+      // exactly what was written. The backend refuses such a plan outright.
+      const fs = receivesData.has(p.index) ? null : formatFsOf(p.filesystem);
+      if (fs) {
+        ops.push({
+          op: 'format',
+          part: ref,
+          fs,
+          label: p.volume_label || '',
+          quick: meta.quickFormat,
+        });
+      }
+      if (meta.letter) {
+        ops.push({ op: 'assign_letter', part: ref, letter: meta.letter });
+      }
+    }
+
+    // Only a bootable whole-disk copy gets its boot chain rebuilt, and only
+    // when both halves are actually present.
+    if (wholeDiskRestore && previewIdx.length > 0) {
+      const espIdx = srcBackupParts.findIndex(
+        (p) => (p.gpt_type_guid || '').toUpperCase() === GPT_TYPES[1].guid,
+      );
+      const winIdx = srcBackupParts.findIndex(
+        (p) => p.is_system || (p.filesystem || '').toLowerCase() === 'ntfs',
+      );
+      const win = winIdx >= 0 ? refOf(previewIdx[winIdx]) : null;
+      const esp = espIdx >= 0 ? refOf(previewIdx[espIdx]) : null;
+      if (win) {
+        ops.push({ op: 'finalize_boot', windows_part: win, esp, uefi: isGpt });
+      }
+    }
+
+    return {
+      id: crypto.randomUUID(),
+      target_disk: diskNumber(d),
+      image_path: activeInfo?.image_path ?? lastRun?.image_path ?? '',
+      verify_after: verifyAfter,
+      ops,
+    };
+  }
+
+  /** What the pure checks cannot work out for themselves. Anything left blank
+   *  the service fills in — it can see the machine, this window cannot. */
+  function buildCheckContext(): CheckContext {
+    return {
+      source_sector_size: srcSector,
+      sources: (srcDisk?.partitions ?? [])
+        .filter((p) => backedUpParts.includes(p.index))
+        .map((p) => ({
+          index: p.index,
+          size_bytes: p.size_bytes,
+          used_bytes: p.used_bytes,
+          filesystem: p.filesystem,
+          label: p.volume_label || '',
+        })),
+      taken_letters: [],
+      target_is_system_disk: false,
+    };
+  }
+
   function clickTargetPart(p: PartitionInfo) {
     if (wholeDiskRestore) {
       fitMsg = 'В режиме «загрузочный» выберите свободное место, а не существующий раздел.';
@@ -842,9 +1047,10 @@
 
   const elapsedMs = $derived(running && startMs ? nowMs - startMs : 0);
 
-  // Design stage: "Восстановить" only shows the queue of operations that WOULD
-  // run. Nothing is written until the restore logic is wired up.
-  function askConfirm() {
+  // "Восстановить" runs the DRY RUN and shows what it found alongside the
+  // queue. Applying the plan is destructive and stays deliberately unwired —
+  // nothing on this screen can write to a disk.
+  async function askConfirm() {
     formError = null;
     if (!targetDiskId) {
       fitMsg = 'Шаг 1: выберите диск, на который восстановить.';
@@ -860,8 +1066,29 @@
       fitMsg = `Загрузочную копию нельзя восстановить на диск с сектором ${dstSector} Б (копия снята с ${srcSector} Б).`;
       return;
     }
+    checks = [];
+    letterChanges = [];
+    checkError = null;
     opsOpen = true;
+    const plan = buildPlan();
+    if (!plan) return;
+    checking = true;
+    try {
+      const res = await api.dryRunRestorePlan(plan, buildCheckContext());
+      checks = res.results;
+      letterChanges = res.letter_changes;
+    } catch (e) {
+      // The checks live in the service; without it we can still show the queue,
+      // but we must not imply the plan was validated.
+      checkError = String(e);
+    } finally {
+      checking = false;
+    }
   }
+
+  const checkErrors = $derived(checks.filter((c) => c.level === 'error'));
+  const checkWarnings = $derived(checks.filter((c) => c.level === 'warning'));
+  const checkInfos = $derived(checks.filter((c) => c.level === 'info'));
 
   async function doRestore() {
     if (confirmText !== 'ДА') return;
@@ -1176,11 +1403,59 @@
 {#if opsOpen}
   <div class="overlay">
     <div class="dialog wide">
-      <div class="dialog-title">Будут выполнены следующие операции</div>
+      <div class="dialog-title">Проверка плана восстановления</div>
+
+      {#if checking}
+        <div class="chk-line"><span class="spinner"></span> Проверяем план…</div>
+      {:else if checkError}
+        <div class="chk err">
+          <b>Проверить план не удалось</b>
+          <div>{checkError}</div>
+          <div class="chk-note">Ниже — очередь операций, но она не проверена.</div>
+        </div>
+      {:else if checks.length === 0}
+        <div class="chk ok">Проверки не нашли препятствий.</div>
+      {:else}
+        {#each checkErrors as c}
+          <div class="chk err">{c.message}</div>
+        {/each}
+        {#each checkWarnings as c}
+          <div class="chk warn">{c.message}</div>
+        {/each}
+        {#each checkInfos as c}
+          <div class="chk info">{c.message}</div>
+        {/each}
+      {/if}
+
+      {#each letterChanges as lc}
+        <div class="chk info">
+          Раздел {lc.part_index}: буква {lc.requested}: занята —
+          {lc.assigned ? `назначим ${lc.assigned}:` : 'свободных букв не осталось'}.
+        </div>
+      {/each}
+
+      <div class="dialog-title sub">Будут выполнены следующие операции</div>
       <ol class="ops">
         {#each operations as op}<li>{op}</li>{/each}
       </ol>
-      <p class="ops-note">Пока это только предпросмотр — восстановление ещё не запускается.</p>
+
+      <label class="opt">
+        <input type="checkbox" bind:checked={wipeFreeSpace} />
+        <span>
+          Затирать свободное место
+          <em>копируются только занятые блоки, поэтому в промежутках физически остаются
+            прежние данные — файловая система их не видит</em>
+        </span>
+      </label>
+      <label class="opt">
+        <input type="checkbox" bind:checked={verifyAfter} />
+        <span>Проверять записанное после восстановления</span>
+      </label>
+
+      <p class="ops-note">
+        Восстановление отсюда пока не запускается: это проверка и предпросмотр, на диск
+        ничего не пишется.
+      </p>
       <div class="dialog-actions">
         <button class="btn ghost" onclick={() => (opsOpen = false)}>Закрыть</button>
       </div>
@@ -1276,6 +1551,17 @@
   .dialog.wide { width: 560px; }
   .ops { margin: 0 0 12px 18px; padding: 0; font-size: 13px; color: var(--head); line-height: 1.7; }
   .ops-note { font-size: 12px; color: var(--text-muted); }
+  .dialog-title.sub { margin-top: 16px; font-size: 13px; }
+  .chk-line { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--text-muted); padding: 6px 0 12px; }
+  .chk { font-size: 13px; line-height: 1.5; padding: 9px 12px; border-radius: 6px; margin-bottom: 8px; }
+  .chk-note { font-size: 12px; opacity: .8; margin-top: 4px; }
+  .chk.err { background: rgba(216,74,74,.1); border: 1px solid rgba(216,74,74,.35); color: #8c1d1d; }
+  .chk.warn { background: rgba(214,158,46,.12); border: 1px solid rgba(214,158,46,.4); color: #7a5a10; }
+  .chk.info { background: rgba(45,125,210,.08); border: 1px solid rgba(45,125,210,.28); color: var(--head); }
+  .chk.ok { background: rgba(56,161,105,.1); border: 1px solid rgba(56,161,105,.32); color: #205e3b; }
+  .opt { display: flex; align-items: flex-start; gap: 9px; font-size: 13px; color: var(--head); margin: 4px 0 10px; cursor: pointer; }
+  .opt input { width: auto; margin-top: 2px; flex: 0 0 auto; }
+  .opt em { display: block; font-style: normal; font-size: 12px; color: var(--text-muted); line-height: 1.45; margin-top: 2px; }
   .btn.primary-solid { background: var(--primary); color: #fff; }
   .fit-msg { margin-top: 10px; padding: 9px 14px; font-size: 13px; border-radius: 5px; background: var(--accent-soft); color: var(--head); }
   .fit-msg.bad { background: rgba(216,74,74,.1); color: #8c1d1d; font-weight: 600; }

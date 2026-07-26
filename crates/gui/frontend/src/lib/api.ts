@@ -10,6 +10,9 @@ import type {
   DecryptResult,
   DiskBackup,
   DiskRestoreSummary,
+  RestorePlan,
+  CheckContext,
+  DryRunResult,
   ServiceHealth,
   ServiceStatus,
   MountBackendStatus,
@@ -48,6 +51,12 @@ export const api = {
   restoreDiskNow: (manifestPath: string, targetDisk: number, force: boolean) =>
     invoke<DiskRestoreSummary>('restore_disk_now', { manifestPath, targetDisk, force }),
   cancelEngineOp: () => invoke<void>('cancel_engine_op'),
+
+  // --- restore plans (partition designer) ---
+  // Only the dry run is wired up: it validates and writes nothing. Applying a
+  // plan is destructive and stays deliberately unconnected for now.
+  dryRunRestorePlan: (plan: RestorePlan, context?: CheckContext) =>
+    invoke<DryRunResult>('dry_run_restore_plan', { plan, context }),
 
   // --- Mount prerequisites: AIM driver (Windows) / NBD+NTFS status (Linux) ---
   aimDriverStatus: () => invoke<MountBackendStatus>('aim_driver_status'),

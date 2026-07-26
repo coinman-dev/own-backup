@@ -132,7 +132,11 @@ pub struct PartitionTableSpec {
 pub enum FormatFs {
     Ntfs,
     Fat32,
+    // Spelled out rather than left to `rename_all`, which would turn these into
+    // "ex_fat" and "re_fs" — names no one would guess when reading the wire.
+    #[serde(rename = "exfat")]
     ExFat,
+    #[serde(rename = "refs")]
     ReFs,
 }
 
