@@ -114,10 +114,13 @@ fn taken_drive_letters() -> Vec<char> {
     }
 }
 
-/// Whether `disk` is the one the running OS boots from. The guard returns an
-/// error for exactly that case, so its failure *is* the answer (D13).
+/// Whether `disk` is the one the running OS boots from.
+///
+/// Informational now, not a refusal: what gets refused is a plan that touches
+/// the partitions that system is standing on (`protected_partitions`).
 fn is_system_disk(disk: u32) -> bool {
-    own_backup_restore::guard_target_disk(disk).is_err()
+    own_backup_restore::system_disk_number() == Some(disk)
+        && !own_backup_restore::is_boot_media()
 }
 
 /// Replace the plan's idea of the target disk's size with the device's own.
@@ -136,7 +139,7 @@ fn correct_disk_size(plan: &mut own_backup_common::restore_plan::RestorePlan) {
     #[cfg(target_os = "windows")]
     {
         use own_backup_common::restore_plan::RestoreOp;
-        let path = format!(r"\.\PhysicalDrive{}", plan.target_disk);
+        let path = format!(r"\\.\PhysicalDrive{}", plan.target_disk);
         let Ok(dev) = own_backup_backup::win_device::WinRawDevice::open_read(&path) else {
             return; // not reachable right now; the checks fall back to the plan's figure
         };
@@ -848,8 +851,15 @@ impl BackupService for BackupServiceImpl {
         if ctx.taken_letters.is_empty() {
             ctx.taken_letters = taken_drive_letters();
         }
+        // Being on the system disk is no longer a veto — a spare partition
+        // there is an ordinary target. What is refused is touching the
+        // partitions the running system stands on, and only the service can
+        // work out which those are.
         ctx.target_is_system_disk =
             ctx.target_is_system_disk || is_system_disk(p.plan.target_disk);
+        if ctx.protected_parts.is_empty() {
+            ctx.protected_parts = own_backup_restore::protected_partitions(p.plan.target_disk);
+        }
 
         // Resolving letters mutates the plan, so the caller gets the adjusted
         // plan back and applies *that* — otherwise the fix would be lost

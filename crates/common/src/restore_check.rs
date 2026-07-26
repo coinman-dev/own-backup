@@ -86,8 +86,10 @@ pub enum CheckCode {
     FormatAfterSectorRestore,
     /// UEFI boot finalisation without an EFI System Partition.
     MissingEsp,
-    /// The target is the disk the running OS boots from.
-    TargetIsSystemDisk,
+    /// A partition the running system is standing on would be overwritten.
+    TargetIsLiveSystemPartition,
+    /// The plan changes the layout of the disk the running OS boots from.
+    LiveSystemDiskLayout,
     /// MBR cannot address the requested geometry.
     MbrLimit,
     /// More than four primary partitions on an MBR disk.
@@ -192,9 +194,16 @@ pub struct CheckContext {
     pub sources: Vec<SourcePartition>,
     /// Drive letters currently in use on this machine.
     pub taken_letters: Vec<char>,
-    /// The target disk is the one the running OS boots from — restoring onto it
-    /// is refused outright; that job needs a Boot CD (D13).
+    /// The target disk is the one the running OS boots from. On its own this is
+    /// no longer a veto — a spare partition there is an ordinary target — but it
+    /// does change how the layout has to be applied.
     pub target_is_system_disk: bool,
+    /// Partitions on the target disk the running system is standing on: the
+    /// volume Windows runs from and the ESP it booted through. Overwriting one
+    /// of those stops the machine mid-write, so it is refused. Empty on boot
+    /// media, and empty when nothing could be determined.
+    #[serde(default)]
+    pub protected_parts: Vec<u32>,
     /// The target disk's partitions as they are now, so the checks can say what
     /// is about to be overwritten. Empty when the caller did not supply them.
     #[serde(default)]
@@ -275,20 +284,8 @@ fn next_free_letter(from: char, used: &[char]) -> Option<char> {
 pub fn check_plan(plan: &RestorePlan, ctx: &CheckContext) -> Vec<CheckResult> {
     let mut out = Vec::new();
 
-    if ctx.target_is_system_disk {
-        out.push(CheckResult::new(
-            CheckLevel::Error,
-            CheckCode::TargetIsSystemDisk,
-            None,
-            format!(
-                "Диск {} — системный: с него загружена работающая Windows, и переписать \
-                 его разметку на ходу невозможно. Загрузитесь с Boot CD и повторите.",
-                plan.target_disk
-            ),
-        ));
-    }
-
     let table = plan.table();
+    check_live_system(plan, table, ctx, &mut out);
     if let Some(t) = table {
         check_table(t, &mut out);
         check_sector_size(t, ctx, &mut out);
@@ -678,6 +675,84 @@ fn check_fit(src: &SourcePartition, dst: &PartRef, mode: RestoreMode, out: &mut 
     }
 }
 
+/// What the running system will not let go of.
+///
+/// The first version of this refused the whole disk Windows boots from. That is
+/// too blunt: putting a copy on a spare partition of that disk is an ordinary
+/// thing to do — it is how anyone installs a second system alongside an
+/// existing one. What genuinely cannot be touched is the volume Windows is
+/// running from and the ESP it booted through, and those are two specific
+/// partitions, not a whole disk.
+///
+/// So the veto moved down to the partition, and what is left at the disk level
+/// is a statement of fact: the layout of a live disk has to be applied through
+/// the partition manager rather than written behind its back.
+fn check_live_system(
+    plan: &RestorePlan,
+    table: Option<&PartitionTableSpec>,
+    ctx: &CheckContext,
+    out: &mut Vec<CheckResult>,
+) {
+    if ctx.protected_parts.is_empty() && !ctx.target_is_system_disk {
+        return;
+    }
+
+    // Everything the plan disturbs: partitions it writes into, and partitions
+    // that exist now and are absent from the new layout — those are deletions,
+    // and a deletion is as destructive as a write.
+    let mut touched: Vec<u32> = plan
+        .ops
+        .iter()
+        .filter_map(|op| match op {
+            RestoreOp::RestorePartition { dst, .. } => Some(dst.index),
+            RestoreOp::Format { part, .. } => Some(part.index),
+            _ => None,
+        })
+        .collect();
+    if let Some(t) = table {
+        for cur in &ctx.targets {
+            if !t.entries.iter().any(|e| e.index == cur.index) {
+                touched.push(cur.index);
+            }
+        }
+    }
+    touched.sort_unstable();
+    touched.dedup();
+
+    let hit: Vec<u32> =
+        touched.iter().copied().filter(|i| ctx.protected_parts.contains(i)).collect();
+    if !hit.is_empty() {
+        let list = hit.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
+        out.push(CheckResult::new(
+            CheckLevel::Error,
+            CheckCode::TargetIsLiveSystemPartition,
+            hit.first().copied(),
+            format!(
+                "На этом диске работает загруженная сейчас Windows, и план затрагивает \
+                 разделы, на которых она стоит: {list}. Переписать их на ходу невозможно — \
+                 система остановится посреди записи. Загрузитесь с Boot CD и повторите, \
+                 либо выберите другие разделы."
+            ),
+        ));
+        return; // the rest is noise next to this
+    }
+
+    if ctx.target_is_system_disk && table.is_some() {
+        out.push(CheckResult::new(
+            CheckLevel::Warning,
+            CheckCode::LiveSystemDiskLayout,
+            None,
+            format!(
+                "Диск {} — тот, с которого загружена работающая Windows. Разделы, на которых \
+                 она стоит, план не трогает, поэтому восстановление возможно: новая разметка \
+                 будет применена через диспетчер разделов Windows, как это делает «Управление \
+                 дисками». Затронутые тома будут отключены — закройте открытые в них файлы.",
+                plan.target_disk
+            ),
+        ));
+    }
+}
+
 /// Point out a filesystem chosen at partition creation that will not be
 /// created.
 ///
@@ -1001,6 +1076,7 @@ mod tests {
             sources,
             taken_letters: vec![],
             target_is_system_disk: false,
+            protected_parts: vec![],
             targets: vec![],
             requested_formats: vec![],
         }
@@ -1502,12 +1578,81 @@ mod tests {
     }
 
     #[test]
-    fn restoring_onto_the_system_disk_is_refused() {
-        let t = table(vec![entry(1, 1, 100)]);
+    fn overwriting_the_partition_windows_runs_from_is_refused() {
+        let t = table(vec![entry(1, 1, 200)]);
+        let p1 = part_ref(&t, 1);
+        let plan = plan_with(
+            t,
+            vec![RestoreOp::RestorePartition {
+                src_index: 1,
+                dst: p1,
+                mode: RestoreMode::Sectors,
+                wipe_free_space: false,
+                reencrypt: false,
+            }],
+        );
+        let mut c = ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ntfs)]);
+        c.target_is_system_disk = true;
+        c.protected_parts = vec![1];
+        let results = check_plan(&plan, &c);
+        assert!(errors(&results).contains(&CheckCode::TargetIsLiveSystemPartition), "{results:#?}");
+    }
+
+    #[test]
+    fn a_spare_partition_on_the_system_disk_is_allowed() {
+        // The case that mattered: Windows runs from partition 3, the copy goes
+        // into partition 8. Refusing the whole disk for that was too blunt.
+        let t = table(vec![entry(3, 1, 100), entry(8, 101, 200)]);
+        let p8 = part_ref(&t, 8);
+        let plan = plan_with(
+            t,
+            vec![RestoreOp::RestorePartition {
+                src_index: 1,
+                dst: p8,
+                mode: RestoreMode::Sectors,
+                wipe_free_space: false,
+                reencrypt: false,
+            }],
+        );
+        let mut c = ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ntfs)]);
+        c.target_is_system_disk = true;
+        c.protected_parts = vec![1, 3];
+        let results = check_plan(&plan, &c);
+        assert!(errors(&results).is_empty(), "{results:#?}");
+        assert!(codes(&results).contains(&CheckCode::LiveSystemDiskLayout));
+    }
+
+    #[test]
+    fn deleting_the_partition_windows_runs_from_is_refused_too() {
+        // It is not in any operation — it simply vanishes from the new layout,
+        // which is exactly as destructive as writing over it.
+        let t = table(vec![entry(8, 101, 200)]);
+        let plan = plan_with(t, vec![]);
         let mut c = ctx(vec![]);
         c.target_is_system_disk = true;
-        let results = check_plan(&plan_with(t, vec![]), &c);
-        assert!(errors(&results).contains(&CheckCode::TargetIsSystemDisk), "{results:#?}");
+        c.protected_parts = vec![3];
+        c.targets = vec![target(3, FileSystem::Ntfs, 40 * MIB, "Windows")];
+        let results = check_plan(&plan, &c);
+        assert!(errors(&results).contains(&CheckCode::TargetIsLiveSystemPartition), "{results:#?}");
+    }
+
+    #[test]
+    fn boot_media_protects_nothing() {
+        // In WinPE no partition here is running anything.
+        let t = table(vec![entry(1, 1, 200)]);
+        let p1 = part_ref(&t, 1);
+        let plan = plan_with(
+            t,
+            vec![RestoreOp::RestorePartition {
+                src_index: 1,
+                dst: p1,
+                mode: RestoreMode::Sectors,
+                wipe_free_space: false,
+                reencrypt: false,
+            }],
+        );
+        let c = ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ntfs)]);
+        assert!(errors(&check_plan(&plan, &c)).is_empty());
     }
 
     #[test]

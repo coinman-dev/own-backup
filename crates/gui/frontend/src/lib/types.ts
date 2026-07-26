@@ -506,7 +506,11 @@ export interface CheckContext {
     luks_header_available: boolean;
   }[];
   taken_letters: string[];
+  /** The target disk hosts the running Windows. Not a veto on its own — the
+   *  service fills in which partitions actually cannot be touched. */
   target_is_system_disk: boolean;
+  /** Partitions the running system stands on. Filled by the service. */
+  protected_parts: number[];
   /** The target disk's partitions as they are now, so the checks can say what
    *  the restore is about to overwrite. */
   targets: {

@@ -171,9 +171,24 @@ pub fn execute_plan(
     use own_backup_backup::disk_session_win::DiskSession;
     use own_backup_backup::engine_win::load_sidecar_of;
 
-    // Refuse the running system's own disk here too, not only in the checks:
-    // a plan can reach the service by a route that skipped the dry run.
-    own_backup_restore::guard_target_disk(plan.target_disk)?;
+    // The running system's own partitions are refused here too, not only in the
+    // checks: a plan can reach the service by a route that skipped the dry run.
+    // The *disk* is no longer refused — a spare partition on it is an ordinary
+    // target — only the partitions the system is standing on.
+    let protected = own_backup_restore::protected_partitions(plan.target_disk);
+    if !protected.is_empty() {
+        let touched = plan.touched_partitions();
+        let hit: Vec<u32> = touched.iter().copied().filter(|i| protected.contains(i)).collect();
+        if !hit.is_empty() {
+            return Err(OwnBackupError::RestoreIncompatible(format!(
+                "план затрагивает разделы, на которых стоит работающая Windows: {}. \
+                 Загрузитесь с Boot CD и повторите.",
+                hit.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", ")
+            )));
+        }
+    }
+    let live_system = own_backup_restore::system_disk_number() == Some(plan.target_disk)
+        && !own_backup_restore::is_boot_media();
 
     let sidecar = load_sidecar_of(&plan.image_path)?;
     let mut state = initial_state(plan);
@@ -184,14 +199,16 @@ pub fn execute_plan(
     // The session is only needed when the table is rewritten. Opening it always
     // would take the disk offline for a plan that merely assigns a drive letter.
     let mut session = if plan.touches_partition_table() {
-        let mut s = DiskSession::open(plan.target_disk)?;
+        let mut s = DiskSession::open(plan.target_disk, live_system)?;
         s.take_offline()?;
         Some(s)
     } else {
         None
     };
 
-    let mut online = session.is_none();
+    // A live system disk never went offline, so there is no transition to make
+    // and its volumes were never taken away.
+    let mut online = session.as_ref().map(|s| s.is_live_system()).unwrap_or(true);
 
     for (index, op) in ordered.iter().enumerate() {
         if cancel.is_cancelled() {
@@ -612,7 +629,10 @@ fn run_op(
                 wipe_free_space: *wipe_free_space,
                 // When we hold a session the disk is offline and there is
                 // nothing left to dismount.
-                disk_already_offline: session.is_some(),
+                // A live system disk stays online, so its volumes are still
+                // mounted and the targeted dismount guard is exactly what is
+                // needed. Only a disk we took offline has nothing left to guard.
+                disk_already_offline: session.as_ref().is_some_and(|s| !s.is_live_system()),
             };
             let report = |pr: &own_backup_backup::restore_win::SectorRestoreProgress,
                           on_progress: &mut dyn FnMut(u32, u64)| {

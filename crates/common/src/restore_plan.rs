@@ -424,6 +424,40 @@ impl RestorePlan {
         self.ordered().iter().position(|op| op.destroys_data())
     }
 
+    /// Every partition on the target the plan disturbs: those it writes into or
+    /// formats, plus — when it rewrites the table — those that exist today and
+    /// are absent from the new layout, which is a deletion and just as
+    /// destructive.
+    ///
+    /// `current` is the target disk's partition indices as they are now; pass an
+    /// empty slice when they are not known and only the written ones count.
+    pub fn touched_partitions_with(&self, current: &[u32]) -> Vec<u32> {
+        let mut out: Vec<u32> = self
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                RestoreOp::RestorePartition { dst, .. } => Some(dst.index),
+                RestoreOp::Format { part, .. } => Some(part.index),
+                _ => None,
+            })
+            .collect();
+        if let Some(t) = self.table() {
+            for &i in current {
+                if !t.entries.iter().any(|e| e.index == i) {
+                    out.push(i);
+                }
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// Partitions the plan writes into or formats.
+    pub fn touched_partitions(&self) -> Vec<u32> {
+        self.touched_partitions_with(&[])
+    }
+
     /// The partition table the plan writes, if it writes one.
     pub fn table(&self) -> Option<&PartitionTableSpec> {
         self.ops.iter().find_map(|op| match op {

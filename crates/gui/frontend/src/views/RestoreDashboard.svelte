@@ -1089,7 +1089,10 @@
           luks_header_available: reencryptable.includes(p.index),
         })),
       taken_letters: [],
+      // Both filled in by the service: only it can see which partitions the
+      // running Windows is standing on.
       target_is_system_disk: false,
+      protected_parts: [],
       // What the destinations hold RIGHT NOW — from the live disk, not from the
       // edited layout, since that is what the restore will overwrite.
       targets: (targetDisk?.partitions ?? []).map((p) => ({

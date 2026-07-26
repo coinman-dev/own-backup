@@ -138,6 +138,25 @@ pub fn volume_extents(volume_root: &str) -> Vec<VolumeExtent> {
         .collect()
 }
 
+/// The `\\?\Volume{…}\` root of the volume a path lives on.
+///
+/// Answers "which volume is `C:\Windows` on" without going through a drive
+/// letter, which can be absent or reassigned.
+pub fn volume_root_for_path(path: &str) -> Option<String> {
+    use windows::Win32::Storage::FileSystem::{GetVolumeNameForVolumeMountPointW, GetVolumePathNameW};
+
+    let wide = to_wide(path);
+    let mut mount = [0u16; 512];
+    // SAFETY: both buffers are valid for their length; `wide` is NUL-terminated.
+    unsafe { GetVolumePathNameW(PCWSTR(wide.as_ptr()), &mut mount) }.ok()?;
+
+    let mut name = [0u16; 512];
+    // SAFETY: `mount` came back NUL-terminated from the call above.
+    unsafe { GetVolumeNameForVolumeMountPointW(PCWSTR(mount.as_ptr()), &mut name) }.ok()?;
+    let len = name.iter().position(|&c| c == 0).unwrap_or(name.len());
+    Some(String::from_utf16_lossy(&name[..len]))
+}
+
 /// Whether every extent of `volume_root` lives on `disk_number`.
 pub fn volume_on_disk(volume_root: &str, disk_number: u32) -> bool {
     let extents = volume_extents(volume_root);
