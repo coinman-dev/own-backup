@@ -342,23 +342,31 @@ fn check_mbr_limits(t: &PartitionTableSpec, disk_sectors: u64, out: &mut Vec<Che
         ));
     }
 
-    let primaries = t
-        .entries
-        .iter()
-        .filter(|e| {
-            matches!(&e.kind, crate::restore_plan::PartitionKind::Mbr { logical, .. } if !logical)
-        })
-        .count();
-    if primaries > 4 {
+    let logical = |e: &PartitionSpec| {
+        matches!(&e.kind, crate::restore_plan::PartitionKind::Mbr { logical, .. } if *logical)
+    };
+    let primaries = t.entries.iter().filter(|e| !logical(e)).count();
+    let has_logicals = t.entries.iter().any(logical);
+    // Logical partitions live inside an extended partition, and the extended
+    // partition is itself one of the four entries — so it costs a slot.
+    let budget = if has_logicals { 3 } else { 4 };
+    if primaries > budget {
         out.push(CheckResult::new(
             CheckLevel::Error,
             CheckCode::MbrTooManyPrimaries,
             None,
-            format!(
-                "Основных разделов {} — в MBR их не может быть больше четырёх. \
-                 Лишние надо сделать логическими.",
-                primaries
-            ),
+            if has_logicals {
+                format!(
+                    "Основных разделов {primaries}, и ещё один слот из четырёх занимает \
+                     расширенный раздел, внутри которого лежат логические. Основных остаётся \
+                     не больше трёх."
+                )
+            } else {
+                format!(
+                    "Основных разделов {primaries} — в MBR их не может быть больше четырёх. \
+                     Лишние надо сделать логическими."
+                )
+            },
         ));
     }
 }
@@ -949,23 +957,74 @@ mod tests {
         assert!(errors(&results).contains(&CheckCode::MissingEsp), "{results:#?}");
     }
 
-    #[test]
-    fn mbr_refuses_more_than_four_primaries() {
-        let mbr = |index: u32, first_mib: u64| PartitionSpec {
-            index,
-            first_lba: first_mib * MIB / 512,
-            last_lba: (first_mib + 10) * MIB / 512 - 1,
-            kind: PartitionKind::Mbr { type_byte: 0x07, bootable: false, logical: false },
-        };
-        let t = PartitionTableSpec {
+    fn mbr_table(entries: Vec<PartitionSpec>) -> PartitionTableSpec {
+        PartitionTableSpec {
             scheme: PartitionScheme::Mbr,
             sector_size: 512,
             disk_size_bytes: 100 * GIB,
             disk_id: "1A2B3C4D".into(),
-            entries: vec![mbr(1, 1), mbr(2, 11), mbr(3, 21), mbr(4, 31), mbr(5, 41)],
-        };
+            entries,
+        }
+    }
+
+    fn mbr_entry(index: u32, first_mib: u64, logical: bool) -> PartitionSpec {
+        PartitionSpec {
+            index,
+            first_lba: first_mib * MIB / 512,
+            last_lba: (first_mib + 10) * MIB / 512 - 1,
+            kind: PartitionKind::Mbr { type_byte: 0x07, bootable: false, logical },
+        }
+    }
+
+    #[test]
+    fn mbr_refuses_more_than_four_primaries() {
+        let t = mbr_table(vec![
+            mbr_entry(1, 1, false),
+            mbr_entry(2, 11, false),
+            mbr_entry(3, 21, false),
+            mbr_entry(4, 31, false),
+            mbr_entry(5, 41, false),
+        ]);
         let results = check_plan(&plan_with(t, vec![]), &ctx(vec![]));
         assert!(errors(&results).contains(&CheckCode::MbrTooManyPrimaries), "{results:#?}");
+    }
+
+    #[test]
+    fn four_primaries_are_fine_without_logicals() {
+        let t = mbr_table(vec![
+            mbr_entry(1, 1, false),
+            mbr_entry(2, 11, false),
+            mbr_entry(3, 21, false),
+            mbr_entry(4, 31, false),
+        ]);
+        let results = check_plan(&plan_with(t, vec![]), &ctx(vec![]));
+        assert!(errors(&results).is_empty(), "{results:#?}");
+    }
+
+    #[test]
+    fn a_logical_partition_costs_one_of_the_four_primary_slots() {
+        // The extended partition that holds the logical one is itself an entry.
+        let t = mbr_table(vec![
+            mbr_entry(1, 1, false),
+            mbr_entry(2, 11, false),
+            mbr_entry(3, 21, false),
+            mbr_entry(4, 31, false),
+            mbr_entry(5, 42, true),
+        ]);
+        let results = check_plan(&plan_with(t, vec![]), &ctx(vec![]));
+        assert!(errors(&results).contains(&CheckCode::MbrTooManyPrimaries), "{results:#?}");
+    }
+
+    #[test]
+    fn three_primaries_plus_logicals_fit() {
+        let t = mbr_table(vec![
+            mbr_entry(1, 1, false),
+            mbr_entry(2, 11, false),
+            mbr_entry(3, 21, false),
+            mbr_entry(5, 42, true),
+        ]);
+        let results = check_plan(&plan_with(t, vec![]), &ctx(vec![]));
+        assert!(errors(&results).is_empty(), "{results:#?}");
     }
 
     #[test]

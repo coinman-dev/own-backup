@@ -63,6 +63,7 @@ pub struct GptLayout {
 }
 
 /// A single raw write to apply to the disk.
+#[derive(Debug, Clone)]
 pub struct WriteOp {
     pub offset: u64,
     pub bytes: Vec<u8>,
