@@ -12,7 +12,11 @@ use crate::service_link::ServiceLink;
 /// are reached through [`ServiceLink`]. The GUI keeps only its config and that
 /// link.
 pub struct GuiState {
-    pub config: AppConfig,
+    /// The live config. Behind a lock because `save_config` has to update it as
+    /// well as the file: it used to write only the file, so the next
+    /// `get_config` handed back the copy loaded at startup and every change
+    /// looked lost the moment the user left the page.
+    pub config: std::sync::Mutex<AppConfig>,
     pub config_path: PathBuf,
     /// Connection to the backup service.
     pub link: Arc<ServiceLink>,
@@ -22,7 +26,7 @@ impl GuiState {
     pub fn new(config: AppConfig, link: Arc<ServiceLink>) -> Self {
         let config_path = config.data_dir.join("config.toml");
         Self {
-            config,
+            config: std::sync::Mutex::new(config),
             config_path,
             link,
         }

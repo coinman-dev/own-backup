@@ -1027,7 +1027,9 @@
         wipe_free_space: mode === 'sectors' && wipeFreeSpace,
         // Only meaningful for a sector restore of a partition whose header the
         // copy kept; the backend refuses the other combinations outright.
-        reencrypt: mode === 'sectors' && reencrypt && reencryptable.includes(m.src),
+        // Only where a working password was given. An empty field means the
+        // user chose to restore that partition without its container.
+        reencrypt: mode === 'sectors' && willReencrypt.includes(m.src),
       });
       // A larger target leaves a tail the filesystem does not know about; only
       // NTFS can claim it automatically (D2). In file mode the filesystem was
@@ -1321,11 +1323,25 @@
   const checkWarnings = $derived(groupByCode(checks.filter((c) => c.level === 'warning')));
   const checkInfos = $derived(groupByCode(checks.filter((c) => c.level === 'info')));
 
-  /** Every re-encryptable partition has a password that was actually checked.
-   *  Without it the restore would write the header, fail to open it, and stop —
-   *  after the partition table had already been rewritten. */
+  /** Partitions whose container will actually be put back: the ones with a
+   *  password that has been checked. */
+  const willReencrypt = $derived(
+    reencrypt ? reencryptable.filter((i) => luksPwState[i] === 'ok') : [],
+  );
+  /** Re-encryptable partitions left without a password. They restore as a plain
+   *  filesystem — which is a choice, not a mistake, so it warns rather than
+   *  blocks. */
+  const luksSkipped = $derived(
+    reencrypt ? reencryptable.filter((i) => !(luksPw[i] ?? '').trim()) : [],
+  );
+  /** Nothing is half-done: a password that was typed must be one that works.
+   *  An unchecked or wrong one would let the restore write the container header,
+   *  fail to open it, and stop — with the partition table already rewritten.
+   *  An EMPTY one is fine: it simply means "restore this one without
+   *  encryption". */
   const luksReady = $derived(
-    !reencrypt || reencryptable.every((i) => luksPwState[i] === 'ok'),
+    !reencrypt ||
+      reencryptable.every((i) => !(luksPw[i] ?? '').trim() || luksPwState[i] === 'ok'),
   );
   /** The plan checked out and nothing stands in the way of running it. */
   const canApply = $derived(
@@ -1391,6 +1407,36 @@
 
   const targetLabel = $derived(targetDisk?.model ?? '');
 </script>
+
+<!-- Password entry for one container. Rendered both on the card and inside the
+     check dialog: the dialog is what tells the user a password is needed, and
+     asking for it there while the only field sits on the page behind it is a
+     dead end. -->
+{#snippet pwRow(part: number, label: string)}
+  <span class="pw-inline">
+    <span class="pw-lbl">{label}</span>
+    <input
+      type="password"
+      autocomplete="off"
+      spellcheck="false"
+      value={luksPw[part] ?? ''}
+      oninput={(e) => {
+        luksPw[part] = (e.currentTarget as HTMLInputElement).value;
+        luksPwState[part] = 'idle';
+      }}
+      onkeydown={(e) => { if (e.key === 'Enter') checkLuksPassword(part); }}
+    />
+    <button
+      class="btn ghost tiny"
+      disabled={!(luksPw[part] ?? '') || luksPwState[part] === 'checking'}
+      onclick={() => checkLuksPassword(part)}
+    >Проверка</button>
+    {#if luksPwState[part] === 'checking'}<span class="pw-note">проверяем…</span>{/if}
+    {#if luksPwState[part] === 'ok'}<span class="pw-ok">✓ подходит</span>{/if}
+    {#if luksPwState[part] === 'bad'}<span class="pw-bad">✕ не подходит</span>{/if}
+    {#if luksPwState[part] === 'error'}<span class="pw-bad" title={luksPwError[part]}>не удалось проверить</span>{/if}
+  </span>
+{/snippet}
 
 {#snippet copyNav()}
   <div class="copynav">
@@ -1460,62 +1506,19 @@
               : ` разделу ${describeSrc(reencryptable[0])}`}</b>
           </label>
           {#if reencrypt && reencryptable.length === 1}
-            {@const part = reencryptable[0]}
-            <span class="pw-inline">
-              <span class="pw-lbl">Введите пароль:</span>
-              <input
-                type="password"
-                autocomplete="off"
-                spellcheck="false"
-                value={luksPw[part] ?? ''}
-                oninput={(e) => {
-                  luksPw[part] = (e.currentTarget as HTMLInputElement).value;
-                  luksPwState[part] = 'idle';
-                }}
-                onkeydown={(e) => { if (e.key === 'Enter') checkLuksPassword(part); }}
-              />
-              <button
-                class="btn ghost tiny"
-                disabled={!(luksPw[part] ?? '') || luksPwState[part] === 'checking'}
-                onclick={() => checkLuksPassword(part)}
-              >Проверка</button>
-              {#if luksPwState[part] === 'checking'}<span class="pw-note">проверяем…</span>{/if}
-              {#if luksPwState[part] === 'ok'}<span class="pw-ok">✓ подходит</span>{/if}
-              {#if luksPwState[part] === 'bad'}<span class="pw-bad">✕ не подходит</span>{/if}
-              {#if luksPwState[part] === 'error'}<span class="pw-bad" title={luksPwError[part]}>не удалось проверить</span>{/if}
-            </span>
+            {@render pwRow(reencryptable[0], 'Введите пароль:')}
           {/if}
         </div>
         <div class="luks-note">
           Заголовок контейнера сохранён в копии. Раздел восстановится ровно таким, каким был —
           тот же UUID, тот же пароль — и система загрузится без единой правки.
-          В копии пароль не хранится: он нужен только чтобы открыть заголовок и зашифровать данные обратно.
+          В копии пароль не хранится: он нужен только чтобы открыть заголовок и зашифровать
+          данные обратно. Оставите поле пустым — раздел восстановится без шифрования,
+          о последствиях предупредим перед запуском.
         </div>
         {#if reencrypt && reencryptable.length > 1}
           {#each reencryptable as part}
-            <div class="pw-inline multi">
-              <span class="pw-lbl">Раздел {describeSrc(part)} — пароль:</span>
-              <input
-                type="password"
-                autocomplete="off"
-                spellcheck="false"
-                value={luksPw[part] ?? ''}
-                oninput={(e) => {
-                  luksPw[part] = (e.currentTarget as HTMLInputElement).value;
-                  luksPwState[part] = 'idle';
-                }}
-                onkeydown={(e) => { if (e.key === 'Enter') checkLuksPassword(part); }}
-              />
-              <button
-                class="btn ghost tiny"
-                disabled={!(luksPw[part] ?? '') || luksPwState[part] === 'checking'}
-                onclick={() => checkLuksPassword(part)}
-              >Проверка</button>
-              {#if luksPwState[part] === 'checking'}<span class="pw-note">проверяем…</span>{/if}
-              {#if luksPwState[part] === 'ok'}<span class="pw-ok">✓ подходит</span>{/if}
-              {#if luksPwState[part] === 'bad'}<span class="pw-bad">✕ не подходит</span>{/if}
-              {#if luksPwState[part] === 'error'}<span class="pw-bad" title={luksPwError[part]}>не удалось проверить</span>{/if}
-            </div>
+            <div class="pw-multi">{@render pwRow(part, `Раздел ${describeSrc(part)} — пароль:`)}</div>
           {/each}
         {/if}
         {#if !reencrypt}
@@ -1931,6 +1934,28 @@
         <span>Проверять записанное после восстановления</span>
       </label>
 
+      <!-- Asked for here, where the need for it is stated: the field used to be
+           on the page behind this dialog, which made the instruction a dead
+           end. Leaving it empty is a valid answer and says what it produces. -->
+      {#if reencrypt && luksSkipped.length > 0}
+        <div class="pw-block">
+          <div class="pw-block-head">Пароль контейнера — чтобы вернуть шифрование</div>
+          {#each luksSkipped as part}
+            <div class="pw-multi">
+              {@render pwRow(part, luksSkipped.length > 1 ? `Раздел ${describeSrc(part)}:` : 'Пароль:')}
+            </div>
+          {/each}
+          <div class="finding warn">
+            Пароль не введён — {luksSkipped.length === 1 ? 'раздел' : 'разделы'}
+            {luksSkipped.map(describeSrc).join('; ')}
+            {luksSkipped.length === 1 ? 'восстановится' : 'восстановятся'} без контейнера LUKS.
+            Данные будут целы и читаемы, но <b>Linux с такого раздела не загрузится</b>:
+            initramfs и <code>/etc/crypttab</code> ждут зашифрованное устройство, которого больше нет.
+            Понадобится Live CD — убрать запись из <code>/etc/crypttab</code>, поправить
+            <code>/etc/fstab</code> на UUID самого раздела и пересобрать initramfs.
+          </div>
+        </div>
+      {/if}
       {#if applyBlockedBy}
         <p class="ops-note">{applyBlockedBy}</p>
       {:else}
@@ -2024,7 +2049,9 @@
   .luks-row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 14px; }
   .luks-note { font-size: 12px; color: var(--text-muted); line-height: 1.5; margin-top: 6px; }
   .pw-inline { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--head); }
-  .pw-inline.multi { margin-top: 8px; }
+  .pw-multi { margin-top: 8px; }
+  .pw-block { margin: 14px 0 12px; padding: 12px 14px; border-radius: 6px; border: 1px solid var(--border); background: var(--card-bg); }
+  .pw-block-head { font-size: 13px; font-weight: 600; color: var(--head); margin-bottom: 6px; }
   .pw-lbl { white-space: nowrap; }
   .pw-inline input { width: 180px; padding: 6px 9px; border: 1px solid var(--border); border-radius: 4px; font-size: 13px; font-family: var(--font); background: var(--card-bg); color: var(--text); }
   .btn.tiny { padding: 6px 12px; font-size: 12px; }

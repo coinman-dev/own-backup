@@ -5,14 +5,17 @@ use crate::state::GuiState;
 
 #[tauri::command]
 pub async fn get_config(state: State<'_, GuiState>) -> Result<AppConfig, String> {
-    Ok(state.config.clone())
+    Ok(state.config.lock().map_err(|e| e.to_string())?.clone())
 }
 
 #[tauri::command]
 pub async fn save_config(state: State<'_, GuiState>, config: AppConfig) -> Result<(), String> {
-    config
-        .save_to_file(&state.config_path)
-        .map_err(|e| e.to_string())
+    config.save_to_file(&state.config_path).map_err(|e| e.to_string())?;
+    // The in-memory copy has to move too. Writing only the file left
+    // `get_config` handing back what was loaded at startup, so anything saved
+    // came back missing as soon as the user navigated away and returned.
+    *state.config.lock().map_err(|e| e.to_string())? = config;
+    Ok(())
 }
 
 #[derive(serde::Serialize)]
