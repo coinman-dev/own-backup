@@ -225,6 +225,16 @@
   const sectorMismatch = $derived(
     srcSector > 0 && dstSector > 0 && srcSector !== dstSector,
   );
+  // Partitions of the copy whose ORIGINAL was an encrypted container. The
+  // patched list above deliberately drops the padlock (the copy holds the
+  // volume in the clear), so the fact has to be read off the raw snapshot —
+  // and it matters: the restore cannot put the container back.
+  const decryptedParts = $derived(
+    (rawBackedUpDisks[0]?.partitions ?? [])
+      .filter((p) => p.is_encrypted && backedUpParts.includes(p.index))
+      .map((p) => p.index),
+  );
+
   // Source partitions that are actually inside this copy.
   const srcBackupParts = $derived(
     (srcDisk?.partitions ?? []).filter((p) => backedUpParts.includes(p.index)),
@@ -631,7 +641,10 @@
   function onFsChange(fs: string) {
     if (!createDlg) return;
     createDlg.fs = fs;
-    createDlg.gptType = ['ext4', 'xfs', 'btrfs'].includes(fs) ? GPT_TYPES[4].guid : GPT_TYPES[0].guid;
+    // Choosing a Windows filesystem implies a Basic Data partition; "не
+    // форматировать" leaves the type alone, since that is the case where the
+    // user is most likely aiming at something else (Linux, swap, ESP).
+    if (fs) createDlg.gptType = GPT_TYPES[0].guid;
   }
   // Create = split that free cell in place: [new partition][leftover free].
   function doCreate() {
@@ -979,6 +992,7 @@
           used_bytes: p.used_bytes,
           filesystem: p.filesystem,
           label: p.volume_label || '',
+          encrypted_at_source: decryptedParts.includes(p.index),
         })),
       taken_letters: [],
       target_is_system_disk: false,
@@ -1203,6 +1217,29 @@
       <div class="warn-note">Диск этой копии сейчас не подключён — карту показать нельзя.</div>
     {/if}
 
+    <!-- The copy holds the volume decrypted, so the restore cannot put the
+         container back. Said here, next to the card, rather than only in the
+         confirmation dialog: this decides whether the restore is useful at
+         all, and it should not come as news at the last click. -->
+    {#if decryptedParts.length > 0}
+      <div class="luks-warn">
+        <span class="sw-ico">🔓</span>
+        <span>
+          <b>Шифрование не восстановится.</b>
+          {decryptedParts.length === 1 ? 'Раздел' : 'Разделы'}
+          {decryptedParts.join(', ')}
+          {decryptedParts.length === 1 ? 'был зашифрован' : 'были зашифрованы'} (LUKS),
+          но в копию {decryptedParts.length === 1 ? 'попал' : 'попали'} в расшифрованном виде —
+          после восстановления там окажется обычная файловая система без контейнера.
+          <br />
+          Данные будут целы и читаемы, но <b>Linux с такого раздела не загрузится</b>:
+          initramfs и <code>/etc/crypttab</code> ждут зашифрованное устройство, которого больше нет.
+          Понадобится Live CD: убрать запись из <code>/etc/crypttab</code>, поправить
+          <code>/etc/fstab</code> на UUID самого раздела и пересобрать initramfs.
+        </span>
+      </div>
+    {/if}
+
     {#if catData}
       <div class="cat-block">
         <div class="cat-head">Что в копии — по типам файлов</div>
@@ -1395,12 +1432,17 @@
       <div class="row2">
         <label class="fld">
           <span>Файловая система</span>
+          <!-- Only filesystems Windows can actually create (D9). A Linux
+               partition is made by picking the GPT type on the right and
+               leaving this on "не форматировать" — Windows has no mkfs for
+               ext4, and offering it here would produce a partition the queue
+               claims is formatted and that is in fact empty. -->
           <select value={createDlg.fs} onchange={(e) => onFsChange((e.currentTarget as HTMLSelectElement).value)}>
             <option value="ntfs">NTFS</option>
             <option value="fat32">FAT32</option>
-            <option value="ex_fat">exFAT</option>
-            <option value="ext4">ext4</option>
-            <option value="re_fs">ReFS</option>
+            <option value="exfat">exFAT</option>
+            <option value="refs">ReFS</option>
+            <option value="">Не форматировать</option>
           </select>
         </label>
         {#if isGpt}
@@ -1576,6 +1618,8 @@
   .hint-small { margin-top: 8px; font-size: 12px; color: var(--text-muted); }
   .sector-warn { display: flex; gap: 10px; margin-top: 12px; padding: 12px 14px; border-radius: 6px; background: rgba(216,74,74,.1); border: 1px solid rgba(216,74,74,.35); font-size: 13px; color: #8c1d1d; line-height: 1.5; }
   .sw-ico { flex-shrink: 0; font-size: 15px; line-height: 1.3; }
+  .luks-warn { display: flex; gap: 10px; margin-top: 14px; padding: 12px 14px; border-radius: 6px; background: rgba(214,158,46,.12); border: 1px solid rgba(214,158,46,.4); font-size: 13px; color: #7a5a10; line-height: 1.55; }
+  .luks-warn code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; background: rgba(0,0,0,.06); padding: 1px 4px; border-radius: 3px; }
   /* Right-click partition menu */
   .menu-backdrop { position: fixed; inset: 0; z-index: 190; }
   .ctx-menu { position: fixed; z-index: 200; min-width: 180px; background: var(--card-bg); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 10px 30px rgba(0,0,0,.18); padding: 6px; }

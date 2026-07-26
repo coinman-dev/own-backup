@@ -491,6 +491,9 @@ export interface CheckContext {
     used_bytes: number;
     filesystem: string;
     label: string;
+    /** The source volume was a LUKS/BitLocker container and the copy holds it
+     *  decrypted — the restore produces a plain filesystem. */
+    encrypted_at_source: boolean;
   }[];
   taken_letters: string[];
   target_is_system_disk: boolean;

@@ -73,10 +73,6 @@ pub enum CheckCode {
     ExtendNotNtfs,
     /// Source and target disagree on logical sector size.
     SectorSizeMismatch,
-    /// A drive letter was already taken; a free one was substituted.
-    LetterReassigned,
-    /// No free drive letters left.
-    NoFreeLetter,
     /// The plan references a partition index the image does not contain.
     UnknownSourcePartition,
     /// An operation points at a partition that is not in the table being written.
@@ -98,6 +94,13 @@ pub enum CheckCode {
     MbrTooManyPrimaries,
     /// Free space is not being wiped, so old data survives in the gaps.
     FreeSpaceNotWiped,
+    /// A file-by-file restore into a partition nothing formats.
+    FileModeNeedsFormat,
+    /// The filesystem being created cannot hold what the source holds.
+    FormatFsTooLimited,
+    /// The source volume was an encrypted container, and the copy holds it
+    /// decrypted — the restore produces a plain filesystem.
+    EncryptionNotRestored,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,6 +134,11 @@ pub struct SourcePartition {
     /// decrypted filesystem, because that is what the image holds (D14).
     pub filesystem: FileSystem,
     pub label: String,
+    /// The source volume lived inside a LUKS or BitLocker container and the
+    /// backup captured it **decrypted**. The restore therefore produces a plain
+    /// filesystem where an encrypted container used to be (D14).
+    #[serde(default)]
+    pub encrypted_at_source: bool,
 }
 
 /// Facts about the machine and the image that the pure checks cannot discover
@@ -402,6 +410,8 @@ fn check_ops(
     let mut restored: Vec<u32> = Vec::new();
     let mut sector_restored: Vec<u32> = Vec::new();
     let mut formatted: Vec<(u32, crate::restore_plan::FormatFs)> = Vec::new();
+    // Partitions receiving files, and the filesystem their source held.
+    let mut file_targets: Vec<(u32, FileSystem)> = Vec::new();
 
     for op in &plan.ops {
         if let Some(part) = op.part() {
@@ -445,6 +455,10 @@ fn check_ops(
                     continue;
                 };
                 check_fit(src, dst, *mode, out);
+                check_encryption(src, dst, out);
+                if *mode == RestoreMode::Files {
+                    file_targets.push((dst.index, src.filesystem));
+                }
             }
             RestoreOp::Format { part, fs, .. } => formatted.push((part.index, *fs)),
             RestoreOp::ExtendFilesystem { part } => {
@@ -462,6 +476,23 @@ fn check_ops(
                 }
             }
             RestoreOp::WritePartitionTable { .. } | RestoreOp::AssignLetter { .. } => {}
+        }
+    }
+
+    // A file-by-file restore writes onto a filesystem. If nothing creates one,
+    // the files land on whatever was there before — or on nothing at all.
+    for (index, src_fs) in &file_targets {
+        match formatted.iter().find(|(i, _)| i == index) {
+            None => out.push(CheckResult::new(
+                CheckLevel::Error,
+                CheckCode::FileModeNeedsFormat,
+                Some(*index),
+                format!(
+                    "Раздел {index} восстанавливается пофайлово, но в плане нет его \
+                     форматирования — копировать файлы некуда."
+                ),
+            )),
+            Some((_, fs)) => check_format_capacity(*index, *src_fs, *fs, out),
         }
     }
 
@@ -587,6 +618,62 @@ fn check_fit(src: &SourcePartition, dst: &PartRef, mode: RestoreMode, out: &mut 
     }
 }
 
+/// The copy holds a decrypted container, so the restore cannot put the
+/// encryption back (D14).
+///
+/// This is the quiet failure of the whole restore path: every file is present
+/// and readable, and a Linux system still refuses to boot, because `crypttab`
+/// and the initramfs are waiting for a LUKS device that no longer exists.
+/// Saying so before the restore costs nothing; discovering it afterwards costs
+/// an evening.
+fn check_encryption(src: &SourcePartition, dst: &PartRef, out: &mut Vec<CheckResult>) {
+    if !src.encrypted_at_source {
+        return;
+    }
+    out.push(CheckResult::new(
+        CheckLevel::Warning,
+        CheckCode::EncryptionNotRestored,
+        Some(dst.index),
+        format!(
+            "Том «{}» был зашифрован, но в копию он попал расшифрованным — после \
+             восстановления в разделе {} окажется обычная {} без контейнера LUKS. \
+             Данные будут целы и читаемы, но система с этого раздела не загрузится: \
+             initramfs и /etc/crypttab ждут зашифрованное устройство, которого больше нет. \
+             Нужно загрузиться с Live CD, убрать запись из /etc/crypttab, поправить \
+             /etc/fstab на UUID самого раздела и пересобрать initramfs.",
+            src.label,
+            dst.index,
+            src.filesystem.label()
+        ),
+    ));
+}
+
+/// Does the filesystem being created hold what the source held?
+fn check_format_capacity(
+    index: u32,
+    src_fs: FileSystem,
+    fs: crate::restore_plan::FormatFs,
+    out: &mut Vec<CheckResult>,
+) {
+    use crate::restore_plan::FormatFs;
+    // FAT32 caps a single file at 4 GiB. Restoring an NTFS volume onto FAT32
+    // copies most of it and then fails on the one large file, which reads as a
+    // random error rather than a format that cannot express the data.
+    if fs == FormatFs::Fat32 && src_fs != FileSystem::Fat32 {
+        out.push(CheckResult::new(
+            CheckLevel::Warning,
+            CheckCode::FormatFsTooLimited,
+            Some(index),
+            format!(
+                "Раздел {index} форматируется в FAT32, а исходный том — {}. \
+                 В FAT32 не поместится ни один файл больше 4 ГиБ; такие файлы \
+                 скопировать не удастся.",
+                src_fs.label()
+            ),
+        ));
+    }
+}
+
 /// `FSCTL_EXTEND_VOLUME` only exists for NTFS. Work out which filesystem will
 /// actually be on the partition by the time the extend runs: the one the image
 /// brings for a sector restore, the one [`RestoreOp::Format`] creates otherwise.
@@ -694,7 +781,14 @@ mod tests {
     }
 
     fn source(index: u32, size: u64, used: u64, fs: FileSystem) -> SourcePartition {
-        SourcePartition { index, size_bytes: size, used_bytes: used, filesystem: fs, label: "Data".into() }
+        SourcePartition {
+            index,
+            size_bytes: size,
+            used_bytes: used,
+            filesystem: fs,
+            label: "Data".into(),
+            encrypted_at_source: false,
+        }
     }
 
     fn plan_with(table: PartitionTableSpec, mut ops: Vec<RestoreOp>) -> RestorePlan {
@@ -831,6 +925,85 @@ mod tests {
         );
         let results = check_plan(&plan, &ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Btrfs)]));
         assert!(errors(&results).contains(&CheckCode::FileModeUnsupportedFs), "{results:#?}");
+    }
+
+    #[test]
+    fn a_decrypted_container_is_flagged_but_does_not_block() {
+        // The data restores fine; the system it belongs to will not boot until
+        // crypttab and the initramfs are fixed. That is a warning, not a veto.
+        let t = table(vec![entry(1, 1, 200)]);
+        let p1 = part_ref(&t, 1);
+        let plan = plan_with(
+            t,
+            vec![RestoreOp::RestorePartition {
+                src_index: 1,
+                dst: p1,
+                mode: RestoreMode::Sectors,
+                wipe_free_space: false,
+            }],
+        );
+        let mut src = source(1, 100 * MIB, 10 * MIB, FileSystem::Btrfs);
+        src.encrypted_at_source = true;
+        let results = check_plan(&plan, &ctx(vec![src]));
+        assert!(errors(&results).is_empty(), "{results:#?}");
+        let found = results.iter().find(|r| r.code == CheckCode::EncryptionNotRestored).unwrap();
+        assert_eq!(found.level, CheckLevel::Warning);
+        assert!(found.message.contains("crypttab"), "the fix must be spelled out");
+    }
+
+    #[test]
+    fn an_unencrypted_source_says_nothing_about_encryption() {
+        let t = table(vec![entry(1, 1, 200)]);
+        let p1 = part_ref(&t, 1);
+        let plan = plan_with(
+            t,
+            vec![RestoreOp::RestorePartition {
+                src_index: 1,
+                dst: p1,
+                mode: RestoreMode::Sectors,
+                wipe_free_space: false,
+            }],
+        );
+        let results = check_plan(&plan, &ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ntfs)]));
+        assert!(!codes(&results).contains(&CheckCode::EncryptionNotRestored));
+    }
+
+    #[test]
+    fn a_file_restore_with_nothing_to_format_it_is_refused() {
+        let t = table(vec![entry(1, 1, 200)]);
+        let p1 = part_ref(&t, 1);
+        let plan = plan_with(
+            t,
+            vec![RestoreOp::RestorePartition {
+                src_index: 1,
+                dst: p1,
+                mode: RestoreMode::Files,
+                wipe_free_space: false,
+            }],
+        );
+        let results = check_plan(&plan, &ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ntfs)]));
+        assert!(errors(&results).contains(&CheckCode::FileModeNeedsFormat), "{results:#?}");
+    }
+
+    #[test]
+    fn formatting_an_ntfs_source_as_fat32_warns_about_the_4_gib_limit() {
+        let t = table(vec![entry(1, 1, 200)]);
+        let p1 = part_ref(&t, 1);
+        let plan = plan_with(
+            t,
+            vec![
+                RestoreOp::Format { part: p1, fs: FormatFs::Fat32, label: String::new(), quick: true },
+                RestoreOp::RestorePartition {
+                    src_index: 1,
+                    dst: p1,
+                    mode: RestoreMode::Files,
+                    wipe_free_space: false,
+                },
+            ],
+        );
+        let results = check_plan(&plan, &ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ntfs)]));
+        assert!(codes(&results).contains(&CheckCode::FormatFsTooLimited), "{results:#?}");
+        assert!(errors(&results).is_empty(), "a limit worth knowing, not a veto");
     }
 
     #[test]

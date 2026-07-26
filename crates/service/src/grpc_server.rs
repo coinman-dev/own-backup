@@ -869,6 +869,14 @@ impl BackupService for BackupServiceImpl {
                     });
                 }
             });
+            // Persisted as soon as it ends: a service restart must not erase
+            // the record of what was done to the disk (D5).
+            if let Ok(final_state) = &outcome {
+                own_backup_core::restore_exec::append_history(
+                    &state.config.data_dir,
+                    final_state,
+                );
+            }
             if let Err(e) = outcome {
                 // The plan never started, so there is no run state describing
                 // it — say so instead of leaving the last run's state on screen.
@@ -892,6 +900,14 @@ impl BackupService for BackupServiceImpl {
     async fn get_restore_state(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
         let run = self.state.restore_run.lock().unwrap().clone();
+        // Nothing in memory means the service was restarted, not that nothing
+        // ever happened — the last run comes back off disk so a reopened window
+        // still shows what the disk went through.
+        let run = run.or_else(|| {
+            own_backup_core::restore_exec::read_history(&self.state.config.data_dir)
+                .into_iter()
+                .next()
+        });
         json_reply(&run)
     }
 

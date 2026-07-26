@@ -127,7 +127,7 @@ pub fn check_fits(copy: &BlockCopy, dst_size: u64) -> Result<()> {
 /// `wipe_free_space` can zero it (D16).
 ///
 /// `covered` need not be sorted or disjoint.
-pub fn uncovered_ranges(covered: &mut Vec<(u64, u64)>, total: u64) -> Vec<(u64, u64)> {
+pub fn uncovered_ranges(covered: &mut [(u64, u64)], total: u64) -> Vec<(u64, u64)> {
     covered.sort_unstable();
     let mut gaps = Vec::new();
     let mut cursor = 0u64;
@@ -152,7 +152,7 @@ mod tests {
     #[test]
     fn a_volume_image_maps_block_zero_to_the_start_of_the_target() {
         let w = SourceWindow::whole(100 * MIB);
-        let c = plan_block_copy(0, MIB, 100 * MIB, 1 * MIB, w).unwrap();
+        let c = plan_block_copy(0, MIB, 100 * MIB, MIB, w).unwrap();
         assert_eq!(c.image_offset, MIB, "block 0 sits at volume_data_offset");
         assert_eq!(c.block_len, MIB as usize);
         assert_eq!(c.slice_start, 0);

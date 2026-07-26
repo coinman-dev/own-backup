@@ -34,6 +34,54 @@ use own_backup_common::restore_plan::{RestoreMode, RestoreOp, RestorePlan};
 use own_backup_common::restore_state::{OpRecord, OpStatus, RestoreRunState, RunStatus};
 use own_backup_common::{OwnBackupError, Result};
 
+/// Where finished restore runs are kept.
+///
+/// The run state lived only in the service's memory, so a service restart —
+/// or a crash mid-restore — erased the record of what had been done to the
+/// disk. That is the one thing a user needs after a restore goes wrong, so it
+/// is written to disk as soon as the run ends (D5).
+pub const HISTORY_FILE: &str = "restore-history.json";
+
+/// How many runs to keep. A restore is a rare event; a hundred of them is more
+/// history than anyone will read and still a trivial file.
+const HISTORY_CAP: usize = 100;
+
+/// Append `state` to the persisted history, newest first.
+pub fn append_history(data_dir: &std::path::Path, state: &RestoreRunState) {
+    let path = data_dir.join(HISTORY_FILE);
+    let mut history: Vec<RestoreRunState> = std::fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    // Re-running the same plan replaces its entry rather than accumulating
+    // near-duplicates.
+    history.retain(|r| r.plan_id != state.plan_id);
+    history.insert(0, state.clone());
+    history.truncate(HISTORY_CAP);
+    if let Err(e) = write_history(&path, &history) {
+        warn!(path = %path.display(), error = %e, "could not persist the restore history");
+    }
+}
+
+/// Finished runs, newest first.
+pub fn read_history(data_dir: &std::path::Path) -> Vec<RestoreRunState> {
+    std::fs::read(data_dir.join(HISTORY_FILE))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn write_history(path: &std::path::Path, history: &[RestoreRunState]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    // Written through a temporary file: a half-written history is worse than
+    // none, because it looks readable and is not.
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(history)?)?;
+    std::fs::rename(&tmp, path)
+}
+
 /// Build the initial state for `plan`, with every operation pending.
 ///
 /// Split out so the caller can publish a run *before* the work starts: a window
@@ -65,14 +113,20 @@ pub fn initial_state(plan: &RestorePlan) -> RestoreRunState {
     // and how long the run really is.
     if plan.verify_after {
         for op in plan.ordered() {
-            let RestoreOp::RestorePartition { dst, mode: RestoreMode::Sectors, src_index, .. } = op
-            else {
+            let RestoreOp::RestorePartition { dst, mode, src_index, .. } = op else {
                 continue;
+            };
+            // Two different checks: a sector restore is verified block by block
+            // against the copy's checksums, a file restore by comparing what
+            // arrived with what was there. Neither substitutes for the other.
+            let (kind, what) = match mode {
+                RestoreMode::Sectors => ("verify_sectors", "записанное"),
+                RestoreMode::Files => ("verify_files", "перенесённые файлы"),
             };
             ops.push(OpRecord {
                 index: ops.len(),
-                kind: "verify_sectors".into(),
-                title: format!("Проверить записанное в разделе {} (из раздела {src_index})", dst.index),
+                kind: kind.into(),
+                title: format!("Проверить {what} в разделе {} (из раздела {src_index})", dst.index),
                 part_index: Some(dst.index),
                 status: OpStatus::Pending,
                 percent: 0,
@@ -220,11 +274,13 @@ pub fn execute_plan(
 /// Read back every sector-restored partition and check it against the copy
 /// (R9, D10).
 ///
-/// A verification failure does **not** mark the run failed: the restore itself
-/// finished, and what went wrong is a different fact. It is reported as the
-/// verify operation failing, with the follow-up spelling out which of the two
-/// possible causes it was — a damaged backup, or a target that did not take the
-/// write. Those call for different actions, so they are never merged.
+/// A verification failure marks the whole run failed, and deliberately so: the
+/// bytes on the disk are not the bytes in the copy, which is what a restore was
+/// supposed to deliver. Reporting "Завершено" with a failed check buried inside
+/// would invite exactly the wrong conclusion.
+///
+/// The follow-up still separates the two causes — a damaged backup, or a target
+/// that did not take the write — because they call for different actions.
 #[cfg(target_os = "windows")]
 fn run_verification(
     plan: &RestorePlan,
@@ -236,14 +292,14 @@ fn run_verification(
 ) {
     use own_backup_backup::restore_win::{verify_partition_sectors, PartitionTarget};
 
-    let sector_ops: Vec<&RestoreOp> = ordered
+    let restore_ops: Vec<&RestoreOp> = ordered
         .iter()
-        .filter(|op| matches!(op, RestoreOp::RestorePartition { mode: RestoreMode::Sectors, .. }))
+        .filter(|op| matches!(op, RestoreOp::RestorePartition { .. }))
         .collect();
     let first = ordered.len();
 
-    for (n, op) in sector_ops.iter().enumerate() {
-        let RestoreOp::RestorePartition { src_index, dst, .. } = op else { continue };
+    for (n, op) in restore_ops.iter().enumerate() {
+        let RestoreOp::RestorePartition { src_index, dst, mode, .. } = op else { continue };
         let index = first + n;
         if index >= state.ops.len() {
             break;
@@ -257,6 +313,12 @@ fn run_verification(
         state.ops[index].status = OpStatus::Running;
         state.cancellable = true;
         on_update(state);
+
+        if *mode == RestoreMode::Files {
+            verify_files(plan, sidecar, *src_index, dst.index, dst.offset, index, state);
+            on_update(state);
+            continue;
+        }
 
         let target =
             PartitionTarget { disk_number: plan.target_disk, offset: dst.offset, size: dst.size };
@@ -324,6 +386,156 @@ fn run_verification(
     state.current = None;
 }
 
+/// Restore the GPT fields the designer cannot know, from the copy's own
+/// captured layout.
+///
+/// The partition map in the interface is built out of `PartitionInfo`, which
+/// describes *volumes*: label, filesystem, size. It has no room for a GPT
+/// entry's attribute flags or its entry name, so a table rebuilt from it comes
+/// out with attributes zeroed — and those flags are not decoration:
+///
+/// - bit 0 (Required Partition) marks the ESP and the Microsoft Reserved
+///   partition; clearing it invites tools to treat them as ordinary volumes;
+/// - bit 63 (no drive letter) is what keeps a Recovery partition from
+///   appearing as a drive the user can open and empty.
+///
+/// For every partition that came out of the copy, the values are taken from the
+/// image's own captured GPT, which is exactly the layout being reproduced.
+/// Hand-created partitions keep what the designer gave them.
+fn with_captured_gpt_fields(
+    table: &own_backup_common::restore_plan::PartitionTableSpec,
+    plan: &RestorePlan,
+    sidecar: &own_backup_backup::sidecar::Sidecar,
+) -> own_backup_common::restore_plan::PartitionTableSpec {
+    use own_backup_common::restore_plan::PartitionKind;
+
+    let Some(dm) = sidecar.disk_manifest.as_ref() else {
+        return table.clone();
+    };
+    // Which target partition receives which source partition.
+    let src_of: std::collections::HashMap<u32, u32> = plan
+        .ops
+        .iter()
+        .filter_map(|op| match op {
+            RestoreOp::RestorePartition { src_index, dst, .. } => Some((dst.index, *src_index)),
+            _ => None,
+        })
+        .collect();
+
+    let mut out = table.clone();
+    for e in out.entries.iter_mut() {
+        let Some(src_index) = src_of.get(&e.index) else { continue };
+        let Some(captured) = dm.layout.partitions.iter().find(|p| p.index == *src_index) else {
+            continue;
+        };
+        if let PartitionKind::Gpt { type_guid, part_guid, attributes, name } = &mut e.kind {
+            *attributes = captured.attributes;
+            *name = captured.name.clone();
+            // The type GUID and the unique GUID also come from the copy: the
+            // BCD and UEFI reference partitions by the unique GUID, and losing
+            // it is what turns a bootable restore into an unbootable one.
+            if !captured.type_guid.is_empty() {
+                *type_guid = captured.type_guid.clone();
+            }
+            if !captured.part_guid.is_empty() {
+                *part_guid = captured.part_guid.clone();
+            }
+        }
+    }
+    out
+}
+
+/// Compare what arrived with what the copy holds, for a file-by-file restore.
+///
+/// Block checksums mean nothing here — the bytes are laid out differently by
+/// construction. What can be compared is the count and the total size, which
+/// catches the failure that matters: files that did not make it. Individual
+/// copy failures are already reported by the restore operation itself; this is
+/// the independent second look.
+#[cfg(target_os = "windows")]
+fn verify_files(
+    plan: &RestorePlan,
+    sidecar: &own_backup_backup::sidecar::Sidecar,
+    src_index: u32,
+    dst_index: u32,
+    dst_offset: u64,
+    index: usize,
+    state: &mut RestoreRunState,
+) {
+    use own_backup_backup::file_restore_win::{long_path, measure_tree};
+    use own_backup_backup::restore_win::MountedImage;
+    use own_backup_backup::volume_win::volume_root_at_offset;
+    use own_backup_common::cancel::CancelToken;
+
+    let fail = |state: &mut RestoreRunState, msg: String| {
+        state.ops[index].status = OpStatus::Failed;
+        state.ops[index].message = msg;
+    };
+
+    let quiet = CancelToken::default();
+    let image = match MountedImage::open(&plan.image_path) {
+        Ok(i) => i,
+        Err(e) => return fail(state, format!("не удалось подключить копию для сверки: {e}")),
+    };
+    let src_root = match image.volume_root_of(sidecar, src_index) {
+        Ok(r) => r,
+        Err(e) => return fail(state, e.to_string()),
+    };
+    let Some(dst_root) = volume_root_at_offset(plan.target_disk, dst_offset) else {
+        return fail(state, format!("Windows не показала том раздела {dst_index} — сверять не с чем"));
+    };
+
+    let want = measure_tree(&long_path(std::path::Path::new(&src_root)), &quiet);
+    let got = measure_tree(&long_path(std::path::Path::new(&dst_root)), &quiet);
+
+    if want.files == got.files && want.bytes == got.bytes {
+        state.ops[index].status = OpStatus::Done;
+        state.ops[index].percent = 100;
+        state.ops[index].message =
+            format!("Файлов: {}, суммарно {}", got.files, own_backup_common::units::human_bytes(got.bytes));
+        info!(part = dst_index, files = got.files, "file verification passed");
+        return;
+    }
+
+    let text = format!(
+        "в копии {} файлов на {}, в разделе {} файлов на {}",
+        want.files,
+        own_backup_common::units::human_bytes(want.bytes),
+        got.files,
+        own_backup_common::units::human_bytes(got.bytes)
+    );
+    error!(part = dst_index, %text, "file verification failed");
+    fail(state, text.clone());
+    state.follow_ups.push(format!("Раздел {dst_index}: перенос файлов неполный — {text}."));
+}
+
+/// What to tell the user when the copy held a decrypted container (D14).
+///
+/// The restore is faithful — it writes exactly what the backup holds — and what
+/// the backup holds is a plain filesystem where a LUKS container used to be. A
+/// Linux system on such a partition mounts fine from a Live CD and refuses to
+/// boot on its own, which is a confusing failure unless someone says why.
+#[cfg(target_os = "windows")]
+fn encryption_follow_up(
+    sidecar: &own_backup_backup::sidecar::Sidecar,
+    part_index: u32,
+) -> Vec<String> {
+    let was_encrypted = sidecar
+        .manifest
+        .volume_encryption
+        .as_ref()
+        .is_some_and(|v| v.capture_mode == own_backup_common::image::VolumeCaptureMode::Plaintext);
+    if !was_encrypted {
+        return Vec::new();
+    }
+    vec![format!(
+        "Раздел {part_index}: исходный том был зашифрован, а в копии он лежит расшифрованным — \
+         контейнер LUKS не восстанавливается. Данные на месте, но система с этого раздела \
+         не загрузится, пока не убрать запись из /etc/crypttab, не поправить /etc/fstab на \
+         UUID самого раздела и не пересобрать initramfs (с Live CD)."
+    )]
+}
+
 /// Anything an operation wants to tell the user afterwards.
 #[cfg(target_os = "windows")]
 #[derive(Default)]
@@ -355,7 +567,8 @@ fn run_op(
                     "нет открытой сессии диска для записи разметки — внутренняя ошибка".into(),
                 )
             })?;
-            session.write_partition_table(table)?;
+            let table = with_captured_gpt_fields(table, plan, sidecar);
+            session.write_partition_table(&table)?;
             Ok(OpNote::default())
         }
 
@@ -392,7 +605,7 @@ fn run_op(
             if summary.cancelled {
                 return Err(OwnBackupError::Cancelled);
             }
-            Ok(OpNote::default())
+            Ok(OpNote { message: String::new(), follow_ups: encryption_follow_up(sidecar, dst.index) })
         }
 
         RestoreOp::RestorePartition { src_index, dst, mode: RestoreMode::Files, .. } => {
@@ -752,9 +965,9 @@ mod tests {
     }
 
     #[test]
-    fn a_file_mode_restore_gets_no_verify_op() {
-        // File-by-file verification compares counts and sizes, not blocks —
-        // a different check, and not this one (R4b).
+    fn a_file_mode_restore_gets_its_own_kind_of_check() {
+        // Block checksums say nothing about a file copy — the bytes are laid
+        // out differently by construction — so the check is a different one.
         let mut plan = RestorePlan::new(
             1,
             "/tmp/img.vhdx".into(),
@@ -766,7 +979,131 @@ mod tests {
             }],
         );
         plan.verify_after = true;
-        assert_eq!(initial_state(&plan).ops.len(), 1);
+        let state = initial_state(&plan);
+        assert_eq!(state.ops.len(), 2);
+        assert_eq!(state.ops[1].kind, "verify_files");
+    }
+
+    /// A minimal sidecar whose disk manifest carries one captured partition.
+    fn sidecar_with(entry: own_backup_common::gpt::GptPartitionEntry) -> own_backup_backup::sidecar::Sidecar {
+        use own_backup_backup::sidecar::SidecarInfo;
+        use own_backup_common::gpt::{DiskBackupManifest, DiskLayout};
+        use own_backup_common::image::ImageManifest;
+        use own_backup_common::types::{BackupMode, BackupType, BootMode, CompressionAlgo, PartitionTable};
+
+        let disk = own_backup_common::disk::DiskInfo {
+            device_id: String::new(),
+            model: String::new(),
+            serial: String::new(),
+            size_bytes: 0,
+            sector_size_logical: 512,
+            sector_size_physical: 512,
+            media_type: String::new(),
+            partition_table: PartitionTable::Gpt,
+            disk_guid: String::new(),
+            partitions: vec![],
+        };
+        own_backup_backup::sidecar::Sidecar {
+            info: SidecarInfo::new_full(String::from("img.vhdx"), 0),
+            manifest: ImageManifest {
+                backup_id: uuid::Uuid::nil(),
+                created_at: String::new(),
+                backup_type: BackupType::Full,
+                parent_backup_id: None,
+                source_os: String::new(),
+                source_disk: disk,
+                boot_mode: BootMode::Uefi,
+                partition_table: PartitionTable::Gpt,
+                compression_algo: CompressionAlgo::None,
+                compression_level: 0,
+                encryption_algo: None,
+                encryption_salt: None,
+                block_size: 1024 * 1024,
+                total_blocks: 0,
+                used_blocks: 0,
+                backup_mode: BackupMode::UsedSectors,
+                checksum_algorithm: "xxhash64".into(),
+                preflight_report: None,
+                volume_encryption: None,
+            },
+            checksums: vec![],
+            disk_manifest: Some(DiskBackupManifest {
+                format_version: DiskBackupManifest::FORMAT_VERSION,
+                created_at: String::new(),
+                job_id: None,
+                disk_number: 0,
+                disk_model: String::new(),
+                layout: DiskLayout {
+                    disk_guid: String::new(),
+                    sector_size: 512,
+                    size_bytes: 0,
+                    partitions: vec![entry],
+                },
+                images: vec![],
+                source_disk: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn gpt_attributes_and_names_come_back_from_the_copy() {
+        // The designer builds entries out of PartitionInfo, which has no room
+        // for attribute flags — so a table rebuilt from it zeroes them. Bit 63
+        // is what keeps a Recovery partition from getting a drive letter, and
+        // losing it silently changes what the restored disk does.
+        let captured = own_backup_common::gpt::GptPartitionEntry {
+            index: 7,
+            type_guid: "DE94BBA4-06D1-4D40-A16A-BFD50179D6AC".into(),
+            part_guid: "11111111-2222-3333-4444-555555555555".into(),
+            first_lba: 2048,
+            last_lba: 4095,
+            attributes: (1 << 63) | 1,
+            name: "Basic data partition".into(),
+        };
+        let plan = RestorePlan::new(
+            1,
+            "/tmp/img.vhdx".into(),
+            vec![
+                RestoreOp::WritePartitionTable { table: table() },
+                RestoreOp::RestorePartition {
+                    // Target partition 1 receives source partition 7.
+                    src_index: 7,
+                    dst: part(),
+                    mode: RestoreMode::Sectors,
+                    wipe_free_space: false,
+                },
+            ],
+        );
+        let patched = with_captured_gpt_fields(&table(), &plan, &sidecar_with(captured));
+        let PartitionKind::Gpt { attributes, name, type_guid, part_guid } = &patched.entries[0].kind
+        else {
+            panic!("expected a GPT entry");
+        };
+        assert_eq!(*attributes, (1u64 << 63) | 1, "required + no-drive-letter survive");
+        assert_eq!(name, "Basic data partition");
+        assert_eq!(type_guid, "DE94BBA4-06D1-4D40-A16A-BFD50179D6AC");
+        assert_eq!(part_guid, "11111111-2222-3333-4444-555555555555", "UEFI references this");
+    }
+
+    #[test]
+    fn a_hand_created_partition_keeps_what_the_designer_gave_it() {
+        // Nothing restores into it, so there is no captured entry to take from.
+        let plan = RestorePlan::new(
+            1,
+            "/tmp/img.vhdx".into(),
+            vec![RestoreOp::WritePartitionTable { table: table() }],
+        );
+        let captured = own_backup_common::gpt::GptPartitionEntry {
+            index: 7,
+            type_guid: "DE94BBA4-06D1-4D40-A16A-BFD50179D6AC".into(),
+            part_guid: "11111111-2222-3333-4444-555555555555".into(),
+            first_lba: 2048,
+            last_lba: 4095,
+            attributes: 1 << 63,
+            name: "Recovery".into(),
+        };
+        let patched = with_captured_gpt_fields(&table(), &plan, &sidecar_with(captured));
+        assert_eq!(patched, table());
     }
 
     #[test]
