@@ -395,14 +395,73 @@ fn run_op(
             Ok(OpNote::default())
         }
 
-        RestoreOp::RestorePartition { mode: RestoreMode::Files, .. } => {
-            // R4b. Failing loudly beats a silent skip that leaves an empty
-            // partition looking like a successful restore.
-            Err(OwnBackupError::NotImplemented(
-                "пофайловое восстановление ещё не реализовано — выберите посекторный режим \
-                 и раздел не меньше исходного"
+        RestoreOp::RestorePartition { src_index, dst, mode: RestoreMode::Files, .. } => {
+            use own_backup_backup::file_restore_win::{copy_tree, long_path, measure_tree};
+            use own_backup_backup::restore_win::MountedImage;
+
+            // The copy is read through a read-only mount of the image, so the
+            // filesystem driver does the reading and every file's metadata
+            // comes along. Detached when `image` drops, including on failure.
+            let image = MountedImage::open(&plan.image_path)?;
+            let src_root = image.volume_root_of(sidecar, *src_index)?;
+            let dst_root = volume_root_at_offset(plan.target_disk, dst.offset).ok_or_else(|| {
+                OwnBackupError::Device(format!(
+                    "Windows не показала том раздела {} — копировать файлы некуда",
+                    dst.index
+                ))
+            })?;
+
+            // Counting first costs one metadata pass and buys a progress bar
+            // that means something. On a restore that runs for an hour, a
+            // spinner is not good enough.
+            let total = measure_tree(&long_path(std::path::Path::new(&src_root)), cancel);
+            let summary = copy_tree(
+                &long_path(std::path::Path::new(&src_root)),
+                &long_path(std::path::Path::new(&dst_root)),
+                total,
+                cancel,
+                |pr| {
+                    let percent = if pr.bytes_total > 0 {
+                        (pr.bytes_done * 100 / pr.bytes_total) as u32
+                    } else {
+                        0
+                    };
+                    on_progress(percent, pr.bytes_done);
+                    Ok(())
+                },
+            )?;
+
+            if summary.cancelled {
+                return Err(OwnBackupError::Cancelled);
+            }
+
+            let mut follow_ups = vec![
+                "Серийный номер тома восстановить нельзя — он назначается при форматировании, \
+                 и API для его смены не существует. Программы, чьи лицензии к нему привязаны, \
+                 потребуют повторной активации; ссылки на том в BCD придётся пересоздать."
                     .into(),
-            ))
+            ];
+            if !summary.failures.is_empty() {
+                // Naming a few beats a bare count: a user can tell at a glance
+                // whether it was a locked log file or their documents.
+                let sample: Vec<String> =
+                    summary.failures.iter().take(5).map(|(p, e)| format!("{p} ({e})")).collect();
+                follow_ups.push(format!(
+                    "Не удалось скопировать объектов: {}. Первые из них: {}",
+                    summary.failures.len(),
+                    sample.join("; ")
+                ));
+            }
+            Ok(OpNote {
+                message: format!(
+                    "Файлов: {}, каталогов: {}, жёстких ссылок: {}, точек соединения: {}",
+                    summary.files_copied,
+                    summary.dirs_created,
+                    summary.hard_links,
+                    summary.reparse_points
+                ),
+                follow_ups,
+            })
         }
 
         RestoreOp::Format { part, fs, label, quick } => {

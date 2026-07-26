@@ -369,3 +369,70 @@ pub fn verify_partition_sectors(
     );
     Ok(out)
 }
+
+// ---------------------------------------------------------------------------
+// Mounting the image for a file-by-file restore (R4b)
+// ---------------------------------------------------------------------------
+
+/// A read-only mount of a backup image, detached on drop.
+///
+/// The detach matters more than it looks: a leaked attachment keeps the image
+/// file locked, so the next restore attempt fails with a file-in-use error that
+/// says nothing about the real cause.
+pub struct MountedImage {
+    path: std::path::PathBuf,
+    /// `\\.\PhysicalDriveN` of the attached image.
+    physical_path: String,
+}
+
+impl MountedImage {
+    /// Attach `image_path` read-only.
+    pub fn open(image_path: &Path) -> Result<Self> {
+        let physical_path = crate::engine_win::mount_image(image_path, false)?;
+        info!(image = %image_path.display(), device = %physical_path, "image mounted for file restore");
+        Ok(Self { path: image_path.to_path_buf(), physical_path })
+    }
+
+    /// Physical disk number of the attached image.
+    pub fn disk_number(&self) -> Result<u32> {
+        self.physical_path
+            .rsplit(|c: char| !c.is_ascii_digit())
+            .find(|s| !s.is_empty())
+            .and_then(|s| s.parse().ok())
+            .ok_or_else(|| {
+                OwnBackupError::Device(format!(
+                    "cannot read a disk number out of {}",
+                    self.physical_path
+                ))
+            })
+    }
+
+    /// Volume root (`\\?\Volume{…}\`) of source partition `src_index` inside
+    /// the mounted image.
+    pub fn volume_root_of(&self, sidecar: &Sidecar, src_index: u32) -> Result<String> {
+        let disk = self.disk_number()?;
+        // A volume image places its single volume at `volume_data_offset`; a
+        // whole-disk image keeps every partition at its original offset. Both
+        // answers are the window's start.
+        let offset = source_window_for(sidecar, src_index)?.start;
+        crate::volume_win::volume_root_at_offset(disk, offset).ok_or_else(|| {
+            OwnBackupError::Device(format!(
+                "Windows не показала том раздела {src_index} в подключённой копии \
+                 (смещение {offset}) — прочитать файлы неоткуда"
+            ))
+        })
+    }
+}
+
+impl Drop for MountedImage {
+    fn drop(&mut self) {
+        if let Err(e) = crate::engine_win::unmount_image(&self.path) {
+            warn!(
+                image = %self.path.display(), error = %e,
+                "could not detach the mounted image — the file stays locked until the service restarts"
+            );
+        } else {
+            debug!(image = %self.path.display(), "mounted image detached");
+        }
+    }
+}

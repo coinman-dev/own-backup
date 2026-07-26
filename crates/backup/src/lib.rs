@@ -54,6 +54,8 @@ pub mod engine_win;
 #[cfg(target_os = "windows")]
 pub mod exclusions_win;
 #[cfg(target_os = "windows")]
+pub mod file_restore_win;
+#[cfg(target_os = "windows")]
 pub mod format_win;
 #[cfg(target_os = "windows")]
 pub mod letters_win;

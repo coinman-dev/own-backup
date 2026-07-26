@@ -11,7 +11,8 @@
   import type { MapSlot } from '../components/DiskMap.svelte';
   import type {
     Job, DiskInfo, PartitionInfo, ImageInfo,
-    RestorePlan, RestoreOp, PartitionSpec, PartRef, FormatFs, CheckContext, CheckResult, LetterChange,
+    RestorePlan, RestoreOp, RestoreMode, PartitionSpec, PartRef, FormatFs,
+    CheckContext, CheckResult, LetterChange,
   } from '../lib/types';
 
   interface Props {
@@ -756,8 +757,11 @@
     for (const m of mappings) {
       const sp = srcDisk?.partitions.find((x) => x.index === m.src);
       const dp = cur.find((x) => x.index === m.dst);
+      // Same wording as the plan builder's rule, so the list and the plan
+      // cannot describe different things.
+      const byFiles = !!sp && !!dp && dp.size_bytes < sp.size_bytes;
       ops.push(
-        `Восстановить «${sp?.volume_label || sp?.volume_letter || 'раздел ' + m.src}» → «${dp?.volume_label || dp?.volume_letter || 'раздел ' + m.dst}» (${formatBytes(sp?.size_bytes ?? 0)})`,
+        `Восстановить «${sp?.volume_label || sp?.volume_letter || 'раздел ' + m.src}» → «${dp?.volume_label || dp?.volume_letter || 'раздел ' + m.dst}» (${formatBytes(sp?.size_bytes ?? 0)}, ${byFiles ? 'пофайлово: приёмник меньше исходного' : 'посекторно'})`,
       );
     }
     return ops;
@@ -868,24 +872,51 @@
       ? previewIdx.map((dst, k) => ({ src: srcBackupParts[k]?.index ?? 0, dst }))
       : mappings;
 
+    // A target at least as large as the source volume takes it verbatim,
+    // filesystem and all. A smaller one cannot — the filesystem would have to
+    // shrink — so the data goes file by file onto a freshly made one (D1).
+    const filesMode = new Set<number>();
     for (const m of pairs) {
       const dst = refOf(m.dst);
       const sp = srcDisk?.partitions.find((x) => x.index === m.src);
       if (!dst || !sp) continue;
+      const mode: RestoreMode = dst.size >= sp.size_bytes ? 'sectors' : 'files';
+      if (mode === 'files') {
+        filesMode.add(m.dst);
+        // File mode writes onto a filesystem, so one has to exist first.
+        const fs = formatFsOf(sp.filesystem);
+        if (fs) {
+          ops.push({
+            op: 'format',
+            part: dst,
+            fs,
+            label: sp.volume_label || '',
+            quick: true,
+          });
+        }
+      }
       ops.push({
         op: 'restore_partition',
         src_index: m.src,
         dst,
-        mode: 'sectors',
-        wipe_free_space: wipeFreeSpace,
+        mode,
+        wipe_free_space: mode === 'sectors' && wipeFreeSpace,
       });
-      // A larger target leaves a tail the filesystem does not know about.
-      // Windows can only claim it automatically for NTFS (D2).
-      if (dst.size > sp.size_bytes && (sp.filesystem || '').toLowerCase() === 'ntfs') {
+      // A larger target leaves a tail the filesystem does not know about; only
+      // NTFS can claim it automatically (D2). In file mode the filesystem was
+      // just made at full size, so there is nothing to extend.
+      if (
+        mode === 'sectors' &&
+        dst.size > sp.size_bytes &&
+        (sp.filesystem || '').toLowerCase() === 'ntfs'
+      ) {
         ops.push({ op: 'extend_filesystem', part: dst });
       }
     }
 
+    // Sector-restored partitions must never be formatted — formatting runs
+    // later in the fixed order and would erase what was just written. File-mode
+    // targets already got their Format op above.
     const receivesData = new Set(pairs.map((m) => m.dst));
     for (const p of cur) {
       const meta = newPartMeta.get(p.index);
@@ -972,7 +1003,11 @@
     const need = sp.used_bytes > 0 ? sp.used_bytes : sp.size_bytes;
     if (p.size_bytes < need) {
       badTarget = p.index;
-      fitMsg = `Раздел не подходит: нужно ≥ ${formatBytes(need)}, а доступно ${formatBytes(p.size_bytes)}.`;
+      fitMsg =
+        `Раздел не подходит: нужно ≥ ${formatBytes(need)}, а доступно ${formatBytes(p.size_bytes)}.` +
+        (sp.used_bytes > 0
+          ? ' В приёмник меньше исходного тома данные переносятся пофайлово, но и они сюда не влезают.'
+          : '');
       return;
     }
     pushHistory();

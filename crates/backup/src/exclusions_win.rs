@@ -39,10 +39,10 @@ const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 const FILE_LIST_DIRECTORY: u32 = 0x0001;
 
 /// One directory entry from [`list_dir_backup`].
-pub(crate) struct DirEntryInfo {
-    pub(crate) name: String,
-    pub(crate) size: u64,
-    pub(crate) attributes: u32,
+pub struct DirEntryInfo {
+    pub name: String,
+    pub size: u64,
+    pub attributes: u32,
 }
 
 /// A matched entry, recorded at its highest match point (a matched directory
@@ -62,7 +62,7 @@ pub struct ExcludedPath {
 /// enumerated once SeBackupPrivilege is enabled — unlike `std::fs::read_dir`,
 /// which opens without backup semantics and is denied. Sizes/attributes come
 /// straight from the enumeration, so no per-file open is needed here.
-pub(crate) fn list_dir_backup(dir: &std::path::Path) -> Result<Vec<DirEntryInfo>> {
+pub fn list_dir_backup(dir: &std::path::Path) -> Result<Vec<DirEntryInfo>> {
     let wide = to_wide(&dir.to_string_lossy());
     // SAFETY: `wide` outlives the call.
     let handle = unsafe {
