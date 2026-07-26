@@ -12,6 +12,69 @@
   let imported: { id: string; job: Job }[] = $state([]);
   let addError: string | null = $state(null);
   let addOpen = $state(false); // "Файл / Папка с копиями" choice modal
+  /** Keep what was added, so it is there next time. On by default: having to
+   *  find the same file again on every launch is the sort of thing nobody asks
+   *  for and everybody resents. */
+  let rememberAdded = $state(true);
+
+  /** Paths remembered in the app config, restored on the next launch. The card
+   *  itself is always read from the image's own metadata — this only records
+   *  which files to look at, which is what keeps it working on a machine with
+   *  no job database. */
+  let config = $state<Record<string, unknown> | null>(null);
+
+  $effect(() => {
+    let live = true;
+    api.getConfig().then(
+      async (cfg) => {
+        if (!live) return;
+        config = cfg;
+        const paths = (cfg.remembered_backups as string[] | undefined) ?? [];
+        const missing: string[] = [];
+        for (const path of paths) {
+          try {
+            addEntry(makeJobFromInfo(await api.readImageInfo(path)));
+          } catch {
+            // Moved, deleted, or on a drive that is not plugged in. Dropped
+            // quietly rather than nagging: the file is simply not here.
+            missing.push(path);
+          }
+        }
+        if (live && missing.length > 0) {
+          void persistRemembered(paths.filter((p) => !missing.includes(p)));
+        }
+      },
+      () => {},
+    );
+    return () => { live = false; };
+  });
+
+  async function persistRemembered(paths: string[]): Promise<void> {
+    if (!config) return;
+    const next = { ...config, remembered_backups: Array.from(new Set(paths)) };
+    config = next;
+    try {
+      await api.saveConfig(next);
+    } catch (e) {
+      addError = `Список копий не сохранён: ${e}`;
+    }
+  }
+
+  /** Record `paths` so they come back next launch, if the user asked for it. */
+  async function remember(paths: string[]): Promise<void> {
+    if (!rememberAdded || paths.length === 0) return;
+    const current = (config?.remembered_backups as string[] | undefined) ?? [];
+    await persistRemembered([...current, ...paths]);
+  }
+
+  /** Forget one copy — from the list and from the config. */
+  async function forget(id: string): Promise<void> {
+    imported = imported.filter((x) => x.id !== id);
+    if (selectedId === id) selectedId = jobs.list[0]?.id ?? imported[0]?.id ?? null;
+    const path = id.startsWith('file:') ? id.slice(5) : id;
+    const current = (config?.remembered_backups as string[] | undefined) ?? [];
+    await persistRemembered(current.filter((p) => p !== path));
+  }
 
   let selectedId: string | null = $state(null);
   const selectedJob = $derived(
@@ -93,6 +156,7 @@
     try {
       const info = await api.readImageInfo(picked);
       selectedId = addEntry(makeJobFromInfo(info));
+      await remember([info.image_path]);
     } catch (e) {
       addError = String(e);
     }
@@ -116,6 +180,7 @@
         if (!first) first = id;
       }
       if (first) selectedId = first;
+      await remember(list.map((i) => i.image_path));
     } catch (e) {
       addError = String(e);
     }
@@ -156,16 +221,21 @@
         </button>
       {/each}
       {#each imported as it (it.id)}
-        <button class="job-item" class:sel={selectedId === it.id} onclick={() => (selectedId = it.id)}>
-          <div class="job-icon">
-            <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="1.4"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="12" cy="12" r="3.2"/></svg>
-            <span class="status-dot" style="background:var(--green)"></span>
-          </div>
-          <div class="job-meta">
-            <div class="job-name">{it.job.name}</div>
-            <div class="job-path">файл копии</div>
-          </div>
-        </button>
+        <!-- Added by hand, so it can be taken away by hand: the × removes it
+             from the list and from what is remembered for next launch. -->
+        <div class="job-item added" class:sel={selectedId === it.id}>
+          <button class="job-pick" onclick={() => (selectedId = it.id)}>
+            <div class="job-icon">
+              <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="1.4"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="12" cy="12" r="3.2"/></svg>
+              <span class="status-dot" style="background:var(--green)"></span>
+            </div>
+            <div class="job-meta">
+              <div class="job-name">{it.job.name}</div>
+              <div class="job-path">файл копии</div>
+            </div>
+          </button>
+          <button class="job-forget" title="Убрать из списка (файл не удаляется)" onclick={() => forget(it.id)}>×</button>
+        </div>
       {/each}
     </div>
     {#if addError}<div class="add-err">{addError}</div>{/if}
@@ -207,6 +277,13 @@
           <span class="choice-sub">найти все копии в папке</span>
         </button>
       </div>
+      <label class="remember">
+        <input type="checkbox" bind:checked={rememberAdded} />
+        <span>
+          Добавить файл(ы) бэкапа в список Резервных копий
+          <em>копия останется в списке после перезапуска — не придётся искать файл заново</em>
+        </span>
+      </label>
       <div class="dialog-actions">
         <button class="ghost" onclick={() => (addOpen = false)}>Отмена</button>
       </div>
@@ -233,6 +310,13 @@
   .job-path { font-size: 12px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .add-btn { display: flex; align-items: center; gap: 10px; padding: 15px 18px; background: none; border: none; border-top: 1px solid var(--border); cursor: pointer; font-size: 14px; font-weight: 600; color: var(--head); font-family: var(--font); }
   .add-btn:hover { color: var(--primary); }
+  .remember { display: flex; align-items: flex-start; gap: 9px; margin: 4px 0 16px; font-size: 13px; color: var(--head); cursor: pointer; line-height: 1.45; }
+  .remember input { width: auto; margin-top: 2px; flex: 0 0 auto; }
+  .job-item.added { display: flex; align-items: center; padding: 0; }
+  .job-pick { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; padding: 10px 8px; background: none; border: none; cursor: pointer; text-align: left; font-family: var(--font); }
+  .job-forget { flex: 0 0 auto; width: 26px; height: 26px; margin-right: 6px; border: none; background: none; border-radius: 4px; color: var(--text-muted); font-size: 17px; line-height: 1; cursor: pointer; font-family: var(--font); }
+  .job-forget:hover { background: rgba(216,74,74,.12); color: #b32b2b; }
+  .remember em { display: block; font-style: normal; font-size: 12px; color: var(--text-muted); margin-top: 3px; }
   .add-err { margin: 0 8px 8px; padding: 8px 12px; font-size: 12px; color: #8c1d1d; background: rgba(216,74,74,.08); border-radius: 5px; }
   .dash-col { flex: 1; min-width: 0; overflow: auto; }
   .empty-dash { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; color: var(--text-muted); font-size: 15px; }

@@ -301,8 +301,14 @@ impl RestoreOp {
     }
 
     /// One line describing the operation, in the words the user will read.
+    ///
+    /// A partition is named by number *and* size. The plan carries no labels or
+    /// filesystems — those live in the check context — but a bare "раздел 3"
+    /// makes the reader go and look it up, and the size alone is usually enough
+    /// to recognise which one it is.
     pub fn title(&self) -> String {
         use crate::units::human_bytes;
+        let named = |p: &PartRef| format!("{} ({})", p.index, human_bytes(p.size));
         match self {
             RestoreOp::WritePartitionTable { table } => format!(
                 "Записать разметку {} ({} разд.)",
@@ -314,25 +320,24 @@ impl RestoreOp {
             ),
             RestoreOp::Format { part, fs, label, quick } => format!(
                 "Отформатировать раздел {} в {}{}{}",
-                part.index,
+                named(part),
                 fs.as_str(),
                 if label.is_empty() { String::new() } else { format!(", метка «{label}»") },
                 if *quick { ", быстрое" } else { ", полное" }
             ),
             RestoreOp::RestorePartition { src_index, dst, mode, .. } => format!(
-                "Восстановить раздел {src_index} → {} ({}, {})",
-                dst.index,
-                human_bytes(dst.size),
+                "Восстановить раздел {src_index} → {} ({})",
+                named(dst),
                 match mode {
                     RestoreMode::Sectors => "посекторно",
                     RestoreMode::Files => "пофайлово",
                 }
             ),
             RestoreOp::ExtendFilesystem { part } => {
-                format!("Расширить файловую систему раздела {} на весь раздел", part.index)
+                format!("Расширить файловую систему раздела {} на весь раздел", named(part))
             }
             RestoreOp::AssignLetter { part, letter } => {
-                format!("Назначить разделу {} букву {letter}:", part.index)
+                format!("Назначить разделу {} букву {letter}:", named(part))
             }
             RestoreOp::FinalizeBoot { uefi, .. } => {
                 format!("Пересоздать загрузчик ({})", if *uefi { "UEFI" } else { "BIOS" })

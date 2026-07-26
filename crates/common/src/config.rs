@@ -19,6 +19,12 @@ pub struct AppConfig {
     pub hooks: HooksConfig,
     #[serde(default)]
     pub credentials: CredentialsConfig,
+    /// Backup images added by hand on the restore screen, so they come back on
+    /// the next launch instead of having to be picked again. Paths only: the
+    /// card itself is read from each image's own embedded metadata, which is
+    /// what makes this work on a machine with no job database at all.
+    #[serde(default)]
+    pub remembered_backups: Vec<String>,
 }
 
 /// Pre/post snapshot hooks for application-consistent backups.
@@ -93,6 +99,7 @@ impl Default for AppConfig {
             default_compression_level: 3,
             hooks: HooksConfig::default(),
             credentials: CredentialsConfig::default(),
+            remembered_backups: Vec::new(),
         }
     }
 }

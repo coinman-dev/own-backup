@@ -254,6 +254,27 @@
   );
   const canReencrypt = $derived(reencryptable.length > 0);
 
+  /** A partition named the way a person recognises it: number, then what it is.
+   *  A bare "раздел 3" makes the reader go and find it on the map. */
+  function describePart(p: PartitionInfo | undefined | null, index: number): string {
+    if (!p) return String(index);
+    const bits: string[] = [];
+    const label = p.volume_label || (p.volume_letter ? `${p.volume_letter}:` : '');
+    if (label) bits.push(`«${label}»`);
+    if (p.size_bytes > 0) bits.push(formatBytes(p.size_bytes));
+    const fs = (p.filesystem || '').replace(/^unknown$/i, '');
+    if (fs) bits.push(fs === 'ntfs' ? 'NTFS' : fs.charAt(0).toUpperCase() + fs.slice(1));
+    return bits.length > 0 ? `${index} (${bits.join(', ')})` : String(index);
+  }
+  /** Source partition inside the copy, by its index. */
+  function describeSrc(index: number): string {
+    return describePart(srcDisk?.partitions.find((p) => p.index === index), index);
+  }
+  /** Target partition, as the designer currently has it. */
+  function describeDst(index: number): string {
+    return describePart(curParts.find((p) => p.index === index), index);
+  }
+
   // Source partitions that are actually inside this copy.
   const srcBackupParts = $derived(
     (srcDisk?.partitions ?? []).filter((p) => backedUpParts.includes(p.index)),
@@ -864,7 +885,7 @@
         bits.push('с возвратом шифрования');
       }
       ops.push(
-        `Восстановить «${sp?.volume_label || sp?.volume_letter || 'раздел ' + m.src}» → «${dp?.volume_label || dp?.volume_letter || 'раздел ' + m.dst}» (${bits.join(', ')})`,
+        `Восстановить раздел ${describeSrc(m.src)} → раздел ${describeDst(m.dst)} (${bits.join(', ')})`,
       );
     }
     return ops;
@@ -1292,8 +1313,8 @@
   /** "Раздел 5: ..." repeated for 5, 6 and 7 becomes "Разделы 5, 6, 7: ...". */
   function mergedText(g: { message: string; parts: number[] }): string {
     if (g.parts.length < 2) return g.message;
-    const tail = g.message.replace(/^Раздел \d+/, '').replace(/^\s*:\s*/, ': ');
-    return `Разделы ${g.parts.join(', ')}${tail}`;
+    const tail = g.message.replace(/^Раздел \d+(\s*\([^)]*\))?/, '').replace(/^\s*:\s*/, ': ');
+    return `Разделы ${g.parts.map(describeDst).join('; ')}${tail}`;
   }
 
   const checkErrors = $derived(groupByCode(checks.filter((c) => c.level === 'error')));
@@ -1434,7 +1455,9 @@
         <div class="luks-row">
           <label class="luks-opt">
             <input type="checkbox" bind:checked={reencrypt} />
-            <b>Вернуть шифрование{reencryptable.length > 1 ? ` разделам ${reencryptable.join(', ')}` : ` разделу ${reencryptable[0]}`}</b>
+            <b>Вернуть шифрование{reencryptable.length > 1
+              ? ` разделам ${reencryptable.map(describeSrc).join('; ')}`
+              : ` разделу ${describeSrc(reencryptable[0])}`}</b>
           </label>
           {#if reencrypt && reencryptable.length === 1}
             {@const part = reencryptable[0]}
@@ -1471,7 +1494,7 @@
         {#if reencrypt && reencryptable.length > 1}
           {#each reencryptable as part}
             <div class="pw-inline multi">
-              <span class="pw-lbl">Раздел {part} — пароль:</span>
+              <span class="pw-lbl">Раздел {describeSrc(part)} — пароль:</span>
               <input
                 type="password"
                 autocomplete="off"
@@ -1514,7 +1537,7 @@
         <span>
           <b>Шифрование не восстановится.</b>
           {decryptedParts.length === 1 ? 'Раздел' : 'Разделы'}
-          {decryptedParts.join(', ')}
+          {decryptedParts.map(describeSrc).join('; ')}
           {decryptedParts.length === 1 ? 'был зашифрован' : 'были зашифрованы'} (LUKS),
           но в копию {decryptedParts.length === 1 ? 'попал' : 'попали'} в расшифрованном виде,
           а заголовок контейнера в ней не сохранён — так писались копии раньше.

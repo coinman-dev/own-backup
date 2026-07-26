@@ -215,6 +215,33 @@ pub struct CheckContext {
 }
 
 impl CheckContext {
+    /// A partition named the way a person would recognise it: the number, then
+    /// what it actually is.
+    ///
+    /// "Раздел 3" alone asks the reader to go and look it up on the map — and a
+    /// message about destroying data is the worst possible place to make
+    /// someone do that. `size` and `filesystem` come from whatever is known;
+    /// when nothing is, the bare number is still returned rather than a lie.
+    fn describe_target(&self, index: u32, table: Option<&PartitionTableSpec>) -> String {
+        if let Some(t) = self.target(index) {
+            return describe(index, &t.label, t.size_bytes, Some(t.filesystem));
+        }
+        // A partition the plan creates does not exist yet; the table knows how
+        // big it will be.
+        let size = table
+            .and_then(|t| t.entries.iter().find(|e| e.index == index).map(|e| e.size_bytes(t.sector_size)))
+            .unwrap_or(0);
+        describe(index, "", size, None)
+    }
+
+    /// The same, for a partition inside the copy.
+    fn describe_source(&self, index: u32) -> String {
+        match self.source(index) {
+            Some(s) => describe(index, &s.label, s.size_bytes, Some(s.filesystem)),
+            None => index.to_string(),
+        }
+    }
+
     fn source(&self, index: u32) -> Option<&SourcePartition> {
         self.sources.iter().find(|s| s.index == index)
     }
@@ -225,6 +252,29 @@ impl CheckContext {
 
     fn requested_format(&self, index: u32) -> Option<crate::restore_plan::FormatFs> {
         self.requested_formats.iter().find(|r| r.index == index).map(|r| r.fs)
+    }
+}
+
+/// `3 («Данные», 128.00 ГиБ, NTFS)` — as much of that as is known.
+///
+/// "Раздел 3" on its own asks the reader to go and look it up on the map, and a
+/// message about destroying data is the worst possible place to make someone do
+/// that.
+fn describe(index: u32, label: &str, size: u64, fs: Option<FileSystem>) -> String {
+    let mut bits = Vec::new();
+    if !label.trim().is_empty() {
+        bits.push(format!("«{}»", label.trim()));
+    }
+    if size > 0 {
+        bits.push(human(size));
+    }
+    if let Some(fs) = fs.filter(|f| *f != FileSystem::Unknown) {
+        bits.push(fs.label().to_string());
+    }
+    if bits.is_empty() {
+        index.to_string()
+    } else {
+        format!("{index} ({})", bits.join(", "))
     }
 }
 
@@ -470,16 +520,17 @@ fn check_ops(
 
     for op in &plan.ops {
         if let Some(part) = op.part() {
-            check_part_ref(part, table, out);
+            check_part_ref(part, table, ctx, out);
         }
         match op {
             RestoreOp::RestorePartition { src_index, dst, mode, wipe_free_space, reencrypt } => {
+                let dst_txt = ctx.describe_target(dst.index, table);
                 if restored.contains(&dst.index) {
                     out.push(CheckResult::new(
                         CheckLevel::Error,
                         CheckCode::DuplicateRestore,
                         Some(dst.index),
-                        format!("В раздел {} пишут данные две операции сразу.", dst.index),
+                        format!("В раздел {dst_txt} пишут данные две операции сразу."),
                     ));
                 }
                 restored.push(dst.index);
@@ -491,10 +542,9 @@ fn check_ops(
                             CheckCode::FreeSpaceNotWiped,
                             Some(dst.index),
                             format!(
-                                "Раздел {}: копируются только занятые блоки, поэтому в промежутках \
-                                 физически останутся прежние данные. Файловая система их не увидит; \
-                                 чтобы стереть — включите затирание свободного места.",
-                                dst.index
+                                "Раздел {dst_txt}: копируются только занятые блоки, поэтому в \
+                                 промежутках физически останутся прежние данные. Файловая система \
+                                 их не увидит; чтобы стереть — включите затирание свободного места."
                             ),
                         ));
                     }
@@ -505,21 +555,21 @@ fn check_ops(
                         CheckLevel::Error,
                         CheckCode::UnknownSourcePartition,
                         Some(dst.index),
-                        format!("В копии нет раздела с номером {}.", src_index),
+                        format!("В копии нет раздела с номером {src_index}."),
                     ));
                     continue;
                 };
-                check_fit(src, dst, *mode, out);
-                check_encryption(src, dst, *mode, *reencrypt, out);
-                check_destination(ctx, src, dst, out);
-                check_format_choice(ctx, src, dst, *mode, out);
+                check_fit(src, dst, &dst_txt, *mode, out);
+                check_encryption(src, dst, dst.index, &dst_txt, *mode, *reencrypt, out);
+                check_destination(ctx, src, dst, &dst_txt, out);
+                check_format_choice(ctx, src, dst.index, &dst_txt, *mode, out);
                 if *mode == RestoreMode::Files {
                     file_targets.push((dst.index, src.filesystem));
                 }
             }
             RestoreOp::Format { part, fs, .. } => formatted.push((part.index, *fs)),
             RestoreOp::ExtendFilesystem { part } => {
-                check_extend(plan, ctx, part, out);
+                check_extend(plan, ctx, part, &ctx.describe_target(part.index, table), out);
             }
             RestoreOp::FinalizeBoot { windows_part, esp, uefi } => {
                 if *uefi && esp.is_none() {
@@ -545,11 +595,14 @@ fn check_ops(
                 CheckCode::FileModeNeedsFormat,
                 Some(*index),
                 format!(
-                    "Раздел {index} восстанавливается пофайлово, но в плане нет его \
-                     форматирования — копировать файлы некуда."
+                    "Раздел {} восстанавливается пофайлово, но в плане нет его \
+                     форматирования — копировать файлы некуда.",
+                    ctx.describe_target(*index, table)
                 ),
             )),
-            Some((_, fs)) => check_format_capacity(*index, *src_fs, *fs, out),
+            Some((_, fs)) => {
+                check_format_capacity(*index, &ctx.describe_target(*index, table), *src_fs, *fs, out)
+            }
         }
     }
 
@@ -565,7 +618,7 @@ fn check_ops(
                     "Раздел {} восстанавливается посекторно и тут же форматируется — \
                      форматирование сотрёт всё, что было записано. Посекторное восстановление \
                      приносит готовую файловую систему, форматировать не нужно.",
-                    index
+                    ctx.describe_target(*index, table)
                 ),
             ));
         }
@@ -576,14 +629,22 @@ fn check_ops(
 /// They are stored twice — the table addresses sectors, the operation addresses
 /// bytes for `part:<disk>:<offset>:<len>` — and this is where they are made to
 /// agree.
-fn check_part_ref(part: PartRef, table: Option<&PartitionTableSpec>, out: &mut Vec<CheckResult>) {
+fn check_part_ref(
+    part: PartRef,
+    table: Option<&PartitionTableSpec>,
+    ctx: &CheckContext,
+    out: &mut Vec<CheckResult>,
+) {
     let Some(t) = table else { return };
     let Some(e) = t.entries.iter().find(|e| e.index == part.index) else {
         out.push(CheckResult::new(
             CheckLevel::Error,
             CheckCode::OpNotInTable,
             Some(part.index),
-            format!("Операция ссылается на раздел {}, которого нет в новой разметке.", part.index),
+            format!(
+                "Операция ссылается на раздел {}, которого нет в новой разметке.",
+                ctx.describe_target(part.index, table)
+            ),
         ));
         return;
     };
@@ -595,14 +656,24 @@ fn check_part_ref(part: PartRef, table: Option<&PartitionTableSpec>, out: &mut V
             Some(part.index),
             format!(
                 "Раздел {}: операция адресует {}..+{} Б, а в разметке он лежит по {}..+{} Б.",
-                part.index, part.offset, part.size, offset, size
+                ctx.describe_target(part.index, table),
+                part.offset,
+                part.size,
+                offset,
+                size
             ),
         ));
     }
 }
 
 /// Does the source fit into the target, in the requested mode?
-fn check_fit(src: &SourcePartition, dst: &PartRef, mode: RestoreMode, out: &mut Vec<CheckResult>) {
+fn check_fit(
+    src: &SourcePartition,
+    dst: &PartRef,
+    dst_txt: &str,
+    mode: RestoreMode,
+    out: &mut Vec<CheckResult>,
+) {
     match mode {
         RestoreMode::Sectors => {
             if dst.size < src.size_bytes {
@@ -611,11 +682,10 @@ fn check_fit(src: &SourcePartition, dst: &PartRef, mode: RestoreMode, out: &mut 
                     CheckCode::TargetTooSmallForSectors,
                     Some(dst.index),
                     format!(
-                        "Раздел {} меньше исходного тома «{}»: {} против {}. Посекторное \
+                        "Раздел {dst_txt} меньше исходного тома «{}»: {} против {}. Посекторное \
                          восстановление переносит том целиком вместе с его файловой системой, \
                          поэтому приёмник не может быть меньше. Уместить данные можно только \
                          пофайлово.",
-                        dst.index,
                         src.label,
                         human(dst.size),
                         human(src.size_bytes)
@@ -646,10 +716,8 @@ fn check_fit(src: &SourcePartition, dst: &PartRef, mode: RestoreMode, out: &mut 
                     Some(dst.index),
                     format!(
                         "Для тома «{}» неизвестен объём занятых данных, поэтому проверить, \
-                         влезут ли они в раздел {} ({}), заранее нельзя.",
-                        src.label,
-                        dst.index,
-                        human(dst.size)
+                         влезут ли они в раздел {dst_txt}, заранее нельзя.",
+                        src.label
                     ),
                 ));
                 return;
@@ -661,10 +729,8 @@ fn check_fit(src: &SourcePartition, dst: &PartRef, mode: RestoreMode, out: &mut 
                     CheckCode::TargetTooSmallForFiles,
                     Some(dst.index),
                     format!(
-                        "В раздел {} ({}) не влезут данные тома «{}»: занято {}, а с запасом \
+                        "В раздел {dst_txt} не влезут данные тома «{}»: занято {}, а с запасом \
                          на служебные структуры файловой системы нужно не меньше {}.",
-                        dst.index,
-                        human(dst.size),
                         src.label,
                         human(src.used_bytes),
                         human(needed)
@@ -722,7 +788,11 @@ fn check_live_system(
     let hit: Vec<u32> =
         touched.iter().copied().filter(|i| ctx.protected_parts.contains(i)).collect();
     if !hit.is_empty() {
-        let list = hit.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
+        let list = hit
+            .iter()
+            .map(|i| ctx.describe_target(*i, table))
+            .collect::<Vec<_>>()
+            .join("; ");
         out.push(CheckResult::new(
             CheckLevel::Error,
             CheckCode::TargetIsLiveSystemPartition,
@@ -768,27 +838,27 @@ fn check_live_system(
 fn check_format_choice(
     ctx: &CheckContext,
     src: &SourcePartition,
-    dst: &PartRef,
+    dst_index: u32,
+    dst_txt: &str,
     mode: RestoreMode,
     out: &mut Vec<CheckResult>,
 ) {
     if mode != RestoreMode::Sectors {
         return; // a file restore really does format, and the plan says so
     }
-    let Some(chosen) = ctx.requested_format(dst.index) else { return };
+    let Some(chosen) = ctx.requested_format(dst_index) else { return };
     if chosen.is_same_as(src.filesystem) {
         return;
     }
     out.push(CheckResult::new(
         CheckLevel::Warning,
         CheckCode::FormatChoiceIgnored,
-        Some(dst.index),
+        Some(dst_index),
         format!(
-            "При создании раздела {} выбрана файловая система {}, но она создана не будет: \
-             посекторное восстановление приносит файловую систему из копии целиком, и в \
-             разделе окажется {}. Форматировать тут нечего — форматирование стёрло бы \
+            "При создании раздела {dst_txt} выбрана файловая система {}, но она создана не \
+             будет: посекторное восстановление приносит файловую систему из копии целиком, и \
+             в разделе окажется {}. Форматировать тут нечего — форматирование стёрло бы \
              только что восстановленные данные.",
-            dst.index,
             chosen.as_str(),
             src.filesystem.label()
         ),
@@ -813,6 +883,7 @@ fn check_destination(
     ctx: &CheckContext,
     src: &SourcePartition,
     dst: &PartRef,
+    dst_txt: &str,
     out: &mut Vec<CheckResult>,
 ) {
     let Some(cur) = ctx.target(dst.index) else { return };
@@ -833,9 +904,8 @@ fn check_destination(
             CheckCode::DestinationWillBeErased,
             Some(dst.index),
             format!(
-                "На разделе {} сейчас {}{label}{used}. Восстановление перезапишет его \
+                "На разделе {dst_txt} сейчас {}{label}{used}. Восстановление перезапишет его \
                  целиком — вернуть то, что там лежит, будет нельзя.",
-                dst.index,
                 cur.filesystem.label()
             ),
         ));
@@ -851,18 +921,16 @@ fn check_destination(
             Some(dst.index),
             if becomes_linux {
                 format!(
-                    "Раздел {} перестанет быть разделом Windows: в него ляжет {}, и тип \
-                     раздела в таблице сменится на Linux. Windows больше не покажет его \
+                    "Раздел {dst_txt} перестанет быть разделом Windows: в него ляжет {}, и \
+                     тип раздела в таблице сменится на Linux. Windows больше не покажет его \
                      как диск — это нормально для раздела Linux, но букву {} он потеряет.",
-                    dst.index,
                     src.filesystem.label(),
                     cur.label.trim()
                 )
             } else {
                 format!(
-                    "Раздел {} сейчас размечен как {}, а в него ляжет {} — после \
+                    "Раздел {dst_txt} сейчас размечен как {}, а в него ляжет {} — после \
                      восстановления Windows начнёт показывать его как обычный диск.",
-                    dst.index,
                     cur.filesystem.label(),
                     src.filesystem.label()
                 )
@@ -882,10 +950,13 @@ fn check_destination(
 fn check_encryption(
     src: &SourcePartition,
     dst: &PartRef,
+    dst_index: u32,
+    dst_txt: &str,
     mode: RestoreMode,
     reencrypt: bool,
     out: &mut Vec<CheckResult>,
 ) {
+    let _ = dst;
     if reencrypt {
         if !src.luks_header_available {
             out.push(CheckResult::new(
@@ -893,10 +964,9 @@ fn check_encryption(
                 CheckCode::NoLuksHeader,
                 Some(dst.index),
                 format!(
-                    "Вернуть шифрование разделу {} нельзя: в этой копии не сохранён заголовок \
-                     контейнера. Так писались копии до того, как заголовок начали сохранять — \
-                     восстановить её можно только расшифрованной.",
-                    dst.index
+                    "Вернуть шифрование разделу {dst_txt} нельзя: в этой копии не сохранён \
+                     заголовок контейнера. Так писались копии до того, как заголовок начали \
+                     сохранять — восстановить её можно только расшифрованной."
                 ),
             ));
         }
@@ -909,10 +979,9 @@ fn check_encryption(
                 CheckCode::ReencryptNeedsSectors,
                 Some(dst.index),
                 format!(
-                    "Раздел {}: вернуть шифрование можно только при посекторном \
+                    "Раздел {dst_txt}: вернуть шифрование можно только при посекторном \
                      восстановлении — пофайловое пишет через файловую систему, а внутри \
-                     нового контейнера её ещё нет.",
-                    dst.index
+                     нового контейнера её ещё нет."
                 ),
             ));
         }
@@ -936,12 +1005,11 @@ fn check_encryption(
         Some(dst.index),
         format!(
             "Том «{}» был зашифрован, но в копию он попал расшифрованным — после \
-             восстановления в разделе {} окажется обычная {} без контейнера LUKS. \
+             восстановления в разделе {dst_txt} окажется обычная {} без контейнера LUKS. \
              Данные будут целы и читаемы, но система с этого раздела не загрузится: \
              initramfs и /etc/crypttab ждут зашифрованное устройство, которого больше нет. \
              {remedy}",
             src.label,
-            dst.index,
             src.filesystem.label()
         ),
     ));
@@ -950,6 +1018,7 @@ fn check_encryption(
 /// Does the filesystem being created hold what the source held?
 fn check_format_capacity(
     index: u32,
+    index_txt: &str,
     src_fs: FileSystem,
     fs: crate::restore_plan::FormatFs,
     out: &mut Vec<CheckResult>,
@@ -964,7 +1033,7 @@ fn check_format_capacity(
             CheckCode::FormatFsTooLimited,
             Some(index),
             format!(
-                "Раздел {index} форматируется в FAT32, а исходный том — {}. \
+                "Раздел {index_txt} форматируется в FAT32, а исходный том — {}. \
                  В FAT32 не поместится ни один файл больше 4 ГиБ; такие файлы \
                  скопировать не удастся.",
                 src_fs.label()
@@ -980,6 +1049,7 @@ fn check_extend(
     plan: &RestorePlan,
     ctx: &CheckContext,
     part: &PartRef,
+    part_txt: &str,
     out: &mut Vec<CheckResult>,
 ) {
     let from_image = plan.ops.iter().find_map(|op| match op {
@@ -1006,9 +1076,8 @@ fn check_extend(
                 CheckCode::ExtendNotNtfs,
                 Some(part.index),
                 format!(
-                    "Расширять раздел {} нечего: в него ничего не восстанавливается и он не \
-                     форматируется, значит файловой системы там не будет.",
-                    part.index
+                    "Расширять раздел {part_txt} нечего: в него ничего не восстанавливается и \
+                     он не форматируется, значит файловой системы там не будет."
                 ),
             ));
             return;
@@ -1020,10 +1089,9 @@ fn check_extend(
         CheckCode::ExtendNotNtfs,
         Some(part.index),
         format!(
-            "Раздел {} размечен как {} — автоматически расширить Windows умеет только NTFS. \
-             Свободный хвост останется неразмеченным внутри раздела; его придётся дорастить \
-             средствами самой системы.",
-            part.index, fs_name
+            "Раздел {part_txt} размечен как {fs_name} — автоматически расширить Windows умеет \
+             только NTFS. Свободный хвост останется неразмеченным внутри раздела; его придётся \
+             дорастить средствами самой системы."
         ),
     ));
 }
