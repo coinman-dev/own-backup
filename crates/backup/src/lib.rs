@@ -20,6 +20,7 @@ pub mod ntfs_map;
 pub mod overlay;
 pub mod qcow2;
 pub mod raw_copy;
+pub mod restore_map;
 pub mod san_policy;
 pub mod secrets;
 pub mod sidecar;
@@ -60,6 +61,8 @@ pub mod letters_win;
 pub mod privileges_win;
 #[cfg(target_os = "windows")]
 pub mod qcow2_removal_win;
+#[cfg(target_os = "windows")]
+pub mod restore_win;
 #[cfg(target_os = "windows")]
 pub mod true_removal_win;
 #[cfg(target_os = "windows")]

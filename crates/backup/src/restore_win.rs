@@ -1,0 +1,269 @@
+//! Restoring one partition's data, sector by sector (R4a).
+//!
+//! The existing `restore_volume` writes a whole volume image onto a whole
+//! device. This does the harder case the designer produces: take *one*
+//! partition out of an image — which may be a whole-disk image holding several
+//! — and write it into *one* partition on the target, wherever that partition
+//! happens to sit.
+//!
+//! Addressing goes through `part:<disk>:<offset>:<len>`
+//! ([`crate::win_device`]), a window over the physical drive. That works for a
+//! partition with no drive letter, no mounted volume, and no filesystem Windows
+//! recognises — none of which is exotic: an EFI System Partition, a Linux
+//! partition, and a partition that does not exist yet are all in that category.
+//!
+//! The arithmetic — which blocks, which slices, where they land — is in
+//! [`crate::restore_map`] and tested there.
+
+#![cfg(target_os = "windows")]
+
+use std::path::Path;
+use std::time::{Duration, Instant};
+
+use tracing::{debug, info, warn};
+
+use own_backup_common::cancel::CancelToken;
+use own_backup_common::{OwnBackupError, Result};
+
+use crate::checksum::compute_block_checksum;
+use crate::engine_win::ImageReadSource;
+use crate::restore_map::{check_fits, plan_block_copy, uncovered_ranges, SourceWindow};
+use crate::sidecar::Sidecar;
+use crate::volume_win::VolumeDismountGuard;
+use crate::win_device::WinRawDevice;
+
+/// Chunk used when zeroing the gaps between restored blocks.
+const WIPE_CHUNK: usize = 4 * 1024 * 1024;
+
+/// Where the data for one partition is to be written.
+#[derive(Debug, Clone, Copy)]
+pub struct PartitionTarget {
+    pub disk_number: u32,
+    pub offset: u64,
+    pub size: u64,
+}
+
+impl PartitionTarget {
+    fn device_path(&self) -> String {
+        format!("part:{}:{}:{}", self.disk_number, self.offset, self.size)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SectorRestoreOptions {
+    /// Verify each block against the checksum stored in the sidecar.
+    pub verify_checksums: bool,
+    /// Zero the stretches no stored block covers (D16).
+    pub wipe_free_space: bool,
+    /// Assume the caller has already taken the disk offline, so there is
+    /// nothing to dismount. Skips the volume sweep, which is not free.
+    pub disk_already_offline: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SectorRestoreProgress {
+    pub blocks_done: u64,
+    pub blocks_total: u64,
+    pub bytes_written: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct SectorRestoreSummary {
+    pub blocks_restored: u64,
+    pub bytes_restored: u64,
+    pub bytes_wiped: u64,
+    pub duration: Duration,
+    /// The user cancelled partway. The partition is left half-written and is
+    /// not usable until restored again — there is no rollback.
+    pub cancelled: bool,
+}
+
+/// Which stretch of the image belongs to source partition `src_index`.
+///
+/// For a whole-disk image the answer comes from the embedded disk manifest's
+/// GPT. For a plain volume image the image *is* the volume, and `src_index` is
+/// not consulted — there is only one thing it could mean.
+pub fn source_window_for(sidecar: &Sidecar, src_index: u32) -> Result<SourceWindow> {
+    let image_len = sidecar.manifest.source_disk.size_bytes;
+    let Some(dm) = sidecar.disk_manifest.as_ref() else {
+        return Ok(SourceWindow::whole(image_len));
+    };
+    let p = dm.layout.partitions.iter().find(|p| p.index == src_index).ok_or_else(|| {
+        OwnBackupError::RestoreIncompatible(format!(
+            "в копии нет раздела с номером {src_index} (есть: {})",
+            dm.layout
+                .partitions
+                .iter()
+                .map(|p| p.index.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+    })?;
+    Ok(SourceWindow::partition(p.first_lba, p.last_lba, dm.layout.sector_size))
+}
+
+/// Copy one partition's stored blocks from `image_path` into `target`.
+///
+/// DESTRUCTIVE. The caller is responsible for the confirmation, for the
+/// system-disk guard, and — when the plan rewrites the partition table — for
+/// having taken the disk offline first.
+pub fn restore_partition_sectors(
+    image_path: &Path,
+    sidecar: &Sidecar,
+    src_index: u32,
+    target: PartitionTarget,
+    opts: SectorRestoreOptions,
+    cancel: &CancelToken,
+    mut progress: impl FnMut(&SectorRestoreProgress) -> Result<()>,
+) -> Result<SectorRestoreSummary> {
+    let started = Instant::now();
+    let block_size = sidecar.manifest.block_size as u64;
+    let image_len = sidecar.manifest.source_disk.size_bytes;
+    let data_offset = sidecar.info.volume_data_offset;
+    let window = source_window_for(sidecar, src_index)?;
+
+    if target.size < window.len {
+        return Err(OwnBackupError::RestoreIncompatible(format!(
+            "раздел-приёмник {} Б меньше исходного тома {} Б — посекторно не поместится",
+            target.size, window.len
+        )));
+    }
+
+    // Nothing may hold the target's sectors while we write them. When the disk
+    // is already offline this is a no-op; otherwise it takes down exactly the
+    // volumes in the way and keeps their lock handles alive until it drops.
+    let _guard = if opts.disk_already_offline {
+        None
+    } else {
+        let g = VolumeDismountGuard::for_range(target.disk_number, target.offset, target.size);
+        if !g.failed.is_empty() {
+            warn!(volumes = ?g.failed, "some volumes could not be dismounted before the restore");
+        }
+        Some(g)
+    };
+
+    let device_path = target.device_path();
+    let mut dev = WinRawDevice::open_write(&device_path)?;
+    if block_size % dev.sector_size() as u64 != 0 {
+        return Err(OwnBackupError::RestoreIncompatible(format!(
+            "размер блока образа {block_size} не кратен сектору приёмника {}",
+            dev.sector_size()
+        )));
+    }
+    let mut image = ImageReadSource::open(image_path, &sidecar.info.container)?;
+
+    let total = sidecar.checksums.len() as u64;
+    let mut blocks_restored = 0u64;
+    let mut bytes_restored = 0u64;
+    let mut covered: Vec<(u64, u64)> = Vec::new();
+    let mut cancelled = false;
+
+    for entry in &sidecar.checksums {
+        // Checked at every block: the data copy is the one operation long
+        // enough for cancellation to be worth anything (D18).
+        if cancel.is_cancelled() {
+            cancelled = true;
+            warn!(
+                blocks_restored,
+                "restore cancelled — the partition is half-written and unusable until restored again"
+            );
+            break;
+        }
+
+        let Some(copy) = plan_block_copy(entry.block_number, block_size, image_len, data_offset, window)
+        else {
+            continue; // this block belongs to some other partition
+        };
+        check_fits(&copy, target.size)?;
+
+        // The whole block is read even when only a slice is wanted: the stored
+        // checksum was computed over the whole block, and half a block cannot
+        // be checked against it.
+        let mut buf = vec![0u8; copy.block_len];
+        image.read_at(copy.image_offset, &mut buf)?;
+
+        if opts.verify_checksums {
+            let actual = compute_block_checksum(&buf);
+            if actual != entry.checksum {
+                return Err(OwnBackupError::ChecksumMismatch {
+                    block_index: entry.block_number,
+                    expected: entry.checksum,
+                    actual,
+                });
+            }
+        }
+
+        dev.write_at(copy.dst_offset, &buf[copy.slice_start..copy.slice_start + copy.slice_len])?;
+        blocks_restored += 1;
+        bytes_restored += copy.slice_len as u64;
+        if opts.wipe_free_space {
+            covered.push((copy.dst_offset, copy.slice_len as u64));
+        }
+
+        progress(&SectorRestoreProgress {
+            blocks_done: blocks_restored,
+            blocks_total: total,
+            bytes_written: bytes_restored,
+        })?;
+    }
+
+    let mut bytes_wiped = 0u64;
+    if opts.wipe_free_space && !cancelled {
+        bytes_wiped = wipe_gaps(&mut dev, &mut covered, window.len, cancel)?;
+    }
+
+    dev.flush()?;
+    drop(image);
+
+    info!(
+        image = %image_path.display(),
+        target = %device_path,
+        src_index,
+        blocks = blocks_restored,
+        bytes = bytes_restored,
+        bytes_wiped,
+        cancelled,
+        secs = started.elapsed().as_secs(),
+        "partition restored"
+    );
+
+    Ok(SectorRestoreSummary {
+        blocks_restored,
+        bytes_restored,
+        bytes_wiped,
+        duration: started.elapsed(),
+        cancelled,
+    })
+}
+
+/// Zero everything inside the volume that no stored block covered (D16).
+///
+/// Only the volume's own length is wiped, not the whole target partition: past
+/// the volume's end lies space the filesystem does not know about yet, and on a
+/// larger target that is exactly the space `ExtendFilesystem` is about to claim.
+/// Writing zeroes there would be pointless work, sometimes a lot of it.
+fn wipe_gaps(
+    dev: &mut WinRawDevice,
+    covered: &mut Vec<(u64, u64)>,
+    volume_len: u64,
+    cancel: &CancelToken,
+) -> Result<u64> {
+    let gaps = uncovered_ranges(covered, volume_len);
+    let zeros = vec![0u8; WIPE_CHUNK];
+    let mut wiped = 0u64;
+    for (start, len) in gaps {
+        let mut written = 0u64;
+        while written < len {
+            if cancel.is_cancelled() {
+                debug!(wiped, "free-space wipe cancelled");
+                return Ok(wiped);
+            }
+            let chunk = ((len - written) as usize).min(WIPE_CHUNK);
+            dev.write_at(start + written, &zeros[..chunk])?;
+            written += chunk as u64;
+            wiped += chunk as u64;
+        }
+    }
+    debug!(bytes = wiped, "free space between restored blocks zeroed");
+    Ok(wiped)
+}

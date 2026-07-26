@@ -214,7 +214,7 @@ impl ImageTarget {
 /// Read source behind the same format switch, picked by the sidecar's
 /// `container` field: VHDX images are attached read-only and read as a raw
 /// disk; qcow2 images are read directly in userspace (no attach).
-enum ImageReadSource {
+pub(crate) enum ImageReadSource {
     Vhdx {
         /// Keeps the read-only attachment alive; detaches on drop.
         _attached: crate::vhdx::AttachedVhdx,
@@ -224,7 +224,7 @@ enum ImageReadSource {
 }
 
 impl ImageReadSource {
-    fn open(image_path: &Path, container: &str) -> Result<Self> {
+    pub(crate) fn open(image_path: &Path, container: &str) -> Result<Self> {
         match container {
             "qcow2" => Ok(Self::Qcow2(crate::qcow2::Qcow2RandomReader::open(image_path)?)),
             "vhdx" => {
@@ -238,7 +238,7 @@ impl ImageReadSource {
         }
     }
 
-    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
+    pub(crate) fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
         match self {
             Self::Vhdx { dev, .. } => dev.read_at(offset, buf),
             Self::Qcow2(r) => r.read_at(offset, buf),
@@ -3286,7 +3286,7 @@ pub fn unlock_and_probe(device_path: &str, passphrase: &str) -> Result<Decrypted
     Ok(DecryptedProbe { ok: true, filesystem, label, used_bytes })
 }
 
-fn load_sidecar_of(image_path: &Path) -> Result<Sidecar> {
+pub(crate) fn load_sidecar_of(image_path: &Path) -> Result<Sidecar> {
     let ext = image_path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_lowercase();
     match read_embedded_sidecar(image_path, &ext) {
         Ok(s) => Ok(s),
