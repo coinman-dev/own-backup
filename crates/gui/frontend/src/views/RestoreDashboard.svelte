@@ -107,6 +107,25 @@
       pct: ((c[m.key] ?? 0) / total) * 100,
     }));
   });
+  // The bar covers the whole scanned volume: what the copy holds, plus what the
+  // exclusions left out (last segment). Shares are recomputed against that grand
+  // total so the bar still adds up to 100%.
+  const barData = $derived.by(() => {
+    if (!catData) return null;
+    const kept = catData.reduce((s, c) => s + c.bytes, 0);
+    const ex = excluded.bytes;
+    const total = kept + ex;
+    if (total <= 0) return null;
+    const out: { name: string; color: string; bytes: number; pct: number }[] = catData.map((c) => ({
+      name: c.name,
+      color: c.color,
+      bytes: c.bytes,
+      pct: (c.bytes / total) * 100,
+    }));
+    if (ex > 0) out.push({ name: 'Исключено', color: '#c0463f', bytes: ex, pct: (ex / total) * 100 });
+    return out;
+  });
+
   // --- Disk maps: top = the disk this copy captured (read-only), bottom = all
   // system disks to pick a restore target from (same visuals as the source tab).
   function diskNumber(d: DiskInfo): number {
@@ -174,6 +193,16 @@
 
   const targetDisk = $derived(systemDisks.find((d) => d.device_id === targetDiskId) ?? null);
   const srcDisk = $derived(backedUpDisks[0] ?? null);
+
+  // A GPT stores partition positions as LBA numbers, so the same table means
+  // different byte offsets on a disk with a different logical sector size —
+  // a 512e layout cannot be reproduced byte-identically on a 4Kn disk (and vice
+  // versa). Detect it before anything is mapped and say so plainly.
+  const srcSector = $derived(activeInfo?.sector_size || srcDisk?.sector_size_logical || 0);
+  const dstSector = $derived(targetDisk?.sector_size_logical ?? 0);
+  const sectorMismatch = $derived(
+    srcSector > 0 && dstSector > 0 && srcSector !== dstSector,
+  );
   // Source partitions that are actually inside this copy.
   const srcBackupParts = $derived(
     (srcDisk?.partitions ?? []).filter((p) => backedUpParts.includes(p.index)),
@@ -186,7 +215,7 @@
   // creating splits a free cell in place. Nothing is written to the disk.
   let slots = $state<MapSlot[] | null>(null);
   let previewIdx = $state<number[]>([]); // partitions the restore would create
-  let menu = $state<{ x: number; y: number; part?: PartitionInfo; offset?: number; size?: number } | null>(null);
+  let menu = $state<{ x: number; y: number; part?: PartitionInfo; offset?: number; size?: number; slot: number } | null>(null);
   let delConfirm = $state<PartitionInfo | null>(null);
   const MIB = 1024 * 1024;
   const GIB = 1024 * 1024 * 1024;
@@ -405,6 +434,7 @@
   }
   function clickSourcePart(p: PartitionInfo) {
     if (wholeDiskRestore) return; // whole-disk: the selection is fixed
+    if (mappings.some((m) => m.src === p.index)) return; // already mapped
     badTarget = null;
     fitMsg = null;
     srcPart = p.index;
@@ -415,6 +445,19 @@
   // space is left over), so the surrounding cells keep their exact geometry.
   function clickFreeSpace(offset: number, _size: number) {
     if (!wholeDiskRestore || !slots) return;
+    // The copy goes down exactly once — a second click would duplicate every
+    // partition into the remaining free space.
+    if (previewIdx.length > 0) {
+      fitMsg = 'Разделы копии уже размещены. Отмените последнее действие, чтобы выбрать другое место.';
+      return;
+    }
+    if (sectorMismatch) {
+      fitMsg =
+        `Несовместимая геометрия: копия снята с диска с сектором ${srcSector} Б, ` +
+        `а у выбранного — ${dstSector} Б. Загрузочную копию нельзя перенести без пересчёта разметки. ` +
+        `Выберите диск с сектором ${srcSector} Б.`;
+      return;
+    }
     const i = slots.findIndex((s) => s.kind === 'free' && s.offset === offset);
     if (i < 0) return;
     const cell = slots[i] as { offset: number; size: number; share: number };
@@ -460,10 +503,44 @@
 
   // --- Partition editor actions --------------------------------------------
   function openPartMenu(p: PartitionInfo, ev: MouseEvent) {
-    menu = { x: ev.clientX, y: ev.clientY, part: p };
+    const slot = (slots ?? []).findIndex((s) => s.kind === 'part' && s.p.index === p.index);
+    menu = { x: ev.clientX, y: ev.clientY, part: p, slot };
   }
   function openFreeMenu(offset: number, size: number, ev: MouseEvent) {
-    menu = { x: ev.clientX, y: ev.clientY, offset, size };
+    const slot = (slots ?? []).findIndex((s) => s.kind === 'free' && s.offset === offset);
+    menu = { x: ev.clientX, y: ev.clientY, offset, size, slot };
+  }
+
+  // Growing a partition into the unallocated space right after it. The same
+  // operation is offered from both sides: "Расширить раздел" on the partition,
+  // "Присоединить раздел" on the free region (it joins the partition before it).
+  const canExtend = $derived.by(() => {
+    const list = slots ?? [];
+    const i = menu?.slot ?? -1;
+    if (i < 0 || i >= list.length) return -1;
+    // From a partition: the next cell must be free. From free space: the
+    // previous cell must be a partition. Either way return the PARTITION's slot.
+    if (list[i].kind === 'part') return list[i + 1]?.kind === 'free' ? i : -1;
+    return i > 0 && list[i - 1].kind === 'part' ? i - 1 : -1;
+  });
+
+  function extendPart(partSlot: number) {
+    menu = null;
+    if (!slots) return;
+    const ps = slots[partSlot];
+    const fs = slots[partSlot + 1];
+    if (!ps || ps.kind !== 'part' || !fs || fs.kind !== 'free') return;
+    pushHistory();
+    // Grow to the end of the free region — computing from offsets also swallows
+    // any sub-MiB alignment sliver between them. Both width budgets add up, so
+    // nothing else on the map moves.
+    const grown: MapSlot = {
+      kind: 'part',
+      p: { ...ps.p, size_bytes: fs.offset + fs.size - ps.p.offset_bytes },
+      share: ps.share + fs.share,
+    };
+    slots = normalize([...slots.slice(0, partSlot), grown, ...slots.slice(partSlot + 2)]);
+    fitMsg = null;
   }
   // Delete = the partition's cell becomes a free cell with the SAME offset and
   // size, so every other partition keeps its position and width on the map.
@@ -620,7 +697,16 @@
       }
     }
     for (const p of cur) {
-      if (orig.some((o) => o.index === p.index) || previewIdx.includes(p.index)) continue;
+      // Same partition, bigger than it was → it was extended into free space.
+      const was = orig.find((o) => o.index === p.index);
+      if (was && p.size_bytes !== was.size_bytes) {
+        const how = p.size_bytes > was.size_bytes ? 'Расширить' : 'Уменьшить';
+        ops.push(
+          `${how} раздел ${p.volume_letter ? p.volume_letter + ': ' : ''}${p.volume_label || '(без метки)'}` +
+            ` — ${preciseSize(was.size_bytes)} → ${preciseSize(p.size_bytes)}`,
+        );
+      }
+      if (was || previewIdx.includes(p.index)) continue;
       const m = newPartMeta.get(p.index);
       const bits = [formatBytes(p.size_bytes)];
       if (p.filesystem) bits.push(p.filesystem.toUpperCase());
@@ -650,6 +736,7 @@
       fitMsg = 'В режиме «загрузочный» выберите свободное место, а не существующий раздел.';
       return;
     }
+    if (mappings.some((m) => m.dst === p.index) || previewIdx.includes(p.index)) return; // taken
     if (srcPart == null) {
       fitMsg = 'Сначала выберите раздел сверху.';
       return;
@@ -769,6 +856,10 @@
         : 'Шаг 2: сопоставьте хотя бы один раздел.';
       return;
     }
+    if (sectorMismatch && wholeDiskRestore) {
+      fitMsg = `Загрузочную копию нельзя восстановить на диск с сектором ${dstSector} Б (копия снята с ${srcSector} Б).`;
+      return;
+    }
     opsOpen = true;
   }
 
@@ -820,6 +911,7 @@
             bootChecked={wholeDiskRestore}
             onBootToggle={toggleWholeDisk}
             inBackup={backedUpParts.length > 0 ? backedUpParts : undefined}
+            lockedIndices={wholeDiskRestore ? backedUpParts : mappings.map((m) => m.src)}
             onPart={i === 0 && targetDiskId ? clickSourcePart : undefined}
             stateOf={i === 0 && targetDiskId ? srcState : undefined}
           />
@@ -835,7 +927,7 @@
       <div class="cat-block">
         <div class="cat-head">Что в копии — по типам файлов</div>
         <div class="catbar">
-          {#each catData as c}<div style="width:{c.pct}%; background:{c.color}" title="{c.name}: {formatBytes(c.bytes)}"></div>{/each}
+          {#each barData?.filter((c) => c.bytes > 0) ?? [] as c}<div class="catseg" style="width:{c.pct}%; background:{c.color}" title="{c.name}: {formatBytes(c.bytes)}"></div>{/each}
         </div>
         <div class="cats">
           {#each catData as c}
@@ -884,12 +976,29 @@
           {slots}
           onPart={clickTargetPart}
           stateOf={dstState}
-          onFree={wholeDiskRestore ? clickFreeSpace : undefined}
-          needBytes={wholeDiskRestore ? srcTotalBytes : undefined}
+          lockedIndices={[...mappings.map((m) => m.dst), ...previewIdx]}
+          onFree={wholeDiskRestore && previewIdx.length === 0 ? clickFreeSpace : undefined}
+          needBytes={wholeDiskRestore && previewIdx.length === 0 ? srcTotalBytes : undefined}
           onPartMenu={openPartMenu}
           onFreeMenu={openFreeMenu}
         />
       </div>
+      {#if sectorMismatch}
+        <div class="sector-warn">
+          <span class="sw-ico">⚠</span>
+          <span>
+            <b>Разный размер сектора.</b>
+            Копия снята с диска с логическим сектором <b>{srcSector} Б</b>, у выбранного диска — <b>{dstSector} Б</b>.
+            Разметка GPT хранит положение разделов в номерах секторов (LBA), поэтому на таком диске она означала бы
+            другие смещения в байтах — воспроизвести её один-в-один нельзя.
+            {#if wholeDiskRestore}
+              Восстановление загрузочной копии сюда недоступно: выберите диск с сектором {srcSector} Б.
+            {:else}
+              Отдельные разделы восстановить можно, но загрузочную цепочку придётся чинить отдельно.
+            {/if}
+          </span>
+        </div>
+      {/if}
       <div class="hint-small">Правый клик по разделу или свободному месту — создать / удалить раздел.</div>
       <!-- Undo everything and go back to step 1 (pick a disk). -->
       <div class="under-card">
@@ -955,8 +1064,14 @@
     <div class="ctx-title">Действия</div>
     {#if menu.part}
       <button onclick={() => { const p = menu!.part!; menu = null; delConfirm = p; }}>Удалить раздел</button>
+      {#if canExtend >= 0}
+        <button onclick={() => extendPart(canExtend)}>Расширить раздел</button>
+      {/if}
     {:else}
       <button onclick={() => openCreate(menu!.offset ?? 0, menu!.size ?? 0)}>Создать раздел</button>
+      {#if canExtend >= 0}
+        <button onclick={() => extendPart(canExtend)}>Присоединить раздел</button>
+      {/if}
     {/if}
   </div>
 {/if}
@@ -1103,6 +1218,9 @@
   .cat-block { margin-top: 14px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 6px; background: var(--card-bg); }
   .cat-head { font-size: 13px; font-weight: 600; color: var(--head); margin-bottom: 4px; }
   .catbar { height: 9px; border-radius: 5px; overflow: hidden; display: flex; margin-top: 10px; }
+  /* Every present category stays visible: tiny slices keep 5px and the
+     large ones shrink to make room, so the bar still totals 100%. */
+  .catseg { min-width: 5px; }
   .cats { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
   .cat { flex: 1; min-width: 130px; display: flex; align-items: center; gap: 7px; }
   .dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
@@ -1128,6 +1246,8 @@
   .btn.small { padding: 7px 18px; font-size: 13px; }
   .btn.icon { display: inline-flex; align-items: center; justify-content: center; padding: 7px 12px; }
   .hint-small { margin-top: 8px; font-size: 12px; color: var(--text-muted); }
+  .sector-warn { display: flex; gap: 10px; margin-top: 12px; padding: 12px 14px; border-radius: 6px; background: rgba(216,74,74,.1); border: 1px solid rgba(216,74,74,.35); font-size: 13px; color: #8c1d1d; line-height: 1.5; }
+  .sw-ico { flex-shrink: 0; font-size: 15px; line-height: 1.3; }
   /* Right-click partition menu */
   .menu-backdrop { position: fixed; inset: 0; z-index: 190; }
   .ctx-menu { position: fixed; z-index: 200; min-width: 180px; background: var(--card-bg); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 10px 30px rgba(0,0,0,.18); padding: 6px; }

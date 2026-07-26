@@ -242,6 +242,25 @@
     }));
   });
 
+  // The bar covers the whole scanned volume: what the copy holds, plus what the
+  // exclusions left out (last segment). Shares are recomputed against that grand
+  // total so the bar still adds up to 100%.
+  const barData = $derived.by(() => {
+    if (!catData) return null;
+    const kept = catData.reduce((s, c) => s + c.bytes, 0);
+    const ex = job.last_run?.excluded_bytes ?? 0;
+    const total = kept + ex;
+    if (total <= 0) return null;
+    const out: { name: string; color: string; bytes: number; pct: number }[] = catData.map((c) => ({
+      name: c.name,
+      color: c.color,
+      bytes: c.bytes,
+      pct: (c.bytes / total) * 100,
+    }));
+    if (ex > 0) out.push({ name: 'Исключено', color: '#c0463f', bytes: ex, pct: (ex / total) * 100 });
+    return out;
+  });
+
   // Keep disk_source.parts in sync with the currently-selected backable
   // partitions of a disk (behaviour B: only kept volumes stay in the layout).
   function syncDiskSourceParts(d: DiskInfo) {
@@ -751,8 +770,8 @@
             <div class="cat-block">
               <div class="cat-head">Что в копии — по типам файлов</div>
               <div class="catbar">
-                {#each catData as c}
-                  <div style="width:{c.pct}%; background:{c.color}" title="{c.name}: {formatBytes(c.bytes)}"></div>
+                {#each barData?.filter((c) => c.bytes > 0) ?? [] as c}
+                  <div class="catseg" style="width:{c.pct}%; background:{c.color}" title="{c.name}: {formatBytes(c.bytes)}"></div>
                 {/each}
               </div>
               <div class="cats">
@@ -1028,6 +1047,9 @@
   .cat-block { margin-top: 14px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 6px; background: var(--card-bg); }
   .cat-head { font-size: 13px; font-weight: 600; color: var(--head); margin-bottom: 4px; }
   .catbar { height: 9px; border-radius: 5px; overflow: hidden; display: flex; margin-top: 10px; }
+  /* Every present category stays visible: tiny slices keep 5px and the
+     large ones shrink to make room, so the bar still totals 100%. */
+  .catseg { min-width: 5px; }
   .cats { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
   .cat { flex: 1; min-width: 130px; display: flex; align-items: center; gap: 7px; }
   .dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }

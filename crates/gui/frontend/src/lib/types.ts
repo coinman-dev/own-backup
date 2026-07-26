@@ -202,6 +202,8 @@ export interface ImageInfo {
   /** Files/bytes excluded from this image (for the "Исключено" legend line). */
   excluded_files: number;
   excluded_bytes: number;
+  /** Logical sector size the source GPT was captured with (512 / 4096). */
+  sector_size: number;
   /** True for a whole-disk (bootable) backup. */
   is_whole_disk: boolean;
 }

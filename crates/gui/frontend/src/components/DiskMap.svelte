@@ -55,6 +55,10 @@
     /** Partition indices actually present in the backup. When given, any other
      *  partition is drawn as an empty "не в бэкапе" slot (no data, not clickable). */
     inBackup?: number[];
+    /** Partitions whose fate is already decided (mapped / placed): they keep
+     *  their colour but no longer respond to clicks — undo or "Отмена" to redo.
+     *  The right-click editor menu still works. */
+    lockedIndices?: number[];
     /** Whole-disk mode: click a stretch of unallocated space to place the whole
      *  backup layout there. Receives the gap's offset and size. */
     onFree?: (offset: number, size: number) => void;
@@ -81,6 +85,7 @@
     onPart,
     stateOf,
     inBackup,
+    lockedIndices = [],
     onFree,
     needBytes,
     onPartMenu,
@@ -249,9 +254,11 @@
               <span class="absent-lbl">раздел не в бэкапе</span>
             </div>
           {:else if onPart || onPartMenu}
+            {@const locked = lockedIndices.includes(seg.p.index)}
             <button
               type="button"
               class="seg selectable"
+              class:locked
               class:selected={sel}
               class:st-yellow={st?.kind === 'yellow'}
               class:st-green={st?.kind === 'green'}
@@ -259,7 +266,7 @@
               class:st-preview={st?.kind === 'preview'}
               style="{flexOf(seg)}; {pairStyle(st)}"
               title={segTitle(seg.p)}
-              onclick={(e) => { e.stopPropagation(); onPart?.(seg.p!); }}
+              onclick={(e) => { e.stopPropagation(); if (!locked) onPart?.(seg.p!); }}
               oncontextmenu={(e) => { if (onPartMenu) { e.preventDefault(); e.stopPropagation(); onPartMenu(seg.p!, e); } }}
             >{@render segInner(seg.p, sel)}</button>
           {:else if dev && !readonly && onToggle}
@@ -324,6 +331,9 @@
   .free-lbl { font-size: 11px; color: var(--text-muted); white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
   .seg.selectable { cursor: pointer; }
   .seg.selectable:hover { filter: brightness(0.97); }
+  /* Already mapped/placed: shown, but no longer a click target. */
+  .seg.selectable.locked { cursor: default; }
+  .seg.selectable.locked:hover { filter: none; }
   .seg.ro { cursor: default; }
   .seg.selected { background: rgba(45,125,210,.16); box-shadow: inset 0 0 0 2px var(--primary); }
   .usedfill { position: absolute; top: 0; bottom: 0; left: 0; z-index: 0; background: rgba(45,125,210,.14); border-right: 1px solid rgba(45,125,210,.45); pointer-events: none; }

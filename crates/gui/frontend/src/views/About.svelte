@@ -29,7 +29,7 @@
       </div>
       <div class="info-row">
         <span class="info-label">Image Format</span>
-        <span class="info-value">.obk (cross-platform)</span>
+        <span class="info-value">VHDX / qcow2</span>
       </div>
       <div class="info-row">
         <span class="info-label">Compression</span>

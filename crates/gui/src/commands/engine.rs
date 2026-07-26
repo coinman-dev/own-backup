@@ -135,6 +135,10 @@ pub struct ImageInfoDto {
     /// Files/bytes excluded from this image (for the "Исключено" legend line).
     pub excluded_files: u64,
     pub excluded_bytes: u64,
+    /// Logical sector size the source disk's GPT was captured with. A restore
+    /// onto a disk with a different sector size cannot reproduce the layout:
+    /// the stored LBAs would address different byte offsets.
+    pub sector_size: u32,
     /// True when this image is a whole-disk (bootable) backup.
     pub is_whole_disk: bool,
 }
@@ -196,6 +200,13 @@ fn read_image_info_at(path: &std::path::Path) -> Result<ImageInfoDto, String> {
         categories: sidecar.info.categories,
         excluded_files: sidecar.info.excluded_files,
         excluded_bytes: sidecar.info.excluded_bytes,
+        // The GPT's own sector size is authoritative for a whole-disk image;
+        // otherwise fall back to the volume's.
+        sector_size: sidecar
+            .disk_manifest
+            .as_ref()
+            .map(|dm| dm.layout.sector_size)
+            .unwrap_or(sidecar.manifest.source_disk.sector_size_logical),
         is_whole_disk,
     })
 }
