@@ -35,6 +35,29 @@ pub enum FileSystem {
     Unknown,
 }
 
+impl FileSystem {
+    /// Filesystems Windows can mount, format and walk file-by-file. Everything
+    /// else can only be moved as raw sectors — Windows has no driver for it and
+    /// we are not writing one (D4).
+    pub fn is_windows_family(self) -> bool {
+        matches!(self, FileSystem::Ntfs | FileSystem::Fat32 | FileSystem::ExFat | FileSystem::ReFs)
+    }
+
+    /// Display name as users know it.
+    pub fn label(self) -> &'static str {
+        match self {
+            FileSystem::Ntfs => "NTFS",
+            FileSystem::Fat32 => "FAT32",
+            FileSystem::ExFat => "exFAT",
+            FileSystem::Ext4 => "ext4",
+            FileSystem::Xfs => "XFS",
+            FileSystem::Btrfs => "Btrfs",
+            FileSystem::ReFs => "ReFS",
+            FileSystem::Unknown => "неизвестная ФС",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SupportTier {
     A,

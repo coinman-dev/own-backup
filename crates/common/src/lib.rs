@@ -6,6 +6,7 @@ pub mod gpt;
 pub mod image;
 pub mod preflight;
 pub mod progress;
+pub mod restore_check;
 pub mod restore_plan;
 pub mod types;
 
