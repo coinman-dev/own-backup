@@ -1,16 +1,18 @@
 <script lang="ts">
   import { formatBytes, formatDate, formatClock } from '../lib/format';
-  // DESIGN STAGE: `runRestore` is deliberately NOT imported — this screen must
-  // not be able to write to a disk. The partition editor and the mapping are
-  // in-memory only; "Восстановить" just lists the queued operations.
+  // The partition editor is in-memory only: every click edits `slots` and
+  // `mappings` and nothing else. A disk is touched at exactly one point —
+  // `api.applyRestorePlan`, below, after the dry run has passed with no errors
+  // and the user has typed a confirmation.
   import { engine, cancelCurrent, clearRestoreResult } from '../lib/engineStore.svelte';
+  import { listen } from '@tauri-apps/api/event';
   import { jobs } from '../lib/jobStore.svelte';
   import { api } from '../lib/api';
   import InfoModal from '../components/InfoModal.svelte';
   import DiskMap from '../components/DiskMap.svelte';
   import type { MapSlot } from '../components/DiskMap.svelte';
   import type {
-    Job, DiskInfo, PartitionInfo, ImageInfo,
+    Job, DiskInfo, PartitionInfo, ImageInfo, RestoreRunState, DryRunResult, OpRecord,
     RestorePlan, RestoreOp, RestoreMode, PartitionSpec, PartRef, FormatFs,
     CheckContext, CheckResult, LetterChange,
   } from '../lib/types';
@@ -296,6 +298,31 @@
     quickFormat: boolean;
   } | null>(null);
   let opsOpen = $state(false);
+  /** The plan the dry run checked and returned — this is the one to apply, not
+   *  the one that was sent: the dry run resolves drive-letter conflicts by
+   *  editing it. */
+  let checkedPlan = $state<DryRunResult['plan'] | null>(null);
+  /** State of the restore the service is running (or last ran). Survives this
+   *  window being closed and reopened, and a service restart. */
+  let planRun = $state<RestoreRunState | null>(null);
+  let applyError: string | null = $state(null);
+  const planRunning = $derived(planRun?.status === 'running');
+
+  // Pick up a restore already in progress, and follow it from here on.
+  $effect(() => {
+    let live = true;
+    api.getRestoreState().then(
+      (st) => { if (live && st) planRun = st; },
+      () => {},
+    );
+    const stop = listen<RestoreRunState>('restore-plan-progress', (e) => {
+      if (live) planRun = e.payload;
+    });
+    return () => {
+      live = false;
+      stop.then((un) => un()).catch(() => {});
+    };
+  });
   /** Findings from the last dry run, shown above the queue. */
   let checks = $state<CheckResult[]>([]);
   let letterChanges = $state<LetterChange[]>([]);
@@ -1211,6 +1238,8 @@
     checks = [];
     letterChanges = [];
     checkError = null;
+    checkedPlan = null;
+    applyError = null;
     opsOpen = true;
     const plan = buildPlan();
     if (!plan) return;
@@ -1219,6 +1248,10 @@
       const res = await api.dryRunRestorePlan(plan, buildCheckContext());
       checks = res.results;
       letterChanges = res.letter_changes;
+      // Apply the plan that came BACK: the dry run resolves drive-letter
+      // conflicts by editing it, and applying the one we sent would throw the
+      // fix away.
+      checkedPlan = res.plan;
     } catch (e) {
       // The checks live in the service; without it we can still show the queue,
       // but we must not imply the plan was validated.
@@ -1254,14 +1287,72 @@
   const checkWarnings = $derived(groupByCode(checks.filter((c) => c.level === 'warning')));
   const checkInfos = $derived(groupByCode(checks.filter((c) => c.level === 'info')));
 
+  /** Every re-encryptable partition has a password that was actually checked.
+   *  Without it the restore would write the header, fail to open it, and stop —
+   *  after the partition table had already been rewritten. */
+  const luksReady = $derived(
+    !reencrypt || reencryptable.every((i) => luksPwState[i] === 'ok'),
+  );
+  /** The plan checked out and nothing stands in the way of running it. */
+  const canApply = $derived(
+    !!checkedPlan && !checking && !checkError && checkErrors.length === 0 && luksReady,
+  );
+  /** Why the button is off, in the words that name the thing to fix. */
+  const applyBlockedBy = $derived(
+    checking
+      ? 'Идёт проверка плана…'
+      : checkError
+        ? 'План не проверен — запускать нельзя.'
+        : checkErrors.length > 0
+          ? 'Сначала исправьте ошибки выше.'
+          : !luksReady
+            ? 'Введите пароль контейнера и нажмите «Проверка».'
+            : '',
+  );
+
+  /** DESTRUCTIVE — the one place this screen writes to a disk. */
   async function doRestore() {
-    if (confirmText !== 'ДА') return;
+    if (confirmText !== 'ДА' || !checkedPlan) return;
     confirmOpen = false;
-    // NOTE: per-partition mapped restore is not yet wired to the engine (which
-    // restores a whole volume/disk). Shown as a preview until the backend lands.
-    stubMsg =
-      'Восстановление по разделам пока в разработке: движок восстанавливает том/диск целиком. ' +
-      'Сопоставление разделов показано как предпросмотр и ещё не выполняется.';
+    opsOpen = false;
+    applyError = null;
+    // Keyed by SOURCE partition: that is what the executor looks up the saved
+    // container header by.
+    const passphrases: Record<number, string> = {};
+    if (reencrypt) {
+      for (const i of reencryptable) {
+        if (luksPw[i]) passphrases[i] = luksPw[i];
+      }
+    }
+    try {
+      planRun = await api.applyRestorePlan(
+        { ...checkedPlan, verify_after: verifyAfter },
+        passphrases,
+      );
+    } catch (e) {
+      applyError = String(e);
+    }
+  }
+
+  async function cancelPlanRun() {
+    if (!planRun) return;
+    try {
+      const r = await api.cancelRestorePlan(planRun.plan_id);
+      if (!r.cancelled && r.reason) stubMsg = r.reason;
+    } catch (e) {
+      stubMsg = String(e);
+    }
+  }
+
+  const OP_STATUS_LABEL: Record<string, string> = {
+    pending: 'ожидает',
+    running: 'выполняется',
+    done: 'готово',
+    failed: 'ошибка',
+    skipped: 'пропущено',
+  };
+  function opClass(o: OpRecord): string {
+    return `op ${o.status}`;
   }
 
   const targetLabel = $derived(targetDisk?.model ?? '');
@@ -1279,7 +1370,7 @@
 
 <div class="page">
 <div class="dash" bind:clientWidth={dashWidth}>
-  {#if !running}
+  {#if !running && !planRun}
     <!-- WHAT: the disk this copy captured — same read-only map as Параметры → Источник -->
     <div class="sec-head">
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="12" cy="12" r="3.4"/></svg>
@@ -1530,6 +1621,60 @@
     {/if}
   {/if}
 
+  <!-- A plan being executed by the service. Shown from the run state, not from
+       events, so reopening this window mid-restore picks up where it left off. -->
+  {#if planRun}
+    <div class="run">
+      <div class="run-head">
+        <span class="run-title">
+          {#if planRun.status === 'running'}Восстановление…
+          {:else if planRun.status === 'completed'}Восстановление завершено
+          {:else if planRun.status === 'cancelled'}Восстановление прервано
+          {:else}Восстановление не завершилось{/if}
+        </span>
+        <span class="run-sub">Диск {planRun.target_disk} · операций: {planRun.ops.length}</span>
+      </div>
+      <ol class="ops-run">
+        {#each planRun.ops as o}
+          <li class={opClass(o)}>
+            <span class="op-mark">
+              {#if o.status === 'done'}✓
+              {:else if o.status === 'failed'}✕
+              {:else if o.status === 'running'}▸
+              {:else if o.status === 'skipped'}–
+              {:else}·{/if}
+            </span>
+            <span class="op-body">
+              <span class="op-title">{o.title}</span>
+              {#if o.status === 'running' && o.bytes_total > 0}
+                <span class="op-bar"><span class="op-fill" style="width:{o.percent}%"></span></span>
+              {/if}
+              {#if o.message}<span class="op-msg">{o.message}</span>{/if}
+            </span>
+            <span class="op-state">
+              {#if o.status === 'running' && o.percent > 0}{o.percent}%{:else}{OP_STATUS_LABEL[o.status]}{/if}
+            </span>
+          </li>
+        {/each}
+      </ol>
+      {#if planRun.follow_ups.length > 0}
+        <div class="run-followups">
+          <div class="run-fu-head">Что осталось сделать</div>
+          {#each planRun.follow_ups as f}<div class="finding warn">{f}</div>{/each}
+        </div>
+      {/if}
+      {#if planRun.status !== 'running'}
+        <div class="under-card">
+          <button class="btn ghost small" onclick={() => { planRun = null; resetMapping(); pickAnotherDisk(); }}>
+            Вернуться к выбору
+          </button>
+        </div>
+      {/if}
+    </div>
+  {/if}
+
+  {#if applyError}<div class="banner err"><span class="bdot red"></span><span>{applyError}</span></div>{/if}
+
   {#if running}
     <div class="progress-wrap">
       <div class="progress-info">
@@ -1560,9 +1705,13 @@
         Восстанавливается последняя копия. Отдельные файлы — через «Инструменты → Подключить как диск».
       {/if}
     </div>
-    {#if running}
+    {#if planRunning}
+      <!-- Dark on a point of no return: the service refuses there, and a button
+           that looks alive while nothing happens is worse than one that does not. -->
+      <button class="btn danger" onclick={cancelPlanRun} disabled={!planRun?.cancellable}>Отмена</button>
+    {:else if running}
       <button class="btn danger" onclick={cancelCurrent}>Отмена</button>
-    {:else}
+    {:else if !planRun}
       <button class="btn green" onclick={askConfirm} disabled={!canRestore || backupBusy}>Восстановить</button>
     {/if}
   </div>
@@ -1735,7 +1884,7 @@
       <label class="opt">
         <input type="checkbox" bind:checked={wipeFreeSpace} />
         <span>
-          Затирать свободное место
+          Затирать свободное место <span class="opt-cost">(увеличивает время восстановления)</span>
           <em>копируются только занятые блоки, поэтому в промежутках физически остаются
             прежние данные — файловая система их не видит</em>
         </span>
@@ -1745,12 +1894,20 @@
         <span>Проверять записанное после восстановления</span>
       </label>
 
-      <p class="ops-note">
-        Восстановление отсюда пока не запускается: это проверка и предпросмотр, на диск
-        ничего не пишется.
-      </p>
+      {#if applyBlockedBy}
+        <p class="ops-note">{applyBlockedBy}</p>
+      {:else}
+        <p class="ops-note">
+          Дальше данные на диске будут перезаписаны. Отменить это будет нельзя.
+        </p>
+      {/if}
       <div class="dialog-actions">
         <button class="btn ghost" onclick={() => (opsOpen = false)}>Закрыть</button>
+        <button
+          class="btn danger-solid"
+          disabled={!canApply}
+          onclick={() => { confirmText = ''; confirmOpen = true; }}
+        >Восстановить</button>
       </div>
     </div>
   </div>
@@ -1760,7 +1917,12 @@
   <div class="overlay">
     <div class="dialog">
       <div class="dialog-title">Подтверждение восстановления</div>
-      <p>На диске <b>{targetDisk?.model ?? ''}</b> будут перезаписаны сопоставленные разделы копией <b>{job.name}</b> от {activeInfo ? formatDate(activeInfo.created_at) : lastRun ? formatDate(lastRun.finished_at) : ''} ({mappings.length} разд.).</p>
+      <p>
+        На диске <b>{targetDisk?.model ?? ''}</b> будет перезаписана разметка и данные
+        сопоставленных разделов — копией <b>{job.name}</b> от
+        {activeInfo ? formatDate(activeInfo.created_at) : lastRun ? formatDate(lastRun.finished_at) : ''}.
+      </p>
+      <p><b>Отката нет.</b> Всё, что сейчас на затронутых разделах, будет потеряно.</p>
       <p>Введите <b>ДА</b> (заглавными), чтобы продолжить:</p>
       <input type="text" bind:value={confirmText} spellcheck="false" />
       <div class="dialog-actions">
@@ -1883,6 +2045,29 @@
   .progress-info { display: flex; justify-content: space-between; font-size: 13px; color: var(--head); margin-bottom: 8px; }
   .bar { height: 8px; border-radius: 4px; background: var(--tabbg); overflow: hidden; }
   .bar-fill { height: 100%; background: var(--primary); transition: width .15s linear; }
+  .opt-cost { color: var(--text-muted); font-weight: 400; }
+  /* Plan execution */
+  .run { border: 1px solid var(--border); border-radius: 8px; background: var(--card-bg); padding: 18px 20px; }
+  .run-head { display: flex; align-items: baseline; justify-content: space-between; gap: 14px; margin-bottom: 12px; }
+  .run-title { font-size: 15px; font-weight: 700; color: var(--head); }
+  .run-sub { font-size: 12px; color: var(--text-muted); }
+  .ops-run { list-style: none; margin: 0; padding: 0; }
+  .ops-run .op { display: flex; align-items: flex-start; gap: 10px; padding: 7px 0; border-top: 1px solid var(--border); font-size: 13px; }
+  .ops-run .op:first-child { border-top: none; }
+  .op-mark { flex: 0 0 16px; text-align: center; color: var(--text-muted); }
+  .op.done .op-mark { color: #2f7d4f; }
+  .op.failed .op-mark { color: #b32b2b; }
+  .op.running .op-mark { color: var(--primary); }
+  .op-body { flex: 1; min-width: 0; }
+  .op-title { display: block; color: var(--head); line-height: 1.45; }
+  .op.pending .op-title, .op.skipped .op-title { color: var(--text-muted); }
+  .op-msg { display: block; font-size: 12px; color: var(--text-muted); margin-top: 3px; line-height: 1.45; }
+  .op.failed .op-msg { color: #b32b2b; }
+  .op-bar { display: block; height: 4px; border-radius: 2px; background: var(--border); margin-top: 6px; overflow: hidden; }
+  .op-fill { display: block; height: 100%; background: var(--primary); transition: width .2s; }
+  .op-state { flex: 0 0 auto; font-size: 12px; color: var(--text-muted); white-space: nowrap; }
+  .run-followups { margin-top: 14px; }
+  .run-fu-head { font-size: 13px; font-weight: 700; color: var(--head); margin-bottom: 8px; }
   .progress-meta { display: flex; justify-content: space-between; gap: 16px; margin-top: 8px; font-size: 12px; color: var(--text-muted); }
   .progress-meta .route { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%; }
   .banner { margin-top: 22px; border-radius: 6px; padding: 13px 16px; display: flex; align-items: center; gap: 12px; background: var(--accent-soft); font-size: 13px; color: var(--head); }

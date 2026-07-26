@@ -455,8 +455,9 @@ impl BackupClient {
     /// state; progress arrives on `StreamEvents` as `restore-plan`, and the
     /// current state is always readable via [`Self::get_restore_state`].
     ///
-    /// `passphrases` maps a target partition index to the pass phrase of the
-    /// container being put back (D19). They travel with the request rather than
+    /// `passphrases` maps a **source** partition index to the pass phrase of the
+    /// container being put back (D19) — the container is identified by where it
+    /// came from, not by where it is going. They travel with the request rather than
     /// inside the plan, because the plan is persisted to the restore history
     /// and a password on disk in the clear is not a trade worth making.
     pub async fn apply_restore_plan(

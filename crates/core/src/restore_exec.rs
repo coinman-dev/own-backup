@@ -568,7 +568,7 @@ fn run_op(
     op: &RestoreOp,
     plan: &RestorePlan,
     sidecar: &own_backup_backup::sidecar::Sidecar,
-    // Passphrase per target partition, for putting a container back (D19).
+    // Passphrase per SOURCE partition, for putting its container back (D19).
     // Kept out of the plan on purpose: the plan is persisted to the restore
     // history, and a password on disk in the clear is not a trade worth making.
     passphrases: &std::collections::HashMap<u32, String>,
@@ -632,10 +632,13 @@ fn run_op(
                          вернуть шифрование нечем"
                     ))
                 })?;
-                let passphrase = passphrases.get(&dst.index).ok_or_else(|| {
+                // Keyed by the SOURCE partition: the passphrase belongs to the
+                // container, and the container is identified by where it came
+                // from, not by where it is going.
+                let passphrase = passphrases.get(src_index).ok_or_else(|| {
                     OwnBackupError::Config(format!(
-                        "для раздела {} не передан пароль, а план требует вернуть шифрование",
-                        dst.index
+                        "для раздела {src_index} копии не передан пароль, а план требует \
+                         вернуть шифрование"
                     ))
                 })?;
                 restore_partition_encrypted(

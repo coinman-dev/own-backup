@@ -528,3 +528,41 @@ export interface DryRunResult {
   results: CheckResult[];
   letter_changes: LetterChange[];
 }
+
+// ---------------------------------------------------------------------------
+// Restore run state (mirrors common::restore_state)
+// ---------------------------------------------------------------------------
+
+export type RunStatus = 'running' | 'completed' | 'failed' | 'cancelled';
+export type OpStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped';
+
+export interface OpRecord {
+  index: number;
+  /** Stable slug: write_partition_table, restore_sectors, format, … */
+  kind: string;
+  title: string;
+  part_index: number | null;
+  status: OpStatus;
+  percent: number;
+  bytes_done: number;
+  bytes_total: number;
+  message: string;
+  cancellable: boolean;
+  /** From here on there is no going back. */
+  destroys_data: boolean;
+}
+
+export interface RestoreRunState {
+  plan_id: string;
+  target_disk: number;
+  started_at: string;
+  finished_at: string | null;
+  status: RunStatus;
+  ops: OpRecord[];
+  current: number | null;
+  /** Whether a cancel request would be honoured right now. */
+  cancellable: boolean;
+  /** Things the restore could not do and the user must (fix crypttab, rerun
+   *  bcdboot, …). */
+  follow_ups: string[];
+}

@@ -13,6 +13,7 @@ import type {
   RestorePlan,
   CheckContext,
   DryRunResult,
+  RestoreRunState,
   ServiceHealth,
   ServiceStatus,
   MountBackendStatus,
@@ -62,6 +63,17 @@ export const api = {
    *  made (no stored header, unreadable image). */
   verifyLuksPassword: (imagePath: string, srcIndex: number, password: string) =>
     invoke<boolean>('verify_luks_password', { imagePath, srcIndex, password }),
+  /** DESTRUCTIVE. Hand the checked plan to the service. `passphrases` maps a
+   *  SOURCE partition index to the password of the container being put back;
+   *  they travel with the request, never inside the plan (which is persisted).
+   *  Returns immediately — progress arrives as `restore-plan-progress`. */
+  applyRestorePlan: (plan: RestorePlan, passphrases?: Record<number, string>) =>
+    invoke<RestoreRunState>('apply_restore_plan', { plan, passphrases }),
+  /** The restore in progress, or the last one that finished. Survives closing
+   *  and reopening the window, and a service restart. */
+  getRestoreState: () => invoke<RestoreRunState | null>('get_restore_state'),
+  cancelRestorePlan: (planId: string) =>
+    invoke<{ cancelled: boolean; reason: string }>('cancel_restore_plan', { planId }),
 
   // --- Mount prerequisites: AIM driver (Windows) / NBD+NTFS status (Linux) ---
   aimDriverStatus: () => invoke<MountBackendStatus>('aim_driver_status'),
