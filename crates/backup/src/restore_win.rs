@@ -478,24 +478,13 @@ pub fn restore_partition_encrypted(
     cancel: &CancelToken,
     mut progress: impl FnMut(&SectorRestoreProgress) -> Result<()>,
 ) -> Result<SectorRestoreSummary> {
-    use base64::Engine;
-
     let started = Instant::now();
     let block_size = sidecar.manifest.block_size as u64;
     let image_len = sidecar.manifest.source_disk.size_bytes;
     let data_offset = sidecar.info.volume_data_offset;
     let window = source_window_for(sidecar, src_index)?;
 
-    let header = base64::engine::general_purpose::STANDARD
-        .decode(&req.header.header_b64)
-        .map_err(|e| OwnBackupError::ImageFormat(format!("повреждён сохранённый заголовок LUKS: {e}")))?;
-    if header.len() as u64 != req.header.data_offset {
-        return Err(OwnBackupError::ImageFormat(format!(
-            "сохранённый заголовок LUKS — {} Б, а контейнер начинал данные с {} Б",
-            header.len(),
-            req.header.data_offset
-        )));
-    }
+    let header = crate::luks::decode_stored_header(req.header)?;
 
     // The payload no longer starts at the partition's first byte: the header
     // takes the front. So the partition must hold both.

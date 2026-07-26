@@ -57,6 +57,11 @@ export const api = {
   // plan is destructive and stays deliberately unconnected for now.
   dryRunRestorePlan: (plan: RestorePlan, context?: CheckContext) =>
     invoke<DryRunResult>('dry_run_restore_plan', { plan, context }),
+  /** Does this password open the container whose header the copy kept?
+   *  `false` = wrong password; a rejected promise = the check could not be
+   *  made (no stored header, unreadable image). */
+  verifyLuksPassword: (imagePath: string, srcIndex: number, password: string) =>
+    invoke<boolean>('verify_luks_password', { imagePath, srcIndex, password }),
 
   // --- Mount prerequisites: AIM driver (Windows) / NBD+NTFS status (Linux) ---
   aimDriverStatus: () => invoke<MountBackendStatus>('aim_driver_status'),

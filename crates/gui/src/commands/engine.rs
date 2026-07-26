@@ -169,11 +169,12 @@ pub struct ImageInfoDto {
 /// Read one image's embedded metadata into an [`ImageInfoDto`] (direct file
 /// read: embedded meta partition first, then an adjacent `.obkm`). Shared by
 /// `read_image_info` (single file) and `list_image_backups` (folder scan).
-fn read_image_info_at(path: &std::path::Path) -> Result<ImageInfoDto, String> {
+/// Load an image's sidecar: embedded first, the adjacent `.obkm` as a fallback
+/// for images written before the sidecar moved inside the container.
+fn load_sidecar(path: &std::path::Path) -> Result<own_backup_backup::Sidecar, String> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_lowercase();
-
-    let sidecar = match own_backup_backup::read_embedded_sidecar(path, &ext) {
-        Ok(s) => s,
+    match own_backup_backup::read_embedded_sidecar(path, &ext) {
+        Ok(s) => Ok(s),
         Err(_) => {
             let sidecar_path = own_backup_backup::sidecar_path_for(path);
             if !sidecar_path.exists() {
@@ -182,9 +183,13 @@ fn read_image_info_at(path: &std::path::Path) -> Result<ImageInfoDto, String> {
                     sidecar_path.display()
                 ));
             }
-            own_backup_backup::read_sidecar(&sidecar_path).map_err(|e| e.to_string())?
+            own_backup_backup::read_sidecar(&sidecar_path).map_err(|e| e.to_string())
         }
-    };
+    }
+}
+
+fn read_image_info_at(path: &std::path::Path) -> Result<ImageInfoDto, String> {
+    let sidecar = load_sidecar(path)?;
 
     // Derived (compute before moving fields out of the sidecar): the archived
     // disk snapshot and which of its partitions are in this backup — whole-disk
@@ -446,4 +451,42 @@ pub async fn cancel_restore_plan(
     plan_id: String,
 ) -> Result<serde_json::Value, String> {
     state.link.client().await?.cancel_restore_plan(&plan_id).await
+}
+
+/// Check a LUKS passphrase against the header stored in a copy (D19).
+///
+/// Runs here rather than in the service: it is a pure computation over bytes
+/// already read from the image, and the answer is the same one the restore
+/// would get. Finding out that a password is wrong should not require starting
+/// a restore and waiting for it to reach the container.
+///
+/// Returns `true` when the passphrase opens the container, `false` when it does
+/// not. An `Err` means the check could not be made at all — no stored header,
+/// an unreadable image — which is a different thing from a wrong password and
+/// is reported as such.
+#[tauri::command]
+pub async fn verify_luks_password(
+    image_path: String,
+    src_index: u32,
+    password: String,
+) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let sidecar = load_sidecar(std::path::Path::new(&image_path))?;
+        let headers = &sidecar.info.luks_headers;
+        // A per-volume image records index 0 — there was nothing to
+        // disambiguate at backup time — so its lone entry answers for whichever
+        // partition is asked about.
+        let header = match headers.as_slice() {
+            [only] if sidecar.disk_manifest.is_none() => Some(only),
+            _ => headers.iter().find(|h| h.part_index == src_index),
+        }
+        .ok_or_else(|| {
+            format!("в копии не сохранён заголовок контейнера для раздела {src_index}")
+        })?;
+
+        own_backup_backup::luks::verify_stored_passphrase(header, &password)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("проверка пароля не запустилась: {e}"))?
 }

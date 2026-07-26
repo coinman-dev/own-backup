@@ -242,6 +242,75 @@ fn xts_decrypt(key: &[u8], sector_size: usize, first_512_unit: u128, buf: &mut [
     Ok(())
 }
 
+/// A saved header blob, readable the way a volume is.
+///
+/// Reads past the end return zeros rather than failing: a caller that asks for
+/// a fixed-size window at the tail of the header should not have to know
+/// exactly where the blob stops.
+struct HeaderBlob<'a>(&'a [u8]);
+
+impl RawVolume for HeaderBlob<'_> {
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        buf.fill(0);
+        let start = offset as usize;
+        if start >= self.0.len() {
+            return Ok(());
+        }
+        let n = buf.len().min(self.0.len() - start);
+        buf[..n].copy_from_slice(&self.0[start..start + n]);
+        Ok(())
+    }
+
+    fn len(&self) -> u64 {
+        self.0.len() as u64
+    }
+}
+
+/// Recover the master key from a **saved** header (D19) instead of a live
+/// device.
+///
+/// Two uses: checking a passphrase before a restore starts — the answer is the
+/// same one the restore would get, so there is no reason to make the user find
+/// out an hour in — and opening the container without a disk to open it on.
+pub fn open_luks_from_header(header: &[u8], passphrase: &[u8]) -> Result<LuksParams> {
+    let mut blob = HeaderBlob(header);
+    open_luks(&mut blob, passphrase)
+}
+
+/// Decode a stored header blob back into bytes, checking it is the length the
+/// container said its data area started at.
+///
+/// A blob of the wrong length is not a header we can put back: writing it would
+/// leave the payload at the wrong offset, which produces a container that opens
+/// and decrypts to noise.
+pub fn decode_stored_header(
+    stored: &own_backup_common::image::LuksHeaderBackup,
+) -> Result<Vec<u8>> {
+    let bytes = B64
+        .decode(&stored.header_b64)
+        .map_err(|e| bad(format!("повреждён сохранённый заголовок LUKS: {e}")))?;
+    if bytes.len() as u64 != stored.data_offset {
+        return Err(bad(format!(
+            "сохранённый заголовок LUKS — {} Б, а контейнер начинал данные с {} Б",
+            bytes.len(),
+            stored.data_offset
+        )));
+    }
+    Ok(bytes)
+}
+
+/// Whether `passphrase` opens the container whose header the copy kept (D19).
+///
+/// `Ok(false)` is a wrong passphrase — an expected answer, not a failure. `Err`
+/// means the question could not be asked at all: a corrupt or absent blob.
+pub fn verify_stored_passphrase(
+    stored: &own_backup_common::image::LuksHeaderBackup,
+    passphrase: &str,
+) -> Result<bool> {
+    let bytes = decode_stored_header(stored)?;
+    Ok(open_luks_from_header(&bytes, passphrase.as_bytes()).is_ok())
+}
+
 /// Read the container's own header area — everything before the encrypted data
 /// starts — so a restore can put the container back exactly as it was (D19).
 ///

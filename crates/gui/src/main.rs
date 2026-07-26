@@ -244,6 +244,7 @@ fn main() {
             commands::engine::apply_restore_plan,
             commands::engine::get_restore_state,
             commands::engine::cancel_restore_plan,
+            commands::engine::verify_luks_password,
             // --- misc ---
             commands::settings::get_config,
             commands::settings::save_config,

@@ -310,6 +310,26 @@
    *  can do it: leaving encryption off silently is how a Linux install stops
    *  booting after an otherwise perfect restore. */
   let reencrypt = $state(true);
+  /** Passphrase per source partition, entered here and held only in memory —
+   *  it goes to the service with the apply request, never into the plan. */
+  let luksPw = $state<Record<number, string>>({});
+  /** Result of the last check per partition. Cleared as soon as the field is
+   *  edited: a tick next to a password that has since changed is a lie. */
+  let luksPwState = $state<Record<number, 'idle' | 'checking' | 'ok' | 'bad' | 'error'>>({});
+  let luksPwError = $state<Record<number, string>>({});
+
+  async function checkLuksPassword(part: number) {
+    const path = activeInfo?.image_path ?? lastRun?.image_path ?? '';
+    const pw = luksPw[part] ?? '';
+    if (!path || !pw) return;
+    luksPwState[part] = 'checking';
+    try {
+      luksPwState[part] = (await api.verifyLuksPassword(path, part, pw)) ? 'ok' : 'bad';
+    } catch (e) {
+      luksPwState[part] = 'error';
+      luksPwError[part] = String(e);
+    }
+  }
   /** Extra attributes of hand-created partitions, for the operations queue. */
   let newPartMeta = $state(
     new Map<number, { gptType: string; mbrKind: string; active: boolean; letter: string; quickFormat: boolean }>(),
@@ -1304,17 +1324,72 @@
            dialog: it decides whether the restored system boots, and the
            default is the one that keeps it working. -->
       <div class="luks-box">
-        <label class="luks-opt">
-          <input type="checkbox" bind:checked={reencrypt} />
-          <span>
+        <!-- The checkbox sits in its own <label>; the password field must NOT,
+             or clicking into it would toggle the checkbox. -->
+        <div class="luks-row">
+          <label class="luks-opt">
+            <input type="checkbox" bind:checked={reencrypt} />
             <b>Вернуть шифрование{reencryptable.length > 1 ? ` разделам ${reencryptable.join(', ')}` : ` разделу ${reencryptable[0]}`}</b>
-            <em>
-              Заголовок контейнера сохранён в копии. Раздел восстановится ровно таким, каким был —
-              тот же UUID, тот же пароль — и система загрузится без единой правки.
-              Пароль спросим перед запуском восстановления; в копии он не хранится.
-            </em>
-          </span>
-        </label>
+          </label>
+          {#if reencrypt && reencryptable.length === 1}
+            {@const part = reencryptable[0]}
+            <span class="pw-inline">
+              <span class="pw-lbl">Введите пароль:</span>
+              <input
+                type="password"
+                autocomplete="off"
+                spellcheck="false"
+                value={luksPw[part] ?? ''}
+                oninput={(e) => {
+                  luksPw[part] = (e.currentTarget as HTMLInputElement).value;
+                  luksPwState[part] = 'idle';
+                }}
+                onkeydown={(e) => { if (e.key === 'Enter') checkLuksPassword(part); }}
+              />
+              <button
+                class="btn ghost tiny"
+                disabled={!(luksPw[part] ?? '') || luksPwState[part] === 'checking'}
+                onclick={() => checkLuksPassword(part)}
+              >Проверка</button>
+              {#if luksPwState[part] === 'checking'}<span class="pw-note">проверяем…</span>{/if}
+              {#if luksPwState[part] === 'ok'}<span class="pw-ok">✓ подходит</span>{/if}
+              {#if luksPwState[part] === 'bad'}<span class="pw-bad">✕ не подходит</span>{/if}
+              {#if luksPwState[part] === 'error'}<span class="pw-bad" title={luksPwError[part]}>не удалось проверить</span>{/if}
+            </span>
+          {/if}
+        </div>
+        <div class="luks-note">
+          Заголовок контейнера сохранён в копии. Раздел восстановится ровно таким, каким был —
+          тот же UUID, тот же пароль — и система загрузится без единой правки.
+          В копии пароль не хранится: он нужен только чтобы открыть заголовок и зашифровать данные обратно.
+        </div>
+        {#if reencrypt && reencryptable.length > 1}
+          {#each reencryptable as part}
+            <div class="pw-inline multi">
+              <span class="pw-lbl">Раздел {part} — пароль:</span>
+              <input
+                type="password"
+                autocomplete="off"
+                spellcheck="false"
+                value={luksPw[part] ?? ''}
+                oninput={(e) => {
+                  luksPw[part] = (e.currentTarget as HTMLInputElement).value;
+                  luksPwState[part] = 'idle';
+                }}
+                onkeydown={(e) => { if (e.key === 'Enter') checkLuksPassword(part); }}
+              />
+              <button
+                class="btn ghost tiny"
+                disabled={!(luksPw[part] ?? '') || luksPwState[part] === 'checking'}
+                onclick={() => checkLuksPassword(part)}
+              >Проверка</button>
+              {#if luksPwState[part] === 'checking'}<span class="pw-note">проверяем…</span>{/if}
+              {#if luksPwState[part] === 'ok'}<span class="pw-ok">✓ подходит</span>{/if}
+              {#if luksPwState[part] === 'bad'}<span class="pw-bad">✕ не подходит</span>{/if}
+              {#if luksPwState[part] === 'error'}<span class="pw-bad" title={luksPwError[part]}>не удалось проверить</span>{/if}
+            </div>
+          {/each}
+        {/if}
         {#if !reencrypt}
           <div class="luks-warn inner">
             <span class="sw-ico">🔓</span>
@@ -1747,7 +1822,16 @@
   .luks-box { margin-top: 14px; padding: 12px 14px; border-radius: 6px; border: 1px solid var(--border); background: var(--card-bg); }
   .luks-opt { display: flex; align-items: flex-start; gap: 10px; font-size: 13px; color: var(--head); cursor: pointer; line-height: 1.5; }
   .luks-opt input { width: auto; margin-top: 2px; flex: 0 0 auto; }
-  .luks-opt em { display: block; font-style: normal; font-size: 12px; color: var(--text-muted); line-height: 1.5; margin-top: 3px; }
+  .luks-row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 14px; }
+  .luks-note { font-size: 12px; color: var(--text-muted); line-height: 1.5; margin-top: 6px; }
+  .pw-inline { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--head); }
+  .pw-inline.multi { margin-top: 8px; }
+  .pw-lbl { white-space: nowrap; }
+  .pw-inline input { width: 180px; padding: 6px 9px; border: 1px solid var(--border); border-radius: 4px; font-size: 13px; font-family: var(--font); background: var(--card-bg); color: var(--text); }
+  .btn.tiny { padding: 6px 12px; font-size: 12px; }
+  .pw-ok { font-size: 12px; color: #2f7d4f; white-space: nowrap; }
+  .pw-bad { font-size: 12px; color: #b32b2b; white-space: nowrap; }
+  .pw-note { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
   /* Right-click partition menu */
   .menu-backdrop { position: fixed; inset: 0; z-index: 190; }
   .ctx-menu { position: fixed; z-index: 200; min-width: 180px; background: var(--card-bg); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 10px 30px rgba(0,0,0,.18); padding: 6px; }
