@@ -3426,7 +3426,7 @@ pub fn get_all_active_mounts(
     // can show "J:" instead of "PhysicalDrive5" / "Диск 5".
     for m in &mut result {
         if let Some(disk_num) = disk_number_from_physical(&m.physical_path) {
-            m.volume_letters = crate::true_removal_win::drive_letters_on_disk(disk_num);
+            m.volume_letters = crate::volume_win::drive_letters_on_disk(disk_num);
         }
     }
 

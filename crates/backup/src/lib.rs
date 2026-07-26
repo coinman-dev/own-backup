@@ -47,9 +47,15 @@ pub mod automount;
 #[cfg(target_os = "windows")]
 pub mod block_reader_win;
 #[cfg(target_os = "windows")]
+pub mod disk_session_win;
+#[cfg(target_os = "windows")]
 pub mod engine_win;
 #[cfg(target_os = "windows")]
 pub mod exclusions_win;
+#[cfg(target_os = "windows")]
+pub mod format_win;
+#[cfg(target_os = "windows")]
+pub mod letters_win;
 #[cfg(target_os = "windows")]
 pub mod privileges_win;
 #[cfg(target_os = "windows")]
@@ -60,6 +66,8 @@ pub mod true_removal_win;
 pub mod used_sectors_win;
 #[cfg(target_os = "windows")]
 pub mod vhdx;
+#[cfg(target_os = "windows")]
+pub mod volume_win;
 #[cfg(target_os = "windows")]
 pub mod win_device;
 

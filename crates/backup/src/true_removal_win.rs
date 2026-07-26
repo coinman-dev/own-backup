@@ -30,17 +30,12 @@ use std::time::{Duration, Instant};
 
 use tracing::{debug, info, warn};
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{CloseHandle, ERROR_NO_MORE_FILES, GENERIC_READ, GENERIC_WRITE, HANDLE};
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, DeleteVolumeMountPointW, FileDispositionInfo, FileDispositionInfoEx,
-    FindFirstVolumeW, FindNextVolumeW, FindVolumeClose, FlushFileBuffers,
-    GetVolumePathNamesForVolumeNameW, SetFileAttributesW, SetFileInformationByHandle,
-    FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_BACKUP_SEMANTICS,
+    CreateFileW, FileDispositionInfo, FileDispositionInfoEx, SetFileAttributesW,
+    SetFileInformationByHandle, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS, OPEN_EXISTING,
+    OPEN_EXISTING,
 };
-use windows::Win32::System::Ioctl::{FSCTL_DISMOUNT_VOLUME, FSCTL_LOCK_VOLUME};
-use windows::Win32::System::IO::DeviceIoControl;
 
 use own_backup_common::{OwnBackupError, Result};
 
@@ -49,6 +44,10 @@ use crate::exclusions_win::{list_dir_backup, ExcludedPath};
 use crate::sidecar::BlockChecksum;
 use crate::vhdx::{attach_vhdx, create_differencing_vhdx, merge_into_parent, AttachMode};
 use crate::vhdx_bat::allocated_payload_blocks;
+use crate::volume_win::{
+    all_volume_roots_on_disk, flush_lock_dismount_volume, strip_drive_letters,
+    strip_letters_on_disk, volume_root_at_offset, FileHandle,
+};
 use crate::win_device::{to_wide, WinRawDevice};
 
 /// Stamped into the start log line so a stale service exe is immediately
@@ -89,15 +88,6 @@ pub struct RemovalOutcome {
     /// Checksum entries newly added (driver wrote into previously-free space,
     /// e.g. USN journal growth).
     pub blocks_added: u64,
-}
-
-/// RAII file handle.
-struct FileHandle(HANDLE);
-impl Drop for FileHandle {
-    fn drop(&mut self) {
-        // SAFETY: handle owned by us, closed exactly once.
-        let _ = unsafe { CloseHandle(self.0) };
-    }
 }
 
 fn dev_err(what: &str, e: impl std::fmt::Display) -> OwnBackupError {
@@ -450,93 +440,8 @@ pub(crate) fn delete_paths_on_disk_multi(
     Ok((deleted, failed))
 }
 
-/// `\\?\Volume{GUID}\` root of the volume that starts exactly at `part_offset`
-/// bytes on `disk_number`, or `None` if none does (yet). Retries briefly, since
-/// a freshly attached disk's volumes take a moment to enumerate.
-fn volume_root_at_offset(disk_number: u32, part_offset: u64) -> Option<String> {
-    for _ in 0..40 {
-        for vr in all_volume_roots_on_disk(disk_number) {
-            if volume_start_on_disk(&vr) == Some((disk_number, part_offset)) {
-                return Some(vr);
-            }
-        }
-        std::thread::sleep(Duration::from_millis(250));
-    }
-    None
-}
 
-/// Every `\\?\Volume{GUID}\` root that lives on `disk_number`.
-fn all_volume_roots_on_disk(disk_number: u32) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut name_buf = [0u16; 512];
-    // SAFETY: buffer valid for the call; handle closed below.
-    let Ok(find) = (unsafe { FindFirstVolumeW(&mut name_buf) }) else {
-        return out;
-    };
-    loop {
-        let len = name_buf.iter().position(|&c| c == 0).unwrap_or(name_buf.len());
-        let volume_root = String::from_utf16_lossy(&name_buf[..len]);
-        if volume_on_disk(&volume_root, disk_number) {
-            out.push(volume_root);
-        }
-        name_buf = [0u16; 512];
-        // SAFETY: valid find handle and buffer.
-        if unsafe { FindNextVolumeW(find, &mut name_buf) }.is_err() {
-            break;
-        }
-    }
-    // SAFETY: handle from a successful FindFirstVolumeW.
-    let _ = unsafe { FindVolumeClose(find) };
-    out
-}
 
-/// `(disk_number, starting_offset_bytes)` of a single-extent volume, or `None`
-/// (a spanned/striped volume — never one of our image partitions — or on error).
-fn volume_start_on_disk(volume_root: &str) -> Option<(u32, u64)> {
-    let device = volume_root.trim_end_matches('\\');
-    let wide = to_wide(device);
-    // SAFETY: `wide` outlives the call.
-    let handle = unsafe {
-        CreateFileW(
-            PCWSTR(wide.as_ptr()),
-            0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            None,
-            OPEN_EXISTING,
-            FILE_FLAGS_AND_ATTRIBUTES(0),
-            None,
-        )
-    }
-    .ok()?;
-    let handle = FileHandle(handle);
-    // VOLUME_DISK_EXTENTS: u32 count, pad to 8, then 24-byte DISK_EXTENT[]
-    // (u32 DiskNumber, pad, i64 StartingOffset, i64 ExtentLength).
-    let mut out = [0u8; 8 + 24 * 8];
-    let mut returned = 0u32;
-    // SAFETY: out buffer valid for its size.
-    let ok = unsafe {
-        DeviceIoControl(
-            handle.0,
-            IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
-            None,
-            0,
-            Some(out.as_mut_ptr() as *mut _),
-            out.len() as u32,
-            Some(&mut returned),
-            None,
-        )
-    };
-    if ok.is_err() || returned < 8 + 24 {
-        return None;
-    }
-    let count = u32::from_le_bytes(out[0..4].try_into().unwrap());
-    if count != 1 {
-        return None; // multi-extent volume — not one of our image partitions
-    }
-    let disk = u32::from_le_bytes(out[8..12].try_into().unwrap());
-    let offset = i64::from_le_bytes(out[16..24].try_into().unwrap()).max(0) as u64;
-    Some((disk, offset))
-}
 
 /// Delete `paths` on one already-mounted volume (identified by its
 /// `\\?\Volume{GUID}\` root), waiting for its filesystem to become ready first.
@@ -737,191 +642,7 @@ fn wait_volume_gone(disk_number: u32, timeout: Duration) -> bool {
 /// One sweep over all volumes; returns the `\\?\Volume{GUID}\` root of the
 /// first that lives on `disk_number`, or `None` if none does.
 fn enumerate_volume_on_disk(disk_number: u32) -> Option<String> {
-    let mut name_buf = [0u16; 512];
-    // SAFETY: buffer valid for the call; handle closed on every path below.
-    let find = unsafe { FindFirstVolumeW(&mut name_buf) }.ok()?;
-    let result = loop {
-        let len = name_buf.iter().position(|&c| c == 0).unwrap_or(name_buf.len());
-        let volume_root = String::from_utf16_lossy(&name_buf[..len]);
-        if volume_on_disk(&volume_root, disk_number) {
-            break Some(volume_root);
-        }
-        name_buf = [0u16; 512];
-        // SAFETY: valid find handle and buffer.
-        match unsafe { FindNextVolumeW(find, &mut name_buf) } {
-            Ok(()) => {}
-            Err(e) => {
-                if e.code() != ERROR_NO_MORE_FILES.to_hresult() {
-                    debug!(error = %e, "FindNextVolumeW");
-                }
-                break None;
-            }
-        }
-    };
-    // SAFETY: handle from a successful FindFirstVolumeW.
-    let _ = unsafe { FindVolumeClose(find) };
-    result
-}
-
-/// Does `\\?\Volume{GUID}\` live (entirely) on `disk_number`?
-fn volume_on_disk(volume_root: &str, disk_number: u32) -> bool {
-    let device = volume_root.trim_end_matches('\\');
-    let wide = to_wide(device);
-    // Access 0: IOCTL_VOLUME_QUERY_DISK_EXTENTS needs no data access.
-    // SAFETY: `wide` outlives the call.
-    let handle = unsafe {
-        CreateFileW(
-            PCWSTR(wide.as_ptr()),
-            0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            None,
-            OPEN_EXISTING,
-            FILE_FLAGS_AND_ATTRIBUTES(0),
-            None,
-        )
-    };
-    let Ok(handle) = handle else { return false };
-    let handle = FileHandle(handle);
-
-    // VOLUME_DISK_EXTENTS: u32 count, pad to 8, then 24-byte DISK_EXTENT[]
-    // (u32 DiskNumber, pad, i64 StartingOffset, i64 ExtentLength).
-    let mut out = [0u8; 8 + 24 * 8];
-    let mut returned = 0u32;
-    // SAFETY: out buffer valid for its size.
-    let ok = unsafe {
-        DeviceIoControl(
-            handle.0,
-            IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
-            None,
-            0,
-            Some(out.as_mut_ptr() as *mut _),
-            out.len() as u32,
-            Some(&mut returned),
-            None,
-        )
-    };
-    if ok.is_err() || returned < 8 + 24 {
-        return false;
-    }
-    let count = u32::from_le_bytes(out[0..4].try_into().unwrap()) as usize;
-    (0..count.min(8)).all(|i| {
-        let base = 8 + i * 24;
-        u32::from_le_bytes(out[base..base + 4].try_into().unwrap()) == disk_number
-    }) && count > 0
-}
-
-/// Drive letters (e.g. `"J:"`) of every volume that lives on `disk_number`.
-/// Empty if Windows has not assigned any yet (a freshly attached AIM disk can
-/// need a moment) — the caller then falls back to the disk number. Used to
-/// show the friendly mount target in the GUI/CLI instead of `PhysicalDriveN`.
-pub(crate) fn drive_letters_on_disk(disk_number: u32) -> Vec<String> {
-    let mut letters = Vec::new();
-    let mut name_buf = [0u16; 512];
-    // SAFETY: buffer valid for the call; handle closed below.
-    let Ok(find) = (unsafe { FindFirstVolumeW(&mut name_buf) }) else {
-        return letters;
-    };
-    loop {
-        let len = name_buf.iter().position(|&c| c == 0).unwrap_or(name_buf.len());
-        let volume_root = String::from_utf16_lossy(&name_buf[..len]);
-        if volume_on_disk(&volume_root, disk_number) {
-            letters.extend(volume_drive_letters(&volume_root));
-        }
-        name_buf = [0u16; 512];
-        // SAFETY: valid find handle and buffer.
-        if unsafe { FindNextVolumeW(find, &mut name_buf) }.is_err() {
-            break;
-        }
-    }
-    // SAFETY: handle from a successful FindFirstVolumeW.
-    let _ = unsafe { FindVolumeClose(find) };
-    letters
-}
-
-/// Remove every auto-assigned drive letter of `volume_root` (a mounted image
-/// volume must never surface as a lettered drive during the removal pass).
-///
-/// `DeleteVolumeMountPoint` also deletes the REMEMBERED `MountedDevices`
-/// mapping (the `mountvol X: /D` semantics) — the actual reason a letter kept
-/// appearing despite auto-mount being disabled: a differencing chain reuses its
-/// parent's partition GUIDs, so once a letter was ever assigned to the chain's
-/// volume, mountmgr restored it from the database on every later attach,
-/// bypassing the auto-mount setting. Stripping once heals the chain for good.
-/// Folder mount points (`C:\mnt\…`) are never touched — only bare `X:\` roots,
-/// and only for volumes the caller verified live on OUR attached disk.
-fn strip_drive_letters(volume_root: &str) {
-    for letter in volume_drive_letters(volume_root) {
-        let root = format!("{letter}\\"); // "J:" → "J:\"
-        let wide = to_wide(&root);
-        // SAFETY: `wide` is NUL-terminated and outlives the call.
-        match unsafe { DeleteVolumeMountPointW(PCWSTR(wide.as_ptr())) } {
-            Ok(()) => info!(
-                letter = %letter,
-                volume = %volume_root,
-                "true removal: removed the volume's drive letter (and its remembered mapping)"
-            ),
-            Err(e) => warn!(letter = %letter, volume = %volume_root, error = %e, "true removal: could not remove the drive letter"),
-        }
-    }
-}
-
-/// Strip drive letters from EVERY volume on `disk_number` (partitions without
-/// exclusions surface too when the whole-disk image is brought online).
-fn strip_letters_on_disk(disk_number: u32) {
-    for vr in all_volume_roots_on_disk(disk_number) {
-        strip_drive_letters(&vr);
-    }
-}
-
-/// Path names mapped to `\\?\Volume{GUID}\`, reduced to bare drive letters.
-/// A volume may have several (drive letter + mount-point folders); we keep
-/// only `"X:"` entries.
-fn volume_drive_letters(volume_root: &str) -> Vec<String> {
-    let wide = to_wide(volume_root); // keeps the required trailing backslash
-    let mut buf = vec![0u16; 512];
-    let mut needed = 0u32;
-    // SAFETY: `wide` outlives the call; buffer sized by `buf.len()`.
-    let ok = unsafe {
-        GetVolumePathNamesForVolumeNameW(
-            PCWSTR(wide.as_ptr()),
-            Some(buf.as_mut_slice()),
-            &mut needed,
-        )
-    };
-    if ok.is_err() {
-        // Grow once if the buffer was too small, then give up quietly.
-        if needed as usize > buf.len() {
-            buf = vec![0u16; needed as usize];
-            // SAFETY: as above, larger buffer.
-            if unsafe {
-                GetVolumePathNamesForVolumeNameW(
-                    PCWSTR(wide.as_ptr()),
-                    Some(buf.as_mut_slice()),
-                    &mut needed,
-                )
-            }
-            .is_err()
-            {
-                return Vec::new();
-            }
-        } else {
-            return Vec::new();
-        }
-    }
-    // Double-null-terminated list of null-separated path names.
-    buf.split(|&c| c == 0)
-        .filter(|s| !s.is_empty())
-        .filter_map(|s| {
-            let path = String::from_utf16_lossy(s);
-            let bytes = path.as_bytes();
-            // "X:\" → "X:"; ignore mount-point folder paths.
-            if bytes.len() == 3 && bytes[1] == b':' && bytes[2] == b'\\' && bytes[0].is_ascii_alphabetic() {
-                Some(format!("{}:", (bytes[0] as char).to_ascii_uppercase()))
-            } else {
-                None
-            }
-        })
-        .collect()
+    all_volume_roots_on_disk(disk_number).into_iter().next()
 }
 
 /// Delete one filesystem entry (recursing into non-reparse directories first).
@@ -1011,9 +732,6 @@ fn delete_one(path: &str) -> Result<()> {
     .map_err(|e| dev_err("set delete disposition", e))
 }
 
-/// How long to keep retrying `FSCTL_LOCK_VOLUME` while system services finish
-/// their post-mount writes and release the volume.
-const LOCK_RETRY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Cleanly unmount the volume so the subsequent detach is instant:
 /// flush → LOCK (retry) → DISMOUNT → offline the disk while still locked.
@@ -1040,89 +758,6 @@ fn teardown_volume(volume_root: &str, dev: &WinRawDevice) {
     drop(handle);
 }
 
-/// Flush, lock (with retries) and dismount one volume, returning the still-open
-/// lock handle so the caller controls when the lock releases (typically after
-/// the disk is offlined, so the filesystem does not immediately re-mount). A
-/// successful `FSCTL_LOCK_VOLUME` invalidates every foreign handle, which is what
-/// lets the subsequent `DetachVirtualDisk` avoid the ~180 s PnP removal-veto.
-fn flush_lock_dismount_volume(volume_root: &str) -> Option<FileHandle> {
-    let device = volume_root.trim_end_matches('\\');
-    let wide = to_wide(device);
-    // SAFETY: `wide` outlives the call.
-    let handle = unsafe {
-        CreateFileW(
-            PCWSTR(wide.as_ptr()),
-            GENERIC_READ.0 | GENERIC_WRITE.0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            None,
-            OPEN_EXISTING,
-            FILE_FLAGS_AND_ATTRIBUTES(0),
-            None,
-        )
-    };
-    let Ok(handle) = handle else {
-        warn!(volume = %device, "true removal: cannot open volume for teardown");
-        return None;
-    };
-    let handle = FileHandle(handle);
-
-    let t = Instant::now();
-    // SAFETY: valid volume handle.
-    if let Err(e) = unsafe { FlushFileBuffers(handle.0) } {
-        warn!(error = %e, "true removal: volume flush failed");
-    }
-    let flush_ms = t.elapsed().as_millis();
-
-    // Lock with retries: right after 20k+ deletions the lazy writer, storsvc
-    // (System Volume Information) and friends still hold handles for a few
-    // seconds; the lock succeeds once they let go.
-    let mut returned = 0u32;
-    let t = Instant::now();
-    let mut attempts = 0u32;
-    let locked = loop {
-        attempts += 1;
-        // SAFETY: no in/out buffers.
-        match unsafe {
-            DeviceIoControl(handle.0, FSCTL_LOCK_VOLUME, None, 0, None, 0, Some(&mut returned), None)
-        } {
-            Ok(()) => break true,
-            Err(e) => {
-                if t.elapsed() >= LOCK_RETRY_TIMEOUT {
-                    warn!(
-                        error = %e,
-                        attempts,
-                        "true removal: could not lock the volume — foreign handles survive, detach may stall"
-                    );
-                    break false;
-                }
-                std::thread::sleep(Duration::from_millis(500));
-            }
-        }
-    };
-    let lock_ms = t.elapsed().as_millis();
-
-    let t = Instant::now();
-    // Forced when unlocked — still better than nothing.
-    // SAFETY: no in/out buffers.
-    let dismounted = unsafe {
-        DeviceIoControl(handle.0, FSCTL_DISMOUNT_VOLUME, None, 0, None, 0, Some(&mut returned), None)
-    }
-    .map_err(|e| warn!(error = %e, "true removal: volume dismount failed"))
-    .is_ok();
-    let dismount_ms = t.elapsed().as_millis();
-
-    info!(
-        volume = %device,
-        locked,
-        attempts,
-        dismounted,
-        flush_ms,
-        lock_ms,
-        dismount_ms,
-        "true removal: volume flushed/locked/dismounted"
-    );
-    Some(handle)
-}
 
 /// Re-read every backup block overlapped by the child's touched regions from
 /// the merged image and update/insert its checksum. New all-zero blocks are
