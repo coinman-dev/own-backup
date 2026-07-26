@@ -112,6 +112,9 @@ pub enum CheckCode {
     /// The destination changes families — a Windows partition becomes a Linux
     /// one or the other way round.
     PartitionChangesFamily,
+    /// A filesystem was chosen when creating the partition, and the restore
+    /// brings a different one along.
+    FormatChoiceIgnored,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -157,6 +160,18 @@ pub struct SourcePartition {
     pub luks_header_available: bool,
 }
 
+/// A filesystem the user picked in the "create partition" dialog.
+///
+/// It is not part of the plan when the partition also receives a sector
+/// restore — formatting there would erase what was just written, so no format
+/// operation is generated. The choice is passed here anyway, precisely so the
+/// checks can point out that it will not happen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestedFormat {
+    pub index: u32,
+    pub fs: crate::restore_plan::FormatFs,
+}
+
 /// What a destination partition holds **right now**, before the restore.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TargetPartition {
@@ -184,6 +199,10 @@ pub struct CheckContext {
     /// is about to be overwritten. Empty when the caller did not supply them.
     #[serde(default)]
     pub targets: Vec<TargetPartition>,
+    /// Filesystems chosen in the designer's "create partition" dialog, so the
+    /// checks can say when one of them will not be created after all.
+    #[serde(default)]
+    pub requested_formats: Vec<RequestedFormat>,
 }
 
 impl CheckContext {
@@ -193,6 +212,10 @@ impl CheckContext {
 
     fn target(&self, index: u32) -> Option<&TargetPartition> {
         self.targets.iter().find(|t| t.index == index)
+    }
+
+    fn requested_format(&self, index: u32) -> Option<crate::restore_plan::FormatFs> {
+        self.requested_formats.iter().find(|r| r.index == index).map(|r| r.fs)
     }
 }
 
@@ -492,6 +515,7 @@ fn check_ops(
                 check_fit(src, dst, *mode, out);
                 check_encryption(src, dst, *mode, *reencrypt, out);
                 check_destination(ctx, src, dst, out);
+                check_format_choice(ctx, src, dst, *mode, out);
                 if *mode == RestoreMode::Files {
                     file_targets.push((dst.index, src.filesystem));
                 }
@@ -652,6 +676,48 @@ fn check_fit(src: &SourcePartition, dst: &PartRef, mode: RestoreMode, out: &mut 
             }
         }
     }
+}
+
+/// Point out a filesystem chosen at partition creation that will not be
+/// created.
+///
+/// A sector restore brings the source's filesystem along complete — that is
+/// what makes it a sector restore — so the partition ends up holding whatever
+/// the copy holds, regardless of what was picked when it was created. The plan
+/// is right about this (it generates no format operation, which would erase the
+/// restored data), but the user picked NTFS and has every reason to expect
+/// NTFS.
+///
+/// Nothing is said when the choice matches what arrives, or when no filesystem
+/// was chosen at all — there is no misunderstanding to correct.
+fn check_format_choice(
+    ctx: &CheckContext,
+    src: &SourcePartition,
+    dst: &PartRef,
+    mode: RestoreMode,
+    out: &mut Vec<CheckResult>,
+) {
+    if mode != RestoreMode::Sectors {
+        return; // a file restore really does format, and the plan says so
+    }
+    let Some(chosen) = ctx.requested_format(dst.index) else { return };
+    if chosen.is_same_as(src.filesystem) {
+        return;
+    }
+    out.push(CheckResult::new(
+        CheckLevel::Warning,
+        CheckCode::FormatChoiceIgnored,
+        Some(dst.index),
+        format!(
+            "При создании раздела {} выбрана файловая система {}, но она создана не будет: \
+             посекторное восстановление приносит файловую систему из копии целиком, и в \
+             разделе окажется {}. Форматировать тут нечего — форматирование стёрло бы \
+             только что восстановленные данные.",
+            dst.index,
+            chosen.as_str(),
+            src.filesystem.label()
+        ),
+    ));
 }
 
 /// Say what the destination holds today, and what it becomes.
@@ -936,6 +1002,7 @@ mod tests {
             taken_letters: vec![],
             target_is_system_disk: false,
             targets: vec![],
+            requested_formats: vec![],
         }
     }
 
@@ -1100,6 +1167,74 @@ mod tests {
             filesystem: fs,
             label: label.into(),
         }
+    }
+
+    fn sector_restore_plan(src_fs: FileSystem, chosen: Option<FormatFs>) -> (RestorePlan, CheckContext) {
+        let t = table(vec![entry(1, 1, 200)]);
+        let p1 = part_ref(&t, 1);
+        let plan = plan_with(
+            t,
+            vec![RestoreOp::RestorePartition {
+                src_index: 1,
+                dst: p1,
+                mode: RestoreMode::Sectors,
+                wipe_free_space: false,
+                reencrypt: false,
+            }],
+        );
+        let mut c = ctx(vec![source(1, 100 * MIB, 10 * MIB, src_fs)]);
+        c.requested_formats =
+            chosen.into_iter().map(|fs| RequestedFormat { index: 1, fs }).collect();
+        (plan, c)
+    }
+
+    #[test]
+    fn choosing_a_filesystem_that_the_copy_will_overwrite_is_called_out() {
+        // The case in front of me: a partition created as NTFS, then mapped to
+        // a btrfs source. No format operation is generated — correctly, it
+        // would erase the restored data — but the user picked NTFS and expects
+        // NTFS.
+        let (plan, c) = sector_restore_plan(FileSystem::Btrfs, Some(FormatFs::Ntfs));
+        let results = check_plan(&plan, &c);
+        let found = results.iter().find(|r| r.code == CheckCode::FormatChoiceIgnored).unwrap();
+        assert_eq!(found.level, CheckLevel::Warning);
+        assert!(found.message.contains("NTFS"), "{}", found.message);
+        assert!(found.message.contains("Btrfs"), "{}", found.message);
+        assert!(errors(&results).is_empty(), "a misunderstanding, not a mistake");
+    }
+
+    #[test]
+    fn choosing_the_filesystem_the_copy_brings_says_nothing() {
+        let (plan, c) = sector_restore_plan(FileSystem::Ntfs, Some(FormatFs::Ntfs));
+        assert!(!codes(&check_plan(&plan, &c)).contains(&CheckCode::FormatChoiceIgnored));
+    }
+
+    #[test]
+    fn choosing_nothing_says_nothing() {
+        let (plan, c) = sector_restore_plan(FileSystem::Btrfs, None);
+        assert!(!codes(&check_plan(&plan, &c)).contains(&CheckCode::FormatChoiceIgnored));
+    }
+
+    #[test]
+    fn a_file_restore_really_does_format_so_the_choice_stands() {
+        let t = table(vec![entry(1, 1, 200)]);
+        let p1 = part_ref(&t, 1);
+        let plan = plan_with(
+            t,
+            vec![
+                RestoreOp::Format { part: p1, fs: FormatFs::Ntfs, label: String::new(), quick: true },
+                RestoreOp::RestorePartition {
+                    src_index: 1,
+                    dst: p1,
+                    mode: RestoreMode::Files,
+                    wipe_free_space: false,
+                    reencrypt: false,
+                },
+            ],
+        );
+        let mut c = ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ntfs)]);
+        c.requested_formats = vec![RequestedFormat { index: 1, fs: FormatFs::Ntfs }];
+        assert!(!codes(&check_plan(&plan, &c)).contains(&CheckCode::FormatChoiceIgnored));
     }
 
     #[test]

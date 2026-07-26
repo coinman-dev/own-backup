@@ -516,6 +516,9 @@ export interface CheckContext {
     filesystem: string;
     label: string;
   }[];
+  /** Filesystems chosen in the "create partition" dialog, so the checks can
+   *  say when one of them will not be created after all. */
+  requested_formats: { index: number; fs: FormatFs }[];
 }
 
 export interface DryRunResult {

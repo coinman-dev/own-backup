@@ -141,6 +141,22 @@ pub enum FormatFs {
 }
 
 impl FormatFs {
+    /// Whether this names the same filesystem as `fs`.
+    ///
+    /// The two enums exist for different reasons — [`FormatFs`] is what we can
+    /// create, [`crate::types::FileSystem`] is what we can recognise — and this
+    /// is the one place they have to be compared.
+    pub fn is_same_as(self, fs: crate::types::FileSystem) -> bool {
+        use crate::types::FileSystem;
+        matches!(
+            (self, fs),
+            (FormatFs::Ntfs, FileSystem::Ntfs)
+                | (FormatFs::Fat32, FileSystem::Fat32)
+                | (FormatFs::ExFat, FileSystem::ExFat)
+                | (FormatFs::ReFs, FileSystem::ReFs)
+        )
+    }
+
     /// Name as `FormatEx` / `format.com` expect it.
     pub fn as_str(self) -> &'static str {
         match self {

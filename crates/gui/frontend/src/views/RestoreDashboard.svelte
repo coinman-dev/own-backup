@@ -631,7 +631,11 @@
       // 287 MiB gap the user never asked for).
       size: avail >= GIB ? (avail / GIB).toFixed(2) : String(Math.round(avail / MIB)),
       unit: avail >= GIB ? 'GiB' : 'MiB',
-      fs: 'ntfs',
+      // "Не форматировать" by default: a partition created here is usually
+      // about to receive a sector restore, which brings its own filesystem —
+      // picking one up front only sets up an expectation the restore will not
+      // meet.
+      fs: '',
       label: '',
       gptType: GPT_TYPES[0].guid,
       mbrKind: 'primary',
@@ -764,13 +768,24 @@
       }
       if (was || previewIdx.includes(p.index)) continue;
       const m = newPartMeta.get(p.index);
+      // A partition that is about to receive a sector restore is NOT formatted:
+      // the filesystem arrives from the copy, and formatting would erase it.
+      // Saying otherwise here was the queue promising something the plan never
+      // contained.
+      const takesData = mappings.some((x) => x.dst === p.index);
       const bits = [formatBytes(p.size_bytes)];
-      if (p.filesystem) bits.push(p.filesystem.toUpperCase());
+      if (p.filesystem && !takesData) bits.push(p.filesystem.toUpperCase());
       if (m) {
         bits.push(isGpt ? (GPT_TYPES.find((t) => t.guid === m.gptType)?.name ?? 'тип') : m.mbrKind === 'primary' ? 'основной' : 'логический');
         if (!isGpt && m.active) bits.push('активный');
         if (m.letter) bits.push(`буква ${m.letter}:`);
-        bits.push(m.quickFormat ? 'быстрое форматирование' : 'полное форматирование');
+        if (takesData) {
+          bits.push('без форматирования: файловая система придёт из копии');
+        } else if (p.filesystem) {
+          bits.push(m.quickFormat ? 'быстрое форматирование' : 'полное форматирование');
+        } else {
+          bits.push('без форматирования');
+        }
       }
       bits.push('выравнивание 1 МиБ');
       ops.push(`Создать раздел ${p.volume_label || '(без метки)'} — ${bits.join(', ')}`);
@@ -1027,6 +1042,15 @@
         filesystem: p.filesystem,
         label: p.volume_label || (p.volume_letter ? `${p.volume_letter}:` : ''),
       })),
+      // What the create dialog picked. Deliberately reported even though the
+      // plan contains no format operation for a partition that receives a
+      // sector restore — that absence is exactly what the user should be told
+      // about.
+      requested_formats: curParts.flatMap((p) => {
+        if (!newPartMeta.has(p.index)) return [];
+        const fs = formatFsOf(p.filesystem);
+        return fs ? [{ index: p.index, fs }] : [];
+      }),
     };
   }
 
@@ -1524,11 +1548,11 @@
                ext4, and offering it here would produce a partition the queue
                claims is formatted and that is in fact empty. -->
           <select value={createDlg.fs} onchange={(e) => onFsChange((e.currentTarget as HTMLSelectElement).value)}>
+            <option value="">Не форматировать</option>
             <option value="ntfs">NTFS</option>
             <option value="fat32">FAT32</option>
             <option value="exfat">exFAT</option>
             <option value="refs">ReFS</option>
-            <option value="">Не форматировать</option>
           </select>
         </label>
         {#if isGpt}
