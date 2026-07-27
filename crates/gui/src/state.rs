@@ -23,8 +23,11 @@ pub struct GuiState {
 }
 
 impl GuiState {
-    pub fn new(config: AppConfig, link: Arc<ServiceLink>) -> Self {
-        let config_path = config.data_dir.join("config.toml");
+    /// `config_path` is passed in rather than derived from `config.data_dir`:
+    /// the file is what *says* where the data directory is, so deriving the
+    /// path from a value inside it means saving to a different place than the
+    /// one it was read from as soon as a user edits that setting.
+    pub fn new(config: AppConfig, config_path: PathBuf, link: Arc<ServiceLink>) -> Self {
         Self {
             config: std::sync::Mutex::new(config),
             config_path,

@@ -188,8 +188,11 @@ fn main() {
     // still need the service — see plan stage 2e.)
     init_logging();
 
-    // Load config (or use defaults)
-    let config = AppConfig::default();
+    // Read config.toml. This used to be `AppConfig::default()` with a comment
+    // claiming otherwise: settings were written to a file nothing ever opened,
+    // so nothing the user changed survived a restart.
+    let config_path = AppConfig::default_path();
+    let config = AppConfig::load_or_default();
 
     // Ensure data directory exists (config.toml is written here).
     let _ = std::fs::create_dir_all(&config.data_dir);
@@ -198,7 +201,7 @@ fn main() {
     // service; connect to it, spawning a private foreground instance if none is
     // installed/running so the GUI still works standalone.
     let link = Arc::new(ServiceLink::new(&config.grpc_address, config.token_path()));
-    let gui_state = GuiState::new(config, link.clone());
+    let gui_state = GuiState::new(config, config_path, link.clone());
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())

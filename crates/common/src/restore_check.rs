@@ -234,13 +234,6 @@ impl CheckContext {
         describe(index, "", size, None)
     }
 
-    /// The same, for a partition inside the copy.
-    fn describe_source(&self, index: u32) -> String {
-        match self.source(index) {
-            Some(s) => describe(index, &s.label, s.size_bytes, Some(s.filesystem)),
-            None => index.to_string(),
-        }
-    }
 
     fn source(&self, index: u32) -> Option<&SourcePartition> {
         self.sources.iter().find(|s| s.index == index)
@@ -957,6 +950,7 @@ fn check_encryption(
     out: &mut Vec<CheckResult>,
 ) {
     let _ = dst;
+    let _ = dst_index;
     if reencrypt {
         if !src.luks_header_available {
             out.push(CheckResult::new(

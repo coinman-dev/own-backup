@@ -109,6 +109,28 @@ impl AppConfig {
         self.data_dir.join("metadata.db")
     }
 
+    /// Where the config lives: `<data dir>/config.toml`.
+    ///
+    /// Derived from the *default* data directory, because the file is what says
+    /// where the data directory is — it cannot be found using a value it holds.
+    pub fn default_path() -> PathBuf {
+        default_data_dir().join("config.toml")
+    }
+
+    /// Read [`Self::default_path`], falling back to defaults when it is absent
+    /// or unreadable.
+    ///
+    /// A missing file is the normal first-run case, and a corrupt one should
+    /// not stop the program from starting — losing settings is recoverable,
+    /// refusing to launch is not. Either way the next save rewrites it.
+    pub fn load_or_default() -> Self {
+        let path = Self::default_path();
+        match Self::load_from_file(&path) {
+            Ok(c) => c,
+            Err(_) => Self::default(),
+        }
+    }
+
     pub fn load_from_file(path: &std::path::Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
         toml::from_str(&content).map_err(|e| OwnBackupError::Config(e.to_string()))
@@ -157,5 +179,71 @@ impl AppConfig {
         {
             self.data_dir.join("service.token")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_saved_config_reads_back_the_same() {
+        // The trap this guards: TOML serialises fields in declaration order, and
+        // everything after a struct field lands *inside* that field's table. A
+        // Vec<String> declared below `hooks` would come back as
+        // `hooks.remembered_backups` — or not come back at all.
+        let mut cfg = AppConfig::default();
+        cfg.remembered_backups =
+            vec![r"E:\Backup\one.vhdx".into(), r"E:\Backup\two.qcow2".into()];
+        cfg.default_compression_level = 7;
+        cfg.hooks.profiles = vec!["postgresql".into()];
+
+        let text = toml::to_string_pretty(&cfg).expect("config must serialise");
+        let back: AppConfig = toml::from_str(&text).expect("config must parse back");
+
+        assert_eq!(back.remembered_backups, cfg.remembered_backups, "\n{text}");
+        assert_eq!(back.default_compression_level, 7);
+        assert_eq!(back.hooks.profiles, vec!["postgresql".to_string()]);
+    }
+
+    #[test]
+    fn a_config_survives_a_trip_through_a_file() {
+        // The bug this guards was one level up — the GUI wrote this file and
+        // then never read it, so nothing a user changed outlived a restart —
+        // but the file itself has to round-trip for the fix to mean anything.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let mut cfg = AppConfig::default();
+        cfg.remembered_backups = vec![r"E:\Backup\one.vhdx".into()];
+        cfg.log_level = "debug".into();
+        cfg.save_to_file(&path).unwrap();
+
+        let back = AppConfig::load_from_file(&path).unwrap();
+        assert_eq!(back.remembered_backups, cfg.remembered_backups);
+        assert_eq!(back.log_level, "debug");
+    }
+
+    #[test]
+    fn a_missing_or_broken_config_does_not_stop_the_program() {
+        // First run, or a file someone edited badly. Losing settings is
+        // recoverable; refusing to start is not.
+        let dir = tempfile::tempdir().unwrap();
+        assert!(AppConfig::load_from_file(&dir.path().join("nope.toml")).is_err());
+        let bad = dir.path().join("bad.toml");
+        std::fs::write(&bad, "this is not toml = = =").unwrap();
+        assert!(AppConfig::load_from_file(&bad).is_err());
+    }
+
+    #[test]
+    fn scalars_and_arrays_come_before_the_tables() {
+        // Same thing stated structurally: every plain key has to appear before
+        // the first [table] header, or it belongs to that table.
+        let text = toml::to_string_pretty(&AppConfig::default()).unwrap();
+        let first_table = text.find("\n[").unwrap_or(text.len());
+        assert!(
+            !text[first_table..].contains("remembered_backups"),
+            "remembered_backups fell inside a table:\n{text}"
+        );
     }
 }
