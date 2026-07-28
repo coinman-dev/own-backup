@@ -467,7 +467,10 @@ export type RestoreOp =
   | { op: 'finalize_boot'; windows_part: PartRef; esp: PartRef | null; uefi: boolean }
   /** Copy the bootloader to `\EFI\BOOT\BOOTX64.EFI` — the only path UEFI tries
    *  without an NVRAM entry, and NVRAM does not travel with a copy. */
-  | { op: 'ensure_fallback_bootloader'; esp: PartRef };
+  | { op: 'ensure_fallback_bootloader'; esp: PartRef }
+  /** Make Windows and the app re-read the disk that was just written, instead
+   *  of going on describing the layout it had before the restore. */
+  | { op: 'refresh_disk_state' };
 
 export interface RestorePlan {
   id: string;

@@ -328,6 +328,11 @@ struct EditSet {
     inserts: BTreeMap<u64, Vec<(Key, Vec<u8>)>>,
     /// child logical → (parent internal-node logical, slot) — for key cascade.
     parent: HashMap<u64, (u64, usize)>,
+    /// Roots whose parent linkage has been learned. A node missing from
+    /// `parent` is legitimately parentless ONLY if it is one of these; anything
+    /// else means we are editing a tree we never mapped, and a first-key change
+    /// there would silently strand the parent's key.
+    roots: HashSet<u64>,
 }
 
 impl EditSet {
@@ -339,6 +344,7 @@ impl EditSet {
             patches: BTreeMap::new(),
             inserts: BTreeMap::new(),
             parent: HashMap::new(),
+            roots: HashSet::new(),
         }
     }
 
@@ -367,6 +373,9 @@ impl EditSet {
     /// Record the whole tree's parent linkage (child logical → parent+slot) so
     /// a leaf whose first key changes can update its ancestors.
     fn learn_parents(&mut self, vol: &mut dyn RawVolume, fs: &Fs, root: u64) -> Result<()> {
+        if !self.roots.insert(root) {
+            return Ok(()); // already mapped
+        }
         let mut stack = vec![root];
         let mut seen = 0u64;
         while let Some(logical) = stack.pop() {
@@ -537,7 +546,18 @@ impl EditSet {
     /// own first key) changed.
     fn cascade_key(&mut self, vol: &mut dyn RawVolume, fs: &Fs, child_logical: u64, new_key: Key) -> Result<()> {
         let Some(&(parent, slot)) = self.parent.get(&child_logical) else {
-            return Ok(()); // root — no parent
+            if self.roots.contains(&child_logical) {
+                return Ok(()); // a tree root: nothing above it holds its key
+            }
+            // Editing a tree whose linkage was never learned. Staying quiet
+            // here is what destroyed a restored system: the checksum tree's
+            // leaves changed their first key, no parent was updated, and every
+            // read of those leaves died with `tree first key mismatch` — which
+            // surfaced as the kernel's init taking SIGBUS on its own pages.
+            return Err(bad(format!(
+                "узел {child_logical} сменил первый ключ, но его дерево не разобрано \
+                 (learn_parents не вызывался) — исключения не применяются"
+            )));
         };
         let node = self.node_mut(vol, fs, parent)?;
         let ko = HEADER + slot * 33;
@@ -847,6 +867,14 @@ fn plan_csum_edits(
     if freed.is_empty() && zeroed.is_empty() {
         return Ok(());
     }
+    // Deleting/trimming csum items changes leaves' FIRST KEYS, and a leaf whose
+    // first key moved must have its parent's key_ptr updated. Without this map
+    // the cascade had nothing to walk and quietly did nothing: the parent kept
+    // pointing at the old key, every read of that leaf failed with
+    // `tree first key mismatch`, and the restored system's init died taking
+    // SIGBUS on pages whose checksums lived there. The old in-place rewrite
+    // never moved a key, which is why Stage 1 alone was safe.
+    edits.learn_parents(vol, fs, csum_root)?;
     let zero_sector = vec![0u8; fs.sectorsize as usize];
     let zero_csum = fs.flavor.compute(&zero_sector).to_le_bytes();
     let ss = fs.sectorsize;
@@ -1204,8 +1232,9 @@ pub fn scan_btrfs_exclusions(
     }
     all_dropped.finalize();
     for (start, end) in all_dropped.iter() {
-        for phys in fs.chunks.physical(start, end - start)? {
-            scan.ranges.add(phys, phys + (end - start));
+        // Merged ranges can span chunks — translate span by span.
+        for (phys, len) in fs.chunks.physical_spans(start, end)? {
+            scan.ranges.add(phys, phys + len);
         }
     }
     scan.ranges.finalize();
@@ -1819,6 +1848,52 @@ mod btrfs_integration {
         }
         std::fs::write(out_path, &data).unwrap();
         assert_csums_cover_only_allocated(out_path);
+        assert_parent_keys_match(out_path);
+    }
+
+    /// Every internal node's key_ptr must equal its child's first key.
+    ///
+    /// btrfs verifies exactly this on every tree-block read, and a violation is
+    /// not a cosmetic one: `tree first key mismatch` fails the read, which
+    /// reaches userspace as EIO — as SIGBUS if the page was mapped, which is
+    /// how a restored system's init died (`Attempted to kill init!
+    /// exitcode=0x00000007`). The defect that caused it lived in a tree this
+    /// suite never had a parent node for, so nothing noticed.
+    fn assert_parent_keys_match(img: &Path) {
+        let f = std::fs::File::open(img).unwrap();
+        let len = f.metadata().unwrap().len();
+        let mut vol = FileVol { f, len };
+        let fs = Fs::bootstrap(&mut vol).unwrap();
+        let roots: Vec<u64> = fs.tree_roots.values().copied().collect();
+        for root in roots {
+            let mut stack = vec![root];
+            while let Some(logical) = stack.pop() {
+                let node = match read_node(&mut vol, &fs.chunks, logical, fs.nodesize) {
+                    Ok(n) => n,
+                    Err(_) => continue, // not reachable in this image — not our claim
+                };
+                if node[0x64] == 0 {
+                    continue; // leaf
+                }
+                let nritems = u32at(&node, 0x60) as usize;
+                for i in 0..nritems {
+                    let off = HEADER + i * 33;
+                    let want = read_key(&node, off);
+                    let child = u64at(&node, off + 17);
+                    let cn = read_node(&mut vol, &fs.chunks, child, fs.nodesize).unwrap();
+                    let cn_items = u32at(&cn, 0x60) as usize;
+                    assert!(cn_items > 0, "node {child} is empty but {logical} points at it");
+                    // Leaf items and internal key_ptrs both start with the key.
+                    let got = read_key(&cn, HEADER);
+                    assert_eq!(
+                        want, got,
+                        "parent {logical} slot {i} expects {want:?} but child {child} starts with {got:?} \
+                         — `tree first key mismatch` at the next read"
+                    );
+                    stack.push(child);
+                }
+            }
+        }
     }
 
     /// Static detector for the defect that used to be visible only at the
@@ -2101,6 +2176,29 @@ mod btrfs_integration {
         let (scan, _) = run_scan(&img, &[]);
         assert_eq!(scan.files_excluded, 0);
         assert!(scan.ranges.is_empty());
+    }
+
+    /// Forensic tool, not a test of our code: point it at a real btrfs image
+    /// (e.g. a partition carved out of a copy) and it applies the structural
+    /// checks `btrfs check` does not — every parent key against its child's
+    /// first key, every csum entry against the allocated extents.
+    ///
+    /// ```sh
+    /// OWN_BACKUP_VERIFY_IMG=/tmp/btrfs.img cargo test -p own-backup-backup \
+    ///     --lib -- --ignored verify_an_image_from_the_environment --nocapture
+    /// ```
+    #[test]
+    #[ignore = "diagnostic: needs OWN_BACKUP_VERIFY_IMG=<path to a btrfs image>"]
+    fn verify_an_image_from_the_environment() {
+        let Ok(path) = std::env::var("OWN_BACKUP_VERIFY_IMG") else {
+            eprintln!("OWN_BACKUP_VERIFY_IMG not set — skipping");
+            return;
+        };
+        let img = Path::new(&path);
+        assert_parent_keys_match(img);
+        eprintln!("parent keys: OK");
+        assert_csums_cover_only_allocated(img);
+        eprintln!("csum coverage: OK");
     }
 
     /// Many files → a multi-level FS tree (internal nodes), so removing items
@@ -2392,6 +2490,90 @@ mod btrfs_integration {
         }
     }
 
+    /// A filesystem big enough for a MULTI-LEVEL checksum tree — the shape
+    /// every other fixture here lacks, and the reason a real copy shipped
+    /// broken while all 235 tests stayed green.
+    ///
+    /// Freeing extents deletes and trims csum items, which moves leaves' first
+    /// keys. Their parents' key_ptrs must move with them. The csum tree's
+    /// linkage was never mapped, so the cascade had nothing to walk and did
+    /// nothing at all; on a 130 GiB volume (many csum leaves, a real parent
+    /// node) the restored system then read those leaves as
+    /// `tree first key mismatch`, and its init took SIGBUS on its own pages:
+    /// `Kernel panic — Attempted to kill init! exitcode=0x00000007`.
+    /// Every test filesystem here has a single-leaf csum tree, where there is
+    /// no parent to get it wrong.
+    #[test]
+    fn stage2_updates_parent_keys_in_a_multi_level_csum_tree() {
+        use std::io::Write;
+        if !have("mkfs.btrfs") {
+            eprintln!("mkfs.btrfs unavailable — skipping");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        // ~200 MiB: one csum leaf covers ~16 MiB of data, so this is a dozen
+        // leaves plus the internal node that ties them together.
+        for i in 0..200u32 {
+            let ext = if i % 3 == 0 { "log" } else { "keep" };
+            let mut buf = vec![0u8; 1024 * 1024];
+            for (j, b) in buf.iter_mut().enumerate() {
+                *b = (i as usize).wrapping_mul(31).wrapping_add(j) as u8;
+            }
+            std::fs::File::create(src.join(format!("f{i:04}.{ext}")))
+                .unwrap()
+                .write_all(&buf)
+                .unwrap();
+        }
+        let img = dir.path().join("fs.img");
+        std::fs::File::create(&img).unwrap().set_len(1024 * 1024 * 1024).unwrap();
+        let out = std::process::Command::new("mkfs.btrfs").args(["-q", "-r"]).arg(&src).arg(&img).output().unwrap();
+        if !out.status.success() {
+            eprintln!("mkfs.btrfs failed: {}", String::from_utf8_lossy(&out.stderr));
+            return;
+        }
+
+        // Sanity: without internal nodes in the csum tree this proves nothing.
+        {
+            let f = std::fs::File::open(&img).unwrap();
+            let len = f.metadata().unwrap().len();
+            let mut vol = FileVol { f, len };
+            let fs = Fs::bootstrap(&mut vol).unwrap();
+            let csum_root = *fs.tree_roots.get(&CSUM_TREE_OBJECTID).unwrap();
+            let node = read_node(&mut vol, &fs.chunks, csum_root, fs.nodesize).unwrap();
+            assert!(
+                node[0x64] > 0,
+                "csum tree is a single leaf — the fixture is too small to catch the defect"
+            );
+        }
+
+        let (scan, _) = run_scan(&img, &["*.log"]);
+        assert_eq!(scan.files_excluded, 67);
+        assert!(!scan.ranges.is_empty());
+
+        let patched = dir.path().join("patched.img");
+        apply(&img, &scan, &patched); // parent-key + csum-coverage asserts inside
+        let (ok, log) = btrfs_check(&patched, true);
+        assert!(ok, "btrfs check on a multi-level csum tree:\n{log}");
+        assert!(!log.contains("Wrong key"), "a parent key was left behind:\n{log}");
+
+        // The kept files must still read back byte-identical.
+        let outdir = dir.path().join("restored");
+        std::fs::create_dir_all(&outdir).unwrap();
+        let r = std::process::Command::new("btrfs").arg("restore").arg(&patched).arg(&outdir).output().unwrap();
+        assert!(r.status.success(), "btrfs restore failed: {}", String::from_utf8_lossy(&r.stderr));
+        for i in (0..200u32).filter(|i| i % 3 != 0).take(20) {
+            let data = std::fs::read(outdir.join(format!("f{i:04}.keep"))).unwrap();
+            assert_eq!(data.len(), 1024 * 1024, "f{i:04}.keep truncated");
+            assert_eq!(
+                data[777],
+                (i as usize).wrapping_mul(31).wrapping_add(777) as u8,
+                "f{i:04}.keep damaged"
+            );
+        }
+    }
+
     /// The dynamic acceptance no static check can replace: mount the patched
     /// image, WRITE until the freed space is reused, unmount, re-check. This
     /// is exactly how the freed-extent csum defect surfaced — and the only way
@@ -2413,23 +2595,38 @@ mod btrfs_integration {
         if !have("mkfs.btrfs") {
             return;
         }
-        // Dense, multi-leaf, interleaved kept/excluded files — the layout that
-        // maximises csum-item trims and splits.
+        // Interleaved kept/excluded files, and enough data (~200 MiB) that the
+        // checksum tree has real internal nodes. The first version of this test
+        // used 3000 tiny files: its csum tree was a single leaf, so a defect
+        // that only shows up when a leaf's first key moves under a parent
+        // walked straight past it and into a user's copy.
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src");
         std::fs::create_dir_all(&src).unwrap();
-        for i in 0..3000 {
+        for i in 0..200u32 {
             let ext = if i % 3 == 0 { "log" } else { "keep" };
-            let mut f = std::fs::File::create(src.join(format!("f{i:05}.{ext}"))).unwrap();
-            f.write_all(format!("data-{i}-").repeat(512).as_bytes()).unwrap();
+            let mut buf = vec![0u8; 1024 * 1024];
+            for (j, b) in buf.iter_mut().enumerate() {
+                *b = (i as usize).wrapping_mul(31).wrapping_add(j) as u8;
+            }
+            std::fs::File::create(src.join(format!("f{i:04}.{ext}"))).unwrap().write_all(&buf).unwrap();
         }
         let img = dir.path().join("fs.img");
-        std::fs::File::create(&img).unwrap().set_len(512 * 1024 * 1024).unwrap();
+        std::fs::File::create(&img).unwrap().set_len(1024 * 1024 * 1024).unwrap();
         let out = std::process::Command::new("mkfs.btrfs").args(["-q", "-r"]).arg(&src).arg(&img).output().unwrap();
         assert!(out.status.success(), "mkfs.btrfs failed");
+        {
+            let f = std::fs::File::open(&img).unwrap();
+            let len = f.metadata().unwrap().len();
+            let mut vol = FileVol { f, len };
+            let fs = Fs::bootstrap(&mut vol).unwrap();
+            let csum_root = *fs.tree_roots.get(&CSUM_TREE_OBJECTID).unwrap();
+            let node = read_node(&mut vol, &fs.chunks, csum_root, fs.nodesize).unwrap();
+            assert!(node[0x64] > 0, "csum tree is a single leaf — fixture too small");
+        }
 
         let (scan, _) = run_scan(&img, &["*.log"]);
-        assert_eq!(scan.files_excluded, 1000);
+        assert_eq!(scan.files_excluded, 67);
         let patched = dir.path().join("patched.img");
         apply(&img, &scan, &patched);
         let (ok, log) = btrfs_check(&patched, true);
@@ -2453,8 +2650,17 @@ mod btrfs_integration {
             }
             written += 1;
         }
-        let sample = std::fs::read(mnt.join("f00001.keep")).unwrap();
-        assert!(sample.windows(7).any(|w| w == b"data-1-"), "kept file unreadable after writes");
+        // Reading a kept file AFTER the writes is the point: a stale csum, or a
+        // csum leaf its parent can no longer address, surfaces here as EIO.
+        for i in [1u32, 50, 101, 199] {
+            if i % 3 == 0 {
+                continue;
+            }
+            let sample = std::fs::read(mnt.join(format!("f{i:04}.keep")))
+                .unwrap_or_else(|e| panic!("f{i:04}.keep unreadable after writes: {e}"));
+            assert_eq!(sample.len(), 1024 * 1024);
+            assert_eq!(sample[777], (i as usize).wrapping_mul(31).wrapping_add(777) as u8);
+        }
         let _ = std::process::Command::new("sync").output();
         let u = std::process::Command::new("umount").arg(&mnt).output().unwrap();
         assert!(u.status.success(), "umount failed: {}", String::from_utf8_lossy(&u.stderr));

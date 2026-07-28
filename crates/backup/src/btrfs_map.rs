@@ -161,6 +161,36 @@ impl ChunkMap {
         }
         Err(bad(format!("logical range [{logical}, {end}) not in any chunk")))
     }
+
+    /// Physical spans `(offset, len)` covering a logical range that may cross
+    /// chunk boundaries, one entry per mirror per chunk.
+    ///
+    /// [`Self::physical`] demands a single chunk, which is right for one extent
+    /// but wrong for a *merged* range: adjacent extents on either side of a
+    /// chunk boundary coalesce into one range, and the whole exclusion scan
+    /// then failed with "not in any chunk" — dropping every exclusion on a
+    /// volume big enough to have several chunks.
+    pub(crate) fn physical_spans(&self, start: u64, end: u64) -> Result<Vec<(u64, u64)>> {
+        if end <= start {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        let mut pos = start;
+        while pos < end {
+            let c = self
+                .chunks
+                .iter()
+                .find(|c| pos >= c.logical && pos < c.logical + c.length)
+                .ok_or_else(|| bad(format!("logical {pos} not in any chunk")))?;
+            let seg_end = end.min(c.logical + c.length);
+            let delta = pos - c.logical;
+            for s in &c.stripes {
+                out.push((s + delta, seg_end - pos));
+            }
+            pos = seg_end;
+        }
+        Ok(out)
+    }
 }
 
 /// Parse a `struct btrfs_chunk` at `data` (mapped to logical `logical`).

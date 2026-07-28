@@ -580,7 +580,8 @@ fn check_ops(
             // wrong about in advance.
             RestoreOp::WritePartitionTable { .. }
             | RestoreOp::AssignLetter { .. }
-            | RestoreOp::EnsureFallbackBootloader { .. } => {}
+            | RestoreOp::EnsureFallbackBootloader { .. }
+            | RestoreOp::RefreshDiskState => {}
         }
     }
 

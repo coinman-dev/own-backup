@@ -50,7 +50,12 @@ tested on a Windows host — cross-compilation validates compilation only.
   Any change that edits foreign FS metadata must pass BOTH fsck-clean
   (`btrfs check --check-data-csum` / `e2fsck -fn` / `xfs_repair -n`) AND a
   mount-and-write acceptance before shipping — static checks alone once let a
-  first-write corruption through.
+  first-write corruption through. **fsck-clean is not proof:** `btrfs check`
+  reported "no error found" on a copy whose csum-tree parent keys were stale
+  (kernel: `tree first key mismatch` → EIO → init took SIGBUS). Hence our own
+  structural invariants in the test harness (parent key == child's first key,
+  csums only over allocated extents) and fixtures big enough to have
+  MULTI-LEVEL trees — a flat image has no parent node to get wrong.
 - The legacy `.obk` format (zstd + AES-256-GCM + Argon2id) was **deleted**
   (decision 2026-07-26, D8 in `.ai/restore-designer-plan_2026-07-26.md`): it had
   no writer left in any live path and its dead reader confused the restore work.

@@ -978,6 +978,33 @@ fn run_op(
             let outcome = ensure_fallback_bootloader(plan.target_disk, *esp, &restored)?;
             Ok(OpNote { message: outcome.message, follow_ups: outcome.follow_ups })
         }
+
+        RestoreOp::RefreshDiskState => {
+            use own_backup_backup::disk_session_win::DiskSession;
+            // partmgr re-reads the table, so the disk stops presenting the
+            // layout it cached before the restore rewrote it. A failure here
+            // costs nothing that a reboot does not fix, and the data is already
+            // written — so it is reported, not raised.
+            let mut note = OpNote::default();
+            match DiskSession::open(plan.target_disk, false)
+                .and_then(|s| s.update_properties())
+            {
+                Ok(()) => {
+                    note.message = format!("Диск {} перечитан", plan.target_disk);
+                }
+                Err(e) => {
+                    warn!(disk = plan.target_disk, error = %e, "restore: disk re-read failed");
+                    note.message = "Диск не удалось перечитать".into();
+                    note.follow_ups.push(
+                        "Windows мог не перечитать разметку восстановленного диска. \
+                         Данные записаны полностью; если раздел не виден в проводнике, \
+                         откройте «Управление дисками» или перезагрузитесь."
+                            .into(),
+                    );
+                }
+            }
+            Ok(note)
+        }
     }
 }
 

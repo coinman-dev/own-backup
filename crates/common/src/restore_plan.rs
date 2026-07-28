@@ -262,6 +262,19 @@ pub enum RestoreOp {
     /// the same trick as a bootable USB stick, and it changes nothing for a
     /// machine that already has its NVRAM entry — that entry keeps winning.
     EnsureFallbackBootloader { esp: PartRef },
+
+    /// Re-read the disk, so Windows and the app stop describing the disk that
+    /// used to be there.
+    ///
+    /// Every operation before this one talks to the disk through handles opened
+    /// while the restore was running. When the last one finishes, partmgr may
+    /// still hold the layout it cached before the table was rewritten, and the
+    /// app's own disk list is whatever the inventory read at the start — so the
+    /// restored disk keeps showing its former partitions until something forces
+    /// a re-read. Making that its own step also gives the user the one thing
+    /// the queue could not say before: that the disk they just wrote to is now
+    /// what the program thinks it is.
+    RefreshDiskState,
 }
 
 /// Sort key giving the fixed execution order documented at the top of this
@@ -276,6 +289,7 @@ impl RestoreOp {
     const ORDER_LETTER: u8 = 5;
     const ORDER_BOOT: u8 = 6;
     const ORDER_FALLBACK: u8 = 7;
+    const ORDER_REFRESH: u8 = 8;
 
     pub fn order_key(&self) -> u8 {
         match self {
@@ -289,6 +303,8 @@ impl RestoreOp {
             // Last: it inspects the ESP as the restore leaves it, so anything
             // that writes to the ESP has to have finished — bcdboot included.
             RestoreOp::EnsureFallbackBootloader { .. } => Self::ORDER_FALLBACK,
+            // Truly last: it reports the disk as everything before it left it.
+            RestoreOp::RefreshDiskState => Self::ORDER_REFRESH,
         }
     }
 
@@ -304,6 +320,7 @@ impl RestoreOp {
             RestoreOp::AssignLetter { part, .. } => Some(*part),
             RestoreOp::FinalizeBoot { windows_part, .. } => Some(*windows_part),
             RestoreOp::EnsureFallbackBootloader { esp } => Some(*esp),
+            RestoreOp::RefreshDiskState => None,
         }
     }
 
@@ -319,6 +336,7 @@ impl RestoreOp {
             RestoreOp::AssignLetter { .. } => "assign_letter",
             RestoreOp::FinalizeBoot { .. } => "finalize_boot",
             RestoreOp::EnsureFallbackBootloader { .. } => "ensure_fallback_bootloader",
+            RestoreOp::RefreshDiskState => "refresh_disk_state",
         }
     }
 
@@ -368,6 +386,7 @@ impl RestoreOp {
                 "Положить загрузчик по пути, который UEFI ищет сам                  (\\EFI\\BOOT\\BOOTX64.EFI)"
                     .into()
             }
+            RestoreOp::RefreshDiskState => "Обновить состояние дисков".into(),
         }
     }
 
@@ -386,6 +405,7 @@ impl RestoreOp {
                 | RestoreOp::AssignLetter { .. }
                 | RestoreOp::FinalizeBoot { .. }
                 | RestoreOp::EnsureFallbackBootloader { .. }
+                | RestoreOp::RefreshDiskState
         )
     }
 

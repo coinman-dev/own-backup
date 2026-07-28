@@ -1145,6 +1145,10 @@
         ops.push({ op: 'ensure_fallback_bootloader', esp });
       }
     }
+    // Always last: everything above wrote to the disk through handles opened
+    // during the restore, and until something forces a re-read both Windows and
+    // this app keep showing the partitions that were there before.
+    ops.push({ op: 'refresh_disk_state' });
 
     return {
       id: crypto.randomUUID(),
