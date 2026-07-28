@@ -138,7 +138,8 @@ pub fn remove_excluded_from_image(
         Err(e) => {
             warn!(
                 error = %e,
-                "true removal: mount-&-delete failed — excluded files stay as zero-filled ghosts"
+                "true removal: mount-&-delete failed — excluded files stay as zero-filled ghosts \
+                 (на ReFS с integrity streams чтение таких призраков вернёт ошибку — это ожидаемо)"
             );
             let _ = std::fs::remove_file(&temp);
             return Ok(None);
@@ -151,7 +152,8 @@ pub fn remove_excluded_from_image(
         // keeps the image byte-identical to its checksums.
         warn!(
             failed = deleted.1,
-            "true removal: no entries could be deleted — image left with zero-filled ghosts"
+            "true removal: no entries could be deleted — image left with zero-filled ghosts \
+             (на ReFS с integrity streams чтение таких призраков вернёт ошибку — это ожидаемо)"
         );
         let _ = std::fs::remove_file(&temp);
         return Ok(None);

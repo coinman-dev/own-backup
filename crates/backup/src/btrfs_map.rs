@@ -291,6 +291,7 @@ pub fn build_btrfs_used_map(vol: &mut dyn RawVolume, block_size: u32) -> Result<
 
     let root = u64at(&sb, 0x50); // root tree, logical
     let chunk_root = u64at(&sb, 0x58); // chunk tree, logical
+    let log_root = u64at(&sb, 0x60); // fsync log tree (0 = clean shutdown)
     let total_bytes = u64at(&sb, 0x70);
     let bytes_used = u64at(&sb, 0x78);
     let num_devices = u64at(&sb, 0x88);
@@ -302,6 +303,13 @@ pub fn build_btrfs_used_map(vol: &mut dyn RawVolume, block_size: u32) -> Result<
 
     if num_devices != 1 {
         return Err(bad(format!("multi-device filesystem ({num_devices} devices)")));
+    }
+    if log_root != 0 {
+        // Unreplayed fsync log: its tree blocks are NOT in the extent tree, so
+        // a map built from extents would drop them from the copy and the
+        // restored system's log replay would read garbage. A full-sector copy
+        // carries the log along and replays fine.
+        return Err(bad("log tree not empty (unclean shutdown) — falling back to a full copy"));
     }
     // Refuse any incompat feature that could change how allocated space is
     // recorded. Only features that leave the extent-tree walk correct are

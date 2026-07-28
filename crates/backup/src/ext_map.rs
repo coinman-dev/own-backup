@@ -30,6 +30,7 @@ const EXT_MAGIC: u64 = 0xEF53;
 // s_feature_incompat bits.
 const INCOMPAT_64BIT: u64 = 0x80;
 const INCOMPAT_META_BG: u64 = 0x10;
+const INCOMPAT_RECOVER: u64 = 0x4;
 const INCOMPAT_JOURNAL_DEV: u64 = 0x8;
 
 // s_feature_ro_compat bits.
@@ -164,6 +165,13 @@ pub fn build_ext_used_map(vol: &mut dyn RawVolume, block_size: u32) -> Result<Ex
     }
     if incompat & INCOMPAT_META_BG != 0 {
         return Err(bad("meta_bg descriptor layout not supported"));
+    }
+    if incompat & INCOMPAT_RECOVER != 0 {
+        // Unreplayed journal: the on-disk bitmaps are OLDER than the committed
+        // state — blocks allocated in those transactions may still read as
+        // free, and a map built from them would drop live data from the copy.
+        // A full-sector copy carries the journal along and replays fine.
+        return Err(bad("journal needs recovery (unclean shutdown) — falling back to a full copy"));
     }
     if ro_compat & RO_COMPAT_BIGALLOC != 0 {
         return Err(bad("bigalloc (cluster) bitmaps not supported"));

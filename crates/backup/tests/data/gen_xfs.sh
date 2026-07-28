@@ -22,6 +22,11 @@ python3 -c "open('$T/mnt/secret.log','wb').write(b'\xab'*131072)"
 cp --reflink=always "$T/mnt/secret.log" "$T/mnt/shared_clone.bin"
 mkdir "$T/mnt/cache"
 python3 -c "open('$T/mnt/cache/big.bin','wb').write(b'\xab'*65536)"
+# Hard-link pair (0xEE): excluding hard_a must keep the data — hard_b still
+# names the same inode (a_hard_linked_file_is_kept_whole can then use these
+# instead of the xfs_db nlink patch).
+python3 -c "open('$T/mnt/hard_a.bin','wb').write(b'\xee'*65536)"
+ln "$T/mnt/hard_a.bin" "$T/mnt/hard_b.bin"
 sync
 umount "$T/mnt"
 xfs_repair -n "$T/fs.img" >/dev/null

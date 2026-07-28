@@ -35,5 +35,8 @@ cargo
 # Mounted Windows test folder (exe, logs, multi-GB backup images)
 win-files/
 
+# Local scratch (repros, ad-hoc archives) — never push
+/tmp/
+
 # Linux test binaries
 linux-files/

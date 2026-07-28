@@ -21,7 +21,7 @@
 //! Failure policy (as elsewhere): any parse ambiguity keeps the file in the
 //! backup — excluding less is safe, corrupting the image is not.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use tracing::{info, warn};
 
@@ -50,6 +50,7 @@ const EXTENT_MAGIC: u16 = 0xF30A;
 // s_feature_incompat
 const INCOMPAT_64BIT: u64 = 0x80;
 const INCOMPAT_META_BG: u64 = 0x10;
+const INCOMPAT_RECOVER: u64 = 0x4;
 const INCOMPAT_JOURNAL_DEV: u64 = 0x8;
 const INCOMPAT_INLINE_DATA: u64 = 0x8000;
 const INCOMPAT_CSUM_SEED: u64 = 0x2000;
@@ -170,6 +171,17 @@ fn parse_sb(vol: &mut dyn RawVolume) -> Result<Sb> {
     let ro_compat = u32at(sb, 0x64);
     if incompat & INCOMPAT_JOURNAL_DEV != 0 || incompat & INCOMPAT_META_BG != 0 {
         return Err(bad("journal-dev / meta_bg layout not supported"));
+    }
+    if incompat & INCOMPAT_RECOVER != 0 {
+        // The journal holds committed transactions the on-disk structures do
+        // not reflect yet; the kernel replays it on the NEXT mount. Our patches
+        // would be walked from stale metadata and then partially overwritten by
+        // that replay — the failure only appears when the restored system
+        // boots. Same nature as the btrfs freed-extent csum defect: invisible
+        // to every static check we can run.
+        return Err(bad(
+            "journal needs recovery (unclean shutdown) — boot Linux cleanly or run e2fsck first",
+        ));
     }
     if ro_compat & RO_COMPAT_BIGALLOC != 0 || compat & COMPAT_SPARSE_SUPER2 != 0 {
         return Err(bad("bigalloc / sparse_super2 not supported"));
@@ -399,8 +411,37 @@ struct Coalesce {
     owner_gen: u32,
 }
 
-/// Walk the tree and collect data byte ranges of every matched file plus the
-/// per-entry info Stage 2 needs. `tick` reports progress / cancels.
+/// Everything one full walk of the tree gathers. No decisions live here — the
+/// walk only records what exists and which NAMES the patterns excluded.
+#[derive(Default)]
+struct Collected {
+    /// Raw inode bytes of every matched inode (first sighting).
+    matched_inodes: HashMap<u32, Vec<u8>>,
+    /// Every directory entry seen (`.`/`..` skipped).
+    dirents: Vec<CDirEnt>,
+    /// ino → how many of its names are excluded (≥ 1 ⇒ matched).
+    hit_names: HashMap<u32, u32>,
+}
+
+/// One directory entry, with what Stage 2 needs to coalesce it away.
+struct CDirEnt {
+    parent: u32,
+    parent_gen: u32,
+    ino: u32,
+    is_dir: bool,
+    block_off: u64,
+    rec_off: usize,
+}
+
+/// Walk the tree, decide, then emit — three phases, btrfs-style.
+///
+/// The one-pass predecessor decided each entry's fate at sighting time, which
+/// broke whenever a decision depended on the whole tree: a hard link spared
+/// AFTER its parent directory was already freed ended up a nameless inode
+/// («unattached inode» — the ext incarnation of btrfs's «unresolved ref»), and
+/// the essential-dir guard pushed its subtree twice with contradictory flags,
+/// so the emptying it promised never happened. Collect everything first, hold
+/// the invariants at a fixpoint, only then emit.
 pub fn scan_ext_exclusions(
     vol: &mut dyn RawVolume,
     patterns: &[String],
@@ -414,44 +455,86 @@ pub fn scan_ext_exclusions(
     }
     let sb = parse_sb(vol)?;
 
-    // Freed inodes (ino, is_dir) / blocks + dirents to coalesce → Stage-2 patches.
+    // Phase 1 — collect: one walk of the whole tree, no decisions.
+    let col = collect_tree(vol, &sb, &parsed, &mut scan, &mut tick)?;
+    if col.matched_inodes.is_empty() {
+        scan.ranges.finalize();
+        return Ok(scan);
+    }
+
+    // Phase 2 — decide: which matched inodes may ACTUALLY be removed.
+    let removable = decide_removable(vol, &sb, &col);
+    let spared = col.matched_inodes.len() - removable.len();
+    if spared > 0 {
+        info!(spared, "ext exclusions: файлы оставлены целиком (hardlink/чужой xattr-блок)");
+    }
+
+    // Phase 3 — emit: Stage-1 ranges + the Stage-2 work lists.
     let mut freed_inodes: Vec<(u32, bool)> = Vec::new();
     let mut freed_blocks: Vec<u64> = Vec::new();
     let mut coalesce: Vec<Coalesce> = Vec::new();
     // Surviving parent directories that lost a subdirectory (their link count
     // must drop by one per removed subdir).
     let mut dir_parents: Vec<u32> = Vec::new();
-
-    // (dir inode, lowercased path components, subtree already excluded).
-    let mut stack: Vec<(u32, Vec<String>, bool)> = vec![(ROOT_INO, Vec::new(), false)];
-    let mut visited: HashSet<u32> = HashSet::new();
-
-    while let Some((dir_ino, rel, subtree_excluded)) = stack.pop() {
-        if !visited.insert(dir_ino) {
+    for (&ino, inode) in &col.matched_inodes {
+        if !removable.contains(&ino) {
             continue;
         }
-        let dir_inode = match read_inode(vol, &sb, dir_ino) {
-            Ok(i) => i,
-            Err(e) => {
-                warn!(ino = dir_ino, error = %e, "ext exclusions: unreadable directory inode — skipping subtree");
-                continue;
-            }
-        };
-        if u16at(&dir_inode, 0x00) as u16 & S_IFMT != S_IFDIR {
-            continue;
+        let mode = u16at(inode, 0x00) as u16 & S_IFMT;
+        let is_dir = mode == S_IFDIR;
+        let size = u32at(inode, 0x04) | (u32at(inode, 0x6C) << 32);
+        // The xattr block goes with the inode (sole ownership proven in
+        // phase 2) — left behind it would sit marked used with no owner.
+        let file_acl = u32at(inode, 0x68) | (u16at(inode, 0x76) << 32);
+        if file_acl != 0 {
+            scan.ranges.add(file_acl * sb.fs_block, (file_acl + 1) * sb.fs_block);
+            freed_blocks.push(file_acl);
         }
-        let dir_gen = u32at(&dir_inode, 0x64) as u32;
-        let extents = match inode_extents(vol, &sb, &dir_inode) {
-            Ok(e) => e,
-            Err(e) => {
-                warn!(ino = dir_ino, error = %e, "ext exclusions: cannot map directory blocks — skipping subtree");
-                continue;
-            }
+        // Whether i_block holds a block map at all. Only regular files,
+        // directories and slow symlinks own data blocks. For a char/block
+        // device i_block holds the DEVICE NUMBER, for a fast symlink the
+        // target text — read either as block pointers and an unrelated block
+        // gets zeroed and freed: excluding an on-disk /dev/console (5,1)
+        // turned into "free block 0x0501", which on the repro image was a
+        // block of the journal.
+        let has_block_map = match mode {
+            S_IFREG | S_IFDIR => true,
+            S_IFLNK => !is_fast_symlink(&sb, inode, size),
+            _ => false, // device / fifo / socket: no data blocks
         };
-        walk_dir_blocks(
-            vol, &sb, dir_ino, dir_gen, &extents, &rel, subtree_excluded, &parsed, &mut scan, &mut stack,
-            &mut freed_inodes, &mut freed_blocks, &mut coalesce, &mut dir_parents, &mut tick,
-        )?;
+        if has_block_map {
+            let extents = inode_extents(vol, &sb, inode)?;
+            for e in &extents {
+                scan.ranges.add(e.first * sb.fs_block, (e.first + e.count) * sb.fs_block);
+                for b in e.first..e.first + e.count {
+                    freed_blocks.push(b);
+                }
+            }
+        }
+        freed_inodes.push((ino, is_dir));
+        scan.files_excluded += 1;
+        if !is_dir {
+            scan.bytes_excluded += size;
+        }
+    }
+    // Dirents: an entry whose inode goes while its directory survives is
+    // coalesced away (a removed directory takes all its entries with its
+    // blocks); a removed subdirectory also drops the surviving parent's link
+    // count — its `..` was a hard link to the parent. A removable inode has
+    // ALL its names excluded (phase 2), so every surviving-parent entry of it
+    // is coalesced — a fully-matched hardlink pair loses both names.
+    for d in &col.dirents {
+        if removable.contains(&d.ino) && !removable.contains(&d.parent) {
+            coalesce.push(Coalesce {
+                dir_block_off: d.block_off,
+                rec_off: d.rec_off,
+                owner_ino: d.parent,
+                owner_gen: d.parent_gen,
+            });
+            if d.is_dir {
+                dir_parents.push(d.parent);
+            }
+        }
     }
 
     scan.ranges.finalize();
@@ -477,153 +560,201 @@ pub fn scan_ext_exclusions(
     Ok(scan)
 }
 
-/// Parse the entries of one directory (all its data blocks), matching each and
-/// pushing subdirectories to `stack`.
-#[allow(clippy::too_many_arguments)]
-fn walk_dir_blocks(
+/// Phase 1: walk the whole tree once, recording every entry and every matched
+/// inode. Only NAMING decisions happen here — pattern match, subtree closure,
+/// the essential-dir guard; nothing about what may actually be removed.
+fn collect_tree(
     vol: &mut dyn RawVolume,
     sb: &Sb,
-    dir_ino: u32,
-    dir_gen: u32,
-    extents: &[Extent],
-    rel: &[String],
-    subtree_excluded: bool,
     parsed: &[ExclusionPattern],
     scan: &mut ExtExclusionScan,
-    stack: &mut Vec<(u32, Vec<String>, bool)>,
-    freed_inodes: &mut Vec<(u32, bool)>,
-    freed_blocks: &mut Vec<u64>,
-    coalesce: &mut Vec<Coalesce>,
-    dir_parents: &mut Vec<u32>,
     tick: &mut dyn FnMut(u64) -> Result<()>,
-) -> Result<()> {
+) -> Result<Collected> {
+    let mut col = Collected::default();
+    // (dir inode, lowercased path components, inside an excluded subtree).
+    let mut stack: Vec<(u32, Vec<String>, bool)> = vec![(ROOT_INO, Vec::new(), false)];
+    let mut visited: HashSet<u32> = HashSet::new();
     let mut block = vec![0u8; sb.fs_block as usize];
-    for ext in extents {
-        for bi in 0..ext.count {
-            let phys = ext.first + bi;
-            let block_off = phys * sb.fs_block;
-            vol.read_at(block_off, &mut block)?;
-            let mut off = 0usize;
-            while off + 8 <= block.len() {
-                let ino = u32at(&block, off) as u32;
-                let rec_len = u16at(&block, off + 4) as usize;
-                let name_len = block[off + 6] as usize;
-                if rec_len < 8 || off + rec_len > block.len() {
-                    break; // malformed / tail padding — stop this block
-                }
-                scan.entries_scanned += 1;
-                if scan.entries_scanned % 4096 == 0 {
-                    tick(scan.entries_scanned)?;
-                }
-                if ino != 0 && name_len != 0 && off + 8 + name_len <= block.len() {
-                    let name = &block[off + 8..off + 8 + name_len];
-                    if name != b"." && name != b".." {
-                        let name_str = String::from_utf8_lossy(name).to_string();
-                        let name_lower = name_str.to_lowercase();
-                        let mut child_rel = rel.to_vec();
-                        child_rel.push(name_lower.clone());
 
-                        let hit = subtree_excluded
-                            || parsed.iter().any(|p| p.matches(&name_lower, &child_rel));
+    while let Some((dir_ino, rel, sub_excluded)) = stack.pop() {
+        if !visited.insert(dir_ino) {
+            continue;
+        }
+        let dir_inode = match read_inode(vol, sb, dir_ino) {
+            Ok(i) => i,
+            Err(e) => {
+                warn!(ino = dir_ino, error = %e, "ext exclusions: unreadable directory inode — skipping subtree");
+                continue;
+            }
+        };
+        if u16at(&dir_inode, 0x00) as u16 & S_IFMT != S_IFDIR {
+            continue;
+        }
+        let dir_gen = u32at(&dir_inode, 0x64) as u32;
+        let extents = match inode_extents(vol, sb, &dir_inode) {
+            Ok(e) => e,
+            Err(e) => {
+                warn!(ino = dir_ino, error = %e, "ext exclusions: cannot map directory blocks — skipping subtree");
+                continue;
+            }
+        };
+        for ext in &extents {
+            for bi in 0..ext.count {
+                let block_off = (ext.first + bi) * sb.fs_block;
+                vol.read_at(block_off, &mut block)?;
+                let mut off = 0usize;
+                while off + 8 <= block.len() {
+                    let ino = u32at(&block, off) as u32;
+                    let rec_len = u16at(&block, off + 4) as usize;
+                    let name_len = block[off + 6] as usize;
+                    if rec_len < 8 || off + rec_len > block.len() {
+                        break; // malformed / tail padding — stop this block
+                    }
+                    scan.entries_scanned += 1;
+                    if scan.entries_scanned % 4096 == 0 {
+                        tick(scan.entries_scanned)?;
+                    }
+                    if ino != 0 && name_len != 0 && off + 8 + name_len <= block.len() {
+                        let name = &block[off + 8..off + 8 + name_len];
+                        if name != b"." && name != b".." {
+                            let name_str = String::from_utf8_lossy(name).to_string();
+                            let name_lower = name_str.to_lowercase();
+                            let mut child_rel = rel.to_vec();
+                            child_rel.push(name_lower.clone());
+                            let mut hit = sub_excluded
+                                || parsed.iter().any(|p| p.matches(&name_lower, &child_rel));
 
-                        if let Ok(inode) = read_inode(vol, sb, ino) {
-                            let mode = u16at(&inode, 0x00) as u16 & S_IFMT;
-                            let is_dir = mode == S_IFDIR;
-                            if hit {
-                                // Coalesce this entry's dirent only when its
-                                // containing directory survives (a parent that is
-                                // itself excluded has ALL its blocks freed, so its
-                                // entries need no coalescing). `subtree_excluded`
-                                // == "this directory is part of an excluded subtree".
-                                let did_free = exclude_entry(
-                                    vol, sb, ino, &inode, is_dir, !subtree_excluded,
-                                    block_off, off, dir_ino, dir_gen, scan, freed_inodes,
-                                    freed_blocks, coalesce, dir_parents,
-                                )?;
-                                if is_dir && did_free {
-                                    // Whole subtree excluded — recurse to free it.
-                                    stack.push((ino, child_rel, true));
-                                }
+                            // An unreadable child inode is recorded anyway: its
+                            // dirent must count in phase 2, where an inode we
+                            // cannot free automatically spares its parent.
+                            let inode = read_inode(vol, sb, ino).ok();
+                            let is_dir = inode
+                                .as_deref()
+                                .map(|i| u16at(i, 0x00) as u16 & S_IFMT == S_IFDIR)
+                                .unwrap_or(false);
+                            if hit && is_dir && crate::exclusions::is_essential_linux_dir(&child_rel) {
+                                // `/proc`, `/sys`, `/dev`, `/run`, `/tmp` are
+                                // emptied, never removed: systemd mounts on
+                                // them before it can do anything, and a root
+                                // without them panics the kernel.
+                                warn!(
+                                    dir = %name_str,
+                                    "exclusions: kept an essential mount point (contents still excluded)"
+                                );
+                                hit = false;
+                                stack.push((ino, child_rel.clone(), true));
                             } else if is_dir {
-                                stack.push((ino, child_rel, false));
-                            } else if mode == S_IFREG {
-                                // Kept file — count its size for the dashboard.
-                                let size = u32at(&inode, 0x04) | (u32at(&inode, 0x6C) << 32);
-                                scan.categories.add(&child_rel, size);
+                                stack.push((ino, child_rel.clone(), hit));
+                            }
+                            col.dirents.push(CDirEnt {
+                                parent: dir_ino,
+                                parent_gen: dir_gen,
+                                ino,
+                                is_dir,
+                                block_off,
+                                rec_off: off,
+                            });
+                            if let Some(inode) = inode {
+                                if hit {
+                                    *col.hit_names.entry(ino).or_default() += 1;
+                                    col.matched_inodes.entry(ino).or_insert(inode);
+                                } else if u16at(&inode, 0x00) as u16 & S_IFMT == S_IFREG {
+                                    // Kept file — size for the dashboard.
+                                    let size =
+                                        u32at(&inode, 0x04) | (u32at(&inode, 0x6C) << 32);
+                                    scan.categories.add(&child_rel, size);
+                                }
                             }
                         }
                     }
+                    off += rec_len;
                 }
-                off += rec_len;
             }
         }
     }
-    Ok(())
+    Ok(col)
 }
 
-/// Exclude one matched entry: add its data to Stage-1 ranges and record the
-/// Stage-2 work (free inode + blocks; coalesce the dirent when `coalesce`).
-/// Returns `true` if the inode/blocks were freed (so a directory's subtree is
-/// worth recursing into). A hard-linked regular file (links > 1) is kept whole
-/// — excluding less is safe; freeing shared data would corrupt the other name.
-#[allow(clippy::too_many_arguments)]
-fn exclude_entry(
-    vol: &mut dyn RawVolume,
-    sb: &Sb,
-    ino: u32,
-    inode: &[u8],
-    is_dir: bool,
-    coalesce_dirent: bool,
-    dir_block_off: u64,
-    rec_off: usize,
-    owner_ino: u32,
-    owner_gen: u32,
-    scan: &mut ExtExclusionScan,
-    freed_inodes: &mut Vec<(u32, bool)>,
-    freed_blocks: &mut Vec<u64>,
-    coalesce: &mut Vec<Coalesce>,
-    dir_parents: &mut Vec<u32>,
-) -> Result<bool> {
-    // Never touch the reserved metadata inodes (should be unreachable — guard).
-    if ino < EXT_FIRST_USER_INO && ino != ROOT_INO {
-        return Ok(false);
-    }
-    let mode = u16at(inode, 0x00) as u16 & S_IFMT;
-    let size = u32at(inode, 0x04) | (u32at(inode, 0x6C) << 32);
-    let links = u16at(inode, 0x1A) as u16;
-
-    // Only REGULAR files carry hard links; a directory's link count is
-    // structural (self + parent + subdirs), not sharing.
-    if mode == S_IFREG && links > 1 {
-        return Ok(false); // keep the whole file
-    }
-
-    // Data extents → Stage-1 ranges + freed blocks. A fast symlink stores its
-    // target inside i_block (no data blocks): nothing to zero.
-    let fast_symlink = mode == S_IFLNK && size < 60 && u32at(inode, 0x1C) == 0;
-    if !fast_symlink {
-        let extents = inode_extents(vol, sb, inode)?;
-        for e in &extents {
-            scan.ranges.add(e.first * sb.fs_block, (e.first + e.count) * sb.fs_block);
-            for b in e.first..e.first + e.count {
-                freed_blocks.push(b);
+/// Phase 2: the removable set — matched inodes that may ACTUALLY be removed,
+/// with the two invariants the one-pass scanner used to break:
+///
+/// 1. A non-directory goes only if EVERY one of its names is excluded.
+///    `i_links_count` says how many names it has; the walk counted how many
+///    are excluded. Freeing an inode from under a surviving name is how
+///    «unattached inode» happens. (The btrfs analogue: `refs == matched_count`.)
+/// 2. A directory goes only with everything inside it: a spared child spares
+///    its parent, up the chain, to a fixpoint. (The btrfs analogue:
+///    `spare_parents_of_spared_children`.)
+///
+/// A shared xattr block (refcount > 1) also spares its file — decrementing the
+/// refcount is a patch this pass does not carry yet (plan P8), and excluding
+/// less is always safe.
+fn decide_removable(vol: &mut dyn RawVolume, sb: &Sb, col: &Collected) -> HashSet<u32> {
+    let mut removable: HashSet<u32> = HashSet::new();
+    for (&ino, inode) in &col.matched_inodes {
+        // Never touch the reserved metadata inodes (unreachable — guard).
+        if ino < EXT_FIRST_USER_INO && ino != ROOT_INO {
+            continue;
+        }
+        let mode = u16at(inode, 0x00) as u16 & S_IFMT;
+        let links = u16at(inode, 0x1A) as u32;
+        // A directory's link count is structural (self + parent + subdirs) —
+        // its fate hangs on its children, restored by the fixpoint below.
+        if mode != S_IFDIR {
+            let hits = col.hit_names.get(&ino).copied().unwrap_or(0);
+            if links > hits {
+                continue; // a name survives somewhere — keep the whole file
             }
         }
+        let file_acl = u32at(inode, 0x68) | (u16at(inode, 0x76) << 32);
+        if file_acl != 0 && !xattr_block_is_private(vol, sb, file_acl) {
+            continue;
+        }
+        removable.insert(ino);
     }
-    freed_inodes.push((ino, is_dir));
-    if coalesce_dirent {
-        coalesce.push(Coalesce { dir_block_off, rec_off, owner_ino, owner_gen });
-        // Removing a subdirectory drops its surviving parent's link count by one
-        // (the subdir's ".." was a hard link to the parent).
-        if is_dir {
-            dir_parents.push(owner_ino);
+    loop {
+        let mut changed = false;
+        for d in &col.dirents {
+            if removable.contains(&d.parent) && !removable.contains(&d.ino) {
+                removable.remove(&d.parent);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
         }
     }
-    scan.files_excluded += 1;
-    if !is_dir {
-        scan.bytes_excluded += size;
+    removable
+}
+
+/// True when `file_acl` points at a valid xattr block owned by exactly one
+/// inode (header magic 0xEA020000, refcount 1).
+fn xattr_block_is_private(vol: &mut dyn RawVolume, sb: &Sb, file_acl: u64) -> bool {
+    if file_acl >= sb.blocks_count {
+        return false;
     }
-    Ok(true)
+    let mut hdr = [0u8; 8];
+    if vol.read_at(file_acl * sb.fs_block, &mut hdr).is_err() {
+        return false;
+    }
+    u32::from_le_bytes(hdr[0..4].try_into().unwrap()) == 0xEA02_0000
+        && u32::from_le_bytes(hdr[4..8].try_into().unwrap()) == 1
+}
+
+/// e2fsprogs' `ext2fs_is_fast_symlink`: the target lives inside i_block iff the
+/// inode owns no blocks besides its (optional) xattr block. `i_blocks` counts
+/// 512-byte sectors, and an xattr block accounts for `fs_block/512` of them —
+/// so the old `i_blocks == 0` test sent a fast symlink WITH an xattr block down
+/// the block-map walker, which read the target text as block pointers.
+fn is_fast_symlink(sb: &Sb, inode: &[u8], size: u64) -> bool {
+    if size >= 60 {
+        return false; // target too long for i_block — a real data block
+    }
+    let i_blocks = u32at(inode, 0x1C);
+    // i_file_acl (xattr block): lo @0x68, high @0x76 (linux2.l_i_file_acl_high).
+    let file_acl = u32at(inode, 0x68) | (u16at(inode, 0x76) << 32);
+    let acl_sectors = if file_acl != 0 { sb.fs_block / 512 } else { 0 };
+    i_blocks == acl_sectors
 }
 
 // --- Stage 2 checksum helpers (all metadata_csum = crc32c) ----------------
@@ -989,10 +1120,12 @@ mod ext_integration {
                 eprintln!("mke2fs unavailable — skipping ext4 integration test");
                 return;
             };
-            // Exclude by bare name (secret.log) and by path (cache/**).
+            // Exclude two whole entries by name: a file and a directory.
+            // Naming the directory is what removes it — `cache/**` would ask
+            // only for its contents and leave the directory standing.
             // The image is verified by reading the file directly (below), so the
             // volume handle itself is not needed here.
-            let (scan, _vol) = run_scan(&img, &["secret.log", "cache/**"]);
+            let (scan, _vol) = run_scan(&img, &["secret.log", "cache"]);
             // secret.log + cache dir + cache/big.bin.
             assert_eq!(scan.files_excluded, 3, "bs={bs}");
             assert!(!scan.ranges.is_empty(), "bs={bs}: no ranges");
@@ -1071,7 +1204,7 @@ mod ext_integration {
         for bs in [1024u32, 4096] {
             let Some((img, keep)) = make_ext4(bs) else { return };
             // Exclude the file, the whole cache subtree — leave keep.txt.
-            let (scan, _) = run_scan(&img, &["secret.log", "cache/**"]);
+            let (scan, _) = run_scan(&img, &["secret.log", "cache"]);
             assert!(!scan.patches.is_empty(), "bs={bs}: Stage 2 produced no patches");
 
             // Apply the metadata patches to a copy of the image.
@@ -1193,5 +1326,300 @@ mod ext_integration {
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr),
         );
+    }
+
+    // --- debugfs-built fixtures (device nodes, xattr blocks, journal flags) ---
+
+    fn have_tool(cmd: &str) -> bool {
+        std::process::Command::new(cmd).arg("-V").output().is_ok()
+    }
+
+    /// Feed a script of commands to a read-write debugfs session.
+    fn debugfs_w(img: &std::path::Path, script: &str) -> String {
+        use std::io::Write;
+        let mut child = std::process::Command::new("debugfs")
+            .arg("-w")
+            .arg(img)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.as_mut().unwrap().write_all(script.as_bytes()).unwrap();
+        let out = child.wait_with_output().unwrap();
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    }
+
+    fn debugfs_r(img: &std::path::Path, req: &str) -> String {
+        let out = std::process::Command::new("debugfs").args(["-R", req]).arg(img).output().unwrap();
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    }
+
+    /// `e2fsck -fn` → (clean, log).
+    fn fsck_ro(img: &std::path::Path) -> (bool, String) {
+        let out = std::process::Command::new("e2fsck").args(["-fn"]).arg(img).output().unwrap();
+        let log = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        (out.status.success(), log)
+    }
+
+    /// debugfs leaves stale group counters behind — let e2fsck repair them,
+    /// then insist the baseline is clean so failures below indict the scanner
+    /// alone, not the fixture.
+    fn fsck_normalize(img: &std::path::Path) -> bool {
+        let _ = std::process::Command::new("e2fsck").args(["-fy"]).arg(img).output();
+        fsck_ro(img).0
+    }
+
+    fn apply_patches(img: &std::path::Path, scan: &ExtExclusionScan, out: &std::path::Path) {
+        let mut data = std::fs::read(img).unwrap();
+        for (off, bytes) in &scan.patches {
+            let o = *off as usize;
+            assert!(o + bytes.len() <= data.len(), "patch out of range");
+            data[o..o + bytes.len()].copy_from_slice(bytes);
+        }
+        std::fs::write(out, &data).unwrap();
+    }
+
+    /// Regression for a confirmed corruption: a char device's i_block holds the
+    /// DEVICE NUMBER, not a block map, and the scanner read it as one — zeroing
+    /// and freeing an unrelated block. (5,1) old-encodes to i_block[0] = 0x0501,
+    /// and on the repro image "block 1281" belonged to the journal.
+    #[test]
+    fn excluding_a_device_node_leaves_foreign_blocks_alone() {
+        if !have_tool("debugfs") || !have_tool("e2fsck") {
+            eprintln!("debugfs/e2fsck unavailable — skipping");
+            return;
+        }
+        let Some((img, keep)) = make_ext4(4096) else { return };
+        debugfs_w(&img, "mkdir /devdir\ncd /devdir\nmknod console c 5 1\n");
+        if !fsck_normalize(&img) {
+            eprintln!("debugfs left the image inconsistent — skipping");
+            return;
+        }
+        let stat = debugfs_r(&img, "stat /devdir/console");
+        if !stat.contains("character special") {
+            eprintln!("debugfs could not create the device node — skipping:\n{stat}");
+            return;
+        }
+
+        let (scan, _) = run_scan(&img, &["devdir"]);
+        assert_eq!(scan.files_excluded, 2, "devdir + console");
+        // The device number, read as a block pointer, must NOT be excluded.
+        let dev_block = 0x0501u64;
+        for (s, e) in scan.ranges.iter() {
+            assert!(
+                e <= dev_block * 4096 || s >= (dev_block + 1) * 4096,
+                "device number (5,1) was read as block {dev_block}: range [{s},{e})"
+            );
+        }
+        // Stage 2 removes the node; e2fsck judges the aftermath.
+        let patched = keep.path().join("patched_dev.img");
+        apply_patches(&img, &scan, &patched);
+        let (ok, log) = fsck_ro(&patched);
+        assert!(ok, "e2fsck after device removal:\n{log}");
+        assert!(!debugfs_r(&patched, "ls -l /").contains("devdir"), "devdir survived");
+    }
+
+    /// A fast symlink with an EXTERNAL xattr block has i_blocks != 0, and the
+    /// old fast-symlink test (`i_blocks == 0`) sent its TARGET TEXT down the
+    /// block-map walker. The only block such an inode owns is the xattr block —
+    /// solely owned, it is freed together with the inode.
+    #[test]
+    fn excluding_a_fast_symlink_with_an_xattr_block() {
+        if !have_tool("debugfs") || !have_tool("e2fsck") {
+            eprintln!("debugfs/e2fsck unavailable — skipping");
+            return;
+        }
+        let Some((img, keep)) = make_ext4(4096) else { return };
+        let big = "A".repeat(300); // does not fit in-inode → external xattr block
+        debugfs_w(&img, &format!("symlink /link shorttarget\nea_set /link user.big {big}\n"));
+        if !fsck_normalize(&img) {
+            eprintln!("debugfs left the image inconsistent — skipping");
+            return;
+        }
+        let stat = debugfs_r(&img, "stat /link");
+        let acl: u64 = stat
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("File ACL: "))
+            .and_then(|s| s.split_whitespace().next())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        if acl == 0 {
+            eprintln!("xattr stayed in-inode — skipping:\n{stat}");
+            return;
+        }
+
+        let (scan, _) = run_scan(&img, &["link"]);
+        assert_eq!(scan.files_excluded, 1);
+        // Exactly the xattr block and nothing else — the old check produced
+        // bogus block pointers out of the target text.
+        let all: Vec<_> = scan.ranges.iter().collect();
+        assert_eq!(
+            all,
+            vec![(acl * 4096, (acl + 1) * 4096)],
+            "excluded ranges must be exactly the symlink's xattr block"
+        );
+
+        let patched = keep.path().join("patched_sym.img");
+        apply_patches(&img, &scan, &patched);
+        let (ok, log) = fsck_ro(&patched);
+        assert!(ok, "e2fsck after symlink removal:\n{log}");
+        assert!(!debugfs_r(&patched, "ls -l /").contains("link"), "symlink survived");
+    }
+
+    /// Populated ext4 image from a caller-built source tree.
+    fn make_ext4_from(
+        bs: u32,
+        build: impl FnOnce(&std::path::Path),
+    ) -> Option<(std::path::PathBuf, tempfile::TempDir)> {
+        if std::process::Command::new("mke2fs").arg("-V").output().is_err() {
+            return None;
+        }
+        let dir = tempfile::tempdir().ok()?;
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).ok()?;
+        build(&src);
+        let img = dir.path().join("fs.img");
+        let out = std::process::Command::new("mke2fs")
+            .args(["-q", "-F", "-t", "ext4", "-b"])
+            .arg(bs.to_string())
+            .arg("-d")
+            .arg(&src)
+            .arg(&img)
+            .arg("16384")
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            eprintln!("mke2fs failed: {}", String::from_utf8_lossy(&out.stderr));
+            return None;
+        }
+        Some((img, dir))
+    }
+
+    /// A hard link with a surviving name spares the whole file — and its parent
+    /// directory, and the chain up (the invariant `decide_removable` restores).
+    /// The other children still go, their entries coalesced from the SPARED
+    /// directory's surviving blocks. The one-pass scanner freed the parent
+    /// first and left the spared child a nameless «unattached inode».
+    #[test]
+    fn a_surviving_hardlink_name_spares_file_and_parent_chain() {
+        if !have_tool("e2fsck") || !have_tool("debugfs") {
+            eprintln!("e2fsck/debugfs unavailable — skipping");
+            return;
+        }
+        let Some((img, keep)) = make_ext4_from(4096, |src| {
+            std::fs::create_dir_all(src.join("cache")).unwrap();
+            std::fs::write(src.join("cache/hard_a.bin"), vec![0xAB; 8192]).unwrap();
+            std::fs::hard_link(src.join("cache/hard_a.bin"), src.join("hard_b.bin")).unwrap();
+            std::fs::write(src.join("cache/other.bin"), vec![0xEE; 8192]).unwrap();
+        }) else {
+            return;
+        };
+        let (scan, _) = run_scan(&img, &["cache"]);
+        assert_eq!(scan.files_excluded, 1, "only other.bin is removable");
+        assert_eq!(
+            scan.ranges.iter().map(|(s, e)| e - s).sum::<u64>(),
+            8192,
+            "exactly other.bin's data — the hardlink and the spared dir stay"
+        );
+
+        let patched = keep.path().join("patched.img");
+        apply_patches(&img, &scan, &patched);
+        let (ok, log) = fsck_ro(&patched);
+        assert!(ok, "e2fsck after a spared hardlink:\n{log}");
+        let ls = debugfs_r(&patched, "ls -l /cache");
+        assert!(ls.contains("hard_a.bin"), "spared hardlink name lost:\n{ls}");
+        assert!(!ls.contains("other.bin"), "other.bin entry survived:\n{ls}");
+    }
+
+    /// A hardlink pair with BOTH names excluded goes entirely — the ext
+    /// counterpart of btrfs's `refs == matched_count`: inode freed once, both
+    /// entries gone, data zeroed and counted once.
+    #[test]
+    fn a_fully_matched_hardlink_pair_is_removed() {
+        if !have_tool("e2fsck") || !have_tool("debugfs") {
+            eprintln!("e2fsck/debugfs unavailable — skipping");
+            return;
+        }
+        let Some((img, keep)) = make_ext4_from(4096, |src| {
+            std::fs::create_dir_all(src.join("c1")).unwrap();
+            std::fs::create_dir_all(src.join("c2")).unwrap();
+            std::fs::write(src.join("c1/hard_a.bin"), vec![0xAB; 8192]).unwrap();
+            std::fs::hard_link(src.join("c1/hard_a.bin"), src.join("c2/hard_b.bin")).unwrap();
+        }) else {
+            return;
+        };
+        let (scan, _) = run_scan(&img, &["c1", "c2"]);
+        assert_eq!(scan.files_excluded, 3, "c1 + c2 + the shared inode");
+        assert_eq!(scan.bytes_excluded, 8192, "the shared inode counts once");
+
+        let patched = keep.path().join("patched.img");
+        apply_patches(&img, &scan, &patched);
+        let (ok, log) = fsck_ro(&patched);
+        assert!(ok, "e2fsck after removing a hardlink pair:\n{log}");
+        let ls = debugfs_r(&patched, "ls -l /");
+        assert!(!ls.contains("c1") && !ls.contains("c2"), "dirs survived:\n{ls}");
+    }
+
+    /// A hand-written `tmp` pattern keeps the mount point and EMPTIES it — the
+    /// promise the old double-push never delivered (the second push won and the
+    /// contents stayed untouched while the log claimed otherwise).
+    #[test]
+    fn an_essential_dir_is_emptied_but_kept() {
+        if !have_tool("e2fsck") || !have_tool("debugfs") {
+            eprintln!("e2fsck/debugfs unavailable — skipping");
+            return;
+        }
+        let Some((img, keep)) = make_ext4_from(4096, |src| {
+            std::fs::create_dir_all(src.join("tmp")).unwrap();
+            std::fs::write(src.join("tmp/junk1.bin"), vec![0xAB; 8192]).unwrap();
+            std::fs::write(src.join("tmp/junk2.bin"), vec![0xAB; 4096]).unwrap();
+        }) else {
+            return;
+        };
+        let (scan, _) = run_scan(&img, &["tmp"]);
+        assert_eq!(scan.files_excluded, 2, "contents go, the mount point stays");
+        assert_eq!(scan.bytes_excluded, 8192 + 4096);
+
+        let patched = keep.path().join("patched.img");
+        apply_patches(&img, &scan, &patched);
+        let (ok, log) = fsck_ro(&patched);
+        assert!(ok, "e2fsck after emptying /tmp:\n{log}");
+        let root = debugfs_r(&patched, "ls -l /");
+        assert!(root.contains("tmp"), "/tmp must survive:\n{root}");
+        let inside = debugfs_r(&patched, "ls /tmp");
+        assert!(!inside.contains("junk"), "contents must be gone:\n{inside}");
+    }
+
+    /// An unreplayed journal makes both products liars: the on-disk structures
+    /// are older than the committed state, and the kernel's replay at first
+    /// boot overwrites whatever was patched. Both entry points must refuse.
+    #[test]
+    fn a_dirty_journal_refuses_scan_and_used_map() {
+        if !have_tool("debugfs") {
+            eprintln!("debugfs unavailable — skipping");
+            return;
+        }
+        let Some((img, _keep)) = make_ext4(4096) else { return };
+        debugfs_w(&img, "feature needs_recovery\n");
+        let f = std::fs::File::open(&img).unwrap();
+        let len = f.metadata().unwrap().len();
+        let mut vol = FileVol { f, len };
+        let scan = scan_ext_exclusions(&mut vol, &["secret.log".to_string()], |_| Ok(()));
+        assert!(scan.is_err(), "exclusions must refuse a dirty journal");
+        let map = crate::ext_map::build_ext_used_map(&mut vol, 1 << 20);
+        assert!(map.is_err(), "used-map must refuse a dirty journal");
     }
 }

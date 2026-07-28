@@ -78,7 +78,8 @@ pub struct XfsExclusionScan {
     pub files_excluded: u64,
     pub entries_scanned: u64,
     pub bytes_excluded: u64,
-    /// Files matched but kept because their data is shared (reflink/CoW).
+    /// Files matched but kept because their data is shared — a reflink/CoW
+    /// extent, or a hard link (the other name is not excluded).
     pub files_kept_shared: u64,
     pub categories: CategorySizes,
     pub patches: Vec<(u64, Vec<u8>)>,
@@ -507,7 +508,16 @@ pub fn scan_xfs_exclusions(
             let name_lower = e.name.to_lowercase();
             let mut crel = rel.clone();
             crel.push(name_lower.clone());
-            let hit = sub_excluded || parsed.iter().any(|p| p.matches(&name_lower, &crel));
+            let mut hit = sub_excluded || parsed.iter().any(|p| p.matches(&name_lower, &crel));
+            // `/proc`, `/sys`, `/dev`, `/run`, `/tmp` are emptied, never
+            // removed: systemd mounts on them before it can do anything, and a
+            // root without them panics the kernel instead of booting.
+            if hit && e.is_dir && crate::exclusions::is_essential_linux_dir(&crel) {
+                warn!(dir = %e.name, "exclusions: kept an essential mount point (contents still excluded)");
+                hit = false;
+                stack.push((e.ino, crel, true));
+                continue;
+            }
             if e.is_dir {
                 stack.push((e.ino, crel, hit));
             } else if hit {
@@ -515,6 +525,15 @@ pub fn scan_xfs_exclusions(
                     let mode = be16(&fi, 2) as u16;
                     if mode & S_IFMT != S_IFREG {
                         continue; // symlinks/devices: no data blocks to zero
+                    }
+                    // A hard-linked file is kept whole: its other name is not
+                    // excluded, and zeroing the shared inode's data would
+                    // silently empty that innocent file — xfs does not checksum
+                    // data, so nothing would even notice. Same rule as
+                    // ext4/btrfs/NTFS.
+                    if be32(&fi, 0x10) > 1 {
+                        scan.files_kept_shared += 1;
+                        continue;
                     }
                     let size = be64(&fi, 0x38);
                     let format = fi[5];
@@ -607,7 +626,7 @@ mod xfs_integration {
         std::fs::write(&img, &raw).unwrap();
 
         // Exclude the shared file (kept) AND the private one (zeroed).
-        let (scan, mut vol) = run(&img, &["secret.log", "cache/**"]);
+        let (scan, mut vol) = run(&img, &["secret.log", "cache"]);
         assert!(scan.files_kept_shared >= 1, "shared file not detected as shared");
         assert!(!scan.ranges.is_empty(), "private file not zeroed");
 
@@ -649,5 +668,44 @@ mod xfs_integration {
         let (scan, _) = run(&img, &[]);
         assert_eq!(scan.files_excluded, 0);
         assert!(scan.ranges.is_empty());
+    }
+
+    /// A hard-linked file must be kept whole: its other name is not excluded,
+    /// and zeroing the shared inode's data would silently empty that innocent
+    /// file. The fixture has no hard links, so the link count is raised offline
+    /// with xfs_db (the refcount btree — reflink sharing — knows nothing about
+    /// name sharing, which is exactly why a separate guard is needed).
+    #[test]
+    fn a_hard_linked_file_is_kept_whole() {
+        let zst = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/xfs_reflink.img.zst");
+        if !zst.exists() {
+            eprintln!("xfs_reflink.img.zst missing — skipping");
+            return;
+        }
+        if std::process::Command::new("xfs_db").arg("-V").output().is_err() {
+            eprintln!("xfs_db unavailable — skipping");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let img = dir.path().join("fs.img");
+        std::fs::write(&img, zstd::decode_all(std::fs::File::open(&zst).unwrap()).unwrap())
+            .unwrap();
+
+        // Sanity: with nlink == 1 the private file IS zeroed…
+        let (scan, _) = run(&img, &["big.bin"]);
+        assert!(!scan.ranges.is_empty(), "sanity: big.bin should be zeroable when unlinked");
+
+        // …then the same file with nlink == 2 must be left alone.
+        let out = std::process::Command::new("xfs_db")
+            .args(["-x", "-c", "path /cache/big.bin", "-c", "write core.nlinkv2 2"])
+            .arg(&img)
+            .output()
+            .unwrap();
+        let written = String::from_utf8_lossy(&out.stdout);
+        assert!(written.contains("core.nlinkv2 = 2"), "xfs_db write failed:\n{written}");
+
+        let (scan, _) = run(&img, &["big.bin"]);
+        assert!(scan.ranges.is_empty(), "hard-linked file was zeroed");
+        assert_eq!(scan.files_kept_shared, 1, "kept-hardlink accounting");
     }
 }

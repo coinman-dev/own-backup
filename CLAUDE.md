@@ -41,6 +41,16 @@ tested on a Windows host — cross-compilation validates compilation only.
   directly (`fat_exclusions.rs`).
 - Incremental/differential = differencing VHDX (AVHDX chains); consolidation via
   `MergeVirtualDisk`.
+- **True removal is a hard product requirement (decision 2026-07-28):** excluded
+  files must be REALLY removed from the image's filesystem on every supported
+  FS — zero-filled ghost entries are a fallback, not the product. Status:
+  NTFS/ReFS (driver mount-&-delete), FAT32/exFAT (direct patch), ext2/3/4
+  (Stage 2) — done; btrfs Stage 2 v2 per этап C of
+  `.ai/exclusions-full-repair-plan_2026-07-28.md`; xfs — этап D there, pending.
+  Any change that edits foreign FS metadata must pass BOTH fsck-clean
+  (`btrfs check --check-data-csum` / `e2fsck -fn` / `xfs_repair -n`) AND a
+  mount-and-write acceptance before shipping — static checks alone once let a
+  first-write corruption through.
 - The legacy `.obk` format (zstd + AES-256-GCM + Argon2id) was **deleted**
   (decision 2026-07-26, D8 in `.ai/restore-designer-plan_2026-07-26.md`): it had
   no writer left in any live path and its dead reader confused the restore work.

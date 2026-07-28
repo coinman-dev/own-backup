@@ -179,9 +179,27 @@ impl CategorySizes {
 /// - Patterns without a path separator match the file/directory NAME anywhere
 ///   on the volume (`pagefile.sys`, `*.tmp`, `$Recycle.Bin`, `Temp`).
 /// - Patterns with `\` or `/` match the path RELATIVE to the volume root.
-///   A `**` component matches any run of path components (including none), so
-///   `**\Temp\**` excludes every `Temp` directory at any depth and everything
-///   inside it, while `Temp\*.log` matches only `.log` files in a root `Temp`.
+///   A `**` component matches any run of path components, so `**\Temp\**`
+///   excludes the contents of every `Temp` directory at any depth, while
+///   `Temp\*.log` matches only `.log` files in a root `Temp`.
+///
+/// ## A trailing `**` is the *contents*, not the directory
+///
+/// `proc/**` means everything inside `proc`. It does **not** mean `proc`.
+///
+/// This was not always so, and the difference is not academic. A `**` component
+/// matches zero or more path components, so a trailing one used to match the
+/// directory itself as well — which meant the default Linux exclusions
+/// (`proc/**`, `sys/**`, `dev/**`, `run/**`, `tmp/**`) deleted `/proc`, `/sys`,
+/// `/dev`, `/run` and `/tmp` from the image. Those directories are empty; they
+/// are also the mount points systemd needs before it can do anything at all.
+/// The restored system unlocked its disk, mounted its root, started `init` —
+/// and died with `Attempted to kill init`, because there was nowhere to mount
+/// `/proc`.
+///
+/// So a pattern that ends in `**` now requires at least one component after the
+/// prefix. A directory is excluded by naming it (`lost+found`, `$Recycle.Bin`),
+/// not by asking for its contents.
 ///
 /// Matching is case-insensitive (NTFS semantics); within one component `*`
 /// matches any run of characters and `?` matches exactly one character.
@@ -190,6 +208,8 @@ pub struct ExclusionPattern {
     components: Vec<String>,
     /// true = match against the full relative path, false = name only.
     anchored: bool,
+    /// The pattern ends in `**`: it names what is *inside* a directory.
+    contents_only: bool,
 }
 
 impl ExclusionPattern {
@@ -213,6 +233,7 @@ impl ExclusionPattern {
         }
         Some(Self {
             anchored: components.len() > 1,
+            contents_only: components.len() > 1 && components.last().is_some_and(|c| c == "**"),
             components,
         })
     }
@@ -224,8 +245,31 @@ impl ExclusionPattern {
         if !self.anchored {
             return glob_match(&self.components[0], name_lower);
         }
+        if self.contents_only {
+            // Everything inside the directory, and not the directory. Matching
+            // the *parent* against the whole pattern says exactly that: the
+            // trailing `**` is then left with at least this one component to
+            // consume, so a path that IS the directory cannot match.
+            let Some((_, parent)) = rel_components.split_last() else { return false };
+            return match_path(&self.components, parent);
+        }
         match_path(&self.components, rel_components)
     }
+}
+
+/// Directories a Linux system cannot start without, at the root of a volume.
+///
+/// They hold nothing — they are where the kernel and systemd mount `devtmpfs`,
+/// `proc`, `sysfs` and the rest. Excluding their contents is right and saves
+/// nothing; removing the directories themselves costs the system its boot, and
+/// the failure surfaces as a kernel panic with no mention of a missing
+/// directory anywhere.
+///
+/// A last line of defence behind the pattern rules: a hand-written `proc` in
+/// the exclusion list still keeps the directory, and only empties it.
+pub fn is_essential_linux_dir(rel_components: &[String]) -> bool {
+    rel_components.len() == 1
+        && matches!(rel_components[0].as_str(), "dev" | "proc" | "sys" | "run" | "tmp")
 }
 
 /// Match pattern components against path components. A `**` component matches
@@ -457,6 +501,83 @@ mod tests {
         path.split('\\').map(|c| c.to_lowercase()).collect()
     }
 
+    /// The bug this file exists to never repeat.
+    ///
+    /// `proc/**` matched `proc` itself, because a `**` component matches zero
+    /// or more components. The default Linux exclusions therefore deleted
+    /// `/proc`, `/sys`, `/dev`, `/run` and `/tmp` — empty directories, and the
+    /// mount points systemd needs before it can start. The restored system
+    /// unlocked its disk, mounted its root, and the kernel panicked with
+    /// `Attempted to kill init! exitcode=0x00000100`.
+    #[test]
+    fn a_trailing_globstar_excludes_the_contents_and_keeps_the_directory() {
+        for dir in ["proc", "sys", "dev", "run", "tmp"] {
+            let p = pat(&format!("{dir}/**"));
+            assert!(
+                !p.matches(dir, &comps(dir)),
+                "{dir}/** must not match {dir} itself — systemd mounts on it"
+            );
+            assert!(p.matches("1", &comps(&format!("{dir}\\1"))), "…but its contents go");
+            assert!(p.matches("x", &comps(&format!("{dir}\\a\\x"))), "…at any depth");
+        }
+    }
+
+    #[test]
+    fn the_same_holds_for_a_globstar_in_the_middle() {
+        let p = pat("**\\Temp\\**");
+        assert!(!p.matches("temp", &comps("Windows\\Temp")), "the directory survives");
+        assert!(!p.matches("temp", &comps("Temp")));
+        assert!(p.matches("a.log", &comps("Windows\\Temp\\a.log")), "its contents do not");
+        assert!(p.matches("a.log", &comps("Temp\\deep\\a.log")));
+    }
+
+    #[test]
+    fn a_directory_is_excluded_by_naming_it() {
+        // The way to remove a directory is to name it — which is what the
+        // default lists do for the ones that really should go.
+        let p = pat("lost+found");
+        assert!(p.matches("lost+found", &comps("lost+found")));
+        let r = pat("$Recycle.Bin");
+        assert!(r.matches("$recycle.bin", &comps("$Recycle.Bin")));
+    }
+
+    #[test]
+    fn essential_mount_points_are_recognised_at_the_root_only() {
+        // A guard behind the pattern rules, for a hand-written `proc`.
+        for dir in ["dev", "proc", "sys", "run", "tmp"] {
+            assert!(is_essential_linux_dir(&comps(dir)));
+        }
+        assert!(!is_essential_linux_dir(&comps("var\\tmp")), "only at the volume root");
+        assert!(!is_essential_linux_dir(&comps("home")));
+        assert!(!is_essential_linux_dir(&[]));
+    }
+
+    #[test]
+    fn every_default_linux_exclusion_leaves_the_root_directories_alone() {
+        // The whole default list against the top-level directories of a Linux
+        // root: none of them may be removed.
+        let patterns: Vec<ExclusionPattern> = [
+            "proc/**", "sys/**", "dev/**", "run/**", "tmp/**", "var/tmp/**", "var/cache/**",
+            "**/.cache/**", "swapfile", "lost+found",
+        ]
+        .iter()
+        .filter_map(|p| ExclusionPattern::parse(p))
+        .collect();
+        for dir in [
+            "bin", "boot", "dev", "etc", "home", "lib", "lib64", "media", "mnt", "opt", "proc",
+            "root", "run", "sbin", "srv", "sys", "tmp", "usr", "var",
+        ] {
+            let c = comps(dir);
+            assert!(
+                !patterns.iter().any(|p| p.matches(dir, &c)),
+                "/{dir} would be removed from the image"
+            );
+        }
+        // …while what they are for still goes.
+        let c = comps("var\\cache\\apt\\archives\\x.deb");
+        assert!(patterns.iter().any(|p| p.matches("x.deb", &c)));
+    }
+
     #[test]
     fn name_patterns_match_anywhere() {
         let p = pat("pagefile.sys");
@@ -501,9 +622,11 @@ mod tests {
     #[test]
     fn globstar_matches_any_depth() {
         let p = pat(r"**\Temp\**");
-        // The Temp directory itself (so its subtree gets excluded)...
-        assert!(p.matches("temp", &comps("Windows\\Temp")));
-        assert!(p.matches("temp", &comps("Users\\Bob\\AppData\\Local\\Temp")));
+        // The Temp directories themselves survive — a trailing `**` asks for
+        // what is inside them, and an emptied directory saves nothing while
+        // removing one can cost a system its boot (see the module docs).
+        assert!(!p.matches("temp", &comps("Windows\\Temp")));
+        assert!(!p.matches("temp", &comps("Users\\Bob\\AppData\\Local\\Temp")));
         // ...and files anywhere under it.
         assert!(p.matches("a.txt", &comps("Windows\\Temp\\a.txt")));
         assert!(p.matches("b.dat", &comps("Users\\Bob\\AppData\\Local\\Temp\\sub\\b.dat")));
@@ -511,9 +634,9 @@ mod tests {
         assert!(!p.matches("temper", &comps("Windows\\Temper")));
         assert!(!p.matches("x", &comps("Windows\\System32\\x")));
 
-        // Leading anchor: a Temp at root only.
+        // Leading anchor: a Temp at root only — again, its contents.
         let r = pat(r"Temp\**");
-        assert!(r.matches("temp", &comps("Temp")));
+        assert!(!r.matches("temp", &comps("Temp")));
         assert!(r.matches("a", &comps("Temp\\a")));
         assert!(!r.matches("a", &comps("Windows\\Temp\\a")));
 
