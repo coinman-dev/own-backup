@@ -6,6 +6,7 @@
   // that stays in the wizard; here segments are shown, and optionally clickable.
   import type { Snippet } from 'svelte';
   import { formatBytes } from '../lib/format';
+  import { diskSegments as computeSegments } from '../lib/diskLayout';
   import type { DiskInfo, PartitionInfo } from '../lib/types';
 
   /** One cell of an explicit layout grid (see the `slots` prop).
@@ -170,24 +171,9 @@
     return t;
   }
 
+  // Shape of the disk — from `lib/diskLayout`, so this map, the backup wizard
+  // and the restore designer all draw the same disk the same way.
   interface DiskSeg { kind: 'part' | 'free'; size: number; offset?: number; share?: number; p?: PartitionInfo }
-  function diskSegments(d: DiskInfo): DiskSeg[] {
-    const parts = [...d.partitions].sort((a, b) => a.offset_bytes - b.offset_bytes);
-    const segs: DiskSeg[] = [];
-    // Absolute, not a percentage of the disk: 1% of a 477 GiB disk would hide
-    // free regions up to 4.77 GiB (20 GiB on a 2 TB disk).
-    const minGap = 1024 * 1024;
-    let cursor = 0;
-    for (const p of parts) {
-      const gap = p.offset_bytes - cursor;
-      if (gap > minGap) segs.push({ kind: 'free', size: gap, offset: cursor });
-      segs.push({ kind: 'part', size: p.size_bytes, offset: p.offset_bytes, p });
-      cursor = Math.max(cursor, p.offset_bytes + p.size_bytes);
-    }
-    const tail = d.size_bytes - cursor;
-    if (tail > minGap) segs.push({ kind: 'free', size: tail, offset: cursor });
-    return segs;
-  }
 
   // Cells to draw: the explicit grid when supplied, else derived from the disk.
   const segments = $derived.by((): DiskSeg[] =>
@@ -197,7 +183,7 @@
             ? { kind: 'part' as const, size: s.p.size_bytes, offset: s.p.offset_bytes, share: s.share, p: s.p }
             : { kind: 'free' as const, size: s.size, offset: s.offset, share: s.share },
         )
-      : diskSegments(disk),
+      : computeSegments(disk),
   );
   // With an explicit budget the width is exact — no flexing, no min-width.
   const flexOf = (seg: DiskSeg) =>
@@ -285,9 +271,18 @@
           {@const st = stateOf ? stateOf(seg.p.index) : undefined}
           {@const absent = !!inBackup && !inBackup.includes(seg.p.index)}
           {#if absent}
-            <!-- Not part of this backup: an empty slot, no data, not clickable. -->
-            <div class="seg absent" style={flexOf(seg)} title="Этот раздел не входит в резервную копию">
-              <span class="absent-lbl">раздел не в бэкапе</span>
+            <!-- Not part of this backup: an empty slot, no data, not clickable.
+                 It still says WHICH partition it is. Two nameless "раздел не в
+                 бэкапе" cells side by side read as one thing drawn twice, and
+                 the question that follows is "where did the second one come
+                 from" — when they are simply two different partitions. -->
+            <div
+              class="seg absent"
+              style={flexOf(seg)}
+              title="{partLabel(seg.p)} — {formatBytes(seg.p.size_bytes)}: этот раздел не входит в резервную копию"
+            >
+              <span class="absent-lbl">не в бэкапе</span>
+              <span class="absent-who">{partLabel(seg.p)} · {formatBytes(seg.p.size_bytes)}</span>
             </div>
           {:else if onPart || onPartMenu}
             {@const locked = lockedIndices.includes(seg.p.index)}
@@ -348,8 +343,10 @@
   /* Region too small for the copy: red on hover so it reads as "won't fit". */
   .seg.free.free-pick.too-small:hover { box-shadow: inset 0 0 0 2px var(--error); }
   /* Partition that is not in the backup: an empty, inert slot. */
-  .seg.absent { align-items: center; justify-content: center; background: var(--panel2); cursor: default; }
-  .absent-lbl { font-size: 11px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* Two lines, centred: what it is not, and which partition it is. */
+  .seg.absent { align-items: center; justify-content: center; flex-direction: column; gap: 2px; background: var(--panel2); cursor: default; overflow: hidden; }
+  .absent-lbl { font-size: 11px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+  .absent-who { font-size: 11px; color: var(--text-muted); opacity: .75; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
   .disk-head { width: 100%; display: flex; align-items: center; justify-content: space-between; padding: 6px 12px; background: var(--panel2); border: 0; border-bottom: 1px solid var(--border); margin: 0; font-family: inherit; text-align: left; }
   .disk-head.whole { background: rgba(45,125,210,.12); color: var(--primary); }
   .disk-head.whole .disk-model { color: var(--primary); }

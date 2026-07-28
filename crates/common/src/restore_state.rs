@@ -74,6 +74,16 @@ pub struct RestoreRunState {
     /// Things the restore cannot do and the user must (re-encrypt LUKS, fix
     /// crypttab, run bcdboot by hand). Written as they are discovered.
     pub follow_ups: Vec<String>,
+    /// The user has read the report and closed it.
+    ///
+    /// A finished run is deliberately sticky: a window closed mid-restore, or a
+    /// service restarted under it, must come back to the report rather than to
+    /// an empty screen. That is right up until the user dismisses it, after
+    /// which the same report reappearing on every visit to the page is just
+    /// noise — and worse, reads as if the restore had run again. The run itself
+    /// stays in the history either way.
+    #[serde(default)]
+    pub acknowledged: bool,
 }
 
 impl RestoreRunState {

@@ -5,6 +5,7 @@ pub mod engine_dto;
 pub mod error;
 pub mod gpt;
 pub mod image;
+pub mod log_mirror;
 pub mod preflight;
 pub mod progress;
 pub mod restore_check;

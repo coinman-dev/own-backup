@@ -35,6 +35,17 @@ use crate::win_device::WinRawDevice;
 /// Chunk used when zeroing the gaps between restored blocks.
 const WIPE_CHUNK: usize = 4 * 1024 * 1024;
 
+/// How long to let Windows finish rebuilding its volumes after the partition
+/// table changed, before writing into one of the new partitions.
+const SETTLE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How many times to take the volumes down again and retry a refused write.
+///
+/// Once is nearly always enough — the second attempt is made with the volume
+/// that appeared mid-write locked — and three attempts is the point at which
+/// something else is wrong and saying so beats retrying forever.
+const WRITE_ATTEMPTS: u32 = 3;
+
 /// Where the data for one partition is to be written.
 #[derive(Debug, Clone, Copy)]
 pub struct PartitionTarget {
@@ -58,6 +69,117 @@ pub struct SectorRestoreOptions {
     /// Assume the caller has already taken the disk offline, so there is
     /// nothing to dismount. Skips the volume sweep, which is not free.
     pub disk_already_offline: bool,
+}
+
+/// The target partition, its open device, and the volumes held out of the way.
+///
+/// These three belong together because recovering from a refused write means
+/// redoing all of them: Windows can mount a volume on top of the sectors being
+/// written — a filesystem is recognisable long before it is fully written — and
+/// from that moment the physical drive refuses them. The cure is to take the
+/// new volume down and reopen; the cause is invisible in the error, which says
+/// only "отказано в доступе".
+struct TargetWriter {
+    target: PartitionTarget,
+    dev: WinRawDevice,
+    /// `None` when the caller took the whole disk offline, which already
+    /// guarantees no volume can appear.
+    guard: Option<VolumeDismountGuard>,
+}
+
+impl TargetWriter {
+    /// Open `target` for writing, with everything mounted on it taken down.
+    fn open(target: PartitionTarget, guarded: bool) -> Result<Self> {
+        let guard = guarded.then(|| {
+            // Settle first: right after the table was rewritten, Windows is
+            // still creating and destroying volumes over these sectors, and a
+            // guard built during that sees a set that no longer exists a moment
+            // later.
+            crate::volume_win::wait_for_volumes_to_settle(
+                target.disk_number,
+                target.offset,
+                target.size,
+                SETTLE_TIMEOUT,
+            );
+            VolumeDismountGuard::for_restore_range(
+                target.disk_number,
+                target.offset,
+                target.size,
+            )
+        });
+        if let Some(g) = &guard {
+            if !g.failed.is_empty() {
+                warn!(volumes = ?g.failed, "some volumes could not be dismounted before the restore");
+            }
+        }
+        let dev = WinRawDevice::open_write(&target.device_path())?;
+        Ok(Self { target, dev, guard })
+    }
+
+    /// Write, and when Windows takes the sectors away, take them back.
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()> {
+        for attempt in 1..=WRITE_ATTEMPTS {
+            let failure = match self.dev.try_write_at(offset, data) {
+                Ok(()) => return Ok(()),
+                Err(f) => f,
+            };
+            if !failure.volume_in_the_way() || self.guard.is_none() {
+                return Err(failure.into_error(&self.target.device_path(), offset, data.len()));
+            }
+            if attempt == WRITE_ATTEMPTS {
+                // Say what is actually holding the sectors. "Отказано в
+                // доступе" on a partition the user just created reads as a
+                // permissions problem, and no amount of running as
+                // Administrator fixes it — the block comes from Windows
+                // protecting a volume, and the volume is usually one it left
+                // behind over a partition that no longer exists.
+                let blocking = crate::volume_win::volumes_overlapping(
+                    self.target.disk_number,
+                    self.target.offset,
+                    self.target.size,
+                );
+                return Err(OwnBackupError::Device(format!(
+                    "Windows не отдаёт секторы раздела (смещение {}, {} Б): {failure}. \
+                     Их держат тома: {}. Так бывает, когда от удалённого раздела остался \
+                     том-призрак — он не отпускает секторы и не поддаётся размонтированию. \
+                     Перезагрузите машину и повторите восстановление.",
+                    self.target.offset,
+                    self.target.size,
+                    if blocking.is_empty() { "не определены".into() } else { blocking.join(", ") }
+                )));
+            }
+            warn!(
+                attempt,
+                offset,
+                bytes = data.len(),
+                error = %failure,
+                "the write was refused — a volume mounted itself over the target; \
+                 taking it down and retrying"
+            );
+            // Drop the old guard before building the new one: its locks are on
+            // volumes that may no longer exist, and a lock held on a stale
+            // handle keeps nothing away.
+            self.guard = None;
+            std::thread::sleep(Duration::from_millis(500));
+            self.guard = Some(VolumeDismountGuard::for_restore_range(
+                self.target.disk_number,
+                self.target.offset,
+                self.target.size,
+            ));
+            // Reopening drops the old handle: after ERROR_NO_SUCH_DEVICE it
+            // refers to a device stack that has since been rebuilt.
+            self.dev = WinRawDevice::open_write(&self.target.device_path())?;
+        }
+        unreachable!("the loop returns on the last attempt")
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        self.dev.flush()
+    }
+
+    fn sector_size(&self) -> u32 {
+        self.dev.sector_size()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -130,20 +252,11 @@ pub fn restore_partition_sectors(
     }
 
     // Nothing may hold the target's sectors while we write them. When the disk
-    // is already offline this is a no-op; otherwise it takes down exactly the
-    // volumes in the way and keeps their lock handles alive until it drops.
-    let _guard = if opts.disk_already_offline {
-        None
-    } else {
-        let g = VolumeDismountGuard::for_range(target.disk_number, target.offset, target.size);
-        if !g.failed.is_empty() {
-            warn!(volumes = ?g.failed, "some volumes could not be dismounted before the restore");
-        }
-        Some(g)
-    };
-
+    // is already offline that is guaranteed; otherwise the writer waits for
+    // Windows to settle, takes down exactly the volumes in the way, and keeps
+    // their lock handles alive until it drops.
     let device_path = target.device_path();
-    let mut dev = WinRawDevice::open_write(&device_path)?;
+    let mut dev = TargetWriter::open(target, !opts.disk_already_offline)?;
     if block_size % dev.sector_size() as u64 != 0 {
         return Err(OwnBackupError::RestoreIncompatible(format!(
             "размер блока образа {block_size} не кратен сектору приёмника {}",
@@ -243,7 +356,7 @@ pub fn restore_partition_sectors(
 /// larger target that is exactly the space `ExtendFilesystem` is about to claim.
 /// Writing zeroes there would be pointless work, sometimes a lot of it.
 fn wipe_gaps(
-    dev: &mut WinRawDevice,
+    dev: &mut TargetWriter,
     covered: &mut Vec<(u64, u64)>,
     volume_len: u64,
     cancel: &CancelToken,
@@ -501,14 +614,8 @@ pub fn restore_partition_encrypted(
         )));
     }
 
-    let _guard = if opts.disk_already_offline {
-        None
-    } else {
-        Some(VolumeDismountGuard::for_range(target.disk_number, target.offset, target.size))
-    };
-
     let device_path = target.device_path();
-    let mut dev = WinRawDevice::open_write(&device_path)?;
+    let mut dev = TargetWriter::open(target, !opts.disk_already_offline)?;
     dev.write_at(0, &header)?;
     dev.flush()?;
     info!(target = %device_path, bytes = header.len(), "LUKS header written back");

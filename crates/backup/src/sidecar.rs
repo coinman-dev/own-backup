@@ -46,6 +46,17 @@ pub enum ChainRole {
 pub struct SidecarInfo {
     /// Sidecar format version (bump on layout changes).
     pub format_version: u32,
+    /// Version of Own Backup that wrote this image (`CARGO_PKG_VERSION`, e.g.
+    /// "0.1.0").
+    ///
+    /// Not decoration. A copy outlives the build that made it, and when one
+    /// turns out to be damaged the first question is *which build produced it*
+    /// — as it was for the btrfs exclusions that zeroed live metadata: the
+    /// difference between a good copy and a corrupt one was the build, and
+    /// nothing in the file said so. Empty for images written before this field
+    /// existed, which is itself the answer ("older than 0.1.1").
+    #[serde(default)]
+    pub app_version: String,
     /// Container kind; currently always `"vhdx"`.
     pub container: String,
     /// File name (not path) of the image this sidecar describes.
@@ -111,6 +122,7 @@ impl SidecarInfo {
     pub fn new_full(image_file_name: impl Into<String>, volume_data_offset: u64) -> Self {
         Self {
             format_version: 1,
+            app_version: env!("CARGO_PKG_VERSION").into(),
             container: "vhdx".into(),
             image_file_name: image_file_name.into(),
             chain_role: ChainRole::Full,
@@ -134,6 +146,7 @@ impl SidecarInfo {
     ) -> Self {
         Self {
             format_version: 1,
+            app_version: env!("CARGO_PKG_VERSION").into(),
             container: "vhdx".into(),
             image_file_name: image_file_name.into(),
             chain_role: role,
@@ -869,6 +882,34 @@ mod tests {
         assert_eq!(sidecar.info.volume_data_offset, 1024 * 1024);
         assert_eq!(sidecar.manifest.block_size, 65536);
         assert_eq!(sidecar.checksums, checksums);
+        // Which build wrote the copy, carried inside it. The question comes up
+        // exactly when the copy is suspect and the build that made it is long
+        // gone from the machine.
+        assert_eq!(sidecar.info.app_version, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn a_sidecar_written_before_the_version_field_still_reads() {
+        // Copies made by 0.1.0 have no `app_version` at all. They must keep
+        // opening — and say so by leaving the field empty, rather than claiming
+        // the version of whatever is reading them now.
+        let json = serde_json::json!({
+            "info": {
+                "format_version": 1,
+                "container": "vhdx",
+                "image_file_name": "old.vhdx",
+                "chain_role": "full",
+                "parent_image_file_name": null
+            },
+            "manifest": serde_json::to_value(make_manifest()).unwrap(),
+        });
+        #[derive(serde::Deserialize)]
+        struct Doc {
+            info: SidecarInfo,
+        }
+        let doc: Doc = serde_json::from_value(json).unwrap();
+        assert_eq!(doc.info.app_version, "", "an old copy must not borrow our version");
+        assert_eq!(doc.info.image_file_name, "old.vhdx");
     }
 
     #[test]

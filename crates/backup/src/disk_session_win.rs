@@ -33,6 +33,14 @@
 //! appeared, and tells the rest of the system. It also refuses changes that
 //! would pull the ground out from under the running OS, which is exactly the
 //! second opinion worth having.
+//!
+//! Its second opinion is not a substitute for not asking, though. partmgr acts
+//! on the layout it is handed, and a layout that quietly renames the partitions
+//! it was supposed to leave alone is a layout it will apply. So before anything
+//! is written the spec is reconciled with the table already on the disk
+//! ([`crate::table_merge`]): entries that describe partitions that are already
+//! there, unmoved, take their identity back from the disk, and a table that
+//! ends up identical to the disk's is not written at all.
 
 #![cfg(target_os = "windows")]
 
@@ -42,9 +50,13 @@ use windows::Win32::System::Ioctl::{
 };
 use windows::Win32::System::IO::DeviceIoControl;
 
+use own_backup_common::gpt::DiskLayout;
 use own_backup_common::restore_plan::{PartitionKind, PartitionScheme, PartitionTableSpec};
 use own_backup_common::{OwnBackupError, Result};
 
+use crate::table_merge::{
+    adopt_existing_entries, describe_disk, describe_table, entry_unchanged, same_layout,
+};
 use crate::table_writer::partition_table_write_ops;
 use crate::win_device::WinRawDevice;
 
@@ -146,7 +158,19 @@ impl DiskSession {
     /// figure comes from an inventory query and can be a hair off; a GPT whose
     /// backup header is not at the true last sector is a GPT Windows reports as
     /// damaged.
-    pub fn write_partition_table(&mut self, spec: &PartitionTableSpec) -> Result<()> {
+    ///
+    /// Returns whether anything was actually written: a table identical to the
+    /// one on the disk is left alone, and the caller says so rather than
+    /// claiming a rewrite that did not happen.
+    ///
+    /// `owned` names the target partitions the plan acts on. Every other entry
+    /// is a bystander whose GPT identity comes from the disk — see
+    /// [`crate::table_merge::adopt_existing_entries`].
+    pub fn write_partition_table(
+        &mut self,
+        spec: &PartitionTableSpec,
+        owned: &[u32],
+    ) -> Result<bool> {
         if !self.offline && !self.live_system {
             return Err(OwnBackupError::Device(format!(
                 "disk {} must be offline before its partition table is rewritten",
@@ -172,8 +196,50 @@ impl DiskSession {
             spec.disk_size_bytes = self.dev.length();
         }
 
+        // What is on the disk right now — the authority on the identities the
+        // plan does not carry, and on whether the plan changes anything at all.
+        let current = self.current_layout();
+        if let Some(cur) = &current {
+            for line in describe_disk(cur) {
+                info!(disk = self.disk_number, "on disk now: {line}");
+            }
+            let adopted = adopt_existing_entries(&mut spec, cur, owned);
+            if !adopted.is_empty() {
+                info!(
+                    disk = self.disk_number,
+                    disk_id = adopted.kept_disk_id,
+                    unique_guid = ?adopted.kept_guid,
+                    attributes = ?adopted.kept_attributes,
+                    name = ?adopted.kept_name,
+                    "kept the on-disk GPT identity of partitions the plan leaves in place"
+                );
+            }
+            if same_layout(&spec, cur) {
+                info!(
+                    disk = self.disk_number,
+                    partitions = spec.entries.len(),
+                    "the planned layout is the one already on the disk — partition table left \
+                     untouched"
+                );
+                return Ok(false);
+            }
+        }
+        info!(
+            disk = self.disk_number,
+            scheme = ?spec.scheme,
+            disk_id = %spec.disk_id,
+            sector = spec.sector_size,
+            size = spec.disk_size_bytes,
+            partitions = spec.entries.len(),
+            "writing a new partition table"
+        );
+        for line in describe_table(&spec) {
+            info!(disk = self.disk_number, "to write: {line}");
+        }
+
         if self.live_system {
-            return self.set_drive_layout(&spec);
+            self.set_drive_layout(&spec, current.as_ref())?;
+            return Ok(true);
         }
 
         let ops = partition_table_write_ops(&spec)?;
@@ -192,7 +258,28 @@ impl DiskSession {
             partitions = spec.entries.len(),
             "partition table written"
         );
-        Ok(())
+        Ok(true)
+    }
+
+    /// The GPT that is on the disk right now, read from its own sectors.
+    ///
+    /// Read rather than asked for: the partition manager's picture is what the
+    /// plan is about to replace, while the sectors are what the identities have
+    /// to come from. A disk with no readable GPT (a brand-new one, an MBR disk)
+    /// yields `None`, and the caller then has nothing to reconcile against —
+    /// which is correct, since there is nothing there to preserve.
+    fn current_layout(&self) -> Option<DiskLayout> {
+        match crate::gpt_reader::read_disk_layout(self.disk_number) {
+            Ok(layout) => Some(layout),
+            Err(e) => {
+                warn!(
+                    disk = self.disk_number, error = %e,
+                    "could not read the partition table currently on the disk — writing the \
+                     planned one as it stands"
+                );
+                None
+            }
+        }
     }
 
     /// Apply `spec` through the partition manager (`IOCTL_DISK_SET_DRIVE_LAYOUT_EX`).
@@ -206,13 +293,43 @@ impl DiskSession {
     /// The structures are built by hand rather than through the `windows`
     /// crate's types: `DRIVE_LAYOUT_INFORMATION_EX` ends in a variable-length
     /// array, so it has to be laid out in a byte buffer anyway.
-    fn set_drive_layout(&mut self, spec: &PartitionTableSpec) -> Result<()> {
+    ///
+    /// `current` is the table on the disk, when it could be read. Entries that
+    /// match it byte for byte are handed over with `RewritePartition = FALSE`,
+    /// so partmgr leaves those partitions — and the volumes mounted on them —
+    /// alone. On the disk the running Windows boots from, one of those volumes
+    /// is `C:`.
+    fn set_drive_layout(
+        &mut self,
+        spec: &PartitionTableSpec,
+        current: Option<&DiskLayout>,
+    ) -> Result<()> {
         // DRIVE_LAYOUT_INFORMATION_EX: u32 PartitionStyle, u32 PartitionCount,
         // union { GPT { Guid DiskId; i64 StartingUsableOffset; i64 UsableLength;
         //              u32 MaxPartitionCount } | MBR { u32 Signature; u32 Checksum } }
         // padded to 8, then PARTITION_INFORMATION_EX[].
         const HEADER: usize = 48;
         const ENTRY: usize = 144;
+        // Offset of the style-specific union inside PARTITION_INFORMATION_EX.
+        //
+        // It follows `IsServicePartition` at +29, padded up to the union's own
+        // 8-byte alignment — so +32, and the GPT arm's 112 bytes then fill the
+        // record exactly (32 + 112 = 144 = ENTRY). This was +40 once, which put
+        // a zeroed half-GUID where partmgr reads the partition type, the tail of
+        // the type GUID where it reads the unique ID, and half of *that* where
+        // it reads the attribute flags. Applied to a live system disk it made
+        // Windows stop recognising its own boot volume: bugcheck immediately,
+        // and an unbootable disk afterwards.
+        const UNION: usize = 32;
+        // PARTITION_INFORMATION_GPT is 112 bytes (two GUIDs, u64 attributes,
+        // 36 UTF-16 units) and is the larger arm of the union, so it has to end
+        // exactly where the record does. Checked here because the symptom of
+        // getting it wrong is a bugcheck on the user's machine, not a test
+        // failure on ours.
+        const _: () = assert!(UNION + 16 + 16 + 8 + 72 == ENTRY);
+        // Same for the header: DiskId at +8, then two i64 and MaxPartitionCount,
+        // padded up to the first entry.
+        const _: () = assert!(HEADER == 48);
         let sector = spec.sector_size.max(512) as u64;
         let count = spec.entries.len();
         let mut buf = vec![0u8; HEADER + ENTRY * count.max(1)];
@@ -244,22 +361,33 @@ impl DiskSession {
             }
         }
 
+        let mut rewritten: Vec<u32> = Vec::new();
+        let mut untouched: Vec<u32> = Vec::new();
         for (i, e) in spec.entries.iter().enumerate() {
             // PARTITION_INFORMATION_EX: u32 PartitionStyle, pad, i64 StartingOffset,
             // i64 PartitionLength, u32 PartitionNumber, u8 RewritePartition,
-            // u8 IsServicePartition, pad, then the style-specific union at +40.
+            // u8 IsServicePartition, pad, then the style-specific union at UNION.
             let b = HEADER + i * ENTRY;
             buf[b..b + 4].copy_from_slice(&style.to_le_bytes());
             buf[b + 8..b + 16].copy_from_slice(&(e.offset_bytes(spec.sector_size) as i64).to_le_bytes());
             buf[b + 16..b + 24]
                 .copy_from_slice(&(e.size_bytes(spec.sector_size) as i64).to_le_bytes());
             buf[b + 24..b + 28].copy_from_slice(&e.index.to_le_bytes());
-            // Every entry is rewritten: partmgr diffs the whole layout against
-            // what is there, and a "keep" flag on an entry it has to move would
-            // just be a way to get it wrong.
-            buf[b + 28] = 1;
+            // Rewrite only what actually differs. partmgr applies an entry
+            // marked TRUE and leaves a FALSE one exactly as it found it, so
+            // this is the difference between "restore into the spare partition"
+            // and "recreate every partition on the disk, including the one the
+            // OS is running from". With no readable current layout there is
+            // nothing to compare against and every entry has to be written.
+            let unchanged = current.is_some_and(|cur| entry_unchanged(e, cur));
+            buf[b + 28] = u8::from(!unchanged);
+            if unchanged {
+                untouched.push(e.index);
+            } else {
+                rewritten.push(e.index);
+            }
 
-            let u = b + 40;
+            let u = b + UNION;
             match &e.kind {
                 PartitionKind::Gpt { type_guid, part_guid, attributes, name } => {
                     // PARTITION_INFORMATION_GPT: Guid PartitionType, Guid PartitionId,
@@ -285,6 +413,28 @@ impl DiskSession {
                 }
             }
         }
+
+        info!(
+            disk = self.disk_number,
+            partitions = count,
+            rewrite = ?rewritten,
+            keep = ?untouched,
+            bytes = buf.len(),
+            "handing the layout to the partition manager"
+        );
+
+        // Take down what lives on the sectors this change disturbs, and hold it
+        // down until partmgr has applied the new layout.
+        //
+        // Skipping this is what leaves a *ghost*: delete a partition whose
+        // volume is still mounted and mountmgr keeps the volume object, with
+        // its old extents, over sectors that now belong to a new partition.
+        // Nothing can lock a volume whose partition is gone — it answers
+        // "устройство не готово" forever — and Windows still refuses raw writes
+        // to everything it claims. The restore then fails inside the new
+        // partition with "отказано в доступе", which names neither the ghost
+        // nor the deletion that created it.
+        let _guards = self.dismount_disturbed_ranges(spec, current);
 
         let mut returned = 0u32;
         // SAFETY: the input buffer is laid out as DRIVE_LAYOUT_INFORMATION_EX
@@ -314,9 +464,69 @@ impl DiskSession {
         info!(
             disk = self.disk_number,
             partitions = count,
+            rewritten = rewritten.len(),
             "partition table applied through the partition manager (live system disk)"
         );
         Ok(())
+    }
+
+    /// Dismount every volume sitting on a stretch of disk this layout change
+    /// disturbs, and keep it down for as long as the returned guards live.
+    ///
+    /// Two kinds of stretch qualify, and only these two:
+    ///
+    /// - a partition on the disk today that the new layout does not keep in
+    ///   place — deleted outright, or moved/resized;
+    /// - a partition in the new layout that is not already there — the sectors
+    ///   it will occupy may still be carrying somebody else's volume.
+    ///
+    /// Partitions that come through the change untouched are deliberately left
+    /// alone. On the disk the running Windows boots from, one of them is `C:`,
+    /// and it neither can nor should be dismounted.
+    fn dismount_disturbed_ranges(
+        &self,
+        spec: &PartitionTableSpec,
+        current: Option<&DiskLayout>,
+    ) -> Vec<crate::volume_win::VolumeDismountGuard> {
+        let Some(cur) = current else { return Vec::new() };
+
+        let mut ranges: Vec<(u64, u64)> = Vec::new();
+        for p in &cur.partitions {
+            let survives = spec
+                .entries
+                .iter()
+                .any(|e| e.first_lba == p.first_lba && e.last_lba == p.last_lba);
+            if !survives {
+                let cur_sector = cur.sector_size.max(512) as u64;
+                ranges.push((
+                    p.first_lba * cur_sector,
+                    (p.last_lba + 1 - p.first_lba) * cur_sector,
+                ));
+            }
+        }
+        for e in &spec.entries {
+            let existed = cur
+                .partitions
+                .iter()
+                .any(|p| p.first_lba == e.first_lba && p.last_lba == e.last_lba);
+            if !existed {
+                ranges.push((e.offset_bytes(spec.sector_size), e.size_bytes(spec.sector_size)));
+            }
+        }
+        if ranges.is_empty() {
+            return Vec::new();
+        }
+        info!(disk = self.disk_number, ?ranges, "dismounting what stands on the sectors being changed");
+        ranges
+            .into_iter()
+            .map(|(offset, len)| {
+                crate::volume_win::VolumeDismountGuard::for_restore_range(
+                    self.disk_number,
+                    offset,
+                    len,
+                )
+            })
+            .collect()
     }
 
     /// The underlying device, for callers that need raw access within the

@@ -164,6 +164,10 @@ pub struct ImageInfoDto {
     pub sector_size: u32,
     /// True when this image is a whole-disk (bootable) backup.
     pub is_whole_disk: bool,
+    /// Version of Own Backup that wrote this copy. Empty for copies made before
+    /// the field existed — worth showing as such rather than hiding, since
+    /// "which build made this" is the first question when a copy misbehaves.
+    pub app_version: String,
 }
 
 /// Read one image's embedded metadata into an [`ImageInfoDto`] (direct file
@@ -265,6 +269,7 @@ fn read_image_info_at(path: &std::path::Path) -> Result<ImageInfoDto, String> {
             .map(|dm| dm.layout.sector_size)
             .unwrap_or(sidecar.manifest.source_disk.sector_size_logical),
         is_whole_disk,
+        app_version: sidecar.info.app_version,
     })
 }
 
@@ -451,6 +456,15 @@ pub async fn cancel_restore_plan(
     plan_id: String,
 ) -> Result<serde_json::Value, String> {
     state.link.client().await?.cancel_restore_plan(&plan_id).await
+}
+
+/// The user closed the finished run's report — stop handing it back.
+#[tauri::command]
+pub async fn ack_restore_run(
+    state: State<'_, GuiState>,
+    plan_id: String,
+) -> Result<(), String> {
+    state.link.client().await?.ack_restore_run(&plan_id).await
 }
 
 /// Check a LUKS passphrase against the header stored in a copy (D19).

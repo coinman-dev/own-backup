@@ -575,7 +575,12 @@ fn check_ops(
                     ));
                 }
             }
-            RestoreOp::WritePartitionTable { .. } | RestoreOp::AssignLetter { .. } => {}
+            // Nothing to check: it reads the restored ESP and writes one file
+            // only if that file is absent, so there is no state it can be
+            // wrong about in advance.
+            RestoreOp::WritePartitionTable { .. }
+            | RestoreOp::AssignLetter { .. }
+            | RestoreOp::EnsureFallbackBootloader { .. } => {}
         }
     }
 

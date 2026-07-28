@@ -98,12 +98,24 @@ fn init_logging() {
 
     let opened = open_log();
     let log_path = opened.as_ref().map(|(_, p)| p.clone());
+    let mut mirror_path = None;
     match opened {
         Some((f, _)) => {
+            // Same second copy the service keeps, for the same reason: if the
+            // machine goes down mid-restore, the drive the user named is where
+            // the last lines are.
+            let tee = own_backup_common::log_mirror::TeeLog::new(
+                f,
+                own_backup_common::log_mirror::MirrorLog::new(
+                    own_backup_common::config::AppConfig::default_path(),
+                    "own-backup-gui.log",
+                ),
+            );
+            mirror_path = tee.mirror_path();
             tracing_subscriber::fmt()
                 .with_env_filter(filter)
                 .with_ansi(false)
-                .with_writer(std::sync::Mutex::new(f))
+                .with_writer(std::sync::Mutex::new(tee))
                 .init();
         }
         None => {
@@ -134,6 +146,9 @@ fn init_logging() {
     }
     if let Some(p) = &log_path {
         tracing::info!(log = %p.display(), "log file");
+    }
+    if let Some(p) = &mirror_path {
+        tracing::info!(mirror = %p.display(), "log is duplicated here, flushed line by line");
     }
     #[cfg(windows)]
     tracing::info!(elevated = ?elevation_state(), "process elevation (expected: Some(false))");
@@ -247,6 +262,7 @@ fn main() {
             commands::engine::apply_restore_plan,
             commands::engine::get_restore_state,
             commands::engine::cancel_restore_plan,
+            commands::engine::ack_restore_run,
             commands::engine::verify_luks_password,
             // --- misc ---
             commands::settings::get_config,

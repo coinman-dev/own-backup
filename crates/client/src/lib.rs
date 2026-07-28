@@ -505,6 +505,15 @@ impl BackupClient {
         parse(&reply.json)
     }
 
+    /// Say the finished run's report has been read, so it stops coming back.
+    pub async fn ack_restore_run(&mut self, plan_id: &str) -> Result<()> {
+        self.inner
+            .ack_restore_run(self.request(proto::IdRequest { id: plan_id.into() }))
+            .await
+            .map_err(status)?;
+        Ok(())
+    }
+
     /// Signal-cancel the running restore/verify/disk-restore.
     pub async fn cancel_engine_op(&mut self) -> Result<()> {
         self.inner

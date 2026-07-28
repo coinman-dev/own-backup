@@ -13,6 +13,16 @@ pub struct AppConfig {
     pub grpc_address: String,
     #[serde(default = "default_log_level")]
     pub log_level: String,
+    /// Second copy of the log, in a directory the user names — a USB stick,
+    /// another disk. Empty means off.
+    ///
+    /// It exists for the one failure the ordinary log cannot describe: a
+    /// restore that takes the machine down with it. The local log is on the
+    /// disk being written to and is lost with it; lines written here are pushed
+    /// out of the OS cache one by one, so the last thing the program did is on
+    /// the stick even after a bugcheck (see [`crate::log_mirror`]).
+    #[serde(default)]
+    pub log_mirror_dir: String,
     #[serde(default)]
     pub default_compression_level: i32,
     #[serde(default)]
@@ -96,6 +106,7 @@ impl Default for AppConfig {
             data_dir: default_data_dir(),
             grpc_address: default_grpc_addr(),
             log_level: default_log_level(),
+            log_mirror_dir: String::new(),
             default_compression_level: 3,
             hooks: HooksConfig::default(),
             credentials: CredentialsConfig::default(),

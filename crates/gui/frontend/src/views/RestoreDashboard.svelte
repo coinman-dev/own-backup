@@ -4,12 +4,13 @@
   // `mappings` and nothing else. A disk is touched at exactly one point —
   // `api.applyRestorePlan`, below, after the dry run has passed with no errors
   // and the user has typed a confirmation.
-  import { engine, cancelCurrent, clearRestoreResult } from '../lib/engineStore.svelte';
+  import { engine, cancelCurrent, clearRestoreResult, refreshVolumes } from '../lib/engineStore.svelte';
   import { listen } from '@tauri-apps/api/event';
   import { jobs } from '../lib/jobStore.svelte';
   import { api } from '../lib/api';
   import InfoModal from '../components/InfoModal.svelte';
   import DiskMap from '../components/DiskMap.svelte';
+  import { diskSegments } from '../lib/diskLayout';
   import type { MapSlot } from '../components/DiskMap.svelte';
   import type {
     Job, DiskInfo, PartitionInfo, ImageInfo, RestoreRunState, DryRunResult, OpRecord,
@@ -53,15 +54,21 @@
   // file, in which case the run-record image (imageInfo) is used instead.
   let copies = $state<ImageInfo[]>([]);
   let copyIndex = $state(0);
+  /** The folder scan is still in flight. Until it lands there is nothing to say
+   *  about the copy — and saying «диск этой копии не подключён» in the meantime
+   *  is a red warning that flashes on every visit and is wrong every time. */
+  let copiesLoading = $state(true);
   $effect(() => {
     const folder = job.dest_folder;
     const jid = job.id;
     if (!folder || jid.startsWith('file:')) {
       copies = [];
       copyIndex = 0;
+      copiesLoading = false;
       return;
     }
     let cancelled = false;
+    copiesLoading = true;
     api.listImageBackups(folder).then(
       (list) => {
         if (cancelled) return;
@@ -69,9 +76,13 @@
           .filter((i) => i.job_id === jid)
           .sort((a, b) => (a.created_at < b.created_at ? 1 : -1)); // newest first
         copyIndex = 0;
+        copiesLoading = false;
       },
       () => {
-        if (!cancelled) copies = [];
+        if (!cancelled) {
+          copies = [];
+          copiesLoading = false;
+        }
       },
     );
     return () => { cancelled = true; };
@@ -232,9 +243,13 @@
    *  recreates it. Shown as part of the copy so it does not read as omitted. */
   const MSR_GUID = 'E3C9E316-0B5C-4DB8-817D-F92DF00215AE';
   const layoutOnlyParts = $derived(
-    (rawBackedUpDisks[0]?.partitions ?? [])
-      .filter((p) => (p.gpt_type_guid || '').replace(/[{}]/g, '').toUpperCase() === MSR_GUID)
-      .map((p) => p.index),
+    // Only a whole-disk copy keeps the MSR slot; a per-volume copy has nothing
+    // to do with it, and calling it "в копии" there would be a lie.
+    (activeInfo?.is_whole_disk ?? false)
+      ? (rawBackedUpDisks[0]?.partitions ?? [])
+          .filter((p) => (p.gpt_type_guid || '').replace(/[{}]/g, '').toUpperCase() === MSR_GUID)
+          .map((p) => p.index)
+      : [],
   );
 
   // Partitions of the copy whose ORIGINAL was an encrypted container. The
@@ -280,6 +295,15 @@
     (srcDisk?.partitions ?? []).filter((p) => backedUpParts.includes(p.index)),
   );
   const srcTotalBytes = $derived(srcBackupParts.reduce((s, p) => s + p.size_bytes, 0));
+  /** Room the copy needs on the target — not the same as the sum of its
+   *  partitions. Each one starts on a 1 MiB boundary, and the source's sizes
+   *  are not round numbers, so a few mebibytes of padding come with them. */
+  const srcNeedBytes = $derived(
+    srcBackupParts.reduce(
+      (cursor, p) => Math.ceil((cursor + p.size_bytes) / (1024 * 1024)) * 1024 * 1024,
+      0,
+    ),
+  );
 
   // --- Simple partition editor on the target disk ---------------------------
   // The layout is an explicit list of cells. Deleting a partition turns ITS cell
@@ -347,13 +371,34 @@
       () => {},
     );
     const stop = listen<RestoreRunState>('restore-plan-progress', (e) => {
-      if (live) planRun = e.payload;
+      if (!live) return;
+      const wasRunning = planRun?.status === 'running';
+      planRun = e.payload;
+      // The disk just changed shape, and nothing else will notice: the map is
+      // refreshed when a *drive letter* appears or disappears, and a restore of
+      // Linux partitions creates none. Without this the target still reads
+      // "Не занято" after a restore that filled it.
+      if (wasRunning && planRun.status !== 'running') refreshVolumes();
     });
     return () => {
       live = false;
       stop.then((un) => un()).catch(() => {});
     };
   });
+
+  /** Close the finished run's report. It goes to «Активность» and does not come
+   *  back here — a report that reappears on every visit reads as if the restore
+   *  had run again. */
+  async function dismissRun() {
+    const id = planRun?.plan_id;
+    planRun = null;
+    resetMapping();
+    pickAnotherDisk();
+    if (id) await api.ackRestoreRun(id).catch(() => {});
+    // Re-read the disks on the way out, so the map the user lands on is the one
+    // the restore just produced.
+    refreshVolumes();
+  }
   /** Findings from the last dry run, shown above the queue. */
   let checks = $state<CheckResult[]>([]);
   let letterChanges = $state<LetterChange[]>([]);
@@ -466,23 +511,11 @@
     return shares.map((s) => (s * 100) / sum);
   }
 
-  // Build the initial grid: partitions in offset order, plus the real gaps.
+  // Build the initial grid: the shared disk shape (`lib/diskLayout` — the same
+  // one the backup wizard and the read-only maps draw), plus this screen's
+  // width budget on top of it.
   function buildSlots(d: DiskInfo): MapSlot[] {
-    const parts = [...d.partitions].sort((a, b) => a.offset_bytes - b.offset_bytes);
-    const raw: { kind: 'part' | 'free'; size: number; offset: number; p?: PartitionInfo }[] = [];
-    // Absolute threshold: a percentage of the disk hid real free space (1% of a
-    // 477 GiB disk is 4.77 GiB — and 20 GiB on a 2 TB one). Only sub-MiB
-    // alignment slivers are not worth a cell.
-    const minGap = MIB;
-    let cursor = 0;
-    for (const p of parts) {
-      const gap = p.offset_bytes - cursor;
-      if (gap > minGap) raw.push({ kind: 'free', size: gap, offset: cursor });
-      raw.push({ kind: 'part', size: p.size_bytes, offset: p.offset_bytes, p });
-      cursor = Math.max(cursor, p.offset_bytes + p.size_bytes);
-    }
-    const tail = d.size_bytes - cursor;
-    if (tail > minGap) raw.push({ kind: 'free', size: tail, offset: cursor });
+    const raw = diskSegments(d);
     const shares = allocateShares(raw.map((r) => r.size));
     return raw.map((r, i) =>
       r.kind === 'part'
@@ -592,12 +625,26 @@
     const i = slots.findIndex((s) => s.kind === 'free' && s.offset === offset);
     if (i < 0) return;
     const cell = slots[i] as { offset: number; size: number; share: number };
-    if (cell.size < srcTotalBytes) {
+    // Every partition starts on a 1 MiB boundary, so the copy needs a little
+    // more room than the sum of its parts: the source's own sizes are not round
+    // (this ESP is 1.28 GiB) and each one pushes the next start up to the next
+    // boundary. Reproducing the source's misalignment instead would cost a
+    // read-modify-write on every write for the life of the disk.
+    const start = Math.ceil(cell.offset / MIB) * MIB;
+    const offsets: number[] = [];
+    let cursor = start;
+    for (const sp of srcBackupParts) {
+      offsets.push(cursor);
+      cursor = Math.ceil((cursor + sp.size_bytes) / MIB) * MIB;
+    }
+    const cellEnd = cell.offset + cell.size;
+    const needed = cursor - cell.offset;
+    if (needed > cell.size) {
       // Exact numbers + the shortfall: rounded ones read as "нужно 130 GiB,
       // свободно 130 GiB", which tells the user nothing.
-      const short = srcTotalBytes - cell.size;
+      const short = needed - cell.size;
       fitMsg =
-        `Недостаточно места: нужно ${preciseSize(srcTotalBytes)}, свободно ${preciseSize(cell.size)}` +
+        `Недостаточно места: нужно ${preciseSize(needed)}, свободно ${preciseSize(cell.size)}` +
         ` — не хватает ${preciseSize(short)}. Удалите разделы или выберите другой участок.`;
       return;
     }
@@ -605,7 +652,7 @@
     // The region's width budget is split between the placed partitions (and any
     // leftover free space), so the cells around it do not move.
     const sizes = srcBackupParts.map((p) => p.size_bytes);
-    const rest = cell.size - srcTotalBytes;
+    const rest = cellEnd - cursor;
     if (rest > 0) sizes.push(rest);
     // The sub-shares are scaled by the cell's own share, so the readable floor
     // has to be scaled up by the same factor — otherwise a cell that owns 40% of
@@ -614,16 +661,20 @@
       (s) => (s * cell.share) / 100,
     );
 
-    let cursor = cell.offset;
     let next = Math.max(0, ...curParts.map((p) => p.index)) + 1;
     const placed: MapSlot[] = [];
     srcBackupParts.forEach((sp, k) => {
       placed.push({
         kind: 'part',
-        p: { ...sp, index: next, offset_bytes: cursor, volume_device: '', volume_letter: null },
+        p: {
+          ...sp,
+          index: next,
+          offset_bytes: offsets[k],
+          volume_device: '',
+          volume_letter: null,
+        },
         share: sub[k],
       });
-      cursor += sp.size_bytes;
       next += 1;
     });
     previewIdx = placed.map((s) => (s as { p: PartitionInfo }).p.index);
@@ -1084,6 +1135,15 @@
       if (win) {
         ops.push({ op: 'finalize_boot', windows_part: win, esp, uefi: isGpt });
       }
+      // A UEFI machine boots what its NVRAM names, and NVRAM stays with the
+      // machine — so a copy restored onto different hardware has a loader
+      // nobody asks for. `\EFI\BOOT\BOOTX64.EFI` is the one path firmware tries
+      // by itself. bcdboot writes an NVRAM entry for Windows; for Linux nothing
+      // did, and a restored Kubuntu landed in a UEFI shell with a perfectly
+      // good shim sitting on its ESP.
+      if (esp && isGpt) {
+        ops.push({ op: 'ensure_fallback_bootloader', esp });
+      }
     }
 
     return {
@@ -1328,12 +1388,6 @@
   const willReencrypt = $derived(
     reencrypt ? reencryptable.filter((i) => luksPwState[i] === 'ok') : [],
   );
-  /** Re-encryptable partitions left without a password. They restore as a plain
-   *  filesystem — which is a choice, not a mistake, so it warns rather than
-   *  blocks. */
-  const luksSkipped = $derived(
-    reencrypt ? reencryptable.filter((i) => !(luksPw[i] ?? '').trim()) : [],
-  );
   /** Nothing is half-done: a password that was typed must be one that works.
    *  An unchecked or wrong one would let the restore write the container header,
    *  fail to open it, and stop — with the partition table already rewritten.
@@ -1442,7 +1496,16 @@
   <div class="copynav">
     <button class="cn-btn" title="Более старая копия" aria-label="Более старая копия"
       disabled={!hasMultiple || copyIndex >= copies.length - 1} onclick={() => { copyIndex += 1; resetMapping(); }}>‹</button>
-    <span class="cn-date">{activeInfo ? formatDate(activeInfo.created_at) : lastRun ? formatDate(lastRun.finished_at) : ''}</span>
+    <span class="cn-date"
+      title={activeInfo
+        ? `Копию сделала Own Backup ${activeInfo.app_version || '— версия не записана (сборка старше 0.1.1)'}`
+        : ''}
+    >{activeInfo ? formatDate(activeInfo.created_at) : lastRun ? formatDate(lastRun.finished_at) : ''}</span>
+    <!-- Which build wrote this copy. Small, next to the date, and the first
+         thing to look at when a copy behaves oddly. -->
+    {#if activeInfo}
+      <span class="cn-ver">v{activeInfo.app_version || '?'}</span>
+    {/if}
     <button class="cn-btn" title="Более новая копия" aria-label="Более новая копия"
       disabled={!hasMultiple || copyIndex <= 0} onclick={() => { copyIndex -= 1; resetMapping(); }}>›</button>
   </div>
@@ -1467,22 +1530,27 @@
             disk={d}
             center={i === 0 ? copyNav : undefined}
             selected={targetDiskId ? [] : job.sources}
-            selectedIndices={targetDiskId ? [] : (activeInfo?.backed_up_parts ?? [])}
+            selectedIndices={targetDiskId ? [] : [...(activeInfo?.backed_up_parts ?? []), ...layoutOnlyParts]}
             readonly
             boot={activeInfo?.is_whole_disk ?? isBootableCopy(d)}
             bootChecked={wholeDiskRestore}
             onBootToggle={toggleWholeDisk}
             inBackup={backedUpParts.length > 0 ? [...backedUpParts, ...layoutOnlyParts] : undefined}
             layoutOnly={layoutOnlyParts}
-            lockedIndices={wholeDiskRestore ? backedUpParts : mappings.map((m) => m.src)}
+            lockedIndices={wholeDiskRestore
+              ? [...backedUpParts, ...layoutOnlyParts]
+              : mappings.map((m) => m.src)}
             onPart={i === 0 && targetDiskId ? clickSourcePart : undefined}
             stateOf={i === 0 && targetDiskId ? srcState : undefined}
           />
         {/each}
       </div>
-    {:else if engine.volumesLoading && engine.disks.length === 0}
+    {:else if copiesLoading || (engine.volumesLoading && engine.disks.length === 0)}
       <div class="loading-note">Загрузка списка дисков…</div>
     {:else}
+      <!-- Only once everything that could describe the copy has been asked and
+           answered. This used to be reachable mid-load, so it appeared for a
+           moment on every visit and then withdrew itself. -->
       <div class="warn-note">Диск этой копии сейчас не подключён — карту показать нельзя.</div>
     {/if}
 
@@ -1616,7 +1684,7 @@
               : undefined
             : openCreate}
           freeAction={wholeDiskRestore ? 'place' : 'create'}
-          needBytes={wholeDiskRestore && previewIdx.length === 0 ? srcTotalBytes : undefined}
+          needBytes={wholeDiskRestore && previewIdx.length === 0 ? srcNeedBytes : undefined}
           onPartMenu={openPartMenu}
           onFreeMenu={openFreeMenu}
         />
@@ -1705,7 +1773,7 @@
       {/if}
       {#if planRun.status !== 'running'}
         <div class="under-card">
-          <button class="btn ghost small" onclick={() => { planRun = null; resetMapping(); pickAnotherDisk(); }}>
+          <button class="btn ghost small" onclick={dismissRun}>
             Вернуться к выбору
           </button>
         </div>
@@ -1934,28 +2002,11 @@
         <span>Проверять записанное после восстановления</span>
       </label>
 
-      <!-- Asked for here, where the need for it is stated: the field used to be
-           on the page behind this dialog, which made the instruction a dead
-           end. Leaving it empty is a valid answer and says what it produces. -->
-      {#if reencrypt && luksSkipped.length > 0}
-        <div class="pw-block">
-          <div class="pw-block-head">Пароль контейнера — чтобы вернуть шифрование</div>
-          {#each luksSkipped as part}
-            <div class="pw-multi">
-              {@render pwRow(part, luksSkipped.length > 1 ? `Раздел ${describeSrc(part)}:` : 'Пароль:')}
-            </div>
-          {/each}
-          <div class="finding warn">
-            Пароль не введён — {luksSkipped.length === 1 ? 'раздел' : 'разделы'}
-            {luksSkipped.map(describeSrc).join('; ')}
-            {luksSkipped.length === 1 ? 'восстановится' : 'восстановятся'} без контейнера LUKS.
-            Данные будут целы и читаемы, но <b>Linux с такого раздела не загрузится</b>:
-            initramfs и <code>/etc/crypttab</code> ждут зашифрованное устройство, которого больше нет.
-            Понадобится Live CD — убрать запись из <code>/etc/crypttab</code>, поправить
-            <code>/etc/fstab</code> на UUID самого раздела и пересобрать initramfs.
-          </div>
-        </div>
-      {/if}
+      <!-- The password field is not repeated here. It lives on the page, next
+           to the "вернуть шифрование" checkbox that raises the question, and a
+           partition left without one is already reported above by the plan
+           check (EncryptionNotRestored) — in the same list as everything else
+           this dialog exists to show. -->
       {#if applyBlockedBy}
         <p class="ops-note">{applyBlockedBy}</p>
       {:else}
@@ -2025,6 +2076,7 @@
   .cn-btn:hover:not(:disabled) { border-color: var(--primary); color: var(--primary); }
   .cn-btn:disabled { opacity: .4; cursor: default; }
   .cn-date { font-size: 12px; font-weight: 600; color: var(--head); white-space: nowrap; }
+  .cn-ver { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
   /* Arrow occupies the left half so it sits at ~25%; the instruction fills the
      right half. */
   /* The arrow's centre sits at 25% of the width (half its own 44px width is
@@ -2050,8 +2102,6 @@
   .luks-note { font-size: 12px; color: var(--text-muted); line-height: 1.5; margin-top: 6px; }
   .pw-inline { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--head); }
   .pw-multi { margin-top: 8px; }
-  .pw-block { margin: 14px 0 12px; padding: 12px 14px; border-radius: 6px; border: 1px solid var(--border); background: var(--card-bg); }
-  .pw-block-head { font-size: 13px; font-weight: 600; color: var(--head); margin-bottom: 6px; }
   .pw-lbl { white-space: nowrap; }
   .pw-inline input { width: 180px; padding: 6px 9px; border: 1px solid var(--border); border-radius: 4px; font-size: 13px; font-family: var(--font); background: var(--card-bg); color: var(--text); }
   .btn.tiny { padding: 6px 12px; font-size: 12px; }

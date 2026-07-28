@@ -868,6 +868,38 @@ impl BackupService for BackupServiceImpl {
         correct_disk_size(&mut p.plan);
         let results = check_plan(&p.plan, &ctx);
 
+        // The dry run is where a restore usually stops, and until now it left no
+        // trace at all: the user saw a red box in a dialog and the log had
+        // nothing to say about it. The plan that was checked and every finding
+        // go in, so the refusal can be read afterwards.
+        tracing::info!(
+            plan = %p.plan.id,
+            target_disk = p.plan.target_disk,
+            image = %p.plan.image_path.display(),
+            ops = p.plan.ops.len(),
+            findings = results.len(),
+            "dry run: checking a restore plan"
+        );
+        if let Some(t) = p.plan.table() {
+            tracing::info!(
+                disk_size = t.disk_size_bytes,
+                sector = t.sector_size,
+                partitions = t.entries.len(),
+                "dry run: proposed table"
+            );
+            for line in own_backup_backup::table_merge::describe_table(t) {
+                tracing::info!("dry run: {line}");
+            }
+        }
+        for r in &results {
+            match r.level {
+                own_backup_common::restore_check::CheckLevel::Error => {
+                    tracing::warn!(code = ?r.code, part = ?r.part_index, "dry run refuses: {}", r.message)
+                }
+                _ => tracing::info!(code = ?r.code, part = ?r.part_index, "dry run notes: {}", r.message),
+            }
+        }
+
         json_reply(&serde_json::json!({
             "plan": p.plan,
             "results": results,
@@ -976,7 +1008,30 @@ impl BackupService for BackupServiceImpl {
                 .into_iter()
                 .next()
         });
+        // …but only until it has been read. After that the report belongs to
+        // the history, not to the restore page.
+        let run = run.filter(|r| !r.acknowledged);
         json_reply(&run)
+    }
+
+    async fn ack_restore_run(&self, req: Request<IdRequest>) -> Result<Response<Empty>, Status> {
+        check_auth(&req, &self.service_token)?;
+        let id = req.into_inner().id;
+        let plan_id = uuid::Uuid::parse_str(id.trim())
+            .map_err(|e| Status::invalid_argument(format!("bad plan id {id:?}: {e}")))?;
+
+        // Both copies, because either one alone would bring the report back:
+        // the in-memory run is what a window reads first, the history is what
+        // answers after a service restart.
+        if let Some(run) = self.state.restore_run.lock().unwrap().as_mut() {
+            if run.plan_id == plan_id {
+                run.acknowledged = true;
+            }
+        }
+        let found =
+            own_backup_core::restore_exec::acknowledge_in_history(&self.state.config.data_dir, plan_id);
+        tracing::info!(plan = %plan_id, in_history = found, "restore report acknowledged");
+        Ok(Response::new(Empty {}))
     }
 
     async fn cancel_restore_plan(

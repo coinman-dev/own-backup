@@ -41,6 +41,16 @@ use crate::win_device::to_wide;
 /// deletions the lazy writer and storsvc still hold handles for a few seconds.
 const LOCK_RETRY_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// The same, for a restore.
+///
+/// A minute of retries is right when the volume is one we have been writing to
+/// and expect to get back. It is wrong here: the volumes in a restore's way are
+/// usually about to be overwritten anyway, and one of them is routinely a
+/// *ghost* — a volume object left over a partition that no longer exists, which
+/// answers "устройство не готово" for as long as anyone keeps asking. Sixty
+/// seconds of that before the real failure buries the cause.
+const RESTORE_LOCK_TIMEOUT: Duration = Duration::from_secs(6);
+
 /// RAII wrapper closing a Win32 handle exactly once.
 pub struct FileHandle(pub HANDLE);
 
@@ -287,6 +297,15 @@ pub fn drive_letters_on_disk(disk_number: u32) -> Vec<String> {
 /// this handle, and dropping it lets the filesystem mount straight back.
 #[must_use = "the lock lives only as long as the returned handle"]
 pub fn flush_lock_dismount_volume(volume_root: &str) -> Option<FileHandle> {
+    flush_lock_dismount_volume_within(volume_root, LOCK_RETRY_TIMEOUT)
+}
+
+/// [`flush_lock_dismount_volume`] with a caller-chosen patience for the lock.
+#[must_use = "the lock lives only as long as the returned handle"]
+pub fn flush_lock_dismount_volume_within(
+    volume_root: &str,
+    lock_timeout: Duration,
+) -> Option<FileHandle> {
     let device = volume_root.trim_end_matches('\\');
     let wide = to_wide(device);
     // SAFETY: `wide` outlives the call.
@@ -325,7 +344,7 @@ pub fn flush_lock_dismount_volume(volume_root: &str) -> Option<FileHandle> {
         } {
             Ok(()) => break true,
             Err(e) => {
-                if t.elapsed() >= LOCK_RETRY_TIMEOUT {
+                if t.elapsed() >= lock_timeout {
                     warn!(
                         error = %e, attempts,
                         "could not lock the volume — foreign handles survive"
@@ -383,22 +402,23 @@ impl VolumeDismountGuard {
     /// Take down every volume that overlaps `[offset, offset + length)` on
     /// `disk_number`.
     pub fn for_range(disk_number: u32, offset: u64, length: u64) -> Self {
-        let end = offset.saturating_add(length);
+        Self::for_range_within(disk_number, offset, length, LOCK_RETRY_TIMEOUT)
+    }
+
+    /// [`Self::for_range`] with a chosen patience for each volume's lock.
+    pub fn for_range_within(
+        disk_number: u32,
+        offset: u64,
+        length: u64,
+        lock_timeout: Duration,
+    ) -> Self {
         let mut handles = Vec::new();
         let mut volumes = Vec::new();
         let mut failed = Vec::new();
 
-        for vr in all_volume_roots() {
-            let overlaps = volume_extents(&vr).iter().any(|e| {
-                e.disk_number == disk_number
-                    && e.offset < end
-                    && e.offset.saturating_add(e.length) > offset
-            });
-            if !overlaps {
-                continue;
-            }
+        for vr in volumes_overlapping(disk_number, offset, length) {
             strip_drive_letters(&vr);
-            match flush_lock_dismount_volume(&vr) {
+            match flush_lock_dismount_volume_within(&vr, lock_timeout) {
                 Some(h) => {
                     handles.push(h);
                     volumes.push(vr);
@@ -406,9 +426,12 @@ impl VolumeDismountGuard {
                 None => failed.push(vr),
             }
         }
-        debug!(
+        // At info, not debug: when a raw write is refused, what the guard did
+        // and did not manage to take down is the first thing worth reading, and
+        // by then the machine may be in no state to reproduce it.
+        info!(
             disk = disk_number, offset, length,
-            taken = volumes.len(), failed = failed.len(),
+            taken = ?volumes, failed = ?failed,
             "dismount guard established"
         );
         Self { _handles: handles, volumes, failed }
@@ -417,6 +440,80 @@ impl VolumeDismountGuard {
     /// Take down every volume on the whole disk.
     pub fn for_disk(disk_number: u32) -> Self {
         Self::for_range(disk_number, 0, u64::MAX)
+    }
+
+    /// The patience a restore uses — see [`RESTORE_LOCK_TIMEOUT`].
+    pub fn for_restore_range(disk_number: u32, offset: u64, length: u64) -> Self {
+        Self::for_range_within(disk_number, offset, length, RESTORE_LOCK_TIMEOUT)
+    }
+}
+
+/// Every volume whose extents intersect `[offset, offset + length)` on `disk`.
+///
+/// Includes volumes whose partition is already gone: mountmgr can keep a volume
+/// object — with its old extents — after the partition under it has been
+/// deleted, and Windows still refuses raw writes to the sectors it claims.
+pub fn volumes_overlapping(disk: u32, offset: u64, length: u64) -> Vec<String> {
+    let end = offset.saturating_add(length);
+    all_volume_roots()
+        .into_iter()
+        .filter(|vr| {
+            volume_extents(vr).iter().any(|e| {
+                e.disk_number == disk
+                    && e.offset < end
+                    && e.offset.saturating_add(e.length) > offset
+            })
+        })
+        .collect()
+}
+
+/// Wait until Windows has finished rebuilding its idea of `disk` after the
+/// partition table changed.
+///
+/// Rewriting the table tears volumes down and builds others up, and none of
+/// that is finished when the IOCTL returns: the first raw write after it came
+/// back "указано несуществующее устройство" 23 ms later. Settled means the set
+/// of volumes covering the range stopped changing between two looks, so the
+/// dismount guard that follows sees what is really there — including a volume
+/// Windows created for the partition we are about to write into.
+///
+/// Best effort: on timeout the caller carries on, because a range with no
+/// volume on it at all is the normal case for a partition that has just been
+/// created and never formatted, and waiting longer would not change that.
+pub fn wait_for_volumes_to_settle(disk: u32, offset: u64, length: u64, timeout: Duration) {
+    // Long enough for a volume that is about to arrive to have arrived. Without
+    // it, the seconds between "the table changed" and "Windows created the
+    // volume" look perfectly stable — the range is empty and stays empty — and
+    // the wait ends just in time to be wrong.
+    const MINIMUM: Duration = Duration::from_millis(1500);
+
+    let started = Instant::now();
+    let mut previous = volumes_overlapping(disk, offset, length);
+    let mut stable_since = Instant::now();
+    loop {
+        std::thread::sleep(Duration::from_millis(250));
+        let now = volumes_overlapping(disk, offset, length);
+        if now != previous {
+            previous = now;
+            stable_since = Instant::now();
+        } else if stable_since.elapsed() >= Duration::from_millis(750)
+            && started.elapsed() >= MINIMUM
+        {
+            info!(
+                disk, offset, length, volumes = ?previous,
+                waited_ms = started.elapsed().as_millis(),
+                "volume topology settled"
+            );
+            return;
+        }
+        if started.elapsed() >= timeout {
+            warn!(
+                disk, offset, length, volumes = ?previous,
+                "volumes over the target range are still appearing and disappearing — \
+                 writing anyway"
+            );
+            return;
+        }
     }
 }
 

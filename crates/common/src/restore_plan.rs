@@ -246,6 +246,22 @@ pub enum RestoreOp {
         esp: Option<PartRef>,
         uefi: bool,
     },
+    /// Put a copy of the bootloader at `\EFI\BOOT\BOOTX64.EFI` on the restored
+    /// ESP, if nothing is there yet.
+    ///
+    /// A UEFI machine boots what its **NVRAM** tells it to, and NVRAM is on the
+    /// motherboard, not on the disk. The entry that says "ubuntu →
+    /// `\EFI\ubuntu\shimx64.efi`" does not travel with a copy, so a disk
+    /// restored into a new machine — or a new virtual machine — has a perfectly
+    /// good loader that nothing ever asks for. The firmware then falls back to
+    /// one fixed path, `\EFI\BOOT\BOOTX64.EFI`, and drops to a UEFI shell when
+    /// that is missing too. Which is exactly what a restored Kubuntu did:
+    /// `\EFI\ubuntu\shimx64.efi` present, `\EFI\BOOT` absent, no boot.
+    ///
+    /// So the restore leaves a copy where the firmware looks by itself. It is
+    /// the same trick as a bootable USB stick, and it changes nothing for a
+    /// machine that already has its NVRAM entry — that entry keeps winning.
+    EnsureFallbackBootloader { esp: PartRef },
 }
 
 /// Sort key giving the fixed execution order documented at the top of this
@@ -259,6 +275,7 @@ impl RestoreOp {
     const ORDER_EXTEND: u8 = 4;
     const ORDER_LETTER: u8 = 5;
     const ORDER_BOOT: u8 = 6;
+    const ORDER_FALLBACK: u8 = 7;
 
     pub fn order_key(&self) -> u8 {
         match self {
@@ -269,6 +286,9 @@ impl RestoreOp {
             RestoreOp::ExtendFilesystem { .. } => Self::ORDER_EXTEND,
             RestoreOp::AssignLetter { .. } => Self::ORDER_LETTER,
             RestoreOp::FinalizeBoot { .. } => Self::ORDER_BOOT,
+            // Last: it inspects the ESP as the restore leaves it, so anything
+            // that writes to the ESP has to have finished — bcdboot included.
+            RestoreOp::EnsureFallbackBootloader { .. } => Self::ORDER_FALLBACK,
         }
     }
 
@@ -283,6 +303,7 @@ impl RestoreOp {
             RestoreOp::ExtendFilesystem { part } => Some(*part),
             RestoreOp::AssignLetter { part, .. } => Some(*part),
             RestoreOp::FinalizeBoot { windows_part, .. } => Some(*windows_part),
+            RestoreOp::EnsureFallbackBootloader { esp } => Some(*esp),
         }
     }
 
@@ -297,6 +318,7 @@ impl RestoreOp {
             RestoreOp::ExtendFilesystem { .. } => "extend_filesystem",
             RestoreOp::AssignLetter { .. } => "assign_letter",
             RestoreOp::FinalizeBoot { .. } => "finalize_boot",
+            RestoreOp::EnsureFallbackBootloader { .. } => "ensure_fallback_bootloader",
         }
     }
 
@@ -342,6 +364,10 @@ impl RestoreOp {
             RestoreOp::FinalizeBoot { uefi, .. } => {
                 format!("Пересоздать загрузчик ({})", if *uefi { "UEFI" } else { "BIOS" })
             }
+            RestoreOp::EnsureFallbackBootloader { .. } => {
+                "Положить загрузчик по пути, который UEFI ищет сам                  (\\EFI\\BOOT\\BOOTX64.EFI)"
+                    .into()
+            }
         }
     }
 
@@ -359,6 +385,7 @@ impl RestoreOp {
                 | RestoreOp::ExtendFilesystem { .. }
                 | RestoreOp::AssignLetter { .. }
                 | RestoreOp::FinalizeBoot { .. }
+                | RestoreOp::EnsureFallbackBootloader { .. }
         )
     }
 
@@ -591,6 +618,37 @@ mod tests {
         let offsets: Vec<u64> =
             plan.ordered().iter().filter_map(|op| op.part()).map(|p| p.offset).collect();
         assert_eq!(offsets, vec![1000, 2000, 3000]);
+    }
+
+    #[test]
+    fn the_fallback_bootloader_is_written_after_everything_that_touches_the_esp() {
+        // It reads the ESP as the restore leaves it — so bcdboot, which writes
+        // into that same ESP, has to have run first.
+        let plan = RestorePlan::new(
+            1,
+            "/tmp/img.vhdx".into(),
+            vec![
+                RestoreOp::EnsureFallbackBootloader { esp: part(1, 100) },
+                RestoreOp::FinalizeBoot { windows_part: part(2, 200), esp: None, uefi: true },
+                RestoreOp::RestorePartition {
+                    src_index: 1,
+                    dst: part(1, 100),
+                    mode: RestoreMode::Sectors,
+                    wipe_free_space: false,
+                    reencrypt: false,
+                },
+            ],
+        );
+        let kinds: Vec<&str> = plan.ordered().iter().map(|op| op.kind()).collect();
+        assert_eq!(kinds, vec!["restore_sectors", "finalize_boot", "ensure_fallback_bootloader"]);
+    }
+
+    #[test]
+    fn copying_a_bootloader_destroys_nothing_and_needs_a_mounted_esp() {
+        let op = RestoreOp::EnsureFallbackBootloader { esp: part(1, 100) };
+        assert!(!op.destroys_data(), "it only adds a file that was not there");
+        assert!(op.needs_disk_online(), "the ESP has to be a mounted volume to write to");
+        assert!(!op.cancellable(), "it takes milliseconds");
     }
 
     #[test]

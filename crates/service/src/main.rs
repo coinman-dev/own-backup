@@ -106,21 +106,33 @@ fn open_service_log() -> Option<(std::fs::File, std::path::PathBuf)> {
 /// which has no console, still produces a diagnosable log) and record startup
 /// facts. `RUST_LOG` overrides the default filter.
 fn init_logging() {
+    use own_backup_common::log_mirror::{MirrorLog, TeeLog};
+
     let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        "info,own_backup_service=debug,own_backup_scheduler=debug".into()
+        // The restore engine lives in `core` and `backup`; when a restore goes
+        // wrong those two are the log, so they are on by default rather than
+        // behind a RUST_LOG the user would have to know about.
+        "info,own_backup_service=debug,own_backup_scheduler=debug,own_backup_core=debug".into()
     });
-    let log_path = match open_service_log() {
+    let (log_path, mirror_path) = match open_service_log() {
         Some((f, path)) => {
+            // The second copy, on whatever drive the user named — the only one
+            // that survives a restore that takes the machine down with it.
+            let tee = TeeLog::new(
+                f,
+                MirrorLog::new(AppConfig::default_path(), "own-backup-service.log"),
+            );
+            let mirror = tee.mirror_path();
             tracing_subscriber::fmt()
                 .with_env_filter(filter)
                 .with_ansi(false)
-                .with_writer(std::sync::Mutex::new(f))
+                .with_writer(std::sync::Mutex::new(tee))
                 .init();
-            Some(path)
+            (Some(path), mirror)
         }
         None => {
             tracing_subscriber::fmt().with_writer(std::io::stderr).with_env_filter(filter).init();
-            None
+            (None, None)
         }
     };
     info!(
@@ -135,6 +147,10 @@ fn init_logging() {
     }
     if let Some(p) = &log_path {
         info!(log = %p.display(), "log file");
+    }
+    match &mirror_path {
+        Some(p) => info!(mirror = %p.display(), "log is duplicated here, flushed line by line"),
+        None => info!("log is not duplicated (no directory set in параметры)"),
     }
 }
 

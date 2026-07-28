@@ -4,6 +4,7 @@
   import { engine } from '../lib/engineStore.svelte';
   import { saveJob, runJob, decryptVolume, decryptedVolumes } from '../lib/jobStore.svelte';
   import { formatBytes } from '../lib/format';
+  import { diskSegments } from '../lib/diskLayout';
   import InfoModal from '../components/InfoModal.svelte';
   import type { Job, DiskInfo, PartitionInfo } from '../lib/types';
 
@@ -152,27 +153,10 @@
   }
 
   // Proportional segments of a disk: partitions plus hatched gaps for
-  // unallocated space, ordered by on-disk offset.
-  interface DiskSeg {
-    kind: 'part' | 'free';
-    size: number;
-    p?: PartitionInfo;
-  }
-  function diskSegments(d: DiskInfo): DiskSeg[] {
-    const parts = [...d.partitions].sort((a, b) => a.offset_bytes - b.offset_bytes);
-    const segs: DiskSeg[] = [];
-    const minGap = d.size_bytes * 0.01; // ignore sub-1% alignment gaps
-    let cursor = 0;
-    for (const p of parts) {
-      const gap = p.offset_bytes - cursor;
-      if (gap > minGap) segs.push({ kind: 'free', size: gap });
-      segs.push({ kind: 'part', size: p.size_bytes, p });
-      cursor = Math.max(cursor, p.offset_bytes + p.size_bytes);
-    }
-    const tail = d.size_bytes - cursor;
-    if (tail > minGap) segs.push({ kind: 'free', size: tail });
-    return segs;
-  }
+  // unallocated space, ordered by on-disk offset. Shared with the restore
+  // screens (`lib/diskLayout`) — the same disk has to look the same wherever it
+  // is drawn. This screen used to hide any gap under 1% of the disk, which on a
+  // 894 GiB drive meant 8.9 GiB of free space simply was not there.
 
   // Fraction (0..100) of a partition that is in use, for the fill overlay.
   function usedPct(p: PartitionInfo): number {

@@ -214,6 +214,8 @@ export interface ImageInfo {
   sector_size: number;
   /** True for a whole-disk (bootable) backup. */
   is_whole_disk: boolean;
+  /** Version of Own Backup that wrote this copy ("" for older copies). */
+  app_version: string;
 }
 
 // ===== Job model (phase 6) =====
@@ -462,7 +464,10 @@ export type RestoreOp =
     }
   | { op: 'extend_filesystem'; part: PartRef }
   | { op: 'assign_letter'; part: PartRef; letter: string }
-  | { op: 'finalize_boot'; windows_part: PartRef; esp: PartRef | null; uefi: boolean };
+  | { op: 'finalize_boot'; windows_part: PartRef; esp: PartRef | null; uefi: boolean }
+  /** Copy the bootloader to `\EFI\BOOT\BOOTX64.EFI` — the only path UEFI tries
+   *  without an NVRAM entry, and NVRAM does not travel with a copy. */
+  | { op: 'ensure_fallback_bootloader'; esp: PartRef };
 
 export interface RestorePlan {
   id: string;

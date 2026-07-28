@@ -1,10 +1,17 @@
 <script lang="ts">
+  import { open } from '@tauri-apps/plugin-dialog';
   import { api } from '../lib/api';
   import type { ServiceStatus } from '../lib/types';
 
+  /** The config as it was loaded, kept whole. Saving edits a copy of it rather
+   *  than building a fresh object out of the four fields this page shows —
+   *  which is how the remembered backups and the hook settings used to
+   *  disappear the first time someone opened Settings and pressed Save. */
+  let loadedConfig: Record<string, unknown> = $state({});
   let dataDirectory = $state('');
   let compressionLevel = $state(3);
   let logLevel = $state('info');
+  let logMirrorDir = $state('');
   let serviceStatus: ServiceStatus | null = $state(null);
   let isLoading = $state(true);
   let error: string | null = $state(null);
@@ -21,9 +28,11 @@
 
       if (configResult.status === 'fulfilled') {
         const cfg = configResult.value;
-        dataDirectory = (cfg.data_directory as string) ?? '';
-        compressionLevel = (cfg.compression_level as number) ?? 3;
+        loadedConfig = cfg;
+        dataDirectory = (cfg.data_dir as string) ?? '';
+        compressionLevel = (cfg.default_compression_level as number) ?? 3;
         logLevel = (cfg.log_level as string) ?? 'info';
+        logMirrorDir = (cfg.log_mirror_dir as string) ?? '';
       }
 
       serviceStatus = statusResult.status === 'fulfilled' ? statusResult.value : null;
@@ -38,16 +47,23 @@
     loadSettings();
   });
 
+  async function pickMirrorDir() {
+    const chosen = await open({ directory: true, multiple: false, title: 'Куда дублировать журнал' });
+    if (typeof chosen === 'string') logMirrorDir = chosen;
+  }
+
   async function handleSave() {
     saveMessage = null;
     error = null;
     try {
       await api.saveConfig({
-        data_directory: dataDirectory,
-        compression_level: compressionLevel,
+        ...loadedConfig,
+        data_dir: dataDirectory,
+        default_compression_level: compressionLevel,
         log_level: logLevel,
+        log_mirror_dir: logMirrorDir.trim(),
       });
-      saveMessage = 'Settings saved successfully.';
+      saveMessage = 'Настройки сохранены.';
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : String(e);
     }
@@ -205,6 +221,28 @@
             <option value="debug">Debug</option>
             <option value="trace">Trace</option>
           </select>
+        </div>
+
+        <div class="form-group">
+          <label for="log-mirror">Дублировать журнал на диск</label>
+          <div class="path-row">
+            <input
+              id="log-mirror"
+              type="text"
+              class="form-input"
+              placeholder="например, E:\ — пусто значит «не дублировать»"
+              bind:value={logMirrorDir}
+            />
+            <button class="btn btn-secondary" onclick={pickMirrorDir}>Обзор…</button>
+          </div>
+          <p class="help-text">
+            Копия журнала службы и окна ложится в указанную папку — на флешку или
+            на другой диск. Каждая строка сразу сбрасывается на носитель, поэтому
+            она останется там даже если машина уйдёт в синий экран: обычный журнал
+            лежит на том же диске, который восстановление перезаписывает, и
+            пропадает вместе с ним. Настройка подхватывается на ходу —
+            перезапускать службу не нужно.
+          </p>
         </div>
 
         <div class="form-actions">
@@ -462,6 +500,18 @@
     font-size: 12px;
     color: var(--text-muted);
     margin-top: 4px;
+  }
+
+  /* Path plus its "Обзор…" button: the field takes what is left. */
+  .path-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .path-row .form-input {
+    flex: 1;
+    min-width: 0;
   }
 
   .form-range {

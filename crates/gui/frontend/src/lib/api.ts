@@ -74,6 +74,9 @@ export const api = {
   getRestoreState: () => invoke<RestoreRunState | null>('get_restore_state'),
   cancelRestorePlan: (planId: string) =>
     invoke<{ cancelled: boolean; reason: string }>('cancel_restore_plan', { planId }),
+  /** The report has been read and closed: `getRestoreState` stops returning it.
+   *  The run itself stays in the history and in «Активность». */
+  ackRestoreRun: (planId: string) => invoke<void>('ack_restore_run', { planId }),
 
   // --- Mount prerequisites: AIM driver (Windows) / NBD+NTFS status (Linux) ---
   aimDriverStatus: () => invoke<MountBackendStatus>('aim_driver_status'),

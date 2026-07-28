@@ -2686,7 +2686,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-backup"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -2720,7 +2720,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "clap",
@@ -2747,7 +2747,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hyper-util",
  "own-backup-common",
@@ -2766,7 +2766,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-common"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "serde",
@@ -2779,7 +2779,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "own-backup-backup",
@@ -2798,7 +2798,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-gui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "own-backup-backup",
@@ -2832,7 +2832,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-inventory"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "own-backup-common",
@@ -2845,7 +2845,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-metadata"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "own-backup-common",
@@ -2860,7 +2860,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-restore"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2879,7 +2879,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-scheduler"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "cron",
@@ -2895,7 +2895,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-service"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-stream",
  "chrono",
@@ -2928,7 +2928,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-snapshot"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "chrono",

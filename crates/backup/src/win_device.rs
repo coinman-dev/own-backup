@@ -101,6 +101,66 @@ pub struct WinRawDevice {
     sector_size: u32,
 }
 
+/// Why a raw write did not happen.
+pub enum WriteFailure {
+    /// Rejected before reaching the device (alignment, length, allocation).
+    Refused(String),
+    /// The device said no.
+    Win32(windows::core::Error),
+}
+
+impl WriteFailure {
+    /// Whether this is Windows protecting sectors it thinks belong to a volume.
+    ///
+    /// Three codes mean the same thing to a restore, and none of them means the
+    /// disk is broken:
+    ///
+    /// - `ERROR_ACCESS_DENIED` — the sectors are inside a *mounted* volume.
+    ///   Writing the first megabytes of a filesystem is enough for Windows to
+    ///   recognise one and mount it, and from that moment the rest of the write
+    ///   is refused. A restore hits this halfway through its own first
+    ///   partition, which reads as a permissions problem and is not one.
+    /// - `ERROR_NO_SUCH_DEVICE` — the partition was created moments ago and the
+    ///   device stack is still being rebuilt.
+    /// - `ERROR_NOT_READY` — same story, seen from the volume side.
+    ///
+    /// All three are cured by taking the volume down again and retrying, which
+    /// is what the caller does.
+    pub fn volume_in_the_way(&self) -> bool {
+        const ACCESS_DENIED: i32 = 0x8007_0005u32 as i32;
+        const NO_SUCH_DEVICE: i32 = 0x8007_01B1u32 as i32;
+        const NOT_READY: i32 = 0x8007_0015u32 as i32;
+        match self {
+            WriteFailure::Win32(e) => {
+                matches!(e.code().0, ACCESS_DENIED | NO_SUCH_DEVICE | NOT_READY)
+            }
+            WriteFailure::Refused(_) => false,
+        }
+    }
+
+    /// The message a user reads, naming the device, the offset and the size —
+    /// everything needed to find the write in the log.
+    pub fn into_error(self, path: &str, offset: u64, len: usize) -> OwnBackupError {
+        match self {
+            WriteFailure::Refused(msg) => {
+                OwnBackupError::Device(format!("write to {path} at {offset}: {msg}"))
+            }
+            WriteFailure::Win32(e) => OwnBackupError::Device(format!(
+                "WriteFile({path}) {len} bytes at {offset} failed: {e}"
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for WriteFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WriteFailure::Refused(m) => write!(f, "{m}"),
+            WriteFailure::Win32(e) => write!(f, "{e}"),
+        }
+    }
+}
+
 /// Parse a windowed partition source `part:<disk>:<offset>:<len>` into
 /// `(disk_number, offset_bytes, length_bytes)`.
 fn parse_partition_spec(device_path: &str) -> Option<(u32, u64, u64)> {
@@ -378,15 +438,29 @@ impl WinRawDevice {
     /// Write `data` at `offset`. Both must be sector-aligned; a write must not
     /// extend past the device end.
     pub fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()> {
+        self.try_write_at(offset, data).map_err(|f| f.into_error(&self.path, offset, data.len()))
+    }
+
+    /// The same write, with the Win32 error kept intact.
+    ///
+    /// Raw sector writes to a live disk fail for reasons that are worth telling
+    /// apart — a volume mounted itself on top of the sectors mid-write, the
+    /// partition has not appeared yet — and a caller that can do something about
+    /// those needs the code, not a sentence (see [`WriteFailure`]).
+    pub fn try_write_at(
+        &mut self,
+        offset: u64,
+        data: &[u8],
+    ) -> std::result::Result<(), WriteFailure> {
         let sector = self.sector_size as u64;
         if offset % sector != 0 || data.len() as u64 % sector != 0 {
-            return Err(OwnBackupError::Device(format!(
+            return Err(WriteFailure::Refused(format!(
                 "write of {} bytes at {offset} is not aligned to sector size {sector}",
                 data.len()
             )));
         }
         if offset + data.len() as u64 > self.length {
-            return Err(OwnBackupError::Device(format!(
+            return Err(WriteFailure::Refused(format!(
                 "write of {} bytes at {offset} exceeds device length {}",
                 data.len(),
                 self.length
@@ -396,10 +470,11 @@ impl WinRawDevice {
             return Ok(());
         }
 
-        let mut aligned = AlignedBuf::new(data.len(), self.sector_size as usize)?;
+        let mut aligned = AlignedBuf::new(data.len(), self.sector_size as usize)
+            .map_err(|e| WriteFailure::Refused(e.to_string()))?;
         aligned.as_mut_slice().copy_from_slice(data);
 
-        self.seek(offset)?;
+        self.seek(offset).map_err(|e| WriteFailure::Refused(e.to_string()))?;
         let mut written = 0u32;
         // SAFETY: buffer valid for data.len() bytes.
         unsafe {
@@ -410,17 +485,10 @@ impl WinRawDevice {
                 None,
             )
         }
-        .map_err(|e| {
-            OwnBackupError::Device(format!(
-                "WriteFile({}) {} bytes at {offset} failed: {e}",
-                self.path,
-                data.len()
-            ))
-        })?;
+        .map_err(WriteFailure::Win32)?;
         if (written as usize) != data.len() {
-            return Err(OwnBackupError::Device(format!(
-                "short write on {}: wanted {} wrote {written} at offset {offset}",
-                self.path,
+            return Err(WriteFailure::Refused(format!(
+                "short write: wanted {} wrote {written}",
                 data.len()
             )));
         }

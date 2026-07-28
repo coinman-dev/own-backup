@@ -8,10 +8,12 @@ pub mod checksum;
 pub mod decrypt;
 pub mod devio;
 pub mod exclusions;
+pub mod esp_fallback;
 pub mod ext_exclusions;
 pub mod ext_map;
 pub mod fat_exclusions;
 pub mod fat_map;
+pub mod fs_uuid;
 pub mod gpt_reader;
 pub mod gpt_writer;
 pub mod luks;
@@ -24,6 +26,7 @@ pub mod restore_map;
 pub mod san_policy;
 pub mod secrets;
 pub mod sidecar;
+pub mod table_merge;
 pub mod table_writer;
 pub mod used_sectors;
 pub mod vhdx_bat;
@@ -51,6 +54,8 @@ pub mod block_reader_win;
 pub mod disk_session_win;
 #[cfg(target_os = "windows")]
 pub mod engine_win;
+#[cfg(target_os = "windows")]
+pub mod esp_fallback_win;
 #[cfg(target_os = "windows")]
 pub mod exclusions_win;
 #[cfg(target_os = "windows")]

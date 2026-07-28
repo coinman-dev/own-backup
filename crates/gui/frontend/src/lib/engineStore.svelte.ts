@@ -60,8 +60,18 @@ async function pollDrives(): Promise<void> {
   }
 }
 
+/** A refresh asked for while another was already running. Enumeration goes
+ *  through PowerShell and takes seconds, and the one in flight may have started
+ *  *before* whatever changed the disks — so the request is remembered instead of
+ *  dropped. Dropping it is how a restore that repartitioned a disk left the map
+ *  showing the layout from before it. */
+let refreshAgain = false;
+
 export async function refreshVolumes(): Promise<void> {
-  if (engine.volumesLoading) return;
+  if (engine.volumesLoading) {
+    refreshAgain = true;
+    return;
+  }
   engine.volumesLoading = true;
   engine.volumesError = null;
   try {
@@ -96,6 +106,10 @@ export async function refreshVolumes(): Promise<void> {
     engine.volumesError = String(e);
   } finally {
     engine.volumesLoading = false;
+  }
+  if (refreshAgain) {
+    refreshAgain = false;
+    await refreshVolumes();
   }
 }
 

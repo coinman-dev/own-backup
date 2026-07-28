@@ -1511,16 +1511,34 @@ fn prepare_partition_map(
         return out;
     }
     if let Ok(mut m) = crate::btrfs_map::build_btrfs_used_map(src.as_mut(), block_size) {
-        // btrfs: CoW-safe file exclusions (Stage 1). Only extents PROVEN
-        // exclusively owned by matched files are zeroed + dropped; anything
-        // shared with a snapshot/reflink is kept. The checksum tree is patched
-        // for the zeroed ranges so the ghost data reads back cleanly. Catalog
-        // true-removal (Stage 2) is a follow-up.
+        // btrfs: CoW-safe file exclusions. Only extents PROVEN exclusively
+        // owned by matched files are zeroed + dropped; anything shared with a
+        // snapshot or a reflink is kept. Files whose extents are all private
+        // are removed from the FS tree outright (Stage 2).
+        //
+        // Stage 2 destroyed a copy once (2026-07-28): excluding dense subtrees
+        // (/proc, /sys, /dev, /run, /var/cache) emptied whole FS-tree leaves,
+        // which stayed in the tree with no items while their parents still
+        // pointed at them. The restored system aborted its first mount with
+        // `tree first key mismatch … has=(0,0,0)`; later, stale csum entries
+        // over freed extents corrupted the tree at first write. Three guards
+        // now stand in the way (FS-, extent- and csum-tree leaves: files whose
+        // removal would empty or overflow a leaf are spared to Stage 1), freed
+        // extents LOSE their csum entries (`btrfs_del_csums` contract), and if
+        // a leaf still breaks, the whole Stage 2 is discarded. A failed scan
+        // keeps every file — a bigger image is always better than a corrupt
+        // one.
         drop(src);
         let mut out = none("btrfs", None);
         if !patterns_linux.is_empty() {
             if let Ok(mut src2) = open() {
-                match crate::btrfs_exclusions::scan_btrfs_exclusions(src2.as_mut(), patterns_linux, tick) {
+                // `true` = Stage 2: excluded files are REALLY removed from the
+                // catalog (product requirement 2026-07-28, CLAUDE.md). The
+                // scanner spares anything it cannot remove safely (shared
+                // extents, hardlinks, leaf-breaking edits) down to Stage 1,
+                // and any Stage-2 failure keeps the whole volume on Stage 1 —
+                // see `scan_btrfs_exclusions`.
+                match crate::btrfs_exclusions::scan_btrfs_exclusions(src2.as_mut(), patterns_linux, true, tick) {
                     Ok(scan) => {
                         out.excluded_files = scan.files_excluded;
                         out.excluded_bytes = scan.bytes_excluded;

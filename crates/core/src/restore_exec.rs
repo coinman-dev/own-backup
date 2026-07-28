@@ -71,6 +71,28 @@ pub fn read_history(data_dir: &std::path::Path) -> Vec<RestoreRunState> {
         .unwrap_or_default()
 }
 
+/// Mark the run `plan_id` as read, in the history on disk.
+///
+/// Without this the report comes back from the history every time the restore
+/// page is opened, which reads as "it ran again". Returns whether an entry was
+/// found — a run that never reached the history (the service is still holding
+/// it) is not an error, and the caller marks its in-memory copy instead.
+pub fn acknowledge_in_history(data_dir: &std::path::Path, plan_id: uuid::Uuid) -> bool {
+    let path = data_dir.join(HISTORY_FILE);
+    let mut history = read_history(data_dir);
+    let Some(entry) = history.iter_mut().find(|r| r.plan_id == plan_id) else {
+        return false;
+    };
+    if entry.acknowledged {
+        return true;
+    }
+    entry.acknowledged = true;
+    if let Err(e) = write_history(&path, &history) {
+        warn!(path = %path.display(), error = %e, "could not record that the run was read");
+    }
+    true
+}
+
 fn write_history(path: &std::path::Path, history: &[RestoreRunState]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -152,6 +174,7 @@ pub fn initial_state(plan: &RestorePlan) -> RestoreRunState {
         // Nothing destructive has started yet, so a cancel now costs nothing.
         cancellable: true,
         follow_ups: Vec::new(),
+        acknowledged: false,
     }
 }
 
@@ -175,7 +198,51 @@ pub fn execute_plan(
     // checks: a plan can reach the service by a route that skipped the dry run.
     // The *disk* is no longer refused — a spare partition on it is an ordinary
     // target — only the partitions the system is standing on.
+    // Logged before anything happens, and in full. A restore is the one
+    // operation whose log has to survive the machine it ran on: if it goes
+    // wrong the disk may not boot, and this record is then the only account of
+    // what was written where.
+    info!(
+        plan = %plan.id,
+        target_disk = plan.target_disk,
+        image = %plan.image_path.display(),
+        ops = plan.ops.len(),
+        verify_after = plan.verify_after,
+        touches_table = plan.touches_partition_table(),
+        "=== restore plan starting ==="
+    );
+    for (n, op) in plan.ordered().iter().enumerate() {
+        match op.part() {
+            Some(p) => info!(
+                step = n,
+                kind = op.kind(),
+                part = p.index,
+                offset = p.offset,
+                size = p.size,
+                "plan step: {}",
+                op.title()
+            ),
+            None => info!(step = n, kind = op.kind(), "plan step: {}", op.title()),
+        }
+    }
+    if let Some(t) = plan.table() {
+        for line in own_backup_backup::table_merge::describe_table(t) {
+            info!(plan = %plan.id, "planned table: {line}");
+        }
+    }
+
+    // Asked once and kept: `system_disk_number` shells out to PowerShell, and
+    // the answer cannot change between these two uses of it.
+    let system_disk = own_backup_restore::system_disk_number();
+    let boot_media = own_backup_restore::is_boot_media();
     let protected = own_backup_restore::protected_partitions(plan.target_disk);
+    info!(
+        target_disk = plan.target_disk,
+        ?protected,
+        ?system_disk,
+        boot_media,
+        "restore target checked against the running system"
+    );
     if !protected.is_empty() {
         let touched = plan.touched_partitions();
         let hit: Vec<u32> = touched.iter().copied().filter(|i| protected.contains(i)).collect();
@@ -187,10 +254,26 @@ pub fn execute_plan(
             )));
         }
     }
-    let live_system = own_backup_restore::system_disk_number() == Some(plan.target_disk)
-        && !own_backup_restore::is_boot_media();
+    let live_system = system_disk == Some(plan.target_disk) && !boot_media;
 
     let sidecar = load_sidecar_of(&plan.image_path)?;
+    info!(
+        image = %plan.image_path.display(),
+        // Which build wrote this copy — the first thing worth knowing when a
+        // restore from it turns out badly.
+        made_by = %if sidecar.info.app_version.is_empty() {
+            "<до 0.1.1>".to_string()
+        } else {
+            format!("Own Backup {}", sidecar.info.app_version)
+        },
+        created = %sidecar.manifest.created_at,
+        block_size = sidecar.manifest.block_size,
+        blocks = sidecar.checksums.len(),
+        source_size = sidecar.manifest.source_disk.size_bytes,
+        whole_disk = sidecar.disk_manifest.is_some(),
+        data_offset = sidecar.info.volume_data_offset,
+        "copy opened"
+    );
     let mut state = initial_state(plan);
     on_update(&state);
 
@@ -200,6 +283,13 @@ pub fn execute_plan(
     // would take the disk offline for a plan that merely assigns a drive letter.
     let mut session = if plan.touches_partition_table() {
         let mut s = DiskSession::open(plan.target_disk, live_system)?;
+        info!(
+            disk = plan.target_disk,
+            live_system,
+            length = s.length(),
+            sector = s.sector_size(),
+            "disk session opened"
+        );
         s.take_offline()?;
         Some(s)
     } else {
@@ -230,6 +320,13 @@ pub fn execute_plan(
         state.ops[index].status = OpStatus::Running;
         state.cancellable = op.cancellable();
         on_update(&state);
+        info!(
+            step = index,
+            kind = op.kind(),
+            destroys_data = op.destroys_data(),
+            "restore operation starting: {}",
+            op.title()
+        );
 
         let outcome = run_op(op, plan, &sidecar, passphrases, session.as_mut(), cancel, &mut |percent, bytes| {
             state.ops[index].percent = percent;
@@ -243,7 +340,7 @@ pub fn execute_plan(
                 state.ops[index].percent = 100;
                 state.ops[index].message = note.message;
                 state.follow_ups.extend(note.follow_ups);
-                info!(op = %op.kind(), index, "restore operation done");
+                info!(op = %op.kind(), index, note = %state.ops[index].message, "restore operation done");
             }
             Err(e) => {
                 error!(op = %op.kind(), index, error = %e, "restore operation failed");
@@ -608,8 +705,22 @@ fn run_op(
                 )
             })?;
             let table = with_captured_gpt_fields(table, plan, sidecar);
-            session.write_partition_table(&table)?;
-            Ok(OpNote::default())
+            // Everything the plan is not acting on is a bystander: its GPT
+            // entry belongs to the disk, not to the designer.
+            let owned = plan.touched_partitions();
+            // A restore into an existing partition does not change the layout,
+            // and then the table is left exactly as it is. Saying so matters:
+            // "разметка перезаписана" in the report of a run that touched one
+            // spare partition is how a user concludes their disk was rebuilt.
+            if session.write_partition_table(&table, &owned)? {
+                Ok(OpNote::default())
+            } else {
+                Ok(OpNote {
+                    message: "Разметка уже соответствует плану — таблица разделов не менялась"
+                        .into(),
+                    follow_ups: Vec::new(),
+                })
+            }
         }
 
         RestoreOp::RestorePartition {
@@ -624,6 +735,22 @@ fn run_op(
                 offset: dst.offset,
                 size: dst.size,
             };
+            // Written down before the first byte goes out, not after the last:
+            // a log that only reports finished writes says nothing about the
+            // one that was in flight when the machine went down.
+            info!(
+                disk = plan.target_disk,
+                part = dst.index,
+                offset = dst.offset,
+                size = dst.size,
+                src_index,
+                wipe_free_space,
+                reencrypt,
+                "writing sectors into part:{}:{}:{}",
+                plan.target_disk,
+                dst.offset,
+                dst.size
+            );
             let opts = SectorRestoreOptions {
                 verify_checksums: true,
                 wipe_free_space: *wipe_free_space,
@@ -833,6 +960,23 @@ fn run_op(
                         .into(),
                 ],
             })
+        }
+
+        RestoreOp::EnsureFallbackBootloader { esp } => {
+            use own_backup_backup::esp_fallback_win::ensure_fallback_bootloader;
+            // Which partitions this run wrote: their filesystem UUIDs are what
+            // tells one bootloader directory on the ESP from another, and an
+            // ESP that has served a machine for years has several.
+            let restored: Vec<_> = plan
+                .ops
+                .iter()
+                .filter_map(|op| match op {
+                    RestoreOp::RestorePartition { dst, .. } => Some(*dst),
+                    _ => None,
+                })
+                .collect();
+            let outcome = ensure_fallback_bootloader(plan.target_disk, *esp, &restored)?;
+            Ok(OpNote { message: outcome.message, follow_ups: outcome.follow_ups })
         }
     }
 }

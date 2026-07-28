@@ -65,6 +65,9 @@ service BackupService {
   // take down the run that started after it. Refused outright while a
   // non-cancellable operation is in progress, rather than accepted and ignored.
   rpc CancelRestorePlan(IdRequest) returns (JsonReply);    // in: plan id -> { cancelled, reason }
+  // The user read the finished run's report and closed it. GetRestoreState
+  // stops returning it — the run stays in the history and in Activity.
+  rpc AckRestoreRun(IdRequest) returns (Empty);            // in: plan id
 
   // --- Arsenal Image Mounter driver (needed to mount qcow2 on Windows) ---
   // Install downloads Arsenal Recon's signed driver package from GitHub and
