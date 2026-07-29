@@ -60,6 +60,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# dm-crypt and btrfs are modules in the WSL2 kernel; mount/cryptsetup would
+# pull them in anyway, but a missing module is much clearer said out loud than
+# met as "unknown filesystem type".
+modprobe dm_crypt 2>/dev/null || true
+modprobe btrfs 2>/dev/null || true
+
 # --- Phase 0: the source disk becomes physically read-only ------------------
 echo "== источник: $SRC_DISK (только чтение)"
 blockdev --setro "$SRC_DISK"
@@ -71,7 +77,8 @@ for p in "$SRC_DISK"?*; do
     if cryptsetup isLuks "$p" 2>/dev/null; then SRC_PART="$p"; break; fi
 done
 if [[ -n $SRC_PART ]]; then
-    echo "   LUKS-раздел: $SRC_PART"
+    echo "   LUKS-раздел: $SRC_PART ($(blockdev --getsize64 "$SRC_PART" 2>/dev/null | numfmt --to=iec 2>/dev/null || echo '?'))"
+    echo "   сейчас будет запрошен пароль от контейнера — открывается ТОЛЬКО НА ЧТЕНИЕ"
     cryptsetup open --readonly "$SRC_PART" obk_src
     SRC_FS=/dev/mapper/obk_src
 else
