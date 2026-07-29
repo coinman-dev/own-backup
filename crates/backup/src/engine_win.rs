@@ -1499,7 +1499,11 @@ fn prepare_partition_map(
                         out.categories = Some(scan.categories);
                         out.patches = scan.patches;
                         if !scan.ranges.is_empty() {
-                            m.apply_excluded_ranges(&scan.ranges, block_size);
+                            // Only what Stage 2 actually freed leaves the image.
+                            // A zero-filled ghost keeps its blocks: the
+                            // filesystem still lists the file, so those sectors
+                            // must be restored as the zeros they became.
+                            m.apply_excluded_ranges(&scan.droppable, block_size);
                             out.zero_ranges = scan.ranges;
                         }
                     }
@@ -1545,7 +1549,12 @@ fn prepare_partition_map(
                         out.categories = Some(scan.categories);
                         out.patches = scan.patches;
                         if !scan.ranges.is_empty() {
-                            m.apply_excluded_ranges(&scan.ranges, block_size);
+                            // Stage-2 frees may be dropped; Stage-1 ghosts keep
+                            // their blocks — btrfs rewrote their checksums to
+                            // the checksum of zeros, so a restore that leaves
+                            // the target's old bytes there fails every read
+                            // (EIO) instead of returning an empty file.
+                            m.apply_excluded_ranges(&scan.droppable, block_size);
                             out.zero_ranges = scan.ranges;
                         }
                     }
@@ -1570,7 +1579,10 @@ fn prepare_partition_map(
                         out.excluded_bytes = scan.bytes_excluded;
                         out.categories = Some(scan.categories);
                         if !scan.ranges.is_empty() {
-                            m.apply_excluded_ranges(&scan.ranges, block_size);
+                            // xfs has no Stage 2: every excluded file stays in
+                            // the catalog, so its (zeroed) blocks stay in the
+                            // image — `droppable` is empty by construction.
+                            m.apply_excluded_ranges(&scan.droppable, block_size);
                             out.zero_ranges = scan.ranges;
                         }
                     }

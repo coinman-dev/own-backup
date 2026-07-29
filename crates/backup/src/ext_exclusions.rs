@@ -87,8 +87,15 @@ fn u32at(b: &[u8], o: usize) -> u64 {
 
 /// Result of an ext exclusion walk (mirrors [`crate::fat_exclusions::FatExclusionScan`]).
 pub struct ExtExclusionScan {
-    /// Excluded file data byte ranges (VOLUME-relative), for zeroing + used-map drop.
+    /// Excluded file data byte ranges (VOLUME-relative), zeroed in the image.
     pub ranges: ByteRanges,
+    /// The subset of [`Self::ranges`] that may also be DROPPED from the used
+    /// map — filled only when Stage 2 produced its patches, so the blocks are
+    /// free in the bitmaps too. When Stage 2 is skipped the files stay as
+    /// zero-filled ghosts, and a ghost's blocks must be STORED as zeros: drop
+    /// them and a restore leaves whatever the target disk held there, inside a
+    /// file the filesystem still lists.
+    pub droppable: ByteRanges,
     pub files_excluded: u64,
     pub entries_scanned: u64,
     pub bytes_excluded: u64,
@@ -103,6 +110,7 @@ impl ExtExclusionScan {
     fn empty() -> Self {
         Self {
             ranges: ByteRanges::new(),
+            droppable: ByteRanges::new(),
             files_excluded: 0,
             entries_scanned: 0,
             bytes_excluded: 0,
@@ -546,7 +554,15 @@ pub fn scan_ext_exclusions(
     // and keep Stage 1, so excluded files remain zero-filled ghosts rather than
     // risking an inconsistent image).
     match build_stage2_patches(vol, &sb, &coalesce, &freed_inodes, &freed_blocks, &dir_parents) {
-        Ok(patches) => scan.patches = patches,
+        Ok(patches) => {
+            scan.patches = patches;
+            // Stage 2 freed these blocks in the bitmaps, so nothing reads them
+            // any more and the image need not carry them.
+            for (s, e) in scan.ranges.iter() {
+                scan.droppable.add(s, e);
+            }
+            scan.droppable.finalize();
+        }
         Err(e) => warn!(error = %e, "ext exclusions: Stage-2 metadata removal skipped — keeping zero-filled ghosts"),
     }
     info!(

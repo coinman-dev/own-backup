@@ -133,8 +133,21 @@ impl CsumFlavor {
 /// Result of a btrfs exclusion walk (mirrors the ext4/FAT scan structs).
 pub struct BtrfsExclusionScan {
     /// PHYSICAL volume byte ranges of exclusively-owned excluded extents —
-    /// zeroed in the image and dropped from the used-map.
+    /// zeroed in the image.
     pub ranges: ByteRanges,
+    /// The subset of [`Self::ranges`] that may also be DROPPED from the used
+    /// map: extents Stage 2 actually freed, which the filesystem no longer
+    /// references.
+    ///
+    /// A Stage-1 ghost is not in here, and that distinction is the difference
+    /// between a working restore and a broken one. Its entry survives, and on
+    /// btrfs its checksums were rewritten to the checksum of zeros — so those
+    /// sectors MUST read back as zeros. Drop them from the map and they are
+    /// never stored, never written, and the restored filesystem reads whatever
+    /// the target disk happened to hold: checksum failure, EIO, and an apt that
+    /// cannot open its own cache. Kept in the map they cost nothing — an
+    /// all-zero block is a few bytes in qcow2 and an unallocated one in VHDX.
+    pub droppable: ByteRanges,
     pub files_excluded: u64,
     pub entries_scanned: u64,
     /// Bytes of excluded file data actually removed (exclusive extents only).
@@ -154,6 +167,7 @@ impl BtrfsExclusionScan {
     fn empty() -> Self {
         Self {
             ranges: ByteRanges::new(),
+            droppable: ByteRanges::new(),
             files_excluded: 0,
             entries_scanned: 0,
             bytes_excluded: 0,
@@ -1238,6 +1252,14 @@ pub fn scan_btrfs_exclusions(
         }
     }
     scan.ranges.finalize();
+    // Only what Stage 2 truly freed may leave the image; ghosts keep their
+    // (zeroed) blocks, because the filesystem still reads them.
+    for (start, end) in freed_logical.iter() {
+        for (phys, len) in fs.chunks.physical_spans(start, end)? {
+            scan.droppable.add(phys, phys + len);
+        }
+    }
+    scan.droppable.finalize();
 
     // 7. Superblock: decrement bytes_used, invalidate the free-space tree (the
     //    kernel rebuilds it on mount), fix csum on every mirror. ONLY when
@@ -2176,6 +2198,45 @@ mod btrfs_integration {
         let (scan, _) = run_scan(&img, &[]);
         assert_eq!(scan.files_excluded, 0);
         assert!(scan.ranges.is_empty());
+    }
+
+    /// A Stage-1 ghost's blocks must stay in the image; only what Stage 2 truly
+    /// freed may be dropped.
+    ///
+    /// This is the difference between an empty file and an unreadable one. A
+    /// ghost keeps its entry, and btrfs keeps a checksum for it — the checksum
+    /// of zeros. Drop its blocks from the used map and they are never stored,
+    /// so a restore writes nothing there and the filesystem reads whatever the
+    /// target disk held before: checksum failure, EIO. On a restored Kubuntu
+    /// that was apt, unable to open its own excluded .deb cache:
+    /// `E: Ошибка чтения - read (5: Ошибка ввода/вывода)`.
+    #[test]
+    fn a_stage1_ghost_keeps_its_blocks_in_the_image() {
+        let Some((img, _keep)) = make_btrfs() else {
+            eprintln!("mkfs.btrfs unavailable — skipping");
+            return;
+        };
+        // Stage 1 only: nothing is removed, so nothing may be dropped.
+        let f = std::fs::File::open(&img).unwrap();
+        let len = f.metadata().unwrap().len();
+        let mut vol = FileVol { f, len };
+        let pats = vec!["secret.log".to_string(), "cache".to_string()];
+        let scan = scan_btrfs_exclusions(&mut vol, &pats, false, |_| Ok(())).unwrap();
+        assert!(!scan.ranges.is_empty(), "ghost data is still zeroed");
+        assert!(
+            scan.droppable.is_empty(),
+            "ghost blocks were dropped from the image — the filesystem still reads them"
+        );
+
+        // Stage 2: the freed extents may go, and never more than was zeroed.
+        let (scan2, _) = run_scan(&img, &["secret.log", "cache"]);
+        assert!(!scan2.droppable.is_empty(), "stage 2 frees nothing?");
+        for (s, e) in scan2.droppable.iter() {
+            assert!(
+                scan2.ranges.covers(s, e),
+                "droppable range [{s},{e}) is not among the zeroed ones"
+            );
+        }
     }
 
     /// Forensic tool, not a test of our code: point it at a real btrfs image

@@ -381,6 +381,57 @@ fn wipe_gaps(
     Ok(wiped)
 }
 
+/// [`wipe_gaps`] for a container being re-encrypted: the zeros have to be
+/// *encrypted* zeros, or the plaintext there is noise.
+///
+/// This is not tidiness. A block whose every used cluster was excluded is
+/// dropped from the used map and never stored, yet the filesystem it belongs to
+/// still describes those sectors — on btrfs with the excluded file's checksums
+/// rewritten to the checksum of zeros. Leave the target's old ciphertext in
+/// place and the plaintext decrypts to noise, so the very first read of such a
+/// file fails its checksum:
+///
+/// ```text
+/// E: Ошибка чтения - read (5: Ошибка ввода/вывода)
+/// ```
+///
+/// which is how a restored Kubuntu's apt met the .deb files it had excluded.
+/// The plain sector path has wiped its gaps since D16; the encrypted path
+/// simply never did, and only an encrypted target could show it.
+#[allow(clippy::too_many_arguments)]
+fn wipe_gaps_encrypted(
+    dev: &mut TargetWriter,
+    covered: &mut Vec<(u64, u64)>,
+    payload_len: u64,
+    params: &crate::luks::LuksParams,
+    data_offset: u64,
+    cancel: &CancelToken,
+) -> Result<u64> {
+    let gaps = uncovered_ranges(covered, payload_len);
+    let mut wiped = 0u64;
+    let mut buf = vec![0u8; WIPE_CHUNK];
+    for (start, len) in gaps {
+        let mut written = 0u64;
+        while written < len {
+            if cancel.is_cancelled() {
+                debug!(wiped, "free-space wipe cancelled");
+                return Ok(wiped);
+            }
+            let chunk = ((len - written) as usize).min(WIPE_CHUNK);
+            let off = start + written;
+            // The tweak depends on the offset, so every chunk is encrypted
+            // where it lands — a cached ciphertext block would be wrong.
+            buf[..chunk].fill(0);
+            params.encrypt(off, &mut buf[..chunk])?;
+            dev.write_at(data_offset + off, &buf[..chunk])?;
+            written += chunk as u64;
+            wiped += chunk as u64;
+        }
+    }
+    debug!(bytes = wiped, "free space inside the container zeroed (encrypted)");
+    Ok(wiped)
+}
+
 // ---------------------------------------------------------------------------
 // Verification after a sector restore (R9, D10)
 // ---------------------------------------------------------------------------
@@ -635,6 +686,7 @@ pub fn restore_partition_encrypted(
 
     let mut image = ImageReadSource::open(image_path, &sidecar.info.container)?;
     let total = sidecar.checksums.len() as u64;
+    let mut covered: Vec<(u64, u64)> = Vec::new();
     let mut out = SectorRestoreSummary {
         blocks_restored: 0,
         bytes_restored: 0,
@@ -682,11 +734,19 @@ pub fn restore_partition_encrypted(
 
         out.blocks_restored += 1;
         out.bytes_restored += copy.slice_len as u64;
+        if opts.wipe_free_space {
+            covered.push((payload_off, copy.slice_len as u64));
+        }
         progress(&SectorRestoreProgress {
             blocks_done: out.blocks_restored,
             blocks_total: total,
             bytes_written: out.bytes_restored,
         })?;
+    }
+
+    if opts.wipe_free_space && !out.cancelled {
+        out.bytes_wiped =
+            wipe_gaps_encrypted(&mut dev, &mut covered, payload_len, &params, req.header.data_offset, cancel)?;
     }
 
     dev.flush()?;
@@ -697,6 +757,7 @@ pub fn restore_partition_encrypted(
         src_index,
         blocks = out.blocks_restored,
         bytes = out.bytes_restored,
+        wiped = out.bytes_wiped,
         cancelled = out.cancelled,
         secs = out.duration.as_secs(),
         "partition restored with its encryption intact"

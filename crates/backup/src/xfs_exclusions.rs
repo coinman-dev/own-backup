@@ -73,8 +73,13 @@ fn be64(b: &[u8], o: usize) -> u64 {
 /// Result of an xfs exclusion walk (Stage 1). `patches` is always empty — xfs
 /// Stage 1 edits no metadata.
 pub struct XfsExclusionScan {
-    /// PHYSICAL volume byte ranges of exclusive excluded extents (zero + drop).
+    /// PHYSICAL volume byte ranges of exclusive excluded extents — zeroed in
+    /// the image.
     pub ranges: ByteRanges,
+    /// Always empty on xfs: Stage 1 leaves every excluded file in the catalog,
+    /// so the filesystem still reads those blocks and they must be stored (as
+    /// zeros) rather than dropped. Kept for symmetry with the other scanners.
+    pub droppable: ByteRanges,
     pub files_excluded: u64,
     pub entries_scanned: u64,
     pub bytes_excluded: u64,
@@ -89,6 +94,7 @@ impl XfsExclusionScan {
     fn empty() -> Self {
         Self {
             ranges: ByteRanges::new(),
+            droppable: ByteRanges::new(),
             files_excluded: 0,
             entries_scanned: 0,
             bytes_excluded: 0,

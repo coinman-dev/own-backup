@@ -246,6 +246,15 @@ impl VhdxWriter {
             let take = std::cmp::min(self.block_size - in_block, data.len() as u64) as usize;
 
             let bi = bat_index(block, self.chunk_ratio) as usize;
+            // Zeros into a block nobody has touched cost a megabyte of file for
+            // nothing: an unallocated block already reads as zeros. This is what
+            // keeps excluded-file "ghosts" free — their blocks stay in the used
+            // map (the filesystem still reads them) but carry no data.
+            if self.bat[bi] == 0 && data[..take].iter().all(|&b| b == 0) {
+                off += take as u64;
+                data = &data[take..];
+                continue;
+            }
             if self.bat[bi] == 0 {
                 self.bat[bi] = self.next_data_off;
                 self.next_data_off += self.block_size;
