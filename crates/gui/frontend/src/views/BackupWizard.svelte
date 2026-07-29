@@ -460,16 +460,17 @@
   // Encrypted volumes shown in the password panel UNDER a disk: those already
   // selected, plus — when the disk is a bootable copy — any still-unselected
   // encrypted volume, so its Linux root can be decrypted and auto-included.
-  // Encrypted volumes we will actually have to READ — those, and only those,
-  // need a password. A bootable-copy disk used to demand one for every
-  // encrypted partition on it, including the ones the user had just unchecked:
-  // a 347 GiB BitLocker volume nobody asked to copy left "Дальше" greyed out
-  // with no way to proceed short of typing a password for data that was never
-  // going to be touched.
+  // Encrypted volumes to OFFER a password for. On a bootable-copy disk that is
+  // all of them: the system volume usually has to be unlocked before it can be
+  // recognised and chosen at all, so waiting for the user to tick it first
+  // would be backwards.
+  //
+  // Offering is not the same as requiring — see `encryptedBlocking`.
   function encryptedForDisk(d: DiskInfo): { device: string; label: string }[] {
+    const boot = isBootableCopy(d);
     return d.partitions
       .filter((p) => p.is_encrypted && partDevice(p))
-      .filter((p) => job.sources.includes(partDevice(p)!))
+      .filter((p) => boot || job.sources.includes(partDevice(p)!))
       .map((p) => {
         const dev = partDevice(p)!;
         const i = job.sources.indexOf(dev);
@@ -559,10 +560,17 @@
   // a disk marked "Загрузочная копия" — must be unlocked before leaving the
   // Source step. Otherwise an undecrypted LUKS root gives an incomplete
   // bootable copy, so "Далее" stays disabled until every shown lock is opened.
+  // Encrypted volumes that actually stand in the way: the ones this copy will
+  // read. A 347 GiB BitLocker volume the user unchecked used to hold "Дальше"
+  // greyed out on a bootable-copy disk, with no way forward but to type a
+  // password for data nobody was going to touch.
+  function encryptedBlocking(): { device: string; label: string }[] {
+    return engine.disks
+      .flatMap((d) => encryptedForDisk(d))
+      .filter(({ device }) => job.sources.includes(device));
+  }
   function allEncryptedDecrypted(): boolean {
-    return engine.disks.every((d) =>
-      encryptedForDisk(d).every(({ device }) => decryptedVolumes[device])
-    );
+    return encryptedBlocking().every(({ device }) => decryptedVolumes[device]);
   }
 
   // The source step is complete: a source is chosen, any encrypted volume is
@@ -574,9 +582,7 @@
     if (job.sources.length === 0) return 'Выберите том-источник';
     // Name the volume: "расшифруйте зашифрованный том" is no help at all when
     // the screen shows two of them and one is already unlocked.
-    const locked = engine.disks
-      .flatMap((d) => encryptedForDisk(d))
-      .find(({ device }) => !decryptedVolumes[device]);
+    const locked = encryptedBlocking().find(({ device }) => !decryptedVolumes[device]);
     if (locked) return `Введите пароль для тома «${locked.label}»`;
     if (!job.dest_folder.trim()) return 'Выберите папку назначения';
     return '';
