@@ -95,14 +95,19 @@ fi
 mount -o ro,norecovery,subvolid=5 "$SRC_FS" "$MNT_SRC" \
     || mount -o ro,subvolid=5 "$SRC_FS" "$MNT_SRC"
 
+# NOTE: no `-xdev`. Every btrfs subvolume has its own device id, so `-xdev`
+# stops dead at `@`, `@home`, `@swap` and the walk returns four directories —
+# which the comparison then reports as "0 differences". A verification that
+# silently checks nothing is worse than none at all; hence also the floor in
+# `require_plausible` below.
 manifest() { # $1 = mountpoint, $2 = output file
     local root="$1" out="$2"
-    ( cd "$root" && find . -xdev \( -type f -o -type l -o -type d \) -printf '%y\t%s\t%P\n' ) \
+    ( cd "$root" && find . \( -type f -o -type l -o -type d \) -printf '%y\t%s\t%P\n' ) \
         | LC_ALL=C sort -t$'\t' -k3 > "$out.meta"
     if [[ $FAST -eq 0 ]]; then
         # `hash<TAB>path`, sorted by path: sha256sum's own "hash  path" splits
         # on blanks, and half the paths on a Linux root have spaces in them.
-        ( cd "$root" && find . -xdev -type f -printf '%P\0' \
+        ( cd "$root" && find . -type f -printf '%P\0' \
             | xargs -0 -r -P 4 -n 64 sha256sum 2>/dev/null ) \
             | sed 's/^\([0-9a-f]\{64\}\)  /\1\t/' \
             | LC_ALL=C sort -t$'\t' -k2 > "$out.sha" || true
@@ -111,9 +116,21 @@ manifest() { # $1 = mountpoint, $2 = output file
     fi
 }
 
+# A Linux root has hundreds of thousands of entries. Anything near zero means
+# the walk never happened, and the verdict below would be a lie.
+require_plausible() { # $1 = count, $2 = what
+    if [[ $1 -lt 5000 ]]; then
+        echo
+        echo "!! в описи $2 всего $1 записей — обход не состоялся, сравнивать нечего."
+        echo "   (подтома не обошлись? не тот раздел? пустой образ?)"
+        exit 3
+    fi
+}
+
 echo "== снимаю опись источника (это долго: читается каждый файл)"
 manifest "$MNT_SRC" "$WORK/src"
 SRC_FILES=$(wc -l < "$WORK/src.meta")
+require_plausible "$SRC_FILES" "источника"
 umount "$MNT_SRC"
 [[ -n $SRC_PART ]] && cryptsetup close obk_src
 echo "   файлов/каталогов: $SRC_FILES"
@@ -146,13 +163,15 @@ fi
 echo "   btrfs в копии: смещение $OFF, длина $LEN"
 
 echo "== структурные проверки копии"
-btrfs check --readonly --check-data-csum "$RAW" 2>&1 | tail -3 || true
+btrfs check --readonly --check-data-csum "$RAW" 2>&1 \
+    | grep -aiE "no error found|ERROR|WARNING|corrupt" | head -5 || true
 
 mount -o ro,loop,offset=$OFF,sizelimit=$LEN,subvolid=5 "$RAW" "$MNT_COPY"
 echo "== снимаю опись копии"
 manifest "$MNT_COPY" "$WORK/copy"
 COPY_FILES=$(wc -l < "$WORK/copy.meta")
 echo "   файлов/каталогов: $COPY_FILES"
+require_plausible "$COPY_FILES" "копии"
 
 # --- Phase 3: compare -------------------------------------------------------
 echo
