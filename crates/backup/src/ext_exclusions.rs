@@ -471,10 +471,14 @@ pub fn scan_ext_exclusions(
     }
 
     // Phase 2 — decide: which matched inodes may ACTUALLY be removed.
-    let removable = decide_removable(vol, &sb, &col);
-    let spared = col.matched_inodes.len() - removable.len();
-    if spared > 0 {
-        info!(spared, "ext exclusions: файлы оставлены целиком (hardlink/чужой xattr-блок)");
+    let (removable, zeroable) = decide_removable(vol, &sb, &col);
+    let kept_whole = col
+        .matched_inodes
+        .keys()
+        .filter(|ino| !zeroable.contains(ino) && !removable.contains(ino))
+        .count();
+    if kept_whole > 0 {
+        info!(kept_whole, "ext exclusions: файлы оставлены целиком (уцелевшая жёсткая ссылка)");
     }
 
     // Phase 3 — emit: Stage-1 ranges + the Stage-2 work lists.
@@ -484,18 +488,25 @@ pub fn scan_ext_exclusions(
     // Surviving parent directories that lost a subdirectory (their link count
     // must drop by one per removed subdir).
     let mut dir_parents: Vec<u32> = Vec::new();
+    // Data ranges of the files that are actually REMOVED — the only ones whose
+    // blocks may leave the image. A file we merely emptied still owns its
+    // blocks, and the filesystem still reads them.
+    let mut freed_ranges = ByteRanges::new();
     for (&ino, inode) in &col.matched_inodes {
-        if !removable.contains(&ino) {
+        let remove = removable.contains(&ino);
+        if !remove && !zeroable.contains(&ino) {
             continue;
         }
         let mode = u16at(inode, 0x00) as u16 & S_IFMT;
         let is_dir = mode == S_IFDIR;
         let size = u32at(inode, 0x04) | (u32at(inode, 0x6C) << 32);
         // The xattr block goes with the inode (sole ownership proven in
-        // phase 2) — left behind it would sit marked used with no owner.
+        // phase 2) — left behind it would sit marked used with no owner. It
+        // goes ONLY with a removal: an emptied file keeps its attributes.
         let file_acl = u32at(inode, 0x68) | (u16at(inode, 0x76) << 32);
-        if file_acl != 0 {
+        if remove && file_acl != 0 {
             scan.ranges.add(file_acl * sb.fs_block, (file_acl + 1) * sb.fs_block);
+            freed_ranges.add(file_acl * sb.fs_block, (file_acl + 1) * sb.fs_block);
             freed_blocks.push(file_acl);
         }
         // Whether i_block holds a block map at all. Only regular files,
@@ -513,13 +524,19 @@ pub fn scan_ext_exclusions(
         if has_block_map {
             let extents = inode_extents(vol, &sb, inode)?;
             for e in &extents {
-                scan.ranges.add(e.first * sb.fs_block, (e.first + e.count) * sb.fs_block);
-                for b in e.first..e.first + e.count {
-                    freed_blocks.push(b);
+                let (from, to) = (e.first * sb.fs_block, (e.first + e.count) * sb.fs_block);
+                scan.ranges.add(from, to);
+                if remove {
+                    freed_ranges.add(from, to);
+                    for b in e.first..e.first + e.count {
+                        freed_blocks.push(b);
+                    }
                 }
             }
         }
-        freed_inodes.push((ino, is_dir));
+        if remove {
+            freed_inodes.push((ino, is_dir));
+        }
         scan.files_excluded += 1;
         if !is_dir {
             scan.bytes_excluded += size;
@@ -546,6 +563,7 @@ pub fn scan_ext_exclusions(
     }
 
     scan.ranges.finalize();
+    freed_ranges.finalize();
     if scan.files_excluded == 0 {
         return Ok(scan);
     }
@@ -556,9 +574,10 @@ pub fn scan_ext_exclusions(
     match build_stage2_patches(vol, &sb, &coalesce, &freed_inodes, &freed_blocks, &dir_parents) {
         Ok(patches) => {
             scan.patches = patches;
-            // Stage 2 freed these blocks in the bitmaps, so nothing reads them
-            // any more and the image need not carry them.
-            for (s, e) in scan.ranges.iter() {
+            // Only what Stage 2 freed in the bitmaps: an emptied file still
+            // owns its blocks and the filesystem still reads them, so those
+            // stay in the image (as zeros).
+            for (s, e) in freed_ranges.iter() {
                 scan.droppable.add(s, e);
             }
             scan.droppable.finalize();
@@ -705,8 +724,21 @@ fn collect_tree(
 /// A shared xattr block (refcount > 1) also spares its file — decrementing the
 /// refcount is a patch this pass does not carry yet (plan P8), and excluding
 /// less is always safe.
-fn decide_removable(vol: &mut dyn RawVolume, sb: &Sb, col: &Collected) -> HashSet<u32> {
+/// Returns `(removable, zeroable)`.
+///
+/// `zeroable` is the wider set, and the difference matters: a file we cannot
+/// REMOVE (its xattr block is shared with another inode) we can still EMPTY,
+/// and until this split existed such a file kept its contents in the copy —
+/// the exclusion quietly did nothing for it. The one file that must keep its
+/// data is a hard link with a name that was not excluded: zeroing it would
+/// empty an innocent path.
+fn decide_removable(
+    vol: &mut dyn RawVolume,
+    sb: &Sb,
+    col: &Collected,
+) -> (HashSet<u32>, HashSet<u32>) {
     let mut removable: HashSet<u32> = HashSet::new();
+    let mut zeroable: HashSet<u32> = HashSet::new();
     for (&ino, inode) in &col.matched_inodes {
         // Never touch the reserved metadata inodes (unreachable — guard).
         if ino < EXT_FIRST_USER_INO && ino != ROOT_INO {
@@ -721,10 +753,13 @@ fn decide_removable(vol: &mut dyn RawVolume, sb: &Sb, col: &Collected) -> HashSe
             if links > hits {
                 continue; // a name survives somewhere — keep the whole file
             }
+            // Every name of it is excluded, so its data blocks are ours to
+            // empty even if the entry has to stay.
+            zeroable.insert(ino);
         }
         let file_acl = u32at(inode, 0x68) | (u16at(inode, 0x76) << 32);
         if file_acl != 0 && !xattr_block_is_private(vol, sb, file_acl) {
-            continue;
+            continue; // shared xattr block: the file stays, its data does not
         }
         removable.insert(ino);
     }
@@ -740,7 +775,8 @@ fn decide_removable(vol: &mut dyn RawVolume, sb: &Sb, col: &Collected) -> HashSe
             break;
         }
     }
-    removable
+    zeroable.extend(removable.iter().copied());
+    (removable, zeroable)
 }
 
 /// True when `file_acl` points at a valid xattr block owned by exactly one
@@ -1617,6 +1653,75 @@ mod ext_integration {
         assert!(root.contains("tmp"), "/tmp must survive:\n{root}");
         let inside = debugfs_r(&patched, "ls /tmp");
         assert!(!inside.contains("junk"), "contents must be gone:\n{inside}");
+    }
+
+    /// A file we cannot remove must still lose its data.
+    ///
+    /// An inode sharing its xattr block with another one cannot be freed — the
+    /// block's refcount would need decrementing, which this pass does not do.
+    /// It used to be kept whole, contents and all, so the exclusion silently
+    /// did nothing for it. Now its data is zeroed and only the entry remains.
+    #[test]
+    fn a_file_that_cannot_be_removed_is_still_emptied() {
+        if !have_tool("debugfs") || !have_tool("e2fsck") {
+            eprintln!("debugfs/e2fsck unavailable — skipping");
+            return;
+        }
+        let Some((img, keep)) = make_ext4_from(4096, |src| {
+            std::fs::create_dir_all(src.join("cache")).unwrap();
+            std::fs::write(src.join("cache/shared_xattr.bin"), vec![0xAB; 8192]).unwrap();
+            std::fs::write(src.join("cache/plain.bin"), vec![0xAB; 8192]).unwrap();
+            std::fs::write(src.join("keep.txt"), vec![0xCD; 4096]).unwrap();
+        }) else {
+            return;
+        };
+        // Give the file an xattr block and then claim it is shared, which is
+        // what a second owner would look like from here.
+        let big = "A".repeat(300);
+        debugfs_w(&img, &format!("ea_set /cache/shared_xattr.bin user.big {big}\n"));
+        let stat = debugfs_r(&img, "stat /cache/shared_xattr.bin");
+        let acl: u64 = stat
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("File ACL: "))
+            .and_then(|s| s.split_whitespace().next())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        if acl == 0 {
+            eprintln!("xattr stayed in-inode — skipping");
+            return;
+        }
+        // h_refcount lives at offset 4 of the xattr block: make it 2.
+        let mut data = std::fs::read(&img).unwrap();
+        let off = (acl * 4096 + 4) as usize;
+        data[off..off + 4].copy_from_slice(&2u32.to_le_bytes());
+        std::fs::write(&img, &data).unwrap();
+
+        let (scan, _) = run_scan(&img, &["cache"]);
+        // Both files lose their data…
+        let zeroed: u64 = scan.ranges.iter().map(|(s, e)| e - s).sum();
+        assert!(zeroed >= 16384, "оба файла должны быть обнулены, обнулено {zeroed} Б");
+        // …but only the removable one's blocks may leave the image.
+        let droppable: u64 = scan.droppable.iter().map(|(s, e)| e - s).sum();
+        assert!(
+            droppable < zeroed,
+            "блоки пощажённого файла нельзя выбрасывать из образа: {droppable} из {zeroed}"
+        );
+
+        // The doctored refcount leaves the xattr block's own checksum stale, so
+        // this fixture is not fsck-clean to begin with. What must hold is that
+        // our patches add nothing to that list.
+        let complaints = |log: &str| log.lines().filter(|l| l.contains("Fix?")).count();
+        let (_, before) = fsck_ro(&img);
+        let patched = keep.path().join("patched.img");
+        apply_patches(&img, &scan, &patched);
+        let (_, after) = fsck_ro(&patched);
+        assert_eq!(
+            complaints(&after),
+            complaints(&before),
+            "патчи добавили замечаний e2fsck:\nбыло:\n{before}\nстало:\n{after}"
+        );
+        let ls = debugfs_r(&patched, "ls -l /cache");
+        assert!(ls.contains("shared_xattr.bin"), "запись пощажённого файла должна остаться:\n{ls}");
     }
 
     /// An unreplayed journal makes both products liars: the on-disk structures
