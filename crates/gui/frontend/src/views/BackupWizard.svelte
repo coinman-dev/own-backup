@@ -460,11 +460,16 @@
   // Encrypted volumes shown in the password panel UNDER a disk: those already
   // selected, plus — when the disk is a bootable copy — any still-unselected
   // encrypted volume, so its Linux root can be decrypted and auto-included.
+  // Encrypted volumes we will actually have to READ — those, and only those,
+  // need a password. A bootable-copy disk used to demand one for every
+  // encrypted partition on it, including the ones the user had just unchecked:
+  // a 347 GiB BitLocker volume nobody asked to copy left "Дальше" greyed out
+  // with no way to proceed short of typing a password for data that was never
+  // going to be touched.
   function encryptedForDisk(d: DiskInfo): { device: string; label: string }[] {
-    const boot = isBootableCopy(d);
     return d.partitions
       .filter((p) => p.is_encrypted && partDevice(p))
-      .filter((p) => boot || job.sources.includes(partDevice(p)!))
+      .filter((p) => job.sources.includes(partDevice(p)!))
       .map((p) => {
         const dev = partDevice(p)!;
         const i = job.sources.indexOf(dev);
@@ -567,7 +572,12 @@
   }
   function nextHint(): string {
     if (job.sources.length === 0) return 'Выберите том-источник';
-    if (!allEncryptedDecrypted()) return 'Сначала расшифруйте зашифрованный том';
+    // Name the volume: "расшифруйте зашифрованный том" is no help at all when
+    // the screen shows two of them and one is already unlocked.
+    const locked = engine.disks
+      .flatMap((d) => encryptedForDisk(d))
+      .find(({ device }) => !decryptedVolumes[device]);
+    if (locked) return `Введите пароль для тома «${locked.label}»`;
     if (!job.dest_folder.trim()) return 'Выберите папку назначения';
     return '';
   }
@@ -577,7 +587,7 @@
     // A run needs every encrypted source unlocked first — the password is
     // stored (and verified) when the user clicks "Расшифровать".
     if (run && !allEncryptedDecrypted()) {
-      error = 'Сначала расшифруйте выбранный зашифрованный том.';
+      error = nextHint() || 'Сначала расшифруйте выбранный зашифрованный том.';
       step = 0;
       return;
     }
