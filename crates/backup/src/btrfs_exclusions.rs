@@ -340,6 +340,11 @@ struct EditSet {
     /// (callers pre-spare files so it never comes to that). Trimming/splitting
     /// an existing item is delete + insert(s) with the derived keys.
     inserts: BTreeMap<u64, Vec<(Key, Vec<u8>)>>,
+    /// Leaves we intend to UNLINK from their parent once they end up empty,
+    /// instead of sparing a file to keep them alive. Advisory: `finalize`
+    /// checks reality and refuses if a leaf marked here is not actually empty,
+    /// because its tree block's extent has already been freed by then.
+    drop_leaves: HashSet<u64>,
     /// child logical → (parent internal-node logical, slot) — for key cascade.
     parent: HashMap<u64, (u64, usize)>,
     /// Roots whose parent linkage has been learned. A node missing from
@@ -357,6 +362,7 @@ impl EditSet {
             deletes: BTreeMap::new(),
             patches: BTreeMap::new(),
             inserts: BTreeMap::new(),
+            drop_leaves: HashSet::new(),
             parent: HashMap::new(),
             roots: HashSet::new(),
         }
@@ -458,11 +464,21 @@ impl EditSet {
             // reaching here means it missed a case, and being loud about it is
             // the point.
             if new_first.is_none() {
-                return Err(bad(format!(
-                    "удаление опустошило бы лист дерева (logical {leaf}) — \
-                     родитель остался бы со ссылкой на пустой узел; \
-                     исключения не применяются"
-                )));
+                // An emptied leaf may not be left behind: its parent still
+                // points at it, and btrfs reads the first key of an empty leaf
+                // as (0,0,0) — `tree first key mismatch`, transaction aborted.
+                // Either it was planned for removal, or something predicted
+                // wrong and the whole of Stage 2 is refused.
+                if !self.drop_leaves.contains(&leaf) {
+                    return Err(bad(format!(
+                        "удаление опустошило бы лист дерева (logical {leaf}) — \
+                         родитель остался бы со ссылкой на пустой узел; \
+                         исключения не применяются"
+                    )));
+                }
+                self.nodes.insert(leaf, node);
+                self.unlink_child(vol, fs, leaf)?;
+                continue;
             }
             self.nodes.insert(leaf, node);
             if new_first != old_first {
@@ -471,6 +487,23 @@ impl EditSet {
                 }
             }
         }
+        // A leaf whose extent we already freed but which did NOT end up empty
+        // would be a live tree block sitting in free space. Nothing salvages
+        // that halfway, so the whole edit set goes.
+        for leaf in &self.drop_leaves {
+            let empty = self
+                .nodes
+                .get(leaf)
+                .map(|n| u32at(n, 0x60) == 0)
+                .unwrap_or(false);
+            if !empty {
+                return Err(bad(format!(
+                    "лист {leaf} планировался к удалению, но остался непустым — \
+                     исключения не применяются"
+                )));
+            }
+        }
+
         // 2. Recompute checksums + emit physical patches for every touched node.
         let mut out = Vec::new();
         for (logical, mut node) in std::mem::take(&mut self.nodes) {
@@ -552,6 +585,79 @@ impl EditSet {
             node[data_end..data_end + data.len()].copy_from_slice(data);
         }
         node[0x60..0x64].copy_from_slice(&(kept.len() as u32).to_le_bytes());
+        Ok(())
+    }
+
+    /// May this leaf be unlinked instead of costing a spared file?
+    ///
+    /// Only if its parent keeps at least one child — counting the siblings
+    /// already promised to other drops. A parent that would itself empty is a
+    /// second unlink one level up, and that is not what this pass does; there
+    /// the old answer still applies, spare a file and let the leaf live.
+    fn try_drop_leaf(&mut self, vol: &mut dyn RawVolume, fs: &Fs, leaf: u64) -> Result<bool> {
+        if self.drop_leaves.contains(&leaf) {
+            return Ok(true);
+        }
+        let Some(&(parent, _)) = self.parent.get(&leaf) else {
+            return Ok(false); // a tree root has nothing to be unlinked from
+        };
+        let node = read_node(vol, &fs.chunks, parent, self.nodesize)?;
+        let nritems = u32at(&node, 0x60) as usize;
+        let mut alive = 0usize;
+        for i in 0..nritems {
+            let child = u64at(&node, HEADER + i * 33 + 17);
+            if child != leaf && !self.drop_leaves.contains(&child) {
+                alive += 1;
+            }
+        }
+        if alive == 0 {
+            return Ok(false);
+        }
+        self.drop_leaves.insert(leaf);
+        Ok(true)
+    }
+
+    /// Remove an empty leaf from its parent: drop the parent's key_ptr slot,
+    /// shift the rest down, and cascade if the parent's own first key moved.
+    ///
+    /// The parent keeping at least one child is decided before any of this, in
+    /// `plan_leaf_drops` — a parent that would itself empty is not a case this
+    /// handles, and reaching it means the plan was wrong.
+    fn unlink_child(&mut self, vol: &mut dyn RawVolume, fs: &Fs, child_logical: u64) -> Result<()> {
+        let Some(&(parent, slot)) = self.parent.get(&child_logical) else {
+            return Err(bad(format!("нечего отвязывать: у узла {child_logical} нет родителя")));
+        };
+        let nodesize = self.nodesize as usize;
+        let node = self.node_mut(vol, fs, parent)?;
+        let nritems = u32at(node, 0x60) as usize;
+        if slot >= nritems {
+            return Err(bad(format!("слот {slot} вне узла {parent} ({nritems} детей)")));
+        }
+        if nritems <= 1 {
+            return Err(bad(format!("узел {parent} остался бы без детей")));
+        }
+        // key_ptr entries are 33 bytes: key(17) + blockptr(8) + generation(8).
+        let from = HEADER + (slot + 1) * 33;
+        let to = HEADER + slot * 33;
+        let end = HEADER + nritems * 33;
+        node.copy_within(from..end, to);
+        node[end - 33..end].fill(0);
+        node[0x60..0x64].copy_from_slice(&((nritems - 1) as u32).to_le_bytes());
+        debug_assert!(end <= nodesize);
+        let first = read_key(node, HEADER);
+        // Everything below this slot moved up one place, so the parent map is
+        // stale for those children — and a later unlink would target the wrong
+        // slot. Fix it here rather than let it bite two calls from now.
+        let moved: Vec<(u64, usize)> = (slot..nritems - 1)
+            .map(|i| (u64at(node, HEADER + i * 33 + 17), i))
+            .collect();
+        for (child, i) in moved {
+            self.parent.insert(child, (parent, i));
+        }
+        self.parent.remove(&child_logical);
+        if slot == 0 {
+            self.cascade_key(vol, fs, parent, first)?;
+        }
         Ok(())
     }
 
@@ -1201,16 +1307,33 @@ pub fn scan_btrfs_exclusions(
     // not, the set still violates "a directory goes only with everything inside
     // it", which is the invariant whose breach `btrfs check` once counted 608
     // times. Stopping quietly after N rounds would ship exactly that.
+    // The parent linkage of every tree we might unlink a leaf from has to be
+    // known BEFORE the guards run: "may this leaf go?" is a question about its
+    // parent.
+    let mut edits = EditSet::new(fs.nodesize);
+    if remove_entries {
+        for sv in &subvols {
+            edits.learn_parents(vol, &fs, sv.root)?;
+        }
+        if let Some(&extent_root) = fs.tree_roots.get(&crate::btrfs_map::EXTENT_TREE_OBJECTID) {
+            edits.learn_parents(vol, &fs, extent_root)?;
+        }
+        if let Some(&csum_root) = fs.tree_roots.get(&CSUM_TREE_OBJECTID) {
+            edits.learn_parents(vol, &fs, csum_root)?;
+        }
+    }
+
     const MAX_ROUNDS: u32 = 64;
     let mut spared = 0u64;
     let mut settled = false;
     for _ in 0..MAX_ROUNDS {
-        let a = spare_inodes_that_would_empty_a_leaf(vol, &fs, &subvols, &mut removable)?;
-        let b = spare_files_whose_extents_would_empty_a_leaf(vol, &fs, &mut removable, &file_extents)?;
-        let c = spare_files_whose_csum_edits_break_a_leaf(vol, &fs, &mut removable, &file_extents)?;
+        let a = spare_inodes_that_would_empty_a_leaf(vol, &fs, &subvols, &mut removable, &mut edits)?;
+        let b = spare_files_whose_extents_would_empty_a_leaf(vol, &fs, &mut removable, &file_extents, &mut edits)?;
+        let c = spare_files_whose_csum_edits_break_a_leaf(vol, &fs, &mut removable, &file_extents, &mut edits)?;
         let d = spare_parents_of_spared_children(&subvols, &mut removable);
+        let e = undrop_leaves_we_cannot_free(vol, &fs, &mut edits)?;
         spared += a + b + c + d;
-        if a + b + c + d == 0 {
+        if a + b + c + d + e == 0 {
             settled = true;
             break;
         }
@@ -1223,17 +1346,17 @@ pub fn scan_btrfs_exclusions(
     if spared > 0 {
         info!(spared, "btrfs exclusions: файлы оставлены в дереве ради целостности листов");
     }
-    let mut edits = EditSet::new(fs.nodesize);
     let mut freed_logical = ByteRanges::new();
     // Stage 2 removes entries; Stage 1 only zeroes data. They are separate
     // promises, and the weaker one must survive the stronger one failing —
     // including the walk's file-type breakdown, which belongs to neither and
     // was lost with the whole scan the first time this could fail.
     let mut removed_bytes = 0u64;
+    let mut freed_meta = 0u64;
     let stage2 = if remove_entries {
         apply_stage2(
             vol, &fs, &subvols, &removable, &file_extents, &file_sizes,
-            &mut edits, &mut freed_logical, &mut removed_bytes,
+            &mut edits, &mut freed_logical, &mut removed_bytes, &mut freed_meta,
         )
     } else {
         // Stage 1 only: nothing is removed, so nothing falls back — every
@@ -1254,6 +1377,7 @@ pub fn scan_btrfs_exclusions(
             );
             edits = EditSet::new(fs.nodesize);
             freed_logical = ByteRanges::new();
+            freed_meta = 0;
             removable.clear();
         }
     }
@@ -1378,7 +1502,7 @@ pub fn scan_btrfs_exclusions(
     //    Stage 2 actually freed extents: Stage 1 changes no allocation, so
     //    bytes_used is right and the free-space tree is still valid — patching
     //    the superblocks then would be a gratuitous edit of foreign metadata.
-    let freed_bytes: u64 = freed_logical.iter().map(|(s, e)| e - s).sum();
+    let freed_bytes: u64 = freed_logical.iter().map(|(s, e)| e - s).sum::<u64>() + freed_meta;
     scan.patches = edits.finalize(vol, &fs)?;
     if freed_bytes > 0 {
         patch_superblocks(vol, &fs, freed_bytes, &mut scan.patches)?;
@@ -1420,6 +1544,7 @@ fn spare_inodes_that_would_empty_a_leaf(
     fs: &Fs,
     subvols: &[Subvol],
     removable: &mut HashSet<(u64, u64)>,
+    edits: &mut EditSet,
 ) -> Result<u64> {
     let mut spared = 0u64;
     for sv in subvols {
@@ -1469,6 +1594,10 @@ fn spare_inodes_that_would_empty_a_leaf(
                 continue; // something survives in this leaf — nothing to do
             }
             let Some(inodes) = blamed.get(&leaf) else { continue };
+            // Better than sparing anything: take the leaf out of the tree.
+            if edits.try_drop_leaf(vol, fs, leaf)? {
+                continue;
+            }
             if inodes.iter().any(|i| kept.contains(i)) {
                 continue; // a file we already spared holds this leaf open
             }
@@ -1538,6 +1667,7 @@ fn spare_files_whose_extents_would_empty_a_leaf(
     fs: &Fs,
     removable: &mut HashSet<(u64, u64)>,
     file_extents: &HashMap<(u64, u64), Vec<DataRef>>,
+    edits: &mut EditSet,
 ) -> Result<u64> {
     // bytenr → the files that would free it.
     let mut owners: HashMap<u64, HashSet<(u64, u64)>> = HashMap::new();
@@ -1585,6 +1715,9 @@ fn spare_files_whose_extents_would_empty_a_leaf(
             continue;
         }
         let Some(files) = blamed.get(&leaf) else { continue };
+        if edits.try_drop_leaf(vol, fs, leaf)? {
+            continue;
+        }
         if files.iter().any(|f| kept.contains(f)) {
             continue; // already held open by a file spared for another leaf
         }
@@ -1614,6 +1747,7 @@ fn spare_files_whose_csum_edits_break_a_leaf(
     fs: &Fs,
     removable: &mut HashSet<(u64, u64)>,
     file_extents: &HashMap<(u64, u64), Vec<DataRef>>,
+    edits: &mut EditSet,
 ) -> Result<u64> {
     let Some(&csum_root) = fs.tree_roots.get(&CSUM_TREE_OBJECTID) else {
         return Ok(0);
@@ -1637,6 +1771,7 @@ fn spare_files_whose_csum_edits_break_a_leaf(
     let ss = fs.sectorsize;
 
     let mut to_spare: HashSet<(u64, u64)> = HashSet::new();
+    let mut emptying: Vec<(u64, Vec<(u64, u64)>)> = Vec::new();
     walk_tree(vol, &fs.chunks, csum_root, fs.nodesize, |node, nritems| {
         let leaf = u64at(node, 0x30);
         let mut items_after = 0u64;
@@ -1680,6 +1815,13 @@ fn spare_files_whose_csum_edits_break_a_leaf(
             items_after += segs as u64;
             bytes_after += segs * 25 + (seg_secs * 4) as usize;
         }
+        if touched && items_after == 0 {
+            // An emptied csum leaf can be unlinked; only overflow still costs a
+            // spared file. Recorded here and decided after the walk, which
+            // holds `vol` for the duration.
+            emptying.push((leaf, blamed.iter().copied().collect::<Vec<_>>()));
+            return Ok(());
+        }
         if touched && (items_after == 0 || HEADER + bytes_after > fs.nodesize as usize) {
             // One file kept back leaves a csum item in the leaf, and the leaf
             // survives; the rest of its files are still removed. This is the
@@ -1702,6 +1844,20 @@ fn spare_files_whose_csum_edits_break_a_leaf(
         }
         Ok(())
     })?;
+    for (leaf, blamed) in emptying {
+        if edits.try_drop_leaf(vol, fs, leaf)? {
+            continue;
+        }
+        if blamed.iter().any(|f| to_spare.contains(f)) {
+            continue;
+        }
+        let mut sorted = blamed;
+        sorted.sort_unstable();
+        if let Some(&who) = sorted.first() {
+            warn!(leaf, "btrfs exclusions: лист дерева сумм опустел бы — один файл оставлен");
+            to_spare.insert(who);
+        }
+    }
     let mut spared = 0u64;
     for who in to_spare {
         if removable.remove(&who) {
@@ -1709,6 +1865,90 @@ fn spare_files_whose_csum_edits_break_a_leaf(
         }
     }
     Ok(spared)
+}
+
+/// Take back any planned leaf removal we cannot actually pay for.
+///
+/// Unlinking a leaf means freeing its tree block, and that is only ours to free
+/// when nothing else holds it. A btrfs snapshot shares tree blocks with the
+/// subvolume it was taken from until one of them is written to, so an FS-tree
+/// leaf can easily belong to two trees at once — its extent item then says
+/// `refs > 1`, or carries a SHARED_BLOCK_REF. Freeing that would delete a leaf
+/// out from under the snapshot.
+///
+/// The other refusal is the familiar one: if removing those extent items would
+/// empty an extent-tree leaf, we are back where we started, so the drop is
+/// cancelled and the guards spare a file next round instead.
+fn undrop_leaves_we_cannot_free(
+    vol: &mut dyn RawVolume,
+    fs: &Fs,
+    edits: &mut EditSet,
+) -> Result<u64> {
+    const METADATA_ITEM: u8 = 169;
+    const TREE_BLOCK_REF: u8 = 176;
+    const SHARED_BLOCK_REF: u8 = 182;
+
+    let drops: HashSet<u64> = edits.drop_leaves.clone();
+    if drops.is_empty() {
+        return Ok(0);
+    }
+    let extent_root = *fs
+        .tree_roots
+        .get(&crate::btrfs_map::EXTENT_TREE_OBJECTID)
+        .ok_or_else(|| bad("no extent tree root"))?;
+
+    let mut exclusive: HashMap<u64, bool> = drops.iter().map(|&b| (b, false)).collect();
+    let mut total: HashMap<u64, u64> = HashMap::new();
+    let mut doomed: HashMap<u64, u64> = HashMap::new();
+    let mut blamed: HashMap<u64, HashSet<u64>> = HashMap::new();
+    walk_tree(vol, &fs.chunks, extent_root, fs.nodesize, |node, nritems| {
+        let eleaf = u64at(node, 0x30);
+        total.insert(eleaf, nritems);
+        for_each_item(node, nritems, |objectid, ktype, _koffset, data| {
+            if !drops.contains(&objectid) {
+                return Ok(());
+            }
+            match ktype {
+                EXTENT_ITEM_TYPE | METADATA_ITEM => {
+                    let refs = if data.len() >= 8 { u64at(data, 0) } else { 0 };
+                    exclusive.insert(objectid, refs == 1);
+                    *doomed.entry(eleaf).or_default() += 1;
+                    blamed.entry(eleaf).or_default().insert(objectid);
+                }
+                TREE_BLOCK_REF => {
+                    *doomed.entry(eleaf).or_default() += 1;
+                    blamed.entry(eleaf).or_default().insert(objectid);
+                }
+                SHARED_BLOCK_REF => {
+                    exclusive.insert(objectid, false); // lives in another tree too
+                }
+                _ => {}
+            }
+            Ok(())
+        })
+    })?;
+
+    let mut undropped = 0u64;
+    for (&block, &ok) in &exclusive {
+        if !ok && edits.drop_leaves.remove(&block) {
+            undropped += 1;
+        }
+    }
+    for (eleaf, n) in doomed {
+        if total.get(&eleaf).copied().unwrap_or(0) != n {
+            continue;
+        }
+        let Some(blocks) = blamed.get(&eleaf) else { continue };
+        for b in blocks {
+            if edits.drop_leaves.remove(b) {
+                undropped += 1;
+            }
+        }
+    }
+    if undropped > 0 {
+        info!(undropped, "btrfs exclusions: удаление листьев отменено (общий блок или лист дерева экстентов)");
+    }
+    Ok(undropped)
 }
 
 /// Delete the removable files/dirs from the FS trees, free their extents in the
@@ -1728,6 +1968,8 @@ fn apply_stage2(
     // Bytes of the files actually removed. Kept out of the scan until Stage 2
     // succeeds, because a failure discards all of it.
     removed_bytes: &mut u64,
+    // Bytes of tree blocks freed by unlinking emptied leaves.
+    freed_meta: &mut u64,
 ) -> Result<()> {
     // --- FS trees: delete items + fix surviving-parent dir sizes ---
     for sv in subvols {
@@ -1793,7 +2035,7 @@ fn apply_stage2(
             }
         }
     }
-    if freed_extents.is_empty() {
+    if freed_extents.is_empty() && edits.drop_leaves.is_empty() {
         return Ok(());
     }
     let extent_root = *fs.tree_roots.get(&crate::btrfs_map::EXTENT_TREE_OBJECTID).ok_or_else(|| bad("no extent tree root"))?;
@@ -1807,10 +2049,22 @@ fn apply_stage2(
         start: u64,
         len: u64,
     }
+    // Tree blocks of the leaves we are unlinking: their extent items go too,
+    // and their bytes come off the block group and the superblock. Proven
+    // exclusively ours by `undrop_leaves_we_cannot_free` before we get here.
+    let dropped: HashSet<u64> = edits.drop_leaves.clone();
+    const METADATA_ITEM: u8 = 169;
+    const TREE_BLOCK_REF: u8 = 176;
+
     let mut bgs: Vec<Bg> = Vec::new();
     walk_tree(vol, &fs.chunks, extent_root, fs.nodesize, |node, nritems| {
         let leaf = u64at(node, 0x30);
         for_each_item(node, nritems, |objectid, ktype, koffset, data| {
+            if dropped.contains(&objectid)
+                && matches!(ktype, EXTENT_ITEM_TYPE | METADATA_ITEM | TREE_BLOCK_REF)
+            {
+                edits.delete_item(leaf, (objectid, ktype, koffset));
+            }
             match ktype {
                 EXTENT_ITEM_TYPE => {
                     if freed_extents.contains_key(&objectid) {
@@ -1842,6 +2096,19 @@ fn apply_stage2(
         *bg_dec.entry(bi).or_default() += len;
         // Logical range → physical drop; account bytes.
         freed_logical.add(bytenr, bytenr + len);
+    }
+    // The unlinked tree blocks, charged to whichever (metadata) block group
+    // holds them. Their bytes are NOT added to `freed_logical`: that set is
+    // about file data — what gets zeroed, dropped from the image and stripped
+    // of checksums. A freed tree block simply becomes free space, exactly as
+    // when btrfs frees one itself.
+    for &block in &dropped {
+        let bi = bgs
+            .iter()
+            .position(|b| block >= b.start && block + fs.nodesize <= b.start + b.len)
+            .ok_or_else(|| bad(format!("освобождённый блок дерева {block} вне групп блоков")))?;
+        *bg_dec.entry(bi).or_default() += fs.nodesize;
+        *freed_meta += fs.nodesize;
     }
     for (bi, dec) in bg_dec {
         let b = &bgs[bi];
@@ -2406,16 +2673,16 @@ mod btrfs_integration {
         assert!(ghost.iter().all(|&b| b == 0), "призрак читается не нулями");
     }
 
-    /// A leaf that would empty costs ONE spared file, not all of them.
+    /// A leaf that would empty is removed, so nothing is left behind at all.
     ///
-    /// The guards used to spare every file that touched such a leaf, and on a
-    /// real 130 GiB volume that turned 9453 of 11499 matched files into
-    /// zero-filled ghosts — files that still exist, still list their old size,
-    /// and read as zeros, which is what makes apt refuse its own cache. One
-    /// surviving item is enough to keep a leaf alive, so one file is what gets
-    /// spared now.
+    /// This number is what the user meets: a ghost is a file that still exists,
+    /// still claims its old size and reads as zeros — and one such .deb is
+    /// enough to stop `apt upgrade` until someone runs `apt clean`. The guards
+    /// first spared every file that touched an emptying leaf (359 ghosts out of
+    /// 400 here, 9453 of 11499 on a real volume), then just one per leaf (7),
+    /// and now the leaf itself goes.
     #[test]
-    fn a_dense_directory_costs_a_handful_of_ghosts_not_all_of_them() {
+    fn a_dense_directory_leaves_no_ghosts_at_all() {
         use std::io::Write;
         if !have("mkfs.btrfs") {
             eprintln!("mkfs.btrfs unavailable — skipping");
@@ -2453,9 +2720,9 @@ mod btrfs_integration {
         assert!(r.status.success(), "btrfs restore failed: {}", String::from_utf8_lossy(&r.stderr));
         let ghosts = std::fs::read_dir(outdir.join("cache")).map(|d| d.count()).unwrap_or(0);
         eprintln!("ПРИЗРАКОВ: {ghosts} из 400");
-        assert!(
-            ghosts * 5 < 400,
-            "призраков {ghosts} из 400 — щажение по-прежнему забирает целые листья"
+        assert_eq!(
+            ghosts, 0,
+            "остались призраки: опустевшие листья должны удаляться, а не щадиться"
         );
         let kept = std::fs::read(outdir.join("keep.txt")).unwrap();
         assert!(kept.len() == 65536 && kept.iter().all(|&b| b == 0xCD), "keep.txt damaged");
@@ -2701,6 +2968,35 @@ mod btrfs_integration {
             "shared extents were zeroed — CoW safety violated"
         );
         assert!(scan.files_kept_shared >= 1, "expected shared-kept accounting");
+    }
+
+    /// A tree block a snapshot also points at is not ours to free.
+    ///
+    /// Unlinking an emptied leaf means freeing its tree block, and btrfs
+    /// snapshots share tree blocks with the subvolume they were taken from
+    /// until one side is written to. Free such a block and the snapshot loses a
+    /// leaf. The fixture has a snapshot, so exclusions across it must come out
+    /// `btrfs check`-clean — including the check that no parent key was left
+    /// pointing at something that is gone.
+    #[test]
+    fn a_leaf_shared_with_a_snapshot_is_never_freed() {
+        let zst = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/btrfs_shared.img.zst");
+        if !zst.exists() {
+            eprintln!("btrfs_shared.img.zst missing — skipping");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let img = dir.path().join("shared.img");
+        std::fs::write(&img, zstd::decode_all(std::fs::File::open(&zst).unwrap()).unwrap()).unwrap();
+
+        // Exclude broadly, so the walk crosses the snapshot as well as the
+        // subvolume it came from.
+        let (scan, _) = run_scan(&img, &["orig.bin", "clone.bin", "cache", "*.bin"]);
+        let patched = dir.path().join("patched.img");
+        apply(&img, &scan, &patched); // parent-key + csum-coverage asserts inside
+        let (ok, log) = btrfs_check(&patched, true);
+        assert!(ok, "btrfs check на образе со снапшотом:\n{log}");
+        assert!(!log.contains("Wrong key"), "ключ родителя оставлен висеть:\n{log}");
     }
 
     /// Set `log_root` (superblock @0x60) to a non-zero value and fix the
