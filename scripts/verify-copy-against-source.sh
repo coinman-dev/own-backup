@@ -177,7 +177,10 @@ require_plausible "$COPY_FILES" "копии"
 echo
 echo "=============== РЕЗУЛЬТАТ ==============="
 LC_ALL=C join -t$'\t' -j 3 -v 1 -o 0 "$WORK/src.meta" "$WORK/copy.meta" > "$WORK/missing.txt" || true
-LC_ALL=C join -t$'\t' -j 3 -v 2 -o 0 "$WORK/copy.meta" "$WORK/src.meta" > "$WORK/extra.txt" || true
+# -v 1 with the copy FIRST: unpairable lines of the copy. (-v 2 with the copy
+# first prints the source's, which made "есть только в копии" mirror the
+# missing count exactly — 2043 both ways, and neither number meant that.)
+LC_ALL=C join -t$'\t' -j 3 -v 1 -o 0 "$WORK/copy.meta" "$WORK/src.meta" > "$WORK/extra.txt" || true
 echo "нет в копии (удалено):        $(wc -l < "$WORK/missing.txt")"
 echo "есть только в копии:          $(wc -l < "$WORK/extra.txt")"
 

@@ -613,8 +613,30 @@ struct SubvolData {
     dirents: Vec<DirEnt>,
     /// ino → its regular data extents.
     extents: HashMap<u64, Vec<DataRef>>,
-    /// ino → true when any EXTENT_DATA is inline (data inside the leaf).
-    has_inline: HashSet<u64>,
+    /// ino → its INLINE extents: small files whose bytes btrfs keeps inside the
+    /// B-tree leaf instead of allocating an extent for them.
+    ///
+    /// Stage 1 zeroes *extents*, so for these files it zeroes nothing at all
+    /// and their contents travel into the copy intact — 513 of them on the
+    /// first real volume this was measured on. That is the one promise
+    /// exclusions must not break, so the bytes are overwritten in place inside
+    /// the leaf (a plain same-size item patch: no key moves, no checksum-tree
+    /// work — inline data is covered by the node checksum, which the edit set
+    /// recomputes anyway).
+    inline: HashMap<u64, Vec<InlineExtent>>,
+}
+
+/// One inline `EXTENT_DATA` item: where it lives and how much of it is data.
+#[derive(Clone, Copy)]
+struct InlineExtent {
+    leaf: u64,
+    key: Key,
+    /// btrfs_file_extent_item.compression — zeroing compressed bytes would
+    /// leave data that cannot be decompressed, so those are left alone (and
+    /// counted, not silently ignored).
+    compression: u8,
+    /// Bytes of file content in the item, after the 21-byte header.
+    data_len: usize,
 }
 
 const S_IFMT: u32 = 0xF000;
@@ -625,6 +647,7 @@ const S_IFREG: u32 = 0x8000;
 fn collect_subvol(vol: &mut dyn RawVolume, fs: &Fs, root: u64) -> Result<SubvolData> {
     let mut d = SubvolData::default();
     walk_tree(vol, &fs.chunks, root, fs.nodesize, |node, nritems| {
+        let leaf = u64at(node, 0x30); // header.bytenr — where an item may be patched
         for_each_item(node, nritems, |objectid, ktype, koffset, data| {
             match ktype {
                 INODE_ITEM => {
@@ -659,7 +682,12 @@ fn collect_subvol(vol: &mut dyn RawVolume, fs: &Fs, root: u64) -> Result<SubvolD
                     // 2 prealloc); regular: disk_bytenr@21, disk_num_bytes@29.
                     if data.len() >= 21 {
                         if data[20] == 0 {
-                            d.has_inline.insert(objectid);
+                            d.inline.entry(objectid).or_default().push(InlineExtent {
+                                leaf,
+                                key: (objectid, ktype, koffset),
+                                compression: data[16],
+                                data_len: data.len() - 21,
+                            });
                         } else if data.len() >= 53 {
                             let disk_bytenr = u64at(data, 21);
                             let disk_num_bytes = u64at(data, 29);
@@ -1224,6 +1252,47 @@ pub fn scan_btrfs_exclusions(
             zeroed_logical.add(e.disk_bytenr, e.disk_bytenr + e.disk_num_bytes);
         }
     }
+    // 5b. Inline data of matched-but-kept files: overwritten inside the leaf.
+    //     Stage 1 above only touches extents, and a file small enough to live
+    //     inside the tree has none — so without this its bytes reach the copy
+    //     untouched, which is precisely what an exclusion promises will not
+    //     happen. Same-size patch: nothing moves, only the node checksum
+    //     changes, and that is recomputed for every touched node anyway.
+    let mut inline_zeroed = 0u64;
+    let mut inline_compressed = 0u64;
+    for sv in &subvols {
+        for &ino in &sv.matched {
+            if removable.contains(&(sv.id, ino)) {
+                continue; // Stage 2 deletes the item outright
+            }
+            let Some(items) = sv.data.inline.get(&ino) else { continue };
+            for it in items {
+                if it.compression != 0 {
+                    // Zeroing compressed bytes yields something that cannot be
+                    // decompressed — EIO on read. Left intact and reported.
+                    inline_compressed += 1;
+                    continue;
+                }
+                if it.data_len == 0 {
+                    continue;
+                }
+                edits.patch_item(it.leaf, it.key, 21, vec![0u8; it.data_len]);
+                inline_zeroed += it.data_len as u64;
+            }
+        }
+    }
+    if inline_compressed > 0 {
+        warn!(
+            items = inline_compressed,
+            "btrfs exclusions: сжатые inline-данные оставлены как есть — их нельзя обнулить, \
+             не сломав распаковку"
+        );
+    }
+    if inline_zeroed > 0 {
+        scan.bytes_excluded += inline_zeroed;
+        info!(bytes = inline_zeroed, "btrfs exclusions: inline-данные обнулены внутри листьев");
+    }
+
     zeroed_logical.finalize();
     freed_logical.finalize();
     // Data that never reaches the image is excluded whether its entry survived
@@ -2198,6 +2267,71 @@ mod btrfs_integration {
         let (scan, _) = run_scan(&img, &[]);
         assert_eq!(scan.files_excluded, 0);
         assert!(scan.ranges.is_empty());
+    }
+
+    /// A file small enough to live INSIDE the tree must lose its contents too.
+    ///
+    /// btrfs keeps files under ~2 KiB inline, in the B-tree leaf, with no
+    /// extent of their own. Stage 1 zeroes extents — so for these it zeroed
+    /// nothing, and comparing a real copy against its source turned up 513
+    /// excluded files (`~/.cache/mesa_shader_cache/**` and friends) whose
+    /// bytes had travelled into the copy intact. The exclusion had removed
+    /// their data everywhere except where it actually was.
+    #[test]
+    fn inline_data_of_an_excluded_file_is_zeroed_too() {
+        use std::io::Write;
+        if !have("mkfs.btrfs") {
+            eprintln!("mkfs.btrfs unavailable — skipping");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(src.join("cache")).unwrap();
+        // Small enough to be stored inline, and unmistakable in a hex dump.
+        let secret = b"INLINE-SECRET-THAT-MUST-NOT-TRAVEL".repeat(20); // ~680 B
+        std::fs::File::create(src.join("cache/tiny.txt")).unwrap().write_all(&secret).unwrap();
+        std::fs::File::create(src.join("keep.txt")).unwrap().write_all(&[0xCD; 65536]).unwrap();
+        let img = dir.path().join("fs.img");
+        std::fs::File::create(&img).unwrap().set_len(128 * 1024 * 1024).unwrap();
+        let out = std::process::Command::new("mkfs.btrfs").args(["-q", "-r"]).arg(&src).arg(&img).output().unwrap();
+        if !out.status.success() {
+            eprintln!("mkfs.btrfs failed — skipping");
+            return;
+        }
+        let marker = b"INLINE-SECRET-THAT-MUST-NOT-TRAVEL";
+        let raw = std::fs::read(&img).unwrap();
+        assert!(
+            raw.windows(marker.len()).any(|w| w == marker),
+            "фикстура не содержит маркер — тест ничего не проверил бы"
+        );
+
+        // Stage 1 only (remove_entries = false): the file KEEPS its entry, so
+        // this is exactly the case where the data used to survive.
+        let f = std::fs::File::open(&img).unwrap();
+        let len = f.metadata().unwrap().len();
+        let mut vol = FileVol { f, len };
+        let scan =
+            scan_btrfs_exclusions(&mut vol, &["cache".to_string()], false, |_| Ok(())).unwrap();
+        let patched = dir.path().join("patched.img");
+        apply(&img, &scan, &patched);
+
+        let after = std::fs::read(&patched).unwrap();
+        assert!(
+            !after.windows(marker.len()).any(|w| w == marker),
+            "содержимое исключённого inline-файла осталось в копии"
+        );
+        let (ok, log) = btrfs_check(&patched, true);
+        assert!(ok, "btrfs check после обнуления inline-данных:\n{log}");
+
+        // …and the file that was not excluded is untouched.
+        let outdir = dir.path().join("restored");
+        std::fs::create_dir_all(&outdir).unwrap();
+        let r = std::process::Command::new("btrfs").arg("restore").arg(&patched).arg(&outdir).output().unwrap();
+        assert!(r.status.success(), "btrfs restore failed: {}", String::from_utf8_lossy(&r.stderr));
+        let kept = std::fs::read(outdir.join("keep.txt")).unwrap();
+        assert!(kept.len() == 65536 && kept.iter().all(|&b| b == 0xCD), "keep.txt damaged");
+        let ghost = std::fs::read(outdir.join("cache/tiny.txt")).unwrap();
+        assert!(ghost.iter().all(|&b| b == 0), "призрак читается не нулями");
     }
 
     /// A Stage-1 ghost's blocks must stay in the image; only what Stage 2 truly
