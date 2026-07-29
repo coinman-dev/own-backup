@@ -194,6 +194,7 @@ if [[ $FAST -eq 0 ]]; then
     # file used to give when its blocks never made it into the image.
     : > "$WORK/ghosts.txt"; : > "$WORK/broken.txt"; : > "$WORK/unreadable.txt"
     while IFS= read -r f; do
+        [[ -n $f ]] || continue          # sha256sum escapes odd names; skip the debris
         [[ -f "$MNT_COPY/$f" ]] || continue
         if ! cat -- "$MNT_COPY/$f" > /dev/null 2>&1; then
             echo "$f" >> "$WORK/unreadable.txt"
