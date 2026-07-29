@@ -1457,23 +1457,35 @@ fn spare_inodes_that_would_empty_a_leaf(
             })
         })?;
 
+        // Spare the LEAST that keeps the leaf alive: one surviving inode is
+        // enough, and everything else in it still goes. Sparing every file
+        // that touched the leaf is what turned 82% of the matched files into
+        // ghosts on a real volume — 9453 of 11499.
+        let mut doomed: Vec<_> = doomed.into_iter().collect();
+        doomed.sort_unstable();
+        let mut kept: HashSet<u64> = HashSet::new();
         for (leaf, n) in doomed {
             if total.get(&leaf).copied().unwrap_or(0) != n {
                 continue; // something survives in this leaf — nothing to do
             }
             let Some(inodes) = blamed.get(&leaf) else { continue };
-            for &ino in inodes {
-                if removable.remove(&(sv.id, ino)) {
-                    spared += 1;
-                }
+            if inodes.iter().any(|i| kept.contains(i)) {
+                continue; // a file we already spared holds this leaf open
+            }
+            let mut sorted: Vec<u64> = inodes.iter().copied().collect();
+            sorted.sort_unstable();
+            let Some(&ino) = sorted.first() else { continue };
+            kept.insert(ino);
+            if removable.remove(&(sv.id, ino)) {
+                spared += 1;
             }
             warn!(
                 subvol = sv.id,
                 leaf,
                 items = n,
-                inodes = inodes.len(),
-                "btrfs exclusions: удаление опустошило бы лист — эти файлы оставлены \
-                 (данные всё равно обнуляются)"
+                ino,
+                "btrfs exclusions: удаление опустошило бы лист — один файл оставлен, \
+                 чтобы лист выжил (его данные всё равно обнуляются)"
             );
         }
     }
@@ -1565,22 +1577,29 @@ fn spare_files_whose_extents_would_empty_a_leaf(
     })?;
 
     let mut spared = 0u64;
+    let mut doomed: Vec<_> = doomed.into_iter().collect();
+    doomed.sort_unstable();
+    let mut kept: HashSet<(u64, u64)> = HashSet::new();
     for (leaf, n) in doomed {
         if total.get(&leaf).copied().unwrap_or(0) != n {
             continue;
         }
         let Some(files) = blamed.get(&leaf) else { continue };
-        for who in files {
-            if removable.remove(who) {
-                spared += 1;
-            }
+        if files.iter().any(|f| kept.contains(f)) {
+            continue; // already held open by a file spared for another leaf
+        }
+        let mut sorted: Vec<(u64, u64)> = files.iter().copied().collect();
+        sorted.sort_unstable();
+        let Some(&who) = sorted.first() else { continue };
+        kept.insert(who);
+        if removable.remove(&who) {
+            spared += 1;
         }
         warn!(
             leaf,
             items = n,
-            files = files.len(),
             "btrfs exclusions: освобождение экстентов опустошило бы лист дерева экстентов — \
-             эти файлы оставлены"
+             один файл оставлен"
         );
     }
     Ok(spared)
@@ -1662,14 +1681,24 @@ fn spare_files_whose_csum_edits_break_a_leaf(
             bytes_after += segs * 25 + (seg_secs * 4) as usize;
         }
         if touched && (items_after == 0 || HEADER + bytes_after > fs.nodesize as usize) {
-            warn!(
-                leaf,
-                items_after,
-                bytes_after,
-                files = blamed.len(),
-                "btrfs exclusions: правка сумм сломала бы лист дерева сумм — эти файлы оставлены"
-            );
-            to_spare.extend(blamed.iter().copied());
+            // One file kept back leaves a csum item in the leaf, and the leaf
+            // survives; the rest of its files are still removed. This is the
+            // guard that produced most of the ghosts — a whole leaf's worth of
+            // files spared for the sake of one item.
+            if !blamed.iter().any(|f| to_spare.contains(f)) {
+                let mut sorted: Vec<(u64, u64)> = blamed.iter().copied().collect();
+                sorted.sort_unstable();
+                if let Some(&who) = sorted.first() {
+                    warn!(
+                        leaf,
+                        items_after,
+                        bytes_after,
+                        "btrfs exclusions: правка сумм сломала бы лист дерева сумм — \
+                         один файл оставлен"
+                    );
+                    to_spare.insert(who);
+                }
+            }
         }
         Ok(())
     })?;
@@ -2375,6 +2404,61 @@ mod btrfs_integration {
         assert!(kept.len() == 65536 && kept.iter().all(|&b| b == 0xCD), "keep.txt damaged");
         let ghost = std::fs::read(outdir.join("cache/tiny.txt")).unwrap();
         assert!(ghost.iter().all(|&b| b == 0), "призрак читается не нулями");
+    }
+
+    /// A leaf that would empty costs ONE spared file, not all of them.
+    ///
+    /// The guards used to spare every file that touched such a leaf, and on a
+    /// real 130 GiB volume that turned 9453 of 11499 matched files into
+    /// zero-filled ghosts — files that still exist, still list their old size,
+    /// and read as zeros, which is what makes apt refuse its own cache. One
+    /// surviving item is enough to keep a leaf alive, so one file is what gets
+    /// spared now.
+    #[test]
+    fn a_dense_directory_costs_a_handful_of_ghosts_not_all_of_them() {
+        use std::io::Write;
+        if !have("mkfs.btrfs") {
+            eprintln!("mkfs.btrfs unavailable — skipping");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(src.join("cache")).unwrap();
+        // Long names so the directory fills whole leaves, and 64 KiB of data
+        // each so the checksum tree fills too.
+        for i in 0..400 {
+            let name = format!("cache/f-{i:04}-{}", "y".repeat(80));
+            std::fs::File::create(src.join(&name)).unwrap().write_all(&[0xAB; 65536]).unwrap();
+        }
+        std::fs::File::create(src.join("keep.txt")).unwrap().write_all(&[0xCD; 65536]).unwrap();
+        let img = dir.path().join("fs.img");
+        std::fs::File::create(&img).unwrap().set_len(512 * 1024 * 1024).unwrap();
+        let out = std::process::Command::new("mkfs.btrfs").args(["-q", "-r"]).arg(&src).arg(&img).output().unwrap();
+        if !out.status.success() {
+            eprintln!("mkfs.btrfs failed — skipping");
+            return;
+        }
+
+        let (scan, _) = run_scan(&img, &["cache"]);
+        let patched = dir.path().join("patched.img");
+        apply(&img, &scan, &patched);
+        let (ok, log) = btrfs_check(&patched, true);
+        assert!(ok, "btrfs check:\n{log}");
+
+        // Count what actually survives in the restored tree: a ghost is a file
+        // that is still there, and every one of them is an apt complaint.
+        let outdir = dir.path().join("restored");
+        std::fs::create_dir_all(&outdir).unwrap();
+        let r = std::process::Command::new("btrfs").arg("restore").arg(&patched).arg(&outdir).output().unwrap();
+        assert!(r.status.success(), "btrfs restore failed: {}", String::from_utf8_lossy(&r.stderr));
+        let ghosts = std::fs::read_dir(outdir.join("cache")).map(|d| d.count()).unwrap_or(0);
+        eprintln!("ПРИЗРАКОВ: {ghosts} из 400");
+        assert!(
+            ghosts * 5 < 400,
+            "призраков {ghosts} из 400 — щажение по-прежнему забирает целые листья"
+        );
+        let kept = std::fs::read(outdir.join("keep.txt")).unwrap();
+        assert!(kept.len() == 65536 && kept.iter().all(|&b| b == 0xCD), "keep.txt damaged");
     }
 
     /// The same, on a filesystem mounted with compression.
