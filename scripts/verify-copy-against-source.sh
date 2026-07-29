@@ -137,6 +137,11 @@ while read -r start size; do
         LEN=$((size * 512))
     fi
 done < <(sfdisk -d "$RAW" 2>/dev/null | sed -n 's/.*start=\s*\([0-9]*\).*size=\s*\([0-9]*\).*/\1 \2/p')
+if [[ -z $OFF ]] && [[ $(dd if="$RAW" bs=1 skip=65600 count=8 2>/dev/null) == "_BHRfS_M" ]]; then
+    # Not a whole disk but the partition itself, already carved out.
+    OFF=0
+    LEN=$(stat -c %s "$RAW")
+fi
 [[ -n $OFF ]] || { echo "в копии не нашёлся btrfs — нечего сравнивать"; exit 1; }
 echo "   btrfs в копии: смещение $OFF, длина $LEN"
 
