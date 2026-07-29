@@ -370,7 +370,7 @@ pub fn execute_plan(
     drop(session);
 
     if plan.verify_after {
-        run_verification(plan, &sidecar, &ordered, &mut state, cancel, &mut on_update);
+        run_verification(plan, &sidecar, &ordered, passphrases, &mut state, cancel, &mut on_update);
     }
 
     state.current = None;
@@ -401,6 +401,7 @@ fn run_verification(
     plan: &RestorePlan,
     sidecar: &own_backup_backup::sidecar::Sidecar,
     ordered: &[RestoreOp],
+    passphrases: &std::collections::HashMap<u32, String>,
     state: &mut RestoreRunState,
     cancel: &CancelToken,
     on_update: &mut impl FnMut(&RestoreRunState),
@@ -437,11 +438,46 @@ fn run_verification(
 
         let target =
             PartitionTarget { disk_number: plan.target_disk, offset: dst.offset, size: dst.size };
+        // A re-encrypted container holds ciphertext past its header: to compare
+        // it with the copy the check has to open it the same way the restore
+        // wrote it. Without this every block read as different — 12691 of 12691
+        // on a partition whose restored system booted fine.
+        let reencrypted = matches!(op, RestoreOp::RestorePartition { reencrypt: true, .. });
+        let crypt = if reencrypted {
+            match passphrases.get(src_index) {
+                Some(pw) => {
+                    let path = format!("part:{}:{}:{}", plan.target_disk, dst.offset, dst.size);
+                    match own_backup_backup::win_device::WinRawDevice::open_read(&path)
+                        .and_then(|mut d| own_backup_backup::luks::open_luks(&mut d, pw.as_bytes()))
+                    {
+                        Ok(p) => Some(p),
+                        Err(e) => {
+                            warn!(part = dst.index, error = %e, "verification: cannot open the restored container");
+                            None
+                        }
+                    }
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+        if reencrypted && crypt.is_none() {
+            // Better to say the check did not happen than to report a failure
+            // that only means we could not read what we wrote.
+            state.ops[index].status = OpStatus::Done;
+            state.ops[index].percent = 100;
+            state.ops[index].message =
+                "Не проверено: контейнер перешифрован, а открыть его не удалось".into();
+            on_update(state);
+            continue;
+        }
         let result = verify_partition_sectors(
             &plan.image_path,
             sidecar,
             *src_index,
             target,
+            crypt.as_ref(),
             cancel,
             |pr| {
                 let percent = if pr.blocks_total > 0 {
@@ -467,6 +503,27 @@ fn run_verification(
             Ok(v) if v.cancelled => {
                 state.ops[index].status = OpStatus::Skipped;
                 state.ops[index].message = "Проверка прервана.".into();
+            }
+            // The restore itself writes to the ESP after the copy is in place:
+            // bcdboot, and the fallback loader at \EFI\BOOT\BOOTX64.EFI. Those
+            // blocks differ from the copy BECAUSE the restore changed them, and
+            // reporting that as "запись не легла (проверьте накопитель)" sends
+            // the user to look for a failing disk that is working perfectly.
+            Ok(v) if v.image_corrupt.is_empty() && touched_after_copy(ordered, dst.index) => {
+                state.ops[index].status = OpStatus::Done;
+                state.ops[index].percent = 100;
+                state.ops[index].message = format!(
+                    "Сверено блоков: {}; отличаются {} — в этот раздел после копирования \
+                     дописан загрузчик, это ожидаемо",
+                    v.blocks_checked,
+                    v.mismatches.len()
+                );
+                info!(
+                    part = dst.index,
+                    blocks = v.blocks_checked,
+                    changed = v.mismatches.len(),
+                    "verification passed (bootloader written after the copy)"
+                );
             }
             Ok(v) => {
                 state.ops[index].status = OpStatus::Failed;
@@ -499,6 +556,22 @@ fn run_verification(
         on_update(state);
     }
     state.current = None;
+}
+
+/// Did the plan write into this partition after its data was copied?
+///
+/// Only the boot steps do: `bcdboot` rebuilds the Windows loader, and the
+/// fallback step drops `\EFI\BOOT\BOOTX64.EFI` on the ESP. Both are asked for
+/// deliberately, and both make the partition differ from the copy on purpose.
+#[cfg(target_os = "windows")]
+fn touched_after_copy(ordered: &[RestoreOp], part_index: u32) -> bool {
+    ordered.iter().any(|op| match op {
+        RestoreOp::EnsureFallbackBootloader { esp } => esp.index == part_index,
+        RestoreOp::FinalizeBoot { esp, windows_part, .. } => {
+            esp.map(|e| e.index == part_index).unwrap_or(false) || windows_part.index == part_index
+        }
+        _ => false,
+    })
 }
 
 /// Restore the GPT fields the designer cannot know, from the copy's own

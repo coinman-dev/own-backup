@@ -468,11 +468,19 @@ impl VerifySummary {
 /// checksum over it, is what makes a partial block checkable: only a slice of
 /// the first and last block belongs to the partition, and a checksum over a
 /// slice cannot be compared with one computed over the whole block.
+/// Verify a restored partition against the copy.
+///
+/// `crypt` must be given for a container that was re-encrypted: the bytes on
+/// the disk are then ciphertext sitting past the LUKS header, and comparing
+/// them with the copy's plaintext reports every single block as wrong. That is
+/// what it did — 12691 mismatches out of 12691 blocks on a partition whose
+/// restored system booted perfectly.
 pub fn verify_partition_sectors(
     image_path: &Path,
     sidecar: &Sidecar,
     src_index: u32,
     target: PartitionTarget,
+    crypt: Option<&crate::luks::LuksParams>,
     cancel: &CancelToken,
     mut progress: impl FnMut(&SectorRestoreProgress) -> Result<()>,
 ) -> Result<VerifySummary> {
@@ -507,7 +515,16 @@ pub fn verify_partition_sectors(
         }
 
         let mut from_disk = vec![0u8; copy.slice_len];
-        dev.read_at(copy.dst_offset, &mut from_disk)?;
+        match crypt {
+            None => dev.read_at(copy.dst_offset, &mut from_disk)?,
+            Some(params) => {
+                // Past the header, and encrypted: read where the restore wrote
+                // and undo the encryption before comparing.
+                let payload_off = copy.dst_offset;
+                dev.read_at(params.data_offset + payload_off, &mut from_disk)?;
+                params.decrypt(payload_off, &mut from_disk)?;
+            }
+        }
         if from_disk != from_image[copy.slice_start..copy.slice_start + copy.slice_len] {
             out.mismatches.push(entry.block_number);
         }
