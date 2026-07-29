@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+# Compare a whole-disk copy with the disk it was taken from, file by file.
+#
+# This is the acceptance test no synthetic fixture can replace: it reads the
+# real source filesystem and the real copy and asks the only question that
+# matters — is every file that should be there, there, and byte-identical?
+#
+# It answers three things at once:
+#   * files MISSING from the copy   → truly removed (what exclusions promise)
+#   * files present but ALL ZEROS   → Stage-1 "ghosts" (data gone, entry left)
+#   * files present and DIFFERENT   → a defect; nothing else explains it
+#
+# Everything is read-only, twice over: the source device is set read-only with
+# `blockdev --setro`, its container is opened `--readonly`, and the filesystem
+# is mounted `ro,norecovery` so not even a journal replay can write to it.
+#
+# The two filesystems are NEVER mounted at the same time: a copy carries the
+# source's btrfs UUID, and two mounted filesystems sharing one UUID is how the
+# kernel ends up reading the wrong device.
+#
+# Usage (WSL2 / any Linux, as root):
+#
+#   # 1. attach the source disk to WSL from an ELEVATED PowerShell:
+#   #    wsl --mount \\.\PHYSICALDRIVE3 --bare
+#   # 2. then, inside WSL:
+#   sudo bash scripts/verify-copy-against-source.sh /dev/sde /mnt/e/OwnBackup/copy.qcow2
+#
+#   Add --fast to compare sizes and mtimes only (no hashing).
+set -euo pipefail
+
+FAST=0
+ARGS=()
+for a in "$@"; do
+    case "$a" in
+        --fast) FAST=1 ;;
+        *) ARGS+=("$a") ;;
+    esac
+done
+if [[ ${#ARGS[@]} -lt 2 ]]; then
+    sed -n '2,30p' "$0"
+    exit 2
+fi
+SRC_DISK="${ARGS[0]}"
+COPY="${ARGS[1]}"
+WORK="${ARGS[2]:-/tmp/obk-verify}"
+
+[[ $EUID -eq 0 ]] || { echo "нужен root (mount/cryptsetup)"; exit 1; }
+[[ -b $SRC_DISK ]] || { echo "$SRC_DISK — не блочное устройство"; exit 1; }
+[[ -f $COPY ]] || { echo "$COPY — файла копии нет"; exit 1; }
+
+MNT_SRC="$WORK/mnt-src"
+MNT_COPY="$WORK/mnt-copy"
+RAW="$WORK/copy.raw"
+mkdir -p "$MNT_SRC" "$MNT_COPY"
+
+cleanup() {
+    umount "$MNT_SRC" 2>/dev/null || true
+    umount "$MNT_COPY" 2>/dev/null || true
+    cryptsetup close obk_src 2>/dev/null || true
+}
+trap cleanup EXIT
+
+# --- Phase 0: the source disk becomes physically read-only ------------------
+echo "== источник: $SRC_DISK (только чтение)"
+blockdev --setro "$SRC_DISK"
+for p in "$SRC_DISK"?*; do [[ -b $p ]] && blockdev --setro "$p" || true; done
+
+SRC_PART=""
+for p in "$SRC_DISK"?*; do
+    [[ -b $p ]] || continue
+    if cryptsetup isLuks "$p" 2>/dev/null; then SRC_PART="$p"; break; fi
+done
+if [[ -n $SRC_PART ]]; then
+    echo "   LUKS-раздел: $SRC_PART"
+    cryptsetup open --readonly "$SRC_PART" obk_src
+    SRC_FS=/dev/mapper/obk_src
+else
+    # No container: take the largest btrfs partition instead.
+    for p in "$SRC_DISK"?*; do
+        [[ -b $p ]] || continue
+        if blkid -o value -s TYPE "$p" 2>/dev/null | grep -q btrfs; then SRC_FS="$p"; fi
+    done
+    [[ -n ${SRC_FS:-} ]] || { echo "на диске нет ни LUKS, ни btrfs"; exit 1; }
+    echo "   btrfs-раздел: $SRC_FS"
+fi
+
+# --- Phase 1: manifest of the source ----------------------------------------
+mount -o ro,norecovery,subvolid=5 "$SRC_FS" "$MNT_SRC" \
+    || mount -o ro,subvolid=5 "$SRC_FS" "$MNT_SRC"
+
+manifest() { # $1 = mountpoint, $2 = output file
+    local root="$1" out="$2"
+    ( cd "$root" && find . -xdev \( -type f -o -type l -o -type d \) -printf '%y\t%s\t%P\n' ) \
+        | LC_ALL=C sort -t$'\t' -k3 > "$out.meta"
+    if [[ $FAST -eq 0 ]]; then
+        # `hash<TAB>path`, sorted by path: sha256sum's own "hash  path" splits
+        # on blanks, and half the paths on a Linux root have spaces in them.
+        ( cd "$root" && find . -xdev -type f -printf '%P\0' \
+            | xargs -0 -r -P 4 -n 64 sha256sum 2>/dev/null ) \
+            | sed 's/^\([0-9a-f]\{64\}\)  /\1\t/' \
+            | LC_ALL=C sort -t$'\t' -k2 > "$out.sha" || true
+    else
+        : > "$out.sha"
+    fi
+}
+
+echo "== снимаю опись источника (это долго: читается каждый файл)"
+manifest "$MNT_SRC" "$WORK/src"
+SRC_FILES=$(wc -l < "$WORK/src.meta")
+umount "$MNT_SRC"
+[[ -n $SRC_PART ]] && cryptsetup close obk_src
+echo "   файлов/каталогов: $SRC_FILES"
+
+# --- Phase 2: the copy ------------------------------------------------------
+# The copy holds the LUKS payload DECRYPTED, so its btrfs is readable without
+# a password — the partition simply starts where the partition table says.
+echo "== разворачиваю копию: $COPY"
+case "$COPY" in
+    *.qcow2|*.vhdx) qemu-img convert -p -O raw -S 4096 "$COPY" "$RAW" ;;
+    *) RAW="$COPY" ;;
+esac
+
+OFF=""
+while read -r start size; do
+    [[ -n $start ]] || continue
+    o=$((start * 512))
+    # btrfs superblock magic lives 64 KiB into the partition.
+    if [[ $(dd if="$RAW" bs=1 skip=$((o + 65600)) count=8 2>/dev/null) == "_BHRfS_M" ]]; then
+        OFF=$o
+        LEN=$((size * 512))
+    fi
+done < <(sfdisk -d "$RAW" 2>/dev/null | sed -n 's/.*start=\s*\([0-9]*\).*size=\s*\([0-9]*\).*/\1 \2/p')
+[[ -n $OFF ]] || { echo "в копии не нашёлся btrfs — нечего сравнивать"; exit 1; }
+echo "   btrfs в копии: смещение $OFF, длина $LEN"
+
+echo "== структурные проверки копии"
+btrfs check --readonly --check-data-csum "$RAW" 2>&1 | tail -3 || true
+
+mount -o ro,loop,offset=$OFF,sizelimit=$LEN,subvolid=5 "$RAW" "$MNT_COPY"
+echo "== снимаю опись копии"
+manifest "$MNT_COPY" "$WORK/copy"
+COPY_FILES=$(wc -l < "$WORK/copy.meta")
+echo "   файлов/каталогов: $COPY_FILES"
+
+# --- Phase 3: compare -------------------------------------------------------
+echo
+echo "=============== РЕЗУЛЬТАТ ==============="
+LC_ALL=C join -t$'\t' -j 3 -v 1 -o 0 "$WORK/src.meta" "$WORK/copy.meta" > "$WORK/missing.txt" || true
+LC_ALL=C join -t$'\t' -j 3 -v 2 -o 0 "$WORK/copy.meta" "$WORK/src.meta" > "$WORK/extra.txt" || true
+echo "нет в копии (удалено):        $(wc -l < "$WORK/missing.txt")"
+echo "есть только в копии:          $(wc -l < "$WORK/extra.txt")"
+
+if [[ $FAST -eq 0 ]]; then
+    LC_ALL=C join -t$'\t' -j 2 -o 0,1.1,2.1 "$WORK/src.sha" "$WORK/copy.sha" 2>/dev/null \
+        | awk -F'\t' '$2 != $3 {print $1}' > "$WORK/differ.txt" || true
+    DIFF_N=$(wc -l < "$WORK/differ.txt")
+    echo "содержимое различается:       $DIFF_N"
+    # A "ghost" is a file whose copy is all zeros: data excluded, entry kept.
+    # An unreadable one is worse than either — that is the EIO an excluded
+    # file used to give when its blocks never made it into the image.
+    : > "$WORK/ghosts.txt"; : > "$WORK/broken.txt"; : > "$WORK/unreadable.txt"
+    while IFS= read -r f; do
+        [[ -f "$MNT_COPY/$f" ]] || continue
+        if ! cat -- "$MNT_COPY/$f" > /dev/null 2>&1; then
+            echo "$f" >> "$WORK/unreadable.txt"
+        elif [[ -z $(LC_ALL=C tr -d '\000' < "$MNT_COPY/$f" | head -c1) ]]; then
+            echo "$f" >> "$WORK/ghosts.txt"      # nothing but zeros
+        else
+            echo "$f" >> "$WORK/broken.txt"      # real mismatch
+        fi
+    done < "$WORK/differ.txt"
+    echo "   из них нулевые «призраки»: $(wc -l < "$WORK/ghosts.txt")"
+    echo "   из них НЕ ЧИТАЮТСЯ (EIO):  $(wc -l < "$WORK/unreadable.txt")"
+    echo "   из них ИСПОРЧЕНО:          $(wc -l < "$WORK/broken.txt")"
+    if [[ -s "$WORK/unreadable.txt" ]]; then
+        echo
+        echo "!! файлы, чтение которых даёт ошибку — копия непригодна:"
+        head -20 "$WORK/unreadable.txt"
+    fi
+    if [[ -s "$WORK/broken.txt" ]]; then
+        echo
+        echo "!! файлы, которые не исключались и всё равно не совпали:"
+        head -20 "$WORK/broken.txt"
+        echo "   (полный список: $WORK/broken.txt)"
+    fi
+fi
+echo
+echo "описи и списки: $WORK"
+echo "Замечание: файлы, изменённые в источнике ПОСЛЕ снятия копии, тоже попадут"
+echo "в расхождения — сверяйтесь со временем копии, если система с тех пор работала."
