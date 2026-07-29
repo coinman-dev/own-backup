@@ -631,13 +631,21 @@ struct SubvolData {
 struct InlineExtent {
     leaf: u64,
     key: Key,
-    /// btrfs_file_extent_item.compression — zeroing compressed bytes would
-    /// leave data that cannot be decompressed, so those are left alone (and
-    /// counted, not silently ignored).
+    /// btrfs_file_extent_item.compression. Zero means the bytes can simply be
+    /// overwritten; anything else means the item has to be re-emitted
+    /// uncompressed, or the decompressor would be handed nonsense.
     compression: u8,
     /// Bytes of file content in the item, after the 21-byte header.
     data_len: usize,
+    /// The item's 21-byte header, kept for the compressed case so the item can
+    /// be rebuilt without reading the tree again.
+    header: Option<[u8; 21]>,
 }
+
+/// Largest inline file we will re-emit uncompressed. btrfs caps inline extents
+/// at the sector size and, in practice, well below it; a bound keeps a corrupt
+/// `ram_bytes` from turning into a huge item that fails the whole edit set.
+const MAX_INLINE_REWRITE: usize = 8192;
 
 const S_IFMT: u32 = 0xF000;
 const S_IFDIR: u32 = 0x4000;
@@ -687,6 +695,7 @@ fn collect_subvol(vol: &mut dyn RawVolume, fs: &Fs, root: u64) -> Result<SubvolD
                                 key: (objectid, ktype, koffset),
                                 compression: data[16],
                                 data_len: data.len() - 21,
+                                header: data[..21].try_into().ok(),
                             });
                         } else if data.len() >= 53 {
                             let disk_bytenr = u64at(data, 21);
@@ -1280,17 +1289,38 @@ pub fn scan_btrfs_exclusions(
             }
             let Some(items) = sv.data.inline.get(&ino) else { continue };
             for it in items {
-                if it.compression != 0 {
-                    // Zeroing compressed bytes yields something that cannot be
-                    // decompressed — EIO on read. Left intact and reported.
+                if it.data_len == 0 && it.compression == 0 {
+                    continue;
+                }
+                if it.compression == 0 {
+                    edits.patch_item(it.leaf, it.key, 21, vec![0u8; it.data_len]);
+                    inline_zeroed += it.data_len as u64;
+                    continue;
+                }
+                // Compressed inline data cannot simply be overwritten with
+                // zeros: what comes back out of the decompressor is then
+                // garbage, i.e. EIO instead of an empty file. Re-emit the item
+                // UNCOMPRESSED, all zeros, the length the file claims — the
+                // decompressor is no longer involved. That makes the item grow
+                // (zeros do not compress into nothing), so it only happens when
+                // the leaf can hold it; otherwise the file keeps its data and
+                // is counted, because a silent leak is the one outcome an
+                // exclusion may not have.
+                let Some(hdr) = it.header else {
+                    inline_compressed += 1;
+                    continue;
+                };
+                let ram = u64at(&hdr, 8) as usize;
+                if ram > MAX_INLINE_REWRITE {
                     inline_compressed += 1;
                     continue;
                 }
-                if it.data_len == 0 {
-                    continue;
-                }
-                edits.patch_item(it.leaf, it.key, 21, vec![0u8; it.data_len]);
-                inline_zeroed += it.data_len as u64;
+                let mut data = hdr.to_vec();
+                data[16] = 0; // compression = none
+                data.resize(21 + ram, 0);
+                edits.delete_item(it.leaf, it.key);
+                edits.insert_item(it.leaf, it.key, data);
+                inline_zeroed += ram as u64;
             }
         }
     }
@@ -2345,6 +2375,112 @@ mod btrfs_integration {
         assert!(kept.len() == 65536 && kept.iter().all(|&b| b == 0xCD), "keep.txt damaged");
         let ghost = std::fs::read(outdir.join("cache/tiny.txt")).unwrap();
         assert!(ghost.iter().all(|&b| b == 0), "призрак читается не нулями");
+    }
+
+    /// The same, on a filesystem mounted with compression.
+    ///
+    /// A compressed inline extent cannot be overwritten with zeros — the
+    /// decompressor would be handed nonsense and the read would fail with EIO
+    /// instead of returning an empty file. The item is re-emitted uncompressed
+    /// instead, so the data is gone and the file still reads.
+    #[test]
+    fn compressed_inline_data_is_re_emitted_uncompressed() {
+        use std::io::Write;
+        if !have("mkfs.btrfs") {
+            eprintln!("mkfs.btrfs unavailable — skipping");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(src.join("cache")).unwrap();
+        // Highly compressible and small: mkfs.btrfs --compress stores it as a
+        // compressed inline extent.
+        let secret = "COMPRESSED-INLINE-SECRET ".repeat(40); // ~1 KiB, compresses well
+        std::fs::File::create(src.join("cache/tiny.txt")).unwrap().write_all(secret.as_bytes()).unwrap();
+        std::fs::File::create(src.join("keep.txt")).unwrap().write_all(&[0xCD; 65536]).unwrap();
+        let img = dir.path().join("fs.img");
+        std::fs::File::create(&img).unwrap().set_len(128 * 1024 * 1024).unwrap();
+        let out = std::process::Command::new("mkfs.btrfs").args(["-q", "-r"]).arg(&src).arg(&img).output().unwrap();
+        if !out.status.success() {
+            eprintln!("mkfs.btrfs failed — skipping");
+            return;
+        }
+        // mkfs.btrfs 6.6 has no --compress, so the compressed inline extent is
+        // built here: the item is re-emitted with a zstd frame and
+        // compression=3. The fixture is then PROVEN valid — btrfs itself must
+        // read the original text back out of it — before the scan is asked to
+        // deal with it. A fixture nobody checked would make this test say
+        // whatever we hoped.
+        let compressed_img = dir.path().join("compressed.img");
+        {
+            let f = std::fs::File::open(&img).unwrap();
+            let len = f.metadata().unwrap().len();
+            let mut vol = FileVol { f, len };
+            let fs = Fs::bootstrap(&mut vol).unwrap();
+            let root = *fs.tree_roots.get(&FS_TREE_OBJECTID).unwrap();
+            let mut target: Option<(u64, Key, Vec<u8>)> = None;
+            walk_tree(&mut vol, &fs.chunks, root, fs.nodesize, |node, nritems| {
+                let leaf = u64at(node, 0x30);
+                for_each_item(node, nritems, |oid, ktype, koff, data| {
+                    if ktype == EXTENT_DATA
+                        && data.len() > 21
+                        && data[20] == 0
+                        && data[21..].starts_with(b"COMPRESSED-INLINE-SECRET")
+                    {
+                        target = Some((leaf, (oid, ktype, koff), data.to_vec()));
+                    }
+                    Ok(())
+                })
+            })
+            .unwrap();
+            let (leaf, key, item) = target.expect("inline-элемент с маркером не найден");
+            let packed = zstd::bulk::compress(&item[21..], 3).unwrap();
+            assert!(packed.len() < item.len() - 21, "фикстура: сжатие не уменьшило данные");
+            let mut new_item = item[..21].to_vec();
+            new_item[16] = 3; // BTRFS_COMPRESS_ZSTD
+            new_item.extend_from_slice(&packed);
+
+            let mut edits = EditSet::new(fs.nodesize);
+            edits.learn_parents(&mut vol, &fs, root).unwrap();
+            edits.delete_item(leaf, key);
+            edits.insert_item(leaf, key, new_item);
+            let patches = edits.finalize(&mut vol, &fs).unwrap();
+            let mut data = std::fs::read(&img).unwrap();
+            for (off, bytes) in &patches {
+                let o = *off as usize;
+                data[o..o + bytes.len()].copy_from_slice(bytes);
+            }
+            std::fs::write(&compressed_img, &data).unwrap();
+        }
+        // The fixture must be a real, readable compressed inline extent.
+        let (ok, log) = btrfs_check(&compressed_img, true);
+        assert!(ok, "фикстура со сжатым inline невалидна:\n{log}");
+        let probe = dir.path().join("probe");
+        std::fs::create_dir_all(&probe).unwrap();
+        let r = std::process::Command::new("btrfs").arg("restore").arg(&compressed_img).arg(&probe).output().unwrap();
+        assert!(r.status.success(), "btrfs restore фикстуры: {}", String::from_utf8_lossy(&r.stderr));
+        let back = std::fs::read(probe.join("cache/tiny.txt")).unwrap();
+        assert_eq!(back, secret.as_bytes(), "фикстура: btrfs не прочитал сжатые данные обратно");
+
+        let f = std::fs::File::open(&compressed_img).unwrap();
+        let len = f.metadata().unwrap().len();
+        let mut vol = FileVol { f, len };
+        let scan =
+            scan_btrfs_exclusions(&mut vol, &["cache".to_string()], false, |_| Ok(())).unwrap();
+        let patched = dir.path().join("patched.img");
+        apply(&compressed_img, &scan, &patched);
+        let (ok, log) = btrfs_check(&patched, true);
+        assert!(ok, "btrfs check после пере-эмиссии сжатого inline:\n{log}");
+
+        let outdir = dir.path().join("restored");
+        std::fs::create_dir_all(&outdir).unwrap();
+        let r = std::process::Command::new("btrfs").arg("restore").arg(&patched).arg(&outdir).output().unwrap();
+        assert!(r.status.success(), "btrfs restore failed: {}", String::from_utf8_lossy(&r.stderr));
+        let ghost = std::fs::read(outdir.join("cache/tiny.txt")).unwrap();
+        assert!(!ghost.is_empty(), "файл должен читаться");
+        assert!(ghost.iter().all(|&b| b == 0), "сжатые inline-данные не вычищены");
+        let kept = std::fs::read(outdir.join("keep.txt")).unwrap();
+        assert!(kept.len() == 65536 && kept.iter().all(|&b| b == 0xCD), "keep.txt damaged");
     }
 
     /// A Stage-1 ghost's blocks must stay in the image; only what Stage 2 truly
