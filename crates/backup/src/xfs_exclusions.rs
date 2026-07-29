@@ -107,6 +107,9 @@ impl XfsExclusionScan {
 
 struct Sb {
     blocksize: u64,
+    /// sb_logstart / sb_logblocks — the internal log, or 0 for an external one.
+    logstart: u64,
+    logblocks: u64,
     inodesize: u64,
     agblocks: u64,
     agcount: u64,
@@ -151,6 +154,8 @@ fn parse_sb(vol: &mut dyn RawVolume) -> Result<Sb> {
     let agblocks = be32(&sb, 0x54);
     let agcount = be32(&sb, 0x58);
     let rootino = be64(&sb, 0x38);
+    let logstart = be64(&sb, 0x30);
+    let logblocks = be32(&sb, 0x60);
     let sectsize = be16(&sb, 0x66);
     let inopblog = sb[0x7B] as u32;
     let agblklog = sb[0x7C] as u32;
@@ -170,6 +175,8 @@ fn parse_sb(vol: &mut dyn RawVolume) -> Result<Sb> {
     }
     Ok(Sb {
         blocksize,
+        logstart,
+        logblocks,
         inodesize,
         agblocks,
         agcount,
@@ -180,6 +187,83 @@ fn parse_sb(vol: &mut dyn RawVolume) -> Result<Sb> {
         reflink: ro_compat & 0x4 != 0,     // XFS_SB_FEAT_RO_COMPAT_REFLINK
         ftype: incompat & 0x1 != 0,        // XFS_SB_FEAT_INCOMPAT_FTYPE
     })
+}
+
+/// XFS has no "needs recovery" flag: the only way to know whether the log
+/// holds work is to look at the log.
+///
+/// It matters here more than the flag does on ext4. Our xfs pass reads the
+/// inode and directory structures to decide which blocks belong to an excluded
+/// file, and zeroes them. If the log holds transactions that moved those
+/// blocks to some other file, the replay at first mount hands the survivor a
+/// hole full of zeros. So: read the log, find the record with the highest LSN,
+/// and require it to be the unmount record a clean shutdown leaves behind.
+/// Anything we cannot read confidently counts as dirty — refusing costs a few
+/// gigabytes in the copy, guessing costs someone else's file.
+fn log_is_clean(vol: &mut dyn RawVolume, sb: &Sb) -> Result<bool> {
+    if sb.logstart == 0 {
+        return Ok(false); // external log device — not ours to inspect
+    }
+    xfs_log_is_clean_at(
+        vol,
+        sb.fsblock_to_phys(sb.logstart),
+        sb.logblocks * sb.blocksize,
+        sb.sectsize,
+    )
+}
+
+/// The scan itself, over an already-located log. Kept free of the exclusion
+/// scanner's superblock struct so the used-map builder — which accepts older
+/// filesystems this module refuses outright — can ask the same question.
+pub(crate) fn xfs_log_is_clean_at(
+    vol: &mut dyn RawVolume,
+    log_off: u64,
+    log_len: u64,
+    sectsize: u64,
+) -> Result<bool> {
+    const XLOG_MAGIC: u32 = 0xFEED_BABE;
+    const XLOG_UNMOUNT_TYPE: u16 = 0x556E; // "Un"
+
+    if log_len == 0 || log_off + log_len > vol.len() {
+        return Ok(false);
+    }
+    let sect = sectsize.max(512) as usize;
+    let mut best: Option<(u64, u64)> = None; // (lsn, absolute offset)
+    let mut buf = vec![0u8; 1 << 20];
+    let mut pos = 0u64;
+    while pos < log_len {
+        let want = ((log_len - pos) as usize).min(buf.len());
+        vol.read_at(log_off + pos, &mut buf[..want])?;
+        let mut o = 0usize;
+        while o + sect <= want {
+            if be32(&buf, o) as u32 == XLOG_MAGIC {
+                let lsn = be64(&buf, o + 0x10);
+                if best.map(|(b, _)| lsn > b).unwrap_or(true) {
+                    best = Some((lsn, log_off + pos + o as u64));
+                }
+            }
+            o += sect;
+        }
+        pos += want as u64;
+    }
+
+    let Some((_, head)) = best else {
+        return Ok(true); // never written: a fresh mkfs log holds nothing
+    };
+    // The unmount record is one operation long, and its payload says so.
+    let mut rec = vec![0u8; sect + 16];
+    vol.read_at(head, &mut rec)?;
+    let num_logops = be32(&rec, 0x28);
+    if num_logops != 1 {
+        return Ok(false);
+    }
+    let magic_off = sect + 12; // record header, then xlog_op_header (12 B)
+    if magic_off + 2 > rec.len() {
+        return Ok(false);
+    }
+    let be = u16::from_be_bytes(rec[magic_off..magic_off + 2].try_into().unwrap());
+    let le = u16::from_le_bytes(rec[magic_off..magic_off + 2].try_into().unwrap());
+    Ok(be == XLOG_UNMOUNT_TYPE || le == XLOG_UNMOUNT_TYPE)
 }
 
 /// A resolved data extent (fs-block start + block count).
@@ -476,6 +560,11 @@ pub fn scan_xfs_exclusions(
         return Ok(scan);
     }
     let sb = parse_sb(vol)?;
+    if !log_is_clean(vol, &sb)? {
+        return Err(bad(
+            "журнал xfs не пуст (нечистое завершение) — исключения пропущены;              загрузите систему корректно или выполните xfs_repair",
+        ));
+    }
     // Shared block set (fs-block ranges) — empty when reflink is off.
     let shared = if sb.reflink { collect_shared(vol, &sb)? } else { ByteRanges::new() };
 
@@ -660,6 +749,67 @@ mod xfs_integration {
         std::fs::write(&patched, &data).unwrap();
         let out = std::process::Command::new("xfs_repair").arg("-n").arg(&patched).output().unwrap();
         assert!(out.status.success(), "xfs_repair found errors:\n{}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    /// XFS keeps no "needs recovery" flag, so the log itself is the only
+    /// witness. The fixture was unmounted cleanly, so it must read as clean;
+    /// overwrite the unmount record's magic and it must read as dirty — and
+    /// both entry points must then refuse rather than work from stale btrees.
+    #[test]
+    fn a_dirty_log_refuses_scan_and_used_map() {
+        let zst = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/xfs_reflink.img.zst");
+        if !zst.exists() {
+            eprintln!("xfs_reflink.img.zst missing — skipping");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let img = dir.path().join("fs.img");
+        let raw = zstd::decode_all(std::fs::File::open(&zst).unwrap()).unwrap();
+        std::fs::write(&img, &raw).unwrap();
+
+        // Sanity: a cleanly unmounted filesystem must not read as dirty, or the
+        // guard would simply switch xfs exclusions off for everyone.
+        let (scan, _) = run(&img, &["cache"]);
+        assert!(scan.files_excluded > 0, "чистый лог принят за грязный — исключения бы отключились");
+
+        // Find the unmount record and break its magic.
+        let mut data = raw.clone();
+        let sect = u16::from_be_bytes(data[0x66..0x68].try_into().unwrap()) as usize;
+        let bs = u32::from_be_bytes(data[0x04..0x08].try_into().unwrap()) as u64;
+        let logstart = u64::from_be_bytes(data[0x30..0x38].try_into().unwrap());
+        let agblocks = u32::from_be_bytes(data[0x54..0x58].try_into().unwrap()) as u64;
+        let agblklog = data[0x7C] as u32;
+        let log_off =
+            ((logstart >> agblklog) * agblocks + (logstart & ((1u64 << agblklog) - 1))) * bs;
+        let logblocks = u32::from_be_bytes(data[0x60..0x64].try_into().unwrap()) as u64;
+        let mut best: Option<(u64, usize)> = None;
+        let mut o = log_off as usize;
+        while o + sect <= (log_off + logblocks * bs) as usize {
+            if u32::from_be_bytes(data[o..o + 4].try_into().unwrap()) == 0xFEED_BABE {
+                let lsn = u64::from_be_bytes(data[o + 0x10..o + 0x18].try_into().unwrap());
+                if best.map(|(b, _)| lsn > b).unwrap_or(true) {
+                    best = Some((lsn, o));
+                }
+            }
+            o += sect;
+        }
+        let (_, head) = best.expect("в фикстуре не нашлось ни одной записи лога");
+        let magic_off = head + sect + 12;
+        data[magic_off] ^= 0xFF; // no longer an unmount record
+        let dirty = dir.path().join("dirty.img");
+        std::fs::write(&dirty, &data).unwrap();
+
+        let f = std::fs::File::open(&dirty).unwrap();
+        let len = f.metadata().unwrap().len();
+        let mut vol = FileVol { f, len };
+        assert!(
+            scan_xfs_exclusions(&mut vol, &["cache".to_string()], |_| Ok(())).is_err(),
+            "исключения должны отказать на грязном логе"
+        );
+        assert!(
+            crate::xfs_map::build_xfs_used_map(&mut vol, 1 << 20).is_err(),
+            "карта занятых блоков должна отказать на грязном логе"
+        );
     }
 
     #[test]
