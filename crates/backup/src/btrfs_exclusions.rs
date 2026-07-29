@@ -69,6 +69,13 @@ const EXTENT_CSUM_OBJECTID: u64 = u64::MAX - 9;
 /// `EXTENT_ITEM.flags` bit: a data extent (vs tree block).
 const EXTENT_FLAG_DATA: u64 = 0x1;
 
+/// Test-only: make `EditSet::finalize` refuse, so the Stage-1 fallback can be
+/// exercised without hunting for a filesystem that triggers it naturally.
+#[cfg(test)]
+thread_local! {
+    static FAIL_FINALIZE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 fn bad(msg: impl std::fmt::Display) -> OwnBackupError {
     OwnBackupError::Device(format!("btrfs exclusions: {msg}"))
 }
@@ -340,6 +347,10 @@ struct EditSet {
     /// (callers pre-spare files so it never comes to that). Trimming/splitting
     /// an existing item is delete + insert(s) with the derived keys.
     inserts: BTreeMap<u64, Vec<(Key, Vec<u8>)>>,
+    /// Leaves proven un-freeable (shared with a snapshot, or their extent
+    /// items would empty an extent-tree leaf). Unlike `drop_leaves` this
+    /// survives the planning rounds — a verdict does not need re-deriving.
+    never_drop: HashSet<u64>,
     /// Leaves we intend to UNLINK from their parent once they end up empty,
     /// instead of sparing a file to keep them alive. Advisory: `finalize`
     /// checks reality and refuses if a leaf marked here is not actually empty,
@@ -362,6 +373,7 @@ impl EditSet {
             deletes: BTreeMap::new(),
             patches: BTreeMap::new(),
             inserts: BTreeMap::new(),
+            never_drop: HashSet::new(),
             drop_leaves: HashSet::new(),
             parent: HashMap::new(),
             roots: HashSet::new(),
@@ -423,6 +435,10 @@ impl EditSet {
     /// node's checksum, and emit `(physical, bytes)` patches for all stripe
     /// copies (DUP metadata patched in both).
     fn finalize(mut self, vol: &mut dyn RawVolume, fs: &Fs) -> Result<Vec<(u64, Vec<u8>)>> {
+        #[cfg(test)]
+        if FAIL_FINALIZE.with(|f| f.get()) && !self.deletes.is_empty() {
+            return Err(bad("тестовый отказ сборки правок"));
+        }
         // 1. Rebuild each leaf that has deletes/patches/inserts; track
         //    first-key changes.
         let leaves: HashSet<u64> = self
@@ -595,6 +611,9 @@ impl EditSet {
     /// second unlink one level up, and that is not what this pass does; there
     /// the old answer still applies, spare a file and let the leaf live.
     fn try_drop_leaf(&mut self, vol: &mut dyn RawVolume, fs: &Fs, leaf: u64) -> Result<bool> {
+        if self.never_drop.contains(&leaf) {
+            return Ok(false);
+        }
         if self.drop_leaves.contains(&leaf) {
             return Ok(true);
         }
@@ -1327,6 +1346,14 @@ pub fn scan_btrfs_exclusions(
     let mut spared = 0u64;
     let mut settled = false;
     for _ in 0..MAX_ROUNDS {
+        // Rebuilt from scratch, because the set it is derived from keeps
+        // moving: `spare_parents_of_spared_children` runs LAST and puts files
+        // back, after which a leaf marked for removal may no longer empty. A
+        // stale mark meant its tree block was freed for a leaf that still had
+        // items — caught by `finalize`, which then refused the whole of
+        // Stage 2 and let every excluded file into the copy (image 6.8 → 9.4
+        // GB). Verdicts that cannot change — `never_drop` — are kept.
+        edits.drop_leaves.clear();
         let a = spare_inodes_that_would_empty_a_leaf(vol, &fs, &subvols, &mut removable, &mut edits)?;
         let b = spare_files_whose_extents_would_empty_a_leaf(vol, &fs, &mut removable, &file_extents, &mut edits)?;
         let c = spare_files_whose_csum_edits_break_a_leaf(vol, &fs, &mut removable, &file_extents, &mut edits)?;
@@ -1502,8 +1529,48 @@ pub fn scan_btrfs_exclusions(
     //    Stage 2 actually freed extents: Stage 1 changes no allocation, so
     //    bytes_used is right and the free-space tree is still valid — patching
     //    the superblocks then would be a gratuitous edit of foreign metadata.
-    let freed_bytes: u64 = freed_logical.iter().map(|(s, e)| e - s).sum::<u64>() + freed_meta;
-    scan.patches = edits.finalize(vol, &fs)?;
+    let mut freed_bytes: u64 = freed_logical.iter().map(|(s, e)| e - s).sum::<u64>() + freed_meta;
+    // A Stage-2 failure discovered HERE — a leaf that was to be removed and is
+    // not empty, a leaf that overflowed — used to take the whole scan down with
+    // it, and the engine then kept every excluded file: the copy grew from 6.8
+    // to 9.4 GB with "btrfs exclusions failed" in the log. The weaker promise
+    // must survive the stronger one failing, so Stage 1 is rebuilt from
+    // scratch: entries stay, data still goes.
+    scan.patches = match edits.finalize(vol, &fs) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(
+                error = %e,
+                "btrfs exclusions: правки Stage 2 отвергнуты на сборке — \
+                 повторяю только обнулением данных"
+            );
+            let mut stage1 = EditSet::new(fs.nodesize);
+            let mut only_zeroed = ByteRanges::new();
+            for (&(sid, ino), exts) in &file_extents {
+                let _ = sid;
+                let _ = ino;
+                for ex in exts.iter().filter(|e| freeable(e.disk_bytenr)) {
+                    only_zeroed.add(ex.disk_bytenr, ex.disk_bytenr + ex.disk_num_bytes);
+                }
+            }
+            only_zeroed.finalize();
+            plan_csum_edits(vol, &fs, &ByteRanges::new(), &only_zeroed, &mut stage1)?;
+            // The used-map may not drop anything now: every entry survives, so
+            // the filesystem still reads those blocks — as zeros.
+            scan.droppable = ByteRanges::new();
+            scan.ranges = ByteRanges::new();
+            for (start, end) in only_zeroed.iter() {
+                for (phys, len) in fs.chunks.physical_spans(start, end)? {
+                    scan.ranges.add(phys, phys + len);
+                }
+            }
+            scan.ranges.finalize();
+            scan.bytes_excluded = only_zeroed.iter().map(|(s, e)| e - s).sum();
+            freed_bytes = 0;
+            removable.clear();
+            stage1.finalize(vol, &fs)?
+        }
+    };
     if freed_bytes > 0 {
         patch_superblocks(vol, &fs, freed_bytes, &mut scan.patches)?;
     }
@@ -1566,11 +1633,16 @@ fn spare_inodes_that_would_empty_a_leaf(
             let leaf = u64at(node, 0x30);
             total.insert(leaf, nritems);
             for_each_item(node, nritems, |objectid, ktype, _koffset, data| {
+                // A DIR_ITEM can hold several entries under one hash. It only
+                // disappears if ALL of them point at removed inodes —
+                // `split_dir_item` re-emits it otherwise, and predicting a
+                // deletion that does not happen is how a leaf gets marked for
+                // removal and then survives.
                 let victim = if rem.contains(&objectid) {
                     Some(objectid)
                 } else if ktype == DIR_ITEM || ktype == DIR_INDEX {
-                    let loc = u64at(data, 0);
-                    rem.contains(&loc).then_some(loc)
+                    let (removed_len, kept) = split_dir_item(data, &rem);
+                    (removed_len > 0 && kept.is_empty()).then(|| u64at(data, 0))
                 } else {
                     None
                 };
@@ -1930,8 +2002,11 @@ fn undrop_leaves_we_cannot_free(
 
     let mut undropped = 0u64;
     for (&block, &ok) in &exclusive {
-        if !ok && edits.drop_leaves.remove(&block) {
-            undropped += 1;
+        if !ok {
+            edits.never_drop.insert(block);
+            if edits.drop_leaves.remove(&block) {
+                undropped += 1;
+            }
         }
     }
     for (eleaf, n) in doomed {
@@ -1940,6 +2015,7 @@ fn undrop_leaves_we_cannot_free(
         }
         let Some(blocks) = blamed.get(&eleaf) else { continue };
         for b in blocks {
+            edits.never_drop.insert(*b);
             if edits.drop_leaves.remove(b) {
                 undropped += 1;
             }
@@ -2968,6 +3044,113 @@ mod btrfs_integration {
             "shared extents were zeroed — CoW safety violated"
         );
         assert!(scan.files_kept_shared >= 1, "expected shared-kept accounting");
+    }
+
+    /// The plan to remove a leaf must be rebuilt whenever the removal set moves.
+    ///
+    /// `spare_parents_of_spared_children` runs LAST in each round and puts
+    /// files back, so a leaf marked for removal earlier in that same round may
+    /// no longer empty. The mark used to survive into the next round anyway,
+    /// its tree block was freed for a leaf that still held items, and
+    /// `finalize` — correctly — refused the whole of Stage 2, letting every
+    /// excluded file into the copy: the image went from 6.8 to 9.4 GB with
+    /// "btrfs exclusions failed — keeping all files" in the log.
+    ///
+    /// A hard link whose other name is outside the excluded tree is what
+    /// triggers it: the file cannot be removed, so its directory is spared
+    /// after the fact.
+    #[test]
+    fn a_spared_parent_cancels_the_plan_to_remove_its_leaf() {
+        use std::io::Write;
+        if !have("mkfs.btrfs") {
+            eprintln!("mkfs.btrfs unavailable — skipping");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(src.join("cache")).unwrap();
+        // Dense enough that whole leaves fill with this directory's items.
+        for i in 0..400 {
+            let name = format!("cache/f-{i:04}-{}", "y".repeat(80));
+            std::fs::File::create(src.join(&name)).unwrap().write_all(&[0xAB; 8192]).unwrap();
+        }
+        // …and one file inside it that cannot go: its twin lives outside.
+        std::fs::File::create(src.join("cache/hard.bin")).unwrap().write_all(&[0xEE; 8192]).unwrap();
+        std::fs::hard_link(src.join("cache/hard.bin"), src.join("keep_hard.bin")).unwrap();
+        std::fs::File::create(src.join("keep.txt")).unwrap().write_all(&[0xCD; 65536]).unwrap();
+        let img = dir.path().join("fs.img");
+        std::fs::File::create(&img).unwrap().set_len(512 * 1024 * 1024).unwrap();
+        let out = std::process::Command::new("mkfs.btrfs").args(["-q", "-r"]).arg(&src).arg(&img).output().unwrap();
+        if !out.status.success() {
+            eprintln!("mkfs.btrfs failed — skipping");
+            return;
+        }
+
+        // The scan must SUCCEED. Failing here means Stage 2 was refused, which
+        // in the product means every excluded file travels into the copy.
+        let f = std::fs::File::open(&img).unwrap();
+        let len = f.metadata().unwrap().len();
+        let mut vol = FileVol { f, len };
+        let scan = scan_btrfs_exclusions(&mut vol, &["cache".to_string()], true, |_| Ok(()))
+            .expect("Stage 2 отменён — план удаления листьев разошёлся с реальностью");
+        assert!(scan.files_excluded > 0);
+
+        let patched = dir.path().join("patched.img");
+        apply(&img, &scan, &patched);
+        let (ok, log) = btrfs_check(&patched, true);
+        assert!(ok, "btrfs check:\n{log}");
+
+        // The hard link's data must survive: its other name was never excluded.
+        let outdir = dir.path().join("restored");
+        std::fs::create_dir_all(&outdir).unwrap();
+        let r = std::process::Command::new("btrfs").arg("restore").arg(&patched).arg(&outdir).output().unwrap();
+        assert!(r.status.success(), "btrfs restore failed: {}", String::from_utf8_lossy(&r.stderr));
+        let twin = std::fs::read(outdir.join("keep_hard.bin")).unwrap();
+        assert!(twin.iter().all(|&b| b == 0xEE), "жёсткая ссылка снаружи потеряла данные");
+    }
+
+    /// When Stage 2 is refused at assembly time, Stage 1 must still happen.
+    ///
+    /// This is the difference between a copy without the excluded data and a
+    /// copy WITH it. A Stage-2 defect discovered while assembling the patches
+    /// used to fail the whole scan, and the engine's answer to a failed scan is
+    /// to keep every file: the image went from 6.8 to 9.4 GB and the excluded
+    /// data travelled after all. The weaker promise — the data goes, the entry
+    /// stays — has to survive the stronger one failing.
+    #[test]
+    fn a_refused_stage2_still_zeroes_the_data() {
+        let Some((img, keep)) = make_btrfs() else {
+            eprintln!("mkfs.btrfs unavailable — skipping");
+            return;
+        };
+        let f = std::fs::File::open(&img).unwrap();
+        let len = f.metadata().unwrap().len();
+        let mut vol = FileVol { f, len };
+        let pats = vec!["secret.log".to_string(), "cache".to_string()];
+
+        FAIL_FINALIZE.with(|f| f.set(true));
+        let scan = scan_btrfs_exclusions(&mut vol, &pats, true, |_| Ok(()));
+        FAIL_FINALIZE.with(|f| f.set(false));
+        let scan = scan.expect("скан обязан выжить: Stage 1 не зависит от Stage 2");
+
+        assert!(!scan.ranges.is_empty(), "данные исключённых файлов не обнулены");
+        assert!(scan.droppable.is_empty(), "призраки нельзя выбрасывать из образа");
+        assert!(scan.bytes_excluded > 0, "исключённые байты не посчитаны");
+
+        let patched = keep.path().join("fallback.img");
+        apply(&img, &scan, &patched);
+        let (ok, log) = btrfs_check(&patched, true);
+        assert!(ok, "btrfs check после отката на Stage 1:\n{log}");
+
+        // The files are still listed — as ghosts — and read as zeros.
+        let outdir = keep.path().join("restored");
+        std::fs::create_dir_all(&outdir).unwrap();
+        let r = std::process::Command::new("btrfs").arg("restore").arg(&patched).arg(&outdir).output().unwrap();
+        assert!(r.status.success(), "btrfs restore failed: {}", String::from_utf8_lossy(&r.stderr));
+        let ghost = std::fs::read(outdir.join("secret.log")).unwrap();
+        assert!(ghost.iter().all(|&b| b == 0), "призрак читается не нулями");
+        let kept = std::fs::read(outdir.join("keep.txt")).unwrap();
+        assert!(kept.iter().all(|&b| b == 0xCD), "keep.txt повреждён");
     }
 
     /// A tree block a snapshot also points at is not ours to free.
