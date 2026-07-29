@@ -12,6 +12,7 @@ pub mod esp_fallback;
 pub mod ext_exclusions;
 pub mod ext_map;
 pub mod fat_exclusions;
+pub mod aligned_volume;
 pub mod fat_map;
 pub mod fs_uuid;
 pub mod gpt_reader;

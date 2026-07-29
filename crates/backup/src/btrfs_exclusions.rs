@@ -1187,16 +1187,29 @@ pub fn scan_btrfs_exclusions(
     // nothing pointing at it. `btrfs check` counted 608 of those in one copy:
     //
     //   unresolved ref dir 199852 index 2 name downloads … no dir item, no dir index
+    // Run to a FIXPOINT. The bound is a runaway guard, not a budget: sparing
+    // only ever shrinks the set, so it must converge — and if it somehow has
+    // not, the set still violates "a directory goes only with everything inside
+    // it", which is the invariant whose breach `btrfs check` once counted 608
+    // times. Stopping quietly after N rounds would ship exactly that.
+    const MAX_ROUNDS: u32 = 64;
     let mut spared = 0u64;
-    for _ in 0..8 {
+    let mut settled = false;
+    for _ in 0..MAX_ROUNDS {
         let a = spare_inodes_that_would_empty_a_leaf(vol, &fs, &subvols, &mut removable)?;
         let b = spare_files_whose_extents_would_empty_a_leaf(vol, &fs, &mut removable, &file_extents)?;
         let c = spare_files_whose_csum_edits_break_a_leaf(vol, &fs, &mut removable, &file_extents)?;
         let d = spare_parents_of_spared_children(&subvols, &mut removable);
         spared += a + b + c + d;
         if a + b + c + d == 0 {
+            settled = true;
             break;
         }
+    }
+    if !settled {
+        return Err(bad(format!(
+            "набор удаляемых файлов не сошёлся за {MAX_ROUNDS} кругов — исключения не применяются"
+        )));
     }
     if spared > 0 {
         info!(spared, "btrfs exclusions: файлы оставлены в дереве ради целостности листов");

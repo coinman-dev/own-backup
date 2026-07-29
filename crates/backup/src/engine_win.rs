@@ -1418,11 +1418,18 @@ fn prepare_partition_map(
         excluded_bytes: 0,
         categories: None,
     };
+    // Every exclusion scanner reads through this. The alignment wrapper is not
+    // a nicety: a raw Windows device refuses reads that do not start on a
+    // sector boundary, and ext inodes are 256 bytes — the root inode among the
+    // unaligned ones. Without it the ext scan failed on its first read, skipped
+    // the whole tree, and reported "excluded_files=0" as if it had worked.
     let open = || -> Result<Box<dyn crate::fat_map::RawVolume + Send>> {
         let dev = WinRawDevice::open_read(read_path)?;
         Ok(match luks {
-            Some(p) => Box::new(crate::decrypt::DecryptingVolume::new(Box::new(dev), p.clone())),
-            None => Box::new(dev),
+            Some(p) => Box::new(crate::aligned_volume::AlignedVolume::new(
+                crate::decrypt::DecryptingVolume::new(Box::new(dev), p.clone()),
+            )),
+            None => Box::new(crate::aligned_volume::AlignedVolume::new(dev)),
         })
     };
     // NTFS first (only on a plain, non-decrypted volume), then FAT/ext/btrfs/xfs.
