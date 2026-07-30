@@ -52,7 +52,7 @@ use crate::win_device::{to_wide, WinRawDevice};
 
 /// Stamped into the start log line so a stale service exe is immediately
 /// visible in the log (see "Windows GUI testing gotchas").
-const BUILD_TAG: &str = "2026-07-09e-mount-wait-diag";
+const BUILD_TAG: &str = "2026-07-30a-volume-online";
 
 /// Standard `DELETE` access right (generic, not in the FILE_* consts).
 const DELETE_ACCESS: u32 = 0x0001_0000;
@@ -236,7 +236,9 @@ fn mount_and_delete(
     // volume from mounting at all (device-not-ready), so the delete pass would
     // wait out the full 180 s and delete nothing. Instead the surfacing volume's
     // drive letter (and its remembered mapping) is stripped once it mounts (see
-    // strip_drive_letters), so it only flashes briefly.
+    // strip_drive_letters), so it only flashes briefly. A machine that has
+    // auto-mount off for its own reasons gets it back on for the mount window.
+    let _automount = crate::automount::AutoMountGuard::enable_if_disabled();
     create_differencing_vhdx(temp, image_path)?;
     debug!(temp_child = %temp.display(), "true removal: temp differencing child created");
 
@@ -366,7 +368,9 @@ fn mount_and_delete_multi(
 ) -> Result<(u64, u64)> {
     // Do NOT disable auto-mount (it blocks the NTFS volume from mounting at all
     // → 180 s device-not-ready + nothing deleted). Letters are stripped after
-    // mount instead (strip_letters_on_disk below).
+    // mount instead (strip_letters_on_disk below); a machine that keeps
+    // auto-mount off gets it back on for the mount window.
+    let _automount = crate::automount::AutoMountGuard::enable_if_disabled();
     create_differencing_vhdx(temp, image_path)?;
     let attached = attach_vhdx(temp, AttachMode::RawWrite)?;
     let dev = open_write_retry(attached.physical_path())?;
@@ -547,14 +551,36 @@ pub(crate) fn delete_paths_on_disk(
 /// image mounted fine read-only for browsing).
 const VOLUME_READY_TIMEOUT: Duration = Duration::from_secs(180);
 
+/// How long a volume may keep answering `ERROR_NOT_READY` before we stop
+/// waiting. That code does not mean "still mounting" — a mount in progress
+/// BLOCKS inside the open — it means the volume manager is holding the volume
+/// offline and will keep doing so (auto-mount disabled is the usual reason).
+/// Waiting out the full [`VOLUME_READY_TIMEOUT`] for that only turns a failed
+/// pass into a three-minute freeze at the end of the backup (2026-07-30).
+/// Kept above the slowest mount ever observed to still succeed (~57 s) so a
+/// genuinely slow qcow2/AIM mount is never cut off by this.
+const NOT_READY_GIVE_UP: Duration = Duration::from_secs(60);
+
+/// `ERROR_NOT_READY` as it appears in a formatted `windows::core::Error`. The
+/// hex code is the locale-independent part of the message ("Устройство не
+/// готово. (0x80070015)" on a Russian host).
+const NOT_READY_HRESULT: &str = "0x80070015";
+
 /// Wait until the volume's filesystem is mounted and its root directory is
 /// readable, so deletions do not race an incomplete mount. Polls the root entry
 /// count until it is non-zero and stable across two reads, or a timeout. Returns
 /// the final entry count (0 = the FS never came up — a clear diagnostic).
+///
+/// A volume answering `ERROR_NOT_READY` is not mounting slowly, it is being held
+/// offline; the poll therefore also asks the volume manager to bring it online
+/// (`IOCTL_VOLUME_ONLINE`, what diskpart's `online volume` sends) instead of
+/// only watching, and gives up after [`NOT_READY_GIVE_UP`] if that never takes.
 fn wait_for_volume_ready(volume_root: &str) -> usize {
     let start = Instant::now();
     let mut last = 0usize;
     let mut next_report = Duration::from_secs(15);
+    let mut next_online = Duration::ZERO;
+    let mut online_ok = false;
     loop {
         match list_dir_backup(Path::new(volume_root)) {
             Ok(entries) => {
@@ -566,15 +592,52 @@ fn wait_for_volume_ready(volume_root: &str) -> usize {
             }
             Err(e) => {
                 last = 0;
+                let not_ready = e.to_string().contains(NOT_READY_HRESULT);
+                // Held offline → ask for it to be mounted, first straight away
+                // and then every few seconds while the state persists.
+                if not_ready && start.elapsed() >= next_online {
+                    next_online = start.elapsed() + Duration::from_secs(5);
+                    match crate::volume_win::bring_volume_online(volume_root) {
+                        Ok(()) => {
+                            if !online_ok {
+                                info!(
+                                    volume = %volume_root,
+                                    "true removal: volume was offline — brought it online explicitly"
+                                );
+                            }
+                            online_ok = true;
+                        }
+                        Err(err) => debug!(
+                            volume = %volume_root, error = %err,
+                            "true removal: could not bring the volume online"
+                        ),
+                    }
+                }
                 // Periodic breadcrumb: the exact error code distinguishes a
                 // slow mount from a failed one (RAW) from a device problem.
                 if start.elapsed() >= next_report {
                     info!(
                         elapsed_s = start.elapsed().as_secs(),
                         error = %e,
+                        automount_disabled = ?crate::automount::is_disabled(),
                         "true removal: filesystem not ready yet"
                     );
                     next_report += Duration::from_secs(15);
+                }
+                // "Not ready" that survives explicit onlining is terminal:
+                // report it in seconds instead of freezing the finalize phase
+                // for three minutes to reach the same answer.
+                if not_ready && start.elapsed() >= NOT_READY_GIVE_UP {
+                    warn!(
+                        volume = %volume_root,
+                        elapsed_s = start.elapsed().as_secs(),
+                        online_ioctl_ok = online_ok,
+                        automount_disabled = ?crate::automount::is_disabled(),
+                        error = %e,
+                        "true removal: the volume manager keeps the image volume offline — \
+                         giving up (no filesystem was ever mounted, so no I/O reached the image)"
+                    );
+                    return 0;
                 }
             }
         }

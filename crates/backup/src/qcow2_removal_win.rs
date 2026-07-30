@@ -296,11 +296,14 @@ fn mount_delete(
     paths: &[ExcludedPath],
     tick: &mut dyn FnMut(u64),
 ) -> Result<(u64, u64)> {
-    // No drive letter while we delete (reached via \\?\Volume{GUID}\). qcow2/AIM
-    // only — the AIM disk still surfaces its volume with auto-mount off, so the
-    // NTFS FS mounts and no letter flashes. (VHDX must NOT do this: mountvol /N
-    // blocks the AttachVirtualDisk child's NTFS mount entirely — 2026-07-12.)
-    let _no_letter = crate::automount::AutoMountGuard::disable();
+    // Auto-mount is NOT disabled here (it was until 2026-07-30): `mountvol /N`
+    // makes mountmgr hold every surfacing volume OFFLINE, and an offline volume
+    // answers ERROR_NOT_READY to every open without a single byte of I/O — the
+    // three-minute "filesystem not ready yet" freeze that deleted nothing. The
+    // letter is hidden the way the VHDX path hides it instead: stripped as soon
+    // as it appears (strip_drive_letters, via delete_paths_on_disk). If the
+    // machine has auto-mount off, it is turned on for the mount window only.
+    let _automount = crate::automount::AutoMountGuard::enable_if_disabled();
     let adapter = crate::aim_win::AimAdapter::open()?;
     let device_number = adapter.create_tcp_proxy(port, virtual_size, false)?;
     let result = (|| -> Result<(u64, u64)> {
@@ -343,10 +346,11 @@ fn mount_delete_multi(
     partitions: &[(u64, Vec<ExcludedPath>)],
     tick: &mut dyn FnMut(u64),
 ) -> Result<(u64, u64)> {
-    // No drive letters while we delete (reached via \\?\Volume{GUID}\). qcow2/AIM
-    // only — see mount_delete above; VHDX must NOT disable auto-mount (blocks the
-    // NTFS mount, 180 s hang — 2026-07-12).
-    let _no_letter = crate::automount::AutoMountGuard::disable();
+    // Auto-mount stays as the machine has it — see mount_delete above: turning
+    // it off holds the image's volumes offline and the delete pass finds
+    // nothing to delete. Letters are stripped after the mount instead
+    // (strip_letters_on_disk, via delete_paths_on_disk_multi).
+    let _automount = crate::automount::AutoMountGuard::enable_if_disabled();
     let adapter = crate::aim_win::AimAdapter::open()?;
     let device_number = adapter.create_tcp_proxy(port, virtual_size, false)?;
     let result = (|| -> Result<(u64, u64)> {

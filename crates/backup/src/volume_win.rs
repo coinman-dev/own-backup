@@ -277,6 +277,56 @@ pub fn strip_drive_letters(volume_root: &str) {
     }
 }
 
+/// `IOCTL_VOLUME_ONLINE` — absent from the Windows SDK metadata the `windows`
+/// crate is generated from, so it is spelled out here:
+/// `CTL_CODE(IOCTL_VOLUME_BASE = 0x56, 2, METHOD_BUFFERED, FILE_READ_ACCESS |
+/// FILE_WRITE_ACCESS)`.
+const IOCTL_VOLUME_ONLINE: u32 = 0x0056_C008;
+
+/// Ask the volume manager to bring `volume_root` ONLINE — i.e. mount its
+/// filesystem — and report what happened.
+///
+/// A volume that surfaces while "automatic mounting of new volumes" is off
+/// (`mountvol /N`, `diskpart automount disable`) is deliberately left offline by
+/// mountmgr: the volume device enumerates and answers
+/// `IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS`, but every open of its root fails with
+/// `ERROR_NOT_READY` (0x80070015) and **no I/O ever reaches the disk**. That is
+/// exactly what a backup image mounted for the true-removal pass looked like on
+/// 2026-07-30: 180 s of "filesystem not ready yet", 14 reads served in total,
+/// nothing deleted. The setting is machine-global and persistent, so it can also
+/// be the user's own (or the leftover of a run that died before restoring it) —
+/// which is why the delete pass must not merely avoid turning it off, it has to
+/// mount the volume explicitly.
+///
+/// This is the IOCTL behind diskpart's `online volume`; it mounts the volume
+/// whatever the machine's automount setting says. Best-effort: an error is
+/// returned for logging, never fatal.
+pub fn bring_volume_online(volume_root: &str) -> std::result::Result<(), String> {
+    let device = volume_root.trim_end_matches('\\');
+    let wide = to_wide(device);
+    // SAFETY: `wide` outlives the call.
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            GENERIC_READ.0 | GENERIC_WRITE.0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAGS_AND_ATTRIBUTES(0),
+            None,
+        )
+    }
+    .map_err(|e| format!("open volume: {e}"))?;
+    let handle = FileHandle(handle);
+
+    let mut returned = 0u32;
+    // SAFETY: no in/out buffers; valid volume handle.
+    unsafe {
+        DeviceIoControl(handle.0, IOCTL_VOLUME_ONLINE, None, 0, None, 0, Some(&mut returned), None)
+    }
+    .map_err(|e| format!("IOCTL_VOLUME_ONLINE: {e}"))
+}
+
 /// Strip drive letters from every volume on `disk_number`.
 pub fn strip_letters_on_disk(disk_number: u32) {
     for vr in all_volume_roots_on_disk(disk_number) {

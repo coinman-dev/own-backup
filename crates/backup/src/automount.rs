@@ -14,15 +14,22 @@
 //! leaving the guard a no-op and a letter still appearing. `mountvol` is the
 //! same kind of proven system-tool call as [`crate::san_policy`]'s PowerShell.
 //!
-//! **qcow2/AIM only.** The VHDX true-removal path must NOT use this guard:
-//! `mountvol /N` stops the NTFS volume on an `AttachVirtualDisk` differencing
-//! child from mounting at all (180 s device-not-ready, nothing deleted —
-//! 2026-07-12). VHDX volumes never flash a letter anyway, so the VHDX path
-//! relies solely on [`crate::true_removal_win`]'s `strip_drive_letters`. The
-//! AIM-mounted qcow2 disk still surfaces its volume with auto-mount disabled,
-//! so the guard works there and is the thing that keeps the letter hidden.
+//! **No true-removal path uses the guard any more (2026-07-30).** `mountvol /N`
+//! does not merely withhold a letter: mountmgr holds every *new* volume OFFLINE,
+//! and an offline volume answers `ERROR_NOT_READY` (0x80070015) to every open
+//! without a single byte of I/O reaching the disk. The VHDX path learned that
+//! on 2026-07-12 (180 s device-not-ready, nothing deleted); the qcow2/AIM path
+//! was believed to be immune until a VMware guest reproduced exactly the same
+//! three-minute freeze on 2026-07-30. Both paths now let the machine's setting
+//! stand, strip the letter as soon as it appears
+//! ([`crate::volume_win`]'s `strip_drive_letters`) and, when a volume does come
+//! up offline anyway — the setting is global and may be the user's own — mount
+//! it explicitly with `bring_volume_online`. [`is_disabled`] reports the
+//! machine's setting for the log so that state is never a guess again.
 //!
-//! [`AutoMountGuard`] is RAII and best-effort: `disable()` turns auto-mount off,
+//! [`AutoMountGuard`] is kept for callers that legitimately want no letter at
+//! all (mounting an image for browsing), and is RAII and best-effort:
+//! `disable()` turns auto-mount off,
 //! `Drop` turns it back on (retried, loudly logged on failure — a stuck
 //! "disabled" would stop the user's own USB drives from getting letters until
 //! they run `mountvol /E`). Any failure yields a no-op/loud guard; the delete
@@ -33,51 +40,117 @@
 use std::os::windows::process::CommandExt;
 use std::process::Command;
 
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// `CREATE_NO_WINDOW` — keep the helper `mountvol.exe` invisible.
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-/// Restores auto-mounting of new volumes when dropped.
-#[must_use = "auto-mount is restored when the guard is dropped"]
+/// Puts the machine's auto-mount setting back when dropped.
+#[must_use = "the setting is put back when the guard is dropped"]
 pub struct AutoMountGuard {
-    /// True when we disabled auto-mount and must re-enable it on drop.
-    restore: bool,
+    /// `mountvol` flag to run on drop (`/E` or `/N`), or `None` for a guard
+    /// that changed nothing.
+    restore: Option<&'static str>,
 }
 
 impl AutoMountGuard {
-    /// Turn auto-mount OFF so a surfacing volume gets no drive letter. Assumes
-    /// the near-universal default (enabled) and re-enables on drop; `mountvol`
-    /// has no query, so a machine that already had it disabled is re-enabled —
-    /// harmless, enabled is the default.
+    /// Turn auto-mount OFF so a surfacing volume gets no drive letter — and no
+    /// mounted filesystem either, which is why the true-removal paths do not
+    /// use this (see the module docs). Restores the previous state on drop.
     pub fn disable() -> Self {
+        let previous = is_disabled();
         if run_mountvol("/N") {
-            debug!("auto-mount disabled (mountvol /N) for the true-removal mount window");
-            Self { restore: true }
+            debug!("auto-mount disabled (mountvol /N)");
+            Self { restore: (previous != Some(true)).then_some("/E") }
         } else {
-            warn!("could not disable auto-mount (mountvol /N) — a drive letter may appear briefly during removal");
-            Self { restore: false }
+            warn!("could not disable auto-mount (mountvol /N) — a drive letter may appear briefly");
+            Self { restore: None }
+        }
+    }
+
+    /// Turn auto-mount ON for the duration when — and only when — the machine
+    /// has it off, restoring "off" on drop.
+    ///
+    /// With auto-mount disabled, mountmgr keeps every arriving volume offline:
+    /// the image we just attached to delete the excluded files from would
+    /// answer `ERROR_NOT_READY` to every open and the pass would delete nothing.
+    /// The setting is machine-global, so it may be the admin's deliberate
+    /// choice — hence a window as short as the mount, and the original state
+    /// back afterwards.
+    pub fn enable_if_disabled() -> Self {
+        if is_disabled() != Some(true) {
+            return Self { restore: None };
+        }
+        if run_mountvol("/E") {
+            info!(
+                "auto-mount was disabled on this machine — enabled for the mount window so the \
+                 image's volumes can mount (restored on the way out)"
+            );
+            Self { restore: Some("/N") }
+        } else {
+            warn!(
+                "auto-mount is disabled on this machine and could not be enabled (mountvol /E) — \
+                 the image's volumes may refuse to mount"
+            );
+            Self { restore: None }
         }
     }
 }
 
 impl Drop for AutoMountGuard {
     fn drop(&mut self) {
-        if !self.restore {
-            return;
-        }
-        // Re-enabling matters: a stuck "disabled" stops the user's own new
-        // volumes from getting letters. Retry, and make failure impossible to
-        // miss in the log.
+        let Some(flag) = self.restore else { return };
+        // Restoring matters both ways: a stuck "disabled" stops the user's own
+        // new volumes from getting letters, a stuck "enabled" undoes a policy
+        // they chose. Retry, and make failure impossible to miss in the log.
         for attempt in 1..=3 {
-            if run_mountvol("/E") {
-                debug!("auto-mount re-enabled (mountvol /E)");
+            if run_mountvol(flag) {
+                debug!(flag, "auto-mount setting restored");
                 return;
             }
-            warn!(attempt, "retrying mountvol /E");
+            warn!(attempt, flag, "retrying mountvol");
         }
-        warn!("FAILED to re-enable auto-mount — run `mountvol /E` manually to restore drive-letter assignment");
+        warn!(flag, "FAILED to restore the auto-mount setting — run `mountvol {flag}` manually");
     }
+}
+
+/// Is automatic mounting of new volumes currently OFF on this machine?
+///
+/// `Some(true)` means new volumes surface OFFLINE: their device enumerates but
+/// every open fails with `ERROR_NOT_READY` until something onlines them
+/// explicitly (see `volume_win::bring_volume_online`). The setting is global and
+/// persistent — it can be the user's own, or the leftover of a run that died
+/// with the guard still applied — so the true-removal pass logs it whenever a
+/// mounted image refuses to come up. `None` = could not be read.
+///
+/// `mountvol` has no query, so the registry value mountmgr itself reads is
+/// consulted (`reg query`, same "proven system tool" approach as the rest of
+/// this module). An absent value is the default: auto-mount enabled.
+pub fn is_disabled() -> Option<bool> {
+    let out = Command::new("reg")
+        .args([
+            "query",
+            r"HKLM\SYSTEM\CurrentControlSet\Services\mountmgr",
+            "/v",
+            "NoAutoMount",
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    if let Some(line) = text.lines().find(|l| l.contains("NoAutoMount")) {
+        let value = line.split_whitespace().last().unwrap_or_default();
+        return match value {
+            "0x0" => Some(false),
+            v if v.starts_with("0x") => Some(true),
+            _ => None,
+        };
+    }
+    // Value not present → mountmgr uses its default (auto-mount enabled).
+    if !out.status.success() {
+        return Some(false);
+    }
+    None
 }
 
 /// Run `mountvol <flag>`; `true` on success. `/N` disables, `/E` enables
