@@ -82,7 +82,8 @@ fn needs_admin(command: &Commands) -> bool {
             | Commands::Verify(_)
             | Commands::Service(_)
             | Commands::Driver(commands::driver::DriverArgs {
-                action: commands::driver::DriverAction::Install | commands::driver::DriverAction::Uninstall,
+                action: commands::driver::DriverAction::Install { .. }
+                    | commands::driver::DriverAction::Uninstall,
             })
     )
 }

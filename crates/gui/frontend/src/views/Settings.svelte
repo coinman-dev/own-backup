@@ -1,5 +1,6 @@
 <script lang="ts">
   import { open } from '@tauri-apps/plugin-dialog';
+  import { invoke } from '@tauri-apps/api/core';
   import { api } from '../lib/api';
   import type { ServiceStatus } from '../lib/types';
 
@@ -132,6 +133,28 @@
     if (installing) return; // don't let the user close mid-install
     showInstallModal = false;
     installError = null;
+  }
+
+  /** Where the driver comes from and who owns it — shown in the consent dialog
+   *  so the terms are read from the vendor, not from us. */
+  const VENDOR_LINKS = [
+    'https://arsenalrecon.com/weapons/image-mounter',
+    'https://github.com/ArsenalRecon/Arsenal-Image-Mounter',
+  ];
+
+  /** Open a link in the user's browser.
+   *
+   *  A webview swallows `target="_blank"`, and a licence the user is asked to
+   *  accept but cannot open would be a poor kind of consent — so the URL goes
+   *  to the shell plugin (already permitted in `capabilities`). If that fails,
+   *  the address is still on screen to copy. */
+  async function openExternal(event: MouseEvent, url: string) {
+    event.preventDefault();
+    try {
+      await invoke('plugin:shell|open', { path: url });
+    } catch (e) {
+      console.error('could not open', url, e);
+    }
   }
 
   async function uninstallDriver() {
@@ -371,25 +394,49 @@
 {#if showInstallModal}
   <div class="modal-backdrop" role="presentation" onclick={closeInstallModal}>
     <div class="modal" role="dialog" aria-modal="true" onclick={(e) => e.stopPropagation()}>
-      <h3 class="modal-title">Установка Arsenal Image Mounter</h3>
+      <h3 class="modal-title">Установка стороннего драйвера</h3>
       <p>
-        <b>Arsenal Image Mounter</b> — это отдельная программа (драйвер) компании
-        Arsenal Recon, распространяемая на условиях <b>её собственной лицензии</b>.
-        Она работает бесплатно в режиме базовой функциональности (Free Mode).
+        Сейчас будет установлен <b>Arsenal Image Mounter</b> — отдельная программа
+        компании <b>Arsenal Consulting, Inc.</b> (d/b/a Arsenal Recon), а не часть
+        My Own Backup. Разработчик описывает её так:
+      </p>
+      <p class="modal-quote">
+        «Arsenal Image Mounter mounts the contents of disk images as complete disks
+        in Microsoft Windows» — подключает содержимое образов дисков как полноценные
+        диски Windows.
       </p>
       <p>
-        Пакет будет загружен с официального репозитория GitHub:
+        <b>Лицензия.</b> Проект распространяется по двойной лицензии: GNU Affero
+        General Public License v3 либо отдельная коммерческая лицензия Arsenal Recon.
+        Установленный без ключа драйвер работает в бесплатном режиме: «If Arsenal
+        Image Mounter is run without a license, it will run in “Free Mode” and provide
+        core functionality».
       </p>
-      <p class="modal-url">github.com/ArsenalRecon/Arsenal-Image-Mounter</p>
       <p>
-        и установлен в систему — он нужен, чтобы подключать резервные копии
-        формата qcow2 как диск. My Own Backup не распространяет этот драйвер:
-        он скачивается напрямую от разработчика в момент установки.
+        <b>Что произойдёт.</b> Пакет <code>DriverFiles.zip</code> будет загружен
+        напрямую из официального репозитория Arsenal Recon и установлен как драйвер
+        режима ядра (SCSI-адаптер <code>ROOT\PhDskMnt</code>). My Own Backup этот
+        драйвер не распространяет и правообладателем не является. Удалить его можно
+        здесь же кнопкой «Удалить».
+      </p>
+      <p>
+        <b>Зачем.</b> Драйвер нужен только для копий формата <b>qcow2</b> —
+        подключать их как диск. Копии VHDX монтируются средствами Windows и драйвера
+        не требуют.
+      </p>
+      <p class="modal-links">
+        {#each VENDOR_LINKS as url}
+          <a href={url} onclick={(e) => openExternal(e, url)}>{url.replace('https://', '')}</a>
+        {/each}
+      </p>
+      <p>
+        Нажимая «Принять и установить», вы принимаете условия Arsenal Recon как
+        пользователь их продукта.
       </p>
       <div class="modal-actions">
         <button class="btn btn-secondary" onclick={closeInstallModal} disabled={installing}>Отмена</button>
         <button class="btn btn-primary" onclick={confirmInstall} disabled={installing}>
-          {installing ? 'Установка…' : 'Загрузить и установить'}
+          {installing ? 'Установка…' : 'Принять и установить'}
         </button>
       </div>
 
@@ -657,6 +704,10 @@
     border-radius: 10px;
     padding: 24px;
     box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
+    /* The dialog grew once it started saying whose driver this is and under
+       what terms — it scrolls rather than pushing its own buttons off screen. */
+    max-height: calc(100vh - 96px);
+    overflow-y: auto;
   }
   .modal-title {
     margin: 0 0 12px;
@@ -675,6 +726,35 @@
     padding: 8px 10px;
     border-radius: 6px;
     word-break: break-all;
+  }
+  /* The vendor's own words about their product, kept as a quotation so it is
+     visibly theirs and not ours. */
+  .modal-quote {
+    border-left: 3px solid var(--border);
+    padding-left: 10px;
+    font-style: italic;
+  }
+  .modal code {
+    font-family: monospace;
+    font-size: 12px;
+    background: rgba(127, 127, 127, 0.12);
+    padding: 1px 5px;
+    border-radius: 4px;
+  }
+  .modal-links {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .modal-links a {
+    font-family: monospace;
+    font-size: 12px;
+    color: var(--accent, #5b6ee1);
+    text-decoration: none;
+    word-break: break-all;
+  }
+  .modal-links a:hover {
+    text-decoration: underline;
   }
   .modal-actions {
     display: flex;

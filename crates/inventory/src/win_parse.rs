@@ -8,18 +8,18 @@
 
 use own_backup_common::types::FileSystem;
 
-pub(crate) fn u32_at(b: &[u8], off: usize) -> u32 {
+pub fn u32_at(b: &[u8], off: usize) -> u32 {
     b.get(off..off + 4).map(|s| u32::from_le_bytes(s.try_into().unwrap())).unwrap_or(0)
 }
 
-pub(crate) fn u64_at(b: &[u8], off: usize) -> u64 {
+pub fn u64_at(b: &[u8], off: usize) -> u64 {
     b.get(off..off + 8).map(|s| u64::from_le_bytes(s.try_into().unwrap())).unwrap_or(0)
 }
 
 /// A GUID as Windows stores it in memory — first three fields little-endian,
 /// the last eight bytes in order — formatted the way the rest of this codebase
 /// writes GUIDs: upper case, no braces. An all-zero GUID reads as absent.
-pub(crate) fn guid_at(b: &[u8], off: usize) -> String {
+pub fn guid_at(b: &[u8], off: usize) -> String {
     let Some(g) = b.get(off..off + 16) else { return String::new() };
     if g.iter().all(|&x| x == 0) {
         return String::new();
@@ -44,7 +44,7 @@ pub(crate) fn guid_at(b: &[u8], off: usize) -> String {
 ///
 /// `STORAGE_DEVICE_DESCRIPTOR` stores its model and serial as offsets into the
 /// same buffer; an offset of 0 means the device did not answer that question.
-pub(crate) fn ansi_at(buf: &[u8], off: u32) -> String {
+pub fn ansi_at(buf: &[u8], off: u32) -> String {
     let off = off as usize;
     if off == 0 || off >= buf.len() {
         return String::new();
@@ -54,7 +54,7 @@ pub(crate) fn ansi_at(buf: &[u8], off: u32) -> String {
 }
 
 /// `STORAGE_BUS_TYPE` as a name a person reads.
-pub(crate) fn bus_name(bus: u32) -> &'static str {
+pub fn bus_name(bus: u32) -> &'static str {
     match bus {
         1 => "SCSI",
         2 => "ATAPI",
@@ -85,7 +85,7 @@ pub(crate) fn bus_name(bus: u32) -> &'static str {
 /// disk media" about an NVMe SSD. The bus plus the seek penalty (the storage
 /// stack's own way of saying "this thing has a head that moves") is both
 /// shorter and true.
-pub(crate) fn media_type_of(bus: u32, seek_penalty: Option<bool>, removable: bool) -> String {
+pub fn media_type_of(bus: u32, seek_penalty: Option<bool>, removable: bool) -> String {
     let kind = match seek_penalty {
         Some(false) => "SSD",
         Some(true) => "HDD",
@@ -110,7 +110,7 @@ pub(crate) fn media_type_of(bus: u32, seek_penalty: Option<bool>, removable: boo
 }
 
 /// The filesystem name `GetVolumeInformation` reports.
-pub(crate) fn parse_filesystem(fs: &str) -> FileSystem {
+pub fn parse_filesystem(fs: &str) -> FileSystem {
     match fs.trim().to_uppercase().as_str() {
         "NTFS" => FileSystem::Ntfs,
         "FAT32" => FileSystem::Fat32,
@@ -125,7 +125,7 @@ pub(crate) fn parse_filesystem(fs: &str) -> FileSystem {
 }
 
 /// Known EFI System Partition GPT type GUID.
-pub(crate) const GPT_TYPE_EFI_SYSTEM: &str = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B";
+pub const GPT_TYPE_EFI_SYSTEM: &str = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B";
 
 #[cfg(test)]
 mod tests {
