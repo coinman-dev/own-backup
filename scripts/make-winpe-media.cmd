@@ -131,6 +131,26 @@ copy /y "%SRC%\own-backup-cli.exe" "%APP%\" >nul
 echo [4/7] copying WebView2 ^(about 250 MB^)...
 xcopy "%WV%\*" "%APP%\WebView2\" /e /i /y /q >nul
 
+rem WinPE carries only the DLLs its own tools need. Anything our binaries or
+rem WebView2 import beyond that has to travel with them, or the process dies at
+rem load time before its first line of code - printing nothing at all, which is
+rem exactly how the first medium behaved (2026-07-31). Our exes are linked
+rem against the static CRT now, so the C runtime is no longer among them; the
+rem rest is copied in only where the image does not already have it.
+for %%D in (virtdisk.dll newdev.dll dwmapi.dll comctl32.dll shlwapi.dll cfgmgr32.dll
+            setupapi.dll crypt32.dll bcrypt.dll bcryptprimitives.dll) do (
+  if not exist "%TREE%\Windows\System32\%%D" (
+    if exist "%SystemRoot%\System32\%%D" (
+      copy /y "%SystemRoot%\System32\%%D" "%TREE%\Windows\System32\" >nul
+      echo       added missing %%D
+    )
+  )
+)
+rem WebView2 is not ours and is not statically linked; it wants the VC runtime.
+for %%D in (vcruntime140.dll vcruntime140_1.dll msvcp140.dll) do (
+  if exist "%SystemRoot%\System32\%%D" copy /y "%SystemRoot%\System32\%%D" "%APP%\WebView2\" >nul
+)
+
 rem WinPE boots from X:, has no desktop compositor and no sandbox, and the
 rem browser profile has to sit on a writable volume. The screen comes up in
 rem whatever the firmware left (1024x768 on a VMware guest), which is no size

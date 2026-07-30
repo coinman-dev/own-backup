@@ -1,2 +1,7 @@
 [target.x86_64-pc-windows-msvc]
 linker = "lld-link"
+# Link the C runtime statically. Without this every binary imports
+# VCRUNTIME140.dll, which lives in the Visual C++ redistributable and NOT in
+# WinPE — on boot media the process then dies at load time, before its first
+# line of code, printing nothing at all (2026-07-31).
+rustflags = ["-C", "target-feature=+crt-static"]
