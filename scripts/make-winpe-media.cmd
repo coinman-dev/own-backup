@@ -173,6 +173,11 @@ if "%MODE%"=="mount" (
   )
 )
 call :nuke "%TREE%"
+if exist "%TREE%" (
+  echo       [!] scratch tree survived - see the note at the end
+) else (
+  if "%MODE%"=="apply" echo       scratch tree removed
+)
 
 rem --- 8. media layout (UEFI) -------------------------------------------------
 echo [6/7] laying out the medium...
@@ -186,6 +191,9 @@ copy /y "%SystemRoot%\Boot\DVD\EFI\BCD" "%MEDIA%\EFI\Microsoft\Boot\BCD" >nul
 copy /y "%SystemRoot%\Boot\DVD\EFI\boot.sdi" "%MEDIA%\boot\boot.sdi" >nul
 move /y "%WORK%\boot.wim" "%MEDIA%\sources\boot.wim" >nul
 call :nuke "%WORK%"
+
+if exist "%TREE%" call :nuke "%TREE%"
+if exist "%WORK%" call :nuke "%WORK%"
 
 echo [7/7] done.
 echo.
