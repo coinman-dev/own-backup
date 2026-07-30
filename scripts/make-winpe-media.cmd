@@ -102,6 +102,16 @@ set "MODE=mount"
 echo [3/7] opening the image ^(mount^)...
 dism /Mount-Wim /WimFile:"%WORK%\boot.wim" /Index:1 /MountDir:"%TREE%" >nul 2>&1
 if errorlevel 1 (
+  rem Error 1243 means the wimmount filter driver has no service registered -
+  rem trimmed-down Windows builds ship the driver but not its registration.
+  rem One INF install fixes it, and then there is no unpacked tree at all.
+  if exist "%SystemRoot%\System32\drivers\wimmount.inf" (
+    echo       mount failed - registering the wimmount driver and retrying...
+    rundll32.exe setupapi.dll,InstallHinfSection DefaultInstall 132 "%SystemRoot%\System32\drivers\wimmount.inf" >nul 2>&1
+    dism /Mount-Wim /WimFile:"%WORK%\boot.wim" /Index:1 /MountDir:"%TREE%" >nul 2>&1
+  )
+)
+if errorlevel 1 (
   echo       mount unavailable ^(wimmount driver missing?^) - unpacking instead,
   echo       this takes a few minutes and a couple of GB of disk.
   set "MODE=apply"
@@ -184,10 +194,10 @@ dir /s /b "%MEDIA%"
 if exist "%TREE%" (
   echo.
   echo [!] The scratch tree could not be removed: %TREE%
-  echo     Remove it by hand with:
-  echo       icacls "%TREE%" /setowner "*S-1-5-32-544" /t /c /q
-  echo       icacls "%TREE%" /grant "*S-1-5-32-544:(OI)(CI)F" /t /c /q
-  echo       rmdir /s /q "%TREE%"
+  echo     Remove it by hand with ^(backup mode ignores the ACLs^):
+  echo       md "%%TEMP%%\empty"
+  echo       robocopy "%%TEMP%%\empty" "%TREE%" /MIR /B
+  echo       rmdir /s /q "%TREE%" ^& rmdir /s /q "%%TEMP%%\empty"
 )
 echo.
 echo Next, either:
@@ -219,7 +229,21 @@ if not exist "%~1" exit /b 0
 rmdir /s /q "%~1" >nul 2>&1
 if not exist "%~1" exit /b 0
 dism /Cleanup-Mountpoints >nul 2>&1
-icacls "%~1" /setowner "*S-1-5-32-544" /t /c /q >nul 2>&1
+
+rem Backup mode first: robocopy /B opens through SeBackup/SeRestore, which
+rem administrators hold, and those privileges override the ACL instead of
+rem arguing with it. Mirroring an empty folder over the tree empties it.
+set "EMPTY=%TEMP%\ownbackup-empty"
+mkdir "%EMPTY%" 2>nul
+robocopy "%EMPTY%" "%~1" /MIR /B /R:1 /W:1 /NFL /NDL /NJH /NJS /NP >nul 2>&1
+rmdir /s /q "%EMPTY%" >nul 2>&1
+rmdir /s /q "%~1" >nul 2>&1
+if not exist "%~1" exit /b 0
+
+rem Then ownership. `takeown` rather than `icacls /setowner`: taking ownership
+rem needs SeTakeOwnership *enabled*, and only takeown does that - which is why
+rem icacls answers "access denied" on WinSxS manifests.
+takeown /f "%~1" /r /a /skipsl >nul 2>&1
 icacls "%~1" /grant "*S-1-5-32-544:(OI)(CI)F" /t /c /q >nul 2>&1
 attrib -r -h -s "%~1\*.*" /s /d >nul 2>&1
 for /l %%N in (1,1,3) do (
