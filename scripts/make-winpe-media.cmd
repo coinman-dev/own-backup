@@ -13,15 +13,19 @@ rem  Downloads nothing. Needs no ADK.
 rem
 rem  Run from an ELEVATED console:
 rem      make-winpe-media.cmd [folder_with_exes] [output_folder]
-rem  Defaults: exes from this script's folder, output to C:\OwnBackupMedia.
+rem  Defaults: exes and output both next to this script (.\OwnBackupMedia).
 rem
-rem  All output is ASCII on purpose: a .cmd file is read in the console's OEM
-rem  code page, and anything else comes out as mojibake.
+rem  Two things about how it works:
 rem
-rem  The image is edited by apply+capture rather than by mounting it: DISM's
-rem  mount needs the wimmount filter driver, which trimmed-down Windows builds
-rem  are missing (error 1243 "the specified service does not exist"). Mounting
-rem  is tried first anyway - it is faster - and the fallback is automatic.
+rem  * All output is ASCII on purpose: a .cmd is read in the console's OEM code
+rem    page, and anything else comes out as mojibake.
+rem
+rem  * The image is edited by unpacking and repacking it (/Apply-Image +
+rem    /Capture-Image) rather than by mounting it. Mounting needs the wimmount
+rem    filter driver, which trimmed-down Windows builds are missing (error 1243,
+rem    "the specified service does not exist"). Mounting is still tried first
+rem    because it is faster; the fallback is automatic. The unpacked tree is a
+rem    scratch directory - it is deleted when the medium is built.
 rem ===========================================================================
 
 net session >nul 2>&1
@@ -30,9 +34,11 @@ if errorlevel 1 (
   exit /b 1
 )
 
-set "SRC=%~dp0"
+set "HERE=%~dp0"
+if "%HERE:~-1%"=="\" set "HERE=%HERE:~0,-1%"
+set "SRC=%HERE%"
 if not "%~1"=="" set "SRC=%~1"
-set "OUT=%SystemDrive%\OwnBackupMedia"
+set "OUT=%HERE%\OwnBackupMedia"
 if not "%~2"=="" set "OUT=%~2"
 
 echo === My Own Backup boot medium (spike) ===
@@ -84,14 +90,14 @@ rem --- 4. work area ----------------------------------------------------------
 set "WORK=%OUT%\work"
 set "TREE=%OUT%\tree"
 if exist "%TREE%\Windows" dism /Unmount-Wim /MountDir:"%TREE%" /Discard >nul 2>&1
-rmdir /s /q "%OUT%" >nul 2>&1
+call :nuke "%OUT%"
 mkdir "%WORK%" 2>nul
 mkdir "%TREE%" 2>nul
 
 copy /y "%BASE%" "%WORK%\boot.wim" >nul || (echo [!] cannot copy the base image & exit /b 1)
 attrib -r -h -s "%WORK%\boot.wim"
 
-rem --- 5. open the image: mount, or apply if mounting is unavailable ----------
+rem --- 5. open the image: mount, or unpack if mounting is unavailable ---------
 set "MODE=mount"
 echo [3/7] opening the image ^(mount^)...
 dism /Mount-Wim /WimFile:"%WORK%\boot.wim" /Index:1 /MountDir:"%TREE%" >nul 2>&1
@@ -155,8 +161,8 @@ if "%MODE%"=="mount" (
     echo [!] Could not capture the image. See %SystemRoot%\Logs\DISM\dism.log
     exit /b 1
   )
-  rmdir /s /q "%TREE%" >nul 2>&1
 )
+call :nuke "%TREE%"
 
 rem --- 8. media layout (UEFI) -------------------------------------------------
 echo [6/7] laying out the medium...
@@ -169,12 +175,20 @@ copy /y "%SystemRoot%\Boot\EFI\bootmgfw.efi" "%MEDIA%\EFI\BOOT\BOOTX64.EFI" >nul
 copy /y "%SystemRoot%\Boot\DVD\EFI\BCD" "%MEDIA%\EFI\Microsoft\Boot\BCD" >nul
 copy /y "%SystemRoot%\Boot\DVD\EFI\boot.sdi" "%MEDIA%\boot\boot.sdi" >nul
 move /y "%WORK%\boot.wim" "%MEDIA%\sources\boot.wim" >nul
-rmdir /s /q "%WORK%" >nul 2>&1
+call :nuke "%WORK%"
 
 echo [7/7] done.
 echo.
 echo Medium assembled in: %MEDIA%
 dir /s /b "%MEDIA%"
+if exist "%TREE%" (
+  echo.
+  echo [!] The scratch tree could not be removed: %TREE%
+  echo     Remove it by hand with:
+  echo       icacls "%TREE%" /setowner "*S-1-5-32-544" /t /c /q
+  echo       icacls "%TREE%" /grant "*S-1-5-32-544:(OI)(CI)F" /t /c /q
+  echo       rmdir /s /q "%TREE%"
+)
 echo.
 echo Next, either:
 echo   * USB stick: diskpart - clean / convert gpt / create partition primary /
@@ -189,3 +203,28 @@ echo mount filter driver can be registered with:
 echo   rundll32.exe setupapi.dll,InstallHinfSection DefaultInstall 132 %SystemRoot%\System32\drivers\wimmount.inf
 echo   sc query wimmount
 endlocal
+exit /b 0
+
+rem ---------------------------------------------------------------------------
+rem  Delete a folder that came out of a Windows image.
+rem
+rem  Applied system files keep the ACLs they had inside the image: owned by
+rem  TrustedInstaller, with administrators holding read only. Nothing is
+rem  "locked" - there is simply no permission to delete, so ownership has to be
+rem  taken first. `icacls /setowner` is used rather than `takeown`, whose /D
+rem  answer is localised and refuses the English "Y" on a localised Windows.
+rem ---------------------------------------------------------------------------
+:nuke
+if not exist "%~1" exit /b 0
+rmdir /s /q "%~1" >nul 2>&1
+if not exist "%~1" exit /b 0
+dism /Cleanup-Mountpoints >nul 2>&1
+icacls "%~1" /setowner "*S-1-5-32-544" /t /c /q >nul 2>&1
+icacls "%~1" /grant "*S-1-5-32-544:(OI)(CI)F" /t /c /q >nul 2>&1
+attrib -r -h -s "%~1\*.*" /s /d >nul 2>&1
+for /l %%N in (1,1,3) do (
+  rmdir /s /q "%~1" >nul 2>&1
+  if not exist "%~1" exit /b 0
+  ping -n 3 127.0.0.1 >nul
+)
+exit /b 1
