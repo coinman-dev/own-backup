@@ -907,6 +907,35 @@ fn match_subvol(
 // Extent-tree ownership analysis
 // ---------------------------------------------------------------------------
 
+/// A swap area's signature: "SWAPSPACE2" at the end of the first page.
+const SWAP_MAGIC: &[u8; 10] = b"SWAPSPACE2";
+/// Nothing smaller can be a swap area (mkswap wants ten pages), and this keeps
+/// the probe off the thousands of small files a cache exclusion matches.
+const SWAP_MIN_SIZE: u64 = 64 * 1024;
+
+/// Is this file a swap area?
+///
+/// It matters because a swapfile must be treated unlike any other excluded
+/// file. Its contents are worth nothing — the kernel never reads a page back
+/// across a boot — but the FILE has to stay, with a valid header: `/etc/fstab`
+/// names it, and a missing or blank one means
+/// `Failed to activate swap swap-swapfile.swap` at every boot, with
+/// `swap.target` failing behind it. So: keep the first page (that is the
+/// header, and it holds no swapped data), drop everything after it, and never
+/// remove the entry.
+fn looks_like_swap(vol: &mut dyn RawVolume, fs: &Fs, first: &DataRef) -> Result<bool> {
+    let page = 4096usize;
+    if first.disk_num_bytes < page as u64 {
+        return Ok(false);
+    }
+    let Some(&phys) = fs.chunks.physical(first.disk_bytenr, page as u64)?.first() else {
+        return Ok(false);
+    };
+    let mut head = vec![0u8; page];
+    vol.read_at(phys, &mut head)?;
+    Ok(&head[page - 10..] == SWAP_MAGIC)
+}
+
 /// Ownership summary of one candidate data extent.
 struct ExtentOwn {
     /// `EXTENT_ITEM.refs`.
@@ -1304,6 +1333,26 @@ pub fn scan_btrfs_exclusions(
         }
     }
 
+    // 3b. Swap areas: their contents go, the file stays. Decided before the
+    //     guards so the removal set they work on is already final.
+    let mut swap_keep: HashMap<(u64, u64), u64> = HashMap::new(); // file → first page (logical)
+    for (&who, exts) in &file_extents {
+        let Some(first) = exts.first() else { continue };
+        if file_sizes.get(&who).copied().unwrap_or(0) < SWAP_MIN_SIZE {
+            continue;
+        }
+        if looks_like_swap(vol, &fs, first)? {
+            removable.remove(&who);
+            swap_keep.insert(who, first.disk_bytenr);
+        }
+    }
+    if !swap_keep.is_empty() {
+        info!(
+            files = swap_keep.len(),
+            "btrfs exclusions: своп-файлы оставлены с заголовком, содержимое обнулено"
+        );
+    }
+
     // 4. Apply Stage 2 (removable) — collects freed logical ranges.
     //
     // First take out anything whose removal would empty a tree leaf: those
@@ -1421,8 +1470,17 @@ pub fn scan_btrfs_exclusions(
         if excl.len() != exts.len() {
             scan.files_kept_shared += 1;
         }
+        let header = swap_keep.get(&(sid, ino)).copied();
         for e in excl {
-            zeroed_logical.add(e.disk_bytenr, e.disk_bytenr + e.disk_num_bytes);
+            let mut from = e.disk_bytenr;
+            // The swap header stays: everything after it is dead weight, the
+            // header itself is what lets the restored system swapon at all.
+            if header == Some(e.disk_bytenr) {
+                from += 4096;
+            }
+            if from < e.disk_bytenr + e.disk_num_bytes {
+                zeroed_logical.add(from, e.disk_bytenr + e.disk_num_bytes);
+            }
         }
     }
     // 5b. Inline data of matched-but-kept files: overwritten inside the leaf.
@@ -3151,6 +3209,65 @@ mod btrfs_integration {
         assert!(ghost.iter().all(|&b| b == 0), "призрак читается не нулями");
         let kept = std::fs::read(outdir.join("keep.txt")).unwrap();
         assert!(kept.iter().all(|&b| b == 0xCD), "keep.txt повреждён");
+    }
+
+    /// A swapfile keeps its header and its entry; only its contents go.
+    ///
+    /// `swapfile` is in the default exclusion list, and Stage 2 duly removed
+    /// it — so the restored system met `Failed to activate swap
+    /// swap-swapfile.swap - /swap/swapfile` on every boot, with `swap.target`
+    /// failing behind it, because `/etc/fstab` still names a file that is no
+    /// longer there. Zeroing it whole is no better: `swapon` wants the
+    /// signature in the first page. The contents are worth nothing (the kernel
+    /// never reads a swap page back across a boot), the header is worth the
+    /// boot.
+    #[test]
+    fn a_swapfile_keeps_its_header_and_its_place() {
+        use std::io::Write;
+        if !have("mkfs.btrfs") {
+            eprintln!("mkfs.btrfs unavailable — skipping");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        // A real swap area: header page ending in SWAPSPACE2, then "contents".
+        let page = 4096usize;
+        let pages = 64usize;
+        let mut swap = vec![0u8; page * pages];
+        swap[1024..1028].copy_from_slice(&1u32.to_le_bytes()); // version
+        swap[1028..1032].copy_from_slice(&((pages - 1) as u32).to_le_bytes()); // last_page
+        swap[page - 10..page].copy_from_slice(b"SWAPSPACE2");
+        for b in swap[page..].iter_mut() {
+            *b = 0x5A; // what a used swap area looks like: not zeros
+        }
+        std::fs::File::create(src.join("swapfile")).unwrap().write_all(&swap).unwrap();
+        std::fs::File::create(src.join("keep.txt")).unwrap().write_all(&[0xCD; 65536]).unwrap();
+        let img = dir.path().join("fs.img");
+        std::fs::File::create(&img).unwrap().set_len(128 * 1024 * 1024).unwrap();
+        let out = std::process::Command::new("mkfs.btrfs").args(["-q", "-r"]).arg(&src).arg(&img).output().unwrap();
+        if !out.status.success() {
+            eprintln!("mkfs.btrfs failed — skipping");
+            return;
+        }
+
+        let (scan, _) = run_scan(&img, &["swapfile"]);
+        let patched = dir.path().join("patched.img");
+        apply(&img, &scan, &patched);
+        let (ok, log) = btrfs_check(&patched, true);
+        assert!(ok, "btrfs check:\n{log}");
+
+        let outdir = dir.path().join("restored");
+        std::fs::create_dir_all(&outdir).unwrap();
+        let r = std::process::Command::new("btrfs").arg("restore").arg(&patched).arg(&outdir).output().unwrap();
+        assert!(r.status.success(), "btrfs restore failed: {}", String::from_utf8_lossy(&r.stderr));
+        let back = std::fs::read(outdir.join("swapfile")).expect("своп-файл удалён — fstab его не найдёт");
+        assert_eq!(back.len(), page * pages, "размер своп-файла изменился");
+        assert_eq!(&back[page - 10..page], SWAP_MAGIC, "заголовок свопа потерян — swapon откажет");
+        assert!(
+            back[page..].iter().all(|&b| b == 0),
+            "содержимое свопа уехало в копию"
+        );
     }
 
     /// A tree block a snapshot also points at is not ours to free.

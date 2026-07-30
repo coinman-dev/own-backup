@@ -492,6 +492,7 @@ pub fn scan_ext_exclusions(
     // blocks may leave the image. A file we merely emptied still owns its
     // blocks, and the filesystem still reads them.
     let mut freed_ranges = ByteRanges::new();
+    let mut swap_kept = 0u64;
     for (&ino, inode) in &col.matched_inodes {
         let remove = removable.contains(&ino);
         if !remove && !zeroable.contains(&ino) {
@@ -523,15 +524,33 @@ pub fn scan_ext_exclusions(
         };
         if has_block_map {
             let extents = inode_extents(vol, &sb, inode)?;
-            for e in &extents {
-                let (from, to) = (e.first * sb.fs_block, (e.first + e.count) * sb.fs_block);
-                scan.ranges.add(from, to);
-                if remove {
-                    freed_ranges.add(from, to);
+            // A swap area keeps its header page and its entry; only what comes
+            // after the header is dead weight.
+            let swap = size >= SWAP_MIN_SIZE
+                && extents.first().map(|e| looks_like_swap(vol, &sb, e)).unwrap_or(false);
+            if swap {
+                swap_kept += 1;
+            }
+            for (i, e) in extents.iter().enumerate() {
+                let (mut from, to) = (e.first * sb.fs_block, (e.first + e.count) * sb.fs_block);
+                if swap && i == 0 {
+                    from += 4096;
+                }
+                if from < to {
+                    scan.ranges.add(from, to);
+                }
+                if remove && !swap {
+                    freed_ranges.add(e.first * sb.fs_block, to);
                     for b in e.first..e.first + e.count {
                         freed_blocks.push(b);
                     }
                 }
+            }
+            if swap {
+                // Its entry stays, so nothing about the inode is freed.
+                scan.files_excluded += 1;
+                scan.bytes_excluded += size.saturating_sub(4096);
+                continue;
             }
         }
         if remove {
@@ -583,6 +602,9 @@ pub fn scan_ext_exclusions(
             scan.droppable.finalize();
         }
         Err(e) => warn!(error = %e, "ext exclusions: Stage-2 metadata removal skipped — keeping zero-filled ghosts"),
+    }
+    if swap_kept > 0 {
+        info!(swap_kept, "ext exclusions: своп-файлы оставлены с заголовком, содержимое обнулено");
     }
     info!(
         files = scan.files_excluded,
@@ -791,6 +813,32 @@ fn xattr_block_is_private(vol: &mut dyn RawVolume, sb: &Sb, file_acl: u64) -> bo
     }
     u32::from_le_bytes(hdr[0..4].try_into().unwrap()) == 0xEA02_0000
         && u32::from_le_bytes(hdr[4..8].try_into().unwrap()) == 1
+}
+
+/// A swap area's signature: "SWAPSPACE2" at the end of the first page.
+const SWAP_MAGIC: &[u8; 10] = b"SWAPSPACE2";
+/// Nothing smaller can be a swap area, and the bound keeps the probe off the
+/// thousands of small files a cache exclusion matches.
+const SWAP_MIN_SIZE: u64 = 64 * 1024;
+
+/// Is this file a swap area?
+///
+/// A swapfile is excluded by default and must still survive it: `/etc/fstab`
+/// names it, so removing it means `Failed to activate swap` at every boot, and
+/// zeroing it whole means `swapon` finds no signature. Its contents are worth
+/// nothing — the kernel never reads a swap page back across a boot — so the
+/// first page (the header, which holds no swapped data) stays and the rest
+/// goes.
+fn looks_like_swap(vol: &mut dyn RawVolume, sb: &Sb, first: &Extent) -> bool {
+    let page = 4096usize;
+    if first.count * sb.fs_block < page as u64 {
+        return false;
+    }
+    let mut head = vec![0u8; page];
+    if vol.read_at(first.first * sb.fs_block, &mut head).is_err() {
+        return false;
+    }
+    &head[page - 10..] == SWAP_MAGIC
 }
 
 /// e2fsprogs' `ext2fs_is_fast_symlink`: the target lives inside i_block iff the
