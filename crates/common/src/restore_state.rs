@@ -54,6 +54,15 @@ pub struct OpRecord {
     pub cancellable: bool,
     /// From here on there is no going back.
     pub destroys_data: bool,
+    /// Housekeeping the user did not ask for and does not need to watch.
+    ///
+    /// The fallback-loader step is one: it exists to cover a case that may not
+    /// apply, it usually finds nothing to do, and listing it in the queue
+    /// invites the question "why is my restore doing something to my
+    /// bootloader?". It still runs, and still reports — but only when it
+    /// actually changed something.
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 /// Everything known about a run in progress or just finished.

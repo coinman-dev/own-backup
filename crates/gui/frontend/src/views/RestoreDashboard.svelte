@@ -290,9 +290,17 @@
     return describePart(curParts.find((p) => p.index === index), index);
   }
 
-  // Source partitions that are actually inside this copy.
+  // Partitions the whole-disk layout must reproduce on the target.
+  //
+  // Not the same as "partitions whose data was copied": Microsoft Reserved has
+  // no filesystem and nothing to copy, but the copy keeps its GPT entry and
+  // Windows expects the slot to be there. Leaving it out wrote a two-entry
+  // table where the source had three, and the restored disk came out without
+  // its MSR. It is placed like any other partition and simply gets no data.
   const srcBackupParts = $derived(
-    (srcDisk?.partitions ?? []).filter((p) => backedUpParts.includes(p.index)),
+    (srcDisk?.partitions ?? []).filter(
+      (p) => backedUpParts.includes(p.index) || layoutOnlyParts.includes(p.index),
+    ),
   );
   const srcTotalBytes = $derived(srcBackupParts.reduce((s, p) => s + p.size_bytes, 0));
   /** Room the copy needs on the target — not the same as the sum of its
@@ -1044,7 +1052,11 @@
     // Whole-disk mode: previewIdx[k] is the target partition created for
     // srcBackupParts[k] — they are placed in order, so the index lines up.
     const pairs: { src: number; dst: number }[] = wholeDiskRestore
-      ? previewIdx.map((dst, k) => ({ src: srcBackupParts[k]?.index ?? 0, dst }))
+      ? previewIdx
+          .map((dst, k) => ({ src: srcBackupParts[k]?.index ?? 0, dst }))
+          // Microsoft Reserved gets the slot, not a data copy: the backup holds
+          // no blocks for it, so a restore operation would have nothing to write.
+          .filter((m) => !layoutOnlyParts.includes(m.src))
       : mappings;
 
     // A target at least as large as the source volume takes it verbatim,
@@ -1459,6 +1471,13 @@
     failed: 'ошибка',
     skipped: 'пропущено',
   };
+  // Housekeeping stays out of the queue: a line saying we are about to touch
+  // the bootloader raises a question whose answer is usually "nothing
+  // happened". Such a step reports afterwards, and only if it acted.
+  function shownOps(run: RestoreRunState): OpRecord[] {
+    return run.ops.filter((o) => !o.hidden || o.status === 'failed');
+  }
+
   function opClass(o: OpRecord): string {
     return `op ${o.status}`;
   }
@@ -1744,10 +1763,10 @@
           {:else if planRun.status === 'cancelled'}Восстановление прервано
           {:else}Восстановление не завершилось{/if}
         </span>
-        <span class="run-sub">Диск {planRun.target_disk} · операций: {planRun.ops.length}</span>
+        <span class="run-sub">Диск {planRun.target_disk} · операций: {shownOps(planRun).length}</span>
       </div>
       <ol class="ops-run">
-        {#each planRun.ops as o}
+        {#each shownOps(planRun) as o}
           <li class={opClass(o)}>
             <span class="op-mark">
               {#if o.status === 'done'}✓

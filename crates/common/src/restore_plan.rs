@@ -420,6 +420,21 @@ impl RestoreOp {
         matches!(self, RestoreOp::RestorePartition { .. })
     }
 
+    /// Housekeeping the user neither asked for nor needs to watch.
+    ///
+    /// The fallback loader is the case: it covers a situation that may not
+    /// apply (a copy restored onto different hardware, whose NVRAM knows
+    /// nothing about it), it usually finds a loader already in place and does
+    /// nothing, and a line in the queue saying we are about to touch the
+    /// bootloader raises a question the answer to which is "probably nothing".
+    /// It runs, and reports — but only when it changed something.
+    pub fn is_housekeeping(&self) -> bool {
+        // Only the fallback loader. "Обновить состояние дисков" stays visible —
+        // it is the step that tells the user their disk is now what the program
+        // thinks it is, which is worth seeing.
+        matches!(self, RestoreOp::EnsureFallbackBootloader { .. })
+    }
+
     /// Whether this operation destroys data that cannot be recovered. From the
     /// first such operation onward there is no going back — the old partition
     /// table or filesystem is already gone (D12).

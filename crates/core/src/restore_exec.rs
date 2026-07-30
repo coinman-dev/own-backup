@@ -126,6 +126,7 @@ pub fn initial_state(plan: &RestorePlan) -> RestoreRunState {
             message: String::new(),
             cancellable: op.cancellable(),
             destroys_data: op.destroys_data(),
+            hidden: op.is_housekeeping(),
         })
         .collect();
 
@@ -159,6 +160,7 @@ pub fn initial_state(plan: &RestorePlan) -> RestoreRunState {
                 // Reading back destroys nothing; cancelling only means the
                 // check did not finish.
                 destroys_data: false,
+                hidden: false,
             });
         }
     }
@@ -1011,6 +1013,7 @@ fn run_op(
 
         RestoreOp::FinalizeBoot { windows_part, esp, uefi } => {
             use own_backup_backup::engine_win::finalize_boot;
+            use own_backup_backup::letters_win::TempDriveLetter;
             let win_volume = volume_root_at_offset(plan.target_disk, windows_part.offset)
                 .ok_or_else(|| {
                     OwnBackupError::Device(
@@ -1018,13 +1021,29 @@ fn run_op(
                             .into(),
                     )
                 })?;
-            let esp_volume = match esp {
-                Some(p) => Some(volume_root_at_offset(plan.target_disk, p.offset).ok_or_else(
-                    || OwnBackupError::Device("Windows не показала том раздела EFI".into()),
-                )?),
+            // bcdboot takes paths, not volume GUIDs: handed
+            // `\\?\Volume{…}\Windows` it fails with exit 123
+            // (ERROR_INVALID_NAME) and says nothing on stderr, which is exactly
+            // how a restored Windows ended up with no loader and a report that
+            // explained nothing. A restored partition normally has no letter —
+            // automount is off on purpose — so it gets one for the duration.
+            let win_mount = TempDriveLetter::acquire(&win_volume)?;
+            let esp_mount = match esp {
+                Some(p) => {
+                    let vr = volume_root_at_offset(plan.target_disk, p.offset).ok_or_else(|| {
+                        OwnBackupError::Device("Windows не показала том раздела EFI".into())
+                    })?;
+                    Some(TempDriveLetter::acquire(&vr)?)
+                }
                 None => None,
             };
-            finalize_boot(&win_volume, esp_volume.as_deref(), *uefi)?;
+            // Drive roots, without the trailing backslash bcdboot dislikes.
+            let win_arg = win_mount.mount_point().trim_end_matches('\\').to_string();
+            let esp_arg = esp_mount
+                .as_ref()
+                .map(|m| m.mount_point().trim_end_matches('\\').to_string());
+            info!(win = %win_arg, esp = ?esp_arg, uefi = *uefi, "bcdboot: recreating the loader");
+            finalize_boot(&win_arg, esp_arg.as_deref(), *uefi)?;
             Ok(OpNote {
                 message: String::new(),
                 follow_ups: vec![
@@ -1049,7 +1068,23 @@ fn run_op(
                 })
                 .collect();
             let outcome = ensure_fallback_bootloader(plan.target_disk, *esp, &restored)?;
-            Ok(OpNote { message: outcome.message, follow_ups: outcome.follow_ups })
+            // Say something only when something was done. This step is hidden
+            // from the queue precisely because it usually has nothing to do,
+            // and a paragraph about NVRAM entries under a restore that changed
+            // nothing is noise.
+            Ok(OpNote {
+                message: outcome.message,
+                follow_ups: if outcome.copied {
+                    vec![format!(
+                        "На разделе EFI не было \\EFI\\BOOT\\BOOTX64.EFI — единственного пути, \
+                         который UEFI пробует без записи в NVRAM. Скопировали туда загрузчик из \
+                         EFI\\{}, иначе на новой машине диск не стартовал бы.",
+                        outcome.from
+                    )]
+                } else {
+                    outcome.follow_ups
+                },
+            })
         }
 
         RestoreOp::RefreshDiskState => {

@@ -562,6 +562,9 @@ export interface OpRecord {
   cancellable: boolean;
   /** From here on there is no going back. */
   destroys_data: boolean;
+  /** Housekeeping the user did not ask for: it runs, and speaks up only if it
+   *  changed something. Kept out of the queue. */
+  hidden?: boolean;
 }
 
 export interface RestoreRunState {

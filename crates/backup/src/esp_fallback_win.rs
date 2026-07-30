@@ -26,6 +26,11 @@ use crate::esp_fallback::{
 pub struct FallbackOutcome {
     pub message: String,
     pub follow_ups: Vec<String>,
+    /// A loader was actually copied — the only case worth telling the user
+    /// about, since this step is otherwise invisible.
+    pub copied: bool,
+    /// Which `EFI\<vendor>` directory it came from, when it was.
+    pub from: String,
 }
 
 /// Ensure `\EFI\BOOT\BOOTX64.EFI` exists on the ESP at `esp.offset`.
@@ -50,6 +55,8 @@ pub fn ensure_fallback_bootloader(
     let efi = root.join("EFI");
     if !efi.is_dir() {
         return Ok(FallbackOutcome {
+            copied: false,
+            from: String::new(),
             message: "На разделе EFI нет каталога \\EFI — копировать нечего".into(),
             follow_ups: vec![
                 "Раздел EFI восстановлен, но каталога \\EFI в нём нет: загрузчика на диске \
@@ -77,6 +84,8 @@ pub fn ensure_fallback_bootloader(
                 own_backup_common::units::human_bytes(size)
             ),
             follow_ups: Vec::new(),
+            copied: false,
+            from: String::new(),
         });
     }
 
@@ -92,6 +101,8 @@ pub fn ensure_fallback_bootloader(
 
     let Some(choice) = choose_loader(&vendors, &uuids) else {
         return Ok(FallbackOutcome {
+            copied: false,
+            from: String::new(),
             message: "Загрузчика для UEFI на разделе EFI не нашлось".into(),
             follow_ups: vec![format!(
                 "На разделе EFI нет ни {FALLBACK_DIR}\\{FALLBACK_NAME}, ни знакомого загрузчика \
@@ -159,6 +170,8 @@ pub fn ensure_fallback_bootloader(
     Ok(FallbackOutcome {
         message: format!("Из EFI\\{} скопировано в {FALLBACK_DIR}: {}", choice.dir, copied.join(", ")),
         follow_ups,
+        copied: true,
+        from: choice.dir.clone(),
     })
 }
 
