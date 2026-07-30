@@ -52,6 +52,9 @@ enum Commands {
     /// Mount prerequisites: AIM driver (Windows) / NBD & NTFS status (Linux)
     Driver(commands::driver::DriverArgs),
 
+    /// Pick a screen mode fit for the interface (boot media)
+    Display(commands::display::DisplayArgs),
+
     /// Detach a mounted VHDX backup image
     Unmount(commands::unmount::UnmountArgs),
 
@@ -123,6 +126,7 @@ async fn main() {
         Commands::Mount(args) => commands::mount::run(args).await,
         Commands::DevioServe(args) => commands::devio_serve::run(args).await,
         Commands::Driver(args) => commands::driver::run(args).await,
+        Commands::Display(args) => commands::display::run(args).await,
         Commands::Unmount(args) => commands::unmount::run(args).await,
         Commands::ListBackups(args) => commands::list_backups::run(args).await,
         Commands::Jobs(args) => commands::jobs::run(args).await,

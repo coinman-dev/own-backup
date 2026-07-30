@@ -132,21 +132,37 @@ echo [4/7] copying WebView2 ^(about 250 MB^)...
 xcopy "%WV%\*" "%APP%\WebView2\" /e /i /y /q >nul
 
 rem WinPE boots from X:, has no desktop compositor and no sandbox, and the
-rem browser profile has to sit on a writable volume.
-> "%APP%\start-media.cmd" echo @echo off
->>"%APP%\start-media.cmd" echo wpeinit
->>"%APP%\start-media.cmd" echo set "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER=X:\Program Files\OwnBackup\WebView2"
->>"%APP%\start-media.cmd" echo set "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--no-sandbox --disable-gpu --disable-gpu-compositing"
->>"%APP%\start-media.cmd" echo set "WEBVIEW2_USER_DATA_FOLDER=X:\Windows\Temp\OwnBackupWebView2"
->>"%APP%\start-media.cmd" echo md "%%WEBVIEW2_USER_DATA_FOLDER%%" 2^>nul
->>"%APP%\start-media.cmd" echo start "" "X:\Program Files\OwnBackup\own-backup-service.exe" --run
->>"%APP%\start-media.cmd" echo "X:\Program Files\OwnBackup\own-backup-gui.exe"
->>"%APP%\start-media.cmd" echo echo GUI exited - console left open on purpose.
->>"%APP%\start-media.cmd" echo cmd
+rem browser profile has to sit on a writable volume. The screen comes up in
+rem whatever the firmware left (1024x768 on a VMware guest), which is no size
+rem for an interface, so the mode is picked before anything is shown.
+set "SCRIPT=%APP%\start-media.cmd"
+> "%SCRIPT%" echo @echo off
+>>"%SCRIPT%" echo title My Own Backup - boot medium
+>>"%SCRIPT%" echo wpeinit
+>>"%SCRIPT%" echo "X:\Program Files\OwnBackup\own-backup-cli.exe" display --min 1280x720
+>>"%SCRIPT%" echo set "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER=X:\Program Files\OwnBackup\WebView2"
+>>"%SCRIPT%" echo set "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--no-sandbox --disable-gpu --disable-gpu-compositing"
+>>"%SCRIPT%" echo set "WEBVIEW2_USER_DATA_FOLDER=X:\Windows\Temp\OwnBackupWebView2"
+>>"%SCRIPT%" echo md "%%WEBVIEW2_USER_DATA_FOLDER%%" 2^>nul
+>>"%SCRIPT%" echo echo Starting the service...
+>>"%SCRIPT%" echo start "own-backup service" /min "X:\Program Files\OwnBackup\own-backup-service.exe" --run
+>>"%SCRIPT%" echo echo Starting the interface...
+>>"%SCRIPT%" echo "X:\Program Files\OwnBackup\own-backup-gui.exe"
+>>"%SCRIPT%" echo echo.
+>>"%SCRIPT%" echo echo The interface has exited. This console is left open on purpose:
+>>"%SCRIPT%" echo echo   own-backup-gui.log / own-backup-service.log live next to the exe.
+>>"%SCRIPT%" echo cmd
 
-rem Our launcher instead of the recovery environment's own shell.
-> "%TREE%\Windows\System32\winpeshl.ini" echo [LaunchApps]
->>"%TREE%\Windows\System32\winpeshl.ini" echo "X:\Program Files\OwnBackup\start-media.cmd"
+rem How WinPE starts what we want, and why it is startnet.cmd rather than
+rem winpeshl.ini: entries in winpeshl.ini are handed to CreateProcess, which
+rem cannot run a .cmd - the first medium booted straight into a bare console
+rem because of it. With no winpeshl.ini the default shell runs
+rem `cmd /k startnet.cmd`, which is a batch file by definition. The recovery
+rem environment ships its own winpeshl.ini (it launches the recovery menu), so
+rem that one has to go.
+del /f /q "%TREE%\Windows\System32\winpeshl.ini" >nul 2>&1
+> "%TREE%\Windows\System32\startnet.cmd" echo @echo off
+>>"%TREE%\Windows\System32\startnet.cmd" echo call "X:\Program Files\OwnBackup\start-media.cmd"
 
 rem WinPE's default 32 MB scratch space is not enough for a browser engine.
 if "%MODE%"=="mount" (
