@@ -233,8 +233,8 @@ pub fn execute_plan(
         }
     }
 
-    // Asked once and kept: `system_disk_number` shells out to PowerShell, and
-    // the answer cannot change between these two uses of it.
+    // Asked once and kept: the answer cannot change between these two uses of
+    // it, and both callers below want the same one.
     let system_disk = own_backup_restore::system_disk_number();
     let boot_media = own_backup_restore::is_boot_media();
     let protected = own_backup_restore::protected_partitions(plan.target_disk);
@@ -720,9 +720,9 @@ pub struct IdentityOutcome {
 /// Read the GPT identities of every disk attached to this machine except
 /// `except_disk` (the restore target, whose table is about to be replaced).
 ///
-/// Disks are probed by number rather than enumerated through WMI: this runs in
-/// the middle of a restore, and the inventory's PowerShell round-trip takes ten
-/// seconds. A disk that cannot be opened or has no GPT contributes nothing —
+/// Disks are probed by number rather than asked of the inventory: this runs in
+/// the middle of a restore and wants one fact per disk, not a full sweep. A
+/// disk that cannot be opened or has no GPT contributes nothing —
 /// which is correct, it holds no GUID we could collide with.
 #[cfg(target_os = "windows")]
 fn identities_in_use(except_disk: u32) -> IdentitiesInUse {
@@ -1540,7 +1540,9 @@ mod tests {
     }
 
     /// A minimal sidecar whose disk manifest carries one captured partition.
-    fn sidecar_with(entry: own_backup_common::gpt::GptPartitionEntry) -> own_backup_backup::sidecar::Sidecar {
+    fn sidecar_with(
+        entry: own_backup_common::gpt::GptPartitionEntry,
+    ) -> own_backup_backup::sidecar::Sidecar {
         sidecar_with_disk(entry, "")
     }
 

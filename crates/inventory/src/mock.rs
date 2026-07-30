@@ -102,7 +102,7 @@ impl DiskInventory for MockInventory {
         if disk.device_id == device_id {
             Ok(disk)
         } else {
-            Err(OwnBackupError::Wmi(format!(
+            Err(OwnBackupError::Inventory(format!(
                 "Mock: no disk found with device_id '{device_id}'"
             )))
         }

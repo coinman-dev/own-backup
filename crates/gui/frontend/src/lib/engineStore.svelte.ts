@@ -60,10 +60,9 @@ async function pollDrives(): Promise<void> {
   }
 }
 
-/** A refresh asked for while another was already running. Enumeration goes
- *  through PowerShell and takes seconds, and the one in flight may have started
- *  *before* whatever changed the disks — so the request is remembered instead of
- *  dropped. Dropping it is how a restore that repartitioned a disk left the map
+/** A refresh asked for while another was already running. The one in flight may
+ *  have started *before* whatever changed the disks — so the request is
+ *  remembered instead of dropped. Dropping it is how a restore that repartitioned a disk left the map
  *  showing the layout from before it. */
 let refreshAgain = false;
 

@@ -5,9 +5,9 @@
 //! describes *volumes*: where they start, how big they are, what filesystem is
 //! inside. A GPT entry holds three more things that no volume query returns:
 //!
-//! - the **unique partition GUID**. On Windows the inventory cannot even read
-//!   it (`Get-Partition` does not expose it), so every entry arrives empty —
-//!   and an empty GUID means "generate a fresh one". Regenerating it for the
+//! - the **unique partition GUID**. Until the inventory stopped going through
+//!   `Get-Partition`, which does not expose it, every entry arrived empty — and
+//!   an empty GUID means "generate a fresh one". Regenerating it for the
 //!   partitions that are merely *sitting there* renames them out from under the
 //!   BCD and the UEFI boot entries, which reference partitions by exactly this
 //!   value: the machine restores fine and then does not boot.

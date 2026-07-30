@@ -10,7 +10,7 @@ pub struct ListDisksArgs {
 
 pub async fn run(args: ListDisksArgs) -> own_backup_common::Result<()> {
     #[cfg(target_os = "windows")]
-    let inventory = own_backup_inventory::WmiInventory::new()?;
+    let inventory = own_backup_inventory::WindowsInventory::new()?;
     #[cfg(target_os = "linux")]
     let inventory = own_backup_inventory::LinuxInventory::new();
     #[cfg(not(any(target_os = "windows", target_os = "linux")))]

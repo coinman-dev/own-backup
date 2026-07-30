@@ -7,8 +7,11 @@ pub mod fs_probe;
 pub mod linux;
 #[cfg(target_os = "windows")]
 pub mod preflight_windows;
+/// Pure parsing of the structures Windows answers with — not gated, so its
+/// tests run wherever this project's tests run.
+pub mod win_parse;
 #[cfg(target_os = "windows")]
-pub mod wmi;
+pub mod win_disks;
 
 pub use mock::MockInventory;
 pub use preflight::PreflightAnalyzer;
@@ -17,13 +20,13 @@ pub use traits::DiskInventory;
 #[cfg(target_os = "linux")]
 pub use linux::LinuxInventory;
 #[cfg(target_os = "windows")]
-pub use wmi::WmiInventory;
+pub use win_disks::WindowsInventory;
 
 /// A cheap signature of the currently present drive letters.
 ///
 /// Changes when a volume is mounted/removed (USB insert/eject, VHDX attach).
-/// Uses `GetLogicalDrives` (a single bitmask syscall) so it can be polled
-/// frequently without the cost of full WMI/PowerShell enumeration.
+/// Uses `GetLogicalDrives` (a single bitmask syscall) so it can be polled as
+/// often as the interface likes.
 #[cfg(target_os = "windows")]
 pub fn drive_letters_signature() -> u32 {
     // SAFETY: GetLogicalDrives takes no arguments and cannot fail meaningfully.

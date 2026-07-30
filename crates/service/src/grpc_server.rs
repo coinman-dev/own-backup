@@ -421,7 +421,7 @@ impl BackupService for BackupServiceImpl {
         use own_backup_inventory::DiskInventory;
 
         #[cfg(target_os = "windows")]
-        let disks = own_backup_inventory::WmiInventory::new()
+        let disks = own_backup_inventory::WindowsInventory::new()
             .map_err(|e| Status::internal(e.to_string()))?
             .enumerate_disks()
             .await

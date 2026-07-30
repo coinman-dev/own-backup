@@ -23,13 +23,42 @@ pub use imp::SanPolicyGuard;
 
 #[cfg(target_os = "windows")]
 mod imp {
-    use std::os::windows::process::CommandExt;
-    use std::process::{Command, Output};
-
     use tracing::{debug, warn};
 
-    /// `CREATE_NO_WINDOW` — keep the helper `powershell.exe` invisible.
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    use crate::registry_win::{delete_value_hklm, read_dword_hklm, write_dword_hklm};
+
+    /// Where the partition manager itself reads the policy from. `diskpart`'s
+    /// `san policy=…` writes exactly this value; PowerShell's
+    /// `Set-StorageSetting -NewDiskPolicy` ends up here too, one WMI provider
+    /// later. Going to the value directly is what lets this work in WinPE,
+    /// where neither tool is installed.
+    const KEY: &str = r"SYSTEM\CurrentControlSet\Services\partmgr\Parameters";
+    const VALUE: &str = "SanPolicy";
+
+    /// `SAN_POLICY` values, as partmgr numbers them.
+    const ONLINE_ALL: u32 = 1;
+    const OFFLINE_SHARED: u32 = 2;
+    const OFFLINE_ALL: u32 = 3;
+    const OFFLINE_INTERNAL: u32 = 4;
+
+    fn policy_name(value: u32) -> &'static str {
+        match value {
+            ONLINE_ALL => "OnlineAll",
+            OFFLINE_SHARED => "OfflineShared",
+            OFFLINE_ALL => "OfflineAll",
+            OFFLINE_INTERNAL => "OfflineInternal",
+            _ => "Unknown",
+        }
+    }
+
+    /// What the machine had before we touched it: a value, or nothing at all.
+    /// The difference matters on the way out — a machine that carried no
+    /// explicit policy must not be left carrying one.
+    #[derive(Debug, Clone, Copy)]
+    enum Previous {
+        Value(u32),
+        Absent,
+    }
 
     /// Restores the machine's new-disk policy when dropped.
     ///
@@ -38,37 +67,30 @@ mod imp {
     /// attached and confirmed offline.
     #[must_use = "the policy is restored when the guard is dropped"]
     pub struct SanPolicyGuard {
-        /// Policy name to restore on drop (e.g. `"OnlineAll"`), or `None` when
-        /// we changed nothing — query/set failed, or it was already offline.
-        restore: Option<String>,
+        /// What to put back on drop, or `None` when we changed nothing.
+        restore: Option<Previous>,
     }
 
     impl SanPolicyGuard {
         /// Set the new-disk policy to `OfflineAll`, remembering the previous
-        /// value so [`Drop`] can restore it. Best-effort: if the policy cannot
-        /// be read or set (missing cmdlet, not elevated), it logs and returns a
-        /// no-op guard rather than failing the backup — the detach may then
-        /// stall, but the backup data is still correct.
+        /// value so [`Drop`] can restore it. Best-effort: if the value cannot
+        /// be written (no rights), it logs and returns a no-op guard rather
+        /// than failing the backup — the detach may then stall, but the backup
+        /// data is still correct.
         pub fn offline_all() -> Self {
-            let previous = match query_policy() {
-                Some(p) => p,
-                None => {
-                    warn!(
-                        "could not read the new-disk (SAN) policy — leaving it unchanged; \
-                         a differencing detach may stall for ~3 min"
-                    );
-                    return Self { restore: None };
-                }
+            let previous = match read_dword_hklm(KEY, VALUE) {
+                Some(v) => Previous::Value(v),
+                // No value = the driver's default (OnlineAll on client
+                // Windows), which is exactly the case this guard exists for.
+                None => Previous::Absent,
             };
-            if previous.eq_ignore_ascii_case("OfflineAll") {
+            if matches!(previous, Previous::Value(OFFLINE_ALL)) {
                 debug!("new-disk policy already OfflineAll — nothing to change");
                 return Self { restore: None };
             }
-            if set_policy("OfflineAll") {
-                debug!(previous = %previous, "new-disk policy set to OfflineAll for VHDX attach");
-                Self {
-                    restore: Some(previous),
-                }
+            if write_dword_hklm(KEY, VALUE, OFFLINE_ALL) {
+                debug!(?previous, "new-disk policy set to OfflineAll for the VHDX attach");
+                Self { restore: Some(previous) }
             } else {
                 warn!(
                     "could not set the new-disk (SAN) policy to OfflineAll; \
@@ -81,67 +103,33 @@ mod imp {
 
     impl Drop for SanPolicyGuard {
         fn drop(&mut self) {
-            let Some(policy) = self.restore.take() else {
+            let Some(previous) = self.restore.take() else {
                 return;
             };
             // Restoring a global machine setting matters: a stuck `OfflineAll`
             // would make the user's own disks arrive offline. Retry before
             // giving up, and make the failure impossible to miss in the log.
             for attempt in 1..=3 {
-                if set_policy(&policy) {
-                    debug!(restored = %policy, "new-disk policy restored");
+                let ok = match previous {
+                    Previous::Value(v) => write_dword_hklm(KEY, VALUE, v),
+                    Previous::Absent => delete_value_hklm(KEY, VALUE),
+                };
+                if ok {
+                    debug!(?previous, "new-disk policy restored");
                     return;
                 }
-                warn!(policy = %policy, attempt, "retrying SAN policy restore");
+                warn!(?previous, attempt, "retrying the SAN policy restore");
             }
+            let name = match previous {
+                Previous::Value(v) => policy_name(v),
+                Previous::Absent => "OnlineAll (was unset)",
+            };
             warn!(
-                policy = %policy,
-                "FAILED to restore the new-disk (SAN) policy — the machine is left in \
-                 OfflineAll; run `Set-StorageSetting -NewDiskPolicy {}` manually",
-                policy
+                restore_to = name,
+                "FAILED to restore the new-disk (SAN) policy — the machine is left in OfflineAll; \
+                 put it back with `diskpart` → `san policy=onlineall`"
             );
         }
-    }
-
-    /// `(Get-StorageSetting).NewDiskPolicy` → e.g. `OnlineAll` / `OfflineAll`.
-    fn query_policy() -> Option<String> {
-        let out = run_ps("(Get-StorageSetting).NewDiskPolicy").ok()?;
-        if !out.status.success() {
-            warn!(stderr = %String::from_utf8_lossy(&out.stderr), "Get-StorageSetting failed");
-            return None;
-        }
-        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if s.is_empty() {
-            None
-        } else {
-            Some(s)
-        }
-    }
-
-    /// `Set-StorageSetting -NewDiskPolicy <policy>`; `true` on success.
-    fn set_policy(policy: &str) -> bool {
-        match run_ps(&format!("Set-StorageSetting -NewDiskPolicy {policy}")) {
-            Ok(o) if o.status.success() => true,
-            Ok(o) => {
-                warn!(
-                    policy,
-                    stderr = %String::from_utf8_lossy(&o.stderr),
-                    "Set-StorageSetting failed"
-                );
-                false
-            }
-            Err(e) => {
-                warn!(policy, error = %e, "failed to launch powershell for Set-StorageSetting");
-                false
-            }
-        }
-    }
-
-    fn run_ps(command: &str) -> std::io::Result<Output> {
-        Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", command])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
     }
 }
 

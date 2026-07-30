@@ -11,8 +11,9 @@
 //!
 //! `mountvol /N` / `/E` is used rather than the `IOCTL_MOUNTMGR_*_AUTO_MOUNT`
 //! ioctls: the query ioctl was observed to fail on a real host (2026-07-11),
-//! leaving the guard a no-op and a letter still appearing. `mountvol` is the
-//! same kind of proven system-tool call as [`crate::san_policy`]'s PowerShell.
+//! leaving the guard a no-op and a letter still appearing. `mountvol.exe` is a
+//! system tool that exists in WinPE too, so it stays; reading the setting goes
+//! through the registry ([`is_disabled`]).
 //!
 //! **No true-removal path uses the guard any more (2026-07-30).** `mountvol /N`
 //! does not merely withhold a letter: mountmgr holds every *new* volume OFFLINE,
@@ -123,34 +124,17 @@ impl Drop for AutoMountGuard {
 /// with the guard still applied — so the true-removal pass logs it whenever a
 /// mounted image refuses to come up. `None` = could not be read.
 ///
-/// `mountvol` has no query, so the registry value mountmgr itself reads is
-/// consulted (`reg query`, same "proven system tool" approach as the rest of
-/// this module). An absent value is the default: auto-mount enabled.
+/// `mountvol` has no query, so the value mountmgr itself reads is consulted
+/// directly. An absent value is the default: auto-mount enabled.
 pub fn is_disabled() -> Option<bool> {
-    let out = Command::new("reg")
-        .args([
-            "query",
-            r"HKLM\SYSTEM\CurrentControlSet\Services\mountmgr",
-            "/v",
-            "NoAutoMount",
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    if let Some(line) = text.lines().find(|l| l.contains("NoAutoMount")) {
-        let value = line.split_whitespace().last().unwrap_or_default();
-        return match value {
-            "0x0" => Some(false),
-            v if v.starts_with("0x") => Some(true),
-            _ => None,
-        };
+    // The value mountmgr itself reads. `reg query` would do as well and exists
+    // in WinPE, but a process launch to read one DWORD is a process launch.
+    const MOUNTMGR: &str = r"SYSTEM\CurrentControlSet\Services\mountmgr";
+    match crate::registry_win::read_dword_hklm(MOUNTMGR, "NoAutoMount") {
+        Some(v) => Some(v != 0),
+        // Absent = mountmgr's default, which is auto-mount enabled.
+        None => Some(false),
     }
-    // Value not present → mountmgr uses its default (auto-mount enabled).
-    if !out.status.success() {
-        return Some(false);
-    }
-    None
 }
 
 /// Run `mountvol <flag>`; `true` on success. `/N` disables, `/E` enables

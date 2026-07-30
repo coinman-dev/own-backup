@@ -24,8 +24,8 @@ pub enum OwnBackupError {
     #[error("VSS error: {0}")]
     Vss(String),
 
-    #[error("WMI error: {0}")]
-    Wmi(String),
+    #[error("Disk inventory error: {0}")]
+    Inventory(String),
 
     #[error("Database error: {0}")]
     Database(String),

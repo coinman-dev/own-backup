@@ -48,25 +48,19 @@ pub fn check_whole_disk_restore(
 
 /// The physical drive number that hosts the running Windows (`%SystemDrive%`),
 /// or `None` if it can't be determined.
+///
+/// Asked of the volume itself rather than of PowerShell: the system drive's
+/// volume knows which disk it sits on (`IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS`),
+/// and this has to work on boot media, where PowerShell does not exist.
 #[cfg(target_os = "windows")]
 pub fn system_disk_number() -> Option<u32> {
-    use std::os::windows::process::CommandExt;
-    use std::process::Command;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    use own_backup_backup::volume_win::{volume_root_for_path, volume_start_on_disk};
 
     let sysdrive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
-    let letter = sysdrive.chars().next().filter(|c| c.is_ascii_alphabetic())?;
-    let out = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            &format!("(Get-Partition -DriveLetter {letter}).DiskNumber"),
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .ok()?;
-    String::from_utf8_lossy(&out.stdout).trim().parse::<u32>().ok()
+    let root = volume_root_for_path(&format!("{}\\", sysdrive.trim_end_matches('\\')))?;
+    // A spanned volume answers with no single disk — and a system on one is not
+    // something this guard can reason about anyway.
+    volume_start_on_disk(&root).map(|(disk, _)| disk)
 }
 
 /// True when running under a Windows recovery environment (WinPE), which boots

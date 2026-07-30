@@ -13,12 +13,10 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+# COM/WMI features are deliberately absent: disk inventory goes through the
+# storage stack directly (see src/win_disks.rs), and nothing here needs WMI.
 windows = { version = "0.58", features = [
     "Win32_Foundation",
-    "Win32_System_Com",
-    "Win32_System_Wmi",
-    "Win32_System_Variant",
-    "Win32_System_Ole",
     "Win32_Storage_FileSystem",
     "Win32_System_Ioctl",
     "Win32_System_IO",

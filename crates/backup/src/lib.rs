@@ -24,6 +24,7 @@ pub mod overlay;
 pub mod qcow2;
 pub mod raw_copy;
 pub mod restore_map;
+pub mod registry_win;
 pub mod san_policy;
 pub mod secrets;
 pub mod sidecar;

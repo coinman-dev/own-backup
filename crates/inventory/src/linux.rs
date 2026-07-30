@@ -157,11 +157,11 @@ fn build_disk(v: &Value) -> Option<DiskInfo> {
 /// applied separately so this is testable without real devices).
 fn parse_lsblk(json: &str) -> Result<Vec<DiskInfo>> {
     let root: Value = serde_json::from_str(json)
-        .map_err(|e| OwnBackupError::Wmi(format!("lsblk JSON parse: {e}")))?;
+        .map_err(|e| OwnBackupError::Inventory(format!("lsblk JSON parse: {e}")))?;
     let devices = root
         .get("blockdevices")
         .and_then(|d| d.as_array())
-        .ok_or_else(|| OwnBackupError::Wmi("lsblk JSON has no blockdevices".into()))?;
+        .ok_or_else(|| OwnBackupError::Inventory("lsblk JSON has no blockdevices".into()))?;
     Ok(devices.iter().filter_map(build_disk).collect())
 }
 
@@ -212,9 +212,9 @@ fn run_lsblk() -> Result<String> {
     let out = Command::new("lsblk")
         .args(["-b", "-J", "-O"])
         .output()
-        .map_err(|e| OwnBackupError::Wmi(format!("failed to run lsblk: {e}")))?;
+        .map_err(|e| OwnBackupError::Inventory(format!("failed to run lsblk: {e}")))?;
     if !out.status.success() {
-        return Err(OwnBackupError::Wmi(format!(
+        return Err(OwnBackupError::Inventory(format!(
             "lsblk exited {}: {}",
             out.status,
             String::from_utf8_lossy(&out.stderr)
@@ -240,7 +240,7 @@ impl super::traits::DiskInventory for LinuxInventory {
             .await?
             .into_iter()
             .find(|d| d.device_id == device_id)
-            .ok_or_else(|| OwnBackupError::Wmi(format!("disk not found: {device_id}")))
+            .ok_or_else(|| OwnBackupError::Inventory(format!("disk not found: {device_id}")))
     }
 }
 
