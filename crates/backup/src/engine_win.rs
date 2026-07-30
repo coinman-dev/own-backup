@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -2906,17 +2906,48 @@ fn restore_disk_legacy(
     })
 }
 
+/// What [`finalize_boot`] left behind, for the restore report.
+#[derive(Debug, Default)]
+pub struct BootFinalizeReport {
+    /// The entry `bcdboot` left as the store's default — the one that boots the
+    /// restored Windows. `None` when the store could not be read.
+    pub default_id: Option<String>,
+    /// Windows loader entries the store held before the menu was trimmed
+    /// (recovery/ramdisk entries not counted — those never show in the menu).
+    pub loaders_found: usize,
+    /// The boot menu was reduced to that single entry.
+    pub menu_trimmed: bool,
+    /// `\Windows\bootstat.dat` was removed, so the first boot does not open the
+    /// recovery screen.
+    pub boot_status_cleared: bool,
+    /// Why the menu was left as it was, when it was.
+    pub note: Option<String>,
+}
+
 /// Recreate the boot files (and, on UEFI, the firmware NVRAM entry) for a
-/// restored Windows via `bcdboot`. Needed only for a **fresh disk / new
-/// hardware** — a same-disk restore that preserved the partition GUIDs boots
-/// as-is. `windows_volume` is the restored OS volume ("C:"); `system_volume`
-/// is the EFI System Partition mount ("S:") for UEFI (omit to let bcdboot pick
-/// the current one). Typically run from WinPE.
+/// restored Windows via `bcdboot`, then leave exactly ONE entry in the boot
+/// menu.
+///
+/// Needed only for a **fresh disk / new hardware** — a same-disk restore that
+/// preserved the partition GUIDs boots as-is. `windows_volume` is the restored
+/// OS volume ("C:"); `system_volume` is the EFI System Partition mount ("S:")
+/// for UEFI (omit to let bcdboot pick the current one). Typically run from
+/// WinPE.
+///
+/// The menu step is not cosmetic. The ESP is restored from the copy, so it
+/// arrives carrying the SOURCE machine's BCD, whose loader entries name the
+/// source disk's GPT GUIDs; the restored disk gets its own, so those entries
+/// resolve to nothing. `bcdboot` adds a correct entry and makes it the default
+/// but leaves the inherited ones in the display order — which is why a restored
+/// Windows offered two identical "Windows 10" items, one booting and one dying
+/// with `0xc000000e \Windows\system32\winload.efi` (2026-07-30). Trimming the
+/// display order to the default hides them without deleting anything: the
+/// entries stay in the store for anyone who wants to look.
 pub fn finalize_boot(
     windows_volume: &str,
     system_volume: Option<&str>,
     uefi: bool,
-) -> Result<()> {
+) -> Result<BootFinalizeReport> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -2940,7 +2971,214 @@ pub fn finalize_boot(
         )));
     }
     info!(win_dir, uefi, "bcdboot: boot files recreated");
-    Ok(())
+
+    let boot_status_cleared = clear_boot_status(windows_volume);
+
+    let mut report = match system_volume {
+        Some(esp) => trim_boot_menu(esp, uefi, windows_volume),
+        // Without /s we do not know which store bcdboot wrote, and the "current"
+        // store belongs to whatever is running this (WinPE, or the live OS) —
+        // never something to edit blind.
+        None => BootFinalizeReport {
+            note: Some(
+                "Раздел EFI не был указан, поэтому меню загрузки не проверялось: если система \
+                 предлагает несколько одинаковых записей Windows, лишние остались от исходного \
+                 диска."
+                    .into(),
+            ),
+            ..Default::default()
+        },
+    };
+    report.boot_status_cleared = boot_status_cleared;
+    Ok(report)
+}
+
+/// Remove the restored system's `\Windows\bootstat.dat`.
+///
+/// A copy is taken from a *running* Windows (VSS), so the shutdown it records
+/// never happened: on the first boot the boot manager reads that file, decides
+/// the machine "couldn't turn off properly" and stops at the recovery screen
+/// with `0xc0000001`. Pressing Enter boots it and the state clears itself, but
+/// a restore that ends in an error screen reads as a failed restore.
+///
+/// Windows recreates the file on the next boot, which is why this is preferred
+/// over `bootstatuspolicy IgnoreShutdownFailures`: that setting would silence
+/// genuine shutdown failures on the machine for good.
+///
+/// Best-effort — a copy whose Windows directory is spelled differently, or a
+/// file that will not go, simply leaves the one-time recovery screen in place.
+fn clear_boot_status(windows_volume: &str) -> bool {
+    let path = format!(r"{}\Windows\bootstat.dat", windows_volume.trim_end_matches(['\\', '/']));
+    if !std::path::Path::new(&path).exists() {
+        debug!(path = %path, "boot status: nothing to clear");
+        return false;
+    }
+    if let Err(e) = std::fs::remove_file(&path) {
+        // The file is hidden + system; that alone does not block a delete, but
+        // a read-only attribute does.
+        let wide = crate::win_device::to_wide(&path);
+        // SAFETY: `wide` is NUL-terminated and outlives the call.
+        let _ = unsafe {
+            windows::Win32::Storage::FileSystem::SetFileAttributesW(
+                windows::core::PCWSTR(wide.as_ptr()),
+                windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL,
+            )
+        };
+        if let Err(again) = std::fs::remove_file(&path) {
+            warn!(
+                path = %path, error = %e, retry_error = %again,
+                "boot status: could not remove bootstat.dat — the first boot may stop at the \
+                 recovery screen once"
+            );
+            return false;
+        }
+    }
+    info!(
+        path = %path,
+        "boot status: removed bootstat.dat so the first boot does not open the recovery screen"
+    );
+    true
+}
+
+/// Run `bcdedit` with the given arguments; stdout on success, a message on
+/// failure. The output is read as lossy UTF-8 on purpose: everything this code
+/// looks for (identifiers, `partition=X:`) is ASCII, while bcdedit's prose is
+/// localised and in the console code page.
+fn bcdedit(args: &[&str]) -> std::result::Result<String, String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let out = std::process::Command::new("bcdedit")
+        .args(args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|e| format!("не удалось запустить bcdedit: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "bcdedit {} → код {}: {}",
+            args.join(" "),
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The first `{guid}` in `text`, as bcdedit prints identifiers.
+fn first_identifier(text: &str) -> Option<String> {
+    let start = text.find('{')?;
+    let end = text[start..].find('}')? + start;
+    let id = &text[start..=end];
+    // 32 hex digits + 4 dashes + 2 braces; aliases like {default} are shorter.
+    (id.len() == 38).then(|| id.to_string())
+}
+
+/// Loader entries in a store, as `(identifier, is_ramdisk)` pairs. A ramdisk
+/// loader is the Recovery Environment: it never appears in the boot menu and
+/// must not be counted with the menu entries.
+fn loader_entries(store: &str) -> Vec<(String, bool)> {
+    let Ok(text) = bcdedit(&["/store", store, "/enum", "osloader", "/v"]) else {
+        return Vec::new();
+    };
+    text.split("\r\n\r\n")
+        .filter_map(|block| {
+            let id = first_identifier(block)?;
+            Some((id, block.contains("ramdisk=")))
+        })
+        .collect()
+}
+
+/// Leave the store's boot menu showing only the entry bcdboot made default.
+///
+/// Deliberately conservative: if the default entry cannot be read, or does not
+/// point at the Windows volume that was just restored, nothing is changed and
+/// the reason is reported — a wrong guess here is an unbootable machine, while
+/// an untouched menu is merely the extra question the user already sees.
+fn trim_boot_menu(esp_volume: &str, uefi: bool, windows_volume: &str) -> BootFinalizeReport {
+    let esp = esp_volume.trim_end_matches(['\\', '/']);
+    let store = if uefi {
+        format!(r"{esp}\EFI\Microsoft\Boot\BCD")
+    } else {
+        format!(r"{esp}\Boot\BCD")
+    };
+    if !std::path::Path::new(&store).exists() {
+        warn!(store = %store, "boot menu: store not found where bcdboot should have written it");
+        return BootFinalizeReport {
+            note: Some(format!("Хранилище загрузки {store} не найдено — меню не проверялось.")),
+            ..Default::default()
+        };
+    }
+
+    let default_block = match bcdedit(&["/store", &store, "/enum", "{default}", "/v"]) {
+        Ok(text) => text,
+        Err(e) => {
+            warn!(error = %e, "boot menu: cannot read the default entry");
+            return BootFinalizeReport {
+                note: Some(format!("Не удалось прочитать запись загрузки по умолчанию: {e}")),
+                ..Default::default()
+            };
+        }
+    };
+    let Some(default_id) = first_identifier(&default_block) else {
+        warn!("boot menu: the default entry has no readable identifier");
+        return BootFinalizeReport {
+            note: Some("Запись загрузки по умолчанию не удалось определить — меню не менялось.".into()),
+            ..Default::default()
+        };
+    };
+
+    // The default must be the entry bcdboot just wrote for THIS restore: its
+    // device is the restored Windows volume, which is holding a drive letter for
+    // exactly this reason.
+    let letter = windows_volume.trim_end_matches(['\\', '/']).to_ascii_uppercase();
+    let expected = format!("PARTITION={letter}"); // matched against an uppercased block
+    let loaders = loader_entries(&store);
+    let menu_loaders = loaders.iter().filter(|(_, ramdisk)| !ramdisk).count();
+    if !default_block.to_ascii_uppercase().contains(&expected) {
+        warn!(
+            default = %default_id, expected = %expected,
+            "boot menu: the default entry does not point at the restored volume — left as it is"
+        );
+        return BootFinalizeReport {
+            default_id: Some(default_id),
+            loaders_found: menu_loaders,
+            note: Some(
+                "Запись загрузки по умолчанию указывает не на восстановленный раздел — меню \
+                 оставлено без изменений, проверьте его вручную (bcdedit)."
+                    .into(),
+            ),
+            menu_trimmed: false,
+            ..Default::default()
+        };
+    }
+
+    match bcdedit(&["/store", &store, "/displayorder", &default_id]) {
+        Ok(_) => {
+            info!(
+                store = %store,
+                default = %default_id,
+                loaders = menu_loaders,
+                "boot menu: display order reduced to the entry bcdboot created"
+            );
+            BootFinalizeReport {
+                default_id: Some(default_id),
+                loaders_found: menu_loaders,
+                menu_trimmed: menu_loaders > 1,
+                note: None,
+                ..Default::default()
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, "boot menu: could not set the display order");
+            BootFinalizeReport {
+                default_id: Some(default_id),
+                loaders_found: menu_loaders,
+                menu_trimmed: false,
+                note: Some(format!("Не удалось сократить меню загрузки: {e}")),
+                ..Default::default()
+            }
+        }
+    }
 }
 
 /// Result of verifying an image against its sidecar checksums.

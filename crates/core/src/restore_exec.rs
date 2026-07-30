@@ -597,11 +597,13 @@ fn with_captured_gpt_fields(
     table: &own_backup_common::restore_plan::PartitionTableSpec,
     plan: &RestorePlan,
     sidecar: &own_backup_backup::sidecar::Sidecar,
-) -> own_backup_common::restore_plan::PartitionTableSpec {
-    use own_backup_common::restore_plan::PartitionKind;
+    taken: &IdentitiesInUse,
+) -> (own_backup_common::restore_plan::PartitionTableSpec, IdentityOutcome) {
+    use own_backup_common::restore_plan::{PartitionKind, PartitionScheme};
 
+    let mut outcome = IdentityOutcome::default();
     let Some(dm) = sidecar.disk_manifest.as_ref() else {
-        return table.clone();
+        return (table.clone(), outcome);
     };
     // Which target partition receives which source partition.
     let src_of: std::collections::HashMap<u32, u32> = plan
@@ -619,6 +621,13 @@ fn with_captured_gpt_fields(
         let Some(captured) = dm.layout.partitions.iter().find(|p| p.index == *src_index) else {
             continue;
         };
+        let index = e.index;
+        // `ReAgent.xml` records where WinRE lives as disk GUID + partition
+        // BYTE OFFSET, so a partition that lands somewhere else takes the
+        // recovery environment with it even when every GUID is reproduced.
+        if captured.first_lba != e.first_lba {
+            outcome.partitions_moved.push(index);
+        }
         if let PartitionKind::Gpt { type_guid, part_guid, attributes, name } = &mut e.kind {
             *attributes = captured.attributes;
             *name = captured.name.clone();
@@ -629,7 +638,108 @@ fn with_captured_gpt_fields(
                 *type_guid = captured.type_guid.clone();
             }
             if !captured.part_guid.is_empty() {
-                *part_guid = captured.part_guid.clone();
+                if taken.holds_partition(&captured.part_guid) {
+                    // Another disk in this machine already answers to that GUID
+                    // — most often the source disk itself, still attached. Two
+                    // partitions with one identity is what makes the mount
+                    // manager hand a drive letter to the wrong volume, so this
+                    // one gets a fresh GUID (empty = the writer generates one).
+                    part_guid.clear();
+                    outcome.partitions_regenerated.push(index);
+                } else {
+                    *part_guid = captured.part_guid.clone();
+                }
+            }
+        }
+    }
+
+    // The disk's own GUID, and with it the second half of every BCD device
+    // element: those name a partition by *both* its GUID and its disk's. A
+    // restored disk that reproduces both boots on the copy's own boot entries —
+    // WinRE and `ReAgent.xml` (which records the disk GUID) included — and
+    // `bcdboot` then updates that entry instead of adding a second one. When
+    // the source disk is still attached, reproducing its GUID would put two
+    // disks with one identity in the machine and Windows takes one of them
+    // offline, so the target keeps a fresh GUID and the boot chain is rebuilt.
+    if out.scheme == PartitionScheme::Gpt && !dm.layout.disk_guid.is_empty() {
+        if taken.holds_disk(&dm.layout.disk_guid) {
+            outcome.disk_guid_taken = Some(dm.layout.disk_guid.clone());
+        } else {
+            out.disk_id = dm.layout.disk_guid.clone();
+            outcome.disk_guid_preserved = true;
+        }
+    }
+    (out, outcome)
+}
+
+/// GPT identities that disks attached to this machine already answer to.
+///
+/// A restored disk may reproduce the source's GUIDs only while nothing else
+/// holds them: duplicates make Windows take a disk offline (the disk GUID) or
+/// hand a remembered drive letter to the wrong volume (a partition GUID).
+#[derive(Debug, Default, Clone)]
+pub struct IdentitiesInUse {
+    disk_guids: std::collections::BTreeSet<String>,
+    part_guids: std::collections::BTreeSet<String>,
+    /// Disks the scan could read, for the log (Windows-only; the scan does not
+    /// exist elsewhere).
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    scanned: Vec<u32>,
+}
+
+impl IdentitiesInUse {
+    fn normalize(guid: &str) -> String {
+        guid.trim().trim_start_matches('{').trim_end_matches('}').to_ascii_uppercase()
+    }
+
+    fn holds_disk(&self, guid: &str) -> bool {
+        self.disk_guids.contains(&Self::normalize(guid))
+    }
+
+    fn holds_partition(&self, guid: &str) -> bool {
+        self.part_guids.contains(&Self::normalize(guid))
+    }
+}
+
+/// What the identity decision came to, for the log and the restore report.
+#[derive(Debug, Default)]
+pub struct IdentityOutcome {
+    /// The restored disk carries the source disk's own GUID.
+    disk_guid_preserved: bool,
+    /// The source disk's GUID is in use here, so a fresh one was used instead.
+    disk_guid_taken: Option<String>,
+    /// Target partitions that had to get a fresh GUID because the source's is
+    /// in use on this machine.
+    partitions_regenerated: Vec<u32>,
+    /// Target partitions that start at a different offset than on the source.
+    /// Identity by GUID survives that; `ReAgent.xml`'s offset-based reference
+    /// to WinRE does not.
+    partitions_moved: Vec<u32>,
+}
+
+/// Read the GPT identities of every disk attached to this machine except
+/// `except_disk` (the restore target, whose table is about to be replaced).
+///
+/// Disks are probed by number rather than enumerated through WMI: this runs in
+/// the middle of a restore, and the inventory's PowerShell round-trip takes ten
+/// seconds. A disk that cannot be opened or has no GPT contributes nothing —
+/// which is correct, it holds no GUID we could collide with.
+#[cfg(target_os = "windows")]
+fn identities_in_use(except_disk: u32) -> IdentitiesInUse {
+    const MAX_DISKS: u32 = 32;
+    let mut out = IdentitiesInUse::default();
+    for n in 0..MAX_DISKS {
+        if n == except_disk {
+            continue;
+        }
+        let Ok(layout) = own_backup_backup::gpt_reader::read_disk_layout(n) else { continue };
+        out.scanned.push(n);
+        if !layout.disk_guid.is_empty() {
+            out.disk_guids.insert(IdentitiesInUse::normalize(&layout.disk_guid));
+        }
+        for p in &layout.partitions {
+            if !p.part_guid.is_empty() {
+                out.part_guids.insert(IdentitiesInUse::normalize(&p.part_guid));
             }
         }
     }
@@ -779,7 +889,16 @@ fn run_op(
                     "нет открытой сессии диска для записи разметки — внутренняя ошибка".into(),
                 )
             })?;
-            let table = with_captured_gpt_fields(table, plan, sidecar);
+            let taken = identities_in_use(plan.target_disk);
+            let (table, identity) = with_captured_gpt_fields(table, plan, sidecar, &taken);
+            info!(
+                scanned_disks = ?taken.scanned,
+                disk_guid_preserved = identity.disk_guid_preserved,
+                disk_guid_taken = ?identity.disk_guid_taken,
+                partitions_regenerated = ?identity.partitions_regenerated,
+                partitions_moved = ?identity.partitions_moved,
+                "identity of the source disk on the restored disk"
+            );
             // Everything the plan is not acting on is a bystander: its GPT
             // entry belongs to the disk, not to the designer.
             let owned = plan.touched_partitions();
@@ -787,15 +906,53 @@ fn run_op(
             // and then the table is left exactly as it is. Saying so matters:
             // "разметка перезаписана" in the report of a run that touched one
             // spare partition is how a user concludes their disk was rebuilt.
-            if session.write_partition_table(&table, &owned)? {
-                Ok(OpNote::default())
+            let written = session.write_partition_table(&table, &owned)?;
+            let mut note = if written {
+                OpNote::default()
             } else {
-                Ok(OpNote {
+                OpNote {
                     message: "Разметка уже соответствует плану — таблица разделов не менялась"
                         .into(),
                     follow_ups: Vec::new(),
-                })
+                }
+            };
+            if identity.disk_guid_preserved {
+                note.message = if note.message.is_empty() {
+                    "Идентификаторы исходного диска воспроизведены — записи загрузки и среда \
+                     восстановления (WinRE) из копии продолжают работать"
+                        .into()
+                } else {
+                    note.message
+                };
+                if !identity.partitions_moved.is_empty() {
+                    note.follow_ups.push(format!(
+                        "Разделы {:?} начинаются не там, где на исходном диске. Записи загрузки \
+                         это переживут (они ссылаются на GUID), а среда восстановления WinRE — \
+                         нет: ReAgent.xml помнит смещение раздела. Если «Особые варианты \
+                         загрузки» не работают, выполните в восстановленной системе: reagentc \
+                         /setreimage /path C:\\Recovery\\WindowsRE, затем reagentc /enable.",
+                        identity.partitions_moved
+                    ));
+                }
+            } else if let Some(guid) = &identity.disk_guid_taken {
+                note.follow_ups.push(format!(
+                    "Идентификатор исходного диска ({guid}) уже занят другим подключённым диском, \
+                     поэтому восстановленный диск получил новый. Загрузчик пересоздан bcdboot и \
+                     система стартует, но записи загрузки из копии (в том числе среда \
+                     восстановления WinRE) указывают на прежний диск. Чтобы вернуть WinRE, \
+                     выполните в восстановленной системе: reagentc /setreimage /path \
+                     C:\\Recovery\\WindowsRE, затем reagentc /enable."
+                ));
             }
+            if !identity.partitions_regenerated.is_empty() {
+                note.follow_ups.push(format!(
+                    "Разделам {:?} выданы новые GUID: их идентификаторы из копии уже заняты \
+                     другим подключённым диском, а два раздела с одним GUID путают назначение \
+                     букв дисков.",
+                    identity.partitions_regenerated
+                ));
+            }
+            Ok(note)
         }
 
         RestoreOp::RestorePartition {
@@ -1043,15 +1200,38 @@ fn run_op(
                 .as_ref()
                 .map(|m| m.mount_point().trim_end_matches('\\').to_string());
             info!(win = %win_arg, esp = ?esp_arg, uefi = *uefi, "bcdboot: recreating the loader");
-            finalize_boot(&win_arg, esp_arg.as_deref(), *uefi)?;
-            Ok(OpNote {
-                message: String::new(),
-                follow_ups: vec![
-                    "Загрузчик пересоздан командой bcdboot. Если система не стартует, \
-                     проверьте порядок загрузки в UEFI."
-                        .into(),
-                ],
-            })
+            let report = finalize_boot(&win_arg, esp_arg.as_deref(), *uefi)?;
+            let mut follow_ups = vec![
+                "Загрузчик пересоздан командой bcdboot. Если система не стартует, \
+                 проверьте порядок загрузки в UEFI."
+                    .into(),
+            ];
+            // The ESP came out of the copy, so its BCD still describes the
+            // source disk: those entries point at GPT GUIDs this disk does not
+            // have and end in 0xc000000e. They are hidden, not deleted.
+            if report.menu_trimmed {
+                follow_ups.push(format!(
+                    "В скопированном хранилище загрузки было записей Windows: {}. В меню оставлена \
+                     одна — созданная bcdboot для восстановленной системы; остальные указывали на \
+                     разделы исходного диска и не загрузились бы. Система стартует без вопросов.",
+                    report.loaders_found
+                ));
+            }
+            if let Some(note) = report.note {
+                follow_ups.push(note);
+            }
+            // A copy is taken from a running system, so its recorded shutdown
+            // never happened and the first boot would stop at the recovery
+            // screen (0xc0000001). Removing bootstat.dat is what makes the
+            // restored machine start straight into Windows the first time.
+            let message = if report.boot_status_cleared {
+                "Снят признак незавершённого выключения — первая загрузка пройдёт без экрана \
+                 восстановления"
+                    .to_string()
+            } else {
+                String::new()
+            };
+            Ok(OpNote { message, follow_ups })
         }
 
         RestoreOp::EnsureFallbackBootloader { esp } => {
@@ -1361,6 +1541,13 @@ mod tests {
 
     /// A minimal sidecar whose disk manifest carries one captured partition.
     fn sidecar_with(entry: own_backup_common::gpt::GptPartitionEntry) -> own_backup_backup::sidecar::Sidecar {
+        sidecar_with_disk(entry, "")
+    }
+
+    fn sidecar_with_disk(
+        entry: own_backup_common::gpt::GptPartitionEntry,
+        disk_guid: &str,
+    ) -> own_backup_backup::sidecar::Sidecar {
         use own_backup_backup::sidecar::SidecarInfo;
         use own_backup_common::gpt::{DiskBackupManifest, DiskLayout};
         use own_backup_common::image::ImageManifest;
@@ -1409,7 +1596,7 @@ mod tests {
                 disk_number: 0,
                 disk_model: String::new(),
                 layout: DiskLayout {
-                    disk_guid: String::new(),
+                    disk_guid: disk_guid.to_string(),
                     sector_size: 512,
                     size_bytes: 0,
                     partitions: vec![entry],
@@ -1450,7 +1637,8 @@ mod tests {
                 },
             ],
         );
-        let patched = with_captured_gpt_fields(&table(), &plan, &sidecar_with(captured));
+        let (patched, _) =
+            with_captured_gpt_fields(&table(), &plan, &sidecar_with(captured), &IdentitiesInUse::default());
         let PartitionKind::Gpt { attributes, name, type_guid, part_guid } = &patched.entries[0].kind
         else {
             panic!("expected a GPT entry");
@@ -1459,6 +1647,103 @@ mod tests {
         assert_eq!(name, "Basic data partition");
         assert_eq!(type_guid, "DE94BBA4-06D1-4D40-A16A-BFD50179D6AC");
         assert_eq!(part_guid, "11111111-2222-3333-4444-555555555555", "UEFI references this");
+    }
+
+    /// A restore onto a disk of its own reproduces the source's identity whole:
+    /// the BCD names a partition by its GUID *and* its disk's, so both have to
+    /// come back for the copy's own boot entries — WinRE included — to resolve.
+    #[test]
+    fn the_source_disks_identity_is_reproduced_when_nothing_holds_it() {
+        let captured = own_backup_common::gpt::GptPartitionEntry {
+            index: 7,
+            type_guid: "DE94BBA4-06D1-4D40-A16A-BFD50179D6AC".into(),
+            part_guid: "11111111-2222-3333-4444-555555555555".into(),
+            first_lba: 2048,
+            last_lba: 4095,
+            attributes: 0,
+            name: "Basic data partition".into(),
+        };
+        let plan = restoring_plan();
+        let sidecar = sidecar_with_disk(captured, "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE");
+        let (patched, outcome) =
+            with_captured_gpt_fields(&table(), &plan, &sidecar, &IdentitiesInUse::default());
+        assert_eq!(patched.disk_id, "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE");
+        assert!(outcome.disk_guid_preserved);
+        assert!(outcome.partitions_regenerated.is_empty());
+        assert!(outcome.partitions_moved.is_empty(), "the partition lands where it came from");
+    }
+
+    /// A partition that lands at another offset is still the same partition by
+    /// GUID — but `ReAgent.xml` points at WinRE by offset, so the run has to
+    /// say so rather than let the user find out from a dead recovery menu.
+    #[test]
+    fn a_partition_that_moved_is_reported_even_when_its_guid_is_kept() {
+        let captured = own_backup_common::gpt::GptPartitionEntry {
+            index: 7,
+            type_guid: "DE94BBA4-06D1-4D40-A16A-BFD50179D6AC".into(),
+            part_guid: "11111111-2222-3333-4444-555555555555".into(),
+            first_lba: 34, // the copy had it right after the GPT head
+            last_lba: 4095,
+            attributes: 0,
+            name: "Basic data partition".into(),
+        };
+        let plan = restoring_plan();
+        let sidecar = sidecar_with_disk(captured, "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE");
+        let (_, outcome) =
+            with_captured_gpt_fields(&table(), &plan, &sidecar, &IdentitiesInUse::default());
+        assert!(outcome.disk_guid_preserved);
+        assert_eq!(outcome.partitions_moved, vec![1]);
+    }
+
+    /// …and refuses to when the source disk is still attached: two disks with
+    /// one GUID make Windows take one of them offline, and two partitions with
+    /// one GUID send a remembered drive letter to the wrong volume.
+    #[test]
+    fn an_identity_another_attached_disk_answers_to_is_not_reproduced() {
+        let captured = own_backup_common::gpt::GptPartitionEntry {
+            index: 7,
+            type_guid: "DE94BBA4-06D1-4D40-A16A-BFD50179D6AC".into(),
+            part_guid: "11111111-2222-3333-4444-555555555555".into(),
+            first_lba: 2048,
+            last_lba: 4095,
+            attributes: 0,
+            name: "Basic data partition".into(),
+        };
+        let plan = restoring_plan();
+        let sidecar = sidecar_with_disk(captured, "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE");
+        // Written the way the on-disk GPT spells them — braces and case are
+        // noise, and a comparison that trips over them would miss a collision.
+        let mut taken = IdentitiesInUse::default();
+        taken.disk_guids.insert("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_ascii_uppercase());
+        taken.part_guids.insert("11111111-2222-3333-4444-555555555555".into());
+
+        let (patched, outcome) = with_captured_gpt_fields(&table(), &plan, &sidecar, &taken);
+        assert_eq!(patched.disk_id, "", "empty means the writer makes a fresh one");
+        assert!(!outcome.disk_guid_preserved);
+        assert_eq!(outcome.disk_guid_taken.as_deref(), Some("AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"));
+        assert_eq!(outcome.partitions_regenerated, vec![1]);
+        let PartitionKind::Gpt { part_guid, .. } = &patched.entries[0].kind else {
+            panic!("expected a GPT entry");
+        };
+        assert_eq!(part_guid, "", "the copy's partition GUID is in use here — take a fresh one");
+    }
+
+    /// A plan that restores source partition 7 into target partition 1.
+    fn restoring_plan() -> RestorePlan {
+        RestorePlan::new(
+            1,
+            "/tmp/img.vhdx".into(),
+            vec![
+                RestoreOp::WritePartitionTable { table: table() },
+                RestoreOp::RestorePartition {
+                    src_index: 7,
+                    dst: part(),
+                    mode: RestoreMode::Sectors,
+                    wipe_free_space: false,
+                    reencrypt: false,
+                },
+            ],
+        )
     }
 
     #[test]
@@ -1478,8 +1763,10 @@ mod tests {
             attributes: 1 << 63,
             name: "Recovery".into(),
         };
-        let patched = with_captured_gpt_fields(&table(), &plan, &sidecar_with(captured));
+        let (patched, outcome) =
+            with_captured_gpt_fields(&table(), &plan, &sidecar_with(captured), &IdentitiesInUse::default());
         assert_eq!(patched, table());
+        assert!(!outcome.disk_guid_preserved, "the copy carries no disk GUID here");
     }
 
     #[test]
