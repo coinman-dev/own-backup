@@ -429,10 +429,15 @@ impl RestoreOp {
     /// bootloader raises a question the answer to which is "probably nothing".
     /// It runs, and reports — but only when it changed something.
     pub fn is_housekeeping(&self) -> bool {
-        // Only the fallback loader. "Обновить состояние дисков" stays visible —
-        // it is the step that tells the user their disk is now what the program
-        // thinks it is, which is worth seeing.
-        matches!(self, RestoreOp::EnsureFallbackBootloader { .. })
+        // "Обновить состояние дисков" joined it on 2026-07-30. It was worth a
+        // line while re-reading the disks meant ten seconds of PowerShell —
+        // the user could see what the wait was for. The inventory now answers
+        // in twenty milliseconds, so the step is over before the eye reaches
+        // it, and a queue entry that only ever flashes is noise.
+        matches!(
+            self,
+            RestoreOp::EnsureFallbackBootloader { .. } | RestoreOp::RefreshDiskState
+        )
     }
 
     /// Whether this operation destroys data that cannot be recovered. From the
@@ -676,6 +681,28 @@ mod tests {
         );
         let kinds: Vec<&str> = plan.ordered().iter().map(|op| op.kind()).collect();
         assert_eq!(kinds, vec!["restore_sectors", "finalize_boot", "ensure_fallback_bootloader"]);
+    }
+
+    /// The queue shows the user what is happening to their disk. Steps that
+    /// finish before they can be read are hidden — but only those: a queue
+    /// missing the step that is about to overwrite a partition would be a
+    /// different kind of wrong.
+    #[test]
+    fn only_the_instant_steps_are_kept_out_of_the_queue() {
+        assert!(RestoreOp::RefreshDiskState.is_housekeeping());
+        assert!(RestoreOp::EnsureFallbackBootloader { esp: part(1, 100) }.is_housekeeping());
+        for op in [
+            RestoreOp::WritePartitionTable { table: table() },
+            RestoreOp::FinalizeBoot { windows_part: part(1, 100), esp: None, uefi: true },
+            RestoreOp::Format {
+                part: part(1, 100),
+                fs: FormatFs::Ntfs,
+                label: String::new(),
+                quick: true,
+            },
+        ] {
+            assert!(!op.is_housekeeping(), "{} belongs in the queue", op.kind());
+        }
     }
 
     #[test]
