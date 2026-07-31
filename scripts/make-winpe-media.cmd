@@ -284,10 +284,16 @@ set "SCRIPT=%APP%\start-media.cmd"
 >>"%SCRIPT%" echo set /p "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=" ^<"%%ARGS_FILE%%"
 >>"%SCRIPT%" echo echo Browser arguments read from: %%ARGS_FILE%%
 >>"%SCRIPT%" echo if not defined WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS echo [!] no arguments came out of that file
+>>"%SCRIPT%" echo rem Media mode: state goes to the RAM disk instead of the rescued machine's
+>>"%SCRIPT%" echo rem C:, the engine runs as a process (nothing to install into - WinPE's registry
+>>"%SCRIPT%" echo rem lives in RAM), no VSS is attempted (the system here is offline, so a direct
+>>"%SCRIPT%" echo rem read is already consistent) and schedules stay hidden. The programs detect
+>>"%SCRIPT%" echo rem WinPE by themselves; this makes it explicit and covers child processes.
+>>"%SCRIPT%" echo set "OWN_BACKUP_MEDIA=1"
 >>"%SCRIPT%" echo set "RUST_BACKTRACE=1"
 >>"%SCRIPT%" echo set "RUST_LOG=info,own_backup_gui=debug,tauri_runtime_wry=debug,wry=debug"
->>"%SCRIPT%" echo echo Starting the service...
->>"%SCRIPT%" echo start "own-backup service" /min "X:\Program Files\OwnBackup\own-backup-service.exe" --run
+>>"%SCRIPT%" echo echo Starting the engine...
+>>"%SCRIPT%" echo start "own-backup engine" /min "X:\Program Files\OwnBackup\own-backup-service.exe" --run --media
 >>"%SCRIPT%" echo echo Starting the interface...
 >>"%SCRIPT%" echo start "" "X:\Program Files\OwnBackup\own-backup-gui.exe"
 >>"%SCRIPT%" echo echo.

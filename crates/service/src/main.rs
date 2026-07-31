@@ -56,6 +56,10 @@ enum Mode {
 fn parse_mode(args: &[String]) -> Mode {
     for a in args {
         match a.as_str() {
+            // Not a mode: it colours every mode. Kept in this loop so it can be
+            // combined with any of them (`--run --media` is what the medium
+            // uses) and so it is seen before the data directory is first read.
+            "--media" | "/media" => own_backup_common::media_mode::set_media_mode(true),
             "/install" | "--install" | "install" => return Mode::Install,
             "/uninstall" | "--uninstall" | "uninstall" | "/remove" | "--remove" => {
                 return Mode::Uninstall
@@ -208,6 +212,10 @@ fn print_info() {
     println!("  /status       показать состояние службы");
     println!("  --foreground  запустить в консоли для отладки (TCP localhost:50051)");
     println!("  --run         режим демона (UDS/named pipe) — так её запускает systemd");
+    println!(
+        "  --media       режим загрузочного носителя: состояние на диске носителя, \
+         службу не устанавливать (в WinPE включается сам)"
+    );
 }
 
 /// Build a tokio runtime and run the gRPC loop until shutdown. `use_tcp`

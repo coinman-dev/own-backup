@@ -342,6 +342,25 @@ fn validate_parent(parent_image: &Path, block_size: u32, volume_len: u64) -> Res
     Ok(sidecar)
 }
 
+/// Should we try for a shadow copy at all?
+///
+/// On the boot medium the answer is no, and not because VSS is missing (it is —
+/// WinPE carries no Volume Shadow Copy Service) but because there is nothing for
+/// it to do: the system on that disk is not running, no process holds a file
+/// open, nothing is written while we read. A direct read of an offline volume is
+/// already a consistent copy — that is the whole point of rescue media. Asking
+/// anyway would cost a COM round trip and log a failure that means nothing.
+fn snapshot_wanted(requested: bool) -> bool {
+    if !requested {
+        return false;
+    }
+    if own_backup_common::media_mode::is_media_mode() {
+        info!("boot medium: the system is offline, reading the volume directly (cold copy)");
+        return false;
+    }
+    true
+}
+
 fn backup_volume_inner(
     req: &VolumeBackupRequest,
     mut progress: impl FnMut(&BackupProgress) -> Result<()>,
@@ -351,7 +370,7 @@ fn backup_volume_inner(
 
     // --- VSS shadow copy (live lettered volumes only) ---
     let mut vss: Option<VssSnapshotSession> = None;
-    let read_path = if req.use_vss {
+    let read_path = if snapshot_wanted(req.use_vss) {
         match volume_root_of(&source) {
             Some(root) => match VssSnapshotSession::create(&root) {
                 Ok(session) => {
@@ -1801,7 +1820,7 @@ fn backup_disk_inner(
         let source = normalize_device_path(&p.device);
         // VSS for a live lettered volume; else read the source directly.
         let mut vss: Option<VssSnapshotSession> = None;
-        let read_path = match volume_root_of(&source) {
+        let read_path = match volume_root_of(&source).filter(|_| snapshot_wanted(true)) {
             Some(root) => match VssSnapshotSession::create(&root) {
                 Ok(session) => {
                     let path = session.device_path().to_string();

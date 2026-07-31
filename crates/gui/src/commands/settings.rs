@@ -36,17 +36,27 @@ pub struct ServiceHealth {
     pub reachable: bool,
     /// The service is registered with the OS (SCM / systemd), regardless of state.
     pub installed: bool,
+    /// Running from the boot medium. Then `installed: false` is not a fault to
+    /// report but the design: WinPE's registry lives in RAM, so there is nowhere
+    /// to install a service to, and a schedule would not outlive the session.
+    pub media: bool,
 }
 
 #[tauri::command]
 pub async fn service_health(state: State<'_, GuiState>) -> Result<ServiceHealth, String> {
     let reachable = state.link.is_reachable().await;
-    // `sc query` blocks — keep it off the async runtime.
-    let installed = tokio::task::spawn_blocking(crate::service_link::service_installed)
-        .await
-        .unwrap_or(false);
-    tracing::info!(reachable, installed, "service_health check");
-    Ok(ServiceHealth { reachable, installed })
+    let media = own_backup_common::media_mode::is_media_mode();
+    // `sc query` blocks — keep it off the async runtime. On the medium there is
+    // no SCM worth asking, so the call is skipped entirely.
+    let installed = if media {
+        false
+    } else {
+        tokio::task::spawn_blocking(crate::service_link::service_installed)
+            .await
+            .unwrap_or(false)
+    };
+    tracing::info!(reachable, installed, media, "service_health check");
+    Ok(ServiceHealth { reachable, installed, media })
 }
 
 #[tauri::command]

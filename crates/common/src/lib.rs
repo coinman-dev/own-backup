@@ -6,6 +6,7 @@ pub mod error;
 pub mod gpt;
 pub mod image;
 pub mod log_mirror;
+pub mod media_mode;
 pub mod preflight;
 pub mod progress;
 pub mod restore_check;

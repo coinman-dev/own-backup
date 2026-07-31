@@ -12,5 +12,9 @@ toml = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+# Only for the WinPE check in `media_mode` — reading one registry key.
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_System_Registry"] }
+
 [dev-dependencies]
 tempfile = "3"

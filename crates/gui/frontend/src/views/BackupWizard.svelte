@@ -2,6 +2,7 @@
   import { open } from '@tauri-apps/plugin-dialog';
   import { api } from '../lib/api';
   import { engine } from '../lib/engineStore.svelte';
+  import { media, ensureMediaMode } from '../lib/mediaStore.svelte';
   import { saveJob, runJob, decryptVolume, decryptedVolumes } from '../lib/jobStore.svelte';
   import { formatBytes } from '../lib/format';
   import { diskSegments } from '../lib/diskLayout';
@@ -24,13 +25,19 @@
   const stub = () =>
     (stubMsg = 'Эта настройка сохраняется, но пока не применяется — реализация позже.');
 
-  const steps = [
-    { key: 'source', label: 'Источник' },
-    { key: 'schedule', label: 'Расписание' },
-    { key: 'scheme', label: 'Схема' },
-    { key: 'exclusions', label: 'Исключения' },
-    { key: 'advanced', label: 'Дополнительно' },
-  ];
+  // On the boot medium the schedule step is dropped rather than disabled: the
+  // session ends at power-off, so any schedule set here is a promise nothing
+  // can keep. The job is saved with kind='none' (see buildJob), which is what
+  // "run it now, once" means everywhere else in the program.
+  const steps = $derived(
+    [
+      { key: 'source', label: 'Источник' },
+      { key: 'schedule', label: 'Расписание' },
+      { key: 'scheme', label: 'Схема' },
+      { key: 'exclusions', label: 'Исключения' },
+      { key: 'advanced', label: 'Дополнительно' },
+    ].filter((s) => !(media.active && s.key === 'schedule')),
+  );
 
   const weekdays = [
     ['mon', 'Пн'], ['tue', 'Вт'], ['wed', 'Ср'], ['thu', 'Чт'],
@@ -54,6 +61,15 @@
       ? job.schedule.days.filter((x) => x !== d)
       : [...job.schedule.days, d];
   }
+
+  // The wizard can be opened before App's health check has answered, and it is
+  // the schedule step that depends on the answer — ask, then force the draft to
+  // "run manually" so a job carried over from an edit cannot smuggle a schedule
+  // onto a medium that has no scheduler running.
+  $effect(() => {
+    ensureMediaMode();
+    if (media.active && job.schedule.kind !== 'none') job.schedule.kind = 'none';
+  });
 
   // ---- source selection (Paragon-style disk map, multi-volume) ----------
 

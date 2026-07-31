@@ -82,6 +82,14 @@ fn default_data_dir() -> PathBuf {
             return PathBuf::from(dir);
         }
     }
+    // On the boot medium `C:` is the machine being rescued, not ours: state
+    // written there would modify the very disk the user booted the medium to
+    // save (and it did — the spike left a service.token on the target's C:).
+    // The RAM disk is the only volume that is genuinely ours, and losing this
+    // state at power-off is correct: it describes one rescue session.
+    if crate::media_mode::is_media_mode() {
+        return media_data_dir();
+    }
     #[cfg(target_os = "windows")]
     {
         PathBuf::from(r"C:\ProgramData\OwnBackup")
@@ -90,6 +98,18 @@ fn default_data_dir() -> PathBuf {
     {
         PathBuf::from("/var/lib/own-backup")
     }
+}
+
+/// Where state lives on the boot medium. `%SystemRoot%` is asked rather than
+/// assuming `X:\Windows`, because that is what WinPE itself sets and it costs
+/// nothing to be right if it ever differs.
+fn media_data_dir() -> PathBuf {
+    if let Ok(root) = std::env::var("SystemRoot") {
+        if !root.trim().is_empty() {
+            return PathBuf::from(root).join("Temp").join("OwnBackup");
+        }
+    }
+    std::env::temp_dir().join("OwnBackup")
 }
 
 fn default_grpc_addr() -> String {

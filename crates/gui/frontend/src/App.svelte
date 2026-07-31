@@ -3,6 +3,7 @@
   import { initEngine } from './lib/engineStore.svelte';
   import { initJobs } from './lib/jobStore.svelte';
   import { api } from './lib/api';
+  import { setMediaMode } from './lib/mediaStore.svelte';
   import Sidebar from './components/Sidebar.svelte';
   import BackupSection from './views/BackupSection.svelte';
   import Restore from './views/Restore.svelte';
@@ -26,7 +27,17 @@
     checking = true;
     try {
       const h = await api.serviceHealth();
-      if (!h.installed) {
+      setMediaMode(h.media);
+      if (h.media) {
+        // On the boot medium the engine deliberately runs as a plain process:
+        // WinPE's registry is in RAM, so there is nothing to install into, and
+        // a schedule could not outlive the session anyway. Only losing the
+        // engine is worth saying anything about.
+        serviceWarn = h.reachable
+          ? null
+          : 'Движок не отвечает. Запустите его: own-backup-service.exe --run --media, ' +
+            'затем нажмите «Повторить».';
+      } else if (!h.installed) {
         // Not installed is always worth flagging: even if a temporary/foreground
         // instance answers, the scheduler only runs from the installed service.
         serviceWarn = h.reachable

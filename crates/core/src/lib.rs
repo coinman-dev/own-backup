@@ -1703,7 +1703,10 @@ async fn perform_disk_backup(
     run.base_image_path = image_path.display().to_string();
     run.backup_kind = "full".into();
     run.smart_mode = true;
-    run.vss_used = true;
+    // The whole-disk path takes a shadow copy per partition — except on the
+    // boot medium, where the system is offline and a direct read is already
+    // consistent (see `snapshot_wanted` in the engine).
+    run.vss_used = !own_backup_common::media_mode::is_media_mode();
 
     match result {
         Ok(Ok(summary)) => {

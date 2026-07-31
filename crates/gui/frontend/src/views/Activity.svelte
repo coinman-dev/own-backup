@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { media } from '../lib/mediaStore.svelte';
   import { jobs, reloadActivity } from '../lib/jobStore.svelte';
   import { formatBytes, formatDate, formatDuration } from '../lib/format';
 
@@ -52,7 +53,12 @@
               <div><span class="k">Скорость</span><span class="v">{speed(r)} МБ/с</span></div>
               <div><span class="k">Время</span><span class="v">{formatDuration(r.duration_secs)}</span></div>
               <div><span class="k">Режим</span><span class="v">{r.smart_mode ? 'занятые' : 'посекторно'}</span></div>
-              <div><span class="k">VSS</span><span class="v">{r.vss_used ? 'да' : 'нет'}</span></div>
+              <div>
+                <span class="k">Снимок</span>
+                <!-- "нет" would read as a shortcoming; on the medium the volume
+                     is offline, so no snapshot was needed in the first place. -->
+                <span class="v">{r.vss_used ? 'VSS' : media.active ? 'не нужен (офлайн)' : 'нет'}</span>
+              </div>
             </div>
           {/if}
         </div>

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { media } from '../lib/mediaStore.svelte';
   import { api } from '../lib/api';
   import { formatBytes, formatDate, formatClock } from '../lib/format';
   import { jobs, jobStatus, sourceSummary, runJob, cancelRunning } from '../lib/jobStore.svelte';
@@ -298,7 +299,11 @@
         <div class="banner ok">
           <span class="bdot"></span>
           <span>
-            Копия создана — {kindLabel(lastRun.backup_kind)}{lastRun.vss_used ? ', снимок VSS' : ''}.
+            Копия создана — {kindLabel(lastRun.backup_kind)}{lastRun.vss_used
+              ? ', снимок VSS'
+              : media.active
+                ? ', холодная копия (система офлайн)'
+                : ''}.
             {lastRun.smart_mode ? 'Только занятые секторы.' : 'Посекторно.'}
             {#if lastRun.backup_kind === 'incremental' || lastRun.backup_kind === 'differential'}
               Записано только изменённое: {formatBytes(lastRun.bytes_copied)}.

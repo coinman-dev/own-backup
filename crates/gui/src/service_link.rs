@@ -122,6 +122,13 @@ impl ServiceLink {
 /// installed (stopped) or missing entirely.
 fn unreachable_message() -> String {
     let name = own_backup_common::WINDOWS_SERVICE_DISPLAY_NAME;
+    // On the medium "install it" is not advice anyone can follow.
+    if own_backup_common::media_mode::is_media_mode() {
+        return format!(
+            "Движок «{name}» не отвечает. Запустите его из консоли носителя:\n  \
+             own-backup-service.exe --run --media"
+        );
+    }
     #[cfg(target_os = "windows")]
     let (start_hint, install_hint) = (
         "Запустите её (нужны права администратора) или перезагрузите компьютер.".to_string(),
@@ -162,6 +169,14 @@ pub fn service_installed() -> bool {
 /// admin, so this only succeeds if the GUI is elevated or the service DACL
 /// allows it; the auto-start service is normally already running anyway.
 fn start_installed_service() {
+    // On the boot medium there is no installed service to start — asking the
+    // SCM would just fail. Re-launch the engine as a process instead, the same
+    // way the medium's launcher does, so losing it (a crash, a stray Ctrl+C in
+    // the console it shares) is recoverable from the interface.
+    if own_backup_common::media_mode::is_media_mode() {
+        start_media_engine();
+        return;
+    }
     #[cfg(target_os = "windows")]
     {
         let _ = run_hidden("net", &["start", own_backup_common::WINDOWS_SERVICE_DISPLAY_NAME]);
@@ -177,6 +192,34 @@ fn start_installed_service() {
         let _ = std::process::Command::new("systemctl")
             .args(["--no-ask-password", "start", own_backup_common::LINUX_UNIT_NAME])
             .status();
+    }
+}
+
+/// Start the engine as a plain process from next to this exe — the boot
+/// medium's equivalent of "start the service". Nothing is installed and nothing
+/// is elevated: on the medium everything already runs as SYSTEM.
+fn start_media_engine() {
+    let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf()))
+    else {
+        return;
+    };
+    let exe = dir.join(if cfg!(windows) { "own-backup-service.exe" } else { "own-backup-service" });
+    if !exe.exists() {
+        tracing::warn!(path = %exe.display(), "engine binary not found next to the interface");
+        return;
+    }
+    tracing::info!(path = %exe.display(), "boot medium: starting the engine as a process");
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.args(["--run", "--media"]);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    match cmd.spawn() {
+        Ok(child) => tracing::info!(pid = child.id(), "engine started"),
+        Err(e) => tracing::warn!(error = %e, "could not start the engine"),
     }
 }
 

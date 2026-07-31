@@ -136,6 +136,9 @@ export interface ServiceStatus {
 export interface ServiceHealth {
   reachable: boolean;
   installed: boolean;
+  /** Running from the boot medium: the service is a plain process there, and
+   *  there is nowhere to install it to, so `installed: false` is expected. */
+  media: boolean;
 }
 
 export type ViewName =
