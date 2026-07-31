@@ -613,21 +613,18 @@
   function clickSourcePart(p: PartitionInfo) {
     if (wholeDiskRestore) return; // whole-disk: the selection is fixed
     if (mappings.some((m) => m.src === p.index)) return; // already mapped
-    // Microsoft Reserved is in the copy as a GPT entry and nothing else — there
-    // are no blocks to write anywhere. Mapping it produced a plan the engine
-    // then refused ("В копии нет раздела с номером 2"), which read as if the
-    // backup were broken.
-    if (layoutOnlyParts.includes(p.index)) {
-      badTarget = null;
-      srcPart = null;
-      fitMsg =
-        'Раздел «Зарезервировано системой» (MSR) не содержит данных — в копии ' +
-        'хранится только его место в таблице разделов, и восстановление ' +
-        'воссоздаёт его само. Выбирать его не нужно.';
-      return;
-    }
     badTarget = null;
-    fitMsg = null;
+    // Microsoft Reserved holds no data — the copy keeps its place in the
+    // partition table and nothing else. It is still drawn as a partition, and
+    // that is how anyone reads it, so it maps like one: the two maps stay
+    // paired one to one and nothing looks skipped. What it cannot do is carry
+    // blocks, so the plan will hold no copy operation for it — said here as a
+    // note, not as a refusal.
+    fitMsg = layoutOnlyParts.includes(p.index)
+      ? 'Раздел «Зарезервировано системой» (MSR) не содержит данных: восстановление ' +
+        'воссоздаёт его вместе с таблицей разделов. Сопоставить его можно — ' +
+        'копировать в нём просто нечего.'
+      : null;
     srcPart = p.index;
   }
 
@@ -957,6 +954,15 @@
       ops.push(`Восстановить все разделы копии (${srcBackupParts.length} шт., ${formatBytes(srcTotalBytes)}) и загрузочные данные`);
     }
     for (const m of mappings) {
+      // Mapped, but there is nothing to copy: say what will actually happen
+      // instead of promising a restore the plan does not contain.
+      if (layoutOnlyParts.includes(m.src)) {
+        ops.push(
+          `Раздел ${describeSrc(m.src)} — воссоздаётся вместе с таблицей разделов ` +
+            `(«Зарезервировано системой» не содержит данных)`,
+        );
+        continue;
+      }
       const sp = srcDisk?.partitions.find((x) => x.index === m.src);
       const dp = cur.find((x) => x.index === m.dst);
       // Same wording as the plan builder's rule, so the list and the plan
@@ -1257,7 +1263,13 @@
       srcPart = null;
       return;
     }
-    const need = sp.used_bytes > 0 ? sp.used_bytes : sp.size_bytes;
+    // A layout-only partition (MSR) carries nothing, so "does the data fit"
+    // does not apply — only the slot itself has to be there.
+    const need = layoutOnlyParts.includes(sp.index)
+      ? 0
+      : sp.used_bytes > 0
+        ? sp.used_bytes
+        : sp.size_bytes;
     if (p.size_bytes < need) {
       badTarget = p.index;
       fitMsg =
