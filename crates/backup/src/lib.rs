@@ -78,6 +78,9 @@ pub mod true_removal_win;
 pub mod used_sectors_win;
 #[cfg(target_os = "windows")]
 pub mod vhdx;
+pub mod wim_info;
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub mod winre_find;
 #[cfg(target_os = "windows")]
 pub mod volume_win;
 #[cfg(target_os = "windows")]

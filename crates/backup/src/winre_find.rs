@@ -1,0 +1,394 @@
+//! Finding a base image for the boot medium on the machine we are running on.
+//!
+//! We do not ship WinPE — the medium is built from what Windows already carries.
+//! That image is `Winre.wim`, and where it lives depends on the installation:
+//! registered with the recovery environment on its own partition, or sitting in
+//! `System32\Recovery` with the environment switched off, or nowhere at all
+//! (verified on the author's machine 2026-07-30: WinRE `Disabled`, only
+//! `ReAgent.xml` left behind).
+//!
+//! So every place is looked at, best first, and each candidate is read before it
+//! is offered — a file called `Winre.wim` is not necessarily one, and an
+//! installation image is a different thing wearing the same extension. The user
+//! chooses from what was actually found; nothing is picked silently, because
+//! building a medium on the wrong base fails at boot, on their hardware, in the
+//! middle of a rescue.
+
+use crate::wim_info::{read_wim_info, WimInfo};
+use std::path::{Path, PathBuf};
+
+/// Where a candidate came from. Shown to the user, because "found on D:" and
+/// "registered with the recovery environment" mean different degrees of
+/// confidence, and because a candidate inside an installation image needs
+/// extracting before it can be used.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BaseOrigin {
+    /// The image the recovery environment itself points at (`ReAgent.xml`).
+    Registered,
+    /// `%SystemRoot%\System32\Recovery` — where it waits while WinRE is off.
+    SystemRecovery,
+    /// `\Recovery\WindowsRE` on a volume, lettered or given a letter by us.
+    RecoveryFolder,
+    /// Chosen by the user in a file dialog.
+    Manual,
+}
+
+impl BaseOrigin {
+    pub fn describe(&self) -> &'static str {
+        match self {
+            BaseOrigin::Registered => "зарегистрирован в среде восстановления",
+            BaseOrigin::SystemRecovery => "лежит в System32\\Recovery",
+            BaseOrigin::RecoveryFolder => "раздел восстановления",
+            BaseOrigin::Manual => "указан вручную",
+        }
+    }
+}
+
+/// A usable base image, already read and vouched for.
+#[derive(Debug, Clone)]
+pub struct BaseImage {
+    pub path: PathBuf,
+    pub origin: BaseOrigin,
+    pub info: WimInfo,
+    /// Reasons to hesitate — not refusals. A medium built on a different
+    /// servicing branch than the running Windows usually works, and the user is
+    /// entitled to build it; they are just told first.
+    pub warnings: Vec<String>,
+}
+
+/// What `ReAgent.xml` says. Read instead of running `reagentc /info`, whose
+/// output is localised — the XML is not.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ReAgentInfo {
+    /// The recovery environment is enabled (`InstallState state="1"`).
+    pub enabled: bool,
+    /// Directory the image is registered in, relative to its volume
+    /// (`\Recovery\WindowsRE`). Empty when nothing is registered.
+    pub winre_dir: String,
+    /// GUID of the volume holding it — the letterless recovery partition, on a
+    /// normal installation.
+    pub winre_volume_guid: String,
+    /// `10.0.19041.1` — the build the environment belongs to.
+    pub os_build: String,
+}
+
+/// Parse `ReAgent.xml`. Attribute soup, no schema: the file is small, flat and
+/// stable, and pulling three attributes out of it does not justify a dependency.
+pub fn parse_reagent_xml(xml: &str) -> ReAgentInfo {
+    ReAgentInfo {
+        enabled: attr(xml, "InstallState", "state").as_deref() == Some("1"),
+        winre_dir: attr(xml, "WinreLocation", "path").unwrap_or_default(),
+        winre_volume_guid: attr(xml, "WinreLocation", "guid").unwrap_or_default(),
+        os_build: attr(xml, "OsBuildVersion", "path").unwrap_or_default(),
+    }
+}
+
+/// Value of `attribute` on the first `<element …>` in the document.
+fn attr(xml: &str, element: &str, attribute: &str) -> Option<String> {
+    let start = xml.find(&format!("<{element}"))?;
+    let rest = &xml[start..];
+    let end = rest.find('>')?;
+    let tag = &rest[..end];
+    let key = format!("{attribute}=\"");
+    let vs = tag.find(&key)? + key.len();
+    let ve = tag[vs..].find('"')? + vs;
+    let v = tag[vs..ve].trim();
+    (!v.is_empty()).then(|| v.to_string())
+}
+
+/// Read and vouch for one candidate path, or say why it is not usable.
+///
+/// `running_build` is the build of the Windows we are on, for the branch
+/// comparison; pass 0 when it is unknown and the check is skipped.
+pub fn inspect_candidate(
+    path: &Path,
+    origin: BaseOrigin,
+    running_build: u32,
+) -> std::result::Result<BaseImage, String> {
+    let info = read_wim_info(path).map_err(|e| e.to_string())?;
+
+    if !info.is_windows_pe() {
+        return Err(format!(
+            "{}: это установочный образ Windows ({}), а не среда восстановления. \
+             Из него можно достать Winre.wim, но напрямую он не подходит.",
+            path.display(),
+            if info.edition_id.is_empty() { "выпуск не указан" } else { &info.edition_id }
+        ));
+    }
+    if !info.is_x64() {
+        return Err(format!(
+            "{}: образ для архитектуры {}, а нужен x64.",
+            path.display(),
+            if info.architecture.is_empty() { "неизвестной" } else { &info.architecture }
+        ));
+    }
+    if info.total_parts > 1 {
+        return Err(format!(
+            "{}: это часть {} из {} разделённого образа (.swm) — сначала соберите его целиком.",
+            path.display(),
+            info.part_number,
+            info.total_parts
+        ));
+    }
+
+    let mut warnings = Vec::new();
+    if running_build > 0 && !info.same_branch_as(running_build) {
+        warnings.push(format!(
+            "Образ собран для Windows {} , а на этой машине {}. Носитель, скорее всего, \
+             заработает, но это неподдерживаемое сочетание: драйверы и компоненты \
+             берутся от текущей системы.",
+            info.build, running_build
+        ));
+    }
+    Ok(BaseImage { path: path.to_path_buf(), origin, info, warnings })
+}
+
+/// Advice for when nothing was found. Deliberately instructions rather than an
+/// error: the user's machine is missing a file, and every line here is a way to
+/// get it.
+pub fn nothing_found_advice() -> Vec<String> {
+    vec![
+        "Включить среду восстановления, если образ на диске есть:  reagentc /enable".into(),
+        "Достать Winre.wim из установочного образа Windows: смонтируйте ISO и укажите его — \
+         мастер извлечёт образ сам."
+            .into(),
+        "Указать файл вручную, если Winre.wim лежит где-то ещё.".into(),
+        "Поставить Windows ADK с дополнением WinPE, если своего образа нет вовсе.".into(),
+    ]
+}
+
+/// Every place worth looking, best first. Windows only — on Linux there is no
+/// WinRE to find, and the media builder is a Windows feature.
+#[cfg(target_os = "windows")]
+pub fn find_base_images() -> Vec<BaseImage> {
+    use std::collections::BTreeSet;
+
+    let running_build = running_windows_build();
+    let mut found: Vec<BaseImage> = Vec::new();
+    let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
+
+    let mut consider = |path: PathBuf, origin: BaseOrigin, found: &mut Vec<BaseImage>| {
+        if !path.exists() || !seen.insert(path.clone()) {
+            return;
+        }
+        match inspect_candidate(&path, origin, running_build) {
+            Ok(img) => {
+                tracing::info!(path = %img.path.display(), build = img.info.build,
+                               lang = %img.info.language, "base image found");
+                found.push(img);
+            }
+            Err(why) => tracing::debug!(%why, "candidate rejected"),
+        }
+    };
+
+    // 1. What the recovery environment itself points at. Its volume usually has
+    //    no letter, so the path is resolved through the volume GUID.
+    let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    let reagent = PathBuf::from(&system_root).join(r"System32\Recovery\ReAgent.xml");
+    if let Ok(text) = std::fs::read_to_string(&reagent) {
+        let ra = parse_reagent_xml(&text);
+        tracing::info!(enabled = ra.enabled, dir = %ra.winre_dir, build = %ra.os_build,
+                       "ReAgent.xml read");
+        if !ra.winre_volume_guid.is_empty() && !ra.winre_dir.is_empty() {
+            // ReAgent writes the GUID with its braces, which is exactly the form
+            // a volume path wants: \\?\Volume{GUID}\ .
+            let root = format!(r"\\?\Volume{}\", ra.winre_volume_guid);
+            let dir = ra.winre_dir.trim_start_matches('\\');
+            consider(
+                PathBuf::from(root).join(dir).join("Winre.wim"),
+                BaseOrigin::Registered,
+                &mut found,
+            );
+        }
+    }
+
+    // 2. Where the image waits while the environment is switched off.
+    consider(
+        PathBuf::from(&system_root).join(r"System32\Recovery\Winre.wim"),
+        BaseOrigin::SystemRecovery,
+        &mut found,
+    );
+
+    // 3. Every volume that has a letter: the recovery folder, and a second
+    //    Windows' own System32\Recovery. Two file opens per volume, not a walk.
+    for letter in 'A'..='Z' {
+        let root = format!("{letter}:\\");
+        if std::fs::metadata(&root).is_err() {
+            continue;
+        }
+        consider(
+            PathBuf::from(&root).join(r"Recovery\WindowsRE\Winre.wim"),
+            BaseOrigin::RecoveryFolder,
+            &mut found,
+        );
+        consider(
+            PathBuf::from(&root).join(r"Windows\System32\Recovery\Winre.wim"),
+            BaseOrigin::SystemRecovery,
+            &mut found,
+        );
+    }
+
+    // 4. Recovery partitions with no letter — the usual case on a factory
+    //    installation. Each is given a temporary mount point, looked at, and
+    //    released; a volume that already had a letter keeps it.
+    for volume in crate::volume_win::all_volume_roots() {
+        // A volume that already answers to a letter was covered by the sweep
+        // above; giving it a second mount point would be pointless work.
+        if std::fs::metadata(&volume).is_err() {
+            continue; // not readable at all (offline disk, empty reader)
+        }
+        let Ok(temp) = crate::letters_win::TempDriveLetter::acquire(&volume) else {
+            continue;
+        };
+        let mount = temp.mount_point().to_string();
+        if mount.is_empty() {
+            continue;
+        }
+        consider(
+            PathBuf::from(&mount).join(r"Recovery\WindowsRE\Winre.wim"),
+            BaseOrigin::RecoveryFolder,
+            &mut found,
+        );
+    }
+
+    // Best base first: the registered one, then the rest, newest build first so
+    // a machine with two Windows offers the current one at the top.
+    found.sort_by(|a, b| {
+        (a.origin != BaseOrigin::Registered)
+            .cmp(&(b.origin != BaseOrigin::Registered))
+            .then(b.info.build.cmp(&a.info.build))
+    });
+    found
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn find_base_images() -> Vec<BaseImage> {
+    Vec::new()
+}
+
+/// Build number of the running Windows, 0 when it cannot be read.
+#[cfg(target_os = "windows")]
+fn running_windows_build() -> u32 {
+    use windows::Win32::System::SystemInformation::GetVersionExW;
+    use windows::Win32::System::SystemInformation::OSVERSIONINFOW;
+    let mut vi = OSVERSIONINFOW {
+        dwOSVersionInfoSize: std::mem::size_of::<OSVERSIONINFOW>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: the struct's size field is set as the API requires.
+    if unsafe { GetVersionExW(&mut vi) }.is_ok() {
+        vi.dwBuildNumber
+    } else {
+        0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A real ReAgent.xml from an installation with the environment enabled.
+    const REAGENT_ENABLED: &str = r#"<?xml version='1.0' encoding='utf-8'?>
+<WindowsRE version="2.0">
+  <WinreBCD id="{00000000-0000-0000-0000-000000000000}"/>
+  <WinreLocation path="\Recovery\WindowsRE" id="0" offset="1048576" guid="{8f9e951e-0000-0000-0000-000000000000}"/>
+  <ImageLocation path="" id="0" offset="0" guid="{00000000-0000-0000-0000-000000000000}"/>
+  <InstallState state="1"/>
+  <OsInstallAvailable state="0"/>
+  <IsAutoRepairOn state="1"/>
+  <OsBuildVersion path="10.0.19041.1"/>
+</WindowsRE>"#;
+
+    #[test]
+    fn reads_where_the_recovery_environment_keeps_its_image() {
+        let ra = parse_reagent_xml(REAGENT_ENABLED);
+        assert!(ra.enabled);
+        assert_eq!(ra.winre_dir, r"\Recovery\WindowsRE");
+        assert_eq!(ra.winre_volume_guid, "{8f9e951e-0000-0000-0000-000000000000}");
+        assert_eq!(ra.os_build, "10.0.19041.1");
+    }
+
+    /// The case that started this: WinRE switched off, so the XML registers
+    /// nothing — and the image is elsewhere, if it is anywhere.
+    #[test]
+    fn a_disabled_environment_registers_nothing() {
+        let xml = REAGENT_ENABLED
+            .replace(r#"<InstallState state="1"/>"#, r#"<InstallState state="0"/>"#)
+            .replace(r#"path="\Recovery\WindowsRE""#, r#"path="""#);
+        let ra = parse_reagent_xml(&xml);
+        assert!(!ra.enabled);
+        assert!(ra.winre_dir.is_empty());
+    }
+
+    #[test]
+    fn missing_file_yields_defaults_not_a_panic() {
+        let ra = parse_reagent_xml("<WindowsRE version=\"2.0\"/>");
+        assert_eq!(ra, ReAgentInfo::default());
+    }
+
+    /// An installation image passes every structural test and is still the wrong
+    /// file — the rejection has to say what it actually is.
+    #[test]
+    fn an_installation_image_is_refused_with_its_own_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("install.wim");
+        write_wim(&p, "Professional", "9", 19041, 1);
+        let e = inspect_candidate(&p, BaseOrigin::Manual, 19041).unwrap_err();
+        assert!(e.contains("установочный образ"), "{e}");
+    }
+
+    #[test]
+    fn a_split_image_is_refused_before_anything_is_copied() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("boot.swm");
+        write_wim(&p, "WindowsPE", "9", 19041, 3);
+        let e = inspect_candidate(&p, BaseOrigin::Manual, 19041).unwrap_err();
+        assert!(e.contains(".swm"), "{e}");
+    }
+
+    /// A different branch is a warning, not a refusal: the user may well have
+    /// good reason, and the medium usually works.
+    #[test]
+    fn a_different_windows_branch_warns_but_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("winre.wim");
+        write_wim(&p, "WindowsPE", "9", 22621, 1);
+        let img = inspect_candidate(&p, BaseOrigin::Manual, 19045).unwrap();
+        assert_eq!(img.warnings.len(), 1, "{:?}", img.warnings);
+        assert!(img.warnings[0].contains("22621"));
+
+        let p2 = dir.path().join("same.wim");
+        write_wim(&p2, "WindowsPE", "9", 19041, 1);
+        assert!(inspect_candidate(&p2, BaseOrigin::Manual, 19045).unwrap().warnings.is_empty());
+    }
+
+    #[test]
+    fn advice_is_offered_when_the_machine_has_no_image() {
+        let advice = nothing_found_advice();
+        assert!(advice.iter().any(|a| a.contains("reagentc /enable")));
+        assert!(advice.len() >= 3);
+    }
+
+    fn write_wim(path: &Path, edition: &str, arch: &str, build: u32, parts: u16) {
+        use std::io::Write;
+        let xml = format!(
+            "<WIM><IMAGE INDEX=\"1\"><NAME>t</NAME><WINDOWS><ARCH>{arch}</ARCH>\
+             <EDITIONID>{edition}</EDITIONID><VERSION><BUILD>{build}</BUILD></VERSION>\
+             <LANGUAGE>ru-RU</LANGUAGE></WINDOWS></IMAGE></WIM>"
+        );
+        let mut xml_bytes: Vec<u8> = vec![0xFF, 0xFE];
+        for u in xml.encode_utf16() {
+            xml_bytes.extend_from_slice(&u.to_le_bytes());
+        }
+        let mut header = vec![0u8; 0x60];
+        header[..8].copy_from_slice(crate::wim_info::WIM_MAGIC);
+        header[0x28..0x2A].copy_from_slice(&1u16.to_le_bytes());
+        header[0x2A..0x2C].copy_from_slice(&parts.to_le_bytes());
+        header[0x2C..0x30].copy_from_slice(&1u32.to_le_bytes());
+        header[0x48..0x50].copy_from_slice(&(xml_bytes.len() as u64).to_le_bytes());
+        header[0x50..0x58].copy_from_slice(&0x60u64.to_le_bytes());
+        let mut f = std::fs::File::create(path).unwrap();
+        f.write_all(&header).unwrap();
+        f.write_all(&xml_bytes).unwrap();
+    }
+}
