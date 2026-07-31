@@ -308,7 +308,13 @@
    *  are not round numbers, so a few mebibytes of padding come with them. */
   const srcNeedBytes = $derived(
     srcBackupParts.reduce(
-      (cursor, p) => Math.ceil((cursor + p.size_bytes) / (1024 * 1024)) * 1024 * 1024,
+      // The last partition's end is NOT rounded up: that padding only exists to
+      // align the next start, and counting it made a disk look too small for the
+      // copy taken from it. Same rule as the placement in clickFreeSpace.
+      (cursor, p, k) =>
+        k === srcBackupParts.length - 1
+          ? cursor + p.size_bytes
+          : Math.ceil((cursor + p.size_bytes) / (1024 * 1024)) * 1024 * 1024,
       0,
     ),
   );
@@ -654,10 +660,17 @@
     const start = Math.ceil(cell.offset / MIB) * MIB;
     const offsets: number[] = [];
     let cursor = start;
-    for (const sp of srcBackupParts) {
+    srcBackupParts.forEach((sp, k) => {
       offsets.push(cursor);
-      cursor = Math.ceil((cursor + sp.size_bytes) / MIB) * MIB;
-    }
+      const end = cursor + sp.size_bytes;
+      // Round up to the next boundary only to align the NEXT partition's start.
+      // Doing it after the last one demanded up to 1 MiB that nothing would ever
+      // occupy — and made the most important restore of all impossible: a disk
+      // whose last partition ends at the last usable LBA (which is where Windows
+      // puts it) could not be put back onto itself, short by the 33 sectors of
+      // the secondary GPT.
+      cursor = k === srcBackupParts.length - 1 ? end : Math.ceil(end / MIB) * MIB;
+    });
     const cellEnd = cell.offset + cell.size;
     const needed = cursor - cell.offset;
     if (needed > cell.size) {
