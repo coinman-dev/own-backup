@@ -87,34 +87,45 @@ pub const SCRATCH_SPACE_MB: u32 = 512;
 /// The `--disable-features` list REPLACES wry's own defaults, so those are
 /// re-listed here. `--allow-run-as-system` is required because WinPE runs
 /// everything as SYSTEM and WebView2 refuses SYSTEM without it.
-pub fn browser_args(log_path: &str) -> String {
-    format!(
-        "--allow-run-as-system --no-sandbox --in-process-gpu --disable-gpu \
-         --disable-gpu-compositing --disable-direct-composition \
-         --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,\
+pub fn browser_args() -> String {
+    "--allow-run-as-system --no-sandbox --in-process-gpu --disable-gpu \
+     --disable-gpu-compositing --disable-direct-composition \
+     --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,\
 RendererCodeIntegrity,RemoveRedirectionBitmap,ForceSWDCompWhenDCompFallbackRequired \
-         --no-first-run --enable-logging=file --v=1 --log-file={log_path}"
-    )
+     --no-first-run"
+        .into()
+}
+
+/// The same, with Chromium's own log — the diagnostic line, not the default.
+pub fn browser_args_logging(log_path: &str) -> String {
+    format!("{} --enable-logging=file --v=1 --log-file={log_path}", browser_args())
 }
 
 /// The whole `webview2-args.txt`: the live line, then the alternatives, because
 /// the medium is a RAM disk and swapping the top line with notepad is faster
 /// than any rebuild.
 ///
-/// Note `--enable-logging=file` rather than plain `--enable-logging`: the bare
-/// form sends Chromium's log to stderr, and a process with no console gets one
-/// allocated for it — a window that appears over the interface and fills with
-/// errors about services WinPE does not have (the network-change watcher retries
-/// `WSALookupServiceBegin` once a second forever, because there is no Network
-/// Location Awareness here). The log is worth keeping; the window is not.
+/// **No Chromium logging by default.** Asking for it at all makes this Edge
+/// build allocate a console for a process that has none — a window that lands
+/// over the interface and fills with errors about services WinPE does not have
+/// (the network-change watcher retries `WSALookupServiceBegin` once a second
+/// forever, because there is no Network Location Awareness here; the Edge LLM
+/// and geolocation lines are the same story). Directing the log to a file with
+/// `--enable-logging=file` cut the flood but not the window: the switch's
+/// presence is what opens it. Our own `own-backup-gui.log` is always written
+/// and says whether the webview was created, which is the question that
+/// actually gets asked; Chromium's log is a line away when it is needed.
 pub fn webview2_args_file(log_path: &str) -> String {
     let base = "--allow-run-as-system --no-sandbox";
     let feats = "msWebOOUI,msPdfOOUI,msSmartScreenProtection,RendererCodeIntegrity";
     lines(&[
-        &browser_args(log_path),
+        &browser_args(),
         "",
         "Only the line above is used. To try another set, move its line to the top",
         "with notepad and run start-media.cmd again.",
+        "",
+        "A - with Chromium's own log (opens a console window of its own):",
+        &browser_args_logging(log_path),
         "",
         "B - the same, plus forcing software GL:",
         &format!(
@@ -124,14 +135,7 @@ pub fn webview2_args_file(log_path: &str) -> String {
              --enable-logging --v=1 --log-file={log_path}"
         ),
         "",
-        "C - no Chromium log at all, if even the file is in the way:",
-        &format!(
-            "{base} --in-process-gpu --disable-gpu --disable-gpu-compositing \
-             --disable-direct-composition --disable-features={feats},\
-RemoveRedirectionBitmap,ForceSWDCompWhenDCompFallbackRequired --no-first-run"
-        ),
-        "",
-        "D - the other direction: give D3D a working device (WARP) instead of banning it:",
+        "C - the other direction: give D3D a working device (WARP) instead of banning it:",
         &format!(
             "{base} --in-process-gpu --use-gl=angle --use-angle=d3d11-warp \
              --disable-features={feats} --no-first-run --enable-logging --v=1 \
@@ -329,20 +333,22 @@ mod tests {
         }
     }
 
-    /// Plain `--enable-logging` goes to stderr, and Chromium allocates a console
-    /// for a process that has none — a window of its own over the interface.
+    /// Asking for a Chromium log at all opens a console window over the
+    /// interface in this Edge build — even directed at a file.
     #[test]
-    fn the_chromium_log_goes_to_the_file_not_to_a_console() {
-        let a = browser_args("X:\\log");
-        assert!(a.contains("--enable-logging=file"));
-        assert!(!a.contains("--enable-logging "), "the bare form opens a console window");
+    fn the_default_arguments_ask_for_no_chromium_log() {
+        let a = browser_args();
+        assert!(!a.contains("--enable-logging"), "this opens a console window");
+        assert!(!a.contains("--log-file"));
+        // Still available one line away, for when something needs diagnosing.
+        assert!(browser_args_logging("X:\\log").contains("--enable-logging=file"));
     }
 
     /// Both of these were found the hard way; a regression would show up as a
     /// black window or a refusal to start, neither of which points at the cause.
     #[test]
     fn the_arguments_carry_what_winpe_needs() {
-        let a = browser_args(r"X:\Windows\Temp\OwnBackup\webview2.log");
+        let a = browser_args();
         assert!(a.contains("--allow-run-as-system"), "WinPE runs everything as SYSTEM");
         assert!(a.contains("--no-sandbox"), "no sandbox in WinPE");
         // wry's own defaults are replaced by whatever we pass, so they must be here.
