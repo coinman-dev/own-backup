@@ -624,11 +624,29 @@ export interface BaseImage {
   warnings: string[];
 }
 
+/** One driver package on this machine, as offered for selection. */
+export interface DriverPackage {
+  inf: string;
+  original_name: string;
+  class_name: string;
+  provider: string;
+  version: string;
+  size_bytes: number;
+  /** Storage / network / USB — ticked by default; the rest is weight. */
+  recommended: boolean;
+}
+
 export interface MediaBuildOptions {
   base_wim: string;
   output_iso: string;
-  include_drivers: boolean;
+  /** Published names of the driver packages to include; empty means none. */
+  drivers: string[];
   extra_drivers: string;
+}
+
+export interface MediaStage {
+  id: string;
+  title: string;
 }
 
 export interface MediaBuildReport {
@@ -640,11 +658,16 @@ export interface MediaBuildReport {
   unpacked: boolean;
   drivers_added: number;
   runtime_files_trimmed: number;
+  temp_bytes_freed: number;
   warnings: string[];
 }
 
 export interface MediaProgress {
-  phase: string;
-  detail: string;
+  /** The whole queue, sent with every event so the two sides cannot drift. */
+  stages: MediaStage[];
+  stage_index: number;
+  /** 0–100 within the current stage. */
   percent: number;
+  detail: string;
+  finished: boolean;
 }

@@ -109,6 +109,26 @@ pub struct BaseImageDto {
     pub warnings: Vec<String>,
 }
 
+/// One driver package on this machine, as offered for selection.
+///
+/// The size is the point: exporting every package is what made the first medium
+/// 2.2 GB, and a display driver alone can be several hundred megabytes that a
+/// rescue medium will never use.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DriverPackageDto {
+    /// Published name (`oem12.inf`) — what the build exports by.
+    pub inf: String,
+    /// The vendor's own name for it, which is the one that means something.
+    pub original_name: String,
+    pub class_name: String,
+    pub provider: String,
+    pub version: String,
+    pub size_bytes: u64,
+    /// A class a rescue medium plausibly needs (storage, network, USB): ticked
+    /// by default, the rest left clear.
+    pub recommended: bool,
+}
+
 /// What to build. Paths are the service's, not the interface's: the build runs
 /// on the machine the service is on.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -118,10 +138,9 @@ pub struct MediaBuildOptionsDto {
     pub base_wim: String,
     /// Where the finished ISO goes.
     pub output_iso: String,
-    /// Include this machine's drivers. Without them a medium may not see the
-    /// disks of the machine it is booted on.
+    /// Published names of the driver packages to include. Empty means none.
     #[serde(default)]
-    pub include_drivers: bool,
+    pub drivers: Vec<String>,
     /// An extra folder of `.inf` drivers.
     #[serde(default)]
     pub extra_drivers: String,
@@ -139,16 +158,40 @@ pub struct MediaBuildReportDto {
     pub unpacked: bool,
     pub drivers_added: u32,
     pub runtime_files_trimmed: u32,
+    /// Temporary files removed after the build — a few gigabytes when the image
+    /// had to be unpacked.
+    #[serde(default)]
+    pub temp_bytes_freed: u64,
     pub warnings: Vec<String>,
 }
 
+/// One stage of a build, as the wizard lists them before anything starts.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MediaStageDto {
+    pub id: String,
+    pub title: String,
+}
+
 /// Progress of a build, streamed as an engine event of kind `media`.
+///
+/// The full stage list travels with every event. It is ten short strings, and
+/// sending it repeatedly costs nothing next to never having to keep the
+/// interface's copy in step with the service's.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MediaProgressDto {
-    /// Phase name in words, ready to show.
-    pub phase: String,
-    /// What is happening inside the phase.
-    pub detail: String,
-    /// 0–100 across the whole build; a rough guide, since DISM does not report.
+    pub stages: Vec<MediaStageDto>,
+    /// Which stage is running (index into `stages`).
+    pub stage_index: usize,
+    /// 0–100 within that stage. The two DISM steps cannot measure themselves
+    /// and report 0 on entry and 100 on exit; the wizard shows those as
+    /// indeterminate rather than as a bar that sits still for minutes.
     pub percent: u64,
+    pub detail: String,
+    pub finished: bool,
+}
+
+/// Report of the temporary files removed after a build.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct MediaCleanupDto {
+    pub bytes_freed: u64,
 }

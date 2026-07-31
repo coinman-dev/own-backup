@@ -361,6 +361,17 @@ pub async fn find_base_images(
     Ok(found)
 }
 
+/// Driver packages this machine could put on the medium. Sizes included: a
+/// display driver can be several hundred megabytes a rescue medium never uses.
+#[tauri::command]
+pub async fn list_driver_packages(
+    state: State<'_, GuiState>,
+) -> Result<Vec<own_backup_common::engine_dto::DriverPackageDto>, String> {
+    let list = state.link.client().await?.list_drivers().await?;
+    tracing::info!(count = list.len(), "driver packages offered");
+    Ok(list)
+}
+
 /// Build the boot medium. Minutes of work in the service; progress comes back
 /// on the `media-progress` window event.
 #[tauri::command]
@@ -368,7 +379,11 @@ pub async fn build_boot_media(
     state: State<'_, GuiState>,
     options: own_backup_common::engine_dto::MediaBuildOptionsDto,
 ) -> Result<own_backup_common::engine_dto::MediaBuildReportDto, String> {
-    tracing::info!(iso = %options.output_iso, drivers = options.include_drivers, "building boot medium");
+    tracing::info!(
+        iso = %options.output_iso,
+        drivers = options.drivers.len(),
+        "building boot medium"
+    );
     let report = state.link.client().await?.build_media(&options).await?;
     tracing::info!(mb = report.iso_bytes / 1_048_576, "boot medium written");
     Ok(report)

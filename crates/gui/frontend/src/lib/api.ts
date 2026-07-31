@@ -18,6 +18,7 @@ import type {
   DirEntry,
   DirListing,
   BaseImage,
+  DriverPackage,
   MediaBuildOptions,
   MediaBuildReport,
   ServiceStatus,
@@ -35,6 +36,7 @@ export const api = {
 
   // --- boot medium ---
   findBaseImages: () => invoke<BaseImage[]>('find_base_images'),
+  listDriverPackages: () => invoke<DriverPackage[]>('list_driver_packages'),
   buildBootMedia: (options: MediaBuildOptions) =>
     invoke<MediaBuildReport>('build_boot_media', { options }),
   driveSignature: () => invoke<number>('drive_signature'),

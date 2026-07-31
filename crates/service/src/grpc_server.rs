@@ -714,15 +714,44 @@ impl BackupService for BackupServiceImpl {
         ))
     }
 
+    async fn list_drivers(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        #[cfg(target_os = "windows")]
+        {
+            use own_backup_common::engine_dto::DriverPackageDto;
+            let list = tokio::task::spawn_blocking(
+                own_backup_backup::media_build_win::list_driver_packages,
+            )
+            .await
+            .map_err(|e| Status::internal(format!("driver enumeration panicked: {e}")))?;
+            let out: Vec<DriverPackageDto> = list
+                .into_iter()
+                .map(|d| DriverPackageDto {
+                    inf: d.inf,
+                    original_name: d.original_name,
+                    class_name: d.class_name,
+                    provider: d.provider,
+                    version: d.version,
+                    size_bytes: d.size_bytes,
+                    recommended: d.recommended,
+                })
+                .collect();
+            return json_reply(&out);
+        }
+        #[cfg(not(target_os = "windows"))]
+        Err(Status::unimplemented("Драйверы перечисляются только на Windows"))
+    }
+
     async fn build_media(&self, req: Request<JsonRequest>) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
         #[cfg(target_os = "windows")]
         {
-            use own_backup_backup::media_build_win::{build_media, MediaBuildRequest};
-            use own_backup_common::engine_dto::{
-                MediaBuildOptionsDto, MediaBuildReportDto, MediaProgressDto,
+            use own_backup_backup::media_build_win::{
+                build_media, clean_up, BuildStage, MediaBuildRequest,
             };
-            use own_backup_backup::media_layout::MEDIA_DIR;
+            use own_backup_common::engine_dto::{
+                MediaBuildOptionsDto, MediaBuildReportDto, MediaProgressDto, MediaStageDto,
+            };
 
             let opts: MediaBuildOptionsDto = serde_json::from_str(&req.into_inner().json)
                 .map_err(|e| Status::invalid_argument(e.to_string()))?;
@@ -741,7 +770,8 @@ impl BackupService for BackupServiceImpl {
                     .map(|b| b.path)
                     .ok_or_else(|| {
                         Status::failed_precondition(
-                            "На этой машине не нашлось образа среды восстановления.                              Включите её (reagentc /enable) или укажите Winre.wim вручную.",
+                            "На этой машине не нашлось образа среды восстановления. \
+                             Включите её (reagentc /enable) или укажите Winre.wim вручную.",
                         )
                     })?
             } else {
@@ -754,12 +784,13 @@ impl BackupService for BackupServiceImpl {
                 .ok_or_else(|| Status::internal("не удалось определить папку программы"))?;
             let webview2 = find_webview2_runtime(&program_dir).ok_or_else(|| {
                 Status::failed_precondition(
-                    "Не найден рантайм WebView2. Установите Microsoft Edge WebView2 Runtime                      или положите папку WebView2 рядом с программой.",
+                    "Не найден рантайм WebView2. Установите Microsoft Edge WebView2 Runtime \
+                     или положите папку WebView2 рядом с программой.",
                 )
             })?;
 
             let out_iso = std::path::PathBuf::from(&opts.output_iso);
-            let work = own_backup_common::config::AppConfig::load_or_default()
+            let work_root = own_backup_common::config::AppConfig::load_or_default()
                 .data_dir
                 .join("media");
             let events = self.state.events.clone();
@@ -767,60 +798,65 @@ impl BackupService for BackupServiceImpl {
                 .then(|| std::path::PathBuf::from(&opts.extra_drivers));
 
             let report = tokio::task::spawn_blocking(move || -> own_backup_common::Result<_> {
-                let staging = work.join("out");
-                let _ = std::fs::remove_dir_all(&staging);
-                let req = MediaBuildRequest {
+                let staging = work_root.join("out");
+                let work = work_root.join("work");
+                let stages: Vec<MediaStageDto> = BuildStage::plan(!opts.drivers.is_empty())
+                    .into_iter()
+                    .map(|s| MediaStageDto { id: s.id().into(), title: s.title().into() })
+                    .collect();
+                let index_of = |id: &str| stages.iter().position(|s| s.id == id).unwrap_or(0);
+                let emit = |stage_id: &str, percent: u64, detail: &str, finished: bool| {
+                    emit_engine(
+                        &events,
+                        "media",
+                        &MediaProgressDto {
+                            stages: stages.clone(),
+                            stage_index: index_of(stage_id),
+                            percent,
+                            detail: detail.to_string(),
+                            finished,
+                        },
+                    );
+                };
+
+                let build = MediaBuildRequest {
                     base_wim: base,
                     program_dir,
                     webview2_dir: webview2,
                     out_dir: staging.clone(),
-                    work_dir: work.join("work"),
-                    include_drivers: opts.include_drivers,
+                    work_dir: work.clone(),
+                    drivers: opts.drivers.clone(),
                     extra_drivers: extra,
                 };
-                // Phases are weighted by how long they actually take, so the bar
-                // does not sit at 90% through the longest part of the build.
-                let percent_of = |p: own_backup_backup::media_build_win::BuildPhase| -> u64 {
-                    use own_backup_backup::media_build_win::BuildPhase::*;
-                    match p {
-                        Preparing => 2,
-                        OpeningImage => 10,
-                        CopyingPayload => 35,
-                        AddingDrivers => 55,
-                        WritingImage => 70,
-                        LayingOutMedia => 85,
-                        Done => 90,
+
+                // A build that fails still leaves gigabytes behind, so the
+                // clean-up runs either way — the first run left 3 GB in
+                // ProgramData because it only ran on success.
+                let built = match build_media(&build, |r| {
+                    emit(r.stage.id(), r.percent, r.detail, false);
+                }) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        emit("clean", 0, "после ошибки", false);
+                        clean_up(&work, &staging);
+                        return Err(e);
                     }
                 };
-                let ev = events.clone();
-                let built = build_media(&req, |phase, detail| {
-                    emit_engine(
-                        &ev,
-                        "media",
-                        &MediaProgressDto {
-                            phase: phase.describe().to_string(),
-                            detail: detail.to_string(),
-                            percent: percent_of(phase),
-                        },
-                    );
-                })?;
 
-                emit_engine(
-                    &events,
-                    "media",
-                    &MediaProgressDto {
-                        phase: "Запись ISO".into(),
-                        detail: "сборка образа".into(),
-                        percent: 92,
-                    },
-                );
-                let iso_bytes = write_media_iso(&built.media_dir, &out_iso)?;
-                let _ = std::fs::remove_dir_all(&staging);
-                emit_engine(
-                    &events,
-                    "media",
-                    &MediaProgressDto { phase: "Готово".into(), detail: String::new(), percent: 100 },
-                );
+                emit("iso", 0, "сборка образа", false);
+                let iso_bytes = match write_media_iso(&built.media_dir, &out_iso) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        emit("clean", 0, "после ошибки", false);
+                        clean_up(&work, &staging);
+                        return Err(e);
+                    }
+                };
+                emit("iso", 100, "", false);
+
+                emit("clean", 0, "удаление временных файлов", false);
+                let freed = clean_up(&work, &staging);
+                emit("clean", 100, "", true);
 
                 Ok(MediaBuildReportDto {
                     iso_path: out_iso.display().to_string(),
@@ -831,6 +867,7 @@ impl BackupService for BackupServiceImpl {
                     unpacked: built.unpacked,
                     drivers_added: built.drivers_added,
                     runtime_files_trimmed: built.runtime_files_trimmed,
+                    temp_bytes_freed: freed,
                     warnings: built.warnings,
                 })
             })
@@ -838,8 +875,13 @@ impl BackupService for BackupServiceImpl {
             .map_err(|e| Status::internal(format!("media build panicked: {e}")))?
             .map_err(|e| Status::internal(e.to_string()))?;
 
-            let _ = MEDIA_DIR;
-            info!(iso = %report.iso_path, mb = report.iso_bytes / 1_048_576, "boot medium built");
+            info!(
+                iso = %report.iso_path,
+                mb = report.iso_bytes / 1_048_576,
+                drivers = report.drivers_added,
+                freed_mb = report.temp_bytes_freed / 1_048_576,
+                "boot medium built"
+            );
             return json_reply(&report);
         }
         #[cfg(not(target_os = "windows"))]

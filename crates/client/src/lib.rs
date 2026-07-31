@@ -381,6 +381,20 @@ impl BackupClient {
         parse(&reply.json)
     }
 
+    /// Driver packages published on this machine, largest first — with sizes,
+    /// because that is what the choice is actually about.
+    pub async fn list_drivers(
+        &mut self,
+    ) -> Result<Vec<own_backup_common::engine_dto::DriverPackageDto>> {
+        let reply = self
+            .inner
+            .list_drivers(self.request(proto::Empty {}))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
+
     /// Build the boot medium and write it as an ISO. Progress arrives on the
     /// event stream as kind `media`; this returns when the file is on disk.
     pub async fn build_media(

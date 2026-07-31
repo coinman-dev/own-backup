@@ -76,6 +76,7 @@ service BackupService {
   // than from file names. BuildMedia does the work and streams progress as an
   // engine event of kind "media".
   rpc FindBaseImages(Empty) returns (JsonReply);        // JSON: [BaseImageDto]
+  rpc ListDrivers(Empty) returns (JsonReply);           // JSON: [DriverPackageDto]
   rpc BuildMedia(JsonRequest) returns (JsonReply);      // in: MediaBuildOptions -> MediaBuildReport
 
   // --- Arsenal Image Mounter driver (needed to mount qcow2 on Windows) ---
