@@ -349,6 +349,31 @@ pub async fn mount_backup(
         .await
 }
 
+/// Base images the machine can build a boot medium on. Empty is not an error:
+/// the interface offers the ways to get one instead (`reagentc /enable`, an
+/// installation ISO, pointing at a file).
+#[tauri::command]
+pub async fn find_base_images(
+    state: State<'_, GuiState>,
+) -> Result<Vec<own_backup_common::engine_dto::BaseImageDto>, String> {
+    let found = state.link.client().await?.find_base_images().await?;
+    tracing::info!(count = found.len(), "base images offered");
+    Ok(found)
+}
+
+/// Build the boot medium. Minutes of work in the service; progress comes back
+/// on the `media-progress` window event.
+#[tauri::command]
+pub async fn build_boot_media(
+    state: State<'_, GuiState>,
+    options: own_backup_common::engine_dto::MediaBuildOptionsDto,
+) -> Result<own_backup_common::engine_dto::MediaBuildReportDto, String> {
+    tracing::info!(iso = %options.output_iso, drivers = options.include_drivers, "building boot medium");
+    let report = state.link.client().await?.build_media(&options).await?;
+    tracing::info!(mb = report.iso_bytes / 1_048_576, "boot medium written");
+    Ok(report)
+}
+
 #[tauri::command]
 pub async fn unmount_backup(state: State<'_, GuiState>, image_path: String) -> Result<(), String> {
     state.link.client().await?.unmount_image(&image_path).await

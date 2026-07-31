@@ -16,7 +16,7 @@ use state::GuiState;
 /// Bump this on any build you hand over for testing. It is printed at the top of
 /// the log so we can tell from the log alone WHICH binary actually ran (a common
 /// trap: an old exe left in another folder still gets launched).
-const BUILD_TAG: &str = "winpe-2026-07-31g-msr-selectable";
+const BUILD_TAG: &str = "winpe-2026-07-31h-media-wizard";
 
 const ROTATE_AT: u64 = 4 * 1024 * 1024;
 
@@ -284,6 +284,8 @@ fn main() {
             commands::engine::verify_now,
             commands::engine::mount_backup,
             commands::engine::unmount_backup,
+            commands::engine::find_base_images,
+            commands::engine::build_boot_media,
             commands::engine::aim_driver_status,
             commands::engine::install_aim_driver,
             commands::engine::uninstall_aim_driver,
@@ -353,6 +355,7 @@ async fn bridge_service_events(app: tauri::AppHandle, link: Arc<ServiceLink>) {
                                 "verify" => "verify-progress",
                                 "restore-disk" => "restore-disk-progress",
                                 "restore-plan" => "restore-plan-progress",
+                                "media" => "media-progress",
                                 _ => continue,
                             };
                             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) {

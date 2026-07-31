@@ -607,3 +607,44 @@ export interface DirListing {
   parent: string | null;
   entries: DirEntry[];
 }
+
+// --- boot medium ---------------------------------------------------------
+
+/** A base image the medium can be built on, already read and vouched for. */
+export interface BaseImage {
+  path: string;
+  /** Where it was found, in words. */
+  origin: string;
+  name: string;
+  build: number;
+  language: string;
+  architecture: string;
+  total_bytes: number;
+  /** Reasons to hesitate, not refusals. */
+  warnings: string[];
+}
+
+export interface MediaBuildOptions {
+  base_wim: string;
+  output_iso: string;
+  include_drivers: boolean;
+  extra_drivers: string;
+}
+
+export interface MediaBuildReport {
+  iso_path: string;
+  iso_bytes: number;
+  base_name: string;
+  base_build: number;
+  base_language: string;
+  unpacked: boolean;
+  drivers_added: number;
+  runtime_files_trimmed: number;
+  warnings: string[];
+}
+
+export interface MediaProgress {
+  phase: string;
+  detail: string;
+  percent: number;
+}

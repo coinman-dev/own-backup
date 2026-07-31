@@ -367,6 +367,36 @@ impl BackupClient {
         Ok(m.mount_point)
     }
 
+    /// Base images this machine can build a medium on, best first, each already
+    /// read and vouched for by the service.
+    pub async fn find_base_images(
+        &mut self,
+    ) -> Result<Vec<own_backup_common::engine_dto::BaseImageDto>> {
+        let reply = self
+            .inner
+            .find_base_images(self.request(proto::Empty {}))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
+
+    /// Build the boot medium and write it as an ISO. Progress arrives on the
+    /// event stream as kind `media`; this returns when the file is on disk.
+    pub async fn build_media(
+        &mut self,
+        options: &own_backup_common::engine_dto::MediaBuildOptionsDto,
+    ) -> Result<own_backup_common::engine_dto::MediaBuildReportDto> {
+        let json = serde_json::to_string(options).unwrap_or_default();
+        let reply = self
+            .inner
+            .build_media(self.request(proto::JsonRequest { json }))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
+
     pub async fn unmount_image(&mut self, image_path: &str) -> Result<()> {
         let json = serde_json::json!({ "image_path": image_path }).to_string();
         self.inner

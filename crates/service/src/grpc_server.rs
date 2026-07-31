@@ -683,6 +683,174 @@ impl BackupService for BackupServiceImpl {
         }
     }
 
+    async fn find_base_images(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        #[cfg(target_os = "windows")]
+        {
+            use own_backup_common::engine_dto::BaseImageDto;
+            // Reads several files off disk; keep it off the async runtime.
+            let found = tokio::task::spawn_blocking(own_backup_backup::winre_find::find_base_images)
+                .await
+                .map_err(|e| Status::internal(format!("base image search panicked: {e}")))?;
+            let out: Vec<BaseImageDto> = found
+                .into_iter()
+                .map(|b| BaseImageDto {
+                    path: b.path.display().to_string(),
+                    origin: b.origin.describe().to_string(),
+                    name: b.info.name,
+                    build: b.info.build,
+                    language: b.info.language,
+                    architecture: b.info.architecture,
+                    total_bytes: b.info.total_bytes,
+                    warnings: b.warnings,
+                })
+                .collect();
+            info!(count = out.len(), "base images offered");
+            return json_reply(&out);
+        }
+        #[cfg(not(target_os = "windows"))]
+        Err(Status::unimplemented(
+            "Загрузочный носитель собирается только на Windows",
+        ))
+    }
+
+    async fn build_media(&self, req: Request<JsonRequest>) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        #[cfg(target_os = "windows")]
+        {
+            use own_backup_backup::media_build_win::{build_media, MediaBuildRequest};
+            use own_backup_common::engine_dto::{
+                MediaBuildOptionsDto, MediaBuildReportDto, MediaProgressDto,
+            };
+            use own_backup_backup::media_layout::MEDIA_DIR;
+
+            let opts: MediaBuildOptionsDto = serde_json::from_str(&req.into_inner().json)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+            if opts.output_iso.trim().is_empty() {
+                return Err(Status::invalid_argument("не указан файл ISO"));
+            }
+
+            // The base is either what the user picked or the best candidate —
+            // the search has already sorted them, best first.
+            let base = if opts.base_wim.trim().is_empty() {
+                tokio::task::spawn_blocking(own_backup_backup::winre_find::find_base_images)
+                    .await
+                    .map_err(|e| Status::internal(format!("base image search panicked: {e}")))?
+                    .into_iter()
+                    .next()
+                    .map(|b| b.path)
+                    .ok_or_else(|| {
+                        Status::failed_precondition(
+                            "На этой машине не нашлось образа среды восстановления.                              Включите её (reagentc /enable) или укажите Winre.wim вручную.",
+                        )
+                    })?
+            } else {
+                std::path::PathBuf::from(&opts.base_wim)
+            };
+
+            let program_dir = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                .ok_or_else(|| Status::internal("не удалось определить папку программы"))?;
+            let webview2 = find_webview2_runtime(&program_dir).ok_or_else(|| {
+                Status::failed_precondition(
+                    "Не найден рантайм WebView2. Установите Microsoft Edge WebView2 Runtime                      или положите папку WebView2 рядом с программой.",
+                )
+            })?;
+
+            let out_iso = std::path::PathBuf::from(&opts.output_iso);
+            let work = own_backup_common::config::AppConfig::load_or_default()
+                .data_dir
+                .join("media");
+            let events = self.state.events.clone();
+            let extra = (!opts.extra_drivers.trim().is_empty())
+                .then(|| std::path::PathBuf::from(&opts.extra_drivers));
+
+            let report = tokio::task::spawn_blocking(move || -> own_backup_common::Result<_> {
+                let staging = work.join("out");
+                let _ = std::fs::remove_dir_all(&staging);
+                let req = MediaBuildRequest {
+                    base_wim: base,
+                    program_dir,
+                    webview2_dir: webview2,
+                    out_dir: staging.clone(),
+                    work_dir: work.join("work"),
+                    include_drivers: opts.include_drivers,
+                    extra_drivers: extra,
+                };
+                // Phases are weighted by how long they actually take, so the bar
+                // does not sit at 90% through the longest part of the build.
+                let percent_of = |p: own_backup_backup::media_build_win::BuildPhase| -> u64 {
+                    use own_backup_backup::media_build_win::BuildPhase::*;
+                    match p {
+                        Preparing => 2,
+                        OpeningImage => 10,
+                        CopyingPayload => 35,
+                        AddingDrivers => 55,
+                        WritingImage => 70,
+                        LayingOutMedia => 85,
+                        Done => 90,
+                    }
+                };
+                let ev = events.clone();
+                let built = build_media(&req, |phase, detail| {
+                    emit_engine(
+                        &ev,
+                        "media",
+                        &MediaProgressDto {
+                            phase: phase.describe().to_string(),
+                            detail: detail.to_string(),
+                            percent: percent_of(phase),
+                        },
+                    );
+                })?;
+
+                emit_engine(
+                    &events,
+                    "media",
+                    &MediaProgressDto {
+                        phase: "Запись ISO".into(),
+                        detail: "сборка образа".into(),
+                        percent: 92,
+                    },
+                );
+                let iso_bytes = write_media_iso(&built.media_dir, &out_iso)?;
+                let _ = std::fs::remove_dir_all(&staging);
+                emit_engine(
+                    &events,
+                    "media",
+                    &MediaProgressDto { phase: "Готово".into(), detail: String::new(), percent: 100 },
+                );
+
+                Ok(MediaBuildReportDto {
+                    iso_path: out_iso.display().to_string(),
+                    iso_bytes,
+                    base_name: built.base_name,
+                    base_build: built.base_build,
+                    base_language: built.base_language,
+                    unpacked: built.unpacked,
+                    drivers_added: built.drivers_added,
+                    runtime_files_trimmed: built.runtime_files_trimmed,
+                    warnings: built.warnings,
+                })
+            })
+            .await
+            .map_err(|e| Status::internal(format!("media build panicked: {e}")))?
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+            let _ = MEDIA_DIR;
+            info!(iso = %report.iso_path, mb = report.iso_bytes / 1_048_576, "boot medium built");
+            return json_reply(&report);
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = req;
+            Err(Status::unimplemented(
+                "Загрузочный носитель собирается только на Windows",
+            ))
+        }
+    }
+
     async fn unmount_image(&self, req: Request<JsonRequest>) -> Result<Response<Empty>, Status> {
         check_auth(&req, &self.service_token)?;
         #[cfg(target_os = "windows")]
@@ -1260,4 +1428,89 @@ mod tests {
         assert!(excl["windows"].as_array().unwrap().iter().any(|p| p.as_str().unwrap().contains("Temp")));
         assert!(excl["linux"].as_array().unwrap().iter().any(|p| p.as_str().unwrap().contains("tmp")));
     }
+}
+
+/// Where the WebView2 runtime lives on this machine.
+///
+/// The installed Evergreen runtime keeps its version in the folder name, so the
+/// newest is taken. A `WebView2` folder beside the program wins over all of it —
+/// that is how a machine without Edge is served, and how a specific runtime can
+/// be forced.
+#[cfg(target_os = "windows")]
+fn find_webview2_runtime(program_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let beside = program_dir.join("WebView2");
+    if beside.join("msedgewebview2.exe").exists() {
+        return Some(beside);
+    }
+    let mut best: Option<(String, std::path::PathBuf)> = None;
+    for base in ["ProgramFiles(x86)", "ProgramFiles"] {
+        let Ok(root) = std::env::var(base) else { continue };
+        let apps = std::path::PathBuf::from(root).join(r"Microsoft\EdgeWebView\Application");
+        let Ok(rd) = std::fs::read_dir(&apps) else { continue };
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if !name.starts_with(|c: char| c.is_ascii_digit()) {
+                continue;
+            }
+            if !e.path().join("msedgewebview2.exe").exists() {
+                continue;
+            }
+            if best.as_ref().map(|(n, _)| name > *n).unwrap_or(true) {
+                best = Some((name, e.path()));
+            }
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
+/// Turn a finished medium folder into a bootable ISO.
+///
+/// The El Torito image carries the loader and the BCD it looks for beside
+/// itself; everything else is read from the ISO9660 tree, which is why the whole
+/// medium goes in as files as well.
+#[cfg(target_os = "windows")]
+fn write_media_iso(
+    media_dir: &std::path::Path,
+    out_iso: &std::path::Path,
+) -> own_backup_common::Result<u64> {
+    use own_backup_backup::fat_writer::{build_fat16, FatFile};
+    use own_backup_backup::iso9660::{write_iso, IsoBoot, IsoFile};
+
+    fn walk(dir: &std::path::Path, base: &std::path::Path, out: &mut Vec<IsoFile>) {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, base, out);
+            } else if let Ok(rel) = p.strip_prefix(base) {
+                out.push(IsoFile {
+                    path: rel.to_string_lossy().replace('\\', "/"),
+                    source: p.clone(),
+                });
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(media_dir, media_dir, &mut files);
+
+    let mut boot_files = Vec::new();
+    for rel in ["EFI/BOOT/BOOTX64.EFI", "EFI/Microsoft/Boot/BCD", "boot/boot.sdi"] {
+        let src = media_dir.join(rel.replace('/', "\\"));
+        if src.exists() {
+            boot_files.push(FatFile {
+                path: rel.replace('/', "\\"),
+                data: std::fs::read(&src)?,
+            });
+        }
+    }
+    let efisys = media_dir.join("boot").join("efisys.bin");
+    std::fs::write(&efisys, build_fat16(&boot_files, "OWNBOOT")?)?;
+    files.push(IsoFile { path: "boot/efisys.bin".into(), source: efisys.clone() });
+
+    if let Some(parent) = out_iso.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let len = write_iso(&files, "OWNBACKUP", Some(IsoBoot { image_path: "boot/efisys.bin".into() }), out_iso)?;
+    let _ = std::fs::remove_file(&efisys);
+    Ok(len)
 }

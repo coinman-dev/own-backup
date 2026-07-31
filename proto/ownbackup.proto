@@ -69,6 +69,15 @@ service BackupService {
   // stops returning it — the run stays in the history and in Activity.
   rpc AckRestoreRun(IdRequest) returns (Empty);            // in: plan id
 
+  // --- Boot medium ---
+  // Built from what the machine already carries: its recovery image, its
+  // drivers, its WebView2. FindBaseImages reads every candidate before
+  // offering it, so the user chooses from images known to be usable rather
+  // than from file names. BuildMedia does the work and streams progress as an
+  // engine event of kind "media".
+  rpc FindBaseImages(Empty) returns (JsonReply);        // JSON: [BaseImageDto]
+  rpc BuildMedia(JsonRequest) returns (JsonReply);      // in: MediaBuildOptions -> MediaBuildReport
+
   // --- Arsenal Image Mounter driver (needed to mount qcow2 on Windows) ---
   // Install downloads Arsenal Recon's signed driver package from GitHub and
   // installs it (the service runs as LocalSystem, so no UAC in the GUI).

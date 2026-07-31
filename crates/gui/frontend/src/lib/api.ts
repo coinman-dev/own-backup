@@ -17,6 +17,9 @@ import type {
   ServiceHealth,
   DirEntry,
   DirListing,
+  BaseImage,
+  MediaBuildOptions,
+  MediaBuildReport,
   ServiceStatus,
   MountBackendStatus,
 } from './types';
@@ -29,6 +32,11 @@ export const api = {
   listDir: (path: string, dirsOnly: boolean, filesExt: string[]) =>
     invoke<DirListing>('list_dir', { path, dirsOnly, filesExt }),
   createDir: (path: string) => invoke<string>('create_dir', { path }),
+
+  // --- boot medium ---
+  findBaseImages: () => invoke<BaseImage[]>('find_base_images'),
+  buildBootMedia: (options: MediaBuildOptions) =>
+    invoke<MediaBuildReport>('build_boot_media', { options }),
   driveSignature: () => invoke<number>('drive_signature'),
 
   // --- job model (phase 6) ---
