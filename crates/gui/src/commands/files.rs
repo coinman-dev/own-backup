@@ -20,6 +20,15 @@ pub struct DirEntryDto {
     pub is_dir: bool,
     /// `None` for directories and for files whose size cannot be read.
     pub size: Option<u64>,
+    /// Volume label, for drive rows only. A bare list of letters says nothing
+    /// about which disk is which — on the medium the user is looking at their
+    /// own machine's disks and has to recognise them.
+    #[serde(default)]
+    pub label: String,
+    /// Filesystem of the drive ("NTFS", "FAT32", …). Shown when there is no
+    /// label, so a drive is never listed with nothing beside it.
+    #[serde(default)]
+    pub fs: String,
 }
 
 #[derive(Serialize)]
@@ -45,11 +54,14 @@ pub async fn list_roots() -> Result<Vec<DirEntryDto>, String> {
             for letter in 'A'..='Z' {
                 let root = format!("{letter}:\\");
                 if std::fs::read_dir(&root).is_ok() {
+                    let (label, fs) = volume_label_and_fs(&root);
                     out.push(DirEntryDto {
                         name: format!("{letter}:"),
                         path: root,
                         is_dir: true,
                         size: None,
+                        label,
+                        fs,
                     });
                 }
             }
@@ -62,11 +74,47 @@ pub async fn list_roots() -> Result<Vec<DirEntryDto>, String> {
                 path: "/".into(),
                 is_dir: true,
                 size: None,
+                label: String::new(),
+                fs: String::new(),
             }])
         }
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// A drive's label and filesystem name, both empty when the volume does not
+/// answer (a card reader with no card that still passed the read_dir probe, a
+/// mapping that just went away).
+#[cfg(target_os = "windows")]
+fn volume_label_and_fs(root: &str) -> (String, String) {
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::GetVolumeInformationW;
+
+    let wide: Vec<u16> = root.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut label = [0u16; 256];
+    let mut fs = [0u16; 64];
+    // SAFETY: `wide` is null-terminated and outlives the call; both buffers are
+    // passed with their true lengths.
+    let ok = unsafe {
+        GetVolumeInformationW(
+            PCWSTR(wide.as_ptr()),
+            Some(&mut label),
+            None,
+            None,
+            None,
+            Some(&mut fs),
+        )
+    }
+    .is_ok();
+    if !ok {
+        return (String::new(), String::new());
+    }
+    let cut = |b: &[u16]| {
+        let n = b.iter().position(|&c| c == 0).unwrap_or(b.len());
+        String::from_utf16_lossy(&b[..n]).trim().to_string()
+    };
+    (cut(&label), cut(&fs))
 }
 
 /// List one directory: sub-directories first, then files, both by name.
@@ -109,7 +157,14 @@ pub async fn list_dir(
             }
             let full = entry.path().to_string_lossy().to_string();
             if meta.is_dir() {
-                dirs.push(DirEntryDto { name, path: full, is_dir: true, size: None });
+                dirs.push(DirEntryDto {
+                    name,
+                    path: full,
+                    is_dir: true,
+                    size: None,
+                    label: String::new(),
+                    fs: String::new(),
+                });
             } else if !dirs_only {
                 let keep = files_ext.is_empty()
                     || entry
@@ -123,6 +178,8 @@ pub async fn list_dir(
                         path: full,
                         is_dir: false,
                         size: Some(meta.len()),
+                        label: String::new(),
+                        fs: String::new(),
                     });
                 }
             }

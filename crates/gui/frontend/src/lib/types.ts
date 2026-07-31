@@ -596,6 +596,10 @@ export interface DirEntry {
   path: string;
   is_dir: boolean;
   size: number | null;
+  /** Volume label — drive rows only, empty elsewhere. */
+  label: string;
+  /** Filesystem of the drive, shown when it has no label. */
+  fs: string;
 }
 
 export interface DirListing {

@@ -130,9 +130,22 @@
         {/if}
         {#each entries as e (e.path)}
           <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-          <div class="row" class:sel={selectedFile === e.path} onclick={() => onRow(e)}>
+          <div
+            class="row"
+            class:sel={selectedFile === e.path}
+            class:drive={!!(e.label || e.fs)}
+            onclick={() => onRow(e)}
+          >
             <span class="ico">{e.is_dir ? '📁' : '📄'}</span>
             <span class="nm">{e.name}</span>
+            <!-- Drives carry a label; a bare "C:, D:, E:" tells the user nothing
+                 about which of their disks is which. Without a label the
+                 filesystem at least says what kind of volume it is. -->
+            {#if e.label}
+              <span class="tag">{e.label}</span>
+            {:else if e.fs}
+              <span class="tag muted-tag">{e.fs}</span>
+            {/if}
             {#if !e.is_dir && e.size != null}<span class="sz">{formatBytes(e.size)}</span>{/if}
           </div>
         {/each}
@@ -175,6 +188,13 @@
   .ico { flex-shrink: 0; }
   .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sz { color: var(--text-muted); font-size: 12px; }
+  .tag { color: var(--head); font-size: 12px; opacity: .85; }
+  /* On a drive row the label belongs beside the letter - "C: Windows" -
+     not pushed to the far edge where it reads as a separate column. */
+  .row.drive .nm { flex: 0 0 auto; }
+  .row.drive .tag { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tag.muted-tag { color: var(--text-muted); opacity: 1; }
+  .row.sel .tag { color: #fff; }
   .mk { display: flex; gap: 8px; padding: 10px 18px; }
   .mk input { flex: 1; min-width: 0; background: none; border: 1px solid var(--border); border-radius: 4px; padding: 6px 10px; font-size: 13px; color: var(--head); font-family: var(--font); }
   .foot { display: flex; gap: 10px; align-items: center; padding: 12px 18px; }
