@@ -607,6 +607,19 @@
   function clickSourcePart(p: PartitionInfo) {
     if (wholeDiskRestore) return; // whole-disk: the selection is fixed
     if (mappings.some((m) => m.src === p.index)) return; // already mapped
+    // Microsoft Reserved is in the copy as a GPT entry and nothing else — there
+    // are no blocks to write anywhere. Mapping it produced a plan the engine
+    // then refused ("В копии нет раздела с номером 2"), which read as if the
+    // backup were broken.
+    if (layoutOnlyParts.includes(p.index)) {
+      badTarget = null;
+      srcPart = null;
+      fitMsg =
+        'Раздел «Зарезервировано системой» (MSR) не содержит данных — в копии ' +
+        'хранится только его место в таблице разделов, и восстановление ' +
+        'воссоздаёт его само. Выбирать его не нужно.';
+      return;
+    }
     badTarget = null;
     fitMsg = null;
     srcPart = p.index;
@@ -1051,13 +1064,16 @@
 
     // Whole-disk mode: previewIdx[k] is the target partition created for
     // srcBackupParts[k] — they are placed in order, so the index lines up.
-    const pairs: { src: number; dst: number }[] = wholeDiskRestore
-      ? previewIdx
-          .map((dst, k) => ({ src: srcBackupParts[k]?.index ?? 0, dst }))
-          // Microsoft Reserved gets the slot, not a data copy: the backup holds
-          // no blocks for it, so a restore operation would have nothing to write.
-          .filter((m) => !layoutOnlyParts.includes(m.src))
-      : mappings;
+    const pairs: { src: number; dst: number }[] = (
+      wholeDiskRestore
+        ? previewIdx.map((dst, k) => ({ src: srcBackupParts[k]?.index ?? 0, dst }))
+        : mappings
+    )
+      // Microsoft Reserved gets the slot, not a data copy: the backup holds no
+      // blocks for it, so a restore operation would have nothing to write. This
+      // guards BOTH paths — the manual one let it through and the plan was then
+      // refused outright, blocking the whole restore.
+      .filter((m) => !layoutOnlyParts.includes(m.src));
 
     // A target at least as large as the source volume takes it verbatim,
     // filesystem and all. A smaller one cannot — the filesystem would have to
