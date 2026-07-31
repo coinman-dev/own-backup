@@ -32,6 +32,7 @@ impl MockInventory {
             volume_label: "EFI System Partition".into(),
             fs_uuid: "1234-ABCD".into(),
             is_system: false,
+            has_os: false,
             is_boot: true,
             is_encrypted: false,
         };
@@ -49,6 +50,7 @@ impl MockInventory {
             volume_label: "Microsoft Reserved".into(),
             fs_uuid: String::new(),
             is_system: false,
+            has_os: false,
             is_boot: false,
             is_encrypted: false,
         };
@@ -66,6 +68,7 @@ impl MockInventory {
             volume_label: "Windows".into(),
             fs_uuid: "AABB1122CCDD3344".into(),
             is_system: true,
+            has_os: true,
             is_boot: false,
             is_encrypted: false,
         };

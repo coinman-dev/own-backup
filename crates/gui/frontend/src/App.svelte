@@ -5,6 +5,7 @@
   import { api } from './lib/api';
   import { setMediaMode } from './lib/mediaStore.svelte';
   import Sidebar from './components/Sidebar.svelte';
+  import PathPicker from './components/PathPicker.svelte';
   import BackupSection from './views/BackupSection.svelte';
   import Restore from './views/Restore.svelte';
   import Tools from './views/Tools.svelte';
@@ -66,6 +67,8 @@
     initJobs();
   });
 </script>
+
+<PathPicker />
 
 <div class="app-layout">
   <Sidebar {currentView} onNavigate={handleNavigate} />

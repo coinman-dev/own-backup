@@ -38,8 +38,22 @@ pub struct PartitionInfo {
     pub volume_device: String,
     pub volume_label: String,
     pub fs_uuid: String,
+    /// This volume is the one the CURRENTLY RUNNING system booted from. False
+    /// for everything on a boot medium, where nothing on a real disk is running
+    /// — see [`Self::has_os`] for "holds an installed system", which is what a
+    /// whole-disk copy actually needs to know.
     pub is_system: bool,
     pub is_boot: bool,
+    /// An operating system is INSTALLED here, running or not (probed by looking
+    /// for its kernel on the volume).
+    ///
+    /// The distinction only shows up on rescue media, and it showed up as a bug:
+    /// "bootable copy of this disk" auto-selected partitions by `is_system`, so
+    /// booted from the medium it selected the EFI partition and left Windows
+    /// itself out — a copy that could never boot. Older images and older
+    /// services do not send this field, hence the default.
+    #[serde(default)]
+    pub has_os: bool,
     /// The partition holds an encrypted container (LUKS / BitLocker). Its
     /// filesystem shows as `Unknown`, but it can still be backed up by
     /// supplying a password to decrypt it first.

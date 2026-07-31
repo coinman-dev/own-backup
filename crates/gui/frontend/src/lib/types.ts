@@ -26,8 +26,13 @@ export interface PartitionInfo {
   volume_device: string;
   volume_label: string;
   fs_uuid: string;
+  /** This volume runs the system RIGHT NOW (false for everything when booted
+   *  from the medium — nothing on a real disk is running there). */
   is_system: boolean;
   is_boot: boolean;
+  /** An OS is INSTALLED here, running or not. On the medium this is what
+   *  identifies the system partition; `is_system` cannot. */
+  has_os: boolean;
   /** Encrypted container (LUKS/BitLocker): filesystem is Unknown, but it can be
    *  backed up after supplying a password to decrypt it. */
   is_encrypted: boolean;
@@ -583,4 +588,18 @@ export interface RestoreRunState {
   /** Things the restore could not do and the user must (fix crypttab, rerun
    *  bcdboot, …). */
   follow_ups: string[];
+}
+
+/** One row in the built-in file browser (see commands/files.rs). */
+export interface DirEntry {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  size: number | null;
+}
+
+export interface DirListing {
+  path: string;
+  parent: string | null;
+  entries: DirEntry[];
 }

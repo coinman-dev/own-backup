@@ -504,6 +504,29 @@ fn enumerate_volumes() -> Vec<VolumeFacts> {
 /// right on most machines. On boot media it answers with the RAM disk, so no
 /// partition on any real disk is marked as running the system — which is
 /// exactly right there: on WinPE nothing is.
+/// Is a Windows installation present on this volume?
+///
+/// Asked of every volume, not just the running one, because a rescue medium
+/// needs to know which partition holds the system it is there to copy — and
+/// from the medium that system is not running, so no flag says so. The test is
+/// the kernel file itself: present on every Windows since NT, and nowhere else.
+///
+/// The letter is preferred over the volume GUID path only because a wrong or
+/// stale letter fails a stat, while a GUID path always resolves; either form is
+/// accepted by the filesystem API.
+fn volume_holds_os(volume_root: Option<&str>, letter: Option<char>) -> bool {
+    let root = match (letter, volume_root) {
+        (Some(l), _) => format!("{l}:\\"),
+        (None, Some(v)) => v.to_string(),
+        (None, None) => return false,
+    };
+    let kernel = std::path::Path::new(&root)
+        .join("Windows")
+        .join("System32")
+        .join("ntoskrnl.exe");
+    kernel.exists()
+}
+
 fn system_volume_root() -> Option<String> {
     let mut win = [0u16; 260];
     // SAFETY: buffer valid for the call.
@@ -609,6 +632,7 @@ impl super::traits::DiskInventory for WindowsInventory {
                 };
                 let is_boot = raw.type_guid.eq_ignore_ascii_case(GPT_TYPE_EFI_SYSTEM)
                     || (partition_table == PartitionTable::Mbr && raw.bootable);
+                let has_os = volume_holds_os(volume.map(|v| v.root.as_str()), letter);
 
                 partitions.push(PartitionInfo {
                     index: raw.number,
@@ -624,6 +648,7 @@ impl super::traits::DiskInventory for WindowsInventory {
                     fs_uuid: String::new(),
                     is_system,
                     is_boot,
+                    has_os,
                     is_encrypted,
                 });
             }

@@ -200,7 +200,7 @@
 {#snippet segInner(p: PartitionInfo, sel: boolean)}
   {#if usedPct(p) > 0}<div class="usedfill" style="width: {usedPct(p)}%"></div>{/if}
   <div class="seg-top">
-    {#if p.is_system || p.is_boot}
+    {#if p.is_system || p.is_boot || p.has_os}
       <svg class="lock" width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a5 5 0 0 0-5 5v3H6a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-9a1 1 0 0 0-1-1h-1V7a5 5 0 0 0-5-5zm-3 8V7a3 3 0 0 1 6 0v3z"/></svg>
     {/if}
     {#if p.is_encrypted}<span class="enc" title="Зашифрован">🔒</span>{/if}

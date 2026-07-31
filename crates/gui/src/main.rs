@@ -16,7 +16,7 @@ use state::GuiState;
 /// Bump this on any build you hand over for testing. It is printed at the top of
 /// the log so we can tell from the log alone WHICH binary actually ran (a common
 /// trap: an old exe left in another folder still gets launched).
-const BUILD_TAG: &str = "winpe-2026-07-31b-media-mode";
+const BUILD_TAG: &str = "winpe-2026-07-31c-picker-and-has-os";
 
 const ROTATE_AT: u64 = 4 * 1024 * 1024;
 
@@ -303,6 +303,11 @@ fn main() {
             commands::settings::save_config,
             commands::settings::get_service_status,
             commands::settings::service_health,
+            // Built-in file browsing: the native dialog is a shell dialog, and
+            // the boot medium has no shell (see commands/files.rs).
+            commands::files::list_roots,
+            commands::files::list_dir,
+            commands::files::create_dir,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { open } from '@tauri-apps/plugin-dialog';
+  import { pickPath } from '../lib/pickPath.svelte';
   import { api } from '../lib/api';
   import { engine, runVerify, toolsState, refreshVolumes } from '../lib/engineStore.svelte';
   import type { ActiveMount } from '../lib/types';
@@ -83,11 +83,7 @@
 
   async function browse(setPath: (p: string) => void, extensions = ['vhdx', 'avhdx', 'qcow2']) {
     try {
-      const picked = await open({
-        title: 'Выберите образ',
-        multiple: false,
-        filters: [{ name: 'Образ резервной копии', extensions }],
-      });
+      const picked = await pickPath({ directory: false, title: 'Выберите образ', extensions });
       if (typeof picked === 'string') setPath(picked);
     } catch {
       /* dialog cancelled */

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { open } from '@tauri-apps/plugin-dialog';
+  import { pickPath } from '../lib/pickPath.svelte';
   import { jobs, jobStatus } from '../lib/jobStore.svelte';
   import { api } from '../lib/api';
   import RestoreDashboard from './RestoreDashboard.svelte';
@@ -148,9 +148,10 @@
   async function addFile() {
     addOpen = false;
     addError = null;
-    const picked = await open({
-      multiple: false,
-      filters: [{ name: 'Резервная копия', extensions: ['vhdx', 'avhdx', 'qcow2'] }],
+    const picked = await pickPath({
+      directory: false,
+      title: 'Резервная копия',
+      extensions: ['vhdx', 'avhdx', 'qcow2'],
     });
     if (typeof picked !== 'string') return;
     try {
@@ -166,7 +167,7 @@
   async function addFolder() {
     addOpen = false;
     addError = null;
-    const picked = await open({ directory: true });
+    const picked = await pickPath({ directory: true, title: 'Папка с копиями' });
     if (typeof picked !== 'string') return;
     try {
       const list = await api.listImageBackups(picked);

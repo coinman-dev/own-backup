@@ -94,6 +94,10 @@ fn build_partition(v: &Value, index: u32) -> PartitionInfo {
         fs_uuid: jstr(v, "uuid").unwrap_or_default(),
         is_system,
         is_boot,
+        // Linux support is deferred (Windows-first), and probing an unmounted
+        // partition for an installed system means mounting it. `is_system`
+        // already covers the running root, which is what this build uses.
+        has_os: is_system,
         is_encrypted,
     }
 }

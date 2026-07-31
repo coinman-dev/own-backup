@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { open } from '@tauri-apps/plugin-dialog';
+  import { pickPath } from '../lib/pickPath.svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { api } from '../lib/api';
   import type { ServiceStatus } from '../lib/types';
@@ -49,7 +49,7 @@
   });
 
   async function pickMirrorDir() {
-    const chosen = await open({ directory: true, multiple: false, title: 'Куда дублировать журнал' });
+    const chosen = await pickPath({ directory: true, title: 'Куда дублировать журнал' });
     if (typeof chosen === 'string') logMirrorDir = chosen;
   }
 

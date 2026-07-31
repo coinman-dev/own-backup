@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { open } from '@tauri-apps/plugin-dialog';
+  import { pickPath } from '../lib/pickPath.svelte';
   import { api } from '../lib/api';
   import { engine } from '../lib/engineStore.svelte';
   import { media, ensureMediaMode } from '../lib/mediaStore.svelte';
@@ -201,8 +201,12 @@
   }
   // The ESP and the OS/system partition are required for a bootable restore, so
   // while bootable-copy is on they are auto-included and cannot be deselected.
+  /** Partitions a bootable disk copy cannot leave out: the loader's partition
+   *  and the one holding the system itself. `is_system` alone was not enough —
+   *  booted from the medium nothing is "the running system", so the copy came
+   *  out with the EFI partition and without Windows. */
   function isBootEssential(p: PartitionInfo): boolean {
-    return p.is_boot || p.is_system;
+    return p.is_boot || p.is_system || p.has_os;
   }
   /** Microsoft Reserved: Windows expects the slot, there is no filesystem in it.
    *  A whole-disk copy keeps its GPT entry (`DiskLayout::retain_for_backup`)
@@ -327,7 +331,7 @@
 
   async function browseDest() {
     try {
-      const picked = await open({ directory: true, title: 'Папка для образов' });
+      const picked = await pickPath({ directory: true, title: 'Папка для образов' });
       if (typeof picked === 'string') job.dest_folder = picked;
     } catch (e) {
       error = String(e);
@@ -644,7 +648,7 @@
     <div class="usedfill" style="width: {usedPct(p)}%"></div>
   {/if}
   <div class="seg-top">
-    {#if p.is_system || p.is_boot}
+    {#if p.is_system || p.is_boot || p.has_os}
       <svg class="lock" width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a5 5 0 0 0-5 5v3H6a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-9a1 1 0 0 0-1-1h-1V7a5 5 0 0 0-5-5zm-3 8V7a3 3 0 0 1 6 0v3z"/></svg>
     {/if}
     {#if p.is_encrypted}

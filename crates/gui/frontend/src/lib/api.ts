@@ -15,12 +15,20 @@ import type {
   DryRunResult,
   RestoreRunState,
   ServiceHealth,
+  DirEntry,
+  DirListing,
   ServiceStatus,
   MountBackendStatus,
 } from './types';
 
 export const api = {
   listDisks: () => invoke<DiskInfo[]>('list_disks'),
+
+  // --- built-in file browsing (the boot medium has no shell dialog) ---
+  listRoots: () => invoke<DirEntry[]>('list_roots'),
+  listDir: (path: string, dirsOnly: boolean, filesExt: string[]) =>
+    invoke<DirListing>('list_dir', { path, dirsOnly, filesExt }),
+  createDir: (path: string) => invoke<string>('create_dir', { path }),
   driveSignature: () => invoke<number>('drive_signature'),
 
   // --- job model (phase 6) ---
