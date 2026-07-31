@@ -15,13 +15,13 @@ rem  Run from an ELEVATED console:
 rem      make-winpe-media.cmd [folder_with_exes] [output_folder]
 rem  Defaults: exes and output both next to this script (.\OwnBackupMedia).
 rem
-rem  NOTHING STARTS AUTOMATICALLY on the medium (2026-07-31): the first media
-rem  auto-ran the interface in the foreground of the only console; when WebView2
-rem  failed to open a window the process stayed resident and the console was
-rem  dead - nothing could be typed, nothing could be inspected. The medium now
-rem  boots to a plain console and prints how to start things by hand
-rem  ("X:\Program Files\OwnBackup\start-media.cmd", launches the interface with
-rem  `start` so the console stays usable either way).
+rem  The interface starts at boot (2026-07-31, once the window was working). The
+rem  rule that survives from the medium that trapped its user is not "start
+rem  nothing" but "hold nothing": that first one ran the interface in the
+rem  FOREGROUND of the only console, and when the window failed to open the
+rem  process stayed resident and the console was gone - nothing could be typed
+rem  or inspected. Everything is launched with `start` now, so this console
+rem  comes back to a prompt whether the interface appears or not.
 rem
 rem  Why the interface showed no window (found 2026-07-31, own-backup-gui.log):
 rem  WebView2 creation failed with 0x80080005 - the browser process refused to
@@ -333,19 +333,19 @@ rem cannot run a .cmd - the first medium booted straight into a bare console
 rem because of it. With no winpeshl.ini the default shell runs
 rem `cmd /k startnet.cmd`, which is a batch file by definition. The recovery
 rem environment ships its own winpeshl.ini (it launches the recovery menu), so
-rem that one has to go. startnet.cmd itself starts NOTHING of ours - it prints
-rem what to run and leaves the console to the operator.
+rem that one has to go. startnet.cmd calls start-media.cmd, which launches
+rem everything detached, so the boot console returns to a prompt immediately.
 del /f /q "%TREE%\Windows\System32\winpeshl.ini" >nul 2>&1
 set "SNET=%TREE%\Windows\System32\startnet.cmd"
 > "%SNET%" echo @echo off
 >>"%SNET%" echo wpeinit
 >>"%SNET%" echo echo.
->>"%SNET%" echo echo === My Own Backup boot medium ===
->>"%SNET%" echo echo Nothing starts automatically. When ready, run:
->>"%SNET%" echo echo   "X:\Program Files\OwnBackup\start-media.cmd"
->>"%SNET%" echo echo It fixes the screen mode, starts the service minimized and opens the
->>"%SNET%" echo echo interface in its own window; this console stays usable.
+>>"%SNET%" echo echo === My Own Backup ===
 >>"%SNET%" echo echo.
+>>"%SNET%" echo call "X:\Program Files\OwnBackup\start-media.cmd"
+>>"%SNET%" echo echo.
+>>"%SNET%" echo echo This console stays usable. To start the interface again:
+>>"%SNET%" echo echo   "X:\Program Files\OwnBackup\start-media.cmd"
 
 rem WinPE's default 32 MB scratch space is not enough for a browser engine.
 if "%MODE%"=="mount" (

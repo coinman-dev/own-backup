@@ -128,26 +128,35 @@ pub fn webview2_args_file(log_path: &str) -> String {
 
 /// `startnet.cmd` — what WinPE's default shell runs at boot.
 ///
-/// It starts NOTHING of ours. The first medium auto-ran the interface in the
-/// foreground of the only console; when the window failed to open, the process
-/// stayed resident and the console was dead — nothing could be typed, nothing
-/// inspected. (User decision 2026-07-31: do not bring autostart back.)
+/// The interface starts by itself, which is what a rescue medium should do: the
+/// person booting it wants the program, not a prompt.
+///
+/// The rule that survives from the medium that trapped its user (2026-07-31) is
+/// not "start nothing" but "hold nothing". That first medium ran the interface
+/// in the FOREGROUND of the only console; when the window failed to open, the
+/// process stayed resident and the console was gone — nothing could be typed,
+/// nothing inspected, nothing killed. Autostart returns now that the window
+/// works, and everything is launched detached (see [`start_media_cmd`]) so this
+/// console comes straight back to a prompt whether the interface appears or
+/// not. That property is what the tests guard; the autostart itself is a
+/// preference.
 ///
 /// And it is `startnet.cmd` rather than `winpeshl.ini` because entries in that
 /// file go to `CreateProcess`, which cannot run a `.cmd` — the medium booted
 /// into a bare console. With no `winpeshl.ini` the default shell runs
-/// `cmd /k startnet.cmd`, which is a batch file by definition.
+/// `cmd /k startnet.cmd`, which is a batch file by definition, and the `/k` is
+/// what keeps the prompt afterwards.
 pub fn startnet_cmd(app_dir: &str) -> String {
     lines(&[
         "@echo off",
         "wpeinit",
         "echo.",
         "echo === My Own Backup ===",
-        "echo Nothing starts automatically. When ready, run:",
-        &format!("echo   \"{app_dir}\\start-media.cmd\""),
-        "echo It fixes the screen mode, starts the engine and opens the interface",
-        "echo in its own window; this console stays usable.",
         "echo.",
+        &format!("call \"{app_dir}\\start-media.cmd\""),
+        "echo.",
+        "echo This console stays usable. To start the interface again:",
+        &format!("echo   \"{app_dir}\\start-media.cmd\""),
     ])
 }
 
@@ -250,20 +259,28 @@ pub fn runtime_trim_list(runtime_root: &Path) -> Vec<PathBuf> {
 mod tests {
     use super::*;
 
-    /// Autostart is the one thing that made the medium unusable rather than
-    /// merely broken: a dead console with no way in.
+    /// What made the first medium unusable was not that it started something —
+    /// it was that it started something in the foreground and never came back.
+    /// The interface may be launched at boot; the console must survive it.
     #[test]
-    fn boot_starts_nothing_by_itself() {
-        let s = startnet_cmd(r"X:\Program Files\OwnBackup");
+    fn boot_hands_the_console_back() {
+        let app = r"X:\Program Files\OwnBackup";
+        let s = startnet_cmd(app);
         assert!(s.contains("wpeinit"));
+        assert!(
+            s.contains(&format!("call \"{app}\\start-media.cmd\"")),
+            "the interface should start at boot"
+        );
         for line in s.lines() {
             let l = line.trim_start();
+            if l.starts_with("echo") || l.starts_with("call") || l.starts_with("wpeinit") {
+                continue;
+            }
             assert!(
-                !(l.starts_with("start ") || l.contains(".exe\"") && !l.starts_with("echo")),
-                "startnet must not launch anything: {line:?}"
+                !l.contains(".exe"),
+                "nothing may run in the foreground of the boot console: {line:?}"
             );
         }
-        assert!(s.contains("Nothing starts automatically"));
     }
 
     /// The console has to survive a window that never appears — that is how the
