@@ -16,7 +16,7 @@ use state::GuiState;
 /// Bump this on any build you hand over for testing. It is printed at the top of
 /// the log so we can tell from the log alone WHICH binary actually ran (a common
 /// trap: an old exe left in another folder still gets launched).
-const BUILD_TAG: &str = "diag-2026-07-09a-qcow2removal";
+const BUILD_TAG: &str = "winpe-2026-07-31a-browser-args-via-api";
 
 const ROTATE_AT: u64 = 4 * 1024 * 1024;
 
@@ -223,6 +223,40 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(gui_state)
         .setup(move |app| {
+            // The main window is built in code, not in tauri.conf.json, because
+            // of WebView2 browser arguments: wry ALWAYS sets
+            // additionalBrowserArguments through the WebView2 API, and the API
+            // value makes the loader ignore the
+            // WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS environment variable. On
+            // WinPE those flags (--allow-run-as-system --no-sandbox) are the
+            // difference between a window and HRESULT 0x80080005, so when the
+            // variable is set it is handed to the API verbatim. Note wry's own
+            // defaults (--disable-features=msWebOOUI,msPdfOOUI,
+            // msSmartScreenProtection) are replaced, not extended — whoever sets
+            // the variable must include everything wanted.
+            let mut window =
+                tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
+                    .title("My Own Backup")
+                    .inner_size(1200.0, 800.0)
+                    .min_inner_size(900.0, 600.0)
+                    .resizable(true)
+                    .decorations(true);
+            #[cfg(windows)]
+            if let Ok(extra) = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS") {
+                let extra = extra.trim().to_string();
+                if !extra.is_empty() {
+                    tracing::info!(
+                        args = %extra,
+                        "browser arguments from WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS passed via API"
+                    );
+                    window = window.additional_browser_args(&extra);
+                }
+            }
+            // A failed build (no WebView2, browser process refused to start)
+            // aborts the app with the error in the log — better than the old
+            // behaviour of running on windowless.
+            window.build()?;
+
             // Bridge the service's event stream (progress / queue / finished) to
             // the Tauri window events the frontend already listens for.
             let handle = app.handle().clone();

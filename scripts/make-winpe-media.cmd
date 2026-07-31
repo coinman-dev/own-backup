@@ -15,6 +15,66 @@ rem  Run from an ELEVATED console:
 rem      make-winpe-media.cmd [folder_with_exes] [output_folder]
 rem  Defaults: exes and output both next to this script (.\OwnBackupMedia).
 rem
+rem  NOTHING STARTS AUTOMATICALLY on the medium (2026-07-31): the first media
+rem  auto-ran the interface in the foreground of the only console; when WebView2
+rem  failed to open a window the process stayed resident and the console was
+rem  dead - nothing could be typed, nothing could be inspected. The medium now
+rem  boots to a plain console and prints how to start things by hand
+rem  ("X:\Program Files\OwnBackup\start-media.cmd", launches the interface with
+rem  `start` so the console stays usable either way).
+rem
+rem  Why the interface showed no window (found 2026-07-31, own-backup-gui.log):
+rem  WebView2 creation failed with 0x80080005 - the browser process refused to
+rem  start. WinPE runs everything as SYSTEM and WebView2 refuses SYSTEM unless
+rem  --allow-run-as-system is passed; the sandbox also cannot start there. Both
+rem  flags were set via WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS, but wry (the
+rem  Tauri runtime) always sets additionalBrowserArguments through the WebView2
+rem  API, and the API value makes the loader IGNORE that variable. The GUI now
+rem  passes the variable through the API itself - this medium needs a GUI built
+rem  with build_tag winpe-2026-07-31a-browser-args-via-api or newer (the tag is
+rem  printed at the top of own-backup-gui.log). WinPE also lacks the media/D3D
+rem  DLLs the browser links against; they are copied in below.
+rem
+rem  Why the window was then black (found 2026-07-31, webview2.log): even with
+rem  --disable-gpu --disable-gpu-compositing, Chromium still PRESENTS the
+rem  software-composited frame through a DXGI swap chain whenever it thinks
+rem  DirectComposition is available. WinPE has no video device, so every
+rem  Present1/Map returned DXGI_ERROR_DEVICE_REMOVED (0x887A0005), the display
+rem  compositor crashed in a loop, and no frame ever reached the window - while
+rem  the page itself ran fine (the log shows list_disks answering).
+rem
+rem  THE FIX (confirmed on a boot 2026-07-31): do not put dcomp.dll in the image.
+rem  It was OUR OWN doing - the DLL came from the list this script copies out of
+rem  the build host's System32, inherited from an earlier WebView2 workaround.
+rem  Native WinRE ships no dcomp.dll (it does ship d3d11/dxgi/d3d9/d3d10warp),
+rem  and Edge picks the presenter by trying to CREATE a DirectComposition device,
+rem  not by reading any switch. With the DLL present that probe succeeds, the
+rem  composition swap chain is chosen (CreateSwapChainForComposition), and with
+rem  no DWM to compose with every Present1 dies. dcomp.dll is a delay-import of
+rem  msedge.dll, so with the DLL gone the probe fails cleanly and Edge falls back
+rem  to a plain GDI blit - which is what WinPE can actually do. See the `del`
+rem  below; the DLL is also kept out of the copy list.
+rem
+rem  What did NOT fix it, because the lesson is the useful part. First
+rem  --disable-direct-composition: the presenter is chosen in the GPU PROCESS,
+rem  and that switch is not among the ones the browser forwards there
+rem  (kSwitchNames in content/browser/gpu/gpu_process_host.cc), so the check
+rem  never sees it. Then --disable-features=RemoveRedirectionBitmap: feature
+rem  overrides DO reach every child, but reversing msedge.dll showed that gate
+rem  (features::ShouldRemoveRedirectionBitmap) has exactly one code reference and
+rem  begins with a Win11-22H2-or-newer test, which WinPE 19041 fails anyway - so
+rem  it was never the gate in play. Then --in-process-gpu, to make the browser's
+rem  own command line be the one the decision is made from: no change either,
+rem  since the decision is a capability probe, not a switch. Both are still
+rem  passed below - they cost nothing and cover other builds - but the DLL is
+rem  what mattered. When a Chromium switch does nothing, ask what it is really
+rem  probing.
+rem
+rem  Those browser arguments live in a text file rather than being baked into
+rem  the launcher, so a flag can be tried without rebuilding a 760 MB image:
+rem  put "ownbackup-webview2-args.txt" in the root of any drive the medium can
+rem  see (C: to H:) and it wins over the copy inside the image.
+rem
 rem  Two things about how it works:
 rem
 rem  * All output is ASCII on purpose: a .cmd is read in the console's OEM code
@@ -135,10 +195,18 @@ rem WinPE carries only the DLLs its own tools need. Anything our binaries or
 rem WebView2 import beyond that has to travel with them, or the process dies at
 rem load time before its first line of code - printing nothing at all, which is
 rem exactly how the first medium behaved (2026-07-31). Our exes are linked
-rem against the static CRT now, so the C runtime is no longer among them; the
-rem rest is copied in only where the image does not already have it.
+rem against the static CRT now, so the C runtime is no longer among them. The
+rem browser process additionally links Media Foundation, Direct3D/DirectWrite
+rem and the WinInet family, none of which WinRE carries. WinRE comes from this
+rem same Windows installation, so DLLs taken out of System32 match the image's
+rem OS build; nothing the image already has is ever overwritten.
 for %%D in (virtdisk.dll newdev.dll dwmapi.dll comctl32.dll shlwapi.dll cfgmgr32.dll
-            setupapi.dll crypt32.dll bcrypt.dll bcryptprimitives.dll) do (
+            setupapi.dll crypt32.dll bcrypt.dll bcryptprimitives.dll
+            mf.dll mfplat.dll mfreadwrite.dll mfcore.dll mfsrcsnk.dll mfperfhelper.dll evr.dll
+            d3d11.dll d3d10_1.dll d3d10.dll d3d9.dll dxgi.dll d2d1.dll dwrite.dll
+            d3dcompiler_47.dll windowscodecs.dll opengl32.dll
+            propsys.dll userenv.dll winhttp.dll wininet.dll urlmon.dll iertutil.dll
+            wintrust.dll cryptui.dll ncrypt.dll version.dll winmm.dll usp10.dll) do (
   if not exist "%TREE%\Windows\System32\%%D" (
     if exist "%SystemRoot%\System32\%%D" (
       copy /y "%SystemRoot%\System32\%%D" "%TREE%\Windows\System32\" >nul
@@ -146,32 +214,87 @@ for %%D in (virtdisk.dll newdev.dll dwmapi.dll comctl32.dll shlwapi.dll cfgmgr32
     )
   )
 )
-rem WebView2 is not ours and is not statically linked; it wants the VC runtime.
+for %%D in (mf.dll mfplat.dll d3d11.dll dxgi.dll d2d1.dll dwrite.dll) do (
+  if not exist "%TREE%\Windows\System32\%%D" (
+    echo       [!] %%D is unavailable - WebView2 will most likely not start
+  )
+)
+rem dcomp.dll must NOT be in the image, and an earlier build put it there, so it
+rem is deleted explicitly. Reversed from msedge.dll (Edge 150, 2026-07-31): the
+rem presenter is picked by probing whether a DirectComposition device can be
+rem created, not by any switch. dcomp.dll is a delay-import; when the DLL is
+rem absent the probe fails cleanly and Edge falls back to plain GDI - which is
+rem the only path that can work with no DWM running. With the DLL present the
+rem client-side device gets created, the composition swap chain is chosen, and
+rem every Present1 dies with DXGI_ERROR_DEVICE_REMOVED (the black window with
+rem list_disks working underneath). Original WinRE ships no dcomp.dll either.
+del /f /q "%TREE%\Windows\System32\dcomp.dll" >nul 2>&1
+
+rem WebView2 is not ours and is not statically linked; it wants the VC runtime,
+rem both next to msedgewebview2.exe and in its x64 subfolder.
 for %%D in (vcruntime140.dll vcruntime140_1.dll msvcp140.dll) do (
-  if exist "%SystemRoot%\System32\%%D" copy /y "%SystemRoot%\System32\%%D" "%APP%\WebView2\" >nul
+  if exist "%SystemRoot%\System32\%%D" (
+    copy /y "%SystemRoot%\System32\%%D" "%APP%\WebView2\" >nul
+    if exist "%APP%\WebView2\x64" copy /y "%SystemRoot%\System32\%%D" "%APP%\WebView2\x64\" >nul
+  )
 )
 
-rem WinPE boots from X:, has no desktop compositor and no sandbox, and the
-rem browser profile has to sit on a writable volume. The screen comes up in
-rem whatever the firmware left (1024x768 on a VMware guest), which is no size
-rem for an interface, so the mode is picked before anything is shown.
+rem The browser arguments. Only the FIRST line is read (start-media.cmd uses
+rem "set /p"), so the rest of the file carries the alternatives to try if this
+rem set is not enough - X: is a RAM disk, so swapping the top line with notepad
+rem and re-running start-media.cmd needs neither a rebuild nor a reboot.
+rem RemoveRedirectionBitmap is the gate that picks the D3D presenter; the
+rem msWebOOUI/msPdfOOUI/msSmartScreenProtection entries only restore wry's own
+rem defaults, which the API value replaces.
+> "%APP%\webview2-args.txt" echo --allow-run-as-system --no-sandbox --in-process-gpu --disable-gpu --disable-gpu-compositing --disable-direct-composition --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,RendererCodeIntegrity,RemoveRedirectionBitmap,ForceSWDCompWhenDCompFallbackRequired --no-first-run --enable-logging --v=1 --log-file=X:\Windows\Temp\OwnBackup\webview2.log
+>>"%APP%\webview2-args.txt" echo.
+>>"%APP%\webview2-args.txt" echo Only the line above is used. To try another set, move its line to the top
+>>"%APP%\webview2-args.txt" echo with notepad and run start-media.cmd again.
+>>"%APP%\webview2-args.txt" echo.
+>>"%APP%\webview2-args.txt" echo B - the same, plus forcing software GL:
+>>"%APP%\webview2-args.txt" echo --allow-run-as-system --no-sandbox --in-process-gpu --disable-gpu --disable-gpu-compositing --disable-direct-composition --override-use-software-gl-for-tests --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,RendererCodeIntegrity,RemoveRedirectionBitmap,ForceSWDCompWhenDCompFallbackRequired --no-first-run --enable-logging --v=1 --log-file=X:\Windows\Temp\OwnBackup\webview2.log
+>>"%APP%\webview2-args.txt" echo.
+>>"%APP%\webview2-args.txt" echo C - the other direction: give D3D a working device (WARP) instead of banning it:
+>>"%APP%\webview2-args.txt" echo --allow-run-as-system --no-sandbox --in-process-gpu --use-gl=angle --use-angle=d3d11-warp --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,RendererCodeIntegrity --no-first-run --enable-logging --v=1 --log-file=X:\Windows\Temp\OwnBackup\webview2.log
+
+rem The manual launcher. WinPE boots from X:, has no desktop compositor and no
+rem sandbox, and the browser profile has to sit on a writable volume - all of
+rem that is arranged here, right before the programs start. The interface goes
+rem through `start` so this console is NEVER blocked by a windowless process.
+rem The WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS value is passed to the WebView2
+rem API by the GUI itself (see the header); it replaces wry's defaults, so the
+rem msWebOOUI/msPdfOOUI/msSmartScreenProtection features are re-listed here.
 set "SCRIPT=%APP%\start-media.cmd"
 > "%SCRIPT%" echo @echo off
 >>"%SCRIPT%" echo title My Own Backup - boot medium
->>"%SCRIPT%" echo wpeinit
 >>"%SCRIPT%" echo "X:\Program Files\OwnBackup\own-backup-cli.exe" display --min 1280x720
+>>"%SCRIPT%" echo md "X:\Windows\Temp\OwnBackup" 2^>nul
+>>"%SCRIPT%" echo md "X:\Windows\Temp\OwnBackup\Profile\AppData\Local" 2^>nul
+>>"%SCRIPT%" echo md "X:\Windows\Temp\OwnBackup\Profile\AppData\Roaming" 2^>nul
+>>"%SCRIPT%" echo md "X:\Windows\Temp\OwnBackup\WebView2Data" 2^>nul
+>>"%SCRIPT%" echo set "TEMP=X:\Windows\Temp\OwnBackup"
+>>"%SCRIPT%" echo set "TMP=X:\Windows\Temp\OwnBackup"
+>>"%SCRIPT%" echo set "USERPROFILE=X:\Windows\Temp\OwnBackup\Profile"
+>>"%SCRIPT%" echo set "LOCALAPPDATA=X:\Windows\Temp\OwnBackup\Profile\AppData\Local"
+>>"%SCRIPT%" echo set "APPDATA=X:\Windows\Temp\OwnBackup\Profile\AppData\Roaming"
 >>"%SCRIPT%" echo set "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER=X:\Program Files\OwnBackup\WebView2"
->>"%SCRIPT%" echo set "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--no-sandbox --disable-gpu --disable-gpu-compositing"
->>"%SCRIPT%" echo set "WEBVIEW2_USER_DATA_FOLDER=X:\Windows\Temp\OwnBackupWebView2"
->>"%SCRIPT%" echo md "%%WEBVIEW2_USER_DATA_FOLDER%%" 2^>nul
+>>"%SCRIPT%" echo set "WEBVIEW2_USER_DATA_FOLDER=X:\Windows\Temp\OwnBackup\WebView2Data"
+>>"%SCRIPT%" echo set "ARGS_FILE=X:\Program Files\OwnBackup\webview2-args.txt"
+>>"%SCRIPT%" echo for %%%%D in (C D E F G H) do if exist "%%%%D:\ownbackup-webview2-args.txt" set "ARGS_FILE=%%%%D:\ownbackup-webview2-args.txt"
+>>"%SCRIPT%" echo set /p "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=" ^<"%%ARGS_FILE%%"
+>>"%SCRIPT%" echo echo Browser arguments read from: %%ARGS_FILE%%
+>>"%SCRIPT%" echo if not defined WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS echo [!] no arguments came out of that file
+>>"%SCRIPT%" echo set "RUST_BACKTRACE=1"
+>>"%SCRIPT%" echo set "RUST_LOG=info,own_backup_gui=debug,tauri_runtime_wry=debug,wry=debug"
 >>"%SCRIPT%" echo echo Starting the service...
 >>"%SCRIPT%" echo start "own-backup service" /min "X:\Program Files\OwnBackup\own-backup-service.exe" --run
 >>"%SCRIPT%" echo echo Starting the interface...
->>"%SCRIPT%" echo "X:\Program Files\OwnBackup\own-backup-gui.exe"
+>>"%SCRIPT%" echo start "" "X:\Program Files\OwnBackup\own-backup-gui.exe"
 >>"%SCRIPT%" echo echo.
->>"%SCRIPT%" echo echo The interface has exited. This console is left open on purpose:
->>"%SCRIPT%" echo echo   own-backup-gui.log / own-backup-service.log live next to the exe.
->>"%SCRIPT%" echo cmd
+>>"%SCRIPT%" echo echo The interface starts in its own window; this console stays usable.
+>>"%SCRIPT%" echo echo If no window appears, look at:
+>>"%SCRIPT%" echo echo   "X:\Program Files\OwnBackup\own-backup-gui.log"
+>>"%SCRIPT%" echo echo   X:\Windows\Temp\OwnBackup\webview2.log
 
 rem How WinPE starts what we want, and why it is startnet.cmd rather than
 rem winpeshl.ini: entries in winpeshl.ini are handed to CreateProcess, which
@@ -179,10 +302,19 @@ rem cannot run a .cmd - the first medium booted straight into a bare console
 rem because of it. With no winpeshl.ini the default shell runs
 rem `cmd /k startnet.cmd`, which is a batch file by definition. The recovery
 rem environment ships its own winpeshl.ini (it launches the recovery menu), so
-rem that one has to go.
+rem that one has to go. startnet.cmd itself starts NOTHING of ours - it prints
+rem what to run and leaves the console to the operator.
 del /f /q "%TREE%\Windows\System32\winpeshl.ini" >nul 2>&1
-> "%TREE%\Windows\System32\startnet.cmd" echo @echo off
->>"%TREE%\Windows\System32\startnet.cmd" echo call "X:\Program Files\OwnBackup\start-media.cmd"
+set "SNET=%TREE%\Windows\System32\startnet.cmd"
+> "%SNET%" echo @echo off
+>>"%SNET%" echo wpeinit
+>>"%SNET%" echo echo.
+>>"%SNET%" echo echo === My Own Backup boot medium ===
+>>"%SNET%" echo echo Nothing starts automatically. When ready, run:
+>>"%SNET%" echo echo   "X:\Program Files\OwnBackup\start-media.cmd"
+>>"%SNET%" echo echo It fixes the screen mode, starts the service minimized and opens the
+>>"%SNET%" echo echo interface in its own window; this console stays usable.
+>>"%SNET%" echo echo.
 
 rem WinPE's default 32 MB scratch space is not enough for a browser engine.
 if "%MODE%"=="mount" (
@@ -243,6 +375,9 @@ if exist "%TREE%" (
   echo       robocopy "%%TEMP%%\empty" "%TREE%" /MIR /B
   echo       rmdir /s /q "%TREE%" ^& rmdir /s /q "%%TEMP%%\empty"
 )
+echo.
+echo The medium boots to a console; nothing of ours runs until you start it:
+echo   X:\^> "X:\Program Files\OwnBackup\start-media.cmd"
 echo.
 echo Next, either:
 echo   * USB stick: diskpart - clean / convert gpt / create partition primary /
