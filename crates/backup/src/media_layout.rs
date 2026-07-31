@@ -93,13 +93,20 @@ pub fn browser_args(log_path: &str) -> String {
          --disable-gpu-compositing --disable-direct-composition \
          --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,\
 RendererCodeIntegrity,RemoveRedirectionBitmap,ForceSWDCompWhenDCompFallbackRequired \
-         --no-first-run --enable-logging --v=1 --log-file={log_path}"
+         --no-first-run --enable-logging=file --v=1 --log-file={log_path}"
     )
 }
 
 /// The whole `webview2-args.txt`: the live line, then the alternatives, because
 /// the medium is a RAM disk and swapping the top line with notepad is faster
 /// than any rebuild.
+///
+/// Note `--enable-logging=file` rather than plain `--enable-logging`: the bare
+/// form sends Chromium's log to stderr, and a process with no console gets one
+/// allocated for it — a window that appears over the interface and fills with
+/// errors about services WinPE does not have (the network-change watcher retries
+/// `WSALookupServiceBegin` once a second forever, because there is no Network
+/// Location Awareness here). The log is worth keeping; the window is not.
 pub fn webview2_args_file(log_path: &str) -> String {
     let base = "--allow-run-as-system --no-sandbox";
     let feats = "msWebOOUI,msPdfOOUI,msSmartScreenProtection,RendererCodeIntegrity";
@@ -117,7 +124,14 @@ pub fn webview2_args_file(log_path: &str) -> String {
              --enable-logging --v=1 --log-file={log_path}"
         ),
         "",
-        "C - the other direction: give D3D a working device (WARP) instead of banning it:",
+        "C - no Chromium log at all, if even the file is in the way:",
+        &format!(
+            "{base} --in-process-gpu --disable-gpu --disable-gpu-compositing \
+             --disable-direct-composition --disable-features={feats},\
+RemoveRedirectionBitmap,ForceSWDCompWhenDCompFallbackRequired --no-first-run"
+        ),
+        "",
+        "D - the other direction: give D3D a working device (WARP) instead of banning it:",
         &format!(
             "{base} --in-process-gpu --use-gl=angle --use-angle=d3d11-warp \
              --disable-features={feats} --no-first-run --enable-logging --v=1 \
@@ -313,6 +327,15 @@ mod tests {
             assert!(s.contains("\r\n"));
             assert!(!s.replace("\r\n", "").contains('\n'), "a bare LF slipped in");
         }
+    }
+
+    /// Plain `--enable-logging` goes to stderr, and Chromium allocates a console
+    /// for a process that has none — a window of its own over the interface.
+    #[test]
+    fn the_chromium_log_goes_to_the_file_not_to_a_console() {
+        let a = browser_args("X:\\log");
+        assert!(a.contains("--enable-logging=file"));
+        assert!(!a.contains("--enable-logging "), "the bare form opens a console window");
     }
 
     /// Both of these were found the hard way; a regression would show up as a

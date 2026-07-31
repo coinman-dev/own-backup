@@ -268,19 +268,29 @@ rem The browser arguments. Only the FIRST line is read (start-media.cmd uses
 rem "set /p"), so the rest of the file carries the alternatives to try if this
 rem set is not enough - X: is a RAM disk, so swapping the top line with notepad
 rem and re-running start-media.cmd needs neither a rebuild nor a reboot.
+rem `--enable-logging=file`, not the bare `--enable-logging`: the bare form sends
+rem Chromium's log to stderr, and a process with no console gets one allocated
+rem for it - a window that lands over the interface and fills with errors about
+rem services WinPE does not have (the network-change watcher retries
+rem WSALookupServiceBegin once a second forever - there is no Network Location
+rem Awareness here; the Edge LLM and geolocation lines are the same story, once
+rem each). None of them matter; the window does.
 rem RemoveRedirectionBitmap is the gate that picks the D3D presenter; the
 rem msWebOOUI/msPdfOOUI/msSmartScreenProtection entries only restore wry's own
 rem defaults, which the API value replaces.
-> "%APP%\webview2-args.txt" echo --allow-run-as-system --no-sandbox --in-process-gpu --disable-gpu --disable-gpu-compositing --disable-direct-composition --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,RendererCodeIntegrity,RemoveRedirectionBitmap,ForceSWDCompWhenDCompFallbackRequired --no-first-run --enable-logging --v=1 --log-file=X:\Windows\Temp\OwnBackup\webview2.log
+> "%APP%\webview2-args.txt" echo --allow-run-as-system --no-sandbox --in-process-gpu --disable-gpu --disable-gpu-compositing --disable-direct-composition --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,RendererCodeIntegrity,RemoveRedirectionBitmap,ForceSWDCompWhenDCompFallbackRequired --no-first-run --enable-logging=file --v=1 --log-file=X:\Windows\Temp\OwnBackup\webview2.log
 >>"%APP%\webview2-args.txt" echo.
 >>"%APP%\webview2-args.txt" echo Only the line above is used. To try another set, move its line to the top
 >>"%APP%\webview2-args.txt" echo with notepad and run start-media.cmd again.
 >>"%APP%\webview2-args.txt" echo.
 >>"%APP%\webview2-args.txt" echo B - the same, plus forcing software GL:
->>"%APP%\webview2-args.txt" echo --allow-run-as-system --no-sandbox --in-process-gpu --disable-gpu --disable-gpu-compositing --disable-direct-composition --override-use-software-gl-for-tests --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,RendererCodeIntegrity,RemoveRedirectionBitmap,ForceSWDCompWhenDCompFallbackRequired --no-first-run --enable-logging --v=1 --log-file=X:\Windows\Temp\OwnBackup\webview2.log
+>>"%APP%\webview2-args.txt" echo --allow-run-as-system --no-sandbox --in-process-gpu --disable-gpu --disable-gpu-compositing --disable-direct-composition --override-use-software-gl-for-tests --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,RendererCodeIntegrity,RemoveRedirectionBitmap,ForceSWDCompWhenDCompFallbackRequired --no-first-run --enable-logging=file --v=1 --log-file=X:\Windows\Temp\OwnBackup\webview2.log
 >>"%APP%\webview2-args.txt" echo.
->>"%APP%\webview2-args.txt" echo C - the other direction: give D3D a working device (WARP) instead of banning it:
->>"%APP%\webview2-args.txt" echo --allow-run-as-system --no-sandbox --in-process-gpu --use-gl=angle --use-angle=d3d11-warp --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,RendererCodeIntegrity --no-first-run --enable-logging --v=1 --log-file=X:\Windows\Temp\OwnBackup\webview2.log
+>>"%APP%\webview2-args.txt" echo C - no Chromium log at all, if even the file is in the way:
+>>"%APP%\webview2-args.txt" echo --allow-run-as-system --no-sandbox --in-process-gpu --disable-gpu --disable-gpu-compositing --disable-direct-composition --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,RendererCodeIntegrity,RemoveRedirectionBitmap,ForceSWDCompWhenDCompFallbackRequired --no-first-run
+>>"%APP%\webview2-args.txt" echo.
+>>"%APP%\webview2-args.txt" echo D - the other direction: give D3D a working device (WARP):
+>>"%APP%\webview2-args.txt" echo --allow-run-as-system --no-sandbox --in-process-gpu --use-gl=angle --use-angle=d3d11-warp --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,RendererCodeIntegrity --no-first-run --enable-logging=file --v=1 --log-file=X:\Windows\Temp\OwnBackup\webview2.log
 
 rem The manual launcher. WinPE boots from X:, has no desktop compositor and no
 rem sandbox, and the browser profile has to sit on a writable volume - all of
