@@ -78,6 +78,8 @@ pub mod true_removal_win;
 pub mod used_sectors_win;
 #[cfg(target_os = "windows")]
 pub mod vhdx;
+pub mod fat_writer;
+pub mod iso9660;
 pub mod media_layout;
 #[cfg(target_os = "windows")]
 pub mod media_build_win;
