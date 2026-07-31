@@ -219,6 +219,31 @@ for %%D in (mf.dll mfplat.dll d3d11.dll dxgi.dll d2d1.dll dwrite.dll) do (
     echo       [!] %%D is unavailable - WebView2 will most likely not start
   )
 )
+rem Trim the runtime. Measured on the medium (2026-07-31) it is 849 MB unpacked,
+rem and WinPE loads the whole boot.wim into RAM, so what is dropped here is RAM
+rem the machine gets to keep. Only dead weight goes:
+rem   * Locales - 168 languages, 120 MB; Chromium falls back to en-US for any
+rem     language whose .pak is absent, and our interface ships ru/en anyway;
+rem   * ResiliencyLinks - a byte-identical SECOND copy of Locales and the .pak
+rem     files, kept for Edge's self-repair (verified with cmp). Note that the
+rem     WIM stores identical data once, so deleting one copy alone frees
+rem     NOTHING - the locales must go from both places, which is why this runs
+rem     before the image is written;
+rem   * WidevineCdm - DRM video playback, and Installer / edge_game_assist -
+rem     updater and gaming overlay. None of them can be reached from our UI.
+rem Left alone on purpose: msedge.dll (316 MB) is the engine itself, and the
+rem loose DLLs (mspdf, dxcompiler, onnxruntime, vk_swiftshader) are loaded by
+rem the browser process on paths we do not fully control - a missing one would
+rem fail at run time, on the user's machine, for 60 MB.
+for %%D in (ResiliencyLinks WidevineCdm Installer edge_game_assist) do (
+  if exist "%APP%\WebView2\%%D" rd /s /q "%APP%\WebView2\%%D"
+)
+if exist "%APP%\WebView2\Locales" (
+  for /f "delims=" %%L in ('dir /b "%APP%\WebView2\Locales\*.pak" 2^>nul') do (
+    if /i not "%%L"=="ru.pak" if /i not "%%L"=="en-US.pak" del /f /q "%APP%\WebView2\Locales\%%L"
+  )
+)
+
 rem dcomp.dll must NOT be in the image, and an earlier build put it there, so it
 rem is deleted explicitly. Reversed from msedge.dll (Edge 150, 2026-07-31): the
 rem presenter is picked by probing whether a DirectComposition device can be
