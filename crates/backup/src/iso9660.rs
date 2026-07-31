@@ -354,31 +354,41 @@ enum RecordKind {
     File(usize),
 }
 
+/// Length of a directory's extent. Measured by building it, so the layout and
+/// the writing can never disagree about the padding below — the record sizes do
+/// not depend on the addresses, so this is exact before the addresses exist.
 fn dir_extent_len(dirs: &[DirNode], idx: usize, joliet: bool) -> u32 {
-    let mut len = dir_record(dirs, idx, joliet, RecordKind::SelfRef).len()
-        + dir_record(dirs, idx, joliet, RecordKind::Parent).len();
-    for &c in &dirs[idx].children {
-        len += dir_record(dirs, c, joliet, RecordKind::Child(c)).len();
-    }
-    for f in 0..dirs[idx].files.len() {
-        len += dir_record(dirs, idx, joliet, RecordKind::File(f)).len();
-    }
-    len as u32
+    directory_extent(dirs, idx, joliet).len() as u32
 }
 
 fn directory_extent(dirs: &[DirNode], idx: usize, joliet: bool) -> Vec<u8> {
-    let mut out = dir_record(dirs, idx, joliet, RecordKind::SelfRef);
-    out.extend(dir_record(dirs, idx, joliet, RecordKind::Parent));
+    let mut out: Vec<u8> = Vec::new();
+    // "Each Directory Record shall be recorded entirely within one Logical
+    // Sector." A record that straddles the boundary turns everything after it
+    // into rubbish — readers then see impossible flags and loop, or refuse the
+    // image outright. Directories only exceed 2048 bytes once they hold a few
+    // dozen entries, so a small tree never notices; the WebView2 runtime has
+    // hundreds of files in one folder and did.
+    let mut push = |rec: Vec<u8>, out: &mut Vec<u8>| {
+        let used = out.len() % SECTOR;
+        if used + rec.len() > SECTOR {
+            out.resize(out.len() + (SECTOR - used), 0);
+        }
+        out.extend(rec);
+    };
+
+    push(dir_record(dirs, idx, joliet, RecordKind::SelfRef), &mut out);
+    push(dir_record(dirs, idx, joliet, RecordKind::Parent), &mut out);
     let mut kids = dirs[idx].children.clone();
     kids.sort_by(|&a, &b| {
         encode_name(dirs[a].path.last().unwrap(), joliet, true)
             .cmp(&encode_name(dirs[b].path.last().unwrap(), joliet, true))
     });
     for c in kids {
-        out.extend(dir_record(dirs, c, joliet, RecordKind::Child(c)));
+        push(dir_record(dirs, c, joliet, RecordKind::Child(c)), &mut out);
     }
     for f in 0..dirs[idx].files.len() {
-        out.extend(dir_record(dirs, idx, joliet, RecordKind::File(f)));
+        push(dir_record(dirs, idx, joliet, RecordKind::File(f)), &mut out);
     }
     out
 }
@@ -616,7 +626,17 @@ pub fn find_file(iso: &Path, path: &str) -> Result<Option<(u32, u32)>> {
         f.read_exact(&mut buf)?;
         let mut at = 0usize;
         let mut hit = None;
-        while at < buf.len() && buf[at] != 0 {
+        while at < buf.len() {
+            // A zero length byte means "no more records in THIS sector"; the
+            // next one may still hold entries.
+            if buf[at] == 0 {
+                let next = (at / SECTOR + 1) * SECTOR;
+                if next >= buf.len() {
+                    break;
+                }
+                at = next;
+                continue;
+            }
             let rl = buf[at] as usize;
             let nl = buf[at + 32] as usize;
             let name = String::from_utf8_lossy(&buf[at + 33..at + 33 + nl]).to_string();
@@ -787,6 +807,89 @@ mod tests {
         )
         .unwrap();
         assert_eq!(s, "Microsoft");
+    }
+
+    /// The bug that made a real medium unreadable: a folder with hundreds of
+    /// files fills more than one sector, and a record allowed to straddle the
+    /// boundary corrupts the rest of the directory. xorriso called the image
+    /// "interleaved"; pycdlib recursed until it gave up.
+    #[test]
+    fn a_directory_larger_than_a_sector_stays_readable() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("payload");
+        std::fs::write(&src, b"x").unwrap();
+        let mut files: Vec<IsoFile> = (0..300)
+            .map(|i| IsoFile {
+                path: format!("OwnBackup/WebView2/file_number_{i:03}.dll"),
+                source: src.clone(),
+            })
+            .collect();
+        files.push(IsoFile { path: "sources/boot.wim".into(), source: src.clone() });
+        let iso = dir.path().join("big.iso");
+        write_iso(&files, "OWNBACKUP", None, &iso).unwrap();
+
+        let data = std::fs::read(&iso).unwrap();
+        let (lba, len) = {
+            // Walk to the crowded directory through its parent.
+            let (l, s) = find_file(&iso, "OwnBackup/WebView2/file_number_000.dll")
+                .unwrap()
+                .expect("first file");
+            assert_eq!(s, 1);
+            (l, s)
+        };
+        assert!(lba > 16 && len == 1);
+        // Every file must still be findable — the last one is past the boundary.
+        for i in [0usize, 42, 299] {
+            assert!(
+                find_file(&iso, &format!("OwnBackup/WebView2/file_number_{i:03}.dll"))
+                    .unwrap()
+                    .is_some(),
+                "file {i} lost after the sector boundary"
+            );
+        }
+        // And no record may cross a sector: check the directory extent itself.
+        let (dlba, dlen) = dir_extent_of(&data, "OWNBACKUP/WEBVIEW2");
+        let ext = &data[dlba * SECTOR..dlba * SECTOR + dlen];
+        let mut at = 0usize;
+        while at < ext.len() {
+            let rl = ext[at] as usize;
+            if rl == 0 {
+                at = (at / SECTOR + 1) * SECTOR;
+                continue;
+            }
+            assert!(
+                at % SECTOR + rl <= SECTOR,
+                "a record at {at} crosses the sector boundary"
+            );
+            at += rl;
+        }
+    }
+
+    /// Address and length of a directory, by walking the primary tree.
+    fn dir_extent_of(data: &[u8], path: &str) -> (usize, usize) {
+        let pvd = &data[16 * SECTOR..17 * SECTOR];
+        let mut lba = u32::from_le_bytes(pvd[158..162].try_into().unwrap()) as usize;
+        let mut len = u32::from_le_bytes(pvd[166..170].try_into().unwrap()) as usize;
+        for part in path.split('/') {
+            let ext = &data[lba * SECTOR..lba * SECTOR + len];
+            let mut at = 0usize;
+            loop {
+                assert!(at < ext.len(), "{part} not found");
+                let rl = ext[at] as usize;
+                if rl == 0 {
+                    at = (at / SECTOR + 1) * SECTOR;
+                    continue;
+                }
+                let nl = ext[at + 32] as usize;
+                if &ext[at + 33..at + 33 + nl] == part.as_bytes() {
+                    lba = u32::from_le_bytes(ext[at + 2..at + 6].try_into().unwrap()) as usize;
+                    len = u32::from_le_bytes(ext[at + 10..at + 14].try_into().unwrap()) as usize;
+                    break;
+                }
+                at += rl;
+            }
+        }
+        (lba, len)
     }
 
     #[test]
