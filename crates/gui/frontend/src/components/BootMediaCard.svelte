@@ -6,6 +6,7 @@
   // base is chosen, not spread across the Tools page.
   import { onMount } from 'svelte';
   import { api } from '../lib/api';
+  import { media, ensureMediaMode } from '../lib/mediaStore.svelte';
   import { formatBytes } from '../lib/format';
   import MediaBuildModal from './MediaBuildModal.svelte';
   import type { BaseImage } from '../lib/types';
@@ -18,7 +19,12 @@
 
   const windowsBase = $derived(bases[0] ?? null);
 
-  onMount(search);
+  onMount(async () => {
+    await ensureMediaMode();
+    // Nothing to look for when running from the medium: it cannot build one.
+    if (!media.active) search();
+    else searching = false;
+  });
 
   async function search() {
     searching = true;
@@ -33,6 +39,7 @@
   }
 
   function openDialog() {
+    if (media.active) return;
     if (tab === 'windows' && !windowsBase) return; // nothing to build on
     open = tab;
   }
@@ -70,9 +77,20 @@
   </div>
 
   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-  <div class="panel" class:disabled={tab === 'windows' && !windowsBase}
+  <div class="panel" class:disabled={media.active || (tab === 'windows' && !windowsBase)}
        onclick={openDialog} role="button" tabindex="0">
-    {#if tab === 'windows'}
+    {#if media.active}
+      <!-- Building from the medium failed at DISM halfway through, which
+           explains nothing. Say so before, and say why. -->
+      <div class="p-desc">
+        Собрать носитель можно только из установленной Windows. Здесь, на самом
+        носителе, нет ни хранилища драйверов этой машины, ни места для распаковки
+        образа: <code>X:</code> — это диск в оперативной памяти.
+      </div>
+      <div class="p-meta soon">
+        Запустите программу в обычной Windows, чтобы собрать носитель.
+      </div>
+    {:else if tab === 'windows'}
       <div class="p-desc">
         Собирается из того, что уже есть на этой машине: среда восстановления
         Windows, программа с интерфейсом, рантайм WebView2 и, по желанию,
@@ -140,6 +158,6 @@
   .p-meta { font-size: 12px; color: var(--text-muted); margin-top: 8px; }
   .p-meta.soon { color: var(--warning); }
   .p-warn { font-size: 12px; color: var(--warning); margin-top: 8px; line-height: 1.45; }
-  .p-warn code { font-family: monospace; }
+  .p-warn code, .p-desc code { font-family: monospace; }
   .p-go { font-size: 12px; color: var(--primary); margin-top: 10px; }
 </style>

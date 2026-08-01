@@ -685,6 +685,7 @@ impl BackupService for BackupServiceImpl {
 
     async fn find_base_images(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
+        media_build_unavailable()?;
         #[cfg(target_os = "windows")]
         {
             use own_backup_common::engine_dto::BaseImageDto;
@@ -716,6 +717,7 @@ impl BackupService for BackupServiceImpl {
 
     async fn list_drivers(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
+        media_build_unavailable()?;
         #[cfg(target_os = "windows")]
         {
             use own_backup_common::engine_dto::DriverPackageDto;
@@ -746,6 +748,7 @@ impl BackupService for BackupServiceImpl {
 
     async fn build_media(&self, req: Request<JsonRequest>) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
+        media_build_unavailable()?;
         #[cfg(target_os = "windows")]
         {
             use own_backup_backup::media_build_win::{
@@ -1473,6 +1476,26 @@ mod tests {
         assert!(excl["windows"].as_array().unwrap().iter().any(|p| p.as_str().unwrap().contains("Temp")));
         assert!(excl["linux"].as_array().unwrap().iter().any(|p| p.as_str().unwrap().contains("tmp")));
     }
+}
+
+/// A boot medium cannot build a boot medium, and the reasons are not one but
+/// several: `X:` is a RAM disk with no room to unpack a multi-gigabyte image
+/// into, the driver store the medium would copy from does not exist there (which
+/// is why the driver scan comes back empty), and WinPE carries a reduced DISM
+/// that cannot service an image at all.
+///
+/// Refused here rather than only in the interface, because the interface is not
+/// the only way in — and because the failure it produced was a DISM error code
+/// halfway through the build, which explains nothing.
+fn media_build_unavailable() -> Result<(), Status> {
+    if own_backup_common::media_mode::is_media_mode() {
+        return Err(Status::failed_precondition(
+            "Собрать загрузочный носитель можно только из установленной Windows. \
+             Здесь, на самом носителе, нет ни хранилища драйверов, ни места для \
+             распаковки образа: X: — это диск в оперативной памяти.",
+        ));
+    }
+    Ok(())
 }
 
 /// Where the WebView2 runtime lives on this machine.
