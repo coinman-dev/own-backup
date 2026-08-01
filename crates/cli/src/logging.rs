@@ -67,9 +67,43 @@ fn redacted_cmdline() -> String {
 
 /// Install the two-sink subscriber and record startup facts. Returns the log
 /// file path when one could be opened.
+/// May the console be given colours?
+///
+/// On the boot medium it may not: WinPE's console does not interpret escape
+/// sequences unless it is asked to, and every log line came out as
+/// `←[2m2026-08-01…←[0m ←[32m INFO←[0m`. So the console is asked first, and
+/// colours are used only if it agrees.
+#[cfg(target_os = "windows")]
+fn console_takes_ansi() -> bool {
+    use windows::Win32::System::Console::{
+        GetConsoleMode, GetStdHandle, SetConsoleMode, CONSOLE_MODE,
+        ENABLE_VIRTUAL_TERMINAL_PROCESSING, STD_ERROR_HANDLE,
+    };
+    // SAFETY: plain console-mode query and set on our own standard handle.
+    unsafe {
+        let Ok(h) = GetStdHandle(STD_ERROR_HANDLE) else { return false };
+        let mut mode = CONSOLE_MODE(0);
+        if GetConsoleMode(h, &mut mode).is_err() {
+            return false; // redirected to a file or a pipe: no escapes there
+        }
+        if mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING != CONSOLE_MODE(0) {
+            return true;
+        }
+        SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING).is_ok()
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn console_takes_ansi() -> bool {
+    true
+}
+
+/// Install the two-sink subscriber and record startup facts. Returns the log
+/// file path when one could be opened.
 pub fn init() -> Option<PathBuf> {
     let console_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "warn".into());
+    let ansi = console_takes_ansi();
 
     let log_path = match open_cli_log() {
         Some((f, path)) => {
@@ -78,6 +112,7 @@ pub fn init() -> Option<PathBuf> {
             tracing_subscriber::registry()
                 .with(
                     tracing_subscriber::fmt::layer()
+                        .with_ansi(ansi)
                         .with_writer(std::io::stderr)
                         .with_filter(console_filter),
                 )
@@ -92,6 +127,7 @@ pub fn init() -> Option<PathBuf> {
         }
         None => {
             tracing_subscriber::fmt()
+                .with_ansi(ansi)
                 .with_writer(std::io::stderr)
                 .with_env_filter(console_filter)
                 .init();
