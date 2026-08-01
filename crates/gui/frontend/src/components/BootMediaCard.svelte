@@ -119,6 +119,15 @@
 {/if}
 
 <style>
+  /* Svelte scopes styles per component, so the card classes defined in Tools
+     never reached this one — the heading and the icon sat on the page with no
+     frame around them. They live here now, matching Mount and Verify. */
+  .tool-card { border: 1px solid var(--border); border-radius: 8px; background: var(--card-bg); box-shadow: var(--shadow); padding: 20px 22px; margin-bottom: 16px; }
+  .tool-head { display: flex; gap: 14px; align-items: flex-start; margin-bottom: 14px; }
+  .glyph { font-size: 22px; color: var(--primary); }
+  .tool-title { font-size: 15px; font-weight: 600; color: var(--head); }
+  .tool-desc { font-size: 12px; color: var(--text-muted); margin-top: 3px; line-height: 1.5; }
+
   .tabs { display: flex; gap: 4px; margin-top: 4px; border-bottom: 1px solid var(--border); }
   .tab { display: flex; align-items: center; gap: 8px; padding: 9px 14px; border: 1px solid transparent; border-bottom: none; border-radius: 6px 6px 0 0; background: none; cursor: pointer; font-family: var(--font); font-size: 13px; color: var(--text-muted); margin-bottom: -1px; }
   .tab:hover { color: var(--head); }

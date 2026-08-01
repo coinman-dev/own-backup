@@ -266,7 +266,6 @@
 
   .inner {
     padding: 30px 44px;
-    max-width: 860px;
   }
 
   h1 {

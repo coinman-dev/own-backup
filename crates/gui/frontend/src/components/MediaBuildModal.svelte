@@ -216,12 +216,13 @@
             {@const now = i === progress.stage_index && !progress.finished}
             <div class="stage" class:done class:now>
               <span class="mark">{done ? '✓' : now ? '▸' : ''}</span>
-              <span class="st-title">
-                {st.title}
-                {#if now && progress.detail}<span class="st-detail">— {progress.detail}</span>{/if}
-              </span>
+              <span class="st-title">{st.title}</span>
               <span class="st-bar">
                 <span class="st-fill" style="width: {done ? 100 : now ? progress.percent : 0}%"></span>
+                <!-- What the stage is doing sits at the far end of its own bar,
+                     and only while it is doing it: once the stage is done the
+                     words describe nothing. -->
+                {#if now && progress.detail}<span class="st-detail">{progress.detail}</span>{/if}
               </span>
             </div>
           {/each}
@@ -317,9 +318,9 @@
   .st-title { white-space: nowrap; }
   .stage.now, .stage.done { color: var(--head); }
   .mark { color: var(--green); }
-  .st-bar { height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; }
+  .st-bar { position: relative; height: 16px; background: var(--border); border-radius: 3px; overflow: hidden; }
   .st-fill { display: block; height: 100%; background: var(--green); transition: width .25s; }
-  .st-detail { color: var(--text-muted); }
+  .st-detail { position: absolute; right: 8px; top: 0; line-height: 16px; font-size: 11px; color: var(--head); max-width: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .err { font-size: 12px; color: var(--error); margin-top: 12px; word-break: break-word; }
   .warn { font-size: 12px; color: var(--warning); margin-top: 6px; line-height: 1.4; }
   .muted { font-size: 13px; color: var(--text-muted); padding: 6px 0; }
