@@ -83,6 +83,12 @@ pub mod iso9660;
 pub mod media_layout;
 #[cfg(target_os = "windows")]
 pub mod media_build_win;
+// Mostly Windows-only, but its INF parsing is plain text and its tests run
+// everywhere — the module is compiled on all platforms, the process calls are
+// gated inside it.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub mod media_guest_drivers_win;
+pub mod ole_compound;
 pub mod wim_info;
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub mod winre_find;

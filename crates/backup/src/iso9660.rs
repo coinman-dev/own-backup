@@ -78,6 +78,21 @@ pub fn write_iso(
     boot: Option<IsoBoot>,
     out: &Path,
 ) -> Result<u64> {
+    write_iso_with_progress(files, volume_id, boot, out, &mut |_| {})
+}
+
+/// [`write_iso`], reporting 0–100 as the payload is written.
+///
+/// The payload is most of a medium — several hundred megabytes — and the caller
+/// shows a bar while it goes out. Only the file data is counted: the descriptors
+/// and tables around it are a few sectors and take no measurable time.
+pub fn write_iso_with_progress(
+    files: &[IsoFile],
+    volume_id: &str,
+    boot: Option<IsoBoot>,
+    out: &Path,
+    progress: &mut dyn FnMut(u64),
+) -> Result<u64> {
     let mut dirs: Vec<DirNode> = vec![DirNode { parent: 0, ..Default::default() }];
 
     // --- build the tree ----------------------------------------------------
@@ -236,6 +251,10 @@ pub fn write_iso(
         }
     }
 
+    let total: u64 = order.iter().flat_map(|&i| dirs[i].files.iter()).map(|f| f.size as u64).sum();
+    let mut written = 0u64;
+    let mut last_pct = u64::MAX;
+
     let mut buf = vec![0u8; 1 << 20];
     for &i in &order {
         for f in &dirs[i].files {
@@ -253,6 +272,15 @@ pub fn write_iso(
                 }
                 w.write_all(&buf[..n])?;
                 left -= n;
+                // One report per whole percent: the callback crosses a process
+                // boundary (an event to the interface), and 700 MB in 1 MB
+                // chunks would send seven hundred of them.
+                written += n as u64;
+                let pct = if total == 0 { 100 } else { written * 100 / total };
+                if pct != last_pct {
+                    last_pct = pct;
+                    progress(pct);
+                }
             }
             write_zeros(&mut w, pad_to_sector(f.size.max(1) as usize))?;
         }

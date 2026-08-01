@@ -152,6 +152,30 @@ pub fn list_driver_packages() -> Vec<DriverPackage> {
         })
         .collect();
     list.sort_by(|a, b| b.recommended.cmp(&a.recommended).then(b.size_bytes.cmp(&a.size_bytes)));
+
+    // Drivers this machine does not have but a virtual machine booted from the
+    // medium will need. They go first: the list is otherwise ordered by size,
+    // and this one's size is not known until it is extracted.
+    if let Some(iso) = crate::media_guest_drivers_win::vmware_tools_iso() {
+        info!(iso = %iso.display(), "VMware guest tools found — offering their drivers");
+        list.insert(
+            0,
+            DriverPackage {
+                inf: crate::media_guest_drivers_win::VMWARE_TOOLS_ID.to_string(),
+                original_name: iso.display().to_string(),
+                class_name: "Display".into(),
+                provider: "VMware, Inc.".into(),
+                version: String::new(),
+                // Unknown until the tools image is unpacked; the interface shows
+                // a dash rather than a made-up number.
+                size_bytes: 0,
+                recommended: true,
+                role: "экран и устройства виртуальной машины".into(),
+                device: "VMware Tools (windows.iso)".into(),
+            },
+        );
+    }
+
     info!(
         total = list.len(),
         recommended = list.iter().filter(|d| d.recommended).count(),
@@ -363,7 +387,15 @@ pub fn build_media(
     std::fs::copy(&req.base_wim, &staged_wim)?;
     clear_readonly(&staged_wim);
     at(&mut progress, BuildStage::OpeningImage, 30, "монтирование");
-    let mounted = open_image(&staged_wim, &tree)?;
+    // Mounting is quick; unpacking is minutes, and its own percentage is mapped
+    // into what is left of this stage's bar rather than restarting it at zero.
+    let mounted = open_image(&staged_wim, &tree, &mut |pct| {
+        progress(StageReport {
+            stage: BuildStage::OpeningImage,
+            percent: 30 + pct * 70 / 100,
+            detail: "распаковка",
+        });
+    })?;
     report.unpacked = !mounted;
     at(
         &mut progress,
@@ -417,18 +449,47 @@ pub fn build_media(
     }
     at(&mut progress, BuildStage::CopyingRuntime, 100, "");
 
-    if !req.drivers.is_empty() {
+    // The chosen list mixes real packages from this machine's driver store with
+    // pseudo-packages that have to be fetched from somewhere else (a
+    // hypervisor's guest tools). They are separated here, before anything hands
+    // an id that is not an INF name to `pnputil`.
+    let guest_prefix = crate::media_guest_drivers_win::PSEUDO_PREFIX;
+    let (guest, store): (Vec<String>, Vec<String>) =
+        req.drivers.iter().cloned().partition(|d| d.starts_with(guest_prefix));
+
+    if !store.is_empty() || !guest.is_empty() {
         at(&mut progress, BuildStage::AddingDrivers, 0, "выгрузка из хранилища");
-        match add_drivers(&tree, work, &req.drivers, req.extra_drivers.as_deref(), &mut |pct, d| {
-            progress(StageReport { stage: BuildStage::AddingDrivers, percent: pct, detail: d })
-        }) {
-            Ok(n) => report.drivers_added = n,
-            Err(e) => {
-                warn!(error = %e, "drivers were not added");
-                report.warnings.push(format!(
-                    "Драйверы добавить не удалось: {e}. Носитель соберётся, но может не \
-                     увидеть диски на другом оборудовании."
-                ));
+        if !store.is_empty() {
+            match add_drivers(&tree, work, &store, req.extra_drivers.as_deref(), &mut |pct, d| {
+                progress(StageReport { stage: BuildStage::AddingDrivers, percent: pct, detail: d })
+            }) {
+                Ok(n) => report.drivers_added = n,
+                Err(e) => {
+                    warn!(error = %e, "drivers were not added");
+                    report.warnings.push(format!(
+                        "Драйверы добавить не удалось: {}. Носитель соберётся, но может не \
+                         увидеть диски на другом оборудовании.",
+                        user_reason(&e)
+                    ));
+                }
+            }
+        }
+        if guest.iter().any(|d| d == crate::media_guest_drivers_win::VMWARE_TOOLS_ID) {
+            match add_guest_vmware(&tree, work, &mut |pct, d| {
+                progress(StageReport { stage: BuildStage::AddingDrivers, percent: pct, detail: d })
+            }) {
+                Ok((n, notes)) => {
+                    report.drivers_added += n;
+                    report.warnings.extend(notes);
+                }
+                Err(e) => {
+                    warn!(error = %e, "VMware guest drivers were not added");
+                    report.warnings.push(format!(
+                        "Драйверы VMware Tools добавить не удалось: {}. Носитель соберётся, \
+                         но в виртуальной машине VMware останется разрешение 1024×768.",
+                        user_reason(&e)
+                    ));
+                }
             }
         }
         at(&mut progress, BuildStage::AddingDrivers, 100, "");
@@ -469,6 +530,7 @@ pub fn build_media(
     let _ = std::fs::remove_file(sys32.join("winpeshl.ini"));
     std::fs::write(sys32.join("startnet.cmd"), layout::startnet_cmd(app_dir_win))?;
     set_scratch_space(&tree, mounted);
+    set_input_locales(&tree, mounted, &mut report);
 
     at(
         &mut progress,
@@ -476,7 +538,14 @@ pub fn build_media(
         0,
         if mounted { "фиксация изменений" } else { "упаковка (несколько минут)" },
     );
-    close_image(&staged_wim, &tree, mounted)?;
+    let writing_detail = if mounted { "фиксация изменений" } else { "упаковка" };
+    close_image(&staged_wim, &tree, mounted, &mut |pct| {
+        progress(StageReport {
+            stage: BuildStage::WritingImage,
+            percent: pct,
+            detail: writing_detail,
+        });
+    })?;
     at(&mut progress, BuildStage::WritingImage, 100, "");
 
     at(&mut progress, BuildStage::BootFiles, 0, "");
@@ -501,14 +570,34 @@ pub fn build_media(
 /// caller can run it after the ISO is written — and so a failed build can call
 /// it too, which is how the first run left 3 GB in ProgramData.
 pub fn clean_up(work_dir: &Path, out_dir: &Path) -> u64 {
+    clean_up_with_progress(work_dir, out_dir, &mut |_, _| {})
+}
+
+/// [`clean_up`], saying which part of it is running.
+///
+/// Not one act but four, and each of them minutes: measuring several gigabytes
+/// of unpacked image, then removing the tree, the work folder and the staging
+/// folder — the removals through robocopy when the image's ACLs refuse a plain
+/// delete. The step used to report nothing at all until it was over.
+pub fn clean_up_with_progress(
+    work_dir: &Path,
+    out_dir: &Path,
+    progress: &mut dyn FnMut(u64, &str),
+) -> u64 {
+    progress(0, "подсчёт");
     let freed = dir_size(work_dir) + dir_size(out_dir);
+    progress(10, "распакованный образ");
     nuke_tree(&work_dir.join("tree"));
+    progress(45, "рабочая папка");
     nuke_tree(work_dir);
+    progress(75, "файлы носителя");
     nuke_tree(out_dir);
+    progress(95, "проверка");
     let left = dir_size(work_dir) + dir_size(out_dir);
     if left > 0 {
         warn!(bytes = left, "some temporary files could not be removed");
     }
+    progress(100, "");
     freed.saturating_sub(left)
 }
 
@@ -517,7 +606,10 @@ fn stage_id(s: BuildStage) -> &'static str {
 }
 
 /// Mount the image; fall back to unpacking it. Returns true when mounted.
-fn open_image(wim: &Path, tree: &Path) -> Result<bool> {
+///
+/// `progress` reports 0–100 of whichever operation is running — mounting is
+/// quick, unpacking is minutes, and only DISM knows how far along it is.
+fn open_image(wim: &Path, tree: &Path, progress: &mut dyn FnMut(u64)) -> Result<bool> {
     if dism(&["/Mount-Wim", &format!("/WimFile:{}", wim.display()), "/Index:1",
               &format!("/MountDir:{}", tree.display())]).is_ok()
     {
@@ -540,24 +632,123 @@ fn open_image(wim: &Path, tree: &Path) -> Result<bool> {
         }
     }
     warn!("WIM mounting unavailable — unpacking instead (slower, needs a few GB)");
-    dism(&["/Apply-Image", &format!("/ImageFile:{}", wim.display()), "/Index:1",
-           &format!("/ApplyDir:{}", tree.display())])?;
+    dism_progress(
+        &["/Apply-Image", &format!("/ImageFile:{}", wim.display()), "/Index:1",
+          &format!("/ApplyDir:{}", tree.display())],
+        progress,
+    )?;
     Ok(false)
 }
 
-fn close_image(wim: &Path, tree: &Path, mounted: bool) -> Result<()> {
+fn close_image(
+    wim: &Path,
+    tree: &Path,
+    mounted: bool,
+    progress: &mut dyn FnMut(u64),
+) -> Result<()> {
     if mounted {
-        return dism(&["/Unmount-Wim", &format!("/MountDir:{}", tree.display()), "/Commit"]);
+        // Committing a mounted image writes back everything that changed —
+        // the program, the runtime, the drivers. Minutes, and DISM counts them.
+        return dism_progress(
+            &["/Unmount-Wim", &format!("/MountDir:{}", tree.display()), "/Commit"],
+            progress,
+        );
     }
     let _ = std::fs::remove_file(wim);
-    dism(&[
-        "/Capture-Image",
-        &format!("/ImageFile:{}", wim.display()),
-        &format!("/CaptureDir:{}", tree.display()),
-        "/Name:My Own Backup media",
-        "/Compress:max",
-        "/Bootable",
-    ])
+    dism_progress(
+        &[
+            "/Capture-Image",
+            &format!("/ImageFile:{}", wim.display()),
+            &format!("/CaptureDir:{}", tree.display()),
+            "/Name:My Own Backup media",
+            "/Compress:max",
+            "/Bootable",
+        ],
+        progress,
+    )
+}
+
+/// The part of an error a person should read. The variant's English prefix
+/// ("Image format error: ") belongs in the log, not in a line shown in a dialog
+/// under a red border.
+fn user_reason(e: &OwnBackupError) -> String {
+    let text = e.to_string();
+    for prefix in ["Image format error: ", "I/O error: ", "Device I/O error: "] {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            return rest.to_string();
+        }
+    }
+    text
+}
+
+/// Take the guest drivers out of VMware Tools and put them in the image.
+///
+/// Kept here rather than in the guest-drivers module so that module never has
+/// to know how this image is being serviced: it stages files, DISM is ours.
+fn add_guest_vmware(
+    tree: &Path,
+    work: &Path,
+    progress: &mut dyn FnMut(u64, &str),
+) -> Result<(u32, Vec<String>)> {
+    let iso = crate::media_guest_drivers_win::vmware_tools_iso().ok_or_else(|| {
+        OwnBackupError::ImageFormat(
+            "windows.iso (VMware Tools) больше не найден — драйверы VMware пропущены".into(),
+        )
+    })?;
+    crate::media_guest_drivers_win::add_vmware_tools_drivers(
+        &iso,
+        work,
+        |pct, detail| progress(pct, detail),
+        |staged| {
+            dism(&[
+                &format!("/Image:{}", tree.display()),
+                "/Add-Driver",
+                &format!("/Driver:{}", staged.display()),
+                "/Recurse",
+            ])
+        },
+    )
+}
+
+/// Keyboard layouts in the image (see [`layout::INPUT_LOCALES`]).
+///
+/// Two levers, because neither covers both cases: DISM writes the layouts into
+/// the image's registry, which only works while the image is mounted, and the
+/// boot script asks `wpeutil` for them at every start, which is all an unpacked
+/// image has. Both are best-effort — a medium that boots with one layout is
+/// still a medium; one that fails to build is not.
+fn set_input_locales(tree: &Path, mounted: bool, report: &mut MediaBuildReport) {
+    // A layout whose DLL is absent silently does not switch, so fill in what
+    // the image lacks from the machine doing the building.
+    let sys32 = tree.join("Windows").join("System32");
+    for dll in layout::KEYBOARD_DLLS {
+        let dst = sys32.join(dll);
+        if dst.exists() {
+            continue;
+        }
+        let src = system32().join(dll);
+        if src.exists() {
+            let _ = std::fs::copy(&src, &dst);
+        } else {
+            warn!(dll, "keyboard layout DLL is in neither the image nor this machine");
+            report.warnings.push(format!(
+                "{dll} нет ни в образе, ни на этой машине — соответствующая раскладка \
+                 клавиатуры на носителе может не переключаться."
+            ));
+        }
+    }
+    if mounted {
+        if let Err(e) = dism(&[
+            &format!("/Image:{}", tree.display()),
+            &format!("/Set-InputLocale:{}", layout::INPUT_LOCALES),
+        ]) {
+            warn!(error = %e, "input locales were not written into the image");
+            report.warnings.push(format!(
+                "Раскладки клавиатуры не записались в образ ({e}). Носитель загрузится, \
+                 раскладки выставит скрипт запуска (Alt+Shift)."
+            ));
+        }
+    }
 }
 
 /// WinPE's writable space. Set through DISM when mounted; through the image's
@@ -764,6 +955,78 @@ fn dism(args: &[&str]) -> Result<()> {
     run("dism", args)
 }
 
+/// DISM, reporting the percentage it prints as it prints it.
+///
+/// The two long steps — unpacking an image and packing it back — take minutes,
+/// and DISM does say how far along it is: it draws
+/// `[==========          ]  50.0%` on stdout and redraws that same line with a
+/// carriage return. Collecting the output with `.output()` hands all of it over
+/// at the end, which is exactly why those stages looked frozen. Reading the
+/// pipe while it fills turns them into a bar that moves.
+///
+/// Failure is reported like [`run`]: with the last lines DISM printed, since
+/// its own message is the useful part.
+fn dism_progress(args: &[&str], progress: &mut dyn FnMut(u64)) -> Result<()> {
+    use std::io::Read;
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let mut child = std::process::Command::new("dism")
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .map_err(|e| OwnBackupError::ImageFormat(format!("dism: {e}")))?;
+
+    let mut out = child.stdout.take();
+    // The tail is kept for the error message; the whole output of an unpack is
+    // thousands of redraws and none of it is worth holding.
+    let mut tail = String::new();
+    let mut last = u64::MAX;
+    if let Some(pipe) = out.as_mut() {
+        let mut buf = [0u8; 4096];
+        loop {
+            match pipe.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let chunk = layout::console_text(&buf[..n]);
+                    if let Some(pct) = layout::dism_percent(&chunk) {
+                        if pct != last {
+                            last = pct;
+                            progress(pct);
+                        }
+                    }
+                    tail.push_str(&chunk);
+                    if tail.len() > 8192 {
+                        // Keep the end: that is where the error lands.
+                        tail = tail.split_off(tail.len() - 4096);
+                    }
+                }
+            }
+        }
+    }
+
+    let status = child
+        .wait()
+        .map_err(|e| OwnBackupError::ImageFormat(format!("dism: {e}")))?;
+    if status.success() {
+        return Ok(());
+    }
+    let lines: Vec<&str> = tail
+        .split(['\r', '\n'])
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && !l.starts_with('['))
+        .rev()
+        .take(3)
+        .collect();
+    Err(OwnBackupError::ImageFormat(format!(
+        "dism завершился с ошибкой: {}",
+        lines.into_iter().rev().collect::<Vec<_>>().join(" ")
+    )))
+}
+
+
 /// Run a console tool without flashing a window, and turn a non-zero exit into
 /// an error carrying what it printed — DISM's own message is the useful part.
 fn run(program: &str, args: &[&str]) -> Result<()> {
@@ -785,7 +1048,7 @@ fn run(program: &str, args: &[&str]) -> Result<()> {
     if ok {
         return Ok(());
     }
-    let text = String::from_utf8_lossy(&out.stdout);
+    let text = layout::console_text(&out.stdout);
     let tail: Vec<&str> = text.lines().rev().filter(|l| !l.trim().is_empty()).take(3).collect();
     Err(OwnBackupError::ImageFormat(format!(
         "{program} завершился с ошибкой: {}",

@@ -188,6 +188,86 @@ pub fn rescue_role(class_guid: &str, bus: &str) -> Option<&'static str> {
 /// WinPE's default 32 MB of writable space is not enough for a browser engine.
 pub const SCRATCH_SPACE_MB: u32 = 512;
 
+/// Text a console tool printed, decoded.
+///
+/// DISM and its kind write in the console's OEM code page, not UTF-8: on a
+/// Russian Windows its errors arrived as `\u{fffd}訡��: 2 Cannot find…` and
+/// went into the report exactly like that. UTF-8 is tried first (everything
+/// ASCII, and our own tools, come out right), and the fallback is CP866 —
+/// the OEM page of the Windows this program is built for. A machine on CP437
+/// prints ASCII for the same messages, so it takes the first path anyway.
+pub fn console_text(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(s) => s.to_string(),
+        Err(_) => bytes.iter().map(|&b| cp866_char(b)).collect(),
+    }
+}
+
+/// One CP866 byte as a character. 0x00–0x7F is ASCII; above that the page is
+/// three contiguous runs of Cyrillic with the box-drawing block between them.
+fn cp866_char(b: u8) -> char {
+    match b {
+        0x00..=0x7F => b as char,
+        // А…п — 0x80..0xAF is А..я without the last sixteen letters
+        0x80..=0xAF => char::from_u32(0x0410 + (b - 0x80) as u32).unwrap_or('?'),
+        // 0xB0..0xDF is the box-drawing block; it carries no meaning in a
+        // message and a middle dot is less noisy than a wrong letter.
+        0xB0..=0xDF => '·',
+        // р…я
+        0xE0..=0xEF => char::from_u32(0x0440 + (b - 0xE0) as u32).unwrap_or('?'),
+        0xF0 => 'Ё',
+        0xF1 => 'ё',
+        _ => ' ',
+    }
+}
+
+/// The last percentage in a chunk of DISM's output, as a whole percent.
+///
+/// DISM draws its progress as `[==========           ]  50.0%` and redraws that
+/// same line with a carriage return, so a chunk read from its pipe holds
+/// several of those; the last one is where it is now. Here rather than beside
+/// the code that reads the pipe, because that code is Windows-only and this is
+/// a parser — the thing most worth having a test for.
+pub fn dism_percent(text: &str) -> Option<u64> {
+    let bytes = text.as_bytes();
+    let at = text.rfind('%')?;
+    // Walk back over the digits (and the one decimal point) before the sign.
+    let mut start = at;
+    while start > 0 {
+        let c = bytes[start - 1];
+        if c.is_ascii_digit() || c == b'.' {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+    if start == at {
+        return None;
+    }
+    let value: f64 = text[start..at].parse().ok()?;
+    (0.0..=100.0).contains(&value).then_some(value as u64)
+}
+
+/// Keyboard layouts the medium boots with: US English, then Russian.
+///
+/// WinPE starts with the single layout of the image it was built from, and the
+/// medium is exactly where a BitLocker or LUKS passphrase has to be typed — a
+/// Russian passphrase cannot be entered at all without a Russian layout, and
+/// there is no taskbar to add one from. `0409:00000409` is en-US and
+/// `0419:00000419` is ru-RU; the form is the one both DISM (`/Set-InputLocale`)
+/// and `wpeutil SetKeyboardLayout` take, and Alt+Shift switches between them.
+///
+/// English is first on purpose: it is the layout every password was typed in
+/// when it was set, and it is what the machine falls back to if the second
+/// layout fails to load.
+pub const INPUT_LOCALES: &str = "0409:00000409;0419:00000419";
+
+/// Layout DLLs the above needs inside the image. WinRE normally carries them
+/// (its own BitLocker recovery prompt has the same problem), but an image
+/// trimmed of them would offer a layout that cannot load, so the builder checks
+/// and fills them in from the machine it runs on.
+pub const KEYBOARD_DLLS: [&str; 2] = ["kbdus.dll", "kbdru.dll"];
+
 /// Browser arguments, first line of `webview2-args.txt`.
 ///
 /// They are in a file rather than baked into the launcher so a flag can be tried
@@ -279,6 +359,19 @@ pub fn startnet_cmd(app_dir: &str) -> String {
     lines(&[
         "@echo off",
         "wpeinit",
+        // Drivers added to the image sit in its driver store, and wpeinit's PnP
+        // pass does not reliably START them — the display driver in particular
+        // stayed installed-but-idle while Microsoft Basic Display kept the
+        // screen at 1152x864. drvload is WinPE's own tool for exactly this:
+        // load a driver from its INF into the running system, now. Loading one
+        // that is already running is a cheap no-op, so every added package is
+        // offered rather than guessing which ones PnP missed. Before
+        // start-media.cmd, so the mode picker there sees the driver's modes.
+        "for %%i in (%SystemRoot%\\INF\\oem*.inf) do drvload \"%%i\" >nul 2>&1",
+        // Set at build time in the image registry as well; this line is what
+        // makes it true on a medium whose image had to be unpacked instead of
+        // mounted, where DISM cannot write that registry.
+        &format!("wpeutil SetKeyboardLayout {INPUT_LOCALES} >nul 2>&1"),
         "echo.",
         "echo === My Own Backup ===",
         "echo.",
@@ -411,6 +504,58 @@ mod tests {
                 "nothing may run in the foreground of the boot console: {line:?}"
             );
         }
+    }
+
+    /// DISM's errors are the text that ends up in the report, and they arrive
+    /// in the console's code page, not UTF-8.
+    #[test]
+    fn console_output_is_decoded_out_of_its_code_page() {
+        assert_eq!(console_text(b"Error: 2 Cannot find the file"), "Error: 2 Cannot find the file");
+        // CP866 "Ошибка: 2" — invalid UTF-8, so the fallback decodes it.
+        let oem = [0x8E, 0xE8, 0xA8, 0xA1, 0xAA, 0xA0, 0x3A, 0x20, 0x32];
+        assert_eq!(console_text(&oem), "Ошибка: 2");
+        // UTF-8 wins when the bytes are valid UTF-8 — our own messages are.
+        assert_eq!(console_text("не найден".as_bytes()), "не найден");
+    }
+
+    /// The two long steps report through this and nothing else — a parser that
+    /// quietly returns None turns the bar back into the frozen one it replaced.
+    #[test]
+    fn dism_progress_is_read_out_of_its_redrawn_line() {
+        // A chunk off the pipe: several redraws, the last one is the answer.
+        let chunk = "[=====                      ]  20.0%\r[==========                 ]  40.0%\r";
+        assert_eq!(dism_percent(chunk), Some(40));
+        assert_eq!(dism_percent("[==========================] 100.0%"), Some(100));
+        assert_eq!(dism_percent("\r[=                          ]   1.5%"), Some(1));
+        // Nothing to read: the bar keeps whatever it had.
+        assert_eq!(dism_percent("Deployment Image Servicing and Management tool"), None);
+        assert_eq!(dism_percent("Version: 10.0.19041.1"), None);
+        assert_eq!(dism_percent("100%"), Some(100));
+        // A stray sign with no number in front of it is not a percentage.
+        assert_eq!(dism_percent("% done"), None);
+    }
+
+    /// A driver in the store that nobody starts is a screen stuck at 1152x864:
+    /// the boot script must drvload what the build put in.
+    #[test]
+    fn boot_starts_the_added_drivers() {
+        let s = startnet_cmd(r"X:\Program Files\OwnBackup");
+        assert!(s.contains("drvload"), "added drivers must be loaded, not just stored");
+        assert!(s.contains(r"%SystemRoot%\INF\oem*.inf"), "every added package is offered");
+        // Order matters: the driver first, the mode picker (start-media) after.
+        let drv = s.find("drvload").unwrap();
+        let start = s.find("start-media.cmd").unwrap();
+        assert!(drv < start, "the display driver must be up before the mode is picked");
+    }
+
+    /// A passphrase that cannot be typed is a medium that cannot restore
+    /// anything: the boot script must offer more than the image's own layout.
+    #[test]
+    fn boot_sets_up_the_keyboard_layouts() {
+        let s = startnet_cmd(r"X:\Program Files\OwnBackup");
+        assert!(s.contains("SetKeyboardLayout"));
+        assert!(s.contains(INPUT_LOCALES), "both layouts must be set at boot");
+        assert!(INPUT_LOCALES.contains("0419"), "Russian has to be one of them");
     }
 
     /// The console has to survive a window that never appears — that is how the
