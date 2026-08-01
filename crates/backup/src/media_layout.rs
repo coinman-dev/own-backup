@@ -165,6 +165,16 @@ pub const RESCUE_CLASSES: [(&str, &[&str], &str); 5] = [
     ("{36fc9e60-c465-11cf-8056-444553540000}", &["PCI"], "контроллер USB"),
 ];
 
+/// Just the GUIDs, for handing to a device query that should not walk classes we
+/// are going to throw away anyway.
+pub const RESCUE_CLASS_GUIDS: [&str; 5] = [
+    "{4d36e97b-e325-11ce-bfc1-08002be10318}",
+    "{4d36e96a-e325-11ce-bfc1-08002be10318}",
+    "{4d36e967-e325-11ce-bfc1-08002be10318}",
+    "{4d36e972-e325-11ce-bfc1-08002be10318}",
+    "{36fc9e60-c465-11cf-8056-444553540000}",
+];
+
 /// Does this class/bus pair belong on a rescue medium? Returns what it is, in
 /// words, so the interface can say why a driver is on the list.
 pub fn rescue_role(class_guid: &str, bus: &str) -> Option<&'static str> {
@@ -579,6 +589,17 @@ mod tests {
 
     /// The class name is localised on some systems; the GUID never is. Case
     /// varies between the registry and PowerShell, so matching ignores it.
+    /// The short list handed to the device query must stay in step with the
+    /// table the decision is made from, or the query filters out a class the
+    /// rule would have accepted and the driver silently never appears.
+    #[test]
+    fn the_query_guids_are_the_table_guids() {
+        for (g, _, _) in RESCUE_CLASSES {
+            assert!(RESCUE_CLASS_GUIDS.contains(&g), "{g} missing from the query list");
+        }
+        assert_eq!(RESCUE_CLASS_GUIDS.len(), RESCUE_CLASSES.len());
+    }
+
     #[test]
     fn class_guids_match_whatever_the_case() {
         assert!(rescue_role("{4D36E97B-E325-11CE-BFC1-08002BE10318}", "pci").is_some());

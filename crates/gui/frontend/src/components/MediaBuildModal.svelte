@@ -47,7 +47,13 @@
   );
   /** The build is over: the button becomes "Готово" and closes the dialog. */
   const finished = $derived(!!report);
-  const canStart = $derived(isWindows && !building && !!base && outputDir.trim().length > 0);
+  // Not while the hardware is still being polled: the driver list is part of
+  // what "Начать" would act on, and starting without it would quietly build a
+  // medium with no drivers at all.
+  const canStart = $derived(
+    isWindows && !building && !!base && outputDir.trim().length > 0 &&
+    !(includeDrivers && loadingDrivers),
+  );
 
   onMount(() => {
     if (isWindows) loadDrivers();
@@ -170,7 +176,14 @@
         {#if includeDrivers}
           <div class="drivers">
             {#if loadingDrivers}
-              <div class="muted">Чтение списка драйверов…</div>
+              <!-- Polling the device list takes a couple of seconds on a machine
+                   with a lot of hardware, and a still line of text reads as a
+                   hang. The bar says it is working without pretending to know
+                   how far along it is. -->
+              <div class="scan">
+                <span class="scan-bar"><span class="scan-run"></span></span>
+                <span class="muted">Опрос оборудования: диски и сетевые адаптеры…</span>
+              </div>
             {:else if driverError}
               <div class="err">{driverError}</div>
             {:else if drivers.length === 0}
@@ -274,8 +287,12 @@
         <button class="btn primary" onclick={onClose}>Готово</button>
       {:else}
         <button class="btn primary" onclick={start} disabled={!canStart}
-                title={isWindows ? '' : 'Сборка Linux-носителя ещё не реализована'}>
-          {building ? 'Сборка…' : 'Начать'}
+                title={!isWindows
+                  ? 'Сборка Linux-носителя ещё не реализована'
+                  : includeDrivers && loadingDrivers
+                    ? 'Идёт опрос оборудования'
+                    : ''}>
+          {building ? 'Сборка…' : includeDrivers && loadingDrivers ? 'Опрос…' : 'Начать'}
         </button>
       {/if}
     </div>
@@ -294,6 +311,11 @@
   .opt input { margin-top: 2px; flex-shrink: 0; }
   .opt-note { display: block; font-size: 12px; color: var(--text-muted); line-height: 1.4; margin-top: 2px; }
   .drivers { margin-top: 10px; }
+  .scan { display: flex; align-items: center; gap: 12px; padding: 8px 0; }
+  .scan-bar { flex: 0 0 120px; height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; }
+  /* Indeterminate on purpose: the count is not known until the walk is done. */
+  .scan-run { display: block; width: 40%; height: 100%; background: var(--green); border-radius: 3px; animation: scan 1.1s ease-in-out infinite; }
+  @keyframes scan { 0% { transform: translateX(-100%); } 100% { transform: translateX(250%); } }
   .drv-head { display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: var(--text-muted); margin-bottom: 6px; }
   .drv-actions { display: flex; gap: 12px; }
   .lnk { background: none; border: none; color: var(--primary); font-size: 12px; cursor: pointer; padding: 0; font-family: var(--font); }

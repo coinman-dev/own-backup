@@ -16,7 +16,7 @@
 //!   exactly why "universal" rescue media cannot see NVMe or RAID controllers.
 
 use crate::media_layout as layout;
-use crate::media_layout::rescue_role;
+use crate::media_layout::{rescue_role, RESCUE_CLASS_GUIDS};
 use crate::wim_info::read_wim_info;
 use own_backup_common::{OwnBackupError, Result};
 use std::path::{Path, PathBuf};
@@ -84,21 +84,37 @@ pub fn list_driver_packages() -> Vec<DriverPackage> {
         name: Option<String>,
     }
 
-    let installed: Vec<Raw> = ps_json(
-        "Get-WindowsDriver -Online | Select-Object Driver,OriginalFileName,ClassName,\
-         ProviderName,Version | ConvertTo-Json -Compress",
-    );
+    // The two questions are independent, and each costs a PowerShell start plus
+    // a walk of something large, so they are asked at the same time.
+    let installed_job = std::thread::spawn(|| -> Vec<Raw> {
+        ps_json(
+            "Get-WindowsDriver -Online | Select-Object Driver,OriginalFileName,ClassName,\
+             ProviderName,Version | ConvertTo-Json -Compress",
+        )
+    });
 
-    // The device side. `-PresentOnly` is what keeps a printer that was unplugged
-    // two years ago out of the answer, and the instance id's prefix is the bus.
-    let present: Vec<Dev> = ps_json(
-        "Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | ForEach-Object { \
+    // The device side. `-PresentOnly` keeps a printer unplugged two years ago
+    // out of the answer, and the instance id's prefix is the bus.
+    //
+    // The class filter comes BEFORE the per-device property lookup, and that is
+    // the whole cost of this call: `Get-PnpDeviceProperty` is one call per
+    // device, and a desktop has several hundred devices against a handful of
+    // storage and network ones. Asking all of them took seconds.
+    let guid_list = RESCUE_CLASS_GUIDS
+        .iter()
+        .map(|g| format!("'{g}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let present: Vec<Dev> = ps_json(&format!(
+        "$g=@({guid_list}); Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | \
+         Where-Object {{ $g -contains $_.ClassGuid }} | ForEach-Object {{ \
            $p = Get-PnpDeviceProperty -InstanceId $_.InstanceId \
                   -KeyName 'DEVPKEY_Device_DriverInfPath' -ErrorAction SilentlyContinue; \
-           if ($p.Data) { [pscustomobject]@{ inf = $p.Data; guid = $_.ClassGuid; \
-             bus = $_.InstanceId.Split('\\')[0]; name = $_.FriendlyName } } \
-         } | ConvertTo-Json -Compress",
-    );
+           if ($p.Data) {{ [pscustomobject]@{{ inf = $p.Data; guid = $_.ClassGuid; \
+             bus = $_.InstanceId.Split('\\')[0]; name = $_.FriendlyName }} }} \
+         }} | ConvertTo-Json -Compress"
+    ));
+    let installed: Vec<Raw> = installed_job.join().unwrap_or_default();
 
     // inf -> (role, device name) for everything a rescue medium would want.
     let mut wanted: std::collections::HashMap<String, (String, String)> = Default::default();
