@@ -12,6 +12,11 @@ replaced by wnbd (LGPL-2.1) before release. See `THIRD-PARTY-NOTICES.md`.
 
 Current roadmap: `.ai/implementation_plan_v2_2026-07-01.md` (phases 0–8, decisions log).
 qcow2 second format + mounting: `.ai/qcow2-second-format-plan_2026-07-07.md` (Q0–Q5).
+Boot medium: `.ai/boot-media-plan_2026-07-30.md`.
+**BitLocker unlock does NOT work on Windows yet** (only LUKS does; the FVE
+parser in `backup/src/bitlocker.rs` is wired on Linux only, because a locked
+volume cannot be read through its volume handle) — plan and steps in
+`.ai/bitlocker-windows-plan_2026-08-01.md`.
 
 ## Build
 

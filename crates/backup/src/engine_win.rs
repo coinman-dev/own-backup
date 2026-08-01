@@ -3644,6 +3644,16 @@ fn unmount_qcow2_via_aim(image_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Did this read fail because the volume is a locked BitLocker volume?
+///
+/// `FVE_E_LOCKED_VOLUME` (`0x80310000`) is what the filesystem stack returns for
+/// every read of a locked volume through its volume handle. The code is carried
+/// in the formatted Windows error — its text is localised, the hex is not, so
+/// that is what is matched.
+fn is_bitlocker_locked(e: &OwnBackupError) -> bool {
+    e.to_string().contains("0x80310000")
+}
+
 /// Outcome of decrypting an encrypted source: whether the passphrase unlocked
 /// it, and (on success) the inner filesystem's name / volume label / used bytes
 /// so the UI can show them like any other volume.
@@ -3660,13 +3670,30 @@ pub struct DecryptedProbe {
 /// source that is not LUKS returns `ok = true` with empty info (nothing to
 /// unlock). Errors only on I/O so the UI can tell "wrong password" from
 /// "could not read the device".
+///
+/// **BitLocker is not unlocked here.** Windows refuses to read a locked
+/// BitLocker volume through its volume handle at all, so the attempt fails on
+/// the very first read; the parser in [`crate::bitlocker`] would need the
+/// ciphertext from the physical disk instead, which is a piece of work of its
+/// own (see `.ai/bitlocker-windows-plan_2026-08-01.md`). Until then the honest
+/// answer is said out loud rather than dressed up as a device fault.
 pub fn unlock_and_probe(device_path: &str, passphrase: &str) -> Result<DecryptedProbe> {
     use crate::fat_map::RawVolume;
 
     let src = normalize_device_path(device_path);
     let mut dev = WinRawDevice::open_read(&src)?;
     let mut header = vec![0u8; 4096];
-    dev.read_at(0, &mut header)?;
+    if let Err(e) = dev.read_at(0, &mut header) {
+        if is_bitlocker_locked(&e) {
+            return Err(OwnBackupError::Device(
+                "Том зашифрован BitLocker, и Own Backup пока не умеет его расшифровывать. \
+                 Разблокируйте том в Windows (Панель управления → Шифрование диска BitLocker, \
+                 либо `manage-bde -unlock`) или исключите его из копии."
+                    .into(),
+            ));
+        }
+        return Err(e);
+    }
     if !crate::luks::is_luks(&header) {
         return Ok(DecryptedProbe { ok: true, ..Default::default() });
     }
