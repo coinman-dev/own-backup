@@ -16,6 +16,7 @@
 //!   exactly why "universal" rescue media cannot see NVMe or RAID controllers.
 
 use crate::media_layout as layout;
+use crate::media_layout::rescue_role;
 use crate::wim_info::read_wim_info;
 use own_backup_common::{OwnBackupError, Result};
 use std::path::{Path, PathBuf};
@@ -37,21 +38,32 @@ pub struct DriverPackage {
     pub provider: String,
     pub version: String,
     pub size_bytes: u64,
-    /// Whether a rescue medium plausibly needs it — see [`RESCUE_CLASSES`].
+    /// Bound to a present device of a class a rescue medium needs.
     pub recommended: bool,
+    /// What that device is, in words: "контроллер дисков", "сетевой адаптер".
+    pub role: String,
+    /// The device's own name, which is what the user recognises — "Intel(R)
+    /// Ethernet Connection I219-V" rather than "oem34.inf".
+    pub device: String,
 }
 
-/// Classes a boot medium actually needs: something has to see the disks and,
-/// if the copies live on a share, the network. Everything else — display,
-/// audio, printers, cameras — is weight the medium carries and never uses.
-pub const RESCUE_CLASSES: [&str; 7] =
-    ["SCSIAdapter", "HDC", "DiskDrive", "Volume", "Net", "USB", "System"];
-
-/// Driver packages published on this machine, largest first.
+/// Driver packages this machine could put on a rescue medium.
 ///
-/// Read through PowerShell's DISM cmdlet as JSON rather than by parsing
-/// `pnputil`: pnputil's output is localised, and we would be matching Russian
-/// captions on a Russian Windows and English ones elsewhere.
+/// Two questions, asked of the system rather than of the files on disk.
+///
+/// *What is installed* comes from the DISM cmdlet: every third-party package,
+/// with its provider, version and the folder it occupies in the driver store —
+/// which is where its real size is.
+///
+/// *What is actually in this machine* comes from the device list, restricted to
+/// devices that are PRESENT. That second question is the one that matters:
+/// parsing the INF files gets the class right but not the bus, and the bus is
+/// what separates an Ethernet card from the VPN adapter sitting in the same
+/// class beside it. Only a package bound to a present device of the right class,
+/// on a bus that class can really live on, is recommended.
+///
+/// Everything installed is still returned, so the interface can show what was
+/// left out and what it would have cost.
 pub fn list_driver_packages() -> Vec<DriverPackage> {
     use std::os::windows::process::CommandExt;
 
@@ -64,56 +76,91 @@ pub fn list_driver_packages() -> Vec<DriverPackage> {
         provider_name: Option<String>,
         version: Option<String>,
     }
+    #[derive(serde::Deserialize)]
+    struct Dev {
+        inf: Option<String>,
+        guid: Option<String>,
+        bus: Option<String>,
+        name: Option<String>,
+    }
 
-    let out = std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "Get-WindowsDriver -Online | Select-Object Driver,OriginalFileName,ClassName,\
-             ProviderName,Version | ConvertTo-Json -Compress",
-        ])
-        .creation_flags(0x0800_0000)
-        .output();
-    let Ok(out) = out else {
-        warn!("could not enumerate drivers");
-        return Vec::new();
-    };
-    let text = String::from_utf8_lossy(&out.stdout);
-    // A single driver comes back as an object rather than an array.
-    let raws: Vec<Raw> = serde_json::from_str::<Vec<Raw>>(&text)
-        .or_else(|_| serde_json::from_str::<Raw>(&text).map(|r| vec![r]))
-        .unwrap_or_default();
+    let installed: Vec<Raw> = ps_json(
+        "Get-WindowsDriver -Online | Select-Object Driver,OriginalFileName,ClassName,\
+         ProviderName,Version | ConvertTo-Json -Compress",
+    );
 
-    let mut list: Vec<DriverPackage> = raws
+    // The device side. `-PresentOnly` is what keeps a printer that was unplugged
+    // two years ago out of the answer, and the instance id's prefix is the bus.
+    let present: Vec<Dev> = ps_json(
+        "Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | ForEach-Object { \
+           $p = Get-PnpDeviceProperty -InstanceId $_.InstanceId \
+                  -KeyName 'DEVPKEY_Device_DriverInfPath' -ErrorAction SilentlyContinue; \
+           if ($p.Data) { [pscustomobject]@{ inf = $p.Data; guid = $_.ClassGuid; \
+             bus = $_.InstanceId.Split('\\')[0]; name = $_.FriendlyName } } \
+         } | ConvertTo-Json -Compress",
+    );
+
+    // inf -> (role, device name) for everything a rescue medium would want.
+    let mut wanted: std::collections::HashMap<String, (String, String)> = Default::default();
+    for d in &present {
+        let (Some(inf), Some(guid), Some(bus)) = (&d.inf, &d.guid, &d.bus) else { continue };
+        if let Some(role) = rescue_role(guid, bus) {
+            wanted.insert(
+                inf.to_ascii_lowercase(),
+                (role.to_string(), d.name.clone().unwrap_or_default()),
+            );
+        }
+    }
+
+    let mut list: Vec<DriverPackage> = installed
         .into_iter()
         .filter_map(|r| {
             let inf = r.driver?;
             let original = r.original_file_name.unwrap_or_default();
-            let class_name = r.class_name.unwrap_or_default();
-            // The package's real cost is its folder in the driver store.
-            let size = std::path::Path::new(&original)
-                .parent()
-                .map(dir_size)
-                .unwrap_or(0);
-            let recommended = RESCUE_CLASSES.iter().any(|c| c.eq_ignore_ascii_case(&class_name));
+            let size = std::path::Path::new(&original).parent().map(dir_size).unwrap_or(0);
+            let hit = wanted.get(&inf.to_ascii_lowercase());
             Some(DriverPackage {
-                inf,
                 original_name: std::path::Path::new(&original)
                     .file_name()
                     .map(|f| f.to_string_lossy().to_string())
                     .unwrap_or(original),
-                class_name,
+                class_name: r.class_name.unwrap_or_default(),
                 provider: r.provider_name.unwrap_or_default(),
                 version: r.version.unwrap_or_default(),
                 size_bytes: size,
-                recommended,
+                recommended: hit.is_some(),
+                role: hit.map(|(role, _)| role.clone()).unwrap_or_default(),
+                device: hit.map(|(_, name)| name.clone()).unwrap_or_default(),
+                inf,
             })
         })
         .collect();
-    list.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
-    info!(count = list.len(), "driver packages enumerated");
+    list.sort_by(|a, b| b.recommended.cmp(&a.recommended).then(b.size_bytes.cmp(&a.size_bytes)));
+    info!(
+        total = list.len(),
+        recommended = list.iter().filter(|d| d.recommended).count(),
+        "driver packages enumerated"
+    );
     list
+}
+
+/// Run a PowerShell one-liner that prints JSON, and parse it. A single object
+/// comes back unwrapped rather than as a one-element array, which is a
+/// PowerShell habit rather than a mistake, so both shapes are accepted.
+fn ps_json<T: serde::de::DeserializeOwned>(script: &str) -> Vec<T> {
+    use std::os::windows::process::CommandExt;
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .creation_flags(0x0800_0000)
+        .output();
+    let Ok(out) = out else {
+        warn!("powershell did not run");
+        return Vec::new();
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    serde_json::from_str::<Vec<T>>(&text)
+        .or_else(|_| serde_json::from_str::<T>(&text).map(|one| vec![one]))
+        .unwrap_or_default()
 }
 
 /// What to build and how.
@@ -729,3 +776,5 @@ fn run(program: &str, args: &[&str]) -> Result<()> {
         tail.into_iter().rev().collect::<Vec<_>>().join(" ")
     )))
 }
+
+

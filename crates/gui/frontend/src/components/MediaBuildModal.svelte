@@ -183,7 +183,7 @@
             {:else}
               <div class="drv-head">
                 <span>
-                  Диски и сеть: выбрано {selected.size} из {offered.length} ·
+                  Найдено оборудования: {offered.length} · выбрано {selected.size} ·
                   {formatBytes(chosenBytes)}
                 </span>
                 <span class="drv-actions">
@@ -193,11 +193,13 @@
               </div>
               <div class="drv-list">
                 {#each offered as d (d.inf)}
-                  <label class="drv">
+                  <label class="drv" title={d.original_name || d.inf}>
                     <input type="checkbox" checked={selected.has(d.inf)}
                            onchange={() => toggle(d.inf)} disabled={building} />
-                    <span class="drv-name">{d.original_name || d.inf}</span>
-                    <span class="drv-class">{d.class_name || '—'}</span>
+                    <!-- The device's own name, not the INF's: "Intel(R) Ethernet
+                         Connection I219-V" is recognisable, "oem34.inf" is not. -->
+                    <span class="drv-name">{d.device || d.original_name || d.inf}</span>
+                    <span class="drv-class">{d.role || d.class_name}</span>
                     <span class="drv-prov">{d.provider}</span>
                     <span class="drv-size">{formatBytes(d.size_bytes)}</span>
                   </label>
@@ -296,7 +298,7 @@
   .drv-actions { display: flex; gap: 12px; }
   .lnk { background: none; border: none; color: var(--primary); font-size: 12px; cursor: pointer; padding: 0; font-family: var(--font); }
   .drv-list { max-height: 220px; overflow: auto; border: 1px solid var(--border); border-radius: 5px; }
-  .drv { display: grid; grid-template-columns: 20px 1fr 110px 1fr 80px; gap: 10px; align-items: center; padding: 6px 10px; font-size: 12px; cursor: pointer; color: var(--head); }
+  .drv { display: grid; grid-template-columns: 20px 1fr 150px 1fr 80px; gap: 10px; align-items: center; padding: 6px 10px; font-size: 12px; cursor: pointer; color: var(--head); }
   .drv:hover { background: var(--hover-bg, rgba(127,127,127,.10)); }
   .drv.rec .drv-class { color: var(--green); }
   .drv-name, .drv-prov { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

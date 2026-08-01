@@ -734,6 +734,8 @@ impl BackupService for BackupServiceImpl {
                     version: d.version,
                     size_bytes: d.size_bytes,
                     recommended: d.recommended,
+                    role: d.role,
+                    device: d.device,
                 })
                 .collect();
             return json_reply(&out);

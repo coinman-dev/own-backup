@@ -126,6 +126,55 @@ pub const RUNTIME_DROP_FILES: [&str; 22] = [
 /// to en-US for any language whose `.pak` is missing. The other 166 are 120 MB.
 pub const KEEP_LOCALES: [&str; 2] = ["ru.pak", "en-US.pak"];
 
+/// Which device classes belong on a rescue medium, and which buses each is
+/// allowed to sit on.
+///
+/// GUIDs rather than class names: the name comes back localised on some systems
+/// and has changed spelling between releases, while these values have been fixed
+/// since Windows NT. A filter built on names silently matches nothing on a
+/// machine that answers in Russian.
+///
+/// The class alone is not enough either, and it fails in two opposite ways.
+/// `Net` covers the Ethernet card and the VPN adapter installed beside it —
+/// same class, both present — but a card is enumerated on `PCI` or `USB` while
+/// anything invented in software hangs off `ROOT`. And `USB` covers both the
+/// host controller and everything plugged into it: the controller is a PCI
+/// device, the printer is a USB one. Requiring PCI for controllers, and allowing
+/// USB only where a real device attaches that way (a network dongle, an external
+/// disk), separates them.
+///
+/// `System` is deliberately absent however tempting it looks: it is where
+/// chipset drivers live, and also Logitech's receiver, ACPI oddities and half
+/// the vendor utilities on a laptop.
+///
+/// Checked against a real machine (2026-08-01): of the 23 packages the old
+/// class-name filter accepted, this leaves the NVMe controller, the AHCI
+/// controller and the Ethernet card — and drops the Logitech receiver, the Canon
+/// and Epson printers, five Intel chipset packages, WireGuard, OpenVPN, the
+/// Avast network filter, and our own Arsenal Image Mounter.
+pub const RESCUE_CLASSES: [(&str, &[&str], &str); 5] = [
+    // storage controllers — RAID, NVMe, SAS
+    ("{4d36e97b-e325-11ce-bfc1-08002be10318}", &["PCI"], "контроллер дисков"),
+    // IDE / AHCI controllers
+    ("{4d36e96a-e325-11ce-bfc1-08002be10318}", &["PCI"], "контроллер дисков"),
+    // the disks themselves, which can hang off either
+    ("{4d36e967-e325-11ce-bfc1-08002be10318}", &["SCSI", "USB"], "диск"),
+    // network adapters: cards on PCI, dongles on USB
+    ("{4d36e972-e325-11ce-bfc1-08002be10318}", &["PCI", "USB"], "сетевой адаптер"),
+    // USB host controllers, which are PCI devices — not what is plugged in
+    ("{36fc9e60-c465-11cf-8056-444553540000}", &["PCI"], "контроллер USB"),
+];
+
+/// Does this class/bus pair belong on a rescue medium? Returns what it is, in
+/// words, so the interface can say why a driver is on the list.
+pub fn rescue_role(class_guid: &str, bus: &str) -> Option<&'static str> {
+    let guid = class_guid.trim().to_ascii_lowercase();
+    let bus = bus.trim().to_ascii_uppercase();
+    RESCUE_CLASSES.iter().find_map(|(g, buses, role)| {
+        (g.eq_ignore_ascii_case(&guid) && buses.iter().any(|b| *b == bus)).then_some(*role)
+    })
+}
+
 /// WinPE's default 32 MB of writable space is not enough for a browser engine.
 pub const SCRATCH_SPACE_MB: u32 = 512;
 
@@ -476,5 +525,63 @@ mod tests {
         assert!(names.contains(&"de.pak".to_string()));
         assert!(!names.contains(&"ru.pak".to_string()));
         assert!(!names.contains(&"en-US.pak".to_string()));
+    }
+
+    use super::*;
+
+    /// Both halves of the rule matter, and the cases below are the ones a real
+    /// machine actually produced (2026-08-01).
+    #[test]
+    fn storage_and_network_on_a_real_bus_are_taken() {
+        // Samsung NVMe, Intel AHCI — the two that make disks visible at all.
+        assert_eq!(rescue_role("{4d36e97b-e325-11ce-bfc1-08002be10318}", "PCI"), Some("контроллер дисков"));
+        assert_eq!(rescue_role("{4d36e96a-e325-11ce-bfc1-08002be10318}", "PCI"), Some("контроллер дисков"));
+        // Intel Ethernet on PCI, and a USB network dongle.
+        assert_eq!(rescue_role("{4d36e972-e325-11ce-bfc1-08002be10318}", "PCI"), Some("сетевой адаптер"));
+        assert_eq!(rescue_role("{4d36e972-e325-11ce-bfc1-08002be10318}", "USB"), Some("сетевой адаптер"));
+    }
+
+    /// A VPN adapter is class Net and present, exactly like the card beside it.
+    /// The bus is the only thing that tells them apart.
+    #[test]
+    fn software_adapters_are_left_out() {
+        for bus in ["ROOT", "SWD"] {
+            assert_eq!(
+                rescue_role("{4d36e972-e325-11ce-bfc1-08002be10318}", bus),
+                None,
+                "a {bus} adapter has no cable — WireGuard, OpenVPN, the Avast filter"
+            );
+        }
+        // Our own Arsenal Image Mounter registers as a ROOT storage controller.
+        assert_eq!(rescue_role("{4d36e97b-e325-11ce-bfc1-08002be10318}", "ROOT"), None);
+    }
+
+    /// Class USB holds the host controller AND everything plugged into it. The
+    /// controller is a PCI device; a printer is not.
+    #[test]
+    fn usb_takes_the_controller_and_not_the_printer() {
+        assert_eq!(rescue_role("{36fc9e60-c465-11cf-8056-444553540000}", "PCI"), Some("контроллер USB"));
+        assert_eq!(
+            rescue_role("{36fc9e60-c465-11cf-8056-444553540000}", "USB"),
+            None,
+            "the Canon and Epson packages arrive here"
+        );
+    }
+
+    /// System is where the chipset lives — and the Logitech receiver, which is
+    /// how a mouse driver reached a rescue medium.
+    #[test]
+    fn the_system_class_is_not_a_rescue_class() {
+        for bus in ["PCI", "ROOT", "ACPI"] {
+            assert_eq!(rescue_role("{4d36e97d-e325-11ce-bfc1-08002be10318}", bus), None);
+        }
+    }
+
+    /// The class name is localised on some systems; the GUID never is. Case
+    /// varies between the registry and PowerShell, so matching ignores it.
+    #[test]
+    fn class_guids_match_whatever_the_case() {
+        assert!(rescue_role("{4D36E97B-E325-11CE-BFC1-08002BE10318}", "pci").is_some());
+        assert!(rescue_role("  {4d36e972-e325-11ce-bfc1-08002be10318}  ", " PCI ").is_some());
     }
 }

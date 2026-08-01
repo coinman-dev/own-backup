@@ -124,9 +124,17 @@ pub struct DriverPackageDto {
     pub provider: String,
     pub version: String,
     pub size_bytes: u64,
-    /// A class a rescue medium plausibly needs (storage, network, USB): ticked
-    /// by default, the rest left clear.
+    /// Bound to a device that is present, of a class a rescue medium needs, on
+    /// a bus that class can really live on. Ticked by default; the rest is
+    /// listed only so the user can see what was left out.
     pub recommended: bool,
+    /// What the device is, in words: "контроллер дисков", "сетевой адаптер".
+    #[serde(default)]
+    pub role: String,
+    /// The device's own name — "Intel(R) Ethernet Connection I219-V" is what
+    /// the user recognises; "oem34.inf" is not.
+    #[serde(default)]
+    pub device: String,
 }
 
 /// What to build. Paths are the service's, not the interface's: the build runs

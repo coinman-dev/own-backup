@@ -632,8 +632,13 @@ export interface DriverPackage {
   provider: string;
   version: string;
   size_bytes: number;
-  /** Storage / network / USB — ticked by default; the rest is weight. */
+  /** Bound to a present device of a class the medium needs, on a bus that
+   *  class can really live on. */
   recommended: boolean;
+  /** What it is, in words: "контроллер дисков", "сетевой адаптер". */
+  role: string;
+  /** The device's own name, which is what the user recognises. */
+  device: string;
 }
 
 export interface MediaBuildOptions {
