@@ -144,6 +144,11 @@ pub struct MediaBuildOptionsDto {
     /// An extra folder of `.inf` drivers.
     #[serde(default)]
     pub extra_drivers: String,
+    /// Compress the WebView2 runtime into `boot.wim` instead of leaving it
+    /// beside it. Smaller file, more memory at boot — see the field of the same
+    /// name on the builder's request for the arithmetic.
+    #[serde(default)]
+    pub runtime_in_image: bool,
 }
 
 /// What the build did.

@@ -28,6 +28,10 @@
   let loadingDrivers = $state(false);
   let driverError: string | null = $state(null);
 
+  // Compressing the runtime into the image is the default: the ISO is what the
+  // user carries around, and the memory it costs only matters on a machine with
+  // little of it.
+  let runtimeInImage = $state(true);
   let outputDir = $state('');
   let building = $state(false);
   let progress: MediaProgress | null = $state(null);
@@ -91,6 +95,7 @@
         output_iso: `${outputDir}${sep}OwnBackup.iso`,
         drivers: includeDrivers ? [...selected] : [],
         extra_drivers: '',
+        runtime_in_image: runtimeInImage,
       });
     } catch (e) {
       error = String(e);
@@ -136,10 +141,21 @@
         </div>
       {/if}
 
-      <!-- Drivers. Hidden once the build starts: the queue takes their place,
-           because a list of checkboxes that can no longer be changed is only in
-           the way of the thing the user is now watching. -->
+      <!-- Options. Hidden once the build starts: a set of checkboxes that can no
+           longer be changed is only in the way of the thing being watched. -->
       {#if isWindows && !building && !finished}
+        <label class="opt">
+          <input type="checkbox" bind:checked={runtimeInImage} disabled={building} />
+          <span>
+            Сжимать WebView2 в образ
+            <span class="opt-note">
+              {runtimeInImage
+                ? 'файл ISO примерно на 280 МБ меньше, но при загрузке рантайм занимает около 260 МБ оперативной памяти — WinPE держит образ в памяти целиком'
+                : 'рантайм лежит на носителе несжатым: ISO больше, зато память при загрузке свободна — файлы читаются по мере надобности'}
+            </span>
+          </span>
+        </label>
+
         <label class="opt">
           <input type="checkbox" bind:checked={includeDrivers} disabled={building} />
           <span>

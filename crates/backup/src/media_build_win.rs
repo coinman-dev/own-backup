@@ -140,6 +140,19 @@ pub struct MediaBuildRequest {
     pub drivers: Vec<String>,
     /// An extra folder of drivers (`.inf`) to add as well.
     pub extra_drivers: Option<PathBuf>,
+    /// Put the WebView2 runtime inside `boot.wim` rather than beside it.
+    ///
+    /// A real trade, not a preference. Inside, it is compressed with the rest of
+    /// the image — LZX gets about four to one, so ~400 MB of runtime costs ~110
+    /// MB of medium. But WinPE loads the whole of `boot.wim` into a RAM disk
+    /// before anything runs, so that compressed copy occupies memory from boot
+    /// to shutdown whether the interface is ever opened or not. Outside, the
+    /// files are read from the medium as they are needed and cost no memory, at
+    /// the price of their full size on the ISO.
+    ///
+    /// The launcher handles both: it looks for the marker file on the medium
+    /// first and falls back to the path inside the image.
+    pub runtime_in_image: bool,
 }
 
 /// What the build did, for the report the user reads afterwards.
@@ -309,15 +322,24 @@ pub fn build_media(
         );
     }
 
-    // The runtime goes on the medium's partition, not into the image: WinPE
-    // holds the whole image in RAM, and 250 MB of browser is not needed there
-    // until the interface starts.
-    at(&mut progress, BuildStage::CopyingRuntime, 0, "около 550 МБ");
-    let media_app = report.media_dir.join(layout::MEDIA_DIR);
-    let runtime_dst = media_app.join("WebView2");
+    at(
+        &mut progress,
+        BuildStage::CopyingRuntime,
+        0,
+        if req.runtime_in_image { "в образ, со сжатием" } else { "на носитель, без сжатия" },
+    );
+    let runtime_dst = if req.runtime_in_image {
+        app_dir.join("WebView2")
+    } else {
+        // Outside the image the medium needs a marker: WinPE assigns its volume
+        // whatever letter it likes, and the launcher finds it by this file.
+        let media_app = report.media_dir.join(layout::MEDIA_DIR);
+        std::fs::create_dir_all(&media_app)?;
+        std::fs::write(media_app.join(layout::MEDIA_MARKER), layout::MEDIA_MARKER_TEXT.as_bytes())?;
+        media_app.join("WebView2")
+    };
     std::fs::create_dir_all(&runtime_dst)?;
     copy_tree(&req.webview2_dir, &runtime_dst)?;
-    std::fs::write(media_app.join(layout::MEDIA_MARKER), layout::MEDIA_MARKER_TEXT.as_bytes())?;
     at(&mut progress, BuildStage::CopyingRuntime, 80, "лишнее из рантайма");
     report.runtime_files_trimmed = trim_runtime(&runtime_dst);
     for dll in layout::VC_RUNTIME {

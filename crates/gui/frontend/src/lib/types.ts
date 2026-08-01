@@ -642,6 +642,8 @@ export interface MediaBuildOptions {
   /** Published names of the driver packages to include; empty means none. */
   drivers: string[];
   extra_drivers: string;
+  /** Compress WebView2 into boot.wim: smaller ISO, more RAM at boot. */
+  runtime_in_image: boolean;
 }
 
 export interface MediaStage {

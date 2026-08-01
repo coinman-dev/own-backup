@@ -827,6 +827,7 @@ impl BackupService for BackupServiceImpl {
                     work_dir: work.clone(),
                     drivers: opts.drivers.clone(),
                     extra_drivers: extra,
+                    runtime_in_image: opts.runtime_in_image,
                 };
 
                 // A build that fails still leaves gigabytes behind, so the
