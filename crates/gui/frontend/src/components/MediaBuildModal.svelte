@@ -200,11 +200,13 @@
             {@const now = i === progress.stage_index && !progress.finished}
             <div class="stage" class:done class:now>
               <span class="mark">{done ? '✓' : now ? '▸' : ''}</span>
-              <span class="st-title">{st.title}</span>
+              <span class="st-title">
+                {st.title}
+                {#if now && progress.detail}<span class="st-detail">— {progress.detail}</span>{/if}
+              </span>
               <span class="st-bar">
                 <span class="st-fill" style="width: {done ? 100 : now ? progress.percent : 0}%"></span>
               </span>
-              <span class="st-detail">{now ? progress.detail : ''}</span>
             </div>
           {/each}
         </div>
@@ -292,12 +294,16 @@
   .btn.primary { background: var(--primary); border-color: var(--primary); color: #fff; }
   .btn:disabled { opacity: .5; cursor: default; }
   .queue { margin-top: 16px; border: 1px solid var(--border); border-radius: 5px; padding: 10px 12px; }
-  .stage { display: grid; grid-template-columns: 16px 190px 1fr 150px; gap: 10px; align-items: center; padding: 3px 0; font-size: 12px; color: var(--text-muted); }
+  /* The bar takes everything to the right of the title; the running stage's
+     detail rides along with the title rather than holding a column of its own,
+     which was empty on every other row and cut the bar short of the edge. */
+  .stage { display: grid; grid-template-columns: 16px minmax(190px, auto) 1fr; gap: 10px; align-items: center; padding: 3px 0; font-size: 12px; color: var(--text-muted); }
+  .st-title { white-space: nowrap; }
   .stage.now, .stage.done { color: var(--head); }
   .mark { color: var(--green); }
   .st-bar { height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; }
   .st-fill { display: block; height: 100%; background: var(--green); transition: width .25s; }
-  .st-detail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); }
+  .st-detail { color: var(--text-muted); }
   .err { font-size: 12px; color: var(--error); margin-top: 12px; word-break: break-word; }
   .warn { font-size: 12px; color: var(--warning); margin-top: 6px; line-height: 1.4; }
   .muted { font-size: 13px; color: var(--text-muted); padding: 6px 0; }

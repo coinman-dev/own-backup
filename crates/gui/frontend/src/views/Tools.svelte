@@ -155,8 +155,6 @@
   <div class="inner">
   <h1>Инструменты</h1>
 
-  <BootMediaCard />
-
   <div class="tool-card">
     <div class="tool-head">
       <span class="glyph">💽</span>
@@ -253,15 +251,7 @@
     {#if verifyErr}<div class="banner err">{verifyErr}</div>{/if}
   </div>
 
-  <div class="tool-card muted">
-    <div class="tool-head">
-      <span class="glyph">💿</span>
-      <div>
-        <div class="tool-title">Загрузочный носитель</div>
-        <div class="tool-desc">Создание аварийного USB-носителя восстановления — в разработке.</div>
-      </div>
-    </div>
-  </div>
+  <BootMediaCard />
 </div>
 </div>
 

@@ -67,8 +67,60 @@ pub const VC_RUNTIME: [&str; 3] = ["vcruntime140.dll", "vcruntime140_1.dll", "ms
 /// files, kept for Edge's self-repair. Both copies have to go for the space to
 /// be freed — a WIM stores identical data once, so dropping one alone frees
 /// nothing.
-pub const RUNTIME_DROP_DIRS: [&str; 4] =
-    ["ResiliencyLinks", "WidevineCdm", "Installer", "edge_game_assist"];
+///
+/// `EBWebView\x86` is the 32-bit client; the medium is x64 throughout. `BHO`
+/// and `PdfPreview` are the Internet Explorer shim and the PDF viewer.
+pub const RUNTIME_DROP_DIRS: [&str; 8] = [
+    "ResiliencyLinks",
+    "WidevineCdm",
+    "Installer",
+    "edge_game_assist",
+    "BHO",
+    "PdfPreview",
+    "identity_proxy",
+    "EBWebView\\x86",
+];
+
+/// Files in the runtime's root that belong to features the medium has no way to
+/// reach: the full browser and its updaters, Copilot, the PDF viewer, the
+/// shader compilers and Vulkan (the interface runs with the GPU off), telemetry
+/// and sign-in, and the Internet Explorer engine adapter.
+///
+/// Checked before choosing, not guessed: none of these appear in the import
+/// tables of `msedge.dll`, `msedgewebview2.exe` or `EmbeddedBrowserWebView.dll`,
+/// statically or delay-loaded — they are opened by name when a feature asks for
+/// them. `msedge_elf.dll` IS a static import and must stay; so does the ANGLE
+/// set (`libEGL`, `libGLESv2`, `d3dcompiler_47`), which Chromium may still
+/// initialise for software rendering, and `ffmpeg.dll`, which is delay-loaded.
+pub const RUNTIME_DROP_FILES: [&str; 22] = [
+    // the full browser and everything that installs or updates it
+    "msedge.exe",
+    "setup.exe",
+    "elevation_service.exe",
+    "elevated_tracing_service.exe",
+    "notification_helper.exe",
+    "cookie_exporter.exe",
+    "identity_helper.exe",
+    "platform_experiences_helper.exe",
+    "msedge_proxy.exe",
+    "msedge_pwa_launcher.exe",
+    "pwahelper.exe",
+    // Copilot and the on-device model runtime
+    "copilotapp.exe",
+    "mscopilot.exe",
+    "onnxruntime.dll",
+    "learning_tools.dll",
+    "onramp.dll",
+    // PDF viewer
+    "mspdf.dll",
+    // shader compilers and Vulkan — the interface runs with --disable-gpu
+    "dxcompiler.dll",
+    "dxil.dll",
+    "vk_swiftshader.dll",
+    "vulkan-1.dll",
+    // the Internet Explorer engine adapter
+    "dual_engine_adapter_x64.dll",
+];
 
 /// Locales worth keeping: the interface ships these two, and Chromium falls back
 /// to en-US for any language whose `.pak` is missing. The other 166 are 120 MB.
@@ -261,6 +313,7 @@ pub fn keep_locale(file_name: &str) -> bool {
 /// Returned rather than deleted here so the caller can log and count.
 pub fn runtime_trim_list(runtime_root: &Path) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = RUNTIME_DROP_DIRS.iter().map(|d| runtime_root.join(d)).collect();
+    out.extend(RUNTIME_DROP_FILES.iter().map(|f| runtime_root.join(f)));
     let locales = runtime_root.join("Locales");
     if let Ok(rd) = std::fs::read_dir(&locales) {
         for e in rd.flatten() {
@@ -382,6 +435,29 @@ mod tests {
         assert!(keep_locale("en-US.pak"));
         assert!(!keep_locale("af.pak"));
         assert!(!keep_locale("zh-CN.pak"));
+    }
+
+    /// Everything the runtime cannot start without must survive the trim. The
+    /// list was chosen by reading the import tables; a regression here shows up
+    /// as a medium that boots to no window at all.
+    #[test]
+    fn the_trim_keeps_what_the_runtime_is_linked_against() {
+        for keep in [
+            "msedge.dll",             // the engine
+            "msedge_elf.dll",         // static import of the engine
+            "msedgewebview2.exe",     // the host we actually launch
+            "ffmpeg.dll",             // delay-loaded, but loaded
+            "libEGL.dll",             // ANGLE, for software rendering
+            "libGLESv2.dll",
+            "d3dcompiler_47.dll",
+            "icudtl.dat",
+            "resources.pak",
+        ] {
+            assert!(
+                !RUNTIME_DROP_FILES.iter().any(|d| d.eq_ignore_ascii_case(keep)),
+                "{keep} must not be trimmed"
+            );
+        }
     }
 
     #[test]
