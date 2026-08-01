@@ -152,6 +152,7 @@
 </script>
 
 <div class="page">
+  <div class="inner">
   <h1>Инструменты</h1>
 
   <BootMediaCard />
@@ -262,13 +263,20 @@
     </div>
   </div>
 </div>
+</div>
 
 <style>
+  /* The scrollbar belongs to the window's edge, not to the column of content:
+     with max-width on the scrolling element it appeared 860 px in, floating in
+     the middle of the page. */
   .page {
-    padding: 30px 44px;
-    max-width: 860px;
     overflow: auto;
     height: 100%;
+  }
+
+  .inner {
+    padding: 30px 44px;
+    max-width: 860px;
   }
 
   h1 {

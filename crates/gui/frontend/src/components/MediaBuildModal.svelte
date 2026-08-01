@@ -34,9 +34,15 @@
   let report: MediaBuildReport | null = $state(null);
   let error: string | null = $state(null);
 
+  // Only the classes a rescue medium can use are offered. The rest — display,
+  // audio, printers — is what turned the first medium into 2.2 GB, and no one
+  // scrolling a list of ninety packages wants to find that out by hand.
+  const offered = $derived(drivers.filter((d) => d.recommended));
   const chosenBytes = $derived(
-    drivers.filter((d) => selected.has(d.inf)).reduce((s, d) => s + d.size_bytes, 0),
+    offered.filter((d) => selected.has(d.inf)).reduce((s, d) => s + d.size_bytes, 0),
   );
+  /** The build is over: the button becomes "Готово" and closes the dialog. */
+  const finished = $derived(!!report);
   const canStart = $derived(isWindows && !building && !!base && outputDir.trim().length > 0);
 
   onMount(() => {
@@ -53,8 +59,6 @@
     driverError = null;
     try {
       drivers = await api.listDriverPackages();
-      // Storage, network and USB are ticked; the rest — display, audio,
-      // printers — are what turned the first medium into 2.2 GB.
       selected = new Set(drivers.filter((d) => d.recommended).map((d) => d.inf));
     } catch (e) {
       driverError = String(e);
@@ -132,8 +136,10 @@
         </div>
       {/if}
 
-      <!-- Drivers -->
-      {#if isWindows}
+      <!-- Drivers. Hidden once the build starts: the queue takes their place,
+           because a list of checkboxes that can no longer be changed is only in
+           the way of the thing the user is now watching. -->
+      {#if isWindows && !building && !finished}
         <label class="opt">
           <input type="checkbox" bind:checked={includeDrivers} disabled={building} />
           <span>
@@ -153,20 +159,25 @@
               <div class="err">{driverError}</div>
             {:else if drivers.length === 0}
               <div class="muted">Сторонних драйверов на этой машине не найдено.</div>
+            {:else if offered.length === 0}
+              <div class="muted">
+                Драйверов дисков и сети на этой машине не нашлось — носитель
+                соберётся на встроенных драйверах Windows.
+              </div>
             {:else}
               <div class="drv-head">
-                <span>Выбрано {selected.size} из {drivers.length} · {formatBytes(chosenBytes)}</span>
+                <span>
+                  Диски и сеть: выбрано {selected.size} из {offered.length} ·
+                  {formatBytes(chosenBytes)}
+                </span>
                 <span class="drv-actions">
-                  <button class="lnk" onclick={() => (selected = new Set(drivers.filter((d) => d.recommended).map((d) => d.inf)))}>
-                    только нужные
-                  </button>
-                  <button class="lnk" onclick={() => (selected = new Set(drivers.map((d) => d.inf)))}>все</button>
+                  <button class="lnk" onclick={() => (selected = new Set(offered.map((d) => d.inf)))}>все</button>
                   <button class="lnk" onclick={() => (selected = new Set())}>ни одного</button>
                 </span>
               </div>
               <div class="drv-list">
-                {#each drivers as d (d.inf)}
-                  <label class="drv" class:rec={d.recommended}>
+                {#each offered as d (d.inf)}
+                  <label class="drv">
                     <input type="checkbox" checked={selected.has(d.inf)}
                            onchange={() => toggle(d.inf)} disabled={building} />
                     <span class="drv-name">{d.original_name || d.inf}</span>
@@ -180,18 +191,6 @@
           </div>
         {/if}
       {/if}
-
-      <!-- Destination + start -->
-      <div class="dest">
-        <span class="lbl">Куда сохранить ISO</span>
-        <input type="text" bind:value={outputDir} placeholder="D:\OwnBackup"
-               spellcheck="false" disabled={building} />
-        <button class="btn outline" onclick={chooseFolder} disabled={building}>Обзор…</button>
-        <button class="btn primary" onclick={start} disabled={!canStart}
-                title={isWindows ? '' : 'Сборка Linux-носителя ещё не реализована'}>
-          {building ? 'Сборка…' : 'Начать'}
-        </button>
-      </div>
 
       <!-- The queue -->
       {#if progress}
@@ -240,6 +239,25 @@
         </div>
       {/if}
     </div>
+
+    <!-- Pinned: the destination and the button stay reachable however long the
+         list above grows. -->
+    <div class="dest">
+      <span class="lbl">Куда сохранить ISO</span>
+      <input type="text" bind:value={outputDir} placeholder="D:\OwnBackup"
+             spellcheck="false" disabled={building || finished} />
+      <button class="btn outline" onclick={chooseFolder} disabled={building || finished}>
+        Обзор…
+      </button>
+      {#if finished}
+        <button class="btn primary" onclick={onClose}>Готово</button>
+      {:else}
+        <button class="btn primary" onclick={start} disabled={!canStart}
+                title={isWindows ? '' : 'Сборка Linux-носителя ещё не реализована'}>
+          {building ? 'Сборка…' : 'Начать'}
+        </button>
+      {/if}
+    </div>
   </div>
 </div>
 
@@ -248,7 +266,7 @@
   .dialog { width: 760px; max-width: 96vw; max-height: 92vh; background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow); display: flex; flex-direction: column; }
   .head { padding: 14px 18px; font-size: 16px; color: var(--head); border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
   .x { background: none; border: none; color: var(--text-muted); font-size: 15px; cursor: pointer; padding: 2px 6px; }
-  .body { padding: 16px 18px; overflow: auto; }
+  .body { padding: 16px 18px; overflow: auto; flex: 1; min-height: 0; }
   .intro { font-size: 13px; color: var(--head); line-height: 1.6; }
   .soon { margin-top: 10px; font-size: 13px; color: var(--warning); line-height: 1.5; }
   .opt { display: flex; align-items: flex-start; gap: 9px; font-size: 13px; color: var(--head); margin-top: 16px; cursor: pointer; }
@@ -266,7 +284,8 @@
   .drv-class { color: var(--text-muted); }
   .drv-prov { color: var(--text-muted); }
   .drv-size { text-align: right; color: var(--text-muted); }
-  .dest { display: grid; grid-template-columns: auto 1fr auto auto; gap: 10px; align-items: center; margin-top: 16px; }
+  /* Pinned below the scrolling body, not inside it. */
+  .dest { display: grid; grid-template-columns: auto 1fr auto auto; gap: 10px; align-items: center; padding: 12px 18px; border-top: 1px solid var(--border); flex-shrink: 0; background: var(--card-bg); border-radius: 0 0 8px 8px; }
   .lbl { font-size: 12px; color: var(--primary); }
   .dest input { min-width: 0; background: none; border: 1px solid var(--border); border-radius: 4px; padding: 7px 10px; font-size: 13px; color: var(--head); font-family: var(--font); }
   .btn { border-radius: 4px; padding: 8px 18px; font-size: 13px; font-family: var(--font); cursor: pointer; border: 1px solid var(--border); background: none; color: var(--head); }
