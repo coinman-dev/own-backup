@@ -38,6 +38,16 @@
       { key: 'advanced', label: 'Дополнительно' },
     ].filter((s) => !(media.active && s.key === 'schedule')),
   );
+  // The tab list is filtered (no schedule on the boot medium), so the body must
+  // be keyed by the step's KEY, never by its index: on the medium index 2 said
+  // «Схема» in the tab bar and drew the exclusions, and «Дополнительно» — the
+  // last index — could not be reached at all.
+  const stepKey = $derived(steps[step]?.key ?? 'source');
+  // A step can also vanish under us (the medium check answers after the first
+  // render), so never leave `step` pointing past the end of the list.
+  $effect(() => {
+    if (step > steps.length - 1) step = steps.length - 1;
+  });
 
   const weekdays = [
     ['mon', 'Пн'], ['tue', 'Вт'], ['wed', 'Ср'], ['thu', 'Чт'],
@@ -729,8 +739,8 @@
     </div>
 
     <div class="body">
-      <!-- 0: source (top) → destination (bottom) -->
-      {#if step === 0}
+      <!-- source (top) → destination (bottom) -->
+      {#if stepKey === 'source'}
         <div class="src-wrap">
           <!-- SOURCE -->
           <div class="sec-head">
@@ -893,8 +903,8 @@
         </div>
       {/if}
 
-      <!-- 1: schedule -->
-      {#if step === 1}
+      <!-- schedule -->
+      {#if stepKey === 'schedule'}
         <div class="sched">
           <div class="sched-kinds">
             {#each scheduleKinds as [k, lbl]}
@@ -966,8 +976,8 @@
         </div>
       {/if}
 
-      <!-- 2: scheme -->
-      {#if step === 2}
+      <!-- scheme -->
+      {#if stepKey === 'scheme'}
         <div class="field-label">Формат образа:</div>
         <select
           bind:value={job.image_format}
@@ -1007,8 +1017,8 @@
         <div class="note">Цепочка удаляется целиком (полная копия вместе с её инкрементами) после успешного завершения очередного копирования. Цепочка, к которой относится свежая копия, не удаляется никогда.</div>
       {/if}
 
-      <!-- 3: exclusions -->
-      {#if step === 3}
+      <!-- exclusions -->
+      {#if stepKey === 'exclusions'}
         <label class="chk"><input type="checkbox" bind:checked={job.exclusions.enabled} /> Исключить файлы по следующим критериям:</label>
         <div class="note">Маска без пути (<code>*.tmp</code>, <code>pagefile.sys</code>) действует по всему тому; маска с путём (<code>Temp\*.log</code>) — от корня тома. В посекторном режиме исключения не применяются.<br />Исключённые файлы удаляются из копии полностью — как в Acronis: место в архиве и на восстановленном томе освобождается. На <b>NTFS и ReFS</b> данные исключённых файлов в копию не попадают вовсе, а записи каталога в готовом образе удаляет сам драйвер файловой системы Windows; если этот шаг не удался, файлы остаются в каталоге копии пустыми (нулевыми) — резервная копия при этом полностью рабочая.</div>
 
@@ -1035,8 +1045,8 @@
         </div>
       {/if}
 
-      <!-- 4: advanced -->
-      {#if step === 4}
+      <!-- advanced -->
+      {#if stepKey === 'advanced'}
         <div class="adv">
           <div class="adv-group">
             <div class="adv-title">Режим создания образа</div>
@@ -1057,7 +1067,7 @@
 
     {#if error}<div class="wz-error">{error}</div>{/if}
 
-    {#if mode === 'wizard' && step === 1 && job.schedule.kind !== 'none' && job.requires_password && !allRemembered()}
+    {#if mode === 'wizard' && stepKey === 'schedule' && job.schedule.kind !== 'none' && job.requires_password && !allRemembered()}
       <div class="warn-note footer-warn">
         Среди источников есть зашифрованный том. Чтобы копия запускалась по
         расписанию, отметьте «Запомнить» для его пароля на шаге «Источник» —
@@ -1075,8 +1085,8 @@
           <button
             class="btn primary"
             onclick={() => (step += 1)}
-            disabled={step === 0 && !canLeaveSource()}
-            title={step === 0 ? nextHint() : ''}
+            disabled={stepKey === 'source' && !canLeaveSource()}
+            title={stepKey === 'source' ? nextHint() : ''}
           >Дальше</button>
         {:else}
           <button class="btn green" onclick={() => finish(true)}>Создать копию</button>
