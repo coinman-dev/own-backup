@@ -15,6 +15,7 @@ import type {
   DryRunResult,
   RestoreRunState,
   ServiceHealth,
+  KeyboardLayout,
   DirEntry,
   DirListing,
   BaseImage,
@@ -105,5 +106,7 @@ export const api = {
   getConfig: () => invoke<Record<string, unknown>>('get_config'),
   saveConfig: (config: Record<string, unknown>) => invoke<void>('save_config', { config }),
   serviceHealth: () => invoke<ServiceHealth>('service_health'),
+  /** Active keyboard layout; null where it cannot be told (non-Windows). */
+  keyboardLayout: () => invoke<KeyboardLayout | null>('keyboard_layout'),
   getServiceStatus: () => invoke<ServiceStatus>('get_service_status'),
 };

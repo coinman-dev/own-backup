@@ -146,6 +146,14 @@ export interface ServiceHealth {
   media: boolean;
 }
 
+/** The keyboard layout the focused window is typing in (boot medium only). */
+export interface KeyboardLayout {
+  /** Short tag for the indicator: "RU", "EN", … */
+  code: string;
+  /** Full native name for the tooltip: "русский", "English". */
+  name: string;
+}
+
 export type ViewName =
   | 'backup'
   | 'restore'

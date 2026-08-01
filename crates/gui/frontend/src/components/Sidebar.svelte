@@ -1,5 +1,7 @@
 <script lang="ts">
-  import type { ViewName } from '../lib/types';
+  import type { ViewName, KeyboardLayout } from '../lib/types';
+  import { api } from '../lib/api';
+  import { media } from '../lib/mediaStore.svelte';
 
   interface Props {
     currentView: ViewName;
@@ -7,6 +9,41 @@
   }
 
   let { currentView, onNavigate }: Props = $props();
+
+  // ---- keyboard layout, boot medium only -------------------------------
+  //
+  // WinPE has no taskbar, so nothing anywhere on screen says which layout the
+  // keyboard is in — and the one place it matters most is a BitLocker/LUKS
+  // passphrase, where the wrong layout is indistinguishable from the wrong
+  // password. Installed Windows keeps its own indicator; we stay out of the
+  // way there.
+  //
+  // Polled rather than pushed: the layout changes behind our back (Alt+Shift
+  // is handled by Windows, not by us), and there is no event to subscribe to
+  // from inside the WebView. Three Win32 calls per tick.
+  let layout = $state<KeyboardLayout | null>(null);
+
+  $effect(() => {
+    if (!media.active) {
+      layout = null;
+      return;
+    }
+    let alive = true;
+    const tick = async () => {
+      try {
+        const l = await api.keyboardLayout();
+        if (alive) layout = l;
+      } catch {
+        // Older exe without the command: no indicator, nothing broken.
+      }
+    };
+    tick();
+    const id = setInterval(tick, 700);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  });
 
   interface NavItem {
     id: ViewName;
@@ -89,6 +126,18 @@
 
   <div class="sidebar-footer">
     <div class="version-text">v0.1.0</div>
+    {#if layout}
+      <div
+        class="kbd"
+        title="Раскладка клавиатуры: {layout.name}. Переключение — Alt+Shift."
+      >
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+          <rect x="2" y="6" width="20" height="12" rx="2" />
+          <path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M8 14h8" />
+        </svg>
+        <span>{layout.code}</span>
+      </div>
+    {/if}
   </div>
 </nav>
 
@@ -183,11 +232,31 @@
   .sidebar-footer {
     padding: 12px 20px;
     border-top: 1px solid rgba(255, 255, 255, 0.06);
+    display: flex;
+    align-items: center;
+    gap: 10px;
   }
 
   .version-text {
     font-size: 11px;
     color: var(--sidebar-text);
     opacity: 0.6;
+  }
+
+  /* Layout indicator: same line as the version, pushed to the right. */
+  .kbd {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    color: var(--sidebar-text);
+    opacity: 0.85;
+  }
+  .kbd svg {
+    flex-shrink: 0;
+    opacity: 0.75;
   }
 </style>

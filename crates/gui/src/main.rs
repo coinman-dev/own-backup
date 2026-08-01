@@ -16,7 +16,7 @@ use state::GuiState;
 /// Bump this on any build you hand over for testing. It is printed at the top of
 /// the log so we can tell from the log alone WHICH binary actually ran (a common
 /// trap: an old exe left in another folder still gets launched).
-const BUILD_TAG: &str = "winpe-2026-08-01h-no-build-on-media";
+const BUILD_TAG: &str = "winpe-2026-08-01s-vm-mode";
 
 const ROTATE_AT: u64 = 4 * 1024 * 1024;
 
@@ -306,6 +306,8 @@ fn main() {
             commands::settings::save_config,
             commands::settings::get_service_status,
             commands::settings::service_health,
+            // The boot medium has no taskbar to say which layout is active.
+            commands::keyboard::keyboard_layout,
             // Built-in file browsing: the native dialog is a shell dialog, and
             // the boot medium has no shell (see commands/files.rs).
             commands::files::list_roots,
