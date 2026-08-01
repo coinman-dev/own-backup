@@ -47,6 +47,27 @@
   );
   /** The build is over: the button becomes "Готово" and closes the dialog. */
   const finished = $derived(!!report);
+
+  // How long the current stage has been running. The two DISM steps take
+  // minutes, and a clock that ticks is the difference between "working" and
+  // "hung" — especially while the stage has no percentage of its own yet.
+  let elapsed = $state(0);
+  let stageStarted = 0;
+  $effect(() => {
+    // Re-runs whenever the stage changes; the interval is replaced with it.
+    const stage = progress?.stage_index ?? -1;
+    if (stage < 0 || progress?.finished) {
+      elapsed = 0;
+      return;
+    }
+    stageStarted = performance.now();
+    elapsed = 0;
+    const id = setInterval(() => {
+      elapsed = Math.floor((performance.now() - stageStarted) / 1000);
+    }, 1000);
+    return () => clearInterval(id);
+  });
+  const clock = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
   // Not while the hardware is still being polled: the driver list is part of
   // what "Начать" would act on, and starting without it would quietly build a
   // medium with no drivers at all.
@@ -214,7 +235,10 @@
                     <span class="drv-name">{d.device || d.original_name || d.inf}</span>
                     <span class="drv-class">{d.role || d.class_name}</span>
                     <span class="drv-prov">{d.provider}</span>
-                    <span class="drv-size">{formatBytes(d.size_bytes)}</span>
+                    <!-- A package that is not in this machine's driver store
+                         (the hypervisor's guest tools) has no size until it is
+                         unpacked; a dash says so instead of "0 Б". -->
+                    <span class="drv-size">{d.size_bytes > 0 ? formatBytes(d.size_bytes) : '—'}</span>
                   </label>
                 {/each}
               </div>
@@ -229,15 +253,30 @@
           {#each progress.stages as st, i}
             {@const done = i < progress.stage_index || progress.finished}
             {@const now = i === progress.stage_index && !progress.finished}
+            <!-- A stage that has not reported a percentage yet is not a stage
+                 doing nothing: DISM's unpack sends its first number after a
+                 while, and the clean-up measures gigabytes before it deletes
+                 anything. A still bar at 0 % for a minute reads as a hang, so
+                 the running stage animates until it has a real number. -->
+            {@const waiting = now && progress.percent === 0}
             <div class="stage" class:done class:now>
               <span class="mark">{done ? '✓' : now ? '▸' : ''}</span>
               <span class="st-title">{st.title}</span>
-              <span class="st-bar">
-                <span class="st-fill" style="width: {done ? 100 : now ? progress.percent : 0}%"></span>
+              <span class="st-bar" class:waiting>
+                {#if waiting}
+                  <span class="st-run"></span>
+                {:else}
+                  <span class="st-fill" style="width: {done ? 100 : now ? progress.percent : 0}%"></span>
+                {/if}
                 <!-- What the stage is doing sits at the far end of its own bar,
                      and only while it is doing it: once the stage is done the
-                     words describe nothing. -->
-                {#if now && progress.detail}<span class="st-detail">{progress.detail}</span>{/if}
+                     words describe nothing. The clock beside it is the proof
+                     that a step measured in minutes is still moving. -->
+                {#if now}
+                  <span class="st-detail">
+                    {progress.detail}{#if elapsed > 2}<span class="st-clock">{clock(elapsed)}</span>{/if}
+                  </span>
+                {/if}
               </span>
             </div>
           {/each}
@@ -344,9 +383,26 @@
   .mark { color: var(--green); }
   .st-bar { position: relative; height: 16px; background: var(--border); border-radius: 3px; overflow: hidden; }
   .st-fill { display: block; height: 100%; background: var(--green); transition: width .25s; }
+  /* No number to show yet — the stripe says the step is alive without
+     claiming a position it does not know. */
+  .st-run { position: absolute; inset: 0 auto 0 0; width: 32%; background: var(--green); opacity: .75; border-radius: 3px; animation: st-slide 1.4s ease-in-out infinite; }
+  @keyframes st-slide { 0% { transform: translateX(-105%); } 100% { transform: translateX(320%); } }
+  .st-clock { margin-left: 8px; opacity: .75; font-variant-numeric: tabular-nums; }
   .st-detail { position: absolute; right: 8px; top: 0; line-height: 16px; font-size: 11px; color: var(--head); max-width: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .err { font-size: 12px; color: var(--error); margin-top: 12px; word-break: break-word; }
-  .warn { font-size: 12px; color: var(--warning); margin-top: 6px; line-height: 1.4; }
+  /* A warning is not a footnote: the build finished, but something the user
+     asked for is not on the medium. Framed, so it is not read as prose. */
+  .warn {
+    font-size: 12px;
+    color: var(--error);
+    margin-top: 8px;
+    padding: 8px 10px;
+    line-height: 1.45;
+    border: 1px solid rgba(200, 60, 60, .45);
+    border-left-width: 3px;
+    border-radius: 4px;
+    background: rgba(200, 60, 60, .07);
+  }
   .muted { font-size: 13px; color: var(--text-muted); padding: 6px 0; }
   .report { margin-top: 14px; border: 1px solid var(--border); border-radius: 5px; padding: 12px 14px; }
   .rep-head { font-size: 14px; color: var(--head); margin-bottom: 8px; }

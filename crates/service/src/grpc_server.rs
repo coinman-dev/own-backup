@@ -752,7 +752,7 @@ impl BackupService for BackupServiceImpl {
         #[cfg(target_os = "windows")]
         {
             use own_backup_backup::media_build_win::{
-                build_media, clean_up, BuildStage, MediaBuildRequest,
+                build_media, clean_up, clean_up_with_progress, BuildStage, MediaBuildRequest,
             };
             use own_backup_common::engine_dto::{
                 MediaBuildOptionsDto, MediaBuildReportDto, MediaProgressDto, MediaStageDto,
@@ -850,7 +850,9 @@ impl BackupService for BackupServiceImpl {
                 };
 
                 emit("iso", 0, "сборка образа", false);
-                let iso_bytes = match write_media_iso(&built.media_dir, &out_iso) {
+                let iso_bytes = match write_media_iso(&built.media_dir, &out_iso, &mut |pct| {
+                    emit("iso", pct, "запись файлов", false);
+                }) {
                     Ok(n) => n,
                     Err(e) => {
                         emit("clean", 0, "после ошибки", false);
@@ -860,8 +862,9 @@ impl BackupService for BackupServiceImpl {
                 };
                 emit("iso", 100, "", false);
 
-                emit("clean", 0, "удаление временных файлов", false);
-                let freed = clean_up(&work, &staging);
+                let freed = clean_up_with_progress(&work, &staging, &mut |pct, detail| {
+                    emit("clean", pct, detail, false);
+                });
                 emit("clean", 100, "", true);
 
                 Ok(MediaBuildReportDto {
@@ -1540,9 +1543,10 @@ fn find_webview2_runtime(program_dir: &std::path::Path) -> Option<std::path::Pat
 fn write_media_iso(
     media_dir: &std::path::Path,
     out_iso: &std::path::Path,
+    progress: &mut dyn FnMut(u64),
 ) -> own_backup_common::Result<u64> {
     use own_backup_backup::fat_writer::{build_fat16, FatFile};
-    use own_backup_backup::iso9660::{write_iso, IsoBoot, IsoFile};
+    use own_backup_backup::iso9660::{write_iso_with_progress, IsoBoot, IsoFile};
 
     fn walk(dir: &std::path::Path, base: &std::path::Path, out: &mut Vec<IsoFile>) {
         let Ok(rd) = std::fs::read_dir(dir) else { return };
@@ -1578,7 +1582,13 @@ fn write_media_iso(
     if let Some(parent) = out_iso.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let len = write_iso(&files, "OWNBACKUP", Some(IsoBoot { image_path: "boot/efisys.bin".into() }), out_iso)?;
+    let len = write_iso_with_progress(
+        &files,
+        "OWNBACKUP",
+        Some(IsoBoot { image_path: "boot/efisys.bin".into() }),
+        out_iso,
+        progress,
+    )?;
     let _ = std::fs::remove_file(&efisys);
     Ok(len)
 }
