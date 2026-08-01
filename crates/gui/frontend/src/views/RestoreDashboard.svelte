@@ -9,6 +9,7 @@
   import { jobs } from '../lib/jobStore.svelte';
   import { api } from '../lib/api';
   import InfoModal from '../components/InfoModal.svelte';
+  import PasswordField from '../components/PasswordField.svelte';
   import DiskMap from '../components/DiskMap.svelte';
   import { diskSegments } from '../lib/diskLayout';
   import type { MapSlot } from '../components/DiskMap.svelte';
@@ -1533,16 +1534,15 @@
 {#snippet pwRow(part: number, label: string)}
   <span class="pw-inline">
     <span class="pw-lbl">{label}</span>
-    <input
-      type="password"
-      autocomplete="off"
-      spellcheck="false"
+    <PasswordField
+      variant="inline"
       value={luksPw[part] ?? ''}
-      oninput={(e) => {
-        luksPw[part] = (e.currentTarget as HTMLInputElement).value;
+      oninput={(v) => {
+        luksPw[part] = v;
         luksPwState[part] = 'idle';
       }}
-      onkeydown={(e) => { if (e.key === 'Enter') checkLuksPassword(part); }}
+      onenter={() => checkLuksPassword(part)}
+      invalid={luksPwState[part] === 'bad'}
     />
     <button
       class="btn ghost tiny"
@@ -2167,7 +2167,7 @@
   .pw-inline { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--head); }
   .pw-multi { margin-top: 8px; }
   .pw-lbl { white-space: nowrap; }
-  .pw-inline input { width: 180px; padding: 6px 9px; border: 1px solid var(--border); border-radius: 4px; font-size: 13px; font-family: var(--font); background: var(--card-bg); color: var(--text); }
+  /* The field itself (with its eye) is PasswordField, variant="inline". */
   .btn.tiny { padding: 6px 12px; font-size: 12px; }
   .pw-ok { font-size: 12px; color: #2f7d4f; white-space: nowrap; }
   .pw-bad { font-size: 12px; color: #b32b2b; white-space: nowrap; }

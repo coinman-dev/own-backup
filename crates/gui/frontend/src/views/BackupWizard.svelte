@@ -7,6 +7,7 @@
   import { formatBytes } from '../lib/format';
   import { diskSegments } from '../lib/diskLayout';
   import InfoModal from '../components/InfoModal.svelte';
+  import PasswordField from '../components/PasswordField.svelte';
   import type { Job, DiskInfo, PartitionInfo } from '../lib/types';
 
   interface Props {
@@ -586,6 +587,50 @@
     }
   }
 
+  // ---- one password for every volume ("Общий пароль") -------------------
+
+  // Typing the same BitLocker/LUKS password into three boxes in a row is the
+  // normal case, not the exception: one policy, one passphrase, several
+  // volumes. With the box ticked the panels collapse into a single prompt that
+  // unlocks every locked volume on every disk in turn; per-volume entry is one
+  // click away again for the machine where the passwords really do differ.
+  let sharedPw = $state(false);
+  let sharedInput = $state({ password: '', remember: false });
+  let sharedBusy = $state(false);
+
+  // Every encrypted volume a password is offered for, across all shown disks.
+  function encryptedOffered(): { device: string; label: string }[] {
+    return visibleDisks.flatMap((d) => encryptedForDisk(d));
+  }
+  // The shared prompt is drawn once — under the first disk that still has a
+  // locked volume — instead of once per disk panel.
+  const sharedFormDiskId = $derived(
+    visibleDisks.find((d) =>
+      encryptedForDisk(d).some(({ device }) => !decryptedVolumes[device]),
+    )?.device_id ?? null,
+  );
+  // Volumes the shared password did not open: they need individual entry, so
+  // say so rather than leaving "Дальше" greyed out with no explanation.
+  const sharedFailed = $derived(encryptedOffered().filter(({ device }) => pwErrors[device]));
+
+  function setSharedPw(value: string) {
+    sharedInput.password = value;
+    pwErrors = {}; // editing clears the previous "wrong password" markers
+  }
+  async function decryptAllShared() {
+    if (!sharedInput.password) return;
+    sharedBusy = true;
+    try {
+      for (const { device } of encryptedOffered()) {
+        if (decryptedVolumes[device]) continue;
+        pwInputs[device] = { password: sharedInput.password, remember: sharedInput.remember };
+        await decrypt(device);
+      }
+    } finally {
+      sharedBusy = false;
+    }
+  }
+
   // Every encrypted volume shown in a per-disk password panel — selected, OR on
   // a disk marked "Загрузочная копия" — must be unlocked before leaving the
   // Source step. Otherwise an undecrypted LUKS root gives an incomplete
@@ -672,29 +717,66 @@
   {/if}
 {/snippet}
 
-{#snippet pwPanel(list: { device: string; label: string }[])}
+{#snippet pwPanel(list: { device: string; label: string }[], showShared: boolean)}
   <div class="pw-panel under-disk">
-    <div class="pw-head">🔒 Зашифрованные тома — введите пароль для расшифровки</div>
+    <div class="pw-head">
+      <span>🔒 Зашифрованные тома — введите пароль для расшифровки</span>
+      <!-- One toggle for the whole screen: it lives next to the single shared
+           prompt, not once per disk panel. -->
+      {#if showShared && encryptedOffered().length > 1}
+        <label class="pw-shared-tgl" title="Один и тот же пароль у всех зашифрованных томов — ввести его один раз и расшифровать все">
+          <input type="checkbox" bind:checked={sharedPw} /> Общий пароль
+        </label>
+      {/if}
+    </div>
+
+    {#if sharedPw && showShared}
+      <div class="pw-row shared">
+        <span class="pw-vol">Пароль для всех томов</span>
+        <PasswordField
+          value={sharedInput.password}
+          oninput={setSharedPw}
+          onenter={() => { if (!sharedBusy && sharedInput.password) decryptAllShared(); }}
+          invalid={sharedFailed.length > 0}
+        />
+        <label class="pw-remember">
+          <input type="checkbox" bind:checked={sharedInput.remember} /> Запомнить
+        </label>
+        <button
+          type="button"
+          class="btn small primary"
+          onclick={decryptAllShared}
+          disabled={sharedBusy || !sharedInput.password}
+        >{sharedBusy ? 'Расшифровка…' : 'Расшифровать все'}</button>
+      </div>
+      {#if sharedFailed.length > 0 && !sharedBusy}
+        <div class="pw-err">
+          Пароль не подошёл: {sharedFailed.map((f) => f.label).join(', ')}. Снимите
+          «Общий пароль», чтобы ввести пароль для этих томов отдельно.
+        </div>
+      {/if}
+    {/if}
+
     {#each list as e (e.device)}
       <div class="pw-row" class:done={!!decryptedVolumes[e.device]}>
         <span class="pw-vol" title={e.device}>{e.label}</span>
         {#if decryptedVolumes[e.device]}
           <span class="pw-done">✓ Расшифровано</span>
+        {:else if sharedPw}
+          <!-- One prompt for all: the per-volume row is only a status line. -->
+          <span class="pw-wait">
+            {#if decrypting === e.device}Расшифровка…
+            {:else if pwErrors[e.device]}Пароль не подошёл
+            {:else}Ожидает общего пароля{/if}
+          </span>
         {:else}
-          <input
-            type="password"
-            class="pw-input"
-            class:err={pwErrors[e.device]}
-            placeholder="Пароль"
-            autocomplete="off"
+          <PasswordField
             value={pwInputs[e.device]?.password ?? ''}
-            oninput={(ev) => setPw(e.device, (ev.target as HTMLInputElement).value)}
-            onkeydown={(ev) => {
-              if (ev.key === 'Enter' && decrypting !== e.device && pwInputs[e.device]?.password) {
-                ev.preventDefault();
-                decrypt(e.device);
-              }
+            oninput={(v) => setPw(e.device, v)}
+            onenter={() => {
+              if (decrypting !== e.device && pwInputs[e.device]?.password) decrypt(e.device);
             }}
+            invalid={pwErrors[e.device]}
           />
           <label class="pw-remember">
             <input
@@ -711,7 +793,7 @@
           >{decrypting === e.device ? 'Расшифровка…' : 'Расшифровать'}</button>
         {/if}
       </div>
-      {#if pwErrors[e.device]}
+      {#if pwErrors[e.device] && !sharedPw}
         <div class="pw-err">Пароль не подходит</div>
       {/if}
     {/each}
@@ -835,7 +917,7 @@
                   </div>
                 </div>
                 {#if encryptedForDisk(d).length > 0}
-                  {@render pwPanel(encryptedForDisk(d))}
+                  {@render pwPanel(encryptedForDisk(d), d.device_id === sharedFormDiskId)}
                 {/if}
               {/each}
             </div>
@@ -1175,16 +1257,20 @@
   /* Password panel rendered directly under its disk card: tighter top margin
      and a primary-tinted border so the association with the disk is clear. */
   .pw-panel.under-disk { margin-top: 6px; margin-bottom: 4px; border-color: rgba(45,125,210,.35); background: rgba(45,125,210,.05); }
-  .pw-head { font-size: 13px; font-weight: 700; margin-bottom: 12px; }
+  .pw-head { display: flex; align-items: center; gap: 16px; font-size: 13px; font-weight: 700; margin-bottom: 12px; }
+  .pw-shared-tgl { margin-left: auto; display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; white-space: nowrap; cursor: pointer; }
   .pw-row { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; }
+  /* The single "one password for all volumes" prompt, set off from the
+     per-volume status lines below it. */
+  .pw-row.shared { padding-bottom: 10px; margin-bottom: 10px; border-bottom: 1px dashed var(--border); }
+  .pw-wait { font-size: 13px; color: var(--text-muted); }
   /* Once decrypted, centre the "<метка> ✓ Расшифровано" pair. */
   .pw-row.done { justify-content: center; gap: 16px; }
   .pw-row.done .pw-vol { flex: 0 0 auto; }
   .pw-vol { flex: 0 0 auto; max-width: 240px; font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  /* One row: label + wide password field + remember + button. The input grows
-     to fill; the label, checkbox and button keep their natural width. */
-  .pw-input { flex: 1 1 auto; min-width: 120px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 5px; font-size: 13px; }
-  .pw-input.err { border-color: #d84a4a; }
+  /* One row: label + wide password field + remember + button. The field grows
+     to fill (see PasswordField); label, checkbox and button keep their
+     natural width. */
   .pw-remember { flex-shrink: 0; display: flex; align-items: center; gap: 6px; font-size: 13px; white-space: nowrap; }
   .pw-row .btn { flex-shrink: 0; white-space: nowrap; }
   .pw-done { font-size: 13px; font-weight: 600; color: var(--green, #2e7d32); }
