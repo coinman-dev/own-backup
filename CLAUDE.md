@@ -18,10 +18,13 @@ named-pipe transport as open; all three are done).
 Roadmap and decisions log: `.ai/old2/implementation_plan_v2_2026-07-01.md` (phases 0–8).
 qcow2 second format + mounting: `.ai/old2/qcow2-second-format-plan_2026-07-07.md` (Q0–Q5).
 Boot medium (live): `.ai/boot-media-plan_2026-07-30.md`.
-**BitLocker unlock does NOT work on Windows yet** (only LUKS does; the FVE
-parser in `backup/src/bitlocker.rs` is wired on Linux only, because a locked
-volume cannot be read through its volume handle) — plan and steps in
-`.ai/bitlocker-windows-plan_2026-08-01.md`.
+**BitLocker:** the FVE parser (`backup/src/bitlocker.rs`) opens a real volume —
+confirmed on Windows 10 / XTS-AES 128 on 2026-08-05 via `own-backup-cli
+bitlocker --unlock`, password protector only. It reads the ciphertext off
+`\\.\PhysicalDriveN` at the partition's offset, because a locked volume
+refuses reads through its own device (`FVE_E_LOCKED_VOLUME`). **Not yet wired
+into backup**: `engine_win::unlock_and_probe` still handles LUKS only. Plan,
+findings and the remaining steps: `.ai/bitlocker-windows-plan_2026-08-01.md`.
 
 ## Build
 
