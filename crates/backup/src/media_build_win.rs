@@ -64,7 +64,7 @@ pub struct DriverPackage {
 ///
 /// Everything installed is still returned, so the interface can show what was
 /// left out and what it would have cost.
-pub fn list_driver_packages() -> Vec<DriverPackage> {
+pub fn list_driver_packages() -> std::result::Result<Vec<DriverPackage>, String> {
     use std::os::windows::process::CommandExt;
 
     #[derive(serde::Deserialize)]
@@ -86,7 +86,7 @@ pub fn list_driver_packages() -> Vec<DriverPackage> {
 
     // The two questions are independent, and each costs a PowerShell start plus
     // a walk of something large, so they are asked at the same time.
-    let installed_job = std::thread::spawn(|| -> Vec<Raw> {
+    let installed_job = std::thread::spawn(|| -> std::result::Result<Vec<Raw>, String> {
         ps_json(
             "Get-WindowsDriver -Online | Select-Object Driver,OriginalFileName,ClassName,\
              ProviderName,Version | ConvertTo-Json -Compress",
@@ -113,8 +113,12 @@ pub fn list_driver_packages() -> Vec<DriverPackage> {
            if ($p.Data) {{ [pscustomobject]@{{ inf = $p.Data; guid = $_.ClassGuid; \
              bus = $_.InstanceId.Split('\\')[0]; name = $_.FriendlyName }} }} \
          }} | ConvertTo-Json -Compress"
-    ));
-    let installed: Vec<Raw> = installed_job.join().unwrap_or_default();
+    ))
+    .map_err(|e| format!("не удалось перечислить устройства этой машины: {e}"))?;
+    let installed: Vec<Raw> = installed_job
+        .join()
+        .map_err(|_| "поток опроса драйверов упал".to_string())?
+        .map_err(|e| format!("не удалось перечислить установленные драйверы: {e}"))?;
 
     // inf -> (role, device name) for everything a rescue medium would want.
     let mut wanted: std::collections::HashMap<String, (String, String)> = Default::default();
@@ -181,26 +185,44 @@ pub fn list_driver_packages() -> Vec<DriverPackage> {
         recommended = list.iter().filter(|d| d.recommended).count(),
         "driver packages enumerated"
     );
-    list
+    Ok(list)
 }
 
 /// Run a PowerShell one-liner that prints JSON, and parse it. A single object
 /// comes back unwrapped rather than as a one-element array, which is a
 /// PowerShell habit rather than a mistake, so both shapes are accepted.
-fn ps_json<T: serde::de::DeserializeOwned>(script: &str) -> Vec<T> {
+/// `Err` значит «спросить не удалось», а не «ничего нет» — разница видна
+/// пользователю: пустой список в мастере читается как «драйверов не нашлось», и
+/// на урезанной Windows без PowerShell это была бы тихая ложь.
+fn ps_json<T: serde::de::DeserializeOwned>(script: &str) -> std::result::Result<Vec<T>, String> {
     use std::os::windows::process::CommandExt;
     let out = std::process::Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .creation_flags(0x0800_0000)
         .output();
-    let Ok(out) = out else {
-        warn!("powershell did not run");
-        return Vec::new();
+    let out = match out {
+        Ok(o) => o,
+        Err(e) => {
+            warn!(error = %e, "powershell did not run");
+            return Err(format!("PowerShell не запустился: {e}"));
+        }
     };
     let text = String::from_utf8_lossy(&out.stdout);
+    if text.trim().is_empty() {
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr);
+            warn!(status = ?out.status.code(), "powershell returned nothing");
+            return Err(format!(
+                "PowerShell завершился с кодом {:?}: {}",
+                out.status.code(),
+                err.trim()
+            ));
+        }
+        return Ok(Vec::new()); // спросили, ответ пустой — это законный ответ
+    }
     serde_json::from_str::<Vec<T>>(&text)
         .or_else(|_| serde_json::from_str::<T>(&text).map(|one| vec![one]))
-        .unwrap_or_default()
+        .map_err(|e| format!("ответ PowerShell не разобрался: {e}"))
 }
 
 /// What to build and how.

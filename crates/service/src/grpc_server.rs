@@ -747,11 +747,14 @@ impl BackupService for BackupServiceImpl {
         #[cfg(target_os = "windows")]
         {
             use own_backup_common::engine_dto::DriverPackageDto;
+            // «Не смог опросить систему» и «драйверов нет» — разные ответы, и
+            // мастер обязан показать первый как причину, а не как пустой список.
             let list = tokio::task::spawn_blocking(
                 own_backup_backup::media_build_win::list_driver_packages,
             )
             .await
-            .map_err(|e| Status::internal(format!("driver enumeration panicked: {e}")))?;
+            .map_err(|e| Status::internal(format!("driver enumeration panicked: {e}")))?
+            .map_err(|e| Status::failed_precondition(format!("Драйверы перечислить не удалось: {e}")))?;
             let out: Vec<DriverPackageDto> = list
                 .into_iter()
                 .map(|d| DriverPackageDto {
