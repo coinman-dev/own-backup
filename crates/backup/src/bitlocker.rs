@@ -738,7 +738,11 @@ fn open_bitlocker_with_iters(
     for info_off in offsets {
         match unlock_from_metadata(vol, info_off, sector_size as u32, password, iterations) {
             Ok(params) => {
-                return if verify { verify_ntfs(vol, params) } else { Ok(params) }
+                if verify {
+                    verify_covers_volume(&params, vol.len())?;
+                    return verify_ntfs(vol, params);
+                }
+                return Ok(params);
             }
             Err(e) => last_err = e,
         }
@@ -962,6 +966,31 @@ pub fn diagnose_first_sector(vol: &mut dyn RawVolume, params: &BitLockerParams) 
         &mut out,
     );
     out
+}
+
+/// Is the whole volume actually encrypted?
+///
+/// The image we write is `encrypted_size` long, so a volume whose encrypted
+/// region is much shorter than its partition would be copied SHORT — and a
+/// restore would lay down a truncated filesystem, which is worse than
+/// refusing. Checked against four real volumes (2026-08-05): on every one,
+/// fully converted and "encrypt used space only", the encrypted size equals
+/// the partition length exactly.
+///
+/// The tolerance is deliberately loose. Nothing here can tell an encryption
+/// still in progress from a layout we have not met — the metadata field that
+/// would say so has not been identified on a real disk — so this refuses only
+/// what is unmistakably wrong, and says what it saw.
+fn verify_covers_volume(params: &BitLockerParams, volume_len: u64) -> Result<()> {
+    if volume_len == 0 || params.encrypted_size >= volume_len / 10 * 9 {
+        return Ok(());
+    }
+    Err(bad(format!(
+        "зашифрована лишь часть тома: {} из {} байт ({:.0}%). Похоже, шифрование ещё идёт —          дождитесь его окончания (в Windows: manage-bde -status). Копировать такой том          нельзя: образ вышел бы обрезанным.",
+        params.encrypted_size,
+        volume_len,
+        params.encrypted_size as f64 * 100.0 / volume_len as f64
+    )))
 }
 
 /// Decrypt sector 0 through the recovered parameters and require a plausible
@@ -1198,6 +1227,29 @@ mod tests {
         assert!(parse_recovery_key("hunter2").is_err());
     }
 
+    /// A volume half-encrypted would be copied half-long, and restored broken.
+    #[test]
+    fn a_partly_encrypted_volume_is_refused() {
+        let params = BitLockerParams {
+            fvek: Zeroizing::new(vec![0u8; 32]),
+            algorithm: ALG_AES_XTS_128,
+            sector_size: 512,
+            encrypted_size: 50 * 1024,
+            nb_backup_sectors: 0,
+            boot_backup_addr: 0,
+            kind: VolumeEncryptionKind::BitLocker,
+        };
+        let err = verify_covers_volume(&params, 100 * 1024).unwrap_err().to_string();
+        assert!(err.contains("50"), "the message should name what was seen: {err}");
+
+        // The real case: encrypted size equal to the partition — and a little
+        // slack, because a volume is not obliged to be exact.
+        assert!(verify_covers_volume(&params, 50 * 1024).is_ok());
+        assert!(verify_covers_volume(&params, 52 * 1024).is_ok());
+        // Nothing to compare against is not a reason to refuse.
+        assert!(verify_covers_volume(&params, 0).is_ok());
+    }
+
     #[test]
     fn stretch_key_is_deterministic() {
         let a = stretch_key(&utf16le("hunter2"), &[3u8; 16], 64);
@@ -1375,6 +1427,12 @@ mod tests {
         dev[boot_backup_addr as usize..boot_backup_addr as usize + 512]
             .copy_from_slice(&relocated);
 
+        // A real volume's encrypted region covers the WHOLE partition — the
+        // metadata blocks and the relocated boot sectors live inside it, not
+        // past its end (checked on four disks, 2026-08-05). Say so, or the
+        // "is the volume fully encrypted" guard rightly refuses this fixture.
+        put_u64(&mut info, 0x10, dev_len as u64);
+
         // BitLocker boot sector at device offset 0 (its own boot code + pointers).
         dev[3..11].copy_from_slice(FVE_SIGNATURE);
         put_u16(&mut dev, 0x0B, 512);
@@ -1404,7 +1462,10 @@ mod tests {
         let info = inspect_bitlocker(&mut vol).unwrap();
         assert_eq!(info.cipher, ALG_AES_XTS_128);
         assert!(info.cipher_supported);
-        assert_eq!(info.encrypted_size, encrypted_size);
+        assert_eq!(
+            info.encrypted_size, dev_len as u64,
+            "the encrypted region covers the whole volume, as it does on a real disk"
+        );
         assert_eq!(info.sector_size, 512);
         assert_eq!(
             info.protectors.iter().map(|p| p.kind).collect::<Vec<_>>(),
