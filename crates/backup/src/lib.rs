@@ -89,6 +89,7 @@ pub mod media_build_win;
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub mod media_guest_drivers_win;
 pub mod ole_compound;
+pub mod volume_window;
 pub mod wim_info;
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub mod winre_find;

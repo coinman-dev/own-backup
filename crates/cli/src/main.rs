@@ -30,6 +30,8 @@ enum Commands {
 
     /// Create a backup
     Backup(commands::backup::BackupArgs),
+    /// What a BitLocker volume says about itself (read-only, no password)
+    Bitlocker(commands::bitlocker::BitlockerArgs),
 
     /// Restore from a backup
     Restore(commands::restore::RestoreArgs),
@@ -79,6 +81,8 @@ fn needs_admin(command: &Commands) -> bool {
         command,
         Commands::Preflight(_)
             | Commands::Backup(_)
+            // Reads `\\.\PhysicalDriveN`, which is an administrator's privilege.
+            | Commands::Bitlocker(_)
             | Commands::Restore(_)
             | Commands::RestoreDisk(_)
             | Commands::FinalizeBoot(_)
@@ -119,6 +123,7 @@ async fn main() {
         Commands::ListDisks(args) => commands::list_disks::run(args).await,
         Commands::Preflight(args) => commands::preflight::run(args).await,
         Commands::Backup(args) => commands::backup::run(args).await,
+        Commands::Bitlocker(args) => commands::bitlocker::run(args).await,
         Commands::Restore(args) => commands::restore::run(args).await,
         Commands::RestoreDisk(args) => commands::restore_disk::run(args).await,
         Commands::FinalizeBoot(args) => commands::finalize_boot::run(args).await,

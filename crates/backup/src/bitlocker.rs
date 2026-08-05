@@ -65,6 +65,26 @@ const ALG_AES_XTS_256: u16 = 0x8005;
 /// VMK key-protection type for a user passphrase.
 const PROTECT_PASSWORD: u16 = 0x2000;
 
+/// The ways a volume can be unlocked, as the metadata names them.
+///
+/// A volume carries one VMK datum per way in, and each says which one it is.
+/// Reading that list costs nothing — no password, no privileges beyond the
+/// disk read we already do — and it is the difference between asking for a
+/// passphrase that exists and telling the user their volume has none.
+///
+/// **The codes beyond `PASSWORD` come from libbde's documentation, not from a
+/// volume we have opened.** They are reported with their raw value beside the
+/// name so a real volume can confirm or correct them; nothing decides anything
+/// on a code we have not seen.
+pub const PROTECTOR_KINDS: [(u16, &str); 6] = [
+    (0x0000, "защита приостановлена (ключ лежит открыто)"),
+    (0x0100, "TPM"),
+    (0x0200, "ключ запуска (USB)"),
+    (0x0500, "TPM + PIN"),
+    (0x0800, "ключ восстановления (48 цифр)"),
+    (PROTECT_PASSWORD, "пароль"),
+];
+
 /// Real BitLocker stretch iteration count (2^20).
 const STRETCH_ITERATIONS: u32 = 0x0010_0000;
 
@@ -349,6 +369,146 @@ fn read_at(vol: &mut dyn RawVolume, offset: u64, len: usize) -> Result<Vec<u8>> 
     vol.read_at(offset, &mut buf)?;
     buf.truncate(len);
     Ok(buf)
+}
+
+/// One way into a volume, as its metadata declares it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Protector {
+    /// Raw `protection_type` from the VMK datum.
+    pub kind: u16,
+    /// What that code means, or "неизвестно" when it is one we have not seen.
+    pub name: String,
+    /// Can Own Backup open the volume this way today?
+    pub usable: bool,
+}
+
+/// What a BitLocker volume says about itself before anyone types a password.
+///
+/// Read-only, and read from the DISK rather than the volume, so it works on a
+/// locked volume — which is the only kind worth asking about.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BitLockerInfo {
+    /// Volume-level cipher from the dataset header.
+    pub cipher: u16,
+    pub cipher_name: String,
+    /// Do we implement that cipher?
+    pub cipher_supported: bool,
+    pub sector_size: u32,
+    /// Size of the encrypted region — the plaintext length of the volume.
+    pub encrypted_size: u64,
+    /// Relocated boot sectors: how many, and where their ciphertext lives.
+    pub nb_backup_sectors: u64,
+    pub boot_backup_addr: u64,
+    /// Which of the three metadata copies parsed (0, 1, 2).
+    pub metadata_copy: usize,
+    pub protectors: Vec<Protector>,
+    /// The 0x40-byte metadata block header and the 0x30-byte dataset header,
+    /// as hex. Printed because the fields we do NOT claim to understand —
+    /// among them whatever records a conversion in progress — have to be
+    /// learned from real volumes before anything is decided on them.
+    pub header_hex: String,
+    pub dataset_hex: String,
+}
+
+impl BitLockerInfo {
+    /// Can the volume be opened with a passphrase at all?
+    pub fn has_password(&self) -> bool {
+        self.protectors.iter().any(|p| p.kind == PROTECT_PASSWORD)
+    }
+    /// Nothing we can do with it today.
+    pub fn openable(&self) -> bool {
+        self.cipher_supported && self.protectors.iter().any(|p| p.usable)
+    }
+}
+
+fn cipher_name(alg: u16) -> (String, bool) {
+    match alg {
+        ALG_AES_XTS_128 => ("AES-XTS 128".into(), true),
+        ALG_AES_XTS_256 => ("AES-XTS 256".into(), true),
+        0x8000 => ("AES-CBC 128 + диффузор (Vista/7)".into(), false),
+        0x8001 => ("AES-CBC 256 + диффузор (Vista/7)".into(), false),
+        0x8002 => ("AES-CBC 128".into(), false),
+        0x8003 => ("AES-CBC 256".into(), false),
+        other => (format!("неизвестный шифр {other:#06x}"), false),
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+}
+
+/// Read what a BitLocker volume declares about itself — cipher, geometry and
+/// the list of ways in — without a password and without writing anything.
+pub fn inspect_bitlocker(vol: &mut dyn RawVolume) -> Result<BitLockerInfo> {
+    let boot = read_at(vol, 0, 512)?;
+    if !is_bitlocker(&boot) {
+        return Err(bad("not a BitLocker volume"));
+    }
+    let sector_size = u16at(&boot, 0x0B) as u32;
+
+    let mut last_err = bad("no FVE metadata copy could be parsed");
+    for i in 0..3 {
+        let info_off = u64at(&boot, INFO_OFFSETS_AT + i * 8);
+        if info_off == 0 || info_off + 0x70 > vol.len() {
+            continue;
+        }
+        match inspect_metadata(vol, info_off, sector_size, i) {
+            Ok(info) => return Ok(info),
+            Err(e) => last_err = e,
+        }
+    }
+    Err(last_err)
+}
+
+fn inspect_metadata(
+    vol: &mut dyn RawVolume,
+    info_off: u64,
+    sector_size: u32,
+    copy: usize,
+) -> Result<BitLockerInfo> {
+    let head = read_at(vol, info_off, 0x70)?;
+    if &head[0..8] != FVE_SIGNATURE {
+        return Err(bad("FVE metadata lacks the -FVE-FS- signature"));
+    }
+    let dataset_size = u32at(&head, 0x40);
+    if !(0x30..=16 * 1024 * 1024).contains(&dataset_size) {
+        return Err(bad(format!("implausible dataset size {dataset_size}")));
+    }
+    let dataset = read_at(vol, info_off + 0x40, dataset_size as usize)?;
+    let cipher = u16at(&dataset, 0x24) as u16;
+    let (cipher_name, cipher_supported) = cipher_name(cipher);
+
+    let mut protectors = Vec::new();
+    for d in datums(&dataset[0x30..]) {
+        if d.entry_type != 0x0002 || d.value_type != DATUM_VMK || d.data.len() < 28 {
+            continue;
+        }
+        let kind = u16at(d.data, 0x1A) as u16;
+        let known = PROTECTOR_KINDS.iter().find(|(k, _)| *k == kind);
+        let p = Protector {
+            kind,
+            name: known.map(|(_, n)| (*n).to_string()).unwrap_or_else(|| "неизвестно".into()),
+            // Only the passphrase, and only with a cipher we implement.
+            usable: kind == PROTECT_PASSWORD && cipher_supported,
+        };
+        if !protectors.contains(&p) {
+            protectors.push(p);
+        }
+    }
+
+    Ok(BitLockerInfo {
+        cipher,
+        cipher_name,
+        cipher_supported,
+        sector_size,
+        encrypted_size: u64at(&head, 0x10),
+        nb_backup_sectors: u32at(&head, 0x1C),
+        boot_backup_addr: u64at(&head, 0x38),
+        metadata_copy: copy,
+        protectors,
+        header_hex: hex(&head[..0x40]),
+        dataset_hex: hex(&dataset[..0x30.min(dataset.len())]),
+    })
 }
 
 /// Recover the FVEK of a BitLocker volume using `password`. Errors on a wrong
@@ -889,6 +1049,21 @@ mod tests {
         // exposed; instead assert the crypto pipeline via the public path with
         // matching iterations.
         let mut vol = MemVolume(dev);
+
+        // --- What the volume says about itself, before any password ---
+        let info = inspect_bitlocker(&mut vol).unwrap();
+        assert_eq!(info.cipher, ALG_AES_XTS_128);
+        assert!(info.cipher_supported);
+        assert_eq!(info.encrypted_size, encrypted_size);
+        assert_eq!(info.sector_size, 512);
+        assert_eq!(
+            info.protectors.iter().map(|p| p.kind).collect::<Vec<_>>(),
+            vec![PROTECT_PASSWORD],
+            "the volume has exactly one way in, and it is a passphrase"
+        );
+        assert!(info.has_password() && info.openable());
+        assert!(!info.header_hex.is_empty() && !info.dataset_hex.is_empty());
+
         let params = super::open_bitlocker_with_iters(&mut vol, password, stretch_iters).unwrap();
         assert_eq!(params.algorithm, ALG_AES_XTS_128);
         assert_eq!(&params.fvek[..], &fvek[..]);
