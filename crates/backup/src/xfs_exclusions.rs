@@ -88,6 +88,9 @@ pub struct XfsExclusionScan {
     pub files_kept_shared: u64,
     pub categories: CategorySizes,
     pub patches: Vec<(u64, Vec<u8>)>,
+    /// Файлы, чьи данные Stage 1 занулил — то есть кандидаты на НАСТОЯЩЕЕ
+    /// удаление (этап D). Stage 1 сам их не трогает структурно.
+    pub(crate) removable: Vec<RemovableFile>,
 }
 
 impl XfsExclusionScan {
@@ -101,29 +104,34 @@ impl XfsExclusionScan {
             files_kept_shared: 0,
             categories: CategorySizes::default(),
             patches: Vec::new(),
+            removable: Vec::new(),
         }
     }
 }
 
-struct Sb {
-    blocksize: u64,
+pub(crate) struct Sb {
+    pub(crate) blocksize: u64,
     /// sb_logstart / sb_logblocks — the internal log, or 0 for an external one.
-    logstart: u64,
-    logblocks: u64,
-    inodesize: u64,
-    agblocks: u64,
-    agcount: u64,
-    agblklog: u32,
-    inopblog: u32,
-    rootino: u64,
-    sectsize: u64,
-    reflink: bool,
-    ftype: bool,
+    pub(crate) logstart: u64,
+    pub(crate) logblocks: u64,
+    pub(crate) inodesize: u64,
+    pub(crate) agblocks: u64,
+    pub(crate) agcount: u64,
+    pub(crate) agblklog: u32,
+    pub(crate) inopblog: u32,
+    pub(crate) rootino: u64,
+    pub(crate) sectsize: u64,
+    pub(crate) reflink: bool,
+    pub(crate) ftype: bool,
+    /// Разреженные чанки инодов (`XFS_SB_FEAT_INCOMPAT_SPINODES`, бит 1) —
+    /// меняют раскладку записи INOBT. Включены современным mkfs по умолчанию
+    /// (проверено: `incompat=0xb` на mkfs.xfs 6.x).
+    pub(crate) spinodes: bool,
 }
 
 impl Sb {
     /// Byte offset of inode `ino` on the volume.
-    fn inode_offset(&self, ino: u64) -> u64 {
+    pub(crate) fn inode_offset(&self, ino: u64) -> u64 {
         let mask = (1u64 << (self.agblklog + self.inopblog)) - 1;
         let agino = ino & mask;
         let ag = ino >> (self.agblklog + self.inopblog);
@@ -132,14 +140,14 @@ impl Sb {
         (ag * self.agblocks + agblock) * self.blocksize + off * self.inodesize
     }
     /// Physical byte offset of an fs-block number (agno<<agblklog | agblock).
-    fn fsblock_to_phys(&self, fsblock: u64) -> u64 {
+    pub(crate) fn fsblock_to_phys(&self, fsblock: u64) -> u64 {
         let ag = fsblock >> self.agblklog;
         let agblock = fsblock & ((1u64 << self.agblklog) - 1);
         (ag * self.agblocks + agblock) * self.blocksize
     }
 }
 
-fn parse_sb(vol: &mut dyn RawVolume) -> Result<Sb> {
+pub(crate) fn parse_sb(vol: &mut dyn RawVolume) -> Result<Sb> {
     let mut sb = [0u8; 512];
     vol.read_at(0, &mut sb)?;
     if be32(&sb, 0) as u32 != SB_MAGIC {
@@ -186,6 +194,7 @@ fn parse_sb(vol: &mut dyn RawVolume) -> Result<Sb> {
         sectsize,
         reflink: ro_compat & 0x4 != 0,     // XFS_SB_FEAT_RO_COMPAT_REFLINK
         ftype: incompat & 0x1 != 0,        // XFS_SB_FEAT_INCOMPAT_FTYPE
+        spinodes: incompat & 0x2 != 0,     // XFS_SB_FEAT_INCOMPAT_SPINODES
     })
 }
 
@@ -266,11 +275,20 @@ pub(crate) fn xfs_log_is_clean_at(
     Ok(be == XLOG_UNMOUNT_TYPE || le == XLOG_UNMOUNT_TYPE)
 }
 
+/// A file Stage 1 zeroed: everything etап D needs to remove it for real.
+pub(crate) struct RemovableFile {
+    pub(crate) ino: u64,
+    /// The directory holding the excluded name (Stage 2 has to edit it).
+    pub(crate) parent: u64,
+    pub(crate) extents: Vec<Extent>,
+    pub(crate) size: u64,
+}
+
 /// A resolved data extent (fs-block start + block count).
 #[derive(Clone, Copy)]
-struct Extent {
-    startblock: u64,
-    count: u64,
+pub(crate) struct Extent {
+    pub(crate) startblock: u64,
+    pub(crate) count: u64,
 }
 
 /// Decode one 16-byte bmbt record (packed 128-bit) → (startoff, extent).
@@ -572,7 +590,8 @@ pub fn scan_xfs_exclusions(
     let mut visited: HashSet<u64> = HashSet::new();
     let mut stack: Vec<(u64, Vec<String>, bool)> = vec![(sb.rootino, Vec::new(), false)];
     // Per matched file: its extents (to zero if exclusive).
-    let mut matched_files: HashMap<u64, (Vec<Extent>, u64)> = HashMap::new(); // ino → (extents, size)
+    // ino → (extents, size, parent dir ino)
+    let mut matched_files: HashMap<u64, (Vec<Extent>, u64, u64)> = HashMap::new();
 
     while let Some((ino, rel, sub_excluded)) = stack.pop() {
         if !visited.insert(ino) {
@@ -634,7 +653,7 @@ pub fn scan_xfs_exclusions(
                     let format = fi[5];
                     let nextents = be32(&fi, 0x4C);
                     if let Ok(exts) = fork_extents(vol, &sb, &fi, format, nextents) {
-                        matched_files.insert(e.ino, (exts, size));
+                        matched_files.insert(e.ino, (exts, size, ino));
                     }
                 }
             } else if let Ok(fi) = read_inode(vol, &sb, e.ino) {
@@ -646,7 +665,7 @@ pub fn scan_xfs_exclusions(
 
     // Zero exclusively-owned extents; keep any that overlap a shared range.
     scan.files_excluded = matched_files.len() as u64;
-    for (_ino, (exts, size)) in &matched_files {
+    for (&fino, (exts, size, parent)) in &matched_files {
         let mut any_shared = false;
         let mut ranges: Vec<(u64, u64)> = Vec::new();
         for e in exts {
@@ -665,6 +684,12 @@ pub fn scan_xfs_exclusions(
             scan.ranges.add(a, b);
         }
         scan.bytes_excluded += size;
+        scan.removable.push(RemovableFile {
+            ino: fino,
+            parent: *parent,
+            extents: exts.clone(),
+            size: *size,
+        });
     }
     scan.ranges.finalize();
     info!(
@@ -828,9 +853,14 @@ mod xfs_integration {
 
     /// A hard-linked file must be kept whole: its other name is not excluded,
     /// and zeroing the shared inode's data would silently empty that innocent
-    /// file. The fixture has no hard links, so the link count is raised offline
-    /// with xfs_db (the refcount btree — reflink sharing — knows nothing about
-    /// name sharing, which is exactly why a separate guard is needed).
+    /// file. (The refcount btree — reflink sharing — knows nothing about NAME
+    /// sharing, which is exactly why a separate guard is needed.)
+    ///
+    /// The pair is real: `gen_xfs.sh` makes `hard_a.bin`/`hard_b.bin` one inode
+    /// under two names. Until 2026-08-05 the committed fixture predated that
+    /// and the test had to fake the link count with `xfs_db write core.nlinkv2`
+    /// — which proved the nlink guard fires, but not that a second NAME is what
+    /// raises it.
     #[test]
     fn a_hard_linked_file_is_kept_whole() {
         let zst = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/xfs_reflink.img.zst");
@@ -838,30 +868,107 @@ mod xfs_integration {
             eprintln!("xfs_reflink.img.zst missing — skipping");
             return;
         }
-        if std::process::Command::new("xfs_db").arg("-V").output().is_err() {
-            eprintln!("xfs_db unavailable — skipping");
-            return;
-        }
         let dir = tempfile::tempdir().unwrap();
         let img = dir.path().join("fs.img");
         std::fs::write(&img, zstd::decode_all(std::fs::File::open(&zst).unwrap()).unwrap())
             .unwrap();
 
-        // Sanity: with nlink == 1 the private file IS zeroed…
+        // Sanity: a file with ONE name is zeroed — otherwise the assert below
+        // would pass on a scanner that excludes nothing at all.
         let (scan, _) = run(&img, &["big.bin"]);
         assert!(!scan.ranges.is_empty(), "sanity: big.bin should be zeroable when unlinked");
 
-        // …then the same file with nlink == 2 must be left alone.
-        let out = std::process::Command::new("xfs_db")
-            .args(["-x", "-c", "path /cache/big.bin", "-c", "write core.nlinkv2 2"])
-            .arg(&img)
-            .output()
-            .unwrap();
-        let written = String::from_utf8_lossy(&out.stdout);
-        assert!(written.contains("core.nlinkv2 = 2"), "xfs_db write failed:\n{written}");
-
-        let (scan, _) = run(&img, &["big.bin"]);
+        // One name of the pair excluded, the other not: nothing may be zeroed.
+        let (scan, _) = run(&img, &["hard_a.bin"]);
         assert!(scan.ranges.is_empty(), "hard-linked file was zeroed");
         assert_eq!(scan.files_kept_shared, 1, "kept-hardlink accounting");
+    }
+
+    /// The dynamic half of the acceptance: mount what a restore would produce,
+    /// read every kept file, write until the space is reused, read again,
+    /// unmount, `xfs_repair -n`. XFS is Stage-1-only today (data zeroed, no
+    /// metadata edits), so what this guards is the zeroing itself — an extent
+    /// zeroed under a file that still owns it is invisible to `xfs_repair`,
+    /// which checks structure and never looks at file contents.
+    ///
+    /// The fixture is the shared corpus (`exclusion_corpus`): dense and
+    /// nested-dense directories, hard links inside and across the exclusion,
+    /// device nodes, FIFOs, sockets, symlinks, xattrs and a reflink copy whose
+    /// extents are shared with an excluded file.
+    ///
+    /// Needs root (loop mount):
+    ///
+    /// ```sh
+    /// cargo test -p own-backup-backup --lib --no-run     # build as yourself
+    /// sudo <test-binary> --ignored xfs_survives_mount_and_write --nocapture
+    /// ```
+    #[test]
+    #[ignore = "needs root: loop-mounts the patched image and writes to it"]
+    fn xfs_survives_mount_and_write() {
+        use crate::exclusion_corpus as corpus;
+        if !corpus::is_root() {
+            eprintln!("not root — skipping");
+            return;
+        }
+        for t in ["mkfs.xfs", "xfs_repair"] {
+            if std::process::Command::new(t).arg("-V").output().is_err() {
+                eprintln!("{t} unavailable — skipping");
+                return;
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let img = dir.path().join("fs.img");
+        std::fs::File::create(&img).unwrap().set_len(768 * 1024 * 1024).unwrap();
+        assert!(std::process::Command::new("mkfs.xfs")
+            .args(["-q", "-m", "reflink=1,crc=1"])
+            .arg(&img)
+            .status()
+            .unwrap()
+            .success());
+        let mnt = dir.path().join("mnt");
+        std::fs::create_dir_all(&mnt).unwrap();
+
+        let c = {
+            let _m = corpus::mounted(&img, &mnt);
+            corpus::populate(&mnt, corpus::Caps::xfs())
+        };
+
+        let (scan, _) = run(&img, &["cache"]);
+        assert!(scan.files_excluded >= 1400, "исключено всего {}", scan.files_excluded);
+        // The reflink clone and both hard-linked files are shared — nothing of
+        // theirs may be zeroed, and the scanner has to say so out loud.
+        assert!(
+            scan.files_kept_shared >= 3,
+            "разделённых файлов найдено {}",
+            scan.files_kept_shared
+        );
+        let patched = dir.path().join("patched.img");
+        let mut data = std::fs::read(&img).unwrap();
+        for (s, e) in scan.ranges.iter() {
+            data[s as usize..e as usize].fill(0);
+        }
+        std::fs::write(&patched, &data).unwrap();
+
+        let before = corpus::dmesg_len();
+        {
+            let _m = corpus::mounted(&patched, &mnt);
+            c.verify_kept("после восстановления");
+            let written = corpus::Corpus::fill(&mnt, 512);
+            assert!(written > 32, "записалось всего {written} МиБ");
+            eprintln!("записано {written} МиБ поверх зануленного");
+            c.verify_kept("после заполнения");
+        }
+
+        let out =
+            std::process::Command::new("xfs_repair").arg("-n").arg(&patched).output().unwrap();
+        assert!(
+            out.status.success(),
+            "xfs_repair ПОСЛЕ монтирования и записи:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let complaints = corpus::kernel_complaints(before, &["XFS", "xfs"]);
+        let bad: Vec<&String> =
+            complaints.iter().filter(|l| l.contains("error") || l.contains("corrupt")).collect();
+        assert!(bad.is_empty(), "ядро ругалось на ФС:\n{bad:?}");
     }
 }

@@ -34,6 +34,11 @@ pub mod used_sectors;
 pub mod vhdx_bat;
 pub mod xfs_exclusions;
 pub mod xfs_map;
+pub mod xfs_stage2;
+
+/// The shared fixture zoo for the root-gated dynamic acceptance (этап T).
+#[cfg(all(test, target_os = "linux"))]
+pub mod exclusion_corpus;
 
 #[cfg(target_os = "linux")]
 pub mod engine_linux;

@@ -3599,46 +3599,99 @@ mod btrfs_integration {
     }
 
     /// The dynamic acceptance no static check can replace: mount the patched
-    /// image, WRITE until the freed space is reused, unmount, re-check. This
-    /// is exactly how the freed-extent csum defect surfaced — and the only way
-    /// to prove it stays gone. Needs root (loop mount):
+    /// image, read everything, WRITE until the freed space is reused, read
+    /// again, unmount, re-check. This is exactly how the freed-extent csum
+    /// defect surfaced — and the only way to prove it stays gone.
+    ///
+    /// The fixture is the shared corpus (`exclusion_corpus`) plus what only
+    /// btrfs has: a subvolume, a snapshot of it, reflink copies, DUP metadata
+    /// (`mkfs -m dup` — every metadata block written twice, so a patch that
+    /// forgets the mirror is caught), and 200 MiB of big files so the checksum
+    /// tree has real internal nodes. The first version of this test used 3000
+    /// tiny files: its csum tree was a single leaf, so a defect that only shows
+    /// when a leaf's first key moves under a parent walked straight past it and
+    /// into a user's copy.
+    ///
+    /// Needs root (loop mount):
     ///
     /// ```sh
-    /// sudo -E "$(command -v cargo)" test -p own-backup-backup --lib -- \
-    ///     --ignored stage2_survives_mount_and_write --nocapture
+    /// cargo test -p own-backup-backup --lib --no-run     # build as yourself
+    /// sudo <test-binary> --ignored stage2_survives_mount_and_write --nocapture
     /// ```
     #[test]
     #[ignore = "needs root: loop-mounts the patched image and writes to it"]
     fn stage2_survives_mount_and_write() {
-        use std::io::Write;
-        let uid = std::process::Command::new("id").arg("-u").output().unwrap();
-        if String::from_utf8_lossy(&uid.stdout).trim() != "0" {
+        use crate::exclusion_corpus as corpus;
+        if !corpus::is_root() {
             eprintln!("not root — skipping");
             return;
         }
-        if !have("mkfs.btrfs") {
+        if !have("mkfs.btrfs") || !have("btrfs") {
             return;
         }
-        // Interleaved kept/excluded files, and enough data (~200 MiB) that the
-        // checksum tree has real internal nodes. The first version of this test
-        // used 3000 tiny files: its csum tree was a single leaf, so a defect
-        // that only shows up when a leaf's first key moves under a parent
-        // walked straight past it and into a user's copy.
         let dir = tempfile::tempdir().unwrap();
-        let src = dir.path().join("src");
-        std::fs::create_dir_all(&src).unwrap();
-        for i in 0..200u32 {
-            let ext = if i % 3 == 0 { "log" } else { "keep" };
-            let mut buf = vec![0u8; 1024 * 1024];
-            for (j, b) in buf.iter_mut().enumerate() {
-                *b = (i as usize).wrapping_mul(31).wrapping_add(j) as u8;
-            }
-            std::fs::File::create(src.join(format!("f{i:04}.{ext}"))).unwrap().write_all(&buf).unwrap();
-        }
         let img = dir.path().join("fs.img");
-        std::fs::File::create(&img).unwrap().set_len(1024 * 1024 * 1024).unwrap();
-        let out = std::process::Command::new("mkfs.btrfs").args(["-q", "-r"]).arg(&src).arg(&img).output().unwrap();
-        assert!(out.status.success(), "mkfs.btrfs failed");
+        std::fs::File::create(&img).unwrap().set_len(2 * 1024 * 1024 * 1024).unwrap();
+        // DUP metadata: every metadata block exists twice, and a patch applied
+        // to one copy only leaves the mirror stale.
+        let out = std::process::Command::new("mkfs.btrfs")
+            .args(["-q", "-m", "dup", "-d", "single"])
+            .arg(&img)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "mkfs.btrfs: {}", String::from_utf8_lossy(&out.stderr));
+        let mnt = dir.path().join("mnt");
+        std::fs::create_dir_all(&mnt).unwrap();
+
+        // Two names sharing one btrfs name hash live in a single DIR_ITEM: the
+        // excluded one must be split out and the innocent one left whole. The
+        // static test proves the split; here the kernel gets to read the result.
+        let hash = |name: &str| crc32c_raw(0xFFFF_FFFE, name.as_bytes());
+        let mut seen: HashMap<u32, String> = HashMap::new();
+        let mut pair: Option<(String, String)> = None;
+        for i in 0u64..3_000_000 {
+            let name = format!("c{:x}", i.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 8);
+            if let Some(prev) = seen.insert(hash(&name), name.clone()) {
+                pair = Some((prev, name));
+                break;
+            }
+        }
+        let (victim, innocent) = pair.expect("no 32-bit hash collision in 3M names");
+
+        let (mut c, subvol_file) = {
+            let _m = corpus::mounted(&img, &mnt);
+            let c = corpus::populate(&mnt, corpus::Caps::btrfs());
+            std::fs::write(mnt.join("keep").join(&victim), corpus::pattern(6001, 8192)).unwrap();
+            std::fs::write(mnt.join("keep").join(&innocent), corpus::pattern(6002, 8192)).unwrap();
+            // A subvolume with its own files, and a snapshot of it: their trees
+            // share leaves with the main one, and a shared leaf may never be
+            // freed no matter what was excluded from it.
+            let sub = mnt.join("keep/sub");
+            let r = std::process::Command::new("btrfs")
+                .args(["subvolume", "create"])
+                .arg(&sub)
+                .output()
+                .unwrap();
+            assert!(r.status.success(), "subvolume create: {}", String::from_utf8_lossy(&r.stderr));
+            for i in 0..50u32 {
+                std::fs::write(sub.join(format!("s{i:03}.bin")), corpus::pattern(5000 + i, 65536))
+                    .unwrap();
+            }
+            let _ = std::process::Command::new("sync").status();
+            let r = std::process::Command::new("btrfs")
+                .args(["subvolume", "snapshot"])
+                .arg(&sub)
+                .arg(mnt.join("keep/snap"))
+                .output()
+                .unwrap();
+            assert!(r.status.success(), "snapshot: {}", String::from_utf8_lossy(&r.stderr));
+            let _ = std::process::Command::new("sync").status();
+            (c, sub.join("s000.bin"))
+        };
+
+        // Sanity: a fixture proves only what it contains — without internal
+        // nodes in the csum tree, and without a mirrored metadata chunk, the
+        // two things this test is here for are not present at all.
         {
             let f = std::fs::File::open(&img).unwrap();
             let len = f.metadata().unwrap().len();
@@ -3647,53 +3700,68 @@ mod btrfs_integration {
             let csum_root = *fs.tree_roots.get(&CSUM_TREE_OBJECTID).unwrap();
             let node = read_node(&mut vol, &fs.chunks, csum_root, fs.nodesize).unwrap();
             assert!(node[0x64] > 0, "csum tree is a single leaf — fixture too small");
+            let mirrored = fs.chunks.chunks.iter().filter(|c| c.stripes.len() > 1).count();
+            assert!(mirrored > 0, "mkfs проигнорировал -m dup — зеркал нет, проверять нечего");
+            // Every mirror must be patched: the kernel falls back to the second
+            // copy when the first fails its checksum, so a stale mirror is a
+            // mine that goes off long after the restore.
+            let (scan, _) = run_scan(&img, &["cache"]);
+            let mut offs: Vec<u64> = scan.patches.iter().map(|(o, _)| *o).collect();
+            offs.sort_unstable();
+            offs.dedup();
+            assert_eq!(offs.len(), scan.patches.len(), "патчи по одному смещению дублируются");
+            let node_len = fs.nodesize;
+            let mirrored_patches = scan
+                .patches
+                .iter()
+                .filter(|(_, b)| b.len() as u64 == node_len)
+                .filter(|(o, b)| scan.patches.iter().any(|(o2, b2)| o2 != o && b2 == b))
+                .count();
+            assert!(
+                mirrored_patches > 0,
+                "ни один узел не пропатчен в обеих копиях DUP — зеркала протухнут"
+            );
         }
 
-        let (scan, _) = run_scan(&img, &["*.log"]);
-        assert_eq!(scan.files_excluded, 67);
+        // The innocent twin is a kept file like any other from here on.
+        c.kept.push((mnt.join("keep").join(&innocent), corpus::pattern(6002, 8192)));
+
+        let (scan, _) = run_scan(&img, &["cache", &victim]);
+        assert!(scan.files_excluded >= 1400, "исключено всего {}", scan.files_excluded);
         let patched = dir.path().join("patched.img");
         apply(&img, &scan, &patched);
         let (ok, log) = btrfs_check(&patched, true);
         assert!(ok, "btrfs check before mount:\n{log}");
 
-        // Mount, write until the disk fills (reusing the freed space), verify
-        // reads, unmount, check again.
-        let mnt = dir.path().join("mnt");
-        std::fs::create_dir_all(&mnt).unwrap();
-        let m = std::process::Command::new("mount").arg("-o").arg("loop").arg(&patched).arg(&mnt).output().unwrap();
-        assert!(m.status.success(), "mount failed: {}", String::from_utf8_lossy(&m.stderr));
-        let chunk = vec![0x5Au8; 1024 * 1024];
-        let mut written = 0;
-        for i in 0..600 {
-            let mut f = match std::fs::File::create(mnt.join(format!("new{i:04}.bin"))) {
-                Ok(f) => f,
-                Err(_) => break, // ENOSPC — the goal
-            };
-            if f.write_all(&chunk).is_err() {
-                break;
-            }
-            written += 1;
+        let before = corpus::dmesg_len();
+        {
+            let _m = corpus::mounted(&patched, &mnt);
+            c.verify_kept("после восстановления");
+            assert_eq!(
+                std::fs::read(&subvol_file).unwrap(),
+                corpus::pattern(5000, 65536),
+                "файл в подтоме повреждён"
+            );
+            assert_eq!(
+                std::fs::read(mnt.join("keep/snap/s000.bin")).unwrap(),
+                corpus::pattern(5000, 65536),
+                "файл в снапшоте повреждён"
+            );
+            assert!(
+                !mnt.join("keep").join(&victim).exists(),
+                "исключённое имя {victim} пережило коллизию хешей"
+            );
+            let written = corpus::Corpus::fill(&mnt, 900);
+            assert!(written > 32, "записалось всего {written} МиБ");
+            eprintln!("записано {written} МиБ поверх освобождённого");
+            // Reading a kept file AFTER the writes is the point: a stale csum,
+            // or a csum leaf its parent can no longer address, surfaces here.
+            c.verify_kept("после заполнения");
         }
-        // Reading a kept file AFTER the writes is the point: a stale csum, or a
-        // csum leaf its parent can no longer address, surfaces here as EIO.
-        for i in [1u32, 50, 101, 199] {
-            if i % 3 == 0 {
-                continue;
-            }
-            let sample = std::fs::read(mnt.join(format!("f{i:04}.keep")))
-                .unwrap_or_else(|e| panic!("f{i:04}.keep unreadable after writes: {e}"));
-            assert_eq!(sample.len(), 1024 * 1024);
-            assert_eq!(sample[777], (i as usize).wrapping_mul(31).wrapping_add(777) as u8);
-        }
-        let _ = std::process::Command::new("sync").output();
-        let u = std::process::Command::new("umount").arg(&mnt).output().unwrap();
-        assert!(u.status.success(), "umount failed: {}", String::from_utf8_lossy(&u.stderr));
-        eprintln!("wrote {written} MiB into the restored image");
 
         let (ok, log) = btrfs_check(&patched, true);
-        assert!(
-            ok,
-            "btrfs check AFTER mount-and-write failed — the defect-4 class is back:\n{log}"
-        );
+        assert!(ok, "btrfs check AFTER mount-and-write — класс дефекта 4 вернулся:\n{log}");
+        let complaints = corpus::kernel_complaints(before, &["BTRFS error", "BTRFS critical"]);
+        assert!(complaints.is_empty(), "ядро ругалось на ФС:\n{}", complaints.join("\n"));
     }
 }

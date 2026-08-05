@@ -493,6 +493,8 @@ pub fn scan_ext_exclusions(
     // blocks, and the filesystem still reads them.
     let mut freed_ranges = ByteRanges::new();
     let mut swap_kept = 0u64;
+    // xattr block → how many of the inodes that own it are being removed.
+    let mut xattr_owners: std::collections::BTreeMap<u64, u32> = Default::default();
     for (&ino, inode) in &col.matched_inodes {
         let remove = removable.contains(&ino);
         if !remove && !zeroable.contains(&ino) {
@@ -501,14 +503,13 @@ pub fn scan_ext_exclusions(
         let mode = u16at(inode, 0x00) as u16 & S_IFMT;
         let is_dir = mode == S_IFDIR;
         let size = u32at(inode, 0x04) | (u32at(inode, 0x6C) << 32);
-        // The xattr block goes with the inode (sole ownership proven in
-        // phase 2) — left behind it would sit marked used with no owner. It
-        // goes ONLY with a removal: an emptied file keeps its attributes.
+        // The xattr block of a removed inode loses one reference. Whether that
+        // frees it depends on the other owners, so only the tally is taken here
+        // (resolved right after the loop). It counts ONLY for a removal: an
+        // emptied file keeps its attributes.
         let file_acl = u32at(inode, 0x68) | (u16at(inode, 0x76) << 32);
         if remove && file_acl != 0 {
-            scan.ranges.add(file_acl * sb.fs_block, (file_acl + 1) * sb.fs_block);
-            freed_ranges.add(file_acl * sb.fs_block, (file_acl + 1) * sb.fs_block);
-            freed_blocks.push(file_acl);
+            *xattr_owners.entry(file_acl).or_default() += 1;
         }
         // Whether i_block holds a block map at all. Only regular files,
         // directories and slow symlinks own data blocks. For a char/block
@@ -561,6 +562,27 @@ pub fn scan_ext_exclusions(
             scan.bytes_excluded += size;
         }
     }
+    // The xattr blocks of the removed inodes. A block whose LAST owner goes is
+    // freed with it — left behind it would sit marked used with nobody pointing
+    // at it («block bitmap differences»). A block a surviving inode still owns
+    // only loses references: `h_refcount` drops by the number of owners that
+    // went and the block's own checksum follows (Stage 2), while its contents
+    // stay — they belong to the survivor.
+    let mut xattr_dec: Vec<(u64, u32)> = Vec::new();
+    for (&blk, &owners) in &xattr_owners {
+        match xattr_refcount(vol, &sb, blk) {
+            Some(rc) if rc > owners => xattr_dec.push((blk, owners)),
+            Some(_) => {
+                scan.ranges.add(blk * sb.fs_block, (blk + 1) * sb.fs_block);
+                freed_ranges.add(blk * sb.fs_block, (blk + 1) * sb.fs_block);
+                freed_blocks.push(blk);
+            }
+            // Unreachable — phase 2 kept such an inode out of `removable` — but
+            // a leaked block beats a wrong one: never touched, only reported.
+            None => warn!(block = blk, "ext exclusions: xattr-блок нечитаем — оставлен занятым"),
+        }
+    }
+
     // Dirents: an entry whose inode goes while its directory survives is
     // coalesced away (a removed directory takes all its entries with its
     // blocks); a removed subdirectory also drops the surviving parent's link
@@ -590,7 +612,10 @@ pub fn scan_ext_exclusions(
     // Stage 2 — build metadata patches (best-effort: on any error, drop Stage 2
     // and keep Stage 1, so excluded files remain zero-filled ghosts rather than
     // risking an inconsistent image).
-    match build_stage2_patches(vol, &sb, &coalesce, &freed_inodes, &freed_blocks, &dir_parents) {
+    let stage2 = build_stage2_patches(
+        vol, &sb, &coalesce, &freed_inodes, &freed_blocks, &dir_parents, &xattr_dec,
+    );
+    match stage2 {
         Ok(patches) => {
             scan.patches = patches;
             // Only what Stage 2 freed in the bitmaps: an emptied file still
@@ -743,17 +768,17 @@ fn collect_tree(
 ///    its parent, up the chain, to a fixpoint. (The btrfs analogue:
 ///    `spare_parents_of_spared_children`.)
 ///
-/// A shared xattr block (refcount > 1) also spares its file — decrementing the
-/// refcount is a patch this pass does not carry yet (plan P8), and excluding
-/// less is always safe.
+/// A file whose xattr block does not parse also stays: its `i_file_acl` points
+/// at something we can neither free nor decrement, and freeing an inode while
+/// its attribute block stays marked used is exactly the leak this pass exists
+/// to avoid. A SHARED but valid block is no obstacle — Stage 2 decrements it.
 /// Returns `(removable, zeroable)`.
 ///
 /// `zeroable` is the wider set, and the difference matters: a file we cannot
-/// REMOVE (its xattr block is shared with another inode) we can still EMPTY,
-/// and until this split existed such a file kept its contents in the copy —
-/// the exclusion quietly did nothing for it. The one file that must keep its
-/// data is a hard link with a name that was not excluded: zeroing it would
-/// empty an innocent path.
+/// REMOVE we can still EMPTY, and until this split existed such a file kept its
+/// contents in the copy — the exclusion quietly did nothing for it. The one
+/// file that must keep its data is a hard link with a name that was not
+/// excluded: zeroing it would empty an innocent path.
 fn decide_removable(
     vol: &mut dyn RawVolume,
     sb: &Sb,
@@ -780,8 +805,8 @@ fn decide_removable(
             zeroable.insert(ino);
         }
         let file_acl = u32at(inode, 0x68) | (u16at(inode, 0x76) << 32);
-        if file_acl != 0 && !xattr_block_is_private(vol, sb, file_acl) {
-            continue; // shared xattr block: the file stays, its data does not
+        if file_acl != 0 && xattr_refcount(vol, sb, file_acl).is_none() {
+            continue; // unreadable xattr block: the file stays, its data does not
         }
         removable.insert(ino);
     }
@@ -801,19 +826,25 @@ fn decide_removable(
     (removable, zeroable)
 }
 
-/// True when `file_acl` points at a valid xattr block owned by exactly one
-/// inode (header magic 0xEA020000, refcount 1).
-fn xattr_block_is_private(vol: &mut dyn RawVolume, sb: &Sb, file_acl: u64) -> bool {
-    if file_acl >= sb.blocks_count {
-        return false;
+/// How many inodes an xattr block claims to be shared by (`h_refcount`), or
+/// None when the block is out of range, unreadable, or carries no xattr header
+/// (magic 0xEA020000) — in which case nothing about it may be assumed.
+fn xattr_refcount(vol: &mut dyn RawVolume, sb: &Sb, file_acl: u64) -> Option<u32> {
+    if file_acl < sb.first_data_block as u64 || file_acl >= sb.blocks_count {
+        return None;
     }
     let mut hdr = [0u8; 8];
-    if vol.read_at(file_acl * sb.fs_block, &mut hdr).is_err() {
-        return false;
-    }
-    u32::from_le_bytes(hdr[0..4].try_into().unwrap()) == 0xEA02_0000
-        && u32::from_le_bytes(hdr[4..8].try_into().unwrap()) == 1
+    vol.read_at(file_acl * sb.fs_block, &mut hdr).ok()?;
+    (u32::from_le_bytes(hdr[0..4].try_into().unwrap()) == XATTR_MAGIC)
+        .then(|| u32::from_le_bytes(hdr[4..8].try_into().unwrap()))
 }
+
+/// `h_magic` of an ext2/3/4 extended-attribute block.
+const XATTR_MAGIC: u32 = 0xEA02_0000;
+/// `h_refcount` — how many inodes point at this block.
+const XATTR_REFCOUNT_OFF: usize = 0x04;
+/// `h_checksum` — crc32c of the block, seeded with its own block number.
+const XATTR_CSUM_OFF: usize = 0x10;
 
 /// A swap area's signature: "SWAPSPACE2" at the end of the first page.
 const SWAP_MAGIC: &[u8; 10] = b"SWAPSPACE2";
@@ -883,6 +914,18 @@ fn dir_block_csum(sb: &Sb, dir_ino: u32, dir_gen: u32, block: &[u8]) -> u32 {
     let seed = crc32c_raw(sb.csum_seed, &dir_ino.to_le_bytes());
     let seed = crc32c_raw(seed, &dir_gen.to_le_bytes());
     crc32c_raw(seed, &block[..block.len() - 12])
+}
+
+/// Extended-attribute block checksum (`h_checksum` @0x10, metadata_csum):
+/// crc32c seeded with the fs seed over the block's own number as 64-bit LE,
+/// then over the whole block with the checksum field zeroed (the caller zeroes
+/// it). The `ext2_ext_attr_header` comment in e2fsprogs («id = inum if
+/// refcount=1, blknum otherwise») describes an intent the code does not follow:
+/// checked against e2fsprogs 1.47 on a real image, the block number is the seed
+/// at refcount 1 AND 2, and no inode number takes part.
+fn xattr_block_csum(sb: &Sb, blk: u64, block: &[u8]) -> u32 {
+    let c = crc32c_raw(sb.csum_seed, &blk.to_le_bytes());
+    crc32c_raw(c, block)
 }
 
 /// Superblock checksum (`s_checksum`, metadata_csum): crc32c(~0) over the first
@@ -955,6 +998,7 @@ fn build_stage2_patches(
     freed_inodes: &[(u32, bool)],
     freed_blocks: &[u64],
     dir_parents: &[u32],
+    xattr_dec: &[(u64, u32)],
 ) -> Result<Vec<(u64, Vec<u8>)>> {
     if sb.gdt_csum && !sb.metadata_csum {
         return Err(bad("crc16 (gdt_csum-only) descriptors not supported"));
@@ -1072,6 +1116,28 @@ fn build_stage2_patches(
         put_u16(&mut inode, 0x1A, links.saturating_sub(dec));
         set_inode_csum(sb, pino, &mut inode);
         patches.insert(off, inode);
+    }
+
+    // --- Shared xattr blocks: drop one reference per removed owner. The block
+    //     itself stays (a surviving inode still points at it), so no bitmap and
+    //     no free count moves — only `h_refcount` and the block's checksum. ---
+    for &(blk, owners) in xattr_dec {
+        let off = blk * fsb;
+        let mut b = read_block(vol, off)?;
+        let rcb = &b[XATTR_REFCOUNT_OFF..XATTR_REFCOUNT_OFF + 4];
+        let rc = u32::from_le_bytes(rcb.try_into().unwrap());
+        if u32::from_le_bytes(b[0..4].try_into().unwrap()) != XATTR_MAGIC || rc <= owners {
+            // The block changed under us between the scan and now (it cannot,
+            // the volume is a snapshot) — refuse rather than write nonsense.
+            return Err(bad("xattr block header changed during the scan"));
+        }
+        put_u32(&mut b, XATTR_REFCOUNT_OFF, rc - owners);
+        if sb.metadata_csum {
+            put_u32(&mut b, XATTR_CSUM_OFF, 0);
+            let c = xattr_block_csum(sb, blk, &b);
+            put_u32(&mut b, XATTR_CSUM_OFF, c);
+        }
+        patches.insert(off, b);
     }
 
     // --- Descriptors: apply free-count deltas + recompute bg_checksum. ---
@@ -1703,12 +1769,135 @@ mod ext_integration {
         assert!(!inside.contains("junk"), "contents must be gone:\n{inside}");
     }
 
+    /// `File ACL:` of an inode — the block holding its out-of-inode xattrs.
+    fn file_acl_of(img: &std::path::Path, path: &str) -> u64 {
+        debugfs_r(img, &format!("stat {path}"))
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("File ACL: "))
+            .and_then(|s| s.split_whitespace().next())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
+    }
+
+    /// Build an image where `/cache/a.bin` and `/keep_xattr.bin` SHARE one xattr
+    /// block: `ea_set` gives the first one a block, `sif` points the second at
+    /// the same block, and `e2fsck -fy` makes the result genuine (it raises
+    /// h_refcount to 2, fixes i_blocks and writes the block's own checksum, so
+    /// the fixture is e2fsprogs' idea of a shared block, not ours). Returns the
+    /// image, its tempdir and the block number.
+    fn make_shared_xattr_image() -> Option<(std::path::PathBuf, tempfile::TempDir, u64)> {
+        let (img, keep) = make_ext4_from(4096, |src| {
+            std::fs::create_dir_all(src.join("cache")).unwrap();
+            std::fs::write(src.join("cache/a.bin"), vec![0xAB; 8192]).unwrap();
+            std::fs::write(src.join("keep_xattr.bin"), vec![0xCD; 8192]).unwrap();
+        })?;
+        let big = "A".repeat(300); // too big for the inode → an external block
+        debugfs_w(&img, &format!("ea_set /cache/a.bin user.big {big}\n"));
+        let acl = file_acl_of(&img, "/cache/a.bin");
+        if acl == 0 {
+            eprintln!("xattr stayed in-inode — skipping");
+            return None;
+        }
+        debugfs_w(&img, &format!("sif /keep_xattr.bin file_acl {acl}\n"));
+        if !fsck_normalize(&img) {
+            eprintln!("e2fsck could not normalise the shared-xattr fixture — skipping");
+            return None;
+        }
+        if file_acl_of(&img, "/keep_xattr.bin") != acl {
+            eprintln!("e2fsck undid the sharing — skipping");
+            return None;
+        }
+        Some((img, keep, acl))
+    }
+
+    fn xattr_refcount_in(img: &std::path::Path, blk: u64) -> u32 {
+        let data = std::fs::read(img).unwrap();
+        let off = (blk * 4096) as usize;
+        assert_eq!(
+            u32::from_le_bytes(data[off..off + 4].try_into().unwrap()),
+            XATTR_MAGIC,
+            "блок {blk} перестал быть xattr-блоком"
+        );
+        u32::from_le_bytes(data[off + 4..off + 8].try_into().unwrap())
+    }
+
+    /// P8-финал: removing one owner of a SHARED xattr block decrements its
+    /// refcount (and rewrites its checksum) instead of sparing the file.
+    ///
+    /// The block must survive untouched — its contents belong to the survivor —
+    /// and it must not leave the image either.
+    #[test]
+    fn removing_one_owner_decrements_a_shared_xattr_block() {
+        if !have_tool("debugfs") || !have_tool("e2fsck") {
+            eprintln!("debugfs/e2fsck unavailable — skipping");
+            return;
+        }
+        let Some((img, keep, acl)) = make_shared_xattr_image() else { return };
+        assert_eq!(xattr_refcount_in(&img, acl), 2, "фикстура должна давать общий блок");
+
+        let (scan, _) = run_scan(&img, &["cache"]);
+        assert_eq!(scan.files_excluded, 2, "каталог cache и файл в нём");
+        // The shared block is neither zeroed nor dropped: the survivor reads it.
+        let covers =
+            |r: &ByteRanges, b: u64| r.iter().any(|(s, e)| s < (b + 1) * 4096 && e > b * 4096);
+        assert!(!covers(&scan.ranges, acl), "общий xattr-блок {acl} нельзя обнулять");
+        assert!(!covers(&scan.droppable, acl), "общий xattr-блок {acl} нельзя выбрасывать");
+
+        let patched = keep.path().join("patched.img");
+        apply_patches(&img, &scan, &patched);
+        assert_eq!(xattr_refcount_in(&patched, acl), 1, "refcount должен уменьшиться до 1");
+        let (ok, log) = fsck_ro(&patched);
+        assert!(ok, "e2fsck после декремента refcount:\n{log}");
+        // The surviving owner keeps both its attribute and its data.
+        let ea = debugfs_r(&patched, "ea_list /keep_xattr.bin");
+        assert!(ea.contains("user.big"), "уцелевший владелец потерял атрибут:\n{ea}");
+        let ls = debugfs_r(&patched, "ls /cache");
+        assert!(!ls.contains("a.bin"), "исключённый файл должен исчезнуть:\n{ls}");
+    }
+
+    /// The other half of the same rule: when the LAST owner goes, the block is
+    /// freed with it — otherwise it stays marked used with nobody pointing at it.
+    #[test]
+    fn removing_the_last_owner_frees_the_xattr_block() {
+        if !have_tool("debugfs") || !have_tool("e2fsck") {
+            eprintln!("debugfs/e2fsck unavailable — skipping");
+            return;
+        }
+        let Some((img, keep)) = make_ext4_from(4096, |src| {
+            std::fs::create_dir_all(src.join("cache")).unwrap();
+            std::fs::write(src.join("cache/a.bin"), vec![0xAB; 8192]).unwrap();
+            std::fs::write(src.join("keep.txt"), vec![0xCD; 4096]).unwrap();
+        }) else {
+            return;
+        };
+        let big = "A".repeat(300);
+        debugfs_w(&img, &format!("ea_set /cache/a.bin user.big {big}\n"));
+        let acl = file_acl_of(&img, "/cache/a.bin");
+        if acl == 0 || !fsck_normalize(&img) {
+            eprintln!("xattr stayed in-inode or fixture unclean — skipping");
+            return;
+        }
+        assert_eq!(xattr_refcount_in(&img, acl), 1);
+
+        let (scan, _) = run_scan(&img, &["cache"]);
+        let covers =
+            |r: &ByteRanges, b: u64| r.iter().any(|(s, e)| s < (b + 1) * 4096 && e > b * 4096);
+        assert!(covers(&scan.ranges, acl), "последний владелец ушёл — блок {acl} обнуляется");
+        assert!(covers(&scan.droppable, acl), "и покидает образ");
+
+        let patched = keep.path().join("patched.img");
+        apply_patches(&img, &scan, &patched);
+        let (ok, log) = fsck_ro(&patched);
+        assert!(ok, "e2fsck после освобождения xattr-блока:\n{log}");
+    }
+
     /// A file we cannot remove must still lose its data.
     ///
-    /// An inode sharing its xattr block with another one cannot be freed — the
-    /// block's refcount would need decrementing, which this pass does not do.
-    /// It used to be kept whole, contents and all, so the exclusion silently
-    /// did nothing for it. Now its data is zeroed and only the entry remains.
+    /// An inode whose `i_file_acl` points at something that is not an xattr
+    /// block cannot be freed: the block can be neither released (it may belong
+    /// to someone else) nor decremented. Such a file used to be kept whole,
+    /// contents and all, so the exclusion silently did nothing for it. Now its
+    /// data is zeroed and only the entry remains.
     #[test]
     fn a_file_that_cannot_be_removed_is_still_emptied() {
         if !have_tool("debugfs") || !have_tool("e2fsck") {
@@ -1717,31 +1906,24 @@ mod ext_integration {
         }
         let Some((img, keep)) = make_ext4_from(4096, |src| {
             std::fs::create_dir_all(src.join("cache")).unwrap();
-            std::fs::write(src.join("cache/shared_xattr.bin"), vec![0xAB; 8192]).unwrap();
+            std::fs::write(src.join("cache/broken_xattr.bin"), vec![0xAB; 8192]).unwrap();
             std::fs::write(src.join("cache/plain.bin"), vec![0xAB; 8192]).unwrap();
             std::fs::write(src.join("keep.txt"), vec![0xCD; 4096]).unwrap();
         }) else {
             return;
         };
-        // Give the file an xattr block and then claim it is shared, which is
-        // what a second owner would look like from here.
         let big = "A".repeat(300);
-        debugfs_w(&img, &format!("ea_set /cache/shared_xattr.bin user.big {big}\n"));
-        let stat = debugfs_r(&img, "stat /cache/shared_xattr.bin");
-        let acl: u64 = stat
-            .lines()
-            .find_map(|l| l.trim().strip_prefix("File ACL: "))
-            .and_then(|s| s.split_whitespace().next())
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
+        debugfs_w(&img, &format!("ea_set /cache/broken_xattr.bin user.big {big}\n"));
+        let acl = file_acl_of(&img, "/cache/broken_xattr.bin");
         if acl == 0 {
             eprintln!("xattr stayed in-inode — skipping");
             return;
         }
-        // h_refcount lives at offset 4 of the xattr block: make it 2.
+        // Ruin the header magic: from here the block is unreadable, and nothing
+        // about it may be assumed.
         let mut data = std::fs::read(&img).unwrap();
-        let off = (acl * 4096 + 4) as usize;
-        data[off..off + 4].copy_from_slice(&2u32.to_le_bytes());
+        let off = (acl * 4096) as usize;
+        data[off..off + 4].copy_from_slice(&0xDEAD_BEEFu32.to_le_bytes());
         std::fs::write(&img, &data).unwrap();
 
         let (scan, _) = run_scan(&img, &["cache"]);
@@ -1755,9 +1937,8 @@ mod ext_integration {
             "блоки пощажённого файла нельзя выбрасывать из образа: {droppable} из {zeroed}"
         );
 
-        // The doctored refcount leaves the xattr block's own checksum stale, so
-        // this fixture is not fsck-clean to begin with. What must hold is that
-        // our patches add nothing to that list.
+        // The ruined header leaves the fixture unclean to begin with. What must
+        // hold is that our patches add nothing to e2fsck's list.
         let complaints = |log: &str| log.lines().filter(|l| l.contains("Fix?")).count();
         let (_, before) = fsck_ro(&img);
         let patched = keep.path().join("patched.img");
@@ -1769,7 +1950,7 @@ mod ext_integration {
             "патчи добавили замечаний e2fsck:\nбыло:\n{before}\nстало:\n{after}"
         );
         let ls = debugfs_r(&patched, "ls -l /cache");
-        assert!(ls.contains("shared_xattr.bin"), "запись пощажённого файла должна остаться:\n{ls}");
+        assert!(ls.contains("broken_xattr.bin"), "запись пощажённого файла должна остаться:\n{ls}");
     }
 
     /// An unreplayed journal makes both products liars: the on-disk structures
@@ -1790,5 +1971,127 @@ mod ext_integration {
         assert!(scan.is_err(), "exclusions must refuse a dirty journal");
         let map = crate::ext_map::build_ext_used_map(&mut vol, 1 << 20);
         assert!(map.is_err(), "used-map must refuse a dirty journal");
+    }
+
+    // --- Dynamic acceptance (root): the kernel gets the last word -----------
+
+    /// What a restored volume actually looks like: the excluded ranges are
+    /// zeros (the backup never stored them) and the Stage-2 patches are in.
+    fn apply_full(img: &std::path::Path, scan: &ExtExclusionScan, out: &std::path::Path) {
+        let mut data = std::fs::read(img).unwrap();
+        for (s, e) in scan.ranges.iter() {
+            data[s as usize..e as usize].fill(0);
+        }
+        for (off, bytes) in &scan.patches {
+            let o = *off as usize;
+            data[o..o + bytes.len()].copy_from_slice(bytes);
+        }
+        std::fs::write(out, &data).unwrap();
+    }
+
+    /// The acceptance no static check can replace: mount the patched image,
+    /// read every kept file, WRITE until the freed space is reused, read them
+    /// again, unmount, `e2fsck -fn`. e2fsck judges structure; only the kernel
+    /// judges whether that structure is USABLE — the btrfs half of this suite
+    /// learned it the hard way (an image `btrfs check` called clean whose stale
+    /// parent keys turned into EIO and took init down with SIGBUS).
+    ///
+    /// The fixture is the shared corpus (`exclusion_corpus`), built by the
+    /// kernel through a mount rather than assembled by debugfs: dense and
+    /// nested-dense directories, hard links inside and across the exclusion,
+    /// device nodes, FIFOs, sockets, fast and slow symlinks, an xattr block
+    /// SHARED by a kept and an excluded file (the P8 decrement path) and one
+    /// owned privately.
+    ///
+    /// Needs root (loop mount):
+    ///
+    /// ```sh
+    /// cargo test -p own-backup-backup --lib --no-run     # build as yourself
+    /// sudo <test-binary> --ignored ext_survives_mount_and_write --nocapture
+    /// ```
+    #[test]
+    #[ignore = "needs root: loop-mounts the patched image and writes to it"]
+    fn ext_survives_mount_and_write() {
+        use crate::exclusion_corpus as corpus;
+        if !corpus::is_root() {
+            eprintln!("not root — skipping");
+            return;
+        }
+        for t in ["mkfs.ext4", "e2fsck", "debugfs"] {
+            if !have_tool(t) {
+                eprintln!("{t} unavailable — skipping");
+                return;
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let img = dir.path().join("fs.img");
+        std::fs::File::create(&img).unwrap().set_len(512 * 1024 * 1024).unwrap();
+        assert!(std::process::Command::new("mkfs.ext4")
+            .args(["-q", "-F"])
+            .arg(&img)
+            .status()
+            .unwrap()
+            .success());
+        let mnt = dir.path().join("mnt");
+        std::fs::create_dir_all(&mnt).unwrap();
+        let keep = mnt.join("keep");
+        let cache = mnt.join("cache");
+
+        let c = {
+            let _m = corpus::mounted(&img, &mnt);
+            corpus::populate(&mnt, corpus::Caps::ext())
+        };
+
+        // A fixture only proves what it actually contains (the btrfs lesson: a
+        // single-leaf csum tree quietly proved nothing for months).
+        let acl_keep = file_acl_of(&img, "/keep/shared_xattr.bin");
+        let acl_cache = file_acl_of(&img, "/cache/shared_xattr.bin");
+        assert!(
+            acl_keep != 0 && acl_keep == acl_cache,
+            "ядро не разделило xattr-блок ({acl_keep} и {acl_cache}) — P8 остался бы непроверенным"
+        );
+        let (clean, log) = fsck_ro(&img);
+        assert!(clean, "фикстура нечиста до всякого вмешательства:\n{log}");
+
+        let (scan, _) = run_scan(&img, &["cache"]);
+        assert!(scan.files_excluded >= 1400, "исключено всего {}", scan.files_excluded);
+        assert!(!scan.patches.is_empty(), "Stage 2 отказался — проверять было бы нечего");
+        let patched = dir.path().join("patched.img");
+        apply_full(&img, &scan, &patched);
+        let (ok, log) = fsck_ro(&patched);
+        assert!(ok, "e2fsck до монтирования:\n{log}");
+        assert_eq!(xattr_refcount_in(&patched, acl_keep), 1, "общий xattr-блок не декрементирован");
+
+        let before = corpus::dmesg_len();
+        {
+            let _m = corpus::mounted(&patched, &mnt);
+            c.verify_kept("после восстановления");
+            // The survivor of the shared xattr block still has its attribute.
+            assert_eq!(
+                corpus::getxattr(&keep.join("shared_xattr.bin"), "user.big"),
+                vec![b'A'; 2048],
+                "уцелевший владелец потерял общий xattr"
+            );
+            // The straddling hard link keeps the file alive under its kept name,
+            // and that spares /cache itself — holding exactly that one entry.
+            let mut left: Vec<String> = std::fs::read_dir(&cache)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            left.sort();
+            assert_eq!(left, ["hard_in.bin"], "в /cache осталось лишнее: {left:?}");
+
+            let written = corpus::Corpus::fill(&mnt, 512);
+            assert!(written > 32, "записалось всего {written} МиБ — место не переиспользовалось");
+            eprintln!("записано {written} МиБ поверх освобождённого");
+            // Reading AFTER the writes is the point: a block freed twice, or a
+            // bitmap that lied, shows up here and nowhere else.
+            c.verify_kept("после заполнения");
+        }
+
+        let (ok, log) = fsck_ro(&patched);
+        assert!(ok, "e2fsck ПОСЛЕ монтирования и записи:\n{log}");
+        let complaints = corpus::kernel_complaints(before, &["EXT4-fs error", "EXT4-fs warning"]);
+        assert!(complaints.is_empty(), "ядро ругалось на ФС:\n{}", complaints.join("\n"));
     }
 }
