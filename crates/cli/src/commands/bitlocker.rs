@@ -148,6 +148,16 @@ type Examined = (
 fn report(found: Vec<Examined>, json: bool) -> Result<()> {
     let encrypted: Vec<&Examined> = found.iter().filter(|(_, _, r)| r.is_ok()).collect();
 
+    if !json {
+        // Which binary answered. An old exe in another folder looks exactly
+        // like a bug in this one — it has already cost a round trip.
+        println!(
+            "own-backup-cli {} (сборка {})",
+            env!("CARGO_PKG_VERSION"),
+            crate::BUILD_TAG
+        );
+    }
+
     if json {
         let items: Vec<serde_json::Value> = encrypted
             .iter()

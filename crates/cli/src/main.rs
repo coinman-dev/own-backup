@@ -4,11 +4,21 @@ mod logging;
 
 use clap::{Parser, Subcommand};
 
+/// Bump this on any build handed over for testing.
+///
+/// It exists because an old exe left in another folder is indistinguishable
+/// from a bug: a run of this program answered with a message that had already
+/// been replaced, and the option it was told to use "did not exist". `-V` and
+/// every diagnostic command print it, so "which binary is this" is a question
+/// with an answer.
+pub const BUILD_TAG: &str = "2026-08-05a";
+const VERSION_LINE: &str = concat!(env!("CARGO_PKG_VERSION"), " (сборка 2026-08-05a)");
+
 #[derive(Parser)]
 #[command(
     name = "own-backup",
     about = "My Own Backup - Open-source block-level backup system",
-    version
+    version = VERSION_LINE
 )]
 struct Cli {
     #[command(subcommand)]
