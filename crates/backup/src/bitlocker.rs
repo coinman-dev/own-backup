@@ -446,18 +446,28 @@ pub fn inspect_bitlocker(vol: &mut dyn RawVolume) -> Result<BitLockerInfo> {
     }
     let sector_size = u16at(&boot, 0x0B) as u32;
 
-    let mut last_err = bad("no FVE metadata copy could be parsed");
-    for i in 0..3 {
-        let info_off = u64at(&boot, INFO_OFFSETS_AT + i * 8);
+    let offsets: Vec<u64> = (0..3).map(|i| u64at(&boot, INFO_OFFSETS_AT + i * 8)).collect();
+    let mut last_err = String::new();
+    for (i, &info_off) in offsets.iter().enumerate() {
         if info_off == 0 || info_off + 0x70 > vol.len() {
             continue;
         }
         match inspect_metadata(vol, info_off, sector_size, i) {
             Ok(info) => return Ok(info),
-            Err(e) => last_err = e,
+            Err(e) => last_err = e.to_string(),
         }
     }
-    Err(last_err)
+    // Nothing parsed. The answer is in the bytes, so they go into the message:
+    // guessing at a layout from the outside is how an evening disappears.
+    Err(bad(format!(
+        "метаданные FVE не прочитаны. Окно {} байт, сектор {sector_size}; \
+         смещения копий: {}; сектор 0 [0x00..0x10]: {}; [0x160..0x190]: {}{}",
+        vol.len(),
+        offsets.iter().map(|o| format!("{o:#x}")).collect::<Vec<_>>().join(", "),
+        hex(&boot[..0x10]),
+        hex(&boot[0x160..0x190.min(boot.len())]),
+        if last_err.is_empty() { String::new() } else { format!("; последняя ошибка: {last_err}") },
+    )))
 }
 
 fn inspect_metadata(

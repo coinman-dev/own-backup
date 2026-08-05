@@ -28,6 +28,15 @@ pub struct BitlockerArgs {
     /// Output as JSON.
     #[arg(long)]
     pub json: bool,
+
+    /// Write the first bytes of the volume to a file, for reading the layout
+    /// somewhere else. Only headers and encrypted bytes — no readable data.
+    #[arg(long, value_name = "ФАЙЛ")]
+    pub dump: Option<String>,
+
+    /// How much `--dump` writes, in KiB.
+    #[arg(long, default_value = "64")]
+    pub dump_kib: u64,
 }
 
 #[cfg(target_os = "windows")]
@@ -56,7 +65,15 @@ pub async fn run(args: BitlockerArgs) -> Result<()> {
                 .volume_letter
                 .map(|c| format!("{c}:"))
                 .unwrap_or_else(|| format!("{} раздел {}", disk.device_id, part.index));
-            found.push(examine(number, part.offset_bytes, part.size_bytes, &label, &disk.device_id));
+            found.push(examine(
+                number,
+                part.offset_bytes,
+                part.size_bytes,
+                &label,
+                &disk.device_id,
+                args.dump.as_deref(),
+                args.dump_kib,
+            ));
         }
     }
     report(found, args.json)
@@ -70,7 +87,10 @@ fn examine(
     size: u64,
     label: &str,
     disk_id: &str,
+    dump: Option<&str>,
+    dump_kib: u64,
 ) -> (String, String, std::result::Result<own_backup_backup::bitlocker::BitLockerInfo, String>) {
+    use own_backup_backup::fat_map::RawVolume;
     use own_backup_backup::volume_window::VolumeWindow;
     use own_backup_backup::win_device::WinRawDevice;
 
@@ -80,6 +100,14 @@ fn examine(
         let dev = WinRawDevice::open_read(&path).map_err(|e| e.to_string())?;
         let mut window =
             VolumeWindow::new(Box::new(dev), offset, size).map_err(|e| e.to_string())?;
+        if let Some(dump) = dump {
+            let want = (dump_kib * 1024).min(window.len()) as usize;
+            let mut buf = vec![0u8; want];
+            window.read_at(0, &mut buf).map_err(|e| e.to_string())?;
+            let file = format!("{dump}.{}.bin", label.trim_end_matches(':').replace([' ', '\\'], "_"));
+            std::fs::write(&file, &buf).map_err(|e| e.to_string())?;
+            println!("  записано {} КиБ в {file}", want / 1024);
+        }
         own_backup_backup::bitlocker::inspect_bitlocker(&mut window).map_err(|e| e.to_string())
     })();
     (label.to_string(), where_, outcome)
