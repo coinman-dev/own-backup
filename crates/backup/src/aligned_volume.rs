@@ -59,7 +59,12 @@ impl<V: RawVolume> RawVolume for AlignedVolume<V> {
             return Ok(());
         }
         let start = offset / WINDOW * WINDOW;
+        // Rounding up must not walk off the end: a partition is not a multiple
+        // of 4096 sectors, and the reader underneath is right to refuse a read
+        // that leaves it. The clamp still covers the caller's range, which is
+        // inside the device by definition.
         let end = (offset + buf.len() as u64).div_ceil(WINDOW) * WINDOW;
+        let end = end.min(self.inner.len().max(offset + buf.len() as u64));
         // A request that is already aligned and big goes straight through: no
         // point copying megabytes of filesystem blocks through a window buffer.
         if start == offset && end == offset + buf.len() as u64 && buf.len() as u64 >= WINDOW {
@@ -117,6 +122,19 @@ mod tests {
         // Byte i = i mod 251, so every offset is identifiable.
         let data: Vec<u8> = (0..65536usize).map(|i| (i % 251) as u8).collect();
         PickyVolume { data, sector: 512, reads: 0 }
+    }
+
+    /// The tail of a partition: rounding the window up to 4096 would ask for
+    /// bytes the device does not have, and a reader that knows its own length
+    /// — a window onto one partition — refuses that, rightly.
+    #[test]
+    fn a_read_at_the_very_end_does_not_round_past_it() {
+        let mut short = picky();
+        short.data.truncate(5120); // ten sectors: not a multiple of the window
+        let mut v = AlignedVolume::new(short);
+        let mut buf = [0u8; 16];
+        v.read_at(5100, &mut buf).expect("the last bytes must be readable");
+        assert_eq!(buf[0], (5100 % 251) as u8);
     }
 
     #[test]

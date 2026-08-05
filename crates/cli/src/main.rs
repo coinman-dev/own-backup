@@ -11,8 +11,8 @@ use clap::{Parser, Subcommand};
 /// been replaced, and the option it was told to use "did not exist". `-V` and
 /// every diagnostic command print it, so "which binary is this" is a question
 /// with an answer.
-pub const BUILD_TAG: &str = "2026-08-05b";
-const VERSION_LINE: &str = concat!(env!("CARGO_PKG_VERSION"), " (сборка 2026-08-05b)");
+pub const BUILD_TAG: &str = "2026-08-05c";
+const VERSION_LINE: &str = concat!(env!("CARGO_PKG_VERSION"), " (сборка 2026-08-05c)");
 
 #[derive(Parser)]
 #[command(

@@ -98,8 +98,14 @@ fn examine(
     let path = format!(r"\\.\PhysicalDrive{disk}");
     let outcome = (|| -> std::result::Result<_, String> {
         let dev = WinRawDevice::open_read(&path).map_err(|e| e.to_string())?;
-        let mut window =
-            VolumeWindow::new(Box::new(dev), offset, size).map_err(|e| e.to_string())?;
+        // Windows opens a raw device with FILE_FLAG_NO_BUFFERING, so every read
+        // must start on a sector boundary — and the FVE dataset begins 0x40
+        // bytes into its block, which is not one. Same wrapper the ext scanner
+        // needed for the same reason, and it caches the last window, which the
+        // metadata walk reads over and over.
+        let mut window = own_backup_backup::aligned_volume::AlignedVolume::new(
+            VolumeWindow::new(Box::new(dev), offset, size).map_err(|e| e.to_string())?,
+        );
         if let Some(dump) = dump {
             let want = (dump_kib * 1024).min(window.len()) as usize;
             let mut buf = vec![0u8; want];
