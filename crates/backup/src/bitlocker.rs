@@ -49,8 +49,22 @@ const BITLOCKER_GUID: [u8; 16] = [
 const BITLOCKER_TO_GO_GUID: [u8; 16] = [
     0x3C, 0xD6, 0x67, 0x49, 0x29, 0x2E, 0xD8, 0x4A, 0x83, 0x99, 0xF6, 0xA3, 0x39, 0xE3, 0xD0, 0x00,
 ];
-/// Boot-sector offset of the three FVE metadata block byte offsets (u64 each).
-const INFO_OFFSETS_AT: usize = 0x170;
+/// Boot-sector offset of the three FVE metadata block byte offsets (u64 each),
+/// in a volume whose header still looks like NTFS: the BitLocker GUID sits at
+/// 0x160 and the offsets follow it.
+const INFO_OFFSETS_NTFS: usize = 0x170;
+
+/// The same three offsets in a volume whose header is a FAT-shaped BPB with
+/// `-FVE-FS-` as its OEM id — the original boot sector having been moved aside.
+///
+/// **Found by dumping real volumes (2026-08-05).** Every test in this file
+/// builds its own volume, and every one of them put the offsets at
+/// [`INFO_OFFSETS_NTFS`] because that is where the parser looked; the first
+/// four real volumes we ever pointed it at — Windows 10, XTS-AES 128, "encrypt
+/// used space only" — all carry this header instead, with zeros at 0x160 and
+/// the offsets here. So the parser had never once been right about a real
+/// disk, and its own tests could not have told us.
+const INFO_OFFSETS_FVE: usize = 0x00B0;
 
 /// FVE datum `value_type` codes.
 const DATUM_KEY: u16 = 0x0001;
@@ -265,6 +279,31 @@ fn utf16le(password: &str) -> Zeroizing<Vec<u8>> {
 // FVE metadata / datum parsing
 // ---------------------------------------------------------------------------
 
+/// Where the three FVE metadata copies might be, best first.
+///
+/// Both header layouts are read rather than chosen between: a value that is
+/// zero, unaligned or outside the volume is not an offset, and what survives
+/// that is tried until one parses. Choosing by signature would work today and
+/// would break on the next variant Microsoft ships — this cannot.
+fn metadata_offsets(boot: &[u8], volume_len: u64) -> Vec<u64> {
+    let mut out: Vec<u64> = Vec::new();
+    for base in [INFO_OFFSETS_FVE, INFO_OFFSETS_NTFS] {
+        for i in 0..3 {
+            let at = base + i * 8;
+            if at + 8 > boot.len() {
+                continue;
+            }
+            let off = u64at(boot, at);
+            // A metadata block is sector-aligned, inside the volume, and not
+            // at the very start (that is the boot sector itself).
+            if off >= 512 && off % 512 == 0 && off + 0x70 <= volume_len && !out.contains(&off) {
+                out.push(off);
+            }
+        }
+    }
+    out
+}
+
 /// One FVE datum (metadata entry): an 8-byte header then `size - 8` data bytes.
 struct Datum<'a> {
     entry_type: u16,
@@ -446,12 +485,9 @@ pub fn inspect_bitlocker(vol: &mut dyn RawVolume) -> Result<BitLockerInfo> {
     }
     let sector_size = u16at(&boot, 0x0B) as u32;
 
-    let offsets: Vec<u64> = (0..3).map(|i| u64at(&boot, INFO_OFFSETS_AT + i * 8)).collect();
+    let offsets = metadata_offsets(&boot, vol.len());
     let mut last_err = String::new();
     for (i, &info_off) in offsets.iter().enumerate() {
-        if info_off == 0 || info_off + 0x70 > vol.len() {
-            continue;
-        }
         match inspect_metadata(vol, info_off, sector_size, i) {
             Ok(info) => return Ok(info),
             Err(e) => last_err = e.to_string(),
@@ -463,7 +499,11 @@ pub fn inspect_bitlocker(vol: &mut dyn RawVolume) -> Result<BitLockerInfo> {
         "метаданные FVE не прочитаны. Окно {} байт, сектор {sector_size}; \
          смещения копий: {}; сектор 0 [0x00..0x10]: {}; [0x160..0x190]: {}{}",
         vol.len(),
-        offsets.iter().map(|o| format!("{o:#x}")).collect::<Vec<_>>().join(", "),
+        if offsets.is_empty() {
+            "ни одного правдоподобного".to_string()
+        } else {
+            offsets.iter().map(|o| format!("{o:#x}")).collect::<Vec<_>>().join(", ")
+        },
         hex(&boot[..0x10]),
         hex(&boot[0x160..0x190.min(boot.len())]),
         if last_err.is_empty() { String::new() } else { format!("; последняя ошибка: {last_err}") },
@@ -543,13 +583,13 @@ fn open_bitlocker_with_iters(
         return Err(bad(format!("implausible sector size {sector_size}")));
     }
 
-    // The three FVE metadata copies — try each until one parses and unlocks.
-    let mut last_err = bad("no FVE metadata copy could be parsed");
-    for i in 0..3 {
-        let info_off = u64at(&boot, INFO_OFFSETS_AT + i * 8);
-        if info_off == 0 || info_off + 0x70 > vol.len() {
-            continue;
-        }
+    // The FVE metadata copies — try each until one parses and unlocks.
+    let offsets = metadata_offsets(&boot, vol.len());
+    let mut last_err = bad(format!(
+        "метаданные FVE не найдены (проверено адресов: {})",
+        offsets.len()
+    ));
+    for info_off in offsets {
         match unlock_from_metadata(vol, info_off, sector_size as u32, password, iterations) {
             Ok(params) => return verify_ntfs(vol, params),
             Err(e) => last_err = e,
@@ -1048,9 +1088,19 @@ mod tests {
         // BitLocker boot sector at device offset 0 (its own boot code + pointers).
         dev[3..11].copy_from_slice(FVE_SIGNATURE);
         put_u16(&mut dev, 0x0B, 512);
-        put_u64(&mut dev, INFO_OFFSETS_AT, info_off);
+        put_u64(&mut dev, INFO_OFFSETS_NTFS, info_off);
         // Metadata block.
         dev[info_off as usize..info_off as usize + info.len()].copy_from_slice(&info);
+
+        // The same volume as a real one is shaped: the offsets at 0xB0 and
+        // nothing at 0x170. Every test here used to describe a volume that
+        // only our own parser would produce, which is why four real disks in a
+        // row came back "no FVE metadata" (2026-08-05).
+        let mut real_layout = dev.clone();
+        for i in 0..3 {
+            put_u64(&mut real_layout, INFO_OFFSETS_NTFS + i * 8, 0);
+        }
+        put_u64(&mut real_layout, INFO_OFFSETS_FVE, info_off);
 
         // --- Unlock ---
         // Use a small stretch count by temporarily shadowing: open_bitlocker
@@ -1087,6 +1137,15 @@ mod tests {
         // Wrong password fails.
         let mut vol2 = MemVolume(view.inner_into_vec());
         assert!(super::open_bitlocker_with_iters(&mut vol2, "nope", stretch_iters).is_err());
+
+        // --- The layout real volumes actually use ---
+        let mut real = MemVolume(real_layout);
+        let info = inspect_bitlocker(&mut real).expect("offsets at 0xB0 must be found");
+        assert_eq!(info.cipher, ALG_AES_XTS_128);
+        assert_eq!(info.protectors.len(), 1);
+        let params = super::open_bitlocker_with_iters(&mut real, password, stretch_iters)
+            .expect("a volume with the offsets at 0xB0 must unlock");
+        assert_eq!(&params.fvek[..], &fvek[..]);
     }
 
     impl BitLockerVolume {
