@@ -22,9 +22,12 @@ Boot medium (live): `.ai/boot-media-plan_2026-07-30.md`.
 confirmed on Windows 10 / XTS-AES 128 on 2026-08-05 via `own-backup-cli
 bitlocker --unlock`, password protector only. It reads the ciphertext off
 `\\.\PhysicalDriveN` at the partition's offset, because a locked volume
-refuses reads through its own device (`FVE_E_LOCKED_VOLUME`). **Not yet wired
-into backup**: `engine_win::unlock_and_probe` still handles LUKS only. Plan,
-findings and the remaining steps: `.ai/bitlocker-windows-plan_2026-08-01.md`.
+refuses reads through its own device (`FVE_E_LOCKED_VOLUME`). **Wired into
+backup** (`engine_win`: `open_bitlocker_source` + `unlock_and_probe` — a locked
+volume is backed up DECRYPTED through a window onto its disk; recovery-key
+protector too; a half-encrypted volume is refused). What is still open — live
+acceptance of the whole path, the recovery-key hash note, the conversion-state
+field, and marking such volumes in the wizard: `.ai/bitlocker-windows-plan_2026-08-01.md`.
 
 ## Build
 
@@ -59,11 +62,22 @@ tested on a Windows host — cross-compilation validates compilation only.
   FS — zero-filled ghost entries are a fallback, not the product. Status:
   NTFS/ReFS (driver mount-&-delete), FAT32/exFAT (direct patch), ext2/3/4
   (Stage 2) — done; btrfs Stage 2 v2 per этап C of
-  `.ai/old2/exclusions-full-repair-plan_2026-07-28.md`; xfs — этап D there, pending.
+  `.ai/old2/exclusions-full-repair-plan_2026-07-28.md`; xfs — Stage 1 only, plan in
+  `.ai/xfs-true-removal-plan_2026-08-05.md` (D0–D5; the kernel's reference delta
+  says a single unlink touches seven structure classes — RMAPBT and FINOBT
+  included, both on by default in modern mkfs).
   Any change that edits foreign FS metadata must pass BOTH fsck-clean
   (`btrfs check --check-data-csum` / `e2fsck -fn` / `xfs_repair -n`) AND a
   mount-and-write acceptance before shipping — static checks alone once let a
-  first-write corruption through. **fsck-clean is not proof:** `btrfs check`
+  first-write corruption through. **No new scanner or stage merges without both
+  steps.** The second one is a single command: `bash scripts/verify-mounted.sh`
+  (run as yourself; it takes sudo only for the run — ext/xfs/btrfs, mount → read
+  everything → write to ENOSPC → read again → unmount → static recheck). Its
+  fixture is the shared corpus in `backup/src/exclusion_corpus.rs`, built by the
+  kernel through a mount (dense and nested-dense dirs, hard links across the
+  exclusion, device nodes/FIFO/sockets, fast+slow symlinks, shared and private
+  xattr blocks, reflinks; btrfs adds a subvolume, a snapshot, DUP metadata and a
+  name-hash collision) — extend THAT, not a copy in one test. **fsck-clean is not proof:** `btrfs check`
   reported "no error found" on a copy whose csum-tree parent keys were stale
   (kernel: `tree first key mismatch` → EIO → init took SIGBUS). Hence our own
   structural invariants in the test harness (parent key == child's first key,
