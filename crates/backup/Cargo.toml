@@ -46,6 +46,7 @@ windows = { version = "0.58", features = [
     "Win32_Devices_DeviceAndDriverInstallation",
     "Win32_System_Services",
     "Win32_System_LibraryLoader",
+    "Win32_System_SystemInformation",
 ] }
 # Driver-install feature (aim_install.rs): download DriverFiles.zip + extract.
 zip = { version = "2", default-features = false, features = ["deflate"] }

@@ -86,6 +86,7 @@ pub mod vhdx;
 pub mod fat_writer;
 pub mod iso9660;
 pub mod media_layout;
+pub mod media_preflight_win;
 #[cfg(target_os = "windows")]
 pub mod media_build_win;
 // Mostly Windows-only, but its INF parsing is plain text and its tests run

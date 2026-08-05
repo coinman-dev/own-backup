@@ -330,15 +330,29 @@ set "SCRIPT=%APP%\start-media.cmd"
 >>"%SCRIPT%" echo set "OWN_BACKUP_MEDIA=1"
 >>"%SCRIPT%" echo set "RUST_BACKTRACE=1"
 >>"%SCRIPT%" echo set "RUST_LOG=info,own_backup_gui=debug,tauri_runtime_wry=debug,wry=debug"
+rem Is there anything to start the interface WITH? WebView2 outside boot.wim,
+rem room on the RAM disk, memory. A medium that cannot paint a window must say
+rem so and leave a working console - that is what media-preflight prints, and
+rem its exit code decides the branch below. The engine starts either way: the
+rem CLI needs it just as much as the interface does.
+>>"%SCRIPT%" echo del /f /q "%%TEMP%%\own-backup-gui-up" 2^>nul
 >>"%SCRIPT%" echo echo Starting the engine...
 >>"%SCRIPT%" echo start "own-backup engine" /min "X:\Program Files\OwnBackup\own-backup-service.exe" --run --media
+>>"%SCRIPT%" echo "X:\Program Files\OwnBackup\own-backup-cli.exe" media-preflight
+>>"%SCRIPT%" echo if errorlevel 1 goto :no_ui
 >>"%SCRIPT%" echo echo Starting the interface...
 >>"%SCRIPT%" echo start "" "X:\Program Files\OwnBackup\own-backup-gui.exe"
+>>"%SCRIPT%" echo "X:\Program Files\OwnBackup\own-backup-cli.exe" media-wait --timeout 25
+>>"%SCRIPT%" echo if errorlevel 1 goto :no_ui
 >>"%SCRIPT%" echo echo.
->>"%SCRIPT%" echo echo The interface starts in its own window; this console stays usable.
->>"%SCRIPT%" echo echo If no window appears, look at:
+>>"%SCRIPT%" echo echo The interface is up in its own window; this console stays usable.
+>>"%SCRIPT%" echo goto :eof
+>>"%SCRIPT%" echo :no_ui
+>>"%SCRIPT%" echo echo.
+>>"%SCRIPT%" echo echo Working without the interface. Logs:
 >>"%SCRIPT%" echo echo   "X:\Program Files\OwnBackup\own-backup-gui.log"
 >>"%SCRIPT%" echo echo   X:\Windows\Temp\OwnBackup\webview2.log
+>>"%SCRIPT%" echo echo To try again after a fix: start-media.cmd
 
 rem How WinPE starts what we want, and why it is startnet.cmd rather than
 rem winpeshl.ini: entries in winpeshl.ini are handed to CreateProcess, which

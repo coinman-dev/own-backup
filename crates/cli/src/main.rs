@@ -67,6 +67,12 @@ enum Commands {
     /// Pick a screen mode fit for the interface (boot media)
     Display(commands::display::DisplayArgs),
 
+    /// Check that this environment can host the interface (boot medium)
+    MediaPreflight(commands::media_preflight::MediaPreflightArgs),
+
+    /// Wait until the interface window is actually up (boot medium)
+    MediaWait(commands::media_preflight::MediaWaitArgs),
+
     /// Detach a mounted VHDX backup image
     Unmount(commands::unmount::UnmountArgs),
 
@@ -142,6 +148,8 @@ async fn main() {
         Commands::DevioServe(args) => commands::devio_serve::run(args).await,
         Commands::Driver(args) => commands::driver::run(args).await,
         Commands::Display(args) => commands::display::run(args).await,
+        Commands::MediaPreflight(args) => commands::media_preflight::run(args).await,
+        Commands::MediaWait(args) => commands::media_preflight::run_wait(args).await,
         Commands::Unmount(args) => commands::unmount::run(args).await,
         Commands::ListBackups(args) => commands::list_backups::run(args).await,
         Commands::Jobs(args) => commands::jobs::run(args).await,

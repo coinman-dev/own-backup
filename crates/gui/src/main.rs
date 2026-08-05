@@ -252,10 +252,54 @@ fn main() {
                     window = window.additional_browser_args(&extra);
                 }
             }
+            // Same checks the medium's launcher runs, for the same reason and
+            // with the same words: a missing WebView2 must read as «WebView2 не
+            // найден, искал там-то», not as a bare wry HRESULT. On an ordinary
+            // Windows this is the only place they run at all.
+            {
+                use own_backup_backup::media_preflight_win as pf;
+                let dir = std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                    .unwrap_or_else(|| std::path::PathBuf::from("."));
+                let checks = pf::run_preflight(&dir);
+                for c in &checks {
+                    match c.level {
+                        pf::Level::Fail => tracing::error!(check = c.name, "{}", c.message),
+                        pf::Level::Warn => tracing::warn!(check = c.name, "{}", c.message),
+                        pf::Level::Ok => tracing::info!(check = c.name, "{}", c.message),
+                    }
+                }
+                // Deliberately NOT a refusal here. The WebView2 loader also
+                // finds a runtime through the registry, which this check does
+                // not read, so a Fail may be our blind spot rather than a
+                // missing runtime — and refusing then would break a machine
+                // that works. The medium is a different matter: there the
+                // launcher (`own-backup-cli media-preflight`) knows the layout
+                // and refuses BEFORE this process is started. So here the
+                // verdict only explains, and the attempt below decides.
+                if pf::worst(&checks) == pf::Level::Fail {
+                    tracing::error!(
+                        "проверка окружения нашла помеху — пробую поднять окно всё равно"
+                    );
+                }
+            }
+
             // A failed build (no WebView2, browser process refused to start)
             // aborts the app with the error in the log — better than the old
             // behaviour of running on windowless.
             window.build()?;
+
+            // The window exists: say so where the launcher can see it. It is a
+            // FILE and not a live process on purpose — a live process without a
+            // window is exactly the state that once trapped the medium's user.
+            {
+                let marker = own_backup_backup::media_preflight_win::gui_up_marker();
+                match std::fs::write(&marker, std::process::id().to_string()) {
+                    Ok(()) => tracing::info!(marker = %marker.display(), "gui window is up"),
+                    Err(e) => tracing::warn!(error = %e, "could not write the gui-up marker"),
+                }
+            }
 
             // Bridge the service's event stream (progress / queue / finished) to
             // the Tauri window events the frontend already listens for.
