@@ -29,6 +29,13 @@ protector too; a half-encrypted volume is refused). What is still open — live
 acceptance of the whole path, the recovery-key hash note, the conversion-state
 field, and marking such volumes in the wizard: `.ai/bitlocker-windows-plan_2026-08-01.md`.
 
+## Branches (decision 2026-08-06)
+
+Work happens on **`dev`** — commit and push there. **`main` is the release
+branch**: it is fast-forwarded from `dev` when something is worth publishing,
+not committed to directly. (`winpe-boot-media` was renamed to `dev` once its
+work landed in `main`; there is no feature-branch-per-task habit here.)
+
 ## Build
 
 ```bash
