@@ -86,14 +86,16 @@ const PROTECT_PASSWORD: u16 = 0x2000;
 /// disk read we already do — and it is the difference between asking for a
 /// passphrase that exists and telling the user their volume has none.
 ///
-/// **The codes beyond `PASSWORD` come from libbde's documentation, not from a
-/// volume we have opened.** They are reported with their raw value beside the
-/// name so a real volume can confirm or correct them; nothing decides anything
-/// on a code we have not seen.
+/// Checked against a real machine (2026-08-05, Windows 10, four volumes): the
+/// password (`0x2000`), the recovery key (`0x0800`), the external key
+/// (`0x0200`) and TPM+PIN (`0x0500`) all matched what `manage-bde -status`
+/// reported for the same volumes, name for name. `0x0000` (a suspended volume,
+/// key in the clear) and `0x0100` (TPM alone) have still never been seen here,
+/// so they keep their raw value beside the name and decide nothing.
 pub const PROTECTOR_KINDS: [(u16, &str); 6] = [
     (0x0000, "защита приостановлена (ключ лежит открыто)"),
     (0x0100, "TPM"),
-    (0x0200, "ключ запуска (USB)"),
+    (0x0200, "внешний ключ (авторазблокировка / ключ запуска)"),
     (0x0500, "TPM + PIN"),
     (0x0800, "ключ восстановления (48 цифр)"),
     (PROTECT_PASSWORD, "пароль"),
@@ -419,6 +421,11 @@ pub struct Protector {
     pub name: String,
     /// Can Own Backup open the volume this way today?
     pub usable: bool,
+    /// How many VMK datums of this kind the volume carries. A machine with
+    /// auto-unlock collects external keys — seven of them on the disk this was
+    /// written against — and one line saying "×7" matches what `manage-bde`
+    /// lists, while one saying nothing does not.
+    pub count: u32,
 }
 
 /// What a BitLocker volume says about itself before anyone types a password.
@@ -535,14 +542,15 @@ fn inspect_metadata(
         }
         let kind = u16at(d.data, 0x1A) as u16;
         let known = PROTECTOR_KINDS.iter().find(|(k, _)| *k == kind);
-        let p = Protector {
-            kind,
-            name: known.map(|(_, n)| (*n).to_string()).unwrap_or_else(|| "неизвестно".into()),
-            // Only the passphrase, and only with a cipher we implement.
-            usable: kind == PROTECT_PASSWORD && cipher_supported,
-        };
-        if !protectors.contains(&p) {
-            protectors.push(p);
+        match protectors.iter_mut().find(|p: &&mut Protector| p.kind == kind) {
+            Some(seen) => seen.count += 1,
+            None => protectors.push(Protector {
+                kind,
+                name: known.map(|(_, n)| (*n).to_string()).unwrap_or_else(|| "неизвестно".into()),
+                // Only the passphrase, and only with a cipher we implement.
+                usable: kind == PROTECT_PASSWORD && cipher_supported,
+                count: 1,
+            }),
         }
     }
 

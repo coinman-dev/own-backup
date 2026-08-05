@@ -37,6 +37,12 @@ pub struct BitlockerArgs {
     /// How much `--dump` writes, in KiB.
     #[arg(long, default_value = "64")]
     pub dump_kib: u64,
+
+    /// Ask for the passphrase and try to unlock — read-only, and the volume is
+    /// left exactly as it was. Says whether the key came out and whether what
+    /// it decrypts is a filesystem; prints no key material.
+    #[arg(long)]
+    pub unlock: bool,
 }
 
 #[cfg(target_os = "windows")]
@@ -74,6 +80,13 @@ pub async fn run(args: BitlockerArgs) -> Result<()> {
                 args.dump.as_deref(),
                 args.dump_kib,
             ));
+            if args.unlock {
+                if let Some((_, _, Ok(info))) = found.last() {
+                    if info.has_password() {
+                        try_unlock(number, part.offset_bytes, part.size_bytes, &label);
+                    }
+                }
+            }
         }
     }
     report(found, args.json)
@@ -119,6 +132,63 @@ fn examine(
     (label.to_string(), where_, outcome)
 }
 
+/// Ask for the passphrase and see whether it opens the volume. Nothing is
+/// written, nothing is kept: this answers "does our own crypto work on a real
+/// disk", which no test in the tree can answer.
+#[cfg(target_os = "windows")]
+fn try_unlock(disk: u32, offset: u64, size: u64, label: &str) {
+    use own_backup_backup::volume_window::VolumeWindow;
+    use own_backup_backup::win_device::WinRawDevice;
+
+    let pass = match ask_passphrase(&format!("  Пароль для {label} (не отображается): ")) {
+        Ok(p) if !p.is_empty() => p,
+        Ok(_) => {
+            println!("  Пароль не введён — пропускаем.");
+            return;
+        }
+        Err(e) => {
+            println!("  Не удалось прочитать пароль: {e}");
+            return;
+        }
+    };
+
+    let path = format!(r"\\.\PhysicalDrive{disk}");
+    let outcome = (|| -> std::result::Result<String, String> {
+        let dev = WinRawDevice::open_read(&path).map_err(|e| e.to_string())?;
+        let mut window = own_backup_backup::aligned_volume::AlignedVolume::new(
+            VolumeWindow::new(Box::new(dev), offset, size).map_err(|e| e.to_string())?,
+        );
+        let params = own_backup_backup::bitlocker::open_bitlocker(&mut window, &pass)
+            .map_err(|e| e.to_string())?;
+
+        // The key is only useful if what it decrypts is a filesystem, so say
+        // which one — that is the end-to-end proof, and it costs one read.
+        let dev = WinRawDevice::open_read(&path).map_err(|e| e.to_string())?;
+        let window = own_backup_backup::aligned_volume::AlignedVolume::new(
+            VolumeWindow::new(Box::new(dev), offset, size).map_err(|e| e.to_string())?,
+        );
+        let mut view =
+            own_backup_backup::bitlocker::BitLockerVolume::new(Box::new(window), params);
+        use own_backup_backup::fat_map::RawVolume;
+        let want = (own_backup_inventory::fs_probe::PROBE_LEN as u64).min(view.len()) as usize;
+        let mut buf = vec![0u8; want];
+        view.read_at(0, &mut buf).map_err(|e| e.to_string())?;
+        Ok(match own_backup_inventory::fs_probe::identify(&buf) {
+            Some(p) => format!(
+                "{:?}{}",
+                p.fs,
+                p.label.map(|l| format!(" «{l}»")).unwrap_or_default()
+            ),
+            None => "файловая система не опознана".into(),
+        })
+    })();
+
+    match outcome {
+        Ok(fs) => println!("  ✓ Пароль подошёл, ключ тома получен. Внутри: {fs}"),
+        Err(e) => println!("  ✗ Открыть не удалось: {e}"),
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub async fn run(args: BitlockerArgs) -> Result<()> {
     use own_backup_common::OwnBackupError;
@@ -151,6 +221,48 @@ type Examined = (
 );
 
 #[cfg_attr(not(any(target_os = "windows", target_os = "linux")), allow(dead_code))]
+/// Read a passphrase from the console without echoing it.
+#[cfg(target_os = "windows")]
+fn ask_passphrase(prompt: &str) -> std::io::Result<String> {
+    use std::io::{BufRead, Write};
+    use windows::Win32::System::Console::{
+        GetConsoleMode, GetStdHandle, SetConsoleMode, CONSOLE_MODE, ENABLE_ECHO_INPUT,
+        STD_INPUT_HANDLE,
+    };
+    print!("{prompt}");
+    std::io::stdout().flush()?;
+
+    // SAFETY: console-mode query and set on our own standard handle; the mode
+    // is put back below whatever the read does.
+    let restore = unsafe {
+        GetStdHandle(STD_INPUT_HANDLE).ok().and_then(|h| {
+            let mut mode = CONSOLE_MODE(0);
+            GetConsoleMode(h, &mut mode).ok()?;
+            SetConsoleMode(h, mode & !ENABLE_ECHO_INPUT).ok()?;
+            Some((h, mode))
+        })
+    };
+    let mut line = String::new();
+    let read = std::io::stdin().lock().read_line(&mut line);
+    if let Some((h, mode)) = restore {
+        // SAFETY: same handle, the mode it had before.
+        let _ = unsafe { SetConsoleMode(h, mode) };
+    }
+    println!();
+    read?;
+    Ok(line.trim_end_matches(['\r', '\n']).to_string())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn ask_passphrase(prompt: &str) -> std::io::Result<String> {
+    use std::io::{BufRead, Write};
+    print!("{prompt}");
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    Ok(line.trim_end_matches(['\r', '\n']).to_string())
+}
+
 fn report(found: Vec<Examined>, json: bool) -> Result<()> {
     let encrypted: Vec<&Examined> = found.iter().filter(|(_, _, r)| r.is_ok()).collect();
 
@@ -219,9 +331,10 @@ fn report(found: Vec<Examined>, json: bool) -> Result<()> {
         }
         for p in &info.protectors {
             println!(
-                "    [{:#06x}] {}{}",
+                "    [{:#06x}] {}{}{}",
                 p.kind,
                 p.name,
+                if p.count > 1 { format!(" ×{}", p.count) } else { String::new() },
                 if p.usable { "  ← умеем" } else { "" }
             );
         }
