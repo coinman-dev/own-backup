@@ -904,7 +904,9 @@ fn verify_ntfs(vol: &mut dyn RawVolume, params: BitLockerParams) -> Result<BitLo
         0
     };
     let mut sector = read_at(vol, src, ss)?;
-    params.decrypt(0, &mut sector)?;
+    // Under the tweak of where it lies, not of where it belongs — see
+    // `BitLockerVolume::read_at`.
+    params.decrypt(src / params.sector_size.max(1) as u64, &mut sector)?;
     if &sector[3..11] != b"NTFS    " || sector[510] != 0x55 || sector[511] != 0xAA {
         return Err(bad(
             "decrypted sector 0 is not an NTFS boot sector — wrong key or unhandled layout",
@@ -968,8 +970,14 @@ impl RawVolume for BitLockerVolume {
         let last = (end - 1) / ss;
         for s in first..=last {
             let mut sector = vec![0u8; ss as usize];
-            self.inner.read_at(self.source_offset(s), &mut sector)?;
-            self.params.decrypt(s, &mut sector)?;
+            // The tweak is the sector's PHYSICAL position, not its place in the
+            // volume: a relocated boot sector was encrypted where it now lies.
+            // Checked on a real volume (2026-08-05) — decrypting sector 0 under
+            // tweak 0 gave noise, under the tweak of its backup address gave
+            // `eb 52 90 NTFS    `.
+            let physical = self.source_offset(s);
+            self.inner.read_at(physical, &mut sector)?;
+            self.params.decrypt(physical / ss, &mut sector)?;
 
             let sec_start = s * ss;
             let lo = offset.max(sec_start);
@@ -1235,11 +1243,22 @@ mod tests {
         for (i, b) in plain[512..1024].iter_mut().enumerate() {
             *b = (i as u8).wrapping_mul(3).wrapping_add(9);
         }
-        // Encrypt the whole region with XTS-128 (tweak = virtual sector index).
-        let c1 = Aes128::new(GenericArray::from_slice(&fvek[..16]));
-        let c2 = Aes128::new(GenericArray::from_slice(&fvek[16..32]));
+        // Encrypt every sector under the tweak of WHERE IT LIES — the rule a
+        // real volume turned out to follow (2026-08-05). Sectors 1.. stay in
+        // place, so their tweak is their index; sector 0 is relocated to the
+        // backup address and is encrypted under the tweak of THAT position.
+        let xts = || {
+            Xts128::new(
+                Aes128::new(GenericArray::from_slice(&fvek[..16])),
+                Aes128::new(GenericArray::from_slice(&fvek[16..32])),
+            )
+        };
         let mut enc = plain.clone();
-        Xts128::new(c1, c2).encrypt_area(&mut enc, sector_size, 0, |i| i.to_le_bytes());
+        xts().encrypt_area(&mut enc, sector_size, 0, |i| i.to_le_bytes());
+
+        let mut relocated = plain[0..512].to_vec();
+        let phys0 = boot_backup_addr / 512;
+        xts().encrypt_area(&mut relocated, sector_size, phys0 as u128, |i| i.to_le_bytes());
 
         // --- Device: BitLocker boot sector at 0; virtual sectors 1.. in place;
         // virtual sector 0's ciphertext relocated to boot_backup_addr. ---
@@ -1247,7 +1266,7 @@ mod tests {
         let mut dev = vec![0u8; dev_len];
         dev[512..encrypted_size as usize].copy_from_slice(&enc[512..encrypted_size as usize]);
         dev[boot_backup_addr as usize..boot_backup_addr as usize + 512]
-            .copy_from_slice(&enc[0..512]);
+            .copy_from_slice(&relocated);
 
         // BitLocker boot sector at device offset 0 (its own boot code + pointers).
         dev[3..11].copy_from_slice(FVE_SIGNATURE);
@@ -1297,6 +1316,12 @@ mod tests {
         let mut got = vec![0u8; 512];
         view.read_at(512, &mut got).unwrap();
         assert_eq!(got, &plain[512..1024]);
+
+        // And sector 0 — the relocated one, which is the whole reason the
+        // reader has two addresses and two tweaks to get right.
+        let mut got0 = vec![0u8; 512];
+        view.read_at(0, &mut got0).unwrap();
+        assert_eq!(got0, &plain[0..512], "the relocated boot sector must come back whole");
 
         // Wrong password fails.
         let mut vol2 = MemVolume(view.inner_into_vec());
