@@ -59,4 +59,17 @@ pub struct PartitionInfo {
     /// supplying a password to decrypt it first.
     #[serde(default)]
     pub is_encrypted: bool,
+    /// How an encrypted volume can be opened, in the words of its own
+    /// metadata: "пароль", "ключ восстановления (48 цифр)", "TPM + PIN"…
+    ///
+    /// A BitLocker volume says this about itself, and it costs one read to
+    /// ask. Without it the interface asks every encrypted volume for a
+    /// password and answers "не подходит" to a volume that has none — which is
+    /// not a wrong password but a wrong question. Empty for LUKS and for
+    /// anything we could not read.
+    #[serde(default)]
+    pub unlock_methods: Vec<String>,
+    /// Can Own Backup open this volume with something the user can type?
+    #[serde(default)]
+    pub unlockable: bool,
 }

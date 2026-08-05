@@ -140,7 +140,7 @@ fn try_unlock(disk: u32, offset: u64, size: u64, label: &str) {
     use own_backup_backup::volume_window::VolumeWindow;
     use own_backup_backup::win_device::WinRawDevice;
 
-    let pass = match ask_passphrase(&format!("  Пароль для {label} (не отображается): ")) {
+    let pass = match ask_passphrase(&format!("  Пароль или ключ восстановления для {label} (не отображается): ")) {
         Ok(p) if !p.is_empty() => p,
         Ok(_) => {
             println!("  Пароль не введён — пропускаем.");

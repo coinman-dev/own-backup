@@ -650,6 +650,11 @@ impl super::traits::DiskInventory for WindowsInventory {
                     is_boot,
                     has_os,
                     is_encrypted,
+                    // Filled in by the service, which can reach the BitLocker
+                    // parser — this crate cannot, the parser's crate depends
+                    // on this one.
+                    unlock_methods: Vec::new(),
+                    unlockable: false,
                 });
             }
             partitions.sort_by_key(|p| p.index);

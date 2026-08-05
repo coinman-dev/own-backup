@@ -3795,6 +3795,35 @@ pub struct DecryptedProbe {
     pub used_bytes: u64,
 }
 
+/// How an encrypted partition can be opened, asked of the volume itself.
+///
+/// `(what it accepts, whether we can do any of it)`. Costs a few sector reads
+/// and no password: the FVE metadata lists the protectors in the clear. The
+/// interface needs it to stop asking a TPM-only volume for a passphrase it
+/// does not have — the answer to which is not "wrong password" but "wrong
+/// question".
+///
+/// `None` when the partition is not BitLocker (a LUKS container, say) or its
+/// metadata could not be read; nothing is claimed in that case.
+#[cfg(target_os = "windows")]
+pub fn describe_encryption(disk: u32, offset: u64, length: u64) -> Option<(Vec<String>, bool)> {
+    let path = format!(r"\\.\PhysicalDrive{disk}");
+    let mut window = disk_window(&path, offset, length).ok()?;
+    let info = crate::bitlocker::inspect_bitlocker(&mut window).ok()?;
+    let names = info
+        .protectors
+        .iter()
+        .map(|p| {
+            if p.count > 1 {
+                format!("{} ×{}", p.name, p.count)
+            } else {
+                p.name.clone()
+            }
+        })
+        .collect();
+    Some((names, info.openable()))
+}
+
 /// Open a BitLocker volume through the disk it lives on, and describe what is
 /// inside it.
 ///

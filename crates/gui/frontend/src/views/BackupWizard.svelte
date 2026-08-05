@@ -482,6 +482,17 @@
     }
     return null;
   }
+  /// An encrypted volume, and what its own metadata says opens it.
+  interface EncryptedVolume {
+    device: string;
+    label: string;
+    /// "пароль", "ключ восстановления (48 цифр)", "TPM + PIN"… Empty when the
+    /// service could not read the volume's metadata (or is an older build).
+    methods: string[];
+    /// Can we open it with something the user can type?
+    unlockable: boolean;
+  }
+
   // Selected sources that are encrypted, paired with their display label.
   function encryptedSelected(): { device: string; label: string }[] {
     return job.sources
@@ -497,7 +508,7 @@
   // would be backwards.
   //
   // Offering is not the same as requiring — see `encryptedBlocking`.
-  function encryptedForDisk(d: DiskInfo): { device: string; label: string }[] {
+  function encryptedForDisk(d: DiskInfo): EncryptedVolume[] {
     const boot = isBootableCopy(d);
     return d.partitions
       .filter((p) => p.is_encrypted && partDevice(p))
@@ -505,7 +516,14 @@
       .map((p) => {
         const dev = partDevice(p)!;
         const i = job.sources.indexOf(dev);
-        return { device: dev, label: i >= 0 ? (job.source_labels[i] ?? partLabel(p)) : partLabel(p) };
+        return {
+          device: dev,
+          label: i >= 0 ? (job.source_labels[i] ?? partLabel(p)) : partLabel(p),
+          methods: p.unlock_methods ?? [],
+          // Older services do not send the field at all; assume openable then,
+          // exactly as before, rather than refusing on a missing answer.
+          unlockable: p.unlockable ?? true,
+        };
       });
   }
   // Linux OS filesystems: a decrypted volume of one of these on a bootable-copy
@@ -599,7 +617,7 @@
   let sharedBusy = $state(false);
 
   // Every encrypted volume a password is offered for, across all shown disks.
-  function encryptedOffered(): { device: string; label: string }[] {
+  function encryptedOffered(): EncryptedVolume[] {
     return visibleDisks.flatMap((d) => encryptedForDisk(d));
   }
   // The shared prompt is drawn once — under the first disk that still has a
@@ -717,7 +735,7 @@
   {/if}
 {/snippet}
 
-{#snippet pwPanel(list: { device: string; label: string }[], showShared: boolean)}
+{#snippet pwPanel(list: EncryptedVolume[], showShared: boolean)}
   <div class="pw-panel under-disk">
     <div class="pw-head">
       <span>🔒 Зашифрованные тома — введите пароль для расшифровки</span>
@@ -760,7 +778,16 @@
     {#each list as e (e.device)}
       <div class="pw-row" class:done={!!decryptedVolumes[e.device]}>
         <span class="pw-vol" title={e.device}>{e.label}</span>
-        {#if decryptedVolumes[e.device]}
+        {#if !e.unlockable && !decryptedVolumes[e.device]}
+          <!-- Asking for a password a volume does not have, and then calling
+               it wrong, is not an error message — it is the wrong question.
+               The volume's own metadata says what it does have. -->
+          <span class="pw-nokey">
+            Открыть нечем: {e.methods.length ? e.methods.join(', ') : 'способ неизвестен'}.
+            Own Backup умеет пароль и ключ восстановления — снимите блокировку в Windows
+            или исключите том из копии.
+          </span>
+        {:else if decryptedVolumes[e.device]}
           <span class="pw-done">✓ Расшифровано</span>
         {:else if sharedPw}
           <!-- One prompt for all: the per-volume row is only a status line. -->
@@ -773,6 +800,11 @@
           <PasswordField
             value={pwInputs[e.device]?.password ?? ''}
             oninput={(v) => setPw(e.device, v)}
+            placeholder={e.methods.includes('пароль')
+              ? 'Пароль'
+              : e.methods.length
+                ? e.methods[0]
+                : 'Пароль'}
             onenter={() => {
               if (decrypting !== e.device && pwInputs[e.device]?.password) decrypt(e.device);
             }}
@@ -798,8 +830,9 @@
       {/if}
     {/each}
     <div class="pw-hint">
-      Пароль хранится в памяти до закрытия программы. «Запомнить» сохраняет его
-      в защищённом хранилище ОС — это нужно, чтобы копия работала по расписанию.
+      Подходит пароль тома или 48-значный ключ восстановления. Пароль хранится в
+      памяти до закрытия программы. «Запомнить» сохраняет его в защищённом
+      хранилище ОС — это нужно, чтобы копия работала по расписанию.
     </div>
   </div>
 {/snippet}
@@ -1275,6 +1308,8 @@
   .pw-row .btn { flex-shrink: 0; white-space: nowrap; }
   .pw-done { font-size: 13px; font-weight: 600; color: var(--green, #2e7d32); }
   .pw-err { font-size: 12px; color: #d84a4a; font-weight: 600; margin: 0 0 6px 204px; }
+  /* A volume we cannot open: a sentence in place of the password box. */
+  .pw-nokey { flex: 1 1 auto; font-size: 12px; color: var(--text-muted); line-height: 1.4; }
   .pw-hint { font-size: 12px; color: var(--text-muted); margin-top: 10px; }
   .btn:disabled { opacity: .5; cursor: default; }
   .seg-label { font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

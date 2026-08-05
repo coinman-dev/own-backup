@@ -421,11 +421,37 @@ impl BackupService for BackupServiceImpl {
         use own_backup_inventory::DiskInventory;
 
         #[cfg(target_os = "windows")]
-        let disks = own_backup_inventory::WindowsInventory::new()
+        let mut disks = own_backup_inventory::WindowsInventory::new()
             .map_err(|e| Status::internal(e.to_string()))?
             .enumerate_disks()
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
+
+        // Ask each encrypted volume how it can be opened. The inventory cannot
+        // do this itself — the parser lives in the backup crate, which depends
+        // on the inventory — so it is filled in here, where both are in reach.
+        // A few sector reads per encrypted partition, and no password.
+        #[cfg(target_os = "windows")]
+        for disk in disks.iter_mut() {
+            let Some(number) = disk
+                .device_id
+                .rsplit("PhysicalDrive")
+                .next()
+                .and_then(|n| n.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            for part in disk.partitions.iter_mut().filter(|p| p.is_encrypted) {
+                if let Some((methods, unlockable)) = own_backup_backup::engine_win::describe_encryption(
+                    number,
+                    part.offset_bytes,
+                    part.size_bytes,
+                ) {
+                    part.unlock_methods = methods;
+                    part.unlockable = unlockable;
+                }
+            }
+        }
 
         #[cfg(target_os = "linux")]
         let disks = own_backup_inventory::LinuxInventory::new()

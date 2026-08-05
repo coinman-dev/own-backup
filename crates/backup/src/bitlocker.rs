@@ -258,8 +258,15 @@ fn aes_ccm_decrypt(
 /// counter(u64 LE)` re-hashed with SHA-256 each round.
 fn stretch_key(password_utf16: &[u8], salt: &[u8], iterations: u32) -> Zeroizing<[u8; 32]> {
     let h1 = Sha256::digest(password_utf16);
-    let password_hash = Sha256::digest(h1);
+    stretch_hash(&Sha256::digest(h1), salt, iterations)
+}
 
+/// The stretch itself, given the hash the secret boils down to.
+///
+/// A user passphrase reaches it as `SHA-256(SHA-256(utf16))`; a recovery key
+/// as the hash of its sixteen bytes. Everything after that is identical, and
+/// it is the expensive part: 2^20 rounds.
+fn stretch_hash(password_hash: &[u8], salt: &[u8], iterations: u32) -> Zeroizing<[u8; 32]> {
     let mut pool = Zeroizing::new([0u8; 88]);
     pool[32..64].copy_from_slice(&password_hash);
     pool[64..80].copy_from_slice(&salt[..16]);
@@ -275,6 +282,48 @@ fn stretch_key(password_utf16: &[u8], salt: &[u8], iterations: u32) -> Zeroizing
 
 fn utf16le(password: &str) -> Zeroizing<Vec<u8>> {
     Zeroizing::new(password.encode_utf16().flat_map(|u| u.to_le_bytes()).collect())
+}
+
+/// VMK protection type of the 48-digit recovery key.
+const PROTECT_RECOVERY: u16 = 0x0800;
+
+/// The sixteen bytes behind a `123456-…-654321` recovery key.
+///
+/// Eight groups of six digits. Each group is a 16-bit number multiplied by 11
+/// — that multiple is the format's own checksum, and a group that fails it is
+/// a typo, which is worth saying before a minute of key stretching rather than
+/// after. The eight numbers are the key, little-endian.
+pub fn parse_recovery_key(text: &str) -> Result<Zeroizing<[u8; 16]>> {
+    let groups: Vec<&str> = text
+        .split(['-', ' ', '\t'])
+        .map(|g| g.trim())
+        .filter(|g| !g.is_empty())
+        .collect();
+    if groups.len() != 8 {
+        return Err(bad(format!(
+            "ключ восстановления — 8 групп по 6 цифр, а здесь {}",
+            groups.len()
+        )));
+    }
+    let mut out = Zeroizing::new([0u8; 16]);
+    for (i, g) in groups.iter().enumerate() {
+        if g.len() != 6 || !g.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(bad(format!("группа {} — не шесть цифр: {g:?}", i + 1)));
+        }
+        let n: u32 = g.parse().map_err(|_| bad(format!("группа {} не читается", i + 1)))?;
+        if n % 11 != 0 {
+            return Err(bad(format!(
+                "группа {} ({g}) не делится на 11 — опечатка в ключе",
+                i + 1
+            )));
+        }
+        let value = n / 11;
+        if value > u16::MAX as u32 {
+            return Err(bad(format!("группа {} ({g}) вне диапазона", i + 1)));
+        }
+        out[i * 2..i * 2 + 2].copy_from_slice(&(value as u16).to_le_bytes());
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -722,17 +771,23 @@ fn unlock_from_metadata(
     let dataset = read_at(vol, info_off + 0x40, dataset_size as usize)?;
     let entries = &dataset[0x30..]; // datums follow the 0x30-byte dataset header
 
-    // --- Recover the VMK: try every VMK datum with the given password ---
+    // --- Recover the VMK from whatever the user typed ---
+    //
+    // A 48-digit recovery key and a passphrase reach the same stretch by
+    // different doors: the key's sixteen bytes are hashed once, a passphrase's
+    // UTF-16 twice. Which VMK datums are worth trying follows from which of
+    // the two the input is.
+    let recovery = parse_recovery_key(password).ok();
     let mut vmk: Option<Zeroizing<Vec<u8>>> = None;
     for d in datums(entries) {
         if d.entry_type != 0x0002 || d.value_type != DATUM_VMK || d.data.len() < 28 {
             continue;
         }
         // VMK head: guid(16) ‖ last_modified(8) ‖ unknown(2) ‖ protection_type(2)
-        // ‖ nested datums (at 0x1C). Password protectors only (recovery/TPM VMKs
-        // simply won't match the passphrase anyway).
+        // ‖ nested datums (at 0x1C).
         let protection = u16at(d.data, 0x1A) as u16;
-        if protection != PROTECT_PASSWORD {
+        let wanted = if recovery.is_some() { PROTECT_RECOVERY } else { PROTECT_PASSWORD };
+        if protection != wanted {
             continue;
         }
         let nested = &d.data[0x1C..];
@@ -754,13 +809,29 @@ fn unlock_from_metadata(
                 continue;
             }
             let salt = &stretch_data[0x04..0x14];
-            let key = stretch_key(&utf16le(password), salt, iterations);
-            for ccm_data in &ccm {
-                // The unwrapped key datum is header(8) ‖ algorithm(4) ‖ VMK.
-                if let Ok(k) = unwrap_ccm_key(&key[..], ccm_data) {
-                    if k.len() >= 12 + 16 {
-                        vmk = Some(Zeroizing::new(k[12..].to_vec()));
-                        break 'salts;
+            // For a recovery key both readings of "the hash of the secret" are
+            // tried — one round of SHA-256 over its bytes, or two. The sources
+            // disagree, the AES-CCM tag does not: a key that unwraps is the
+            // right key. Logged when it lands, so the fact stops being a guess.
+            let candidates: Vec<(&str, Zeroizing<[u8; 32]>)> = match &recovery {
+                Some(bytes) => vec![
+                    ("ключ восстановления, один SHA-256", stretch_hash(&Sha256::digest(&bytes[..]), salt, iterations)),
+                    (
+                        "ключ восстановления, двойной SHA-256",
+                        stretch_hash(&Sha256::digest(Sha256::digest(&bytes[..])), salt, iterations),
+                    ),
+                ],
+                None => vec![("пароль", stretch_key(&utf16le(password), salt, iterations))],
+            };
+            for (how, key) in &candidates {
+                for ccm_data in &ccm {
+                    // The unwrapped key datum is header(8) ‖ algorithm(4) ‖ VMK.
+                    if let Ok(k) = unwrap_ccm_key(&key[..], ccm_data) {
+                        if k.len() >= 12 + 16 {
+                            tracing::info!(protector = %how, "BitLocker VMK unwrapped");
+                            vmk = Some(Zeroizing::new(k[12..].to_vec()));
+                            break 'salts;
+                        }
                     }
                 }
             }
@@ -1089,6 +1160,42 @@ mod tests {
 
         let got = aes_ccm_decrypt(&key, &nonce, &[], &ct, &tag).unwrap();
         assert_eq!(&got[..], &plain[..]);
+    }
+
+    /// The 48 digits are eight 16-bit numbers times eleven, and the times-eleven
+    /// is the format's own typo check.
+    #[test]
+    fn a_recovery_key_is_eight_numbers_and_a_checksum() {
+        // 11 → 1, 22 → 2, … little-endian pairs.
+        let key = parse_recovery_key(
+            "000011-000022-000033-000044-000055-000066-000077-000088",
+        )
+        .unwrap();
+        assert_eq!(
+            &key[..],
+            &[1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0, 7, 0, 8, 0],
+            "each group divided by eleven, little-endian"
+        );
+
+        // The largest value a group may hold: 65535 * 11 = 720885.
+        let max = parse_recovery_key(
+            "720885-720885-720885-720885-720885-720885-720885-720885",
+        )
+        .unwrap();
+        assert_eq!(&max[..2], &[0xFF, 0xFF]);
+
+        // A typo that changes one digit almost always breaks the multiple.
+        let err = parse_recovery_key(
+            "000012-000022-000033-000044-000055-000066-000077-000088",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("11"), "the checksum failure should say so: {err}");
+
+        assert!(parse_recovery_key("000011-000022").is_err(), "eight groups, not two");
+        assert!(parse_recovery_key("00001a-000022-000033-000044-000055-000066-000077-000088").is_err());
+        // A passphrase must not be mistaken for a recovery key.
+        assert!(parse_recovery_key("hunter2").is_err());
     }
 
     #[test]

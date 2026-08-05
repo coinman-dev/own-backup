@@ -36,6 +36,10 @@ export interface PartitionInfo {
   /** Encrypted container (LUKS/BitLocker): filesystem is Unknown, but it can be
    *  backed up after supplying a password to decrypt it. */
   is_encrypted: boolean;
+  /** How an encrypted volume can be opened, in its own metadata's words. */
+  unlock_methods?: string[];
+  /** Can Own Backup open it with something the user can type? */
+  unlockable?: boolean;
 }
 
 export interface BackupJob {
