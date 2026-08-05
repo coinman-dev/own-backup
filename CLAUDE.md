@@ -10,9 +10,14 @@ separate license (`COMMERCIAL-LICENSE.md`). NOT OSI "open source" — say
 AGPL-derived (Arsenal Image Mounter) → **test-only, never distributed**; being
 replaced by wnbd (LGPL-2.1) before release. See `THIRD-PARTY-NOTICES.md`.
 
-Current roadmap: `.ai/implementation_plan_v2_2026-07-01.md` (phases 0–8, decisions log).
-qcow2 second format + mounting: `.ai/qcow2-second-format-plan_2026-07-07.md` (Q0–Q5).
-Boot medium: `.ai/boot-media-plan_2026-07-30.md`.
+Plans live in `.ai/`; the finished ones are moved to `.ai/old2/` and are kept
+for their decision logs, not as a to-do list — check the code before trusting
+one (`implementation_plan_v2` still lists whole-disk restore phases C/D and the
+named-pipe transport as open; all three are done).
+
+Roadmap and decisions log: `.ai/old2/implementation_plan_v2_2026-07-01.md` (phases 0–8).
+qcow2 second format + mounting: `.ai/old2/qcow2-second-format-plan_2026-07-07.md` (Q0–Q5).
+Boot medium (live): `.ai/boot-media-plan_2026-07-30.md`.
 **BitLocker unlock does NOT work on Windows yet** (only LUKS does; the FVE
 parser in `backup/src/bitlocker.rs` is wired on Linux only, because a locked
 volume cannot be read through its volume handle) — plan and steps in
@@ -51,7 +56,7 @@ tested on a Windows host — cross-compilation validates compilation only.
   FS — zero-filled ghost entries are a fallback, not the product. Status:
   NTFS/ReFS (driver mount-&-delete), FAT32/exFAT (direct patch), ext2/3/4
   (Stage 2) — done; btrfs Stage 2 v2 per этап C of
-  `.ai/exclusions-full-repair-plan_2026-07-28.md`; xfs — этап D there, pending.
+  `.ai/old2/exclusions-full-repair-plan_2026-07-28.md`; xfs — этап D there, pending.
   Any change that edits foreign FS metadata must pass BOTH fsck-clean
   (`btrfs check --check-data-csum` / `e2fsck -fn` / `xfs_repair -n`) AND a
   mount-and-write acceptance before shipping — static checks alone once let a
@@ -62,7 +67,7 @@ tested on a Windows host — cross-compilation validates compilation only.
   csums only over allocated extents) and fixtures big enough to have
   MULTI-LEVEL trees — a flat image has no parent node to get wrong.
 - The legacy `.obk` format (zstd + AES-256-GCM + Argon2id) was **deleted**
-  (decision 2026-07-26, D8 in `.ai/restore-designer-plan_2026-07-26.md`): it had
+  (decision 2026-07-26, D8 in `.ai/old2/restore-designer-plan_2026-07-26.md`): it had
   no writer left in any live path and its dead reader confused the restore work.
   `ImageManifest` (`common/src/image.rs`) survived it and is now the sidecar's
   manifest. Do not resurrect the container format.
@@ -71,13 +76,16 @@ tested on a Windows host — cross-compilation validates compilation only.
 
 Cargo workspace with crates:
 - `common` — shared types, error, image/manifest structs, config
-- `inventory` — disk enumeration (WMI via wmic/PowerShell on Windows, mock for tests)
-- `snapshot` — snapshot providers (VSS on Windows — stub pending phase 2, mock for tests)
+- `inventory` — disk enumeration (native CfgMgr + IOCTL on Windows; no
+  PowerShell/wmic — WinPE has neither. Mock for tests)
+- `snapshot` — snapshot providers (VSS on Windows, `vss_raw.rs`/`vss_sync.rs`;
+  mock for tests)
 - `backup` — block pipeline, used-sector maps, VHDX/qcow2 handling, checksums,
   exclusion scanners, LUKS/BitLocker
 - `restore` — restore-target guards (system-disk protection)
 - `metadata` — SQLite DB for backup jobs, sets, retention, activity log
-- `scheduler` — cron-based job scheduling (wired into service in phase 4)
+- `scheduler` — cron-based job scheduling (run by the service,
+  `service/src/scheduler.rs`; OS events too — logon/logoff/startup)
 - `service` — Windows Service + gRPC server (tonic)
 - `cli` — command-line interface (clap)
 - `gui` — Tauri v2 + Svelte 5 (frontend being rebuilt per `design/` mockup:
