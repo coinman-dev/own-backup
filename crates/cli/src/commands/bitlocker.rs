@@ -185,7 +185,46 @@ fn try_unlock(disk: u32, offset: u64, size: u64, label: &str) {
 
     match outcome {
         Ok(fs) => println!("  ✓ Пароль подошёл, ключ тома получен. Внутри: {fs}"),
-        Err(e) => println!("  ✗ Открыть не удалось: {e}"),
+        Err(e) => {
+            println!("  ✗ Открыть не удалось: {e}");
+            // A passphrase Windows accepts and we do not means the fault is
+            // ours, and the shape of the datums is where to look. Types and
+            // sizes only — nothing here is worth keeping secret.
+            // The key unwrapped but what it decrypts is unrecognisable? Then
+            // the passphrase was right and the LAYOUT is wrong — and with the
+            // key in hand the layout can simply be asked.
+            if e.contains("not an NTFS boot sector") {
+                println!("  Ключ получен — значит пароль верный. Ищем, где лежит первый сектор:");
+                let path = format!(r"\\.\PhysicalDrive{disk}");
+                let probed = (|| -> std::result::Result<Vec<String>, String> {
+                    let dev = WinRawDevice::open_read(&path).map_err(|e| e.to_string())?;
+                    let mut window = own_backup_backup::aligned_volume::AlignedVolume::new(
+                        VolumeWindow::new(Box::new(dev), offset, size).map_err(|e| e.to_string())?,
+                    );
+                    let params =
+                        own_backup_backup::bitlocker::open_bitlocker_unverified(&mut window, &pass)
+                            .map_err(|e| e.to_string())?;
+                    Ok(own_backup_backup::bitlocker::diagnose_first_sector(&mut window, &params))
+                })();
+                match probed {
+                    Ok(lines) => lines.iter().for_each(|l| println!("    {l}")),
+                    Err(e) => println!("    не удалось: {e}"),
+                }
+            }
+            println!("  Структура датумов (типы и размеры, без ключей):");
+            let path = format!(r"\\.\PhysicalDrive{disk}");
+            let described = (|| -> std::result::Result<Vec<String>, String> {
+                let dev = WinRawDevice::open_read(&path).map_err(|e| e.to_string())?;
+                let mut window = own_backup_backup::aligned_volume::AlignedVolume::new(
+                    VolumeWindow::new(Box::new(dev), offset, size).map_err(|e| e.to_string())?,
+                );
+                own_backup_backup::bitlocker::describe_vmks(&mut window).map_err(|e| e.to_string())
+            })();
+            match described {
+                Ok(lines) => lines.iter().for_each(|l| println!("    {l}")),
+                Err(e) => println!("    не прочитать: {e}"),
+            }
+        }
     }
 }
 

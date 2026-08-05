@@ -569,10 +569,98 @@ fn inspect_metadata(
     })
 }
 
+/// The shape of every VMK datum in the metadata, in words.
+///
+/// Types and sizes only — no salts, no wrapped keys, nothing that would matter
+/// if it were pasted into a chat. It exists because "passphrase did not unlock
+/// any password VMK" has two very different meanings — the password was wrong,
+/// or we are reading the datums wrongly — and on a volume the parser has never
+/// successfully opened, the second is at least as likely as the first.
+pub fn describe_vmks(vol: &mut dyn RawVolume) -> Result<Vec<String>> {
+    let boot = read_at(vol, 0, 512)?;
+    if !is_bitlocker(&boot) {
+        return Err(bad("not a BitLocker volume"));
+    }
+    let mut out = Vec::new();
+    for info_off in metadata_offsets(&boot, vol.len()) {
+        let head = read_at(vol, info_off, 0x70)?;
+        if &head[0..8] != FVE_SIGNATURE {
+            continue;
+        }
+        let dataset_size = u32at(&head, 0x40);
+        if !(0x30..=16 * 1024 * 1024).contains(&dataset_size) {
+            continue;
+        }
+        let dataset = read_at(vol, info_off + 0x40, dataset_size as usize)?;
+        for d in datums(&dataset[0x30..]) {
+            if d.value_type != DATUM_VMK || d.data.len() < 0x1C {
+                continue;
+            }
+            let protection = u16at(d.data, 0x1A) as u16;
+            out.push(format!(
+                "VMK: тип входа {:#06x}, защита {protection:#06x}, данных {} байт",
+                d.entry_type,
+                d.data.len()
+            ));
+            describe_datums(&d.data[0x1C..], 1, &mut out);
+        }
+        return Ok(out); // one copy is enough; they are duplicates
+    }
+    Err(bad("метаданные FVE не прочитаны"))
+}
+
+fn describe_datums(buf: &[u8], depth: usize, out: &mut Vec<String>) {
+    for d in datums(buf) {
+        let kind = match d.value_type {
+            DATUM_KEY => "ключ",
+            DATUM_STRETCH_KEY => "растяжка",
+            DATUM_AES_CCM => "AES-CCM",
+            DATUM_VMK => "VMK",
+            0x0002 => "UTF-16 строка",
+            0x000F => "смещение+размер",
+            _ => "?",
+        };
+        // The first four bytes of a datum are a method or a counter, never a
+        // key: enough to tell a stretch datum's algorithm without exposing one.
+        let head4 = if d.data.len() >= 4 { hex(&d.data[..4]) } else { String::new() };
+        out.push(format!(
+            "{:indent$}тип {:#06x} ({kind}), вход {:#06x}, данных {} байт, первые 4: {head4}",
+            "",
+            d.value_type,
+            d.entry_type,
+            d.data.len(),
+            indent = depth * 2
+        ));
+        if depth < 4 {
+            let inner = match d.value_type {
+                DATUM_VMK if d.data.len() > 0x1C => Some(&d.data[0x1C..]),
+                DATUM_STRETCH_KEY if d.data.len() > 0x14 => Some(&d.data[0x14..]),
+                _ => None,
+            };
+            if let Some(inner) = inner {
+                describe_datums(inner, depth + 1, out);
+            }
+        }
+    }
+}
+
 /// Recover the FVEK of a BitLocker volume using `password`. Errors on a wrong
 /// passphrase, an unsupported cipher, or a malformed / unhandled layout.
 pub fn open_bitlocker(vol: &mut dyn RawVolume, password: &str) -> Result<BitLockerParams> {
-    open_bitlocker_with_iters(vol, password, STRETCH_ITERATIONS)
+    open_bitlocker_with_iters(vol, password, STRETCH_ITERATIONS, true)
+}
+
+/// [`open_bitlocker`] without the "and it decrypts to NTFS" check.
+///
+/// For diagnosis only: a key that unwrapped cleanly (AES-CCM verifies its own
+/// tag, so the passphrase was right) but decrypts to something unrecognisable
+/// means the LAYOUT is misunderstood, not the key — and telling those two apart
+/// needs the key in hand. Never use it to read data.
+pub fn open_bitlocker_unverified(
+    vol: &mut dyn RawVolume,
+    password: &str,
+) -> Result<BitLockerParams> {
+    open_bitlocker_with_iters(vol, password, STRETCH_ITERATIONS, false)
 }
 
 /// [`open_bitlocker`] with an explicit stretch iteration count (tests use a
@@ -581,6 +669,7 @@ fn open_bitlocker_with_iters(
     vol: &mut dyn RawVolume,
     password: &str,
     iterations: u32,
+    verify: bool,
 ) -> Result<BitLockerParams> {
     let boot = read_at(vol, 0, 512)?;
     if !is_bitlocker(&boot) {
@@ -599,7 +688,9 @@ fn open_bitlocker_with_iters(
     ));
     for info_off in offsets {
         match unlock_from_metadata(vol, info_off, sector_size as u32, password, iterations) {
-            Ok(params) => return verify_ntfs(vol, params),
+            Ok(params) => {
+                return if verify { verify_ntfs(vol, params) } else { Ok(params) }
+            }
             Err(e) => last_err = e,
         }
     }
@@ -646,27 +737,36 @@ fn unlock_from_metadata(
         }
         let nested = &d.data[0x1C..];
 
-        // Salt from the stretch-key datum; encrypted VMK from the AES-CCM datum.
+        // Salt from a stretch-key datum, wrapped VMK from an AES-CCM datum —
+        // and EVERY pair is tried, not the first of each. Which of the two
+        // comes first, and whether the AES-CCM datum is the stretch datum's
+        // sibling or lives inside it, is not something to assume about a
+        // format we cannot see; the stretch is computed once per distinct salt
+        // (it is the expensive half — 2^20 rounds of SHA-256) and each wrapped
+        // key is tried against it.
         let mut stretch = Vec::new();
-        find_datums_typed(nested, DATUM_STRETCH_KEY, &mut stretch);
+        find_datums(nested, DATUM_STRETCH_KEY, &mut stretch);
         let mut ccm = Vec::new();
         find_datums(nested, DATUM_AES_CCM, &mut ccm);
-        let (Some(stretch_data), Some(ccm_data)) = (stretch.first(), ccm.first()) else {
-            continue;
-        };
-        if stretch_data.len() < 0x14 {
-            continue;
-        }
-        let salt = &stretch_data[0x04..0x14];
-        let key = stretch_key(&utf16le(password), salt, iterations);
 
-        match unwrap_ccm_key(&key[..], ccm_data) {
-            // The unwrapped key datum is header(8) ‖ algorithm(4) ‖ VMK.
-            Ok(k) if k.len() >= 12 + 16 => {
-                vmk = Some(Zeroizing::new(k[12..].to_vec()));
-                break;
+        'salts: for stretch_data in &stretch {
+            if stretch_data.len() < 0x14 {
+                continue;
             }
-            _ => continue, // wrong password for this VMK — try the next
+            let salt = &stretch_data[0x04..0x14];
+            let key = stretch_key(&utf16le(password), salt, iterations);
+            for ccm_data in &ccm {
+                // The unwrapped key datum is header(8) ‖ algorithm(4) ‖ VMK.
+                if let Ok(k) = unwrap_ccm_key(&key[..], ccm_data) {
+                    if k.len() >= 12 + 16 {
+                        vmk = Some(Zeroizing::new(k[12..].to_vec()));
+                        break 'salts;
+                    }
+                }
+            }
+        }
+        if vmk.is_some() {
+            break;
         }
     }
     let vmk = vmk.ok_or_else(|| bad("passphrase did not unlock any password VMK"))?;
@@ -711,14 +811,6 @@ fn unlock_from_metadata(
     })
 }
 
-/// Collect datums by `value_type` at the *current* nesting level only.
-fn find_datums_typed<'a>(buf: &'a [u8], value_type: u16, out: &mut Vec<&'a [u8]>) {
-    for d in datums(buf) {
-        if d.value_type == value_type {
-            out.push(d.data);
-        }
-    }
-}
 
 /// Unwrap an AES-CCM datum (`nonce(12) ‖ mac(16) ‖ payload`) with `key`, and
 /// return the inner key datum's raw bytes (the plaintext datum).
@@ -735,6 +827,70 @@ fn unwrap_ccm_key(key: &[u8], ccm: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
         return Err(bad("unwrapped datum is not a key"));
     }
     Ok(plain)
+}
+
+/// With the key in hand, ask the volume where its first sector really is.
+///
+/// The metadata says the first `nb_backup_sectors` were moved to
+/// `boot_backup_addr`, but not what tweak they were encrypted under: their
+/// virtual position (0…15) or their physical one. Both are plausible, the
+/// difference is invisible until it is tried, and our own tests cannot answer
+/// it — they encrypt what they then decrypt.
+///
+/// So each way is tried and the one that yields an NTFS boot sector wins. Only
+/// the first sixteen bytes are shown: a boot sector's signature area, which is
+/// the same on every NTFS volume in the world.
+pub fn diagnose_first_sector(vol: &mut dyn RawVolume, params: &BitLockerParams) -> Vec<String> {
+    let ss = params.sector_size as usize;
+    let backup = params.boot_backup_addr;
+    let phys_index = backup / params.sector_size.max(1) as u64;
+
+    let looks_like_ntfs =
+        |b: &[u8]| b.len() >= 11 && &b[3..11] == b"NTFS    ";
+
+    let mut out = Vec::new();
+    let mut attempt = |label: &str, at: u64, tweak: Option<u64>, out: &mut Vec<String>| {
+        let mut buf = match read_at(vol, at, ss) {
+            Ok(b) => b,
+            Err(e) => {
+                out.push(format!("{label}: прочитать не удалось — {e}"));
+                return;
+            }
+        };
+        if let Some(t) = tweak {
+            if let Err(e) = params.decrypt(t, &mut buf) {
+                out.push(format!("{label}: расшифровать не удалось — {e}"));
+                return;
+            }
+        }
+        out.push(format!(
+            "{label}: {}{}",
+            hex(&buf[..16.min(buf.len())]),
+            if looks_like_ntfs(&buf) { "   ← NTFS!" } else { "" }
+        ));
+    };
+
+    attempt("как есть, со смещения 0 (без расшифровки)", 0, None, &mut out);
+    attempt(
+        &format!("как есть, с {backup} (без расшифровки)"),
+        backup,
+        None,
+        &mut out,
+    );
+    attempt("с 0, ключ сектора 0", 0, Some(0), &mut out);
+    attempt(
+        &format!("с {backup}, ключ сектора 0"),
+        backup,
+        Some(0),
+        &mut out,
+    );
+    attempt(
+        &format!("с {backup}, ключ сектора {phys_index} (физического)"),
+        backup,
+        Some(phys_index),
+        &mut out,
+    );
+    out
 }
 
 /// Decrypt sector 0 through the recovered parameters and require a plausible
@@ -1132,7 +1288,7 @@ mod tests {
         assert!(info.has_password() && info.openable());
         assert!(!info.header_hex.is_empty() && !info.dataset_hex.is_empty());
 
-        let params = super::open_bitlocker_with_iters(&mut vol, password, stretch_iters).unwrap();
+        let params = super::open_bitlocker_with_iters(&mut vol, password, stretch_iters, true).unwrap();
         assert_eq!(params.algorithm, ALG_AES_XTS_128);
         assert_eq!(&params.fvek[..], &fvek[..]);
 
@@ -1144,14 +1300,14 @@ mod tests {
 
         // Wrong password fails.
         let mut vol2 = MemVolume(view.inner_into_vec());
-        assert!(super::open_bitlocker_with_iters(&mut vol2, "nope", stretch_iters).is_err());
+        assert!(super::open_bitlocker_with_iters(&mut vol2, "nope", stretch_iters, true).is_err());
 
         // --- The layout real volumes actually use ---
         let mut real = MemVolume(real_layout);
         let info = inspect_bitlocker(&mut real).expect("offsets at 0xB0 must be found");
         assert_eq!(info.cipher, ALG_AES_XTS_128);
         assert_eq!(info.protectors.len(), 1);
-        let params = super::open_bitlocker_with_iters(&mut real, password, stretch_iters)
+        let params = super::open_bitlocker_with_iters(&mut real, password, stretch_iters, true)
             .expect("a volume with the offsets at 0xB0 must unlock");
         assert_eq!(&params.fvek[..], &fvek[..]);
     }
