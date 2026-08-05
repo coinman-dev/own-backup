@@ -361,6 +361,91 @@ fn snapshot_wanted(requested: bool) -> bool {
     true
 }
 
+/// A BitLocker source: the key, and the window onto the disk its ciphertext
+/// lies in.
+///
+/// The volume device is not usable — locked, it refuses every read — so each
+/// reader is opened straight onto `\\.\PhysicalDriveN`, bounded to the
+/// partition.
+#[cfg(target_os = "windows")]
+struct BitLockerSource {
+    params: crate::bitlocker::BitLockerParams,
+    disk: String,
+    offset: u64,
+    length: u64,
+}
+
+/// A reader bounded to one partition of a disk, aligned for a device opened
+/// without buffering (the FVE dataset starts 0x40 into its block, which is not
+/// a sector boundary).
+#[cfg(target_os = "windows")]
+fn disk_window(
+    disk: &str,
+    offset: u64,
+    length: u64,
+) -> Result<crate::aligned_volume::AlignedVolume<crate::volume_window::VolumeWindow>> {
+    Ok(crate::aligned_volume::AlignedVolume::new(
+        crate::volume_window::VolumeWindow::new(
+            Box::new(WinRawDevice::open_read(disk)?),
+            offset,
+            length,
+        )?,
+    ))
+}
+
+#[cfg(target_os = "windows")]
+impl BitLockerSource {
+    fn window(
+        &self,
+    ) -> Result<crate::aligned_volume::AlignedVolume<crate::volume_window::VolumeWindow>> {
+        disk_window(&self.disk, self.offset, self.length)
+    }
+}
+
+/// Is this source a BitLocker volume, and does the passphrase open it?
+///
+/// `None` when it is not one (a LUKS container, or a plain volume); an error
+/// when it is one and the passphrase does not fit, because by then the user
+/// has been asked for it and silently copying the ciphertext would be worse
+/// than stopping.
+#[cfg(target_os = "windows")]
+fn open_bitlocker_source(read_path: &str, passphrase: &str) -> Result<Option<BitLockerSource>> {
+    let locked = match WinRawDevice::open_read(read_path) {
+        Ok(mut dev) => {
+            let mut header = vec![0u8; 4096];
+            match dev.read_at(0, &mut header) {
+                // Readable and BitLocker-shaped: a locked volume on a disk
+                // moved here from another machine.
+                Ok(()) => crate::bitlocker::is_bitlocker(&header),
+                Err(e) if is_bitlocker_locked(&e) => true,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(_) => false,
+    };
+    if !locked {
+        return Ok(None);
+    }
+
+    let extents = crate::volume_win::volume_extents(read_path);
+    let [extent] = extents.as_slice() else {
+        return Err(OwnBackupError::Device(format!(
+            "{read_path}: том BitLocker занимает {} экстентов — такой не поддерживается",
+            extents.len()
+        )));
+    };
+    let disk = format!(r"\\.\PhysicalDrive{}", extent.disk_number);
+    let mut probe = disk_window(&disk, extent.offset, extent.length)?;
+    let params = crate::bitlocker::open_bitlocker(&mut probe, passphrase)?;
+    info!(
+        algo = format!("{:#x}", params.algorithm),
+        disk = extent.disk_number,
+        offset = extent.offset,
+        "BitLocker source unlocked; backing up decrypted data"
+    );
+    Ok(Some(BitLockerSource { params, disk, offset: extent.offset, length: extent.length }))
+}
+
 fn backup_volume_inner(
     req: &VolumeBackupRequest,
     mut progress: impl FnMut(&BackupProgress) -> Result<()>,
@@ -400,9 +485,18 @@ fn backup_volume_inner(
     // When a passphrase is supplied and the source is a LUKS container, we back
     // up its DECRYPTED data area (used blocks only). The inner filesystem is
     // Linux (btrfs/ext/xfs), so the NTFS-specific steps below are skipped.
+    // A BitLocker source is read through a window onto its DISK: locked, the
+    // volume device answers FVE_E_LOCKED_VOLUME to everything, and the FVE
+    // filter does not sit above the disk. Confirmed on a real volume
+    // 2026-08-05 (Windows 10, XTS-AES 128, password protector).
+    let bitlocker = match &req.passphrase {
+        Some(pass) => open_bitlocker_source(&read_path, pass)?,
+        None => None,
+    };
+
     let mut src_probe = WinRawDevice::open_read(&read_path)?;
-    let luks: Option<crate::luks::LuksParams> = match &req.passphrase {
-        Some(pass) => {
+    let luks: Option<crate::luks::LuksParams> = match (&req.passphrase, &bitlocker) {
+        (Some(pass), None) => {
             let mut header = vec![0u8; 4096];
             src_probe.read_at(0, &mut header)?;
             if crate::luks::is_luks(&header) {
@@ -413,21 +507,29 @@ fn backup_volume_inner(
                 None
             }
         }
-        None => None,
+        _ => None,
     };
     let device_len = src_probe.length();
     let sector_size = src_probe.sector_size();
     drop(src_probe);
 
     // For an encrypted source the backed-up "volume" is the decrypted data area.
-    let volume_len = match &luks {
-        Some(p) => device_len.saturating_sub(p.data_offset),
-        None => device_len,
+    let volume_len = match (&luks, &bitlocker) {
+        (Some(p), _) => device_len.saturating_sub(p.data_offset),
+        (_, Some(b)) => b.params.encrypted_size.min(b.length),
+        _ => device_len,
     };
 
     // Opens a fresh read source for the used-map builders and the block reader:
-    // a plain device, or a decrypting view over it for a LUKS source.
+    // the device itself, or a decrypting view over it — over the volume for
+    // LUKS, over a window onto the disk for BitLocker.
     let open_source = |luks: &Option<crate::luks::LuksParams>| -> Result<Box<dyn crate::fat_map::RawVolume + Send>> {
+        if let Some(b) = &bitlocker {
+            return Ok(Box::new(crate::bitlocker::BitLockerVolume::new(
+                Box::new(b.window()?),
+                b.params.clone(),
+            )));
+        }
         let dev = WinRawDevice::open_read(&read_path)?;
         Ok(match luks {
             Some(p) => Box::new(crate::decrypt::DecryptingVolume::new(Box::new(dev), p.clone())),
@@ -510,12 +612,18 @@ fn backup_volume_inner(
     let smart_mode = if req.all_sectors {
         info!("Sector-by-sector mode requested; copying all blocks");
         false
-    } else if luks.is_some() {
-        // Decrypted Linux volume: only the RawVolume-based parsers apply
-        // (FAT/ext/btrfs); NTFS FSCTL and file exclusions do not.
+    } else if luks.is_some() || bitlocker.is_some() {
+        // A decrypted volume: only the RawVolume-based parsers apply. The NTFS
+        // one among them — a BitLocker volume holds NTFS, and its $Bitmap is
+        // inside the ciphertext, so Windows' own FSCTL cannot reach it while
+        // the volume is locked. The reader below can.
         let mut src = open_source(&luks)?;
         let map: Option<Box<dyn UsedSectorMap>> =
-            if let Ok(m) = crate::fat_map::build_fat_used_map(src.as_mut(), req.block_size) {
+            if let Ok(m) = crate::ntfs_map::build_ntfs_used_map(src.as_mut(), req.block_size) {
+                info!(fs = "NTFS", "Using NTFS map over decrypted volume");
+                detected_fs = Some("NTFS".into());
+                Some(Box::new(m))
+            } else if let Ok(m) = crate::fat_map::build_fat_used_map(src.as_mut(), req.block_size) {
                 info!(fs = m.filesystem, "Using FAT map over decrypted volume");
                 detected_fs = Some(m.filesystem.to_string());
                 Some(Box::new(m))
@@ -655,6 +763,18 @@ fn backup_volume_inner(
             speed_bps: 0,
         })
     };
+    // A locked BitLocker volume cannot be asked which clusters a file occupies:
+    // `FSCTL_GET_RETRIEVAL_POINTERS` needs a mounted filesystem, and there is
+    // none. Copying the file data and only deleting the catalog entries
+    // afterwards would leave those bytes in the image's free space — which is
+    // exactly what "true removal" promises not to do (CLAUDE.md). So the
+    // exclusions are refused out loud instead of being silently skipped.
+    if bitlocker.is_some() && !req.exclusion_patterns.is_empty() {
+        warn!(
+            patterns = req.exclusion_patterns.len(),
+            "BitLocker source: exclusions cannot be applied to a locked volume — copying it whole"
+        );
+    }
     let fat_exclusions = fat_map
         .as_ref()
         .is_some_and(|f| f.filesystem == "FAT32" || f.filesystem == "exFAT")
@@ -852,8 +972,8 @@ fn backup_volume_inner(
     });
 
     let backup_id = Uuid::new_v4();
-    let mut reader: Box<dyn BlockReader> = if luks.is_some() {
-        // Read decrypted blocks through the LUKS view.
+    let mut reader: Box<dyn BlockReader> = if luks.is_some() || bitlocker.is_some() {
+        // Read decrypted blocks through the LUKS or BitLocker view.
         Box::new(crate::block_reader::RawVolumeBlockReader::new(
             open_source(&luks)?,
             req.block_size,
@@ -886,8 +1006,11 @@ fn backup_volume_inner(
     // exactly one healed sector, at TotalSectors, byte-equal to sector 0).
     // Store the correct copy ourselves: NTFS finds a valid backup boot sector
     // and writes nothing — and even if it writes, the bytes are identical.
-    // (Skipped for a decrypted LUKS source — its inner FS is never NTFS.)
-    if luks.is_none() && volume_len > sector_size as u64 {
+    // (Skipped for a decrypted LUKS source — its inner FS is never NTFS — and
+    // for a BitLocker one, whose volume device cannot be read at all while it
+    // is locked; its backup boot sector comes through the decrypting view with
+    // the rest of the volume.)
+    if luks.is_none() && bitlocker.is_none() && volume_len > sector_size as u64 {
         let mut sector0 = vec![0u8; sector_size as usize];
         let mut probe = WinRawDevice::open_read(&read_path)?;
         probe.read_at(0, &mut sector0)?;
@@ -1149,15 +1272,22 @@ fn backup_volume_inner(
         // kind and that encryption must be re-applied after restore. The LUKS
         // header is intentionally not stored — a plaintext capture restores to
         // an unencrypted volume, so the original header is not needed.
-        volume_encryption: luks.as_ref().map(|p| {
+        volume_encryption: {
             use own_backup_common::image::{VolumeCaptureMode, VolumeEncryptionState};
-            VolumeEncryptionState {
-                kind: p.kind.clone(),
+            // The restore screen reads this: without it a decrypted BitLocker
+            // volume would be shown as plain NTFS with no hint that the
+            // original was encrypted and the restored copy will not be (D14).
+            let kind = luks
+                .as_ref()
+                .map(|p| p.kind.clone())
+                .or_else(|| bitlocker.as_ref().map(|b| b.params.kind.clone()));
+            kind.map(|kind| VolumeEncryptionState {
+                kind,
                 capture_mode: VolumeCaptureMode::Plaintext,
                 luks_header_backup_b64: None,
                 note: Some("Decrypted at backup; re-enable encryption after restore".into()),
-            }
-        }),
+            })
+        },
     };
 
     let mut sidecar_info = match &parent {
@@ -3665,6 +3795,63 @@ pub struct DecryptedProbe {
     pub used_bytes: u64,
 }
 
+/// Open a BitLocker volume through the disk it lives on, and describe what is
+/// inside it.
+///
+/// The volume device is useless here: locked, it answers `FVE_E_LOCKED_VOLUME`
+/// to everything. The partition's bytes are on `\\.\PhysicalDriveN` all the
+/// same — that is how the inventory recognises such a volume in the first
+/// place — so the passphrase is tried against a window onto the disk.
+///
+/// Confirmed on a real volume (2026-08-05): Windows 10, XTS-AES 128, password
+/// protector.
+#[cfg(target_os = "windows")]
+fn probe_bitlocker(volume_device: &str, passphrase: &str) -> Result<DecryptedProbe> {
+    use crate::fat_map::RawVolume;
+
+    let extents = crate::volume_win::volume_extents(volume_device);
+    let [extent] = extents.as_slice() else {
+        return Err(OwnBackupError::Device(format!(
+            "{volume_device}: том BitLocker занимает {} экстентов — такой не поддерживается",
+            extents.len()
+        )));
+    };
+    let disk = format!(r"\\.\PhysicalDrive{}", extent.disk_number);
+    let mut probe = disk_window(&disk, extent.offset, extent.length)?;
+    let params = match crate::bitlocker::open_bitlocker(&mut probe, passphrase) {
+        Ok(p) => p,
+        // Wrong passphrase — a fact for the interface, not an error. AES-CCM
+        // verifies its own tag, so this really does mean "not this password".
+        Err(e) => {
+            info!(error = %e, "BitLocker passphrase rejected");
+            return Ok(DecryptedProbe { ok: false, ..Default::default() });
+        }
+    };
+    info!(
+        algo = format!("{:#x}", params.algorithm),
+        disk = extent.disk_number,
+        offset = extent.offset,
+        "BitLocker source unlocked; backing up decrypted data"
+    );
+
+    let mut view = crate::bitlocker::BitLockerVolume::new(
+        Box::new(disk_window(&disk, extent.offset, extent.length)?),
+        params,
+    );
+    let want = (own_backup_inventory::fs_probe::PROBE_LEN as u64).min(view.len()) as usize;
+    let mut buf = vec![0u8; want];
+    view.read_at(0, &mut buf)?;
+    let (filesystem, label, used_bytes) = match own_backup_inventory::fs_probe::identify(&buf) {
+        Some(p) => (
+            format!("{:?}", p.fs).to_lowercase(),
+            p.label.unwrap_or_default(),
+            p.used_bytes.unwrap_or(0),
+        ),
+        None => (String::new(), String::new(), 0),
+    };
+    Ok(DecryptedProbe { ok: true, filesystem, label, used_bytes })
+}
+
 /// Unlock the LUKS container at `device_path` with `passphrase` and probe the
 /// decrypted filesystem. `ok = false` means the passphrase was rejected. A
 /// source that is not LUKS returns `ok = true` with empty info (nothing to
@@ -3683,16 +3870,20 @@ pub fn unlock_and_probe(device_path: &str, passphrase: &str) -> Result<Decrypted
     let src = normalize_device_path(device_path);
     let mut dev = WinRawDevice::open_read(&src)?;
     let mut header = vec![0u8; 4096];
-    if let Err(e) = dev.read_at(0, &mut header) {
-        if is_bitlocker_locked(&e) {
-            return Err(OwnBackupError::Device(
-                "Том зашифрован BitLocker, и Own Backup пока не умеет его расшифровывать. \
-                 Разблокируйте том в Windows (Панель управления → Шифрование диска BitLocker, \
-                 либо `manage-bde -unlock`) или исключите его из копии."
-                    .into(),
-            ));
-        }
-        return Err(e);
+    match dev.read_at(0, &mut header) {
+        Ok(()) => {}
+        // A locked BitLocker volume refuses every read through its own device.
+        // Its ciphertext is on the DISK, which the FVE filter does not sit
+        // above, so the passphrase is tried there instead.
+        Err(e) if is_bitlocker_locked(&e) => return probe_bitlocker(&src, passphrase),
+        Err(e) => return Err(e),
+    }
+    // An unlocked BitLocker volume reads as plain NTFS through its device —
+    // Windows decrypts on the way — and needs nothing from us. A locked one
+    // whose header we could still read (a disk moved here from elsewhere)
+    // goes down the same path as above.
+    if crate::bitlocker::is_bitlocker(&header) {
+        return probe_bitlocker(&src, passphrase);
     }
     if !crate::luks::is_luks(&header) {
         return Ok(DecryptedProbe { ok: true, ..Default::default() });
