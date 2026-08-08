@@ -651,10 +651,11 @@ impl super::traits::DiskInventory for WindowsInventory {
                     has_os,
                     is_encrypted,
                     // Filled in by the service, which can reach the BitLocker
-                    // parser — this crate cannot, the parser's crate depends
-                    // on this one.
+                    // and LUKS parsers — this crate cannot, their crate depends
+                    // on this one. Until then the volume is presumed openable:
+                    // "nobody has asked yet" is not "нечем открыть".
                     unlock_methods: Vec::new(),
-                    unlockable: false,
+                    unlockable: true,
                 });
             }
             partitions.sort_by_key(|p| p.index);

@@ -382,6 +382,182 @@ pub fn open_luks(vol: &mut dyn RawVolume, passphrase: &[u8]) -> Result<LuksParam
     }
 }
 
+/// Marker every "no keyslot accepted it" error carries.
+const NO_KEYSLOT_MATCHED: &str = "passphrase did not match";
+
+/// Did [`open_luks`] fail because the passphrase is wrong — as opposed to a
+/// cipher we do not implement, a header we could not read, or a KDF that ran
+/// out of memory?
+///
+/// The difference is the whole message the user sees. "Пароль не подходит" sent
+/// in answer to a failed 1 GiB Argon2 allocation is not a small inaccuracy: it
+/// sends them off to re-type a password that was right all along.
+pub fn is_wrong_passphrase(e: &OwnBackupError) -> bool {
+    e.to_string().contains(NO_KEYSLOT_MATCHED)
+}
+
+// ---------------------------------------------------------------------------
+// Inspection: what the container says before anyone types anything
+// ---------------------------------------------------------------------------
+
+/// What a LUKS container declares about itself, read without a passphrase.
+///
+/// The BitLocker side of the wizard has asked this question since the FVE
+/// parser landed — a volume is asked what opens it, and only then is the user
+/// asked for it. A LUKS container answers the same question from its own
+/// header: keyslots, cipher and reencryption state all sit there in the clear,
+/// and reading them costs two small reads and no key derivation.
+#[derive(Debug, Clone)]
+pub struct LuksInfo {
+    /// Format version: 1 or 2.
+    pub version: u16,
+    /// What opens it, in the interface's words ("пароль" — the same word the
+    /// BitLocker protector list uses) — or, when nothing here does, why not.
+    pub methods: Vec<String>,
+    /// Can we open it with something the user can type?
+    pub openable: bool,
+}
+
+/// Read the header of the LUKS container on `vol` and describe it.
+///
+/// Errors only when `vol` is not a LUKS container or cannot be read; a
+/// container we cannot open still returns `Ok`, with the reason in `methods`.
+pub fn inspect_luks(vol: &mut dyn RawVolume) -> Result<LuksInfo> {
+    let header = read_at(vol, 0, 4096)?;
+    if !is_luks(&header) {
+        return Err(bad("not a LUKS container"));
+    }
+    let version = u16::from_be_bytes(header[6..8].try_into().unwrap());
+    match version {
+        1 => Ok(inspect_luks1(&header)),
+        2 => inspect_luks2(vol, &header),
+        v => Ok(LuksInfo {
+            version: v,
+            methods: vec![format!("LUKS {v} — этот формат ещё не поддерживается")],
+            openable: false,
+        }),
+    }
+}
+
+fn inspect_luks1(hdr: &[u8]) -> LuksInfo {
+    // 8 keyslots of 48 bytes each at offset 208 → the header runs to 592 bytes.
+    if hdr.len() < 592 {
+        return LuksInfo {
+            version: 1,
+            methods: vec!["заголовок LUKS1 обрезан".into()],
+            openable: false,
+        };
+    }
+    let be32 = |o: usize| u32::from_be_bytes(hdr[o..o + 4].try_into().unwrap());
+    let spec = format!("{}-{}", cstr(&hdr[8..40]), cstr(&hdr[40..72]));
+    let hash = cstr(&hdr[72..104]);
+    let slots = (0..8).filter(|s| be32(208 + s * 48) == LUKS1_KEY_ENABLED).count();
+
+    let mut why = Vec::new();
+    if check_cipher(&spec).is_err() {
+        why.push(format!("LUKS1: шифр {spec} не поддерживается"));
+    }
+    if Hash::parse(&hash).is_err() {
+        why.push(format!("LUKS1: хеш {hash} не поддерживается"));
+    }
+    if slots == 0 {
+        why.push("LUKS1: нет активных слотов ключа".into());
+    }
+    if why.is_empty() {
+        LuksInfo { version: 1, methods: vec!["пароль".into()], openable: true }
+    } else {
+        LuksInfo { version: 1, methods: why, openable: false }
+    }
+}
+
+fn inspect_luks2(vol: &mut dyn RawVolume, hdr: &[u8]) -> Result<LuksInfo> {
+    let hdr_size = u64::from_be_bytes(hdr[8..16].try_into().unwrap());
+    if !(LUKS2_JSON_OFFSET..=16 * 1024 * 1024).contains(&hdr_size) {
+        return Err(bad(format!("implausible LUKS2 header size {hdr_size}")));
+    }
+    let json_raw = read_at(vol, LUKS2_JSON_OFFSET, (hdr_size - LUKS2_JSON_OFFSET) as usize)?;
+    let end = json_raw.iter().position(|&b| b == 0).unwrap_or(json_raw.len());
+    let meta: Value =
+        serde_json::from_slice(&json_raw[..end]).map_err(|e| bad(format!("LUKS2 JSON: {e}")))?;
+
+    let mut why = Vec::new();
+
+    // The data segment's cipher. No crypt segment at all is a container we
+    // cannot read, whatever its keyslots say.
+    match meta
+        .get("segments")
+        .and_then(Value::as_object)
+        .and_then(|s| s.values().find(|s| jstr(s, "type") == Some("crypt")))
+    {
+        Some(seg) => {
+            let spec = jstr(seg, "encryption").unwrap_or_default();
+            if check_cipher(spec).is_err() {
+                why.push(format!("LUKS2: шифр {spec} не поддерживается"));
+            }
+        }
+        None => why.push("LUKS2: в заголовке нет зашифрованного сегмента".into()),
+    }
+
+    // A container mid-reencryption is a moving target: half its data is under
+    // the old key. cryptsetup refuses to touch one it does not understand, and
+    // so do we.
+    let requirements: Vec<String> = meta
+        .get("config")
+        .and_then(|c| c.get("requirements"))
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|r| r.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    for r in &requirements {
+        why.push(format!("LUKS2: {r} — том в особом состоянии, скопировать его целиком нельзя"));
+    }
+
+    // Keyslots the user can type into. A slot claimed by a token — systemd's
+    // TPM2/FIDO2 enrolments, clevis — holds a secret nobody types, exactly like
+    // a BitLocker TPM protector.
+    let empty = serde_json::Map::new();
+    let keyslots = meta.get("keyslots").and_then(Value::as_object).unwrap_or(&empty);
+    let tokens = meta.get("tokens").and_then(Value::as_object).unwrap_or(&empty);
+    let mut token_slots: Vec<&str> = Vec::new();
+    let mut token_types: Vec<String> = Vec::new();
+    for t in tokens.values() {
+        if let Some(list) = t.get("keyslots").and_then(Value::as_array) {
+            token_slots.extend(list.iter().filter_map(Value::as_str));
+        }
+        if let Some(ty) = jstr(t, "type") {
+            if !token_types.iter().any(|k| k == ty) {
+                token_types.push(ty.to_string());
+            }
+        }
+    }
+    let usable_slots = keyslots
+        .iter()
+        .filter(|(id, ks)| {
+            jstr(ks, "type") == Some("luks2")
+                && ks
+                    .get("kdf")
+                    .and_then(|k| jstr(k, "type"))
+                    .is_some_and(|t| matches!(t, "pbkdf2" | "argon2i" | "argon2id"))
+                && !token_slots.contains(&id.as_str())
+        })
+        .count();
+    if usable_slots == 0 {
+        if token_types.is_empty() {
+            why.push("LUKS2: нет слотов, которые открываются паролем".into());
+        } else {
+            why.push(format!(
+                "LUKS2: все слоты заняты токенами ({}) — Own Backup умеет только пароль",
+                token_types.join(", ")
+            ));
+        }
+    }
+
+    Ok(if why.is_empty() {
+        LuksInfo { version: 2, methods: vec!["пароль".into()], openable: true }
+    } else {
+        LuksInfo { version: 2, methods: why, openable: false }
+    })
+}
+
 // ---------------------------------------------------------------------------
 // LUKS1 (big-endian binary header)
 // ---------------------------------------------------------------------------
@@ -438,7 +614,7 @@ fn unlock_luks1(vol: &mut dyn RawVolume, hdr: &[u8], pass: &[u8]) -> Result<Luks
             });
         }
     }
-    Err(bad("passphrase did not match any LUKS1 keyslot"))
+    Err(bad(format!("{NO_KEYSLOT_MATCHED} any LUKS1 keyslot")))
 }
 
 // ---------------------------------------------------------------------------
@@ -552,7 +728,7 @@ fn unlock_luks2(vol: &mut dyn RawVolume, hdr: &[u8], pass: &[u8]) -> Result<Luks
             }
         }
     }
-    Err(bad("passphrase did not match any LUKS2 keyslot"))
+    Err(bad(format!("{NO_KEYSLOT_MATCHED} any LUKS2 keyslot")))
 }
 
 #[cfg(test)]
@@ -771,6 +947,127 @@ mod tests {
     fn rejects_non_luks() {
         let mut vol = MemVolume(vec![0u8; 8192]);
         assert!(open_luks(&mut vol, b"x").is_err());
+        assert!(inspect_luks(&mut vol).is_err());
+    }
+
+    // --- Inspection (no passphrase) ----------------------------------------
+
+    /// A LUKS1 header with one enabled keyslot and the cipher/hash we implement.
+    fn luks1_header(cipher: &str, mode: &str, hash: &str, enabled: bool) -> MemVolume {
+        let mut b = vec![0u8; 8192];
+        b[0..6].copy_from_slice(LUKS_MAGIC);
+        b[6..8].copy_from_slice(&1u16.to_be_bytes());
+        b[8..8 + cipher.len()].copy_from_slice(cipher.as_bytes());
+        b[40..40 + mode.len()].copy_from_slice(mode.as_bytes());
+        b[72..72 + hash.len()].copy_from_slice(hash.as_bytes());
+        put_be32(&mut b, 104, 4096);
+        put_be32(&mut b, 108, 64);
+        if enabled {
+            put_be32(&mut b, 208, LUKS1_KEY_ENABLED);
+        }
+        MemVolume(b)
+    }
+
+    /// A LUKS2 container that carries only the given JSON metadata.
+    fn luks2_with_json(json: &str) -> MemVolume {
+        let hdr_size = 16384u64;
+        let mut b = vec![0u8; hdr_size as usize];
+        b[0..6].copy_from_slice(LUKS_MAGIC);
+        b[6..8].copy_from_slice(&2u16.to_be_bytes());
+        b[8..16].copy_from_slice(&hdr_size.to_be_bytes());
+        let at = LUKS2_JSON_OFFSET as usize;
+        b[at..at + json.len()].copy_from_slice(json.as_bytes());
+        MemVolume(b)
+    }
+
+    /// Keyslots + a crypt segment, with `extra` splicing in tokens/config.
+    fn luks2_json(slot_kdf: &str, extra: &str) -> String {
+        format!(
+            r#"{{"keyslots":{{"0":{{"type":"luks2","key_size":64,"kdf":{{"type":"{slot_kdf}"}},"af":{{"stripes":4000,"hash":"sha256"}},"area":{{"offset":"32768","size":"258048","encryption":"aes-xts-plain64"}}}}}},"segments":{{"0":{{"type":"crypt","offset":"16777216","encryption":"aes-xts-plain64","sector_size":512}}}}{extra}}}"#
+        )
+    }
+
+    #[test]
+    fn luks1_openable_with_a_passphrase() {
+        let info = inspect_luks(&mut luks1_header("aes", "xts-plain64", "sha256", true)).unwrap();
+        assert_eq!(info.version, 1);
+        assert!(info.openable);
+        // The wizard matches this word to decide the field's placeholder; it is
+        // the same one the BitLocker protector list uses.
+        assert_eq!(info.methods, vec!["пароль".to_string()]);
+    }
+
+    #[test]
+    fn luks1_names_what_stands_in_the_way() {
+        let info = inspect_luks(&mut luks1_header("serpent", "xts-plain64", "sha256", true)).unwrap();
+        assert!(!info.openable);
+        assert!(info.methods[0].contains("serpent"), "{:?}", info.methods);
+
+        let info = inspect_luks(&mut luks1_header("aes", "xts-plain64", "sha256", false)).unwrap();
+        assert!(!info.openable);
+        assert!(info.methods[0].contains("нет активных слотов"), "{:?}", info.methods);
+    }
+
+    #[test]
+    fn luks2_openable_with_a_passphrase() {
+        let info = inspect_luks(&mut luks2_with_json(&luks2_json("argon2id", ""))).unwrap();
+        assert_eq!(info.version, 2);
+        assert!(info.openable);
+        assert_eq!(info.methods, vec!["пароль".to_string()]);
+    }
+
+    #[test]
+    fn luks2_refuses_an_unsupported_cipher() {
+        let json = luks2_json("argon2id", "").replace(
+            r#""encryption":"aes-xts-plain64","sector_size":512"#,
+            r#""encryption":"serpent-xts-plain64","sector_size":512"#,
+        );
+        let info = inspect_luks(&mut luks2_with_json(&json)).unwrap();
+        assert!(!info.openable);
+        assert!(info.methods.iter().any(|m| m.contains("serpent")), "{:?}", info.methods);
+    }
+
+    #[test]
+    fn luks2_slot_held_by_a_tpm_token_is_not_a_passphrase() {
+        // systemd-cryptenroll --tpm2-device: the slot's secret is sealed to the
+        // TPM. Asking the user to type it is the wrong question, not a hard one.
+        let extra = r#","tokens":{"0":{"type":"systemd-tpm2","keyslots":["0"]}}"#;
+        let info = inspect_luks(&mut luks2_with_json(&luks2_json("argon2id", extra))).unwrap();
+        assert!(!info.openable);
+        assert!(info.methods[0].contains("systemd-tpm2"), "{:?}", info.methods);
+
+        // A second, token-free slot puts the passphrase back on the table.
+        let two_slots = luks2_json("argon2id", extra).replace(
+            r#""keyslots":{"0":{"type":"luks2""#,
+            r#""keyslots":{"1":{"type":"luks2","key_size":64,"kdf":{"type":"argon2id"}},"0":{"type":"luks2""#,
+        );
+        let info = inspect_luks(&mut luks2_with_json(&two_slots)).unwrap();
+        assert!(info.openable, "{:?}", info.methods);
+    }
+
+    #[test]
+    fn luks2_refuses_a_container_mid_reencryption() {
+        let extra = r#","config":{"json_size":"12288","requirements":["online-reencrypt-v3"]}"#;
+        let info = inspect_luks(&mut luks2_with_json(&luks2_json("argon2id", extra))).unwrap();
+        assert!(!info.openable);
+        assert!(info.methods.iter().any(|m| m.contains("online-reencrypt")), "{:?}", info.methods);
+    }
+
+    #[test]
+    fn a_wrong_passphrase_is_told_apart_from_a_broken_header() {
+        // `LuksParams` carries the master key and deliberately has no Debug, so
+        // the error comes out by hand rather than through `unwrap_err`.
+        let err = |vol: &mut MemVolume| match open_luks(vol, b"whatever") {
+            Ok(_) => panic!("a stub header must not open"),
+            Err(e) => e,
+        };
+        // The keyslot points at material this stub does not have, so no slot
+        // accepts the passphrase — which is what the UI reads as "не подходит".
+        let e = err(&mut luks1_header("aes", "xts-plain64", "sha256", true));
+        assert!(is_wrong_passphrase(&e), "{e}");
+
+        let e = err(&mut luks1_header("serpent", "xts-plain64", "sha256", true));
+        assert!(!is_wrong_passphrase(&e), "{e}");
     }
 
     /// Cross-check master-key recovery against the reference implementation:

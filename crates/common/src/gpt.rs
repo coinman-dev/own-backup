@@ -119,6 +119,16 @@ pub struct DiskImageRef {
     pub image_file_name: String,
     /// Filesystem name for display (e.g. "ntfs", "fat32", "ext4").
     pub filesystem: String,
+    /// The source volume's own encryption (BitLocker/LUKS) and how this image
+    /// captured it — decrypted, or verbatim ciphertext. `None` when the source
+    /// was not an encrypted container, or for images written before the field
+    /// existed.
+    ///
+    /// The restore screen says opposite things in those two cases — one volume
+    /// comes back readable but unprotected, the other comes back exactly as it
+    /// was and needs its password — so guessing between them is not an option.
+    #[serde(default)]
+    pub encryption: Option<crate::image::VolumeEncryptionState>,
 }
 
 /// Sidecar written once per whole-disk backup run (`<name>_diskN_<stamp>.obdm`).

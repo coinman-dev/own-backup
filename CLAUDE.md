@@ -73,6 +73,49 @@ tested on a Windows host — cross-compilation validates compilation only.
   `.ai/xfs-true-removal-plan_2026-08-05.md` (D0–D5; the kernel's reference delta
   says a single unlink touches seven structure classes — RMAPBT and FINOBT
   included, both on by default in modern mkfs).
+  **An encrypted source honours the rules too (2026-08-07).** A locked BitLocker
+  volume is not mounted by Windows, so nothing can be asked which clusters a
+  file holds before the copy — the exclusions used to be dropped entirely (12
+  configured rules, `excluded_files=0`, a warning in the log and nothing on
+  screen). They now run AFTER the copy, inside the image, which holds that NTFS
+  in the clear: mount a differencing child → walk it with the same matcher live
+  volumes get → the FS driver deletes the matches → dismount → zero the clusters
+  they held, **but only those `$Bitmap` still calls free**, so a cluster the
+  filesystem took back for its own metadata is never overwritten → merge and
+  re-checksum (`true_removal_win::exclude_inside_image`). Without that zero pass
+  it would be a rename, not a removal: the data would sit in the image's free
+  space, out of the catalog and fully recoverable. Both formats: VHDX through a
+  differencing child, qcow2 through an AIM RW mount over a CoW overlay
+  (`qcow2_removal_win::exclude_inside_qcow2`) — the scan/delete/zero half is
+  shared (`scan_delete_zero_on_disk`), only the attach differs. **NTFS inside
+  only.** ReFS is not a mounting problem (AIM and the VHDX driver mount it
+  fine) but a free-map one: the zero pass must know which clusters the FS still
+  calls free, and ReFS's allocation state is not readable from the raw image.
+  The route in is `FSCTL_GET_VOLUME_BITMAP`, which ReFS does answer and
+  `used_sectors_win` already uses — it just has to be asked while the volume is
+  LOCKED and before it is dismounted, so nothing writes between the answer and
+  the zeroing. Planned in `.ai/refs-in-image-exclusions-plan_2026-08-07.md`
+  (R1–R5; R1 opens that window inside `flush_lock_dismount_volume` — the
+  function that fought the ~180 s PnP removal veto, so it lands and gets
+  verified on its own). Until then ReFS says out loud that it did not apply the
+  rules.
+  **This pass is slow on a spinning disk, and that is measured, not assumed
+  (2026-08-08).** On the boot medium, 12 937 excluded files (1.9 GiB) out of an
+  84 GiB BitLocker volume: qcow2 81 s, VHDX 420 s. The VHDX half goes to the
+  merge (~95 s) and the re-checksum of 3467 blocks (~260 s). Four shapes of that
+  re-checksum were measured on the same machine and image — one read per block
+  through the attached disk (255 s), 16 MiB runs still attached (245 s), runs
+  read from the file (268 s), runs through a reader that parses the BAT once
+  (260 s). It is therefore neither the read count, nor the attach, nor the
+  per-block BAT re-parse; ~75 ms per megabyte stayed put through all of them.
+  The remaining suspect is the destination drive: an ST2000DM008 is **SMR**, and
+  this ran right after it took 84 GiB of writes. The same run's merge moved
+  7 GiB at 72 MB/s, so the disk is not slow in general — only afterwards. **Do
+  not re-optimise this without first measuring on a CMR disk or an SSD**; three
+  of those four rows are the cost of assuming the code was at fault. qcow2 is
+  faster for structural reasons that will not change: zstd means fewer physical
+  bytes, and its 64 KiB CoW clusters amplify scattered MFT writes 16× less than
+  the VHDX child's 1 MiB blocks (delete: 0.7 s vs 9 s).
   Any change that edits foreign FS metadata must pass BOTH fsck-clean
   (`btrfs check --check-data-csum` / `e2fsck -fn` / `xfs_repair -n`) AND a
   mount-and-write acceptance before shipping — static checks alone once let a

@@ -36,7 +36,7 @@ impl MockInventory {
             is_boot: true,
             is_encrypted: false,
             unlock_methods: Vec::new(),
-            unlockable: false,
+            unlockable: true,
         };
 
         let msr_partition = PartitionInfo {
@@ -56,7 +56,7 @@ impl MockInventory {
             is_boot: false,
             is_encrypted: false,
             unlock_methods: Vec::new(),
-            unlockable: false,
+            unlockable: true,
         };
 
         let ntfs_partition = PartitionInfo {
@@ -76,7 +76,7 @@ impl MockInventory {
             is_boot: false,
             is_encrypted: false,
             unlock_methods: Vec::new(),
-            unlockable: false,
+            unlockable: true,
         };
 
         DiskInfo {

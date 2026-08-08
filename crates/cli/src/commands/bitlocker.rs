@@ -382,11 +382,13 @@ fn report(found: Vec<Examined>, json: bool) -> Result<()> {
             if !info.cipher_supported {
                 "шифр не поддерживается — открыть не сможем".to_string()
             } else if info.has_password() {
-                "можно открыть паролем".to_string()
+                "можно открыть паролем тома".to_string()
             } else if info.openable() {
-                "можно открыть".to_string()
+                // A system volume: Windows allows no passphrase protector there,
+                // so the 48-digit recovery key is the way in.
+                "парольной защиты нет — открывается 48-значным ключом восстановления".to_string()
             } else {
-                "парольной защиты нет — понадобится ключ восстановления (пока не умеем)".to_string()
+                "нечем открыть: ни пароля, ни ключа восстановления среди защит нет".to_string()
             }
         );
         // For checking our table of codes against a real volume.

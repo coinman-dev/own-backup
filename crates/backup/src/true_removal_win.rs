@@ -54,6 +54,13 @@ use crate::win_device::{to_wide, WinRawDevice};
 /// visible in the log (see "Windows GUI testing gotchas").
 const BUILD_TAG: &str = "2026-07-30a-volume-online";
 
+/// How many backup blocks the re-checksum pass may pull in one read.
+///
+/// 16 MiB at a 1 MiB block size. Kept because coalescing adjacent blocks is
+/// obviously right, NOT because it fixed anything: on the HDD it changed
+/// nothing at all (see the note on [`rehash_touched_blocks`]).
+const REHASH_RUN_BLOCKS: u64 = 16;
+
 /// Standard `DELETE` access right (generic, not in the FILE_* consts).
 const DELETE_ACCESS: u32 = 0x0001_0000;
 
@@ -194,7 +201,7 @@ pub fn remove_excluded_from_image(
 
     let t_rehash = Instant::now();
     let (rehashed, added) =
-        rehash_touched_blocks(image_path, &alloc, data_offset, volume_len, block_size, checksums)?;
+        rehash_touched_blocks(image_path, &alloc, data_offset, volume_len, block_size, checksums, tick)?;
     let rehash_ms = t_rehash.elapsed().as_millis();
 
     let outcome = RemovalOutcome {
@@ -216,6 +223,355 @@ pub fn remove_excluded_from_image(
         "true removal: excluded files deleted from the image by the FS driver"
     );
     Ok(Some(outcome))
+}
+
+/// What the "exclude inside the finished image" pass did — the removal outcome
+/// plus the figures the result screen shows, which on this path can only be
+/// learned from the image's own filesystem.
+pub struct InsideRemoval {
+    pub outcome: RemovalOutcome,
+    pub files_excluded: u64,
+    pub bytes_excluded: u64,
+    pub categories: crate::exclusions::CategorySizes,
+    /// Bytes actually overwritten with zeros inside the image.
+    pub bytes_zeroed: u64,
+}
+
+/// Apply file exclusions to an image whose SOURCE could not be walked.
+///
+/// A locked BitLocker volume is not mounted by Windows, so nothing can be asked
+/// which clusters a file occupies before the copy — which is why exclusions
+/// used to be dropped for such a source, leaving twelve configured rules with
+/// no effect and no word about it. The image, though, holds that volume's
+/// filesystem in the clear: it can be mounted, walked, and edited by the very
+/// driver that owns the format.
+///
+/// So the work moves after the copy, into a temporary differencing child:
+///
+/// 1. mount the child and walk it with the same matcher live volumes get;
+/// 2. let the FS driver delete every match — the catalog entry goes, exactly as
+///    the product requires ("настоящее удаление", CLAUDE.md);
+/// 3. dismount, then zero the clusters those files held — but only the ones the
+///    filesystem still reports as FREE, so a cluster it took back for its own
+///    metadata during the deletions is never overwritten;
+/// 4. merge the child down and re-checksum the touched blocks.
+///
+/// Step 3 is what makes this a removal rather than a rename: without it the
+/// file data would sit in the image's free space, out of the catalog but fully
+/// recoverable — the "zero-filled ghost" the product refuses, inside out.
+///
+/// Same graceful contract as [`remove_excluded_from_image`]: `Ok(None)` means
+/// nothing was touched (the copy stands, exclusions simply did not happen and
+/// the caller says so), `Err` means the merge or re-checksum failed and the
+/// backup must fail with it.
+#[allow(clippy::too_many_arguments)]
+pub fn exclude_inside_image(
+    image_path: &Path,
+    patterns: &[String],
+    data_offset: u64,
+    volume_len: u64,
+    block_size: u32,
+    checksums: &mut Vec<BlockChecksum>,
+    tick: &mut dyn FnMut(u64),
+) -> Result<Option<InsideRemoval>> {
+    if patterns.is_empty() {
+        return Ok(None);
+    }
+    let temp = temp_child_path(image_path);
+    info!(
+        image = %image_path.display(),
+        temp_child = %temp.display(),
+        patterns = patterns.len(),
+        build = BUILD_TAG,
+        "exclusions inside the image: starting scan-&-delete pass over the finished image"
+    );
+    let _ = std::fs::remove_file(&temp);
+
+    // --- Phase A (transactional): everything lands in the temp child. ---
+    let t_mount = Instant::now();
+    let scanned = match scan_delete_and_zero(&temp, image_path, patterns, data_offset, volume_len, tick)
+    {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(
+                error = %e,
+                "exclusions inside the image: pass failed — the copy keeps every file, \
+                 including the excluded ones"
+            );
+            let _ = std::fs::remove_file(&temp);
+            return Ok(None);
+        }
+    };
+    let mount_ms = t_mount.elapsed().as_millis();
+    if scanned.deleted == 0 {
+        info!(
+            failed = scanned.failed,
+            files_matched = scanned.files_excluded,
+            "exclusions inside the image: nothing was deleted — discarding the child"
+        );
+        let _ = std::fs::remove_file(&temp);
+        // Nothing matched is a legitimate answer, and a different one from
+        // "the pass could not run": report the (empty) scan so the result
+        // screen says "исключено 0" rather than "исключения не применялись".
+        return Ok(Some(InsideRemoval {
+            outcome: RemovalOutcome {
+                entries_deleted: 0,
+                entries_failed: scanned.failed,
+                blocks_rehashed: 0,
+                blocks_added: 0,
+            },
+            files_excluded: scanned.files_excluded,
+            bytes_excluded: scanned.bytes_excluded,
+            categories: scanned.categories,
+            bytes_zeroed: 0,
+        }));
+    }
+
+    let alloc = match allocated_payload_blocks(&temp) {
+        Ok(a) if !a.blocks.is_empty() => a,
+        Ok(_) => {
+            warn!("exclusions inside the image: child BAT empty after deletions — discarding");
+            let _ = std::fs::remove_file(&temp);
+            return Ok(None);
+        }
+        Err(e) => {
+            warn!(error = %e, "exclusions inside the image: cannot read child BAT — discarding");
+            let _ = std::fs::remove_file(&temp);
+            return Ok(None);
+        }
+    };
+
+    // --- Phase B (commits): from here a failure means the image and its
+    // checksums disagree, which is a failed backup, not a warning. ---
+    let t_merge = Instant::now();
+    merge_into_parent(&temp)?;
+    let _ = std::fs::remove_file(&temp);
+    let merge_ms = t_merge.elapsed().as_millis();
+
+    let (rehashed, added) =
+        rehash_touched_blocks(image_path, &alloc, data_offset, volume_len, block_size, checksums, tick)?;
+
+    let out = InsideRemoval {
+        outcome: RemovalOutcome {
+            entries_deleted: scanned.deleted,
+            entries_failed: scanned.failed,
+            blocks_rehashed: rehashed,
+            blocks_added: added,
+        },
+        files_excluded: scanned.files_excluded,
+        bytes_excluded: scanned.bytes_excluded,
+        categories: scanned.categories,
+        bytes_zeroed: scanned.bytes_zeroed,
+    };
+    info!(
+        files = out.files_excluded,
+        deleted = out.outcome.entries_deleted,
+        failed = out.outcome.entries_failed,
+        bytes_excluded = out.bytes_excluded,
+        bytes_zeroed = out.bytes_zeroed,
+        blocks_rehashed = out.outcome.blocks_rehashed,
+        blocks_added = out.outcome.blocks_added,
+        mount_ms,
+        merge_ms,
+        "exclusions inside the image: excluded files deleted and their clusters zeroed"
+    );
+    Ok(Some(out))
+}
+
+/// Result of the in-image pass before the merge. Shared by both image formats:
+/// the disk under it is a differencing VHDX child or an AIM proxy over a qcow2
+/// overlay, and from here neither is distinguishable.
+pub(crate) struct ScannedInside {
+    pub(crate) deleted: u64,
+    pub(crate) failed: u64,
+    pub(crate) files_excluded: u64,
+    pub(crate) bytes_excluded: u64,
+    pub(crate) categories: crate::exclusions::CategorySizes,
+    pub(crate) bytes_zeroed: u64,
+}
+
+/// Attach a differencing child, mount it, scan + delete, dismount, zero the
+/// freed clusters, detach. Everything written lands in the child.
+fn scan_delete_and_zero(
+    temp: &Path,
+    image_path: &Path,
+    patterns: &[String],
+    data_offset: u64,
+    volume_len: u64,
+    tick: &mut dyn FnMut(u64),
+) -> Result<ScannedInside> {
+    let _automount = crate::automount::AutoMountGuard::enable_if_disabled();
+    create_differencing_vhdx(temp, image_path)?;
+    let attached = attach_vhdx(temp, AttachMode::RawWrite)?;
+    let mut dev = open_write_retry(attached.physical_path())?;
+    let _ = dev.update_properties();
+    dev.set_online_this_session()?;
+    let disk_number = disk_number_of(attached.physical_path())?;
+    let scanned =
+        scan_delete_zero_on_disk(disk_number, &mut dev, patterns, data_offset, volume_len, tick)?;
+    drop(dev);
+    drop(attached); // detaches the child
+    Ok(scanned)
+}
+
+/// Scan the filesystem inside an already-attached, online image disk, delete
+/// what matches, and zero what that freed. Format-independent: the caller has
+/// put a writable disk in front of us, whether by attaching a differencing
+/// VHDX child or by proxying a qcow2 overlay through AIM.
+pub(crate) fn scan_delete_zero_on_disk(
+    disk_number: u32,
+    dev: &mut WinRawDevice,
+    patterns: &[String],
+    data_offset: u64,
+    volume_len: u64,
+    tick: &mut dyn FnMut(u64),
+) -> Result<ScannedInside> {
+    // The volume at the offset the copy wrote it to — not merely "the first
+    // volume on this disk". A per-volume image also carries the meta partition,
+    // and scanning one volume while deleting on another is not a mistake worth
+    // leaving to enumeration order.
+    let volume_root = crate::volume_win::volume_root_at_offset(disk_number, data_offset)
+        .ok_or_else(|| {
+            dev_err(
+                "exclusions inside the image",
+                format!("no volume surfaced at offset {data_offset} of the attached image"),
+            )
+        })?;
+
+    // 1. Walk the image's own filesystem with the matcher live volumes get.
+    // `collect_excluded_ranges` also resolves each match's extents, which is
+    // what the zero pass below needs, and counts the kept files by category —
+    // the breakdown this source could not produce any other way.
+    let entries = wait_for_volume_ready(&volume_root);
+    if entries == 0 {
+        return Err(dev_err(
+            "exclusions inside the image",
+            "the filesystem in the image never mounted",
+        ));
+    }
+    // The cluster size comes from the image's own boot sector rather than from
+    // Windows: it is one read, and it doubles as the check that what we are
+    // about to walk really is NTFS (nothing below can read a ReFS free map).
+    let cluster_size = {
+        let mut window = image_volume_window(dev, data_offset, volume_len)?;
+        crate::ntfs_map::ntfs_cluster_size(&mut window)?
+    };
+    let scan = crate::exclusions_win::collect_excluded_ranges(
+        volume_root.trim_end_matches('\\'),
+        cluster_size,
+        patterns,
+        |n| {
+            tick(n);
+            Ok(())
+        },
+    )?;
+    info!(
+        matched = scan.files_excluded,
+        bytes = scan.bytes_excluded,
+        entries_scanned = scan.entries_scanned,
+        "exclusions inside the image: scan done"
+    );
+
+    // 2. The driver deletes them, then the volume is torn down — which is also
+    // what keeps the detach below from waiting out the ~180 s PnP removal veto
+    // (see `delete_paths_on_disk`, whose body this mirrors for a volume we
+    // located ourselves).
+    let (deleted, failed) = delete_paths_on_volume_root(&volume_root, &scan.paths, tick)?;
+    teardown_volume(&volume_root, dev);
+    let gone = wait_volume_gone(disk_number, Duration::from_secs(10));
+    debug!(gone, "exclusions inside the image: volume state before the zero pass");
+
+    // 3. With the volume dismounted, nothing is writing to the filesystem any
+    // more — so the bitmap read here is final, and zeroing what it calls free
+    // cannot race the driver.
+    let mut bytes_zeroed = 0u64;
+    if deleted > 0 && !scan.ranges.is_empty() {
+        match zero_freed_clusters(dev, data_offset, volume_len, &scan.ranges, tick) {
+            Ok(n) => bytes_zeroed = n,
+            // The entries are gone from the catalog either way; their data
+            // lingering in free space is worth a loud warning, not a lost copy.
+            Err(e) => warn!(
+                error = %e,
+                "exclusions inside the image: could not zero the freed clusters — the deleted \
+                 files' data stays in the image's free space"
+            ),
+        }
+    }
+
+    Ok(ScannedInside {
+        deleted,
+        failed,
+        files_excluded: scan.files_excluded,
+        bytes_excluded: scan.bytes_excluded,
+        categories: scan.categories,
+        bytes_zeroed,
+    })
+}
+
+/// A reader over the volume INSIDE the attached image — the same bytes the
+/// mounted filesystem sits on, addressed from the volume's own start.
+fn image_volume_window(
+    dev: &WinRawDevice,
+    data_offset: u64,
+    volume_len: u64,
+) -> Result<crate::aligned_volume::AlignedVolume<crate::volume_window::VolumeWindow>> {
+    Ok(crate::aligned_volume::AlignedVolume::new(
+        crate::volume_window::VolumeWindow::new(
+            Box::new(WinRawDevice::open_read(dev.path())?),
+            data_offset,
+            volume_len,
+        )?,
+    ))
+}
+
+/// Overwrite with zeros the parts of `ranges` (volume-relative) that the
+/// filesystem now reports as free. Returns the number of bytes written.
+///
+/// Only free clusters are touched. The extent list was collected BEFORE the
+/// deletions, and between then and now the filesystem has been writing — its
+/// own metadata, its journal — and may have taken some of those clusters back.
+/// The bitmap is the only witness to that, so it is read here, after the
+/// volume was dismounted and nothing can change it any more.
+fn zero_freed_clusters(
+    dev: &mut WinRawDevice,
+    data_offset: u64,
+    volume_len: u64,
+    ranges: &crate::exclusions::ByteRanges,
+    tick: &mut dyn FnMut(u64),
+) -> Result<u64> {
+    let mut window = image_volume_window(dev, data_offset, volume_len)?;
+    let free = crate::ntfs_map::ntfs_free_map(&mut window)?;
+    let wanted: Vec<(u64, u64)> = ranges.iter().collect();
+    let parts = free.free_parts_of(&wanted);
+    let skipped = ranges.total_bytes() - parts.iter().map(|(s, e)| e - s).sum::<u64>();
+    if skipped > 0 {
+        info!(
+            bytes = skipped,
+            "exclusions inside the image: some freed clusters were taken back by the filesystem \
+             and are left untouched"
+        );
+    }
+
+    // Written through the handle the disk was offlined under: that offline is
+    // exactly what makes raw sector writes to an attached VHDX legal (a mounted
+    // volume answers ERROR_ACCESS_DENIED — see `set_offline_writable`).
+    // 16 MiB: the zeroing is the one purely sequential part of the pass, and on
+    // a spinning disk a bigger write is simply fewer of them.
+    const CHUNK: usize = 16 * 1024 * 1024;
+    let zeros = vec![0u8; CHUNK];
+    let mut written = 0u64;
+    for (start, end) in parts {
+        let mut at = start;
+        while at < end {
+            let len = ((end - at) as usize).min(CHUNK);
+            dev.write_at(data_offset + at, &zeros[..len])?;
+            at += len as u64;
+            written += len as u64;
+            tick(written / CHUNK as u64);
+        }
+    }
+    dev.flush()?;
+    Ok(written)
 }
 
 fn temp_child_path(image_path: &Path) -> PathBuf {
@@ -337,7 +693,7 @@ pub fn remove_excluded_from_disk_image(
     merge_into_parent(&temp)?;
     let _ = std::fs::remove_file(&temp);
     let (rehashed, added) =
-        rehash_touched_blocks(image_path, &alloc, 0, image_size, block_size, checksums)?;
+        rehash_touched_blocks(image_path, &alloc, 0, image_size, block_size, checksums, tick)?;
 
     let outcome = RemovalOutcome {
         entries_deleted: deleted.0,
@@ -824,9 +1180,36 @@ fn teardown_volume(volume_root: &str, dev: &WinRawDevice) {
 }
 
 
+
 /// Re-read every backup block overlapped by the child's touched regions from
 /// the merged image and update/insert its checksum. New all-zero blocks are
 /// skipped (nothing to restore for them).
+///
+/// Reads the VHDX FILE through [`crate::vhdx_bat::VhdxGuestReader`] — geometry
+/// and BAT parsed once, then payload reads only.
+///
+/// **This pass is slow on a spinning disk and four attempts did not change
+/// that** (2026-08-08, same machine/image every time: 3467 blocks ≈ 3.4 GiB):
+///
+/// | shape | time |
+/// |---|---|
+/// | one 1 MiB read per block, through the attached disk | 255 s |
+/// | reads coalesced into 16 MiB runs, still attached | 245 s |
+/// | runs read from the FILE (`read_vhdx_guest_at` per run) | 268 s |
+/// | runs read through this reader (BAT parsed once) | 260 s |
+///
+/// So it is neither the number of reads, nor the attach, nor the per-block BAT
+/// re-parse — every plausible software cause was tried and the number stayed
+/// put at ~75 ms per megabyte. What is left is the drive: the destination in
+/// that test was an ST2000DM008, an SMR disk, right after taking 84 GiB of
+/// writes — exactly when such a drive is busy rewriting its shingled zones and
+/// serves everything else at a crawl. The merge in the same run moved 7 GiB at
+/// 72 MB/s, so the disk is not slow in general, only after that write load.
+///
+/// Do not "optimise" this again without measuring on a CMR disk or an SSD
+/// first: three of the four rows above are the cost of assuming the code was
+/// at fault. The current shape is kept because it is the simplest of them
+/// (no attach, no per-block re-parse), not because it won.
 pub(crate) fn rehash_touched_blocks(
     image_path: &Path,
     alloc: &crate::vhdx_bat::VhdxAllocation,
@@ -834,6 +1217,7 @@ pub(crate) fn rehash_touched_blocks(
     volume_len: u64,
     block_size: u32,
     checksums: &mut Vec<BlockChecksum>,
+    tick: &mut dyn FnMut(u64),
 ) -> Result<(u64, u64)> {
     let bs = block_size as u64;
     let mut affected: BTreeSet<u64> = BTreeSet::new();
@@ -852,52 +1236,57 @@ pub(crate) fn rehash_touched_blocks(
         return Ok((0, 0));
     }
 
-    let attached = attach_vhdx(image_path, AttachMode::RawRead)?;
-    let mut dev = open_read_retry(attached.physical_path())?;
-
     let mut map: BTreeMap<u64, u64> =
         checksums.iter().map(|c| (c.block_number, c.checksum)).collect();
     let mut added = 0u64;
-    let mut buf = vec![0u8; block_size as usize];
-    for &n in &affected {
-        let offset = n * bs;
-        let len = std::cmp::min(bs, volume_len - offset) as usize;
-        dev.read_at(data_offset + offset, &mut buf[..len])?;
-        let checksum = compute_block_checksum(&buf[..len]);
-        match map.entry(n) {
-            std::collections::btree_map::Entry::Occupied(mut e) => {
-                e.insert(checksum);
+    let t_read = Instant::now();
+    let mut reader = crate::vhdx_bat::VhdxGuestReader::open(image_path)?;
+    let mut buf = vec![0u8; (REHASH_RUN_BLOCKS * bs) as usize];
+    let mut done = 0u64;
+    let mut runs = 0u64;
+    for (first, count) in
+        crate::checksum::coalesce_block_runs(affected.iter().copied(), REHASH_RUN_BLOCKS)
+    {
+        runs += 1;
+        let offset = first * bs;
+        let want = std::cmp::min(count * bs, volume_len - offset) as usize;
+        reader.read_at(data_offset + offset, &mut buf[..want])?;
+        for i in 0..count {
+            let n = first + i;
+            let at = (i * bs) as usize;
+            if at >= want {
+                break; // the last block ran past the end of the volume
             }
-            std::collections::btree_map::Entry::Vacant(e) => {
-                // Driver wrote into previously-free space (USN growth etc.).
-                // All-zero content needs no restore entry.
-                if buf[..len].iter().any(|&x| x != 0) {
+            let len = std::cmp::min(bs as usize, want - at);
+            let block = &buf[at..at + len];
+            let checksum = compute_block_checksum(block);
+            match map.entry(n) {
+                std::collections::btree_map::Entry::Occupied(mut e) => {
                     e.insert(checksum);
-                    added += 1;
+                }
+                std::collections::btree_map::Entry::Vacant(e) => {
+                    // Driver wrote into previously-free space (USN growth etc.).
+                    // All-zero content needs no restore entry.
+                    if block.iter().any(|&x| x != 0) {
+                        e.insert(checksum);
+                        added += 1;
+                    }
                 }
             }
         }
+        done += count;
+        tick(done);
     }
-    drop(dev);
-    drop(attached);
+    info!(
+        blocks = affected.len(),
+        runs,
+        read_ms = t_read.elapsed().as_millis(),
+        "re-checksum read the image file directly (no attach)"
+    );
 
     *checksums = map
         .into_iter()
         .map(|(block_number, checksum)| BlockChecksum { block_number, checksum })
         .collect();
     Ok((affected.len() as u64, added))
-}
-
-fn open_read_retry(path: &str) -> Result<WinRawDevice> {
-    let mut last: Option<OwnBackupError> = None;
-    for attempt in 0..20 {
-        match WinRawDevice::open_read(path) {
-            Ok(dev) => return Ok(dev),
-            Err(e) => {
-                last = Some(e);
-                std::thread::sleep(Duration::from_millis(100 + 50 * attempt));
-            }
-        }
-    }
-    Err(last.unwrap_or_else(|| OwnBackupError::Device(format!("cannot open {path}"))))
 }

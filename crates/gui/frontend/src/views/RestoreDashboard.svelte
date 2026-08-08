@@ -253,14 +253,34 @@
       : [],
   );
 
-  // Partitions of the copy whose ORIGINAL was an encrypted container. The
-  // patched list above deliberately drops the padlock (the copy holds the
-  // volume in the clear), so the fact has to be read off the raw snapshot —
-  // and it matters: the restore cannot put the container back.
+  // What the copy says each encrypted partition's container was.
+  function encOf(index: number) {
+    return (activeInfo?.encrypted_parts ?? []).find((e) => e.index === index);
+  }
+  // Partitions of the copy whose ORIGINAL was an encrypted container and whose
+  // copy holds it in the clear. The patched list above deliberately drops the
+  // padlock (the copy holds the volume decrypted), so the fact has to be read
+  // off the raw snapshot — and it matters: the restore cannot put the
+  // container back.
+  //
+  // A container copied VERBATIM is not one of these: it comes back encrypted,
+  // exactly as it was, and warning about it would be a warning about nothing.
   const decryptedParts = $derived(
     (rawBackedUpDisks[0]?.partitions ?? [])
       .filter((p) => p.is_encrypted && backedUpParts.includes(p.index))
+      .filter((p) => encOf(p.index)?.captured !== 'sector')
       .map((p) => p.index),
+  );
+  // Copies made before the container kind was recorded say nothing about it;
+  // then the screen must not name one. BitLocker and LUKS fail in different
+  // directions, and telling a Windows user to rebuild their initramfs is worse
+  // than telling them nothing.
+  const encKinds = $derived(
+    new Set(decryptedParts.map((i) => encOf(i)?.kind ?? 'unknown')),
+  );
+  const allBitLocker = $derived(encKinds.size === 1 && encKinds.has('bitlocker'));
+  const allLuks = $derived(
+    encKinds.size > 0 && [...encKinds].every((k) => k.startsWith('luks')),
   );
 
   // Encrypted partitions whose container header the copy kept — those can be
@@ -1667,23 +1687,48 @@
         {/if}
       </div>
     {:else if decryptedParts.length > 0}
+      {@const one = decryptedParts.length === 1}
       <div class="luks-warn">
         <span class="sw-ico">🔓</span>
         <span>
           <b>Шифрование не восстановится.</b>
-          {decryptedParts.length === 1 ? 'Раздел' : 'Разделы'}
+          {one ? 'Раздел' : 'Разделы'}
           {decryptedParts.map(describeSrc).join('; ')}
-          {decryptedParts.length === 1 ? 'был зашифрован' : 'были зашифрованы'} (LUKS),
-          но в копию {decryptedParts.length === 1 ? 'попал' : 'попали'} в расшифрованном виде,
-          а заголовок контейнера в ней не сохранён — так писались копии раньше.
+          {one ? 'был зашифрован' : 'были зашифрованы'}{allBitLocker
+            ? ' (BitLocker)'
+            : allLuks
+              ? ' (LUKS)'
+              : ''}, но в копию {one ? 'попал' : 'попали'} в расшифрованном виде.
           <br />
-          Данные будут целы и читаемы, но <b>Linux с такого раздела не загрузится</b>:
-          initramfs и <code>/etc/crypttab</code> ждут зашифрованное устройство, которого больше нет.
-          Понадобится Live CD: убрать запись из <code>/etc/crypttab</code>, поправить
-          <code>/etc/fstab</code> на UUID самого раздела и пересобрать initramfs.
-          <br />
-          Следующие копии этого задания сохранят заголовок — их можно будет восстановить
-          вместе с шифрованием.
+          {#if allBitLocker}
+            <!-- Windows boots from a decrypted volume without a word: the
+                 loader reads plain NTFS. Nothing to repair — only protection to
+                 turn back on, and only the user can decide to. -->
+            Данные будут целы и читаемы, и <b>Windows с такого раздела загрузится</b> —
+            загрузчику расшифрованный NTFS подходит. Но диск останется незащищённым:
+            после восстановления включите BitLocker заново («Панель управления» →
+            «Шифрование диска BitLocker»), иначе копия ваших данных лежит открытой.
+            <br />
+            Заголовок BitLocker в копии не хранится, и вернуть шифрование при
+            восстановлении Own Backup пока не умеет — это делает сама Windows.
+          {:else if allLuks}
+            Данные будут целы и читаемы, но <b>Linux с такого раздела не загрузится</b>:
+            initramfs и <code>/etc/crypttab</code> ждут зашифрованное устройство, которого больше нет.
+            Понадобится Live CD: убрать запись из <code>/etc/crypttab</code>, поправить
+            <code>/etc/fstab</code> на UUID самого раздела и пересобрать initramfs.
+            <br />
+            Заголовок контейнера в этой копии не сохранён — так писались копии раньше.
+            Следующие копии этого задания сохранят его: тогда раздел восстановится
+            вместе с шифрованием.
+          {:else}
+            <!-- An old copy that did not record what the container was. Naming
+                 one would be a guess, and the two fail in opposite ways. -->
+            Данные будут целы и читаемы, но том восстановится без шифрования — какой
+            это был контейнер, копия не записала (так писались копии раньше).
+            Если BitLocker — включите его заново после восстановления. Если LUKS —
+            система с такого раздела не загрузится, пока не убрана запись из
+            <code>/etc/crypttab</code> и не пересобран initramfs.
+          {/if}
         </span>
       </div>
     {/if}

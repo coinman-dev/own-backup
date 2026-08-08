@@ -54,3 +54,28 @@ pub const UNIX_RUNTIME_DIR: &str = "/run/own-backup";
 pub fn unix_socket_path() -> std::path::PathBuf {
     std::path::PathBuf::from(UNIX_RUNTIME_DIR).join("service.sock")
 }
+
+/// When the running executable was built, read off the file itself.
+///
+/// `BUILD_TAG`-style constants have to be bumped by hand, and the one in the
+/// GUI sat at a month-old value while fresh binaries were being handed over —
+/// which is worse than no marker at all, because a log that names a date is
+/// read as if it meant one (2026-08-07: a medium was diagnosed as "built on the
+/// 1st" from a constant nobody had touched since). The file's own timestamp
+/// cannot drift from the file.
+///
+/// Returns `"?"` when the metadata is unreadable — a boot medium can serve the
+/// exe from a read-only image whose times are odd, and a missing stamp must not
+/// cost a log line.
+pub fn exe_build_stamp() -> String {
+    let stamp = std::env::current_exe()
+        .and_then(std::fs::metadata)
+        .and_then(|m| m.modified())
+        .ok();
+    match stamp {
+        Some(t) => chrono::DateTime::<chrono::Utc>::from(t)
+            .format("%Y-%m-%d %H:%M:%SZ")
+            .to_string(),
+        None => "?".into(),
+    }
+}

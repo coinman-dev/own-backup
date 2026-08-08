@@ -13,10 +13,15 @@ use own_backup_common::config::AppConfig;
 use service_link::ServiceLink;
 use state::GuiState;
 
-/// Bump this on any build you hand over for testing. It is printed at the top of
-/// the log so we can tell from the log alone WHICH binary actually ran (a common
-/// trap: an old exe left in another folder still gets launched).
-const BUILD_TAG: &str = "winpe-2026-08-01s-vm-mode";
+/// What this build is ABOUT, in a word — the feature under test, not a date.
+///
+/// It answers "which line of work is this exe from", and it is bumped by hand.
+/// The question "is this the exe I just copied" is answered next to it by
+/// `built = …`, the file's own timestamp (`exe_build_stamp`), because a
+/// hand-bumped tag stops being true the moment someone forgets: this one sat at
+/// "2026-08-01" through a week of handovers, and a log line reading it as a
+/// build date sent a diagnosis down the wrong path (2026-08-07).
+const BUILD_TAG: &str = "in-image-exclusions";
 
 const ROTATE_AT: u64 = 4 * 1024 * 1024;
 
@@ -141,7 +146,11 @@ fn init_logging() {
         "build / runtime"
     );
     match std::env::current_exe() {
-        Ok(exe) => tracing::info!(exe = %exe.display(), "running executable"),
+        Ok(exe) => tracing::info!(
+            exe = %exe.display(),
+            built = %own_backup_common::exe_build_stamp(),
+            "running executable"
+        ),
         Err(e) => tracing::warn!(error = %e, "current_exe() failed"),
     }
     if let Some(p) = &log_path {

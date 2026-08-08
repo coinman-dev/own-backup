@@ -294,11 +294,25 @@ const PROTECT_RECOVERY: u16 = 0x0800;
 /// a typo, which is worth saying before a minute of key stretching rather than
 /// after. The eight numbers are the key, little-endian.
 pub fn parse_recovery_key(text: &str) -> Result<Zeroizing<[u8; 16]>> {
-    let groups: Vec<&str> = text
+    let split: Vec<&str> = text
         .split(['-', ' ', '\t'])
         .map(|g| g.trim())
         .filter(|g| !g.is_empty())
         .collect();
+    // Forty-eight digits in a row are the same key: that is how it arrives when
+    // it is copied out of a field, read off a phone, or typed by someone who
+    // did not think the dashes were part of it. Regrouping is not guessing —
+    // the group checksums below still have to hold.
+    let regrouped: Vec<String>;
+    let groups: Vec<&str> = if split.len() == 1
+        && split[0].len() == 48
+        && split[0].bytes().all(|b| b.is_ascii_digit())
+    {
+        regrouped = split[0].as_bytes().chunks(6).map(|c| String::from_utf8_lossy(c).into_owned()).collect();
+        regrouped.iter().map(String::as_str).collect()
+    } else {
+        split
+    };
     if groups.len() != 8 {
         return Err(bad(format!(
             "ключ восстановления — 8 групп по 6 цифр, а здесь {}",
@@ -596,8 +610,16 @@ fn inspect_metadata(
             None => protectors.push(Protector {
                 kind,
                 name: known.map(|(_, n)| (*n).to_string()).unwrap_or_else(|| "неизвестно".into()),
-                // Only the passphrase, and only with a cipher we implement.
-                usable: kind == PROTECT_PASSWORD && cipher_supported,
+                // What the user can type and we can turn into a VMK: the
+                // passphrase and the 48-digit recovery key, both stretched in
+                // software (see `open_bitlocker`). The recovery key belongs
+                // here as much as the passphrase does — and on a SYSTEM volume
+                // it is usually the only one of the two, because Windows does
+                // not allow a passphrase protector there at all. Leaving it out
+                // made the wizard tell such a volume "открыть нечем: TPM + PIN,
+                // ключ восстановления (48 цифр)" — naming, in the same
+                // sentence, the thing that would have worked.
+                usable: matches!(kind, PROTECT_PASSWORD | PROTECT_RECOVERY) && cipher_supported,
                 count: 1,
             }),
         }
@@ -1225,6 +1247,19 @@ mod tests {
         assert!(parse_recovery_key("00001a-000022-000033-000044-000055-000066-000077-000088").is_err());
         // A passphrase must not be mistaken for a recovery key.
         assert!(parse_recovery_key("hunter2").is_err());
+
+        // The same key without its dashes — copied out of a field, or read off
+        // a phone by someone who did not think the dashes counted.
+        let run = parse_recovery_key("000011000022000033000044000055000066000077000088").unwrap();
+        assert_eq!(&run[..], &key[..], "dashes are punctuation, not data");
+        // Spaces instead of dashes, and a stray leading/trailing one.
+        let spaced =
+            parse_recovery_key(" 000011 000022 000033 000044 000055 000066 000077 000088 ").unwrap();
+        assert_eq!(&spaced[..], &key[..]);
+        // Regrouping is not a licence to ignore the checksums.
+        assert!(parse_recovery_key("000012000022000033000044000055000066000077000088").is_err());
+        // 48 characters, but not all digits: still not a key.
+        assert!(parse_recovery_key("00001a000022000033000044000055000066000077000088").is_err());
     }
 
     /// A volume half-encrypted would be copied half-long, and restored broken.
@@ -1519,5 +1554,68 @@ mod tests {
     fn rejects_non_bitlocker() {
         let mut vol = MemVolume(vec![0u8; 4096]);
         assert!(open_bitlocker(&mut vol, "x").is_err());
+    }
+
+    /// A volume carrying nothing but the given protector kinds. No working
+    /// crypto — [`inspect_bitlocker`] reads protection types and the cipher,
+    /// and that is all this fixture has to be honest about.
+    fn volume_with_protectors(kinds: &[u16]) -> MemVolume {
+        let mut entries = Vec::new();
+        for &kind in kinds {
+            let mut vmk = vec![0u8; 8 + 28];
+            let n = vmk.len() as u16;
+            put_u16(&mut vmk, 0, n);
+            put_u16(&mut vmk, 2, 0x0002); // entry_type = VMK
+            put_u16(&mut vmk, 4, DATUM_VMK);
+            put_u16(&mut vmk, 8 + 0x1A, kind);
+            entries.extend_from_slice(&vmk);
+        }
+        let dataset_size = 0x30 + entries.len();
+        let mut dataset = vec![0u8; dataset_size];
+        put_u32(&mut dataset, 0x00, dataset_size as u32);
+        put_u32(&mut dataset, 0x08, 0x30);
+        put_u16(&mut dataset, 0x24, ALG_AES_XTS_128);
+        dataset[0x30..].copy_from_slice(&entries);
+
+        let info_off = 4096u64;
+        let mut info = vec![0u8; 0x40 + dataset.len()];
+        info[0..8].copy_from_slice(FVE_SIGNATURE);
+        info[0x40..].copy_from_slice(&dataset);
+
+        let mut dev = vec![0u8; info_off as usize + info.len() + 512];
+        dev[3..11].copy_from_slice(FVE_SIGNATURE);
+        put_u16(&mut dev, 0x0B, 512);
+        put_u64(&mut dev, INFO_OFFSETS_FVE, info_off);
+        dev[info_off as usize..info_off as usize + info.len()].copy_from_slice(&info);
+        MemVolume(dev)
+    }
+
+    #[test]
+    fn a_system_volume_is_opened_by_its_recovery_key() {
+        // How Windows protects C:: sealed in the TPM, released against a PIN —
+        // and a 48-digit recovery password beside it. There is no passphrase
+        // protector, because Windows does not allow one on the OS volume. The
+        // recovery key is the one way in that a person can type, and we
+        // implement it (`open_bitlocker` stretches it exactly like a
+        // passphrase), so the wizard must offer the field.
+        let info = inspect_bitlocker(&mut volume_with_protectors(&[
+            0x0500, // TPM + PIN
+            PROTECT_RECOVERY,
+        ]))
+        .unwrap();
+        assert!(!info.has_password(), "an OS volume has no passphrase protector");
+        assert!(info.openable(), "…and is still openable — with the recovery key");
+        let usable: Vec<u16> =
+            info.protectors.iter().filter(|p| p.usable).map(|p| p.kind).collect();
+        assert_eq!(usable, vec![PROTECT_RECOVERY]);
+    }
+
+    #[test]
+    fn a_tpm_only_volume_has_nothing_we_can_type() {
+        // No recovery password, no passphrase: the VMK exists only inside the
+        // TPM, sealed to this machine's boot measurements. Nothing to ask for.
+        let info = inspect_bitlocker(&mut volume_with_protectors(&[0x0100, 0x0500])).unwrap();
+        assert!(!info.openable());
+        assert!(info.protectors.iter().all(|p| !p.usable));
     }
 }

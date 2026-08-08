@@ -147,7 +147,11 @@ fn init_logging() {
         "=== Own Backup service starting ==="
     );
     if let Ok(exe) = std::env::current_exe() {
-        info!(exe = %exe.display(), "running executable");
+        info!(
+            exe = %exe.display(),
+            built = %own_backup_common::exe_build_stamp(),
+            "running executable"
+        );
     }
     if let Some(p) = &log_path {
         info!(log = %p.display(), "log file");
@@ -158,11 +162,75 @@ fn init_logging() {
     }
 }
 
+/// Hide the console window this process was given.
+///
+/// On the boot medium the engine is started by a `.cmd` script, so Windows
+/// hands it a console — an empty black window that sits on the desktop next to
+/// the interface, looking like something the user should read or close. It is
+/// neither: the engine logs to `own-backup-service.log`, and nothing is ever
+/// printed there. The console itself stays open (stdout keeps working), it just
+/// stops being furniture.
+#[cfg(target_os = "windows")]
+fn hide_own_console() {
+    use windows::Win32::System::Console::GetConsoleWindow;
+    use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+
+    // SAFETY: both calls take the console window handle and touch nothing else;
+    // a null handle (no console — the SCM case) is simply skipped.
+    unsafe {
+        let hwnd = GetConsoleWindow();
+        if !hwnd.0.is_null() {
+            let _ = ShowWindow(hwnd, SW_HIDE);
+        }
+    }
+}
+
+/// Turn WinPE's firewall off (`wpeutil disablefirewall`).
+///
+/// It filters cross-process loopback connections: user processes talked over
+/// 127.0.0.1 fine, while DevIoSvc's connect to our devio server — the kernel
+/// half of AIM's TCP proxy, i.e. qcow2 mounting and in-image exclusions — came
+/// back CONNECTION_REFUSED (seen 2026-08-07; the same listener answered a
+/// same-process probe within the same millisecond). Done here rather than only
+/// in the medium's start script, because the script is baked into boot.wim at
+/// media-build time and the usual test loop swaps just the exes — a fix that
+/// lives in the script reaches the machine a full media rebuild later.
+///
+/// Media mode only, and `wpeutil` exists only in WinPE — a rescue environment
+/// with nothing listening on external interfaces.
+#[cfg(target_os = "windows")]
+fn disable_winpe_firewall() {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    match std::process::Command::new("wpeutil")
+        .arg("disablefirewall")
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+    {
+        Ok(o) if o.status.success() => info!("WinPE firewall disabled (wpeutil)"),
+        Ok(o) => tracing::warn!(
+            code = ?o.status.code(),
+            stderr = %String::from_utf8_lossy(&o.stderr).trim(),
+            "wpeutil disablefirewall failed"
+        ),
+        Err(e) => tracing::warn!(error = %e, "wpeutil not found — not a WinPE environment?"),
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_logging();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mode = parse_mode(&args);
+
+    // Media mode only: a dev `--foreground` run wants its console, and under
+    // the SCM there is none to hide.
+    #[cfg(target_os = "windows")]
+    if own_backup_common::media_mode::is_media_mode() && matches!(mode, Mode::Daemon | Mode::Service)
+    {
+        hide_own_console();
+        disable_winpe_firewall();
+    }
 
     // The SCM control operations (register/remove/start/stop) require admin on
     // Windows. Self-elevate via UAC rather than failing with access-denied.

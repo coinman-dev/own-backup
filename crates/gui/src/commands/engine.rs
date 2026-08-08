@@ -36,6 +36,18 @@ pub struct PartFsDto {
     pub filesystem: String,
 }
 
+/// One encrypted partition's container, as this copy took it.
+#[derive(Debug, Clone, Serialize)]
+pub struct PartEncryptionDto {
+    pub index: u32,
+    /// `bitlocker` | `luks1` | `luks2` | `other`.
+    pub kind: String,
+    /// `plaintext` — the copy holds the volume decrypted, and a restore
+    /// produces an unencrypted volume; `sector` — the container's own bytes
+    /// went in whole, and a restore brings the encryption back with them.
+    pub captured: String,
+}
+
 /// A whole-disk backup discovered in the destination folder (from a `.obdm`).
 #[derive(Debug, Clone, Serialize)]
 pub struct DiskBackupDto {
@@ -153,6 +165,12 @@ pub struct ImageInfoDto {
     /// restore can put the encryption back exactly as it was (D19). Empty for
     /// copies taken before headers were stored — those restore decrypted only.
     pub luks_header_parts: Vec<u32>,
+    /// What each encrypted partition's container was, and how this copy took
+    /// it. The restore screen says opposite things for BitLocker and LUKS, and
+    /// opposite things again for a container copied in the clear and one copied
+    /// verbatim — so it needs the fact, not an inference from the filesystem.
+    /// Empty for copies written before this was recorded.
+    pub encrypted_parts: Vec<PartEncryptionDto>,
     /// File-type breakdown embedded in the image (for "по типам файлов").
     pub categories: Option<CategorySizes>,
     /// Files/bytes excluded from this image (for the "Исключено" legend line).
@@ -242,6 +260,54 @@ fn read_image_info_at(path: &std::path::Path) -> Result<ImageInfoDto, String> {
         sidecar.info.luks_headers.iter().map(|h| h.part_index).collect()
     };
 
+    // What each encrypted partition was. A whole-disk image says it per
+    // partition in the disk manifest; a per-volume image says it once, about
+    // the one volume it holds.
+    let enc_name = |k: &own_backup_common::image::VolumeEncryptionKind| {
+        use own_backup_common::image::VolumeEncryptionKind as K;
+        match k {
+            K::BitLocker => "bitlocker",
+            K::Luks1 => "luks1",
+            K::Luks2 => "luks2",
+            K::Other => "other",
+        }
+        .to_string()
+    };
+    let captured_name = |m: &own_backup_common::image::VolumeCaptureMode| {
+        use own_backup_common::image::VolumeCaptureMode as M;
+        match m {
+            M::Plaintext => "plaintext",
+            M::SectorBySector => "sector",
+        }
+        .to_string()
+    };
+    let encrypted_parts: Vec<PartEncryptionDto> = match &sidecar.disk_manifest {
+        Some(dm) => dm
+            .images
+            .iter()
+            .filter_map(|i| {
+                i.encryption.as_ref().map(|e| PartEncryptionDto {
+                    index: i.part_index,
+                    kind: enc_name(&e.kind),
+                    captured: captured_name(&e.capture_mode),
+                })
+            })
+            .collect(),
+        None => sidecar
+            .manifest
+            .volume_encryption
+            .as_ref()
+            .and_then(|e| {
+                backed_up_parts.first().map(|&index| PartEncryptionDto {
+                    index,
+                    kind: enc_name(&e.kind),
+                    captured: captured_name(&e.capture_mode),
+                })
+            })
+            .into_iter()
+            .collect(),
+    };
+
     Ok(ImageInfoDto {
         image_path: path.display().to_string(),
         job_id: sidecar.info.job_id.clone(),
@@ -258,6 +324,7 @@ fn read_image_info_at(path: &std::path::Path) -> Result<ImageInfoDto, String> {
         backed_up_parts,
         part_filesystems,
         luks_header_parts,
+        encrypted_parts,
         categories: sidecar.info.categories,
         excluded_files: sidecar.info.excluded_files,
         excluded_bytes: sidecar.info.excluded_bytes,

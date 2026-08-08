@@ -362,6 +362,170 @@ pub fn vhdx_parent_path(path: &Path) -> Result<Option<std::path::PathBuf>> {
 /// Longest accepted parent chain (a loop is corruption, real chains are short).
 const MAX_CHAIN_DEPTH: usize = 64;
 
+/// A VHDX opened for repeated guest-offset reads: geometry parsed and the BAT
+/// slurped ONCE, so each read costs only the payload I/O.
+///
+/// [`read_vhdx_guest_at`] re-parsed the header, region table, metadata and one
+/// BAT entry for EVERY payload block it crossed — four small reads at the
+/// start of the file interleaved with each 1 MiB read far into it. On the HDD
+/// this turned the re-checksum pass into a head shuttle: ~74 ms per block,
+/// identical whether the payload reads were batched or not (measured
+/// 2026-08-08: 268 s for 3.4 GiB — the same as reading the attached disk).
+/// The whole BAT of an 84 GB image is ~700 KiB: one read, kept in memory.
+pub struct VhdxGuestReader {
+    file: File,
+    virtual_size: u64,
+    block_size: u64,
+    chunk_ratio: u64,
+    bat: Vec<u8>,
+    /// Parent, opened lazily on the first absent block (differencing images).
+    parent_path: Option<std::path::PathBuf>,
+    parent: Option<Box<VhdxGuestReader>>,
+    depth: usize,
+}
+
+impl VhdxGuestReader {
+    pub fn open(path: &Path) -> Result<Self> {
+        Self::open_at_depth(path, 0)
+    }
+
+    fn open_at_depth(path: &Path, depth: usize) -> Result<Self> {
+        if depth >= MAX_CHAIN_DEPTH {
+            return Err(bad(format!(
+                "parent chain deeper than {MAX_CHAIN_DEPTH} images — corrupted chain?"
+            )));
+        }
+        let mut file =
+            File::open(path).map_err(|e| bad(format!("open {}: {e}", path.display())))?;
+
+        let mut id = [0u8; 8];
+        read_exact_at(&mut file, 0, &mut id)?;
+        if &id != b"vhdxfile" {
+            return Err(bad("not a VHDX file (no signature)"));
+        }
+        let mut region = vec![0u8; 64 * 1024];
+        read_exact_at(&mut file, REGION1_OFF, &mut region)?;
+        if &region[0..4] != b"regi" {
+            return Err(bad("no region table signature"));
+        }
+        let entry_count = u32::from_le_bytes(region[8..12].try_into().unwrap()) as usize;
+        let (mut bat_off, mut bat_len) = (0u64, 0u64);
+        for slot in 0..entry_count.min(2047) {
+            let base = 16 + slot * 32;
+            if &region[base..base + 16] == guid_le(BAT_GUID) {
+                bat_off = u64::from_le_bytes(region[base + 16..base + 24].try_into().unwrap());
+                bat_len =
+                    u32::from_le_bytes(region[base + 24..base + 28].try_into().unwrap()) as u64;
+            }
+        }
+        if bat_off == 0 {
+            return Err(bad("region table missing BAT"));
+        }
+
+        let meta = read_metadata_region(&mut file)?;
+        let mcount = u16::from_le_bytes(meta[10..12].try_into().unwrap()) as usize;
+        let (mut vsize, mut bsize, mut ssize) = (0u64, 0u64, 512u32);
+        for slot in 0..mcount.min(2046) {
+            let e = 32 + slot * 32;
+            let guid = &meta[e..e + 16];
+            let ioff = u32::from_le_bytes(meta[e + 16..e + 20].try_into().unwrap()) as usize;
+            if ioff + 8 > meta.len() {
+                continue;
+            }
+            if guid == guid_le(MI_VDISK_SIZE) {
+                vsize = u64::from_le_bytes(meta[ioff..ioff + 8].try_into().unwrap());
+            } else if guid == guid_le(MI_FILE_PARAMS) {
+                bsize = u32::from_le_bytes(meta[ioff..ioff + 4].try_into().unwrap()) as u64;
+            } else if guid == guid_le(MI_LOG_SECTOR) {
+                ssize = u32::from_le_bytes(meta[ioff..ioff + 4].try_into().unwrap());
+            }
+        }
+        if vsize == 0 || bsize == 0 || ssize == 0 {
+            return Err(bad("metadata missing virtual/block/sector size"));
+        }
+
+        // The whole BAT in one read: ~8 bytes per payload block, i.e. well under
+        // a megabyte for the images we make. Capped so a corrupt length cannot
+        // ask for gigabytes.
+        const MAX_BAT: u64 = 32 * 1024 * 1024;
+        let bat_len = bat_len.min(MAX_BAT);
+        let mut bat = vec![0u8; bat_len as usize];
+        read_exact_at(&mut file, bat_off, &mut bat)?;
+
+        let parent_path = parse_parent_locator(&meta).map(|raw| resolve_parent(path, &raw));
+        Ok(Self {
+            file,
+            virtual_size: vsize,
+            block_size: bsize,
+            chunk_ratio: (1u64 << 23) * ssize as u64 / bsize,
+            bat,
+            parent_path,
+            parent: None,
+            depth,
+        })
+    }
+
+    /// Where `guest_offset` lives: `Ok(Some(file_offset))` in this file,
+    /// `Ok(None)` absent here (parent or zeros). Also returns the run length
+    /// to the end of the payload block.
+    fn locate(&self, guest_offset: u64) -> Result<(Option<u64>, u64)> {
+        let block = guest_offset / self.block_size;
+        let within = guest_offset % self.block_size;
+        let run = self.block_size - within;
+        let bat_index = (block + block / self.chunk_ratio) as usize;
+        let Some(entry) = self.bat.get(bat_index * 8..bat_index * 8 + 8) else {
+            return Err(bad("guest offset BAT entry out of BAT bounds"));
+        };
+        let entry = u64::from_le_bytes(entry.try_into().unwrap());
+        let state = entry & 7;
+        if state != 6 && state != 7 {
+            return Ok((None, run));
+        }
+        let file_offset = entry & 0xFFFF_FFFF_FFF0_0000;
+        if file_offset == 0 {
+            return Err(bad(format!("block state {state} with a zero file offset — corrupt BAT")));
+        }
+        Ok((Some(file_offset + within), run))
+    }
+
+    /// Read `buf` from `guest_offset`, following the parent chain for absent
+    /// blocks; past a dynamic (parentless) image absent blocks read as zeros.
+    pub fn read_at(&mut self, guest_offset: u64, buf: &mut [u8]) -> Result<()> {
+        if guest_offset + buf.len() as u64 > self.virtual_size {
+            return Err(bad(format!(
+                "guest read [{guest_offset}, +{}) beyond virtual size {}",
+                buf.len(),
+                self.virtual_size
+            )));
+        }
+        let mut off = guest_offset;
+        let mut rest: &mut [u8] = buf;
+        while !rest.is_empty() {
+            let (place, run) = self.locate(off)?;
+            let take = (run.min(rest.len() as u64)) as usize;
+            match place {
+                Some(file_offset) => {
+                    read_exact_at(&mut self.file, file_offset, &mut rest[..take])?
+                }
+                None => match &self.parent_path {
+                    Some(p) => {
+                        if self.parent.is_none() {
+                            self.parent =
+                                Some(Box::new(Self::open_at_depth(p, self.depth + 1)?));
+                        }
+                        self.parent.as_mut().unwrap().read_at(off, &mut rest[..take])?;
+                    }
+                    None => rest[..take].fill(0),
+                },
+            }
+            off += take as u64;
+            rest = &mut rest[take..];
+        }
+        Ok(())
+    }
+}
+
+
 /// Read directly from a guest offset of a VHDX file without attaching.
 /// Handles ranges spanning payload-block boundaries (blocks are scattered in
 /// the file; each is translated separately) and WALKS THE PARENT CHAIN: a
@@ -572,4 +736,39 @@ mod tests {
         let resolved = resolve_parent(Path::new("/backups/child.avhdx"), r".\parent.vhdx");
         assert_eq!(resolved, Path::new("/backups/parent.vhdx"));
     }
+    /// The reused reader must return byte-for-byte what the one-shot reads do:
+    /// allocated blocks, absent-as-zero blocks, and odd boundaries alike. The
+    /// reader exists purely for speed (one BAT parse instead of one per block),
+    /// and speed refactors are where silent read bugs come from.
+    #[test]
+    fn reused_reader_matches_one_shot_reads() {
+        const MB: u64 = 1024 * 1024;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.vhdx");
+        let mut w = VhdxWriter::create(&path, 8 * MB, MB, 512).unwrap();
+        w.write_at(MB, &vec![0x11u8; MB as usize]).unwrap();
+        w.write_at(3 * MB, &(0..MB).map(|i| (i % 253) as u8).collect::<Vec<_>>()).unwrap();
+        w.finish().unwrap();
+
+        let mut reader = VhdxGuestReader::open(&path).unwrap();
+        // Spans: inside a block, across allocated→absent, absent-only, odd sizes.
+        for (off, len) in [
+            (0u64, 4096usize),
+            (MB - 17, 64),
+            (MB, MB as usize),
+            (2 * MB - 5, 11),
+            (3 * MB + 12345, 100_000),
+            (4 * MB - 3, 7),
+            (6 * MB, 4096),
+        ] {
+            let mut a = vec![0xAAu8; len];
+            let mut b = vec![0x55u8; len];
+            reader.read_at(off, &mut a).unwrap();
+            read_vhdx_guest_at(&path, off, &mut b).unwrap();
+            assert_eq!(a, b, "mismatch at offset {off} len {len}");
+        }
+        // Reads past the virtual size are refused, not zero-filled.
+        assert!(reader.read_at(8 * MB - 4, &mut [0u8; 8]).is_err());
+    }
+
 }

@@ -27,8 +27,12 @@ use crate::used_sectors::UsedSectorMap;
 
 /// `$Bitmap` is fixed MFT record number 6 in every NTFS volume.
 const BITMAP_RECORD: u64 = 6;
+/// `$Volume` — record number 3 — carries the volume label.
+const VOLUME_RECORD: u64 = 3;
 /// Attribute type code for `$DATA`.
 const ATTR_DATA: u64 = 0x80;
+/// Attribute type code for `$VOLUME_NAME`.
+const ATTR_VOLUME_NAME: u64 = 0x60;
 /// Attribute-list end marker.
 const ATTR_END: u64 = 0xFFFF_FFFF;
 /// Attribute flag: the stream is compressed (we cannot follow its runs).
@@ -101,9 +105,23 @@ struct Run {
     hole: bool,
 }
 
-/// Detect NTFS on `vol` and build the used map. Errors (→ caller falls back to
-/// sector-by-sector) on anything unrecognized or inconsistent.
-pub fn build_ntfs_used_map(vol: &mut dyn RawVolume, block_size: u32) -> Result<NtfsUsedMap> {
+/// The volume geometry the boot sector declares — everything the rest of the
+/// parsing needs, and nothing that costs a read to get.
+struct Geometry {
+    bytes_per_sector: u64,
+    cluster_size: u64,
+    total_clusters: u64,
+    /// `total_clusters * cluster_size` — the clustered area; the device may be
+    /// a little longer (the backup boot sector lives past it).
+    clusters_bytes: u64,
+    mft_lcn: u64,
+    mft_record_size: u64,
+}
+
+/// Read and check the NTFS boot sector. Errors on anything that is not NTFS or
+/// does not fit the device — the callers all treat that as "not our
+/// filesystem", never as a reason to guess.
+fn read_geometry(vol: &mut dyn RawVolume) -> Result<Geometry> {
     // --- Boot sector / BPB ---
     let mut boot = [0u8; 512];
     vol.read_at(0, &mut boot)?;
@@ -164,22 +182,41 @@ pub fn build_ntfs_used_map(vol: &mut dyn RawVolume, block_size: u32) -> Result<N
         return Err(bad(format!("implausible MFT record size {mft_record_size}")));
     }
 
-    // --- Read MFT record #6 ($Bitmap). The first 16 records are guaranteed
-    // contiguous from the $MFT's first cluster, so this offset is exact. ---
-    let record_off = mft_lcn * cluster_size + BITMAP_RECORD * mft_record_size;
-    if record_off + mft_record_size > vol.len() {
-        return Err(bad("MFT record #6 runs past the device"));
+    Ok(Geometry {
+        bytes_per_sector,
+        cluster_size,
+        total_clusters,
+        clusters_bytes,
+        mft_lcn,
+        mft_record_size,
+    })
+}
+
+/// Read one of the first sixteen MFT records, fixups applied.
+///
+/// Those sixteen are guaranteed contiguous from the `$MFT`'s first cluster, so
+/// their offsets are arithmetic — no need to walk the `$MFT`'s own runs.
+fn read_fixed_mft_record(vol: &mut dyn RawVolume, g: &Geometry, number: u64) -> Result<Vec<u8>> {
+    let record_off = g.mft_lcn * g.cluster_size + number * g.mft_record_size;
+    if record_off + g.mft_record_size > vol.len() {
+        return Err(bad(format!("MFT record #{number} runs past the device")));
     }
-    let mut rec = vec![0u8; mft_record_size as usize];
+    let mut rec = vec![0u8; g.mft_record_size as usize];
     vol.read_at(record_off, &mut rec)?;
-    apply_fixups(&mut rec, bytes_per_sector)?;
+    apply_fixups(&mut rec, g.bytes_per_sector)?;
+    Ok(rec)
+}
+
+/// Read the volume's cluster-allocation bitmap (`$Bitmap`'s `$DATA`), checked.
+fn read_cluster_bitmap(vol: &mut dyn RawVolume, g: &Geometry) -> Result<Vec<u8>> {
+    let rec = read_fixed_mft_record(vol, g, BITMAP_RECORD)?;
 
     // --- Locate the unnamed non-resident $DATA ($Bitmap's cluster bitmap) ---
-    let needed = total_clusters.div_ceil(8);
+    let needed = g.total_clusters.div_ceil(8);
     if needed > MAX_BITMAP_BYTES {
         return Err(bad(format!("bitmap would need {needed} bytes (volume too large)")));
     }
-    let bitmap = read_bitmap_stream(vol, &rec, cluster_size, needed)?;
+    let bitmap = read_bitmap_stream(vol, &rec, g.cluster_size, needed)?;
 
     // Strong guards: a correctly parsed bitmap always marks the boot sector
     // (cluster 0) and the $MFT itself as allocated. If either reads free we
@@ -187,9 +224,172 @@ pub fn build_ntfs_used_map(vol: &mut dyn RawVolume, block_size: u32) -> Result<N
     if !cluster_allocated(&bitmap, 0) {
         return Err(bad("bitmap leaves cluster 0 (boot) free — parse misaligned"));
     }
-    if !cluster_allocated(&bitmap, mft_lcn) {
+    if !cluster_allocated(&bitmap, g.mft_lcn) {
         return Err(bad("bitmap leaves the $MFT cluster free — parse misaligned"));
     }
+    Ok(bitmap)
+}
+
+/// How many bytes an NTFS volume has in use, straight from `$Bitmap`.
+///
+/// Windows answers this with `GetDiskFreeSpaceEx` for a volume it has mounted.
+/// A volume inside a container we have just unlocked ourselves is not mounted
+/// and cannot be — so the same number is counted here, from the same bitmap the
+/// used-block map is built from. Cheap next to the copy that follows: one MFT
+/// record and the bitmap stream (≈11 MiB for a 350 GiB volume), then a popcount.
+pub fn ntfs_used_bytes(vol: &mut dyn RawVolume) -> Result<u64> {
+    let g = read_geometry(vol)?;
+    let bitmap = read_cluster_bitmap(vol, &g)?;
+    let needed = g.total_clusters.div_ceil(8) as usize;
+    // The last byte covers clusters past the end of the volume; those bits are
+    // not always zero, so mask them off rather than counting phantom clusters.
+    let tail_bits = (g.total_clusters % 8) as u32;
+    let mut used = 0u64;
+    for (i, &byte) in bitmap.iter().take(needed).enumerate() {
+        let byte = if i + 1 == needed && tail_bits != 0 {
+            byte & ((1u16 << tail_bits) - 1) as u8
+        } else {
+            byte
+        };
+        used += byte.count_ones() as u64;
+    }
+    Ok(used * g.cluster_size)
+}
+
+/// Which clusters an NTFS volume currently has free, read off `$Bitmap`.
+///
+/// The true-removal pass needs this after the FS driver has deleted the
+/// excluded entries: the clusters those files held are now free, and the pass
+/// zeroes them so the data does not linger in the image's free space. Asking
+/// the bitmap — rather than trusting the extent list collected before the
+/// deletions — is what makes the zeroing safe: a cluster the filesystem reused
+/// for its own metadata while deleting reads as ALLOCATED here and is left
+/// alone. Overwriting it would corrupt the very filesystem we just repaired.
+pub struct NtfsFreeMap {
+    bitmap: Vec<u8>,
+    pub cluster_size: u64,
+    pub total_clusters: u64,
+}
+
+impl NtfsFreeMap {
+    /// Is this cluster free? Clusters past the end of the volume are not.
+    pub fn is_free(&self, cluster: u64) -> bool {
+        cluster < self.total_clusters && !cluster_allocated(&self.bitmap, cluster)
+    }
+
+    /// Narrow `ranges` (volume-relative byte ranges) down to the clusters that
+    /// are free right now. Returns merged byte ranges, so a run of adjacent
+    /// free clusters comes back as one write.
+    ///
+    /// WHOLE clusters, never a slice of one: allocation is cluster-granular, so
+    /// a free cluster that a range touches at all belonged entirely to what was
+    /// deleted — and a raw disk refuses any write that is not a whole number of
+    /// sectors anyway. Ranges are clipped to the volume's own length.
+    pub fn free_parts_of(&self, ranges: &[(u64, u64)]) -> Vec<(u64, u64)> {
+        let cs = self.cluster_size;
+        let mut out: Vec<(u64, u64)> = Vec::new();
+        for &(start, end) in ranges {
+            if end <= start {
+                continue;
+            }
+            let first = start / cs;
+            let last = ((end - 1) / cs).min(self.total_clusters.saturating_sub(1));
+            for cluster in first..=last {
+                if !self.is_free(cluster) {
+                    continue;
+                }
+                let (s, e) = (cluster * cs, cluster * cs + cs);
+                match out.last_mut() {
+                    Some(prev) if prev.1 == s => prev.1 = e,
+                    _ => out.push((s, e)),
+                }
+            }
+        }
+        out
+    }
+}
+
+/// The volume's cluster size, from its boot sector alone (one 512-byte read).
+///
+/// Errors when the volume is not NTFS — which is also the answer to "can the
+/// in-image exclusion pass work here", since everything it does downstream
+/// reads `$Bitmap`.
+pub fn ntfs_cluster_size(vol: &mut dyn RawVolume) -> Result<u32> {
+    Ok(read_geometry(vol)?.cluster_size as u32)
+}
+
+/// Read `$Bitmap` off an NTFS volume and answer which clusters are free.
+pub fn ntfs_free_map(vol: &mut dyn RawVolume) -> Result<NtfsFreeMap> {
+    let g = read_geometry(vol)?;
+    let bitmap = read_cluster_bitmap(vol, &g)?;
+    Ok(NtfsFreeMap {
+        bitmap,
+        cluster_size: g.cluster_size,
+        total_clusters: g.total_clusters,
+    })
+}
+
+/// The volume label of an NTFS volume, or `None` when it has none.
+///
+/// It lives in MFT record #3 (`$Volume`), attribute `$VOLUME_NAME` — not in the
+/// boot sector, which is why [`own_backup_inventory::fs_probe`] cannot report
+/// it and every unlocked NTFS volume would otherwise show up unnamed.
+pub fn ntfs_volume_label(vol: &mut dyn RawVolume) -> Option<String> {
+    let g = read_geometry(vol).ok()?;
+    let rec = read_fixed_mft_record(vol, &g, VOLUME_RECORD).ok()?;
+    let value = resident_attr(&rec, ATTR_VOLUME_NAME)?;
+    // UTF-16LE, no terminator.
+    let utf16: Vec<u16> = value
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    let name = String::from_utf16_lossy(&utf16).trim().to_string();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+/// The value of a resident attribute of type `atype`, if the record has one.
+fn resident_attr(rec: &[u8], atype: u64) -> Option<&[u8]> {
+    let first_attr = u16at(rec, 0x14) as usize;
+    let used = u32at(rec, 0x18) as usize;
+    if first_attr < 42 || first_attr > rec.len() || used > rec.len() || used < first_attr {
+        return None;
+    }
+    let mut off = first_attr;
+    while off + 24 <= used {
+        let t = u32at(rec, off);
+        if t == ATTR_END {
+            return None;
+        }
+        let alen = u32at(rec, off + 4) as usize;
+        if alen < 24 || off + alen > rec.len() {
+            return None;
+        }
+        if t == atype && rec[off + 8] == 0 {
+            let val_len = u32at(rec, off + 0x10) as usize;
+            let val_off = u16at(rec, off + 0x14) as usize;
+            let end = off.checked_add(val_off)?.checked_add(val_len)?;
+            if end > rec.len() || end > off + alen {
+                return None;
+            }
+            return Some(&rec[off + val_off..end]);
+        }
+        off += alen;
+    }
+    None
+}
+
+/// Detect NTFS on `vol` and build the used map. Errors (→ caller falls back to
+/// sector-by-sector) on anything unrecognized or inconsistent.
+pub fn build_ntfs_used_map(vol: &mut dyn RawVolume, block_size: u32) -> Result<NtfsUsedMap> {
+    let g = read_geometry(vol)?;
+    let (cluster_size, total_clusters, clusters_bytes) =
+        (g.cluster_size, g.total_clusters, g.clusters_bytes);
+    let needed = total_clusters.div_ceil(8);
+    let bitmap = read_cluster_bitmap(vol, &g)?;
 
     // --- Fold allocated clusters into the per-backup-block map ---
     let total_blocks = vol.len().div_ceil(block_size as u64);
@@ -240,7 +440,7 @@ pub fn build_ntfs_used_map(vol: &mut dyn RawVolume, block_size: u32) -> Result<N
 /// sequence number and must be replaced by the real bytes stored in the array.
 fn apply_fixups(rec: &mut [u8], bytes_per_sector: u64) -> Result<()> {
     if &rec[0..4] != b"FILE" {
-        return Err(bad("MFT record #6 lacks the 'FILE' signature"));
+        return Err(bad("MFT record lacks the 'FILE' signature"));
     }
     let usa_off = u16at(rec, 4) as usize;
     let usa_count = u16at(rec, 6) as usize; // update sequence number + one entry per stride
@@ -511,6 +711,32 @@ mod tests {
         // Attribute-list end marker just after the attribute.
         put_u32(&mut img, a + 0x48, 0xFFFF_FFFF);
 
+        // MFT record #3 ($Volume) at byte 5120, with a resident $VOLUME_NAME.
+        let vrec = 4 * cluster as usize + 3 * 1024;
+        img[vrec..vrec + 4].copy_from_slice(b"FILE");
+        put_u16(&mut img, vrec + 4, 0x30); // update-sequence array offset
+        put_u16(&mut img, vrec + 6, 3); // USN + two fixups
+        put_u16(&mut img, vrec + 0x14, 0x38); // first attribute offset
+        put_u16(&mut img, vrec + 0x30, 0x0001); // USN
+        put_u16(&mut img, vrec + 510, 0x0001);
+        put_u16(&mut img, vrec + 1022, 0x0001);
+        // $VOLUME_NAME at vrec+0x38: resident, value (UTF-16LE) at +0x18.
+        let name: Vec<u16> = "Тест".encode_utf16().collect();
+        let val_len = name.len() * 2;
+        let alen = 0x18 + val_len.next_multiple_of(8);
+        let v = vrec + 0x38;
+        put_u32(&mut img, v + 0x00, 0x60); // type = $VOLUME_NAME
+        put_u32(&mut img, v + 0x04, alen as u32);
+        img[v + 0x08] = 0; // resident
+        img[v + 0x09] = 0; // name length
+        put_u32(&mut img, v + 0x10, val_len as u32);
+        put_u16(&mut img, v + 0x14, 0x18); // value offset
+        for (i, unit) in name.iter().enumerate() {
+            put_u16(&mut img, v + 0x18 + i * 2, *unit);
+        }
+        put_u32(&mut img, v + alen, 0xFFFF_FFFF); // attribute-list end
+        put_u32(&mut img, vrec + 0x18, (0x38 + alen + 4) as u32); // used size
+
         // Allocation bitmap in cluster 20 (byte 10240): clusters 0,4,16,17,20,21.
         let bm = 20 * cluster as usize;
         img[bm] = 0b0001_0001; // bits 0 and 4  → clusters 0, 4
@@ -552,6 +778,81 @@ mod tests {
     #[test]
     fn rejects_non_ntfs() {
         assert!(build_ntfs_used_map(&mut MemVolume(vec![0u8; 64 * 512]), 512).is_err());
+        assert!(ntfs_used_bytes(&mut MemVolume(vec![0u8; 64 * 512])).is_err());
+    }
+
+    #[test]
+    fn counts_used_bytes_from_the_bitmap() {
+        // Six allocated clusters of 512 bytes — the number the wizard shows for
+        // a volume Windows cannot be asked about.
+        assert_eq!(ntfs_used_bytes(&mut tiny_ntfs()).unwrap(), 6 * 512);
+    }
+
+    #[test]
+    fn ignores_bitmap_bits_past_the_last_cluster() {
+        // 60 clusters: the last bitmap byte covers four that do not exist. NTFS
+        // leaves those bits set, and counting them would overstate "занято".
+        let mut img = tiny_ntfs().0;
+        put_u64(&mut img, 0x28, 60);
+        img[20 * 512 + 7] = 0xF0; // bits 4..7 → clusters 60..63
+        assert_eq!(ntfs_used_bytes(&mut MemVolume(img)).unwrap(), 6 * 512);
+    }
+
+    #[test]
+    fn free_map_answers_only_for_clusters_that_are_really_free() {
+        // tiny_ntfs allocates 0, 4, 16, 17, 20, 21 — the rest are free.
+        let free = ntfs_free_map(&mut tiny_ntfs()).unwrap();
+        assert_eq!(free.cluster_size, 512);
+        for c in [0u64, 4, 16, 17, 20, 21] {
+            assert!(!free.is_free(c), "cluster {c} is in use");
+        }
+        for c in [1u64, 2, 3, 5, 15, 18, 22, 63] {
+            assert!(free.is_free(c), "cluster {c} is free");
+        }
+        // Past the end of the volume is not "free space" — it is not space.
+        assert!(!free.is_free(64));
+        assert!(!free.is_free(1_000));
+    }
+
+    #[test]
+    fn zeroing_skips_clusters_the_filesystem_took_back() {
+        // The heart of the post-deletion zero pass: an excluded file used to
+        // hold clusters 16..22; by the time we look, the filesystem has taken
+        // 16, 17, 20 and 21 back for itself. Only 18 and 19 may be zeroed —
+        // overwriting the other four would corrupt live metadata.
+        let free = ntfs_free_map(&mut tiny_ntfs()).unwrap();
+        let parts = free.free_parts_of(&[(16 * 512, 22 * 512)]);
+        assert_eq!(parts, vec![(18 * 512, 20 * 512)], "adjacent free clusters merge into one write");
+
+        // A range entirely inside free space comes back whole.
+        assert_eq!(free.free_parts_of(&[(512, 4 * 512)]), vec![(512, 4 * 512)]);
+        // Half a cluster in: the whole cluster is zeroed. Allocation is
+        // cluster-granular, so the rest of it was that file's too — and a raw
+        // disk would refuse a sub-sector write in any case.
+        assert_eq!(free.free_parts_of(&[(512 + 100, 512 + 200)]), vec![(512, 2 * 512)]);
+        // A range running past the end of the volume stops at the last cluster.
+        assert_eq!(free.free_parts_of(&[(62 * 512, 500 * 512)]), vec![(62 * 512, 64 * 512)]);
+        // A range entirely in use produces nothing at all.
+        assert!(free.free_parts_of(&[(16 * 512, 18 * 512)]).is_empty());
+        // Two runs separated by a used cluster stay separate writes.
+        assert_eq!(
+            free.free_parts_of(&[(3 * 512, 6 * 512)]),
+            vec![(3 * 512, 4 * 512), (5 * 512, 6 * 512)]
+        );
+    }
+
+    #[test]
+    fn reads_the_volume_label() {
+        assert_eq!(ntfs_volume_label(&mut tiny_ntfs()).as_deref(), Some("Тест"));
+    }
+
+    #[test]
+    fn no_label_when_the_volume_record_has_none() {
+        // Blank the $VOLUME_NAME type code: the attribute walk finds nothing and
+        // the caller keeps whatever name it already had.
+        let mut img = tiny_ntfs().0;
+        put_u32(&mut img, 4 * 512 + 3 * 1024 + 0x38, 0xFFFF_FFFF);
+        assert_eq!(ntfs_volume_label(&mut MemVolume(img)), None);
     }
 
     #[test]

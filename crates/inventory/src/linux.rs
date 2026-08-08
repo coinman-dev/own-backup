@@ -100,9 +100,10 @@ fn build_partition(v: &Value, index: u32) -> PartitionInfo {
         has_os: is_system,
         is_encrypted,
         // Linux support is deferred; the container's own metadata is not read
-        // here, so nothing is claimed about how it opens.
+        // here, so nothing is claimed about how it opens — and "not asked" must
+        // not read as "cannot be opened", or the password field never appears.
         unlock_methods: Vec::new(),
-        unlockable: false,
+        unlockable: true,
     }
 }
 

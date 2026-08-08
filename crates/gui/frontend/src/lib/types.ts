@@ -199,6 +199,17 @@ export interface VerifySummary {
   duration_secs: number;
 }
 
+/** One encrypted partition's container, as the copy took it. */
+export interface PartEncryption {
+  index: number;
+  /** 'bitlocker' | 'luks1' | 'luks2' | 'other' */
+  kind: string;
+  /** 'plaintext' — the copy holds it decrypted (a restore produces an
+   *  unencrypted volume); 'sector' — the container went in whole and comes
+   *  back encrypted, opened by the same password as before. */
+  captured: string;
+}
+
 export interface ImageInfo {
   image_path: string;
   /** Job id that produced this image (groups copies of one archive). */
@@ -225,6 +236,8 @@ export interface ImageInfo {
   /** Partitions whose container header this copy kept — those can be restored
    *  with their encryption intact, given the password. */
   luks_header_parts: number[];
+  /** What each encrypted partition's container was, and how the copy took it. */
+  encrypted_parts: PartEncryption[];
   /** File-type breakdown embedded in the image. */
   categories: CategorySizes | null;
   /** Files/bytes excluded from this image (for the "Исключено" legend line). */
@@ -323,6 +336,9 @@ export interface JobRun {
   excluded_bytes: number;
   /** null when the walk did not run (exclusions off / non-NTFS / sector mode) */
   categories: CategorySizes | null;
+  /** Why that walk did not run; '' when it did. Explains both the missing
+   *  breakdown and exclusion rules that were never applied. */
+  file_scan_skipped: string;
 }
 
 /** A whole-disk (`.obdm`) backup discovered for restore. */
@@ -412,12 +428,14 @@ export interface QueueSnapshot {
 export interface JobProgress {
   job_id: string;
   /**
-   * 'prepare'  = exclusion scan (blocks_done counts scanned entries)
-   * 'backup'   = copying blocks
-   * 'finalize' = flushing the image to disk / detaching (no granular progress)
-   * 'verify'   = post-backup validation
+   * 'prepare'    = exclusion scan (blocks_done counts scanned entries)
+   * 'backup'     = copying blocks
+   * 'finalize'   = flushing the image to disk / detaching (no granular progress)
+   * 'exclusions' = post-copy true-removal / in-image exclusion pass
+   *                (blocks_done counts processed entries; minutes on big volumes)
+   * 'verify'     = post-backup validation
    */
-  phase: 'prepare' | 'backup' | 'finalize' | 'verify' | string;
+  phase: 'prepare' | 'backup' | 'finalize' | 'exclusions' | 'verify' | string;
   percent: number;
   blocks_done: number;
   blocks_total: number;
@@ -428,6 +446,8 @@ export interface JobProgress {
   volume_count?: number;
   /** Label of the current volume, e.g. "C: Windows". */
   volume?: string;
+  /** File name of the image being written (shown after the destination). */
+  image_file_name?: string;
 }
 
 // ---------------------------------------------------------------------------

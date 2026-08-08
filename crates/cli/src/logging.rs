@@ -143,7 +143,11 @@ pub fn init() -> Option<PathBuf> {
         "=== own-backup-cli run ==="
     );
     if let Ok(exe) = std::env::current_exe() {
-        tracing::info!(exe = %exe.display(), "running executable");
+        tracing::info!(
+            exe = %exe.display(),
+            built = %own_backup_common::exe_build_stamp(),
+            "running executable"
+        );
     }
     if let Some(p) = &log_path {
         tracing::info!(log = %p.display(), "log file");

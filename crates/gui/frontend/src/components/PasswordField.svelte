@@ -16,6 +16,13 @@
     invalid?: boolean;
     /** 'grow' fills its row; 'inline' keeps a fixed, narrower width. */
     variant?: 'grow' | 'inline';
+    /**
+     * Start with the text visible. For a 48-digit BitLocker recovery key that
+     * is the sane default: it is copied off a printout or a phone, never
+     * memorised, and forty-eight masked digits hide the one typo that matters.
+     * Windows' own recovery screen shows them too.
+     */
+    revealed?: boolean;
   }
   let {
     value,
@@ -24,9 +31,10 @@
     placeholder = 'Пароль',
     invalid = false,
     variant = 'grow',
+    revealed = false,
   }: Props = $props();
 
-  let shown = $state(false);
+  let shown = $state(revealed);
 </script>
 
 <span class="pw-field {variant}">

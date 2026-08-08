@@ -299,6 +299,12 @@ pub struct JobRun {
     /// Real per-category byte totals of the archived files (collected during
     /// the exclusion walk); None when the walk did not run.
     pub categories: Option<own_backup_backup::exclusions::CategorySizes>,
+    /// Why that walk did not run, in words for the result screen — empty when
+    /// it did. Both the exclusions and the by-type breakdown come out of it, so
+    /// this one sentence explains either absence instead of leaving the user
+    /// with "Исключено файлов: 0" over twelve rules that were never applied.
+    #[serde(default)]
+    pub file_scan_skipped: String,
 }
 
 /// A persisted backup job (task).
@@ -655,6 +661,11 @@ pub struct JobProgress {
     /// Human label of the current volume, e.g. "C: Windows".
     #[serde(default)]
     pub volume: String,
+    /// File name of the image this run is writing (e.g.
+    /// `MINWINPC_F_full_20260807-190504.vhdx`), so the progress line can name
+    /// the file next to the destination folder. Empty in old events.
+    #[serde(default)]
+    pub image_file_name: String,
 }
 
 /// Sink for orchestration events. The GUI forwards these to Tauri window
@@ -1339,6 +1350,12 @@ async fn perform_backup(
         let cancel_bg = cancel.clone();
         let image_for_verify = image_path.clone();
         let vol_label_bg = vol_label.clone();
+        // The file this run is writing — named in the progress line, because
+        // "WorkDisk-2 → D:\Temp" alone does not say WHAT is appearing there.
+        let image_name = image_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
 
         let result = tokio::task::spawn_blocking(move || {
             let mut last_permille = u64::MAX;
@@ -1353,6 +1370,11 @@ async fn perform_backup(
                 let phase = match p.backup_id.as_str() {
                     "prepare" => "prepare",
                     "finalize" => "finalize",
+                    // The post-copy exclusion passes (true removal, and the
+                    // in-image pass for an encrypted source) — minutes of real
+                    // work that used to hide under "сброс кэша" and read as a
+                    // hang.
+                    "exclusions" => "exclusions",
                     _ => "backup",
                 };
                 let permille = if p.blocks_total > 0 {
@@ -1363,6 +1385,7 @@ async fn perform_backup(
                 // "finalize" has no granular progress — always emit it so the UI
                 // leaves the frozen 100% state; otherwise throttle as usual.
                 if phase == "finalize"
+                    || phase == "exclusions"
                     || permille != last_permille
                     || last_emit.elapsed().as_millis() >= 400
                 {
@@ -1378,6 +1401,7 @@ async fn perform_backup(
                         volume_index: vidx,
                         volume_count: count,
                         volume: vol_label_bg.clone(),
+                        image_file_name: image_name.clone(),
                     });
                 }
                 Ok(())
@@ -1403,6 +1427,7 @@ async fn perform_backup(
                             volume_index: vidx,
                             volume_count: count,
                             volume: vol_label_bg.clone(),
+                            image_file_name: image_name.clone(),
                         });
                     }
                     Ok(())
@@ -1434,6 +1459,15 @@ async fn perform_backup(
                 all_smart &= summary.smart_mode;
                 run.vss_used |= summary.vss_used;
                 run.categories = merge_categories(run.categories.take(), summary.categories);
+                // One line per volume that went unwalked; a run over three
+                // volumes must not report the reason of whichever came last.
+                if let Some(why) = summary.file_scan_skipped {
+                    let line = if volumes.len() > 1 { format!("{device}: {why}") } else { why };
+                    if !run.file_scan_skipped.is_empty() {
+                        run.file_scan_skipped.push_str("; ");
+                    }
+                    run.file_scan_skipped.push_str(&line);
+                }
 
                 let actual_kind = match summary.backup_kind {
                     BT::Full => "full",
@@ -1615,6 +1649,10 @@ async fn perform_disk_backup(
     };
     let validate_after = job.advanced.validate_after;
     let image_for_verify = image_path.clone();
+    let image_name = image_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
 
     let sink_bg = sink.clone();
     let job_id = job.id.clone();
@@ -1636,6 +1674,8 @@ async fn perform_disk_backup(
             let phase = match p.backup_id.as_str() {
                 "prepare" => "prepare",
                 "finalize" => "finalize",
+                // Post-copy exclusion passes — see the per-volume path.
+                "exclusions" => "exclusions",
                 _ => "backup",
             };
             let permille =
@@ -1643,7 +1683,10 @@ async fn perform_disk_backup(
             // "finalize" has no granular progress — always emit it so the UI
             // leaves the frozen 100 %; "prepare" (permille 0) shows on its first
             // tick then rides the 400 ms throttle, same as the per-volume path.
-            if phase == "finalize" || permille != last_permille || last_emit.elapsed().as_millis() >= 400
+            if phase == "finalize"
+                || phase == "exclusions"
+                || permille != last_permille
+                || last_emit.elapsed().as_millis() >= 400
             {
                 last_permille = permille;
                 last_emit = std::time::Instant::now();
@@ -1657,6 +1700,7 @@ async fn perform_disk_backup(
                     volume_index: 0,
                     volume_count: 1,
                     volume: format!("Диск {disk_number} · {model}"),
+                    image_file_name: image_name.clone(),
                 });
             }
             Ok(())
@@ -1683,6 +1727,7 @@ async fn perform_disk_backup(
                         volume_index: 0,
                         volume_count: 1,
                         volume: format!("Диск {disk_number} · {model}"),
+                        image_file_name: image_name.clone(),
                     });
                 }
                 Ok(())
@@ -1717,6 +1762,7 @@ async fn perform_disk_backup(
             run.excluded_files = summary.excluded_files;
             run.excluded_bytes = summary.excluded_bytes;
             run.categories = summary.categories;
+            run.file_scan_skipped = summary.file_scan_skipped.unwrap_or_default();
             run.duration_secs = summary.duration.as_secs_f64();
             // Record what was ACTUALLY produced (the engine may have fallen back
             // to a full when the parent chain was unusable) so the next run plans
@@ -1832,6 +1878,10 @@ async fn perform_backup(
         let cancel_bg = cancel.clone();
         let vol_label_bg = vol_label.clone();
         let image_for_verify = image_path.clone();
+        let image_name = image_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
 
         let result = tokio::task::spawn_blocking(move || {
             let mut last_permille = u64::MAX;
@@ -1858,6 +1908,7 @@ async fn perform_backup(
                         volume_index: vidx,
                         volume_count: count,
                         volume: vol_label_bg.clone(),
+                        image_file_name: image_name.clone(),
                     });
                 }
                 Ok(())

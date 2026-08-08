@@ -1021,6 +1021,7 @@ mod tests {
                 token: "VE7F57C39".into(),
                 image_file_name: "modulator_disk3.vhdx".into(),
                 filesystem: "fat32".into(),
+                encryption: None,
             }],
             source_disk: None,
         };

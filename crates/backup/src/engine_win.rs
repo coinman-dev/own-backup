@@ -63,6 +63,10 @@ const MIB: u64 = 1024 * 1024;
 /// whose scattered writes otherwise all land at detach time.
 const FLUSH_INTERVAL_BYTES: u64 = 256 * MIB;
 
+/// Why there is no by-type breakdown behind the most ordinary copy of all: the
+/// file walk is the exclusion walk, and with no rules to apply nobody walks.
+const NO_PATTERNS: &str = "исключения не заданы — файлы не перечислялись";
+
 /// Parameters for a volume backup.
 pub struct VolumeBackupRequest {
     /// Source volume: `C:`, `\\.\C:` or a VSS snapshot device path.
@@ -136,6 +140,15 @@ pub struct VolumeBackupSummary {
     /// Per-category byte totals of the files in the archive; None when no
     /// exclusion walk ran (exclusions disabled / non-NTFS / sector mode).
     pub categories: Option<crate::exclusions::CategorySizes>,
+    /// Why the file walk did not run, in words for the result screen. `None`
+    /// when it did run.
+    ///
+    /// One walk produces both the exclusions and the by-type breakdown, so one
+    /// sentence explains both absences. It exists because a copy that quietly
+    /// ignored twelve exclusion rules and then reported "Исключено файлов: 0"
+    /// tells the user the rules matched nothing — when in fact they were never
+    /// applied. That difference is the whole point of having the rules.
+    pub file_scan_skipped: Option<String>,
 }
 
 /// Write target behind the format switch. VHDX goes through the kernel
@@ -763,18 +776,11 @@ fn backup_volume_inner(
             speed_bps: 0,
         })
     };
-    // A locked BitLocker volume cannot be asked which clusters a file occupies:
-    // `FSCTL_GET_RETRIEVAL_POINTERS` needs a mounted filesystem, and there is
-    // none. Copying the file data and only deleting the catalog entries
-    // afterwards would leave those bytes in the image's free space — which is
-    // exactly what "true removal" promises not to do (CLAUDE.md). So the
-    // exclusions are refused out loud instead of being silently skipped.
-    if bitlocker.is_some() && !req.exclusion_patterns.is_empty() {
-        warn!(
-            patterns = req.exclusion_patterns.len(),
-            "BitLocker source: exclusions cannot be applied to a locked volume — copying it whole"
-        );
-    }
+    // Why the file walk did not happen — filled in below by whichever branch
+    // skips it, and carried all the way to the result screen. The walk is what
+    // produces BOTH the exclusions and the by-type breakdown, so one sentence
+    // accounts for both being missing.
+    let mut file_scan_skipped: Option<String> = None;
     let fat_exclusions = fat_map
         .as_ref()
         .is_some_and(|f| f.filesystem == "FAT32" || f.filesystem == "exFAT")
@@ -795,6 +801,8 @@ fn backup_volume_inner(
                 map.apply_excluded_ranges(&scan.ranges);
                 zero_ranges = Some(scan.ranges);
             }
+        } else {
+            file_scan_skipped = Some(NO_PATTERNS.into());
         }
         map.release_bitmap();
     } else if fat_exclusions {
@@ -815,9 +823,49 @@ fn backup_volume_inner(
             // chains so the files vanish instead of remaining zero-filled ghosts.
             fat_patches = scan.patches;
         }
-    } else if !req.exclusion_patterns.is_empty() {
-        warn!("file exclusions are supported on NTFS/ReFS and FAT32 in smart mode — ignored for this run");
+    } else {
+        // Nothing walked the files here. Say which of the reasons it was, in
+        // the words the result screen will repeat back to the user.
+        let reason = if req.all_sectors {
+            "копия посекторная — файловая система не разбиралась".to_string()
+        } else if bitlocker.is_some() {
+            // `FSCTL_GET_RETRIEVAL_POINTERS` needs a mounted filesystem, and a
+            // locked volume has none. Copying the data and deleting only the
+            // catalog entries afterwards would leave those bytes in the image's
+            // free space — exactly what "true removal" promises not to do.
+            "том BitLocker был заблокирован — Windows его не смонтировала, а \
+             перечислить файлы можно только в смонтированной файловой системе"
+                .to_string()
+        } else if luks.is_some() {
+            "том LUKS Windows не монтирует — перечислить файлы в нём она не может".to_string()
+        } else if req.exclusion_patterns.is_empty() {
+            NO_PATTERNS.to_string()
+        } else {
+            format!(
+                "файловые исключения работают на NTFS/ReFS и FAT32, а здесь {}",
+                detected_fs.clone().unwrap_or_else(|| "другая файловая система".into())
+            )
+        };
+        if !req.exclusion_patterns.is_empty() {
+            warn!(
+                patterns = req.exclusion_patterns.len(),
+                reason = %reason,
+                "file exclusions were NOT applied on the source"
+            );
+        }
+        file_scan_skipped = Some(reason);
     }
+
+    // …but a container's files can still be reached — after the copy, inside
+    // the image, where their filesystem lies in the clear and Windows will
+    // mount it. NTFS only: the pass walks the mounted volume and then reads
+    // `$Bitmap` to know what it may zero, and neither exists on ReFS or on a
+    // Linux filesystem Windows cannot mount at all.
+    let encrypted_source = bitlocker.is_some() || luks.is_some();
+    let in_image_exclusions = encrypted_source
+        && !req.exclusion_patterns.is_empty()
+        && !req.all_sectors
+        && detected_fs.as_deref() == Some("NTFS");
 
     let used: Box<dyn UsedSectorMap> = if let Some(map) = luks_used {
         map
@@ -1169,18 +1217,81 @@ fn backup_volume_inner(
     // describes the final image.
     let mut checksums = outcome.checksums;
     let mut used_blocks = used_blocks;
-    if !removal_paths.is_empty() {
-        let bytes_copied = outcome.bytes_copied;
-        let mut tick = |entries: u64| {
-            let _ = progress(&BackupProgress {
-                backup_id: "finalize".into(),
-                status: BackupStatus::Running,
-                blocks_done: entries,
-                blocks_total: 0,
-                bytes_written: bytes_copied,
-                speed_bps: 0,
-            });
+    let bytes_copied_so_far = outcome.bytes_copied;
+    // The exclusion passes below run for MINUTES on a big volume (this run:
+    // scan 34 s, delete 10 s, zero ~40 s, merge ~1.5 min, re-checksum ~4 min on
+    // an HDD) — under the "сброс кэша" label that read as a hang. They get
+    // their own phase id, so the interface can say what is actually happening.
+    let mut phase_tick = move |id: &'static str, entries: u64| {
+        let _ = progress(&BackupProgress {
+            backup_id: id.into(),
+            status: BackupStatus::Running,
+            blocks_done: entries,
+            blocks_total: 0,
+            bytes_written: bytes_copied_so_far,
+            speed_bps: 0,
+        });
+    };
+
+    // The source could not be walked, but the IMAGE can be: it holds the
+    // volume's NTFS in the clear, so the exclusions happen there instead —
+    // matched, deleted by the FS driver, and their clusters zeroed. This is the
+    // only path on which a locked BitLocker volume honours the rules at all,
+    // and it is where the figures for the result screen come from too.
+    if in_image_exclusions {
+        let tick = &mut |n| phase_tick("exclusions", n);
+        let done = match req.image_format {
+            ImageFormat::Vhdx => crate::true_removal_win::exclude_inside_image(
+                &req.image_path,
+                &req.exclusion_patterns,
+                data_offset,
+                volume_len,
+                req.block_size,
+                &mut checksums,
+                tick,
+            )?,
+            // Same pass over an AIM-mounted copy-on-write overlay: the driver
+            // that owns NTFS does the deleting either way, and what it sits on
+            // is the image format's business, not the pass's.
+            ImageFormat::Qcow2 => crate::qcow2_removal_win::exclude_inside_qcow2(
+                &req.image_path,
+                &req.exclusion_patterns,
+                data_offset,
+                volume_len,
+                req.block_size,
+                Some(crate::qcow2::DEFAULT_ZSTD_LEVEL),
+                &mut checksums,
+                tick,
+            )?,
         };
+        match done {
+            Some(done) => {
+                info!(
+                    files = done.files_excluded,
+                    deleted = done.outcome.entries_deleted,
+                    failed = done.outcome.entries_failed,
+                    bytes_zeroed = done.bytes_zeroed,
+                    "exclusions applied inside the image of an encrypted volume"
+                );
+                used_blocks = checksums.len() as u64;
+                excluded_files = done.files_excluded;
+                excluded_bytes = done.bytes_excluded;
+                categories = Some(done.categories);
+                file_scan_skipped = None;
+            }
+            None => {
+                // Already logged in detail; the result screen must still say it.
+                file_scan_skipped = Some(
+                    "том зашифрован, а пройтись по файловой системе внутри готового образа \
+                     не удалось — файлы из копии не убраны"
+                        .into(),
+                );
+            }
+        }
+    }
+
+    if !removal_paths.is_empty() {
+        let tick = &mut |n| phase_tick("exclusions", n);
         match req.image_format {
             ImageFormat::Vhdx => {
                 // Differencing child + MergeVirtualDisk via the kernel VHDX driver.
@@ -1191,7 +1302,7 @@ fn backup_volume_inner(
                     volume_len,
                     req.block_size,
                     &mut checksums,
-                    &mut tick,
+                    tick,
                 )?
                 .is_some()
                 {
@@ -1209,7 +1320,7 @@ fn backup_volume_inner(
                     req.block_size,
                     Some(crate::qcow2::DEFAULT_ZSTD_LEVEL),
                     &mut checksums,
-                    &mut tick,
+                    tick,
                 )?
                 .is_some()
                 {
@@ -1387,6 +1498,7 @@ fn backup_volume_inner(
         excluded_files,
         excluded_bytes,
         categories,
+        file_scan_skipped,
     })
 }
 
@@ -1457,6 +1569,11 @@ pub struct DiskBackupSummary {
     /// Per-category byte breakdown of kept files across all partitions (for the
     /// dashboard); `None` when no exclusion walk ran on any partition.
     pub categories: Option<crate::exclusions::CategorySizes>,
+    /// Partitions whose files nobody walked, and why — named, because on a
+    /// whole-disk copy "исключения не применялись" without saying to WHICH
+    /// partition is barely better than silence. `None` when every partition
+    /// was walked.
+    pub file_scan_skipped: Option<String>,
 }
 
 /// One prepared partition: its VSS snapshot, decrypt params, used-map and the
@@ -1481,8 +1598,35 @@ struct PreparedPartition {
     patches: Vec<(u64, Vec<u8>)>,
     /// NTFS/ReFS matched paths for the post-copy true-removal pass (plan D2).
     removal_paths: Vec<crate::exclusions_win::ExcludedPath>,
+    /// The encrypted container this partition holds, if any — recorded whether
+    /// or not it was opened, so the manifest can say how it was captured.
+    container: Option<own_backup_common::image::VolumeEncryptionKind>,
     #[allow(dead_code)]
     vss: Option<VssSnapshotSession>, // kept alive until the copy is done
+}
+
+/// Which encrypted container a volume's first sectors say it is.
+///
+/// Costs nothing and needs no password — LUKS puts its magic and version at
+/// offset 0, BitLocker its signature in the boot sector — and it is the only
+/// way to know what a container we could NOT open was. Without it a locked
+/// partition copied as ciphertext and an unlocked one copied in the clear look
+/// the same in the manifest, and the restore screen has to guess which of two
+/// opposite things to tell the user.
+fn container_kind(header: &[u8]) -> Option<own_backup_common::image::VolumeEncryptionKind> {
+    use own_backup_common::image::VolumeEncryptionKind as K;
+    if crate::bitlocker::is_bitlocker(header) {
+        return Some(K::BitLocker);
+    }
+    if crate::luks::is_luks(header) {
+        // Version is the two big-endian bytes right after the magic.
+        return Some(match u16::from_be_bytes([header[6], header[7]]) {
+            1 => K::Luks1,
+            2 => K::Luks2,
+            _ => K::Other,
+        });
+    }
+    None
 }
 
 /// Short display token for a source device (mirrors core's source_token):
@@ -1532,6 +1676,9 @@ struct PreparedMap {
     /// Per-category byte breakdown of the KEPT files on this partition (powers
     /// the dashboard's data breakdown); `None` when no exclusion walk ran.
     categories: Option<crate::exclusions::CategorySizes>,
+    /// Why no walk ran over this partition, for the result screen. `None` when
+    /// one did.
+    skipped: Option<String>,
 }
 
 /// Build a partition's used-map and apply file exclusions (plan D2). The
@@ -1566,7 +1713,14 @@ fn prepare_partition_map(
         excluded_files: 0,
         excluded_bytes: 0,
         categories: None,
+        skipped: None,
     };
+    // The same, with the reason nobody walked this partition's files.
+    let none_because =
+        |fs: &str, map: Option<Box<dyn UsedSectorMap>>, why: &str| PreparedMap {
+            skipped: Some(why.into()),
+            ..none(fs, map)
+        };
     // Every exclusion scanner reads through this. The alignment wrapper is not
     // a nicety: a raw Windows device refuses reads that do not start on a
     // sector boundary, and ext inodes are 256 bytes — the root inode among the
@@ -1597,14 +1751,19 @@ fn prepare_partition_map(
                     }
                 } else {
                     warn!(part = %read_path, "whole-disk: NTFS exclusion scan failed — keeping all files");
+                    out.skipped = Some("перечислить файлы NTFS не удалось".into());
                 }
+            } else {
+                out.skipped = Some(NO_PATTERNS.into());
             }
             m.release_bitmap();
             out.map = Some(Box::new(m));
             return out;
         }
     }
-    let Ok(mut src) = open() else { return none("unknown", None) };
+    let Ok(mut src) = open() else {
+        return none_because("unknown", None, "раздел не открылся для чтения");
+    };
     if let Ok(m) = crate::fat_map::build_fat_used_map(src.as_mut(), block_size) {
         let fs = m.filesystem.to_lowercase();
         let is_fat = m.filesystem == "FAT32" || m.filesystem == "exFAT";
@@ -1638,7 +1797,15 @@ fn prepare_partition_map(
             }
             return out;
         }
-        return none(&fs, Some(Box::new(m)));
+        return none_because(
+            &fs,
+            Some(Box::new(m)),
+            if patterns.is_empty() {
+                NO_PATTERNS
+            } else {
+                "файловые исключения на этой ФС поддерживаются только для FAT32/exFAT"
+            },
+        );
     }
     if let Ok(mut m) = crate::ext_map::build_ext_used_map(src.as_mut(), block_size) {
         // ext2/3/4: full file-level exclusions (Stage 1 drop+zero, Stage 2
@@ -1663,9 +1830,14 @@ fn prepare_partition_map(
                             out.zero_ranges = scan.ranges;
                         }
                     }
-                    Err(e) => warn!(part = %read_path, error = %e, "ext exclusions failed — keeping all files"),
+                    Err(e) => {
+                        warn!(part = %read_path, error = %e, "ext exclusions failed — keeping all files");
+                        out.skipped = Some("перечислить файлы ext не удалось".into());
+                    }
                 }
             }
+        } else {
+            out.skipped = Some(NO_PATTERNS.into());
         }
         out.map = Some(Box::new(m));
         return out;
@@ -1714,9 +1886,14 @@ fn prepare_partition_map(
                             out.zero_ranges = scan.ranges;
                         }
                     }
-                    Err(e) => warn!(part = %read_path, error = %e, "btrfs exclusions failed — keeping all files"),
+                    Err(e) => {
+                        warn!(part = %read_path, error = %e, "btrfs exclusions failed — keeping all files");
+                        out.skipped = Some("перечислить файлы btrfs не удалось".into());
+                    }
                 }
             }
+        } else {
+            out.skipped = Some(NO_PATTERNS.into());
         }
         out.map = Some(Box::new(m));
         return out;
@@ -1742,14 +1919,19 @@ fn prepare_partition_map(
                             out.zero_ranges = scan.ranges;
                         }
                     }
-                    Err(e) => warn!(part = %read_path, error = %e, "xfs exclusions failed — keeping all files"),
+                    Err(e) => {
+                        warn!(part = %read_path, error = %e, "xfs exclusions failed — keeping all files");
+                        out.skipped = Some("перечислить файлы xfs не удалось".into());
+                    }
                 }
             }
+        } else {
+            out.skipped = Some(NO_PATTERNS.into());
         }
         out.map = Some(Box::new(m));
         return out;
     }
-    none("unknown", None)
+    none_because("unknown", None, "файловая система не распознана — раздел скопирован посекторно")
 }
 
 /// One partition region inside the whole-disk image: its byte offset on the
@@ -1933,6 +2115,9 @@ fn backup_disk_inner(
     let mut excluded_files = 0u64;
     let mut excluded_bytes = 0u64;
     let mut categories: Option<crate::exclusions::CategorySizes> = None;
+    // Partitions whose files nobody walked, each with its reason (see
+    // `PreparedMap::skipped`).
+    let mut scan_skips: Vec<String> = Vec::new();
     for p in &req.partitions {
         let entry = layout
             .partitions
@@ -1965,19 +2150,21 @@ fn backup_disk_inner(
             None => source.clone(),
         };
 
-        // LUKS unlock (decrypted data area is captured).
+        // What sort of container this partition is, asked of its first sectors
+        // and of nobody's memory. Read whether or not a passphrase came with
+        // it: a container we cannot open is still copied — as ciphertext — and
+        // the restore screen has to be able to tell that apart from a container
+        // we opened and captured in the clear.
         let mut probe = WinRawDevice::open_read(&read_path)?;
+        let mut header = vec![0u8; 4096];
+        probe.read_at(0, &mut header)?;
+        let container = container_kind(&header);
+        // LUKS unlock (decrypted data area is captured).
         let luks = match &p.passphrase {
-            Some(pass) => {
-                let mut header = vec![0u8; 4096];
-                probe.read_at(0, &mut header)?;
-                if crate::luks::is_luks(&header) {
-                    Some(crate::luks::open_luks(&mut probe, pass.as_bytes())?)
-                } else {
-                    None
-                }
+            Some(pass) if crate::luks::is_luks(&header) => {
+                Some(crate::luks::open_luks(&mut probe, pass.as_bytes())?)
             }
-            None => None,
+            _ => None,
         };
         let device_len = probe.length();
         drop(probe);
@@ -2043,6 +2230,9 @@ fn backup_disk_inner(
         if let Some(c) = &pm.categories {
             categories.get_or_insert_with(Default::default).merge(c);
         }
+        if let Some(why) = &pm.skipped {
+            scan_skips.push(format!("раздел {} ({}): {why}", p.part_index, pm.filesystem));
+        }
         info!(
             part = p.part_index,
             fs = %pm.filesystem,
@@ -2063,6 +2253,7 @@ fn backup_disk_inner(
             zero_ranges: pm.zero_ranges,
             patches: pm.patches,
             removal_paths: pm.removal_paths,
+            container,
             used,
             vss,
         });
@@ -2318,7 +2509,7 @@ fn backup_disk_inner(
     if !removal.is_empty() {
         let mut tick = |entries: u64| {
             let _ = progress(&BackupProgress {
-                backup_id: "finalize".into(),
+                backup_id: "exclusions".into(),
                 status: BackupStatus::Running,
                 blocks_done: entries,
                 blocks_total: 0,
@@ -2364,6 +2555,23 @@ fn backup_disk_inner(
             token: disk_source_token(&p.device),
             image_file_name: image_file_name.clone(),
             filesystem: p.filesystem.clone(),
+            // Opened → the image holds the volume in the clear. Not opened →
+            // the container's own bytes went in untouched, and the restore
+            // brings it back encrypted, password and all.
+            encryption: p.container.clone().map(|kind| {
+                use own_backup_common::image::{VolumeCaptureMode, VolumeEncryptionState};
+                let opened = p.luks.is_some();
+                VolumeEncryptionState {
+                    kind,
+                    capture_mode: if opened {
+                        VolumeCaptureMode::Plaintext
+                    } else {
+                        VolumeCaptureMode::SectorBySector
+                    },
+                    luks_header_backup_b64: None, // the header itself lives in `info.luks_headers`
+                    note: None,
+                }
+            }),
         })
         .collect();
     let disk_manifest = own_backup_common::gpt::DiskBackupManifest {
@@ -2448,6 +2656,11 @@ fn backup_disk_inner(
         excluded_files,
         excluded_bytes,
         categories,
+        file_scan_skipped: if scan_skips.is_empty() {
+            None
+        } else {
+            Some(scan_skips.join("; "))
+        },
     })
 }
 
@@ -3532,6 +3745,7 @@ pub fn unmount_image(image_path: &Path) -> Result<()> {
                     volume_len,
                     block_size,
                     &mut sidecar.checksums,
+                    &mut |_| {}, // interactive unmount: no progress channel
                 )?;
                 if read_from_embedded {
                     let sector = 512u64;
@@ -3749,6 +3963,7 @@ fn unmount_qcow2_via_aim(image_path: &Path) -> Result<()> {
                     volume_len,
                     block_size,
                     &mut sidecar.checksums,
+                    &mut |_| {}, // interactive unmount: no progress channel
                 )?;
                 if read_from_embedded {
                     let sector = 512u64;
@@ -3798,30 +4013,80 @@ pub struct DecryptedProbe {
 /// How an encrypted partition can be opened, asked of the volume itself.
 ///
 /// `(what it accepts, whether we can do any of it)`. Costs a few sector reads
-/// and no password: the FVE metadata lists the protectors in the clear. The
-/// interface needs it to stop asking a TPM-only volume for a passphrase it
-/// does not have — the answer to which is not "wrong password" but "wrong
-/// question".
+/// and no password: BitLocker's FVE metadata lists its protectors in the clear,
+/// and a LUKS header its keyslots. The interface needs it to stop asking a
+/// TPM-only volume for a passphrase it does not have — the answer to which is
+/// not "wrong password" but "wrong question".
 ///
-/// `None` when the partition is not BitLocker (a LUKS container, say) or its
-/// metadata could not be read; nothing is claimed in that case.
+/// When the container is neither, or its metadata cannot be read, the answer is
+/// "we do not know" — an empty list and `true`. Saying `false` there would put
+/// "открыть нечем" under a volume nobody has actually asked, which is exactly
+/// what a LUKS partition used to get: the wrong question in the other
+/// direction. Letting the user try costs one rejected passphrase; refusing to
+/// ask costs them the volume.
 #[cfg(target_os = "windows")]
-pub fn describe_encryption(disk: u32, offset: u64, length: u64) -> Option<(Vec<String>, bool)> {
+pub fn describe_encryption(disk: u32, offset: u64, length: u64) -> (Vec<String>, bool) {
+    let unknown = (Vec::new(), true);
     let path = format!(r"\\.\PhysicalDrive{disk}");
-    let mut window = disk_window(&path, offset, length).ok()?;
-    let info = crate::bitlocker::inspect_bitlocker(&mut window).ok()?;
-    let names = info
-        .protectors
-        .iter()
-        .map(|p| {
-            if p.count > 1 {
-                format!("{} ×{}", p.name, p.count)
-            } else {
-                p.name.clone()
-            }
-        })
-        .collect();
-    Some((names, info.openable()))
+    let Ok(mut window) = disk_window(&path, offset, length) else {
+        return unknown;
+    };
+    if let Ok(info) = crate::bitlocker::inspect_bitlocker(&mut window) {
+        let names = info
+            .protectors
+            .iter()
+            .map(|p| {
+                if p.count > 1 {
+                    format!("{} ×{}", p.name, p.count)
+                } else {
+                    p.name.clone()
+                }
+            })
+            .collect();
+        return (names, info.openable());
+    }
+    match crate::luks::inspect_luks(&mut window) {
+        Ok(info) => (info.methods, info.openable),
+        Err(e) => {
+            debug!(disk, offset, error = %e, "encrypted partition described neither as BitLocker nor as LUKS");
+            unknown
+        }
+    }
+}
+
+/// Describe what is inside a container we have just unlocked: filesystem,
+/// volume label, bytes in use.
+///
+/// The superblock alone answers this for ext/xfs/btrfs/FAT — their free-space
+/// counters and labels live there. NTFS keeps neither: its label is in the MFT
+/// and its free space in `$Bitmap`. Windows would know both, but only for a
+/// volume it has mounted, and this one it cannot mount — so both are read here,
+/// from the same structures the used-block map is built from. A failure there
+/// costs the numbers, not the unlock.
+#[cfg(target_os = "windows")]
+fn probe_decrypted(view: &mut dyn crate::fat_map::RawVolume) -> Result<DecryptedProbe> {
+    use own_backup_common::types::FileSystem;
+
+    let want = (own_backup_inventory::fs_probe::PROBE_LEN as u64).min(view.len()) as usize;
+    let mut buf = vec![0u8; want];
+    view.read_at(0, &mut buf)?;
+    let Some(probed) = own_backup_inventory::fs_probe::identify(&buf) else {
+        return Ok(DecryptedProbe { ok: true, ..Default::default() });
+    };
+    let filesystem = format!("{:?}", probed.fs).to_lowercase();
+    let mut label = probed.label.unwrap_or_default();
+    let mut used_bytes = probed.used_bytes.unwrap_or(0);
+
+    if probed.fs == FileSystem::Ntfs {
+        match crate::ntfs_map::ntfs_used_bytes(view) {
+            Ok(used) => used_bytes = used,
+            Err(e) => warn!(error = %e, "could not count used bytes of the unlocked NTFS volume"),
+        }
+        if label.is_empty() {
+            label = crate::ntfs_map::ntfs_volume_label(view).unwrap_or_default();
+        }
+    }
+    Ok(DecryptedProbe { ok: true, filesystem, label, used_bytes })
 }
 
 /// Open a BitLocker volume through the disk it lives on, and describe what is
@@ -3836,8 +4101,6 @@ pub fn describe_encryption(disk: u32, offset: u64, length: u64) -> Option<(Vec<S
 /// protector.
 #[cfg(target_os = "windows")]
 fn probe_bitlocker(volume_device: &str, passphrase: &str) -> Result<DecryptedProbe> {
-    use crate::fat_map::RawVolume;
-
     let extents = crate::volume_win::volume_extents(volume_device);
     let [extent] = extents.as_slice() else {
         return Err(OwnBackupError::Device(format!(
@@ -3867,35 +4130,20 @@ fn probe_bitlocker(volume_device: &str, passphrase: &str) -> Result<DecryptedPro
         Box::new(disk_window(&disk, extent.offset, extent.length)?),
         params,
     );
-    let want = (own_backup_inventory::fs_probe::PROBE_LEN as u64).min(view.len()) as usize;
-    let mut buf = vec![0u8; want];
-    view.read_at(0, &mut buf)?;
-    let (filesystem, label, used_bytes) = match own_backup_inventory::fs_probe::identify(&buf) {
-        Some(p) => (
-            format!("{:?}", p.fs).to_lowercase(),
-            p.label.unwrap_or_default(),
-            p.used_bytes.unwrap_or(0),
-        ),
-        None => (String::new(), String::new(), 0),
-    };
-    Ok(DecryptedProbe { ok: true, filesystem, label, used_bytes })
+    probe_decrypted(&mut view)
 }
 
-/// Unlock the LUKS container at `device_path` with `passphrase` and probe the
-/// decrypted filesystem. `ok = false` means the passphrase was rejected. A
-/// source that is not LUKS returns `ok = true` with empty info (nothing to
-/// unlock). Errors only on I/O so the UI can tell "wrong password" from
-/// "could not read the device".
+/// Unlock the encrypted container at `device_path` with `passphrase` and probe
+/// the decrypted filesystem — LUKS through the device itself, BitLocker through
+/// the disk under it (see [`probe_bitlocker`]).
 ///
-/// **BitLocker is not unlocked here.** Windows refuses to read a locked
-/// BitLocker volume through its volume handle at all, so the attempt fails on
-/// the very first read; the parser in [`crate::bitlocker`] would need the
-/// ciphertext from the physical disk instead, which is a piece of work of its
-/// own (see `.ai/bitlocker-windows-plan_2026-08-01.md`). Until then the honest
-/// answer is said out loud rather than dressed up as a device fault.
+/// `ok = false` means the passphrase was rejected, and nothing else: an
+/// unsupported cipher, an unreadable header or a KDF that could not get its
+/// memory come back as errors, so the interface never answers "пароль не
+/// подходит" to a question about something else. A source that is not an
+/// encrypted container at all returns `ok = true` with empty info — there was
+/// nothing to unlock.
 pub fn unlock_and_probe(device_path: &str, passphrase: &str) -> Result<DecryptedProbe> {
-    use crate::fat_map::RawVolume;
-
     let src = normalize_device_path(device_path);
     let mut dev = WinRawDevice::open_read(&src)?;
     let mut header = vec![0u8; 4096];
@@ -3919,25 +4167,23 @@ pub fn unlock_and_probe(device_path: &str, passphrase: &str) -> Result<Decrypted
     }
     let params = match crate::luks::open_luks(&mut dev, passphrase.as_bytes()) {
         Ok(p) => p,
-        Err(_) => return Ok(DecryptedProbe { ok: false, ..Default::default() }),
+        // No keyslot took it: a fact for the interface, not an error.
+        Err(e) if crate::luks::is_wrong_passphrase(&e) => {
+            info!(error = %e, "LUKS passphrase rejected");
+            return Ok(DecryptedProbe { ok: false, ..Default::default() });
+        }
+        // Anything else — a cipher we do not implement, a header we could not
+        // read, an Argon2 that could not get its memory — is NOT a wrong
+        // password, and saying so would send the user off to re-type a password
+        // that was right all along.
+        Err(e) => return Err(e),
     };
     drop(dev);
 
     // Read the decrypted superblock region and identify the inner filesystem.
     let mut view =
         crate::decrypt::DecryptingVolume::new(Box::new(WinRawDevice::open_read(&src)?), params);
-    let want = (own_backup_inventory::fs_probe::PROBE_LEN as u64).min(view.len()) as usize;
-    let mut buf = vec![0u8; want];
-    view.read_at(0, &mut buf)?;
-    let (filesystem, label, used_bytes) = match own_backup_inventory::fs_probe::identify(&buf) {
-        Some(p) => (
-            format!("{:?}", p.fs).to_lowercase(),
-            p.label.unwrap_or_default(),
-            p.used_bytes.unwrap_or(0),
-        ),
-        None => (String::new(), String::new(), 0),
-    };
-    Ok(DecryptedProbe { ok: true, filesystem, label, used_bytes })
+    probe_decrypted(&mut view)
 }
 
 /// Read an image's sidecar: embedded first, adjacent `.obkm` as a fallback

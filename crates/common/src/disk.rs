@@ -2,6 +2,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::{FileSystem, PartitionTable};
 
+/// `#[serde(default = …)]` for a flag whose absence must read as "yes".
+fn yes() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiskInfo {
     pub device_id: String,
@@ -62,14 +67,20 @@ pub struct PartitionInfo {
     /// How an encrypted volume can be opened, in the words of its own
     /// metadata: "пароль", "ключ восстановления (48 цифр)", "TPM + PIN"…
     ///
-    /// A BitLocker volume says this about itself, and it costs one read to
-    /// ask. Without it the interface asks every encrypted volume for a
-    /// password and answers "не подходит" to a volume that has none — which is
-    /// not a wrong password but a wrong question. Empty for LUKS and for
-    /// anything we could not read.
+    /// A BitLocker volume says this about itself, and a LUKS container says it
+    /// through its keyslots; both cost one read to ask. Without it the
+    /// interface asks every encrypted volume for a password and answers "не
+    /// подходит" to a volume that has none — which is not a wrong password but
+    /// a wrong question. Empty for anything we could not read.
     #[serde(default)]
     pub unlock_methods: Vec<String>,
     /// Can Own Backup open this volume with something the user can type?
-    #[serde(default)]
+    ///
+    /// Defaults to `true`, and the inventory leaves it there: only a positive
+    /// answer from the container's own metadata ("TPM only", "a cipher we do
+    /// not implement") may set it to `false`. An unread volume is an unknown
+    /// one, and refusing to even offer the password field on a "don't know" is
+    /// how a perfectly openable LUKS partition ended up marked "открыть нечем".
+    #[serde(default = "yes")]
     pub unlockable: bool,
 }

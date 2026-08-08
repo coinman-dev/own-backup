@@ -425,6 +425,16 @@ pub fn start_media_cmd(app_dir: &str, temp_dir: &str) -> String {
         "echo Browser arguments read from: %ARGS_FILE%",
         "if not defined WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS echo [!] no arguments came out of that file",
         "",
+        "rem WinPE's firewall resets loopback connections BETWEEN processes. A",
+        "rem process reaching its own listener is fine, which is why the engine and",
+        "rem the interface talk happily - but AIM's TCP proxy (qcow2 mounting, and",
+        "rem exclusions inside the image) is connected by the DevIoSvc helper, from",
+        "rem another process, and that one got CONNECTION_REFUSED (2026-08-07).",
+        "rem The service turns the firewall off itself too: this line only helps",
+        "rem the case where it never starts. Nothing listens on external",
+        "rem interfaces here - it is a rescue environment on a RAM disk.",
+        "wpeutil disablefirewall >nul 2>&1",
+        "",
         "rem Media mode: state goes to the RAM disk instead of the rescued machine's",
         "rem C:, the engine runs as a process, and no VSS is attempted (the system",
         "rem here is offline, so a direct read is already consistent).",
@@ -439,8 +449,10 @@ pub fn start_media_cmd(app_dir: &str, temp_dir: &str) -> String {
         &format!("start \"\" \"{app_dir}\\own-backup-gui.exe\""),
         "echo.",
         "echo The interface starts in its own window; this console stays usable.",
+        "echo The engine runs without a window of its own — its log is the place to look.",
         "echo If no window appears, look at:",
         &format!("echo   \"{app_dir}\\own-backup-gui.log\""),
+        &format!("echo   \"{app_dir}\\own-backup-service.log\""),
         &format!("echo   {temp_dir}\\webview2.log"),
     ])
 }
@@ -566,6 +578,19 @@ mod tests {
         assert!(s.contains(r#"start "" "X:\Program Files\OwnBackup\own-backup-gui.exe""#));
         assert!(s.contains("--run --media"), "the engine must know it is on the medium");
         assert!(s.contains("OWN_BACKUP_MEDIA=1"));
+    }
+
+    /// WinPE's firewall resets loopback connections between processes, which is
+    /// exactly how AIM's proxy is fed (DevIoSvc connects to our devio server).
+    /// Without this the qcow2 mount and the in-image exclusion pass die with
+    /// CONNECTION_REFUSED — and they die AFTER the copy, so the run looks
+    /// successful and quietly keeps every excluded file.
+    #[test]
+    fn the_medium_turns_the_firewall_off_before_starting_anything() {
+        let s = start_media_cmd(r"X:\Program Files\OwnBackup", r"X:\Windows\Temp\OwnBackup");
+        let firewall = s.find("wpeutil disablefirewall").expect("firewall must be disabled");
+        let engine = s.find("own-backup-service.exe").expect("the engine must be started");
+        assert!(firewall < engine, "the firewall must be down before the engine comes up");
     }
 
     /// The runtime is off-image, so the launcher must locate the boot volume by

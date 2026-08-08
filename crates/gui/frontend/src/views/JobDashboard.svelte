@@ -22,7 +22,20 @@
   const verifying = $derived(progress?.phase === 'verify');
   const preparing = $derived(progress?.phase === 'prepare');
   const finalizing = $derived(progress?.phase === 'finalize');
+  // The post-copy exclusion pass (true removal / in-image exclusions): minutes
+  // of real work that used to hide under the "сброс кэша" label and read as a
+  // hang — 7 of the 26 minutes of a real run (2026-08-07).
+  const excluding = $derived(progress?.phase === 'exclusions');
   const lastRun = $derived(job.last_run);
+  // The job asks for exclusions and the copy did not apply them. Reporting
+  // "Исключено файлов: 0" for that reads as "the rules matched nothing", which
+  // is the opposite of what happened — the rules were never run.
+  const exclusionsIgnored = $derived(
+    !!lastRun?.file_scan_skipped &&
+      lastRun.excluded_files === 0 &&
+      job.exclusions.enabled &&
+      job.exclusions.patterns.length > 0,
+  );
 
   // "Том 2/3 · C: Windows — " prefix while a multi-volume job runs.
   const volTag = $derived.by(() => {
@@ -45,7 +58,8 @@
   const ringPercent = $derived.by(() => {
     const p = progress;
     if (!p || p.phase === 'prepare') return 0;
-    if (p.phase === 'finalize') return job.advanced.validate_after ? 50 : 100;
+    if (p.phase === 'finalize' || p.phase === 'exclusions')
+      return job.advanced.validate_after ? 50 : 100;
     if (job.advanced.validate_after) {
       return Math.round(p.phase === 'verify' ? 50 + p.percent / 2 : p.percent / 2);
     }
@@ -107,6 +121,15 @@
   });
 
   const elapsedMs = $derived(running && startMs ? nowMs - startMs : 0);
+
+  // Destination as shown in the progress line: the folder plus the file this
+  // run is writing into it — "D:\Temp" alone does not say WHAT is appearing
+  // there, and with several copies in one folder the name is the identity.
+  const destPath = $derived.by(() => {
+    const name = progress?.image_file_name;
+    if (!name) return job.dest_folder;
+    return job.dest_folder.replace(/[\\/]+$/, '') + '\\' + name;
+  });
 
   // Real data-category breakdown, collected during the backup's file walk.
   const CAT_META = [
@@ -224,6 +247,7 @@
       <div class="progress-info">
         <span>
           {volTag}{#if preparing}Подготовка: поиск исключаемых файлов…
+          {:else if excluding}Удаление исключённых файлов из образа…
           {:else if finalizing}Завершение: запись образа на диск…
           {:else if verifying}Проверка резервной копии…
           {:else}Резервное копирование…{/if}
@@ -232,6 +256,8 @@
           <span>
             {#if preparing}
               {progress.blocks_done.toLocaleString('ru-RU')} объектов просмотрено
+            {:else if excluding}
+              файлы удаляются и зануляются в готовой копии…
             {:else if finalizing}
               сброс кэша на диск, подождите…
             {:else}
@@ -240,10 +266,10 @@
           </span>
         {/if}
       </div>
-      <div class="bar"><div class="bar-fill" class:verify={verifying} class:indet={finalizing} style="width:{finalizing ? 100 : (progress?.percent ?? 0)}%"></div></div>
+      <div class="bar"><div class="bar-fill" class:verify={verifying} class:indet={finalizing || excluding} style="width:{finalizing || excluding ? 100 : (progress?.percent ?? 0)}%"></div></div>
       <div class="progress-meta">
-        <span class="route" title="{sourceSummary(job)} → {job.dest_folder}">
-          {sourceSummary(job)} → {job.dest_folder}
+        <span class="route" title="{sourceSummary(job)} → {destPath}">
+          {sourceSummary(job)} → {destPath}
         </span>
         <span class="times">
           Прошло {formatClock(elapsedMs)} · Осталось {Number.isFinite(etaMs) ? '~' + formatClock(etaMs) : 'оценка…'}
@@ -287,7 +313,16 @@
       </div>
     {:else}
       <div class="catbar empty-catbar"></div>
-      <div class="cats-note">Разбивка по типам появится после следующего копирования (считается при сканировании тома).</div>
+      <!-- The breakdown comes out of the file walk. When that walk did not run,
+           the copy knows why — and saying so beats promising it "next time" to
+           someone whose next copy will not have it either. -->
+      <div class="cats-note">
+        {#if lastRun?.file_scan_skipped}
+          Разбивка по типам для этой копии не считалась: {lastRun.file_scan_skipped}.
+        {:else}
+          Разбивка по типам появится после следующего копирования (считается при сканировании тома).
+        {/if}
+      </div>
     {/if}
 
     {#if lastRun?.status === 'success'}
@@ -310,6 +345,11 @@
             {/if}
             {#if lastRun.excluded_files > 0}
               Исключено файлов: {lastRun.excluded_files} ({formatBytes(lastRun.excluded_bytes)}).
+            {:else if exclusionsIgnored}
+              <br />
+              <b>Исключения не применялись</b> ({job.exclusions.patterns.length}
+              {job.exclusions.patterns.length === 1 ? 'правило' : 'правил'}): {lastRun.file_scan_skipped}.
+              Всё, что под них попадает, в копии есть.
             {/if}
           </span>
           <button class="banner-x" title="Скрыть" aria-label="Скрыть" onclick={() => (summaryHidden = true)}>✕</button>

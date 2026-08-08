@@ -442,14 +442,13 @@ impl BackupService for BackupServiceImpl {
                 continue;
             };
             for part in disk.partitions.iter_mut().filter(|p| p.is_encrypted) {
-                if let Some((methods, unlockable)) = own_backup_backup::engine_win::describe_encryption(
+                let (methods, unlockable) = own_backup_backup::engine_win::describe_encryption(
                     number,
                     part.offset_bytes,
                     part.size_bytes,
-                ) {
-                    part.unlock_methods = methods;
-                    part.unlockable = unlockable;
-                }
+                );
+                part.unlock_methods = methods;
+                part.unlockable = unlockable;
             }
         }
 

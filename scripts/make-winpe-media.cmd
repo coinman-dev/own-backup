@@ -328,6 +328,10 @@ set "SCRIPT=%APP%\start-media.cmd"
 >>"%SCRIPT%" echo rem read is already consistent) and schedules stay hidden. The programs detect
 >>"%SCRIPT%" echo rem WinPE by themselves; this makes it explicit and covers child processes.
 >>"%SCRIPT%" echo set "OWN_BACKUP_MEDIA=1"
+>>"%SCRIPT%" echo rem WinPE's firewall resets loopback connections BETWEEN processes: the AIM
+>>"%SCRIPT%" echo rem proxy (qcow2 mounting/exclusions) gets CONNECTION_REFUSED while same-process
+>>"%SCRIPT%" echo rem probes pass. The service also does this itself at startup - belt and braces.
+>>"%SCRIPT%" echo wpeutil disablefirewall ^>nul 2^>^&1
 >>"%SCRIPT%" echo set "RUST_BACKTRACE=1"
 >>"%SCRIPT%" echo set "RUST_LOG=info,own_backup_gui=debug,tauri_runtime_wry=debug,wry=debug"
 rem Is there anything to start the interface WITH? WebView2 outside boot.wim,

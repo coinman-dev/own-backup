@@ -520,12 +520,54 @@
           device: dev,
           label: i >= 0 ? (job.source_labels[i] ?? partLabel(p)) : partLabel(p),
           methods: p.unlock_methods ?? [],
-          // Older services do not send the field at all; assume openable then,
-          // exactly as before, rather than refusing on a missing answer.
-          unlockable: p.unlockable ?? true,
+          // "Открыть нечем" is only believed when the volume said WHY. A bare
+          // `false` with no reason means the service could not read the
+          // container (or is an older build) — then the user gets the password
+          // field, as they did before the field existed.
+          unlockable: (p.unlockable ?? true) || (p.unlock_methods?.length ?? 0) === 0,
         };
       });
   }
+  // A volume whose only typeable way in is the 48-digit key. Windows does not
+  // allow a passphrase protector on the system volume, so this is the normal
+  // state of C: — and asking it for "пароль" is asking for something that does
+  // not exist on that volume.
+  function needsRecoveryKey(e: EncryptedVolume): boolean {
+    return (
+      !e.methods.includes('пароль') &&
+      e.methods.some((m) => m.startsWith('ключ восстановления'))
+    );
+  }
+  // What to ask this volume for, in the words of its own metadata.
+  function promptFor(e: EncryptedVolume): string {
+    return needsRecoveryKey(e) ? '123456-123456-123456-… (48 цифр)' : 'Пароль';
+  }
+
+  // The 48-digit key as a person actually has it: printed in eight groups,
+  // copied off a phone with the dashes lost, read aloud with spaces. All three
+  // become the canonical `123456-…-123456` the engine parses.
+  //
+  // The checks are the format's own, and they are the same ones
+  // `bitlocker::parse_recovery_key` runs: every group is a 16-bit number times
+  // eleven. Running them here means a typo is answered in the instant it is
+  // made, instead of after a round trip and a million rounds of SHA-256 that
+  // can only report "не подошёл" — which for a mistyped digit is not the
+  // useful half of the truth.
+  function normalizeRecoveryKey(text: string): { key: string } | { error: string } {
+    const digits = text.replace(/\D/g, '');
+    if (digits.length !== 48) {
+      return {
+        error: `Ключ восстановления — 48 цифр (8 групп по 6), а введено ${digits.length}`,
+      };
+    }
+    const groups = digits.match(/.{6}/g) as string[];
+    const bad = groups.findIndex((g) => Number(g) % 11 !== 0 || Number(g) / 11 > 65535);
+    if (bad >= 0) {
+      return { error: `Группа ${bad + 1} («${groups[bad]}») не сходится — опечатка в цифрах` };
+    }
+    return { key: groups.join('-') };
+  }
+
   // Linux OS filesystems: a decrypted volume of one of these on a bootable-copy
   // disk is the system root and is auto-included.
   const LINUX_OS_FS = ['ext4', 'xfs', 'btrfs'];
@@ -533,6 +575,9 @@
   // it survives closing and reopening the wizard. Per-device wrong-password
   // markers and the in-flight device are local to this wizard instance.
   let pwErrors = $state<Record<string, boolean>>({});
+  // "What you typed is not a 48-digit key" — said before anything is sent, and
+  // kept apart from "the key was right in shape and wrong in fact".
+  let pwFormat = $state<Record<string, string>>({});
   let decrypting = $state<string | null>(null);
 
   // Keep the "needs a password" job flag in sync with the selection.
@@ -564,6 +609,7 @@
   function setPw(dev: string, value: string) {
     pwInputs[dev] = { password: value, remember: pwInputs[dev]?.remember ?? false };
     delete pwErrors[dev]; // editing clears a previous "wrong password"
+    delete pwFormat[dev]; // …and a previous "that is not 48 digits"
   }
   function setRemember(dev: string, remember: boolean) {
     pwInputs[dev] = { password: pwInputs[dev]?.password ?? '', remember };
@@ -578,10 +624,23 @@
   // bytes. On success the segment then shows them like any other volume, the
   // label flows into the file name, and "Далее" unlocks.
   async function decrypt(device: string) {
-    const pw = pwInputs[device]?.password;
-    if (!pw) { pwErrors[device] = true; return; }
+    const typed = pwInputs[device]?.password;
+    if (!typed) { pwErrors[device] = true; return; }
+    // A volume that takes only the 48-digit key gets the key, in the shape the
+    // engine parses — whatever shape it was typed in. Only input that is trying
+    // to BE a key (digits and separators) is held to the format; anything with
+    // letters in it goes through untouched, so a volume whose protector list we
+    // read wrong is never a dead end.
+    let pw = typed;
+    const vol = encryptedOffered().find((e) => e.device === device);
+    if (vol && needsRecoveryKey(vol) && /^[\d\s-]+$/.test(typed)) {
+      const parsed = normalizeRecoveryKey(typed);
+      if ('error' in parsed) { pwFormat[device] = parsed.error; return; }
+      pw = parsed.key;
+    }
     decrypting = device;
     delete pwErrors[device];
+    delete pwFormat[device];
     try {
       const r = await decryptVolume(device, pw, pwInputs[device]?.remember ?? false);
       if (!r.ok) { pwErrors[device] = true; return; }
@@ -627,9 +686,16 @@
       encryptedForDisk(d).some(({ device }) => !decryptedVolumes[device]),
     )?.device_id ?? null,
   );
+  // Volumes one password can be tried on. A volume that takes only the 48-digit
+  // recovery key is not one of them: that key is unique per volume, so feeding
+  // it the shared password would mark it "не подошёл" for a reason that has
+  // nothing to do with the password. It keeps its own field instead.
+  function sharedCandidates(): EncryptedVolume[] {
+    return encryptedOffered().filter((e) => e.unlockable && !needsRecoveryKey(e));
+  }
   // Volumes the shared password did not open: they need individual entry, so
   // say so rather than leaving "Дальше" greyed out with no explanation.
-  const sharedFailed = $derived(encryptedOffered().filter(({ device }) => pwErrors[device]));
+  const sharedFailed = $derived(sharedCandidates().filter(({ device }) => pwErrors[device]));
 
   function setSharedPw(value: string) {
     sharedInput.password = value;
@@ -639,7 +705,7 @@
     if (!sharedInput.password) return;
     sharedBusy = true;
     try {
-      for (const { device } of encryptedOffered()) {
+      for (const { device } of sharedCandidates()) {
         if (decryptedVolumes[device]) continue;
         pwInputs[device] = { password: sharedInput.password, remember: sharedInput.remember };
         await decrypt(device);
@@ -657,7 +723,7 @@
   // read. A 347 GiB BitLocker volume the user unchecked used to hold "Дальше"
   // greyed out on a bootable-copy disk, with no way forward but to type a
   // password for data nobody was going to touch.
-  function encryptedBlocking(): { device: string; label: string }[] {
+  function encryptedBlocking(): EncryptedVolume[] {
     return engine.disks
       .flatMap((d) => encryptedForDisk(d))
       .filter(({ device }) => job.sources.includes(device));
@@ -676,7 +742,14 @@
     // Name the volume: "расшифруйте зашифрованный том" is no help at all when
     // the screen shows two of them and one is already unlocked.
     const locked = encryptedBlocking().find(({ device }) => !decryptedVolumes[device]);
-    if (locked) return `Введите пароль для тома «${locked.label}»`;
+    // A volume with nothing we can type is not waiting for a password: telling
+    // the user to enter one is a dead end, since no field is shown for it.
+    if (locked) {
+      if (!locked.unlockable) return `Том «${locked.label}» открыть нечем — снимите с него галочку`;
+      return needsRecoveryKey(locked)
+        ? `Введите ключ восстановления для тома «${locked.label}»`
+        : `Введите пароль для тома «${locked.label}»`;
+    }
     if (!job.dest_folder.trim()) return 'Выберите папку назначения';
     return '';
   }
@@ -738,10 +811,14 @@
 {#snippet pwPanel(list: EncryptedVolume[], showShared: boolean)}
   <div class="pw-panel under-disk">
     <div class="pw-head">
-      <span>🔒 Зашифрованные тома — введите пароль для расшифровки</span>
+      <span>
+        🔒 Зашифрованные тома — {list.every(needsRecoveryKey)
+          ? 'введите ключ восстановления'
+          : 'введите пароль для расшифровки'}
+      </span>
       <!-- One toggle for the whole screen: it lives next to the single shared
            prompt, not once per disk panel. -->
-      {#if showShared && encryptedOffered().length > 1}
+      {#if showShared && sharedCandidates().length > 1}
         <label class="pw-shared-tgl" title="Один и тот же пароль у всех зашифрованных томов — ввести его один раз и расшифровать все">
           <input type="checkbox" bind:checked={sharedPw} /> Общий пароль
         </label>
@@ -776,20 +853,33 @@
     {/if}
 
     {#each list as e (e.device)}
-      <div class="pw-row" class:done={!!decryptedVolumes[e.device]}>
-        <span class="pw-vol" title={e.device}>{e.label}</span>
+      <!-- A volume asking for the 48-digit key gets two lines: the question on
+           its own, the answer under it. On one line the label, the words "ключ
+           восстановления", a field wide enough to type into and two controls do
+           not fit — the "Расшифровать" button was pushed off the panel. -->
+      {@const stacked = needsRecoveryKey(e) && !decryptedVolumes[e.device] && e.unlockable}
+      <div
+        class="pw-row"
+        class:done={!!decryptedVolumes[e.device]}
+        class:stacked
+      >
+        {#if stacked}
+          <div class="pw-ask">{e.label}, введите ключ восстановления:</div>
+        {:else}
+          <span class="pw-vol" title={e.device}>{e.label}</span>
+        {/if}
         {#if !e.unlockable && !decryptedVolumes[e.device]}
           <!-- Asking for a password a volume does not have, and then calling
                it wrong, is not an error message — it is the wrong question.
                The volume's own metadata says what it does have. -->
           <span class="pw-nokey">
-            Открыть нечем: {e.methods.length ? e.methods.join(', ') : 'способ неизвестен'}.
-            Own Backup умеет пароль и ключ восстановления — снимите блокировку в Windows
-            или исключите том из копии.
+            Открыть нечем: {e.methods.join(', ')}. Own Backup открывает том паролем
+            или ключом восстановления — снимите блокировку в системе или исключите
+            том из копии.
           </span>
         {:else if decryptedVolumes[e.device]}
           <span class="pw-done">✓ Расшифровано</span>
-        {:else if sharedPw}
+        {:else if sharedPw && !needsRecoveryKey(e)}
           <!-- One prompt for all: the per-volume row is only a status line. -->
           <span class="pw-wait">
             {#if decrypting === e.device}Расшифровка…
@@ -797,38 +887,56 @@
             {:else}Ожидает общего пароля{/if}
           </span>
         {:else}
-          <PasswordField
-            value={pwInputs[e.device]?.password ?? ''}
-            oninput={(v) => setPw(e.device, v)}
-            placeholder={e.methods.includes('пароль')
-              ? 'Пароль'
-              : e.methods.length
-                ? e.methods[0]
-                : 'Пароль'}
-            onenter={() => {
-              if (decrypting !== e.device && pwInputs[e.device]?.password) decrypt(e.device);
-            }}
-            invalid={pwErrors[e.device]}
-          />
-          <label class="pw-remember">
-            <input
-              type="checkbox"
-              checked={pwInputs[e.device]?.remember ?? false}
-              onchange={(ev) => setRemember(e.device, (ev.target as HTMLInputElement).checked)}
-            /> Запомнить
-          </label>
-          <button
-            type="button"
-            class="btn small primary"
-            onclick={() => decrypt(e.device)}
-            disabled={decrypting === e.device || !pwInputs[e.device]?.password}
-          >{decrypting === e.device ? 'Расшифровка…' : 'Расшифровать'}</button>
+          <!-- The entry line: the field takes every spare pixel, the two
+               controls keep their width at the right edge. It is a row of its
+               own when stacked; otherwise `display: contents` dissolves the
+               wrapper and the three controls sit in the parent row as before. -->
+          <div class="pw-line">
+            <PasswordField
+              value={pwInputs[e.device]?.password ?? ''}
+              oninput={(v) => setPw(e.device, v)}
+              placeholder={promptFor(e)}
+              revealed={needsRecoveryKey(e)}
+              onenter={() => {
+                if (decrypting !== e.device && pwInputs[e.device]?.password) decrypt(e.device);
+              }}
+              invalid={pwErrors[e.device] || !!pwFormat[e.device]}
+            />
+            <label class="pw-remember">
+              <input
+                type="checkbox"
+                checked={pwInputs[e.device]?.remember ?? false}
+                onchange={(ev) => setRemember(e.device, (ev.target as HTMLInputElement).checked)}
+              /> Запомнить
+            </label>
+            <button
+              type="button"
+              class="btn small primary"
+              onclick={() => decrypt(e.device)}
+              disabled={decrypting === e.device || !pwInputs[e.device]?.password}
+            >{decrypting === e.device ? 'Расшифровка…' : 'Расшифровать'}</button>
+          </div>
         {/if}
       </div>
-      {#if pwErrors[e.device] && !sharedPw}
-        <div class="pw-err">Пароль не подходит</div>
+      {#if pwFormat[e.device]}
+        <div class="pw-err">{pwFormat[e.device]}</div>
+      {:else if pwErrors[e.device] && !sharedPw}
+        <div class="pw-err">
+          {needsRecoveryKey(e) ? 'Ключ восстановления не подходит этому тому' : 'Пароль не подходит'}
+        </div>
       {/if}
     {/each}
+    {#if list.some(needsRecoveryKey)}
+      <!-- Where to get the key, since the answer is on the machine the user is
+           standing at — but in the system they are not currently running. -->
+      <div class="pw-hint">
+        У системного тома пароля нет — его открывает только 48-значный ключ
+        восстановления. Узнать его в работающей Windows:
+        <code>manage-bde -protectors -get C:</code> — либо на странице учётной
+        записи Microsoft, в AD/Intune, или с распечатки. Вводить можно с дефисами,
+        пробелами или подряд.
+      </div>
+    {/if}
     <div class="pw-hint">
       Подходит пароль тома или 48-значный ключ восстановления. Пароль хранится в
       памяти до закрытия программы. «Запомнить» сохраняет его в защищённом
@@ -1301,6 +1409,18 @@
   .pw-row.done { justify-content: center; gap: 16px; }
   .pw-row.done .pw-vol { flex: 0 0 auto; }
   .pw-vol { flex: 0 0 auto; max-width: 240px; font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* Two lines for the 48-digit key: the question, then the answer. Everything
+     it needs — a long label, a field worth typing into, "Запомнить" and the
+     button — cannot share one line without pushing the button off the panel. */
+  .pw-row.stacked { flex-direction: column; align-items: stretch; gap: 8px; margin-bottom: 10px; }
+  .pw-ask { font-size: 13px; font-weight: 600; }
+  /* The entry line proper. In the one-line layout the wrapper dissolves and its
+     three children become items of `.pw-row` itself, exactly as before. */
+  .pw-line { display: contents; }
+  .pw-row.stacked .pw-line { display: flex; align-items: center; gap: 12px; }
+  /* The field takes the slack; the checkbox and button hold the right edge. */
+  .pw-row.stacked .pw-remember { margin-left: auto; }
+  .pw-row.stacked + .pw-err { margin-left: 0; }
   /* One row: label + wide password field + remember + button. The field grows
      to fill (see PasswordField); label, checkbox and button keep their
      natural width. */
@@ -1311,6 +1431,7 @@
   /* A volume we cannot open: a sentence in place of the password box. */
   .pw-nokey { flex: 1 1 auto; font-size: 12px; color: var(--text-muted); line-height: 1.4; }
   .pw-hint { font-size: 12px; color: var(--text-muted); margin-top: 10px; }
+  .pw-hint code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11.5px; padding: 1px 5px; border-radius: 3px; background: rgba(127, 127, 127, 0.16); color: var(--head); }
   .btn:disabled { opacity: .5; cursor: default; }
   .seg-label { font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .seg-meta { position: relative; z-index: 1; font-size: 11px; color: var(--head); line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
