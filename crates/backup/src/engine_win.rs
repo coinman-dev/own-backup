@@ -616,8 +616,8 @@ fn backup_volume_inner(
     // For an encrypted source the map is built over the decrypting view and
     // returned boxed directly (no exclusions apply to a Linux volume).
     let mut luks_used: Option<Box<dyn UsedSectorMap>> = None;
-    /// NTFS внутри LUKS/BitLocker: карта держится типизированной, пока не
-    /// решится вопрос исключений — их вычитание перестраивает её.
+    // NTFS внутри LUKS/BitLocker: карта держится типизированной, пока не
+    // решится вопрос исключений — их вычитание перестраивает её.
     let mut enc_ntfs_map: Option<crate::ntfs_map::NtfsUsedMap> = None;
     // The filesystem actually found inside the volume. For a LUKS/BitLocker
     // source this is what is INSIDE the container, because that is what the
@@ -796,8 +796,8 @@ fn backup_volume_inner(
     // driver deletes them inside the finished image, so they vanish from the
     // catalog and their space is reclaimed — see `true_removal_win`.
     let mut removal_paths: Vec<crate::exclusions_win::ExcludedPath> = Vec::new();
-    /// Исключения решены ДО копии по $MFT — проход внутри образа не нужен:
-    /// исключённых данных в образе нет, осталось убрать записи из каталога.
+    // Исключения решены ДО копии по $MFT — проход внутри образа не нужен:
+    // исключённых данных в образе нет, осталось убрать записи из каталога.
     let mut pre_copy_exclusions = false;
     if let Some(map) = ntfs_map.as_mut() {
         if !req.exclusion_patterns.is_empty() {
@@ -1736,7 +1736,7 @@ struct PreparedPartition {
     /// Ключ и окно на диск для запертого BitLocker-тома. Читать такой том через
     /// его собственное устройство нельзя — оно отвечает 0x80310000 на всё.
     bitlocker: Option<BitLockerSource>,
-    /// Тот же том, но пароля нет: копируем шифротекстом через окно на диск.
+    /// Тот же том, но пароля нет: копируется шифротекстом через окно на диск.
     locked_window: Option<(String, u64, u64)>,
     /// The container's own header, captured so a restore can put the
     /// encryption back (D19). `None` when the partition was not encrypted or
@@ -1954,8 +1954,13 @@ fn prepare_partition_map(
     luks: &Option<crate::luks::LuksParams>,
     patterns_windows: &[String],
     patterns_linux: &[String],
-    tick: impl FnMut(u64) -> Result<()>,
+    // Источник заморожен (снимок VSS или офлайн на носителе) — только тогда
+    // можно разбирать сырые метаданные: том под записью для этого не годится.
+    frozen: bool,
+    mut tick: impl FnMut(u64) -> Result<()>,
 ) -> PreparedMap {
+    // Тик нужен двум путям подряд, поэтому отдаётся копией результата.
+    let mut tick_ok = |n: u64| tick(n);
     // NTFS/ReFS/FAT use the Windows masks; ext/btrfs/xfs use the Linux masks.
     let patterns = patterns_windows;
     let none = |fs: &str, map: Option<Box<dyn UsedSectorMap>>| PreparedMap {
@@ -1994,18 +1999,63 @@ fn prepare_partition_map(
         if let Ok(mut m) = NtfsUsedSectorMap::open(read_path, block_size) {
             let mut out = none("ntfs", None);
             if !patterns.is_empty() {
-                if let Ok(mut scan) = collect_excluded_ranges(read_path, m.cluster_size(), patterns, tick) {
-                    out.excluded_files = scan.files_excluded;
-                    out.excluded_bytes = scan.bytes_excluded;
-                    out.categories = Some(scan.categories);
-                    out.removal_paths = std::mem::take(&mut scan.paths);
-                    if !scan.ranges.is_empty() {
-                        m.apply_excluded_ranges(&scan.ranges);
-                        out.zero_ranges = std::mem::take(&mut scan.ranges);
-                    }
+                // Сначала по $MFT — как и в копии одного тома (B1): вдвое
+                // быстрее и не теряет pagefile.sys/swapfile.sys, которые обходу
+                // не открыть. Обход остаётся запасным: ReFS (у неё нет MFT),
+                // грязный том, неразобранная запись.
+                let mut mft_tick = |n: u64| tick_ok(n);
+                let fast = if frozen {
+                    scan_ntfs_exclusions_by_mft(read_path, patterns, &mut mft_tick)
                 } else {
-                    warn!(part = %read_path, "whole-disk: NTFS exclusion scan failed — keeping all files");
-                    out.skipped = Some("перечислить файлы NTFS не удалось".into());
+                    Err(OwnBackupError::Device(
+                        "источник не заморожен (нет снимка VSS) — читать $MFT нельзя".into(),
+                    ))
+                };
+                match fast {
+                    Ok(mft) => {
+                        out.excluded_files = mft.files_excluded;
+                        out.excluded_bytes = mft.bytes_excluded;
+                        out.categories = Some(mft.categories);
+                        out.removal_paths = mft
+                            .paths
+                            .iter()
+                            .map(|p| crate::exclusions_win::ExcludedPath {
+                                rel: p.rel.clone(),
+                                is_dir: p.is_dir,
+                                is_reparse: p.is_reparse,
+                            })
+                            .collect();
+                        info!(
+                            part = %read_path,
+                            files = mft.files_excluded,
+                            bytes = mft.bytes_excluded,
+                            kept = mft.kept.len(),
+                            "whole-disk: exclusions resolved from the MFT"
+                        );
+                        if !mft.ranges.is_empty() {
+                            m.apply_excluded_ranges(&mft.ranges);
+                            out.zero_ranges = mft.ranges;
+                        }
+                    }
+                    Err(e) => {
+                        warn!(part = %read_path, error = %e,
+                              "whole-disk: MFT scan unavailable — falling back to the directory walk");
+                        if let Ok(mut scan) =
+                            collect_excluded_ranges(read_path, m.cluster_size(), patterns, tick)
+                        {
+                            out.excluded_files = scan.files_excluded;
+                            out.excluded_bytes = scan.bytes_excluded;
+                            out.categories = Some(scan.categories);
+                            out.removal_paths = std::mem::take(&mut scan.paths);
+                            if !scan.ranges.is_empty() {
+                                m.apply_excluded_ranges(&scan.ranges);
+                                out.zero_ranges = std::mem::take(&mut scan.ranges);
+                            }
+                        } else {
+                            warn!(part = %read_path, "whole-disk: NTFS exclusion scan failed — keeping all files");
+                            out.skipped = Some("перечислить файлы NTFS не удалось".into());
+                        }
+                    }
                 }
             } else {
                 out.skipped = Some(NO_PATTERNS.into());
@@ -2592,6 +2642,9 @@ fn backup_disk_inner(
                 &luks,
                 &req.exclusion_patterns_windows,
                 &req.exclusion_patterns_linux,
+                // Снимок этого раздела взят, или мы на носителе и система
+                // офлайн — только тогда сырые метаданные не движутся.
+                vss.is_some() || own_backup_common::media_mode::is_media_mode(),
                 prepare_tick,
             ),
         };

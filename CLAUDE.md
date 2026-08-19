@@ -121,13 +121,37 @@ tested on a Windows host — cross-compilation validates compilation only.
   faster for structural reasons that will not change: zstd means fewer physical
   bytes, and its 64 KiB CoW clusters amplify scattered MFT writes 16× less than
   the VHDX child's 1 MiB blocks (delete: 0.7 s vs 9 s).
-  **The in-image pass itself is being replaced (plan 2026-08-19):** a second
-  live run (128 GiB volume) spent 16 min just SCANNING the image tree-walk-style
-  and the user cancelled it. The fix — resolve exclusions BEFORE the copy on
-  every Windows FS, Acronis-style: read the MFT sequentially over the decrypted
-  window, subtract matched extents from the used map, so excluded data is never
-  copied and the in-image zero pass disappears (mount-&-delete stays — it costs
-  8 s): `.ai/exclusions-before-copy-plan_2026-08-19.md` (B0–B6).
+  **DONE 2026-08-20 — the in-image pass is now the FALLBACK, not the main road**
+  (`.ai/exclusions-before-copy-plan_2026-08-19.md`, B0–B3 + B1). Exclusions are
+  resolved BEFORE the copy by reading `$MFT` (`backup/src/ntfs_scan.rs`, crate
+  `ntfs` 0.4): matched extents are subtracted from the used map
+  (`ntfs_map::build_ntfs_used_map_excl`), so excluded data is never read, never
+  written, and there is nothing to zero afterwards; only the catalog entries are
+  deleted (`remove_excluded_from_image`, the same pass unlocked volumes use).
+  This is what Acronis does — its file filters stop working when the MFT/run
+  list/bitmap is corrupt (kb.acronis.com/content/36993) — except we also delete
+  the entries, so no ghosts.
+  **The same reader serves every source**: a mounted volume (or its VSS snapshot
+  device) and a locked BitLocker volume through its decrypted window. The
+  directory walk stays as the fallback and picks itself when the MFT cannot be
+  trusted: ReFS (no MFT), a dirty volume (`IS_DIRTY`), an unparsed record, or a
+  source that is NOT frozen — no VSS snapshot and not media mode, because raw
+  metadata of a volume being written cannot be parsed safely.
+  Measured, on the same data: tree walk 45–52 s on a live SSD volume and 959 s
+  inside an image on SMR, versus 15–28 s for the MFT read. Verified against
+  Windows itself (`FSCTL_GET_RETRIEVAL_POINTERS` via `own-backup-cli
+  scan-exclusions --method both`): **byte-for-byte on every common file**, twice
+  — 17 889/17 890 on the image (the one diff was a live database) and
+  17 958/17 958 on a live volume. The MFT road also excludes what the walk
+  cannot: `pagefile.sys`, `swapfile.sys` and `DumpStack.log.tmp` refuse to open
+  on a live volume ("file in use") and the walk left 176 MiB of them in the copy.
+  Acceptance of an exclusion run is by CLUSTERS, never by grepping the image for
+  a marker string: on a real run both the excluded file and the control file
+  turned out NTFS-COMPRESSED, so the plaintext was in neither, and a
+  grep-based test would have passed for the wrong reason. Use
+  `scripts/ntfs-mft-probe.py IMAGE --check NAME` — it finds the file in the
+  image's own MFT and reports whether the record is live and how many of its
+  clusters carry data (excluded: deleted / 0; control: live / all).
   Any change that edits foreign FS metadata must pass BOTH fsck-clean
   (`btrfs check --check-data-csum` / `e2fsck -fn` / `xfs_repair -n`) AND a
   mount-and-write acceptance before shipping — static checks alone once let a
