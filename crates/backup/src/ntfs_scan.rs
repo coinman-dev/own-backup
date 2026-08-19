@@ -149,6 +149,22 @@ pub fn scan_mft<T>(fs: &mut T, patterns: &[String]) -> Result<MftScan>
 where
     T: Read + Seek,
 {
+    scan_mft_with(fs, patterns, |_, _| {})
+}
+
+/// То же, но с докладом о ходе: `tick(прочитано, всего)`.
+///
+/// Без него проход молчит две с лишним минуты на томе в 128 ГиБ (замер на
+/// носителе 2026-08-19: 1 079 808 записей за 2 мин 17 с), и человек за экраном
+/// видит пустую полосу и решает, что программа повисла. Так и было.
+pub fn scan_mft_with<T>(
+    fs: &mut T,
+    patterns: &[String],
+    mut tick: impl FnMut(u64, u64),
+) -> Result<MftScan>
+where
+    T: Read + Seek,
+{
     let parsed = parse_patterns(patterns);
     let mut scan = MftScan::default();
     if parsed.is_empty() {
@@ -188,6 +204,10 @@ where
     let mut entries: HashMap<u64, Entry> = HashMap::with_capacity(total as usize / 2);
     for n in 0..total {
         scan.records_scanned += 1;
+        // Раз в 4096 записей: на миллионе это 260 сообщений, а не миллион.
+        if scan.records_scanned % 4096 == 0 {
+            tick(scan.records_scanned, total);
+        }
         let file = match ntfs.file(fs, n) {
             Ok(f) => f,
             // Мёртвая или неполная запись — таких в MFT штатно много.
@@ -420,7 +440,9 @@ where
 
         match reason {
             Some(r) => {
-                warn!(file = %rel, reason = r.as_str(), "MFT scan: данные остаются в копии");
+                // Пофайлово — в debug: таких на живом томе под сотню, и в логе
+                // они забивают всё остальное. Наружу идёт одна сводка ниже.
+                debug!(file = %rel, reason = r.as_str(), "MFT scan: данные остаются в копии");
                 scan.kept.push((rel, r));
             }
             None => {
@@ -437,6 +459,24 @@ where
         warn!(
             records = unresolved,
             "MFT scan: путь не построен — эти записи правилами НЕ проверялись"
+        );
+    }
+    if !scan.kept.is_empty() {
+        // Сводка по причинам: сколько совпавших файлов остаются в копии данными
+        // (запись из каталога у них всё равно удаляется). Подробности — в debug.
+        let mut by_reason: std::collections::BTreeMap<&str, usize> = Default::default();
+        for (_, r) in &scan.kept {
+            *by_reason.entry(r.as_str()).or_default() += 1;
+        }
+        let summary = by_reason
+            .iter()
+            .map(|(r, n)| format!("{r}: {n}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        warn!(
+            files = scan.kept.len(),
+            reasons = %summary,
+            "MFT scan: у части совпавших файлов данные остаются в копии"
         );
     }
 

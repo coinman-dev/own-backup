@@ -832,7 +832,20 @@ fn backup_volume_inner(
                 // Крейт читает запись MFT по килобайту; без кэша это миллион
                 // обращений к носителю (замер: 313 с против 74 с).
                 let mut buffered = crate::ntfs_scan::BufferedVolume::new(cur, 4 << 20, 6);
-                crate::ntfs_scan::scan_mft(&mut buffered, &req.exclusion_patterns)
+                // Тот же канал «Подготовка: поиск исключаемых файлов», что у
+                // обхода дерева: на 128 ГиБ проход идёт больше двух минут, и
+                // молчащая полоса читается как зависание.
+                let mut report = |n: u64, total: u64| {
+                    let _ = progress(&BackupProgress {
+                        backup_id: "prepare".into(),
+                        status: BackupStatus::Running,
+                        blocks_done: n,
+                        blocks_total: total,
+                        bytes_written: 0,
+                        speed_bps: 0,
+                    });
+                };
+                crate::ntfs_scan::scan_mft_with(&mut buffered, &req.exclusion_patterns, &mut report)
             };
             match scan_result {
                 Ok(scan) => {
@@ -1663,6 +1676,11 @@ struct PreparedPartition {
     device: String,
     read_path: String,
     luks: Option<crate::luks::LuksParams>,
+    /// Ключ и окно на диск для запертого BitLocker-тома. Читать такой том через
+    /// его собственное устройство нельзя — оно отвечает 0x80310000 на всё.
+    bitlocker: Option<BitLockerSource>,
+    /// Тот же том, но пароля нет: копируем шифротекстом через окно на диск.
+    locked_window: Option<(String, u64, u64)>,
     /// The container's own header, captured so a restore can put the
     /// encryption back (D19). `None` when the partition was not encrypted or
     /// the header could not be read.
@@ -1773,6 +1791,88 @@ struct PreparedMap {
 /// yet acted on; LUKS-decrypted volumes are captured whole.
 ///
 /// `tick` reports "prepare"-phase progress (and can cancel by returning `Err`).
+/// Карта и исключения для раздела, который Windows не монтирует: NTFS внутри
+/// BitLocker, прочитанная через расшифрованное окно.
+///
+/// Исключения решаются ДО копии, по $MFT (план exclusions-before-copy, B3):
+/// перечислить файлы обходом дерева тут нельзя — тома для Windows не
+/// существует, — а по MFT можно, и тогда исключённые кластеры просто не
+/// попадают в карту.
+fn prepare_encrypted_partition_map(
+    mut src: Box<dyn crate::fat_map::RawVolume + Send>,
+    block_size: u32,
+    patterns: &[String],
+    mut tick: impl FnMut(u64, u64) -> Result<()>,
+) -> PreparedMap {
+    let mut out = PreparedMap {
+        map: None,
+        filesystem: "NTFS".into(),
+        zero_ranges: ByteRanges::new(),
+        patches: Vec::new(),
+        removal_paths: Vec::new(),
+        excluded_files: 0,
+        excluded_bytes: 0,
+        categories: None,
+        skipped: None,
+    };
+
+    let scan = if patterns.is_empty() {
+        out.skipped = Some(NO_PATTERNS.into());
+        None
+    } else {
+        let cur = crate::ntfs_scan::RawVolumeCursor::new(src.as_mut());
+        let mut buffered = crate::ntfs_scan::BufferedVolume::new(cur, 4 << 20, 6);
+        match crate::ntfs_scan::scan_mft_with(&mut buffered, patterns, |n, total| {
+            let _ = tick(n, total);
+        }) {
+            Ok(scan) => {
+                info!(
+                    files = scan.files_excluded,
+                    bytes = scan.bytes_excluded,
+                    kept = scan.kept.len(),
+                    paths = scan.paths.len(),
+                    records = scan.records_scanned,
+                    "exclusions resolved from the MFT BEFORE the copy"
+                );
+                Some(scan)
+            }
+            Err(e) => {
+                // Грязный том, не NTFS внутри, битая запись — копия делается
+                // целиком, и об этом сказано вслух.
+                warn!(error = %e, "MFT scan failed — this partition keeps every file");
+                out.skipped = Some(format!("перечисление по MFT не удалось: {e}"));
+                None
+            }
+        }
+    };
+
+    let excluded = scan.as_ref().map(|s| &s.ranges).filter(|r| !r.is_empty());
+    match crate::ntfs_map::build_ntfs_used_map_excl(src.as_mut(), block_size, excluded) {
+        Ok(map) => out.map = Some(Box::new(map)),
+        Err(e) => {
+            warn!(error = %e, "no NTFS map over the decrypted partition — copying every block");
+            out.skipped.get_or_insert_with(|| format!("карта NTFS не построена: {e}"));
+            return out;
+        }
+    }
+    if let Some(scan) = scan {
+        out.excluded_files = scan.files_excluded;
+        out.excluded_bytes = scan.bytes_excluded;
+        out.categories = Some(scan.categories);
+        out.removal_paths = scan
+            .paths
+            .iter()
+            .map(|p| crate::exclusions_win::ExcludedPath {
+                rel: p.rel.clone(),
+                is_dir: p.is_dir,
+                is_reparse: p.is_reparse,
+            })
+            .collect();
+        out.zero_ranges = scan.ranges;
+    }
+    out
+}
+
 fn prepare_partition_map(
     read_path: &str,
     block_size: u32,
@@ -2269,16 +2369,61 @@ fn backup_disk_inner(
         // we opened and captured in the clear.
         let mut probe = WinRawDevice::open_read(&read_path)?;
         let mut header = vec![0u8; 4096];
-        probe.read_at(0, &mut header)?;
-        let container = container_kind(&header);
+        // Заблокированный BitLocker-том отвечает отказом на ЛЮБОЕ чтение через
+        // своё устройство (0x80310000) — включая это. Раньше здесь стоял `?`, и
+        // копия целого диска падала на первом же таком разделе: до 2026-08-19
+        // мастер их просто не выбирал, и ветка ни разу не встречалась вживую.
+        // Отказ — не ошибка, а ответ: том зашифрован и заперт, читать его надо
+        // через окно на диск, как это давно делает копия одного тома.
+        let locked = match probe.read_at(0, &mut header) {
+            Ok(()) => false,
+            Err(e) if is_bitlocker_locked(&e) => {
+                info!(part = p.part_index, "partition is a locked BitLocker volume");
+                true
+            }
+            Err(e) => return Err(e),
+        };
+        let container = if locked {
+            Some(own_backup_common::image::VolumeEncryptionKind::BitLocker)
+        } else {
+            container_kind(&header)
+        };
         // LUKS unlock (decrypted data area is captured).
         let luks = match &p.passphrase {
-            Some(pass) if crate::luks::is_luks(&header) => {
+            Some(pass) if !locked && crate::luks::is_luks(&header) => {
                 Some(crate::luks::open_luks(&mut probe, pass.as_bytes())?)
             }
             _ => None,
         };
-        let device_len = probe.length();
+        // BitLocker: ключ и окно на диск, за которым лежит шифротекст. Пароля
+        // нет — раздел всё равно копируется, но как есть, шифротекстом.
+        let bitlocker = match &p.passphrase {
+            Some(pass) if locked || crate::bitlocker::is_bitlocker(&header) => {
+                open_bitlocker_source(&read_path, pass)?
+            }
+            _ => None,
+        };
+        // Экстент тома нужен и без ключа: у запертого тома нельзя спросить даже
+        // длину через его устройство.
+        let locked_extent = if locked && bitlocker.is_none() {
+            let extents = crate::volume_win::volume_extents(&read_path);
+            match extents.as_slice() {
+                [e] => Some((format!(r"\\.\PhysicalDrive{}", e.disk_number), e.offset, e.length)),
+                _ => {
+                    return Err(OwnBackupError::Device(format!(
+                        "{read_path}: запертый том занимает {} экстентов — такой не поддерживается",
+                        extents.len()
+                    )))
+                }
+            }
+        } else {
+            None
+        };
+        let device_len = match (&bitlocker, &locked_extent) {
+            (Some(b), _) => b.length,
+            (None, Some((_, _, len))) => *len,
+            _ => probe.length(),
+        };
         drop(probe);
         // The container's own header, kept verbatim so a restore can rebuild
         // it byte-for-byte (D19). A failure here costs the ability to restore
@@ -2328,14 +2473,53 @@ fn backup_disk_inner(
                 speed_bps: 0,
             })
         };
-        let pm = prepare_partition_map(
-            &read_path,
-            req.block_size,
-            &luks,
-            &req.exclusion_patterns_windows,
-            &req.exclusion_patterns_linux,
-            prepare_tick,
-        );
+        let pm = match &bitlocker {
+            // Запертый том, ключ у нас есть: карта и исключения снимаются с
+            // расшифрованного окна, ровно как в копии одного тома.
+            Some(b) => prepare_encrypted_partition_map(
+                Box::new(crate::bitlocker::BitLockerVolume::new(
+                    Box::new(b.window()?),
+                    b.params.clone(),
+                )),
+                req.block_size,
+                &req.exclusion_patterns_windows,
+                // Своя обёртка: скану есть что сказать про общее число записей,
+                // и полоса «N из M» честнее бегущего счётчика.
+                |done, total| {
+                    progress(&BackupProgress {
+                        backup_id: "prepare".into(),
+                        status: BackupStatus::Running,
+                        blocks_done: done,
+                        blocks_total: total,
+                        bytes_written: 0,
+                        speed_bps: 0,
+                    })
+                },
+            ),
+            None if locked => PreparedMap {
+                map: None, // ключа нет — копируем шифротекст целиком
+                filesystem: "BitLocker (заперт)".into(),
+                zero_ranges: ByteRanges::new(),
+                patches: Vec::new(),
+                removal_paths: Vec::new(),
+                excluded_files: 0,
+                excluded_bytes: 0,
+                categories: None,
+                skipped: Some(
+                    "том BitLocker заперт и пароль не введён — копируется как есть, \
+                     шифротекстом; правила исключений к нему не применялись"
+                        .into(),
+                ),
+            },
+            None => prepare_partition_map(
+                &read_path,
+                req.block_size,
+                &luks,
+                &req.exclusion_patterns_windows,
+                &req.exclusion_patterns_linux,
+                prepare_tick,
+            ),
+        };
         let used = pm.map.unwrap_or_else(|| Box::new(AllUsedMap::new(volume_len.div_ceil(bs))));
         excluded_files += pm.excluded_files;
         excluded_bytes += pm.excluded_bytes;
@@ -2358,6 +2542,8 @@ fn backup_disk_inner(
             device: source,
             read_path,
             luks,
+            bitlocker,
+            locked_window: locked_extent,
             volume_len,
             part_offset,
             filesystem: pm.filesystem,
@@ -2538,10 +2724,21 @@ fn backup_disk_inner(
     //    the meta/tail blocks (written separately) are not copied.
     let mut regions: Vec<DiskRegion> = Vec::new();
     for prep in &prepared {
-        let dev = WinRawDevice::open_read(&prep.read_path)?;
-        let reader: Box<dyn crate::fat_map::RawVolume + Send> = match &prep.luks {
-            Some(l) => Box::new(crate::decrypt::DecryptingVolume::new(Box::new(dev), l.clone())),
-            None => Box::new(dev),
+        let reader: Box<dyn crate::fat_map::RawVolume + Send> = match (&prep.bitlocker, &prep.locked_window) {
+            // Расшифрованное окно на диск: том заперт, его устройство молчит.
+            (Some(b), _) => Box::new(crate::bitlocker::BitLockerVolume::new(
+                Box::new(b.window()?),
+                b.params.clone(),
+            )),
+            // Заперт и без ключа — тот же путь, но без расшифровки.
+            (None, Some((disk, off, len))) => Box::new(disk_window(disk, *off, *len)?),
+            (None, None) => {
+                let dev = WinRawDevice::open_read(&prep.read_path)?;
+                match &prep.luks {
+                    Some(l) => Box::new(crate::decrypt::DecryptingVolume::new(Box::new(dev), l.clone())),
+                    None => Box::new(dev),
+                }
+            }
         };
         regions.push(DiskRegion {
             part_offset: prep.part_offset,
