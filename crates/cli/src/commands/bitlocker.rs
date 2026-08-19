@@ -43,11 +43,21 @@ pub struct BitlockerArgs {
     /// it decrypts is a filesystem; prints no key material.
     #[arg(long)]
     pub unlock: bool,
+
+    /// Отдать разблокировку самой Windows (`manage-bde`), а не читать FVE
+    /// самим: только так виден ReFS внутри контейнера и шифры вне AES-XTS.
+    /// Диск на время закрывается на запись — смонтированная ФС пишет сама.
+    #[arg(long)]
+    pub windows_unlock: bool,
 }
 
 #[cfg(target_os = "windows")]
 pub async fn run(args: BitlockerArgs) -> Result<()> {
     use own_backup_inventory::DiskInventory;
+
+    if args.windows_unlock {
+        return windows_unlock(&args).await;
+    }
 
     let mut found = Vec::new();
     let inventory = own_backup_inventory::WindowsInventory::new()?;
@@ -290,6 +300,120 @@ fn ask_passphrase(prompt: &str) -> std::io::Result<String> {
     println!();
     read?;
     Ok(line.trim_end_matches(['\r', '\n']).to_string())
+}
+
+
+/// Стенд этапа B5: проверить, умеет ли ЭТА система открыть том сама.
+///
+/// Проверяется по одному: есть ли `manage-bde` (он приходит с компонентом
+/// WinPE-SecureStartup, а носитель у нас на базе WinRE — там он, скорее всего,
+/// уже есть); встаёт ли запрет записи на диск; открывается ли том; что
+/// оказалось внутри. Запрет снимается всегда — страж делает это в `Drop`.
+#[cfg(target_os = "windows")]
+async fn windows_unlock(args: &BitlockerArgs) -> Result<()> {
+    use own_backup_backup::windows_unlock_win as wu;
+
+    let Some(volume) = args.volume.clone() else {
+        return Err(own_backup_common::OwnBackupError::Config(
+            "укажите том: --volume G:".into(),
+        ));
+    };
+    let volume = volume.trim_end_matches('\\').to_string();
+
+    match wu::manage_bde_path() {
+        Some(p) => println!("manage-bde:   {}", p.display()),
+        None => {
+            println!("manage-bde:   НЕТ В ЭТОЙ СИСТЕМЕ");
+            println!();
+            println!("Значит носитель собран без компонента WinPE-SecureStartup, и");
+            println!("разблокировка силами Windows тут невозможна. Своё чтение FVE");
+            println!("продолжает работать — оно и открывает NTFS внутри BitLocker.");
+            return Ok(());
+        }
+    }
+
+    // Диск, на котором лежит том: нужен, чтобы закрыть его на запись.
+    let extents = own_backup_backup::volume_win::volume_extents(&volume);
+    let [extent] = extents.as_slice() else {
+        return Err(own_backup_common::OwnBackupError::Device(format!(
+            "{volume}: том занимает {} экстентов — такой стенд их не поддерживает",
+            extents.len()
+        )));
+    };
+    println!("Том:          {volume} (диск {}, смещение {})", extent.disk_number, extent.offset);
+
+    // Системный диск не трогаем даже так: запрет записи на него — не то, что
+    // можно ставить между делом.
+    if own_backup_restore::guard::system_disk_number() == Some(extent.disk_number) {
+        return Err(own_backup_common::OwnBackupError::Config(
+            "это системный диск — запрет записи на него ставить нельзя".into(),
+        ));
+    }
+
+    // Тот же ввод без эха, что у обычной разблокировки, — своя реализация уже
+    // есть, и она умеет молчать в консоли.
+    let secret = ask_passphrase("Ключ восстановления или пароль тома: ")
+        .map_err(|e| own_backup_common::OwnBackupError::Config(format!("ввод: {e}")))?;
+    let secret = secret.trim().to_string();
+    let digits: String = secret.chars().filter(|c| c.is_ascii_digit()).collect();
+    let looks_like_key = digits.len() == 48 && secret.chars().all(|c| c.is_ascii_digit() || c == '-' || c == ' ');
+
+    let guard = wu::ReadOnlyDisk::arm(extent.disk_number)?;
+    println!("Диск закрыт на запись — монтирование ничего в нём не изменит.");
+
+    let dashed = digits_with_dashes(&digits);
+    let outcome = wu::unlock_with_windows(
+        &volume,
+        if looks_like_key {
+            wu::Secret::RecoveryPassword(&dashed)
+        } else {
+            wu::Secret::Passphrase(&secret)
+        },
+    );
+    match &outcome {
+        Ok(()) => println!("\n✓ Windows открыла том."),
+        Err(e) => println!("\n✗ {e}"),
+    }
+
+    // Что теперь видно на этом томе.
+    if outcome.is_ok() {
+        match own_backup_backup::win_device::WinRawDevice::open_read(&format!("\\\\.\\{volume}")) {
+            Ok(mut dev) => {
+                let mut boot = vec![0u8; 4096];
+                match own_backup_backup::fat_map::RawVolume::read_at(&mut dev, 0, &mut boot) {
+                    Ok(()) => {
+                        let fs = if &boot[3..11] == b"NTFS    " {
+                            "NTFS"
+                        } else if &boot[3..11] == b"ReFS\0\0\0\0" || &boot[0..8] == b"\0\0\0ReFS\0" {
+                            "ReFS"
+                        } else if &boot[3..11] == b"EXFAT   " {
+                            "exFAT"
+                        } else {
+                            "неизвестна"
+                        };
+                        println!("Файловая система внутри: {fs}");
+                    }
+                    Err(e) => println!("Том открылся, но читать его не даёт: {e}"),
+                }
+            }
+            Err(e) => println!("Устройство тома не открылось: {e}"),
+        }
+    }
+
+    guard.disarm()?;
+    println!("Запрет записи снят. Том остался открытым до перезагрузки.");
+    outcome
+}
+
+/// `123456789012…` → `123456-789012-…`, как ждёт manage-bde.
+#[cfg(target_os = "windows")]
+fn digits_with_dashes(digits: &str) -> String {
+    digits
+        .as_bytes()
+        .chunks(6)
+        .map(|c| String::from_utf8_lossy(c).to_string())
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 #[cfg(not(target_os = "windows"))]

@@ -554,6 +554,41 @@ impl WinRawDevice {
         Ok(())
     }
 
+    /// Запретить запись на диск до конца сессии (реестр не трогается).
+    ///
+    /// Нужно перед тем, как отдать том Windows на разблокировку: она его
+    /// смонтирует, а смонтированная файловая система пишет сама — проигрывает
+    /// журнал, обновляет метки времени, заводит `System Volume Information`.
+    /// Для источника копии это недопустимо: мы пришли его читать, а не менять.
+    /// Атрибут снимается [`Self::clear_read_only_this_session`] — или сам, при
+    /// перезагрузке, потому что `Persist` не выставлен.
+    pub fn set_read_only_this_session(&self) -> Result<()> {
+        let attrs = SET_DISK_ATTRIBUTES {
+            Version: std::mem::size_of::<SET_DISK_ATTRIBUTES>() as u32,
+            Persist: BOOLEAN(0),
+            Attributes: DISK_ATTRIBUTE_READ_ONLY as u64,
+            AttributesMask: DISK_ATTRIBUTE_READ_ONLY as u64,
+            ..Default::default()
+        };
+        self.set_disk_attributes(&attrs, "read-only")?;
+        debug!(path = %self.path, "Диск переведён в режим только чтения (на эту сессию)");
+        Ok(())
+    }
+
+    /// Снять запрет записи, выставленный [`Self::set_read_only_this_session`].
+    pub fn clear_read_only_this_session(&self) -> Result<()> {
+        let attrs = SET_DISK_ATTRIBUTES {
+            Version: std::mem::size_of::<SET_DISK_ATTRIBUTES>() as u32,
+            Persist: BOOLEAN(0),
+            Attributes: 0,
+            AttributesMask: DISK_ATTRIBUTE_READ_ONLY as u64,
+            ..Default::default()
+        };
+        self.set_disk_attributes(&attrs, "writable")?;
+        debug!(path = %self.path, "Запрет записи с диска снят");
+        Ok(())
+    }
+
     /// Bring the disk online for THIS session only (registry state untouched,
     /// read-only flag untouched): volumes surface and mount. Used when the
     /// user mounts a backup image to browse it — backup attaches keep the

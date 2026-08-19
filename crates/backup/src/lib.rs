@@ -104,6 +104,8 @@ pub mod winre_find;
 pub mod volume_win;
 #[cfg(target_os = "windows")]
 pub mod win_device;
+#[cfg(target_os = "windows")]
+pub mod windows_unlock_win;
 
 pub use block_reader::{BlockReader, MockBlockReader};
 pub use chains::{delete_chain, list_job_chains, plan_retention, Chain, RetentionRules};
