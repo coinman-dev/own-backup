@@ -12,6 +12,7 @@ pub mod mount;
 pub mod preflight;
 pub mod restore;
 pub mod restore_disk;
+pub mod scan_exclusions;
 pub mod service;
 pub mod unmount;
 pub mod verify;

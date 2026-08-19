@@ -50,6 +50,7 @@ ARTIFACT_DIRS=(
   "crates/gui/frontend/.vite"
   "crates/gui/frontend/.vite-temp"
   "log"
+  "scripts/__pycache__"
 )
 
 # Собранные бинарники: лежат в каталогах, которые сами трогать нельзя
@@ -63,7 +64,7 @@ BUILT_BIN_GLOBS=(
 )
 
 # Мусор ОС и редактора (ищется по всему дереву).
-JUNK_GLOBS=("*.DS_Store" "Thumbs.db" "*Zone.Identifier" "*.swp" "*.swo" "*.orig" "*.rej" "*~" "*.rs.bk")
+JUNK_GLOBS=("*.DS_Store" "Thumbs.db" "*Zone.Identifier" "*.swp" "*.swo" "*.orig" "*.rej" "*~" "*.rs.bk" "*.pyc")
 
 # Образы и тестовые данные: в архив не идут никогда, но и не удаляются —
 # среди них может оказаться копия, ради которой всё и затевалось.

@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 /// been replaced, and the option it was told to use "did not exist". `-V` and
 /// every diagnostic command print it, so "which binary is this" is a question
 /// with an answer.
-pub const BUILD_TAG: &str = "2026-08-05g";
+pub const BUILD_TAG: &str = "2026-08-19a";
 const VERSION_LINE: &str = concat!(env!("CARGO_PKG_VERSION"), " (сборка 2026-08-05g)");
 
 #[derive(Parser)]
@@ -42,6 +42,10 @@ enum Commands {
     Backup(commands::backup::BackupArgs),
     /// What a BitLocker volume says about itself (read-only, no password)
     Bitlocker(commands::bitlocker::BitlockerArgs),
+
+    /// Прогнать сканер исключений по тому и сказать, сколько он занял
+    /// (стенд этапов B0/B1 плана исключений-до-копии; ничего не меняет).
+    ScanExclusions(commands::scan_exclusions::ScanExclusionsArgs),
 
     /// Restore from a backup
     Restore(commands::restore::RestoreArgs),
@@ -140,6 +144,7 @@ async fn main() {
         Commands::Preflight(args) => commands::preflight::run(args).await,
         Commands::Backup(args) => commands::backup::run(args).await,
         Commands::Bitlocker(args) => commands::bitlocker::run(args).await,
+        Commands::ScanExclusions(args) => commands::scan_exclusions::run(args).await,
         Commands::Restore(args) => commands::restore::run(args).await,
         Commands::RestoreDisk(args) => commands::restore_disk::run(args).await,
         Commands::FinalizeBoot(args) => commands::finalize_boot::run(args).await,

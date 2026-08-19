@@ -153,6 +153,12 @@ pub struct ExclusionScan {
     /// whose extents failed to resolve) — the driver deletes them all the
     /// same.
     pub paths: Vec<ExcludedPath>,
+    /// Per-file resolved extent bytes, filled only when the caller asks for it
+    /// (`scan-exclusions --list`). Diagnostics for the B0 comparison against
+    /// `scripts/ntfs-mft-probe.py`: the two methods agreed on the file set to
+    /// 0.26% and disagreed on the byte total by a third, and a per-file diff is
+    /// the only thing that says which one is lying.
+    pub file_bytes: Vec<(String, u64)>,
 }
 
 /// Walk `volume_read_path` (`\\.\E:` or a VSS snapshot device path) and
@@ -164,7 +170,27 @@ pub fn collect_excluded_ranges(
     volume_read_path: &str,
     cluster_size: u32,
     patterns: &[String],
+    tick: impl FnMut(u64) -> Result<()>,
+) -> Result<ExclusionScan> {
+    collect_excluded_ranges_inner(volume_read_path, cluster_size, patterns, tick, false)
+}
+
+/// Same walk, but recording per-file byte totals (see `ExclusionScan::file_bytes`).
+pub fn collect_excluded_ranges_verbose(
+    volume_read_path: &str,
+    cluster_size: u32,
+    patterns: &[String],
+    tick: impl FnMut(u64) -> Result<()>,
+) -> Result<ExclusionScan> {
+    collect_excluded_ranges_inner(volume_read_path, cluster_size, patterns, tick, true)
+}
+
+fn collect_excluded_ranges_inner(
+    volume_read_path: &str,
+    cluster_size: u32,
+    patterns: &[String],
     mut tick: impl FnMut(u64) -> Result<()>,
+    collect_file_bytes: bool,
 ) -> Result<ExclusionScan> {
     let parsed = parse_patterns(patterns);
     let mut scan = ExclusionScan {
@@ -174,6 +200,7 @@ pub fn collect_excluded_ranges(
         bytes_excluded: 0,
         categories: CategorySizes::default(),
         paths: Vec::new(),
+        file_bytes: Vec::new(),
     };
     if parsed.is_empty() {
         scan.ranges.finalize();
@@ -235,6 +262,13 @@ pub fn collect_excluded_ranges(
                     Ok(bytes) => {
                         scan.files_excluded += 1;
                         scan.bytes_excluded += bytes;
+                        if collect_file_bytes {
+                            if let Some(rel) =
+                                child.to_string_lossy().strip_prefix(&root).map(str::to_string)
+                            {
+                                scan.file_bytes.push((rel, bytes));
+                            }
+                        }
                     }
                     Err(e) => {
                         warn!(
