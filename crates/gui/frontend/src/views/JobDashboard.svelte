@@ -255,7 +255,8 @@
         {#if progress}
           <span>
             {#if preparing}
-              {progress.blocks_done.toLocaleString('ru-RU')} объектов просмотрено
+              {progress.blocks_done.toLocaleString('ru-RU')} записей просмотрено
+              {#if progress.blocks_total > 0}из {progress.blocks_total.toLocaleString('ru-RU')}{/if}
             {:else if excluding}
               файлы удаляются и зануляются в готовой копии…
             {:else if finalizing}

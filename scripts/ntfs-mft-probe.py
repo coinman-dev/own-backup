@@ -425,6 +425,105 @@ class Mft:
         return bytes(out)
 
 
+
+def check_files(args) -> int:
+    """Приёмка исключений по ОБРАЗУ: найти файл в его MFT и сказать, жива ли
+    запись в каталоге и лежат ли в его кластерах данные.
+
+    Зачем не `grep` по образу. Так и было задумано сначала — и тест дал ЛОЖНЫЙ
+    ответ: оба файла оказались NTFS-сжаты, в образе лежит LZ-поток, и открытого
+    текста там нет ни у исключённого файла, ни у контрольного. Поиск строки не
+    нашёл ничего — и это одинаково согласуется и с «данные исключены», и с
+    «ищем не те байты». Проверять надо кластеры, а не текст.
+
+    Ожидание для приёмки:
+      исключённый файл — запись УДАЛЕНА, не нулевых кластеров 0;
+      контрольный      — запись ЖИВА, не нулевых кластеров столько же, сколько
+                         прочитано (иначе занулили живое).
+    """
+    img = open_image(args.image)
+    win = Window(img, args.offset if args.offset else find_volume_offset(img))
+    mft = Mft(win)
+    wanted = {n.lower() for n in args.check}
+    print(f"$MFT: {mft.record_count} записей, кластер {mft.cluster_size} Б")
+
+    hits: dict[str, tuple] = {}
+    recno = 0
+    vcn = 0
+    t0 = time.time()
+    while recno < mft.record_count:
+        chunk = mft.read_vcn(vcn, 2048)
+        if not chunk:
+            break
+        vcn += 2048
+        for pos in range(0, len(chunk), mft.record_size):
+            n = recno
+            recno += 1
+            rec = bytearray(chunk[pos : pos + mft.record_size])
+            if rec[0:4] != b"FILE" or not apply_fixups(rec, mft.bytes_per_sector):
+                continue
+            flags = struct.unpack_from("<H", rec, 0x16)[0]
+            name = None
+            runs = None
+            size = 0
+            attr_flags = 0
+            resident = None
+            for a in mft.attributes(rec):
+                if a["type"] == ATTR_FILE_NAME and not a["non_resident"]:
+                    c = a["content"]
+                    if len(c) >= 66:
+                        nm = c[66 : 66 + c[64] * 2].decode("utf-16-le", "replace")
+                        if nm.lower() in wanted:
+                            name = nm
+                elif a["type"] == ATTR_DATA and not a["name"]:
+                    if a["non_resident"]:
+                        runs = a["runs"]
+                        size = a["real_size"]
+                        attr_flags = a.get("flags", 0)
+                    else:
+                        resident = a["content"]
+            if name:
+                hits[name.lower()] = (n, flags, size, attr_flags, runs, resident)
+    print(f"проход MFT: {time.time() - t0:.0f} с")
+
+    bad = 0
+    for want in sorted(wanted):
+        v = hits.get(want)
+        print()
+        if not v:
+            print(f"{want}: записи в MFT образа НЕТ (файла в копии не было вовсе)")
+            continue
+        n, flags, size, attr_flags, runs, resident = v
+        alive = "ЖИВА" if flags & 1 else "УДАЛЕНА"
+        comp = "сжат NTFS" if attr_flags & 1 else "не сжат"
+        print(f"{want}: запись #{n}, {alive}, размер {size} Б, {comp}")
+        if resident is not None:
+            print(f"  РЕЗИДЕНТНЫЙ: данные внутри записи MFT, первые байты {resident[:24]!r}")
+            print("  (вычитанием такие не убираются — только удалением записи)")
+            continue
+        if not runs:
+            print("  экстентов нет")
+            continue
+        total = nonzero = 0
+        sample = None
+        for _, lcn, ln in runs:
+            if lcn is None:
+                continue
+            for c in range(ln):
+                data = win.read((lcn + c) * mft.cluster_size, mft.cluster_size)
+                total += 1
+                if data != bytes(len(data)):
+                    nonzero += 1
+                    if sample is None:
+                        sample = data[:40]
+        print(f"  кластеров {total}, с данными {nonzero}")
+        if sample:
+            print(f"  пример: {sample!r}")
+        if nonzero:
+            bad += 1
+    return 0 if bad == 0 else 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("image")
@@ -433,6 +532,13 @@ def main() -> int:
     ap.add_argument("--patterns", help="файл с правилами, по одному на строку")
     ap.add_argument("--list", help="выписать найденные пути сюда")
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument(
+        "--check",
+        action="append",
+        metavar="ИМЯ",
+        help="проверить файл в образе: жива ли запись и есть ли данные в кластерах "
+        "(приёмка исключений; можно повторять)",
+    )
     args = ap.parse_args()
 
     raws = DEFAULT_PATTERNS
@@ -440,6 +546,9 @@ def main() -> int:
         with open(args.patterns, encoding="utf-8") as f:
             raws = [ln.strip() for ln in f if ln.strip()]
     pats = [Pattern(p) for p in raws]
+
+    if args.check:
+        return check_files(args)
 
     t0 = time.time()
     img = open_image(args.image)
