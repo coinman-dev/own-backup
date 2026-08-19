@@ -35,6 +35,11 @@ pub struct ScanExclusionsArgs {
     /// Выписать найденные пути сюда (по одному на строку) — для сверки.
     #[arg(long, value_name = "ФАЙЛ")]
     pub list: Option<String>,
+
+    /// Чем искать: `walk` — обход дерева каталогами (как было), `mft` —
+    /// чтение $MFT (как теперь), `both` — оба подряд со сверкой.
+    #[arg(long, default_value = "both")]
+    pub method: String,
 }
 
 #[cfg(target_os = "windows")]
@@ -55,9 +60,57 @@ pub async fn run(args: ScanExclusionsArgs) -> Result<()> {
     println!("Том:      {volume}");
     println!("Правил:   {}", patterns.len());
     println!("Кластер:  {} Б", args.cluster_size);
-    println!("Метод:    обход дерева каталогами (нынешний)");
+    println!("Метод:    {}", args.method);
     println!();
 
+    // --- чтение $MFT -------------------------------------------------------
+    // Тот же сканер, что работает над расшифрованным окном BitLocker: ни одного
+    // открытия файла, последовательное чтение вместо обхода дерева.
+    if args.method != "walk" {
+        let t = Instant::now();
+        let mut dev = own_backup_backup::win_device::WinRawDevice::open_read(&volume)?;
+        let cur = own_backup_backup::ntfs_scan::RawVolumeCursor::new(&mut dev);
+        let mut buffered = own_backup_backup::ntfs_scan::BufferedVolume::new(cur, 4 << 20, 6);
+        let mut last = Instant::now();
+        match own_backup_backup::ntfs_scan::scan_mft_with(&mut buffered, &patterns, |done, total| {
+            if last.elapsed().as_secs() >= 2 {
+                println!("  … {done} из {total} записей MFT, {:.0} с", t.elapsed().as_secs_f64());
+                last = Instant::now();
+            }
+        }) {
+            Ok(scan) => {
+                let secs = t.elapsed().as_secs_f64();
+                println!("=== чтение $MFT ===");
+                println!("Записей MFT:      {}", scan.records_scanned);
+                println!("Вычтено файлов:   {}", scan.files_excluded);
+                println!(
+                    "Вычтено байт:     {} ({:.0} МиБ)",
+                    scan.bytes_excluded,
+                    scan.bytes_excluded as f64 / (1024.0 * 1024.0)
+                );
+                println!("Оставлено в копии: {} (резидентные, reparse и пр.)", scan.kept.len());
+                println!("Путей к удалению: {}", scan.paths.len());
+                println!("ВРЕМЯ:            {secs:.1} с");
+                if let Some(path) = &args.list {
+                    use std::io::Write;
+                    let mut f = std::fs::File::create(format!("{path}.mft"))?;
+                    let mut by = scan.file_bytes.clone();
+                    by.sort_by(|a, b| a.0.cmp(&b.0));
+                    for (rel, bytes) in &by {
+                        writeln!(f, "{bytes}\t{rel}")?;
+                    }
+                    println!("Байты по файлам:  {path}.mft ({} строк)", by.len());
+                }
+            }
+            Err(e) => println!("=== чтение $MFT НЕ УДАЛОСЬ: {e} ==="),
+        }
+        println!();
+        if args.method == "mft" {
+            return Ok(());
+        }
+    }
+
+    println!("=== обход дерева каталогами ===");
     let started = Instant::now();
     let mut last_report = Instant::now();
     let scan = own_backup_backup::exclusions_win::collect_excluded_ranges_verbose(

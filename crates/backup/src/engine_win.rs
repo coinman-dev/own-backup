@@ -773,7 +773,7 @@ fn backup_volume_inner(
     let mut fat_patches: Vec<(u64, Vec<u8>)> = Vec::new();
     let mut categories: Option<crate::exclusions::CategorySizes> = None;
     // "prepare"-phase progress tick (blocks_total == 0 marks it for the UI).
-    let prepare_tick = |entries: u64| {
+    let mut prepare_tick = |entries: u64| {
         progress(&BackupProgress {
             backup_id: "prepare".into(),
             status: BackupStatus::Running,
@@ -801,15 +801,72 @@ fn backup_volume_inner(
     let mut pre_copy_exclusions = false;
     if let Some(map) = ntfs_map.as_mut() {
         if !req.exclusion_patterns.is_empty() {
-            let mut scan =
-                collect_excluded_ranges(&read_path, map.cluster_size(), &req.exclusion_patterns, prepare_tick)?;
-            excluded_files = scan.files_excluded;
-            excluded_bytes = scan.bytes_excluded;
-            categories = Some(scan.categories);
-            removal_paths = std::mem::take(&mut scan.paths);
-            if !scan.ranges.is_empty() {
-                map.apply_excluded_ranges(&scan.ranges);
-                zero_ranges = Some(scan.ranges);
+            // Сначала по $MFT: последовательное чтение вместо обхода дерева.
+            // На живом C: обход занимает 45 с, внутри образа на SMR — 16 минут;
+            // чтение MFT того же образа — 15 с (замеры B0/B1, 2026-08-19). Плюс
+            // ему не нужен дескриптор: обход не смог открыть pagefile.sys,
+            // swapfile.sys и DumpStack.log.tmp («файл занят другим процессом»)
+            // и оставил в копии 400 МиБ ровно тех файлов, ради которых
+            // исключения и существуют.
+            //
+            // Разбирать метаданные тома, который прямо сейчас пишут, нельзя:
+            // берёмся только за замороженный источник — снимок VSS или офлайн
+            // на носителе. В остальных случаях (VSS не дали) остаётся обход:
+            // он идёт через файловую систему и переживает движение под собой.
+            let frozen = vss_used || own_backup_common::media_mode::is_media_mode();
+            let fast = if frozen {
+                scan_ntfs_exclusions_by_mft(&read_path, &req.exclusion_patterns, &mut prepare_tick)
+            } else {
+                Err(OwnBackupError::Device(
+                    "источник не заморожен (нет снимка VSS) — читать $MFT нельзя".into(),
+                ))
+            };
+            match fast {
+                Ok(mft) => {
+                    excluded_files = mft.files_excluded;
+                    excluded_bytes = mft.bytes_excluded;
+                    categories = Some(mft.categories);
+                    removal_paths = mft
+                        .paths
+                        .iter()
+                        .map(|p| crate::exclusions_win::ExcludedPath {
+                            rel: p.rel.clone(),
+                            is_dir: p.is_dir,
+                            is_reparse: p.is_reparse,
+                        })
+                        .collect();
+                    info!(
+                        files = mft.files_excluded,
+                        bytes = mft.bytes_excluded,
+                        kept = mft.kept.len(),
+                        paths = removal_paths.len(),
+                        records = mft.records_scanned,
+                        "exclusions resolved from the MFT"
+                    );
+                    if !mft.ranges.is_empty() {
+                        map.apply_excluded_ranges(&mft.ranges);
+                        zero_ranges = Some(mft.ranges);
+                    }
+                }
+                Err(e) => {
+                    // ReFS (у неё нет MFT), грязный том, неразобранная запись —
+                    // всё это законные причины вернуться к обходу дерева.
+                    warn!(error = %e, "MFT scan unavailable — falling back to the directory walk");
+                    let mut scan = collect_excluded_ranges(
+                        &read_path,
+                        map.cluster_size(),
+                        &req.exclusion_patterns,
+                        prepare_tick,
+                    )?;
+                    excluded_files = scan.files_excluded;
+                    excluded_bytes = scan.bytes_excluded;
+                    categories = Some(scan.categories);
+                    removal_paths = std::mem::take(&mut scan.paths);
+                    if !scan.ranges.is_empty() {
+                        map.apply_excluded_ranges(&scan.ranges);
+                        zero_ranges = Some(scan.ranges);
+                    }
+                }
             }
         } else {
             file_scan_skipped = Some(NO_PATTERNS.into());
@@ -1798,6 +1855,24 @@ struct PreparedMap {
 /// перечислить файлы обходом дерева тут нельзя — тома для Windows не
 /// существует, — а по MFT можно, и тогда исключённые кластеры просто не
 /// попадают в карту.
+/// Разобрать исключения по $MFT тома, который Windows смонтировала.
+///
+/// Том открывается как устройство и читается насквозь — тем же сканером, что
+/// работает над расшифрованным окном BitLocker. Ничего не пишет.
+#[cfg(target_os = "windows")]
+fn scan_ntfs_exclusions_by_mft(
+    read_path: &str,
+    patterns: &[String],
+    tick: &mut impl FnMut(u64) -> Result<()>,
+) -> Result<crate::ntfs_scan::MftScan> {
+    let mut dev = WinRawDevice::open_read(read_path)?;
+    let cur = crate::ntfs_scan::RawVolumeCursor::new(&mut dev);
+    let mut buffered = crate::ntfs_scan::BufferedVolume::new(cur, 4 << 20, 6);
+    crate::ntfs_scan::scan_mft_with(&mut buffered, patterns, |done, _total| {
+        let _ = tick(done);
+    })
+}
+
 fn prepare_encrypted_partition_map(
     mut src: Box<dyn crate::fat_map::RawVolume + Send>,
     block_size: u32,
