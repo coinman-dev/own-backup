@@ -263,6 +263,50 @@
     sourceReadonly ? engine.disks.filter(diskHasSelection) : engine.disks,
   );
 
+  // ---- one job = one disk = one image file (2026-08-19) -------------------
+  //
+  // The source step asks its questions one at a time, the way "Восстановление"
+  // does: FIRST which disk this copy is about, THEN which of its volumes go in.
+  // Everything that belongs to the second question — the volume segments, the
+  // "Загрузочная копия диска" switch, the password panels, the arrow down and
+  // the destination folder — stays off the screen until a disk is picked, so
+  // the first screen has exactly one thing to click and no way to build a job
+  // that spans two disks.
+  let pickedDiskId = $state<string | null>(null);
+  // A saved job already named its disk, and its source cannot be changed.
+  const diskChosen = $derived(sourceReadonly || pickedDiskId !== null);
+  const activeDisk = $derived(engine.disks.find((d) => d.device_id === pickedDiskId) ?? null);
+  // Stage 1 lists every disk to choose from; stage 2 draws only the chosen one
+  // — a copy that holds one disk must not show the others as if they could
+  // still join it. A read-only job keeps showing whatever it captured,
+  // including the multi-disk jobs saved before this rule.
+  const shownDisks = $derived(
+    sourceReadonly ? visibleDisks : activeDisk ? [activeDisk] : visibleDisks,
+  );
+
+  /** Forget the volume selection: a different disk is a different copy, and a
+   *  leftover source device from the previous one would put the job back across
+   *  two disks — the thing this flow exists to prevent. */
+  function clearSourceSelection() {
+    job.sources = [];
+    job.source_labels = [];
+    job.source = '';
+    job.source_label = '';
+    job.disk_source = null;
+    autoIncluded.clear();
+  }
+  function pickDisk(d: DiskInfo) {
+    if (sourceReadonly || pickedDiskId === d.device_id) return;
+    pickedDiskId = d.device_id;
+    clearSourceSelection();
+  }
+  /** Back to stage 1. Without it the first click would be final — and the disk
+   *  is the one choice on this screen that cannot be corrected further down. */
+  function pickAnotherDisk() {
+    pickedDiskId = null;
+    clearSourceSelection();
+  }
+
   // Kept-files breakdown of the last run (same data the dashboard shows), drawn
   // under the disk map on the read-only "Параметры" screen so the user sees what
   // kind of files the copy holds without leaving the settings.
@@ -453,7 +497,9 @@
       return false;
     }
     if (job.sources.length === 0) {
-      error = 'Выберите источник (хотя бы один том).';
+      error = diskChosen
+        ? 'Выберите источник (хотя бы один том на диске).'
+        : 'Выберите диск, с которым будет работать копия.';
       step = 0;
       return false;
     }
@@ -570,7 +616,6 @@
 
   // Linux OS filesystems: a decrypted volume of one of these on a bootable-copy
   // disk is the system root and is auto-included.
-  const LINUX_OS_FS = ['ext4', 'xfs', 'btrfs'];
   // Unlocked-volume info lives in a GUI-session store (`decryptedVolumes`), so
   // it survives closing and reopening the wizard. Per-device wrong-password
   // markers and the in-flight device are local to this wizard instance.
@@ -585,23 +630,44 @@
     job.requires_password = encryptedSelected().length > 0;
   });
 
-  // Auto-include a decrypted Linux OS volume (ext4/xfs/btrfs) on a disk marked
-  // "Загрузочная копия" — the system root belongs in a bootable copy. Reactive,
-  // so it works no matter the order (toggle-then-decrypt or decrypt-then-toggle)
-  // and self-corrects if the disk was toggled after the volume was unlocked.
-  // Converges: once a volume is in `sources` the guard skips it (no loop).
+  // Auto-include an UNLOCKED volume on a disk marked "Загрузочная копия": the
+  // password was typed for exactly one reason, and the copy is of the whole
+  // disk. Reactive, so it works no matter the order (toggle-then-decrypt or
+  // decrypt-then-toggle) and self-corrects if the disk was toggled after the
+  // volume was unlocked. Converges: once a volume is in `sources` the guard
+  // skips it (no loop).
+  //
+  // Until 2026-08-19 this fired only for a Linux root (ext4/xfs/btrfs), because
+  // a Windows system volume was supposed to be caught at toggle time by
+  // `isBootEssential`. It is not: `is_system`/`has_os` are read from a MOUNTED
+  // filesystem, and Windows never mounts a locked BitLocker volume, so both
+  // come back false while it is locked — and a locked volume is exactly the
+  // state the wizard meets it in. The bootable copy of a 954 GiB disk then went
+  // through with the EFI partition alone: 43 MB written in 0 s, reported as
+  // success.
+  //
+  // Unlocking is the user's "yes" and leaving a volume locked is the "no" —
+  // `retain_for_backup` then drops it from the layout, so its space comes back
+  // free on restore. Both halves are said out loud in the password panel.
+  //
+  // Included ONCE per volume, not held as an invariant: a user who unlocked a
+  // volume to see what is in it must still be able to untick it, and an effect
+  // that re-adds on every run would make that impossible. Per wizard instance,
+  // like the rest of this screen's scratch state.
+  const autoIncluded = new Set<string>();
   $effect(() => {
+    if (sourceReadonly) return; // the source of a saved job is fixed
     for (const d of engine.disks) {
       if (!isBootableCopy(d)) continue;
       for (const p of d.partitions) {
         const dev = partDevice(p);
-        if (!dev || job.sources.includes(dev)) continue;
+        if (!dev || job.sources.includes(dev) || autoIncluded.has(dev)) continue;
         const dec = decryptedVolumes[dev];
-        if (dec && LINUX_OS_FS.includes((dec.filesystem || '').toLowerCase())) {
-          job.sources = [...job.sources, dev];
-          job.source_labels = [...job.source_labels, dec.label || partLabel(p)];
-          syncDiskSourceParts(d);
-        }
+        if (!dec) continue;
+        autoIncluded.add(dev);
+        job.sources = [...job.sources, dev];
+        job.source_labels = [...job.source_labels, dec.label || partLabel(p)];
+        syncDiskSourceParts(d);
       }
     }
   });
@@ -677,12 +743,12 @@
 
   // Every encrypted volume a password is offered for, across all shown disks.
   function encryptedOffered(): EncryptedVolume[] {
-    return visibleDisks.flatMap((d) => encryptedForDisk(d));
+    return shownDisks.flatMap((d) => encryptedForDisk(d));
   }
   // The shared prompt is drawn once — under the first disk that still has a
   // locked volume — instead of once per disk panel.
   const sharedFormDiskId = $derived(
-    visibleDisks.find((d) =>
+    shownDisks.find((d) =>
       encryptedForDisk(d).some(({ device }) => !decryptedVolumes[device]),
     )?.device_id ?? null,
   );
@@ -738,6 +804,10 @@
     return job.sources.length > 0 && allEncryptedDecrypted() && !!job.dest_folder.trim();
   }
   function nextHint(): string {
+    // The hint names the question the screen is actually asking: at stage 1 it
+    // is the disk, and "выберите том" would point at volumes that are not drawn
+    // yet.
+    if (!diskChosen) return 'Выберите диск, с которым будет работать копия';
     if (job.sources.length === 0) return 'Выберите том-источник';
     // Name the volume: "расшифруйте зашифрованный том" is no help at all when
     // the screen shows two of them and one is already unlocked.
@@ -808,7 +878,7 @@
   {/if}
 {/snippet}
 
-{#snippet pwPanel(list: EncryptedVolume[], showShared: boolean)}
+{#snippet pwPanel(list: EncryptedVolume[], showShared: boolean, whole: boolean)}
   <div class="pw-panel under-disk">
     <div class="pw-head">
       <span>
@@ -937,6 +1007,17 @@
         пробелами или подряд.
       </div>
     {/if}
+    {#if whole && list.some((e) => !decryptedVolumes[e.device])}
+      <!-- Said before the copy runs, because afterwards it is a 43 MB image
+           where 128 GiB were expected. A volume left locked is dropped from the
+           partition table too (`DiskLayout::retain_for_backup`), not kept as an
+           empty slot. -->
+      <div class="pw-hint warn">
+        Тома, оставшиеся зашифрованными, в загрузочную копию НЕ войдут — ни
+        данными, ни записью в таблице разделов: при восстановлении их место
+        останется свободным. Расшифрованные войдут в копию расшифрованными.
+      </div>
+    {/if}
     <div class="pw-hint">
       Подходит пароль тома или 48-значный ключ восстановления. Пароль хранится в
       памяти до закрытия программы. «Запомнить» сохраняет его в защищённом
@@ -969,7 +1050,14 @@
           <div class="sec-head">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="12" cy="12" r="3.4"/></svg>
             <span class="sec-title">{sourceReadonly ? 'Что скопировано' : 'Что копировать'}</span>
-            <span class="sec-sub">{sourceReadonly ? 'разделы, включённые в эту копию (менять нельзя)' : 'выберите один или несколько томов'}</span>
+            <span class="sec-sub">{sourceReadonly
+              ? 'разделы, включённые в эту копию (менять нельзя)'
+              : diskChosen
+                ? 'теперь выберите один или несколько томов на диске'
+                : 'вначале выберите раздел диска, с которым будет работать'}</span>
+            {#if diskChosen && !sourceReadonly}
+              <button class="link back-disk" onclick={pickAnotherDisk}>← другой диск</button>
+            {/if}
           </div>
 
           {#if engine.volumesLoading && engine.disks.length === 0}
@@ -984,7 +1072,38 @@
             </div>
           {:else}
             <div class="disks">
-              {#each visibleDisks as d}
+              {#each shownDisks as d (d.device_id)}
+                {#if !diskChosen}
+                  <!-- Stage 1. The whole card is one button: the only question
+                       here is WHICH disk, and nothing inside it can be answered
+                       before that. The map is drawn all the same — a disk is
+                       recognised by what is on it, not by its model string. -->
+                  <button type="button" class="disk-card pickable" onclick={() => pickDisk(d)}>
+                    <div class="disk-head">
+                      <span class="disk-model">{d.model || d.device_id}</span>
+                      <span class="disk-head-right">
+                        <span class="disk-meta">{formatBytes(d.size_bytes)} · {tableLabel(d.partition_table)}</span>
+                      </span>
+                    </div>
+                    <div class="disk-body">
+                      <div class="disk-ico">
+                        <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="1.3"><path d="M3 8a9 3 0 0 0 18 0M3 8a9 3 0 0 1 18 0v8a9 3 0 0 1-18 0z"/><path d="M3 12a9 3 0 0 0 18 0"/></svg>
+                        <div class="disk-name">Диск {d.device_id.replace(/\D+/g, '') || ''}</div>
+                      </div>
+                      <div class="bar">
+                        {#each diskSegments(d) as seg}
+                          {#if seg.kind === 'free'}
+                            <div class="seg free" style="flex: {seg.size} 1 0"><span class="free-lbl">Не занято</span></div>
+                          {:else if seg.p}
+                            <div class="seg" style="flex: {seg.size} 1 0" title={segTitle(seg.p)}>
+                              {@render segInner(seg.p, false, false)}
+                            </div>
+                          {/if}
+                        {/each}
+                      </div>
+                    </div>
+                  </button>
+                {:else}
                 <div class="disk-card">
                   <div class="disk-head" class:whole={isBootableCopy(d)}>
                     <span class="disk-model">{d.model || d.device_id}</span>
@@ -1058,7 +1177,8 @@
                   </div>
                 </div>
                 {#if encryptedForDisk(d).length > 0}
-                  {@render pwPanel(encryptedForDisk(d), d.device_id === sharedFormDiskId)}
+                  {@render pwPanel(encryptedForDisk(d), d.device_id === sharedFormDiskId, isBootableCopy(d))}
+                {/if}
                 {/if}
               {/each}
             </div>
@@ -1091,6 +1211,10 @@
             </div>
           {/if}
 
+          <!-- Stage 2 only: where the copy goes is a question about a copy
+               that has a source. Until a disk is picked the screen holds one
+               question, not three. -->
+          {#if diskChosen}
           <!-- connector -->
           <div class="connector">
             <div class="dash"></div>
@@ -1122,6 +1246,7 @@
           </div>
           {#if collisionLetter}
             <div class="warn-note">⛔ Назначение на том же диске ({collisionLetter}:), что и один из источников. Копию нужно писать на другой диск — выберите другую папку.</div>
+          {/if}
           {/if}
         </div>
       {/if}
@@ -1354,6 +1479,13 @@
   .cat-name { font-size: 13px; color: var(--head); }
   .cat-size { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
   .disk-card { border: 1px solid var(--border); border-radius: 6px; overflow: hidden; background: var(--card-bg); }
+  /* Stage 1: the same card, clickable as a whole. Button defaults (centred
+     text, own font, native border) would undo the layout, so they go. */
+  button.disk-card { display: block; width: 100%; padding: 0; text-align: left; font: inherit; color: inherit; cursor: pointer; }
+  button.disk-card:hover { border-color: var(--primary); }
+  button.disk-card:hover .disk-head { background: var(--hover-bg, rgba(127, 127, 127, 0.1)); }
+  /* Back to the disk question — small, next to the instruction it undoes. */
+  .back-disk { margin-left: auto; font-size: 12px; }
   .disk-head { width: 100%; display: flex; align-items: center; justify-content: space-between; padding: 6px 12px; background: var(--panel2); border: 0; border-bottom: 1px solid var(--border); margin: 0; font-family: inherit; text-align: left; }
   .disk-head.whole { background: rgba(45,125,210,.12); color: var(--primary); }
   .disk-head.whole .disk-model { color: var(--primary); }
@@ -1431,6 +1563,9 @@
   /* A volume we cannot open: a sentence in place of the password box. */
   .pw-nokey { flex: 1 1 auto; font-size: 12px; color: var(--text-muted); line-height: 1.4; }
   .pw-hint { font-size: 12px; color: var(--text-muted); margin-top: 10px; }
+  /* The consequence of leaving a lock closed reads as a warning, not as
+     small print: it changes what the copy contains. */
+  .pw-hint.warn { color: var(--warning); }
   .pw-hint code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11.5px; padding: 1px 5px; border-radius: 3px; background: rgba(127, 127, 127, 0.16); color: var(--head); }
   .btn:disabled { opacity: .5; cursor: default; }
   .seg-label { font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
