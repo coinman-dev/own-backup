@@ -20,6 +20,7 @@ pub mod gpt_writer;
 pub mod luks;
 pub mod mbr_writer;
 pub mod ntfs_map;
+pub mod ntfs_scan;
 pub mod overlay;
 pub mod qcow2;
 pub mod raw_copy;

@@ -385,6 +385,26 @@ fn resident_attr(rec: &[u8], atype: u64) -> Option<&[u8]> {
 /// Detect NTFS on `vol` and build the used map. Errors (→ caller falls back to
 /// sector-by-sector) on anything unrecognized or inconsistent.
 pub fn build_ntfs_used_map(vol: &mut dyn RawVolume, block_size: u32) -> Result<NtfsUsedMap> {
+    build_ntfs_used_map_excl(vol, block_size, None)
+}
+
+/// Та же карта, но кластеры из `excluded` в неё не попадают.
+///
+/// Так исключения работают ДО копирования (план
+/// `.ai/exclusions-before-copy-plan_2026-08-19.md`): блок, все занятые кластеры
+/// которого исключены, не читается и не пишется вовсе — как это делает Acronis.
+/// Блок, где исключённое соседствует с нужным, остаётся в карте: выбросить его
+/// значило бы потерять соседей, и лишнее в нём затирает `ZeroingBlockReader`
+/// уже в памяти, при копировании.
+///
+/// Тот же приём, что у FAT (`build_fat_used_map_excl`): карта строится заново,
+/// а не правится задним числом, потому что «все ли занятые кластеры блока
+/// исключены» видно только на кластерах, а в готовой карте их уже нет.
+pub fn build_ntfs_used_map_excl(
+    vol: &mut dyn RawVolume,
+    block_size: u32,
+    excluded: Option<&crate::exclusions::ByteRanges>,
+) -> Result<NtfsUsedMap> {
     let g = read_geometry(vol)?;
     let (cluster_size, total_clusters, clusters_bytes) =
         (g.cluster_size, g.total_clusters, g.clusters_bytes);
@@ -400,6 +420,7 @@ pub fn build_ntfs_used_map(vol: &mut dyn RawVolume, block_size: u32) -> Result<N
     mark_bytes(&mut map, block_size, clusters_bytes, vol.len());
 
     let mut used_clusters = 0u64;
+    let mut excluded_clusters = 0u64;
     for (byte_idx, &byte) in bitmap.iter().take(needed as usize).enumerate() {
         if byte == 0 {
             continue;
@@ -412,8 +433,13 @@ pub fn build_ntfs_used_map(vol: &mut dyn RawVolume, block_size: u32) -> Result<N
             if cluster >= total_clusters {
                 break;
             }
-            used_clusters += 1;
             let start = cluster * cluster_size;
+            // Исключённый кластер в карту не попадает: копия его не увидит.
+            if excluded.is_some_and(|e| e.covers(start, start + cluster_size)) {
+                excluded_clusters += 1;
+                continue;
+            }
+            used_clusters += 1;
             mark_bytes(&mut map, block_size, start, start + cluster_size);
         }
     }
@@ -424,6 +450,7 @@ pub fn build_ntfs_used_map(vol: &mut dyn RawVolume, block_size: u32) -> Result<N
         cluster_size,
         total_clusters,
         used_clusters,
+        excluded_clusters,
         used_blocks = used_count,
         total_blocks,
         "NTFS used-cluster map ready"

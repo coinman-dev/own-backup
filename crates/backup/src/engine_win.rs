@@ -616,6 +616,9 @@ fn backup_volume_inner(
     // For an encrypted source the map is built over the decrypting view and
     // returned boxed directly (no exclusions apply to a Linux volume).
     let mut luks_used: Option<Box<dyn UsedSectorMap>> = None;
+    /// NTFS внутри LUKS/BitLocker: карта держится типизированной, пока не
+    /// решится вопрос исключений — их вычитание перестраивает её.
+    let mut enc_ntfs_map: Option<crate::ntfs_map::NtfsUsedMap> = None;
     // The filesystem actually found inside the volume. For a LUKS/BitLocker
     // source this is what is INSIDE the container, because that is what the
     // image holds — the partition table outside still says "unknown", and a
@@ -635,7 +638,11 @@ fn backup_volume_inner(
             if let Ok(m) = crate::ntfs_map::build_ntfs_used_map(src.as_mut(), req.block_size) {
                 info!(fs = "NTFS", "Using NTFS map over decrypted volume");
                 detected_fs = Some("NTFS".into());
-                Some(Box::new(m))
+                // НЕ боксим: NTFS внутри контейнера умеет исключения ДО копии
+                // (план exclusions-before-copy, B3), а для этого карту надо
+                // будет перестроить без исключённых кластеров.
+                enc_ntfs_map = Some(m);
+                None
             } else if let Ok(m) = crate::fat_map::build_fat_used_map(src.as_mut(), req.block_size) {
                 info!(fs = m.filesystem, "Using FAT map over decrypted volume");
                 detected_fs = Some(m.filesystem.to_string());
@@ -656,7 +663,7 @@ fn backup_volume_inner(
                 warn!("no used-block map for the decrypted volume — sector-by-sector");
                 None
             };
-        let smart = map.is_some();
+        let smart = map.is_some() || enc_ntfs_map.is_some();
         luks_used = map;
         smart
     } else {
@@ -789,6 +796,9 @@ fn backup_volume_inner(
     // driver deletes them inside the finished image, so they vanish from the
     // catalog and their space is reclaimed — see `true_removal_win`.
     let mut removal_paths: Vec<crate::exclusions_win::ExcludedPath> = Vec::new();
+    /// Исключения решены ДО копии по $MFT — проход внутри образа не нужен:
+    /// исключённых данных в образе нет, осталось убрать записи из каталога.
+    let mut pre_copy_exclusions = false;
     if let Some(map) = ntfs_map.as_mut() {
         if !req.exclusion_patterns.is_empty() {
             let mut scan =
@@ -805,6 +815,72 @@ fn backup_volume_inner(
             file_scan_skipped = Some(NO_PATTERNS.into());
         }
         map.release_bitmap();
+    } else if let Some(map) = enc_ntfs_map.as_mut() {
+        // NTFS внутри контейнера, который Windows не смонтировала. Файлы в нём
+        // всё равно перечислимы — по $MFT, прямо через расшифрованное окно
+        // (`ntfs_scan`), и это решает исключения ДО копирования: экстенты
+        // вычитаются из карты, исключённые данные не читаются и не пишутся.
+        // Раньше здесь был отказ, а правила применялись потом, внутри готового
+        // образа: скан 16 минут, зануление, merge и пересчёт сумм — прогон
+        // 2026-08-19 пользователь отменил.
+        if req.exclusion_patterns.is_empty() {
+            file_scan_skipped = Some(NO_PATTERNS.into());
+        } else {
+            let mut src = open_source(&luks)?;
+            let scan_result = {
+                let cur = crate::ntfs_scan::RawVolumeCursor::new(src.as_mut());
+                // Крейт читает запись MFT по килобайту; без кэша это миллион
+                // обращений к носителю (замер: 313 с против 74 с).
+                let mut buffered = crate::ntfs_scan::BufferedVolume::new(cur, 4 << 20, 6);
+                crate::ntfs_scan::scan_mft(&mut buffered, &req.exclusion_patterns)
+            };
+            match scan_result {
+                Ok(scan) => {
+                    excluded_files = scan.files_excluded;
+                    excluded_bytes = scan.bytes_excluded;
+                    categories = Some(scan.categories);
+                    for (path, reason) in &scan.kept {
+                        debug!(file = %path, reason = reason.as_str(), "данные остаются в копии");
+                    }
+                    removal_paths = scan
+                        .paths
+                        .iter()
+                        .map(|p| crate::exclusions_win::ExcludedPath {
+                            rel: p.rel.clone(),
+                            is_dir: p.is_dir,
+                            is_reparse: p.is_reparse,
+                        })
+                        .collect();
+                    info!(
+                        files = scan.files_excluded,
+                        bytes = scan.bytes_excluded,
+                        kept = scan.kept.len(),
+                        paths = removal_paths.len(),
+                        records = scan.records_scanned,
+                        "exclusions resolved from the MFT BEFORE the copy"
+                    );
+                    if !scan.ranges.is_empty() {
+                        // Карта строится заново, без исключённых кластеров:
+                        // блок, целиком занятый исключённым, не копируется
+                        // вовсе; в общих блоках лишнее занулит ZeroingBlockReader.
+                        let mut src2 = open_source(&luks)?;
+                        let rebuilt = crate::ntfs_map::build_ntfs_used_map_excl(
+                            src2.as_mut(),
+                            req.block_size,
+                            Some(&scan.ranges),
+                        )?;
+                        *map = rebuilt;
+                        zero_ranges = Some(scan.ranges);
+                    }
+                    pre_copy_exclusions = true;
+                }
+                Err(e) => {
+                    // Грязный том, битая запись, не NTFS внутри — откат на
+                    // проход внутри готового образа (медленный, но рабочий).
+                    warn!(error = %e, "MFT scan failed — falling back to the in-image pass");
+                }
+            }
+        }
     } else if fat_exclusions {
         let mut dev = WinRawDevice::open_read(&read_path)?;
         let scan =
@@ -863,11 +939,14 @@ fn backup_volume_inner(
     // Linux filesystem Windows cannot mount at all.
     let encrypted_source = bitlocker.is_some() || luks.is_some();
     let in_image_exclusions = encrypted_source
+        && !pre_copy_exclusions
         && !req.exclusion_patterns.is_empty()
         && !req.all_sectors
         && detected_fs.as_deref() == Some("NTFS");
 
-    let used: Box<dyn UsedSectorMap> = if let Some(map) = luks_used {
+    let used: Box<dyn UsedSectorMap> = if let Some(map) = enc_ntfs_map {
+        Box::new(map)
+    } else if let Some(map) = luks_used {
         map
     } else {
         match (ntfs_map, fat_map, ext_map, btrfs_map, xfs_map) {
@@ -2100,6 +2179,39 @@ fn backup_disk_inner(
     let mut layout = crate::gpt_reader::read_disk_layout(req.disk_number)?;
     let kept: std::collections::HashSet<u32> =
         req.partitions.iter().map(|p| p.part_index).collect();
+    // What this copy is about to leave behind, named before it is dropped.
+    // `retain_for_backup` removes an unselected partition from the layout
+    // ENTIRELY — on restore its space comes back free — and that is too large a
+    // decision to record as a count. On 2026-08-19 a bootable copy of a 954 GiB
+    // disk ran with the EFI partition alone, because a locked BitLocker volume
+    // cannot report `has_os` and the wizard therefore never selected it; the
+    // whole trace in the log was `parts=1` beside a disk that has three, and the
+    // run reported success in 0 s. The selection bug is fixed in the wizard —
+    // this line is so the next one of its kind is legible from the log alone.
+    let left_out: Vec<String> = layout
+        .partitions
+        .iter()
+        .filter(|p| {
+            !kept.contains(&p.index)
+                && !p.type_guid.eq_ignore_ascii_case(own_backup_common::gpt::GPT_TYPE_MSR)
+        })
+        .map(|p| {
+            let mib = p.size_bytes(layout.sector_size) / (1024 * 1024);
+            if p.name.is_empty() {
+                format!("#{} ({mib} МиБ)", p.index)
+            } else {
+                format!("#{} «{}» ({mib} МиБ)", p.index, p.name)
+            }
+        })
+        .collect();
+    if !left_out.is_empty() {
+        warn!(
+            disk = req.disk_number,
+            kept = req.partitions.len(),
+            left_out = %left_out.join(", "),
+            "whole-disk backup: partitions are NOT in the copy — their space is free on restore"
+        );
+    }
     layout.retain_for_backup(&kept);
     let sector = layout.sector_size as u64;
     if bs == 0 || bs % sector != 0 {

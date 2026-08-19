@@ -25,9 +25,14 @@ bitlocker --unlock`, password protector only. It reads the ciphertext off
 refuses reads through its own device (`FVE_E_LOCKED_VOLUME`). **Wired into
 backup** (`engine_win`: `open_bitlocker_source` + `unlock_and_probe` — a locked
 volume is backed up DECRYPTED through a window onto its disk; recovery-key
-protector too; a half-encrypted volume is refused). What is still open — live
-acceptance of the whole path, the recovery-key hash note, the conversion-state
-field, and marking such volumes in the wizard: `.ai/bitlocker-windows-plan_2026-08-01.md`.
+protector too; a half-encrypted volume is refused). **The whole path was run on
+the boot medium on 2026-08-19 and works**: a 128 GiB locked system volume opened
+by its 48-digit recovery key, copied decrypted (XTS-AES 128), and the finished
+image mounted — the in-image exclusion pass walked 703 317 entries in it and
+deleted 23 499 files. That run also settled the open question: the recovery key
+is hashed with **one** SHA-256, not two. Still open — the negative cases (wrong
+password, TPM-only volume, AES-CBC refusal), restoring such a copy, and the
+conversion-state field: `.ai/bitlocker-windows-plan_2026-08-01.md`.
 
 ## Branches (decision 2026-08-06)
 
@@ -116,6 +121,13 @@ tested on a Windows host — cross-compilation validates compilation only.
   faster for structural reasons that will not change: zstd means fewer physical
   bytes, and its 64 KiB CoW clusters amplify scattered MFT writes 16× less than
   the VHDX child's 1 MiB blocks (delete: 0.7 s vs 9 s).
+  **The in-image pass itself is being replaced (plan 2026-08-19):** a second
+  live run (128 GiB volume) spent 16 min just SCANNING the image tree-walk-style
+  and the user cancelled it. The fix — resolve exclusions BEFORE the copy on
+  every Windows FS, Acronis-style: read the MFT sequentially over the decrypted
+  window, subtract matched extents from the used map, so excluded data is never
+  copied and the in-image zero pass disappears (mount-&-delete stays — it costs
+  8 s): `.ai/exclusions-before-copy-plan_2026-08-19.md` (B0–B6).
   Any change that edits foreign FS metadata must pass BOTH fsck-clean
   (`btrfs check --check-data-csum` / `e2fsck -fn` / `xfs_repair -n`) AND a
   mount-and-write acceptance before shipping — static checks alone once let a
