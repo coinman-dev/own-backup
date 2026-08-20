@@ -770,6 +770,9 @@ fn backup_volume_inner(
     // NTFS внутри LUKS/BitLocker: карта держится типизированной, пока не
     // решится вопрос исключений — их вычитание перестраивает её.
     let mut enc_ntfs_map: Option<crate::ntfs_map::NtfsUsedMap> = None;
+    // FAT/exFAT внутри контейнера — то же самое (BitLocker To Go на флешке
+    // обычно именно exFAT, и таких носителей больше, чем ReFS-томов).
+    let mut enc_fat_map: Option<crate::fat_map::FatUsedMap> = None;
     // The filesystem actually found inside the volume. For a LUKS/BitLocker
     // source this is what is INSIDE the container, because that is what the
     // image holds — the partition table outside still says "unknown", and a
@@ -797,7 +800,10 @@ fn backup_volume_inner(
             } else if let Ok(m) = crate::fat_map::build_fat_used_map(src.as_mut(), req.block_size) {
                 info!(fs = m.filesystem, "Using FAT map over decrypted volume");
                 detected_fs = Some(m.filesystem.to_string());
-                Some(Box::new(m))
+                // Как и NTFS, держим типизированной: исключения перестроят её
+                // без исключённых кластеров (этап B4).
+                enc_fat_map = Some(m);
+                None
             } else if let Ok(m) = crate::ext_map::build_ext_used_map(src.as_mut(), req.block_size) {
                 info!(fs = "ext4", "Using ext map over decrypted volume");
                 detected_fs = Some("ext4".into());
@@ -814,7 +820,7 @@ fn backup_volume_inner(
                 warn!("no used-block map for the decrypted volume — sector-by-sector");
                 None
             };
-        let smart = map.is_some() || enc_ntfs_map.is_some();
+        let smart = map.is_some() || enc_ntfs_map.is_some() || enc_fat_map.is_some();
         luks_used = map;
         smart
     } else {
@@ -1102,6 +1108,53 @@ fn backup_volume_inner(
                 }
             }
         }
+    } else if let Some(map) = enc_fat_map.as_mut() {
+        // FAT/exFAT внутри контейнера, который Windows не смонтировала. Свой
+        // разбор FAT читает каталоги прямо из расшифрованного окна — ему, как и
+        // NTFS-сканеру, не нужен ни смонтированный том, ни дескриптор файла.
+        // Раньше здесь был отказ: ветка исключений знала только NTFS.
+        if req.exclusion_patterns.is_empty() {
+            file_scan_skipped = Some(NO_PATTERNS.into());
+        } else {
+            let mut src = open_source(&luks)?;
+            match crate::fat_exclusions::scan_fat_exclusions(
+                src.as_mut(),
+                &req.exclusion_patterns,
+                &mut prepare_tick,
+            ) {
+                Ok(scan) => {
+                    excluded_files = scan.files_excluded;
+                    excluded_bytes = scan.bytes_excluded;
+                    categories = Some(scan.categories);
+                    info!(
+                        files = scan.files_excluded,
+                        bytes = scan.bytes_excluded,
+                        entries = scan.entries_scanned,
+                        patches = scan.patches.len(),
+                        "exclusions resolved from FAT BEFORE the copy"
+                    );
+                    if !scan.ranges.is_empty() {
+                        // Карта строится заново, без исключённых кластеров.
+                        let mut src2 = open_source(&luks)?;
+                        *map = crate::fat_map::build_fat_used_map_excl(
+                            src2.as_mut(),
+                            req.block_size,
+                            Some(&scan.ranges),
+                        )?;
+                        zero_ranges = Some(scan.ranges);
+                        // Правки метаданных: запись каталога помечается
+                        // удалённой, цепочка в таблице освобождается — файл
+                        // исчезает, а не остаётся нулевым призраком.
+                        fat_patches = scan.patches;
+                    }
+                    pre_copy_exclusions = true;
+                }
+                Err(e) => {
+                    warn!(error = %e, "FAT exclusion scan failed — keeping all files");
+                    file_scan_skipped = Some(format!("разбор FAT не удался: {e}"));
+                }
+            }
+        }
     } else if fat_exclusions {
         let mut dev = WinRawDevice::open_read(&read_path)?;
         let scan =
@@ -1166,6 +1219,8 @@ fn backup_volume_inner(
         && detected_fs.as_deref() == Some("NTFS");
 
     let used: Box<dyn UsedSectorMap> = if let Some(map) = enc_ntfs_map {
+        Box::new(map)
+    } else if let Some(map) = enc_fat_map {
         Box::new(map)
     } else if let Some(map) = luks_used {
         map

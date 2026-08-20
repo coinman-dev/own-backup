@@ -835,18 +835,18 @@ fn unlock_from_metadata(
                 continue;
             }
             let salt = &stretch_data[0x04..0x14];
-            // For a recovery key both readings of "the hash of the secret" are
-            // tried — one round of SHA-256 over its bytes, or two. The sources
-            // disagree, the AES-CCM tag does not: a key that unwraps is the
-            // right key. Logged when it lands, so the fact stops being a guess.
+            // A recovery key is hashed with ONE round of SHA-256 — measured, not
+            // guessed: on 2026-08-19 a 128 GiB system volume opened by its
+            // 48-digit key and the log said `protector="ключ восстановления,
+            // один SHA-256"`. Until then both readings were tried, because the
+            // sources disagree and only the AES-CCM tag could settle it. It has;
+            // the second candidate is gone, and with it a million rounds of
+            // SHA-256 on every unlock.
             let candidates: Vec<(&str, Zeroizing<[u8; 32]>)> = match &recovery {
-                Some(bytes) => vec![
-                    ("ключ восстановления, один SHA-256", stretch_hash(&Sha256::digest(&bytes[..]), salt, iterations)),
-                    (
-                        "ключ восстановления, двойной SHA-256",
-                        stretch_hash(&Sha256::digest(Sha256::digest(&bytes[..])), salt, iterations),
-                    ),
-                ],
+                Some(bytes) => vec![(
+                    "ключ восстановления, один SHA-256",
+                    stretch_hash(&Sha256::digest(&bytes[..]), salt, iterations),
+                )],
                 None => vec![("пароль", stretch_key(&utf16le(password), salt, iterations))],
             };
             for (how, key) in &candidates {
