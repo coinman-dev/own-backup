@@ -136,6 +136,10 @@ struct Entry {
     extents: Vec<(u64, u64)>,
     /// Сумма длин экстентов — насколько ФС выделила места под файл.
     allocated: u64,
+    /// Сжат или разрежен по флагам АТРИБУТА, а не по догадке. У таких файлов
+    /// выделено законно меньше, чем они весят, и путать это с недочитанным
+    /// run list'ом нельзя — см. `decide`.
+    compressed_or_sparse: bool,
     resident_data: bool,
     /// Разбор атрибутов упёрся в ошибку — доверять экстентам нельзя.
     broken: bool,
@@ -223,6 +227,7 @@ where
         let mut allocated = 0u64;
         let mut data_size = 0u64;
         let mut resident_data = false;
+        let mut compressed_or_sparse = false;
         let mut broken = false;
         let mut is_reparse = false;
 
@@ -271,6 +276,11 @@ where
                             data_size = data_size.max(v.len());
                         }
                         Ok(NtfsAttributeValue::NonResident(v)) => {
+                            use ntfs::NtfsAttributeFlags as F;
+                            let f = attr.flags();
+                            if f.contains(F::COMPRESSED) || f.contains(F::SPARSE) {
+                                compressed_or_sparse = true;
+                            }
                             // Длинный run list NTFS кладёт в НЕСКОЛЬКО
                             // экземпляров $DATA, и размер заполнен только у
                             // первого (StartVCN=0) — экстенты накапливаем,
@@ -320,6 +330,7 @@ where
                 data_size,
                 extents,
                 allocated,
+                compressed_or_sparse,
                 resident_data,
                 broken,
             },
@@ -328,6 +339,30 @@ where
     debug!(live = entries.len(), "MFT scan: записи разобраны");
     let pass1 = std::time::Instant::now();
 
+    // --- проход 2: пути, совпадения, вычитание -------------------------------
+    // Вынесен в отдельную функцию намеренно: здесь живут ПРАВИЛА (что вычесть,
+    // что оставить, что записать в удаление), и они не про NTFS. Разбор NTFS
+    // проверен байт-в-байт против самой Windows на настоящем томе, а правила
+    // проверяются юнит-тестами внизу файла — на записях, собранных руками.
+    // Синтетическая NTFS-фикстура тут была бы самообманом: она испытывала бы
+    // наш парсер против нашего же писателя (урок BitLocker, четыре захода).
+    decide(&entries, &parsed, cluster_size, &mut scan);
+    scan.ranges.finalize();
+    debug!(secs = pass1.elapsed().as_secs_f64(), "MFT scan: пути и совпадения");
+    Ok(scan)
+}
+
+
+/// Правила: что вычесть из копии, что оставить, что записать на удаление.
+///
+/// Отдельно от чтения NTFS, потому что это разные вещи и ошибаются они
+/// по-разному. Чтение проверено сверкой с Windows; правила — тестами ниже.
+fn decide(
+    entries: &HashMap<u64, Entry>,
+    parsed: &[crate::exclusions::ExclusionPattern],
+    cluster_size: u64,
+    scan: &mut MftScan,
+) {
     // --- проход 2: пути, совпадения, вычитание -------------------------------
     let mut path_cache: HashMap<u64, Option<Vec<String>>> = HashMap::new();
     path_cache.insert(ROOT_RECORD, Some(Vec::new()));
@@ -368,7 +403,7 @@ where
 
     // Каталоги, попавшие под правила: всё под ними исключается вместе с ними.
     let mut excluded_dirs: std::collections::HashSet<u64> = std::collections::HashSet::new();
-    for (&n, e) in &entries {
+    for (&n, e) in entries {
         if !e.is_dir || n < FIRST_USER_RECORD {
             continue;
         }
@@ -380,7 +415,7 @@ where
     }
 
     let mut unresolved = 0u64;
-    for (&n, e) in &entries {
+    for (&n, e) in entries {
         if n < FIRST_USER_RECORD {
             continue; // служебные файлы тома неприкосновенны
         }
@@ -431,8 +466,7 @@ where
             // Файл не пуст, а экстентов нет: run list не прочитан (за
             // ATTRIBUTE_LIST или битая запись). Молчать тут нельзя.
             Some(KeptReason::ExtentsIncomplete)
-        } else if e.allocated < round_up(e.data_size, cluster_size) && !is_probably_compressed(e, cluster_size)
-        {
+        } else if e.allocated < round_up(e.data_size, cluster_size) && !e.compressed_or_sparse {
             Some(KeptReason::ExtentsIncomplete)
         } else {
             None
@@ -480,9 +514,6 @@ where
         );
     }
 
-    scan.ranges.finalize();
-    debug!(secs = pass1.elapsed().as_secs_f64(), "MFT scan: пути и совпадения");
-    Ok(scan)
 }
 
 fn under_excluded(
@@ -547,13 +578,6 @@ fn path_of_pub(
     out.push(name.name.clone());
     cache.insert(n, Some(out.clone()));
     Some(out)
-}
-
-/// Сжатый файл занимает МЕНЬШЕ места, чем его размер, и это нормально.
-/// Отличаем его от недочитанного run list'а по признаку сжатия у атрибута —
-/// здесь по косвенному: выделено меньше размера, но не ноль и кратно кластеру.
-fn is_probably_compressed(e: &Entry, cluster_size: u64) -> bool {
-    e.allocated > 0 && e.allocated % cluster_size == 0
 }
 
 fn round_up(v: u64, to: u64) -> u64 {
@@ -971,5 +995,230 @@ mod tests {
             println!("список путей:     {out}");
         }
         assert!(scan.files_excluded > 0, "не найдено ни одного исключаемого файла");
+    }
+}
+
+#[cfg(test)]
+mod rules_tests {
+    //! Правила исключения — отдельно от чтения NTFS.
+    //!
+    //! Записи здесь собраны руками, и это НЕ попытка изобразить настоящий том:
+    //! разбор NTFS проверен сверкой с самой Windows (17 889 файлов байт-в-байт),
+    //! а тут испытывается то, чего никакая сверка не покажет — решения. Часть
+    //! из них на живом томе не встретилась ни разу: жёстких ссылок среди
+    //! исключённых файлов там было ровно ноль.
+
+    use super::*;
+    use crate::exclusions::parse_patterns;
+
+    fn dir(parent: u64, name: &str) -> Entry {
+        Entry {
+            names: vec![Name { parent, name: name.into() }],
+            is_dir: true,
+            is_reparse: false,
+            data_size: 0,
+            extents: Vec::new(),
+            allocated: 0,
+            compressed_or_sparse: false,
+            resident_data: false,
+            broken: false,
+        }
+    }
+
+    /// Файл с одним именем и одним экстентом ровно по размеру.
+    fn file(parent: u64, name: &str, lcn: u64, clusters: u64) -> Entry {
+        Entry {
+            names: vec![Name { parent, name: name.into() }],
+            is_dir: false,
+            is_reparse: false,
+            data_size: clusters * 4096,
+            extents: vec![(lcn * 4096, clusters * 4096)],
+            allocated: clusters * 4096,
+            compressed_or_sparse: false,
+            resident_data: false,
+            broken: false,
+        }
+    }
+
+    fn run(entries: &[(u64, Entry)], patterns: &[&str]) -> MftScan {
+        let map: HashMap<u64, Entry> = entries.iter().map(|(n, e)| (*n, clone_entry(e))).collect();
+        let parsed = parse_patterns(&patterns.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        let mut scan = MftScan::default();
+        decide(&map, &parsed, 4096, &mut scan);
+        scan.ranges.finalize();
+        scan
+    }
+
+    fn clone_entry(e: &Entry) -> Entry {
+        Entry {
+            names: e.names.iter().map(|n| Name { parent: n.parent, name: n.name.clone() }).collect(),
+            is_dir: e.is_dir,
+            is_reparse: e.is_reparse,
+            data_size: e.data_size,
+            extents: e.extents.clone(),
+            allocated: e.allocated,
+            compressed_or_sparse: e.compressed_or_sparse,
+            resident_data: e.resident_data,
+            broken: e.broken,
+        }
+    }
+
+    fn kept_reasons(scan: &MftScan) -> Vec<KeptReason> {
+        scan.kept.iter().map(|(_, r)| *r).collect()
+    }
+
+    /// Жёсткая ссылка ПОПЕРЁК исключения: одно имя под правилом, второе — нет.
+    /// Данные общие, и вычесть их значит выпотрошить уцелевшее имя. Урок xfs P3,
+    /// на живом томе не встретился ни разу.
+    #[test]
+    fn a_hard_link_outside_the_exclusion_keeps_the_data() {
+        let mut shared = file(20, "shared.tmp", 100, 2);
+        shared.names.push(Name { parent: ROOT_RECORD, name: "keep-me.bin".into() });
+        let scan = run(
+            &[
+                (20, dir(ROOT_RECORD, "Temp")),
+                (30, shared),
+            ],
+            &["*.tmp"],
+        );
+        assert_eq!(scan.files_excluded, 0, "данные общие с уцелевшим именем — вычитать нельзя");
+        assert_eq!(kept_reasons(&scan), vec![KeptReason::OtherNameKept]);
+        assert!(scan.ranges.is_empty(), "ни один кластер не должен быть вычтен");
+        // Запись из каталога всё равно убирается — под правило имя попало.
+        assert_eq!(scan.paths.len(), 1);
+    }
+
+    /// Оба имени под исключением — данных не нужно никому.
+    #[test]
+    fn a_hard_link_excluded_under_every_name_is_subtracted() {
+        let mut shared = file(20, "a.tmp", 100, 2);
+        shared.names.push(Name { parent: 20, name: "b.tmp".into() });
+        let scan = run(&[(20, dir(ROOT_RECORD, "Temp")), (30, shared)], &["*.tmp"]);
+        assert_eq!(scan.files_excluded, 1);
+        assert_eq!(scan.bytes_excluded, 2 * 4096);
+        assert!(scan.kept.is_empty());
+    }
+
+    /// Резидентный файл: данные внутри записи MFT, кластеров нет. Вычитать
+    /// нечего, но из каталога он уходит.
+    #[test]
+    fn a_resident_file_keeps_its_data_and_loses_its_entry() {
+        let mut small = file(ROOT_RECORD, "tiny.tmp", 0, 0);
+        small.resident_data = true;
+        small.data_size = 300;
+        small.extents.clear();
+        small.allocated = 0;
+        let scan = run(&[(30, small)], &["*.tmp"]);
+        assert_eq!(scan.files_excluded, 0);
+        assert_eq!(kept_reasons(&scan), vec![KeptReason::Resident]);
+        assert_eq!(scan.paths.len(), 1, "запись из каталога удаляется");
+    }
+
+    /// Экстенты не покрывают размер файла — значит run list прочитан не весь
+    /// (ATTRIBUTE_LIST). Вычесть половину файла хуже, чем не вычитать: файл
+    /// остаётся целиком. На реальном томе за этим пряталось 1079 МиБ.
+    #[test]
+    fn a_half_read_run_list_keeps_the_whole_file() {
+        let mut torn = file(ROOT_RECORD, "big.tmp", 100, 2);
+        torn.data_size = 100 * 4096; // заявлено 100 кластеров, найдено 2
+        let scan = run(&[(30, torn)], &["*.tmp"]);
+        assert_eq!(scan.files_excluded, 0);
+        assert_eq!(kept_reasons(&scan), vec![KeptReason::ExtentsIncomplete]);
+        assert!(scan.ranges.is_empty());
+    }
+
+    /// Файл без единого экстента, но не пустой — тот же случай, только грубее.
+    #[test]
+    fn a_file_with_no_extents_at_all_is_kept() {
+        let mut hidden = file(ROOT_RECORD, "x.tmp", 0, 0);
+        hidden.data_size = 954 * 1024 * 1024;
+        hidden.extents.clear();
+        hidden.allocated = 0;
+        let scan = run(&[(30, hidden)], &["*.tmp"]);
+        assert_eq!(kept_reasons(&scan), vec![KeptReason::ExtentsIncomplete]);
+    }
+
+    /// Точка повторного разбора: удаляем саму точку, к цели не прикасаемся.
+    #[test]
+    fn a_reparse_point_keeps_its_target() {
+        let mut link = file(ROOT_RECORD, "junction.tmp", 100, 2);
+        link.is_reparse = true;
+        let scan = run(&[(30, link)], &["*.tmp"]);
+        assert_eq!(kept_reasons(&scan), vec![KeptReason::Reparse]);
+        assert!(scan.ranges.is_empty(), "цель junction'а не наша");
+    }
+
+    /// Содержимое исключённого каталога вычитается, но ОТДЕЛЬНОЙ записи на
+    /// удаление не получает: каталог унесёт его с собой.
+    #[test]
+    fn files_inside_an_excluded_directory_ride_along() {
+        let scan = run(
+            &[
+                (20, dir(ROOT_RECORD, "Temp")),
+                (21, dir(20, "nested")),
+                (30, file(20, "a.bin", 100, 1)),
+                (31, file(21, "b.bin", 200, 1)),
+            ],
+            &["Temp"],
+        );
+        assert_eq!(scan.files_excluded, 2, "оба файла вычтены");
+        assert_eq!(scan.bytes_excluded, 2 * 4096);
+        assert_eq!(scan.paths.len(), 1, "на удаление — только сам каталог");
+        assert_eq!(scan.paths[0].rel, "Temp");
+        assert!(scan.paths[0].is_dir);
+    }
+
+    /// Служебные записи тома неприкосновенны, как бы ни совпало имя.
+    #[test]
+    fn the_volume_own_files_are_never_excluded() {
+        let mut mft = file(ROOT_RECORD, "$MFT.tmp", 100, 8);
+        mft.names[0].name = "$Boot.tmp".into();
+        let scan = run(&[(7, mft)], &["*.tmp"]);
+        assert_eq!(scan.files_excluded, 0, "запись 7 — служебная");
+        assert!(scan.paths.is_empty());
+        assert!(scan.kept.is_empty());
+    }
+
+    /// Кириллица и пробелы в пути: матчер работает по компонентам, регистр не
+    /// важен. На живом томе такие пути были у каждого второго файла.
+    #[test]
+    fn cyrillic_and_spaces_match_by_component() {
+        let scan = run(
+            &[
+                (20, dir(ROOT_RECORD, "Пользователи")),
+                (21, dir(20, "Володя Большой")),
+                (22, dir(21, "TEMP")),
+                (30, file(22, "кэш.bin", 100, 3)),
+            ],
+            &["**\\Temp\\**"],
+        );
+        assert_eq!(scan.files_excluded, 1, "TEMP и Temp — одно и то же");
+        assert_eq!(scan.bytes_excluded, 3 * 4096);
+    }
+
+    /// Разреженный файл: дыры места не занимают, вычитается только реальное.
+    #[test]
+    fn a_sparse_file_subtracts_only_what_it_occupies() {
+        let mut sparse = file(ROOT_RECORD, "sparse.tmp", 100, 2);
+        sparse.data_size = 64 * 4096; // 64 кластера «по размеру», выделено 2
+        sparse.allocated = 2 * 4096;
+        // Признак разреженности берётся у АТРИБУТА. Без него файл, занимающий
+        // меньше своего размера, неотличим от недочитанного run list'а — и
+        // должен считаться недочитанным, потому что ошибиться в эту сторону
+        // безопаснее.
+        sparse.compressed_or_sparse = true;
+        let scan = run(&[(30, sparse)], &["*.tmp"]);
+        assert_eq!(scan.files_excluded, 1, "выделенное кратно кластеру — файл сжат/разрежен");
+        assert_eq!(scan.bytes_excluded, 2 * 4096);
+    }
+
+    /// Оборванная цепочка родителей: путь не собрать, правила не применить.
+    /// Такую запись нельзя ни вычесть, ни удалить — только сосчитать.
+    #[test]
+    fn an_orphan_record_is_left_alone() {
+        let scan = run(&[(30, file(999, "orphan.tmp", 100, 1))], &["*.tmp"]);
+        assert_eq!(scan.files_excluded, 0);
+        assert!(scan.paths.is_empty());
+        assert!(scan.ranges.is_empty());
     }
 }
