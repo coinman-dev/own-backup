@@ -90,8 +90,8 @@ fn u64at(b: &[u8], o: usize) -> u64 {
     u64::from_le_bytes(b[o..o + 8].try_into().unwrap())
 }
 
-// --- CRC-32C (Castagnoli), raw running form (same primitive as ext4's) ---
-fn crc32c_raw(seed: u32, data: &[u8]) -> u32 {
+// --- CRC-32C (Castagnoli), raw running form (same primitive as ext4's and xfs's) ---
+pub(crate) fn crc32c_raw(seed: u32, data: &[u8]) -> u32 {
     let mut crc = seed;
     for &b in data {
         crc ^= b as u32;

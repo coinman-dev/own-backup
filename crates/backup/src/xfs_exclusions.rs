@@ -302,7 +302,7 @@ fn decode_bmbt_rec(b: &[u8], o: usize) -> (u64, Extent) {
 }
 
 /// Read inode `ino` (its `inodesize` bytes).
-fn read_inode(vol: &mut dyn RawVolume, sb: &Sb, ino: u64) -> Result<Vec<u8>> {
+pub(crate) fn read_inode(vol: &mut dyn RawVolume, sb: &Sb, ino: u64) -> Result<Vec<u8>> {
     let off = sb.inode_offset(ino);
     if off + sb.inodesize > vol.len() {
         return Err(bad("inode past device"));
@@ -317,7 +317,7 @@ fn read_inode(vol: &mut dyn RawVolume, sb: &Sb, ino: u64) -> Result<Vec<u8>> {
 
 /// The data fork literal area of an inode (`[176, 176 + forkoff*8)` or, when
 /// forkoff==0, to the end of the inode).
-fn data_fork(inode: &[u8], sb: &Sb) -> (usize, usize) {
+pub(crate) fn data_fork(inode: &[u8], sb: &Sb) -> (usize, usize) {
     let forkoff = inode[0x52] as usize;
     let end = if forkoff == 0 { sb.inodesize as usize } else { DINODE_CORE_V3 + forkoff * 8 };
     (DINODE_CORE_V3, end.min(inode.len()))
@@ -326,6 +326,19 @@ fn data_fork(inode: &[u8], sb: &Sb) -> (usize, usize) {
 /// Resolve a data/attr fork of format EXTENTS or BTREE into extents. `nextents`
 /// bounds the extents-format reads; BTREE walks child bmbt blocks.
 fn fork_extents(vol: &mut dyn RawVolume, sb: &Sb, inode: &[u8], format: u8, nextents: u64) -> Result<Vec<Extent>> {
+    Ok(fork_extents_at(vol, sb, inode, format, nextents)?.into_iter().map(|(_, e)| e).collect())
+}
+
+/// Same, keeping each extent's LOGICAL offset in the fork. Directory work needs
+/// it: a dirent's address is derived from the logical block number, so an
+/// extent list without offsets cannot locate the matching hash entry.
+pub(crate) fn fork_extents_at(
+    vol: &mut dyn RawVolume,
+    sb: &Sb,
+    inode: &[u8],
+    format: u8,
+    nextents: u64,
+) -> Result<Vec<(u64, Extent)>> {
     let (fs, fe) = data_fork(inode, sb);
     let mut out = Vec::new();
     match format {
@@ -335,9 +348,9 @@ fn fork_extents(vol: &mut dyn RawVolume, sb: &Sb, inode: &[u8], format: u8, next
                 if o + 16 > fe {
                     return Err(bad("extent list exceeds fork"));
                 }
-                let (_off, e) = decode_bmbt_rec(inode, o);
+                let (off, e) = decode_bmbt_rec(inode, o);
                 if e.count > 0 {
-                    out.push(e);
+                    out.push((off, e));
                 }
             }
         }
@@ -365,7 +378,7 @@ fn fork_extents(vol: &mut dyn RawVolume, sb: &Sb, inode: &[u8], format: u8, next
 }
 
 /// Walk a bmbt btree block (fs-block `fsblock`) collecting leaf extents.
-fn walk_bmbt(vol: &mut dyn RawVolume, sb: &Sb, fsblock: u64, _parent_level: u64, out: &mut Vec<Extent>, depth: u32) -> Result<()> {
+fn walk_bmbt(vol: &mut dyn RawVolume, sb: &Sb, fsblock: u64, _parent_level: u64, out: &mut Vec<(u64, Extent)>, depth: u32) -> Result<()> {
     if depth > 16 {
         return Err(bad("bmbt too deep"));
     }
@@ -382,9 +395,9 @@ fn walk_bmbt(vol: &mut dyn RawVolume, sb: &Sb, fsblock: u64, _parent_level: u64,
             if o + 16 > blk.len() {
                 return Err(bad("bmbt leaf rec out of range"));
             }
-            let (_off, e) = decode_bmbt_rec(&blk, o);
+            let (off, e) = decode_bmbt_rec(&blk, o);
             if e.count > 0 {
-                out.push(e);
+                out.push((off, e));
             }
         }
     } else {
