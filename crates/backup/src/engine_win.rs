@@ -1889,6 +1889,10 @@ struct PreparedPartition {
     bitlocker: Option<BitLockerSource>,
     /// Тот же том, но пароля нет: копируется шифротекстом через окно на диск.
     locked_window: Option<(String, u64, u64)>,
+    /// Запрет записи на диск-источник: держится, пока раздел, открытый силами
+    /// Windows, остаётся смонтированным — то есть до конца копирования.
+    #[allow(dead_code)]
+    ro_guard: Option<crate::windows_unlock_win::ReadOnlyDisk>,
     /// The container's own header, captured so a restore can put the
     /// encryption back (D19). `None` when the partition was not encrypted or
     /// the header could not be read.
@@ -2651,7 +2655,7 @@ fn backup_disk_inner(
         // мастер их просто не выбирал, и ветка ни разу не встречалась вживую.
         // Отказ — не ошибка, а ответ: том зашифрован и заперт, читать его надо
         // через окно на диск, как это давно делает копия одного тома.
-        let locked = match probe.read_at(0, &mut header) {
+        let mut locked = match probe.read_at(0, &mut header) {
             Ok(()) => false,
             Err(e) if is_bitlocker_locked(&e) => {
                 info!(part = p.part_index, "partition is a locked BitLocker volume");
@@ -2673,9 +2677,41 @@ fn backup_disk_inner(
         };
         // BitLocker: ключ и окно на диск, за которым лежит шифротекст. Пароля
         // нет — раздел всё равно копируется, но как есть, шифротекстом.
+        // Запрет записи на диск, если раздел придётся открывать силами Windows.
+        // Живёт до конца копирования: том остаётся смонтированным, и Windows
+        // пишет в него, когда ей вздумается.
+        let mut part_ro_guard: Option<crate::windows_unlock_win::ReadOnlyDisk> = None;
         let bitlocker = match &p.passphrase {
             Some(pass) if locked || crate::bitlocker::is_bitlocker(&header) => {
-                open_bitlocker_source(&read_path, pass)?
+                match open_bitlocker_source(&read_path, pass) {
+                    Ok(src) => src,
+                    // Свой разбор FVE знает только AES-XTS, а размер сектора
+                    // берёт из BPB — которого у ReFS нет вовсе («implausible
+                    // sector size 0», замер 2026-08-20). И то и другое не повод
+                    // ронять задание: то же самое умеет сама Windows, и после
+                    // неё раздел становится обычным смонтированным.
+                    Err(e) => {
+                        warn!(part = p.part_index, error = %e,
+                              "свой разбор BitLocker не справился — прошу открыть Windows");
+                        match unlock_source_with_windows(&read_path, pass) {
+                            Ok(guard) => {
+                                part_ro_guard = Some(guard);
+                                locked = false; // том теперь читается как все
+                                // Перечитать заголовок: под ним уже открытая ФС,
+                                // и по ней дальше определяется всё остальное.
+                                drop(probe);
+                                probe = WinRawDevice::open_read(&read_path)?;
+                                let _ = probe.read_at(0, &mut header);
+                                None
+                            }
+                            Err(e2) => {
+                                warn!(part = p.part_index, error = %e2,
+                                      "Windows тоже не открыла раздел");
+                                return Err(e); // наружу — первая ошибка, она по делу
+                            }
+                        }
+                    }
+                }
             }
             _ => None,
         };
@@ -2823,6 +2859,7 @@ fn backup_disk_inner(
             luks,
             bitlocker,
             locked_window: locked_extent,
+            ro_guard: part_ro_guard,
             volume_len,
             part_offset,
             filesystem: pm.filesystem,
