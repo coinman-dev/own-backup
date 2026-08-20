@@ -37,6 +37,10 @@
 set -euo pipefail
 
 INVOKE_DIR="$(pwd)"          # откуда запустили — туда и ляжет архив
+# Абсолютный путь к самому скрипту — ЗАПОМНИТЬ ДО перехода в корень: `--help`
+# читает справку из собственного текста, а после `cd` относительный $0
+# («clean-artifacts.sh», если запускали из scripts/) уже никуда не ведёт.
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BASE="$(basename "$ROOT")"
 cd "$ROOT"
@@ -75,7 +79,7 @@ ARCHIVE_EXTRA_EXCLUDES=("win-files" "linux-files" "tmp" ".idea" "*.iml")
 
 human() { du -sh "$1" 2>/dev/null | cut -f1; }
 
-usage() { sed -n '2,/^set -euo/p' "$0" | grep '^#' | sed 's/^# \{0,1\}//'; exit 0; }
+usage() { sed -n '2,/^set -euo/p' "$SELF" | grep '^#' | sed 's/^# \{0,1\}//'; exit 0; }
 
 # find по дереву без target/.git/node_modules — иначе обход 16 ГБ ради пары
 # файлов мусора. win-files/ и linux-files/ тоже мимо: там точки монтирования, и
