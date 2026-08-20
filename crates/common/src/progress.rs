@@ -1,6 +1,6 @@
 use crate::types::BackupStatus;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct BackupProgress {
     pub backup_id: String,
     pub status: BackupStatus,
@@ -8,6 +8,17 @@ pub struct BackupProgress {
     pub blocks_total: u64,
     pub bytes_written: u64,
     pub speed_bps: u64,
+    /// Разбивка ОСТАВШИХСЯ файлов по типам, если она уже известна.
+    ///
+    /// Сканер видит каждый файл с его размером ещё ДО копирования, то есть
+    /// сводка готова через минуту после старта — а показывалась она только в
+    /// конце, когда копия уже снята. Здесь она едет в интерфейс сразу после
+    /// скана; в остальных сообщениях о ходе поле пустое, чтобы не гонять одно
+    /// и то же по десять раз в секунду.
+    ///
+    /// Пары «имя категории → байты», а не структура: `common` не знает про
+    /// `backup::exclusions::CategorySizes` и знать не должен.
+    pub categories: Option<Vec<(String, u64)>>,
 }
 
 impl BackupProgress {

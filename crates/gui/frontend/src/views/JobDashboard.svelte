@@ -141,8 +141,22 @@
     { key: 'linux', name: 'Linux', color: '#14b8a6' },
     { key: 'other', name: 'Другое', color: '#9aa0ad' },
   ] as const;
+  // Сводка, присланная сразу после скана. Приходит одним сообщением и дальше
+  // не меняется, поэтому держится отдельно от `progress`, который обновляется
+  // по десять раз в секунду и это поле не несёт.
+  let liveCategories = $state<Record<string, number> | null>(null);
+  $effect(() => {
+    const pairs = progress?.categories;
+    if (pairs && pairs.length) {
+      liveCategories = Object.fromEntries(pairs);
+    }
+    // Прогон кончился — дальше показываем то, что записано в результате.
+    if (!progress) liveCategories = null;
+  });
+
   const catData = $derived.by(() => {
-    const c = lastRun?.categories;
+    // Во время копирования — свежая сводка от сканера; после — из результата.
+    const c = liveCategories ?? lastRun?.categories;
     if (!c) return null;
     const total = CAT_META.reduce((s, m) => s + (c[m.key] ?? 0), 0);
     if (total <= 0) return null;
@@ -277,6 +291,29 @@
         </span>
       </div>
     </div>
+    <!-- Разбивка по типам — сразу, как только сканер её посчитал, а не в конце.
+         Он видит каждый файл с размером ещё ДО копирования, так что ответ на
+         вопрос «что вообще в этой копии» готов через минуту после старта, а
+         не через двадцать. -->
+    {#if catData}
+      <div class="live-cats">
+        <div class="live-cats-head">Что войдёт в копию — по типам файлов</div>
+        <div class="catbar">
+          {#each barData?.filter((c) => c.bytes > 0) ?? [] as c}
+            <div class="catseg" style="width:{c.pct}%; background:{c.color}" title="{c.name}: {formatBytes(c.bytes)}"></div>
+          {/each}
+        </div>
+        <div class="cats">
+          {#each catData as c}
+            <div class="cat">
+              <span class="dot" style="background:{c.color}"></span>
+              <span class="cat-name">{c.name}</span>
+              <span class="cat-size">{formatBytes(c.bytes)}</span>
+            </div>
+          {/each}
+        </div>
+      </div>
+    {/if}
   {:else}
     <!-- stats row -->
     <div class="stats">
@@ -414,6 +451,11 @@
   .stats b { color: var(--head); font-weight: 600; }
   .reco { display: flex; align-items: center; gap: 6px; }
   .q { width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--text-muted); background: none; color: var(--text-muted); font-size: 10px; cursor: pointer; padding: 0; }
+  /* Разбивка под полосой прогресса: тот же вид, что в итоге, но с заголовком —
+     во время копирования она отвечает на другой вопрос («что будет в копии»),
+     и без подписи это читалось бы как результат. */
+  .live-cats { margin-top: 26px; }
+  .live-cats-head { font-size: 13px; color: var(--text-muted); margin-bottom: 4px; }
   .catbar { height: 9px; border-radius: 5px; overflow: hidden; display: flex; margin-top: 10px; }
   /* Every present category stays visible: tiny slices keep 5px and the
      large ones shrink to make room, so the bar still totals 100%. */

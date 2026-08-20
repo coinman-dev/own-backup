@@ -290,6 +290,56 @@ fn open_read_with_retry(path: &str) -> Result<WinRawDevice> {
 }
 
 /// Back up a volume into a freshly created, directly mountable VHDX.
+/// Отказать заранее, если исключения в qcow2 удалить будет нечем.
+///
+/// Данные исключённых файлов в копию не попадут в любом случае — они
+/// вычитаются из карты ДО копирования. А вот записи из каталога образа убирает
+/// драйвер файловой системы, и чтобы он их увидел, образ надо смонтировать:
+/// VHDX монтирует сама Windows, а qcow2 — только Arsenal Image Mounter. Без
+/// него исключённые файлы останутся в копии нулевыми призраками, а «настоящее
+/// удаление» — продуктовое требование (решение 2026-07-28), не пожелание.
+///
+/// Проверка стоит здесь, ДО первого прочитанного байта: узнать об этом через
+/// двадцать минут копирования — то же самое, что не узнать вовсе.
+#[cfg(target_os = "windows")]
+/// Отправить в интерфейс разбивку по типам файлов, как только она посчитана.
+///
+/// Одним сообщением и один раз: гонять её в каждом отчёте о ходе незачем —
+/// она не меняется до конца копирования.
+#[cfg(target_os = "windows")]
+fn report_categories(
+    progress: &mut impl FnMut(&BackupProgress) -> Result<()>,
+    categories: Option<&crate::exclusions::CategorySizes>,
+) {
+    let Some(c) = categories else { return };
+    let _ = progress(&BackupProgress {
+        backup_id: "prepare".into(),
+        status: BackupStatus::Running,
+        categories: Some(c.as_pairs()),
+        ..Default::default()
+    });
+}
+
+fn refuse_qcow2_exclusions_without_aim(
+    format: ImageFormat,
+    patterns_win: &[String],
+    patterns_linux: &[String],
+) -> Result<()> {
+    if format != ImageFormat::Qcow2 || (patterns_win.is_empty() && patterns_linux.is_empty()) {
+        return Ok(());
+    }
+    if crate::aim_install::status().installed {
+        return Ok(());
+    }
+    Err(OwnBackupError::Config(
+        "для формата qcow2 удаление исключённых файлов из готовой копии делает \
+         драйвер Arsenal Image Mounter, а он не установлен. Установите его \
+         (Инструменты → Драйвер монтирования) — или выключите исключения в \
+         задании, или выберите формат VHDX: его Windows монтирует сама."
+            .into(),
+    ))
+}
+
 pub fn backup_volume(
     req: &VolumeBackupRequest,
     progress: impl FnMut(&BackupProgress) -> Result<()>,
@@ -300,6 +350,7 @@ pub fn backup_volume(
             req.image_path.display()
         )));
     }
+    refuse_qcow2_exclusions_without_aim(req.image_format, &req.exclusion_patterns, &[])?;
     if let Some(parent) = req.image_path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
@@ -938,6 +989,7 @@ fn backup_volume_inner(
             blocks_total: 0,
             bytes_written: 0,
             speed_bps: 0,
+                categories: None,
         })
     };
     // Why the file walk did not happen — filled in below by whichever branch
@@ -1000,6 +1052,11 @@ fn backup_volume_inner(
                         records = mft.records_scanned,
                         "exclusions resolved from the MFT"
                     );
+                    // Сводка по типам файлов известна уже сейчас — сканер видел
+                    // каждый файл с размером. Отправляем её сразу, а не в конце:
+                    // человеку, который смотрит на полосу двадцать минут, есть
+                    // что почитать, и это ответ на вопрос «а что вообще в копии».
+                    report_categories(&mut progress, categories.as_ref());
                     if !mft.ranges.is_empty() {
                         map.apply_excluded_ranges(&mft.ranges);
                         zero_ranges = Some(mft.ranges);
@@ -1057,6 +1114,7 @@ fn backup_volume_inner(
                         blocks_total: total,
                         bytes_written: 0,
                         speed_bps: 0,
+                categories: None,
                     });
                 };
                 crate::ntfs_scan::scan_mft_with(&mut buffered, &req.exclusion_patterns, &mut report)
@@ -1066,6 +1124,7 @@ fn backup_volume_inner(
                     excluded_files = scan.files_excluded;
                     excluded_bytes = scan.bytes_excluded;
                     categories = Some(scan.categories);
+                    report_categories(&mut progress, categories.as_ref());
                     for (path, reason) in &scan.kept {
                         debug!(file = %path, reason = reason.as_str(), "данные остаются в копии");
                     }
@@ -1547,6 +1606,7 @@ fn backup_volume_inner(
         blocks_total: 0,
         bytes_written: outcome.bytes_copied,
         speed_bps: 0,
+                categories: None,
     });
     // Timed step by step inside finalize(): the stall lives in ONE of the
     // steps (flush of remaining cache vs handle close vs detach for VHDX;
@@ -1585,6 +1645,7 @@ fn backup_volume_inner(
             blocks_total: 0,
             bytes_written: bytes_copied_so_far,
             speed_bps: 0,
+                categories: None,
         });
     };
 
@@ -2584,6 +2645,11 @@ pub fn backup_disk(
     req: &DiskBackupRequest,
     progress: impl FnMut(&BackupProgress) -> Result<()>,
 ) -> Result<DiskBackupSummary> {
+    refuse_qcow2_exclusions_without_aim(
+        req.image_format,
+        &req.exclusion_patterns_windows,
+        &req.exclusion_patterns_linux,
+    )?;
     if req.image_path.exists() {
         return Err(OwnBackupError::Config(format!(
             "output image already exists: {}",
@@ -2838,6 +2904,7 @@ fn backup_disk_inner(
                 blocks_total: 0,
                 bytes_written: 0,
                 speed_bps: 0,
+                categories: None,
             })
         };
         let pm = match &bitlocker {
@@ -2860,6 +2927,7 @@ fn backup_disk_inner(
                         blocks_total: total,
                         bytes_written: 0,
                         speed_bps: 0,
+                categories: None,
                     })
                 },
             ),
@@ -2927,6 +2995,10 @@ fn backup_disk_inner(
             vss,
         });
     }
+
+    // Разделы подготовлены — значит сводка по типам файлов посчитана по всем
+    // сразу. Отправляем её одним сообщением, до первого скопированного блока.
+    report_categories(&mut progress, categories.as_ref());
 
     // 3a. Parent chain (plan D5). A non-full kind writes a differencing CHILD
     // over the previous whole-disk image; a broken/incompatible parent falls
@@ -3159,6 +3231,7 @@ fn backup_disk_inner(
         blocks_total: 0,
         bytes_written: bytes_copied,
         speed_bps: 0,
+                categories: None,
     });
     target.finalize()?;
     for prep in &mut prepared {
@@ -3195,6 +3268,7 @@ fn backup_disk_inner(
                 blocks_total: 0,
                 bytes_written: bytes_copied,
                 speed_bps: 0,
+                categories: None,
             });
         };
         match req.image_format {

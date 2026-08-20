@@ -666,6 +666,12 @@ pub struct JobProgress {
     /// the file next to the destination folder. Empty in old events.
     #[serde(default)]
     pub image_file_name: String,
+    /// Разбивка оставшихся файлов по типам — приходит ОДИН раз, сразу после
+    /// скана, и дальше не меняется. Сканер видит каждый файл с размером ещё до
+    /// копирования, так что показывать её только в конце незачем: человек
+    /// смотрит на полосу двадцать минут, и это ответ на вопрос «что в копии».
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub categories: Vec<(String, u64)>,
 }
 
 /// Sink for orchestration events. The GUI forwards these to Tauri window
@@ -1384,7 +1390,12 @@ async fn perform_backup(
                 };
                 // "finalize" has no granular progress — always emit it so the UI
                 // leaves the frozen 100% state; otherwise throttle as usual.
-                if phase == "finalize"
+                // Сообщение со сводкой по типам приходит одно и в единственный
+                // момент — сразу после скана. Через троттлинг его пропускать
+                // нельзя: другого такого не будет.
+                let has_categories = p.categories.is_some();
+                if has_categories
+                    || phase == "finalize"
                     || phase == "exclusions"
                     || permille != last_permille
                     || last_emit.elapsed().as_millis() >= 400
@@ -1402,6 +1413,7 @@ async fn perform_backup(
                         volume_count: count,
                         volume: vol_label_bg.clone(),
                         image_file_name: image_name.clone(),
+                        categories: p.categories.clone().unwrap_or_default(),
                     });
                 }
                 Ok(())
@@ -1428,6 +1440,7 @@ async fn perform_backup(
                             volume_count: count,
                             volume: vol_label_bg.clone(),
                             image_file_name: image_name.clone(),
+                        categories: Vec::new(),
                         });
                     }
                     Ok(())
@@ -1683,7 +1696,11 @@ async fn perform_disk_backup(
             // "finalize" has no granular progress — always emit it so the UI
             // leaves the frozen 100 %; "prepare" (permille 0) shows on its first
             // tick then rides the 400 ms throttle, same as the per-volume path.
-            if phase == "finalize"
+            // Сводка по типам приходит один раз, сразу после скана раздела —
+            // через троттлинг её пропускать нельзя, другой такой не будет.
+            let has_categories = p.categories.is_some();
+            if has_categories
+                || phase == "finalize"
                 || phase == "exclusions"
                 || permille != last_permille
                 || last_emit.elapsed().as_millis() >= 400
@@ -1701,6 +1718,7 @@ async fn perform_disk_backup(
                     volume_count: 1,
                     volume: format!("Диск {disk_number} · {model}"),
                     image_file_name: image_name.clone(),
+                    categories: p.categories.clone().unwrap_or_default(),
                 });
             }
             Ok(())
@@ -1728,6 +1746,7 @@ async fn perform_disk_backup(
                         volume_count: 1,
                         volume: format!("Диск {disk_number} · {model}"),
                         image_file_name: image_name.clone(),
+                        categories: Vec::new(),
                     });
                 }
                 Ok(())
@@ -1909,6 +1928,7 @@ async fn perform_backup(
                         volume_count: count,
                         volume: vol_label_bg.clone(),
                         image_file_name: image_name.clone(),
+                        categories: Vec::new(),
                     });
                 }
                 Ok(())

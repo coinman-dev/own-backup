@@ -48,6 +48,23 @@ pub struct CategorySizes {
 }
 
 impl CategorySizes {
+    /// Пары «категория → байты» для отправки в интерфейс.
+    ///
+    /// `common::BackupProgress` не знает про эту структуру и не должен: она
+    /// живёт в `backup`, а прогресс — общий для всех. Пары развязывают их и
+    /// заодно позволяют интерфейсу рисовать список, не зная состава полей.
+    pub fn as_pairs(&self) -> Vec<(String, u64)> {
+        vec![
+            ("images".into(), self.images),
+            ("video".into(), self.video),
+            ("audio".into(), self.audio),
+            ("documents".into(), self.documents),
+            ("windows".into(), self.windows),
+            ("linux".into(), self.linux),
+            ("other".into(), self.other),
+        ]
+    }
+
     /// Attribute `bytes` of a kept file to a category. `rel` is the file's path
     /// components from the volume root, lowercased (e.g.
     /// `["windows", "system32", "kernel32.dll"]`).
