@@ -524,9 +524,18 @@ impl BitLockerInfo {
     pub fn has_password(&self) -> bool {
         self.protectors.iter().any(|p| p.kind == PROTECT_PASSWORD)
     }
-    /// Nothing we can do with it today.
+    /// Справится ли НАШ разбор: и шифр знаком, и есть что набрать.
     pub fn openable(&self) -> bool {
         self.cipher_supported && self.protectors.iter().any(|p| p.usable)
+    }
+    /// Есть ли вообще что набрать руками — независимо от шифра.
+    ///
+    /// Это и есть вопрос, на который отвечает мастер, когда решает, показывать
+    /// поле пароля. Шифр, которого не знает наш разбор, ещё не значит «открыть
+    /// нечем»: том откроет сама Windows. Нечем открыть — это когда протектора
+    /// для человека нет вовсе (один только TPM).
+    pub fn typeable(&self) -> bool {
+        self.protectors.iter().any(|p| p.usable)
     }
 }
 
@@ -619,7 +628,16 @@ fn inspect_metadata(
                 // made the wizard tell such a volume "открыть нечем: TPM + PIN,
                 // ключ восстановления (48 цифр)" — naming, in the same
                 // sentence, the thing that would have worked.
-                usable: matches!(kind, PROTECT_PASSWORD | PROTECT_RECOVERY) && cipher_supported,
+                // Шифр здесь НЕ участвует намеренно. `usable` отвечает на
+                // вопрос «есть ли что набрать руками», а не «справится ли наш
+                // разбор»: том с AES-CBC открывает сама Windows
+                // (`windows_unlock_win`), и пароль от него нужен точно так же.
+                // Пока эти два вопроса были одним, мастер отказывался
+                // спрашивать пароль у ЛЮБОЙ флешки BitLocker To Go — а Windows
+                // шифрует съёмные диски в режиме совместимости (AES-CBC) по
+                // умолчанию, чтобы их читали старые версии. То есть отказ
+                // получал не редкий случай, а обычный.
+                usable: matches!(kind, PROTECT_PASSWORD | PROTECT_RECOVERY),
                 count: 1,
             }),
         }
@@ -1560,6 +1578,12 @@ mod tests {
     /// crypto — [`inspect_bitlocker`] reads protection types and the cipher,
     /// and that is all this fixture has to be honest about.
     fn volume_with_protectors(kinds: &[u16]) -> MemVolume {
+        volume_with_cipher(kinds, ALG_AES_XTS_128)
+    }
+
+    /// То же, но с заданным шифром — нужно, чтобы отличать «наш разбор не
+    /// умеет» от «открыть нечем».
+    fn volume_with_cipher(kinds: &[u16], alg: u16) -> MemVolume {
         let mut entries = Vec::new();
         for &kind in kinds {
             let mut vmk = vec![0u8; 8 + 28];
@@ -1574,7 +1598,7 @@ mod tests {
         let mut dataset = vec![0u8; dataset_size];
         put_u32(&mut dataset, 0x00, dataset_size as u32);
         put_u32(&mut dataset, 0x08, 0x30);
-        put_u16(&mut dataset, 0x24, ALG_AES_XTS_128);
+        put_u16(&mut dataset, 0x24, alg);
         dataset[0x30..].copy_from_slice(&entries);
 
         let info_off = 4096u64;
@@ -1588,6 +1612,35 @@ mod tests {
         put_u64(&mut dev, INFO_OFFSETS_FVE, info_off);
         dev[info_off as usize..info_off as usize + info.len()].copy_from_slice(&info);
         MemVolume(dev)
+    }
+
+
+    /// Флешка BitLocker To Go: шифр AES-CBC, и пароль у неё есть.
+    ///
+    /// Windows шифрует съёмные диски в режиме совместимости (AES-CBC 128) ПО
+    /// УМОЛЧАНИЮ — чтобы их читали старые версии. Наш разбор FVE такого шифра
+    /// не умеет, и это правда; неправдой было бы сказать «открыть нечем» —
+    /// том прекрасно открывает сама Windows, ей нужен тот же пароль.
+    ///
+    /// Пока эти два вопроса были одним полем, мастер не показывал поле пароля
+    /// НИ ОДНОЙ обычной флешке. Найдено живой проверкой 2026-08-20.
+    #[test]
+    fn a_removable_drive_in_compatible_mode_still_has_a_password_to_type() {
+        let cbc = inspect_bitlocker(&mut volume_with_cipher(
+            &[PROTECT_PASSWORD, PROTECT_RECOVERY],
+            0x8002, // AES-CBC 128 — то, что делает панель Windows со флешкой
+        ))
+        .unwrap();
+        assert!(!cbc.cipher_supported, "AES-CBC мы действительно не умеем");
+        assert!(!cbc.openable(), "наш разбор его не откроет");
+        assert!(cbc.typeable(), "но пароль у него есть — спросить обязаны");
+        assert!(cbc.has_password());
+
+        // Дискриминация: том только с TPM набрать нечем ни при каком шифре.
+        let tpm = inspect_bitlocker(&mut volume_with_cipher(&[0x0100], ALG_AES_XTS_128)).unwrap();
+        assert!(tpm.cipher_supported);
+        assert!(!tpm.typeable(), "у TPM-тома человеку набирать нечего");
+        assert!(!tpm.openable());
     }
 
     #[test]

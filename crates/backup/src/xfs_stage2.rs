@@ -17,6 +17,7 @@
 //! журнал (вход требует чистого лога, LSN в заголовках оставляем старыми).
 
 use own_backup_common::{OwnBackupError, Result};
+use tracing::{info, warn};
 
 use crate::fat_map::RawVolume;
 use crate::xfs_exclusions::{Extent, RemovableFile, Sb};
@@ -608,7 +609,7 @@ mod tests {
         // Наш план — по ИСХОДНОМУ образу.
         let mut v = vol(&img);
         let sb = parse_sb(&mut v).unwrap();
-        let scan = scan_xfs_exclusions(&mut v, &["c*.bin".to_string()], |_| Ok(())).unwrap();
+        let scan = scan_xfs_exclusions(&mut v, &["c*.bin".to_string()], false, |_| Ok(())).unwrap();
         assert_eq!(
             scan.removable.len(),
             victims.len(),
@@ -701,4 +702,212 @@ mod tests {
             "фикстура выродилась: все экстенты слились в один — слияние не проверено"
         );
     }
+}
+
+// ============================================================================
+// D5 — общий проход: решить, кого удалять, ДО первой правки
+// ============================================================================
+
+/// Итог Stage 2 по одному тому.
+#[derive(Debug, Default)]
+pub(crate) struct Stage2Outcome {
+    /// Байтовые патчи всех трёх шагов плюс один патч суперблока.
+    pub(crate) patches: Vec<(u64, Vec<u8>)>,
+    /// Иноды, чьи файлы удалены по-настоящему.
+    pub(crate) removed: Vec<u64>,
+    /// Кого пощадили и почему. Файл остаётся в каталоге нулевым призраком —
+    /// это Stage 1, а не потеря данных.
+    pub(crate) spared: Vec<(u64, String)>,
+    pub(crate) blocks_freed: u64,
+}
+
+/// Сколько раз пересобирать план, отбрасывая пощажённые файлы.
+///
+/// Отказ одного файла меняет условия для остальных (освободившийся инод — это
+/// новая запись в FINOBT, возвращённый экстент — новая запись в деревьях
+/// свободного места), поэтому одного прохода мало. На каждом круге набор
+/// кандидатов строго уменьшается, так что цикл конечен; сорока хватает, чтобы
+/// щажение четвертями сошлось на большом наборе.
+const MAX_ROUNDS: usize = 40;
+
+/// Спланировать настоящее удаление для файлов, которые Stage 1 признал своими.
+///
+/// **Главное правило: полуправленной ФС быть не должно.** У D2, D3 и D4 свои
+/// условия отказа — форма каталога node, полный лист FINOBT, переполнение или
+/// опустошение листа свободного места, — и узнать о них можно только попробовав.
+/// Поэтому план собирается целиком, и если хоть кто-то отказал, виновные файлы
+/// выбывают и план собирается ЗАНОВО с чистого тома. Патчи наружу уходят только
+/// когда все три шага согласились по всему набору.
+///
+/// Это тот же приём, что уже спас btrfs: «сомневаемся — откатываем на Stage 1».
+pub(crate) fn plan_stage2(
+    vol: &mut dyn RawVolume,
+    sb: &Sb,
+    files: &[RemovableFile],
+) -> Result<Stage2Outcome> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let mut out = Stage2Outcome::default();
+    if files.is_empty() {
+        return Ok(out);
+    }
+    let by_ino: BTreeMap<u64, &RemovableFile> = files.iter().map(|f| (f.ino, f)).collect();
+    let mut alive: BTreeSet<u64> = by_ino.keys().copied().collect();
+
+    for round in 0..MAX_ROUNDS {
+        if alive.is_empty() {
+            break;
+        }
+        // Кого выгнать по итогам этого круга: инод → причина.
+        let mut spare: BTreeMap<u64, String> = BTreeMap::new();
+
+        // --- D2: имена из каталогов ---------------------------------------
+        let mut by_dir: BTreeMap<u64, Vec<&RemovableFile>> = BTreeMap::new();
+        for ino in &alive {
+            let f = by_ino[ino];
+            by_dir.entry(f.parent).or_default().push(f);
+        }
+        let mut patches: Vec<(u64, Vec<u8>)> = Vec::new();
+        for (dir, group) in &by_dir {
+            let names: Vec<String> = group.iter().map(|f| f.name.clone()).collect();
+            let edit = crate::xfs_dirent::plan_dirent_removal(vol, sb, *dir, &names)?;
+            for r in &edit.refusals {
+                match r {
+                    crate::xfs_dirent::DirRefusal::NameNotFound { name, .. }
+                    | crate::xfs_dirent::DirRefusal::WouldEmptyBlock { name, .. } => {
+                        // Виноват один файл — выгоняем только его.
+                        if let Some(f) = group.iter().find(|f| &f.name == name) {
+                            spare.insert(f.ino, r.to_string());
+                        }
+                    }
+                    _ => {
+                        // Виноват каталог целиком: форма node, перекодировка
+                        // номеров инодов. Выгоняем всю его группу.
+                        for f in group {
+                            spare.insert(f.ino, r.to_string());
+                        }
+                    }
+                }
+            }
+            patches.extend(edit.patches);
+        }
+        if !spare.is_empty() {
+            for (ino, why) in spare {
+                alive.remove(&ino);
+                out.spared.push((ino, why));
+            }
+            continue;
+        }
+
+        // --- D3: иноды ------------------------------------------------------
+        let inos: Vec<u64> = alive.iter().copied().collect();
+        let freeing = crate::xfs_ifree::plan_inode_freeing(vol, sb, &inos)?;
+        for r in &freeing.refusals {
+            let ino = match r {
+                crate::xfs_ifree::InoRefusal::NotInTree { ino }
+                | crate::xfs_ifree::InoRefusal::AlreadyFree { ino }
+                | crate::xfs_ifree::InoRefusal::FinobtLeafFull { ino, .. }
+                | crate::xfs_ifree::InoRefusal::Other { ino, .. } => *ino,
+            };
+            spare.insert(ino, r.to_string());
+        }
+        if !spare.is_empty() {
+            for (ino, why) in spare {
+                alive.remove(&ino);
+                out.spared.push((ino, why));
+            }
+            continue;
+        }
+        patches.extend(freeing.patches);
+
+        // --- D4: блоки ------------------------------------------------------
+        let mask = (1u64 << sb.agblklog) - 1;
+        let mut returned: BTreeMap<u64, Vec<crate::xfs_efree::Free>> = BTreeMap::new();
+        let mut ags_of: BTreeMap<u64, BTreeSet<u64>> = BTreeMap::new(); // инод → группы
+        for ino in &alive {
+            let f = by_ino[ino];
+            for e in &f.extents {
+                let ag = e.startblock >> sb.agblklog;
+                returned
+                    .entry(ag)
+                    .or_default()
+                    .push(crate::xfs_efree::Free { agbno: e.startblock & mask, len: e.count });
+                ags_of.entry(*ino).or_default().insert(ag);
+            }
+        }
+        for v in returned.values_mut() {
+            v.sort_unstable();
+        }
+        let ext = crate::xfs_efree::plan_extent_freeing(vol, sb, &returned, &alive)?;
+        for r in &ext.refusals {
+            // Отказ назван по ГРУППЕ, а не по файлу: переполнение и опустошение
+            // листа — свойство всей пачки удалений, а не одного экстента.
+            //
+            // Щадить всю группу целиком было бы честно, но бесполезно: на
+            // корпусе из полутора тысяч файлов это оставляло НОЛЬ удалённых.
+            // Поэтому щадим ЧЕТВЕРТЬ её живых файлов и пробуем снова — набор
+            // строго уменьшается, так что круги конечны, а результат сходится
+            // к самой большой пачке, которую деревья выдерживают.
+            let ag = match r {
+                crate::xfs_efree::ExtRefusal::LeafFull { ag, .. }
+                | crate::xfs_efree::ExtRefusal::LeafUnderflow { ag, .. } => *ag,
+            };
+            let here: Vec<u64> = ags_of
+                .iter()
+                .filter(|(ino, ags)| ags.contains(&ag) && alive.contains(ino))
+                .map(|(ino, _)| *ino)
+                .collect();
+            let drop_n = (here.len() / 4).max(1);
+            for ino in here.iter().rev().take(drop_n) {
+                spare.insert(*ino, r.to_string());
+            }
+        }
+        if !spare.is_empty() {
+            for (ino, why) in spare {
+                alive.remove(&ino);
+                out.spared.push((ino, why));
+            }
+            continue;
+        }
+        patches.extend(ext.patches);
+
+        // --- суперблок: один патч на оба счётчика --------------------------
+        if let Some(p) =
+            crate::xfs_ifree::patch_superblock(vol, sb, freeing.sb_ifree_delta, ext.blocks_freed)?
+        {
+            patches.push(p);
+        }
+
+        out.patches = patches;
+        out.removed = inos;
+        out.blocks_freed = ext.blocks_freed;
+        if round > 0 {
+            info!(round, spared = out.spared.len(), "xfs stage2: план собран не с первого круга");
+        }
+        return Ok(out);
+    }
+
+    // Сюда попадаем двумя дорогами: кандидаты кончились (пощажены все) либо
+    // круги кончились раньше согласия. Разница важна для чтения журнала.
+    if out.spared.len() >= files.len() {
+        warn!(
+            files = files.len(),
+            "xfs stage2: пощажены все файлы — настоящее удаление не состоялось"
+        );
+    } else {
+        warn!(
+            files = files.len(),
+            spared = out.spared.len(),
+            "xfs stage2: план не сошёлся за {MAX_ROUNDS} кругов — настоящее удаление пропущено"
+        );
+    }
+    for f in files {
+        if !out.spared.iter().any(|(i, _)| *i == f.ino) {
+            out.spared.push((f.ino, "план Stage 2 не сошёлся".into()));
+        }
+    }
+    out.patches.clear();
+    out.removed.clear();
+    out.blocks_freed = 0;
+    Ok(out)
 }

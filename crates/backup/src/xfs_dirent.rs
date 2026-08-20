@@ -5,11 +5,11 @@
 //! складывается из четырёх шагов, и это первый: правка самих записей каталога.
 //! Инод и его экстенты здесь НЕ освобождаются — это D3 и D4.
 //!
-//! **Поэтому один D2 не даёт согласованной ФС и в продукт не включён.** После
-//! него имя исчезает, а инод остаётся размещённым и ни на что не сослан:
-//! `xfs_repair` назовёт его disconnected и предложит перенести в lost+found.
-//! Это ожидаемое промежуточное состояние; включать D2 в движок можно только
-//! вместе с D3/D4.
+//! **Сам по себе D2 согласованной ФС не даёт**: имя исчезает, а инод остаётся
+//! размещённым и ни на что не сослан — `xfs_repair` назовёт его disconnected.
+//! Поэтому в движок он идёт только связкой, которую собирает
+//! [`crate::xfs_stage2::plan_stage2`] (D5): либо все три шага согласились по
+//! всему набору, либо файл остаётся нулевым призраком.
 //!
 //! ## Откуда взялась раскладка
 //!
@@ -36,13 +36,11 @@
 //! Этого хватает на весь общий корпус (`exclusion_corpus`): его плотные
 //! каталоги на 300–600 имён — это leaf.
 //!
-//! Форма **node** (несколько листьев и блоки индекса свободного места)
-//! отвергается по имени причины: она появляется на тысячах имён в одном
-//! каталоге и требует правки `freeindex`, чего здесь нет.
-
-#![allow(dead_code)] // Шаги D2–D4 завершены и проверены, но в движок не
-// подключены: согласованную ФС даёт только вся связка, а решение, какие файлы
-// щадить, принимает общий проход D5. До тех пор вызывают их только тесты.
+//! Форма **node** (несколько листьев и блоки индекса свободного места) тоже
+//! поддержана: хеш-запись ищется по адресу во всех листьях сразу — это дешевле
+//! и надёжнее, чем повторять хеш-функцию ядра, — а копия «лучшей дыры» кладётся
+//! в блок индекса, чей диапазон `firstdb..firstdb+nvalid` накрывает нужный блок
+//! данных. Без этого ФС искала бы место там, где его нет.
 
 use own_backup_common::{OwnBackupError, Result};
 
@@ -81,6 +79,11 @@ const DIR3_BLOCK_MAGIC: u32 = 0x5844_4233; // "XDB3"
 const DIR3_FREE_MAGIC: u32 = 0x5844_4633; // "XDF3"
 const DIR3_LEAF1_MAGIC: u16 = 0x3DF1;
 const DIR3_LEAFN_MAGIC: u16 = 0x3DFF;
+/// Узел da-дерева над листьями. У по-настоящему большого каталога хеш-индекс
+/// сам становится деревом, и в диапазоне «листьев» появляется этот блок.
+/// Править его не нужно: мы не меняем ни хешей, ни числа записей — только
+/// обнуляем адрес внутри листа, — поэтому ключи узла остаются верными.
+const DA3_NODE_MAGIC: u16 = 0x3EBE;
 
 /// `xfs_dir3_data_hdr`: 48 байт общего заголовка + три записи bestfree + pad.
 const DATA_HDR: usize = 64;
@@ -90,6 +93,8 @@ const BESTFREE_OFF: usize = 0x30;
 const BLKINFO: usize = 56;
 /// `xfs_dir3_leaf_hdr`: blkinfo + count(2) + stale(2) + pad(4).
 const LEAF_HDR: usize = 64;
+/// `xfs_dir3_free_hdr`: общий заголовок(48) + firstdb + nvalid + nused + pad.
+const FREE_HDR: usize = 64;
 /// CRC лежит по 0x04 в блоках данных и по 0x0C в листьях.
 const DATA_CRC_OFF: usize = 4;
 const LEAF_CRC_OFF: usize = 12;
@@ -108,12 +113,17 @@ const NULL_BEST: u16 = 0xFFFF;
 /// в этом коде считается ошибкой, а не результатом.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DirRefusal {
-    /// Форма node: несколько листьев плюс индекс свободного места.
-    NodeForm { dir_ino: u64 },
     /// Удаление потребовало бы перекодировать все номера инодов из 8 байт в 4.
     ShortformToIno4 { dir_ino: u64 },
     /// Имени в каталоге нет (уже удалено или каталог не тот).
     NameNotFound { dir_ino: u64, name: String },
+    /// Блок данных остался бы совсем пустым.
+    ///
+    /// Такой блок XFS не оставляет — она изымает его из каталога и возвращает
+    /// в свободное место. Мы этого не делаем, а `xfs_repair` пустой блок
+    /// замечает («empty data block N: would junk block») и заодно объявляет
+    /// негодным хвост листа. Поэтому одно имя в блоке остаётся жить.
+    WouldEmptyBlock { dir_ino: u64, name: String },
     /// Всё остальное — с текстом.
     Other { dir_ino: u64, why: String },
 }
@@ -121,9 +131,6 @@ pub(crate) enum DirRefusal {
 impl std::fmt::Display for DirRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DirRefusal::NodeForm { dir_ino } => {
-                write!(f, "каталог {dir_ino}: форма node (индекс свободного места) не реализована")
-            }
             DirRefusal::ShortformToIno4 { dir_ino } => write!(
                 f,
                 "каталог {dir_ino}: удаление потребовало бы перекодировки номеров инодов в 4 байта"
@@ -131,6 +138,10 @@ impl std::fmt::Display for DirRefusal {
             DirRefusal::NameNotFound { dir_ino, name } => {
                 write!(f, "каталог {dir_ino}: имени {name:?} в нём нет")
             }
+            DirRefusal::WouldEmptyBlock { dir_ino, name } => write!(
+                f,
+                "каталог {dir_ino}: имя {name:?} оставлено, иначе блок данных стал бы пустым"
+            ),
             DirRefusal::Other { dir_ino, why } => write!(f, "каталог {dir_ino}: {why}"),
         }
     }
@@ -458,13 +469,13 @@ fn block_removal(
     // Разложить блоки по ролям: данные, лист, индекс свободного места.
     let mut data_blocks: Vec<(u64, u64)> = Vec::new(); // (логический, физический fsb)
     let mut leaf_blocks: Vec<(u64, u64)> = Vec::new();
-    let mut free_blocks = 0usize;
+    let mut free_blocks: Vec<(u64, u64)> = Vec::new();
     for (off, e) in &extents {
         for i in 0..e.count {
             let logical = off + i;
             let fsb = e.startblock + i;
             if logical >= free_first {
-                free_blocks += 1;
+                free_blocks.push((logical, fsb));
             } else if logical >= leaf_first {
                 leaf_blocks.push((logical, fsb));
             } else {
@@ -472,62 +483,70 @@ fn block_removal(
             }
         }
     }
-    if free_blocks > 0 || leaf_blocks.len() > 1 {
-        edit.refusals.push(DirRefusal::NodeForm { dir_ino });
-        return Ok(());
-    }
-
-    // Прочитать блоки данных и найти жертвы.
+    // Форма block: единственный блок, хеш-массив и хвост в нём же.
     let mut loaded: Vec<(u64, u64, Vec<u8>)> = Vec::new(); // (логический, fsb, байты)
     for (logical, fsb) in &data_blocks {
         let mut blk = vec![0u8; bs];
         vol.read_at(sb.fsblock_to_phys(*fsb), &mut blk)?;
         loaded.push((*logical, *fsb, blk));
     }
-
-    let wanted: std::collections::HashSet<&String> = names.iter().collect();
-    let mut found: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    // Форма block: единственный блок, хеш-массив и хвост в нём же.
     let single_block = loaded.len() == 1 && be32(&loaded[0].2, 0) as u32 == DIR3_BLOCK_MAGIC;
-    if !single_block && leaf_blocks.len() != 1 {
+    if !single_block && leaf_blocks.is_empty() {
         edit.refusals.push(DirRefusal::Other {
             dir_ino,
-            why: format!("неожиданная форма: {} блоков данных, {} листьев", loaded.len(), leaf_blocks.len()),
+            why: format!("{} блоков данных и ни одного листа", loaded.len()),
         });
         return Ok(());
     }
 
-    // Лист (для leaf-формы) читаем один раз и правим по мере удаления.
-    let mut leaf: Option<(u64, Vec<u8>)> = None;
-    if !single_block {
-        let (_, fsb) = leaf_blocks[0];
+    // Листья: у leaf-формы один, у node-формы несколько. Правим их в памяти.
+    let mut leaves: Vec<(u64, Vec<u8>)> = Vec::new();
+    for (_, fsb) in &leaf_blocks {
         let mut blk = vec![0u8; bs];
-        vol.read_at(sb.fsblock_to_phys(fsb), &mut blk)?;
+        vol.read_at(sb.fsblock_to_phys(*fsb), &mut blk)?;
         let magic = be16(&blk, 8) as u16;
-        if magic == DIR3_LEAFN_MAGIC {
-            edit.refusals.push(DirRefusal::NodeForm { dir_ino });
-            return Ok(());
+        if magic == DA3_NODE_MAGIC {
+            continue; // индексный узел: ключи не меняются
         }
-        if magic != DIR3_LEAF1_MAGIC {
+        if magic != DIR3_LEAF1_MAGIC && magic != DIR3_LEAFN_MAGIC {
             return Err(bad(format!("каталог {dir_ino}: лист с меткой {magic:#06x}")));
         }
         if !crc_matches(&blk, LEAF_CRC_OFF) {
             return Err(bad(format!("каталог {dir_ino}: CRC листа не сходится — не трогаю")));
         }
-        leaf = Some((fsb, blk));
+        leaves.push((*fsb, blk));
     }
 
+    // Блоки индекса свободного места (только у формы node): в них лежит копия
+    // «лучшей дыры» каждого блока данных, и без неё ФС будет искать место там,
+    // где его нет.
+    let mut frees: Vec<(u64, Vec<u8>)> = Vec::new();
+    for (_, fsb) in &free_blocks {
+        let mut blk = vec![0u8; bs];
+        vol.read_at(sb.fsblock_to_phys(*fsb), &mut blk)?;
+        if be32(&blk, 0) as u32 != DIR3_FREE_MAGIC {
+            return Err(bad(format!("каталог {dir_ino}: блок индекса с чужой меткой")));
+        }
+        if !crc_matches(&blk, DATA_CRC_OFF) {
+            return Err(bad(format!("каталог {dir_ino}: CRC индекса не сходится — не трогаю")));
+        }
+        frees.push((*fsb, blk));
+    }
+
+    let wanted: std::collections::HashSet<&String> = names.iter().collect();
+    let mut found: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Имена, судьба которых решена: удалены или намеренно оставлены.
+    let mut accounted: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut touched: Vec<usize> = Vec::new();
+    let mut leaves_touched = false;
+    let mut frees_touched = false;
+
     for idx in 0..loaded.len() {
         let (logical, _, blk) = &loaded[idx];
         let logical = *logical;
         let magic = be32(blk, 0) as u32;
-        if magic == DIR3_FREE_MAGIC {
-            continue;
-        }
         if magic != DIR3_DATA_MAGIC && magic != DIR3_BLOCK_MAGIC {
-            return Err(bad(format!("каталог {dir_ino}: блок с меткой {magic:#010x}")));
+            return Err(bad(format!("каталог {dir_ino}: блок данных с меткой {magic:#010x}")));
         }
         if !crc_matches(blk, DATA_CRC_OFF) {
             return Err(bad(format!("каталог {dir_ino}: CRC блока данных не сходится — не трогаю")));
@@ -540,12 +559,25 @@ fn block_removal(
             bs
         };
         let (ents, holes) = parse_data(blk, sb, limit)?;
-        let victims: Vec<DataEnt> =
+        let total = ents.len();
+        let mut victims: Vec<DataEnt> =
             ents.into_iter().filter(|e| wanted.contains(&e.name)).collect();
         if victims.is_empty() {
             continue;
         }
-
+        // Пустой блок данных — не наш случай: изымать его из каталога умеет
+        // только ядро. Оставляем одно имя, и оно становится нулевым призраком.
+        if victims.len() == total {
+            let keep = victims.pop().expect("victims непуст");
+            // В `removed` его класть НЕЛЬЗЯ — он остался жить. Но и в
+            // «имени нет в каталоге» он не виноват, поэтому учитывается
+            // отдельно.
+            accounted.insert(keep.name.clone());
+            edit.refusals.push(DirRefusal::WouldEmptyBlock { dir_ino, name: keep.name });
+            if victims.is_empty() {
+                continue;
+            }
+        }
         let mut holes = holes;
         let mut blk = loaded[idx].2.clone();
         for v in &victims {
@@ -556,24 +588,60 @@ fn block_removal(
             holes.sort_by_key(|h| h.at);
             found.insert(v.name.clone());
 
-            // Хеш-запись: в самом блоке (block) или в листе (leaf).
             if magic == DIR3_BLOCK_MAGIC {
                 let count = be32(&blk, bs - 8) as usize;
                 let ents_at = bs - 8 - count * 8;
                 kill_hash_entry(ents_at, count, bs - 4 + 2, &mut blk, addr)?;
             } else {
-                let (_, lblk) = leaf.as_mut().expect("leaf-форма без листа");
-                let count = be16(lblk, BLKINFO) as usize;
-                kill_hash_entry(LEAF_HDR, count, BLKINFO + 2, lblk, addr)?;
+                // Хеш-запись лежит в одном из листьев; какой именно — решает
+                // хеш имени, но искать по адресу дешевле и надёжнее, чем
+                // повторять хеш-функцию ядра.
+                let mut done = false;
+                for (_, lblk) in leaves.iter_mut() {
+                    let count = be16(lblk, BLKINFO) as usize;
+                    if kill_hash_entry(LEAF_HDR, count, BLKINFO + 2, lblk, addr).is_ok() {
+                        done = true;
+                        leaves_touched = true;
+                        break;
+                    }
+                }
+                if !done {
+                    return Err(bad(format!(
+                        "каталог {dir_ino}: в листьях нет записи с адресом {addr}"
+                    )));
+                }
             }
         }
         let best = rebuild_bestfree(&mut blk, &holes);
-        // У leaf-формы лист хранит копию «лучшего свободного» каждого блока.
-        if let Some((_, lblk)) = leaf.as_mut() {
-            let bestcount = be32(lblk, bs - 4) as usize;
-            if (logical as usize) < bestcount {
-                let bests_at = bs - 4 - bestcount * 2;
-                put_be16(lblk, bests_at + logical as usize * 2, best);
+
+        // Копия «лучшей дыры»: у leaf-формы в хвосте листа, у node-формы — в
+        // блоке индекса.
+        if !frees.is_empty() {
+            let mut placed = false;
+            for (_, fblk) in frees.iter_mut() {
+                let firstdb = be32(fblk, 48);
+                let nvalid = be32(fblk, 52);
+                if logical >= firstdb && logical < firstdb + nvalid {
+                    let at = FREE_HDR + (logical - firstdb) as usize * 2;
+                    put_be16(fblk, at, best);
+                    placed = true;
+                    frees_touched = true;
+                    break;
+                }
+            }
+            if !placed {
+                return Err(bad(format!(
+                    "каталог {dir_ino}: блок данных {logical} не покрыт индексом свободного места"
+                )));
+            }
+        } else if let Some((_, lblk)) = leaves.first_mut() {
+            if magic != DIR3_BLOCK_MAGIC {
+                let bestcount = be32(lblk, bs - 4) as usize;
+                if (logical as usize) < bestcount {
+                    let bests_at = bs - 4 - bestcount * 2;
+                    put_be16(lblk, bests_at + logical as usize * 2, best);
+                    leaves_touched = true;
+                }
             }
         }
         set_crc(&mut blk, DATA_CRC_OFF);
@@ -582,7 +650,7 @@ fn block_removal(
     }
 
     for n in names {
-        if !found.contains(n) {
+        if !found.contains(n) && !accounted.contains(n) {
             edit.refusals.push(DirRefusal::NameNotFound { dir_ino, name: n.clone() });
         }
     }
@@ -594,11 +662,17 @@ fn block_removal(
         let (_, fsb, blk) = &loaded[idx];
         edit.patches.push((sb.fsblock_to_phys(*fsb), blk.clone()));
     }
-    if let Some((fsb, mut lblk)) = leaf {
-        // У block-формы `stale` живёт в хвосте самого блока, у leaf — в листе;
-        // хвост block-формы уже записан выше вместе с блоком.
-        set_crc(&mut lblk, LEAF_CRC_OFF);
-        edit.patches.push((sb.fsblock_to_phys(fsb), lblk));
+    if leaves_touched {
+        for (fsb, mut blk) in leaves {
+            set_crc(&mut blk, LEAF_CRC_OFF);
+            edit.patches.push((sb.fsblock_to_phys(fsb), blk));
+        }
+    }
+    if frees_touched {
+        for (fsb, mut blk) in frees {
+            set_crc(&mut blk, DATA_CRC_OFF);
+            edit.patches.push((sb.fsblock_to_phys(fsb), blk));
+        }
     }
     edit.removed.extend(found);
     Ok(())
@@ -945,13 +1019,18 @@ mod tests {
         assert!(bad.is_empty(), "ядро ругалось на ФС:\n{bad:?}");
     }
 
-    /// Форма node отвергается по имени причины, а не молча и не порчей.
+    /// Форма node: несколько листьев, узел da-дерева над ними и отдельные
+    /// блоки индекса свободного места. Тысячи имён в одном каталоге — это она.
+    ///
+    /// Проверяется на живой ФС, потому что ошибиться тут можно тихо: если не
+    /// поправить копию «лучшей дыры» в блоке индекса, каталог останется
+    /// читаемым, а вот место в нём ФС будет искать не там.
     #[test]
     #[ignore = "needs root: builds a directory big enough to reach node form"]
-    fn node_form_is_refused_by_name() {
+    fn node_form_directories_are_edited_too() {
         use crate::exclusion_corpus as corpus;
-        if !corpus::is_root() || !have("mkfs.xfs") {
-            eprintln!("не root или нет mkfs.xfs — пропускаю");
+        if !corpus::is_root() || !have("mkfs.xfs") || !have("xfs_repair") {
+            eprintln!("не root или нет xfsprogs — пропускаю");
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -959,26 +1038,85 @@ mod tests {
         mkfs(&img, 768);
         let mnt = dir.path().join("mnt");
         std::fs::create_dir_all(&mnt).unwrap();
-        let ino = {
+        let (ino, victims, keepers) = {
             use std::os::linux::fs::MetadataExt;
             let _m = corpus::mounted(&img, &mnt);
             let d = mnt.join("huge");
             std::fs::create_dir(&d).unwrap();
+            let mut victims = Vec::new();
+            let mut keepers = Vec::new();
             for i in 0..6000u32 {
-                std::fs::write(d.join(format!("file-{i:06}-with-a-long-name.dat")), b"x").unwrap();
+                let n = format!("file-{i:06}-with-a-deliberately-long-name.dat");
+                std::fs::write(d.join(&n), b"x".repeat(64)).unwrap();
+                // Жертвы вразбивку по всему каталогу, а не подряд: так они
+                // попадают в разные блоки данных и разные листья.
+                if i % 7 == 3 {
+                    victims.push(n);
+                } else if i % 101 == 0 {
+                    keepers.push(n);
+                }
             }
-            std::fs::write(d.join("VICTIM.dat"), b"v").unwrap();
-            std::fs::metadata(&d).unwrap().st_ino()
+            (std::fs::metadata(&d).unwrap().st_ino(), victims, keepers)
         };
+
         let mut v = vol(&img);
-        let sb = parse_sb(&mut v).unwrap();
-        let edit = plan_dirent_removal(&mut v, &sb, ino, &["VICTIM.dat".to_string()]).unwrap();
-        assert!(edit.patches.is_empty(), "форму node трогать нельзя");
-        assert!(edit.removed.is_empty());
+        let sb = crate::xfs_exclusions::parse_sb(&mut v).unwrap();
+        let edit = plan_dirent_removal(&mut v, &sb, ino, &victims).unwrap();
+        // Единственное разрешённое щажение — «блок стал бы пустым».
+        for r in &edit.refusals {
+            assert!(
+                matches!(r, DirRefusal::WouldEmptyBlock { .. }),
+                "неожиданный отказ: {r}"
+            );
+        }
         assert!(
-            matches!(edit.refusals.as_slice(), [DirRefusal::NodeForm { .. }]),
-            "ожидали отказ NodeForm, получили {:?}",
-            edit.refusals
+            edit.removed.len() > victims.len() * 9 / 10,
+            "убрано {} из {} — форма node почти не поддалась",
+            edit.removed.len(),
+            victims.len()
         );
+        eprintln!("  node: убрано {} имён, патчей {}", edit.removed.len(), edit.patches.len());
+        drop(v);
+        apply(&img, &edit.patches);
+
+        // Ядро: имена исчезли, соседи целы, и в каталог можно ДОПИСЫВАТЬ —
+        // это и проверяет, что индекс свободного места остался верным.
+        {
+            let _m = corpus::mounted(&img, &mnt);
+            let d = mnt.join("huge");
+            for n in &edit.removed {
+                assert!(!d.join(n).exists(), "имя {n} осталось");
+            }
+            for n in &keepers {
+                assert_eq!(std::fs::read(d.join(n)).unwrap().len(), 64, "сосед {n} испорчен");
+            }
+            for i in 0..500u32 {
+                std::fs::write(d.join(format!("fresh-{i:05}-name.dat")), b"z".repeat(128)).unwrap();
+            }
+        }
+        let out = std::process::Command::new("xfs_repair").arg("-n").arg(&img).output().unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let bad: Vec<&str> = text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .filter(|l| {
+                !l.starts_with("Phase")
+                    && !l.starts_with('-')
+                    && !l.starts_with("No modify flag set")
+                    && !l.contains("host filesystem geometry")
+                    && !l.contains("Repair may fail")
+                    && !l.contains("sector size mismatch")
+                    && !l.contains("the image and the host filesystem")
+                    // Иноды и блоки освобождают D3 и D4 — здесь только имена.
+                    && !l.contains("disconnected inode")
+                    && !l.contains("lost+found")
+            })
+            .collect();
+        assert!(bad.is_empty(), "xfs_repair после правки node-каталога:\n{}", bad.join("\n"));
     }
 }

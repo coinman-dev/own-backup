@@ -2481,15 +2481,19 @@ fn prepare_partition_map(
         let mut out = none("xfs", None);
         if !patterns_linux.is_empty() {
             if let Ok(mut src2) = open() {
-                match crate::xfs_exclusions::scan_xfs_exclusions(src2.as_mut(), patterns_linux, tick) {
+                // `true` — Stage 2: записи каталогов, иноды и блоки. План
+                // собирается целиком и применяется только если все три шага
+                // согласились; иначе файл остаётся нулевым призраком.
+                match crate::xfs_exclusions::scan_xfs_exclusions(src2.as_mut(), patterns_linux, true, tick) {
                     Ok(scan) => {
                         out.excluded_files = scan.files_excluded;
                         out.excluded_bytes = scan.bytes_excluded;
                         out.categories = Some(scan.categories);
+                        out.patches = scan.patches;
                         if !scan.ranges.is_empty() {
-                            // xfs has no Stage 2: every excluded file stays in
-                            // the catalog, so its (zeroed) blocks stay in the
-                            // image — `droppable` is empty by construction.
+                            // Из образа уходит только то, что Stage 2 успел
+                            // вернуть в свободное место. Призрак держит свои
+                            // блоки: ФС всё ещё их читает.
                             m.apply_excluded_ranges(&scan.droppable, block_size);
                             out.zero_ranges = scan.ranges;
                         }
@@ -4797,7 +4801,10 @@ pub fn describe_encryption(disk: u32, offset: u64, length: u64) -> (Vec<String>,
                 }
             })
             .collect();
-        return (names, info.openable());
+        // Мастеру важно «есть ли что набрать», а не «справится ли наш разбор»:
+        // чего не умеем мы, откроет Windows. Иначе поле пароля не показывается
+        // там, где пароль отлично подошёл бы.
+        return (names, info.typeable());
     }
     match crate::luks::inspect_luks(&mut window) {
         Ok(info) => (info.methods, info.openable),

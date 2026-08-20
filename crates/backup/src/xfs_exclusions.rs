@@ -70,15 +70,17 @@ fn be64(b: &[u8], o: usize) -> u64 {
     u64::from_be_bytes(b[o..o + 8].try_into().unwrap())
 }
 
-/// Result of an xfs exclusion walk (Stage 1). `patches` is always empty — xfs
-/// Stage 1 edits no metadata.
+/// Result of an xfs exclusion walk. `patches` is empty unless Stage 2 ran and
+/// every candidate passed all three of its steps.
 pub struct XfsExclusionScan {
     /// PHYSICAL volume byte ranges of exclusive excluded extents — zeroed in
     /// the image.
     pub ranges: ByteRanges,
-    /// Always empty on xfs: Stage 1 leaves every excluded file in the catalog,
-    /// so the filesystem still reads those blocks and they must be stored (as
-    /// zeros) rather than dropped. Kept for symmetry with the other scanners.
+    /// Blocks Stage 2 actually returned to the free pool — safe to leave out of
+    /// the image entirely, because the filesystem no longer reads them. Empty
+    /// when Stage 2 is off or spared the file: a zero-filled ghost is still
+    /// listed in the catalog, so its sectors must be stored as the zeros they
+    /// became.
     pub droppable: ByteRanges,
     pub files_excluded: u64,
     pub entries_scanned: u64,
@@ -88,6 +90,9 @@ pub struct XfsExclusionScan {
     pub files_kept_shared: u64,
     pub categories: CategorySizes,
     pub patches: Vec<(u64, Vec<u8>)>,
+    /// Кого Stage 2 пощадил и почему: файл остался в каталоге нулевым
+    /// призраком. Наружу это идёт предупреждением, а не тишиной.
+    pub stage2_spared: Vec<(u64, String)>,
     /// Файлы, чьи данные Stage 1 занулил — то есть кандидаты на НАСТОЯЩЕЕ
     /// удаление (этап D). Stage 1 сам их не трогает структурно.
     pub(crate) removable: Vec<RemovableFile>,
@@ -104,6 +109,7 @@ impl XfsExclusionScan {
             files_kept_shared: 0,
             categories: CategorySizes::default(),
             patches: Vec::new(),
+            stage2_spared: Vec::new(),
             removable: Vec::new(),
         }
     }
@@ -280,6 +286,9 @@ pub(crate) struct RemovableFile {
     pub(crate) ino: u64,
     /// The directory holding the excluded name (Stage 2 has to edit it).
     pub(crate) parent: u64,
+    /// The name to take out of that directory — Stage 2 removes entries by
+    /// name, and the inode number alone does not identify one.
+    pub(crate) name: String,
     pub(crate) extents: Vec<Extent>,
     pub(crate) size: u64,
 }
@@ -579,9 +588,12 @@ fn walk_refcount(vol: &mut dyn RawVolume, sb: &Sb, ag: u64, agblock: u64, shared
 
 /// Walk the directory tree, match `patterns`, and zero exclusively-owned data
 /// extents of matched files (shared extents kept — reflink safety).
+/// `stage2` включает НАСТОЯЩЕЕ удаление (шаги D2–D5): записи каталогов, иноды
+/// и блоки. Без него остаётся Stage 1 — данные занулены, файл в каталоге.
 pub fn scan_xfs_exclusions(
     vol: &mut dyn RawVolume,
     patterns: &[String],
+    stage2: bool,
     mut tick: impl FnMut(u64) -> Result<()>,
 ) -> Result<XfsExclusionScan> {
     let mut scan = XfsExclusionScan::empty();
@@ -604,7 +616,7 @@ pub fn scan_xfs_exclusions(
     let mut stack: Vec<(u64, Vec<String>, bool)> = vec![(sb.rootino, Vec::new(), false)];
     // Per matched file: its extents (to zero if exclusive).
     // ino → (extents, size, parent dir ino)
-    let mut matched_files: HashMap<u64, (Vec<Extent>, u64, u64)> = HashMap::new();
+    let mut matched_files: HashMap<u64, (Vec<Extent>, u64, u64, String)> = HashMap::new();
 
     while let Some((ino, rel, sub_excluded)) = stack.pop() {
         if !visited.insert(ino) {
@@ -666,7 +678,7 @@ pub fn scan_xfs_exclusions(
                     let format = fi[5];
                     let nextents = be32(&fi, 0x4C);
                     if let Ok(exts) = fork_extents(vol, &sb, &fi, format, nextents) {
-                        matched_files.insert(e.ino, (exts, size, ino));
+                        matched_files.insert(e.ino, (exts, size, ino, e.name.clone()));
                     }
                 }
             } else if let Ok(fi) = read_inode(vol, &sb, e.ino) {
@@ -678,7 +690,7 @@ pub fn scan_xfs_exclusions(
 
     // Zero exclusively-owned extents; keep any that overlap a shared range.
     scan.files_excluded = matched_files.len() as u64;
-    for (&fino, (exts, size, parent)) in &matched_files {
+    for (&fino, (exts, size, parent, name)) in &matched_files {
         let mut any_shared = false;
         let mut ranges: Vec<(u64, u64)> = Vec::new();
         for e in exts {
@@ -700,17 +712,65 @@ pub fn scan_xfs_exclusions(
         scan.removable.push(RemovableFile {
             ino: fino,
             parent: *parent,
+            name: name.clone(),
             extents: exts.clone(),
             size: *size,
         });
     }
     scan.ranges.finalize();
+
+    // Stage 2: настоящее удаление. Патчи появляются только если весь набор
+    // прошёл все три шага; пощажённые файлы остаются нулевыми призраками, и их
+    // блоки обязаны остаться в образе — ФС всё ещё их читает.
+    if stage2 && !scan.removable.is_empty() {
+        match crate::xfs_stage2::plan_stage2(vol, &sb, &scan.removable) {
+            Ok(outcome) => {
+                let removed: std::collections::HashSet<u64> =
+                    outcome.removed.iter().copied().collect();
+                for f in &scan.removable {
+                    if !removed.contains(&f.ino) {
+                        continue;
+                    }
+                    for e in &f.extents {
+                        let a = sb.fsblock_to_phys(e.startblock);
+                        scan.droppable.add(a, a + e.count * sb.blocksize);
+                    }
+                }
+                scan.droppable.finalize();
+                // По одной строке на файл — это тысячи строк; журналу нужна
+                // сводка по причинам, а подробности лежат в самом результате.
+                let mut tally: std::collections::BTreeMap<&str, u64> = Default::default();
+                for (_, why) in &outcome.spared {
+                    *tally.entry(why.as_str()).or_default() += 1;
+                }
+                for (why, n) in &tally {
+                    warn!(files = n, reason = %why, "xfs stage2: файлы оставлены на Stage 1");
+                }
+                scan.stage2_spared = outcome.spared;
+                info!(
+                    removed = outcome.removed.len(),
+                    spared = scan.stage2_spared.len(),
+                    blocks_freed = outcome.blocks_freed,
+                    patches = outcome.patches.len(),
+                    "xfs exclusions: Stage 2 complete"
+                );
+                scan.patches = outcome.patches;
+            }
+            Err(e) => {
+                // Ни одного патча наружу: Stage 1 уже полноценный результат.
+                eprintln!("ОШИБКА plan_stage2: {e}");
+                warn!(error = %e, "xfs stage2: настоящее удаление не удалось — остаётся зануление");
+            }
+        }
+    }
+
     info!(
         files = scan.files_excluded,
         kept_shared = scan.files_kept_shared,
         bytes = scan.bytes_excluded,
         ranges = scan.ranges.iter().count(),
-        "xfs exclusions: Stage-1 scan complete"
+        patches = scan.patches.len(),
+        "xfs exclusions: scan complete"
     );
     Ok(scan)
 }
@@ -734,12 +794,21 @@ mod xfs_integration {
         }
     }
 
+    /// Тот же прогон, но с НАСТОЯЩИМ удалением (Stage 2).
+    fn run2(img: &Path, patterns: &[&str]) -> XfsExclusionScan {
+        let f = std::fs::File::open(img).unwrap();
+        let len = f.metadata().unwrap().len();
+        let mut vol = FileVol { f, len };
+        let pats: Vec<String> = patterns.iter().map(|s| s.to_string()).collect();
+        scan_xfs_exclusions(&mut vol, &pats, true, |_| Ok(())).unwrap()
+    }
+
     fn run(img: &Path, patterns: &[&str]) -> (XfsExclusionScan, FileVol) {
         let f = std::fs::File::open(img).unwrap();
         let len = f.metadata().unwrap().len();
         let mut vol = FileVol { f, len };
         let pats: Vec<String> = patterns.iter().map(|s| s.to_string()).collect();
-        let scan = scan_xfs_exclusions(&mut vol, &pats, |_| Ok(())).unwrap();
+        let scan = scan_xfs_exclusions(&mut vol, &pats, false, |_| Ok(())).unwrap();
         (scan, vol)
     }
 
@@ -841,7 +910,7 @@ mod xfs_integration {
         let len = f.metadata().unwrap().len();
         let mut vol = FileVol { f, len };
         assert!(
-            scan_xfs_exclusions(&mut vol, &["cache".to_string()], |_| Ok(())).is_err(),
+            scan_xfs_exclusions(&mut vol, &["cache".to_string()], false, |_| Ok(())).is_err(),
             "исключения должны отказать на грязном логе"
         );
         assert!(
@@ -983,5 +1052,174 @@ mod xfs_integration {
         let bad: Vec<&String> =
             complaints.iter().filter(|l| l.contains("error") || l.contains("corrupt")).collect();
         assert!(bad.is_empty(), "ядро ругалось на ФС:\n{bad:?}");
+    }
+
+    /// Приёмка Stage 2 целиком, через тот же вход, что зовёт движок.
+    ///
+    /// Отличие от `xfs_survives_mount_and_write` (Stage 1) в том, что здесь
+    /// файлы обязаны ИСЧЕЗНУТЬ из каталога, а не остаться нулевыми призраками,
+    /// и `xfs_repair` обязан молчать после всей операции.
+    ///
+    /// Корпус даёт полторы тысячи исключённых файлов в плотных и вложенных
+    /// каталогах — это не демонстрация на трёх файлах, а нагрузка, на которой
+    /// и проявляются щажения.
+    ///
+    /// **Замер 2026-08-20: удаляется 129–306 файлов из 1403** (три прогона
+    /// подряд; разброс от того, как ядро разложило корпус). Потолок ставит
+    /// RMAPBT: массовое удаление уводит его листья ниже минимума, а слияния
+    /// листьев ещё нет. Остальные остаются нулевыми призраками — то есть на
+    /// Stage 1: данных в копии нет, имя в каталоге есть. Ограничение
+    /// КОЛИЧЕСТВЕННОЕ, а не качественное: образ согласован в любом случае, и
+    /// проверяет тест именно это.
+    #[test]
+    #[ignore = "needs root: loop-mounts the patched image and writes to it"]
+    fn stage2_removes_the_files_and_repair_stays_clean() {
+        use crate::exclusion_corpus as corpus;
+        use std::os::unix::fs::FileExt;
+        if !corpus::is_root() {
+            eprintln!("не root — пропускаю");
+            return;
+        }
+        for t in ["mkfs.xfs", "xfs_repair"] {
+            if std::process::Command::new(t).arg("-V").output().is_err() {
+                eprintln!("нет {t} — пропускаю");
+                return;
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let img = dir.path().join("fs.img");
+        std::fs::File::create(&img).unwrap().set_len(768 * 1024 * 1024).unwrap();
+        assert!(std::process::Command::new("mkfs.xfs")
+            .args(["-q", "-m", "reflink=1,crc=1"])
+            .arg(&img)
+            .status()
+            .unwrap()
+            .success());
+        let mnt = dir.path().join("mnt");
+        std::fs::create_dir_all(&mnt).unwrap();
+        let c = {
+            let _m = corpus::mounted(&img, &mnt);
+            corpus::populate(&mnt, corpus::Caps::xfs())
+        };
+
+        let scan = run2(&img, &["cache"]);
+        assert!(scan.files_excluded >= 1400, "исключено всего {}", scan.files_excluded);
+        assert!(!scan.patches.is_empty(), "Stage 2 не дал ни одного патча");
+        assert!(
+            !scan.droppable.is_empty(),
+            "ничего не вернулось в свободное место — значит удаления не было"
+        );
+        eprintln!(
+            "  исключено {}, патчей {}, разделено {}",
+            scan.files_excluded,
+            scan.patches.len(),
+            scan.files_kept_shared
+        );
+
+        // Сначала зануление данных, поверх — правка метаданных: тот же порядок,
+        // в каком это видит движок при чтении.
+        let patched = dir.path().join("patched.img");
+        let mut data = std::fs::read(&img).unwrap();
+        for (a, b) in scan.ranges.iter() {
+            data[a as usize..b as usize].fill(0);
+        }
+        for (off, bytes) in &scan.patches {
+            let o = *off as usize;
+            data[o..o + bytes.len()].copy_from_slice(bytes);
+        }
+        std::fs::write(&patched, &data).unwrap();
+        drop(data);
+
+        let repair = |p: &Path| -> String {
+            let o = std::process::Command::new("xfs_repair").arg("-n").arg(p).output().unwrap();
+            format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))
+        };
+        let judge = |t: &str| -> Vec<String> {
+            t.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .filter(|l| {
+                    !l.starts_with("Phase")
+                        && !l.starts_with('-')
+                        && !l.starts_with("No modify flag set")
+                        && !l.contains("host filesystem geometry")
+                        && !l.contains("Repair may fail")
+                        && !l.contains("sector size mismatch")
+                        && !l.contains("the image and the host filesystem")
+                })
+                .map(|l| l.to_string())
+                .collect()
+        };
+        let found = judge(&repair(&patched));
+        assert!(found.is_empty(), "xfs_repair после Stage 2 сказал:\n{}", found.join("\n"));
+
+        let before = corpus::dmesg_len();
+        let left = {
+            let _m = corpus::mounted(&patched, &mnt);
+            c.verify_kept("после восстановления");
+            let left = walk_count(&mnt.join("cache"));
+            let written = corpus::Corpus::fill(&mnt, 512);
+            assert!(written > 32, "записалось всего {written} МиБ");
+            c.verify_kept("после заполнения");
+            left
+        };
+        let mut tally: std::collections::BTreeMap<&str, u64> = Default::default();
+        for (_, why) in &scan.stage2_spared {
+            *tally.entry(why.as_str()).or_default() += 1;
+        }
+        let removed = scan.files_excluded - scan.stage2_spared.len() as u64;
+        eprintln!(
+            "  удалено по-настоящему {removed} из {}, в cache/ осталось имён {left}",
+            scan.files_excluded
+        );
+        for (why, n) in &tally {
+            let short: String = why.chars().take(80).collect();
+            eprintln!("    {n:5} × {short}");
+        }
+        // Каждое щажение обязано быть названо: «не смогли» без причины в этом
+        // коде — ошибка, а не результат.
+        assert!(
+            scan.stage2_spared.iter().all(|(_, w)| !w.is_empty()),
+            "нашлось щажение без причины"
+        );
+        // Порога здесь намеренно нет. Сколько удастся удалить, зависит от
+        // раскладки, которую делает ядро при наполнении корпуса: три прогона
+        // подряд дали 129, 266 и 306 из 1403. Порог на такой величине был бы
+        // не сторожем, а генератором ложных падений. Проверяем то, что
+        // устойчиво: удаление произошло, и образ согласован.
+        assert!(removed > 0, "не удалено ни одного файла — Stage 2 перестал работать");
+        assert!(
+            left + removed <= scan.files_excluded + 16,
+            "имён осталось {left} при {removed} удалённых — счёт не сходится"
+        );
+
+        let found = judge(&repair(&patched));
+        assert!(
+            found.is_empty(),
+            "xfs_repair после монтирования и записи сказал:\n{}",
+            found.join("\n")
+        );
+        let complaints = corpus::kernel_complaints(before, &["XFS", "xfs"]);
+        let bad: Vec<&String> =
+            complaints.iter().filter(|l| l.contains("error") || l.contains("corrupt")).collect();
+        assert!(bad.is_empty(), "ядро ругалось на ФС:\n{bad:?}");
+    }
+
+    /// Сколько ФАЙЛОВ осталось в поддереве (каталоги Stage 2 не удаляет).
+    fn walk_count(root: &Path) -> u64 {
+        let mut n = 0;
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&d) else { continue };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    n += 1;
+                }
+            }
+        }
+        n
     }
 }
