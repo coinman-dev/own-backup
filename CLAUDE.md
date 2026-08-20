@@ -29,9 +29,21 @@ the boot medium on 2026-08-19 and works**: a 128 GiB locked system volume opened
 by its 48-digit recovery key, copied decrypted (XTS-AES 128), and the finished
 image mounted — the in-image exclusion pass walked 703 317 entries in it and
 deleted 23 499 files. That run also settled the open question: the recovery key
-is hashed with **one** SHA-256, not two. Still open — the negative cases (wrong
-password, TPM-only volume, AES-CBC refusal), restoring such a copy, and the
-conversion-state field: `.ai/PLAN.md` §2–3.
+is hashed with **one** SHA-256, not two.
+
+**Three things that must never be conflated again (2026-08-20, found by one
+live run, each hiding the next):** (1) "is there anything a person can type"
+is NOT "does our parser know the cipher" — Windows encrypts REMOVABLE drives
+in compatible mode (AES-CBC) by default, so conflating them refused every
+ordinary flash drive; (2) "wrong password" means exactly one thing, an AES-CCM
+tag mismatch — everything else must go to the Windows-unlock road instead;
+(3) a container holds more than NTFS, and the "did it decrypt sensibly" check
+must accept FAT32/exFAT/ReFS. Also: the sector size in the BPB is ZERO for
+exFAT and ReFS — take it from the device geometry, never guess 512.
+
+Still open — the negative cases (wrong password, TPM-only volume, AES-CBC
+refusal), restoring such a copy, and the conversion-state field:
+`.ai/PLAN.md` §2–3.
 
 ## Branches (decision 2026-08-06)
 
@@ -71,7 +83,10 @@ tested on a Windows host — cross-compilation validates compilation only.
 - **True removal is a hard product requirement (decision 2026-07-28):** excluded
   files must be REALLY removed from the image's filesystem on every supported
   FS — zero-filled ghost entries are a fallback, not the product. Status:
-  NTFS/ReFS (driver mount-&-delete), FAT32/exFAT (direct patch), ext2/3/4
+  NTFS/ReFS (driver mount-&-delete), FAT32/exFAT (direct patch — **verified
+  2026-08-20 inside a LOCKED BitLocker container too**, the last step of the
+  exclusions plan: the volume stays locked, Windows never mounts it, and the
+  used map is built over our own decrypted window), ext2/3/4
   (Stage 2) and btrfs (Stage 2 v2, enabled in the engine) — done;
   xfs — Stage 1 only, D0/D1 done and the writer missing (`.ai/PLAN.md` §3.2;
   the kernel's reference delta says a single unlink touches seven structure
