@@ -333,7 +333,13 @@ async fn windows_unlock(args: &BitlockerArgs) -> Result<()> {
     }
 
     // Диск, на котором лежит том: нужен, чтобы закрыть его на запись.
-    let extents = own_backup_backup::volume_win::volume_extents(&volume);
+    //
+    // `volume_extents` спрашивает УСТРОЙСТВО тома, поэтому ему нужен путь
+    // устройства (`\\.\C:`), а не буква. С голой буквой CreateFileW открывает
+    // не том, а каталог, IOCTL по нему не проходит, и получается «том занимает
+    // 0 экстентов» — ровно то, обо что споткнулся первый прогон стенда.
+    let device = own_backup_backup::win_device::normalize_device_path(&volume);
+    let extents = own_backup_backup::volume_win::volume_extents(&device);
     let [extent] = extents.as_slice() else {
         return Err(own_backup_common::OwnBackupError::Device(format!(
             "{volume}: том занимает {} экстентов — такой стенд их не поддерживает",
@@ -362,6 +368,7 @@ async fn windows_unlock(args: &BitlockerArgs) -> Result<()> {
     println!("Диск закрыт на запись — монтирование ничего в нём не изменит.");
 
     let dashed = digits_with_dashes(&digits);
+    // manage-bde, наоборот, работает с буквой тома.
     let outcome = wu::unlock_with_windows(
         &volume,
         if looks_like_key {
@@ -377,7 +384,7 @@ async fn windows_unlock(args: &BitlockerArgs) -> Result<()> {
 
     // Что теперь видно на этом томе.
     if outcome.is_ok() {
-        match own_backup_backup::win_device::WinRawDevice::open_read(&format!("\\\\.\\{volume}")) {
+        match own_backup_backup::win_device::WinRawDevice::open_read(&device) {
             Ok(mut dev) => {
                 let mut boot = vec![0u8; 4096];
                 match own_backup_backup::fat_map::RawVolume::read_at(&mut dev, 0, &mut boot) {

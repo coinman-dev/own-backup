@@ -49,6 +49,14 @@ windows = { version = "0.58", features = [
     "Win32_System_Services",
     "Win32_System_LibraryLoader",
     "Win32_System_SystemInformation",
+    # Разблокировка BitLocker силами Windows (windows_unlock_win.rs): провайдер
+    # BitLocker живёт в WMI, и это единственный НЕинтерактивный путь к нему —
+    # manage-bde читает пароль из консоли и в перенаправленный ввод не смотрит.
+    "Win32_System_Wmi",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+    "Win32_System_Rpc",
 ] }
 # Driver-install feature (aim_install.rs): download DriverFiles.zip + extract.
 zip = { version = "2", default-features = false, features = ["deflate"] }
