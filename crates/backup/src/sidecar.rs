@@ -477,10 +477,46 @@ impl GuestBlob {
     }
 }
 
+/// Which container an image really is, decided by its first eight bytes.
+///
+/// The file name is a guess; the magic is ground truth. They can disagree in
+/// ordinary use: `--output` and `--format` are independent on the command line,
+/// so `--output monday.img --format vhdx` writes a perfectly good VHDX, and a
+/// user is free to rename `backup.vhdx` to anything afterwards. While the
+/// container was picked by extension, both cases produced an image that was
+/// written successfully and then could not be read at all — `verify`, `mount`,
+/// `restore` and the chain listing every one of them failed with "unsupported
+/// container format: img". Found by the first root run of the `--ignored`
+/// tests, 2026-08-20.
+pub fn detect_container_format(image_path: &Path) -> Result<&'static str> {
+    let mut head = [0u8; 8];
+    let mut file = File::open(image_path)?;
+    let mut got = 0;
+    while got < head.len() {
+        match file.read(&mut head[got..])? {
+            0 => break,
+            n => got += n,
+        }
+    }
+    if got == head.len() && &head == b"vhdxfile" {
+        return Ok("vhdx");
+    }
+    if got >= 4 && u32::from_be_bytes(head[..4].try_into().unwrap()) == crate::qcow2::QCOW2_MAGIC {
+        return Ok("qcow2");
+    }
+    Err(OwnBackupError::ImageFormat(format!(
+        "{}: not a VHDX or qcow2 image (no known signature)",
+        image_path.display()
+    )))
+}
+
 /// Locate the OwnBackupMeta partition of an image: returns a guest reader plus
 /// the partition's (offset, size) in guest bytes.
 fn open_meta_partition(image_path: &Path, container_format: &str) -> Result<(GuestBlob, u64, u64)> {
     const SECTOR: usize = 512;
+    // `container_format` is whatever the caller inferred from the name — kept
+    // only for the error message when the file has no signature to read.
+    let container_format = detect_container_format(image_path).unwrap_or(container_format);
     let (mut guest, vsize) = match container_format {
         "vhdx" | "avhdx" => {
             let alloc = crate::vhdx_bat::allocated_payload_blocks(image_path)?;
@@ -1160,5 +1196,40 @@ mod tests {
         let (read_info, read_manifest) = read_embedded_sidecar_header(&image_path, "qcow2").unwrap();
         assert_eq!(read_info.image_file_name, "test.qcow2");
         assert_eq!(read_manifest.block_size, 65536);
+
+        // Renaming a backup is an ordinary thing to do, and the extension used
+        // to decide which container to open — so the same file under a name
+        // with no extension had to keep reading. Before the magic-byte check it
+        // failed with "unsupported container format: ".
+        let renamed = image_path.parent().unwrap().join("monday-copy");
+        std::fs::rename(&image_path, &renamed).unwrap();
+        let after_rename = read_embedded_sidecar(&renamed, "").unwrap();
+        assert_eq!(after_rename.info.image_file_name, "test.qcow2");
+        assert_eq!(after_rename.checksums, checksums);
+    }
+
+    /// The container is decided by the file's first bytes, never by its name.
+    #[test]
+    fn container_format_comes_from_the_magic_not_the_name() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // A VHDX called `.qcow2` is still a VHDX, and the other way round.
+        let lying_vhdx = dir.path().join("actually-vhdx.qcow2");
+        std::fs::write(&lying_vhdx, b"vhdxfile\x00\x00\x00\x00").unwrap();
+        assert_eq!(detect_container_format(&lying_vhdx).unwrap(), "vhdx");
+
+        let lying_qcow = dir.path().join("actually-qcow2.vhdx");
+        std::fs::write(&lying_qcow, b"QFI\xfb\x00\x00\x00\x03").unwrap();
+        assert_eq!(detect_container_format(&lying_qcow).unwrap(), "qcow2");
+
+        // Discrimination: a file that is neither must say so, not guess. A
+        // short file must not be read past its end either.
+        let junk = dir.path().join("notes.vhdx");
+        std::fs::write(&junk, b"hello there, not an image").unwrap();
+        assert!(detect_container_format(&junk).is_err());
+
+        let tiny = dir.path().join("tiny.vhdx");
+        std::fs::write(&tiny, b"vhdx").unwrap();
+        assert!(detect_container_format(&tiny).is_err());
     }
 }
