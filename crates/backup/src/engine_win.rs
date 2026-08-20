@@ -459,6 +459,65 @@ fn open_bitlocker_source(read_path: &str, passphrase: &str) -> Result<Option<Bit
     Ok(Some(BitLockerSource { params, disk, offset: extent.offset, length: extent.length }))
 }
 
+/// Открыть заблокированный том силами Windows и закрыть его диск на запись.
+///
+/// Возвращает стража: пока он жив, диск нельзя изменить. Держать его надо до
+/// конца копирования — том остаётся смонтированным, и Windows пишет в него,
+/// когда ей вздумается (журнал, метки времени, System Volume Information).
+#[cfg(target_os = "windows")]
+/// Лежит ли внутри расшифрованного контейнера ReFS.
+///
+/// Признак тот же, что у инвентаризации (`fs_probe`): имя «ReFS» на смещении 3
+/// И сигнатура структуры «FSRS» на 0x10 — одного имени мало, оно встречается и
+/// в мусоре. Ошибка чтения значит «не знаем», а не «ReFS».
+#[cfg(target_os = "windows")]
+fn inner_fs_is_refs(src: &BitLockerSource) -> bool {
+    let Ok(window) = src.window() else { return false };
+    let mut vol = crate::bitlocker::BitLockerVolume::new(Box::new(window), src.params.clone());
+    let mut boot = vec![0u8; 4096];
+    if crate::fat_map::RawVolume::read_at(&mut vol, 0, &mut boot).is_err() {
+        return false;
+    }
+    &boot[3..7] == b"ReFS" && &boot[0x10..0x14] == b"FSRS"
+}
+
+fn unlock_source_with_windows(
+    read_path: &str,
+    passphrase: &str,
+) -> Result<crate::windows_unlock_win::ReadOnlyDisk> {
+    use crate::windows_unlock_win as wu;
+
+    let extents = crate::volume_win::volume_extents(read_path);
+    let [extent] = extents.as_slice() else {
+        return Err(OwnBackupError::Device(format!(
+            "{read_path}: том занимает {} экстентов — открыть его силами Windows нельзя",
+            extents.len()
+        )));
+    };
+    let guard = wu::ReadOnlyDisk::arm(extent.disk_number)?;
+
+    // 48 цифр — это ключ восстановления, что бы ни было между ними; всё
+    // остальное считаем парольной фразой.
+    let digits: String = passphrase.chars().filter(char::is_ascii_digit).collect();
+    let is_key = digits.len() == 48
+        && passphrase.chars().all(|c| c.is_ascii_digit() || c == '-' || c == ' ');
+    let dashed;
+    let secret = if is_key {
+        dashed = digits
+            .as_bytes()
+            .chunks(6)
+            .map(|c| String::from_utf8_lossy(c).to_string())
+            .collect::<Vec<_>>()
+            .join("-");
+        wu::Secret::RecoveryPassword(&dashed)
+    } else {
+        wu::Secret::Passphrase(passphrase)
+    };
+    wu::unlock_with_windows(read_path, secret)?;
+    info!(volume = read_path, "том открыт силами Windows — дальше он обычный");
+    Ok(guard)
+}
+
 fn backup_volume_inner(
     req: &VolumeBackupRequest,
     mut progress: impl FnMut(&BackupProgress) -> Result<()>,
@@ -502,9 +561,57 @@ fn backup_volume_inner(
     // volume device answers FVE_E_LOCKED_VOLUME to everything, and the FVE
     // filter does not sit above the disk. Confirmed on a real volume
     // 2026-08-05 (Windows 10, XTS-AES 128, password protector).
+    // Запрет записи на диск-источник, если том пришлось открывать силами
+    // Windows: она его СМОНТИРУЕТ, а смонтированная ФС пишет сама. Страж живёт
+    // до конца копирования — не до конца разблокировки.
+    let mut _source_ro_guard: Option<crate::windows_unlock_win::ReadOnlyDisk> = None;
     let bitlocker = match &req.passphrase {
-        Some(pass) => open_bitlocker_source(&read_path, pass)?,
+        Some(pass) => match open_bitlocker_source(&read_path, pass) {
+            Ok(src) => src,
+            // Своё чтение FVE знает только AES-XTS 128/256. Шифр вне этого
+            // списка (AES-CBC, Elephant diffuser) — не повод сдаваться: то же
+            // самое умеет сама Windows, и через неё том станет обычным
+            // смонтированным, со всем быстрым путём (план B5).
+            Err(e) => {
+                warn!(error = %e, "свой разбор BitLocker не справился — прошу открыть Windows");
+                match unlock_source_with_windows(&read_path, pass) {
+                    Ok(guard) => {
+                        _source_ro_guard = Some(guard);
+                        None // том теперь обычный: читаем его как все
+                    }
+                    Err(e2) => {
+                        warn!(error = %e2, "Windows тоже не открыла том");
+                        return Err(e); // наружу — первая ошибка, она по делу
+                    }
+                }
+            }
+        },
         None => None,
+    };
+
+    // ReFS внутри контейнера: расшифровать её мы умеем, а перечислить в ней
+    // файлы — нет, спецификации ReFS не существует. Хуже того, без разбора нет
+    // и карты занятого: том пришлось бы копировать посекторно, целиком. Если
+    // Windows готова открыть его сама, том станет обычным смонтированным — и
+    // заработает и карта (FSCTL_GET_VOLUME_BITMAP на ReFS отвечает), и
+    // исключения обходом дерева. Это и есть смысл этапа B5.
+    let bitlocker = match (&bitlocker, &req.passphrase) {
+        (Some(b), Some(pass)) if inner_fs_is_refs(b) => {
+            info!("внутри контейнера ReFS — прошу Windows открыть том, иначе её не прочесть");
+            match unlock_source_with_windows(&read_path, pass) {
+                Ok(guard) => {
+                    _source_ro_guard = Some(guard);
+                    None
+                }
+                Err(e) => {
+                    // Не беда: копия снимется нашим чтением, просто посекторно
+                    // и без исключений — и об этом будет сказано ниже.
+                    warn!(error = %e, "Windows не открыла ReFS-том — копирую своим чтением");
+                    bitlocker
+                }
+            }
+        }
+        _ => bitlocker,
     };
 
     let mut src_probe = WinRawDevice::open_read(&read_path)?;
