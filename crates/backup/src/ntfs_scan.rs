@@ -75,6 +75,11 @@ pub struct MftScan {
     /// Пофайловые байты вычтенного — эталон для сверки с ответом Windows
     /// (`own-backup-cli scan-exclusions --list` пишет такой же).
     pub file_bytes: Vec<(String, u64)>,
+    /// Сколько заняли две половины прохода, миллисекунды: чтение и разбор
+    /// записей MFT — и вычисление правил. Без этой пары непонятно, что
+    /// оптимизировать, а гадать в этом проекте уже выходило боком.
+    pub parse_ms: u64,
+    pub decide_ms: u64,
     /// Разбивка ОСТАЮЩИХСЯ файлов по типам — для карточки копии. Проход и так
     /// видит каждый файл с его размером, так что это бесплатно; без неё
     /// зашифрованный источник остался бы без разбивки вовсе.
@@ -169,6 +174,7 @@ pub fn scan_mft_with<T>(
 where
     T: Read + Seek,
 {
+    let started = std::time::Instant::now();
     let parsed = parse_patterns(patterns);
     let mut scan = MftScan::default();
     if parsed.is_empty() {
@@ -337,7 +343,8 @@ where
         );
     }
     debug!(live = entries.len(), "MFT scan: записи разобраны");
-    let pass1 = std::time::Instant::now();
+    scan.parse_ms = started.elapsed().as_millis() as u64;
+    let pass2 = std::time::Instant::now();
 
     // --- проход 2: пути, совпадения, вычитание -------------------------------
     // Вынесен в отдельную функцию намеренно: здесь живут ПРАВИЛА (что вычесть,
@@ -348,7 +355,8 @@ where
     // наш парсер против нашего же писателя (урок BitLocker, четыре захода).
     decide(&entries, &parsed, cluster_size, &mut scan);
     scan.ranges.finalize();
-    debug!(secs = pass1.elapsed().as_secs_f64(), "MFT scan: пути и совпадения");
+    scan.decide_ms = pass2.elapsed().as_millis() as u64;
+    debug!(parse_ms = scan.parse_ms, decide_ms = scan.decide_ms, "MFT scan: готово");
     Ok(scan)
 }
 
@@ -983,7 +991,12 @@ mod tests {
         for (r, n) in &by_reason {
             println!("   {n:6}  {r}");
         }
-        println!("время:            {:.1} с", elapsed.as_secs_f64());
+        println!(
+            "время:            {:.1} с (разбор {:.1} с + правила {:.1} с)",
+            elapsed.as_secs_f64(),
+            scan.parse_ms as f64 / 1000.0,
+            scan.decide_ms as f64 / 1000.0
+        );
 
         if let Ok(out) = std::env::var("OWN_BACKUP_SCAN_OUT") {
             let mut f = std::fs::File::create(&out).unwrap();
