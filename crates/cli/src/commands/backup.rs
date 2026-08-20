@@ -30,6 +30,16 @@ pub struct BackupArgs {
     /// or qcow2 (zstd-compressed, cross-platform; full backups only for now)
     #[arg(long, default_value = "vhdx")]
     pub format: own_backup_common::types::ImageFormat,
+
+    /// Маска исключения; можно повторять. Обычно правила приходят из задания
+    /// GUI — здесь они нужны, чтобы проверять исключения без мастера.
+    #[arg(long, value_name = "МАСКА")]
+    pub exclude: Vec<String>,
+
+    /// Взять те же двенадцать правил, что мастер подставляет новому заданию
+    /// (pagefile.sys, **\Temp\**, *.tmp и прочие).
+    #[arg(long)]
+    pub exclude_defaults: bool,
 }
 
 #[cfg(target_os = "windows")]
@@ -53,7 +63,15 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
         // the CLI creates plain full backups for now.
         kind: own_backup_common::types::BackupType::Full,
         parent_image: None,
-        exclusion_patterns: Vec::new(),
+        exclusion_patterns: {
+            let mut p = if args.exclude_defaults {
+                own_backup_core::default_exclusions()
+            } else {
+                Vec::new()
+            };
+            p.extend(args.exclude.iter().cloned());
+            p
+        },
         job_id: None,
         passphrase: args.password.clone().map(zeroize::Zeroizing::new),
         image_format: args.format,

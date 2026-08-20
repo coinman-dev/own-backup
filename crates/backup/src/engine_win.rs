@@ -514,6 +514,37 @@ fn unlock_source_with_windows(
         wu::Secret::Passphrase(passphrase)
     };
     wu::unlock_with_windows(read_path, secret)?;
+
+    // Разблокировка и монтирование — разные события. FVE отдаёт ключ сразу, а
+    // том появляется на своём устройстве через мгновение, и читать его в этот
+    // промежуток бессмысленно: устройство ещё не отвечает. Ждём, пока с него
+    // прочтётся хотя бы загрузочный сектор — не дольше пятнадцати секунд.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut last_err = None;
+    loop {
+        match WinRawDevice::open_read(read_path).and_then(|mut d| {
+            let mut boot = vec![0u8; 512];
+            crate::fat_map::RawVolume::read_at(&mut d, 0, &mut boot)?;
+            // Нули значат «устройство есть, а тома на нём ещё нет».
+            if boot.iter().all(|&b| b == 0) {
+                return Err(OwnBackupError::Device("том ещё не смонтирован".into()));
+            }
+            Ok(())
+        }) {
+            Ok(()) => break,
+            Err(e) => {
+                if std::time::Instant::now() >= deadline {
+                    warn!(error = %e, "том открыт, но за 15 с так и не стал читаемым");
+                    last_err = Some(e);
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+        }
+    }
+    if let Some(e) = last_err {
+        return Err(e);
+    }
     info!(volume = read_path, "том открыт силами Windows — дальше он обычный");
     Ok(guard)
 }
@@ -595,6 +626,19 @@ fn backup_volume_inner(
     // Windows готова открыть его сама, том станет обычным смонтированным — и
     // заработает и карта (FSCTL_GET_VOLUME_BITMAP на ReFS отвечает), и
     // исключения обходом дерева. Это и есть смысл этапа B5.
+    //
+    // **На практике сюда не доходит, и это выяснилось живой проверкой
+    // 2026-08-20.** Наш разбор FVE отказывается от ReFS-контейнера ещё раньше:
+    // размер сектора он берёт из BPB загрузочного сектора (`bitlocker.rs`), а у
+    // ReFS этого поля нет — приходит ноль, и открытие отклоняется как
+    // «implausible sector size 0». Срабатывает ветка выше, общая: «парсер не
+    // справился — просим Windows», и результат тот же.
+    //
+    // Проверка всё же оставлена. Она стоит одного чтения загрузочного сектора,
+    // а покрывает случай, которого мы не видели: контейнер, который парсер
+    // ОТКРЫЛ, а внутри ReFS. Убрать её значит поставить на то, что такого не
+    // бывает — а расплатой был бы тихий откат к посекторной копии тома целиком,
+    // без единого предупреждения.
     let bitlocker = match (&bitlocker, &req.passphrase) {
         (Some(b), Some(pass)) if inner_fs_is_refs(b) => {
             info!("внутри контейнера ReFS — прошу Windows открыть том, иначе её не прочесть");
