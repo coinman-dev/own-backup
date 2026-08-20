@@ -1010,16 +1010,16 @@ fn unwrap_ccm_key(key: &[u8], ccm: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
 /// difference is invisible until it is tried, and our own tests cannot answer
 /// it — they encrypt what they then decrypt.
 ///
-/// So each way is tried and the one that yields an NTFS boot sector wins. Only
-/// the first sixteen bytes are shown: a boot sector's signature area, which is
-/// the same on every NTFS volume in the world.
+/// So each way is tried and the one that yields a recognisable filesystem wins.
+/// Only the first sixteen bytes are shown: the boot sector's signature area.
+/// Не только NTFS: внутри контейнера бывают FAT32, exFAT и ReFS, и диагностика,
+/// которая знает одну ФС, молчит ровно там, где нужна.
 pub fn diagnose_first_sector(vol: &mut dyn RawVolume, params: &BitLockerParams) -> Vec<String> {
     let ss = params.sector_size as usize;
     let backup = params.boot_backup_addr;
     let phys_index = backup / params.sector_size.max(1) as u64;
 
-    let looks_like_ntfs =
-        |b: &[u8]| b.len() >= 11 && &b[3..11] == b"NTFS    ";
+    let looks_like_fs = |b: &[u8]| decrypts_to_a_filesystem(b);
 
     let mut out = Vec::new();
     let mut attempt = |label: &str, at: u64, tweak: Option<u64>, out: &mut Vec<String>| {
@@ -1039,7 +1039,7 @@ pub fn diagnose_first_sector(vol: &mut dyn RawVolume, params: &BitLockerParams) 
         out.push(format!(
             "{label}: {}{}",
             hex(&buf[..16.min(buf.len())]),
-            if looks_like_ntfs(&buf) { "   ← NTFS!" } else { "" }
+            if looks_like_fs(&buf) { "   ← файловая система!" } else { "" }
         ));
     };
 
@@ -1105,9 +1105,10 @@ fn verify_ntfs(vol: &mut dyn RawVolume, params: BitLockerParams) -> Result<BitLo
     // Under the tweak of where it lies, not of where it belongs — see
     // `BitLockerVolume::read_at`.
     params.decrypt(src / params.sector_size.max(1) as u64, &mut sector)?;
-    if &sector[3..11] != b"NTFS    " || sector[510] != 0x55 || sector[511] != 0xAA {
+    if !decrypts_to_a_filesystem(&sector) {
         return Err(bad(
-            "decrypted sector 0 is not an NTFS boot sector — wrong key or unhandled layout",
+            "расшифрованный сектор 0 не похож ни на одну файловую систему — \
+             не тот ключ или неучтённая раскладка",
         ));
     }
     Ok(params)
@@ -1116,6 +1117,30 @@ fn verify_ntfs(vol: &mut dyn RawVolume, params: BitLockerParams) -> Result<BitLo
 // ---------------------------------------------------------------------------
 // Decrypting view
 // ---------------------------------------------------------------------------
+
+/// Похоже ли расшифрованное начало тома на файловую систему.
+///
+/// Проверка есть затем, чтобы отличить «ключ верный» от «раскладка понята»:
+/// AES-CCM подтверждает ключ своим тегом, но не говорит ничего о том, по той
+/// ли сетке секторов мы считали tweak. Мусор на выходе — признак второго.
+///
+/// **Раньше она признавала только NTFS, и это закрывало дорогу всему
+/// остальному.** Заблокированная FAT32-флешка открывалась правильно — VMK
+/// разворачивался, ключ был тот, — и тут же отвергалась: «decrypted sector 0
+/// is not an NTFS boot sector». Найдено живым прогоном 2026-08-20, на этапе,
+/// который для того и заведён. Внутри BitLocker бывает не только NTFS: FAT32 и
+/// exFAT на съёмных дисках, ReFS на серверных.
+///
+/// Спрашиваем у общего определителя ФС — того же, что разбирает разделы при
+/// инвентаризации. Зашифрованный контейнер внутри расшифрованного успехом не
+/// считается: это признак, что расшифровали не то.
+fn decrypts_to_a_filesystem(sector: &[u8]) -> bool {
+    use own_backup_common::types::FileSystem;
+    match own_backup_inventory::fs_probe::identify(sector) {
+        Some(p) => !p.encrypted && p.fs != FileSystem::Unknown,
+        None => false,
+    }
+}
 
 /// A decrypting view over a BitLocker volume: offset 0 is the first plaintext
 /// byte. Relocated boot sectors are read from their backup address; everything
@@ -1688,6 +1713,49 @@ mod tests {
     /// Ноль в BPB это не поломка, а обычное состояние контейнера с exFAT или
     /// ReFS внутри: BitLocker то поле не заполняет. Найдено живьём 2026-08-20 —
     /// заблокированная exFAT-флешка отвечала «implausible sector size 0».
+
+    /// Внутри BitLocker бывает не только NTFS — и проверка «расшифровалось ли
+    /// осмысленно» обязана это знать.
+    ///
+    /// Пока она признавала один NTFS, заблокированная FAT32-флешка
+    /// открывалась правильно и тут же отвергалась. Найдено живым прогоном
+    /// 2026-08-20; ни один тест этого не видел, потому что все фикстуры были
+    /// NTFS.
+    #[test]
+    fn a_decrypted_volume_may_be_any_windows_filesystem() {
+        let mut sector = vec![0u8; 512];
+        sector[510] = 0x55;
+        sector[511] = 0xAA;
+
+        sector[3..11].copy_from_slice(b"NTFS    ");
+        assert!(decrypts_to_a_filesystem(&sector), "NTFS");
+
+        sector[3..11].copy_from_slice(b"EXFAT   ");
+        assert!(decrypts_to_a_filesystem(&sector), "exFAT");
+
+        sector[3..11].copy_from_slice(&[0u8; 8]);
+        sector[3..7].copy_from_slice(b"ReFS");
+        sector[0x10..0x14].copy_from_slice(b"FSRS");
+        assert!(decrypts_to_a_filesystem(&sector), "ReFS");
+
+        // FAT32 узнаётся по строке типа на 0x52 — там, где её пишет mkfs.
+        let mut fat = vec![0u8; 512];
+        fat[510] = 0x55;
+        fat[511] = 0xAA;
+        fat[0x52..0x5A].copy_from_slice(b"FAT32   ");
+        assert!(decrypts_to_a_filesystem(&fat), "FAT32");
+
+        // Дискриминация. Неверный ключ даёт шум — его принимать нельзя.
+        let noise: Vec<u8> = (0..512u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+        assert!(!decrypts_to_a_filesystem(&noise), "шум принят за ФС");
+        assert!(!decrypts_to_a_filesystem(&vec![0u8; 512]), "нули приняты за ФС");
+
+        // Расшифровали и увидели снова BitLocker — значит расшифровали не то.
+        let mut still_encrypted = vec![0u8; 512];
+        still_encrypted[3..11].copy_from_slice(FVE_SIGNATURE);
+        assert!(!decrypts_to_a_filesystem(&still_encrypted), "контейнер принят за ФС");
+    }
+
     #[test]
     fn the_sector_size_falls_back_to_the_device_geometry() {
         let mut boot = vec![0u8; 512];
