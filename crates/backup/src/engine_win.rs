@@ -4875,9 +4875,18 @@ fn probe_bitlocker(volume_device: &str, passphrase: &str) -> Result<DecryptedPro
         Ok(p) => p,
         // Wrong passphrase — a fact for the interface, not an error. AES-CCM
         // verifies its own tag, so this really does mean "not this password".
-        Err(e) => {
+        Err(e) if crate::bitlocker::is_wrong_passphrase(&e) => {
             info!(error = %e, "BitLocker passphrase rejected");
             return Ok(DecryptedProbe { ok: false, ..Default::default() });
+        }
+        // А это НЕ про пароль: шифр вне AES-XTS (панель Windows шифрует съёмные
+        // диски в режиме совместимости по умолчанию), ReFS без BPB, нечитаемый
+        // заголовок. Пароль при этом мог подойти — в журнале так и написано,
+        // «VMK unwrapped», — и отвечать «пароль не подходит» значит отправить
+        // человека перенабирать верное. Всё это открывает сама Windows.
+        Err(e) => {
+            warn!(error = %e, "свой разбор BitLocker не справился — прошу открыть Windows");
+            return probe_by_windows(volume_device, passphrase);
         }
     };
     info!(
@@ -4892,6 +4901,30 @@ fn probe_bitlocker(volume_device: &str, passphrase: &str) -> Result<DecryptedPro
         params,
     );
     probe_decrypted(&mut view)
+}
+
+/// Открыть том силами Windows и осмотреть то, что получилось.
+///
+/// После разблокировки том становится обычным смонтированным, и читается он
+/// как любой другой — своей расшифровки уже не нужно. Страж держит диск
+/// закрытым на запись только пока мы читаем метки: копия дальше пойдёт общей
+/// дорогой, и держать диск дольше незачем.
+#[cfg(target_os = "windows")]
+fn probe_by_windows(volume_device: &str, passphrase: &str) -> Result<DecryptedProbe> {
+    let guard = match unlock_source_with_windows(volume_device, passphrase) {
+        Ok(g) => g,
+        Err(e) => {
+            // Windows тоже не открыла. Это может быть и неверный пароль, и
+            // отсутствие компонента BitLocker на носителе — точнее сказать
+            // нечего, и «не подошёл» здесь честнее, чем молчание.
+            info!(error = %e, "Windows не открыла том");
+            return Ok(DecryptedProbe { ok: false, ..Default::default() });
+        }
+    };
+    let probed = WinRawDevice::open_read(volume_device)
+        .and_then(|mut dev| probe_decrypted(&mut dev));
+    drop(guard);
+    probed
 }
 
 /// Unlock the encrypted container at `device_path` with `passphrase` and probe

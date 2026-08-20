@@ -76,6 +76,19 @@ const DATUM_VMK: u16 = 0x0008;
 const ALG_AES_XTS_128: u16 = 0x8004;
 const ALG_AES_XTS_256: u16 = 0x8005;
 
+/// Единственная ошибка, которая ЗНАЧИТ «пароль не подошёл».
+///
+/// AES-CCM проверяет собственный тег, так что это не догадка. Все прочие
+/// отказы — шифр вне AES-XTS, нечитаемый заголовок, отсутствующий BPB у ReFS —
+/// про пароль не говорят ничего, и отвечать на них «пароль не подходит» значит
+/// отправить человека перенабирать то, что он ввёл верно.
+const WRONG_PASSPHRASE: &str = "CCM authentication failed (wrong passphrase?)";
+
+/// Значит ли эта ошибка, что пароль не тот.
+pub fn is_wrong_passphrase(e: &OwnBackupError) -> bool {
+    e.to_string().contains(WRONG_PASSPHRASE)
+}
+
 /// VMK key-protection type for a user passphrase.
 const PROTECT_PASSWORD: u16 = 0x2000;
 
@@ -247,7 +260,7 @@ fn aes_ccm_decrypt(
         diff |= tag[i] ^ (x[i] ^ s0[i]);
     }
     if diff != 0 {
-        return Err(bad("CCM authentication failed (wrong passphrase?)"));
+        return Err(bad(WRONG_PASSPHRASE));
     }
     Ok(plain)
 }
