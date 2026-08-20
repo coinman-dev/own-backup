@@ -10,14 +10,13 @@ separate license (`COMMERCIAL-LICENSE.md`). NOT OSI "open source" — say
 AGPL-derived (Arsenal Image Mounter) → **test-only, never distributed**; being
 replaced by wnbd (LGPL-2.1) before release. See `THIRD-PARTY-NOTICES.md`.
 
-Plans live in `.ai/`; the finished ones are moved to `.ai/old2/` and are kept
-for their decision logs, not as a to-do list — check the code before trusting
-one (`implementation_plan_v2` still lists whole-disk restore phases C/D and the
-named-pipe transport as open; all three are done).
+**There is one plan: `.ai/PLAN.md`** (consolidated 2026-08-20 — done / done but
+unverified / not done, plus the decisions that must not be reopened). The
+twenty-three plans it replaced are in `.ai/archive-plans-until-2026-08-20.tar.gz`
+— `.ai` is not under git, so that tarball is their only copy. Unpack it for a
+decision log, never as a to-do list: several of those files listed closed work
+as open. Check the code before trusting any of them.
 
-Roadmap and decisions log: `.ai/old2/implementation_plan_v2_2026-07-01.md` (phases 0–8).
-qcow2 second format + mounting: `.ai/old2/qcow2-second-format-plan_2026-07-07.md` (Q0–Q5).
-Boot medium (live): `.ai/boot-media-plan_2026-07-30.md`.
 **BitLocker:** the FVE parser (`backup/src/bitlocker.rs`) opens a real volume —
 confirmed on Windows 10 / XTS-AES 128 on 2026-08-05 via `own-backup-cli
 bitlocker --unlock`, password protector only. It reads the ciphertext off
@@ -32,7 +31,7 @@ image mounted — the in-image exclusion pass walked 703 317 entries in it and
 deleted 23 499 files. That run also settled the open question: the recovery key
 is hashed with **one** SHA-256, not two. Still open — the negative cases (wrong
 password, TPM-only volume, AES-CBC refusal), restoring such a copy, and the
-conversion-state field: `.ai/bitlocker-windows-plan_2026-08-01.md`.
+conversion-state field: `.ai/PLAN.md` §2–3.
 
 ## Branches (decision 2026-08-06)
 
@@ -45,7 +44,7 @@ work landed in `main`; there is no feature-branch-per-task habit here.)
 
 ```bash
 cargo build          # build all crates (Linux, mocks only)
-cargo test           # run all tests (76+, run on mocks)
+cargo test           # run all tests (556 pass, 16 #[ignore] need root)
 cargo xwin check --target x86_64-pc-windows-msvc -p own-backup-backup ...  # fast Windows check
 cargo xwin build --target x86_64-pc-windows-msvc --release  # Windows cross-compile
 ```
@@ -73,11 +72,10 @@ tested on a Windows host — cross-compilation validates compilation only.
   files must be REALLY removed from the image's filesystem on every supported
   FS — zero-filled ghost entries are a fallback, not the product. Status:
   NTFS/ReFS (driver mount-&-delete), FAT32/exFAT (direct patch), ext2/3/4
-  (Stage 2) — done; btrfs Stage 2 v2 per этап C of
-  `.ai/old2/exclusions-full-repair-plan_2026-07-28.md`; xfs — Stage 1 only, plan in
-  `.ai/xfs-true-removal-plan_2026-08-05.md` (D0–D5; the kernel's reference delta
-  says a single unlink touches seven structure classes — RMAPBT and FINOBT
-  included, both on by default in modern mkfs).
+  (Stage 2) and btrfs (Stage 2 v2, enabled in the engine) — done;
+  xfs — Stage 1 only, D0/D1 done and the writer missing (`.ai/PLAN.md` §3.2;
+  the kernel's reference delta says a single unlink touches seven structure
+  classes — RMAPBT and FINOBT included, both on by default in modern mkfs).
   **An encrypted source honours the rules too (2026-08-07).** A locked BitLocker
   volume is not mounted by Windows, so nothing can be asked which clusters a
   file holds before the copy — the exclusions used to be dropped entirely (12
@@ -99,8 +97,8 @@ tested on a Windows host — cross-compilation validates compilation only.
   The route in is `FSCTL_GET_VOLUME_BITMAP`, which ReFS does answer and
   `used_sectors_win` already uses — it just has to be asked while the volume is
   LOCKED and before it is dismounted, so nothing writes between the answer and
-  the zeroing. Planned in `.ai/refs-in-image-exclusions-plan_2026-08-07.md`
-  (R1–R5; R1 opens that window inside `flush_lock_dismount_volume` — the
+  the zeroing. Planned in `.ai/PLAN.md` §3.3
+  (R1 opens that window inside `flush_lock_dismount_volume` — the
   function that fought the ~180 s PnP removal veto, so it lands and gets
   verified on its own). Until then ReFS says out loud that it did not apply the
   rules.
@@ -122,7 +120,7 @@ tested on a Windows host — cross-compilation validates compilation only.
   bytes, and its 64 KiB CoW clusters amplify scattered MFT writes 16× less than
   the VHDX child's 1 MiB blocks (delete: 0.7 s vs 9 s).
   **DONE 2026-08-20 — the in-image pass is now the FALLBACK, not the main road**
-  (`.ai/exclusions-before-copy-plan_2026-08-19.md`, B0–B3 + B1). Exclusions are
+  (`.ai/PLAN.md` §1). Exclusions are
   resolved BEFORE the copy by reading `$MFT` (`backup/src/ntfs_scan.rs`, crate
   `ntfs` 0.4): matched extents are subtracted from the used map
   (`ntfs_map::build_ntfs_used_map_excl`), so excluded data is never read, never
@@ -170,7 +168,7 @@ tested on a Windows host — cross-compilation validates compilation only.
   csums only over allocated extents) and fixtures big enough to have
   MULTI-LEVEL trees — a flat image has no parent node to get wrong.
 - The legacy `.obk` format (zstd + AES-256-GCM + Argon2id) was **deleted**
-  (decision 2026-07-26, D8 in `.ai/old2/restore-designer-plan_2026-07-26.md`): it had
+  (decision 2026-07-26): it had
   no writer left in any live path and its dead reader confused the restore work.
   `ImageManifest` (`common/src/image.rs`) survived it and is now the sidecar's
   manifest. Do not resurrect the container format.
