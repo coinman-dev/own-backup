@@ -40,6 +40,10 @@
 //! потомка» проекту уже знаком: именно его нарушение в btrfs дало ФС, которую
 //! `btrfs check` называл чистой, а ядро роняло с SIGBUS.
 
+#![allow(dead_code)] // Шаги D2–D4 завершены и проверены, но в движок не
+// подключены: согласованную ФС даёт только вся связка, а решение, какие файлы
+// щадить, принимает общий проход D5. До тех пор вызывают их только тесты.
+
 use std::collections::BTreeMap;
 
 use own_backup_common::{OwnBackupError, Result};
@@ -92,6 +96,7 @@ const AGI_CRC_OFF: usize = 0x138;
 /// `xfs_repair` сказал «sb_icount 519, counted 512» при том, что число инодов
 /// обязано делиться на 64. Ни один единичный тест такого не увидел бы.
 const SB_IFREE: usize = 0x88;
+const SB_FDBLOCKS: usize = 0x90;
 const SB_CRC_OFF: usize = 0xE0;
 /// Поля ядра инода.
 const DI_MODE: usize = 0x02;
@@ -135,6 +140,12 @@ pub(crate) struct InodeFreeing {
     pub(crate) patches: Vec<(u64, Vec<u8>)>,
     pub(crate) freed: Vec<u64>,
     pub(crate) refusals: Vec<InoRefusal>,
+    /// Насколько вырос `sb_ifree`. Суперблок ЗДЕСЬ НЕ ПАТЧИТСЯ намеренно: D4
+    /// правит в том же секторе `sb_fdblocks`, а патч — это целый сектор с
+    /// пересчитанной контрольной суммой, так что два независимых патча просто
+    /// затёрли бы друг друга. Оба шага возвращают дельты, и суперблок пишет
+    /// [`patch_superblock`] один раз.
+    pub(crate) sb_ifree_delta: u64,
 }
 
 /// Где лежит запись (или где ей место), вместе с дорогой от корня.
@@ -503,18 +514,35 @@ pub(crate) fn plan_inode_freeing(
         sb_ifree_delta += agi_delta;
     }
 
-    if sb_ifree_delta > 0 {
-        let mut sb_sec = vec![0u8; sb.sectsize as usize];
-        vol.read_at(0, &mut sb_sec)?;
-        if !crc_matches(&sb_sec, SB_CRC_OFF) {
-            return Err(bad("CRC суперблока не сходится — не трогаю"));
-        }
-        let ifree = be64(&sb_sec, SB_IFREE);
-        put_be64(&mut sb_sec, SB_IFREE, ifree + sb_ifree_delta);
-        set_crc(&mut sb_sec, SB_CRC_OFF);
-        out.patches.push((0, sb_sec));
-    }
+    out.sb_ifree_delta = sb_ifree_delta;
     Ok(out)
+}
+
+/// Один патч суперблока на оба счётчика.
+///
+/// `sb_ifree` растёт от D3, `sb_fdblocks` — от D4, и живут они в одном секторе
+/// под одной контрольной суммой. Поэтому патч ровно один, и делается он после
+/// того, как оба шага сказали свои дельты.
+pub(crate) fn patch_superblock(
+    vol: &mut dyn RawVolume,
+    sb: &Sb,
+    ifree_delta: u64,
+    fdblocks_delta: u64,
+) -> Result<Option<(u64, Vec<u8>)>> {
+    if ifree_delta == 0 && fdblocks_delta == 0 {
+        return Ok(None);
+    }
+    let mut sec = vec![0u8; sb.sectsize as usize];
+    vol.read_at(0, &mut sec)?;
+    if !crc_matches(&sec, SB_CRC_OFF) {
+        return Err(bad("CRC суперблока не сходится — не трогаю"));
+    }
+    let ifree = be64(&sec, SB_IFREE);
+    put_be64(&mut sec, SB_IFREE, ifree + ifree_delta);
+    let fd = be64(&sec, SB_FDBLOCKS);
+    put_be64(&mut sec, SB_FDBLOCKS, fd + fdblocks_delta);
+    set_crc(&mut sec, SB_CRC_OFF);
+    Ok(Some((0, sec)))
 }
 
 fn read_inode_raw(vol: &mut dyn RawVolume, sb: &Sb, ino: u64) -> Result<Vec<u8>> {
@@ -753,6 +781,10 @@ mod tests {
             freeing.refusals.iter().map(|r| r.to_string()).collect::<Vec<_>>()
         );
         assert_eq!(freeing.freed.len(), all_inos.len(), "освобождены не все иноды");
+        // Суперблок пишется отдельно — D3 отдаёт только дельту.
+        if let Some(sbp) = patch_superblock(&mut vol, &sb, freeing.sb_ifree_delta, 0).unwrap() {
+            patches.push(sbp);
+        }
         eprintln!(
             "  каталоги: {:?}; освобождено инодов: {}; патчей: {}",
             dir_inos,
