@@ -442,6 +442,16 @@ struct BitLockerSource {
 /// A reader bounded to one partition of a disk, aligned for a device opened
 /// without buffering (the FVE dataset starts 0x40 into its block, which is not
 /// a sector boundary).
+/// Размер сектора диска — по геометрии устройства, а не по догадке.
+///
+/// Нужен, когда BitLocker не заполнил поле в BPB: внутри exFAT или ReFS там
+/// ноль, и без этого числа контейнер не открыть (см. `bitlocker::
+/// resolve_sector_size`). Стоит одного открытия устройства.
+#[cfg(target_os = "windows")]
+fn disk_sector_size(disk: &str) -> Option<u32> {
+    WinRawDevice::open_read(disk).ok().map(|d| d.sector_size())
+}
+
 #[cfg(target_os = "windows")]
 fn disk_window(
     disk: &str,
@@ -500,7 +510,8 @@ fn open_bitlocker_source(read_path: &str, passphrase: &str) -> Result<Option<Bit
     };
     let disk = format!(r"\\.\PhysicalDrive{}", extent.disk_number);
     let mut probe = disk_window(&disk, extent.offset, extent.length)?;
-    let params = crate::bitlocker::open_bitlocker(&mut probe, passphrase)?;
+    let params =
+        crate::bitlocker::open_bitlocker_with(&mut probe, passphrase, disk_sector_size(&disk))?;
     info!(
         algo = format!("{:#x}", params.algorithm),
         disk = extent.disk_number,
@@ -4789,7 +4800,7 @@ pub fn describe_encryption(disk: u32, offset: u64, length: u64) -> (Vec<String>,
     let Ok(mut window) = disk_window(&path, offset, length) else {
         return unknown;
     };
-    if let Ok(info) = crate::bitlocker::inspect_bitlocker(&mut window) {
+    if let Ok(info) = crate::bitlocker::inspect_bitlocker_with(&mut window, disk_sector_size(&path)) {
         let names = info
             .protectors
             .iter()
@@ -4871,7 +4882,8 @@ fn probe_bitlocker(volume_device: &str, passphrase: &str) -> Result<DecryptedPro
     };
     let disk = format!(r"\\.\PhysicalDrive{}", extent.disk_number);
     let mut probe = disk_window(&disk, extent.offset, extent.length)?;
-    let params = match crate::bitlocker::open_bitlocker(&mut probe, passphrase) {
+    let params = match crate::bitlocker::open_bitlocker_with(&mut probe, passphrase, disk_sector_size(&disk))
+    {
         Ok(p) => p,
         // Wrong passphrase — a fact for the interface, not an error. AES-CCM
         // verifies its own tag, so this really does mean "not this password".

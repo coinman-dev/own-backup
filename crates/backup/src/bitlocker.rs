@@ -571,11 +571,22 @@ fn hex(bytes: &[u8]) -> String {
 /// Read what a BitLocker volume declares about itself — cipher, geometry and
 /// the list of ways in — without a password and without writing anything.
 pub fn inspect_bitlocker(vol: &mut dyn RawVolume) -> Result<BitLockerInfo> {
+    inspect_bitlocker_with(vol, None)
+}
+
+/// То же, но с подсказкой о размере сектора — она нужна, когда BPB его не
+/// сообщает (exFAT, ReFS). См. [`resolve_sector_size`].
+pub fn inspect_bitlocker_with(
+    vol: &mut dyn RawVolume,
+    sector_hint: Option<u32>,
+) -> Result<BitLockerInfo> {
     let boot = read_at(vol, 0, 512)?;
     if !is_bitlocker(&boot) {
         return Err(bad("not a BitLocker volume"));
     }
-    let sector_size = u16at(&boot, 0x0B) as u32;
+    // Осмотр переживает отсутствие поля: шифр и протекторы от него не зависят,
+    // и сказать о них человеку важнее, чем отказать целиком.
+    let sector_size = resolve_sector_size(&boot, sector_hint).unwrap_or(512);
 
     let offsets = metadata_offsets(&boot, vol.len());
     let mut last_err = String::new();
@@ -746,10 +757,46 @@ fn describe_datums(buf: &[u8], depth: usize, out: &mut Vec<String>) {
     }
 }
 
+/// Размер сектора тома: из BPB, а если его там нет — из геометрии устройства.
+///
+/// BitLocker заполняет поле по 0x0B в своём заголовке не всегда. У NTFS и FAT32
+/// оно на месте, а у **exFAT и ReFS там ноль** — проверено живьём 2026-08-20:
+/// заблокированная exFAT-флешка отвечала «implausible sector size 0», и наш
+/// разбор отказывался от неё при любом шифре.
+///
+/// Догадаться «наверное 512» нельзя: на диске с сектором 4 КиБ это дало бы
+/// неверный tweak XTS и мусор вместо данных — молча, потому что расшифровка
+/// ничего не проверяет. Поэтому единственный запасной источник — геометрия
+/// самого устройства, которую сообщает вызывающий; без неё честнее отказать.
+fn resolve_sector_size(boot: &[u8], hint: Option<u32>) -> Result<u32> {
+    let plausible = |v: u32| v.is_power_of_two() && (512..=4096).contains(&v);
+    let from_bpb = u16at(boot, 0x0B) as u32;
+    if plausible(from_bpb) {
+        return Ok(from_bpb);
+    }
+    match hint {
+        Some(h) if plausible(h) => Ok(h),
+        _ => Err(bad(format!(
+            "implausible sector size {from_bpb} в BPB, а геометрия устройства не сообщена \
+             (так выглядит exFAT или ReFS внутри контейнера)"
+        ))),
+    }
+}
+
 /// Recover the FVEK of a BitLocker volume using `password`. Errors on a wrong
 /// passphrase, an unsupported cipher, or a malformed / unhandled layout.
 pub fn open_bitlocker(vol: &mut dyn RawVolume, password: &str) -> Result<BitLockerParams> {
-    open_bitlocker_with_iters(vol, password, STRETCH_ITERATIONS, true)
+    open_bitlocker_with_iters(vol, password, STRETCH_ITERATIONS, true, None)
+}
+
+/// [`open_bitlocker`] с подсказкой о размере сектора от геометрии устройства —
+/// без неё не открыть контейнер с exFAT или ReFS внутри.
+pub fn open_bitlocker_with(
+    vol: &mut dyn RawVolume,
+    password: &str,
+    sector_hint: Option<u32>,
+) -> Result<BitLockerParams> {
+    open_bitlocker_with_iters(vol, password, STRETCH_ITERATIONS, true, sector_hint)
 }
 
 /// [`open_bitlocker`] without the "and it decrypts to NTFS" check.
@@ -762,7 +809,7 @@ pub fn open_bitlocker_unverified(
     vol: &mut dyn RawVolume,
     password: &str,
 ) -> Result<BitLockerParams> {
-    open_bitlocker_with_iters(vol, password, STRETCH_ITERATIONS, false)
+    open_bitlocker_with_iters(vol, password, STRETCH_ITERATIONS, false, None)
 }
 
 /// [`open_bitlocker`] with an explicit stretch iteration count (tests use a
@@ -772,15 +819,13 @@ fn open_bitlocker_with_iters(
     password: &str,
     iterations: u32,
     verify: bool,
+    sector_hint: Option<u32>,
 ) -> Result<BitLockerParams> {
     let boot = read_at(vol, 0, 512)?;
     if !is_bitlocker(&boot) {
         return Err(bad("not a BitLocker volume"));
     }
-    let sector_size = u16at(&boot, 0x0B);
-    if !sector_size.is_power_of_two() || !(512..=4096).contains(&sector_size) {
-        return Err(bad(format!("implausible sector size {sector_size}")));
-    }
+    let sector_size = resolve_sector_size(&boot, sector_hint)?;
 
     // The FVE metadata copies — try each until one parses and unlocks.
     let offsets = metadata_offsets(&boot, vol.len());
@@ -789,7 +834,7 @@ fn open_bitlocker_with_iters(
         offsets.len()
     ));
     for info_off in offsets {
-        match unlock_from_metadata(vol, info_off, sector_size as u32, password, iterations) {
+        match unlock_from_metadata(vol, info_off, sector_size, password, iterations) {
             Ok(params) => {
                 if verify {
                     verify_covers_volume(&params, vol.len())?;
@@ -1541,7 +1586,7 @@ mod tests {
         assert!(info.has_password() && info.openable());
         assert!(!info.header_hex.is_empty() && !info.dataset_hex.is_empty());
 
-        let params = super::open_bitlocker_with_iters(&mut vol, password, stretch_iters, true).unwrap();
+        let params = super::open_bitlocker_with_iters(&mut vol, password, stretch_iters, true, None).unwrap();
         assert_eq!(params.algorithm, ALG_AES_XTS_128);
         assert_eq!(&params.fvek[..], &fvek[..]);
 
@@ -1559,14 +1604,14 @@ mod tests {
 
         // Wrong password fails.
         let mut vol2 = MemVolume(view.inner_into_vec());
-        assert!(super::open_bitlocker_with_iters(&mut vol2, "nope", stretch_iters, true).is_err());
+        assert!(super::open_bitlocker_with_iters(&mut vol2, "nope", stretch_iters, true, None).is_err());
 
         // --- The layout real volumes actually use ---
         let mut real = MemVolume(real_layout);
         let info = inspect_bitlocker(&mut real).expect("offsets at 0xB0 must be found");
         assert_eq!(info.cipher, ALG_AES_XTS_128);
         assert_eq!(info.protectors.len(), 1);
-        let params = super::open_bitlocker_with_iters(&mut real, password, stretch_iters, true)
+        let params = super::open_bitlocker_with_iters(&mut real, password, stretch_iters, true, None)
             .expect("a volume with the offsets at 0xB0 must unlock");
         assert_eq!(&params.fvek[..], &fvek[..]);
     }
@@ -1637,6 +1682,37 @@ mod tests {
     ///
     /// Пока эти два вопроса были одним полем, мастер не показывал поле пароля
     /// НИ ОДНОЙ обычной флешке. Найдено живой проверкой 2026-08-20.
+
+    /// Размер сектора: из BPB, а когда его там нет — из геометрии устройства.
+    ///
+    /// Ноль в BPB это не поломка, а обычное состояние контейнера с exFAT или
+    /// ReFS внутри: BitLocker то поле не заполняет. Найдено живьём 2026-08-20 —
+    /// заблокированная exFAT-флешка отвечала «implausible sector size 0».
+    #[test]
+    fn the_sector_size_falls_back_to_the_device_geometry() {
+        let mut boot = vec![0u8; 512];
+        boot[3..11].copy_from_slice(FVE_SIGNATURE);
+
+        // BPB заполнен — геометрия не спрашивается, и подсказка её не
+        // перебивает: том знает о себе больше, чем диск под ним.
+        put_u16(&mut boot, 0x0B, 4096);
+        assert_eq!(resolve_sector_size(&boot, None).unwrap(), 4096);
+        assert_eq!(resolve_sector_size(&boot, Some(512)).unwrap(), 4096);
+
+        // Поля нет: без подсказки — честный отказ, с подсказкой — её значение.
+        put_u16(&mut boot, 0x0B, 0);
+        assert!(resolve_sector_size(&boot, None).is_err());
+        assert_eq!(resolve_sector_size(&boot, Some(512)).unwrap(), 512);
+        assert_eq!(resolve_sector_size(&boot, Some(4096)).unwrap(), 4096);
+
+        // Дискриминация: неправдоподобная подсказка не принимается. Молча
+        // взять её значило бы считать XTS-tweak по неверной сетке и получить
+        // мусор вместо данных — без единой жалобы.
+        assert!(resolve_sector_size(&boot, Some(0)).is_err());
+        assert!(resolve_sector_size(&boot, Some(3000)).is_err(), "не степень двойки");
+        assert!(resolve_sector_size(&boot, Some(8192)).is_err(), "вне диапазона");
+    }
+
     #[test]
     fn a_removable_drive_in_compatible_mode_still_has_a_password_to_type() {
         let cbc = inspect_bitlocker(&mut volume_with_cipher(
