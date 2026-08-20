@@ -142,6 +142,25 @@ impl<'a> AgReader<'a> {
         Ok(b)
     }
 
+    /// Физическое смещение сектора группы — чтобы D3 мог не только прочитать
+    /// AGI, но и сказать, куда лечь правке.
+    pub(crate) fn sector_offset(&self, sector: u64) -> u64 {
+        self.ag_off() + sector * self.sb.sectsize
+    }
+
+    /// То же для блока.
+    pub(crate) fn block_offset(&self, agbno: u64) -> u64 {
+        self.ag_off() + agbno * self.sb.blocksize
+    }
+
+    pub(crate) fn read_sector_at(&self, vol: &mut dyn RawVolume, sector: u64) -> Result<Vec<u8>> {
+        self.read_sector(vol, sector)
+    }
+
+    pub(crate) fn read_block_at(&self, vol: &mut dyn RawVolume, agbno: u64) -> Result<Vec<u8>> {
+        self.read_block(vol, agbno)
+    }
+
     pub(crate) fn agf(&self, vol: &mut dyn RawVolume) -> Result<Agf> {
         let b = self.read_sector(vol, 1)?;
         if &b[0..4] != b"XAGF" {

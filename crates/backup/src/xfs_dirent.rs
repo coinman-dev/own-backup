@@ -145,7 +145,7 @@ pub(crate) struct DirEdit {
 
 /// XFS считает CRC32C с затравкой `~0` по блоку, в котором поле CRC обнулено, и
 /// пишет дополнение результата в LITTLE-endian.
-fn xfs_crc(block: &[u8], crc_off: usize) -> u32 {
+pub(crate) fn xfs_crc(block: &[u8], crc_off: usize) -> u32 {
     let mut tmp;
     let data = if block[crc_off..crc_off + 4] == [0, 0, 0, 0] {
         block
@@ -157,11 +157,11 @@ fn xfs_crc(block: &[u8], crc_off: usize) -> u32 {
     !crate::btrfs_exclusions::crc32c_raw(!0u32, data)
 }
 
-fn stored_crc(block: &[u8], crc_off: usize) -> u32 {
+pub(crate) fn stored_crc(block: &[u8], crc_off: usize) -> u32 {
     u32::from_le_bytes(block[crc_off..crc_off + 4].try_into().unwrap())
 }
 
-fn set_crc(block: &mut [u8], crc_off: usize) {
+pub(crate) fn set_crc(block: &mut [u8], crc_off: usize) {
     block[crc_off..crc_off + 4].fill(0);
     let c = xfs_crc(block, crc_off);
     block[crc_off..crc_off + 4].copy_from_slice(&c.to_le_bytes());
@@ -172,7 +172,7 @@ fn set_crc(block: &mut [u8], crc_off: usize) {
 /// Дешёвая, но сильная проверка: если формула неверна или блок повреждён, мы
 /// узнаём об этом ДО записи, а не по разрушенной ФС. Тот же приём спас btrfs от
 /// молчаливой порчи, когда оттенок crc32c оказался другим.
-fn crc_matches(block: &[u8], crc_off: usize) -> bool {
+pub(crate) fn crc_matches(block: &[u8], crc_off: usize) -> bool {
     stored_crc(block, crc_off) == xfs_crc(block, crc_off)
 }
 

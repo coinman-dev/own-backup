@@ -35,6 +35,7 @@ pub mod used_sectors;
 pub mod vhdx_bat;
 pub mod xfs_dirent;
 pub mod xfs_exclusions;
+pub mod xfs_ifree;
 pub mod xfs_map;
 pub mod xfs_stage2;
 
