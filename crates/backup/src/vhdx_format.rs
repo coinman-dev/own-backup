@@ -12,8 +12,7 @@
 //! CRC-32C (Castagnoli).
 
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom};
-use std::os::unix::fs::FileExt;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use uuid::Uuid;
@@ -103,6 +102,8 @@ pub struct VhdxWriter {
     bat: Vec<u64>,
     /// Where the next allocated payload block lands (MiB-aligned).
     next_data_off: u64,
+    /// Offset of the BAT region in the VHDX file.
+    bat_off: u64,
 }
 
 impl VhdxWriter {
@@ -132,7 +133,7 @@ impl VhdxWriter {
             .map_err(|e| bad(format!("create {}: {e}", path.display())))?;
         file.set_len(data_start).map_err(bad)?;
 
-        let w = Self {
+        let mut w = Self {
             file,
             virtual_size,
             block_size,
@@ -140,6 +141,7 @@ impl VhdxWriter {
             chunk_ratio,
             bat: vec![0u64; bat_entries as usize],
             next_data_off: data_start,
+            bat_off: BAT_OFF,
         };
         w.write_file_id()?;
         w.write_header()?;
@@ -148,11 +150,113 @@ impl VhdxWriter {
         Ok(w)
     }
 
-    fn at(&self, off: u64, data: &[u8]) -> Result<()> {
-        self.file.write_all_at(data, off).map_err(bad)
+    /// Open an existing dynamic or differencing VHDX image (e.g. pre-created by
+    /// `create_differencing_vhdx` or `create_dynamic_vhdx`) to write payload
+    /// blocks in userspace without attaching to the Windows kernel.
+    pub fn open_existing(path: &Path) -> Result<Self> {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|e| bad(format!("open {}: {e}", path.display())))?;
+
+        // Region table: locate BAT and metadata offsets.
+        let mut region = vec![0u8; 64 * 1024];
+        file.seek(SeekFrom::Start(REGION1_OFF)).map_err(bad)?;
+        file.read_exact(&mut region).map_err(bad)?;
+        if &region[0..4] != b"regi" {
+            return Err(bad("no region table signature"));
+        }
+        let entry_count = u32::from_le_bytes(region[8..12].try_into().unwrap()) as usize;
+        let (mut bat_off, mut bat_len, mut meta_off) = (0u64, 0u64, 0u64);
+        for slot in 0..entry_count.min(2047) {
+            let base = 16 + slot * 32;
+            let guid = &region[base..base + 16];
+            let off = u64::from_le_bytes(region[base + 16..base + 24].try_into().unwrap());
+            let len = u32::from_le_bytes(region[base + 24..base + 28].try_into().unwrap()) as u64;
+            if guid == guid_le(BAT_GUID) {
+                bat_off = off;
+                bat_len = len;
+            } else if guid == guid_le(META_GUID) {
+                meta_off = off;
+            }
+        }
+        if bat_off == 0 || meta_off == 0 {
+            return Err(bad("region table missing BAT or metadata"));
+        }
+
+        // Metadata: virtual disk size, block size, sector size.
+        let mut meta = vec![0u8; META_LEN as usize];
+        file.seek(SeekFrom::Start(meta_off)).map_err(bad)?;
+        file.read_exact(&mut meta).map_err(bad)?;
+        if &meta[0..8] != b"metadata" {
+            return Err(bad("no metadata signature"));
+        }
+        let mcount = u16::from_le_bytes(meta[10..12].try_into().unwrap()) as usize;
+        let (mut vsize, mut bsize, mut ssize) = (0u64, 0u64, 512u32);
+        for slot in 0..mcount.min(2046) {
+            let e = 32 + slot * 32;
+            let guid = &meta[e..e + 16];
+            let ioff = u32::from_le_bytes(meta[e + 16..e + 20].try_into().unwrap()) as usize;
+            let read_u32 = |m: &[u8], o: usize| u32::from_le_bytes(m[o..o + 4].try_into().unwrap());
+            let read_u64 = |m: &[u8], o: usize| u64::from_le_bytes(m[o..o + 8].try_into().unwrap());
+            if guid == guid_le(MI_VDISK_SIZE) {
+                vsize = read_u64(&meta, ioff);
+            } else if guid == guid_le(MI_FILE_PARAMS) {
+                bsize = read_u32(&meta, ioff) as u64;
+            } else if guid == guid_le(MI_LOG_SECTOR) {
+                ssize = read_u32(&meta, ioff);
+            }
+        }
+        if vsize == 0 || bsize == 0 {
+            return Err(bad("metadata missing virtual/block size"));
+        }
+
+        let chunk_ratio = chunk_ratio(bsize, ssize);
+        let entries = (bat_len / 8) as usize;
+        let mut raw = vec![0u8; entries * 8];
+        file.seek(SeekFrom::Start(bat_off)).map_err(bad)?;
+        file.read_exact(&mut raw).map_err(bad)?;
+        let bat: Vec<u64> = raw
+            .chunks_exact(8)
+            .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+
+        // Determine where new payload blocks will be appended.
+        let mut max_off = bat_off + bat_len;
+        for &entry in &bat {
+            if entry & 7 == PAYLOAD_BLOCK_FULLY_PRESENT {
+                let file_off = (entry >> 20) * MB;
+                if file_off + bsize > max_off {
+                    max_off = file_off + bsize;
+                }
+            }
+        }
+        let file_len = file.metadata().map_err(bad)?.len();
+        let next_data_off = max_off.max(file_len);
+
+        Ok(Self {
+            file,
+            virtual_size: vsize,
+            block_size: bsize,
+            sector_size: ssize,
+            chunk_ratio,
+            bat,
+            next_data_off,
+            bat_off,
+        })
     }
 
-    fn write_file_id(&self) -> Result<()> {
+    pub fn length(&self) -> u64 {
+        self.virtual_size
+    }
+
+    fn at(&mut self, off: u64, data: &[u8]) -> Result<()> {
+        self.file.seek(SeekFrom::Start(off)).map_err(bad)?;
+        self.file.write_all(data).map_err(bad)
+    }
+
+    fn write_file_id(&mut self) -> Result<()> {
         let mut b = vec![0u8; 64 * 1024];
         b[..8].copy_from_slice(b"vhdxfile");
         // Creator: UTF-16LE, 512 bytes at offset 8.
@@ -162,7 +266,7 @@ impl VhdxWriter {
         self.at(0, &b)
     }
 
-    fn write_header(&self) -> Result<()> {
+    fn write_header(&mut self) -> Result<()> {
         let mut h = vec![0u8; 4096];
         h[0..4].copy_from_slice(b"head");
         // 4..8 checksum (filled below)
@@ -181,7 +285,7 @@ impl VhdxWriter {
         self.at(HEADER1_OFF + 64 * 1024, &h)
     }
 
-    fn write_region_table(&self, bat_len: u64) -> Result<()> {
+    fn write_region_table(&mut self, bat_len: u64) -> Result<()> {
         let mut r = vec![0u8; 64 * 1024];
         r[0..4].copy_from_slice(b"regi");
         // 4..8 checksum
@@ -201,7 +305,7 @@ impl VhdxWriter {
         self.at(REGION2_OFF, &r)
     }
 
-    fn write_metadata(&self) -> Result<()> {
+    fn write_metadata(&mut self) -> Result<()> {
         let mut m = vec![0u8; META_LEN as usize];
         // Metadata table header.
         m[0..8].copy_from_slice(b"metadata");
@@ -246,23 +350,39 @@ impl VhdxWriter {
             let take = std::cmp::min(self.block_size - in_block, data.len() as u64) as usize;
 
             let bi = bat_index(block, self.chunk_ratio) as usize;
+            if bi >= self.bat.len() {
+                self.bat.resize(bi + 1, 0);
+            }
+            let entry = self.bat[bi];
+            let is_allocated = (entry & 7) == PAYLOAD_BLOCK_FULLY_PRESENT || (entry != 0 && (entry & 7) == 0);
+
             // Zeros into a block nobody has touched cost a megabyte of file for
             // nothing: an unallocated block already reads as zeros. This is what
             // keeps excluded-file "ghosts" free — their blocks stay in the used
             // map (the filesystem still reads them) but carry no data.
-            if self.bat[bi] == 0 && data[..take].iter().all(|&b| b == 0) {
+            if !is_allocated && data[..take].iter().all(|&b| b == 0) {
                 off += take as u64;
                 data = &data[take..];
                 continue;
             }
-            if self.bat[bi] == 0 {
-                self.bat[bi] = self.next_data_off;
+
+            let file_off = if is_allocated {
+                if (entry & 7) == PAYLOAD_BLOCK_FULLY_PRESENT {
+                    (entry >> 20) * MB
+                } else {
+                    entry
+                }
+            } else {
+                let alloc_off = self.next_data_off;
                 self.next_data_off += self.block_size;
                 self.file
                     .set_len(self.next_data_off)
                     .map_err(bad)?;
-            }
-            self.at(self.bat[bi] + in_block, &data[..take])?;
+                self.bat[bi] = alloc_off;
+                alloc_off
+            };
+
+            self.at(file_off + in_block, &data[..take])?;
             off += take as u64;
             data = &data[take..];
         }
@@ -270,17 +390,19 @@ impl VhdxWriter {
     }
 
     /// Write the BAT and flush. Consumes the writer.
-    pub fn finish(self) -> Result<()> {
+    pub fn finish(mut self) -> Result<()> {
         let mut bat = vec![0u8; self.bat.len() * 8];
-        for (i, &file_off) in self.bat.iter().enumerate() {
-            let entry = if file_off != 0 {
-                ((file_off / MB) << 20) | PAYLOAD_BLOCK_FULLY_PRESENT
+        for (i, &entry) in self.bat.iter().enumerate() {
+            let encoded = if (entry & 7) == PAYLOAD_BLOCK_FULLY_PRESENT {
+                entry
+            } else if entry != 0 {
+                ((entry / MB) << 20) | PAYLOAD_BLOCK_FULLY_PRESENT
             } else {
                 0
             };
-            bat[i * 8..i * 8 + 8].copy_from_slice(&entry.to_le_bytes());
+            bat[i * 8..i * 8 + 8].copy_from_slice(&encoded.to_le_bytes());
         }
-        self.at(BAT_OFF, &bat)?;
+        self.at(self.bat_off, &bat)?;
         self.file.sync_all().map_err(bad)?;
         Ok(())
     }
@@ -375,7 +497,7 @@ impl VhdxReader {
 
     /// Read `buf.len()` bytes at virtual-disk `offset`; regions with no allocated
     /// block read as zero.
-    pub fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
+    pub fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
         if offset + buf.len() as u64 > self.virtual_size {
             return Err(bad("read past virtual disk end"));
         }
@@ -390,8 +512,9 @@ impl VhdxReader {
             let entry = self.bat.get(bi).copied().unwrap_or(0);
             if entry & 7 == PAYLOAD_BLOCK_FULLY_PRESENT {
                 let file_off = (entry >> 20) * MB + in_block;
+                self.file.seek(SeekFrom::Start(file_off)).map_err(bad)?;
                 self.file
-                    .read_exact_at(&mut buf[done..done + take], file_off)
+                    .read_exact(&mut buf[done..done + take])
                     .map_err(bad)?;
             } else {
                 buf[done..done + take].fill(0); // absent block = zeros
@@ -452,5 +575,34 @@ mod tests {
         // The file is sparse: allocated blocks (3) ≪ virtual size.
         let actual = std::fs::metadata(&path).unwrap().len();
         assert!(actual < vsize + BAT_OFF + 4 * block);
+    }
+
+    #[test]
+    fn open_existing_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t2.vhdx");
+        let block = 2 * MB;
+        let vsize = 10 * MB;
+
+        let mut w = VhdxWriter::create(&path, vsize, block, 512).unwrap();
+        let data1 = vec![0x11u8; 4096];
+        w.write_at(0, &data1).unwrap();
+        w.finish().unwrap();
+
+        // Re-open existing VHDX and write to block 1
+        let mut w2 = VhdxWriter::open_existing(&path).unwrap();
+        assert_eq!(w2.length(), vsize);
+        let data2 = vec![0x22u8; 4096];
+        w2.write_at(block, &data2).unwrap();
+        w2.finish().unwrap();
+
+        let r = VhdxReader::open(&path).unwrap();
+        let mut buf1 = vec![0u8; 4096];
+        r.read_at(0, &mut buf1).unwrap();
+        assert_eq!(buf1, data1);
+
+        let mut buf2 = vec![0u8; 4096];
+        r.read_at(block, &mut buf2).unwrap();
+        assert_eq!(buf2, data2);
     }
 }

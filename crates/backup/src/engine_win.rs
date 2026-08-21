@@ -157,15 +157,7 @@ pub struct VolumeBackupSummary {
 /// juggling, no flush pacing (the OS cache never holds a whole image).
 enum ImageTarget {
     Vhdx {
-        /// DECLARED BEFORE `attached` ON PURPOSE: fields drop in declaration
-        /// order. [`ImageTarget::finalize`] drops them in the right order by
-        /// hand, but an error anywhere in the copy drops the whole target
-        /// implicitly — and detaching a disk whose device handle we still hold
-        /// is how a clean teardown becomes a vetoed one.
-        writer: WinRawDevice,
-        attached: crate::vhdx::AttachedVhdx,
-        /// Bytes written since the last pacing flush (see FLUSH_INTERVAL_BYTES).
-        bytes_since_flush: u64,
+        writer: crate::vhdx_format::VhdxWriter,
     },
     Qcow2 {
         writer: crate::qcow2::Qcow2StagedWriter<std::io::BufWriter<std::fs::File>>,
@@ -176,65 +168,25 @@ impl ImageTarget {
     /// Virtual disk size of the image being written.
     fn length(&self) -> u64 {
         match self {
-            ImageTarget::Vhdx { writer, .. } => writer.length(),
+            ImageTarget::Vhdx { writer } => writer.length(),
             ImageTarget::Qcow2 { writer } => writer.length(),
         }
     }
 
     fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()> {
         match self {
-            ImageTarget::Vhdx { writer, bytes_since_flush, .. } => {
-                writer.write_at(offset, data)?;
-                // Drain the OS cache in bounded chunks so the end-of-backup
-                // flush stays short (see FLUSH_INTERVAL_BYTES).
-                *bytes_since_flush += data.len() as u64;
-                if *bytes_since_flush >= FLUSH_INTERVAL_BYTES {
-                    writer.flush()?;
-                    *bytes_since_flush = 0;
-                }
-                Ok(())
-            }
+            ImageTarget::Vhdx { writer } => writer.write_at(offset, data),
             ImageTarget::Qcow2 { writer } => writer.write_at(offset, data),
         }
     }
 
-    /// Finalize the image and log per-step timings (the finalize stall lives
-    /// in ONE of these, and the log should say which).
+    /// Finalize the image and log per-step timings.
     fn finalize(self) -> Result<()> {
         match self {
-            ImageTarget::Vhdx { attached, mut writer, .. } => {
+            ImageTarget::Vhdx { writer } => {
                 let t = Instant::now();
-                writer.flush()?;
-                let flush_ms = t.elapsed().as_millis();
-                // Every byte is down now, so the image's FINAL GPT is on disk —
-                // re-persist the offline attribute keyed to its real GUID. The
-                // attach-time persist can run before the GPT head exists (a
-                // partition starting at LBA 34 makes block 0 "used", deferring
-                // the head to the copy pass), which keys the attribute to a RAW
-                // disk and silently protects nothing — then the NEXT attach in
-                // the chain auto-mounts and its detach stalls ~180 s.
-                if let Err(e) = writer.update_properties().and_then(|()| writer.set_offline_writable(true)) {
-                    warn!(error = %e, "could not re-persist the offline attribute at finalize");
-                }
-                let t2 = Instant::now();
-                let rescued = dismount_surfaced_volumes(&attached, &writer);
-                let rescue_ms = t2.elapsed().as_millis();
-                let t = Instant::now();
-                drop(writer);
-                let close_ms = t.elapsed().as_millis();
-                let t = Instant::now();
-                drop(attached); // detaches the image
-                let detach_ms = t.elapsed().as_millis();
-                info!(flush_ms, rescue_ms, close_ms, detach_ms, "VHDX finalize timings");
-                if detach_ms > 5_000 {
-                    warn!(
-                        detach_ms,
-                        rescued,
-                        "DETACH-STALL: DetachVirtualDisk blocked despite the offline \
-                         discipline — if no MOUNT-LEAK was logged, a foreign handle \
-                         (indexer/antivirus/our own leaked reader) held the disk"
-                    );
-                }
+                writer.finish()?;
+                info!(finish_ms = t.elapsed().as_millis(), "VHDX finalize timings");
             }
             ImageTarget::Qcow2 { writer } => {
                 let t = Instant::now();
@@ -309,131 +261,7 @@ fn open_write_with_retry(path: &str) -> Result<WinRawDevice> {
     Err(last_err.unwrap_or_else(|| OwnBackupError::Device(format!("cannot open {path}"))))
 }
 
-/// The ONE way to attach an image for raw writing. Owns the whole offline
-/// discipline — SAN-policy window, attach, offline (+optional persist) — and
-/// checks the result: a volume that surfaced anyway is reported by name
-/// (`MOUNT-LEAK`) instead of resurfacing three minutes later as a mystery
-/// detach stall. New write paths must call this, never `attach_vhdx` directly.
-///
-/// `persist_offline` persists the offline attribute keyed to the disk's GPT
-/// GUID; pass `false` only when the image has no final GPT yet (a fresh full) —
-/// [`ImageTarget::finalize`] re-persists once every byte is down.
-fn attach_for_raw_write(
-    image_path: &Path,
-    persist_offline: bool,
-) -> Result<(crate::vhdx::AttachedVhdx, WinRawDevice)> {
-    let san_guard = SanPolicyGuard::offline_all();
-    let attached = attach_vhdx(image_path, AttachMode::RawWrite)?;
-    let writer = open_write_with_retry(attached.physical_path())?;
-    // THE window. If the SAN policy did not take and the image surfaced its
-    // inherited volumes, this is the ONLY moment they can be seen and torn
-    // down: the disk is still online, so `volume_extents` answers and the
-    // volume devices open. One line later it is offline and the enumeration
-    // goes blind (that blindness is why the finalize-time check reported
-    // "no volumes" while the detach still waited out the veto).
-    //
-    // Order matters, and it is the sequence true removal proved: dismount the
-    // volumes, take the disk offline while still HOLDING their locks, and only
-    // then let go — otherwise the filesystem mounts straight back into the gap.
-    if let Some(disk) = disk_number_from_physical(attached.physical_path()) {
-        tear_down_surfaced_volumes(disk, "at attach");
-    }
-    writer.set_offline_writable(persist_offline)?;
-    drop(san_guard);
-    Ok((attached, writer))
-}
 
-/// Strip letters and force-dismount every volume currently visible on `disk` —
-/// the image's volumes that should never have surfaced.
-///
-/// Nothing is flushed and nothing is locked: a volume that came out of an image
-/// must be dropped, not committed. Flushing it writes the filesystem driver's
-/// idea of the volume (a dirty bit, an updated FSInfo) into an image the backup
-/// has already checksummed, and the copy stops matching its own sidecar. The
-/// disk goes offline immediately afterwards, which is what keeps the volume
-/// from coming back.
-///
-/// Silent on the healthy path (nothing surfaced). When something did, it says
-/// so as `MOUNT-LEAK` with the volume names — the offline discipline regressed
-/// somewhere, and that is the line which says where to look.
-fn tear_down_surfaced_volumes(disk: u32, when: &str) -> bool {
-    let roots = crate::volume_win::all_volume_roots_on_disk(disk);
-    if roots.is_empty() {
-        return false;
-    }
-    warn!(
-        disk, when,
-        volumes = ?roots,
-        "MOUNT-LEAK: a volume surfaced from the image — the offline discipline \
-         failed (SAN policy not applied / offline attribute not persisted for \
-         this chain); force-dismounting it so the detach does not wait out the \
-         ~180 s PnP removal veto"
-    );
-    crate::volume_win::strip_letters_on_disk(disk);
-    for vr in &roots {
-        crate::volume_win::dismount_volume_forced(vr);
-    }
-    true
-}
-
-/// Last check before `DetachVirtualDisk`: is the image's device stack actually
-/// gone? Returns `true` when something had to be torn down here.
-///
-/// This runs on an OFFLINE disk, where `all_volume_roots_on_disk` cannot see
-/// anything (`volume_extents` fails for an offline disk's volumes) — so it asks
-/// the question that survives that blindness: do PARTITION device objects still
-/// exist? A live one on an offline disk means the teardown behind the offline
-/// transition was vetoed, and the detach is about to wait ~180 s for it. Those
-/// same partition devices are what a dismount reaches, so they are also the
-/// cure. The disk's real attribute state is logged either way: "we set offline"
-/// and "the disk IS offline" are not the same claim, and confusing them is what
-/// kept this bug alive.
-fn dismount_surfaced_volumes(attached: &crate::vhdx::AttachedVhdx, dev: &WinRawDevice) -> bool {
-    let Some(disk) = disk_number_from_physical(attached.physical_path()) else {
-        return false;
-    };
-    let state = dev.is_offline_read_only();
-    let parts = crate::volume_win::partition_devices_on_disk(disk);
-    let roots = crate::volume_win::all_volume_roots_on_disk(disk);
-    match state {
-        Ok((offline, read_only)) => info!(
-            disk, offline, read_only,
-            partitions = parts.len(),
-            volumes = roots.len(),
-            "image device state before detach"
-        ),
-        Err(e) => warn!(disk, error = %e, "could not read the image's disk attributes before detach"),
-    }
-    if parts.is_empty() && roots.is_empty() {
-        return false;
-    }
-    warn!(
-        disk,
-        partitions = ?parts,
-        volumes = ?roots,
-        "MOUNT-LEAK: the image still carries a live device stack at detach — \
-         tearing it down so DetachVirtualDisk does not wait out the ~180 s PnP \
-         removal veto"
-    );
-    crate::volume_win::strip_letters_on_disk(disk);
-    // Forced, never flushed: see `tear_down_surfaced_volumes`. Volume roots
-    // first, then the partition devices, which stay reachable on an offline
-    // disk.
-    for p in roots.iter().chain(parts.iter()) {
-        crate::volume_win::dismount_volume_forced(p);
-    }
-    if let Err(e) = dev.set_offline_writable(false) {
-        warn!(error = %e, "could not offline the disk after the forced dismount");
-    }
-    let _ = dev.update_properties();
-    let gone = crate::true_removal_win::wait_volume_gone(disk, Duration::from_secs(10));
-    info!(
-        gone,
-        partitions_left = crate::volume_win::partition_devices_on_disk(disk).len(),
-        "image device stack torn down before detach"
-    );
-    true
-}
 
 /// Back up a volume into a freshly created, directly mountable VHDX.
 /// Отказать заранее, если исключения в qcow2 удалить будет нечем.
@@ -1493,7 +1321,7 @@ fn backup_volume_inner(
             (ImageTarget::Qcow2 { writer }, data_offset)
         }
         ImageFormat::Vhdx => {
-            let data_offset = match &parent {
+            let (writer, data_offset) = match &parent {
                 None => {
                     create_dynamic_vhdx(
                         &req.image_path,
@@ -1503,32 +1331,16 @@ fn backup_volume_inner(
                             physical_sector_size: std::cmp::max(sector_size, 4096),
                         },
                     )?;
-                    DEFAULT_PARTITION_OFFSET
+                    let writer = crate::vhdx_format::VhdxWriter::open_existing(&req.image_path)?;
+                    (writer, DEFAULT_PARTITION_OFFSET)
                 }
                 Some((parent_path, parent_sidecar)) => {
-                    // Child inherits geometry and the GPT from its chain.
                     create_differencing_vhdx(&req.image_path, parent_path)?;
-                    parent_sidecar.info.volume_data_offset
+                    let writer = crate::vhdx_format::VhdxWriter::open_existing(&req.image_path)?;
+                    (writer, parent_sidecar.info.volume_data_offset)
                 }
             };
-
-            // A differencing (child) image inherits a full NTFS filesystem from its
-            // parent, which Windows auto-mounts the instant the disk is attached. That
-            // transient mount is what makes DetachVirtualDisk block on a fixed ~180 s
-            // volume-teardown timeout when the backup ends (full images start blank and
-            // never mount, so they detach in milliseconds). `attach_for_raw_write` owns
-            // the offline discipline that prevents the mount. For children the disk
-            // carries the chain's GPT GUID, so the offline attribute is persisted right
-            // away; full images do the persist step after their GPT is written below.
-            let (attached, writer) = attach_for_raw_write(&req.image_path, parent.is_some())?;
-            if writer.length() < data_offset + volume_len {
-                return Err(OwnBackupError::Vhdx(format!(
-                    "attached image is {} bytes — too small for the volume ({} bytes at offset {data_offset})",
-                    writer.length(),
-                    volume_len
-                )));
-            }
-            (ImageTarget::Vhdx { attached, writer, bytes_since_flush: 0 }, data_offset)
+            (ImageTarget::Vhdx { writer }, data_offset)
         }
     };
 
@@ -1557,14 +1369,6 @@ fn backup_volume_inner(
             // the auto-mount race for the whole chain. Best-effort: a failure
             // only means the next attach may transiently mount. (qcow2 images
             // are never attached, so there is nothing to persist.)
-            if let ImageTarget::Vhdx { writer, .. } = &mut target {
-                if let Err(e) = writer
-                    .update_properties()
-                    .and_then(|()| writer.set_offline_writable(true))
-                {
-                    warn!(error = %e, "could not persist the offline attribute for the new image");
-                }
-            }
             layout.disk_guid.to_string()
         }
         Some((_, parent_sidecar)) => parent_sidecar.manifest.source_disk.disk_guid.clone(),
@@ -3301,14 +3105,6 @@ fn backup_disk_inner(
                 p += take;
             }
         }
-        if let ImageTarget::Vhdx { writer, .. } = &mut target {
-            // Persist the offline attribute keyed to the image's OWN (random)
-            // disk GUID so future attaches arrive offline — safe now that the
-            // GUID is not the source disk's. Children inherit it via the chain.
-            if let Err(e) = writer.update_properties().and_then(|()| writer.set_offline_writable(true)) {
-                warn!(error = %e, "could not persist the offline attribute for the disk image");
-            }
-        }
     }
 
     // 5. Copy the disk as whole-image blocks (block N = image offset N*bs). Each
@@ -3656,11 +3452,8 @@ fn create_disk_child_target(
         }
         ImageFormat::Vhdx => {
             create_differencing_vhdx(image_path, parent_path)?;
-            // The child arrives offline (the chain's GPT GUID carries a persisted
-            // offline attribute), so raw sector writes are not blocked by an
-            // auto-mounted filesystem; persist it for the child too.
-            let (attached, writer) = attach_for_raw_write(image_path, true)?;
-            Ok((ImageTarget::Vhdx { attached, writer, bytes_since_flush: 0 }, sector_size))
+            let writer = crate::vhdx_format::VhdxWriter::open_existing(image_path)?;
+            Ok((ImageTarget::Vhdx { writer }, sector_size))
         }
     }
 }
@@ -3690,14 +3483,8 @@ fn create_disk_image_target(
                     physical_sector_size: std::cmp::max(sector_size, 4096),
                 },
             )?;
-            let (attached, writer) = attach_for_raw_write(image_path, false)?;
-            if writer.length() < disk_size {
-                return Err(OwnBackupError::Vhdx(format!(
-                    "attached image is {} bytes — smaller than the planned {disk_size}",
-                    writer.length()
-                )));
-            }
-            Ok((ImageTarget::Vhdx { attached, writer, bytes_since_flush: 0 }, sector_size))
+            let writer = crate::vhdx_format::VhdxWriter::open_existing(image_path)?;
+            Ok((ImageTarget::Vhdx { writer }, sector_size))
         }
     }
 }

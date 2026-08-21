@@ -30,13 +30,15 @@ fn code_occurrences(haystack: &str, needle: &str) -> usize {
 }
 
 #[test]
-fn raw_write_attach_has_exactly_one_call_site() {
-    let n = code_occurrences(ENGINE, "AttachMode::RawWrite");
+fn backup_engine_never_attaches_images_for_writing() {
+    // Backup creation (both full VHDX and differencing AVHDX) is written 100%
+    // in userspace using VhdxWriter, exactly like qcow2 and Linux VHDX.
+    // Attaching images to the kernel during backup creation was the root cause
+    // of the 180 s PnP detach stalls.
     assert_eq!(
-        n, 1,
-        "AttachMode::RawWrite must be used ONLY inside attach_for_raw_write(), which owns \
-         the offline discipline (SAN policy, dismount-what-surfaced, offline while holding \
-         the locks). Found {n} uses. Call attach_for_raw_write() instead of attaching by hand."
+        code_occurrences(ENGINE, "AttachMode::RawWrite"),
+        0,
+        "engine_win.rs must NEVER attach images for writing — write with VhdxWriter in userspace"
     );
 }
 
@@ -62,16 +64,10 @@ fn reading_an_image_never_attaches_it() {
 }
 
 #[test]
-fn the_write_target_closes_its_handle_before_detaching() {
-    // Struct fields drop in declaration order, so the device handle must be
-    // named BEFORE the attachment: an error anywhere in the copy drops the
-    // target implicitly, and detaching a disk we still hold open turns a clean
-    // teardown into a vetoed one.
-    let dev = ENGINE.find("writer: WinRawDevice").expect("no writer field");
-    let att = ENGINE.find("attached: crate::vhdx::AttachedVhdx").expect("no attached field");
+fn image_target_uses_userspace_vhdx_writer() {
+    // ImageTarget::Vhdx must hold VhdxWriter directly, with zero AttachedVhdx or WinRawDevice.
     assert!(
-        dev < att,
-        "ImageTarget::Vhdx: the device handle must be declared before the attachment so it \
-         drops first (~180 s detach otherwise)."
+        ENGINE.contains("writer: crate::vhdx_format::VhdxWriter"),
+        "ImageTarget::Vhdx must use user-space VhdxWriter"
     );
 }
