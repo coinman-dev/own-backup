@@ -224,8 +224,17 @@
    *  whatever the user selected — so the map must show it as part of the copy,
    *  not as something left out. */
   const MSR_GUID = 'E3C9E316-0B5C-4DB8-817D-F92DF00215AE';
+  /** Is this disk's layout captured — i.e. does the job write ONE image of it?
+   *  True for every disk a new job picks; false for jobs saved before that
+   *  became unconditional, which still hold one image per volume. */
+  function isDiskCaptured(d: DiskInfo): boolean {
+    return job.disk_source != null && job.disk_source.disk_number === diskNumber(d);
+  }
   function layoutOnlyParts(d: DiskInfo): number[] {
-    if (!isBootableCopy(d)) return [];
+    // Keyed on the captured layout, not on bootability: `retain_for_backup`
+    // keeps the MSR slot in ANY whole-disk copy, so a non-bootable one must
+    // show it as included too.
+    if (!isDiskCaptured(d)) return [];
     return d.partitions
       .filter((p) => (p.gpt_type_guid || '').replace(/[{}]/g, '').toUpperCase() === MSR_GUID)
       .map((p) => p.index);
@@ -234,9 +243,23 @@
   function diskOfDevice(dev: string): DiskInfo | null {
     return engine.disks.find((d) => d.partitions.some((p) => partDevice(p) === dev)) ?? null;
   }
-  // "Bootable copy of this disk" is on when its layout (disk_source) is captured.
+  // "Bootable copy of this disk" is on when every partition a restore needs to
+  // boot is in the copy.
+  //
+  // It used to mean "disk_source is captured", i.e. "this job makes ONE image
+  // of the whole disk" — two different ideas behind one checkbox. With one
+  // image per disk now unconditional (2026-08-21), `disk_source` says nothing
+  // about bootability, so the question is asked of the selection itself.
+  // Derived, not stored: a flag could disagree with the partitions actually
+  // selected, and then the copy would promise a boot it cannot deliver.
   function isBootableCopy(d: DiskInfo): boolean {
-    return job.disk_source != null && job.disk_source.disk_number === diskNumber(d);
+    if (!isBootableDisk(d)) return false;
+    const essential = d.partitions.filter(isBootEssential);
+    if (essential.length === 0) return false;
+    return essential.every((p) => {
+      const dev = partDevice(p);
+      return !!dev && job.sources.includes(dev);
+    });
   }
   // A selected volume that is boot-essential AND on a disk in bootable-copy
   // mode is locked: its checkbox stays checked and can't be turned off.
@@ -263,7 +286,7 @@
     sourceReadonly ? engine.disks.filter(diskHasSelection) : engine.disks,
   );
 
-  // ---- one job = one disk = one image file (2026-08-19) -------------------
+  // ---- one job = one disk = one image file (2026-08-19, enforced 2026-08-21)
   //
   // The source step asks its questions one at a time, the way "Восстановление"
   // does: FIRST which disk this copy is about, THEN which of its volumes go in.
@@ -272,6 +295,12 @@
   // the destination folder — stays off the screen until a disk is picked, so
   // the first screen has exactly one thing to click and no way to build a job
   // that spans two disks.
+  //
+  // The "one image file" half of that rule was only half true until 2026-08-21:
+  // it held for a bootable copy and not otherwise, so two selected partitions
+  // quietly produced two files with two independent chains. `pickDisk` now
+  // captures `disk_source` for every disk, and the bootable switch is back to
+  // meaning only what it says.
   let pickedDiskId = $state<string | null>(null);
   // A saved job already named its disk, and its source cannot be changed.
   const diskChosen = $derived(sourceReadonly || pickedDiskId !== null);
@@ -295,10 +324,30 @@
     job.disk_source = null;
     autoIncluded.clear();
   }
+  /** One job = one disk = ONE image file (2026-08-21).
+   *
+   *  Capturing `disk_source` is what makes the engine write a single image
+   *  holding the real GPT with each selected partition at its original offset,
+   *  instead of a separate image per volume. It is captured for every disk, not
+   *  only bootable ones: two selected partitions used to silently produce two
+   *  files with two independent chains, which is not what "a copy of this disk"
+   *  means to anyone reading the folder. A restore can still take a single
+   *  partition out of such an image (`RestoreOp::RestorePartition`).
+   */
+  function captureDiskSource(d: DiskInfo) {
+    job.disk_source = {
+      disk_number: diskNumber(d),
+      disk_model: d.model || d.device_id,
+      parts: [],
+    };
+    syncDiskSourceParts(d);
+  }
+
   function pickDisk(d: DiskInfo) {
     if (sourceReadonly || pickedDiskId === d.device_id) return;
     pickedDiskId = d.device_id;
     clearSourceSelection();
+    captureDiskSource(d);
   }
   /** Back to stage 1. Without it the first click would be final — and the disk
    *  is the one choice on this screen that cannot be corrected further down. */
@@ -414,10 +463,23 @@
     if (sourceReadonly) return; // fixed source on the "Параметры" screen
     if (!isBootableDisk(d)) return; // read-only for pure data disks
     if (isBootableCopy(d)) {
-      job.disk_source = null; // turn off; keep the user's volume selection
+      // Turn off: drop the boot partitions, keep whatever data volumes the user
+      // chose. The copy stays one image of this disk — it just will not boot.
+      for (const p of d.partitions) {
+        const dev = partDevice(p);
+        if (!dev || !isBootEssential(p)) continue;
+        const i = job.sources.indexOf(dev);
+        if (i >= 0) {
+          job.sources = job.sources.filter((x) => x !== dev);
+          job.source_labels = job.source_labels.filter((_, idx) => idx !== i);
+        }
+      }
+      job.source = job.sources[0] ?? '';
+      job.source_label = job.source_labels[0] ?? '';
+      syncDiskSourceParts(d);
       return;
     }
-    // Turn on: auto-include the boot-essential volumes (ESP + OS), then capture.
+    // Turn on: include the boot-essential volumes (ESP + OS).
     for (const p of d.partitions) {
       const dev = partDevice(p);
       if (dev && isBootEssential(p) && !job.sources.includes(dev)) {
@@ -427,7 +489,7 @@
     }
     job.source = job.sources[0] ?? '';
     job.source_label = job.source_labels[0] ?? '';
-    job.disk_source = { disk_number: diskNumber(d), disk_model: d.model || d.device_id, parts: [] };
+    captureDiskSource(d);
     syncDiskSourceParts(d);
   }
 
@@ -1160,7 +1222,7 @@
                         class="boot-toggle"
                         class:disabled={!isBootableDisk(d)}
                         title={isBootableDisk(d)
-                          ? 'Сохранить таблицу разделов (GPT) и загрузочные разделы, чтобы восстановить систему на новый диск с сохранением загрузки. Разделы с данными (напр. D:) можно исключить.'
+                          ? 'Включить в копию загрузочные разделы (EFI и системный), чтобы систему можно было восстановить на новый диск с сохранением загрузки. Таблица разделов (GPT) сохраняется в любом случае — копия диска всегда один файл.'
                           : 'Диск не является загрузочным (нет EFI-раздела) — загрузочная копия недоступна.'}
                       >
                         <input
