@@ -381,6 +381,11 @@
             {#if lastRun.backup_kind === 'incremental' || lastRun.backup_kind === 'differential'}
               Записано только изменённое: {formatBytes(lastRun.bytes_copied)}.
             {/if}
+            {#if lastRun.consolidated_increments > 0}
+              Объединено версий: {lastRun.consolidated_increments} — самые старые
+              инкременты влиты в полную копию, она теперь соответствует более
+              позднему дню.
+            {/if}
             {#if lastRun.excluded_files > 0}
               Исключено файлов: {lastRun.excluded_files} ({formatBytes(lastRun.excluded_bytes)}).
             {:else if exclusionsIgnored}

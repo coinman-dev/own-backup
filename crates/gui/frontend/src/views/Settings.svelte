@@ -13,6 +13,7 @@
   let compressionLevel = $state(3);
   let logLevel = $state('info');
   let logMirrorDir = $state('');
+  let consolidationEnabled = $state(true);
   let serviceStatus: ServiceStatus | null = $state(null);
   let isLoading = $state(true);
   let error: string | null = $state(null);
@@ -34,6 +35,9 @@
         compressionLevel = (cfg.default_compression_level as number) ?? 3;
         logLevel = (cfg.log_level as string) ?? 'info';
         logMirrorDir = (cfg.log_mirror_dir as string) ?? '';
+        // Absent in configs written before consolidation existed — and the
+        // engine's own default is "on", so the box must agree with it.
+        consolidationEnabled = (cfg.consolidation_enabled as boolean) ?? true;
       }
 
       serviceStatus = statusResult.status === 'fulfilled' ? statusResult.value : null;
@@ -63,6 +67,7 @@
         default_compression_level: compressionLevel,
         log_level: logLevel,
         log_mirror_dir: logMirrorDir.trim(),
+        consolidation_enabled: consolidationEnabled,
       });
       saveMessage = 'Настройки сохранены.';
     } catch (e: unknown) {
@@ -265,6 +270,22 @@
             лежит на том же диске, который восстановление перезаписывает, и
             пропадает вместе с ним. Настройка подхватывается на ходу —
             перезапускать службу не нужно.
+          </p>
+        </div>
+
+        <div class="form-group">
+          <label class="check-row">
+            <input type="checkbox" bind:checked={consolidationEnabled} />
+            <span>Разрешить объединение резервных копий</span>
+          </label>
+          <p class="help-text">
+            Разрешает заданиям вливать самый старый инкремент в полную копию,
+            когда их становится больше заданного числа (настраивается в самом
+            задании). Это единственная операция обслуживания, которая
+            <b>переписывает уже готовый файл копии</b>, поэтому её можно
+            выключить здесь целиком — тогда ни одно задание ничего объединять не
+            будет, что бы ни стояло в его настройках. Уже объединённые копии от
+            этого не меняются.
           </p>
         </div>
 
@@ -547,6 +568,21 @@
     font-size: 12px;
     color: var(--text-muted);
     margin-top: 4px;
+  }
+
+  /* A checkbox and its label on one line, the label clickable with it. */
+  .check-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--text);
+  }
+
+  .check-row input {
+    margin: 0;
+    flex: none;
   }
 
   /* Path plus its "Обзор…" button: the field takes what is left. */

@@ -342,6 +342,8 @@ export interface JobRun {
   /** Why that walk did not run; '' when it did. Explains both the missing
    *  breakdown and exclusion rules that were never applied. */
   file_scan_skipped: string;
+  /** Increments folded into their base after this run (sliding window). */
+  consolidated_increments: number;
 }
 
 /** A whole-disk (`.obdm`) backup discovered for restore. */

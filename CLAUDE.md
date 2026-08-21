@@ -80,6 +80,17 @@ tested on a Windows host — cross-compilation validates compilation only.
   directly (`fat_exclusions.rs`).
 - Incremental/differential = differencing VHDX (AVHDX chains); consolidation via
   `MergeVirtualDisk`.
+- **Sliding increment window (2026-08-21):** a job may keep at most N
+  increments — the oldest is folded into the base, the next repointed at it,
+  the folded file deleted LAST so a crash is finishable (`consolidate.rs`,
+  marker `<base>.consolidating.json`). Nothing is re-encoded and no checksum is
+  recomputed: the increment's sidecar already describes the whole state, so the
+  base inherits it. **Differential chains are never consolidated** — their
+  children are siblings on the base, and moving the base would silently rebase
+  them onto a moment they were never computed against. qcow2 is done and
+  validated by `qemu-img`; the VHDX half compiles but has never run — see
+  `.ai/PLAN.md` §3.4. Consolidating deletes files, so anything counting a
+  chain's versions must use `Chain::increments_ever()`, never `images.len()`.
 - **True removal is a hard product requirement (decision 2026-07-28):** excluded
   files must be REALLY removed from the image's filesystem on every supported
   FS — zero-filled ghost entries are a fallback, not the product. Status:

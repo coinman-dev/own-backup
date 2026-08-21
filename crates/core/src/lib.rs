@@ -324,6 +324,14 @@ pub struct JobRun {
     /// with "Исключено файлов: 0" over twelve rules that were never applied.
     #[serde(default)]
     pub file_scan_skipped: String,
+    /// Increments consolidation folded into their base after this run.
+    ///
+    /// Worth surfacing rather than leaving in the log: it is the one step that
+    /// REWRITES an existing copy, and it moves the oldest restore point
+    /// forward. A user who sees their version count stay flat deserves to be
+    /// told why, in the same place the run is reported.
+    #[serde(default)]
+    pub consolidated_increments: u32,
 }
 
 /// A persisted backup job (task).
@@ -1259,22 +1267,22 @@ fn apply_retention(job: &Job, protected: &[(String, PathBuf)]) {
 /// already succeeded, and a chain that did not get consolidated is a chain
 /// that is merely longer than asked for, not a broken one.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))] // used by the Windows backup path
-fn apply_consolidation(job: &Job, protected: &[(String, PathBuf)]) {
+fn apply_consolidation(job: &Job, protected: &[(String, PathBuf)]) -> u32 {
     use own_backup_backup::chains::{list_job_chains, plan_consolidation};
     use own_backup_backup::consolidate::{consolidate_step, resume_pending};
 
     let Some(keep) = job.scheme.rolling_incrementals else {
-        return;
+        return 0;
     };
     // Differential chains hang every child off the base, so moving the base
     // forward would silently rebase the rest. `plan_consolidation` refuses
     // them too; bailing here keeps the log quiet about a thing we never do.
     if job.scheme.method != "incremental" {
-        return;
+        return 0;
     }
     if !own_backup_common::config::AppConfig::load_or_default().consolidation_enabled {
         info!(job = %job.name, "Consolidation is switched off globally — skipping");
-        return;
+        return 0;
     }
 
     let folder = PathBuf::from(&job.dest_folder);
@@ -1295,12 +1303,13 @@ fn apply_consolidation(job: &Job, protected: &[(String, PathBuf)]) {
     // a step that reports success without shortening anything — a loop that
     // never ends would be a far worse bug than a chain left one version long.
     const MAX_STEPS: usize = 64;
+    let mut folded = 0u32;
     for _ in 0..MAX_STEPS {
         let chains = match list_job_chains(&folder, &job.id) {
             Ok(c) => c,
             Err(e) => {
                 warn!(job = %job.name, error = %e, "Consolidation scan failed");
-                return;
+                return folded;
             }
         };
         let step = chains
@@ -1312,16 +1321,19 @@ fn apply_consolidation(job: &Job, protected: &[(String, PathBuf)]) {
                     .is_some_and(|t| tokens.contains(&t.to_ascii_uppercase()))
             })
             .find_map(|c| plan_consolidation(c, keep));
-        let Some(step) = step else { return };
+        let Some(step) = step else { return folded };
 
         match consolidate_step(&step) {
-            Ok(outcome) => info!(
-                job = %job.name,
-                base = %outcome.base.display(),
-                folded = %outcome.folded.display(),
-                secs = outcome.duration.as_secs(),
-                "Consolidation: increment folded into the base"
-            ),
+            Ok(outcome) => {
+                folded += 1;
+                info!(
+                    job = %job.name,
+                    base = %outcome.base.display(),
+                    folded = %outcome.folded.display(),
+                    secs = outcome.duration.as_secs(),
+                    "Consolidation: increment folded into the base"
+                );
+            }
             Err(e) => {
                 warn!(
                     job = %job.name,
@@ -1330,11 +1342,12 @@ fn apply_consolidation(job: &Job, protected: &[(String, PathBuf)]) {
                     error = %e,
                     "Consolidation step failed — the chain is left as it was"
                 );
-                return;
+                return folded;
             }
         }
     }
     warn!(job = %job.name, "Consolidation stopped at the step cap — chains stay longer than asked");
+    folded
 }
 
 fn run_skeleton(job: &Job) -> JobRun {
@@ -1669,7 +1682,7 @@ async fn perform_backup(
     // Retention runs after a fully successful backup, independently per volume.
     // Its failures are logged, never surfaced as a run failure.
     apply_retention(job, &protected);
-    apply_consolidation(job, &protected);
+    run.consolidated_increments = apply_consolidation(job, &protected);
 
     run
 }
@@ -1917,7 +1930,7 @@ async fn perform_disk_backup(
                 "Whole-disk backup complete");
             let protected = [(format!("disk{}", ds.disk_number), image_path)];
             apply_retention(job, &protected);
-            apply_consolidation(job, &protected);
+            run.consolidated_increments = apply_consolidation(job, &protected);
         }
         Ok(Err(OwnBackupError::Cancelled)) => {
             run.status = "cancelled".into();

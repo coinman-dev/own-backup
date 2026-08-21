@@ -1358,6 +1358,16 @@
           <label class="radio blk"><input type="radio" checked={job.scheme.only_incremental} onchange={() => (job.scheme.only_incremental = true)} /> Только инкрементные версии после первой полной</label>
           <label class="radio blk"><input type="radio" checked={!job.scheme.only_incremental} onchange={() => (job.scheme.only_incremental = false)} /> Полная версия после каждых <input type="number" min="1" bind:value={job.scheme.full_every_n} class="num" /> версий</label>
         {/if}
+        {#if job.scheme.method === 'incremental'}
+          <label class="chk"><input type="checkbox" checked={job.scheme.rolling_incrementals !== null} onchange={(e) => (job.scheme.rolling_incrementals = (e.target as HTMLInputElement).checked ? 3 : null)} /> Хранить не более <input type="number" min="1" max="64" value={job.scheme.rolling_incrementals ?? 3} oninput={(e) => (job.scheme.rolling_incrementals = +(e.target as HTMLInputElement).value)} class="num" disabled={job.scheme.rolling_incrementals === null} /> инкрементов, старые вливать в полную копию</label>
+          {#if job.scheme.rolling_incrementals !== null}
+            <div class="note">Когда инкрементов становится больше, самый старый вливается в полную копию, а следующий начинает опираться прямо на неё. Место экономится без создания новой полной копии с нуля, а восстановление идёт по короткой цепочке.<br />Точек восстановления остаётся столько же — {job.scheme.rolling_incrementals + 1} (полная плюс {job.scheme.rolling_incrementals}). Но <b>полная копия перестаёт быть копией того дня, когда её сняли</b>: она сдвигается вперёд, на день влитого инкремента. Откатиться глубже уже нельзя.
+            {#if job.scheme.only_incremental}
+              <br /><b>Внимание:</b> вместе с «только инкрементные версии» одна и та же полная копия будет переписываться бесконечно — других копий этих данных не останется. Надёжнее выбрать «Полная версия после каждых N версий»: тогда цепочки будут сменяться, а старая доживать по правилам очистки.
+            {/if}
+            </div>
+          {/if}
+        {/if}
         <div class="field-label mt">Правила очистки старых версий:</div>
         <label class="chk"><input type="checkbox" checked={job.scheme.keep_chains !== null} onchange={(e) => (job.scheme.keep_chains = (e.target as HTMLInputElement).checked ? 3 : null)} /> Хранить не более <input type="number" min="1" value={job.scheme.keep_chains ?? 3} oninput={(e) => (job.scheme.keep_chains = +(e.target as HTMLInputElement).value)} class="num" disabled={job.scheme.keep_chains === null} /> последних цепочек</label>
         <label class="chk"><input type="checkbox" checked={job.scheme.cleanup_older_than_days !== null} onchange={(e) => (job.scheme.cleanup_older_than_days = (e.target as HTMLInputElement).checked ? 90 : null)} /> Удалять цепочки старше <input type="number" min="1" value={job.scheme.cleanup_older_than_days ?? 90} oninput={(e) => (job.scheme.cleanup_older_than_days = +(e.target as HTMLInputElement).value)} class="num" disabled={job.scheme.cleanup_older_than_days === null} /> дней</label>
