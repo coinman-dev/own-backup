@@ -309,9 +309,11 @@ fn repoint_next(next: &Path, base: &Path, container: &str) -> Result<()> {
 
 fn remove_quietly(path: &Path) {
     match std::fs::remove_file(path) {
-        Ok(()) | Err(_) if !path.exists() => {}
-        Err(e) => warn!(path = %path.display(), error = %e, "Consolidation: could not delete file"),
-        _ => {}
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            warn!(path = %path.display(), error = %e, "Consolidation: could not delete file")
+        }
     }
 }
 
