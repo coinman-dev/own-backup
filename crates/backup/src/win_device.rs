@@ -18,9 +18,10 @@ use windows::Win32::Storage::FileSystem::{
     OPEN_EXISTING,
 };
 use windows::Win32::System::Ioctl::{
-    DISK_ATTRIBUTE_OFFLINE, DISK_ATTRIBUTE_READ_ONLY, DISK_GEOMETRY, GET_LENGTH_INFORMATION,
-    IOCTL_DISK_GET_DRIVE_GEOMETRY, IOCTL_DISK_GET_LENGTH_INFO, IOCTL_DISK_SET_DISK_ATTRIBUTES,
-    IOCTL_DISK_UPDATE_PROPERTIES, SET_DISK_ATTRIBUTES,
+    DISK_ATTRIBUTE_OFFLINE, DISK_ATTRIBUTE_READ_ONLY, DISK_GEOMETRY, GET_DISK_ATTRIBUTES,
+    GET_LENGTH_INFORMATION, IOCTL_DISK_GET_DISK_ATTRIBUTES, IOCTL_DISK_GET_DRIVE_GEOMETRY,
+    IOCTL_DISK_GET_LENGTH_INFO, IOCTL_DISK_SET_DISK_ATTRIBUTES, IOCTL_DISK_UPDATE_PROPERTIES,
+    SET_DISK_ATTRIBUTES,
 };
 use windows::Win32::System::IO::DeviceIoControl;
 
@@ -552,6 +553,64 @@ impl WinRawDevice {
         self.set_disk_attributes(&attrs, "offline")?;
         debug!(path = %self.path, persist, "Attached disk set offline (writable) for raw imaging");
         Ok(())
+    }
+
+    /// Take the disk offline for THIS session, leaving the read-only flag
+    /// alone (registry untouched).
+    ///
+    /// [`Self::set_offline_writable`] also CLEARS read-only, which a disk
+    /// attached read-only refuses — so a read attach needs this narrower form.
+    /// Going offline matters for reads too: an image attached read-only still
+    /// surfaces its inherited volumes, Windows mounts them, and the volume
+    /// stack that builds up is what makes the later detach wait out the PnP
+    /// removal veto. Raw reads through the physical-drive handle are unaffected.
+    pub fn set_offline_this_session(&self) -> Result<()> {
+        let attrs = SET_DISK_ATTRIBUTES {
+            Version: std::mem::size_of::<SET_DISK_ATTRIBUTES>() as u32,
+            Persist: BOOLEAN(0),
+            Attributes: DISK_ATTRIBUTE_OFFLINE as u64,
+            AttributesMask: DISK_ATTRIBUTE_OFFLINE as u64,
+            ..Default::default()
+        };
+        self.set_disk_attributes(&attrs, "offline (session)")?;
+        debug!(path = %self.path, "Attached disk set offline for raw reading");
+        Ok(())
+    }
+
+    /// What Windows itself says about the disk right now: `(offline, read_only)`.
+    ///
+    /// Setting an attribute is not the same as the disk having reached that
+    /// state — the volume teardown behind an offline transition is asynchronous
+    /// and can be vetoed. Log this before a detach instead of assuming.
+    pub fn is_offline_read_only(&self) -> Result<(bool, bool)> {
+        let mut out = GET_DISK_ATTRIBUTES {
+            Version: std::mem::size_of::<GET_DISK_ATTRIBUTES>() as u32,
+            ..Default::default()
+        };
+        let mut returned = 0u32;
+        // SAFETY: output buffer valid for its size.
+        unsafe {
+            DeviceIoControl(
+                self.handle,
+                IOCTL_DISK_GET_DISK_ATTRIBUTES,
+                None,
+                0,
+                Some(&mut out as *mut _ as *mut _),
+                std::mem::size_of::<GET_DISK_ATTRIBUTES>() as u32,
+                Some(&mut returned),
+                None,
+            )
+        }
+        .map_err(|e| {
+            OwnBackupError::Device(format!(
+                "IOCTL_DISK_GET_DISK_ATTRIBUTES on {} failed: {e}",
+                self.path
+            ))
+        })?;
+        Ok((
+            out.Attributes & DISK_ATTRIBUTE_OFFLINE as u64 != 0,
+            out.Attributes & DISK_ATTRIBUTE_READ_ONLY as u64 != 0,
+        ))
     }
 
     /// Запретить запись на диск до конца сессии (реестр не трогается).

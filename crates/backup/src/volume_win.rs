@@ -340,6 +340,52 @@ pub fn drive_letters_on_disk(disk_number: u32) -> Vec<String> {
     all_volume_roots_on_disk(disk_number).iter().flat_map(|vr| volume_drive_letters(vr)).collect()
 }
 
+/// Partition device objects that still exist on `disk_number`, as openable
+/// `\\?\GLOBALROOT\Device\HarddiskN\PartitionM` paths.
+///
+/// [`all_volume_roots_on_disk`] is BLIND to a disk that is offline — it filters
+/// by [`volume_extents`], and that IOCTL fails for the volumes of an offline
+/// disk (see its doc comment). So the moment we take an image offline we lose
+/// the ability to notice that a volume surfaced from it, which is exactly the
+/// state a stalled detach is diagnosed in. This probe answers the question that
+/// still matters there: does a partition device stack exist on this disk at
+/// all? A live object here after the disk went offline means the teardown was
+/// vetoed and `DetachVirtualDisk` is about to wait ~180 s for it.
+///
+/// The partition objects are what a dismount has to reach anyway, so these
+/// paths are also usable with [`flush_lock_dismount_volume`].
+pub fn partition_devices_on_disk(disk_number: u32) -> Vec<String> {
+    // Partition numbering starts at 1; our images carry a handful of them, and
+    // an unused index simply fails to open.
+    (1..=16u32)
+        .map(|p| format!(r"\\?\GLOBALROOT\Device\Harddisk{disk_number}\Partition{p}"))
+        .filter(|path| {
+            let wide = to_wide(path);
+            // Opened with no access rights: enough to prove the device object
+            // exists, and it disturbs nothing that holds the partition.
+            // SAFETY: `wide` outlives the call.
+            let handle = unsafe {
+                CreateFileW(
+                    PCWSTR(wide.as_ptr()),
+                    0,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    None,
+                    OPEN_EXISTING,
+                    FILE_FLAGS_AND_ATTRIBUTES(0),
+                    None,
+                )
+            };
+            match handle {
+                Ok(h) => {
+                    drop(FileHandle(h));
+                    true
+                }
+                Err(_) => false,
+            }
+        })
+        .collect()
+}
+
 /// Flush, lock (with retries) and dismount one volume, returning the still-open
 /// lock handle so the caller decides when the lock releases.
 ///
@@ -358,18 +404,25 @@ pub fn flush_lock_dismount_volume_within(
 ) -> Option<FileHandle> {
     let device = volume_root.trim_end_matches('\\');
     let wide = to_wide(device);
-    // SAFETY: `wide` outlives the call.
-    let handle = unsafe {
-        CreateFileW(
-            PCWSTR(wide.as_ptr()),
-            GENERIC_READ.0 | GENERIC_WRITE.0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            None,
-            OPEN_EXISTING,
-            FILE_FLAGS_AND_ATTRIBUTES(0),
-            None,
-        )
+    let open = |access: u32| {
+        // SAFETY: `wide` outlives the call.
+        unsafe {
+            CreateFileW(
+                PCWSTR(wide.as_ptr()),
+                access,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_FLAGS_AND_ATTRIBUTES(0),
+                None,
+            )
+        }
     };
+    // Read/write first (a writable handle can also flush), but fall back to
+    // read: both FSCTLs are FILE_ANY_ACCESS, and the volumes of a read-only
+    // attached image refuse a writable open — the case where the teardown is
+    // needed most is the one where the RW open cannot succeed.
+    let handle = open(GENERIC_READ.0 | GENERIC_WRITE.0).or_else(|_| open(GENERIC_READ.0));
     let Ok(handle) = handle else {
         warn!(volume = %device, "cannot open volume for teardown");
         return None;

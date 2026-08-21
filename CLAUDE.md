@@ -220,23 +220,34 @@ Cargo workspace with crates:
 
 ## Key patterns
 
-- **The ~180 s detach stall (PnP volume-removal veto) is guarded in DEPTH —
-  never remove a layer, never bypass the choke point (2026-08-21, after the
-  stall returned a third time).** A volume that surfaces from an attached
-  image makes `DetachVirtualDisk` wait out a fixed ~180 s PnP veto. Four
-  layers: (1) every raw-write attach goes through
-  `engine_win::attach_for_raw_write` — NEVER call `attach_vhdx(RawWrite)` +
-  `set_offline_writable` by hand; (2) `ImageTarget::finalize` RE-persists the
-  offline attribute after the last byte is written — the attach-time persist
-  can run before the GPT head exists (a partition starting at LBA 34 makes
-  block 0 "used", deferring the head to the copy pass), which keys the
-  attribute to a RAW disk and protects nothing, and that was exactly this
-  recurrence; (3) finalize force-dismounts any surfaced volume before detach
-  (`dismount_surfaced_volumes`, the sequence true removal proved) so any
-  future regression costs seconds, not minutes; (4) tripwires `MOUNT-LEAK` and
-  `DETACH-STALL` in the service log name the failure and the volumes by name —
-  after touching anything near attach/GPT/finalize, run one incremental on a
-  chain and grep the log for them (`detach_ms` must stay < 1000).
+- **The ~180 s detach stall (PnP volume-removal veto): a READ attach mounts
+  the image too, and our own leak detector is blind on an offline disk
+  (2026-08-21, the third recurrence — the first two "fixes" were aimed at the
+  wrong thing).** A volume surfacing from an attached image makes
+  `DetachVirtualDisk` wait out a fixed ~180 s veto. Only incrementals stalled,
+  and the reason is the one thing only an incremental does: it attaches the
+  PARENT image to read its GPT (`ImageReadSource::open`). That attach had no
+  offline discipline at all — `NO_DRIVE_LETTER` withholds the letter, NOT the
+  mount, so every incremental mounted the chain's FAT32/NTFS and left a volume
+  stack behind. It also detached before closing its own device handle (struct
+  fields drop in declaration order). Now: **every raw attach, read AND write,
+  goes through one disciplined helper** (`attach_for_raw_write` /
+  `ImageReadSource::open`) — SAN policy → attach → dismount whatever surfaced →
+  offline WHILE HOLDING the locks. `tests/attach_choke_point.rs` fails the
+  build if a second `AttachMode::RawWrite`/`RawRead` call site appears or the
+  handle/attachment field order is swapped.
+  **Do not "verify" a teardown with `all_volume_roots_on_disk`:** it filters by
+  `volume_extents`, which FAILS for the volumes of an offline disk — the check
+  reports "no volumes" precisely when the disk is in the state we put it in.
+  That false negative is what made the second fix look correct while the stall
+  continued. Use `volume_win::partition_devices_on_disk` (probes
+  `\Device\HarddiskN\PartitionM`, survives offline) and log the disk's REAL
+  attributes (`is_offline_read_only`) — "we set offline" is not "the disk is
+  offline"; the transition is async and can be vetoed.
+  Tripwires: `MOUNT-LEAK` (something surfaced, names it), `DETACH-STALL`
+  (detach > 5 s), and an `image device state before detach` line every run.
+  After touching anything near attach/GPT/finalize, run one INCREMENTAL (a full
+  cannot reproduce this) and check `detach_ms` < 1000.
 - Windows-specific code gated with `#[cfg(target_os = "windows")]`
 - All traits (`BlockReader`, `BlockWriter`, `UsedSectorMap`, `SnapshotProvider`,
   `DiskInventory`) have mock implementations for Linux testing
