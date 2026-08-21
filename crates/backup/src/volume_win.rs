@@ -386,8 +386,61 @@ pub fn partition_devices_on_disk(disk_number: u32) -> Vec<String> {
         .collect()
 }
 
+/// Dismount one volume WITHOUT flushing or locking it first — a forced
+/// dismount, which DISCARDS whatever the filesystem driver still had cached
+/// instead of committing it.
+///
+/// For a volume that surfaced from a BACKUP IMAGE this is the only correct
+/// teardown. [`flush_lock_dismount_volume`] is built for real volumes, where
+/// losing cached writes would be data loss; pointed at an image it does the
+/// opposite of what is wanted — on 2026-08-21 it pushed the FAT32 driver's
+/// dirty boot sector (LBA 34, 35 and 66) into a freshly written incremental,
+/// so the image no longer matched the checksums the backup had just computed
+/// for it. An image must come out of a backup byte-identical to the source;
+/// nothing Windows happened to think while it briefly had the volume mounted
+/// belongs in it.
+///
+/// Returns whether the dismount succeeded.
+pub fn dismount_volume_forced(volume_root: &str) -> bool {
+    let device = volume_root.trim_end_matches('\\');
+    let wide = to_wide(device);
+    let open = |access: u32| {
+        // SAFETY: `wide` outlives the call.
+        unsafe {
+            CreateFileW(
+                PCWSTR(wide.as_ptr()),
+                access,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_FLAGS_AND_ATTRIBUTES(0),
+                None,
+            )
+        }
+    };
+    let Ok(handle) = open(GENERIC_READ.0 | GENERIC_WRITE.0).or_else(|_| open(GENERIC_READ.0)) else {
+        warn!(volume = %device, "cannot open the image's volume to dismount it");
+        return false;
+    };
+    let handle = FileHandle(handle);
+    let mut returned = 0u32;
+    let t = Instant::now();
+    // SAFETY: valid volume handle; no in/out buffers.
+    let ok = unsafe {
+        DeviceIoControl(handle.0, FSCTL_DISMOUNT_VOLUME, None, 0, None, 0, Some(&mut returned), None)
+    }
+    .map_err(|e| warn!(error = %e, volume = %device, "image volume dismount failed"))
+    .is_ok();
+    info!(volume = %device, dismounted = ok, ms = t.elapsed().as_millis(), "image volume dismounted (nothing flushed)");
+    ok
+}
+
 /// Flush, lock (with retries) and dismount one volume, returning the still-open
 /// lock handle so the caller decides when the lock releases.
+///
+/// For a volume that came out of a backup image use
+/// [`dismount_volume_forced`] instead — flushing writes the filesystem's
+/// cached state INTO the image.
 ///
 /// Do not discard the return value. See the module docs: the lock belongs to
 /// this handle, and dropping it lets the filesystem mount straight back.

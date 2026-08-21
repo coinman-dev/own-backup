@@ -248,6 +248,28 @@ Cargo workspace with crates:
   (detach > 5 s), and an `image device state before detach` line every run.
   After touching anything near attach/GPT/finalize, run one INCREMENTAL (a full
   cannot reproduce this) and check `detach_ms` < 1000.
+  **A volume that surfaced from an image is force-dismounted, never flushed or
+  locked** (`volume_win::dismount_volume_forced`). `flush_lock_dismount_volume`
+  is for REAL volumes, where discarding cached writes would be data loss; on an
+  image it does the opposite of what is wanted — the first version of this fix
+  used it and pushed the FAT32 driver's dirty boot sector (LBA 34/35/66) into a
+  freshly written incremental, so the copy no longer matched the checksums the
+  backup had just computed. Nothing Windows thought while it briefly held the
+  volume belongs in the image.
+- **`PAYLOAD_BLOCK_PARTIALLY_PRESENT` (BAT state 7) is per-SECTOR, and our
+  reader used to get it wrong (found 2026-08-21).** State 7 means only some
+  sectors of the block live in this file and the chunk's sector bitmap says
+  which; the rest still come from the parent. Both readers in `vhdx_bat.rs`
+  treated it as "fully present" and returned the child's zeros for the parent's
+  sectors. Symptom: an image whose block 0 had been touched by a transient
+  mount lost its GPT header (LBA 1) and every later read failed with
+  `embedded sidecar not found (disk has no GPT)` — while the image itself was
+  perfectly fine when read through Windows. Windows writes state 7; we never
+  do, so it only appears after something outside the backup wrote to an image.
+  `tests/vhdx_partial_block.rs` builds a synthetic parent/child pair byte by
+  byte (the only way to produce state 7 on Linux) and fails if either reader
+  regresses. The write path refuses a partial block outright rather than
+  writing bytes that would read back from the parent.
 - Windows-specific code gated with `#[cfg(target_os = "windows")]`
 - All traits (`BlockReader`, `BlockWriter`, `UsedSectorMap`, `SnapshotProvider`,
   `DiskInventory`) have mock implementations for Linux testing

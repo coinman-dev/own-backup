@@ -35,6 +35,13 @@ const MI_PARENT_LOCATOR: &str = "a8d35f2d-b30b-454d-abf7-d3d84834ab0c";
 /// parent). Every other state (UNDEFINED/ZERO/UNMAPPED/FULLY/PARTIALLY
 /// present) means the block's content differs from the parent's.
 const PAYLOAD_BLOCK_NOT_PRESENT: u64 = 0;
+/// The whole block lives in this file.
+const PAYLOAD_BLOCK_FULLY_PRESENT: u64 = 6;
+/// SOME sectors of the block live in this file; the chunk's sector bitmap says
+/// which. The rest come from the parent (see [`GuestRun::Partial`]).
+const PAYLOAD_BLOCK_PARTIALLY_PRESENT: u64 = 7;
+/// Sector-bitmap BAT entry state: the bitmap block exists in this file.
+const SB_BLOCK_PRESENT: u64 = 6;
 
 fn bad(msg: impl std::fmt::Display) -> OwnBackupError {
     OwnBackupError::Vhdx(format!("vhdx bat: {msg}"))
@@ -158,6 +165,20 @@ enum GuestRun {
     /// from the parent; dynamic image: reads as zeros). `state` is the raw BAT
     /// block state, kept for error messages on the write path.
     Absent { run: u64, state: u64 },
+    /// This file carries SOME of the next `run` bytes — the chunk's sector
+    /// bitmap at `bitmap_offset` decides sector by sector, starting at
+    /// `sector_in_chunk`. Produced by `PAYLOAD_BLOCK_PARTIALLY_PRESENT`, which
+    /// is what Windows leaves behind when something writes only part of a
+    /// block of a differencing image.
+    Partial {
+        file_offset: u64,
+        run: u64,
+        bitmap_offset: u64,
+        sector_in_chunk: u64,
+        sector_size: u64,
+        /// Bytes into the first sector the read starts at (0 when aligned).
+        sector_skip: u64,
+    },
 }
 
 /// Translate one guest offset into a [`GuestRun`]: the bytes till the end of
@@ -244,14 +265,103 @@ fn guest_to_file_offset_in_file(file: &mut File, guest_offset: u64) -> Result<Gu
 
     let state = entry & 7;
     let run = bsize - block_offset;
-    if state != 6 && state != 7 {
+    if state != PAYLOAD_BLOCK_FULLY_PRESENT && state != PAYLOAD_BLOCK_PARTIALLY_PRESENT {
         return Ok(GuestRun::Absent { run, state });
     }
     let file_offset = entry & 0xFFFFFFFFFFF00000;
     if file_offset == 0 {
         return Err(bad(format!("block state {state} with a zero file offset — corrupt BAT")));
     }
+    if state == PAYLOAD_BLOCK_PARTIALLY_PRESENT {
+        // Only SOME sectors of this block belong to this file; the rest still
+        // come from the parent, and which is which is written in the chunk's
+        // sector bitmap. Treating the whole block as ours reads the parent's
+        // sectors as ZEROS — that is how an incremental whose image had been
+        // touched by a transient mount lost its GPT ("disk has no GPT"): the
+        // FAT32 driver had written three sectors into block 0, and the GPT
+        // header, which lives in the same block and belongs to the parent,
+        // came back as zeros.
+        let chunk = payload_block_index / chunk_ratio;
+        let bitmap_bat_index = ((chunk + 1) * chunk_ratio + chunk) as usize;
+        if (bitmap_bat_index * 8 + 8) as u64 > bat_len {
+            return Err(bad("sector-bitmap BAT entry out of BAT bounds"));
+        }
+        let mut bm_buf = [0u8; 8];
+        read_exact_at(file, bat_off + bitmap_bat_index as u64 * 8, &mut bm_buf)?;
+        let bm_entry = u64::from_le_bytes(bm_buf);
+        // State 6 here is SB_BLOCK_PRESENT. Without a bitmap block, the spec
+        // says no sector of the block is present in this file.
+        if bm_entry & 7 != SB_BLOCK_PRESENT {
+            return Ok(GuestRun::Absent { run, state });
+        }
+        let bitmap_offset = bm_entry & 0xFFFFFFFFFFF00000;
+        if bitmap_offset == 0 {
+            return Err(bad("sector bitmap present with a zero file offset — corrupt BAT"));
+        }
+        // First sector of THIS guest offset counted from the chunk's start.
+        let chunk_first_block = chunk * chunk_ratio;
+        let sector_in_chunk =
+            ((payload_block_index - chunk_first_block) * bsize + block_offset) / ssize as u64;
+        return Ok(GuestRun::Partial {
+            file_offset: file_offset + block_offset,
+            run,
+            bitmap_offset,
+            sector_in_chunk,
+            sector_size: ssize as u64,
+            sector_skip: block_offset % ssize as u64,
+        });
+    }
     Ok(GuestRun::Data { file_offset: file_offset + block_offset, run })
+}
+
+/// Split a partially-present run into `(bytes, present_in_this_file)` segments
+/// by reading the chunk's sector bitmap. Segments coalesce consecutive sectors
+/// with the same state, so a whole-block read costs one bitmap read.
+fn partial_segments(
+    file: &mut File,
+    bitmap_offset: u64,
+    sector_in_chunk: u64,
+    sector_size: u64,
+    sector_skip: u64,
+    run: u64,
+    want: u64,
+) -> Result<Vec<(u64, bool)>> {
+    let take = run.min(want);
+    if take == 0 {
+        return Ok(Vec::new());
+    }
+    // Reads are not always sector-aligned — the sidecar blob, for one, starts
+    // at `meta_offset + 12 + json_len`. The first segment then covers only the
+    // tail of its sector, and it still follows that sector's bit.
+    let sectors = (take + sector_skip).div_ceil(sector_size);
+    let first_bit = sector_in_chunk;
+    let last_bit = first_bit + sectors - 1;
+    let first_byte = first_bit / 8;
+    let byte_len = (last_bit / 8 - first_byte + 1) as usize;
+    let mut bits = vec![0u8; byte_len];
+    read_exact_at(file, bitmap_offset + first_byte, &mut bits)?;
+    let present = |i: u64| -> bool {
+        let bit = first_bit + i;
+        let byte = (bit / 8 - first_byte) as usize;
+        (bits[byte] >> (bit % 8)) & 1 == 1
+    };
+
+    let mut out: Vec<(u64, bool)> = Vec::new();
+    let mut done = 0u64;
+    for i in 0..sectors {
+        let full = if i == 0 { sector_size - sector_skip } else { sector_size };
+        let len = full.min(take - done);
+        let p = present(i);
+        match out.last_mut() {
+            Some((acc, prev)) if *prev == p => *acc += len,
+            _ => out.push((len, p)),
+        }
+        done += len;
+        if done == take {
+            break;
+        }
+    }
+    Ok(out)
 }
 
 /// Read the metadata region of an open VHDX file (signature-checked).
@@ -497,11 +607,24 @@ const MAX_CHAIN_DEPTH: usize = 64;
 /// identical whether the payload reads were batched or not (measured
 /// 2026-08-08: 268 s for 3.4 GiB — the same as reading the attached disk).
 /// The whole BAT of an 84 GB image is ~700 KiB: one read, kept in memory.
+/// Where the bytes at a guest offset live, for [`VhdxGuestReader::locate`].
+enum Placement {
+    /// In this file, at the given file offset.
+    Here(u64),
+    /// Not in this file: the parent chain, or zeros past a dynamic image.
+    Elsewhere,
+    /// Partly here: the chunk's sector bitmap decides sector by sector.
+    Split { file_offset: u64, bitmap_offset: u64, sector_in_chunk: u64, sector_skip: u64 },
+}
+
 pub struct VhdxGuestReader {
     file: File,
     virtual_size: u64,
     block_size: u64,
     chunk_ratio: u64,
+    /// Logical sector size — the unit the sector bitmap of a partially present
+    /// block is indexed in.
+    sector_size: u64,
     bat: Vec<u8>,
     /// Parent, opened lazily on the first absent block (differencing images).
     parent_path: Option<std::path::PathBuf>,
@@ -583,6 +706,7 @@ impl VhdxGuestReader {
             virtual_size: vsize,
             block_size: bsize,
             chunk_ratio: (1u64 << 23) * ssize as u64 / bsize,
+            sector_size: ssize as u64,
             bat,
             parent_path,
             parent: None,
@@ -590,10 +714,11 @@ impl VhdxGuestReader {
         })
     }
 
-    /// Where `guest_offset` lives: `Ok(Some(file_offset))` in this file,
-    /// `Ok(None)` absent here (parent or zeros). Also returns the run length
-    /// to the end of the payload block.
-    fn locate(&self, guest_offset: u64) -> Result<(Option<u64>, u64)> {
+    /// Where `guest_offset` lives: [`Placement::Here`] in this file,
+    /// [`Placement::Elsewhere`] (parent or zeros), or [`Placement::Split`] when
+    /// only some sectors of the block are ours. Also returns the run length to
+    /// the end of the payload block.
+    fn locate(&self, guest_offset: u64) -> Result<(Placement, u64)> {
         let block = guest_offset / self.block_size;
         let within = guest_offset % self.block_size;
         let run = self.block_size - within;
@@ -603,14 +728,43 @@ impl VhdxGuestReader {
         };
         let entry = u64::from_le_bytes(entry.try_into().unwrap());
         let state = entry & 7;
-        if state != 6 && state != 7 {
-            return Ok((None, run));
+        if state != PAYLOAD_BLOCK_FULLY_PRESENT && state != PAYLOAD_BLOCK_PARTIALLY_PRESENT {
+            return Ok((Placement::Elsewhere, run));
         }
         let file_offset = entry & 0xFFFF_FFFF_FFF0_0000;
         if file_offset == 0 {
             return Err(bad(format!("block state {state} with a zero file offset — corrupt BAT")));
         }
-        Ok((Some(file_offset + within), run))
+        if state == PAYLOAD_BLOCK_PARTIALLY_PRESENT {
+            // See `guest_to_file_offset_in_file`: the chunk's sector bitmap
+            // decides per sector, and reading the whole block from this file
+            // would silently zero the sectors that belong to the parent.
+            let chunk = block / self.chunk_ratio;
+            let bm_index = ((chunk + 1) * self.chunk_ratio + chunk) as usize;
+            let Some(bm) = self.bat.get(bm_index * 8..bm_index * 8 + 8) else {
+                return Err(bad("sector-bitmap BAT entry out of BAT bounds"));
+            };
+            let bm = u64::from_le_bytes(bm.try_into().unwrap());
+            if bm & 7 != SB_BLOCK_PRESENT {
+                return Ok((Placement::Elsewhere, run));
+            }
+            let bitmap_offset = bm & 0xFFFF_FFFF_FFF0_0000;
+            if bitmap_offset == 0 {
+                return Err(bad("sector bitmap present with a zero file offset — corrupt BAT"));
+            }
+            let sector_in_chunk =
+                ((block - chunk * self.chunk_ratio) * self.block_size + within) / self.sector_size;
+            return Ok((
+                Placement::Split {
+                    file_offset: file_offset + within,
+                    bitmap_offset,
+                    sector_in_chunk,
+                    sector_skip: within % self.sector_size,
+                },
+                run,
+            ));
+        }
+        Ok((Placement::Here(file_offset + within), run))
     }
 
     /// Read `buf` from `guest_offset`, following the parent chain for absent
@@ -629,24 +783,60 @@ impl VhdxGuestReader {
             let (place, run) = self.locate(off)?;
             let take = (run.min(rest.len() as u64)) as usize;
             match place {
-                Some(file_offset) => {
-                    read_exact_at(&mut self.file, file_offset, &mut rest[..take])?
+                Placement::Here(file_offset) => {
+                    read_exact_at(&mut self.file, file_offset, &mut rest[..take])?;
+                    off += take as u64;
+                    rest = &mut rest[take..];
                 }
-                None => match &self.parent_path {
-                    Some(p) => {
-                        if self.parent.is_none() {
-                            self.parent =
-                                Some(Box::new(Self::open_at_depth(p, self.depth + 1)?));
+                Placement::Elsewhere => {
+                    self.read_from_parent(off, &mut rest[..take])?;
+                    off += take as u64;
+                    rest = &mut rest[take..];
+                }
+                Placement::Split { file_offset, bitmap_offset, sector_in_chunk, sector_skip } => {
+                    let segments = partial_segments(
+                        &mut self.file,
+                        bitmap_offset,
+                        sector_in_chunk,
+                        self.sector_size,
+                        sector_skip,
+                        run,
+                        rest.len() as u64,
+                    )?;
+                    let mut seg_file_off = file_offset;
+                    for (len, present) in segments {
+                        let n = len as usize;
+                        if present {
+                            read_exact_at(&mut self.file, seg_file_off, &mut rest[..n])?;
+                        } else {
+                            self.read_from_parent(off, &mut rest[..n])?;
                         }
-                        self.parent.as_mut().unwrap().read_at(off, &mut rest[..take])?;
+                        seg_file_off += len;
+                        off += len;
+                        rest = &mut rest[n..];
                     }
-                    None => rest[..take].fill(0),
-                },
+                }
             }
-            off += take as u64;
-            rest = &mut rest[take..];
         }
         Ok(())
+    }
+
+    /// Bytes this file does not carry: from the parent, or zeros past a
+    /// parentless (dynamic) image.
+    fn read_from_parent(&mut self, guest_offset: u64, buf: &mut [u8]) -> Result<()> {
+        match &self.parent_path {
+            Some(p) => {
+                if self.parent.is_none() {
+                    let p = p.clone();
+                    self.parent = Some(Box::new(Self::open_at_depth(&p, self.depth + 1)?));
+                }
+                self.parent.as_mut().unwrap().read_at(guest_offset, buf)
+            }
+            None => {
+                buf.fill(0);
+                Ok(())
+            }
+        }
     }
 }
 
@@ -698,6 +888,49 @@ fn read_guest_chain(path: &Path, guest_offset: u64, buf: &mut [u8], depth: usize
                 off += take as u64;
                 rest = &mut rest[take..];
             }
+            GuestRun::Partial {
+                file_offset,
+                run,
+                bitmap_offset,
+                sector_in_chunk,
+                sector_size,
+                sector_skip,
+            } => {
+                let segments = partial_segments(
+                    &mut file,
+                    bitmap_offset,
+                    sector_in_chunk,
+                    sector_size,
+                    sector_skip,
+                    run,
+                    rest.len() as u64,
+                )?;
+                let mut seg_file_off = file_offset;
+                for (len, present) in segments {
+                    let take = len as usize;
+                    if present {
+                        read_exact_at(&mut file, seg_file_off, &mut rest[..take])?;
+                    } else {
+                        let resolved = match &parent {
+                            Some(p) => p.clone(),
+                            None => {
+                                let p = vhdx_parent_path(path)?;
+                                parent = Some(p.clone());
+                                p
+                            }
+                        };
+                        match resolved {
+                            Some(parent_path) => {
+                                read_guest_chain(&parent_path, off, &mut rest[..take], depth + 1)?
+                            }
+                            None => rest[..take].fill(0),
+                        }
+                    }
+                    seg_file_off += len;
+                    off += len;
+                    rest = &mut rest[take..];
+                }
+            }
         }
     }
     Ok(())
@@ -729,6 +962,16 @@ pub fn write_vhdx_guest_at(path: &Path, guest_offset: u64, buf: &[u8]) -> Result
                 return Err(bad(format!(
                     "block state {state} is not physically allocated in VHDX (cannot seek/write)"
                 )));
+            }
+            GuestRun::Partial { .. } => {
+                // Writing here would need the sector bitmap updated too, or the
+                // bytes would be written and then read back from the parent.
+                // Our writer only ever targets blocks it allocated whole, so a
+                // partial block means something else wrote to this image.
+                return Err(bad(
+                    "block is only partially present (something wrote to this image outside the \
+                     backup); refusing to write without updating its sector bitmap",
+                ));
             }
         }
     }

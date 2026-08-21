@@ -282,10 +282,9 @@ impl ImageReadSource {
                 let san_guard = SanPolicyGuard::offline_all();
                 let attached = attach_vhdx(image_path, AttachMode::RawRead)?;
                 let dev = open_read_with_retry(attached.physical_path())?;
-                let locks = match disk_number_from_physical(attached.physical_path()) {
-                    Some(disk) => tear_down_surfaced_volumes(disk, "at read attach"),
-                    None => Vec::new(),
-                };
+                if let Some(disk) = disk_number_from_physical(attached.physical_path()) {
+                    tear_down_surfaced_volumes(disk, "at read attach");
+                }
                 // Session-only (the registry is not touched for a read) and
                 // through a SEPARATE write handle: setting a disk attribute
                 // needs write access, which `dev` — opened for reading — does
@@ -297,7 +296,6 @@ impl ImageReadSource {
                         debug!(error = %e, "could not take the image offline for reading");
                     }
                 }
-                drop(locks);
                 drop(san_guard);
                 Ok(Self::Vhdx { dev, _attached: attached })
             }
@@ -371,42 +369,45 @@ fn attach_for_raw_write(
     // Order matters, and it is the sequence true removal proved: dismount the
     // volumes, take the disk offline while still HOLDING their locks, and only
     // then let go — otherwise the filesystem mounts straight back into the gap.
-    let locks = match disk_number_from_physical(attached.physical_path()) {
-        Some(disk) => tear_down_surfaced_volumes(disk, "at attach"),
-        None => Vec::new(),
-    };
+    if let Some(disk) = disk_number_from_physical(attached.physical_path()) {
+        tear_down_surfaced_volumes(disk, "at attach");
+    }
     writer.set_offline_writable(persist_offline)?;
-    drop(locks);
     drop(san_guard);
     Ok((attached, writer))
 }
 
-/// Strip letters, then flush+lock+dismount every volume currently visible on
-/// `disk` — the image's volumes that should never have surfaced. Returns the
-/// still-open lock handles: hold them across the disk's offline transition, or
-/// the filesystem re-mounts into the gap.
+/// Strip letters and force-dismount every volume currently visible on `disk` —
+/// the image's volumes that should never have surfaced.
 ///
-/// Silent and empty on the healthy path (nothing surfaced). When something did,
-/// it says so as `MOUNT-LEAK` with the volume names — the offline discipline
-/// regressed somewhere and that is the line which says where to look.
-fn tear_down_surfaced_volumes(disk: u32, when: &str) -> Vec<crate::volume_win::FileHandle> {
+/// Nothing is flushed and nothing is locked: a volume that came out of an image
+/// must be dropped, not committed. Flushing it writes the filesystem driver's
+/// idea of the volume (a dirty bit, an updated FSInfo) into an image the backup
+/// has already checksummed, and the copy stops matching its own sidecar. The
+/// disk goes offline immediately afterwards, which is what keeps the volume
+/// from coming back.
+///
+/// Silent on the healthy path (nothing surfaced). When something did, it says
+/// so as `MOUNT-LEAK` with the volume names — the offline discipline regressed
+/// somewhere, and that is the line which says where to look.
+fn tear_down_surfaced_volumes(disk: u32, when: &str) -> bool {
     let roots = crate::volume_win::all_volume_roots_on_disk(disk);
     if roots.is_empty() {
-        return Vec::new();
+        return false;
     }
     warn!(
         disk, when,
         volumes = ?roots,
         "MOUNT-LEAK: a volume surfaced from the image — the offline discipline \
          failed (SAN policy not applied / offline attribute not persisted for \
-         this chain); dismounting it now so the detach does not wait out the \
+         this chain); force-dismounting it so the detach does not wait out the \
          ~180 s PnP removal veto"
     );
     crate::volume_win::strip_letters_on_disk(disk);
-    roots
-        .iter()
-        .filter_map(|vr| crate::volume_win::flush_lock_dismount_volume(vr))
-        .collect()
+    for vr in &roots {
+        crate::volume_win::dismount_volume_forced(vr);
+    }
+    true
 }
 
 /// Last check before `DetachVirtualDisk`: is the image's device stack actually
@@ -449,18 +450,16 @@ fn dismount_surfaced_volumes(attached: &crate::vhdx::AttachedVhdx, dev: &WinRawD
          removal veto"
     );
     crate::volume_win::strip_letters_on_disk(disk);
-    // Volume roots first (a mounted filesystem needs its own flush), then the
-    // partition devices, which are reachable even when the disk is offline.
-    let handles: Vec<_> = roots
-        .iter()
-        .chain(parts.iter())
-        .filter_map(|p| crate::volume_win::flush_lock_dismount_volume(p))
-        .collect();
+    // Forced, never flushed: see `tear_down_surfaced_volumes`. Volume roots
+    // first, then the partition devices, which stay reachable on an offline
+    // disk.
+    for p in roots.iter().chain(parts.iter()) {
+        crate::volume_win::dismount_volume_forced(p);
+    }
     if let Err(e) = dev.set_offline_writable(false) {
         warn!(error = %e, "could not offline the disk after the forced dismount");
     }
     let _ = dev.update_properties();
-    drop(handles); // release the locks with the disk already offline
     let gone = crate::true_removal_win::wait_volume_gone(disk, Duration::from_secs(10));
     info!(
         gone,
