@@ -88,9 +88,30 @@ tested on a Windows host — cross-compilation validates compilation only.
   base inherits it. **Differential chains are never consolidated** — their
   children are siblings on the base, and moving the base would silently rebase
   them onto a moment they were never computed against. qcow2 is done and
-  validated by `qemu-img`; the VHDX half compiles but has never run — see
-  `.ai/PLAN.md` §3.4. Consolidating deletes files, so anything counting a
+  validated by `qemu-img`. Consolidating deletes files, so anything counting a
   chain's versions must use `Chain::increments_ever()`, never `images.len()`.
+  **The VHDX half RAN AND WAS VERIFIED on 2026-08-21** (before that it had only
+  ever compiled): `full ← inc1 ← inc2 ← inc3` became `full ← inc2 ← inc3 ←
+  inc4` — oldest folded, next repointed, folded file deleted, marker cleared.
+  Verified against the FILES, not the log: the surviving increment reads
+  byte-for-byte identically through the old and the new chain (0 differing
+  blocks of 2338 across the whole 2.4 GiB virtual disk — that is the acceptance
+  criterion, since consolidation must change nothing observable); the victim's
+  block is in the base; the base inherited the folded increment's sidecar (its
+  `backup_id` and `created_at`) promoted to `full`, with
+  `consolidated_increments=1` and `chain_started_at` still holding the ORIGINAL
+  full's timestamp; the repointed increment's `parent_backup_id` and
+  `parent_image_file_name` follow the base's new identity.
+  That run also DISPROVED something this module relied on: `MergeVirtualDisk`
+  did NOT change the base's `DataWriteGuid` — the whole chain shares one and it
+  survived the merge, because userspace writing means nothing bumps it any
+  more. The crash-resume cross-check "the child's parent linkage went stale ⇒
+  the fold already happened" could therefore never fire, and a crash between a
+  successful merge and the marker write would have left the chain in its one
+  unreadable state (base folded, next not yet repointed) with the resume
+  refusing to finish it. It now asks the DATA instead
+  (`consolidate::merge_already_applied`: does the base already carry every
+  block the victim holds?), keeping the linkage only as a bonus signal.
 - **True removal is a hard product requirement (decision 2026-07-28):** excluded
   files must be REALLY removed from the image's filesystem on every supported
   FS — zero-filled ghost entries are a fallback, not the product. Status:

@@ -39,9 +39,13 @@
 //!   that already **succeeded** leaves the child invalid, and re-running would
 //!   fail. So the marker records the merge the moment it returns, and if a
 //!   crash beats that record, the failed re-run is cross-checked against the
-//!   files themselves: `MergeVirtualDisk` rewrites the base, which changes its
-//!   `DataWriteGuid`, which no longer matches what the child stamped when it
-//!   was created. A stale linkage plus a refused merge means the merge is done.
+//!   files themselves — by their DATA: does the base already carry every block
+//!   the child holds? Then the fold happened. (The older cross-check asked
+//!   whether the child's parent linkage had gone stale, on the theory that a
+//!   merge bumps the base's `DataWriteGuid`. That stopped being true when
+//!   images moved to userspace writing: nothing bumps the GUID any more, and a
+//!   live run on 2026-08-21 showed a whole chain sharing one, unchanged across
+//!   a real `MergeVirtualDisk`. It is still consulted, but only as a bonus.)
 //!
 //! # The window where a chain is not readable
 //!
@@ -207,26 +211,68 @@ fn fold_vhdx(base: &Path, victim: &Path) -> Result<()> {
     match crate::vhdx::merge_into_parent(victim) {
         Ok(()) => Ok(()),
         Err(e) => {
-            // Ask the files, not the error text: a merge that finished has
-            // rewritten the base, so the base's DataWriteGuid no longer matches
-            // the identity the child recorded — and that mismatch is itself
-            // what stops the API reopening the chain. Anything else, and
-            // nothing was changed, so the error is real.
-            match crate::vhdx_bat::vhdx_parent_linkage_matches(victim, base) {
-                Ok(false) => {
-                    warn!(
-                        child = %victim.display(),
-                        base = %base.display(),
-                        error = %e,
-                        "MergeVirtualDisk refused a child whose parent linkage is already stale \
-                         — treating the merge as finished and completing the remaining steps"
-                    );
-                    Ok(())
-                }
-                _ => Err(e),
+            // Ask the FILES, not the error text. Two questions, either of which
+            // proves the fold already happened:
+            //
+            //   a) is the child's recorded parent identity stale? A merge
+            //      rewrites the base, and a base whose DataWriteGuid moved no
+            //      longer matches what the child stamped at creation.
+            //   b) does the base already carry the child's data?
+            //
+            // (a) alone is NOT enough any more, and that is measured, not
+            // assumed: since images are written in userspace (no attach, no VHD
+            // driver), nothing bumps DataWriteGuid — on the 2026-08-21 live run
+            // every image in the chain carried the SAME one, unchanged across a
+            // real MergeVirtualDisk. So (a) can no longer fire, and without (b)
+            // a crash between a successful merge and the marker write would
+            // leave the chain in its one unreadable state (base folded, next
+            // not yet repointed) with the resume refusing to finish it — the
+            // exact case step 6 is ordered last to make survivable.
+            let stale = matches!(crate::vhdx_bat::vhdx_parent_linkage_matches(victim, base), Ok(false));
+            let applied = stale || merge_already_applied(base, victim).unwrap_or(false);
+            if applied {
+                warn!(
+                    child = %victim.display(),
+                    base = %base.display(),
+                    stale_linkage = stale,
+                    error = %e,
+                    "MergeVirtualDisk refused a child whose data the base already carries \
+                     — treating the merge as finished and completing the remaining steps"
+                );
+                Ok(())
+            } else {
+                Err(e)
             }
         }
     }
+}
+
+/// Does `base` already carry every block `victim` holds? Then the fold is done.
+///
+/// Only the blocks the victim CARRIES are compared — everything else it reads
+/// through the parent anyway, so it is equal by construction. An increment is
+/// small, which is what makes this affordable on the crash path where it runs.
+///
+/// Reading is portable (`vhdx_bat`), so this does not care whether the victim
+/// is still openable through the Windows API after a successful merge.
+/// A victim whose blocks already match the base answers `true`, which is the
+/// right answer either way: folding them in would change nothing.
+fn merge_already_applied(base: &Path, victim: &Path) -> Result<bool> {
+    let carried = crate::vhdx_bat::allocated_payload_blocks(victim)?;
+    let mut vic = crate::vhdx_bat::VhdxGuestReader::open(victim)?;
+    let mut base_reader = crate::vhdx_bat::VhdxGuestReader::open(base)?;
+    for &block in &carried.blocks {
+        let (start, end) = carried.block_range(block);
+        let len = (end - start) as usize;
+        let mut from_victim = vec![0u8; len];
+        let mut from_base = vec![0u8; len];
+        vic.read_at(start, &mut from_victim)?;
+        base_reader.read_at(start, &mut from_base)?;
+        if from_victim != from_base {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -529,6 +575,37 @@ pub fn resume_pending(folder: &Path) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vhdx_format::VhdxWriter;
+
+    /// The crash-path question "did the fold already happen?" must be answered
+    /// from the DATA. The old answer — "the child's parent linkage went stale"
+    /// — cannot fire any more: images are written in userspace, so nothing
+    /// bumps DataWriteGuid, and a live run on 2026-08-21 showed every image in
+    /// a chain carrying the same one, unchanged across a real MergeVirtualDisk.
+    #[test]
+    fn merge_already_applied_answers_from_the_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let mb = 1024 * 1024u64;
+        let base = dir.path().join("base.vhdx");
+        let victim = dir.path().join("victim.vhdx");
+        let payload = vec![0x7Eu8; mb as usize];
+
+        // The victim carries block 1; the base still has the old bytes there.
+        let mut w = VhdxWriter::create(&victim, 8 * mb, mb, 512).unwrap();
+        w.write_at(mb, &payload).unwrap();
+        w.finish().unwrap();
+        let mut w = VhdxWriter::create(&base, 8 * mb, mb, 512).unwrap();
+        w.write_at(mb, &vec![0x11u8; mb as usize]).unwrap();
+        w.finish().unwrap();
+        assert!(!merge_already_applied(&base, &victim).unwrap(), "the fold has NOT happened yet");
+
+        // Now the base carries the victim's bytes — the fold is done.
+        let mut w = VhdxWriter::create(&base, 8 * mb, mb, 512).unwrap();
+        w.write_at(mb, &payload).unwrap();
+        w.finish().unwrap();
+        assert!(merge_already_applied(&base, &victim).unwrap(), "the fold IS already applied");
+    }
+
     use crate::chains::{list_job_chains, plan_consolidation};
     use crate::gpt_writer::{gpt_write_ops, GptLayout, DEFAULT_PARTITION_OFFSET};
     use crate::qcow2::{Qcow2RandomReader, Qcow2StagedWriter, Qcow2WriterOptions};
