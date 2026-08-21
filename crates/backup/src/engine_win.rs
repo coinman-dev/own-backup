@@ -201,13 +201,35 @@ impl ImageTarget {
                 let t = Instant::now();
                 writer.flush()?;
                 let flush_ms = t.elapsed().as_millis();
+                // Every byte is down now, so the image's FINAL GPT is on disk —
+                // re-persist the offline attribute keyed to its real GUID. The
+                // attach-time persist can run before the GPT head exists (a
+                // partition starting at LBA 34 makes block 0 "used", deferring
+                // the head to the copy pass), which keys the attribute to a RAW
+                // disk and silently protects nothing — then the NEXT attach in
+                // the chain auto-mounts and its detach stalls ~180 s.
+                if let Err(e) = writer.update_properties().and_then(|()| writer.set_offline_writable(true)) {
+                    warn!(error = %e, "could not re-persist the offline attribute at finalize");
+                }
+                let t2 = Instant::now();
+                let rescued = dismount_surfaced_volumes(&attached, &writer);
+                let rescue_ms = t2.elapsed().as_millis();
                 let t = Instant::now();
                 drop(writer);
                 let close_ms = t.elapsed().as_millis();
                 let t = Instant::now();
                 drop(attached); // detaches the image
                 let detach_ms = t.elapsed().as_millis();
-                info!(flush_ms, close_ms, detach_ms, "VHDX finalize timings");
+                info!(flush_ms, rescue_ms, close_ms, detach_ms, "VHDX finalize timings");
+                if detach_ms > 5_000 {
+                    warn!(
+                        detach_ms,
+                        rescued,
+                        "DETACH-STALL: DetachVirtualDisk blocked despite the offline \
+                         discipline — if no MOUNT-LEAK was logged, a foreign handle \
+                         (indexer/antivirus/our own leaked reader) held the disk"
+                    );
+                }
             }
             ImageTarget::Qcow2 { writer } => {
                 let t = Instant::now();
@@ -287,6 +309,74 @@ fn open_read_with_retry(path: &str) -> Result<WinRawDevice> {
         }
     }
     Err(last_err.unwrap_or_else(|| OwnBackupError::Device(format!("cannot open {path}"))))
+}
+
+/// The ONE way to attach an image for raw writing. Owns the whole offline
+/// discipline — SAN-policy window, attach, offline (+optional persist) — and
+/// checks the result: a volume that surfaced anyway is reported by name
+/// (`MOUNT-LEAK`) instead of resurfacing three minutes later as a mystery
+/// detach stall. New write paths must call this, never `attach_vhdx` directly.
+///
+/// `persist_offline` persists the offline attribute keyed to the disk's GPT
+/// GUID; pass `false` only when the image has no final GPT yet (a fresh full) —
+/// [`ImageTarget::finalize`] re-persists once every byte is down.
+fn attach_for_raw_write(
+    image_path: &Path,
+    persist_offline: bool,
+) -> Result<(crate::vhdx::AttachedVhdx, WinRawDevice)> {
+    let san_guard = SanPolicyGuard::offline_all();
+    let attached = attach_vhdx(image_path, AttachMode::RawWrite)?;
+    let writer = open_write_with_retry(attached.physical_path())?;
+    writer.set_offline_writable(persist_offline)?;
+    drop(san_guard);
+    if let Some(disk) = disk_number_from_physical(attached.physical_path()) {
+        let vols = crate::volume_win::all_volume_roots_on_disk(disk);
+        if !vols.is_empty() {
+            warn!(
+                disk,
+                volumes = ?vols,
+                "MOUNT-LEAK: a volume surfaced from the image at attach — the offline \
+                 discipline failed (SAN policy not applied / offline attribute not \
+                 persisted for this chain); finalize will force-dismount before detach"
+            );
+        }
+    }
+    Ok((attached, writer))
+}
+
+/// If any volume surfaced from the attached image (the offline discipline
+/// regressed somewhere), tear it down NOW — otherwise `DetachVirtualDisk`
+/// waits out the fixed ~180 s PnP volume-removal veto. Same proven sequence
+/// as true removal's teardown: strip letters → flush+lock+dismount every
+/// volume → offline the disk holding the locks → wait for the volumes to go.
+/// Returns `true` when a rescue was needed (the healthy path is a no-op).
+fn dismount_surfaced_volumes(attached: &crate::vhdx::AttachedVhdx, dev: &WinRawDevice) -> bool {
+    let Some(disk) = disk_number_from_physical(attached.physical_path()) else {
+        return false;
+    };
+    let roots = crate::volume_win::all_volume_roots_on_disk(disk);
+    if roots.is_empty() {
+        return false;
+    }
+    warn!(
+        disk,
+        volumes = ?roots,
+        "MOUNT-LEAK: a volume surfaced from the image during the backup — \
+         force-dismounting before detach to avoid the ~180 s PnP removal veto"
+    );
+    crate::volume_win::strip_letters_on_disk(disk);
+    let handles: Vec<_> = roots
+        .iter()
+        .filter_map(|vr| crate::volume_win::flush_lock_dismount_volume(vr))
+        .collect();
+    if let Err(e) = dev.set_offline_writable(false) {
+        warn!(error = %e, "could not offline the disk after the forced dismount");
+    }
+    let _ = dev.update_properties();
+    drop(handles); // release the locks with the disk already offline
+    let gone = crate::true_removal_win::wait_volume_gone(disk, Duration::from_secs(10));
+    info!(gone, "surfaced volumes torn down before detach");
+    true
 }
 
 /// Back up a volume into a freshly created, directly mountable VHDX.
@@ -1370,20 +1460,11 @@ fn backup_volume_inner(
             // parent, which Windows auto-mounts the instant the disk is attached. That
             // transient mount is what makes DetachVirtualDisk block on a fixed ~180 s
             // volume-teardown timeout when the backup ends (full images start blank and
-            // never mount, so they detach in milliseconds). Force new disks to arrive
-            // OFFLINE for the attach window so the volume never surfaces at all; the
-            // guard restores the machine policy the moment the disk is attached and
-            // confirmed offline (and on the error/unwind path).
-            let san_guard = SanPolicyGuard::offline_all();
-            let attached = attach_vhdx(&req.image_path, AttachMode::RawWrite)?;
-            let writer = open_write_with_retry(attached.physical_path())?;
-            // Belt-and-suspenders: take the disk offline explicitly (in case the SAN
-            // policy could not be changed) so raw sector writes are not blocked by a
-            // mounted filesystem (ERROR_ACCESS_DENIED). For children the disk carries
-            // the chain's GPT GUID, so ALSO persist the offline attribute. (Full images
-            // do the persist step after their GPT is written below.)
-            writer.set_offline_writable(parent.is_some())?;
-            drop(san_guard);
+            // never mount, so they detach in milliseconds). `attach_for_raw_write` owns
+            // the offline discipline that prevents the mount. For children the disk
+            // carries the chain's GPT GUID, so the offline attribute is persisted right
+            // away; full images do the persist step after their GPT is written below.
+            let (attached, writer) = attach_for_raw_write(&req.image_path, parent.is_some())?;
             if writer.length() < data_offset + volume_len {
                 return Err(OwnBackupError::Vhdx(format!(
                     "attached image is {} bytes — too small for the volume ({} bytes at offset {data_offset})",
@@ -3522,11 +3603,7 @@ fn create_disk_child_target(
             // The child arrives offline (the chain's GPT GUID carries a persisted
             // offline attribute), so raw sector writes are not blocked by an
             // auto-mounted filesystem; persist it for the child too.
-            let san_guard = SanPolicyGuard::offline_all();
-            let attached = attach_vhdx(image_path, AttachMode::RawWrite)?;
-            let writer = open_write_with_retry(attached.physical_path())?;
-            writer.set_offline_writable(true)?;
-            drop(san_guard);
+            let (attached, writer) = attach_for_raw_write(image_path, true)?;
             Ok((ImageTarget::Vhdx { attached, writer, bytes_since_flush: 0 }, sector_size))
         }
     }
@@ -3557,11 +3634,7 @@ fn create_disk_image_target(
                     physical_sector_size: std::cmp::max(sector_size, 4096),
                 },
             )?;
-            let san_guard = SanPolicyGuard::offline_all();
-            let attached = attach_vhdx(image_path, AttachMode::RawWrite)?;
-            let writer = open_write_with_retry(attached.physical_path())?;
-            writer.set_offline_writable(false)?;
-            drop(san_guard);
+            let (attached, writer) = attach_for_raw_write(image_path, false)?;
             if writer.length() < disk_size {
                 return Err(OwnBackupError::Vhdx(format!(
                     "attached image is {} bytes — smaller than the planned {disk_size}",

@@ -220,6 +220,23 @@ Cargo workspace with crates:
 
 ## Key patterns
 
+- **The ~180 s detach stall (PnP volume-removal veto) is guarded in DEPTH —
+  never remove a layer, never bypass the choke point (2026-08-21, after the
+  stall returned a third time).** A volume that surfaces from an attached
+  image makes `DetachVirtualDisk` wait out a fixed ~180 s PnP veto. Four
+  layers: (1) every raw-write attach goes through
+  `engine_win::attach_for_raw_write` — NEVER call `attach_vhdx(RawWrite)` +
+  `set_offline_writable` by hand; (2) `ImageTarget::finalize` RE-persists the
+  offline attribute after the last byte is written — the attach-time persist
+  can run before the GPT head exists (a partition starting at LBA 34 makes
+  block 0 "used", deferring the head to the copy pass), which keys the
+  attribute to a RAW disk and protects nothing, and that was exactly this
+  recurrence; (3) finalize force-dismounts any surfaced volume before detach
+  (`dismount_surfaced_volumes`, the sequence true removal proved) so any
+  future regression costs seconds, not minutes; (4) tripwires `MOUNT-LEAK` and
+  `DETACH-STALL` in the service log name the failure and the volumes by name —
+  after touching anything near attach/GPT/finalize, run one incremental on a
+  chain and grep the log for them (`detach_ms` must stay < 1000).
 - Windows-specific code gated with `#[cfg(target_os = "windows")]`
 - All traits (`BlockReader`, `BlockWriter`, `UsedSectorMap`, `SnapshotProvider`,
   `DiskInventory`) have mock implementations for Linux testing

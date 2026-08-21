@@ -1047,7 +1047,7 @@ fn find_volume_on_disk(disk_number: u32) -> Result<String> {
 /// mounted volume's device stack has been fully torn down after an offline, so
 /// the subsequent `DetachVirtualDisk` has nothing to remove and returns at
 /// once. Returns `true` if the volume disappeared within `timeout`.
-fn wait_volume_gone(disk_number: u32, timeout: Duration) -> bool {
+pub(crate) fn wait_volume_gone(disk_number: u32, timeout: Duration) -> bool {
     let start = Instant::now();
     loop {
         if enumerate_volume_on_disk(disk_number).is_none() {
