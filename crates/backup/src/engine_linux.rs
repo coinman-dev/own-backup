@@ -815,7 +815,7 @@ mod tests {
 
         // The image's partition (at the 1 MiB GPT head) holds a recognisable
         // ext4 — proof the superblock/metadata were copied to the right place.
-        let dev = crate::vhdx_format::VhdxReader::open(&img).unwrap();
+        let mut dev = crate::vhdx_format::VhdxReader::open(&img).unwrap();
         let mut head = vec![0u8; own_backup_inventory::fs_probe::PROBE_LEN];
         dev.read_at(DEFAULT_PARTITION_OFFSET, &mut head).unwrap();
         let probed = own_backup_inventory::fs_probe::identify(&head).expect("image holds a filesystem");

@@ -104,6 +104,18 @@ pub struct VhdxWriter {
     next_data_off: u64,
     /// Offset of the BAT region in the VHDX file.
     bat_off: u64,
+    /// This file is a DIFFERENCING child, so an unallocated block does not read
+    /// as zeros — it reads as the parent's data. Two shortcuts that are correct
+    /// for a parentless image are silent data loss here, and both are guarded
+    /// in [`Self::write_at`]: skipping an all-zero write, and leaving the rest
+    /// of a block untouched when a write covers only part of it.
+    has_parent: bool,
+    /// The image as it read BEFORE this writer touched it (parent chain and
+    /// all), opened lazily. Used to seed a freshly allocated block so the bytes
+    /// the caller did not write keep coming from the parent.
+    seed: Option<crate::vhdx_bat::VhdxGuestReader>,
+    /// Own path — the seed reader opens the same file a second time.
+    path: std::path::PathBuf,
 }
 
 impl VhdxWriter {
@@ -142,6 +154,10 @@ impl VhdxWriter {
             bat: vec![0u64; bat_entries as usize],
             next_data_off: data_start,
             bat_off: BAT_OFF,
+            // A freshly created image has no parent: absent blocks read as zeros.
+            has_parent: false,
+            seed: None,
+            path: path.to_path_buf(),
         };
         w.write_file_id()?;
         w.write_header()?;
@@ -194,6 +210,7 @@ impl VhdxWriter {
         }
         let mcount = u16::from_le_bytes(meta[10..12].try_into().unwrap()) as usize;
         let (mut vsize, mut bsize, mut ssize) = (0u64, 0u64, 512u32);
+        let mut has_parent = false;
         for slot in 0..mcount.min(2046) {
             let e = 32 + slot * 32;
             let guid = &meta[e..e + 16];
@@ -204,6 +221,8 @@ impl VhdxWriter {
                 vsize = read_u64(&meta, ioff);
             } else if guid == guid_le(MI_FILE_PARAMS) {
                 bsize = read_u32(&meta, ioff) as u64;
+                // FileParameters: bit 0 leave-blocks-allocated, bit 1 has-parent.
+                has_parent = read_u32(&meta, ioff + 4) & 2 != 0;
             } else if guid == guid_le(MI_LOG_SECTOR) {
                 ssize = read_u32(&meta, ioff);
             }
@@ -244,6 +263,9 @@ impl VhdxWriter {
             bat,
             next_data_off,
             bat_off,
+            has_parent,
+            seed: None,
+            path: path.to_path_buf(),
         })
     }
 
@@ -360,7 +382,13 @@ impl VhdxWriter {
             // nothing: an unallocated block already reads as zeros. This is what
             // keeps excluded-file "ghosts" free — their blocks stay in the used
             // map (the filesystem still reads them) but carry no data.
-            if !is_allocated && data[..take].iter().all(|&b| b == 0) {
+            //
+            // ONLY for a parentless image. In a differencing child an
+            // unallocated block reads as the PARENT's data, so dropping a write
+            // of zeros would leave the previous version's bytes showing through
+            // — a region emptied on the source since the last backup would come
+            // back from the dead on restore.
+            if !is_allocated && !self.has_parent && data[..take].iter().all(|&b| b == 0) {
                 off += take as u64;
                 data = &data[take..];
                 continue;
@@ -378,6 +406,26 @@ impl VhdxWriter {
                 self.file
                     .set_len(self.next_data_off)
                     .map_err(bad)?;
+                // A newly allocated block is written whole (FULLY_PRESENT), so
+                // the parent stops showing through it — every byte of it must
+                // therefore be filled, not just the part this call carries.
+                // Seed it with what the image reads right now: the parent's
+                // block, or the parent/child merge of a partially-present one.
+                // The on-disk BAT still says "absent" (we only write the BAT in
+                // finish), which is exactly the pre-write state wanted here.
+                let block_start = block * self.block_size;
+                let block_len = (self.virtual_size - block_start).min(self.block_size);
+                if self.has_parent && (in_block != 0 || take as u64 != block_len) {
+                    let mut seed = vec![0u8; block_len as usize];
+                    {
+                        if self.seed.is_none() {
+                            let path = self.path.clone();
+                            self.seed = Some(crate::vhdx_bat::VhdxGuestReader::open(&path)?);
+                        }
+                        self.seed.as_mut().unwrap().read_at(block_start, &mut seed)?;
+                    }
+                    self.at(alloc_off, &seed)?;
+                }
                 self.bat[bi] = alloc_off;
                 alloc_off
             };
@@ -552,7 +600,7 @@ mod tests {
         w.write_at(4 * block - 4096, &span).unwrap();
         w.finish().unwrap();
 
-        let r = VhdxReader::open(&path).unwrap();
+        let mut r = VhdxReader::open(&path).unwrap();
         assert_eq!(r.virtual_size(), vsize);
 
         let mut buf = vec![0u8; a.len()];
@@ -596,7 +644,7 @@ mod tests {
         w2.write_at(block, &data2).unwrap();
         w2.finish().unwrap();
 
-        let r = VhdxReader::open(&path).unwrap();
+        let mut r = VhdxReader::open(&path).unwrap();
         let mut buf1 = vec![0u8; 4096];
         r.read_at(0, &mut buf1).unwrap();
         assert_eq!(buf1, data1);

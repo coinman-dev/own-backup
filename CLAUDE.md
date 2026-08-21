@@ -220,28 +220,34 @@ Cargo workspace with crates:
 
 ## Key patterns
 
-- **The ~180 s detach stall (PnP volume-removal veto): IMAGES ARE NEVER
-  ATTACHED FOR READING (2026-08-21, after three recurrences).** A volume
-  surfacing from an attached image makes `DetachVirtualDisk` wait out a fixed
-  ~180 s veto. `NO_DRIVE_LETTER` withholds the letter, NOT the mount, so every
-  attach mounts the image's filesystem. The WRITE path survives that because it
-  can take the disk offline; a READ attach cannot (the attribute IOCTL needs a
-  writable handle, which a read-only attached disk will not give), so the
-  volume comes straight back and the veto is unavoidable — measured on the
-  verify pass: `verify: image OK` 15:43:20, job "finished" 15:46:20.
-  So `AttachMode::RawRead` is GONE. Images are read in userspace with
-  `vhdx_bat::VhdxGuestReader`, which resolves the differencing chain from the
-  files — the same way qcow2 has always been read, and the same reader the
-  embedded sidecar always used. No device, no volume, nothing to detach, no
-  dependence on the SAN policy taking effect. Cost is a wash (~260 s per
-  3.4 GiB either way, measured 2026-08-08).
-  Writing still attaches, through the ONE disciplined helper
-  `attach_for_raw_write` (SAN policy → attach → force-dismount whatever
-  surfaced → offline). `tests/attach_choke_point.rs` fails the build if a
-  second `AttachMode::RawWrite` call site appears, if any read path starts
-  attaching again, or if the handle/attachment field order is swapped (fields
-  drop in declaration order — detaching a disk we still hold open is itself a
-  vetoed teardown).
+- **The ~180 s detach stall is GONE because the backup engine no longer
+  attaches images AT ALL (2026-08-21, after four failed attempts to attach
+  them "carefully").** A volume surfacing from an attached image makes
+  `DetachVirtualDisk` wait out a fixed ~180 s PnP veto, and
+  `NO_DRIVE_LETTER` withholds the letter, NOT the mount — so every attach
+  mounts the image's filesystem and Defender/Search/VSS grab PnP handles
+  before anything can be done about it. Four fixes tried to win that race
+  (SAN policy, offline-attribute persist order, force-dismount, offline while
+  holding locks); none could, because the race is not ours to win.
+  Now: the file is CREATED by `CreateVirtualDisk` (which does not attach) and
+  then written byte by byte in userspace by `vhdx_format::VhdxWriter`
+  (`open_existing` → `write_at` → `finish` writes the BAT), and read by
+  `vhdx_bat::VhdxGuestReader`. `AttachVirtualDisk`/`DetachVirtualDisk` are gone
+  from the engine — exactly how qcow2 always worked, which is why qcow2 never
+  had any of this. `tests/attach_choke_point.rs` fails the build if any path
+  starts attaching images again.
+  **What userspace writing takes ON, and must never lose:** the writer now owns
+  the answer to "what does an untouched block read as", and it differs by
+  image kind — zeros for a parentless image, THE PARENT'S DATA for a
+  differencing child. Two shortcuts that are right for the first are silent
+  data loss for the second: (1) skipping an all-zero write (the child would
+  keep showing the parent's bytes — a region emptied on the source comes back
+  from the dead on restore); (2) allocating a block for a PARTIAL write without
+  seeding it (the block becomes FULLY_PRESENT, so everything not written reads
+  as zeros instead of the parent). `VhdxWriter` tracks `has_parent` from the
+  FileParameters flag and guards both; `tests/vhdx_partial_block.rs` fails
+  without either guard. The engine's own writes are block-aligned today, so (2)
+  was latent — do not rely on that staying true.
   **Do not "verify" a teardown with `all_volume_roots_on_disk`:** it filters by
   `volume_extents`, which FAILS for the volumes of an offline disk — the check
   reports "no volumes" precisely when the disk is in the state we put it in.

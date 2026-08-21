@@ -75,7 +75,9 @@ fn build_vhdx(path: &Path, entries: &[(u64, u64, u64)], body: &[(u64, Vec<u8>)],
         (guid_le("8141bf1d-a96f-4709-ba47-f233a8faab5f"), 0x1020, 4),
     ];
     put(&mut file, m + 0x1000, &(BLOCK as u32).to_le_bytes()); // block size
-    put(&mut file, m + 0x1004, &2u32.to_le_bytes()); // has_parent
+    // FileParameters flags: bit 1 = has-parent, set only for a real child.
+    let flags: u32 = if parent.is_some() { 2 } else { 0 };
+    put(&mut file, m + 0x1004, &flags.to_le_bytes());
     put(&mut file, m + 0x1010, &VSIZE.to_le_bytes());
     put(&mut file, m + 0x1020, &(SECTOR as u32).to_le_bytes());
 
@@ -228,4 +230,99 @@ fn partial_block_resolves_from_an_offset_inside_it() {
     assert_eq!(buf[SECTOR as usize], 0xCC, "sector 34 belongs to the child");
     assert_eq!(buf[(2 * SECTOR) as usize], 0xCC, "sector 35 belongs to the child");
     assert_eq!(buf[(3 * SECTOR) as usize], 0xAA, "sector 36 belongs to the parent");
+}
+
+// ---------------------------------------------------------------------------
+// Writing a differencing child in userspace
+// ---------------------------------------------------------------------------
+//
+// The engine writes VHDX images without attaching them (no AttachVirtualDisk,
+// so no ~180 s PnP detach veto). That puts the whole burden of "what does an
+// untouched block read as" on our own writer — and the answer differs between
+// a parentless image (zeros) and a differencing child (the PARENT's data).
+// Both tests below fail if the writer forgets that difference, and both are
+// silent data loss in production: the image looks fine and restores stale
+// bytes.
+
+use own_backup_backup::vhdx_format::{VhdxWriter, VhdxReader};
+
+/// Build a parent + an empty differencing child over it, both 1 MiB blocks.
+fn diff_pair(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let parent = dir.join("p.vhdx");
+    let child = dir.join("c.avhdx");
+    build_vhdx(&parent, &[(0, 6, DATA_OFF)], &[(DATA_OFF, parent_block0())], None);
+    // No BAT entries at all: every block of the child comes from the parent.
+    build_vhdx(&child, &[], &[], Some("p.vhdx"));
+    (parent, child)
+}
+
+/// Writing zeros into a child must ALLOCATE the block. Skipping the write —
+/// correct for a parentless image, where an absent block already reads as
+/// zeros — leaves the parent's old bytes showing through: a file deleted (or a
+/// region emptied) since the last backup would come back on restore.
+#[test]
+fn zeros_written_to_a_child_hide_the_parent() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_parent, child) = diff_pair(dir.path());
+
+    let mut w = VhdxWriter::open_existing(&child).unwrap();
+    w.write_at(0, &vec![0u8; BLOCK as usize]).unwrap();
+    w.finish().unwrap();
+
+    let mut buf = vec![0u8; BLOCK as usize];
+    read_vhdx_guest_at(&child, 0, &mut buf).unwrap();
+    assert!(
+        buf.iter().all(|&b| b == 0),
+        "the child was written all-zero, but the parent still shows through — \
+         the zero-write shortcut must not apply to a differencing image"
+    );
+}
+
+/// A partial write into a block the child does not own yet must keep the rest
+/// of that block coming from the parent. The block becomes FULLY_PRESENT, so
+/// anything not seeded reads back as zeros — losing the parent's data.
+#[test]
+fn a_partial_write_to_a_child_keeps_the_parents_rest_of_the_block() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_parent, child) = diff_pair(dir.path());
+
+    // Touch one sector in the middle of block 0; the parent owns the rest.
+    let mut w = VhdxWriter::open_existing(&child).unwrap();
+    w.write_at(100 * SECTOR, &vec![0x5Au8; SECTOR as usize]).unwrap();
+    w.finish().unwrap();
+
+    let mut buf = vec![0u8; BLOCK as usize];
+    read_vhdx_guest_at(&child, 0, &mut buf).unwrap();
+    assert_eq!(buf[(100 * SECTOR) as usize], 0x5A, "our own write is missing");
+    assert_eq!(
+        &buf[SECTOR as usize..SECTOR as usize + 8],
+        b"EFI PART",
+        "the GPT header at LBA 1 belongs to the parent and must survive a \
+         partial write elsewhere in the same block"
+    );
+    for s in [2u64, 50, 99, 101, 500] {
+        assert_eq!(
+            buf[(s * SECTOR) as usize],
+            0xAA,
+            "sector {s} lost the parent's data to a partial write"
+        );
+    }
+}
+
+/// The same write on a PARENTLESS image keeps the cheap behaviour: an all-zero
+/// write allocates nothing, because an absent block already reads as zeros.
+#[test]
+fn zero_writes_to_a_parentless_image_stay_free() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("plain.vhdx");
+    let mut w = VhdxWriter::create(&path, 8 * BLOCK, BLOCK, SECTOR as u32).unwrap();
+    w.write_at(0, &vec![0u8; BLOCK as usize]).unwrap();
+    w.finish().unwrap();
+
+    let mut r = VhdxReader::open(&path).unwrap();
+    let mut buf = vec![0u8; BLOCK as usize];
+    r.read_at(0, &mut buf).unwrap();
+    assert!(buf.iter().all(|&b| b == 0));
+    let len = std::fs::metadata(&path).unwrap().len();
+    assert!(len < 5 * BLOCK, "an all-zero block should not be allocated (file is {len} bytes)");
 }
