@@ -54,6 +54,12 @@ pub struct VolumeUnlockDto {
     pub label: String,
     /// Bytes in use inside the decrypted volume, 0 if unknown.
     pub used_bytes: u64,
+    /// Where the filesystem inside says it was last mounted (ext only): `"/"`
+    /// for a Linux system root, `"/home"` or `"/mnt/…"` for data. Empty when
+    /// unknown. The wizard needs it to answer, the moment a volume opens,
+    /// whether it belongs in a bootable copy.
+    #[serde(default)]
+    pub linux_last_mounted: String,
 }
 
 /// An active mounted image mapping.

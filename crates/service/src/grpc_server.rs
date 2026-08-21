@@ -391,6 +391,7 @@ impl BackupService for BackupServiceImpl {
                 filesystem: probe.filesystem,
                 label: probe.label,
                 used_bytes: probe.used_bytes,
+                linux_last_mounted: probe.linux_last_mounted,
             }
         };
         #[cfg(not(target_os = "windows"))]
@@ -399,6 +400,7 @@ impl BackupService for BackupServiceImpl {
             filesystem: String::new(),
             label: String::new(),
             used_bytes: 0,
+            linux_last_mounted: String::new(),
         };
 
         // Only cache a password that actually unlocked the volume. Key by the

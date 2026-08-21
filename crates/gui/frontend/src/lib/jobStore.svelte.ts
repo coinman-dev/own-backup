@@ -21,7 +21,7 @@ export const jobs = $state({
  *  for the password again (the backend also caches the password for the
  *  session). Keyed by the source device string. */
 export const decryptedVolumes = $state<
-  Record<string, { label: string; used_bytes: number; filesystem: string }>
+  Record<string, { label: string; used_bytes: number; filesystem: string; linux_last_mounted: string }>
 >({});
 
 let inited = false;

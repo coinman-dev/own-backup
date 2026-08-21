@@ -98,6 +98,10 @@ fn build_partition(v: &Value, index: u32) -> PartitionInfo {
         // partition for an installed system means mounting it. `is_system`
         // already covers the running root, which is what this build uses.
         has_os: is_system,
+        // `lsblk` reports the CURRENT mount point, not the filesystem's own
+        // record of the last one; the field is filled by the raw probe on
+        // Windows, which is where the wizard needs it.
+        linux_last_mounted: jstr(v, "mountpoint").unwrap_or_default(),
         is_encrypted,
         // Linux support is deferred; the container's own metadata is not read
         // here, so nothing is claimed about how it opens — and "not asked" must

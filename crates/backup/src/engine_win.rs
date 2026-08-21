@@ -4695,6 +4695,11 @@ pub struct DecryptedProbe {
     pub filesystem: String,
     pub label: String,
     pub used_bytes: u64,
+    /// Where the filesystem INSIDE the container says it was last mounted
+    /// (ext only). This is what turns "the password opened something" into an
+    /// answer to the question the wizard actually asked: is the system in here,
+    /// or is this a data volume the user merely wanted to look at?
+    pub linux_last_mounted: String,
 }
 
 /// How an encrypted partition can be opened, asked of the volume itself.
@@ -4776,7 +4781,13 @@ fn probe_decrypted(view: &mut dyn crate::fat_map::RawVolume) -> Result<Decrypted
             label = crate::ntfs_map::ntfs_volume_label(view).unwrap_or_default();
         }
     }
-    Ok(DecryptedProbe { ok: true, filesystem, label, used_bytes })
+    Ok(DecryptedProbe {
+        ok: true,
+        filesystem,
+        label,
+        used_bytes,
+        linux_last_mounted: probed.last_mounted.unwrap_or_default(),
+    })
 }
 
 /// Open a BitLocker volume through the disk it lives on, and describe what is

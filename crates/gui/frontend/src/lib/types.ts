@@ -33,6 +33,10 @@ export interface PartitionInfo {
   /** An OS is INSTALLED here, running or not. On the medium this is what
    *  identifies the system partition; `is_system` cannot. */
   has_os: boolean;
+  /** Where a Linux filesystem records it was last mounted ("/" = system root,
+   *  "/home" = data, "" = unknown). Read from the superblock without mounting;
+   *  it is the only signal that tells a Linux root from a Linux data volume. */
+  linux_last_mounted: string;
   /** Encrypted container (LUKS/BitLocker): filesystem is Unknown, but it can be
    *  backed up after supplying a password to decrypt it. */
   is_encrypted: boolean;
@@ -423,6 +427,9 @@ export interface DecryptResult {
   filesystem: string;
   label: string;
   used_bytes: number;
+  /** Where the filesystem inside says it was last mounted (ext only): "/" for a
+   *  Linux system root, "/home" or "/mnt/…" for data, "" when unknown. */
+  linux_last_mounted: string;
 }
 
 export interface QueueSnapshot {

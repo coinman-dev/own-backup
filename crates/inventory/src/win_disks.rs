@@ -609,6 +609,11 @@ impl super::traits::DiskInventory for WindowsInventory {
                     _ => probed.as_ref().and_then(|p| p.used_bytes).unwrap_or(0),
                 };
                 let is_encrypted = probed.as_ref().map(|p| p.encrypted).unwrap_or(false);
+                // Only a raw probe can answer this: Windows never mounts ext,
+                // so a Linux partition reaches us as a volume it calls RAW and
+                // the superblock is the only thing that speaks.
+                let linux_last_mounted =
+                    probed.as_ref().and_then(|p| p.last_mounted.clone()).unwrap_or_default();
                 let letter = volume.and_then(|v| v.letter);
 
                 // Openable device: the drive letter, else the volume GUID path,
@@ -649,6 +654,7 @@ impl super::traits::DiskInventory for WindowsInventory {
                     is_system,
                     is_boot,
                     has_os,
+                    linux_last_mounted,
                     is_encrypted,
                     // Filled in by the service, which can reach the BitLocker
                     // and LUKS parsers — this crate cannot, their crate depends

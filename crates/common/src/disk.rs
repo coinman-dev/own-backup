@@ -59,6 +59,17 @@ pub struct PartitionInfo {
     /// services do not send this field, hence the default.
     #[serde(default)]
     pub has_os: bool,
+    /// Where a Linux filesystem says it was last mounted (`s_last_mounted`,
+    /// ext2/3/4). `"/"` is the system root, `"/home"` or `"/mnt/data"` is data.
+    ///
+    /// The only thing on a Linux volume that says what it is FOR, and it costs
+    /// one superblock read from Windows — no mounting. Everything else about a
+    /// Linux partition (its GPT type, its filesystem) says the same for a root
+    /// and for a data volume, which is how a "bootable copy" ends up either
+    /// dragging in a data disk or leaving the system out. Empty when the
+    /// filesystem is not ext, has never been mounted, or could not be read.
+    #[serde(default)]
+    pub linux_last_mounted: String,
     /// The partition holds an encrypted container (LUKS / BitLocker). Its
     /// filesystem shows as `Unknown`, but it can still be backed up by
     /// supplying a password to decrypt it first.

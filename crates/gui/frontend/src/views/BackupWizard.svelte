@@ -205,25 +205,102 @@
     const m = d.device_id.match(/(\d+)\s*$/);
     return m ? parseInt(m[1], 10) : 0;
   }
-  // A disk can host a bootable OS only if it has an EFI System Partition; the
-  // "bootable copy" option is disabled (read-only) for pure data disks.
-  function isBootableDisk(d: DiskInfo): boolean {
-    return d.partitions.some((p) => p.is_boot);
-  }
-  // The ESP and the OS/system partition are required for a bootable restore, so
-  // while bootable-copy is on they are auto-included and cannot be deselected.
-  /** Partitions a bootable disk copy cannot leave out: the loader's partition
-   *  and the one holding the system itself. `is_system` alone was not enough —
-   *  booted from the medium nothing is "the running system", so the copy came
-   *  out with the EFI partition and without Windows. */
-  function isBootEssential(p: PartitionInfo): boolean {
-    return p.is_boot || p.is_system || p.has_os;
-  }
+  // ---- What belongs to booting (rewritten from scratch 2026-08-21) ----------
+  //
+  // The old switch answered this by taking EVERY volume of the disk, on the
+  // reasoning that a Linux system cannot be recognised from Windows and one
+  // partition too many only costs space. On a real disk that put a 347 GiB NTFS
+  // data volume into a "bootable copy", which is not what the words say and not
+  // what the user wants backed up.
+  //
+  // So the question is asked properly, of the partition TYPE — the one thing
+  // written on the disk itself, by the installer, in a form both worlds agree
+  // on. `has_os` (a Windows kernel file) stays as a second opinion; it is the
+  // only signal that needs a mounted filesystem, and it is never the only one.
+
+  /** EFI System Partition — the loader lives here, on Windows and on Linux. */
+  const GPT_ESP = 'C12A7328-F81F-11D2-BA4B-00A0C93EC93B';
   /** Microsoft Reserved: Windows expects the slot, there is no filesystem in it.
    *  A whole-disk copy keeps its GPT entry (`DiskLayout::retain_for_backup`)
    *  whatever the user selected — so the map must show it as part of the copy,
    *  not as something left out. */
   const MSR_GUID = 'E3C9E316-0B5C-4DB8-817D-F92DF00215AE';
+  /** Types that ARE the boot chain, whoever installed the system. */
+  const BOOT_TYPES = new Set([
+    GPT_ESP,
+    MSR_GUID,
+    'DE94BBA4-06D1-4D40-A16A-BFD50179D6AC', // Windows Recovery (WinRE)
+    'BC13C2FF-59E6-4262-A352-B275FD6F7172', // Linux extended boot (XBOOTLDR, /boot)
+    '4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709', // Linux root, x86-64
+    '44479540-F297-41B2-9AF7-D131D5F0458A', // Linux root, x86
+    'B921B045-1DF0-41C3-AF44-4C6F280D3FAE', // Linux root, arm64
+    '8484680C-9521-48C6-9C11-B0720656F69E', // Linux /usr, x86-64
+    'E6D6D379-F507-44C2-A23C-238F2A3DF928', // Linux LVM — the root usually lives inside
+  ]);
+  /** Filesystems a Linux system is installed on. A partition carrying one is
+   *  part of the system unless something says otherwise — Windows data lives on
+   *  NTFS/exFAT, never on these. */
+  const LINUX_FS = new Set(['ext2', 'ext3', 'ext4', 'xfs', 'btrfs', 'f2fs']);
+
+  function typeGuid(p: PartitionInfo): string {
+    return (p.gpt_type_guid || '').replace(/[{}]/g, '').toUpperCase();
+  }
+  function fsName(p: PartitionInfo): string {
+    return String(p.filesystem ?? '').toLowerCase();
+  }
+
+  /** Why a partition is (not) part of the boot chain. `locked` is the honest
+   *  third answer: an encrypted volume cannot be judged until it is open, so it
+   *  is neither included nor dismissed — its password is asked for instead. */
+  type BootRole = 'boot' | 'data' | 'locked';
+  function bootRole(p: PartitionInfo): BootRole {
+    // Sealed containers first: nothing inside is readable, so nothing about
+    // them is decidable. Judged again the moment they are unlocked.
+    if (p.is_encrypted && !decryptedVolumes[partDevice(p) ?? '']) return 'locked';
+    if (BOOT_TYPES.has(typeGuid(p))) return 'boot';
+    // A running Windows, or a Windows found by its kernel file. Both need a
+    // mounted filesystem, which is why they cannot carry this alone.
+    if (p.is_system || p.has_os) return 'boot';
+    // The generic "Linux filesystem" type (0FC63DAF…) is what Ubuntu writes for
+    // the root — and also for a data partition, so the type alone decides
+    // nothing, and neither does "it is ext4". What DOES decide is the mount
+    // point the filesystem itself recorded: a root says "/", a data volume says
+    // "/home" or "/mnt/…". Read straight from the superblock, no mounting.
+    const mnt = lastMounted(p);
+    if (mnt) return LINUX_SYSTEM_MOUNTS.has(mnt) ? 'boot' : 'data';
+    // Never mounted, or not an ext filesystem (btrfs and xfs keep no such
+    // record). Falling back to "a Linux filesystem is part of the system" errs
+    // towards including it: a copy with one partition too many costs space, a
+    // copy missing the root does not boot.
+    if (LINUX_FS.has(decryptedFs(p) || fsName(p))) return 'boot';
+    return 'data';
+  }
+  /** Mount points that make a Linux volume part of the system. `/` is the root;
+   *  a separate `/boot`, `/boot/efi` or `/usr` is just as load-bearing. */
+  const LINUX_SYSTEM_MOUNTS = new Set(['/', '/boot', '/boot/efi', '/usr', '/etc', '/var']);
+  /** What the filesystem says about its own last mount point — from the
+   *  unlocked view when there is one, else from the disk inventory. */
+  function lastMounted(p: PartitionInfo): string {
+    const dev = partDevice(p);
+    const dec = dev ? decryptedVolumes[dev]?.linux_last_mounted : '';
+    return (dec || p.linux_last_mounted || '').trim();
+  }
+  /** Filesystem seen INSIDE an unlocked container, if it has been opened. */
+  function decryptedFs(p: PartitionInfo): string {
+    const dev = partDevice(p);
+    return dev ? String(decryptedVolumes[dev]?.filesystem ?? '').toLowerCase() : '';
+  }
+  /** Every partition of the disk that the boot chain needs, as judged right
+   *  now — encrypted ones only once they are open. */
+  function bootParts(d: DiskInfo): PartitionInfo[] {
+    return d.partitions.filter((p) => bootRole(p) === 'boot');
+  }
+  /** A disk worth offering the switch for: something on it boots. An encrypted
+   *  volume counts — it may well be the system, and that is exactly the case
+   *  the switch has to handle. */
+  function isBootableDisk(d: DiskInfo): boolean {
+    return d.partitions.some((p) => bootRole(p) !== 'data');
+  }
   /** Is this disk's layout captured — i.e. does the job write ONE image of it?
    *  True for every disk a new job picks; false for jobs saved before that
    *  became unconditional, which still hold one image per volume. */
@@ -243,31 +320,34 @@
   function diskOfDevice(dev: string): DiskInfo | null {
     return engine.disks.find((d) => d.partitions.some((p) => partDevice(p) === dev)) ?? null;
   }
-  // "Bootable copy of this disk" is on when every partition a restore needs to
-  // boot is in the copy.
-  //
-  // It used to mean "disk_source is captured", i.e. "this job makes ONE image
-  // of the whole disk" — two different ideas behind one checkbox. With one
-  // image per disk now unconditional (2026-08-21), `disk_source` says nothing
-  // about bootability, so the question is asked of the selection itself.
-  // Derived, not stored: a flag could disagree with the partitions actually
-  // selected, and then the copy would promise a boot it cannot deliver.
+  /** Disks whose "Загрузочная копия" switch the user turned ON.
+   *
+   *  STORED, not derived from the selection. Deriving it was what made the
+   *  switch unusable with encryption: an encrypted root cannot be selected
+   *  until it is open, so a derived switch reads "off" exactly while it is
+   *  waiting for the password it asked for, and turns itself on and off under
+   *  the user's hand as volumes unlock. */
+  let bootCopyOn = $state<string[]>([]);
   function isBootableCopy(d: DiskInfo): boolean {
-    if (!isBootableDisk(d)) return false;
-    const essential = d.partitions.filter(isBootEssential);
-    if (essential.length === 0) return false;
-    return essential.every((p) => {
-      const dev = partDevice(p);
-      return !!dev && job.sources.includes(dev);
-    });
+    // A saved job cannot be edited, so there is no switch to read — say what
+    // the copy actually holds.
+    if (sourceReadonly) {
+      const need = bootParts(d);
+      return need.length > 0 && need.every((p) => {
+        const dev = partDevice(p);
+        return !!dev && job.sources.includes(dev);
+      });
+    }
+    return bootCopyOn.includes(d.device_id);
   }
-  // A selected volume that is boot-essential AND on a disk in bootable-copy
-  // mode is locked: its checkbox stays checked and can't be turned off.
+  // While the switch is on, the boot chain stays in: a "загрузочная копия"
+  // missing its ESP is a copy that will not boot, and there is a switch for
+  // saying that — turning this one off.
   function isLockedSource(dev: string): boolean {
     const d = diskOfDevice(dev);
     if (!d || !isBootableCopy(d)) return false;
     const p = d.partitions.find((pp) => partDevice(pp) === dev);
-    return !!p && isBootEssential(p);
+    return !!p && bootRole(p) === 'boot';
   }
 
   // "Параметры" screen (edit mode): the source is fixed once a job is saved —
@@ -477,55 +557,50 @@
     }
   });
 
-  // Toggle the disk's "bootable copy": capture the GPT layout + boot partitions
-  // so the disk can be restored bootable to a new SSD. Independent of which
-  // data volumes are selected; disabled for non-bootable disks.
+  /** Add one partition to the selection, remembering that the SWITCH put it
+   *  there and not the user — turning the switch off takes back exactly these. */
+  function includeForBoot(d: DiskInfo, p: PartitionInfo) {
+    const dev = partDevice(p);
+    if (!dev || job.sources.includes(dev)) return;
+    autoIncluded.add(dev);
+    job.sources = [...job.sources, dev];
+    job.source_labels = [...job.source_labels, decryptedVolumes[dev]?.label || partLabel(p)];
+    job.source = job.sources[0] ?? '';
+    job.source_label = job.source_labels[0] ?? '';
+    syncDiskSourceParts(d);
+  }
+
+  /** Turn "Загрузочная копия диска" on or off.
+   *
+   *  ON selects the boot chain and nothing else — data volumes are left exactly
+   *  as the user had them. An encrypted volume is NOT selected: locked, it
+   *  cannot be told from a data volume, so the password panel asks for it and
+   *  the effect below picks it up if what comes out is part of the system.
+   *
+   *  OFF gives back only what the switch took, so a data volume ticked by hand
+   *  survives the switch being flicked twice. */
   function toggleBootableCopy(d: DiskInfo) {
     if (sourceReadonly) return; // fixed source on the "Параметры" screen
-    if (!isBootableDisk(d)) return; // read-only for pure data disks
+    if (!isBootableDisk(d)) return; // nothing on this disk boots
     if (isBootableCopy(d)) {
-      // Turn off: drop the partitions a boot needs, keep the rest. The copy
-      // stays one image of this disk — it just stops promising a boot.
+      bootCopyOn = bootCopyOn.filter((id) => id !== d.device_id);
       for (const p of d.partitions) {
         const dev = partDevice(p);
-        if (!dev || !isBootEssential(p)) continue;
+        if (!dev || !autoIncluded.has(dev)) continue;
+        autoIncluded.delete(dev);
         const i = job.sources.indexOf(dev);
-        if (i >= 0) {
-          job.sources = job.sources.filter((x) => x !== dev);
-          job.source_labels = job.source_labels.filter((_, idx) => idx !== i);
-        }
+        if (i < 0) continue;
+        job.sources = job.sources.filter((x) => x !== dev);
+        job.source_labels = job.source_labels.filter((_, idx) => idx !== i);
       }
       job.source = job.sources[0] ?? '';
       job.source_label = job.source_labels[0] ?? '';
       syncDiskSourceParts(d);
       return;
     }
-    // Turn on: include EVERY volume of the disk that can be copied.
-    //
-    // Not "the boot-essential ones", because we cannot tell which those are.
-    // `has_os` is set by looking for `Windows\System32\ntoskrnl.exe`
-    // (`win_disks.rs`), so it answers "is Windows installed here" and nothing
-    // else — a Linux root, encrypted or not, is never recognised from Windows.
-    // On a Kubuntu disk that left the bootable copy holding the EFI partition
-    // and not the system (2026-08-21), which is not a bootable copy at all.
-    //
-    // Guessing harder (GPT type GUIDs, "encrypted so probably the root") only
-    // moves the guess around: Ubuntu writes the generic "Linux filesystem"
-    // type for data partitions too. So take everything and let the user drop
-    // what they know is data — the tooltip has always promised exactly that,
-    // and the cost of one extra partition is space, while the cost of one
-    // missing partition is a copy that will not boot.
-    for (const p of d.partitions) {
-      const dev = partDevice(p);
-      if (dev && !job.sources.includes(dev)) {
-        job.sources = [...job.sources, dev];
-        job.source_labels = [...job.source_labels, partLabel(p)];
-      }
-    }
-    job.source = job.sources[0] ?? '';
-    job.source_label = job.source_labels[0] ?? '';
+    bootCopyOn = [...bootCopyOn, d.device_id];
     captureDiskSource(d);
-    syncDiskSourceParts(d);
+    for (const p of bootParts(d)) includeForBoot(d, p);
   }
 
   async function browseDest() {
@@ -774,30 +849,20 @@
     job.requires_password = encryptedSelected().length > 0;
   });
 
-  // Auto-include an UNLOCKED volume on a disk marked "Загрузочная копия": the
-  // password was typed for exactly one reason, and the copy is of the whole
-  // disk. Reactive, so it works no matter the order (toggle-then-decrypt or
-  // decrypt-then-toggle) and self-corrects if the disk was toggled after the
-  // volume was unlocked. Converges: once a volume is in `sources` the guard
-  // skips it (no loop).
+  // A volume that was unlocked while the switch is on gets judged the moment it
+  // becomes readable, and joins the copy only if it turns out to be part of the
+  // system. That is the whole reason the password is asked for: locked, the
+  // volume is a black box, and the old code resolved that by including EVERY
+  // unlocked volume — so a data volume the user opened just to look inside was
+  // pulled into a "bootable copy" it has no business being in.
   //
-  // Until 2026-08-19 this fired only for a Linux root (ext4/xfs/btrfs), because
-  // a Windows system volume was supposed to be caught at toggle time by
-  // `isBootEssential`. It is not: `is_system`/`has_os` are read from a MOUNTED
-  // filesystem, and Windows never mounts a locked BitLocker volume, so both
-  // come back false while it is locked — and a locked volume is exactly the
-  // state the wizard meets it in. The bootable copy of a 954 GiB disk then went
-  // through with the EFI partition alone: 43 MB written in 0 s, reported as
-  // success.
+  // Reactive, so the order of actions does not matter (unlock-then-switch or
+  // switch-then-unlock). Converges: once a device is in `sources` — or has been
+  // taken back off by hand — `autoIncluded` stops it being added again.
   //
-  // Unlocking is the user's "yes" and leaving a volume locked is the "no" —
-  // `retain_for_backup` then drops it from the layout, so its space comes back
-  // free on restore. Both halves are said out loud in the password panel.
-  //
-  // Included ONCE per volume, not held as an invariant: a user who unlocked a
-  // volume to see what is in it must still be able to untick it, and an effect
-  // that re-adds on every run would make that impossible. Per wizard instance,
-  // like the rest of this screen's scratch state.
+  // Leaving a volume locked is a valid answer, and it means "no":
+  // `retain_for_backup` drops it from the layout, so its space comes back free
+  // on restore. Both halves are said out loud in the password panel.
   const autoIncluded = new Set<string>();
   $effect(() => {
     if (sourceReadonly) return; // the source of a saved job is fixed
@@ -806,12 +871,9 @@
       for (const p of d.partitions) {
         const dev = partDevice(p);
         if (!dev || job.sources.includes(dev) || autoIncluded.has(dev)) continue;
-        const dec = decryptedVolumes[dev];
-        if (!dec) continue;
-        autoIncluded.add(dev);
-        job.sources = [...job.sources, dev];
-        job.source_labels = [...job.source_labels, dec.label || partLabel(p)];
-        syncDiskSourceParts(d);
+        if (!decryptedVolumes[dev]) continue; // still sealed — nothing to judge
+        if (bootRole(p) !== 'boot') continue; // opened, and it is data
+        includeForBoot(d, p);
       }
     }
   });
@@ -857,7 +919,12 @@
       // Remember for the whole GUI session (survives reopening the wizard). A
       // decrypted Linux OS volume on a "Загрузочная копия" disk is then
       // auto-included by the reactive effect below (any order of actions).
-      decryptedVolumes[device] = { label: r.label, used_bytes: r.used_bytes, filesystem: r.filesystem };
+      decryptedVolumes[device] = {
+        label: r.label,
+        used_bytes: r.used_bytes,
+        filesystem: r.filesystem,
+        linux_last_mounted: r.linux_last_mounted ?? '',
+      };
 
       // Carry the volume label into the job (file name + display), like C:/D:.
       const i = job.sources.indexOf(device);
@@ -933,10 +1000,33 @@
   // read. A 347 GiB BitLocker volume the user unchecked used to hold "Дальше"
   // greyed out on a bootable-copy disk, with no way forward but to type a
   // password for data nobody was going to touch.
+  /** Pure loader slots: they get a system onto its feet but are not the system.
+   *  A copy holding only these boots into "no operating system found". */
+  const LOADER_ONLY = new Set([GPT_ESP, MSR_GUID, 'DE94BBA4-06D1-4D40-A16A-BFD50179D6AC']);
+  /** Is anything that could BE the system already in the copy of this disk? */
+  function systemIncluded(d: DiskInfo): boolean {
+    return d.partitions.some((p) => {
+      const dev = partDevice(p);
+      if (!dev || !job.sources.includes(dev)) return false;
+      return bootRole(p) === 'boot' && !LOADER_ONLY.has(typeGuid(p));
+    });
+  }
   function encryptedBlocking(): EncryptedVolume[] {
-    return engine.disks
-      .flatMap((d) => encryptedForDisk(d))
-      .filter(({ device }) => job.sources.includes(device));
+    return engine.disks.flatMap((d) => {
+      const shown = encryptedForDisk(d);
+      // Anything this copy will actually read has to be open — that is what the
+      // password is for.
+      const selected = shown.filter(({ device }) => job.sources.includes(device));
+      // And on a disk asked for a BOOTABLE copy where nothing else looks like a
+      // system, a locked volume is the last candidate for being it. Letting that
+      // through is how a 954 GiB disk once produced a 43 MB "bootable copy" of
+      // its EFI partition alone, reported as success. When the system IS already
+      // in (Windows found, a Linux root selected), a locked volume is data and
+      // nobody has to type anything for it.
+      if (!isBootableCopy(d) || systemIncluded(d)) return selected;
+      const devs = new Set(selected.map((e) => e.device));
+      return [...selected, ...shown.filter((e) => !devs.has(e.device))];
+    });
   }
   function allEncryptedDecrypted(): boolean {
     return encryptedBlocking().every(({ device }) => decryptedVolumes[device]);
@@ -1257,8 +1347,8 @@
                         class="boot-toggle"
                         class:disabled={!isBootableDisk(d)}
                         title={isBootableDisk(d)
-                          ? 'Включить в копию загрузочные разделы (EFI и системный), чтобы систему можно было восстановить на новый диск с сохранением загрузки. Таблица разделов (GPT) сохраняется в любом случае — копия диска всегда один файл.'
-                          : 'Диск не является загрузочным (нет EFI-раздела) — загрузочная копия недоступна.'}
+                          ? 'Отметить разделы, из которых система загружается: EFI, раздел загрузчика, сам системный раздел. Разделы с данными не трогаются — их выбираете вы. Зашифрованный раздел сначала попросит пароль: пока он закрыт, понять, система там или данные, невозможно. Таблица разделов (GPT) сохраняется в любом случае — копия диска всегда один файл.'
+                          : 'На этом диске нечему загружаться — ни EFI-раздела, ни системы, ни зашифрованных томов.'}
                       >
                         <input
                           type="checkbox"
@@ -1320,13 +1410,25 @@
                     </div>
                   </div>
                 </div>
-                {#if isBootableCopy(d) && !d.partitions.some((p) => p.has_os)}
-                  <div class="boot-hint">
-                    Система на этом диске не опознана — Own Backup определяет только
-                    установленную Windows. В копию включены все разделы диска, чтобы
-                    ничего нужного для загрузки не потерялось. Разделы с данными можно
-                    снять, но <b>раздел с системой снимать нельзя</b> — без него копия не загрузится.
-                  </div>
+                {#if isBootableCopy(d)}
+                  {@const locked = d.partitions.filter((p) => bootRole(p) === 'locked')}
+                  {#if locked.length > 0}
+                    <div class="boot-hint">
+                      Отмечено то, из чего диск загружается. Осталось
+                      {locked.length === 1 ? 'закрытый том' : 'закрытых томов'}:
+                      <b>{locked.map((p) => partLabel(p)).join(', ')}</b> — пока
+                      {locked.length === 1 ? 'он зашифрован' : 'они зашифрованы'}, понять,
+                      система там или данные, нельзя. Введите пароль ниже: если внутри
+                      окажется система, том добавится в копию сам. Оставите закрытым —
+                      он в копию не войдёт, и при восстановлении его место останется свободным.
+                    </div>
+                  {:else if !d.partitions.some((p) => p.has_os) && bootParts(d).every((p) => typeGuid(p) === GPT_ESP)}
+                    <div class="boot-hint">
+                      На диске найден только EFI-раздел — самой системы не видно.
+                      Если она здесь есть, отметьте её раздел вручную: без него копия
+                      не загрузится.
+                    </div>
+                  {/if}
                 {/if}
                 {#if encryptedForDisk(d).length > 0}
                   {@render pwPanel(encryptedForDisk(d), d.device_id === sharedFormDiskId, isBootableCopy(d))}

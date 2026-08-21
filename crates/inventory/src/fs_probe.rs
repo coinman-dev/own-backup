@@ -30,6 +30,28 @@ pub struct ProbedFs {
     /// The partition is an encrypted container (LUKS) — `fs` is `Unknown` but it
     /// can be backed up after decryption with a password.
     pub encrypted: bool,
+    /// Where this filesystem was last mounted, as the filesystem itself
+    /// recorded it (`s_last_mounted`, ext2/3/4 only). `Some("/")` is a Linux
+    /// system root; `Some("/home")` or `Some("/mnt/data")` is data.
+    ///
+    /// This is the one thing on a Linux volume that says what it is FOR, and it
+    /// is readable from Windows without mounting anything. Without it the only
+    /// question we can answer is "is this ext4", which a data partition answers
+    /// the same way as a root — and a backup wizard that cannot tell them apart
+    /// either drags data volumes into a bootable copy or leaves the system out
+    /// of one. `None` when the filesystem is not ext, has never been mounted,
+    /// or the field is out of the probed buffer.
+    pub last_mounted: Option<String>,
+}
+
+/// Read a NUL-padded absolute path (`s_last_mounted`); `None` when empty or
+/// not a path. Never trimmed of meaning: "/" and "/home" are different answers.
+fn read_path(buf: &[u8], off: usize, len: usize) -> Option<String> {
+    let end = off.checked_add(len)?;
+    let raw = buf.get(off..end)?;
+    let cut = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+    let s = String::from_utf8_lossy(&raw[..cut]).trim().to_string();
+    (s.starts_with('/')).then_some(s)
 }
 
 /// Read a fixed-width, space/NUL-padded label; `None` when empty or a
@@ -108,7 +130,7 @@ const BITLOCKER_TO_GO_GUID: [u8; 16] = [
 /// very first byte.
 pub fn identify(buf: &[u8]) -> Option<ProbedFs> {
     let at = |off: usize, tag: &[u8]| buf.len() >= off + tag.len() && &buf[off..off + tag.len()] == tag;
-    let some = |fs, label| Some(ProbedFs { fs, label, used_bytes: None, encrypted: false });
+    let some = |fs, label| Some(ProbedFs { fs, label, used_bytes: None, encrypted: false, last_mounted: None });
 
     // BitLocker must be checked before NTFS: Win8+ BitLocker volumes carry an
     // "NTFS    " OEM id but the BitLocker GUID at 0x160 (Vista/7 use the
@@ -122,6 +144,7 @@ pub fn identify(buf: &[u8]) -> Option<ProbedFs> {
             label: Some("BitLocker (зашифровано)".into()),
             used_bytes: None,
             encrypted: true,
+            last_mounted: None,
         });
     }
 
@@ -149,6 +172,7 @@ pub fn identify(buf: &[u8]) -> Option<ProbedFs> {
             label: read_label(buf, 0x6C, 12),
             used_bytes: xfs_used_bytes(buf),
             encrypted: false,
+            last_mounted: None,
         });
     }
     // LUKS1/2 container: "LUKS\xba\xbe" at offset 0. Not a filesystem we can
@@ -160,6 +184,7 @@ pub fn identify(buf: &[u8]) -> Option<ProbedFs> {
             label: Some("LUKS (зашифровано)".into()),
             used_bytes: None,
             encrypted: true,
+            last_mounted: None,
         });
     }
     // ext2/3/4: s_magic 0xEF53 (LE) at superblock offset 0x38 → partition byte
@@ -172,6 +197,8 @@ pub fn identify(buf: &[u8]) -> Option<ProbedFs> {
             label: read_label(buf, 1024 + 0x78, 16),
             used_bytes: ext_used_bytes(buf),
             encrypted: false,
+            // s_last_mounted: 64 bytes at superblock offset 0x88, NUL-padded.
+            last_mounted: read_path(buf, 1024 + 0x88, 64),
         });
     }
     // btrfs: "_BHRfS_M" at 0x10040; label: 256 bytes at superblock offset 0x12B;
@@ -185,6 +212,7 @@ pub fn identify(buf: &[u8]) -> Option<ProbedFs> {
             label: read_label(buf, 0x10000 + 0x12B, 256),
             used_bytes: used,
             encrypted: false,
+            last_mounted: None,
         });
     }
     None
@@ -306,6 +334,45 @@ pub fn probe_partition_path(dev_path: &str) -> Option<ProbedFs> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build an ext4 superblock with a given `s_last_mounted`.
+    fn ext_with_mount(mount: &str) -> Vec<u8> {
+        let mut buf = vec![0u8; PROBE_LEN];
+        buf[1080] = 0x53; // s_magic 0xEF53
+        buf[1081] = 0xEF;
+        let off = 1024 + 0x88;
+        buf[off..off + mount.len()].copy_from_slice(mount.as_bytes());
+        buf
+    }
+
+    /// The last mount point is what tells a Linux ROOT from a Linux DATA
+    /// volume, and nothing else on the volume does: both are ext4, and Ubuntu
+    /// gives both the same generic GPT type. The backup wizard picks the boot
+    /// partitions with it.
+    #[test]
+    fn ext_reports_where_it_was_last_mounted() {
+        assert_eq!(identify(&ext_with_mount("/")).unwrap().last_mounted.as_deref(), Some("/"));
+        assert_eq!(
+            identify(&ext_with_mount("/mnt/data")).unwrap().last_mounted.as_deref(),
+            Some("/mnt/data")
+        );
+        // Never mounted: the field is all zeros, and "no answer" must not read
+        // as "mounted at the root".
+        assert_eq!(identify(&ext_with_mount("")).unwrap().last_mounted, None);
+        // Junk that is not a path is not an answer either.
+        assert_eq!(identify(&ext_with_mount("garbage")).unwrap().last_mounted, None);
+    }
+
+    /// Only ext keeps this record — nothing may be invented for the others.
+    #[test]
+    fn other_filesystems_report_no_mount_point() {
+        let mut ntfs = vec![0u8; PROBE_LEN];
+        ntfs[3..11].copy_from_slice(b"NTFS    ");
+        assert_eq!(identify(&ntfs).unwrap().last_mounted, None);
+        let mut xfs = vec![0u8; PROBE_LEN];
+        xfs[0..4].copy_from_slice(b"XFSB");
+        assert_eq!(identify(&xfs).unwrap().last_mounted, None);
+    }
 
     #[test]
     fn detects_refs() {
