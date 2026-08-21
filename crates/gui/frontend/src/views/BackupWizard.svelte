@@ -440,15 +440,36 @@
       job.scheme.full_every_n = job.scheme.full_every_n || 3;
       job.scheme.keep_chains = job.scheme.keep_chains ?? 3;
     }
+    // The age box carries a DIFFERENT action in each mode — "начать цепочку
+    // заново" against "удалить цепочки" — so it is not carried across. A
+    // checkbox that stays ticked while its meaning changes underneath is worse
+    // than one the user has to tick again.
+    job.scheme.cleanup_older_than_days = null;
   }
 
   // A job saved before the modes existed can hold "only incremental versions",
   // which is one endless chain with nothing bounding it. That is the shape the
   // consolidation mode replaced, so the standard mode must not keep offering
   // it: normalise on the way in.
-  // Also covers switching the METHOD away from incremental: a differential
-  // job left with `only_incremental` would never roll its chain over either,
-  // and the engine reads that field whatever the method says.
+  /** Leaving the incremental method drops out of the consolidation mode, and
+   *  that mode owns three fields the standard one needs back.
+   *
+   *  Without this, picking "Дифференциальное" while consolidation was on left
+   *  `keep_chains` null and `cleanup_older_than_days` at 90 — so the standard
+   *  block came up with "хранить не более N цепочек" unticked and "удалять
+   *  цепочки старше 90 дней" ticked, the opposite of the defaults, and the
+   *  ticked one now meant DELETE where a moment ago it meant START OVER. */
+  function onMethodChange() {
+    if (job.scheme.method !== 'incremental' && job.scheme.rolling_incrementals !== null) {
+      setSchemeMode('standard');
+    }
+  }
+
+  // A job saved before the modes existed can hold "only incremental versions",
+  // which is one endless chain with nothing bounding it — the shape the
+  // consolidation mode replaced. Normalise it on the way in, whatever the
+  // method: a differential job left with the flag would never roll over
+  // either, and the engine reads it regardless of method.
   $effect(() => {
     if (!isConsolidation && job.scheme.only_incremental) {
       job.scheme.only_incremental = false;
@@ -463,8 +484,8 @@
     if (sourceReadonly) return; // fixed source on the "Параметры" screen
     if (!isBootableDisk(d)) return; // read-only for pure data disks
     if (isBootableCopy(d)) {
-      // Turn off: drop the boot partitions, keep whatever data volumes the user
-      // chose. The copy stays one image of this disk — it just will not boot.
+      // Turn off: drop the partitions a boot needs, keep the rest. The copy
+      // stays one image of this disk — it just stops promising a boot.
       for (const p of d.partitions) {
         const dev = partDevice(p);
         if (!dev || !isBootEssential(p)) continue;
@@ -479,10 +500,24 @@
       syncDiskSourceParts(d);
       return;
     }
-    // Turn on: include the boot-essential volumes (ESP + OS).
+    // Turn on: include EVERY volume of the disk that can be copied.
+    //
+    // Not "the boot-essential ones", because we cannot tell which those are.
+    // `has_os` is set by looking for `Windows\System32\ntoskrnl.exe`
+    // (`win_disks.rs`), so it answers "is Windows installed here" and nothing
+    // else — a Linux root, encrypted or not, is never recognised from Windows.
+    // On a Kubuntu disk that left the bootable copy holding the EFI partition
+    // and not the system (2026-08-21), which is not a bootable copy at all.
+    //
+    // Guessing harder (GPT type GUIDs, "encrypted so probably the root") only
+    // moves the guess around: Ubuntu writes the generic "Linux filesystem"
+    // type for data partitions too. So take everything and let the user drop
+    // what they know is data — the tooltip has always promised exactly that,
+    // and the cost of one extra partition is space, while the cost of one
+    // missing partition is a copy that will not boot.
     for (const p of d.partitions) {
       const dev = partDevice(p);
-      if (dev && isBootEssential(p) && !job.sources.includes(dev)) {
+      if (dev && !job.sources.includes(dev)) {
         job.sources = [...job.sources, dev];
         job.source_labels = [...job.source_labels, partLabel(p)];
       }
@@ -1285,6 +1320,14 @@
                     </div>
                   </div>
                 </div>
+                {#if isBootableCopy(d) && !d.partitions.some((p) => p.has_os)}
+                  <div class="boot-hint">
+                    Система на этом диске не опознана — Own Backup определяет только
+                    установленную Windows. В копию включены все разделы диска, чтобы
+                    ничего нужного для загрузки не потерялось. Разделы с данными можно
+                    снять, но <b>раздел с системой снимать нельзя</b> — без него копия не загрузится.
+                  </div>
+                {/if}
                 {#if encryptedForDisk(d).length > 0}
                   {@render pwPanel(encryptedForDisk(d), d.device_id === sharedFormDiskId, isBootableCopy(d))}
                 {/if}
@@ -1453,7 +1496,7 @@
           <div class="note">Копия открывается самой Windows двойным кликом и видна как обычный диск — даже без Own Backup. Инкрементные цепочки и полное удаление исключённых файлов (NTFS/ReFS). Сжатия нет — файл больше; на Linux открывается через qemu-nbd.</div>
         {/if}
         <div class="field-label mt">Метод резервного копирования:</div>
-        <select bind:value={job.scheme.method} class="wide">
+        <select bind:value={job.scheme.method} onchange={onMethodChange} class="wide">
           <option value="full">Полное</option>
           <option value="incremental">Инкрементное</option>
           <option value="differential">Дифференциальное</option>
@@ -1750,6 +1793,7 @@
   .chk.sub { margin-left: 26px; }
   .chk:has(input:disabled) { color: var(--text-muted); }
   .note.warn { color: #a06a10; background: rgba(251,188,5,.10); border-left: 3px solid rgba(251,188,5,.55); padding: 8px 12px; border-radius: 0 4px 4px 0; }
+  .boot-hint { margin-top: 10px; font-size: 12.5px; line-height: 1.5; color: #a06a10; background: rgba(251,188,5,.10); border-left: 3px solid rgba(251,188,5,.55); padding: 8px 12px; border-radius: 0 4px 4px 0; }
   .excl-list { border: 1px solid var(--border); border-radius: 5px; background: #fff; max-height: 260px; overflow: auto; margin-top: 12px; }
   .excl-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 14px; font-size: 13px; color: var(--head); border-bottom: 1px solid var(--border); }
   .x { background: none; border: none; color: var(--text-muted); font-size: 18px; cursor: pointer; line-height: 1; }
