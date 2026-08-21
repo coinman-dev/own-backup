@@ -36,7 +36,6 @@ use crate::exclusions::{ByteRanges, ZeroingBlockReader};
 use crate::exclusions_win::collect_excluded_ranges;
 use crate::gpt_writer::{disk_gpt_write_ops, gpt_write_ops, GptLayout, DEFAULT_PARTITION_OFFSET};
 use crate::raw_copy::copy_used_blocks;
-use crate::san_policy::SanPolicyGuard;
 use crate::sidecar::{
     read_embedded_sidecar, read_sidecar, sidecar_path_for,
     write_sidecar, ChainRole, Sidecar, SidecarInfo,
@@ -55,13 +54,6 @@ use crate::win_device::{normalize_device_path, WinRawDevice};
 pub const DEFAULT_BLOCK_SIZE: u32 = 1024 * 1024;
 
 const MIB: u64 = 1024 * 1024;
-
-/// Flush the image to disk every this many written bytes during the copy, so
-/// the OS write-back cache never grows huge and the final flush/detach is
-/// quick — the wait is spread across the honest progress bar instead of a long
-/// stall at 100 %. Especially visible for differencing (incremental) images,
-/// whose scattered writes otherwise all land at detach time.
-const FLUSH_INTERVAL_BYTES: u64 = 256 * MIB;
 
 /// Why there is no by-type breakdown behind the most ordinary copy of all: the
 /// file walk is the exclusion walk, and with no rules to apply nobody walks.
