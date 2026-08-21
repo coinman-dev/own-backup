@@ -220,22 +220,28 @@ Cargo workspace with crates:
 
 ## Key patterns
 
-- **The ~180 s detach stall (PnP volume-removal veto): a READ attach mounts
-  the image too, and our own leak detector is blind on an offline disk
-  (2026-08-21, the third recurrence — the first two "fixes" were aimed at the
-  wrong thing).** A volume surfacing from an attached image makes
-  `DetachVirtualDisk` wait out a fixed ~180 s veto. Only incrementals stalled,
-  and the reason is the one thing only an incremental does: it attaches the
-  PARENT image to read its GPT (`ImageReadSource::open`). That attach had no
-  offline discipline at all — `NO_DRIVE_LETTER` withholds the letter, NOT the
-  mount, so every incremental mounted the chain's FAT32/NTFS and left a volume
-  stack behind. It also detached before closing its own device handle (struct
-  fields drop in declaration order). Now: **every raw attach, read AND write,
-  goes through one disciplined helper** (`attach_for_raw_write` /
-  `ImageReadSource::open`) — SAN policy → attach → dismount whatever surfaced →
-  offline WHILE HOLDING the locks. `tests/attach_choke_point.rs` fails the
-  build if a second `AttachMode::RawWrite`/`RawRead` call site appears or the
-  handle/attachment field order is swapped.
+- **The ~180 s detach stall (PnP volume-removal veto): IMAGES ARE NEVER
+  ATTACHED FOR READING (2026-08-21, after three recurrences).** A volume
+  surfacing from an attached image makes `DetachVirtualDisk` wait out a fixed
+  ~180 s veto. `NO_DRIVE_LETTER` withholds the letter, NOT the mount, so every
+  attach mounts the image's filesystem. The WRITE path survives that because it
+  can take the disk offline; a READ attach cannot (the attribute IOCTL needs a
+  writable handle, which a read-only attached disk will not give), so the
+  volume comes straight back and the veto is unavoidable — measured on the
+  verify pass: `verify: image OK` 15:43:20, job "finished" 15:46:20.
+  So `AttachMode::RawRead` is GONE. Images are read in userspace with
+  `vhdx_bat::VhdxGuestReader`, which resolves the differencing chain from the
+  files — the same way qcow2 has always been read, and the same reader the
+  embedded sidecar always used. No device, no volume, nothing to detach, no
+  dependence on the SAN policy taking effect. Cost is a wash (~260 s per
+  3.4 GiB either way, measured 2026-08-08).
+  Writing still attaches, through the ONE disciplined helper
+  `attach_for_raw_write` (SAN policy → attach → force-dismount whatever
+  surfaced → offline). `tests/attach_choke_point.rs` fails the build if a
+  second `AttachMode::RawWrite` call site appears, if any read path starts
+  attaching again, or if the handle/attachment field order is swapped (fields
+  drop in declaration order — detaching a disk we still hold open is itself a
+  vetoed teardown).
   **Do not "verify" a teardown with `all_volume_roots_on_disk`:** it filters by
   `volume_extents`, which FAILS for the volumes of an offline disk — the check
   reports "no volumes" precisely when the disk is in the state we put it in.

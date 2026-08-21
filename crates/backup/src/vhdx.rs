@@ -178,6 +178,14 @@ fn open_vhdx(path: &Path, access: VIRTUAL_DISK_ACCESS_MASK, rw_depth: u32) -> Re
 }
 
 /// How to attach a VHDX.
+///
+/// There is deliberately NO raw read-only mode. Reading an image used to attach
+/// it that way, and it cost a fixed ~180 s per read: `NO_DRIVE_LETTER` does not
+/// stop Windows from mounting the image's filesystem, and a read attach has no
+/// writable handle with which to take the disk offline again, so the volume
+/// stack survives until `DetachVirtualDisk` waits out the PnP removal veto.
+/// Images are read in userspace instead — [`crate::vhdx_bat::VhdxGuestReader`]
+/// resolves the differencing chain from the files, exactly as qcow2 is read.
 pub enum AttachMode {
     /// Read-write, no drive letter — used while writing a backup into the image.
     /// Auto-detaches when the [`AttachedVhdx`] is dropped.
@@ -190,9 +198,6 @@ pub enum AttachMode {
     /// Survives process exit (`PERMANENT_LIFETIME`); detach explicitly via
     /// [`detach_vhdx`].
     ReadWriteMounted,
-    /// Read-only, no drive letter — for verify passes.
-    /// Auto-detaches when the [`AttachedVhdx`] is dropped.
-    RawRead,
 }
 
 /// An attached virtual disk. Detaches on drop unless attached with
@@ -253,16 +258,6 @@ pub fn attach_vhdx(path: &Path, mode: AttachMode) -> Result<AttachedVhdx> {
                 ATTACH_VIRTUAL_DISK_FLAG_PERMANENT_LIFETIME.0,
             ),
             false,
-        ),
-        AttachMode::RawRead => (
-            VIRTUAL_DISK_ACCESS_MASK(
-                VIRTUAL_DISK_ACCESS_ATTACH_RO.0 | VIRTUAL_DISK_ACCESS_GET_INFO.0,
-            ),
-            ATTACH_VIRTUAL_DISK_FLAG(
-                ATTACH_VIRTUAL_DISK_FLAG_READ_ONLY.0
-                    | ATTACH_VIRTUAL_DISK_FLAG_NO_DRIVE_LETTER.0,
-            ),
-            true,
         ),
     };
 

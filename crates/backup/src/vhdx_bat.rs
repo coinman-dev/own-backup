@@ -56,6 +56,42 @@ fn read_exact_at(file: &mut File, off: u64, buf: &mut [u8]) -> Result<()> {
     file.read_exact(buf).map_err(bad)
 }
 
+/// Refuse a VHDX whose log still holds entries to replay.
+///
+/// Reading a VHDX in userspace means reading the file as it lies. A non-zero
+/// `LogGuid` in the active header says the last writer did not close the file
+/// cleanly and its most recent metadata updates live in the log — only the
+/// Windows VHD driver can replay them, and reading past that would hand back a
+/// stale image while claiming it is the current one. Every image we close
+/// normally has `LogGuid = 0` (verified on real backups, 2026-08-21).
+fn ensure_log_is_empty(file: &mut File, path: &Path) -> Result<()> {
+    // Headers 1 and 2 at their spec-fixed offsets; the one with the higher
+    // sequence number is the active one.
+    let mut active: Option<(u64, [u8; 16])> = None;
+    for off in [64 * 1024u64, 128 * 1024] {
+        let mut h = [0u8; 80];
+        if read_exact_at(file, off, &mut h).is_err() || &h[0..4] != b"head" {
+            continue;
+        }
+        let seq = u64::from_le_bytes(h[8..16].try_into().unwrap());
+        let mut log_guid = [0u8; 16];
+        log_guid.copy_from_slice(&h[48..64]);
+        if active.map_or(true, |(s, _)| seq > s) {
+            active = Some((seq, log_guid));
+        }
+    }
+    match active {
+        Some((_, guid)) if guid != [0u8; 16] => Err(bad(format!(
+            "{} was not closed cleanly — its log still has entries to replay, which only \
+             Windows can do; attach the image once (mount it) and try again",
+            path.display()
+        ))),
+        // No readable header: leave it to the parsing below, which reports the
+        // structural problem in more useful terms.
+        _ => Ok(()),
+    }
+}
+
 /// The payload blocks a VHDX file carries itself (BAT state ≠ NOT_PRESENT).
 pub struct VhdxAllocation {
     /// Payload block size in bytes (1 MiB for images we create).
@@ -645,6 +681,7 @@ impl VhdxGuestReader {
         }
         let mut file =
             File::open(path).map_err(|e| bad(format!("open {}: {e}", path.display())))?;
+        ensure_log_is_empty(&mut file, path)?;
 
         let mut id = [0u8; 8];
         read_exact_at(&mut file, 0, &mut id)?;

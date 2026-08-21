@@ -252,18 +252,25 @@ impl ImageTarget {
 }
 
 /// Read source behind the same format switch, picked by the sidecar's
-/// `container` field: VHDX images are attached read-only and read as a raw
-/// disk; qcow2 images are read directly in userspace (no attach).
+/// `container` field. BOTH formats are read in userspace now — no attach.
+///
+/// Reading a VHDX used to attach it read-only, and that attach was the last
+/// place an image could still be mounted by Windows. `NO_DRIVE_LETTER`
+/// withholds the letter, not the mount: the volumes surfaced anyway, and the
+/// detach afterwards waited out the ~180 s PnP removal veto (measured
+/// 2026-08-21: `verify: image OK` at 15:43:20, the backup "finished" at
+/// 15:46:20). The write path can dismiss those volumes because it can take the
+/// disk offline; a read attach has no writable handle to do that with, so the
+/// volume comes straight back and the veto is unavoidable.
+///
+/// So the read path stopped attaching. `vhdx_bat::VhdxGuestReader` resolves the
+/// differencing chain from the files themselves — the same reader the embedded
+/// sidecar has always been read with — which makes VHDX reads work exactly like
+/// qcow2 reads: plain file I/O, no device, no volume, nothing to detach, and
+/// nothing that depends on a SAN policy taking effect. It is also what the
+/// measurements said to expect: ~260 s for 3.4 GiB either way (CLAUDE.md).
 pub(crate) enum ImageReadSource {
-    Vhdx {
-        /// DECLARED FIRST ON PURPOSE: struct fields drop in declaration order,
-        /// so this device handle closes BEFORE `_attached` detaches the disk.
-        /// The other order calls `DetachVirtualDisk` on a disk we ourselves
-        /// still hold open, which turns a clean teardown into a vetoed one.
-        dev: WinRawDevice,
-        /// Keeps the read-only attachment alive; detaches on drop.
-        _attached: crate::vhdx::AttachedVhdx,
-    },
+    Vhdx(Box<crate::vhdx_bat::VhdxGuestReader>),
     Qcow2(crate::qcow2::Qcow2RandomReader),
 }
 
@@ -271,34 +278,7 @@ impl ImageReadSource {
     pub(crate) fn open(image_path: &Path, container: &str) -> Result<Self> {
         match container {
             "qcow2" => Ok(Self::Qcow2(crate::qcow2::Qcow2RandomReader::open(image_path)?)),
-            "vhdx" => {
-                // A READ attach surfaces volumes exactly like a write attach
-                // does: `NO_DRIVE_LETTER` withholds the letter, not the mount.
-                // Reading a parent image is what an incremental does and a full
-                // never does — so this attach, left undisciplined, mounted the
-                // chain's filesystem on every incremental and left a volume
-                // stack behind for the next detach to pay for. Same discipline
-                // as the write path; raw reads work fine on an offline disk.
-                let san_guard = SanPolicyGuard::offline_all();
-                let attached = attach_vhdx(image_path, AttachMode::RawRead)?;
-                let dev = open_read_with_retry(attached.physical_path())?;
-                if let Some(disk) = disk_number_from_physical(attached.physical_path()) {
-                    tear_down_surfaced_volumes(disk, "at read attach");
-                }
-                // Session-only (the registry is not touched for a read) and
-                // through a SEPARATE write handle: setting a disk attribute
-                // needs write access, which `dev` — opened for reading — does
-                // not have. Best-effort: with the SAN policy applied the disk
-                // is already offline and this is a no-op; it matters only when
-                // that policy could not be set.
-                if let Ok(w) = WinRawDevice::open_write(attached.physical_path()) {
-                    if let Err(e) = w.set_offline_this_session() {
-                        debug!(error = %e, "could not take the image offline for reading");
-                    }
-                }
-                drop(san_guard);
-                Ok(Self::Vhdx { dev, _attached: attached })
-            }
+            "vhdx" => Ok(Self::Vhdx(Box::new(crate::vhdx_bat::VhdxGuestReader::open(image_path)?))),
             other => Err(OwnBackupError::ImageFormat(format!(
                 "unknown image container '{other}' in sidecar"
             ))),
@@ -307,7 +287,7 @@ impl ImageReadSource {
 
     pub(crate) fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
         match self {
-            Self::Vhdx { dev, .. } => dev.read_at(offset, buf),
+            Self::Vhdx(r) => r.read_at(offset, buf),
             Self::Qcow2(r) => r.read_at(offset, buf),
         }
     }
@@ -319,20 +299,6 @@ fn open_write_with_retry(path: &str) -> Result<WinRawDevice> {
     let mut last_err: Option<OwnBackupError> = None;
     for attempt in 0..20 {
         match WinRawDevice::open_write(path) {
-            Ok(dev) => return Ok(dev),
-            Err(e) => {
-                last_err = Some(e);
-                std::thread::sleep(Duration::from_millis(100 + 50 * attempt));
-            }
-        }
-    }
-    Err(last_err.unwrap_or_else(|| OwnBackupError::Device(format!("cannot open {path}"))))
-}
-
-fn open_read_with_retry(path: &str) -> Result<WinRawDevice> {
-    let mut last_err: Option<OwnBackupError> = None;
-    for attempt in 0..20 {
-        match WinRawDevice::open_read(path) {
             Ok(dev) => return Ok(dev),
             Err(e) => {
                 last_err = Some(e);
