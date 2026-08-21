@@ -113,12 +113,24 @@ impl Default for SchemeConfig {
         Self {
             method: "full".into(),
             only_incremental: false,
-            full_every_n: 5,
+            full_every_n: 3,
             cleanup_older_than_days: None,
             keep_chains: Some(3),
-            keep_first: true,
+            keep_first: false,
             rolling_incrementals: None,
         }
+    }
+}
+
+impl SchemeConfig {
+    /// True when the job runs the **consolidation** scheme: ONE chain, kept
+    /// short by folding its oldest increment into the base, instead of a new
+    /// chain every N versions.
+    ///
+    /// Derived rather than stored — `rolling_incrementals` being set IS the
+    /// mode — so there is no second field that can disagree with the first.
+    pub fn is_consolidation(&self) -> bool {
+        self.method == "incremental" && self.rolling_incrementals.is_some()
     }
 }
 
@@ -1060,9 +1072,50 @@ fn format_change_error(job: &Job, folder: &Path) -> Option<String> {
 /// chains for that volume's drive letter (the sidecars are the source of
 /// truth). This makes planning correct for multi-volume jobs — each volume has
 /// its own independent chain — without relying on a single run-history record.
+/// Is it time to abandon this chain and take a fresh full backup?
+///
+/// The two schemes answer differently, and neither answer is the other's:
+///
+/// - **Standard** counts versions: after N increments the chain is closed and
+///   a new one begins, so old chains age out whole. Counting uses
+///   `Chain::increments_ever`, not the files present — consolidation could
+///   have deleted some, and a count that ignored that would never reach N.
+/// - **Consolidation** keeps ONE chain and bounds it by folding, so no count
+///   ever ends it. What ends it is AGE: a base that has been rewritten every
+///   night for months is a single copy of the data with no independent second
+///   one, and one bad block in it takes every restore point at once. The new
+///   chain starts first and the old one is deleted only once the new full has
+///   succeeded (see `apply_retention`), so there is never a moment with no
+///   backup at all.
+fn should_start_new_chain(
+    job: &Job,
+    chain: &own_backup_backup::chains::Chain,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    if job.scheme.is_consolidation() {
+        return match job.scheme.cleanup_older_than_days {
+            Some(days) => chain.age_days(now) >= days as i64,
+            None => false,
+        };
+    }
+    !job.scheme.only_incremental && chain.increments_ever() >= job.scheme.full_every_n.max(1)
+}
+
 /// Any doubt (no chain, rollover reached, parent missing) resolves to a full.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))] // used by the Windows backup path
 pub fn plan_run_for_volume(job: &Job, folder: &Path, device: &str) -> RunPlan {
+    plan_run_for_volume_at(job, folder, device, chrono::Utc::now())
+}
+
+/// [`plan_run_for_volume`] with the clock passed in, so the age-based rollover
+/// can be tested without waiting three months.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn plan_run_for_volume_at(
+    job: &Job,
+    folder: &Path,
+    device: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> RunPlan {
     use own_backup_backup::chains::list_job_chains;
 
     let method: &'static str = match job.scheme.method.as_str() {
@@ -1095,14 +1148,12 @@ pub fn plan_run_for_volume(job: &Job, folder: &Path, device: &str) -> RunPlan {
         Some(img) => img.image_path.clone(),
         None => return RunPlan::full(),
     };
-    // Increments EVER held, not files present: a sliding window deletes the
-    // oldest increment after folding it into the base, and counting only what
-    // is left would stop the rollover firing and leave one base being
-    // rewritten forever.
+    // Increments EVER held, not files present: consolidation deletes the
+    // oldest increment after folding it into the base, so counting files would
+    // both stop the rollover firing and make the version number go backwards.
     let child_count = chain.increments_ever();
 
-    // "Full version after every N": start a fresh chain once it holds N children.
-    if !job.scheme.only_incremental && child_count >= job.scheme.full_every_n.max(1) {
+    if should_start_new_chain(job, &chain, now) {
         return RunPlan::full();
     }
 
@@ -1138,6 +1189,17 @@ pub fn plan_run_for_volume(job: &Job, folder: &Path, device: &str) -> RunPlan {
 /// parent missing) resolves to a full — a whole-disk full is always self-contained.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))] // used by the Windows backup path
 pub fn plan_run_for_disk(job: &Job, folder: &Path, disk_number: u32) -> RunPlan {
+    plan_run_for_disk_at(job, folder, disk_number, chrono::Utc::now())
+}
+
+/// [`plan_run_for_disk`] with the clock passed in (see the volume twin).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn plan_run_for_disk_at(
+    job: &Job,
+    folder: &Path,
+    disk_number: u32,
+    now: chrono::DateTime<chrono::Utc>,
+) -> RunPlan {
     use own_backup_backup::chains::list_job_chains;
 
     let method: &'static str = match job.scheme.method.as_str() {
@@ -1169,13 +1231,12 @@ pub fn plan_run_for_disk(job: &Job, folder: &Path, disk_number: u32) -> RunPlan 
         Some(img) => img.image_path.clone(),
         None => return RunPlan::full(),
     };
-    // Increments EVER held, not files present: a sliding window deletes the
-    // oldest increment after folding it into the base, and counting only what
-    // is left would stop the rollover firing and leave one base being
-    // rewritten forever.
+    // Increments EVER held, not files present: consolidation deletes the
+    // oldest increment after folding it into the base, so counting files would
+    // both stop the rollover firing and make the version number go backwards.
     let child_count = chain.increments_ever();
 
-    if !job.scheme.only_incremental && child_count >= job.scheme.full_every_n.max(1) {
+    if should_start_new_chain(job, &chain, now) {
         return RunPlan::full();
     }
 
@@ -1209,10 +1270,27 @@ pub fn plan_run_for_disk(job: &Job, folder: &Path, disk_number: u32) -> RunPlan 
 fn apply_retention(job: &Job, protected: &[(String, PathBuf)]) {
     use own_backup_backup::chains::{delete_chain, list_job_chains, plan_retention, RetentionRules};
 
-    let rules = RetentionRules {
-        keep_chains: job.scheme.keep_chains,
-        cleanup_older_than_days: job.scheme.cleanup_older_than_days,
-        keep_first: job.scheme.keep_first,
+    let rules = if job.scheme.is_consolidation() {
+        // Consolidation means ONE chain. Its age setting does not delete
+        // anything — it makes the planner START a new chain (see
+        // `should_start_new_chain`), and this is what then removes the old one.
+        //
+        // The ordering is the whole safety argument: `apply_retention` runs
+        // only after a fully successful run, and never touches the chain
+        // holding the image that run just wrote. So the old chain survives
+        // until the new full is on disk and complete, and there is no instant
+        // in which the data is unprotected.
+        RetentionRules {
+            keep_chains: Some(1),
+            cleanup_older_than_days: None,
+            keep_first: false,
+        }
+    } else {
+        RetentionRules {
+            keep_chains: job.scheme.keep_chains,
+            cleanup_older_than_days: job.scheme.cleanup_older_than_days,
+            keep_first: job.scheme.keep_first,
+        }
     };
     if rules.keep_chains.is_none() && rules.cleanup_older_than_days.is_none() {
         return;
@@ -2523,21 +2601,35 @@ mod tests {
         assert_eq!(plan_run_for_volume(&job, d, "C:"), RunPlan::full());
     }
 
-    /// A sliding window deletes increments; the rollover must still fire.
-    ///
-    /// Without the folded-in count the planner would see a chain that never
-    /// grows past the window, "full version after every N versions" would
-    /// never trigger again, and one base would be rewritten forever — the
-    /// single point of failure the window is supposed to be paired against.
-    #[test]
-    fn consolidated_increments_still_count_towards_the_rollover() {
-        use own_backup_backup::sidecar::{
-            read_sidecar, write_sidecar, ChainRole, SIDECAR_EXTENSION,
-        };
+    /// Helper: rewrite a base's sidecar with consolidation bookkeeping.
+    fn stamp_base(base: &Path, folded: u32, chain_started_at: Option<&str>) {
+        use own_backup_backup::sidecar::{read_sidecar, write_sidecar};
         use own_backup_backup::sidecar_path_for;
+        let mut sidecar = read_sidecar(&sidecar_path_for(base)).unwrap();
+        sidecar.info.consolidated_increments = folded;
+        sidecar.info.chain_started_at = chain_started_at.map(|s| s.to_string());
+        write_sidecar(
+            &sidecar_path_for(base),
+            &sidecar.info,
+            &sidecar.manifest,
+            &sidecar.checksums,
+        )
+        .unwrap();
+    }
+
+    fn at(rfc3339: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(rfc3339).unwrap().with_timezone(&chrono::Utc)
+    }
+
+    /// Standard mode counts VERSIONS, and consolidation deletes increment
+    /// files — so a job switched from consolidation back to standard must
+    /// still count the folded ones. Counting the files left would restart the
+    /// rollover from zero and stretch the chain far past N.
+    #[test]
+    fn folded_increments_still_count_towards_the_standard_rollover() {
+        use own_backup_backup::sidecar::ChainRole;
         let dir = tempfile::tempdir().unwrap();
         let d = dir.path();
-        let _ = SIDECAR_EXTENSION;
 
         let base_name = "job_C_full_20260101-000000.vhdx";
         put_real_image(d, base_name, ChainRole::Full, None, "job1", "2026-01-01T00:00:00Z");
@@ -2555,28 +2647,73 @@ mod tests {
         job.scheme.method = "incremental".into();
         job.scheme.only_incremental = false;
         job.scheme.full_every_n = 3;
-        job.scheme.rolling_incrementals = Some(1);
+        job.scheme.rolling_incrementals = None; // standard mode
 
-        // One increment on disk, none folded yet: keep going.
+        // One increment on disk, none folded: keep going.
         assert_eq!(plan_run_for_volume(&job, d, "C:").kind, "incremental");
 
-        // Two increments have since been folded into the base. Only one file
-        // remains, but the chain has held three versions — time for a full.
-        let base = d.join(base_name);
-        let mut sidecar = read_sidecar(&sidecar_path_for(&base)).unwrap();
-        sidecar.info.consolidated_increments = 2;
-        write_sidecar(
-            &sidecar_path_for(&base),
-            &sidecar.info,
-            &sidecar.manifest,
-            &sidecar.checksums,
-        )
-        .unwrap();
-
+        // Two more were folded into the base earlier. One file remains, but
+        // the chain has held three versions — time for a full.
+        stamp_base(&d.join(base_name), 2, None);
         assert_eq!(
             plan_run_for_volume(&job, d, "C:"),
             RunPlan::full(),
             "1 increment present + 2 folded in = 3 versions, so N=3 must roll over"
+        );
+    }
+
+    /// Consolidation mode keeps ONE chain, so no version count ever ends it.
+    /// Age does — and it keys on when the chain STARTED, which consolidation
+    /// moves out of the base's own `created_at`.
+    #[test]
+    fn consolidation_mode_rolls_over_by_age_not_by_count() {
+        use own_backup_backup::sidecar::ChainRole;
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+
+        let base_name = "job_C_full_20260401-000000.vhdx";
+        // The base was CONSOLIDATED on 1 April, but its chain began 1 January.
+        put_real_image(d, base_name, ChainRole::Full, None, "job1", "2026-04-01T00:00:00Z");
+        put_real_image(
+            d,
+            "job_C_inc_20260402-000000.avhdx",
+            ChainRole::Incremental,
+            Some(base_name),
+            "job1",
+            "2026-04-02T00:00:00Z",
+        );
+
+        let mut job = Job::default();
+        job.id = "job1".into();
+        job.scheme.method = "incremental".into();
+        job.scheme.rolling_incrementals = Some(3);
+        job.scheme.full_every_n = 1; // would fire instantly in standard mode
+        job.scheme.only_incremental = false;
+
+        // No age limit set: the chain lives on however many versions it holds.
+        job.scheme.cleanup_older_than_days = None;
+        stamp_base(&d.join(base_name), 40, Some("2026-01-01T00:00:00Z"));
+        assert_eq!(
+            plan_run_for_volume_at(&job, d, "C:", at("2026-04-03T00:00:00Z")).kind,
+            "incremental",
+            "40 folded versions must NOT end a consolidated chain"
+        );
+
+        // With a 90-day limit the chain is 92 days old — start a new one.
+        job.scheme.cleanup_older_than_days = Some(90);
+        assert_eq!(
+            plan_run_for_volume_at(&job, d, "C:", at("2026-04-03T00:00:00Z")),
+            RunPlan::full(),
+            "the chain began on 1 January, whatever the base's own date now says"
+        );
+
+        // The base's own date (1 April) is only two days old — reading THAT
+        // instead of the chain's start is the mistake this test exists for.
+        stamp_base(&d.join(base_name), 40, None);
+        assert_eq!(
+            plan_run_for_volume_at(&job, d, "C:", at("2026-04-03T00:00:00Z")).kind,
+            "incremental",
+            "without a chain stamp the base's own date is the honest fallback"
         );
     }
 

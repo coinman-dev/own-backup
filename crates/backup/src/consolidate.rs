@@ -107,6 +107,13 @@ struct Marker {
     /// counting the same fold twice.
     #[serde(default)]
     folded_before: u32,
+    /// When the chain was STARTED, carried for the same reason as
+    /// `folded_before`: the fold replaces the base's sidecar with the
+    /// increment's, and the increment knows nothing about the chain's birth.
+    /// Without this the base's `created_at` keeps moving forward and the chain
+    /// never grows old, so an age-based rule would never fire.
+    #[serde(default)]
+    chain_started_at: Option<String>,
 }
 
 /// Marker file for a given base image.
@@ -274,11 +281,17 @@ fn write_sidecars(image: &Path, sidecar: &Sidecar) -> Result<()> {
 /// `engine_win`, "Child sidecars carry the FULL state checksums"). After the
 /// fold the base holds exactly that state, so the increment's table describes
 /// it exactly. Only the four fields that say "I am a child" have to change.
-fn promote_base(base: &Path, mut sidecar: Sidecar, folded: u32) -> Result<()> {
+fn promote_base(
+    base: &Path,
+    mut sidecar: Sidecar,
+    folded: u32,
+    chain_started_at: Option<String>,
+) -> Result<()> {
     sidecar.info.image_file_name = file_name_of(base)?;
     sidecar.info.chain_role = ChainRole::Full;
     sidecar.info.parent_image_file_name = None;
     sidecar.info.consolidated_increments = folded;
+    sidecar.info.chain_started_at = chain_started_at;
     sidecar.manifest.backup_type = BackupType::Full;
     sidecar.manifest.parent_backup_id = None;
     write_sidecars(base, &sidecar)
@@ -334,6 +347,7 @@ fn execute(base: &Path, victim: &Path, next: Option<&Path>) -> Result<Consolidat
     watched.extend(next);
     ensure_idle(&watched)?;
 
+    let base_header = crate::sidecar::read_image_sidecar_header(base).ok();
     let mut marker = match read_marker(&marker_file) {
         // A marker naming a different increment means two different steps got
         // mixed up in one folder. Stop; a human should look.
@@ -352,10 +366,17 @@ fn execute(base: &Path, victim: &Path, next: Option<&Path>) -> Result<Consolidat
             victim: file_name_of(victim)?,
             next: next.map(file_name_of).transpose()?,
             merged: false,
-            // Read while the base is still describing itself.
-            folded_before: crate::sidecar::read_image_sidecar_header(base)
+            // Both read while the base is still describing itself. A base
+            // that has never been consolidated has no stamp, and its own
+            // creation time IS the chain's start — the same fallback
+            // `Chain::started_at` makes.
+            folded_before: base_header
+                .as_ref()
                 .map(|(info, _)| info.consolidated_increments)
                 .unwrap_or(0),
+            chain_started_at: base_header.as_ref().and_then(|(info, manifest)| {
+                info.chain_started_at.clone().or_else(|| Some(manifest.created_at.clone()))
+            }),
         },
     };
 
@@ -398,7 +419,12 @@ fn execute(base: &Path, victim: &Path, next: Option<&Path>) -> Result<Consolidat
         write_marker(&marker_file, &marker)?;
     }
 
-    promote_base(base, victim_sidecar, marker.folded_before + 1)?;
+    promote_base(
+        base,
+        victim_sidecar,
+        marker.folded_before + 1,
+        marker.chain_started_at.clone(),
+    )?;
 
     if let Some(next) = next {
         repoint_next(next, base, container)?;
@@ -729,6 +755,7 @@ mod tests {
             next: Some("j_C_inc_3.qcow2".into()),
             merged: true,
             folded_before: 0,
+            chain_started_at: Some("2026-01-01T00:00:00Z".into()),
         };
         write_marker(&marker_path(&base), &marker).unwrap();
         crate::qcow2::merge_child_into_parent(&base, &inc1).unwrap();
@@ -754,6 +781,7 @@ mod tests {
             next: None,
             merged: true,
             folded_before: 0,
+            chain_started_at: Some("2026-01-01T00:00:00Z".into()),
         };
         write_marker(&marker_path(&base), &marker).unwrap();
         assert_eq!(resume_pending(dir.path()).unwrap(), 1);

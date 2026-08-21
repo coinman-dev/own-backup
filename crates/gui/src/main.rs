@@ -21,7 +21,7 @@ use state::GuiState;
 /// hand-bumped tag stops being true the moment someone forgets: this one sat at
 /// "2026-08-01" through a week of handovers, and a log line reading it as a
 /// build date sent a diagnosis down the wrong path (2026-08-07).
-const BUILD_TAG: &str = "consolidation-window";
+const BUILD_TAG: &str = "scheme-two-modes";
 
 const ROTATE_AT: u64 = 4 * 1024 * 1024;
 

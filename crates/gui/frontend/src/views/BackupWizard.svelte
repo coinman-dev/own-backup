@@ -360,6 +360,53 @@
     job.disk_source = { ...job.disk_source, parts };
   }
 
+  // ---- Scheme mode: chains that roll over, or one chain that consolidates --
+  //
+  // The mode is DERIVED, not stored: `rolling_incrementals` being set is what
+  // makes the engine consolidate, so a separate "mode" field could only ever
+  // disagree with it. Switching mode rewrites the fields the other mode owns,
+  // so a job never carries settings that its mode ignores but the engine still
+  // reads — the way `only_incremental` used to quietly outlive the radio that
+  // set it.
+  //
+  // `cleanup_older_than_days` is deliberately shared: it means "delete chains
+  // older than X" in the standard mode and "start the chain over after X" in
+  // consolidation, and both are the same user intent — do not let this archive
+  // get older than X.
+  const isConsolidation = $derived(
+    job.scheme.method === 'incremental' && job.scheme.rolling_incrementals !== null,
+  );
+
+  function setSchemeMode(mode: 'standard' | 'consolidation') {
+    if (mode === 'consolidation') {
+      job.scheme.rolling_incrementals = job.scheme.rolling_incrementals ?? 3;
+      // One chain: it never rolls over on a version count, and there is no
+      // second chain for "keep N chains" to count.
+      job.scheme.only_incremental = true;
+      job.scheme.keep_chains = null;
+      job.scheme.keep_first = false;
+    } else {
+      job.scheme.rolling_incrementals = null;
+      job.scheme.only_incremental = false;
+      job.scheme.full_every_n = job.scheme.full_every_n || 3;
+      job.scheme.keep_chains = job.scheme.keep_chains ?? 3;
+    }
+  }
+
+  // A job saved before the modes existed can hold "only incremental versions",
+  // which is one endless chain with nothing bounding it. That is the shape the
+  // consolidation mode replaced, so the standard mode must not keep offering
+  // it: normalise on the way in.
+  // Also covers switching the METHOD away from incremental: a differential
+  // job left with `only_incremental` would never roll its chain over either,
+  // and the engine reads that field whatever the method says.
+  $effect(() => {
+    if (!isConsolidation && job.scheme.only_incremental) {
+      job.scheme.only_incremental = false;
+      job.scheme.full_every_n = job.scheme.full_every_n || 3;
+    }
+  });
+
   // Toggle the disk's "bootable copy": capture the GPT layout + boot partitions
   // so the disk can be restored bootable to a new SSD. Independent of which
   // data volumes are selected; disabled for non-bootable disks.
@@ -1350,29 +1397,44 @@
           <option value="differential">Дифференциальное</option>
         </select>
         {#if job.scheme.method === 'incremental'}
-          <div class="note">Каждый запуск сохраняет только изменения относительно предыдущей версии (цепочка полная → И1 → И2 …).</div>
+          <div class="note">Каждый запуск сохраняет только изменения относительно предыдущей версии (цепочка: полная → И1 → И2 …).</div>
         {:else if job.scheme.method === 'differential'}
-          <div class="note">Каждый запуск сохраняет изменения относительно полной копии (полная → Д1, Д2 …).</div>
+          <div class="note">Каждый запуск сохраняет изменения относительно полной копии (полная → Д1, Д2 …). Объединение для этого метода недоступно: все версии опираются прямо на полную копию, и сдвинуть её нельзя, не сделав остальные неверными.</div>
         {/if}
-        {#if job.scheme.method !== 'full'}
-          <label class="radio blk"><input type="radio" checked={job.scheme.only_incremental} onchange={() => (job.scheme.only_incremental = true)} /> Только инкрементные версии после первой полной</label>
-          <label class="radio blk"><input type="radio" checked={!job.scheme.only_incremental} onchange={() => (job.scheme.only_incremental = false)} /> Полная версия после каждых <input type="number" min="1" bind:value={job.scheme.full_every_n} class="num" /> версий</label>
-        {/if}
+
         {#if job.scheme.method === 'incremental'}
-          <label class="chk"><input type="checkbox" checked={job.scheme.rolling_incrementals !== null} onchange={(e) => (job.scheme.rolling_incrementals = (e.target as HTMLInputElement).checked ? 3 : null)} /> Хранить не более <input type="number" min="1" max="64" value={job.scheme.rolling_incrementals ?? 3} oninput={(e) => (job.scheme.rolling_incrementals = +(e.target as HTMLInputElement).value)} class="num" disabled={job.scheme.rolling_incrementals === null} /> инкрементов, старые вливать в полную копию</label>
-          {#if job.scheme.rolling_incrementals !== null}
-            <div class="note">Когда инкрементов становится больше, самый старый вливается в полную копию, а следующий начинает опираться прямо на неё. Место экономится без создания новой полной копии с нуля, а восстановление идёт по короткой цепочке.<br />Точек восстановления остаётся столько же — {job.scheme.rolling_incrementals + 1} (полная плюс {job.scheme.rolling_incrementals}). Но <b>полная копия перестаёт быть копией того дня, когда её сняли</b>: она сдвигается вперёд, на день влитого инкремента. Откатиться глубже уже нельзя.
-            {#if job.scheme.only_incremental}
-              <br /><b>Внимание:</b> вместе с «только инкрементные версии» одна и та же полная копия будет переписываться бесконечно — других копий этих данных не останется. Надёжнее выбрать «Полная версия после каждых N версий»: тогда цепочки будут сменяться, а старая доживать по правилам очистки.
-            {/if}
-            </div>
+          <div class="field-label mt">Режим хранения:</div>
+          <label class="radio blk"><input type="radio" checked={!isConsolidation} onchange={() => setSchemeMode('standard')} /> Стандартный — цепочки сменяются</label>
+          <label class="radio blk"><input type="radio" checked={isConsolidation} onchange={() => setSchemeMode('consolidation')} /> Объединение (консолидация) — одна цепочка</label>
+        {/if}
+
+        {#if job.scheme.method !== 'full' && !isConsolidation}
+          <!-- Стандартный режим: цепочка растёт до предела, затем начинается новая. -->
+          <div class="field-label mt">Длина цепочки:</div>
+          <label class="chk-line">Делать не более <input type="number" min="1" max="64" bind:value={job.scheme.full_every_n} class="num" /> {job.scheme.method === 'differential' ? 'дифференциальных' : 'инкрементных'} версий в цепочке</label>
+          <div class="note">Когда предел достигнут, следующий запуск снимает новую полную копию и начинает новую цепочку. Старые цепочки остаются целыми и удаляются по правилам ниже.<br />Точек восстановления: до {job.scheme.full_every_n + 1} в каждой цепочке.</div>
+
+          <div class="field-label mt">Правила очистки старых цепочек:</div>
+          <label class="chk"><input type="checkbox" checked={job.scheme.keep_chains !== null} onchange={(e) => (job.scheme.keep_chains = (e.target as HTMLInputElement).checked ? 3 : null)} /> Хранить не более <input type="number" min="1" value={job.scheme.keep_chains ?? 3} oninput={(e) => (job.scheme.keep_chains = +(e.target as HTMLInputElement).value)} class="num" disabled={job.scheme.keep_chains === null} /> последних цепочек</label>
+          <label class="chk"><input type="checkbox" checked={job.scheme.cleanup_older_than_days !== null} onchange={(e) => (job.scheme.cleanup_older_than_days = (e.target as HTMLInputElement).checked ? 90 : null)} /> Удалять цепочки старше <input type="number" min="1" value={job.scheme.cleanup_older_than_days ?? 90} oninput={(e) => (job.scheme.cleanup_older_than_days = +(e.target as HTMLInputElement).value)} class="num" disabled={job.scheme.cleanup_older_than_days === null} /> дней</label>
+          <label class="chk sub"><input type="checkbox" bind:checked={job.scheme.keep_first} disabled={job.scheme.cleanup_older_than_days === null} /> Не удалять первую (самую старую) цепочку</label>
+          <div class="note">Цепочка удаляется целиком — полная копия вместе с её версиями — и только после успешного завершения очередного копирования. Цепочка, к которой относится свежая копия, не удаляется никогда.</div>
+        {/if}
+
+        {#if isConsolidation}
+          <!-- Консолидация: цепочка одна, её длину держит объединение. -->
+          <div class="field-label mt">Длина цепочки:</div>
+          <label class="chk-line">Делать объединение после <input type="number" min="1" max="64" value={job.scheme.rolling_incrementals ?? 3} oninput={(e) => (job.scheme.rolling_incrementals = +(e.target as HTMLInputElement).value)} class="num" /> инкрементных версий</label>
+          <div class="note">Новая полная копия не создаётся: когда версий становится больше предела, самая старая вливается в полную копию, а следующая начинает опираться прямо на неё. Место экономится, а восстановление идёт по короткой цепочке.<br />Точек восстановления: {(job.scheme.rolling_incrementals ?? 3) + 1} — полная плюс {job.scheme.rolling_incrementals ?? 3}. Но <b>полная копия перестаёт быть копией того дня, когда её сняли</b>: она сдвигается вперёд, на день влитой версии, и откатиться глубже уже нельзя.</div>
+
+          <div class="field-label mt">Обновление цепочки:</div>
+          <label class="chk"><input type="checkbox" checked={job.scheme.cleanup_older_than_days !== null} onchange={(e) => (job.scheme.cleanup_older_than_days = (e.target as HTMLInputElement).checked ? 90 : null)} /> Начинать цепочку заново, когда ей больше <input type="number" min="1" value={job.scheme.cleanup_older_than_days ?? 90} oninput={(e) => (job.scheme.cleanup_older_than_days = +(e.target as HTMLInputElement).value)} class="num" disabled={job.scheme.cleanup_older_than_days === null} /> дней</label>
+          {#if job.scheme.cleanup_older_than_days !== null}
+            <div class="note">Снимается новая полная копия, и только после её успешного завершения старая цепочка удаляется — момента без резервной копии не бывает. Считается возраст цепочки с её начала, а не дата полной копии: объединение сдвигает её вперёд каждый раз.</div>
+          {:else}
+            <div class="note warn">Цепочка не будет обновляться никогда: одна и та же полная копия останется единственным экземпляром этих данных и будет переписываться при каждом объединении. Один сбойный блок в ней заберёт сразу все точки восстановления. Рекомендуется включить обновление.</div>
           {/if}
         {/if}
-        <div class="field-label mt">Правила очистки старых версий:</div>
-        <label class="chk"><input type="checkbox" checked={job.scheme.keep_chains !== null} onchange={(e) => (job.scheme.keep_chains = (e.target as HTMLInputElement).checked ? 3 : null)} /> Хранить не более <input type="number" min="1" value={job.scheme.keep_chains ?? 3} oninput={(e) => (job.scheme.keep_chains = +(e.target as HTMLInputElement).value)} class="num" disabled={job.scheme.keep_chains === null} /> последних цепочек</label>
-        <label class="chk"><input type="checkbox" checked={job.scheme.cleanup_older_than_days !== null} onchange={(e) => (job.scheme.cleanup_older_than_days = (e.target as HTMLInputElement).checked ? 90 : null)} /> Удалять цепочки старше <input type="number" min="1" value={job.scheme.cleanup_older_than_days ?? 90} oninput={(e) => (job.scheme.cleanup_older_than_days = +(e.target as HTMLInputElement).value)} class="num" disabled={job.scheme.cleanup_older_than_days === null} /> дней</label>
-        <label class="chk"><input type="checkbox" bind:checked={job.scheme.keep_first} /> Не удалять первую (самую старую) цепочку</label>
-        <div class="note">Цепочка удаляется целиком (полная копия вместе с её инкрементами) после успешного завершения очередного копирования. Цепочка, к которой относится свежая копия, не удаляется никогда.</div>
       {/if}
 
       <!-- exclusions -->
@@ -1619,6 +1681,13 @@
   .excl-tab { padding: 8px 2px 10px; background: none; border: none; border-bottom: 2px solid transparent; color: var(--text-muted); font-size: 13px; font-weight: 600; font-family: var(--font); cursor: pointer; }
   .excl-tab.active { color: var(--head); border-bottom-color: var(--primary); }
   .note.sub { margin-top: 10px; }
+  /* A line of prose that happens to contain a number field — reads as a
+     sentence, not as a labelled input. */
+  .chk-line { display: flex; align-items: center; font-size: 14px; color: var(--head); }
+  /* A checkbox that only makes sense under the one above it. */
+  .chk.sub { margin-left: 26px; }
+  .chk:has(input:disabled) { color: var(--text-muted); }
+  .note.warn { color: #a06a10; background: rgba(251,188,5,.10); border-left: 3px solid rgba(251,188,5,.55); padding: 8px 12px; border-radius: 0 4px 4px 0; }
   .excl-list { border: 1px solid var(--border); border-radius: 5px; background: #fff; max-height: 260px; overflow: auto; margin-top: 12px; }
   .excl-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 14px; font-size: 13px; color: var(--head); border-bottom: 1px solid var(--border); }
   .x { background: none; border: none; color: var(--text-muted); font-size: 18px; cursor: pointer; line-height: 1; }

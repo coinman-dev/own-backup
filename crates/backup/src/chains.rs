@@ -39,6 +39,9 @@ pub struct ChainImage {
     /// after every N versions" keeps counting versions that no longer exist as
     /// files — see [`crate::sidecar::SidecarInfo::consolidated_increments`].
     pub consolidated_increments: u32,
+    /// When the chain this image belongs to was started (base only, `None`
+    /// until the base has been consolidated at least once).
+    pub chain_started_at: Option<String>,
 }
 
 /// A full backup with all images depending on it, oldest first.
@@ -56,6 +59,30 @@ impl Chain {
     pub fn increments_ever(&self) -> u32 {
         let present = self.images.len().saturating_sub(1) as u32;
         present + self.images.first().map_or(0, |i| i.consolidated_increments)
+    }
+
+    /// When this chain was STARTED — the day its full backup was taken, even
+    /// if consolidation has since moved that image forward in time.
+    ///
+    /// Falls back to the base's own `created_at`, which is exactly right for a
+    /// chain that has never been consolidated (including every chain written
+    /// before the stamp existed).
+    pub fn started_at(&self) -> &str {
+        match self.images.first() {
+            Some(base) => base.chain_started_at.as_deref().unwrap_or(&base.created_at),
+            None => "",
+        }
+    }
+
+    /// Whole days between the chain's start and `now`; 0 if the stamp will not
+    /// parse (a chain we cannot date is never treated as old — the age rule
+    /// starts a NEW full backup, and doing that on unreadable metadata would
+    /// be churn, not safety).
+    pub fn age_days(&self, now: chrono::DateTime<chrono::Utc>) -> i64 {
+        match chrono::DateTime::parse_from_rfc3339(self.started_at()) {
+            Ok(started) => (now - started.with_timezone(&chrono::Utc)).num_days(),
+            Err(_) => 0,
+        }
     }
 
     /// Creation time of the chain's newest image (age-based retention keys on
@@ -133,6 +160,7 @@ pub fn list_job_chains(folder: &Path, job_id: &str) -> Result<Vec<Chain>> {
             created_at: manifest.created_at,
             parent_file_name: info.parent_image_file_name,
             consolidated_increments: info.consolidated_increments,
+            chain_started_at: info.chain_started_at,
         });
     }
 
@@ -490,6 +518,7 @@ mod tests {
                     created_at: s.to_string(),
                     parent_file_name: None,
                     consolidated_increments: 0,
+                    chain_started_at: None,
                 }],
             })
             .collect()

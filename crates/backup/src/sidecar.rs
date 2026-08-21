@@ -122,6 +122,19 @@ pub struct SidecarInfo {
     /// self-describing when the database is gone.
     #[serde(default)]
     pub consolidated_increments: u32,
+    /// When this image's CHAIN was started, not when this image was written.
+    ///
+    /// Only meaningful on a base, and it exists because consolidation moves
+    /// the base's `created_at` forward — the base stops being the copy of the
+    /// day it was taken. Anything asking "how old is this chain" would then
+    /// see a chain that never ages, and an age-based rule would never fire.
+    ///
+    /// `None` on every image written before this existed, and on a full that
+    /// has never been consolidated — in both cases the base's own `created_at`
+    /// is the honest answer, which is what [`crate::chains::Chain::started_at`]
+    /// falls back to.
+    #[serde(default)]
+    pub chain_started_at: Option<String>,
     /// Headers of the encrypted containers this image holds, one per partition
     /// that was decrypted for the copy (D19).
     ///
@@ -150,6 +163,7 @@ impl SidecarInfo {
             excluded_bytes: 0,
             filesystem: None,
             consolidated_increments: 0,
+            chain_started_at: None,
             luks_headers: Vec::new(),
         }
     }
@@ -175,6 +189,7 @@ impl SidecarInfo {
             excluded_bytes: 0,
             filesystem: None,
             consolidated_increments: 0,
+            chain_started_at: None,
             luks_headers: Vec::new(),
         }
     }
