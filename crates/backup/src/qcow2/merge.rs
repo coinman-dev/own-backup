@@ -6,8 +6,9 @@
 //! excluded files into a raw overlay, and the touched blocks are folded back in
 //! here — exactly as qemu would: a compressed cluster is read-only, so writing a
 //! guest cluster **appends a new host cluster and repoints its L2 entry**; the
-//! old cluster is left as dead space (a benign `qemu-img check` "leaked cluster"
-//! warning). Untouched data clusters keep their original host offsets, so no full
+//! old cluster is left as dead space — committed with refcount 0, so it reads as
+//! free rather than leaked (`qemu-img check`: "No errors were found"). Untouched
+//! data clusters keep their original host offsets, so no full
 //! rewrite happens — the file grows only by the touched clusters plus fresh
 //! metadata.
 //!
@@ -157,6 +158,29 @@ impl Qcow2InPlaceMerge {
         self.virtual_size
     }
 
+    pub fn total_guest_clusters(&self) -> u64 {
+        self.total_guest_clusters
+    }
+
+    /// True when this image stores compressed clusters as **zstd** (the
+    /// `compression_type` incompatible feature). Grafting between images that
+    /// disagree is refused: a zstd payload copied into an image whose header
+    /// says "deflate" decodes as garbage, and nothing would notice until a
+    /// restore.
+    pub fn is_zstd(&self) -> bool {
+        self.zstd_level.is_some()
+    }
+
+    /// What this image itself says about a guest cluster (no backing-file
+    /// fall-through). Consolidation asks before grafting, to count the space
+    /// the old cluster is about to stop being referenced from.
+    pub fn descriptor(&self, index: u64) -> Result<ClusterDescriptor> {
+        match self.l2.get(&index) {
+            None => Ok(ClusterDescriptor::Unallocated),
+            Some(&entry) => decode_l2_entry(entry, self.cluster_bits),
+        }
+    }
+
     fn pad(&mut self) -> Result<()> {
         let rem = self.append_offset % self.cluster_size;
         if rem != 0 {
@@ -216,6 +240,76 @@ impl Qcow2InPlaceMerge {
         self.file.write_all(data)?;
         self.append_offset += self.cluster_size;
         self.l2.insert(index, OFLAG_COPIED | host_offset);
+        Ok(())
+    }
+
+    // --- Grafting: copy clusters in from another image of the same chain ---
+    //
+    // Consolidation folds a whole increment into its base, and unlike true
+    // removal it must not re-encode: the child's clusters are already zstd
+    // streams at the same level, so they are copied byte-for-byte. Compressed
+    // grafts are also **packed** byte-to-byte, exactly as the write-once
+    // writer packs them. `write_cluster` gives every compressed cluster a host
+    // cluster of its own, which is fine for the handful true removal touches
+    // and ruinous here: a 2 GiB increment would cost the base 64 KiB per
+    // cluster — its uncompressed size — and the format's whole point with it.
+
+    fn graft_index_check(&mut self, index: u64) -> Result<()> {
+        if index >= self.total_guest_clusters {
+            return Err(bad(format!("cluster {index} beyond virtual disk")));
+        }
+        self.written = true;
+        Ok(())
+    }
+
+    /// Graft a compressed cluster verbatim. `payload` is the child's own
+    /// compressed stream, as read from its host offset.
+    pub fn graft_compressed(&mut self, index: u64, payload: &[u8]) -> Result<()> {
+        self.graft_index_check(index)?;
+        if payload.is_empty() {
+            return Err(bad(format!("empty compressed payload for cluster {index}")));
+        }
+        let host_offset = self.append_offset;
+        let entry =
+            encode_compressed_l2_entry(host_offset, payload.len() as u64, self.cluster_bits)?;
+        self.file.seek(SeekFrom::Start(host_offset))?;
+        self.file.write_all(payload)?;
+        self.append_offset += payload.len() as u64;
+        self.l2.insert(index, entry);
+        Ok(())
+    }
+
+    /// Graft an uncompressed (incompressible) cluster: a whole host cluster,
+    /// so the append point is aligned first.
+    pub fn graft_raw(&mut self, index: u64, data: &[u8]) -> Result<()> {
+        self.graft_index_check(index)?;
+        if data.len() as u64 != self.cluster_size {
+            return Err(bad(format!(
+                "raw cluster data is {} bytes, expected {}",
+                data.len(),
+                self.cluster_size
+            )));
+        }
+        self.pad()?;
+        let host_offset = self.append_offset;
+        self.file.seek(SeekFrom::Start(host_offset))?;
+        self.file.write_all(data)?;
+        self.append_offset += self.cluster_size;
+        self.l2.insert(index, OFLAG_COPIED | host_offset);
+        Ok(())
+    }
+
+    /// Graft an explicit zero cluster — the child said "zeros here", which
+    /// must override whatever the base holds. Same rule as `write_cluster`:
+    /// shadow the backing file with an explicit zero entry when there is one,
+    /// otherwise drop the entry (unallocated reads as zeros).
+    pub fn graft_zero(&mut self, index: u64) -> Result<()> {
+        self.graft_index_check(index)?;
+        if self.has_backing {
+            self.l2.insert(index, super::OFLAG_ZERO);
+        } else {
+            self.l2.remove(&index);
+        }
         Ok(())
     }
 

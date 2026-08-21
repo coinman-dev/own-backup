@@ -26,7 +26,9 @@ use windows::Win32::Storage::Vhd::{
     CREATE_VIRTUAL_DISK_FLAG_NONE, CREATE_VIRTUAL_DISK_PARAMETERS,
     CREATE_VIRTUAL_DISK_VERSION_2, DETACH_VIRTUAL_DISK_FLAG_NONE,
     MERGE_VIRTUAL_DISK_FLAG_NONE, MERGE_VIRTUAL_DISK_PARAMETERS, MERGE_VIRTUAL_DISK_VERSION_1,
-    OPEN_VIRTUAL_DISK_FLAG_NONE, OPEN_VIRTUAL_DISK_PARAMETERS, OPEN_VIRTUAL_DISK_VERSION_1,
+    OPEN_VIRTUAL_DISK_FLAG_NONE, OPEN_VIRTUAL_DISK_FLAG_NO_PARENTS,
+    OPEN_VIRTUAL_DISK_PARAMETERS, OPEN_VIRTUAL_DISK_VERSION_1, OPEN_VIRTUAL_DISK_VERSION_2,
+    SetVirtualDiskInformation, SET_VIRTUAL_DISK_INFO, SET_VIRTUAL_DISK_INFO_PARENT_PATH_WITH_DEPTH,
     VIRTUAL_DISK_ACCESS_MASK, VIRTUAL_DISK_ACCESS_ATTACH_RO, VIRTUAL_DISK_ACCESS_ATTACH_RW,
     VIRTUAL_DISK_ACCESS_DETACH, VIRTUAL_DISK_ACCESS_GET_INFO, VIRTUAL_DISK_ACCESS_METAOPS,
     VIRTUAL_DISK_ACCESS_NONE, VIRTUAL_STORAGE_TYPE, VIRTUAL_STORAGE_TYPE_DEVICE_VHDX,
@@ -338,5 +340,84 @@ pub fn merge_into_parent(child: &Path) -> Result<()> {
     let _ = unsafe { CloseHandle(handle) };
     result?;
     info!(child = %child.display(), "Differencing VHDX merged into parent");
+    Ok(())
+}
+
+/// Point a differencing VHDX at a different parent file.
+///
+/// This is the other half of consolidation, and `MergeVirtualDisk` is explicit
+/// that it is ours to do: it "will not delete any disks that are not valid, or
+/// perform any automatic differencing relationship reconnections", and "if a
+/// merge operation is performed on a nonleaf node of a differencing disk, it is
+/// the responsibility of the caller to fix up the parent information for the
+/// child nodes". Folding INC1 into the base rewrites the base, whose
+/// DataWriteGuid then no longer matches what INC2 recorded when it was
+/// created — so without this call the chain stops opening at all.
+///
+/// The identity is not ours to compute: "setting the parent information will
+/// also cause the child's parent GUID and Timestamp fields to be updated", so
+/// the API re-stamps the linkage from the parent it resolves. Which is why the
+/// call fails outright if `parent` cannot be resolved — that is the guard
+/// against silently linking a child to nothing.
+///
+/// Open flags follow Microsoft's own `SetVirtualDiskInformation.cpp` sample
+/// rather than the function's reference page: the page still asks for
+/// `VIRTUAL_DISK_ACCESS_METAOPS`, but a version-2 open accepts only
+/// `VIRTUAL_DISK_ACCESS_NONE`, and the chain must NOT be opened along with the
+/// child (`NO_PARENTS`) — at this point it is broken, which is the whole
+/// reason we are here.
+pub fn set_parent_path(child: &Path, parent: &Path) -> Result<()> {
+    if !parent.exists() {
+        return Err(OwnBackupError::Vhdx(format!(
+            "new parent {} does not exist — refusing to repoint {}",
+            parent.display(),
+            child.display()
+        )));
+    }
+    let child_wide = to_wide(path_str(child)?);
+    let parent_wide = to_wide(path_str(parent)?);
+    let storage_type = vhdx_storage_type();
+
+    let mut params = OPEN_VIRTUAL_DISK_PARAMETERS::default();
+    params.Version = OPEN_VIRTUAL_DISK_VERSION_2;
+    // Not a "GetInfoOnly" handle: we are here to alter the file.
+    params.Anonymous.Version2.GetInfoOnly = false.into();
+
+    let mut handle = HANDLE::default();
+    // SAFETY: all pointers valid for the duration of the call.
+    let err = unsafe {
+        OpenVirtualDisk(
+            &storage_type,
+            PCWSTR(child_wide.as_ptr()),
+            VIRTUAL_DISK_ACCESS_NONE,
+            OPEN_VIRTUAL_DISK_FLAG_NO_PARENTS,
+            Some(&params),
+            &mut handle,
+        )
+    };
+    check(err, &format!("OpenVirtualDisk(no-parents {})", child.display()))?;
+
+    let mut info = SET_VIRTUAL_DISK_INFO::default();
+    info.Version = SET_VIRTUAL_DISK_INFO_PARENT_PATH_WITH_DEPTH;
+    // Depth counts from the leaf, which is depth 1 — so the child's immediate
+    // parent is what we are setting.
+    info.Anonymous.ParentPathWithDepthInfo.ChildDepth = 1;
+    info.Anonymous.ParentPathWithDepthInfo.ParentFilePath = PCWSTR(parent_wide.as_ptr());
+
+    // SAFETY: handle owned here; the path buffer outlives the call.
+    let err = unsafe { SetVirtualDiskInformation(handle, &info) };
+    let result = check(
+        err,
+        &format!("SetVirtualDiskInformation(parent {} -> {})", child.display(), parent.display()),
+    );
+    // SAFETY: handle owned here, closed exactly once.
+    let _ = unsafe { CloseHandle(handle) };
+    result?;
+
+    info!(
+        child = %child.display(),
+        parent = %parent.display(),
+        "Differencing VHDX repointed at a new parent"
+    );
     Ok(())
 }

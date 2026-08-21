@@ -602,3 +602,99 @@ fn merge_spans_multiple_l2_tables_and_repeats() {
         qemu_validate(&path, virtual_size, &expected);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Consolidation: folding a child into its backing file
+// ---------------------------------------------------------------------------
+
+/// The sliding window's one step, validated by qemu itself: build
+/// base ← inc1 ← inc2, fold inc1 into the base, repoint inc2, and check that
+/// qemu reads the shortened chain exactly as it read the long one.
+///
+/// This is the acceptance that matters. Our own reader agreeing with our own
+/// writer proves nothing about a format we do not own; `qemu-img convert`
+/// walking the repointed chain does.
+#[test]
+fn qemu_validates_a_consolidated_chain() {
+    if !qemu_img_available() {
+        eprintln!("qemu-img not found — skipping conformance test");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    if !qemu_supports_zstd(dir.path()) {
+        eprintln!("qemu-img built without zstd — skipping consolidation conformance");
+        return;
+    }
+    let virtual_size = 8 * 1024 * 1024u64;
+
+    // Base holds 0..3; inc1 overrides 1 and adds 4; inc2 overrides 4 and adds 5.
+    let base = write_image_file(
+        dir.path(),
+        "base.qcow2",
+        virtual_size,
+        None,
+        &[
+            (0, text_cluster(0x10)),
+            (1, text_cluster(0x11)),
+            (2, noise_cluster(7)),
+            (3, text_cluster(0x13)),
+        ],
+    );
+    let inc1 = write_image_file(
+        dir.path(),
+        "inc1.qcow2",
+        virtual_size,
+        Some("base.qcow2"),
+        &[(1, text_cluster(0x21)), (4, noise_cluster(8))],
+    );
+    let inc2 = write_image_file(
+        dir.path(),
+        "inc2.qcow2",
+        virtual_size,
+        Some("inc1.qcow2"),
+        &[(4, text_cluster(0x34)), (5, text_cluster(0x35))],
+    );
+
+    // What the full chain reads, in raw-disk terms.
+    let expected_leaf = vec![
+        (0u64, text_cluster(0x10)),
+        (1, text_cluster(0x21)),
+        (2, noise_cluster(7)),
+        (3, text_cluster(0x13)),
+        (4, text_cluster(0x34)),
+        (5, text_cluster(0x35)),
+    ];
+    qemu_validate(&inc2, virtual_size, &expected_leaf);
+
+    own_backup_backup::qcow2::merge_child_into_parent(&base, &inc1).unwrap();
+    own_backup_backup::qcow2::set_backing_file(&inc2, Some("base.qcow2")).unwrap();
+    std::fs::remove_file(&inc1).unwrap();
+
+    // The merged base is a standalone image of inc1's point in time...
+    qemu_validate(
+        &base,
+        virtual_size,
+        &[
+            (0u64, text_cluster(0x10)),
+            (1, text_cluster(0x21)),
+            (2, noise_cluster(7)),
+            (3, text_cluster(0x13)),
+            (4, noise_cluster(8)),
+        ],
+    );
+    // ...and the leaf still reads exactly what it did before.
+    qemu_validate(&inc2, virtual_size, &expected_leaf);
+
+    // qemu must also agree about who the leaf's parent now is.
+    let info = Command::new("qemu-img")
+        .args(["info", "-f", "qcow2"])
+        .arg(&inc2)
+        .output()
+        .expect("run qemu-img info");
+    let info = String::from_utf8_lossy(&info.stdout);
+    assert!(
+        info.contains("base.qcow2"),
+        "qemu-img info does not see the repointed parent:\n{info}"
+    );
+}
+

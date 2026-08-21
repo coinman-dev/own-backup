@@ -107,6 +107,21 @@ pub struct SidecarInfo {
     /// existed, and for a sector-by-sector copy of an unrecognised filesystem.
     #[serde(default)]
     pub filesystem: Option<String>,
+    /// How many increments consolidation has folded into this image.
+    ///
+    /// Only ever non-zero on a chain's base. It exists because the run planner
+    /// counts a chain's versions by the FILES in the folder, and the sliding
+    /// window removes files: without this, "a full version after every N
+    /// versions" would stop firing the moment a window was enabled, the chain
+    /// would never roll over, and one base would be rewritten forever with no
+    /// independent copy of anything. The planner adds this to the number of
+    /// images it can see, so N keeps meaning "N increments".
+    ///
+    /// Lives in the sidecar rather than the job database on purpose — the same
+    /// reason retention reads sidecars: a folder of images has to remain
+    /// self-describing when the database is gone.
+    #[serde(default)]
+    pub consolidated_increments: u32,
     /// Headers of the encrypted containers this image holds, one per partition
     /// that was decrypted for the copy (D19).
     ///
@@ -134,6 +149,7 @@ impl SidecarInfo {
             excluded_files: 0,
             excluded_bytes: 0,
             filesystem: None,
+            consolidated_increments: 0,
             luks_headers: Vec::new(),
         }
     }
@@ -158,6 +174,7 @@ impl SidecarInfo {
             excluded_files: 0,
             excluded_bytes: 0,
             filesystem: None,
+            consolidated_increments: 0,
             luks_headers: Vec::new(),
         }
     }
@@ -592,6 +609,56 @@ fn read_meta_blob(image_path: &Path, container_format: &str, header_only: bool) 
     let mut blob = vec![0u8; total as usize];
     guest.read_at(meta_offset, &mut blob)?;
     Ok(blob)
+}
+
+/// Guest offset and size of the image's meta partition, read from the image's
+/// own GPT.
+///
+/// This is the locator the readers use, and the only one anything writing the
+/// blob back should use: the backup engine derives the same offset from the
+/// volume length and sector size at write time, and a second copy of that
+/// arithmetic is a second thing to get wrong on an image whose geometry came
+/// from somewhere else.
+pub fn meta_partition_of(image_path: &Path, container_format: &str) -> Result<(u64, u64)> {
+    let (_, offset, size) = open_meta_partition(image_path, container_format)?;
+    Ok((offset, size))
+}
+
+/// Replace an image's embedded sidecar in place, at the offset its own GPT
+/// gives. Used by consolidation, which rewrites metadata without rewriting
+/// data.
+///
+/// Takes the whole [`Sidecar`] rather than its parts on purpose: a whole-disk
+/// image carries its restore manifest in the same blob, and writing the parts
+/// through [`write_sidecar_v2_to`] would silently drop it — the image would
+/// still verify and still mount, and only a bare-metal restore would find out.
+pub fn write_embedded_sidecar(
+    image_path: &Path,
+    container_format: &str,
+    sidecar: &Sidecar,
+) -> Result<()> {
+    let (meta_offset, meta_size) = meta_partition_of(image_path, container_format)?;
+    let mut blob = Vec::new();
+    write_sidecar_v2_full_to(
+        &mut blob,
+        &sidecar.info,
+        &sidecar.manifest,
+        &sidecar.checksums,
+        sidecar.disk_manifest.as_ref(),
+    )?;
+    if blob.len() as u64 > meta_size {
+        return Err(OwnBackupError::ImageFormat(format!(
+            "sidecar ({} bytes) does not fit the meta partition ({meta_size} bytes)",
+            blob.len()
+        )));
+    }
+    match container_format {
+        "vhdx" | "avhdx" => crate::vhdx_bat::write_vhdx_guest_at(image_path, meta_offset, &blob),
+        "qcow2" => crate::qcow2::merge::write_qcow2_guest_blob(image_path, meta_offset, &blob),
+        other => Err(OwnBackupError::ImageFormat(format!(
+            "unsupported container format: {other}"
+        ))),
+    }
 }
 
 /// Read the embedded sidecar v2 from the virtual disk image.

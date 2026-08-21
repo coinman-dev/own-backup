@@ -35,6 +35,20 @@ pub struct AppConfig {
     /// what makes this work on a machine with no job database at all.
     #[serde(default)]
     pub remembered_backups: Vec<String>,
+    /// Master switch for backup-chain consolidation (the sliding increment
+    /// window). Off here means no job consolidates anything, whatever its own
+    /// scheme says.
+    ///
+    /// It exists for support, not for tuning: consolidation is the one
+    /// maintenance step that REWRITES an existing image, so "turn it off and
+    /// tell me whether the problem goes away" has to be one setting away and
+    /// has to override everything below it.
+    #[serde(default = "default_true")]
+    pub consolidation_enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Pre/post snapshot hooks for application-consistent backups.
@@ -131,6 +145,7 @@ impl Default for AppConfig {
             hooks: HooksConfig::default(),
             credentials: CredentialsConfig::default(),
             remembered_backups: Vec::new(),
+            consolidation_enabled: true,
         }
     }
 }

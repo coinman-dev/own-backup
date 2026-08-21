@@ -152,6 +152,13 @@ impl<R: Read + Seek> Qcow2Reader<R> {
         self.backing_file.as_deref()
     }
 
+    /// True when compressed clusters in this image are zstd streams.
+    /// Consolidation compares this between child and base before copying any
+    /// compressed payload across (see `Qcow2InPlaceMerge::is_zstd`).
+    pub fn is_zstd(&self) -> bool {
+        self.compression == Compression::Zstd
+    }
+
     /// What this file itself says about a guest cluster (no backing-file
     /// fall-through — the caller resolves chains).
     pub fn descriptor(&mut self, index: u64) -> Result<ClusterDescriptor> {

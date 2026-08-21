@@ -335,6 +335,131 @@ fn parse_parent_locator(meta: &[u8]) -> Option<String> {
     best.map(|(_, v)| v)
 }
 
+/// The GUIDs a differencing VHDX will accept as its parent's identity
+/// (`parent_linkage` and, when present, `parent_linkage2`; MS-VHDX §2.6.3).
+///
+/// When a child is created, the implementation stamps the parent's
+/// **DataWriteGuid** here, and when the chain is opened it checks the parent's
+/// current DataWriteGuid against these. Writing to the parent changes it — so
+/// this is how a merge becomes visible in the child, and how consolidation
+/// tells "already folded in" from "not yet".
+fn parse_parent_linkages(meta: &[u8]) -> Vec<Uuid> {
+    let Some(mcount) = meta
+        .get(10..12)
+        .and_then(|b| b.try_into().ok())
+        .map(u16::from_le_bytes)
+    else {
+        return Vec::new();
+    };
+    let (mut ioff, mut ilen) = (0usize, 0usize);
+    for slot in 0..(mcount as usize).min(2046) {
+        let e = 32 + slot * 32;
+        let Some(guid) = meta.get(e..e + 16) else { break };
+        if guid == guid_le(MI_PARENT_LOCATOR) {
+            ioff = match meta.get(e + 16..e + 20).and_then(|b| b.try_into().ok()) {
+                Some(b) => u32::from_le_bytes(b) as usize,
+                None => return Vec::new(),
+            };
+            ilen = match meta.get(e + 20..e + 24).and_then(|b| b.try_into().ok()) {
+                Some(b) => u32::from_le_bytes(b) as usize,
+                None => return Vec::new(),
+            };
+            break;
+        }
+    }
+    if ioff == 0 || ilen < 20 {
+        return Vec::new();
+    }
+    let Some(locator) = meta.get(ioff..ioff + ilen) else { return Vec::new() };
+    let Some(count) = locator
+        .get(18..20)
+        .and_then(|b| b.try_into().ok())
+        .map(u16::from_le_bytes)
+    else {
+        return Vec::new();
+    };
+
+    let read_utf16 = |off: usize, len: usize| -> Option<String> {
+        let bytes = locator.get(off..off + len)?;
+        let units: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        Some(String::from_utf16_lossy(&units))
+    };
+
+    let mut out = Vec::new();
+    for i in 0..(count as usize).min(64) {
+        let e = 20 + i * 12;
+        let Some(entry) = locator.get(e..e + 12) else { break };
+        let key_off = u32::from_le_bytes(entry[0..4].try_into().unwrap()) as usize;
+        let val_off = u32::from_le_bytes(entry[4..8].try_into().unwrap()) as usize;
+        let key_len = u16::from_le_bytes(entry[8..10].try_into().unwrap()) as usize;
+        let val_len = u16::from_le_bytes(entry[10..12].try_into().unwrap()) as usize;
+        let Some(key) = read_utf16(key_off, key_len) else { continue };
+        if key != "parent_linkage" && key != "parent_linkage2" {
+            continue;
+        }
+        // Stored as a braced, lowercase string: "{83ed0ec3-…}".
+        if let Some(value) = read_utf16(val_off, val_len) {
+            let trimmed = value.trim().trim_matches(|c| c == '{' || c == '}' || c == '\0');
+            if let Ok(id) = Uuid::parse_str(trimmed) {
+                out.push(id);
+            }
+        }
+    }
+    out
+}
+
+/// `DataWriteGuid` of the file's ACTIVE header (MS-VHDX §2.3): the identity a
+/// child's parent locator is checked against. Changes when the file's data is
+/// modified — including by `MergeVirtualDisk`.
+///
+/// Header 1 lives at 64 KiB and header 2 at 128 KiB; the live one is whichever
+/// carries the greater sequence number.
+pub fn vhdx_data_write_guid(path: &Path) -> Result<Uuid> {
+    let mut file = File::open(path).map_err(|e| bad(format!("open {}: {e}", path.display())))?;
+    let mut best: Option<(u64, Uuid)> = None;
+    for offset in [64 * 1024u64, 128 * 1024] {
+        let mut head = [0u8; 64];
+        if read_exact_at(&mut file, offset, &mut head).is_err() {
+            continue;
+        }
+        if &head[0..4] != b"head" {
+            continue;
+        }
+        let sequence = u64::from_le_bytes(head[8..16].try_into().unwrap());
+        let guid = Uuid::from_bytes_le(head[32..48].try_into().unwrap());
+        if best.as_ref().is_none_or(|(seq, _)| sequence > *seq) {
+            best = Some((sequence, guid));
+        }
+    }
+    best.map(|(_, guid)| guid)
+        .ok_or_else(|| bad(format!("no valid VHDX header in {}", path.display())))
+}
+
+/// Does `child` still consider `parent` to be the file it was created against?
+///
+/// `false` means the parent's data was written since — for a differencing
+/// chain that is exactly what a completed `MergeVirtualDisk` leaves behind,
+/// and it is also the state Windows refuses to open. Consolidation asks this
+/// when resuming after a crash: re-running a merge that already succeeded
+/// would fail, and skipping one that did not would leave the base short of the
+/// increment's data.
+pub fn vhdx_parent_linkage_matches(child: &Path, parent: &Path) -> Result<bool> {
+    let mut file = File::open(child).map_err(|e| bad(format!("open {}: {e}", child.display())))?;
+    let meta = read_metadata_region(&mut file)?;
+    let linkages = parse_parent_linkages(&meta);
+    if linkages.is_empty() {
+        return Err(bad(format!(
+            "{} carries no parent linkage — not a differencing image?",
+            child.display()
+        )));
+    }
+    let current = vhdx_data_write_guid(parent)?;
+    Ok(linkages.contains(&current))
+}
+
 /// Resolve a parent-locator path against the child image's directory.
 fn resolve_parent(child: &Path, raw: &str) -> std::path::PathBuf {
     let s = raw.trim_start_matches(r"\\?\");
@@ -771,4 +896,85 @@ mod tests {
         assert!(reader.read_at(8 * MB - 4, &mut [0u8; 8]).is_err());
     }
 
+    /// Build a synthetic metadata region holding a parent locator with the
+    /// given key/value pairs (MS-VHDX §2.6.3 layout, as above).
+    #[cfg(test)]
+    fn locator_meta(pairs: &[(&str, &str)]) -> Vec<u8> {
+        let mut meta = vec![0u8; 8192];
+        meta[0..8].copy_from_slice(b"metadata");
+        meta[10..12].copy_from_slice(&1u16.to_le_bytes());
+        meta[32..48].copy_from_slice(&guid_le(MI_PARENT_LOCATOR));
+        meta[48..52].copy_from_slice(&1024u32.to_le_bytes());
+        meta[52..56].copy_from_slice(&4096u32.to_le_bytes());
+        meta[1042..1044].copy_from_slice(&(pairs.len() as u16).to_le_bytes());
+
+        let mut cursor = 20 + pairs.len() * 12;
+        for (i, (key, value)) in pairs.iter().enumerate() {
+            let kb: Vec<u8> = key.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+            let vb: Vec<u8> = value.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+            let ko = cursor;
+            meta[1024 + ko..1024 + ko + kb.len()].copy_from_slice(&kb);
+            cursor += kb.len();
+            let vo = cursor;
+            meta[1024 + vo..1024 + vo + vb.len()].copy_from_slice(&vb);
+            cursor += vb.len();
+            let e = 1024 + 20 + i * 12;
+            meta[e..e + 4].copy_from_slice(&(ko as u32).to_le_bytes());
+            meta[e + 4..e + 8].copy_from_slice(&(vo as u32).to_le_bytes());
+            meta[e + 8..e + 10].copy_from_slice(&(kb.len() as u16).to_le_bytes());
+            meta[e + 10..e + 12].copy_from_slice(&(vb.len() as u16).to_le_bytes());
+        }
+        meta
+    }
+
+    /// Both linkage slots are read: the spec lets a child accept either, which
+    /// is precisely how a legitimately-modified parent stays openable.
+    #[test]
+    fn parent_linkages_read_both_slots() {
+        let a = "83ed0ec3-24c8-49a6-a959-5e4bf1288bfb";
+        let b = "11111111-2222-3333-4444-555555555555";
+        let meta = locator_meta(&[
+            ("relative_path", r".\parent.vhdx"),
+            ("parent_linkage", &format!("{{{a}}}")),
+            ("parent_linkage2", &format!("{{{b}}}")),
+        ]);
+        let got = parse_parent_linkages(&meta);
+        assert_eq!(got.len(), 2, "got {got:?}");
+        assert!(got.contains(&Uuid::parse_str(a).unwrap()));
+        assert!(got.contains(&Uuid::parse_str(b).unwrap()));
+        // The path parser must keep working off the same locator.
+        assert_eq!(parse_parent_locator(&meta).as_deref(), Some(r".\parent.vhdx"));
+    }
+
+    #[test]
+    fn parent_linkages_empty_without_a_locator() {
+        let mut meta = vec![0u8; 4096];
+        meta[0..8].copy_from_slice(b"metadata");
+        assert!(parse_parent_linkages(&meta).is_empty());
+    }
+
+    /// The live header is the one with the greater sequence number — a VHDX
+    /// alternates between the two slots, so reading the wrong one would report
+    /// a stale identity and make a merged parent look unmerged.
+    #[test]
+    fn data_write_guid_takes_the_newer_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("h.vhdx");
+        let old = Uuid::parse_str("aaaaaaaa-0000-0000-0000-000000000001").unwrap();
+        let new = Uuid::parse_str("bbbbbbbb-0000-0000-0000-000000000002").unwrap();
+
+        let mut file = vec![0u8; 192 * 1024];
+        for (offset, sequence, guid) in [(64 * 1024, 7u64, old), (128 * 1024, 9u64, new)] {
+            file[offset..offset + 4].copy_from_slice(b"head");
+            file[offset + 8..offset + 16].copy_from_slice(&sequence.to_le_bytes());
+            file[offset + 32..offset + 48].copy_from_slice(&guid.to_bytes_le());
+        }
+        std::fs::write(&path, &file).unwrap();
+        assert_eq!(vhdx_data_write_guid(&path).unwrap(), new);
+
+        // Swap the sequence numbers: the other slot becomes authoritative.
+        file[64 * 1024 + 8..64 * 1024 + 16].copy_from_slice(&11u64.to_le_bytes());
+        std::fs::write(&path, &file).unwrap();
+        assert_eq!(vhdx_data_write_guid(&path).unwrap(), old);
+    }
 }

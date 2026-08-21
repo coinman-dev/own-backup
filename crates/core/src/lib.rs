@@ -88,6 +88,24 @@ pub struct SchemeConfig {
     pub cleanup_older_than_days: Option<u32>,
     pub keep_chains: Option<u32>,
     pub keep_first: bool,
+    /// Sliding window: keep at most this many increments behind the full
+    /// backup, folding the oldest one into it when a new run overflows the
+    /// window (`None` = off, which is how every job written before this
+    /// existed keeps behaving).
+    ///
+    /// The window costs the DEEPEST restore point — the base stops standing
+    /// for the day it was taken and starts standing for the day of the
+    /// increment it absorbed. Nothing in the middle is lost: the count of
+    /// restore points stays at `rolling_incrementals + 1`.
+    ///
+    /// Independent of `full_every_n`, which still starts a NEW chain every N
+    /// runs — that counter lives in the run history, not in the files, so
+    /// consolidating does not reset it. A job with both set gets a bounded
+    /// window inside each chain and a fresh full now and then, which is the
+    /// combination worth recommending: a base that is rewritten forever is one
+    /// file with no independent copy of anything.
+    #[serde(default)]
+    pub rolling_incrementals: Option<u32>,
 }
 
 impl Default for SchemeConfig {
@@ -99,6 +117,7 @@ impl Default for SchemeConfig {
             cleanup_older_than_days: None,
             keep_chains: Some(3),
             keep_first: true,
+            rolling_incrementals: None,
         }
     }
 }
@@ -1068,7 +1087,11 @@ pub fn plan_run_for_volume(job: &Job, folder: &Path, device: &str) -> RunPlan {
         Some(img) => img.image_path.clone(),
         None => return RunPlan::full(),
     };
-    let child_count = chain.images.len() as u32 - 1;
+    // Increments EVER held, not files present: a sliding window deletes the
+    // oldest increment after folding it into the base, and counting only what
+    // is left would stop the rollover firing and leave one base being
+    // rewritten forever.
+    let child_count = chain.increments_ever();
 
     // "Full version after every N": start a fresh chain once it holds N children.
     if !job.scheme.only_incremental && child_count >= job.scheme.full_every_n.max(1) {
@@ -1138,7 +1161,11 @@ pub fn plan_run_for_disk(job: &Job, folder: &Path, disk_number: u32) -> RunPlan 
         Some(img) => img.image_path.clone(),
         None => return RunPlan::full(),
     };
-    let child_count = chain.images.len() as u32 - 1;
+    // Increments EVER held, not files present: a sliding window deletes the
+    // oldest increment after folding it into the base, and counting only what
+    // is left would stop the rollover firing and leave one base being
+    // rewritten forever.
+    let child_count = chain.increments_ever();
 
     if !job.scheme.only_incremental && child_count >= job.scheme.full_every_n.max(1) {
         return RunPlan::full();
@@ -1222,6 +1249,92 @@ fn apply_retention(job: &Job, protected: &[(String, PathBuf)]) {
             delete_chain(&vol_chains[idx]);
         }
     }
+}
+
+/// Fold overflowed increments into their base after a successful run.
+///
+/// Runs AFTER [`apply_retention`] on purpose: retention deletes whole chains,
+/// and folding an increment into a base that is about to be deleted anyway is
+/// pure wear. Failures are logged and never fail the run — the backup itself
+/// already succeeded, and a chain that did not get consolidated is a chain
+/// that is merely longer than asked for, not a broken one.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))] // used by the Windows backup path
+fn apply_consolidation(job: &Job, protected: &[(String, PathBuf)]) {
+    use own_backup_backup::chains::{list_job_chains, plan_consolidation};
+    use own_backup_backup::consolidate::{consolidate_step, resume_pending};
+
+    let Some(keep) = job.scheme.rolling_incrementals else {
+        return;
+    };
+    // Differential chains hang every child off the base, so moving the base
+    // forward would silently rebase the rest. `plan_consolidation` refuses
+    // them too; bailing here keeps the log quiet about a thing we never do.
+    if job.scheme.method != "incremental" {
+        return;
+    }
+    if !own_backup_common::config::AppConfig::load_or_default().consolidation_enabled {
+        info!(job = %job.name, "Consolidation is switched off globally — skipping");
+        return;
+    }
+
+    let folder = PathBuf::from(&job.dest_folder);
+
+    // Anything a crash left half-done is finished FIRST: planning against a
+    // chain that is mid-consolidation would be planning against a lie.
+    match resume_pending(&folder) {
+        Ok(0) => {}
+        Ok(n) => info!(job = %job.name, steps = n, "Finished interrupted consolidations"),
+        Err(e) => warn!(job = %job.name, error = %e, "Could not scan for interrupted consolidations"),
+    }
+
+    let tokens: std::collections::HashSet<String> =
+        protected.iter().map(|(t, _)| t.to_ascii_uppercase()).collect();
+
+    // One step at a time, re-reading the folder after each: a step changes the
+    // very chain the next decision is made from. The cap is a backstop against
+    // a step that reports success without shortening anything — a loop that
+    // never ends would be a far worse bug than a chain left one version long.
+    const MAX_STEPS: usize = 64;
+    for _ in 0..MAX_STEPS {
+        let chains = match list_job_chains(&folder, &job.id) {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(job = %job.name, error = %e, "Consolidation scan failed");
+                return;
+            }
+        };
+        let step = chains
+            .iter()
+            .filter(|c| {
+                c.images
+                    .first()
+                    .and_then(|i| image_token(&i.image_path))
+                    .is_some_and(|t| tokens.contains(&t.to_ascii_uppercase()))
+            })
+            .find_map(|c| plan_consolidation(c, keep));
+        let Some(step) = step else { return };
+
+        match consolidate_step(&step) {
+            Ok(outcome) => info!(
+                job = %job.name,
+                base = %outcome.base.display(),
+                folded = %outcome.folded.display(),
+                secs = outcome.duration.as_secs(),
+                "Consolidation: increment folded into the base"
+            ),
+            Err(e) => {
+                warn!(
+                    job = %job.name,
+                    base = %step.base.image_path.display(),
+                    increment = %step.victim.image_path.display(),
+                    error = %e,
+                    "Consolidation step failed — the chain is left as it was"
+                );
+                return;
+            }
+        }
+    }
+    warn!(job = %job.name, "Consolidation stopped at the step cap — chains stay longer than asked");
 }
 
 fn run_skeleton(job: &Job) -> JobRun {
@@ -1556,6 +1669,7 @@ async fn perform_backup(
     // Retention runs after a fully successful backup, independently per volume.
     // Its failures are logged, never surfaced as a run failure.
     apply_retention(job, &protected);
+    apply_consolidation(job, &protected);
 
     run
 }
@@ -1801,7 +1915,9 @@ async fn perform_disk_backup(
             info!(job = %job.name, image = %image_path.display(), kind = kind_str,
                 partitions = summary.partitions, unchanged = summary.blocks_unchanged,
                 "Whole-disk backup complete");
-            apply_retention(job, &[(format!("disk{}", ds.disk_number), image_path)]);
+            let protected = [(format!("disk{}", ds.disk_number), image_path)];
+            apply_retention(job, &protected);
+            apply_consolidation(job, &protected);
         }
         Ok(Err(OwnBackupError::Cancelled)) => {
             run.status = "cancelled".into();
@@ -2392,6 +2508,63 @@ mod tests {
         // Rollover: with N=1 the one-child chain is full already → new full.
         job.scheme.full_every_n = 1;
         assert_eq!(plan_run_for_volume(&job, d, "C:"), RunPlan::full());
+    }
+
+    /// A sliding window deletes increments; the rollover must still fire.
+    ///
+    /// Without the folded-in count the planner would see a chain that never
+    /// grows past the window, "full version after every N versions" would
+    /// never trigger again, and one base would be rewritten forever — the
+    /// single point of failure the window is supposed to be paired against.
+    #[test]
+    fn consolidated_increments_still_count_towards_the_rollover() {
+        use own_backup_backup::sidecar::{
+            read_sidecar, write_sidecar, ChainRole, SIDECAR_EXTENSION,
+        };
+        use own_backup_backup::sidecar_path_for;
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let _ = SIDECAR_EXTENSION;
+
+        let base_name = "job_C_full_20260101-000000.vhdx";
+        put_real_image(d, base_name, ChainRole::Full, None, "job1", "2026-01-01T00:00:00Z");
+        put_real_image(
+            d,
+            "job_C_inc_20260105-000000.avhdx",
+            ChainRole::Incremental,
+            Some(base_name),
+            "job1",
+            "2026-01-05T00:00:00Z",
+        );
+
+        let mut job = Job::default();
+        job.id = "job1".into();
+        job.scheme.method = "incremental".into();
+        job.scheme.only_incremental = false;
+        job.scheme.full_every_n = 3;
+        job.scheme.rolling_incrementals = Some(1);
+
+        // One increment on disk, none folded yet: keep going.
+        assert_eq!(plan_run_for_volume(&job, d, "C:").kind, "incremental");
+
+        // Two increments have since been folded into the base. Only one file
+        // remains, but the chain has held three versions — time for a full.
+        let base = d.join(base_name);
+        let mut sidecar = read_sidecar(&sidecar_path_for(&base)).unwrap();
+        sidecar.info.consolidated_increments = 2;
+        write_sidecar(
+            &sidecar_path_for(&base),
+            &sidecar.info,
+            &sidecar.manifest,
+            &sidecar.checksums,
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan_run_for_volume(&job, d, "C:"),
+            RunPlan::full(),
+            "1 increment present + 2 folded in = 3 versions, so N=3 must roll over"
+        );
     }
 
     #[test]

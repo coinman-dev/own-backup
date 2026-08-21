@@ -278,6 +278,9 @@ export interface SchemeConfig {
   cleanup_older_than_days: number | null;
   keep_chains: number | null;
   keep_first: boolean;
+  /** Sliding window: keep at most N increments, folding the oldest into the
+   *  base when a new run overflows it. null = off. */
+  rolling_incrementals: number | null;
 }
 
 export interface ExclusionsConfig {

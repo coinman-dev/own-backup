@@ -59,6 +59,9 @@ enum Commands {
     /// Verify a VHDX backup image against its sidecar checksums
     Verify(commands::verify::VerifyArgs),
 
+    /// Fold overflowed increments into their base (sliding window)
+    Consolidate(commands::consolidate::ConsolidateArgs),
+
     /// Mount a VHDX backup image read-only as a disk
     Mount(commands::mount::MountArgs),
 
@@ -107,6 +110,7 @@ fn needs_admin(command: &Commands) -> bool {
             | Commands::RestoreDisk(_)
             | Commands::FinalizeBoot(_)
             | Commands::Verify(_)
+            | Commands::Consolidate(_)
             | Commands::Service(_)
             | Commands::Driver(commands::driver::DriverArgs {
                 action: commands::driver::DriverAction::Install { .. }
@@ -149,6 +153,7 @@ async fn main() {
         Commands::RestoreDisk(args) => commands::restore_disk::run(args).await,
         Commands::FinalizeBoot(args) => commands::finalize_boot::run(args).await,
         Commands::Verify(args) => commands::verify::run(args).await,
+        Commands::Consolidate(args) => commands::consolidate::run(args).await,
         Commands::Mount(args) => commands::mount::run(args).await,
         Commands::DevioServe(args) => commands::devio_serve::run(args).await,
         Commands::Driver(args) => commands::driver::run(args).await,

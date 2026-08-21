@@ -4397,7 +4397,11 @@ pub fn verify_image(
     })
 }
 
-fn child_path_for(image_path: &Path) -> PathBuf {
+/// Path of the temporary differencing child a read-write mount writes into.
+/// Its existence is what says "this image is mounted RW right now" — the
+/// consolidation guard reads it, because folding an increment into a base
+/// somebody is writing through would corrupt both.
+pub fn child_path_for(image_path: &Path) -> PathBuf {
     let mut name = image_path.file_name().unwrap_or_default().to_os_string();
     name.push(".mount_rw.avhdx");
     image_path.with_file_name(name)
@@ -4561,6 +4565,12 @@ static AIM_MOUNTS: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, AimMoun
 fn aim_mounts() -> &'static std::sync::Mutex<HashMap<PathBuf, AimMount>> {
     // Shadow the module-wide alias so the code above can name it directly.
     AIM_MOUNTS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// Is this image (qcow2) currently served to Windows by an AIM mount of ours?
+/// Companion to [`child_path_for`] for the consolidation guard.
+pub fn qcow2_mounted_here(image_path: &Path) -> bool {
+    aim_mounts().lock().map(|m| m.contains_key(image_path)).unwrap_or(true)
 }
 
 /// Present a qcow2 backup (incl. its backing chain) to Windows as a real

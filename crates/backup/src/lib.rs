@@ -5,6 +5,7 @@ pub mod btrfs_exclusions;
 pub mod btrfs_map;
 pub mod chains;
 pub mod checksum;
+pub mod consolidate;
 pub mod decrypt;
 pub mod devio;
 pub mod exclusions;

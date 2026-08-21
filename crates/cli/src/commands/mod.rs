@@ -1,5 +1,6 @@
 pub mod backup;
 pub mod bitlocker;
+pub mod consolidate;
 pub mod devio_serve;
 pub mod display;
 pub mod driver;
