@@ -18,6 +18,50 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+/// Read speed of a verify pass, averaged over the last second.
+///
+/// The verify callback counts BLOCKS, and a block count says nothing to a
+/// person watching a 85 GiB image go by. This turns it into MiB/s the same way
+/// the copy phase reports it, over a one-second window so the number is steady
+/// enough to read but still follows a disk that slows down.
+struct VerifyRate {
+    block_bytes: u64,
+    window_start: std::time::Instant,
+    window_blocks: u64,
+    mbps: f64,
+}
+
+impl VerifyRate {
+    /// `image` is read once for its block size — a verify of an image with a
+    /// different block size must not be reported in someone else's units.
+    fn new(image: &std::path::Path) -> Self {
+        let block_bytes = own_backup_backup::sidecar::read_image_sidecar(image)
+            .map(|s| s.manifest.block_size as u64)
+            .unwrap_or(1024 * 1024);
+        Self {
+            block_bytes,
+            window_start: std::time::Instant::now(),
+            window_blocks: 0,
+            mbps: 0.0,
+        }
+    }
+
+    /// Feed the running block count; returns MiB/s to report right now.
+    fn sample(&mut self, blocks_done: u64) -> f64 {
+        let elapsed = self.window_start.elapsed();
+        if elapsed >= std::time::Duration::from_secs(1) {
+            let read = blocks_done.saturating_sub(self.window_blocks) * self.block_bytes;
+            // Same unit as the copy phase reports (`speed_bps / 1e6`), so the
+            // two numbers on the same line mean the same thing.
+            self.mbps = read as f64 / elapsed.as_secs_f64() / 1_000_000.0;
+            self.window_start = std::time::Instant::now();
+            self.window_blocks = blocks_done;
+        }
+        self.mbps
+    }
+}
+
+
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tracing::{error, info, warn};
@@ -1628,7 +1672,9 @@ async fn perform_backup(
             if validate_after {
                 let mut v_permille = u64::MAX;
                 let mut v_emit = std::time::Instant::now();
+                let mut v_rate = VerifyRate::new(&image_for_verify);
                 let v = verify_image(&image_for_verify, |done, total| {
+                    let mbps = v_rate.sample(done);
                     let permille = if total > 0 { done * 1000 / total } else { 0 };
                     if permille != v_permille || v_emit.elapsed().as_millis() >= 400 {
                         v_permille = permille;
@@ -1639,7 +1685,7 @@ async fn perform_backup(
                             percent: permille / 10,
                             blocks_done: done,
                             blocks_total: total,
-                            speed_mbps: 0.0,
+                            speed_mbps: mbps,
                             volume_index: vidx,
                             volume_count: count,
                             volume: vol_label_bg.clone(),
@@ -1935,7 +1981,9 @@ async fn perform_disk_backup(
         if validate_after {
             let mut v_permille = u64::MAX;
             let mut v_emit = std::time::Instant::now();
+            let mut v_rate = VerifyRate::new(&image_for_verify);
             let v = verify_image(&image_for_verify, |done, total| {
+                let mbps = v_rate.sample(done);
                 let permille = if total > 0 { done * 1000 / total } else { 0 };
                 if permille != v_permille || v_emit.elapsed().as_millis() >= 400 {
                     v_permille = permille;
@@ -1946,7 +1994,7 @@ async fn perform_disk_backup(
                         percent: permille / 10,
                         blocks_done: done,
                         blocks_total: total,
-                        speed_mbps: 0.0,
+                        speed_mbps: mbps,
                         volume_index: 0,
                         volume_count: 1,
                         volume: format!("Диск {disk_number} · {model}"),

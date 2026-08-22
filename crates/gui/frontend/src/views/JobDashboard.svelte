@@ -450,7 +450,10 @@
   .bar-fill.indet { background-image: linear-gradient(90deg, rgba(255,255,255,.35) 25%, transparent 25%, transparent 50%, rgba(255,255,255,.35) 50%, rgba(255,255,255,.35) 75%, transparent 75%); background-size: 28px 28px; animation: indet-move 0.8s linear infinite; }
   @keyframes indet-move { from { background-position: 0 0; } to { background-position: 28px 0; } }
   .progress-meta { display: flex; justify-content: space-between; gap: 16px; margin-top: 8px; font-size: 12px; color: var(--text-muted); }
-  .progress-meta .route { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%; }
+  /* Занимает всё, что осталось от строки: имя файла копии обрезалось на 60 %
+     ширины, хотя правее до «Прошло …» стояла пустота. Обрезка остаётся на
+     совсем длинный путь, но включается последней, а не заранее. */
+  .progress-meta .route { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; min-width: 0; }
   .progress-meta .times { white-space: nowrap; flex-shrink: 0; }
   .stats { display: flex; justify-content: space-between; font-size: 13px; color: var(--text-muted); margin-top: 34px; }
   .stats b { color: var(--head); font-weight: 600; }

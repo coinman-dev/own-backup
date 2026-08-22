@@ -957,13 +957,15 @@ fn backup_volume_inner(
     // for NTFS/ReFS, which still use zeroing for now.
     let mut fat_patches: Vec<(u64, Vec<u8>)> = Vec::new();
     let mut categories: Option<crate::exclusions::CategorySizes> = None;
-    // "prepare"-phase progress tick (blocks_total == 0 marks it for the UI).
-    let mut prepare_tick = |entries: u64| {
+    // "prepare"-phase progress tick. `total` is the number of MFT records the
+    // scan will look at, known up front; 0 when whatever is scanning cannot say
+    // (a directory walk meets its entries as it goes).
+    let mut prepare_tick = |entries: u64, total: u64| {
         progress(&BackupProgress {
             backup_id: "prepare".into(),
             status: BackupStatus::Running,
             blocks_done: entries,
-            blocks_total: 0,
+            blocks_total: total,
             bytes_written: 0,
             speed_bps: 0,
                 categories: None,
@@ -1043,11 +1045,12 @@ fn backup_volume_inner(
                     // ReFS (у неё нет MFT), грязный том, неразобранная запись —
                     // всё это законные причины вернуться к обходу дерева.
                     warn!(error = %e, "MFT scan unavailable — falling back to the directory walk");
+                    let mut walk_tick = |n: u64| prepare_tick(n, 0);
                     let mut scan = collect_excluded_ranges(
                         &read_path,
                         map.cluster_size(),
                         &req.exclusion_patterns,
-                        prepare_tick,
+                        &mut walk_tick,
                     )?;
                     excluded_files = scan.files_excluded;
                     excluded_bytes = scan.bytes_excluded;
@@ -1153,10 +1156,11 @@ fn backup_volume_inner(
             file_scan_skipped = Some(NO_PATTERNS.into());
         } else {
             let mut src = open_source(&luks)?;
+            let mut walk_tick = |n: u64| prepare_tick(n, 0);
             match crate::fat_exclusions::scan_fat_exclusions(
                 src.as_mut(),
                 &req.exclusion_patterns,
-                &mut prepare_tick,
+                &mut walk_tick,
             ) {
                 Ok(scan) => {
                     excluded_files = scan.files_excluded;
@@ -1194,7 +1198,7 @@ fn backup_volume_inner(
     } else if fat_exclusions {
         let mut dev = WinRawDevice::open_read(&read_path)?;
         let scan =
-            crate::fat_exclusions::scan_fat_exclusions(&mut dev, &req.exclusion_patterns, prepare_tick)?;
+            crate::fat_exclusions::scan_fat_exclusions(&mut dev, &req.exclusion_patterns, |n| prepare_tick(n, 0))?;
         excluded_files = scan.files_excluded;
         excluded_bytes = scan.bytes_excluded;
         categories = Some(scan.categories);
@@ -2075,16 +2079,21 @@ struct PreparedMap {
 /// Том открывается как устройство и читается насквозь — тем же сканером, что
 /// работает над расшифрованным окном BitLocker. Ничего не пишет.
 #[cfg(target_os = "windows")]
+/// `tick(records_done, records_total)`. The total is the whole point: the MFT
+/// has a known record count (`$MFT` size / record size), so the wait can be a
+/// bar with an end and an estimate instead of a number running up. Only this
+/// scanner can say it — a directory walk does not know how many entries it is
+/// about to meet, and passes 0.
 fn scan_ntfs_exclusions_by_mft(
     read_path: &str,
     patterns: &[String],
-    tick: &mut impl FnMut(u64) -> Result<()>,
+    tick: &mut impl FnMut(u64, u64) -> Result<()>,
 ) -> Result<crate::ntfs_scan::MftScan> {
     let mut dev = WinRawDevice::open_read(read_path)?;
     let cur = crate::ntfs_scan::RawVolumeCursor::new(&mut dev);
     let mut buffered = crate::ntfs_scan::BufferedVolume::new(cur, 4 << 20, 6);
-    crate::ntfs_scan::scan_mft_with(&mut buffered, patterns, |done, _total| {
-        let _ = tick(done);
+    crate::ntfs_scan::scan_mft_with(&mut buffered, patterns, |done, total| {
+        let _ = tick(done, total);
     })
 }
 
@@ -2172,10 +2181,10 @@ fn prepare_partition_map(
     // Источник заморожен (снимок VSS или офлайн на носителе) — только тогда
     // можно разбирать сырые метаданные: том под записью для этого не годится.
     frozen: bool,
-    mut tick: impl FnMut(u64) -> Result<()>,
+    // `tick(entries_done, entries_total)`; total 0 = «сколько всего, неизвестно»
+    // (обход каталога этого не знает, чтение $MFT — знает).
+    mut tick: impl FnMut(u64, u64) -> Result<()>,
 ) -> PreparedMap {
-    // Тик нужен двум путям подряд, поэтому отдаётся копией результата.
-    let mut tick_ok = |n: u64| tick(n);
     // NTFS/ReFS/FAT use the Windows masks; ext/btrfs/xfs use the Linux masks.
     let patterns = patterns_windows;
     let none = |fs: &str, map: Option<Box<dyn UsedSectorMap>>| PreparedMap {
@@ -2218,7 +2227,7 @@ fn prepare_partition_map(
                 // быстрее и не теряет pagefile.sys/swapfile.sys, которые обходу
                 // не открыть. Обход остаётся запасным: ReFS (у неё нет MFT),
                 // грязный том, неразобранная запись.
-                let mut mft_tick = |n: u64| tick_ok(n);
+                let mut mft_tick = |n: u64, total: u64| tick(n, total);
                 let fast = if frozen {
                     scan_ntfs_exclusions_by_mft(read_path, patterns, &mut mft_tick)
                 } else {
@@ -2256,7 +2265,7 @@ fn prepare_partition_map(
                         warn!(part = %read_path, error = %e,
                               "whole-disk: MFT scan unavailable — falling back to the directory walk");
                         if let Ok(mut scan) =
-                            collect_excluded_ranges(read_path, m.cluster_size(), patterns, tick)
+                            collect_excluded_ranges(read_path, m.cluster_size(), patterns, |n| tick(n, 0))
                         {
                             out.excluded_files = scan.files_excluded;
                             out.excluded_bytes = scan.bytes_excluded;
@@ -2290,7 +2299,7 @@ fn prepare_partition_map(
         if is_fat && !patterns.is_empty() {
             let mut out = none(&fs, None);
             if let Ok(mut dev) = WinRawDevice::open_read(read_path) {
-                if let Ok(scan) = crate::fat_exclusions::scan_fat_exclusions(&mut dev, patterns, tick) {
+                if let Ok(scan) = crate::fat_exclusions::scan_fat_exclusions(&mut dev, patterns, |n| tick(n, 0)) {
                     out.excluded_files = scan.files_excluded;
                     out.excluded_bytes = scan.bytes_excluded;
                     out.categories = Some(scan.categories);
@@ -2334,7 +2343,7 @@ fn prepare_partition_map(
         let mut out = none("ext4", None);
         if !patterns_linux.is_empty() {
             if let Ok(mut src2) = open() {
-                match crate::ext_exclusions::scan_ext_exclusions(src2.as_mut(), patterns_linux, tick) {
+                match crate::ext_exclusions::scan_ext_exclusions(src2.as_mut(), patterns_linux, |n| tick(n, 0)) {
                     Ok(scan) => {
                         out.excluded_files = scan.files_excluded;
                         out.excluded_bytes = scan.bytes_excluded;
@@ -2389,7 +2398,7 @@ fn prepare_partition_map(
                 // extents, hardlinks, leaf-breaking edits) down to Stage 1,
                 // and any Stage-2 failure keeps the whole volume on Stage 1 —
                 // see `scan_btrfs_exclusions`.
-                match crate::btrfs_exclusions::scan_btrfs_exclusions(src2.as_mut(), patterns_linux, true, tick) {
+                match crate::btrfs_exclusions::scan_btrfs_exclusions(src2.as_mut(), patterns_linux, true, |n| tick(n, 0)) {
                     Ok(scan) => {
                         out.excluded_files = scan.files_excluded;
                         out.excluded_bytes = scan.bytes_excluded;
@@ -2428,7 +2437,7 @@ fn prepare_partition_map(
                 // `true` — Stage 2: записи каталогов, иноды и блоки. План
                 // собирается целиком и применяется только если все три шага
                 // согласились; иначе файл остаётся нулевым призраком.
-                match crate::xfs_exclusions::scan_xfs_exclusions(src2.as_mut(), patterns_linux, true, tick) {
+                match crate::xfs_exclusions::scan_xfs_exclusions(src2.as_mut(), patterns_linux, true, |n| tick(n, 0)) {
                     Ok(scan) => {
                         out.excluded_files = scan.files_excluded;
                         out.excluded_bytes = scan.bytes_excluded;
@@ -2844,12 +2853,12 @@ fn backup_disk_inner(
             )));
         }
 
-        let prepare_tick = |entries: u64| {
+        let prepare_tick = |entries: u64, total: u64| {
             progress(&BackupProgress {
                 backup_id: "prepare".into(),
                 status: BackupStatus::Running,
                 blocks_done: entries,
-                blocks_total: 0,
+                blocks_total: total,
                 bytes_written: 0,
                 speed_bps: 0,
                 categories: None,
