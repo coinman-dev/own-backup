@@ -26,6 +26,12 @@
   // of real work that used to hide under the "сброс кэша" label and read as a
   // hang — 7 of the 26 minutes of a real run (2026-08-07).
   const excluding = $derived(progress?.phase === 'exclusions');
+  /* Бегущая полоса — только когда считать нечего. У удаления исключённых
+     файлов итог есть (сколько путей велено удалить), поэтому там обычная
+     шкала и честное «Осталось»; «сброс кэша» итога не имеет никогда. */
+  const indetBar = $derived(
+    progress?.phase === 'finalize' || (excluding && (progress?.blocks_total ?? 0) === 0),
+  );
   const lastRun = $derived(job.last_run);
   // The job asks for exclusions and the copy did not apply them. Reporting
   // "Исключено файлов: 0" for that reads as "the rules matched nothing", which
@@ -272,16 +278,22 @@
               {progress.blocks_done.toLocaleString('ru-RU')} записей просмотрено
               {#if progress.blocks_total > 0}из {progress.blocks_total.toLocaleString('ru-RU')}{/if}
             {:else if excluding}
-              файлы удаляются и зануляются в готовой копии…
+              {#if progress.blocks_total > 0}
+                {progress.blocks_done.toLocaleString('ru-RU')} из {progress.blocks_total.toLocaleString('ru-RU')}
+              {:else}
+                файлы удаляются и зануляются в готовой копии…
+              {/if}
             {:else if finalizing}
               сброс кэша на диск, подождите…
             {:else}
-              {progress.blocks_done} / {progress.blocks_total} блоков{#if progress.speed_mbps > 0} · {progress.speed_mbps.toFixed(1)} МБ/с{/if}
+              <!-- Пробел перед «·» пишется явно: в начале блока {#if} Svelte
+                   его срезает, и получалось «блоков· 85.1 МБ/с». -->
+              {progress.blocks_done} / {progress.blocks_total} блоков{#if progress.speed_mbps > 0}{'\u00a0· '}{progress.speed_mbps.toFixed(1)} МБ/с{/if}
             {/if}
           </span>
         {/if}
       </div>
-      <div class="bar"><div class="bar-fill" class:verify={verifying} class:indet={finalizing || excluding} style="width:{finalizing || excluding ? 100 : (progress?.percent ?? 0)}%"></div></div>
+      <div class="bar"><div class="bar-fill" class:verify={verifying} class:indet={indetBar} style="width:{indetBar ? 100 : (progress?.percent ?? 0)}%"></div></div>
       <div class="progress-meta">
         <span class="route" title="{sourceSummary(job)} → {destPath}">
           {sourceSummary(job)} → {destPath}

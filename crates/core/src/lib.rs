@@ -24,6 +24,9 @@ use std::sync::{Arc, Mutex};
 /// person watching a 85 GiB image go by. This turns it into MiB/s the same way
 /// the copy phase reports it, over a one-second window so the number is steady
 /// enough to read but still follows a disk that slows down.
+// Обе проверки после копии живут в Windows-путях; на Linux структура
+// компилируется, но никем не зовётся.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 struct VerifyRate {
     block_bytes: u64,
     window_start: std::time::Instant,
@@ -31,6 +34,7 @@ struct VerifyRate {
     mbps: f64,
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 impl VerifyRate {
     /// `image` is read once for its block size — a verify of an image with a
     /// different block size must not be reported in someone else's units.
@@ -1066,11 +1070,7 @@ fn image_token(path: &Path) -> Option<String> {
 fn output_path_for(job: &Job, device: &str, kind: &str) -> PathBuf {
     let token = file_token(job, device);
     let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
-    let safe_name: String = job
-        .name
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '_' })
-        .collect();
+    let safe_name = own_backup_common::file_name::safe_file_stem(&job.name, "backup");
     // VHDX children are AVHDX (the Windows convention); qcow2 children stay
     // .qcow2 (the qemu convention — chain role lives in the sidecar).
     let child_ext = match job.image_format {
@@ -1829,11 +1829,7 @@ async fn perform_disk_backup(
 
     use own_backup_common::types::BackupType;
 
-    let safe_name: String = job
-        .name
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '_' })
-        .collect();
+    let safe_name = own_backup_common::file_name::safe_file_stem(&job.name, "backup");
 
     // Chain planning (plan D5): a scheduled incremental/differential writes a
     // differencing child over the previous whole-disk image of THIS disk; any
@@ -2116,11 +2112,7 @@ async fn perform_backup(
         let token = source_token(device);
         let vol_label = job.label_for(device);
         let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
-        let safe: String = job
-            .name
-            .chars()
-            .map(|c| if c.is_alphanumeric() { c } else { '_' })
-            .collect();
+        let safe = own_backup_common::file_name::safe_file_stem(&job.name, "backup");
         let image_path = folder.join(format!(
             "{safe}_{}_full_{stamp}.{}",
             file_token(job, device),

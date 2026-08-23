@@ -1585,12 +1585,12 @@ fn backup_volume_inner(
     // scan 34 s, delete 10 s, zero ~40 s, merge ~1.5 min, re-checksum ~4 min on
     // an HDD) — under the "сброс кэша" label that read as a hang. They get
     // their own phase id, so the interface can say what is actually happening.
-    let mut phase_tick = move |id: &'static str, entries: u64| {
+    let mut phase_tick = move |id: &'static str, entries: u64, total: u64| {
         let _ = progress(&BackupProgress {
             backup_id: id.into(),
             status: BackupStatus::Running,
             blocks_done: entries,
-            blocks_total: 0,
+            blocks_total: total,
             bytes_written: bytes_copied_so_far,
             speed_bps: 0,
                 categories: None,
@@ -1603,7 +1603,7 @@ fn backup_volume_inner(
     // only path on which a locked BitLocker volume honours the rules at all,
     // and it is where the figures for the result screen come from too.
     if in_image_exclusions {
-        let tick = &mut |n| phase_tick("exclusions", n);
+        let tick = &mut |n, total| phase_tick("exclusions", n, total);
         let done = match req.image_format {
             ImageFormat::Vhdx => crate::true_removal_win::exclude_inside_image(
                 &req.image_path,
@@ -1655,7 +1655,7 @@ fn backup_volume_inner(
     }
 
     if !removal_paths.is_empty() {
-        let tick = &mut |n| phase_tick("exclusions", n);
+        let tick = &mut |n, total| phase_tick("exclusions", n, total);
         match req.image_format {
             ImageFormat::Vhdx => {
                 // Differencing child + MergeVirtualDisk via the kernel VHDX driver.
@@ -3209,12 +3209,15 @@ fn backup_disk_inner(
         .map(|p| (p.part_offset, std::mem::take(&mut p.removal_paths)))
         .collect();
     if !removal.is_empty() {
-        let mut tick = |entries: u64| {
+        // Каждый проход удаления называет свой итог сам: удаление — пути,
+        // зануление — куски, пере-хеширование — блоки. Ноль значит «итог
+        // неизвестен», и полоса тогда остаётся бегущей, как раньше.
+        let mut tick = |entries: u64, total: u64| {
             let _ = progress(&BackupProgress {
                 backup_id: "exclusions".into(),
                 status: BackupStatus::Running,
                 blocks_done: entries,
-                blocks_total: 0,
+                blocks_total: total,
                 bytes_written: bytes_copied,
                 speed_bps: 0,
                 categories: None,
@@ -4435,7 +4438,7 @@ pub fn unmount_image(image_path: &Path) -> Result<()> {
                     volume_len,
                     block_size,
                     &mut sidecar.checksums,
-                    &mut |_| {}, // interactive unmount: no progress channel
+                    &mut |_, _| {}, // interactive unmount: no progress channel
                 )?;
                 if read_from_embedded {
                     let sector = 512u64;
@@ -4659,7 +4662,7 @@ fn unmount_qcow2_via_aim(image_path: &Path) -> Result<()> {
                     volume_len,
                     block_size,
                     &mut sidecar.checksums,
-                    &mut |_| {}, // interactive unmount: no progress channel
+                    &mut |_, _| {}, // interactive unmount: no progress channel
                 )?;
                 if read_from_embedded {
                     let sector = 512u64;

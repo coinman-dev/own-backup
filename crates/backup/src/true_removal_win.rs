@@ -123,7 +123,7 @@ pub fn remove_excluded_from_image(
     volume_len: u64,
     block_size: u32,
     checksums: &mut Vec<BlockChecksum>,
-    tick: &mut dyn FnMut(u64),
+    tick: &mut dyn FnMut(u64, u64),
 ) -> Result<Option<RemovalOutcome>> {
     if paths.is_empty() {
         return Ok(None);
@@ -272,7 +272,7 @@ pub fn exclude_inside_image(
     volume_len: u64,
     block_size: u32,
     checksums: &mut Vec<BlockChecksum>,
-    tick: &mut dyn FnMut(u64),
+    tick: &mut dyn FnMut(u64, u64),
 ) -> Result<Option<InsideRemoval>> {
     if patterns.is_empty() {
         return Ok(None);
@@ -398,7 +398,7 @@ fn scan_delete_and_zero(
     patterns: &[String],
     data_offset: u64,
     volume_len: u64,
-    tick: &mut dyn FnMut(u64),
+    tick: &mut dyn FnMut(u64, u64),
 ) -> Result<ScannedInside> {
     let _automount = crate::automount::AutoMountGuard::enable_if_disabled();
     create_differencing_vhdx(temp, image_path)?;
@@ -424,7 +424,7 @@ pub(crate) fn scan_delete_zero_on_disk(
     patterns: &[String],
     data_offset: u64,
     volume_len: u64,
-    tick: &mut dyn FnMut(u64),
+    tick: &mut dyn FnMut(u64, u64),
 ) -> Result<ScannedInside> {
     // The volume at the offset the copy wrote it to — not merely "the first
     // volume on this disk". A per-volume image also carries the meta partition,
@@ -461,7 +461,7 @@ pub(crate) fn scan_delete_zero_on_disk(
         cluster_size,
         patterns,
         |n| {
-            tick(n);
+            tick(n, 0);
             Ok(())
         },
     )?;
@@ -476,7 +476,7 @@ pub(crate) fn scan_delete_zero_on_disk(
     // what keeps the detach below from waiting out the ~180 s PnP removal veto
     // (see `delete_paths_on_disk`, whose body this mirrors for a volume we
     // located ourselves).
-    let (deleted, failed) = delete_paths_on_volume_root(&volume_root, &scan.paths, tick)?;
+    let (deleted, failed) = delete_paths_on_volume_root(&volume_root, &scan.paths, 0, scan.paths.len() as u64, tick)?;
     teardown_volume(&volume_root, dev);
     let gone = wait_volume_gone(disk_number, Duration::from_secs(10));
     debug!(gone, "exclusions inside the image: volume state before the zero pass");
@@ -537,7 +537,7 @@ fn zero_freed_clusters(
     data_offset: u64,
     volume_len: u64,
     ranges: &crate::exclusions::ByteRanges,
-    tick: &mut dyn FnMut(u64),
+    tick: &mut dyn FnMut(u64, u64),
 ) -> Result<u64> {
     let mut window = image_volume_window(dev, data_offset, volume_len)?;
     let free = crate::ntfs_map::ntfs_free_map(&mut window)?;
@@ -567,7 +567,7 @@ fn zero_freed_clusters(
             dev.write_at(data_offset + at, &zeros[..len])?;
             at += len as u64;
             written += len as u64;
-            tick(written / CHUNK as u64);
+            tick(written / CHUNK as u64, (end - start).div_ceil(CHUNK as u64));
         }
     }
     dev.flush()?;
@@ -586,7 +586,7 @@ fn mount_and_delete(
     image_path: &Path,
     temp: &Path,
     paths: &[ExcludedPath],
-    tick: &mut dyn FnMut(u64),
+    tick: &mut dyn FnMut(u64, u64),
 ) -> Result<(u64, u64)> {
     // NB: we do NOT disable auto-mount here — `mountvol /N` stops the NTFS
     // volume from mounting at all (device-not-ready), so the delete pass would
@@ -639,7 +639,7 @@ pub fn remove_excluded_from_disk_image(
     image_size: u64,
     block_size: u32,
     checksums: &mut Vec<BlockChecksum>,
-    tick: &mut dyn FnMut(u64),
+    tick: &mut dyn FnMut(u64, u64),
 ) -> Result<Option<RemovalOutcome>> {
     let total_paths: usize = partitions.iter().map(|(_, p)| p.len()).sum();
     if total_paths == 0 {
@@ -720,7 +720,7 @@ fn mount_and_delete_multi(
     image_path: &Path,
     temp: &Path,
     partitions: &[(u64, Vec<ExcludedPath>)],
-    tick: &mut dyn FnMut(u64),
+    tick: &mut dyn FnMut(u64, u64),
 ) -> Result<(u64, u64)> {
     // Do NOT disable auto-mount (it blocks the NTFS volume from mounting at all
     // → 180 s device-not-ready + nothing deleted). Letters are stripped after
@@ -754,7 +754,7 @@ pub(crate) fn delete_paths_on_disk_multi(
     disk_number: u32,
     dev: &WinRawDevice,
     partitions: &[(u64, Vec<ExcludedPath>)],
-    tick: &mut dyn FnMut(u64),
+    tick: &mut dyn FnMut(u64, u64),
 ) -> Result<(u64, u64)> {
     // Letters can land on ANY volume of the disk (also partitions we are not
     // deleting from) via remembered mappings — strip them all up front, and
@@ -762,12 +762,15 @@ pub(crate) fn delete_paths_on_disk_multi(
     strip_letters_on_disk(disk_number);
     let mut deleted = 0u64;
     let mut failed = 0u64;
+    // One bar across every partition of the disk, not one per partition.
+    let total_paths_all: u64 = partitions.iter().map(|(_, p)| p.len() as u64).sum();
+    let mut paths_done = 0u64;
     for (part_offset, paths) in partitions {
         if paths.is_empty() {
             continue;
         }
         match volume_root_at_offset(disk_number, *part_offset) {
-            Some(vr) => match delete_paths_on_volume_root(&vr, paths, tick) {
+            Some(vr) => match delete_paths_on_volume_root(&vr, paths, paths_done, total_paths_all, tick) {
                 Ok((d, f)) => {
                     deleted += d;
                     failed += f;
@@ -784,6 +787,7 @@ pub(crate) fn delete_paths_on_disk_multi(
                 failed += paths.len() as u64;
             }
         }
+        paths_done += paths.len() as u64;
     }
 
     let roots = all_volume_roots_on_disk(disk_number);
@@ -809,10 +813,15 @@ pub(crate) fn delete_paths_on_disk_multi(
 /// `\\?\Volume{GUID}\` root), waiting for its filesystem to become ready first.
 /// No teardown — the caller dismounts the volume(s). Returns (deleted, failed).
 /// `Err` if the filesystem never mounted (the caller keeps zero-filled ghosts).
+/// `done_before` / `total_paths_all` place this volume's paths inside the whole
+/// job: a disk can hold several partitions, and a bar that restarts at each one
+/// tells the user nothing about how long the pass still has to run.
 fn delete_paths_on_volume_root(
     volume_root: &str,
     paths: &[ExcludedPath],
-    tick: &mut dyn FnMut(u64),
+    done_before: u64,
+    total_paths_all: u64,
+    tick: &mut dyn FnMut(u64, u64),
 ) -> Result<(u64, u64)> {
     // No lettered drive must surface for the image volume: strip any letter the
     // MountManager already restored from its remembered mapping, and strip again
@@ -838,7 +847,11 @@ fn delete_paths_on_volume_root(
     let t_del = Instant::now();
     let mut deleted = 0u64;
     let mut failed = 0u64;
-    for p in paths {
+    // Progress counts PATHS, not deleted entries: the caller knows how many
+    // paths it asked for, and a matched directory is one path but many entries
+    // — mixing the two makes a bar that runs past its own end.
+    let total_paths = paths.len() as u64;
+    for (idx, p) in paths.iter().enumerate() {
         // Skip System Volume Information and anything inside it. Windows
         // automatically recreates and locks this folder upon mounting, so trying
         // to delete it is futile and causes sharing-violation warnings.
@@ -850,11 +863,11 @@ fn delete_paths_on_volume_root(
         }
         let full = format!("{volume_root}{}", p.rel);
         delete_tree(&full, p.is_dir, p.is_reparse, &mut deleted, &mut failed);
-        if (deleted + failed) % 64 == 0 {
-            tick(deleted);
+        if idx % 64 == 0 {
+            tick(done_before + idx as u64 + 1, total_paths_all);
         }
     }
-    tick(deleted);
+    tick(done_before + total_paths, total_paths_all);
     info!(
         volume = %volume_root,
         deleted,
@@ -874,10 +887,10 @@ pub(crate) fn delete_paths_on_disk(
     disk_number: u32,
     dev: &WinRawDevice,
     paths: &[ExcludedPath],
-    tick: &mut dyn FnMut(u64),
+    tick: &mut dyn FnMut(u64, u64),
 ) -> Result<(u64, u64)> {
     let volume_root = find_volume_on_disk(disk_number)?;
-    let (deleted, failed) = delete_paths_on_volume_root(&volume_root, paths, tick)?;
+    let (deleted, failed) = delete_paths_on_volume_root(&volume_root, paths, 0, paths.len() as u64, tick)?;
 
     // Tear the mounted volume down BEFORE detaching, or DetachVirtualDisk hits
     // the fixed ~180 s PnP removal-veto timeout (the stall the main image
@@ -1217,7 +1230,7 @@ pub(crate) fn rehash_touched_blocks(
     volume_len: u64,
     block_size: u32,
     checksums: &mut Vec<BlockChecksum>,
-    tick: &mut dyn FnMut(u64),
+    tick: &mut dyn FnMut(u64, u64),
 ) -> Result<(u64, u64)> {
     let bs = block_size as u64;
     let mut affected: BTreeSet<u64> = BTreeSet::new();
@@ -1275,7 +1288,7 @@ pub(crate) fn rehash_touched_blocks(
             }
         }
         done += count;
-        tick(done);
+        tick(done, affected.len() as u64);
     }
     info!(
         blocks = affected.len(),

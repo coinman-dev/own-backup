@@ -3,6 +3,7 @@ pub mod config;
 pub mod disk;
 pub mod engine_dto;
 pub mod error;
+pub mod file_name;
 pub mod gpt;
 pub mod image;
 pub mod log_mirror;

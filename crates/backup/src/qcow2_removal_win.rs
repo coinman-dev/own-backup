@@ -75,7 +75,7 @@ pub fn exclude_inside_qcow2(
     block_size: u32,
     zstd_level: Option<i32>,
     checksums: &mut Vec<BlockChecksum>,
-    tick: &mut dyn FnMut(u64),
+    tick: &mut dyn FnMut(u64, u64),
 ) -> Result<Option<crate::true_removal_win::InsideRemoval>> {
     if patterns.is_empty() {
         return Ok(None);
@@ -219,7 +219,7 @@ fn mount_scan_delete(
     patterns: &[String],
     data_offset: u64,
     volume_len: u64,
-    tick: &mut dyn FnMut(u64),
+    tick: &mut dyn FnMut(u64, u64),
 ) -> Result<crate::true_removal_win::ScannedInside> {
     let _automount = crate::automount::AutoMountGuard::enable_if_disabled();
     let adapter = crate::aim_win::AimAdapter::open()?;
@@ -278,7 +278,7 @@ pub fn remove_excluded_from_qcow2(
     block_size: u32,
     zstd_level: Option<i32>,
     checksums: &mut Vec<BlockChecksum>,
-    tick: &mut dyn FnMut(u64),
+    tick: &mut dyn FnMut(u64, u64),
 ) -> Result<Option<Qcow2RemovalOutcome>> {
     let t0 = Instant::now();
     let (virtual_size, cluster_size) = {
@@ -400,7 +400,7 @@ pub fn remove_excluded_from_disk_image_qcow2(
     block_size: u32,
     zstd_level: Option<i32>,
     checksums: &mut Vec<BlockChecksum>,
-    tick: &mut dyn FnMut(u64),
+    tick: &mut dyn FnMut(u64, u64),
 ) -> Result<Option<Qcow2RemovalOutcome>> {
     let total_paths: usize = partitions.iter().map(|(_, p)| p.len()).sum();
     if total_paths == 0 {
@@ -505,7 +505,7 @@ fn mount_delete(
     port: u16,
     virtual_size: u64,
     paths: &[ExcludedPath],
-    tick: &mut dyn FnMut(u64),
+    tick: &mut dyn FnMut(u64, u64),
 ) -> Result<(u64, u64)> {
     // Auto-mount is NOT disabled here (it was until 2026-07-30): `mountvol /N`
     // makes mountmgr hold every surfacing volume OFFLINE, and an offline volume
@@ -555,7 +555,7 @@ fn mount_delete_multi(
     port: u16,
     virtual_size: u64,
     partitions: &[(u64, Vec<ExcludedPath>)],
-    tick: &mut dyn FnMut(u64),
+    tick: &mut dyn FnMut(u64, u64),
 ) -> Result<(u64, u64)> {
     // Auto-mount stays as the machine has it — see mount_delete above: turning
     // it off holds the image's volumes offline and the delete pass finds
@@ -618,7 +618,7 @@ pub(crate) fn rehash_touched(
     volume_len: u64,
     block_size: u32,
     checksums: &mut Vec<BlockChecksum>,
-    tick: &mut dyn FnMut(u64),
+    tick: &mut dyn FnMut(u64, u64),
 ) -> Result<u64> {
     let bs = block_size as u64;
     // Touched clusters are disk-image offsets; the sidecar checksums are per
@@ -675,7 +675,7 @@ pub(crate) fn rehash_touched(
             }
         }
         done += count;
-        tick(done);
+        tick(done, affected.len() as u64);
     }
     *checksums = map
         .into_iter()

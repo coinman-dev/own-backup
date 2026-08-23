@@ -668,13 +668,28 @@
     return `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}-${pad2(d.getHours())}${pad2(d.getMinutes())}${pad2(d.getSeconds())}`;
   })();
 
+  /** Имя файла из имени задания — ровно то же правило, что в движке
+   *  (`common::file_name::safe_file_stem`): пробел становится `_`, запрещённый
+   *  в имени файла знак ВЫБРАСЫВАЕТСЯ, остальное остаётся как набрано. Если
+   *  здесь и там правила разойдутся, показанный путь будет враньём. */
+  function safeFileStem(name: string, fallback: string): string {
+    const out = (name ?? '')
+      .replace(/^[\s.]+|[\s.]+$/g, '')
+      .split('')
+      .map((c) => (c === ' ' ? '_' : /[<>:"/\\|?*\u0000-\u001f]/.test(c) ? '' : c))
+      .join('');
+    if (!out) return fallback;
+    const reserved = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i;
+    return reserved.test(out) ? out + '_' : out;
+  }
+
   // Full path of the file the first selected volume will produce, so the user
   // sees the concrete auto-generated name (mirrors the engine's naming; the
   // <тип> here is shown as "full" — the real type/date are decided at run time).
   const previewPath = $derived.by(() => {
     const folder = job.dest_folder.trim();
     if (!folder || job.sources.length === 0) return '';
-    const safe = (job.name || 'backup').replace(/[^\p{L}\p{N}]/gu, '_');
+    const safe = safeFileStem(job.name, 'backup');
     const token = sourceToken(job.sources[0]);
     const sep = folder.endsWith('\\') || folder.endsWith('/') ? '' : '\\';
     return `${folder}${sep}${safe}_${token}_full_${previewStamp}.vhdx`;
