@@ -108,11 +108,22 @@ impl Chain {
     }
 }
 
-/// Scan `folder` for sidecars belonging to `job_id` and group them into
-/// chains, oldest chain first. Unreadable sidecars are skipped with a warning.
-/// Children whose parent sidecar is missing (broken chains) are grouped into
-/// their own chain so retention can still clean them up.
+/// The chains of one job — see [`list_chains`].
 pub fn list_job_chains(folder: &Path, job_id: &str) -> Result<Vec<Chain>> {
+    list_chains(folder, Some(job_id))
+}
+
+/// Scan `folder` for sidecars and group them into chains, oldest chain first.
+/// Unreadable sidecars are skipped with a warning. Children whose parent
+/// sidecar is missing (broken chains) are grouped into their own chain so
+/// retention can still clean them up.
+///
+/// `job_id` says whose images to look at, and the distinction matters because
+/// one folder can hold both kinds: `Some(id)` takes a job's own images, `None`
+/// takes the ones that belong to no job — what a copy made from the command
+/// line writes. Mixing them would let a hand-made image become the parent of a
+/// scheduled job's increment, or the other way round.
+pub fn list_chains(folder: &Path, job_id: Option<&str>) -> Result<Vec<Chain>> {
     let mut entries: Vec<ChainImage> = Vec::new();
 
     for dir_entry in std::fs::read_dir(folder)? {
@@ -148,7 +159,7 @@ pub fn list_job_chains(folder: &Path, job_id: &str) -> Result<Vec<Chain>> {
             }
         };
 
-        if info.job_id.as_deref() != Some(job_id) {
+        if info.job_id.as_deref() != job_id {
             continue;
         }
         let sidecar_path = crate::sidecar::sidecar_path_for(&path);
@@ -472,6 +483,32 @@ mod tests {
         assert_eq!(chain_names(&chains[0]), vec!["a_full.vhdx", "a_inc1.avhdx", "a_inc2.avhdx"]);
         assert_eq!(chain_names(&chains[1]), vec!["b_full.vhdx"]);
         assert_eq!(chains[0].newest_created_at(), "2026-01-03T00:00:00Z");
+    }
+
+    /// A copy made from the command line belongs to no job, and those images
+    /// form chains of their own. Asked for `None`, the listing must see them
+    /// and NOT see a job's — otherwise a hand-made image could become the
+    /// parent of a scheduled job's increment.
+    #[test]
+    fn images_without_a_job_are_a_chain_of_their_own() {
+        let dir = tempfile::tempdir().unwrap();
+        put_image(dir.path(), "cli_full.vhdx", ChainRole::Full, None, None, "2026-03-01T00:00:00Z");
+        put_image(
+            dir.path(),
+            "cli_inc1.avhdx",
+            ChainRole::Incremental,
+            Some("cli_full.vhdx"),
+            None,
+            "2026-03-02T00:00:00Z",
+        );
+        put_image(dir.path(), "job_full.vhdx", ChainRole::Full, None, Some("j1"), "2026-03-03T00:00:00Z");
+
+        let chains = list_chains(dir.path(), None).unwrap();
+        assert_eq!(chains.len(), 1, "the job's image is not ours");
+        assert_eq!(chain_names(&chains[0]), vec!["cli_full.vhdx", "cli_inc1.avhdx"]);
+        // And the job still sees only its own.
+        let job = list_chains(dir.path(), Some("j1")).unwrap();
+        assert_eq!(chain_names(&job[0]), vec!["job_full.vhdx"]);
     }
 
     #[test]
