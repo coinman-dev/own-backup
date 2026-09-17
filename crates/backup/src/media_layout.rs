@@ -466,15 +466,18 @@ pub fn start_media_cmd(app_dir: &str, temp_dir: &str) -> String {
         "if defined OWN_BACKUP_LOG_MIRROR del \"%OWN_BACKUP_LOG_MIRROR%\\write.test\" >nul 2>&1",
         "if defined OWN_BACKUP_LOG_MIRROR echo Logs are copied to: %OWN_BACKUP_LOG_MIRROR%",
         "if not defined OWN_BACKUP_LOG_MIRROR echo Logs stay on the RAM disk only - no writable boot medium found.",
-        "rem Which display driver started and what PnP said about it: the first",
-        "rem question after a dark screen, answered before the mode is touched.",
+        "rem The monitor's own mode. The picker waits for a display driver PnP may",
+        "rem still be installing - on 2026-09-17 it decided one second in, while the",
+        "rem screen was still the basic driver's. The old mode comes back unless a",
+        "rem key is pressed.",
+        &format!("\"{app_dir}\\own-backup-cli.exe\" display --min 1280x720"),
+        "rem Which driver ended up drawing, and what PnP said about it. AFTER the",
+        "rem pick on purpose: by then the stack has settled, and that is the state",
+        "rem the question is about - setupapi.dev.log keeps the earlier lines anyway.",
         &format!(
             "if defined OWN_BACKUP_LOG_MIRROR \"{app_dir}\\own-backup-cli.exe\" display --diag \
              >\"%OWN_BACKUP_LOG_MIRROR%\\display-diag.txt\" 2>&1"
         ),
-        "",
-        "rem The monitor's own mode; the old one comes back unless a key is pressed.",
-        &format!("\"{app_dir}\\own-backup-cli.exe\" display --min 1280x720"),
         &format!("md \"{temp_dir}\" 2>nul"),
         &format!("md \"{temp_dir}\\Profile\\AppData\\Local\" 2>nul"),
         &format!("md \"{temp_dir}\\Profile\\AppData\\Roaming\" 2>nul"),

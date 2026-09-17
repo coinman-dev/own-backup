@@ -30,6 +30,15 @@
 //! And any switch is provisional, the way Windows' own "Keep these display
 //! settings?" is: the old mode comes back unless a key is pressed, because a
 //! monitor that lost the signal cannot show the question.
+//!
+//! **Nothing may be decided while the display stack is still coming up**
+//! (2026-09-17, boot medium). `drvload` returns when the INF is loaded, PnP
+//! installs the device afterwards, and the mode was picked ONE SECOND into
+//! that: `EnumDisplayDevices` answered with nothing at all, the monitor
+//! declared nothing, and the mode list was still the basic driver's — whose
+//! largest entry, 2560×1600, a 32:9 panel in picture-by-picture mode cannot
+//! show. So the stack is waited for first, and when the monitor still says
+//! nothing the screen is left alone unless it is too small to work in.
 
 use clap::Args;
 
@@ -58,6 +67,12 @@ pub struct DisplayArgs {
     /// How long to wait for that key, in seconds.
     #[arg(long, default_value_t = 15)]
     pub confirm_secs: u64,
+
+    /// How long to wait for a display driver PnP is still installing, in
+    /// seconds. Only waited out when a display package is in the image at all;
+    /// 0 asks whatever is up right now.
+    #[arg(long, default_value_t = 20)]
+    pub settle_secs: u64,
 
     /// Show what the display can do and change nothing.
     #[arg(long)]
@@ -213,6 +228,24 @@ pub fn choose_preferred(modes: &[Mode], preferred: Mode) -> Option<Mode> {
         .copied()
 }
 
+/// The mode to take when the monitor declared nothing and the screen is too
+/// small to work in.
+///
+/// The SMALLEST mode that still meets `min` — not the largest on offer. A
+/// driver lists what it can be told to do; without the monitor's own answer
+/// the only safe assumption is that an ordinary, modest size is displayable.
+/// Taking the largest is what blanked a 32:9 panel with 2560×1600 on
+/// 2026-09-17. `--biggest` is there for whoever wants the old behaviour.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn choose_conservative(modes: &[Mode], min: (u32, u32)) -> Option<Mode> {
+    modes
+        .iter()
+        .filter(|m| m.usable() && m.width >= min.0 && m.height >= min.1)
+        .min_by_key(|m| (m.area(), !m.sane_hz(), m.hz))
+        .copied()
+        .or_else(|| biggest(modes))
+}
+
 /// The biggest true-colour mode on offer. Refresh rate breaks ties, but only
 /// among sane ones: a driver that lists 1 Hz means "unspecified", and picking
 /// that would be a worse screen, not a better one.
@@ -250,7 +283,23 @@ pub async fn run(args: DisplayArgs) -> own_backup_common::Result<()> {
     // vendor driver in the image means the driver did not start — the mode
     // list below belongs to the fallback, not the hardware. A virtual adapter
     // presents one head per possible monitor, so identical lines are folded.
-    let adapters = imp::adapters();
+    // Wait for the display stack before anything is read from it. A diagnostic
+    // run asks for the state as it is right now and never waits.
+    let vendor_inf = imp::vendor_display_inf();
+    let (adapters, waited_ms) = if args.diag || args.settle_secs == 0 {
+        (imp::adapters(), 0)
+    } else {
+        imp::wait_for_display_stack(
+            vendor_inf.as_deref(),
+            std::time::Duration::from_secs(args.settle_secs),
+        )
+    };
+    if waited_ms >= 1000 {
+        println!("Ждали драйвер экрана: {:.1} с", waited_ms as f64 / 1000.0);
+    }
+    if adapters.is_empty() {
+        println!("Windows не назвала ни одного видеоадаптера — экран ещё поднимается.");
+    }
     let mut shown: Vec<&String> = Vec::new();
     for a in &adapters {
         if !shown.contains(&a) {
@@ -264,6 +313,7 @@ pub async fn run(args: DisplayArgs) -> own_backup_common::Result<()> {
     // on the medium the screen may be dark by the time anyone reads it, and the
     // log is copied to the boot stick.
     tracing::info!(current = ?current, adapters = ?adapters, virtual_machine = ?virt,
+                   vendor_inf = ?vendor_inf, waited_ms,
                    "display: the screen as found");
 
     if args.diag {
@@ -311,6 +361,8 @@ pub async fn run(args: DisplayArgs) -> own_backup_common::Result<()> {
     } else {
         preferred.and_then(|p| choose_preferred(&modes, p))
     };
+    let current_meets_min =
+        current.as_ref().is_some_and(|c| c.width >= min.0 && c.height >= min.1);
     let best = match from_monitor {
         Some(m) => {
             let p = preferred.unwrap_or(m);
@@ -320,11 +372,37 @@ pub async fn run(args: DisplayArgs) -> own_backup_common::Result<()> {
             );
             m
         }
-        None => {
+        // A virtual machine, or someone who asked for the maximum outright.
+        None if use_prefer || args.biggest => {
             let Some(m) = choose(&modes, min, prefer, use_prefer) else {
                 println!("Драйвер дисплея не перечислил ни одного режима — оставляем как есть.");
                 return Ok(());
             };
+            m
+        }
+        // Real hardware, and the monitor declared nothing. A working screen is
+        // not worth risking for a bigger one nobody vouched for.
+        None if current_meets_min => {
+            let now = current
+                .as_ref()
+                .map(|c| format!("{}x{}", c.width, c.height))
+                .unwrap_or_else(|| "текущий".into());
+            println!(
+                "Монитор свой режим не сообщил, а {now} для интерфейса хватает — оставляем как есть \
+                 (принудительно: --biggest)."
+            );
+            tracing::info!("display: monitor silent, current mode usable — left alone");
+            return Ok(());
+        }
+        None => {
+            let Some(m) = choose_conservative(&modes, min) else {
+                println!("Драйвер дисплея не перечислил ни одного режима — оставляем как есть.");
+                return Ok(());
+            };
+            println!(
+                "Монитор свой режим не сообщил: берём самый скромный подходящий — {}x{}.",
+                m.width, m.height
+            );
             m
         }
     };
@@ -333,17 +411,11 @@ pub async fn run(args: DisplayArgs) -> own_backup_common::Result<()> {
     // Already there? Then there is nothing to do — and in a virtual machine
     // that is the only reason to leave the screen alone, since the chosen mode
     // is deliberately not the biggest one.
+    // Only the size matters here: a mode of the same size at another refresh
+    // rate is not worth a switch the monitor might not survive.
     let same_size =
         current.as_ref().is_some_and(|c| c.width == best.width && c.height == best.height);
-    // The monitor's own mode is exactly what is wanted; "the current one is
-    // at least as big" is no reason to keep a size the monitor did not ask for.
-    let good_enough = same_size
-        || (!use_prefer
-            && from_monitor.is_none()
-            && current.as_ref().is_some_and(|c| {
-                c.width >= min.0 && c.height >= min.1 && c.area() >= best.area()
-            }));
-    if good_enough {
+    if same_size {
         println!("Менять нечего: текущий режим — тот, что нужен.");
         return Ok(());
     }
@@ -601,6 +673,67 @@ mod imp {
         None
     }
 
+    /// A display driver of this machine's own, sitting in the image as an
+    /// `oem*.inf`. Its presence is the reason to wait: PnP may still be
+    /// installing it while this runs, and until it does the mode list belongs
+    /// to Microsoft Basic Display.
+    pub fn vendor_display_inf() -> Option<String> {
+        let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"X:\Windows".into());
+        let dir = std::path::Path::new(&windir).join("INF");
+        for e in std::fs::read_dir(&dir).ok()?.flatten() {
+            let name = e.file_name().to_string_lossy().to_ascii_lowercase();
+            if !(name.starts_with("oem") && name.ends_with(".inf")) {
+                continue;
+            }
+            let text = read_inf(&e.path()).to_ascii_lowercase();
+            // `Class=Display` is how a graphics package announces itself. The
+            // inbox fallbacks are not what anyone is waiting for.
+            if text.contains("class=display")
+                && !text.contains("basicdisplay")
+                && !text.contains("basicrender")
+            {
+                return Some(name);
+            }
+        }
+        None
+    }
+
+    /// Wait until the display stack answers, and — when a display package is in
+    /// the image — until the driver from it has taken the screen over.
+    ///
+    /// Returns the adapters as they finally are and how long that took. On the
+    /// medium of 2026-09-17 this was decided one second into the install:
+    /// `EnumDisplayDevices` returned NOTHING, so neither "which adapter" nor
+    /// "is this a virtual machine" could be answered, and the modes on offer
+    /// were still the basic driver's.
+    pub fn wait_for_display_stack(
+        vendor_inf: Option<&str>,
+        timeout: std::time::Duration,
+    ) -> (Vec<String>, u64) {
+        let start = std::time::Instant::now();
+        loop {
+            let found = adapters();
+            let waited = start.elapsed();
+            // Nothing answered yet: the device is being reinstalled.
+            let ready = !found.is_empty()
+                // With a package of our own in the image, the basic driver is a
+                // stage and not the answer.
+                && (vendor_inf.is_none() || !super::is_basic_display(&found));
+            if ready || waited >= timeout {
+                if !ready {
+                    tracing::info!(
+                        waited_ms = waited.as_millis() as u64,
+                        vendor_inf = ?vendor_inf,
+                        adapters = ?found,
+                        "display: the stack never settled — deciding on what there is"
+                    );
+                }
+                return (found, waited.as_millis() as u64);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+    }
+
     /// The mode the monitor on the primary display asks for — its preferred
     /// timing as the display stack parsed it from EDID/DisplayID, which is
     /// where a 5120×1440 panel's real size lives (a base EDID block cannot
@@ -617,9 +750,12 @@ mod imp {
 
         let (mut np, mut nm) = (0u32, 0u32);
         // SAFETY: plain out-parameters.
-        if unsafe { GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut np, &mut nm) }
-            != ERROR_SUCCESS
-        {
+        let sizes = unsafe { GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut np, &mut nm) };
+        if sizes != ERROR_SUCCESS {
+            // Logged, not swallowed: "the monitor said nothing" and "we could
+            // not ask" lead to the same silence on screen and to very
+            // different fixes.
+            tracing::info!(code = sizes.0, "display: GetDisplayConfigBufferSizes failed");
             return None;
         }
         let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); np as usize];
@@ -636,9 +772,14 @@ mod imp {
             )
         };
         if r != ERROR_SUCCESS {
+            tracing::info!(code = r.0, paths = np, "display: QueryDisplayConfig failed");
             return None;
         }
         paths.truncate(np as usize);
+        if paths.is_empty() {
+            tracing::info!("display: no active display path — nothing to ask about the monitor");
+            return None;
+        }
 
         let primary = primary_device_name();
         let mut first = None;
@@ -661,7 +802,14 @@ mod imp {
             pref.header.adapterId = p.targetInfo.adapterId;
             pref.header.id = p.targetInfo.id;
             // SAFETY: as above.
-            if unsafe { DisplayConfigGetDeviceInfo(&mut pref.header) } != 0 || pref.width == 0 {
+            let got = unsafe { DisplayConfigGetDeviceInfo(&mut pref.header) };
+            if got != 0 || pref.width == 0 {
+                tracing::info!(
+                    source = %source,
+                    code = got,
+                    width = pref.width,
+                    "display: this path declared no preferred mode"
+                );
                 continue;
             }
             let v = pref.targetMode.targetVideoSignalInfo.vSyncFreq;
@@ -893,6 +1041,36 @@ mod tests {
         assert_eq!(choose_preferred(&modes, mh(2560, 1440, 60)).unwrap().hz, 59);
         let modes = vec![mh(2560, 1440, 50), mh(2560, 1440, 70)];
         assert_eq!(choose_preferred(&modes, mh(2560, 1440, 60)).unwrap().hz, 50);
+    }
+
+    /// The list the basic display driver really offered on the boot medium
+    /// (2026-09-17). The monitor is a 32:9 panel showing 2560×1440 per input;
+    /// nothing in this list describes it, and the largest entry blanked it.
+    fn winpe_basic_modes() -> Vec<Mode> {
+        [
+            (1024, 768), (640, 480), (800, 600), (1152, 864), (1280, 768), (1280, 800),
+            (1280, 1024), (1440, 900), (1600, 1200), (1680, 1050), (1856, 1392),
+            (1920, 1200), (2560, 1600), (1600, 768), (1600, 900), (1920, 1080),
+            (1024, 600), (1366, 768),
+        ]
+        .into_iter()
+        .map(|(w, h)| mh(w, h, 60))
+        .collect()
+    }
+
+    #[test]
+    fn with_no_word_from_the_monitor_the_modest_mode_wins() {
+        let chosen = choose_conservative(&winpe_basic_modes(), (1280, 720)).unwrap();
+        assert_eq!((chosen.width, chosen.height), (1280, 768));
+        // The trap this exists for.
+        assert_eq!(biggest(&winpe_basic_modes()).unwrap().width, 2560);
+    }
+
+    #[test]
+    fn nothing_meets_the_minimum_so_the_biggest_is_better_than_nothing() {
+        let modes = vec![mh(800, 600, 60), mh(1024, 768, 60)];
+        assert_eq!(choose_conservative(&modes, (1280, 720)).unwrap().width, 1024);
+        assert_eq!(choose_conservative(&[], (1280, 720)), None);
     }
 
     #[test]
