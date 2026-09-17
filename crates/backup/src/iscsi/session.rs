@@ -5,13 +5,21 @@
 //! both are negotiated away in [`Session::login`]. What varies is the opcode,
 //! and the handful this understands are the ones a Microsoft initiator sends.
 //!
-//! Two decisions shape the write path and are worth stating, because they are
-//! what make it short: `InitialR2T=No` and `ImmediateData=Yes`. The initiator
-//! may therefore send the data of a WRITE straight after the command — as
-//! immediate data and unsolicited Data-Out — and we never have to ask for it
-//! with R2T. Everything else is refused honestly rather than guessed at: an
-//! opcode we do not know gets a Reject, data larger than we said we would take
-//! ends the connection instead of being half-read.
+//! **The data of a write arrives only in the way the login agreed on, and that
+//! is the initiator's decision, not ours** (2026-09-18). This used to assume
+//! `InitialR2T=No` and `ImmediateData=Yes` — the initiator sends the data
+//! straight after the command and nothing has to be asked for. The Microsoft
+//! initiator negotiates the opposite, `InitialR2T=Yes` with `ImmediateData=No`:
+//! it sends the command alone and waits to be asked. So the first write of an
+//! NTFS mount hung here — we waited for data the initiator would never send
+//! unasked, every later command queued behind it, and Windows failed the mount
+//! with device I/O errors after three minutes of them. Both keys are now
+//! honoured with the result function the RFC gives them (OR for `InitialR2T`,
+//! AND for `ImmediateData`), and the data we are owed is asked for with R2T.
+//!
+//! Everything else is refused honestly rather than guessed at: an opcode we do
+//! not know gets a Reject, data larger than we said we would take ends the
+//! connection instead of being half-read.
 
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
@@ -37,6 +45,7 @@ const OP_DATA_OUT: u8 = 0x05;
 const OP_LOGOUT: u8 = 0x06;
 
 /// Opcodes, target → initiator.
+const OP_R2T: u8 = 0x31;
 const OP_NOP_IN: u8 = 0x20;
 const OP_SCSI_RSP: u8 = 0x21;
 const OP_LOGIN_RSP: u8 = 0x23;
@@ -80,6 +89,12 @@ pub struct Session {
     /// What the initiator said it can receive in one data segment.
     initiator_max_recv: u32,
     max_burst: u32,
+    /// The write rules the login settled on. The RFC's defaults are what
+    /// applies when the initiator never mentions a key, and they are the
+    /// cautious pair: nothing arrives until we ask for it.
+    initial_r2t: bool,
+    immediate_data: bool,
+    first_burst: u32,
     reads: u64,
     read_bytes: u64,
     writes: u64,
@@ -97,6 +112,9 @@ impl Session {
             exp_cmd_sn: 0,
             initiator_max_recv: 8192, // the standard's default until told otherwise
             max_burst: MAX_DATA_SEGMENT,
+            initial_r2t: true, // RFC default: ask before anything is sent
+            immediate_data: true,
+            first_burst: 64 * 1024,
             reads: 0,
             read_bytes: 0,
             writes: 0,
@@ -205,9 +223,12 @@ impl Session {
             self.stat_sn = self.stat_sn.wrapping_add(1);
         }
         put_u32(bhs, 28, self.exp_cmd_sn);
-        // The window of commands we will accept. One at a time is all we do,
-        // but a window of zero would stall an initiator that pipelines.
-        put_u32(bhs, 32, self.exp_cmd_sn.wrapping_add(7));
+        // The window of commands we will accept: room for the next one, and
+        // no more. This serves one command at a time, and a wider window only
+        // invites the initiator to send a command while we are in the middle
+        // of collecting the data of a write — where it would be read as
+        // Data-Out and end the connection.
+        put_u32(bhs, 32, self.exp_cmd_sn);
     }
 
     /// Note the command number so the response can acknowledge it. Immediate
@@ -308,6 +329,9 @@ impl Session {
                 discovery = self.discovery,
                 initiator_max_recv = self.initiator_max_recv,
                 max_burst = self.max_burst,
+                first_burst = self.first_burst,
+                initial_r2t = self.initial_r2t,
+                immediate_data = self.immediate_data,
                 "iSCSI session in full feature phase"
             );
         }
@@ -336,14 +360,27 @@ impl Session {
                 self.max_burst = ours;
                 Some(ours.to_string())
             }
-            // Everything in one burst: this is what lets a WRITE arrive without
-            // an R2T round trip.
+            // How much may arrive unsolicited, immediate data included. The
+            // result is the smaller of the two, and never above one burst.
             "FirstBurstLength" => {
                 let ours = number(value).unwrap_or(self.max_burst).min(self.max_burst);
+                self.first_burst = ours;
                 Some(ours.to_string())
             }
-            "InitialR2T" => Some("No".into()),
-            "ImmediateData" => Some("Yes".into()),
+            // Result function: OR. We would rather not ask (`No`), but an
+            // initiator that said `Yes` WILL wait to be asked — answering it
+            // `No` is not a preference, it is a lie, and the write then hangs
+            // on both sides (2026-09-18).
+            "InitialR2T" => {
+                self.initial_r2t = value.eq_ignore_ascii_case("yes");
+                Some(if self.initial_r2t { "Yes" } else { "No" }.into())
+            }
+            // Result function: AND. `No` from the initiator means the command
+            // comes alone, however welcome its data would have been.
+            "ImmediateData" => {
+                self.immediate_data = value.eq_ignore_ascii_case("yes");
+                Some(if self.immediate_data { "Yes" } else { "No" }.into())
+            }
             "MaxOutstandingR2T" => Some("1".into()),
             "DataPDUInOrder" | "DataSequenceInOrder" => Some("Yes".into()),
             // Level 0: a broken connection is retried by logging in again.
@@ -430,31 +467,8 @@ impl Session {
         let expected = u32::from_be_bytes([bhs[20], bhs[21], bhs[22], bhs[23]]) as usize;
         let cdb = &bhs[32..48];
 
-        // Write data: what came with the command, then unsolicited Data-Out
-        // until the promised length is there. No R2T — see the module note.
-        let mut payload = immediate;
-        if writing {
-            while payload.len() < expected {
-                let Some((next, data)) = self.read_pdu(stream)? else {
-                    return Err(dev("iSCSI: connection closed mid-write"));
-                };
-                let op = next[0] & 0x3F;
-                if op != OP_DATA_OUT {
-                    return Err(dev(format!("iSCSI: expected Data-Out, got {op:#04x}")));
-                }
-                let offset = u32::from_be_bytes([next[40], next[41], next[42], next[43]]) as usize;
-                if offset != payload.len() {
-                    return Err(dev(format!(
-                        "iSCSI: Data-Out at offset {offset}, expected {}",
-                        payload.len()
-                    )));
-                }
-                payload.extend_from_slice(&data);
-                if next[1] & 0x80 != 0 && payload.len() >= expected {
-                    break;
-                }
-            }
-        }
+        let payload =
+            if writing { self.collect_write(stream, bhs, immediate, expected)? } else { immediate };
 
         let reply = {
             let mut lun = self.lun.lock().map_err(|_| dev("iSCSI: the LUN lock is poisoned"))?;
@@ -508,6 +522,117 @@ impl Session {
         put_u32(&mut rsp, 36, data_sn);
         put_u32(&mut rsp, 44, residual);
         self.send(stream, &mut rsp, &segment)
+    }
+
+    /// All the data of a write: what came with the command, whatever the login
+    /// allows to follow unasked, and then as many R2T rounds as it takes.
+    ///
+    /// The two halves are not interchangeable. Unsolicited data stops at
+    /// `FirstBurstLength`, and with `InitialR2T=Yes` there is none at all —
+    /// waiting for it is how this hung a Windows mount (see the module note).
+    fn collect_write<S: Read + Write>(
+        &mut self,
+        stream: &mut S,
+        cmd: &[u8; BHS],
+        immediate: Vec<u8>,
+        expected: usize,
+    ) -> Result<Vec<u8>> {
+        let mut payload = immediate;
+        if !self.initial_r2t {
+            // The burst counts the immediate data too, so a command that
+            // already carried its first burst gets nothing more unasked.
+            let burst_end = (self.first_burst as usize).min(expected);
+            while payload.len() < burst_end {
+                let (next, data) = self.read_data_out(stream, cmd, payload.len())?;
+                payload.extend_from_slice(&data);
+                // F bit: the end of this burst, whatever it added up to.
+                if next[1] & 0x80 != 0 {
+                    break;
+                }
+            }
+        }
+        let mut r2t_sn = 0u32;
+        while payload.len() < expected {
+            let want = (expected - payload.len()).min(self.max_burst as usize);
+            self.send_r2t(stream, cmd, payload.len() as u32, want as u32, r2t_sn)?;
+            r2t_sn = r2t_sn.wrapping_add(1);
+            let burst_end = payload.len() + want;
+            while payload.len() < burst_end {
+                let (_next, data) = self.read_data_out(stream, cmd, payload.len())?;
+                payload.extend_from_slice(&data);
+            }
+        }
+        Ok(payload)
+    }
+
+    /// The next Data-Out PDU of this command, which has to continue exactly
+    /// where the data so far ended — anything else would land in the wrong
+    /// place on the image.
+    fn read_data_out<S: Read + Write>(
+        &mut self,
+        stream: &mut S,
+        cmd: &[u8; BHS],
+        at: usize,
+    ) -> Result<([u8; BHS], Vec<u8>)> {
+        let (next, data) = loop {
+            let Some((next, data)) = self.read_pdu(stream)? else {
+                return Err(dev("iSCSI: connection closed mid-write"));
+            };
+            let op = next[0] & 0x3F;
+            // A keep-alive ignores the command window, so it can turn up in
+            // the middle of a write; answering it and going back to waiting is
+            // all it wants.
+            if op == OP_NOP_OUT {
+                self.nop(stream, &next, &data)?;
+                continue;
+            }
+            break (next, data);
+        };
+        let op = next[0] & 0x3F;
+        if op != OP_DATA_OUT {
+            return Err(dev(format!("iSCSI: expected Data-Out, got {op:#04x}")));
+        }
+        if next[16..20] != cmd[16..20] {
+            return Err(dev("iSCSI: Data-Out belongs to another command"));
+        }
+        let offset = u32::from_be_bytes([next[40], next[41], next[42], next[43]]) as usize;
+        if offset != at {
+            return Err(dev(format!("iSCSI: Data-Out at offset {offset}, expected {at}")));
+        }
+        Ok((next, data))
+    }
+
+    /// "Ready To Transfer": send me these bytes of that command, now. The
+    /// initiator answers with Data-Out PDUs echoing the tag.
+    fn send_r2t<S: Write>(
+        &mut self,
+        stream: &mut S,
+        cmd: &[u8; BHS],
+        offset: u32,
+        len: u32,
+        r2t_sn: u32,
+    ) -> Result<()> {
+        let mut pdu = [0u8; BHS];
+        pdu[0] = OP_R2T;
+        pdu[1] = 0x80; // an R2T is always final
+        pdu[8..16].copy_from_slice(&cmd[8..16]); // LUN
+        pdu[16..20].copy_from_slice(&cmd[16..20]); // ITT
+        // Target transfer tag: anything but the all-ones "none", and different
+        // per request so a late Data-Out cannot be mistaken for a fresh one.
+        put_u32(&mut pdu, 20, r2t_sn.wrapping_add(1));
+        self.put_sns(&mut pdu, false); // an R2T carries no status of its own
+        // And the window closes until the data is in: MaxCmdSN one BELOW the
+        // expected number means "send nothing new yet", which is how a
+        // one-command-at-a-time target keeps a write from being interleaved.
+        put_u32(&mut pdu, 32, self.exp_cmd_sn.wrapping_sub(1));
+        put_u32(&mut pdu, 36, r2t_sn);
+        put_u32(&mut pdu, 40, offset);
+        put_u32(&mut pdu, 44, len);
+        // In the log because a write that never gets its data is a hang, and a
+        // hang is what this cost before R2T existed here: the line says what
+        // the target is waiting for.
+        tracing::debug!(offset, len, r2t_sn, "iSCSI: asking for the data of a write");
+        self.send(stream, &mut pdu, &[])
     }
 }
 
@@ -570,12 +695,23 @@ mod tests {
     }
 
     /// A login that transits straight to full feature, the way the Microsoft
-    /// initiator does once it has agreed on the operational keys.
+    /// initiator does once it has agreed on the operational keys — including
+    /// its write keys, which are the cautious pair: it sends nothing until it
+    /// is asked.
     fn login_pdu(session_type: &str, target: &str) -> Vec<u8> {
+        login_with(session_type, target, "InitialR2T=Yes\0ImmediateData=No\0")
+    }
+
+    /// The other shape: an initiator that promises to send the data unasked.
+    fn login_unsolicited(target: &str) -> Vec<u8> {
+        login_with("Normal", target, "InitialR2T=No\0ImmediateData=Yes\0")
+    }
+
+    fn login_with(session_type: &str, target: &str, write_keys: &str) -> Vec<u8> {
         let mut keys = format!(
             "InitiatorName=iqn.1991-05.com.microsoft:test\0SessionType={session_type}\0\
              HeaderDigest=None\0DataDigest=None\0MaxRecvDataSegmentLength=65536\0\
-             MaxBurstLength=262144\0FirstBurstLength=65536\0InitialR2T=Yes\0ImmediateData=No\0"
+             MaxBurstLength=262144\0FirstBurstLength=65536\0{write_keys}"
         );
         if !target.is_empty() {
             keys.push_str(&format!("TargetName={target}\0"));
@@ -588,7 +724,8 @@ mod tests {
         Session::new("iqn.2026-08.dev.ownbackup:image.test".into(), Arc::new(Mutex::new(lun)))
     }
 
-    fn responses(output: &[u8]) -> Vec<(u8, Vec<u8>)> {
+    /// Everything we wrote back, header and data, in order.
+    fn pdus(output: &[u8]) -> Vec<([u8; BHS], Vec<u8>)> {
         let mut out = Vec::new();
         let mut at = 0usize;
         while at + BHS <= output.len() {
@@ -597,10 +734,14 @@ mod tests {
             let len = data_len(&bhs) as usize;
             let start = at + BHS;
             let data = output[start..start + len].to_vec();
-            out.push((bhs[0], data));
+            out.push((bhs, data));
             at = start + len + padding(len);
         }
         out
+    }
+
+    fn responses(output: &[u8]) -> Vec<(u8, Vec<u8>)> {
+        pdus(output).into_iter().map(|(bhs, data)| (bhs[0], data)).collect()
     }
 
     /// The initiator says which status number it expects next; answering with
@@ -626,7 +767,7 @@ mod tests {
 
     #[test]
     fn a_login_is_answered_with_what_we_agreed_to() {
-        let mut wire = Wire::new(login_pdu("Normal", "iqn.2026-08.dev.ownbackup:image.test"));
+        let mut wire = Wire::new(login_unsolicited("iqn.2026-08.dev.ownbackup:image.test"));
         let mut s = session(Lun::read_write(Box::new(MemSource::new(4096))));
         s.run(&mut wire).unwrap();
 
@@ -635,7 +776,11 @@ mod tests {
         assert_eq!(rsp[0].0, OP_LOGIN_RSP);
         let keys = parse_keys(&rsp[0].1);
         let get = |k: &str| keys.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone());
-        // The two that make an unsolicited write legal.
+        // The two that make an unsolicited write legal — agreed to here
+        // because this initiator asked for exactly that; the pair Windows
+        // really sends is the other way round, and
+        // `the_write_keys_are_answered_with_the_result_the_rfc_gives_them`
+        // is about that.
         assert_eq!(get("InitialR2T").as_deref(), Some("No"));
         assert_eq!(get("ImmediateData").as_deref(), Some("Yes"));
         assert_eq!(get("HeaderDigest").as_deref(), Some("None"));
@@ -747,6 +892,105 @@ mod tests {
         lun.lock().unwrap().read_at(0, &mut back).unwrap();
         assert_eq!(&back[..512], &[0x11u8; 512][..]);
         assert_eq!(&back[512..], &[0x22u8; 512][..]);
+    }
+
+    /// What the initiator asked for is what it has to be told. For these two
+    /// keys the answer is not the target's preference: `InitialR2T` is settled
+    /// with OR and `ImmediateData` with AND. Answering the Microsoft
+    /// initiator's pair with our own left both sides waiting — it for an R2T,
+    /// us for its data — and an NTFS mount died of it (2026-09-18).
+    #[test]
+    fn the_write_keys_are_answered_with_the_result_the_rfc_gives_them() {
+        let script = login_pdu("Normal", "iqn.2026-08.dev.ownbackup:image.test");
+        let mut wire = Wire::new(script);
+        let mut s = session(Lun::read_write(Box::new(MemSource::new(4096))));
+        s.run(&mut wire).unwrap();
+
+        let (_, answer) = pdus(&wire.output).into_iter().next().unwrap();
+        let text = String::from_utf8_lossy(&answer).replace('\0', " ");
+        assert!(text.contains("InitialR2T=Yes"), "{text}");
+        assert!(text.contains("ImmediateData=No"), "{text}");
+        assert!(s.initial_r2t, "the initiator asked to be the one who waits");
+        assert!(!s.immediate_data);
+    }
+
+    /// The Microsoft initiator's write: the command arrives alone, and the data
+    /// only after an R2T naming where it goes and how much is wanted.
+    #[test]
+    fn a_write_nobody_sent_unasked_is_asked_for_with_r2t() {
+        let mut script = login_pdu("Normal", "iqn.2026-08.dev.ownbackup:image.test");
+        let mut cmd = pdu(OP_SCSI_CMD, 0xA1, 13, &[]); // final | write, no data
+        cmd[20..24].copy_from_slice(&1024u32.to_be_bytes());
+        cmd[32..42].copy_from_slice(&[0x2A, 0, 0, 0, 0, 0, 0, 0, 2, 0]);
+        let itt = cmd[16..20].to_vec();
+        script.extend(cmd);
+        let mut data = pdu(OP_DATA_OUT, 0x80, 13, &vec![0x33u8; 1024]);
+        data[40..44].copy_from_slice(&0u32.to_be_bytes());
+        script.extend(data);
+
+        let lun = Arc::new(Mutex::new(Lun::read_write(Box::new(MemSource::new(4096)))));
+        let mut wire = Wire::new(script);
+        let mut s = Session::new("iqn.2026-08.dev.ownbackup:image.test".into(), lun.clone());
+        s.run(&mut wire).unwrap();
+
+        let r2t = pdus(&wire.output)
+            .into_iter()
+            .find(|(bhs, _)| bhs[0] == OP_R2T)
+            .expect("the write must have been asked for");
+        let (bhs, _) = r2t;
+        assert_eq!(&bhs[16..20], &itt[..], "the R2T names the command it is for");
+        assert_ne!(u32::from_be_bytes(bhs[20..24].try_into().unwrap()), u32::MAX);
+        assert_eq!(u32::from_be_bytes(bhs[40..44].try_into().unwrap()), 0);
+        assert_eq!(u32::from_be_bytes(bhs[44..48].try_into().unwrap()), 1024);
+        // The command window is shut until the data is in: a command sent now
+        // would be read as the data we asked for and end the connection.
+        let exp_cmd_sn = u32::from_be_bytes(bhs[28..32].try_into().unwrap());
+        assert_eq!(
+            u32::from_be_bytes(bhs[32..36].try_into().unwrap()),
+            exp_cmd_sn.wrapping_sub(1),
+            "the window must be closed while the write is being collected"
+        );
+        // And open again once the command is answered.
+        let (last, _) = pdus(&wire.output).into_iter().last().unwrap();
+        assert_eq!(last[0], OP_SCSI_RSP);
+        assert_eq!(
+            u32::from_be_bytes(last[32..36].try_into().unwrap()),
+            u32::from_be_bytes(last[28..32].try_into().unwrap()),
+            "the next command is welcome once this one is done"
+        );
+
+        let mut back = vec![0u8; 1024];
+        lun.lock().unwrap().read_at(0, &mut back).unwrap();
+        assert_eq!(back, vec![0x33u8; 1024]);
+        assert_eq!(s.writes, 1);
+    }
+
+    /// And an initiator that promised to send the data unasked is taken at its
+    /// word: nothing is asked for, the burst is read as it arrives.
+    #[test]
+    fn data_sent_unasked_is_taken_when_the_login_allowed_it() {
+        let mut script = login_unsolicited("iqn.2026-08.dev.ownbackup:image.test");
+        let mut cmd = pdu(OP_SCSI_CMD, 0xA1, 14, &vec![0x44u8; 512]);
+        cmd[20..24].copy_from_slice(&1024u32.to_be_bytes());
+        cmd[32..42].copy_from_slice(&[0x2A, 0, 0, 0, 0, 0, 0, 0, 2, 0]);
+        script.extend(cmd);
+        let mut rest = pdu(OP_DATA_OUT, 0x80, 14, &vec![0x55u8; 512]);
+        rest[40..44].copy_from_slice(&512u32.to_be_bytes());
+        script.extend(rest);
+
+        let lun = Arc::new(Mutex::new(Lun::read_write(Box::new(MemSource::new(4096)))));
+        let mut wire = Wire::new(script);
+        let mut s = Session::new("iqn.2026-08.dev.ownbackup:image.test".into(), lun.clone());
+        s.run(&mut wire).unwrap();
+
+        assert!(
+            pdus(&wire.output).iter().all(|(bhs, _)| bhs[0] != OP_R2T),
+            "nothing had to be asked for"
+        );
+        let mut back = vec![0u8; 1024];
+        lun.lock().unwrap().read_at(0, &mut back).unwrap();
+        assert_eq!(&back[..512], &[0x44u8; 512][..]);
+        assert_eq!(&back[512..], &[0x55u8; 512][..]);
     }
 
     /// Data-Out that does not continue where the last piece ended would be
