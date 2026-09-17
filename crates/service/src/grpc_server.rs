@@ -768,7 +768,6 @@ impl BackupService for BackupServiceImpl {
                     recommended: d.recommended,
                     role: d.role,
                     device: d.device,
-                    display: d.display,
                     inbox: d.inbox,
                 })
                 .collect();

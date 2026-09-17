@@ -141,11 +141,6 @@ pub struct DriverPackageDto {
     /// the user recognises; "oem34.inf" is not.
     #[serde(default)]
     pub device: String,
-    /// Bound to a present video adapter. Offered as a choice of its own, not
-    /// ticked by default: the package is large and the medium works without
-    /// it — only at the resolution the firmware leaves.
-    #[serde(default)]
-    pub display: bool,
     /// Not a package: a present disk or network device on a driver that ships
     /// with Windows. Nothing to choose — shown so the wizard can say so, and
     /// checked against the base image during the build.

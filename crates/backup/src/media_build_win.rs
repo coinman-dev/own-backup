@@ -16,7 +16,7 @@
 //!   exactly why "universal" rescue media cannot see NVMe or RAID controllers.
 
 use crate::media_layout as layout;
-use crate::media_layout::{display_role, rescue_role, DISPLAY_CLASS, RESCUE_CLASS_GUIDS};
+use crate::media_layout::{rescue_role, RESCUE_CLASS_GUIDS};
 use crate::wim_info::read_wim_info;
 use own_backup_common::{OwnBackupError, Result};
 use std::path::{Path, PathBuf};
@@ -46,9 +46,6 @@ pub struct DriverPackage {
     /// Ethernet Connection I219-V" rather than "oem34.inf". Several devices
     /// on one package (two identical cards) are all named.
     pub device: String,
-    /// Bound to a present video adapter ([`crate::media_layout::DISPLAY_CLASS`]).
-    /// Never `recommended`: it is offered as a choice of its own.
-    pub display: bool,
     /// Not a package at all: a present disk or network device running on a
     /// driver that ships with Windows (`stornvme.inf`, `net1ic64.inf`). There
     /// is nothing to export, so it is listed only to be SAID — and the build
@@ -66,8 +63,8 @@ struct PresentDevice {
     name: Option<String>,
 }
 
-/// The devices of this machine a medium cares about — rescue classes and video
-/// adapters — each with the INF it is bound to.
+/// The devices of this machine a medium cares about — the rescue classes — each
+/// with the INF it is bound to.
 ///
 /// `-PresentOnly` keeps a printer unplugged two years ago out of the answer,
 /// and the instance id's prefix is the bus.
@@ -79,7 +76,6 @@ struct PresentDevice {
 fn present_devices() -> std::result::Result<Vec<PresentDevice>, String> {
     let guid_list = RESCUE_CLASS_GUIDS
         .iter()
-        .chain(std::iter::once(&DISPLAY_CLASS.0))
         .map(|g| format!("'{g}'"))
         .collect::<Vec<_>>()
         .join(",");
@@ -139,26 +135,20 @@ pub fn list_driver_packages() -> std::result::Result<Vec<DriverPackage>, String>
         .map_err(|_| "поток опроса драйверов упал".to_string())?
         .map_err(|e| format!("не удалось перечислить установленные драйверы: {e}"))?;
 
-    // inf -> (role, device names, is a video adapter) for everything a medium
-    // would want. One package can drive several present devices — two
-    // identical cards, or a GPU and its twin output — and every one is named.
+    // inf -> (role, device names) for everything a medium would want. One
+    // package can drive several present devices — two identical cards — and
+    // every one is named.
     struct Wanted {
         role: String,
         names: Vec<String>,
-        display: bool,
     }
     let mut wanted: std::collections::HashMap<String, Wanted> = Default::default();
     for d in &present {
         let (Some(inf), Some(guid), Some(bus)) = (&d.inf, &d.guid, &d.bus) else { continue };
-        let (role, display) = match (rescue_role(guid, bus), display_role(guid, bus)) {
-            (Some(role), _) => (role, false),
-            (None, Some(role)) => (role, true),
-            (None, None) => continue,
-        };
+        let Some(role) = rescue_role(guid, bus) else { continue };
         let entry = wanted.entry(inf.to_ascii_lowercase()).or_insert_with(|| Wanted {
             role: role.to_string(),
             names: Vec::new(),
-            display,
         });
         let name = d.name.clone().unwrap_or_default();
         if !name.is_empty() && !entry.names.contains(&name) {
@@ -182,8 +172,7 @@ pub fn list_driver_packages() -> std::result::Result<Vec<DriverPackage>, String>
                 provider: r.provider_name.unwrap_or_default(),
                 version: r.version.unwrap_or_default(),
                 size_bytes: size,
-                recommended: hit.is_some_and(|w| !w.display),
-                display: hit.is_some_and(|w| w.display),
+                recommended: hit.is_some(),
                 role: hit.map(|w| w.role.clone()).unwrap_or_default(),
                 device: hit.map(|w| w.names.join(", ")).unwrap_or_default(),
                 inbox: false,
@@ -193,12 +182,10 @@ pub fn list_driver_packages() -> std::result::Result<Vec<DriverPackage>, String>
         .collect();
 
     // Disks and network running on Windows' own drivers: no package to offer,
-    // but "nothing found" would be the wrong thing to say about them. Video
-    // adapters are left out here — one on an inbox driver is on Microsoft
-    // Basic Display, and there is no better driver to be had from this machine.
+    // but "nothing found" would be the wrong thing to say about them.
     let mut inbox: Vec<DriverPackage> = wanted
         .iter()
-        .filter(|(inf, w)| !w.display && !layout::is_published_inf(inf))
+        .filter(|(inf, _)| !layout::is_published_inf(inf))
         .map(|(inf, w)| DriverPackage {
             inf: inf.clone(),
             original_name: inf.clone(),
@@ -207,7 +194,6 @@ pub fn list_driver_packages() -> std::result::Result<Vec<DriverPackage>, String>
             version: String::new(),
             size_bytes: 0,
             recommended: false,
-            display: false,
             inbox: true,
             role: w.role.clone(),
             device: w.names.join(", "),
@@ -235,7 +221,6 @@ pub fn list_driver_packages() -> std::result::Result<Vec<DriverPackage>, String>
                 recommended: true,
                 role: "экран и устройства виртуальной машины".into(),
                 device: "VMware Tools (windows.iso)".into(),
-                display: false,
                 inbox: false,
             },
         );
@@ -245,14 +230,9 @@ pub fn list_driver_packages() -> std::result::Result<Vec<DriverPackage>, String>
     info!(
         total = list.len(),
         recommended = list.iter().filter(|d| d.recommended).count(),
-        display = list.iter().filter(|d| d.display).count(),
         inbox = list.iter().filter(|d| d.inbox).count(),
         "driver packages enumerated"
     );
-    for d in list.iter().filter(|d| d.display) {
-        info!(inf = %d.inf, device = %d.device, provider = %d.provider,
-              mb = d.size_bytes >> 20, "video adapter driver offered");
-    }
     Ok(list)
 }
 
@@ -1065,6 +1045,16 @@ fn lay_out_media(wim: &Path, media: &Path) -> Result<()> {
     // Windows starts, and this is where: the loader is told to take the
     // highest mode the firmware offers instead of its 1024×768 default. A
     // failure here costs a small screen, not the medium, so it only warns.
+    //
+    // "The highest the firmware offers" depends on the firmware's SETUP, not
+    // on anything on the medium (2026-09-18, GeForce GTX 1070 Ti, Samsung
+    // C49G95T). With CSM — the Compatibility Support Module — enabled, the top
+    // of the list was 1280×1024, by all appearances the modes of the card's
+    // legacy video BIOS; with CSM disabled the card's own UEFI driver answers,
+    // and the medium came up in the monitor's recommended mode. That is also why
+    // video adapter drivers are no longer offered for the medium: the GeForce
+    // one never gave a picture in WinPE (four outputs enumerated, none lit), and
+    // the firmware gives the right mode by itself once asked properly.
     if let Err(e) =
         run("bcdedit", &["/store", &bcd.display().to_string(), "/set", "{default}", "highestmode", "on"])
     {

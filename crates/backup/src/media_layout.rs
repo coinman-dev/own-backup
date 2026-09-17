@@ -192,35 +192,6 @@ pub const RESCUE_CLASS_GUIDS: [&str; 5] = [
     "{36fc9e60-c465-11cf-8056-444553540000}",
 ];
 
-/// Video adapters: every graphics device the machine really has — integrated,
-/// discrete, several at once — whatever the vendor.
-///
-/// Not a rescue class, because the medium works without them and they are
-/// the largest packages in the store (a GeForce driver is over a gigabyte,
-/// which WinPE then holds in RAM). But without one the medium is stuck on
-/// Microsoft Basic Display, which on UEFI draws in whatever mode the firmware
-/// and the boot loader left — measured 2026-09-17 on a 5120×1440 monitor:
-/// one mode, 1280×1024, and no way to change it from inside Windows. So they
-/// are found as carefully as the rescue classes and offered as their own
-/// choice.
-///
-/// PCI only. A physical GPU always sits there, the integrated one included;
-/// what hangs off `ROOT` or `SWD` is software — the remote-desktop adapter,
-/// virtual monitors for streaming — and has nothing to show a monitor. USB
-/// display adapters (DisplayLink and the like) are left out too: they are
-/// indirect-display drivers leaning on a user-mode service, and none has been
-/// tried in WinPE.
-pub const DISPLAY_CLASS: (&str, &[&str], &str) =
-    ("{4d36e968-e325-11ce-bfc1-08002be10318}", &["PCI"], "видеоадаптер");
-
-/// Is this class/bus pair a real video adapter? Returns what it is, in words.
-pub fn display_role(class_guid: &str, bus: &str) -> Option<&'static str> {
-    let (g, buses, role) = DISPLAY_CLASS;
-    (g.eq_ignore_ascii_case(class_guid.trim())
-        && buses.iter().any(|b| b.eq_ignore_ascii_case(bus.trim())))
-    .then_some(role)
-}
-
 /// Is this the published name of a third-party package (`oem12.inf`)?
 ///
 /// That is the only kind `pnputil` can export. Everything else a device can be
@@ -936,21 +907,16 @@ mod tests {
         assert_eq!(RESCUE_CLASS_GUIDS.len(), RESCUE_CLASSES.len());
     }
 
-    /// Every physical GPU, whoever made it, and nothing that only pretends to
-    /// be one.
+    /// A video adapter is never a rescue device. Its driver is the largest
+    /// package in the store, and on the medium it never gave a picture — the
+    /// resolution comes from the firmware, with CSM disabled (2026-09-18).
     #[test]
-    fn video_adapters_are_the_real_ones_on_pci() {
-        let g = "{4d36e968-e325-11ce-bfc1-08002be10318}";
-        assert_eq!(display_role(g, "PCI"), Some("видеоадаптер"));
-        assert_eq!(display_role(&g.to_uppercase(), " pci "), Some("видеоадаптер"));
-        for bus in ["ROOT", "SWD", "USB"] {
-            assert_eq!(display_role(g, bus), None, "{bus} is not a GPU");
+    fn a_video_adapter_is_not_a_rescue_device() {
+        let display = "{4d36e968-e325-11ce-bfc1-08002be10318}";
+        for bus in ["PCI", "ROOT", "SWD", "USB"] {
+            assert_eq!(rescue_role(display, bus), None, "{bus}");
         }
-        // A video adapter is not a rescue device, and a rescue device is not a
-        // video adapter: the two choices must never pull in each other.
-        assert_eq!(rescue_role(g, "PCI"), None);
-        assert_eq!(display_role("{4d36e972-e325-11ce-bfc1-08002be10318}", "PCI"), None);
-        assert!(!RESCUE_CLASS_GUIDS.contains(&DISPLAY_CLASS.0));
+        assert!(!RESCUE_CLASS_GUIDS.contains(&display));
     }
 
     /// The names from a real Windows 11 machine (2026-09-17): every disk and

@@ -699,8 +699,6 @@ export interface DriverPackage {
   role: string;
   /** The device's own name, which is what the user recognises. */
   device: string;
-  /** Bound to a present video adapter: offered as its own choice. */
-  display: boolean;
   /** Not a package: a present disk/network device on a driver built into
    *  Windows. Shown, not chosen; the build checks the image has it. */
   inbox: boolean;

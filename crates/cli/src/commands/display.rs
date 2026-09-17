@@ -50,6 +50,15 @@
 //! after a driver load is not this module's doing — but it is this module's job
 //! to SAY so, which is why "adapters enumerated, none of them drawing" is
 //! reported loudly instead of being passed over.
+//!
+//! **And the resolution was the firmware's all along** (2026-09-18, same
+//! machine). With CSM — the Compatibility Support Module — disabled in the
+//! firmware setup, the loader's `highestmode` from the medium's BCD got the
+//! monitor's recommended mode, and Microsoft Basic Display drew in it with no
+//! vendor driver at all; with CSM on, the top of the firmware's list had been
+//! 1280×1024. Video adapter drivers are no longer offered for the medium, and
+//! on real hardware on the basic driver this command says where the setting
+//! is, because nothing on the medium can change it.
 
 use clap::Args;
 
@@ -347,6 +356,15 @@ pub async fn run(args: DisplayArgs) -> own_backup_common::Result<()> {
     tracing::info!(current = ?current, adapters = ?adapters, virtual_machine = ?virt,
                    vendor_inf = ?vendor_inf, waited_ms,
                    "display: the screen as found");
+    // Real hardware on the basic driver: the mode is what the loader took from
+    // the firmware, and how large it can be is a firmware setting. Said in the
+    // diagnostic too — that is the file read when the screen is too small.
+    if virt.is_none() && is_basic_display(&adapters) {
+        println!(
+            "Разрешение выбрала прошивка при загрузке. Если оно меньше рекомендованного \
+             монитором, отключите CSM (Compatibility Support Module) в настройках BIOS/UEFI."
+        );
+    }
 
     if args.diag {
         imp::diag();

@@ -27,7 +27,6 @@
   let includeDrivers = $state(true);
   // Off by default: the medium works without them, and a GPU driver is often
   // bigger than everything else on it together — held in RAM from boot.
-  let includeVideo = $state(false);
   let loadingDrivers = $state(false);
   let driverError: string | null = $state(null);
 
@@ -48,13 +47,9 @@
   const chosenBytes = $derived(
     offered.filter((d) => selected.has(d.inf)).reduce((s, d) => s + d.size_bytes, 0),
   );
-  // Every video adapter the machine has, whoever made it — found by the
-  // service, not guessed here.
-  const video = $derived(drivers.filter((d) => d.display));
   // Disks and network on Windows' own drivers: nothing to pick, but they are
   // this machine's hardware and the user should see that they were looked at.
   const inbox = $derived(drivers.filter((d) => d.inbox));
-  const videoBytes = $derived(video.reduce((s, d) => s + d.size_bytes, 0));
   /** The build is over: the button becomes "Готово" and closes the dialog. */
   const finished = $derived(!!report);
 
@@ -83,7 +78,7 @@
   // medium with no drivers at all.
   const canStart = $derived(
     isWindows && !building && !!base && outputDir.trim().length > 0 &&
-    !((includeDrivers || includeVideo) && loadingDrivers),
+    !(includeDrivers && loadingDrivers),
   );
 
   onMount(() => {
@@ -130,12 +125,7 @@
       report = await api.buildBootMedia({
         base_wim: base?.path ?? '',
         output_iso: `${outputDir}${sep}OwnBackup.iso`,
-        drivers: [
-          ...new Set([
-            ...(includeDrivers ? selected : []),
-            ...(includeVideo ? video.map((d) => d.inf) : []),
-          ]),
-        ],
+        drivers: includeDrivers ? [...selected] : [],
         extra_drivers: '',
         runtime_in_image: runtimeInImage,
       });
@@ -205,34 +195,6 @@
             <span class="opt-note">
               без них носитель может не увидеть диски: именно поэтому
               «универсальные» носители не находят NVMe и RAID
-            </span>
-          </span>
-        </label>
-
-        <!-- Right under the drivers option, above the list: both are choices
-             about drivers, and the list is the long, detailed part. -->
-        <label class="opt">
-          <input type="checkbox" bind:checked={includeVideo}
-                 disabled={building || loadingDrivers || video.length === 0} />
-          <span>
-            Добавить драйверы видеоадаптеров
-            <span class="opt-note">
-              {#if loadingDrivers}
-                опрос оборудования…
-              {:else if driverError}
-                оборудование опросить не удалось
-              {:else if video.length === 0}
-                у видеоадаптеров этой машины нет отдельных драйверов — экран на
-                носителе будет в режиме, который оставит прошивка
-              {:else}
-                {video.map((d) => d.device || d.original_name).join(', ')} ·
-                {formatBytes(videoBytes)}. Может дать родное разрешение монитора —
-                а может погасить экран: WinPE поднимает такой драйвер не всегда, и
-                тогда картинки нет вовсе, помогает только перезагрузка (проверено
-                17.09.2026, GeForce GTX 1070 Ti). Сначала соберите без них: без
-                драйвера экран остаётся в режиме прошивки, обычно 1024×768 или
-                1280×1024, но он работает
-              {/if}
             </span>
           </span>
         </label>
@@ -307,6 +269,26 @@
             {/if}
           </div>
         {/if}
+
+        <!-- Not an option: the screen on the medium is the firmware's business,
+             and the one setting that decides it is in the firmware. Video
+             adapter drivers used to be offered here instead; the GeForce one
+             left WinPE with no picture at all, while switching CSM off gave the
+             monitor's recommended mode with no driver (2026-09-18). -->
+        <div class="screen">
+          <div class="screen-title">Разрешение экрана на носителе</div>
+          Режим экрана выбирает прошивка компьютера при загрузке, видеодрайверы
+          для этого не нужны. Чтобы носитель открылся в разрешении, которое
+          рекомендует монитор, отключите в настройках BIOS/UEFI модуль CSM
+          (Compatibility Support Module — обычно в разделе загрузки, пункт
+          «Launch CSM» или «CSM Support»). С включённым CSM экран может остаться
+          в 1024×768 или 1280×1024.
+          <span class="screen-warn">
+            Если основная система этого компьютера установлена в режиме Legacy
+            (MBR), без CSM она не загрузится — после работы с носителем включите
+            его обратно.
+          </span>
+        </div>
       {/if}
 
       <!-- The queue -->
@@ -412,6 +394,9 @@
   .opt input { margin-top: 2px; flex-shrink: 0; }
   .opt-note { display: block; font-size: 12px; color: var(--text-muted); line-height: 1.4; margin-top: 2px; }
   .drivers { margin-top: 16px; }
+  .screen { margin-top: 16px; font-size: 12px; color: var(--text-muted); line-height: 1.5; }
+  .screen-title { font-size: 13px; color: var(--head); margin-bottom: 2px; }
+  .screen-warn { display: block; margin-top: 4px; }
   .inbox { margin-top: 10px; }
   .inbox .muted { margin-bottom: 6px; }
   .inbox-row { cursor: default; color: var(--text-muted); }
