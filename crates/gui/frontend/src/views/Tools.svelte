@@ -210,7 +210,9 @@
         <button class="btn primary" onclick={mount} disabled={mountBusy || !toolsState.mountPath || isCurrentPathMounted}>
           Подключить
         </button>
-        <button class="btn outline" onclick={unmount} disabled={mountBusy || !toolsState.mountPath}>
+        <!-- Nothing mounted, nothing to detach: the button says so by being
+             unavailable, instead of failing on the second press. -->
+        <button class="btn outline" onclick={unmount} disabled={mountBusy || !isCurrentPathMounted}>
           Отключить
         </button>
       </div>

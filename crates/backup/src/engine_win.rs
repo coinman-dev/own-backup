@@ -4362,6 +4362,16 @@ pub fn unmount_image(image_path: &Path) -> Result<()> {
     if qcow2_mounts().lock().unwrap().contains_key(image_path) {
         return unmount_qcow2_via_iscsi(image_path);
     }
+    // A qcow2 we are not serving is simply not mounted — and must never reach
+    // the VHDX road below, which hands it to `OpenVirtualDisk` and gets "the
+    // file or directory is corrupted" (error 1392) for an image that is
+    // perfectly fine (seen 2026-09-18, on a second press of "Отключить").
+    if is_qcow2_file(image_path) {
+        return Err(OwnBackupError::Config(format!(
+            "{} сейчас не подключён — отключать нечего",
+            image_path.display()
+        )));
+    }
 
     let child_path = child_path_for(image_path);
     if child_path.exists() {
@@ -4991,6 +5001,15 @@ pub fn get_all_active_mounts(
     }
 
     result
+}
+
+/// Is this file a qcow2? By its magic, not by its extension: what a backup is
+/// called is the user's business, what it is is the file's own.
+fn is_qcow2_file(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(path) else { return false };
+    let mut magic = [0u8; 4];
+    f.read_exact(&mut magic).is_ok() && magic == [0x51, 0x46, 0x49, 0xFB]
 }
 
 /// Parse `\\.\PhysicalDriveN` → `N`.
