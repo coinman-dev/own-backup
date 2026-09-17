@@ -2,7 +2,9 @@
   import { media } from '../lib/mediaStore.svelte';
   import { api } from '../lib/api';
   import { formatBytes, formatDate, formatClock } from '../lib/format';
-  import { jobs, jobStatus, sourceSummary, runJob, cancelRunning } from '../lib/jobStore.svelte';
+  import {
+    jobs, jobStatus, sourceSummary, runJob, cancelRunning, runClock, etaMs,
+  } from '../lib/jobStore.svelte';
   import InfoModal from '../components/InfoModal.svelte';
   import type { Job } from '../lib/types';
 
@@ -72,61 +74,25 @@
     return p.percent;
   });
 
-  // Elapsed clock + ETA from recent throughput (a sliding window), reset each
-  // time a run (or a new phase) starts. "оценка…" until the window is wide.
+  // Elapsed clock + ETA from recent throughput. Both are counted in the job
+  // store: this view is unmounted every time the user walks through the menu,
+  // and a clock kept here started again from zero on the way back.
   let nowMs = $state(Date.now());
-  let etaMs = $state(NaN);
-  let startMs = $state(0);
-  let samples: { t: number; blocks: number }[] = [];
-  let lastPhase = '';
+  const eta = $derived(running ? etaMs(job.id) : NaN);
 
+  // The only thing this view still ticks: the "Прошло" line, which has to
+  // move on its own between progress messages.
   $effect(() => {
-    const p = jobs.progress[job.id];
-    if (!running || !p) {
-      samples = [];
-      lastPhase = '';
-      return;
-    }
-    if (p.phase !== lastPhase) {
-      lastPhase = p.phase;
-      samples = [];
-      startMs = Date.now();
-    }
-    const last = samples[samples.length - 1];
-    if (last && last.blocks === p.blocks_done) return;
-    const t = Date.now();
-    samples.push({ t, blocks: p.blocks_done });
-    while (samples.length > 2 && samples[0].t < t - 12000) samples.shift();
-  });
-
-  $effect(() => {
-    if (!running) {
-      etaMs = NaN;
-      return;
-    }
-    const tick = () => {
-      nowMs = Date.now();
-      const p = jobs.progress[job.id];
-      if (!p || samples.length < 2) {
-        etaMs = NaN;
-        return;
-      }
-      const first = samples[0];
-      const last = samples[samples.length - 1];
-      const dt = last.t - first.t;
-      const db = last.blocks - first.blocks;
-      if (dt < 1500 || db <= 0) {
-        etaMs = NaN;
-        return;
-      }
-      etaMs = ((p.blocks_total - p.blocks_done) * dt) / db;
-    };
-    tick();
-    const id = setInterval(tick, 500);
+    if (!running) return;
+    nowMs = Date.now();
+    const id = setInterval(() => (nowMs = Date.now()), 500);
     return () => clearInterval(id);
   });
 
-  const elapsedMs = $derived(running && startMs ? nowMs - startMs : 0);
+  const elapsedMs = $derived.by(() => {
+    const c = runClock[job.id];
+    return running && c ? nowMs - c.startMs : 0;
+  });
 
   // Destination as shown in the progress line: the folder plus the file this
   // run is writing into it — "D:\Temp" alone does not say WHAT is appearing
@@ -147,17 +113,12 @@
     { key: 'linux', name: 'Linux', color: '#14b8a6' },
     { key: 'other', name: 'Другое', color: '#9aa0ad' },
   ] as const;
-  // Сводка, присланная сразу после скана. Приходит одним сообщением и дальше
-  // не меняется, поэтому держится отдельно от `progress`, который обновляется
-  // по десять раз в секунду и это поле не несёт.
-  let liveCategories = $state<Record<string, number> | null>(null);
-  $effect(() => {
+  // Сводка, присланная сразу после скана: приходит одним сообщением, а
+  // дальше её переносит из сообщения в сообщение хранилище прогона — здесь
+  // хранить её нельзя, это представление живёт только пока на него смотрят.
+  const liveCategories = $derived.by(() => {
     const pairs = progress?.categories;
-    if (pairs && pairs.length) {
-      liveCategories = Object.fromEntries(pairs);
-    }
-    // Прогон кончился — дальше показываем то, что записано в результате.
-    if (!progress) liveCategories = null;
+    return pairs && pairs.length ? Object.fromEntries(pairs) : null;
   });
 
   const catData = $derived.by(() => {
@@ -299,7 +260,7 @@
           {sourceSummary(job)} → {destPath}
         </span>
         <span class="times">
-          Прошло {formatClock(elapsedMs)} · Осталось {Number.isFinite(etaMs) ? '~' + formatClock(etaMs) : 'оценка…'}
+          Прошло {formatClock(elapsedMs)} · Осталось {Number.isFinite(eta) ? '~' + formatClock(eta) : 'оценка…'}
         </span>
       </div>
     </div>

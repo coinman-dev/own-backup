@@ -30,6 +30,27 @@ export const engine = $state({
   verifyProgress: null as EngineProgress | null,
 });
 
+/** When the running restore started and how fast it has been going lately.
+ *  In the store, like the progress itself: the restore view is unmounted the
+ *  moment the user walks through the menu, and a clock kept there started
+ *  again from zero on the way back (2026-09-18). */
+export const restoreClock = $state({
+  startMs: 0,
+  samples: [] as { t: number; blocks: number }[],
+});
+
+/** How long the restore still has at the rate of the last few seconds, or
+ *  `NaN` while the window is too short to say anything. */
+export function restoreEtaMs(): number {
+  const p = engine.restoreProgress;
+  const s = restoreClock.samples;
+  if (!p || s.length < 2) return NaN;
+  const dt = s[s.length - 1].t - s[0].t;
+  const db = s[s.length - 1].blocks - s[0].blocks;
+  if (dt < 1500 || db <= 0) return NaN;
+  return ((p.blocks_total - p.blocks_done) * dt) / db;
+}
+
 let inited = false;
 
 export async function initEngine(): Promise<void> {
@@ -38,6 +59,13 @@ export async function initEngine(): Promise<void> {
 
   await listen<EngineProgress>('restore-progress', (e) => {
     engine.restoreProgress = e.payload;
+    const now = Date.now();
+    const s = restoreClock.samples;
+    if (s.length === 0) restoreClock.startMs = now;
+    if (s.length === 0 || s[s.length - 1].blocks !== e.payload.blocks_done) {
+      s.push({ t: now, blocks: e.payload.blocks_done });
+      while (s.length > 2 && s[0].t < now - 12000) s.shift();
+    }
   });
   await listen<EngineProgress>('verify-progress', (e) => {
     engine.verifyProgress = e.payload;
@@ -122,6 +150,8 @@ export async function runRestore(imagePath: string, target: string): Promise<voi
   engine.restoreProgress = null;
   engine.restoreSummary = null;
   engine.restoreError = null;
+  restoreClock.startMs = 0;
+  restoreClock.samples = [];
   try {
     engine.restoreSummary = await api.restoreNow(imagePath, target);
   } catch (e) {

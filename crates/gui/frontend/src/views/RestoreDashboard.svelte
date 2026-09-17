@@ -4,7 +4,9 @@
   // `mappings` and nothing else. A disk is touched at exactly one point —
   // `api.applyRestorePlan`, below, after the dry run has passed with no errors
   // and the user has typed a confirmation.
-  import { engine, cancelCurrent, clearRestoreResult, refreshVolumes } from '../lib/engineStore.svelte';
+  import {
+    engine, cancelCurrent, clearRestoreResult, refreshVolumes, restoreClock, restoreEtaMs,
+  } from '../lib/engineStore.svelte';
   import { listen } from '@tauri-apps/api/event';
   import { jobs } from '../lib/jobStore.svelte';
   import { api } from '../lib/api';
@@ -1341,54 +1343,21 @@
   const summary = $derived(engine.restoreSummary);
   const errorMsg = $derived(formError ?? engine.restoreError);
 
-  // Elapsed + ETA from recent throughput.
+  // Elapsed + ETA from recent throughput. Counted in the engine store, which
+  // outlives this view — it is unmounted on every walk through the menu.
   let nowMs = $state(Date.now());
-  let etaMs = $state(NaN);
-  let startMs = $state(0);
-  let samples: { t: number; blocks: number }[] = [];
+  const eta = $derived(running ? restoreEtaMs() : NaN);
 
+  // All this view still ticks: the "Прошло" line has to move between
+  // progress messages.
   $effect(() => {
-    const p = engine.restoreProgress;
-    if (!running || !p) {
-      samples = [];
-      return;
-    }
-    if (samples.length === 0) startMs = Date.now();
-    const last = samples[samples.length - 1];
-    if (last && last.blocks === p.blocks_done) return;
-    const t = Date.now();
-    samples.push({ t, blocks: p.blocks_done });
-    while (samples.length > 2 && samples[0].t < t - 12000) samples.shift();
-  });
-
-  $effect(() => {
-    if (!running) {
-      etaMs = NaN;
-      return;
-    }
-    const tick = () => {
-      nowMs = Date.now();
-      const p = engine.restoreProgress;
-      if (!p || samples.length < 2) {
-        etaMs = NaN;
-        return;
-      }
-      const first = samples[0];
-      const last = samples[samples.length - 1];
-      const dt = last.t - first.t;
-      const db = last.blocks - first.blocks;
-      if (dt < 1500 || db <= 0) {
-        etaMs = NaN;
-        return;
-      }
-      etaMs = ((p.blocks_total - p.blocks_done) * dt) / db;
-    };
-    tick();
-    const id = setInterval(tick, 500);
+    if (!running) return;
+    nowMs = Date.now();
+    const id = setInterval(() => (nowMs = Date.now()), 500);
     return () => clearInterval(id);
   });
 
-  const elapsedMs = $derived(running && startMs ? nowMs - startMs : 0);
+  const elapsedMs = $derived(running && restoreClock.startMs ? nowMs - restoreClock.startMs : 0);
 
   // "Восстановить" runs the DRY RUN and shows what it found alongside the
   // queue. Applying the plan is destructive and stays deliberately unwired —
@@ -1903,7 +1872,7 @@
       <div class="bar"><div class="bar-fill" style="width:{progress?.percent ?? 0}%"></div></div>
       <div class="progress-meta">
         <span class="route">{job.name} → {targetLabel}</span>
-        <span class="times">Прошло {formatClock(elapsedMs)} · Осталось {Number.isFinite(etaMs) ? '~' + formatClock(etaMs) : 'оценка…'}</span>
+        <span class="times">Прошло {formatClock(elapsedMs)} · Осталось {Number.isFinite(eta) ? '~' + formatClock(eta) : 'оценка…'}</span>
       </div>
     </div>
   {/if}

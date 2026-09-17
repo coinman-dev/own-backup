@@ -6,6 +6,15 @@ import { listen } from '@tauri-apps/api/event';
 import { api } from './api';
 import type { Job, JobRun, JobProgress, QueueSnapshot, DecryptResult } from './types';
 
+/** What a running job's view needs but the events do not repeat: when the
+ *  current phase started and a short window of recent throughput for the
+ *  estimate. */
+interface RunClock {
+  phase: string;
+  startMs: number;
+  samples: { t: number; blocks: number }[];
+}
+
 export const jobs = $state({
   list: [] as Job[],
   loaded: false,
@@ -24,6 +33,40 @@ export const decryptedVolumes = $state<
   Record<string, { label: string; used_bytes: number; filesystem: string; linux_last_mounted: string }>
 >({});
 
+/** Timing of the runs going on right now, by job id. Here and not in the view
+ *  because walking through the menu unmounts the view: the elapsed clock then
+ *  started again from zero, and the estimate with it (2026-09-18). */
+export const runClock = $state<Record<string, RunClock>>({});
+
+/** Note the time of a progress message: a new phase starts the clock afresh,
+ *  and the throughput window keeps the last twelve seconds. */
+function keepTime(p: JobProgress): void {
+  const now = Date.now();
+  let c = runClock[p.job_id];
+  if (!c || c.phase !== p.phase) {
+    c = { phase: p.phase, startMs: now, samples: [] };
+    runClock[p.job_id] = c;
+  }
+  const last = c.samples[c.samples.length - 1];
+  if (last && last.blocks === p.blocks_done) return;
+  c.samples.push({ t: now, blocks: p.blocks_done });
+  while (c.samples.length > 2 && c.samples[0].t < now - 12000) c.samples.shift();
+}
+
+/** How long the current phase still has at the rate of the last few seconds,
+ *  or `NaN` while the window is too short to say anything. */
+export function etaMs(jobId: string): number {
+  const p = jobs.progress[jobId];
+  const c = runClock[jobId];
+  if (!p || !c || c.samples.length < 2) return NaN;
+  const first = c.samples[0];
+  const last = c.samples[c.samples.length - 1];
+  const dt = last.t - first.t;
+  const db = last.blocks - first.blocks;
+  if (dt < 1500 || db <= 0) return NaN;
+  return ((p.blocks_total - p.blocks_done) * dt) / db;
+}
+
 let inited = false;
 
 export async function initJobs(): Promise<void> {
@@ -31,13 +74,24 @@ export async function initJobs(): Promise<void> {
   inited = true;
 
   await listen<JobProgress>('job-progress', (e) => {
-    jobs.progress[e.payload.job_id] = e.payload;
+    const p = e.payload;
+    // Разбивка по типам файлов приходит ОДИН раз, сразу после скана, и
+    // следующие сообщения её не несут — здесь она переносится из предыдущего.
+    // Пока она жила в представлении, достаточно было уйти в другой раздел и
+    // вернуться, чтобы она исчезла до конца прогона (2026-09-18).
+    const prev = jobs.progress[p.job_id];
+    if (!p.categories?.length && prev?.categories?.length) {
+      p.categories = prev.categories;
+    }
+    jobs.progress[p.job_id] = p;
+    keepTime(p);
   });
   await listen<QueueSnapshot>('queue-changed', (e) => {
     jobs.queue = e.payload;
   });
   await listen<JobRun>('job-finished', (e) => {
     delete jobs.progress[e.payload.job_id];
+    delete runClock[e.payload.job_id];
     void reloadJobs();
     void reloadActivity();
   });
