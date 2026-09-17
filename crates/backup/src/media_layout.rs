@@ -19,13 +19,16 @@ use std::path::{Path, PathBuf};
 
 /// Folder on the medium's partition holding everything that does not need to be
 /// in RAM. The marker file inside it is how the running medium recognises which
-/// drive it booted from.
+/// drive it booted from — always written, because the logs go there too.
 pub const MEDIA_DIR: &str = "OwnBackup";
 /// Marker file, content is its own explanation for anyone who finds it.
 pub const MEDIA_MARKER: &str = "media.id";
 pub const MEDIA_MARKER_TEXT: &str =
     "My Own Backup boot medium. This file marks the volume so the medium can \
-     find its own WebView2 runtime after boot.\r\n";
+     find its own files after boot; its logs are kept in the logs folder beside it.\r\n";
+
+/// Where on the boot medium the running medium keeps a copy of its logs.
+pub const MEDIA_LOGS_DIR: &str = "logs";
 
 /// Program files that go inside the image, so they are present even if the
 /// medium's own partition somehow does not come up.
@@ -174,6 +177,48 @@ pub const RESCUE_CLASS_GUIDS: [&str; 5] = [
     "{4d36e972-e325-11ce-bfc1-08002be10318}",
     "{36fc9e60-c465-11cf-8056-444553540000}",
 ];
+
+/// Video adapters: every graphics device the machine really has — integrated,
+/// discrete, several at once — whatever the vendor.
+///
+/// Not a rescue class, because the medium works without them and they are
+/// the largest packages in the store (a GeForce driver is over a gigabyte,
+/// which WinPE then holds in RAM). But without one the medium is stuck on
+/// Microsoft Basic Display, which on UEFI draws in whatever mode the firmware
+/// and the boot loader left — measured 2026-09-17 on a 5120×1440 monitor:
+/// one mode, 1280×1024, and no way to change it from inside Windows. So they
+/// are found as carefully as the rescue classes and offered as their own
+/// choice.
+///
+/// PCI only. A physical GPU always sits there, the integrated one included;
+/// what hangs off `ROOT` or `SWD` is software — the remote-desktop adapter,
+/// virtual monitors for streaming — and has nothing to show a monitor. USB
+/// display adapters (DisplayLink and the like) are left out too: they are
+/// indirect-display drivers leaning on a user-mode service, and none has been
+/// tried in WinPE.
+pub const DISPLAY_CLASS: (&str, &[&str], &str) =
+    ("{4d36e968-e325-11ce-bfc1-08002be10318}", &["PCI"], "видеоадаптер");
+
+/// Is this class/bus pair a real video adapter? Returns what it is, in words.
+pub fn display_role(class_guid: &str, bus: &str) -> Option<&'static str> {
+    let (g, buses, role) = DISPLAY_CLASS;
+    (g.eq_ignore_ascii_case(class_guid.trim())
+        && buses.iter().any(|b| b.eq_ignore_ascii_case(bus.trim())))
+    .then_some(role)
+}
+
+/// Is this the published name of a third-party package (`oem12.inf`)?
+///
+/// That is the only kind `pnputil` can export. Everything else a device can be
+/// bound to — `stornvme.inf`, `net1ic64.inf` — ships with Windows, and whether
+/// the medium has it depends on the base image, not on this machine's store.
+pub fn is_published_inf(inf: &str) -> bool {
+    let lower = inf.trim().to_ascii_lowercase();
+    lower
+        .strip_prefix("oem")
+        .and_then(|rest| rest.strip_suffix(".inf"))
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
 
 /// Does this class/bus pair belong on a rescue medium? Returns what it is, in
 /// words, so the interface can say why a driver is on the list.
@@ -390,9 +435,45 @@ pub fn startnet_cmd(app_dir: &str) -> String {
 pub fn start_media_cmd(app_dir: &str, temp_dir: &str) -> String {
     let args_file = format!("{app_dir}\\webview2-args.txt");
     let marker = format!("{MEDIA_DIR}\\{MEDIA_MARKER}");
+    let logs = format!("{MEDIA_DIR}\\{MEDIA_LOGS_DIR}");
     lines(&[
         "@echo off",
         "title My Own Backup",
+        "rem Media mode: state goes to the RAM disk instead of the rescued machine's",
+        "rem C:, the engine runs as a process, and no VSS is attempted (the system",
+        "rem here is offline, so a direct read is already consistent). Set first:",
+        "rem every program below, the screen-mode picker included, must know it.",
+        "set \"OWN_BACKUP_MEDIA=1\"",
+        "",
+        "rem The drive the medium booted from, found by its marker - WinPE gives it",
+        "rem whatever letter it likes. X: is the RAM disk and is never it.",
+        "set \"MEDIA=\"",
+        &format!(
+            "for %%D in (C D E F G H I J K L M N O P Q R S T U V W Y Z) do \
+             if exist \"%%D:\\{marker}\" if not defined MEDIA set \"MEDIA=%%D:\""
+        ),
+        "",
+        "rem Every log is copied there, line by line, if the medium is writable: a",
+        "rem session that ends in a dark screen or a reboot leaves its logs on a RAM",
+        "rem disk that is gone. A DVD or a mounted ISO is read-only and simply skipped.",
+        "set \"OWN_BACKUP_LOG_MIRROR=\"",
+        &format!("if defined MEDIA md \"%MEDIA%\\{logs}\" 2>nul"),
+        &format!("if defined MEDIA copy /y nul \"%MEDIA%\\{logs}\\write.test\" >nul 2>&1"),
+        &format!(
+            "if defined MEDIA if exist \"%MEDIA%\\{logs}\\write.test\" \
+             set \"OWN_BACKUP_LOG_MIRROR=%MEDIA%\\{logs}\""
+        ),
+        "if defined OWN_BACKUP_LOG_MIRROR del \"%OWN_BACKUP_LOG_MIRROR%\\write.test\" >nul 2>&1",
+        "if defined OWN_BACKUP_LOG_MIRROR echo Logs are copied to: %OWN_BACKUP_LOG_MIRROR%",
+        "if not defined OWN_BACKUP_LOG_MIRROR echo Logs stay on the RAM disk only - no writable boot medium found.",
+        "rem Which display driver started and what PnP said about it: the first",
+        "rem question after a dark screen, answered before the mode is touched.",
+        &format!(
+            "if defined OWN_BACKUP_LOG_MIRROR \"{app_dir}\\own-backup-cli.exe\" display --diag \
+             >\"%OWN_BACKUP_LOG_MIRROR%\\display-diag.txt\" 2>&1"
+        ),
+        "",
+        "rem The monitor's own mode; the old one comes back unless a key is pressed.",
         &format!("\"{app_dir}\\own-backup-cli.exe\" display --min 1280x720"),
         &format!("md \"{temp_dir}\" 2>nul"),
         &format!("md \"{temp_dir}\\Profile\\AppData\\Local\" 2>nul"),
@@ -404,15 +485,14 @@ pub fn start_media_cmd(app_dir: &str, temp_dir: &str) -> String {
         &format!("set \"LOCALAPPDATA={temp_dir}\\Profile\\AppData\\Local\""),
         &format!("set \"APPDATA={temp_dir}\\Profile\\AppData\\Roaming\""),
         "",
-        "rem The runtime is on the medium's own partition, not in the image: it is",
-        "rem 250 MB that WinPE would otherwise hold in RAM from boot to shutdown.",
-        "rem The letter is not known in advance, so the volume is found by its marker.",
-        &format!("set \"WV=\""),
+        "rem The runtime is either in the image or on the medium's own partition (it",
+        "rem is 250 MB that WinPE would otherwise hold in RAM). The marker is on",
+        "rem every medium now, so the runtime itself is what is looked for.",
+        &format!("set \"WV={app_dir}\\WebView2\""),
         &format!(
-            "for %%D in (C D E F G H I J K L M N O P Q R S T U V W Y Z) do \
-             if exist \"%%D:\\{marker}\" if not defined WV set \"WV=%%D:\\{MEDIA_DIR}\\WebView2\""
+            "if defined MEDIA if exist \"%MEDIA%\\{MEDIA_DIR}\\WebView2\\msedgewebview2.exe\" \
+             set \"WV=%MEDIA%\\{MEDIA_DIR}\\WebView2\""
         ),
-        &format!("if not defined WV set \"WV={app_dir}\\WebView2\""),
         "set \"WEBVIEW2_BROWSER_EXECUTABLE_FOLDER=%WV%\"",
         "echo WebView2: %WV%",
         &format!("set \"WEBVIEW2_USER_DATA_FOLDER={temp_dir}\\WebView2Data\""),
@@ -435,10 +515,6 @@ pub fn start_media_cmd(app_dir: &str, temp_dir: &str) -> String {
         "rem interfaces here - it is a rescue environment on a RAM disk.",
         "wpeutil disablefirewall >nul 2>&1",
         "",
-        "rem Media mode: state goes to the RAM disk instead of the rescued machine's",
-        "rem C:, the engine runs as a process, and no VSS is attempted (the system",
-        "rem here is offline, so a direct read is already consistent).",
-        "set \"OWN_BACKUP_MEDIA=1\"",
         "set \"RUST_BACKTRACE=1\"",
         "set \"RUST_LOG=info,own_backup_gui=debug\"",
         "echo Starting the engine...",
@@ -449,7 +525,7 @@ pub fn start_media_cmd(app_dir: &str, temp_dir: &str) -> String {
         &format!("start \"\" \"{app_dir}\\own-backup-gui.exe\""),
         "echo.",
         "echo The interface starts in its own window; this console stays usable.",
-        "echo The engine runs without a window of its own — its log is the place to look.",
+        "echo The engine runs without a window of its own - its log is the place to look.",
         "echo If no window appears, look at:",
         &format!("echo   \"{app_dir}\\own-backup-gui.log\""),
         &format!("echo   \"{app_dir}\\own-backup-service.log\""),
@@ -570,6 +646,23 @@ mod tests {
         assert!(INPUT_LOCALES.contains("0419"), "Russian has to be one of them");
     }
 
+    /// `cmd` reads a batch file in the console's OEM code page, and that page
+    /// comes from the base image's language: an en-US WinRE printed a UTF-8
+    /// dash as `ΓÇö`. Only ASCII reads the same on every base.
+    #[test]
+    fn the_boot_scripts_are_plain_ascii() {
+        let app = r"X:\Program Files\OwnBackup";
+        for (name, text) in [
+            ("startnet.cmd", startnet_cmd(app)),
+            ("start-media.cmd", start_media_cmd(app, r"X:\Windows\Temp\OwnBackup")),
+            ("webview2-args.txt", webview2_args_file(r"X:\Windows\Temp\OwnBackup\webview2.log")),
+        ] {
+            if let Some(line) = text.lines().find(|l| !l.is_ascii()) {
+                panic!("{name} has a non-ASCII line: {line:?}");
+            }
+        }
+    }
+
     /// The console has to survive a window that never appears — that is how the
     /// first medium trapped its user.
     #[test]
@@ -599,8 +692,27 @@ mod tests {
     fn the_runtime_is_found_by_marker_with_a_fallback() {
         let s = start_media_cmd(r"X:\Program Files\OwnBackup", r"X:\Windows\Temp\OwnBackup");
         assert!(s.contains(&format!(r"{MEDIA_DIR}\{MEDIA_MARKER}")));
-        assert!(s.contains(r"if not defined WV set "), "a fallback path must exist");
+        assert!(s.contains(r#"set "WV=X:\Program Files\OwnBackup\WebView2""#), "the in-image runtime is the fallback");
+        // The marker is on every medium now, so it alone must not redirect the
+        // runtime to a folder that is not there.
+        assert!(s.contains(r"WebView2\msedgewebview2.exe"));
         assert!(s.contains("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER=%WV%"));
+    }
+
+    /// A dark screen ended the session of 2026-09-17 with every log on the RAM
+    /// disk. The copy on the stick has to be switched on before the first
+    /// program runs — the screen-mode picker is the one that did it — and media
+    /// mode has to be known before any of them reads its settings.
+    #[test]
+    fn logs_go_to_the_boot_medium_before_anything_runs() {
+        let s = start_media_cmd(r"X:\Program Files\OwnBackup", r"X:\Windows\Temp\OwnBackup");
+        let media = s.find("OWN_BACKUP_MEDIA=1").unwrap();
+        let mirror = s.find(r#"set "OWN_BACKUP_LOG_MIRROR=%MEDIA%\OwnBackup\logs""#).expect("mirror set");
+        let display = s.find("display --min").unwrap();
+        let engine = s.find("own-backup-service.exe").unwrap();
+        assert!(media < display && mirror < display && display < engine);
+        // Only on a medium that takes a write: a DVD must not end the script.
+        assert!(s.contains("write.test"));
     }
 
     #[test]
@@ -768,6 +880,36 @@ mod tests {
             assert!(RESCUE_CLASS_GUIDS.contains(&g), "{g} missing from the query list");
         }
         assert_eq!(RESCUE_CLASS_GUIDS.len(), RESCUE_CLASSES.len());
+    }
+
+    /// Every physical GPU, whoever made it, and nothing that only pretends to
+    /// be one.
+    #[test]
+    fn video_adapters_are_the_real_ones_on_pci() {
+        let g = "{4d36e968-e325-11ce-bfc1-08002be10318}";
+        assert_eq!(display_role(g, "PCI"), Some("видеоадаптер"));
+        assert_eq!(display_role(&g.to_uppercase(), " pci "), Some("видеоадаптер"));
+        for bus in ["ROOT", "SWD", "USB"] {
+            assert_eq!(display_role(g, bus), None, "{bus} is not a GPU");
+        }
+        // A video adapter is not a rescue device, and a rescue device is not a
+        // video adapter: the two choices must never pull in each other.
+        assert_eq!(rescue_role(g, "PCI"), None);
+        assert_eq!(display_role("{4d36e972-e325-11ce-bfc1-08002be10318}", "PCI"), None);
+        assert!(!RESCUE_CLASS_GUIDS.contains(&DISPLAY_CLASS.0));
+    }
+
+    /// The names from a real Windows 11 machine (2026-09-17): every disk and
+    /// network device there ran on an inbox driver, and the wizard said
+    /// "nothing found" about hardware that plainly had drivers.
+    #[test]
+    fn published_names_are_told_from_inbox_ones() {
+        for inf in ["oem3.inf", "OEM12.INF", " oem105.inf "] {
+            assert!(is_published_inf(inf), "{inf}");
+        }
+        for inf in ["stornvme.inf", "net1ic64.inf", "netrtwlane.inf", "mshdc.inf", "oem.inf", "oemsetup.inf", "oem3.sys"] {
+            assert!(!is_published_inf(inf), "{inf}");
+        }
     }
 
     #[test]

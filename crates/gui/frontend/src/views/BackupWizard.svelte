@@ -311,7 +311,12 @@
     // Keyed on the captured layout, not on bootability: `retain_for_backup`
     // keeps the MSR slot in ANY whole-disk copy, so a non-bootable one must
     // show it as included too.
-    if (!isDiskCaptured(d)) return [];
+    //
+    // But only once there IS a copy — something on the disk chosen. Picking
+    // the disk alone selects nothing, and a map that opened with the MSR
+    // already ticked (and no way to untick it) read as a selection made for
+    // the user (2026-09-17). Every partition starts unselected.
+    if (!isDiskCaptured(d) || !diskHasSelection(d)) return [];
     return d.partitions
       .filter((p) => (p.gpt_type_guid || '').replace(/[{}]/g, '').toUpperCase() === MSR_GUID)
       .map((p) => p.index);

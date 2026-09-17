@@ -15,6 +15,7 @@
 //! middle of a rescue.
 
 use crate::wim_info::{read_wim_info, WimInfo};
+use own_backup_common::types::PartitionTable;
 use std::path::{Path, PathBuf};
 
 /// Where a candidate came from. Shown to the user, because "found on D:" and
@@ -27,7 +28,7 @@ pub enum BaseOrigin {
     Registered,
     /// `%SystemRoot%\System32\Recovery` — where it waits while WinRE is off.
     SystemRecovery,
-    /// `\Recovery\WindowsRE` on a volume, lettered or given a letter by us.
+    /// `\Recovery\WindowsRE` on a volume, by its letter or its volume GUID path.
     RecoveryFolder,
     /// Chosen by the user in a file dialog.
     Manual,
@@ -65,20 +66,63 @@ pub struct ReAgentInfo {
     /// Directory the image is registered in, relative to its volume
     /// (`\Recovery\WindowsRE`). Empty when nothing is registered.
     pub winre_dir: String,
-    /// GUID of the volume holding it — the letterless recovery partition, on a
-    /// normal installation.
-    pub winre_volume_guid: String,
+    /// The partition holding it is named by its DISK and its place on it, not
+    /// by a volume: `guid` is the GPT disk GUID (all zeros on MBR), `id` the
+    /// MBR disk signature in decimal (0 on GPT), `offset` the partition's start
+    /// in bytes. The first version of this read `guid` as a volume GUID, so the
+    /// registered image was never found — `\\?\Volume{disk GUID}\` names no
+    /// volume — and the search always fell through to the slower sweeps.
+    pub winre_disk_guid: String,
+    pub winre_disk_signature: u32,
+    pub winre_offset: u64,
     /// `10.0.19041.1` — the build the environment belongs to.
     pub os_build: String,
 }
 
+impl ReAgentInfo {
+    /// Something is registered and it says where: a directory, and a disk to
+    /// look for it on.
+    pub fn has_location(&self) -> bool {
+        !self.winre_dir.is_empty()
+            && (!self.winre_disk_guid.is_empty() || self.winre_disk_signature != 0)
+    }
+
+    /// Whether a disk with this scheme and id (as the inventory reports it:
+    /// GPT GUID without braces, MBR signature as hex) is the one registered.
+    pub fn is_registered_disk(&self, table: PartitionTable, disk_id: &str) -> bool {
+        match table {
+            PartitionTable::Gpt => {
+                !self.winre_disk_guid.is_empty()
+                    && bare_guid(&self.winre_disk_guid) == bare_guid(disk_id)
+            }
+            PartitionTable::Mbr => {
+                self.winre_disk_signature != 0
+                    && u32::from_str_radix(disk_id, 16).ok() == Some(self.winre_disk_signature)
+            }
+        }
+    }
+}
+
+/// `{8f9e951e-…}` → `8F9E951E-…`, for comparison.
+fn bare_guid(g: &str) -> String {
+    g.trim().trim_start_matches('{').trim_end_matches('}').to_ascii_uppercase()
+}
+
 /// Parse `ReAgent.xml`. Attribute soup, no schema: the file is small, flat and
-/// stable, and pulling three attributes out of it does not justify a dependency.
+/// stable, and pulling a few attributes out of it does not justify a dependency.
 pub fn parse_reagent_xml(xml: &str) -> ReAgentInfo {
+    let disk_guid = attr(xml, "WinreLocation", "guid").unwrap_or_default();
+    let disk_guid_is_zero = bare_guid(&disk_guid).chars().all(|c| c == '0' || c == '-');
     ReAgentInfo {
         enabled: attr(xml, "InstallState", "state").as_deref() == Some("1"),
         winre_dir: attr(xml, "WinreLocation", "path").unwrap_or_default(),
-        winre_volume_guid: attr(xml, "WinreLocation", "guid").unwrap_or_default(),
+        winre_disk_guid: if disk_guid_is_zero { String::new() } else { disk_guid },
+        winre_disk_signature: attr(xml, "WinreLocation", "id")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
+        winre_offset: attr(xml, "WinreLocation", "offset")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
         os_build: attr(xml, "OsBuildVersion", "path").unwrap_or_default(),
     }
 }
@@ -89,8 +133,12 @@ fn attr(xml: &str, element: &str, attribute: &str) -> Option<String> {
     let rest = &xml[start..];
     let end = rest.find('>')?;
     let tag = &rest[..end];
+    // Whole attribute names only: `id="` is also the tail of `guid="`.
     let key = format!("{attribute}=\"");
-    let vs = tag.find(&key)? + key.len();
+    let vs = tag
+        .match_indices(&key)
+        .find(|(i, _)| tag[..*i].ends_with(char::is_whitespace))
+        .map(|(i, _)| i + key.len())?;
     let ve = tag[vs..].find('"')? + vs;
     let v = tag[vs..ve].trim();
     (!v.is_empty()).then(|| v.to_string())
@@ -181,24 +229,45 @@ pub fn find_base_images() -> Vec<BaseImage> {
         }
     };
 
-    // 1. What the recovery environment itself points at. Its volume usually has
-    //    no letter, so the path is resolved through the volume GUID.
+    // Every path handed out must still open when the medium is BUILT, which is
+    // another request, minutes later. So a letterless volume is named by its
+    // volume GUID path (`\\?\Volume{…}\Recovery\…`), which the file API opens
+    // directly — never through a letter lent for the search. That is what this
+    // did at first, and the build then failed with "path not found" on a letter
+    // given back the moment the search ended.
+    let volume_root = |volume: &str| -> String {
+        // `"X:"` joined as-is would be drive-RELATIVE (`X:Recovery\…`).
+        match crate::volume_win::volume_drive_letters(volume).first() {
+            Some(letter) => format!("{letter}\\"),
+            None => volume.to_string(),
+        }
+    };
+
+    // 1. What the recovery environment itself points at: a partition named by
+    //    its disk and offset, found among the volumes by exactly that.
     let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
     let reagent = PathBuf::from(&system_root).join(r"System32\Recovery\ReAgent.xml");
     if let Ok(text) = std::fs::read_to_string(&reagent) {
         let ra = parse_reagent_xml(&text);
         tracing::info!(enabled = ra.enabled, dir = %ra.winre_dir, build = %ra.os_build,
-                       "ReAgent.xml read");
-        if !ra.winre_volume_guid.is_empty() && !ra.winre_dir.is_empty() {
-            // ReAgent writes the GUID with its braces, which is exactly the form
-            // a volume path wants: \\?\Volume{GUID}\ .
-            let root = format!(r"\\?\Volume{}\", ra.winre_volume_guid);
+                       disk_guid = %ra.winre_disk_guid, disk_signature = ra.winre_disk_signature,
+                       offset = ra.winre_offset, "ReAgent.xml read");
+        if ra.has_location() {
             let dir = ra.winre_dir.trim_start_matches('\\');
-            consider(
-                PathBuf::from(root).join(dir).join("Winre.wim"),
-                BaseOrigin::Registered,
-                &mut found,
-            );
+            let registered = crate::volume_win::all_volume_roots().into_iter().find(|v| {
+                matches!(crate::volume_win::volume_start_on_disk(v),
+                         Some((disk, offset)) if offset == ra.winre_offset
+                             && own_backup_inventory::win_disks::disk_identity(disk)
+                                 .is_some_and(|(t, id)| ra.is_registered_disk(t, &id)))
+            });
+            match registered {
+                Some(volume) => consider(
+                    PathBuf::from(volume_root(&volume)).join(dir).join("Winre.wim"),
+                    BaseOrigin::Registered,
+                    &mut found,
+                ),
+                None => tracing::info!("the registered recovery partition is not among the volumes"),
+            }
         }
     }
 
@@ -229,23 +298,19 @@ pub fn find_base_images() -> Vec<BaseImage> {
     }
 
     // 4. Recovery partitions with no letter — the usual case on a factory
-    //    installation. Each is given a temporary mount point, looked at, and
-    //    released; a volume that already had a letter keeps it.
+    //    installation. Looked at through the volume GUID path; nothing is
+    //    mounted, so nothing flashes up in Explorer either.
     for volume in crate::volume_win::all_volume_roots() {
         // A volume that already answers to a letter was covered by the sweep
-        // above; giving it a second mount point would be pointless work.
+        // above, under the name the user knows it by.
+        if !crate::volume_win::volume_drive_letters(&volume).is_empty() {
+            continue;
+        }
         if std::fs::metadata(&volume).is_err() {
             continue; // not readable at all (offline disk, empty reader)
         }
-        let Ok(temp) = crate::letters_win::TempDriveLetter::acquire(&volume) else {
-            continue;
-        };
-        let mount = temp.mount_point().to_string();
-        if mount.is_empty() {
-            continue;
-        }
         consider(
-            PathBuf::from(&mount).join(r"Recovery\WindowsRE\Winre.wim"),
+            PathBuf::from(&volume).join(r"Recovery\WindowsRE\Winre.wim"),
             BaseOrigin::RecoveryFolder,
             &mut found,
         );
@@ -304,8 +369,44 @@ mod tests {
         let ra = parse_reagent_xml(REAGENT_ENABLED);
         assert!(ra.enabled);
         assert_eq!(ra.winre_dir, r"\Recovery\WindowsRE");
-        assert_eq!(ra.winre_volume_guid, "{8f9e951e-0000-0000-0000-000000000000}");
+        assert_eq!(ra.winre_disk_guid, "{8f9e951e-0000-0000-0000-000000000000}");
+        assert_eq!(ra.winre_disk_signature, 0);
+        assert_eq!(ra.winre_offset, 1048576);
         assert_eq!(ra.os_build, "10.0.19041.1");
+        assert!(ra.has_location());
+    }
+
+    /// `guid` names the DISK, compared with what the inventory reports for it:
+    /// uppercase, no braces. Right offset on the wrong disk is not the image.
+    #[test]
+    fn a_gpt_location_matches_its_disk_and_no_other() {
+        let ra = parse_reagent_xml(REAGENT_ENABLED);
+        assert!(ra.is_registered_disk(PartitionTable::Gpt, "8F9E951E-0000-0000-0000-000000000000"));
+        assert!(!ra.is_registered_disk(PartitionTable::Gpt, "8F9E951E-0000-0000-0000-000000000001"));
+        assert!(!ra.is_registered_disk(PartitionTable::Mbr, "00000000"));
+    }
+
+    /// On MBR the disk is named by its signature, in decimal, and `guid` is all
+    /// zeros — which must not be taken for a GPT disk with a zero GUID.
+    #[test]
+    fn an_mbr_location_is_named_by_the_decimal_signature() {
+        let xml = r#"<WindowsRE version="2.0"><WinreLocation path="\Recovery\WindowsRE" id="1560802729" offset="115153920" guid="{00000000-0000-0000-0000-000000000000}"/></WindowsRE>"#;
+        let ra = parse_reagent_xml(xml);
+        assert!(ra.winre_disk_guid.is_empty());
+        assert_eq!(ra.winre_disk_signature, 1560802729);
+        assert_eq!(ra.winre_offset, 115153920);
+        assert!(ra.has_location());
+        assert!(ra.is_registered_disk(PartitionTable::Mbr, "5D07F5A9"));
+        assert!(!ra.is_registered_disk(PartitionTable::Mbr, "5D07F5AA"));
+        assert!(!ra.is_registered_disk(PartitionTable::Gpt, ""));
+    }
+
+    /// `id="` is also the tail of `guid="`; the order of attributes must not
+    /// decide which one is read.
+    #[test]
+    fn attributes_are_matched_by_whole_name() {
+        let xml = r#"<WinreLocation guid="{00000000-0000-0000-0000-000000000000}" path="\R" offset="1" id="42"/>"#;
+        assert_eq!(parse_reagent_xml(xml).winre_disk_signature, 42);
     }
 
     /// The case that started this: WinRE switched off, so the XML registers
@@ -318,6 +419,7 @@ mod tests {
         let ra = parse_reagent_xml(&xml);
         assert!(!ra.enabled);
         assert!(ra.winre_dir.is_empty());
+        assert!(!ra.has_location());
     }
 
     #[test]

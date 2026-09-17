@@ -119,7 +119,19 @@ pub fn init() -> Option<PathBuf> {
                 .with(
                     tracing_subscriber::fmt::layer()
                         .with_ansi(false)
-                        .with_writer(std::sync::Mutex::new(f))
+                        // The same second copy the service and the interface
+                        // keep: on the boot medium this is the stick, and the
+                        // screen-mode decisions made before either of them
+                        // starts are exactly what a dark screen leaves unread.
+                        .with_writer(std::sync::Mutex::new(
+                            own_backup_common::log_mirror::TeeLog::new(
+                                f,
+                                own_backup_common::log_mirror::MirrorLog::new(
+                                    AppConfig::default_path(),
+                                    "own-backup-cli.log",
+                                ),
+                            ),
+                        ))
                         .with_filter(file_filter),
                 )
                 .init();

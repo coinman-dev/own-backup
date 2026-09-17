@@ -15,11 +15,11 @@
 # УДАЛЯЕТСЯ по --force (пересоберётся само):
 #   - target/ (обычно десятки гигабайт), frontend/node_modules, frontend/dist,
 #     кэши .svelte-kit / .vite;
-#   - собранные exe и pdb в win-files/ и linux-files/ (сами каталоги остаются);
+#   - собранные exe и pdb в win/ и linux-files/ (сами каталоги остаются);
 #   - мусор ОС и редактора (*Zone.Identifier, .DS_Store, *.swp, *.orig, *.rs.bk).
 #
 # НЕ УДАЛЯЕТСЯ, но и В АРХИВ НЕ ИДЁТ:
-#   - win-files/ и linux-files/ целиком: там точки монтирования дисков Windows
+#   - win/ и linux-files/ целиком: там точки монтирования дисков Windows
 #     с многогигабайтными образами — rm -rf по ним стёр бы данные на
 #     смонтированном диске, а tar утащил бы их в архив;
 #   - tmp/ — локальные репро;
@@ -58,10 +58,10 @@ ARTIFACT_DIRS=(
 )
 
 # Собранные бинарники: лежат в каталогах, которые сами трогать нельзя
-# (win-files/* — точки монтирования). Удаляются только обычные файлы.
+# (win/* — точки монтирования). Удаляются только обычные файлы.
 BUILT_BIN_GLOBS=(
-  "win-files/*.exe"
-  "win-files/*.pdb"
+  "win/*.exe"
+  "win/*.pdb"
   "linux-files/*"
   "*.exe"
   "*.pdb"
@@ -75,19 +75,19 @@ JUNK_GLOBS=("*.DS_Store" "Thumbs.db" "*Zone.Identifier" "*.swp" "*.swo" "*.orig"
 TEST_IMAGE_GLOBS=("*.vhdx" "*.avhdx" "*.obkm" "*.obk" "*.vmdk" "*.wim" "*.iso")
 
 # Не попадает В АРХИВ, но --force это не трогает.
-ARCHIVE_EXTRA_EXCLUDES=("win-files" "linux-files" "tmp" ".idea" "*.iml")
+ARCHIVE_EXTRA_EXCLUDES=("win" "linux-files" "tmp" ".idea" "*.iml")
 
 human() { du -sh "$1" 2>/dev/null | cut -f1; }
 
 usage() { sed -n '2,/^set -euo/p' "$SELF" | grep '^#' | sed 's/^# \{0,1\}//'; exit 0; }
 
 # find по дереву без target/.git/node_modules — иначе обход 16 ГБ ради пары
-# файлов мусора. win-files/ и linux-files/ тоже мимо: там точки монтирования, и
+# файлов мусора. win/ и linux-files/ тоже мимо: там точки монтирования, и
 # обход смонтированного диска на 2 ТБ через drvfs занял бы минуты, а удаление
 # по итогам писало бы на чужой раздел.
 prune_find() {
   find . -path ./.git -prune -o -path ./target -prune -o -name node_modules -prune \
-       -o -path ./win-files -prune -o -path ./linux-files -prune -o "$@"
+       -o -path ./win -prune -o -path ./linux-files -prune -o "$@"
 }
 
 # ── разбор аргументов ────────────────────────────────────────────────────────
@@ -136,7 +136,7 @@ if [ "$MODE" = "archive" ]; then
   echo "того, что вне git, это единственная копия):"
   echo "  -> $OUT"
   [ "$WITH_GIT" -eq 0 ] && echo "  (история .git не входит — нужна, добавьте --with-git)"
-  echo "  (win-files/ и linux-files/ не входят: там точки монтирования дисков Windows)"
+  echo "  (win/ и linux-files/ не входят: там точки монтирования дисков Windows)"
   tar -C "$(dirname "$ROOT")" -czf "$OUT" "${excludes[@]}" "$BASE"
   echo "Готово. Размер архива: $(human "$OUT")"
   exit 0
@@ -157,7 +157,7 @@ for d in "${ARTIFACT_DIRS[@]}"; do
   fi
 done
 
-# Собранные бинарники. Только обычные файлы: каталоги win-files/disk-* могут
+# Собранные бинарники. Только обычные файлы: каталоги win/disk-* могут
 # быть смонтированными дисками Windows.
 shopt -s nullglob
 for pat in "${BUILT_BIN_GLOBS[@]}"; do
@@ -204,9 +204,9 @@ if [ -n "$img_list" ]; then
   echo "Образы и тестовые данные (НЕ удаляются, в архив не идут):"
   while IFS= read -r f; do note "$(human "$f")" "${f#./}"; done <<< "$img_list"
 fi
-if [ -d win-files ] || [ -d linux-files ]; then
+if [ -d win ] || [ -d linux-files ]; then
   echo
-  echo "  win-files/ и linux-files/ внутрь не осматривались — там могут быть"
+  echo "  win/ и linux-files/ внутрь не осматривались — там могут быть"
   echo "  смонтированные диски Windows; трогаются только собранные exe/pdb в их корне."
 fi
 

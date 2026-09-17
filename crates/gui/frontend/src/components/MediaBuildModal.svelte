@@ -25,6 +25,9 @@
   let drivers: DriverPackage[] = $state([]);
   let selected = $state(new Set<string>());
   let includeDrivers = $state(true);
+  // Off by default: the medium works without them, and a GPU driver is often
+  // bigger than everything else on it together — held in RAM from boot.
+  let includeVideo = $state(false);
   let loadingDrivers = $state(false);
   let driverError: string | null = $state(null);
 
@@ -45,6 +48,13 @@
   const chosenBytes = $derived(
     offered.filter((d) => selected.has(d.inf)).reduce((s, d) => s + d.size_bytes, 0),
   );
+  // Every video adapter the machine has, whoever made it — found by the
+  // service, not guessed here.
+  const video = $derived(drivers.filter((d) => d.display));
+  // Disks and network on Windows' own drivers: nothing to pick, but they are
+  // this machine's hardware and the user should see that they were looked at.
+  const inbox = $derived(drivers.filter((d) => d.inbox));
+  const videoBytes = $derived(video.reduce((s, d) => s + d.size_bytes, 0));
   /** The build is over: the button becomes "Готово" and closes the dialog. */
   const finished = $derived(!!report);
 
@@ -73,7 +83,7 @@
   // medium with no drivers at all.
   const canStart = $derived(
     isWindows && !building && !!base && outputDir.trim().length > 0 &&
-    !(includeDrivers && loadingDrivers),
+    !((includeDrivers || includeVideo) && loadingDrivers),
   );
 
   onMount(() => {
@@ -120,7 +130,12 @@
       report = await api.buildBootMedia({
         base_wim: base?.path ?? '',
         output_iso: `${outputDir}${sep}OwnBackup.iso`,
-        drivers: includeDrivers ? [...selected] : [],
+        drivers: [
+          ...new Set([
+            ...(includeDrivers ? selected : []),
+            ...(includeVideo ? video.map((d) => d.inf) : []),
+          ]),
+        ],
         extra_drivers: '',
         runtime_in_image: runtimeInImage,
       });
@@ -194,6 +209,31 @@
           </span>
         </label>
 
+        <!-- Right under the drivers option, above the list: both are choices
+             about drivers, and the list is the long, detailed part. -->
+        <label class="opt">
+          <input type="checkbox" bind:checked={includeVideo}
+                 disabled={building || loadingDrivers || video.length === 0} />
+          <span>
+            Добавить драйверы видеоадаптеров
+            <span class="opt-note">
+              {#if loadingDrivers}
+                опрос оборудования…
+              {:else if driverError}
+                оборудование опросить не удалось
+              {:else if video.length === 0}
+                у видеоадаптеров этой машины нет отдельных драйверов — экран на
+                носителе будет в режиме, который оставит прошивка
+              {:else}
+                {video.map((d) => d.device || d.original_name).join(', ')} ·
+                {formatBytes(videoBytes)}. Носитель откроется в родном разрешении
+                монитора; без них экран остаётся в режиме прошивки (часто 1024×768
+                или 1280×1024). Образ станет больше и загружается в память целиком
+              {/if}
+            </span>
+          </span>
+        </label>
+
         {#if includeDrivers}
           <div class="drivers">
             {#if loadingDrivers}
@@ -207,13 +247,13 @@
               </div>
             {:else if driverError}
               <div class="err">{driverError}</div>
-            {:else if drivers.length === 0}
-              <div class="muted">Сторонних драйверов на этой машине не найдено.</div>
-            {:else if offered.length === 0}
+            {:else if offered.length === 0 && inbox.length === 0}
               <div class="muted">
-                Драйверов дисков и сети на этой машине не нашлось — носитель
-                соберётся на встроенных драйверах Windows.
+                Дисков и сетевых адаптеров, которым нужен драйвер, на этой машине
+                не нашлось.
               </div>
+            {:else if offered.length === 0}
+              <!-- Nothing to choose: the rows below say why, device by device. -->
             {:else}
               <div class="drv-head">
                 <span>
@@ -240,6 +280,25 @@
                          unpacked; a dash says so instead of "0 Б". -->
                     <span class="drv-size">{d.size_bytes > 0 ? formatBytes(d.size_bytes) : '—'}</span>
                   </label>
+                {/each}
+              </div>
+            {/if}
+            {#if !loadingDrivers && !driverError && inbox.length > 0}
+              <div class="inbox">
+                <div class="muted">
+                  {offered.length === 0 ? 'Диски и сеть этой машины работают' : 'Остальные устройства работают'}
+                  на драйверах, встроенных в Windows, — выгружать их не нужно. При
+                  сборке проверится, что они есть и в среде восстановления; если
+                  какого-то нет, он будет добавлен с этой машины.
+                </div>
+                {#each inbox as d (d.inf)}
+                  <div class="drv inbox-row" title="{d.device} — {d.role}, драйвер {d.inf}">
+                    <span></span><!-- the checkbox column: nothing to tick -->
+                    <span class="drv-name">{d.device || d.inf}</span>
+                    <span class="drv-class">{d.role}</span>
+                    <span class="drv-prov">{d.inf}</span>
+                    <span class="drv-size">встроенный</span>
+                  </div>
                 {/each}
               </div>
             {/if}
@@ -349,7 +408,11 @@
   .opt { display: flex; align-items: flex-start; gap: 9px; font-size: 13px; color: var(--head); margin-top: 16px; cursor: pointer; }
   .opt input { margin-top: 2px; flex-shrink: 0; }
   .opt-note { display: block; font-size: 12px; color: var(--text-muted); line-height: 1.4; margin-top: 2px; }
-  .drivers { margin-top: 10px; }
+  .drivers { margin-top: 16px; }
+  .inbox { margin-top: 10px; }
+  .inbox .muted { margin-bottom: 6px; }
+  .inbox-row { cursor: default; color: var(--text-muted); }
+  .inbox-row:hover { background: none; }
   .scan { display: flex; align-items: center; gap: 12px; padding: 8px 0; }
   .scan-bar { flex: 0 0 120px; height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; }
   /* Indeterminate on purpose: the count is not known until the walk is done. */

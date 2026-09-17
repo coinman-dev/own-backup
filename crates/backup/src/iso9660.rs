@@ -282,13 +282,25 @@ pub fn write_iso_with_progress(
                     progress(pct);
                 }
             }
-            write_zeros(&mut w, pad_to_sector(f.size.max(1) as usize))?;
+            // Pad to exactly the sectors the layout gave this file. An empty
+            // file still owns one sector, and padding "as if 1 byte" left it
+            // 2047 bytes: every later file then sat one byte before its LBA and
+            // the image was not whole sectors — Windows called it corrupt and
+            // Rufus could not extract it (2026-09-17, bcdedit's empty BCD.LOG1/2).
+            write_zeros(&mut w, sectors_for(f.size.max(1)) as usize * SECTOR - f.size as usize)?;
         }
     }
     w.flush()?;
     drop(w);
 
     let len = std::fs::metadata(out)?.len();
+    if len != total_sectors as u64 * SECTOR as u64 {
+        return Err(OwnBackupError::ImageFormat(format!(
+            "{}: записано {len} байт, а по разметке должно быть {} — образ испорчен",
+            out.display(),
+            total_sectors as u64 * SECTOR as u64
+        )));
+    }
     Ok(len)
 }
 
@@ -918,6 +930,35 @@ mod tests {
             }
         }
         (lba, len)
+    }
+
+    /// Empty files own a sector each and must not shorten it: the medium that
+    /// Windows refused to mount had two (bcdedit's BCD.LOG1/2), was 2 bytes
+    /// short of whole sectors, and the file written after them was shifted.
+    #[test]
+    fn empty_files_do_not_shift_what_follows() {
+        let dir = tempfile::tempdir().unwrap();
+        let iso = dir.path().join("e.iso");
+        let mut files = sample(dir.path());
+        for name in ["BCD.LOG1", "BCD.LOG2"] {
+            let p = dir.path().join(name);
+            std::fs::write(&p, b"").unwrap();
+            files.push(IsoFile { path: format!("EFI/Microsoft/Boot/{name}"), source: p });
+        }
+        let bcd = dir.path().join("bcd");
+        std::fs::write(&bcd, vec![0xEE; 3000]).unwrap();
+        // "BCD" sorts before "BCD.LOG1"; "ZZZ" after both, so it is written last.
+        let last = dir.path().join("zzz");
+        std::fs::write(&last, vec![0x77; 3000]).unwrap();
+        files.push(IsoFile { path: "EFI/Microsoft/Boot/BCD".into(), source: bcd });
+        files.push(IsoFile { path: "EFI/Microsoft/Boot/ZZZ".into(), source: last });
+
+        let len = write_iso(&files, "OWNBACKUP", None, &iso).unwrap();
+        assert_eq!(len as usize % SECTOR, 0, "the image must be whole sectors");
+        let data = std::fs::read(&iso).unwrap();
+        let (lba, size) = find_file(&iso, "EFI/Microsoft/Boot/ZZZ").unwrap().unwrap();
+        let at = lba as usize * SECTOR;
+        assert_eq!(&data[at..at + size as usize], &vec![0x77; 3000][..], "shifted by the empty files");
     }
 
     #[test]

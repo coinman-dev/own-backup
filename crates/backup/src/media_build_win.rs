@@ -16,7 +16,7 @@
 //!   exactly why "universal" rescue media cannot see NVMe or RAID controllers.
 
 use crate::media_layout as layout;
-use crate::media_layout::{rescue_role, RESCUE_CLASS_GUIDS};
+use crate::media_layout::{display_role, rescue_role, DISPLAY_CLASS, RESCUE_CLASS_GUIDS};
 use crate::wim_info::read_wim_info;
 use own_backup_common::{OwnBackupError, Result};
 use std::path::{Path, PathBuf};
@@ -43,8 +43,56 @@ pub struct DriverPackage {
     /// What that device is, in words: "контроллер дисков", "сетевой адаптер".
     pub role: String,
     /// The device's own name, which is what the user recognises — "Intel(R)
-    /// Ethernet Connection I219-V" rather than "oem34.inf".
+    /// Ethernet Connection I219-V" rather than "oem34.inf". Several devices
+    /// on one package (two identical cards) are all named.
     pub device: String,
+    /// Bound to a present video adapter ([`crate::media_layout::DISPLAY_CLASS`]).
+    /// Never `recommended`: it is offered as a choice of its own.
+    pub display: bool,
+    /// Not a package at all: a present disk or network device running on a
+    /// driver that ships with Windows (`stornvme.inf`, `net1ic64.inf`). There
+    /// is nothing to export, so it is listed only to be SAID — and the build
+    /// checks that the base image carries the same driver
+    /// ([`check_inbox_drivers`]).
+    pub inbox: bool,
+}
+
+/// A present device of a class the medium cares about, with the INF it runs on.
+#[derive(serde::Deserialize)]
+struct PresentDevice {
+    inf: Option<String>,
+    guid: Option<String>,
+    bus: Option<String>,
+    name: Option<String>,
+}
+
+/// The devices of this machine a medium cares about — rescue classes and video
+/// adapters — each with the INF it is bound to.
+///
+/// `-PresentOnly` keeps a printer unplugged two years ago out of the answer,
+/// and the instance id's prefix is the bus.
+///
+/// The class filter comes BEFORE the per-device property lookup, and that is
+/// the whole cost of this call: `Get-PnpDeviceProperty` is one call per
+/// device, and a desktop has several hundred devices against a handful of
+/// storage and network ones. Asking all of them took seconds.
+fn present_devices() -> std::result::Result<Vec<PresentDevice>, String> {
+    let guid_list = RESCUE_CLASS_GUIDS
+        .iter()
+        .chain(std::iter::once(&DISPLAY_CLASS.0))
+        .map(|g| format!("'{g}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    ps_json(&format!(
+        "$g=@({guid_list}); Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | \
+         Where-Object {{ $g -contains $_.ClassGuid }} | ForEach-Object {{ \
+           $p = Get-PnpDeviceProperty -InstanceId $_.InstanceId \
+                  -KeyName 'DEVPKEY_Device_DriverInfPath' -ErrorAction SilentlyContinue; \
+           if ($p.Data) {{ [pscustomobject]@{{ inf = $p.Data; guid = $_.ClassGuid; \
+             bus = $_.InstanceId.Split('\\')[0]; name = $_.FriendlyName }} }} \
+         }} | ConvertTo-Json -Compress"
+    ))
+    .map_err(|e| format!("не удалось перечислить устройства этой машины: {e}"))
 }
 
 /// Driver packages this machine could put on a rescue medium.
@@ -76,14 +124,6 @@ pub fn list_driver_packages() -> std::result::Result<Vec<DriverPackage>, String>
         provider_name: Option<String>,
         version: Option<String>,
     }
-    #[derive(serde::Deserialize)]
-    struct Dev {
-        inf: Option<String>,
-        guid: Option<String>,
-        bus: Option<String>,
-        name: Option<String>,
-    }
-
     // The two questions are independent, and each costs a PowerShell start plus
     // a walk of something large, so they are asked at the same time.
     let installed_job = std::thread::spawn(|| -> std::result::Result<Vec<Raw>, String> {
@@ -93,42 +133,36 @@ pub fn list_driver_packages() -> std::result::Result<Vec<DriverPackage>, String>
         )
     });
 
-    // The device side. `-PresentOnly` keeps a printer unplugged two years ago
-    // out of the answer, and the instance id's prefix is the bus.
-    //
-    // The class filter comes BEFORE the per-device property lookup, and that is
-    // the whole cost of this call: `Get-PnpDeviceProperty` is one call per
-    // device, and a desktop has several hundred devices against a handful of
-    // storage and network ones. Asking all of them took seconds.
-    let guid_list = RESCUE_CLASS_GUIDS
-        .iter()
-        .map(|g| format!("'{g}'"))
-        .collect::<Vec<_>>()
-        .join(",");
-    let present: Vec<Dev> = ps_json(&format!(
-        "$g=@({guid_list}); Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | \
-         Where-Object {{ $g -contains $_.ClassGuid }} | ForEach-Object {{ \
-           $p = Get-PnpDeviceProperty -InstanceId $_.InstanceId \
-                  -KeyName 'DEVPKEY_Device_DriverInfPath' -ErrorAction SilentlyContinue; \
-           if ($p.Data) {{ [pscustomobject]@{{ inf = $p.Data; guid = $_.ClassGuid; \
-             bus = $_.InstanceId.Split('\\')[0]; name = $_.FriendlyName }} }} \
-         }} | ConvertTo-Json -Compress"
-    ))
-    .map_err(|e| format!("не удалось перечислить устройства этой машины: {e}"))?;
+    let present = present_devices()?;
     let installed: Vec<Raw> = installed_job
         .join()
         .map_err(|_| "поток опроса драйверов упал".to_string())?
         .map_err(|e| format!("не удалось перечислить установленные драйверы: {e}"))?;
 
-    // inf -> (role, device name) for everything a rescue medium would want.
-    let mut wanted: std::collections::HashMap<String, (String, String)> = Default::default();
+    // inf -> (role, device names, is a video adapter) for everything a medium
+    // would want. One package can drive several present devices — two
+    // identical cards, or a GPU and its twin output — and every one is named.
+    struct Wanted {
+        role: String,
+        names: Vec<String>,
+        display: bool,
+    }
+    let mut wanted: std::collections::HashMap<String, Wanted> = Default::default();
     for d in &present {
         let (Some(inf), Some(guid), Some(bus)) = (&d.inf, &d.guid, &d.bus) else { continue };
-        if let Some(role) = rescue_role(guid, bus) {
-            wanted.insert(
-                inf.to_ascii_lowercase(),
-                (role.to_string(), d.name.clone().unwrap_or_default()),
-            );
+        let (role, display) = match (rescue_role(guid, bus), display_role(guid, bus)) {
+            (Some(role), _) => (role, false),
+            (None, Some(role)) => (role, true),
+            (None, None) => continue,
+        };
+        let entry = wanted.entry(inf.to_ascii_lowercase()).or_insert_with(|| Wanted {
+            role: role.to_string(),
+            names: Vec::new(),
+            display,
+        });
+        let name = d.name.clone().unwrap_or_default();
+        if !name.is_empty() && !entry.names.contains(&name) {
+            entry.names.push(name);
         }
     }
 
@@ -148,13 +182,38 @@ pub fn list_driver_packages() -> std::result::Result<Vec<DriverPackage>, String>
                 provider: r.provider_name.unwrap_or_default(),
                 version: r.version.unwrap_or_default(),
                 size_bytes: size,
-                recommended: hit.is_some(),
-                role: hit.map(|(role, _)| role.clone()).unwrap_or_default(),
-                device: hit.map(|(_, name)| name.clone()).unwrap_or_default(),
+                recommended: hit.is_some_and(|w| !w.display),
+                display: hit.is_some_and(|w| w.display),
+                role: hit.map(|w| w.role.clone()).unwrap_or_default(),
+                device: hit.map(|w| w.names.join(", ")).unwrap_or_default(),
+                inbox: false,
                 inf,
             })
         })
         .collect();
+
+    // Disks and network running on Windows' own drivers: no package to offer,
+    // but "nothing found" would be the wrong thing to say about them. Video
+    // adapters are left out here — one on an inbox driver is on Microsoft
+    // Basic Display, and there is no better driver to be had from this machine.
+    let mut inbox: Vec<DriverPackage> = wanted
+        .iter()
+        .filter(|(inf, w)| !w.display && !layout::is_published_inf(inf))
+        .map(|(inf, w)| DriverPackage {
+            inf: inf.clone(),
+            original_name: inf.clone(),
+            class_name: String::new(),
+            provider: "Windows".into(),
+            version: String::new(),
+            size_bytes: 0,
+            recommended: false,
+            display: false,
+            inbox: true,
+            role: w.role.clone(),
+            device: w.names.join(", "),
+        })
+        .collect();
+    inbox.sort_by(|a, b| a.role.cmp(&b.role).then(a.device.cmp(&b.device)));
     list.sort_by(|a, b| b.recommended.cmp(&a.recommended).then(b.size_bytes.cmp(&a.size_bytes)));
 
     // Drivers this machine does not have but a virtual machine booted from the
@@ -176,15 +235,24 @@ pub fn list_driver_packages() -> std::result::Result<Vec<DriverPackage>, String>
                 recommended: true,
                 role: "экран и устройства виртуальной машины".into(),
                 device: "VMware Tools (windows.iso)".into(),
+                display: false,
+                inbox: false,
             },
         );
     }
+    list.extend(inbox);
 
     info!(
         total = list.len(),
         recommended = list.iter().filter(|d| d.recommended).count(),
+        display = list.iter().filter(|d| d.display).count(),
+        inbox = list.iter().filter(|d| d.inbox).count(),
         "driver packages enumerated"
     );
+    for d in list.iter().filter(|d| d.display) {
+        info!(inf = %d.inf, device = %d.device, provider = %d.provider,
+              mb = d.size_bytes >> 20, "video adapter driver offered");
+    }
     Ok(list)
 }
 
@@ -196,8 +264,12 @@ pub fn list_driver_packages() -> std::result::Result<Vec<DriverPackage>, String>
 /// на урезанной Windows без PowerShell это была бы тихая ложь.
 fn ps_json<T: serde::de::DeserializeOwned>(script: &str) -> std::result::Result<Vec<T>, String> {
     use std::os::windows::process::CommandExt;
+    // Redirected, PowerShell writes in the console's OEM code page, and device
+    // names are localised: "Расширяемый хост-контроллер…" arrived as "������"
+    // (2026-09-17). Asking for UTF-8 is what makes the bytes mean one thing.
+    let script = format!("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; {script}");
     let out = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .creation_flags(0x0800_0000)
         .output();
     let out = match out {
@@ -207,10 +279,11 @@ fn ps_json<T: serde::de::DeserializeOwned>(script: &str) -> std::result::Result<
             return Err(format!("PowerShell не запустился: {e}"));
         }
     };
-    let text = String::from_utf8_lossy(&out.stdout);
+    // UTF-8 first; the OEM page only if something still slipped through.
+    let text = layout::console_text(&out.stdout);
     if text.trim().is_empty() {
         if !out.status.success() {
-            let err = String::from_utf8_lossy(&out.stderr);
+            let err = layout::console_text(&out.stderr);
             warn!(status = ?out.status.code(), "powershell returned nothing");
             return Err(format!(
                 "PowerShell завершился с кодом {:?}: {}",
@@ -445,14 +518,15 @@ pub fn build_media(
         0,
         if req.runtime_in_image { "в образ, со сжатием" } else { "на носитель, без сжатия" },
     );
+    // Every medium carries the marker: WinPE assigns its volume whatever letter
+    // it likes, and the launcher finds it by this file — for a runtime kept
+    // outside the image, and for the copy of the logs it keeps there.
+    let media_app = report.media_dir.join(layout::MEDIA_DIR);
+    std::fs::create_dir_all(&media_app)?;
+    std::fs::write(media_app.join(layout::MEDIA_MARKER), layout::MEDIA_MARKER_TEXT.as_bytes())?;
     let runtime_dst = if req.runtime_in_image {
         app_dir.join("WebView2")
     } else {
-        // Outside the image the medium needs a marker: WinPE assigns its volume
-        // whatever letter it likes, and the launcher finds it by this file.
-        let media_app = report.media_dir.join(layout::MEDIA_DIR);
-        std::fs::create_dir_all(&media_app)?;
-        std::fs::write(media_app.join(layout::MEDIA_MARKER), layout::MEDIA_MARKER_TEXT.as_bytes())?;
         media_app.join("WebView2")
     };
     std::fs::create_dir_all(&runtime_dst)?;
@@ -516,6 +590,7 @@ pub fn build_media(
         }
         at(&mut progress, BuildStage::AddingDrivers, 100, "");
     }
+    check_inbox_drivers(&tree, &mut report);
 
     at(&mut progress, BuildStage::SystemLibraries, 0, "");
     let sys32 = tree.join("Windows").join("System32");
@@ -848,6 +923,85 @@ fn add_drivers(
     Ok(exported)
 }
 
+/// Make sure the disks and network of THIS machine work on the medium when
+/// they run on Windows' own drivers.
+///
+/// Nothing is exported for those, which used to leave the question unasked:
+/// the recovery environment carries a subset of Windows' drivers, not all of
+/// them, and "the full Windows has it" says nothing about WinRE. So each INF is
+/// looked for in the opened image; one that is missing is added from this
+/// machine's driver store, and one that cannot be added is reported by the
+/// device's name — a medium that boots and then sees no disk should never be
+/// the first news of it.
+fn check_inbox_drivers(tree: &Path, report: &mut MediaBuildReport) {
+    let devices = match present_devices() {
+        Ok(d) => d,
+        Err(e) => {
+            warn!(error = %e, "inbox drivers not checked");
+            report.warnings.push(format!(
+                "Не удалось проверить, есть ли в образе встроенные драйверы дисков и сети \
+                 этой машины: {e}"
+            ));
+            return;
+        }
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    for d in &devices {
+        let (Some(inf), Some(guid), Some(bus)) = (&d.inf, &d.guid, &d.bus) else { continue };
+        let inf = inf.to_ascii_lowercase();
+        if layout::is_published_inf(&inf) || rescue_role(guid, bus).is_none() || !seen.insert(inf.clone())
+        {
+            continue;
+        }
+        let name = d.name.clone().unwrap_or_else(|| inf.clone());
+        if tree.join("Windows").join("INF").join(&inf).exists() {
+            info!(%inf, device = %name, "inbox driver is in the base image");
+            continue;
+        }
+        let Some(pkg) = host_inbox_package(&inf) else {
+            warn!(%inf, device = %name, "inbox driver missing from the base image and from the driver store");
+            report.warnings.push(format!(
+                "{name}: драйвера {inf} нет в среде восстановления, и в хранилище драйверов \
+                 этой машины его не нашлось — на носителе это устройство может не работать."
+            ));
+            continue;
+        };
+        match dism(&[
+            &format!("/Image:{}", tree.display()),
+            "/Add-Driver",
+            &format!("/Driver:{}", pkg.display()),
+        ]) {
+            Ok(()) => {
+                info!(%inf, device = %name, package = %pkg.display(), "inbox driver added to the image");
+                report.drivers_added += 1;
+            }
+            Err(e) => {
+                warn!(%inf, device = %name, error = %e, "inbox driver could not be added");
+                report.warnings.push(format!(
+                    "{name}: драйвера {inf} нет в среде восстановления, и добавить его с этой \
+                     машины не удалось ({}) — на носителе это устройство может не работать.",
+                    user_reason(&e)
+                ));
+            }
+        }
+    }
+}
+
+/// This machine's copy of an inbox driver package:
+/// `DriverStore\FileRepository\<inf>_amd64_<hash>\<inf>`. Several versions can
+/// sit side by side after updates; the newest folder is the one in use.
+fn host_inbox_package(inf: &str) -> Option<PathBuf> {
+    let repo = system32().join("DriverStore").join("FileRepository");
+    let prefix = format!("{inf}_");
+    std::fs::read_dir(&repo)
+        .ok()?
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().to_ascii_lowercase().starts_with(&prefix))
+        .map(|e| e.path().join(inf))
+        .filter(|p| p.exists())
+        .max_by_key(|p| p.parent().and_then(|d| d.metadata().ok()).and_then(|m| m.modified().ok()))
+}
+
 fn count_inf(dir: &Path) -> u32 {
     fn walk(dir: &Path, n: &mut u32) {
         let Ok(rd) = std::fs::read_dir(dir) else { return };
@@ -867,7 +1021,7 @@ fn count_inf(dir: &Path) -> u32 {
 
 /// The boot chain, taken from the running Windows: `bootmgfw.efi` plus the
 /// READY-MADE BCD store that ships with it, which already boots
-/// `\sources\boot.wim` off a ramdisk. No bcdedit, no oscdimg, no ADK.
+/// `\sources\boot.wim` off a ramdisk. No oscdimg, no ADK.
 fn lay_out_media(wim: &Path, media: &Path) -> Result<()> {
     let boot = PathBuf::from(std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into()))
         .join("Boot");
@@ -876,7 +1030,30 @@ fn lay_out_media(wim: &Path, media: &Path) -> Result<()> {
     std::fs::create_dir_all(media.join("boot"))?;
     std::fs::create_dir_all(media.join("sources"))?;
     std::fs::copy(boot.join(r"EFI\bootmgfw.efi"), media.join(r"EFI\BOOT\BOOTX64.EFI"))?;
-    std::fs::copy(boot.join(r"DVD\EFI\BCD"), media.join(r"EFI\Microsoft\Boot\BCD"))?;
+    let bcd = media.join(r"EFI\Microsoft\Boot\BCD");
+    std::fs::copy(boot.join(r"DVD\EFI\BCD"), &bcd)?;
+    clear_readonly(&bcd);
+    // The medium carries no display driver, so the screen is Microsoft Basic
+    // Display, and on UEFI that driver draws on the framebuffer the boot
+    // loader left behind — it cannot switch modes afterwards
+    // (ChangeDisplaySettingsEx → -1). The resolution has to be chosen BEFORE
+    // Windows starts, and this is where: the loader is told to take the
+    // highest mode the firmware offers instead of its 1024×768 default. A
+    // failure here costs a small screen, not the medium, so it only warns.
+    if let Err(e) =
+        run("bcdedit", &["/store", &bcd.display().to_string(), "/set", "{default}", "highestmode", "on"])
+    {
+        warn!(error = %e, "highestmode not set — the medium boots at the loader's default resolution");
+    }
+    // bcdedit opens the store as a registry hive and leaves its transaction
+    // logs behind. Once it has exited they are empty and mean nothing; the
+    // shipped store has none. A non-empty one is left alone.
+    for log in ["BCD.LOG", "BCD.LOG1", "BCD.LOG2"] {
+        let p = media.join(r"EFI\Microsoft\Boot").join(log);
+        if std::fs::metadata(&p).is_ok_and(|m| m.len() == 0) {
+            let _ = std::fs::remove_file(&p);
+        }
+    }
     std::fs::copy(boot.join(r"DVD\EFI\boot.sdi"), media.join(r"boot\boot.sdi"))?;
     let dst = media.join(r"sources\boot.wim");
     let _ = std::fs::remove_file(&dst);

@@ -23,6 +23,11 @@
 //!   "restart the service first" instruction is worth nothing. The path is
 //!   re-checked every few seconds, so switching it on takes effect on the next
 //!   line written.
+//!
+//! On the boot medium there is no setting to read — its config lives on a RAM
+//! disk that starts empty — so the launcher names the target instead, in
+//! [`LOG_MIRROR_ENV`]: the stick the medium booted from. That is where the logs
+//! of a session that ended in a dark screen or a reboot can still be read.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
@@ -30,6 +35,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::config::AppConfig;
+
+/// Environment variable naming the mirror directory outright. Takes precedence
+/// over the config file; set by the boot medium's launcher.
+pub const LOG_MIRROR_ENV: &str = "OWN_BACKUP_LOG_MIRROR";
 
 /// How often the config file is consulted for a changed mirror path.
 const RECHECK: Duration = Duration::from_secs(3);
@@ -45,6 +54,9 @@ pub struct MirrorLog {
     config_path: PathBuf,
     /// File name to create inside the chosen directory.
     file_name: String,
+    /// A directory named by [`LOG_MIRROR_ENV`], read once at start: the
+    /// process's environment does not change under it.
+    fixed_dir: Option<PathBuf>,
     /// The directory currently in force, and the handle open in it.
     dir: Option<PathBuf>,
     file: Option<File>,
@@ -54,9 +66,25 @@ pub struct MirrorLog {
 impl MirrorLog {
     /// A mirror for `file_name`, reading its target from `config_path`.
     pub fn new(config_path: PathBuf, file_name: impl Into<String>) -> Self {
+        let fixed = std::env::var(LOG_MIRROR_ENV)
+            .ok()
+            .map(|d| d.trim().to_string())
+            .filter(|d| !d.is_empty())
+            .map(PathBuf::from);
+        Self::with_fixed_dir(config_path, file_name, fixed)
+    }
+
+    /// [`Self::new`] with the environment's answer passed in — tests cannot
+    /// set a process-wide variable without racing each other.
+    fn with_fixed_dir(
+        config_path: PathBuf,
+        file_name: impl Into<String>,
+        fixed_dir: Option<PathBuf>,
+    ) -> Self {
         let mut this = Self {
             config_path,
             file_name: file_name.into(),
+            fixed_dir,
             dir: None,
             file: None,
             // Checked on the first line rather than here: at construction time
@@ -83,11 +111,13 @@ impl MirrorLog {
         }
         self.next_check = now + RECHECK;
 
-        let wanted = AppConfig::load_from_file(&self.config_path)
-            .ok()
-            .map(|c| c.log_mirror_dir)
-            .filter(|d| !d.trim().is_empty())
-            .map(|d| PathBuf::from(d.trim()));
+        let wanted = self.fixed_dir.clone().or_else(|| {
+            AppConfig::load_from_file(&self.config_path)
+                .ok()
+                .map(|c| c.log_mirror_dir)
+                .filter(|d| !d.trim().is_empty())
+                .map(|d| PathBuf::from(d.trim()))
+        });
 
         if wanted != self.dir {
             self.dir = wanted;
@@ -193,6 +223,21 @@ mod tests {
         let text = std::fs::read_to_string(stick.path().join("test.log")).unwrap();
         assert_eq!(text, "first line\nsecond line\n");
         assert!(mirror.active_path().is_some());
+    }
+
+    /// The boot medium's case: no config at all, the launcher names the stick.
+    #[test]
+    fn a_directory_named_by_the_environment_needs_no_config() {
+        let home = tempfile::tempdir().unwrap();
+        let stick = tempfile::tempdir().unwrap();
+        let mut mirror = MirrorLog::with_fixed_dir(
+            home.path().join("nope.toml"),
+            "test.log",
+            Some(stick.path().join("logs")),
+        );
+        mirror.write_event(b"from the medium\n");
+        let text = std::fs::read_to_string(stick.path().join("logs").join("test.log")).unwrap();
+        assert_eq!(text, "from the medium\n");
     }
 
     #[test]

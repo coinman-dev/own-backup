@@ -5,9 +5,10 @@
 //! desktop has nowhere to put itself. Windows itself does not choose for us:
 //! WinPE has no display settings, no monitor profile and no user to ask.
 //!
-//! On real hardware the choice is the one a person would make: ask the display
-//! driver what it can do and take the largest true-colour mode, which on a
-//! monitor that reports its EDID is the monitor's own preferred one.
+//! On real hardware the choice is the one a person would make. It used to be
+//! read as "the largest true-colour mode the driver offers", on the theory that
+//! a monitor's EDID makes that its own preferred one — see below for why that
+//! did not survive a real monitor.
 //!
 //! **In a virtual machine that reasoning does not hold.** The guest driver's
 //! list is a catalogue of what it can be *told* to do — a VMware guest offers
@@ -17,6 +18,18 @@
 //! ultra-wide, where the host's own screen is not that shape either. So in a
 //! virtual machine a size that fits anywhere is aimed for instead of the
 //! maximum, and `--biggest` is there for whoever disagrees.
+//!
+//! **On real hardware "the biggest mode" was wrong too** (2026-09-17). A
+//! Samsung C49G95T in picture-by-picture mode shows each input as half the
+//! panel, 2560×1440, while a GPU driver still lists modes the input will not
+//! take — the medium switched, and the monitor went dark. So the monitor is
+//! asked first: the preferred mode it declares (its EDID, as Windows parsed
+//! it), which is the one a person would pick in Settings. The largest mode is
+//! only the fallback for a display that declares nothing.
+//!
+//! And any switch is provisional, the way Windows' own "Keep these display
+//! settings?" is: the old mode comes back unless a key is pressed, because a
+//! monitor that lost the signal cannot show the question.
 
 use clap::Args;
 
@@ -32,9 +45,19 @@ pub struct DisplayArgs {
     #[arg(long, default_value = "1440x900")]
     pub prefer: String,
 
-    /// Take the largest mode on offer even in a virtual machine.
+    /// Take the largest mode on offer, ignoring the monitor's own preference
+    /// (and, in a virtual machine, the size aimed for).
     #[arg(long)]
     pub biggest: bool,
+
+    /// Keep a new mode without asking. By default the old mode comes back
+    /// unless a key is pressed — a dark screen cannot show the question.
+    #[arg(long)]
+    pub no_confirm: bool,
+
+    /// How long to wait for that key, in seconds.
+    #[arg(long, default_value_t = 15)]
+    pub confirm_secs: u64,
 
     /// Show what the display can do and change nothing.
     #[arg(long)]
@@ -114,6 +137,15 @@ pub fn virtual_machine(adapters: &[String]) -> Option<&'static str> {
     None
 }
 
+/// Whether the screen is being drawn by Microsoft Basic Display — no vendor
+/// driver started, so the mode is the one the boot loader set.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn is_basic_display(adapters: &[String]) -> bool {
+    adapters
+        .iter()
+        .any(|a| a.to_uppercase().contains(r"ROOT\BASICDISPLAY") && a.ends_with("активен"))
+}
+
 /// The mode to switch to, and why in the caller's words.
 ///
 /// `prefer` is only consulted for a virtual machine. It never goes below `min`:
@@ -154,6 +186,31 @@ pub fn choose(modes: &[Mode], min: (u32, u32), prefer: (u32, u32), virt: bool) -
         .min_by_key(|m| (m.area(), m.bpp))
         .copied()
         .or_else(|| biggest(modes))
+}
+
+/// The mode to use for a monitor that declared its preferred one.
+///
+/// Exactly that size when the driver has it; otherwise the largest mode that
+/// fits inside it — never bigger, which is how the screen went dark. Among
+/// modes of the chosen size the refresh rate nearest the monitor's own wins,
+/// and a tie goes to the lower one: a monitor that asks for 60 Hz is known to
+/// take 60 Hz.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn choose_preferred(modes: &[Mode], preferred: Mode) -> Option<Mode> {
+    let (w, h) = (preferred.width, preferred.height);
+    let exact: Vec<&Mode> =
+        modes.iter().filter(|m| m.width == w && m.height == h && m.bpp >= 32).collect();
+    let pool: Vec<&Mode> = if !exact.is_empty() {
+        exact
+    } else {
+        let fits = modes.iter().filter(|m| m.usable() && m.width <= w && m.height <= h);
+        let Some(area) = fits.clone().map(|m| m.area()).max() else { return None };
+        fits.filter(|m| m.area() == area).collect()
+    };
+    let hz_gap = |m: &Mode| (m.hz as i64 - preferred.hz as i64).unsigned_abs();
+    pool.into_iter()
+        .min_by_key(|m| (hz_gap(m), m.hz, std::cmp::Reverse(m.bpp)))
+        .copied()
 }
 
 /// The biggest true-colour mode on offer. Refresh rate breaks ties, but only
@@ -203,6 +260,11 @@ pub async fn run(args: DisplayArgs) -> own_backup_common::Result<()> {
         }
     }
     let virt = virtual_machine(&adapters);
+    // Everything that decides the mode goes to the log as well as the screen:
+    // on the medium the screen may be dark by the time anyone reads it, and the
+    // log is copied to the boot stick.
+    tracing::info!(current = ?current, adapters = ?adapters, virtual_machine = ?virt,
+                   "display: the screen as found");
 
     if args.diag {
         imp::diag();
@@ -210,11 +272,24 @@ pub async fn run(args: DisplayArgs) -> own_backup_common::Result<()> {
     }
 
     let modes = imp::available_modes();
+    // What the monitor itself declares. Not asked in a virtual machine, whose
+    // "monitor" is a window of whatever size the host happens to give it.
+    let preferred = if virt.is_none() { imp::preferred_mode() } else { None };
+    tracing::info!(
+        count = modes.len(),
+        preferred = ?preferred,
+        modes = %modes.iter().map(|m| format!("{}x{}@{}", m.width, m.height, m.hz)).collect::<Vec<_>>().join(" "),
+        "display: what the driver and the monitor offer"
+    );
     if args.list {
         for m in &modes {
             println!("  {}x{} {} бит, {} Гц", m.width, m.height, m.bpp, m.hz);
         }
         println!("Всего режимов: {}", modes.len());
+        match preferred {
+            Some(p) => println!("Монитор предпочитает: {}x{}, {} Гц", p.width, p.height, p.hz),
+            None => println!("Монитор свой режим не сообщил"),
+        }
         return Ok(());
     }
 
@@ -231,18 +306,40 @@ pub async fn run(args: DisplayArgs) -> own_backup_common::Result<()> {
         }
     }
 
-    let Some(best) = choose(&modes, min, prefer, use_prefer) else {
-        println!("Драйвер дисплея не перечислил ни одного режима — оставляем как есть.");
-        return Ok(());
+    let from_monitor = if use_prefer || args.biggest {
+        None
+    } else {
+        preferred.and_then(|p| choose_preferred(&modes, p))
     };
+    let best = match from_monitor {
+        Some(m) => {
+            let p = preferred.unwrap_or(m);
+            println!(
+                "Монитор сообщает свой режим: {}x{}, {} Гц — берём {}x{}, {} Гц.",
+                p.width, p.height, p.hz, m.width, m.height, m.hz
+            );
+            m
+        }
+        None => {
+            let Some(m) = choose(&modes, min, prefer, use_prefer) else {
+                println!("Драйвер дисплея не перечислил ни одного режима — оставляем как есть.");
+                return Ok(());
+            };
+            m
+        }
+    };
+    tracing::info!(chosen = ?best, from_monitor = from_monitor.is_some(), "display: chosen");
 
     // Already there? Then there is nothing to do — and in a virtual machine
     // that is the only reason to leave the screen alone, since the chosen mode
     // is deliberately not the biggest one.
     let same_size =
         current.as_ref().is_some_and(|c| c.width == best.width && c.height == best.height);
+    // The monitor's own mode is exactly what is wanted; "the current one is
+    // at least as big" is no reason to keep a size the monitor did not ask for.
     let good_enough = same_size
         || (!use_prefer
+            && from_monitor.is_none()
             && current.as_ref().is_some_and(|c| {
                 c.width >= min.0 && c.height >= min.1 && c.area() >= best.area()
             }));
@@ -258,10 +355,29 @@ pub async fn run(args: DisplayArgs) -> own_backup_common::Result<()> {
     }
 
     match imp::apply(&best) {
-        Ok(()) => println!(
-            "Переключено на {}x{} {} бит, {} Гц",
-            best.width, best.height, best.bpp, best.hz
-        ),
+        Ok(()) => {
+            println!("Переключено на {}x{} {} бит, {} Гц", best.width, best.height, best.bpp, best.hz);
+            tracing::info!(mode = ?best, "display: switched");
+            if let (false, Some(prev)) = (args.no_confirm, current) {
+                confirm_or_revert(prev, args.confirm_secs);
+            }
+        }
+        // Expected, not a failure: on UEFI the basic driver lists the modes the
+        // firmware knows but can only draw in the one the loader set. The medium
+        // asks the loader for the highest one (`highestmode` in its BCD), so
+        // there is nothing left to do here — and a red ERROR at every boot of
+        // the medium read as the medium being broken.
+        Err(e) if is_basic_display(&adapters) => {
+            tracing::info!(error = %e, "basic display driver refused a mode change");
+            println!(
+                "Базовый видеодрайвер не меняет режим после загрузки — экран остаётся {}. \
+                 Разрешение задаёт загрузчик носителя.",
+                current
+                    .as_ref()
+                    .map(|c| format!("{}x{}", c.width, c.height))
+                    .unwrap_or_else(|| "как есть".into())
+            );
+        }
         Err(e) => {
             return Err(OwnBackupError::Device(format!(
                 "не удалось переключить режим на {}x{}: {e}",
@@ -270,6 +386,40 @@ pub async fn run(args: DisplayArgs) -> own_backup_common::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Keep the new mode only if someone can see it.
+///
+/// A switch the monitor cannot display leaves a dark screen and no way to say
+/// so — which is how the medium ended on 2026-09-17. So, like Windows' own
+/// "Keep these display settings?", the previous mode comes back unless a key
+/// is pressed in time. Without a console to read from (the command run from a
+/// script with its input redirected) there is nobody to ask, and the mode is
+/// kept.
+#[cfg(target_os = "windows")]
+fn confirm_or_revert(prev: Mode, secs: u64) {
+    println!(
+        "Если изображение видно, нажмите любую клавишу. Иначе через {secs} с вернётся \
+         прежний режим {}x{}.",
+        prev.width, prev.height
+    );
+    match imp::wait_for_key(std::time::Duration::from_secs(secs)) {
+        Some(true) => {
+            println!("Режим оставлен.");
+            tracing::info!("display: new mode confirmed with a key");
+        }
+        Some(false) => {
+            tracing::info!(back_to = ?prev, "display: no key in time — reverting");
+            match imp::apply(&prev) {
+                Ok(()) => println!("Клавишу не нажали — возвращён режим {}x{}.", prev.width, prev.height),
+                Err(e) => {
+                    tracing::info!(error = %e, "display: revert failed");
+                    println!("Вернуть прежний режим не удалось: {e}");
+                }
+            }
+        }
+        None => tracing::info!("display: no console to ask — new mode kept"),
+    }
 }
 
 /// "1280x720" → (1280, 720). Also accepts "1280X720" and "1280*720".
@@ -425,6 +575,155 @@ mod imp {
         }
     }
 
+    fn wide_str(b: &[u16]) -> String {
+        let n = b.iter().position(|&c| c == 0).unwrap_or(b.len());
+        String::from_utf16_lossy(&b[..n])
+    }
+
+    /// GDI name of the primary display (`\\.\DISPLAY1`).
+    fn primary_device_name() -> Option<String> {
+        use windows::Win32::Graphics::Gdi::{
+            EnumDisplayDevicesW, DISPLAY_DEVICEW, DISPLAY_DEVICE_PRIMARY_DEVICE,
+        };
+        for i in 0..16u32 {
+            let mut dd = DISPLAY_DEVICEW {
+                cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32,
+                ..Default::default()
+            };
+            // SAFETY: `dd` is a live DISPLAY_DEVICEW with cb filled in.
+            if !unsafe { EnumDisplayDevicesW(PCWSTR::null(), i, &mut dd, 0) }.as_bool() {
+                break;
+            }
+            if dd.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE != 0 {
+                return Some(wide_str(&dd.DeviceName));
+            }
+        }
+        None
+    }
+
+    /// The mode the monitor on the primary display asks for — its preferred
+    /// timing as the display stack parsed it from EDID/DisplayID, which is
+    /// where a 5120×1440 panel's real size lives (a base EDID block cannot
+    /// even describe a width over 4095).
+    pub fn preferred_mode() -> Option<Mode> {
+        use windows::Win32::Devices::Display::{
+            DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QueryDisplayConfig,
+            DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+            DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_PREFERRED_MODE, DISPLAYCONFIG_MODE_INFO,
+            DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME,
+            DISPLAYCONFIG_TARGET_PREFERRED_MODE, QDC_ONLY_ACTIVE_PATHS,
+        };
+        use windows::Win32::Foundation::ERROR_SUCCESS;
+
+        let (mut np, mut nm) = (0u32, 0u32);
+        // SAFETY: plain out-parameters.
+        if unsafe { GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut np, &mut nm) }
+            != ERROR_SUCCESS
+        {
+            return None;
+        }
+        let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); np as usize];
+        let mut infos = vec![DISPLAYCONFIG_MODE_INFO::default(); nm as usize];
+        // SAFETY: the arrays are as large as the counts passed alongside them.
+        let r = unsafe {
+            QueryDisplayConfig(
+                QDC_ONLY_ACTIVE_PATHS,
+                &mut np,
+                paths.as_mut_ptr(),
+                &mut nm,
+                infos.as_mut_ptr(),
+                None,
+            )
+        };
+        if r != ERROR_SUCCESS {
+            return None;
+        }
+        paths.truncate(np as usize);
+
+        let primary = primary_device_name();
+        let mut first = None;
+        for p in &paths {
+            let mut src = DISPLAYCONFIG_SOURCE_DEVICE_NAME::default();
+            src.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+            src.header.size = std::mem::size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32;
+            src.header.adapterId = p.sourceInfo.adapterId;
+            src.header.id = p.sourceInfo.id;
+            // SAFETY: the header is the first field of a correctly sized packet.
+            let source = if unsafe { DisplayConfigGetDeviceInfo(&mut src.header) } == 0 {
+                wide_str(&src.viewGdiDeviceName)
+            } else {
+                String::new()
+            };
+
+            let mut pref = DISPLAYCONFIG_TARGET_PREFERRED_MODE::default();
+            pref.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_PREFERRED_MODE;
+            pref.header.size = std::mem::size_of::<DISPLAYCONFIG_TARGET_PREFERRED_MODE>() as u32;
+            pref.header.adapterId = p.targetInfo.adapterId;
+            pref.header.id = p.targetInfo.id;
+            // SAFETY: as above.
+            if unsafe { DisplayConfigGetDeviceInfo(&mut pref.header) } != 0 || pref.width == 0 {
+                continue;
+            }
+            let v = pref.targetMode.targetVideoSignalInfo.vSyncFreq;
+            let hz = if v.Denominator > 0 {
+                (v.Numerator as f64 / v.Denominator as f64).round() as u32
+            } else {
+                0
+            };
+            let mode = Mode { width: pref.width, height: pref.height, bpp: 32, hz };
+            tracing::info!(source = %source, mode = ?mode, "display: monitor's preferred mode");
+            if primary.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(&source)) {
+                return Some(mode);
+            }
+            first.get_or_insert(mode);
+        }
+        first
+    }
+
+    /// Wait for a key press on the console. `None` when there is no console to
+    /// read from, `Some(false)` when the time ran out.
+    pub fn wait_for_key(timeout: std::time::Duration) -> Option<bool> {
+        use windows::Win32::Foundation::WAIT_OBJECT_0;
+        use windows::Win32::System::Console::{
+            FlushConsoleInputBuffer, GetConsoleMode, GetStdHandle, ReadConsoleInputW,
+            CONSOLE_MODE, INPUT_RECORD, KEY_EVENT, STD_INPUT_HANDLE,
+        };
+        use windows::Win32::System::Threading::WaitForSingleObject;
+
+        // SAFETY: plain handle query.
+        let h = unsafe { GetStdHandle(STD_INPUT_HANDLE) }.ok()?;
+        let mut mode = CONSOLE_MODE(0);
+        // SAFETY: `h` is this process's input handle; `mode` is an out-param.
+        unsafe { GetConsoleMode(h, &mut mode) }.ok()?;
+        // A key pressed before the question was asked is not an answer to it.
+        // SAFETY: as above.
+        let _ = unsafe { FlushConsoleInputBuffer(h) };
+
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return Some(false);
+            }
+            // SAFETY: a valid handle and a finite timeout.
+            if unsafe { WaitForSingleObject(h, left.as_millis() as u32) } != WAIT_OBJECT_0 {
+                return Some(false);
+            }
+            let mut recs = [INPUT_RECORD::default(); 16];
+            let mut n = 0u32;
+            // SAFETY: the buffer and its length travel together.
+            if unsafe { ReadConsoleInputW(h, &mut recs, &mut n) }.is_err() {
+                return Some(false);
+            }
+            for r in &recs[..n as usize] {
+                // SAFETY: the union is read as the member EventType says it is.
+                if r.EventType as u32 == KEY_EVENT && unsafe { r.Event.KeyEvent.bKeyDown }.as_bool() {
+                    return Some(true);
+                }
+            }
+        }
+    }
+
     pub fn apply(mode: &Mode) -> std::result::Result<(), String> {
         let mut dm = empty_devmode();
         dm.dmPelsWidth = mode.width;
@@ -509,6 +808,18 @@ mod tests {
         );
     }
 
+    /// The line a real medium printed on Windows 11's WinRE (2026-09-17). Only
+    /// the ACTIVE basic adapter counts: an inactive one beside a started vendor
+    /// driver means that driver is drawing.
+    #[test]
+    fn the_basic_display_driver_is_recognised_only_when_it_draws() {
+        let active = "Microsoft Basic Display Driver [ROOT\\BasicDisplay] — активен".to_string();
+        assert!(is_basic_display(&[active]));
+        let idle = "Microsoft Basic Display Driver [ROOT\\BasicDisplay]".to_string();
+        let vendor = "NVIDIA GeForce RTX 3080 [PCI\\VEN_10DE&DEV_2206] — активен".to_string();
+        assert!(!is_basic_display(&[idle, vendor]));
+    }
+
     /// The 49-inch ultra-wide case: the guest offers 3840×2400, which says
     /// nothing about the window the guest is shown in.
     #[test]
@@ -542,6 +853,46 @@ mod tests {
         let modes = vec![m(1920, 1080), m(2560, 1440)];
         let chosen = choose(&modes, (800, 600), (1024, 768), true).unwrap();
         assert_eq!((chosen.width, chosen.height), (1920, 1080));
+    }
+
+    fn mh(width: u32, height: u32, hz: u32) -> Mode {
+        Mode { width, height, bpp: 32, hz }
+    }
+
+    /// The case that blacked the screen: a 32:9 panel in picture-by-picture
+    /// mode declares 2560×1440 per input, the driver lists far more. The
+    /// monitor's own answer wins, at its own refresh rate.
+    #[test]
+    fn the_monitor_preferred_mode_beats_the_biggest() {
+        let modes = vec![
+            mh(1920, 1080, 60), mh(2560, 1440, 60), mh(2560, 1440, 120),
+            mh(3840, 2160, 60), mh(5120, 1440, 60), mh(5120, 1440, 240),
+        ];
+        let chosen = choose_preferred(&modes, mh(2560, 1440, 60)).unwrap();
+        assert_eq!(chosen, mh(2560, 1440, 60));
+        // The same monitor as one big screen.
+        let chosen = choose_preferred(&modes, mh(5120, 1440, 60)).unwrap();
+        assert_eq!(chosen, mh(5120, 1440, 60));
+    }
+
+    /// A preferred size the driver does not list: the largest that fits inside
+    /// it, never anything bigger.
+    #[test]
+    fn a_preferred_size_not_on_offer_rounds_down_not_up() {
+        let modes = vec![mh(1920, 1080, 60), mh(2560, 1080, 60), mh(3840, 2160, 60)];
+        let chosen = choose_preferred(&modes, mh(2560, 1440, 60)).unwrap();
+        assert_eq!((chosen.width, chosen.height), (2560, 1080));
+        assert_eq!(choose_preferred(&[mh(3840, 2160, 60)], mh(2560, 1440, 60)), None);
+    }
+
+    /// A refresh rate that is not listed exactly: the nearest, and on a tie the
+    /// lower one.
+    #[test]
+    fn the_refresh_rate_nearest_the_monitors_wins() {
+        let modes = vec![mh(2560, 1440, 59), mh(2560, 1440, 75), mh(2560, 1440, 144)];
+        assert_eq!(choose_preferred(&modes, mh(2560, 1440, 60)).unwrap().hz, 59);
+        let modes = vec![mh(2560, 1440, 50), mh(2560, 1440, 70)];
+        assert_eq!(choose_preferred(&modes, mh(2560, 1440, 60)).unwrap().hz, 50);
     }
 
     #[test]

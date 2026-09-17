@@ -346,6 +346,15 @@ fn drive_layout(handle: HANDLE) -> Option<(PartitionTable, String, Vec<RawPartit
     Some((scheme, disk_id, parts))
 }
 
+/// Partition scheme and disk id of `\\.\PhysicalDrive{number}` — the GPT disk
+/// GUID (`8F9E951E-…`, no braces), or the MBR signature as eight hex digits.
+/// `None` when the drive does not open or carries no table.
+pub fn disk_identity(number: u32) -> Option<(PartitionTable, String)> {
+    let handle = open_query(&format!(r"\\.\PhysicalDrive{number}"))?;
+    let (scheme, disk_id, _) = drive_layout(handle.0)?;
+    Some((scheme, disk_id))
+}
+
 // ---------------------------------------------------------------------------
 // Volumes
 // ---------------------------------------------------------------------------
