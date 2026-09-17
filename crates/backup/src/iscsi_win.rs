@@ -29,13 +29,23 @@ use windows::core::PCWSTR;
 use windows::Win32::Storage::IscsiDisc::{
     AddIScsiSendTargetPortalW, AddIScsiStaticTargetW, GetDevicesForIScsiSessionW,
     LoginIScsiTargetW, LogoutIScsiTarget, RemoveIScsiSendTargetPortalW, RemoveIScsiStaticTargetW,
-    ISCSI_DEVICE_ON_SESSIONW, ISCSI_TARGET_PORTALW, ISCSI_UNIQUE_SESSION_ID,
+    ISCSI_DEVICE_ON_SESSIONW, ISCSI_TARGET_PORTALW, ISCSI_TARGET_PORTAL_GROUPW,
+    ISCSI_UNIQUE_SESSION_ID,
 };
 
 use crate::win_device::to_wide;
 
 /// The Microsoft iSCSI Initiator service.
 pub const INITIATOR_SERVICE: &str = "MSiSCSI";
+
+/// "any initiator port" — `ISCSI_ANY_INITIATOR_PORT` from `iscsidsc.h`.
+///
+/// NOT zero, which is what this passed at first: zero names initiator port 0,
+/// which does not exist, so `AddIScsiSendTargetPortal` answered
+/// ERROR_INVALID_PARAMETER, the portal was never registered, and the login
+/// that followed had nowhere to go — `ISDSC_NO_PORTAL_SPECIFIED`
+/// (0xefff003c, seen 2026-09-18).
+const ANY_INITIATOR_PORT: u32 = u32::MAX;
 
 /// How long the service is given to reach "running".
 const SERVICE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -46,27 +56,137 @@ fn dev(msg: impl Into<String>) -> OwnBackupError {
     OwnBackupError::Device(msg.into())
 }
 
-/// What the initiator's own error numbers mean.
+/// Every status the initiator can return, taken from `iscsierr.h` in the
+/// Windows SDK: the full code, its name and the text Microsoft ships with
+/// it. Keyed on the whole value because the informational and error sets
+/// reuse the same low half. Without this a log line is a bare number and
+/// the next person goes looking for a header they may not have — which is
+/// exactly what `0xefff003c` cost on 2026-09-18.
+const ISDSC_STATUSES: [(u32, &str, &str); 104] = [
+    (0xafff002e, "ISDSC_OPERATION_NOT_ALL_SUCCESS", "The operation was not successful for all initiators or discovery methods"),
+    (0xafff003b, "ISDSC_OPERATION_REQUIRES_REBOOT", "The operation was successful but requires a driver reload or reboot to become effective"),
+    (0xafff0048, "ISDSC_SHORT_CHAP_SECRET", "The specified CHAP secret is less than 96 bits and will not be usable for authenticating over non ipsec connections"),
+    (0xefff0001, "ISDSC_NON_SPECIFIC_ERROR", "A non specific error occurred"),
+    (0xefff0002, "ISDSC_LOGIN_FAILED", "Login Failed"),
+    (0xefff0003, "ISDSC_CONNECTION_FAILED", "Connection Failed"),
+    (0xefff0004, "ISDSC_INITIATOR_NODE_ALREADY_EXISTS", "Initiator Node Already Exists"),
+    (0xefff0005, "ISDSC_INITIATOR_NODE_NOT_FOUND", "Initiator Node Does Not Exist"),
+    (0xefff0006, "ISDSC_TARGET_MOVED_TEMPORARILY", "Target Moved Temporarily"),
+    (0xefff0007, "ISDSC_TARGET_MOVED_PERMANENTLY", "Target Moved Permanently"),
+    (0xefff0008, "ISDSC_INITIATOR_ERROR", "Initiator Error"),
+    (0xefff0009, "ISDSC_AUTHENTICATION_FAILURE", "Authentication Failure"),
+    (0xefff000a, "ISDSC_AUTHORIZATION_FAILURE", "Authorization Failure"),
+    (0xefff000b, "ISDSC_NOT_FOUND", "Not Found"),
+    (0xefff000c, "ISDSC_TARGET_REMOVED", "Target Removed"),
+    (0xefff000d, "ISDSC_UNSUPPORTED_VERSION", "Unsupported Version"),
+    (0xefff000e, "ISDSC_TOO_MANY_CONNECTIONS", "Too many Connections"),
+    (0xefff000f, "ISDSC_MISSING_PARAMETER", "Missing Parameter"),
+    (0xefff0010, "ISDSC_CANT_INCLUDE_IN_SESSION", "Can not include in session"),
+    (0xefff0011, "ISDSC_SESSION_TYPE_NOT_SUPPORTED", "Session type not supported"),
+    (0xefff0012, "ISDSC_TARGET_ERROR", "Target Error"),
+    (0xefff0013, "ISDSC_SERVICE_UNAVAILABLE", "Service Unavailable"),
+    (0xefff0014, "ISDSC_OUT_OF_RESOURCES", "Out of Resources"),
+    (0xefff0015, "ISDSC_CONNECTION_ALREADY_EXISTS", "Connections already exist on initiator node"),
+    (0xefff0016, "ISDSC_SESSION_ALREADY_EXISTS", "Session Already Exists"),
+    (0xefff0017, "ISDSC_INITIATOR_INSTANCE_NOT_FOUND", "Initiator Instance Does Not Exist"),
+    (0xefff0018, "ISDSC_TARGET_ALREADY_EXISTS", "Target Already Exists"),
+    (0xefff0019, "ISDSC_DRIVER_BUG", "The iscsi driver implementation did not complete an operation correctly"),
+    (0xefff001a, "ISDSC_INVALID_TEXT_KEY", "An invalid key text was encountered"),
+    (0xefff001b, "ISDSC_INVALID_SENDTARGETS_TEXT", "Invalid SendTargets response text was encountered"),
+    (0xefff001c, "ISDSC_INVALID_SESSION_ID", "Invalid Session Id"),
+    (0xefff001d, "ISDSC_SCSI_REQUEST_FAILED", "The scsi request failed"),
+    (0xefff001e, "ISDSC_TOO_MANY_SESSIONS", "Exceeded max sessions for this initiator"),
+    (0xefff001f, "ISDSC_SESSION_BUSY", "Session is busy since a request is already in progress"),
+    (0xefff0020, "ISDSC_TARGET_MAPPING_UNAVAILABLE", "The target mapping requested is not available"),
+    (0xefff0021, "ISDSC_ADDRESS_TYPE_NOT_SUPPORTED", "The Target Address type given is not supported"),
+    (0xefff0022, "ISDSC_LOGON_FAILED", "Logon Failed"),
+    (0xefff0023, "ISDSC_SEND_FAILED", "TCP Send Failed"),
+    (0xefff0024, "ISDSC_TRANSPORT_ERROR", "TCP Transport Error"),
+    (0xefff0025, "ISDSC_VERSION_MISMATCH", "iSCSI Version Mismatch"),
+    (0xefff0026, "ISDSC_TARGET_MAPPING_OUT_OF_RANGE", "The Target Mapping Address passed is out of range for the adapter configuration"),
+    (0xefff0027, "ISDSC_TARGET_PRESHAREDKEY_UNAVAILABLE", "The preshared key for the target or IKE identification payload is not available"),
+    (0xefff0028, "ISDSC_TARGET_AUTHINFO_UNAVAILABLE", "The authentication information for the target is not available"),
+    (0xefff0029, "ISDSC_TARGET_NOT_FOUND", "The target name is not found or is marked as hidden from login"),
+    (0xefff002a, "ISDSC_LOGIN_USER_INFO_BAD", "One or more parameters specified in LoginTargetIN structure is invalid"),
+    (0xefff002b, "ISDSC_TARGET_MAPPING_EXISTS", "Given target mapping already exists"),
+    (0xefff002c, "ISDSC_HBA_SECURITY_CACHE_FULL", "The HBA security information cache is full"),
+    (0xefff002d, "ISDSC_INVALID_PORT_NUMBER", "The port number passed is not valid for the initiator"),
+    (0xefff002f, "ISDSC_HBA_SECURITY_CACHE_NOT_SUPPORTED", "The HBA security information cache is not supported by this adapter"),
+    (0xefff0030, "ISDSC_IKE_ID_PAYLOAD_TYPE_NOT_SUPPORTED", "The IKE id payload type specified is not supported"),
+    (0xefff0031, "ISDSC_IKE_ID_PAYLOAD_INCORRECT_SIZE", "The IKE id payload size specified is not correct"),
+    (0xefff0032, "ISDSC_TARGET_PORTAL_ALREADY_EXISTS", "Target Portal Structure Already Exists"),
+    (0xefff0033, "ISDSC_TARGET_ADDRESS_ALREADY_EXISTS", "Target Address Structure Already Exists"),
+    (0xefff0034, "ISDSC_NO_AUTH_INFO_AVAILABLE", "There is no IKE authentication information available"),
+    (0xefff0035, "ISDSC_NO_TUNNEL_OUTER_MODE_ADDRESS", "There is no tunnel mode outer address specified"),
+    (0xefff0036, "ISDSC_CACHE_CORRUPTED", "Authentication or tunnel address cache is corrupted"),
+    (0xefff0037, "ISDSC_REQUEST_NOT_SUPPORTED", "The request or operation is not supported"),
+    (0xefff0038, "ISDSC_TARGET_OUT_OF_RESORCES", "The target does not have enough resources to process the given request"),
+    (0xefff0039, "ISDSC_SERVICE_DID_NOT_RESPOND", "The initiator service did not respond to the request sent by the driver"),
+    (0xefff003a, "ISDSC_ISNS_SERVER_NOT_FOUND", "The Internet Storage Name Server (iSNS) server was not found or is unavailable"),
+    (0xefff003c, "ISDSC_NO_PORTAL_SPECIFIED", "There is no target portal available to complete the login"),
+    (0xefff003d, "ISDSC_CANT_REMOVE_LAST_CONNECTION", "Cannot remove the last connection for a session"),
+    (0xefff003e, "ISDSC_SERVICE_NOT_RUNNING", "The Microsoft iSCSI Initiator Service is not running. Please start the service and retry"),
+    (0xefff003f, "ISDSC_TARGET_ALREADY_LOGGED_IN", "The target has already been logged in via an iSCSI session"),
+    (0xefff0040, "ISDSC_DEVICE_BUSY_ON_SESSION", "The session cannot be logged out since a device on that session is currently being used"),
+    (0xefff0041, "ISDSC_COULD_NOT_SAVE_PERSISTENT_LOGIN_DATA", "Failed to save persistent login information"),
+    (0xefff0042, "ISDSC_COULD_NOT_REMOVE_PERSISTENT_LOGIN_DATA", "Failed to remove persistent login information"),
+    (0xefff0043, "ISDSC_PORTAL_NOT_FOUND", "The specified portal was not found"),
+    (0xefff0044, "ISDSC_INITIATOR_NOT_FOUND", "The specified initiator name was not found"),
+    (0xefff0045, "ISDSC_DISCOVERY_MECHANISM_NOT_FOUND", "The specified discovery mechanism was not found"),
+    (0xefff0046, "ISDSC_IPSEC_NOT_SUPPORTED_ON_OS", "iSCSI does not support IPSEC for this version of the OS"),
+    (0xefff0047, "ISDSC_PERSISTENT_LOGIN_TIMEOUT", "The iSCSI service timed out waiting for all persistent logins to complete"),
+    (0xefff0049, "ISDSC_EVALUATION_PEROID_EXPIRED", "The evaluation period for the iSCSI initiator service has expired"),
+    (0xefff004a, "ISDSC_INVALID_CHAP_SECRET", "CHAP secret given does not conform to the standard. Please see system event log for more information"),
+    (0xefff004b, "ISDSC_INVALID_TARGET_CHAP_SECRET", "Target CHAP secret given is invalid. Maximum size of CHAP secret is 16 bytes. Minimum size is 12 bytes if IPSec is not used"),
+    (0xefff004c, "ISDSC_INVALID_INITIATOR_CHAP_SECRET", "Initiator CHAP secret given is invalid. Maximum size of CHAP secret is 16 bytes. Minimum size is 12 bytes if IPSec is not used"),
+    (0xefff004d, "ISDSC_INVALID_CHAP_USER_NAME", "CHAP Username given is invalid"),
+    (0xefff004e, "ISDSC_INVALID_LOGON_AUTH_TYPE", "Logon Authentication type given is invalid"),
+    (0xefff004f, "ISDSC_INVALID_TARGET_MAPPING", "Target Mapping information given is invalid"),
+    (0xefff0050, "ISDSC_INVALID_TARGET_ID", "Target Id given in Target Mapping is invalid"),
+    (0xefff0051, "ISDSC_INVALID_ISCSI_NAME", "The iSCSI name specified contains invalid characters or is too long"),
+    (0xefff0052, "ISDSC_INCOMPATIBLE_ISNS_VERSION", "The version number returned from the Internet Storage Name Server (iSNS) server is not compatible with this version of the iSNS client"),
+    (0xefff0053, "ISDSC_FAILED_TO_CONFIGURE_IPSEC", "Initiator failed to configure IPSec for the given connection. This could be because of low resources"),
+    (0xefff0054, "ISDSC_BUFFER_TOO_SMALL", "The buffer given for processing the request is too small"),
+    (0xefff0055, "ISDSC_INVALID_LOAD_BALANCE_POLICY", "The given Load Balance policy is not recognized by iScsi initiator"),
+    (0xefff0056, "ISDSC_INVALID_PARAMETER", "One or more paramaters specified is not valid"),
+    (0xefff0057, "ISDSC_DUPLICATE_PATH_SPECIFIED", "Duplicate PathIds were specified in the call to set Load Balance Policy"),
+    (0xefff0058, "ISDSC_PATH_COUNT_MISMATCH", "Number of paths specified in Set Load Balance Policy does not match the number of paths to the target"),
+    (0xefff0059, "ISDSC_INVALID_PATH_ID", "Path Id specified in the call to set Load Balance Policy is not valid"),
+    (0xefff005a, "ISDSC_MULTIPLE_PRIMARY_PATHS_SPECIFIED", "Multiple primary paths specified when only one primary path is expected"),
+    (0xefff005b, "ISDSC_NO_PRIMARY_PATH_SPECIFIED", "No primary path specified when at least one is expected"),
+    (0xefff005c, "ISDSC_DEVICE_ALREADY_PERSISTENTLY_BOUND", "Device is already a persistently bound device"),
+    (0xefff005d, "ISDSC_DEVICE_NOT_FOUND", "Device was not found"),
+    (0xefff005e, "ISDSC_DEVICE_NOT_ISCSI_OR_PERSISTENT", "The device specified does not originate from an iSCSI disk or a persistent iSCSI login"),
+    (0xefff005f, "ISDSC_DNS_NAME_UNRESOLVED", "The DNS name specified was not resolved"),
+    (0xefff0060, "ISDSC_NO_CONNECTION_AVAILABLE", "There is no connection available in the iSCSI session to process the request"),
+    (0xefff0061, "ISDSC_LB_POLICY_NOT_SUPPORTED", "The given Load Balance policy is not supported"),
+    (0xefff0062, "ISDSC_REMOVE_CONNECTION_IN_PROGRESS", "A remove connection request is already in progress for this session"),
+    (0xefff0063, "ISDSC_INVALID_CONNECTION_ID", "Given connection was not found in the session"),
+    (0xefff0064, "ISDSC_CANNOT_REMOVE_LEADING_CONNECTION", "The leading connection in the session cannot be removed"),
+    (0xefff0065, "ISDSC_RESTRICTED_BY_GROUP_POLICY", "The operation cannot be performed since it does not conform with the group policy assigned to this computer"),
+    (0xefff0066, "ISDSC_ISNS_FIREWALL_BLOCKED", "The operation cannot be performed since the Internet Storage Name Server (iSNS) firewall exception has not been enabled"),
+    (0xefff0067, "ISDSC_FAILURE_TO_PERSIST_LB_POLICY", "Failed to persist load balancing policy parameters"),
+    (0xefff0068, "ISDSC_INVALID_HOST", "The name could not be resolved to an IP Address"),
+];
+
+/// What one of those numbers means, in words.
 ///
-/// The `0xEFFF….` range is iSCSI's (`iscsierr.h`); small numbers are ordinary
-/// Win32 errors, and telling them apart matters — "the service is disabled" and
+/// The `0xEFFF….` range is iSCSI's own; small numbers are ordinary Win32
+/// errors, and telling them apart matters — "the service is disabled" and
 /// "the target refused the login" are answered in completely different places.
 fn describe(code: u32) -> String {
-    let known = match code {
-        0xEFFF_0001 => "non-specific error",
-        0xEFFF_0002 => "login failed",
-        0xEFFF_0003 => "connection failed — the initiator never reached the portal",
-        0xEFFF_0004 => "initiator error",
-        0xEFFF_0005 => "authentication failure",
-        0xEFFF_0006 => "target not found",
-        0x0000_0002 => "Win32: not found",
-        0x0000_0005 => "Win32: access denied",
-        0x0000_0057 => "Win32: invalid parameter",
-        0x0000_0422 => "Win32: the service is disabled",
-        _ if code < 0x0001_0000 => "a Win32 error, not an iSCSI one",
-        _ => "see the initiator's own error list (iscsierr.h)",
+    if let Some((_, name, text)) = ISDSC_STATUSES.iter().find(|(c, _, _)| *c == code) {
+        return format!("{code:#010x} {name} — {text}");
+    }
+    let win32 = match code {
+        0x0000_0002 => "Win32: не найдено",
+        0x0000_0005 => "Win32: отказано в доступе",
+        0x0000_0057 => "Win32: недопустимый параметр",
+        0x0000_0422 => "Win32: служба отключена",
+        _ if code < 0x0001_0000 => "ошибка Win32, не iSCSI",
+        _ => "нет в таблице iscsierr.h",
     };
-    format!("{code:#010x} — {known}")
+    format!("{code:#010x} — {win32}")
 }
 
 fn check(api: &str, target: &str, code: u32) -> Result<()> {
@@ -377,7 +497,13 @@ pub fn login(address: &str, port: u16, target: &str) -> Result<AttachedTarget> {
     let mut portal_added = false;
     // SAFETY: the portal outlives the call; no login options, no security.
     let code = unsafe {
-        AddIScsiSendTargetPortalW(PCWSTR::null(), 0, std::ptr::null_mut(), 0, &mut portal)
+        AddIScsiSendTargetPortalW(
+            PCWSTR::null(),
+            ANY_INITIATOR_PORT,
+            std::ptr::null_mut(),
+            0,
+            &mut portal,
+        )
     };
     if code == 0 {
         portal_added = true;
@@ -387,7 +513,11 @@ pub fn login(address: &str, port: u16, target: &str) -> Result<AttachedTarget> {
             reason = %describe(code),
             "iSCSI: SendTargets portal not added; falling back to a static target"
         );
-        // SAFETY: `iqn` outlives the call; no alias, mappings or portal group.
+        // WITH a portal group: a static target that names no portal leaves the
+        // initiator nothing to connect to, and the login then fails with
+        // ISDSC_NO_PORTAL_SPECIFIED — which is how this was found.
+        let mut group = ISCSI_TARGET_PORTAL_GROUPW { Count: 1, Portals: [portal] };
+        // SAFETY: `iqn` and `group` outlive the call; no alias or mappings.
         let st = unsafe {
             AddIScsiStaticTargetW(
                 PCWSTR(iqn.as_ptr()),
@@ -396,7 +526,7 @@ pub fn login(address: &str, port: u16, target: &str) -> Result<AttachedTarget> {
                 false,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
-                std::ptr::null_mut(),
+                &mut group,
             )
         };
         check("AddIScsiStaticTarget", target, st)?;
@@ -412,7 +542,7 @@ pub fn login(address: &str, port: u16, target: &str) -> Result<AttachedTarget> {
             PCWSTR(iqn.as_ptr()),
             false,
             PCWSTR::null(),
-            0,
+            ANY_INITIATOR_PORT,
             &mut portal,
             0,
             std::ptr::null_mut(),
@@ -435,7 +565,7 @@ pub fn login(address: &str, port: u16, target: &str) -> Result<AttachedTarget> {
                 PCWSTR(iqn.as_ptr()),
                 false,
                 PCWSTR::null(),
-                0,
+                ANY_INITIATOR_PORT,
                 std::ptr::null_mut(),
                 0,
                 std::ptr::null_mut(),
@@ -558,16 +688,24 @@ impl AttachedTarget {
 mod tests {
     use super::*;
 
-    /// The three codes worth telling apart by name: everything else is handed
-    /// over with its number so it can be looked up rather than guessed at.
+    /// Every code the initiator can return is named, out of the SDK's own
+    /// header — including the one that cost a live run (0xefff003c).
     #[test]
-    fn the_initiators_own_error_numbers_are_translated() {
-        assert!(describe(0xEFFF_0003).contains("never reached the portal"));
-        assert!(describe(0x0000_0005).contains("access denied"));
-        assert!(describe(0x0000_0422).contains("service is disabled"));
-        let unknown = describe(0xEFFF_0099);
-        assert!(unknown.contains("0xefff0099"), "{unknown}");
-        assert!(unknown.contains("iscsierr.h"), "{unknown}");
+    fn the_initiators_own_status_numbers_are_translated() {
+        let no_portal = describe(0xEFFF_003C);
+        assert!(no_portal.contains("ISDSC_NO_PORTAL_SPECIFIED"), "{no_portal}");
+        assert!(no_portal.contains("no target portal"), "{no_portal}");
+        assert!(describe(0xEFFF_0003).contains("ISDSC_CONNECTION_FAILED"));
+        assert!(describe(0x0000_0057).contains("недопустимый параметр"));
+        let unknown = describe(0xEFFF_7777);
+        assert!(unknown.contains("0xefff7777") && unknown.contains("iscsierr.h"), "{unknown}");
+    }
+
+    /// Zero is a real initiator port number, not "any" — the mistake that made
+    /// every portal registration fail with ERROR_INVALID_PARAMETER.
+    #[test]
+    fn any_initiator_port_is_not_zero() {
+        assert_eq!(ANY_INITIATOR_PORT, 0xFFFF_FFFF);
     }
 
     #[test]

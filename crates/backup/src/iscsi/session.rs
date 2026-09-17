@@ -234,7 +234,17 @@ impl Session {
         if csg > STAGE_FULL_FEATURE {
             return Err(dev(format!("iSCSI: login from an impossible stage {csg}")));
         }
-        self.take_cmd_sn(bhs);
+        // The status numbering starts where the initiator expects it to: it
+        // sends the first ExpStatSN it will accept, and a target that answers
+        // with another number has its response dropped.
+        if !self.logged_in && self.stat_sn == 0 {
+            self.stat_sn = u32::from_be_bytes([bhs[28], bhs[29], bhs[30], bhs[31]]);
+        }
+        // A login advances the command numbering even though it is marked
+        // immediate — this is what other targets do, and the window we
+        // advertise has to sit above it.
+        let cmd_sn = u32::from_be_bytes([bhs[24], bhs[25], bhs[26], bhs[27]]);
+        self.exp_cmd_sn = cmd_sn.wrapping_add(1);
 
         let keys = parse_keys(data);
         let mut answer = String::new();
@@ -591,6 +601,27 @@ mod tests {
             at = start + len + padding(len);
         }
         out
+    }
+
+    /// The initiator says which status number it expects next; answering with
+    /// a different one gets the response dropped on the floor.
+    #[test]
+    fn the_status_numbering_starts_where_the_initiator_expects() {
+        let mut script = login_pdu("Normal", "iqn.2026-08.dev.ownbackup:image.test");
+        // ExpStatSN = 7, CmdSN = 3, in the login request.
+        script[24..28].copy_from_slice(&3u32.to_be_bytes());
+        script[28..32].copy_from_slice(&7u32.to_be_bytes());
+        let mut wire = Wire::new(script);
+        let mut s = session(Lun::read_write(Box::new(MemSource::new(4096))));
+        s.run(&mut wire).unwrap();
+
+        let stat_sn = u32::from_be_bytes(wire.output[24..28].try_into().unwrap());
+        let exp_cmd_sn = u32::from_be_bytes(wire.output[28..32].try_into().unwrap());
+        let max_cmd_sn = u32::from_be_bytes(wire.output[32..36].try_into().unwrap());
+        assert_eq!(stat_sn, 7, "the response carries the number that was asked for");
+        assert_eq!(exp_cmd_sn, 4, "a login advances the command numbering");
+        assert!(max_cmd_sn >= exp_cmd_sn, "the window must not be closed");
+        assert_eq!(s.stat_sn, 8, "and the next one follows it");
     }
 
     #[test]
