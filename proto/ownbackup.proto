@@ -79,12 +79,13 @@ service BackupService {
   rpc ListDrivers(Empty) returns (JsonReply);           // JSON: [DriverPackageDto]
   rpc BuildMedia(JsonRequest) returns (JsonReply);      // in: MediaBuildOptions -> MediaBuildReport
 
-  // --- Arsenal Image Mounter driver (needed to mount qcow2 on Windows) ---
-  // Install downloads Arsenal Recon's signed driver package from GitHub and
-  // installs it (the service runs as LocalSystem, so no UAC in the GUI).
-  rpc AimDriverStatus(Empty) returns (JsonReply);      // JSON: { installed, version }
-  rpc InstallAimDriver(Empty) returns (JsonReply);     // JSON: { installed, version }
-  rpc UninstallAimDriver(Empty) returns (Empty);
+  // --- What mounting a backup image needs on this machine ---
+  // No driver of ours is installed on either platform: Windows serves the
+  // image over an iSCSI target of ours to its own built-in initiator, Linux
+  // uses the in-tree NBD module. Prepare starts (or loads) what that needs;
+  // the service runs privileged, so the GUI never raises UAC for it.
+  rpc MountBackendStatus(Empty) returns (JsonReply);   // JSON: { platform, ready, message, … }
+  rpc PrepareMountBackend(Empty) returns (JsonReply);  // JSON: the same shape
 }
 
 message Empty {}

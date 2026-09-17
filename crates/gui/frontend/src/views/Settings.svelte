@@ -75,36 +75,33 @@
     }
   }
 
-  // --- Mount-prerequisites card (Windows: AIM driver; Linux: NBD/NTFS) ---
+  // --- What mounting a backup image needs here ---
+  //
+  // No driver of ours is installed on either platform any more: Windows serves
+  // the image over an iSCSI target of ours to its own initiator, Linux uses the
+  // in-tree NBD module. "Prepare" starts (or loads) what that needs.
   let mountStatus: import('$lib/types').MountBackendStatus | null = $state(null);
   const isLinux = $derived(mountStatus?.platform === 'linux');
-  const driverInstalled = $derived(mountStatus ? (mountStatus.installed ?? null) : null);
   let driverBusy = $state(false);
   let driverMsg: string | null = $state(null);
   let driverErr: string | null = $state(null);
-  let showInstallModal = $state(false);
-  // Modal-local install state: the modal stays open with a running progress
-  // bar during install, and closes only on success (or shows the error).
-  let installing = $state(false);
-  let installError: string | null = $state(null);
 
   async function refreshDriver() {
     try {
-      mountStatus = await api.aimDriverStatus();
+      mountStatus = await api.mountBackendStatus();
     } catch (e) {
       mountStatus = null;
       driverErr = String(e);
     }
   }
 
-  // Linux: load the in-tree kernel NBD module (no driver to install).
-  async function loadNbd() {
+  async function prepareMounting() {
     driverBusy = true;
     driverMsg = null;
     driverErr = null;
     try {
-      mountStatus = await api.installAimDriver();
-      driverMsg = 'Модуль NBD загружен.';
+      mountStatus = await api.prepareMountBackend();
+      driverMsg = isLinux ? 'Модуль NBD загружен.' : 'Служба инициатора запущена.';
     } catch (e) {
       driverErr = String(e);
     } finally {
@@ -115,67 +112,6 @@
   $effect(() => {
     refreshDriver();
   });
-
-  async function confirmInstall() {
-    // Keep the modal open; run the progress bar; close only on success.
-    installing = true;
-    installError = null;
-    driverMsg = null;
-    driverErr = null;
-    try {
-      await api.installAimDriver();
-      await refreshDriver();
-      installing = false;
-      showInstallModal = false;
-      driverMsg = 'Драйвер установлен.';
-    } catch (e) {
-      installing = false;
-      installError = String(e);
-    }
-  }
-
-  function closeInstallModal() {
-    if (installing) return; // don't let the user close mid-install
-    showInstallModal = false;
-    installError = null;
-  }
-
-  /** Where the driver comes from and who owns it — shown in the consent dialog
-   *  so the terms are read from the vendor, not from us. */
-  const VENDOR_LINKS = [
-    'https://arsenalrecon.com/weapons/image-mounter',
-    'https://github.com/ArsenalRecon/Arsenal-Image-Mounter',
-  ];
-
-  /** Open a link in the user's browser.
-   *
-   *  A webview swallows `target="_blank"`, and a licence the user is asked to
-   *  accept but cannot open would be a poor kind of consent — so the URL goes
-   *  to the shell plugin (already permitted in `capabilities`). If that fails,
-   *  the address is still on screen to copy. */
-  async function openExternal(event: MouseEvent, url: string) {
-    event.preventDefault();
-    try {
-      await invoke('plugin:shell|open', { path: url });
-    } catch (e) {
-      console.error('could not open', url, e);
-    }
-  }
-
-  async function uninstallDriver() {
-    driverBusy = true;
-    driverMsg = null;
-    driverErr = null;
-    try {
-      await api.uninstallAimDriver();
-      driverMsg = 'Драйвер удалён.';
-      await refreshDriver();
-    } catch (e) {
-      driverErr = String(e);
-    } finally {
-      driverBusy = false;
-    }
-  }
 </script>
 
 <div class="settings-view">
@@ -339,20 +275,20 @@
             встроенный в ядро модуль <b>NBD</b> — программа сама отдаёт блоки,
             без qemu. Для просмотра <b>NTFS</b>-копий нужен драйвер ядра
             <code>ntfs3</code> или пакет <code>ntfs-3g</code>.
-            {#if mountStatus?.kernel}<span class="kernel">Ядро: {mountStatus.kernel}</span>{/if}
+            {#if mountStatus?.linux?.kernel}<span class="kernel">Ядро: {mountStatus.linux?.kernel}</span>{/if}
           </p>
 
           <div class="driver-row">
             <div class="driver-status">
-              {#if mountStatus?.nbd_ok}
+              {#if mountStatus?.linux?.nbd_ok}
                 <span class="status-dot"></span><span>Модуль NBD доступен</span>
               {:else}
                 <span class="status-dot offline"></span><span>Модуль NBD не загружен</span>
               {/if}
             </div>
             <div class="driver-actions">
-              {#if !mountStatus?.nbd_ok}
-                <button class="btn btn-primary" onclick={loadNbd} disabled={driverBusy}>
+              {#if !mountStatus?.linux?.nbd_ok}
+                <button class="btn btn-primary" onclick={prepareMounting} disabled={driverBusy}>
                   {driverBusy ? 'Загрузка…' : 'Загрузить модуль NBD'}
                 </button>
               {/if}
@@ -361,8 +297,8 @@
 
           <div class="driver-row">
             <div class="driver-status">
-              {#if mountStatus?.ntfs_ok}
-                <span class="status-dot"></span><span>NTFS: {mountStatus.ntfs_backend}</span>
+              {#if mountStatus?.linux?.ntfs_ok}
+                <span class="status-dot"></span><span>NTFS: {mountStatus.linux?.ntfs_backend}</span>
               {:else}
                 <span class="status-dot offline"></span>
                 <span>NTFS не поддерживается — установите <code>ntfs-3g</code></span>
@@ -375,30 +311,29 @@
         </div>
       {:else}
         <div class="card">
-          <h2 class="section-title">Драйвер монтирования (Arsenal Image Mounter)</h2>
+          <h2 class="section-title">Подключение копий как диска</h2>
           <p class="driver-desc">
-            Нужен для подключения резервных копий формата <b>qcow2</b> как диска.
-            Для формата VHDX не требуется — он монтируется средствами Windows.
+            Отдельный драйвер не нужен. Копия отдаётся как <b>iSCSI</b>-цель на
+            этой же машине, а подключает её <b>встроенный в Windows
+            инициатор</b> — служба <code>MSiSCSI</code>, которая есть в каждой
+            Windows и в загрузочном носителе. Ничего стороннего не ставится.
           </p>
 
           <div class="driver-row">
             <div class="driver-status">
-              {#if driverInstalled === null}
-                <span class="status-dot offline"></span><span>Статус неизвестен</span>
-              {:else if driverInstalled}
-                <span class="status-dot"></span><span>Установлен</span>
+              {#if mountStatus?.iscsi?.ready}
+                <span class="status-dot"></span>
+                <span>{mountStatus.iscsi.running ? 'Готово: служба работает' : 'Готово: служба запустится по требованию'}</span>
+              {:else if mountStatus?.iscsi}
+                <span class="status-dot offline"></span><span>{mountStatus.iscsi.message}</span>
               {:else}
-                <span class="status-dot offline"></span><span>Не установлен</span>
+                <span class="status-dot offline"></span><span>Статус неизвестен</span>
               {/if}
             </div>
             <div class="driver-actions">
-              {#if driverInstalled}
-                <button class="btn btn-secondary" onclick={uninstallDriver} disabled={driverBusy}>
-                  {driverBusy ? 'Удаление…' : 'Удалить'}
-                </button>
-              {:else}
-                <button class="btn btn-primary" onclick={() => (showInstallModal = true)} disabled={driverBusy}>
-                  {driverBusy ? 'Установка…' : 'Установить'}
+              {#if mountStatus?.iscsi && !mountStatus.iscsi.running}
+                <button class="btn btn-primary" onclick={prepareMounting} disabled={driverBusy}>
+                  {driverBusy ? 'Запуск…' : 'Запустить службу'}
                 </button>
               {/if}
             </div>
@@ -411,70 +346,6 @@
     </div>
   {/if}
 </div>
-
-{#if showInstallModal}
-  <div class="modal-backdrop" role="presentation" onclick={closeInstallModal}>
-    <div class="modal" role="dialog" aria-modal="true" onclick={(e) => e.stopPropagation()}>
-      <h3 class="modal-title">Установка стороннего драйвера</h3>
-      <p>
-        Сейчас будет установлен <b>Arsenal Image Mounter</b> — отдельная программа
-        компании <b>Arsenal Consulting, Inc.</b> (d/b/a Arsenal Recon), а не часть
-        My Own Backup. Разработчик описывает её так:
-      </p>
-      <p class="modal-quote">
-        «Arsenal Image Mounter mounts the contents of disk images as complete disks
-        in Microsoft Windows» — подключает содержимое образов дисков как полноценные
-        диски Windows.
-      </p>
-      <p>
-        <b>Лицензия.</b> Проект распространяется по двойной лицензии: GNU Affero
-        General Public License v3 либо отдельная коммерческая лицензия Arsenal Recon.
-        Установленный без ключа драйвер работает в бесплатном режиме: «If Arsenal
-        Image Mounter is run without a license, it will run in “Free Mode” and provide
-        core functionality».
-      </p>
-      <p>
-        <b>Что произойдёт.</b> Пакет <code>DriverFiles.zip</code> будет загружен
-        напрямую из официального репозитория Arsenal Recon и установлен как драйвер
-        режима ядра (SCSI-адаптер <code>ROOT\PhDskMnt</code>). My Own Backup этот
-        драйвер не распространяет и правообладателем не является. Удалить его можно
-        здесь же кнопкой «Удалить».
-      </p>
-      <p>
-        <b>Зачем.</b> Драйвер нужен только для копий формата <b>qcow2</b> —
-        подключать их как диск. Копии VHDX монтируются средствами Windows и драйвера
-        не требуют.
-      </p>
-      <p class="modal-links">
-        {#each VENDOR_LINKS as url}
-          <a href={url} onclick={(e) => openExternal(e, url)}>{url.replace('https://', '')}</a>
-        {/each}
-      </p>
-      <p>
-        Нажимая «Принять и установить», вы принимаете условия Arsenal Recon как
-        пользователь их продукта.
-      </p>
-      <div class="modal-actions">
-        <button class="btn btn-secondary" onclick={closeInstallModal} disabled={installing}>Отмена</button>
-        <button class="btn btn-primary" onclick={confirmInstall} disabled={installing}>
-          {installing ? 'Установка…' : 'Принять и установить'}
-        </button>
-      </div>
-
-      {#if installing}
-        <div class="modal-progress">
-          <div class="progress-caption">Загрузка и установка драйвера…</div>
-          <div class="progress-track"><div class="progress-bar"></div></div>
-        </div>
-      {:else if installError}
-        <div class="modal-install-error">
-          <div class="err-title">Не удалось установить драйвер</div>
-          <div class="err-detail">{installError}</div>
-        </div>
-      {/if}
-    </div>
-  </div>
-{/if}
 
 <style>
   .settings-view {

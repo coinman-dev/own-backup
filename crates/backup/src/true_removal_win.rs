@@ -830,7 +830,7 @@ fn delete_paths_on_volume_root(
     strip_drive_letters(volume_root);
     // The volume DEVICE enumerating does not mean the filesystem is MOUNTED: a
     // natively-attached VHDX is ready instantly, but the userspace-backed
-    // AIM/devio disk (qcow2) mounts asynchronously. Deleting before the FS is up
+    // An iSCSI-attached disk (qcow2) mounts asynchronously. Deleting before the FS is up
     // makes almost every path lookup fail with "not found" (root entries resolve
     // but deeper directories do not). Wait for the root to become readable and
     // stable first; the logged count also tells us from the log alone whether the
@@ -913,7 +913,7 @@ pub(crate) fn delete_paths_on_disk(
 }
 
 /// How long to wait for the filesystem inside the image to mount. A natively
-/// attached VHDX is ready in under a second; the userspace-backed AIM/devio
+/// attached VHDX is ready in under a second; the userspace-backed iSCSI
 /// disk (qcow2) decompresses a 64 KiB zstd cluster for every 4 KiB the kernel
 /// reads, and an RW mount additionally replays/writes the NTFS log — minutes,
 /// not seconds (the 23:55 run was still not ready at ~57 s while the same

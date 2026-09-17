@@ -612,6 +612,31 @@ pub fn build_media(
     // Whatever the base carried, this one must not be in the finished image.
     let _ = std::fs::remove_file(sys32.join(layout::FORBIDDEN_DLL));
 
+    // Windows' own iSCSI initiator: without its user-mode files the medium
+    // cannot mount a backup at all, and the failure would only show much
+    // later, in front of someone trying to restore.
+    let mut missing_iscsi = Vec::new();
+    for name in layout::ISCSI_FILES {
+        let dst = sys32.join(name);
+        if dst.exists() {
+            continue;
+        }
+        let src = system32().join(name);
+        if src.exists() {
+            let _ = std::fs::copy(&src, &dst);
+        } else {
+            missing_iscsi.push(name);
+        }
+    }
+    if !missing_iscsi.is_empty() {
+        warn!(files = ?missing_iscsi, "media: iSCSI initiator files missing on the build host");
+        report.warnings.push(format!(
+            "На этой машине не нашлось файлов iSCSI-инициатора ({}). Носитель соберётся, \
+             но подключить копию как диск на нём не выйдет.",
+            missing_iscsi.join(", ")
+        ));
+    }
+
     let app_dir_win = r"X:\Program Files\OwnBackup";
     let temp_dir_win = r"X:\Windows\Temp\OwnBackup";
     std::fs::write(

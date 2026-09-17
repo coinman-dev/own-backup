@@ -65,8 +65,8 @@ enum Commands {
     /// Mount a VHDX backup image read-only as a disk
     Mount(commands::mount::MountArgs),
 
-    /// Serve a qcow2 backup to Arsenal Image Mounter over devio TCP (read-only)
-    DevioServe(commands::devio_serve::DevioServeArgs),
+    /// Serve a qcow2 backup as an iSCSI target for the OS's own initiator
+    IscsiServe(commands::iscsi_serve::IscsiServeArgs),
 
     /// Mount prerequisites: AIM driver (Windows) / NBD & NTFS status (Linux)
     Driver(commands::driver::DriverArgs),
@@ -113,8 +113,7 @@ fn needs_admin(command: &Commands) -> bool {
             | Commands::Consolidate(_)
             | Commands::Service(_)
             | Commands::Driver(commands::driver::DriverArgs {
-                action: commands::driver::DriverAction::Install { .. }
-                    | commands::driver::DriverAction::Uninstall,
+                action: commands::driver::DriverAction::Prepare,
             })
     )
 }
@@ -155,7 +154,7 @@ async fn main() {
         Commands::Verify(args) => commands::verify::run(args).await,
         Commands::Consolidate(args) => commands::consolidate::run(args).await,
         Commands::Mount(args) => commands::mount::run(args).await,
-        Commands::DevioServe(args) => commands::devio_serve::run(args).await,
+        Commands::IscsiServe(args) => commands::iscsi_serve::run(args).await,
         Commands::Driver(args) => commands::driver::run(args).await,
         Commands::Display(args) => commands::display::run(args).await,
         Commands::MediaPreflight(args) => commands::media_preflight::run(args).await,

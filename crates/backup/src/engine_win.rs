@@ -256,17 +256,12 @@ fn open_write_with_retry(path: &str) -> Result<WinRawDevice> {
 
 
 /// Back up a volume into a freshly created, directly mountable VHDX.
-/// Отказать заранее, если исключения в qcow2 удалить будет нечем.
-///
-/// Данные исключённых файлов в копию не попадут в любом случае — они
-/// вычитаются из карты ДО копирования. А вот записи из каталога образа убирает
+/// Данные исключённых файлов в копию не попадают в любом случае — они
+/// вычитаются из карты ДО копирования. Записи из каталога образа убирает
 /// драйвер файловой системы, и чтобы он их увидел, образ надо смонтировать:
-/// VHDX монтирует сама Windows, а qcow2 — только Arsenal Image Mounter. Без
-/// него исключённые файлы останутся в копии нулевыми призраками, а «настоящее
-/// удаление» — продуктовое требование (решение 2026-07-28), не пожелание.
-///
-/// Проверка стоит здесь, ДО первого прочитанного байта: узнать об этом через
-/// двадцать минут копирования — то же самое, что не узнать вовсе.
+/// VHDX монтирует сама Windows, qcow2 — наша iSCSI-цель ([`crate::attach_win`]).
+/// Ставить с этим никаких условий больше не нужно: с 2026-09-18 стороннего
+/// драйвера нет, а инициатор есть в любой Windows.
 #[cfg(target_os = "windows")]
 /// Отправить в интерфейс разбивку по типам файлов, как только она посчитана.
 ///
@@ -286,26 +281,6 @@ fn report_categories(
     });
 }
 
-fn refuse_qcow2_exclusions_without_aim(
-    format: ImageFormat,
-    patterns_win: &[String],
-    patterns_linux: &[String],
-) -> Result<()> {
-    if format != ImageFormat::Qcow2 || (patterns_win.is_empty() && patterns_linux.is_empty()) {
-        return Ok(());
-    }
-    if crate::aim_install::status().installed {
-        return Ok(());
-    }
-    Err(OwnBackupError::Config(
-        "для формата qcow2 удаление исключённых файлов из готовой копии делает \
-         драйвер Arsenal Image Mounter, а он не установлен. Установите его \
-         (Инструменты → Драйвер монтирования) — или выключите исключения в \
-         задании, или выберите формат VHDX: его Windows монтирует сама."
-            .into(),
-    ))
-}
-
 pub fn backup_volume(
     req: &VolumeBackupRequest,
     progress: impl FnMut(&BackupProgress) -> Result<()>,
@@ -316,7 +291,6 @@ pub fn backup_volume(
             req.image_path.display()
         )));
     }
-    refuse_qcow2_exclusions_without_aim(req.image_format, &req.exclusion_patterns, &[])?;
     if let Some(parent) = req.image_path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
@@ -1614,7 +1588,7 @@ fn backup_volume_inner(
                 &mut checksums,
                 tick,
             )?,
-            // Same pass over an AIM-mounted copy-on-write overlay: the driver
+            // Same pass over a copy-on-write overlay attached over iSCSI: the driver
             // that owns NTFS does the deleting either way, and what it sits on
             // is the image format's business, not the pass's.
             ImageFormat::Qcow2 => crate::qcow2_removal_win::exclude_inside_qcow2(
@@ -1674,7 +1648,7 @@ fn backup_volume_inner(
                 }
             }
             ImageFormat::Qcow2 => {
-                // RW-mount via AIM over a CoW overlay, delete, fold the touched
+                // RW-mount over a CoW overlay, delete, fold the touched
                 // clusters back with Qcow2InPlaceMerge (Q-R3).
                 if crate::qcow2_removal_win::remove_excluded_from_qcow2(
                     &req.image_path,
@@ -2602,11 +2576,6 @@ pub fn backup_disk(
     req: &DiskBackupRequest,
     progress: impl FnMut(&BackupProgress) -> Result<()>,
 ) -> Result<DiskBackupSummary> {
-    refuse_qcow2_exclusions_without_aim(
-        req.image_format,
-        &req.exclusion_patterns_windows,
-        &req.exclusion_patterns_linux,
-    )?;
     if req.image_path.exists() {
         return Err(OwnBackupError::Config(format!(
             "output image already exists: {}",
@@ -4339,8 +4308,8 @@ pub fn mount_image(image_path: &Path, read_write: bool) -> Result<String> {
     // Dispatch by the container's OWN magic, never by sidecar metadata (new
     // backups carry no external .obkm, and a silent fall-through once sent a
     // qcow2 into vhdmp, which reported it as "file corrupted", error 1392).
-    // qcow2 cannot go through vhdmp; it mounts via the Arsenal Image Mounter
-    // driver + our devio server (see `mount_qcow2_via_aim`).
+    // qcow2 cannot go through vhdmp; it is served over an iSCSI target of ours
+    // to Windows' own initiator (see `mount_qcow2_via_iscsi`).
     let mut magic = [0u8; 8];
     {
         use std::io::Read;
@@ -4351,7 +4320,7 @@ pub fn mount_image(image_path: &Path, read_write: bool) -> Result<String> {
     }
     if magic[..4] == [0x51, 0x46, 0x49, 0xFB] {
         // "QFI\xfb"
-        return mount_qcow2_via_aim(image_path, read_write);
+        return mount_qcow2_via_iscsi(image_path, read_write);
     }
     if &magic != b"vhdxfile" {
         return Err(OwnBackupError::ImageFormat(format!(
@@ -4389,9 +4358,9 @@ pub fn mount_image(image_path: &Path, read_write: bool) -> Result<String> {
 
 /// Detach a previously mounted image.
 pub fn unmount_image(image_path: &Path) -> Result<()> {
-    // qcow2 mounts are tracked in-process (AIM device + devio server).
-    if aim_mounts().lock().unwrap().contains_key(image_path) {
-        return unmount_qcow2_via_aim(image_path);
+    // qcow2 mounts are tracked in-process (the target dies with us).
+    if qcow2_mounts().lock().unwrap().contains_key(image_path) {
+        return unmount_qcow2_via_iscsi(image_path);
     }
 
     let child_path = child_path_for(image_path);
@@ -4465,55 +4434,50 @@ pub fn unmount_image(image_path: &Path) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// qcow2 mounting via Arsenal Image Mounter (plan Q5)
+// qcow2 mounting over our own iSCSI target
 // ---------------------------------------------------------------------------
 
-struct AimMount {
-    adapter: crate::aim_win::AimAdapter,
-    device_number: u32,
-    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    server: Option<std::thread::JoinHandle<()>>,
+/// One qcow2 image currently shown to Windows as a disk, and the scratch
+/// overlay behind it when the mount is writable.
+struct MountedImage {
+    attached: crate::attach_win::Attached,
     overlay: Option<std::sync::Arc<std::sync::Mutex<crate::overlay::WritableOverlaySource>>>,
 }
 
-/// qcow2 mounts served by THIS process: the devio server and AIM device die
-/// with the process, so this only makes sense inside the long-running service
-/// (or a foreground CLI command).
-static AIM_MOUNTS: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, AimMount>>> =
+/// qcow2 mounts served by THIS process: the target dies with the process, so
+/// this only makes sense inside the long-running service (or a foreground CLI
+/// command).
+static QCOW2_MOUNTS: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, MountedImage>>> =
     std::sync::OnceLock::new();
 
-fn aim_mounts() -> &'static std::sync::Mutex<HashMap<PathBuf, AimMount>> {
-    // Shadow the module-wide alias so the code above can name it directly.
-    AIM_MOUNTS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+fn qcow2_mounts() -> &'static std::sync::Mutex<HashMap<PathBuf, MountedImage>> {
+    QCOW2_MOUNTS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
-/// Is this image (qcow2) currently served to Windows by an AIM mount of ours?
+/// Is this image (qcow2) currently served to Windows by a mount of ours?
 /// Companion to [`child_path_for`] for the consolidation guard.
 pub fn qcow2_mounted_here(image_path: &Path) -> bool {
-    aim_mounts().lock().map(|m| m.contains_key(image_path)).unwrap_or(true)
+    qcow2_mounts().lock().map(|m| m.contains_key(image_path)).unwrap_or(true)
 }
 
-/// Present a qcow2 backup (incl. its backing chain) to Windows as a real
-/// read-only disk: start a devio TCP server on an ephemeral loopback port,
-/// then have the AIM driver attach a proxy disk pointing at it. Windows mounts
-/// the NTFS volume inside and assigns a drive letter. Returns the physical
-/// disk path (`\\.\PhysicalDriveN`).
-fn mount_qcow2_via_aim(image_path: &Path, read_write: bool) -> Result<String> {
-    use std::sync::atomic::AtomicBool;
-    use std::sync::Arc;
-
-    if let Some(existing) = aim_mounts().lock().unwrap().get(image_path) {
-        if let Some(n) = crate::aim_win::find_physical_drive(existing.device_number) {
-            return Ok(format!(r"\\.\PhysicalDrive{n}"));
-        }
+/// Present a qcow2 backup (incl. its backing chain) to Windows as a real disk:
+/// serve it over an iSCSI target of ours and have Windows' own initiator log
+/// in. Windows mounts the filesystem inside and assigns a drive letter.
+/// Returns the physical disk path (`\\.\PhysicalDriveN`).
+fn mount_qcow2_via_iscsi(image_path: &Path, read_write: bool) -> Result<String> {
+    if let Some(existing) = qcow2_mounts().lock().unwrap().get(image_path) {
+        return Ok(existing.attached.physical.clone());
     }
 
     let (virtual_size, cluster_size) = {
         let r = crate::qcow2::Qcow2RandomReader::open(image_path)?;
         (r.virtual_size(), r.cluster_size())
     };
+    let serial = crate::iscsi::serial_for_image(image_path);
 
-    let overlay_opt = if read_write {
+    // Writable mounts never touch the image: everything lands in a scratch file
+    // beside it, and only what the caller asks for is merged back on unmount.
+    let (attached, overlay) = if read_write {
         let scratch = scratch_path_for(image_path);
         let _ = std::fs::remove_file(&scratch);
         let overlay_file = std::fs::OpenOptions::new()
@@ -4524,97 +4488,44 @@ fn mount_qcow2_via_aim(image_path: &Path, read_write: bool) -> Result<String> {
             .open(&scratch)
             .map_err(|e| OwnBackupError::Device(format!("create scratch file: {e}")))?;
         let base: Box<dyn BlockSource> = Box::new(crate::qcow2::Qcow2RandomReader::open(image_path)?);
-        let ov = std::sync::Arc::new(std::sync::Mutex::new(crate::overlay::WritableOverlaySource::new(base, cluster_size, overlay_file)));
-        Some(ov)
+        let overlay = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::overlay::WritableOverlaySource::new(base, cluster_size, overlay_file),
+        ));
+        let attached =
+            crate::attach_win::attach_rw(Box::new(overlay.clone()), virtual_size, &serial)?;
+        (attached, Some(overlay))
     } else {
-        None
+        let reader = crate::qcow2::Qcow2RandomReader::open(image_path)?;
+        let attached = crate::attach_win::attach_ro(Box::new(reader), virtual_size, &serial)?;
+        (attached, None)
     };
 
-    let reader = if overlay_opt.is_none() {
-        Some(crate::qcow2::Qcow2RandomReader::open(image_path)?)
-    } else {
-        None
-    };
-
-    // Bind an ephemeral loopback port for the devio server.
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")
-        .map_err(|e| OwnBackupError::Device(format!("devio bind: {e}")))?;
-    let port = listener
-        .local_addr()
-        .map_err(|e| OwnBackupError::Device(format!("devio local_addr: {e}")))?
-        .port();
-
-    let stop = Arc::new(AtomicBool::new(false));
-    let stop_bg = stop.clone();
-    let overlay_bg = overlay_opt.clone();
-    let server = std::thread::Builder::new()
-        .name("aim-devio".into())
-        .spawn(move || {
-            if let Some(ov) = overlay_bg {
-                if let Err(e) = crate::devio::serve_listener_rw(listener, Box::new(ov), stop_bg) {
-                    warn!(error = %e, "devio server for AIM RW mount ended with an error");
-                }
-            } else {
-                if let Err(e) = crate::devio::serve_listener(listener, Box::new(reader.unwrap()), stop_bg) {
-                    warn!(error = %e, "devio server for AIM RO mount ended with an error");
-                }
-            }
-        })
-        .map_err(|e| OwnBackupError::Device(format!("spawn devio server: {e}")))?;
-
-    // Create the AIM proxy disk pointing at our server.
-    let create = (|| -> Result<(crate::aim_win::AimAdapter, u32)> {
-        let adapter = crate::aim_win::AimAdapter::open()?;
-        let device_number = adapter.create_tcp_proxy(port, virtual_size, !read_write)?;
-        Ok((adapter, device_number))
-    })();
-    let (adapter, device_number) = match create {
-        Ok(v) => v,
-        Err(e) => {
-            stop.store(true, std::sync::atomic::Ordering::SeqCst);
-            let _ = server.join();
-            return Err(e);
-        }
-    };
-
-    // Bring the disk online so Windows mounts the volume and assigns a letter
-    let physical = crate::aim_win::find_physical_drive(device_number)
-        .map(|n| format!(r"\\.\PhysicalDrive{n}"));
-    if let Some(path) = &physical {
-        match open_write_with_retry(path) {
-            Ok(dev) => {
-                if let Err(e) = dev.set_online_this_session().and_then(|()| dev.update_properties()) {
-                    warn!(error = %e, "could not bring the AIM disk online — it may show offline in Disk Management");
-                }
-            }
-            Err(e) => warn!(error = %e, "could not open the AIM disk to bring it online"),
-        }
-    }
-
-    aim_mounts().lock().unwrap().insert(
-        image_path.to_path_buf(),
-        AimMount { adapter, device_number, stop, server: Some(server), overlay: overlay_opt },
+    let physical = attached.physical.clone();
+    info!(
+        image = %image_path.display(),
+        physical = %physical,
+        read_write,
+        "qcow2 mounted over iSCSI"
     );
-    info!(image = %image_path.display(), device_number = format!("{device_number:#08x}"), "qcow2 mounted via Arsenal Image Mounter");
-    Ok(physical.unwrap_or_else(|| "(disk created — see Disk Management)".into()))
+    qcow2_mounts()
+        .lock()
+        .unwrap()
+        .insert(image_path.to_path_buf(), MountedImage { attached, overlay });
+    Ok(physical)
 }
 
-fn unmount_qcow2_via_aim(image_path: &Path) -> Result<()> {
-    let entry = aim_mounts().lock().unwrap().remove(image_path);
-    let Some(mut entry) = entry else {
+fn unmount_qcow2_via_iscsi(image_path: &Path) -> Result<()> {
+    let entry = qcow2_mounts().lock().unwrap().remove(image_path);
+    let Some(entry) = entry else {
         return Err(OwnBackupError::Config(format!(
             "{} is not mounted by this service",
             image_path.display()
         )));
     };
-    // Remove the AIM device first (stops the driver's proxy I/O), then the
-    // devio server, then join.
-    let removed = entry.adapter.remove_device(entry.device_number);
-    entry.stop.store(true, std::sync::atomic::Ordering::SeqCst);
-    if let Some(t) = entry.server.take() {
-        let _ = t.join();
-    }
-    removed?;
+    // Dismount, log out, stop serving — in that order, and before anything is
+    // merged: the overlay must not move under a disk Windows still has open.
+    entry.attached.detach();
+    info!(image = %image_path.display(), "qcow2 unmounted (iSCSI session logged out)");
 
     // If it was mounted in RW mode, we have the overlay and need to merge + rehash + update sidecar!
     if let Some(overlay_arc) = entry.overlay {

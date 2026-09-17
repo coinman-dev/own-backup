@@ -55,7 +55,7 @@ const NBD_CMD_FLUSH: u16 = 3;
 const MAX_REQUEST_LEN: u32 = 64 * 1024 * 1024;
 
 /// What the NBD server needs from an image — the shared [`BlockSource`]
-/// (same providers back the Windows devio adapter).
+/// (same providers back the Windows iSCSI target).
 pub use crate::block_source::BlockSource as NbdSource;
 
 fn ioctl(file: &File, cmd: libc::c_ulong, arg: libc::c_ulong, what: &str) -> Result<()> {

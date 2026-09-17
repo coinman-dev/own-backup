@@ -1327,24 +1327,27 @@ impl BackupService for BackupServiceImpl {
         }))
     }
 
-    // --- Arsenal Image Mounter driver management (Windows) ---
+    // --- What mounting a backup image needs here ---
 
-    async fn aim_driver_status(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
+    async fn mount_backend_status(
+        &self,
+        req: Request<Empty>,
+    ) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
-        // The GUI reads `platform` to pick the right card: Windows shows the AIM
-        // driver installer; Linux shows the (no-driver) NBD/NTFS status.
+        // The GUI reads `platform` to pick the right card. Neither platform
+        // installs a driver of ours any more: Windows serves the image over an
+        // iSCSI target of ours to its own initiator, Linux uses in-tree NBD.
         #[cfg(target_os = "windows")]
         {
-            let st = own_backup_backup::aim_install::status();
-            json_reply(&serde_json::json!({
-                "platform": "windows",
-                "installed": st.installed,
-                "version": st.version,
-            }))
+            let st = own_backup_backup::iscsi_win::status();
+            json_reply(&serde_json::json!({ "platform": "windows", "iscsi": st }))
         }
         #[cfg(target_os = "linux")]
         {
-            json_reply(&own_backup_backup::engine_linux::mount_support_status())
+            json_reply(&serde_json::json!({
+                "platform": "linux",
+                "linux": own_backup_backup::engine_linux::mount_support_status(),
+            }))
         }
         #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         {
@@ -1352,31 +1355,33 @@ impl BackupService for BackupServiceImpl {
         }
     }
 
-    async fn install_aim_driver(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
+    async fn prepare_mount_backend(
+        &self,
+        req: Request<Empty>,
+    ) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
         #[cfg(target_os = "windows")]
         {
-            // Download + SetupAPI install can take a few seconds; run it off the
-            // async runtime.
-            tokio::task::spawn_blocking(own_backup_backup::aim_install::install)
+            // Nothing is installed: the initiator service is simply started.
+            // Policy can hold it disabled, and that failure carries the one
+            // command that fixes it.
+            tokio::task::spawn_blocking(own_backup_backup::iscsi_win::ensure_initiator_service)
                 .await
-                .map_err(|e| Status::internal(format!("install task panicked: {e}")))?
-                .map_err(|e| Status::internal(e.to_string()))?;
-            let st = own_backup_backup::aim_install::status();
-            json_reply(&serde_json::json!({
-                "platform": "windows",
-                "installed": st.installed,
-                "version": st.version,
-            }))
+                .map_err(|e| Status::internal(format!("initiator task panicked: {e}")))?
+                .map_err(|e| Status::failed_precondition(e.to_string()))?;
+            let st = own_backup_backup::iscsi_win::status();
+            json_reply(&serde_json::json!({ "platform": "windows", "iscsi": st }))
         }
         #[cfg(target_os = "linux")]
         {
-            // No driver to install — just load the in-tree NBD module (root).
             tokio::task::spawn_blocking(own_backup_backup::engine_linux::ensure_nbd_loaded)
                 .await
                 .map_err(|e| Status::internal(format!("modprobe task panicked: {e}")))?
                 .map_err(|e| Status::internal(e.to_string()))?;
-            json_reply(&own_backup_backup::engine_linux::mount_support_status())
+            json_reply(&serde_json::json!({
+                "platform": "linux",
+                "linux": own_backup_backup::engine_linux::mount_support_status(),
+            }))
         }
         #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         {
@@ -1384,23 +1389,6 @@ impl BackupService for BackupServiceImpl {
         }
     }
 
-    async fn uninstall_aim_driver(&self, req: Request<Empty>) -> Result<Response<Empty>, Status> {
-        check_auth(&req, &self.service_token)?;
-        #[cfg(target_os = "windows")]
-        {
-            tokio::task::spawn_blocking(own_backup_backup::aim_install::uninstall)
-                .await
-                .map_err(|e| Status::internal(format!("uninstall task panicked: {e}")))?
-                .map_err(|e| Status::internal(e.to_string()))?;
-            Ok(Response::new(Empty {}))
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            Err(Status::unimplemented(
-                "The Arsenal Image Mounter driver is a Windows component.",
-            ))
-        }
-    }
 }
 
 #[cfg(test)]

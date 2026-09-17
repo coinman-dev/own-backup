@@ -188,10 +188,12 @@ fn hide_own_console() {
 /// Turn WinPE's firewall off (`wpeutil disablefirewall`).
 ///
 /// It filters cross-process loopback connections: user processes talked over
-/// 127.0.0.1 fine, while DevIoSvc's connect to our devio server — the kernel
-/// half of AIM's TCP proxy, i.e. qcow2 mounting and in-image exclusions — came
-/// back CONNECTION_REFUSED (seen 2026-08-07; the same listener answered a
-/// same-process probe within the same millisecond). Done here rather than only
+/// 127.0.0.1 fine, while the connection from the kernel half of the mount —
+/// qcow2 mounting and in-image exclusions — came back CONNECTION_REFUSED (seen
+/// 2026-08-07; the same listener answered a same-process probe within the same
+/// millisecond). It applies just as much to the iSCSI road that replaced it:
+/// the initiator lives in the kernel, so its connection to our target is
+/// cross-process by definition. Done here rather than only
 /// in the medium's start script, because the script is baked into boot.wim at
 /// media-build time and the usual test loop swaps just the exes — a fix that
 /// lives in the script reaches the machine a full media rebuild later.

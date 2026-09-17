@@ -56,6 +56,20 @@ pub const SYSTEM_DLLS: [&str; 30] = [
     "windowscodecs.dll", "propsys.dll", "userenv.dll", "winhttp.dll", "usp10.dll",
 ];
 
+/// The user-mode half of Windows' own iSCSI initiator — how a backup image
+/// becomes a disk on the medium ([`crate::iscsi_win`]). The kernel driver
+/// (`msiscsi.sys`) is already in WinRE; these are not, and without them the
+/// initiator's API is not there to call. Copied from the building machine,
+/// which is safe for the same reason [`SYSTEM_DLLS`] is: same Windows.
+pub const ISCSI_FILES: [&str; 6] = [
+    "iscsidsc.dll",
+    "iscsiexe.dll",
+    "iscsium.dll",
+    "iscsiwmi.dll",
+    "iscsilog.dll",
+    "iscsicli.exe",
+];
+
 /// The DLL whose presence breaks rendering. Deleted from the image if the base
 /// already had it, and never copied in.
 pub const FORBIDDEN_DLL: &str = "dcomp.dll";
@@ -153,8 +167,8 @@ pub const KEEP_LOCALES: [&str; 2] = ["ru.pak", "en-US.pak"];
 /// Checked against a real machine (2026-08-01): of the 23 packages the old
 /// class-name filter accepted, this leaves the NVMe controller, the AHCI
 /// controller and the Ethernet card — and drops the Logitech receiver, the Canon
-/// and Epson printers, five Intel chipset packages, WireGuard, OpenVPN, the
-/// Avast network filter, and our own Arsenal Image Mounter.
+/// and Epson printers, five Intel chipset packages, WireGuard, OpenVPN and the
+/// Avast network filter.
 pub const RESCUE_CLASSES: [(&str, &[&str], &str); 5] = [
     // storage controllers — RAID, NVMe, SAS
     ("{4d36e97b-e325-11ce-bfc1-08002be10318}", &["PCI"], "контроллер дисков"),
@@ -510,9 +524,10 @@ pub fn start_media_cmd(app_dir: &str, temp_dir: &str) -> String {
         "",
         "rem WinPE's firewall resets loopback connections BETWEEN processes. A",
         "rem process reaching its own listener is fine, which is why the engine and",
-        "rem the interface talk happily - but AIM's TCP proxy (qcow2 mounting, and",
-        "rem exclusions inside the image) is connected by the DevIoSvc helper, from",
-        "rem another process, and that one got CONNECTION_REFUSED (2026-08-07).",
+        "rem the interface talk happily - but the kernel half of a mount (qcow2",
+        "rem mounting, and exclusions inside the image) connects from outside our",
+        "rem process, and that one got CONNECTION_REFUSED (2026-08-07). The iSCSI",
+        "rem initiator that replaced it is in the kernel too, so it is the same case.",
         "rem The service turns the firewall off itself too: this line only helps",
         "rem the case where it never starts. Nothing listens on external",
         "rem interfaces here - it is a rescue environment on a RAM disk.",
@@ -533,6 +548,25 @@ pub fn start_media_cmd(app_dir: &str, temp_dir: &str) -> String {
         &format!("echo   \"{app_dir}\\own-backup-gui.log\""),
         &format!("echo   \"{app_dir}\\own-backup-service.log\""),
         &format!("echo   {temp_dir}\\webview2.log"),
+        "",
+        "rem The iSCSI initiator, LAST on purpose. It is how a backup copy becomes",
+        "rem a real disk here without a driver of ours, and it is needed only when",
+        "rem someone asks to mount one - minutes away at the earliest. Ahead of the",
+        "rem engine it could stop the product from starting at all.",
+        "rem",
+        "rem The service will not start in PE as it stands: it wants the Event Log,",
+        "rem which PE keeps off through the MiniNT key. The key is taken away for",
+        "rem the few seconds the service needs and put straight back - MiniNT is",
+        "rem what tells Windows it is running from a RAM disk, and leaving it off",
+        "rem changes how the environment treats disks, letters and profiles.",
+        "rem `sc` does not exist in WinPE; `net` does.",
+        "net stop eventlog >nul 2>&1",
+        "reg delete \"HKLM\\SYSTEM\\CurrentControlSet\\Control\\MiniNT\" /f >nul 2>&1",
+        "net start eventlog >nul 2>&1",
+        "net start msiscsi",
+        "reg add \"HKLM\\SYSTEM\\CurrentControlSet\\Control\\MiniNT\" /f >nul 2>&1",
+        "echo If the line above says the service started or was already running,",
+        "echo qcow2 copies can be mounted here; the engine starts it on demand too.",
     ])
 }
 
@@ -677,7 +711,8 @@ mod tests {
     }
 
     /// WinPE's firewall resets loopback connections between processes, which is
-    /// exactly how AIM's proxy is fed (DevIoSvc connects to our devio server).
+    /// exactly how the iSCSI road works: the initiator lives in the KERNEL, so
+    /// its connection to our target is cross-process by definition.
     /// Without this the qcow2 mount and the in-image exclusion pass die with
     /// CONNECTION_REFUSED — and they die AFTER the copy, so the run looks
     /// successful and quietly keeps every excluded file.
@@ -700,6 +735,21 @@ mod tests {
         // runtime to a folder that is not there.
         assert!(s.contains(r"WebView2\msedgewebview2.exe"));
         assert!(s.contains("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER=%WV%"));
+    }
+
+    /// The initiator has to come up AFTER the product, and the MiniNT key has
+    /// to go back: it is what tells Windows it is running from a RAM disk.
+    #[test]
+    fn the_initiator_starts_last_and_gives_the_key_back() {
+        let s = start_media_cmd(r"X:\Program Files\OwnBackup", r"X:\Windows\Temp\OwnBackup");
+        let engine = s.find("own-backup-service.exe").unwrap();
+        let del = s.find("reg delete").expect("MiniNT taken away");
+        let start = s.find("net start msiscsi").expect("the initiator is started");
+        let add = s.find("reg add").expect("MiniNT put back");
+        assert!(engine < del, "the product must start before the initiator is touched");
+        assert!(del < start && start < add, "key off -> start -> key back");
+        // `sc` is not in WinPE: reaching for it once took the whole script down.
+        assert!(!s.contains("sc config") && !s.contains("sc start"));
     }
 
     /// A dark screen ended the session of 2026-09-17 with every log on the RAM
@@ -847,7 +897,8 @@ mod tests {
                 "a {bus} adapter has no cable — WireGuard, OpenVPN, the Avast filter"
             );
         }
-        // Our own Arsenal Image Mounter registers as a ROOT storage controller.
+        // Software storage controllers register on ROOT — a rescue medium has
+        // no use for them, and our own iSCSI disks arrive that way too.
         assert_eq!(rescue_role("{4d36e97b-e325-11ce-bfc1-08002be10318}", "ROOT"), None);
     }
 

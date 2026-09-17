@@ -8,93 +8,61 @@ pub struct DriverArgs {
 
 #[derive(Subcommand)]
 pub enum DriverAction {
-    /// Show mount prerequisites (Windows: AIM driver; Linux: NBD/NTFS)
+    /// What mounting an image needs here (Windows: the iSCSI initiator;
+    /// Linux: NBD and NTFS) and whether it is in place.
     Status,
-    /// Windows: install the AIM driver. Linux: load the kernel NBD module. (root/admin)
-    Install {
-        /// Accept the third-party driver's terms without being asked (for
-        /// scripts — the terms are printed either way).
-        #[arg(long, short = 'y')]
-        yes: bool,
-    },
-    /// Windows: remove the AIM driver. Linux: nothing to remove. (root/admin)
-    Uninstall,
+    /// Put it in place: Windows starts the iSCSI initiator service, Linux
+    /// loads the kernel NBD module. Needs administrator/root.
+    Prepare,
 }
 
-/// What is about to be installed, whose it is and on what terms — the same
-/// facts the interface shows in its dialog, so a console install is not a
-/// quieter one.
-#[cfg(target_os = "windows")]
-fn print_vendor_terms() {
-    use own_backup_backup::aim_install::DRIVER_ZIP_URL;
-
-    println!("Будет установлена ОТДЕЛЬНАЯ программа — не часть My Own Backup:");
-    println!();
-    println!("  Arsenal Image Mounter");
-    println!("  © Arsenal Consulting, Inc. (d/b/a Arsenal Recon)");
-    println!("  «mounts the contents of disk images as complete disks in Microsoft Windows»");
-    println!();
-    println!("Лицензия: GNU Affero General Public License v3 либо отдельная коммерческая");
-    println!("лицензия Arsenal Recon. Без ключа драйвер работает в режиме Free Mode:");
-    println!("«If Arsenal Image Mounter is run without a license, it will run in “Free Mode”");
-    println!("and provide core functionality».");
-    println!();
-    println!("  https://arsenalrecon.com/weapons/image-mounter");
-    println!("  https://github.com/ArsenalRecon/Arsenal-Image-Mounter");
-    println!();
-    println!("Пакет будет загружен напрямую от разработчика и установлен как драйвер режима");
-    println!("ядра (SCSI-адаптер ROOT\\PhDskMnt). My Own Backup его не распространяет.");
-    println!("  {DRIVER_ZIP_URL}");
-    println!();
-}
-
-/// Ask, and treat anything that is not a clear yes as a no.
-#[cfg(target_os = "windows")]
-fn confirmed() -> bool {
-    use std::io::Write;
-
-    print!("Принять условия Arsenal Recon и установить драйвер? [y/N]: ");
-    let _ = std::io::stdout().flush();
-    let mut answer = String::new();
-    if std::io::stdin().read_line(&mut answer).is_err() {
-        return false; // no console to ask on — `--yes` is the way then
-    }
-    matches!(answer.trim().to_lowercase().as_str(), "y" | "yes" | "д" | "да")
-}
-
+/// Mounting a backup image needs no driver of ours on either platform.
+///
+/// Windows: an iSCSI target of ours plus the initiator Windows already has
+/// (`MSiSCSI`). This replaced Arsenal Image Mounter, whose driver was
+/// third-party, AGPL-derived and had to be installed before anything worked.
+/// Linux: the in-tree NBD module.
 #[cfg(target_os = "windows")]
 pub async fn run(args: DriverArgs) -> own_backup_common::Result<()> {
-    use own_backup_backup::aim_install;
+    use own_backup_backup::iscsi_win;
+
+    fn print_status() {
+        let s = iscsi_win::status();
+        println!("Подключение образов (Windows) — через встроенный iSCSI-инициатор");
+        println!("  Режим носителя (WinPE):  {}", if s.media_mode { "да" } else { "нет" });
+        println!(
+            "  Драйвер msiscsi.sys:     {}",
+            if s.driver_file { "есть" } else { "НЕ НАЙДЕН" }
+        );
+        println!(
+            "  Служба {}:           {}",
+            iscsi_win::INITIATOR_SERVICE,
+            match (s.service_present, s.disabled, s.running) {
+                (false, _, _) => "НЕТ",
+                (true, true, _) => "ОТКЛЮЧЕНА политикой",
+                (true, false, true) => "работает",
+                (true, false, false) => "остановлена (запустится по требованию)",
+            }
+        );
+        println!();
+        println!("{}", s.message);
+        if s.ready {
+            println!();
+            println!("Проверить целиком:  own-backup-cli iscsi-serve <образ.qcow2>");
+        }
+    }
 
     match args.action {
-        DriverAction::Status => {
-            let st = aim_install::status();
-            println!(
-                "Arsenal Image Mounter driver: {}",
-                if st.installed { "УСТАНОВЛЕН" } else { "не установлен" }
-            );
-            if let Some(v) = st.version {
-                println!("Версия: {v}");
-            }
-        }
-        DriverAction::Install { yes } => {
-            print_vendor_terms();
-            if !yes && !confirmed() {
-                println!("Отменено — ничего не установлено.");
-                return Ok(());
-            }
-            println!("Скачиваю и устанавливаю…");
-            tokio::task::spawn_blocking(aim_install::install)
+        DriverAction::Status => print_status(),
+        DriverAction::Prepare => {
+            println!("Запускаю службу {}…", iscsi_win::INITIATOR_SERVICE);
+            tokio::task::spawn_blocking(iscsi_win::ensure_initiator_service)
                 .await
-                .map_err(|e| own_backup_common::OwnBackupError::Device(format!("install task panicked: {e}")))??;
-            println!("Готово. Драйвер Arsenal Image Mounter установлен.");
-        }
-        DriverAction::Uninstall => {
-            println!("Удаляю драйвер Arsenal Image Mounter…");
-            tokio::task::spawn_blocking(aim_install::uninstall)
-                .await
-                .map_err(|e| own_backup_common::OwnBackupError::Device(format!("uninstall task panicked: {e}")))??;
-            println!("Готово. Драйвер удалён.");
+                .map_err(|e| {
+                    own_backup_common::OwnBackupError::Device(format!("task panicked: {e}"))
+                })??;
+            println!("Готово.\n");
+            print_status();
         }
     }
     Ok(())
@@ -118,22 +86,15 @@ pub async fn run(args: DriverArgs) -> own_backup_common::Result<()> {
             Some(b) => println!("  NTFS: ДОСТУПЕН ({b})"),
             None => println!("  NTFS: нет — установите `ntfs-3g` (напр. `sudo apt install ntfs-3g`)"),
         }
-        println!();
-        println!("Arsenal Image Mounter не нужен на Linux — это компонент Windows.");
     }
 
     match args.action {
         DriverAction::Status => print_status(),
-        // No third-party terms to accept here: the NBD module is part of the
-        // running kernel, so `--yes` has nothing to agree to.
-        DriverAction::Install { .. } => {
+        DriverAction::Prepare => {
             println!("Загружаю модуль ядра NBD (нужны права root)…");
             ensure_nbd_loaded()?;
             println!("Готово.\n");
             print_status();
-        }
-        DriverAction::Uninstall => {
-            println!("На Linux нечего удалять: модуль NBD встроен в ядро.");
         }
     }
     Ok(())
@@ -142,6 +103,6 @@ pub async fn run(args: DriverArgs) -> own_backup_common::Result<()> {
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub async fn run(_args: DriverArgs) -> own_backup_common::Result<()> {
     Err(own_backup_common::OwnBackupError::Config(
-        "The 'driver' command manages platform mount prerequisites (Windows AIM / Linux NBD).".into(),
+        "The 'driver' command reports what mounting an image needs on this platform.".into(),
     ))
 }

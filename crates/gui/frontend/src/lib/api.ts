@@ -97,10 +97,10 @@ export const api = {
    *  The run itself stays in the history and in «Активность». */
   ackRestoreRun: (planId: string) => invoke<void>('ack_restore_run', { planId }),
 
-  // --- Mount prerequisites: AIM driver (Windows) / NBD+NTFS status (Linux) ---
-  aimDriverStatus: () => invoke<MountBackendStatus>('aim_driver_status'),
-  installAimDriver: () => invoke<MountBackendStatus>('install_aim_driver'),
-  uninstallAimDriver: () => invoke<void>('uninstall_aim_driver'),
+  // --- What mounting a backup image needs here (no driver of ours either way:
+  // Windows' own iSCSI initiator / the in-tree NBD module on Linux) ---
+  mountBackendStatus: () => invoke<MountBackendStatus>('mount_backend_status'),
+  prepareMountBackend: () => invoke<MountBackendStatus>('prepare_mount_backend'),
 
   // --- misc ---
   getConfig: () => invoke<Record<string, unknown>>('get_config'),

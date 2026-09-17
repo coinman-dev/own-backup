@@ -461,21 +461,16 @@ pub async fn unmount_backup(state: State<'_, GuiState>, image_path: String) -> R
     state.link.client().await?.unmount_image(&image_path).await
 }
 
-// --- Arsenal Image Mounter driver (needed to mount qcow2 on Windows) ---
+// --- What mounting a backup image needs here (no driver of ours) ---
 
 #[tauri::command]
-pub async fn aim_driver_status(state: State<'_, GuiState>) -> Result<serde_json::Value, String> {
-    state.link.client().await?.aim_driver_status().await
+pub async fn mount_backend_status(state: State<'_, GuiState>) -> Result<serde_json::Value, String> {
+    state.link.client().await?.mount_backend_status().await
 }
 
 #[tauri::command]
-pub async fn install_aim_driver(state: State<'_, GuiState>) -> Result<serde_json::Value, String> {
-    state.link.client().await?.install_aim_driver().await
-}
-
-#[tauri::command]
-pub async fn uninstall_aim_driver(state: State<'_, GuiState>) -> Result<(), String> {
-    state.link.client().await?.uninstall_aim_driver().await
+pub async fn prepare_mount_backend(state: State<'_, GuiState>) -> Result<serde_json::Value, String> {
+    state.link.client().await?.prepare_mount_backend().await
 }
 
 /// Restore a WHOLE disk from a `.obdm` manifest onto `target_disk`. DESTRUCTIVE.

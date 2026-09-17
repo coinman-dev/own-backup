@@ -111,7 +111,7 @@ const MAX_CHAIN_DEPTH: usize = 256;
 /// the parent's file name, so a backup folder stays relocatable).
 /// Cap on cached decompressed clusters: 1024 × 64 KiB = 64 MiB. Sequential
 /// verify/restore touch each cluster once (cache-neutral); the win is the
-/// mount paths (AIM devio on Windows, NBD on Linux), where the kernel reads
+/// mount paths (iSCSI on Windows, NBD on Linux), where the kernel reads
 /// in 4 KiB chunks and would otherwise decompress the same cluster sixteen
 /// times — an NTFS mount walks $MFT/$LogFile/$Bitmap this way and 8 MiB was
 /// too small to hold the mount's working set.

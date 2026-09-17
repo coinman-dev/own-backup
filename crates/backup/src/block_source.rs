@@ -1,7 +1,7 @@
 //! The one thing every block-device adapter needs from an image: its size and
 //! random reads. Served to the kernel by [`crate::nbd_linux`] on Linux and to
-//! Arsenal Image Mounter by [`crate::devio`] on Windows — same providers
-//! (qcow2 chains with decompression, VHDX) behind both.
+//! Windows' own iSCSI initiator by [`crate::iscsi`] — same providers (qcow2
+//! chains with decompression, VHDX) behind both.
 
 use own_backup_common::Result;
 
@@ -10,9 +10,9 @@ pub trait BlockSource: Send {
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()>;
 }
 
-/// A block source that also accepts writes — served RW to the mounter so the OS
-/// filesystem driver can delete excluded files (NTFS/ReFS true removal for the
-/// qcow2 container). Writes land in a scratch overlay, never the base image.
+/// A block source that also accepts writes — served RW so the OS filesystem
+/// driver can delete excluded files (NTFS/ReFS true removal for the qcow2
+/// container). Writes land in a scratch overlay, never the base image.
 pub trait WritableBlockSource: BlockSource {
     fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()>;
 }

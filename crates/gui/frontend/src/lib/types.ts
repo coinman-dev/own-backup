@@ -126,14 +126,24 @@ export interface ActiveMount {
 /// returns the NBD/NTFS fields. `platform` selects which card to render.
 export interface MountBackendStatus {
   platform: 'windows' | 'linux';
-  // Windows (Arsenal Image Mounter):
-  installed?: boolean;
-  version?: string | null;
-  // Linux (kernel NBD + NTFS backend):
-  nbd_ok?: boolean;
-  ntfs_ok?: boolean;
-  ntfs_backend?: string | null;
-  kernel?: string;
+  /** Windows: the built-in iSCSI initiator, which needs no install — only,
+   *  sometimes, a service start. */
+  iscsi?: {
+    ready: boolean;
+    driver_file: boolean;
+    service_present: boolean;
+    running: boolean;
+    disabled: boolean;
+    media_mode: boolean;
+    message: string;
+  };
+  /** Linux: the in-tree NBD module and an NTFS backend. */
+  linux?: {
+    nbd_ok: boolean;
+    ntfs_ok: boolean;
+    ntfs_backend?: string | null;
+    kernel: string;
+  };
 }
 
 export interface ServiceStatus {

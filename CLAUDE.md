@@ -6,9 +6,12 @@ Source-available block-level backup system (Rust). Analogue of Acronis True Imag
 **License (decision 2026-07-08): PolyForm Noncommercial 1.0.0** — free for
 noncommercial use (forks too, staying noncommercial); commercial use needs a
 separate license (`COMMERCIAL-LICENSE.md`). NOT OSI "open source" — say
-"source-available / free for noncommercial use". `aim_win.rs`/`devio.rs` are
-AGPL-derived (Arsenal Image Mounter) → **test-only, never distributed**; being
-replaced by wnbd (LGPL-2.1) before release. See `THIRD-PARTY-NOTICES.md`.
+"source-available / free for noncommercial use". **The AGPL blocker is gone
+(2026-09-18):** Arsenal Image Mounter has been deleted (`aim_win.rs`,
+`aim_install.rs`, `devio.rs`) and replaced by our own **iSCSI target**
+(`iscsi/`, `iscsi_win.rs`, `attach_win.rs`) — an image is served to the
+`MSiSCSI` initiator Windows already has, so nothing third-party is installed or
+distributed. See `THIRD-PARTY-NOTICES.md`.
 
 **There is one plan: `.ai/PLAN.md`** (consolidated 2026-08-20 — done / done but
 unverified / not done, plus the decisions that must not be reopened). The
@@ -135,10 +138,10 @@ tested on a Windows host — cross-compilation validates compilation only.
   re-checksum (`true_removal_win::exclude_inside_image`). Without that zero pass
   it would be a rename, not a removal: the data would sit in the image's free
   space, out of the catalog and fully recoverable. Both formats: VHDX through a
-  differencing child, qcow2 through an AIM RW mount over a CoW overlay
+  differencing child, qcow2 through an iSCSI RW mount over a CoW overlay
   (`qcow2_removal_win::exclude_inside_qcow2`) — the scan/delete/zero half is
   shared (`scan_delete_zero_on_disk`), only the attach differs. **NTFS inside
-  only.** ReFS is not a mounting problem (AIM and the VHDX driver mount it
+  only.** ReFS is not a mounting problem (the iSCSI road and the VHDX driver mount it
   fine) but a free-map one: the zero pass must know which clusters the FS still
   calls free, and ReFS's allocation state is not readable from the raw image.
   The route in is `FSCTL_GET_VOLUME_BITMAP`, which ReFS does answer and

@@ -35,7 +35,7 @@ pub(crate) fn resolve_token(explicit: &str) -> String {
 }
 
 /// Mount is done by the **service** (a long-running process), not in this CLI:
-/// a qcow2 mount is served by an in-process devio server that must outlive the
+/// a qcow2 mount is served by an in-process iSCSI target that must outlive the
 /// command, so the service holds it. The CLI just asks the service and exits —
 /// the disk stays mounted in the background until `unmount`.
 pub async fn run(args: MountArgs) -> Result<()> {

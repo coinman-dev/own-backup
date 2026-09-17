@@ -1,7 +1,7 @@
 //! NTFS/ReFS true removal for the qcow2 container (plan Q-R3).
 //!
-//! qcow2 has no kernel merge like VHDX, so we RW-mount the finished image via
-//! Arsenal Image Mounter over a copy-on-write scratch overlay
+//! qcow2 has no kernel merge like VHDX, so we RW-mount the finished image over
+//! our own iSCSI target ([`crate::attach_win`]) with a copy-on-write overlay
 //! ([`crate::overlay::WritableOverlaySource`]), let the OS filesystem driver
 //! delete the excluded files into the overlay (the base qcow2 is never
 //! touched), then fold the touched clusters back into the qcow2 with
@@ -103,26 +103,15 @@ pub fn exclude_inside_qcow2(
     let base: Box<dyn BlockSource> = Box::new(Qcow2RandomReader::open(image_path)?);
     let overlay = Arc::new(Mutex::new(WritableOverlaySource::new(base, cluster_size, overlay_file)));
 
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| dev(format!("bind: {e}")))?;
-    let port = listener
-        .local_addr()
-        .map_err(|e| dev(format!("local_addr: {e}")))?
-        .port();
-    let stop = Arc::new(AtomicBool::new(false));
-    let stop_bg = stop.clone();
-    let overlay_bg = overlay.clone();
-    let server = std::thread::Builder::new()
-        .name("aim-devio-rw".into())
-        .spawn(move || {
-            if let Err(e) = crate::devio::serve_listener_rw(listener, Box::new(overlay_bg), stop_bg) {
-                warn!(error = %e, "qcow2 exclusions inside the image: devio RW server ended with an error");
-            }
-        })
-        .map_err(|e| dev(format!("spawn devio: {e}")))?;
-
-    let mounted = mount_scan_delete(port, virtual_size, patterns, data_offset, volume_len, tick);
-    stop.store(true, Ordering::SeqCst);
-    let _ = server.join();
+    let mounted = mount_scan_delete(
+        overlay.clone(),
+        virtual_size,
+        image_path,
+        patterns,
+        data_offset,
+        volume_len,
+        tick,
+    );
 
     let scanned = match mounted {
         Ok(v) => v,
@@ -211,43 +200,35 @@ pub fn exclude_inside_qcow2(
     }))
 }
 
-/// AIM RW mount → online → scan + delete + zero (shared with the VHDX path) →
-/// teardown. The AIM device is always removed before returning.
+/// Attach RW → scan + delete + zero (shared with the VHDX path) → teardown.
+/// The session is logged out and the target stopped before returning, whatever
+/// happened in between.
+///
+/// The size guard that used to live here is now in [`crate::attach_win`]: it
+/// refuses anything that is not exactly this image before the handle is
+/// handed over, which matters twice over here, where the pass also ZEROES
+/// sectors (a resolution bug once pointed it at a LIVE host disk, 2026-07-08).
 fn mount_scan_delete(
-    port: u16,
+    overlay: Arc<Mutex<WritableOverlaySource>>,
     virtual_size: u64,
+    image_path: &Path,
     patterns: &[String],
     data_offset: u64,
     volume_len: u64,
     tick: &mut dyn FnMut(u64, u64),
 ) -> Result<crate::true_removal_win::ScannedInside> {
     let _automount = crate::automount::AutoMountGuard::enable_if_disabled();
-    let adapter = crate::aim_win::AimAdapter::open()?;
-    let device_number = adapter.create_tcp_proxy(port, virtual_size, false)?;
+    let attached = crate::attach_win::attach_rw(
+        Box::new(overlay),
+        virtual_size,
+        &crate::iscsi::serial_for_image(image_path),
+    )?;
     let result = (|| -> Result<crate::true_removal_win::ScannedInside> {
-        let physical = crate::aim_win::find_physical_drive(device_number)
-            .map(|n| format!(r"\\.\PhysicalDrive{n}"))
-            .ok_or_else(|| dev("AIM disk did not surface"))?;
-        let mut d = open_write_retry(&physical)?;
-        // Never write on anything but our proxy disk: a resolution bug here
-        // once pointed the pass at a LIVE host disk (2026-07-08). The proxy is
-        // created with exactly `virtual_size` bytes, so a mismatch = wrong disk.
-        // It matters twice over here, where the pass also ZEROES sectors.
-        if d.length() != virtual_size {
-            return Err(dev(format!(
-                "{physical} is {} bytes, expected {virtual_size} — refusing to touch a disk that is not the mounted image",
-                d.length()
-            )));
-        }
-        let _ = d.update_properties();
-        d.set_online_this_session()?;
-        let disk_number: u32 = physical
-            .trim_start_matches(r"\\.\PhysicalDrive")
-            .parse()
-            .map_err(|_| dev(format!("unexpected physical path {physical}")))?;
-        info!(physical = %physical, disk = disk_number, "qcow2 exclusions inside the image: AIM disk attached RW and online");
+        let mut d = open_write_retry(&attached.physical)?;
+        info!(physical = %attached.physical, disk = attached.disk_number,
+              "qcow2 exclusions inside the image: disk attached RW and online");
         let scanned = crate::true_removal_win::scan_delete_zero_on_disk(
-            disk_number,
+            attached.disk_number,
             &mut d,
             patterns,
             data_offset,
@@ -257,10 +238,8 @@ fn mount_scan_delete(
         drop(d);
         Ok(scanned)
     })();
-    let removed = adapter.remove_device(device_number);
-    let scanned = result?;
-    removed?;
-    Ok(scanned)
+    attached.detach();
+    result
 }
 
 /// Delete `paths` from the finished qcow2 image, in place.
@@ -304,29 +283,9 @@ pub fn remove_excluded_from_qcow2(
     let base: Box<dyn BlockSource> = Box::new(Qcow2RandomReader::open(image_path)?);
     let overlay = Arc::new(Mutex::new(WritableOverlaySource::new(base, cluster_size, overlay_file)));
 
-    // devio RW server on an ephemeral loopback port.
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| dev(format!("bind: {e}")))?;
-    let port = listener
-        .local_addr()
-        .map_err(|e| dev(format!("local_addr: {e}")))?
-        .port();
-    let stop = Arc::new(AtomicBool::new(false));
-    let stop_bg = stop.clone();
-    let overlay_bg = overlay.clone();
-    let server = std::thread::Builder::new()
-        .name("aim-devio-rw".into())
-        .spawn(move || {
-            if let Err(e) = crate::devio::serve_listener_rw(listener, Box::new(overlay_bg), stop_bg) {
-                warn!(error = %e, "qcow2 true removal: devio RW server ended with an error");
-            }
-        })
-        .map_err(|e| dev(format!("spawn devio: {e}")))?;
-
-    // Mount RW via AIM, delete, tear down. Best-effort: on ANY failure here the
-    // base qcow2 is untouched (writes went to the scratch), so we keep ghosts.
-    let mount_del = mount_delete(port, virtual_size, paths, tick);
-    stop.store(true, Ordering::SeqCst);
-    let _ = server.join();
+    // Attach RW, delete, tear down. Best-effort: on ANY failure here the base
+    // qcow2 is untouched (writes went to the scratch), so we keep ghosts.
+    let mount_del = mount_delete(overlay.clone(), virtual_size, image_path, paths, tick);
 
     let (deleted, failed) = match mount_del {
         Ok(v) => v,
@@ -431,23 +390,8 @@ pub fn remove_excluded_from_disk_image_qcow2(
     let base: Box<dyn BlockSource> = Box::new(Qcow2RandomReader::open(image_path)?);
     let overlay = Arc::new(Mutex::new(WritableOverlaySource::new(base, cluster_size, overlay_file)));
 
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| dev(format!("bind: {e}")))?;
-    let port = listener.local_addr().map_err(|e| dev(format!("local_addr: {e}")))?.port();
-    let stop = Arc::new(AtomicBool::new(false));
-    let stop_bg = stop.clone();
-    let overlay_bg = overlay.clone();
-    let server = std::thread::Builder::new()
-        .name("aim-devio-rw".into())
-        .spawn(move || {
-            if let Err(e) = crate::devio::serve_listener_rw(listener, Box::new(overlay_bg), stop_bg) {
-                warn!(error = %e, "qcow2 true removal: devio RW server ended with an error");
-            }
-        })
-        .map_err(|e| dev(format!("spawn devio: {e}")))?;
-
-    let mount_del = mount_delete_multi(port, virtual_size, partitions, tick);
-    stop.store(true, Ordering::SeqCst);
-    let _ = server.join();
+    let mount_del =
+        mount_delete_multi(overlay.clone(), virtual_size, image_path, partitions, tick);
 
     let (deleted, failed) = match mount_del {
         Ok(v) => v,
@@ -502,8 +446,9 @@ pub fn remove_excluded_from_disk_image_qcow2(
 /// AIM RW mount → online → delete (shared with the VHDX path) → teardown. The
 /// AIM device is always removed before returning.
 fn mount_delete(
-    port: u16,
+    overlay: Arc<Mutex<WritableOverlaySource>>,
     virtual_size: u64,
+    image_path: &Path,
     paths: &[ExcludedPath],
     tick: &mut dyn FnMut(u64, u64),
 ) -> Result<(u64, u64)> {
@@ -515,45 +460,31 @@ fn mount_delete(
     // as it appears (strip_drive_letters, via delete_paths_on_disk). If the
     // machine has auto-mount off, it is turned on for the mount window only.
     let _automount = crate::automount::AutoMountGuard::enable_if_disabled();
-    let adapter = crate::aim_win::AimAdapter::open()?;
-    let device_number = adapter.create_tcp_proxy(port, virtual_size, false)?;
+    let attached = crate::attach_win::attach_rw(
+        Box::new(overlay),
+        virtual_size,
+        &crate::iscsi::serial_for_image(image_path),
+    )?;
     let result = (|| -> Result<(u64, u64)> {
-        let physical = crate::aim_win::find_physical_drive(device_number)
-            .map(|n| format!(r"\\.\PhysicalDrive{n}"))
-            .ok_or_else(|| dev("AIM disk did not surface"))?;
-        let d = open_write_retry(&physical)?;
-        // Never delete on anything but our proxy disk: a resolution bug here
-        // once pointed the pass at a LIVE host disk (2026-07-08). The proxy is
-        // created with exactly `virtual_size` bytes, so a mismatch = wrong disk.
-        if d.length() != virtual_size {
-            return Err(dev(format!(
-                "{physical} is {} bytes, expected {virtual_size} — refusing to touch a disk that is not the mounted image",
-                d.length()
-            )));
-        }
-        let _ = d.update_properties();
-        d.set_online_this_session()?;
-        let disk_number: u32 = physical
-            .trim_start_matches(r"\\.\PhysicalDrive")
-            .parse()
-            .map_err(|_| dev(format!("unexpected physical path {physical}")))?;
-        info!(physical = %physical, disk = disk_number, "qcow2 true removal: AIM disk attached RW and online");
-        let counts = crate::true_removal_win::delete_paths_on_disk(disk_number, &d, paths, tick)?;
+        let d = open_write_retry(&attached.physical)?;
+        info!(physical = %attached.physical, disk = attached.disk_number,
+              "qcow2 true removal: disk attached RW and online");
+        let counts =
+            crate::true_removal_win::delete_paths_on_disk(attached.disk_number, &d, paths, tick)?;
         drop(d);
         Ok(counts)
     })();
-    let removed = adapter.remove_device(device_number);
-    let counts = result?;
-    removed?;
-    Ok(counts)
+    attached.detach();
+    result
 }
 
-/// Multi-volume twin of [`mount_delete`]: AIM RW mount → online → per-partition
-/// delete on the volume at each partition's disk offset → teardown all volumes.
-/// The AIM device is always removed before returning.
+/// Multi-volume twin of [`mount_delete`]: attach RW → per-partition delete on
+/// the volume at each partition's disk offset → teardown all volumes. The
+/// session is always logged out before returning.
 fn mount_delete_multi(
-    port: u16,
+    overlay: Arc<Mutex<WritableOverlaySource>>,
     virtual_size: u64,
+    image_path: &Path,
     partitions: &[(u64, Vec<ExcludedPath>)],
     tick: &mut dyn FnMut(u64, u64),
 ) -> Result<(u64, u64)> {
@@ -562,35 +493,26 @@ fn mount_delete_multi(
     // nothing to delete. Letters are stripped after the mount instead
     // (strip_letters_on_disk, via delete_paths_on_disk_multi).
     let _automount = crate::automount::AutoMountGuard::enable_if_disabled();
-    let adapter = crate::aim_win::AimAdapter::open()?;
-    let device_number = adapter.create_tcp_proxy(port, virtual_size, false)?;
+    let attached = crate::attach_win::attach_rw(
+        Box::new(overlay),
+        virtual_size,
+        &crate::iscsi::serial_for_image(image_path),
+    )?;
     let result = (|| -> Result<(u64, u64)> {
-        let physical = crate::aim_win::find_physical_drive(device_number)
-            .map(|n| format!(r"\\.\PhysicalDrive{n}"))
-            .ok_or_else(|| dev("AIM disk did not surface"))?;
-        let d = open_write_retry(&physical)?;
-        // Never touch anything but our proxy disk (size guard — 2026-07-08).
-        if d.length() != virtual_size {
-            return Err(dev(format!(
-                "{physical} is {} bytes, expected {virtual_size} — refusing to touch a disk that is not the mounted image",
-                d.length()
-            )));
-        }
-        let _ = d.update_properties();
-        d.set_online_this_session()?;
-        let disk_number: u32 = physical
-            .trim_start_matches(r"\\.\PhysicalDrive")
-            .parse()
-            .map_err(|_| dev(format!("unexpected physical path {physical}")))?;
-        info!(physical = %physical, disk = disk_number, "qcow2 true removal: whole-disk AIM disk attached RW and online");
-        let counts = crate::true_removal_win::delete_paths_on_disk_multi(disk_number, &d, partitions, tick)?;
+        let d = open_write_retry(&attached.physical)?;
+        info!(physical = %attached.physical, disk = attached.disk_number,
+              "qcow2 true removal: whole-disk image attached RW and online");
+        let counts = crate::true_removal_win::delete_paths_on_disk_multi(
+            attached.disk_number,
+            &d,
+            partitions,
+            tick,
+        )?;
         drop(d);
         Ok(counts)
     })();
-    let removed = adapter.remove_device(device_number);
-    let counts = result?;
-    removed?;
-    Ok(counts)
+    attached.detach();
+    result
 }
 
 fn open_write_retry(path: &str) -> Result<WinRawDevice> {

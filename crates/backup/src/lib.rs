@@ -7,7 +7,6 @@ pub mod chains;
 pub mod checksum;
 pub mod consolidate;
 pub mod decrypt;
-pub mod devio;
 pub mod exclusions;
 pub mod esp_fallback;
 pub mod ext_exclusions;
@@ -22,6 +21,7 @@ pub mod luks;
 pub mod mbr_writer;
 pub mod ntfs_map;
 pub mod ntfs_scan;
+pub mod iscsi;
 pub mod overlay;
 pub mod qcow2;
 pub mod raw_copy;
@@ -54,9 +54,7 @@ pub mod linux_device;
 pub mod nbd_linux;
 
 #[cfg(target_os = "windows")]
-pub mod aim_install;
 #[cfg(target_os = "windows")]
-pub mod aim_win;
 #[cfg(target_os = "windows")]
 pub mod automount;
 #[cfg(target_os = "windows")]
@@ -88,6 +86,8 @@ pub mod used_sectors_win;
 #[cfg(target_os = "windows")]
 pub mod vhdx;
 pub mod fat_writer;
+pub mod attach_win;
+pub mod iscsi_win;
 pub mod iso9660;
 pub mod media_layout;
 pub mod media_preflight_win;
