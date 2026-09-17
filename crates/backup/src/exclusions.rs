@@ -289,6 +289,28 @@ pub fn is_essential_linux_dir(rel_components: &[String]) -> bool {
         && matches!(rel_components[0].as_str(), "dev" | "proc" | "sys" | "run" | "tmp")
 }
 
+/// The one excluded path a delete pass inside the image cannot win:
+/// `System Volume Information` at the volume root.
+///
+/// Windows recreates that folder the moment the image's volume mounts and
+/// holds it open — storsvc writes there, VSS keeps its state there — so the
+/// DIRECTORY is not going anywhere while the volume is mounted, and it is the
+/// mounted volume that does the deleting.
+///
+/// What is INSIDE it is ordinary work: those entries came from the source
+/// volume, and nothing on this machine has them open. Until 2026-09-18 both
+/// were skipped, and only at `debug` level — a run that matched two files
+/// inside the folder reported `deleted=0 failed=0` and left both entries in
+/// the image's catalog, with nothing in the log to say why. The data was never
+/// at risk (its clusters are subtracted before the copy), but "настоящее
+/// удаление" is about the entries too.
+///
+/// Only the root one: a folder of the same name deeper in the tree is a folder
+/// like any other.
+pub fn recreated_by_windows(rel: &str) -> bool {
+    rel.trim_end_matches(['\\', '/']).eq_ignore_ascii_case("System Volume Information")
+}
+
 /// Match pattern components against path components. A `**` component matches
 /// zero or more whole path components; any other component is a single-component
 /// glob (`*` / `?`). Root-anchored, must consume the entire path. Iterative
@@ -508,6 +530,20 @@ impl<R: BlockReader> BlockReader for ZeroingBlockReader<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only the folder Windows recreates is beyond the delete pass — what lies
+    /// inside it is deleted like anything else.
+    #[test]
+    fn only_the_system_folder_itself_is_beyond_the_delete_pass() {
+        assert!(recreated_by_windows("System Volume Information"));
+        assert!(recreated_by_windows("system volume information"));
+        assert!(recreated_by_windows(r"System Volume Information\"));
+        assert!(!recreated_by_windows(r"System Volume Information\tracking.log"));
+        assert!(!recreated_by_windows(r"System Volume Information\MasterFileStatus.db"));
+        assert!(!recreated_by_windows("Windows"));
+        // Same name deeper in the tree: an ordinary folder, and ours to delete.
+        assert!(!recreated_by_windows(r"Users\me\System Volume Information"));
+    }
     use crate::block_reader::MockBlockReader;
 
     fn pat(s: &str) -> ExclusionPattern {

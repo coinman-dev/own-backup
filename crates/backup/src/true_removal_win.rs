@@ -847,31 +847,42 @@ fn delete_paths_on_volume_root(
     let t_del = Instant::now();
     let mut deleted = 0u64;
     let mut failed = 0u64;
+    let mut skipped = 0u64;
     // Progress counts PATHS, not deleted entries: the caller knows how many
     // paths it asked for, and a matched directory is one path but many entries
     // — mixing the two makes a bar that runs past its own end.
     let total_paths = paths.len() as u64;
     for (idx, p) in paths.iter().enumerate() {
-        // Skip System Volume Information and anything inside it. Windows
-        // automatically recreates and locks this folder upon mounting, so trying
-        // to delete it is futile and causes sharing-violation warnings.
-        let is_sys_vol_info = p.rel.eq_ignore_ascii_case("System Volume Information")
-            || (p.rel.len() >= 26 && p.rel.as_bytes()[..26].eq_ignore_ascii_case(b"System Volume Information\\"));
-        if is_sys_vol_info {
-            debug!(path = %p.rel, "true removal: skipping System Volume Information to avoid sharing violations");
-            continue;
-        }
         let full = format!("{volume_root}{}", p.rel);
-        delete_tree(&full, p.is_dir, p.is_reparse, &mut deleted, &mut failed);
+        // `System Volume Information` is matched as a FOLDER by the default
+        // rules, and the folder itself stays: Windows recreates it the moment
+        // this volume mounts and holds it open. Its CONTENTS are ordinary work
+        // — they came from the source and nothing here has them open, so they
+        // are deleted and the folder is left behind empty. Until 2026-09-18
+        // the whole path was skipped at `debug` level, which is how a run
+        // reported `deleted=0 failed=0` over two matched files and looked like
+        // a pass with nothing to do
+        // ([`crate::exclusions::recreated_by_windows`]).
+        if crate::exclusions::recreated_by_windows(&p.rel) {
+            skipped += 1;
+            debug!(path = %p.rel, "true removal: emptying the folder Windows recreates on mount");
+            delete_children(&full, &mut deleted, &mut failed);
+        } else {
+            delete_tree(&full, p.is_dir, p.is_reparse, &mut deleted, &mut failed);
+        }
         if idx % 64 == 0 {
             tick(done_before + idx as u64 + 1, total_paths_all);
         }
     }
     tick(done_before + total_paths, total_paths_all);
+    // `skipped` is in the line because its absence was the confusing part: a
+    // run said `deleted=0 failed=0` over two matched files and looked like a
+    // pass that had found nothing to do.
     info!(
         volume = %volume_root,
         deleted,
         failed,
+        skipped,
         delete_ms = t_del.elapsed().as_millis(),
         "true removal: deletions done on volume"
     );
@@ -1082,6 +1093,30 @@ fn enumerate_volume_on_disk(disk_number: u32) -> Option<String> {
 /// Delete one filesystem entry (recursing into non-reparse directories first).
 /// Failures are counted and warned, never fatal — excluding less than asked is
 /// safe, breaking the pass over one stubborn file is not.
+/// Delete everything inside a directory and leave the directory itself. For
+/// the one folder that cannot go (see the call site); a directory that cannot
+/// even be listed is reported once, not per missing child.
+fn delete_children(path: &str, deleted: &mut u64, failed: &mut u64) {
+    match list_dir_backup(Path::new(path)) {
+        Ok(entries) => {
+            for e in entries {
+                let child = format!("{path}\\{}", e.name);
+                delete_tree(
+                    &child,
+                    e.attributes & FILE_ATTRIBUTE_DIRECTORY != 0,
+                    e.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0,
+                    deleted,
+                    failed,
+                );
+            }
+        }
+        Err(e) => {
+            warn!(dir = %path, error = %e, "true removal: cannot list the folder to empty it");
+            *failed += 1;
+        }
+    }
+}
+
 fn delete_tree(path: &str, is_dir: bool, is_reparse: bool, deleted: &mut u64, failed: &mut u64) {
     if is_dir && !is_reparse {
         // Children first: NTFS/ReFS only delete empty directories.
