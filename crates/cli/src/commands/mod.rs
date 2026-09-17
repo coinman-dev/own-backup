@@ -1,6 +1,8 @@
 pub mod backup;
+pub mod backup_disk;
 pub mod bitlocker;
 pub mod consolidate;
+pub mod copy_options;
 pub mod display;
 pub mod driver;
 pub mod iscsi_serve;

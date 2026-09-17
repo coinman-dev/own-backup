@@ -40,6 +40,27 @@ pub struct BackupArgs {
     /// (pagefile.sys, **\Temp\**, *.tmp и прочие).
     #[arg(long)]
     pub exclude_defaults: bool,
+
+    /// full | incremental | differential. Ребёнок пишется поверх --parent или
+    /// того, что найдёт --parent-auto. Цепочки — только на Windows.
+    #[arg(long, default_value = "full")]
+    pub kind: String,
+
+    /// Родительский образ ТОГО ЖЕ тома: предыдущая версия для инкрементальной
+    /// копии, полная копия цепочки — для дифференциальной.
+    #[arg(long, value_name = "ОБРАЗ")]
+    pub parent: Option<String>,
+
+    /// Найти родителя самому: новейшая цепочка образов рядом с --output из
+    /// тех, что собраны не заданием, а из командной строки. Наследовать нечего
+    /// — пишется полная копия, и об этом говорится.
+    #[arg(long)]
+    pub parent_auto: bool,
+
+    /// Проверить готовый образ по его контрольным суммам — то же, что
+    /// «проверять после создания» в задании.
+    #[arg(long)]
+    pub verify: bool,
 }
 
 #[cfg(target_os = "windows")]
@@ -53,16 +74,25 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
         ));
     }
 
+    let image_path = std::path::PathBuf::from(&args.output);
+    // Which version this is and what it is written over. Retention and
+    // scheduling stay with the job model in the service; the copy itself is
+    // all here — see [`super::copy_options`].
+    let (kind, parent_image) = super::copy_options::resolve_parent(
+        super::copy_options::backup_kind(&args.kind)?,
+        args.parent.as_deref(),
+        args.parent_auto,
+        &image_path,
+        args.format,
+    )?;
     let request = VolumeBackupRequest {
         source: args.source.clone(),
-        image_path: std::path::PathBuf::from(&args.output),
+        image_path: image_path.clone(),
         block_size: args.block_size_mib * 1024 * 1024,
         all_sectors: args.all_sectors,
         use_vss: !args.no_vss,
-        // Chains, exclusions and retention are driven by the GUI job model;
-        // the CLI creates plain full backups for now.
-        kind: own_backup_common::types::BackupType::Full,
-        parent_image: None,
+        kind,
+        parent_image,
         exclusion_patterns: {
             let mut p = if args.exclude_defaults {
                 own_backup_core::default_exclusions()
@@ -79,7 +109,7 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
         source_disk: None,
     };
 
-    println!("Backing up {} -> {} ({})", args.source, args.output, args.format);
+    println!("Backing up {} -> {} ({}, {kind:?})", args.source, args.output, args.format);
     println!(
         "Mode: {}",
         if args.all_sectors {
@@ -94,11 +124,7 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
     let summary = tokio::task::spawn_blocking(move || {
         let mut last_percent = u64::MAX;
         backup_volume(&request, |p| {
-            let percent = if p.blocks_total > 0 {
-                p.blocks_done * 100 / p.blocks_total
-            } else {
-                0
-            };
+            let percent = (p.blocks_done * 100).checked_div(p.blocks_total).unwrap_or(0);
             if percent != last_percent {
                 last_percent = percent;
                 print!(
@@ -143,6 +169,10 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
         summary.bytes_copied as f64 / 1e9,
         summary.duration.as_secs_f64()
     );
+    if args.verify {
+        println!();
+        super::copy_options::verify_after(&summary.image_path)?;
+    }
     println!("\nMount it with: own-backup-cli mount \"{}\"", summary.image_path.display());
 
     Ok(())
@@ -154,6 +184,15 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
         backup_volume, verify_image, LinuxBackupRequest, DEFAULT_BLOCK_SIZE,
     };
 
+    // The Linux engine has no chains: its request carries no parent and no
+    // kind. Refusing is the honest answer — quietly writing a full copy where
+    // an increment was asked for is how a backup plan turns out to be one file.
+    if super::copy_options::backup_kind(&args.kind)? != own_backup_common::types::BackupType::Full {
+        return Err(own_backup_common::OwnBackupError::Config(
+            "цепочки (incremental/differential) на Linux пока не поддерживаются — только full"
+                .into(),
+        ));
+    }
     let block_size = if args.block_size_mib == 0 {
         DEFAULT_BLOCK_SIZE
     } else {
