@@ -39,6 +39,17 @@
 //! largest entry, 2560×1600, a 32:9 panel in picture-by-picture mode cannot
 //! show. So the stack is waited for first, and when the monitor still says
 //! nothing the screen is left alone unless it is too small to work in.
+//!
+//! **And a vendor driver on the medium can end the picture by itself** (same
+//! machine, next boot). With the GeForce package added, WinPE enumerated the
+//! card four times — one line per output — and marked NOT ONE of them attached
+//! to the desktop; `QueryDisplayConfig` then had no active path to report and
+//! the monitor lost the signal. Nothing was switched that boot: the mode was
+//! left exactly as found, and the screen still went dark, while the engine and
+//! the interface came up and talked to each other as usual. So a dark screen
+//! after a driver load is not this module's doing — but it is this module's job
+//! to SAY so, which is why "adapters enumerated, none of them drawing" is
+//! reported loudly instead of being passed over.
 
 use clap::Args;
 
@@ -159,6 +170,16 @@ pub fn is_basic_display(adapters: &[String]) -> bool {
     adapters
         .iter()
         .any(|a| a.to_uppercase().contains(r"ROOT\BASICDISPLAY") && a.ends_with("активен"))
+}
+
+/// Is any adapter actually attached to the desktop?
+///
+/// `false` with a non-empty list means the card was enumerated but nothing is
+/// drawing through it — in WinPE that is what a monitor going dark looks like
+/// from inside (2026-09-17: four GeForce outputs, none attached).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn any_adapter_drawing(adapters: &[String]) -> bool {
+    adapters.iter().any(|a| a.ends_with("активен"))
 }
 
 /// The mode to switch to, and why in the caller's words.
@@ -299,6 +320,17 @@ pub async fn run(args: DisplayArgs) -> own_backup_common::Result<()> {
     }
     if adapters.is_empty() {
         println!("Windows не назвала ни одного видеоадаптера — экран ещё поднимается.");
+    } else if !any_adapter_drawing(&adapters) {
+        // The signature of a driver that took the card and never lit it up.
+        println!(
+            "Видеоадаптер найден, но НИ ОДИН выход не подключён к рабочему столу — \
+             картинки, скорее всего, уже нет. Так ведёт себя видеодрайвер, который \
+             WinPE не смог поднять: пересоберите носитель без драйверов видеоадаптеров."
+        );
+        tracing::info!(
+            adapters = ?adapters,
+            "display: adapters enumerated but none attached to the desktop — the screen is probably dark"
+        );
     }
     let mut shown: Vec<&String> = Vec::new();
     for a in &adapters {
@@ -686,9 +718,12 @@ mod imp {
                 continue;
             }
             let text = read_inf(&e.path()).to_ascii_lowercase();
-            // `Class=Display` is how a graphics package announces itself. The
-            // inbox fallbacks are not what anyone is waiting for.
-            if text.contains("class=display")
+            // By the class GUID, not by `Class=Display`: NVIDIA writes
+            // `Class       = Display` with spaces, and the substring check
+            // missed its package entirely (2026-09-17 — the wait then ended
+            // the moment anything answered). The GUID has one spelling.
+            const DISPLAY_CLASS_GUID: &str = "{4d36e968-e325-11ce-bfc1-08002be10318}";
+            if text.contains(DISPLAY_CLASS_GUID)
                 && !text.contains("basicdisplay")
                 && !text.contains("basicrender")
             {
@@ -739,23 +774,47 @@ mod imp {
     /// where a 5120×1440 panel's real size lives (a base EDID block cannot
     /// even describe a width over 4095).
     pub fn preferred_mode() -> Option<Mode> {
+        use windows::Win32::Devices::Display::{QDC_ALL_PATHS, QDC_ONLY_ACTIVE_PATHS};
+
+        // Active paths first. When nothing is active — which is exactly the
+        // state a driver that took the card without lighting it up leaves
+        // behind, and where `QueryDisplayConfig` answered 87/ERROR_INVALID_
+        // PARAMETER with zero paths — ask for every path instead: a monitor
+        // still declares its preferred mode on a target that is merely
+        // available.
+        for flags in [QDC_ONLY_ACTIVE_PATHS, QDC_ALL_PATHS] {
+            if let Some(m) = preferred_mode_with(flags) {
+                return Some(m);
+            }
+        }
+        None
+    }
+
+    fn preferred_mode_with(
+        flags: windows::Win32::Devices::Display::QUERY_DISPLAY_CONFIG_FLAGS,
+    ) -> Option<Mode> {
         use windows::Win32::Devices::Display::{
             DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QueryDisplayConfig,
             DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
             DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_PREFERRED_MODE, DISPLAYCONFIG_MODE_INFO,
             DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME,
-            DISPLAYCONFIG_TARGET_PREFERRED_MODE, QDC_ONLY_ACTIVE_PATHS,
+            DISPLAYCONFIG_TARGET_PREFERRED_MODE,
         };
         use windows::Win32::Foundation::ERROR_SUCCESS;
 
         let (mut np, mut nm) = (0u32, 0u32);
         // SAFETY: plain out-parameters.
-        let sizes = unsafe { GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut np, &mut nm) };
+        let sizes = unsafe { GetDisplayConfigBufferSizes(flags, &mut np, &mut nm) };
         if sizes != ERROR_SUCCESS {
             // Logged, not swallowed: "the monitor said nothing" and "we could
             // not ask" lead to the same silence on screen and to very
             // different fixes.
-            tracing::info!(code = sizes.0, "display: GetDisplayConfigBufferSizes failed");
+            tracing::info!(flags = flags.0, code = sizes.0,
+                           "display: GetDisplayConfigBufferSizes failed");
+            return None;
+        }
+        if np == 0 {
+            tracing::info!(flags = flags.0, "display: no display path of this kind at all");
             return None;
         }
         let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); np as usize];
@@ -763,7 +822,7 @@ mod imp {
         // SAFETY: the arrays are as large as the counts passed alongside them.
         let r = unsafe {
             QueryDisplayConfig(
-                QDC_ONLY_ACTIVE_PATHS,
+                flags,
                 &mut np,
                 paths.as_mut_ptr(),
                 &mut nm,
@@ -772,7 +831,8 @@ mod imp {
             )
         };
         if r != ERROR_SUCCESS {
-            tracing::info!(code = r.0, paths = np, "display: QueryDisplayConfig failed");
+            tracing::info!(flags = flags.0, code = r.0, paths = np,
+                           "display: QueryDisplayConfig failed");
             return None;
         }
         paths.truncate(np as usize);
@@ -954,6 +1014,16 @@ mod tests {
             None,
             "real hardware must not be taken for a guest"
         );
+    }
+
+    /// The four lines a medium printed with the GeForce package added
+    /// (2026-09-17): the card enumerated once per output, nothing drawing.
+    #[test]
+    fn a_card_with_no_output_attached_is_not_drawing() {
+        let gpu = "NVIDIA GeForce GTX 1070 Ti [PCI\\VEN_10DE&DEV_1B82]".to_string();
+        assert!(!any_adapter_drawing(&vec![gpu.clone(); 4]));
+        assert!(!any_adapter_drawing(&[]));
+        assert!(any_adapter_drawing(&[format!("{gpu} — активен")]));
     }
 
     /// The line a real medium printed on Windows 11's WinRE (2026-09-17). Only
