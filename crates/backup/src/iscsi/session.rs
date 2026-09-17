@@ -511,7 +511,19 @@ impl Session {
             segment.extend_from_slice(&(reply.sense.len() as u16).to_be_bytes());
             segment.extend_from_slice(&reply.sense);
         }
-        let residual = expected.saturating_sub(to_send) as u32;
+        // What actually moved, in the direction this command asked for. A
+        // write's bytes travel IN to us, so the read side sent nothing and
+        // `to_send` is zero: answering a write with THAT residual claimed an
+        // underflow of the whole transfer -- "of your N bytes I moved none"
+        // -- with a status of GOOD beside it. The initiator believes the
+        // residual, not the bytes: the data was in the image and the write
+        // was still counted as lost, which is what an RW mount of an image
+        // looked like from outside (2026-09-18). Reads were fine, the volume
+        // was there, the system log filled with `{Delayed Write Failed}` on
+        // `\:$I30:$INDEX_ALLOCATION` and `disk` event 153 retrying, and our
+        // own log had not one failed read or write to show for it.
+        let transferred = if writing { payload.len().min(expected) } else { to_send };
+        let residual = expected.saturating_sub(transferred) as u32;
         let mut rsp = [0u8; BHS];
         rsp[0] = OP_SCSI_RSP;
         rsp[1] = 0x80 | if residual > 0 { 0x02 } else { 0x00 }; // final, underflow
@@ -868,6 +880,63 @@ mod tests {
         lun.lock().unwrap().read_at(0, &mut back).unwrap();
         assert_eq!(back, payload);
         assert_eq!(s.writes, 1);
+    }
+
+    /// A write that took every byte it was promised is NOT an underflow.
+    ///
+    /// The residual used to be read off the data-IN side, which a write never
+    /// uses, so every good write answered "of your N bytes I moved none" with
+    /// the underflow bit set beside a status of GOOD. An initiator believes
+    /// the residual over the bytes, and this is what kept an image from ever
+    /// mounting read-write while reads were perfect (2026-09-18): the volume
+    /// appeared, NTFS wrote to it, and every write came back counted as lost.
+    #[test]
+    fn a_write_that_took_all_its_data_reports_no_residual() {
+        let mut script = login_pdu("Normal", "iqn.2026-08.dev.ownbackup:image.test");
+        let mut cmd = pdu(OP_SCSI_CMD, 0xA1, 9, &vec![0xC7u8; 512]);
+        cmd[20..24].copy_from_slice(&512u32.to_be_bytes());
+        cmd[32..42].copy_from_slice(&[0x2A, 0, 0, 0, 0, 0, 0, 0, 1, 0]);
+        script.extend(cmd);
+
+        let mut wire = Wire::new(script);
+        let mut s = session(Lun::read_write(Box::new(MemSource::new(4096))));
+        s.run(&mut wire).unwrap();
+
+        let all = pdus(&wire.output);
+        let (bhs, _) = all.last().unwrap();
+        assert_eq!(bhs[0], OP_SCSI_RSP);
+        assert_eq!(bhs[3], scsi::STATUS_GOOD, "the write itself succeeded");
+        assert_eq!(bhs[1] & 0x02, 0, "a write that took everything must not claim underflow");
+        assert_eq!(
+            u32::from_be_bytes(bhs[44..48].try_into().unwrap()),
+            0,
+            "none of the write was left behind"
+        );
+    }
+
+    /// And an answer genuinely shorter than the room offered still says so:
+    /// the residual is how the initiator learns which part of its buffer holds
+    /// data. INQUIRY is the everyday case -- room for 255 bytes, 36 come back.
+    #[test]
+    fn an_answer_shorter_than_the_room_offered_still_reports_underflow() {
+        let mut script = login_pdu("Normal", "iqn.2026-08.dev.ownbackup:image.test");
+        let mut cmd = pdu(OP_SCSI_CMD, 0x81, 9, &[]);
+        cmd[20..24].copy_from_slice(&255u32.to_be_bytes());
+        cmd[32..38].copy_from_slice(&[0x12, 0, 0, 0, 255, 0]);
+        script.extend(cmd);
+
+        let mut wire = Wire::new(script);
+        let mut s = session(Lun::read_write(Box::new(MemSource::new(4096))));
+        s.run(&mut wire).unwrap();
+
+        let all = pdus(&wire.output);
+        let got: usize =
+            all.iter().filter(|(b, _)| b[0] == OP_DATA_IN).map(|(_, d)| d.len()).sum();
+        let (bhs, _) = all.last().unwrap();
+        assert_eq!(bhs[0], OP_SCSI_RSP);
+        assert!(got > 0 && got < 255, "INQUIRY answers with less than the room offered: {got}");
+        assert_ne!(bhs[1] & 0x02, 0, "a short answer is an underflow");
+        assert_eq!(u32::from_be_bytes(bhs[44..48].try_into().unwrap()) as usize, 255 - got);
     }
 
     /// The rest of a write arriving as its own PDU, which is what the initiator
