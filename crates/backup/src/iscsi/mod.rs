@@ -90,6 +90,12 @@ pub struct Lun {
     /// What INQUIRY reports as the unit serial. Windows tells two mounted
     /// images apart by it, so it is the image's own name and not a constant.
     serial: String,
+    /// Opcodes already refused once, so the same refusal is not written to the
+    /// log hundreds of times. Whatever watches this machine's disks sends the
+    /// same handful of commands in a burst about once a second for as long as
+    /// an image is attached, and the second identical line says nothing the
+    /// first did not.
+    refused: [bool; 256],
 }
 
 enum Backing {
@@ -107,6 +113,7 @@ impl Lun {
             backing: Backing::Ro(source),
             block_size: Self::BLOCK_SIZE,
             serial: "0001".into(),
+            refused: [false; 256],
         }
     }
 
@@ -115,7 +122,13 @@ impl Lun {
             backing: Backing::Rw(source),
             block_size: Self::BLOCK_SIZE,
             serial: "0001".into(),
+            refused: [false; 256],
         }
+    }
+
+    /// True the FIRST time this opcode is refused, false every time after.
+    pub(crate) fn first_refusal_of(&mut self, opcode: u8) -> bool {
+        !std::mem::replace(&mut self.refused[opcode as usize], true)
     }
 
     /// The image's own serial, as INQUIRY reports it.

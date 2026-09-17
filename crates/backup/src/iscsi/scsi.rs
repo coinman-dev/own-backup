@@ -11,7 +11,7 @@
 //! Every reply here is bytes in, bytes out: no sockets, no Windows, no image —
 //! which is why this file carries the tests for the whole command set.
 
-use tracing::warn;
+use tracing::{debug, trace, warn};
 
 use super::Lun;
 
@@ -95,7 +95,18 @@ pub fn execute(lun: &mut Lun, cdb: &[u8], data_out: &[u8]) -> Reply {
         0x1E => Reply::ok(),                       // PREVENT ALLOW MEDIUM REMOVAL
         0x2F | 0x8F => Reply::ok(),                // VERIFY: the image is what it is
         _ => {
-            warn!(opcode = format!("{opcode:#04x}"), "iSCSI: unsupported SCSI command");
+            // Refusing is the right answer and the initiator takes it as one;
+            // the only question is whether anybody wants to read about it.
+            if !lun.first_refusal_of(opcode) {
+                trace!(opcode = format!("{opcode:#04x}"), "iSCSI: refused again");
+            } else if refusal_is_expected(opcode) {
+                debug!(
+                    opcode = format!("{opcode:#04x}"),
+                    "iSCSI: refusing a command a backup image is not meant to answer"
+                );
+            } else {
+                warn!(opcode = format!("{opcode:#04x}"), "iSCSI: unsupported SCSI command");
+            }
             Reply::fail(KEY_ILLEGAL_REQUEST, ASC_INVALID_OPCODE)
         }
     }
@@ -206,6 +217,24 @@ fn report_luns() -> Reply {
     let mut d = vec![0u8; 16];
     d[0..4].copy_from_slice(&8u32.to_be_bytes()); // one entry follows
     Reply::good(d) // LUN 0, all zeros
+}
+
+/// Commands nobody should expect an image to answer, so refusing one is not
+/// news.
+///
+/// `ATA PASS-THROUGH` (0x85 and 0xA1) asks a SCSI device to forward an ATA
+/// command to the drive behind it — SMART, almost always. There is no drive
+/// behind this LUN to forward anything to. The vendor-specific range
+/// (0xC0-0xFF, SPC-4 §5.1) is by definition whatever the maker of a real disk
+/// chose to put there, so a target that does not implement it is not missing
+/// anything either.
+///
+/// Both arrive in bursts from whatever watches this machine's disks, about
+/// once a second for as long as an image is attached. As warnings they were
+/// almost every line of a run's log and buried the one message that mattered
+/// (2026-09-18) — the reason this classification exists.
+fn refusal_is_expected(opcode: u8) -> bool {
+    matches!(opcode, 0x85 | 0xA1) || opcode >= 0xC0
 }
 
 /// LBA and block count out of a READ/WRITE CDB, 10- or 16-byte form.
@@ -416,6 +445,35 @@ pub(crate) mod tests {
         let r = execute(&mut lun, &[0xDE, 0, 0, 0, 0, 0], &[]);
         assert_eq!(r.status, STATUS_CHECK_CONDITION);
         assert_eq!((r.sense[12], r.sense[13]), ASC_INVALID_OPCODE);
+    }
+
+    /// Which refusals are worth a word. ATA pass-through and the
+    /// vendor-specific range come from whatever polls the machine's disks and
+    /// mean nothing here; a real SCSI command we have not implemented is a gap
+    /// somebody should hear about.
+    #[test]
+    fn a_refusal_nobody_can_help_is_told_apart_from_a_gap() {
+        for op in [0x85u8, 0xA1, 0xC0, 0xD8, 0xDF, 0xE0, 0xE4, 0xE6, 0xF8, 0xFF] {
+            assert!(refusal_is_expected(op), "{op:#04x} is nothing to warn about");
+        }
+        for op in [0x24u8, 0x41, 0x42, 0x93] {
+            assert!(!refusal_is_expected(op), "{op:#04x} is a command we could have");
+        }
+    }
+
+    /// The same opcode a second time is not news either way, and a poller
+    /// sends it hundreds of times per attach. The REFUSAL itself never changes.
+    #[test]
+    fn the_same_refusal_is_reported_once_but_answered_every_time() {
+        let mut lun = rw_lun(4096);
+        assert!(lun.first_refusal_of(0xDF));
+        assert!(!lun.first_refusal_of(0xDF), "the second one is the same line");
+        assert!(lun.first_refusal_of(0xE4), "another opcode has its own first time");
+        for _ in 0..3 {
+            let r = execute(&mut lun, &[0xDF, 0, 0, 0, 0, 0], &[]);
+            assert_eq!(r.status, STATUS_CHECK_CONDITION);
+            assert_eq!((r.sense[12], r.sense[13]), ASC_INVALID_OPCODE);
+        }
     }
 
     #[test]
