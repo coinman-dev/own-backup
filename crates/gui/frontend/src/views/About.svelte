@@ -1,88 +1,149 @@
 <script lang="ts">
-  // Static about page -- no async calls needed
+  // «Справка» — единственное место, где программа говорит о себе сама, и
+  // единственное, где она говорит о лицензии. Поэтому здесь нет ни одного
+  // вшитого утверждения, которое может разойтись с действительностью: версии,
+  // связь со службой и папка данных спрашиваются у службы и у настроек.
+  //
+  // До 2026-09-18 тут лежала англоязычная заглушка, и она врала в трёх местах:
+  // «MIT / Apache-2.0» вместо PolyForm Noncommercial, «Encryption AES-256-GCM»
+  // (шифрование ушло вместе с форматом .obk) и «gRPC on localhost:50051»
+  // (в бою это именованный канал, а порт не слушается вовсе). Ссылки вели на
+  // github.com/user/own-backup — такого места нет.
+  import { onMount } from 'svelte';
+  import { api } from '../lib/api';
+  import { media, ensureMediaMode } from '../lib/mediaStore.svelte';
+  import type { ServiceStatus, ServiceHealth } from '../lib/types';
+
+  let status: ServiceStatus | null = $state(null);
+  let health: ServiceHealth | null = $state(null);
+  let dataDir = $state('');
+  let logMirrorDir = $state('');
+
+  onMount(async () => {
+    await ensureMediaMode();
+    const [st, he, cfg] = await Promise.allSettled([
+      api.getServiceStatus(),
+      api.serviceHealth(),
+      api.getConfig(),
+    ]);
+    if (st.status === 'fulfilled') status = st.value;
+    if (he.status === 'fulfilled') health = he.value;
+    if (cfg.status === 'fulfilled') {
+      dataDir = (cfg.value.data_dir as string) ?? '';
+      logMirrorDir = (cfg.value.log_mirror_dir as string) ?? '';
+    }
+  });
+
+  // Как интерфейс разговаривает со службой. На Windows это именованный канал с
+  // ограниченным доступом, и порт при этом не слушается — сказать «gRPC на
+  // localhost:50051» было бы неправдой о том, что открыто в системе.
+  const link = $derived(
+    media.active
+      ? 'канал \\\\.\\pipe\\OwnBackup, служба запущена как процесс носителя'
+      : 'канал \\\\.\\pipe\\OwnBackup с ограниченным доступом (сетевой порт не слушается)',
+  );
+  const serviceState = $derived.by(() => {
+    if (!health) return 'опрашиваем…';
+    if (media.active) return 'режим носителя: служба работает как процесс, в систему не устанавливается';
+    if (health.reachable) return `отвечает${status?.version ? `, версия ${status.version}` : ''}`;
+    if (health.installed) return 'установлена, но не отвечает — проверьте, запущена ли она';
+    return 'не установлена';
+  });
 </script>
 
 <div class="about-view">
   <div class="page-header">
-    <h1 class="page-title">About</h1>
+    <h1 class="page-title">Справка</h1>
   </div>
 
-  <div class="about-card card">
-    <div class="app-logo">
-      <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-        <rect x="2" y="6" width="20" height="12" rx="2" />
-        <path d="M12 6V2M8 6V4M16 6V4" />
-        <circle cx="12" cy="12" r="3" />
-      </svg>
-    </div>
-
+  <div class="card">
     <h2 class="app-name">My Own Backup</h2>
-    <p class="app-version">Version 0.1.0</p>
     <p class="app-description">
-      Open-source block-level backup system for disk imaging, incremental backups, and bare-metal restore. Built with Rust.
+      Копии дисков и томов целиком, блок за блоком: в копию попадают только
+      занятые кластеры, а исключённые файлы не попадают вовсе. Из копии можно
+      восстановить раздел, диск или отдельные файлы, а с загрузочного носителя —
+      и тот диск, с которого система загружается.
     </p>
 
     <div class="info-table">
       <div class="info-row">
-        <span class="info-label">License</span>
-        <span class="info-value">MIT / Apache-2.0</span>
+        <span class="info-label">Версия интерфейса</span>
+        <span class="info-value">{status?.version ?? '—'}</span>
       </div>
       <div class="info-row">
-        <span class="info-label">Image Format</span>
-        <span class="info-value">VHDX / qcow2</span>
+        <span class="info-label">Служба</span>
+        <span class="info-value">{serviceState}</span>
       </div>
       <div class="info-row">
-        <span class="info-label">Compression</span>
-        <span class="info-value">zstd (level 0-19)</span>
+        <span class="info-label">Связь с службой</span>
+        <span class="info-value">{link}</span>
       </div>
       <div class="info-row">
-        <span class="info-label">Encryption</span>
-        <span class="info-value">AES-256-GCM</span>
+        <span class="info-label">Формат копий</span>
+        <span class="info-value">динамический VHDX или qcow2 (сжатие zstd)</span>
       </div>
       <div class="info-row">
-        <span class="info-label">Backend</span>
-        <span class="info-value">gRPC on localhost:50051</span>
+        <span class="info-label">Контрольные суммы</span>
+        <span class="info-value">xxHash64 на каждый блок, в манифесте внутри образа</span>
       </div>
       <div class="info-row">
-        <span class="info-label">Metadata</span>
-        <span class="info-value">SQLite</span>
+        <span class="info-label">Задания и журнал</span>
+        <span class="info-value">SQLite{dataDir ? ` в ${dataDir}` : ''}</span>
       </div>
-      <div class="info-row">
-        <span class="info-label">GUI Framework</span>
-        <span class="info-value">Tauri 2 + Svelte 5</span>
-      </div>
+      {#if logMirrorDir}
+        <div class="info-row">
+          <span class="info-label">Копия журнала</span>
+          <span class="info-value">{logMirrorDir}</span>
+        </div>
+      {/if}
     </div>
+  </div>
 
-    <div class="links-section">
-      <h3 class="links-heading">Links</h3>
-      <div class="links-list">
-        <a href="https://github.com/user/own-backup" target="_blank" rel="noopener" class="link-item">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-            <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z" />
-          </svg>
-          GitHub Repository
-        </a>
-        <a href="https://github.com/user/own-backup/issues" target="_blank" rel="noopener" class="link-item">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-            <circle cx="12" cy="12" r="10" />
-            <path d="M12 8v4m0 4h.01" />
-          </svg>
-          Report an Issue
-        </a>
-        <a href="https://github.com/user/own-backup/wiki" target="_blank" rel="noopener" class="link-item">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
-            <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
-          </svg>
-          Documentation
-        </a>
-      </div>
-    </div>
+  <div class="card">
+    <h3 class="section-heading">Лицензия</h3>
+    <p class="licence">
+      <b>PolyForm Noncommercial 1.0.0.</b> Программой можно бесплатно
+      пользоваться в некоммерческих целях — дома, в учёбе, в исследованиях;
+      исходный код открыт, его можно изучать и изменять, и производные работы
+      остаются на тех же условиях.
+    </p>
+    <p class="licence">
+      Коммерческое использование требует отдельной лицензии — условия в файле
+      <code>COMMERCIAL-LICENSE.md</code> рядом с программой.
+    </p>
+    <p class="licence muted">
+      Это не лицензия «open source» в смысле OSI: правильнее говорить
+      «исходный код открыт, бесплатно для некоммерческого использования».
+      Сторонние компоненты и их лицензии перечислены в
+      <code>THIRD-PARTY-NOTICES.md</code>.
+    </p>
+  </div>
 
-    <div class="copyright">
-      <p>Copyright 2025-2026. All rights reserved.</p>
-      <p>Built with Rust, Tauri, and Svelte.</p>
-    </div>
+  <div class="card">
+    <h3 class="section-heading">Если что-то не получилось</h3>
+    <ul class="hints">
+      <li>
+        Раздел <b>«Активность»</b> хранит все прогоны — там видно, чем
+        закончился каждый и с какой ошибкой.
+      </li>
+      <li>
+        Подробности — в журналах рядом с программой:
+        <code>own-backup-service.log</code> и <code>own-backup-gui.log</code>.
+        Время в них записано по UTC.
+      </li>
+      <li>
+        В «Параметрах» можно назвать папку для второй копии журнала — например,
+        на флешке. Она пишется строка за строкой и нужна для того единственного
+        случая, который обычный журнал описать не может: восстановление,
+        уносящее машину вместе с диском, на котором лежит журнал.
+      </li>
+      {#if !media.active}
+        <li>
+          Восстановить систему, которая не загружается, можно с загрузочного
+          носителя: «Инструменты» → «Загрузочный носитель».
+        </li>
+      {/if}
+    </ul>
   </div>
 </div>
 
@@ -104,47 +165,33 @@
     margin: 0;
   }
 
-  .about-card {
-    max-width: 600px;
-    text-align: center;
-  }
-
-  .app-logo {
-    margin-bottom: 16px;
+  .card {
+    max-width: 720px;
+    margin-bottom: 18px;
   }
 
   .app-name {
-    font-size: 22px;
+    font-size: 20px;
     font-weight: 700;
     color: var(--text);
-    margin: 0 0 4px;
-  }
-
-  .app-version {
-    font-size: 14px;
-    color: var(--text-muted);
-    margin: 0 0 16px;
+    margin: 0 0 8px;
   }
 
   .app-description {
     font-size: 14px;
     color: var(--text-secondary);
     line-height: 1.6;
-    margin: 0 0 24px;
-    max-width: 480px;
-    margin-left: auto;
-    margin-right: auto;
+    margin: 0 0 20px;
   }
 
   .info-table {
-    text-align: left;
-    margin-bottom: 24px;
     border-top: 1px solid var(--border);
   }
 
   .info-row {
     display: flex;
     justify-content: space-between;
+    gap: 24px;
     padding: 10px 0;
     border-bottom: 1px solid var(--border);
   }
@@ -152,57 +199,54 @@
   .info-label {
     font-size: 13px;
     color: var(--text-muted);
+    flex-shrink: 0;
   }
 
   .info-value {
     font-size: 13px;
     font-weight: 500;
     color: var(--text);
+    text-align: right;
   }
 
-  .links-section {
-    text-align: left;
-    margin-bottom: 24px;
-  }
-
-  .links-heading {
-    font-size: 14px;
+  .section-heading {
+    font-size: 15px;
     font-weight: 600;
     color: var(--text);
     margin: 0 0 10px;
   }
 
-  .links-list {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .link-item {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 8px 12px;
-    border-radius: 6px;
+  .licence {
     font-size: 13px;
-    color: var(--primary);
-    text-decoration: none;
-    transition: background-color 0.12s ease;
+    color: var(--text-secondary);
+    line-height: 1.6;
+    margin: 0 0 10px;
   }
 
-  .link-item:hover {
-    background: rgba(45, 125, 210, 0.06);
-    text-decoration: none;
-  }
-
-  .copyright {
-    font-size: 12px;
+  .licence.muted {
     color: var(--text-muted);
-    padding-top: 16px;
-    border-top: 1px solid var(--border);
+    margin-bottom: 0;
   }
 
-  .copyright p {
-    margin: 0 0 2px;
+  .hints {
+    margin: 0;
+    padding-left: 20px;
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.6;
+  }
+
+  .hints li {
+    margin-bottom: 8px;
+  }
+
+  .hints li:last-child {
+    margin-bottom: 0;
+  }
+
+  code {
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 12px;
+    color: var(--text);
   }
 </style>
