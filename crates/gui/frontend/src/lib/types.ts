@@ -177,6 +177,9 @@ export interface BootStatus {
 export interface BootActionResult {
   message: string;
   safety_copy: string;
+  // На загрузочном носителе копия может лечь на временный диск и не пережить
+  // перезагрузку — ту самую, ради которой её и снимают.
+  safety_copy_durable: boolean;
   created: string | null;
 }
 

@@ -19,6 +19,9 @@
   let msg = $state<string | null>(null);
   let err = $state<string | null>(null);
   let showAll = $state(false);
+  // Предупреждение живёт отдельно от msg: оно про то, куда легла копия, а не
+  // про то, что сделано, и должно висеть, пока его не перекроет следующее.
+  let warn = $state<string | null>(null);
 
   // Переименование правится на месте: номер записи, которую сейчас правят.
   let editing = $state<string | null>(null);
@@ -58,6 +61,10 @@
     try {
       const r = await api.bootAction(action);
       msg = r.message;
+      warn = r.safety_copy_durable
+        ? null
+        : `Копия прежнего состояния легла на временный диск (${r.safety_copy}) и не переживёт ` +
+          'перезагрузку. Сохраните её сами, если она может понадобиться.';
       await refresh();
     } catch (e) {
       err = String(e);
@@ -121,6 +128,7 @@
 
     {#if err}<div class="banner err">{err}</div>{/if}
     {#if msg}<div class="banner ok">{msg}</div>{/if}
+    {#if warn}<div class="banner warn">{warn}</div>{/if}
 
     {#if status && !status.uefi}
       <div class="card">
@@ -309,6 +317,7 @@
   .banner { padding: 10px 14px; border-radius: 6px; margin-bottom: 14px; font-size: 13px; }
   .banner.ok { background: rgba(60, 160, 90, 0.14); }
   .banner.err { background: rgba(200, 70, 70, 0.16); }
+  .banner.warn { background: rgba(230, 170, 60, 0.18); }
 
   .entries { width: 100%; border-collapse: collapse; margin-top: 12px; }
   .entries td { padding: 8px 4px; vertical-align: top; border-bottom: 1px solid var(--border); }

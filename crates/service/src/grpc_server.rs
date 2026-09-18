@@ -1546,7 +1546,10 @@ impl BackupService for BackupServiceImpl {
             tracing::info!(message = %done.message, "boot configuration changed");
             json_reply(&serde_json::json!({
                 "message": done.message,
-                "safety_copy": done.safety_copy.display().to_string(),
+                "safety_copy": done.safety_copy.path.display().to_string(),
+                // На носителе копия может лежать на временном диске: экран
+                // обязан это сказать, а не показать путь и промолчать.
+                "safety_copy_durable": done.safety_copy.durable,
                 "created": done.created.map(|n| format!("{n:04X}")),
             }))
         }

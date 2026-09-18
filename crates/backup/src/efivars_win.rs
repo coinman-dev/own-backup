@@ -629,10 +629,40 @@ pub fn delete_var(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// The copy taken before a change, and whether it will still be there
+/// afterwards.
+#[derive(Debug, Clone)]
+pub struct SafetyCopy {
+    pub path: std::path::PathBuf,
+    /// The file is on storage that survives a restart.
+    ///
+    /// On the boot medium it may not be. WinPE runs from a RAM disk, and a copy
+    /// written there dies in the very restart it exists to survive — which is
+    /// worth saying out loud rather than discovering afterwards.
+    pub durable: bool,
+}
+
 /// Where the automatic copy before a change is kept.
-pub fn safety_copy_dir() -> std::path::PathBuf {
+///
+/// On the boot medium, the writable part of the medium itself, beside the logs
+/// that already go there. `OWN_BACKUP_LOG_MIRROR` is set by the medium's start
+/// script only after it has proved it can write there, so its presence is the
+/// answer to "is there anywhere durable" and not a guess.
+pub fn safety_copy_dir() -> (std::path::PathBuf, bool) {
+    if let Ok(mirror) = std::env::var(own_backup_common::log_mirror::LOG_MIRROR_ENV) {
+        if !mirror.trim().is_empty() {
+            let dir = std::path::Path::new(&mirror);
+            // The mirror is `<medium>\OwnBackup\logs`; copies of the boot
+            // configuration are not logs, so they go beside it.
+            let base = dir.parent().unwrap_or(dir);
+            return (base.join("boot"), true);
+        }
+    }
     let base = std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".into());
-    std::path::Path::new(&base).join("OwnBackup").join("boot")
+    // In WinPE `ProgramData` is on the RAM disk: the directory exists, the file
+    // will be written, and none of it outlives the restart.
+    let durable = !own_backup_common::media_mode::is_windows_pe();
+    (std::path::Path::new(&base).join("OwnBackup").join("boot"), durable)
 }
 
 /// Copy the whole boot configuration to a file named by the second.
@@ -640,13 +670,18 @@ pub fn safety_copy_dir() -> std::path::PathBuf {
 /// Rule one of the plan: taken before every change, without asking and without
 /// a way to decline. A change to firmware has no undo of its own, and the file
 /// costs a few kilobytes.
-pub fn safety_copy() -> Result<std::path::PathBuf> {
-    let dir = safety_copy_dir();
+///
+/// A copy that will not survive a restart is still taken. Refusing to act
+/// without durable storage would block exactly the case this whole section
+/// exists for — a machine that does not start, being repaired from a read-only
+/// medium. The caller is told, and decides.
+pub fn safety_copy() -> Result<SafetyCopy> {
+    let (dir, durable) = safety_copy_dir();
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("boot-{}.json", chrono::Local::now().format("%Y%m%d-%H%M%S")));
     std::fs::write(&path, export()?.to_json()?)?;
-    info!(path = %path.display(), "efivars: safety copy taken");
-    Ok(path)
+    info!(path = %path.display(), durable, "efivars: safety copy taken");
+    Ok(SafetyCopy { path, durable })
 }
 
 /// Write one entry, having first checked that what we assembled reads back as
@@ -791,7 +826,7 @@ pub enum Action {
 #[derive(Debug, Clone)]
 pub struct Done {
     pub message: String,
-    pub safety_copy: std::path::PathBuf,
+    pub safety_copy: SafetyCopy,
     /// The number a newly created entry was given.
     pub created: Option<u16>,
 }

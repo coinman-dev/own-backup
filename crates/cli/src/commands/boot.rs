@@ -322,7 +322,15 @@ fn with_safety_copy<T>(
 ) -> own_backup_common::Result<T> {
     use own_backup_backup::efivars_win;
     match efivars_win::safety_copy() {
-        Ok(path) => println!("Прежнее состояние сохранено: {}", path.display()),
+        Ok(c) => {
+            println!("Прежнее состояние сохранено: {}", c.path.display());
+            if !c.durable {
+                println!(
+                    "ВНИМАНИЕ: это временный диск носителя — копия не переживёт перезагрузку. \
+                     Сохраните её сами, если она может понадобиться."
+                );
+            }
+        }
         // Refusing to act because the copy could not be written is the right
         // way round: that copy is the only undo there is.
         Err(e) => {

@@ -463,6 +463,15 @@ pub fn start_media_cmd(app_dir: &str, temp_dir: &str) -> String {
             "if defined OWN_BACKUP_LOG_MIRROR \"{app_dir}\\own-backup-cli.exe\" display --diag \
              >\"%OWN_BACKUP_LOG_MIRROR%\\display-diag.txt\" 2>&1"
         ),
+        "rem What the firmware says about booting. Read-only, and written to the",
+        "rem medium rather than the RAM disk: this is the machine someone is here",
+        "rem to repair, and the list of its boot entries is the first thing anyone",
+        "rem will ask for. It also answers whether reading them works in WinPE at",
+        "rem all, which is otherwise only knowable by booting the medium.",
+        &format!(
+            "if defined OWN_BACKUP_LOG_MIRROR \"{app_dir}\\own-backup-cli.exe\" boot list \
+             >\"%OWN_BACKUP_LOG_MIRROR%\\boot-entries.txt\" 2>&1"
+        ),
         &format!("md \"{temp_dir}\" 2>nul"),
         &format!("md \"{temp_dir}\\Profile\\AppData\\Local\" 2>nul"),
         &format!("md \"{temp_dir}\\Profile\\AppData\\Roaming\" 2>nul"),
