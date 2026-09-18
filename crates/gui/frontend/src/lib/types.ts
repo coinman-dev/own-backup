@@ -124,6 +124,62 @@ export interface ActiveMount {
 
 /// Mount prerequisites status. Windows returns the AIM driver fields; Linux
 /// returns the NBD/NTFS fields. `platform` selects which card to render.
+// --- как загружается машина ---
+// Запись загрузки UEFI живёт в памяти материнской платы и указывает на файл на
+// разделе по GUID этого раздела. Файл и запись о нём — две разные вещи в двух
+// разных местах: пропажа записи оставляет файл нетронутым и недостижимым.
+
+export interface BootEntry {
+  number: string;            // 000F
+  name: string;
+  in_menu: number | null;    // место в меню, null = прошивка его не предлагает
+  active: boolean;
+  current: boolean;          // машина загружена отсюда
+  next: boolean;             // назначена на один следующий раз
+  device_entry: boolean;     // называет устройство, а не файл
+  file: string | null;
+  partition_guid: string | null;
+  partition_number: number | null;
+  editable: boolean;         // путь разобран полностью, править можно
+}
+
+export interface EspLoader {
+  path: string;
+  size: number;
+  kind: string;
+  fallback: boolean;         // запасной путь съёмного носителя
+  second_stage: boolean;     // его запускает другой загрузчик
+  named_by: string | null;   // номер записи, которая на него ссылается
+}
+
+export interface Esp {
+  disk: number;
+  partition: number;
+  guid: string;
+  size_bytes: number;
+  unreadable: string | null;
+  loaders: EspLoader[];
+}
+
+export interface BootStatus {
+  uefi: boolean;
+  message?: string;
+  order?: string[];
+  current?: string | null;
+  next?: string | null;
+  timeout_secs?: number | null;
+  found_by?: string;
+  dangling?: string[];
+  entries?: BootEntry[];
+  esps?: Esp[];
+}
+
+export interface BootActionResult {
+  message: string;
+  safety_copy: string;
+  created: string | null;
+}
+
 export interface MountBackendStatus {
   platform: 'windows' | 'linux';
   /** Windows: the built-in iSCSI initiator, which needs no install — only,

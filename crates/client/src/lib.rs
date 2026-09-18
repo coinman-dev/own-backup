@@ -422,6 +422,28 @@ impl BackupClient {
 
     /// What mounting an image needs on the service's machine, and whether it
     /// is in place (JSON: { platform, iscsi | linux }).
+    /// Everything about how this machine boots, in one answer.
+    pub async fn boot_status(&mut self) -> Result<serde_json::Value> {
+        let reply = self
+            .inner
+            .boot_status(self.request(proto::Empty {}))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
+
+    /// Change one thing about it. The service takes the safety copy.
+    pub async fn boot_action(&mut self, action: &serde_json::Value) -> Result<serde_json::Value> {
+        let reply = self
+            .inner
+            .boot_action(self.request(proto::JsonRequest { json: action.to_string() }))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
+
     pub async fn mount_backend_status(&mut self) -> Result<serde_json::Value> {
         let reply = self
             .inner

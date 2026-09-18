@@ -463,6 +463,29 @@ pub async fn unmount_backup(state: State<'_, GuiState>, image_path: String) -> R
 
 // --- What mounting a backup image needs here (no driver of ours) ---
 
+/// How this machine boots: the firmware's entries and the loaders sitting on
+/// its EFI partitions, compared.
+///
+/// Read through the service because the privilege it needs
+/// (`SeSystemEnvironmentPrivilege`) belongs to a process, and this one is not
+/// elevated.
+#[tauri::command]
+pub async fn boot_status(state: State<'_, GuiState>) -> Result<serde_json::Value, String> {
+    state.link.client().await?.boot_status().await
+}
+
+/// Change one thing about it. The service takes a copy of the whole
+/// configuration first; that is not optional and not ours to skip.
+#[tauri::command]
+pub async fn boot_action(
+    state: State<'_, GuiState>,
+    action: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let out = state.link.client().await?.boot_action(&action).await?;
+    tracing::info!(action = %action, "boot configuration changed from the interface");
+    Ok(out)
+}
+
 #[tauri::command]
 pub async fn mount_backend_status(state: State<'_, GuiState>) -> Result<serde_json::Value, String> {
     state.link.client().await?.mount_backend_status().await

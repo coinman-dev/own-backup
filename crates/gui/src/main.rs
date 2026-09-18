@@ -344,6 +344,8 @@ fn main() {
             commands::engine::find_base_images,
             commands::engine::list_driver_packages,
             commands::engine::build_boot_media,
+            commands::engine::boot_status,
+            commands::engine::boot_action,
             commands::engine::mount_backend_status,
             commands::engine::prepare_mount_backend,
             commands::engine::read_image_info,

@@ -1388,6 +1388,173 @@ impl BackupService for BackupServiceImpl {
         }
     }
 
+    // --- boot entries -----------------------------------------------------
+
+    /// Everything about how this machine boots, read in one pass.
+    ///
+    /// Entries and EFI-partition contents travel together because the answer
+    /// the screen needs is the comparison between them, and two calls would
+    /// compare two different moments.
+    async fn boot_status(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        #[cfg(target_os = "windows")]
+        {
+            use own_backup_backup::{efivars_win, esp_scan_win};
+
+            let value = tokio::task::spawn_blocking(|| -> own_backup_common::Result<_> {
+                if !efivars_win::is_uefi() {
+                    return Ok(serde_json::json!({
+                        "uefi": false,
+                        "message": "эта машина загружается через обычный BIOS — записей UEFI у неё нет",
+                    }));
+                }
+                let cfg = efivars_win::read_config()?;
+                let esps = esp_scan_win::scan(&cfg.entries)?;
+                Ok(serde_json::json!({
+                    "uefi": true,
+                    "order": cfg.order.iter().map(|n| format!("{n:04X}")).collect::<Vec<_>>(),
+                    "current": cfg.current.map(|n| format!("{n:04X}")),
+                    "next": cfg.next.map(|n| format!("{n:04X}")),
+                    "timeout_secs": cfg.timeout,
+                    "found_by": cfg.found_by,
+                    "dangling": cfg.dangling.iter().map(|n| format!("{n:04X}")).collect::<Vec<_>>(),
+                    "entries": cfg.entries.iter().map(|e| serde_json::json!({
+                        "number": format!("{:04X}", e.number),
+                        "name": e.option.description,
+                        "in_menu": e.order_index.map(|i| i + 1),
+                        "active": e.option.is_active(),
+                        "current": e.is_current,
+                        "next": e.is_next,
+                        "device_entry": e.is_device_entry(),
+                        "file": e.option.file_path(),
+                        "partition_guid": e.option.hard_drive().and_then(|h| h.partition_guid()),
+                        "partition_number": e.option.hard_drive().map(|h| h.partition_number),
+                        // An entry whose device path we did not fully read is
+                        // shown and not offered for editing.
+                        "editable": e.option.fully_understood(),
+                    })).collect::<Vec<_>>(),
+                    "esps": esps.iter().map(|p| serde_json::json!({
+                        "disk": p.disk,
+                        "partition": p.partition,
+                        "guid": p.partition_guid,
+                        "size_bytes": p.size_bytes,
+                        "unreadable": p.unreadable,
+                        "loaders": p.loaders.iter().map(|l| serde_json::json!({
+                            "path": l.path,
+                            "size": l.size,
+                            "kind": l.kind,
+                            "fallback": l.fallback,
+                            "second_stage":
+                                l.role == own_backup_backup::esp_scan::Role::SecondStage,
+                            "named_by": l.named_by.map(|n| format!("{n:04X}")),
+                        })).collect::<Vec<_>>(),
+                    })).collect::<Vec<_>>(),
+                }))
+            })
+            .await
+            .map_err(|e| Status::internal(format!("boot status task panicked: {e}")))?
+            .map_err(|e| Status::internal(e.to_string()))?;
+            json_reply(&value)
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            json_reply(&serde_json::json!({
+                "uefi": false,
+                "message": "записи загрузки читаются только на Windows",
+            }))
+        }
+    }
+
+    /// Change one thing about it.
+    ///
+    /// The safety copy and the guard on the currently-booted entry live in
+    /// `efivars_win::apply_action`, not here: the command line goes through the
+    /// same door, and rules that each caller has to remember are rules that one
+    /// of them eventually will not.
+    async fn boot_action(&self, req: Request<JsonRequest>) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        #[cfg(target_os = "windows")]
+        {
+            use own_backup_backup::efivars_win::{apply_action, Action};
+
+            #[derive(serde::Deserialize)]
+            struct In {
+                action: String,
+                entry: Option<String>,
+                name: Option<String>,
+                on: Option<bool>,
+                to: Option<usize>,
+                force: Option<bool>,
+                disk: Option<u32>,
+                partition: Option<u32>,
+                file: Option<String>,
+                position: Option<usize>,
+                secs: Option<u16>,
+                clear: Option<bool>,
+            }
+            let p: In = serde_json::from_str(&req.into_inner().json)
+                .map_err(|e| Status::invalid_argument(format!("boot_action: {e}")))?;
+
+            let entry = || -> Result<u16, Status> {
+                let s = p.entry.as_deref().unwrap_or_default();
+                u16::from_str_radix(s.trim().trim_start_matches("0x"), 16)
+                    .map_err(|_| Status::invalid_argument(format!("не номер записи: «{s}»")))
+            };
+            let want = |o: Option<String>, what: &str| -> Result<String, Status> {
+                o.ok_or_else(|| Status::invalid_argument(format!("не сказано: {what}")))
+            };
+
+            let action = match p.action.as_str() {
+                "rename" => Action::Rename {
+                    entry: entry()?,
+                    name: want(p.name.clone(), "название")?,
+                },
+                "set_active" => Action::SetActive {
+                    entry: entry()?,
+                    on: p.on.unwrap_or(true),
+                    force: p.force.unwrap_or(false),
+                },
+                "move" => Action::Move {
+                    entry: entry()?,
+                    to: p.to.unwrap_or(0).saturating_sub(1),
+                },
+                "delete" => Action::Delete { entry: entry()?, force: p.force.unwrap_or(false) },
+                "create" => Action::Create {
+                    name: want(p.name.clone(), "название")?,
+                    disk: p.disk.ok_or_else(|| Status::invalid_argument("не сказан диск"))?,
+                    partition: p
+                        .partition
+                        .ok_or_else(|| Status::invalid_argument("не сказан раздел"))?,
+                    file: want(p.file.clone(), "путь к загрузчику")?,
+                    position: p.position.map(|x| x.saturating_sub(1)),
+                },
+                "boot_next" => Action::BootNext {
+                    entry: if p.clear.unwrap_or(false) { None } else { Some(entry()?) },
+                },
+                "timeout" => Action::Timeout {
+                    secs: p.secs.ok_or_else(|| Status::invalid_argument("не сказано сколько секунд"))?,
+                },
+                other => {
+                    return Err(Status::invalid_argument(format!("неизвестное действие: {other}")))
+                }
+            };
+
+            let done = tokio::task::spawn_blocking(move || apply_action(action))
+                .await
+                .map_err(|e| Status::internal(format!("boot action task panicked: {e}")))?
+                .map_err(|e| Status::failed_precondition(e.to_string()))?;
+            tracing::info!(message = %done.message, "boot configuration changed");
+            json_reply(&serde_json::json!({
+                "message": done.message,
+                "safety_copy": done.safety_copy.display().to_string(),
+                "created": done.created.map(|n| format!("{n:04X}")),
+            }))
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Err(Status::unimplemented("записи загрузки меняются только на Windows"))
+        }
+    }
 }
 
 #[cfg(test)]

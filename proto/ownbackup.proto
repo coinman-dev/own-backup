@@ -86,6 +86,15 @@ service BackupService {
   // the service runs privileged, so the GUI never raises UAC for it.
   rpc MountBackendStatus(Empty) returns (JsonReply);   // JSON: { platform, ready, message, … }
   rpc PrepareMountBackend(Empty) returns (JsonReply);  // JSON: the same shape
+
+  // --- The machine's boot configuration (UEFI firmware variables) ---
+  // These live in the motherboard, not on a disk, so no copy of a partition
+  // preserves them. Reading needs SeSystemEnvironmentPrivilege, which the
+  // service has and the interface does not — hence going through here.
+  // Status is one call on purpose: the entries and the loaders on the EFI
+  // partitions have to come from one moment to be compared at all.
+  rpc BootStatus(Empty) returns (JsonReply);        // JSON: { uefi, writable, entries, esps, … }
+  rpc BootAction(JsonRequest) returns (JsonReply);  // in: { action, … } -> { message, safety_copy }
 }
 
 message Empty {}

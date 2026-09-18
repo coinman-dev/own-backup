@@ -1,5 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
+  BootStatus,
+  BootActionResult,
   DiskInfo,
   RestoreSummary,
   VerifySummary,
@@ -99,6 +101,12 @@ export const api = {
 
   // --- What mounting a backup image needs here (no driver of ours either way:
   // Windows' own iSCSI initiator / the in-tree NBD module on Linux) ---
+  // --- как загружается машина (переменные прошивки UEFI) ---
+  // Живут в материнской плате, а не на диске: копия разделов их не сохраняет.
+  bootStatus: () => invoke<BootStatus>('boot_status'),
+  bootAction: (action: Record<string, unknown>) =>
+    invoke<BootActionResult>('boot_action', { action }),
+
   mountBackendStatus: () => invoke<MountBackendStatus>('mount_backend_status'),
   prepareMountBackend: () => invoke<MountBackendStatus>('prepare_mount_backend'),
 
