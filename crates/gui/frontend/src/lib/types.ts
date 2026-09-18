@@ -231,6 +231,7 @@ export interface KeyboardLayout {
 export type ViewName =
   | 'backup'
   | 'restore'
+  | 'boot'
   | 'tools'
   | 'activity'
   | 'settings'

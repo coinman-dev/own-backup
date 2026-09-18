@@ -2,7 +2,6 @@
   import { onMount } from 'svelte';
   import { pickPath } from '../lib/pickPath.svelte';
   import BootMediaCard from '../components/BootMediaCard.svelte';
-  import BootEntriesCard from '../components/BootEntriesCard.svelte';
   import { api } from '../lib/api';
   import { engine, runVerify, toolsState, refreshVolumes } from '../lib/engineStore.svelte';
   import type { ActiveMount } from '../lib/types';
@@ -155,8 +154,6 @@
 <div class="page">
   <div class="inner">
   <h1>Инструменты</h1>
-
-  <BootEntriesCard />
 
   <div class="tool-card">
     <div class="tool-head">

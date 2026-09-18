@@ -1888,6 +1888,35 @@ pub struct DiskBackupRequest {
     pub source_disk: Option<own_backup_common::disk::DiskInfo>,
 }
 
+/// Write the machine's UEFI boot entries next to a finished image.
+///
+/// Why this is worth anything after a restore: [`crate::gpt_writer`] recreates
+/// the disk with every partition's ORIGINAL unique GUID, offset and size, and a
+/// boot entry names its partition by exactly those three things. So an entry
+/// saved here still points at the right partition on the restored disk — there
+/// is nothing to translate, only something to put back.
+///
+/// Nothing is reported upwards. A machine on a plain BIOS has no such entries,
+/// and an unelevated run cannot read them; neither is a reason to spoil a
+/// backup that succeeded.
+fn save_boot_entries_beside(image_path: &Path) {
+    let path = image_path.with_extension(format!(
+        "{}.boot.json",
+        image_path.extension().and_then(|e| e.to_str()).unwrap_or("img")
+    ));
+    match crate::efivars_win::export() {
+        Ok(backup) => match backup.to_json().and_then(|j| Ok(std::fs::write(&path, j)?)) {
+            Ok(()) => info!(
+                path = %path.display(),
+                entries = backup.readable.len(),
+                "boot entries saved beside the image"
+            ),
+            Err(e) => warn!(error = %e, path = %path.display(), "boot entries not saved"),
+        },
+        Err(e) => info!(error = %e, "boot entries not read — nothing saved beside the image"),
+    }
+}
+
 /// Outcome of a completed whole-disk backup.
 pub struct DiskBackupSummary {
     pub image_path: PathBuf,
@@ -3308,6 +3337,24 @@ fn backup_disk_inner(
             crate::qcow2::merge::write_qcow2_guest_blob(&req.image_path, meta_offset, &blob)?
         }
     }
+
+    // The machine's boot entries, beside the image.
+    //
+    // They are not on the disk and never were: a boot entry lives in the
+    // motherboard's own memory. A whole-disk copy therefore captures every
+    // partition and none of the menu that starts them, and a restore onto a
+    // fresh machine comes up with the partitions in place and nothing offering
+    // to boot them. On 2026-09-18 this machine lost the entries for Acronis and
+    // R-Drive Image while their loaders sat untouched on the ESP; no copy taken
+    // before that would have brought them back.
+    //
+    // Beside the image rather than inside it, next to the `.obkm` sidecar that
+    // is already there. Restoring is `own-backup-cli boot import` on this very
+    // file — nothing else has to understand the format.
+    //
+    // Best effort on purpose: the copy of the disk is the thing that was asked
+    // for, and a firmware that will not be read is no reason to fail it.
+    save_boot_entries_beside(&req.image_path);
 
     info!(
         image = %req.image_path.display(),

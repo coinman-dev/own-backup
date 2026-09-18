@@ -8,6 +8,7 @@
   import PathPicker from './components/PathPicker.svelte';
   import BackupSection from './views/BackupSection.svelte';
   import Restore from './views/Restore.svelte';
+  import Boot from './views/Boot.svelte';
   import Tools from './views/Tools.svelte';
   import Activity from './views/Activity.svelte';
   import Settings from './views/Settings.svelte';
@@ -89,6 +90,8 @@
         <BackupSection />
       {:else if currentView === 'restore'}
         <Restore />
+      {:else if currentView === 'boot'}
+        <Boot />
       {:else if currentView === 'tools'}
         <Tools />
       {:else if currentView === 'activity'}
