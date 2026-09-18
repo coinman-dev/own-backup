@@ -7,8 +7,10 @@ pub mod chains;
 pub mod checksum;
 pub mod consolidate;
 pub mod decrypt;
+pub mod efivars;
 pub mod exclusions;
 pub mod esp_fallback;
+pub mod esp_scan;
 pub mod ext_exclusions;
 pub mod ext_map;
 pub mod fat_exclusions;
@@ -62,9 +64,13 @@ pub mod block_reader_win;
 #[cfg(target_os = "windows")]
 pub mod disk_session_win;
 #[cfg(target_os = "windows")]
+pub mod efivars_win;
+#[cfg(target_os = "windows")]
 pub mod engine_win;
 #[cfg(target_os = "windows")]
 pub mod esp_fallback_win;
+#[cfg(target_os = "windows")]
+pub mod esp_scan_win;
 #[cfg(target_os = "windows")]
 pub mod exclusions_win;
 #[cfg(target_os = "windows")]

@@ -1,5 +1,6 @@
 pub mod backup;
 pub mod backup_disk;
+pub mod boot;
 pub mod bitlocker;
 pub mod consolidate;
 pub mod copy_options;

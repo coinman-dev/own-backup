@@ -44,6 +44,9 @@ enum Commands {
     /// Copy a WHOLE disk (several partitions) into one bootable image --
     /// the same thing a job from the interface does
     BackupDisk(commands::backup_disk::BackupDiskArgs),
+
+    /// Записи загрузки UEFI: что прошивка предлагает в меню и куда это ведёт
+    Boot(commands::boot::BootArgs),
     /// What a BitLocker volume says about itself (read-only, no password)
     Bitlocker(commands::bitlocker::BitlockerArgs),
 
@@ -109,6 +112,8 @@ fn needs_admin(command: &Commands) -> bool {
         Commands::Preflight(_)
             | Commands::Backup(_)
             | Commands::BackupDisk(_)
+            // Переменные прошивки читаются только с SeSystemEnvironmentPrivilege.
+            | Commands::Boot(_)
             // Reads `\\.\PhysicalDriveN`, which is an administrator's privilege.
             | Commands::Bitlocker(_)
             | Commands::Restore(_)
@@ -152,6 +157,7 @@ async fn main() {
         Commands::Preflight(args) => commands::preflight::run(args).await,
         Commands::Backup(args) => commands::backup::run(args).await,
         Commands::BackupDisk(args) => commands::backup_disk::run(args).await,
+        Commands::Boot(args) => commands::boot::run(args).await,
         Commands::Bitlocker(args) => commands::bitlocker::run(args).await,
         Commands::ScanExclusions(args) => commands::scan_exclusions::run(args).await,
         Commands::Restore(args) => commands::restore::run(args).await,
