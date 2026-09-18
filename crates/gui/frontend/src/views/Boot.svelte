@@ -12,7 +12,8 @@
   // спроса: у правки в прошивке нет своей отмены.
   import { onMount } from 'svelte';
   import { api } from '../lib/api';
-  import type { BootStatus, BootEntry, Esp, EspLoader } from '../lib/types';
+  import { engine, refreshVolumes } from '../lib/engineStore.svelte';
+  import type { BootStatus, BootEntry, DiskInfo, Esp, EspLoader } from '../lib/types';
 
   let status = $state<BootStatus | null>(null);
   let busy = $state(false);
@@ -113,13 +114,30 @@
     });
   }
 
+  // «диск 3» ничего не говорит человеку, у которого их пять. Модель берём из
+  // того же перечисления дисков, что показывает мастер копирования: служба
+  // отдаёт в записях только номер, а номер — это то, чем диски отличаются друг
+  // от друга меньше всего.
+  function diskLabel(n: number): string {
+    const d = engine.disks.find((x: DiskInfo) => {
+      const tail = x.device_id.match(/(\d+)$/);
+      return tail ? Number(tail[1]) === n : false;
+    });
+    return d ? `диск ${n}: ${d.model}` : `диск ${n}`;
+  }
+
   // Что предложить в качестве названия. Служба уже опознала файл — её ответ
   // ближе к делу, чем путь.
   function suggestName(l: EspLoader): string {
     return l.kind === 'загрузчик' ? (l.path.split('\\').filter(Boolean)[1] ?? 'Загрузка') : l.kind;
   }
 
-  onMount(refresh);
+  onMount(() => {
+    refresh();
+    // Список дисков нужен только ради их названий; если мастер копирования
+    // его уже загрузил, второй раз не спрашиваем.
+    if (!engine.volumesLoaded && !engine.volumesLoading) refreshVolumes();
+  });
 </script>
 
 <div class="page">
@@ -225,7 +243,9 @@
             <div class="orphan">
               <div>
                 <b>{o.loader.kind}</b>
-                <div class="target">диск {o.esp.disk} раздел {o.esp.partition} · {o.loader.path}</div>
+                <div class="target">
+                  {diskLabel(o.esp.disk)}, раздел {o.esp.partition} · {o.loader.path}
+                </div>
               </div>
               <button class="btn primary" disabled={busy} onclick={() => addEntry(o.esp, o.loader)}>
                 Добавить в меню
@@ -253,7 +273,8 @@
         {#each status.esps ?? [] as esp (esp.disk + '-' + esp.partition)}
           <div class="esp">
             <div class="esp-title">
-              Диск {esp.disk}, раздел {esp.partition} · {Math.round(esp.size_bytes / 1048576)} МиБ
+              {diskLabel(esp.disk)}, раздел {esp.partition} ·
+              {Math.round(esp.size_bytes / 1048576)} МиБ
             </div>
             {#if esp.unreadable}
               <div class="target">{esp.unreadable}</div>
