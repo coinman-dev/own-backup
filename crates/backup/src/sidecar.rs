@@ -488,6 +488,68 @@ pub fn write_sidecar_v2_full_to<W: Write>(
 /// Maximum accepted JSON header size (defensive cap against a corrupt length).
 const MAX_JSON_LEN: u32 = 100 * 1024 * 1024;
 
+/// Hard ceiling on the number of checksum entries, whatever a header claims.
+/// Reached only when the header does not say how big the source was; the
+/// limit derived below is normally far tighter.
+const MAX_CHECKSUMS: u64 = 1 << 32;
+
+/// How many entries are reserved before a single one has been read.
+///
+/// The point of the cap is that the count field is UNTRUSTED input. Reserving
+/// `count` up front — which both readers used to do — let a forty-byte corrupt
+/// file ask for 64 GiB of memory before anything checked whether the table was
+/// even there (audit AUD-15). Everything past this comes from the vector's own
+/// growth, driven by entries that actually arrived, so a bogus count now costs
+/// one small allocation and an end-of-file error.
+const PREALLOC_CHECKSUMS: u64 = 1 << 16;
+
+/// Largest block size we will believe. Our writers use 1 MiB at most; the
+/// margin is for formats we have not written yet, not for arbitrary numbers.
+const MAX_BLOCK_SIZE: u64 = 64 * 1024 * 1024;
+
+/// The most checksum entries this sidecar's own header allows.
+///
+/// A checksum describes one block of the source volume, so the source's size
+/// is the ceiling: `ceil(size / block_size)`, plus one for a trailing partial
+/// block. When the header does not say (block size or size missing — some old
+/// sidecars), fall back to the absolute cap rather than refusing the file:
+/// supporting readable older formats matters more than a tight bound on a
+/// file that has already parsed as JSON.
+fn checksum_limit(manifest: &ImageManifest) -> u64 {
+    let block = manifest.block_size as u64;
+    let size = manifest.source_disk.size_bytes;
+    if block == 0 || block > MAX_BLOCK_SIZE || size == 0 {
+        return MAX_CHECKSUMS;
+    }
+    size.div_ceil(block).saturating_add(1).min(MAX_CHECKSUMS)
+}
+
+/// Check a count field against that limit before it is used for anything.
+fn checked_checksum_count(count: u64, manifest: &ImageManifest, what: &str) -> Result<u64> {
+    let limit = checksum_limit(manifest);
+    if count > limit {
+        return Err(OwnBackupError::ImageFormat(format!(
+            "{what}: таблица заявляет {count} контрольных сумм, а образ такого \
+             размера вмещает не больше {limit} — файл повреждён"
+        )));
+    }
+    Ok(count)
+}
+
+/// A vector for `count` entries whose up-front allocation does not depend on
+/// `count` being honest. `try_reserve`, so even that bounded ask reports a
+/// failure instead of aborting the process.
+fn reserve_checksums(count: u64) -> Result<Vec<BlockChecksum>> {
+    let mut v: Vec<BlockChecksum> = Vec::new();
+    let want = count.min(PREALLOC_CHECKSUMS) as usize;
+    v.try_reserve(want).map_err(|_| {
+        OwnBackupError::ImageFormat(format!(
+            "не удалось выделить память под {want} контрольных сумм"
+        ))
+    })?;
+    Ok(v)
+}
+
 /// Read a sidecar file from `path`.
 pub fn read_sidecar(path: &Path) -> Result<Sidecar> {
     let file = File::open(path)?;
@@ -824,11 +886,7 @@ fn read_sidecar_v2_from_after_magic<R: Read>(r: &mut R) -> Result<Sidecar> {
     r.read_exact(&mut count_buf)?;
     header_bytes.write_all(&count_buf)?;
     let count = u64::from_le_bytes(count_buf);
-    if count > 1u64 << 32 {
-        return Err(OwnBackupError::ImageFormat(format!(
-            "sidecar v2 checksum count {count} out of range"
-        )));
-    }
+    let count = checked_checksum_count(count, &header.manifest, "sidecar v2")?;
 
     let mut table_len_buf = [0u8; 4];
     r.read_exact(&mut table_len_buf)?;
@@ -855,17 +913,39 @@ fn read_sidecar_v2_from_after_magic<R: Read>(r: &mut R) -> Result<Sidecar> {
         )));
     }
 
-    let mut checksums = Vec::with_capacity(count as usize);
+    let mut checksums = reserve_checksums(count)?;
     if count > 0 {
-        let max_decompressed_table = (count * 16 + 10 * 1024 * 1024) as usize;
+        // An entry is a varint delta (1..=10 bytes) plus eight checksum bytes,
+        // so the decompressed table cannot honestly exceed 18 bytes per entry.
+        // The old bound was `count * 16 + 10 MiB` over an unchecked count —
+        // a 64 GiB decompression bomb ceiling (audit AUD-15).
+        let max_decompressed_table = count
+            .checked_mul(18)
+            .and_then(|n| n.checked_add(64))
+            .and_then(|n| usize::try_from(n).ok())
+            .ok_or_else(|| {
+                OwnBackupError::ImageFormat(format!(
+                    "sidecar v2: таблица из {count} записей не помещается в память"
+                ))
+            })?;
         let table_decompressed = zstd::bulk::decompress(&table_zstd, max_decompressed_table)
             .map_err(|e| OwnBackupError::Compression(e.to_string()))?;
-        
+
+        let limit = checksum_limit(&header.manifest);
         let mut cursor = std::io::Cursor::new(table_decompressed);
         let mut prev = 0u64;
-        for _ in 0..count {
+        for i in 0..count {
             let delta = read_varint(&mut cursor)?;
-            let block_number = prev + delta;
+            // Deltas are cumulative, so a corrupt one used to wrap (release) or
+            // panic (debug) instead of being reported. And a block number past
+            // the end of the image is not merely odd: `verify_image` turns it
+            // into `volume_len - offset`, which underflows.
+            let block_number = prev.checked_add(delta).filter(|b| *b <= limit).ok_or_else(|| {
+                OwnBackupError::ImageFormat(format!(
+                    "sidecar v2: запись {i} указывает на блок за пределами образа \
+                     (предыдущий {prev}, шаг {delta}, предел {limit})"
+                ))
+            })?;
             let mut cksum_buf = [0u8; 8];
             cursor.read_exact(&mut cksum_buf)?;
             let checksum = u64::from_le_bytes(cksum_buf);
@@ -906,18 +986,22 @@ pub fn read_sidecar_from<R: Read>(r: &mut R) -> Result<Sidecar> {
         let mut count_buf = [0u8; 8];
         r.read_exact(&mut count_buf)?;
         let count = u64::from_le_bytes(count_buf);
-        if count > 1u64 << 32 {
-            return Err(OwnBackupError::ImageFormat(format!(
-                "sidecar checksum count {count} out of range"
-            )));
-        }
+        let count = checked_checksum_count(count, &header.manifest, "sidecar")?;
 
-        let mut checksums = Vec::with_capacity(count as usize);
+        let limit = checksum_limit(&header.manifest);
+        let mut checksums = reserve_checksums(count)?;
         let mut entry = [0u8; 16];
-        for _ in 0..count {
+        for i in 0..count {
             r.read_exact(&mut entry)?;
+            let block_number = u64::from_le_bytes(entry[0..8].try_into().unwrap());
+            if block_number > limit {
+                return Err(OwnBackupError::ImageFormat(format!(
+                    "sidecar: запись {i} указывает на блок {block_number} за пределами \
+                     образа (предел {limit})"
+                )));
+            }
             checksums.push(BlockChecksum {
-                block_number: u64::from_le_bytes(entry[0..8].try_into().unwrap()),
+                block_number,
                 checksum: u64::from_le_bytes(entry[8..16].try_into().unwrap()),
             });
         }
@@ -1313,5 +1397,124 @@ mod tests {
         let tiny = dir.path().join("tiny.vhdx");
         std::fs::write(&tiny, b"vhdx").unwrap();
         assert!(detect_container_format(&tiny).is_err());
+    }
+
+    // --- Пределы памяти при чтении таблицы (аудит AUD-15) -------------------
+    //
+    // Заголовок разбирается раньше счётчика, и в нём уже есть размер источника
+    // и размер блока. Значит, сколько контрольных сумм в файле МОЖЕТ быть —
+    // известно до того, как счётчику поверили. Раньше ему верили до 2^32 и
+    // сразу звали `Vec::with_capacity`: сорок байт мусора просили 64 ГиБ.
+
+    /// Счётчик, которого не может быть при таком образе, отвергается сразу —
+    /// и, что важнее, ДО всякой большой аллокации.
+    #[test]
+    fn a_count_larger_than_the_image_is_refused_at_once() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(SIDECAR_MAGIC);
+        let json = serde_json::to_vec(&JsonHeader {
+            info: SidecarInfo::new_full("x.vhdx", 0),
+            manifest: make_manifest(), // 1 MiB источника, блок 64 KiB => 16 блоков
+            disk_manifest: None,
+        })
+        .unwrap();
+        buf.extend_from_slice(&(json.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&json);
+        // Столько записей этот образ вместить не может ни при каком раскладе.
+        buf.extend_from_slice(&(u32::MAX as u64).to_le_bytes());
+        // И ни одной записи за счётчиком нет — файл кончается здесь.
+
+        let started = std::time::Instant::now();
+        let err = read_sidecar_from(&mut Cursor::new(&buf)).unwrap_err();
+        assert!(
+            format!("{err}").contains("вмещает не больше"),
+            "должна быть сказана причина, а не EOF: {err}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "отказ должен быть мгновенным, без попытки выделить память под таблицу"
+        );
+    }
+
+    /// То же для v2 — у него счётчик ещё и задаёт потолок распаковки таблицы.
+    #[test]
+    fn a_v2_count_larger_than_the_image_is_refused_at_once() {
+        let info = SidecarInfo::new_full("x.vhdx", 0);
+        let manifest = make_manifest();
+        let mut buf = Vec::new();
+        write_sidecar_v2_to(&mut buf, &info, &manifest, &[]).unwrap();
+
+        // Подменяем счётчик на заведомо невозможный. Контрольная сумма шапки
+        // после этого не сойдётся, поэтому проверку размера обязана пройти
+        // ДО неё — иначе она бесполезна: сначала выделим память, потом узнаем.
+        let json_len = u32::from_le_bytes(buf[8..12].try_into().unwrap()) as usize;
+        let count_at = 8 + 4 + json_len;
+        buf[count_at..count_at + 8].copy_from_slice(&(u32::MAX as u64).to_le_bytes());
+
+        let err = read_sidecar_from(&mut Cursor::new(&buf)).unwrap_err();
+        assert!(
+            format!("{err}").contains("вмещает не больше"),
+            "размер должен проверяться раньше хеша шапки: {err}"
+        );
+    }
+
+    /// Честный файл читается как читался — предел не должен задевать край.
+    #[test]
+    fn a_table_that_fills_the_image_exactly_still_reads() {
+        let info = SidecarInfo::new_full("x.vhdx", 0);
+        let manifest = make_manifest(); // 16 блоков
+        let checksums: Vec<_> = (0..16)
+            .map(|i| BlockChecksum { block_number: i, checksum: i * 7 })
+            .collect();
+
+        for v2 in [false, true] {
+            let mut buf = Vec::new();
+            if v2 {
+                write_sidecar_v2_to(&mut buf, &info, &manifest, &checksums).unwrap();
+            } else {
+                write_sidecar_to(&mut buf, &info, &manifest, &checksums).unwrap();
+            }
+            let read = read_sidecar_from(&mut Cursor::new(&buf)).unwrap();
+            assert_eq!(read.checksums.len(), 16, "v2={v2}");
+            assert_eq!(read.checksums[15].block_number, 15, "v2={v2}");
+        }
+    }
+
+    /// Старый sidecar без размера источника читается по-прежнему: поддержку
+    /// допустимых старых форматов предел ломать не должен.
+    #[test]
+    fn a_header_that_does_not_say_the_size_falls_back_to_the_absolute_cap() {
+        let mut manifest = make_manifest();
+        manifest.source_disk.size_bytes = 0;
+        assert_eq!(checksum_limit(&manifest), MAX_CHECKSUMS);
+
+        let mut manifest = make_manifest();
+        manifest.block_size = 0;
+        assert_eq!(checksum_limit(&manifest), MAX_CHECKSUMS);
+    }
+
+    /// Накопление дельт складывалось без проверки: подделанный шаг
+    /// оборачивался (release) или ронял программу (debug). И номер блока за
+    /// краем образа — не просто странность: `verify_image` считает по нему
+    /// `volume_len - offset`, и это вычитание уходит в минус.
+    #[test]
+    fn a_block_number_past_the_end_of_the_image_is_an_error_not_a_panic() {
+        let info = SidecarInfo::new_full("x.vhdx", 0);
+        let manifest = make_manifest(); // 16 блоков
+        let checksums = vec![BlockChecksum { block_number: u64::MAX - 1, checksum: 1 }];
+
+        for v2 in [false, true] {
+            let mut buf = Vec::new();
+            if v2 {
+                write_sidecar_v2_to(&mut buf, &info, &manifest, &checksums).unwrap();
+            } else {
+                write_sidecar_to(&mut buf, &info, &manifest, &checksums).unwrap();
+            }
+            let err = read_sidecar_from(&mut Cursor::new(&buf)).unwrap_err();
+            assert!(
+                format!("{err}").contains("за пределами"),
+                "v2={v2}: {err}"
+            );
+        }
     }
 }

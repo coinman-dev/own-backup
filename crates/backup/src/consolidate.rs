@@ -634,7 +634,12 @@ mod tests {
                 device_id: r"\\.\E:".into(),
                 model: String::new(),
                 serial: String::new(),
-                size_bytes: 4096,
+                // The volume this fixture actually builds. It used to say 4096
+                // bytes while claiming eight 4096-byte blocks and numbering
+                // checksums up to block 3 — an image that cannot exist. Nothing
+                // read it until the sidecar reader started bounding the
+                // checksum table by the size the header itself states.
+                size_bytes: VOLUME_LEN,
                 sector_size_logical: 512,
                 sector_size_physical: 4096,
                 media_type: "Volume".into(),
@@ -649,7 +654,7 @@ mod tests {
             encryption_algo: None,
             encryption_salt: None,
             block_size: 4096,
-            total_blocks: 8,
+            total_blocks: VOLUME_LEN / 4096,
             used_blocks: 8,
             backup_mode: BackupMode::UsedSectors,
             checksum_algorithm: "xxhash64".into(),
