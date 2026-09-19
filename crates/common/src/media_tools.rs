@@ -48,6 +48,18 @@ pub struct MediaTool {
     /// what lives there is session state and unsaved documents, which are
     /// someone's private files and have no business on a boot medium.
     pub settings_in_appdata: Option<&'static str>,
+    /// What the medium starts it with.
+    ///
+    /// Total Commander opens the drive it was last looking at, which on a
+    /// machine whose settings these are means `C:` — and on a rescue medium
+    /// `C:` is the patient: locked by BitLocker as often as not, and then the
+    /// file manager opens with an error instead of a panel. `X:` is the RAM
+    /// disk, it is always there and it is always readable.
+    ///
+    /// Done with the program's own switches rather than by editing the
+    /// `wincmd.ini` we copied: the settings are the person's, and a medium has
+    /// no business rewriting them to say something they did not.
+    pub args: &'static [&'static str],
     /// Subfolders of the installation not worth carrying.
     ///
     /// The medium is loaded into RAM whole, so every megabyte here is a
@@ -78,6 +90,8 @@ pub const MEDIA_TOOLS: [MediaTool; 2] = [
         // `wincmd.ini`. Total Commander looks for it beside the exe when the
         // registry names no other place, and a medium's registry names none.
         settings_in_appdata: Some("GHISLER"),
+        // Both panels on the RAM disk. /L and /R are Total Commander's own.
+        args: &[r"/L=X:\", r"/R=X:\"],
         skip: &[],
     },
     MediaTool {
@@ -87,6 +101,7 @@ pub const MEDIA_TOOLS: [MediaTool; 2] = [
         exe: "notepad++.exe",
         portable_marker: Some("doLocalConf.xml"),
         settings_in_appdata: Some("Notepad++"),
+        args: &[],
         // `updater` is WinGUP, which downloads new versions — there is no
         // network worth using on a rescue medium and no point updating a copy
         // that lives for one session. `themes` is only read when a theme is
@@ -181,6 +196,17 @@ mod tests {
         assert!(npp.skips("Themes"), "a folder name is not case-sensitive on Windows");
         assert!(!npp.skips("plugins"), "those are part of the program");
         assert!(!npp.skips(""), "and nothing matches nothing");
+    }
+
+    /// On a rescue medium `C:` is the patient — locked by BitLocker as often as
+    /// not — and a file manager that opens there greets the person with an
+    /// error instead of a panel. `X:` is the RAM disk: always present, always
+    /// readable.
+    #[test]
+    fn the_file_manager_opens_on_the_ram_disk_and_not_on_the_patient() {
+        let tc = tool("totalcmd").unwrap();
+        assert_eq!(tc.args, [r"/L=X:\", r"/R=X:\"], "both panels");
+        assert!(!tc.args.iter().any(|a| a.contains("C:")), "never the machine being rescued");
     }
 
     #[test]

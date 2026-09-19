@@ -319,7 +319,7 @@ pub async fn run(args: DisplayArgs) -> own_backup_common::Result<()> {
     // не то же самое, что разрешение: экран может быть 2560x1440 и при этом
     // всё на нём вдвое крупнее. Печатается всегда, потому что узнать это иначе
     // можно только загрузившись с носителя и посмотрев глазами.
-    let dpi = imp::system_dpi();
+    let dpi = imp::screen_dpi();
     println!("Масштаб интерфейса: {}% ({} точек на дюйм)", dpi * 100 / 96, dpi);
     // Which adapter is actually drawing. "Microsoft Basic Display" here with a
     // vendor driver in the image means the driver did not start — the mode
@@ -566,7 +566,7 @@ fn cap_scale(max_percent: u32) {
     if max_percent == 0 {
         return;
     }
-    let before = imp::system_dpi();
+    let before = imp::screen_dpi();
     let percent = before * 100 / 96;
     let Some((steps, want)) = steps_down(percent, max_percent) else {
         tracing::info!(percent, max_percent, "display: the scale is within the cap");
@@ -575,7 +575,7 @@ fn cap_scale(max_percent: u32) {
 
     println!("Масштаб интерфейса {percent}% — это много для спасательной среды, ставим {want}%.");
     let asked = imp::nudge_scale(steps);
-    let after = imp::system_dpi() * 100 / 96;
+    let after = imp::screen_dpi() * 100 / 96;
     tracing::info!(percent, want, steps, asked, after, "display: scale capped");
     if after == percent {
         // Undocumented call, and WinPE is not where Microsoft tests it.
@@ -695,16 +695,47 @@ mod imp {
         read(ENUM_CURRENT_SETTINGS)
     }
 
-    /// The scale Windows is drawing everything at, in dots per inch: 96 is
-    /// 100 %, 144 is 150 %, 192 is 200 %.
+    /// The scale the SCREEN is drawn at, in dots per inch: 96 is 100 %, 144 is
+    /// 150 %, 192 is 200 %.
     ///
-    /// `GetDpiForSystem` rather than the screen DC, because the DC answers what
-    /// THIS process was told — a process that never declared itself aware is
-    /// lied to and always reads 96, which would report "100 %" from inside a
-    /// desktop drawn at double size.
-    pub fn system_dpi() -> u32 {
-        // SAFETY: no arguments, no handles, no failure mode.
-        unsafe { windows::Win32::UI::HiDpi::GetDpiForSystem() }
+    /// Of the monitor, and that is the whole of it. `GetDpiForSystem` answers
+    /// about the session — the scale the primary display had when the session
+    /// began — and on a per-monitor-aware Windows that is a different number
+    /// from what is on the screen now. Measured on this very machine: the
+    /// system said 96 while the monitor was running at 120, and a cap reading
+    /// the system's answer would have found nothing to cap at 200 % either.
+    ///
+    /// The screen DC is no better: it reports what THIS process was told, and a
+    /// process that never declared itself aware is lied to and always reads 96.
+    pub fn screen_dpi() -> u32 {
+        use windows::Win32::Foundation::POINT;
+        use windows::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTOPRIMARY};
+        use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+        // Windows lies to a process that has not said it understands scaling —
+        // and it lies about the MONITOR too, not only about its own windows:
+        // `MDT_EFFECTIVE_DPI` is effective *for the caller*, so an unaware
+        // process is told 96 whatever the screen is set to. Measured here: 96
+        // reported while the monitor ran at 120, which would have left a cap at
+        // 200 % with nothing to do. Said once; it cannot be unsaid, and nothing
+        // else in this command reads a virtualised coordinate.
+        static AWARE: std::sync::Once = std::sync::Once::new();
+        AWARE.call_once(|| unsafe {
+            let _ = windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(
+                windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+            );
+        });
+        unsafe {
+            // SAFETY: the origin always belongs to some monitor, and
+            // MONITOR_DEFAULTTOPRIMARY guarantees a handle either way.
+            let monitor = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
+            let (mut across, mut down) = (0u32, 0u32);
+            if GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut across, &mut down).is_ok()
+                && across > 0
+            {
+                return across;
+            }
+            windows::Win32::UI::HiDpi::GetDpiForSystem()
+        }
     }
 
     /// Move the interface scale `steps` positions down Windows' own list.

@@ -900,9 +900,10 @@ fn chose(window: HWND, id: u32) {
             // In its own folder: these programs keep their settings beside
             // themselves and look for them there. And with no console: they
             // have windows of their own, and a black box flashing up first is
-            // not part of what was asked for.
+            // not part of what was asked for. The arguments are the medium's
+            // own — see `MediaTool::args`.
             let home = path.parent().map(|p| p.to_path_buf());
-            launch(&path.to_string_lossy(), &[], home, CREATE_NO_WINDOW);
+            launch(&path.to_string_lossy(), tool.args, home, CREATE_NO_WINDOW);
         }
     }
 }

@@ -201,6 +201,48 @@ fn enforce_single_instance() {
     std::mem::forget(handle);
 }
 
+/// The window the interface opens in, in LOGICAL pixels, never larger than the
+/// screen it has to open on.
+///
+/// The size Tauri takes is logical, so it is multiplied by whatever the display
+/// is scaled to. 1200×800 asked for on a screen at 200 % is 2400×1600 real
+/// pixels — taller than a 1440-line monitor — and on a virtual machine sitting
+/// at 1024×768 even 1200×800 hangs off both edges. The medium showed both: the
+/// interface came up with its left column cut away, and no amount of `min` size
+/// helped, because a minimum is a floor for dragging and not the size a window
+/// opens at.
+///
+/// So the screen is asked first, and its WORK area rather than its resolution:
+/// that is what is left after the strip along the bottom has taken its height.
+/// The wanted size is kept when it fits and the room is taken when it does not.
+/// The minimum comes down with it — a floor above the ceiling would make the
+/// window unresizable on exactly the screens that need resizing most.
+fn window_size(app: &tauri::App) -> (f64, f64, f64, f64) {
+    const WANT: (f64, f64) = (1200.0, 800.0);
+    const LEAST: (f64, f64) = (900.0, 600.0);
+    // Room for the frame and for not sitting flush against the edges.
+    const MARGIN: f64 = 40.0;
+
+    let Ok(Some(monitor)) = app.primary_monitor() else {
+        return (WANT.0, WANT.1, LEAST.0, LEAST.1);
+    };
+    let scale = monitor.scale_factor().max(0.5);
+    let area = monitor.work_area();
+    let room = (
+        (area.size.width as f64 / scale - MARGIN).max(320.0),
+        (area.size.height as f64 / scale - MARGIN).max(240.0),
+    );
+    let size = (WANT.0.min(room.0), WANT.1.min(room.1));
+    let least = (LEAST.0.min(size.0), LEAST.1.min(size.1));
+    tracing::info!(
+        screen = format!("{}x{}", monitor.size().width, monitor.size().height),
+        scale,
+        window = format!("{}x{}", size.0, size.1),
+        "interface window sized to the screen"
+    );
+    (size.0, size.1, least.0, least.1)
+}
+
 fn main() {
     // Only one GUI at a time (Windows).
     #[cfg(target_os = "windows")]
@@ -243,18 +285,17 @@ fn main() {
             // defaults (--disable-features=msWebOOUI,msPdfOOUI,
             // msSmartScreenProtection) are replaced, not extended — whoever sets
             // the variable must include everything wanted.
+            let (width, height, min_width, min_height) = window_size(app);
             let mut window =
                 tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
                     .title("My Own Backup")
-                    .inner_size(1200.0, 800.0)
-                    .min_inner_size(900.0, 600.0)
+                    .inner_size(width, height)
+                    .min_inner_size(min_width, min_height)
                     // Not maximised, on the medium either. It used to be —
                     // there was no taskbar and nothing to share the screen
                     // with — but the medium has a desktop now, and a window
                     // that covers it whole hides the strip that says which
-                    // keyboard layout the passphrase is being typed in. The
-                    // screen can be as small as 1024×768 with no display
-                    // driver, which `min_inner_size` already allows for.
+                    // keyboard layout the passphrase is being typed in.
                     .maximized(false)
                     .resizable(true)
                     .decorations(true);
