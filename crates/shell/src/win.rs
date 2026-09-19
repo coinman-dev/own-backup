@@ -59,13 +59,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetWindowPos, ShowWindow, SwitchToThisWindow, SystemParametersInfoW, TrackPopupMenuEx,
     TranslateMessage,
     GWL_EXSTYLE, GW_OWNER, HWND_BOTTOM, HWND_TOPMOST, IDC_ARROW, IDYES, MA_NOACTIVATE,
-    MB_ICONQUESTION, MB_SETFOREGROUND, MB_YESNO, MF_SEPARATOR, MF_STRING, MSG, SM_CXSCREEN,
-    SM_CYSCREEN, SPIF_SENDCHANGE, SPI_GETWORKAREA, SPI_SETWORKAREA, SWP_NOACTIVATE, SW_MINIMIZE,
+    MB_ICONQUESTION, MB_SETFOREGROUND, MB_YESNO, MF_SEPARATOR, MF_STRING, MSG, SC_MINIMIZE,
+    SM_CXSCREEN, SM_CYSCREEN, SPIF_SENDCHANGE, SPI_GETWORKAREA, SPI_SETWORKAREA, SWP_NOACTIVATE,
+    SW_MINIMIZE,
     SW_RESTORE, SW_SHOWNOACTIVATE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, TPM_BOTTOMALIGN,
     TPM_LEFTALIGN, TPM_LEFTBUTTON, TPM_RETURNCMD, WM_APP, WM_DESTROY, WM_DISPLAYCHANGE,
     WM_ERASEBKGND, WM_INPUTLANGCHANGEREQUEST, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_NULL, WM_PAINT,
-    WM_TIMER, WNDCLASSW, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_POPUP,
+    WM_SYSCOMMAND, WM_TIMER, WNDCLASSW, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::layout::{self, BarSlots};
@@ -132,6 +133,13 @@ struct Bar {
     window_slots: Vec<layout::Slot>,
     /// The window in front, so its button can be drawn as the one in front.
     front: HWND,
+    /// What was in front when the mouse went down on the strip.
+    ///
+    /// Asked at `WM_MOUSEACTIVATE`, which arrives BEFORE the press has changed
+    /// anything. By the time `WM_LBUTTONDOWN` is handled the desktop may
+    /// already have no window in front at all, and "is this the window in
+    /// front?" then answers no about the very window the person is looking at.
+    front_at_press: HWND,
     /// Everything the buttons show, in one string: what the strip is repainted
     /// for. Comparing it beats comparing the list itself, and a repaint every
     /// second is a strip that flickers every second.
@@ -506,7 +514,19 @@ fn tick(bar: HWND) {
         .iter()
         .filter_map(|handle| seen.iter().find(|w| w.handle == *handle).cloned())
         .collect();
-    let front = unsafe { GetForegroundWindow() };
+
+    // A desktop with nothing in front is a real state and a common one here:
+    // clicking the strip costs the window in front its place. Forgetting who
+    // it was would drop the mark off its button a second later, and leave the
+    // next click with nothing to compare against.
+    let front = {
+        let now = unsafe { GetForegroundWindow() };
+        if now.is_invalid() {
+            with_bar(|b| b.front)
+        } else {
+            now
+        }
+    };
     let shown = windows
         .iter()
         .map(|w| format!("{:?}{}{}", w.handle.0, if w.handle == front { "*" } else { "" }, w.title))
@@ -644,22 +664,80 @@ unsafe fn window_title(window: HWND) -> Option<String> {
 /// None of this arises on the medium, where everything runs as SYSTEM.
 fn raise_or_hide(window: HWND) {
     unsafe {
-        if GetForegroundWindow() == window {
+        let front = window_in_front();
+        log(&format!(
+            "click {:?}: at press {:?}, live {:?}, last {:?}, folded {} -> {}",
+            window.0,
+            with_bar(|b| b.front_at_press).0,
+            GetForegroundWindow().0,
+            with_bar(|b| b.front).0,
+            IsIconic(window).as_bool(),
+            if front == window { "fold away" } else { "bring forward" }
+        ));
+        if front == window {
             let _ = ShowWindow(window, SW_MINIMIZE);
+            if !IsIconic(window).as_bool() {
+                // `ShowWindow` is us DOING something to someone else's window,
+                // and it is refused for a window this process may not command.
+                // A system command is us ASKING the window to fold itself
+                // away — the same thing its own «Свернуть» does — and that is
+                // allowed. Measured against the Services console, which the
+                // first road could not touch (2026-09-19).
+                let _ = PostMessageW(
+                    window,
+                    WM_SYSCOMMAND,
+                    WPARAM(SC_MINIMIZE as usize),
+                    LPARAM(0),
+                );
+            }
+            // Remembered straight away rather than waited for: the next click
+            // may come before the next tick, and it must not find this window
+            // still marked as the one in front.
+            with_bar(|b| b.front = HWND::default());
             return;
         }
+
         if IsIconic(window).as_bool() {
             let _ = ShowWindow(window, SW_RESTORE);
             if IsIconic(window).as_bool() {
+                // Refused. The switcher's own route unfolds AND activates, and
+                // it does so in the window's own time — so there is nothing to
+                // check afterwards. Checking anyway is what made the log claim
+                // three times that a window had not come back while it was in
+                // the middle of coming back.
                 SwitchToThisWindow(window, TRUE);
-            }
-            if IsIconic(window).as_bool() {
-                log("a window would not come back - it belongs to a program above us");
+                with_bar(|b| b.front = window);
                 return;
             }
         }
-        let _ = SetForegroundWindow(window);
+        // Refused means nobody is in front at all — not the window we were
+        // asked for, and not the one that had the place before the press. The
+        // switcher's own route is allowed where this one is not.
+        if !SetForegroundWindow(window).as_bool() {
+            SwitchToThisWindow(window, TRUE);
+        }
+        with_bar(|b| b.front = window);
     }
+}
+
+/// The window the person means when they say "the one in front".
+///
+/// Three answers, in the order they can be trusted. What was in front when the
+/// mouse went down, because pressing on the strip costs that window its place
+/// and by the time the click is handled the desktop can have nothing in front
+/// at all. Then what is in front now, for anything that did not start with a
+/// press. And last, the one the strip has been marking — a second old at
+/// worst, and the only answer left when the desktop has none.
+fn window_in_front() -> HWND {
+    let at_press = with_bar(|b| b.front_at_press);
+    if !at_press.is_invalid() {
+        return at_press;
+    }
+    let now = unsafe { GetForegroundWindow() };
+    if !now.is_invalid() {
+        return now;
+    }
+    with_bar(|b| b.front)
 }
 
 /// The language of the keyboard layout of the window in front.
@@ -686,7 +764,7 @@ fn foreground_langid() -> u16 {
 /// which of the two a window reads is up to the window.
 fn switch_layout() {
     unsafe {
-        let front = GetForegroundWindow();
+        let front = window_in_front();
         if front.is_invalid() {
             return;
         }
@@ -1074,7 +1152,15 @@ unsafe fn bar_message(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM
         // Clickable without taking the focus. Without this the click meant to
         // switch the layout of the window in front would first make US the
         // window in front, and then switch our own.
-        WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+        //
+        // And this is the last moment the desktop is still as the person sees
+        // it: pressing here costs the window in front its place, so whatever
+        // the click turns out to be about has to be remembered now.
+        WM_MOUSEACTIVATE => {
+            let front = GetForegroundWindow();
+            with_bar(|b| b.front_at_press = front);
+            LRESULT(MA_NOACTIVATE as isize)
+        }
         WM_PAINT => {
             paint_bar(window);
             LRESULT(0)
