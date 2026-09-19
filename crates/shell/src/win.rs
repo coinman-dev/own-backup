@@ -771,6 +771,31 @@ fn launch(program: &str, args: &[&str], from: Option<PathBuf>, flags: u32) {
     }
 }
 
+/// The way out of the one failure that costs more than it should.
+///
+/// On the medium this process is the shell, and winpeshl takes its exit for the
+/// end of the session: a desktop that cannot start would reboot the machine
+/// before anyone could read why. So it hands the session to `cmd.exe` and waits
+/// there — which is exactly what the medium was before any of this existed, and
+/// closing that console still means a restart, as it always did.
+///
+/// Off the medium there is nothing to hold: `cmd` was never the shell there,
+/// and a console appearing out of nowhere on a working machine would be the
+/// strangest possible way to report a failure.
+pub fn hold_a_console_instead() {
+    if !own_backup_common::media_mode::is_windows_pe() {
+        return;
+    }
+    log("falling back to a console - the medium is usable, the strip is not");
+    match std::process::Command::new("cmd.exe").creation_flags(CREATE_NEW_CONSOLE).spawn() {
+        Ok(mut console) => {
+            let _ = console.wait();
+            log("the console was closed");
+        }
+        Err(error) => log(&format!("even cmd.exe would not start: {error}")),
+    }
+}
+
 /// A console of its own, because this process has none to give.
 const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
 /// No console at all, for the programs that would only flash one.
@@ -885,7 +910,43 @@ fn fill(dc: HDC, area: RECT, colour: COLORREF) {
     }
 }
 
+/// Both window procedures go through this.
+///
+/// A panic unwinding out of an `extern "system"` function aborts the process,
+/// and on the medium this process is the shell: aborting is a reboot, from a
+/// bug in drawing a clock. Nothing here is worth that, so a panicking handler
+/// is logged and answered as if it had not been handled at all.
+unsafe fn guarded(
+    window: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    handler: fn(HWND, u32, WPARAM, LPARAM) -> LRESULT,
+) -> LRESULT {
+    let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        handler(window, message, wparam, lparam)
+    }));
+    match attempt {
+        Ok(answer) => answer,
+        Err(_) => {
+            log(&format!("a handler for message {message:#06x} panicked - carrying on"));
+            DefWindowProcW(window, message, wparam, lparam)
+        }
+    }
+}
+
 unsafe extern "system" fn backdrop_proc(
+    window: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    guarded(window, message, wparam, lparam, |w, m, wp, lp| unsafe {
+        backdrop_message(w, m, wp, lp)
+    })
+}
+
+unsafe fn backdrop_message(
     window: HWND,
     message: u32,
     wparam: WPARAM,
@@ -918,6 +979,12 @@ unsafe extern "system" fn bar_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    guarded(window, message, wparam, lparam, |w, m, wp, lp| unsafe {
+        bar_message(w, m, wp, lp)
+    })
+}
+
+unsafe fn bar_message(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match message {
         WM_ERASEBKGND => LRESULT(1),
         // Clickable without taking the focus. Without this the click meant to

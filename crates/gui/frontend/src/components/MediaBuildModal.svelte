@@ -46,6 +46,12 @@
   // user carries around, and the memory it costs only matters on a machine with
   // little of it.
   let runtimeInImage = $state(true);
+
+  // The way back. Our own desktop is the medium's shell by default; ticking
+  // this leaves cmd in that place, the way every medium before this one worked.
+  // It exists because a desktop that fails to start on some machine leaves no
+  // console behind it — and that is a medium that does not come up at all.
+  let classicConsole = $state(false);
   let outputDir = $state('');
   let building = $state(false);
   let progress: MediaProgress | null = $state(null);
@@ -154,6 +160,7 @@
         drivers: includeDrivers ? [...selected] : [],
         extra_drivers: '',
         tools: [...chosenTools],
+        classic_console: classicConsole,
         runtime_in_image: runtimeInImage,
       });
     } catch (e) {
@@ -296,6 +303,21 @@
             {/if}
           </div>
         {/if}
+
+        <div class="shell-choice">
+          <label class="shell-row">
+            <input type="checkbox" bind:checked={classicConsole} disabled={building} />
+            <span>Классическая консоль вместо рабочего стола</span>
+          </label>
+          <div class="shell-note">
+            Обычно носитель загружается в рабочий стол: полоса внизу с меню
+            «Пуск», часами и указателем раскладки — он и показывает, в какой
+            раскладке набирается пароль BitLocker. С этой галочкой оболочкой
+            останется командная строка, как на прежних носителях: видно весь ход
+            загрузки, но панели нет. Пригодится, если на каком-то компьютере
+            рабочий стол не поднимется.
+          </div>
+        </div>
 
         <!-- Third-party programs from this machine. Offered, never assumed:
              they are someone else's software, and the copy is made from the
@@ -454,6 +476,10 @@
   .opt { display: flex; align-items: flex-start; gap: 9px; font-size: 13px; color: var(--head); margin-top: 16px; cursor: pointer; }
   .opt input { margin-top: 2px; flex-shrink: 0; }
   .opt-note { display: block; font-size: 12px; color: var(--text-muted); line-height: 1.4; margin-top: 2px; }
+  .shell-choice { margin-top: 16px; }
+  .shell-row { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  .shell-note { font-size: 12px; color: var(--muted); margin-top: 4px; }
+
   .tools { margin-top: 16px; }
   .tools-title { font-weight: 600; margin-bottom: 4px; }
   .tools-note { font-size: 12px; color: var(--muted); margin-bottom: 8px; }

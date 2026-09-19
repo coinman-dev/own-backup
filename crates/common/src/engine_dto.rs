@@ -163,6 +163,10 @@ pub struct MediaBuildOptionsDto {
     /// An extra folder of `.inf` drivers.
     #[serde(default)]
     pub extra_drivers: String,
+    /// Leave `cmd` as the medium's shell instead of our own desktop — the way
+    /// back if the desktop does not come up on some machine.
+    #[serde(default)]
+    pub classic_console: bool,
     /// Ids of the third-party tools to copy in — see
     /// [`crate::media_tools::MEDIA_TOOLS`]. Empty means none, which is what a
     /// machine with neither installed always sends.

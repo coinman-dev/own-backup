@@ -302,6 +302,17 @@ pub struct MediaBuildRequest {
     pub drivers: Vec<String>,
     /// An extra folder of drivers (`.inf`) to add as well.
     pub extra_drivers: Option<PathBuf>,
+    /// Leave `cmd` as the medium's shell instead of our own desktop.
+    ///
+    /// The way back, and off by default: a medium is built with our desktop as
+    /// its shell unless this is asked for.
+    ///
+    /// It exists because with our desktop as the shell there is no console
+    /// behind it, so a desktop that fails to start on some machine leaves a
+    /// medium that does not come up at all. Two things answer that: the desktop
+    /// itself falls back to `cmd.exe` rather than exiting, and this — one tick
+    /// in the wizard and the medium behaves exactly as every medium before it.
+    pub classic_console: bool,
     /// Ids from [`own_backup_common::media_tools::MEDIA_TOOLS`] the user ticked.
     ///
     /// Asked for by id rather than by path so the build looks them up here, on
@@ -662,10 +673,22 @@ pub fn build_media(
         app_dir.join("webview2-args.txt"),
         layout::webview2_args_file(&format!("{temp_dir_win}\\webview2.log")),
     )?;
-    // WinRE ships its own winpeshl.ini to launch the recovery menu; ours must
-    // not be there at all (see media_layout::startnet_cmd).
+    // WinRE ships its own winpeshl.ini, which launches the recovery menu. It
+    // must never survive: either ours replaces it, or there must be none at all
+    // so WinPE falls back to `cmd /k startnet.cmd`.
     let _ = std::fs::remove_file(sys32.join("winpeshl.ini"));
-    std::fs::write(sys32.join("startnet.cmd"), layout::startnet_cmd(app_dir_win))?;
+    if !req.classic_console {
+        std::fs::write(sys32.join("winpeshl.ini"), layout::winpeshl_ini(app_dir_win))?;
+    }
+    // Exactly one of the two starts the desktop — see `startnet_cmd`.
+    std::fs::write(
+        sys32.join("startnet.cmd"),
+        layout::startnet_cmd(app_dir_win, req.classic_console),
+    )?;
+    info!(
+        shell = if req.classic_console { "cmd" } else { "own-backup-shell" },
+        "the medium's shell"
+    );
     set_scratch_space(&tree, mounted);
     set_input_locales(&tree, mounted, &mut report);
 

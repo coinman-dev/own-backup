@@ -783,6 +783,8 @@ export interface MediaBuildOptions {
   extra_drivers: string;
   /** Ids of the third-party tools to copy in; empty means none. */
   tools: string[];
+  /** Leave cmd as the medium's shell instead of our own desktop. */
+  classic_console: boolean;
   /** Compress WebView2 into boot.wim: smaller ISO, more RAM at boot. */
   runtime_in_image: boolean;
 }

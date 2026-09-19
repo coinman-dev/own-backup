@@ -390,15 +390,16 @@ pub fn webview2_args_file(log_path: &str) -> String {
 /// not. That property is what the tests guard; the autostart itself is a
 /// preference.
 ///
-/// And it is `startnet.cmd` rather than `winpeshl.ini` because entries in that
-/// file go to `CreateProcess`, which cannot run a `.cmd` — the medium booted
-/// into a bare console. With no `winpeshl.ini` the default shell runs
-/// `cmd /k startnet.cmd`, which is a batch file by definition, and the `/k` is
-/// what keeps the prompt afterwards.
-pub fn startnet_cmd(app_dir: &str) -> String {
-    lines(&[
-        "@echo off",
-        "wpeinit",
+/// `start_desktop` says whether OUR desktop is launched from here, and exactly
+/// one of the two boot files may do it. With a [`winpeshl_ini`] on the medium,
+/// winpeshl starts the desktop itself and this script must not: a second copy
+/// would find the first one's mutex, exit at once, and winpeshl treats its last
+/// application exiting as the end of the session — a machine that reboots
+/// seconds after it booted.
+pub fn startnet_cmd(app_dir: &str, start_desktop: bool) -> String {
+    let mut rows: Vec<String> = [
+        "@echo off".to_string(),
+        "wpeinit".to_string(),
         // Drivers added to the image sit in its driver store, and wpeinit's PnP
         // pass does not reliably START them — the display driver in particular
         // stayed installed-but-idle while Microsoft Basic Display kept the
@@ -407,28 +408,59 @@ pub fn startnet_cmd(app_dir: &str) -> String {
         // that is already running is a cheap no-op, so every added package is
         // offered rather than guessing which ones PnP missed. Before
         // start-media.cmd, so the mode picker there sees the driver's modes.
-        "for %%i in (%SystemRoot%\\INF\\oem*.inf) do drvload \"%%i\" >nul 2>&1",
+        "for %%i in (%SystemRoot%\\INF\\oem*.inf) do drvload \"%%i\" >nul 2>&1".to_string(),
         // Set at build time in the image registry as well; this line is what
         // makes it true on a medium whose image had to be unpacked instead of
         // mounted, where DISM cannot write that registry.
-        &format!("wpeutil SetKeyboardLayout {INPUT_LOCALES} >nul 2>&1"),
-        "echo.",
-        "echo === My Own Backup ===",
-        "echo.",
-        &format!("call \"{app_dir}\\start-media.cmd\""),
-        "echo.",
-        "echo This console stays usable. To start the interface again:",
-        &format!("echo   \"{app_dir}\\start-media.cmd\""),
-        "",
-        // The desktop this medium otherwise has none of. It is started LAST and
-        // detached, and `cmd` remains the shell: a failure here costs the strip
-        // and nothing else. When it becomes the shell itself (a `winpeshl.ini`
-        // on the medium) that stops being true, which is exactly why that step
-        // comes after everything else has been seen working.
-        "rem The strip along the bottom: clock, and which keyboard layout the",
-        "rem window in front is using - the thing a BitLocker passphrase is",
-        "rem typed into with nothing on screen to say which alphabet it is in.",
-        &format!("start \"\" \"{app_dir}\\own-backup-shell.exe\""),
+        format!("wpeutil SetKeyboardLayout {INPUT_LOCALES} >nul 2>&1"),
+        "echo.".to_string(),
+        "echo === My Own Backup ===".to_string(),
+        "echo.".to_string(),
+        format!("call \"{app_dir}\\start-media.cmd\""),
+        "echo.".to_string(),
+        "echo This console stays usable. To start the interface again:".to_string(),
+        format!("echo   \"{app_dir}\\start-media.cmd\""),
+    ]
+    .to_vec();
+
+    if start_desktop {
+        // The classic medium: `cmd` is still the shell and the desktop is one
+        // more program started detached at the end, so a failure here costs the
+        // strip and nothing else.
+        rows.extend([
+            String::new(),
+            "rem The strip along the bottom: clock, and which keyboard layout the".to_string(),
+            "rem window in front is using - the thing a BitLocker passphrase is".to_string(),
+            "rem typed into with nothing on screen to say which alphabet it is in.".to_string(),
+            format!("start \"\" \"{app_dir}\\own-backup-shell.exe\""),
+        ]);
+    }
+    lines(&rows.iter().map(String::as_str).collect::<Vec<_>>())
+}
+
+/// `winpeshl.ini` — what WinPE runs INSTEAD of its default shell.
+///
+/// Without this file the default shell is `cmd /k startnet.cmd`, and that
+/// console is the whole desktop. With it, winpeshl runs these entries in order,
+/// waiting for each: the boot script to completion, then our desktop, which
+/// holds the session.
+///
+/// **When the last entry exits, the machine reboots.** That is winpeshl's rule
+/// and not something added here — it is also exactly what closing the console
+/// has always done on this medium. It is why the desktop offers no way out of
+/// itself in WinPE, and why a desktop that cannot start must end in a console
+/// rather than in a return.
+///
+/// The first entry goes through `cmd /c` because entries in this file are handed
+/// to `CreateProcess`, which cannot run a `.cmd` at all: a medium that named the
+/// script directly booted into a bare console (2026-07-31), and that is the
+/// whole reason this file was avoided until the rest of the desktop worked. The
+/// comma is winpeshl's own separator between a program and its arguments.
+pub fn winpeshl_ini(app_dir: &str) -> String {
+    lines(&[
+        "[LaunchApps]",
+        r"%SYSTEMDRIVE%\Windows\System32\cmd.exe, /c %SYSTEMDRIVE%\Windows\System32\startnet.cmd",
+        &format!("\"{app_dir}\\own-backup-shell.exe\""),
     ])
 }
 
@@ -613,7 +645,7 @@ mod tests {
     #[test]
     fn boot_hands_the_console_back() {
         let app = r"X:\Program Files\OwnBackup";
-        let s = startnet_cmd(app);
+        let s = startnet_cmd(app, true);
         assert!(s.contains("wpeinit"));
         assert!(
             s.contains(&format!("call \"{app}\\start-media.cmd\"")),
@@ -670,7 +702,7 @@ mod tests {
     /// the boot script must drvload what the build put in.
     #[test]
     fn boot_starts_the_added_drivers() {
-        let s = startnet_cmd(r"X:\Program Files\OwnBackup");
+        let s = startnet_cmd(r"X:\Program Files\OwnBackup", true);
         assert!(s.contains("drvload"), "added drivers must be loaded, not just stored");
         assert!(s.contains(r"%SystemRoot%\INF\oem*.inf"), "every added package is offered");
         // Order matters: the driver first, the mode picker (start-media) after.
@@ -683,7 +715,7 @@ mod tests {
     /// anything: the boot script must offer more than the image's own layout.
     #[test]
     fn boot_sets_up_the_keyboard_layouts() {
-        let s = startnet_cmd(r"X:\Program Files\OwnBackup");
+        let s = startnet_cmd(r"X:\Program Files\OwnBackup", true);
         assert!(s.contains("SetKeyboardLayout"));
         assert!(s.contains(INPUT_LOCALES), "both layouts must be set at boot");
         assert!(INPUT_LOCALES.contains("0419"), "Russian has to be one of them");
@@ -696,7 +728,7 @@ mod tests {
     fn the_boot_scripts_are_plain_ascii() {
         let app = r"X:\Program Files\OwnBackup";
         for (name, text) in [
-            ("startnet.cmd", startnet_cmd(app)),
+            ("startnet.cmd", startnet_cmd(app, true)),
             ("start-media.cmd", start_media_cmd(app, r"X:\Windows\Temp\OwnBackup")),
             ("webview2-args.txt", webview2_args_file(r"X:\Windows\Temp\OwnBackup\webview2.log")),
         ] {
@@ -722,7 +754,7 @@ mod tests {
     #[test]
     fn the_desktop_starts_detached_and_after_the_work() {
         let app = r"X:\Program Files\OwnBackup";
-        let s = startnet_cmd(app);
+        let s = startnet_cmd(app, true);
         let work = s.find("start-media.cmd").expect("the interface still starts");
         let desktop = s.find("own-backup-shell.exe").expect("the desktop starts too");
         assert!(desktop > work, "the desktop comes after the work, not before it");
@@ -732,13 +764,54 @@ mod tests {
         );
     }
 
+    /// The rule that keeps a medium from rebooting seconds after it booted.
+    ///
+    /// With `winpeshl.ini` present, winpeshl starts the desktop and waits for
+    /// it; the session ends when it exits. If `startnet.cmd` had ALSO started
+    /// one, the second copy would find the first one's mutex, exit immediately,
+    /// and winpeshl would take that for the end of the session.
+    #[test]
+    fn exactly_one_of_the_two_boot_files_starts_the_desktop() {
+        let app = r"X:\Program Files\OwnBackup";
+        let desktop = "own-backup-shell.exe";
+
+        // The medium where our desktop IS the shell.
+        let shell_medium = format!("{}{}", startnet_cmd(app, false), winpeshl_ini(app));
+        assert_eq!(shell_medium.matches(desktop).count(), 1, "once, from winpeshl");
+        assert!(!startnet_cmd(app, false).contains(desktop), "and not from the script");
+
+        // The medium where `cmd` is still the shell: no winpeshl.ini is written
+        // at all, and the script is the only one starting it.
+        assert_eq!(startnet_cmd(app, true).matches(desktop).count(), 1);
+    }
+
+    /// `CreateProcess` cannot run a `.cmd`, and winpeshl hands it these lines
+    /// verbatim. A medium that named the script directly booted into a bare
+    /// console, and it is a rebuild cycle before anyone finds out.
+    #[test]
+    fn winpeshl_runs_the_boot_script_through_cmd() {
+        let ini = winpeshl_ini(r"X:\Program Files\OwnBackup");
+        assert!(ini.starts_with("[LaunchApps]"), "winpeshl reads nothing else");
+        let script = ini.lines().find(|l| l.contains("startnet.cmd")).expect("the boot script");
+        assert!(script.contains("cmd.exe, /c"), "through cmd, with winpeshl's own comma: {script}");
+        // Order is not cosmetic: wpeinit, the drivers and the screen mode all
+        // have to be done before anything is drawn.
+        let boot = ini.find("startnet.cmd").unwrap();
+        let desktop = ini.find("own-backup-shell.exe").unwrap();
+        assert!(boot < desktop, "the work comes before the desktop");
+        assert!(
+            ini.contains("\"X:\\Program Files\\OwnBackup\\own-backup-shell.exe\""),
+            "a path with a space in it has to be quoted"
+        );
+    }
+
     /// A program the boot scripts launch but the build never copies in gives a
     /// medium that boots and then cannot find its own parts — and the only way
     /// to discover it is to boot one.
     #[test]
     fn every_program_the_boot_scripts_run_is_one_that_is_copied_in() {
         let app = r"X:\Program Files\OwnBackup";
-        let scripts = format!("{}{}", startnet_cmd(app), start_media_cmd(app, r"X:\Temp"));
+        let scripts = format!("{}{}", startnet_cmd(app, true), start_media_cmd(app, r"X:\Temp"));
         let mut rest = scripts.as_str();
         while let Some(at) = rest.find("own-backup-") {
             let tail = &rest[at..];
@@ -816,7 +889,9 @@ mod tests {
     #[test]
     fn every_generated_file_uses_windows_line_endings() {
         for s in [
-            startnet_cmd("X:\\app"),
+            startnet_cmd("X:\\app", true),
+            startnet_cmd("X:\\app", false),
+            winpeshl_ini("X:\\app"),
             start_media_cmd("X:\\app", "X:\\tmp"),
             webview2_args_file("X:\\tmp\\webview2.log"),
         ] {

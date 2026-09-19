@@ -895,6 +895,7 @@ impl BackupService for BackupServiceImpl {
                     drivers: opts.drivers.clone(),
                     extra_drivers: extra,
                     tools: opts.tools.clone(),
+                    classic_console: opts.classic_console,
                     runtime_in_image: opts.runtime_in_image,
                 };
 
