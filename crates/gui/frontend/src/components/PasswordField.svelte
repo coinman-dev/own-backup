@@ -34,6 +34,13 @@
     revealed = false,
   }: Props = $props();
 
+  // Deliberately the INITIAL value, not a live one (audit AUD-13 asks this to
+  // be judged by the contract rather than assumed a defect). `revealed` says
+  // what the field starts as; after that the eye belongs to the user, and
+  // following the prop would undo their click. The one caller keys its
+  // `{#each}` by device, so every volume gets its own field and its own
+  // starting state — nothing changes under a live instance.
+  // svelte-ignore state_referenced_locally
   let shown = $state(revealed);
 </script>
 

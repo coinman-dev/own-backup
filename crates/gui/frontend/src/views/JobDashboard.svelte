@@ -155,15 +155,26 @@
 
   // Collapsible "Копия создана…" summary card; its state is remembered across
   // sessions (localStorage), per this job so hiding one doesn't hide others.
-  const SUMMARY_KEY = `hideRunSummary:${job.id}`;
-  let summaryHidden = $state(
-    typeof localStorage !== 'undefined' && localStorage.getItem(SUMMARY_KEY) === '1',
-  );
+  //
+  // The key has to FOLLOW the job. Svelte reuses this component when the
+  // selected job changes rather than remounting it, so a key computed once at
+  // creation stayed on whichever job happened to be open first — hiding the
+  // card on one job then hid it on every other, which is the exact thing the
+  // per-job key exists to prevent (audit AUD-13, reactivity warning).
+  const SUMMARY_KEY = $derived(`hideRunSummary:${job.id}`);
+  let summaryHidden = $state(false);
+  // Only READING reacts to the key. Writing happens where the user actually
+  // folds the card: an effect that both read and wrote would fire on the
+  // switch to another job and save the previous job's value under the new key.
   $effect(() => {
-    if (typeof localStorage !== 'undefined') {
-      localStorage.setItem(SUMMARY_KEY, summaryHidden ? '1' : '0');
-    }
+    summaryHidden =
+      typeof localStorage !== 'undefined' && localStorage.getItem(SUMMARY_KEY) === '1';
   });
+  function rememberSummaryState(hidden: boolean) {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(SUMMARY_KEY, hidden ? '1' : '0');
+    }
+  }
 
   async function backup() {
     actionErr = null;
@@ -338,7 +349,7 @@
 
     {#if lastRun?.status === 'success'}
       {#if summaryHidden}
-        <button class="summary-show" onclick={() => (summaryHidden = false)}>
+        <button class="summary-show" onclick={() => { summaryHidden = false; rememberSummaryState(false); }}>
           <span class="bdot small"></span> Показать сведения о копии
         </button>
       {:else}
@@ -368,7 +379,7 @@
               Всё, что под них попадает, в копии есть.
             {/if}
           </span>
-          <button class="banner-x" title="Скрыть" aria-label="Скрыть" onclick={() => (summaryHidden = true)}>✕</button>
+          <button class="banner-x" title="Скрыть" aria-label="Скрыть" onclick={() => { summaryHidden = true; rememberSummaryState(true); }}>✕</button>
         </div>
       {/if}
     {:else if lastRun?.status === 'error'}

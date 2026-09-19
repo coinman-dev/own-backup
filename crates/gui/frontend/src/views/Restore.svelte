@@ -270,6 +270,9 @@
 
 {#if addOpen}
   <div class="overlay" role="presentation" onclick={() => (addOpen = false)}>
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- Only a guard: it stops a click inside the dialog from reaching the
+         overlay and closing it. Nothing happens that a key could do instead. -->
     <div class="dialog" role="dialog" tabindex="-1" onclick={(e) => e.stopPropagation()}>
       <div class="dialog-title">Добавить копию</div>
       <p>Что открыть?</p>

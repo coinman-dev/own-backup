@@ -111,7 +111,14 @@
     }
     // Default destination: where the program itself is, which is the folder the
     // user already knows how to find.
-    api.getConfig().then((c) => { if (!outputDir) outputDir = c.data_dir || ''; }).catch(() => {});
+    // `getConfig` hands back the whole config as unknown values; this one is a
+    // path, so say so rather than letting `{}` flow into a string.
+    api
+      .getConfig()
+      .then((c) => {
+        if (!outputDir) outputDir = typeof c.data_dir === 'string' ? c.data_dir : '';
+      })
+      .catch(() => {});
     const un = listen<MediaProgress>('media-progress', (e) => (progress = e.payload));
     return () => { un.then((f) => f()); };
   });
@@ -519,7 +526,6 @@
   .drv-list { max-height: 220px; overflow: auto; border: 1px solid var(--border); border-radius: 5px; }
   .drv { display: grid; grid-template-columns: 20px 1fr 150px 1fr 80px; gap: 10px; align-items: center; padding: 6px 10px; font-size: 12px; cursor: pointer; color: var(--head); }
   .drv:hover { background: var(--hover-bg, rgba(127,127,127,.10)); }
-  .drv.rec .drv-class { color: var(--green); }
   .drv-name, .drv-prov { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .drv-class { color: var(--text-muted); }
   .drv-prov { color: var(--text-muted); }

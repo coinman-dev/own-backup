@@ -210,6 +210,10 @@
   {#if sel}<div class="check"><svg width="10" height="10" viewBox="0 0 24 24" stroke="#fff" stroke-width="3.6" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></div>{/if}
 {/snippet}
 
+<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+<!-- The tab stop and the role appear together or not at all: without `onDisk`
+     the card is inert and gets neither. The checker cannot see that they are
+     the same condition, so it reads the tabindex as sitting on a plain div. -->
 <div
   class="disk-card"
   class:clickable={onDisk}
@@ -225,6 +229,10 @@
       {#if boot}
         <!-- Whole-disk (bootable) restore opt-in — the checkbox lives inside the
              badge itself, so it reads as one control. -->
+        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
+        <!-- A guard, not an action: it keeps a click on the badge from also
+             selecting the card behind it. The checkbox inside is the control,
+             and it answers the keyboard by itself. -->
         <label class="whole-badge boot-check" onclick={(e) => e.stopPropagation()}>
           <input
             type="checkbox"

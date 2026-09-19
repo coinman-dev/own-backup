@@ -8,6 +8,10 @@
 </script>
 
 <div class="overlay" onclick={onClose} role="presentation">
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- The handler only stops the overlay's click from closing the dialog when
+       the user clicks INSIDE it. There is no action to give a key equivalent
+       to; the dialog's own button is the keyboard path. -->
   <div class="dialog" onclick={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
     <div class="dialog-title">{title}</div>
     <p>{message}</p>

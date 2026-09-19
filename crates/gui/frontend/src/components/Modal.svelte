@@ -38,11 +38,15 @@
 
 {#if open}
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+  <!-- tabindex="-1": a dialog has to be focusable for Escape to reach the
+       handler below at all. Without it the key went to whatever was focused
+       behind the dialog. -->
   <div
     class="modal-backdrop"
     role="dialog"
     aria-modal="true"
     aria-label={title}
+    tabindex="-1"
     onclick={handleBackdropClick}
     onkeydown={handleKeydown}
   >

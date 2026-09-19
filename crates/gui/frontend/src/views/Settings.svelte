@@ -2,7 +2,7 @@
   import { pickPath } from '../lib/pickPath.svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { api } from '../lib/api';
-  import type { ServiceStatus } from '../lib/types';
+  import type { ServiceStatus, MountBackendStatus } from '../lib/types';
 
   /** The config as it was loaded, kept whole. Saving edits a copy of it rather
    *  than building a fresh object out of the four fields this page shows —
@@ -80,7 +80,13 @@
   // No driver of ours is installed on either platform any more: Windows serves
   // the image over an iSCSI target of ours to its own initiator, Linux uses the
   // in-tree NBD module. "Prepare" starts (or loads) what that needs.
-  let mountStatus: import('$lib/types').MountBackendStatus | null = $state(null);
+  // `$state<T | null>(null)`, not `let x: T | null = $state(null)`: with the
+  // annotation on the variable, TypeScript reads the initialiser as literally
+  // `null` and narrows every straight-line use below to `never` — which is how
+  // `mountStatus?.platform` and `draftJob?.id` became type errors nobody saw
+  // (audit AUD-13). The generic form gives the call the union type, so there
+  // is nothing to narrow.
+  let mountStatus = $state<MountBackendStatus | null>(null);
   const isLinux = $derived(mountStatus?.platform === 'linux');
   let driverBusy = $state(false);
   let driverMsg: string | null = $state(null);

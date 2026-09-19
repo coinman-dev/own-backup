@@ -8,7 +8,7 @@
 
   let selectedId: string | null = $state(null);
   // Shared draft the wizard edits; its name is also editable in the list.
-  let draftJob: Job | null = $state(null);
+  let draftJob = $state<Job | null>(null);
   let draftMode: 'wizard' | 'edit' | null = $state(null);
 
   // Persisted list prefs.
@@ -134,7 +134,8 @@
       // файл может быть занят, папка недоступна, а старую папку назначения
       // журнал мог уже забыть. Промолчать об этом — значит оставить копии
       // лежать там, где пользователь уверен, что их нет.
-      if (deleteFiles && !report.complete) {
+      const everythingWent = report.kept.length === 0 && !report.history_truncated;
+      if (deleteFiles && !everythingWent) {
         const lines = report.kept.map(([path, why]) => `${path} — ${why}`);
         if (report.history_truncated) {
           lines.push(
@@ -211,7 +212,20 @@
               <div class="job-name">{job.name}</div>
               <div class="job-path">{job.dest_folder}</div>
             </div>
-            <span class="del" onclick={(e) => askDelete(job.id, e)} role="button" tabindex="0">×</span>
+            <!-- Focusable AND activatable: it carried role="button" and a tab
+                 stop but no key handler, so a keyboard user could reach it and
+                 then not press it. -->
+            <span
+              class="del"
+              role="button"
+              tabindex="0"
+              onclick={(e) => askDelete(job.id, e)}
+              onkeydown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  askDelete(job.id, e);
+                }
+              }}>×</span>
           {/if}
         </button>
       {/each}

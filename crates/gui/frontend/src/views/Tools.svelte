@@ -286,9 +286,6 @@
     margin-bottom: 16px;
   }
 
-  .tool-card.muted {
-    opacity: 0.6;
-  }
 
   .tool-head {
     display: flex;

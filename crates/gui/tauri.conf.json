@@ -1,6 +1,5 @@
 {
   "productName": "My Own Backup",
-  "version": "0.1.0",
   "identifier": "com.ownbackup.gui",
   "build": {
     "frontendDist": "frontend/dist",

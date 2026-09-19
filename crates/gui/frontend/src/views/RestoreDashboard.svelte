@@ -1752,7 +1752,7 @@
       <div class="disks">
         <DiskMap
           disk={targetDisk}
-          {slots}
+          slots={slots ?? undefined}
           onPart={clickTargetPart}
           stateOf={dstState}
           lockedIndices={[...mappings.map((m) => m.dst), ...previewIdx]}

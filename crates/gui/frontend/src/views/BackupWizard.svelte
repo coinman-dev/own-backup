@@ -1882,8 +1882,7 @@
   .dest-fields { flex: 1; display: flex; align-items: center; gap: 12px; min-width: 0; }
   .dest-fields input { flex: 1; min-width: 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: 4px; font-size: 13px; font-family: var(--font); background: var(--card-bg); color: var(--text); }
   .loading-note { font-size: 13px; color: var(--text-muted); padding: 9px 0; }
-  .note, .dev-note { font-size: 12px; color: var(--text-muted); margin-top: 18px; }
-  .dev-note { color: #a06a10; background: rgba(251,188,5,.1); padding: 8px 12px; border-radius: 5px; }
+  .note { font-size: 12px; color: var(--text-muted); margin-top: 18px; }
   .warn-note { font-size: 13px; color: #8c1d1d; background: rgba(216,74,74,.1); padding: 10px 14px; border-radius: 5px; margin-top: 14px; font-weight: 600; }
   /* Same warning, docked just above the Отмена/Назад/Далее footer. */
   .footer-warn { margin: 0 34px 12px; }
