@@ -395,6 +395,20 @@ impl BackupClient {
         parse(&reply.json)
     }
 
+    /// Third-party tools this machine has that the medium could carry. Empty
+    /// is the ordinary answer on a machine with neither installed.
+    pub async fn list_media_tools(
+        &mut self,
+    ) -> Result<Vec<own_backup_common::engine_dto::MediaToolDto>> {
+        let reply = self
+            .inner
+            .list_media_tools(self.request(proto::Empty {}))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
+
     /// Build the boot medium and write it as an ISO. Progress arrives on the
     /// event stream as kind `media`; this returns when the file is on disk.
     pub async fn build_media(

@@ -343,6 +343,7 @@ fn main() {
             commands::engine::unmount_backup,
             commands::engine::find_base_images,
             commands::engine::list_driver_packages,
+            commands::engine::list_media_tools,
             commands::engine::build_boot_media,
             commands::engine::boot_status,
             commands::engine::boot_action,

@@ -163,6 +163,11 @@ pub struct MediaBuildOptionsDto {
     /// An extra folder of `.inf` drivers.
     #[serde(default)]
     pub extra_drivers: String,
+    /// Ids of the third-party tools to copy in — see
+    /// [`crate::media_tools::MEDIA_TOOLS`]. Empty means none, which is what a
+    /// machine with neither installed always sends.
+    #[serde(default)]
+    pub tools: Vec<String>,
     /// Compress the WebView2 runtime into `boot.wim` instead of leaving it
     /// beside it. Smaller file, more memory at boot — see the field of the same
     /// name on the builder's request for the arithmetic.
@@ -181,12 +186,32 @@ pub struct MediaBuildReportDto {
     /// The image had to be unpacked and recaptured (WIM mounting unavailable).
     pub unpacked: bool,
     pub drivers_added: u32,
+    #[serde(default)]
+    pub tools_added: u32,
+    #[serde(default)]
+    pub tools_bytes: u64,
     pub runtime_files_trimmed: u32,
     /// Temporary files removed after the build — a few gigabytes when the image
     /// had to be unpacked.
     #[serde(default)]
     pub temp_bytes_freed: u64,
     pub warnings: Vec<String>,
+}
+
+/// A third-party program found on this machine that the medium could carry.
+///
+/// Size and file count are shown because that is what the choice is about: the
+/// medium is loaded into RAM whole, and an installation carrying a dozen
+/// plugins is not the size anyone expects.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MediaToolDto {
+    /// Id from [`crate::media_tools::MEDIA_TOOLS`].
+    pub id: String,
+    pub name: String,
+    /// Where it was found, shown so the user can see WHICH installation it is.
+    pub source: String,
+    pub size_bytes: u64,
+    pub files: u32,
 }
 
 /// One stage of a build, as the wizard lists them before anything starts.

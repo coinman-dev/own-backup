@@ -77,6 +77,10 @@ service BackupService {
   // engine event of kind "media".
   rpc FindBaseImages(Empty) returns (JsonReply);        // JSON: [BaseImageDto]
   rpc ListDrivers(Empty) returns (JsonReply);           // JSON: [DriverPackageDto]
+  // Third-party tools installed on THIS machine that the medium could carry —
+  // a file manager and a text editor, copied from the user's own installation
+  // and never distributed by us.
+  rpc ListMediaTools(Empty) returns (JsonReply);        // JSON: [MediaToolDto]
   rpc BuildMedia(JsonRequest) returns (JsonReply);      // in: MediaBuildOptions -> MediaBuildReport
 
   // --- What mounting a backup image needs on this machine ---

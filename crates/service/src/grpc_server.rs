@@ -777,6 +777,36 @@ impl BackupService for BackupServiceImpl {
         Err(Status::unimplemented("Драйверы перечисляются только на Windows"))
     }
 
+    async fn list_media_tools(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        media_build_unavailable()?;
+        #[cfg(target_os = "windows")]
+        {
+            use own_backup_common::engine_dto::MediaToolDto;
+            // Не нашли ничего — это обычный ответ, а не отказ: машина без
+            // Total Commander и Notepad++ ничего не теряет.
+            let found = tokio::task::spawn_blocking(own_backup_backup::media_tools_win::find_tools)
+                .await
+                .map_err(|e| Status::internal(format!("tool search panicked: {e}")))?;
+            let out: Vec<MediaToolDto> = found
+                .into_iter()
+                .map(|t| MediaToolDto {
+                    id: t.id,
+                    name: t.name,
+                    source: t.source.display().to_string(),
+                    size_bytes: t.size_bytes,
+                    files: t.files,
+                })
+                .collect();
+            info!(count = out.len(), "third-party tools offered for the medium");
+            return json_reply(&out);
+        }
+        #[cfg(not(target_os = "windows"))]
+        Err(Status::unimplemented(
+            "Сторонние средства ищутся только на Windows",
+        ))
+    }
+
     async fn build_media(&self, req: Request<JsonRequest>) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
         media_build_unavailable()?;
@@ -836,7 +866,8 @@ impl BackupService for BackupServiceImpl {
             let report = tokio::task::spawn_blocking(move || -> own_backup_common::Result<_> {
                 let staging = work_root.join("out");
                 let work = work_root.join("work");
-                let stages: Vec<MediaStageDto> = BuildStage::plan(!opts.drivers.is_empty())
+                let stages: Vec<MediaStageDto> =
+                    BuildStage::plan(!opts.drivers.is_empty(), !opts.tools.is_empty())
                     .into_iter()
                     .map(|s| MediaStageDto { id: s.id().into(), title: s.title().into() })
                     .collect();
@@ -863,6 +894,7 @@ impl BackupService for BackupServiceImpl {
                     work_dir: work.clone(),
                     drivers: opts.drivers.clone(),
                     extra_drivers: extra,
+                    tools: opts.tools.clone(),
                     runtime_in_image: opts.runtime_in_image,
                 };
 
@@ -906,6 +938,8 @@ impl BackupService for BackupServiceImpl {
                     base_language: built.base_language,
                     unpacked: built.unpacked,
                     drivers_added: built.drivers_added,
+                    tools_added: built.tools_added,
+                    tools_bytes: built.tools_bytes,
                     runtime_files_trimmed: built.runtime_files_trimmed,
                     temp_bytes_freed: freed,
                     warnings: built.warnings,
@@ -919,6 +953,7 @@ impl BackupService for BackupServiceImpl {
                 iso = %report.iso_path,
                 mb = report.iso_bytes / 1_048_576,
                 drivers = report.drivers_added,
+                tools = report.tools_added,
                 freed_mb = report.temp_bytes_freed / 1_048_576,
                 "boot medium built"
             );

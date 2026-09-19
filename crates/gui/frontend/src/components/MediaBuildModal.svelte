@@ -10,7 +10,13 @@
   import { api } from '../lib/api';
   import { pickPath } from '../lib/pickPath.svelte';
   import { formatBytes } from '../lib/format';
-  import type { BaseImage, DriverPackage, MediaBuildReport, MediaProgress } from '../lib/types';
+  import type {
+    BaseImage,
+    DriverPackage,
+    MediaBuildReport,
+    MediaProgress,
+    MediaTool,
+  } from '../lib/types';
 
   interface Props {
     kind: 'windows' | 'linux';
@@ -29,6 +35,12 @@
   // bigger than everything else on it together — held in RAM from boot.
   let loadingDrivers = $state(false);
   let driverError: string | null = $state(null);
+
+  // Third-party programs found on THIS machine. Nothing is downloaded: the
+  // copy is made from the user's own installation, which is why they are
+  // offered rather than added quietly. Off by default for the same reason.
+  let tools: MediaTool[] = $state([]);
+  let chosenTools = $state(new Set<string>());
 
   // Compressing the runtime into the image is the default: the ISO is what the
   // user carries around, and the memory it costs only matters on a machine with
@@ -50,6 +62,9 @@
   // Disks and network on Windows' own drivers: nothing to pick, but they are
   // this machine's hardware and the user should see that they were looked at.
   const inbox = $derived(drivers.filter((d) => d.inbox));
+  const toolBytes = $derived(
+    tools.filter((t) => chosenTools.has(t.id)).reduce((sum, t) => sum + t.size_bytes, 0),
+  );
   /** The build is over: the button becomes "Готово" and closes the dialog. */
   const finished = $derived(!!report);
 
@@ -82,7 +97,12 @@
   );
 
   onMount(() => {
-    if (isWindows) loadDrivers();
+    if (isWindows) {
+      loadDrivers();
+      // Quietly: a machine with neither installed is the ordinary case, and an
+      // empty section says so without an error.
+      api.listMediaTools().then((t) => (tools = t)).catch(() => {});
+    }
     // Default destination: where the program itself is, which is the folder the
     // user already knows how to find.
     api.getConfig().then((c) => { if (!outputDir) outputDir = c.data_dir || ''; }).catch(() => {});
@@ -101,6 +121,12 @@
     } finally {
       loadingDrivers = false;
     }
+  }
+
+  function toggleTool(id: string) {
+    const next = new Set(chosenTools);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    chosenTools = next;
   }
 
   function toggle(inf: string) {
@@ -127,6 +153,7 @@
         output_iso: `${outputDir}${sep}OwnBackup.iso`,
         drivers: includeDrivers ? [...selected] : [],
         extra_drivers: '',
+        tools: [...chosenTools],
         runtime_in_image: runtimeInImage,
       });
     } catch (e) {
@@ -270,6 +297,34 @@
           </div>
         {/if}
 
+        <!-- Third-party programs from this machine. Offered, never assumed:
+             they are someone else's software, and the copy is made from the
+             user's own installation into their own medium. -->
+        {#if tools.length > 0}
+          <div class="tools">
+            <div class="tools-title">Средства на всякий случай</div>
+            <div class="tools-note">
+              Найдены на этом компьютере. Если отметить, они лягут на носитель
+              вместе со своими настройками — теми, что сейчас на машине. Места
+              занимают немного, а неожиданную проблему в среде восстановления
+              решают быстро. Настройки, изменённые на носителе, не сохраняются:
+              диск X: живёт в памяти.
+            </div>
+            {#each tools as t (t.id)}
+              <label class="tool">
+                <input type="checkbox" checked={chosenTools.has(t.id)}
+                       onchange={() => toggleTool(t.id)} disabled={building} />
+                <span class="tool-name">{t.name}</span>
+                <span class="tool-src" title={t.source}>{t.source}</span>
+                <span class="tool-size">{formatBytes(t.size_bytes)} · {t.files} файлов</span>
+              </label>
+            {/each}
+            {#if chosenTools.size > 0}
+              <div class="tools-sum">Добавится к носителю: {formatBytes(toolBytes)}</div>
+            {/if}
+          </div>
+        {/if}
+
         <!-- Not an option: the screen on the medium is the firmware's business,
              and the one setting that decides it is in the firmware. Video
              adapter drivers used to be offered here instead; the GeForce one
@@ -342,6 +397,12 @@
             <span>Драйверы</span>
             <span>{report.drivers_added > 0 ? `${report.drivers_added} шт.` : 'не добавлялись'}</span>
           </div>
+          {#if report.tools_added > 0}
+            <div class="rep-row">
+              <span>Средства</span>
+              <span>{report.tools_added} шт. · {formatBytes(report.tools_bytes)}</span>
+            </div>
+          {/if}
           {#if report.temp_bytes_freed > 0}
             <div class="rep-row">
               <span>Убрано</span>
@@ -393,6 +454,26 @@
   .opt { display: flex; align-items: flex-start; gap: 9px; font-size: 13px; color: var(--head); margin-top: 16px; cursor: pointer; }
   .opt input { margin-top: 2px; flex-shrink: 0; }
   .opt-note { display: block; font-size: 12px; color: var(--text-muted); line-height: 1.4; margin-top: 2px; }
+  .tools { margin-top: 16px; }
+  .tools-title { font-weight: 600; margin-bottom: 4px; }
+  .tools-note { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+  .tool {
+    display: grid;
+    grid-template-columns: 22px 160px 1fr auto;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0;
+    font-size: 13px;
+  }
+  .tool-src {
+    color: var(--muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .tool-size { color: var(--muted); white-space: nowrap; }
+  .tools-sum { font-size: 12px; color: var(--muted); margin-top: 6px; }
+
   .drivers { margin-top: 16px; }
   .screen { margin-top: 16px; font-size: 12px; color: var(--text-muted); line-height: 1.5; }
   .screen-title { font-size: 13px; color: var(--head); margin-bottom: 2px; }

@@ -302,6 +302,12 @@ pub struct MediaBuildRequest {
     pub drivers: Vec<String>,
     /// An extra folder of drivers (`.inf`) to add as well.
     pub extra_drivers: Option<PathBuf>,
+    /// Ids from [`own_backup_common::media_tools::MEDIA_TOOLS`] the user ticked.
+    ///
+    /// Asked for by id rather than by path so the build looks them up here, on
+    /// the machine that has them, and a request cannot name a folder that was
+    /// never offered.
+    pub tools: Vec<String>,
     /// Put the WebView2 runtime inside `boot.wim` rather than beside it.
     ///
     /// A real trade, not a preference. Inside, it is compressed with the rest of
@@ -326,6 +332,9 @@ pub struct MediaBuildReport {
     /// True when the image had to be unpacked and recaptured.
     pub unpacked: bool,
     pub drivers_added: u32,
+    /// Third-party tools copied in, and what they cost.
+    pub tools_added: u32,
+    pub tools_bytes: u64,
     pub runtime_files_trimmed: u32,
     pub image_bytes: u64,
     pub media_bytes: u64,
@@ -344,6 +353,7 @@ pub enum BuildStage {
     Checking,
     OpeningImage,
     CopyingProgram,
+    CopyingTools,
     CopyingRuntime,
     AddingDrivers,
     SystemLibraries,
@@ -359,6 +369,7 @@ impl BuildStage {
             BuildStage::Checking => "check",
             BuildStage::OpeningImage => "open",
             BuildStage::CopyingProgram => "program",
+            BuildStage::CopyingTools => "tools",
             BuildStage::CopyingRuntime => "runtime",
             BuildStage::AddingDrivers => "drivers",
             BuildStage::SystemLibraries => "libs",
@@ -373,6 +384,7 @@ impl BuildStage {
             BuildStage::Checking => "Проверка исходных файлов",
             BuildStage::OpeningImage => "Открытие образа восстановления",
             BuildStage::CopyingProgram => "Копирование программы",
+            BuildStage::CopyingTools => "Копирование сторонних средств",
             BuildStage::CopyingRuntime => "Копирование WebView2",
             BuildStage::AddingDrivers => "Добавление драйверов",
             BuildStage::SystemLibraries => "Системные библиотеки",
@@ -386,13 +398,16 @@ impl BuildStage {
     /// The stages a build with these options will actually run — the queue is
     /// shown before anything starts, so it must not list work that will be
     /// skipped.
-    pub fn plan(with_drivers: bool) -> Vec<BuildStage> {
+    pub fn plan(with_drivers: bool, with_tools: bool) -> Vec<BuildStage> {
         let mut v = vec![
             BuildStage::Checking,
             BuildStage::OpeningImage,
             BuildStage::CopyingProgram,
-            BuildStage::CopyingRuntime,
         ];
+        if with_tools {
+            v.push(BuildStage::CopyingTools);
+        }
+        v.push(BuildStage::CopyingRuntime);
         if with_drivers {
             v.push(BuildStage::AddingDrivers);
         }
@@ -490,6 +505,26 @@ pub fn build_media(
             ((i + 1) * 100 / layout::PROGRAM_FILES.len()) as u64,
             exe,
         );
+    }
+
+    if !req.tools.is_empty() {
+        at(&mut progress, BuildStage::CopyingTools, 0, "");
+        match add_tools(&tree, &req.tools, &mut |pct, what| {
+            at(&mut progress, BuildStage::CopyingTools, pct, what);
+        }) {
+            Ok((count, bytes)) => {
+                report.tools_added = count;
+                report.tools_bytes = bytes;
+            }
+            // Never fatal. A medium without Total Commander is the medium we
+            // shipped yesterday; a build that failed at the last convenience is
+            // an hour of someone's evening.
+            Err(e) => {
+                warn!(error = %e, "third-party tools were not added");
+                report.warnings.push(format!("Сторонние средства не добавлены: {e}"));
+            }
+        }
+        at(&mut progress, BuildStage::CopyingTools, 100, "");
     }
 
     at(
@@ -1089,6 +1124,64 @@ fn trim_runtime(runtime_root: &Path) -> u32 {
         }
     }
     n
+}
+
+/// Put the chosen third-party tools into the image.
+///
+/// Under `Program Files\Tools`, beside our own folder and not inside it: the
+/// shell looks for them exactly there
+/// ([`own_backup_common::media_tools::MediaTool::path_on_medium`]), and nothing
+/// of ours is ever mistaken for someone else's program.
+///
+/// Whole folders, settings and all. They are copied as they are on the machine
+/// making the medium, which is the point — a Total Commander with the user's
+/// own panels and hotkeys is worth more in a rescue than a default one. That
+/// those settings do not survive a reboot is fine and expected: `X:` is a RAM
+/// disk, and the next boot brings the same copy back.
+fn add_tools(
+    tree: &Path,
+    wanted: &[String],
+    progress: &mut dyn FnMut(u64, &str),
+) -> Result<(u32, u64)> {
+    let found = crate::media_tools_win::find_tools();
+    let picked: Vec<&crate::media_tools_win::FoundTool> =
+        found.iter().filter(|f| wanted.iter().any(|id| id == &f.id)).collect();
+    if picked.len() < wanted.len() {
+        // Asked for something this machine does not have. Worth saying out
+        // loud: the wizard offered it a moment ago.
+        let missing: Vec<&str> = wanted
+            .iter()
+            .map(String::as_str)
+            .filter(|id| !picked.iter().any(|f| f.id == *id))
+            .collect();
+        warn!(missing = ?missing, "tools asked for but not found on this machine");
+    }
+
+    let root = tree.join("Program Files").join(own_backup_common::media_tools::TOOLS_DIR);
+    let mut count = 0;
+    let mut bytes = 0;
+    for (n, tool) in picked.iter().enumerate() {
+        let Some(known) = own_backup_common::media_tools::tool(&tool.id) else { continue };
+        let to = root.join(known.folder);
+        progress(((n * 100) / picked.len().max(1)) as u64, &tool.name);
+        std::fs::create_dir_all(&to)?;
+        copy_tree(&tool.source, &to)?;
+        if !to.join(known.exe).is_file() {
+            return Err(OwnBackupError::ImageFormat(format!(
+                "{} скопирован, но {} в нём нет",
+                tool.name, known.exe
+            )));
+        }
+        info!(
+            tool = %tool.id,
+            from = %tool.source.display(),
+            mb = tool.size_bytes / 1_048_576,
+            "third-party tool put on the medium"
+        );
+        count += 1;
+        bytes += tool.size_bytes;
+    }
+    Ok((count, bytes))
 }
 
 fn system32() -> PathBuf {

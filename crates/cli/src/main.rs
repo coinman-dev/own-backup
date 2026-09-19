@@ -87,6 +87,9 @@ enum Commands {
     /// Wait until the interface window is actually up (boot medium)
     MediaWait(commands::media_preflight::MediaWaitArgs),
 
+    /// Сторонние средства этой машины, которые можно положить на носитель
+    MediaTools(commands::media_tools::MediaToolsArgs),
+
     /// Detach a mounted VHDX backup image
     Unmount(commands::unmount::UnmountArgs),
 
@@ -171,6 +174,7 @@ async fn main() {
         Commands::Display(args) => commands::display::run(args).await,
         Commands::MediaPreflight(args) => commands::media_preflight::run(args).await,
         Commands::MediaWait(args) => commands::media_preflight::run_wait(args).await,
+        Commands::MediaTools(args) => commands::media_tools::run(args).await,
         Commands::Unmount(args) => commands::unmount::run(args).await,
         Commands::ListBackups(args) => commands::list_backups::run(args).await,
         Commands::Jobs(args) => commands::jobs::run(args).await,

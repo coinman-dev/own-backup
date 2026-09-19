@@ -25,16 +25,12 @@ pub const TOOL_BASE: u32 = 10;
 /// Programs the build may have copied onto the medium from the machine that
 /// made it, in the order they appear in the menu.
 ///
-/// The path is relative to the folder ABOVE ours — the medium's
-/// `X:\Program Files` — and nothing here puts them there: this table is only
-/// the agreement about where they will be, so the menu and the builder cannot
-/// drift apart. Until the builder copies them (stage T3) the entries simply
-/// never appear, which is also what happens on a medium built on a machine
-/// that had neither installed.
-pub const TOOLS: [(&str, &str); 2] = [
-    ("Total Commander", r"Tools\totalcmd\TOTALCMD64.EXE"),
-    ("Notepad++", r"Tools\Notepad++\notepad++.exe"),
-];
+/// The table itself lives in `common`, because the other half of the agreement
+/// — the builder that puts them there — cannot see this crate and this crate
+/// cannot see it. A path written out twice is a path that eventually differs.
+/// Where they are not on the medium, their lines simply never appear, which is
+/// also what happens when the machine that built it had neither installed.
+pub use own_backup_common::media_tools::MEDIA_TOOLS as TOOLS;
 
 /// The menu, given where we are running and which of [`TOOLS`] were found.
 ///
@@ -52,13 +48,13 @@ pub fn items(on_medium: bool, tools_found: &[bool]) -> Vec<Item> {
     ];
 
     let mut first_tool = true;
-    for (n, (name, _)) in TOOLS.iter().enumerate() {
+    for (n, tool) in TOOLS.iter().enumerate() {
         if !tools_found.get(n).copied().unwrap_or(false) {
             continue;
         }
         out.push(Item {
             id: TOOL_BASE + n as u32,
-            text: (*name).into(),
+            text: tool.name.into(),
             separator_above: std::mem::take(&mut first_tool),
         });
     }

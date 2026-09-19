@@ -764,12 +764,25 @@ export interface DriverPackage {
   inbox: boolean;
 }
 
+/** A third-party program on this machine the medium could carry. Copied from
+ *  the user's own installation and never distributed by us. */
+export interface MediaTool {
+  id: string;
+  name: string;
+  /** Where it was found, so the user can see WHICH installation it is. */
+  source: string;
+  size_bytes: number;
+  files: number;
+}
+
 export interface MediaBuildOptions {
   base_wim: string;
   output_iso: string;
   /** Published names of the driver packages to include; empty means none. */
   drivers: string[];
   extra_drivers: string;
+  /** Ids of the third-party tools to copy in; empty means none. */
+  tools: string[];
   /** Compress WebView2 into boot.wim: smaller ISO, more RAM at boot. */
   runtime_in_image: boolean;
 }
@@ -787,6 +800,8 @@ export interface MediaBuildReport {
   base_language: string;
   unpacked: boolean;
   drivers_added: number;
+  tools_added: number;
+  tools_bytes: number;
   runtime_files_trimmed: number;
   temp_bytes_freed: number;
   warnings: string[];

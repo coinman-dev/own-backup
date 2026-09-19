@@ -649,7 +649,7 @@ fn show_menu(window: HWND, at: &layout::Slot) {
     let on_medium = own_backup_common::media_mode::is_windows_pe();
     let found: Vec<bool> = menu::TOOLS
         .iter()
-        .map(|(_, relative)| tool_path(relative).map(|p| p.exists()).unwrap_or(false))
+        .map(|tool| tool_path(&tool.path_on_medium()).map(|p| p.exists()).unwrap_or(false))
         .collect();
     let items = menu::items(on_medium, &found);
     let previously_in_front = unsafe { GetForegroundWindow() };
@@ -723,11 +723,11 @@ fn chose(window: HWND, id: u32) {
                 log(&format!("menu line {other} means nothing here"));
                 return;
             };
-            let Some((_, relative)) = menu::TOOLS.get(n as usize) else {
+            let Some(tool) = menu::TOOLS.get(n as usize) else {
                 log(&format!("menu line {other} means nothing here"));
                 return;
             };
-            let Some(path) = tool_path(relative) else { return };
+            let Some(path) = tool_path(&tool.path_on_medium()) else { return };
             // In its own folder: these programs keep their settings beside
             // themselves and look for them there.
             let home = path.parent().map(|p| p.to_path_buf());
@@ -1025,44 +1025,33 @@ fn paint_bar(window: HWND) {
     }
 }
 
-static LOG_FILE: OnceLock<Option<PathBuf>> = OnceLock::new();
+static LOG_FILES: OnceLock<Vec<PathBuf>> = OnceLock::new();
 
-/// Where the shell's own few lines go.
-///
-/// The boot medium's launcher names a directory on the stick it booted from
-/// ([`own_backup_common::log_mirror::LOG_MIRROR_ENV`]), and that is the first
-/// choice for a reason: everything beside the exe is on a RAM disk, and a
-/// session that ended in a dark screen took that disk with it.
-fn log_target() -> Option<&'static PathBuf> {
-    LOG_FILE
-        .get_or_init(|| {
-            let mut places: Vec<PathBuf> = Vec::new();
-            if let Ok(dir) = std::env::var(own_backup_common::log_mirror::LOG_MIRROR_ENV) {
-                if !dir.trim().is_empty() {
-                    places.push(PathBuf::from(dir.trim()));
-                }
-            }
-            if let Some(beside) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
-                places.push(beside);
-            }
-            places.push(std::env::temp_dir());
-            places.into_iter().map(|d| d.join("own-backup-shell.log")).find(|path| {
-                std::fs::OpenOptions::new().create(true).append(true).open(path).is_ok()
-            })
-        })
-        .as_ref()
+/// Every place a line is written, worked out once — the environment does not
+/// change under a running process. See [`crate::log`] for why there are two.
+fn log_targets() -> &'static [PathBuf] {
+    LOG_FILES.get_or_init(|| {
+        let mirror = std::env::var(own_backup_common::log_mirror::LOG_MIRROR_ENV).ok();
+        let beside = app_dir();
+        crate::log::log_paths(mirror.as_deref(), beside.as_deref(), &std::env::temp_dir())
+    })
 }
 
-/// One line, with the time it happened. There are only a handful of them in a
-/// whole session, so there is nothing here to rotate.
+/// One line, with the time it happened, to each place at once.
+///
+/// There are only a handful of lines in a whole session, so there is nothing
+/// here to rotate — and each one is pushed out of the cache before the call
+/// returns. A line still sitting in a cache when the machine is switched off at
+/// the wall is a line that was never written, and switching a rescue machine
+/// off at the wall is an ordinary end to a session.
 pub fn log(message: &str) {
-    let Some(path) = log_target() else { return };
     let now = unsafe { GetLocalTime() };
-    let line = format!(
-        "{:02}:{:02}:{:02} {message}\r\n",
-        now.wHour, now.wMinute, now.wSecond
-    );
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let _ = file.write_all(line.as_bytes());
+    let line = format!("{:02}:{:02}:{:02} {message}\r\n", now.wHour, now.wMinute, now.wSecond);
+    for path in log_targets() {
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            if file.write_all(line.as_bytes()).is_ok() {
+                let _ = file.sync_data();
+            }
+        }
     }
 }

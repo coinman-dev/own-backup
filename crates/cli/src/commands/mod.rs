@@ -12,6 +12,7 @@ pub mod jobs;
 pub mod list_backups;
 pub mod list_disks;
 pub mod media_preflight;
+pub mod media_tools;
 pub mod mount;
 pub mod preflight;
 pub mod restore;

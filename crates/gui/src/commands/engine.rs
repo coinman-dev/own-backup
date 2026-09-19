@@ -439,6 +439,18 @@ pub async fn list_driver_packages(
     Ok(list)
 }
 
+/// Third-party tools this machine has that the medium could carry. Nothing is
+/// downloaded: the copy would be made from the user's own installation, which
+/// is why the wizard asks rather than doing it quietly.
+#[tauri::command]
+pub async fn list_media_tools(
+    state: State<'_, GuiState>,
+) -> Result<Vec<own_backup_common::engine_dto::MediaToolDto>, String> {
+    let list = state.link.client().await?.list_media_tools().await?;
+    tracing::info!(count = list.len(), "third-party tools offered");
+    Ok(list)
+}
+
 /// Build the boot medium. Minutes of work in the service; progress comes back
 /// on the `media-progress` window event.
 #[tauri::command]
@@ -449,6 +461,7 @@ pub async fn build_boot_media(
     tracing::info!(
         iso = %options.output_iso,
         drivers = options.drivers.len(),
+        tools = options.tools.len(),
         "building boot medium"
     );
     let report = state.link.client().await?.build_media(&options).await?;
