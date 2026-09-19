@@ -511,7 +511,12 @@ pub fn start_media_cmd(app_dir: &str, temp_dir: &str) -> String {
         "rem new mode, and a question nobody can answer means the mode ALWAYS",
         "rem reverts. That is worse than the case the question guards against - a",
         "rem mode the driver listed AND accepted, that then fails to display.",
-        &format!("\"{app_dir}\\own-backup-cli.exe\" display --min 1280x720 --no-confirm"),
+        "rem --max-scale: switching to the monitor's recommended resolution, the",
+        "rem driver scales everything to 200% to go with it. On a desktop that is",
+        "rem turned down in the settings; WinPE has no settings to turn it down in.",
+        &format!(
+            "\"{app_dir}\\own-backup-cli.exe\" display --min 1280x720 --no-confirm --max-scale 150"
+        ),
         "rem Which driver ended up drawing, and what PnP said about it. AFTER the",
         "rem pick on purpose: by then the stack has settled, and that is the state",
         "rem the question is about - setupapi.dev.log keeps the earlier lines anyway.",
@@ -780,6 +785,16 @@ mod tests {
         let s = start_media_cmd(r"X:\Program Files\OwnBackup", r"X:\Temp");
         let pick = s.lines().find(|l| l.contains("display --min")).expect("the mode picker");
         assert!(pick.contains("--no-confirm"), "nobody can answer it: {pick}");
+    }
+
+    /// The screen's own driver scales to 200 % on a large monitor, which is
+    /// right for a desktop read from a sofa and wrong for a rescue environment
+    /// — and WinPE has no settings page to turn it down in.
+    #[test]
+    fn the_boot_script_caps_how_large_everything_is_drawn() {
+        let s = start_media_cmd(r"X:\Program Files\OwnBackup", r"X:\Temp");
+        let pick = s.lines().find(|l| l.contains("display --min")).expect("the mode picker");
+        assert!(pick.contains("--max-scale 150"), "{pick}");
     }
 
     /// The rule that keeps a medium from rebooting seconds after it booted.

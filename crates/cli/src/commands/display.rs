@@ -94,6 +94,12 @@ pub struct DisplayArgs {
     #[arg(long, default_value_t = 20)]
     pub settle_secs: u64,
 
+    /// Largest interface scale to leave in place, in per cent. A driver that
+    /// switches to the monitor's recommended resolution often scales to 200 %,
+    /// and WinPE has no settings page to turn it down in. 0 leaves it alone.
+    #[arg(long, default_value_t = 150)]
+    pub max_scale: u32,
+
     /// Show what the display can do and change nothing.
     #[arg(long)]
     pub list: bool,
@@ -541,7 +547,45 @@ pub async fn run(args: DisplayArgs) -> own_backup_common::Result<()> {
             )))
         }
     }
+
+    cap_scale(args.max_scale);
     Ok(())
+}
+
+/// Bring the interface scale down to the cap, if the display put it above.
+///
+/// After the mode change and never before it: the scale Windows chooses
+/// belongs to the resolution, so asking about it first answers about a screen
+/// that is on its way out.
+///
+/// The change reaches windows created AFTER it, which on the medium is the
+/// interface and everything started from the menu. The desktop is already up by
+/// then and draws in real pixels, so it neither notices nor needs to.
+#[cfg(target_os = "windows")]
+fn cap_scale(max_percent: u32) {
+    if max_percent == 0 {
+        return;
+    }
+    let before = imp::system_dpi();
+    let percent = before * 100 / 96;
+    let Some((steps, want)) = steps_down(percent, max_percent) else {
+        tracing::info!(percent, max_percent, "display: the scale is within the cap");
+        return;
+    };
+
+    println!("Масштаб интерфейса {percent}% — это много для спасательной среды, ставим {want}%.");
+    let asked = imp::nudge_scale(steps);
+    let after = imp::system_dpi() * 100 / 96;
+    tracing::info!(percent, want, steps, asked, after, "display: scale capped");
+    if after == percent {
+        // Undocumented call, and WinPE is not where Microsoft tests it.
+        println!(
+            "Windows масштаб не сменила — осталось {after}%. Это не мешает работе, \
+             только крупнее обычного."
+        );
+    } else {
+        println!("Масштаб интерфейса: {after}%");
+    }
 }
 
 /// Keep the new mode only if someone can see it.
@@ -578,6 +622,35 @@ fn confirm_or_revert(prev: Mode, secs: u64) {
     }
 }
 
+/// The interface scales Windows offers, in per cent, in its own order.
+///
+/// Windows does not take a percentage — it takes a position in this list,
+/// counted from the one it recommends for the screen. So to ask for "no more
+/// than 150" the list has to be walked.
+pub const SCALE_STEPS: [u32; 12] = [100, 125, 150, 175, 200, 225, 250, 300, 350, 400, 450, 500];
+
+/// How many steps down from `current` land at or below `max`, and what that
+/// lands on. `None` when there is nothing to do.
+///
+/// The screen's own driver decides the scale, and on a large monitor it decides
+/// 200 % — which is right for a desktop being read from a sofa and wrong for a
+/// rescue environment, where it means half the interface is off the screen.
+/// The same thing happens on an ordinary Windows after a driver install; there
+/// a person opens the settings and turns it down, and in WinPE there are no
+/// settings to open.
+///
+/// A `current` the list does not contain is taken to the nearest step at or
+/// below it, because the answer has to be one of these positions either way.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn steps_down(current: u32, max: u32) -> Option<(i32, u32)> {
+    if current <= max {
+        return None;
+    }
+    let at = SCALE_STEPS.iter().position(|s| *s >= current).unwrap_or(SCALE_STEPS.len() - 1);
+    let to = SCALE_STEPS.iter().rposition(|s| *s <= max)?;
+    (to < at).then(|| (to as i32 - at as i32, SCALE_STEPS[to]))
+}
+
 /// "1280x720" → (1280, 720). Also accepts "1280X720" and "1280*720".
 ///
 /// Lives outside the Windows-only path so its tests run with the rest of the
@@ -592,6 +665,9 @@ fn parse_size(s: &str) -> Option<(u32, u32)> {
 mod imp {
     use super::Mode;
     use windows::core::PCWSTR;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SYSTEM_PARAMETERS_INFO_ACTION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    };
     use windows::Win32::Graphics::Gdi::{
         ChangeDisplaySettingsExW, EnumDisplaySettingsW, CDS_TYPE, CDS_UPDATEREGISTRY, DEVMODEW,
         DEVMODE_FIELD_FLAGS, DISP_CHANGE_SUCCESSFUL, DM_BITSPERPEL, DM_DISPLAYFREQUENCY,
@@ -629,6 +705,33 @@ mod imp {
     pub fn system_dpi() -> u32 {
         // SAFETY: no arguments, no handles, no failure mode.
         unsafe { windows::Win32::UI::HiDpi::GetDpiForSystem() }
+    }
+
+    /// Move the interface scale `steps` positions down Windows' own list.
+    ///
+    /// `SPI_SETLOGICALDPIOVERRIDE` is how the settings page does it, and it is
+    /// not in anybody's documentation — Microsoft never published it, and it
+    /// has been there since Windows 8.1. It takes a position RELATIVE to the
+    /// one the display recommends, which is why this is given steps and not a
+    /// percentage, and why it is only ever called at boot: before anything has
+    /// moved the scale, "current" and "recommended" are the same thing.
+    ///
+    /// Undocumented means it may simply do nothing, so the caller checks the
+    /// scale afterwards instead of believing the return value.
+    pub fn nudge_scale(steps: i32) -> bool {
+        const SPI_SETLOGICALDPIOVERRIDE: SYSTEM_PARAMETERS_INFO_ACTION =
+            SYSTEM_PARAMETERS_INFO_ACTION(0x009F);
+        // SAFETY: the action takes its argument in `uiParam` and ignores the
+        // pointer, which is why none is passed.
+        unsafe {
+            windows::Win32::UI::WindowsAndMessaging::SystemParametersInfoW(
+                SPI_SETLOGICALDPIOVERRIDE,
+                steps as u32,
+                None,
+                SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+            )
+            .is_ok()
+        }
     }
 
     /// Every mode the display driver admits to, deduplicated.
@@ -1087,6 +1190,41 @@ mod tests {
 
     fn m(width: u32, height: u32) -> Mode {
         Mode { width, height, bpp: 32, hz: 60 }
+    }
+
+    /// What the complaint was about: a driver that switches to the monitor's
+    /// recommended resolution and scales everything to 200 %.
+    #[test]
+    fn two_hundred_per_cent_comes_down_to_the_cap() {
+        assert_eq!(steps_down(200, 150), Some((-2, 150)), "200 -> 175 -> 150");
+        assert_eq!(steps_down(200, 125), Some((-3, 125)));
+        assert_eq!(steps_down(175, 150), Some((-1, 150)));
+        assert_eq!(steps_down(250, 150), Some((-4, 150)), "250 -> 225 -> 200 -> 175 -> 150");
+    }
+
+    /// A screen already at or below the cap is left alone. Stepping it UP is
+    /// not what a cap means, and a rescue medium has no business enlarging
+    /// anything on its own.
+    #[test]
+    fn a_scale_already_small_enough_is_not_touched() {
+        assert_eq!(steps_down(100, 150), None);
+        assert_eq!(steps_down(125, 150), None);
+        assert_eq!(steps_down(150, 150), None, "at the cap is not over it");
+    }
+
+    /// Windows takes a position in its own list, not a percentage, so a value
+    /// that is not in the list still has to resolve to one.
+    #[test]
+    fn a_scale_windows_does_not_list_still_lands_on_a_step() {
+        let (delta, landed) = steps_down(210, 150).expect("210 is above 150");
+        assert_eq!(landed, 150);
+        assert!(delta < 0, "downwards");
+        assert!(SCALE_STEPS.contains(&landed));
+    }
+
+    #[test]
+    fn a_cap_below_every_step_is_refused_rather_than_guessed() {
+        assert_eq!(steps_down(200, 50), None, "there is no step below 100 %");
     }
 
     /// The list a VMware guest really offers (2026-08-01, VMware SVGA 3D).
