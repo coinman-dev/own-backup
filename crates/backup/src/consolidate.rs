@@ -161,15 +161,72 @@ fn sidecar_ext(path: &Path) -> String {
         .to_lowercase()
 }
 
+/// Write the marker so that a power cut leaves either the old one or the new
+/// one, never half of either.
+///
+/// The marker only helps if it survives the crash that made it necessary, and
+/// the old version could not promise that (audit AUD-06): `fs::write`
+/// truncates the existing file in place, so a cut between truncate and write
+/// left a zero-length marker — unreadable, which the resume pass treats as
+/// "leave it alone". And the flush that was supposed to make it durable was
+/// written as `let _ = file.sync_all()`, so a failing disk reported success.
+///
+/// Now: a temporary file beside it, flushed with the error CHECKED, then an
+/// atomic rename over the old one.
 fn write_marker(path: &Path, marker: &Marker) -> Result<()> {
+    use std::io::Write;
+
     let json = serde_json::to_vec_pretty(marker)?;
-    std::fs::write(path, &json)?;
-    // The marker only helps if it survives the power cut that made it
-    // necessary, so it is flushed to the platter, not to the cache.
-    if let Ok(file) = std::fs::File::open(path) {
-        let _ = file.sync_all();
+    let tmp = path.with_extension("tmp");
+    {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(&json)?;
+        // Not `let _ =`: if the bytes did not reach the platter, the marker is
+        // not a marker, and the caller must not go on believing it has one.
+        file.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)?;
+    // The rename has to reach the platter too, or a cut can leave a directory
+    // entry pointing at nothing. Windows has no directory handle to sync;
+    // there `rename` over an existing file is already atomic and ordered.
+    #[cfg(unix)]
+    if let Some(dir) = path.parent() {
+        if let Ok(d) = std::fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
     }
     Ok(())
+}
+
+/// Delete a file whose disappearance is part of the operation's meaning, so a
+/// failure has to be reported rather than logged.
+fn remove_checked(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(OwnBackupError::ChainBroken(format!(
+            "не удалось удалить {}: {e}",
+            path.display()
+        ))),
+    }
+}
+
+/// Resolve a name out of a marker against the folder the marker sits in.
+///
+/// A marker holds file NAMES on purpose, so a moved or remounted backup folder
+/// still resumes. That only holds if they really are names: `folder.join()` on
+/// `..\\..\\something` or on an absolute path walks straight out of the folder
+/// (audit AUD-06, point 5).
+fn name_inside(folder: &Path, name: &str) -> Result<PathBuf> {
+    let candidate = Path::new(name);
+    let mut parts = candidate.components();
+    let single = matches!(parts.next(), Some(std::path::Component::Normal(_))) && parts.next().is_none();
+    if !single {
+        return Err(OwnBackupError::ChainBroken(format!(
+            "маркер консолидации называет {name:?} — это не имя файла в папке копий"
+        )));
+    }
+    Ok(folder.join(name))
 }
 
 fn read_marker(path: &Path) -> Option<Marker> {
@@ -182,7 +239,7 @@ fn read_marker(path: &Path) -> Option<Marker> {
 /// that a mounted chain is reading through, which would hand that reader a
 /// file that changed under it.
 #[cfg(target_os = "windows")]
-fn ensure_idle(images: &[&Path]) -> Result<()> {
+pub(crate) fn ensure_idle(images: &[&Path]) -> Result<()> {
     for image in images {
         if crate::engine_win::child_path_for(image).exists() {
             return Err(OwnBackupError::Config(format!(
@@ -201,7 +258,7 @@ fn ensure_idle(images: &[&Path]) -> Result<()> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn ensure_idle(_images: &[&Path]) -> Result<()> {
+pub(crate) fn ensure_idle(_images: &[&Path]) -> Result<()> {
     Ok(())
 }
 
@@ -476,10 +533,16 @@ fn execute(base: &Path, victim: &Path, next: Option<&Path>) -> Result<Consolidat
         repoint_next(next, base, container)?;
     }
 
-    // Only now is the increment redundant.
-    remove_quietly(victim);
-    remove_quietly(&sidecar_path_for(victim));
-    remove_quietly(&marker_file);
+    // Only now is the increment redundant. Its deletion is the step's last
+    // phase and has to be CHECKABLE: reporting a shortened window while the
+    // increment is still on disk sends the caller straight back to planning
+    // the very same step (audit AUD-06, point 4). Failing here is safe — the
+    // fold, the promotion and the repointing have all happened and are
+    // idempotent, the marker stays, and the next recovery finishes the
+    // deletion.
+    remove_checked(victim)?;
+    remove_quietly(&sidecar_path_for(victim)); // a description, not data
+    remove_checked(&marker_file)?;
 
     let outcome = ConsolidationOutcome {
         base: base.to_path_buf(),
@@ -512,11 +575,11 @@ pub fn consolidate_step(step: &ConsolidationStep) -> Result<ConsolidationOutcome
 ///
 /// Called at the start of a job run rather than at service start: the folder
 /// may be a removable drive that was not attached when the service came up.
-pub fn resume_pending(folder: &Path) -> Result<u32> {
-    let mut finished = 0u32;
+pub fn resume_pending(folder: &Path) -> Result<ResumeReport> {
+    let mut report = ResumeReport::default();
     let entries = match std::fs::read_dir(folder) {
         Ok(e) => e,
-        Err(_) => return Ok(0),
+        Err(_) => return Ok(report),
     };
 
     for entry in entries.flatten() {
@@ -529,13 +592,32 @@ pub fn resume_pending(folder: &Path) -> Result<u32> {
             continue;
         }
         let Some(marker) = read_marker(&path) else {
+            // Kept for a human to look at, never deleted and never guessed at
+            // — and reported, so the chain it names is not quietly used as if
+            // nothing had happened (audit AUD-06).
             warn!(path = %path.display(), "Consolidation: unreadable marker — leaving it in place");
+            report.unfinished.push((
+                path.clone(),
+                "маркер консолидации не читается — состояние цепочки неизвестно".into(),
+            ));
             continue;
         };
 
-        let base = folder.join(&marker.base);
-        let victim = folder.join(&marker.victim);
-        let next = marker.next.as_ref().map(|n| folder.join(n));
+        let resolved: Result<(PathBuf, PathBuf, Option<PathBuf>)> = (|| {
+            Ok((
+                name_inside(folder, &marker.base)?,
+                name_inside(folder, &marker.victim)?,
+                marker.next.as_deref().map(|n| name_inside(folder, n)).transpose()?,
+            ))
+        })();
+        let (base, victim, next) = match resolved {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(path = %path.display(), error = %e, "Consolidation: marker names are not usable");
+                report.unfinished.push((path.clone(), e.to_string()));
+                continue;
+            }
+        };
 
         if !victim.exists() {
             // The step got as far as deleting the increment; only the marker
@@ -545,8 +627,10 @@ pub fn resume_pending(folder: &Path) -> Result<u32> {
                 "Consolidation: nothing left to finish — clearing the marker"
             );
             remove_quietly(&sidecar_path_for(&victim));
-            remove_quietly(&path);
-            finished += 1;
+            match remove_checked(&path) {
+                Ok(()) => report.finished.push(path.clone()),
+                Err(e) => report.unfinished.push((path.clone(), e.to_string())),
+            }
             continue;
         }
 
@@ -558,7 +642,7 @@ pub fn resume_pending(folder: &Path) -> Result<u32> {
             "Consolidation: finishing a step interrupted earlier"
         );
         match execute(&base, &victim, next.as_deref()) {
-            Ok(_) => finished += 1,
+            Ok(_) => report.finished.push(path.clone()),
             Err(e) => {
                 warn!(
                     base = %base.display(),
@@ -566,10 +650,45 @@ pub fn resume_pending(folder: &Path) -> Result<u32> {
                     "Consolidation: could not finish the interrupted step — the marker stays, \
                      the chain is left exactly as it was"
                 );
+                report.unfinished.push((path.clone(), e.to_string()));
             }
         }
     }
-    Ok(finished)
+    Ok(report)
+}
+
+/// What a recovery pass over a folder found and what it managed to finish.
+///
+/// It used to return a bare count of markers cleared, which made "three
+/// finished" and "three finished, one chain in an unknown state" the same
+/// answer. The second one must stop the run: planning against a chain that is
+/// mid-fold is planning against a lie (audit AUD-06).
+#[derive(Debug, Default, Clone)]
+pub struct ResumeReport {
+    /// Markers whose step is now complete.
+    pub finished: Vec<PathBuf>,
+    /// Markers still on disk, with the reason. The chains they name must not
+    /// be used as parents, and must not be deleted, until this is resolved.
+    pub unfinished: Vec<(PathBuf, String)>,
+}
+
+impl ResumeReport {
+    pub fn all_finished(&self) -> bool {
+        self.unfinished.is_empty()
+    }
+
+    /// The base image each unfinished marker belongs to, so a caller can ask
+    /// whether the chain in question is one of its own.
+    pub fn stuck_bases(&self) -> Vec<PathBuf> {
+        self.unfinished
+            .iter()
+            .filter_map(|(marker, _)| {
+                let name = marker.file_name()?.to_string_lossy().into_owned();
+                let base = name.strip_suffix(MARKER_SUFFIX)?;
+                Some(marker.with_file_name(base))
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -842,7 +961,9 @@ mod tests {
         write_marker(&marker_path(&base), &marker).unwrap();
         crate::qcow2::merge_child_into_parent(&base, &inc1).unwrap();
 
-        assert_eq!(resume_pending(dir.path()).unwrap(), 1);
+        let report = resume_pending(dir.path()).unwrap();
+        assert!(report.all_finished(), "{report:?}");
+        assert_eq!(report.finished.len(), 1);
         assert!(!inc1.exists());
         assert!(!marker_path(&base).exists());
         assert_eq!(read_volume(&inc2), leaf_before, "the leaf survived the interruption");
@@ -866,7 +987,9 @@ mod tests {
             chain_started_at: Some("2026-01-01T00:00:00Z".into()),
         };
         write_marker(&marker_path(&base), &marker).unwrap();
-        assert_eq!(resume_pending(dir.path()).unwrap(), 1);
+        let report = resume_pending(dir.path()).unwrap();
+        assert!(report.all_finished(), "{report:?}");
+        assert_eq!(report.finished.len(), 1);
         assert!(!marker_path(&base).exists());
     }
 
@@ -946,5 +1069,119 @@ mod tests {
         let kept = promoted.disk_manifest.expect("whole-disk manifest must survive promotion");
         assert_eq!(kept.images.len(), 1);
         assert_eq!(kept.images[0].image_file_name, "d_disk0_inc_2.qcow2");
+    }
+
+    // --- Восстановление после прерывания (аудит AUD-06) --------------------
+
+    /// Маркер, который не читается, — это не «нечего делать». Пока в него не
+    /// заглянул человек, состояние цепочки неизвестно, и проход обязан это
+    /// сказать, а не вернуть число, похожее на успех.
+    #[test]
+    fn an_unreadable_marker_is_reported_not_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, _, _, _) = three_image_chain(dir.path());
+        let marker = marker_path(&base);
+        std::fs::write(&marker, b"{ this is not json").unwrap();
+
+        let report = resume_pending(dir.path()).unwrap();
+        assert!(!report.all_finished(), "{report:?}");
+        assert!(marker.exists(), "повреждённый маркер сохраняется для разбора");
+        assert_eq!(report.stuck_bases(), vec![base], "{report:?}");
+    }
+
+    /// Пустой маркер — это ровно то, что оставлял прежний `fs::write`, если
+    /// питание пропадало между усечением файла и его заполнением.
+    #[test]
+    fn a_truncated_marker_is_reported_and_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, _, _, _) = three_image_chain(dir.path());
+        let marker = marker_path(&base);
+        std::fs::write(&marker, b"").unwrap();
+
+        let report = resume_pending(dir.path()).unwrap();
+        assert!(!report.all_finished(), "{report:?}");
+        assert!(marker.exists());
+    }
+
+    /// Маркер хранит ИМЕНА файлов, чтобы переехавшая папка копий всё равно
+    /// доводилась до конца. «Имя», уводящее из папки, таковым не является.
+    #[test]
+    fn a_marker_name_that_leaves_the_folder_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, inc1, _, _) = three_image_chain(dir.path());
+        let marker = Marker {
+            version: MARKER_VERSION,
+            started_at: "2026-01-03T01:00:00Z".into(),
+            base: "../j_C_full_1.qcow2".into(),
+            victim: "j_C_inc_2.qcow2".into(),
+            next: None,
+            merged: false,
+            folded_before: 0,
+            chain_started_at: None,
+        };
+        write_marker(&marker_path(&base), &marker).unwrap();
+
+        let report = resume_pending(dir.path()).unwrap();
+        assert!(!report.all_finished(), "{report:?}");
+        assert!(inc1.exists(), "ни один файл не должен быть тронут");
+        assert!(marker_path(&base).exists());
+    }
+
+    /// Запись маркера идёт через временный файл и переименование, поэтому
+    /// момента, когда на диске лежит ни то ни другое, не существует. Здесь
+    /// видно следствие: ничего лишнего рядом не остаётся, а перезапись
+    /// заменяет содержимое целиком.
+    #[test]
+    fn writing_a_marker_leaves_nothing_half_written_beside_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("x_full.qcow2");
+        let path = marker_path(&base);
+
+        let mut marker = Marker {
+            version: MARKER_VERSION,
+            started_at: "2026-01-03T01:00:00Z".into(),
+            base: "x_full.qcow2".into(),
+            victim: "x_inc.qcow2".into(),
+            next: None,
+            merged: false,
+            folded_before: 0,
+            chain_started_at: None,
+        };
+        write_marker(&path, &marker).unwrap();
+        marker.merged = true;
+        write_marker(&path, &marker).unwrap();
+
+        assert!(read_marker(&path).unwrap().merged, "перезапись видна целиком");
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "остался временный файл: {leftovers:?}");
+    }
+
+    /// Удаление свёрнутого инкремента — последняя фаза шага, и её результат
+    /// должен быть проверяемым. Раньше оно шло через remove_quietly, и шаг
+    /// отчитывался об укороченном окне, когда инкремент ещё лежал на месте —
+    /// после чего вызывающий планировал ровно тот же шаг снова.
+    #[test]
+    fn deleting_the_increment_gives_a_checkable_result() {
+        let dir = tempfile::tempdir().unwrap();
+        // Уже нет — смысл фазы выполнен.
+        assert!(remove_checked(&dir.path().join("never-existed")).is_ok());
+        // Не удаляется — это ошибка, а не строчка в журнале.
+        std::fs::create_dir(dir.path().join("stuck")).unwrap();
+        assert!(remove_checked(&dir.path().join("stuck")).is_err());
+    }
+
+    /// Имя внутри папки — ровно одна часть пути и ничего больше.
+    #[test]
+    fn only_a_plain_file_name_resolves_inside_the_folder() {
+        let folder = Path::new("/backups");
+        assert!(name_inside(folder, "a_full.qcow2").is_ok());
+        for bad in ["../a.qcow2", "sub/a.qcow2", "/etc/passwd", "", "."] {
+            assert!(name_inside(folder, bad).is_err(), "{bad:?} должно быть отвергнуто");
+        }
     }
 }

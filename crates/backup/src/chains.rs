@@ -377,23 +377,170 @@ pub fn plan_consolidation(chain: &Chain, keep_increments: u32) -> Option<Consoli
     })
 }
 
-/// Delete every image + sidecar of a chain (children first). Returns the
-/// number of files removed; missing files are ignored, other errors logged.
-pub fn delete_chain(chain: &Chain) -> u32 {
-    let mut removed = 0u32;
-    for image in chain.images.iter().rev() {
-        for path in [&image.sidecar_path, &image.image_path] {
-            match std::fs::remove_file(path) {
-                Ok(()) => removed += 1,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => {
-                    warn!(path = %path.display(), error = %e, "Failed to delete chain file")
-                }
+/// What deleting a chain actually did.
+///
+/// A count was not enough. The old `delete_chain` returned one, logged
+/// "deleted backup version" for every image whether or not it had gone, and
+/// left the caller with no way to tell a clean sweep from a chain that is now
+/// half there (audit AUD-05).
+#[derive(Debug, Default, Clone)]
+pub struct DeletionReport {
+    /// Files that are gone now.
+    pub deleted: Vec<PathBuf>,
+    /// Images still on disk, each with the reason it is.
+    pub kept: Vec<(PathBuf, String)>,
+    /// Sidecars whose image was deleted but which could not be removed
+    /// themselves. Not a danger to anybody's data — nothing depends on a
+    /// sidecar — but they describe images that are gone, so say so.
+    pub orphan_sidecars: Vec<PathBuf>,
+}
+
+impl DeletionReport {
+    /// Did everything the chain consisted of actually go?
+    pub fn complete(&self) -> bool {
+        self.kept.is_empty() && self.orphan_sidecars.is_empty()
+    }
+
+    pub fn files_deleted(&self) -> u32 {
+        self.deleted.len() as u32
+    }
+}
+
+/// Delete every image + sidecar of a chain, children before parents.
+///
+/// Several `remove_file` calls do not add up to one transaction, and nothing
+/// here pretends otherwise. What this does guarantee is the property that
+/// matters when one of them fails: **no image left on disk ever loses a parent
+/// it needs.** A differencing child without its base is not a smaller backup,
+/// it is an unreadable one — and that is exactly what the old version produced,
+/// because an error deleting a child only got logged and the parents went
+/// anyway (audit AUD-05).
+///
+/// What changed:
+/// * order comes from the parent links, not the timestamps — a differential
+///   chain is a star, not a line, and a wrong `created_at` must not be able to
+///   reorder a dependency;
+/// * a failure propagates UP. If a child could not be deleted, its ancestors
+///   are left alone; its siblings and their own descendants are not affected;
+/// * the external sidecar goes AFTER its image, never before. The old order
+///   could leave a data file with nothing describing it;
+/// * the chain is refused outright while somebody is using it, or while an
+///   interrupted consolidation still has a marker on it. Finishing that
+///   recovery is a different operation's job, and deleting the files under it
+///   would take away the only thing it can finish from.
+pub fn delete_chain(chain: &Chain) -> Result<DeletionReport> {
+    let images: Vec<&Path> = chain.images.iter().map(|i| i.image_path.as_path()).collect();
+    crate::consolidate::ensure_idle(&images)?;
+    if let Some(base) = chain.images.first() {
+        let marker = crate::consolidate::marker_path(&base.image_path);
+        if marker.exists() {
+            return Err(own_backup_common::OwnBackupError::ChainBroken(format!(
+                "цепочка {} не дошла до конца предыдущей консолидации ({}) — \
+                 пока это не завершено, удалять её нельзя",
+                base.image_path.display(),
+                marker.display()
+            )));
+        }
+    }
+
+    let n = chain.images.len();
+    let parent = parent_links(chain);
+    let mut order: Vec<usize> = (0..n).collect();
+    let depth = depths(&parent);
+    order.sort_by_key(|&i| std::cmp::Reverse(depth[i]));
+
+    let mut report = DeletionReport::default();
+    let mut blocked = vec![false; n];
+
+    for &i in &order {
+        let image = &chain.images[i];
+        if blocked[i] {
+            report.kept.push((
+                image.image_path.clone(),
+                "оставлен: от него всё ещё зависит образ, который не удалось удалить".into(),
+            ));
+            block_parent(&parent, &mut blocked, i);
+            continue;
+        }
+
+        // The image first. Until it is gone, its parents must stay.
+        match std::fs::remove_file(&image.image_path) {
+            Ok(()) => report.deleted.push(image.image_path.clone()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                warn!(path = %image.image_path.display(), error = %e, "Failed to delete chain image");
+                report.kept.push((image.image_path.clone(), e.to_string()));
+                block_parent(&parent, &mut blocked, i);
+                continue;
+            }
+        }
+
+        // Only now the sidecar. Failing here leaves a description of something
+        // that no longer exists — untidy, but it endangers no data, so the
+        // parents may still go.
+        match std::fs::remove_file(&image.sidecar_path) {
+            Ok(()) => report.deleted.push(image.sidecar_path.clone()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                warn!(path = %image.sidecar_path.display(), error = %e, "Failed to delete sidecar");
+                report.orphan_sidecars.push(image.sidecar_path.clone());
             }
         }
         info!(image = %image.image_path.display(), "Retention: deleted backup version");
     }
-    removed
+
+    Ok(report)
+}
+
+/// Index of each image's parent inside the chain, by the file name its sidecar
+/// names. `None` for the root and for a link that points outside the chain.
+fn parent_links(chain: &Chain) -> Vec<Option<usize>> {
+    let by_name: HashMap<String, usize> = chain
+        .images
+        .iter()
+        .enumerate()
+        .filter_map(|(i, img)| {
+            img.image_path.file_name().map(|n| (n.to_string_lossy().to_lowercase(), i))
+        })
+        .collect();
+    chain
+        .images
+        .iter()
+        .enumerate()
+        .map(|(i, img)| {
+            img.parent_file_name
+                .as_ref()
+                .and_then(|p| by_name.get(&p.to_lowercase()).copied())
+                .filter(|&p| p != i) // an image naming itself is not its own parent
+        })
+        .collect()
+}
+
+/// How far each image is below the root, so children are always handled before
+/// their parents. A sidecar set that somehow forms a cycle is given the
+/// greatest depth rather than being followed forever.
+fn depths(parent: &[Option<usize>]) -> Vec<usize> {
+    let n = parent.len();
+    (0..n)
+        .map(|i| {
+            let mut cur = i;
+            let mut d = 0;
+            while let Some(p) = parent[cur] {
+                d += 1;
+                cur = p;
+                if d > n {
+                    return usize::MAX; // a cycle: treat it as the deepest thing there is
+                }
+            }
+            d
+        })
+        .collect()
+}
+
+fn block_parent(parent: &[Option<usize>], blocked: &mut [bool], i: usize) {
+    if let Some(p) = parent[i] {
+        blocked[p] = true;
+    }
 }
 
 #[cfg(test)]
@@ -622,7 +769,9 @@ mod tests {
         put_image(dir.path(), "old_full.vhdx", ChainRole::Full, None, Some("j1"), "2026-01-01T00:00:00Z");
         put_image(dir.path(), "old_inc.avhdx", ChainRole::Incremental, Some("old_full.vhdx"), Some("j1"), "2026-01-02T00:00:00Z");
         let chains = list_job_chains(dir.path(), "j1").unwrap();
-        assert_eq!(delete_chain(&chains[0]), 4);
+        let report = delete_chain(&chains[0]).unwrap();
+        assert!(report.complete(), "nothing should have been left: {report:?}");
+        assert_eq!(report.files_deleted(), 4);
         assert!(!dir.path().join("old_full.vhdx").exists());
         assert!(!dir.path().join("old_inc.avhdx").exists());
         assert!(!dir.path().join("old_full.vhdx.obkm").exists());
@@ -729,5 +878,136 @@ mod tests {
 
         let chain = list_job_chains(dir.path(), "j1").unwrap().remove(0);
         assert!(plan_consolidation(&chain, 1).is_none());
+    }
+
+    // --- Удаление цепочки: что остаётся, когда файл не удалился (AUD-05) ----
+    //
+    // Несколько remove_file не складываются в одну транзакцию, и обещать этого
+    // нельзя. Обещать нужно другое: ни один оставшийся на диске образ не должен
+    // потерять родителя, без которого он не читается. Разностный ребёнок без
+    // базы — это не копия поменьше, это копия, которую не открыть.
+
+    /// Модель отказа из аудита: на месте дочернего файла каталог, поэтому
+    /// remove_file по нему не проходит. Раньше ошибка просто попадала в журнал,
+    /// база уезжала следом, и на диске оставался файл без зависимостей — да
+    /// ещё и со строкой «deleted backup version» про него.
+    #[test]
+    fn a_child_that_cannot_be_deleted_keeps_its_base() {
+        let dir = tempfile::tempdir().unwrap();
+        put_image(dir.path(), "b_full.vhdx", ChainRole::Full, None, Some("j1"), "2026-01-01T00:00:00Z");
+        put_image(dir.path(), "b_inc.avhdx", ChainRole::Incremental, Some("b_full.vhdx"), Some("j1"), "2026-01-02T00:00:00Z");
+        let chains = list_job_chains(dir.path(), "j1").unwrap();
+
+        // Делаем ребёнка неудаляемым: каталог вместо файла.
+        let leaf = dir.path().join("b_inc.avhdx");
+        std::fs::remove_file(&leaf).unwrap();
+        std::fs::create_dir(&leaf).unwrap();
+
+        let report = delete_chain(&chains[0]).unwrap();
+        assert!(!report.complete(), "отчёт обязан сказать, что цепочка осталась");
+        assert!(
+            dir.path().join("b_full.vhdx").exists(),
+            "база должна остаться: от неё всё ещё зависит ребёнок"
+        );
+        assert!(
+            dir.path().join("b_inc.avhdx.obkm").exists(),
+            "sidecar ребёнка тоже остаётся — образ-то на месте"
+        );
+        let kept: Vec<_> = report.kept.iter().map(|(p, _)| p.clone()).collect();
+        assert!(kept.contains(&dir.path().join("b_full.vhdx")), "{report:?}");
+        assert!(kept.contains(&leaf), "{report:?}");
+    }
+
+    /// Разностная цепочка — это звезда, а не линия: дети висят на базе
+    /// сёстрами. Застрявший ребёнок держит базу, но не должен мешать другим
+    /// детям уйти.
+    #[test]
+    fn a_stuck_child_does_not_hold_its_siblings() {
+        let dir = tempfile::tempdir().unwrap();
+        put_image(dir.path(), "c_full.vhdx", ChainRole::Full, None, Some("j1"), "2026-01-01T00:00:00Z");
+        put_image(dir.path(), "c_d1.avhdx", ChainRole::Differential, Some("c_full.vhdx"), Some("j1"), "2026-01-02T00:00:00Z");
+        put_image(dir.path(), "c_d2.avhdx", ChainRole::Differential, Some("c_full.vhdx"), Some("j1"), "2026-01-03T00:00:00Z");
+        let chains = list_job_chains(dir.path(), "j1").unwrap();
+
+        let stuck = dir.path().join("c_d1.avhdx");
+        std::fs::remove_file(&stuck).unwrap();
+        std::fs::create_dir(&stuck).unwrap();
+
+        let report = delete_chain(&chains[0]).unwrap();
+        assert!(!dir.path().join("c_d2.avhdx").exists(), "сестра не виновата и должна уйти");
+        assert!(dir.path().join("c_full.vhdx").exists(), "база держится застрявшим ребёнком");
+        assert!(!report.complete());
+    }
+
+    /// Sidecar удаляется ПОСЛЕ своего образа. В прежнем порядке отказ на
+    /// образе оставлял файл данных, про который уже ничего не написано.
+    #[test]
+    fn the_sidecar_never_goes_before_its_image() {
+        let dir = tempfile::tempdir().unwrap();
+        put_image(dir.path(), "d_full.vhdx", ChainRole::Full, None, Some("j1"), "2026-01-01T00:00:00Z");
+        let chains = list_job_chains(dir.path(), "j1").unwrap();
+
+        let base = dir.path().join("d_full.vhdx");
+        std::fs::remove_file(&base).unwrap();
+        std::fs::create_dir(&base).unwrap();
+
+        let report = delete_chain(&chains[0]).unwrap();
+        assert!(
+            dir.path().join("d_full.vhdx.obkm").exists(),
+            "образ не удалился — его описание обязано остаться при нём"
+        );
+        assert!(report.deleted.is_empty(), "{report:?}");
+    }
+
+    /// Встроенный sidecar — обычное дело у qcow2: отдельного .obkm рядом нет.
+    /// Его отсутствие не ошибка.
+    #[test]
+    fn a_missing_sidecar_is_not_a_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        put_image(dir.path(), "e_full.vhdx", ChainRole::Full, None, Some("j1"), "2026-01-01T00:00:00Z");
+        let chains = list_job_chains(dir.path(), "j1").unwrap();
+        std::fs::remove_file(dir.path().join("e_full.vhdx.obkm")).unwrap();
+
+        let report = delete_chain(&chains[0]).unwrap();
+        assert!(report.complete(), "{report:?}");
+        assert_eq!(report.files_deleted(), 1);
+    }
+
+    /// Незавершённая консолидация — единственное, что может её закончить, это
+    /// оставшиеся файлы. Удалять цепочку из-под неё нельзя.
+    #[test]
+    fn a_chain_with_an_unfinished_consolidation_is_refused_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        put_image(dir.path(), "f_full.vhdx", ChainRole::Full, None, Some("j1"), "2026-01-01T00:00:00Z");
+        put_image(dir.path(), "f_inc.avhdx", ChainRole::Incremental, Some("f_full.vhdx"), Some("j1"), "2026-01-02T00:00:00Z");
+        let chains = list_job_chains(dir.path(), "j1").unwrap();
+
+        let marker = crate::consolidate::marker_path(&dir.path().join("f_full.vhdx"));
+        std::fs::write(&marker, b"{}").unwrap();
+
+        assert!(delete_chain(&chains[0]).is_err());
+        assert!(dir.path().join("f_full.vhdx").exists(), "ни один файл не должен быть тронут");
+        assert!(dir.path().join("f_inc.avhdx").exists());
+    }
+
+    /// Порядок берётся из родительских ссылок, а не из дат: подделанная дата
+    /// не должна переставить зависимость. Здесь ребёнок «старше» базы.
+    #[test]
+    fn the_order_comes_from_the_parent_links_not_the_dates() {
+        let dir = tempfile::tempdir().unwrap();
+        put_image(dir.path(), "g_full.vhdx", ChainRole::Full, None, Some("j1"), "2026-06-01T00:00:00Z");
+        put_image(dir.path(), "g_inc.avhdx", ChainRole::Incremental, Some("g_full.vhdx"), Some("j1"), "2026-01-01T00:00:00Z");
+        let chains = list_job_chains(dir.path(), "j1").unwrap();
+
+        let stuck = dir.path().join("g_inc.avhdx");
+        std::fs::remove_file(&stuck).unwrap();
+        std::fs::create_dir(&stuck).unwrap();
+
+        let report = delete_chain(&chains[0]).unwrap();
+        assert!(
+            dir.path().join("g_full.vhdx").exists(),
+            "ребёнок помечен более ранней датой, но зависит от базы — база остаётся"
+        );
+        assert!(!report.complete());
     }
 }

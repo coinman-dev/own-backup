@@ -31,9 +31,22 @@ pub async fn run(args: ConsolidateArgs) -> own_backup_common::Result<()> {
     if args.dry_run {
         println!("Dry run — nothing will be changed.\n");
     } else {
-        match resume_pending(&folder)? {
-            0 => {}
-            n => println!("Finished {n} interrupted consolidation step(s).\n"),
+        let report = resume_pending(&folder)?;
+        if !report.finished.is_empty() {
+            println!("Finished {} interrupted consolidation step(s).\n", report.finished.len());
+        }
+        // A marker that could not be finished means the chain it names is in
+        // an unknown state. Consolidating further would plan against that.
+        if !report.all_finished() {
+            for (marker, why) in &report.unfinished {
+                eprintln!("НЕ ЗАВЕРШЕНО: {} — {why}", marker.display());
+            }
+            return Err(own_backup_common::OwnBackupError::ChainBroken(
+                "прерванная консолидация не доведена до конца — цепочку нельзя ни \
+                 использовать, ни удалять, пока это не решено"
+                    .into(),
+            )
+            .into());
         }
     }
 

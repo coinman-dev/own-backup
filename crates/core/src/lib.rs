@@ -1462,16 +1462,128 @@ fn apply_retention(job: &Job, protected: &[(String, PathBuf)]) {
         }
         let doomed = plan_retention(&vol_chains, &rules, chrono::Utc::now(), protect_image);
         for idx in doomed {
+            let base = vol_chains[idx]
+                .images
+                .first()
+                .map(|i| i.image_path.display().to_string())
+                .unwrap_or_default();
             info!(
                 job = %job.name,
                 volume = %token,
-                base = %vol_chains[idx].images.first().map(|i| i.image_path.display().to_string()).unwrap_or_default(),
+                base = %base,
                 images = vol_chains[idx].images.len(),
                 "Retention: deleting old backup chain"
             );
-            delete_chain(&vol_chains[idx]);
+            // A chain that could not be deleted whole is worth a line of its
+            // own: the files that stayed are still readable backups, and the
+            // old code said "deleted backup version" about every one of them
+            // (audit AUD-05).
+            match delete_chain(&vol_chains[idx]) {
+                Ok(report) if report.complete() => {}
+                Ok(report) => {
+                    for (path, why) in &report.kept {
+                        warn!(job = %job.name, image = %path.display(), reason = %why,
+                            "Retention: this version is still on disk");
+                    }
+                    for path in &report.orphan_sidecars {
+                        warn!(job = %job.name, sidecar = %path.display(),
+                            "Retention: the image is gone but its sidecar stayed");
+                    }
+                    warn!(job = %job.name, base = %base, deleted = report.files_deleted(),
+                        kept = report.kept.len(),
+                        "Retention: the old chain was only partly deleted");
+                }
+                Err(e) => {
+                    warn!(job = %job.name, base = %base, error = %e,
+                        "Retention: the old chain was left alone");
+                }
+            }
         }
     }
+}
+
+/// Finish whatever a crash left half-done in the destination folder — before
+/// anything reads or plans against the chains in it.
+///
+/// **Where this runs is the whole of the fix** (audit AUD-06). It used to live
+/// inside [`apply_consolidation`], which is the last thing a run does: after
+/// the format check, after a parent had been chosen, after the new copy had
+/// been written, and after retention had deleted whole chains. Every one of
+/// those decisions was therefore taken against a chain that was in the middle
+/// of a fold — a base already rewritten with an increment's data while the
+/// increment still sat beside it, unrepointed.
+///
+/// And it sat behind the consolidation switch, so turning consolidation off
+/// turned RECOVERY off with it, leaving a half-folded chain that nothing would
+/// ever finish. Recovery is not a new consolidation: it is the completion of
+/// one that was already started, and no setting cancels it.
+///
+/// Returns the message to fail the run with when a chain of THIS job could not
+/// be brought to a known state. That is deliberate: an unreadable or unfinished
+/// marker means the chain's parent is possibly mid-rewrite, and writing an
+/// increment onto it — or deleting it by retention — is how a broken chain
+/// becomes a lost one.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))] // used by the Windows backup path
+fn recover_interrupted_consolidations(job: &Job, folder: &Path) -> Option<String> {
+    use own_backup_backup::consolidate::resume_pending;
+
+    let report = match resume_pending(folder) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(job = %job.name, error = %e, "Could not scan for interrupted consolidations");
+            return None; // the folder could not be read; the run's own checks will say so
+        }
+    };
+    if !report.finished.is_empty() {
+        info!(job = %job.name, steps = report.finished.len(),
+            "Finished consolidations interrupted earlier");
+    }
+    if report.all_finished() {
+        return None;
+    }
+
+    // Only a chain this job would actually touch stops this job. A stuck
+    // marker belonging to another job in a shared folder is that job's
+    // problem, and it is reported there.
+    let ours: Vec<String> = report
+        .stuck_bases()
+        .iter()
+        .filter(|base| belongs_to_job(base, &job.id))
+        .map(|base| base.display().to_string())
+        .collect();
+    for (marker, why) in &report.unfinished {
+        warn!(job = %job.name, marker = %marker.display(), reason = %why,
+            "An interrupted consolidation could not be finished");
+    }
+    if ours.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "Прерванная консолидация не доведена до конца: {}. Пока состояние цепочки \
+         неизвестно, копировать в неё и удалять её нельзя — подробности в журнале службы.",
+        ours.join(", ")
+    ))
+}
+
+/// Does this image belong to the given job? Asked of the image's own sidecar,
+/// which is the source of truth for ownership (the job history is not).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn belongs_to_job(image: &Path, job_id: &str) -> bool {
+    let ext = image
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_lowercase();
+    own_backup_backup::sidecar::read_embedded_sidecar_header(image, &ext)
+        .or_else(|_| {
+            own_backup_backup::sidecar::read_sidecar_header(
+                &own_backup_backup::sidecar::sidecar_path_for(image),
+            )
+        })
+        .map(|(info, _)| info.job_id.as_deref() == Some(job_id))
+        // A base we cannot even read the ownership of is treated as ours: the
+        // cautious answer is the one that stops the run.
+        .unwrap_or(true)
 }
 
 /// Fold overflowed increments into their base after a successful run.
@@ -1484,7 +1596,7 @@ fn apply_retention(job: &Job, protected: &[(String, PathBuf)]) {
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))] // used by the Windows backup path
 fn apply_consolidation(job: &Job, protected: &[(String, PathBuf)]) -> u32 {
     use own_backup_backup::chains::{list_job_chains, plan_consolidation};
-    use own_backup_backup::consolidate::{consolidate_step, resume_pending};
+    use own_backup_backup::consolidate::consolidate_step;
 
     let Some(keep) = job.scheme.rolling_incrementals else {
         return 0;
@@ -1501,15 +1613,6 @@ fn apply_consolidation(job: &Job, protected: &[(String, PathBuf)]) -> u32 {
     }
 
     let folder = PathBuf::from(&job.dest_folder);
-
-    // Anything a crash left half-done is finished FIRST: planning against a
-    // chain that is mid-consolidation would be planning against a lie.
-    match resume_pending(&folder) {
-        Ok(0) => {}
-        Ok(n) => info!(job = %job.name, steps = n, "Finished interrupted consolidations"),
-        Err(e) => warn!(job = %job.name, error = %e, "Could not scan for interrupted consolidations"),
-    }
-
     let tokens: std::collections::HashSet<String> =
         protected.iter().map(|(t, _)| t.to_ascii_uppercase()).collect();
 
@@ -1621,6 +1724,15 @@ async fn perform_backup(
         return run;
     }
     let folder = PathBuf::from(&job.dest_folder);
+    // FIRST, before the format check, before a parent is chosen and long
+    // before anything is written: finish what a crash left half-done. Every
+    // decision below reads these chains (audit AUD-06).
+    if let Some(msg) = recover_interrupted_consolidations(job, &folder) {
+        run.finished_at = chrono::Utc::now().to_rfc3339();
+        run.status = "error".into();
+        run.error = msg;
+        return run;
+    }
     if let Some(msg) = format_change_error(job, &folder) {
         run.finished_at = chrono::Utc::now().to_rfc3339();
         run.status = "error".into();
@@ -2232,6 +2344,15 @@ async fn perform_backup(
         return run;
     }
     let folder = PathBuf::from(&job.dest_folder);
+    // FIRST, before the format check, before a parent is chosen and long
+    // before anything is written: finish what a crash left half-done. Every
+    // decision below reads these chains (audit AUD-06).
+    if let Some(msg) = recover_interrupted_consolidations(job, &folder) {
+        run.finished_at = chrono::Utc::now().to_rfc3339();
+        run.status = "error".into();
+        run.error = msg;
+        return run;
+    }
     if let Some(msg) = format_change_error(job, &folder) {
         run.finished_at = chrono::Utc::now().to_rfc3339();
         run.status = "error".into();
@@ -3108,5 +3229,117 @@ mod tests {
         // Rollover: N=1 and the disk-3 chain already has a child → new full.
         job.scheme.full_every_n = 1;
         assert_eq!(plan_run_for_disk(&job, d, 3), RunPlan::full());
+    }
+
+    // --- Восстановление запускается ПЕРВЫМ и умеет остановить запуск (AUD-06)
+
+    /// Образ с внешним sidecar, принадлежащий заданию `job_id`.
+    fn put_image_of_job(dir: &Path, name: &str, job_id: &str) -> PathBuf {
+        use own_backup_backup::sidecar::{write_sidecar, SidecarInfo};
+        let image = dir.join(name);
+        std::fs::write(&image, b"img").unwrap();
+        let mut info = SidecarInfo::new_full(name, 0);
+        info.job_id = Some(job_id.into());
+        let manifest = own_backup_common::image::ImageManifest {
+            backup_id: uuid::Uuid::nil(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            backup_type: own_backup_common::types::BackupType::Full,
+            parent_backup_id: None,
+            source_os: "windows".into(),
+            source_disk: own_backup_common::disk::DiskInfo {
+                device_id: r"\.\E:".into(),
+                model: String::new(),
+                serial: String::new(),
+                size_bytes: 1024 * 1024,
+                sector_size_logical: 512,
+                sector_size_physical: 4096,
+                media_type: "Volume".into(),
+                partition_table: own_backup_common::types::PartitionTable::Gpt,
+                disk_guid: uuid::Uuid::nil().to_string(),
+                partitions: vec![],
+            },
+            boot_mode: own_backup_common::types::BootMode::Uefi,
+            partition_table: own_backup_common::types::PartitionTable::Gpt,
+            compression_algo: own_backup_common::types::CompressionAlgo::None,
+            compression_level: 0,
+            encryption_algo: None,
+            encryption_salt: None,
+            block_size: 65536,
+            total_blocks: 16,
+            used_blocks: 0,
+            backup_mode: own_backup_common::types::BackupMode::UsedSectors,
+            checksum_algorithm: "xxhash64".into(),
+            preflight_report: None,
+            volume_encryption: None,
+        };
+        write_sidecar(&own_backup_backup::sidecar_path_for(&image), &info, &manifest, &[]).unwrap();
+        image
+    }
+
+    /// Незавершённая консолидация СВОЕЙ цепочки останавливает запуск. Раньше
+    /// восстановление вызывалось последним делом запуска, уже после того как
+    /// родитель был выбран, копия записана, а retention удалил цепочки, —
+    /// то есть все эти решения принимались о цепочке в середине свёртки.
+    #[test]
+    fn a_chain_stuck_mid_consolidation_stops_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = put_image_of_job(dir.path(), "a_full.vhdx", "job1");
+        // Маркер, который прочитать нельзя: состояние цепочки неизвестно.
+        std::fs::write(
+            own_backup_backup::consolidate::marker_path(&base),
+            b"not json at all",
+        )
+        .unwrap();
+
+        let mut job = Job::default();
+        job.id = "job1".into();
+        let stop = recover_interrupted_consolidations(&job, dir.path());
+        assert!(stop.is_some(), "запуск обязан остановиться");
+        assert!(stop.unwrap().contains("a_full.vhdx"));
+    }
+
+    /// Чужая застрявшая цепочка в общей папке — проблема того задания, а не
+    /// этого. Останавливать здесь нечего.
+    #[test]
+    fn someone_elses_stuck_chain_does_not_stop_this_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = put_image_of_job(dir.path(), "b_full.vhdx", "other-job");
+        std::fs::write(
+            own_backup_backup::consolidate::marker_path(&base),
+            b"not json at all",
+        )
+        .unwrap();
+
+        let mut job = Job::default();
+        job.id = "job1".into();
+        assert!(recover_interrupted_consolidations(&job, dir.path()).is_none());
+    }
+
+    /// Папка без маркеров — обычный случай, и он ничего не стоит.
+    #[test]
+    fn a_folder_with_no_markers_lets_the_run_go_on() {
+        let dir = tempfile::tempdir().unwrap();
+        put_image_of_job(dir.path(), "c_full.vhdx", "job1");
+        let mut job = Job::default();
+        job.id = "job1".into();
+        assert!(recover_interrupted_consolidations(&job, dir.path()).is_none());
+    }
+
+    /// Базу, у которой вообще не прочитать принадлежность, считаем своей:
+    /// осторожный ответ — тот, который останавливает запуск.
+    #[test]
+    fn a_base_whose_owner_cannot_be_read_counts_as_ours() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("d_full.vhdx");
+        std::fs::write(&base, b"not an image").unwrap();
+        std::fs::write(
+            own_backup_backup::consolidate::marker_path(&base),
+            b"not json at all",
+        )
+        .unwrap();
+
+        let mut job = Job::default();
+        job.id = "job1".into();
+        assert!(recover_interrupted_consolidations(&job, dir.path()).is_some());
     }
 }
