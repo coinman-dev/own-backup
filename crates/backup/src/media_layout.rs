@@ -576,10 +576,20 @@ pub fn start_media_cmd(app_dir: &str, temp_dir: &str) -> String {
         "",
         "set \"RUST_BACKTRACE=1\"",
         "set \"RUST_LOG=info,own_backup_gui=debug\"",
+        "rem The engine, unless the caller asked for the interface alone.",
+        "rem",
+        "rem A SECOND engine is not a harmless extra process: every one of them",
+        "rem mints a new authentication token and writes it over the old file,",
+        "rem and the interface that is already running holds the previous one.",
+        "rem From then on every screen it opens answers \"Invalid or missing",
+        "rem token\" while the engine sits there, running and reachable. That is",
+        "rem what the Start menu's own entry did, by calling this script whole.",
+        "if /i \"%~1\"==\"gui\" goto :interface",
         "echo Starting the engine...",
         &format!(
             "start \"own-backup engine\" /min \"{app_dir}\\own-backup-service.exe\" --run --media"
         ),
+        ":interface",
         "echo Starting the interface...",
         &format!("start \"\" \"{app_dir}\\own-backup-gui.exe\""),
         "echo.",
@@ -589,6 +599,11 @@ pub fn start_media_cmd(app_dir: &str, temp_dir: &str) -> String {
         &format!("echo   \"{app_dir}\\own-backup-gui.log\""),
         &format!("echo   \"{app_dir}\\own-backup-service.log\""),
         &format!("echo   {temp_dir}\\webview2.log"),
+        "",
+        "rem Everything below is boot-time setup and is done once. Asked for the",
+        "rem interface alone, there is nothing left to do - and taking the MiniNT",
+        "rem key away again under a running system is not a no-op.",
+        "if /i \"%~1\"==\"gui\" goto :eof",
         "",
         "rem The iSCSI initiator, LAST on purpose. It is how a backup copy becomes",
         "rem a real disk here without a driver of ours, and it is needed only when",
@@ -795,6 +810,28 @@ mod tests {
         let s = start_media_cmd(r"X:\Program Files\OwnBackup", r"X:\Temp");
         let pick = s.lines().find(|l| l.contains("display --min")).expect("the mode picker");
         assert!(pick.contains("--max-scale 150"), "{pick}");
+    }
+
+    /// A second engine is not a spare engine.
+    ///
+    /// Every one of them mints a new authentication token and writes it over
+    /// the old file; the interface already running holds the previous one, and
+    /// from then on every screen it opens answers "Invalid or missing token"
+    /// while the engine sits there, running and reachable. Seen on the medium
+    /// (2026-09-19) after the Start menu's own entry called this script whole.
+    #[test]
+    fn asking_for_the_interface_alone_starts_no_second_engine() {
+        let s = start_media_cmd(r"X:\Program Files\OwnBackup", r"X:\Temp");
+        let guard = s.find("goto :interface").expect("the gui-only path");
+        let engine = s.find("own-backup-service.exe").expect("the engine still starts");
+        let label = s.find("\r\n:interface").expect("and is jumped over");
+        assert!(guard < engine && engine < label, "the jump has to clear the engine");
+
+        // And the boot-time setup below it is not repeated either: taking the
+        // MiniNT key away again under a running system is not a no-op.
+        let iscsi = s.find("net start msiscsi").expect("the initiator");
+        let stop = s.rfind("goto :eof").expect("the second guard");
+        assert!(stop < iscsi, "the gui-only path must stop before it");
     }
 
     /// The rule that keeps a medium from rebooting seconds after it booted.

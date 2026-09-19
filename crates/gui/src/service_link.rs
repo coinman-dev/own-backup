@@ -22,8 +22,16 @@ pub struct ServiceLink {
     /// each connect so a token that appears after startup is picked up; empty
     /// when absent (dev/foreground TCP has no token).
     token_path: PathBuf,
-    /// Cached client (cheap to clone; shares the HTTP/2 channel, auto-reconnects).
-    client: AsyncMutex<Option<BackupClient>>,
+    /// Cached client (cheap to clone; shares the HTTP/2 channel, auto-reconnects)
+    /// together with the token it was built with.
+    ///
+    /// The token is kept beside it because the service mints a NEW one every
+    /// time it starts, and a client holding the previous one is refused by
+    /// every call — "Invalid or missing token", with the service plainly
+    /// running and reachable. On the boot medium that is not a rare event: the
+    /// Start menu's «Резервное копирование» used to bring up a second engine,
+    /// which rewrote the token under the interface that was already open.
+    client: AsyncMutex<Option<(String, BackupClient)>>,
 }
 
 impl ServiceLink {
@@ -46,6 +54,15 @@ impl ServiceLink {
 
     async fn connect(&self) -> Result<BackupClient, String> {
         let token = self.read_token();
+        if token.is_empty() && !self.endpoint.is_empty() {
+            // Reachable and useless. Every call through such a client comes
+            // back "Invalid or missing token", and the interface shows that
+            // instead of its contents — which is what the medium did when the
+            // interface started in the second the service was still writing
+            // the file. Counted as "not up yet", so the caller waits for it.
+            tracing::debug!(endpoint = %self.endpoint, "no service token yet");
+            return Err("токен службы ещё не записан".into());
+        }
         let r = BackupClient::connect(self.endpoint.clone(), token.clone()).await;
         tracing::debug!(
             endpoint = %self.endpoint,
@@ -87,12 +104,28 @@ impl ServiceLink {
             .unwrap_or_else(|_| "Служба резервного копирования недоступна.".into()))
     }
 
+    /// The cached client, if it is still holding the token the service is
+    /// currently answering to.
+    ///
+    /// Checked on every use rather than on failure, because a stale token does
+    /// not fail the connection — it fails each CALL, one screen at a time, and
+    /// the message it gives blames the token rather than the restart behind it.
+    /// The file is a few dozen bytes on a RAM disk; reading it is nothing.
     async fn cached(&self) -> Option<BackupClient> {
-        self.client.lock().await.as_ref().cloned()
+        let held = self.client.lock().await;
+        let (used, client) = held.as_ref()?;
+        let now = self.read_token();
+        // Unreadable is not a reason to throw away a working connection — the
+        // file could be mid-rename. A DIFFERENT one is: the service restarted.
+        if !now.is_empty() && now != *used {
+            tracing::info!("the service minted a new token - reconnecting");
+            return None;
+        }
+        Some(client.clone())
     }
 
     async fn store(&self, c: BackupClient) {
-        *self.client.lock().await = Some(c);
+        *self.client.lock().await = Some((self.read_token(), c));
     }
 
     /// Drop the cached client so the next [`client`](Self::client) reconnects.
@@ -107,7 +140,7 @@ impl ServiceLink {
     pub async fn is_reachable(&self) -> bool {
         match self.connect().await {
             Ok(c) => {
-                *self.client.lock().await = Some(c);
+                self.store(c).await;
                 true
             }
             Err(_) => {

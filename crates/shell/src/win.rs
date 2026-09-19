@@ -924,7 +924,16 @@ fn start_the_interface() {
     match app_dir() {
         Some(dir) if dir.join("start-media.cmd").exists() => {
             let script = dir.join("start-media.cmd");
-            launch("cmd.exe", &["/c", &script.to_string_lossy()], Some(dir), CREATE_NO_WINDOW);
+            // `gui` — the interface alone. The whole script would bring up a
+            // SECOND engine, and each engine mints a new token over the old
+            // file: the interface already running then holds the previous one
+            // and every screen it opens answers "Invalid or missing token".
+            launch(
+                "cmd.exe",
+                &["/c", &script.to_string_lossy(), "gui"],
+                Some(dir),
+                CREATE_NO_WINDOW,
+            );
         }
         Some(dir) => {
             let exe = dir.join("own-backup-gui.exe");

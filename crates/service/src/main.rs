@@ -511,7 +511,16 @@ fn write_service_token(config: &AppConfig) -> Result<String, Box<dyn std::error:
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&path, token.as_bytes())?;
+    // Written beside itself and moved into place, never over the top of the
+    // old one. `write` truncates first, so a reader arriving in that instant
+    // gets an EMPTY token and is refused by this very service — which is what
+    // happened on the boot medium when a second engine started while the
+    // interface was running: `token_len=0` in its log, and every call after it
+    // answered "Invalid or missing token" (2026-09-19). A rename cannot be
+    // caught half-done.
+    let fresh = path.with_extension("token.new");
+    std::fs::write(&fresh, token.as_bytes())?;
+    std::fs::rename(&fresh, &path)?;
 
     // Lock down the DACL: strip inheritance (ProgramData grants Users:read),
     // then allow only SYSTEM + Administrators (full) and INTERACTIVE (read) — so
