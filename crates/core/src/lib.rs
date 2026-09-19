@@ -96,6 +96,12 @@ pub struct ScheduleConfig {
     pub event_once_per_day: bool,
     /// Minutes to wait after startup before the "startup" event fires. 0–60.
     pub event_startup_delay_min: u32,
+    /// The next three are SAVED BUT NOT HONOURED: nothing in the scheduler or
+    /// the runner reads them (audit AUD-16). They default to false so a new job
+    /// never records a promise the service does not keep, and the wizard shows
+    /// them as unavailable rather than as working switches. Sleep handling, when
+    /// it is built, has to put the machine's state back on cancel and on error
+    /// too, so it lands as its own change rather than as a flag read here.
     pub only_when_locked: bool,
     pub wake_to_run: bool,
     pub prevent_sleep: bool,
@@ -116,8 +122,8 @@ impl Default for ScheduleConfig {
             event_once_per_day: true,
             event_startup_delay_min: 0,
             only_when_locked: false,
-            wake_to_run: true,
-            prevent_sleep: true,
+            wake_to_run: false,
+            prevent_sleep: false,
             run_missed: true,
             missed_delay_min: 1,
         }
@@ -541,6 +547,19 @@ pub struct JobStore {
 }
 
 const ACTIVITY_CAP: usize = 200;
+
+/// How a run ends when the user cancelled the post-copy check rather than the
+/// copy (audit AUD-12).
+///
+/// Three things have to stay true at once, and they pull in different
+/// directions: the image is finished and must NOT be deleted (unlike a
+/// cancelled copy, which leaves a half-written file); the run must not be
+/// called a success, because nothing read the image back; and retention must
+/// not run, because a stage the user stopped is no basis for deleting older
+/// versions. So the run is `cancelled`, with the image path recorded and this
+/// sentence saying which half happened.
+const VERIFY_CANCELLED: &str =
+    "Копия создана, но проверка отменена пользователем — образ не проверен.";
 
 impl JobStore {
     pub fn load(data_dir: &std::path::Path) -> Arc<Self> {
@@ -1743,11 +1762,19 @@ async fn perform_backup(
 
             // Optional post-backup verification — emit its own progress so the
             // UI shows "Проверка…" instead of freezing at 100%.
+            let mut verify_cancelled = false;
             if validate_after {
                 let mut v_permille = u64::MAX;
                 let mut v_emit = std::time::Instant::now();
                 let mut v_rate = VerifyRate::new(&image_for_verify);
-                let v = verify_image(&image_for_verify, |done, total| {
+                let verified = verify_image(&image_for_verify, |done, total| {
+                    // Cancel reaches the check too, not just the copy (audit
+                    // AUD-12). Reading back a whole image is minutes of work;
+                    // before this, pressing Отмена during it did nothing and
+                    // the run then finished as a success.
+                    if cancel_bg.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                        return Err(OwnBackupError::Cancelled);
+                    }
                     let mbps = v_rate.sample(done);
                     let permille = if total > 0 { done * 1000 / total } else { 0 };
                     if permille != v_permille || v_emit.elapsed().as_millis() >= 400 {
@@ -1768,22 +1795,30 @@ async fn perform_backup(
                         });
                     }
                     Ok(())
-                })?;
-                if !v.valid() {
-                    return Err(OwnBackupError::ImageFormat(format!(
-                        "проверка после копирования не пройдена ({}): {} повреждённых блоков",
-                        vol_label_bg,
-                        v.mismatched_blocks.len()
-                    )));
+                });
+                match verified {
+                    Ok(v) if !v.valid() => {
+                        return Err(OwnBackupError::ImageFormat(format!(
+                            "проверка после копирования не пройдена ({}): {} повреждённых блоков",
+                            vol_label_bg,
+                            v.mismatched_blocks.len()
+                        )))
+                    }
+                    Ok(_) => {}
+                    // The copy itself is finished and on disk; only the reading
+                    // back was stopped. That is a different outcome from a
+                    // cancelled copy, and the image must survive it.
+                    Err(OwnBackupError::Cancelled) => verify_cancelled = true,
+                    Err(e) => return Err(e),
                 }
             }
 
-            Ok::<_, OwnBackupError>(summary)
+            Ok::<_, OwnBackupError>((summary, verify_cancelled))
         })
         .await;
 
         match result {
-            Ok(Ok(summary)) => {
+            Ok(Ok((summary, verify_cancelled))) => {
                 use own_backup_common::types::BackupType as BT;
                 run.source_bytes += summary.source_bytes;
                 run.bytes_copied += summary.bytes_copied;
@@ -1836,6 +1871,15 @@ async fn perform_backup(
                 // encrypted volumes), not the device password key.
                 run_images.push((device.clone(), image_path.clone()));
                 protected.push((file_token(job, device), image_path));
+
+                // Everything above is recorded first, so the finished image is
+                // findable in the history; then the run stops short of success
+                // because nobody checked it. Retention and consolidation do not
+                // run — a cancelled read must not delete anything.
+                if verify_cancelled {
+                    fatal = Some(("cancelled".into(), VERIFY_CANCELLED.into()));
+                    break;
+                }
             }
             Ok(Err(OwnBackupError::Cancelled)) => {
                 fatal = Some(("cancelled".into(), "Отменено пользователем".into()));
@@ -2048,11 +2092,15 @@ async fn perform_disk_backup(
         // Optional post-backup verification — emit "verify" progress so the UI
         // shows "Проверка…", and FAIL the run on any checksum mismatch (a bad
         // image must never be reported as success).
+        let mut verify_cancelled = false;
         if validate_after {
             let mut v_permille = u64::MAX;
             let mut v_emit = std::time::Instant::now();
             let mut v_rate = VerifyRate::new(&image_for_verify);
-            let v = verify_image(&image_for_verify, |done, total| {
+            let verified = verify_image(&image_for_verify, |done, total| {
+                if cancel_bg.swap(false, Ordering::SeqCst) {
+                    return Err(OwnBackupError::Cancelled);
+                }
                 let mbps = v_rate.sample(done);
                 let permille = if total > 0 { done * 1000 / total } else { 0 };
                 if permille != v_permille || v_emit.elapsed().as_millis() >= 400 {
@@ -2073,15 +2121,20 @@ async fn perform_disk_backup(
                     });
                 }
                 Ok(())
-            })?;
-            if !v.valid() {
-                return Err(OwnBackupError::ImageFormat(format!(
-                    "проверка после копирования не пройдена: {} повреждённых блоков",
-                    v.mismatched_blocks.len()
-                )));
+            });
+            match verified {
+                Ok(v) if !v.valid() => {
+                    return Err(OwnBackupError::ImageFormat(format!(
+                        "проверка после копирования не пройдена: {} повреждённых блоков",
+                        v.mismatched_blocks.len()
+                    )))
+                }
+                Ok(_) => {}
+                Err(OwnBackupError::Cancelled) => verify_cancelled = true,
+                Err(e) => return Err(e),
             }
         }
-        Ok::<_, OwnBackupError>(summary)
+        Ok::<_, OwnBackupError>((summary, verify_cancelled))
     })
     .await;
 
@@ -2096,7 +2149,7 @@ async fn perform_disk_backup(
     run.vss_used = !own_backup_common::media_mode::is_media_mode();
 
     match result {
-        Ok(Ok(summary)) => {
+        Ok(Ok((summary, verify_cancelled))) => {
             run.status = "success".into();
             run.bytes_copied = summary.bytes_copied;
             run.used_blocks = summary.blocks_copied;
@@ -2124,6 +2177,13 @@ async fn perform_disk_backup(
             info!(job = %job.name, image = %image_path.display(), kind = kind_str,
                 partitions = summary.partitions, unchanged = summary.blocks_unchanged,
                 "Whole-disk backup complete");
+            // A check the user stopped is not a reason to delete older versions
+            // — and the image below is NOT removed, unlike a cancelled copy.
+            if verify_cancelled {
+                run.status = "cancelled".into();
+                run.error = VERIFY_CANCELLED.into();
+                return run;
+            }
             let protected = [(format!("disk{}", ds.disk_number), image_path)];
             apply_retention(job, &protected);
             run.consolidated_increments = apply_consolidation(job, &protected);
@@ -2254,16 +2314,27 @@ async fn perform_backup(
                 }
                 Ok(())
             })?;
+            let mut verify_cancelled = false;
             if validate_after {
-                let v = verify_image(&image_for_verify, |_, _| Ok(()))?;
-                if !v.valid() {
-                    return Err(OwnBackupError::ImageFormat(format!(
-                        "проверка после копирования не пройдена: {} повреждённых блоков",
-                        v.mismatched_blocks.len()
-                    )));
+                let verified = verify_image(&image_for_verify, |_, _| {
+                    if cancel_bg.load(Ordering::SeqCst) {
+                        return Err(OwnBackupError::Cancelled);
+                    }
+                    Ok(())
+                });
+                match verified {
+                    Ok(v) if !v.valid() => {
+                        return Err(OwnBackupError::ImageFormat(format!(
+                            "проверка после копирования не пройдена: {} повреждённых блоков",
+                            v.mismatched_blocks.len()
+                        )))
+                    }
+                    Ok(_) => {}
+                    Err(OwnBackupError::Cancelled) => verify_cancelled = true,
+                    Err(e) => return Err(e),
                 }
             }
-            Ok(summary)
+            Ok((summary, verify_cancelled))
         })
         .await;
 
@@ -2275,7 +2346,7 @@ async fn perform_backup(
         }
 
         match result {
-            Ok(Ok(summary)) => {
+            Ok(Ok((summary, verify_cancelled))) => {
                 run.image_path = summary.image_path.display().to_string();
                 run.base_image_path = run.image_path.clone();
                 run.source_bytes += summary.source_bytes;
@@ -2284,6 +2355,11 @@ async fn perform_backup(
                 run.total_blocks += summary.total_blocks;
                 run.smart_mode = summary.smart_mode;
                 run.backup_kind = "full".into();
+                if verify_cancelled {
+                    run.status = "cancelled".into();
+                    run.error = VERIFY_CANCELLED.into();
+                    break;
+                }
             }
             Ok(Err(OwnBackupError::Cancelled)) => {
                 run.status = "cancelled".into();

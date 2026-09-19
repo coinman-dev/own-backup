@@ -1582,9 +1582,13 @@
           <div class="note">✓ Автозапуск выполняет служба «Own Backup» (должна быть установлена и запущена). Для зашифрованных томов сохраните пароль на шаге «Источник».</div>
         {/if}
         <div class="adv-schedule">
-          <label class="chk"><input type="checkbox" bind:checked={job.schedule.only_when_locked} onchange={stub} /> Копировать только если компьютер заблокирован</label>
-          <label class="chk"><input type="checkbox" bind:checked={job.schedule.wake_to_run} onchange={stub} /> Пробуждать компьютер из спящего режима</label>
-          <label class="chk"><input type="checkbox" bind:checked={job.schedule.prevent_sleep} onchange={stub} /> Предотвращать переход в спящий режим</label>
+          <!-- Служба этих трёх настроек пока не исполняет. Пока это так, они
+               не должны выглядеть работающими переключателями: снятая галочка,
+               которую нельзя поставить, честнее сохранённого значения, которое
+               ничего не делает (аудит AUD-16). -->
+          <label class="chk"><input type="checkbox" checked={false} disabled /> Копировать только если компьютер заблокирован<span class="dev-badge">в разработке</span></label>
+          <label class="chk"><input type="checkbox" checked={false} disabled /> Пробуждать компьютер из спящего режима<span class="dev-badge">в разработке</span></label>
+          <label class="chk"><input type="checkbox" checked={false} disabled /> Предотвращать переход в спящий режим<span class="dev-badge">в разработке</span></label>
           <label class="chk"><input type="checkbox" bind:checked={job.schedule.run_missed} /> Выполнять пропущенные операции при запуске системы с задержкой (в минутах)</label>
           {#if job.schedule.run_missed}
             <label class="delay-min">Задержка после запуска системы:
@@ -1913,7 +1917,7 @@
   .chk-line { display: flex; align-items: center; font-size: 14px; color: var(--head); }
   /* A checkbox that only makes sense under the one above it. */
   .chk.sub { margin-left: 26px; }
-  .chk:has(input:disabled) { color: var(--text-muted); }
+  .chk:has(input:disabled) { color: var(--text-muted); cursor: default; }
   .note.warn { color: #a06a10; background: rgba(251,188,5,.10); border-left: 3px solid rgba(251,188,5,.55); padding: 8px 12px; border-radius: 0 4px 4px 0; }
   .boot-hint { margin-top: 10px; font-size: 12.5px; line-height: 1.5; color: #a06a10; background: rgba(251,188,5,.10); border-left: 3px solid rgba(251,188,5,.55); padding: 8px 12px; border-radius: 0 4px 4px 0; }
   .excl-list { border: 1px solid var(--border); border-radius: 5px; background: #fff; max-height: 260px; overflow: auto; margin-top: 12px; }

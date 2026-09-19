@@ -720,6 +720,7 @@ pub fn get_all_active_mounts(
 }
 
 /// Result of verifying an image against its sidecar checksums.
+#[derive(Debug)]
 pub struct VerifySummary {
     pub blocks_checked: u64,
     pub mismatched_blocks: Vec<u64>,
@@ -998,5 +999,122 @@ mod tests {
 
         unmount_image(&img).unwrap();
         assert!(!Path::new(&mount_dir).join("payload.bin").exists());
+    }
+}
+
+/// Regression guard for audit AUD-12: the post-copy check has to answer to
+/// cancel the same way the copy does.
+///
+/// Reading a whole image back is minutes of work, and every callback here used
+/// to return `Ok(())` unconditionally — so pressing "Отмена" during "Проверка…"
+/// did nothing, the read ran to the end, and the run was then reported as a
+/// verified success. The engine already propagates a callback error; nothing
+/// was passing one. These tests pin both halves of that: a callback that says
+/// stop ends the read there, and one that does not lets it finish.
+#[cfg(test)]
+mod verify_cancel_tests {
+    use super::*;
+    use crate::sidecar::{write_sidecar, BlockChecksum, SidecarInfo};
+
+    const BLOCK: u64 = 64 * 1024;
+    const BLOCKS: u64 = 8;
+
+    /// A tiny qcow2 with `BLOCKS` clusters of known bytes, plus the adjacent
+    /// sidecar naming a checksum for each — the smallest thing `verify_image`
+    /// will read.
+    fn an_image_with_eight_blocks(dir: &std::path::Path) -> PathBuf {
+        let image = dir.join("copy.qcow2");
+        let mut checksums = Vec::new();
+        {
+            let file = std::fs::File::create(&image).unwrap();
+            let mut w = crate::qcow2::Qcow2Writer::new(
+                std::io::BufWriter::new(file),
+                crate::qcow2::Qcow2WriterOptions {
+                    virtual_size: BLOCK * BLOCKS,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            for i in 0..BLOCKS {
+                let data = vec![(i + 1) as u8; BLOCK as usize];
+                w.write_cluster(i, &data).unwrap();
+                checksums.push(BlockChecksum {
+                    block_number: i,
+                    checksum: compute_block_checksum(&data),
+                });
+            }
+            w.finish().unwrap();
+        }
+
+        let mut info = SidecarInfo::new_full("copy.qcow2", 0);
+        info.container = "qcow2".into();
+        let manifest = ImageManifest {
+            backup_id: Uuid::nil(),
+            created_at: "2026-09-19T00:00:00Z".into(),
+            backup_type: BackupType::Full,
+            parent_backup_id: None,
+            source_os: "linux".into(),
+            source_disk: DiskInfo {
+                device_id: "/dev/null".into(),
+                model: "test".into(),
+                serial: "test".into(),
+                size_bytes: BLOCK * BLOCKS,
+                sector_size_logical: 512,
+                sector_size_physical: 512,
+                media_type: "SSD".into(),
+                partition_table: PartitionTable::Gpt,
+                disk_guid: Uuid::nil().to_string(),
+                partitions: vec![],
+            },
+            boot_mode: BootMode::Uefi,
+            partition_table: PartitionTable::Gpt,
+            compression_algo: CompressionAlgo::None,
+            compression_level: 0,
+            encryption_algo: None,
+            encryption_salt: None,
+            block_size: BLOCK as u32,
+            total_blocks: BLOCKS,
+            used_blocks: BLOCKS,
+            backup_mode: BackupMode::UsedSectors,
+            checksum_algorithm: "xxhash64".into(),
+            preflight_report: None,
+            volume_encryption: None,
+        };
+        write_sidecar(&crate::sidecar::sidecar_path_for(&image), &info, &manifest, &checksums)
+            .unwrap();
+        image
+    }
+
+    #[test]
+    fn a_check_stops_where_the_user_cancelled_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = an_image_with_eight_blocks(dir.path());
+
+        let mut seen = 0u64;
+        let outcome = verify_image(&image, |done, _total| {
+            seen = done;
+            // Third block: far enough in to prove the loop was running, early
+            // enough to prove it did not run to the end.
+            if done == 3 {
+                return Err(OwnBackupError::Cancelled);
+            }
+            Ok(())
+        });
+
+        assert!(
+            matches!(outcome, Err(OwnBackupError::Cancelled)),
+            "the cancellation must come back out, not be swallowed: {outcome:?}"
+        );
+        assert_eq!(seen, 3, "reading must stop at the cancelled block, not finish the image");
+    }
+
+    #[test]
+    fn a_check_nobody_cancels_still_reads_the_whole_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = an_image_with_eight_blocks(dir.path());
+
+        let summary = verify_image(&image, |_, _| Ok(())).unwrap();
+        assert_eq!(summary.blocks_checked, BLOCKS);
+        assert!(summary.valid(), "an untouched image must verify clean");
     }
 }

@@ -32,6 +32,7 @@ pub const SERVICE_DESCRIPTION: &str =
 pub const LINUX_UNIT_NAME: &str = own_backup_common::LINUX_UNIT_NAME;
 
 /// How the binary was invoked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Install,
     Uninstall,
@@ -53,13 +54,33 @@ enum Mode {
 /// Accept both Windows-style (`/install`) and Unix-style (`--install`) flags on
 /// every platform, so muscle memory works either way; the actual work is
 /// platform-specific.
+///
+/// Flags are read in two passes, and the order matters (audit AUD-16). The
+/// mode pass RETURNS on the first word it recognises, so anything that merely
+/// *colours* a mode has to be looked for before it — `--run --media`, which is
+/// exactly how the medium's launcher spells it, used to select the daemon and
+/// walk away without ever seeing `--media`. On a real WinPE the MiniNT key
+/// usually covered that up; anywhere else the explicit flag was simply ignored.
 fn parse_mode(args: &[String]) -> Mode {
+    if wants_media(args) {
+        // Must happen before anything reads the data directory: the first
+        // answer `media_mode` gives out is final.
+        own_backup_common::media_mode::set_media_mode(true);
+    }
+    mode_of(args)
+}
+
+/// Does the command line ask for media mode? Not a mode of its own — it
+/// colours whichever mode is selected, so it is answered from the whole line
+/// regardless of where it appears.
+fn wants_media(args: &[String]) -> bool {
+    args.iter().any(|a| matches!(a.as_str(), "--media" | "/media"))
+}
+
+/// Which mode the command line selects: the first word that names one wins.
+fn mode_of(args: &[String]) -> Mode {
     for a in args {
         match a.as_str() {
-            // Not a mode: it colours every mode. Kept in this loop so it can be
-            // combined with any of them (`--run --media` is what the medium
-            // uses) and so it is seen before the data directory is first read.
-            "--media" | "/media" => own_backup_common::media_mode::set_media_mode(true),
             "/install" | "--install" | "install" => return Mode::Install,
             "/uninstall" | "--uninstall" | "uninstall" | "/remove" | "--remove" => {
                 return Mode::Uninstall
@@ -909,4 +930,54 @@ async fn serve_named_pipe(
 
     drop_our_token(&config, &kept_token);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(line: &str) -> Vec<String> {
+        line.split_whitespace().map(str::to_string).collect()
+    }
+
+    /// The case that failed: the medium's launcher spells it `--run --media`,
+    /// and the old single pass returned on `--run` without ever reading the
+    /// rest of the line (audit AUD-16).
+    #[test]
+    fn media_is_seen_after_the_mode_word_too() {
+        assert!(wants_media(&args("--run --media")));
+        assert_eq!(mode_of(&args("--run --media")), Mode::Daemon);
+    }
+
+    #[test]
+    fn every_order_of_run_and_media_means_the_same_thing() {
+        for line in ["--run --media", "--media --run", "/media --run", "--run /media"] {
+            assert!(wants_media(&args(line)), "{line}");
+            assert_eq!(mode_of(&args(line)), Mode::Daemon, "{line}");
+        }
+    }
+
+    /// And the other way round: ordinary Windows must not fall into media mode
+    /// because of a word that merely looks like the flag.
+    #[test]
+    fn nothing_else_turns_media_mode_on() {
+        for line in ["", "--run", "--foreground", "/install", "--run media", "--mediaX"] {
+            assert!(!wants_media(&args(line)), "{line}");
+        }
+    }
+
+    #[test]
+    fn media_colours_any_mode_it_is_given_with() {
+        assert_eq!(mode_of(&args("--media --foreground")), Mode::Foreground);
+        assert_eq!(mode_of(&args("--media /status")), Mode::Status);
+        // On its own it selects nothing: the SCM launches us with no words.
+        assert_eq!(mode_of(&args("--media")), Mode::Service);
+    }
+
+    #[test]
+    fn the_first_mode_word_wins() {
+        assert_eq!(mode_of(&args("/install --run")), Mode::Install);
+        assert_eq!(mode_of(&args("--run /install")), Mode::Daemon);
+        assert_eq!(mode_of(&args("")), Mode::Service);
+    }
 }
