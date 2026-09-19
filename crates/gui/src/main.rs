@@ -243,6 +243,37 @@ fn window_size(app: &tauri::App) -> (f64, f64, f64, f64) {
     (size.0, size.1, least.0, least.1)
 }
 
+/// Largest scale the interface is happy to be drawn at.
+///
+/// Matches the cap the boot medium asks the screen for, and exists for the same
+/// reason: a display driver that switches to the monitor's recommended
+/// resolution scales to 200 % to go with it.
+const COMFORTABLE_SCALE: f64 = 1.5;
+
+/// Draw the page smaller when the screen is scaled harder than we can use.
+///
+/// The medium asks Windows to bring the scale down and Windows does not always
+/// listen: on hardware it answered "done" and left the screen at 200 %
+/// (`asked=true after=200` in the medium's own log). The call it uses is
+/// undocumented, so there is nobody to ask why.
+///
+/// This needs nobody's permission. At 200 % the page is already drawn at twice
+/// size by the webview, and asking it for three quarters of that puts it at
+/// 150 % — the same place the cap was aiming for, for our own window at least.
+/// Everything else on the medium stays as Windows drew it.
+fn shrink_if_the_screen_is_scaled_hard(app: &tauri::App, window: &tauri::WebviewWindow) {
+    let Ok(Some(monitor)) = app.primary_monitor() else { return };
+    let scale = monitor.scale_factor();
+    if scale <= COMFORTABLE_SCALE {
+        return;
+    }
+    let zoom = COMFORTABLE_SCALE / scale;
+    match window.set_zoom(zoom) {
+        Ok(()) => tracing::info!(scale, zoom, "screen scaled hard - drawing the page smaller"),
+        Err(error) => tracing::warn!(scale, zoom, %error, "the page would not be zoomed"),
+    }
+}
+
 fn main() {
     // Only one GUI at a time (Windows).
     #[cfg(target_os = "windows")]
@@ -346,7 +377,8 @@ fn main() {
             // A failed build (no WebView2, browser process refused to start)
             // aborts the app with the error in the log — better than the old
             // behaviour of running on windowless.
-            window.build()?;
+            let built = window.build()?;
+            shrink_if_the_screen_is_scaled_hard(app, &built);
 
             // The window exists: say so where the launcher can see it. It is a
             // FILE and not a live process on purpose — a live process without a

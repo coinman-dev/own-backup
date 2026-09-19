@@ -760,6 +760,12 @@ mod imp {
     pub fn nudge_scale(steps: i32) -> bool {
         const SPI_SETLOGICALDPIOVERRIDE: SYSTEM_PARAMETERS_INFO_ACTION =
             SYSTEM_PARAMETERS_INFO_ACTION(0x009F);
+        // Written down and announced. Asked without either on the medium, the
+        // call answered "done" and changed nothing (`asked=true after=200` in
+        // its log) — and for an undocumented action there is nobody to ask what
+        // it wanted, so it gets what every documented one takes.
+        const WRITE_AND_TELL: SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS =
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0x0001 | 0x0002);
         // SAFETY: the action takes its argument in `uiParam` and ignores the
         // pointer, which is why none is passed.
         unsafe {
@@ -767,7 +773,7 @@ mod imp {
                 SPI_SETLOGICALDPIOVERRIDE,
                 steps as u32,
                 None,
-                SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+                WRITE_AND_TELL,
             )
             .is_ok()
         }
