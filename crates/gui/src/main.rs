@@ -248,10 +248,14 @@ fn main() {
                     .title("My Own Backup")
                     .inner_size(1200.0, 800.0)
                     .min_inner_size(900.0, 600.0)
-                    // On the medium the screen may be as small as 1024×768 (no
-                    // display driver) and a 1200×800 window hangs off it; there
-                    // is no taskbar and nothing else to share the screen with.
-                    .maximized(own_backup_common::media_mode::is_media_mode())
+                    // Not maximised, on the medium either. It used to be —
+                    // there was no taskbar and nothing to share the screen
+                    // with — but the medium has a desktop now, and a window
+                    // that covers it whole hides the strip that says which
+                    // keyboard layout the passphrase is being typed in. The
+                    // screen can be as small as 1024×768 with no display
+                    // driver, which `min_inner_size` already allows for.
+                    .maximized(false)
                     .resizable(true)
                     .decorations(true);
             #[cfg(windows)]

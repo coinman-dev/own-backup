@@ -54,7 +54,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
     DispatchMessageW, EnumWindows, GetClientRect, GetForegroundWindow, GetMessageW,
     GetSystemMetrics, GetWindow, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW,
-    GetWindowThreadProcessId, IsIconic, IsWindowVisible, LoadCursorW, MessageBoxW, PostMessageW,
+    GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, LoadCursorW, MessageBoxW,
+    PostMessageW,
     PostQuitMessage, RegisterClassW, SetForegroundWindow, SetProcessDPIAware, SetTimer,
     SetWindowPos, ShowWindow, SwitchToThisWindow, SystemParametersInfoW, TrackPopupMenuEx,
     TranslateMessage,
@@ -261,6 +262,7 @@ pub fn run() -> windows::core::Result<()> {
         let _ = ShowWindow(bar, SW_SHOWNOACTIVATE);
         SetTimer(bar, TICK, 1000, None);
     }
+    boot_the_medium();
 
     let mut msg = MSG::default();
     // `GetMessageW` answers -1 on error, and -1 is not false: the obvious loop
@@ -743,12 +745,18 @@ fn window_in_front() -> HWND {
 /// The language of the keyboard layout of the window in front.
 ///
 /// Of the window in FRONT, not of this one: every thread has its own layout,
-/// and ours would answer a question nobody is asking. Zero when there is no
-/// foreground window — at boot there is a moment where there is none.
+/// and ours would answer a question nobody is asking.
+///
+/// [`window_in_front`] rather than `GetForegroundWindow`, and that is the
+/// difference between an indicator and a blank space. Clicking the strip costs
+/// the window in front its place, so the click meant to READ the layout — or to
+/// switch it — was followed by the indicator going empty: the desktop had
+/// nobody in front to ask. The last window known to have been there is a far
+/// better answer than none.
 fn foreground_langid() -> u16 {
     unsafe {
-        let front = GetForegroundWindow();
-        if front.is_invalid() {
+        let front = window_in_front();
+        if front.is_invalid() || !IsWindow(front).as_bool() {
             return 0;
         }
         let thread = GetWindowThreadProcessId(front, None);
@@ -766,16 +774,29 @@ fn switch_layout() {
     unsafe {
         let front = window_in_front();
         if front.is_invalid() {
+            log("layout: nothing in front to ask");
             return;
         }
         let thread = GetWindowThreadProcessId(front, None);
         let current = GetKeyboardLayout(thread);
         let installed = installed_layouts();
         if installed.len() < 2 {
+            log(&format!("layout: only {} installed, nothing to switch to", installed.len()));
             return;
         }
         let at = installed.iter().position(|l| l.0 == current.0).unwrap_or(0);
         let next = installed[(at + 1) % installed.len()];
+        log(&format!(
+            "layout: asking {:?} to go from {:04X} to {:04X} (installed: {})",
+            front.0,
+            current.0 as usize & 0xFFFF,
+            next.0 as usize & 0xFFFF,
+            installed
+                .iter()
+                .map(|l| format!("{:04X}", l.0 as usize & 0xFFFF))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
         let _ = PostMessageW(
             front,
             WM_INPUTLANGCHANGEREQUEST,
@@ -877,9 +898,11 @@ fn chose(window: HWND, id: u32) {
             };
             let Some(path) = tool_path(&tool.path_on_medium()) else { return };
             // In its own folder: these programs keep their settings beside
-            // themselves and look for them there.
+            // themselves and look for them there. And with no console: they
+            // have windows of their own, and a black box flashing up first is
+            // not part of what was asked for.
             let home = path.parent().map(|p| p.to_path_buf());
-            launch(&path.to_string_lossy(), &[], home, 0);
+            launch(&path.to_string_lossy(), &[], home, CREATE_NO_WINDOW);
         }
     }
 }
@@ -890,13 +913,16 @@ fn chose(window: HWND, id: u32) {
 /// finds the WebView2 runtime, points the profile at the RAM disk and turns the
 /// firewall off. Starting the interface without it gives a process that runs
 /// and never shows a window — the failure this medium already spent a week on.
-/// `/k` rather than `/c` so the console it opens stays, the way every other
-/// console on this medium does.
+///
+/// **With no window of its own.** The script is plumbing, and a console box
+/// appearing over the desktop to announce it is noise: the only thing a person
+/// asked for is the interface. Its output still reaches the log on the stick,
+/// which is where anyone looking for it would look.
 fn start_the_interface() {
     match app_dir() {
         Some(dir) if dir.join("start-media.cmd").exists() => {
             let script = dir.join("start-media.cmd");
-            launch("cmd.exe", &["/k", &script.to_string_lossy()], Some(dir), CREATE_NEW_CONSOLE);
+            launch("cmd.exe", &["/c", &script.to_string_lossy()], Some(dir), CREATE_NO_WINDOW);
         }
         Some(dir) => {
             let exe = dir.join("own-backup-gui.exe");
@@ -919,6 +945,32 @@ fn launch(program: &str, args: &[&str], from: Option<PathBuf>, flags: u32) {
     }
 }
 
+/// Run the medium's boot script, with no window, now that there is a desktop
+/// for its results to appear on.
+///
+/// This is the desktop's one piece of work that is not drawing, and it is here
+/// because of the order it buys. `winpeshl` runs its entries one after another
+/// and waits for each, so a boot script listed ahead of us would finish — and
+/// start the interface — before the desktop existed: a console window first,
+/// the interface inside it, and the desktop last, underneath everything. That
+/// is what the first medium built this way did.
+///
+/// Started and forgotten. `wpeinit`, the drivers, the keyboard layouts and the
+/// screen mode all go on behind the desktop, and the screen mode changing is
+/// something the strip already handles. Nothing here waits: a desktop that
+/// waits is a desktop that has stopped.
+///
+/// Only on the medium. On an installed Windows there is no `startnet.cmd`, and
+/// running one would be nonsense.
+fn boot_the_medium() {
+    if !own_backup_common::media_mode::is_windows_pe() {
+        return;
+    }
+    let script = own_backup_common::media_paths::BOOT_SCRIPT;
+    log(&format!("starting the medium's boot script with no window: {script}"));
+    launch("cmd.exe", &["/c", script], None, CREATE_NO_WINDOW);
+}
+
 /// The way out of the one failure that costs more than it should.
 ///
 /// On the medium this process is the shell, and winpeshl takes its exit for the
@@ -934,8 +986,17 @@ pub fn hold_a_console_instead() {
     if !own_backup_common::media_mode::is_windows_pe() {
         return;
     }
-    log("falling back to a console - the medium is usable, the strip is not");
-    match std::process::Command::new("cmd.exe").creation_flags(CREATE_NEW_CONSOLE).spawn() {
+    log("falling back to a console - the medium is usable, the desktop is not");
+    // With the boot script — the desktop was going to run it and did not get
+    // that far, and without it there is no `wpeinit`, no drivers and no screen
+    // mode. `/k` keeps the prompt afterwards, which is the medium exactly as it
+    // was before any of this existed.
+    let script = own_backup_common::media_paths::BOOT_SCRIPT;
+    let started = std::process::Command::new("cmd.exe")
+        .args(["/k", script])
+        .creation_flags(CREATE_NEW_CONSOLE)
+        .spawn();
+    match started {
         Ok(mut console) => {
             let _ = console.wait();
             log("the console was closed");
@@ -1175,6 +1236,20 @@ unsafe fn bar_message(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM
             let x = (lparam.0 & 0xFFFF) as i16 as i32;
             let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
             let slots = with_bar(|b| b.slots);
+            log(&format!(
+                "strip click at {x},{y}: {}",
+                if slots.start.contains(x, y) {
+                    "start"
+                } else if slots.layout.contains(x, y) {
+                    "layout"
+                } else if slots.close.contains(x, y) {
+                    "close"
+                } else if with_bar(|b| b.window_slots.iter().any(|s| s.contains(x, y))) {
+                    "a window button"
+                } else {
+                    "nothing"
+                }
+            ));
             if slots.start.contains(x, y) {
                 show_menu(window, &slots.start);
             } else if slots.layout.contains(x, y) {
@@ -1192,6 +1267,11 @@ unsafe fn bar_message(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM
             }) {
                 raise_or_hide(wanted);
             }
+            // Only this click was about that window. Left standing, it would
+            // go on answering "what is in front" for the rest of the session,
+            // and the layout indicator would report a window nobody is typing
+            // into any more.
+            with_bar(|b| b.front_at_press = HWND::default());
             LRESULT(0)
         }
         WM_DISPLAYCHANGE => {
@@ -1274,7 +1354,25 @@ static LOG_FILES: OnceLock<Vec<PathBuf>> = OnceLock::new();
 /// change under a running process. See [`crate::log`] for why there are two.
 fn log_targets() -> &'static [PathBuf] {
     LOG_FILES.get_or_init(|| {
-        let mirror = std::env::var(own_backup_common::log_mirror::LOG_MIRROR_ENV).ok();
+        // The launcher script names the stick in the environment — but it
+        // names it for ITS OWN children, and this process is not one of them:
+        // `winpeshl` starts the desktop, and the script runs underneath it.
+        // The first medium built this way left no shell log at all, because
+        // everything beside the exe is on a RAM disk. So the stick is looked
+        // for the same way the script looks for it, by its marker.
+        let mirror = std::env::var(own_backup_common::log_mirror::LOG_MIRROR_ENV)
+            .ok()
+            .filter(|dir| !dir.trim().is_empty())
+            .or_else(|| {
+                // Only when this IS the medium. A boot stick plugged into a
+                // working machine is someone's drive, not a place to start
+                // writing to unasked.
+                if !own_backup_common::media_mode::is_windows_pe() {
+                    return None;
+                }
+                own_backup_common::media_paths::find_log_dir()
+                    .map(|dir| dir.display().to_string())
+            });
         let beside = app_dir();
         crate::log::log_paths(mirror.as_deref(), beside.as_deref(), &std::env::temp_dir())
     })

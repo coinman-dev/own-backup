@@ -17,18 +17,13 @@
 
 use std::path::{Path, PathBuf};
 
-/// Folder on the medium's partition holding everything that does not need to be
-/// in RAM. The marker file inside it is how the running medium recognises which
-/// drive it booted from — always written, because the logs go there too.
-pub const MEDIA_DIR: &str = "OwnBackup";
-/// Marker file, content is its own explanation for anyone who finds it.
-pub const MEDIA_MARKER: &str = "media.id";
-pub const MEDIA_MARKER_TEXT: &str =
-    "My Own Backup boot medium. This file marks the volume so the medium can \
-     find its own files after boot; its logs are kept in the logs folder beside it.\r\n";
-
-/// Where on the boot medium the running medium keeps a copy of its logs.
-pub const MEDIA_LOGS_DIR: &str = "logs";
+// Where the medium keeps its own files, and how it is recognised. Defined in
+// `common` because the desktop has to find the stick WITHOUT this crate: it is
+// started by `winpeshl` and inherits nothing from the launcher script, so it
+// asks the same question from its own side.
+pub use own_backup_common::media_paths::{
+    MEDIA_DIR, MEDIA_LOGS_DIR, MEDIA_MARKER, MEDIA_MARKER_TEXT,
+};
 
 /// Program files that go inside the image, so they are present even if the
 /// medium's own partition somehow does not come up.
@@ -441,28 +436,32 @@ pub fn startnet_cmd(app_dir: &str, start_desktop: bool) -> String {
 /// `winpeshl.ini` — what WinPE runs INSTEAD of its default shell.
 ///
 /// Without this file the default shell is `cmd /k startnet.cmd`, and that
-/// console is the whole desktop. With it, winpeshl runs these entries in order,
-/// waiting for each: the boot script to completion, then our desktop, which
-/// holds the session.
+/// console is the whole desktop. With it, the desktop is the ONLY entry, and it
+/// is the first thing on the screen.
 ///
-/// **When the last entry exits, the machine reboots.** That is winpeshl's rule
-/// and not something added here — it is also exactly what closing the console
-/// has always done on this medium. It is why the desktop offers no way out of
+/// **One entry, not two, and that is the whole design.** The obvious spelling
+/// puts the boot script first and the desktop second, and it is what the first
+/// medium did: a console window opened, the interface came up inside it, and
+/// the desktop appeared last, under everything. Entries here run in order and
+/// each is waited for, so the desktop cannot possibly come first that way.
+/// Instead the desktop runs the boot script itself, with no window
+/// ([`crate::media_layout::BOOT_SCRIPT`]) — the screen is ours from the first
+/// second, and `wpeinit`, the drivers and the screen mode go on behind it.
+///
+/// **When this entry exits, the machine reboots.** That is winpeshl's rule and
+/// not something added here — it is also exactly what closing the console has
+/// always done on this medium. It is why the desktop offers no way out of
 /// itself in WinPE, and why a desktop that cannot start must end in a console
 /// rather than in a return.
-///
-/// The first entry goes through `cmd /c` because entries in this file are handed
-/// to `CreateProcess`, which cannot run a `.cmd` at all: a medium that named the
-/// script directly booted into a bare console (2026-07-31), and that is the
-/// whole reason this file was avoided until the rest of the desktop worked. The
-/// comma is winpeshl's own separator between a program and its arguments.
 pub fn winpeshl_ini(app_dir: &str) -> String {
-    lines(&[
-        "[LaunchApps]",
-        r"%SYSTEMDRIVE%\Windows\System32\cmd.exe, /c %SYSTEMDRIVE%\Windows\System32\startnet.cmd",
-        &format!("\"{app_dir}\\own-backup-shell.exe\""),
-    ])
+    lines(&["[LaunchApps]", &format!("\"{app_dir}\\own-backup-shell.exe\"")])
 }
+
+// The script the desktop runs for itself, with no window. `CreateProcess`
+// cannot start a `.cmd` at all — a medium that named the script directly booted
+// into a bare console (2026-07-31) — so the desktop puts `cmd /c` in front of
+// it. Defined in `common`, which the desktop can see.
+pub use own_backup_common::media_paths::BOOT_SCRIPT;
 
 /// `start-media.cmd` — everything the medium needs set before the programs run.
 ///
@@ -505,9 +504,14 @@ pub fn start_media_cmd(app_dir: &str, temp_dir: &str) -> String {
         "if not defined OWN_BACKUP_LOG_MIRROR echo Logs stay on the RAM disk only - no writable boot medium found.",
         "rem The monitor's own mode. The picker waits for a display driver PnP may",
         "rem still be installing - on 2026-09-17 it decided one second in, while the",
-        "rem screen was still the basic driver's. The old mode comes back unless a",
-        "rem key is pressed.",
-        &format!("\"{app_dir}\\own-backup-cli.exe\" display --min 1280x720"),
+        "rem screen was still the basic driver's.",
+        "rem",
+        "rem --no-confirm because this script has no console any more: the desktop",
+        "rem runs it without a window, so nobody can press the key that keeps the",
+        "rem new mode, and a question nobody can answer means the mode ALWAYS",
+        "rem reverts. That is worse than the case the question guards against - a",
+        "rem mode the driver listed AND accepted, that then fails to display.",
+        &format!("\"{app_dir}\\own-backup-cli.exe\" display --min 1280x720 --no-confirm"),
         "rem Which driver ended up drawing, and what PnP said about it. AFTER the",
         "rem pick on purpose: by then the stack has settled, and that is the state",
         "rem the question is about - setupapi.dev.log keeps the earlier lines anyway.",
@@ -764,6 +768,20 @@ mod tests {
         );
     }
 
+    /// The boot script runs with no console now, so it must not ask anything.
+    ///
+    /// The screen-mode picker keeps a new mode only if a key is pressed and
+    /// reverts otherwise. With no window to press a key in, that is not a
+    /// safety net but a guarantee the mode goes back — the medium would boot
+    /// at the firmware's resolution every time, which is the whole problem the
+    /// picker exists to solve.
+    #[test]
+    fn nothing_in_the_boot_script_waits_for_an_answer() {
+        let s = start_media_cmd(r"X:\Program Files\OwnBackup", r"X:\Temp");
+        let pick = s.lines().find(|l| l.contains("display --min")).expect("the mode picker");
+        assert!(pick.contains("--no-confirm"), "nobody can answer it: {pick}");
+    }
+
     /// The rule that keeps a medium from rebooting seconds after it booted.
     ///
     /// With `winpeshl.ini` present, winpeshl starts the desktop and waits for
@@ -785,24 +803,35 @@ mod tests {
         assert_eq!(startnet_cmd(app, true).matches(desktop).count(), 1);
     }
 
-    /// `CreateProcess` cannot run a `.cmd`, and winpeshl hands it these lines
-    /// verbatim. A medium that named the script directly booted into a bare
-    /// console, and it is a rebuild cycle before anyone finds out.
+    /// The desktop has to be the FIRST thing on the screen, and the only way
+    /// to get that from winpeshl is to be the only entry it has.
+    ///
+    /// The obvious spelling — boot script first, desktop second — is what the
+    /// first medium did, and it showed a console window, then the interface
+    /// inside it, and the desktop last of all. Entries are run in order and
+    /// each is waited for, so there is no arrangement of two entries that puts
+    /// the desktop first.
     #[test]
-    fn winpeshl_runs_the_boot_script_through_cmd() {
+    fn winpeshl_starts_the_desktop_and_nothing_else() {
         let ini = winpeshl_ini(r"X:\Program Files\OwnBackup");
         assert!(ini.starts_with("[LaunchApps]"), "winpeshl reads nothing else");
-        let script = ini.lines().find(|l| l.contains("startnet.cmd")).expect("the boot script");
-        assert!(script.contains("cmd.exe, /c"), "through cmd, with winpeshl's own comma: {script}");
-        // Order is not cosmetic: wpeinit, the drivers and the screen mode all
-        // have to be done before anything is drawn.
-        let boot = ini.find("startnet.cmd").unwrap();
-        let desktop = ini.find("own-backup-shell.exe").unwrap();
-        assert!(boot < desktop, "the work comes before the desktop");
-        assert!(
-            ini.contains("\"X:\\Program Files\\OwnBackup\\own-backup-shell.exe\""),
+        let apps: Vec<&str> =
+            ini.lines().filter(|l| !l.is_empty() && !l.starts_with('[')).collect();
+        assert_eq!(apps.len(), 1, "one entry, or the desktop cannot be first: {apps:?}");
+        assert!(!ini.contains("startnet.cmd"), "the desktop runs the script itself");
+        assert_eq!(
+            apps[0], "\"X:\\Program Files\\OwnBackup\\own-backup-shell.exe\"",
             "a path with a space in it has to be quoted"
         );
+    }
+
+    /// The script the desktop runs is named the way `CreateProcess` can be
+    /// given it — a `.cmd` cannot be started directly, which is how a medium
+    /// once booted into a bare console.
+    #[test]
+    fn the_boot_script_is_where_winpe_keeps_it() {
+        assert!(BOOT_SCRIPT.ends_with("startnet.cmd"));
+        assert!(BOOT_SCRIPT.starts_with(r"X:\"), "the RAM disk, always X: in WinPE");
     }
 
     /// A program the boot scripts launch but the build never copies in gives a

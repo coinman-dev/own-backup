@@ -8,6 +8,7 @@ pub mod gpt;
 pub mod image;
 pub mod log_mirror;
 pub mod media_mode;
+pub mod media_paths;
 pub mod media_tools;
 pub mod preflight;
 pub mod progress;

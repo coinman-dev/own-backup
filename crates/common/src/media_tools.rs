@@ -30,12 +30,6 @@ pub struct MediaTool {
     pub exe: &'static str,
 }
 
-/// Where the tools live on the medium, under `Program Files`.
-///
-/// Beside our own folder rather than inside it, so nothing of ours is ever
-/// mistaken for someone else's program or the other way round.
-pub const TOOLS_DIR: &str = "Tools";
-
 /// Everything the medium knows how to carry, in the order the menu shows them.
 ///
 /// **`TOTALCMD64.EXE` is how the 64-bit Total Commander is told from the
@@ -60,9 +54,14 @@ pub const MEDIA_TOOLS: [MediaTool; 2] = [
 
 impl MediaTool {
     /// Path to the executable on the booted medium, relative to
-    /// `X:\Program Files` — what the shell joins onto its own parent folder.
+    /// `X:\Program Files` — what the desktop joins onto its own parent folder.
+    ///
+    /// Straight under `Program Files`, beside our own folder rather than inside
+    /// a wrapper of ours: `X:\Program Files\totalcmd\TOTALCMD64.EXE` is where
+    /// anyone would look for Total Commander on any Windows, and a rescue
+    /// medium is the last place to make someone hunt for a file manager.
     pub fn path_on_medium(&self) -> String {
-        format!(r"{}\{}\{}", TOOLS_DIR, self.folder, self.exe)
+        format!(r"{}\{}", self.folder, self.exe)
     }
 }
 
@@ -77,8 +76,8 @@ mod tests {
 
     #[test]
     fn the_path_the_shell_looks_at_is_the_one_the_builder_writes() {
-        assert_eq!(tool("totalcmd").unwrap().path_on_medium(), r"Tools\totalcmd\TOTALCMD64.EXE");
-        assert_eq!(tool("notepadpp").unwrap().path_on_medium(), r"Tools\Notepad++\notepad++.exe");
+        assert_eq!(tool("totalcmd").unwrap().path_on_medium(), r"totalcmd\TOTALCMD64.EXE");
+        assert_eq!(tool("notepadpp").unwrap().path_on_medium(), r"Notepad++\notepad++.exe");
     }
 
     /// A 32-bit install has `TOTALCMD.EXE` and not this one. That difference is

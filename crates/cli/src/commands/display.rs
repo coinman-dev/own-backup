@@ -309,6 +309,12 @@ pub async fn run(args: DisplayArgs) -> own_backup_common::Result<()> {
         Some(m) => println!("Сейчас: {}x{} {} бит, {} Гц", m.width, m.height, m.bpp, m.hz),
         None => println!("Сейчас: режим определить не удалось"),
     }
+    // Масштаб интерфейса. На носителе он замечен увеличенным до 200 %, и это
+    // не то же самое, что разрешение: экран может быть 2560x1440 и при этом
+    // всё на нём вдвое крупнее. Печатается всегда, потому что узнать это иначе
+    // можно только загрузившись с носителя и посмотрев глазами.
+    let dpi = imp::system_dpi();
+    println!("Масштаб интерфейса: {}% ({} точек на дюйм)", dpi * 100 / 96, dpi);
     // Which adapter is actually drawing. "Microsoft Basic Display" here with a
     // vendor driver in the image means the driver did not start — the mode
     // list below belongs to the fallback, not the hardware. A virtual adapter
@@ -583,6 +589,18 @@ mod imp {
 
     pub fn current_mode() -> Option<Mode> {
         read(ENUM_CURRENT_SETTINGS)
+    }
+
+    /// The scale Windows is drawing everything at, in dots per inch: 96 is
+    /// 100 %, 144 is 150 %, 192 is 200 %.
+    ///
+    /// `GetDpiForSystem` rather than the screen DC, because the DC answers what
+    /// THIS process was told — a process that never declared itself aware is
+    /// lied to and always reads 96, which would report "100 %" from inside a
+    /// desktop drawn at double size.
+    pub fn system_dpi() -> u32 {
+        // SAFETY: no arguments, no handles, no failure mode.
+        unsafe { windows::Win32::UI::HiDpi::GetDpiForSystem() }
     }
 
     /// Every mode the display driver admits to, deduplicated.

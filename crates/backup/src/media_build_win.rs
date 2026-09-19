@@ -1151,10 +1151,10 @@ fn trim_runtime(runtime_root: &Path) -> u32 {
 
 /// Put the chosen third-party tools into the image.
 ///
-/// Under `Program Files\Tools`, beside our own folder and not inside it: the
-/// shell looks for them exactly there
-/// ([`own_backup_common::media_tools::MediaTool::path_on_medium`]), and nothing
-/// of ours is ever mistaken for someone else's program.
+/// Straight under `Program Files`, beside our own folder: the desktop looks
+/// for them exactly there
+/// ([`own_backup_common::media_tools::MediaTool::path_on_medium`]), and that is
+/// where anyone would look for them on any Windows.
 ///
 /// Whole folders, settings and all. They are copied as they are on the machine
 /// making the medium, which is the point — a Total Commander with the user's
@@ -1180,7 +1180,7 @@ fn add_tools(
         warn!(missing = ?missing, "tools asked for but not found on this machine");
     }
 
-    let root = tree.join("Program Files").join(own_backup_common::media_tools::TOOLS_DIR);
+    let root = tree.join("Program Files");
     let mut count = 0;
     let mut bytes = 0;
     for (n, tool) in picked.iter().enumerate() {
