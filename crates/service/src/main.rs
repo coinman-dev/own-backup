@@ -3,6 +3,7 @@ mod grpc_server;
 mod install;
 mod scheduler;
 mod shutdown;
+mod single_instance;
 
 #[cfg(target_os = "windows")]
 mod windows_service;
@@ -10,7 +11,7 @@ mod windows_service;
 use std::net::SocketAddr;
 
 use tonic::transport::Server;
-use tracing::info;
+use tracing::{info, warn};
 
 use app_state::AppState;
 use grpc_server::BackupServiceImpl;
@@ -432,6 +433,29 @@ pub async fn run_main_loop(
     let config = AppConfig::default();
 
     std::fs::create_dir_all(&config.data_dir)?;
+
+    // BEFORE the database, the job store, the worker, the scheduler and the
+    // token file — all of which a second copy used to reach before the named
+    // pipe finally turned it away (audit AUD-07). Held for the life of the
+    // process; the OS releases it even if we are killed.
+    let _ownership = match single_instance::claim(&config.data_dir) {
+        Ok(o) => {
+            if !o.machine_wide {
+                warn!(
+                    "single instance is guarded only within this session — the machine-wide \
+                     name was refused"
+                );
+            }
+            o
+        }
+        Err(e) => {
+            // Nothing above this line changed anything, and nothing below runs.
+            warn!(error = %e, "Refusing to start a second engine");
+            eprintln!("{e}");
+            return Err(Box::new(e));
+        }
+    };
+
     let _conn = own_backup_metadata::open_database(&config.db_path())?;
     info!("Metadata database initialized");
 
