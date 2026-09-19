@@ -56,7 +56,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, GetWindow, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW,
     GetWindowThreadProcessId, IsIconic, IsWindowVisible, LoadCursorW, MessageBoxW, PostMessageW,
     PostQuitMessage, RegisterClassW, SetForegroundWindow, SetProcessDPIAware, SetTimer,
-    SetWindowPos, ShowWindow, SystemParametersInfoW, TrackPopupMenuEx, TranslateMessage,
+    SetWindowPos, ShowWindow, SwitchToThisWindow, SystemParametersInfoW, TrackPopupMenuEx,
+    TranslateMessage,
     GWL_EXSTYLE, GW_OWNER, HWND_BOTTOM, HWND_TOPMOST, IDC_ARROW, IDYES, MA_NOACTIVATE,
     MB_ICONQUESTION, MB_SETFOREGROUND, MB_YESNO, MF_SEPARATOR, MF_STRING, MSG, SM_CXSCREEN,
     SM_CYSCREEN, SPIF_SENDCHANGE, SPI_GETWORKAREA, SPI_SETWORKAREA, SWP_NOACTIVATE, SW_MINIMIZE,
@@ -623,6 +624,24 @@ unsafe fn window_title(window: HWND) -> Option<String> {
 /// A click on a window's button: bring it forward, or put it away if it is
 /// already the window in front — what every taskbar does, and the only thing
 /// anybody tries.
+///
+/// Unfolding a minimised window takes two goes. `ShowWindow` is the documented
+/// way and it is REFUSED for a window belonging to a program running with more
+/// rights than ours — Windows keeps those out of reach of anything the user
+/// runs, and the Services console started from an elevated prompt is exactly
+/// that. Refused silently, too: it returns and the window stays folded, which
+/// is how a button that did nothing at all came about.
+///
+/// The second go is the route the Alt+Tab switcher itself uses, and it is
+/// allowed where the first is not (verified on this machine against a minimised
+/// `mmc.exe`, 2026-09-19).
+///
+/// **And nothing is brought to the front while it is still folded away.**
+/// `SetForegroundWindow` succeeds on a minimised window — leaving the strip
+/// marking it as the window in front while the screen shows no sign of it,
+/// which is worse than the click having done nothing.
+///
+/// None of this arises on the medium, where everything runs as SYSTEM.
 fn raise_or_hide(window: HWND) {
     unsafe {
         if GetForegroundWindow() == window {
@@ -631,6 +650,13 @@ fn raise_or_hide(window: HWND) {
         }
         if IsIconic(window).as_bool() {
             let _ = ShowWindow(window, SW_RESTORE);
+            if IsIconic(window).as_bool() {
+                SwitchToThisWindow(window, TRUE);
+            }
+            if IsIconic(window).as_bool() {
+                log("a window would not come back - it belongs to a program above us");
+                return;
+            }
         }
         let _ = SetForegroundWindow(window);
     }
