@@ -61,6 +61,22 @@ pub struct SidecarInfo {
     pub container: String,
     /// File name (not path) of the image this sidecar describes.
     pub image_file_name: String,
+    /// A stable identity for the volume this image was taken from.
+    ///
+    /// Everything that chose a parent used to go through the image's FILE NAME
+    /// — a token built from the drive letter, or, for an encrypted `part:`
+    /// source with no letter, from its cleaned-up label (audit AUD-10). Two
+    /// volumes labelled the same are then the same volume as far as chain
+    /// planning is concerned, and an increment can be written onto a parent
+    /// that is a copy of a different disk.
+    ///
+    /// On Windows this is the volume's GUID path, which survives a letter
+    /// change and a reboot, or `disk-guid:offset` for a partition with no
+    /// mounted volume. `None` in copies written before this existed and where
+    /// no stable identity could be worked out — and then the token is all
+    /// there is, which is why it is still used as well.
+    #[serde(default)]
+    pub source_id: Option<String>,
     /// Role of the image in its chain.
     pub chain_role: ChainRole,
     /// File name of the parent image for incremental/differential images.
@@ -153,6 +169,7 @@ impl SidecarInfo {
             app_version: env!("CARGO_PKG_VERSION").into(),
             container: "vhdx".into(),
             image_file_name: image_file_name.into(),
+            source_id: None,
             chain_role: ChainRole::Full,
             parent_image_file_name: None,
             volume_data_offset,
@@ -179,6 +196,7 @@ impl SidecarInfo {
             app_version: env!("CARGO_PKG_VERSION").into(),
             container: "vhdx".into(),
             image_file_name: image_file_name.into(),
+            source_id: None,
             chain_role: role,
             parent_image_file_name: Some(parent.into()),
             volume_data_offset,

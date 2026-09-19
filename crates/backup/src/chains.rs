@@ -34,6 +34,9 @@ pub struct ChainImage {
     /// RFC3339 creation timestamp from the manifest.
     pub created_at: String,
     pub parent_file_name: Option<String>,
+    /// The stable identity of the volume this image came from, when the copy
+    /// recorded one. See [`crate::sidecar::SidecarInfo::source_id`].
+    pub source_id: Option<String>,
     /// Increments consolidation has already folded into this image (base only).
     /// The run planner adds it to the images it can see, so "a full version
     /// after every N versions" keeps counting versions that no longer exist as
@@ -170,6 +173,7 @@ pub fn list_chains(folder: &Path, job_id: Option<&str>) -> Result<Vec<Chain>> {
             container: info.container,
             created_at: manifest.created_at,
             parent_file_name: info.parent_image_file_name,
+            source_id: info.source_id,
             consolidated_increments: info.consolidated_increments,
             chain_started_at: info.chain_started_at,
         });
@@ -701,6 +705,7 @@ mod tests {
                     container: "vhdx".into(),
                     created_at: s.to_string(),
                     parent_file_name: None,
+                    source_id: None,
                     consolidated_increments: 0,
                     chain_started_at: None,
                 }],

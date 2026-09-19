@@ -14,6 +14,10 @@
 pub mod busy;
 pub mod restore_exec;
 
+/// Where a destination folder sits relative to a job's sources — re-exported
+/// so callers do not have to reach into the backup crate for one enum.
+pub use own_backup_backup::source_identity::DestPlacement;
+
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -243,13 +247,33 @@ pub fn dest_on_source_volume(source: &str, dest_folder: &str) -> bool {
 
 /// For a multi-volume job: the drive letter of the first source that collides
 /// with the destination folder, or `None` if the destination is safe for all
-/// sources. Used to forbid writing the image onto any volume being imaged.
+/// sources.
+///
+/// By LETTERS only, so it sees nothing when a source is a volume GUID path, a
+/// `part:` range or a mount point. Kept as the cheap first pass, with the real
+/// answer in [`dest_placement`] — this one never refuses something that is
+/// actually fine, so it costs nothing to ask first.
 pub fn dest_collision_letter(job: &Job, dest_folder: &str) -> Option<char> {
     let dst = drive_letter_of(dest_folder)?;
     job.source_list()
         .iter()
         .filter_map(|s| drive_letter_of(s))
         .find(|&src| src == dst)
+}
+
+/// Where the destination folder actually sits relative to the job's sources.
+///
+/// Compares the RANGES the volumes occupy, not their names (audit AUD-10). A
+/// source given as `\\?\Volume{…}`, as `part:<disk>:<offset>:<len>` or reached
+/// through a mount point matched nothing at all by letter, so the image could
+/// be written onto the volume being imaged. And it is by range on purpose: a
+/// DIFFERENT partition of the same disk is a perfectly ordinary destination,
+/// and refusing it would be refusing something that works.
+pub fn dest_placement(job: &Job, dest_folder: &str) -> own_backup_backup::source_identity::DestPlacement {
+    own_backup_backup::source_identity::where_the_destination_sits(
+        &job.source_list(),
+        dest_folder,
+    )
 }
 
 pub fn default_exclusions() -> Vec<String> {
@@ -1197,6 +1221,33 @@ fn file_token(job: &Job, device: &str) -> String {
     source_token(device)
 }
 
+/// Is this chain a chain of THIS volume's copies?
+///
+/// The file-name token has to match, as it always did — but a token is a drive
+/// letter, or for an encrypted `part:` source with no letter, its cleaned-up
+/// label. Two volumes sharing either are one volume as far as that goes, and
+/// an increment written onto a copy of a different disk is not a smaller
+/// mistake than a lost one (audit AUD-10, point 3).
+///
+/// So when BOTH sides recorded who they are, that decides. When either does
+/// not — an old copy, or a machine that cannot answer — the name is all there
+/// is and the behaviour is exactly what it was. That is the compatible half:
+/// this never starts mixing sources, it only stops.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))] // used by the Windows backup path
+fn chain_belongs_to(
+    base: &own_backup_backup::chains::ChainImage,
+    token: &str,
+    identity: &Option<String>,
+) -> bool {
+    if !image_token(&base.image_path).is_some_and(|t| t.eq_ignore_ascii_case(token)) {
+        return false;
+    }
+    match (identity, &base.source_id) {
+        (Some(mine), Some(theirs)) => mine.eq_ignore_ascii_case(theirs),
+        _ => true,
+    }
+}
+
 /// Recover the source token that an image file name encodes. Names are
 /// `<name>_<token>_<tag>_<stamp>.<ext>`; token/tag/stamp are always the last
 /// three underscore-separated segments, so we read from the end — robust even
@@ -1324,6 +1375,9 @@ pub fn plan_run_for_volume_at(
     };
 
     let token = file_token(job, device);
+    // Who this volume is, independently of what it is called. `None` on a
+    // machine that cannot say, and on every non-Windows build.
+    let identity = own_backup_backup::source_identity::stable_source_id(device);
     let chains = match list_job_chains(folder, &job.id) {
         Ok(c) => c,
         Err(_) => return RunPlan::full(),
@@ -1333,10 +1387,7 @@ pub fn plan_run_for_volume_at(
     let Some(chain) = chains
         .into_iter()
         .filter(|c| {
-            c.images
-                .first()
-                .and_then(|i| image_token(&i.image_path))
-                .is_some_and(|t| t.eq_ignore_ascii_case(&token))
+            c.images.first().is_some_and(|base| chain_belongs_to(base, &token, &identity))
         })
         .next_back()
     else {
@@ -3681,5 +3732,61 @@ mod tests {
 
         let found = store.job_image_files("job1");
         assert!(found.contains(&PathBuf::from("/dest/second.vhdx")), "{found:?}");
+    }
+
+    // --- Цепочка выбирается по тому, ЧТО это за том (аудит AUD-10) ---------
+    //
+    // Токен в имени файла — это буква диска, а для зашифрованного part:-тома
+    // без буквы — его очищенная метка. Два тома с одинаковой меткой на этом
+    // уровне неразличимы, и инкремент мог лечь на копию другого диска.
+
+    /// Имя совпало, а идентичность — нет: такую цепочку брать нельзя.
+    #[test]
+    fn a_chain_of_another_volume_with_the_same_label_is_not_ours() {
+        let base = own_backup_backup::chains::ChainImage {
+            image_path: PathBuf::from("j_KUBUNTUBOOT_full_1.vhdx"),
+            sidecar_path: PathBuf::from("j_KUBUNTUBOOT_full_1.vhdx.obkm"),
+            role: own_backup_backup::sidecar::ChainRole::Full,
+            container: "vhdx".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            parent_file_name: None,
+            source_id: Some(r"\?\VOLUME{11111111-1111-1111-1111-111111111111}".into()),
+            consolidated_increments: 0,
+            chain_started_at: None,
+        };
+        // Тот же токен в имени, другой том.
+        assert!(!chain_belongs_to(
+            &base,
+            "KUBUNTUBOOT",
+            &Some(r"\?\Volume{22222222-2222-2222-2222-222222222222}".into()),
+        ));
+        // Тот же том — берём, регистр значения не имеет.
+        assert!(chain_belongs_to(
+            &base,
+            "kubuntuboot",
+            &Some(r"\?\volume{11111111-1111-1111-1111-111111111111}".into()),
+        ));
+    }
+
+    /// Старая копия ничего про себя не записала — тогда имя это всё, что есть,
+    /// и поведение ровно прежнее. Совместимая половина правки: она никогда не
+    /// начинает смешивать источники, она только перестаёт.
+    #[test]
+    fn a_copy_that_never_recorded_who_it_was_still_matches_by_name() {
+        let base = own_backup_backup::chains::ChainImage {
+            image_path: PathBuf::from("j_C_full_1.vhdx"),
+            sidecar_path: PathBuf::from("j_C_full_1.vhdx.obkm"),
+            role: own_backup_backup::sidecar::ChainRole::Full,
+            container: "vhdx".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            parent_file_name: None,
+            source_id: None,
+            consolidated_increments: 0,
+            chain_started_at: None,
+        };
+        assert!(chain_belongs_to(&base, "C", &Some("whatever".into())));
+        assert!(chain_belongs_to(&base, "C", &None));
+        // Имя всё ещё должно совпадать — это не отменяется.
+        assert!(!chain_belongs_to(&base, "D", &None));
     }
 }

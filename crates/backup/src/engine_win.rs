@@ -1497,6 +1497,7 @@ fn backup_volume_inner(
     };
     temp_info.container = req.image_format.extension().into();
     temp_info.job_id = req.job_id.clone();
+    temp_info.source_id = crate::source_identity::stable_source_id(&req.source);
     temp_info.source_disk_layout = req.source_disk.clone();
     let mut temp_blob = Vec::new();
     crate::sidecar::write_sidecar_v2_to(&mut temp_blob, &temp_info, &temp_manifest, &outcome.checksums)?;
@@ -1757,6 +1758,9 @@ fn backup_volume_inner(
     // The job id is what ties images into this job's chains: list_job_chains
     // filters on it, so without it every next run plans a FULL backup.
     sidecar_info.job_id = req.job_id.clone();
+    // Who this volume IS, not what it is called: a label or a drive letter is
+    // for display, and two volumes can share both (audit AUD-10).
+    sidecar_info.source_id = crate::source_identity::stable_source_id(&req.source);
     sidecar_info.source_disk_layout = req.source_disk.clone();
     sidecar_info.categories = categories;
     sidecar_info.excluded_files = excluded_files;

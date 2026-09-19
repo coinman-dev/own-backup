@@ -493,9 +493,26 @@ fn validate_job(job: &own_backup_core::Job) -> Result<(), Status> {
     }
     if let Some(letter) = own_backup_core::dest_collision_letter(job, &job.dest_folder) {
         return Err(Status::invalid_argument(format!(
-            "Нельзя сохранять копию на тот же диск, который копируется ({letter}:). \
-             Выберите для назначения другой диск."
+            "Нельзя сохранять копию на тот же том, который копируется ({letter}:). \
+             Выберите для назначения другое место."
         )));
+    }
+    // And the same question asked properly: by the sectors each volume
+    // occupies, so a source with no drive letter is seen too (audit AUD-10).
+    // Saving a job writes nothing, so an unanswerable case is noted here and
+    // refused where it matters — immediately before the copy.
+    match own_backup_core::dest_placement(job, &job.dest_folder) {
+        own_backup_core::DestPlacement::Clear => {}
+        own_backup_core::DestPlacement::OnSource(source) => {
+            return Err(Status::invalid_argument(format!(
+                "Папка назначения лежит на томе, который копируется ({source}). \
+                 Копия росла бы вместе с источником — выберите другое место."
+            )))
+        }
+        own_backup_core::DestPlacement::CannotTell(why) => {
+            tracing::warn!(job = %job.name, dest = %job.dest_folder, reason = %why,
+                "could not confirm the destination is not on a source volume")
+        }
     }
     // The image format must never change over existing archives (decision
     // 2026-07-08): reject the save right away when the destination already
@@ -629,11 +646,29 @@ impl BackupService for BackupServiceImpl {
             .store
             .get(&id)
             .ok_or_else(|| Status::not_found("Задание не найдено."))?;
-        // Guard against writing onto any source volume (mirrors save-time check).
+        // Guard against writing onto any source volume (mirrors save-time
+        // check). This is the one that runs immediately before anything is
+        // written, so here "cannot tell" is a refusal: not knowing where the
+        // copy will land is not knowing that it lands somewhere safe (audit
+        // AUD-10, point 2).
         if let Some(letter) = own_backup_core::dest_collision_letter(&job, &job.dest_folder) {
             return Err(Status::failed_precondition(format!(
-                "Копия пишется на тот же диск ({letter}:), что и источник — запуск отменён."
+                "Копия пишется на тот же том ({letter}:), что и источник — запуск отменён."
             )));
+        }
+        match own_backup_core::dest_placement(&job, &job.dest_folder) {
+            own_backup_core::DestPlacement::Clear => {}
+            own_backup_core::DestPlacement::OnSource(source) => {
+                return Err(Status::failed_precondition(format!(
+                    "Папка назначения лежит на копируемом томе ({source}) — запуск отменён."
+                )))
+            }
+            own_backup_core::DestPlacement::CannotTell(why) => {
+                return Err(Status::failed_precondition(format!(
+                    "Нельзя убедиться, что копия не пишется на копируемый том: {why}. \
+                     Запуск отменён."
+                )))
+            }
         }
         // Asked and added in one step: two requests arriving together used to
         // be able to both find it absent and both add it.

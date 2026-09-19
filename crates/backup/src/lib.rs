@@ -31,6 +31,7 @@ pub mod restore_map;
 pub mod registry_win;
 pub mod san_policy;
 pub mod secrets;
+pub mod source_identity;
 pub mod sidecar;
 pub mod table_merge;
 pub mod table_writer;
