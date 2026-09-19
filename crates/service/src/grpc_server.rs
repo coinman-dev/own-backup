@@ -252,27 +252,47 @@ impl BackupService for BackupServiceImpl {
         json_reply(&saved)
     }
 
-    async fn delete_job(&self, req: Request<DeleteJobRequest>) -> Result<Response<Empty>, Status> {
+    async fn delete_job(
+        &self,
+        req: Request<DeleteJobRequest>,
+    ) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
         let DeleteJobRequest { id, delete_files } = req.into_inner();
-        if delete_files {
-            // Erase the images this job wrote (image + adjacent `.obkm` sidecar).
-            // Best-effort: a missing file is fine; we never fail the delete on it.
-            for f in self.state.store.job_image_files(&id) {
-                let sc = own_backup_backup::sidecar_path_for(&f);
-                if let Err(e) = std::fs::remove_file(&f) {
-                    if e.kind() != std::io::ErrorKind::NotFound {
-                        tracing::warn!(file = %f.display(), error = %e, "delete_job: could not remove image file");
-                    }
-                }
-                let _ = std::fs::remove_file(&sc);
-            }
+
+        // A run in flight is writing into the very files this is about to
+        // delete. Deleting them under it is not "best effort", it is pulling
+        // the floor out (audit AUD-09). The user is told to stop it first;
+        // cancelling on their behalf would throw away a backup they may be
+        // minutes from finishing.
+        let queue = self.state.queue.snapshot();
+        if queue.current.as_deref() == Some(id.as_str()) {
+            return Err(Status::failed_precondition(
+                "Задание сейчас выполняется. Остановите его и повторите удаление.",
+            ));
         }
+        // Waiting in the queue is a different matter — nothing has started, so
+        // it is simply taken out before the job goes.
+        if self.state.queue.cancel_pending(&id) {
+            tracing::info!(job = %id, "delete_job: taken out of the queue first");
+        }
+
+        let report = if delete_files {
+            match self.state.store.get(&id) {
+                Some(job) => own_backup_core::delete_job_files(&self.state.store, &job),
+                None => own_backup_core::JobFilesDeleted::default(),
+            }
+        } else {
+            own_backup_core::JobFilesDeleted::default()
+        };
+        for (path, why) in &report.kept {
+            tracing::warn!(job = %id, path = %path, reason = %why, "delete_job: left on disk");
+        }
+
         self.state
             .store
             .delete(&id)
             .map_err(|e| Status::internal(format!("Задание не удалено: {e}")))?;
-        Ok(Response::new(Empty {}))
+        json_reply(&report)
     }
 
     async fn new_job_template(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {

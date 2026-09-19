@@ -348,6 +348,24 @@ impl Default for AdvancedConfig {
     }
 }
 
+/// One image a run wrote, with the source it came from.
+///
+/// Kept per volume so "everything this job produced" is answerable from the
+/// history for a multi-volume job, not just for its first volume (audit
+/// AUD-09).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct RunImage {
+    /// The source volume/device this image is a copy of.
+    pub source: String,
+    pub image_path: String,
+    /// The chain's full backup this image belongs to (== `image_path` for a
+    /// full).
+    pub base_image_path: String,
+    /// full | incremental | differential
+    pub kind: String,
+}
+
 /// A single completed (or failed) run — feeds the dashboard and Activity.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -390,6 +408,16 @@ pub struct JobRun {
     /// with "Исключено файлов: 0" over twelve rules that were never applied.
     #[serde(default)]
     pub file_scan_skipped: String,
+    /// Every image this run produced — one per source volume.
+    ///
+    /// `image_path` and `base_image_path` above describe only the FIRST volume
+    /// (they drive the single-value dashboard fields). A two-volume job
+    /// therefore had half its output recorded nowhere, and "delete the job's
+    /// copies" left the second volume's images on disk (audit AUD-09). They
+    /// stay as they are — the dashboard wants one answer, and runs recorded
+    /// before this field existed have nothing else.
+    #[serde(default)]
+    pub images: Vec<RunImage>,
     /// Increments consolidation folded into their base after this run.
     ///
     /// Worth surfacing rather than leaving in the log: it is the one step that
@@ -624,11 +652,12 @@ impl JobStore {
         Ok(())
     }
 
-    /// Distinct image files this job has produced, gathered from its recorded
-    /// run history plus its last run, for the "delete related files" option.
-    /// Best-effort and precise: only paths the app itself wrote are returned (no
-    /// wildcard folder sweep), so an unrelated file can never be deleted. Bounded
-    /// by the retained activity history ([`ACTIVITY_CAP`] runs).
+    /// Distinct image files this job's own history mentions.
+    ///
+    /// This is the *narrow* answer and it is deliberately kept: only paths the
+    /// app itself wrote are returned, so no wildcard sweep can ever reach an
+    /// unrelated file. But it is bounded by [`ACTIVITY_CAP`] runs, so it is not
+    /// the whole answer — see [`job_files`], which asks the images themselves.
     pub fn job_image_files(&self, job_id: &str) -> Vec<PathBuf> {
         let mut set = std::collections::BTreeSet::new();
         let add = |p: &str, set: &mut std::collections::BTreeSet<PathBuf>| {
@@ -641,6 +670,10 @@ impl JobStore {
             for r in activity.iter().filter(|r| r.job_id == job_id) {
                 add(&r.image_path, &mut set);
                 add(&r.base_image_path, &mut set);
+                for i in &r.images {
+                    add(&i.image_path, &mut set);
+                    add(&i.base_image_path, &mut set);
+                }
             }
         }
         {
@@ -648,9 +681,21 @@ impl JobStore {
             if let Some(run) = jobs.iter().find(|j| j.id == job_id).and_then(|j| j.last_run.as_ref()) {
                 add(&run.image_path, &mut set);
                 add(&run.base_image_path, &mut set);
+                for i in &run.images {
+                    add(&i.image_path, &mut set);
+                    add(&i.base_image_path, &mut set);
+                }
             }
         }
         set.into_iter().collect()
+    }
+
+    /// Has the activity journal reached its cap, i.e. are there runs it can no
+    /// longer tell us about? Used to say out loud that "everything this job
+    /// wrote" may not be everything.
+    pub fn history_is_truncated(&self, job_id: &str) -> bool {
+        let activity = self.activity.lock().unwrap();
+        activity.len() >= ACTIVITY_CAP && activity.iter().any(|r| r.job_id == job_id)
     }
 
     /// Record a finished run.
@@ -801,8 +846,12 @@ impl RunQueue {
 
     /// Take a job out of the queue while it is still waiting. A running job is
     /// not touched — stopping that one is cancellation, not dequeuing.
-    pub fn cancel_pending(&self, id: &str) {
-        self.state.lock().unwrap().pending.retain(|j| j != id);
+    /// Returns whether it was actually waiting.
+    pub fn cancel_pending(&self, id: &str) -> bool {
+        let mut q = self.state.lock().unwrap();
+        let before = q.pending.len();
+        q.pending.retain(|j| j != id);
+        q.pending.len() != before
     }
 }
 
@@ -1502,6 +1551,119 @@ fn apply_retention(job: &Job, protected: &[(String, PathBuf)]) {
     }
 }
 
+/// What "delete the job's copies" actually did, in the words the user is shown.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct JobFilesDeleted {
+    pub deleted: Vec<String>,
+    /// Things still on disk, each with the reason.
+    pub kept: Vec<(String, String)>,
+    /// The folders that were searched for this job's images.
+    pub folders: Vec<String>,
+    /// True when the activity journal is at its cap, so a destination the job
+    /// used long ago may not be in the list above at all. Said out loud rather
+    /// than presented as a clean sweep (audit AUD-09).
+    pub history_truncated: bool,
+}
+
+impl JobFilesDeleted {
+    pub fn complete(&self) -> bool {
+        self.kept.is_empty() && !self.history_truncated
+    }
+}
+
+/// Delete every copy a job produced, and report exactly what happened.
+///
+/// The old version asked the GUI's activity journal — capped at
+/// [`ACTIVITY_CAP`] runs, and for a multi-volume job recording only the FIRST
+/// volume's image — and then removed each path with `remove_file`, one at a
+/// time, in no particular order (audit AUD-09). Older versions and every
+/// non-first volume stayed on disk, and a differencing child could lose its
+/// base while surviving itself.
+///
+/// The reliable question is not "what does the journal remember" but "which
+/// images say they belong to this job": that is written in each image's own
+/// sidecar, it covers every volume and every run, and it is what retention
+/// has always used. So the folders are scanned by sidecar and deleted as
+/// CHAINS, with the leaf-first ordering and the failure rules from AUD-05.
+///
+/// What cannot be answered from here is a destination the job used before the
+/// journal scrolled past it. Rather than pretend, the report says the history
+/// was truncated.
+pub fn delete_job_files(store: &JobStore, job: &Job) -> JobFilesDeleted {
+    use own_backup_backup::chains::{delete_chain, list_job_chains};
+
+    let mut out = JobFilesDeleted { history_truncated: store.history_is_truncated(&job.id), ..Default::default() };
+
+    // Every folder we have reason to think this job wrote into: the one it is
+    // configured for now, plus the parents of everything its history names.
+    let from_history = store.job_image_files(&job.id);
+    let mut folders: Vec<PathBuf> = Vec::new();
+    let mut push_folder = |p: PathBuf, folders: &mut Vec<PathBuf>| {
+        if !p.as_os_str().is_empty() && !folders.contains(&p) {
+            folders.push(p);
+        }
+    };
+    push_folder(PathBuf::from(&job.dest_folder), &mut folders);
+    for f in &from_history {
+        if let Some(parent) = f.parent() {
+            push_folder(parent.to_path_buf(), &mut folders);
+        }
+    }
+    out.folders = folders.iter().map(|f| f.display().to_string()).collect();
+
+    for folder in &folders {
+        let chains = match list_job_chains(folder, &job.id) {
+            Ok(c) => c,
+            Err(e) => {
+                out.kept.push((folder.display().to_string(), e.to_string()));
+                continue;
+            }
+        };
+        for chain in &chains {
+            match delete_chain(chain) {
+                Ok(report) => {
+                    out.deleted.extend(report.deleted.iter().map(|p| p.display().to_string()));
+                    out.kept.extend(
+                        report.kept.iter().map(|(p, why)| (p.display().to_string(), why.clone())),
+                    );
+                    out.kept.extend(report.orphan_sidecars.iter().map(|p| {
+                        (p.display().to_string(), "образ удалён, а его описание осталось".into())
+                    }));
+                }
+                Err(e) => {
+                    let base = chain
+                        .images
+                        .first()
+                        .map(|i| i.image_path.display().to_string())
+                        .unwrap_or_default();
+                    out.kept.push((base, e.to_string()));
+                }
+            }
+        }
+    }
+
+    // Anything the history names that the chain scan did not reach: an image
+    // whose sidecar has become unreadable, or one left in a folder that holds
+    // nothing else of ours. Still precise — these are paths this job wrote.
+    for path in from_history {
+        if !path.exists() {
+            continue;
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => {
+                out.deleted.push(path.display().to_string());
+                let sidecar = own_backup_backup::sidecar_path_for(&path);
+                if std::fs::remove_file(&sidecar).is_ok() {
+                    out.deleted.push(sidecar.display().to_string());
+                }
+            }
+            Err(e) => out.kept.push((path.display().to_string(), e.to_string())),
+        }
+    }
+
+    out
+}
+
 /// Finish whatever a crash left half-done in the destination folder — before
 /// anything reads or plans against the chains in it.
 ///
@@ -1960,24 +2122,34 @@ async fn perform_backup(
                 };
                 kinds.push(actual_kind);
 
+                // Where this volume's copy went, and which chain it joined.
+                // Computed for EVERY volume: the two single-value fields below
+                // describe the first one only, and for years that was the whole
+                // record of a multi-volume run (audit AUD-09).
+                let base_of_this_volume = match summary.backup_kind {
+                    BT::Full => image_path.display().to_string(),
+                    _ => plan
+                        .base_image
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default(),
+                };
+                run.images.push(RunImage {
+                    source: device.clone(),
+                    image_path: image_path.display().to_string(),
+                    base_image_path: base_of_this_volume.clone(),
+                    kind: actual_kind.into(),
+                });
+
                 // The primary (first) volume drives the single-value dashboard
                 // fields (image to open, chain base, increment index).
                 if idx == 0 {
                     run.image_path = image_path.display().to_string();
-                    match summary.backup_kind {
-                        BT::Full => {
-                            run.base_image_path = image_path.display().to_string();
-                            run.increment_index = 0;
-                        }
-                        _ => {
-                            run.base_image_path = plan
-                                .base_image
-                                .as_ref()
-                                .map(|p| p.display().to_string())
-                                .unwrap_or_default();
-                            run.increment_index = plan.increment_index;
-                        }
-                    }
+                    run.base_image_path = base_of_this_volume;
+                    run.increment_index = match summary.backup_kind {
+                        BT::Full => 0,
+                        _ => plan.increment_index,
+                    };
                 }
                 // Retention matches images by their file-name token (label for
                 // encrypted volumes), not the device password key.
@@ -2286,6 +2458,15 @@ async fn perform_disk_backup(
                 }
                 run.increment_index = plan.increment_index;
             }
+            // One image for the whole disk, but the list is filled in all the
+            // same: "everything this job wrote" must be answerable the same way
+            // whatever the job's shape (audit AUD-09).
+            run.images.push(RunImage {
+                source: format!("disk{}", ds.disk_number),
+                image_path: run.image_path.clone(),
+                base_image_path: run.base_image_path.clone(),
+                kind: kind_str.into(),
+            });
             info!(job = %job.name, image = %image_path.display(), kind = kind_str,
                 partitions = summary.partitions, unchanged = summary.blocks_unchanged,
                 "Whole-disk backup complete");
@@ -2470,6 +2651,12 @@ async fn perform_backup(
             Ok(Ok((summary, verify_cancelled))) => {
                 run.image_path = summary.image_path.display().to_string();
                 run.base_image_path = run.image_path.clone();
+                run.images.push(RunImage {
+                    source: device.clone(),
+                    image_path: run.image_path.clone(),
+                    base_image_path: run.image_path.clone(),
+                    kind: "full".into(),
+                });
                 run.source_bytes += summary.source_bytes;
                 run.bytes_copied += summary.bytes_copied;
                 run.used_blocks += summary.used_blocks;
@@ -3235,6 +3422,7 @@ mod tests {
 
     /// Образ с внешним sidecar, принадлежащий заданию `job_id`.
     fn put_image_of_job(dir: &Path, name: &str, job_id: &str) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
         use own_backup_backup::sidecar::{write_sidecar, SidecarInfo};
         let image = dir.join(name);
         std::fs::write(&image, b"img").unwrap();
@@ -3341,5 +3529,144 @@ mod tests {
         let mut job = Job::default();
         job.id = "job1".into();
         assert!(recover_interrupted_consolidations(&job, dir.path()).is_some());
+    }
+
+    // --- «Удалить задание вместе с копиями» (аудит AUD-09) ------------------
+    //
+    // Вопрос «что это задание записало» раньше задавали журналу интерфейса:
+    // он обрезан до ACTIVITY_CAP запусков, а у многотомного задания в нём
+    // лежал только образ ПЕРВОГО тома. Надёжный источник — сами образы: в
+    // sidecar каждого написано, чьё это.
+
+    fn a_store(dir: &Path) -> Arc<JobStore> {
+        JobStore::load(dir)
+    }
+
+    /// Копия второго тома тоже уходит. Раньше она оставалась на диске:
+    /// её пути не было ни в одном поле JobRun.
+    #[test]
+    fn every_volume_of_a_job_is_found_not_just_the_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        let store = a_store(dir.path());
+
+        put_image_of_job(&dest, "j_C_full_1.vhdx", "job1");
+        put_image_of_job(&dest, "j_D_full_1.vhdx", "job1");
+
+        let mut job = Job::default();
+        job.id = "job1".into();
+        job.dest_folder = dest.display().to_string();
+
+        let report = delete_job_files(&store, &job);
+        assert!(report.complete(), "{report:?}");
+        assert!(!dest.join("j_C_full_1.vhdx").exists());
+        assert!(!dest.join("j_D_full_1.vhdx").exists(), "второй том тоже принадлежит заданию");
+    }
+
+    /// Чужие копии в той же папке не трогаются — принадлежность читается из
+    /// sidecar, а не угадывается по имени файла.
+    #[test]
+    fn copies_of_another_job_in_the_same_folder_are_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        let store = a_store(dir.path());
+
+        put_image_of_job(&dest, "mine_full_1.vhdx", "job1");
+        put_image_of_job(&dest, "theirs_full_1.vhdx", "job2");
+
+        let mut job = Job::default();
+        job.id = "job1".into();
+        job.dest_folder = dest.display().to_string();
+
+        delete_job_files(&store, &job);
+        assert!(!dest.join("mine_full_1.vhdx").exists());
+        assert!(dest.join("theirs_full_1.vhdx").exists(), "чужое остаётся нетронутым");
+    }
+
+    /// Папка, в которую задание писало РАНЬШЕ, известна только из журнала —
+    /// и она тоже просматривается.
+    #[test]
+    fn a_folder_the_job_used_earlier_is_searched_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("old");
+        let new = dir.path().join("new");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        let store = a_store(dir.path());
+
+        let old_image = put_image_of_job(&old, "j_C_full_1.vhdx", "job1");
+        put_image_of_job(&new, "j_C_full_2.vhdx", "job1");
+
+        let mut job = Job::default();
+        job.id = "job1".into();
+        job.dest_folder = new.display().to_string();
+        store.upsert(job.clone()).unwrap();
+        store
+            .record_run(JobRun {
+                job_id: "job1".into(),
+                status: "success".into(),
+                image_path: old_image.display().to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let report = delete_job_files(&store, &store.get("job1").unwrap());
+        assert!(!old.join("j_C_full_1.vhdx").exists(), "старая папка: {report:?}");
+        assert!(!new.join("j_C_full_2.vhdx").exists(), "новая папка: {report:?}");
+    }
+
+    /// Занятый файл не удаляется — и об этом говорится, а не умалчивается.
+    #[test]
+    fn a_file_that_cannot_go_is_named_in_the_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        let store = a_store(dir.path());
+
+        let image = put_image_of_job(&dest, "j_C_full_1.vhdx", "job1");
+        std::fs::remove_file(&image).unwrap();
+        std::fs::create_dir(&image).unwrap(); // модель «удалить нельзя»
+
+        let mut job = Job::default();
+        job.id = "job1".into();
+        job.dest_folder = dest.display().to_string();
+
+        let report = delete_job_files(&store, &job);
+        assert!(!report.complete(), "{report:?}");
+        assert!(report.kept.iter().any(|(p, _)| p.contains("j_C_full_1.vhdx")), "{report:?}");
+    }
+
+    /// Каждый том запуска записывается в history, а не только первый.
+    #[test]
+    fn a_runs_images_are_all_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = a_store(dir.path());
+        store
+            .record_run(JobRun {
+                job_id: "job1".into(),
+                image_path: "/dest/first.vhdx".into(),
+                base_image_path: "/dest/first.vhdx".into(),
+                images: vec![
+                    RunImage {
+                        source: "C:".into(),
+                        image_path: "/dest/first.vhdx".into(),
+                        base_image_path: "/dest/first.vhdx".into(),
+                        kind: "full".into(),
+                    },
+                    RunImage {
+                        source: "D:".into(),
+                        image_path: "/dest/second.vhdx".into(),
+                        base_image_path: "/dest/second.vhdx".into(),
+                        kind: "full".into(),
+                    },
+                ],
+                ..Default::default()
+            })
+            .unwrap();
+
+        let found = store.job_image_files("job1");
+        assert!(found.contains(&PathBuf::from("/dest/second.vhdx")), "{found:?}");
     }
 }

@@ -4,7 +4,7 @@
 
 import { listen } from '@tauri-apps/api/event';
 import { api } from './api';
-import type { Job, JobRun, JobProgress, QueueSnapshot, DecryptResult } from './types';
+import type { Job, JobRun, JobProgress, QueueSnapshot, DecryptResult, JobFilesDeleted } from './types';
 
 /** What a running job's view needs but the events do not repeat: when the
  *  current phase started and a short window of recent throughput for the
@@ -128,9 +128,16 @@ export async function saveJob(job: Job): Promise<Job> {
   return saved;
 }
 
-export async function deleteJob(id: string, deleteFiles = false): Promise<void> {
-  await api.deleteBackupJob(id, deleteFiles);
+/** Delete a job, optionally with its copies. Returns what actually went and
+ *  what stayed — "delete the files" is not a promise that can always be kept,
+ *  and saying nothing about the leftovers is how they go unnoticed. */
+export async function deleteJob(
+  id: string,
+  deleteFiles = false,
+): Promise<JobFilesDeleted> {
+  const report = await api.deleteBackupJob(id, deleteFiles);
   await reloadJobs();
+  return report;
 }
 
 /** Unlock an encrypted source and read its inner volume label / used bytes.

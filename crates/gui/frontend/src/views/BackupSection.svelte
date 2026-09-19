@@ -24,6 +24,8 @@
   // Delete-confirmation modal.
   let deleteId: string | null = $state(null);
   let deleteFiles = $state(false);
+  /// Что помешало удалить задание или его копии — держится до следующей попытки.
+  let deleteError: string | null = $state(null);
   const deleteJobObj = $derived(jobs.list.find((j) => j.id === deleteId) ?? null);
 
   const selectedJob = $derived(jobs.list.find((j) => j.id === selectedId) ?? null);
@@ -125,7 +127,27 @@
   }
   async function confirmDelete() {
     if (!deleteId) return;
-    await deleteJob(deleteId, deleteFiles);
+    deleteError = null;
+    try {
+      const report = await deleteJob(deleteId, deleteFiles);
+      // «Удалить вместе с копиями» — не обещание, которое всегда выполнимо:
+      // файл может быть занят, папка недоступна, а старую папку назначения
+      // журнал мог уже забыть. Промолчать об этом — значит оставить копии
+      // лежать там, где пользователь уверен, что их нет.
+      if (deleteFiles && !report.complete) {
+        const lines = report.kept.map(([path, why]) => `${path} — ${why}`);
+        if (report.history_truncated) {
+          lines.push(
+            'Журнал запусков переполнен: папки, которыми задание пользовалось раньше, ' +
+              'могли остаться не просмотренными.',
+          );
+        }
+        deleteError = 'Задание удалено, но не все копии:\n' + lines.join('\n');
+      }
+    } catch (e) {
+      deleteError = String(e);
+      return; // окно остаётся открытым: задание не удалено
+    }
     deleteId = null;
   }
 
@@ -238,7 +260,22 @@
   {#if deleteFiles}
     <p class="del-warn">Файлы образов этой копии будут удалены с диска безвозвратно.</p>
   {/if}
+  {#if deleteError}
+    <p class="del-left">{deleteError}</p>
+  {/if}
 </Modal>
+
+{#if deleteError && deleteId === null}
+  <Modal
+    open
+    title="Копии удалены не полностью"
+    confirmLabel="Понятно"
+    onClose={() => (deleteError = null)}
+    onConfirm={() => (deleteError = null)}
+  >
+    <p class="del-left">{deleteError}</p>
+  </Modal>
+{/if}
 
 <style>
   .layout { display: flex; height: 100%; }
@@ -256,6 +293,7 @@
   .del-q { font-size: 14px; color: var(--head); margin: 0 0 16px; }
   .del-files { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--head); cursor: pointer; }
   .del-warn { font-size: 13px; color: var(--error, #d84a4a); font-weight: 600; margin: 12px 0 0; }
+  .del-left { font-size: 13px; color: var(--error, #d84a4a); margin: 12px 0 0; white-space: pre-wrap; max-height: 240px; overflow: auto; }
   .jobs-list { flex: 1; overflow: auto; padding: 8px 8px; }
   .empty-list { text-align: center; color: var(--text-muted); font-size: 13px; padding: 30px 10px; line-height: 1.6; }
   .job-item { width: 100%; display: flex; align-items: center; gap: 10px; padding: 10px 8px; border: 1px solid transparent; border-radius: 6px; background: none; cursor: pointer; margin-bottom: 4px; text-align: left; font-family: var(--font); }

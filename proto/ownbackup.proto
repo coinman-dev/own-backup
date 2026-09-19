@@ -14,7 +14,7 @@ service BackupService {
   rpc ListJobs(Empty) returns (JsonReply);           // JSON: [Job]
   rpc GetJob(IdRequest) returns (JsonReply);         // JSON: Job | null
   rpc SaveJob(JsonRequest) returns (JsonReply);      // in: Job JSON -> out: stored Job JSON
-  rpc DeleteJob(DeleteJobRequest) returns (Empty);
+  rpc DeleteJob(DeleteJobRequest) returns (JsonReply);  // JSON: JobFilesDeleted
   rpc NewJobTemplate(Empty) returns (JsonReply);     // JSON: Job (default template)
   rpc DefaultExclusions(Empty) returns (JsonReply);  // JSON: [string]
 

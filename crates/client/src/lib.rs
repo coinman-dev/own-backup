@@ -205,15 +205,24 @@ impl BackupClient {
         parse(&reply.json)
     }
 
-    pub async fn delete_job(&mut self, id: &str, delete_files: bool) -> Result<()> {
-        self.inner
+    /// Delete a job, optionally with the copies it produced. The reply says
+    /// what was actually removed and what stayed — "delete the files" is not a
+    /// promise anyone can keep unconditionally (audit AUD-09).
+    pub async fn delete_job(
+        &mut self,
+        id: &str,
+        delete_files: bool,
+    ) -> Result<own_backup_core::JobFilesDeleted> {
+        let reply = self
+            .inner
             .delete_job(self.request(proto::DeleteJobRequest {
                 id: id.into(),
                 delete_files,
             }))
             .await
-            .map_err(status)?;
-        Ok(())
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
     }
 
     pub async fn new_job_template(&mut self) -> Result<Job> {

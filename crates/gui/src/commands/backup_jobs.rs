@@ -49,7 +49,7 @@ pub async fn delete_backup_job(
     state: State<'_, GuiState>,
     id: String,
     delete_files: bool,
-) -> Result<(), String> {
+) -> Result<own_backup_core::JobFilesDeleted, String> {
     state.link.client().await?.delete_job(&id, delete_files).await
 }
 

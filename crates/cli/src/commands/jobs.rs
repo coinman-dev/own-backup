@@ -320,11 +320,23 @@ pub async fn run(args: JobsArgs) -> Result<()> {
             println!("Изменено: {} — {}", saved.id, saved.name);
         }
         JobsCommand::Delete { id, delete_files } => {
-            client.delete_job(&id, delete_files).await.map_err(cfg)?;
+            let report = client.delete_job(&id, delete_files).await.map_err(cfg)?;
             println!(
                 "Задание {id} удалено{}.",
                 if delete_files { " вместе с копиями" } else { ", копии остались на месте" }
             );
+            if delete_files {
+                println!("Удалено файлов: {}", report.deleted.len());
+                for (path, why) in &report.kept {
+                    println!("  ОСТАЛОСЬ: {path} — {why}");
+                }
+                if report.history_truncated {
+                    println!(
+                        "  Журнал запусков переполнен, поэтому папки, которыми задание \
+                         пользовалось раньше, могли остаться не просмотренными."
+                    );
+                }
+            }
         }
     }
     Ok(())

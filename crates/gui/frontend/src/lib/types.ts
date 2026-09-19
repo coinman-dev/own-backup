@@ -416,8 +416,32 @@ export interface JobRun {
   /** Why that walk did not run; '' when it did. Explains both the missing
    *  breakdown and exclusion rules that were never applied. */
   file_scan_skipped: string;
+  /** Every image this run produced, one per source volume. `image_path` and
+   *  `base_image_path` above describe only the first. Empty in runs recorded
+   *  before this field existed. */
+  images: RunImage[];
   /** Increments folded into their base after this run (sliding window). */
   consolidated_increments: number;
+}
+
+/** One image a run wrote, with the source it is a copy of. */
+export interface RunImage {
+  source: string;
+  image_path: string;
+  base_image_path: string;
+  kind: string;
+}
+
+/** What "delete the job's copies" actually managed to do. */
+export interface JobFilesDeleted {
+  deleted: string[];
+  /** [path, reason] for everything still on disk. */
+  kept: [string, string][];
+  /** Folders that were searched for this job's images. */
+  folders: string[];
+  /** The activity journal is full, so a destination the job used long ago may
+   *  not have been searched at all. */
+  history_truncated: boolean;
 }
 
 /** A whole-disk (`.obdm`) backup discovered for restore. */
