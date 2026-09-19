@@ -11,6 +11,7 @@
 //! Tauri. Runs are serialized through an mpsc queue processed by one worker,
 //! so a second "run" while a backup is in progress is queued, not rejected.
 
+pub mod busy;
 pub mod restore_exec;
 
 use std::collections::VecDeque;
@@ -1009,6 +1010,7 @@ pub async fn run_queue_worker(
     sink: Arc<dyn EventSink>,
     store: Arc<JobStore>,
     queue: RunQueue,
+    busy: Arc<crate::busy::Busy>,
     cancel: Arc<AtomicBool>,
     passwords: Arc<dyn PasswordResolver>,
     mut rx: UnboundedReceiver<String>,
@@ -1029,6 +1031,17 @@ pub async fn run_queue_worker(
 
         sink.queue_changed(queue.snapshot());
         info!(job = %job.name, "Starting queued backup");
+
+        // A copy is a destructive operation on the destination folder: it
+        // writes images, merges them and runs retention over them. It takes
+        // the machine's one slot like everything else, and WAITS for it
+        // rather than failing — a scheduled copy that happens to collide
+        // with a restore should run afterwards, not be dropped (audit
+        // AUD-02). Released by Drop at the end of the iteration, including
+        // if the engine panics.
+        let _slot = busy
+            .acquire(crate::busy::Doing::new("резервное копирование", job.name.clone()))
+            .await;
 
         cancel.store(false, Ordering::SeqCst);
         let last_success = store.last_success(&job.id);

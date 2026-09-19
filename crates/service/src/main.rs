@@ -464,6 +464,9 @@ pub async fn run_main_loop(
     // actually drives backups.
     let store = own_backup_core::JobStore::load(&config.data_dir);
     let queue = own_backup_core::RunQueue::new();
+    // Everything destructive — a copy, a restore, a verify, a read-write
+    // mount, deleting a job's images — goes through this one slot (AUD-02).
+    let busy = own_backup_core::busy::Busy::new();
     let (job_tx, job_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (events, _bootstrap_rx) =
@@ -478,6 +481,7 @@ pub async fn run_main_loop(
         sink,
         store.clone(),
         queue.clone(),
+        busy.clone(),
         cancel.clone(),
         passwords.clone(),
         job_rx,
@@ -495,7 +499,8 @@ pub async fn run_main_loop(
         os_rx,
     );
 
-    let state = AppState::new(config.clone(), store, queue, job_tx, cancel, events, passwords);
+    let state =
+        AppState::new(config.clone(), store, queue, busy, job_tx, cancel, events, passwords);
 
     // Production transport (no listening TCP port, so no local process can reach
     // the privileged service by opening a socket): Unix Domain Socket on Linux,

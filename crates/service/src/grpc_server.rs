@@ -37,6 +37,37 @@ impl BackupServiceImpl {
     pub fn into_service(self) -> BackupServiceServer<BackupServiceImpl> {
         BackupServiceServer::new(self)
     }
+
+    /// Take the machine for one destructive operation, or turn the caller away
+    /// naming who has it (audit AUD-02).
+    ///
+    /// `failed_precondition` and not `unavailable`: nothing is broken, the
+    /// answer is simply "not now", and a client can retry when the thing that
+    /// is running has ended.
+    fn reserve(
+        &self,
+        what: &str,
+        which: &str,
+    ) -> Result<own_backup_core::busy::Reservation, Status> {
+        self.state
+            .busy
+            .reserve(own_backup_core::busy::Doing::new(what, which))
+            .map_err(|held| Status::failed_precondition(held.refusal()))
+    }
+
+    /// The same, for an operation the client already has an id for — a restore
+    /// plan is cancelled by its plan id, and that is what the window knows.
+    fn reserve_with_id(
+        &self,
+        what: &str,
+        which: &str,
+        id: uuid::Uuid,
+    ) -> Result<own_backup_core::busy::Reservation, Status> {
+        self.state
+            .busy
+            .reserve(own_backup_core::busy::Doing::with_id(what, which, id))
+            .map_err(|held| Status::failed_precondition(held.refusal()))
+    }
 }
 
 /// Bridges core orchestration events onto the broadcast channel that
@@ -278,7 +309,13 @@ impl BackupService for BackupServiceImpl {
 
         let report = if delete_files {
             match self.state.store.get(&id) {
-                Some(job) => own_backup_core::delete_job_files(&self.state.store, &job),
+                Some(job) => {
+                    // Deleting a job's images is destructive work on the same
+                    // folders a backup writes and a restore reads, so it takes
+                    // the machine's slot like the rest (audit AUD-02).
+                    let _slot = self.reserve("удаление копий", &job.name)?;
+                    own_backup_core::delete_job_files(&self.state.store, &job)
+                }
                 None => own_backup_core::JobFilesDeleted::default(),
             }
         } else {
@@ -532,7 +569,6 @@ impl BackupService for BackupServiceImpl {
         check_auth(&req, &self.service_token)?;
         #[cfg(target_os = "windows")]
         {
-            use std::sync::atomic::Ordering;
             use own_backup_backup::engine_win::{restore_volume, VolumeRestoreRequest};
             use own_backup_common::engine_dto::{EngineProgress, RestoreSummaryDto};
 
@@ -544,8 +580,12 @@ impl BackupService for BackupServiceImpl {
             let p: In = serde_json::from_str(&req.into_inner().json)
                 .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
 
-            self.state.engine_cancel.store(false, Ordering::SeqCst);
-            let cancel = self.state.engine_cancel.clone();
+            // The machine's one slot. Writing a volume back cannot share the
+            // machine with a backup, another restore or a verify (audit
+            // AUD-02); the guard travels into the blocking closure so it is
+            // released even if the engine panics there.
+            let slot = self.reserve("восстановление тома", &p.target)?;
+            let cancel = slot.cancel();
             let events = self.state.events.clone();
             let request = VolumeRestoreRequest {
                 image_path: std::path::PathBuf::from(&p.image_path),
@@ -554,10 +594,11 @@ impl BackupService for BackupServiceImpl {
             };
 
             let summary = tokio::task::spawn_blocking(move || {
+                let _slot = slot;
                 let mut last_permille = u64::MAX;
                 let mut last_emit = std::time::Instant::now();
                 restore_volume(&request, |pr| {
-                    if cancel.swap(false, Ordering::SeqCst) {
+                    if cancel.is_cancelled() {
                         return Err(own_backup_common::OwnBackupError::Cancelled);
                     }
                     let permille = if pr.blocks_total > 0 {
@@ -604,7 +645,6 @@ impl BackupService for BackupServiceImpl {
         check_auth(&req, &self.service_token)?;
         #[cfg(target_os = "windows")]
         {
-            use std::sync::atomic::Ordering;
             use own_backup_backup::engine_win::verify_image;
             use own_backup_common::engine_dto::{EngineProgress, VerifySummaryDto};
 
@@ -615,16 +655,20 @@ impl BackupService for BackupServiceImpl {
             let p: In = serde_json::from_str(&req.into_inner().json)
                 .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
 
-            self.state.engine_cancel.store(false, Ordering::SeqCst);
-            let cancel = self.state.engine_cancel.clone();
+            // A verify only reads — but it reads a chain that a consolidation
+            // or a retention pass may be rewriting, and reading one of those
+            // mid-change is how a good image gets reported as damaged.
+            let slot = self.reserve("проверка образа", &p.image_path)?;
+            let cancel = slot.cancel();
             let events = self.state.events.clone();
             let path = std::path::PathBuf::from(&p.image_path);
 
             let summary = tokio::task::spawn_blocking(move || {
+                let _slot = slot;
                 let mut last_permille = u64::MAX;
                 let mut last_emit = std::time::Instant::now();
                 verify_image(&path, |done, total| {
-                    if cancel.swap(false, Ordering::SeqCst) {
+                    if cancel.is_cancelled() {
                         return Err(own_backup_common::OwnBackupError::Cancelled);
                     }
                     let permille = if total > 0 { done * 1000 / total } else { 0 };
@@ -681,10 +725,21 @@ impl BackupService for BackupServiceImpl {
             let path = std::path::PathBuf::from(&p.image_path);
             let rw = p.read_write.unwrap_or(false);
             let image_path = p.image_path.clone();
-            let mount_point = tokio::task::spawn_blocking(move || mount_image(&path, rw))
-                .await
-                .map_err(|e| Status::internal(format!("mount task panicked: {e}")))?
-                .map_err(|e| Status::internal(e.to_string()))?;
+            // Attaching an image while a chain of ours is being consolidated or
+            // deleted would hand the mount a file that changes underneath it
+            // (audit AUD-02). The slot is held for the duration of the ATTACH
+            // only — a mount lives on afterwards, and blocking every backup for
+            // as long as a window is open would be worse than the problem.
+            // What protects a live mount is the check consolidation already
+            // makes: it refuses an image that has a mount beside it.
+            let slot = self.reserve("подключение образа", &p.image_path)?;
+            let mount_point = tokio::task::spawn_blocking(move || {
+                let _slot = slot;
+                mount_image(&path, rw)
+            })
+            .await
+            .map_err(|e| Status::internal(format!("mount task panicked: {e}")))?
+            .map_err(|e| Status::internal(e.to_string()))?;
 
             {
                 let mut mounts = self.state.active_mounts.lock().unwrap();
@@ -1059,7 +1114,6 @@ impl BackupService for BackupServiceImpl {
         check_auth(&req, &self.service_token)?;
         #[cfg(target_os = "windows")]
         {
-            use std::sync::atomic::Ordering;
             use own_backup_backup::engine_win::{restore_disk, DiskRestoreRequest};
             use own_backup_common::engine_dto::{DiskRestoreProgressDto, DiskRestoreSummaryDto};
 
@@ -1079,8 +1133,9 @@ impl BackupService for BackupServiceImpl {
                     .map_err(|e| Status::failed_precondition(e.to_string()))?;
             }
 
-            self.state.engine_cancel.store(false, Ordering::SeqCst);
-            let cancel = self.state.engine_cancel.clone();
+            let slot =
+                self.reserve("восстановление диска", &format!("диск {}", p.target_disk))?;
+            let cancel = slot.cancel();
             let events = self.state.events.clone();
             let request = DiskRestoreRequest {
                 manifest_path: std::path::PathBuf::from(&p.manifest_path),
@@ -1089,9 +1144,10 @@ impl BackupService for BackupServiceImpl {
             };
 
             let summary = tokio::task::spawn_blocking(move || {
+                let _slot = slot;
                 let mut last = String::new();
                 restore_disk(&request, |pr| {
-                    if cancel.swap(false, Ordering::SeqCst) {
+                    if cancel.is_cancelled() {
                         return Err(own_backup_common::OwnBackupError::Cancelled);
                     }
                     let percent = if pr.blocks_total > 0 {
@@ -1137,9 +1193,11 @@ impl BackupService for BackupServiceImpl {
 
     async fn cancel_engine_op(&self, req: Request<Empty>) -> Result<Response<Empty>, Status> {
         check_auth(&req, &self.service_token)?;
-        self.state
-            .engine_cancel
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        // Whatever is in the slot. There is no id here — this is the button
+        // that stops what the user can see — but the token belongs to that one
+        // run and is thrown away with it, so a late press cannot reach the
+        // next one (audit AUD-02).
+        self.state.busy.cancel_whatever_is_running();
         Ok(Response::new(Empty {}))
     }
 
@@ -1229,7 +1287,6 @@ impl BackupService for BackupServiceImpl {
         req: Request<JsonRequest>,
     ) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
-        use own_backup_common::cancel::CancelToken;
         use own_backup_common::restore_plan::RestorePlan;
         use own_backup_common::restore_state::RunStatus;
 
@@ -1252,27 +1309,29 @@ impl BackupService for BackupServiceImpl {
             })
             .map_err(|e| Status::invalid_argument(format!("bad plan JSON: {e}")))?;
 
-        // One restore at a time. Two plans writing the same disk would be a
-        // race with no possible good outcome.
-        if let Some(run) = self.state.restore_run.lock().unwrap().as_ref() {
-            if run.status == RunStatus::Running {
-                return Err(Status::failed_precondition(format!(
-                    "восстановление уже выполняется (план {})",
-                    run.plan_id
-                )));
-            }
-        }
-
-        // A fresh token per run: nothing is ever reset, so a cancel cannot leak
-        // from the previous run into this one (D18).
-        let cancel = CancelToken::new(plan.id);
-        *self.state.restore_cancel.lock().unwrap() = Some(cancel.clone());
+        // One destructive operation at a time, and the check IS the taking.
+        // The old version read `restore_run` under one lock and wrote the new
+        // state under another, so two requests arriving together could both
+        // find nothing running and both start (audit AUD-02). It also only
+        // knew about other RESTORES — a backup writing the same images was
+        // invisible to it.
+        //
+        // The token comes with the slot, addressed by plan id, so a cancel
+        // that arrives late cannot hit the run that started after it (D18).
+        let slot = self.reserve_with_id(
+            "восстановление",
+            &format!("диск {}", plan.target_disk),
+            plan.id,
+        )?;
+        let cancel = slot.cancel();
         let initial = own_backup_core::restore_exec::initial_state(&plan);
         *self.state.restore_run.lock().unwrap() = Some(initial.clone());
 
         let state = self.state.clone();
         let events = self.state.events.clone();
-        tokio::task::spawn_blocking(move || {
+        let plan_id = plan.id;
+        let task = tokio::task::spawn_blocking(move || {
+            let _slot = slot;
             let mut last_emit = std::time::Instant::now();
             let outcome = own_backup_core::restore_exec::execute_plan(&plan, &passphrases, &cancel, |run| {
                 *state.restore_run.lock().unwrap() = Some(run.clone());
@@ -1308,6 +1367,32 @@ impl BackupService for BackupServiceImpl {
                         json: serde_json::to_string(&*run).unwrap_or_default(),
                     });
                 }
+            }
+        });
+
+        // The handle used to be dropped here, so if the engine panicked the
+        // run stayed `Running` on screen until the service was restarted — and
+        // nothing ever said why (audit AUD-02, point 5). The slot itself is
+        // freed by the guard unwinding with the panic; what still needs saying
+        // is that the run ended, and how.
+        let watcher_state = self.state.clone();
+        let watcher_events = self.state.events.clone();
+        tokio::spawn(async move {
+            let Err(e) = task.await else { return };
+            tracing::error!(error = %e, plan = %plan_id, "the restore task did not finish normally");
+            let mut slot = watcher_state.restore_run.lock().unwrap();
+            if let Some(run) = slot.as_mut().filter(|r| r.plan_id == plan_id && !r.is_finished()) {
+                run.status = RunStatus::Failed;
+                run.cancellable = false;
+                run.follow_ups.push(
+                    "Восстановление прервалось изнутри. Проверьте диск и журнал службы \
+                     прежде чем повторять."
+                        .into(),
+                );
+                let _ = watcher_events.send(Event {
+                    kind: "restore-plan".into(),
+                    json: serde_json::to_string(&*run).unwrap_or_default(),
+                });
             }
         });
 
@@ -1378,14 +1463,7 @@ impl BackupService for BackupServiceImpl {
             }));
         }
 
-        let matched = self
-            .state
-            .restore_cancel
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(|t| t.cancel_run(plan_id))
-            .unwrap_or(false);
+        let matched = self.state.busy.cancel_run(plan_id);
 
         json_reply(&serde_json::json!({
             "cancelled": matched,
@@ -1641,7 +1719,9 @@ mod tests {
         let (events, _r) = broadcast::channel(16);
         let passwords =
             std::sync::Arc::new(own_backup_core::PasswordStore::new(dir.join("meta.db")));
-        let state = AppState::new(config, store, queue, job_tx, cancel, events, passwords);
+        let busy = own_backup_core::busy::Busy::new();
+        let state =
+            AppState::new(config, store, queue, busy, job_tx, cancel, events, passwords);
         BackupServiceImpl::new(state, String::new())
     }
 
@@ -1734,6 +1814,143 @@ mod tests {
         .unwrap();
         assert!(excl["windows"].as_array().unwrap().iter().any(|p| p.as_str().unwrap().contains("Temp")));
         assert!(excl["linux"].as_array().unwrap().iter().any(|p| p.as_str().unwrap().contains("tmp")));
+    }
+
+    // --- Один разрушительный ход за раз (аудит AUD-02) ---------------------
+
+    /// Проверка «занято?» и захват — одно действие. Раньше план восстановления
+    /// читал restore_run под одним замком и писал новое состояние под другим,
+    /// так что два запроса, пришедшие вместе, оба проходили проверку.
+    #[tokio::test]
+    async fn a_second_destructive_request_is_refused_while_one_holds_the_machine() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = make_service(dir.path());
+        let saved: own_backup_core::Job = serde_json::from_str(
+            &svc.save_job(Request::new(JsonRequest { json: job("T", "E:", r"D:\bk") }))
+                .await
+                .unwrap()
+                .into_inner()
+                .json,
+        )
+        .unwrap();
+
+        let held = svc
+            .state
+            .busy
+            .reserve(own_backup_core::busy::Doing::new("восстановление", "диск 1"))
+            .expect("свободно");
+
+        let refused = svc
+            .delete_job(Request::new(DeleteJobRequest {
+                id: saved.id.clone(),
+                delete_files: true,
+            }))
+            .await
+            .expect_err("удаление копий не должно начаться поверх восстановления");
+        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+        assert!(refused.message().contains("восстановление"), "{}", refused.message());
+
+        // Задание при этом не удалено: отказ должен случиться ДО изменений.
+        assert!(svc.state.store.get(&saved.id).is_some());
+
+        drop(held);
+        assert!(svc
+            .delete_job(Request::new(DeleteJobRequest { id: saved.id, delete_files: true }))
+            .await
+            .is_ok());
+    }
+
+    /// Удалять задание, которое прямо сейчас пишет в свои файлы, нельзя
+    /// (аудит AUD-09, пункт 1).
+    #[tokio::test]
+    async fn a_job_that_is_running_cannot_be_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = make_service(dir.path());
+        let saved: own_backup_core::Job = serde_json::from_str(
+            &svc.save_job(Request::new(JsonRequest { json: job("T", "E:", r"D:\bk") }))
+                .await
+                .unwrap()
+                .into_inner()
+                .json,
+        )
+        .unwrap();
+
+        assert!(svc.state.queue.enqueue(&saved.id));
+        assert!(svc.state.queue.start(&saved.id));
+
+        let refused = svc
+            .delete_job(Request::new(DeleteJobRequest {
+                id: saved.id.clone(),
+                delete_files: false,
+            }))
+            .await
+            .expect_err("выполняющееся задание удалять нельзя");
+        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+        assert!(svc.state.store.get(&saved.id).is_some());
+
+        svc.state.queue.finish();
+        assert!(svc
+            .delete_job(Request::new(DeleteJobRequest { id: saved.id, delete_files: false }))
+            .await
+            .is_ok());
+    }
+
+    /// Ожидающее задание не выполняется, поэтому удаляется — но сначала
+    /// снимается с очереди, иначе рабочий возьмёт его уже несуществующим.
+    #[tokio::test]
+    async fn a_job_waiting_in_the_queue_is_taken_out_before_it_is_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = make_service(dir.path());
+        let saved: own_backup_core::Job = serde_json::from_str(
+            &svc.save_job(Request::new(JsonRequest { json: job("T", "E:", r"D:\bk") }))
+                .await
+                .unwrap()
+                .into_inner()
+                .json,
+        )
+        .unwrap();
+
+        assert!(svc.state.queue.enqueue(&saved.id));
+        assert!(svc
+            .delete_job(Request::new(DeleteJobRequest {
+                id: saved.id.clone(),
+                delete_files: false,
+            }))
+            .await
+            .is_ok());
+        assert!(
+            !svc.state.queue.snapshot().pending.contains(&saved.id),
+            "оно не должно остаться в очереди"
+        );
+    }
+
+    /// Кнопка «остановить» бьёт по тому, что идёт сейчас, и ни по чему больше:
+    /// токен принадлежит одному запуску и выбрасывается вместе с ним.
+    #[tokio::test]
+    async fn stopping_hits_the_run_that_is_going_on_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = make_service(dir.path());
+
+        // Ничего не идёт — останавливать нечего, и это не ошибка.
+        assert!(svc.cancel_engine_op(Request::new(Empty {})).await.is_ok());
+
+        let first = svc
+            .state
+            .busy
+            .reserve(own_backup_core::busy::Doing::new("проверка образа", "a.vhdx"))
+            .unwrap();
+        svc.cancel_engine_op(Request::new(Empty {})).await.unwrap();
+        assert!(first.cancel().is_cancelled());
+        drop(first);
+
+        // Следующий запуск начинается с чистого токена: старый флаг не
+        // сбрасывается, его просто больше нет.
+        let second = svc
+            .state
+            .busy
+            .reserve(own_backup_core::busy::Doing::new("проверка образа", "b.vhdx"))
+            .unwrap();
+        assert!(!second.cancel().is_cancelled());
     }
 }
 

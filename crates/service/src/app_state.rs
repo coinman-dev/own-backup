@@ -24,10 +24,16 @@ pub struct AppState {
     pub job_tx: UnboundedSender<String>,
     /// Set true to cancel the currently running backup.
     pub cancel: Arc<AtomicBool>,
-    /// Set true to cancel the currently running direct engine op (restore /
-    /// verify / disk restore). Separate from `cancel` so cancelling a restore
-    /// never touches a running backup and vice-versa.
-    pub engine_cancel: Arc<AtomicBool>,
+    /// The machine's single slot for destructive work: restores, direct engine
+    /// operations, backups, read-write mounts and deleting a job's copies all
+    /// pass through it, so two of them can never overlap (audit AUD-02).
+    ///
+    /// It also owns the CANCEL TOKEN of whatever is running. The flag it
+    /// replaces was one `AtomicBool` shared by every direct operation and
+    /// **reset at the start of each one**, so a second run silently disarmed
+    /// the first one's cancel; the token here is created per run, never reset,
+    /// and addressed by id.
+    pub busy: Arc<own_backup_core::busy::Busy>,
     /// Fan-out of orchestration events to `StreamEvents` subscribers.
     pub events: broadcast::Sender<proto::Event>,
     /// Passwords for encrypted volumes (in-memory cache + OS-protected store).
@@ -40,9 +46,6 @@ pub struct AppState {
     /// should be able to lose by closing a window. `GetRestoreState` hands this
     /// over, so reopening the screen shows the run in progress.
     pub restore_run: std::sync::Mutex<Option<own_backup_common::restore_state::RestoreRunState>>,
-    /// Cancel token of the run in `restore_run`. A fresh one per run, addressed
-    /// by plan id, so a cancel that arrives late cannot hit the next run (D18).
-    pub restore_cancel: std::sync::Mutex<Option<own_backup_common::cancel::CancelToken>>,
     pub start_time: Instant,
 }
 
@@ -52,6 +55,7 @@ impl AppState {
         config: AppConfig,
         store: Arc<JobStore>,
         queue: RunQueue,
+        busy: Arc<own_backup_core::busy::Busy>,
         job_tx: UnboundedSender<String>,
         cancel: Arc<AtomicBool>,
         events: broadcast::Sender<proto::Event>,
@@ -63,12 +67,11 @@ impl AppState {
             queue,
             job_tx,
             cancel,
-            engine_cancel: Arc::new(AtomicBool::new(false)),
+            busy,
             events,
             passwords,
             active_mounts: std::sync::Mutex::new(Vec::new()),
             restore_run: std::sync::Mutex::new(None),
-            restore_cancel: std::sync::Mutex::new(None),
             start_time: Instant::now(),
         })
     }
