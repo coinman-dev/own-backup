@@ -31,7 +31,7 @@ use std::os::windows::process::CommandExt as _;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use windows::core::{w, PCWSTR};
+use windows::core::{s, w, PCWSTR};
 use windows::Win32::Foundation::{
     GetLastError, BOOL, COLORREF, ERROR_ALREADY_EXISTS, HWND, LPARAM, LRESULT, POINT, RECT, SIZE,
     TRUE, WPARAM,
@@ -42,7 +42,7 @@ use windows::Win32::Graphics::Gdi::{
     SetTextColor, HDC, HFONT, PAINTSTRUCT, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_RIGHT,
     DT_SINGLELINE, DT_VCENTER, TRANSPARENT,
 };
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyboardLayout, GetKeyboardLayoutList, HKL};
@@ -538,13 +538,14 @@ fn tick(bar: HWND) {
 
 /// The windows a person would expect to find on a taskbar.
 ///
-/// The rule is the one Alt+Tab uses: visible, titled, not a tool window, and
-/// not owned by another window. On Windows 11 a handful of invisible system
-/// windows slip through it — they are filtered by asking the desktop compositor
-/// whether a window is cloaked, and that question is deliberately not asked
-/// here. It would add a load-time dependency on `dwmapi.dll` to a program whose
-/// whole job is to come up when other things have not, and the environment it
-/// is FOR has no compositor and no such windows.
+/// The rule is the one Alt+Tab uses: visible, titled, not a tool window, not
+/// owned by another window — and not CLOAKED.
+///
+/// That last one is not tidiness. Windows 11 keeps several windows alive and
+/// hidden ("Настройки", "Интерфейс ввода Windows"); they pass every other test,
+/// and they cannot be brought forward, so clicking their button leaves the
+/// desktop with no foreground window at all. Buttons that do nothing would be
+/// bad enough; these ones led straight into a state the strip used to die in.
 fn open_windows() -> Vec<OpenWindow> {
     let mut found: Vec<OpenWindow> = Vec::new();
     unsafe {
@@ -564,7 +565,7 @@ unsafe extern "system" fn collect_window(window: HWND, data: LPARAM) -> BOOL {
 }
 
 unsafe fn is_task_window(window: HWND) -> bool {
-    if !IsWindowVisible(window).as_bool() {
+    if !IsWindowVisible(window).as_bool() || is_cloaked(window) {
         return false;
     }
     let (bar, back) = with_bar(|b| (b.bar, b.back));
@@ -579,6 +580,34 @@ unsafe fn is_task_window(window: HWND) -> bool {
         return false;
     }
     GetWindow(window, GW_OWNER).map(|owner| owner.is_invalid()).unwrap_or(true)
+}
+
+/// Is the compositor holding this window alive but not showing it?
+///
+/// Asked of `dwmapi.dll` if it is there, and answered "no" if it is not. Loaded
+/// by hand rather than linked, and that is the point: this program's whole job
+/// is to come up when other things have not, so it must not gain a reason to
+/// fail before its first line runs. WinPE has no compositor and no cloaked
+/// windows, so the question does not arise there at all.
+fn is_cloaked(window: HWND) -> bool {
+    /// `DWMWA_CLOAKED` — non-zero means the window is there but not shown.
+    const CLOAKED: u32 = 14;
+    type Ask = unsafe extern "system" fn(HWND, u32, *mut c_void, u32) -> i32;
+    static ASK: OnceLock<Option<Ask>> = OnceLock::new();
+
+    let Some(ask) = ASK.get_or_init(|| unsafe {
+        let library = LoadLibraryW(w!("dwmapi.dll")).ok()?;
+        let found = GetProcAddress(library, s!("DwmGetWindowAttribute"))?;
+        Some(std::mem::transmute::<unsafe extern "system" fn() -> isize, Ask>(found))
+    }) else {
+        return false;
+    };
+
+    let mut cloaked: u32 = 0;
+    let asked = unsafe {
+        ask(window, CLOAKED, &mut cloaked as *mut u32 as *mut c_void, size_of::<u32>() as u32)
+    };
+    asked == 0 && cloaked != 0
 }
 
 unsafe fn window_title(window: HWND) -> Option<String> {
