@@ -506,6 +506,33 @@ pub async fn run(args: DisplayArgs) -> own_backup_common::Result<()> {
                     .unwrap_or_else(|| "как есть".into())
             );
         }
+        // В виртуальной машине экран может быть вообще не гостевым делом: у
+        // Hyper-V второго поколения размер задаётся хостом, а драйвер внутри
+        // всё равно перечисляет свой каталог режимов — тот самый список, в
+        // котором 1440x900 есть, но взять его гость не может. Тогда важно не
+        // то, что мы отказались, а кто это решает и какой командой.
+        Err(e) if virt.is_some() => {
+            tracing::info!(error = %e, vm = ?virt, "a virtual machine refused a mode change");
+            println!(
+                "Виртуальная машина не дала сменить режим — экран остаётся {}.",
+                current
+                    .as_ref()
+                    .map(|c| format!("{}x{}", c.width, c.height))
+                    .unwrap_or_else(|| "как есть".into())
+            );
+            if virt == Some("Hyper-V") {
+                println!(
+                    "У Hyper-V размер экрана задаёт хост, а не гость. На хосте, \
+                     при выключенной машине:"
+                );
+                println!(
+                    "  Set-VMVideo -VMName ИМЯ -ResolutionType Single \
+                     -HorizontalResolution {} -VerticalResolution {}",
+                    best.width, best.height
+                );
+            }
+            println!("Подробности отказа: {e}");
+        }
         Err(e) => {
             return Err(OwnBackupError::Device(format!(
                 "не удалось переключить режим на {}x{}: {e}",
@@ -565,9 +592,9 @@ mod imp {
     use super::Mode;
     use windows::core::PCWSTR;
     use windows::Win32::Graphics::Gdi::{
-        ChangeDisplaySettingsExW, EnumDisplaySettingsW, CDS_TYPE, DEVMODEW, DEVMODE_FIELD_FLAGS,
-        DISP_CHANGE_SUCCESSFUL, DM_BITSPERPEL, DM_DISPLAYFREQUENCY, DM_PELSHEIGHT, DM_PELSWIDTH,
-        ENUM_CURRENT_SETTINGS, ENUM_DISPLAY_SETTINGS_MODE,
+        ChangeDisplaySettingsExW, EnumDisplaySettingsW, CDS_TYPE, CDS_UPDATEREGISTRY, DEVMODEW,
+        DEVMODE_FIELD_FLAGS, DISP_CHANGE_SUCCESSFUL, DM_BITSPERPEL, DM_DISPLAYFREQUENCY,
+        DM_PELSHEIGHT, DM_PELSWIDTH, ENUM_CURRENT_SETTINGS, ENUM_DISPLAY_SETTINGS_MODE,
     };
 
     fn empty_devmode() -> DEVMODEW {
@@ -968,30 +995,66 @@ mod imp {
         }
     }
 
-    pub fn apply(mode: &Mode) -> std::result::Result<(), String> {
+    /// One way of asking for a mode. Kept apart from [`apply`] so the four
+    /// ways below read as four different questions rather than as a retry loop.
+    fn ask(device: Option<&str>, mode: &Mode, with_hz: bool, flags: CDS_TYPE) -> i32 {
         let mut dm = empty_devmode();
         dm.dmPelsWidth = mode.width;
         dm.dmPelsHeight = mode.height;
         dm.dmBitsPerPel = mode.bpp;
-        dm.dmDisplayFrequency = mode.hz;
-        dm.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL | DM_DISPLAYFREQUENCY;
-        // A mode change without CDS_UPDATEREGISTRY: boot media has no registry
-        // worth persisting to, and the next boot starts from the firmware's
-        // choice again anyway.
-        // SAFETY: `dm` is a live DEVMODEW describing an enumerated mode.
-        let r = unsafe { ChangeDisplaySettingsExW(PCWSTR::null(), Some(&dm), None, CDS_TYPE(0), None) };
-        if r == DISP_CHANGE_SUCCESSFUL {
-            return Ok(());
-        }
-        // Some drivers reject an exact refresh rate but accept the resolution.
         dm.dmFields = DEVMODE_FIELD_FLAGS(DM_PELSWIDTH.0 | DM_PELSHEIGHT.0 | DM_BITSPERPEL.0);
-        // SAFETY: as above.
-        let r2 = unsafe { ChangeDisplaySettingsExW(PCWSTR::null(), Some(&dm), None, CDS_TYPE(0), None) };
-        if r2 == DISP_CHANGE_SUCCESSFUL {
-            Ok(())
-        } else {
-            Err(format!("ChangeDisplaySettingsEx вернул {} (и {} без частоты)", r.0, r2.0))
+        if with_hz {
+            dm.dmDisplayFrequency = mode.hz;
+            dm.dmFields = DEVMODE_FIELD_FLAGS(dm.dmFields.0 | DM_DISPLAYFREQUENCY.0);
         }
+        let wide: Option<Vec<u16>> =
+            device.map(|d| d.encode_utf16().chain(std::iter::once(0)).collect());
+        let name = wide.as_ref().map_or(PCWSTR::null(), |w| PCWSTR(w.as_ptr()));
+        // SAFETY: `dm` is a live DEVMODEW describing an enumerated mode, and
+        // `name` points into `wide`, which outlives the call.
+        unsafe { ChangeDisplaySettingsExW(name, Some(&dm), None, flags, None) }.0
+    }
+
+    /// Put the screen into this mode, asking four different ways before giving
+    /// up.
+    ///
+    /// They are not retries. Each drops an assumption the one before it made,
+    /// and drivers differ in which one they object to:
+    ///
+    /// 1. **As asked.** Size and refresh rate together.
+    /// 2. **Without the refresh rate.** A driver may list a rate it will not
+    ///    actually set, and refuse the whole request because of it.
+    /// 3. **Naming the display.** A null name means "the default display",
+    ///    which is resolved somewhere inside GDI; naming `\\.\DISPLAY1`
+    ///    outright asks the adapter that is really drawing.
+    /// 4. **Through the registry.** A dynamic change is the driver reshaping a
+    ///    live display; `CDS_UPDATEREGISTRY` writes the mode down and lets the
+    ///    driver take it the way it would at startup. Nothing is lost by it
+    ///    here — a boot medium's registry is a RAM disk.
+    ///
+    /// Every refusal is logged with the way that produced it, because "it
+    /// returned -1" answers nothing on a machine that cannot be attached to a
+    /// debugger.
+    pub fn apply(mode: &Mode) -> std::result::Result<(), String> {
+        let device = primary_device_name();
+        let attempts: [(&str, Option<&str>, bool, CDS_TYPE); 4] = [
+            ("как есть", None, true, CDS_TYPE(0)),
+            ("без частоты", None, false, CDS_TYPE(0)),
+            ("с именем экрана", device.as_deref(), false, CDS_TYPE(0)),
+            ("через реестр", device.as_deref(), false, CDS_UPDATEREGISTRY),
+        ];
+
+        let mut refused = Vec::new();
+        for (way, name, with_hz, flags) in attempts {
+            let code = ask(name, mode, with_hz, flags);
+            if code == DISP_CHANGE_SUCCESSFUL.0 {
+                tracing::info!(way, device = ?device, "display: the mode was accepted");
+                return Ok(());
+            }
+            tracing::info!(way, code, "display: refused");
+            refused.push(format!("{way}: {code}"));
+        }
+        Err(format!("ChangeDisplaySettingsEx отказал — {}", refused.join(", ")))
     }
 }
 
