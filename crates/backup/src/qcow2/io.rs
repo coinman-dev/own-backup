@@ -127,24 +127,48 @@ pub struct Qcow2RandomReader {
 }
 
 impl Qcow2RandomReader {
+    /// Open a qcow2 and every image behind it.
+    ///
+    /// **A relative backing path belongs to the folder of the image that names
+    /// it**, layer by layer, and qemu reads them the same way. Resolving them
+    /// all against the LEAF's folder — which is what this did — quietly reads
+    /// the wrong base whenever a chain spans folders: `leaf.qcow2 →
+    /// nested/mid.qcow2 → base.qcow2` means `nested/base.qcow2`, and a
+    /// `base.qcow2` sitting next to the leaf was taken instead. Nothing
+    /// complains: the read succeeds and returns another image's data. With no
+    /// such file to find, a perfectly good chain is reported as broken.
+    /// (Audit 2026-09-19, AUD-03; confirmed against `qemu-img convert`.)
     pub fn open(path: &Path) -> Result<Self> {
-        let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
         let mut layers = Vec::new();
         let mut current = path.to_path_buf();
+        // Where each layer has already been. A chain that points back into
+        // itself would otherwise be found only by the depth limit, which
+        // reports a corrupted chain instead of the loop it actually is.
+        let mut visited: Vec<std::path::PathBuf> = Vec::new();
         loop {
             if layers.len() >= MAX_CHAIN_DEPTH {
                 return Err(bad(format!(
                     "backing chain longer than {MAX_CHAIN_DEPTH} images — corrupted chain?"
                 )));
             }
+            let here = std::fs::canonicalize(&current).unwrap_or_else(|_| current.clone());
+            if visited.contains(&here) {
+                return Err(bad(format!(
+                    "backing chain comes back to {} — it is a loop",
+                    current.display()
+                )));
+            }
+            visited.push(here);
+
             let file = File::open(&current).map_err(|e| {
                 bad(format!("cannot open chain image {}: {e}", current.display()))
             })?;
             let layer = Qcow2Reader::open(file)
                 .map_err(|e| bad(format!("{}: {e}", current.display())))?;
+            let beside = current.parent().map(|p| p.to_path_buf()).unwrap_or_default();
             let backing = layer.backing_file().map(|b| {
                 let p = Path::new(b);
-                if p.is_absolute() { p.to_path_buf() } else { dir.join(p) }
+                if p.is_absolute() { p.to_path_buf() } else { beside.join(p) }
             });
             layers.push(layer);
             match backing {
@@ -250,6 +274,87 @@ mod tests {
 
     fn opts(size: u64) -> Qcow2WriterOptions {
         Qcow2WriterOptions { virtual_size: size, ..Default::default() }
+    }
+
+    /// One image of a chain: `backing` makes it a child, `fill` is what its
+    /// first cluster holds.
+    fn layer(path: &Path, backing: Option<&str>, fill: Option<u8>) {
+        let mut w = crate::qcow2::Qcow2Writer::new(
+            Cursor::new(Vec::new()),
+            Qcow2WriterOptions {
+                virtual_size: 1024 * 1024,
+                backing_file: backing.map(|b| b.to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        if let Some(byte) = fill {
+            w.write_cluster(0, &vec![byte; 65536]).unwrap();
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, w.finish().unwrap().into_inner()).unwrap();
+    }
+
+    fn first_byte(path: &Path) -> u8 {
+        let mut r = Qcow2RandomReader::open(path).unwrap();
+        let mut buf = [0u8; 1];
+        r.read_at(0, &mut buf).unwrap();
+        buf[0]
+    }
+
+    /// A relative backing path belongs to the folder of the image that NAMES
+    /// it. Resolved against the leaf's folder instead, a chain spanning folders
+    /// silently reads whatever file of that name sits beside the leaf — the
+    /// read succeeds and returns another image's data (AUD-03).
+    #[test]
+    fn a_backing_path_is_read_from_the_folder_of_the_image_that_names_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        // The chain: leaf → nested/mid → nested/base, with the data in base.
+        layer(&root.join("nested/base.qcow2"), None, Some(0xA5));
+        layer(&root.join("nested/mid.qcow2"), Some("base.qcow2"), None);
+        layer(&root.join("leaf.qcow2"), Some("nested/mid.qcow2"), None);
+
+        // And the trap: a different base of the same name beside the leaf.
+        layer(&root.join("base.qcow2"), None, Some(0x5A));
+
+        assert_eq!(first_byte(&root.join("leaf.qcow2")), 0xA5, "nested/base.qcow2 is the base");
+    }
+
+    /// Without a same-named decoy the old behaviour failed outright — a good
+    /// chain reported as unopenable — so the fix has to be tested both ways.
+    #[test]
+    fn a_chain_across_folders_opens_without_a_file_beside_the_leaf() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        layer(&root.join("deep/inner/base.qcow2"), None, Some(0x11));
+        layer(&root.join("deep/mid.qcow2"), Some("inner/base.qcow2"), None);
+        layer(&root.join("top.qcow2"), Some("deep/mid.qcow2"), None);
+        assert_eq!(first_byte(&root.join("top.qcow2")), 0x11);
+    }
+
+    /// An absolute backing path still means exactly what it says.
+    #[test]
+    fn an_absolute_backing_path_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("elsewhere/base.qcow2");
+        layer(&base, None, Some(0x33));
+        layer(&dir.path().join("child.qcow2"), Some(&base.to_string_lossy()), None);
+        assert_eq!(first_byte(&dir.path().join("child.qcow2")), 0x33);
+    }
+
+    /// A chain that comes back to itself is a loop, and saying so beats
+    /// running into the depth limit and calling it corruption.
+    #[test]
+    fn a_chain_that_points_at_itself_is_named_as_a_loop() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.qcow2");
+        layer(&a, Some("a.qcow2"), None);
+        let err = Qcow2RandomReader::open(&a).unwrap_err().to_string();
+        assert!(err.contains("loop"), "{err}");
     }
 
     #[test]

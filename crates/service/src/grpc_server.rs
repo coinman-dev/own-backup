@@ -241,7 +241,15 @@ impl BackupService for BackupServiceImpl {
         let job: own_backup_core::Job = serde_json::from_str(&req.into_inner().json)
             .map_err(|e| Status::invalid_argument(format!("bad job JSON: {e}")))?;
         validate_job(&job)?;
-        json_reply(&self.state.store.upsert(job))
+        // Reported as saved only once it is on disk: a full destination or a
+        // read-only data folder used to give a job that lived until the next
+        // restart and then vanished (audit AUD-08).
+        let saved = self
+            .state
+            .store
+            .upsert(job)
+            .map_err(|e| Status::internal(format!("Задание не сохранено: {e}")))?;
+        json_reply(&saved)
     }
 
     async fn delete_job(&self, req: Request<DeleteJobRequest>) -> Result<Response<Empty>, Status> {
@@ -260,7 +268,10 @@ impl BackupService for BackupServiceImpl {
                 let _ = std::fs::remove_file(&sc);
             }
         }
-        self.state.store.delete(&id);
+        self.state
+            .store
+            .delete(&id)
+            .map_err(|e| Status::internal(format!("Задание не удалено: {e}")))?;
         Ok(Response::new(Empty {}))
     }
 
@@ -303,26 +314,24 @@ impl BackupService for BackupServiceImpl {
                 "Копия пишется на тот же диск ({letter}:), что и источник — запуск отменён."
             )));
         }
-        // Skip if already pending or running.
-        {
-            let pending = self.state.queue.pending.lock().unwrap();
-            let current = self.state.queue.current.lock().unwrap();
-            if pending.iter().any(|j| *j == id) || current.as_deref() == Some(id.as_str()) {
-                return Ok(Response::new(Empty {}));
-            }
+        // Asked and added in one step: two requests arriving together used to
+        // be able to both find it absent and both add it.
+        if !self.state.queue.enqueue(&id) {
+            return Ok(Response::new(Empty {}));
         }
-        self.state.queue.pending.lock().unwrap().push_back(id.clone());
-        self.state
-            .job_tx
-            .send(id)
-            .map_err(|e| Status::internal(format!("enqueue failed: {e}")))?;
+        if let Err(e) = self.state.job_tx.send(id.clone()) {
+            // Nobody will ever come for it — leaving it waiting would show a
+            // job queued forever.
+            self.state.queue.cancel_pending(&id);
+            return Err(Status::internal(format!("enqueue failed: {e}")));
+        }
         Ok(Response::new(Empty {}))
     }
 
     async fn cancel_queued(&self, req: Request<IdRequest>) -> Result<Response<Empty>, Status> {
         check_auth(&req, &self.service_token)?;
         let id = req.into_inner().id;
-        self.state.queue.pending.lock().unwrap().retain(|j| *j != id);
+        self.state.queue.cancel_pending(&id);
         Ok(Response::new(Empty {}))
     }
 

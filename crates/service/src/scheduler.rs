@@ -195,11 +195,31 @@ fn handle_os_event(
 }
 
 /// Did the job's most recent run start today (local time)?
+///
+/// `started_at` is written in UTC, so its own `date_naive()` is a UTC date and
+/// comparing it against a LOCAL one asks two different questions. East of
+/// Greenwich the evening is already tomorrow over there: a run at 22:30 UTC is
+/// 01:30 on the 19th in Moscow, and at 02:00 on that same local morning this
+/// function called it yesterday's and ran the job again (audit AUD-11).
 fn ran_today(job: &Job) -> bool {
+    started_on_the_same_day(job, chrono::Local::now())
+}
+
+/// The comparison itself, with "now" handed in so it can be tested.
+///
+/// Both sides are brought into the SAME zone — the one `now` is in — before
+/// the calendar day is taken. Which zone that is does not matter; that it is
+/// one zone does.
+fn started_on_the_same_day<Tz: chrono::TimeZone>(
+    job: &Job,
+    now: chrono::DateTime<Tz>,
+) -> bool {
     job.last_run
         .as_ref()
         .and_then(|r| chrono::DateTime::parse_from_rfc3339(&r.started_at).ok())
-        .is_some_and(|dt| dt.date_naive() == chrono::Local::now().date_naive())
+        .is_some_and(|started| {
+            started.with_timezone(&now.timezone()).date_naive() == now.date_naive()
+        })
 }
 
 /// True unless an encrypted source is missing its saved password (an unattended
@@ -219,17 +239,74 @@ fn has_passwords(job: &own_backup_core::Job, passwords: &PasswordStore) -> bool 
 
 /// Enqueue a job unless it is already pending or running (mirrors `RunJob`).
 fn enqueue(queue: &RunQueue, job_tx: &UnboundedSender<String>, id: &str, name: &str) {
-    {
-        let pending = queue.pending.lock().unwrap();
-        let current = queue.current.lock().unwrap();
-        if pending.iter().any(|j| j == id) || current.as_deref() == Some(id) {
-            return;
-        }
+    if !queue.enqueue(id) {
+        return; // already waiting or running
     }
-    queue.pending.lock().unwrap().push_back(id.to_string());
     if job_tx.send(id.to_string()).is_ok() {
         info!(job = %name, "Scheduler: enqueued a scheduled backup");
     } else {
+        // Nobody will come for it; a job left waiting for a worker that is
+        // gone would sit in the queue for the rest of the session.
+        queue.cancel_pending(id);
         warn!(job = %name, "Scheduler: enqueue failed (worker gone)");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{FixedOffset, TimeZone};
+
+    fn job_started_at(utc: &str) -> Job {
+        Job {
+            last_run: Some(own_backup_core::JobRun {
+                started_at: utc.to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// The case that ran jobs twice. `started_at` is UTC; east of Greenwich the
+    /// late evening there is already the next morning here, and comparing a UTC
+    /// date against a local one called it yesterday's run (AUD-11).
+    #[test]
+    fn a_run_late_at_night_in_utc_is_today_east_of_greenwich() {
+        let moscow = FixedOffset::east_opt(3 * 3600).unwrap();
+        let job = job_started_at("2026-09-18T22:30:00Z"); // 19 Sep, 01:30 in Moscow
+        let now = moscow.with_ymd_and_hms(2026, 9, 19, 2, 0, 0).unwrap();
+        assert!(started_on_the_same_day(&job, now), "the same local day, so not again");
+    }
+
+    /// And the mirror case, which the old comparison got right by accident and
+    /// must not now get wrong: west of Greenwich the early morning there is
+    /// still the previous evening here.
+    #[test]
+    fn a_run_early_in_utc_is_yesterday_west_of_greenwich() {
+        let new_york = FixedOffset::west_opt(4 * 3600).unwrap();
+        let job = job_started_at("2026-09-19T02:00:00Z"); // 18 Sep, 22:00 in New York
+        let now = new_york.with_ymd_and_hms(2026, 9, 19, 9, 0, 0).unwrap();
+        assert!(!started_on_the_same_day(&job, now), "a different local day - run it");
+    }
+
+    #[test]
+    fn the_same_local_day_is_the_same_day_whatever_the_hour() {
+        let moscow = FixedOffset::east_opt(3 * 3600).unwrap();
+        let job = job_started_at("2026-09-19T06:00:00Z"); // 09:00 in Moscow
+        let now = moscow.with_ymd_and_hms(2026, 9, 19, 23, 59, 0).unwrap();
+        assert!(started_on_the_same_day(&job, now));
+    }
+
+    #[test]
+    fn a_job_that_never_ran_has_not_run_today() {
+        assert!(!started_on_the_same_day(&Job::default(), chrono::Utc::now()));
+    }
+
+    /// A timestamp that cannot be read is not evidence of a run today: the
+    /// safer answer is "run it" rather than "skip it".
+    #[test]
+    fn an_unreadable_timestamp_does_not_count_as_a_run() {
+        let job = job_started_at("not a date at all");
+        assert!(!started_on_the_same_day(&job, chrono::Utc::now()));
     }
 }

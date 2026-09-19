@@ -564,34 +564,45 @@ impl JobStore {
         self.jobs.lock().unwrap().iter().find(|j| j.id == id).cloned()
     }
 
-    /// Insert or update a job; returns the stored job.
-    pub fn upsert(&self, mut job: Job) -> Job {
+    /// Insert or update a job; returns the stored job once it is ON DISK.
+    ///
+    /// **Disk first, memory second.** It used to change memory, hand the job
+    /// back as saved and only log if the write failed — so a full disk or a
+    /// read-only folder produced a job that was visible, editable and runnable
+    /// until the next restart, then gone without a word (audit AUD-08,
+    /// reproduced). Now a failed write leaves the store exactly as it was and
+    /// the caller is told.
+    pub fn upsert(&self, mut job: Job) -> std::io::Result<Job> {
         let now = chrono::Utc::now().to_rfc3339();
-        {
-            let mut jobs = self.jobs.lock().unwrap();
-            if job.id.is_empty() {
-                job.id = uuid::Uuid::new_v4().to_string();
-                job.created_at = now.clone();
-                job.updated_at = now;
-                jobs.push(job.clone());
-            } else if let Some(existing) = jobs.iter_mut().find(|j| j.id == job.id) {
-                job.created_at = existing.created_at.clone();
-                job.last_run = existing.last_run.clone(); // preserve run history
-                job.updated_at = now;
-                *existing = job.clone();
-            } else {
-                job.created_at = now.clone();
-                job.updated_at = now;
-                jobs.push(job.clone());
-            }
+        let mut jobs = self.jobs.lock().unwrap();
+        let mut next = jobs.clone();
+        if job.id.is_empty() {
+            job.id = uuid::Uuid::new_v4().to_string();
+            job.created_at = now.clone();
+            job.updated_at = now;
+            next.push(job.clone());
+        } else if let Some(existing) = next.iter_mut().find(|j| j.id == job.id) {
+            job.created_at = existing.created_at.clone();
+            job.last_run = existing.last_run.clone(); // preserve run history
+            job.updated_at = now;
+            *existing = job.clone();
+        } else {
+            job.created_at = now.clone();
+            job.updated_at = now;
+            next.push(job.clone());
         }
-        self.persist_jobs();
-        job
+        write_json(&self.jobs_path, &next)?;
+        *jobs = next;
+        Ok(job)
     }
 
-    pub fn delete(&self, id: &str) {
-        self.jobs.lock().unwrap().retain(|j| j.id != id);
-        self.persist_jobs();
+    /// Remove a job; the list in memory changes only once the disk agrees.
+    pub fn delete(&self, id: &str) -> std::io::Result<()> {
+        let mut jobs = self.jobs.lock().unwrap();
+        let next: Vec<Job> = jobs.iter().filter(|j| j.id != id).cloned().collect();
+        write_json(&self.jobs_path, &next)?;
+        *jobs = next;
+        Ok(())
     }
 
     /// Distinct image files this job has produced, gathered from its recorded
@@ -623,7 +634,13 @@ impl JobStore {
         set.into_iter().collect()
     }
 
-    pub fn record_run(&self, run: JobRun) {
+    /// Record a finished run.
+    ///
+    /// Unlike a save, this cannot be refused: the backup already happened, and
+    /// forgetting it in memory would not un-happen it. What it must not do is
+    /// stay quiet — an unrecorded run is a chain the next backup will plan
+    /// against wrongly — so a failed write is returned and the caller says so.
+    pub fn record_run(&self, run: JobRun) -> std::io::Result<()> {
         {
             let mut jobs = self.jobs.lock().unwrap();
             if let Some(job) = jobs.iter_mut().find(|j| j.id == run.job_id) {
@@ -635,8 +652,9 @@ impl JobStore {
             activity.insert(0, run);
             activity.truncate(ACTIVITY_CAP);
         }
-        self.persist_jobs();
-        self.persist_activity();
+        let jobs = write_json(&self.jobs_path, &*self.jobs.lock().unwrap());
+        let activity = write_json(&self.activity_path, &*self.activity.lock().unwrap());
+        jobs.and(activity)
     }
 
     pub fn activity(&self) -> Vec<JobRun> {
@@ -655,17 +673,6 @@ impl JobStore {
             .cloned()
     }
 
-    fn persist_jobs(&self) {
-        if let Err(e) = write_json(&self.jobs_path, &*self.jobs.lock().unwrap()) {
-            error!(error = %e, "Failed to persist jobs.json");
-        }
-    }
-
-    fn persist_activity(&self) {
-        if let Err(e) = write_json(&self.activity_path, &*self.activity.lock().unwrap()) {
-            error!(error = %e, "Failed to persist activity.json");
-        }
-    }
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &std::path::Path) -> Option<T> {
@@ -673,7 +680,18 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &std::path::Path) -> Option<T> 
     match serde_json::from_slice(&data) {
         Ok(v) => Some(v),
         Err(e) => {
-            warn!(path = %path.display(), error = %e, "Failed to parse store file");
+            // Unreadable is not the same as absent, and the difference matters:
+            // starting empty means the next save writes an empty list over
+            // whatever was there. The file is moved aside first, so the jobs
+            // are recoverable by hand instead of gone.
+            let kept = path.with_extension("json.bad");
+            let saved = std::fs::rename(path, &kept).is_ok();
+            error!(
+                path = %path.display(),
+                error = %e,
+                kept = %if saved { kept.display().to_string() } else { "nowhere".into() },
+                "store file could not be read - starting empty, the old one is kept"
+            );
             None
         }
     }
@@ -684,7 +702,15 @@ fn write_json<T: Serialize>(path: &std::path::Path, value: &T) -> std::io::Resul
         std::fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(value)?)?;
+    {
+        // Pushed out of the cache BEFORE the rename. Without it the rename can
+        // land while the bytes have not, and a crash then leaves a file that
+        // exists, is the right size and holds nothing.
+        use std::io::Write as _;
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(&serde_json::to_vec_pretty(value)?)?;
+        f.sync_all()?;
+    }
     std::fs::rename(&tmp, path)
 }
 
@@ -695,23 +721,69 @@ fn write_json<T: Serialize>(path: &std::path::Path, value: &T) -> std::io::Resul
 /// Queue state shared between the `run_job` command and the worker.
 #[derive(Clone)]
 pub struct RunQueue {
-    pub pending: Arc<Mutex<VecDeque<String>>>,
-    pub current: Arc<Mutex<Option<String>>>,
+    /// Waiting and running under ONE lock, and the fields kept private so it
+    /// stays that way.
+    ///
+    /// They used to be two mutexes and two public fields, and every caller
+    /// chose its own order: `snapshot` took current then pending, while the
+    /// RPC and the scheduler took pending then current. That is a deadlock
+    /// waiting for the right interleaving, and it was reproduced (audit
+    /// AUD-04). It also left "is it already queued?" and "put it in the queue"
+    /// as two separate lock-holds, so two callers could both decide it was not
+    /// there and both add it.
+    state: Arc<Mutex<QueueState>>,
+}
+
+#[derive(Default)]
+struct QueueState {
+    pending: VecDeque<String>,
+    current: Option<String>,
 }
 
 impl RunQueue {
     pub fn new() -> Self {
-        Self {
-            pending: Arc::new(Mutex::new(VecDeque::new())),
-            current: Arc::new(Mutex::new(None)),
-        }
+        Self { state: Arc::new(Mutex::new(QueueState::default())) }
     }
 
     pub fn snapshot(&self) -> QueueSnapshot {
-        QueueSnapshot {
-            current: self.current.lock().unwrap().clone(),
-            pending: self.pending.lock().unwrap().iter().cloned().collect(),
+        let q = self.state.lock().unwrap();
+        QueueSnapshot { current: q.current.clone(), pending: q.pending.iter().cloned().collect() }
+    }
+
+    /// Put a job in the queue unless it is already waiting or running.
+    ///
+    /// The answer and the change happen under the same lock: `false` means it
+    /// was already there and the caller must not send a second message about
+    /// it.
+    pub fn enqueue(&self, id: &str) -> bool {
+        let mut q = self.state.lock().unwrap();
+        if q.current.as_deref() == Some(id) || q.pending.iter().any(|j| j == id) {
+            return false;
         }
+        q.pending.push_back(id.to_string());
+        true
+    }
+
+    /// Move a waiting job to running. `false` when it is no longer waiting —
+    /// it was cancelled between the message being sent and the worker
+    /// arriving, and must not start.
+    pub fn start(&self, id: &str) -> bool {
+        let mut q = self.state.lock().unwrap();
+        let Some(at) = q.pending.iter().position(|j| j == id) else { return false };
+        q.pending.remove(at);
+        q.current = Some(id.to_string());
+        true
+    }
+
+    /// Nothing is running any more.
+    pub fn finish(&self) {
+        self.state.lock().unwrap().current = None;
+    }
+
+    /// Take a job out of the queue while it is still waiting. A running job is
+    /// not touched — stopping that one is cancellation, not dequeuing.
+    pub fn cancel_pending(&self, id: &str) {
+        self.state.lock().unwrap().pending.retain(|j| j != id);
     }
 }
 
@@ -874,30 +946,32 @@ pub async fn run_queue_worker(
     mut rx: UnboundedReceiver<String>,
 ) {
     while let Some(job_id) = rx.recv().await {
-        // Skip if it was cancelled out of the pending queue.
-        {
-            let mut pending = queue.pending.lock().unwrap();
-            if let Some(pos) = pending.iter().position(|id| *id == job_id) {
-                pending.remove(pos);
-            } else {
-                continue;
-            }
+        // Waiting -> running in one step. Cancelled while it waited, it is no
+        // longer in the queue and must not start.
+        if !queue.start(&job_id) {
+            continue;
         }
         let job = match store.get(&job_id) {
             Some(j) => j,
-            None => continue,
+            None => {
+                queue.finish();
+                continue;
+            }
         };
 
-        *queue.current.lock().unwrap() = Some(job_id.clone());
         sink.queue_changed(queue.snapshot());
         info!(job = %job.name, "Starting queued backup");
 
         cancel.store(false, Ordering::SeqCst);
         let last_success = store.last_success(&job.id);
         let run = perform_backup(&sink, &job, &cancel, last_success, &passwords).await;
-        store.record_run(run.clone());
+        if let Err(e) = store.record_run(run.clone()) {
+            // The backup happened; only the record of it did not. Saying so is
+            // the whole point — the next run plans its chain from this history.
+            error!(error = %e, job = %job.name, "the finished run could not be written down");
+        }
 
-        *queue.current.lock().unwrap() = None;
+        queue.finish();
         sink.queue_changed(queue.snapshot());
         sink.job_finished(run);
     }
@@ -2258,6 +2332,156 @@ async fn perform_backup(
 mod tests {
     use super::*;
     use std::path::Path;
+
+    /// A save that cannot reach the disk must not be reported as done. It
+    /// used to be: memory changed, the job came back as stored, and the
+    /// failure went to the log — so the job was visible, editable and runnable
+    /// until the next restart, then gone (audit AUD-08).
+    #[test]
+    fn a_job_that_could_not_be_written_is_not_reported_as_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JobStore::load(dir.path());
+
+        // Something in the way of the temporary file the store writes first.
+        // A directory cannot be replaced by a file, so the write fails the way
+        // a full disk or a read-only folder would.
+        std::fs::create_dir(dir.path().join("jobs.json.tmp")).unwrap();
+
+        let err = store
+            .upsert(Job { name: "nightly".into(), ..Default::default() })
+            .expect_err("the write cannot succeed");
+        assert!(!err.to_string().is_empty());
+
+        // And the store is exactly as it was — no job that will disappear at
+        // the next restart.
+        assert!(store.list().is_empty(), "nothing was added in memory either");
+    }
+
+    /// The same for removal: a job is gone from the list only once it is gone
+    /// from the file.
+    #[test]
+    fn a_job_that_could_not_be_removed_stays_in_the_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JobStore::load(dir.path());
+        let job = store.upsert(Job { name: "keep".into(), ..Default::default() }).unwrap();
+
+        std::fs::create_dir(dir.path().join("jobs.json.tmp")).unwrap();
+        assert!(store.delete(&job.id).is_err());
+        assert_eq!(store.list().len(), 1, "still there, because the file still has it");
+    }
+
+    /// A jobs file that cannot be parsed is kept, not walked over. Starting
+    /// empty and saving on top would replace it with an empty list.
+    #[test]
+    fn an_unreadable_store_file_is_moved_aside_rather_than_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("jobs.json"), b"{ this is not json").unwrap();
+
+        let store = JobStore::load(dir.path());
+        assert!(store.list().is_empty(), "nothing could be read");
+        assert!(
+            dir.path().join("jobs.json.bad").is_file(),
+            "the unreadable one is kept for recovery"
+        );
+
+        // And a later save does not resurrect the broken file.
+        store.upsert(Job { name: "fresh".into(), ..Default::default() }).unwrap();
+        assert_eq!(JobStore::load(dir.path()).list().len(), 1);
+    }
+
+    /// The queue's two halves used to be two mutexes taken in opposite orders
+    /// by different callers. This is the shape that deadlocks, and the test
+    /// that would have caught it: one thread holds the queue while another
+    /// asks for it, from both directions at once, many times over. With one
+    /// lock it simply cannot hang; with two it hangs and the test times out.
+    #[test]
+    fn the_queue_cannot_be_deadlocked_from_two_directions() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Barrier;
+
+        let queue = RunQueue::new();
+        let done = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(Barrier::new(2));
+
+        let readers = {
+            let (q, d, g) = (queue.clone(), done.clone(), gate.clone());
+            std::thread::spawn(move || {
+                g.wait();
+                for _ in 0..5_000 {
+                    let _ = q.snapshot();
+                    d.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+        };
+        let writers = {
+            let (q, d, g) = (queue.clone(), done.clone(), gate.clone());
+            std::thread::spawn(move || {
+                g.wait();
+                for n in 0..5_000 {
+                    let id = format!("job-{}", n % 7);
+                    q.enqueue(&id);
+                    q.cancel_pending(&id);
+                    d.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+        };
+        readers.join().unwrap();
+        writers.join().unwrap();
+        assert_eq!(done.load(Ordering::Relaxed), 10_000);
+    }
+
+    /// Asking "is it queued?" and queueing it are one step, or two callers
+    /// arriving together both find it absent and both add it — and the job
+    /// runs twice.
+    #[test]
+    fn a_job_is_queued_once_however_many_ask() {
+        let queue = RunQueue::new();
+        let gate = Arc::new(std::sync::Barrier::new(8));
+        let winners: Vec<_> = (0..8)
+            .map(|_| {
+                let (q, g) = (queue.clone(), gate.clone());
+                std::thread::spawn(move || {
+                    g.wait();
+                    q.enqueue("the-one-job")
+                })
+            })
+            .collect();
+        let accepted =
+            winners.into_iter().map(|h| h.join().unwrap()).filter(|added| *added).count();
+        assert_eq!(accepted, 1, "exactly one caller may be told it was added");
+        assert_eq!(queue.snapshot().pending, vec!["the-one-job".to_string()]);
+    }
+
+    /// A job cancelled while it waited must not start when the worker finally
+    /// reaches its message.
+    #[test]
+    fn a_job_cancelled_while_waiting_never_starts() {
+        let queue = RunQueue::new();
+        assert!(queue.enqueue("a"));
+        queue.cancel_pending("a");
+        assert!(!queue.start("a"), "it is no longer in the queue");
+        assert_eq!(queue.snapshot().current, None);
+    }
+
+    /// Waiting and running are one move: the job is never in both lists and
+    /// never in neither.
+    #[test]
+    fn starting_a_job_takes_it_out_of_the_queue_in_the_same_step() {
+        let queue = RunQueue::new();
+        queue.enqueue("a");
+        queue.enqueue("b");
+        assert!(queue.start("a"));
+
+        let seen = queue.snapshot();
+        assert_eq!(seen.current.as_deref(), Some("a"));
+        assert_eq!(seen.pending, vec!["b".to_string()]);
+
+        // And a running job is not queued again behind itself.
+        assert!(!queue.enqueue("a"));
+
+        queue.finish();
+        assert_eq!(queue.snapshot().current, None);
+    }
 
     // Password persistence round-trips through the OS secret store; on non-Windows
     // that is the key-file backend (testable here), on Windows it is DPAPI.
