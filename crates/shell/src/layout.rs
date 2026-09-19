@@ -44,8 +44,16 @@ pub struct BarSlots {
     /// The keyboard layout of the window in front. Clickable: it is also how
     /// the layout is switched.
     pub layout: Slot,
-    /// The clock, hard against the right edge.
+    /// The clock.
     pub clock: Slot,
+    /// A way to close the strip — and EMPTY on the boot medium, where there
+    /// must not be one: the shell exiting there means the machine reboots.
+    ///
+    /// Off the medium it is the opposite: this program is run on a working
+    /// machine to look at, it covers the desktop and sits over the real
+    /// taskbar, and a shell with no way out is a shell somebody has to reach
+    /// for Task Manager to be rid of.
+    pub close: Slot,
 }
 
 /// How tall the strip is on a screen this tall.
@@ -73,18 +81,40 @@ pub fn gap(bar_h: i32) -> i32 {
 
 /// Lay the strip out, given the widths the Win32 half measured.
 ///
-/// The order of squeezing is the point: the clock and the layout keep their
-/// width whatever happens, and the window buttons take what is left — possibly
-/// nothing. A clock that disappears on a narrow screen would be a bug; a window
-/// button that does not fit is a fact of life.
-pub fn bar_slots(bar_w: i32, bar_h: i32, start_w: i32, layout_w: i32, clock_w: i32) -> BarSlots {
+/// `bar_w` is the width the strip actually GOT, which is not always the
+/// screen's: an installed Windows may hand back a narrower rectangle to keep
+/// clear of its own taskbar, and a clock placed by screen width then sits
+/// outside the window entirely — found by running it on exactly such a machine.
+///
+/// A `close_w` of zero means no close button, which is what the boot medium
+/// asks for. The order of squeezing is the rest of the point: the clock and the
+/// layout keep their width whatever happens, and the window buttons take what
+/// is left — possibly nothing. A clock that vanishes on a narrow screen would
+/// be a bug; a window button that does not fit is a fact of life.
+pub fn bar_slots(
+    bar_w: i32,
+    bar_h: i32,
+    start_w: i32,
+    layout_w: i32,
+    clock_w: i32,
+    close_w: i32,
+) -> BarSlots {
     let g = gap(bar_h);
     let start = Slot { x: g, y: 0, w: start_w.max(0), h: bar_h };
-    let clock = Slot { x: bar_w - g - clock_w.max(0), y: 0, w: clock_w.max(0), h: bar_h };
+
+    // Right to left: the close button if there is one, then the clock, then
+    // the layout.
+    let mut edge = bar_w - g;
+    let close = Slot { x: edge - close_w.max(0), y: 0, w: close_w.max(0), h: bar_h };
+    if !close.is_empty() {
+        edge = close.x - g;
+    }
+    let clock = Slot { x: edge - clock_w.max(0), y: 0, w: clock_w.max(0), h: bar_h };
     let layout = Slot { x: clock.x - g - layout_w.max(0), y: 0, w: layout_w.max(0), h: bar_h };
+
     let from = start.right() + g;
     let buttons = Slot { x: from, y: 0, w: (layout.x - g - from).max(0), h: bar_h };
-    BarSlots { start, buttons, layout, clock }
+    BarSlots { start, buttons, layout, clock, close }
 }
 
 /// Two-letter label for the language half of a keyboard layout identifier.
@@ -139,9 +169,14 @@ pub fn clock_text(hour: u16, minute: u16) -> String {
 mod tests {
     use super::*;
 
+    /// What the boot medium asks for: no close button.
+    fn on_medium(bar_w: i32) -> BarSlots {
+        bar_slots(bar_w, 48, 160, 40, 60, 0)
+    }
+
     #[test]
     fn the_clock_is_at_the_right_edge_and_the_start_button_at_the_left() {
-        let s = bar_slots(1920, 48, 160, 40, 60);
+        let s = on_medium(1920);
         let g = gap(48);
         assert_eq!(s.start.x, g, "the start button hugs the left end");
         assert_eq!(s.clock.right(), 1920 - g, "the clock hugs the right end");
@@ -150,20 +185,34 @@ mod tests {
 
     #[test]
     fn the_window_buttons_take_what_is_left_and_nothing_overlaps() {
-        let s = bar_slots(1920, 48, 160, 40, 60);
+        let s = on_medium(1920);
         assert!(s.buttons.x > s.start.right(), "buttons start after the start button");
         assert!(s.buttons.right() < s.layout.x, "buttons end before the layout");
         assert!(s.buttons.w > 1000, "a wide screen leaves plenty of room: {}", s.buttons.w);
+    }
+
+    /// The medium must not offer a way out of the shell, because there it is
+    /// not a way out of a program but a reboot. Everywhere else it must.
+    #[test]
+    fn the_close_button_exists_only_when_it_is_asked_for() {
+        let medium = on_medium(1920);
+        assert!(medium.close.is_empty(), "no way out of the shell on the medium");
+        assert_eq!(medium.clock.right(), 1920 - gap(48), "the clock takes the edge instead");
+
+        let desk = bar_slots(1920, 48, 160, 40, 60, 30);
+        assert_eq!(desk.close.right(), 1920 - gap(48), "the close button takes the edge");
+        assert!(desk.clock.right() < desk.close.x, "and pushes the clock left of it");
+        assert_eq!(desk.clock.w, 60, "without taking any of its width");
     }
 
     /// What must never happen is a strip that drops the clock or the layout
     /// because a screen is narrow. The window buttons are the part that yields.
     #[test]
     fn a_strip_too_narrow_for_everything_gives_up_the_window_buttons_first() {
-        let squeezed = bar_slots(320, 32, 160, 40, 60);
+        let squeezed = bar_slots(320, 32, 160, 40, 60, 0);
         assert!(squeezed.buttons.w < 40, "barely room for a button: {}", squeezed.buttons.w);
 
-        let crushed = bar_slots(240, 32, 160, 40, 60);
+        let crushed = bar_slots(240, 32, 160, 40, 60, 0);
         assert!(crushed.buttons.is_empty(), "no room left at all for window buttons");
         assert_eq!(crushed.clock.w, 60, "the clock still keeps its width");
         assert_eq!(crushed.layout.w, 40, "and so does the layout");
@@ -181,9 +230,9 @@ mod tests {
 
     #[test]
     fn a_click_belongs_to_at_most_one_part() {
-        let s = bar_slots(1920, 48, 160, 40, 60);
+        let s = bar_slots(1920, 48, 160, 40, 60, 30);
         for x in [0, 5, 100, 200, 900, 1700, 1800, 1850, 1900, 1919] {
-            let hits = [s.start, s.buttons, s.layout, s.clock]
+            let hits = [s.start, s.buttons, s.layout, s.clock, s.close]
                 .iter()
                 .filter(|slot| slot.contains(x, 10))
                 .count();

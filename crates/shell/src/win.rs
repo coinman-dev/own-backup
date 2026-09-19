@@ -49,8 +49,9 @@ use windows::Win32::UI::Shell::{
     APPBARDATA,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetForegroundWindow,
-    GetMessageW, GetSystemMetrics, GetWindowThreadProcessId, LoadCursorW, PostQuitMessage,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
+    GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindowThreadProcessId, LoadCursorW,
+    PostQuitMessage,
     PostMessageW, RegisterClassW, SetProcessDPIAware, SetTimer, SetWindowPos, ShowWindow,
     SystemParametersInfoW, TranslateMessage, HWND_BOTTOM, HWND_TOPMOST, IDC_ARROW, MSG,
     SM_CXSCREEN, SM_CYSCREEN, SPIF_SENDCHANGE, SPI_GETWORKAREA, SPI_SETWORKAREA,
@@ -78,6 +79,8 @@ const LAYOUT_SAMPLE: &str = "0000";
 const CLOCK_SAMPLE: &str = "00:00";
 /// What sits where the Start button will go until the menu exists.
 const START_TEXT: &str = "My Own Backup";
+/// The way out, shown only off the boot medium — see [`BarSlots::close`].
+const CLOSE_TEXT: &str = "\u{2715}";
 
 const BACKDROP: COLORREF = rgb(15, 48, 87);
 const BACKDROP_TEXT: COLORREF = rgb(110, 143, 176);
@@ -99,8 +102,13 @@ struct Bar {
     big: HFONT,
     screen_w: i32,
     screen_h: i32,
+    /// The width the strip actually got, which is not always the screen's.
+    bar_w: i32,
     bar_h: i32,
     slots: BarSlots,
+    /// Set while the strip is being placed, so the appbar notification that
+    /// placing it provokes does not start the whole thing again.
+    placing: bool,
     clock: String,
     layout: String,
     /// The shell accepted us as an appbar and is keeping the work area for us.
@@ -194,11 +202,11 @@ pub fn run() -> windows::core::Result<()> {
         b.bar = bar;
     });
     log(&format!("shell up on a {w}x{h} screen"));
-    // There is no way to close it from the strip, and on the medium there must
-    // not be: for a shell, exiting means rebooting. On a working machine, where
-    // this is only ever run to look at, the way out belongs in the log rather
-    // than in a button nobody on the medium should find.
-    log("to stop it from a console: taskkill /im own-backup-shell.exe");
+    log(if own_backup_common::media_mode::is_windows_pe() {
+        "WinPE: no way out of the strip, because here that would be a reboot"
+    } else {
+        "not WinPE: the X at the right end of the strip closes it"
+    });
 
     reflow(bar);
     tick(bar);
@@ -259,12 +267,6 @@ fn reflow(bar: HWND) {
     let bar_h = layout::bar_height(h);
     let font = make_font(layout::font_height(bar_h));
     let big = make_font(layout::font_height(bar_h) * 2);
-    let gap = layout::gap(bar_h);
-    let start_w = text_width(font, START_TEXT) + gap;
-    let layout_w = text_width(font, LAYOUT_SAMPLE) + gap;
-    let clock_w = text_width(font, CLOCK_SAMPLE) + gap;
-    let slots = layout::bar_slots(w, bar_h, start_w, layout_w, clock_w);
-
     let (old_font, old_big) = with_bar(|b| {
         let old = (b.font, b.big);
         b.font = font;
@@ -272,7 +274,7 @@ fn reflow(bar: HWND) {
         b.screen_w = w;
         b.screen_h = h;
         b.bar_h = bar_h;
-        b.slots = slots;
+        b.placing = true;
         old
     });
     for stale in [old_font, old_big] {
@@ -284,6 +286,39 @@ fn reflow(bar: HWND) {
     }
 
     dock(bar);
+
+    // Laid out across the width the strip actually GOT, not the screen's. On
+    // the medium the two are the same; on this working machine the shell
+    // trimmed our rectangle to keep clear of its own vertical taskbar, and a
+    // clock placed by screen width ended up past the window's right edge —
+    // drawn, invisible, and looking exactly like a clock that never appeared.
+    let mut client = RECT::default();
+    let width = unsafe {
+        match GetClientRect(bar, &mut client) {
+            Ok(()) if client.right > client.left => client.right - client.left,
+            _ => w,
+        }
+    };
+    let gap = layout::gap(bar_h);
+    let close_w = if own_backup_common::media_mode::is_windows_pe() {
+        0
+    } else {
+        text_width(font, CLOSE_TEXT) + gap
+    };
+    let slots = layout::bar_slots(
+        width,
+        bar_h,
+        text_width(font, START_TEXT) + gap,
+        text_width(font, LAYOUT_SAMPLE) + gap,
+        text_width(font, CLOCK_SAMPLE) + gap,
+        close_w,
+    );
+    with_bar(|b| {
+        b.bar_w = width;
+        b.slots = slots;
+        b.placing = false;
+    });
+
     let back = with_bar(|b| b.back);
     unsafe {
         let _ = SetWindowPos(back, HWND_BOTTOM, 0, 0, w, h, SWP_NOACTIVATE);
@@ -611,6 +646,11 @@ unsafe extern "system" fn bar_proc(
             let slots = with_bar(|b| b.slots);
             if slots.layout.contains(x, y) {
                 switch_layout();
+            } else if slots.close.contains(x, y) {
+                // Only ever present off the medium, and it goes through
+                // WM_DESTROY so the desktop gets its work area back.
+                log("closed from the strip");
+                let _ = DestroyWindow(window);
             }
             LRESULT(0)
         }
@@ -620,8 +660,11 @@ unsafe extern "system" fn bar_proc(
             reflow(window);
             LRESULT(0)
         }
-        WM_APPBAR if wparam.0 as u32 == ABN_POSCHANGED => {
-            dock(window);
+        // The shell moved something and wants us to take our place again. Our
+        // own placing provokes this too, so it is ignored while that is what is
+        // happening — otherwise the two feed each other.
+        WM_APPBAR if wparam.0 as u32 == ABN_POSCHANGED && !with_bar(|b| b.placing) => {
+            reflow(window);
             LRESULT(0)
         }
         WM_DESTROY => {
@@ -637,7 +680,7 @@ fn paint_bar(window: HWND) {
     // Copied out before any drawing: painting calls into Windows, and Windows
     // can call back into the window procedure that would want this borrow.
     let (slots, font, bar_h, width, clock, indicator) = with_bar(|b| {
-        (b.slots, b.font, b.bar_h, b.screen_w, b.clock.clone(), b.layout.clone())
+        (b.slots, b.font, b.bar_h, b.bar_w, b.clock.clone(), b.layout.clone())
     });
     unsafe {
         let mut paint = PAINTSTRUCT::default();
@@ -653,6 +696,7 @@ fn paint_bar(window: HWND) {
             draw_text(dc, &slots.start, START_TEXT, DT_LEFT.0);
             draw_text(dc, &slots.layout, &indicator, DT_CENTER.0);
             draw_text(dc, &slots.clock, &clock, DT_RIGHT.0);
+            draw_text(dc, &slots.close, CLOSE_TEXT, DT_CENTER.0);
         }
         let _ = EndPaint(window, &paint);
     }
