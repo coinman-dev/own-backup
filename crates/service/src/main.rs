@@ -471,11 +471,16 @@ pub async fn run_main_loop(
     // platforms the TCP path is dev/foreground only and stays token-less (the
     // real Unix transport is the UDS above).
     let addr: SocketAddr = config.grpc_address.parse()?;
+    // A failure here USED to fall back to an empty token, and an empty expected
+    // token turns `check_auth` into `Ok(())` for every call — the service went
+    // on serving with no authentication at all, saying so in a warning nobody
+    // reads. A contract that says "a token is required" must not be switched
+    // off by a failed write; refusing to start is the honest outcome.
     #[cfg(windows)]
-    let token = write_service_token(&config).unwrap_or_else(|e| {
-        tracing::warn!(error = %e, "could not write service token — running WITHOUT auth");
-        String::new()
-    });
+    let token = write_service_token(&config).map_err(|e| {
+        tracing::error!(error = %e, "no service token could be written — refusing to start");
+        e
+    })?;
     #[cfg(not(windows))]
     let token = String::new();
     info!(
@@ -483,6 +488,8 @@ pub async fn run_main_loop(
         addr,
         if token.is_empty() { "off" } else { "token" }
     );
+    #[cfg(windows)]
+    let kept_token = token.clone();
     let service = BackupServiceImpl::new(state, token).into_service();
     Server::builder()
         .add_service(service)
@@ -492,8 +499,27 @@ pub async fn run_main_loop(
         .await?;
 
     #[cfg(windows)]
-    let _ = std::fs::remove_file(config.token_path());
+    drop_our_token(&config, &kept_token);
     Ok(())
+}
+
+/// Take the token file away on shutdown — but only while it is still ours.
+///
+/// A second engine that started, minted its own token over ours and then failed
+/// to take the pipe would otherwise delete OUR token on its way out, and the
+/// interface talking to the running service is refused from that moment on.
+/// Seen on the boot medium, where the launcher was run more than once
+/// (2026-09-19): five engine starts in one session and `token_len=0` after them.
+#[cfg(windows)]
+fn drop_our_token(config: &AppConfig, ours: &str) {
+    let path = config.token_path();
+    match std::fs::read_to_string(&path) {
+        Ok(on_disk) if on_disk.trim() == ours => {
+            let _ = std::fs::remove_file(&path);
+        }
+        Ok(_) => tracing::info!("the token file belongs to another engine now - left alone"),
+        Err(_) => {}
+    }
 }
 
 /// Generate a per-boot bearer token, write it to the (ACL-restricted) token
@@ -795,10 +821,12 @@ async fn serve_named_pipe(
     use tokio::net::windows::named_pipe::ServerOptions;
 
     let pipe_path = own_backup_common::windows_pipe_path();
-    let token = write_service_token(&config).unwrap_or_else(|e| {
-        tracing::warn!(error = %e, "could not write service token — running WITHOUT token auth");
-        String::new()
-    });
+    // As on the TCP path: no token means no authentication, so a write that
+    // failed ends the start instead of quietly removing the check.
+    let token = write_service_token(&config).map_err(|e| {
+        tracing::error!(error = %e, "no service token could be written — refusing to start");
+        e
+    })?;
     let security = PipeSecurity::new()?;
 
     info!(
@@ -870,6 +898,7 @@ async fn serve_named_pipe(
         }
     };
 
+    let kept_token = token.clone();
     let service = BackupServiceImpl::new(state, token).into_service();
     Server::builder()
         .add_service(service)
@@ -878,6 +907,6 @@ async fn serve_named_pipe(
         })
         .await?;
 
-    let _ = std::fs::remove_file(config.token_path());
+    drop_our_token(&config, &kept_token);
     Ok(())
 }
