@@ -117,6 +117,33 @@ pub fn bar_slots(
     BarSlots { start, buttons, layout, clock, close }
 }
 
+/// Buttons for the open windows, across the room the strip has left.
+///
+/// They share that room equally, up to a width past which a button stops being
+/// easier to read and only takes space from the next one. Below a floor they
+/// stop being buttons at all, so when there is not enough room the strip shows
+/// as many as fit rather than a row of slivers — the rest are still one
+/// Alt+Tab away, which a sliver would not have helped with either.
+pub fn window_buttons(area: Slot, count: usize, bar_h: i32) -> Vec<Slot> {
+    if count == 0 || area.is_empty() {
+        return Vec::new();
+    }
+    let between = (gap(bar_h) / 2).max(2);
+    let floor = bar_h;
+    let cap = bar_h * 5;
+    let fit = ((area.w + between) / (floor + between)).max(1) as usize;
+    let shown = fit.min(count);
+    let each = (((area.w + between) / shown as i32) - between).min(cap);
+    (0..shown)
+        .map(|n| Slot {
+            x: area.x + n as i32 * (each + between),
+            y: area.y,
+            w: each,
+            h: area.h,
+        })
+        .collect()
+}
+
 /// Two-letter label for the language half of a keyboard layout identifier.
 ///
 /// The low word of an `HKL` is a language identifier, and its low ten bits are
@@ -238,6 +265,49 @@ mod tests {
                 .count();
             assert!(hits <= 1, "x={x} landed in {hits} parts at once");
         }
+    }
+
+    #[test]
+    fn window_buttons_share_the_room_without_touching_each_other() {
+        let area = Slot { x: 200, y: 0, w: 900, h: 48 };
+        let buttons = window_buttons(area, 3, 48);
+        assert_eq!(buttons.len(), 3);
+        assert_eq!(buttons[0].x, 200, "the first starts where the room does");
+        for pair in buttons.windows(2) {
+            assert!(pair[1].x > pair[0].right(), "buttons must not touch");
+            assert_eq!(pair[0].w, pair[1].w, "and they are the same width");
+        }
+        assert!(buttons[2].right() <= area.right(), "and stay inside the room");
+    }
+
+    /// Two windows on a wide screen should not give two buttons half a metre
+    /// wide each.
+    #[test]
+    fn a_button_stops_growing_once_it_is_wide_enough_to_read() {
+        let area = Slot { x: 200, y: 0, w: 2000, h: 48 };
+        let buttons = window_buttons(area, 2, 48);
+        assert_eq!(buttons[0].w, 48 * 5, "capped");
+        assert!(buttons[1].x < area.right(), "and still laid out left to right");
+    }
+
+    /// Slivers help nobody: better to show the ones that fit and leave the rest
+    /// to Alt+Tab.
+    #[test]
+    fn too_many_windows_show_as_many_as_can_still_be_read() {
+        let area = Slot { x: 0, y: 0, w: 300, h: 48 };
+        let buttons = window_buttons(area, 20, 48);
+        assert!(buttons.len() < 20, "not all of them");
+        assert!(!buttons.is_empty(), "but not none either");
+        for b in &buttons {
+            assert!(b.w >= 40, "each one still wide enough to read: {}", b.w);
+            assert!(b.right() <= area.right());
+        }
+    }
+
+    #[test]
+    fn no_windows_means_no_buttons() {
+        assert!(window_buttons(Slot { x: 0, y: 0, w: 900, h: 48 }, 0, 48).is_empty());
+        assert!(window_buttons(Slot::default(), 3, 48).is_empty(), "and no room means none");
     }
 
     #[test]

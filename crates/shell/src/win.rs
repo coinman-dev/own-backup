@@ -33,13 +33,14 @@ use std::sync::OnceLock;
 
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{
-    GetLastError, COLORREF, ERROR_ALREADY_EXISTS, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
+    GetLastError, BOOL, COLORREF, ERROR_ALREADY_EXISTS, HWND, LPARAM, LRESULT, POINT, RECT, SIZE,
+    TRUE, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, ClientToScreen, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint,
     FillRect, GetDC, GetTextExtentPoint32W, InvalidateRect, ReleaseDC, SelectObject, SetBkMode,
-    SetTextColor, HDC, HFONT, PAINTSTRUCT, DT_CENTER, DT_END_ELLIPSIS, DT_RIGHT, DT_SINGLELINE,
-    DT_VCENTER, TRANSPARENT,
+    SetTextColor, HDC, HFONT, PAINTSTRUCT, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_RIGHT,
+    DT_SINGLELINE, DT_VCENTER, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::SystemInformation::GetLocalTime;
@@ -51,16 +52,19 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-    DispatchMessageW, GetClientRect, GetForegroundWindow, GetMessageW, GetSystemMetrics,
-    GetWindowThreadProcessId, LoadCursorW, MessageBoxW, PostMessageW, PostQuitMessage,
-    RegisterClassW, SetForegroundWindow, SetProcessDPIAware, SetTimer, SetWindowPos, ShowWindow,
-    SystemParametersInfoW, TrackPopupMenuEx, TranslateMessage, HWND_BOTTOM, HWND_TOPMOST,
-    IDC_ARROW, IDYES, MA_NOACTIVATE, MB_ICONQUESTION, MB_SETFOREGROUND, MB_YESNO, MF_SEPARATOR,
-    MF_STRING, MSG, SM_CXSCREEN, SM_CYSCREEN, SPIF_SENDCHANGE, SPI_GETWORKAREA, SPI_SETWORKAREA,
-    SWP_NOACTIVATE, SW_SHOWNOACTIVATE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, TPM_BOTTOMALIGN,
+    DispatchMessageW, EnumWindows, GetClientRect, GetForegroundWindow, GetMessageW,
+    GetSystemMetrics, GetWindow, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW,
+    GetWindowThreadProcessId, IsIconic, IsWindowVisible, LoadCursorW, MessageBoxW, PostMessageW,
+    PostQuitMessage, RegisterClassW, SetForegroundWindow, SetProcessDPIAware, SetTimer,
+    SetWindowPos, ShowWindow, SystemParametersInfoW, TrackPopupMenuEx, TranslateMessage,
+    GWL_EXSTYLE, GW_OWNER, HWND_BOTTOM, HWND_TOPMOST, IDC_ARROW, IDYES, MA_NOACTIVATE,
+    MB_ICONQUESTION, MB_SETFOREGROUND, MB_YESNO, MF_SEPARATOR, MF_STRING, MSG, SM_CXSCREEN,
+    SM_CYSCREEN, SPIF_SENDCHANGE, SPI_GETWORKAREA, SPI_SETWORKAREA, SWP_NOACTIVATE, SW_MINIMIZE,
+    SW_RESTORE, SW_SHOWNOACTIVATE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, TPM_BOTTOMALIGN,
     TPM_LEFTALIGN, TPM_LEFTBUTTON, TPM_RETURNCMD, WM_APP, WM_DESTROY, WM_DISPLAYCHANGE,
     WM_ERASEBKGND, WM_INPUTLANGCHANGEREQUEST, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_NULL, WM_PAINT,
-    WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WM_TIMER, WNDCLASSW, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_POPUP,
 };
 
 use crate::layout::{self, BarSlots};
@@ -92,9 +96,12 @@ const BACKDROP_TEXT: COLORREF = rgb(110, 143, 176);
 const BAR_BG: COLORREF = rgb(242, 242, 242);
 const BAR_EDGE: COLORREF = rgb(196, 196, 196);
 const BAR_TEXT: COLORREF = rgb(26, 26, 26);
-/// The Start button, a shade darker than the strip so it reads as something to
-/// click rather than as a word printed in the corner.
+/// The Start button and the window buttons, a shade darker than the strip so
+/// they read as something to click rather than as words printed on it.
 const BAR_BUTTON: COLORREF = rgb(222, 222, 222);
+/// The button of the window in front, darker again — the only thing on the
+/// strip that says which window a keystroke would go to.
+const BAR_BUTTON_FRONT: COLORREF = rgb(198, 208, 220);
 
 const fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
     COLORREF((r as u32) | ((g as u32) << 8) | ((b as u32) << 16))
@@ -119,6 +126,15 @@ struct Bar {
     placing: bool,
     clock: String,
     layout: String,
+    /// The open windows, as of the last tick, and where their buttons are.
+    windows: Vec<OpenWindow>,
+    window_slots: Vec<layout::Slot>,
+    /// The window in front, so its button can be drawn as the one in front.
+    front: HWND,
+    /// Everything the buttons show, in one string: what the strip is repainted
+    /// for. Comparing it beats comparing the list itself, and a repaint every
+    /// second is a strip that flickers every second.
+    windows_shown: String,
     /// The shell accepted us as an appbar and is keeping the work area for us.
     appbar: bool,
     /// The work area as we found it, when we had to set it ourselves.
@@ -127,6 +143,13 @@ struct Bar {
 
 thread_local! {
     static BAR: RefCell<Bar> = RefCell::new(Bar::default());
+}
+
+/// A window someone could want to come back to.
+#[derive(Clone)]
+struct OpenWindow {
+    handle: HWND,
+    title: String,
 }
 
 /// Read or change the shared state. Kept to short, Win32-free closures on
@@ -473,16 +496,99 @@ fn tick(bar: HWND) {
     let now = unsafe { GetLocalTime() };
     let clock = layout::clock_text(now.wHour, now.wMinute);
     let indicator = layout::layout_label(foreground_langid());
+    let windows = open_windows();
+    let front = unsafe { GetForegroundWindow() };
+    let shown = windows
+        .iter()
+        .map(|w| format!("{:?}{}{}", w.handle.0, if w.handle == front { "*" } else { "" }, w.title))
+        .collect::<Vec<_>>()
+        .join("|");
+
     let changed = with_bar(|b| {
-        let differs = b.clock != clock || b.layout != indicator;
+        let differs = b.clock != clock || b.layout != indicator || b.windows_shown != shown;
         b.clock = clock;
         b.layout = indicator;
+        b.front = front;
+        b.window_slots = layout::window_buttons(b.slots.buttons, windows.len(), b.bar_h);
+        b.windows = windows;
+        b.windows_shown = shown;
         differs
     });
     if changed {
         unsafe {
             let _ = InvalidateRect(bar, None, false);
         }
+    }
+}
+
+/// The windows a person would expect to find on a taskbar.
+///
+/// The rule is the one Alt+Tab uses: visible, titled, not a tool window, and
+/// not owned by another window. On Windows 11 a handful of invisible system
+/// windows slip through it — they are filtered by asking the desktop compositor
+/// whether a window is cloaked, and that question is deliberately not asked
+/// here. It would add a load-time dependency on `dwmapi.dll` to a program whose
+/// whole job is to come up when other things have not, and the environment it
+/// is FOR has no compositor and no such windows.
+fn open_windows() -> Vec<OpenWindow> {
+    let mut found: Vec<OpenWindow> = Vec::new();
+    unsafe {
+        let _ = EnumWindows(Some(collect_window), LPARAM(&mut found as *mut _ as isize));
+    }
+    found
+}
+
+unsafe extern "system" fn collect_window(window: HWND, data: LPARAM) -> BOOL {
+    let found = &mut *(data.0 as *mut Vec<OpenWindow>);
+    if is_task_window(window) {
+        if let Some(title) = window_title(window) {
+            found.push(OpenWindow { handle: window, title });
+        }
+    }
+    TRUE
+}
+
+unsafe fn is_task_window(window: HWND) -> bool {
+    if !IsWindowVisible(window).as_bool() {
+        return false;
+    }
+    let (bar, back) = with_bar(|b| (b.bar, b.back));
+    if window == bar || window == back {
+        return false;
+    }
+    let extended = GetWindowLongPtrW(window, GWL_EXSTYLE) as u32;
+    if extended & WS_EX_APPWINDOW.0 != 0 {
+        return true;
+    }
+    if extended & WS_EX_TOOLWINDOW.0 != 0 {
+        return false;
+    }
+    GetWindow(window, GW_OWNER).map(|owner| owner.is_invalid()).unwrap_or(true)
+}
+
+unsafe fn window_title(window: HWND) -> Option<String> {
+    let length = GetWindowTextLengthW(window);
+    if length <= 0 {
+        return None;
+    }
+    let mut text = vec![0u16; length as usize + 1];
+    let got = GetWindowTextW(window, &mut text);
+    (got > 0).then(|| String::from_utf16_lossy(&text[..got as usize]))
+}
+
+/// A click on a window's button: bring it forward, or put it away if it is
+/// already the window in front — what every taskbar does, and the only thing
+/// anybody tries.
+fn raise_or_hide(window: HWND) {
+    unsafe {
+        if GetForegroundWindow() == window {
+            let _ = ShowWindow(window, SW_MINIMIZE);
+            return;
+        }
+        if IsIconic(window).as_bool() {
+            let _ = ShowWindow(window, SW_RESTORE);
+        }
+        let _ = SetForegroundWindow(window);
     }
 }
 
@@ -841,6 +947,13 @@ unsafe extern "system" fn bar_proc(
                 // WM_DESTROY so the desktop gets its work area back.
                 log("closed from the strip");
                 let _ = DestroyWindow(window);
+            } else if let Some(wanted) = with_bar(|b| {
+                b.window_slots
+                    .iter()
+                    .position(|slot| slot.contains(x, y))
+                    .and_then(|n| b.windows.get(n).map(|w| w.handle))
+            }) {
+                raise_or_hide(wanted);
             }
             LRESULT(0)
         }
@@ -872,6 +985,8 @@ fn paint_bar(window: HWND) {
     let (slots, font, bar_h, width, clock, indicator) = with_bar(|b| {
         (b.slots, b.font, b.bar_h, b.bar_w, b.clock.clone(), b.layout.clone())
     });
+    let (buttons, windows, front) =
+        with_bar(|b| (b.window_slots.clone(), b.windows.clone(), b.front));
     unsafe {
         let mut paint = PAINTSTRUCT::default();
         let dc = BeginPaint(window, &mut paint);
@@ -883,11 +998,25 @@ fn paint_bar(window: HWND) {
             let b = &slots.start;
             fill(dc, RECT { left: b.x, top: 2, right: b.right(), bottom: bar_h }, BAR_BUTTON);
         }
+        for (slot, window) in buttons.iter().zip(&windows) {
+            let colour = if window.handle == front { BAR_BUTTON_FRONT } else { BAR_BUTTON };
+            fill(dc, RECT { left: slot.x, top: 2, right: slot.right(), bottom: bar_h }, colour);
+        }
         if !font.is_invalid() {
             SelectObject(dc, font);
             SetBkMode(dc, TRANSPARENT);
             SetTextColor(dc, BAR_TEXT);
             draw_text(dc, &slots.start, START_TEXT, DT_CENTER.0);
+            for (slot, window) in buttons.iter().zip(&windows) {
+                // Inset, so a long title runs out of room before it reaches the
+                // next button rather than after.
+                let inside = layout::Slot {
+                    x: slot.x + 6,
+                    w: (slot.w - 12).max(0),
+                    ..*slot
+                };
+                draw_text(dc, &inside, &window.title, DT_LEFT.0);
+            }
             draw_text(dc, &slots.layout, &indicator, DT_CENTER.0);
             draw_text(dc, &slots.clock, &clock, DT_RIGHT.0);
             draw_text(dc, &slots.close, CLOSE_TEXT, DT_CENTER.0);
