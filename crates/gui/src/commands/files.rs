@@ -165,7 +165,13 @@ pub async fn list_dir(
                     label: String::new(),
                     fs: String::new(),
                 });
-            } else if !dirs_only {
+            // Files are listed when one is being picked — and ALSO when a
+            // FOLDER is being picked and the caller named the extensions that
+            // matter there. Choosing "the folder with the copies" used to show
+            // an empty folder: the copies were in it, the folder was the right
+            // one, and nothing on screen said so. They cannot be chosen in that
+            // mode; they are there to be recognised.
+            } else if !dirs_only || !files_ext.is_empty() {
                 let keep = files_ext.is_empty()
                     || entry
                         .path()

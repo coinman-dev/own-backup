@@ -72,9 +72,13 @@
     }
   }
 
+  // Files shown while a FOLDER is being picked are there to say "the copies
+  // are in here" — the folder is the answer, not one of them.
+  const pickable = (e: DirEntry) => e.is_dir || !req?.directory;
+
   function onRow(e: DirEntry) {
     if (e.is_dir) go(e.path);
-    else selectedFile = selectedFile === e.path ? null : e.path;
+    else if (!req?.directory) selectedFile = selectedFile === e.path ? null : e.path;
   }
 
   async function makeFolder() {
@@ -134,6 +138,7 @@
             class="row"
             class:sel={selectedFile === e.path}
             class:drive={!!(e.label || e.fs)}
+            class:shown-only={!pickable(e)}
             onclick={() => onRow(e)}
           >
             <span class="ico">{e.is_dir ? '📁' : '📄'}</span>
@@ -182,6 +187,12 @@
   .nav { background: none; border: 1px solid var(--border); border-radius: 4px; padding: 6px 12px; font-size: 13px; color: var(--head); cursor: pointer; font-family: var(--font); }
   .nav:disabled { opacity: .45; cursor: default; }
   .list { height: 320px; overflow: auto; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+  /* Listed for recognition, not for choosing. */
+  .shown-only {
+    opacity: .62;
+    cursor: default;
+  }
+
   .row { display: flex; align-items: center; gap: 10px; padding: 7px 18px; cursor: pointer; font-size: 13px; color: var(--head); }
   .row:hover { background: var(--hover-bg, rgba(127,127,127,.12)); }
   .row.sel { background: var(--primary); color: #fff; }

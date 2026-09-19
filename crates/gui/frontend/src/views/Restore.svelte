@@ -167,7 +167,14 @@
   async function addFolder() {
     addOpen = false;
     addError = null;
-    const picked = await pickPath({ directory: true, title: 'Папка с копиями' });
+    // The extensions are named although a FOLDER is being picked: the picker
+    // shows those files greyed out, so the folder holding the copies can be
+    // told from the one next to it. Without them it looked empty.
+    const picked = await pickPath({
+      directory: true,
+      title: 'Папка с копиями',
+      extensions: ['vhdx', 'avhdx', 'qcow2'],
+    });
     if (typeof picked !== 'string') return;
     try {
       const list = await api.listImageBackups(picked);
