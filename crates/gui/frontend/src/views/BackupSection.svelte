@@ -18,6 +18,9 @@
   let sortKey = $state<SortKey>((localStorage.getItem(SORT_KEY) as SortKey) ?? 'name');
   let sortOpen = $state(false);
 
+  /// Why "Добавить копию" did nothing, when it does nothing.
+  let addError: string | null = $state(null);
+
   // Delete-confirmation modal.
   let deleteId: string | null = $state(null);
   let deleteFiles = $state(false);
@@ -77,8 +80,18 @@
   async function addJob() {
     // Volumes are scanned once at startup and kept fresh by the background
     // drive-change poll — no re-scan needed here.
-    draftJob = await api.newJobTemplate();
-    draftMode = 'wizard';
+    //
+    // The template comes from the engine, so this can fail — and when it did
+    // on the boot medium the failure went nowhere: the exception ended in the
+    // console nobody can see, the wizard never opened, and the button read as
+    // broken. Whatever the reason, it has to be on screen.
+    addError = null;
+    try {
+      draftJob = await api.newJobTemplate();
+      draftMode = 'wizard';
+    } catch (e) {
+      addError = String(e);
+    }
   }
 
   function editJob() {
@@ -181,6 +194,9 @@
         </button>
       {/each}
     </div>
+    {#if addError}
+      <div class="add-error">Не удалось открыть мастер: {addError}</div>
+    {/if}
     <button class="add-btn" onclick={addJob}>
       <svg width="18" height="18" viewBox="0 0 24 24" stroke="var(--primary)" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
       Добавить копию
@@ -254,6 +270,16 @@
   .name-edit { flex: 1; min-width: 0; font-size: 14px; font-weight: 600; color: var(--head); border: 1px solid var(--primary); border-radius: 4px; padding: 5px 8px; font-family: var(--font); outline: none; background: #fff; }
   .del { opacity: 0; color: var(--text-muted); font-size: 18px; line-height: 1; padding: 0 4px; }
   .job-item:hover .del { opacity: 1; }
+  .add-error {
+    margin: 0 12px 8px;
+    padding: 8px 10px;
+    border-radius: 6px;
+    background: var(--danger-bg, rgba(220, 80, 80, .12));
+    color: var(--danger, #b03030);
+    font-size: 12px;
+    line-height: 1.35;
+  }
+
   .add-btn { display: flex; align-items: center; gap: 10px; padding: 15px 18px; background: none; border: none; border-top: 1px solid var(--border); cursor: pointer; font-size: 14px; font-weight: 600; color: var(--head); font-family: var(--font); }
   .add-btn:hover { color: var(--primary); }
   .dash-col { flex: 1; min-width: 0; overflow: auto; }
