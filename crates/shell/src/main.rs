@@ -24,6 +24,8 @@
 
 #[cfg_attr(not(windows), allow(dead_code))]
 mod layout;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod menu;
 #[cfg(windows)]
 mod win;
 

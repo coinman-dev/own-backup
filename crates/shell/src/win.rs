@@ -27,18 +27,19 @@ use std::cell::RefCell;
 use std::ffi::c_void;
 use std::io::Write as _;
 use std::mem::size_of;
+use std::os::windows::process::CommandExt as _;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use windows::core::w;
+use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{
-    GetLastError, COLORREF, ERROR_ALREADY_EXISTS, HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM,
+    GetLastError, COLORREF, ERROR_ALREADY_EXISTS, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint, FillRect, GetDC,
-    GetTextExtentPoint32W, InvalidateRect, ReleaseDC, SelectObject, SetBkMode, SetTextColor, HDC,
-    HFONT, PAINTSTRUCT, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_RIGHT, DT_SINGLELINE, DT_VCENTER,
-    TRANSPARENT,
+    BeginPaint, ClientToScreen, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint,
+    FillRect, GetDC, GetTextExtentPoint32W, InvalidateRect, ReleaseDC, SelectObject, SetBkMode,
+    SetTextColor, HDC, HFONT, PAINTSTRUCT, DT_CENTER, DT_END_ELLIPSIS, DT_RIGHT, DT_SINGLELINE,
+    DT_VCENTER, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::SystemInformation::GetLocalTime;
@@ -49,18 +50,21 @@ use windows::Win32::UI::Shell::{
     APPBARDATA,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
-    GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindowThreadProcessId, LoadCursorW,
-    PostQuitMessage,
-    PostMessageW, RegisterClassW, SetProcessDPIAware, SetTimer, SetWindowPos, ShowWindow,
-    SystemParametersInfoW, TranslateMessage, HWND_BOTTOM, HWND_TOPMOST, IDC_ARROW, MSG,
-    SM_CXSCREEN, SM_CYSCREEN, SPIF_SENDCHANGE, SPI_GETWORKAREA, SPI_SETWORKAREA,
-    SWP_NOACTIVATE, SW_SHOWNOACTIVATE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WNDCLASSW, WM_APP,
-    WM_DESTROY, WM_DISPLAYCHANGE, WM_ERASEBKGND, WM_INPUTLANGCHANGEREQUEST, WM_LBUTTONDOWN,
-    WM_PAINT, WM_TIMER, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
+    DispatchMessageW, GetClientRect, GetForegroundWindow, GetMessageW, GetSystemMetrics,
+    GetWindowThreadProcessId, LoadCursorW, MessageBoxW, PostMessageW, PostQuitMessage,
+    RegisterClassW, SetForegroundWindow, SetProcessDPIAware, SetTimer, SetWindowPos, ShowWindow,
+    SystemParametersInfoW, TrackPopupMenuEx, TranslateMessage, HWND_BOTTOM, HWND_TOPMOST,
+    IDC_ARROW, IDYES, MA_NOACTIVATE, MB_ICONQUESTION, MB_SETFOREGROUND, MB_YESNO, MF_SEPARATOR,
+    MF_STRING, MSG, SM_CXSCREEN, SM_CYSCREEN, SPIF_SENDCHANGE, SPI_GETWORKAREA, SPI_SETWORKAREA,
+    SWP_NOACTIVATE, SW_SHOWNOACTIVATE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, TPM_BOTTOMALIGN,
+    TPM_LEFTALIGN, TPM_LEFTBUTTON, TPM_RETURNCMD, WM_APP, WM_DESTROY, WM_DISPLAYCHANGE,
+    WM_ERASEBKGND, WM_INPUTLANGCHANGEREQUEST, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_NULL, WM_PAINT,
+    WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::layout::{self, BarSlots};
+use crate::menu;
 
 /// The appbar's own notifications come back as this message.
 const WM_APPBAR: u32 = WM_APP + 1;
@@ -77,8 +81,9 @@ const INPUTLANGCHANGE_FORWARD: usize = 0x0002;
 /// than any two letters.
 const LAYOUT_SAMPLE: &str = "0000";
 const CLOCK_SAMPLE: &str = "00:00";
-/// What sits where the Start button will go until the menu exists.
-const START_TEXT: &str = "My Own Backup";
+/// The Start button. The product's name is on the backdrop behind it, where it
+/// does not have to be clicked to be read.
+const START_TEXT: &str = "Пуск";
 /// The way out, shown only off the boot medium — see [`BarSlots::close`].
 const CLOSE_TEXT: &str = "\u{2715}";
 
@@ -87,6 +92,9 @@ const BACKDROP_TEXT: COLORREF = rgb(110, 143, 176);
 const BAR_BG: COLORREF = rgb(242, 242, 242);
 const BAR_EDGE: COLORREF = rgb(196, 196, 196);
 const BAR_TEXT: COLORREF = rgb(26, 26, 26);
+/// The Start button, a shade darker than the strip so it reads as something to
+/// click rather than as a word printed in the corner.
+const BAR_BUTTON: COLORREF = rgb(222, 222, 222);
 
 const fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
     COLORREF((r as u32) | ((g as u32) << 8) | ((b as u32) << 16))
@@ -181,9 +189,14 @@ pub fn run() -> windows::core::Result<()> {
             None,
         )?
     };
+    // No `WS_EX_NOACTIVATE` here, unlike the backdrop, and the reason is the
+    // Start menu: a popup menu that does not own the foreground will not close
+    // when the person clicks past it. The strip is kept from stealing the focus
+    // by answering WM_MOUSEACTIVATE instead, which leaves the door open for the
+    // one moment the menu needs it.
     let bar = unsafe {
         CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
             bar_class,
             w!("My Own Backup"),
             WS_POPUP,
@@ -308,7 +321,9 @@ fn reflow(bar: HWND) {
     let slots = layout::bar_slots(
         width,
         bar_h,
-        text_width(font, START_TEXT) + gap,
+        // Roomier than the rest: it is a button, and a button the width of its
+        // own word is a word.
+        text_width(font, START_TEXT) + gap * 3,
         text_width(font, LAYOUT_SAMPLE) + gap,
         text_width(font, CLOCK_SAMPLE) + gap,
         close_w,
@@ -516,6 +531,175 @@ fn switch_layout() {
     }
 }
 
+/// Put the Start menu up and act on what was chosen.
+///
+/// Two pieces of etiquette are load-bearing here. The menu is given the
+/// foreground first, or it stays on screen after the person clicks past it —
+/// the workaround Microsoft documents for tray icons and appbars alike, along
+/// with the empty message posted afterwards. And the foreground is handed
+/// straight back, because the whole point of the strip is to report on the
+/// window someone is typing into, and that has to go on being their window.
+fn show_menu(window: HWND, at: &layout::Slot) {
+    let on_medium = own_backup_common::media_mode::is_windows_pe();
+    let found: Vec<bool> = menu::TOOLS
+        .iter()
+        .map(|(_, relative)| tool_path(relative).map(|p| p.exists()).unwrap_or(false))
+        .collect();
+    let items = menu::items(on_medium, &found);
+    let previously_in_front = unsafe { GetForegroundWindow() };
+
+    let chosen = unsafe {
+        let popup = match CreatePopupMenu() {
+            Ok(popup) => popup,
+            Err(error) => {
+                log(&format!("no Start menu: {error}"));
+                return;
+            }
+        };
+        for item in &items {
+            if item.separator_above {
+                let _ = AppendMenuW(popup, MF_SEPARATOR, 0, None);
+            }
+            let text: Vec<u16> = item.text.encode_utf16().chain(std::iter::once(0)).collect();
+            let _ = AppendMenuW(popup, MF_STRING, item.id as usize, PCWSTR(text.as_ptr()));
+        }
+
+        let mut corner = POINT { x: at.x, y: at.y };
+        let _ = ClientToScreen(window, &mut corner);
+        let _ = SetForegroundWindow(window);
+        let picked = TrackPopupMenuEx(
+            popup,
+            (TPM_RETURNCMD | TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_LEFTBUTTON).0,
+            corner.x,
+            corner.y,
+            window,
+            None,
+        )
+        .0;
+        let _ = PostMessageW(window, WM_NULL, WPARAM(0), LPARAM(0));
+        let _ = DestroyMenu(popup);
+        picked
+    };
+
+    if !previously_in_front.is_invalid() && previously_in_front != window {
+        unsafe {
+            let _ = SetForegroundWindow(previously_in_front);
+        }
+    }
+    if chosen > 0 {
+        chose(window, chosen as u32);
+    }
+}
+
+/// Do what the chosen line says. Every arm here launches something and returns:
+/// nothing in this program waits for a child, because a shell that waits is a
+/// desktop that has stopped.
+fn chose(window: HWND, id: u32) {
+    match id {
+        menu::COMMAND_PROMPT => launch("cmd.exe", &[], None, CREATE_NEW_CONSOLE),
+        menu::INTERFACE => start_the_interface(),
+        menu::REBOOT => {
+            if confirm("Перезагрузить компьютер?") {
+                launch("wpeutil", &["reboot"], None, CREATE_NO_WINDOW);
+            }
+        }
+        menu::SHUTDOWN => {
+            if confirm("Выключить компьютер?") {
+                launch("wpeutil", &["shutdown"], None, CREATE_NO_WINDOW);
+            }
+        }
+        menu::CLOSE => unsafe {
+            log("closed from the Start menu");
+            let _ = DestroyWindow(window);
+        },
+        other => {
+            let Some(n) = other.checked_sub(menu::TOOL_BASE) else {
+                log(&format!("menu line {other} means nothing here"));
+                return;
+            };
+            let Some((_, relative)) = menu::TOOLS.get(n as usize) else {
+                log(&format!("menu line {other} means nothing here"));
+                return;
+            };
+            let Some(path) = tool_path(relative) else { return };
+            // In its own folder: these programs keep their settings beside
+            // themselves and look for them there.
+            let home = path.parent().map(|p| p.to_path_buf());
+            launch(&path.to_string_lossy(), &[], home, 0);
+        }
+    }
+}
+
+/// Start the product the way this machine expects it to be started.
+///
+/// On the medium that is `start-media.cmd` and not the exe: the script is what
+/// finds the WebView2 runtime, points the profile at the RAM disk and turns the
+/// firewall off. Starting the interface without it gives a process that runs
+/// and never shows a window — the failure this medium already spent a week on.
+/// `/k` rather than `/c` so the console it opens stays, the way every other
+/// console on this medium does.
+fn start_the_interface() {
+    match app_dir() {
+        Some(dir) if dir.join("start-media.cmd").exists() => {
+            let script = dir.join("start-media.cmd");
+            launch("cmd.exe", &["/k", &script.to_string_lossy()], Some(dir), CREATE_NEW_CONSOLE);
+        }
+        Some(dir) => {
+            let exe = dir.join("own-backup-gui.exe");
+            launch(&exe.to_string_lossy(), &[], Some(dir), 0);
+        }
+        None => log("cannot tell where I am, so cannot start the interface"),
+    }
+}
+
+/// Start a program and forget it.
+fn launch(program: &str, args: &[&str], from: Option<PathBuf>, flags: u32) {
+    let mut command = std::process::Command::new(program);
+    command.args(args).creation_flags(flags);
+    if let Some(dir) = from {
+        command.current_dir(dir);
+    }
+    match command.spawn() {
+        Ok(child) => log(&format!("started {program} as {}", child.id())),
+        Err(error) => log(&format!("could not start {program}: {error}")),
+    }
+}
+
+/// A console of its own, because this process has none to give.
+const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+/// No console at all, for the programs that would only flash one.
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// The folder this exe lives in — where the medium keeps everything of ours.
+fn app_dir() -> Option<PathBuf> {
+    std::env::current_exe().ok()?.parent().map(|d| d.to_path_buf())
+}
+
+/// Where an optional tool would be, if the build put one there: beside our own
+/// folder rather than inside it, so a tool is never mistaken for a part of the
+/// product.
+fn tool_path(relative: &str) -> Option<PathBuf> {
+    Some(app_dir()?.parent()?.join(relative))
+}
+
+/// Ask before doing something that ends the session.
+///
+/// This is the one question the shell asks, and it earns its place: the two
+/// lines it guards are next to each other at the bottom of a menu, on a machine
+/// where a restart in the middle of a copy costs the copy.
+fn confirm(question: &str) -> bool {
+    let text: Vec<u16> = question.encode_utf16().chain(std::iter::once(0)).collect();
+    let title: Vec<u16> = "My Own Backup".encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        MessageBoxW(
+            None,
+            PCWSTR(text.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            MB_YESNO | MB_ICONQUESTION | MB_SETFOREGROUND,
+        ) == IDYES
+    }
+}
+
 fn installed_layouts() -> Vec<HKL> {
     unsafe {
         let count = GetKeyboardLayoutList(None);
@@ -630,6 +814,10 @@ unsafe extern "system" fn bar_proc(
 ) -> LRESULT {
     match message {
         WM_ERASEBKGND => LRESULT(1),
+        // Clickable without taking the focus. Without this the click meant to
+        // switch the layout of the window in front would first make US the
+        // window in front, and then switch our own.
+        WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
         WM_PAINT => {
             paint_bar(window);
             LRESULT(0)
@@ -644,7 +832,9 @@ unsafe extern "system" fn bar_proc(
             let x = (lparam.0 & 0xFFFF) as i16 as i32;
             let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
             let slots = with_bar(|b| b.slots);
-            if slots.layout.contains(x, y) {
+            if slots.start.contains(x, y) {
+                show_menu(window, &slots.start);
+            } else if slots.layout.contains(x, y) {
                 switch_layout();
             } else if slots.close.contains(x, y) {
                 // Only ever present off the medium, and it goes through
@@ -689,11 +879,15 @@ fn paint_bar(window: HWND) {
         // A hairline along the top edge, so the strip reads as a strip and not
         // as the bottom of whatever window happens to be above it.
         fill(dc, RECT { left: 0, top: 0, right: width, bottom: 1 }, BAR_EDGE);
+        if !slots.start.is_empty() {
+            let b = &slots.start;
+            fill(dc, RECT { left: b.x, top: 2, right: b.right(), bottom: bar_h }, BAR_BUTTON);
+        }
         if !font.is_invalid() {
             SelectObject(dc, font);
             SetBkMode(dc, TRANSPARENT);
             SetTextColor(dc, BAR_TEXT);
-            draw_text(dc, &slots.start, START_TEXT, DT_LEFT.0);
+            draw_text(dc, &slots.start, START_TEXT, DT_CENTER.0);
             draw_text(dc, &slots.layout, &indicator, DT_CENTER.0);
             draw_text(dc, &slots.clock, &clock, DT_RIGHT.0);
             draw_text(dc, &slots.close, CLOSE_TEXT, DT_CENTER.0);
