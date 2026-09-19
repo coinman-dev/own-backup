@@ -139,58 +139,11 @@ fn weigh(dir: &Path) -> (u64, u32) {
     (bytes, files)
 }
 
-// --- the smallest possible registry read ---
-
-use windows::core::PCWSTR;
-use windows::Win32::Foundation::ERROR_SUCCESS;
-use windows::Win32::System::Registry::{
-    RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE,
-    KEY_READ, REG_VALUE_TYPE,
-};
-
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
-/// One string value, or nothing. An empty `value` reads the key's default,
-/// which is where Notepad++ keeps its install path.
-fn read_string(root: HKEY, subkey: &str, value: &str) -> Option<String> {
-    unsafe {
-        let mut key = HKEY::default();
-        let opened = RegOpenKeyExW(root, PCWSTR(wide(subkey).as_ptr()), 0, KEY_READ, &mut key);
-        if opened != ERROR_SUCCESS {
-            return None;
-        }
-        let name = wide(value);
-        let name = if value.is_empty() { PCWSTR::null() } else { PCWSTR(name.as_ptr()) };
-        let mut kind = REG_VALUE_TYPE(0);
-        let mut size: u32 = 0;
-        let sized = RegQueryValueExW(key, name, None, Some(&mut kind), None, Some(&mut size));
-        if sized != ERROR_SUCCESS || size == 0 {
-            let _ = RegCloseKey(key);
-            return None;
-        }
-        let mut buffer = vec![0u8; size as usize];
-        let read = RegQueryValueExW(
-            key,
-            name,
-            None,
-            Some(&mut kind),
-            Some(buffer.as_mut_ptr()),
-            Some(&mut size),
-        );
-        let _ = RegCloseKey(key);
-        if read != ERROR_SUCCESS {
-            return None;
-        }
-        let units: Vec<u16> = buffer
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-            .take_while(|unit| *unit != 0)
-            .collect();
-        Some(String::from_utf16_lossy(&units))
-    }
-}
+// One value out of the registry, defined once in `common` — the same question
+// is asked from the display command, and two copies of it would eventually
+// disagree about what an empty value means.
+use own_backup_common::win_registry::read_string;
+use windows::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
 
 #[cfg(test)]
 mod tests {

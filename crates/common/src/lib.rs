@@ -17,6 +17,8 @@ pub mod restore_plan;
 pub mod restore_state;
 pub mod types;
 pub mod units;
+#[cfg(windows)]
+pub mod win_registry;
 
 pub use error::{OwnBackupError, Result};
 

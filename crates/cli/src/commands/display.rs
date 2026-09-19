@@ -525,8 +525,9 @@ pub async fn run(args: DisplayArgs) -> own_backup_common::Result<()> {
                     "У Hyper-V размер экрана задаёт хост, а не гость. На хосте, \
                      при выключенной машине:"
                 );
+                let name = imp::machine_name().unwrap_or_else(|| "ИМЯ".into());
                 println!(
-                    "  Set-VMVideo -VMName ИМЯ -ResolutionType Single \
+                    "  Set-VMVideo -VMName {name} -ResolutionType Single \
                      -HorizontalResolution {} -VerticalResolution {}",
                     best.width, best.height
                 );
@@ -745,6 +746,21 @@ mod imp {
     fn wide_str(b: &[u16]) -> String {
         let n = b.iter().position(|&c| c == 0).unwrap_or(b.len());
         String::from_utf16_lossy(&b[..n])
+    }
+
+    /// What the host calls this virtual machine, if it bothered to tell the
+    /// guest.
+    ///
+    /// Hyper-V writes it into the guest's registry through the integration
+    /// services, and the point of asking is that the command a person then has
+    /// to run on the host takes that exact name — printing `ИМЯ` and leaving
+    /// them to find it is half an answer.
+    pub fn machine_name() -> Option<String> {
+        own_backup_common::win_registry::read_string(
+            windows::Win32::System::Registry::HKEY_LOCAL_MACHINE,
+            r"SOFTWARE\Microsoft\Virtual Machine\Guest\Parameters",
+            "VirtualMachineName",
+        )
     }
 
     /// GDI name of the primary display (`\\.\DISPLAY1`).
