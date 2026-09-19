@@ -37,10 +37,11 @@ use windows::Win32::Foundation::{
     TRUE, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, ClientToScreen, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint,
-    FillRect, GetDC, GetTextExtentPoint32W, InvalidateRect, ReleaseDC, SelectObject, SetBkMode,
-    SetTextColor, HDC, HFONT, PAINTSTRUCT, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_RIGHT,
-    DT_SINGLELINE, DT_VCENTER, TRANSPARENT,
+    BeginPaint, ClientToScreen, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW,
+    EndPaint, EnumFontFamiliesExW, FillRect, GetDC, GetTextExtentPoint32W, InvalidateRect,
+    ReleaseDC, SelectObject, SetBkMode, SetTextColor, FONT_CHARSET, HDC, HFONT, LOGFONTW,
+    PAINTSTRUCT, TEXTMETRICW, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_RIGHT, DT_SINGLELINE,
+    DT_VCENTER, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
 use windows::Win32::System::SystemInformation::GetLocalTime;
@@ -1054,7 +1055,52 @@ fn installed_layouts() -> Vec<HKL> {
     }
 }
 
+/// Typefaces to draw the strip with, best first.
+///
+/// A name GDI cannot find is not an error — the font mapper quietly substitutes
+/// whatever it thinks is closest, and on the medium it thought an ITALIC face
+/// was closest to a missing "Segoe UI". The whole strip came up slanted. So the
+/// name is checked against what is really installed before it is asked for, and
+/// the list ends with faces every Windows has had for thirty years.
+const FACES: [&str; 4] = ["Segoe UI", "Tahoma", "Microsoft Sans Serif", "Arial"];
+
+/// The first of [`FACES`] this machine actually has.
+fn face() -> &'static str {
+    static CHOSEN: OnceLock<&'static str> = OnceLock::new();
+    CHOSEN.get_or_init(|| {
+        let found = FACES.iter().copied().find(|name| installed(name)).unwrap_or(FACES[1]);
+        log(&format!("drawing the strip in {found}"));
+        found
+    })
+}
+
+/// Does a typeface of this name exist?
+fn installed(name: &str) -> bool {
+    unsafe extern "system" fn seen(
+        _font: *const LOGFONTW,
+        _metrics: *const TEXTMETRICW,
+        _kind: u32,
+        found: LPARAM,
+    ) -> i32 {
+        *(found.0 as *mut bool) = true;
+        0 // stop: one is all the answer needed
+    }
+
+    let mut wanted = LOGFONTW { lfCharSet: FONT_CHARSET(1), ..Default::default() };
+    for (slot, unit) in wanted.lfFaceName.iter_mut().zip(name.encode_utf16()) {
+        *slot = unit;
+    }
+    let mut found = false;
+    unsafe {
+        let dc = GetDC(None);
+        EnumFontFamiliesExW(dc, &wanted, Some(seen), LPARAM(&mut found as *mut bool as isize), 0);
+        ReleaseDC(None, dc);
+    }
+    found
+}
+
 fn make_font(height: i32) -> HFONT {
+    let name: Vec<u16> = face().encode_utf16().chain(std::iter::once(0)).collect();
     unsafe {
         CreateFontW(
             -height, // negative: the height of the characters, not of the cell
@@ -1062,15 +1108,15 @@ fn make_font(height: i32) -> HFONT {
             0,
             0,
             400, // FW_NORMAL
+            0,   // not italic, and the strip came up italic anyway - see FACES
             0,
             0,
-            0,
-            1, // DEFAULT_CHARSET - the strip shows Russian as well
-            0, // OUT_DEFAULT_PRECIS
-            0, // CLIP_DEFAULT_PRECIS
-            5, // CLEARTYPE_QUALITY
-            0, // DEFAULT_PITCH | FF_DONTCARE
-            w!("Segoe UI"),
+            1,    // DEFAULT_CHARSET - the strip shows Russian as well
+            0,    // OUT_DEFAULT_PRECIS
+            0,    // CLIP_DEFAULT_PRECIS
+            5,    // CLEARTYPE_QUALITY
+            0x22, // VARIABLE_PITCH | FF_SWISS - what to substitute if it must
+            PCWSTR(name.as_ptr()),
         )
     }
 }

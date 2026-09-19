@@ -438,6 +438,7 @@ pub async fn run(args: DisplayArgs) -> own_backup_common::Result<()> {
         None if use_prefer || args.biggest => {
             let Some(m) = choose(&modes, min, prefer, use_prefer) else {
                 println!("Драйвер дисплея не перечислил ни одного режима — оставляем как есть.");
+                cap_scale(args.max_scale);
                 return Ok(());
             };
             m
@@ -454,11 +455,13 @@ pub async fn run(args: DisplayArgs) -> own_backup_common::Result<()> {
                  (принудительно: --biggest)."
             );
             tracing::info!("display: monitor silent, current mode usable — left alone");
+            cap_scale(args.max_scale);
             return Ok(());
         }
         None => {
             let Some(m) = choose_conservative(&modes, min) else {
                 println!("Драйвер дисплея не перечислил ни одного режима — оставляем как есть.");
+                cap_scale(args.max_scale);
                 return Ok(());
             };
             println!(
@@ -479,6 +482,11 @@ pub async fn run(args: DisplayArgs) -> own_backup_common::Result<()> {
         current.as_ref().is_some_and(|c| c.width == best.width && c.height == best.height);
     if same_size {
         println!("Менять нечего: текущий режим — тот, что нужен.");
+        // The scale still might. On the medium the firmware had already set
+        // the monitor's own resolution, so this is the path every boot takes —
+        // and the cap below it never ran once: the log showed the screen
+        // reported at 200 % and not a word about capping it (2026-09-19).
+        cap_scale(args.max_scale);
         return Ok(());
     }
     if best.width < min.0 || best.height < min.1 {
