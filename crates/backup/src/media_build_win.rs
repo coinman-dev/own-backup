@@ -1188,7 +1188,7 @@ fn add_tools(
         let to = root.join(known.folder);
         progress(((n * 100) / picked.len().max(1)) as u64, &tool.name);
         std::fs::create_dir_all(&to)?;
-        copy_tree(&tool.source, &to)?;
+        copy_tree_except(&tool.source, &to, known.skip)?;
         if !to.join(known.exe).is_file() {
             return Err(OwnBackupError::ImageFormat(format!(
                 "{} скопирован, но {} в нём нет",
@@ -1276,6 +1276,30 @@ fn copy_settings(under: &str, into: &Path) -> u32 {
 fn system32() -> PathBuf {
     PathBuf::from(std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into()))
         .join("System32")
+}
+
+/// [`copy_tree`], minus the top-level folders named in `skip`.
+///
+/// Only the top level, and deliberately: a name like `themes` could appear
+/// again somewhere deep inside a program's own data, and leaving THAT out is
+/// not what anybody asked for.
+fn copy_tree_except(src: &Path, dst: &Path, skip: &[&str]) -> Result<()> {
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if skip.iter().any(|s| s.eq_ignore_ascii_case(&name.to_string_lossy())) {
+            info!(folder = %name.to_string_lossy(), "left behind, nothing on a medium reads it");
+            continue;
+        }
+        let to = dst.join(&name);
+        if entry.file_type()?.is_dir() {
+            std::fs::create_dir_all(&to)?;
+            copy_tree(&entry.path(), &to)?;
+        } else {
+            std::fs::copy(entry.path(), &to)?;
+        }
+    }
+    Ok(())
 }
 
 fn copy_tree(src: &Path, dst: &Path) -> Result<()> {

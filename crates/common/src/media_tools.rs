@@ -48,6 +48,14 @@ pub struct MediaTool {
     /// what lives there is session state and unsaved documents, which are
     /// someone's private files and have no business on a boot medium.
     pub settings_in_appdata: Option<&'static str>,
+    /// Subfolders of the installation not worth carrying.
+    ///
+    /// The medium is loaded into RAM whole, so every megabyte here is a
+    /// megabyte the rescued machine never gets back — and these are megabytes
+    /// nothing on a medium can use. They are left out of the size shown in the
+    /// wizard too: the number a person decides on should be the number the
+    /// medium actually grows by.
+    pub skip: &'static [&'static str],
 }
 
 /// Everything the medium knows how to carry, in the order the menu shows them.
@@ -70,6 +78,7 @@ pub const MEDIA_TOOLS: [MediaTool; 2] = [
         // `wincmd.ini`. Total Commander looks for it beside the exe when the
         // registry names no other place, and a medium's registry names none.
         settings_in_appdata: Some("GHISLER"),
+        skip: &[],
     },
     MediaTool {
         id: "notepadpp",
@@ -78,6 +87,13 @@ pub const MEDIA_TOOLS: [MediaTool; 2] = [
         exe: "notepad++.exe",
         portable_marker: Some("doLocalConf.xml"),
         settings_in_appdata: Some("Notepad++"),
+        // `updater` is WinGUP, which downloads new versions — there is no
+        // network worth using on a rescue medium and no point updating a copy
+        // that lives for one session. `themes` is only read when a theme is
+        // chosen instead of the default styling, and the styling itself comes
+        // from `stylers.xml`, which IS carried. Together they are a third of
+        // the program: 6.9 MiB of 19.9.
+        skip: &["themes", "updater"],
     },
 ];
 
@@ -91,6 +107,11 @@ impl MediaTool {
     /// medium is the last place to make someone hunt for a file manager.
     pub fn path_on_medium(&self) -> String {
         format!(r"{}\{}", self.folder, self.exe)
+    }
+
+    /// Is this subfolder of the installation one the medium leaves behind?
+    pub fn skips(&self, folder: &str) -> bool {
+        self.skip.iter().any(|s| s.eq_ignore_ascii_case(folder))
     }
 }
 
@@ -147,6 +168,19 @@ mod tests {
         for t in MEDIA_TOOLS {
             assert!(t.settings_in_appdata.is_some(), "{} has nowhere to take settings from", t.id);
         }
+    }
+
+    /// The medium is held in RAM whole, and these two folders are a third of
+    /// Notepad++ that nothing on a medium reads: an updater with no network
+    /// worth using, and themes that are only consulted when one is chosen
+    /// instead of the default styling — which comes from `stylers.xml`.
+    #[test]
+    fn the_folders_a_medium_has_no_use_for_are_left_behind() {
+        let npp = tool("notepadpp").unwrap();
+        assert!(npp.skips("themes") && npp.skips("updater"));
+        assert!(npp.skips("Themes"), "a folder name is not case-sensitive on Windows");
+        assert!(!npp.skips("plugins"), "those are part of the program");
+        assert!(!npp.skips(""), "and nothing matches nothing");
     }
 
     #[test]

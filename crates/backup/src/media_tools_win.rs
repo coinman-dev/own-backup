@@ -44,12 +44,22 @@ pub fn find_tools() -> Vec<FoundTool> {
     let mut found = Vec::new();
     for tool in MEDIA_TOOLS {
         let Some(source) = locate(&tool) else { continue };
-        let (size_bytes, files) = weigh(&source);
+        // What the medium will actually grow by, not what the installation
+        // weighs: the folders in `skip` never leave this machine, and a number
+        // that counts them is a number the person deciding is misled by.
+        let (whole, whole_files) = weigh(&source);
+        let (left, left_files) = tool
+            .skip
+            .iter()
+            .map(|folder| weigh(&source.join(folder)))
+            .fold((0, 0), |(b, f), (sb, sf)| (b + sb, f + sf));
+        let (size_bytes, files) = (whole - left.min(whole), whole_files - left_files.min(whole_files));
         info!(
             tool = tool.id,
             path = %source.display(),
             mb = size_bytes / 1_048_576,
             files,
+            left_behind_mb = left / 1_048_576,
             "third-party tool found for the medium"
         );
         found.push(FoundTool {
