@@ -675,6 +675,9 @@ export interface CheckContext {
    *  the restore is about to overwrite. */
   targets: {
     index: number;
+    /** Where it starts on the disk. A plan with no partition table has nothing
+     *  else to check an operation's raw byte offset against. */
+    offset_bytes: number;
     size_bytes: number;
     used_bytes: number;
     filesystem: string;

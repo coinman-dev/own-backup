@@ -68,6 +68,270 @@ impl BackupServiceImpl {
             .reserve(own_backup_core::busy::Doing::with_id(what, which, id))
             .map_err(|held| Status::failed_precondition(held.refusal()))
     }
+
+    /// Run every plan check against a service-built context and return the
+    /// refusals, in the user's words. An empty list means the plan may run.
+    ///
+    /// The plan is `&mut` because two of the preparations change it: drive
+    /// letters that collide are moved to free ones, and a disk size that
+    /// disagrees with the device is corrected. Both were already done for the
+    /// preview; doing them here too is what makes the executed plan the
+    /// checked one.
+    async fn validate_restore(
+        &self,
+        plan: &mut own_backup_common::restore_plan::RestorePlan,
+    ) -> Result<Vec<String>, Status> {
+        use own_backup_common::restore_check::{
+            check_plan, resolve_letter_conflicts, CheckContext, CheckLevel,
+        };
+
+        // Which device is under that number NOW. `PhysicalDriveN` is a slot:
+        // unplug a USB disk and plug another in, and the number moves (audit
+        // AUD-01, point 5).
+        let now = live_disk_id(plan.target_disk).await;
+        match plan.target_disk_id.as_ref().and_then(|was| was.matches(&now)) {
+            Some(true) => {}
+            Some(false) => {
+                let was = plan.target_disk_id.clone().unwrap_or_default();
+                tracing::warn!(
+                    disk = plan.target_disk,
+                    expected = ?was,
+                    found = ?now,
+                    "the target disk is not the one the plan was made for"
+                );
+                return Ok(vec![format!(
+                    "Диск {} сейчас — не тот, для которого составлен план \
+                     (было: серийный «{}», {} Б; стало: серийный «{}», {} Б). \
+                     Соберите план заново.",
+                    plan.target_disk, was.serial, was.size_bytes, now.serial, now.size_bytes
+                )]);
+            }
+            // Nothing recorded, or nothing comparable: it cannot be checked,
+            // and saying so is all that is honestly available. It is not a
+            // refusal — a plan built by a client that predates this field is
+            // still a plan the rest of the checks can judge.
+            None => tracing::warn!(
+                disk = plan.target_disk,
+                "the plan carries no target identity, so it cannot be confirmed \
+                 that this is still the same device"
+            ),
+        }
+
+        let ctx = self.restore_context(plan, CheckContext::default());
+        let moved = resolve_letter_conflicts(plan, &ctx.taken_letters);
+        for m in &moved {
+            tracing::info!(
+                part = m.part_index,
+                asked = %m.requested,
+                given = ?m.assigned,
+                "restore: the drive letter asked for was taken"
+            );
+        }
+        correct_disk_size(plan);
+
+        let results = check_plan(plan, &ctx);
+        for r in &results {
+            match r.level {
+                CheckLevel::Error => tracing::warn!(
+                    plan = %plan.id, code = ?r.code, part = ?r.part_index,
+                    "restore refused: {}", r.message
+                ),
+                _ => tracing::info!(
+                    plan = %plan.id, code = ?r.code, part = ?r.part_index,
+                    "restore note: {}", r.message
+                ),
+            }
+        }
+        Ok(results
+            .into_iter()
+            .filter(|r| r.level == CheckLevel::Error)
+            .map(|r| r.message)
+            .collect())
+    }
+
+    /// Everything the plan checks need, gathered on this side of the wire.
+    ///
+    /// The client's context is taken only for the things the client alone
+    /// knows — which filesystem the user picked in a dialog that has not been
+    /// sent yet. Everything describing the MACHINE is asked of the machine
+    /// (audit AUD-01, point 2): what a client sends about disks is a picture it
+    /// drew some time ago, and the layout can have changed since it drew it.
+    /// These facts are the input to every refusal below, so a client able to
+    /// supply them is a client able to switch them off.
+    fn restore_context(
+        &self,
+        plan: &own_backup_common::restore_plan::RestorePlan,
+        from_client: own_backup_common::restore_check::CheckContext,
+    ) -> own_backup_common::restore_check::CheckContext {
+        use own_backup_common::restore_check::CheckContext;
+
+        let mut ctx = CheckContext {
+            // The user's own choices in the designer: not facts about the
+            // machine, and there is nowhere else to get them.
+            requested_formats: from_client.requested_formats,
+            // What the image holds. The client read the same sidecar, but the
+            // service can read it again and this is the sizes every "will it
+            // fit" answer is computed from.
+            sources: image_sources(&plan.image_path).unwrap_or(from_client.sources),
+            source_sector_size: image_sector_size(&plan.image_path)
+                .unwrap_or(from_client.source_sector_size),
+            ..Default::default()
+        };
+        ctx.taken_letters = taken_drive_letters();
+        ctx.target_is_system_disk = is_system_disk(plan.target_disk);
+        ctx.targets = current_target_partitions(plan.target_disk);
+
+        // Being on the system disk is no longer a veto — a spare partition
+        // there is an ordinary target. What is refused is touching the
+        // partitions the running system stands on.
+        //
+        // A protection that could not be worked out is NOT an empty list: an
+        // empty list reads as "nothing to protect here", and that was the
+        // default a failed check used to land on. Here it becomes a protection
+        // over every partition the plan could touch, so the checks refuse and
+        // say why, rather than allowing everything.
+        let guard = own_backup_restore::protection(plan.target_disk);
+        ctx.protected_parts = match &guard.cannot_tell {
+            None => guard.parts,
+            Some(why) => {
+                tracing::warn!(
+                    disk = plan.target_disk,
+                    reason = %why,
+                    "the running system's partitions on this disk could not be determined — \
+                     treating the whole disk as protected"
+                );
+                ctx.targets.iter().map(|t| t.index).collect()
+            }
+        };
+        ctx
+    }
+}
+
+/// The image's partitions as the checks want them, read from the copy's own
+/// sidecar rather than taken from the client.
+///
+/// This is where every "will it fit" answer comes from, so it has to come from
+/// the file the restore will actually read. `None` when the copy is not a
+/// whole-disk image or carries no source snapshot — then the client's list is
+/// all there is, and the executor's own size check is the backstop.
+fn image_sources(
+    image: &std::path::Path,
+) -> Option<Vec<own_backup_common::restore_check::SourcePartition>> {
+    use own_backup_common::image::VolumeCaptureMode;
+    use own_backup_common::restore_check::SourcePartition;
+
+    let sidecar = own_backup_backup::sidecar::read_image_sidecar(image).ok()?;
+    let disk = sidecar.disk_manifest.as_ref()?;
+    let source = disk.source_disk.as_ref()?;
+
+    // A copy that kept the container's header can be restored still encrypted.
+    let headers: Vec<u32> = sidecar.info.luks_headers.iter().map(|h| h.part_index).collect();
+
+    Some(
+        source
+            .partitions
+            .iter()
+            .map(|p| {
+                // "Encrypted at source, and the copy holds it in the clear" —
+                // a container captured verbatim comes back exactly as it was
+                // and is not this case at all.
+                let captured_plain = disk
+                    .images
+                    .iter()
+                    .find(|i| i.part_index == p.index)
+                    .and_then(|i| i.encryption.as_ref())
+                    .is_some_and(|e| e.capture_mode == VolumeCaptureMode::Plaintext);
+                SourcePartition {
+                    index: p.index,
+                    size_bytes: p.size_bytes,
+                    used_bytes: p.used_bytes,
+                    filesystem: p.filesystem,
+                    label: p.volume_label.clone(),
+                    encrypted_at_source: captured_plain,
+                    luks_header_available: headers.contains(&p.index),
+                }
+            })
+            .collect(),
+    )
+}
+
+/// Logical sector size the image's layout was captured with.
+fn image_sector_size(image: &std::path::Path) -> Option<u32> {
+    own_backup_backup::sidecar::read_image_sidecar_header(image)
+        .ok()
+        .map(|(_, manifest)| manifest.source_disk.sector_size_logical)
+        .filter(|s| *s > 0)
+}
+
+/// Who the disk under `PhysicalDriveN` is right now.
+///
+/// Read straight off the device rather than from the inventory, so it is the
+/// same question the restore itself will ask a moment later, answered without
+/// a scan of every disk in the machine.
+#[cfg(target_os = "windows")]
+async fn live_disk_id(disk: u32) -> own_backup_common::restore_plan::TargetDiskId {
+    use own_backup_common::restore_plan::TargetDiskId;
+    use own_backup_inventory::DiskInventory;
+
+    let mut id = TargetDiskId::default();
+    if let Ok(layout) = own_backup_backup::gpt_reader::read_disk_layout(disk) {
+        id.disk_guid = layout.disk_guid;
+        id.size_bytes = layout.size_bytes;
+    }
+    // The serial is the one fact that survives repartitioning, so it is worth
+    // the enumeration; a machine with no inventory answer still has the two
+    // facts above.
+    if let Ok(inv) = own_backup_inventory::WindowsInventory::new() {
+        if let Ok(disks) = inv.enumerate_disks().await {
+            let want = format!(r"\\.\PhysicalDrive{disk}");
+            if let Some(info) = disks.iter().find(|d| d.device_id.eq_ignore_ascii_case(&want)) {
+                id.serial = info.serial.clone();
+                if id.size_bytes == 0 {
+                    id.size_bytes = info.size_bytes;
+                }
+            }
+        }
+    }
+    id
+}
+
+#[cfg(not(target_os = "windows"))]
+async fn live_disk_id(_disk: u32) -> own_backup_common::restore_plan::TargetDiskId {
+    own_backup_common::restore_plan::TargetDiskId::default()
+}
+
+/// What the target disk holds right now.
+#[cfg(target_os = "windows")]
+fn current_target_partitions(
+    disk: u32,
+) -> Vec<own_backup_common::restore_check::TargetPartition> {
+    use own_backup_common::restore_check::TargetPartition;
+
+    let Ok(layout) = own_backup_backup::gpt_reader::read_disk_layout(disk) else {
+        return Vec::new();
+    };
+    layout
+        .partitions
+        .iter()
+        .map(|p| TargetPartition {
+            index: p.index,
+            offset_bytes: p.offset_bytes(layout.sector_size),
+            size_bytes: p.size_bytes(layout.sector_size),
+            // Knowing how full a partition is means mounting it, which is not
+            // something a safety check should do. Zero means "unknown" to the
+            // checks, which is the honest answer.
+            used_bytes: 0,
+            filesystem: own_backup_common::types::FileSystem::Unknown,
+            label: p.name.trim().to_string(),
+        })
+        .collect()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn current_target_partitions(
+    _disk: u32,
+) -> Vec<own_backup_common::restore_check::TargetPartition> {
+    Vec::new()
 }
 
 /// Bridges core orchestration events onto the broadcast channel that
@@ -579,6 +843,13 @@ impl BackupService for BackupServiceImpl {
             }
             let p: In = serde_json::from_str(&req.into_inner().json)
                 .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+
+            // This path writes sectors straight onto a device with no plan and
+            // no table, so none of the plan checks apply to it — and it had no
+            // guard of its own at all, which made the running system's volume
+            // a perfectly acceptable target (audit AUD-01).
+            own_backup_restore::guard_target_volume(&p.target)
+                .map_err(|e| Status::failed_precondition(e.to_string()))?;
 
             // The machine's one slot. Writing a volume back cannot share the
             // machine with a backup, another restore or a verify (audit
@@ -1220,27 +1491,22 @@ impl BackupService for BackupServiceImpl {
         let mut p: In = serde_json::from_str(&req.into_inner().json)
             .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
 
-        // Letters the machine has taken are a service-side fact; a client that
-        // sent none gets the real list rather than an empty one.
-        let mut ctx = p.context;
-        if ctx.taken_letters.is_empty() {
-            ctx.taken_letters = taken_drive_letters();
-        }
-        // Being on the system disk is no longer a veto — a spare partition
-        // there is an ordinary target. What is refused is touching the
-        // partitions the running system stands on, and only the service can
-        // work out which those are.
-        ctx.target_is_system_disk =
-            ctx.target_is_system_disk || is_system_disk(p.plan.target_disk);
-        if ctx.protected_parts.is_empty() {
-            ctx.protected_parts = own_backup_restore::protected_partitions(p.plan.target_disk);
-        }
+        // The context is built HERE, from the machine and the image, and the
+        // client's copy only fills gaps it alone can know about (audit AUD-01,
+        // point 2). What a client sends about disks is a picture it drew some
+        // time ago; the partition table can have changed since, and a
+        // `CheckContext` is the input to every safety decision below.
+        let ctx = self.restore_context(&p.plan, p.context);
 
         // Resolving letters mutates the plan, so the caller gets the adjusted
         // plan back and applies *that* — otherwise the fix would be lost
         // between the dry run and the real one.
         let letter_changes = resolve_letter_conflicts(&mut p.plan, &ctx.taken_letters);
         correct_disk_size(&mut p.plan);
+        // Stamp the plan with WHICH DEVICE the user is looking at. The client
+        // sends this plan back to be applied, and by then `PhysicalDriveN` may
+        // point somewhere else entirely (audit AUD-01, point 5).
+        p.plan.target_disk_id = Some(live_disk_id(p.plan.target_disk).await);
         let results = check_plan(&p.plan, &ctx);
 
         // The dry run is where a restore usually stops, and until now it left no
@@ -1302,12 +1568,31 @@ impl BackupService for BackupServiceImpl {
         let raw = req.into_inner().json;
         // A bare plan is still accepted — nothing needs a passphrase unless it
         // asks to put a container back.
-        let In { plan, passphrases } = serde_json::from_str::<In>(&raw)
+        let In { mut plan, passphrases } = serde_json::from_str::<In>(&raw)
             .or_else(|_| {
                 serde_json::from_str::<RestorePlan>(&raw)
                     .map(|plan| In { plan, passphrases: Default::default() })
             })
             .map_err(|e| Status::invalid_argument(format!("bad plan JSON: {e}")))?;
+
+        // THE gate. `dry_run_restore_plan` checks a plan; `apply_restore_plan`
+        // used to accept a different one and hand it straight to the executor
+        // (audit AUD-01). A client could therefore send a plan the preview
+        // would have refused — restore a partition by sectors and then format
+        // it, or name one partition's number with another's offset — and the
+        // only thing between that and the disk was whatever the executor
+        // happened to notice on its way past.
+        //
+        // The same checks now run here, on the plan that is actually about to
+        // be executed, against a context built on this side of the wire. A
+        // preview is still useful; it is not a permission slip.
+        let refusals = self.validate_restore(&mut plan).await?;
+        if !refusals.is_empty() {
+            return Err(Status::failed_precondition(format!(
+                "План не прошёл проверку — ничего не записано:\n{}",
+                refusals.join("\n")
+            )));
+        }
 
         // One destructive operation at a time, and the check IS the taking.
         // The old version read `restore_run` under one lock and wrote the new

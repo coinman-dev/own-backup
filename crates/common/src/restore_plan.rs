@@ -466,12 +466,75 @@ pub struct RestorePlan {
     /// Verify what was written once the plan finishes (D10).
     #[serde(default)]
     pub verify_after: bool,
+    /// Which device `target_disk` was when this plan was made.
+    ///
+    /// `PhysicalDriveN` is a slot, not a disk: unplug a USB drive and plug
+    /// another one in and the number moves to the new device. A plan built
+    /// against disk 2, reviewed, and then applied after a reconnect would land
+    /// on whatever is disk 2 by then — and a restore's first act is to destroy
+    /// what it finds (audit AUD-01, point 5).
+    ///
+    /// Filled in by the service during the dry run, checked again immediately
+    /// before execution. `None` in plans made before this existed, and in a
+    /// plan that never went through a preview; then there is nothing to
+    /// compare against and the mismatch cannot be detected, only said.
+    #[serde(default)]
+    pub target_disk_id: Option<TargetDiskId>,
     pub ops: Vec<RestoreOp>,
+}
+
+/// Enough of a disk's identity to notice that it is a different disk.
+///
+/// Three independent facts, because each can be missing or unreliable on its
+/// own: a serial number is empty on some virtual and USB-bridged disks, a GPT
+/// GUID is absent on an unpartitioned or MBR disk, and a size is shared by
+/// every disk of the same model. Together they catch the case that matters —
+/// the number now pointing at some other device.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TargetDiskId {
+    #[serde(default)]
+    pub serial: String,
+    #[serde(default)]
+    pub disk_guid: String,
+    #[serde(default)]
+    pub size_bytes: u64,
+}
+
+impl TargetDiskId {
+    /// Is `now` the same device this describes?
+    ///
+    /// Only fields that were recorded are compared — a blank one was unknown
+    /// then and proves nothing now. When nothing at all was recorded the
+    /// answer is "cannot tell", which the caller must not read as "yes".
+    pub fn matches(&self, now: &TargetDiskId) -> Option<bool> {
+        let mut compared = false;
+        let mut same = true;
+        if !self.serial.trim().is_empty() && !now.serial.trim().is_empty() {
+            compared = true;
+            same &= self.serial.trim().eq_ignore_ascii_case(now.serial.trim());
+        }
+        if !self.disk_guid.trim().is_empty() && !now.disk_guid.trim().is_empty() {
+            compared = true;
+            same &= self.disk_guid.trim().eq_ignore_ascii_case(now.disk_guid.trim());
+        }
+        if self.size_bytes > 0 && now.size_bytes > 0 {
+            compared = true;
+            same &= self.size_bytes == now.size_bytes;
+        }
+        compared.then_some(same)
+    }
 }
 
 impl RestorePlan {
     pub fn new(target_disk: u32, image_path: PathBuf, ops: Vec<RestoreOp>) -> Self {
-        Self { id: Uuid::new_v4(), target_disk, image_path, verify_after: false, ops }
+        Self {
+            id: Uuid::new_v4(),
+            target_disk,
+            image_path,
+            verify_after: false,
+            target_disk_id: None,
+            ops,
+        }
     }
 
     /// The plan's operations in execution order (see the module docs). Sorting

@@ -79,6 +79,12 @@ pub enum CheckCode {
     OpNotInTable,
     /// An operation's byte offset/size disagrees with the table entry.
     PartRefMismatch,
+    /// Where an operation writes could not be checked against anything: the
+    /// plan carries no table and the target disk's current layout was not
+    /// supplied. Not the same as "it is fine" (audit AUD-01).
+    PartRefUnverifiable,
+    /// An operation's offset + size overflows, or reaches past the disk.
+    PartRefOutOfRange,
     /// Two operations write data into the same partition.
     DuplicateRestore,
     /// A partition is both restored sector-by-sector and formatted — the format
@@ -178,6 +184,12 @@ pub struct RequestedFormat {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TargetPartition {
     pub index: u32,
+    /// Where it starts on the disk. Not decoration: a plan that writes into
+    /// existing partitions carries no table, and then this is the only thing an
+    /// operation's raw byte offset can be checked against (audit AUD-01).
+    /// 0 means "not supplied", which is itself an answer the checks report.
+    #[serde(default)]
+    pub offset_bytes: u64,
     pub size_bytes: u64,
     /// Bytes in use. 0 when unknown or empty.
     pub used_bytes: u64,
@@ -624,17 +636,62 @@ fn check_ops(
     }
 }
 
-/// An operation's byte offset and size must match the table entry it names.
+/// An operation's byte offset and size must match the partition it names.
+///
 /// They are stored twice — the table addresses sectors, the operation addresses
 /// bytes for `part:<disk>:<offset>:<len>` — and this is where they are made to
-/// agree.
+/// agree. The raw byte pair is what actually reaches the disk, so an operation
+/// naming partition 3 with partition 1's offset writes over partition 1 while
+/// every message on screen says 3.
+///
+/// A plan that only writes into EXISTING partitions carries no table, and that
+/// used to end this function on its first line: the offset and size were then
+/// taken entirely on trust (audit AUD-01, point 3). Such a plan is now checked
+/// against what the disk holds now.
 fn check_part_ref(
     part: PartRef,
     table: Option<&PartitionTableSpec>,
     ctx: &CheckContext,
     out: &mut Vec<CheckResult>,
 ) {
-    let Some(t) = table else { return };
+    // Arithmetic first: a pair that wraps describes no region at all, and
+    // every comparison below would be against a nonsense number.
+    match part.offset.checked_add(part.size) {
+        Some(_) if part.size > 0 => {}
+        _ => {
+            out.push(CheckResult::new(
+                CheckLevel::Error,
+                CheckCode::PartRefOutOfRange,
+                Some(part.index),
+                format!(
+                    "Раздел {}: операция адресует {}..+{} Б — такой области не существует.",
+                    ctx.describe_target(part.index, table),
+                    part.offset,
+                    part.size
+                ),
+            ));
+            return;
+        }
+    }
+
+    let Some(t) = table else {
+        return check_part_ref_against_disk(part, ctx, out);
+    };
+    if let Some(end) = part.offset.checked_add(part.size) {
+        if t.disk_size_bytes > 0 && end > t.disk_size_bytes {
+            out.push(CheckResult::new(
+                CheckLevel::Error,
+                CheckCode::PartRefOutOfRange,
+                Some(part.index),
+                format!(
+                    "Раздел {}: операция пишет до {} Б, а диск — {} Б.",
+                    ctx.describe_target(part.index, table),
+                    end,
+                    t.disk_size_bytes
+                ),
+            ));
+        }
+    }
     let Some(e) = t.entries.iter().find(|e| e.index == part.index) else {
         out.push(CheckResult::new(
             CheckLevel::Error,
@@ -660,6 +717,53 @@ fn check_part_ref(
                 part.size,
                 offset,
                 size
+            ),
+        ));
+    }
+}
+
+/// The same check for a plan with no table: against the disk as it is now.
+fn check_part_ref_against_disk(part: PartRef, ctx: &CheckContext, out: &mut Vec<CheckResult>) {
+    let Some(t) = ctx.target(part.index) else {
+        out.push(CheckResult::new(
+            CheckLevel::Warning,
+            CheckCode::PartRefUnverifiable,
+            Some(part.index),
+            format!(
+                "Раздел {}: не с чем сверить, куда именно пойдёт запись — \
+                 разметка целевого диска неизвестна.",
+                part.index
+            ),
+        ));
+        return;
+    };
+    // A supplied layout with no offsets is the old shape of this data; saying
+    // "unverifiable" is honest, and quietly passing is what this fixes.
+    if t.offset_bytes == 0 {
+        out.push(CheckResult::new(
+            CheckLevel::Warning,
+            CheckCode::PartRefUnverifiable,
+            Some(part.index),
+            format!(
+                "Раздел {}: в разметке целевого диска не указано, где он начинается, \
+                 поэтому адрес записи сверить не с чем.",
+                part.index
+            ),
+        ));
+        return;
+    }
+    if t.offset_bytes != part.offset || (t.size_bytes > 0 && t.size_bytes != part.size) {
+        out.push(CheckResult::new(
+            CheckLevel::Error,
+            CheckCode::PartRefMismatch,
+            Some(part.index),
+            format!(
+                "Раздел {}: операция адресует {}..+{} Б, а на диске он лежит по {}..+{} Б.",
+                describe(part.index, &t.label, t.size_bytes, Some(t.filesystem)),
+                part.offset,
+                part.size,
+                t.offset_bytes,
+                t.size_bytes
             ),
         ));
     }
@@ -1306,6 +1410,7 @@ mod tests {
     fn target(index: u32, fs: FileSystem, used: u64, label: &str) -> TargetPartition {
         TargetPartition {
             index,
+            offset_bytes: MIB + (index as u64 - 1) * 200 * MIB,
             size_bytes: 200 * MIB,
             used_bytes: used,
             filesystem: fs,
@@ -1881,5 +1986,136 @@ mod tests {
         let info: Vec<_> = results.iter().filter(|r| r.code == CheckCode::FreeSpaceNotWiped).collect();
         assert_eq!(info.len(), 1);
         assert_eq!(info[0].level, CheckLevel::Info);
+    }
+
+    // --- Куда именно пойдёт запись (аудит AUD-01, пункт 3) ------------------
+    //
+    // На диск уходит пара «смещение и длина» из операции, а не номер раздела.
+    // Операция, называющая раздел 3 со смещением раздела 1, перезапишет
+    // раздел 1, и все сообщения на экране будут при этом говорить «3».
+
+    /// План без разметки — восстановление в СУЩЕСТВУЮЩИЕ разделы — раньше
+    /// выходил из этой проверки на первой же строке, и адрес записи брался
+    /// на веру целиком.
+    #[test]
+    fn an_offset_that_belongs_to_another_partition_is_refused_without_a_table() {
+        let mut ctx = CheckContext::default();
+        ctx.sources = vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ntfs)];
+        ctx.targets = vec![target(1, FileSystem::Ntfs, 0, "A"), target(2, FileSystem::Ntfs, 0, "B")];
+
+        // Номер второго раздела, смещение первого.
+        let wrong = PartRef {
+            index: 2,
+            offset: ctx.targets[0].offset_bytes,
+            size: ctx.targets[0].size_bytes,
+        };
+        let plan = RestorePlan {
+            id: uuid::Uuid::new_v4(),
+            target_disk: 1,
+            image_path: "x.vhdx".into(),
+            verify_after: false,
+            target_disk_id: None,
+            ops: vec![RestoreOp::RestorePartition {
+                src_index: 1,
+                dst: wrong,
+                mode: RestoreMode::Sectors,
+                reencrypt: false,
+                wipe_free_space: false,
+            }],
+        };
+        let results = check_plan(&plan, &ctx);
+        assert!(errors(&results).contains(&CheckCode::PartRefMismatch), "{results:#?}");
+    }
+
+    /// Та же операция с ПРАВИЛЬНЫМ адресом проходит: проверка не должна
+    /// запрещать обычное восстановление в существующий раздел.
+    #[test]
+    fn the_right_offset_for_that_partition_passes() {
+        let mut ctx = CheckContext::default();
+        ctx.sources = vec![source(2, 100 * MIB, 10 * MIB, FileSystem::Ntfs)];
+        ctx.targets = vec![target(1, FileSystem::Ntfs, 0, "A"), target(2, FileSystem::Ntfs, 0, "B")];
+
+        let right = PartRef {
+            index: 2,
+            offset: ctx.targets[1].offset_bytes,
+            size: ctx.targets[1].size_bytes,
+        };
+        let plan = RestorePlan {
+            id: uuid::Uuid::new_v4(),
+            target_disk: 1,
+            image_path: "x.vhdx".into(),
+            verify_after: false,
+            target_disk_id: None,
+            ops: vec![RestoreOp::RestorePartition {
+                src_index: 2,
+                dst: right,
+                mode: RestoreMode::Sectors,
+                reencrypt: false,
+                wipe_free_space: false,
+            }],
+        };
+        let results = check_plan(&plan, &ctx);
+        assert!(!errors(&results).contains(&CheckCode::PartRefMismatch), "{results:#?}");
+    }
+
+    /// Сверить не с чем — это отдельный ответ, а не «всё в порядке».
+    #[test]
+    fn nothing_to_compare_against_is_said_out_loud() {
+        let mut ctx = CheckContext::default();
+        ctx.sources = vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ntfs)];
+        // targets пуст: разметка целевого диска неизвестна.
+        let plan = RestorePlan {
+            id: uuid::Uuid::new_v4(),
+            target_disk: 1,
+            image_path: "x.vhdx".into(),
+            verify_after: false,
+            target_disk_id: None,
+            ops: vec![RestoreOp::RestorePartition {
+                src_index: 1,
+                dst: PartRef { index: 1, offset: MIB, size: 200 * MIB },
+                mode: RestoreMode::Sectors,
+                reencrypt: false,
+                wipe_free_space: false,
+            }],
+        };
+        let results = check_plan(&plan, &ctx);
+        assert!(
+            results.iter().any(|r| r.code == CheckCode::PartRefUnverifiable),
+            "{results:#?}"
+        );
+    }
+
+    /// Пара, которая переполняется, не описывает никакой области — и раньше
+    /// уходила в арифметику ниже как обычное число.
+    #[test]
+    fn an_offset_and_size_that_wrap_describe_nothing() {
+        let mut ctx = CheckContext::default();
+        ctx.sources = vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ntfs)];
+        ctx.targets = vec![target(1, FileSystem::Ntfs, 0, "A")];
+
+        for bad in [
+            PartRef { index: 1, offset: u64::MAX - 10, size: 1024 },
+            PartRef { index: 1, offset: MIB, size: 0 },
+        ] {
+            let plan = RestorePlan {
+                id: uuid::Uuid::new_v4(),
+                target_disk: 1,
+                image_path: "x.vhdx".into(),
+                verify_after: false,
+                target_disk_id: None,
+                ops: vec![RestoreOp::RestorePartition {
+                    src_index: 1,
+                    dst: bad,
+                    mode: RestoreMode::Sectors,
+                    reencrypt: false,
+                    wipe_free_space: false,
+                }],
+            };
+            let results = check_plan(&plan, &ctx);
+            assert!(
+                errors(&results).contains(&CheckCode::PartRefOutOfRange),
+                "{bad:?}: {results:#?}"
+            );
+        }
     }
 }

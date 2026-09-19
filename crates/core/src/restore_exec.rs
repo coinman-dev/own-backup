@@ -237,17 +237,34 @@ pub fn execute_plan(
     // it, and both callers below want the same one.
     let system_disk = own_backup_restore::system_disk_number();
     let boot_media = own_backup_restore::is_boot_media();
-    let protected = own_backup_restore::protected_partitions(plan.target_disk);
+    let guard = own_backup_restore::protection(plan.target_disk);
+    // What the disk holds RIGHT NOW. Without it, a partition the plan simply
+    // leaves out of the new table — which deletes it — counted as untouched,
+    // so a protected partition could be removed rather than overwritten and
+    // the check below would not notice (audit AUD-01, point 4).
+    let current_parts = current_partition_indices(plan.target_disk);
+    let touched = plan.touched_partitions_with(&current_parts);
     info!(
         target_disk = plan.target_disk,
-        ?protected,
+        protected = ?guard.parts,
+        cannot_tell = ?guard.cannot_tell,
+        ?current_parts,
+        ?touched,
         ?system_disk,
         boot_media,
         "restore target checked against the running system"
     );
-    if !protected.is_empty() {
-        let touched = plan.touched_partitions();
-        let hit: Vec<u32> = touched.iter().copied().filter(|i| protected.contains(i)).collect();
+    // An answer that could not be worked out is not an all-clear. It used to
+    // be spelled as an empty list, which reads exactly like "nothing to
+    // protect here".
+    if let Some(why) = &guard.cannot_tell {
+        return Err(OwnBackupError::RestoreIncompatible(format!(
+            "Нельзя проверить, не стоит ли на этом диске работающая система: {why}. \
+             Загрузитесь с носителя восстановления — там этот вопрос не стоит."
+        )));
+    }
+    if !guard.parts.is_empty() {
+        let hit: Vec<u32> = touched.iter().copied().filter(|i| guard.parts.contains(i)).collect();
         if !hit.is_empty() {
             return Err(OwnBackupError::RestoreIncompatible(format!(
                 "план затрагивает разделы, на которых стоит работающая Windows: {}. \
@@ -724,6 +741,19 @@ pub struct IdentityOutcome {
 /// the middle of a restore and wants one fact per disk, not a full sweep. A
 /// disk that cannot be opened or has no GPT contributes nothing —
 /// which is correct, it holds no GUID we could collide with.
+/// The partition numbers the target disk holds right now.
+///
+/// Needed so that a partition the plan simply LEAVES OUT of the new table is
+/// counted as touched: leaving it out deletes it, which is every bit as
+/// destructive as writing over it (audit AUD-01, point 4). Empty when the disk
+/// has no readable GPT — a disk with nothing on it has nothing to lose.
+#[cfg(target_os = "windows")]
+fn current_partition_indices(disk: u32) -> Vec<u32> {
+    own_backup_backup::gpt_reader::read_disk_layout(disk)
+        .map(|l| l.partitions.iter().map(|p| p.index).collect())
+        .unwrap_or_default()
+}
+
 #[cfg(target_os = "windows")]
 fn identities_in_use(except_disk: u32) -> IdentitiesInUse {
     const MAX_DISKS: u32 = 32;

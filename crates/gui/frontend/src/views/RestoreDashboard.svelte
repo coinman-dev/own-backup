@@ -1254,6 +1254,10 @@
       // edited layout, since that is what the restore will overwrite.
       targets: (targetDisk?.partitions ?? []).map((p) => ({
         index: p.index,
+        // Where it starts: for a plan that writes into existing partitions
+        // there is no table, and this is the only thing an operation's raw
+        // byte offset can be checked against.
+        offset_bytes: p.offset_bytes,
         size_bytes: p.size_bytes,
         used_bytes: p.used_bytes,
         filesystem: p.filesystem,
