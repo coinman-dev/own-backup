@@ -5,6 +5,13 @@
 //! way of knowing which layout the keystrokes are going through, and a wrong
 //! layout looks exactly like a wrong password. On an installed Windows the
 //! taskbar already answers this, so the interface leaves it to the taskbar.
+//!
+//! And the medium has a taskbar of its own now. Its strip shows the same thing
+//! — for the same reason, and about the FOREGROUND window rather than about
+//! ours, which is the more useful answer. Two indicators side by side are one
+//! too many, and they part company the moment the focus moves: ours would go
+//! on reporting this window while somebody types into another. So the
+//! interface asks whether the desktop is up and, if it is, says nothing.
 
 #[derive(serde::Serialize)]
 pub struct KeyboardLayoutDto {
@@ -18,6 +25,9 @@ pub struct KeyboardLayoutDto {
 /// question has no answer (non-Windows, or nothing focused).
 #[tauri::command]
 pub async fn keyboard_layout() -> Result<Option<KeyboardLayoutDto>, String> {
+    if own_backup_common::media_paths::desktop_is_running() {
+        return Ok(None);
+    }
     Ok(current_layout())
 }
 

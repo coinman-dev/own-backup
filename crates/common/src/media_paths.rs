@@ -25,6 +25,19 @@ pub const MEDIA_MARKER_TEXT: &str =
 /// Where the running medium keeps the copy of its logs that survives a reboot.
 pub const MEDIA_LOGS_DIR: &str = "logs";
 
+/// The name the medium's desktop holds while it is running.
+///
+/// It takes this to keep a second copy of itself off the screen, and everything
+/// else can ask the same question by trying to open it: the desktop is up
+/// exactly while this name exists.
+///
+/// The interface asks, and it matters. Both of them show which keyboard layout
+/// is active — the desktop because the medium had nothing saying so, the
+/// interface because before the desktop existed it was the only thing that
+/// could. Two of them side by side is one too many, and they disagree the
+/// moment the focus moves.
+pub const DESKTOP_RUNNING: &str = "OwnBackupShellSingleInstance";
+
 /// The boot script, where WinPE keeps it, as the desktop has to name it to run
 /// it.
 ///
@@ -50,6 +63,39 @@ pub fn find_medium() -> Option<std::path::PathBuf> {
         }
     }
     None
+}
+
+/// Is the medium's desktop running?
+///
+/// Asked by opening the name it holds ([`DESKTOP_RUNNING`]) — the handle is
+/// closed immediately and the answer is the whole point. A name that cannot be
+/// opened means no desktop, which is also the honest answer on an installed
+/// Windows, where there is none and never will be.
+#[cfg(windows)]
+pub fn desktop_is_running() -> bool {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{OpenMutexW, SYNCHRONIZATION_ACCESS_RIGHTS};
+
+    /// The least that can be asked for: enough to be told the name exists,
+    /// and nothing that would let this touch what it names.
+    const SYNCHRONIZE: SYNCHRONIZATION_ACCESS_RIGHTS = SYNCHRONIZATION_ACCESS_RIGHTS(0x0010_0000);
+
+    let name: Vec<u16> = DESKTOP_RUNNING.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        match OpenMutexW(SYNCHRONIZE, false, PCWSTR(name.as_ptr())) {
+            Ok(handle) => {
+                let _ = CloseHandle(handle);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn desktop_is_running() -> bool {
+    false
 }
 
 /// The log folder on that drive, created if the medium is writable.

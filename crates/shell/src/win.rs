@@ -295,7 +295,13 @@ fn already_running() -> bool {
         // The handle is deliberately never closed: the mutex has to live
         // exactly as long as the process, and the process ending is what
         // releases it.
-        if CreateMutexW(None, true, w!("OwnBackupShellSingleInstance")).is_err() {
+        // The name is in `common` because the interface asks about it too: it
+        // has a layout indicator of its own and hides it while this one is up.
+        let name: Vec<u16> = own_backup_common::media_paths::DESKTOP_RUNNING
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        if CreateMutexW(None, true, PCWSTR(name.as_ptr())).is_err() {
             return false;
         }
         GetLastError() == ERROR_ALREADY_EXISTS

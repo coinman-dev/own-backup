@@ -13,8 +13,14 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-# Only for the WinPE check in `media_mode` — reading one registry key.
-windows = { version = "0.58", features = ["Win32_Foundation", "Win32_System_Registry"] }
+# Three small questions asked of Windows from here: is this WinPE (one
+# registry key), where a program keeps its settings (the same), and is the
+# medium's desktop running (one named object, opened and closed).
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 tempfile = "3"
