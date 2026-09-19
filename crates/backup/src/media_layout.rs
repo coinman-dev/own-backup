@@ -32,8 +32,18 @@ pub const MEDIA_LOGS_DIR: &str = "logs";
 
 /// Program files that go inside the image, so they are present even if the
 /// medium's own partition somehow does not come up.
-pub const PROGRAM_FILES: [&str; 3] =
-    ["own-backup-gui.exe", "own-backup-service.exe", "own-backup-cli.exe"];
+///
+/// `own-backup-shell.exe` is the medium's desktop: the strip along the bottom
+/// with the clock and — the reason it exists at all — which keyboard layout the
+/// window in front is using. It is listed here with the rest so that a build
+/// missing it fails at the check, rather than producing a medium that starts it
+/// and finds nothing.
+pub const PROGRAM_FILES: [&str; 4] = [
+    "own-backup-gui.exe",
+    "own-backup-service.exe",
+    "own-backup-cli.exe",
+    "own-backup-shell.exe",
+];
 
 /// System DLLs WinPE does not carry but the browser process links against.
 ///
@@ -409,6 +419,16 @@ pub fn startnet_cmd(app_dir: &str) -> String {
         "echo.",
         "echo This console stays usable. To start the interface again:",
         &format!("echo   \"{app_dir}\\start-media.cmd\""),
+        "",
+        // The desktop this medium otherwise has none of. It is started LAST and
+        // detached, and `cmd` remains the shell: a failure here costs the strip
+        // and nothing else. When it becomes the shell itself (a `winpeshl.ini`
+        // on the medium) that stops being true, which is exactly why that step
+        // comes after everything else has been seen working.
+        "rem The strip along the bottom: clock, and which keyboard layout the",
+        "rem window in front is using - the thing a BitLocker passphrase is",
+        "rem typed into with nothing on screen to say which alphabet it is in.",
+        &format!("start \"\" \"{app_dir}\\own-backup-shell.exe\""),
     ])
 }
 
@@ -604,6 +624,12 @@ mod tests {
             if l.starts_with("echo") || l.starts_with("call") || l.starts_with("wpeinit") {
                 continue;
             }
+            // `rem` runs nothing, and `start "..."` is the detached form — the
+            // console comes straight back from it, which is the property this
+            // test is about.
+            if l.starts_with("rem") || l.starts_with("start \"") {
+                continue;
+            }
             assert!(
                 !l.contains(".exe"),
                 "nothing may run in the foreground of the boot console: {line:?}"
@@ -688,6 +714,45 @@ mod tests {
         assert!(s.contains(r#"start "" "X:\Program Files\OwnBackup\own-backup-gui.exe""#));
         assert!(s.contains("--run --media"), "the engine must know it is on the medium");
         assert!(s.contains("OWN_BACKUP_MEDIA=1"));
+    }
+
+    /// The strip is cosmetic while `cmd` is still the shell, so it goes last:
+    /// by then everything that matters has already run, and a desktop that
+    /// fails to appear costs nothing but the desktop.
+    #[test]
+    fn the_desktop_starts_detached_and_after_the_work() {
+        let app = r"X:\Program Files\OwnBackup";
+        let s = startnet_cmd(app);
+        let work = s.find("start-media.cmd").expect("the interface still starts");
+        let desktop = s.find("own-backup-shell.exe").expect("the desktop starts too");
+        assert!(desktop > work, "the desktop comes after the work, not before it");
+        assert!(
+            s.contains(&format!("start \"\" \"{app}\\own-backup-shell.exe\"")),
+            "detached, like everything else this medium launches"
+        );
+    }
+
+    /// A program the boot scripts launch but the build never copies in gives a
+    /// medium that boots and then cannot find its own parts — and the only way
+    /// to discover it is to boot one.
+    #[test]
+    fn every_program_the_boot_scripts_run_is_one_that_is_copied_in() {
+        let app = r"X:\Program Files\OwnBackup";
+        let scripts = format!("{}{}", startnet_cmd(app), start_media_cmd(app, r"X:\Temp"));
+        let mut rest = scripts.as_str();
+        while let Some(at) = rest.find("own-backup-") {
+            let tail = &rest[at..];
+            let end = tail.find(|c: char| c == '"' || c.is_whitespace()).unwrap_or(tail.len());
+            let (name, after) = tail.split_at(end);
+            // Log files and window titles share the prefix; only programs count.
+            if name.ends_with(".exe") {
+                assert!(
+                    PROGRAM_FILES.contains(&name),
+                    "{name} is launched by the boot scripts but never copied into the image"
+                );
+            }
+            rest = after;
+        }
     }
 
     /// WinPE's firewall resets loopback connections between processes, which is
