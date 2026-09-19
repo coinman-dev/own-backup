@@ -28,6 +28,26 @@ pub struct MediaTool {
     /// The executable inside that folder — and, on the machine being searched,
     /// the proof that the right thing was found.
     pub exe: &'static str,
+    /// A file that tells the program to keep its settings BESIDE ITSELF
+    /// instead of in the user's profile, created on the medium if named.
+    ///
+    /// This is the difference between a program that works on the medium and
+    /// one that half-works. Left to itself, Notepad++ keeps its configuration
+    /// in `%APPDATA%` — which in WinPE is the SYSTEM account's profile on a RAM
+    /// disk, nothing like the folder its settings were copied from. Its own
+    /// documented answer is this marker file: with it present, everything is
+    /// read from and written to its own folder, and the drive letter stops
+    /// mattering at all.
+    pub portable_marker: Option<&'static str>,
+    /// Folder under `%APPDATA%` where this program keeps the settings a person
+    /// has actually changed, copied onto the medium beside the program itself.
+    ///
+    /// Without this the medium carries a freshly installed program, not the
+    /// one the user knows: neither of these two keeps its settings in its own
+    /// folder. Only the top-level `.xml` and `.ini` are taken — the rest of
+    /// what lives there is session state and unsaved documents, which are
+    /// someone's private files and have no business on a boot medium.
+    pub settings_in_appdata: Option<&'static str>,
 }
 
 /// Everything the medium knows how to carry, in the order the menu shows them.
@@ -43,12 +63,21 @@ pub const MEDIA_TOOLS: [MediaTool; 2] = [
         name: "Total Commander",
         folder: "totalcmd",
         exe: "TOTALCMD64.EXE",
+        // None needed: Total Commander is told where its `wincmd.ini` is by the
+        // registry, and a medium has no such entry — so it falls back to its
+        // own folder, which is where we want it anyway.
+        portable_marker: None,
+        // `wincmd.ini`. Total Commander looks for it beside the exe when the
+        // registry names no other place, and a medium's registry names none.
+        settings_in_appdata: Some("GHISLER"),
     },
     MediaTool {
         id: "notepadpp",
         name: "Notepad++",
         folder: "Notepad++",
         exe: "notepad++.exe",
+        portable_marker: Some("doLocalConf.xml"),
+        settings_in_appdata: Some("Notepad++"),
     },
 ];
 
@@ -100,6 +129,23 @@ mod tests {
         for t in MEDIA_TOOLS {
             assert!(!t.name.is_empty() && !t.folder.is_empty() && !t.exe.is_empty(), "{t:?}");
             assert!(!t.folder.contains('/') && !t.folder.contains('\\'), "one folder, not a path");
+        }
+    }
+
+    /// The medium is a RAM disk under a different drive letter every boot, so
+    /// a program that keeps its settings in the user's profile keeps them
+    /// nowhere. Notepad++ has a documented cure and must get it.
+    #[test]
+    fn notepad_is_told_to_keep_its_settings_beside_itself() {
+        assert_eq!(tool("notepadpp").unwrap().portable_marker, Some("doLocalConf.xml"));
+    }
+
+    /// Neither of these keeps its settings in its own folder, so a medium that
+    /// copies only the installation carries a program nobody recognises.
+    #[test]
+    fn both_tools_know_where_their_settings_live() {
+        for t in MEDIA_TOOLS {
+            assert!(t.settings_in_appdata.is_some(), "{} has nowhere to take settings from", t.id);
         }
     }
 

@@ -1195,16 +1195,82 @@ fn add_tools(
                 tool.name, known.exe
             )));
         }
+        // Counted, not assumed. A program that is nearly all there starts and
+        // then fails at something specific — and the failure it reports is
+        // about whatever it could not find, never about the copy. Cheaper to
+        // catch here than on a booted medium.
+        let (copied_bytes, copied_files) = crate::media_tools_win::weigh(&to);
+        if copied_files < tool.files || copied_bytes < tool.size_bytes {
+            return Err(OwnBackupError::ImageFormat(format!(
+                "{} скопирован не полностью: {} файлов вместо {} ({} вместо {} байт)",
+                tool.name, copied_files, tool.files, copied_bytes, tool.size_bytes
+            )));
+        }
+
+        // The settings the person actually uses, which live nowhere near the
+        // program — see `MediaTool::settings_in_appdata`.
+        if let Some(under) = known.settings_in_appdata {
+            let taken = copy_settings(under, &to);
+            info!(tool = %tool.id, from = under, files = taken, "the tool's own settings copied");
+        }
+
+        // And the file that makes it read them from there — see
+        // `MediaTool::portable_marker`. After the settings, so a program that
+        // somehow starts mid-build never sees the marker without them.
+        if let Some(marker) = known.portable_marker {
+            std::fs::write(to.join(marker), b"")?;
+            info!(tool = %tool.id, marker, "the tool is told to keep its settings beside itself");
+        }
+
         info!(
             tool = %tool.id,
             from = %tool.source.display(),
             mb = tool.size_bytes / 1_048_576,
+            files = copied_files,
             "third-party tool put on the medium"
         );
         count += 1;
         bytes += tool.size_bytes;
     }
     Ok((count, bytes))
+}
+
+/// Copy a program's settings out of `%APPDATA%\<under>` and in beside the
+/// program on the medium.
+///
+/// **The top-level files, and only those.** That is the settings and nothing
+/// else: `config.xml`, `stylers.xml`, `wincmd.ini`, and the toolbar files
+/// (`.bar`, `.br2`) a Total Commander toolbar is useless without. What lives in
+/// the SUBfolders is caches, plugin state and — in Notepad++'s case — the backup
+/// copies of documents a person never saved; putting someone's unsaved files
+/// on a medium they may hand to somebody else is not a mistake worth making
+/// once.
+///
+/// One exception, and it is not about privacy: `session.xml` is the list of
+/// files that were open, all of them on the machine's own disk. Restoring it on
+/// a rescue medium would have Notepad++ reach for the very disk the medium was
+/// booted to save, before anybody asked it to.
+///
+/// Never fatal: a machine where the program has never been started has no such
+/// folder, and a medium carrying default settings is still a working medium.
+fn copy_settings(under: &str, into: &Path) -> u32 {
+    let Ok(appdata) = std::env::var("APPDATA") else { return 0 };
+    let from = Path::new(&appdata).join(under);
+    let Ok(entries) = std::fs::read_dir(&from) else { return 0 };
+    let mut taken = 0;
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name();
+        if name.to_string_lossy().to_ascii_lowercase().starts_with("session.") {
+            continue;
+        }
+        if std::fs::copy(entry.path(), into.join(&name)).is_ok() {
+            taken += 1;
+        }
+    }
+    taken
 }
 
 fn system32() -> PathBuf {

@@ -118,7 +118,7 @@ fn program_files_x86() -> Option<PathBuf> {
 /// Size and file count of a folder, because the wizard shows both: the medium
 /// is a RAM disk, and an installation with a dozen plugins is not the size
 /// anyone expects.
-fn weigh(dir: &Path) -> (u64, u32) {
+pub fn weigh(dir: &Path) -> (u64, u32) {
     let Ok(entries) = std::fs::read_dir(dir) else { return (0, 0) };
     let mut bytes = 0;
     let mut files = 0;
