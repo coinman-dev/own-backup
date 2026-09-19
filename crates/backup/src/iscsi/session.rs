@@ -99,6 +99,28 @@ pub struct Session {
     read_bytes: u64,
     writes: u64,
     write_bytes: u64,
+    /// Told when a PDU starts arriving and when the connection goes back to
+    /// waiting, so whoever owns the socket can change how long it is willing
+    /// to wait. See [`Pace`].
+    pace: Option<Box<dyn Fn(Pace) + Send>>,
+}
+
+/// How patient the socket should be right now (audit AUD-14).
+///
+/// Between PDUs an initiator may legitimately say nothing for a long time —
+/// an idle mount is exactly that — so waiting there has no deadline. But once
+/// the first byte of a PDU has arrived the rest of it is already on the wire,
+/// and a connection that sends half a header and stops is not idle: it is
+/// holding one of the four session slots for as long as the process lives.
+///
+/// Login is treated as "in a PDU" from the first moment, so a connection that
+/// opens and says nothing at all is timed out too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pace {
+    /// Waiting for something to happen. No deadline.
+    Idle,
+    /// Part-way through a PDU, or not logged in yet. Short deadline.
+    InPdu,
 }
 
 impl Session {
@@ -119,6 +141,20 @@ impl Session {
             read_bytes: 0,
             writes: 0,
             write_bytes: 0,
+            pace: None,
+        }
+    }
+
+    /// Hand in the hook that changes the socket's patience. Without one the
+    /// session behaves exactly as before, which is what the tests want.
+    pub fn with_pace(mut self, pace: impl Fn(Pace) + Send + 'static) -> Self {
+        self.pace = Some(Box::new(pace));
+        self
+    }
+
+    fn set_pace(&self, pace: Pace) {
+        if let Some(f) = &self.pace {
+            f(pace);
         }
     }
 
@@ -140,6 +176,12 @@ impl Session {
             let Some((bhs, data)) = self.read_pdu(stream)? else {
                 return Ok(()); // the initiator closed the connection
             };
+            // A logged-in session may now sit idle for as long as it likes.
+            // Before login it may not: that is the deadline that keeps a
+            // connection saying nothing from holding a session slot.
+            if self.logged_in {
+                self.set_pace(Pace::Idle);
+            }
             let opcode = bhs[0] & 0x3F;
             if !self.logged_in && opcode != OP_LOGIN {
                 return Err(dev(format!("iSCSI: opcode {opcode:#04x} before login")));
@@ -170,7 +212,14 @@ impl Session {
             match stream.read(&mut bhs[got..]) {
                 Ok(0) if got == 0 => return Ok(None),
                 Ok(0) => return Err(dev("iSCSI: connection closed in the middle of a header")),
-                Ok(n) => got += n,
+                Ok(n) => {
+                    // Something has started arriving. From here to the end of
+                    // this PDU there is no reason to wait long for the rest.
+                    if got == 0 {
+                        self.set_pace(Pace::InPdu);
+                    }
+                    got += n;
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(e) => return Err(dev(format!("iSCSI read: {e}"))),
             }

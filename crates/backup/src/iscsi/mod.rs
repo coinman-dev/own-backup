@@ -26,9 +26,10 @@
 pub mod scsi;
 pub mod session;
 
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use own_backup_common::{OwnBackupError, Result};
 use tracing::{info, warn};
@@ -184,16 +185,62 @@ impl Lun {
     }
 }
 
+/// How long a connection may take over a PDU it has begun, and over logging in.
+/// Generous by the standards of a loopback socket; the point is only that it is
+/// finite (audit AUD-14).
+const PDU_DEADLINE: Duration = Duration::from_secs(30);
+
+/// How long a stopping target waits for its sessions to notice.
+const STOP_GRACE: Duration = Duration::from_secs(5);
+
+/// One accepted connection: the thread serving it, and a second handle on its
+/// socket so the connection can be broken from outside.
+///
+/// The second handle is the whole point. A session thread spends its life
+/// blocked in `read`, and there is no portable way to interrupt that — but
+/// shutting the socket down makes the read return, and the thread then ends on
+/// its own. Without it, stopping the target left every session running and the
+/// image open behind them (audit AUD-14).
+struct Accepted {
+    thread: std::thread::JoinHandle<()>,
+    socket: Option<TcpStream>,
+    peer: SocketAddr,
+}
+
+impl Accepted {
+    fn hang_up(&self) {
+        if let Some(s) = &self.socket {
+            let _ = s.shutdown(std::net::Shutdown::Both);
+        }
+    }
+}
+
 /// Serve `lun` under `iqn` until `stop` is set.
 ///
 /// Accept is polled rather than blocked on, so the caller can take the target
 /// down between sessions — which is how every mount here ends: the volumes are
 /// dismounted, the initiator logs out, and this returns.
+///
+/// Returning also means every session it accepted has ended: the LUN — and the
+/// image file under it — is not still open in some thread nobody is holding.
 pub fn serve_listener(
     listener: TcpListener,
     iqn: String,
     lun: Arc<Mutex<Lun>>,
     stop: Arc<AtomicBool>,
+) -> Result<()> {
+    serve_listener_paced(listener, iqn, lun, stop, PDU_DEADLINE, STOP_GRACE)
+}
+
+/// The same, with the two durations named — so a test does not have to wait
+/// half a minute to watch a deadline work.
+fn serve_listener_paced(
+    listener: TcpListener,
+    iqn: String,
+    lun: Arc<Mutex<Lun>>,
+    stop: Arc<AtomicBool>,
+    pdu_deadline: Duration,
+    stop_grace: Duration,
 ) -> Result<()> {
     let addr = listener
         .local_addr()
@@ -207,8 +254,13 @@ pub fn serve_listener(
 
     let open = Arc::new(AtomicU32::new(0));
     let mut accepted: u64 = 0;
+    let mut sessions: Vec<Accepted> = Vec::new();
 
     while !stop.load(Ordering::SeqCst) {
+        // Sessions that have ended keep nothing alive; dropping them here is
+        // what stops this list growing for the life of a long mount.
+        sessions.retain(|s| !s.thread.is_finished());
+
         match listener.accept() {
             Ok((stream, peer)) => {
                 // This hands out the contents of a backup. The initiator is the
@@ -228,6 +280,17 @@ pub fn serve_listener(
                 stream
                     .set_nonblocking(false)
                     .map_err(|e| OwnBackupError::Device(format!("iSCSI blocking: {e}")))?;
+                // Until this connection has logged in it is on a deadline.
+                let _ = stream.set_read_timeout(Some(pdu_deadline));
+
+                // A second handle on the same socket, kept here. It is not for
+                // reading or writing — only for breaking the connection when
+                // the target stops, which is the only way to get a thread out
+                // of a blocking read.
+                let leash = stream.try_clone().ok();
+                // And a third for the session's own use, so it can tighten and
+                // relax its own deadline as PDUs arrive.
+                let clock = stream.try_clone().ok();
 
                 let lun = lun.clone();
                 let iqn = iqn.clone();
@@ -237,15 +300,28 @@ pub fn serve_listener(
                     .name("iscsi-session".into())
                     .spawn(move || {
                         let mut stream = stream;
-                        match session::Session::new(iqn, lun).run(&mut stream) {
+                        let mut sess = session::Session::new(iqn, lun);
+                        if let Some(clock) = clock {
+                            sess = sess.with_pace(move |pace| {
+                                let t = match pace {
+                                    session::Pace::Idle => None,
+                                    session::Pace::InPdu => Some(pdu_deadline),
+                                };
+                                let _ = clock.set_read_timeout(t);
+                            });
+                        }
+                        match sess.run(&mut stream) {
                             Ok(()) => info!(%peer, "iSCSI initiator disconnected"),
                             Err(e) => warn!(%peer, error = %e, "iSCSI session ended with an error"),
                         }
                         open_bg.fetch_sub(1, Ordering::SeqCst);
                     });
-                if let Err(e) = spawned {
-                    open.fetch_sub(1, Ordering::SeqCst);
-                    warn!(error = %e, "iSCSI session thread: not started");
+                match spawned {
+                    Ok(thread) => sessions.push(Accepted { thread, socket: leash, peer }),
+                    Err(e) => {
+                        open.fetch_sub(1, Ordering::SeqCst);
+                        warn!(error = %e, "iSCSI session thread: not started");
+                    }
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -255,13 +331,46 @@ pub fn serve_listener(
         }
     }
 
-    info!(%addr, accepted, still_open = open.load(Ordering::SeqCst), "iSCSI target stopped");
+    // Stopping means stopping. Break every connection still open, then wait a
+    // bounded time for the threads to notice; the image stays open behind any
+    // that do not, so this is not a formality.
+    for s in &sessions {
+        if !s.thread.is_finished() {
+            info!(peer = %s.peer, "iSCSI: hanging up on a session that is still open");
+            s.hang_up();
+        }
+    }
+    let deadline = Instant::now() + stop_grace;
+    while Instant::now() < deadline && sessions.iter().any(|s| !s.thread.is_finished()) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let mut stuck = 0usize;
+    for s in sessions {
+        if s.thread.is_finished() {
+            let _ = s.thread.join();
+        } else {
+            // Waiting forever would hang whoever asked for the unmount, which
+            // is worse than one thread outliving its target. It is named, so
+            // it can be looked for.
+            warn!(peer = %s.peer, "iSCSI: a session did not end in time and is left running");
+            stuck += 1;
+        }
+    }
+
+    info!(
+        %addr,
+        accepted,
+        stuck,
+        still_open = open.load(Ordering::SeqCst),
+        "iSCSI target stopped"
+    );
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
 
     #[test]
     fn a_target_name_survives_whatever_the_image_is_called() {
@@ -284,5 +393,134 @@ mod tests {
         assert_eq!(lun.blocks(), 8);
         let e = lun.write_at(0, &[1, 2, 3]).unwrap_err().to_string();
         assert!(e.contains("read-only"), "{e}");
+    }
+
+    // --- Остановка цели действительно останавливает её (аудит AUD-14) -------
+    //
+    // Потоки сессий никуда не записывались: stop проверялся только в цикле
+    // accept, а сессия его не видела вовсе. Остановленная цель оставляла
+    // потоки жить, а вместе с ними — открытый образ под ними.
+
+    fn a_tiny_target() -> (TcpListener, Arc<Mutex<Lun>>, Arc<AtomicBool>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let lun = Arc::new(Mutex::new(Lun::read_only(Box::new(
+            scsi::tests::MemSource::new(4096),
+        ))));
+        (listener, lun, Arc::new(AtomicBool::new(false)))
+    }
+
+    /// Подключение, которое молчит, раньше держало слот сессии до конца жизни
+    /// процесса. Четырёх таких хватало, чтобы цель перестала принимать
+    /// настоящего инициатора.
+    #[test]
+    fn a_connection_that_never_logs_in_lets_go_of_its_slot() {
+        let (listener, lun, stop) = a_tiny_target();
+        let addr = listener.local_addr().unwrap();
+        let stop_bg = stop.clone();
+        let server = std::thread::spawn(move || {
+            serve_listener_paced(
+                listener,
+                "iqn.test:one".into(),
+                lun,
+                stop_bg,
+                Duration::from_millis(150), // дедлайн на PDU и на вход
+                Duration::from_secs(2),
+            )
+        });
+
+        // Подключаемся и не говорим ничего.
+        let silent = TcpStream::connect(addr).unwrap();
+        // Дедлайн должен сработать сам, без нашего участия.
+        let gave_up = Instant::now() + Duration::from_secs(3);
+        let mut buf = [0u8; 1];
+        silent.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+        let mut closed = false;
+        while Instant::now() < gave_up {
+            match (&silent).read(&mut buf) {
+                Ok(0) => {
+                    closed = true;
+                    break;
+                }
+                Ok(_) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {}
+                Err(_) => {
+                    closed = true;
+                    break;
+                }
+            }
+        }
+        assert!(closed, "сессия обязана закончиться сама, а не ждать вечно");
+
+        stop.store(true, Ordering::SeqCst);
+        server.join().unwrap().unwrap();
+    }
+
+    /// Остановка обрывает принятые соединения и ДОЖИДАЕТСЯ потоков: пока
+    /// serve_listener не вернулся, образ под LUN считается открытым.
+    #[test]
+    fn stopping_the_target_ends_the_sessions_it_accepted() {
+        let (listener, lun, stop) = a_tiny_target();
+        let addr = listener.local_addr().unwrap();
+        let stop_bg = stop.clone();
+        let watch = lun.clone();
+        let server = std::thread::spawn(move || {
+            serve_listener_paced(
+                listener,
+                "iqn.test:one".into(),
+                lun,
+                stop_bg,
+                Duration::from_secs(60), // долгий дедлайн: проверяем не его
+                Duration::from_secs(3),
+            )
+        });
+
+        let client = TcpStream::connect(addr).unwrap();
+        // Дать слушателю принять соединение.
+        std::thread::sleep(Duration::from_millis(200));
+
+        stop.store(true, Ordering::SeqCst);
+        let started = Instant::now();
+        server.join().unwrap().unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "остановка не должна упираться в льготный срок, если сессию просто оборвали"
+        );
+
+        // Никто больше не держит LUN — значит, и образ под ним закрыт.
+        assert!(watch.try_lock().is_ok(), "LUN остался занят потоком сессии");
+        drop(client);
+    }
+
+    /// Обычный случай — инициатор ушёл сам — тоже должен закрываться без
+    /// ожидания льготного срока.
+    #[test]
+    fn a_session_the_initiator_closed_needs_no_grace_period() {
+        let (listener, lun, stop) = a_tiny_target();
+        let addr = listener.local_addr().unwrap();
+        let stop_bg = stop.clone();
+        let server = std::thread::spawn(move || {
+            serve_listener_paced(
+                listener,
+                "iqn.test:one".into(),
+                lun,
+                stop_bg,
+                Duration::from_secs(60),
+                Duration::from_secs(30), // заведомо больше, чем тест готов ждать
+            )
+        });
+
+        let client = TcpStream::connect(addr).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        drop(client); // инициатор отключился
+
+        std::thread::sleep(Duration::from_millis(200));
+        stop.store(true, Ordering::SeqCst);
+        let started = Instant::now();
+        server.join().unwrap().unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "завершившаяся сессия не должна заставлять ждать льготный срок"
+        );
     }
 }
