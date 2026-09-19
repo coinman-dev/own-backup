@@ -3005,6 +3005,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "own-backup-shell"
+version = "0.1.1"
+dependencies = [
+ "own-backup-common",
+ "windows 0.58.0",
+]
+
+[[package]]
 name = "own-backup-snapshot"
 version = "0.1.1"
 dependencies = [
