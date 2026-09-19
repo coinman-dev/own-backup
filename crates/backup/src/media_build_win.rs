@@ -313,6 +313,14 @@ pub struct MediaBuildRequest {
     /// itself falls back to `cmd.exe` rather than exiting, and this — one tick
     /// in the wizard and the medium behaves exactly as every medium before it.
     pub classic_console: bool,
+    /// `%APPDATA%` of the person the medium is being built for.
+    ///
+    /// Not read from this process's environment, and that is the whole point:
+    /// a build started from the interface runs inside the service, which is
+    /// LocalSystem. Its `%APPDATA%` is the SYSTEM profile, where no third-party
+    /// program has ever kept a setting — so the tools went onto the medium
+    /// freshly installed while the build reported success.
+    pub user_appdata: Option<PathBuf>,
     /// Ids from [`own_backup_common::media_tools::MEDIA_TOOLS`] the user ticked.
     ///
     /// Asked for by id rather than by path so the build looks them up here, on
@@ -520,7 +528,7 @@ pub fn build_media(
 
     if !req.tools.is_empty() {
         at(&mut progress, BuildStage::CopyingTools, 0, "");
-        match add_tools(&tree, &req.tools, &mut |pct, what| {
+        match add_tools(&tree, &req.tools, req.user_appdata.as_deref(), &mut |pct, what| {
             at(&mut progress, BuildStage::CopyingTools, pct, what);
         }) {
             Ok((count, bytes)) => {
@@ -1164,6 +1172,7 @@ fn trim_runtime(runtime_root: &Path) -> u32 {
 fn add_tools(
     tree: &Path,
     wanted: &[String],
+    user_appdata: Option<&Path>,
     progress: &mut dyn FnMut(u64, &str),
 ) -> Result<(u32, u64)> {
     let found = crate::media_tools_win::find_tools();
@@ -1210,8 +1219,16 @@ fn add_tools(
         // The settings the person actually uses, which live nowhere near the
         // program — see `MediaTool::settings_in_appdata`.
         if let Some(under) = known.settings_in_appdata {
-            let taken = copy_settings(under, &to);
-            info!(tool = %tool.id, from = under, files = taken, "the tool's own settings copied");
+            match copy_settings(under, &to, user_appdata) {
+                0 => warn!(
+                    tool = %tool.id,
+                    from = under,
+                    "no settings found - the tool goes on the medium as freshly installed"
+                ),
+                taken => {
+                    info!(tool = %tool.id, from = under, files = taken, "the tool's own settings copied")
+                }
+            }
         }
 
         // And the file that makes it read them from there — see
@@ -1253,9 +1270,21 @@ fn add_tools(
 ///
 /// Never fatal: a machine where the program has never been started has no such
 /// folder, and a medium carrying default settings is still a working medium.
-fn copy_settings(under: &str, into: &Path) -> u32 {
-    let Ok(appdata) = std::env::var("APPDATA") else { return 0 };
-    let from = Path::new(&appdata).join(under);
+fn copy_settings(under: &str, into: &Path, user_appdata: Option<&Path>) -> u32 {
+    let own;
+    let appdata = match user_appdata {
+        Some(given) => given,
+        // Only right when the build runs in somebody's own session. Inside the
+        // service it is the SYSTEM profile and holds nothing.
+        None => match std::env::var("APPDATA") {
+            Ok(from_env) => {
+                own = PathBuf::from(from_env);
+                own.as_path()
+            }
+            Err(_) => return 0,
+        },
+    };
+    let from = appdata.join(under);
     let Ok(entries) = std::fs::read_dir(&from) else { return 0 };
     let mut taken = 0;
     for entry in entries.flatten() {

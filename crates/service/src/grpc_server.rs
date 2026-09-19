@@ -895,6 +895,8 @@ impl BackupService for BackupServiceImpl {
                     drivers: opts.drivers.clone(),
                     extra_drivers: extra,
                     tools: opts.tools.clone(),
+                    user_appdata: (!opts.user_appdata.trim().is_empty())
+                        .then(|| std::path::PathBuf::from(opts.user_appdata.trim())),
                     classic_console: opts.classic_console,
                     runtime_in_image: opts.runtime_in_image,
                 };

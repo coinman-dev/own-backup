@@ -456,8 +456,19 @@ pub async fn list_media_tools(
 #[tauri::command]
 pub async fn build_boot_media(
     state: State<'_, GuiState>,
-    options: own_backup_common::engine_dto::MediaBuildOptionsDto,
+    mut options: own_backup_common::engine_dto::MediaBuildOptionsDto,
 ) -> Result<own_backup_common::engine_dto::MediaBuildReportDto, String> {
+    // Whose settings the third-party tools should go onto the medium with.
+    // Asked here and nowhere else: this process runs as the person building the
+    // medium, and the one that does the building does not — the service is
+    // LocalSystem, whose `%APPDATA%` is the SYSTEM profile and holds nobody's
+    // Notepad++ configuration. The tools went on the medium freshly installed
+    // and the build reported success (2026-09-19).
+    if options.user_appdata.trim().is_empty() {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            options.user_appdata = appdata;
+        }
+    }
     tracing::info!(
         iso = %options.output_iso,
         drivers = options.drivers.len(),

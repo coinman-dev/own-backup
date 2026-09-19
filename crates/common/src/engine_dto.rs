@@ -167,6 +167,15 @@ pub struct MediaBuildOptionsDto {
     /// back if the desktop does not come up on some machine.
     #[serde(default)]
     pub classic_console: bool,
+    /// `%APPDATA%` of the person building the medium.
+    ///
+    /// Filled in by the interface, because the build itself does not run as
+    /// that person: the service is LocalSystem, whose `%APPDATA%` is the
+    /// SYSTEM profile and holds nobody's settings. Empty means "use whatever
+    /// this process has", which is right when the build runs in the user's own
+    /// session.
+    #[serde(default)]
+    pub user_appdata: String,
     /// Ids of the third-party tools to copy in — see
     /// [`crate::media_tools::MEDIA_TOOLS`]. Empty means none, which is what a
     /// machine with neither installed always sends.
