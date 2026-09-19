@@ -496,7 +496,15 @@ fn tick(bar: HWND) {
     let now = unsafe { GetLocalTime() };
     let clock = layout::clock_text(now.wHour, now.wMinute);
     let indicator = layout::layout_label(foreground_langid());
-    let windows = open_windows();
+    // In the order they have been in, not the order the system happens to
+    // enumerate them in — see `layout::stable_order`.
+    let seen = open_windows();
+    let previous: Vec<HWND> = with_bar(|b| b.windows.iter().map(|w| w.handle).collect());
+    let order = layout::stable_order(&previous, &seen.iter().map(|w| w.handle).collect::<Vec<_>>());
+    let windows: Vec<OpenWindow> = order
+        .iter()
+        .filter_map(|handle| seen.iter().find(|w| w.handle == *handle).cloned())
+        .collect();
     let front = unsafe { GetForegroundWindow() };
     let shown = windows
         .iter()
@@ -506,6 +514,13 @@ fn tick(bar: HWND) {
 
     let changed = with_bar(|b| {
         let differs = b.clock != clock || b.layout != indicator || b.windows_shown != shown;
+        // The state that used to take the whole process down with it: nothing
+        // in front, so nothing to say about a layout. Logged because it is not
+        // obvious that it happens at all, and it is what a crash here would
+        // have to be explained by again.
+        if differs && indicator.is_empty() && !b.layout.is_empty() {
+            log("no window in front - the layout indicator has nothing to show");
+        }
         b.clock = clock;
         b.layout = indicator;
         b.front = front;
@@ -879,7 +894,17 @@ fn text_width(font: HFONT, text: &str) -> i32 {
 }
 
 fn draw_text(dc: HDC, slot: &layout::Slot, text: &str, align: u32) {
-    if slot.is_empty() {
+    // Nothing to draw must never reach Windows. `DrawTextW` takes a slice, and
+    // an empty `Vec<u16>` has no allocation behind it: what goes across is a
+    // dangling pointer with a length of zero, and user32 reads it anyway —
+    // 0xC0000005 inside user32.dll, the whole process gone.
+    //
+    // There is exactly one empty string on the strip and it is not a freak
+    // case: the layout indicator shows nothing when no window has the focus,
+    // which happens whenever the last window is closed or minimised. The strip
+    // crashed three times in six minutes on an ordinary desktop before this
+    // line existed (2026-09-19).
+    if slot.is_empty() || text.is_empty() {
         return;
     }
     let mut area = RECT {
@@ -958,6 +983,10 @@ unsafe fn backdrop_message(
             let (w, h, font) = with_bar(|b| (b.screen_w, b.screen_h, b.big));
             let mut paint = PAINTSTRUCT::default();
             let dc = BeginPaint(window, &mut paint);
+            if dc.is_invalid() {
+                let _ = EndPaint(window, &paint);
+                return LRESULT(0);
+            }
             fill(dc, RECT { left: 0, top: 0, right: w, bottom: h }, BACKDROP);
             if !font.is_invalid() {
                 SelectObject(dc, font);
@@ -1057,6 +1086,12 @@ fn paint_bar(window: HWND) {
     unsafe {
         let mut paint = PAINTSTRUCT::default();
         let dc = BeginPaint(window, &mut paint);
+        // A window being torn down answers with nothing, and every call below
+        // would then be drawing into a handle that is not one.
+        if dc.is_invalid() {
+            let _ = EndPaint(window, &paint);
+            return;
+        }
         fill(dc, RECT { left: 0, top: 0, right: width, bottom: bar_h }, BAR_BG);
         // A hairline along the top edge, so the strip reads as a strip and not
         // as the bottom of whatever window happens to be above it.

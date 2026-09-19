@@ -117,6 +117,22 @@ pub fn bar_slots(
     BarSlots { start, buttons, layout, clock, close }
 }
 
+/// Keep the buttons where they are: the same windows in the same places they
+/// were, new ones appended, gone ones closed up.
+///
+/// Windows are enumerated in Z-ORDER, top of the stack first. Taken as it
+/// comes, that order moves a button the moment it is used: clicking one raises
+/// its window, which puts it at the top of the stack, which jumps its button to
+/// the left end of the strip — so the thing you just aimed at is no longer
+/// where you aimed, and the next click lands on something else. Order has to
+/// come from when a window APPEARED, not from where it is in the stack.
+pub fn stable_order<K: Copy + PartialEq>(previous: &[K], current: &[K]) -> Vec<K> {
+    let mut order: Vec<K> = previous.iter().copied().filter(|k| current.contains(k)).collect();
+    let fresh: Vec<K> = current.iter().copied().filter(|k| !order.contains(k)).collect();
+    order.extend(fresh);
+    order
+}
+
 /// Buttons for the open windows, across the room the strip has left.
 ///
 /// They share that room equally, up to a width past which a button stops being
@@ -265,6 +281,34 @@ mod tests {
                 .count();
             assert!(hits <= 1, "x={x} landed in {hits} parts at once");
         }
+    }
+
+    /// The bug this exists for: clicking a button raised its window, which put
+    /// it first in the enumeration, which moved its button to the left end.
+    #[test]
+    fn using_a_button_does_not_move_it() {
+        let shown = ['a', 'b', 'c'];
+        // The same three windows, enumerated again after 'c' was raised.
+        let raised_c = ['c', 'a', 'b'];
+        assert_eq!(stable_order(&shown, &raised_c), vec!['a', 'b', 'c']);
+        // And again after 'a' was raised: still nothing moves.
+        assert_eq!(stable_order(&shown, &['a', 'c', 'b']), vec!['a', 'b', 'c']);
+    }
+
+    #[test]
+    fn a_new_window_goes_on_the_end_and_a_closed_one_leaves_a_gap_that_closes() {
+        assert_eq!(
+            stable_order(&['a', 'b'], &['d', 'a', 'b']),
+            vec!['a', 'b', 'd'],
+            "the new one is last however the system enumerated it"
+        );
+        assert_eq!(stable_order(&['a', 'b', 'c'], &['c', 'a']), vec!['a', 'c']);
+        assert_eq!(stable_order(&['a', 'b'], &[]), Vec::<char>::new());
+    }
+
+    #[test]
+    fn the_first_look_takes_what_it_is_given() {
+        assert_eq!(stable_order(&[], &['b', 'a']), vec!['b', 'a']);
     }
 
     #[test]
