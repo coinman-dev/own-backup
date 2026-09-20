@@ -590,10 +590,32 @@ pub fn start_media_cmd(app_dir: &str, temp_dir: &str) -> String {
             "start \"own-backup engine\" /min \"{app_dir}\\own-backup-service.exe\" --run --media"
         ),
         ":interface",
+        "rem The environment check runs BEFORE the interface, and its verdict is",
+        "rem obeyed. Not decoration: without this line a medium whose WebView2 is",
+        "rem missing shows Tauri's own dialog - in English, offering to DOWNLOAD",
+        "rem the runtime from the internet, on a machine booted into WinPE with no",
+        "rem browser and usually no network - behind an empty window of ours (seen",
+        "rem 2026-09-20). The interface itself deliberately does not refuse on a",
+        "rem failed check, because on an ordinary Windows the loader can still find",
+        "rem a runtime through the registry that this check does not read; it",
+        "rem refuses HERE instead, where the layout is known. That was the design",
+        "rem all along - the call was simply never written.",
+        &format!("\"{app_dir}\\own-backup-cli.exe\" media-preflight"),
+        "if errorlevel 1 goto :nointerface",
         "echo Starting the interface...",
         &format!("start \"\" \"{app_dir}\\own-backup-gui.exe\""),
+        "rem A passed check is not a window. The engine file can be there and",
+        "rem broken, the loader can die on its own - and the old failure mode was",
+        "rem a live process with no window holding the only console. This waits for",
+        "rem the window to say it exists, and says so plainly if it never does.",
+        &format!("\"{app_dir}\\own-backup-cli.exe\" media-wait --timeout 40"),
+        "goto :aftergui",
+        ":nointerface",
         "echo.",
-        "echo The interface starts in its own window; this console stays usable.",
+        "echo The interface was not started - the reason is printed above.",
+        "echo This console is fully usable: own-backup-cli.exe does the whole job.",
+        ":aftergui",
+        "echo.",
         "echo The engine runs without a window of its own - its log is the place to look.",
         "echo If no window appears, look at:",
         &format!("echo   \"{app_dir}\\own-backup-gui.log\""),
@@ -921,6 +943,33 @@ mod tests {
         let firewall = s.find("wpeutil disablefirewall").expect("firewall must be disabled");
         let engine = s.find("own-backup-service.exe").expect("the engine must be started");
         assert!(firewall < engine, "the firewall must be down before the engine comes up");
+    }
+
+    /// Проверка окружения обязана стоять ПЕРЕД запуском интерфейса, и её отказ
+    /// обязан что-то значить.
+    ///
+    /// Обе половины были написаны и покрыты тестами, а вызов не написан —
+    /// и носитель без WebView2 показывал англоязычное окно Tauri с
+    /// предложением скачать среду выполнения из интернета (2026-09-20, WinPE,
+    /// где нет ни браузера, ни сети), за которым стояло пустое окно нашего
+    /// интерфейса. Сам интерфейс при проваленной проверке не отказывается
+    /// стартовать намеренно: на обычной Windows загрузчик находит среду через
+    /// реестр, куда эта проверка не смотрит. Отказывать должен запускатель.
+    #[test]
+    fn the_environment_is_checked_before_the_interface_and_the_verdict_is_obeyed() {
+        let s = start_media_cmd(r"X:\Program Files\OwnBackup", r"X:\Windows\Temp\OwnBackup");
+        let check = s.find("media-preflight").expect("проверка окружения должна вызываться");
+        let gui = s.find("own-backup-gui.exe").expect("интерфейс должен запускаться");
+        assert!(check < gui, "проверка идёт до запуска, иначе она ничего не решает");
+        assert!(
+            s.contains("if errorlevel 1 goto :nointerface"),
+            "отказ проверки должен уводить в обход запуска"
+        );
+        assert!(s.contains(":nointerface"), "и эта метка должна существовать");
+        // Пройденная проверка — ещё не окно: файл движка бывает на месте и
+        // битый. Тогда носитель ждёт окна и говорит, если его нет.
+        let wait = s.find("media-wait").expect("после запуска надо дождаться окна");
+        assert!(gui < wait, "ждать окна имеет смысл только после запуска");
     }
 
     /// The runtime is off-image, so the launcher must locate the boot volume by
