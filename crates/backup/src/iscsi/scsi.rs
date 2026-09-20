@@ -105,7 +105,16 @@ pub fn execute(lun: &mut Lun, cdb: &[u8], data_out: &[u8]) -> Reply {
                     "iSCSI: refusing a command a backup image is not meant to answer"
                 );
             } else {
-                warn!(opcode = format!("{opcode:#04x}"), "iSCSI: unsupported SCSI command");
+                // The whole CDB, not just the opcode. An opcode alone names a
+                // command; the bytes after it say what was being asked for,
+                // and that is the only thing that can tell WHO is asking —
+                // which is the question left open about `0x24` since
+                // 2026-09-18. Once per opcode, so it stays one line.
+                warn!(
+                    opcode = format!("{opcode:#04x}"),
+                    cdb = %cdb.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" "),
+                    "iSCSI: unsupported SCSI command"
+                );
             }
             Reply::fail(KEY_ILLEGAL_REQUEST, ASC_INVALID_OPCODE)
         }

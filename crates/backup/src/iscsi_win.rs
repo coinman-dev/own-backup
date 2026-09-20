@@ -672,9 +672,17 @@ impl AttachedTarget {
             self.static_target_added = false;
         }
         if self.portal_added {
+            // ANY_INITIATOR_PORT, not 0 — the same value the portal was ADDED
+            // with, and for the same reason: zero names initiator port 0, which
+            // does not exist. This call had been left at 0, so every teardown
+            // answered ERROR_INVALID_PARAMETER (0x57) and the portal stayed
+            // registered, accumulating one per mount for the life of the
+            // machine. The mistake was found and fixed on the add side on
+            // 2026-09-18; its mirror went unnoticed because a portal that is
+            // not removed breaks nothing immediately.
             // SAFETY: the portal struct outlives the call.
             let code = unsafe {
-                RemoveIScsiSendTargetPortalW(PCWSTR::null(), 0, &mut self.portal)
+                RemoveIScsiSendTargetPortalW(PCWSTR::null(), ANY_INITIATOR_PORT, &mut self.portal)
             };
             if code != 0 {
                 warn!(reason = %describe(code), "iSCSI: discovery portal not removed");

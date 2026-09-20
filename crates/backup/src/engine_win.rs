@@ -309,16 +309,11 @@ pub fn backup_volume(
     result
 }
 
-/// `\\.\X:` → `X:\` (the volume-root form VSS expects); None for anything
-/// that is not a plain lettered volume (physical drives, GLOBALROOT paths).
+/// The volume-root form VSS expects; None for anything that is not a volume.
+/// See [`crate::source_identity::volume_root_for_snapshot`] — it lives there
+/// because it is pure string work and can be tested without Windows.
 fn volume_root_of(device_path: &str) -> Option<String> {
-    let rest = device_path.strip_prefix(r"\\.\")?;
-    let bytes = rest.as_bytes();
-    if bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
-        Some(format!("{}\\", rest))
-    } else {
-        None
-    }
+    crate::source_identity::volume_root_for_snapshot(device_path)
 }
 
 /// Check that `parent_image` can serve as the parent of a new child image for

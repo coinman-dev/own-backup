@@ -69,6 +69,40 @@ pub fn parse_part_spec(device: &str) -> Option<Extent> {
     Some(Extent { disk, offset, length })
 }
 
+/// The volume root VSS wants for a source device, or `None` when the device is
+/// not a volume at all.
+///
+/// `AddToSnapshotSet` takes a volume NAME with a trailing backslash — a drive
+/// letter root like `C:\`, or the canonical GUID form
+/// `\\?\Volume{…}\`. Both are equally valid to it.
+///
+/// This used to accept only `\\.\X:` (found 2026-09-20). Every source without a
+/// drive letter therefore got no shadow copy at all — an ESP, a recovery
+/// partition, any letterless data volume — and the log said "not a lettered
+/// volume; skipping VSS" as though that were a policy rather than the parser
+/// giving up. The cost was double: a crash-consistent copy of a live volume,
+/// AND the loss of the fast `$MFT` exclusion path, which refuses to read raw
+/// metadata of a source nobody froze.
+pub fn volume_root_for_snapshot(device_path: &str) -> Option<String> {
+    let rest = device_path.strip_prefix(r"\\.\").or_else(|| device_path.strip_prefix(r"\\?\"))?;
+    let trimmed = rest.trim_end_matches('\\');
+    let bytes = trimmed.as_bytes();
+    // A drive letter: `\\.\C:` → `C:\`
+    if bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        return Some(format!("{trimmed}\\"));
+    }
+    // A volume GUID path, in either namespace. VSS is given the `\\?\` form,
+    // which is the one Windows documents for a volume name.
+    if trimmed.len() > "Volume{".len()
+        && trimmed[.."Volume{".len()].eq_ignore_ascii_case("Volume{")
+        && trimmed.ends_with('}')
+    {
+        return Some(format!(r"\\?\{trimmed}\"));
+    }
+    // A physical drive, a partition range, anything else: not a volume.
+    None
+}
+
 /// Is this a path on another machine? Those have no local extent, and that is
 /// an answer rather than a failure to find one.
 pub fn is_network_path(path: &str) -> bool {
@@ -297,5 +331,43 @@ mod tests {
             "expected an explicit 'cannot tell', got {answer:?}"
         );
         assert!(refuse_destination_on_a_source(&["C:".into()], "Z:\\nowhere-at-all").is_err());
+    }
+
+    // --- Какой том отдать VSS (найдено живым прогоном 2026-09-20) ----------
+    //
+    // Разбирался только `\.\X:`, поэтому любой источник без буквы оставался
+    // без снимка, а журнал писал «не том с буквой — VSS пропускаем», будто это
+    // правило, а не разборщик, который сдался. Платилось дважды: копия живого
+    // тома выходила crash-consistent, и терялся быстрый путь исключений —
+    // читать сырой `$MFT` у незамороженного источника нельзя.
+
+    #[test]
+    fn a_lettered_volume_becomes_its_root() {
+        assert_eq!(volume_root_for_snapshot(r"\\.\C:"), Some(r"C:\".into()));
+        assert_eq!(volume_root_for_snapshot(r"\\.\e:"), Some(r"e:\".into()));
+    }
+
+    /// Случай, которого не хватало: ESP и раздел восстановления буквы не имеют,
+    /// а VSS про них знает ровно столько же, сколько про C:.
+    #[test]
+    fn a_volume_with_no_letter_is_a_volume_too() {
+        let guid = "Volume{fb002532-838c-4818-8f14-7824d64763b7}";
+        let want = Some(format!(r"\\?\{guid}\"));
+        // В каком бы пространстве имён он ни пришёл и с хвостовой чертой или без.
+        assert_eq!(volume_root_for_snapshot(&format!(r"\\?\{guid}")), want);
+        assert_eq!(volume_root_for_snapshot(&format!(r"\\?\{guid}\")), want);
+        assert_eq!(volume_root_for_snapshot(&format!(r"\\.\{guid}")), want);
+    }
+
+    /// Не том — значит нечего и снимать: физический диск, диапазон разделов,
+    /// путь в никуда.
+    #[test]
+    fn what_is_not_a_volume_gets_no_snapshot() {
+        assert_eq!(volume_root_for_snapshot(r"\\.\PhysicalDrive0"), None);
+        assert_eq!(volume_root_for_snapshot("part:4:1048576:1000"), None);
+        assert_eq!(volume_root_for_snapshot("C:"), None, "путь должен быть уже нормализован");
+        assert_eq!(volume_root_for_snapshot(r"\\.\Volume"), None, "без скобок это не GUID");
+        assert_eq!(volume_root_for_snapshot(r"\\?\Volume{"), None);
+        assert_eq!(volume_root_for_snapshot(""), None);
     }
 }
