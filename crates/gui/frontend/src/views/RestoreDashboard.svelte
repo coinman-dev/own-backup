@@ -392,7 +392,21 @@
     { guid: '0FC63DAF-8483-4772-8E79-3D69D8477DE4', name: 'Linux filesystem' },
     { guid: '0657FD6D-A4AB-43C4-84E5-0933C84B4F4F', name: 'Linux swap' },
   ];
-  const isGpt = $derived((targetDisk?.partition_table ?? 'gpt') !== 'mbr');
+  /** Схему разметки задаёт КОПИЯ, а не то, что лежит на цели сейчас.
+   *
+   *  Восстановление целого диска переписывает таблицу целиком, поэтому
+   *  единственный правильный ответ — тот, что был у исходного диска. Спрашивать
+   *  цель здесь означало решать судьбу копии по случайному свойству пустого
+   *  диска: Windows отвечает про неразмеченный диск «MBR» (2026-09-20, в
+   *  виртуальной машине), и копия UEFI-диска с ESP восстановилась как MBR с
+   *  загрузчиком BIOS — то есть в незагружаемом виде. При восстановлении
+   *  ОТДЕЛЬНЫХ разделов таблица остаётся чужой, и тогда спрашивать надо цель. */
+  const copyTable = $derived(activeInfo?.source_disk_layout?.partition_table ?? null);
+  const isGpt = $derived(
+    wholeDiskRestore && copyTable
+      ? copyTable !== 'mbr'
+      : (targetDisk?.partition_table ?? 'gpt') !== 'mbr',
+  );
   /** Drive letters already taken anywhere in the system. */
   const usedLetters = $derived(
     new Set(

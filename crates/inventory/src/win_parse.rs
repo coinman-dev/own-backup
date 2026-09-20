@@ -127,6 +127,24 @@ pub fn parse_filesystem(fs: &str) -> FileSystem {
 /// Known EFI System Partition GPT type GUID.
 pub const GPT_TYPE_EFI_SYSTEM: &str = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B";
 
+/// Windows answers «MBR» about a disk that has no table at all.
+///
+/// A never-initialised disk comes back from `IOCTL_DISK_GET_DRIVE_LAYOUT_EX` as
+/// `PARTITION_STYLE_MBR` with no partitions and a zero signature, while
+/// `Get-Disk` says `RAW` about the very same disk (measured 2026-09-20 on a
+/// fresh VHDX). Believing that answer cost a whole-disk restore: the interface
+/// picked the scheme from what the TARGET called itself, saw "mbr", and wrote
+/// an MBR table with a BIOS loader for a copy of a UEFI disk with an ESP —
+/// every byte in place and nothing able to boot it.
+///
+/// A disk someone really did initialise as MBR and left empty is a different
+/// thing and keeps its answer: initialising writes a signature, and that is
+/// what tells the two apart.
+pub fn synthetic_mbr(style: u32, partitions: usize, mbr_signature: u32) -> bool {
+    const STYLE_MBR: u32 = 0;
+    style == STYLE_MBR && partitions == 0 && mbr_signature == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,5 +196,37 @@ mod tests {
         assert_eq!(parse_filesystem("NTFS"), FileSystem::Ntfs);
         assert_eq!(parse_filesystem(" fat32 "), FileSystem::Fat32);
         assert_eq!(parse_filesystem("RAW"), FileSystem::Unknown);
+    }
+}
+
+#[cfg(test)]
+mod layout_answers {
+    use super::synthetic_mbr;
+
+    const MBR: u32 = 0;
+    const GPT: u32 = 1;
+    const RAW: u32 = 2;
+
+    #[test]
+    fn an_untouched_disk_is_not_an_mbr_disk() {
+        // What a never-initialised VHDX answers: style MBR, nothing in it.
+        assert!(synthetic_mbr(MBR, 0, 0));
+    }
+
+    #[test]
+    fn an_empty_but_initialised_mbr_disk_keeps_its_answer() {
+        // "Initialise as MBR" writes a signature; that is the whole difference.
+        assert!(!synthetic_mbr(MBR, 0, 0x1A2B_3C4D));
+    }
+
+    #[test]
+    fn a_partitioned_mbr_disk_is_never_synthetic() {
+        assert!(!synthetic_mbr(MBR, 1, 0));
+    }
+
+    #[test]
+    fn other_styles_are_left_alone() {
+        assert!(!synthetic_mbr(GPT, 0, 0));
+        assert!(!synthetic_mbr(RAW, 0, 0));
     }
 }

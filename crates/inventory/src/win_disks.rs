@@ -47,7 +47,8 @@ use windows::Win32::System::SystemInformation::GetSystemWindowsDirectoryW;
 use windows::Win32::System::IO::DeviceIoControl;
 
 use crate::win_parse::{
-    ansi_at, guid_at, media_type_of, parse_filesystem, u32_at, u64_at, GPT_TYPE_EFI_SYSTEM,
+    ansi_at, guid_at, media_type_of, parse_filesystem, synthetic_mbr, u32_at, u64_at,
+    GPT_TYPE_EFI_SYSTEM,
 };
 
 /// Disk inventory backed by the Windows storage stack.
@@ -305,6 +306,9 @@ fn drive_layout(handle: HANDLE) -> Option<(PartitionTable, String, Vec<RawPartit
     }
     let style = u32_at(&out, 0);
     let count = (u32_at(&out, 4) as usize).min((n - HEADER) / ENTRY);
+    if synthetic_mbr(style, count, u32_at(&out, 8)) {
+        return None;
+    }
     let (scheme, disk_id) = match style {
         STYLE_GPT => (PartitionTable::Gpt, guid_at(&out, 8)),
         STYLE_MBR => (PartitionTable::Mbr, format!("{:08X}", u32_at(&out, 8))),

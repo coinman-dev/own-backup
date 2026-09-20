@@ -318,6 +318,10 @@ pub fn execute_plan(
     // A live system disk never went offline, so there is no transition to make
     // and its volumes were never taken away.
     let mut online = session.as_ref().map(|s| s.is_live_system()).unwrap_or(true);
+    // Was the disk ours alone, from the first sector written to the check? Only
+    // then does a mismatch mean the write did not stick.
+    let held_offline = !online;
+    let mut sectors_verified = false;
 
     for (index, op) in ordered.iter().enumerate() {
         if cancel.is_cancelled() {
@@ -328,6 +332,26 @@ pub fn execute_plan(
 
         // One transition, at the first operation that needs a mounted volume.
         if !online && op.needs_disk_online() {
+            // The last moment the disk is still ours. Everything past this
+            // point — bcdboot, the fallback loader, Windows itself the instant
+            // a volume appears — writes to it, and those writes are not in the
+            // copy: a Recovery partition came back with three blocks changed
+            // and the check called it "запись не легла (проверьте накопитель)"
+            // about a perfectly good disk (2026-09-20). Read it back now.
+            if plan.verify_after && !sectors_verified {
+                run_verification(
+                    plan,
+                    &sidecar,
+                    &ordered,
+                    passphrases,
+                    VerifyPhase::Sectors,
+                    !held_offline,
+                    &mut state,
+                    cancel,
+                    &mut on_update,
+                );
+                sectors_verified = true;
+            }
             if let Some(s) = session.as_mut() {
                 s.update_properties()?;
                 s.bring_online()?;
@@ -380,6 +404,22 @@ pub fn execute_plan(
         on_update(&state);
     }
 
+    // A plan that never needed a mounted volume gets its check here — still
+    // before the disk goes back, for the same reason.
+    if plan.verify_after && !sectors_verified {
+        run_verification(
+            plan,
+            &sidecar,
+            &ordered,
+            passphrases,
+            VerifyPhase::Sectors,
+            !held_offline,
+            &mut state,
+            cancel,
+            &mut on_update,
+        );
+    }
+
     // Bring the disk back before declaring success, so the user sees their
     // volumes rather than a disk that is technically restored and invisible.
     if let Some(s) = session.as_mut() {
@@ -388,8 +428,20 @@ pub fn execute_plan(
     }
     drop(session);
 
+    // Files went INTO a mounted volume, so they can only be checked with the
+    // volume in place — which is now.
     if plan.verify_after {
-        run_verification(plan, &sidecar, &ordered, passphrases, &mut state, cancel, &mut on_update);
+        run_verification(
+            plan,
+            &sidecar,
+            &ordered,
+            passphrases,
+            VerifyPhase::Files,
+            true,
+            &mut state,
+            cancel,
+            &mut on_update,
+        );
     }
 
     state.current = None;
@@ -403,6 +455,20 @@ pub fn execute_plan(
     info!(plan = %plan.id, ops = state.ops.len(), "restore plan finished");
     on_update(&state);
     Ok(state)
+}
+
+/// Which half of the check runs now.
+///
+/// A sector restore is checked against the copy's checksums and wants a disk
+/// nobody has touched since we wrote it — so it runs while the disk is still
+/// offline, before anything can mount a volume. A file restore copied files
+/// INTO a mounted volume and can only be checked with that volume in place, so
+/// it waits until the disk is back.
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VerifyPhase {
+    Sectors,
+    Files,
 }
 
 /// Read back every sector-restored partition and check it against the copy
@@ -421,6 +487,12 @@ fn run_verification(
     sidecar: &own_backup_backup::sidecar::Sidecar,
     ordered: &[RestoreOp],
     passphrases: &std::collections::HashMap<u32, String>,
+    phase: VerifyPhase,
+    // Could anything have written to these partitions after the copy landed?
+    // True only when the disk was never ours to hold offline — a live system
+    // disk. With the disk offline a mismatch means exactly one thing, and
+    // excusing it would be excusing the failure this check exists to find.
+    writes_possible_after_copy: bool,
     state: &mut RestoreRunState,
     cancel: &CancelToken,
     on_update: &mut impl FnMut(&RestoreRunState),
@@ -438,6 +510,14 @@ fn run_verification(
         let index = first + n;
         if index >= state.ops.len() {
             break;
+        }
+        // Not this pass: leave it Pending for the other one, untouched.
+        let belongs_here = match mode {
+            RestoreMode::Files => phase == VerifyPhase::Files,
+            RestoreMode::Sectors => phase == VerifyPhase::Sectors,
+        };
+        if !belongs_here {
+            continue;
         }
         if cancel.is_cancelled() {
             state.ops[index].status = OpStatus::Skipped;
@@ -528,7 +608,11 @@ fn run_verification(
             // blocks differ from the copy BECAUSE the restore changed them, and
             // reporting that as "запись не легла (проверьте накопитель)" sends
             // the user to look for a failing disk that is working perfectly.
-            Ok(v) if v.image_corrupt.is_empty() && touched_after_copy(ordered, dst.index) => {
+            Ok(v)
+                if v.image_corrupt.is_empty()
+                    && writes_possible_after_copy
+                    && touched_after_copy(ordered, dst.index) =>
+            {
                 state.ops[index].status = OpStatus::Done;
                 state.ops[index].percent = 100;
                 state.ops[index].message = format!(
