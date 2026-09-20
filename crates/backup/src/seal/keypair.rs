@@ -329,7 +329,9 @@ fn validate_job_id(job_id: &str) -> Result<()> {
     Ok(())
 }
 
-fn decode_fixed<const N: usize>(value: &str) -> Result<[u8; N]> {
+/// Canonical padded base64 of exactly N bytes; any other length is refused
+/// before decoding, so a longer field cannot smuggle bytes past a size check.
+pub(crate) fn decode_fixed<const N: usize>(value: &str) -> Result<[u8; N]> {
     if value.len() != N.div_ceil(3) * 4 {
         return Err(bad("invalid encoded key-field length"));
     }

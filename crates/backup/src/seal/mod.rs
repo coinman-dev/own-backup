@@ -11,6 +11,7 @@
 pub mod cluster;
 pub mod keypair;
 pub mod local;
+pub mod obk;
 pub mod recovery;
 pub mod wrap;
 

@@ -1,10 +1,11 @@
 # Backup encryption core, version 2
 
-Status: E1 cryptographic records and portable key envelopes. This is **not yet
-the complete qcow2 extension**: the image header, authenticated snapshot index,
-commit protocol, Windows key store and engine integration follow in E2–E4.
-The implementation is in this directory; the product requirements are in
-`.ai/PLAN.md` §7.
+Status: E1 cryptographic records and portable key envelopes, plus the E3
+container — the `.obk` image, its authenticated index and its root record, all
+specified below and implemented in `obk/`. Engine integration, the encrypted
+scratch layer, consolidation and maintenance are E4; the wizard, manual opening
+and the boot medium are E5. The Windows service key store is E2 (`LOCAL.md`).
+The product requirements are in `.ai/PLAN.md` §7.
 
 Version 2 intentionally rejects the unshipped version 1 XTS prototype.
 `SCHEME = "own-backup/v2"`. All binary integers below are unsigned big-endian.
@@ -104,12 +105,11 @@ from the authenticated snapshot index, **not be copied from the same untrusted
 record just to satisfy the API**. This distinguishes a current record from an
 old but valid record at the same guest location.
 
-E3 must authenticate the index, geometry, parent bindings, explicit zeros and
-holes, version ownership, and all pointers used to resolve an image. A forged
-header is never authority for which record belongs at a location. Metadata
-root selection and interrupted commit recovery must also be authenticated.
-Those structures are not implemented by E1, so E1 alone does not provide a
-mountable image or whole-archive rollback protection.
+The index, geometry, parent bindings, explicit zeros and holes, and every
+pointer used to resolve an image are authenticated by the container below. A
+forged header is never authority for which record belongs at a location.
+Whole-archive rollback — replacing every file of a chain with an older, also
+valid set — is still out of scope and needs external trusted state.
 
 ## Wrapped chain key
 
@@ -193,6 +193,133 @@ a tag mismatch alone cannot distinguish those cases.
 Local service authorization, password changes, export and recovery policies
 are outside this portable format. Neither the user's plaintext password nor
 a reusable password-derived key is a scheduler credential.
+
+## The `.obk` container
+
+An encrypted image is a **qcow2 version-3 file** with incompatible feature
+**bit 60** set and a feature name table naming it `own-backup encryption v2`.
+Every other reader must refuse it; `qemu-img info`, `check` and `convert` do,
+by that name. qcow2's own `crypt_method` stays 0 — this is our extension, not
+qcow2 encryption — and internal snapshots, external data files and a header
+length other than 112 are refused. The compression type field says zstd.
+
+Guest data is stored as records (above), packed byte-to-byte and addressed by
+**compressed-cluster L2 descriptors**, whose byte offset and length are exactly
+what a variable-length record needs. That descriptor can address slightly less
+than two clusters, and a record is one cluster plus 100 bytes of framing, so
+the cluster size is at least 4 KiB (`cluster_bits` 12–21; the default stays 16).
+
+File layout, header written last:
+
+```text
+cluster 0     qcow2 header + feature name table + OBKH open header + backing name
+clusters 1..  one sealed Data record per stored guest cluster
+  ...         sealed Index records (chunk ordinal = record index, from 0)
+  ...         sealed Manifest records holding the sealed metadata (index 1..n)
+  ...         the sealed root record (Manifest, index 0)
+  ...         L2 tables, L1 table, refcount blocks, refcount table
+```
+
+Creating an image commits when its header cluster is written: until then the
+first cluster is zeros, so an interrupted image is not a qcow2 file at all.
+Scratch layers, merges and their transactions are E4 and are not covered here.
+
+### Open header (`OBKH`, qcow2 header extension 0x4F424B48)
+
+UTF-8 JSON, at most 32 KiB, rejecting unknown fields. It carries `format`
+(`own-backup-obk`), `scheme`, `chain_id`, `backup_id`, `parent_backup_id`,
+`role`, `created_at`, `virtual_size`, `cluster_bits`, the base64 wrapped chain
+key, the portable private-job-key document, and `root` = the root record's
+`offset`, `len`, `session` and `nonce`.
+
+It exists so a listing can show a backup without any key, and it proves
+nothing: every field is compared with the sealed root record before an image is
+used, and a disagreement refuses the image. The service's local DPAPI envelope
+is never here. The portable envelope is in **every** image of a chain, so a
+different machine needs only the files and a password or the recovery key.
+
+### Root record
+
+Manifest record with logical index 0, payload:
+
+| Offset | Bytes | Field |
+|---|---:|---|
+| 0 | 4 | ASCII `OBKT` |
+| 4 | 2 | Version, 2 |
+| 6 | 1 | Role: Full=1, Incremental=2, Differential=3 |
+| 7 | 1 | Reserved, must be 0 |
+| 8 | 16 | Chain identity |
+| 24 | 16 | Backup identity |
+| 40 | 16 | Parent backup identity, all zero for a full backup |
+| 56 | 8 | Virtual size |
+| 64 | 4 | `cluster_bits` |
+| 68 | 8 | Guest cluster count |
+| 76 | 8 | Clusters this image defines (stored or explicitly zero) |
+| 84 | 8 | Sealed metadata length, decoded, across its chunks |
+| 92 | 4 | Index chunk count |
+| 96 | 4 | Metadata chunk count |
+| 100 | 68 each | Index chunk refs |
+| … | 56 each | Metadata chunk refs |
+
+An index chunk ref is `session[32] || nonce[12] || offset_u64 || len_u32 ||
+entries_u32 || first_cluster_u64`; a metadata chunk ref is the same without the
+last two fields. Metadata chunk *k* is the Manifest record with logical index
+*k+1*, so a chunk cannot be reordered even before its identity is compared.
+
+Decoding checks that the geometry agrees with itself, that a parent is present
+exactly for the roles that have one, that chunk counts and the payload length
+match, that every chunk offset and length could be a record, that index chunks
+are in ascending non-overlapping cluster order, and that the entry counts add
+up to the declared number of defined clusters. Caps: 15 000 index chunks and
+4 096 metadata chunks, both also bounded by the 1 MiB record limit.
+
+### Authenticated index
+
+An Index record's payload is a fixed 53-byte stride, ascending by cluster:
+
+| Offset | Bytes | Field |
+|---|---:|---|
+| 0 | 8 | Guest cluster |
+| 8 | 1 | State: Present=1, Zero=2 |
+| 9 | 32 | Record session identity (zero for Zero) |
+| 41 | 12 | Record nonce (zero for Zero) |
+
+At most 18 000 entries per chunk. A cluster with no entry is **absent**: the
+parent answers, or it reads as zeros in a full backup. A `Zero` entry is an
+explicit zero that overrides the parent and costs no record and no nonce. Zero
+entries must carry an all-zero identity, and a `Present` nonce must be a valid
+counter nonce, or the chunk is refused.
+
+Chunks partition the guest clusters: chunk *k* owns
+`[first_cluster(k), first_cluster(k+1))`, the last one up to the disk's end, and
+an entry outside its chunk's range is refused. Two chunks therefore can never
+answer for one cluster.
+
+### Reading, and what is refused
+
+1. The qcow2 header must be exactly the shape above.
+2. The root record must open under the chain key and agree with the open header
+   on chain, backup and parent identity, role and geometry.
+3. An index chunk must be the record the root named, in the range the root gave
+   it, starting at the cluster the root claims.
+4. A data record must be the record the **index** named, and the L2 entry must
+   agree with the index: absent ↔ unallocated, zero ↔ zero cluster, present ↔ a
+   compressed descriptor holding exactly that record. Any other pairing is an
+   error, never a read.
+
+This is what makes an edited cluster table, a dropped or invented L2 entry, two
+records exchanged inside one image, and a valid record or index chunk spliced in
+from an **older backup of the same chain** all fail instead of returning data.
+Truncation is not promised to be detected as such — cutting the refcount tail
+leaves a perfectly readable image — but it must never change what the image
+reads back.
+
+A chain is opened by following the backing file name and then checking the
+sealed identities: the parent must be the backup this image names, of the same
+chain and geometry; a differential sits directly on a full backup; a
+differential is never a parent; the chain ends at a full backup; and a chain
+that returns to a file it already opened is reported as a loop. One chain key
+opens every image, so an image of another chain cannot be grafted in at all.
 
 ## Recovery code and memory
 

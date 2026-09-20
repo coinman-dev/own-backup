@@ -17,6 +17,7 @@
 
 pub mod consolidate;
 pub mod io;
+pub(crate) mod layout;
 pub mod merge;
 pub mod reader;
 pub mod writer;

@@ -207,6 +207,25 @@ pub fn open_record(
     })
 }
 
+/// Total length of the record starting at `bytes`, taken from its own framing
+/// so a caller that read a rounded-up range can trim to the exact record.
+///
+/// This reads untrusted bytes and proves nothing: `open_record` re-checks every
+/// field it returns, and only the tag decides whether they were ours.
+pub fn framed_len(bytes: &[u8]) -> Result<usize> {
+    if bytes.len() < HEADER_LEN {
+        return Err(bad("encrypted record header truncated"));
+    }
+    if &bytes[..4] != MAGIC || u16::from_be_bytes(array(bytes, 4)) != RECORD_VERSION {
+        return Err(bad("unknown encrypted record format/version"));
+    }
+    let payload_len = u32::from_be_bytes(array(bytes, 36)) as usize;
+    if payload_len > MAX_PAYLOAD_LEN {
+        return Err(bad("encrypted record exceeds the size limit"));
+    }
+    Ok(HEADER_LEN + payload_len + TAG_LEN)
+}
+
 fn validate_lengths(encoding: Encoding, decoded_len: u32, payload_len: usize) -> Result<()> {
     if payload_len > MAX_PAYLOAD_LEN || decoded_len as usize > MAX_PAYLOAD_LEN {
         return Err(bad("encrypted record exceeds the size limit"));
