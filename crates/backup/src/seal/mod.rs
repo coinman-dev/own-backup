@@ -1,39 +1,30 @@
-//! Шифрование копий: ключи, заворачивание, кластеры. Решение — `.ai/PLAN.md` §7.
+//! Cryptographic core for encrypted backups (plan §7).
 //!
-//! Три слоя, снизу вверх:
+//! Records use authenticated AES-256-GCM with independent writer sessions.
+//! X25519 wraps a chain key for a job; portable password/recovery slots protect
+//! the job's private key. Scheduled work additionally needs the local service
+//! key store (E2), never just the public key.
 //!
-//! * [`cluster`] — AES-256-XTS по кластерам qcow2, твик — гостевой индекс
-//!   кластера. Ключ один на всю цепочку: только так кластер, переезжающий при
-//!   объединении из инкремента в базу на то же гостевое место, переносится
-//!   как есть, без ключа. GCM здесь запрещён: один и тот же гостевой кластер
-//!   переписывается в каждом инкременте, и повтор nonce разрушил бы его.
-//! * [`wrap`] — ключ цепочки заворачивается открытым ключом задания (X25519 →
-//!   HKDF-SHA256 → AES-256-GCM, как у `age`). Открытый ключ лежит на машине в
-//!   открытую и умеет только запирать — ночная копия по расписанию обходится им.
-//! * [`keypair`] — пара X25519 задания; закрытый ключ запечатан паролем и,
-//!   вторым слотом, ключом восстановления ([`recovery`]) через Argon2id +
-//!   AES-256-GCM. Запечатанный ключ кладётся в каждый образ, чтобы диск с
-//!   копиями был самодостаточен.
-//!
-//! Ничего из этого не знает о qcow2, манифестах и заданиях: здесь только
-//! байты и ключи, и всё проверяется на Linux. Формат `.obk` — этап Э2.
-//!
-//! Секреты живут в [`zeroize::Zeroizing`]: закрытый ключ, ключ цепочки,
-//! производные ключи. Открытый ключ и отпечаток — нет, они и есть открытые.
+//! See FORMAT.md in this directory for the v2 wire contract. Container indexes,
+//! Windows key storage and engine integration are separate stages.
 
 pub mod cluster;
 pub mod keypair;
+pub mod local;
 pub mod recovery;
 pub mod wrap;
+
+#[cfg(test)]
+mod vectors;
 
 use own_backup_common::{OwnBackupError, Result};
 use zeroize::Zeroizing;
 
 /// Версия схемы. Идёт в `info` каждого HKDF и в файл ключа: сменится схема —
 /// сменится и она, и старые ключи не подойдут к новым байтам по ошибке.
-pub const SCHEME: &str = "own-backup/v1";
+pub const SCHEME: &str = "own-backup/v2";
 
-/// Мастер-ключ цепочки: 32 случайных байта. Из него HKDF выводит ключи XTS и
+/// Мастер-ключ цепочки: 32 случайных байта. Из него HKDF выводит ключи сеансов и
 /// ключ запечатанной части манифеста — сам он ни в одном шифре не участвует.
 #[derive(Clone)]
 pub struct ChainKey(Zeroizing<[u8; 32]>);
@@ -57,7 +48,7 @@ impl ChainKey {
     /// Производный ключ на 32 байта под названным назначением.
     ///
     /// Соль не нужна: мастер-ключ случаен и уникален на цепочку, а назначение
-    /// разводит ключи XTS и манифеста так, что компрометация одного не даёт
+    /// разводит ключи данных и манифеста так, что компрометация одного не даёт
     /// другого.
     pub fn derive(&self, purpose: &str) -> Zeroizing<[u8; 32]> {
         let hk = hkdf::Hkdf::<sha2::Sha256>::new(None, &self.0[..]);
@@ -89,6 +80,46 @@ pub(crate) fn bad(msg: impl std::fmt::Display) -> OwnBackupError {
     OwnBackupError::Config(msg.to_string())
 }
 
+/// Encrypt a bounded plaintext using an isolated, wiped work buffer. The tag
+/// is appended to the returned ciphertext. Callers own nonce uniqueness.
+pub(super) fn aead_seal(
+    key: &[u8; 32],
+    nonce: &[u8; 12],
+    aad: &[u8],
+    plaintext: &[u8],
+) -> Result<Vec<u8>> {
+    use aes_gcm::aead::{AeadInPlace, KeyInit};
+    let cipher = aes_gcm::Aes256Gcm::new(key.into());
+    let mut work = Zeroizing::new(plaintext.to_vec());
+    let tag = cipher
+        .encrypt_in_place_detached(nonce.into(), aad, &mut work)
+        .map_err(|_| bad("AES-GCM encryption failed"))?;
+    let mut sealed = Vec::with_capacity(work.len() + 16);
+    sealed.extend_from_slice(&work);
+    sealed.extend_from_slice(&tag);
+    Ok(sealed)
+}
+
+/// On authentication failure the work buffer is wiped and no plaintext escapes.
+pub(super) fn aead_open(
+    key: &[u8; 32],
+    nonce: &[u8; 12],
+    aad: &[u8],
+    sealed: &[u8],
+) -> Result<Zeroizing<Vec<u8>>> {
+    use aes_gcm::aead::{AeadInPlace, KeyInit};
+    if sealed.len() < 16 {
+        return Err(bad("missing AES-GCM authentication tag"));
+    }
+    let cipher = aes_gcm::Aes256Gcm::new(key.into());
+    let (ciphertext, tag) = sealed.split_at(sealed.len() - 16);
+    let mut work = Zeroizing::new(ciphertext.to_vec());
+    cipher
+        .decrypt_in_place_detached(nonce.into(), aad, &mut work, tag.into())
+        .map_err(|_| bad("authentication failed: wrong key or damaged data"))?;
+    Ok(work)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,11 +130,19 @@ mod tests {
         let b = ChainKey::generate().unwrap();
         assert_ne!(a.as_bytes(), b.as_bytes(), "два вызова — два ключа");
 
-        let xts = a.derive("xts/1");
+        let data = a.derive("data");
         let manifest = a.derive("manifest");
-        assert_ne!(&xts[..], &manifest[..], "назначение разводит ключи");
-        assert_eq!(&a.derive("xts/1")[..], &xts[..], "и при этом вывод детерминирован");
-        assert_ne!(&xts[..], &a.as_bytes()[..], "производный ключ — не сам мастер");
+        assert_ne!(&data[..], &manifest[..], "назначение разводит ключи");
+        assert_eq!(
+            &a.derive("data")[..],
+            &data[..],
+            "и при этом вывод детерминирован"
+        );
+        assert_ne!(
+            &data[..],
+            &a.as_bytes()[..],
+            "производный ключ — не сам мастер"
+        );
     }
 
     #[test]

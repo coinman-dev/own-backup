@@ -3,8 +3,8 @@
 //!
 //! Это второй слот файла ключа ([`super::keypair`]): тот же закрытый ключ,
 //! запечатанный не паролем, а этим числом. Показывается один раз при
-//! создании задания. Потерян вместе с паролем — потеряна цепочка, и мастер
-//! обязан сказать это прямо.
+//! создании задания. Без пароля, этого ключа И доступного локального ключа
+//! службы восстановление невозможно.
 //!
 //! Запись — bech32m: только строчные буквы и цифры без похожих друг на друга
 //! символов (`1`, `b`, `i`, `o` исключены), регистр не важен, и в конце
@@ -12,7 +12,7 @@
 //! молча. Префикс `obkr` говорит, что это за строка, если она найдётся в
 //! чужих бумагах.
 
-use bech32::{Bech32m, Hrp};
+use bech32::{primitives::decode::CheckedHrpstring, Bech32m, Hrp};
 use zeroize::Zeroizing;
 
 use super::{bad, fill_random};
@@ -58,21 +58,32 @@ impl RecoveryKey {
     /// Разобрать то, что ввёл человек: пробелы и регистр не важны, опечатка
     /// ловится контрольной суммой.
     pub fn parse(typed: &str) -> Result<Self> {
-        let compact: String =
-            typed.chars().filter(|c| !c.is_whitespace()).map(|c| c.to_ascii_lowercase()).collect();
-        let (hrp, data) = bech32::decode(&compact)
-            .map_err(|_| bad("ключ восстановления не читается: опечатка или не та строка"))?;
-        if hrp.as_str() != HRP {
-            return Err(bad(format!(
-                "это не ключ восстановления копий: ожидался префикс «{HRP}», а здесь «{}»",
-                hrp.as_str()
-            )));
+        if typed.len() > 256 {
+            return Err(bad("ключ восстановления слишком длинный"));
         }
-        let bytes: [u8; 32] = data
-            .as_slice()
-            .try_into()
-            .map_err(|_| bad(format!("ключ восстановления должен нести 32 байта, а не {}", data.len())))?;
-        Ok(RecoveryKey(Zeroizing::new(bytes)))
+        let compact = Zeroizing::new(
+            typed
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .map(|c| c.to_ascii_lowercase())
+                .collect::<String>(),
+        );
+        let checked = CheckedHrpstring::new::<Bech32m>(&compact)
+            .map_err(|_| bad("ключ восстановления не читается: опечатка или не та строка"))?;
+        if checked.hrp().as_str() != HRP {
+            return Err(bad("это не ключ восстановления копий"));
+        }
+        let data = Zeroizing::new(checked.byte_iter().collect::<Vec<u8>>());
+        if data.len() != 32 {
+            return Err(bad("ключ восстановления должен нести 32 байта"));
+        }
+        let mut bytes = Zeroizing::new([0; 32]);
+        bytes.copy_from_slice(&data);
+        let key = RecoveryKey(bytes);
+        if *key.to_string_plain() != *compact {
+            return Err(bad("неканоническая запись ключа восстановления"));
+        }
+        Ok(key)
     }
 }
 
@@ -102,7 +113,9 @@ mod tests {
         let k = RecoveryKey::generate().unwrap();
         let s = k.to_string_plain();
         assert_eq!(s.len(), 63, "{}", *s);
-        assert!(s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
+        assert!(s
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
     }
 
     #[test]
@@ -129,5 +142,17 @@ mod tests {
     fn it_does_not_print_itself() {
         let k = RecoveryKey::generate().unwrap();
         assert_eq!(format!("{k:?}"), "RecoveryKey(…)");
+    }
+
+    #[test]
+    fn checksum_variant_and_size_are_strict() {
+        let hrp = Hrp::parse(HRP).unwrap();
+        let legacy = bech32::encode::<bech32::Bech32>(hrp, &[7; 32]).unwrap();
+        assert!(RecoveryKey::parse(&legacy).is_err());
+        for len in [0, 1, 31, 33] {
+            let s = bech32::encode::<Bech32m>(hrp, &vec![7; len]).unwrap();
+            assert!(RecoveryKey::parse(&s).is_err());
+        }
+        assert!(RecoveryKey::parse(&" ".repeat(257)).is_err());
     }
 }

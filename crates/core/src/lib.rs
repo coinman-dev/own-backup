@@ -11,6 +11,7 @@
 //! Tauri. Runs are serialized through an mpsc queue processed by one worker,
 //! so a second "run" while a backup is in progress is queued, not rejected.
 
+pub mod backup_encryption;
 pub mod busy;
 pub mod restore_exec;
 
@@ -553,6 +554,10 @@ pub struct Job {
     /// deserialize as vhdx.
     #[serde(default)]
     pub image_format: own_backup_common::types::ImageFormat,
+    /// Portable archive-key envelope and local service authorization reference.
+    /// No password, raw private key or DPAPI blob belongs in the job document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_encryption: Option<backup_encryption::ArchiveEncryption>,
     pub schedule: ScheduleConfig,
     pub scheme: SchemeConfig,
     pub exclusions: ExclusionsConfig,
@@ -576,6 +581,7 @@ impl Default for Job {
             source_disks: Vec::new(),
             dest_folder: String::new(),
             image_format: own_backup_common::types::ImageFormat::default(),
+            archive_encryption: None,
             schedule: ScheduleConfig::default(),
             scheme: SchemeConfig::default(),
             exclusions: ExclusionsConfig::default(),
@@ -676,9 +682,15 @@ impl JobStore {
     /// until the next restart, then gone without a word (audit AUD-08,
     /// reproduced). Now a failed write leaves the store exactly as it was and
     /// the caller is told.
-    pub fn upsert(&self, mut job: Job) -> std::io::Result<Job> {
+    pub fn upsert(&self, job: Job) -> std::io::Result<Job> {
+        self.upsert_inner(job, false)
+    }
+
+    fn upsert_inner(&self, mut job: Job, authorized_encryption: bool) -> std::io::Result<Job> {
         let now = chrono::Utc::now().to_rfc3339();
         let mut jobs = self.jobs.lock().unwrap();
+        let previous = jobs.iter().find(|existing| existing.id == job.id);
+        backup_encryption::validate_update(&mut job, previous, authorized_encryption)?;
         let mut next = jobs.clone();
         if job.id.is_empty() {
             job.id = uuid::Uuid::new_v4().to_string();
@@ -1101,7 +1113,16 @@ pub async fn run_queue_worker(
 
         cancel.store(false, Ordering::SeqCst);
         let last_success = store.last_success(&job.id);
-        let run = perform_backup(&sink, &job, &cancel, last_success, &passwords).await;
+        let run = if let Some(message) = store.archive_encryption_run_error(&job) {
+            // Never let an encrypted job reach the current plaintext writer.
+            let mut run = run_skeleton(&job);
+            run.finished_at = chrono::Utc::now().to_rfc3339();
+            run.status = "error".into();
+            run.error = message;
+            run
+        } else {
+            perform_backup(&sink, &job, &cancel, last_success, &passwords).await
+        };
         if let Err(e) = store.record_run(run.clone()) {
             // The backup happened; only the record of it did not. Saying so is
             // the whole point — the next run plans its chain from this history.

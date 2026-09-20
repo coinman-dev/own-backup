@@ -1,23 +1,11 @@
-//! Пара ключей задания и файл, в котором закрытый ключ лежит запечатанным.
+//! Portable password and recovery slots for a job's private X25519 key.
 //!
-//! У каждого задания своя пара X25519. Открытый ключ живёт на машине в
-//! открытую: им можно только запереть ([`super::wrap`]), и ночной копии по
-//! расписанию его достаточно. Закрытый ключ никогда не лежит в открытом виде —
-//! только запечатанным, в двух слотах: под паролем и под ключом восстановления
-//! ([`super::recovery`]). Каждый слот — Argon2id над секретом → 32 байта →
-//! AES-256-GCM поверх закрытого ключа. Открытый ключ идёт в GCM как
-//! дополнительные данные: подменить его в файле, не зная секрета, нельзя —
-//! слот перестанет открываться.
-//!
-//! Тот же запечатанный файл кладётся в каждый образ (§7.2): диск с копиями,
-//! унесённый от умершей машины, должен открываться одним паролем.
-//!
-//! Файл — JSON: его читают и наш код, и человек, который через год захочет
-//! понять, что это за строки у него в бумагах. Все байты — base64.
+//! The service's local DPAPI envelope is separate and must never be serialized
+//! into this document. Scheduled jobs need that private-key access after reboot.
+//! Every field is bounded before KDF work; slots authenticate their role, KDF
+//! parameters, full recipient key and job identity. See FORMAT.md.
 
-use argon2::{Algorithm, Argon2, Params, Version};
-use aes_gcm::aead::{Aead, KeyInit, Payload};
-use aes_gcm::{Aes256Gcm, Key, Nonce};
+use argon2::{Algorithm, Argon2, Block, Params, Version};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -26,8 +14,13 @@ use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
 use super::recovery::RecoveryKey;
-use super::{bad, fill_random, SCHEME};
+use super::{aead_open, aead_seal, bad, fill_random, SCHEME};
 use own_backup_common::Result;
+
+pub const MAX_KEY_FILE_BYTES: usize = 16 * 1024;
+pub const MAX_JOB_ID_BYTES: usize = 128;
+pub const MAX_PASSWORD_BYTES: usize = 1024;
+pub const KEY_FILE_FORMAT: &str = "own-backup-job-key";
 
 /// Открытый ключ задания. Не секрет: печатается, сравнивается, лежит в образе.
 #[derive(Clone, PartialEq, Eq)]
@@ -42,11 +35,11 @@ impl JobPublicKey {
         &self.0
     }
 
-    /// Первые восемь байт SHA-256 открытого ключа, шестнадцатеричными. Этим
+    /// Полный SHA-256 открытого ключа, шестнадцатеричными. Этим
     /// образ говорит, чей он, а файл ключа — что он тот самый.
     pub fn fingerprint(&self) -> String {
         let h = Sha256::digest(self.0);
-        h[..8].iter().map(|b| format!("{b:02x}")).collect()
+        h.iter().map(|b| format!("{b:02x}")).collect()
     }
 
     pub(super) fn dalek(&self) -> PublicKey {
@@ -64,6 +57,11 @@ impl std::fmt::Debug for JobPublicKey {
 pub struct JobPrivateKey(Zeroizing<[u8; 32]>);
 
 impl JobPrivateKey {
+    /// Only the sibling service-key store can persist this, protected by DPAPI.
+    pub(super) fn storage_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
     pub fn from_bytes(b: [u8; 32]) -> Self {
         JobPrivateKey(Zeroizing::new(b))
     }
@@ -99,48 +97,79 @@ impl JobKeyPair {
     }
 }
 
-/// Параметры Argon2id. Пишутся в файл рядом со слотом, поэтому их можно
-/// менять со временем, не ломая старые ключи.
+/// Argon2id v1.3 parameters, encoded explicitly in each portable slot.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct KdfParams {
     pub algorithm: String,
-    /// Память в КиБ.
     pub m_kib: u32,
-    /// Проходы.
     pub t: u32,
-    /// Параллелизм.
     pub p: u32,
 }
 
 impl KdfParams {
-    /// Боевые параметры: 256 МиБ, три прохода, четыре потока — около секунды
-    /// на этой машине и годы у того, кто перебирает пароль по файлу. Носитель
-    /// с 4 ГБ памяти их тянет.
+    /// Initial production profile; latency must be measured on Windows/WinPE.
     pub fn strong() -> Self {
-        KdfParams { algorithm: "argon2id".into(), m_kib: 256 * 1024, t: 3, p: 4 }
+        Self {
+            algorithm: "argon2id".into(),
+            m_kib: 256 * 1024,
+            t: 3,
+            p: 4,
+        }
     }
 
-    /// Для тестов: та же схема, но мгновенно.
-    pub fn light() -> Self {
-        KdfParams { algorithm: "argon2id".into(), m_kib: 1024, t: 1, p: 1 }
+    #[cfg(test)]
+    fn light() -> Self {
+        Self {
+            algorithm: "argon2id".into(),
+            m_kib: 1024,
+            t: 1,
+            p: 1,
+        }
     }
 
-    fn derive(&self, secret: &[u8], salt: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
+    #[cfg(test)]
+    pub(super) fn test_profile() -> Self {
+        Self::light()
+    }
+
+    fn validate(&self) -> Result<()> {
         if self.algorithm != "argon2id" {
-            return Err(bad(format!("неизвестный KDF в файле ключа: {}", self.algorithm)));
+            return Err(bad("unknown key-file KDF"));
+        }
+        #[cfg(test)]
+        if *self == Self::light() {
+            return Ok(());
+        }
+        if !(64 * 1024..=512 * 1024).contains(&self.m_kib)
+            || !(3..=6).contains(&self.t)
+            || !(1..=8).contains(&self.p)
+            || u64::from(self.m_kib) * u64::from(self.t) > 1536 * 1024
+        {
+            return Err(bad(
+                "Argon2id parameters outside the supported resource/security limits",
+            ));
+        }
+        Ok(())
+    }
+
+    fn derive(&self, secret: &[u8], salt: &[u8; 16]) -> Result<Zeroizing<[u8; 32]>> {
+        self.validate()?;
+        if secret.is_empty() || secret.len() > MAX_PASSWORD_BYTES {
+            return Err(bad("invalid secret length"));
         }
         let params = Params::new(self.m_kib, self.t, self.p, Some(32))
-            .map_err(|e| bad(format!("параметры Argon2id не годятся: {e}")))?;
+            .map_err(|_| bad("invalid Argon2id parameters"))?;
+        let mut memory = Zeroizing::new(vec![Block::default(); params.block_count()]);
         let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-        let mut out = Zeroizing::new([0u8; 32]);
+        let mut out = Zeroizing::new([0; 32]);
         argon
-            .hash_password_into(secret, salt, &mut out[..])
-            .map_err(|e| bad(format!("Argon2id не отработал: {e}")))?;
+            .hash_password_into_with_memory(secret, salt, &mut out[..], &mut memory[..])
+            .map_err(|_| bad("Argon2id key derivation failed"))?;
         Ok(out)
     }
 }
 
-/// Чем открывается слот.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SlotKind {
@@ -148,35 +177,30 @@ pub enum SlotKind {
     Recovery,
 }
 
-/// Один способ открыть закрытый ключ.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Slot {
     pub kind: SlotKind,
     pub kdf: KdfParams,
-    /// 16 байт, base64.
+    /// Canonical padded base64: salt=16, nonce=12, ciphertext+tag=48 bytes.
     pub salt: String,
-    /// 12 байт, base64.
     pub nonce: String,
-    /// 32 байта ключа + 16 байт тега, base64.
     pub sealed: String,
 }
 
-/// Файл ключа задания. То, что лежит в `data_dir` и в каждом образе.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Portable envelope only. Exactly one password and one recovery slot.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SealedPrivateKey {
     pub format: String,
     pub scheme: String,
     pub job_id: String,
-    /// Открытый ключ, base64. Лежит здесь же, чтобы файл был самодостаточен.
     pub public: String,
     pub fingerprint: String,
     pub slots: Vec<Slot>,
 }
 
-pub const KEY_FILE_FORMAT: &str = "own-backup-job-key";
-
 impl SealedPrivateKey {
-    /// Запечатать закрытый ключ паролем и ключом восстановления.
     pub fn seal(
         job_id: &str,
         pair: &JobKeyPair,
@@ -184,11 +208,16 @@ impl SealedPrivateKey {
         recovery: &RecoveryKey,
         kdf: &KdfParams,
     ) -> Result<Self> {
+        validate_job_id(job_id)?;
+        kdf.validate()?;
+        if pair.private.public() != pair.public {
+            return Err(bad("job key pair does not match"));
+        }
         let slots = vec![
-            seal_slot(SlotKind::Password, password.as_bytes(), &pair.public, &pair.private, kdf)?,
-            seal_slot(SlotKind::Recovery, recovery.as_bytes(), &pair.public, &pair.private, kdf)?,
+            seal_slot(job_id, SlotKind::Password, password.as_bytes(), pair, kdf)?,
+            seal_slot(job_id, SlotKind::Recovery, recovery.as_bytes(), pair, kdf)?,
         ];
-        Ok(SealedPrivateKey {
+        Ok(Self {
             format: KEY_FILE_FORMAT.into(),
             scheme: SCHEME.into(),
             job_id: job_id.into(),
@@ -199,14 +228,43 @@ impl SealedPrivateKey {
     }
 
     pub fn public_key(&self) -> Result<JobPublicKey> {
-        let bytes = B64.decode(&self.public).map_err(|_| bad("открытый ключ в файле не base64"))?;
-        let arr: [u8; 32] =
-            bytes.as_slice().try_into().map_err(|_| bad("открытый ключ должен быть 32 байта"))?;
-        let public = JobPublicKey(arr);
-        if public.fingerprint() != self.fingerprint {
-            return Err(bad("отпечаток в файле ключа не сходится с открытым ключом — файл правлен"));
+        let public = JobPublicKey(decode_fixed::<32>(&self.public)?);
+        if self.fingerprint != public.fingerprint() {
+            return Err(bad("отпечаток открытого ключа не совпадает"));
         }
         Ok(public)
+    }
+
+    /// Validate the entire document before doing any expensive work.
+    pub fn validate(&self) -> Result<()> {
+        if self.format != KEY_FILE_FORMAT || self.scheme != SCHEME {
+            return Err(bad("неизвестный формат/версия схемы файла ключа"));
+        }
+        validate_job_id(&self.job_id)?;
+        self.public_key()?;
+        if self.slots.len() != 2
+            || self
+                .slots
+                .iter()
+                .filter(|s| s.kind == SlotKind::Password)
+                .count()
+                != 1
+            || self
+                .slots
+                .iter()
+                .filter(|s| s.kind == SlotKind::Recovery)
+                .count()
+                != 1
+        {
+            return Err(bad("expected one password slot and one recovery slot"));
+        }
+        for slot in &self.slots {
+            slot.kdf.validate()?;
+            decode_fixed::<16>(&slot.salt)?;
+            decode_fixed::<12>(&slot.nonce)?;
+            decode_fixed::<48>(&slot.sealed)?;
+        }
+        Ok(())
     }
 
     pub fn unseal_with_password(&self, password: &str) -> Result<JobPrivateKey> {
@@ -218,78 +276,110 @@ impl SealedPrivateKey {
     }
 
     fn unseal(&self, kind: SlotKind, secret: &[u8]) -> Result<JobPrivateKey> {
-        if self.format != KEY_FILE_FORMAT {
-            return Err(bad(format!("это не файл ключа задания: формат «{}»", self.format)));
-        }
-        if self.scheme != SCHEME {
-            return Err(bad(format!(
-                "файл ключа схемы «{}», а эта программа понимает «{SCHEME}»",
-                self.scheme
-            )));
-        }
+        self.validate()?;
         let public = self.public_key()?;
         let slot = self
             .slots
             .iter()
             .find(|s| s.kind == kind)
-            .ok_or_else(|| bad(format!("в файле ключа нет слота {kind:?}")))?;
-
-        let salt = B64.decode(&slot.salt).map_err(|_| bad("соль слота не base64"))?;
-        let nonce = B64.decode(&slot.nonce).map_err(|_| bad("nonce слота не base64"))?;
-        let sealed = B64.decode(&slot.sealed).map_err(|_| bad("содержимое слота не base64"))?;
-
-        let slot_key = slot.kdf.derive(secret, &salt)?;
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&slot_key[..]));
-        let opened = cipher
-            .decrypt(
-                Nonce::from_slice(&nonce),
-                Payload { msg: &sealed, aad: public.as_bytes() },
-            )
-            .map_err(|_| match kind {
-                // Единственная причина отказа тега при целом файле — не тот
-                // секрет. Говорим это, а не «ошибка расшифровки».
-                SlotKind::Password => bad("пароль не подходит"),
-                SlotKind::Recovery => bad("ключ восстановления не подходит"),
-            })?;
-        let opened = Zeroizing::new(opened);
-        let arr: [u8; 32] = opened
-            .as_slice()
-            .try_into()
-            .map_err(|_| bad("в слоте не 32 байта закрытого ключа — файл повреждён"))?;
-        let private = JobPrivateKey::from_bytes(arr);
-        // Закрытый ключ обязан порождать тот открытый, что записан рядом.
-        // Иначе кто-то подменил слот целиком, вместе с секретом.
+            .ok_or_else(|| bad("missing key slot"))?;
+        let salt = decode_fixed::<16>(&slot.salt)?;
+        let nonce = decode_fixed::<12>(&slot.nonce)?;
+        let sealed = decode_fixed::<48>(&slot.sealed)?;
+        let key = slot.kdf.derive(secret, &salt)?;
+        let aad = slot_aad(&self.job_id, &public, kind, &slot.kdf, &salt, &nonce);
+        let opened = aead_open(&key, &nonce, &aad, &sealed).map_err(|_| match kind {
+            SlotKind::Password => bad("пароль не подходит или файл ключа повреждён"),
+            SlotKind::Recovery => bad("ключ восстановления не подходит или файл ключа повреждён"),
+        })?;
+        let mut bytes = [0; 32];
+        bytes.copy_from_slice(&opened);
+        let private = JobPrivateKey::from_bytes(bytes);
         if private.public() != public {
-            return Err(bad("закрытый ключ из слота не соответствует открытому — файл подменён"));
+            return Err(bad("private key does not match the declared recipient"));
         }
         Ok(private)
     }
 
     pub fn to_json(&self) -> Result<String> {
-        serde_json::to_string_pretty(self).map_err(|e| bad(format!("файл ключа не сериализуется: {e}")))
+        self.validate()?;
+        let json =
+            serde_json::to_string_pretty(self).map_err(|_| bad("cannot serialize key file"))?;
+        if json.len() > MAX_KEY_FILE_BYTES {
+            return Err(bad("key file exceeds the size limit"));
+        }
+        Ok(json)
     }
 
     pub fn from_json(json: &str) -> Result<Self> {
-        serde_json::from_str(json).map_err(|e| bad(format!("это не файл ключа задания: {e}")))
+        if json.len() > MAX_KEY_FILE_BYTES {
+            return Err(bad("key file exceeds the size limit"));
+        }
+        let file: Self = serde_json::from_str(json).map_err(|_| bad("invalid key-file JSON"))?;
+        file.validate()?;
+        Ok(file)
     }
 }
 
+fn validate_job_id(job_id: &str) -> Result<()> {
+    if job_id.is_empty() || job_id.len() > MAX_JOB_ID_BYTES || job_id.chars().any(char::is_control)
+    {
+        return Err(bad("invalid job identity"));
+    }
+    Ok(())
+}
+
+fn decode_fixed<const N: usize>(value: &str) -> Result<[u8; N]> {
+    if value.len() != N.div_ceil(3) * 4 {
+        return Err(bad("invalid encoded key-field length"));
+    }
+    let bytes = B64
+        .decode(value)
+        .map_err(|_| bad("invalid key-field base64"))?;
+    bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| bad("invalid decoded key-field length"))
+}
+
+fn slot_aad(
+    job_id: &str,
+    public: &JobPublicKey,
+    kind: SlotKind,
+    kdf: &KdfParams,
+    salt: &[u8; 16],
+    nonce: &[u8; 12],
+) -> Vec<u8> {
+    let mut aad = b"OBKS\0\x02".to_vec();
+    aad.extend_from_slice(&(job_id.len() as u16).to_be_bytes());
+    aad.extend_from_slice(job_id.as_bytes());
+    aad.extend_from_slice(public.as_bytes());
+    aad.push(match kind {
+        SlotKind::Password => 1,
+        SlotKind::Recovery => 2,
+    });
+    for parameter in [kdf.m_kib, kdf.t, kdf.p] {
+        aad.extend_from_slice(&parameter.to_be_bytes());
+    }
+    aad.extend_from_slice(salt);
+    aad.extend_from_slice(nonce);
+    aad
+}
+
 fn seal_slot(
+    job_id: &str,
     kind: SlotKind,
     secret: &[u8],
-    public: &JobPublicKey,
-    private: &JobPrivateKey,
+    pair: &JobKeyPair,
     kdf: &KdfParams,
 ) -> Result<Slot> {
-    let mut salt = [0u8; 16];
+    let mut salt = [0; 16];
     fill_random(&mut salt)?;
-    let mut nonce = [0u8; 12];
+    let mut nonce = [0; 12];
     fill_random(&mut nonce)?;
-    let slot_key = kdf.derive(secret, &salt)?;
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&slot_key[..]));
-    let sealed = cipher
-        .encrypt(Nonce::from_slice(&nonce), Payload { msg: &private.0[..], aad: public.as_bytes() })
-        .map_err(|_| bad("AES-GCM не запечатал ключ"))?;
+    let key = kdf.derive(secret, &salt)?;
+    let aad = slot_aad(job_id, &pair.public, kind, kdf, &salt, &nonce);
+    let sealed = aead_seal(&key, &nonce, &aad, &pair.private.0[..])?;
     Ok(Slot {
         kind,
         kdf: kdf.clone(),
@@ -306,9 +396,14 @@ mod tests {
     fn sealed() -> (JobKeyPair, RecoveryKey, SealedPrivateKey) {
         let pair = JobKeyPair::generate().unwrap();
         let recovery = RecoveryKey::generate().unwrap();
-        let file =
-            SealedPrivateKey::seal("job-1", &pair, "correct horse", &recovery, &KdfParams::light())
-                .unwrap();
+        let file = SealedPrivateKey::seal(
+            "job-1",
+            &pair,
+            "correct horse",
+            &recovery,
+            &KdfParams::light(),
+        )
+        .unwrap();
         (pair, recovery, file)
     }
 
@@ -351,14 +446,17 @@ mod tests {
         let other = JobKeyPair::generate().unwrap();
         file.public = B64.encode(other.public.as_bytes());
         file.fingerprint = other.public.fingerprint();
-        let err = file.unseal_with_password("correct horse").unwrap_err().to_string();
+        let err = file
+            .unseal_with_password("correct horse")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("не подходит"), "{err}");
     }
 
     #[test]
     fn a_stale_fingerprint_is_caught_before_any_kdf_runs() {
         let (_, _, mut file) = sealed();
-        file.fingerprint = "0000000000000000".into();
+        file.fingerprint = "0".repeat(64);
         let err = file.public_key().unwrap_err().to_string();
         assert!(err.contains("отпечаток"), "{err}");
     }
@@ -367,7 +465,10 @@ mod tests {
     fn a_file_of_another_scheme_is_refused_by_name() {
         let (_, _, mut file) = sealed();
         file.scheme = "own-backup/v0".into();
-        let err = file.unseal_with_password("correct horse").unwrap_err().to_string();
+        let err = file
+            .unseal_with_password("correct horse")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("схемы"), "{err}");
     }
 
@@ -387,5 +488,91 @@ mod tests {
         let pair = JobKeyPair::generate().unwrap();
         assert_eq!(format!("{:?}", pair.private), "JobPrivateKey(…)");
         assert!(format!("{:?}", pair.public).starts_with("JobPublicKey("));
+    }
+
+    #[test]
+    fn malformed_fields_and_resource_bombs_fail_before_kdf() {
+        let (_, _, file) = sealed();
+        let mut bad_files = Vec::new();
+        for size in [0, 1, 11, 13, 32, 1024] {
+            let mut f = file.clone();
+            f.slots[0].nonce = B64.encode(vec![0; size]);
+            bad_files.push(f);
+        }
+        for field in ["salt", "sealed", "public"] {
+            let mut f = file.clone();
+            match field {
+                "salt" => f.slots[0].salt = B64.encode([0; 15]),
+                "sealed" => f.slots[0].sealed = B64.encode([0; 47]),
+                _ => f.public = B64.encode([0; 31]),
+            }
+            bad_files.push(f);
+        }
+        for params in [
+            KdfParams {
+                m_kib: u32::MAX,
+                ..KdfParams::strong()
+            },
+            KdfParams {
+                t: u32::MAX,
+                ..KdfParams::strong()
+            },
+            KdfParams {
+                p: u32::MAX,
+                ..KdfParams::strong()
+            },
+            KdfParams {
+                m_kib: 512 * 1024,
+                t: 6,
+                ..KdfParams::strong()
+            },
+            KdfParams {
+                m_kib: 8,
+                t: 1,
+                p: 1,
+                ..KdfParams::strong()
+            },
+        ] {
+            let mut f = file.clone();
+            f.slots[0].kdf = params;
+            bad_files.push(f);
+        }
+        let mut duplicate = file.clone();
+        duplicate.slots[1].kind = SlotKind::Password;
+        bad_files.push(duplicate);
+        let mut missing = file.clone();
+        missing.slots.pop();
+        bad_files.push(missing);
+        for f in bad_files {
+            assert!(f.unseal_with_password("correct horse").is_err());
+            let json = serde_json::to_string(&f).unwrap();
+            assert!(SealedPrivateKey::from_json(&json).is_err());
+        }
+        assert!(SealedPrivateKey::from_json(&" ".repeat(MAX_KEY_FILE_BYTES + 1)).is_err());
+        let mut unknown = serde_json::to_value(&file).unwrap();
+        unknown["local_dpapi_key"] = "must not be portable".into();
+        assert!(SealedPrivateKey::from_json(&unknown.to_string()).is_err());
+    }
+
+    #[test]
+    fn job_identity_slot_role_and_kdf_parameters_are_authenticated() {
+        let (_, _, file) = sealed();
+        let mut renamed = file.clone();
+        renamed.job_id = "job-2".into();
+        assert!(renamed.unseal_with_password("correct horse").is_err());
+        let mut roles = file.clone();
+        roles.slots[0].kind = SlotKind::Recovery;
+        roles.slots[1].kind = SlotKind::Password;
+        assert!(roles.unseal_with_password("correct horse").is_err());
+        let mut altered = file.clone();
+        altered.slots[0].kdf.t += 1;
+        assert!(altered.unseal_with_password("correct horse").is_err());
+        let pair = JobKeyPair::generate().unwrap();
+        let recovery = RecoveryKey::generate().unwrap();
+        assert!(SealedPrivateKey::seal("", &pair, "pw", &recovery, &KdfParams::light()).is_err());
+        assert!(SealedPrivateKey::seal("j", &pair, "", &recovery, &KdfParams::light()).is_err());
+        assert!(file
+            .unseal_with_password(&"x".repeat(MAX_PASSWORD_BYTES + 1))
+            .is_err());
     }
 }

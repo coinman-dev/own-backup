@@ -9,10 +9,13 @@ own-backup-common = { workspace = true }
 own-backup-snapshot = { workspace = true }
 own-backup-inventory = { workspace = true }
 zstd = { workspace = true }
-# aes-gcm: secrets.rs (secret storage); argon2: luks.rs (LUKS2 key derivation)
-aes-gcm = { workspace = true }
-argon2 = { workspace = true }
-aes = { workspace = true }
+# Volume/secret handling and seal/; wipe cipher/KDF key material on release.
+aes-gcm = { workspace = true, features = ["zeroize"] }
+argon2 = { workspace = true, features = ["zeroize"] }
+aes = { workspace = true, features = ["zeroize"] }
+# Enable wiping throughout AES-GCM's authentication-key implementation.
+ghash = { version = "0.5", features = ["zeroize"] }
+polyval = { version = "0.6", features = ["zeroize"] }
 xts-mode = { workspace = true }
 pbkdf2 = { workspace = true }
 base64 = { workspace = true }
@@ -41,6 +44,7 @@ libc = "0.2"
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_Security_Authorization",
     "Win32_Security_Cryptography",
     "Win32_Storage_FileSystem",
     "Win32_Storage_IscsiDisc",

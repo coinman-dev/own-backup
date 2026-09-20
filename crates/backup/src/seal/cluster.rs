@@ -1,178 +1,455 @@
-//! Шифрование кластеров: AES-256-XTS, твик — гостевой индекс кластера.
+//! Authenticated records for encrypted backups. Contract: seal/FORMAT.md.
 //!
-//! Почему именно так, коротко (полностью — `.ai/PLAN.md` §7.2):
-//!
-//! * **Твик по ГОСТЕВОМУ смещению, не по месту в файле.** При объединении
-//!   цепочки кластер переезжает из инкремента в базу, но гостевое место у него
-//!   то же — значит, и шифротекст тот же, и его можно перенести байт в байт,
-//!   не зная ключа. LUKS внутри qcow2 берёт физическое смещение, и у него это
-//!   невозможно.
-//! * **Длина не меняется.** Кластер шифруется после zstd, каким получился —
-//!   XTS с кражей шифротекста берёт любую длину от 16 байт. Записи L2 со
-//!   сжатыми кластерами хранят длину в байтах и остаются как были.
-//! * **Меньше 16 байт XTS не умеет.** Такой кластер писатель обязан хранить
-//!   несжатым — [`MIN_LEN`] и [`fits`] для этого.
-//! * **Целостности здесь нет — и не должно быть.** GCM с nonce из гостевого
-//!   индекса развалился бы при первом же инкременте, где тот же кластер
-//!   переписан другим содержимым. Целостность даёт манифест: суммы по
-//!   шифротексту (без ключа, от гниения диска) и по открытым данным (с ключом,
-//!   от подмены).
+//! Writers are not cloneable or resumable: opening a writer creates a fresh
+//! random session. Shared writers reserve nonces under a mutex, before encryption
+//! or I/O. Readers require the record identity from an authenticated index; a
+//! valid old record must not silently replace the current one.
 
-use aes::cipher::KeyInit;
-use aes::Aes256;
-use xts_mode::Xts128;
+use std::sync::Mutex;
 
-use super::{bad, ChainKey};
 use own_backup_common::Result;
+use zeroize::Zeroizing;
 
-/// Короче этого XTS не шифрует. Кластер, ужавшийся сильнее, хранится несжатым.
-pub const MIN_LEN: usize = 16;
+use super::{aead_open, aead_seal, bad, fill_random, ChainKey, SCHEME};
 
-/// Годится ли буфер такой длины для шифрования как есть.
-pub fn fits(len: usize) -> bool {
-    len >= MIN_LEN
+pub const RECORD_VERSION: u16 = 2;
+pub const HEADER_LEN: usize = 84;
+pub const TAG_LEN: usize = 16;
+pub const MAX_PAYLOAD_LEN: usize = 1024 * 1024;
+/// Conservative application budgets, not the maximum permitted by GCM.
+pub const MAX_SESSION_RECORDS: u64 = 1 << 20;
+pub const MAX_SESSION_BLOCKS: u64 = 1 << 28;
+const MAGIC: &[u8; 4] = b"OBKR";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Purpose {
+    Data = 1,
+    Manifest = 2,
+    Index = 3,
+    Scratch = 4,
 }
 
-/// Шифр одной цепочки. Дёшево создаётся, ключи внутри — производные от
-/// мастер-ключа, сам мастер сюда не попадает.
-pub struct ClusterCipher {
-    xts: Xts128<Aes256>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Encoding {
+    Raw = 0,
+    Zstd = 1,
 }
 
-impl ClusterCipher {
-    pub fn new(chain: &ChainKey) -> Self {
-        // XTS-256 — это два ключа AES-256: один шифрует данные, другой твик.
-        let k1 = chain.derive("xts/1");
-        let k2 = chain.derive("xts/2");
-        let xts = Xts128::new(Aes256::new((&k1[..]).into()), Aes256::new((&k2[..]).into()));
-        ClusterCipher { xts }
+/// All fields are expected by the caller, not trusted from a record header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecordContext {
+    pub chain_id: [u8; 16],
+    pub purpose: Purpose,
+    /// Guest cluster for Data/Scratch; metadata chunk ordinal otherwise.
+    pub index: u64,
+}
+
+/// This identity must come from the authenticated image index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RecordId {
+    pub session: [u8; 32],
+    pub nonce: [u8; 12],
+}
+
+/// Only ciphertext and public framing; no secret keys.
+pub struct SealedRecord {
+    pub id: RecordId,
+    pub bytes: Vec<u8>,
+}
+
+/// Authenticated, still compressed when encoding == Zstd. The container must
+/// bound decompression to decoded_len and verify the exact resulting size.
+pub struct OpenedRecord {
+    pub encoding: Encoding,
+    pub decoded_len: u32,
+    pub payload: Zeroizing<Vec<u8>>,
+}
+
+struct Session {
+    id: [u8; 32],
+    records: u64,
+    blocks: u64,
+}
+
+impl Session {
+    fn fresh() -> Result<Self> {
+        let mut id = [0; 32];
+        fill_random(&mut id)?;
+        Ok(Self {
+            id,
+            records: 0,
+            blocks: 0,
+        })
+    }
+}
+
+/// A single encryption writer, shared with Arc if concurrent writes are needed.
+/// There is deliberately no Clone, deserialization, or resume-from-session API.
+pub struct RecordWriter {
+    chain: ChainKey,
+    chain_id: [u8; 16],
+    purpose: Purpose,
+    session: Mutex<Session>,
+}
+
+impl RecordWriter {
+    pub fn new(chain: &ChainKey, chain_id: [u8; 16], purpose: Purpose) -> Result<Self> {
+        Ok(Self {
+            chain: chain.clone(),
+            chain_id,
+            purpose,
+            session: Mutex::new(Session::fresh()?),
+        })
     }
 
-    /// Зашифровать кластер на месте. `guest_index` — номер кластера в гостевом
-    /// адресном пространстве (смещение ÷ размер кластера).
-    pub fn encrypt(&self, guest_index: u64, buf: &mut [u8]) -> Result<()> {
-        if !fits(buf.len()) {
-            return Err(bad(format!(
-                "кластер на {} байт короче {MIN_LEN} — такой хранится несжатым",
-                buf.len()
-            )));
+    pub fn seal(
+        &self,
+        index: u64,
+        encoding: Encoding,
+        decoded_len: u32,
+        payload: &[u8],
+    ) -> Result<SealedRecord> {
+        validate_lengths(encoding, decoded_len, payload.len())?;
+        let id = self.reserve(payload.len())?;
+        let context = RecordContext {
+            chain_id: self.chain_id,
+            purpose: self.purpose,
+            index,
+        };
+        let header = header(context, encoding, decoded_len, payload.len() as u32, id);
+        let key = record_key(&self.chain, context, id.session);
+        // A reserved nonce is consumed even if encryption or subsequent I/O fails.
+        let ciphertext = aead_seal(&key, &id.nonce, &header, payload)?;
+        let mut bytes = Vec::with_capacity(HEADER_LEN + ciphertext.len());
+        bytes.extend_from_slice(&header);
+        bytes.extend_from_slice(&ciphertext);
+        Ok(SealedRecord { id, bytes })
+    }
+
+    fn reserve(&self, len: usize) -> Result<RecordId> {
+        self.reserve_with(len, Session::fresh)
+    }
+
+    fn reserve_with(
+        &self,
+        len: usize,
+        fresh: impl FnOnce() -> Result<Session>,
+    ) -> Result<RecordId> {
+        // Include GHASH's padded AAD/ciphertext and final lengths block.
+        let blocks = HEADER_LEN.div_ceil(16) as u64 + len.div_ceil(16) as u64 + 1;
+        let mut session = self
+            .session
+            .lock()
+            .map_err(|_| bad("encryption writer is poisoned"))?;
+        if session.records >= MAX_SESSION_RECORDS || session.blocks + blocks > MAX_SESSION_BLOCKS {
+            // If the RNG fails, the exhausted session stays exhausted.
+            *session = fresh()?;
         }
-        self.xts.encrypt_sector(buf, tweak(guest_index));
-        Ok(())
-    }
-
-    /// Расшифровать кластер на месте под тем же гостевым индексом.
-    pub fn decrypt(&self, guest_index: u64, buf: &mut [u8]) -> Result<()> {
-        if !fits(buf.len()) {
-            return Err(bad(format!(
-                "кластер на {} байт короче {MIN_LEN} — зашифрованным он быть не может",
-                buf.len()
-            )));
-        }
-        self.xts.decrypt_sector(buf, tweak(guest_index));
-        Ok(())
+        let mut nonce = [0; 12];
+        nonce[4..].copy_from_slice(&session.records.to_be_bytes());
+        session.records += 1;
+        session.blocks += blocks;
+        Ok(RecordId {
+            session: session.id,
+            nonce,
+        })
     }
 }
 
-/// Твик как в `plain64`: индекс little-endian в первых восьми байтах, остальное
-/// нули. Та же условность, что у LUKS и у нашего `decrypt.rs`.
-fn tweak(guest_index: u64) -> [u8; 16] {
-    let mut t = [0u8; 16];
-    t[..8].copy_from_slice(&guest_index.to_le_bytes());
-    t
+/// Reject malformed framing and authentication failures without releasing any
+/// plaintext. expected_id prevents replay only when supplied by a trusted index.
+pub fn open_record(
+    chain: &ChainKey,
+    expected: RecordContext,
+    expected_id: RecordId,
+    bytes: &[u8],
+) -> Result<OpenedRecord> {
+    if bytes.len() < HEADER_LEN + TAG_LEN || bytes.len() > HEADER_LEN + MAX_PAYLOAD_LEN + TAG_LEN {
+        return Err(bad("invalid encrypted record length"));
+    }
+    if &bytes[..4] != MAGIC || u16::from_be_bytes(array(bytes, 4)) != RECORD_VERSION {
+        return Err(bad("unknown encrypted record format/version"));
+    }
+    let encoding = match bytes[7] {
+        0 => Encoding::Raw,
+        1 => Encoding::Zstd,
+        _ => return Err(bad("unknown encrypted record encoding")),
+    };
+    let decoded_len = u32::from_be_bytes(array(bytes, 32));
+    let payload_len = u32::from_be_bytes(array(bytes, 36)) as usize;
+    validate_lengths(encoding, decoded_len, payload_len)?;
+    if bytes.len() != HEADER_LEN + payload_len + TAG_LEN {
+        return Err(bad("truncated or trailing encrypted record bytes"));
+    }
+    let id = RecordId {
+        session: array(bytes, 40),
+        nonce: array(bytes, 72),
+    };
+    if id != expected_id
+        || bytes[6] != expected.purpose as u8
+        || array::<16>(bytes, 8) != expected.chain_id
+        || u64::from_be_bytes(array(bytes, 24)) != expected.index
+        || id.nonce[..4] != [0; 4]
+        || u64::from_be_bytes(array(&id.nonce, 4)) >= MAX_SESSION_RECORDS
+    {
+        return Err(bad(
+            "encrypted record does not match its authenticated index",
+        ));
+    }
+    let key = record_key(chain, expected, id.session);
+    let payload = aead_open(&key, &id.nonce, &bytes[..HEADER_LEN], &bytes[HEADER_LEN..])?;
+    Ok(OpenedRecord {
+        encoding,
+        decoded_len,
+        payload,
+    })
+}
+
+fn validate_lengths(encoding: Encoding, decoded_len: u32, payload_len: usize) -> Result<()> {
+    if payload_len > MAX_PAYLOAD_LEN || decoded_len as usize > MAX_PAYLOAD_LEN {
+        return Err(bad("encrypted record exceeds the size limit"));
+    }
+    match encoding {
+        Encoding::Raw if payload_len == decoded_len as usize => Ok(()),
+        Encoding::Zstd if payload_len > 0 && payload_len < decoded_len as usize => Ok(()),
+        _ => Err(bad("invalid encoded/decoded record lengths")),
+    }
+}
+
+fn header(
+    context: RecordContext,
+    encoding: Encoding,
+    decoded_len: u32,
+    payload_len: u32,
+    id: RecordId,
+) -> [u8; HEADER_LEN] {
+    let mut h = [0; HEADER_LEN];
+    h[..4].copy_from_slice(MAGIC);
+    h[4..6].copy_from_slice(&RECORD_VERSION.to_be_bytes());
+    h[6] = context.purpose as u8;
+    h[7] = encoding as u8;
+    h[8..24].copy_from_slice(&context.chain_id);
+    h[24..32].copy_from_slice(&context.index.to_be_bytes());
+    h[32..36].copy_from_slice(&decoded_len.to_be_bytes());
+    h[36..40].copy_from_slice(&payload_len.to_be_bytes());
+    h[40..72].copy_from_slice(&id.session);
+    h[72..84].copy_from_slice(&id.nonce);
+    h
+}
+
+fn record_key(chain: &ChainKey, context: RecordContext, session: [u8; 32]) -> Zeroizing<[u8; 32]> {
+    let mut salt = [0; 48];
+    salt[..16].copy_from_slice(&context.chain_id);
+    salt[16..].copy_from_slice(&session);
+    let hk = hkdf::Hkdf::<sha2::Sha256>::new(Some(&salt), chain.as_bytes());
+    let mut info = format!("{SCHEME}/record/").into_bytes();
+    info.push(context.purpose as u8);
+    let mut out = Zeroizing::new([0; 32]);
+    hk.expand(&info, &mut out[..])
+        .expect("fixed HKDF output size");
+    out
+}
+
+/// Internal only; every caller has already checked the enclosing fixed size.
+fn array<const N: usize>(bytes: &[u8], at: usize) -> [u8; N] {
+    let mut out = [0; N];
+    out.copy_from_slice(&bytes[at..at + N]);
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
+    use std::sync::Arc;
 
-    fn cipher() -> ClusterCipher {
-        ClusterCipher::new(&ChainKey::from_bytes([0x42; 32]))
+    fn context() -> RecordContext {
+        RecordContext {
+            chain_id: [7; 16],
+            purpose: Purpose::Data,
+            index: 55,
+        }
+    }
+
+    fn writer(key: &ChainKey) -> RecordWriter {
+        RecordWriter::new(key, context().chain_id, context().purpose).unwrap()
     }
 
     #[test]
-    fn a_cluster_comes_back_whole() {
-        let c = cipher();
-        let plain: Vec<u8> = (0..65536u32).map(|i| (i * 7 % 251) as u8).collect();
-        let mut buf = plain.clone();
-        c.encrypt(1234, &mut buf).unwrap();
-        assert_ne!(buf, plain, "шифротекст отличается от открытого");
-        c.decrypt(1234, &mut buf).unwrap();
-        assert_eq!(buf, plain);
+    fn raw_and_compressed_records_round_trip_including_short_and_tail_data() {
+        let key = ChainKey::generate().unwrap();
+        let writer = writer(&key);
+        for len in [0, 1, 15, 17, 4096, 65535, MAX_PAYLOAD_LEN] {
+            let plain = vec![42; len];
+            let record = writer.seal(55, Encoding::Raw, len as u32, &plain).unwrap();
+            assert_eq!(record.bytes.len(), HEADER_LEN + len + TAG_LEN);
+            let opened = open_record(&key, context(), record.id, &record.bytes).unwrap();
+            assert_eq!(&*opened.payload, &plain);
+        }
+        let plain = vec![42; 65536];
+        let compressed = zstd::bulk::compress(&plain, 3).unwrap();
+        let record = writer
+            .seal(55, Encoding::Zstd, plain.len() as u32, &compressed)
+            .unwrap();
+        let opened = open_record(&key, context(), record.id, &record.bytes).unwrap();
+        assert_eq!(opened.encoding, Encoding::Zstd);
+        assert_eq!(
+            zstd::bulk::decompress(&opened.payload, opened.decoded_len as usize).unwrap(),
+            plain
+        );
     }
 
-    /// Ради этого выбран XTS с гостевым твиком: объединение переносит кластер
-    /// на то же гостевое место, и шифротекст должен совпасть байт в байт.
     #[test]
-    fn the_same_cluster_at_the_same_guest_place_encrypts_identically() {
-        let c = cipher();
-        let plain = vec![0xA5u8; 4096];
-        let mut a = plain.clone();
-        let mut b = plain.clone();
-        c.encrypt(77, &mut a).unwrap();
-        c.encrypt(77, &mut b).unwrap();
-        assert_eq!(a, b, "перенос как есть возможен только при равенстве");
+    fn every_header_ciphertext_and_tag_byte_is_protected() {
+        let key = ChainKey::generate().unwrap();
+        let record = writer(&key).seal(55, Encoding::Raw, 20, &[3; 20]).unwrap();
+        for at in 0..record.bytes.len() {
+            let mut broken = record.bytes.clone();
+            broken[at] ^= 1;
+            assert!(
+                open_record(&key, context(), record.id, &broken).is_err(),
+                "byte {at}"
+            );
+        }
+        for len in 0..record.bytes.len() {
+            assert!(open_record(&key, context(), record.id, &record.bytes[..len]).is_err());
+        }
+        let mut trailing = record.bytes.clone();
+        trailing.push(0);
+        assert!(open_record(&key, context(), record.id, &trailing).is_err());
+        assert!(open_record(
+            &ChainKey::generate().unwrap(),
+            context(),
+            record.id,
+            &record.bytes
+        )
+        .is_err());
     }
 
-    /// А на другом месте — другой шифротекст: одинаковые блоки диска не
-    /// выдают друг друга.
     #[test]
-    fn a_different_guest_place_gives_a_different_ciphertext() {
-        let c = cipher();
-        let plain = vec![0xA5u8; 4096];
-        let mut a = plain.clone();
-        let mut b = plain.clone();
-        c.encrypt(77, &mut a).unwrap();
-        c.encrypt(78, &mut b).unwrap();
-        assert_ne!(a, b);
+    fn wrong_context_and_old_valid_record_are_rejected() {
+        let key = ChainKey::generate().unwrap();
+        let writer = writer(&key);
+        let old = writer.seal(55, Encoding::Raw, 1, &[1]).unwrap();
+        let new = writer.seal(55, Encoding::Raw, 1, &[2]).unwrap();
+        assert!(open_record(&key, context(), new.id, &old.bytes).is_err());
+        for wrong in [
+            RecordContext {
+                index: 56,
+                ..context()
+            },
+            RecordContext {
+                chain_id: [9; 16],
+                ..context()
+            },
+            RecordContext {
+                purpose: Purpose::Scratch,
+                ..context()
+            },
+        ] {
+            assert!(open_record(&key, wrong, new.id, &new.bytes).is_err());
+        }
+        // Copying a complete record to a new physical location changes nothing.
+        let moved = new.bytes.clone();
+        assert_eq!(
+            &*open_record(&key, context(), new.id, &moved)
+                .unwrap()
+                .payload,
+            &[2]
+        );
     }
 
-    /// Перепутанный индекс при чтении даёт мусор, а не открытые данные —
-    /// значит, читатель обязан знать гостевое место, и это защищает от
-    /// подстановки кластера не туда.
     #[test]
-    fn decrypting_under_the_wrong_index_yields_rubbish() {
-        let c = cipher();
-        let plain = vec![0x11u8; 4096];
-        let mut buf = plain.clone();
-        c.encrypt(5, &mut buf).unwrap();
-        c.decrypt(6, &mut buf).unwrap();
-        assert_ne!(buf, plain);
+    fn concurrent_writes_and_new_writers_never_reuse_record_ids() {
+        let key = ChainKey::generate().unwrap();
+        let writer = Arc::new(writer(&key));
+        let mut ids = HashSet::new();
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    let writer = Arc::clone(&writer);
+                    scope.spawn(move || {
+                        (0..64)
+                            .map(|_| writer.seal(55, Encoding::Raw, 1, &[1]).unwrap())
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            for handle in handles {
+                for record in handle.join().unwrap() {
+                    assert!(ids.insert(record.id));
+                    open_record(&key, context(), record.id, &record.bytes).unwrap();
+                }
+            }
+        });
+        let reopened = RecordWriter::new(&key, context().chain_id, Purpose::Data).unwrap();
+        let new = reopened.seal(55, Encoding::Raw, 1, &[1]).unwrap();
+        assert!(!ids.iter().any(|id| id.session == new.id.session));
+        // An abandoned reservation (failed/cancelled I/O) is never reclaimed.
+        let burned = writer.reserve(1).unwrap();
+        let next = writer.seal(55, Encoding::Raw, 1, &[1]).unwrap();
+        assert_ne!(burned, next.id);
     }
 
-    /// Сжатый кластер имеет произвольную длину — XTS с кражей шифротекста
-    /// обязан брать её без выравнивания и без изменения длины.
     #[test]
-    fn odd_lengths_keep_their_length_and_round_trip() {
-        let c = cipher();
-        for len in [16usize, 17, 31, 33, 1000, 65535] {
-            let plain: Vec<u8> = (0..len).map(|i| (i % 253) as u8).collect();
-            let mut buf = plain.clone();
-            c.encrypt(9, &mut buf).unwrap();
-            assert_eq!(buf.len(), len, "длина {len} не должна меняться");
-            c.decrypt(9, &mut buf).unwrap();
-            assert_eq!(buf, plain, "длина {len}");
+    fn both_session_budgets_rotate_before_reuse() {
+        let key = ChainKey::generate().unwrap();
+        let writer = writer(&key);
+        for records_limit in [true, false] {
+            let old = writer.seal(55, Encoding::Raw, 1, &[1]).unwrap();
+            {
+                let mut session = writer.session.lock().unwrap();
+                if records_limit {
+                    session.records = MAX_SESSION_RECORDS;
+                } else {
+                    session.blocks = MAX_SESSION_BLOCKS;
+                }
+            }
+            let new = writer.seal(55, Encoding::Raw, 1, &[2]).unwrap();
+            assert_ne!(old.id.session, new.id.session);
+            assert_eq!(new.id.nonce, [0; 12]);
+            open_record(&key, context(), old.id, &old.bytes).unwrap();
+            open_record(&key, context(), new.id, &new.bytes).unwrap();
         }
     }
 
     #[test]
-    fn shorter_than_a_block_is_refused_rather_than_padded() {
-        let c = cipher();
-        let mut buf = vec![1u8; 15];
-        assert!(c.encrypt(0, &mut buf).is_err());
-        assert!(c.decrypt(0, &mut buf).is_err());
-        assert!(!fits(15));
-        assert!(fits(16));
+    fn malformed_lengths_are_rejected_before_decryption_or_allocation() {
+        let key = ChainKey::generate().unwrap();
+        let writer = writer(&key);
+        assert!(writer.seal(55, Encoding::Raw, 2, &[1]).is_err());
+        assert!(writer.seal(55, Encoding::Zstd, 2, &[]).is_err());
+        assert!(writer.seal(55, Encoding::Zstd, 2, &[1, 2]).is_err());
+        assert!(writer.seal(55, Encoding::Raw, u32::MAX, &[1]).is_err());
+        let record = writer.seal(55, Encoding::Raw, 1, &[1]).unwrap();
+        for at in [32, 36] {
+            let mut bytes = record.bytes.clone();
+            bytes[at..at + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+            assert!(open_record(&key, context(), record.id, &bytes).is_err());
+        }
     }
 
     #[test]
-    fn a_different_chain_key_cannot_read_it() {
-        let a = ClusterCipher::new(&ChainKey::from_bytes([1u8; 32]));
-        let b = ClusterCipher::new(&ChainKey::from_bytes([2u8; 32]));
-        let plain = vec![0x33u8; 512];
-        let mut buf = plain.clone();
-        a.encrypt(3, &mut buf).unwrap();
-        b.decrypt(3, &mut buf).unwrap();
-        assert_ne!(buf, plain);
+    fn rng_failure_does_not_reset_an_exhausted_session() {
+        let key = ChainKey::generate().unwrap();
+        let writer = writer(&key);
+        let original_session = {
+            let mut session = writer.session.lock().unwrap();
+            session.records = MAX_SESSION_RECORDS;
+            session.id
+        };
+        assert!(writer
+            .reserve_with(1, || Err(bad("injected RNG failure")))
+            .is_err());
+        {
+            let session = writer.session.lock().unwrap();
+            assert_eq!(session.id, original_session);
+            assert_eq!(session.records, MAX_SESSION_RECORDS);
+        }
+        let resumed = writer.seal(55, Encoding::Raw, 1, &[1]).unwrap();
+        assert_ne!(resumed.id.session, original_session);
+        open_record(&key, context(), resumed.id, &resumed.bytes).unwrap();
     }
 }

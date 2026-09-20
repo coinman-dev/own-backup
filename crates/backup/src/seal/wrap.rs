@@ -1,65 +1,57 @@
-//! Заворачивание ключа цепочки открытым ключом задания.
+//! Portable wrapping of a chain key for a job's X25519 public key.
 //!
-//! Схема — та же, что у `age` для получателя X25519, и по той же причине: она
-//! маленькая, разобранная и делает ровно одно.
-//!
-//! ```text
-//! эфемерная пара (e, E) — новая на каждую копию
-//! общий секрет   = X25519(e, P)            P — открытый ключ задания
-//! соль           = E ‖ P
-//! ключ обёртки   = HKDF-SHA256(общий, соль, info = "own-backup/v1/wrap")
-//! обёртка        = AES-256-GCM(ключ обёртки, nonce = 0, ключ цепочки, aad = отпечаток P)
-//! в образ        = E ‖ обёртка              32 + 48 байт
-//! ```
-//!
-//! Nonce нулевой намеренно: ключ обёртки уникален на каждую эфемерную пару,
-//! и повтора nonce под одним ключом не бывает. Отпечаток в `aad` привязывает
-//! обёртку к получателю: под другим ключом тег не сойдётся.
-//!
-//! Развернуть может только закрытый ключ задания. На машине, где идёт копия
-//! по расписанию, его нет в открытом виде — только запечатанный
-//! ([`super::keypair`]), и это вся суть §7.
+//! Each wrap uses a fresh ephemeral key, HKDF-SHA256 and AES-256-GCM. The
+//! complete recipient key, chain identity and version are authenticated.
+//! The service needs its protected PRIVATE job key to reopen an existing chain.
+//! This is our versioned envelope, not an interoperable age file.
 
-use aes_gcm::aead::{Aead, KeyInit, Payload};
-use aes_gcm::{Aes256Gcm, Key, Nonce};
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
 use super::keypair::{JobPrivateKey, JobPublicKey};
-use super::{bad, fill_random, ChainKey, SCHEME};
+use super::{aead_open, aead_seal, bad, fill_random, ChainKey, SCHEME};
 use own_backup_common::Result;
 
-/// Завёрнутый ключ цепочки, как он лежит в открытой части манифеста.
+const PREFIX: &[u8; 6] = b"OBKW\0\x02";
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct WrappedChainKey {
-    /// Эфемерный открытый ключ E.
+    pub chain_id: [u8; 16],
     pub ephemeral: [u8; 32],
-    /// 32 байта ключа + 16 байт тега.
     pub sealed: [u8; 48],
 }
 
 impl WrappedChainKey {
-    pub const LEN: usize = 80;
+    pub const LEN: usize = 102;
 
     pub fn to_bytes(&self) -> [u8; Self::LEN] {
-        let mut out = [0u8; Self::LEN];
-        out[..32].copy_from_slice(&self.ephemeral);
-        out[32..].copy_from_slice(&self.sealed);
+        let mut out = [0; Self::LEN];
+        out[..6].copy_from_slice(PREFIX);
+        out[6..22].copy_from_slice(&self.chain_id);
+        out[22..54].copy_from_slice(&self.ephemeral);
+        out[54..].copy_from_slice(&self.sealed);
         out
     }
 
-    pub fn from_bytes(b: &[u8]) -> Result<Self> {
-        if b.len() != Self::LEN {
-            return Err(bad(format!(
-                "завёрнутый ключ цепочки должен быть {} байт, а не {}",
-                Self::LEN,
-                b.len()
-            )));
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() != Self::LEN || &bytes[..6] != PREFIX {
+            return Err(bad("invalid wrapped chain key format/version/length"));
         }
-        let mut w = WrappedChainKey { ephemeral: [0; 32], sealed: [0; 48] };
-        w.ephemeral.copy_from_slice(&b[..32]);
-        w.sealed.copy_from_slice(&b[32..]);
-        Ok(w)
+        let mut out = Self {
+            chain_id: [0; 16],
+            ephemeral: [0; 32],
+            sealed: [0; 48],
+        };
+        out.chain_id.copy_from_slice(&bytes[6..22]);
+        out.ephemeral.copy_from_slice(&bytes[22..54]);
+        out.sealed.copy_from_slice(&bytes[54..]);
+        Ok(out)
+    }
+
+    fn aad(&self, recipient: &JobPublicKey) -> Vec<u8> {
+        let mut aad = self.to_bytes()[..54].to_vec();
+        aad.extend_from_slice(recipient.as_bytes());
+        aad
     }
 }
 
@@ -69,66 +61,71 @@ impl std::fmt::Debug for WrappedChainKey {
     }
 }
 
-/// Завернуть ключ цепочки для задания. Нужен только открытый ключ.
-pub fn wrap_chain_key(recipient: &JobPublicKey, chain: &ChainKey) -> Result<WrappedChainKey> {
-    let mut raw = Zeroizing::new([0u8; 32]);
+pub fn wrap_chain_key(
+    recipient: &JobPublicKey,
+    chain_id: &[u8; 16],
+    chain: &ChainKey,
+) -> Result<WrappedChainKey> {
+    let mut raw = Zeroizing::new([0; 32]);
     fill_random(&mut raw[..])?;
     let ephemeral = StaticSecret::from(*raw);
     let ephemeral_public = PublicKey::from(&ephemeral);
-
     let shared = ephemeral.diffie_hellman(&recipient.dalek());
-    let wrap_key = wrap_key(shared.as_bytes(), ephemeral_public.as_bytes(), recipient)?;
-
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&wrap_key[..]));
-    let sealed = cipher
-        .encrypt(
-            Nonce::from_slice(&[0u8; 12]),
-            Payload { msg: &chain.as_bytes()[..], aad: recipient.fingerprint().as_bytes() },
-        )
-        .map_err(|_| bad("AES-GCM не завернул ключ цепочки"))?;
-    let mut w = WrappedChainKey { ephemeral: *ephemeral_public.as_bytes(), sealed: [0; 48] };
-    w.sealed.copy_from_slice(&sealed);
-    Ok(w)
-}
-
-/// Развернуть ключ цепочки закрытым ключом задания.
-pub fn unwrap_chain_key(private: &JobPrivateKey, wrapped: &WrappedChainKey) -> Result<ChainKey> {
-    let recipient = private.public();
-    let shared = private.dalek().diffie_hellman(&PublicKey::from(wrapped.ephemeral));
-    let wrap_key = wrap_key(shared.as_bytes(), &wrapped.ephemeral, &recipient)?;
-
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&wrap_key[..]));
-    let opened = cipher
-        .decrypt(
-            Nonce::from_slice(&[0u8; 12]),
-            Payload { msg: &wrapped.sealed[..], aad: recipient.fingerprint().as_bytes() },
-        )
-        // При целых байтах тег не сходится ровно в одном случае: копия
-        // завёрнута для другого задания.
-        .map_err(|_| bad("эта копия завёрнута для другого ключа — не того задания"))?;
-    let opened = Zeroizing::new(opened);
-    let arr: [u8; 32] = opened
-        .as_slice()
-        .try_into()
-        .map_err(|_| bad("в обёртке не 32 байта ключа цепочки — образ повреждён"))?;
-    Ok(ChainKey::from_bytes(arr))
-}
-
-fn wrap_key(shared: &[u8; 32], ephemeral_public: &[u8; 32], recipient: &JobPublicKey) -> Result<Zeroizing<[u8; 32]>> {
-    // Точка низкого порядка на чужом открытом ключе даёт нулевой общий
-    // секрет — то есть ключ обёртки, известный всем. Такой ключ задания
-    // не принимаем.
-    if shared.iter().all(|&b| b == 0) {
-        return Err(bad("открытый ключ задания негоден: общий секрет вырожден"));
+    if !shared.was_contributory() {
+        return Err(bad(
+            "invalid X25519 recipient: non-contributory shared secret",
+        ));
     }
-    let mut salt = [0u8; 64];
+    let key = wrap_key(shared.as_bytes(), ephemeral_public.as_bytes(), recipient);
+    let mut wrapped = WrappedChainKey {
+        chain_id: *chain_id,
+        ephemeral: *ephemeral_public.as_bytes(),
+        sealed: [0; 48],
+    };
+    // This key is used for exactly one encryption, with a fresh ephemeral
+    // secret every time. A fixed nonce is safe for this single-use wrap key.
+    let sealed = aead_seal(&key, &[0; 12], &wrapped.aad(recipient), chain.as_bytes())?;
+    wrapped.sealed.copy_from_slice(&sealed);
+    Ok(wrapped)
+}
+
+pub fn unwrap_chain_key(
+    private: &JobPrivateKey,
+    expected_chain: &[u8; 16],
+    wrapped: &WrappedChainKey,
+) -> Result<ChainKey> {
+    if &wrapped.chain_id != expected_chain {
+        return Err(bad("wrapped key belongs to another chain"));
+    }
+    let recipient = private.public();
+    let shared = private
+        .dalek()
+        .diffie_hellman(&PublicKey::from(wrapped.ephemeral));
+    if !shared.was_contributory() {
+        return Err(bad(
+            "invalid X25519 ephemeral key: non-contributory shared secret",
+        ));
+    }
+    let key = wrap_key(shared.as_bytes(), &wrapped.ephemeral, &recipient);
+    let opened = aead_open(&key, &[0; 12], &wrapped.aad(&recipient), &wrapped.sealed)?;
+    let mut bytes = [0; 32];
+    bytes.copy_from_slice(&opened);
+    Ok(ChainKey::from_bytes(bytes))
+}
+
+fn wrap_key(
+    shared: &[u8; 32],
+    ephemeral_public: &[u8; 32],
+    recipient: &JobPublicKey,
+) -> Zeroizing<[u8; 32]> {
+    let mut salt = [0; 64];
     salt[..32].copy_from_slice(ephemeral_public);
     salt[32..].copy_from_slice(recipient.as_bytes());
     let hk = hkdf::Hkdf::<sha2::Sha256>::new(Some(&salt), shared);
-    let mut out = Zeroizing::new([0u8; 32]);
-    let info = format!("{SCHEME}/wrap");
-    hk.expand(info.as_bytes(), &mut out[..]).expect("32 байта — в пределах HKDF");
-    Ok(out)
+    let mut out = Zeroizing::new([0; 32]);
+    hk.expand(format!("{SCHEME}/wrap").as_bytes(), &mut out[..])
+        .expect("fixed HKDF output size");
+    out
 }
 
 #[cfg(test)]
@@ -140,19 +137,21 @@ mod tests {
     fn the_chain_key_comes_back_only_with_the_private_key() {
         let pair = JobKeyPair::generate().unwrap();
         let chain = ChainKey::generate().unwrap();
-        let wrapped = wrap_chain_key(&pair.public, &chain).unwrap();
-        let back = unwrap_chain_key(&pair.private, &wrapped).unwrap();
+        let wrapped = wrap_chain_key(&pair.public, &[7; 16], &chain).unwrap();
+        let back = unwrap_chain_key(&pair.private, &[7; 16], &wrapped).unwrap();
         assert_eq!(back.as_bytes(), chain.as_bytes());
     }
 
     #[test]
-    fn another_jobs_key_is_told_apart_from_a_broken_file() {
+    fn wrong_key_or_damaged_file_is_rejected() {
         let pair = JobKeyPair::generate().unwrap();
         let other = JobKeyPair::generate().unwrap();
         let chain = ChainKey::generate().unwrap();
-        let wrapped = wrap_chain_key(&pair.public, &chain).unwrap();
-        let err = unwrap_chain_key(&other.private, &wrapped).unwrap_err().to_string();
-        assert!(err.contains("другого ключа"), "{err}");
+        let wrapped = wrap_chain_key(&pair.public, &[7; 16], &chain).unwrap();
+        let err = unwrap_chain_key(&other.private, &[7; 16], &wrapped)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("authentication failed"), "{err}");
     }
 
     #[test]
@@ -161,32 +160,68 @@ mod tests {
         // у них один ключ цепочки.
         let pair = JobKeyPair::generate().unwrap();
         let chain = ChainKey::generate().unwrap();
-        let a = wrap_chain_key(&pair.public, &chain).unwrap();
-        let b = wrap_chain_key(&pair.public, &chain).unwrap();
+        let a = wrap_chain_key(&pair.public, &[7; 16], &chain).unwrap();
+        let b = wrap_chain_key(&pair.public, &[7; 16], &chain).unwrap();
         assert_ne!(a.ephemeral, b.ephemeral);
         assert_ne!(a.sealed, b.sealed);
-        assert_eq!(unwrap_chain_key(&pair.private, &a).unwrap().as_bytes(), chain.as_bytes());
-        assert_eq!(unwrap_chain_key(&pair.private, &b).unwrap().as_bytes(), chain.as_bytes());
+        assert_eq!(
+            unwrap_chain_key(&pair.private, &[7; 16], &a)
+                .unwrap()
+                .as_bytes(),
+            chain.as_bytes()
+        );
+        assert_eq!(
+            unwrap_chain_key(&pair.private, &[7; 16], &b)
+                .unwrap()
+                .as_bytes(),
+            chain.as_bytes()
+        );
     }
 
     #[test]
-    fn the_wrapped_form_is_eighty_bytes_and_round_trips() {
+    fn the_versioned_wrapped_form_round_trips() {
         let pair = JobKeyPair::generate().unwrap();
         let chain = ChainKey::generate().unwrap();
-        let w = wrap_chain_key(&pair.public, &chain).unwrap();
+        let w = wrap_chain_key(&pair.public, &[7; 16], &chain).unwrap();
         let bytes = w.to_bytes();
         assert_eq!(bytes.len(), WrappedChainKey::LEN);
         assert_eq!(WrappedChainKey::from_bytes(&bytes).unwrap(), w);
-        assert!(WrappedChainKey::from_bytes(&bytes[..79]).is_err());
+        assert!(WrappedChainKey::from_bytes(&bytes[..WrappedChainKey::LEN - 1]).is_err());
     }
 
     #[test]
     fn a_flipped_byte_in_the_wrap_is_refused() {
         let pair = JobKeyPair::generate().unwrap();
         let chain = ChainKey::generate().unwrap();
-        let mut w = wrap_chain_key(&pair.public, &chain).unwrap();
+        let mut w = wrap_chain_key(&pair.public, &[7; 16], &chain).unwrap();
         w.sealed[5] ^= 0x80;
-        assert!(unwrap_chain_key(&pair.private, &w).is_err());
+        assert!(unwrap_chain_key(&pair.private, &[7; 16], &w).is_err());
+    }
+
+    #[test]
+    fn chain_binding_versions_and_low_order_keys_are_checked() {
+        let pair = JobKeyPair::generate().unwrap();
+        let chain = ChainKey::generate().unwrap();
+        let wrapped = wrap_chain_key(&pair.public, &[7; 16], &chain).unwrap();
+        assert!(unwrap_chain_key(&pair.private, &[8; 16], &wrapped).is_err());
+        let mut renamed = wrapped.clone();
+        renamed.chain_id = [8; 16];
+        assert!(unwrap_chain_key(&pair.private, &[8; 16], &renamed).is_err());
+        for value in [0, 1] {
+            let mut low = [0; 32];
+            low[0] = value;
+            assert!(wrap_chain_key(&JobPublicKey::from_bytes(low), &[7; 16], &chain).is_err());
+            let mut altered = wrapped.clone();
+            altered.ephemeral = low;
+            assert!(unwrap_chain_key(&pair.private, &[7; 16], &altered).is_err());
+        }
+        let bytes = wrapped.to_bytes();
+        for len in 0..bytes.len() {
+            assert!(WrappedChainKey::from_bytes(&bytes[..len]).is_err());
+        }
+        let mut unknown = bytes;
+        unknown[5] = 1;
+        assert!(WrappedChainKey::from_bytes(&unknown).is_err());
     }
 
     /// RFC 7748 §6.1: известные ключи Алисы и Боба дают известный общий
