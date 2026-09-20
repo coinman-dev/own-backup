@@ -457,6 +457,42 @@ pub fn winpeshl_ini(app_dir: &str) -> String {
     lines(&["[LaunchApps]", &format!("\"{app_dir}\\own-backup-shell.exe\"")])
 }
 
+/// `no-interface.cmd` — то, что человек ВИДИТ, когда интерфейса не будет.
+///
+/// Печатать диагноз в консоль запускателя бессмысленно: рабочий стол носителя
+/// запускает `start-media.cmd` через `cmd.exe` с `CREATE_NO_WINDOW`, и этой
+/// консоли на экране нет. Проверено 2026-09-20: с переименованной папкой
+/// WebView2 человек получал пустой стол — ни окна, ни текста, ни намёка, что
+/// делать. Поэтому неудача открывает СВОЁ окно и оставляет его открытым
+/// (`cmd /k`): в нём повторяется разбор окружения и сказано, что командная
+/// строка делает всю работу целиком.
+pub fn no_interface_cmd(app_dir: &str) -> String {
+    let cli = format!("{app_dir}\\own-backup-cli.exe");
+    lines(&[
+        "@echo off",
+        "rem UTF-8 first: everything this window is here to show - the checks and",
+        "rem their advice - comes out of our own program in Russian, and the",
+        "rem console's default codepage would turn it into rubbish. The script's",
+        "rem own lines stay ASCII, so they read the same either way.",
+        "chcp 65001 >nul 2>&1",
+        "title My Own Backup - interface not started",
+        "echo.",
+        "echo ==================================================================",
+        "echo  The interface was not started. The reason is printed below.",
+        "echo ==================================================================",
+        "echo.",
+        &format!("\"{cli}\" media-preflight --report-only"),
+        "echo.",
+        "echo The command line does the whole job - backup, verify, restore:",
+        &format!("echo   \"{cli}\" --help"),
+        "echo.",
+        "echo Logs:",
+        &format!("echo   \"{app_dir}\\own-backup-gui.log\""),
+        &format!("echo   \"{app_dir}\\own-backup-service.log\""),
+        "echo.",
+    ])
+}
+
 // The script the desktop runs for itself, with no window. `CreateProcess`
 // cannot start a `.cmd` at all — a medium that named the script directly booted
 // into a bare console (2026-07-31) — so the desktop puts `cmd /c` in front of
@@ -609,11 +645,14 @@ pub fn start_media_cmd(app_dir: &str, temp_dir: &str) -> String {
         "rem a live process with no window holding the only console. This waits for",
         "rem the window to say it exists, and says so plainly if it never does.",
         &format!("\"{app_dir}\\own-backup-cli.exe\" media-wait --timeout 40"),
+        "if errorlevel 1 goto :nointerface",
         "goto :aftergui",
         ":nointerface",
-        "echo.",
-        "echo The interface was not started - the reason is printed above.",
-        "echo This console is fully usable: own-backup-cli.exe does the whole job.",
+        "rem In a window of its OWN, not in this console: the desktop starts this",
+        "rem script through cmd with CREATE_NO_WINDOW, so everything printed here",
+        "rem goes nowhere. Without this line the user saw an empty desktop and no",
+        "rem explanation at all (2026-09-20).",
+        &format!("start \"My Own Backup\" cmd /k \"\"{app_dir}\\no-interface.cmd\"\""),
         ":aftergui",
         "echo.",
         "echo The engine runs without a window of its own - its log is the place to look.",
@@ -777,6 +816,7 @@ mod tests {
             ("startnet.cmd", startnet_cmd(app, true)),
             ("start-media.cmd", start_media_cmd(app, r"X:\Windows\Temp\OwnBackup")),
             ("webview2-args.txt", webview2_args_file(r"X:\Windows\Temp\OwnBackup\webview2.log")),
+            ("no-interface.cmd", no_interface_cmd(app)),
         ] {
             if let Some(line) = text.lines().find(|l| !l.is_ascii()) {
                 panic!("{name} has a non-ASCII line: {line:?}");
@@ -970,6 +1010,24 @@ mod tests {
         // битый. Тогда носитель ждёт окна и говорит, если его нет.
         let wait = s.find("media-wait").expect("после запуска надо дождаться окна");
         assert!(gui < wait, "ждать окна имеет смысл только после запуска");
+        // И тот и другой исход должны быть ВИДНЫ. Консоль запускателя не
+        // видна: рабочий стол зовёт его через cmd с CREATE_NO_WINDOW.
+        assert!(
+            s.contains("start \"My Own Backup\" cmd /k") && s.contains("no-interface.cmd"),
+            "неудача обязана открыть своё окно, иначе на экране пусто"
+        );
+    }
+
+    /// Окно неудачи повторяет разбор и оставляет человеку рабочий путь.
+    #[test]
+    fn the_failure_window_says_what_happened_and_what_still_works() {
+        let s = no_interface_cmd(r"X:\Program Files\OwnBackup");
+        assert!(s.contains("media-preflight --report-only"), "разбор повторяется в этом окне");
+        assert!(s.contains("own-backup-cli.exe\" --help"), "и сказано, чем работать дальше");
+        assert!(s.contains("own-backup-gui.log"), "и где искать подробности");
+        // Русский приходит из самой программы, и без UTF-8 консоль покажет
+        // кашу. Строки скрипта остаются ASCII — их проверяет соседний тест.
+        assert!(s.contains("chcp 65001"), "иначе разбор будет нечитаемым");
     }
 
     /// The runtime is off-image, so the launcher must locate the boot volume by

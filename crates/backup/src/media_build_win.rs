@@ -681,6 +681,12 @@ pub fn build_media(
         app_dir.join("webview2-args.txt"),
         layout::webview2_args_file(&format!("{temp_dir_win}\\webview2.log")),
     )?;
+    // То, что человек увидит, если интерфейса не будет: рабочий стол запускает
+    // start-media.cmd без окна, и напечатанное там на экран не попадает.
+    std::fs::write(
+        app_dir.join("no-interface.cmd"),
+        layout::no_interface_cmd(app_dir_win),
+    )?;
     // WinRE ships its own winpeshl.ini, which launches the recovery menu. It
     // must never survive: either ours replaces it, or there must be none at all
     // so WinPE falls back to `cmd /k startnet.cmd`.
