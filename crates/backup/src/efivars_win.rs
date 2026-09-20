@@ -508,7 +508,21 @@ pub fn export() -> Result<crate::efivars::BootBackup> {
             vars.push(SavedVar::new(name, attrs, &data));
         }
     }
+    let mut removable = 0usize;
     for e in &cfg.entries {
+        // A flash drive's entry belongs to the flash drive. It exists while the
+        // stick is in, firmware makes a new one next time, and restored onto
+        // another machine it points at nothing — so the copy of the machine's
+        // menu does not carry it, and nothing shows it later.
+        if e.option.is_removable_device() {
+            removable += 1;
+            debug!(
+                entry = %crate::efivars::entry_name(e.number),
+                name = %e.option.description,
+                "efivars: removable-device entry left out of the copy"
+            );
+            continue;
+        }
         let name = crate::efivars::entry_name(e.number);
         // The bytes as the firmware holds them, not as we would rebuild them.
         if let Some((data, attrs)) = read_var_ex(&name)? {
@@ -523,7 +537,12 @@ pub fn export() -> Result<crate::efivars::BootBackup> {
     }
 
     let machine = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "неизвестно".into());
-    info!(variables = vars.len(), entries = notes.len(), "efivars: boot configuration copied");
+    info!(
+        variables = vars.len(),
+        entries = notes.len(),
+        removable,
+        "efivars: boot configuration copied"
+    );
     Ok(crate::efivars::BootBackup::new(&machine, vars, notes))
 }
 

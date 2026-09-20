@@ -164,6 +164,33 @@ impl LoadOption {
     pub fn fully_understood(&self) -> bool {
         !self.device_path().iter().any(|n| matches!(n, DevicePathNode::Unreadable { .. }))
     }
+
+    /// Does this entry boot off something a person plugs in — a flash drive, an
+    /// external disk?
+    ///
+    /// Such an entry belongs to the stick, not to the machine: it exists while
+    /// the stick is in, and firmware makes a new one the next time. Копируя
+    /// меню загрузки, мы копируем машину, а не то, что в неё воткнули: запись
+    /// про флешку на восстановленной машине указывает в пустоту.
+    ///
+    /// Told by the device path, not by the name: a stick with a bootable ESP
+    /// has a perfectly ordinary file path (`\EFI\BOOT\BOOTX64.EFI`) and a
+    /// description of its own choosing, and the only thing that always gives it
+    /// away is the USB node the firmware put in front of it.
+    pub fn is_removable_device(&self) -> bool {
+        self.device_path().iter().any(|n| match n {
+            DevicePathNode::Other { kind, subtype, .. } => {
+                *kind == DevicePathNode::MESSAGING
+                    && matches!(
+                        *subtype,
+                        DevicePathNode::MSG_USB
+                            | DevicePathNode::MSG_USB_CLASS
+                            | DevicePathNode::MSG_USB_WWID
+                    )
+            }
+            _ => false,
+        })
+    }
 }
 
 /// One node of a device path. Anything we do not have a shape for is kept whole
@@ -248,6 +275,11 @@ impl DevicePathNode {
     const MEDIA: u8 = 0x04;
     const MEDIA_HARD_DRIVE: u8 = 0x01;
     const MEDIA_FILE_PATH: u8 = 0x04;
+    /// Type 3: how the device is reached — USB, SATA, NVMe, network.
+    const MESSAGING: u8 = 0x03;
+    const MSG_USB: u8 = 0x05;
+    const MSG_USB_CLASS: u8 = 0x0F;
+    const MSG_USB_WWID: u8 = 0x10;
 
     fn walk(bytes: &[u8]) -> Vec<Self> {
         let mut out = Vec::new();
@@ -628,6 +660,65 @@ mod tests {
 
     fn end_node() -> Vec<u8> {
         vec![0x7F, 0xFF, 0x04, 0x00]
+    }
+
+    /// Messaging / USB (type 3, subtype 5): parent port and interface, six
+    /// bytes in all. This is what firmware puts in front of anything plugged
+    /// into a USB socket.
+    fn usb_node(port: u8, interface: u8) -> Vec<u8> {
+        vec![0x03, 0x05, 0x06, 0x00, port, interface]
+    }
+
+    #[test]
+    fn an_entry_that_boots_off_a_stick_is_recognised_by_its_path() {
+        // A bootable flash drive looks exactly like a disk from the name and
+        // the file down: an ESP, `\EFI\BOOT\BOOTX64.EFI`, any description its
+        // maker felt like. The USB node is the one part that gives it away.
+        let guid = [0u8; 16];
+        let mut path = usb_node(0, 0);
+        path.extend(hard_drive_node(1, guid));
+        path.extend(file_path_node(r"\EFI\BOOT\BOOTX64.EFI"));
+        path.extend(end_node());
+        let stick = LoadOption::parse(&build(LOAD_OPTION_ACTIVE, "UEFI: SanDisk", &path, &[]))
+            .unwrap();
+        assert!(stick.is_removable_device());
+
+        // The machine's own Windows, on an internal disk: no USB node anywhere.
+        let mut own = hard_drive_node(2, guid);
+        own.extend(file_path_node(r"\EFI\Microsoft\Boot\bootmgfw.efi"));
+        own.extend(end_node());
+        let windows =
+            LoadOption::parse(&build(LOAD_OPTION_ACTIVE, "Windows Boot Manager", &own, &[]))
+                .unwrap();
+        assert!(!windows.is_removable_device());
+    }
+
+    #[test]
+    fn the_other_two_usb_node_shapes_count_too() {
+        // Firmware writes a class or a WWID instead of a port when it wants the
+        // entry to survive being moved to another socket.
+        for subtype in [0x0F, 0x10] {
+            let mut path = vec![0x03, subtype, 0x06, 0x00, 0, 0];
+            path.extend(file_path_node(r"\EFI\BOOT\BOOTX64.EFI"));
+            path.extend(end_node());
+            let opt = LoadOption::parse(&build(LOAD_OPTION_ACTIVE, "UEFI: Generic", &path, &[]))
+                .unwrap();
+            assert!(opt.is_removable_device(), "subtype {subtype:#04x}");
+        }
+    }
+
+    #[test]
+    fn a_sata_or_nvme_node_is_not_a_stick() {
+        // Type 3 as well — the same "how it is reached" family — so the check
+        // must look at the subtype, not just at the node kind.
+        const MSG_SATA: u8 = 0x12;
+        let mut path = vec![0x03, MSG_SATA, 0x0A, 0x00, 0, 0, 0, 0, 0, 0];
+        path.extend(file_path_node(r"\EFI\Microsoft\Boot\bootmgfw.efi"));
+        path.extend(end_node());
+        let opt =
+            LoadOption::parse(&build(LOAD_OPTION_ACTIVE, "Windows Boot Manager", &path, &[]))
+                .unwrap();
+        assert!(!opt.is_removable_device());
     }
 
     /// The everyday entry: a name, a partition, a file inside it.

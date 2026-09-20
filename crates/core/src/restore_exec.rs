@@ -134,7 +134,25 @@ pub fn initial_state(plan: &RestorePlan) -> RestoreRunState {
     // consequence of the "проверять после восстановления" checkbox (D10). It
     // still belongs in the queue, so the user sees up front that it will run
     // and how long the run really is.
+    //
+    // Where it belongs in that queue is where it RUNS. The sector checks read
+    // the disk back while it is still offline — before the loader is written,
+    // before Windows sees a volume — so they stand right after the last sector
+    // restore. Listing them at the end made the screen contradict itself: the
+    // checks ticked off one by one while "Пересоздать загрузчик" sat above them
+    // saying "ожидает" (2026-09-20). File checks really are last: they need a
+    // mounted volume.
+    let after_sector_restores = plan
+        .ordered()
+        .iter()
+        .rposition(|op| {
+            matches!(op, RestoreOp::RestorePartition { mode: RestoreMode::Sectors, .. })
+        })
+        .map(|i| i + 1)
+        .unwrap_or(ops.len());
+
     if plan.verify_after {
+        let mut sector_checks: Vec<OpRecord> = Vec::new();
         for op in plan.ordered() {
             let RestoreOp::RestorePartition { dst, mode, src_index, .. } = op else {
                 continue;
@@ -146,8 +164,10 @@ pub fn initial_state(plan: &RestorePlan) -> RestoreRunState {
                 RestoreMode::Sectors => ("verify_sectors", "записанное"),
                 RestoreMode::Files => ("verify_files", "перенесённые файлы"),
             };
-            ops.push(OpRecord {
-                index: ops.len(),
+            let record = OpRecord {
+                // Filled in below: these records are placed by where they run,
+                // not by the order they were built in.
+                index: 0,
                 kind: kind.into(),
                 title: format!("Проверить {what} в разделе {} (из раздела {src_index})", dst.index),
                 part_index: Some(dst.index),
@@ -161,7 +181,18 @@ pub fn initial_state(plan: &RestorePlan) -> RestoreRunState {
                 // check did not finish.
                 destroys_data: false,
                 hidden: false,
-            });
+            };
+            match mode {
+                RestoreMode::Sectors => sector_checks.push(record),
+                RestoreMode::Files => ops.push(record),
+            }
+        }
+        // Inserted as a block, so they keep their own order among themselves.
+        for (n, record) in sector_checks.into_iter().enumerate() {
+            ops.insert(after_sector_restores + n, record);
+        }
+        for (i, op) in ops.iter_mut().enumerate() {
+            op.index = i;
         }
     }
 
@@ -503,14 +534,9 @@ fn run_verification(
         .iter()
         .filter(|op| matches!(op, RestoreOp::RestorePartition { .. }))
         .collect();
-    let first = ordered.len();
 
-    for (n, op) in restore_ops.iter().enumerate() {
+    for op in restore_ops.iter() {
         let RestoreOp::RestorePartition { src_index, dst, mode, .. } = op else { continue };
-        let index = first + n;
-        if index >= state.ops.len() {
-            break;
-        }
         // Not this pass: leave it Pending for the other one, untouched.
         let belongs_here = match mode {
             RestoreMode::Files => phase == VerifyPhase::Files,
@@ -519,6 +545,17 @@ fn run_verification(
         if !belongs_here {
             continue;
         }
+        // The record sits where the check RUNS, not at a fixed offset from the
+        // end of the plan — so it is found by what it is, not by arithmetic.
+        let kind = match mode {
+            RestoreMode::Sectors => "verify_sectors",
+            RestoreMode::Files => "verify_files",
+        };
+        let Some(index) =
+            state.ops.iter().position(|o| o.kind == kind && o.part_index == Some(dst.index))
+        else {
+            continue;
+        };
         if cancel.is_cancelled() {
             state.ops[index].status = OpStatus::Skipped;
             continue;
@@ -1711,6 +1748,46 @@ mod tests {
         // the check.
         assert!(!state.ops[2].destroys_data);
         assert!(state.ops[2].cancellable);
+    }
+
+    #[test]
+    fn the_check_stands_where_it_runs_and_not_at_the_end_of_the_list() {
+        // На экране список идёт сверху вниз, и человек читает его как порядок
+        // работ. Посекторная сверка выполняется, пока диск ещё офлайн, — то
+        // есть ДО загрузчика; показанная последней, она заставляла экран
+        // противоречить себе: галочки шли по проверкам, а «Пересоздать
+        // загрузчик» над ними стоял «ожидает».
+        let mut plan = RestorePlan::new(
+            1,
+            "/tmp/img.vhdx".into(),
+            vec![
+                RestoreOp::WritePartitionTable { table: table() },
+                RestoreOp::RestorePartition {
+                    src_index: 1,
+                    dst: part(),
+                    mode: RestoreMode::Sectors,
+                    wipe_free_space: false,
+                    reencrypt: false,
+                },
+                RestoreOp::FinalizeBoot { windows_part: part(), esp: None, uefi: true },
+                RestoreOp::RefreshDiskState,
+            ],
+        );
+        plan.verify_after = true;
+        let state = initial_state(&plan);
+        let kinds: Vec<&str> = state.ops.iter().map(|o| o.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "write_partition_table",
+                "restore_sectors",
+                "verify_sectors",
+                "finalize_boot",
+                "refresh_disk_state",
+            ]
+        );
+        // Вставка в середину не должна оставить старую нумерацию.
+        assert!(state.ops.iter().enumerate().all(|(i, o)| o.index == i), "{kinds:?}");
     }
 
     #[test]
