@@ -81,6 +81,13 @@ clap = { version = "4", features = ["derive"] }
 # Cron
 cron = "0.13"
 
+# Шифрование копий (§7 плана): пара ключей задания, заворачивание ключа
+# цепочки и ключ восстановления. Симметрика и KDF уже были (aes, xts-mode,
+# aes-gcm, argon2, sha2).
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
+hkdf = "0.12"
+bech32 = "0.11"
+
 # Internal crates
 own-backup-common = { path = "crates/common" }
 own-backup-inventory = { path = "crates/inventory" }

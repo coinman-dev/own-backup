@@ -27,6 +27,10 @@ async-trait = { workspace = true }
 tokio = { workspace = true }
 getrandom = "0.2"
 zeroize = { version = "1", features = ["derive"] }
+# seal/: шифрование копий — пара ключей задания, ключ цепочки, ключ восстановления
+x25519-dalek = { workspace = true }
+hkdf = { workspace = true }
+bech32 = { workspace = true }
 crc32fast = "1"
 ntfs = "0.4.0"
 

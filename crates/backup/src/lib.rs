@@ -30,6 +30,8 @@ pub mod raw_copy;
 pub mod restore_map;
 pub mod registry_win;
 pub mod san_policy;
+/// Шифрование копий: ключи задания, ключ цепочки, шифр кластеров (`.ai/PLAN.md` §7).
+pub mod seal;
 pub mod secrets;
 pub mod source_identity;
 pub mod sidecar;
