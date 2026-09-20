@@ -120,4 +120,12 @@ export const api = {
   /** Active keyboard layout; null where it cannot be told (non-Windows). */
   keyboardLayout: () => invoke<KeyboardLayout | null>('keyboard_layout'),
   getServiceStatus: () => invoke<ServiceStatus>('get_service_status'),
+  /**
+   * «Интерфейс нарисовался» — единственное, что носитель принимает за доказательство.
+   *
+   * Зовётся один раз при монтировании. Ответить на это может только код,
+   * выполняющийся внутри окна: само окно создаётся успешно и с мёртвым
+   * движком, пустым и синим.
+   */
+  guiReady: () => invoke<void>('gui_ready'),
 };

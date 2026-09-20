@@ -380,16 +380,26 @@ fn main() {
             let built = window.build()?;
             shrink_if_the_screen_is_scaled_hard(app, &built);
 
-            // The window exists: say so where the launcher can see it. It is a
-            // FILE and not a live process on purpose — a live process without a
-            // window is exactly the state that once trapped the medium's user.
+            // A stale marker from an earlier run of this session would answer
+            // for a window that is not this one. Take it away before the new
+            // window has a chance to earn it.
             {
                 let marker = own_backup_backup::media_preflight_win::gui_up_marker();
-                match std::fs::write(&marker, std::process::id().to_string()) {
-                    Ok(()) => tracing::info!(marker = %marker.display(), "gui window is up"),
-                    Err(e) => tracing::warn!(error = %e, "could not write the gui-up marker"),
+                if marker.exists() {
+                    match std::fs::remove_file(&marker) {
+                        Ok(()) => tracing::debug!(marker = %marker.display(), "stale gui-up marker removed"),
+                        Err(e) => tracing::warn!(error = %e, "could not remove the stale gui-up marker"),
+                    }
                 }
             }
+            // The marker is NOT written here. A window built is not an
+            // interface: with a broken engine `build()` still returns a window
+            // — empty, blue, useless — and the medium then reported «gui window
+            // is up» 0.3 s after start while the user looked at exactly the
+            // blank screen this whole mechanism exists to prevent (2026-09-20,
+            // engine file present but zero bytes). The only witness that the
+            // interface is alive is the interface itself, and it says so from
+            // `gui_ready` once the frontend has drawn.
 
             // Bridge the service's event stream (progress / queue / finished) to
             // the Tauri window events the frontend already listens for.
@@ -449,9 +459,29 @@ fn main() {
             commands::files::list_roots,
             commands::files::list_dir,
             commands::files::create_dir,
+            // Единственный свидетель того, что интерфейс жив, — он сам.
+            gui_ready,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Интерфейс отрисовался — поставить признак, которого ждёт носитель.
+///
+/// Зовётся фронтендом один раз, когда он смонтирован. Раньше признак ставился
+/// сразу после `window.build()`, и это оказалось ответом не на тот вопрос:
+/// окно создаётся успешно и с мёртвым движком — пустое, синее, бесполезное, —
+/// а носитель докладывал «окно поднялось» через 0,3 секунды после запуска
+/// (2026-09-20, файл движка на месте и нулевой длины). Отсюда и правило: о
+/// том, что интерфейс жив, может сказать только сам интерфейс, и говорит он
+/// это, когда нарисовал себя. Пустое окно молчит — и `media-wait` честно
+/// доживает до своего срока и объясняет человеку, что произошло.
+#[tauri::command]
+fn gui_ready() -> Result<(), String> {
+    let marker = own_backup_backup::media_preflight_win::gui_up_marker();
+    std::fs::write(&marker, std::process::id().to_string()).map_err(|e| e.to_string())?;
+    tracing::info!(marker = %marker.display(), "gui is up: the frontend has drawn");
+    Ok(())
 }
 
 /// Long-lived task: subscribe to the service's orchestration event stream and
