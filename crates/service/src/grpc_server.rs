@@ -2359,7 +2359,13 @@ fn write_media_iso(
     walk(media_dir, media_dir, &mut files);
 
     let mut boot_files = Vec::new();
-    for rel in ["EFI/BOOT/BOOTX64.EFI", "EFI/Microsoft/Boot/BCD", "boot/boot.sdi"] {
+    // `boot.stl` travels with the loader, not with the rest of the tree: with
+    // Secure Boot on, the loader looks for it on ITS OWN device, and on an ISO
+    // that device is this FAT image rather than the ISO9660 filesystem. Its
+    // absence stops the boot at `0xc000000f` (2026-09-20, found by bisection).
+    for rel in
+        ["EFI/BOOT/BOOTX64.EFI", "EFI/Microsoft/Boot/BCD", "EFI/Microsoft/Boot/boot.stl", "boot/boot.sdi"]
+    {
         let src = media_dir.join(rel.replace('/', "\\"));
         if src.exists() {
             boot_files.push(FatFile {

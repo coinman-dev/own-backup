@@ -717,7 +717,9 @@ pub fn build_media(
     at(&mut progress, BuildStage::WritingImage, 100, "");
 
     at(&mut progress, BuildStage::BootFiles, 0, "");
-    lay_out_media(&staged_wim, &report.media_dir)?;
+    if let Some(missing) = lay_out_media(&staged_wim, &report.media_dir)? {
+        report.warnings.push(missing);
+    }
     report.image_bytes = std::fs::metadata(report.media_dir.join("sources").join("boot.wim"))
         .map(|m| m.len())
         .unwrap_or(0);
@@ -1093,7 +1095,9 @@ fn count_inf(dir: &Path) -> u32 {
 /// The boot chain, taken from the running Windows: `bootmgfw.efi` plus the
 /// READY-MADE BCD store that ships with it, which already boots
 /// `\sources\boot.wim` off a ramdisk. No oscdimg, no ADK.
-fn lay_out_media(wim: &Path, media: &Path) -> Result<()> {
+/// Returns a warning for the person building the medium when the boot chain
+/// came out incomplete — `Ok(None)` means it is whole.
+fn lay_out_media(wim: &Path, media: &Path) -> Result<Option<String>> {
     let boot = PathBuf::from(std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into()))
         .join("Boot");
     std::fs::create_dir_all(media.join(r"EFI\BOOT"))?;
@@ -1104,6 +1108,40 @@ fn lay_out_media(wim: &Path, media: &Path) -> Result<()> {
     let bcd = media.join(r"EFI\Microsoft\Boot\BCD");
     std::fs::copy(boot.join(r"DVD\EFI\BCD"), &bcd)?;
     clear_readonly(&bcd);
+    // `boot.stl` — the certificate trust list, and the ONE file that decides
+    // whether this medium boots on a machine with Secure Boot on. Without it
+    // the loader starts, reads its BCD and stops at `0xc000000f` — which is
+    // `STATUS_NO_SUCH_FILE`, a file it could not find and does not name.
+    // With Secure Boot off the same medium boots, which is what sent the first
+    // diagnosis chasing the ISO's filesystem instead.
+    //
+    // Found by bisection on a real medium, 2026-09-20: eleven files Windows
+    // keeps beside its loader were added, the medium booted, and they were
+    // taken away in groups until one was left. Not `winsipolicy.p7b`, not the
+    // CI policies, not a second copy of the loader — `boot.stl` alone, and
+    // without it the same medium fails again.
+    //
+    // Taken from the running Windows, like the loader beside it, so the two
+    // always come from one servicing level. A machine old enough not to have
+    // it builds a medium that boots with Secure Boot off — better than
+    // refusing to build one at all.
+    let stl = boot.join(r"EFI\boot.stl");
+    let mut missing_stl = None;
+    if stl.is_file() {
+        let dst = media.join(r"EFI\Microsoft\Boot\boot.stl");
+        std::fs::copy(&stl, &dst)?;
+        clear_readonly(&dst);
+    } else {
+        warn!(
+            path = %stl.display(),
+            "boot.stl not found — the medium will not boot with Secure Boot enabled"
+        );
+        missing_stl = Some(format!(
+            "На этой машине нет файла {} — носитель собран без него и НЕ ЗАГРУЗИТСЯ, \
+             пока в прошивке включена безопасная загрузка. Её придётся выключить.",
+            stl.display()
+        ));
+    }
     // The medium carries no display driver, so the screen is Microsoft Basic
     // Display, and on UEFI that driver draws on the framebuffer the boot
     // loader left behind — it cannot switch modes afterwards
@@ -1139,7 +1177,7 @@ fn lay_out_media(wim: &Path, media: &Path) -> Result<()> {
     let dst = media.join(r"sources\boot.wim");
     let _ = std::fs::remove_file(&dst);
     std::fs::rename(wim, &dst).or_else(|_| std::fs::copy(wim, &dst).map(|_| ()))?;
-    Ok(())
+    Ok(missing_stl)
 }
 
 fn trim_runtime(runtime_root: &Path) -> u32 {
