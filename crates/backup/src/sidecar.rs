@@ -61,6 +61,22 @@ pub struct SidecarInfo {
     pub container: String,
     /// File name (not path) of the image this sidecar describes.
     pub image_file_name: String,
+    /// The machine's UEFI boot entries as they were when the copy was taken.
+    ///
+    /// Inside the image, like everything else that describes it. They used to
+    /// be written to a `<image>.boot.json` beside it — the last piece of a
+    /// backup that was not in the backup, and the one a user would carry to
+    /// another disk without noticing it had stayed behind.
+    ///
+    /// Why a copy holds them at all: a boot entry lives in the motherboard's
+    /// NVRAM, not on the disk. A whole-disk copy captures every partition and
+    /// none of the menu that starts them, so a restore onto a fresh machine
+    /// comes up with the partitions in place and nothing offering to boot them.
+    ///
+    /// `None` when the copy is not a bootable one, when the firmware could not
+    /// be read, and in every copy written before this moved inside.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_entries: Option<crate::efivars::BootBackup>,
     /// A stable identity for the volume this image was taken from.
     ///
     /// Everything that chose a parent used to go through the image's FILE NAME
@@ -169,6 +185,7 @@ impl SidecarInfo {
             app_version: env!("CARGO_PKG_VERSION").into(),
             container: "vhdx".into(),
             image_file_name: image_file_name.into(),
+            boot_entries: None,
             source_id: None,
             chain_role: ChainRole::Full,
             parent_image_file_name: None,
@@ -196,6 +213,7 @@ impl SidecarInfo {
             app_version: env!("CARGO_PKG_VERSION").into(),
             container: "vhdx".into(),
             image_file_name: image_file_name.into(),
+            boot_entries: None,
             source_id: None,
             chain_role: role,
             parent_image_file_name: Some(parent.into()),
@@ -278,6 +296,22 @@ pub fn calculate_meta_partition_size(total_blocks: u64, extra_bytes: u64) -> u64
 /// allowed to be optimistic.
 pub fn luks_headers_reserve(headers: &[own_backup_common::image::LuksHeaderBackup]) -> u64 {
     headers.iter().map(|h| h.data_offset.div_ceil(3) * 4 + 65536).sum()
+}
+
+/// Room to reserve for the machine's embedded boot entries.
+///
+/// Measured rather than guessed — they are read before the metadata partition
+/// is sized, so their real serialized length is available. Computed on the
+/// UNcompressed JSON for the same reason as the container headers: a backup
+/// that runs for an hour and then cannot write its own metadata is not a
+/// trade worth making for a few kilobytes of image.
+pub fn boot_entries_reserve(backup: Option<&crate::efivars::BootBackup>) -> u64 {
+    match backup {
+        None => 0,
+        // The variables are already base64 inside the structure, so its own
+        // JSON length is the honest figure; the slack covers the framing.
+        Some(b) => b.to_json().map(|j| j.len() as u64).unwrap_or(0) + 16384,
+    }
 }
 
 /// The same reserve computed straight from the container parameters, for the
@@ -796,6 +830,40 @@ pub fn read_image_sidecar(image_path: &Path) -> Result<Sidecar> {
 
 /// Header-only counterpart of [`read_image_sidecar`] (info + manifest, no
 /// checksum table) — cheap enough for folder scans and dispatch decisions.
+/// The machine's boot entries as this copy holds them, wherever they are.
+///
+/// Inside the image is where they live now. A copy taken before they moved in
+/// has them in a `<image>.boot.json` beside it, and those copies are still
+/// perfectly good copies — so that file is read as a fallback rather than
+/// forgotten. Nothing writes it any more.
+///
+/// `None` means this copy carries none: not a bootable copy, a BIOS machine,
+/// or a run that could not read the firmware.
+pub fn boot_entries_of_image(image_path: &Path) -> Option<crate::efivars::BootBackup> {
+    if let Ok((info, _)) = read_image_sidecar_header(image_path) {
+        if info.boot_entries.is_some() {
+            return info.boot_entries;
+        }
+    }
+    let beside = boot_entries_path_beside(image_path);
+    let json = std::fs::read_to_string(&beside).ok()?;
+    match crate::efivars::BootBackup::load(&json) {
+        Ok(b) => Some(b),
+        Err(e) => {
+            tracing::warn!(path = %beside.display(), error = %e, "boot entries beside the image are unreadable");
+            None
+        }
+    }
+}
+
+/// Where a copy taken before the entries moved inside keeps them.
+pub fn boot_entries_path_beside(image_path: &Path) -> std::path::PathBuf {
+    image_path.with_extension(format!(
+        "{}.boot.json",
+        image_path.extension().and_then(|e| e.to_str()).unwrap_or("img")
+    ))
+}
+
 pub fn read_image_sidecar_header(image_path: &Path) -> Result<(SidecarInfo, ImageManifest)> {
     let ext = image_path
         .extension()
@@ -1534,5 +1602,106 @@ mod tests {
                 "v2={v2}: {err}"
             );
         }
+    }
+
+    // --- Записи загрузки живут внутри образа (2026-09-20) -------------------
+    //
+    // Раньше они лежали рядом файлом `<образ>.boot.json` — единственный кусок
+    // копии, который был не в копии, и именно тот, который пользователь унесёт
+    // на другой диск, не заметив, что он остался.
+
+    fn a_boot_backup(machine: &str) -> crate::efivars::BootBackup {
+        crate::efivars::BootBackup {
+            format: crate::efivars::BACKUP_FORMAT.into(),
+            version: crate::efivars::BACKUP_VERSION,
+            machine: machine.into(),
+            taken_at: "2026-09-19T21:53:53Z".into(),
+            variables: vec![crate::efivars::SavedVar::new("Boot0000", 7, b"whatever")],
+            readable: vec![crate::efivars::SavedNote {
+                name: "Boot0000".into(),
+                description: "Windows 11".into(),
+                file: Some(r"\EFI\MICROSOFT\BOOT\BOOTMGFW.EFI".into()),
+                partition_guid: None,
+            }],
+        }
+    }
+
+    /// Положили внутрь — оттуда и читаются.
+    #[test]
+    fn boot_entries_written_into_the_image_are_read_back_from_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("copy.vhdx");
+        std::fs::write(&image, b"not really an image").unwrap();
+
+        let mut info = SidecarInfo::new_full("copy.vhdx", 0);
+        info.boot_entries = Some(a_boot_backup("MODULATOR"));
+        write_sidecar(&sidecar_path_for(&image), &info, &make_manifest(), &[]).unwrap();
+
+        let read = boot_entries_of_image(&image).expect("the copy carries them");
+        assert_eq!(read.machine, "MODULATOR");
+        assert_eq!(read.readable[0].description, "Windows 11");
+    }
+
+    /// Копия, снятая до переезда, хранит их рядом — и это по-прежнему годная
+    /// копия, поэтому файл читается как запасной путь.
+    #[test]
+    fn an_older_copy_keeps_them_beside_it_and_that_still_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("copy.vhdx");
+        std::fs::write(&image, b"not really an image").unwrap();
+        // Sidecar без записей — как у всех копий до этого изменения.
+        let info = SidecarInfo::new_full("copy.vhdx", 0);
+        write_sidecar(&sidecar_path_for(&image), &info, &make_manifest(), &[]).unwrap();
+
+        let beside = boot_entries_path_beside(&image);
+        assert_eq!(beside.file_name().unwrap(), "copy.vhdx.boot.json");
+        std::fs::write(&beside, a_boot_backup("OLDBOX").to_json().unwrap()).unwrap();
+
+        let read = boot_entries_of_image(&image).expect("the file beside it");
+        assert_eq!(read.machine, "OLDBOX");
+    }
+
+    /// Внутреннее старшинствует: если обе копии на месте, читается та, что в
+    /// образе, — она точно принадлежит ему.
+    #[test]
+    fn what_is_inside_the_image_wins_over_what_lies_beside_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("copy.vhdx");
+        std::fs::write(&image, b"not really an image").unwrap();
+
+        let mut info = SidecarInfo::new_full("copy.vhdx", 0);
+        info.boot_entries = Some(a_boot_backup("INSIDE"));
+        write_sidecar(&sidecar_path_for(&image), &info, &make_manifest(), &[]).unwrap();
+        std::fs::write(
+            boot_entries_path_beside(&image),
+            a_boot_backup("BESIDE").to_json().unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(boot_entries_of_image(&image).unwrap().machine, "INSIDE");
+    }
+
+    /// Копия без записей — обычное дело: не загрузочная, машина на BIOS, или
+    /// прошивку не дали прочитать. Это не ошибка и не повод что-то искать.
+    #[test]
+    fn a_copy_without_boot_entries_simply_has_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("copy.vhdx");
+        std::fs::write(&image, b"not really an image").unwrap();
+        let info = SidecarInfo::new_full("copy.vhdx", 0);
+        write_sidecar(&sidecar_path_for(&image), &info, &make_manifest(), &[]).unwrap();
+
+        assert!(boot_entries_of_image(&image).is_none());
+    }
+
+    /// Место под них резервируется по измеренному размеру, а не на глаз: они
+    /// читаются до того, как считается размер служебного раздела.
+    #[test]
+    fn the_room_reserved_for_them_is_measured_not_guessed() {
+        assert_eq!(boot_entries_reserve(None), 0, "нечего — нечего и резервировать");
+        let backup = a_boot_backup("MODULATOR");
+        let want = boot_entries_reserve(Some(&backup));
+        let json = backup.to_json().unwrap().len() as u64;
+        assert!(want > json, "резерв должен покрывать сами данные и обрамление");
     }
 }

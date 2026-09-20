@@ -1297,6 +1297,87 @@ fn run_op(
             })
         }
 
+        RestoreOp::RestoreBootEntries => {
+            use own_backup_backup::efivars_win;
+
+            let mut note = OpNote::default();
+            let Some(saved) = own_backup_backup::sidecar::boot_entries_of_image(&plan.image_path)
+            else {
+                // The plan asked for them and the copy has none. Not a failure
+                // of the restore — everything on the disk is written — but the
+                // user was shown a list and is owed the news that it did not go.
+                note.message = "Записей загрузки в копии не оказалось".into();
+                note.follow_ups.push(
+                    "Копия не несёт записей загрузки UEFI, поэтому вернуть их не из чего. \
+                     Если машина не предложит загрузиться, добавьте запись в прошивке \
+                     вручную или через «Записи загрузки»."
+                        .into(),
+                );
+                return Ok(note);
+            };
+
+            // Rule one: a copy of what is there NOW, before anything is
+            // written, taken without asking. Firmware has no undo of its own
+            // and the file costs a few kilobytes. On a boot medium it lands on
+            // the RAM disk and does not outlive the restart — the user is told
+            // which of the two it was rather than left to assume.
+            match efivars_win::safety_copy() {
+                Ok(copy) => {
+                    note.follow_ups.push(format!(
+                        "Прежние записи загрузки сохранены в {}{}",
+                        copy.path.display(),
+                        if copy.durable {
+                            "."
+                        } else {
+                            " — это временный диск, файл не переживёт перезагрузку."
+                        }
+                    ));
+                }
+                Err(e) => {
+                    warn!(error = %e, "restore: could not take a safety copy of the boot entries");
+                    note.follow_ups.push(format!(
+                        "Не удалось сохранить прежние записи загрузки ({e}) — они будут \
+                         заменены без копии."
+                    ));
+                }
+            }
+
+            let here = std::env::var("COMPUTERNAME").unwrap_or_default();
+            if !here.is_empty() && !saved.machine.eq_ignore_ascii_case(&here) {
+                // The entries name partitions by GUID. From another machine
+                // those GUIDs are somebody else's.
+                note.follow_ups.push(format!(
+                    "Копия снята на машине «{}», а восстановление идёт на «{here}». \
+                     Записи указывают на разделы по их GUID, и здесь таких разделов \
+                     может не быть — пункты появятся в меню и не заработают.",
+                    saved.machine
+                ));
+            }
+
+            match efivars_win::apply_import(&saved) {
+                Ok(written) => {
+                    info!(written, machine = %saved.machine, "restore: boot entries written");
+                    note.message = format!(
+                        "Записи загрузки возвращены: изменено {written} из {}",
+                        saved.variables.len()
+                    );
+                }
+                Err(e) => {
+                    // The disk is restored; only the menu is not. Raising this
+                    // would report a failed restore for a firmware that
+                    // refuses writes — which many boards do.
+                    warn!(error = %e, "restore: boot entries could not be written");
+                    note.message = "Записи загрузки вернуть не удалось".into();
+                    note.follow_ups.push(format!(
+                        "Прошивка не приняла записи загрузки ({e}). Диск восстановлен \
+                         полностью; добавьте пункт загрузки в настройках прошивки или \
+                         через «Записи загрузки»."
+                    ));
+                }
+            }
+            Ok(note)
+        }
+
         RestoreOp::RefreshDiskState => {
             use own_backup_backup::disk_session_win::DiskSession;
             // partmgr re-reads the table, so the disk stops presenting the

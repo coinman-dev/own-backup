@@ -33,6 +33,13 @@ pub struct BackupDiskArgs {
     #[arg(short, long)]
     pub output: String,
 
+    /// Загрузочная копия: положить в образ ещё и записи загрузки UEFI этой
+    /// машины. Они живут в памяти материнской платы, а не на диске, поэтому
+    /// копия диска с данными их не несёт — и восстанавливать их на другой
+    /// машине было бы прямо неверно.
+    #[arg(long)]
+    pub bootable: bool,
+
     /// Image container format: vhdx (Windows-native mounting, no compression)
     /// or qcow2 (zstd-compressed, cross-platform).
     #[arg(long, default_value = "vhdx")]
@@ -222,6 +229,7 @@ pub async fn run(args: BackupDiskArgs) -> own_backup_common::Result<()> {
             })
             .collect(),
         image_path: image_path.clone(),
+        bootable: args.bootable,
         block_size: args.block_size_mib * 1024 * 1024,
         image_format: args.format,
         job_id: None,

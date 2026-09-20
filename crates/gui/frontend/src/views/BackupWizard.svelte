@@ -424,6 +424,7 @@
       disk_number: diskNumber(d),
       disk_model: d.model || d.device_id,
       parts: [],
+      bootable: isBootableCopy(d),
     };
     syncDiskSourceParts(d);
   }
@@ -491,7 +492,10 @@
     const parts = d.partitions
       .filter((p) => { const dev = partDevice(p); return !!dev && job.sources.includes(dev); })
       .map((p) => ({ part_index: p.index, device: partDevice(p)!, filesystem: p.filesystem }));
-    job.disk_source = { ...job.disk_source, parts };
+    // The switch is re-read here as well as at capture: this runs on every
+    // change to the selection, including the one `toggleBootableCopy` makes,
+    // so it is the point where turning the switch OFF actually reaches the job.
+    job.disk_source = { ...job.disk_source, parts, bootable: isBootableCopy(d) };
   }
 
   // ---- Scheme mode: chains that roll over, or one chain that consolidates --
@@ -1093,6 +1097,17 @@
     if (!job.source_disks || job.source_disks.length === 0) {
       const snap = engine.disks.filter(diskHasSelection);
       if (snap.length > 0) job.source_disks = $state.snapshot(snap) as DiskInfo[];
+    }
+    // Settle "is this a bootable copy" at save time, for an edited job too.
+    //
+    // On the "Параметры" screen the source is read-only, so the switch cannot
+    // be touched — and a job saved before the flag existed would otherwise
+    // keep `bootable: false` forever and silently stop carrying the machine's
+    // boot entries. `isBootableCopy` reads what the job ACTUALLY captures in
+    // that mode, which is the honest answer to the same question.
+    if (job.disk_source) {
+      const d = engine.disks.find((x) => diskNumber(x) === job.disk_source!.disk_number);
+      if (d) job.disk_source = { ...job.disk_source, bootable: isBootableCopy(d) };
     }
     try {
       const saved = await saveJob(job);

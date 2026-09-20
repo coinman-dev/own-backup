@@ -28,6 +28,11 @@
 
   let confirmOpen = $state(false);
   let confirmText = $state('');
+
+  // The machine's boot menu gets its own state further down, next to
+  // `wholeDiskRestore` — the checkbox it depends on.
+  let bootDialogOpen = $state(false);
+  let restoreBootEntries = $state<boolean | null>(null);
   let formError: string | null = $state(null);
   let stubMsg: string | null = $state(null);
 
@@ -215,6 +220,30 @@
   $effect(() => {
     if (!targetDiskId) wholeDiskRestore = activeInfo?.is_whole_disk ?? false;
   });
+
+  // ---- The machine's boot menu -------------------------------------------
+  //
+  // A boot entry lives in the motherboard's NVRAM, not on the disk, so a copy
+  // that holds every partition holds none of the menu that starts them. A
+  // bootable copy therefore carries the entries as well — and putting them
+  // back is the one thing a restore does whose effect outlives the disk it was
+  // restored onto.
+  //
+  // Hence its own question, asked last and answered explicitly, with the
+  // actual list in front of the user. `restoreBootEntries` stays null until
+  // they answer, and nothing goes into the plan on a null.
+  /** The entries this copy carries, if it carries any. */
+  const bootEntries = $derived(activeInfo?.boot_entries ?? null);
+  /** Is there a question to ask at all? Only for a copy that has them, onto a
+   *  disk the user marked загрузочный. */
+  const bootQuestionApplies = $derived(!!bootEntries && wholeDiskRestore);
+  /** The entries name partitions by GUID, so a copy from elsewhere restores
+   *  menu items pointing at partitions this machine does not have. */
+  const fromAnotherMachine = $derived(
+    !!bootEntries &&
+      !!bootEntries.this_machine &&
+      bootEntries.machine.toLowerCase() !== bootEntries.this_machine.toLowerCase(),
+  );
 
   // Partitions actually inside this copy — from the image's embedded metadata,
   // falling back to the job's selected source devices. Anything else on the disk
@@ -611,6 +640,10 @@
     badTarget = null;
     fitMsg = null;
     previewIdx = [];
+    // The answer belongs to one target disk and one copy. Carrying a "да" from
+    // a run the user abandoned to a different disk is the one way this could
+    // write firmware nobody agreed to on this attempt.
+    restoreBootEntries = null;
   }
   function selectTargetDisk(d: DiskInfo) {
     targetDiskId = d.device_id;
@@ -1214,6 +1247,15 @@
       if (esp && isGpt) {
         ops.push({ op: 'ensure_fallback_bootloader', esp });
       }
+      // The machine's own boot menu, and only with the user's word for it.
+      // Three things have to be true at once and none of them implies the
+      // others: the copy carries entries (only a bootable copy does), this
+      // disk is marked загрузочный, and the list was put in front of the user
+      // and answered. Firmware is the one thing a restore touches that
+      // outlives the disk.
+      if (bootEntries && restoreBootEntries) {
+        ops.push({ op: 'restore_boot_entries' });
+      }
     }
     // Always last: everything above wrote to the disk through handles opened
     // during the restore, and until something forces a re-read both Windows and
@@ -1382,12 +1424,17 @@
       fitMsg = `Загрузочную копию нельзя восстановить на диск с сектором ${dstSector} Б (копия снята с ${srcSector} Б).`;
       return;
     }
+    applyError = null;
+    opsOpen = true;
+    await runDryRun();
+  }
+
+  /** Build the plan as it stands and have the service check it. */
+  async function runDryRun() {
     checks = [];
     letterChanges = [];
     checkError = null;
     checkedPlan = null;
-    applyError = null;
-    opsOpen = true;
     const plan = buildPlan();
     if (!plan) return;
     checking = true;
@@ -1406,6 +1453,34 @@
     } finally {
       checking = false;
     }
+  }
+
+  /** The last step before the point of no return.
+   *
+   *  The boot entries get their own question here rather than riding along on
+   *  the "загрузочный" checkbox: that checkbox is about the DISK, and this
+   *  writes the motherboard. It is asked with the actual list in front of the
+   *  user, because "restore the boot entries" means nothing without it.
+   *
+   *  Whatever they answer, the plan is rebuilt and checked again before the
+   *  final confirmation — the plan that gets applied has to be the plan that
+   *  was checked, not one edited after the fact. */
+  async function onFinalRestore() {
+    if (bootQuestionApplies && restoreBootEntries === null) {
+      bootDialogOpen = true;
+      return;
+    }
+    confirmText = '';
+    confirmOpen = true;
+  }
+
+  async function answerBootEntries(yes: boolean) {
+    restoreBootEntries = yes;
+    bootDialogOpen = false;
+    await runDryRun();
+    if (!checkedPlan || checkErrors.length > 0) return; // the dialog says why
+    confirmText = '';
+    confirmOpen = true;
   }
 
   /** Same finding on several partitions reads as noise repeated N times, and
@@ -2101,8 +2176,56 @@
         <button
           class="btn danger-solid"
           disabled={!canApply}
-          onclick={() => { confirmText = ''; confirmOpen = true; }}
+          onclick={onFinalRestore}
         >Восстановить</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- The machine's boot menu: its own question, asked with the list in front of
+     the user. The "загрузочный" checkbox is about the DISK; this writes the
+     motherboard's memory, and that is the one thing here that outlives the
+     disk it was restored onto. -->
+{#if bootDialogOpen && bootEntries}
+  <div class="overlay">
+    <div class="dialog wide">
+      <div class="dialog-title">Восстановить записи загрузки?</div>
+      <p>
+        В копии сохранено меню загрузки этой машины — то, что предлагает прошивка
+        при включении. Оно лежит в памяти материнской платы, а не на диске,
+        поэтому вместе с разделами не восстанавливается.
+      </p>
+      <p class="boot-src">
+        Снято {formatDate(bootEntries.taken_at)} на машине <b>{bootEntries.machine}</b>.
+      </p>
+
+      <div class="dialog-title sub">Будет записано</div>
+      <ul class="boot-list">
+        {#each bootEntries.entries as e}
+          <li>
+            <b>{e.description}</b>
+            <span class="boot-name">{e.name}</span>
+            {#if e.file}<div class="boot-file">{e.file}</div>{/if}
+          </li>
+        {/each}
+      </ul>
+      <p class="ops-note">
+        Всего переменных прошивки: {bootEntries.variables}. Нынешние записи будут
+        сохранены в файл перед заменой.
+      </p>
+      {#if fromAnotherMachine}
+        <p class="finding warn">
+          Копия снята на другой машине («{bootEntries.machine}», а эта —
+          «{bootEntries.this_machine}»). Записи указывают на разделы по их GUID,
+          и здесь таких разделов может не быть — пункты появятся в меню и не
+          заработают.
+        </p>
+      {/if}
+
+      <div class="dialog-actions">
+        <button class="btn ghost" onclick={() => answerBootEntries(false)}>Нет, не надо</button>
+        <button class="btn danger-solid" onclick={() => answerBootEntries(true)}>Да, восстановить</button>
       </div>
     </div>
   </div>
@@ -2220,6 +2343,13 @@
   .dialog.wide { width: 620px; max-height: 84vh; overflow-y: auto; }
   .ops { margin: 0 0 12px 18px; padding: 0; font-size: 13px; color: var(--head); line-height: 1.7; }
   .ops-note { font-size: 12px; color: var(--text-muted); }
+  /* The boot-menu question: the list is the point of the dialog, so it gets
+     the room, and each line reads name-first the way the firmware shows it. */
+  .boot-src { font-size: 12px; color: var(--text-muted); margin: 0 0 12px; }
+  .boot-list { list-style: none; margin: 0 0 12px; padding: 0; max-height: 260px; overflow: auto; }
+  .boot-list li { padding: 7px 10px; border: 1px solid var(--border); border-radius: 5px; margin-bottom: 6px; font-size: 13px; color: var(--head); }
+  .boot-name { font-size: 11px; color: var(--text-muted); margin-left: 8px; }
+  .boot-file { font-size: 11px; color: var(--text-muted); margin-top: 3px; word-break: break-all; }
   .dialog-title.sub { margin-top: 16px; font-size: 13px; }
   .finding-line { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--text-muted); padding: 6px 0 12px; }
   /* Deliberately not `.chk`: that name is a checkbox row in this file, and it

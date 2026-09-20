@@ -317,6 +317,11 @@ export interface ImageInfo {
   /** Files/bytes excluded from this image (for the "Исключено" legend line). */
   excluded_files: number;
   excluded_bytes: number;
+  /** The machine's UEFI boot entries this copy carries, or null when it
+   *  carries none (not a bootable copy, a BIOS machine, or a firmware that
+   *  would not be read). Shown to the user before any of it is written back —
+   *  a list of names is the only way the question means anything. */
+  boot_entries: BootEntries | null;
   /** Logical sector size the source GPT was captured with (512 / 4096). */
   sector_size: number;
   /** True for a whole-disk (bootable) backup. */
@@ -485,6 +490,10 @@ export interface DiskSourceSpec {
   disk_number: number;
   disk_model: string;
   parts: DiskPartSpec[];
+  /** "Загрузочная копия диска" is on for this disk. Decides whether the
+   *  machine's UEFI boot entries travel inside the image — they live in the
+   *  motherboard, not on the disk, so a copy of a data disk carries none. */
+  bootable: boolean;
 }
 
 export interface Job {
@@ -600,6 +609,29 @@ export interface PartRef {
   size: number;
 }
 
+/** The machine's boot menu, as a copy holds it. */
+export interface BootEntries {
+  /** Which machine it came off — the entries name partitions by GUID, so a
+   *  copy taken elsewhere restores menu items that point at nothing here. */
+  machine: string;
+  /** The machine this is being read on, so the screen can say whether the two
+   *  are the same. Empty when the name is not available. */
+  this_machine: string;
+  taken_at: string;
+  /** How many firmware variables would actually be written. */
+  variables: number;
+  entries: BootEntry[];
+}
+
+export interface BootEntry {
+  /** `Boot0000`, `Boot000F`, … */
+  name: string;
+  /** "Windows 11", "Kubuntu 24.04" — what the firmware shows. */
+  description: string;
+  /** The loader it starts, when the entry names one. */
+  file: string | null;
+}
+
 export type RestoreOp =
   | { op: 'write_partition_table'; table: PartitionTableSpec }
   | { op: 'format'; part: PartRef; fs: FormatFs; label: string; quick: boolean }
@@ -620,6 +652,11 @@ export type RestoreOp =
   /** Copy the bootloader to `\EFI\BOOT\BOOTX64.EFI` — the only path UEFI tries
    *  without an NVRAM entry, and NVRAM does not travel with a copy. */
   | { op: 'ensure_fallback_bootloader'; esp: PartRef }
+  /** Put the machine's UEFI boot entries back, from the copy's own record of
+   *  them. Writes the motherboard's NVRAM, not the disk — so it is only ever in
+   *  a plan when the copy carries entries, the target disk is marked bootable,
+   *  and the user has been shown the list and said yes. */
+  | { op: 'restore_boot_entries' }
   /** Make Windows and the app re-read the disk that was just written, instead
    *  of going on describing the layout it had before the restore. */
   | { op: 'refresh_disk_state' };

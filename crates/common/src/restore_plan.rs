@@ -263,6 +263,22 @@ pub enum RestoreOp {
     /// machine that already has its NVRAM entry — that entry keeps winning.
     EnsureFallbackBootloader { esp: PartRef },
 
+    /// Put the machine's UEFI boot entries back, from the copy's own record of
+    /// them.
+    ///
+    /// The one operation here that does not touch the disk at all: it writes
+    /// the motherboard's NVRAM. A restored disk can have every partition in the
+    /// right place and still offer nothing to boot, because the menu that
+    /// starts them was never on the disk to be copied.
+    ///
+    /// Three gates before this is in a plan, and they are deliberately not one:
+    /// the copy has to CARRY entries (only a bootable copy does); the target
+    /// disk has to be marked bootable in the restore screen; and the user has
+    /// to have been shown what would be written and said yes to it. Firmware is
+    /// the one thing a restore touches that outlives the disk — put a stale
+    /// menu back on a machine whose disks have moved and it boots to nothing.
+    RestoreBootEntries,
+
     /// Re-read the disk, so Windows and the app stop describing the disk that
     /// used to be there.
     ///
@@ -289,7 +305,8 @@ impl RestoreOp {
     const ORDER_LETTER: u8 = 5;
     const ORDER_BOOT: u8 = 6;
     const ORDER_FALLBACK: u8 = 7;
-    const ORDER_REFRESH: u8 = 8;
+    const ORDER_FIRMWARE: u8 = 8;
+    const ORDER_REFRESH: u8 = 9;
 
     pub fn order_key(&self) -> u8 {
         match self {
@@ -303,6 +320,10 @@ impl RestoreOp {
             // Last: it inspects the ESP as the restore leaves it, so anything
             // that writes to the ESP has to have finished — bcdboot included.
             RestoreOp::EnsureFallbackBootloader { .. } => Self::ORDER_FALLBACK,
+            // After everything on the disk is final: the entries name
+            // partitions by GUID, so they are only true once the table and the
+            // ESP are what they are going to be.
+            RestoreOp::RestoreBootEntries => Self::ORDER_FIRMWARE,
             // Truly last: it reports the disk as everything before it left it.
             RestoreOp::RefreshDiskState => Self::ORDER_REFRESH,
         }
@@ -320,6 +341,7 @@ impl RestoreOp {
             RestoreOp::AssignLetter { part, .. } => Some(*part),
             RestoreOp::FinalizeBoot { windows_part, .. } => Some(*windows_part),
             RestoreOp::EnsureFallbackBootloader { esp } => Some(*esp),
+            RestoreOp::RestoreBootEntries => None,
             RestoreOp::RefreshDiskState => None,
         }
     }
@@ -336,6 +358,7 @@ impl RestoreOp {
             RestoreOp::AssignLetter { .. } => "assign_letter",
             RestoreOp::FinalizeBoot { .. } => "finalize_boot",
             RestoreOp::EnsureFallbackBootloader { .. } => "ensure_fallback_bootloader",
+            RestoreOp::RestoreBootEntries => "restore_boot_entries",
             RestoreOp::RefreshDiskState => "refresh_disk_state",
         }
     }
@@ -385,6 +408,9 @@ impl RestoreOp {
             RestoreOp::EnsureFallbackBootloader { .. } => {
                 "Положить загрузчик по пути, который UEFI ищет сам                  (\\EFI\\BOOT\\BOOTX64.EFI)"
                     .into()
+            }
+            RestoreOp::RestoreBootEntries => {
+                "Вернуть записи загрузки UEFI из копии в память материнской платы".into()
             }
             RestoreOp::RefreshDiskState => "Обновить состояние дисков".into(),
         }
@@ -449,6 +475,11 @@ impl RestoreOp {
             RestoreOp::WritePartitionTable { .. }
                 | RestoreOp::Format { .. }
                 | RestoreOp::RestorePartition { .. }
+                // Not data on a disk, but the machine's boot menu, and it is
+                // replaced rather than added to. It also outlives the disk:
+                // wrong entries on a machine whose disks have since moved is a
+                // machine that boots to nothing.
+                | RestoreOp::RestoreBootEntries
         )
     }
 }
@@ -863,5 +894,56 @@ mod tests {
             "dst":{"index":1,"offset":0,"size":1024},"mode":"sectors"}"#;
         let op: RestoreOp = serde_json::from_str(json).unwrap();
         assert!(matches!(op, RestoreOp::RestorePartition { wipe_free_space: false, .. }));
+    }
+
+    // --- Записи загрузки: своя ступень, в самом конце ----------------------
+
+    /// Они называют разделы по GUID, поэтому правдой становятся только когда
+    /// разметка и ESP уже такие, какими останутся. И это не хозяйственная
+    /// мелочь: строка в очереди обязана быть, иначе подтверждать нечего.
+    #[test]
+    fn boot_entries_are_written_after_everything_on_the_disk_is_final() {
+        let esp = part(1, 1024 * 1024);
+        let win = part(3, 300 * 1024 * 1024);
+        let plan = RestorePlan {
+            id: Uuid::new_v4(),
+            target_disk: 1,
+            image_path: "x.vhdx".into(),
+            verify_after: false,
+            target_disk_id: None,
+            ops: vec![
+                RestoreOp::RestoreBootEntries,
+                RestoreOp::RefreshDiskState,
+                RestoreOp::EnsureFallbackBootloader { esp },
+                RestoreOp::FinalizeBoot { windows_part: win, esp: Some(esp), uefi: true },
+            ],
+        };
+        let order: Vec<&str> = plan.ordered().iter().map(|op| op.kind()).collect();
+        assert_eq!(
+            order,
+            vec![
+                "finalize_boot",
+                "ensure_fallback_bootloader",
+                "restore_boot_entries",
+                "refresh_disk_state",
+            ]
+        );
+    }
+
+    /// Не данные на диске — но заменяются они целиком, и переживают диск, на
+    /// который их восстановили.
+    #[test]
+    fn writing_the_boot_menu_counts_as_destroying_what_was_there() {
+        assert!(RestoreOp::RestoreBootEntries.destroys_data());
+        // А обновление состояния дисков — нет, иначе точка невозврата
+        // оказалась бы в каждом плане.
+        assert!(!RestoreOp::RefreshDiskState.destroys_data());
+    }
+
+    /// Пользователь должен увидеть эту строку в очереди — он про неё отвечает.
+    #[test]
+    fn the_boot_menu_step_is_not_hidden_as_housekeeping() {
+        assert!(!RestoreOp::RestoreBootEntries.is_housekeeping());
+        assert!(!RestoreOp::RestoreBootEntries.title().is_empty());
     }
 }

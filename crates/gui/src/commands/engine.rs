@@ -186,6 +186,41 @@ pub struct ImageInfoDto {
     /// the field existed — worth showing as such rather than hiding, since
     /// "which build made this" is the first question when a copy misbehaves.
     pub app_version: String,
+    /// The machine's UEFI boot entries this copy carries, if any.
+    ///
+    /// Present only for a copy taken with "Загрузочная копия диска" on. It is
+    /// here so the restore screen can show the user the actual menu it is
+    /// offering to put back — a list of names is the only way "restore the boot
+    /// entries" means anything to the person answering the question.
+    pub boot_entries: Option<BootEntriesDto>,
+}
+
+/// What a copy holds of the machine's boot menu.
+#[derive(Debug, Clone, Serialize)]
+pub struct BootEntriesDto {
+    /// Which machine it came off. The entries name partitions by GUID, so a
+    /// copy taken elsewhere restores menu items that point at nothing here.
+    pub machine: String,
+    /// The machine this is being read ON, so the screen can say whether the
+    /// two are the same without the frontend having to find out what this
+    /// computer is called. Empty when the name is not available.
+    pub this_machine: String,
+    pub taken_at: String,
+    /// How many firmware variables would actually be written.
+    pub variables: usize,
+    /// The readable half: what those bytes mean, for the user to look at.
+    pub entries: Vec<BootEntryDto>,
+}
+
+/// One line of that menu.
+#[derive(Debug, Clone, Serialize)]
+pub struct BootEntryDto {
+    /// `Boot0000`, `BootOrder`, …
+    pub name: String,
+    /// "Windows 11", "Kubuntu 24.04" — what the firmware shows.
+    pub description: String,
+    /// The loader it starts, when the entry names one.
+    pub file: Option<String>,
 }
 
 /// Read one image's embedded metadata into an [`ImageInfoDto`] (direct file
@@ -337,6 +372,31 @@ fn read_image_info_at(path: &std::path::Path) -> Result<ImageInfoDto, String> {
             .unwrap_or(sidecar.manifest.source_disk.sector_size_logical),
         is_whole_disk,
         app_version: sidecar.info.app_version,
+        // Inside the image now; a copy taken before they moved in still has
+        // them in a `.boot.json` beside it, and that is read as a fallback.
+        boot_entries: own_backup_backup::sidecar::boot_entries_of_image(path).map(|b| {
+            BootEntriesDto {
+                machine: b.machine.clone(),
+                this_machine: std::env::var("COMPUTERNAME")
+                    .or_else(|_| std::env::var("HOSTNAME"))
+                    .unwrap_or_default(),
+                taken_at: b.taken_at.clone(),
+                variables: b.variables.len(),
+                entries: b
+                    .readable
+                    .iter()
+                    // `BootOrder` and `Timeout` are settings, not menu items;
+                    // listing them among the systems would be answering a
+                    // different question than the one on screen.
+                    .filter(|n| !n.description.trim().is_empty())
+                    .map(|n| BootEntryDto {
+                        name: n.name.clone(),
+                        description: n.description.clone(),
+                        file: n.file.clone(),
+                    })
+                    .collect(),
+            }
+        }),
     })
 }
 

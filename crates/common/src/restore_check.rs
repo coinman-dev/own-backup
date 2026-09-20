@@ -123,6 +123,8 @@ pub enum CheckCode {
     /// A filesystem was chosen when creating the partition, and the restore
     /// brings a different one along.
     FormatChoiceIgnored,
+    /// The plan puts the machine's UEFI boot entries back from the copy.
+    BootEntriesWillBeWritten,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -590,6 +592,19 @@ fn check_ops(
             // Nothing to check: it reads the restored ESP and writes one file
             // only if that file is absent, so there is no state it can be
             // wrong about in advance.
+            // Writing the machine's boot entries back is checked where the
+            // facts are: the copy has to carry them and the user has to have
+            // said yes, and neither is visible from the plan alone. What IS
+            // worth saying here is that it happens at all — it is the one
+            // operation whose effect outlives the disk.
+            RestoreOp::RestoreBootEntries => out.push(CheckResult::new(
+                CheckLevel::Info,
+                CheckCode::BootEntriesWillBeWritten,
+                None,
+                "Записи загрузки UEFI из копии будут записаны в память материнской платы, \
+                 поверх нынешних. Прежние сохранятся в файл перед заменой."
+                    .into(),
+            )),
             RestoreOp::WritePartitionTable { .. }
             | RestoreOp::AssignLetter { .. }
             | RestoreOp::EnsureFallbackBootloader { .. }

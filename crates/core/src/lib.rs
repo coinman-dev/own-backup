@@ -463,6 +463,17 @@ pub struct DiskSourceSpec {
     pub disk_number: u32,
     pub disk_model: String,
     pub parts: Vec<DiskPartSpec>,
+    /// The user ticked "Загрузочная копия диска" for this disk.
+    ///
+    /// Every whole-disk job captures `disk_source`, bootable or not — that is
+    /// what makes one job produce one image file. This says whether the copy is
+    /// meant to BOOT, which decides one thing: whether the machine's UEFI boot
+    /// entries travel inside the image. They live in the motherboard, not on
+    /// the disk, and a copy of a data disk has no business carrying the boot
+    /// menu. `false` in jobs saved before the flag existed — those copies
+    /// simply carry no entries, exactly as if the switch had been off.
+    #[serde(default)]
+    pub bootable: bool,
 }
 
 /// One partition of a whole-disk backup: its GPT slot and its source device.
@@ -2360,6 +2371,7 @@ async fn perform_disk_backup(
         disk_model: ds.disk_model.clone(),
         partitions,
         source_disk,
+        bootable: ds.bootable,
         image_path: image_path.clone(),
         block_size: own_backup_backup::engine_win::DEFAULT_BLOCK_SIZE,
         image_format: job.image_format,

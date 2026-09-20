@@ -1890,9 +1890,15 @@ pub struct DiskBackupRequest {
     /// in the disk manifest, so a bare-metal restore can identify the archived
     /// disk without jobs.json. `None` for CLI runs (the manifest then omits it).
     pub source_disk: Option<own_backup_common::disk::DiskInfo>,
+    /// The user ticked "Загрузочная копия диска" for this disk.
+    ///
+    /// It decides one thing here: whether the machine's UEFI boot entries go
+    /// into the image. They are the firmware's, not the disk's, and a copy of a
+    /// data disk has no business carrying the boot menu.
+    pub bootable: bool,
 }
 
-/// Write the machine's UEFI boot entries next to a finished image.
+/// Read the machine's UEFI boot entries, to be embedded in the image.
 ///
 /// Why this is worth anything after a restore: [`crate::gpt_writer`] recreates
 /// the disk with every partition's ORIGINAL unique GUID, offset and size, and a
@@ -1900,24 +1906,28 @@ pub struct DiskBackupRequest {
 /// saved here still points at the right partition on the restored disk — there
 /// is nothing to translate, only something to put back.
 ///
-/// Nothing is reported upwards. A machine on a plain BIOS has no such entries,
-/// and an unelevated run cannot read them; neither is a reason to spoil a
-/// backup that succeeded.
-fn save_boot_entries_beside(image_path: &Path) {
-    let path = image_path.with_extension(format!(
-        "{}.boot.json",
-        image_path.extension().and_then(|e| e.to_str()).unwrap_or("img")
-    ));
+/// Only for a copy the user marked BOOTABLE. On any other disk these entries
+/// describe a boot menu that copy has nothing to do with: a data disk's backup
+/// carrying the machine's firmware configuration is metadata nobody asked for,
+/// and a restore of it onto another machine would be actively wrong.
+///
+/// `None` is not an error. A machine on a plain BIOS has no such entries, and
+/// an unelevated run cannot read them; neither is a reason to spoil a backup
+/// that succeeded.
+fn boot_entries_for_image(bootable: bool) -> Option<crate::efivars::BootBackup> {
+    if !bootable {
+        info!("not a bootable copy — the machine's boot entries are not part of it");
+        return None;
+    }
     match crate::efivars_win::export() {
-        Ok(backup) => match backup.to_json().and_then(|j| Ok(std::fs::write(&path, j)?)) {
-            Ok(()) => info!(
-                path = %path.display(),
-                entries = backup.readable.len(),
-                "boot entries saved beside the image"
-            ),
-            Err(e) => warn!(error = %e, path = %path.display(), "boot entries not saved"),
-        },
-        Err(e) => info!(error = %e, "boot entries not read — nothing saved beside the image"),
+        Ok(backup) => {
+            info!(entries = backup.readable.len(), "boot entries read into the image");
+            Some(backup)
+        }
+        Err(e) => {
+            info!(error = %e, "boot entries not read — the copy will carry none");
+            None
+        }
     }
 }
 
@@ -2998,9 +3008,13 @@ fn backup_disk_inner(
     // Stored container headers (D19) are megabytes each, so the reserve has to
     // include them. A child takes the PARENT's reserve, for the same reason it
     // takes the parent's block count: its geometry must match exactly.
+    // Read now, not at the end: the size has to be known before the metadata
+    // partition is sized, and reading NVRAM is instant and independent of
+    // everything the copy does.
+    let boot_entries = boot_entries_for_image(req.bootable);
     let own_reserve = crate::sidecar::luks_reserve_for(
         prepared.iter().filter_map(|p| p.luks_header.as_ref().map(|h| h.data_offset)),
-    );
+    ) + crate::sidecar::boot_entries_reserve(boot_entries.as_ref());
     let full_used = |used: u64, reserve: u64| {
         crate::sidecar::calculate_meta_partition_size(used.max(1), reserve)
     };
@@ -3332,33 +3346,39 @@ fn backup_disk_inner(
     // restore rebuilds the container byte-for-byte, so the restored system's
     // crypttab and initramfs keep working untouched.
     info.luks_headers = prepared.iter().filter_map(|p| p.luks_header.clone()).collect();
+    // The machine's boot entries — INSIDE the image, with everything else that
+    // describes it. They used to be written to a `.boot.json` beside it: the
+    // last piece of a backup that was not in the backup, and the one a user
+    // would carry to another disk without noticing it had stayed behind.
+    //
+    // On 2026-09-18 this machine lost the entries for Acronis and R-Drive Image
+    // while their loaders sat untouched on the ESP; no copy taken before that
+    // would have brought them back. That is what they are for.
+    info.boot_entries = boot_entries;
 
     let mut blob = Vec::new();
     crate::sidecar::write_sidecar_v2_full_to(&mut blob, &info, &manifest, &checksums, Some(&disk_manifest))?;
+    // The metadata partition was sized before any of this existed as bytes. If
+    // the blob will not fit, the boot entries are the one part of it that can
+    // be given up: they are the machine's, identical from run to run, and the
+    // chain's other copies have them. Everything else in here describes THIS
+    // image and has nowhere else to live.
+    if blob.len() as u64 > meta_size && info.boot_entries.is_some() {
+        warn!(
+            blob = blob.len(),
+            meta_size,
+            "no room for the boot entries in this image's metadata — writing without them"
+        );
+        info.boot_entries = None;
+        blob.clear();
+        crate::sidecar::write_sidecar_v2_full_to(&mut blob, &info, &manifest, &checksums, Some(&disk_manifest))?;
+    }
     match req.image_format {
         ImageFormat::Vhdx => crate::vhdx_bat::write_vhdx_guest_at(&req.image_path, meta_offset, &blob)?,
         ImageFormat::Qcow2 => {
             crate::qcow2::merge::write_qcow2_guest_blob(&req.image_path, meta_offset, &blob)?
         }
     }
-
-    // The machine's boot entries, beside the image.
-    //
-    // They are not on the disk and never were: a boot entry lives in the
-    // motherboard's own memory. A whole-disk copy therefore captures every
-    // partition and none of the menu that starts them, and a restore onto a
-    // fresh machine comes up with the partitions in place and nothing offering
-    // to boot them. On 2026-09-18 this machine lost the entries for Acronis and
-    // R-Drive Image while their loaders sat untouched on the ESP; no copy taken
-    // before that would have brought them back.
-    //
-    // Beside the image rather than inside it, next to the `.obkm` sidecar that
-    // is already there. Restoring is `own-backup-cli boot import` on this very
-    // file — nothing else has to understand the format.
-    //
-    // Best effort on purpose: the copy of the disk is the thing that was asked
-    // for, and a firmware that will not be read is no reason to fail it.
-    save_boot_entries_beside(&req.image_path);
 
     info!(
         image = %req.image_path.display(),
