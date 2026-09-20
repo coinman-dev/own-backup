@@ -569,6 +569,10 @@ pub fn plan_import(backup: &crate::efivars::BootBackup) -> Result<Vec<(String, C
     }
     let mut out = Vec::new();
     for v in &backup.variables {
+        // Not offered, because it will not be written: see `apply_import`.
+        if crate::efivars::names_removable_device(v) {
+            continue;
+        }
         let want = v.bytes()?;
         let change = match read_var_ex(&v.name)? {
             Some((have, _)) if have == want => Change::Same,
@@ -601,6 +605,15 @@ pub fn apply_import(backup: &crate::efivars::BootBackup) -> Result<usize> {
             order_last = Some(v);
             continue;
         }
+        // A copy taken before flash drives were left out still carries them;
+        // writing one back would put a stick that is not in this machine into
+        // its boot menu. `BootOrder` may still name it — firmware skips a
+        // number with no entry behind it, and rewriting the order to match
+        // would be editing what the user asked to have back.
+        if crate::efivars::names_removable_device(v) {
+            debug!(variable = %v.name, "efivars: removable-device entry not written back");
+            continue;
+        }
         if plan.iter().any(|(n, c)| n == &v.name && *c == Change::Same) {
             continue;
         }
@@ -613,7 +626,14 @@ pub fn apply_import(backup: &crate::efivars::BootBackup) -> Result<usize> {
             written += 1;
         }
     }
-    info!(written, of = backup.variables.len(), "efivars: boot configuration restored");
+    let offered =
+        backup.variables.iter().filter(|v| !crate::efivars::names_removable_device(v)).count();
+    info!(
+        written,
+        of = offered,
+        skipped_removable = backup.variables.len() - offered,
+        "efivars: boot configuration restored"
+    );
     Ok(written)
 }
 

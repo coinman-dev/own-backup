@@ -545,6 +545,23 @@ impl SavedVar {
 /// random is how a machine stops starting. A restore takes its list of names
 /// from a FILE, so the file must not be able to name anything else. Whitelist,
 /// never blacklist.
+/// Is this saved variable an entry for something a person plugs in?
+///
+/// The same question as [`LoadOption::is_removable_device`], asked of a copy
+/// rather than of firmware — because a copy taken before that rule existed
+/// carries such entries, and putting them back would fill the restored
+/// machine's menu with a flash drive that is not there. `BootOrder` and
+/// `Timeout` are not entries and always answer no.
+pub fn names_removable_device(v: &SavedVar) -> bool {
+    if entry_number(&v.name).is_none() {
+        return false;
+    }
+    v.bytes()
+        .ok()
+        .and_then(|b| LoadOption::parse(&b).ok())
+        .is_some_and(|o| o.is_removable_device())
+}
+
 pub fn is_boot_variable(name: &str) -> bool {
     matches!(name, "BootOrder" | "BootNext" | "Timeout") || entry_number(name).is_some()
 }
@@ -705,6 +722,32 @@ mod tests {
                 .unwrap();
             assert!(opt.is_removable_device(), "subtype {subtype:#04x}");
         }
+    }
+
+    #[test]
+    fn a_copy_made_before_the_rule_still_leaves_the_stick_out() {
+        // Копия от 2026-09-19 несёт «UEFI: JetFlashTranscend 64GB 1100» — и
+        // будет нести всегда, файл уже снят. Отбор на возврате и на показе
+        // работает по тем же байтам, что и отбор при съёме.
+        let guid = [0u8; 16];
+        let mut path = usb_node(0, 0);
+        path.extend(hard_drive_node(1, guid));
+        path.extend(file_path_node(r"\EFI\BOOT\BOOTX64.EFI"));
+        path.extend(end_node());
+        let stick =
+            SavedVar::new("Boot0010", 7, &build(LOAD_OPTION_ACTIVE, "UEFI: JetFlash", &path, &[]));
+        assert!(names_removable_device(&stick));
+
+        let mut own = hard_drive_node(2, guid);
+        own.extend(file_path_node(r"\EFI\Microsoft\Boot\bootmgfw.efi"));
+        own.extend(end_node());
+        let windows =
+            SavedVar::new("Boot0000", 7, &build(LOAD_OPTION_ACTIVE, "Windows 11", &own, &[]));
+        assert!(!names_removable_device(&windows));
+
+        // Порядок и время ожидания — не записи меню, их это не касается.
+        assert!(!names_removable_device(&SavedVar::new("BootOrder", 7, &[0x10, 0x00])));
+        assert!(!names_removable_device(&SavedVar::new("Timeout", 7, &[0x05, 0x00])));
     }
 
     #[test]

@@ -271,6 +271,17 @@ impl DiskSession {
     fn current_layout(&self) -> Option<DiskLayout> {
         match crate::gpt_reader::read_disk_layout(self.disk_number) {
             Ok(layout) => Some(layout),
+            // An empty target is the ordinary case for a restore, not a
+            // problem: there is nothing on it to reconcile against. Saying so
+            // at WARN, in words about whole-disk BACKUP, had a clean run
+            // reporting trouble it did not have (2026-09-20).
+            Err(e) if e.to_string().contains("no GPT") => {
+                debug!(
+                    disk = self.disk_number,
+                    "no partition table on the target — nothing to reconcile, writing the planned one"
+                );
+                None
+            }
             Err(e) => {
                 warn!(
                     disk = self.disk_number, error = %e,

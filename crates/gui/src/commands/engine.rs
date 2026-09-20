@@ -375,13 +375,22 @@ fn read_image_info_at(path: &std::path::Path) -> Result<ImageInfoDto, String> {
         // Inside the image now; a copy taken before they moved in still has
         // them in a `.boot.json` beside it, and that is read as a fallback.
         boot_entries: own_backup_backup::sidecar::boot_entries_of_image(path).map(|b| {
+            // A copy taken before flash drives were left out still carries
+            // them, and the restore no longer writes them back — so they have
+            // no business being in the list the user is asked to agree to.
+            let removable: std::collections::HashSet<String> = b
+                .variables
+                .iter()
+                .filter(|v| own_backup_backup::efivars::names_removable_device(v))
+                .map(|v| v.name.clone())
+                .collect();
             BootEntriesDto {
                 machine: b.machine.clone(),
                 this_machine: std::env::var("COMPUTERNAME")
                     .or_else(|_| std::env::var("HOSTNAME"))
                     .unwrap_or_default(),
                 taken_at: b.taken_at.clone(),
-                variables: b.variables.len(),
+                variables: b.variables.len() - removable.len(),
                 entries: b
                     .readable
                     .iter()
@@ -389,6 +398,7 @@ fn read_image_info_at(path: &std::path::Path) -> Result<ImageInfoDto, String> {
                     // listing them among the systems would be answering a
                     // different question than the one on screen.
                     .filter(|n| !n.description.trim().is_empty())
+                    .filter(|n| !removable.contains(&n.name))
                     .map(|n| BootEntryDto {
                         name: n.name.clone(),
                         description: n.description.clone(),
