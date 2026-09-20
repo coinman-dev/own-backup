@@ -478,7 +478,19 @@ pub fn no_interface_cmd(app_dir: &str) -> String {
         "title My Own Backup - interface not started",
         "echo.",
         "echo ==================================================================",
+        // Два разных исхода, и говорить о них одним текстом нельзя. Когда не
+        // пустила проверка — причина ниже, в её строках. Когда проверки прошли,
+        // а окна так и не появилось, ниже будут три плюса, и обещание «причина
+        // напечатана ниже» станет неправдой (видно 2026-09-20 на пустом файле
+        // движка: проверка его пропускает, потому что файл на месте).
+        "if /i \"%~1\"==\"nowindow\" goto :nowindow",
         "echo  The interface was not started. The reason is printed below.",
+        "goto :reason",
+        ":nowindow",
+        "echo  The interface was started but its window never appeared.",
+        "echo  The checks below all passed - so the trouble is past them:",
+        "echo  a broken engine file, or the engine dying on start. The logs say.",
+        ":reason",
         "echo ==================================================================",
         "echo.",
         &format!("\"{cli}\" media-preflight --report-only"),
@@ -645,7 +657,12 @@ pub fn start_media_cmd(app_dir: &str, temp_dir: &str) -> String {
         "rem a live process with no window holding the only console. This waits for",
         "rem the window to say it exists, and says so plainly if it never does.",
         &format!("\"{app_dir}\\own-backup-cli.exe\" media-wait --timeout 40"),
-        "if errorlevel 1 goto :nointerface",
+        "if errorlevel 1 goto :nowindow",
+        "goto :aftergui",
+        ":nowindow",
+        "rem The checks passed and no window came: the failure window must say",
+        "rem that, not point at checks that are all green.",
+        &format!("start \"My Own Backup\" cmd /k \"\"{app_dir}\\no-interface.cmd\" nowindow\""),
         "goto :aftergui",
         ":nointerface",
         "rem In a window of its OWN, not in this console: the desktop starts this",
@@ -1012,10 +1029,14 @@ mod tests {
         assert!(gui < wait, "ждать окна имеет смысл только после запуска");
         // И тот и другой исход должны быть ВИДНЫ. Консоль запускателя не
         // видна: рабочий стол зовёт его через cmd с CREATE_NO_WINDOW.
-        assert!(
-            s.contains("start \"My Own Backup\" cmd /k") && s.contains("no-interface.cmd"),
-            "неудача обязана открыть своё окно, иначе на экране пусто"
+        assert_eq!(
+            s.matches("start \"My Own Backup\" cmd /k").count(),
+            2,
+            "своё окно нужно обоим исходам: и отказу проверки, и «окна нет»"
         );
+        // И говорить они должны разное: при «окна нет» проверки зелёные, и
+        // обещание «причина напечатана ниже» было бы неправдой.
+        assert!(s.contains("no-interface.cmd\" nowindow"), "второй исход зовётся по имени");
     }
 
     /// Окно неудачи повторяет разбор и оставляет человеку рабочий путь.
@@ -1023,6 +1044,10 @@ mod tests {
     fn the_failure_window_says_what_happened_and_what_still_works() {
         let s = no_interface_cmd(r"X:\Program Files\OwnBackup");
         assert!(s.contains("media-preflight --report-only"), "разбор повторяется в этом окне");
+        assert!(
+            s.contains("if /i \"%~1\"==\"nowindow\" goto :nowindow"),
+            "окно должно различать «не пустила проверка» и «окна так и не появилось»"
+        );
         assert!(s.contains("own-backup-cli.exe\" --help"), "и сказано, чем работать дальше");
         assert!(s.contains("own-backup-gui.log"), "и где искать подробности");
         // Русский приходит из самой программы, и без UTF-8 консоль покажет

@@ -81,6 +81,9 @@ enum Commands {
     /// Pick a screen mode fit for the interface (boot media)
     Display(commands::display::DisplayArgs),
 
+    /// Собрать загрузочный носитель — то же, что делает мастер в интерфейсе
+    Media(commands::media::MediaArgs),
+
     /// Check that this environment can host the interface (boot medium)
     MediaPreflight(commands::media_preflight::MediaPreflightArgs),
 
@@ -172,6 +175,7 @@ async fn main() {
         Commands::IscsiServe(args) => commands::iscsi_serve::run(args).await,
         Commands::Driver(args) => commands::driver::run(args).await,
         Commands::Display(args) => commands::display::run(args).await,
+        Commands::Media(args) => commands::media::run(args).await,
         Commands::MediaPreflight(args) => commands::media_preflight::run(args).await,
         Commands::MediaWait(args) => commands::media_preflight::run_wait(args).await,
         Commands::MediaTools(args) => commands::media_tools::run(args).await,
