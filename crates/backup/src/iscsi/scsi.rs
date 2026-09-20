@@ -100,8 +100,12 @@ pub fn execute(lun: &mut Lun, cdb: &[u8], data_out: &[u8]) -> Reply {
             if !lun.first_refusal_of(opcode) {
                 trace!(opcode = format!("{opcode:#04x}"), "iSCSI: refused again");
             } else if refusal_is_expected(opcode) {
+                // The CDB goes here too, not only in the warning: it is what
+                // classified `0x24` in the first place, and the next unexplained
+                // opcode will be answered the same way.
                 debug!(
                     opcode = format!("{opcode:#04x}"),
+                    cdb = %cdb.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" "),
                     "iSCSI: refusing a command a backup image is not meant to answer"
                 );
             } else {
@@ -242,8 +246,22 @@ fn report_luns() -> Reply {
 /// once a second for as long as an image is attached. As warnings they were
 /// almost every line of a run's log and buried the one message that mattered
 /// (2026-09-18) — the reason this classification exists.
+/// `0x24` joined them on 2026-09-20, with evidence rather than a guess. It had
+/// been the one remaining SCSI warning, repeated on every mount, and the open
+/// question was who sends it. Logging the whole CDB answered it:
+///
+/// ```text
+/// cdb=24 24 00 be 01 00 00 01 00 00 00 a0 ec 00 00 00
+/// ```
+///
+/// `0xA0` is the ATA device register and `0xEC` is IDENTIFY DEVICE — the two
+/// bytes an ATA pass-through carries. So this is the same thing as 0x85/0xA1
+/// in a wrapper we do not implement, from the same burst of disk monitoring,
+/// and there is still no drive behind this LUN to forward it to. Our own
+/// INQUIRY reports a direct-access block device (`d[0] = 0x00`), so nothing
+/// about us invited a scanner command.
 fn refusal_is_expected(opcode: u8) -> bool {
-    matches!(opcode, 0x85 | 0xA1) || opcode >= 0xC0
+    matches!(opcode, 0x24 | 0x85 | 0xA1) || opcode >= 0xC0
 }
 
 /// LBA and block count out of a READ/WRITE CDB, 10- or 16-byte form.
@@ -460,12 +478,18 @@ pub(crate) mod tests {
     /// vendor-specific range come from whatever polls the machine's disks and
     /// mean nothing here; a real SCSI command we have not implemented is a gap
     /// somebody should hear about.
+    ///
+    /// `0x24` was on the second list until 2026-09-20, when logging the whole
+    /// CDB showed what it actually carries — `… a0 ec …`, the ATA device
+    /// register and IDENTIFY DEVICE. It is an ATA pass-through in a wrapper we
+    /// do not implement, from the same disk-monitoring burst as 0x85 and 0xA1,
+    /// so it belongs with them.
     #[test]
     fn a_refusal_nobody_can_help_is_told_apart_from_a_gap() {
-        for op in [0x85u8, 0xA1, 0xC0, 0xD8, 0xDF, 0xE0, 0xE4, 0xE6, 0xF8, 0xFF] {
+        for op in [0x24u8, 0x85, 0xA1, 0xC0, 0xD8, 0xDF, 0xE0, 0xE4, 0xE6, 0xF8, 0xFF] {
             assert!(refusal_is_expected(op), "{op:#04x} is nothing to warn about");
         }
-        for op in [0x24u8, 0x41, 0x42, 0x93] {
+        for op in [0x41u8, 0x42, 0x93] {
             assert!(!refusal_is_expected(op), "{op:#04x} is a command we could have");
         }
     }

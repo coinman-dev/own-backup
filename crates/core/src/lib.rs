@@ -191,6 +191,27 @@ impl SchemeConfig {
     pub fn is_consolidation(&self) -> bool {
         self.method == "incremental" && self.rolling_incrementals.is_some()
     }
+
+    /// After how many increments a new chain is started, or `None` when the
+    /// chain never rolls over by count.
+    ///
+    /// **Zero means OFF** — the way it does for `keep_chains`,
+    /// `cleanup_older_than_days` and `rolling_incrementals`, every other number
+    /// in this group, and what the CLI has always documented ("0 — не начинать
+    /// новую цепочку").
+    ///
+    /// It did not. The two places that asked wrote `full_every_n.max(1)`, so a
+    /// zero became a one and "never start a new chain" produced the most
+    /// aggressive setting there is: a fresh FULL copy after every single
+    /// increment. Found on 2026-09-20 by setting it and watching a third run
+    /// write a second full — the flag did the exact opposite of its own help
+    /// text, and quietly.
+    ///
+    /// `only_incremental` says the same thing in its own field and still wins;
+    /// the two are redundant, which is why the zero was never noticed.
+    pub fn rolls_over_after(&self) -> Option<u32> {
+        (!self.only_incremental && self.full_every_n > 0).then_some(self.full_every_n)
+    }
 }
 
 /// Exclusions tab. Patterns are kept in two OS-specific lists so a whole-disk
@@ -1139,7 +1160,7 @@ pub fn plan_run(job: &Job, last_success: Option<&JobRun>) -> RunPlan {
     let last_kind = if last.backup_kind.is_empty() { "full" } else { &last.backup_kind };
 
     // "Полная версия после каждых N версий": the chain holds at most N children.
-    if !job.scheme.only_incremental && last.increment_index >= job.scheme.full_every_n.max(1) {
+    if job.scheme.rolls_over_after().is_some_and(|n| last.increment_index >= n) {
         return RunPlan::full();
     }
 
@@ -1359,7 +1380,7 @@ fn should_start_new_chain(
             None => false,
         };
     }
-    !job.scheme.only_incremental && chain.increments_ever() >= job.scheme.full_every_n.max(1)
+    job.scheme.rolls_over_after().is_some_and(|n| chain.increments_ever() >= n)
 }
 
 /// Any doubt (no chain, rollover reached, parent missing) resolves to a full.
@@ -3800,5 +3821,42 @@ mod tests {
         assert!(chain_belongs_to(&base, "C", &None));
         // Имя всё ещё должно совпадать — это не отменяется.
         assert!(!chain_belongs_to(&base, "D", &None));
+    }
+
+    /// Ноль значит «выключено» — как у keep_chains, cleanup_older_than_days и
+    /// rolling_incrementals, и как обещает справка CLI. Оба места писали
+    /// `full_every_n.max(1)`, поэтому ноль становился единицей и «не начинать
+    /// новую цепочку» давало самую агрессивную настройку из возможных: полную
+    /// копию после каждого инкремента. Поймано живым прогоном 2026-09-20.
+    #[test]
+    fn zero_means_never_rolling_over_not_rolling_over_every_time() {
+        let mut s = SchemeConfig { method: "incremental".into(), ..Default::default() };
+        s.full_every_n = 0;
+        assert_eq!(s.rolls_over_after(), None, "ноль — это выключено");
+
+        s.full_every_n = 3;
+        assert_eq!(s.rolls_over_after(), Some(3));
+
+        // Единица — законная настройка: новая полная после каждого инкремента.
+        s.full_every_n = 1;
+        assert_eq!(s.rolls_over_after(), Some(1));
+
+        // Отдельный флаг говорит то же самое и по-прежнему главнее.
+        s.only_incremental = true;
+        assert_eq!(s.rolls_over_after(), None);
+    }
+
+    /// То же самое через планировщик: с нулём третий прогон обязан остаться
+    /// инкрементом, а не начать вторую цепочку.
+    #[test]
+    fn with_rollover_off_a_chain_keeps_growing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut job, run, _) = job_with_last(dir.path(), "incremental", "incremental", 1, true);
+        job.scheme.full_every_n = 0;
+        assert_eq!(plan_run(&job, Some(&run)).kind, "incremental");
+
+        // А с единицей — начинает, и это по-прежнему работает.
+        job.scheme.full_every_n = 1;
+        assert_eq!(plan_run(&job, Some(&run)), RunPlan::full());
     }
 }
