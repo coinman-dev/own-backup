@@ -89,7 +89,6 @@ implementation-unavailable error.
   operation/queue serialization (E5).
 - Retire local references after successful job deletion/rebinding, reporting
   cleanup failures without damaging portable slots.
-- Verify real SCM/LocalSystem access after an OS restart on a test VM.
 
 No GUI option or setup RPC has been enabled prematurely.
 
@@ -101,7 +100,8 @@ and loss of the local OS key. Native Windows tests run real DPAPI/DACL code
 under the disposable test account; production construction requires LocalSystem.
 The native tests cover reopening, inherited ACLs, hard links, size limits,
 ordinary-account rejection and same-user thread impersonation.
-These tests do not establish the SCM cold-start result.
+These tests do not by themselves establish the SCM cold-start result; the
+laboratory below does.
 
 Build the independent service probe:
 
@@ -118,6 +118,23 @@ Inside a disposable Windows VM, in Administrator PowerShell:
 ./scripts/test-seal-service.ps1 -Action Remove
 ```
 
+`scripts/wsl-windows-lab.sh` does all of that by itself, in a throwaway Windows
+VM under QEMU/KVM inside WSL — no VM has to exist beforehand and nothing touches
+the machine doing the work:
+
+```text
+scripts/wsl-windows-lab.sh prepare     # answer CD + blank disk
+scripts/wsl-windows-lab.sh install     # unattended Windows, install the probe, power off
+scripts/wsl-windows-lab.sh coldstart   # power on, nobody logs on, verify, power off
+scripts/wsl-windows-lab.sh status      # what the guest said over its serial port
+```
+
+The guest speaks through COM1 into a log file, so the evidence needs no
+networking, no shared folder and no console. `shot` photographs a phase that did
+not finish, which is how the answer file's missing `<ProductKey>` and its
+unanswered region page were found. Rerunning `coldstart` is another cold start:
+a startup task as SYSTEM refreshes its own script from the media and runs it.
+
 The script registers only automatic LocalSystem service `OwnBackupSealProbe`.
 It refuses an existing service/directory instead of overwriting it.
 The isolated fixture is under `ProgramData/OwnBackup-SealProbe-Lab`.
@@ -129,7 +146,7 @@ Verify requires a changed OS boot time and a successful post-boot report.
 Remove unregisters the probe service and leaves evidence/fixtures.
 The script does not initiate a reboot.
 
-The unsigned host test executable triggered Avast CyberCapture; the screenshot
-showed pending analysis, not a final verdict. Native reruns on this host were
-paused. No antivirus settings/exclusions were changed. The laboratory service
-has been built but not installed.
+The unsigned probe is never installed on a working machine: the laboratory VM
+is the whole point, and it also keeps the probe's service, its protected
+directory and its DPAPI blobs off a machine that would have to be cleaned by
+hand afterwards. No antivirus settings or exclusions were changed anywhere.
