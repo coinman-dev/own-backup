@@ -149,14 +149,18 @@
     </p>
 
     <div class="field-label">Введите ключ восстановления, чтобы подтвердить:</div>
-    <PasswordField
-      value={echo}
-      oninput={(v) => (echo = v)}
-      onenter={commit}
-      placeholder="obk1…"
-      invalid={!!error}
-      revealed={true}
-    />
+    <!-- Full width: it is sixty characters of bech32 copied off paper, and a
+         box that shows a third of it hides the typo being looked for. -->
+    <div class="wide-field">
+      <PasswordField
+        value={echo}
+        oninput={(v) => (echo = v)}
+        onenter={commit}
+        placeholder="obk1…"
+        invalid={!!error}
+        revealed={true}
+      />
+    </div>
     <p class="note">
       Пока он не введён, ничего не сохранено: задание останется без шифрования.
     </p>
@@ -178,6 +182,9 @@
     font-size: 12px;
     color: var(--text-muted);
     margin: 14px 0 5px;
+  }
+  .wide-field {
+    display: flex;
   }
   .note {
     margin: 8px 0 0;

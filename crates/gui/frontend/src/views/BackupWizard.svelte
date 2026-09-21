@@ -1808,19 +1808,27 @@
               </div>
             {:else if wantEncryption}
               <div class="enc-form">
-                <div class="field-label">Пароль архива:</div>
-                <PasswordField
-                  value={encPassword}
-                  oninput={(v) => (encPassword = v)}
-                  placeholder="Пароль архива"
-                />
-                <div class="field-label mt">Ещё раз:</div>
-                <PasswordField
-                  value={encPasswordAgain}
-                  oninput={(v) => (encPasswordAgain = v)}
-                  placeholder="Повторите пароль"
-                  invalid={encPasswordAgain.length > 0 && encPassword !== encPasswordAgain}
-                />
+                <!-- Side by side: the pair is one decision, and the row is
+                     wide enough to hold it without scrolling past it. -->
+                <div class="enc-pair">
+                  <div class="enc-cell">
+                    <div class="field-label">Пароль архива:</div>
+                    <PasswordField
+                      value={encPassword}
+                      oninput={(v) => (encPassword = v)}
+                      placeholder="Пароль архива"
+                    />
+                  </div>
+                  <div class="enc-cell">
+                    <div class="field-label">Ещё раз:</div>
+                    <PasswordField
+                      value={encPasswordAgain}
+                      oninput={(v) => (encPasswordAgain = v)}
+                      placeholder="Повторите пароль"
+                      invalid={encPasswordAgain.length > 0 && encPassword !== encPasswordAgain}
+                    />
+                  </div>
+                </div>
                 {#if encPassword.length > 0 && encPassword.length < MIN_ARCHIVE_PASSWORD}
                   <div class="note warn">Не короче {MIN_ARCHIVE_PASSWORD} символов.</div>
                 {:else if encPasswordAgain.length > 0 && encPassword !== encPasswordAgain}
@@ -2077,9 +2085,12 @@
   .adv-group { padding: 12px 0; border-bottom: 1px solid var(--border); }
   /* The password form that opens under the encryption switch: indented to the
      checkbox's text, so it reads as belonging to it. */
-  .enc-form { margin: 10px 0 2px 26px; max-width: 420px; }
+  .enc-form { margin: 10px 0 2px 26px; max-width: 760px; }
   .enc-form .field-label { margin-top: 0; }
-  .enc-form .field-label.mt { margin-top: 10px; }
+  /* The two password boxes share the row: on a narrow window they fall back
+     to one under the other rather than shrinking into uselessness. */
+  .enc-pair { display: flex; gap: 16px; flex-wrap: wrap; }
+  .enc-cell { display: flex; flex-direction: column; flex: 1 1 260px; min-width: 240px; }
   .adv-title { font-size: 13px; font-weight: 600; color: var(--primary); margin-bottom: 8px; }
   .adv-row { display: flex; align-items: center; justify-content: space-between; padding: 14px 4px; border-bottom: 1px solid var(--border); background: none; border-top: none; border-left: none; border-right: none; cursor: pointer; font-size: 14px; color: var(--head); font-family: var(--font); width: 100%; }
   .dev-badge { font-size: 11px; color: #a06a10; background: rgba(251,188,5,.15); padding: 3px 9px; border-radius: 10px; }

@@ -72,25 +72,29 @@
   </div>
 
   {#if mode === 'password'}
-    <PasswordField
-      value={password}
-      oninput={(v) => (password = v)}
-      onenter={submit}
-      placeholder="Пароль архива"
-      invalid={!!error}
-    />
+    <div class="wide-field">
+      <PasswordField
+        value={password}
+        oninput={(v) => (password = v)}
+        onenter={submit}
+        placeholder="Пароль архива"
+        invalid={!!error}
+      />
+    </div>
     <p class="note">Тот пароль, который был задан при включении шифрования этого задания.</p>
   {:else}
-    <!-- Shown, not masked: it is copied off paper, never memorised, and a
-         masked line of it hides the one typo that matters. -->
-    <PasswordField
-      value={recovery}
-      oninput={(v) => (recovery = v)}
-      onenter={submit}
-      placeholder="obk1…"
-      invalid={!!error}
-      revealed={true}
-    />
+    <!-- Shown, not masked, and full width: it is copied off paper, never
+         memorised, and a box that shows a third of it hides the typo. -->
+    <div class="wide-field">
+      <PasswordField
+        value={recovery}
+        oninput={(v) => (recovery = v)}
+        onenter={submit}
+        placeholder="obk1…"
+        invalid={!!error}
+        revealed={true}
+      />
+    </div>
     <p class="note">
       Строка, которую программа показала один раз при включении шифрования.
       Пробелы и регистр значения не имеют.
@@ -132,6 +136,9 @@
     background: var(--card-bg);
     border-color: var(--primary);
     color: var(--text);
+  }
+  .wide-field {
+    display: flex;
   }
   .note {
     margin: 8px 0 0;

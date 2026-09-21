@@ -934,6 +934,19 @@ pub fn read_image_sidecar_header(image_path: &Path) -> Result<(SidecarInfo, Imag
 /// `.obkm` file. Chain planners must accept either: images written since the
 /// embedded-sidecar change carry no external file at all.
 pub fn image_sidecar_readable(image_path: &Path) -> bool {
+    // An ENCRYPTED image keeps its sidecar sealed inside the container, so the
+    // two checks below both say "no" for one that is perfectly usable. The
+    // question being asked is whether this copy can be a chain parent, and for
+    // that the open header is the right authority: it is what the listing and
+    // the retention pass already group by, and the run that writes the child
+    // holds the key the sealed half needs.
+    //
+    // Answering "no" here was not a cosmetic wrong answer: the planners take it
+    // as "the parent is unusable" and fall back to a FULL backup — so every run
+    // of an encrypted job wrote a new full copy and no chain ever formed.
+    if detect_container_format(image_path).ok() == Some(crate::seal::obk::OBK_EXTENSION) {
+        return crate::seal::obk::read_listing(image_path).is_ok();
+    }
     let ext = image_path
         .extension()
         .and_then(|e| e.to_str())
@@ -1747,5 +1760,42 @@ mod tests {
         let want = boot_entries_reserve(Some(&backup));
         let json = backup.to_json().unwrap().len() as u64;
         assert!(want > json, "резерв должен покрывать сами данные и обрамление");
+    }
+
+    /// «Годится ли эта копия в родители» для зашифрованной копии отвечается
+    /// БЕЗ ключа — по открытому заголовку, тому же, по которому её находят
+    /// списки и ретеншн.
+    ///
+    /// Пока здесь отвечалось «нет», планировщик считал родителя непригодным и
+    /// каждый запуск шифрованного задания делал новую полную копию: цепочка не
+    /// складывалась никогда.
+    #[test]
+    fn an_encrypted_image_can_be_a_chain_parent_without_a_key() {
+        use crate::seal::obk::container_tests::Fixture;
+        use crate::seal::obk::ObkWriter;
+        use uuid::Uuid;
+
+        let f = Fixture::new();
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("j_C_full_1.obk");
+        let mut w = ObkWriter::create(
+            &image,
+            &f.chain,
+            f.options(Uuid::new_v4(), ChainRole::Full, None),
+        )
+        .unwrap();
+        w.write_cluster(0, &vec![7u8; 4096]).unwrap();
+        w.finish(b"sealed sidecar").unwrap();
+
+        assert!(!sidecar_path_for(&image).exists(), "рядом ничего не лежит");
+        assert!(
+            image_sidecar_readable(&image),
+            "зашифрованная копия обязана годиться в родители"
+        );
+
+        // А вот файл, который лишь называется образом, — нет.
+        let bogus = dir.path().join("j_C_full_2.obk");
+        std::fs::write(&bogus, b"not an image at all").unwrap();
+        assert!(!image_sidecar_readable(&bogus));
     }
 }
