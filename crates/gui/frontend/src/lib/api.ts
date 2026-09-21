@@ -28,7 +28,20 @@ import type {
   MediaBuildReport,
   ServiceStatus,
   MountBackendStatus,
+  ArchiveImageInfo,
+  ArchiveSecret,
+  BegunArchiveEncryption,
 } from './types';
+
+/** Spread a secret into a Tauri call's arguments, and nothing when there is
+ *  none — an absent field and an empty string mean different things to the
+ *  service, and only the first one means "this copy needs no key". */
+function secretArgs(secret?: ArchiveSecret): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (secret?.password) out.password = secret.password;
+  if (secret?.recoveryKey) out.recoveryKey = secret.recoveryKey;
+  return out;
+}
 
 export const api = {
   listDisks: () => invoke<DiskInfo[]>('list_disks'),
@@ -65,17 +78,48 @@ export const api = {
   listActivity: () => invoke<JobRun[]>('list_activity'),
 
   // --- engine ops (Restore / Tools) ---
-  restoreNow: (imagePath: string, target: string) =>
-    invoke<RestoreSummary>('restore_now', { imagePath, target }),
-  verifyNow: (imagePath: string) => invoke<VerifySummary>('verify_now', { imagePath }),
-  mountBackup: (imagePath: string, readWrite?: boolean) => invoke<string>('mount_backup', { imagePath, readWrite }),
+  // Each takes what the person typed to open an ENCRYPTED copy. A manual
+  // operation never borrows the service's own key (§7.4), so these have to
+  // carry it; `inspectImage` is how a screen learns to ask in the first place.
+  restoreNow: (imagePath: string, target: string, secret?: ArchiveSecret) =>
+    invoke<RestoreSummary>('restore_now', { imagePath, target, ...secretArgs(secret) }),
+  verifyNow: (imagePath: string, secret?: ArchiveSecret) =>
+    invoke<VerifySummary>('verify_now', { imagePath, ...secretArgs(secret) }),
+  mountBackup: (imagePath: string, readWrite?: boolean, secret?: ArchiveSecret) =>
+    invoke<string>('mount_backup', { imagePath, readWrite, ...secretArgs(secret) }),
   unmountBackup: (imagePath: string) => invoke<void>('unmount_backup', { imagePath }),
   readImageInfo: (imagePath: string) => invoke<ImageInfo>('read_image_info', { imagePath }),
+  /** What a copy is, WITHOUT any key. */
+  inspectImage: (imagePath: string) =>
+    invoke<ArchiveImageInfo>('inspect_backup_image', { imagePath }),
   listDiskBackups: (folder: string) => invoke<DiskBackup[]>('list_disk_backups', { folder }),
   listImageBackups: (folder: string) => invoke<ImageInfo[]>('list_image_backups', { folder }),
-  restoreDiskNow: (manifestPath: string, targetDisk: number, force: boolean) =>
-    invoke<DiskRestoreSummary>('restore_disk_now', { manifestPath, targetDisk, force }),
+  restoreDiskNow: (
+    manifestPath: string,
+    targetDisk: number,
+    force: boolean,
+    secret?: ArchiveSecret,
+  ) =>
+    invoke<DiskRestoreSummary>('restore_disk_now', {
+      manifestPath,
+      targetDisk,
+      force,
+      ...secretArgs(secret),
+    }),
   cancelEngineOp: () => invoke<void>('cancel_engine_op'),
+
+  // --- archive encryption (§7.5) ---
+  /** Prepare encryption for a job. Writes NOTHING: the recovery key comes back
+   *  once, and `confirmArchiveEncryption` commits only after it is typed back.
+   *  Slow — the service seals the key with Argon2id, seconds not milliseconds. */
+  beginArchiveEncryption: (job: Job, password: string) =>
+    invoke<BegunArchiveEncryption>('begin_archive_encryption', { job, password }),
+  /** Commit it; returns the stored job. */
+  confirmArchiveEncryption: (token: string, recoveryKey: string) =>
+    invoke<Job>('confirm_archive_encryption', { token, recoveryKey }),
+  /** The operator went back. Nothing was written, so there is nothing to undo. */
+  cancelArchiveEncryption: (token: string) =>
+    invoke<void>('cancel_archive_encryption', { token }),
 
   // --- restore plans (partition designer) ---
   // Only the dry run is wired up: it validates and writes nothing. Applying a

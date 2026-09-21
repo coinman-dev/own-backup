@@ -3,8 +3,59 @@
   import { pickPath } from '../lib/pickPath.svelte';
   import BootMediaCard from '../components/BootMediaCard.svelte';
   import { api } from '../lib/api';
-  import { engine, runVerify, toolsState, refreshVolumes } from '../lib/engineStore.svelte';
-  import type { ActiveMount } from '../lib/types';
+  import ArchiveUnlockModal from '../components/ArchiveUnlockModal.svelte';
+  import {
+    engine,
+    needsArchiveKey,
+    runVerify,
+    toolsState,
+    refreshVolumes,
+  } from '../lib/engineStore.svelte';
+  import type { ActiveMount, ArchiveSecret } from '../lib/types';
+
+  // --- Opening an encrypted copy (§7.4) ---
+  // A manual mount or check never borrows the service's key: whoever is at the
+  // screen types the password. The dialog is raised BEFORE the operation, so a
+  // copy that needs a key is not started and then refused.
+  let unlock = $state<{
+    open: boolean;
+    path: string;
+    busy: boolean;
+    error: string;
+    /** Called with whatever was typed, or with nothing when the copy is plain. */
+    run: ((secret?: ArchiveSecret) => Promise<void>) | null;
+  }>({ open: false, path: '', busy: false, error: '', run: null });
+
+  /** Run `op` on `path`, asking for a key first if the copy turns out to need
+   *  one. Everything the operation reports (including "wrong password") comes
+   *  back through the dialog while it is open. */
+  async function withArchiveKey(
+    path: string,
+    op: (secret?: ArchiveSecret) => Promise<void>,
+  ): Promise<void> {
+    if (!(await needsArchiveKey(path))) {
+      // The operation has already put its own failure on the screen; this
+      // catch only stops it escaping an onclick handler.
+      await op().catch(() => {});
+      return;
+    }
+    unlock = { open: true, path, busy: false, error: '', run: op };
+  }
+
+  async function submitUnlock(secret: ArchiveSecret) {
+    if (!unlock.run) return;
+    unlock.busy = true;
+    unlock.error = '';
+    try {
+      await unlock.run(secret);
+      unlock = { open: false, path: '', busy: false, error: '', run: null };
+    } catch (e) {
+      // Stay open: a wrong password is a thing to retype, not a screen to lose.
+      unlock.error = String(e);
+    } finally {
+      unlock.busy = false;
+    }
+  }
 
   let mountMsg: string | null = $state(null);
   let mountErr: string | null = $state(null);
@@ -82,7 +133,7 @@
     return () => clearInterval(interval);
   });
 
-  async function browse(setPath: (p: string) => void, extensions = ['vhdx', 'avhdx', 'qcow2']) {
+  async function browse(setPath: (p: string) => void, extensions = ['vhdx', 'avhdx', 'qcow2', 'obk']) {
     try {
       const picked = await pickPath({ directory: false, title: 'Выберите образ', extensions });
       if (typeof picked === 'string') setPath(picked);
@@ -92,12 +143,16 @@
   }
 
   async function mount() {
+    await withArchiveKey(toolsState.mountPath, mountWith);
+  }
+
+  async function mountWith(secret?: ArchiveSecret) {
     mountBusy = true;
     mountMsg = null;
     mountErr = null;
     isRefreshingDisks = true;
     try {
-      await api.mountBackup(toolsState.mountPath, toolsState.rwMode);
+      await api.mountBackup(toolsState.mountPath, toolsState.rwMode, secret);
       await Promise.all([loadData(), refreshVolumes()]);
       // The disk may need a moment for Windows to assign a letter; poll briefly.
       let letters = mountedLettersFor(toolsState.mountPath);
@@ -111,6 +166,9 @@
       mountMsg = `Подключено (${mode}): ${where}. Открыть можно в проводнике.`;
     } catch (e) {
       mountErr = String(e);
+      // Rethrown so a wrong password keeps the unlock dialog open with the
+      // reason in it, instead of closing as though the mount had worked.
+      throw e;
     } finally {
       mountBusy = false;
       isRefreshingDisks = false;
@@ -135,21 +193,35 @@
   }
 
   async function verify() {
+    await withArchiveKey(toolsState.verifyPath, verifyWith);
+  }
+
+  async function verifyWith(secret?: ArchiveSecret) {
     verifyBusy = true;
     verifyMsg = null;
     verifyErr = null;
     try {
-      const v = await runVerify(toolsState.verifyPath);
+      const v = await runVerify(toolsState.verifyPath, secret);
       verifyMsg = v.valid
         ? `Целостность подтверждена: ${v.blocks_checked} блоков за ${v.duration_secs.toFixed(1)} с.`
         : `ОШИБКА: повреждено блоков — ${v.mismatched_blocks.length} из ${v.blocks_checked}.`;
     } catch (e) {
       verifyErr = String(e);
+      throw e; // see mountWith
     } finally {
       verifyBusy = false;
     }
   }
 </script>
+
+<ArchiveUnlockModal
+  open={unlock.open}
+  imageName={unlock.path.split(/[\\/]/).pop() ?? unlock.path}
+  busy={unlock.busy}
+  error={unlock.error}
+  onUnlock={submitUnlock}
+  onCancel={() => (unlock = { open: false, path: '', busy: false, error: '', run: null })}
+/>
 
 <div class="page">
   <div class="inner">
@@ -174,7 +246,7 @@
         spellcheck="false"
         disabled={mountBusy}
       />
-      <button class="btn outline btn-browse" onclick={() => browse((p) => (toolsState.mountPath = p), ['vhdx', 'avhdx', 'qcow2'])} disabled={mountBusy}>
+      <button class="btn outline btn-browse" onclick={() => browse((p) => (toolsState.mountPath = p), ['vhdx', 'avhdx', 'qcow2', 'obk'])} disabled={mountBusy}>
         Обзор…
       </button>
     </div>

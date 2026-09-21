@@ -496,6 +496,43 @@ export interface DiskSourceSpec {
   bootable: boolean;
 }
 
+/** A job's archive key, as the service reports it. Present = this job's copies
+ *  are encrypted. Never settable through an ordinary save: it is created by the
+ *  two-step below and the service refuses any other route (§7.5). */
+export interface ArchiveEncryption {
+  portable_key: Record<string, unknown>;
+  local_key: Record<string, unknown>;
+}
+
+/** The answer to "prepare encryption for this job". The recovery key is in it
+ *  ONCE — it is not stored anywhere and cannot be asked for again. */
+export interface BegunArchiveEncryption {
+  token: string;
+  recovery_key: string;
+  fingerprint: string;
+  job_id: string;
+}
+
+/** What a copy says about itself without any key, so a screen can ask for a
+ *  password before it offers to open it rather than after it fails. */
+export interface ArchiveImageInfo {
+  container: string;
+  encrypted: boolean;
+  job_id: string;
+  fingerprint: string;
+  role: string;
+  created_at: string;
+  chain_id: string;
+  virtual_size: number;
+}
+
+/** What the person typed to open an encrypted copy. Both empty for an
+ *  unencrypted one. */
+export interface ArchiveSecret {
+  password?: string;
+  recoveryKey?: string;
+}
+
 export interface Job {
   id: string;
   name: string;
@@ -522,6 +559,11 @@ export interface Job {
   created_at: string;
   updated_at: string;
   last_run: JobRun | null;
+  /** Set once the job's copies are encrypted. Read-only from here: turning it
+   *  on goes through `beginArchiveEncryption` + `confirmArchiveEncryption`, and
+   *  there is no route that turns it off — the copies already written would
+   *  stay encrypted either way. */
+  archive_encryption?: ArchiveEncryption | null;
 }
 
 /** Result of decrypting an encrypted source in the wizard. */

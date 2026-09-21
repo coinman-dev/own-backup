@@ -128,6 +128,21 @@ export async function saveJob(job: Job): Promise<Job> {
   return saved;
 }
 
+/** Turn archive encryption on and store the job as one transaction.
+ *
+ *  Separate from `saveJob` because an ordinary save cannot do this — the
+ *  service refuses it there, so that a job and its key are never written
+ *  apart. `token` comes from `beginArchiveEncryption`; nothing has been
+ *  written until this returns. */
+export async function enableArchiveEncryption(
+  token: string,
+  recoveryKey: string,
+): Promise<Job> {
+  const saved = await api.confirmArchiveEncryption(token, recoveryKey);
+  await reloadJobs();
+  return saved;
+}
+
 /** Delete a job, optionally with its copies. Returns what actually went and
  *  what stayed — "delete the files" is not a promise that can always be kept,
  *  and saying nothing about the leftovers is how they go unnoticed. */

@@ -8,6 +8,7 @@
   import { diskSegments } from '../lib/diskLayout';
   import InfoModal from '../components/InfoModal.svelte';
   import PasswordField from '../components/PasswordField.svelte';
+  import ArchiveKeyModal from '../components/ArchiveKeyModal.svelte';
   import type { Job, DiskInfo, PartitionInfo } from '../lib/types';
 
   interface Props {
@@ -23,6 +24,18 @@
   let step = $state(0);
   let error: string | null = $state(null);
   let stubMsg: string | null = $state(null);
+
+  // --- Archive encryption (§7.5) ---
+  // A job that already has a key stays encrypted: the copies written with it
+  // cannot be un-encrypted by a setting, and replacing the key is a separate
+  // operation the service refuses from here. So the switch is only ever an
+  // on-switch, and it is locked once it is on.
+  const alreadyEncrypted = $derived(!!job.archive_encryption);
+  // svelte-ignore state_referenced_locally
+  let wantEncryption = $state(!!job.archive_encryption);
+  let keyModalOpen = $state(false);
+  /** Set when the save was interrupted to ask for a key: run the job after. */
+  let runAfterKey = $state(false);
   const stub = () =>
     (stubMsg = 'Эта настройка сохраняется, но пока не применяется — реализация позже.');
 
@@ -1109,9 +1122,29 @@
       const d = engine.disks.find((x) => diskNumber(x) === job.disk_source!.disk_number);
       if (d) job.disk_source = { ...job.disk_source, bootable: isBootableCopy(d) };
     }
+    // Turning encryption on cannot go through an ordinary save: the service
+    // refuses it there on purpose, because the job and its key have to be
+    // written as one transaction — and only after the recovery key has been
+    // confirmed. The dialog does both and hands back the stored job.
+    if (wantEncryption && !job.archive_encryption) {
+      runAfterKey = run;
+      keyModalOpen = true;
+      return;
+    }
     try {
       const saved = await saveJob(job);
       if (run) await runJob(saved.id);
+      onDone(saved);
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  /** The key dialog committed the job; carry on where `finish` left off. */
+  async function afterKeyEnabled(saved: Job) {
+    keyModalOpen = false;
+    try {
+      if (runAfterKey) await runJob(saved.id);
       onDone(saved);
     } catch (e) {
       error = String(e);
@@ -1623,7 +1656,7 @@
         <select
           bind:value={job.image_format}
           class="wide"
-          disabled={mode === 'edit' && job.last_run !== null}
+          disabled={(mode === 'edit' && job.last_run !== null) || wantEncryption}
         >
           <option value="vhdx">VHDX — стандарт Windows (по умолчанию)</option>
           <option value="qcow2">qcow2 — универсальный, со сжатием</option>
@@ -1636,6 +1669,45 @@
         {:else}
           <div class="note">Копия открывается самой Windows двойным кликом и видна как обычный диск — даже без Own Backup. Инкрементные цепочки и полное удаление исключённых файлов (NTFS/ReFS). Сжатия нет — файл больше; на Linux открывается через qemu-nbd.</div>
         {/if}
+
+        <!-- Encryption. Only ever an on-switch: copies already written cannot
+             be un-encrypted by a setting, and the service refuses to replace
+             an existing key from here. -->
+        <div class="field-label mt">Шифрование копий:</div>
+        <label class="chk">
+          <input
+            type="checkbox"
+            checked={wantEncryption}
+            disabled={alreadyEncrypted}
+            onchange={(e) => {
+              wantEncryption = (e.target as HTMLInputElement).checked;
+              if (wantEncryption) job.image_format = 'qcow2';
+            }}
+          />
+          Шифровать копии этого задания
+        </label>
+        {#if alreadyEncrypted}
+          <div class="note">
+            Задание уже зашифровано. Выключить шифрование нельзя — уже снятые копии
+            останутся зашифрованными в любом случае, — а смена ключа делается отдельно.
+          </div>
+        {:else if wantEncryption}
+          <div class="note">
+            Пароль и ключ восстановления запрашиваются при сохранении задания.
+            Формат образов будет .obk — наш контейнер: каждый кластер запечатан,
+            сведения о копии лежат внутри него. Посторонние программы (в том числе
+            <code>qemu-img</code>) откажутся его читать, назвав причину.<br />
+            Прочитать копию можно будет <b>только</b> этим паролем или ключом
+            восстановления: ни служба, ни мы не сможем открыть её иначе.
+          </div>
+        {:else}
+          <div class="note">
+            Копии будут читаться кем угодно, у кого есть файл. Шифрование имеет
+            смысл, если копии уезжают с машины — на внешний диск, в сетевую папку,
+            к кому-то ещё.
+          </div>
+        {/if}
+
         <div class="field-label mt">Метод резервного копирования:</div>
         <select bind:value={job.scheme.method} onchange={onMethodChange} class="wide">
           <option value="full">Полное</option>
@@ -1764,6 +1836,17 @@
 </div>
 
 {#if stubMsg}<InfoModal message={stubMsg} onClose={() => (stubMsg = null)} />{/if}
+
+<ArchiveKeyModal
+  open={keyModalOpen}
+  {job}
+  onDone={afterKeyEnabled}
+  onCancel={() => {
+    keyModalOpen = false;
+    // Nothing was saved. Leaving the switch on would offer the same dialog
+    // again on the next Save, which is what backing out of it means.
+  }}
+/>
 
 <style>
   .wizard { height: 100%; background: var(--content-bg); display: flex; flex-direction: column; overflow: hidden; }

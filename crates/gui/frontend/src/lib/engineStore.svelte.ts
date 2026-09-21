@@ -4,7 +4,13 @@
 import { listen } from '@tauri-apps/api/event';
 import { api } from './api';
 import { formatBytes } from './format';
-import type { DiskInfo, EngineProgress, RestoreSummary, VerifySummary } from './types';
+import type {
+  ArchiveSecret,
+  DiskInfo,
+  EngineProgress,
+  RestoreSummary,
+  VerifySummary,
+} from './types';
 
 export interface VolumeOption {
   device: string;
@@ -144,7 +150,25 @@ export function volumeLabel(device: string): string {
   return engine.volumes.find((v) => v.device === device)?.label ?? device;
 }
 
-export async function runRestore(imagePath: string, target: string): Promise<void> {
+/** Does this copy need a password before anything is done to it?
+ *
+ *  Asked BEFORE the operation, not after its refusal: a restore that gets far
+ *  enough to fail has already begun taking the target apart. An unreadable
+ *  file answers `false` — whatever is wrong with it is the operation's to
+ *  report, not this check's. */
+export async function needsArchiveKey(imagePath: string): Promise<boolean> {
+  try {
+    return (await api.inspectImage(imagePath)).encrypted;
+  } catch {
+    return false;
+  }
+}
+
+export async function runRestore(
+  imagePath: string,
+  target: string,
+  secret?: ArchiveSecret,
+): Promise<void> {
   if (engine.op) throw new Error('Уже выполняется другая операция.');
   engine.op = 'restore';
   engine.restoreProgress = null;
@@ -153,7 +177,7 @@ export async function runRestore(imagePath: string, target: string): Promise<voi
   restoreClock.startMs = 0;
   restoreClock.samples = [];
   try {
-    engine.restoreSummary = await api.restoreNow(imagePath, target);
+    engine.restoreSummary = await api.restoreNow(imagePath, target, secret);
   } catch (e) {
     engine.restoreError = String(e);
   } finally {
@@ -162,12 +186,15 @@ export async function runRestore(imagePath: string, target: string): Promise<voi
   }
 }
 
-export async function runVerify(imagePath: string): Promise<VerifySummary> {
+export async function runVerify(
+  imagePath: string,
+  secret?: ArchiveSecret,
+): Promise<VerifySummary> {
   if (engine.op) throw new Error('Уже выполняется другая операция.');
   engine.op = 'verify';
   engine.verifyProgress = null;
   try {
-    return await api.verifyNow(imagePath);
+    return await api.verifyNow(imagePath, secret);
   } finally {
     engine.op = null;
     engine.verifyProgress = null;

@@ -151,9 +151,10 @@
     const picked = await pickPath({
       directory: false,
       title: 'Резервная копия',
-      extensions: ['vhdx', 'avhdx', 'qcow2'],
+      extensions: ['vhdx', 'avhdx', 'qcow2', 'obk'],
     });
     if (typeof picked !== 'string') return;
+    if (await encryptedNotice(picked)) return;
     try {
       const info = await api.readImageInfo(picked);
       selectedId = addEntry(makeJobFromInfo(info));
@@ -161,6 +162,28 @@
     } catch (e) {
       addError = String(e);
     }
+  }
+
+  /** An encrypted copy cannot be described on this screen: everything it shows
+   *  — the disk layout, the partitions, the sizes — is sealed inside the
+   *  container and needs the key. Say that, rather than let the read fail with
+   *  a message about a missing sidecar.
+   *
+   *  Returns true when the copy was encrypted and the notice was shown. */
+  async function encryptedNotice(path: string): Promise<boolean> {
+    let info;
+    try {
+      info = await api.inspectImage(path);
+    } catch {
+      return false; // not readable at all — let the ordinary path report it
+    }
+    if (!info.encrypted) return false;
+    addError =
+      'Копия зашифрована. Этот экран показывает разделы из сведений внутри образа, ' +
+      'а они запечатаны — восстановление зашифрованных копий отсюда пока не подключено. ' +
+      'Проверить копию и подключить её как диск можно в «Инструментах» (там спрашивается пароль), ' +
+      'а восстановить том — командой own-backup-cli restore.';
+    return true;
   }
 
   // "+ Добавить копию" → пользователь выбрал «Папка с копиями»: авто-скан.
@@ -173,7 +196,7 @@
     const picked = await pickPath({
       directory: true,
       title: 'Папка с копиями',
-      extensions: ['vhdx', 'avhdx', 'qcow2'],
+      extensions: ['vhdx', 'avhdx', 'qcow2', 'obk'],
     });
     if (typeof picked !== 'string') return;
     try {

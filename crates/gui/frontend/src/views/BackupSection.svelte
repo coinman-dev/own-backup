@@ -209,7 +209,13 @@
             <input class="name-edit" bind:value={draftJob.name} spellcheck="false" onclick={(e) => e.stopPropagation()} />
           {:else}
             <div class="job-meta">
-              <div class="job-name">{job.name}</div>
+              <div class="job-name">
+                {job.name}{#if job.archive_encryption}<span
+                    class="enc-badge"
+                    title="Копии этого задания зашифрованы — для чтения нужен пароль или ключ восстановления"
+                    aria-label="Зашифровано">🔒</span
+                  >{/if}
+              </div>
               <div class="job-path">{job.dest_folder}</div>
             </div>
             <!-- Focusable AND activatable: it carried role="button" and a tab
@@ -318,6 +324,7 @@
   .status-dot { position: absolute; right: -2px; bottom: 0; width: 11px; height: 11px; border-radius: 50%; border: 2px solid var(--column-bg); }
   .job-meta { flex: 1; min-width: 0; }
   .job-name { font-size: 14px; font-weight: 600; color: var(--head); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .enc-badge { margin-left: 6px; font-size: 11px; opacity: 0.85; }
   .job-path { font-size: 12px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .name-edit { flex: 1; min-width: 0; font-size: 14px; font-weight: 600; color: var(--head); border: 1px solid var(--primary); border-radius: 4px; padding: 5px 8px; font-family: var(--font); outline: none; background: #fff; }
   .del { opacity: 0; color: var(--text-muted); font-size: 18px; line-height: 1; padding: 0 4px; }
