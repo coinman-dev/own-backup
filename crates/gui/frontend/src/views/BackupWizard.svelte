@@ -33,6 +33,13 @@
   const alreadyEncrypted = $derived(!!job.archive_encryption);
   // svelte-ignore state_referenced_locally
   let wantEncryption = $state(!!job.archive_encryption);
+  let encPassword = $state('');
+  let encPasswordAgain = $state('');
+  /** Matches the service's own floor; a slow KDF does not rescue a short one. */
+  const MIN_ARCHIVE_PASSWORD = 8;
+  const encryptionReady = $derived(
+    encPassword.length >= MIN_ARCHIVE_PASSWORD && encPassword === encPasswordAgain,
+  );
   let keyModalOpen = $state(false);
   /** Set when the save was interrupted to ask for a key: run the job after. */
   let runAfterKey = $state(false);
@@ -1127,6 +1134,17 @@
     // written as one transaction — and only after the recovery key has been
     // confirmed. The dialog does both and hands back the stored job.
     if (wantEncryption && !job.archive_encryption) {
+      if (!encryptionReady) {
+        error =
+          encPassword.length < MIN_ARCHIVE_PASSWORD
+            ? `Пароль архива короче ${MIN_ARCHIVE_PASSWORD} символов — «Дополнительно» → «Защита резервной копии».`
+            : 'Пароли архива не совпадают — «Дополнительно» → «Защита резервной копии».';
+        // `advanced` is never filtered out of `steps`, but a -1 would put the
+        // wizard on no step at all — worth one line not to depend on that.
+        const at = steps.findIndex((s) => s.key === 'advanced');
+        if (at >= 0) step = at;
+        return;
+      }
       runAfterKey = run;
       keyModalOpen = true;
       return;
@@ -1670,41 +1688,10 @@
           <div class="note">Копия открывается самой Windows двойным кликом и видна как обычный диск — даже без Own Backup. Инкрементные цепочки и полное удаление исключённых файлов (NTFS/ReFS). Сжатия нет — файл больше; на Linux открывается через qemu-nbd.</div>
         {/if}
 
-        <!-- Encryption. Only ever an on-switch: copies already written cannot
-             be un-encrypted by a setting, and the service refuses to replace
-             an existing key from here. -->
-        <div class="field-label mt">Шифрование копий:</div>
-        <label class="chk">
-          <input
-            type="checkbox"
-            checked={wantEncryption}
-            disabled={alreadyEncrypted}
-            onchange={(e) => {
-              wantEncryption = (e.target as HTMLInputElement).checked;
-              if (wantEncryption) job.image_format = 'qcow2';
-            }}
-          />
-          Шифровать копии этого задания
-        </label>
-        {#if alreadyEncrypted}
+        {#if wantEncryption}
           <div class="note">
-            Задание уже зашифровано. Выключить шифрование нельзя — уже снятые копии
-            останутся зашифрованными в любом случае, — а смена ключа делается отдельно.
-          </div>
-        {:else if wantEncryption}
-          <div class="note">
-            Пароль и ключ восстановления запрашиваются при сохранении задания.
-            Формат образов будет .obk — наш контейнер: каждый кластер запечатан,
-            сведения о копии лежат внутри него. Посторонние программы (в том числе
-            <code>qemu-img</code>) откажутся его читать, назвав причину.<br />
-            Прочитать копию можно будет <b>только</b> этим паролем или ключом
-            восстановления: ни служба, ни мы не сможем открыть её иначе.
-          </div>
-        {:else}
-          <div class="note">
-            Копии будут читаться кем угодно, у кого есть файл. Шифрование имеет
-            смысл, если копии уезжают с машины — на внешний диск, в сетевую папку,
-            к кому-то ещё.
+            Формат задан шифрованием: копии пишутся в наш контейнер .obk
+            (см. «Дополнительно» → «Защита резервной копии»).
           </div>
         {/if}
 
@@ -1794,7 +1781,70 @@
             <div class="adv-title">Проверка</div>
             <label class="chk"><input type="checkbox" bind:checked={job.advanced.validate_after} /> Проверять резервную копию после создания <span class="ok-badge">работает</span></label>
           </div>
-          <button class="adv-row" onclick={stub}><span>🔒 Защита резервной копии (пароль)</span><span class="dev-badge">в разработке</span></button>
+          <!-- Encryption. Only ever an on-switch: copies already written cannot
+               be un-encrypted by a setting, and replacing an existing key is a
+               separate operation the service refuses from here. -->
+          <div class="adv-group">
+            <div class="adv-title">Защита резервной копии</div>
+            <label class="chk">
+              <input
+                type="checkbox"
+                checked={wantEncryption}
+                disabled={alreadyEncrypted}
+                onchange={(e) => {
+                  wantEncryption = (e.target as HTMLInputElement).checked;
+                  if (wantEncryption) job.image_format = 'qcow2';
+                }}
+              />
+              🔒 Шифровать копии задания (задать пароль)
+              <span class="ok-badge">работает</span>
+            </label>
+
+            {#if alreadyEncrypted}
+              <div class="note">
+                Задание уже зашифровано. Выключить шифрование нельзя — уже снятые
+                копии останутся зашифрованными в любом случае, — а смена ключа
+                делается отдельно.
+              </div>
+            {:else if wantEncryption}
+              <div class="enc-form">
+                <div class="field-label">Пароль архива:</div>
+                <PasswordField
+                  value={encPassword}
+                  oninput={(v) => (encPassword = v)}
+                  placeholder="Пароль архива"
+                />
+                <div class="field-label mt">Ещё раз:</div>
+                <PasswordField
+                  value={encPasswordAgain}
+                  oninput={(v) => (encPasswordAgain = v)}
+                  placeholder="Повторите пароль"
+                  invalid={encPasswordAgain.length > 0 && encPassword !== encPasswordAgain}
+                />
+                {#if encPassword.length > 0 && encPassword.length < MIN_ARCHIVE_PASSWORD}
+                  <div class="note warn">Не короче {MIN_ARCHIVE_PASSWORD} символов.</div>
+                {:else if encPasswordAgain.length > 0 && encPassword !== encPasswordAgain}
+                  <div class="note warn">Пароли не совпадают.</div>
+                {/if}
+                <div class="note">
+                  Прочитать копии можно будет <b>только</b> этим паролем или ключом
+                  восстановления — ни служба, ни мы не сможем открыть их иначе.
+                  Ключ восстановления программа покажет один раз при сохранении
+                  задания, и его нужно будет записать.<br />
+                  Формат образов станет .obk — наш контейнер: каждый кластер
+                  запечатан, сведения о копии лежат внутри него, посторонние
+                  программы откажутся его читать, назвав причину. Уже снятые копии
+                  остаются как есть; шифроваться будут следующие.
+                </div>
+              </div>
+            {:else}
+              <div class="note">
+                Без пароля копию прочитает кто угодно, у кого есть файл. Шифрование
+                имеет смысл, если копии уезжают с машины — на внешний диск, в
+                сетевую папку, к кому-то ещё.
+              </div>
+            {/if}
+          </div>
           <button class="adv-row" onclick={stub}><span>⌘ Pre/Post-команды</span><span class="dev-badge">в разработке</span></button>
           <button class="adv-row" onclick={stub}><span>⚠ Обработка ошибок</span><span class="dev-badge">в разработке</span></button>
           <button class="adv-row" onclick={stub}><span>⏻ Выключение компьютера</span><span class="dev-badge">в разработке</span></button>
@@ -1840,6 +1890,7 @@
 <ArchiveKeyModal
   open={keyModalOpen}
   {job}
+  password={encPassword}
   onDone={afterKeyEnabled}
   onCancel={() => {
     keyModalOpen = false;
@@ -2024,6 +2075,11 @@
   .excl-add input { flex: 1; padding: 8px 12px; border: 1px solid var(--border); border-radius: 4px; font-size: 13px; }
   .adv { display: flex; flex-direction: column; gap: 4px; }
   .adv-group { padding: 12px 0; border-bottom: 1px solid var(--border); }
+  /* The password form that opens under the encryption switch: indented to the
+     checkbox's text, so it reads as belonging to it. */
+  .enc-form { margin: 10px 0 2px 26px; max-width: 420px; }
+  .enc-form .field-label { margin-top: 0; }
+  .enc-form .field-label.mt { margin-top: 10px; }
   .adv-title { font-size: 13px; font-weight: 600; color: var(--primary); margin-bottom: 8px; }
   .adv-row { display: flex; align-items: center; justify-content: space-between; padding: 14px 4px; border-bottom: 1px solid var(--border); background: none; border-top: none; border-left: none; border-right: none; cursor: pointer; font-size: 14px; color: var(--head); font-family: var(--font); width: 100%; }
   .dev-badge { font-size: 11px; color: #a06a10; background: rgba(251,188,5,.15); padding: 3px 9px; border-radius: 10px; }

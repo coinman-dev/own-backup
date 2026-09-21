@@ -53,6 +53,54 @@ pub async fn delete_backup_job(
     state.link.client().await?.delete_job(&id, delete_files).await
 }
 
+// --- Archive encryption (plan §7.5) --------------------------------------
+//
+// Turning it on is two steps and cannot go through `save_backup_job`: the
+// service refuses it there, so that a job and its key are written as one
+// transaction — and only once the operator holds the recovery key.
+
+/// Prepare encryption for a job. Writes NOTHING; the recovery key comes back
+/// once. Slow: the service seals the key with Argon2id, seconds not
+/// milliseconds.
+#[tauri::command]
+pub async fn begin_archive_encryption(
+    state: State<'_, GuiState>,
+    job: Job,
+    password: String,
+) -> Result<own_backup_client::BegunArchiveEncryption, String> {
+    state
+        .link
+        .client()
+        .await?
+        .begin_archive_encryption(&job, &password)
+        .await
+}
+
+/// Commit it, once the recovery key has been typed back. Returns the stored job.
+#[tauri::command]
+pub async fn confirm_archive_encryption(
+    state: State<'_, GuiState>,
+    token: String,
+    recovery_key: String,
+) -> Result<Job, String> {
+    state
+        .link
+        .client()
+        .await?
+        .confirm_archive_encryption(&token, &recovery_key)
+        .await
+}
+
+/// The operator went back. Nothing was written, so there is nothing to undo —
+/// this only releases the key the service is holding in memory.
+#[tauri::command]
+pub async fn cancel_archive_encryption(
+    state: State<'_, GuiState>,
+    token: String,
+) -> Result<(), String> {
+    state.link.client().await?.cancel_archive_encryption(&token).await
+}
+
 /// Unlock an encrypted (LUKS/BitLocker) source `volume` with `password`. The
 /// unlock + inner-filesystem probe opens the raw disk, so it runs in the
 /// privileged service (LocalSystem/root) — never in the unelevated GUI, which
