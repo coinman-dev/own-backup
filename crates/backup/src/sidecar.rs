@@ -817,6 +817,25 @@ pub fn read_embedded_sidecar_header(
 
 /// Read an image's full sidecar: embedded (inside the image) first, then the
 /// adjacent `.obkm` file (backups from before the embedded-sidecar change).
+/// The sidecar of an **encrypted** image: the same bytes a plaintext image
+/// keeps in its meta partition, sealed inside the container instead.
+///
+/// §7.3 keeps the guest meta partition out of `.obk` on purpose — the disk
+/// layout, machine name, volume labels, file categories, UEFI entries and the
+/// plaintext checksums are exactly what the sealed half is for. So this is the
+/// only way to read them, and it needs the chain key.
+pub fn read_sealed_sidecar(image_path: &Path, key: &crate::seal::ChainKey) -> Result<Sidecar> {
+    let mut reader = crate::seal::obk::ObkRandomReader::open(image_path, key)?;
+    let blob = reader.sealed_metadata()?;
+    if blob.is_empty() {
+        return Err(OwnBackupError::ImageFormat(format!(
+            "{}: the image carries no sidecar",
+            image_path.display()
+        )));
+    }
+    read_sidecar_from(&mut &blob[..])
+}
+
 pub fn read_image_sidecar(image_path: &Path) -> Result<Sidecar> {
     let ext = image_path
         .extension()

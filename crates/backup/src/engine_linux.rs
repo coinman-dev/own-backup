@@ -68,6 +68,9 @@ const VHDX_BLOCK_SIZE: u64 = 2 * MIB;
 enum LinuxImageWriter {
     Vhdx(crate::vhdx_format::VhdxWriter),
     Qcow2(crate::qcow2::Qcow2StagedWriter<std::io::BufWriter<std::fs::File>>),
+    /// The encrypted container. Its sidecar is not written into the guest at
+    /// all — it is handed to `finish` and sealed inside the image.
+    Obk(crate::seal::obk::ObkStagedWriter<std::io::BufWriter<std::fs::File>>),
 }
 
 impl LinuxImageWriter {
@@ -89,17 +92,37 @@ impl LinuxImageWriter {
         })
     }
 
+    /// Encryption is not a third format the user picks — it is the qcow2 path
+    /// with our incompatible extension, so a job that encrypts always writes
+    /// `.obk` whatever `image_format` says (§7.1).
+    fn create_encrypted(
+        path: &Path,
+        keys: &crate::seal::context::ArchiveKeys,
+        chain: &crate::seal::context::ChainSession,
+        plan: crate::seal::context::ImagePlan<'_>,
+    ) -> Result<Self> {
+        Ok(Self::Obk(crate::seal::obk::ObkStagedWriter::create(
+            path,
+            &chain.key,
+            keys.writer_options(chain, plan),
+        )?))
+    }
+
     fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()> {
         match self {
             Self::Vhdx(w) => w.write_at(offset, data),
             Self::Qcow2(w) => w.write_at(offset, data),
+            Self::Obk(w) => w.write_at(offset, data),
         }
     }
 
-    fn finish(self) -> Result<()> {
+    /// `sealed` is the sidecar of an encrypted image. The other two containers
+    /// have already written theirs into their guest meta partition.
+    fn finish(self, sealed: &[u8]) -> Result<()> {
         match self {
             Self::Vhdx(w) => w.finish(),
             Self::Qcow2(w) => w.finish().map(|_| ()),
+            Self::Obk(w) => w.finish(sealed).map(|_| ()),
         }
     }
 }
@@ -108,14 +131,26 @@ impl LinuxImageWriter {
 enum LinuxImageReader {
     Vhdx(crate::vhdx_format::VhdxReader),
     Qcow2(crate::qcow2::Qcow2RandomReader),
+    Obk(crate::seal::obk::ObkRandomReader),
 }
 
 impl LinuxImageReader {
     fn open(path: &Path, container: &str) -> Result<Self> {
-        match container {
-            "vhdx" => Ok(Self::Vhdx(crate::vhdx_format::VhdxReader::open(path)?)),
-            "qcow2" => Ok(Self::Qcow2(crate::qcow2::Qcow2RandomReader::open(path)?)),
-            other => Err(OwnBackupError::ImageFormat(format!(
+        Self::open_with(path, container, None)
+    }
+
+    /// `key` is the chain key of an encrypted image — without it an `.obk` is
+    /// refused by name rather than half-read.
+    fn open_with(path: &Path, container: &str, key: Option<&crate::seal::ChainKey>) -> Result<Self> {
+        match (container, key) {
+            ("vhdx", _) => Ok(Self::Vhdx(crate::vhdx_format::VhdxReader::open(path)?)),
+            ("qcow2", _) => Ok(Self::Qcow2(crate::qcow2::Qcow2RandomReader::open(path)?)),
+            ("obk", Some(key)) => Ok(Self::Obk(crate::seal::obk::ObkRandomReader::open(path, key)?)),
+            ("obk", None) => Err(OwnBackupError::Encryption(format!(
+                "{}: the image is encrypted — a password or the recovery key is needed to open it",
+                path.display()
+            ))),
+            (other, _) => Err(OwnBackupError::ImageFormat(format!(
                 "unknown image container '{other}' in sidecar"
             ))),
         }
@@ -125,6 +160,7 @@ impl LinuxImageReader {
         match self {
             Self::Vhdx(r) => r.read_at(offset, buf),
             Self::Qcow2(r) => r.read_at(offset, buf),
+            Self::Obk(r) => r.read_at(offset, buf),
         }
     }
 
@@ -132,6 +168,7 @@ impl LinuxImageReader {
         match self {
             Self::Vhdx(r) => r.virtual_size(),
             Self::Qcow2(r) => r.virtual_size(),
+            Self::Obk(r) => r.virtual_size(),
         }
     }
 }
@@ -144,6 +181,45 @@ impl crate::block_source::BlockSource for LinuxImageReader {
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
         LinuxImageReader::read_at(self, offset, buf)
     }
+}
+
+/// The sidecar of an image, wherever it keeps it: sealed inside an encrypted
+/// container, in the guest meta partition of a plaintext one, or in the
+/// adjacent `.obkm` of an older copy.
+fn read_sidecar_for(
+    image_path: &Path,
+    keys: Option<&crate::seal::context::ArchiveKeys>,
+) -> Result<(crate::sidecar::Sidecar, Option<crate::seal::ChainKey>)> {
+    let ext = image_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_lowercase();
+    if ext == crate::seal::obk::OBK_EXTENSION {
+        let keys = keys.ok_or_else(|| {
+            OwnBackupError::Encryption(format!(
+                "{}: the image is encrypted — a password or the recovery key is needed to open it",
+                image_path.display()
+            ))
+        })?;
+        let chain = keys.open_chain_of(image_path)?;
+        let sidecar = crate::sidecar::read_sealed_sidecar(image_path, &chain.key)?;
+        return Ok((sidecar, Some(chain.key)));
+    }
+    let sidecar = match read_embedded_sidecar(image_path, &ext) {
+        Ok(s) => s,
+        Err(e) => {
+            let sidecar_path = sidecar_path_for(image_path);
+            if !sidecar_path.exists() {
+                return Err(OwnBackupError::ImageFormat(format!(
+                    "embedded sidecar not found ({e}) and adjacent sidecar not found: {}",
+                    sidecar_path.display()
+                )));
+            }
+            read_sidecar(&sidecar_path)?
+        }
+    };
+    Ok((sidecar, None))
 }
 
 /// Parameters for a Linux volume backup.
@@ -163,6 +239,10 @@ pub struct LinuxBackupRequest {
     pub job_id: Option<String>,
     /// Image container format: VHDX (default) or zstd-compressed qcow2.
     pub image_format: ImageFormat,
+    /// Present for an encrypted job: the keys opened before the run started
+    /// (the service's own, or a password's). The run then asks nobody anything
+    /// and writes `.obk` whatever `image_format` says.
+    pub encryption: Option<crate::seal::context::ArchiveKeys>,
 }
 
 /// Outcome of a completed Linux backup.
@@ -186,6 +266,23 @@ pub fn backup_volume(
     req: &LinuxBackupRequest,
     progress: impl FnMut(&BackupProgress) -> Result<()>,
 ) -> Result<LinuxBackupSummary> {
+    if req.encryption.is_some()
+        && req
+            .image_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase())
+            .as_deref()
+            != Some(crate::seal::obk::OBK_EXTENSION)
+    {
+        // Listings and retention find encrypted images by this extension; a
+        // differently named one would be invisible to both.
+        return Err(OwnBackupError::Config(format!(
+            "an encrypted image must be named .{}: {}",
+            crate::seal::obk::OBK_EXTENSION,
+            req.image_path.display()
+        )));
+    }
     if req.image_path.exists() {
         return Err(OwnBackupError::Config(format!(
             "output image already exists: {}",
@@ -310,9 +407,42 @@ fn backup_inner(
         Unlock::Luks(p) => Some(p.data_offset),
         _ => None,
     });
-    let meta_size = crate::sidecar::calculate_meta_partition_size(total_blocks, luks_reserve);
+    // An encrypted image keeps its sidecar sealed inside the container, so it
+    // needs no guest meta partition and no room for one (§7.3).
+    let encrypted = req.encryption.is_some();
+    let meta_size = if encrypted {
+        0
+    } else {
+        crate::sidecar::calculate_meta_partition_size(total_blocks, luks_reserve)
+    };
     let disk_size = DEFAULT_PARTITION_OFFSET + volume_len.div_ceil(MIB) * MIB + meta_size + MIB;
-    let mut writer = LinuxImageWriter::create(req.image_format, &req.image_path, disk_size, sector_size)?;
+    let backup_id = Uuid::new_v4();
+    let created_at = chrono::Utc::now().to_rfc3339();
+    let chain = match &req.encryption {
+        Some(keys) => Some(keys.start_chain()?),
+        None => None,
+    };
+    let mut writer = match (&req.encryption, &chain) {
+        (Some(keys), Some(chain)) => LinuxImageWriter::create_encrypted(
+            &req.image_path,
+            keys,
+            chain,
+            crate::seal::context::ImagePlan {
+                backup_id,
+                role: crate::sidecar::ChainRole::Full,
+                parent: None,
+                created_at: created_at.clone(),
+                virtual_size: disk_size,
+                source_id: None,
+                consolidated_increments: 0,
+                chain_started_at: None,
+                compression: crate::seal::obk::ObkCompression::Zstd {
+                    level: crate::qcow2::DEFAULT_ZSTD_LEVEL,
+                },
+            },
+        )?,
+        _ => LinuxImageWriter::create(req.image_format, &req.image_path, disk_size, sector_size)?,
+    };
     let data_offset = DEFAULT_PARTITION_OFFSET;
 
     // --- GPT with Basic Data partition + OwnBackupMeta partition ---
@@ -326,15 +456,14 @@ fn backup_inner(
         disk_guid,
         partition_guid: Uuid::new_v4(),
         partition_name: "OwnBackup".into(),
-        meta_partition_size: Some(meta_size),
-        meta_partition_guid: Some(meta_partition_guid),
+        meta_partition_size: (!encrypted).then_some(meta_size),
+        meta_partition_guid: (!encrypted).then_some(meta_partition_guid),
     };
     for op in gpt_write_ops(&layout)? {
         writer.write_at(op.offset, &op.bytes)?;
     }
 
     // --- Copy used blocks into the partition ---
-    let backup_id = Uuid::new_v4();
     let mut reader: Box<dyn BlockReader> =
         Box::new(RawVolumeBlockReader::new(open_source(&unlock)?, req.block_size)?);
     let outcome = copy_used_blocks(
@@ -349,7 +478,9 @@ fn backup_inner(
     // --- Sidecar + manifest ---
     let manifest = ImageManifest {
         backup_id,
-        created_at: chrono::Utc::now().to_rfc3339(),
+        // The same stamp the open header carries, so a reader holding the key
+        // can check the two halves against each other.
+        created_at: created_at.clone(),
         backup_type: BackupType::Full,
         parent_backup_id: None,
         source_os: "linux".into(),
@@ -409,21 +540,28 @@ fn backup_inner(
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let mut sidecar_info = SidecarInfo::new_full(image_file_name, data_offset);
-    sidecar_info.container = req.image_format.extension().into();
+    sidecar_info.container = if encrypted {
+        crate::seal::obk::OBK_EXTENSION.into()
+    } else {
+        req.image_format.extension().into()
+    };
     sidecar_info.job_id = req.job_id.clone();
     sidecar_info.filesystem = detected_fs;
     let sidecar_path = sidecar_path_for(&req.image_path);
 
 
-    // M0: Write embedded sidecar v2 to the meta partition
-    let sector = sector_size as u64;
-    let last_lba = (DEFAULT_PARTITION_OFFSET + volume_len).div_ceil(sector) - 1;
-    let meta_offset = (last_lba + 1) * sector;
+    // The sidecar: into the guest meta partition for a plaintext image, sealed
+    // inside the container for an encrypted one. Never both, and never in the
+    // clear next to an encrypted image.
     let mut blob_bytes = Vec::new();
     crate::sidecar::write_sidecar_v2_to(&mut blob_bytes, &sidecar_info, &manifest, &outcome.checksums)?;
-    writer.write_at(meta_offset, &blob_bytes)?;
-
-    writer.finish()?;
+    if !encrypted {
+        let sector = sector_size as u64;
+        let last_lba = (DEFAULT_PARTITION_OFFSET + volume_len).div_ceil(sector) - 1;
+        let meta_offset = (last_lba + 1) * sector;
+        writer.write_at(meta_offset, &blob_bytes)?;
+    }
+    writer.finish(&blob_bytes)?;
 
     info!(
         image = %req.image_path.display(),
@@ -455,6 +593,9 @@ pub struct LinuxRestoreRequest {
     pub target: String,
     /// Verify each block's checksum while restoring.
     pub verify_checksums: bool,
+    /// Keys for an encrypted image: the service's own for an automatic check,
+    /// or a password's/recovery key's for a person restoring by hand.
+    pub encryption: Option<crate::seal::context::ArchiveKeys>,
 }
 
 /// Outcome of a completed restore.
@@ -473,25 +614,16 @@ pub fn restore_volume(
     mut progress: impl FnMut(&RestoreProgress) -> Result<()>,
 ) -> Result<LinuxRestoreSummary> {
     let started = Instant::now();
-    let ext = req.image_path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_lowercase();
-    let sidecar = match read_embedded_sidecar(&req.image_path, &ext) {
-        Ok(s) => s,
-        Err(e) => {
-            let sidecar_path = sidecar_path_for(&req.image_path);
-            if !sidecar_path.exists() {
-                return Err(OwnBackupError::ImageFormat(format!(
-                    "embedded sidecar not found ({e}) and adjacent sidecar not found: {}",
-                    sidecar_path.display()
-                )));
-            }
-            read_sidecar(&sidecar_path)?
-        }
-    };
+    let (sidecar, chain_key) = read_sidecar_for(&req.image_path, req.encryption.as_ref())?;
     let block_size = sidecar.manifest.block_size as u64;
     let volume_len = sidecar.manifest.source_disk.size_bytes;
     let data_offset = sidecar.info.volume_data_offset;
 
-    let mut image = LinuxImageReader::open(&req.image_path, &sidecar.info.container)?;
+    let mut image = LinuxImageReader::open_with(
+        &req.image_path,
+        &sidecar.info.container,
+        chain_key.as_ref(),
+    )?;
     let mut target = LinuxRawDevice::open_write(&req.target)?;
     if target.length() < volume_len {
         return Err(OwnBackupError::RestoreIncompatible(format!(
@@ -735,27 +867,26 @@ impl VerifySummary {
 /// Verify every recorded block of a raw image against its sidecar checksums.
 pub fn verify_image(
     image_path: &Path,
+    progress: impl FnMut(u64, u64) -> Result<()>,
+) -> Result<VerifySummary> {
+    verify_image_with_keys(image_path, None, progress)
+}
+
+/// The same check for an encrypted image. With the key this is the full check
+/// §7.4 asks for — the record tags and the authenticated index decide whether
+/// the bytes are ours before their checksums are even computed.
+pub fn verify_image_with_keys(
+    image_path: &Path,
+    keys: Option<&crate::seal::context::ArchiveKeys>,
     mut progress: impl FnMut(u64, u64) -> Result<()>,
 ) -> Result<VerifySummary> {
-    let ext = image_path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_lowercase();
-    let sidecar = match read_embedded_sidecar(image_path, &ext) {
-        Ok(s) => s,
-        Err(e) => {
-            let sidecar_path = sidecar_path_for(image_path);
-            if !sidecar_path.exists() {
-                return Err(OwnBackupError::ImageFormat(format!(
-                    "embedded sidecar not found ({e}) and adjacent sidecar not found: {}",
-                    sidecar_path.display()
-                )));
-            }
-            read_sidecar(&sidecar_path)?
-        }
-    };
+    let (sidecar, chain_key) = read_sidecar_for(image_path, keys)?;
     let block_size = sidecar.manifest.block_size as u64;
     let volume_len = sidecar.manifest.source_disk.size_bytes;
     let data_offset = sidecar.info.volume_data_offset;
 
-    let mut dev = LinuxImageReader::open(image_path, &sidecar.info.container)?;
+    let mut dev =
+        LinuxImageReader::open_with(image_path, &sidecar.info.container, chain_key.as_ref())?;
     let total = sidecar.checksums.len() as u64;
     let mut checked = 0u64;
     let mut mismatched = Vec::new();
@@ -783,6 +914,138 @@ mod tests {
         Ok(())
     }
 
+    /// The keys a test job works with. The minimum production KDF profile, not
+    /// the unit-test one: this module is outside `seal`, and using the real
+    /// profile also proves the ordinary library path works.
+    fn test_keys() -> crate::seal::context::ArchiveKeys {
+        use crate::seal::keypair::{JobKeyPair, KdfParams, SealedPrivateKey};
+        use crate::seal::recovery::RecoveryKey;
+        let pair = JobKeyPair::generate().unwrap();
+        let recovery = RecoveryKey::generate().unwrap();
+        let kdf = KdfParams {
+            algorithm: "argon2id".into(),
+            m_kib: 64 * 1024,
+            t: 3,
+            p: 1,
+        };
+        let envelope =
+            SealedPrivateKey::seal("job-encrypted", &pair, "пароль архива", &recovery, &kdf)
+                .unwrap();
+        crate::seal::context::ArchiveKeys::from_private(envelope, pair.private).unwrap()
+    }
+
+    /// A whole encrypted backup, end to end: the image is not readable without
+    /// the key, holds none of the source's plaintext, is listed as a chain
+    /// without any key at all, and restores byte-for-byte with one.
+    #[test]
+    fn an_encrypted_backup_round_trips_and_is_unreadable_without_its_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.bin");
+        // Repeating marker text: the friendliest possible case for anyone
+        // grepping the image afterwards.
+        let content: Vec<u8> = b"secret-payload--".repeat(4 * 1024 * 1024 / 16);
+        std::fs::write(&src, &content).unwrap();
+
+        let img = dir.path().join("full.obk");
+        let summary = backup_volume(
+            &LinuxBackupRequest {
+                source: src.to_str().unwrap().to_string(),
+                image_path: img.clone(),
+                block_size: DEFAULT_BLOCK_SIZE,
+                all_sectors: false,
+                passphrase: None,
+                job_id: Some("job-encrypted".into()),
+                image_format: ImageFormat::Qcow2,
+                encryption: Some(test_keys()),
+            },
+            no_progress,
+        )
+        .unwrap();
+        assert!(summary.bytes_copied >= content.len() as u64);
+
+        // Nothing of the source survives in the clear, and no plaintext
+        // sidecar was written beside the image.
+        let raw = std::fs::read(&img).unwrap();
+        assert!(
+            !raw.windows(16).any(|w| w == b"secret-payload--"),
+            "plaintext data survived into the encrypted image"
+        );
+        assert!(!sidecar_path_for(&img).exists(), "no sidecar file beside an .obk");
+
+        // A plaintext reader refuses it, and so does verify without a key.
+        assert!(crate::qcow2::Qcow2RandomReader::open(&img).is_err());
+        let error = verify_image(&img, |_, _| Ok(())).unwrap_err().to_string();
+        assert!(error.contains("encrypted"), "unexpected: {error}");
+
+        // With the key the image verifies and restores byte-for-byte. The key
+        // comes from the image's own portable envelope and the password — what
+        // another machine or a boot medium has, and nothing else.
+        let keys =
+            crate::seal::context::ArchiveKeys::from_image_password(&img, "пароль архива").unwrap();
+        let verified = verify_image_with_keys(&img, Some(&keys), |_, _| Ok(())).unwrap();
+        assert!(verified.valid(), "mismatches: {:?}", verified.mismatched_blocks);
+
+        let target = dir.path().join("restored.bin");
+        std::fs::File::create(&target)
+            .unwrap()
+            .set_len(content.len() as u64)
+            .unwrap();
+        let restored = restore_volume(
+            &LinuxRestoreRequest {
+                image_path: img.clone(),
+                target: target.to_str().unwrap().to_string(),
+                verify_checksums: true,
+                encryption: Some(
+                    crate::seal::context::ArchiveKeys::from_image_password(&img, "пароль архива")
+                        .unwrap(),
+                ),
+            },
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(restored.blocks_restored, summary.used_blocks);
+        assert_eq!(std::fs::read(&target).unwrap(), content);
+
+        // A listing sees the chain without any key.
+        let chains = crate::chains::list_job_chains(dir.path(), "job-encrypted").unwrap();
+        assert_eq!(chains.len(), 1);
+        assert_eq!(chains[0].images.len(), 1);
+        assert_eq!(chains[0].images[0].container, "obk");
+
+        // Another key of the same job name opens nothing, and neither does a
+        // wrong password.
+        let stranger = test_keys();
+        assert!(verify_image_with_keys(&img, Some(&stranger), |_, _| Ok(())).is_err());
+        assert!(crate::seal::context::ArchiveKeys::from_image_password(&img, "не тот").is_err());
+    }
+
+    /// An encrypted image must be named so that listings and retention can
+    /// find it at all.
+    #[test]
+    fn an_encrypted_image_must_carry_the_obk_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.bin");
+        std::fs::write(&src, vec![3u8; 1 << 20]).unwrap();
+        let error = backup_volume(
+            &LinuxBackupRequest {
+                source: src.to_str().unwrap().to_string(),
+                image_path: dir.path().join("full.qcow2"),
+                block_size: DEFAULT_BLOCK_SIZE,
+                all_sectors: false,
+                passphrase: None,
+                job_id: None,
+                image_format: ImageFormat::Qcow2,
+                encryption: Some(test_keys()),
+            },
+            no_progress,
+        );
+        let Err(error) = error else {
+            panic!("an encrypted image named .qcow2 must be refused");
+        };
+        let error = error.to_string();
+        assert!(error.contains(".obk"), "unexpected: {error}");
+    }
+
     /// End-to-end on a real ext4 image: back up used blocks into a raw image and
     /// verify. `cargo test -p own-backup-backup -- --ignored` (needs mkfs.ext4).
     #[test]
@@ -806,6 +1069,7 @@ mod tests {
             passphrase: None,
             job_id: None,
             image_format: ImageFormat::Vhdx,
+            encryption: None,
         };
         let sum = backup_volume(&req, no_progress).unwrap();
         assert!(sum.smart_mode);
@@ -847,6 +1111,7 @@ mod tests {
                 passphrase: None,
                 job_id: None,
                 image_format: ImageFormat::Vhdx,
+                encryption: None,
             },
             no_progress,
         )
@@ -860,6 +1125,7 @@ mod tests {
                 image_path: img,
                 target: tgt.to_str().unwrap().to_string(),
                 verify_checksums: true,
+                encryption: None,
             },
             |_| Ok(()),
         )
@@ -898,6 +1164,7 @@ mod tests {
                 passphrase: None,
                 job_id: None,
                 image_format: ImageFormat::Qcow2,
+                encryption: None,
             },
             no_progress,
         )
@@ -929,6 +1196,7 @@ mod tests {
                 image_path: img,
                 target: tgt.to_str().unwrap().to_string(),
                 verify_checksums: true,
+                encryption: None,
             },
             |_| Ok(()),
         )
@@ -985,6 +1253,7 @@ mod tests {
                 passphrase: None,
                 job_id: None,
                 image_format: ImageFormat::Qcow2,
+                encryption: None,
             },
             no_progress,
         )

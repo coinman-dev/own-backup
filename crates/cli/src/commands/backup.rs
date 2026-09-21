@@ -207,6 +207,7 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
         passphrase: args.password.clone().map(zeroize::Zeroizing::new),
         job_id: None,
         image_format: args.format,
+        encryption: None,
     };
 
     println!("Backing up {} -> {} ({})", args.source, args.output, args.format);

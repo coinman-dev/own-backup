@@ -2691,6 +2691,7 @@ async fn perform_backup(
             passphrase: passwords.resolve(&token),
             job_id: Some(job.id.clone()),
             image_format: job.image_format,
+            encryption: None,
         };
         let validate_after = job.advanced.validate_after;
         let sink_bg = sink.clone();

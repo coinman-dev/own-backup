@@ -342,10 +342,26 @@ fn match_path(pat: &[String], path: &[String]) -> bool {
 }
 
 /// Parse a raw pattern list, dropping empties.
+/// Patterns every backup applies, whatever the user's list says.
+///
+/// The service's local key store is the one directory that must never be in a
+/// copy. It holds the DPAPI-protected private job keys that let the service
+/// open archives without a password, and restoring Windows from a backup must
+/// not quietly restore that permission along with it — on a new installation it
+/// is arranged again, deliberately (`seal/LOCAL.md`). The name is ours and
+/// unique, so excluding it wherever it appears costs nothing else.
+///
+/// This is not a default the user can remove: it is added here, in the one
+/// place every scanner (NTFS `$MFT`, the Windows tree walk, ext/xfs/btrfs/FAT)
+/// turns patterns into rules. A raw sector copy runs no scanner at all and must
+/// be refused separately by the engine.
+pub const MANDATORY_EXCLUSIONS: &[&str] = &[crate::seal::local::KEY_DIRECTORY_NAME];
+
 pub fn parse_patterns(patterns: &[String]) -> Vec<ExclusionPattern> {
-    patterns
+    MANDATORY_EXCLUSIONS
         .iter()
         .filter_map(|p| ExclusionPattern::parse(p))
+        .chain(patterns.iter().filter_map(|p| ExclusionPattern::parse(p)))
         .collect()
 }
 
@@ -524,6 +540,35 @@ impl<R: BlockReader> BlockReader for ZeroingBlockReader<R> {
 
     fn total_blocks(&self) -> u64 {
         self.inner.total_blocks()
+    }
+}
+
+#[cfg(test)]
+mod mandatory_tests {
+    use super::*;
+
+    fn matches(patterns: &[String], path: &str) -> bool {
+        let parsed = parse_patterns(patterns);
+        let rel: Vec<String> = path.split('/').map(|c| c.to_lowercase()).collect();
+        let name = rel.last().cloned().unwrap_or_default();
+        parsed.iter().any(|p| p.matches(&name, &rel))
+    }
+
+    #[test]
+    fn the_service_key_store_is_excluded_whatever_the_user_asked_for() {
+        let store = crate::seal::local::KEY_DIRECTORY_NAME;
+        // No user rules at all, and it is still excluded — wherever it sits.
+        assert!(matches(&[], store));
+        assert!(matches(&[], &format!("ProgramData/OwnBackup/{store}")));
+        assert!(matches(
+            &["*.tmp".into()],
+            &format!("Users/lab/AppData/OwnBackup/{store}")
+        ));
+        // The user's own rules keep working next to it.
+        assert!(matches(&["*.tmp".into()], "Users/lab/note.tmp"));
+        assert!(!matches(&["*.tmp".into()], "Users/lab/note.txt"));
+        // And nothing else gets swept up by the mandatory rule.
+        assert!(!matches(&[], "ProgramData/OwnBackup/jobs.json"));
     }
 }
 
@@ -711,7 +756,11 @@ mod tests {
         assert!(ExclusionPattern::parse("").is_none());
         assert!(ExclusionPattern::parse("  ").is_none());
         assert!(ExclusionPattern::parse("\\").is_none());
-        assert_eq!(parse_patterns(&["".into(), "*.tmp".into()]).len(), 1);
+        // The user's list minus the empty entry, plus the mandatory rules.
+        assert_eq!(
+            parse_patterns(&["".into(), "*.tmp".into()]).len(),
+            MANDATORY_EXCLUSIONS.len() + 1
+        );
     }
 
     #[test]

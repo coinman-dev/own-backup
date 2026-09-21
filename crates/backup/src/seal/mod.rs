@@ -9,6 +9,7 @@
 //! Windows key storage and engine integration are separate stages.
 
 pub mod cluster;
+pub mod context;
 pub mod keypair;
 pub mod local;
 pub mod obk;

@@ -105,6 +105,7 @@ pub async fn run(args: RestoreArgs) -> own_backup_common::Result<()> {
         image_path: std::path::PathBuf::from(&args.input),
         target: args.target.clone(),
         verify_checksums: !args.no_verify,
+        encryption: None,
     };
     let summary = tokio::task::spawn_blocking(move || {
         let mut last_percent = u64::MAX;
