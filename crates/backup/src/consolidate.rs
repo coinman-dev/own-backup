@@ -145,6 +145,14 @@ fn container_of(path: &Path) -> Result<&'static str> {
     {
         "vhdx" | "avhdx" => Ok("vhdx"),
         "qcow2" => Ok("qcow2"),
+        // Folding an increment into its base means reading and rewriting both,
+        // which needs the chain key and a merge that speaks the sealed format.
+        // Until that exists the chain is left exactly as it is: longer than the
+        // window asked for, and correct.
+        "obk" => Err(OwnBackupError::Encryption(format!(
+            "объединение копий в зашифрованной цепочке ещё не поддержано —              цепочка оставлена как есть: {}",
+            path.display()
+        ))),
         other => Err(OwnBackupError::ImageFormat(format!(
             "cannot consolidate a {other:?} image: {}",
             path.display()
