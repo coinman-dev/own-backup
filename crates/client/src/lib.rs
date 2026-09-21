@@ -337,8 +337,11 @@ impl BackupClient {
         &mut self,
         image_path: &str,
         target: &str,
+        secret: &ArchiveSecret,
     ) -> Result<own_backup_common::engine_dto::RestoreSummaryDto> {
-        let json = serde_json::json!({ "image_path": image_path, "target": target }).to_string();
+        let mut body = serde_json::json!({ "image_path": image_path, "target": target });
+        secret.add_to(&mut body);
+        let json = body.to_string();
         let reply = self
             .inner
             .restore_volume(self.request(proto::JsonRequest { json }))
@@ -352,8 +355,11 @@ impl BackupClient {
     pub async fn verify_image(
         &mut self,
         image_path: &str,
+        secret: &ArchiveSecret,
     ) -> Result<own_backup_common::engine_dto::VerifySummaryDto> {
-        let json = serde_json::json!({ "image_path": image_path }).to_string();
+        let mut body = serde_json::json!({ "image_path": image_path });
+        secret.add_to(&mut body);
+        let json = body.to_string();
         let reply = self
             .inner
             .verify_image(self.request(proto::JsonRequest { json }))
@@ -364,8 +370,16 @@ impl BackupClient {
     }
 
     /// Mount an image; returns where it appeared.
-    pub async fn mount_image(&mut self, image_path: &str, read_write: bool) -> Result<String> {
-        let json = serde_json::json!({ "image_path": image_path, "read_write": read_write }).to_string();
+    pub async fn mount_image(
+        &mut self,
+        image_path: &str,
+        read_write: bool,
+        secret: &ArchiveSecret,
+    ) -> Result<String> {
+        let mut body =
+            serde_json::json!({ "image_path": image_path, "read_write": read_write });
+        secret.add_to(&mut body);
+        let json = body.to_string();
         let reply = self
             .inner
             .mount_image(self.request(proto::JsonRequest { json }))
@@ -495,16 +509,82 @@ impl BackupClient {
         manifest_path: &str,
         target_disk: u32,
         force: bool,
+        secret: &ArchiveSecret,
     ) -> Result<own_backup_common::engine_dto::DiskRestoreSummaryDto> {
-        let json = serde_json::json!({
+        let mut body = serde_json::json!({
             "manifest_path": manifest_path,
             "target_disk": target_disk,
             "force": force,
-        })
-        .to_string();
+        });
+        secret.add_to(&mut body);
+        let json = body.to_string();
         let reply = self
             .inner
             .restore_disk(self.request(proto::JsonRequest { json }))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
+
+    // --- Archive encryption (plan §7.5) -----------------------------------
+
+    /// Prepare encryption for a job. **Nothing is written**: the recovery key
+    /// comes back once, and [`Self::confirm_archive_encryption`] commits only
+    /// after it has been typed back.
+    ///
+    /// Slow — the service seals the envelope with Argon2id at the production
+    /// profile, seconds rather than milliseconds.
+    pub async fn begin_archive_encryption(
+        &mut self,
+        job: &Job,
+        password: &str,
+    ) -> Result<BegunArchiveEncryption> {
+        let json = serde_json::json!({ "job": job, "password": password }).to_string();
+        let reply = self
+            .inner
+            .begin_archive_encryption(self.request(proto::JsonRequest { json }))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
+
+    /// Commit it. Returns the stored job.
+    pub async fn confirm_archive_encryption(
+        &mut self,
+        token: &str,
+        recovery_key: &str,
+    ) -> Result<Job> {
+        let json =
+            serde_json::json!({ "token": token, "recovery_key": recovery_key }).to_string();
+        let reply = self
+            .inner
+            .confirm_archive_encryption(self.request(proto::JsonRequest { json }))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
+
+    /// Drop a prepared authorization. Nothing was written, so there is nothing
+    /// else to undo.
+    pub async fn cancel_archive_encryption(&mut self, token: &str) -> Result<()> {
+        let json = serde_json::json!({ "token": token }).to_string();
+        self.inner
+            .cancel_archive_encryption(self.request(proto::JsonRequest { json }))
+            .await
+            .map_err(status)?;
+        Ok(())
+    }
+
+    /// What a copy is, without any key — so a screen can ask for a password
+    /// before it offers to mount or restore, instead of after it fails.
+    pub async fn inspect_image(&mut self, image_path: &str) -> Result<ImageInfo> {
+        let json = serde_json::json!({ "image_path": image_path }).to_string();
+        let reply = self
+            .inner
+            .inspect_image(self.request(proto::JsonRequest { json }))
             .await
             .map_err(status)?
             .into_inner();
@@ -647,6 +727,85 @@ fn decode_event(ev: proto::Event) -> ClientEvent {
 
 fn parse<T: for<'de> serde::Deserialize<'de>>(json: &str) -> Result<T> {
     serde_json::from_str(json).map_err(json_err)
+}
+
+/// What the operator typed to open an encrypted copy.
+///
+/// Empty for the ordinary case. When a copy IS encrypted and this is empty the
+/// service refuses rather than guessing — ask [`BackupClient::inspect_image`]
+/// first and prompt, which is why that method exists.
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ArchiveSecret {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_key: Option<String>,
+}
+
+impl ArchiveSecret {
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    pub fn password(value: impl Into<String>) -> Self {
+        Self {
+            password: Some(value.into()),
+            recovery_key: None,
+        }
+    }
+
+    pub fn recovery_key(value: impl Into<String>) -> Self {
+        Self {
+            password: None,
+            recovery_key: Some(value.into()),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.password.is_none() && self.recovery_key.is_none()
+    }
+
+    /// Fold the secret into a request body. The service reads these two names
+    /// at the top level of every engine payload (`ManualSecret`).
+    fn add_to(&self, body: &mut serde_json::Value) {
+        if let Some(map) = body.as_object_mut() {
+            if let Some(password) = &self.password {
+                map.insert("password".into(), serde_json::Value::String(password.clone()));
+            }
+            if let Some(key) = &self.recovery_key {
+                map.insert("recovery_key".into(), serde_json::Value::String(key.clone()));
+            }
+        }
+    }
+}
+
+/// The answer to "prepare encryption for this job". The recovery key is in it
+/// **once**: it is not stored anywhere and cannot be asked for again.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct BegunArchiveEncryption {
+    pub token: String,
+    pub recovery_key: String,
+    pub fingerprint: String,
+    pub job_id: String,
+}
+
+/// What a copy says about itself without any key.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct ImageInfo {
+    pub container: String,
+    pub encrypted: bool,
+    #[serde(default)]
+    pub job_id: String,
+    #[serde(default)]
+    pub fingerprint: String,
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub chain_id: String,
+    #[serde(default)]
+    pub virtual_size: u64,
 }
 
 fn status(s: tonic::Status) -> String {

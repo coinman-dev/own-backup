@@ -38,6 +38,10 @@ pub struct AppState {
     pub events: broadcast::Sender<proto::Event>,
     /// Passwords for encrypted volumes (in-memory cache + OS-protected store).
     pub passwords: Arc<PasswordStore>,
+    /// Archive-encryption authorizations prepared but not yet confirmed
+    /// (plan §7.5). Deliberately in memory only: nothing about a pending one
+    /// should survive a service restart, least of all the private key in it.
+    pub archive_setup: Arc<own_backup_core::archive_setup::ArchiveSetup>,
     /// In-memory active mounts tracked by the service.
     pub active_mounts: std::sync::Mutex<Vec<own_backup_common::engine_dto::ActiveMountDto>>,
     /// The restore plan being executed, or the last one that finished (D6).
@@ -70,6 +74,7 @@ impl AppState {
             busy,
             events,
             passwords,
+            archive_setup: Arc::new(own_backup_core::archive_setup::ArchiveSetup::new()),
             active_mounts: std::sync::Mutex::new(Vec::new()),
             restore_run: std::sync::Mutex::new(None),
             start_time: Instant::now(),

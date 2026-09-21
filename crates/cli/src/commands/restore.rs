@@ -39,16 +39,17 @@ pub async fn run(args: RestoreArgs) -> own_backup_common::Result<()> {
         }
     }
 
-    let request = VolumeRestoreRequest {
+    let mut request = VolumeRestoreRequest {
         image_path: std::path::PathBuf::from(&args.input),
         target: args.target.clone(),
         verify_checksums: !args.no_verify,
-        // Asking for the password of an encrypted copy is E5; until then
-        // such a restore fails saying exactly that.
+        // Asked for below, before a byte of the target is touched.
         encryption: None,
     };
 
     let summary = tokio::task::spawn_blocking(move || {
+        request.encryption =
+            crate::commands::archive_key::open_keys_for_image(&request.image_path)?;
         let mut last_percent = u64::MAX;
         restore_volume(&request, |p| {
             let percent = if p.blocks_total > 0 {

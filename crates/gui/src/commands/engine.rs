@@ -447,6 +447,31 @@ pub async fn list_image_backups(folder: String) -> Result<Vec<ImageInfoDto>, Str
 
 // --- Proxies to the service's privileged engine --------------------------
 
+/// What the screen collected to open an encrypted copy, if anything.
+///
+/// The interface asks [`inspect_backup_image`] first and prompts only when the
+/// answer says the copy is encrypted; a manual operation never borrows the
+/// service's own key (§7.4).
+fn secret_of(
+    password: Option<String>,
+    recovery_key: Option<String>,
+) -> own_backup_client::ArchiveSecret {
+    own_backup_client::ArchiveSecret {
+        password: password.filter(|p| !p.is_empty()),
+        recovery_key: recovery_key.filter(|k| !k.trim().is_empty()),
+    }
+}
+
+/// What a copy is, without any key — so the interface can ask for a password
+/// before it offers to mount or restore, rather than after a failure.
+#[tauri::command]
+pub async fn inspect_backup_image(
+    state: State<'_, GuiState>,
+    image_path: String,
+) -> Result<own_backup_client::ImageInfo, String> {
+    state.link.client().await?.inspect_image(&image_path).await
+}
+
 /// Restore a volume image onto `target` (DESTRUCTIVE). Progress streams from the
 /// service as `restore-progress`.
 #[tauri::command]
@@ -454,12 +479,14 @@ pub async fn restore_now(
     state: State<'_, GuiState>,
     image_path: String,
     target: String,
+    password: Option<String>,
+    recovery_key: Option<String>,
 ) -> Result<RestoreSummaryDto, String> {
     state
         .link
         .client()
         .await?
-        .restore_volume(&image_path, &target)
+        .restore_volume(&image_path, &target, &secret_of(password, recovery_key))
         .await
 }
 
@@ -468,8 +495,15 @@ pub async fn restore_now(
 pub async fn verify_now(
     state: State<'_, GuiState>,
     image_path: String,
+    password: Option<String>,
+    recovery_key: Option<String>,
 ) -> Result<VerifySummaryDto, String> {
-    state.link.client().await?.verify_image(&image_path).await
+    state
+        .link
+        .client()
+        .await?
+        .verify_image(&image_path, &secret_of(password, recovery_key))
+        .await
 }
 
 #[tauri::command]
@@ -477,12 +511,18 @@ pub async fn mount_backup(
     state: State<'_, GuiState>,
     image_path: String,
     read_write: Option<bool>,
+    password: Option<String>,
+    recovery_key: Option<String>,
 ) -> Result<String, String> {
     state
         .link
         .client()
         .await?
-        .mount_image(&image_path, read_write.unwrap_or(false))
+        .mount_image(
+            &image_path,
+            read_write.unwrap_or(false),
+            &secret_of(password, recovery_key),
+        )
         .await
 }
 
@@ -599,12 +639,19 @@ pub async fn restore_disk_now(
     manifest_path: String,
     target_disk: u32,
     force: bool,
+    password: Option<String>,
+    recovery_key: Option<String>,
 ) -> Result<DiskRestoreSummaryDto, String> {
     state
         .link
         .client()
         .await?
-        .restore_disk(&manifest_path, target_disk, force)
+        .restore_disk(
+            &manifest_path,
+            target_disk,
+            force,
+            &secret_of(password, recovery_key),
+        )
         .await
 }
 

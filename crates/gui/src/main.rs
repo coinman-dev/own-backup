@@ -424,6 +424,7 @@ fn main() {
             commands::backup_jobs::get_run_queue,
             commands::backup_jobs::list_activity,
             // --- engine ops used by Restore/Tools ---
+            commands::engine::inspect_backup_image,
             commands::engine::restore_now,
             commands::engine::verify_now,
             commands::engine::mount_backup,

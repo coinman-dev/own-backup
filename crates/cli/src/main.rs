@@ -1,6 +1,7 @@
 mod commands;
 mod elevation;
 mod logging;
+mod secret_prompt;
 
 use clap::{Parser, Subcommand};
 
@@ -68,6 +69,9 @@ enum Commands {
 
     /// Fold overflowed increments into their base (sliding window)
     Consolidate(commands::consolidate::ConsolidateArgs),
+
+    /// Turn archive encryption on for a job (password + recovery key)
+    ArchiveKey(commands::archive_key::ArchiveKeyArgs),
 
     /// Mount a VHDX backup image read-only as a disk
     Mount(commands::mount::MountArgs),
@@ -171,6 +175,7 @@ async fn main() {
         Commands::FinalizeBoot(args) => commands::finalize_boot::run(args).await,
         Commands::Verify(args) => commands::verify::run(args).await,
         Commands::Consolidate(args) => commands::consolidate::run(args).await,
+        Commands::ArchiveKey(args) => commands::archive_key::run(args).await,
         Commands::Mount(args) => commands::mount::run(args).await,
         Commands::IscsiServe(args) => commands::iscsi_serve::run(args).await,
         Commands::Driver(args) => commands::driver::run(args).await,

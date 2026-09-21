@@ -11,6 +11,7 @@
 //! Tauri. Runs are serialized through an mpsc queue processed by one worker,
 //! so a second "run" while a backup is in progress is queued, not rejected.
 
+pub mod archive_setup;
 pub mod backup_encryption;
 pub mod busy;
 pub mod restore_exec;

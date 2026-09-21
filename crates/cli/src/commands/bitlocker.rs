@@ -150,7 +150,7 @@ fn try_unlock(disk: u32, offset: u64, size: u64, label: &str) {
     use own_backup_backup::volume_window::VolumeWindow;
     use own_backup_backup::win_device::WinRawDevice;
 
-    let pass = match ask_passphrase(&format!("  Пароль или ключ восстановления для {label} (не отображается): ")) {
+    let pass = match crate::secret_prompt::ask_secret(&format!("  Пароль или ключ восстановления для {label} (не отображается): ")) {
         Ok(p) if !p.is_empty() => p,
         Ok(_) => {
             println!("  Пароль не введён — пропускаем.");
@@ -269,39 +269,6 @@ type Examined = (
     std::result::Result<own_backup_backup::bitlocker::BitLockerInfo, String>,
 );
 
-#[cfg_attr(not(any(target_os = "windows", target_os = "linux")), allow(dead_code))]
-/// Read a passphrase from the console without echoing it.
-#[cfg(target_os = "windows")]
-fn ask_passphrase(prompt: &str) -> std::io::Result<String> {
-    use std::io::{BufRead, Write};
-    use windows::Win32::System::Console::{
-        GetConsoleMode, GetStdHandle, SetConsoleMode, CONSOLE_MODE, ENABLE_ECHO_INPUT,
-        STD_INPUT_HANDLE,
-    };
-    print!("{prompt}");
-    std::io::stdout().flush()?;
-
-    // SAFETY: console-mode query and set on our own standard handle; the mode
-    // is put back below whatever the read does.
-    let restore = unsafe {
-        GetStdHandle(STD_INPUT_HANDLE).ok().and_then(|h| {
-            let mut mode = CONSOLE_MODE(0);
-            GetConsoleMode(h, &mut mode).ok()?;
-            SetConsoleMode(h, mode & !ENABLE_ECHO_INPUT).ok()?;
-            Some((h, mode))
-        })
-    };
-    let mut line = String::new();
-    let read = std::io::stdin().lock().read_line(&mut line);
-    if let Some((h, mode)) = restore {
-        // SAFETY: same handle, the mode it had before.
-        let _ = unsafe { SetConsoleMode(h, mode) };
-    }
-    println!();
-    read?;
-    Ok(line.trim_end_matches(['\r', '\n']).to_string())
-}
-
 
 /// Стенд этапа B5: проверить, умеет ли ЭТА система открыть том сама.
 ///
@@ -358,7 +325,7 @@ async fn windows_unlock(args: &BitlockerArgs) -> Result<()> {
 
     // Тот же ввод без эха, что у обычной разблокировки, — своя реализация уже
     // есть, и она умеет молчать в консоли.
-    let secret = ask_passphrase("Ключ восстановления или пароль тома: ")
+    let secret = crate::secret_prompt::ask_secret("Ключ восстановления или пароль тома: ")
         .map_err(|e| own_backup_common::OwnBackupError::Config(format!("ввод: {e}")))?;
     let secret = secret.trim().to_string();
     let digits: String = secret.chars().filter(|c| c.is_ascii_digit()).collect();
@@ -423,15 +390,6 @@ fn digits_with_dashes(digits: &str) -> String {
         .join("-")
 }
 
-#[cfg(not(target_os = "windows"))]
-fn ask_passphrase(prompt: &str) -> std::io::Result<String> {
-    use std::io::{BufRead, Write};
-    print!("{prompt}");
-    std::io::stdout().flush()?;
-    let mut line = String::new();
-    std::io::stdin().lock().read_line(&mut line)?;
-    Ok(line.trim_end_matches(['\r', '\n']).to_string())
-}
 
 fn report(found: Vec<Examined>, json: bool) -> Result<()> {
     let encrypted: Vec<&Examined> = found.iter().filter(|(_, _, r)| r.is_ok()).collect();

@@ -53,8 +53,9 @@ pub async fn run(args: MountArgs) -> Result<()> {
             "cannot reach the Own Backup service ({e}). Is it running?"
         )))?;
 
+    let secret = crate::commands::archive_key::ask_for_image(&mut client, &args.image).await?;
     let physical = client
-        .mount_image(&args.image, args.rw)
+        .mount_image(&args.image, args.rw, &secret)
         .await
         .map_err(|e| OwnBackupError::Device(e.to_string()))?;
 

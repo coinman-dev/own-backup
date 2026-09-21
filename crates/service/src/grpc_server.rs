@@ -395,6 +395,84 @@ fn json_reply<T: serde::Serialize>(value: &T) -> Result<Response<JsonReply>, Sta
     Ok(Response::new(JsonReply { json }))
 }
 
+/// What a manual operation was given to open an encrypted copy with.
+///
+/// Both are optional because most copies are not encrypted; when one is, the
+/// caller must have supplied exactly one of these.
+#[derive(serde::Deserialize, Default)]
+struct ManualSecret {
+    #[serde(default)]
+    password: Option<String>,
+    #[serde(default)]
+    recovery_key: Option<String>,
+}
+
+/// Keys for a MANUAL mount, restore or verify, from what the person typed.
+///
+/// **Never the service's own key store**, and that is the line §7.4 draws: a
+/// scheduled copy runs with nobody present and therefore must be able to open
+/// its key by itself, but handing data BACK — to whoever happens to be at the
+/// console, or to whoever reached this socket — costs a password every time.
+/// The service holding a key for its own copies is not consent to decrypt.
+///
+/// `Ok(None)` means the image is not encrypted and needs nothing.
+/// `Err(unauthenticated)` means it is, and nothing was supplied — the code is
+/// how a screen knows to ask rather than to show an error.
+///
+/// Slow: opening the envelope is Argon2id at the production profile, seconds.
+/// [`manual_keys_off_thread`] is what callers use, so that the machine's single
+/// busy slot is not held for the length of a key derivation.
+#[cfg(target_os = "windows")]
+fn manual_keys(
+    image: &std::path::Path,
+    secret: &ManualSecret,
+) -> Result<Option<own_backup_backup::seal::context::ArchiveKeys>, Status> {
+    use own_backup_backup::seal::context::ArchiveKeys;
+    use own_backup_backup::seal::obk::OBK_EXTENSION;
+    use own_backup_backup::seal::recovery::RecoveryKey;
+
+    let container = own_backup_backup::sidecar::detect_container_format(image)
+        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+    if container != OBK_EXTENSION {
+        return Ok(None);
+    }
+    match (&secret.password, &secret.recovery_key) {
+        (Some(_), Some(_)) => Err(Status::invalid_argument(
+            "укажите либо пароль, либо ключ восстановления, но не оба",
+        )),
+        (Some(password), None) => ArchiveKeys::from_image_password(image, password)
+            .map(Some)
+            .map_err(|e| Status::permission_denied(e.to_string())),
+        (None, Some(typed)) => {
+            let key = RecoveryKey::parse(typed)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+            ArchiveKeys::from_image_recovery(image, &key)
+                .map(Some)
+                .map_err(|e| Status::permission_denied(e.to_string()))
+        }
+        (None, None) => Err(Status::unauthenticated(format!(
+            "{}: копия зашифрована — нужен пароль или ключ восстановления",
+            image.display()
+        ))),
+    }
+}
+
+/// [`manual_keys`] on a blocking thread, **before** the operation reserves the
+/// machine.
+///
+/// Deriving a key is seconds of Argon2id. Doing it while holding the single
+/// busy slot would make every mistyped password block the next backup for as
+/// long as it takes to fail.
+#[cfg(target_os = "windows")]
+async fn manual_keys_off_thread(
+    image: std::path::PathBuf,
+    secret: ManualSecret,
+) -> Result<Option<own_backup_backup::seal::context::ArchiveKeys>, Status> {
+    tokio::task::spawn_blocking(move || manual_keys(&image, &secret))
+        .await
+        .map_err(|e| Status::internal(format!("key task panicked: {e}")))?
+}
+
 /// Drive letters in use on this machine. A dry run needs them to resolve
 /// conflicts (D11), and only the service can see them — the GUI runs
 /// unelevated and would be guessing.
@@ -875,6 +953,8 @@ impl BackupService for BackupServiceImpl {
             struct In {
                 image_path: String,
                 target: String,
+                #[serde(flatten)]
+                secret: ManualSecret,
             }
             let p: In = serde_json::from_str(&req.into_inner().json)
                 .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
@@ -893,13 +973,14 @@ impl BackupService for BackupServiceImpl {
             let slot = self.reserve("восстановление тома", &p.target)?;
             let cancel = slot.cancel();
             let events = self.state.events.clone();
+            let image_path = std::path::PathBuf::from(&p.image_path);
             let request = VolumeRestoreRequest {
-                image_path: std::path::PathBuf::from(&p.image_path),
+                image_path: image_path.clone(),
                 target: p.target,
                 verify_checksums: true,
-                // Asking for the password of an encrypted copy is E5; until then
-                // such a restore fails saying exactly that.
-                encryption: None,
+                // From what the person typed, never from the service's own key
+                // store (see `manual_keys`).
+                encryption: manual_keys_off_thread(image_path, p.secret).await?,
             };
 
             let summary = tokio::task::spawn_blocking(move || {
@@ -954,12 +1035,14 @@ impl BackupService for BackupServiceImpl {
         check_auth(&req, &self.service_token)?;
         #[cfg(target_os = "windows")]
         {
-            use own_backup_backup::engine_win::verify_image;
+            use own_backup_backup::engine_win::verify_image_with_keys;
             use own_backup_common::engine_dto::{EngineProgress, VerifySummaryDto};
 
             #[derive(serde::Deserialize)]
             struct In {
                 image_path: String,
+                #[serde(flatten)]
+                secret: ManualSecret,
             }
             let p: In = serde_json::from_str(&req.into_inner().json)
                 .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
@@ -967,16 +1050,17 @@ impl BackupService for BackupServiceImpl {
             // A verify only reads — but it reads a chain that a consolidation
             // or a retention pass may be rewriting, and reading one of those
             // mid-change is how a good image gets reported as damaged.
+            let path = std::path::PathBuf::from(&p.image_path);
+            let keys = manual_keys_off_thread(path.clone(), p.secret).await?;
             let slot = self.reserve("проверка образа", &p.image_path)?;
             let cancel = slot.cancel();
             let events = self.state.events.clone();
-            let path = std::path::PathBuf::from(&p.image_path);
 
             let summary = tokio::task::spawn_blocking(move || {
                 let _slot = slot;
                 let mut last_permille = u64::MAX;
                 let mut last_emit = std::time::Instant::now();
-                verify_image(&path, |done, total| {
+                verify_image_with_keys(&path, keys.as_ref(), |done, total| {
                     if cancel.is_cancelled() {
                         return Err(own_backup_common::OwnBackupError::Cancelled);
                     }
@@ -1021,13 +1105,15 @@ impl BackupService for BackupServiceImpl {
         check_auth(&req, &self.service_token)?;
         #[cfg(target_os = "windows")]
         {
-            use own_backup_backup::engine_win::mount_image;
+            use own_backup_backup::engine_win::mount_image_with_keys;
             use own_backup_common::engine_dto::MountResultDto;
 
             #[derive(serde::Deserialize)]
             struct In {
                 image_path: String,
                 read_write: Option<bool>,
+                #[serde(flatten)]
+                secret: ManualSecret,
             }
             let p: In = serde_json::from_str(&req.into_inner().json)
                 .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
@@ -1041,10 +1127,11 @@ impl BackupService for BackupServiceImpl {
             // as long as a window is open would be worse than the problem.
             // What protects a live mount is the check consolidation already
             // makes: it refuses an image that has a mount beside it.
+            let keys = manual_keys_off_thread(path.clone(), p.secret).await?;
             let slot = self.reserve("подключение образа", &p.image_path)?;
             let mount_point = tokio::task::spawn_blocking(move || {
                 let _slot = slot;
-                mount_image(&path, rw)
+                mount_image_with_keys(&path, rw, keys.as_ref())
             })
             .await
             .map_err(|e| Status::internal(format!("mount task panicked: {e}")))?
@@ -1432,6 +1519,8 @@ impl BackupService for BackupServiceImpl {
                 target_disk: u32,
                 #[serde(default)]
                 force: bool,
+                #[serde(flatten)]
+                secret: ManualSecret,
             }
             let p: In = serde_json::from_str(&req.into_inner().json)
                 .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
@@ -1446,14 +1535,14 @@ impl BackupService for BackupServiceImpl {
                 self.reserve("восстановление диска", &format!("диск {}", p.target_disk))?;
             let cancel = slot.cancel();
             let events = self.state.events.clone();
+            let manifest_path = std::path::PathBuf::from(&p.manifest_path);
             let request = DiskRestoreRequest {
-                manifest_path: std::path::PathBuf::from(&p.manifest_path),
+                manifest_path: manifest_path.clone(),
                 target_disk: p.target_disk,
                 verify_checksums: true,
-                // Manual restores ask for the password themselves (E5); the
-                // service key is for scheduled COPIES, never for handing data
-                // back to whoever happens to be at the console.
-                encryption: None,
+                // From what the person typed, never from the service's own
+                // store: that key is for scheduled COPIES (see `manual_keys`).
+                encryption: manual_keys_off_thread(manifest_path, p.secret).await?,
             };
 
             let summary = tokio::task::spawn_blocking(move || {
@@ -1512,6 +1601,147 @@ impl BackupService for BackupServiceImpl {
         // next one (audit AUD-02).
         self.state.busy.cancel_whatever_is_running();
         Ok(Response::new(Empty {}))
+    }
+
+    // --- Archive encryption (plan §7.5) ----------------------------------
+
+    /// Prepare encryption for a job and hand back its recovery key. **Writes
+    /// nothing** — see [`own_backup_core::archive_setup`] for why the order
+    /// matters.
+    async fn begin_archive_encryption(
+        &self,
+        req: Request<JsonRequest>,
+    ) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        #[derive(serde::Deserialize)]
+        struct In {
+            job: own_backup_core::Job,
+            password: String,
+        }
+        #[derive(serde::Serialize)]
+        struct Out {
+            token: String,
+            recovery_key: String,
+            fingerprint: String,
+            job_id: String,
+        }
+        let p: In = serde_json::from_str(&req.into_inner().json)
+            .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+        validate_job(&p.job)?;
+
+        // Sealing the envelope is Argon2id at the production profile — seconds,
+        // not milliseconds, and it must not sit on the async runtime.
+        let setup = self.state.archive_setup.clone();
+        let begun = tokio::task::spawn_blocking(move || setup.begin(p.job, &p.password))
+            .await
+            .map_err(|e| Status::internal(format!("key setup task panicked: {e}")))?
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+
+        info!(job = %begun.job_id, fingerprint = %begun.fingerprint,
+            "Archive encryption prepared — waiting for the recovery key to be confirmed");
+        json_reply(&Out {
+            token: begun.token,
+            recovery_key: begun.recovery_key.to_string(),
+            fingerprint: begun.fingerprint,
+            job_id: begun.job_id,
+        })
+    }
+
+    /// Commit it, once the operator has typed the recovery key back.
+    async fn confirm_archive_encryption(
+        &self,
+        req: Request<JsonRequest>,
+    ) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        #[derive(serde::Deserialize)]
+        struct In {
+            token: String,
+            recovery_key: String,
+        }
+        let p: In = serde_json::from_str(&req.into_inner().json)
+            .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+
+        let setup = self.state.archive_setup.clone();
+        let store = self.state.store.clone();
+        let job = tokio::task::spawn_blocking(move || {
+            setup.confirm(&store, &p.token, &p.recovery_key)
+        })
+        .await
+        .map_err(|e| Status::internal(format!("key commit task panicked: {e}")))?
+        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+
+        info!(job = %job.id, name = %job.name, "Archive encryption enabled");
+        json_reply(&job)
+    }
+
+    async fn cancel_archive_encryption(
+        &self,
+        req: Request<JsonRequest>,
+    ) -> Result<Response<Empty>, Status> {
+        check_auth(&req, &self.service_token)?;
+        #[derive(serde::Deserialize)]
+        struct In {
+            token: String,
+        }
+        let p: In = serde_json::from_str(&req.into_inner().json)
+            .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+        self.state.archive_setup.cancel(&p.token);
+        Ok(Response::new(Empty {}))
+    }
+
+    /// What a copy is, without any key.
+    ///
+    /// A screen has to know an image is encrypted **before** it offers to mount
+    /// or restore it, so that it asks for a password instead of showing a
+    /// failure. Everything here comes out of the open header, which is why it
+    /// needs nothing: it is also why none of it is a fact about the contents
+    /// (`seal/obk/listing.rs`).
+    async fn inspect_image(
+        &self,
+        req: Request<JsonRequest>,
+    ) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        #[derive(serde::Deserialize)]
+        struct In {
+            image_path: String,
+        }
+        #[derive(serde::Serialize, Default)]
+        struct Out {
+            container: String,
+            encrypted: bool,
+            job_id: String,
+            fingerprint: String,
+            role: String,
+            created_at: String,
+            chain_id: String,
+            virtual_size: u64,
+        }
+        let p: In = serde_json::from_str(&req.into_inner().json)
+            .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+        let path = std::path::PathBuf::from(&p.image_path);
+
+        let container = own_backup_backup::sidecar::detect_container_format(&path)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        if container != own_backup_backup::seal::obk::OBK_EXTENSION {
+            return json_reply(&Out {
+                container: container.to_string(),
+                ..Default::default()
+            });
+        }
+        let listing = own_backup_backup::seal::obk::read_listing(&path)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let header = own_backup_backup::seal::obk::read_open_header(&path)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        json_reply(&Out {
+            container: container.to_string(),
+            encrypted: true,
+            job_id: listing.job_id,
+            fingerprint: header.key_file.fingerprint.clone(),
+            role: format!("{:?}", listing.role).to_lowercase(),
+            created_at: listing.created_at,
+            chain_id: listing.chain_id.to_string(),
+            virtual_size: listing.virtual_size,
+        })
     }
 
     // --- Restore plans (the partition designer) --------------------------

@@ -79,16 +79,17 @@ pub async fn run(args: RestoreDiskArgs) -> own_backup_common::Result<()> {
         }
     }
 
-    let request = DiskRestoreRequest {
+    let mut request = DiskRestoreRequest {
         manifest_path: std::path::PathBuf::from(&args.manifest),
         target_disk: args.target_disk,
         verify_checksums: !args.no_verify,
-        // The command line has no way to ask for a password yet (E5), so an
-        // encrypted image refuses here rather than restoring nothing.
+        // Asked for below, before the target disk is touched.
         encryption: None,
     };
 
     let summary = tokio::task::spawn_blocking(move || {
+        request.encryption =
+            crate::commands::archive_key::open_keys_for_image(&request.manifest_path)?;
         let mut last = String::new();
         restore_disk(&request, |p| {
             let pct = if p.blocks_total > 0 {

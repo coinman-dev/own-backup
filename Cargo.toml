@@ -98,3 +98,19 @@ own-backup-metadata = { path = "crates/metadata" }
 own-backup-scheduler = { path = "crates/scheduler" }
 own-backup-core = { path = "crates/core" }
 own-backup-client = { path = "crates/client" }
+
+# Argon2id is deliberately expensive, and an unoptimised build makes it
+# absurdly so: the production profile (256 MiB, 3 passes) takes ~10 s per
+# derivation in a debug build against well under a second optimised. That cost
+# lands on every test that prepares or opens a key — and on the laboratory
+# probe, which is built in debug and spends half a minute before it starts.
+# Optimising just the hash crates changes no behaviour and costs nothing in
+# compile time worth mentioning.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
+[profile.test.package.argon2]
+opt-level = 3
+[profile.test.package.blake2]
+opt-level = 3

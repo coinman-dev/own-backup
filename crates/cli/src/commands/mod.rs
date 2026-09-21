@@ -1,3 +1,4 @@
+pub mod archive_key;
 pub mod backup;
 pub mod backup_disk;
 pub mod boot;

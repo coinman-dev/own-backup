@@ -8,15 +8,18 @@ pub struct VerifyArgs {
 
 #[cfg(target_os = "windows")]
 pub async fn run(args: VerifyArgs) -> own_backup_common::Result<()> {
-    use own_backup_backup::engine_win::verify_image;
+    use own_backup_backup::engine_win::verify_image_with_keys;
     use std::io::Write;
 
     println!("Verifying {}...", args.image);
 
     let path = std::path::PathBuf::from(&args.image);
     let summary = tokio::task::spawn_blocking(move || {
+        // An encrypted copy is opened by what the person types, never by the
+        // service's own key (§7.4). Asked before the read starts.
+        let keys = crate::commands::archive_key::open_keys_for_image(&path)?;
         let mut last_percent = u64::MAX;
-        verify_image(&path, |done, total| {
+        verify_image_with_keys(&path, keys.as_ref(), |done, total| {
             let percent = if total > 0 { done * 100 / total } else { 0 };
             if percent != last_percent {
                 last_percent = percent;
