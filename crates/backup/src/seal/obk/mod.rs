@@ -32,15 +32,19 @@
 //! valid one — is out of scope here and needs external trusted state (§7.3).
 
 #[cfg(test)]
-mod container_tests;
+pub(crate) mod container_tests;
 pub mod header;
 pub mod index;
+pub mod io;
+pub mod listing;
 pub mod reader;
 pub mod root;
 pub mod writer;
 
 pub use header::{ObkOpenHeader, ObkRootPointer};
 pub use index::ClusterState;
+pub use io::{ObkRandomReader, ObkStagedWriter};
+pub use listing::{read_listing, ObkListing};
 pub use reader::{ObkChain, ObkImage};
 pub use root::ObkRoot;
 pub use writer::{ObkCompression, ObkWriter, ObkWriterOptions};

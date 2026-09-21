@@ -16,7 +16,7 @@
 //! ```
 
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, Write};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -648,10 +648,20 @@ pub fn detect_container_format(image_path: &Path) -> Result<&'static str> {
         return Ok("vhdx");
     }
     if got >= 4 && u32::from_be_bytes(head[..4].try_into().unwrap()) == crate::qcow2::QCOW2_MAGIC {
+        // An encrypted image IS a qcow2 file, so the magic alone would call it
+        // one and every reader after that would fail somewhere deeper. The
+        // incompatible feature bit is what separates them.
+        let mut features = [0u8; 8];
+        if file.seek(std::io::SeekFrom::Start(72)).is_ok()
+            && file.read_exact(&mut features).is_ok()
+            && u64::from_be_bytes(features) & crate::seal::obk::INCOMPAT_OBK_SEAL != 0
+        {
+            return Ok(crate::seal::obk::OBK_EXTENSION);
+        }
         return Ok("qcow2");
     }
     Err(OwnBackupError::ImageFormat(format!(
-        "{}: not a VHDX or qcow2 image (no known signature)",
+        "{}: not a VHDX, qcow2 or encrypted image (no known signature)",
         image_path.display()
     )))
 }

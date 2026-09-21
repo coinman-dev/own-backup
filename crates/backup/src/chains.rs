@@ -116,6 +116,30 @@ pub fn list_job_chains(folder: &Path, job_id: &str) -> Result<Vec<Chain>> {
     list_chains(folder, Some(job_id))
 }
 
+/// One encrypted image as a listing sees it: the open header, and nothing that
+/// needs a key. `Ok(None)` means the image belongs to another job.
+///
+/// The `sidecar_path` of an `.obk` names a file that does not exist — its
+/// sidecar is sealed inside the image. Deletion tolerates a missing sidecar, so
+/// nothing has to special-case it.
+fn encrypted_chain_image(path: &Path, job_id: Option<&str>) -> Result<Option<ChainImage>> {
+    let listing = crate::seal::obk::read_listing(path)?;
+    if Some(listing.job_id.as_str()) != job_id {
+        return Ok(None);
+    }
+    Ok(Some(ChainImage {
+        image_path: path.to_path_buf(),
+        sidecar_path: crate::sidecar::sidecar_path_for(path),
+        role: listing.role,
+        container: crate::seal::obk::OBK_EXTENSION.to_string(),
+        created_at: listing.created_at,
+        parent_file_name: listing.parent_file_name,
+        source_id: listing.source_id,
+        consolidated_increments: listing.consolidated_increments,
+        chain_started_at: listing.chain_started_at,
+    }))
+}
+
 /// Scan `folder` for sidecars and group them into chains, oldest chain first.
 /// Unreadable sidecars are skipped with a warning. Children whose parent
 /// sidecar is missing (broken chains) are grouped into their own chain so
@@ -139,6 +163,21 @@ pub fn list_chains(folder: &Path, job_id: Option<&str>) -> Result<Vec<Chain>> {
             Some(e) => e.to_lowercase(),
             None => continue,
         };
+        if ext == crate::seal::obk::OBK_EXTENSION {
+            // An encrypted image keeps its sidecar sealed inside itself, so a
+            // listing reads the open header instead — no key, and nothing from
+            // it is trusted for more than grouping and counting.
+            match encrypted_chain_image(&path, job_id) {
+                Ok(Some(image)) => entries.push(image),
+                Ok(None) => {}
+                Err(e) => warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "Skipping unreadable encrypted image"
+                ),
+            }
+            continue;
+        }
         if ext != "vhdx" && ext != "avhdx" && ext != "qcow2" {
             continue;
         }
@@ -1014,5 +1053,53 @@ mod tests {
             "ребёнок помечен более ранней датой, но зависит от базы — база остаётся"
         );
         assert!(!report.complete());
+    }
+    /// An encrypted chain has no sidecar files at all: everything a listing
+    /// needs is in the open header, and everything else is sealed inside.
+    #[test]
+    fn encrypted_images_group_into_a_chain_without_a_key() {
+        use crate::seal::obk::container_tests::Fixture;
+        use crate::seal::obk::ObkWriter;
+        use uuid::Uuid;
+
+        let f = Fixture::new();
+        let dir = tempfile::tempdir().unwrap();
+        // Distinct timestamps, as real runs have: images inside a chain are
+        // ordered by when they were taken.
+        let write = |name: &str, id: Uuid, role: ChainRole, parent: Option<(Uuid, &str)>, at: &str| {
+            let mut opts = f.options(id, role, parent);
+            opts.created_at = at.to_string();
+            let mut w = ObkWriter::create(&dir.path().join(name), &f.chain, opts).unwrap();
+            w.write_cluster(0, &vec![1u8; 4096]).unwrap();
+            w.finish(b"sealed sidecar").unwrap();
+        };
+        let full = Uuid::new_v4();
+        write("e_full.obk", full, ChainRole::Full, None, "2026-09-20T01:00:00Z");
+        write(
+            "e_inc.obk",
+            Uuid::new_v4(),
+            ChainRole::Incremental,
+            Some((full, "e_full.obk")),
+            "2026-09-21T01:00:00Z",
+        );
+
+        let chains = list_job_chains(dir.path(), "job-under-test").unwrap();
+        assert_eq!(chains.len(), 1, "one chain, not two loose images");
+        assert_eq!(chain_names(&chains[0]), vec!["e_full.obk", "e_inc.obk"]);
+        assert!(chains[0].images.iter().all(|i| i.container == "obk"));
+        assert_eq!(chains[0].images[0].source_id.as_deref(), Some("volume-under-test"));
+        assert_eq!(chains[0].increments_ever(), 1);
+        assert!(!chains[0].images[0].sidecar_path.exists(), "no sidecar file exists");
+
+        // Another job's listing must not see them, and neither must the
+        // no-job listing a command-line copy uses.
+        assert!(list_job_chains(dir.path(), "other").unwrap().is_empty());
+        assert!(list_chains(dir.path(), None).unwrap().is_empty());
+
+        // Deleting the chain works even though the sidecars never existed.
+        let report = delete_chain(&chains[0]).unwrap();
+        assert!(report.complete(), "{report:?}");
+        assert!(!dir.path().join("e_full.obk").exists());
+        assert!(!dir.path().join("e_inc.obk").exists());
     }
 }

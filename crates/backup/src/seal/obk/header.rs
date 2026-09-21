@@ -92,6 +92,19 @@ pub struct ObkOpenHeader {
     pub created_at: String,
     pub virtual_size: u64,
     pub cluster_bits: u32,
+    /// Listing fields. A backup folder has to be grouped into chains, and
+    /// retention has to count versions, **without** anyone's key — so these
+    /// three live in the open half. They name no machine and no volume label:
+    /// `source_id` is an opaque volume identity (`crate::sidecar::SidecarInfo`).
+    ///
+    /// They are claims, not facts: a program holding the key must check them
+    /// against the sealed sidecar before acting on anything that matters.
+    #[serde(default)]
+    pub source_id: Option<String>,
+    #[serde(default)]
+    pub consolidated_increments: u32,
+    #[serde(default)]
+    pub chain_started_at: Option<String>,
     /// Canonical padded base64 of the 102-byte wrapped chain key.
     pub wrapped_chain_key: String,
     /// Portable password/recovery envelope, so any machine can open the image.
@@ -114,6 +127,20 @@ impl ObkOpenHeader {
         }
         if self.created_at.len() > 64 || self.created_at.chars().any(char::is_control) {
             return Err(bad("invalid creation timestamp"));
+        }
+        if self
+            .chain_started_at
+            .as_ref()
+            .is_some_and(|at| at.len() > 64 || at.chars().any(char::is_control))
+        {
+            return Err(bad("invalid chain start timestamp"));
+        }
+        if self
+            .source_id
+            .as_ref()
+            .is_some_and(|id| id.is_empty() || id.len() > 512 || id.chars().any(char::is_control))
+        {
+            return Err(bad("invalid source identity"));
         }
         match (self.role, self.parent_backup_id) {
             (ChainRole::Full, None) => {}
@@ -385,6 +412,9 @@ mod tests {
             cluster_bits: 16,
             wrapped_chain_key: B64.encode(wrapped.to_bytes()),
             key_file,
+            source_id: None,
+            consolidated_increments: 0,
+            chain_started_at: None,
             root: ObkRootPointer::new(
                 1 << 16,
                 HEADER_LEN + 10 + TAG_LEN,

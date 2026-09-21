@@ -22,6 +22,12 @@ use crate::seal::ChainKey;
 use crate::sidecar::ChainRole;
 
 const CLUSTER_BITS: u32 = 12;
+
+/// The io tests build images with the same fixture; a second copy of the key
+/// setup would be a second thing to keep true.
+pub(crate) fn cluster_bits() -> u32 {
+    CLUSTER_BITS
+}
 const CLUSTER: usize = 1 << CLUSTER_BITS;
 const VIRTUAL_SIZE: u64 = 64 * CLUSTER as u64;
 
@@ -46,8 +52,8 @@ fn text(fill: u8) -> Vec<u8> {
 
 /// One job, one chain, one portable envelope — reused by every image a test
 /// builds, exactly as a real chain reuses them.
-struct Fixture {
-    chain: ChainKey,
+pub(crate) struct Fixture {
+    pub(crate) chain: ChainKey,
     chain_id: Uuid,
     pair: JobKeyPair,
     recovery: RecoveryKey,
@@ -55,7 +61,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let chain = ChainKey::generate().unwrap();
         let pair = JobKeyPair::generate().unwrap();
         let recovery = RecoveryKey::generate().unwrap();
@@ -76,7 +82,12 @@ impl Fixture {
         }
     }
 
-    fn options(&self, backup_id: Uuid, role: ChainRole, parent: Option<(Uuid, &str)>) -> ObkWriterOptions {
+    pub(crate) fn options(
+        &self,
+        backup_id: Uuid,
+        role: ChainRole,
+        parent: Option<(Uuid, &str)>,
+    ) -> ObkWriterOptions {
         ObkWriterOptions {
             chain_id: self.chain_id,
             backup_id,
@@ -90,6 +101,9 @@ impl Fixture {
             key_file: self.key_file.clone(),
             wrapped_chain_key: wrap_chain_key(&self.pair.public, self.chain_id.as_bytes(), &self.chain)
                 .unwrap(),
+            source_id: Some("volume-under-test".into()),
+            consolidated_increments: 0,
+            chain_started_at: None,
         }
     }
 

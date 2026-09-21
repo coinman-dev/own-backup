@@ -63,6 +63,11 @@ pub struct ObkWriterOptions {
     pub key_file: SealedPrivateKey,
     /// The chain master key wrapped for this job's public key.
     pub wrapped_chain_key: WrappedChainKey,
+    /// Listing fields carried in the open header so a backup folder can be
+    /// grouped into chains, and retention can count versions, without a key.
+    pub source_id: Option<String>,
+    pub consolidated_increments: u32,
+    pub chain_started_at: Option<String>,
 }
 
 pub struct ObkWriter<W: Write + Seek> {
@@ -252,6 +257,9 @@ impl<W: Write + Seek> ObkWriter<W> {
             cluster_bits: self.opts.cluster_bits,
             wrapped_chain_key: B64.encode(self.opts.wrapped_chain_key.to_bytes()),
             key_file: self.opts.key_file.clone(),
+            source_id: self.opts.source_id.clone(),
+            consolidated_increments: self.opts.consolidated_increments,
+            chain_started_at: self.opts.chain_started_at.clone(),
             root: ObkRootPointer::new(root_ref.offset, root_ref.len as usize, root_ref.id),
         };
         let extensions = obk_extensions(&open)?;

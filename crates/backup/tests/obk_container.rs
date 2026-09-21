@@ -99,6 +99,9 @@ impl Job {
                 &self.chain,
             )
             .unwrap(),
+            source_id: Some("lab-volume".into()),
+            consolidated_increments: 0,
+            chain_started_at: None,
         };
         let mut writer = ObkWriter::create(path, &self.chain, opts).unwrap();
         for (index, data) in clusters {
