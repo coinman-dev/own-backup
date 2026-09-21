@@ -83,10 +83,6 @@ assign letter=R
         Add-Content -LiteralPath $path -Value $marker -Encoding Ascii
     }
     [IO.File]::WriteAllText('S:\excluded-secret.bin', ($marker * 1000))
-    $hashes = @{}
-    foreach ($path in $keep.Keys) {
-        $hashes[$path] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
-    }
     Say "LAB-OBK-SOURCE files=$($keep.Count + 1) excluded=excluded-secret.bin"
 
     # Windows refuses raw writes to sectors a mounted volume sits on, so a
@@ -106,9 +102,19 @@ assign letter=R
     Set-Disk -Number $tgtDisk.Number -IsOffline $true
     Start-Sleep -Seconds 2
 
-    # The probe: copy, checks, restore.
+    # The probe: full copy, checks, two increments, consolidation, restore.
     $out = & $probe 'S:' $work $spec 2>&1 | Out-String
     Say $out.Trim()
+
+    # Hashed AFTER the probe, not before: the probe writes files of its own onto
+    # the source between copies, so that its increments have something to carry.
+    # The restore reproduces the LAST copy, which is the source as it stands now.
+    $hashes = @{}
+    foreach ($file in (Get-ChildItem -LiteralPath 'S:\' -Recurse -File -ErrorAction SilentlyContinue)) {
+        if ($file.Name -eq 'excluded-secret.bin') { continue }
+        $hashes[$file.FullName] = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
+    }
+    Say "LAB-OBK-SOURCE-AFTER files=$($hashes.Count)"
 
     Set-Disk -Number $tgtDisk.Number -IsOffline $false
     Start-Sleep -Seconds 3
@@ -138,7 +144,8 @@ assign letter=R
     }
     Say "LAB-OBK-RESTORED-VOLUME letter=$letter label=$((Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue).FileSystemLabel)"
 
-    foreach ($path in $keep.Keys) {
+    $matched = 0
+    foreach ($path in $hashes.Keys) {
         $there = $path -replace '^S:', "${letter}:"
         if (-not (Test-Path -LiteralPath $there)) {
             Say "LAB-OBK-FAIL missing after restore: $there"
@@ -146,11 +153,13 @@ assign letter=R
         }
         $now = (Get-FileHash -LiteralPath $there -Algorithm SHA256).Hash
         if ($now -eq $hashes[$path]) {
+            $matched++
             Say "LAB-OBK-FILE-OK $there"
         } else {
             Say "LAB-OBK-FAIL content differs after restore: $there"
         }
     }
+    Say "LAB-OBK-FILES matched=$matched of=$($hashes.Count)"
     # The rule said to exclude this file: its data was never copied, and its
     # catalog entry was deleted inside the image. It must not be here.
     $excludedThere = "${letter}:\excluded-secret.bin"
