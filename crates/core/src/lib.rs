@@ -2005,7 +2005,9 @@ async fn perform_backup(
     passwords: &Arc<dyn PasswordResolver>,
     keys: Option<own_backup_backup::seal::context::ArchiveKeys>,
 ) -> JobRun {
-    use own_backup_backup::engine_win::{backup_volume, verify_image, VolumeBackupRequest};
+    use own_backup_backup::engine_win::{
+        backup_volume, verify_image_with_keys, VolumeBackupRequest,
+    };
     use own_backup_common::types::BackupType;
     use own_backup_common::OwnBackupError;
 
@@ -2108,6 +2110,9 @@ async fn perform_backup(
         let job_id = job.id.clone();
         let cancel_bg = cancel.clone();
         let image_for_verify = image_path.clone();
+        // Checking an encrypted copy needs its key: without one there is no
+        // sidecar to read and nothing to compare checksums against.
+        let keys_for_verify = keys.clone();
         let vol_label_bg = vol_label.clone();
         // The file this run is writing — named in the progress line, because
         // "WorkDisk-2 → D:\Temp" alone does not say WHAT is appearing there.
@@ -2179,7 +2184,10 @@ async fn perform_backup(
                 let mut v_permille = u64::MAX;
                 let mut v_emit = std::time::Instant::now();
                 let mut v_rate = VerifyRate::new(&image_for_verify);
-                let verified = verify_image(&image_for_verify, |done, total| {
+                let verified = verify_image_with_keys(
+                    &image_for_verify,
+                    keys_for_verify.as_ref(),
+                    |done, total| {
                     // Cancel reaches the check too, not just the copy (audit
                     // AUD-12). Reading back a whole image is minutes of work;
                     // before this, pressing Отмена during it did nothing and
@@ -2207,7 +2215,8 @@ async fn perform_backup(
                         });
                     }
                     Ok(())
-                });
+                    },
+                );
                 match verified {
                     Ok(v) if !v.valid() => {
                         return Err(OwnBackupError::ImageFormat(format!(

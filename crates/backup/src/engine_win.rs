@@ -245,14 +245,32 @@ impl ImageTarget {
 pub(crate) enum ImageReadSource {
     Vhdx(Box<crate::vhdx_bat::VhdxGuestReader>),
     Qcow2(crate::qcow2::Qcow2RandomReader),
+    Obk(Box<crate::seal::obk::ObkRandomReader>),
 }
 
 impl ImageReadSource {
     pub(crate) fn open(image_path: &Path, container: &str) -> Result<Self> {
-        match container {
-            "qcow2" => Ok(Self::Qcow2(crate::qcow2::Qcow2RandomReader::open(image_path)?)),
-            "vhdx" => Ok(Self::Vhdx(Box::new(crate::vhdx_bat::VhdxGuestReader::open(image_path)?))),
-            other => Err(OwnBackupError::ImageFormat(format!(
+        Self::open_with(image_path, container, None)
+    }
+
+    /// `key` opens an encrypted image and its whole chain. Without it an `.obk`
+    /// is refused by name rather than half-read.
+    pub(crate) fn open_with(
+        image_path: &Path,
+        container: &str,
+        key: Option<&crate::seal::ChainKey>,
+    ) -> Result<Self> {
+        match (container, key) {
+            ("qcow2", _) => Ok(Self::Qcow2(crate::qcow2::Qcow2RandomReader::open(image_path)?)),
+            ("vhdx", _) => Ok(Self::Vhdx(Box::new(crate::vhdx_bat::VhdxGuestReader::open(image_path)?))),
+            ("obk", Some(key)) => Ok(Self::Obk(Box::new(
+                crate::seal::obk::ObkRandomReader::open(image_path, key)?,
+            ))),
+            ("obk", None) => Err(OwnBackupError::Encryption(format!(
+                "{}: копия зашифрована — чтобы её открыть, нужен пароль или ключ восстановления",
+                image_path.display()
+            ))),
+            (other, _) => Err(OwnBackupError::ImageFormat(format!(
                 "unknown image container '{other}' in sidecar"
             ))),
         }
@@ -262,6 +280,7 @@ impl ImageReadSource {
         match self {
             Self::Vhdx(r) => r.read_at(offset, buf),
             Self::Qcow2(r) => r.read_at(offset, buf),
+            Self::Obk(r) => r.read_at(offset, buf),
         }
     }
 }
@@ -379,14 +398,19 @@ fn volume_root_of(device_path: &str) -> Option<String> {
 
 /// Check that `parent_image` can serve as the parent of a new child image for
 /// the volume being backed up.
-fn validate_parent(parent_image: &Path, block_size: u32, volume_len: u64) -> Result<Sidecar> {
+fn validate_parent(
+    parent_image: &Path,
+    block_size: u32,
+    volume_len: u64,
+    keys: Option<&crate::seal::context::ArchiveKeys>,
+) -> Result<Sidecar> {
     if !parent_image.exists() {
         return Err(OwnBackupError::Config(format!(
             "parent image not found: {}",
             parent_image.display()
         )));
     }
-    let sidecar = load_sidecar_of(parent_image)?;
+    let sidecar = load_sidecar_with_keys(parent_image, keys)?;
     if sidecar.manifest.block_size != block_size {
         return Err(OwnBackupError::Config(format!(
             "parent block size {} != requested {block_size}",
@@ -785,7 +809,12 @@ fn backup_volume_inner(
                 kind = BackupType::Full;
             }
             Some(parent_path) => {
-                match validate_parent(parent_path, req.block_size, volume_len) {
+                match validate_parent(
+                    parent_path,
+                    req.block_size,
+                    volume_len,
+                    req.encryption.as_ref(),
+                ) {
                     Ok(sidecar) => parent = Some((parent_path.clone(), sidecar)),
                     Err(e) => {
                         warn!(
@@ -803,15 +832,20 @@ fn backup_volume_inner(
     // format of an existing archive cannot be changed — that is a hard error,
     // not a fallback. The job runners refuse such runs before reaching the
     // engine; this guards direct callers.
+    let want_container = if req.encryption.is_some() {
+        crate::seal::obk::OBK_EXTENSION
+    } else {
+        req.image_format.extension()
+    };
     if let Some((parent_path, parent_sidecar)) = &parent {
-        if parent_sidecar.info.container != req.image_format.extension() {
+        if parent_sidecar.info.container != want_container {
             return Err(OwnBackupError::Config(format!(
                 "parent image {} is '{}' but the requested format is '{}' — \
                  changing the format of an existing backup chain is not allowed; \
                  create a new job (or remove the old backups)",
                 parent_path.display(),
                 parent_sidecar.info.container,
-                req.image_format
+                want_container
             )));
         }
     }
@@ -4454,15 +4488,31 @@ impl VerifySummary {
 /// Verify every block of an image against the sidecar checksums.
 pub fn verify_image(
     image_path: &Path,
+    progress: impl FnMut(u64, u64) -> Result<()>,
+) -> Result<VerifySummary> {
+    verify_image_with_keys(image_path, None, progress)
+}
+
+/// The same check for an encrypted image. With the key this is the full check
+/// §7.4 asks for: the record tags and the authenticated index decide whether
+/// the bytes are ours before any checksum is computed over them.
+pub fn verify_image_with_keys(
+    image_path: &Path,
+    keys: Option<&crate::seal::context::ArchiveKeys>,
     mut progress: impl FnMut(u64, u64) -> Result<()>,
 ) -> Result<VerifySummary> {
     let started = Instant::now();
-    let sidecar = load_sidecar_of(image_path)?;
+    let sidecar = load_sidecar_with_keys(image_path, keys)?;
     let block_size = sidecar.manifest.block_size as u64;
     let volume_len = sidecar.manifest.source_disk.size_bytes;
     let data_offset = sidecar.info.volume_data_offset;
 
-    let mut image_dev = ImageReadSource::open(image_path, &sidecar.info.container)?;
+    let chain_key = match (keys, sidecar.info.container.as_str()) {
+        (Some(keys), "obk") => Some(keys.open_chain_of(image_path)?.key),
+        _ => None,
+    };
+    let mut image_dev =
+        ImageReadSource::open_with(image_path, &sidecar.info.container, chain_key.as_ref())?;
 
     let total = sidecar.checksums.len() as u64;
     let mut checked = 0u64;
@@ -5094,7 +5144,27 @@ pub fn unlock_and_probe(device_path: &str, passphrase: &str) -> Result<Decrypted
 /// Read an image's sidecar: embedded first, adjacent `.obkm` as a fallback
 /// for images written before the sidecar moved inside the container.
 pub fn load_sidecar_of(image_path: &Path) -> Result<Sidecar> {
+    load_sidecar_with_keys(image_path, None)
+}
+
+/// The same, able to open an encrypted image. Its sidecar is sealed inside the
+/// container, so there is nothing to read without the key — and saying which
+/// key is missing beats failing with "unsupported container".
+pub fn load_sidecar_with_keys(
+    image_path: &Path,
+    keys: Option<&crate::seal::context::ArchiveKeys>,
+) -> Result<Sidecar> {
     let ext = image_path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_lowercase();
+    if ext == crate::seal::obk::OBK_EXTENSION {
+        let keys = keys.ok_or_else(|| {
+            OwnBackupError::Encryption(format!(
+                "{}: копия зашифрована — чтобы её открыть, нужен пароль или ключ восстановления",
+                image_path.display()
+            ))
+        })?;
+        let chain = keys.open_chain_of(image_path)?;
+        return crate::sidecar::read_sealed_sidecar(image_path, &chain.key);
+    }
     match read_embedded_sidecar(image_path, &ext) {
         Ok(s) => Ok(s),
         Err(e) => {

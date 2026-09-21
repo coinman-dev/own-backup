@@ -683,6 +683,15 @@ fn open_meta_partition(image_path: &Path, container_format: &str) -> Result<(Gue
             let vsize = reader.virtual_size();
             (GuestBlob::Qcow2(Box::new(reader)), vsize)
         }
+        // An encrypted image has no guest meta partition at all: its sidecar is
+        // sealed inside the container. Say that, rather than "unsupported" —
+        // the caller needs a key, not a different file.
+        "obk" => {
+            return Err(OwnBackupError::Encryption(format!(
+                "{}: копия зашифрована — её сведения запечатаны внутри образа,                  нужен пароль или ключ восстановления",
+                image_path.display()
+            )))
+        }
         other => {
             return Err(OwnBackupError::ImageFormat(format!(
                 "unsupported container format: {other}"
