@@ -83,6 +83,9 @@ pub async fn run(args: RestoreDiskArgs) -> own_backup_common::Result<()> {
         manifest_path: std::path::PathBuf::from(&args.manifest),
         target_disk: args.target_disk,
         verify_checksums: !args.no_verify,
+        // The command line has no way to ask for a password yet (E5), so an
+        // encrypted image refuses here rather than restoring nothing.
+        encryption: None,
     };
 
     let summary = tokio::task::spawn_blocking(move || {

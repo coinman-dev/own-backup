@@ -1450,6 +1450,10 @@ impl BackupService for BackupServiceImpl {
                 manifest_path: std::path::PathBuf::from(&p.manifest_path),
                 target_disk: p.target_disk,
                 verify_checksums: true,
+                // Manual restores ask for the password themselves (E5); the
+                // service key is for scheduled COPIES, never for handing data
+                // back to whoever happens to be at the console.
+                encryption: None,
             };
 
             let summary = tokio::task::spawn_blocking(move || {

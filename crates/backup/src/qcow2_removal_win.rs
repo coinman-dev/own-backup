@@ -481,8 +481,10 @@ pub(crate) fn mount_delete<S: crate::overlay::SlotStore + 'static>(
 /// Multi-volume twin of [`mount_delete`]: attach RW → per-partition delete on
 /// the volume at each partition's disk offset → teardown all volumes. The
 /// session is always logged out before returning.
-fn mount_delete_multi(
-    overlay: Arc<Mutex<WritableOverlaySource>>,
+/// Generic over the scratch the driver's writes land in, for the same reason
+/// [`mount_delete`] is: an encrypted image may not have a readable one (§7.4).
+pub(crate) fn mount_delete_multi<S: crate::overlay::SlotStore + 'static>(
+    overlay: Arc<Mutex<WritableOverlaySource<S>>>,
     virtual_size: u64,
     image_path: &Path,
     partitions: &[(u64, Vec<ExcludedPath>)],

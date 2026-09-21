@@ -40,16 +40,23 @@ try {
         Say 'LAB-OBK-SKIP no probe on the media'
         return
     }
+    # A previous boot's images are a previous boot's problem: left in place they
+    # join this run's listings as extra chains of the same job.
+    if (Test-Path -LiteralPath $work) { Remove-Item -LiteralPath $work -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $work | Out-Null
     foreach ($f in @($srcVhd, $tgtVhd)) {
         if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force }
     }
 
     # Two throwaway volumes of the same size: one to copy, one to restore onto.
+    # GPT, not the MBR diskpart gives a fresh VHD by default: a whole-disk copy
+    # is a GPT feature (the manifest IS the partition table), and the engine
+    # refuses an MBR disk by name.
     Diskpart @"
 create vdisk file="$srcVhd" maximum=512 type=expandable
 select vdisk file="$srcVhd"
 attach vdisk
+convert gpt
 create partition primary
 format fs=ntfs quick label="OBKSRC"
 assign letter=S
@@ -58,6 +65,7 @@ assign letter=S
 create vdisk file="$tgtVhd" maximum=512 type=expandable
 select vdisk file="$tgtVhd"
 attach vdisk
+convert gpt
 create partition primary
 format fs=ntfs quick label="OBKTGT"
 assign letter=R
@@ -103,7 +111,7 @@ assign letter=R
     Start-Sleep -Seconds 2
 
     # The probe: full copy, checks, two increments, consolidation, restore.
-    $out = & $probe 'S:' $work $spec 2>&1 | Out-String
+    $out = & $probe 'volume' 'S:' $work $spec 2>&1 | Out-String
     Say $out.Trim()
 
     # Hashed AFTER the probe, not before: the probe writes files of its own onto
@@ -166,6 +174,79 @@ assign letter=R
     $stillThere = Test-Path -LiteralPath $excludedThere
     Say "LAB-OBK-EXCLUDED-PRESENT $stillThere (expected False)"
     if ($stillThere) { Say 'LAB-OBK-FAIL the excluded file is still in the restored volume' }
+
+    # --- The bootable whole-disk copy, onto the same throwaway target ---
+    # A different planner, a different composite reader and a different restore
+    # than the volume path above, all of them Windows-only.
+    $srcDisk = Get-Disk | Where-Object { $_.Location -eq $srcVhd } | Select-Object -First 1
+    if (-not $srcDisk -or -not $tgtDisk) {
+        Say 'LAB-OBK-DISK-SKIP could not find both virtual disks'
+    } else {
+        # Nothing may hold the target while a whole disk is written onto it.
+        Set-Disk -Number $tgtDisk.Number -IsOffline $true
+        Start-Sleep -Seconds 2
+        $out = & $probe 'disk' $srcDisk.Number $work $tgtDisk.Number 2>&1 | Out-String
+        $probeOk = ($LASTEXITCODE -eq 0)
+        Say $out.Trim()
+        Set-Disk -Number $tgtDisk.Number -IsOffline $false
+        Start-Sleep -Seconds 3
+        Diskpart @"
+select vdisk file="$tgtVhd"
+detach vdisk
+attach vdisk
+"@ | Out-Null
+        Start-Sleep -Seconds 5
+
+        # Comparing after a failed probe is worse than not comparing: the target
+        # still holds the VOLUME restore from above, whose files match — a green
+        # line for work that never ran.
+        if (-not $probeOk) {
+            Say 'LAB-OBK-DISK-FAIL the whole-disk probe failed — nothing compared'
+            Say 'LAB-OBK-DONE'
+            return
+        }
+
+        # The restored disk must carry the source's own volume, by its label.
+        $back = Get-Disk | Where-Object { $_.Location -eq $tgtVhd } | Select-Object -First 1
+        $vol = if ($back) {
+            Get-Partition -DiskNumber $back.Number -ErrorAction SilentlyContinue |
+                Get-Volume -ErrorAction SilentlyContinue |
+                Where-Object { $_.FileSystemLabel -eq 'OBKSRC' } |
+                Select-Object -First 1
+        } else { $null }
+        if (-not $vol) {
+            Say 'LAB-OBK-DISK-FAIL the restored disk has no OBKSRC volume'
+        } else {
+            if (-not $vol.DriveLetter) {
+                Diskpart @"
+select vdisk file="$tgtVhd"
+select partition 1
+assign letter=Q
+"@ | Out-Null
+                Start-Sleep -Seconds 3
+                $dl = 'Q'
+            } else {
+                $dl = $vol.DriveLetter
+            }
+            Say "LAB-OBK-DISK-VOLUME letter=$dl label=OBKSRC"
+            $matched = 0
+            foreach ($path in $hashes.Keys) {
+                $there = $path -replace '^S:', "${dl}:"
+                if (-not (Test-Path -LiteralPath $there)) {
+                    Say "LAB-OBK-DISK-FAIL missing after whole-disk restore: $there"
+                    continue
+                }
+                if ((Get-FileHash -LiteralPath $there -Algorithm SHA256).Hash -eq $hashes[$path]) {
+                    $matched++
+                } else {
+                    Say "LAB-OBK-DISK-FAIL content differs: $there"
+                }
+            }
+            Say "LAB-OBK-DISK-FILES matched=$matched of=$($hashes.Count)"
+            $ghost = Test-Path -LiteralPath "${dl}:\excluded-secret.bin"
+            Say "LAB-OBK-DISK-EXCLUDED-PRESENT $ghost (expected False)"
+        }
+    }
     Say "LAB-OBK-DONE"
 } catch {
     Say "LAB-OBK-CRASH $($_.Exception.Message)"

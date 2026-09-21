@@ -19,8 +19,13 @@
 //! Usage, inside the VM, as Administrator or SYSTEM:
 //!
 //! ```text
-//! obk_live_probe.exe <source volume, e.g. S:> <work dir> <restore target, e.g. R:>
+//! obk_live_probe.exe volume <source volume, e.g. S:> <work dir> <restore target>
+//! obk_live_probe.exe disk   <source disk number> <work dir> <target disk number>
 //! ```
+//!
+//! The `disk` mode is the bootable whole-disk copy: one image holding the real
+//! GPT and every selected partition, with the restore manifest sealed inside it
+//! rather than in a guest meta partition.
 //!
 //! It writes only inside the work directory, onto the source volume (files of
 //! its own, to give the increments something to carry) and onto the restore
@@ -68,25 +73,38 @@ mod probe {
 
     pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         let args: Vec<String> = std::env::args().collect();
-        if args.len() != 4 {
-            return Err("usage: obk_live_probe <source volume> <work dir> <restore target>".into());
+        if args.len() != 5 {
+            return Err("usage: obk_live_probe <volume|disk> <source> <work dir> <target>".into());
         }
-        let source = args[1].clone();
-        let work = PathBuf::from(&args[2]);
-        let target = args[3].clone();
+        let work = PathBuf::from(&args[3]);
         std::fs::create_dir_all(&work)?;
+        match args[1].as_str() {
+            "volume" => run_volume(args[2].clone(), work, args[4].clone()),
+            "disk" => run_disk(args[2].parse()?, work, args[4].parse()?),
+            other => Err(format!("unknown mode {other:?}: expected 'volume' or 'disk'").into()),
+        }
+    }
 
-        say!("PROBE-BEGIN source={source} work={} target={target}", work.display());
-
-        // The keys of a job, made here and thrown away with the VM. The
-        // production KDF profile, not a test one: this is the ordinary path.
+    /// The keys of a throwaway job, made here and gone with the VM. The
+    /// production KDF profile, not a test one: this is the ordinary path.
+    fn lab_keys() -> Result<ArchiveKeys, Box<dyn std::error::Error>> {
         let pair = JobKeyPair::generate()?;
         let recovery = RecoveryKey::generate()?;
-        let kdf = KdfParams::strong();
         let started = Instant::now();
-        let envelope = SealedPrivateKey::seal(JOB, &pair, PASSWORD, &recovery, &kdf)?;
+        let envelope =
+            SealedPrivateKey::seal(JOB, &pair, PASSWORD, &recovery, &KdfParams::strong())?;
         say!("PROBE-KDF ok ms={}", started.elapsed().as_millis());
-        let keys = ArchiveKeys::from_private(envelope, pair.private)?;
+        Ok(ArchiveKeys::from_private(envelope, pair.private)?)
+    }
+
+    fn run_volume(
+        source: String,
+        work: PathBuf,
+        target: String,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+
+        say!("PROBE-BEGIN source={source} work={} target={target}", work.display());
+        let keys = lab_keys()?;
 
         let full = work.join("lab_C_full_1.obk");
         let inc1 = work.join("lab_C_inc_2.obk");
@@ -194,15 +212,17 @@ mod probe {
             started.elapsed().as_secs()
         );
 
+        // The chain THIS copy belongs to, found by its own leaf. A work folder
+        // can hold more than one chain of the same job — the whole-disk phase
+        // leaves one — and taking "the first" would consolidate a stranger.
         let chains = list_job_chains(&work, JOB)?;
-        say!(
-            "PROBE-CHAIN chains={} images={}",
-            chains.len(),
-            chains.first().map(|c| c.images.len()).unwrap_or(0)
-        );
+        let chain = chains
+            .into_iter()
+            .find(|c| c.images.iter().any(|i| i.image_path == inc2))
+            .ok_or("the work folder holds no chain containing this copy")?;
+        say!("PROBE-CHAIN images={}", chain.images.len());
 
         // --- 6. Consolidation: fold the oldest increment into the base ---
-        let chain = chains.into_iter().next().ok_or("no chain in the work folder")?;
         let step = plan_consolidation(&chain, 1).ok_or("nothing planned: 2 increments, limit 1")?;
         say!(
             "PROBE-CONSOLIDATE-PLAN fold={} into={} repoint={:?}",
@@ -236,10 +256,13 @@ mod probe {
         if before.len() != after.len() {
             say!("PROBE-FAIL the virtual disk changed size across consolidation");
         }
-        let chains = list_job_chains(&work, JOB)?;
+        let after_chain = list_job_chains(&work, JOB)?
+            .into_iter()
+            .find(|c| c.images.iter().any(|i| i.image_path == inc2));
         say!(
-            "PROBE-CHAIN-AFTER images={} base_still_encrypted={}",
-            chains.first().map(|c| c.images.len()).unwrap_or(0),
+            "PROBE-CHAIN-AFTER images={} increments_ever={} base_still_encrypted={}",
+            after_chain.as_ref().map(|c| c.images.len()).unwrap_or(0),
+            after_chain.as_ref().map(|c| c.increments_ever()).unwrap_or(0),
             own_backup_backup::qcow2::Qcow2RandomReader::open(&full).is_err()
         );
 
@@ -272,6 +295,144 @@ mod probe {
         );
 
         say!("PROBE-DONE");
+        Ok(())
+    }
+
+    /// The bootable whole-disk copy: one encrypted image holding the real GPT,
+    /// every partition, and the restore manifest — sealed inside the container,
+    /// because an `.obk` has no guest meta partition to put it in.
+    ///
+    /// This is the half nothing else can check. A whole-disk image is written
+    /// through a different planner, a different composite reader and a
+    /// different restore than a volume copy, and all three are Windows-only.
+    fn run_disk(
+        source_disk: u32,
+        work: PathBuf,
+        target_disk: u32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use own_backup_backup::engine_win::{
+            backup_disk, restore_disk, DiskBackupRequest, DiskPartitionBackup, DiskRestoreRequest,
+        };
+
+        say!("PROBE-DISK-BEGIN source_disk={source_disk} target_disk={target_disk}");
+        let keys = lab_keys()?;
+
+        // Every partition the source disk has, except the Microsoft Reserved
+        // one: it holds no filesystem, and its GPT entry is recreated from the
+        // manifest on restore rather than copied.
+        let layout = own_backup_backup::gpt_reader::read_disk_layout(source_disk)?;
+        let partitions: Vec<DiskPartitionBackup> = layout
+            .partitions
+            .iter()
+            .filter(|p| {
+                !p.type_guid
+                    .eq_ignore_ascii_case(own_backup_common::gpt::GPT_TYPE_MSR)
+            })
+            .map(|p| {
+                let offset = p.first_lba * layout.sector_size as u64;
+                // The VOLUME, not the raw partition range. A raw `part:` spec
+                // has no volume root, so nothing takes a VSS snapshot of it and
+                // nothing can walk its files — the exclusion rules would find
+                // no matches and the copy would silently carry the lot.
+                let device = own_backup_backup::volume_win::volume_root_at_offset(
+                    source_disk,
+                    offset,
+                )
+                .unwrap_or_else(|| format!("part:{source_disk}:{offset}:{}",
+                    p.size_bytes(layout.sector_size)));
+                say!("PROBE-DISK-PART index={} device={device}", p.index);
+                DiskPartitionBackup {
+                    device,
+                    part_index: p.index,
+                    passphrase: None,
+                }
+            })
+            .collect();
+        say!("PROBE-DISK-LAYOUT partitions={}", partitions.len());
+
+        let image = work.join("lab_disk0_full_1.obk");
+        let _ = std::fs::remove_file(&image);
+        let started = Instant::now();
+        let summary = backup_disk(
+            &DiskBackupRequest {
+                disk_number: source_disk,
+                disk_model: "LAB VIRTUAL DISK".into(),
+                partitions,
+                image_path: image.clone(),
+                block_size: DEFAULT_BLOCK_SIZE,
+                image_format: ImageFormat::Qcow2,
+                job_id: Some(JOB.into()),
+                encryption: Some(keys.clone()),
+                exclusion_patterns_windows: vec![EXCLUDED.to_string()],
+                exclusion_patterns_linux: Vec::new(),
+                kind: BackupType::Full,
+                parent_image: None,
+                source_disk: None,
+                bootable: false,
+            },
+            |_| Ok(()),
+        )?;
+        say!(
+            "PROBE-DISK-BACKUP ok blocks={} bytes={} excluded_files={} secs={}",
+            summary.blocks_copied,
+            summary.bytes_copied,
+            summary.excluded_files,
+            started.elapsed().as_secs()
+        );
+        say!("PROBE-DISK-IMAGE bytes={}", std::fs::metadata(&image)?.len());
+
+        // The same refusals as a volume copy, plus the one that matters here:
+        // the restore manifest is INSIDE the sealed half, so a reader without
+        // the key cannot even learn the disk's layout.
+        match own_backup_backup::sidecar::detect_container_format(&image) {
+            Ok(kind) => say!("PROBE-DISK-CONTAINER {kind}"),
+            Err(e) => say!("PROBE-DISK-CONTAINER-FAIL {e}"),
+        }
+        match own_backup_backup::sidecar::read_image_sidecar(&image) {
+            Ok(_) => say!("PROBE-DISK-MANIFEST-FAIL the manifest was readable without a key"),
+            Err(e) => say!("PROBE-DISK-MANIFEST-NOKEY refused: {e}"),
+        }
+
+        let portable = ArchiveKeys::from_image_password(&image, PASSWORD)?;
+        let key = portable.open_chain_of(&image)?.key;
+        let sidecar = own_backup_backup::sidecar::read_sealed_sidecar(&image, &key)?;
+        let dm = sidecar
+            .disk_manifest
+            .as_ref()
+            .ok_or("the sealed sidecar carries no whole-disk manifest")?;
+        say!(
+            "PROBE-DISK-MANIFEST partitions={} disk_guid={} blocks={}",
+            dm.images.len(),
+            dm.layout.disk_guid,
+            sidecar.checksums.len()
+        );
+
+        let started = Instant::now();
+        let verified = verify_image_with_keys(&image, Some(&portable), |_, _| Ok(()))?;
+        say!(
+            "PROBE-DISK-VERIFY ok blocks={} mismatched={} secs={}",
+            verified.blocks_checked,
+            verified.mismatched_blocks.len(),
+            started.elapsed().as_secs()
+        );
+
+        let started = Instant::now();
+        let restored = restore_disk(
+            &DiskRestoreRequest {
+                manifest_path: image.clone(),
+                target_disk,
+                verify_checksums: true,
+                encryption: Some(portable),
+            },
+            |_| Ok(()),
+        )?;
+        say!(
+            "PROBE-DISK-RESTORE ok partitions={} bytes={} secs={}",
+            restored.partitions,
+            restored.bytes_written,
+            started.elapsed().as_secs()
+        );
+        say!("PROBE-DISK-DONE");
         Ok(())
     }
 

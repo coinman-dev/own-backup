@@ -406,27 +406,35 @@ pub fn disk_gpt_write_ops(layout: &DiskLayout, target_disk_size: u64) -> Result<
 /// `layout` must be the KEPT partitions only (variant B, no meta). The stored
 /// disk manifest keeps this same `layout`; restore recreates the source
 /// partitions and never the meta one.
+/// `meta_guid` is `None` for an **encrypted** image: its sidecar is sealed
+/// inside the container, so there is no guest partition to describe it (§7.3),
+/// and putting an empty one in the image's GPT would only describe a place
+/// nothing lives.
 pub fn whole_disk_gpt_ops(
     layout: &DiskLayout,
     plan: &WholeDiskImagePlan,
-    meta_guid: Uuid,
+    meta_guid: Option<Uuid>,
 ) -> Result<Vec<WriteOp>> {
-    let meta_index = (1..=NUM_ENTRIES)
-        .find(|i| !layout.partitions.iter().any(|p| p.index == *i))
-        .ok_or_else(|| {
-            OwnBackupError::ImageFormat("GPT has no free slot for the OwnBackupMeta partition".into())
-        })?;
     let mut with_meta = layout.clone();
     with_meta.size_bytes = plan.image_size;
-    with_meta.partitions.push(GptPartitionEntry {
-        index: meta_index,
-        type_guid: OWN_BACKUP_META_GUID.to_string(),
-        part_guid: meta_guid.to_string(),
-        first_lba: plan.meta_first_lba,
-        last_lba: plan.meta_last_lba,
-        attributes: 0,
-        name: "OwnBackupMeta".into(),
-    });
+    if let Some(meta_guid) = meta_guid {
+        let meta_index = (1..=NUM_ENTRIES)
+            .find(|i| !layout.partitions.iter().any(|p| p.index == *i))
+            .ok_or_else(|| {
+                OwnBackupError::ImageFormat(
+                    "GPT has no free slot for the OwnBackupMeta partition".into(),
+                )
+            })?;
+        with_meta.partitions.push(GptPartitionEntry {
+            index: meta_index,
+            type_guid: OWN_BACKUP_META_GUID.to_string(),
+            part_guid: meta_guid.to_string(),
+            first_lba: plan.meta_first_lba,
+            last_lba: plan.meta_last_lba,
+            attributes: 0,
+            name: "OwnBackupMeta".into(),
+        });
+    }
     disk_gpt_write_ops(&with_meta, plan.image_size)
 }
 
@@ -576,7 +584,7 @@ mod tests {
         let plan = plan_whole_disk_image(&layout, meta_size);
         let meta_guid = Uuid::from_u128(0x5827_248C).to_string().to_uppercase();
 
-        let ops = whole_disk_gpt_ops(&layout, &plan, Uuid::from_u128(0x5827_248C)).unwrap();
+        let ops = whole_disk_gpt_ops(&layout, &plan, Some(Uuid::from_u128(0x5827_248C))).unwrap();
         let mut disk = vec![0u8; plan.image_size as usize];
         apply_ops(&mut disk, &ops);
 

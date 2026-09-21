@@ -30,10 +30,21 @@ use own_backup_common::Result;
 
 use crate::exclusions_win::ExcludedPath;
 use crate::overlay::{SealedSlots, WritableOverlaySource};
-use crate::qcow2_removal_win::{mount_delete, rehash_touched_through, Qcow2RemovalOutcome};
+use crate::qcow2_removal_win::{
+    mount_delete, mount_delete_multi, rehash_touched_through, Qcow2RemovalOutcome,
+};
 use crate::seal::obk::{apply_changed, ObkRandomReader};
 use crate::seal::ChainKey;
 use crate::sidecar::BlockChecksum;
+
+/// The scratch an encrypted removal pass writes through.
+type SealedOverlay = Arc<Mutex<WritableOverlaySource<SealedSlots>>>;
+
+/// Attach the image read-write, let the filesystem driver delete, tear down.
+/// One volume's worth or a whole disk's — that is all the two passes differ by.
+/// Returns (deleted, failed) entry counts.
+type DeletePass<'a> =
+    &'a dyn Fn(SealedOverlay, u64, &Path, &mut dyn FnMut(u64, u64)) -> Result<(u64, u64)>;
 
 fn scratch_path(image_path: &Path) -> std::path::PathBuf {
     let mut p = image_path.to_path_buf();
@@ -45,7 +56,7 @@ fn scratch_path(image_path: &Path) -> std::path::PathBuf {
     p
 }
 
-/// Delete `paths` inside the encrypted image and put the result back into it.
+/// Delete `paths` inside the encrypted image of one volume.
 ///
 /// `Ok(None)` means the pass did not happen and the image is untouched — the
 /// caller decides what to say about the exclusion rules.
@@ -63,6 +74,69 @@ pub fn remove_excluded_from_obk(
     if paths.is_empty() {
         return Ok(None);
     }
+    remove_excluded(
+        image_path,
+        chain,
+        paths.len(),
+        &|overlay, virtual_size, image_path, tick| {
+            mount_delete(overlay, virtual_size, image_path, paths, tick)
+        },
+        data_offset,
+        volume_len,
+        block_size,
+        checksums,
+        tick,
+    )
+}
+
+/// The same for a **whole-disk** encrypted image: one mount, every partition's
+/// recorded paths deleted by the filesystem driver on its own volume.
+///
+/// A whole-disk image is disk-block absolute, so the checksum grid starts at
+/// offset 0 and spans the image.
+#[allow(clippy::too_many_arguments)]
+pub fn remove_excluded_from_obk_disk_image(
+    image_path: &Path,
+    chain: &ChainKey,
+    partitions: &[(u64, Vec<ExcludedPath>)],
+    image_size: u64,
+    block_size: u32,
+    checksums: &mut Vec<BlockChecksum>,
+    tick: &mut dyn FnMut(u64, u64),
+) -> Result<Option<Qcow2RemovalOutcome>> {
+    let total: usize = partitions.iter().map(|(_, p)| p.len()).sum();
+    if total == 0 {
+        return Ok(None);
+    }
+    remove_excluded(
+        image_path,
+        chain,
+        total,
+        &|overlay, virtual_size, image_path, tick| {
+            mount_delete_multi(overlay, virtual_size, image_path, partitions, tick)
+        },
+        0,
+        image_size,
+        block_size,
+        checksums,
+        tick,
+    )
+}
+
+/// What the two entry points share: a sealed scratch, an RW mount that deletes,
+/// and a container rebuilt around whatever the driver changed.
+#[allow(clippy::too_many_arguments)]
+fn remove_excluded(
+    image_path: &Path,
+    chain: &ChainKey,
+    paths: usize,
+    delete: DeletePass<'_>,
+    data_offset: u64,
+    volume_len: u64,
+    block_size: u32,
+    checksums: &mut Vec<BlockChecksum>,
+    tick: &mut dyn FnMut(u64, u64),
+) -> Result<Option<Qcow2RemovalOutcome>> {
     let t0 = Instant::now();
     let (virtual_size, cluster_size, chain_id) = {
         let reader = ObkRandomReader::open(image_path, chain)?;
@@ -75,7 +149,7 @@ pub fn remove_excluded_from_obk(
     };
     info!(
         image = %image_path.display(),
-        paths = paths.len(),
+        paths,
         cluster_size,
         "obk true removal: starting RW mount-&-delete over a sealed scratch"
     );
@@ -99,8 +173,7 @@ pub fn remove_excluded_from_obk(
 
     // Attach RW, delete, tear down. On any failure here the image is untouched:
     // everything the driver wrote is in the sealed scratch.
-    let (deleted, failed) = match mount_delete(overlay.clone(), virtual_size, image_path, paths, tick)
-    {
+    let (deleted, failed) = match delete(overlay.clone(), virtual_size, image_path, tick) {
         Ok(v) => v,
         Err(e) => {
             warn!(error = %e, "obk true removal: mount-&-delete failed — the image is unchanged");

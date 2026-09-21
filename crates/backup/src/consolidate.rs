@@ -1494,6 +1494,17 @@ mod tests {
         let chain = list_job_chains(dir.path(), "j1").unwrap().remove(0);
         assert_eq!(chain.images.len(), 2);
         assert!(plan_consolidation(&chain, 1).is_none());
+
+        // What retention counts, for an encrypted chain, comes out of the open
+        // header — and consolidation is the one thing that can make the files
+        // on disk disagree with the chain's history. Two increments have been
+        // taken over this chain's life; one of them is now inside the base.
+        assert_eq!(chain.increments_ever(), 2, "a folded increment still counts");
+        assert_eq!(
+            chain.started_at(),
+            "2026-01-01T00:00:00Z",
+            "the chain did not get younger by being consolidated"
+        );
     }
 
     /// The dangerous moment, for an encrypted chain: the base has been folded

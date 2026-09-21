@@ -2077,8 +2077,9 @@ pub struct DiskBackupRequest {
     pub block_size: u32,
     pub image_format: ImageFormat,
     pub job_id: Option<String>,
-    /// Present for an encrypted job. Whole-disk images cannot be written
-    /// encrypted yet — the run is refused rather than written in the clear.
+    /// Present for an encrypted job: the whole-disk image is written as `.obk`,
+    /// with its sidecar — including the restore manifest — sealed inside the
+    /// container instead of in a guest meta partition (§7.3).
     pub encryption: Option<crate::seal::context::ArchiveKeys>,
     /// File-exclusion glob patterns for Windows-family filesystems (NTFS/ReFS/
     /// FAT), applied per partition (plan D2): NTFS/ReFS drop + zero the matched
@@ -2832,15 +2833,7 @@ pub fn backup_disk(
     req: &DiskBackupRequest,
     progress: impl FnMut(&BackupProgress) -> Result<()>,
 ) -> Result<DiskBackupSummary> {
-    if req.encryption.is_some() {
-        // Per-volume encrypted images work; a whole-disk one does not yet.
-        // Writing it in the clear instead would be the one outcome §7.7 calls
-        // out as never acceptable, so the run stops here.
-        return Err(OwnBackupError::Encryption(
-            "зашифрованная копия диска целиком ещё не поддержана —              копия не создавалась (шифруются копии томов)"
-                .into(),
-        ));
-    }
+    check_encrypted_target(req.encryption.as_ref(), req.image_format, &req.image_path)?;
     if req.image_path.exists() {
         return Err(OwnBackupError::Config(format!(
             "output image already exists: {}",
@@ -3202,7 +3195,7 @@ fn backup_disk_inner(
                 warn!("no parent image supplied for a {kind} whole-disk backup — creating a full backup");
                 kind = BackupType::Full;
             }
-            Some(pp) => match validate_disk_parent(pp, req.block_size, req.image_format) {
+            Some(pp) => match validate_disk_parent(pp, req.block_size, req.image_format, req.encryption.as_ref()) {
                 Ok(sc) => parent = Some((pp.clone(), sc)),
                 Err(e) => {
                     warn!(parent = %pp.display(), error = %e,
@@ -3265,7 +3258,13 @@ fn backup_disk_inner(
             meta_size = full_used(disk_used.count, own_reserve);
         }
     }
-    let mut plan = own_backup_common::gpt::plan_whole_disk_image(&layout, meta_size);
+    // An encrypted image has no guest meta partition: its sidecar is sealed
+    // inside the container (§7.3). `meta_size` stays the measure of how much
+    // room that sidecar needs — it becomes the container's reservation instead
+    // of a partition's size — but the image itself is planned without one.
+    let encrypted = req.encryption.is_some();
+    let planned_meta = |bytes: u64| if encrypted { 0 } else { bytes };
+    let mut plan = own_backup_common::gpt::plan_whole_disk_image(&layout, planned_meta(meta_size));
     if let Some((pp, sc)) = &parent {
         if plan.image_size != sc.manifest.source_disk.size_bytes {
             warn!(
@@ -3277,11 +3276,11 @@ fn backup_disk_inner(
             kind = BackupType::Full;
             parent = None;
             meta_size = full_used(disk_used.count, own_reserve);
-            plan = own_backup_common::gpt::plan_whole_disk_image(&layout, meta_size);
+            plan = own_backup_common::gpt::plan_whole_disk_image(&layout, planned_meta(meta_size));
         }
     }
     let meta_offset = plan.meta_first_lba * sector;
-    let meta_guid = Uuid::new_v4();
+    let meta_guid = (!encrypted).then(Uuid::new_v4);
 
     // 4. Create the image and (for a full) write its GPT. The image GPT gets
     //    FRESH random disk + partition GUIDs, NEVER the source disk's — a
@@ -3306,21 +3305,64 @@ fn backup_disk_inner(
             .map(|op| (op.offset, op.bytes))
             .collect();
 
+    // Identity of this image, needed before it is created: the container seals
+    // it into its own root record when encrypted.
+    let backup_id = Uuid::new_v4();
     let (mut target, sector_size) = match &parent {
-        None => create_disk_image_target(&req.image_path, plan.image_size, req.image_format)?,
-        Some((pp, _)) => {
+        None => create_disk_image_target(
+            &req.image_path,
+            plan.image_size,
+            req.image_format,
+            req.encryption.as_ref(),
+            &DiskImagePlan {
+                backup_id,
+                role: ChainRole::Full,
+                parent: None,
+                disk_number: req.disk_number,
+            },
+        )?,
+        Some((pp, sc)) => {
             // Child inherits the parent's GPT through the chain — overwrite the
             // op bytes with the parent's actual GPT so the composite reader
             // reproduces them byte-for-byte. Drop the parent read handle before
             // creating the differencing child (VHDX CreateVirtualDisk opens the
             // parent itself).
             {
-                let mut pimg = ImageReadSource::open(pp, &req.image_format.extension())?;
+                // The chain key comes from the parent itself, which is where
+                // the wrapped one travels.
+                let parent_key = match &req.encryption {
+                    Some(keys) => Some(keys.open_chain_of(pp)?.key),
+                    None => None,
+                };
+                let mut pimg = ImageReadSource::open_with(
+                    pp,
+                    &container_ext(req.image_format, req.encryption.as_ref()),
+                    parent_key.as_ref(),
+                )?;
                 for (off, bytes) in &mut gpt_ops {
                     pimg.read_at(*off, bytes)?;
                 }
             }
-            create_disk_child_target(&req.image_path, pp, plan.image_size, req.image_format)?
+            let parent_name = pp
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            create_disk_child_target(
+                &req.image_path,
+                pp,
+                plan.image_size,
+                req.image_format,
+                req.encryption.as_ref(),
+                &DiskImagePlan {
+                    backup_id,
+                    role: match kind {
+                        BackupType::Differential => ChainRole::Differential,
+                        _ => ChainRole::Incremental,
+                    },
+                    parent: Some((sc.manifest.backup_id, parent_name)),
+                    disk_number: req.disk_number,
+                },
+            )?
         }
     };
     if parent.is_none() {
@@ -3409,8 +3451,14 @@ fn backup_disk_inner(
     //    guest-write of the real blob fails with "block state 2"). A non-zero
     //    fill across the whole region forces allocation; the guest-write below
     //    then overwrites it with the actual sidecar. Then finalize + release.
-    let placeholder = vec![0x01u8; meta_size as usize];
-    target.write_at(meta_offset, &placeholder)?;
+    //    An encrypted image has no such partition: the sidecar goes inside the
+    //    container at finalize, with `meta_size` bytes of room reserved so the
+    //    final one — the exclusion figures and the re-checksummed blocks are
+    //    known only after the pass below — can replace it in place.
+    if !encrypted {
+        let placeholder = vec![0x01u8; meta_size as usize];
+        target.write_at(meta_offset, &placeholder)?;
+    }
     let _ = progress(&BackupProgress {
         backup_id: "finalize".into(),
         status: BackupStatus::Running,
@@ -3420,8 +3468,32 @@ fn backup_disk_inner(
         speed_bps: 0,
                 categories: None,
     });
-    // Plaintext only: the disk path refuses encrypted jobs above.
-    target.finalize(&[], 0)?;
+    // A provisional sidecar, so the container has something of the right shape
+    // to reserve around. Nothing reads it: the run either replaces it below or
+    // fails, and a failed run deletes its image.
+    let provisional = if encrypted {
+        let mut blob = Vec::new();
+        let info = SidecarInfo::new_full("provisional", 0);
+        crate::sidecar::write_sidecar_v2_to(
+            &mut blob,
+            &info,
+            &whole_disk_image_manifest(
+                &layout,
+                req,
+                sector_size,
+                plan.image_size,
+                plan.image_size.div_ceil(bs),
+                0,
+                kind,
+                None,
+            ),
+            &[],
+        )?;
+        blob
+    } else {
+        Vec::new()
+    };
+    target.finalize(&provisional, meta_size as usize)?;
     for prep in &mut prepared {
         if let Some(session) = prep.vss.take() {
             if let Err(e) = session.complete() {
@@ -3462,8 +3534,24 @@ fn backup_disk_inner(
                 categories: None,
             });
         };
-        match req.image_format {
-            ImageFormat::Vhdx => {
+        match (&req.encryption, req.image_format) {
+            // Encrypted: the same mount-and-delete, over a sealed scratch, with
+            // the container rebuilt around whatever the driver changed. A
+            // plaintext scratch beside an encrypted copy would hold exactly the
+            // filesystem metadata naming the files being removed (§7.4).
+            (Some(keys), _) => {
+                let chain = keys.open_chain_of(&req.image_path)?;
+                crate::obk_removal_win::remove_excluded_from_obk_disk_image(
+                    &req.image_path,
+                    &chain.key,
+                    &removal,
+                    plan.image_size,
+                    req.block_size,
+                    &mut checksums,
+                    &mut tick,
+                )?;
+            }
+            (None, ImageFormat::Vhdx) => {
                 crate::true_removal_win::remove_excluded_from_disk_image(
                     &req.image_path,
                     &removal,
@@ -3473,7 +3561,7 @@ fn backup_disk_inner(
                     &mut tick,
                 )?;
             }
-            ImageFormat::Qcow2 => {
+            (None, ImageFormat::Qcow2) => {
                 crate::qcow2_removal_win::remove_excluded_from_disk_image_qcow2(
                     &req.image_path,
                     &removal,
@@ -3534,7 +3622,7 @@ fn backup_disk_inner(
     // `used_blocks` is the FULL image state (every checksummed block), not just
     // this run's writes — the next child sizes its meta partition from it, so it
     // must stay stable across the chain (checksums.len() == disk_used.count).
-    let manifest = whole_disk_image_manifest(
+    let mut manifest = whole_disk_image_manifest(
         &layout,
         req,
         sector_size,
@@ -3544,6 +3632,10 @@ fn backup_disk_inner(
         kind,
         parent.as_ref().map(|(_, sc)| sc.manifest.backup_id),
     );
+    // The container sealed this identity into its own root record before a
+    // single cluster was written; the sidecar has to repeat it, or the two
+    // halves of the image would name different backups.
+    manifest.backup_id = backup_id;
     // A whole-disk image is disk-block absolute → volume_data_offset = 0.
     let mut info = match &parent {
         None => SidecarInfo::new_full(image_file_name, 0),
@@ -3559,7 +3651,7 @@ fn backup_disk_inner(
             SidecarInfo::new_child(image_file_name, role, parent_name, 0)
         }
     };
-    info.container = req.image_format.extension().into();
+    info.container = container_ext(req.image_format, req.encryption.as_ref());
     info.job_id = req.job_id.clone();
     info.source_disk_layout = req.source_disk.clone();
     info.categories = categories;
@@ -3596,9 +3688,18 @@ fn backup_disk_inner(
         blob.clear();
         crate::sidecar::write_sidecar_v2_full_to(&mut blob, &info, &manifest, &checksums, Some(&disk_manifest))?;
     }
-    match req.image_format {
-        ImageFormat::Vhdx => crate::vhdx_bat::write_vhdx_guest_at(&req.image_path, meta_offset, &blob)?,
-        ImageFormat::Qcow2 => {
+    match (&req.encryption, req.image_format) {
+        (Some(keys), _) => {
+            // No guest meta partition to write into: the sidecar replaces the
+            // reserved one inside the container, sealed under the same chain
+            // key and with a fresh nonce.
+            let chain = keys.open_chain_of(&req.image_path)?;
+            crate::seal::obk::update_sealed_metadata(&req.image_path, &chain.key, &blob)?;
+        }
+        (None, ImageFormat::Vhdx) => {
+            crate::vhdx_bat::write_vhdx_guest_at(&req.image_path, meta_offset, &blob)?
+        }
+        (None, ImageFormat::Qcow2) => {
             crate::qcow2::merge::write_qcow2_guest_blob(&req.image_path, meta_offset, &blob)?
         }
     }
@@ -3642,6 +3743,7 @@ fn validate_disk_parent(
     parent_image: &Path,
     block_size: u32,
     format: ImageFormat,
+    encryption: Option<&crate::seal::context::ArchiveKeys>,
 ) -> Result<Sidecar> {
     if !parent_image.exists() {
         return Err(OwnBackupError::Config(format!(
@@ -3649,12 +3751,23 @@ fn validate_disk_parent(
             parent_image.display()
         )));
     }
-    let ext = parent_image
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or_default()
-        .to_lowercase();
-    let sidecar = read_embedded_sidecar(parent_image, &ext)?;
+    // An encrypted parent keeps its sidecar sealed inside the container, so
+    // continuing that chain needs the job's key — the same key the new image
+    // will be written with.
+    let sidecar = match encryption {
+        Some(keys) => {
+            let chain = keys.open_chain_of(parent_image)?;
+            crate::sidecar::read_sealed_sidecar(parent_image, &chain.key)?
+        }
+        None => {
+            let ext = parent_image
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or_default()
+                .to_lowercase();
+            read_embedded_sidecar(parent_image, &ext)?
+        }
+    };
     if sidecar.disk_manifest.is_none() {
         return Err(OwnBackupError::Config(format!(
             "parent {} is not a whole-disk image (no embedded disk manifest)",
@@ -3667,12 +3780,12 @@ fn validate_disk_parent(
             sidecar.manifest.block_size
         )));
     }
-    if sidecar.info.container != format.extension() {
+    let want = container_ext(format, encryption);
+    if sidecar.info.container != want {
         return Err(OwnBackupError::Config(format!(
-            "parent image is '{}' but the requested format is '{}' — a backup \
+            "parent image is '{}' but the requested format is '{want}' — a backup \
              chain cannot change container format",
             sidecar.info.container,
-            format.extension()
         )));
     }
     Ok(sidecar)
@@ -3687,7 +3800,12 @@ fn create_disk_child_target(
     parent_path: &Path,
     image_size: u64,
     format: ImageFormat,
+    encryption: Option<&crate::seal::context::ArchiveKeys>,
+    plan: &DiskImagePlan,
 ) -> Result<(ImageTarget, u32)> {
+    if let Some(keys) = encryption {
+        return create_disk_obk_target(image_path, Some(parent_path), image_size, keys, plan);
+    }
     let sector_size = 512u32;
     match format {
         ImageFormat::Qcow2 => {
@@ -3727,11 +3845,78 @@ fn create_disk_child_target(
 
 /// Create an image target of `disk_size` bytes with no parent (full backup).
 /// Returns the target and its logical sector size.
+/// What distinguishes one whole-disk image of a chain from the next. The
+/// per-volume path carries the same thing in [`crate::seal::context::ImagePlan`];
+/// this is the disk-shaped half of it, so the two constructors below can build
+/// an encrypted target without the volume path's arguments.
+struct DiskImagePlan {
+    backup_id: Uuid,
+    role: ChainRole,
+    /// Identity and file name of the parent image, for a child.
+    parent: Option<(Uuid, String)>,
+    disk_number: u32,
+}
+
+/// The extension a run's images carry: `.obk` when encrypted, the job's format
+/// otherwise. One place, because listings, chains and the format-change guard
+/// all have to agree with the writer.
+fn container_ext(
+    format: ImageFormat,
+    encryption: Option<&crate::seal::context::ArchiveKeys>,
+) -> String {
+    match encryption {
+        Some(_) => crate::seal::obk::OBK_EXTENSION.into(),
+        None => format.extension().into(),
+    }
+}
+
+/// The encrypted target for a whole-disk image, full or child.
+fn create_disk_obk_target(
+    image_path: &Path,
+    parent_path: Option<&Path>,
+    disk_size: u64,
+    keys: &crate::seal::context::ArchiveKeys,
+    plan: &DiskImagePlan,
+) -> Result<(ImageTarget, u32)> {
+    let chain = match parent_path {
+        // The chain key travels inside the parent image, so continuing a chain
+        // needs the parent and this job's key, nothing else.
+        Some(parent) => keys.open_chain_of(parent)?,
+        None => keys.start_chain()?,
+    };
+    let image_plan = crate::seal::context::ImagePlan {
+        backup_id: plan.backup_id,
+        role: plan.role,
+        parent: plan.parent.as_ref().map(|(id, name)| (*id, name.as_str())),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        virtual_size: disk_size,
+        // A whole-disk copy is identified by the disk it came from, the way a
+        // volume copy is by its volume.
+        source_id: Some(format!("disk{}", plan.disk_number)),
+        consolidated_increments: 0,
+        chain_started_at: None,
+        compression: crate::seal::obk::ObkCompression::Zstd {
+            level: crate::qcow2::DEFAULT_ZSTD_LEVEL,
+        },
+    };
+    let writer = Box::new(crate::seal::obk::ObkStagedWriter::create(
+        image_path,
+        &chain.key,
+        keys.writer_options(&chain, image_plan),
+    )?);
+    Ok((ImageTarget::Obk { writer }, 512))
+}
+
 fn create_disk_image_target(
     image_path: &Path,
     disk_size: u64,
     format: ImageFormat,
+    encryption: Option<&crate::seal::context::ArchiveKeys>,
+    plan: &DiskImagePlan,
 ) -> Result<(ImageTarget, u32)> {
+    if let Some(keys) = encryption {
+        return create_disk_obk_target(image_path, None, disk_size, keys, plan);
+    }
     let sector_size = 512u32;
     match format {
         ImageFormat::Qcow2 => {
@@ -3937,6 +4122,10 @@ pub struct DiskRestoreRequest {
     /// Target physical drive number (`\\.\PhysicalDrive{target_disk}`).
     pub target_disk: u32,
     pub verify_checksums: bool,
+    /// Keys for an encrypted image. Opened from a password or a recovery key
+    /// by whoever asked for the restore — never from the service's own store,
+    /// which exists so scheduled COPIES need no one present (§7.4).
+    pub encryption: Option<crate::seal::context::ArchiveKeys>,
 }
 
 /// Progress for a whole-disk restore.
@@ -3979,7 +4168,9 @@ pub fn restore_disk(
         .and_then(|e| e.to_str())
         .unwrap_or_default()
         .to_lowercase();
-    if matches!(ext.as_str(), "vhdx" | "avhdx" | "qcow2") {
+    if matches!(ext.as_str(), "vhdx" | "avhdx" | "qcow2")
+        || ext == crate::seal::obk::OBK_EXTENSION
+    {
         return restore_disk_from_image(req, progress);
     }
     restore_disk_legacy(req, progress)
@@ -4001,7 +4192,18 @@ fn restore_disk_from_image(
         .and_then(|e| e.to_str())
         .unwrap_or_default()
         .to_lowercase();
-    let sidecar = read_embedded_sidecar(&req.manifest_path, &ext)?;
+    // An encrypted image keeps everything below inside the container, sealed:
+    // the disk layout, the partition list and the checksums this restore reads
+    // block by block. Without the key there is nothing here to act on, and
+    // `load_sidecar_with_keys` says so by name.
+    let chain_key = match (&req.encryption, ext.as_str()) {
+        (Some(keys), _) => Some(keys.open_chain_of(&req.manifest_path)?.key),
+        (None, _) => None,
+    };
+    let sidecar = match &chain_key {
+        Some(key) => crate::sidecar::read_sealed_sidecar(&req.manifest_path, key)?,
+        None => read_embedded_sidecar(&req.manifest_path, &ext)?,
+    };
     let dm = sidecar.disk_manifest.clone().ok_or_else(|| {
         OwnBackupError::ImageFormat(
             "image has no embedded whole-disk manifest — not a bootable disk image".into(),
@@ -4023,7 +4225,11 @@ fn restore_disk_from_image(
         "Whole-disk restore (embedded manifest): copying data"
     );
 
-    let mut image = ImageReadSource::open(&req.manifest_path, &sidecar.info.container)?;
+    let mut image = ImageReadSource::open_with(
+        &req.manifest_path,
+        &sidecar.info.container,
+        chain_key.as_ref(),
+    )?;
     let mut td = WinRawDevice::open_write(&target_path)?;
     td.set_offline_writable(false)?;
 

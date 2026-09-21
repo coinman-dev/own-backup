@@ -2381,7 +2381,7 @@ async fn perform_disk_backup(
     mut run: JobRun,
 ) -> JobRun {
     use own_backup_backup::engine_win::{
-        backup_disk, verify_image, DiskBackupRequest, DiskPartitionBackup,
+        backup_disk, verify_image_with_keys, DiskBackupRequest, DiskPartitionBackup,
     };
     use own_backup_common::OwnBackupError;
 
@@ -2458,8 +2458,6 @@ async fn perform_disk_backup(
         block_size: own_backup_backup::engine_win::DEFAULT_BLOCK_SIZE,
         image_format: job.image_format,
         job_id: Some(job.id.clone()),
-        // The engine refuses this: a whole-disk image cannot be encrypted yet,
-        // and writing one in the clear for an encrypted job is not an option.
         encryption: keys.clone(),
         exclusion_patterns_windows: excl_win,
         exclusion_patterns_linux: excl_linux,
@@ -2472,6 +2470,7 @@ async fn perform_disk_backup(
     };
     let validate_after = job.advanced.validate_after;
     let image_for_verify = image_path.clone();
+    let keys_for_verify = keys.clone();
     let image_name = image_path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -2542,7 +2541,8 @@ async fn perform_disk_backup(
             let mut v_permille = u64::MAX;
             let mut v_emit = std::time::Instant::now();
             let mut v_rate = VerifyRate::new(&image_for_verify);
-            let verified = verify_image(&image_for_verify, |done, total| {
+            let verified =
+                verify_image_with_keys(&image_for_verify, keys_for_verify.as_ref(), |done, total| {
                 if cancel_bg.swap(false, Ordering::SeqCst) {
                     return Err(OwnBackupError::Cancelled);
                 }
