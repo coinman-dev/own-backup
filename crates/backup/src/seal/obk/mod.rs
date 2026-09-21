@@ -39,6 +39,7 @@ pub mod io;
 pub mod listing;
 pub mod metadata;
 pub mod reader;
+pub mod rebuild;
 pub mod root;
 pub mod writer;
 
@@ -47,6 +48,8 @@ pub use index::ClusterState;
 pub use io::{ObkRandomReader, ObkStagedWriter};
 pub use listing::{read_listing, ObkListing};
 pub use metadata::update_sealed_metadata;
+pub use reader::read_open_header;
+pub use rebuild::{apply_changed, apply_changed_clusters, ChangedClusters, RebuildStats};
 pub use reader::{ObkChain, ObkImage};
 pub use root::ObkRoot;
 pub use writer::{ObkCompression, ObkWriter, ObkWriterOptions};

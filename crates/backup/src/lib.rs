@@ -83,6 +83,8 @@ pub mod format_win;
 #[cfg(target_os = "windows")]
 pub mod letters_win;
 #[cfg(target_os = "windows")]
+pub mod obk_removal_win;
+#[cfg(target_os = "windows")]
 pub mod privileges_win;
 #[cfg(target_os = "windows")]
 pub mod qcow2_removal_win;

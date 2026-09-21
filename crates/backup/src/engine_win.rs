@@ -1322,24 +1322,6 @@ fn backup_volume_inner(
         && !req.all_sectors
         && detected_fs.as_deref() == Some("NTFS");
 
-    // Deleting the excluded files' catalog entries means mounting the finished
-    // image read-write and letting the filesystem driver do it — through a
-    // scratch layer, and then folding the changed clusters back in. For an
-    // encrypted image the scratch is sealed now, but the fold is not: the
-    // container is written once, so putting changed clusters back means
-    // re-emitting its index and metadata tail. Until that exists the run is
-    // refused rather than shipped with the excluded files' names and sizes
-    // still in the image's catalog — §4 calls ghost entries a fallback, and an
-    // encrypted copy is where the user asked for more than a fallback.
-    if !removal_paths.is_empty() && req.encryption.is_some() {
-        return Err(OwnBackupError::Encryption(format!(
-            "файловые исключения в зашифрованной копии ещё не поддержаны ({} правил \
-совпало): удаление записей из каталога образа требует пересборки шифрованного \
-контейнера. Копия не создавалась.",
-            removal_paths.len()
-        )));
-    }
-
     if in_image_exclusions && req.encryption.is_some() {
         // The fallback pass mounts the finished image and deletes inside it,
         // through a plaintext scratch layer. For an encrypted image that layer
@@ -1832,6 +1814,27 @@ fn backup_volume_inner(
                 // Differencing child + MergeVirtualDisk via the kernel VHDX driver.
                 if crate::true_removal_win::remove_excluded_from_image(
                     &req.image_path,
+                    &removal_paths,
+                    data_offset,
+                    volume_len,
+                    req.block_size,
+                    &mut checksums,
+                    tick,
+                )?
+                .is_some()
+                {
+                    used_blocks = checksums.len() as u64;
+                }
+            }
+            // An encrypted image gets the same pass over a SEALED scratch, and
+            // the changed clusters go back by rebuilding the container: it is
+            // written once, so they cannot be folded in place.
+            ImageFormat::Qcow2 if req.encryption.is_some() => {
+                let keys = req.encryption.as_ref().expect("checked above");
+                let chain = keys.open_chain_of(&req.image_path)?;
+                if crate::obk_removal_win::remove_excluded_from_obk(
+                    &req.image_path,
+                    &chain.key,
                     &removal_paths,
                     data_offset,
                     volume_len,

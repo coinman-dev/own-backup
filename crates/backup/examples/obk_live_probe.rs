@@ -95,23 +95,13 @@ mod probe {
             source_disk: None,
         };
 
-        // --- 1a. With file exclusions: refused, and nothing written ---
-        // Deleting the excluded files' catalog entries needs the container
-        // rebuilt, which is not done yet. The run must stop rather than ship a
-        // copy whose catalog still names them.
-        let refused_path = work.join("lab_refused.obk");
-        let _ = std::fs::remove_file(&refused_path);
-        match backup_volume(&request(vec![EXCLUDED.to_string()], &refused_path), |_| Ok(())) {
-            Ok(_) => say!("PROBE-EXCLUSIONS-FAIL an encrypted copy with exclusions was written"),
-            Err(e) => say!(
-                "PROBE-EXCLUSIONS refused: {e} | image_left={}",
-                refused_path.exists()
-            ),
-        }
-
-        // --- 1b. The copy itself ---
+        // --- 1. The copy, with a file exclusion rule ---
+        // The excluded file's data is never read (the `$MFT` road subtracts its
+        // clusters), and its catalog entry is deleted inside the image by the
+        // filesystem driver — over a sealed scratch, with the container rebuilt
+        // afterwards. Both halves are what the restore below checks.
         let started = Instant::now();
-        let summary = backup_volume(&request(Vec::new(), &image), |_| Ok(()))?;
+        let summary = backup_volume(&request(vec![EXCLUDED.to_string()], &image), |_| Ok(()))?;
         say!(
             "PROBE-BACKUP ok blocks={} bytes={} excluded_files={} secs={}",
             summary.blocks_copied,

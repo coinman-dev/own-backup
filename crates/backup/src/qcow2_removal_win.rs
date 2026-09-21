@@ -445,8 +445,8 @@ pub fn remove_excluded_from_disk_image_qcow2(
 
 /// AIM RW mount → online → delete (shared with the VHDX path) → teardown. The
 /// AIM device is always removed before returning.
-fn mount_delete(
-    overlay: Arc<Mutex<WritableOverlaySource>>,
+pub(crate) fn mount_delete<S: crate::overlay::SlotStore + 'static>(
+    overlay: Arc<Mutex<WritableOverlaySource<S>>>,
     virtual_size: u64,
     image_path: &Path,
     paths: &[ExcludedPath],
@@ -542,6 +542,31 @@ pub(crate) fn rehash_touched(
     checksums: &mut Vec<BlockChecksum>,
     tick: &mut dyn FnMut(u64, u64),
 ) -> Result<u64> {
+    let mut reader = Qcow2RandomReader::open(image_path)?;
+    rehash_touched_through(
+        &mut reader,
+        touched,
+        cluster_size,
+        data_offset,
+        volume_len,
+        block_size,
+        checksums,
+        tick,
+    )
+}
+
+/// The same, over an already-open image — an encrypted one is read through its
+/// own reader, with the key.
+pub(crate) fn rehash_touched_through(
+    reader: &mut dyn crate::block_source::BlockSource,
+    touched: &[u64],
+    cluster_size: u64,
+    data_offset: u64,
+    volume_len: u64,
+    block_size: u32,
+    checksums: &mut Vec<BlockChecksum>,
+    tick: &mut dyn FnMut(u64, u64),
+) -> Result<u64> {
     let bs = block_size as u64;
     // Touched clusters are disk-image offsets; the sidecar checksums are per
     // VOLUME block. Map through the volume window [data_offset, +volume_len);
@@ -561,7 +586,6 @@ pub(crate) fn rehash_touched(
         return Ok(0);
     }
 
-    let mut reader = Qcow2RandomReader::open(image_path)?;
     let mut map: BTreeMap<u64, u64> =
         checksums.iter().map(|c| (c.block_number, c.checksum)).collect();
     // Runs rather than single blocks: fewer, longer reads, and every one of

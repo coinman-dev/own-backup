@@ -312,6 +312,22 @@ impl<R: Read + Seek> ObkImage<R> {
         Ok(&self.index_cache[&position])
     }
 
+    /// The raw cluster-table entry, for a pass that re-emits the tables
+    /// (`seal::obk::rebuild`). Still only a pointer: what the cluster must be
+    /// comes from the index.
+    pub fn raw_l2_entry(&mut self, cluster: u64) -> Result<u64> {
+        let l2_per_table = self.cluster_size() / 8;
+        let l1_index = cluster / l2_per_table;
+        let Some(&l1_entry) = self.l1.get(l1_index as usize) else {
+            return Ok(0);
+        };
+        if l1_entry & OFFSET_MASK == 0 {
+            return Ok(0);
+        }
+        self.descriptor(cluster)?; // fills the cache for this table
+        Ok(self.l2_cache[&l1_index][(cluster % l2_per_table) as usize])
+    }
+
     /// What the qcow2 cluster table says — a pointer, never an authority.
     fn descriptor(&mut self, cluster: u64) -> Result<ClusterDescriptor> {
         let l2_per_table = self.cluster_size() / 8;

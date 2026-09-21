@@ -151,11 +151,12 @@ assign letter=R
             Say "LAB-OBK-FAIL content differs after restore: $there"
         }
     }
-    # The copy that succeeded ran with NO exclusion rules (the one with rules is
-    # refused for now), so the excluded file is expected to be there. When the
-    # container can be rebuilt, this line becomes the check that it is gone.
+    # The rule said to exclude this file: its data was never copied, and its
+    # catalog entry was deleted inside the image. It must not be here.
     $excludedThere = "${letter}:\excluded-secret.bin"
-    Say "LAB-OBK-EXCLUDED-PRESENT $(Test-Path -LiteralPath $excludedThere) (expected True: the copy had no exclusion rules)"
+    $stillThere = Test-Path -LiteralPath $excludedThere
+    Say "LAB-OBK-EXCLUDED-PRESENT $stillThere (expected False)"
+    if ($stillThere) { Say 'LAB-OBK-FAIL the excluded file is still in the restored volume' }
     Say "LAB-OBK-DONE"
 } catch {
     Say "LAB-OBK-CRASH $($_.Exception.Message)"

@@ -55,6 +55,32 @@ impl Qcow2Tables {
         }
     }
 
+    /// Continue writing into a file that already holds data records, for a
+    /// pass that appends to a finished image (`seal::obk::rebuild`).
+    pub(crate) fn resume(cluster_bits: u32, total_guest_clusters: u64, at: u64) -> Self {
+        let mut tables = Self::new(cluster_bits, total_guest_clusters);
+        tables.current_offset = at;
+        tables
+    }
+
+    /// Account for a payload that is already in the file: its host clusters
+    /// carry a reference even though this pass did not write them.
+    ///
+    /// The length may be the cluster table's rounded one rather than the
+    /// record's exact length. A refcount one too high on a boundary cluster
+    /// costs nothing — the structures only have to be consistent, and for
+    /// `.obk` no foreign tool reads them at all.
+    pub(crate) fn note_packed(&mut self, host_offset: u64, len: u64) {
+        if len == 0 {
+            return;
+        }
+        for host_cluster in
+            (host_offset >> self.cluster_bits)..=((host_offset + len - 1) >> self.cluster_bits)
+        {
+            *self.compressed_refs.entry(host_cluster).or_insert(0) += 1;
+        }
+    }
+
     pub(crate) fn cluster_size(&self) -> u64 {
         self.cluster_size
     }
