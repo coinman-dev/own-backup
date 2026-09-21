@@ -897,6 +897,9 @@ impl BackupService for BackupServiceImpl {
                 image_path: std::path::PathBuf::from(&p.image_path),
                 target: p.target,
                 verify_checksums: true,
+                // Asking for the password of an encrypted copy is E5; until then
+                // such a restore fails saying exactly that.
+                encryption: None,
             };
 
             let summary = tokio::task::spawn_blocking(move || {

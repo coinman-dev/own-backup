@@ -3793,6 +3793,9 @@ pub struct VolumeRestoreRequest {
     pub target: String,
     /// Verify each block's checksum while reading from the image.
     pub verify_checksums: bool,
+    /// Keys for an encrypted image: a password's or the recovery key's when a
+    /// person restores by hand, the service's own for an automatic check.
+    pub encryption: Option<crate::seal::context::ArchiveKeys>,
 }
 
 /// Outcome of a completed restore.
@@ -3808,7 +3811,7 @@ pub fn restore_volume(
     mut progress: impl FnMut(&RestoreProgress) -> Result<()>,
 ) -> Result<VolumeRestoreSummary> {
     let started = Instant::now();
-    let sidecar = load_sidecar_of(&req.image_path)?;
+    let sidecar = load_sidecar_with_keys(&req.image_path, req.encryption.as_ref())?;
     let block_size = sidecar.manifest.block_size as u64;
     let volume_len = sidecar.manifest.source_disk.size_bytes;
     let data_offset = sidecar.info.volume_data_offset;
@@ -3830,7 +3833,15 @@ pub fn restore_volume(
         )));
     }
 
-    let mut image_dev = ImageReadSource::open(&req.image_path, &sidecar.info.container)?;
+    let chain_key = match (&req.encryption, sidecar.info.container.as_str()) {
+        (Some(keys), "obk") => Some(keys.open_chain_of(&req.image_path)?.key),
+        _ => None,
+    };
+    let mut image_dev = ImageReadSource::open_with(
+        &req.image_path,
+        &sidecar.info.container,
+        chain_key.as_ref(),
+    )?;
 
     let restore_id = Uuid::new_v4().to_string();
     let total = sidecar.checksums.len() as u64;
@@ -4161,6 +4172,9 @@ fn restore_disk_legacy(
             image_path: folder.join(&img.image_file_name),
             target,
             verify_checksums: req.verify_checksums,
+            // Whole-disk images are never encrypted (the backup path refuses
+            // to make one), so their partitions need no key either.
+            encryption: None,
         };
         let base = total_bytes;
         let summary = restore_volume(&vreq, |p| {
@@ -4592,6 +4606,22 @@ fn scratch_path_for(image_path: &Path) -> PathBuf {
 /// Mount an image; volumes inside get drive letters from Windows.
 /// The attachment survives process exit — use [`unmount_image`] to detach.
 pub fn mount_image(image_path: &Path, read_write: bool) -> Result<String> {
+    mount_image_with_keys(image_path, read_write, None)
+}
+
+/// The same, able to mount an encrypted image. Manual mounting is where a
+/// person types a password (§7.4); the service passes its own keys for the
+/// maintenance mounts it does inside a job.
+pub fn mount_image_with_keys(
+    image_path: &Path,
+    read_write: bool,
+    keys: Option<&crate::seal::context::ArchiveKeys>,
+) -> Result<String> {
+    if crate::sidecar::detect_container_format(image_path).ok()
+        == Some(crate::seal::obk::OBK_EXTENSION)
+    {
+        return mount_obk_via_iscsi(image_path, read_write, keys);
+    }
     // Dispatch by the container's OWN magic, never by sidecar metadata (new
     // backups carry no external .obkm, and a silent fall-through once sent a
     // qcow2 into vhdmp, which reported it as "file corrupted", error 1392).
@@ -4808,6 +4838,54 @@ fn mount_qcow2_via_iscsi(image_path: &Path, read_write: bool) -> Result<String> 
         .lock()
         .unwrap()
         .insert(image_path.to_path_buf(), MountedImage { attached, overlay });
+    Ok(physical)
+}
+
+/// Serve an encrypted image read-only to Windows' own iSCSI initiator.
+///
+/// Read-write is refused, and that refusal is the point: a writable mount puts
+/// everything the filesystem driver writes into a scratch file beside the
+/// image, and for an encrypted image that file would be plaintext — the one
+/// thing §7.4 says must not happen. The encrypted scratch is still to come.
+fn mount_obk_via_iscsi(
+    image_path: &Path,
+    read_write: bool,
+    keys: Option<&crate::seal::context::ArchiveKeys>,
+) -> Result<String> {
+    let keys = keys.ok_or_else(|| {
+        OwnBackupError::Encryption(format!(
+            "{}: копия зашифрована — чтобы её открыть, нужен пароль или ключ восстановления",
+            image_path.display()
+        ))
+    })?;
+    if read_write {
+        return Err(OwnBackupError::Encryption(
+            "зашифрованную копию можно открыть только для чтения: для записи нужен              шифрованный временный слой, которого пока нет"
+                .into(),
+        ));
+    }
+    if let Some(existing) = qcow2_mounts().lock().unwrap().get(image_path) {
+        return Ok(existing.attached.physical.clone());
+    }
+
+    let chain = keys.open_chain_of(image_path)?;
+    let reader = crate::seal::obk::ObkRandomReader::open(image_path, &chain.key)?;
+    let virtual_size = reader.virtual_size();
+    let serial = crate::iscsi::serial_for_image(image_path);
+    let attached = crate::attach_win::attach_ro(Box::new(reader), virtual_size, &serial)?;
+    let physical = attached.physical.clone();
+    info!(
+        image = %image_path.display(),
+        physical = %physical,
+        "encrypted image mounted read-only over iSCSI"
+    );
+    qcow2_mounts().lock().unwrap().insert(
+        image_path.to_path_buf(),
+        MountedImage {
+            attached,
+            overlay: None,
+        },
+    );
     Ok(physical)
 }
 

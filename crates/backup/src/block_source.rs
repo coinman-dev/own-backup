@@ -17,6 +17,19 @@ pub trait WritableBlockSource: BlockSource {
     fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()>;
 }
 
+/// An encrypted image (with its chain) serves the same way, once its key has
+/// opened it. Every cluster is authenticated on the way out, so a mounted
+/// `.obk` cannot hand the filesystem driver bytes that are not ours.
+impl BlockSource for crate::seal::obk::ObkRandomReader {
+    fn size(&self) -> u64 {
+        self.virtual_size()
+    }
+
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        crate::seal::obk::ObkRandomReader::read_at(self, offset, buf)
+    }
+}
+
 /// A qcow2 image (with its backing chain) is a block source directly — this
 /// is what the Windows mount path serves, sidecar not required.
 impl BlockSource for crate::qcow2::Qcow2RandomReader {

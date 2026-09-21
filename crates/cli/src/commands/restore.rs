@@ -43,6 +43,9 @@ pub async fn run(args: RestoreArgs) -> own_backup_common::Result<()> {
         image_path: std::path::PathBuf::from(&args.input),
         target: args.target.clone(),
         verify_checksums: !args.no_verify,
+        // Asking for the password of an encrypted copy is E5; until then
+        // such a restore fails saying exactly that.
+        encryption: None,
     };
 
     let summary = tokio::task::spawn_blocking(move || {
