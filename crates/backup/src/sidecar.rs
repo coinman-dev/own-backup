@@ -834,9 +834,14 @@ pub fn read_embedded_sidecar_header(
 /// layout, machine name, volume labels, file categories, UEFI entries and the
 /// plaintext checksums are exactly what the sealed half is for. So this is the
 /// only way to read them, and it needs the chain key.
+/// It opens **this image alone**, never its chain. A sidecar belongs to the
+/// image that wrote it, so the parent has nothing to add — and the one caller
+/// that needs it most, repointing an increment during consolidation, runs in
+/// the window where the chain deliberately does not open (the base has been
+/// rewritten and the link has not moved yet).
 pub fn read_sealed_sidecar(image_path: &Path, key: &crate::seal::ChainKey) -> Result<Sidecar> {
-    let mut reader = crate::seal::obk::ObkRandomReader::open(image_path, key)?;
-    let blob = reader.sealed_metadata()?;
+    let mut image = crate::seal::obk::ObkImage::open_path(image_path, key)?;
+    let blob = image.sealed_metadata()?;
     if blob.is_empty() {
         return Err(OwnBackupError::ImageFormat(format!(
             "{}: the image carries no sidecar",

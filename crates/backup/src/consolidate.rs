@@ -14,6 +14,13 @@
 //! |---|---|---|
 //! | VHDX | `MergeVirtualDisk` (Windows) | `SetVirtualDiskInformation` |
 //! | qcow2 | [`crate::qcow2::merge_child_into_parent`] | rewrite `backing_file` |
+//! | `.obk` | [`crate::seal::obk::fold_child_into_base`] | [`crate::seal::obk::set_backing_file`] |
+//!
+//! The encrypted arm needs the chain's key, which no other arm does — a sealed
+//! record belongs to one image's authenticated index, so folding means reading
+//! and re-sealing rather than moving bytes. That key is the job's, opened once
+//! at the start of a run and handed down here; a caller without one (the CLI
+//! today) gets a refusal naming the image, and the chain is left as it is.
 //!
 //! # Order, and why it is that order
 //!
@@ -66,6 +73,8 @@ use own_backup_common::types::BackupType;
 use own_backup_common::{OwnBackupError, Result};
 
 use crate::chains::ConsolidationStep;
+use crate::seal::context::ArchiveKeys;
+use crate::seal::ChainKey;
 use crate::sidecar::{
     read_image_sidecar, sidecar_path_for, write_embedded_sidecar, write_sidecar, ChainRole, Sidecar,
 };
@@ -145,20 +154,64 @@ fn container_of(path: &Path) -> Result<&'static str> {
     {
         "vhdx" | "avhdx" => Ok("vhdx"),
         "qcow2" => Ok("qcow2"),
-        // Folding an increment into its base means reading and rewriting both,
-        // which needs the chain key and a merge that speaks the sealed format.
-        // Until that exists the chain is left exactly as it is: longer than the
-        // window asked for, and correct.
-        "obk" => Err(OwnBackupError::Encryption(format!(
-            "объединение копий в зашифрованной цепочке ещё не поддержано — цепочка \
-оставлена как есть: {}",
-            path.display()
-        ))),
+        "obk" => Ok("obk"),
         other => Err(OwnBackupError::ImageFormat(format!(
             "cannot consolidate a {other:?} image: {}",
             path.display()
         ))),
     }
+}
+
+/// The chain key for an encrypted image, or a refusal that names the file.
+///
+/// A caller without keys is not a bug — the CLI has none until somebody is
+/// asked for a password (stage E5). It is a reason to leave the chain longer
+/// than the window asked for, which is a correct chain.
+fn chain_key_for(image: &Path, keys: Option<&ArchiveKeys>) -> Result<ChainKey> {
+    let keys = keys.ok_or_else(|| {
+        OwnBackupError::Encryption(format!(
+            "объединение копий в зашифрованной цепочке требует ключ задания — \
+цепочка оставлена как есть: {}",
+            image.display()
+        ))
+    })?;
+    Ok(keys.open_chain_of(image)?.key)
+}
+
+/// An image's sidecar, wherever that image keeps it: in its meta partition, in
+/// a file beside it, or sealed inside the container.
+fn read_sidecar_of(image: &Path, keys: Option<&ArchiveKeys>) -> Result<Sidecar> {
+    if container_of(image)? == "obk" {
+        let key = chain_key_for(image, keys)?;
+        return crate::sidecar::read_sealed_sidecar(image, &key);
+    }
+    read_image_sidecar(image)
+}
+
+/// The same, header only — used before a step starts, where a missing sidecar
+/// is not fatal.
+fn read_header_of(
+    image: &Path,
+    keys: Option<&ArchiveKeys>,
+) -> Option<(crate::sidecar::SidecarInfo, own_backup_common::image::ImageManifest)> {
+    if container_of(image).ok()? == "obk" {
+        let sidecar = read_sidecar_of(image, keys).ok()?;
+        return Some((sidecar.info, sidecar.manifest));
+    }
+    crate::sidecar::read_image_sidecar_header(image).ok()
+}
+
+/// A sidecar in the byte form an encrypted image stores it in.
+fn sealed_blob(sidecar: &Sidecar) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    crate::sidecar::write_sidecar_v2_full_to(
+        &mut bytes,
+        &sidecar.info,
+        &sidecar.manifest,
+        &sidecar.checksums,
+        sidecar.disk_manifest.as_ref(),
+    )?;
+    Ok(bytes)
 }
 
 /// Extension as the sidecar readers want it (they dispatch on the file's own
@@ -393,12 +446,12 @@ fn write_sidecars(image: &Path, sidecar: &Sidecar) -> Result<()> {
 /// `engine_win`, "Child sidecars carry the FULL state checksums"). After the
 /// fold the base holds exactly that state, so the increment's table describes
 /// it exactly. Only the four fields that say "I am a child" have to change.
-fn promote_base(
+fn promote(
     base: &Path,
     mut sidecar: Sidecar,
     folded: u32,
     chain_started_at: Option<String>,
-) -> Result<()> {
+) -> Result<Sidecar> {
     sidecar.info.image_file_name = file_name_of(base)?;
     sidecar.info.chain_role = ChainRole::Full;
     sidecar.info.parent_image_file_name = None;
@@ -406,12 +459,36 @@ fn promote_base(
     sidecar.info.chain_started_at = chain_started_at;
     sidecar.manifest.backup_type = BackupType::Full;
     sidecar.manifest.parent_backup_id = None;
-    write_sidecars(base, &sidecar)
+    Ok(sidecar)
 }
 
 /// Repoint the increment that used to sit on the folded one.
-fn repoint_next(next: &Path, base: &Path, container: &str) -> Result<()> {
+///
+/// `parent_backup_id` is deliberately left alone throughout: it named the
+/// increment we just folded in, and the base has inherited that very id along
+/// with its metadata, so the reference is still true. For an encrypted chain
+/// that is not a nicety but the mechanism — `ObkChain` follows identities, so
+/// an unchanged `parent_backup_id` is what lets the leaf open over the base
+/// with nothing re-sealed but its own sidecar.
+fn repoint_next(
+    next: &Path,
+    base: &Path,
+    container: &str,
+    keys: Option<&ArchiveKeys>,
+) -> Result<()> {
     let base_name = file_name_of(base)?;
+
+    if container == "obk" {
+        let key = chain_key_for(next, keys)?;
+        // The sidecar first, the backing name second. Both are writes of a
+        // known value, so either order survives a crash; this one keeps the
+        // container link — the thing a reader follows — as the last change.
+        let mut sidecar = crate::sidecar::read_sealed_sidecar(next, &key)?;
+        sidecar.info.parent_image_file_name = Some(base_name.clone());
+        crate::seal::obk::update_sealed_metadata(next, &key, &sealed_blob(&sidecar)?)?;
+        return crate::seal::obk::set_backing_file(next, &key, &base_name);
+    }
+
     match container {
         "qcow2" => crate::qcow2::set_backing_file(next, Some(&base_name))?,
         "vhdx" => repoint_vhdx(next, base)?,
@@ -426,9 +503,6 @@ fn repoint_next(next: &Path, base: &Path, container: &str) -> Result<()> {
     // `list_job_chains` groups by the sidecar, the readers follow the file.
     let mut sidecar = read_image_sidecar(next)?;
     sidecar.info.parent_image_file_name = Some(base_name);
-    // `parent_backup_id` is deliberately left alone: it named the increment we
-    // just folded in, and the base has inherited that very id along with its
-    // metadata, so the reference is still true.
     write_sidecars(next, &sidecar)
 }
 
@@ -443,7 +517,12 @@ fn remove_quietly(path: &Path) {
 }
 
 /// Perform one consolidation step, from wherever a previous attempt left off.
-fn execute(base: &Path, victim: &Path, next: Option<&Path>) -> Result<ConsolidationOutcome> {
+fn execute(
+    base: &Path,
+    victim: &Path,
+    next: Option<&Path>,
+    keys: Option<&ArchiveKeys>,
+) -> Result<ConsolidationOutcome> {
     let started = Instant::now();
     let container = container_of(base)?;
     let marker_file = marker_path(base);
@@ -459,7 +538,13 @@ fn execute(base: &Path, victim: &Path, next: Option<&Path>) -> Result<Consolidat
     watched.extend(next);
     ensure_idle(&watched)?;
 
-    let base_header = crate::sidecar::read_image_sidecar_header(base).ok();
+    // Read what the step needs BEFORE the marker is written. A marker is a
+    // promise that this step can be carried to the end, and writing one for a
+    // step that cannot even start leaves the chain looking mid-fold to every
+    // later run — while recording, for an encrypted chain, a consolidation
+    // count and a chain birthday read from an image nobody could open.
+    let victim_sidecar = read_sidecar_of(victim, keys)?;
+
     let mut marker = match read_marker(&marker_file) {
         // A marker naming a different increment means two different steps got
         // mixed up in one folder. Stop; a human should look.
@@ -471,32 +556,54 @@ fn execute(base: &Path, victim: &Path, next: Option<&Path>) -> Result<Consolidat
             )));
         }
         Some(existing) => existing,
-        None => Marker {
-            version: MARKER_VERSION,
-            started_at: chrono::Utc::now().to_rfc3339(),
-            base: file_name_of(base)?,
-            victim: file_name_of(victim)?,
-            next: next.map(file_name_of).transpose()?,
-            merged: false,
-            // Both read while the base is still describing itself. A base
-            // that has never been consolidated has no stamp, and its own
-            // creation time IS the chain's start — the same fallback
-            // `Chain::started_at` makes.
-            folded_before: base_header
-                .as_ref()
-                .map(|(info, _)| info.consolidated_increments)
-                .unwrap_or(0),
-            chain_started_at: base_header.as_ref().and_then(|(info, manifest)| {
-                info.chain_started_at.clone().or_else(|| Some(manifest.created_at.clone()))
-            }),
-        },
+        None => {
+            // Read only when a marker has to be made: on a resume these two
+            // come out of the marker, and asking the base again would get the
+            // promoted answer and count the same fold twice.
+            let base_header = read_header_of(base, keys);
+            // A plaintext base may predate these fields, so a missing answer
+            // there falls back below. An encrypted one always carries them,
+            // and the same key just opened its increment — so "cannot read it"
+            // means something is wrong, not that the count is zero. Guessing
+            // would quietly reset how many increments the chain has absorbed
+            // and when it started, and an age-based rule would never fire again.
+            if container == "obk" && base_header.is_none() {
+                return Err(OwnBackupError::ChainBroken(format!(
+                    "не читается запечатанное описание базовой копии {} — шаг не начат",
+                    base.display()
+                )));
+            }
+            Marker {
+                version: MARKER_VERSION,
+                started_at: chrono::Utc::now().to_rfc3339(),
+                base: file_name_of(base)?,
+                victim: file_name_of(victim)?,
+                next: next.map(file_name_of).transpose()?,
+                merged: false,
+                // Both read while the base is still describing itself. A base
+                // that has never been consolidated has no stamp, and its own
+                // creation time IS the chain's start — the same fallback
+                // `Chain::started_at` makes.
+                folded_before: base_header
+                    .as_ref()
+                    .map(|(info, _)| info.consolidated_increments)
+                    .unwrap_or(0),
+                chain_started_at: base_header.as_ref().and_then(|(info, manifest)| {
+                    info.chain_started_at.clone().or_else(|| Some(manifest.created_at.clone()))
+                }),
+            }
+        }
     };
 
     write_marker(&marker_file, &marker)?;
 
-    // The increment describes the state the base is about to hold. Read it
-    // while it is still an ordinary image of its own.
-    let victim_sidecar = read_image_sidecar(victim)?;
+    // The increment describes the state the base is about to hold.
+    let promoted = promote(
+        base,
+        victim_sidecar,
+        marker.folded_before + 1,
+        marker.chain_started_at.clone(),
+    )?;
 
     let mut bytes_orphaned = 0u64;
     if !marker.merged {
@@ -521,6 +628,33 @@ fn execute(base: &Path, victim: &Path, next: Option<&Path>) -> Result<Consolidat
                     "Consolidation: increment folded into the base"
                 );
             }
+            // The fold carries the promotion with it: an encrypted image keeps
+            // its sidecar inside the container, and the rebuild that puts the
+            // increment's clusters in is the one write that can replace it.
+            "obk" => {
+                let key = chain_key_for(base, keys)?;
+                let stats = crate::seal::obk::fold_child_into_base(
+                    base,
+                    victim,
+                    &key,
+                    &sealed_blob(&promoted)?,
+                    crate::seal::obk::RebuildIdentity {
+                        backup_id: promoted.manifest.backup_id,
+                        created_at: promoted.manifest.created_at.clone(),
+                        consolidated_increments: promoted.info.consolidated_increments,
+                        chain_started_at: promoted.info.chain_started_at.clone(),
+                    },
+                )?;
+                bytes_orphaned = stats.bytes_orphaned;
+                info!(
+                    base = %base.display(),
+                    increment = %victim.display(),
+                    clusters = stats.clusters,
+                    orphaned = stats.bytes_orphaned,
+                    already_applied = stats.already_applied,
+                    "Consolidation: increment folded into the encrypted base"
+                );
+            }
             other => {
                 return Err(OwnBackupError::ImageFormat(format!(
                     "unsupported container: {other}"
@@ -531,15 +665,14 @@ fn execute(base: &Path, victim: &Path, next: Option<&Path>) -> Result<Consolidat
         write_marker(&marker_file, &marker)?;
     }
 
-    promote_base(
-        base,
-        victim_sidecar,
-        marker.folded_before + 1,
-        marker.chain_started_at.clone(),
-    )?;
+    // Everywhere but `.obk`, writing the promoted sidecar is its own step —
+    // idempotent, so a resumed run simply does it again.
+    if container != "obk" {
+        write_sidecars(base, &promoted)?;
+    }
 
     if let Some(next) = next {
-        repoint_next(next, base, container)?;
+        repoint_next(next, base, container, keys)?;
     }
 
     // Only now is the increment redundant. Its deletion is the step's last
@@ -572,10 +705,19 @@ fn execute(base: &Path, victim: &Path, next: Option<&Path>) -> Result<Consolidat
 
 /// Run one step planned by [`crate::chains::plan_consolidation`].
 pub fn consolidate_step(step: &ConsolidationStep) -> Result<ConsolidationOutcome> {
+    consolidate_step_with_keys(step, None)
+}
+
+/// The same, for a job whose chain may be encrypted.
+pub fn consolidate_step_with_keys(
+    step: &ConsolidationStep,
+    keys: Option<&ArchiveKeys>,
+) -> Result<ConsolidationOutcome> {
     execute(
         &step.base.image_path,
         &step.victim.image_path,
         step.next.as_ref().map(|i| i.image_path.as_path()),
+        keys,
     )
 }
 
@@ -585,6 +727,14 @@ pub fn consolidate_step(step: &ConsolidationStep) -> Result<ConsolidationOutcome
 /// Called at the start of a job run rather than at service start: the folder
 /// may be a removable drive that was not attached when the service came up.
 pub fn resume_pending(folder: &Path) -> Result<ResumeReport> {
+    resume_pending_with_keys(folder, None)
+}
+
+/// The same, for a job whose chain may be encrypted.
+pub fn resume_pending_with_keys(
+    folder: &Path,
+    keys: Option<&ArchiveKeys>,
+) -> Result<ResumeReport> {
     let mut report = ResumeReport::default();
     let entries = match std::fs::read_dir(folder) {
         Ok(e) => e,
@@ -650,7 +800,7 @@ pub fn resume_pending(folder: &Path) -> Result<ResumeReport> {
             merged = marker.merged,
             "Consolidation: finishing a step interrupted earlier"
         );
-        match execute(&base, &victim, next.as_deref()) {
+        match execute(&base, &victim, next.as_deref(), keys) {
             Ok(_) => report.finished.push(path.clone()),
             Err(e) => {
                 warn!(
@@ -1182,6 +1332,278 @@ mod tests {
         // Не удаляется — это ошибка, а не строчка в журнале.
         std::fs::create_dir(dir.path().join("stuck")).unwrap();
         assert!(remove_checked(&dir.path().join("stuck")).is_err());
+    }
+
+    // --- Зашифрованная цепочка (§7.4) ------------------------------------
+
+    /// One job's keys, with the test KDF profile — the production one takes
+    /// tens of seconds by design and proves nothing extra here.
+    fn obk_keys() -> crate::seal::context::ArchiveKeys {
+        use crate::seal::keypair::{JobKeyPair, KdfParams, SealedPrivateKey};
+        use crate::seal::recovery::RecoveryKey;
+
+        let pair = JobKeyPair::generate().unwrap();
+        let recovery = RecoveryKey::generate().unwrap();
+        let envelope = SealedPrivateKey::seal(
+            "j1",
+            &pair,
+            "пароль архива",
+            &recovery,
+            &KdfParams::test_profile(),
+        )
+        .unwrap();
+        crate::seal::context::ArchiveKeys::from_private(envelope, pair.private).unwrap()
+    }
+
+    const OBK_CLUSTER: u64 = 1 << crate::seal::context::OBK_CLUSTER_BITS;
+
+    /// One encrypted image of a chain, with a real sealed sidecar.
+    #[allow(clippy::too_many_arguments)]
+    fn put_obk(
+        dir: &Path,
+        name: &str,
+        keys: &crate::seal::context::ArchiveKeys,
+        session: &crate::seal::context::ChainSession,
+        role: ChainRole,
+        created_at: &str,
+        kind: BackupType,
+        parent: Option<(Uuid, &str)>,
+        clusters: &[(u64, u8)],
+        checksums: &[BlockChecksum],
+    ) -> (PathBuf, Uuid) {
+        use crate::seal::obk::{ObkCompression, ObkWriter};
+
+        let path = dir.join(name);
+        let manifest = manifest(created_at, kind, parent.map(|(id, _)| id));
+        let backup_id = manifest.backup_id;
+        let options = keys.writer_options(
+            session,
+            crate::seal::context::ImagePlan {
+                backup_id,
+                role,
+                parent,
+                created_at: created_at.into(),
+                virtual_size: VSIZE,
+                source_id: Some("volume-under-test".into()),
+                consolidated_increments: 0,
+                chain_started_at: None,
+                compression: ObkCompression::Zstd { level: 3 },
+            },
+        );
+        let mut writer = ObkWriter::create(&path, &session.key, options).unwrap();
+        for &(index, fill) in clusters {
+            writer
+                .write_cluster(index, &vec![fill; OBK_CLUSTER as usize])
+                .unwrap();
+        }
+
+        let mut info = match parent {
+            None => SidecarInfo::new_full(name, DEFAULT_PARTITION_OFFSET),
+            Some((_, parent_name)) => {
+                SidecarInfo::new_child(name, role, parent_name, DEFAULT_PARTITION_OFFSET)
+            }
+        };
+        info.container = "obk".into();
+        info.job_id = Some("j1".into());
+        let sidecar = Sidecar {
+            info,
+            manifest,
+            checksums: checksums.to_vec(),
+            disk_manifest: None,
+        };
+        let blob = sealed_blob(&sidecar).unwrap();
+        // Room to rewrite it later: repointing the next increment replaces its
+        // sidecar in place, and the file name of a parent can grow.
+        let reserve = blob.len() + 4096;
+        writer.finish_with_reserve(&blob, reserve).unwrap();
+        (path, backup_id)
+    }
+
+    /// Every cluster of an encrypted chain, read through the chain itself.
+    fn read_obk(path: &Path, keys: &crate::seal::context::ArchiveKeys) -> Vec<Vec<u8>> {
+        let key = keys.open_chain_of(path).unwrap().key;
+        let mut chain = crate::seal::obk::ObkChain::open(path, &key).unwrap();
+        (0..VSIZE / OBK_CLUSTER)
+            .map(|c| chain.read_cluster(c).unwrap().to_vec())
+            .collect()
+    }
+
+    fn obk_sidecar(path: &Path, keys: &crate::seal::context::ArchiveKeys) -> Sidecar {
+        let key = keys.open_chain_of(path).unwrap().key;
+        crate::sidecar::read_sealed_sidecar(path, &key).unwrap()
+    }
+
+    /// The whole step for an encrypted chain, judged by the same criterion as
+    /// the plaintext one: the leaf reads exactly what it read before, and the
+    /// base has become a full backup of the folded increment's moment.
+    #[test]
+    fn one_window_step_end_to_end_on_an_encrypted_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = obk_keys();
+        let session = keys.start_chain().unwrap();
+
+        let (base, base_id) = put_obk(
+            dir.path(), "e_C_full_1.obk", &keys, &session, ChainRole::Full,
+            "2026-01-01T00:00:00Z", BackupType::Full, None,
+            &[(1, 0x11), (2, 0x11)], &sums(&[(0, 100), (1, 101)]),
+        );
+        let (inc1, inc1_id) = put_obk(
+            dir.path(), "e_C_inc_2.obk", &keys, &session, ChainRole::Incremental,
+            "2026-01-02T00:00:00Z", BackupType::Incremental, Some((base_id, "e_C_full_1.obk")),
+            &[(2, 0x22), (3, 0x22)], &sums(&[(0, 100), (1, 201), (2, 202)]),
+        );
+        let (inc2, _) = put_obk(
+            dir.path(), "e_C_inc_3.obk", &keys, &session, ChainRole::Incremental,
+            "2026-01-03T00:00:00Z", BackupType::Incremental, Some((inc1_id, "e_C_inc_2.obk")),
+            &[(3, 0x33), (4, 0x33)], &sums(&[(0, 100), (1, 201), (3, 303)]),
+        );
+
+        let leaf_before = read_obk(&inc2, &keys);
+        let chain = list_job_chains(dir.path(), "j1").unwrap().remove(0);
+        assert_eq!(chain.images.len(), 3, "the listing needs no key");
+        let step = plan_consolidation(&chain, 1).expect("2 increments, limit 1");
+        let outcome = consolidate_step_with_keys(&step, Some(&keys)).unwrap();
+
+        assert_eq!(outcome.folded, inc1);
+        assert_eq!(outcome.repointed.as_deref(), Some(inc2.as_path()));
+        assert!(!inc1.exists(), "the folded increment is deleted");
+        assert!(!marker_path(&base).exists(), "the marker is cleared");
+        assert_eq!(read_obk(&inc2, &keys), leaf_before, "the leaf must read unchanged");
+
+        // The base is that point in time now, and still encrypted.
+        let promoted = obk_sidecar(&base, &keys);
+        assert_eq!(promoted.info.chain_role, ChainRole::Full);
+        assert_eq!(promoted.info.parent_image_file_name, None);
+        assert_eq!(promoted.info.consolidated_increments, 1);
+        assert_eq!(promoted.info.chain_started_at.as_deref(), Some("2026-01-01T00:00:00Z"));
+        assert_eq!(promoted.manifest.backup_type, BackupType::Full);
+        assert_eq!(promoted.manifest.backup_id, inc1_id);
+        assert_eq!(promoted.checksums, sums(&[(0, 100), (1, 201), (2, 202)]));
+        assert!(
+            crate::qcow2::Qcow2RandomReader::open(&base).is_err(),
+            "a folded base is still an encrypted image"
+        );
+
+        // The leaf follows the base by name and by identity.
+        let leaf = obk_sidecar(&inc2, &keys);
+        assert_eq!(leaf.info.parent_image_file_name.as_deref(), Some("e_C_full_1.obk"));
+        assert_eq!(leaf.manifest.parent_backup_id, Some(inc1_id));
+        let listing = crate::seal::obk::read_listing(&inc2).unwrap();
+        assert_eq!(listing.parent_file_name.as_deref(), Some("e_C_full_1.obk"));
+
+        let chain = list_job_chains(dir.path(), "j1").unwrap().remove(0);
+        assert_eq!(chain.images.len(), 2);
+        assert!(plan_consolidation(&chain, 1).is_none());
+    }
+
+    /// The dangerous moment, for an encrypted chain: the base has been folded
+    /// and the leaf has not been repointed, so the chain genuinely does not
+    /// open — by design, since the leaf's recorded parent identity is now the
+    /// base's and the *name* it follows still points at a file about to be
+    /// deleted. Resuming from the marker has to finish it.
+    #[test]
+    fn an_interrupted_encrypted_fold_is_finished_by_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = obk_keys();
+        let session = keys.start_chain().unwrap();
+
+        let (base, base_id) = put_obk(
+            dir.path(), "e_C_full_1.obk", &keys, &session, ChainRole::Full,
+            "2026-01-01T00:00:00Z", BackupType::Full, None,
+            &[(1, 0x11), (2, 0x11)], &sums(&[(0, 100), (1, 101)]),
+        );
+        let (inc1, inc1_id) = put_obk(
+            dir.path(), "e_C_inc_2.obk", &keys, &session, ChainRole::Incremental,
+            "2026-01-02T00:00:00Z", BackupType::Incremental, Some((base_id, "e_C_full_1.obk")),
+            &[(2, 0x22), (3, 0x22)], &sums(&[(0, 100), (1, 201), (2, 202)]),
+        );
+        let (inc2, _) = put_obk(
+            dir.path(), "e_C_inc_3.obk", &keys, &session, ChainRole::Incremental,
+            "2026-01-03T00:00:00Z", BackupType::Incremental, Some((inc1_id, "e_C_inc_2.obk")),
+            &[(3, 0x33), (4, 0x33)], &sums(&[(0, 100), (1, 201), (3, 303)]),
+        );
+        let leaf_before = read_obk(&inc2, &keys);
+
+        // Exactly the state a crash leaves: the fold done and recorded, the
+        // link not yet moved and the increment still on disk.
+        let marker = Marker {
+            version: MARKER_VERSION,
+            started_at: "2026-01-03T01:00:00Z".into(),
+            base: "e_C_full_1.obk".into(),
+            victim: "e_C_inc_2.obk".into(),
+            next: Some("e_C_inc_3.obk".into()),
+            merged: true,
+            folded_before: 0,
+            chain_started_at: Some("2026-01-01T00:00:00Z".into()),
+        };
+        write_marker(&marker_path(&base), &marker).unwrap();
+        let promoted = promote(
+            &base,
+            obk_sidecar(&inc1, &keys),
+            1,
+            Some("2026-01-01T00:00:00Z".into()),
+        )
+        .unwrap();
+        let key = keys.open_chain_of(&base).unwrap().key;
+        crate::seal::obk::fold_child_into_base(
+            &base,
+            &inc1,
+            &key,
+            &sealed_blob(&promoted).unwrap(),
+            crate::seal::obk::RebuildIdentity {
+                backup_id: inc1_id,
+                created_at: "2026-01-02T00:00:00Z".into(),
+                consolidated_increments: 1,
+                chain_started_at: Some("2026-01-01T00:00:00Z".into()),
+            },
+        )
+        .unwrap();
+
+        // This is the window the ordering exists for: the leaf does not open.
+        assert!(
+            crate::seal::obk::ObkChain::open(&inc2, &key).is_err(),
+            "between the fold and the repoint the chain is not readable — \
+             that is why step 5 has to survive a crash"
+        );
+
+        let report = resume_pending_with_keys(dir.path(), Some(&keys)).unwrap();
+        assert!(report.all_finished(), "{report:?}");
+        assert_eq!(report.finished.len(), 1);
+        assert!(!inc1.exists());
+        assert!(!marker_path(&base).exists());
+        assert_eq!(read_obk(&inc2, &keys), leaf_before, "the leaf survived the interruption");
+        let promoted = obk_sidecar(&base, &keys);
+        assert_eq!(promoted.info.chain_role, ChainRole::Full);
+        assert_eq!(promoted.info.consolidated_increments, 1, "the fold is counted once");
+    }
+
+    /// Without the job's key nothing can be folded — and nothing may be
+    /// touched while saying so. A chain left longer than the window asked for
+    /// is a correct chain; a half-rewritten one is not.
+    #[test]
+    fn an_encrypted_chain_is_left_alone_when_there_is_no_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = obk_keys();
+        let session = keys.start_chain().unwrap();
+        let (base, base_id) = put_obk(
+            dir.path(), "e_C_full_1.obk", &keys, &session, ChainRole::Full,
+            "2026-01-01T00:00:00Z", BackupType::Full, None, &[(1, 0x11)], &sums(&[(0, 1)]),
+        );
+        let (inc, _) = put_obk(
+            dir.path(), "e_C_inc_2.obk", &keys, &session, ChainRole::Incremental,
+            "2026-01-02T00:00:00Z", BackupType::Incremental, Some((base_id, "e_C_full_1.obk")),
+            &[(2, 0x22)], &sums(&[(0, 1), (1, 2)]),
+        );
+        let before = std::fs::read(&base).unwrap();
+
+        let chain = list_job_chains(dir.path(), "j1").unwrap().remove(0);
+        let step = plan_consolidation(&chain, 0).unwrap();
+        let error = consolidate_step(&step).unwrap_err().to_string();
+        assert!(error.contains("ключ задания"), "unexpected: {error}");
+
+        assert!(inc.exists(), "the increment stays");
+        assert_eq!(std::fs::read(&base).unwrap(), before, "the base is untouched");
+        assert!(!marker_path(&base).exists(), "and no marker is left behind");
     }
 
     /// Имя внутри папки — ровно одна часть пути и ничего больше.

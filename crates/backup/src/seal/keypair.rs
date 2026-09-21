@@ -134,7 +134,7 @@ impl KdfParams {
     }
 
     #[cfg(test)]
-    pub(super) fn test_profile() -> Self {
+    pub(crate) fn test_profile() -> Self {
         Self::light()
     }
 

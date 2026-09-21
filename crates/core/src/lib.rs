@@ -1820,10 +1820,14 @@ pub fn delete_job_files(store: &JobStore, job: &Job) -> JobFilesDeleted {
 /// increment onto it — or deleting it by retention — is how a broken chain
 /// becomes a lost one.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))] // used by the Windows backup path
-fn recover_interrupted_consolidations(job: &Job, folder: &Path) -> Option<String> {
-    use own_backup_backup::consolidate::resume_pending;
+fn recover_interrupted_consolidations(
+    job: &Job,
+    folder: &Path,
+    keys: Option<&own_backup_backup::seal::context::ArchiveKeys>,
+) -> Option<String> {
+    use own_backup_backup::consolidate::resume_pending_with_keys;
 
-    let report = match resume_pending(folder) {
+    let report = match resume_pending_with_keys(folder, keys) {
         Ok(r) => r,
         Err(e) => {
             warn!(job = %job.name, error = %e, "Could not scan for interrupted consolidations");
@@ -1890,9 +1894,13 @@ fn belongs_to_job(image: &Path, job_id: &str) -> bool {
 /// already succeeded, and a chain that did not get consolidated is a chain
 /// that is merely longer than asked for, not a broken one.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))] // used by the Windows backup path
-fn apply_consolidation(job: &Job, protected: &[(String, PathBuf)]) -> u32 {
+fn apply_consolidation(
+    job: &Job,
+    protected: &[(String, PathBuf)],
+    keys: Option<&own_backup_backup::seal::context::ArchiveKeys>,
+) -> u32 {
     use own_backup_backup::chains::{list_job_chains, plan_consolidation};
-    use own_backup_backup::consolidate::consolidate_step;
+    use own_backup_backup::consolidate::consolidate_step_with_keys;
 
     let Some(keep) = job.scheme.rolling_incrementals else {
         return 0;
@@ -1937,7 +1945,7 @@ fn apply_consolidation(job: &Job, protected: &[(String, PathBuf)]) -> u32 {
             .find_map(|c| plan_consolidation(c, keep));
         let Some(step) = step else { return folded };
 
-        match consolidate_step(&step) {
+        match consolidate_step_with_keys(&step, keys) {
             Ok(outcome) => {
                 folded += 1;
                 info!(
@@ -2026,7 +2034,7 @@ async fn perform_backup(
     // FIRST, before the format check, before a parent is chosen and long
     // before anything is written: finish what a crash left half-done. Every
     // decision below reads these chains (audit AUD-06).
-    if let Some(msg) = recover_interrupted_consolidations(job, &folder) {
+    if let Some(msg) = recover_interrupted_consolidations(job, &folder, keys.as_ref()) {
         run.finished_at = chrono::Utc::now().to_rfc3339();
         run.status = "error".into();
         run.error = msg;
@@ -2355,7 +2363,7 @@ async fn perform_backup(
     // Retention runs after a fully successful backup, independently per volume.
     // Its failures are logged, never surfaced as a run failure.
     apply_retention(job, &protected);
-    run.consolidated_increments = apply_consolidation(job, &protected);
+    run.consolidated_increments = apply_consolidation(job, &protected, keys.as_ref());
 
     run
 }
@@ -2632,7 +2640,7 @@ async fn perform_disk_backup(
             }
             let protected = [(format!("disk{}", ds.disk_number), image_path)];
             apply_retention(job, &protected);
-            run.consolidated_increments = apply_consolidation(job, &protected);
+            run.consolidated_increments = apply_consolidation(job, &protected, keys.as_ref());
         }
         Ok(Err(OwnBackupError::Cancelled)) => {
             run.status = "cancelled".into();
@@ -2684,7 +2692,7 @@ async fn perform_backup(
     // FIRST, before the format check, before a parent is chosen and long
     // before anything is written: finish what a crash left half-done. Every
     // decision below reads these chains (audit AUD-06).
-    if let Some(msg) = recover_interrupted_consolidations(job, &folder) {
+    if let Some(msg) = recover_interrupted_consolidations(job, &folder, None) {
         run.finished_at = chrono::Utc::now().to_rfc3339();
         run.status = "error".into();
         run.error = msg;
@@ -3639,7 +3647,7 @@ mod tests {
 
         let mut job = Job::default();
         job.id = "job1".into();
-        let stop = recover_interrupted_consolidations(&job, dir.path());
+        let stop = recover_interrupted_consolidations(&job, dir.path(), None);
         assert!(stop.is_some(), "запуск обязан остановиться");
         assert!(stop.unwrap().contains("a_full.vhdx"));
     }
@@ -3658,7 +3666,7 @@ mod tests {
 
         let mut job = Job::default();
         job.id = "job1".into();
-        assert!(recover_interrupted_consolidations(&job, dir.path()).is_none());
+        assert!(recover_interrupted_consolidations(&job, dir.path(), None).is_none());
     }
 
     /// Папка без маркеров — обычный случай, и он ничего не стоит.
@@ -3668,7 +3676,7 @@ mod tests {
         put_image_of_job(dir.path(), "c_full.vhdx", "job1");
         let mut job = Job::default();
         job.id = "job1".into();
-        assert!(recover_interrupted_consolidations(&job, dir.path()).is_none());
+        assert!(recover_interrupted_consolidations(&job, dir.path(), None).is_none());
     }
 
     /// Базу, у которой вообще не прочитать принадлежность, считаем своей:
@@ -3686,7 +3694,7 @@ mod tests {
 
         let mut job = Job::default();
         job.id = "job1".into();
-        assert!(recover_interrupted_consolidations(&job, dir.path()).is_some());
+        assert!(recover_interrupted_consolidations(&job, dir.path(), None).is_some());
     }
 
     // --- «Удалить задание вместе с копиями» (аудит AUD-09) ------------------

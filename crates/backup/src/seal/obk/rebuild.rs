@@ -7,24 +7,44 @@
 //!
 //! What happens instead:
 //!
-//! 1. the file is cut back to the end of its last data record, dropping the
-//!    index, the metadata and the tables — they are all re-emitted below, so
-//!    nothing stale is left to accumulate across passes;
-//! 2. the **old** record of every changed cluster is overwritten with zeros.
-//!    This is not tidiness: those records hold the previous contents of the
-//!    filesystem's own metadata, and leaving them would leave the names and
-//!    sizes of files the pass has just removed inside the image, readable to
-//!    anyone holding the key;
-//! 3. a new record is appended for each changed cluster, under a fresh nonce;
-//! 4. the index, the sealed sidecar, the root, the cluster tables and the
+//! 1. the previous bytes of every changed cluster are dealt with, and the two
+//!    passes want opposite things here — see [`PreviousContents`];
+//! 2. a new record is appended for each changed cluster, under a fresh nonce;
+//! 3. the index, the sealed sidecar, the root, the cluster tables and the
 //!    header are written again, the header last — the same commit point the
-//!    image was created with. A crash before it leaves the previous image
-//!    readable, because everything up to step 2 only added bytes past its end.
+//!    image was created with.
 //!
-//! Step 2 is why a crash between steps 2 and 4 is not silent damage: the old
-//! records of the changed clusters are gone, so the image cannot be opened
-//! with the old header either — the reader refuses a record whose bytes are
-//! zeros. It is a failed pass, not a half-applied one.
+//! # The two modes, and why there are two
+//!
+//! [`PreviousContents::Erase`] (the deletion pass) cuts the file back to the
+//! end of its last data record and **overwrites the old record of every
+//! changed cluster with zeros**. That is not tidiness: those records hold the
+//! previous contents of the filesystem's own metadata, and leaving them would
+//! leave the names and sizes of files the pass has just removed inside the
+//! image, readable to anyone holding the key. The price is that a crash
+//! mid-pass leaves an image that no longer opens with its old header either —
+//! a *failed* pass rather than a half-applied one, which is the right trade for
+//! a copy that has not been handed to anybody yet.
+//!
+//! [`PreviousContents::Keep`] (consolidation) must not make that trade. Folding
+//! an increment into its base rewrites an image the rest of the chain is
+//! hanging off, and a crash that damaged the base would destroy every restore
+//! point in the chain at once, not one run's output. So nothing is erased and
+//! nothing is truncated: the new records go **past the end of the file**, the
+//! old ones stay where they are, and the header cluster written last is the
+//! only byte that changes in place. A crash before it leaves the previous image
+//! exactly as it was, and the step can simply be run again — the same property
+//! the plaintext qcow2 fold has, paid for in the same currency (dead space
+//! inside the file, reported as `bytes_orphaned`).
+//!
+//! # What it costs on a large image
+//!
+//! [`read_state`] walks every guest cluster and holds the index in memory, so a
+//! pass over a multi-terabyte image needs memory proportional to the clusters
+//! it *defines* — roughly 60 bytes each, so ~60 MiB per million stored
+//! clusters. Both callers run against one volume's used clusters, which keeps
+//! that in hand; a whole-disk encrypted image (not yet written) would want a
+//! streaming index before it is.
 
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
@@ -32,6 +52,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use own_backup_common::Result;
+use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use super::header::{obk_extensions, ObkRootPointer};
@@ -50,6 +71,43 @@ use crate::seal::ChainKey;
 
 /// What a pass changed: guest cluster -> its whole new content.
 pub type ChangedClusters = BTreeMap<u64, Vec<u8>>;
+
+/// What to do with the bytes the changed clusters used to hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PreviousContents {
+    /// Overwrite them with zeros, so what the pass removed does not survive
+    /// inside the image. The file is cut back first, so a crash mid-pass is a
+    /// failed pass rather than a half-applied one.
+    #[default]
+    Erase,
+    /// Leave them where they are, unreferenced. Nothing before the header
+    /// cluster is touched, so a crash leaves the previous image intact.
+    Keep,
+}
+
+/// The identity a pass gives the image, for the one pass that changes one.
+///
+/// Folding an increment into its base makes the base stand for the increment's
+/// moment in time: it takes that increment's `backup_id` and timestamp, and the
+/// listing fields move with them. Everything else — the chain, the role, the
+/// geometry — stays exactly as it was.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebuildIdentity {
+    pub backup_id: Uuid,
+    pub created_at: String,
+    pub consolidated_increments: u32,
+    pub chain_started_at: Option<String>,
+}
+
+/// Everything a pass may change beyond the clusters themselves.
+#[derive(Default)]
+pub struct RebuildOptions<'a> {
+    /// Replace the sealed sidecar as well. `None` keeps the one the image has.
+    pub metadata: Option<&'a [u8]>,
+    /// Give the image a new identity (consolidation only).
+    pub identity: Option<RebuildIdentity>,
+    pub previous: PreviousContents,
+}
 
 /// Apply `changed` to the image at `path`, optionally replacing its sealed
 /// sidecar as well.
@@ -89,6 +147,27 @@ pub fn apply_changed_clusters(
     )
 }
 
+/// The streaming form with everything left at its default: erase what was
+/// there, keep the image's identity.
+pub fn apply_changed(
+    path: &Path,
+    chain: &ChainKey,
+    clusters: &[u64],
+    read_cluster: impl FnMut(u64) -> Result<Vec<u8>>,
+    metadata: Option<&[u8]>,
+) -> Result<RebuildStats> {
+    apply_changed_with(
+        path,
+        chain,
+        clusters,
+        read_cluster,
+        RebuildOptions {
+            metadata,
+            ..Default::default()
+        },
+    )
+}
+
 /// The same, reading each changed cluster only when it is needed.
 ///
 /// A deletion pass touches the filesystem's own metadata, which on a large
@@ -101,12 +180,12 @@ pub fn apply_changed_clusters(
 /// cut back. The image is then a failed pass — not half-applied, because the
 /// old records of the changed clusters are already gone — and the chain's
 /// previous images are untouched.
-pub fn apply_changed(
+pub fn apply_changed_with(
     path: &Path,
     chain: &ChainKey,
     clusters: &[u64],
     mut read_cluster: impl FnMut(u64) -> Result<Vec<u8>>,
-    metadata: Option<&[u8]>,
+    opts: RebuildOptions<'_>,
 ) -> Result<RebuildStats> {
     let (root, header, mut states, entries, data_end, existing_sidecar) = read_state(path, chain)?;
     let cluster_size = header.cluster_size;
@@ -123,12 +202,23 @@ pub fn apply_changed(
         .open(path)
         .map_err(|e| bad(format!("cannot open {} for writing: {e}", path.display())))?;
 
-    // 1. Everything past the data records goes; it is all re-emitted below.
-    file.set_len(data_end)?;
+    // 1. Make room for the new records. Erasing cuts the file back to the end
+    //    of its data, dropping index, metadata and tables — all re-emitted
+    //    below, so nothing stale accumulates across passes. Keeping appends
+    //    past everything instead, which leaves the whole previous image in
+    //    place and costs the space it occupies.
+    let file_len = file.metadata()?.len();
+    let (append_at, mut orphaned) = match opts.previous {
+        PreviousContents::Erase => {
+            file.set_len(data_end)?;
+            (data_end, 0)
+        }
+        PreviousContents::Keep => (file_len, file_len.saturating_sub(data_end)),
+    };
 
-    // 2. The previous bytes of every cluster this pass replaces. Their exact
-    //    length comes from each record's own framing, so a neighbour packed
-    //    right behind it is never touched.
+    // 2. The previous bytes of every cluster this pass replaces. When they are
+    //    erased, the exact length comes from each record's own framing, so a
+    //    neighbour packed right behind it is never touched.
     let mut zeroed = 0u64;
     for cluster in &changed {
         if let Some(ClusterState::Present(_)) = states.get(cluster) {
@@ -138,21 +228,26 @@ pub fn apply_changed(
                     length,
                 } = decode_l2_entry(entry, header.cluster_bits)?
                 {
-                    zeroed += zero_record(&mut file, host_offset, length)?;
+                    match opts.previous {
+                        PreviousContents::Erase => {
+                            zeroed += zero_record(&mut file, host_offset, length)?
+                        }
+                        PreviousContents::Keep => orphaned += length,
+                    }
                 }
             }
         }
     }
 
-    // 3. The new records, appended after the old data.
+    // 3. The new records, appended after everything that stays.
     let chain_id = *root.chain_id.as_bytes();
     let data_writer = RecordWriter::new(chain, chain_id, Purpose::Data)?;
     let index_writer = RecordWriter::new(chain, chain_id, Purpose::Index)?;
     let meta_writer = RecordWriter::new(chain, chain_id, Purpose::Manifest)?;
-    let mut tables = Qcow2Tables::resume(header.cluster_bits, root.guest_clusters, data_end);
+    let mut tables = Qcow2Tables::resume(header.cluster_bits, root.guest_clusters, append_at);
     let has_parent = root.parent_backup_id.is_some();
 
-    file.seek(SeekFrom::End(0))?;
+    file.seek(SeekFrom::Start(append_at))?;
     for &cluster in &changed {
         let data = read_cluster(cluster)?;
         if data.len() as u64 != cluster_size {
@@ -213,7 +308,7 @@ pub fn apply_changed(
 
     // 4. Index, sidecar, root, tables, header — the header last.
     // Either the caller's new sidecar, or the one read before the cut.
-    let sidecar: Zeroizing<Vec<u8>> = match metadata {
+    let sidecar: Zeroizing<Vec<u8>> = match opts.metadata {
         Some(bytes) => Zeroizing::new(bytes.to_vec()),
         None => existing_sidecar,
     };
@@ -260,12 +355,25 @@ pub fn apply_changed(
         )?);
     }
 
+    // The one pass that changes who the image is: the base of a consolidated
+    // chain becomes the increment it absorbed. Both halves of the header have
+    // to say so, or opening the image fails on the cross-check between them.
+    let mut open = header.open.clone();
+    let mut identity = root.clone();
+    if let Some(new) = &opts.identity {
+        identity.backup_id = new.backup_id;
+        open.backup_id = new.backup_id;
+        open.created_at = new.created_at.clone();
+        open.consolidated_increments = new.consolidated_increments;
+        open.chain_started_at = new.chain_started_at.clone();
+    }
+
     let new_root = ObkRoot {
         sealed_metadata_len: sidecar.len() as u64,
         defined_clusters: listed.len() as u64,
         index_chunks,
         meta_chunks,
-        ..root.clone()
+        ..identity
     };
     let root_payload = Zeroizing::new(new_root.encode()?);
     let root_ref = seal_chunk_with(
@@ -278,7 +386,6 @@ pub fn apply_changed(
     )?;
 
     let info = tables.finish_tables(&mut file)?;
-    let mut open = header.open.clone();
     open.root = ObkRootPointer::new(root_ref.offset, root_ref.len as usize, root_ref.id);
     let cluster = build_header_cluster(
         HeaderParams {
@@ -291,6 +398,10 @@ pub fn apply_changed(
         },
         &info,
     )?;
+    // The header cluster is the commit point, so everything it will point at
+    // has to be on the platter before it is written — otherwise a power cut
+    // can leave a valid header naming records that never landed.
+    file.sync_all()?;
     file.seek(SeekFrom::Start(0))?;
     file.write_all(&cluster)?;
     file.sync_all()?;
@@ -298,6 +409,7 @@ pub fn apply_changed(
     Ok(RebuildStats {
         clusters_changed: changed.len() as u64,
         bytes_zeroed: zeroed,
+        bytes_orphaned: orphaned,
         defined_clusters: new_root.defined_clusters,
     })
 }
@@ -308,6 +420,10 @@ pub struct RebuildStats {
     /// Bytes of previous records overwritten — the old contents of the changed
     /// clusters, which must not survive the pass.
     pub bytes_zeroed: u64,
+    /// Bytes the pass left inside the file with nothing pointing at them: the
+    /// previous index, metadata and tables, plus the old records of the changed
+    /// clusters when they were kept rather than erased.
+    pub bytes_orphaned: u64,
     pub defined_clusters: u64,
 }
 
