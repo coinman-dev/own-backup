@@ -103,11 +103,17 @@ impl<W: Write + Seek> ObkStagedWriter<W> {
 
     /// Seal the staged clusters, then the index, the metadata and the header.
     /// `sealed_metadata` is the sidecar that belongs inside the image.
-    pub fn finish(mut self, sealed_metadata: &[u8]) -> Result<W> {
+    pub fn finish(self, sealed_metadata: &[u8]) -> Result<W> {
+        self.finish_with_reserve(sealed_metadata, 0)
+    }
+
+    /// The same, leaving room for a larger sidecar to replace this one in place
+    /// later (`seal::obk::metadata::update_sealed_metadata`).
+    pub fn finish_with_reserve(mut self, sealed_metadata: &[u8], reserve: usize) -> Result<W> {
         for (cluster, buf) in std::mem::take(&mut self.staged) {
             self.inner.write_cluster(cluster, &buf)?;
         }
-        self.inner.finish(sealed_metadata)
+        self.inner.finish_with_reserve(sealed_metadata, reserve)
     }
 }
 

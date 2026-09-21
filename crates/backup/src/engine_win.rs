@@ -103,6 +103,10 @@ pub struct VolumeBackupRequest {
     /// restore can show the whole disk and flag the backed-up partition without
     /// jobs.json. `None` for CLI runs (the sidecar then omits it).
     pub source_disk: Option<own_backup_common::disk::DiskInfo>,
+    /// Present for an encrypted job: the keys the service opened before this
+    /// run started. Nothing inside the run asks a human anything (§7.4), and
+    /// the image written is `.obk` whatever `image_format` says.
+    pub encryption: Option<crate::seal::context::ArchiveKeys>,
 }
 
 /// Outcome of a completed volume backup.
@@ -154,6 +158,12 @@ enum ImageTarget {
     Qcow2 {
         writer: crate::qcow2::Qcow2StagedWriter<std::io::BufWriter<std::fs::File>>,
     },
+    /// The encrypted container: the qcow2 path with our incompatible
+    /// extension. Its sidecar is sealed inside instead of living in a guest
+    /// meta partition, so `finalize` is where it goes in.
+    Obk {
+        writer: Box<crate::seal::obk::ObkStagedWriter<std::io::BufWriter<std::fs::File>>>,
+    },
 }
 
 impl ImageTarget {
@@ -162,6 +172,7 @@ impl ImageTarget {
         match self {
             ImageTarget::Vhdx { writer } => writer.length(),
             ImageTarget::Qcow2 { writer } => writer.length(),
+            ImageTarget::Obk { writer } => writer.length(),
         }
     }
 
@@ -169,12 +180,30 @@ impl ImageTarget {
         match self {
             ImageTarget::Vhdx { writer } => writer.write_at(offset, data),
             ImageTarget::Qcow2 { writer } => writer.write_at(offset, data),
+            ImageTarget::Obk { writer } => writer.write_at(offset, data),
         }
     }
 
     /// Finalize the image and log per-step timings.
-    fn finalize(self) -> Result<()> {
+    ///
+    /// `sealed` is the sidecar of an encrypted image, with `reserve` bytes of
+    /// room so the final one — the exclusion figures and the checksums the
+    /// deletion pass touched are known only later — can replace it in place.
+    /// The other two containers keep their sidecar in a guest meta partition
+    /// and ignore both.
+    fn finalize(self, sealed: &[u8], reserve: usize) -> Result<()> {
         match self {
+            ImageTarget::Obk { writer } => {
+                let t = Instant::now();
+                // Records, index, sealed sidecar, tables, header — the header
+                // last, which is this container's commit point.
+                let buf = writer.finish_with_reserve(sealed, reserve)?;
+                let file = buf
+                    .into_inner()
+                    .map_err(|e| OwnBackupError::Io(e.into_error()))?;
+                file.sync_all()?;
+                info!(finish_ms = t.elapsed().as_millis(), "obk finalize timings");
+            }
             ImageTarget::Vhdx { writer } => {
                 let t = Instant::now();
                 writer.finish()?;
@@ -281,10 +310,42 @@ fn report_categories(
     });
 }
 
+/// What an encrypted run may be asked to write, checked before anything is
+/// created. Encryption is the qcow2 path with our incompatible extension, and
+/// listings and retention find those images by their `.obk` name.
+fn check_encrypted_target(
+    encryption: Option<&crate::seal::context::ArchiveKeys>,
+    format: ImageFormat,
+    image_path: &Path,
+) -> Result<()> {
+    let Some(_) = encryption else { return Ok(()) };
+    if format != ImageFormat::Qcow2 {
+        return Err(OwnBackupError::Config(
+            "шифрование пишет собственный контейнер .obk — у задания должен быть формат qcow2"
+                .into(),
+        ));
+    }
+    if image_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .as_deref()
+        != Some(crate::seal::obk::OBK_EXTENSION)
+    {
+        return Err(OwnBackupError::Config(format!(
+            "зашифрованный образ должен называться .{}: {}",
+            crate::seal::obk::OBK_EXTENSION,
+            image_path.display()
+        )));
+    }
+    Ok(())
+}
+
 pub fn backup_volume(
     req: &VolumeBackupRequest,
     progress: impl FnMut(&BackupProgress) -> Result<()>,
 ) -> Result<VolumeBackupSummary> {
+    check_encrypted_target(req.encryption.as_ref(), req.image_format, &req.image_path)?;
     if req.image_path.exists() {
         return Err(OwnBackupError::Config(format!(
             "output image already exists: {}",
@@ -1227,6 +1288,17 @@ fn backup_volume_inner(
         && !req.all_sectors
         && detected_fs.as_deref() == Some("NTFS");
 
+    if in_image_exclusions && req.encryption.is_some() {
+        // The fallback pass mounts the finished image and deletes inside it,
+        // through a plaintext scratch layer. For an encrypted image that layer
+        // must be encrypted too (§7.4), and it is not yet. Skipping the pass
+        // instead would ship a copy that quietly kept the excluded files.
+        return Err(OwnBackupError::Encryption(
+            "исключения в зашифрованной копии этого источника ещё не поддержаны:              файлы пришлось бы удалять уже внутри образа, а временный слой для              этого пока не шифруется. Копия не создавалась."
+                .into(),
+        ));
+    }
+
     let used: Box<dyn UsedSectorMap> = if let Some(map) = enc_ntfs_map {
         Box::new(map)
     } else if let Some(map) = enc_fat_map {
@@ -1248,7 +1320,71 @@ fn backup_volume_inner(
     // --- Create the image target (and attach it, for VHDX) ---
     // Disk = 1 MiB GPT head + volume + meta partition + tail for the backup GPT.
     let disk_size = DEFAULT_PARTITION_OFFSET + volume_len.div_ceil(MIB) * MIB + meta_size + MIB;
-    let (mut target, data_offset) = match req.image_format {
+    // The image's identity is settled before it is created: an encrypted image
+    // seals it into its own root record, and the sidecar repeats it.
+    let backup_id = Uuid::new_v4();
+
+    // An encrypted run writes `.obk`: the same userspace path as qcow2, with
+    // every cluster sealed. The sidecar goes inside the container, so the guest
+    // meta partition is neither written nor needed (§7.3) — but its size is
+    // still what the reservation for the final sidecar is measured by.
+    let (mut target, data_offset) = if let Some(keys) = &req.encryption {
+        let (backing_file, data_offset, chain) = match &parent {
+            None => (None, DEFAULT_PARTITION_OFFSET, keys.start_chain()?),
+            Some((parent_path, parent_sidecar)) => {
+                let backing = if parent_path.parent() == req.image_path.parent() {
+                    parent_path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .ok_or_else(|| {
+                            OwnBackupError::Config(format!(
+                                "parent image path has no file name: {}",
+                                parent_path.display()
+                            ))
+                        })?
+                } else {
+                    parent_path.to_string_lossy().into_owned()
+                };
+                // The chain key travels inside the parent image, so continuing
+                // a chain needs the parent and this job's key, nothing else.
+                let chain = keys.open_chain_of(parent_path)?;
+                (
+                    Some(backing),
+                    parent_sidecar.info.volume_data_offset,
+                    chain,
+                )
+            }
+        };
+        let role = match (&parent, kind) {
+            (None, _) => ChainRole::Full,
+            (Some(_), BackupType::Differential) => ChainRole::Differential,
+            (Some(_), _) => ChainRole::Incremental,
+        };
+        let parent_backup_id = parent.as_ref().map(|(_, s)| s.manifest.backup_id);
+        let plan = crate::seal::context::ImagePlan {
+            backup_id,
+            role,
+            parent: match (&backing_file, parent_backup_id) {
+                (Some(name), Some(id)) => Some((id, name.as_str())),
+                _ => None,
+            },
+            created_at: chrono::Utc::now().to_rfc3339(),
+            virtual_size: disk_size,
+            source_id: crate::source_identity::stable_source_id(&req.source),
+            consolidated_increments: 0,
+            chain_started_at: None,
+            compression: crate::seal::obk::ObkCompression::Zstd {
+                level: crate::qcow2::DEFAULT_ZSTD_LEVEL,
+            },
+        };
+        let writer = Box::new(crate::seal::obk::ObkStagedWriter::create(
+            &req.image_path,
+            &chain.key,
+            keys.writer_options(&chain, plan),
+        )?);
+        (ImageTarget::Obk { writer }, data_offset)
+    } else {
+        match req.image_format {
         ImageFormat::Qcow2 => {
             // Userspace-written compressed image: no attach, no kernel writer.
             // A child references its parent by FILE NAME (qemu resolves
@@ -1307,6 +1443,7 @@ fn backup_volume_inner(
             };
             (ImageTarget::Vhdx { writer }, data_offset)
         }
+        }
     };
 
     let disk_guid = match &parent {
@@ -1321,8 +1458,10 @@ fn backup_volume_inner(
                 disk_guid: Uuid::new_v4(),
                 partition_guid: Uuid::new_v4(),
                 partition_name: "OwnBackup".into(),
-                meta_partition_size: Some(meta_size),
-                meta_partition_guid: Some(meta_partition_guid),
+                // An encrypted image keeps its sidecar sealed inside the
+                // container, so there is no partition to describe.
+                meta_partition_size: (req.encryption.is_none()).then_some(meta_size),
+                meta_partition_guid: (req.encryption.is_none()).then_some(meta_partition_guid),
             };
             for op in gpt_write_ops(&layout)? {
                 target.write_at(op.offset, &op.bytes)?;
@@ -1350,7 +1489,6 @@ fn backup_volume_inner(
             .collect()
     });
 
-    let backup_id = Uuid::new_v4();
     let mut reader: Box<dyn BlockReader> = if luks.is_some() || bitlocker.is_some() {
         // Read decrypted blocks through the LUKS or BitLocker view.
         Box::new(crate::block_reader::RawVolumeBlockReader::new(
@@ -1490,7 +1628,11 @@ fn backup_volume_inner(
             SidecarInfo::new_child(temp_image_file_name, role, parent_name, data_offset)
         }
     };
-    temp_info.container = req.image_format.extension().into();
+    temp_info.container = if req.encryption.is_some() {
+        crate::seal::obk::OBK_EXTENSION.into()
+    } else {
+        req.image_format.extension().into()
+    };
     temp_info.job_id = req.job_id.clone();
     temp_info.source_id = crate::source_identity::stable_source_id(&req.source);
     temp_info.source_disk_layout = req.source_disk.clone();
@@ -1498,19 +1640,21 @@ fn backup_volume_inner(
     crate::sidecar::write_sidecar_v2_to(&mut temp_blob, &temp_info, &temp_manifest, &outcome.checksums)?;
 
     // Ensure the placeholder is at least meta_size to cover the entire partition space.
-    let mut placeholder = vec![0u8; meta_size as usize];
-    let placeholder_len = placeholder.len();
-    let temp_blob_len = temp_blob.len();
-    if temp_blob_len <= placeholder_len {
-        placeholder[..temp_blob_len].copy_from_slice(&temp_blob);
-    } else {
-        placeholder.copy_from_slice(&temp_blob[..placeholder_len]);
+    if req.encryption.is_none() {
+        let mut placeholder = vec![0u8; meta_size as usize];
+        let placeholder_len = placeholder.len();
+        let temp_blob_len = temp_blob.len();
+        if temp_blob_len <= placeholder_len {
+            placeholder[..temp_blob_len].copy_from_slice(&temp_blob);
+        } else {
+            placeholder.copy_from_slice(&temp_blob[..placeholder_len]);
+        }
+        // Set a non-zero byte at the end of the placeholder to ensure it spans the whole allocation
+        if placeholder_len > 0 {
+            placeholder[placeholder_len - 1] = 1;
+        }
+        target.write_at(meta_offset, &placeholder)?;
     }
-    // Set a non-zero byte at the end of the placeholder to ensure it spans the whole allocation
-    if placeholder_len > 0 {
-        placeholder[placeholder_len - 1] = 1;
-    }
-    target.write_at(meta_offset, &placeholder)?;
 
     // Flushing a dynamic/differencing VHDX and detaching it writes all the
     // still-cached image data back to the destination drive — many seconds to
@@ -1529,7 +1673,10 @@ fn backup_volume_inner(
     // Timed step by step inside finalize(): the stall lives in ONE of the
     // steps (flush of remaining cache vs handle close vs detach for VHDX;
     // metadata write + sync for qcow2), and the log says which.
-    target.finalize()?;
+    // An encrypted image seals this sidecar now and keeps `meta_size` bytes of
+    // room, so the final one — with the exclusion figures and the checksums the
+    // deletion pass touched — can take its place in the finished file.
+    target.finalize(&temp_blob, meta_size as usize)?;
 
     // Notify VSS writers of success and release the shadow copy.
     let t = Instant::now();
@@ -1749,7 +1896,11 @@ fn backup_volume_inner(
             SidecarInfo::new_child(image_file_name, role, parent_file_name, data_offset)
         }
     };
-    sidecar_info.container = req.image_format.extension().into();
+    sidecar_info.container = if req.encryption.is_some() {
+        crate::seal::obk::OBK_EXTENSION.into()
+    } else {
+        req.image_format.extension().into()
+    };
     // The job id is what ties images into this job's chains: list_job_chains
     // filters on it, so without it every next run plans a FULL backup.
     sidecar_info.job_id = req.job_id.clone();
@@ -1799,11 +1950,18 @@ fn backup_volume_inner(
     let meta_offset = (last_lba + 1) * sector;
     let mut blob_bytes = Vec::new();
     crate::sidecar::write_sidecar_v2_to(&mut blob_bytes, &sidecar_info, &manifest, &checksums)?;
-    match req.image_format {
-        ImageFormat::Vhdx => {
+    match (&req.encryption, req.image_format) {
+        (Some(keys), _) => {
+            // No guest meta partition to write into: the sidecar replaces the
+            // reserved one inside the container, sealed under the same chain
+            // key and with a fresh nonce.
+            let chain = keys.open_chain_of(&req.image_path)?;
+            crate::seal::obk::update_sealed_metadata(&req.image_path, &chain.key, &blob_bytes)?;
+        }
+        (None, ImageFormat::Vhdx) => {
             crate::vhdx_bat::write_vhdx_guest_at(&req.image_path, meta_offset, &blob_bytes)?;
         }
-        ImageFormat::Qcow2 => {
+        (None, ImageFormat::Qcow2) => {
             crate::qcow2::merge::write_qcow2_guest_blob(&req.image_path, meta_offset, &blob_bytes)?;
         }
     }
@@ -1862,6 +2020,9 @@ pub struct DiskBackupRequest {
     pub block_size: u32,
     pub image_format: ImageFormat,
     pub job_id: Option<String>,
+    /// Present for an encrypted job. Whole-disk images cannot be written
+    /// encrypted yet — the run is refused rather than written in the clear.
+    pub encryption: Option<crate::seal::context::ArchiveKeys>,
     /// File-exclusion glob patterns for Windows-family filesystems (NTFS/ReFS/
     /// FAT), applied per partition (plan D2): NTFS/ReFS drop + zero the matched
     /// clusters (data never leaves the machine; the catalog entry stays as a
@@ -2614,6 +2775,15 @@ pub fn backup_disk(
     req: &DiskBackupRequest,
     progress: impl FnMut(&BackupProgress) -> Result<()>,
 ) -> Result<DiskBackupSummary> {
+    if req.encryption.is_some() {
+        // Per-volume encrypted images work; a whole-disk one does not yet.
+        // Writing it in the clear instead would be the one outcome §7.7 calls
+        // out as never acceptable, so the run stops here.
+        return Err(OwnBackupError::Encryption(
+            "зашифрованная копия диска целиком ещё не поддержана —              копия не создавалась (шифруются копии томов)"
+                .into(),
+        ));
+    }
     if req.image_path.exists() {
         return Err(OwnBackupError::Config(format!(
             "output image already exists: {}",
@@ -3193,7 +3363,8 @@ fn backup_disk_inner(
         speed_bps: 0,
                 categories: None,
     });
-    target.finalize()?;
+    // Plaintext only: the disk path refuses encrypted jobs above.
+    target.finalize(&[], 0)?;
     for prep in &mut prepared {
         if let Some(session) = prep.vss.take() {
             if let Err(e) = session.complete() {

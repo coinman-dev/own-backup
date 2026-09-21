@@ -188,7 +188,28 @@ impl<W: Write + Seek> ObkWriter<W> {
     /// binary sidecar (disk layout, machine name, volume labels, categories,
     /// UEFI entries, exclusions and the plaintext checksums), which is exactly
     /// what §7.3 wants out of the open half of the image.
-    pub fn finish(mut self, sealed_metadata: &[u8]) -> Result<W> {
+    pub fn finish(self, sealed_metadata: &[u8]) -> Result<W> {
+        self.finish_with_reserve(sealed_metadata, 0)
+    }
+
+    /// The same, leaving room for a **larger** sidecar to replace this one in
+    /// place later ([`super::metadata::update_sealed_metadata`]).
+    ///
+    /// The Windows engine learns the last of what belongs in a sidecar only
+    /// after the image is closed — the exclusion figures and the checksums the
+    /// deletion pass touched. A plaintext image has a meta partition sized for
+    /// that; an encrypted one reserves its room here instead. Reserved metadata
+    /// is stored uncompressed so that replacing it cannot change any record's
+    /// length, which is what makes the replacement an in-place one.
+    pub fn finish_with_reserve(mut self, sealed_metadata: &[u8], reserve: usize) -> Result<W> {
+        let reserved = reserve > sealed_metadata.len();
+        let padded: Zeroizing<Vec<u8>> = if reserved {
+            let mut buf = Zeroizing::new(vec![0u8; reserve]);
+            buf[..sealed_metadata.len()].copy_from_slice(sealed_metadata);
+            buf
+        } else {
+            Zeroizing::new(sealed_metadata.to_vec())
+        };
         let defined_clusters = self.states.len() as u64;
         let states: Vec<(u64, ClusterState)> = std::mem::take(&mut self.states).into_iter().collect();
         if states.len().div_ceil(MAX_INDEX_ENTRIES_PER_CHUNK) > MAX_INDEX_CHUNKS {
@@ -196,7 +217,7 @@ impl<W: Write + Seek> ObkWriter<W> {
                 "image defines more clusters than one root record can index",
             ));
         }
-        if (sealed_metadata.len()).div_ceil(MAX_PAYLOAD_LEN) > MAX_META_CHUNKS {
+        if padded.len().div_ceil(MAX_PAYLOAD_LEN) > MAX_META_CHUNKS {
             return Err(bad("sealed metadata is larger than the format allows"));
         }
 
@@ -218,12 +239,13 @@ impl<W: Write + Seek> ObkWriter<W> {
         }
 
         let mut meta_chunks = Vec::new();
-        for (ordinal, slice) in sealed_metadata.chunks(MAX_PAYLOAD_LEN).enumerate() {
+        for (ordinal, slice) in padded.chunks(MAX_PAYLOAD_LEN).enumerate() {
             // Chunk 0 of the Manifest purpose is the root record itself.
-            meta_chunks.push(seal_chunk(
+            meta_chunks.push(seal_chunk_with(
                 &self.meta,
                 ordinal as u64 + 1,
                 slice,
+                reserved,
                 &mut self.tables,
                 &mut self.w,
             )?);
@@ -243,7 +265,14 @@ impl<W: Write + Seek> ObkWriter<W> {
             meta_chunks,
         };
         let root_payload = Zeroizing::new(root.encode()?);
-        let root_ref = seal_chunk(&self.meta, 0, &root_payload, &mut self.tables, &mut self.w)?;
+        let root_ref = seal_chunk_with(
+            &self.meta,
+            0,
+            &root_payload,
+            reserved,
+            &mut self.tables,
+            &mut self.w,
+        )?;
 
         let open = ObkOpenHeader {
             format: OBK_OPEN_FORMAT.into(),
@@ -293,14 +322,32 @@ fn seal_chunk<W: Write>(
     tables: &mut Qcow2Tables,
     w: &mut W,
 ) -> Result<ChunkRef> {
+    seal_chunk_with(writer, ordinal, payload, false, tables, w)
+}
+
+/// `uncompressed` forces Raw: the record's length then depends only on the
+/// payload's length, which is what lets a later sidecar of the same size take
+/// this one's place byte for byte.
+pub(crate) fn seal_chunk_with<W: Write>(
+    writer: &RecordWriter,
+    ordinal: u64,
+    payload: &[u8],
+    uncompressed: bool,
+    tables: &mut Qcow2Tables,
+    w: &mut W,
+) -> Result<ChunkRef> {
     if payload.is_empty() || payload.len() > MAX_PAYLOAD_LEN {
         return Err(bad("metadata chunk size out of range"));
     }
-    let compressed = Zeroizing::new(
-        zstd::bulk::compress(payload, crate::qcow2::DEFAULT_ZSTD_LEVEL)
-            .map_err(|e| OwnBackupError::Compression(e.to_string()))?,
-    );
-    let (encoding, bytes) = if compressed.len() < payload.len() {
+    let compressed = if uncompressed {
+        Zeroizing::new(Vec::new())
+    } else {
+        Zeroizing::new(
+            zstd::bulk::compress(payload, crate::qcow2::DEFAULT_ZSTD_LEVEL)
+                .map_err(|e| OwnBackupError::Compression(e.to_string()))?,
+        )
+    };
+    let (encoding, bytes) = if !uncompressed && compressed.len() < payload.len() {
         (Encoding::Zstd, &compressed[..])
     } else {
         (Encoding::Raw, payload)

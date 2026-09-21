@@ -105,6 +105,8 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
         job_id: None,
         passphrase: args.password.clone().map(zeroize::Zeroizing::new),
         image_format: args.format,
+        // The command line does not open encrypted archives yet (E5).
+        encryption: None,
         // CLI has no live disk-layout snapshot to embed (that comes from the GUI).
         source_disk: None,
     };

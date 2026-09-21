@@ -232,6 +232,8 @@ pub async fn run(args: BackupDiskArgs) -> own_backup_common::Result<()> {
         bootable: args.bootable,
         block_size: args.block_size_mib * 1024 * 1024,
         image_format: args.format,
+        // The command line does not open encrypted archives yet (E5).
+        encryption: None,
         job_id: None,
         exclusion_patterns_windows: exclusions.clone(),
         exclusion_patterns_linux: exclusions,

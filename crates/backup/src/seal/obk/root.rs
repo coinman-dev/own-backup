@@ -221,6 +221,11 @@ impl ObkRoot {
         if self.sealed_metadata_len > (self.meta_chunks.len() * MAX_PAYLOAD_LEN) as u64 {
             return Err(bad("metadata longer than its chunks can hold"));
         }
+        // Chunks may hold MORE than the sidecar: an image that reserved room
+        // for a larger one pads the rest (`finish_with_reserve`).
+        if self.sealed_metadata_len == 0 && !self.meta_chunks.is_empty() {
+            return Err(bad("metadata chunks without metadata"));
+        }
         for chunk in &self.meta_chunks {
             if chunk.offset == 0 || !record_len_ok(chunk.len) {
                 return Err(bad("metadata chunk outside the image"));

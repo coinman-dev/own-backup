@@ -30,6 +30,10 @@ use crate::sidecar::ChainRole;
 pub const OBK_CLUSTER_BITS: u32 = 16;
 
 /// One job's key material for one operation.
+///
+/// Cloneable because one run copies several volumes and each of them needs its
+/// own context; a clone holds the same key material and is wiped with it.
+#[derive(Clone)]
 pub struct ArchiveKeys {
     key_file: SealedPrivateKey,
     private: JobPrivateKey,

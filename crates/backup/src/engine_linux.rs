@@ -70,7 +70,7 @@ enum LinuxImageWriter {
     Qcow2(crate::qcow2::Qcow2StagedWriter<std::io::BufWriter<std::fs::File>>),
     /// The encrypted container. Its sidecar is not written into the guest at
     /// all — it is handed to `finish` and sealed inside the image.
-    Obk(crate::seal::obk::ObkStagedWriter<std::io::BufWriter<std::fs::File>>),
+    Obk(Box<crate::seal::obk::ObkStagedWriter<std::io::BufWriter<std::fs::File>>>),
 }
 
 impl LinuxImageWriter {
@@ -101,11 +101,13 @@ impl LinuxImageWriter {
         chain: &crate::seal::context::ChainSession,
         plan: crate::seal::context::ImagePlan<'_>,
     ) -> Result<Self> {
-        Ok(Self::Obk(crate::seal::obk::ObkStagedWriter::create(
-            path,
-            &chain.key,
-            keys.writer_options(chain, plan),
-        )?))
+        Ok(Self::Obk(Box::new(
+            crate::seal::obk::ObkStagedWriter::create(
+                path,
+                &chain.key,
+                keys.writer_options(chain, plan),
+            )?,
+        )))
     }
 
     fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()> {

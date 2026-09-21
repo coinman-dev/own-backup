@@ -215,12 +215,17 @@ impl ObkOpenHeader {
 }
 
 /// The qcow2 half of an `.obk` header, as read back from a file.
+#[derive(Clone, Debug)]
 pub struct ObkFileHeader {
     pub cluster_bits: u32,
     pub cluster_size: u64,
     pub virtual_size: u64,
     pub l1_size: u32,
     pub l1_table_offset: u64,
+    /// Kept so the header cluster can be rebuilt byte for byte when only the
+    /// root pointer changes (`metadata::update_sealed_metadata`).
+    pub refcount_table_offset: u64,
+    pub refcount_table_clusters: u32,
     pub backing_file: Option<String>,
     pub open: ObkOpenHeader,
 }
@@ -332,6 +337,8 @@ impl ObkFileHeader {
             virtual_size,
             l1_size,
             l1_table_offset,
+            refcount_table_offset: u64::from_be_bytes(super::array(&prefix, 48)),
+            refcount_table_clusters: u32::from_be_bytes(super::array(&prefix, 56)),
             backing_file,
             open,
         })

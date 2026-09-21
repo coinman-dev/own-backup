@@ -4,6 +4,7 @@
 //! replace or clear authorization. E4 must replace the fail-closed run guard
 //! with a key context threaded through the actual encrypted image pipeline.
 
+use own_backup_backup::seal::context::ArchiveKeys;
 use own_backup_backup::seal::keypair::{JobPrivateKey, SealedPrivateKey};
 use own_backup_backup::seal::local::{LocalKeyRef, ServiceKeyStore};
 use own_backup_common::{OwnBackupError, Result};
@@ -68,16 +69,32 @@ impl JobStore {
             .map(Some)
     }
 
-    /// Temporary until E3/E4. A saved encryption configuration is not permission
-    /// to produce a plaintext image while the encrypted pipeline is unfinished.
+    /// The keys this run works with, opened once before it starts (§7.4).
+    ///
+    /// `Ok(None)` means the job is not encrypted. An error means the local
+    /// authorization is missing, damaged or unreadable — the run then fails
+    /// with that message instead of waiting for a password or, worse, writing
+    /// the copy in the clear.
+    pub(crate) fn archive_keys_for_run(
+        &self,
+        job: &Job,
+    ) -> std::result::Result<Option<ArchiveKeys>, String> {
+        let Some(encryption) = &job.archive_encryption else {
+            return Ok(None);
+        };
+        let private = self
+            .scheduled_archive_key(job)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Нужно заново разрешить автоматическое выполнение задания".to_string())?;
+        ArchiveKeys::from_private(encryption.portable_key.clone(), private)
+            .map(Some)
+            .map_err(|e| e.to_string())
+    }
+
+    /// The message a run dies with when its keys cannot be opened.
+    #[cfg(test)]
     pub(crate) fn archive_encryption_run_error(&self, job: &Job) -> Option<String> {
-        match self.scheduled_archive_key(job) {
-            Ok(None) => None,
-            Ok(Some(_key)) => Some(
-                "Ключ задания доступен, но запись зашифрованных образов ещё не подключена. Копия не создавалась.".into()
-            ),
-            Err(e) => Some(e.to_string()),
-        }
+        self.archive_keys_for_run(job).err()
     }
 }
 

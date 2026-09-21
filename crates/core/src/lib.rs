@@ -1113,15 +1113,19 @@ pub async fn run_queue_worker(
 
         cancel.store(false, Ordering::SeqCst);
         let last_success = store.last_success(&job.id);
-        let run = if let Some(message) = store.archive_encryption_run_error(&job) {
-            // Never let an encrypted job reach the current plaintext writer.
-            let mut run = run_skeleton(&job);
-            run.finished_at = chrono::Utc::now().to_rfc3339();
-            run.status = "error".into();
-            run.error = message;
-            run
-        } else {
-            perform_backup(&sink, &job, &cancel, last_success, &passwords).await
+        // The keys of an encrypted job are opened here, once, before anything
+        // runs — and if they cannot be opened the run fails saying so, rather
+        // than waiting for a password nobody will type at night or writing the
+        // copy in the clear (§7.2).
+        let run = match store.archive_keys_for_run(&job) {
+            Err(message) => {
+                let mut run = run_skeleton(&job);
+                run.finished_at = chrono::Utc::now().to_rfc3339();
+                run.status = "error".into();
+                run.error = message;
+                run
+            }
+            Ok(keys) => perform_backup(&sink, &job, &cancel, last_success, &passwords, keys).await,
         };
         if let Err(e) = store.record_run(run.clone()) {
             // The backup happened; only the record of it did not. Saying so is
@@ -1332,16 +1336,29 @@ fn output_path_for(job: &Job, device: &str, kind: &str) -> PathBuf {
     let safe_name = own_backup_common::file_name::safe_file_stem(&job.name, "backup");
     // VHDX children are AVHDX (the Windows convention); qcow2 children stay
     // .qcow2 (the qemu convention — chain role lives in the sidecar).
-    let child_ext = match job.image_format {
-        own_backup_common::types::ImageFormat::Vhdx => "avhdx",
-        own_backup_common::types::ImageFormat::Qcow2 => "qcow2",
+    // An encrypted job writes `.obk` throughout, children included: that name
+    // is how listings and retention find encrypted images at all.
+    let child_ext = match (job.archive_encryption.is_some(), job.image_format) {
+        (true, _) => own_backup_backup::seal::obk::OBK_EXTENSION,
+        (false, own_backup_common::types::ImageFormat::Vhdx) => "avhdx",
+        (false, own_backup_common::types::ImageFormat::Qcow2) => "qcow2",
     };
+    let full_ext = container_extension(job);
     let (tag, ext) = match kind {
         "incremental" => ("inc", child_ext),
         "differential" => ("diff", child_ext),
-        _ => ("full", job.image_format.extension()),
+        _ => ("full", full_ext),
     };
     PathBuf::from(&job.dest_folder).join(format!("{safe_name}_{token}_{tag}_{stamp}.{ext}"))
+}
+
+/// The container a job writes: its format, or `.obk` when it encrypts.
+pub fn container_extension(job: &Job) -> &'static str {
+    if job.archive_encryption.is_some() {
+        own_backup_backup::seal::obk::OBK_EXTENSION
+    } else {
+        job.image_format.extension()
+    }
 }
 
 /// A job's image format must never change over existing archives (decision
@@ -1352,7 +1369,7 @@ fn output_path_for(job: &Job, device: &str, kind: &str) -> PathBuf {
 fn format_change_error(job: &Job, folder: &Path) -> Option<String> {
     let chains =
         own_backup_backup::chains::list_job_chains(folder, &job.id).unwrap_or_default();
-    let want = job.image_format.extension();
+    let want = container_extension(job);
     for image in chains.iter().flat_map(|c| c.images.iter()) {
         if image.container != want {
             let name = image
@@ -1986,6 +2003,7 @@ async fn perform_backup(
     cancel: &Arc<AtomicBool>,
     _last_success: Option<JobRun>,
     passwords: &Arc<dyn PasswordResolver>,
+    keys: Option<own_backup_backup::seal::context::ArchiveKeys>,
 ) -> JobRun {
     use own_backup_backup::engine_win::{backup_volume, verify_image, VolumeBackupRequest};
     use own_backup_common::types::BackupType;
@@ -2023,7 +2041,7 @@ async fn perform_backup(
     // Whole-disk (bootable) copy → one image for the whole disk with the real
     // GPT + embedded manifest (plan D1), instead of a per-volume image each.
     if let Some(ds) = job.disk_source.clone() {
-        return perform_disk_backup(sink, job, &ds, cancel, passwords, run).await;
+        return perform_disk_backup(sink, job, &ds, cancel, passwords, keys, run).await;
     }
 
     // Exclusions only make sense in smart NTFS mode; a sector-by-sector image
@@ -2080,6 +2098,9 @@ async fn perform_backup(
             // it only when the source is actually a LUKS container.
             passphrase: passwords.resolve(&token),
             image_format: job.image_format,
+            // Each volume of this run gets its own context; they all hold the
+            // same job key, opened once before the run started.
+            encryption: keys.clone(),
         };
         let validate_after = job.advanced.validate_after;
 
@@ -2339,6 +2360,7 @@ async fn perform_disk_backup(
     ds: &DiskSourceSpec,
     cancel: &Arc<AtomicBool>,
     passwords: &Arc<dyn PasswordResolver>,
+    keys: Option<own_backup_backup::seal::context::ArchiveKeys>,
     mut run: JobRun,
 ) -> JobRun {
     use own_backup_backup::engine_win::{
@@ -2356,9 +2378,10 @@ async fn perform_disk_backup(
     // qcow2 children stay `.qcow2` (the role lives in the sidecar).
     let folder = PathBuf::from(&job.dest_folder);
     let plan = plan_run_for_disk(job, &folder, ds.disk_number);
-    let child_ext = match job.image_format {
-        own_backup_common::types::ImageFormat::Vhdx => "avhdx",
-        own_backup_common::types::ImageFormat::Qcow2 => "qcow2",
+    let child_ext = match (job.archive_encryption.is_some(), job.image_format) {
+        (true, _) => own_backup_backup::seal::obk::OBK_EXTENSION,
+        (false, own_backup_common::types::ImageFormat::Vhdx) => "avhdx",
+        (false, own_backup_common::types::ImageFormat::Qcow2) => "qcow2",
     };
     // Name carries the kind tag (full/inc/diff) so a glance at the folder tells
     // full from child — the extension alone can't (a qcow2 child is still
@@ -2367,7 +2390,7 @@ async fn perform_disk_backup(
     let (tag, ext) = match plan.kind {
         "incremental" => ("inc", child_ext),
         "differential" => ("diff", child_ext),
-        _ => ("full", job.image_format.extension()),
+        _ => ("full", container_extension(job)),
     };
     let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
     let image_path =
@@ -2418,6 +2441,9 @@ async fn perform_disk_backup(
         block_size: own_backup_backup::engine_win::DEFAULT_BLOCK_SIZE,
         image_format: job.image_format,
         job_id: Some(job.id.clone()),
+        // The engine refuses this: a whole-disk image cannot be encrypted yet,
+        // and writing one in the clear for an encrypted job is not an option.
+        encryption: keys.clone(),
         exclusion_patterns_windows: excl_win,
         exclusion_patterns_linux: excl_linux,
         kind: match plan.kind {
@@ -2626,6 +2652,9 @@ async fn perform_backup(
     cancel: &Arc<AtomicBool>,
     _last_success: Option<JobRun>,
     passwords: &Arc<dyn PasswordResolver>,
+    // The local key store is Windows-only, so an encrypted job never gets this
+    // far on Linux: `archive_keys_for_run` fails first and the run says so.
+    _keys: Option<own_backup_backup::seal::context::ArchiveKeys>,
 ) -> JobRun {
     use own_backup_backup::engine_linux::{
         backup_volume, verify_image, LinuxBackupRequest, DEFAULT_BLOCK_SIZE,
@@ -2670,7 +2699,7 @@ async fn perform_backup(
         let image_path = folder.join(format!(
             "{safe}_{}_full_{stamp}.{}",
             file_token(job, device),
-            job.image_format.extension()
+            container_extension(job)
         ));
 
         // Take a point-in-time snapshot (LVM/fsfreeze) so a live filesystem is
@@ -2823,6 +2852,7 @@ async fn perform_backup(
     _cancel: &Arc<AtomicBool>,
     _last_success: Option<JobRun>,
     _passwords: &Arc<dyn PasswordResolver>,
+    _keys: Option<own_backup_backup::seal::context::ArchiveKeys>,
 ) -> JobRun {
     let mut run = run_skeleton(job);
     run.finished_at = chrono::Utc::now().to_rfc3339();

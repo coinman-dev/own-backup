@@ -119,6 +119,11 @@ impl<R: Read + Seek> ObkImage<R> {
         &self.header.open
     }
 
+    /// The qcow2 half too, for the one caller that rewrites a header cluster.
+    pub fn file_header(&self) -> &ObkFileHeader {
+        &self.header
+    }
+
     pub fn root(&self) -> &ObkRoot {
         &self.root
     }
@@ -166,9 +171,12 @@ impl<R: Read + Seek> ObkImage<R> {
             )?;
             out.extend_from_slice(&payload);
         }
-        if out.len() as u64 != self.root.sealed_metadata_len {
-            return Err(bad("sealed metadata is not the declared length"));
+        // Reserved metadata is padded so a later sidecar of the same size can
+        // replace it in place; the root says how much of it is the sidecar.
+        if (out.len() as u64) < self.root.sealed_metadata_len {
+            return Err(bad("sealed metadata is shorter than the declared length"));
         }
+        out.truncate(self.root.sealed_metadata_len as usize);
         Ok(out)
     }
 
