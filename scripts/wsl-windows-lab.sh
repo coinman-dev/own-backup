@@ -28,6 +28,7 @@ LAB="${LAB_DIR:-$HOME/lab}"
 REPO="${REPO_DIR:-$HOME/Development/own-backup}"
 WINDOWS_ISO="${WINDOWS_ISO:-$LAB/win10-ltsc.iso}"
 PROBE="${PROBE_EXE:-$REPO/target/x86_64-pc-windows-msvc/debug/examples/seal_store_service.exe}"
+OBK_PROBE="${OBK_PROBE_EXE:-$REPO/target/x86_64-pc-windows-msvc/debug/examples/obk_live_probe.exe}"
 DISK="$LAB/win-lab.qcow2"
 ANSWER="$LAB/answer.iso"
 MONITOR="$LAB/monitor.sock"
@@ -60,8 +61,17 @@ build_media() {
     mkdir -p "$stage/lab"
     cp "$REPO/scripts/lab/autounattend.xml" "$stage/autounattend.xml"
     cp "$REPO/scripts/lab/lab-stage1.ps1" "$REPO/scripts/lab/lab-stage2.ps1" "$stage/lab/"
+    cp "$REPO/scripts/lab/lab-obk.ps1" "$stage/lab/"
     cp "$REPO/scripts/test-seal-service.ps1" "$stage/lab/"
     cp "$PROBE" "$stage/lab/seal_store_service.exe"
+    # The encrypted-path probe, when it has been built. Without it the lab
+    # still runs the cold-start check and says the probe was not there.
+    if [ -f "$OBK_PROBE" ]; then
+        cp "$OBK_PROBE" "$stage/lab/obk_live_probe.exe"
+        say "encrypted-path probe: $(du -h "$OBK_PROBE" | cut -f1)"
+    else
+        say "no encrypted-path probe at $OBK_PROBE — the lab will skip it"
+    fi
     echo 'OwnBackup E2 disposable laboratory media' > "$stage/lab/lab-marker.txt"
     xorriso -as mkisofs -quiet -J -R -V OBKLAB -o "$ANSWER" "$stage"
     say "answer CD: $ANSWER ($(du -h "$ANSWER" | cut -f1))"

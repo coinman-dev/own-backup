@@ -150,7 +150,8 @@ fn container_of(path: &Path) -> Result<&'static str> {
         // Until that exists the chain is left exactly as it is: longer than the
         // window asked for, and correct.
         "obk" => Err(OwnBackupError::Encryption(format!(
-            "объединение копий в зашифрованной цепочке ещё не поддержано —              цепочка оставлена как есть: {}",
+            "объединение копий в зашифрованной цепочке ещё не поддержано — цепочка \
+оставлена как есть: {}",
             path.display()
         ))),
         other => Err(OwnBackupError::ImageFormat(format!(

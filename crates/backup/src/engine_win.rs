@@ -1322,13 +1322,33 @@ fn backup_volume_inner(
         && !req.all_sectors
         && detected_fs.as_deref() == Some("NTFS");
 
+    // Deleting the excluded files' catalog entries means mounting the finished
+    // image read-write and letting the filesystem driver do it — through a
+    // scratch layer, and then folding the changed clusters back in. For an
+    // encrypted image the scratch is sealed now, but the fold is not: the
+    // container is written once, so putting changed clusters back means
+    // re-emitting its index and metadata tail. Until that exists the run is
+    // refused rather than shipped with the excluded files' names and sizes
+    // still in the image's catalog — §4 calls ghost entries a fallback, and an
+    // encrypted copy is where the user asked for more than a fallback.
+    if !removal_paths.is_empty() && req.encryption.is_some() {
+        return Err(OwnBackupError::Encryption(format!(
+            "файловые исключения в зашифрованной копии ещё не поддержаны ({} правил \
+совпало): удаление записей из каталога образа требует пересборки шифрованного \
+контейнера. Копия не создавалась.",
+            removal_paths.len()
+        )));
+    }
+
     if in_image_exclusions && req.encryption.is_some() {
         // The fallback pass mounts the finished image and deletes inside it,
         // through a plaintext scratch layer. For an encrypted image that layer
         // must be encrypted too (§7.4), and it is not yet. Skipping the pass
         // instead would ship a copy that quietly kept the excluded files.
         return Err(OwnBackupError::Encryption(
-            "исключения в зашифрованной копии этого источника ещё не поддержаны:              файлы пришлось бы удалять уже внутри образа, а временный слой для              этого пока не шифруется. Копия не создавалась."
+            "исключения в зашифрованной копии этого источника ещё не поддержаны: файлы \
+пришлось бы удалять уже внутри образа, а временный слой для этого пока не шифруется. \
+Копия не создавалась."
                 .into(),
         ));
     }
@@ -4860,7 +4880,8 @@ fn mount_obk_via_iscsi(
     })?;
     if read_write {
         return Err(OwnBackupError::Encryption(
-            "зашифрованную копию можно открыть только для чтения: для записи нужен              шифрованный временный слой, которого пока нет"
+            "зашифрованную копию можно открыть только для чтения: для записи нужна \
+пересборка шифрованного контейнера, которой пока нет"
                 .into(),
         ));
     }

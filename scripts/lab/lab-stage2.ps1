@@ -117,6 +117,17 @@ try {
     } else {
         Say 'MISSING'
     }
+
+    # The encrypted backup path, when the media carries its probe. It is a
+    # separate script so a change to it means rebuilding the answer CD, not
+    # reinstalling Windows.
+    if (Test-Path -LiteralPath 'C:\Lab\lab-obk.ps1') {
+        try {
+            & 'C:\Lab\lab-obk.ps1'
+        } catch {
+            Say "LAB-OBK-CRASH $($_.Exception.Message)"
+        }
+    }
 } catch {
     Say "LAB-STAGE2-CRASH $($_.Exception.Message)"
 } finally {

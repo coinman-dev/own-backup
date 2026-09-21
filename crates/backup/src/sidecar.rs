@@ -688,7 +688,8 @@ fn open_meta_partition(image_path: &Path, container_format: &str) -> Result<(Gue
         // the caller needs a key, not a different file.
         "obk" => {
             return Err(OwnBackupError::Encryption(format!(
-                "{}: копия зашифрована — её сведения запечатаны внутри образа,                  нужен пароль или ключ восстановления",
+                "{}: копия зашифрована — её сведения запечатаны внутри образа, \
+нужен пароль или ключ восстановления",
                 image_path.display()
             )))
         }
