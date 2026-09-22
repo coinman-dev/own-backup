@@ -84,9 +84,20 @@ const ALG_AES_XTS_256: u16 = 0x8005;
 /// отправить человека перенабирать то, что он ввёл верно.
 const WRONG_PASSPHRASE: &str = "CCM authentication failed (wrong passphrase?)";
 
+/// То же самое уровнем выше: парольные VMK перебрали все, и ни один тег не
+/// сошёлся.
+///
+/// Именно эта форма и выходит наружу: цикл по VMK отбрасывает ошибку каждой
+/// отдельной попытки (`if let Ok(k)`), так что [`WRONG_PASSPHRASE`] до
+/// вызывающего не доезжает никогда. Пока здесь стоял только он,
+/// [`is_wrong_passphrase`] для BitLocker не срабатывал ни разу — живой прогон
+/// 2026-09-22 это и показал.
+const WRONG_PASSPHRASE_TRIED_ALL: &str = "ни один парольный VMK им не открылся";
+
 /// Значит ли эта ошибка, что пароль не тот.
 pub fn is_wrong_passphrase(e: &OwnBackupError) -> bool {
-    e.to_string().contains(WRONG_PASSPHRASE)
+    let text = e.to_string();
+    text.contains(WRONG_PASSPHRASE) || text.contains(WRONG_PASSPHRASE_TRIED_ALL)
 }
 
 /// VMK key-protection type for a user passphrase.
@@ -119,6 +130,20 @@ const STRETCH_ITERATIONS: u32 = 0x0010_0000;
 
 fn bad(msg: impl std::fmt::Display) -> OwnBackupError {
     OwnBackupError::Device(format!("bitlocker: {msg}"))
+}
+
+/// The one thing "wrong password" is allowed to mean: no password VMK opened,
+/// which is an AES-CCM tag mismatch and nothing else.
+///
+/// Its own constructor because the CATEGORY was wrong, not the text. Said
+/// through [`bad`] it came out as «Device I/O error: …», so a person who
+/// mistyped their passphrase was told the disk had an input/output problem —
+/// and that is the one reading this message must never invite. The
+/// classification was already right; only the label lied.
+fn wrong_passphrase() -> OwnBackupError {
+    OwnBackupError::Encryption(format!(
+        "bitlocker: пароль не подходит к этому тому — {WRONG_PASSPHRASE_TRIED_ALL}"
+    ))
 }
 
 fn u16at(b: &[u8], o: usize) -> u64 {
@@ -881,6 +906,12 @@ fn unlock_from_metadata(
     // the two the input is.
     let recovery = parse_recovery_key(password).ok();
     let mut vmk: Option<Zeroizing<Vec<u8>>> = None;
+    // How many protectors of the asked-for kind this volume actually has. NONE
+    // is a different answer from "none of them opened", and conflating the two
+    // is the mistake this file is built around avoiding: a TPM-only volume
+    // would be reported as a mistyped password, sending someone to retype what
+    // they typed correctly.
+    let mut of_that_kind = 0usize;
     for d in datums(entries) {
         if d.entry_type != 0x0002 || d.value_type != DATUM_VMK || d.data.len() < 28 {
             continue;
@@ -892,6 +923,7 @@ fn unlock_from_metadata(
         if protection != wanted {
             continue;
         }
+        of_that_kind += 1;
         let nested = &d.data[0x1C..];
 
         // Salt from a stretch-key datum, wrapped VMK from an AES-CCM datum —
@@ -942,7 +974,20 @@ fn unlock_from_metadata(
             break;
         }
     }
-    let vmk = vmk.ok_or_else(|| bad("passphrase did not unlock any password VMK"))?;
+    let vmk = match vmk {
+        Some(v) => v,
+        // Nothing of that kind to try: not a password problem, and it must not
+        // be answered as one. Windows may still open the volume its own way.
+        None if of_that_kind == 0 => {
+            return Err(bad(format!(
+                "у тома нет защитника «{}» — этим способом его не открыть",
+                if recovery.is_some() { "ключ восстановления" } else { "пароль" }
+            )))
+        }
+        // Tried them all and every AES-CCM tag failed. That IS the one thing
+        // "wrong password" may mean.
+        None => return Err(wrong_passphrase()),
+    };
 
     // --- Recover the FVEK: the top-level AES-CCM datum, unwrapped with the VMK ---
     let mut fvek_ccm = Vec::new();
@@ -1827,5 +1872,34 @@ mod tests {
         let info = inspect_bitlocker(&mut volume_with_protectors(&[0x0100, 0x0500])).unwrap();
         assert!(!info.openable());
         assert!(info.protectors.iter().all(|p| !p.usable));
+    }
+
+    /// «Пароль не подошёл» и «пароля тут вообще нет» — разные ответы, и путать
+    /// их нельзя ни в ту, ни в другую сторону.
+    ///
+    /// Первое отправляет человека перенабрать пароль, второе — искать другой
+    /// способ входа. До 2026-09-22 классификатор искал текст ошибки AES-CCM,
+    /// которая наружу не выходит вовсе: её отбрасывает цикл перебора VMK. Для
+    /// BitLocker он поэтому не срабатывал ни разу, и живой прогон это показал.
+    #[test]
+    fn a_refused_passphrase_is_told_apart_from_a_volume_that_has_none() {
+        let refused = wrong_passphrase();
+        assert!(
+            is_wrong_passphrase(&refused),
+            "перебрали все парольные VMK и ни один не открылся — это и есть «не тот пароль»: {refused}"
+        );
+        assert!(
+            matches!(refused, OwnBackupError::Encryption(_)),
+            "и это не ошибка ввода-вывода: {refused}"
+        );
+
+        // Ни одного защитника нужного вида: про пароль это не говорит ничего.
+        let none_of_that_kind = bad("у тома нет защитника «пароль» — этим способом его не открыть");
+        assert!(!is_wrong_passphrase(&none_of_that_kind), "{none_of_that_kind}");
+
+        // И прежняя, внутренняя форма по-прежнему опознаётся.
+        assert!(is_wrong_passphrase(&bad(WRONG_PASSPHRASE)));
+        // А посторонний отказ — нет.
+        assert!(!is_wrong_passphrase(&bad("шифр вне AES-XTS")));
     }
 }

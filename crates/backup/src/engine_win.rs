@@ -4055,6 +4055,16 @@ pub fn restore_volume(
 
     let target = normalize_device_path(&req.target);
     let mut target_dev = WinRawDevice::open_write(&target)?;
+    // Nothing may hold the target's sectors while they are overwritten. Windows
+    // refuses a raw write into a MOUNTED volume outright — `WriteFile(\\.\H:)
+    // ... 0x80070005` at offset 0, before a single block — so a restore onto an
+    // ordinary target failed for the ordinary reason that it was mounted. The
+    // whole-disk road has always taken its volumes down (`TargetWriter`); this
+    // one, the simplest operation there is, never did.
+    //
+    // After the open and on the SAME handle: the lock belongs to the handle
+    // that holds it, and taking it on another one only locks this writer out.
+    target_dev.lock_and_dismount();
     if target_dev.length() < volume_len {
         return Err(OwnBackupError::RestoreIncompatible(format!(
             "target {} is {} bytes, smaller than the backed-up volume ({} bytes)",

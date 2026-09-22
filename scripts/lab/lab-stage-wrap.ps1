@@ -18,7 +18,9 @@ function SayW {
     } catch { }
 }
 
-$script = 'C:\Lab\lab-restore-obk.ps1'
+# Whatever task was staged onto the media disk this run. One name, so the
+# wrapper does not have to know which phase is being driven.
+$script = 'C:\Lab\lab-task.ps1'
 SayW "LAB-WRAP-BEGIN $script"
 try {
     if (-not (Test-Path -LiteralPath $script)) { throw "script not found: $script" }

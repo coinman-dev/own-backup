@@ -28,7 +28,7 @@
 #![cfg(target_os = "windows")]
 
 use own_backup_common::{OwnBackupError, Result};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_INVALID_FUNCTION, ERROR_NOT_ALL_ASSIGNED, HANDLE, LUID,
@@ -589,12 +589,52 @@ pub fn plan_import(backup: &crate::efivars::BootBackup) -> Result<Vec<(String, C
 /// Only what differs is written. A firmware's variable store has a limited
 /// number of write cycles and a limited size, and rewriting a dozen identical
 /// variables to report a bigger number would be spending both for nothing.
+/// The partition this entry points at, when it points at one by GUID.
+///
+/// `None` for anything else — an entry that names a device some other way, or
+/// no device at all (`BootOrder`, `Timeout`). Those are written back as before:
+/// the check below only refuses what it can positively show is missing.
+fn entry_partition_guid(v: &crate::efivars::SavedVar) -> Option<String> {
+    let bytes = v.bytes().ok()?;
+    crate::efivars::LoadOption::parse(&bytes)
+        .ok()?
+        .hard_drive()?
+        .partition_guid()
+        .map(|g| g.to_uppercase())
+}
+
+/// Every GPT partition GUID this machine currently has.
+///
+/// An EMPTY set means "could not be determined", and the caller treats it as
+/// such — writing nothing back because no disk answered would be worse than the
+/// problem being solved. Disk numbers are probed rather than enumerated: this
+/// runs on boot media too, where an inventory service may not be there at all.
+fn partition_guids_on_this_machine() -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for disk in 0u32..32 {
+        let Ok(layout) = crate::gpt_reader::read_disk_layout(disk) else {
+            continue;
+        };
+        for p in &layout.partitions {
+            if !p.part_guid.is_empty() {
+                out.insert(p.part_guid.to_uppercase());
+            }
+        }
+    }
+    if out.is_empty() {
+        warn!("efivars: no GPT partition could be read on this machine — orphan check skipped");
+    }
+    out
+}
+
 pub fn apply_import(backup: &crate::efivars::BootBackup) -> Result<usize> {
     if !enable_privilege()? {
         return Err(dev("нет привилегии SeSystemEnvironmentPrivilege — нужны права администратора"));
     }
     let plan = plan_import(backup)?;
+    let here = partition_guids_on_this_machine();
     let mut written = 0;
+    let mut orphaned: Vec<String> = Vec::new();
     // BootOrder last: until the entries it names exist, it points at nothing.
     // The firmware tolerates that, but a machine interrupted mid-restore should
     // be left with entries and a stale order rather than an order and no
@@ -614,6 +654,20 @@ pub fn apply_import(backup: &crate::efivars::BootBackup) -> Result<usize> {
             debug!(variable = %v.name, "efivars: removable-device entry not written back");
             continue;
         }
+        // An entry names its partition by GUID. On a machine that does not have
+        // that partition the firmware does NOT simply show a dead menu item: it
+        // tries to boot it, fails to find the partition, and then looks for a
+        // file of the same name on any device it can see. The names there are
+        // `bootx64.efi`, so the machine starts booting off whatever stick
+        // happens to be plugged in (seen 2026-09-20: five orphaned entries
+        // walked the boot past the chosen device). Warning about it in text was
+        // not enough — this refuses to write it.
+        if let Some(guid) = entry_partition_guid(v) {
+            if !here.is_empty() && !here.contains(&guid) {
+                orphaned.push(format!("{} → раздел {guid}", v.name));
+                continue;
+            }
+        }
         if plan.iter().any(|(n, c)| n == &v.name && *c == Change::Same) {
             continue;
         }
@@ -628,10 +682,18 @@ pub fn apply_import(backup: &crate::efivars::BootBackup) -> Result<usize> {
     }
     let offered =
         backup.variables.iter().filter(|v| !crate::efivars::names_removable_device(v)).count();
+    if !orphaned.is_empty() {
+        warn!(
+            skipped = orphaned.len(),
+            entries = %orphaned.join("; "),
+            "efivars: entries naming partitions this machine does not have were NOT written back"
+        );
+    }
     info!(
         written,
         of = offered,
         skipped_removable = backup.variables.len() - offered,
+        skipped_orphaned = orphaned.len(),
         "efivars: boot configuration restored"
     );
     Ok(written)

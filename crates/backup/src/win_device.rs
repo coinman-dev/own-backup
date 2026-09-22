@@ -18,6 +18,7 @@ use windows::Win32::Storage::FileSystem::{
     OPEN_EXISTING,
 };
 use windows::Win32::System::Ioctl::{
+    FSCTL_DISMOUNT_VOLUME, FSCTL_LOCK_VOLUME,
     DISK_ATTRIBUTE_OFFLINE, DISK_ATTRIBUTE_READ_ONLY, DISK_GEOMETRY, GET_DISK_ATTRIBUTES,
     GET_LENGTH_INFORMATION, IOCTL_DISK_GET_DISK_ATTRIBUTES, IOCTL_DISK_GET_DRIVE_GEOMETRY,
     IOCTL_DISK_GET_LENGTH_INFO, IOCTL_DISK_SET_DISK_ATTRIBUTES, IOCTL_DISK_UPDATE_PROPERTIES,
@@ -186,6 +187,58 @@ impl WinRawDevice {
     /// Open a device for writing (restore target, attached VHDX for backup).
     pub fn open_write(device_path: &str) -> Result<Self> {
         Self::open(device_path, true)
+    }
+
+    /// Take exclusive ownership of a mounted volume so its sectors can be
+    /// overwritten, **on this handle**.
+    ///
+    /// That last part is the whole design: `FSCTL_LOCK_VOLUME` grants exclusive
+    /// access to the handle it was issued on, and every other open of the same
+    /// volume is then refused. Locking through a separate handle and writing
+    /// through this one does not work — it locks the writer out, which is
+    /// exactly what a first attempt at this did (`CreateFileW(\\.\H:)` →
+    /// `0x80070005`, one error along from the `WriteFile` it replaced).
+    ///
+    /// `false` means Windows would not hand the volume over; the caller can
+    /// still try to write and will get the device's own refusal. Locking is
+    /// pointless for a `part:` window — that handle is the physical drive, and
+    /// the volumes in the way are taken down by the caller.
+    pub fn lock_and_dismount(&self) -> bool {
+        if self.base_offset != 0 {
+            return false;
+        }
+        let mut returned = 0u32;
+        // SAFETY: our own handle; both FSCTLs take and return nothing.
+        let locked = unsafe {
+            DeviceIoControl(
+                self.handle,
+                FSCTL_LOCK_VOLUME,
+                None,
+                0,
+                None,
+                0,
+                Some(&mut returned),
+                None,
+            )
+        }
+        .is_ok();
+        // Dismount even when the lock was refused: it is what makes the
+        // filesystem let go, and it is allowed on an unlocked handle too.
+        let dismounted = unsafe {
+            DeviceIoControl(
+                self.handle,
+                FSCTL_DISMOUNT_VOLUME,
+                None,
+                0,
+                None,
+                0,
+                Some(&mut returned),
+                None,
+            )
+        }
+        .is_ok();
+        tracing::info!(device = %self.path, locked, dismounted, "raw device: volume taken over for writing");
+        locked || dismounted
     }
 
     fn open(device_path: &str, writable: bool) -> Result<Self> {
