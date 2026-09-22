@@ -5,7 +5,8 @@
   // `api.applyRestorePlan`, below, after the dry run has passed with no errors
   // and the user has typed a confirmation.
   import {
-    engine, cancelCurrent, clearRestoreResult, refreshVolumes, restoreClock, restoreEtaMs,
+    archiveSecretFor, engine, cancelCurrent, clearRestoreResult, refreshVolumes,
+    restoreClock, restoreEtaMs,
   } from '../lib/engineStore.svelte';
   import { listen } from '@tauri-apps/api/event';
   import { jobs } from '../lib/jobStore.svelte';
@@ -49,7 +50,9 @@
       return;
     }
     let cancelled = false;
-    api.readImageInfo(path).then(
+    // The key for an encrypted copy was collected when it was added; the
+    // designer reads the copy several times and must not ask again.
+    api.readImageInfo(path, archiveSecretFor(path)).then(
       (info) => { if (!cancelled) imageInfo = info; },
       () => { if (!cancelled) imageInfo = null; },
     );
@@ -1572,6 +1575,7 @@
       planRun = await api.applyRestorePlan(
         { ...checkedPlan, verify_after: verifyAfter },
         passphrases,
+        archiveSecretFor(checkedPlan.image_path),
       );
     } catch (e) {
       applyError = String(e);

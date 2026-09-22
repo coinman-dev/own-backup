@@ -218,14 +218,17 @@ pub fn initial_state(plan: &RestorePlan) -> RestoreRunState {
 /// never starting at all (a refused target, an unreadable image), where there
 /// is nothing to report because nothing happened.
 #[cfg(target_os = "windows")]
+/// `archive` carries the keys of an ENCRYPTED copy, from what the person
+/// typed. A manual restore never borrows the service's own key (§7.4).
 pub fn execute_plan(
     plan: &RestorePlan,
     passphrases: &std::collections::HashMap<u32, String>,
+    archive: Option<&own_backup_backup::seal::context::ArchiveKeys>,
     cancel: &CancelToken,
     mut on_update: impl FnMut(&RestoreRunState),
 ) -> Result<RestoreRunState> {
     use own_backup_backup::disk_session_win::DiskSession;
-    use own_backup_backup::engine_win::load_sidecar_of;
+    use own_backup_backup::engine_win::load_sidecar_with_keys;
 
     // The running system's own partitions are refused here too, not only in the
     // checks: a plan can reach the service by a route that skipped the dry run.
@@ -306,7 +309,7 @@ pub fn execute_plan(
     }
     let live_system = system_disk == Some(plan.target_disk) && !boot_media;
 
-    let sidecar = load_sidecar_of(&plan.image_path)?;
+    let sidecar = load_sidecar_with_keys(&plan.image_path, archive)?;
     info!(
         image = %plan.image_path.display(),
         // Which build wrote this copy — the first thing worth knowing when a
@@ -375,6 +378,7 @@ pub fn execute_plan(
                     &sidecar,
                     &ordered,
                     passphrases,
+                    archive,
                     VerifyPhase::Sectors,
                     !held_offline,
                     &mut state,
@@ -402,7 +406,7 @@ pub fn execute_plan(
             op.title()
         );
 
-        let outcome = run_op(op, plan, &sidecar, passphrases, session.as_mut(), cancel, &mut |percent, bytes| {
+        let outcome = run_op(op, plan, &sidecar, passphrases, archive, session.as_mut(), cancel, &mut |percent, bytes| {
             state.ops[index].percent = percent;
             state.ops[index].bytes_done = bytes;
             on_update(&state);
@@ -443,6 +447,7 @@ pub fn execute_plan(
             &sidecar,
             &ordered,
             passphrases,
+            archive,
             VerifyPhase::Sectors,
             !held_offline,
             &mut state,
@@ -467,6 +472,7 @@ pub fn execute_plan(
             &sidecar,
             &ordered,
             passphrases,
+            archive,
             VerifyPhase::Files,
             true,
             &mut state,
@@ -518,6 +524,7 @@ fn run_verification(
     sidecar: &own_backup_backup::sidecar::Sidecar,
     ordered: &[RestoreOp],
     passphrases: &std::collections::HashMap<u32, String>,
+    archive: Option<&own_backup_backup::seal::context::ArchiveKeys>,
     phase: VerifyPhase,
     // Could anything have written to these partitions after the copy landed?
     // True only when the disk was never ours to hold offline — a live system
@@ -567,7 +574,7 @@ fn run_verification(
         on_update(state);
 
         if *mode == RestoreMode::Files {
-            verify_files(plan, sidecar, *src_index, dst.index, dst.offset, index, state);
+            verify_files(plan, sidecar, archive, *src_index, dst.index, dst.offset, index, state);
             on_update(state);
             continue;
         }
@@ -610,6 +617,7 @@ fn run_verification(
         }
         let result = verify_partition_sectors(
             &plan.image_path,
+            archive,
             sidecar,
             *src_index,
             target,
@@ -905,9 +913,13 @@ fn identities_in_use(except_disk: u32) -> IdentitiesInUse {
 /// copy failures are already reported by the restore operation itself; this is
 /// the independent second look.
 #[cfg(target_os = "windows")]
+// Eight: the plan, what the image says about itself, the key that opens it,
+// which partition on each side, and where to put the answer.
+#[allow(clippy::too_many_arguments)]
 fn verify_files(
     plan: &RestorePlan,
     sidecar: &own_backup_backup::sidecar::Sidecar,
+    archive: Option<&own_backup_backup::seal::context::ArchiveKeys>,
     src_index: u32,
     dst_index: u32,
     dst_offset: u64,
@@ -925,7 +937,7 @@ fn verify_files(
     };
 
     let quiet = CancelToken::default();
-    let image = match MountedImage::open(&plan.image_path) {
+    let image = match MountedImage::open(&plan.image_path, archive) {
         Ok(i) => i,
         Err(e) => return fail(state, format!("не удалось подключить копию для сверки: {e}")),
     };
@@ -1022,6 +1034,7 @@ fn run_op(
     // Kept out of the plan on purpose: the plan is persisted to the restore
     // history, and a password on disk in the clear is not a trade worth making.
     passphrases: &std::collections::HashMap<u32, String>,
+    archive: Option<&own_backup_backup::seal::context::ArchiveKeys>,
     session: Option<&mut own_backup_backup::disk_session_win::DiskSession>,
     cancel: &CancelToken,
     on_progress: &mut dyn FnMut(u32, u64),
@@ -1173,6 +1186,7 @@ fn run_op(
                 })?;
                 restore_partition_encrypted(
                     &plan.image_path,
+                    archive,
                     sidecar,
                     *src_index,
                     target,
@@ -1187,6 +1201,7 @@ fn run_op(
             } else {
                 restore_partition_sectors(
                     &plan.image_path,
+                    archive,
                     sidecar,
                     *src_index,
                     target,
@@ -1217,7 +1232,7 @@ fn run_op(
             // The copy is read through a read-only mount of the image, so the
             // filesystem driver does the reading and every file's metadata
             // comes along. Detached when `image` drops, including on failure.
-            let image = MountedImage::open(&plan.image_path)?;
+            let image = MountedImage::open(&plan.image_path, archive)?;
             let src_root = image.volume_root_of(sidecar, *src_index)?;
             let dst_root = volume_root_at_offset(plan.target_disk, dst.offset).ok_or_else(|| {
                 OwnBackupError::Device(format!(
@@ -1587,6 +1602,7 @@ fn add_failure_follow_ups(state: &mut RestoreRunState) {
 pub fn execute_plan(
     plan: &RestorePlan,
     _passphrases: &std::collections::HashMap<u32, String>,
+    _archive: Option<&own_backup_backup::seal::context::ArchiveKeys>,
     _cancel: &CancelToken,
     mut on_update: impl FnMut(&RestoreRunState),
 ) -> Result<RestoreRunState> {

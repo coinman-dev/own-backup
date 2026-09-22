@@ -228,8 +228,43 @@ pub struct BootEntryDto {
 /// `read_image_info` (single file) and `list_image_backups` (folder scan).
 /// Load an image's sidecar: embedded first, the adjacent `.obkm` as a fallback
 /// for images written before the sidecar moved inside the container.
-fn load_sidecar(path: &std::path::Path) -> Result<own_backup_backup::Sidecar, String> {
+/// The keys for an encrypted copy, from what the person typed. Never the
+/// service's own (§7.4) — this runs in the unelevated interface, which has no
+/// access to that store at all.
+fn archive_keys(
+    path: &std::path::Path,
+    secret: &own_backup_client::ArchiveSecret,
+) -> Result<own_backup_backup::seal::context::ArchiveKeys, String> {
+    use own_backup_backup::seal::context::ArchiveKeys;
+    use own_backup_backup::seal::recovery::RecoveryKey;
+
+    if let Some(password) = secret.password.as_ref().filter(|p| !p.is_empty()) {
+        return ArchiveKeys::from_image_password(path, password).map_err(|e| e.to_string());
+    }
+    if let Some(typed) = secret.recovery_key.as_ref().filter(|k| !k.trim().is_empty()) {
+        let key = RecoveryKey::parse(typed).map_err(|e| e.to_string())?;
+        return ArchiveKeys::from_image_recovery(path, &key).map_err(|e| e.to_string());
+    }
+    Err(format!(
+        "{}: копия зашифрована — нужен пароль или ключ восстановления",
+        path.display()
+    ))
+}
+
+fn load_sidecar(
+    path: &std::path::Path,
+    secret: &own_backup_client::ArchiveSecret,
+) -> Result<own_backup_backup::Sidecar, String> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_lowercase();
+    // An encrypted copy keeps everything this screen shows — the disk layout,
+    // the partitions, the sizes — inside the sealed half. Without the key there
+    // is nothing here to read, so the key comes in with the request.
+    if ext == own_backup_backup::seal::obk::OBK_EXTENSION {
+        let keys = archive_keys(path, secret)?;
+        let chain = keys.open_chain_of(path).map_err(|e| e.to_string())?;
+        return own_backup_backup::sidecar::read_sealed_sidecar(path, &chain.key)
+            .map_err(|e| e.to_string());
+    }
     match own_backup_backup::read_embedded_sidecar(path, &ext) {
         Ok(s) => Ok(s),
         Err(_) => {
@@ -245,8 +280,11 @@ fn load_sidecar(path: &std::path::Path) -> Result<own_backup_backup::Sidecar, St
     }
 }
 
-fn read_image_info_at(path: &std::path::Path) -> Result<ImageInfoDto, String> {
-    let sidecar = load_sidecar(path)?;
+fn read_image_info_at(
+    path: &std::path::Path,
+    secret: &own_backup_client::ArchiveSecret,
+) -> Result<ImageInfoDto, String> {
+    let sidecar = load_sidecar(path, secret)?;
 
     // Derived (compute before moving fields out of the sidecar): the archived
     // disk snapshot and which of its partitions are in this backup — whole-disk
@@ -411,8 +449,15 @@ fn read_image_info_at(path: &std::path::Path) -> Result<ImageInfoDto, String> {
 }
 
 #[tauri::command]
-pub async fn read_image_info(image_path: String) -> Result<ImageInfoDto, String> {
-    read_image_info_at(&std::path::PathBuf::from(&image_path))
+pub async fn read_image_info(
+    image_path: String,
+    password: Option<String>,
+    recovery_key: Option<String>,
+) -> Result<ImageInfoDto, String> {
+    read_image_info_at(
+        &std::path::PathBuf::from(&image_path),
+        &secret_of(password, recovery_key),
+    )
 }
 
 /// Scan `folder` for backup IMAGES (per-volume AND whole-disk) and return each
@@ -434,10 +479,13 @@ pub async fn list_image_backups(folder: String) -> Result<Vec<ImageInfoDto>, Str
             .and_then(|e| e.to_str())
             .unwrap_or_default()
             .to_lowercase();
+        // `.obk` is deliberately absent: a folder scan has no key, and
+        // everything this listing shows about a copy is sealed inside it.
+        // The screen adds an encrypted copy one at a time, asking then.
         if !matches!(ext.as_str(), "vhdx" | "avhdx" | "qcow2") {
             continue;
         }
-        if let Ok(info) = read_image_info_at(&path) {
+        if let Ok(info) = read_image_info_at(&path, &own_backup_client::ArchiveSecret::none()) {
             out.push(info);
         }
     }
@@ -695,12 +743,20 @@ pub async fn apply_restore_plan(
     state: State<'_, GuiState>,
     plan: RestorePlan,
     passphrases: Option<std::collections::HashMap<u32, String>>,
+    // What opens the COPY, when it is encrypted. A different thing from
+    // `passphrases`, which put a source volume's own container back.
+    password: Option<String>,
+    recovery_key: Option<String>,
 ) -> Result<RestoreRunState, String> {
     state
         .link
         .client()
         .await?
-        .apply_restore_plan(&plan, &passphrases.unwrap_or_default())
+        .apply_restore_plan(
+            &plan,
+            &passphrases.unwrap_or_default(),
+            &secret_of(password, recovery_key),
+        )
         .await
 }
 
@@ -751,7 +807,10 @@ pub async fn verify_luks_password(
     password: String,
 ) -> Result<bool, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let sidecar = load_sidecar(std::path::Path::new(&image_path))?;
+        let sidecar = load_sidecar(
+            std::path::Path::new(&image_path),
+            &own_backup_client::ArchiveSecret::none(),
+        )?;
         let headers = &sidecar.info.luks_headers;
         // A per-volume image records index 0 — there was nothing to
         // disambiguate at backup time — so its lone entry answers for whichever

@@ -224,13 +224,38 @@ pub fn source_window_for(sidecar: &Sidecar, src_index: u32) -> Result<SourceWind
     Ok(SourceWindow::partition(p.first_lba, p.last_lba, dm.layout.sector_size))
 }
 
+/// The chain key for an encrypted image, from the job/manual keys the caller
+/// holds. `None` for every other container, which needs none.
+///
+/// Resolved per image because the wrapped chain key travels inside the image
+/// itself — that is what lets a copy be opened on a machine that has never
+/// seen the job.
+fn chain_key_of(
+    image_path: &Path,
+    keys: Option<&crate::seal::context::ArchiveKeys>,
+) -> Result<Option<crate::seal::ChainKey>> {
+    match keys {
+        Some(k) if crate::sidecar::detect_container_format(image_path).ok()
+            == Some(crate::seal::obk::OBK_EXTENSION) =>
+        {
+            Ok(Some(k.open_chain_of(image_path)?.key))
+        }
+        _ => Ok(None),
+    }
+}
+
 /// Copy one partition's stored blocks from `image_path` into `target`.
 ///
 /// DESTRUCTIVE. The caller is responsible for the confirmation, for the
 /// system-disk guard, and — when the plan rewrites the partition table — for
 /// having taken the disk offline first.
+// Eight: the image and its key, what to read out of it, where to put it,
+// and how to report. Bundling them into a struct would only move the
+// same list somewhere the caller has to fill in by hand.
+#[allow(clippy::too_many_arguments)]
 pub fn restore_partition_sectors(
     image_path: &Path,
+    keys: Option<&crate::seal::context::ArchiveKeys>,
     sidecar: &Sidecar,
     src_index: u32,
     target: PartitionTarget,
@@ -263,7 +288,9 @@ pub fn restore_partition_sectors(
             dev.sector_size()
         )));
     }
-    let mut image = ImageReadSource::open(image_path, &sidecar.info.container)?;
+    let chain_key = chain_key_of(image_path, keys)?;
+    let mut image =
+        ImageReadSource::open_with(image_path, &sidecar.info.container, chain_key.as_ref())?;
 
     let total = sidecar.checksums.len() as u64;
     let mut blocks_restored = 0u64;
@@ -475,8 +502,13 @@ impl VerifySummary {
 /// them with the copy's plaintext reports every single block as wrong. That is
 /// what it did — 12691 mismatches out of 12691 blocks on a partition whose
 /// restored system booted perfectly.
+// Eight: the image and its key, what to read out of it, where to put it,
+// and how to report. Bundling them into a struct would only move the
+// same list somewhere the caller has to fill in by hand.
+#[allow(clippy::too_many_arguments)]
 pub fn verify_partition_sectors(
     image_path: &Path,
+    keys: Option<&crate::seal::context::ArchiveKeys>,
     sidecar: &Sidecar,
     src_index: u32,
     target: PartitionTarget,
@@ -492,7 +524,9 @@ pub fn verify_partition_sectors(
 
     let device_path = target.device_path();
     let mut dev = WinRawDevice::open_read(&device_path)?;
-    let mut image = ImageReadSource::open(image_path, &sidecar.info.container)?;
+    let chain_key = chain_key_of(image_path, keys)?;
+    let mut image =
+        ImageReadSource::open_with(image_path, &sidecar.info.container, chain_key.as_ref())?;
 
     let mut out = VerifySummary::default();
     let total = sidecar.checksums.len() as u64;
@@ -568,8 +602,11 @@ pub struct MountedImage {
 
 impl MountedImage {
     /// Attach `image_path` read-only.
-    pub fn open(image_path: &Path) -> Result<Self> {
-        let physical_path = crate::engine_win::mount_image(image_path, false)?;
+    pub fn open(
+        image_path: &Path,
+        keys: Option<&crate::seal::context::ArchiveKeys>,
+    ) -> Result<Self> {
+        let physical_path = crate::engine_win::mount_image_with_keys(image_path, false, keys)?;
         info!(image = %image_path.display(), device = %physical_path, "image mounted for file restore");
         Ok(Self { path: image_path.to_path_buf(), physical_path })
     }
@@ -651,6 +688,7 @@ pub struct ReencryptRequest<'a> {
 /// tweak always comes from `payload_off`.
 pub fn restore_partition_encrypted(
     image_path: &Path,
+    keys: Option<&crate::seal::context::ArchiveKeys>,
     sidecar: &Sidecar,
     src_index: u32,
     target: PartitionTarget,
@@ -701,7 +739,9 @@ pub fn restore_partition_encrypted(
         )));
     }
 
-    let mut image = ImageReadSource::open(image_path, &sidecar.info.container)?;
+    let chain_key = chain_key_of(image_path, keys)?;
+    let mut image =
+        ImageReadSource::open_with(image_path, &sidecar.info.container, chain_key.as_ref())?;
     let total = sidecar.checksums.len() as u64;
     let mut covered: Vec<(u64, u64)> = Vec::new();
     let mut out = SectorRestoreSummary {

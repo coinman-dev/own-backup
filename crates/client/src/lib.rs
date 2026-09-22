@@ -626,12 +626,15 @@ impl BackupClient {
         &mut self,
         plan: &own_backup_common::restore_plan::RestorePlan,
         passphrases: &std::collections::HashMap<u32, String>,
+        secret: &ArchiveSecret,
     ) -> Result<own_backup_common::restore_state::RestoreRunState> {
-        let json = serde_json::to_string(&serde_json::json!({
+        let mut body = serde_json::json!({
             "plan": plan,
             "passphrases": passphrases,
-        }))
-        .map_err(|e| format!("serialize plan failed: {e}"))?;
+        });
+        secret.add_to(&mut body);
+        let json = serde_json::to_string(&body)
+            .map_err(|e| format!("serialize plan failed: {e}"))?;
         let reply = self
             .inner
             .apply_restore_plan(self.request(proto::JsonRequest { json }))

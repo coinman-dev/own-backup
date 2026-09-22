@@ -463,14 +463,23 @@ fn manual_keys(
 /// Deriving a key is seconds of Argon2id. Doing it while holding the single
 /// busy slot would make every mistyped password block the next backup for as
 /// long as it takes to fail.
-#[cfg(target_os = "windows")]
 async fn manual_keys_off_thread(
     image: std::path::PathBuf,
     secret: ManualSecret,
 ) -> Result<Option<own_backup_backup::seal::context::ArchiveKeys>, Status> {
-    tokio::task::spawn_blocking(move || manual_keys(&image, &secret))
-        .await
-        .map_err(|e| Status::internal(format!("key task panicked: {e}")))?
+    #[cfg(target_os = "windows")]
+    {
+        tokio::task::spawn_blocking(move || manual_keys(&image, &secret))
+            .await
+            .map_err(|e| Status::internal(format!("key task panicked: {e}")))?
+    }
+    // The engine itself is Windows-only, so nothing here can use a key anyway;
+    // the operation that follows refuses with its own message.
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (image, secret);
+        Ok(None)
+    }
 }
 
 /// Drive letters in use on this machine. A dry run needs them to resolve
@@ -1836,16 +1845,31 @@ impl BackupService for BackupServiceImpl {
             plan: RestorePlan,
             #[serde(default)]
             passphrases: std::collections::HashMap<u32, String>,
+            /// What opens the COPY, when it is encrypted. Different thing from
+            /// `passphrases`, which put a source volume's own container back.
+            #[serde(default, flatten)]
+            secret: ManualSecret,
         }
         let raw = req.into_inner().json;
         // A bare plan is still accepted — nothing needs a passphrase unless it
         // asks to put a container back.
-        let In { mut plan, passphrases } = serde_json::from_str::<In>(&raw)
+        let In {
+            mut plan,
+            passphrases,
+            secret,
+        } = serde_json::from_str::<In>(&raw)
             .or_else(|_| {
-                serde_json::from_str::<RestorePlan>(&raw)
-                    .map(|plan| In { plan, passphrases: Default::default() })
+                serde_json::from_str::<RestorePlan>(&raw).map(|plan| In {
+                    plan,
+                    passphrases: Default::default(),
+                    secret: Default::default(),
+                })
             })
             .map_err(|e| Status::invalid_argument(format!("bad plan JSON: {e}")))?;
+
+        // Before the machine is reserved: deriving the key is seconds, and a
+        // mistyped password must not hold the one slot the machine has.
+        let archive = manual_keys_off_thread(plan.image_path.clone(), secret).await?;
 
         // THE gate. `dry_run_restore_plan` checks a plan; `apply_restore_plan`
         // used to accept a different one and hand it straight to the executor
@@ -1890,18 +1914,25 @@ impl BackupService for BackupServiceImpl {
         let task = tokio::task::spawn_blocking(move || {
             let _slot = slot;
             let mut last_emit = std::time::Instant::now();
-            let outcome = own_backup_core::restore_exec::execute_plan(&plan, &passphrases, &cancel, |run| {
-                *state.restore_run.lock().unwrap() = Some(run.clone());
-                // Throttle the wire, never the stored state: the state is what
-                // a reconnecting window reads, and it must always be current.
-                if run.is_finished() || last_emit.elapsed().as_millis() >= 300 {
-                    last_emit = std::time::Instant::now();
-                    let _ = events.send(Event {
-                        kind: "restore-plan".into(),
-                        json: serde_json::to_string(run).unwrap_or_default(),
-                    });
-                }
-            });
+            let outcome = own_backup_core::restore_exec::execute_plan(
+                &plan,
+                &passphrases,
+                archive.as_ref(),
+                &cancel,
+                |run| {
+                    *state.restore_run.lock().unwrap() = Some(run.clone());
+                    // Throttle the wire, never the stored state: the state is
+                    // what a reconnecting window reads, and it must always be
+                    // current.
+                    if run.is_finished() || last_emit.elapsed().as_millis() >= 300 {
+                        last_emit = std::time::Instant::now();
+                        let _ = events.send(Event {
+                            kind: "restore-plan".into(),
+                            json: serde_json::to_string(run).unwrap_or_default(),
+                        });
+                    }
+                },
+            );
             // Persisted as soon as it ends: a service restart must not erase
             // the record of what was done to the disk (D5).
             if let Ok(final_state) = &outcome {

@@ -2,8 +2,10 @@
   import { pickPath } from '../lib/pickPath.svelte';
   import { jobs, jobStatus } from '../lib/jobStore.svelte';
   import { api } from '../lib/api';
+  import ArchiveUnlockModal from '../components/ArchiveUnlockModal.svelte';
+  import { needsArchiveKey, rememberArchiveSecret } from '../lib/engineStore.svelte';
   import RestoreDashboard from './RestoreDashboard.svelte';
-  import type { Job, ImageInfo } from '../lib/types';
+  import type { ArchiveSecret, Job, ImageInfo } from '../lib/types';
 
   // Copies added by hand via "+ Добавить копию": a backup file picked from disk,
   // read straight from its embedded metadata — no jobs.json needed (Boot-CD).
@@ -33,6 +35,9 @@
         const missing: string[] = [];
         for (const path of paths) {
           try {
+            // An encrypted copy needs a key nobody has typed yet: it drops
+            // out of the remembered list the same way a copy on an unplugged
+            // drive does, and comes back when it is added again.
             addEntry(makeJobFromInfo(await api.readImageInfo(path)));
           } catch {
             // Moved, deleted, or on a drive that is not plugged in. Dropped
@@ -154,36 +159,48 @@
       extensions: ['vhdx', 'avhdx', 'qcow2', 'obk'],
     });
     if (typeof picked !== 'string') return;
-    if (await encryptedNotice(picked)) return;
+    // Everything this screen shows about a copy — the disk layout, the
+    // partitions, the sizes — is sealed inside an encrypted one. So the key is
+    // asked for before the copy is added, not when a restore is already
+    // running, and it is remembered for the rest of the session.
+    if (await needsArchiveKey(picked)) {
+      unlock = { open: true, path: picked, busy: false, error: '' };
+      return;
+    }
     try {
-      const info = await api.readImageInfo(picked);
-      selectedId = addEntry(makeJobFromInfo(info));
-      await remember([info.image_path]);
+      await addImage(picked, undefined);
     } catch (e) {
       addError = String(e);
     }
   }
 
-  /** An encrypted copy cannot be described on this screen: everything it shows
-   *  — the disk layout, the partitions, the sizes — is sealed inside the
-   *  container and needs the key. Say that, rather than let the read fail with
-   *  a message about a missing sidecar.
-   *
-   *  Returns true when the copy was encrypted and the notice was shown. */
-  async function encryptedNotice(path: string): Promise<boolean> {
-    let info;
+  async function addImage(path: string, secret?: ArchiveSecret) {
+    const info = await api.readImageInfo(path, secret);
+    if (secret) rememberArchiveSecret(path, secret);
+    selectedId = addEntry(makeJobFromInfo(info));
+    await remember([info.image_path]);
+  }
+
+  /** The key dialog for a copy being added. */
+  let unlock = $state<{ open: boolean; path: string; busy: boolean; error: string }>({
+    open: false,
+    path: '',
+    busy: false,
+    error: '',
+  });
+
+  async function submitUnlock(secret: ArchiveSecret) {
+    unlock.busy = true;
+    unlock.error = '';
     try {
-      info = await api.inspectImage(path);
-    } catch {
-      return false; // not readable at all — let the ordinary path report it
+      await addImage(unlock.path, secret);
+      unlock = { open: false, path: '', busy: false, error: '' };
+    } catch (e) {
+      // Stay open: a wrong password is a thing to retype.
+      unlock.error = String(e);
+    } finally {
+      unlock.busy = false;
     }
-    if (!info.encrypted) return false;
-    addError =
-      'Копия зашифрована. Этот экран показывает разделы из сведений внутри образа, ' +
-      'а они запечатаны — восстановление зашифрованных копий отсюда пока не подключено. ' +
-      'Проверить копию и подключить её как диск можно в «Инструментах» (там спрашивается пароль), ' +
-      'а восстановить том — командой own-backup-cli restore.';
-    return true;
   }
 
   // "+ Добавить копию" → пользователь выбрал «Папка с копиями»: авто-скан.
@@ -225,6 +242,15 @@
       : 'var(--text-muted)';
   }
 </script>
+
+<ArchiveUnlockModal
+  open={unlock.open}
+  imageName={unlock.path.split(/[\\/]/).pop() ?? unlock.path}
+  busy={unlock.busy}
+  error={unlock.error}
+  onUnlock={submitUnlock}
+  onCancel={() => (unlock = { open: false, path: '', busy: false, error: '' })}
+/>
 
 <div class="restore-root">
 <div class="layout">

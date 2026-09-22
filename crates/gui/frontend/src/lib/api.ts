@@ -88,7 +88,8 @@ export const api = {
   mountBackup: (imagePath: string, readWrite?: boolean, secret?: ArchiveSecret) =>
     invoke<string>('mount_backup', { imagePath, readWrite, ...secretArgs(secret) }),
   unmountBackup: (imagePath: string) => invoke<void>('unmount_backup', { imagePath }),
-  readImageInfo: (imagePath: string) => invoke<ImageInfo>('read_image_info', { imagePath }),
+  readImageInfo: (imagePath: string, secret?: ArchiveSecret) =>
+    invoke<ImageInfo>('read_image_info', { imagePath, ...secretArgs(secret) }),
   /** What a copy is, WITHOUT any key. */
   inspectImage: (imagePath: string) =>
     invoke<ArchiveImageInfo>('inspect_backup_image', { imagePath }),
@@ -135,8 +136,16 @@ export const api = {
    *  SOURCE partition index to the password of the container being put back;
    *  they travel with the request, never inside the plan (which is persisted).
    *  Returns immediately — progress arrives as `restore-plan-progress`. */
-  applyRestorePlan: (plan: RestorePlan, passphrases?: Record<number, string>) =>
-    invoke<RestoreRunState>('apply_restore_plan', { plan, passphrases }),
+  applyRestorePlan: (
+    plan: RestorePlan,
+    passphrases?: Record<number, string>,
+    secret?: ArchiveSecret,
+  ) =>
+    invoke<RestoreRunState>('apply_restore_plan', {
+      plan,
+      passphrases,
+      ...secretArgs(secret),
+    }),
   /** The restore in progress, or the last one that finished. Survives closing
    *  and reopening the window, and a service restart. */
   getRestoreState: () => invoke<RestoreRunState | null>('get_restore_state'),

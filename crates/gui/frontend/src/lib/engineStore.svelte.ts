@@ -150,6 +150,32 @@ export function volumeLabel(device: string): string {
   return engine.volumes.find((v) => v.device === device)?.label ?? device;
 }
 
+/** What the person typed to open each encrypted copy, for this session only.
+ *
+ *  Deliberately in memory and nowhere else. The service will not remember a
+ *  password for manual work either (§7.4): the key it holds is for scheduled
+ *  COPIES, and handing data back is a separate decision made by whoever is at
+ *  the screen. Kept per image because the restore designer reads a copy several
+ *  times — describe it, plan against it, execute — and asking three times for
+ *  the same password would be a worse kind of security theatre.
+ */
+const archiveSecrets = new Map<string, ArchiveSecret>();
+
+const secretKey = (imagePath: string) => imagePath.toLowerCase();
+
+export function rememberArchiveSecret(imagePath: string, secret: ArchiveSecret): void {
+  archiveSecrets.set(secretKey(imagePath), secret);
+}
+
+export function archiveSecretFor(imagePath: string): ArchiveSecret | undefined {
+  return archiveSecrets.get(secretKey(imagePath));
+}
+
+/** Forget them all — for a "lock" action, or when the window is done. */
+export function forgetArchiveSecrets(): void {
+  archiveSecrets.clear();
+}
+
 /** Does this copy need a password before anything is done to it?
  *
  *  Asked BEFORE the operation, not after its refusal: a restore that gets far
