@@ -5491,30 +5491,9 @@ pub fn load_sidecar_with_keys(
     image_path: &Path,
     keys: Option<&crate::seal::context::ArchiveKeys>,
 ) -> Result<Sidecar> {
-    let ext = image_path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_lowercase();
-    if ext == crate::seal::obk::OBK_EXTENSION {
-        let keys = keys.ok_or_else(|| {
-            OwnBackupError::Encryption(format!(
-                "{}: копия зашифрована — чтобы её открыть, нужен пароль или ключ восстановления",
-                image_path.display()
-            ))
-        })?;
-        let chain = keys.open_chain_of(image_path)?;
-        return crate::sidecar::read_sealed_sidecar(image_path, &chain.key);
-    }
-    match read_embedded_sidecar(image_path, &ext) {
-        Ok(s) => Ok(s),
-        Err(e) => {
-            let sidecar_path = sidecar_path_for(image_path);
-            if !sidecar_path.exists() {
-                return Err(OwnBackupError::ImageFormat(format!(
-                    "embedded sidecar not found ({e}) and adjacent sidecar not found: {}",
-                    sidecar_path.display()
-                )));
-            }
-            read_sidecar(&sidecar_path)
-        }
-    }
+    // One reader for the whole product; this name stays because the Windows
+    // engine is full of callers of it.
+    crate::sidecar::read_sidecar_with_keys(image_path, keys)
 }
 
 fn get_diskpart_virtual_disks() -> Vec<(u32, String)> {

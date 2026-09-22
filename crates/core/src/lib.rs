@@ -45,8 +45,15 @@ struct VerifyRate {
 impl VerifyRate {
     /// `image` is read once for its block size — a verify of an image with a
     /// different block size must not be reported in someone else's units.
-    fn new(image: &std::path::Path) -> Self {
-        let block_bytes = own_backup_backup::sidecar::read_image_sidecar(image)
+    ///
+    /// With the key, when the copy is encrypted: read without one it fell back
+    /// to a default that happens to be right today, which is the kind of
+    /// correctness that stops being correct without anyone noticing.
+    fn new(
+        image: &std::path::Path,
+        keys: Option<&own_backup_backup::seal::context::ArchiveKeys>,
+    ) -> Self {
+        let block_bytes = own_backup_backup::sidecar::read_sidecar_with_keys(image, keys)
             .map(|s| s.manifest.block_size as u64)
             .unwrap_or(1024 * 1024);
         Self {
@@ -2202,7 +2209,7 @@ async fn perform_backup(
             if validate_after {
                 let mut v_permille = u64::MAX;
                 let mut v_emit = std::time::Instant::now();
-                let mut v_rate = VerifyRate::new(&image_for_verify);
+                let mut v_rate = VerifyRate::new(&image_for_verify, keys_for_verify.as_ref());
                 let verified = verify_image_with_keys(
                     &image_for_verify,
                     keys_for_verify.as_ref(),
@@ -2551,7 +2558,7 @@ async fn perform_disk_backup(
         if validate_after {
             let mut v_permille = u64::MAX;
             let mut v_emit = std::time::Instant::now();
-            let mut v_rate = VerifyRate::new(&image_for_verify);
+            let mut v_rate = VerifyRate::new(&image_for_verify, keys_for_verify.as_ref());
             let verified =
                 verify_image_with_keys(&image_for_verify, keys_for_verify.as_ref(), |done, total| {
                 if cancel_bg.swap(false, Ordering::SeqCst) {

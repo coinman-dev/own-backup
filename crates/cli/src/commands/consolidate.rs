@@ -19,19 +19,48 @@ pub struct ConsolidateArgs {
     pub dry_run: bool,
 }
 
+/// The first encrypted copy in the folder, or nothing when none is.
+///
+/// Its only job is to decide whether to ask for a password at all, and which
+/// file to unseal the envelope from. Every image of a chain carries the same
+/// portable key, so any of them will do.
+fn first_encrypted_image(folder: &std::path::Path) -> Option<std::path::PathBuf> {
+    let entries = std::fs::read_dir(folder).ok()?;
+    let mut found: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension().and_then(|e| e.to_str()).map(str::to_lowercase).as_deref()
+                == Some(own_backup_backup::seal::obk::OBK_EXTENSION)
+        })
+        .collect();
+    // Same order every run, so the prompt names the same file twice in a row.
+    found.sort();
+    found.into_iter().next()
+}
+
 pub async fn run(args: ConsolidateArgs) -> own_backup_common::Result<()> {
     use own_backup_backup::chains::{list_job_chains, plan_consolidation};
-    use own_backup_backup::consolidate::{consolidate_step, resume_pending};
+    use own_backup_backup::consolidate::{consolidate_step_with_keys, resume_pending_with_keys};
     use std::path::PathBuf;
 
     let folder = PathBuf::from(&args.folder);
+
+    // An encrypted chain cannot be folded without its key, and this command had
+    // no way to be given one: it refused by name and stopped there. The key is
+    // asked for from the first encrypted copy in the folder — one chain, one
+    // key — before anything is read or written.
+    let keys = match first_encrypted_image(&folder) {
+        Some(image) => crate::commands::archive_key::open_keys_for_image(&image)?,
+        None => None,
+    };
 
     // Even a dry run reports interrupted steps, because a folder with a marker
     // in it is not describing a state anyone should plan against.
     if args.dry_run {
         println!("Dry run — nothing will be changed.\n");
     } else {
-        let report = resume_pending(&folder)?;
+        let report = resume_pending_with_keys(&folder, keys.as_ref())?;
         if !report.finished.is_empty() {
             println!("Finished {} interrupted consolidation step(s).\n", report.finished.len());
         }
@@ -90,7 +119,7 @@ pub async fn run(args: ConsolidateArgs) -> own_backup_common::Result<()> {
             return Ok(());
         }
 
-        let outcome = consolidate_step(&step)?;
+        let outcome = consolidate_step_with_keys(&step, keys.as_ref())?;
         steps += 1;
         println!(
             "  done in {:.1}s{}",

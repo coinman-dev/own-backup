@@ -518,7 +518,11 @@
     if (!path || !pw) return;
     luksPwState[part] = 'checking';
     try {
-      luksPwState[part] = (await api.verifyLuksPassword(path, part, pw)) ? 'ok' : 'bad';
+      // The copy's own key too: the stored container header is in its sealed
+      // half, so without it the check cannot be made at all.
+      luksPwState[part] = (await api.verifyLuksPassword(path, part, pw, archiveSecretFor(path)))
+        ? 'ok'
+        : 'bad';
     } catch (e) {
       luksPwState[part] = 'error';
       luksPwError[part] = String(e);

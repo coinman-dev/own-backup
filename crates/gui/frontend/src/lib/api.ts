@@ -133,8 +133,21 @@ export const api = {
   /** Does this password open the container whose header the copy kept?
    *  `false` = wrong password; a rejected promise = the check could not be
    *  made (no stored header, unreadable image). */
-  verifyLuksPassword: (imagePath: string, srcIndex: number, password: string) =>
-    invoke<boolean>('verify_luks_password', { imagePath, srcIndex, password }),
+  verifyLuksPassword: (
+    imagePath: string,
+    srcIndex: number,
+    password: string,
+    secret?: ArchiveSecret,
+  ) =>
+    invoke<boolean>('verify_luks_password', {
+      imagePath,
+      srcIndex,
+      password,
+      // Named apart from `password`: one opens the source's container, the
+      // other opens the copy that stored its header.
+      archivePassword: secret?.password,
+      archiveRecoveryKey: secret?.recoveryKey,
+    }),
   /** DESTRUCTIVE. Hand the checked plan to the service. `passphrases` maps a
    *  SOURCE partition index to the password of the container being put back;
    *  they travel with the request, never inside the plan (which is persisted).

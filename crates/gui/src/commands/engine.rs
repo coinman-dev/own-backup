@@ -64,6 +64,14 @@ pub struct DiskBackupDto {
 /// returned `manifest_path` is what to hand to restore (the image itself for an
 /// embedded backup, the `.obdm` for a legacy one). Cross-platform read-only.
 #[tauri::command]
+/// **Cannot see encrypted copies**, and has no caller in the interface today.
+///
+/// A whole-disk `.obk` keeps its manifest sealed, so a keyless folder scan has
+/// nothing to report about one; the restore screen uses [`list_image_backups`]
+/// and [`list_locked_images`] instead. Left as it is rather than half-fixed: a
+/// scan that quietly skipped encrypted copies is exactly how "no copies with
+/// metadata found" came to be said about a folder holding two of them.
+#[allow(dead_code)]
 pub async fn list_disk_backups(folder: String) -> Result<Vec<DiskBackupDto>, String> {
     use own_backup_common::gpt::DiskBackupManifest;
 
@@ -883,12 +891,17 @@ pub async fn verify_luks_password(
     image_path: String,
     src_index: u32,
     password: String,
+    // `archive_*` opens the COPY; `password` above opens the source volume's
+    // own container. Two different secrets, and the first has to be here
+    // because the stored header lives in the sealed half — without it this
+    // answered "the check could not be made" for every encrypted copy, which
+    // reads as a broken feature rather than as a missing key.
+    archive_password: Option<String>,
+    archive_recovery_key: Option<String>,
 ) -> Result<bool, String> {
+    let secret = secret_of(archive_password, archive_recovery_key);
     tauri::async_runtime::spawn_blocking(move || {
-        let sidecar = load_sidecar(
-            std::path::Path::new(&image_path),
-            &own_backup_client::ArchiveSecret::none(),
-        )?;
+        let sidecar = load_sidecar(std::path::Path::new(&image_path), &secret)?;
         let headers = &sidecar.info.luks_headers;
         // A per-volume image records index 0 — there was nothing to
         // disambiguate at backup time — so its lone entry answers for whichever

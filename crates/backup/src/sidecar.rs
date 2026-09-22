@@ -883,6 +883,48 @@ pub fn read_image_sidecar(image_path: &Path) -> Result<Sidecar> {
 ///
 /// `None` means this copy carries none: not a bootable copy, a BIOS machine,
 /// or a run that could not read the firmware.
+/// An image's description of itself, **with the key when it is encrypted**.
+///
+/// THE reader. Everything that needs a copy's metadata on a road where the
+/// copy may be encrypted goes through here, because the alternative kept being
+/// discovered one screen at a time: `read_image_sidecar` and friends open the
+/// file with no key, an `.obk` answers them with "not an image I know", and the
+/// caller reads that as "the copy has no partitions" / "no boot entries" /
+/// "not a whole-disk copy". Three separate defects in one day were that, and
+/// each looked like a different bug.
+///
+/// `keys` is `None` for a copy that needs none. An encrypted copy arriving
+/// without them is an error naming what is missing, never an empty answer.
+pub fn read_sidecar_with_keys(
+    image_path: &Path,
+    keys: Option<&crate::seal::context::ArchiveKeys>,
+) -> Result<Sidecar> {
+    let ext = image_path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_lowercase();
+    if ext == crate::seal::obk::OBK_EXTENSION {
+        let keys = keys.ok_or_else(|| {
+            OwnBackupError::Encryption(format!(
+                "{}: копия зашифрована — чтобы её открыть, нужен пароль или ключ восстановления",
+                image_path.display()
+            ))
+        })?;
+        let chain = keys.open_chain_of(image_path)?;
+        return read_sealed_sidecar(image_path, &chain.key);
+    }
+    match read_embedded_sidecar(image_path, &ext) {
+        Ok(s) => Ok(s),
+        Err(e) => {
+            let sidecar_path = sidecar_path_for(image_path);
+            if !sidecar_path.exists() {
+                return Err(OwnBackupError::ImageFormat(format!(
+                    "embedded sidecar not found ({e}) and adjacent sidecar not found: {}",
+                    sidecar_path.display()
+                )));
+            }
+            read_sidecar(&sidecar_path)
+        }
+    }
+}
+
 /// **Reads the copy WITHOUT a key**, so an ENCRYPTED copy answers that it has
 /// no boot entries — its whole sidecar is sealed. Use [`boot_entries_of`]
 /// wherever the sidecar has already been opened, which is everywhere that

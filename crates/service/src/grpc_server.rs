@@ -272,20 +272,14 @@ fn read_sidecar_for_checks(
     image: &std::path::Path,
     keys: Option<&own_backup_backup::seal::context::ArchiveKeys>,
 ) -> Option<own_backup_backup::Sidecar> {
-    let Some(keys) = keys else {
-        return own_backup_backup::sidecar::read_image_sidecar(image).ok();
-    };
-    let sealed = keys
-        .open_chain_of(image)
-        .and_then(|chain| own_backup_backup::sidecar::read_sealed_sidecar(image, &chain.key));
-    match sealed {
+    match own_backup_backup::sidecar::read_sidecar_with_keys(image, keys) {
         Ok(sidecar) => Some(sidecar),
         Err(e) => {
-            // A key that does not open THIS copy is not a reason to fall back to
-            // the keyless read: that answers for a different file shape and
-            // would let the checks judge a copy nobody has opened.
+            // No falling back to a keyless read when a key was given and failed:
+            // that answers for a different file shape and would let the checks
+            // judge a copy nobody has opened.
             tracing::warn!(image = %image.display(), error = %e,
-                "plan checks: the copy's sealed description could not be read");
+                "plan checks: the copy's description could not be read");
             None
         }
     }
