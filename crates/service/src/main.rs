@@ -42,6 +42,14 @@ enum Mode {
     Stop,
     Restart,
     Status,
+    /// Put THIS executable in place of the installed one: stop, replace, start.
+    ///
+    /// A running service holds its own file open, so a new build cannot simply
+    /// be copied over it — and the three-step dance that follows is easy to
+    /// forget. Forgetting it once already cost a full test cycle: a fix was
+    /// deployed, the service kept running the old binary, and the run that was
+    /// supposed to prove the fix reproduced the bug instead.
+    Update,
     /// Console run for development: loopback TCP, no auth, easy to attach a
     /// debugger/curl. `--foreground` / `-f`.
     Foreground,
@@ -90,6 +98,7 @@ fn mode_of(args: &[String]) -> Mode {
             "/stop" | "--stop" | "stop" => return Mode::Stop,
             "/restart" | "--restart" | "restart" => return Mode::Restart,
             "/status" | "--status" | "status" => return Mode::Status,
+            "/update" | "--update" | "update" => return Mode::Update,
             "-f" | "--foreground" => return Mode::Foreground,
             "--run" | "run" | "--daemon" | "daemon" => return Mode::Daemon,
             _ => {}
@@ -98,34 +107,43 @@ fn mode_of(args: &[String]) -> Mode {
     Mode::Service
 }
 
-/// Open the service log file, most-preferred location first: next to the exe
-/// (what the user looks for), else the data dir (LocalSystem can always write
-/// there), else temp. Rotates at ~4 MB. Returns the open file and its path.
-fn open_service_log() -> Option<(std::fs::File, std::path::PathBuf)> {
-    use std::path::PathBuf;
-    const ROTATE_AT: u64 = 4 * 1024 * 1024;
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Some(dir) =
-        std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf()))
-    {
-        candidates.push(dir.join("own-backup-service.log"));
-    }
-    candidates.push(AppConfig::default().data_dir.join("own-backup-service.log"));
-    candidates.push(std::env::temp_dir().join("own-backup-service.log"));
-    for path in candidates {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+/// Today's service log, in the shared `Logs` folder beside the exe (what the
+/// user looks for), else the data dir (LocalSystem can always write there),
+/// else temp.
+fn open_service_log() -> Option<(own_backup_common::log_files::DailyLog, std::path::PathBuf)> {
+    let dir = own_backup_common::log_files::log_dir(&AppConfig::default().data_dir)?;
+    let log = own_backup_common::log_files::DailyLog::new(dir, "own-backup-service");
+    let path = log.path();
+    Some((log, path))
+}
+
+/// Delete everyone's logs older than thirty days, and keep doing it.
+///
+/// The service does this for all three executables because it is the one that
+/// is always running: the command line may not be used for a month, and the
+/// interface only while somebody is looking at it. Sweeping at startup and
+/// once a day covers a machine that is rebooted daily and one that is not.
+fn start_log_housekeeping() {
+    let Some(dir) = own_backup_common::log_files::log_dir(&AppConfig::default().data_dir) else {
+        return;
+    };
+    tokio::spawn(async move {
+        loop {
+            let removed = own_backup_common::log_files::sweep(
+                &dir,
+                own_backup_common::log_files::KEEP_DAYS,
+            );
+            if removed > 0 {
+                info!(
+                    removed,
+                    dir = %dir.display(),
+                    keep_days = own_backup_common::log_files::KEEP_DAYS,
+                    "logs older than the retention window removed"
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(24 * 60 * 60)).await;
         }
-        if std::fs::metadata(&path).map(|m| m.len() > ROTATE_AT).unwrap_or(false) {
-            let old = path.with_extension("log.old");
-            let _ = std::fs::remove_file(&old);
-            let _ = std::fs::rename(&path, &old);
-        }
-        if let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-            return Some((f, path));
-        }
-    }
-    None
+    });
 }
 
 /// Set up logging to a file next to the exe (so a service running under the SCM,
@@ -261,7 +279,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_os = "windows")]
     if matches!(
         mode,
-        Mode::Install | Mode::Uninstall | Mode::Start | Mode::Stop | Mode::Restart
+        Mode::Install | Mode::Uninstall | Mode::Start | Mode::Stop | Mode::Restart | Mode::Update
     ) && elevate::relaunch_elevated(&args)
     {
         return Ok(()); // an elevated copy is doing the work; this one is done
@@ -274,6 +292,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Mode::Stop => install::stop(),
         Mode::Restart => install::restart(),
         Mode::Status => install::status(),
+        Mode::Update => install::update_from_here(),
         // Foreground/dev uses TCP on localhost for easy debugging.
         Mode::Foreground => run_loop(true),
         // Daemon (systemd) uses the OS production transport (UDS/named pipe).
@@ -302,6 +321,10 @@ fn print_info() {
     println!("  /stop         остановить службу");
     println!("  /restart      перезапустить службу");
     println!("  /status       показать состояние службы");
+    println!(
+        "  /update       поставить ЭТОТ файл на место установленного: \
+остановить, заменить, запустить"
+    );
     println!("  --foreground  запустить в консоли для отладки (TCP localhost:50051)");
     println!("  --run         режим демона (UDS/named pipe) — так её запускает systemd");
     println!(
@@ -433,6 +456,9 @@ pub async fn run_main_loop(
     let config = AppConfig::default();
 
     std::fs::create_dir_all(&config.data_dir)?;
+
+    // Everyone's logs, swept by the one process that is always here.
+    start_log_housekeeping();
 
     // BEFORE the database, the job store, the worker, the scheduler and the
     // token file — all of which a second copy used to reach before the named

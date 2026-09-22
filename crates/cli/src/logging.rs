@@ -1,43 +1,27 @@
-//! CLI logging, mirroring the service (`service/src/main.rs`): everything
-//! from `info` up goes to `own-backup-cli.log` next to the exe (fallbacks:
-//! data dir, temp; ~4 MB rotation, no ANSI), while the console keeps the old
-//! quiet `warn` default. `RUST_LOG` overrides both filters. The file is what
-//! survives an elevated relaunch closing its console window.
+//! CLI logging, mirroring the service (`service/src/main.rs`): everything from
+//! `info` up goes to `Logs\own-backup-cli-YYYY-MM-DD.log` beside the exe
+//! (fallbacks: data dir, temp; no ANSI), while the console keeps the old quiet
+//! `warn` default. `RUST_LOG` overrides both filters. The file is what survives
+//! an elevated relaunch closing its console window.
+//!
+//! One file per day and thirty days kept — see [`own_backup_common::log_files`]
+//! for why the date is in the name. The sweeping is the service's job: it is
+//! the one process that is always there.
 
 use std::path::PathBuf;
 
 use own_backup_common::config::AppConfig;
+use own_backup_common::log_files::DailyLog;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::Layer;
 
-const ROTATE_AT: u64 = 4 * 1024 * 1024;
-
-/// Open the CLI log file, most-preferred location first (same policy and
-/// rotation as the service log).
-fn open_cli_log() -> Option<(std::fs::File, PathBuf)> {
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Some(dir) =
-        std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf()))
-    {
-        candidates.push(dir.join("own-backup-cli.log"));
-    }
-    candidates.push(AppConfig::default().data_dir.join("own-backup-cli.log"));
-    candidates.push(std::env::temp_dir().join("own-backup-cli.log"));
-    for path in candidates {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if std::fs::metadata(&path).map(|m| m.len() > ROTATE_AT).unwrap_or(false) {
-            let old = path.with_extension("log.old");
-            let _ = std::fs::remove_file(&old);
-            let _ = std::fs::rename(&path, &old);
-        }
-        if let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-            return Some((f, path));
-        }
-    }
-    None
+/// Today's CLI log, in the shared `Logs` folder.
+fn open_cli_log() -> Option<(DailyLog, PathBuf)> {
+    let dir = own_backup_common::log_files::log_dir(&AppConfig::default().data_dir)?;
+    let log = DailyLog::new(dir, "own-backup-cli");
+    let path = log.path();
+    Some((log, path))
 }
 
 /// Command line with secret values masked — `--password X` / `--password=X`

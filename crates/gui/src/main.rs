@@ -23,43 +23,15 @@ use state::GuiState;
 /// build date sent a diagnosis down the wrong path (2026-08-07).
 const BUILD_TAG: &str = "boot-parts-and-scheme-reset";
 
-const ROTATE_AT: u64 = 4 * 1024 * 1024;
-
-/// Candidate log locations, most-preferred first. Next to the exe is what the
-/// user expects, but that can be read-only (a network / WSL / Program Files
-/// path), so we fall back to a per-user dir and finally the temp dir.
-fn candidate_log_paths() -> Vec<PathBuf> {
-    let mut v = Vec::new();
-    if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
-        v.push(dir.join("own-backup-gui.log"));
-    }
-    #[cfg(windows)]
-    if let Ok(local) = std::env::var("LOCALAPPDATA") {
-        if !local.trim().is_empty() {
-            v.push(PathBuf::from(local).join("OwnBackup").join("own-backup-gui.log"));
-        }
-    }
-    v.push(std::env::temp_dir().join("own-backup-gui.log"));
-    v
-}
-
-/// Open the first writable log location, rotating it if large. Returns the open
-/// file and the path used.
-fn open_log() -> Option<(std::fs::File, PathBuf)> {
-    for path in candidate_log_paths() {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if std::fs::metadata(&path).map(|m| m.len() > ROTATE_AT).unwrap_or(false) {
-            let old = path.with_extension("log.old");
-            let _ = std::fs::remove_file(&old);
-            let _ = std::fs::rename(&path, &old);
-        }
-        if let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-            return Some((f, path));
-        }
-    }
-    None
+/// Today's interface log, in the shared `Logs` folder beside the exe — or the
+/// first fallback, because that folder can be read-only (a network / WSL /
+/// Program Files path). Sweeping old ones is the service's job.
+fn open_log() -> Option<(own_backup_common::log_files::DailyLog, PathBuf)> {
+    let data_dir = own_backup_common::config::AppConfig::default().data_dir;
+    let dir = own_backup_common::log_files::log_dir(&data_dir)?;
+    let log = own_backup_common::log_files::DailyLog::new(dir, "own-backup-gui");
+    let path = log.path();
+    Some((log, path))
 }
 
 /// Best-effort elevation check (Windows) so the log records whether the process

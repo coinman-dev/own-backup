@@ -333,3 +333,87 @@ pub fn restart() -> Result<(), Box<dyn std::error::Error>> {
     std::thread::sleep(std::time::Duration::from_millis(500));
     start()
 }
+
+/// Put THIS executable in place of the installed one: stop, replace, start.
+///
+/// A running service holds its own file open, so a new build cannot be copied
+/// over it — which turns every update into three manual steps. Skipping them is
+/// silent: the new file sits beside the old one, the service keeps running the
+/// old code, and the next run reproduces the very bug that was just fixed.
+/// That happened on 2026-09-22 and cost a full test cycle.
+///
+/// Run it from the NEW binary, wherever it was put:
+/// `own-backup-service.exe.new /update`.
+pub fn update_from_here() -> Result<(), Box<dyn std::error::Error>> {
+    let here = std::env::current_exe()?;
+    let installed = installed_binary()?;
+
+    // Same file: nothing to do, and copying a file onto itself would truncate
+    // it. This is the ordinary answer when somebody runs `/update` twice.
+    let same = std::fs::canonicalize(&here).ok() == std::fs::canonicalize(&installed).ok();
+    if same {
+        println!(
+            "Этот файл и есть установленный ({}) — обновлять нечего.",
+            installed.display()
+        );
+        return Ok(());
+    }
+
+    println!("Установлена: {}", installed.display());
+    println!("Заменяю на:  {}", here.display());
+    let _ = stop();
+    // The SCM reports Stopped before the process has necessarily exited, and a
+    // process that still holds its image file makes the copy fail with a
+    // sharing violation. Retry briefly rather than demanding a second attempt.
+    let mut last: Option<std::io::Error> = None;
+    for attempt in 0..20 {
+        match std::fs::copy(&here, &installed) {
+            Ok(_) => {
+                last = None;
+                break;
+            }
+            Err(e) => {
+                last = Some(e);
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                let _ = attempt;
+            }
+        }
+    }
+    if let Some(e) = last {
+        // The service is stopped and the binary is untouched: start it again so
+        // the machine is not left without one because an update failed.
+        let _ = start();
+        return Err(format!(
+            "не удалось заменить {}: {e} — служба запущена обратно, файл не тронут",
+            installed.display()
+        )
+        .into());
+    }
+    println!("Файл заменён.");
+    start()?;
+    // Leaving the staged copy would make the next `/update` a no-op against a
+    // stale file; it has done its job.
+    if here.extension().is_some_and(|e| e.eq_ignore_ascii_case("new")) {
+        let _ = std::fs::remove_file(&here);
+    }
+    Ok(())
+}
+
+/// Where the installed service's binary is, as the system itself records it.
+///
+/// Asked of the SCM rather than guessed from this executable's folder: an
+/// update may be staged anywhere, and replacing the wrong file would leave the
+/// machine running the old service while looking like it had been updated.
+#[cfg(target_os = "windows")]
+fn installed_binary() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    use windows_service::service::ServiceAccess;
+    let service = open_service(ServiceAccess::QUERY_CONFIG)?;
+    Ok(service.query_config()?.executable_path)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn installed_binary() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    // systemd's unit names it; the installer writes the unit, so this is the
+    // same path it used.
+    Ok(std::path::PathBuf::from("/usr/local/bin/own-backup-service"))
+}

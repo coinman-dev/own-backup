@@ -6,6 +6,7 @@ pub mod error;
 pub mod file_name;
 pub mod gpt;
 pub mod image;
+pub mod log_files;
 pub mod log_mirror;
 pub mod media_mode;
 pub mod media_paths;

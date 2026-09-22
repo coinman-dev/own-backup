@@ -168,13 +168,16 @@ fn open_mirror(dir: &Path, name: &str) -> Option<File> {
 ///
 /// Wrapped in a `Mutex` by the caller, which is what `tracing-subscriber`
 /// accepts as a writer factory.
-pub struct TeeLog {
-    primary: File,
+///
+/// Generic over the primary because that is now a writer that changes files at
+/// midnight ([`crate::log_files::DailyLog`]) rather than one open `File`.
+pub struct TeeLog<W: Write = File> {
+    primary: W,
     mirror: MirrorLog,
 }
 
-impl TeeLog {
-    pub fn new(primary: File, mirror: MirrorLog) -> Self {
+impl<W: Write> TeeLog<W> {
+    pub fn new(primary: W, mirror: MirrorLog) -> Self {
         Self { primary, mirror }
     }
 
@@ -183,7 +186,7 @@ impl TeeLog {
     }
 }
 
-impl Write for TeeLog {
+impl<W: Write> Write for TeeLog<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         // The primary comes first and its error is the one that propagates: it
         // is the log that must exist. The mirror is an extra copy, and losing
