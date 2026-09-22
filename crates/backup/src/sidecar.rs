@@ -1762,6 +1762,35 @@ mod tests {
         assert!(want > json, "резерв должен покрывать сами данные и обрамление");
     }
 
+    /// Место, зарезервированное родителем, ребёнок считает ПО СОХРАНЁННОМУ
+    /// сайдкару — и должен получить то же число, что родитель посчитал по
+    /// живым записям. Иначе ребёнку «не хватает места» там, где его хватает.
+    ///
+    /// Так и случилось на живом прогоне 2026-09-22: резерв ребёнка считал
+    /// загрузочные записи, а резерв родителя — нет, и каждая копия цепочки
+    /// диска молча выходила полной, в файле с именем `_inc_`. Здесь закреплена
+    /// та половина, которую можно проверить без Windows: запись и чтение
+    /// сайдкара не меняют размер, по которому считается резерв.
+    #[test]
+    fn a_parents_boot_entries_reserve_survives_a_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let entries = a_boot_backup("MODULATOR");
+        let live = boot_entries_reserve(Some(&entries));
+        assert!(live > 0, "записи есть — резерв не нулевой");
+
+        let mut info = SidecarInfo::new_full("parent.qcow2", 0);
+        info.boot_entries = Some(entries);
+        let path = dir.path().join("parent.qcow2.obkm");
+        write_sidecar(&path, &info, &make_manifest(), &[]).unwrap();
+
+        let back = read_sidecar(&path).unwrap();
+        assert_eq!(
+            boot_entries_reserve(back.info.boot_entries.as_ref()),
+            live,
+            "ребёнок должен увидеть у родителя ровно тот резерв, который тот заложил"
+        );
+    }
+
     /// «Годится ли эта копия в родители» для зашифрованной копии отвечается
     /// БЕЗ ключа — по открытому заголовку, тому же, по которому её находят
     /// списки и ретеншн.

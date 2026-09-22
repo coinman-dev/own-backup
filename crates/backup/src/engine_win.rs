@@ -3233,11 +3233,21 @@ fn backup_disk_inner(
     let full_used = |used: u64, reserve: u64| {
         crate::sidecar::calculate_meta_partition_size(used.max(1), reserve)
     };
+    // What a parent ACTUALLY reserved, measured the way `own_reserve` is: its
+    // container headers AND its boot entries.
+    //
+    // Counting only the first made every bootable chain start over from a full
+    // copy. `own_reserve` includes the boot-entries room — around 18 KiB for a
+    // machine with four UEFI entries — so on a disk without LUKS the test below
+    // read "18730 > 0" every single time, and the run silently wrote a full
+    // backup into a file named `_inc_`. Nothing said so except the warning,
+    // which named two numbers that were never comparable.
+    let reserved_by = |sc: &Sidecar| {
+        crate::sidecar::luks_headers_reserve(&sc.info.luks_headers)
+            + crate::sidecar::boot_entries_reserve(sc.info.boot_entries.as_ref())
+    };
     let mut meta_size = match &parent {
-        Some((_, sc)) => full_used(
-            sc.manifest.used_blocks,
-            crate::sidecar::luks_headers_reserve(&sc.info.luks_headers),
-        ),
+        Some((_, sc)) => full_used(sc.manifest.used_blocks, reserved_by(sc)),
         None => full_used(disk_used.count, own_reserve),
     };
     // A chain started before container headers were stored has no room for one.
@@ -3245,7 +3255,7 @@ fn backup_disk_inner(
     // only honest move is to start a new full backup rather than run for an
     // hour and fail at the metadata write.
     if let Some((pp, sc)) = &parent {
-        let parent_reserve = crate::sidecar::luks_headers_reserve(&sc.info.luks_headers);
+        let parent_reserve = reserved_by(sc);
         if own_reserve > parent_reserve {
             warn!(
                 parent = %pp.display(),
