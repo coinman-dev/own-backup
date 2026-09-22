@@ -168,8 +168,20 @@ try {
             $t = "$((Get-Partition -DiskNumber $blank.Number -PartitionNumber $tgt.PartitionNumber).DriveLetter):"
             $rs = Run "`"$cli`" restore `"$blImg`" --target $t --yes"
             foreach ($l in ($rs -split "`r?`n")) { if ($l.Trim()) { Note "  rs| $($l.Trim())" } }
-            Start-Sleep -Seconds 3
+            # Восстановление снимает том, чтобы писать через диск; обратно Windows
+            # выводит его не сразу. Пятый прогон проверил через три секунды и не
+            # нашёл ничего — а снаружи, из Linux, на разделе лежали все 30
+            # файлов с верной суммой. Ждём появления, а не фиксированное время, и
+            # пишем, сколько ждали: если это десятки секунд, это уже вопрос к
+            # продукту, а не к проверке.
             $restored = "$t\data\bl1.txt"
+            $waited = 0
+            Note ("  том {0} сразу после: {1}" -f $t, ((Get-Volume -DriveLetter $t.TrimEnd(':') -ErrorAction SilentlyContinue |
+                ForEach-Object { "fs=$($_.FileSystem) health=$($_.HealthStatus) size=$($_.Size)" }) -join ' '))
+            while ($waited -lt 60 -and -not (Test-Path -LiteralPath $restored)) {
+                Start-Sleep -Seconds 2; $waited += 2
+            }
+            Note "  файл на цели появился через $waited с"
             if (Test-Path -LiteralPath $restored) {
                 $h = (Get-FileHash -LiteralPath $restored -Algorithm SHA256).Hash
                 $count = @(Get-ChildItem -LiteralPath "$t\data" -File).Count
@@ -190,52 +202,103 @@ try {
     # ---------------------------------------------------------------------
     # 4. Чтение образа по iSCSI — «подключить копию и посмотреть файлы»
     # ---------------------------------------------------------------------
-    Note 'LAB-VER-4 чтение образа по iSCSI'
+    # Продуктовым путём: подключает СЛУЖБА, командная строка её просит. Ручной
+    # `iscsi-serve` + `iscsicli` — дорога для человека с отладкой, и в первом
+    # прогоне я сам ошибся в её аргументах; проверять надо то, чем пользуются.
+    Note 'LAB-VER-4 подключение копии как диска (служба + mount)'
+    $svc = $null
     try {
         $img = "$work\wholedisk.qcow2"
         if (-not (Test-Path -LiteralPath $img)) { throw 'нечего подключать: образ первого пункта не создан' }
+        $svcExe = Join-Path $work 'own-backup-service.exe'
+        if (-not (Test-Path -LiteralPath $svcExe)) { throw "нет $svcExe" }
+
         $before = @(Get-Disk | ForEach-Object { $_.Number })
-        $srv = Start-Process -FilePath $cli -ArgumentList @('iscsi-serve', $img) `
-            -RedirectStandardOutput "$work\iscsi-out.txt" -RedirectStandardError "$work\iscsi-err.txt" `
+        $svc = Start-Process -FilePath $svcExe -ArgumentList @('--foreground') `
+            -RedirectStandardOutput "$work\service-out.txt" -RedirectStandardError "$work\service-err.txt" `
             -NoNewWindow -PassThru
-        $null = $srv.Handle
-        Start-Sleep -Seconds 5
-        Note "  цель поднята: $(Run 'sc query msiscsi | findstr STATE')"
-        Note "  $(Run 'iscsicli QAddTargetPortal 127.0.0.1 3260')"
-        Start-Sleep -Seconds 3
-        # Скобки обязательны: `Run '…' -split '…'` разбирается как ВЫЗОВ Run с
-        # аргументом -split, а не как оператор — и в имя цели попадает баннер
-        # версии инициатора. Из-за этого пункт провалился в первом прогоне.
-        $tgtName = (((Run 'iscsicli ListTargets') -split "`r?`n") |
-            Where-Object { $_ -match 'ownbackup' } | Select-Object -First 1).Trim()
-        Note "  цель: $tgtName"
-        if ($tgtName) {
-            Note "  $(Run "iscsicli QLoginTarget $tgtName")"
-            Start-Sleep -Seconds 6
+        $null = $svc.Handle
+        Start-Sleep -Seconds 10
+        if ($svc.HasExited) { throw "служба не поднялась (код $($svc.ExitCode)) — см. service-err.txt" }
+        Note '  служба запущена в консоли'
+
+        $m = Run "`"$cli`" mount `"$img`""
+        foreach ($l in ($m -split "`r?`n")) { if ($l.Trim()) { Note "  mount| $($l.Trim())" } }
+
+        # Ждём ПОЯВЛЕНИЯ разделов, а не фиксированные восемь секунд: Windows
+        # выводит тома после подключения не мгновенно, и «не успело» с виду
+        # неотличимо от «не получилось».
+        $new = @()
+        $deadline = [DateTime]::UtcNow.AddSeconds(90)
+        while ([DateTime]::UtcNow -lt $deadline) {
             Update-HostStorageCache -ErrorAction SilentlyContinue
-            $after = @(Get-Disk | ForEach-Object { $_.Number })
-            $new = $after | Where-Object { $_ -notin $before }
-            Note "  появились диски: $($new -join ',')"
-            $seen = 0
-            foreach ($d in $new) {
-                foreach ($p in (Get-Partition -DiskNumber $d -ErrorAction SilentlyContinue)) {
-                    $v = Get-Volume -Partition $p -ErrorAction SilentlyContinue
-                    if ($v -and $v.DriveLetter) {
-                        $names = @(Get-ChildItem -LiteralPath "$($v.DriveLetter):\data" -File -ErrorAction SilentlyContinue).Count
-                        Note "  том $($v.DriveLetter): fs=$($v.FileSystem) файлов в \data = $names"
-                        $seen += $names
+            $new = @(Get-Disk | ForEach-Object { $_.Number }) | Where-Object { $_ -notin $before }
+            if ($new -and @(Get-Partition -DiskNumber $new[0] -ErrorAction SilentlyContinue).Count -gt 0) { break }
+            Start-Sleep -Seconds 5
+        }
+        Note "  появились диски: $($new -join ',')"
+
+        # Состояние подключённого диска: образы несут атрибут «offline»
+        # намеренно, и тогда томов не будет вовсе — это надо видеть, а не
+        # гадать по пустому списку.
+        foreach ($d in $new) {
+            $dk = Get-Disk -Number $d -ErrorAction SilentlyContinue
+            Note ("  диск {0}: offline={1} readonly={2} style={3} size={4} model={5}" -f `
+                $d, $dk.IsOffline, $dk.IsReadOnly, $dk.PartitionStyle, $dk.Size, $dk.FriendlyName)
+            if ($dk.IsOffline) {
+                Note '  диск отключён — перевожу в online'
+                try { Set-Disk -Number $d -IsOffline $false -ErrorAction Stop; Start-Sleep -Seconds 5 }
+                catch { Note "  online не удался: $($_.Exception.Message)" }
+            }
+            foreach ($p in (Get-Partition -DiskNumber $d -ErrorAction SilentlyContinue)) {
+                Note ("    раздел {0}: тип={1} смещение={2} размер={3} буква={4}" -f `
+                    $p.PartitionNumber, $p.GptType, $p.Offset, $p.Size, $p.DriveLetter)
+            }
+        }
+
+        $seen = 0
+        foreach ($d in $new) {
+            foreach ($p in (Get-Partition -DiskNumber $d -ErrorAction SilentlyContinue)) {
+                $v = Get-Volume -Partition $p -ErrorAction SilentlyContinue
+                # Том без буквы читать нечем — а буквы образу никто не обещал.
+                if ($v -and -not $v.DriveLetter) {
+                    $free = [char[]](74..90) | Where-Object { -not (Test-Path "$([char]$_):\") } | Select-Object -First 1
+                    if ($free) {
+                        try {
+                            Set-Partition -DiskNumber $d -PartitionNumber $p.PartitionNumber -NewDriveLetter $free -ErrorAction Stop
+                            Start-Sleep -Seconds 2
+                            $v = Get-Volume -Partition (Get-Partition -DiskNumber $d -PartitionNumber $p.PartitionNumber)
+                            Note "    разделу $($p.PartitionNumber) назначена буква $free"
+                        } catch { Note "    буква не назначилась: $($_.Exception.Message)" }
                     }
                 }
+                if ($v -and $v.DriveLetter) {
+                    $files = @(Get-ChildItem -LiteralPath "$($v.DriveLetter):\data" -File -ErrorAction SilentlyContinue)
+                    Note "  том $($v.DriveLetter): fs=$($v.FileSystem) файлов в \data = $($files.Count)"
+                    if ($files.Count -gt 0) {
+                        $h = (Get-FileHash -LiteralPath $files[0].FullName -Algorithm SHA256).Hash
+                        Note "    первый файл $($files[0].Name) sha256=$h"
+                    }
+                    $seen += $files.Count
+                }
             }
-            Verdict 'iSCSI-чтение' $(if ($seen -gt 0) { "подключено и прочитано: $seen файлов" } else { 'ОТКАЗ: файлы не прочитались' })
-            foreach ($d in $new) { Note "  $(Run "iscsicli LogoutTarget $tgtName")" ; break }
-        } else {
-            Verdict 'iSCSI-чтение' 'ОТКАЗ: инициатор не увидел цель'
         }
-        Start-Sleep -Seconds 2
-        if (-not $srv.HasExited) { Stop-Process -Id $srv.Id -Force -ErrorAction SilentlyContinue }
+        Verdict 'Подключение копии' $(if ($seen -gt 0) { "подключено и прочитано: $seen файлов" } else { 'ОТКАЗ: файлы не прочитались' })
+
+        $u = Run "`"$cli`" unmount `"$img`""
+        foreach ($l in ($u -split "`r?`n")) { if ($l.Trim()) { Note "  unmount| $($l.Trim())" } }
     } catch {
-        Verdict 'iSCSI-чтение' "НЕ ПРОВЕРЕНО: $($_.Exception.Message)"
+        Verdict 'Подключение копии' "НЕ ПРОВЕРЕНО: $($_.Exception.Message)"
+    } finally {
+        # Сессия инициатора, пережившая свою цель, держит выключение машины:
+        # прошлый прогон не выключился сам и его пришлось останавливать снаружи.
+        Note "  сессии iSCSI до уборки: $(Run 'iscsicli SessionList | findstr /c:iqn')"
+        $null = Run 'iscsicli ReportTargetMappings'
+        foreach ($t in (((Run 'iscsicli ListTargets') -split "`r?`n") | Where-Object { $_ -match 'ownbackup' })) {
+            $null = Run "iscsicli LogoutTarget $($t.Trim())"
+        }
+        if ($svc -and -not $svc.HasExited) { Stop-Process -Id $svc.Id -Force -ErrorAction SilentlyContinue }
+        Start-Sleep -Seconds 3
     }
 
     Note 'LAB-VER-SUMMARY'

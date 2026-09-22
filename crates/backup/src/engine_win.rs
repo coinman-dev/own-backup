@@ -4042,6 +4042,55 @@ pub struct VolumeRestoreSummary {
     pub duration: Duration,
 }
 
+/// Turn a restore target into the device path that can actually take the whole
+/// volume, plus whatever had to be taken down to allow it.
+///
+/// Returns a `part:<disk>:<offset>:<len>` window when the target is a volume
+/// sitting on exactly one partition, and the target unchanged otherwise — a
+/// raw device path, a `part:` spec the caller already built, or a volume
+/// spanning several extents (a spanned or mirrored set, which is not a
+/// partition and must not be guessed at).
+///
+/// The returned guard holds the dismount. Dropping it early lets Windows mount
+/// the volume back on top of a restore still in progress, so it is bound to the
+/// write, not to this function.
+#[cfg(target_os = "windows")]
+fn partition_window_for(
+    target: &str,
+) -> (String, Option<crate::volume_win::VolumeDismountGuard>) {
+    let plain = normalize_device_path(target);
+    if target.starts_with("part:") {
+        return (plain, None);
+    }
+    let Some(root) = crate::volume_win::volume_root_for_path(target)
+        .or_else(|| crate::volume_win::volume_root_for_path(&format!("{target}\\")))
+    else {
+        return (plain, None);
+    };
+    let extents = crate::volume_win::volume_extents(&root);
+    let [e] = extents.as_slice() else {
+        warn!(
+            target,
+            extents = extents.len(),
+            "restore: the target is not one partition — writing through the volume device"
+        );
+        return (plain, None);
+    };
+    let guard =
+        crate::volume_win::VolumeDismountGuard::for_restore_range(e.disk_number, e.offset, e.length);
+    if !guard.failed.is_empty() {
+        warn!(volumes = ?guard.failed, "restore: some volumes would not dismount");
+    }
+    info!(
+        target,
+        disk = e.disk_number,
+        offset = e.offset,
+        length = e.length,
+        "restore: writing through the partition rather than the volume device"
+    );
+    (format!("part:{}:{}:{}", e.disk_number, e.offset, e.length), Some(guard))
+}
+
 /// Restore a volume image onto a target device. Overwrites the target!
 pub fn restore_volume(
     req: &VolumeRestoreRequest,
@@ -4053,8 +4102,27 @@ pub fn restore_volume(
     let volume_len = sidecar.manifest.source_disk.size_bytes;
     let data_offset = sidecar.info.volume_data_offset;
 
-    let target = normalize_device_path(&req.target);
+    // A volume target is written through its PARTITION, not through the volume
+    // device. Measured, not assumed: writing `\\.\H:` at the last block of a
+    // 1 GiB volume got `wanted 1048576 wrote 1044480`, with the device itself
+    // reporting exactly 1073741824 bytes and the write ending exactly there.
+    // Windows caps a raw write through a volume handle four kilobytes short of
+    // the length it advertises, so the tail — NTFS's backup boot sector — can
+    // never be written that way, and every restore of a full volume ended in an
+    // error message about work that had in fact succeeded.
+    //
+    // The whole-disk road never had this: it writes through the disk at the
+    // partition's offset. This takes the same road, and takes the volume down
+    // first so Windows stops guarding those sectors on its behalf.
+    let (target, _dismounted) = partition_window_for(&req.target);
     let mut target_dev = WinRawDevice::open_write(&target)?;
+    info!(
+        target = %target,
+        target_bytes = target_dev.length(),
+        source_bytes = volume_len,
+        block_size,
+        "restore: target opened"
+    );
     // Nothing may hold the target's sectors while they are overwritten. Windows
     // refuses a raw write into a MOUNTED volume outright — `WriteFile(\\.\H:)
     // ... 0x80070005` at offset 0, before a single block — so a restore onto an
@@ -4064,6 +4132,10 @@ pub fn restore_volume(
     //
     // After the open and on the SAME handle: the lock belongs to the handle
     // that holds it, and taking it on another one only locks this writer out.
+    //
+    // A no-op for the partition window above — that handle is the disk, whose
+    // volumes the guard already took down — and the fallback for a target that
+    // could not be resolved to one.
     target_dev.lock_and_dismount();
     if target_dev.length() < volume_len {
         return Err(OwnBackupError::RestoreIncompatible(format!(

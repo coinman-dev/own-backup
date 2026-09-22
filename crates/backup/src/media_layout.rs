@@ -537,6 +537,22 @@ pub fn start_media_cmd(app_dir: &str, temp_dir: &str) -> String {
              if exist \"%%D:\\{marker}\" if not defined MEDIA set \"MEDIA=%%D:\""
         ),
         "",
+        "rem A letterless volume answers no letter. The medium laid out on a FAT32",
+        "rem EFI partition is exactly that - EFI partitions are not given one - and",
+        "rem then the loop above finds nothing, the log mirror never starts, and the",
+        "rem logs plus the safety copy of the boot entries stay on a RAM disk that",
+        "rem does not survive the restart (seen 2026-09-20). For a rescue program",
+        "rem that reads: fix the disk, then tell us what went wrong - with nothing",
+        "rem to tell it from. So: ask the volumes themselves, and lend one a letter.",
+        "rem Runs only when the letters gave nothing, so the worst case is today's.",
+        &format!(
+            "if not defined MEDIA for /f \"delims=\" %%V in \
+             ('mountvol ^| findstr /i /c:\"\\\\?\\Volume\"') do if not defined MEDIA \
+             if not exist Z:\\ (mountvol Z: \"%%V\" >nul 2>&1 & \
+             if exist \"Z:\\{marker}\" (set \"MEDIA=Z:\") else (mountvol Z: /D >nul 2>&1))"
+        ),
+        "if defined MEDIA echo Boot medium: %MEDIA%",
+        "",
         "rem Every log is copied there, line by line, if the medium is writable: a",
         "rem session that ends in a dark screen or a reboot leaves its logs on a RAM",
         "rem disk that is gone. A DVD or a mounted ISO is read-only and simply skipped.",
@@ -874,6 +890,33 @@ mod tests {
     /// safety net but a guarantee the mode goes back — the medium would boot
     /// at the firmware's resolution every time, which is the whole problem the
     /// picker exists to solve.
+    /// Носитель, разложенный на разделе EFI, буквы не получает — и тогда
+    /// журнал остаётся на ОЗУ-диске, который не переживёт перезагрузку.
+    ///
+    /// Запасной путь спрашивает сами тома и одалживает найденному букву. Он
+    /// выполняется ТОЛЬКО когда перебор букв ничего не дал, поэтому худший
+    /// случай равен сегодняшнему поведению — это и проверяется здесь: порядок,
+    /// охрана `if not defined MEDIA` и возврат буквы при промахе.
+    #[test]
+    fn a_letterless_medium_is_still_found_by_asking_the_volumes() {
+        let s = start_media_cmd(r"X:\Program Files\OwnBackup", r"X:\Temp");
+        let by_letter =
+            s.lines().position(|l| l.contains("for %%D in (C D E")).expect("перебор букв");
+        let idx = s.lines().position(|l| l.contains("mountvol")).expect("запасной путь");
+        assert!(idx > by_letter, "сначала буквы, и только потом тома");
+
+        let line = s.lines().nth(idx).unwrap();
+        assert!(line.starts_with("if not defined MEDIA"), "только когда буквы не дали: {line}");
+        assert!(line.contains(r"findstr /i /c:"), "поиск по строке, а не по образцу: {line}");
+        assert!(line.contains(r"\\?\Volume"), "ищем пути томов: {line}");
+        assert!(line.contains("if not exist Z:\\"), "занятую букву не трогаем: {line}");
+        assert!(line.contains("mountvol Z: /D"), "промах — букву вернуть: {line}");
+        assert!(
+            line.contains(&format!("Z:\\{MEDIA_DIR}\\{MEDIA_MARKER}")),
+            "узнаём носитель по его метке: {line}"
+        );
+    }
+
     #[test]
     fn nothing_in_the_boot_script_waits_for_an_answer() {
         let s = start_media_cmd(r"X:\Program Files\OwnBackup", r"X:\Temp");

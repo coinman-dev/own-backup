@@ -541,9 +541,17 @@ impl WinRawDevice {
         }
         .map_err(WriteFailure::Win32)?;
         if (written as usize) != data.len() {
+            // The device's own length is part of the story and was missing from
+            // it: a tail block that runs one page past what the volume will
+            // accept looks identical to a device refusing writes for some other
+            // reason, and the two want opposite responses. Say where the write
+            // ended and where the device does.
             return Err(WriteFailure::Refused(format!(
-                "short write: wanted {} wrote {written}",
-                data.len()
+                "short write: wanted {} wrote {written} at {offset}; \
+                 this write ends at {}, the device is {} bytes",
+                data.len(),
+                offset + data.len() as u64,
+                self.length,
             )));
         }
         Ok(())
