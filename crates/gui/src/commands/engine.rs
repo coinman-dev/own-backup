@@ -791,12 +791,18 @@ pub async fn dry_run_restore_plan(
     state: State<'_, GuiState>,
     plan: RestorePlan,
     context: Option<CheckContext>,
+    password: Option<String>,
+    recovery_key: Option<String>,
 ) -> Result<serde_json::Value, String> {
     state
         .link
         .client()
         .await?
-        .dry_run_restore_plan(&plan, &context.unwrap_or_default())
+        .dry_run_restore_plan(
+            &plan,
+            &context.unwrap_or_default(),
+            &secret_of(password, recovery_key),
+        )
         .await
 }
 

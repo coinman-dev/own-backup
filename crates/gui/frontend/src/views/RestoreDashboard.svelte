@@ -43,18 +43,26 @@
   // works WITHOUT jobs.json (e.g. a Boot-CD restore). Reloaded whenever the
   // selected copy's image path changes; null until loaded / for old images.
   let imageInfo = $state<ImageInfo | null>(null);
+  /** This read is in flight. Separate from `copiesLoading`, and that separation
+   *  is the point: for an imported file the folder scan finishes at once, so
+   *  the only thing still loading is this — and for an ENCRYPTED copy it is
+   *  Argon2id, seconds, not a blink. That is how long the red «диск не
+   *  подключён» stood on screen before withdrawing itself. */
+  let infoLoading = $state(true);
   $effect(() => {
     const path = lastRun?.status === 'success' ? lastRun.image_path : '';
     if (!path) {
       imageInfo = null;
+      infoLoading = false;
       return;
     }
     let cancelled = false;
+    infoLoading = true;
     // The key for an encrypted copy was collected when it was added; the
     // designer reads the copy several times and must not ask again.
     api.readImageInfo(path, archiveSecretFor(path)).then(
-      (info) => { if (!cancelled) imageInfo = info; },
-      () => { if (!cancelled) imageInfo = null; },
+      (info) => { if (!cancelled) { imageInfo = info; infoLoading = false; } },
+      () => { if (!cancelled) { imageInfo = null; infoLoading = false; } },
     );
     return () => { cancelled = true; };
   });
@@ -1456,7 +1464,15 @@
     if (!plan) return;
     checking = true;
     try {
-      const res = await api.dryRunRestorePlan(plan, buildCheckContext());
+      // The key travels with the preview too: the service reads the copy's own
+      // description to check the plan, and an encrypted copy says nothing
+      // without it. Left out, the preview judged by what this window sent and
+      // the restore judged by nothing — and passed, then refused.
+      const res = await api.dryRunRestorePlan(
+        plan,
+        buildCheckContext(),
+        archiveSecretFor(plan.image_path),
+      );
       checks = res.results;
       letterChanges = res.letter_changes;
       // Apply the plan that came BACK: the dry run resolves drive-letter
@@ -1695,12 +1711,14 @@
           />
         {/each}
       </div>
-    {:else if copiesLoading || (engine.volumesLoading && engine.disks.length === 0)}
-      <div class="loading-note">Загрузка списка дисков…</div>
+    {:else if copiesLoading || infoLoading || (engine.volumesLoading && engine.disks.length === 0)}
+      <div class="loading-note">Чтение копии…</div>
     {:else}
       <!-- Only once everything that could describe the copy has been asked and
-           answered. This used to be reachable mid-load, so it appeared for a
-           moment on every visit and then withdrew itself. -->
+           answered — BOTH reads, not just the folder scan. Missing the second
+           one left this reachable mid-load, so it appeared for a moment on
+           every visit and then withdrew itself; on an encrypted copy that
+           moment is however long Argon2id takes. -->
       <div class="warn-note">Диск этой копии сейчас не подключён — карту показать нельзя.</div>
     {/if}
 

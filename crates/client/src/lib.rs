@@ -602,8 +602,11 @@ impl BackupClient {
         &mut self,
         plan: &own_backup_common::restore_plan::RestorePlan,
         context: &own_backup_common::restore_check::CheckContext,
+        secret: &ArchiveSecret,
     ) -> Result<serde_json::Value> {
-        let json = serde_json::json!({ "plan": plan, "context": context }).to_string();
+        let mut body = serde_json::json!({ "plan": plan, "context": context });
+        secret.add_to(&mut body);
+        let json = body.to_string();
         let reply = self
             .inner
             .dry_run_restore_plan(self.request(proto::JsonRequest { json }))

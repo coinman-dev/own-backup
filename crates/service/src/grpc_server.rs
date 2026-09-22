@@ -80,6 +80,7 @@ impl BackupServiceImpl {
     async fn validate_restore(
         &self,
         plan: &mut own_backup_common::restore_plan::RestorePlan,
+        keys: Option<&own_backup_backup::seal::context::ArchiveKeys>,
     ) -> Result<Vec<String>, Status> {
         use own_backup_common::restore_check::{
             check_plan, resolve_letter_conflicts, CheckContext, CheckLevel,
@@ -117,7 +118,7 @@ impl BackupServiceImpl {
             ),
         }
 
-        let ctx = self.restore_context(plan, CheckContext::default());
+        let ctx = self.restore_context(plan, CheckContext::default(), keys);
         let moved = resolve_letter_conflicts(plan, &ctx.taken_letters);
         for m in &moved {
             tracing::info!(
@@ -162,6 +163,7 @@ impl BackupServiceImpl {
         &self,
         plan: &own_backup_common::restore_plan::RestorePlan,
         from_client: own_backup_common::restore_check::CheckContext,
+        keys: Option<&own_backup_backup::seal::context::ArchiveKeys>,
     ) -> own_backup_common::restore_check::CheckContext {
         use own_backup_common::restore_check::CheckContext;
 
@@ -172,8 +174,8 @@ impl BackupServiceImpl {
             // What the image holds. The client read the same sidecar, but the
             // service can read it again and this is the sizes every "will it
             // fit" answer is computed from.
-            sources: image_sources(&plan.image_path).unwrap_or(from_client.sources),
-            source_sector_size: image_sector_size(&plan.image_path)
+            sources: image_sources(&plan.image_path, keys).unwrap_or(from_client.sources),
+            source_sector_size: image_sector_size(&plan.image_path, keys)
                 .unwrap_or(from_client.source_sector_size),
             ..Default::default()
         };
@@ -216,11 +218,12 @@ impl BackupServiceImpl {
 /// all there is, and the executor's own size check is the backstop.
 fn image_sources(
     image: &std::path::Path,
+    keys: Option<&own_backup_backup::seal::context::ArchiveKeys>,
 ) -> Option<Vec<own_backup_common::restore_check::SourcePartition>> {
     use own_backup_common::image::VolumeCaptureMode;
     use own_backup_common::restore_check::SourcePartition;
 
-    let sidecar = own_backup_backup::sidecar::read_image_sidecar(image).ok()?;
+    let sidecar = read_sidecar_for_checks(image, keys)?;
     let disk = sidecar.disk_manifest.as_ref()?;
     let source = disk.source_disk.as_ref()?;
 
@@ -255,8 +258,49 @@ fn image_sources(
     )
 }
 
+/// The copy's own description of itself, for the plan checks — with the key
+/// when there is one.
+///
+/// An ENCRYPTED copy says nothing without it. Read keyless, it came back as
+/// "not a whole-disk image", the service fell through to whatever the client
+/// had sent, and `apply_restore_plan` sends no context at all — so every
+/// operation was refused with «в копии нет раздела с номером N» about a copy
+/// that plainly had them. The dry run passed, because the window did have the
+/// key and its list filled the gap: the preview said yes and the restore said
+/// no, which is the worst way for these two to disagree.
+fn read_sidecar_for_checks(
+    image: &std::path::Path,
+    keys: Option<&own_backup_backup::seal::context::ArchiveKeys>,
+) -> Option<own_backup_backup::Sidecar> {
+    let Some(keys) = keys else {
+        return own_backup_backup::sidecar::read_image_sidecar(image).ok();
+    };
+    let sealed = keys
+        .open_chain_of(image)
+        .and_then(|chain| own_backup_backup::sidecar::read_sealed_sidecar(image, &chain.key));
+    match sealed {
+        Ok(sidecar) => Some(sidecar),
+        Err(e) => {
+            // A key that does not open THIS copy is not a reason to fall back to
+            // the keyless read: that answers for a different file shape and
+            // would let the checks judge a copy nobody has opened.
+            tracing::warn!(image = %image.display(), error = %e,
+                "plan checks: the copy's sealed description could not be read");
+            None
+        }
+    }
+}
+
 /// Logical sector size the image's layout was captured with.
-fn image_sector_size(image: &std::path::Path) -> Option<u32> {
+fn image_sector_size(
+    image: &std::path::Path,
+    keys: Option<&own_backup_backup::seal::context::ArchiveKeys>,
+) -> Option<u32> {
+    if keys.is_some() {
+        return read_sidecar_for_checks(image, keys)
+            .map(|s| s.manifest.source_disk.sector_size_logical)
+            .filter(|s| *s > 0);
+    }
     own_backup_backup::sidecar::read_image_sidecar_header(image)
         .ok()
         .map(|(_, manifest)| manifest.source_disk.sector_size_logical)
@@ -1768,16 +1812,25 @@ impl BackupService for BackupServiceImpl {
             plan: RestorePlan,
             #[serde(default)]
             context: CheckContext,
+            /// What opens the copy, when it is encrypted. The preview must read
+            /// the same bytes the restore will, or the two disagree — and the
+            /// direction they disagreed in was the bad one: preview yes,
+            /// restore no.
+            #[serde(default, flatten)]
+            secret: ManualSecret,
         }
         let mut p: In = serde_json::from_str(&req.into_inner().json)
             .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+
+        // Seconds of Argon2id, and this runs before anything is reserved.
+        let archive = manual_keys_off_thread(p.plan.image_path.clone(), p.secret).await?;
 
         // The context is built HERE, from the machine and the image, and the
         // client's copy only fills gaps it alone can know about (audit AUD-01,
         // point 2). What a client sends about disks is a picture it drew some
         // time ago; the partition table can have changed since, and a
         // `CheckContext` is the input to every safety decision below.
-        let ctx = self.restore_context(&p.plan, p.context);
+        let ctx = self.restore_context(&p.plan, p.context, archive.as_ref());
 
         // Resolving letters mutates the plan, so the caller gets the adjusted
         // plan back and applies *that* — otherwise the fix would be lost
@@ -1882,7 +1935,7 @@ impl BackupService for BackupServiceImpl {
         // The same checks now run here, on the plan that is actually about to
         // be executed, against a context built on this side of the wire. A
         // preview is still useful; it is not a permission slip.
-        let refusals = self.validate_restore(&mut plan).await?;
+        let refusals = self.validate_restore(&mut plan, archive.as_ref()).await?;
         if !refusals.is_empty() {
             return Err(Status::failed_precondition(format!(
                 "План не прошёл проверку — ничего не записано:\n{}",

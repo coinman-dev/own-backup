@@ -128,8 +128,8 @@ export const api = {
   // --- restore plans (partition designer) ---
   // Only the dry run is wired up: it validates and writes nothing. Applying a
   // plan is destructive and stays deliberately unconnected for now.
-  dryRunRestorePlan: (plan: RestorePlan, context?: CheckContext) =>
-    invoke<DryRunResult>('dry_run_restore_plan', { plan, context }),
+  dryRunRestorePlan: (plan: RestorePlan, context?: CheckContext, secret?: ArchiveSecret) =>
+    invoke<DryRunResult>('dry_run_restore_plan', { plan, context, ...secretArgs(secret) }),
   /** Does this password open the container whose header the copy kept?
    *  `false` = wrong password; a rejected promise = the check could not be
    *  made (no stored header, unreadable image). */
