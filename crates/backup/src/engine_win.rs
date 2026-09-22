@@ -3250,22 +3250,41 @@ fn backup_disk_inner(
         Some((_, sc)) => full_used(sc.manifest.used_blocks, reserved_by(sc)),
         None => full_used(disk_used.count, own_reserve),
     };
-    // A chain started before container headers were stored has no room for one.
-    // The child cannot grow the image — its geometry is the parent's — so the
-    // only honest move is to start a new full backup rather than run for an
+    // Does this run's metadata fit the room the parent laid down? The child
+    // cannot grow the image — its geometry is the parent's — so if it does not,
+    // the only honest move is to start a new full backup rather than run for an
     // hour and fail at the metadata write.
+    //
+    // The comparison is between the two SIZES, not between the reserves they
+    // are computed from, and that is the whole point. The reserve carries
+    // meaningless jitter: it is measured from the serialized boot entries,
+    // whose JSON holds a timestamp whose textual length wobbles by a byte or
+    // three from run to run. Comparing reserves therefore refused a perfectly
+    // good parent over `18730 > 18727` — three bytes, inside a slack of 16
+    // kilobytes — and every copy of the chain came out full. The size rounds to
+    // whole megabytes, where three bytes cannot be seen.
+    //
+    // Sizes also ask the wider question the reserve alone could not: the child's
+    // checksum table grows with the volume, and a source that has gained enough
+    // used blocks genuinely will not fit either.
     if let Some((pp, sc)) = &parent {
-        let parent_reserve = reserved_by(sc);
-        if own_reserve > parent_reserve {
+        let have = full_used(sc.manifest.used_blocks, reserved_by(sc));
+        let want = full_used(disk_used.count, own_reserve);
+        if want > have {
             warn!(
                 parent = %pp.display(),
-                parent_reserve,
+                parent_meta = have,
+                needed_meta = want,
+                parent_reserve = reserved_by(sc),
                 own_reserve,
-                "parent image has no room for the container header — creating a full backup instead"
+                parent_blocks = sc.manifest.used_blocks,
+                own_blocks = disk_used.count,
+                "this copy's metadata does not fit the room the parent reserved \
+                 — creating a full backup instead"
             );
             kind = BackupType::Full;
             parent = None;
-            meta_size = full_used(disk_used.count, own_reserve);
+            meta_size = want;
         }
     }
     // An encrypted image has no guest meta partition: its sidecar is sealed
