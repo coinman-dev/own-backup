@@ -54,6 +54,8 @@ pub(super) trait Backend: Send + Sync {
     fn write_new(&self, id: Uuid, blob: &[u8]) -> Result<()>;
     fn read(&self, id: Uuid) -> Result<Vec<u8>>;
     fn remove(&self, id: Uuid) -> Result<()>;
+    /// Every key this store holds, whether or not a job still refers to it.
+    fn list_ids(&self) -> Result<Vec<Uuid>>;
 }
 
 impl ServiceKeyStore {
@@ -181,6 +183,34 @@ impl ServiceKeyStore {
             .map_err(|_| bad("key-store transaction is poisoned"))?;
         self.backend.remove(reference.id)
     }
+
+    /// Drop every key no live job refers to, and say which ones went.
+    ///
+    /// A blob that outlives its job is exactly what this store exists to
+    /// prevent someone having: it lets THIS machine's service open an archive
+    /// with no password, and nothing left on disk accounts for it. They appear
+    /// from an older build that deleted jobs without revoking, and from a crash
+    /// between writing the blob and publishing the job.
+    ///
+    /// `keep` must be the whole live set. Passing a partial list deletes
+    /// authorizations that are still in use — which costs no data (the portable
+    /// slots are untouched) but does make the affected jobs ask for the
+    /// password again.
+    pub fn retain(&self, keep: &std::collections::BTreeSet<Uuid>) -> Result<Vec<Uuid>> {
+        let _guard = self
+            .transaction
+            .lock()
+            .map_err(|_| bad("key-store transaction is poisoned"))?;
+        let mut gone = Vec::new();
+        for id in self.backend.list_ids()? {
+            if keep.contains(&id) {
+                continue;
+            }
+            self.backend.remove(id)?;
+            gone.push(id);
+        }
+        Ok(gone)
+    }
 }
 
 fn identity(job_id: &str, portable: &SealedPrivateKey) -> Result<JobPublicKey> {
@@ -271,6 +301,9 @@ mod tests {
         fn remove(&self, id: Uuid) -> Result<()> {
             self.disk.files.lock().unwrap().remove(&id);
             Ok(())
+        }
+        fn list_ids(&self) -> Result<Vec<Uuid>> {
+            Ok(self.disk.files.lock().unwrap().keys().copied().collect())
         }
     }
     fn store(disk: &Arc<Disk>, machine: u8) -> ServiceKeyStore {
@@ -376,6 +409,36 @@ mod tests {
     }
 
     #[cfg(not(target_os = "windows"))]
+    /// A key the live set does not name is retired; one it names is not. The
+    /// second half matters as much as the first: a sweep that took a live
+    /// authorization with it would make a scheduled job stop overnight and ask
+    /// a person for a password it must never ask for.
+    #[test]
+    fn a_sweep_keeps_the_keys_jobs_still_name_and_drops_the_rest() {
+        let disk = Arc::new(Disk::default());
+        let (live_pair, _, live_key) = portable();
+        let (dead_pair, _, dead_key) = portable();
+        let keys = store(&disk, 1);
+        let live = keys
+            .authorize_and_commit("job", &live_key, &live_pair.private, Ok)
+            .unwrap();
+        let dead = keys
+            .authorize_and_commit("job", &dead_key, &dead_pair.private, Ok)
+            .unwrap();
+
+        let keep = std::collections::BTreeSet::from([live.id]);
+        let gone = keys.retain(&keep).unwrap();
+        assert_eq!(gone, vec![dead.id]);
+
+        assert!(keys.open("job", &live_key, &live).is_ok());
+        assert!(keys.open("job", &dead_key, &dead).is_err());
+        // Nothing here can cost access to the archive itself.
+        dead_key.unseal_with_password("password").unwrap();
+
+        // And it is idempotent: the second pass finds nothing left to do.
+        assert!(keys.retain(&keep).unwrap().is_empty());
+    }
+
     #[test]
     fn no_unprotected_non_windows_fallback() {
         assert!(ServiceKeyStore::new(Path::new("unused")).is_err());

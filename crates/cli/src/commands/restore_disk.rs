@@ -29,10 +29,46 @@ pub async fn run(args: RestoreDiskArgs) -> own_backup_common::Result<()> {
     use own_backup_common::OwnBackupError;
     use std::io::Write;
 
-    // Show what will be restored, straight from the manifest.
-    let raw = std::fs::read(&args.manifest).map_err(OwnBackupError::Io)?;
-    let manifest: DiskBackupManifest = serde_json::from_slice(&raw)
-        .map_err(|e| OwnBackupError::ImageFormat(format!("bad .obdm manifest: {e}")))?;
+    // Two shapes arrive here, and only one of them is JSON: the legacy `.obdm`
+    // manifest with its images beside it, and a single whole-disk image that
+    // carries the manifest inside. Reading the argument as JSON whatever it is
+    // could never restore the second — it answered "bad .obdm manifest" for
+    // every image, encrypted or not, after reading the whole file into memory
+    // to say so.
+    let image_path = std::path::PathBuf::from(&args.manifest);
+    let ext = image_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_lowercase();
+    let whole_disk_image = matches!(ext.as_str(), "vhdx" | "avhdx" | "qcow2")
+        || ext == own_backup_backup::seal::obk::OBK_EXTENSION;
+
+    // The password is asked for HERE, before anything is shown or confirmed:
+    // the summary below comes out of the sealed metadata, so for an encrypted
+    // copy there is nothing to print until the key is open.
+    let mut encryption = None;
+    let manifest: DiskBackupManifest = if whole_disk_image {
+        let path = image_path.clone();
+        let (keys, sidecar) = tokio::task::spawn_blocking(move || {
+            let keys = crate::commands::archive_key::open_keys_for_image(&path)?;
+            let sidecar =
+                own_backup_backup::engine_win::load_sidecar_with_keys(&path, keys.as_ref())?;
+            Ok::<_, OwnBackupError>((keys, sidecar))
+        })
+        .await
+        .map_err(|e| OwnBackupError::Device(format!("reading the image panicked: {e}")))??;
+        encryption = keys;
+        sidecar.disk_manifest.ok_or_else(|| {
+            OwnBackupError::ImageFormat(
+                "у образа нет встроенного описания диска — это копия тома, а не диска".into(),
+            )
+        })?
+    } else {
+        let raw = std::fs::read(&args.manifest).map_err(OwnBackupError::Io)?;
+        serde_json::from_slice(&raw)
+            .map_err(|e| OwnBackupError::ImageFormat(format!("bad .obdm manifest: {e}")))?
+    };
 
     let sector = manifest.layout.sector_size;
     println!(
@@ -79,17 +115,18 @@ pub async fn run(args: RestoreDiskArgs) -> own_backup_common::Result<()> {
         }
     }
 
-    let mut request = DiskRestoreRequest {
-        manifest_path: std::path::PathBuf::from(&args.manifest),
+    // Already open: asked for above, before the summary was printed and long
+    // before the target disk is touched. Asking again here would be a second
+    // prompt for the same secret — and for a `.obdm` it asked a file that is
+    // not an image at all what container it is, and failed.
+    let request = DiskRestoreRequest {
+        manifest_path: image_path,
         target_disk: args.target_disk,
         verify_checksums: !args.no_verify,
-        // Asked for below, before the target disk is touched.
-        encryption: None,
+        encryption,
     };
 
     let summary = tokio::task::spawn_blocking(move || {
-        request.encryption =
-            crate::commands::archive_key::open_keys_for_image(&request.manifest_path)?;
         let mut last = String::new();
         restore_disk(&request, |p| {
             let pct = if p.blocks_total > 0 {

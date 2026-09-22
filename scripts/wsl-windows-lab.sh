@@ -15,6 +15,7 @@
 #   media     rebuild only the answer CD, keeping the installed VM
 #   install   boot the Windows ISO, install unattended, run stage 1, power off
 #   coldstart boot the installed disk with nobody logged on, run stage 2
+#   restore   boot with an archive disk and a blank target, restore a whole disk
 #   shot      screenshot the running VM (PNG), for when a phase does not finish
 #   key/reset press a key in the guest, or reset it
 #   wait      block until the guest powers itself off
@@ -30,6 +31,10 @@ WINDOWS_ISO="${WINDOWS_ISO:-$LAB/win10-ltsc.iso}"
 PROBE="${PROBE_EXE:-$REPO/target/x86_64-pc-windows-msvc/debug/examples/seal_store_service.exe}"
 OBK_PROBE="${OBK_PROBE_EXE:-$REPO/target/x86_64-pc-windows-msvc/debug/examples/obk_live_probe.exe}"
 DISK="$LAB/win-lab.qcow2"
+# The `restore` phase's two extra disks: the archive to read and the disk to
+# overwrite. Both are made outside this script — one holds a real backup chain.
+ARCHIVE_DISK="${ARCHIVE_DISK:-$LAB/archive.ntfs}"
+TARGET_DISK="${TARGET_DISK:-$LAB/restore-target.qcow2}"
 ANSWER="$LAB/answer.iso"
 MONITOR="$LAB/monitor.sock"
 PIDFILE="$LAB/qemu.pid"
@@ -144,6 +149,25 @@ case "${1:-}" in
         # No installer media, nobody logged on: this is the cold start itself.
         boot coldstart \
             -drive "file=$ANSWER,format=raw,if=ide,index=2,media=cdrom" \
+            -boot order=c
+        ;;
+    restore)
+        # Whole-disk restore of a REAL encrypted archive, on a machine that has
+        # never seen the job, the database or the service's own key: the only
+        # way in is the portable slots inside the images (§7.5).
+        #
+        # No answer CD here on purpose — the boot script takes the first
+        # non-system drive that carries `\lab\lab-stage2.ps1`, and with two of
+        # them attached which one wins is a coin toss. The archive disk carries
+        # it, so the archive disk is the only candidate.
+        [ -f "$ARCHIVE_DISK" ] || die "no archive disk: $ARCHIVE_DISK"
+        [ -f "$TARGET_DISK" ] || die "no target disk: $TARGET_DISK"
+        boot restore \
+            -device ich9-ahci,id=ahci \
+            -drive "file=$ARCHIVE_DISK,format=raw,if=none,id=darch,cache=writeback" \
+            -device ide-hd,drive=darch,bus=ahci.0 \
+            -drive "file=$TARGET_DISK,format=qcow2,if=none,id=dtgt,cache=writeback" \
+            -device ide-hd,drive=dtgt,bus=ahci.1 \
             -boot order=c
         ;;
     shot)

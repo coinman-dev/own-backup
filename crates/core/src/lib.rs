@@ -715,10 +715,20 @@ impl JobStore {
 
     /// Remove a job; the list in memory changes only once the disk agrees.
     pub fn delete(&self, id: &str) -> std::io::Result<()> {
-        let mut jobs = self.jobs.lock().unwrap();
-        let next: Vec<Job> = jobs.iter().filter(|j| j.id != id).cloned().collect();
-        write_json(&self.jobs_path, &next)?;
-        *jobs = next;
+        let removed: Option<Job>;
+        {
+            let mut jobs = self.jobs.lock().unwrap();
+            removed = jobs.iter().find(|j| j.id == id).cloned();
+            let next: Vec<Job> = jobs.iter().filter(|j| j.id != id).cloned().collect();
+            write_json(&self.jobs_path, &next)?;
+            *jobs = next;
+        }
+        // Only now: the job is durably gone, so its local key refers to nothing
+        // and must not stay on this machine. The lock is released first —
+        // revocation touches the key store, not the job list.
+        if let Some(job) = removed {
+            self.retire_local_archive_key(&job);
+        }
         Ok(())
     }
 

@@ -335,6 +335,28 @@ impl Backend for WindowsBackend {
         Ok(data)
     }
 
+    /// The keys on disk, by name. A file that is not `<uuid>.dpapi` is not one
+    /// of ours and is left alone: this list feeds a delete, and guessing at an
+    /// unknown neighbour's file would be the one way to make that dangerous.
+    fn list_ids(&self) -> Result<Vec<Uuid>> {
+        self.check_context()?;
+        let mut ids = Vec::new();
+        for entry in std::fs::read_dir(&self.root)
+            .map_err(|e| bad(format!("каталог локальных ключей не читается: {e}")))?
+        {
+            let entry = entry.map_err(|e| bad(format!("каталог локальных ключей: {e}")))?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            let Some(stem) = name.strip_suffix(".dpapi") else {
+                continue;
+            };
+            if let Ok(id) = Uuid::parse_str(stem) {
+                ids.push(id);
+            }
+        }
+        Ok(ids)
+    }
+
     fn remove(&self, id: Uuid) -> Result<()> {
         match self.open_file(id, true) {
             Ok(file) => delete_handle(&file),

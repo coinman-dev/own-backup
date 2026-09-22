@@ -50,6 +50,72 @@ impl JobStore {
         })
     }
 
+    /// Retire the local authorization of a job that has just been removed.
+    ///
+    /// Call it only once the job is durably gone: while it is still in
+    /// `jobs.json` the reference is live, and revoking first would leave a
+    /// scheduled job pointing at a key that is not there. Nothing here can cost
+    /// access to the archive — the password and the recovery key live in the
+    /// images, and this only takes away this machine's ability to open them
+    /// without either.
+    ///
+    /// Reported, never fatal: the job is already deleted, and refusing to
+    /// finish that because one leftover file resisted would be worse than the
+    /// leftover.
+    pub fn retire_local_archive_key(&self, job: &Job) {
+        let Some(encryption) = &job.archive_encryption else {
+            return;
+        };
+        let outcome = self
+            .service_key_store()
+            .and_then(|keys| keys.revoke(&encryption.local_key));
+        match outcome {
+            Ok(()) => tracing::info!(
+                job = %job.id,
+                key_id = %encryption.local_key.id(),
+                "local archive authorization retired with the job"
+            ),
+            Err(e) => tracing::warn!(
+                job = %job.id,
+                key_id = %encryption.local_key.id(),
+                error = %e,
+                "local archive authorization outlived its job — it is unreferenced \
+                 and can be deleted by hand from the service key store"
+            ),
+        }
+    }
+
+    /// Drop local authorizations no job refers to any more.
+    ///
+    /// The per-deletion path above is the one that should do this work. This is
+    /// what catches the rest: jobs deleted by a build that predates it, a crash
+    /// between writing the blob and publishing the job, and a `jobs.json`
+    /// restored from an older copy.
+    ///
+    /// Returns how many were retired. Anything that is not a live job's key is
+    /// removed, so this must run where the whole job list is known.
+    ///
+    /// An EMPTY list is refused, and that is the important part: a `jobs.json`
+    /// that could not be parsed is moved aside and the store starts empty, on
+    /// purpose, so the jobs can be put back by hand. Sweeping against that
+    /// would answer "no job refers to anything" and retire every
+    /// authorization on the machine — precisely when the person is in the
+    /// middle of recovering them. A leftover file in a SYSTEM-only directory
+    /// is the cheaper mistake.
+    pub fn sweep_local_archive_keys(&self) -> Result<usize> {
+        let jobs = self.list();
+        if jobs.is_empty() {
+            return Ok(0);
+        }
+        let gone = self
+            .service_key_store()?
+            .retain(&referenced_local_keys(&jobs))?;
+        for id in &gone {
+            tracing::info!(key_id = %id, "unreferenced local archive authorization retired");
+        }
+        Ok(gone.len())
+    }
+
     /// Opens the service authorization from disk on every run, including after
     /// service/OS restart. Manual mount/restore must not call this method.
     pub(crate) fn scheduled_archive_key(&self, job: &Job) -> Result<Option<JobPrivateKey>> {
@@ -96,6 +162,19 @@ impl JobStore {
     pub(crate) fn archive_encryption_run_error(&self, job: &Job) -> Option<String> {
         self.archive_keys_for_run(job).err()
     }
+}
+
+/// Every local key the live jobs name.
+///
+/// Its own function because a sweep deletes whatever is NOT in it: a job missed
+/// here is a scheduled job that stops overnight and asks a person for a
+/// password the schedule must never ask for. Encrypted or not, present or not —
+/// the answer has to come from the whole list every time.
+fn referenced_local_keys(jobs: &[Job]) -> std::collections::BTreeSet<uuid::Uuid> {
+    jobs.iter()
+        .filter_map(|job| job.archive_encryption.as_ref())
+        .map(|e| e.local_key.id())
+        .collect()
 }
 
 pub(crate) fn validate_update(
@@ -146,6 +225,44 @@ mod tests {
         JobPublicKey, KdfParams, Slot, SlotKind, KEY_FILE_FORMAT,
     };
     use own_backup_backup::seal::SCHEME;
+
+    /// What the sweep is allowed to keep, from a list that mixes the three
+    /// shapes a real `jobs.json` holds: encrypted, plain, and an encrypted one
+    /// whose copy of the key differs.
+    #[test]
+    fn the_keep_set_names_every_encrypted_jobs_key_and_nothing_else() {
+        let a = encrypted_job();
+        let mut b = encrypted_job();
+        b.id = "second".into();
+        b.archive_encryption.as_mut().unwrap().portable_key.job_id = "second".into();
+        b.archive_encryption.as_mut().unwrap().local_key =
+            serde_json::from_value(serde_json::json!({ "id": uuid::Uuid::new_v4() })).unwrap();
+        let plain = Job { id: "plain".into(), ..Default::default() };
+
+        let keep = referenced_local_keys(&[a.clone(), plain, b.clone()]);
+        assert_eq!(keep.len(), 2, "one per encrypted job, and the plain job adds none");
+        for job in [&a, &b] {
+            let id = job.archive_encryption.as_ref().unwrap().local_key.id();
+            assert!(keep.contains(&id), "job {} kept its key", job.id);
+        }
+        assert!(referenced_local_keys(&[]).is_empty());
+    }
+
+    /// An empty job list stops the sweep before it reaches the key store —
+    /// that is the whole guard, and the way to see it is that the store's own
+    /// error never gets a chance to appear.
+    #[test]
+    fn an_empty_job_list_sweeps_nothing_at_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JobStore::load(dir.path());
+        assert_eq!(store.sweep_local_archive_keys().unwrap(), 0);
+
+        store.upsert(Job { name: "nightly".into(), ..Default::default() }).unwrap();
+        assert!(
+            store.sweep_local_archive_keys().is_err(),
+            "with a job present it does reach the key store (absent here)"
+        );
+    }
 
     fn encrypted_job() -> Job {
         let public = JobPublicKey::from_bytes([0; 32]);

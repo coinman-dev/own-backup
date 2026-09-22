@@ -11,7 +11,7 @@ mod windows_service;
 use std::net::SocketAddr;
 
 use tonic::transport::Server;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use app_state::AppState;
 use grpc_server::BackupServiceImpl;
@@ -489,6 +489,16 @@ pub async fn run_main_loop(
     // an event fan-out for progress streams, and the background worker that
     // actually drives backups.
     let store = own_backup_core::JobStore::load(&config.data_dir);
+    // A local authorization whose job is gone opens an archive on this machine
+    // with no password and is accounted for by nothing. Deleting a job retires
+    // its own; this catches what older builds and interrupted transactions
+    // left. Read as diagnostics, not as a failure to start: on a machine with
+    // no encrypted job the store does not even exist.
+    match store.sweep_local_archive_keys() {
+        Ok(0) => {}
+        Ok(n) => info!(retired = n, "unreferenced local archive authorizations removed"),
+        Err(e) => debug!(error = %e, "local archive key store not swept"),
+    }
     let queue = own_backup_core::RunQueue::new();
     // Everything destructive — a copy, a restore, a verify, a read-write
     // mount, deleting a job's images — goes through this one slot (AUD-02).
