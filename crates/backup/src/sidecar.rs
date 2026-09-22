@@ -883,12 +883,40 @@ pub fn read_image_sidecar(image_path: &Path) -> Result<Sidecar> {
 ///
 /// `None` means this copy carries none: not a bootable copy, a BIOS machine,
 /// or a run that could not read the firmware.
+/// **Reads the copy WITHOUT a key**, so an ENCRYPTED copy answers that it has
+/// no boot entries — its whole sidecar is sealed. Use [`boot_entries_of`]
+/// wherever the sidecar has already been opened, which is everywhere that
+/// matters; this one is for a caller that has nothing else.
 pub fn boot_entries_of_image(image_path: &Path) -> Option<crate::efivars::BootBackup> {
     if let Ok((info, _)) = read_image_sidecar_header(image_path) {
         if info.boot_entries.is_some() {
             return info.boot_entries;
         }
     }
+    boot_entries_beside(image_path)
+}
+
+/// The entries a copy carries, from a sidecar that is already open.
+///
+/// The menu lives in the motherboard's NVRAM, so a copy that holds every
+/// partition holds none of what starts them — which is why a bootable copy
+/// carries the entries too, sealed with the rest of its metadata. Asking the
+/// FILE for them again (as [`boot_entries_of_image`] does) gets "none" from an
+/// encrypted copy, and then the screen offers no question and the restore
+/// reports there was nothing to put back.
+pub fn boot_entries_of(
+    sidecar: &Sidecar,
+    image_path: &Path,
+) -> Option<crate::efivars::BootBackup> {
+    if sidecar.info.boot_entries.is_some() {
+        return sidecar.info.boot_entries.clone();
+    }
+    // Copies written before the entries moved inside keep them in a file next
+    // to the image.
+    boot_entries_beside(image_path)
+}
+
+fn boot_entries_beside(image_path: &Path) -> Option<crate::efivars::BootBackup> {
     let beside = boot_entries_path_beside(image_path);
     let json = std::fs::read_to_string(&beside).ok()?;
     match crate::efivars::BootBackup::load(&json) {
@@ -1697,6 +1725,46 @@ mod tests {
         let read = boot_entries_of_image(&image).expect("the copy carries them");
         assert_eq!(read.machine, "MODULATOR");
         assert_eq!(read.readable[0].description, "Windows 11");
+    }
+
+    /// Уже открытый сайдкар отвечает сам, не перечитывая файл.
+    ///
+    /// Для зашифрованной копии это единственный работающий путь: её сайдкар
+    /// запечатан, и чтение файла без ключа отвечает «записей нет» о копии, в
+    /// которой их четыре. Запасной путь к файлу рядом при этом сохраняется —
+    /// он для копий, снятых до переезда записей внутрь.
+    #[test]
+    fn an_open_sidecar_answers_about_its_own_boot_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("copy.obk");
+
+        let mut info = SidecarInfo::new_full("copy.obk", 0);
+        info.boot_entries = Some(a_boot_backup("MODULATOR"));
+        let sidecar = Sidecar {
+            info,
+            manifest: make_manifest(),
+            checksums: Vec::new(),
+            disk_manifest: None,
+        };
+        // Ничего не лежит ни рядом, ни в файле — ответ приходит из сайдкара.
+        assert!(!image.exists());
+        let read = boot_entries_of(&sidecar, &image).expect("из открытого сайдкара");
+        assert_eq!(read.machine, "MODULATOR");
+
+        // А сайдкар без записей всё так же смотрит в файл рядом.
+        let plain = Sidecar {
+            info: SidecarInfo::new_full("copy.obk", 0),
+            manifest: make_manifest(),
+            checksums: Vec::new(),
+            disk_manifest: None,
+        };
+        assert!(boot_entries_of(&plain, &image).is_none());
+        std::fs::write(
+            boot_entries_path_beside(&image),
+            serde_json::to_string(&a_boot_backup("OLDER")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(boot_entries_of(&plain, &image).unwrap().machine, "OLDER");
     }
 
     /// Копия, снятая до переезда, хранит их рядом — и это по-прежнему годная

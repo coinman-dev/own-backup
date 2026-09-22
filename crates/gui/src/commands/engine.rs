@@ -291,6 +291,10 @@ fn read_image_info_at(
     // images list them in the embedded disk manifest; a per-volume image holds
     // the single partition matching its source device.
     let source_disk_layout = sidecar.info.source_disk_layout.clone();
+    // From THIS sidecar, which was opened with the key when the copy is
+    // encrypted. Asking the file again without one answers "no entries", and
+    // then the screen never offers the question at all.
+    let boot_backup = own_backup_backup::sidecar::boot_entries_of(&sidecar, path);
     let is_whole_disk = sidecar.disk_manifest.is_some();
     let src_dev = sidecar.manifest.source_disk.device_id.clone();
     let backed_up_parts: Vec<u32> = if let Some(dm) = &sidecar.disk_manifest {
@@ -412,7 +416,7 @@ fn read_image_info_at(
         app_version: sidecar.info.app_version,
         // Inside the image now; a copy taken before they moved in still has
         // them in a `.boot.json` beside it, and that is read as a fallback.
-        boot_entries: own_backup_backup::sidecar::boot_entries_of_image(path).map(|b| {
+        boot_entries: boot_backup.map(|b| {
             // A copy taken before flash drives were left out still carries
             // them, and the restore no longer writes them back — so they have
             // no business being in the list the user is asked to agree to.

@@ -1437,7 +1437,11 @@ fn run_op(
             use own_backup_backup::efivars_win;
 
             let mut note = OpNote::default();
-            let Some(saved) = own_backup_backup::sidecar::boot_entries_of_image(&plan.image_path)
+            // From the sidecar this run already opened — with the archive key
+            // when the copy is encrypted. Re-reading the file keyless got
+            // "there are none" from a copy that had four.
+            let Some(saved) =
+                own_backup_backup::sidecar::boot_entries_of(sidecar, &plan.image_path)
             else {
                 // The plan asked for them and the copy has none. Not a failure
                 // of the restore — everything on the disk is written — but the
