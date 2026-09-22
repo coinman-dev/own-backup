@@ -479,15 +479,83 @@ pub async fn list_image_backups(folder: String) -> Result<Vec<ImageInfoDto>, Str
             .and_then(|e| e.to_str())
             .unwrap_or_default()
             .to_lowercase();
-        // `.obk` is deliberately absent: a folder scan has no key, and
-        // everything this listing shows about a copy is sealed inside it.
-        // The screen adds an encrypted copy one at a time, asking then.
+        // `.obk` is absent here because everything this DTO holds — the layout,
+        // the partitions, the sizes — is sealed, and a folder scan has no key.
+        // They are not ignored: [`list_locked_images`] finds them by their open
+        // header so the screen can ask for the password instead of reporting an
+        // empty folder that plainly is not empty.
         if !matches!(ext.as_str(), "vhdx" | "avhdx" | "qcow2") {
             continue;
         }
         if let Ok(info) = read_image_info_at(&path, &own_backup_client::ArchiveSecret::none()) {
             out.push(info);
         }
+    }
+    out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Ok(out)
+}
+
+/// One encrypted copy found in a folder, as far as it can be read with no key.
+///
+/// Every field comes from the open header — the same half the backup lists and
+/// retention work from. It is a CLAIM: enough to name the file and group it
+/// with its chain, and nothing a restore may act on. The sealed metadata is
+/// read once the person supplies the password.
+#[derive(Debug, Clone, Serialize)]
+pub struct LockedImageDto {
+    pub image_path: String,
+    pub file_name: String,
+    pub job_id: String,
+    pub chain_id: String,
+    pub backup_id: String,
+    pub role: String,
+    pub created_at: String,
+    /// The file this one continues, when it continues one. A copy whose parent
+    /// is missing from the folder cannot be restored from it.
+    pub parent_file_name: Option<String>,
+    pub virtual_size: u64,
+}
+
+/// Scan `folder` for ENCRYPTED copies, without any key.
+///
+/// The counterpart of [`list_image_backups`], which can only describe copies it
+/// can read. Without this a folder holding nothing but `.obk` files answered
+/// "no copies with metadata found" — true of the DTO, and entirely wrong about
+/// the folder, which is the one thing the person could see for themselves.
+#[tauri::command]
+pub async fn list_locked_images(folder: String) -> Result<Vec<LockedImageDto>, String> {
+    let dir = std::path::Path::new(&folder);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default()
+            .to_lowercase();
+        if ext != own_backup_backup::seal::obk::OBK_EXTENSION {
+            continue;
+        }
+        let Ok(listing) = own_backup_backup::seal::obk::read_listing(&path) else {
+            continue;
+        };
+        out.push(LockedImageDto {
+            image_path: path.to_string_lossy().into_owned(),
+            file_name: path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            job_id: listing.job_id,
+            chain_id: listing.chain_id.to_string(),
+            backup_id: listing.backup_id.to_string(),
+            role: format!("{:?}", listing.role).to_lowercase(),
+            created_at: listing.created_at,
+            parent_file_name: listing.parent_file_name,
+            virtual_size: listing.virtual_size,
+        });
     }
     out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     Ok(out)

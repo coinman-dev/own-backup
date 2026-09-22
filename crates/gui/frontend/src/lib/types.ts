@@ -526,6 +526,24 @@ export interface ArchiveImageInfo {
   virtual_size: number;
 }
 
+/** An encrypted copy found by scanning a folder, read with NO key.
+ *
+ *  Everything here comes from the open header and is a claim — enough to name
+ *  the file and group it with its chain, never enough to restore from. The
+ *  sealed half is read once the password is supplied. */
+export interface LockedImage {
+  image_path: string;
+  file_name: string;
+  job_id: string;
+  chain_id: string;
+  backup_id: string;
+  role: string;
+  created_at: string;
+  /** The file this one continues, when it continues one. */
+  parent_file_name: string | null;
+  virtual_size: number;
+}
+
 /** What the person typed to open an encrypted copy. Both empty for an
  *  unencrypted one. */
 export interface ArchiveSecret {

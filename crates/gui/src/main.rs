@@ -415,6 +415,7 @@ fn main() {
             commands::engine::read_image_info,
             commands::engine::list_disk_backups,
             commands::engine::list_image_backups,
+            commands::engine::list_locked_images,
             commands::engine::restore_disk_now,
             commands::engine::cancel_engine_op,
             commands::engine::dry_run_restore_plan,

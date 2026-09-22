@@ -6,6 +6,7 @@ import type {
   RestoreSummary,
   VerifySummary,
   ImageInfo,
+  LockedImage,
   Job,
   JobFilesDeleted,
   JobRun,
@@ -95,6 +96,8 @@ export const api = {
     invoke<ArchiveImageInfo>('inspect_backup_image', { imagePath }),
   listDiskBackups: (folder: string) => invoke<DiskBackup[]>('list_disk_backups', { folder }),
   listImageBackups: (folder: string) => invoke<ImageInfo[]>('list_image_backups', { folder }),
+  /** Encrypted copies in a folder, as far as they read WITHOUT a key. */
+  listLockedImages: (folder: string) => invoke<LockedImage[]>('list_locked_images', { folder }),
   restoreDiskNow: (
     manifestPath: string,
     targetDisk: number,

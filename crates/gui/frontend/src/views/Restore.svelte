@@ -164,7 +164,7 @@
     // asked for before the copy is added, not when a restore is already
     // running, and it is remembered for the rest of the session.
     if (await needsArchiveKey(picked)) {
-      unlock = { open: true, path: picked, busy: false, error: '' };
+      unlock = { open: true, paths: [picked], busy: false, error: '' };
       return;
     }
     try {
@@ -181,20 +181,48 @@
     await remember([info.image_path]);
   }
 
-  /** The key dialog for a copy being added. */
-  let unlock = $state<{ open: boolean; path: string; busy: boolean; error: string }>({
+  /** The key dialog for the copies being added.
+   *
+   *  A list, not one path: a folder scan finds a whole chain at once, and they
+   *  share the job key, so one password opens all of them. Asking once per file
+   *  for the same secret would be the worse kind of thoroughness. */
+  let unlock = $state<{ open: boolean; paths: string[]; busy: boolean; error: string }>({
     open: false,
-    path: '',
+    paths: [],
     busy: false,
     error: '',
   });
+  const unlockClosed = { open: false, paths: [] as string[], busy: false, error: '' };
+
+  /** What the dialog is being asked about: one file by name, a chain by count. */
+  function unlockName(paths: string[]): string {
+    const first = paths[0] ?? '';
+    const name = first.split(/[\\/]/).pop() ?? first;
+    return paths.length > 1 ? `${name} (и ещё ${paths.length - 1})` : name;
+  }
 
   async function submitUnlock(secret: ArchiveSecret) {
     unlock.busy = true;
     unlock.error = '';
     try {
-      await addImage(unlock.path, secret);
-      unlock = { open: false, path: '', busy: false, error: '' };
+      // The first one decides whether the password is right; if it is, the rest
+      // of the chain follows on the same key. One that still refuses is named,
+      // rather than failing the whole folder — a folder may hold copies of more
+      // than one job.
+      const [first, ...rest] = unlock.paths;
+      await addImage(first, secret);
+      const refused: string[] = [];
+      for (const path of rest) {
+        try {
+          await addImage(path, secret);
+        } catch {
+          refused.push(path.split(/[\\/]/).pop() ?? path);
+        }
+      }
+      unlock = { ...unlockClosed };
+      addError = refused.length
+        ? `Этим паролем не открылись: ${refused.join(', ')}. Их можно добавить отдельно.`
+        : null;
     } catch (e) {
       // Stay open: a wrong password is a thing to retype.
       unlock.error = String(e);
@@ -218,7 +246,12 @@
     if (typeof picked !== 'string') return;
     try {
       const list = await api.listImageBackups(picked);
-      if (list.length === 0) {
+      // Encrypted copies cannot be described until someone types the password,
+      // so they are scanned separately. Reporting an empty folder when two of
+      // them are sitting in it told the person the product could not read their
+      // backup, which was not true.
+      const locked = await api.listLockedImages(picked);
+      if (list.length === 0 && locked.length === 0) {
         addError = 'В выбранной папке не найдено копий с метаданными.';
         return;
       }
@@ -229,6 +262,16 @@
       }
       if (first) selectedId = first;
       await remember(list.map((i) => i.image_path));
+      if (locked.length > 0) {
+        // Newest first, and the newest is what a person restores: it opens the
+        // dialog, and the rest of the chain rides on the same answer.
+        unlock = {
+          open: true,
+          paths: locked.map((l) => l.image_path),
+          busy: false,
+          error: '',
+        };
+      }
     } catch (e) {
       addError = String(e);
     }
@@ -245,11 +288,11 @@
 
 <ArchiveUnlockModal
   open={unlock.open}
-  imageName={unlock.path.split(/[\\/]/).pop() ?? unlock.path}
+  imageName={unlockName(unlock.paths)}
   busy={unlock.busy}
   error={unlock.error}
   onUnlock={submitUnlock}
-  onCancel={() => (unlock = { open: false, path: '', busy: false, error: '' })}
+  onCancel={() => (unlock = { ...unlockClosed })}
 />
 
 <div class="restore-root">
