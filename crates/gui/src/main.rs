@@ -431,6 +431,8 @@ fn main() {
             commands::settings::service_health,
             // The boot medium has no taskbar to say which layout is active.
             commands::keyboard::keyboard_layout,
+            // …and every password field says it too, beside its eye.
+            commands::keyboard::keyboard_state,
             // Built-in file browsing: the native dialog is a shell dialog, and
             // the boot medium has no shell (see commands/files.rs).
             commands::files::list_roots,

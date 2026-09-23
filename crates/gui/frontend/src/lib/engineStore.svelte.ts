@@ -59,6 +59,11 @@ export function restoreEtaMs(): number {
 
 let inited = false;
 
+/** Told once, by the first progress event of the running verify, that it is
+ *  under way — for an encrypted copy that means the password was accepted,
+ *  since nothing is read before the key opens. */
+let verifyStarted: (() => void) | null = null;
+
 export async function initEngine(): Promise<void> {
   if (inited) return;
   inited = true;
@@ -75,6 +80,9 @@ export async function initEngine(): Promise<void> {
   });
   await listen<EngineProgress>('verify-progress', (e) => {
     engine.verifyProgress = e.payload;
+    const started = verifyStarted;
+    verifyStarted = null;
+    started?.();
   });
 
   await refreshVolumes();
@@ -212,16 +220,21 @@ export async function runRestore(
   }
 }
 
+/** `onStarted` is called once blocks are being read — before the verify
+ *  ends, which on a big chain is many minutes later. */
 export async function runVerify(
   imagePath: string,
   secret?: ArchiveSecret,
+  onStarted?: () => void,
 ): Promise<VerifySummary> {
   if (engine.op) throw new Error('Уже выполняется другая операция.');
   engine.op = 'verify';
   engine.verifyProgress = null;
+  verifyStarted = onStarted ?? null;
   try {
     return await api.verifyNow(imagePath, secret);
   } finally {
+    verifyStarted = null;
     engine.op = null;
     engine.verifyProgress = null;
   }

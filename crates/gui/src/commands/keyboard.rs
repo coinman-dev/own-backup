@@ -31,6 +31,51 @@ pub async fn keyboard_layout() -> Result<Option<KeyboardLayoutDto>, String> {
     Ok(current_layout())
 }
 
+/// What a password field shows beside its eye.
+///
+/// Unlike the sidebar strip this answers everywhere, taskbar or not: it is
+/// about the one field being typed into, and a taskbar indicator in a corner
+/// of the screen is not where anyone looks while typing a password.
+#[derive(serde::Serialize)]
+pub struct KeyboardStateDto {
+    pub layout: Option<KeyboardLayoutDto>,
+    /// Caps Lock, or `None` where it cannot be told.
+    pub caps_lock: Option<bool>,
+}
+
+#[tauri::command]
+pub async fn keyboard_state(app: tauri::AppHandle) -> Result<KeyboardStateDto, String> {
+    Ok(KeyboardStateDto {
+        layout: current_layout(),
+        caps_lock: caps_lock(&app).await,
+    })
+}
+
+/// Asked on the thread that owns our window, not on the command's worker.
+///
+/// `GetKeyState` is the key state of the CALLING thread's input queue, and a
+/// worker thread's queue never sees a keystroke. The window thread's does: the
+/// WebView2 window that receives the typing is its child, and a cross-process
+/// parent/child pair shares one input state. The interface does not rely on it
+/// alone — every key and mouse event carries the browser's own answer, and the
+/// field prefers that; this is for the moment before the first one.
+#[cfg(target_os = "windows")]
+async fn caps_lock(app: &tauri::AppHandle) -> Option<bool> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.run_on_main_thread(move || {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CAPITAL};
+        // Low bit: the toggle, which is what the lamp shows.
+        let _ = tx.send(unsafe { GetKeyState(VK_CAPITAL.0 as i32) } & 1 != 0);
+    })
+    .ok()?;
+    rx.await.ok()
+}
+
+#[cfg(not(target_os = "windows"))]
+async fn caps_lock(_app: &tauri::AppHandle) -> Option<bool> {
+    None
+}
+
 #[cfg(target_os = "windows")]
 fn current_layout() -> Option<KeyboardLayoutDto> {
     use windows::core::PCWSTR;

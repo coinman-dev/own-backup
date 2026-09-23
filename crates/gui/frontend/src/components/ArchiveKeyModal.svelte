@@ -119,7 +119,8 @@
   {open}
   title="Ключ восстановления"
   onClose={cancel}
-  onConfirm={begun && echo.trim().length > 0 && !busy ? commit : undefined}
+  onConfirm={commit}
+  confirmDisabled={!begun || echo.trim().length === 0 || busy}
   confirmLabel={busy ? 'Включаю…' : 'Включить шифрование'}
   cancelLabel="Отмена"
 >

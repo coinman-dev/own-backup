@@ -54,7 +54,8 @@
   {open}
   title="Копия зашифрована"
   onClose={close}
-  onConfirm={ready && !busy ? submit : undefined}
+  onConfirm={submit}
+  confirmDisabled={!ready || busy}
   confirmLabel={busy ? 'Открываю…' : 'Открыть'}
   cancelLabel="Отмена"
 >

@@ -22,16 +22,20 @@
     path: string;
     busy: boolean;
     error: string;
-    /** Called with whatever was typed, or with nothing when the copy is plain. */
-    run: ((secret?: ArchiveSecret) => Promise<void>) | null;
+    /** Called with whatever was typed, or with nothing when the copy is plain.
+     *  `accepted` is for an operation that outlives its key: it closes the
+     *  dialog the moment the key has opened the copy. */
+    run: ((secret?: ArchiveSecret, accepted?: () => void) => Promise<void>) | null;
   }>({ open: false, path: '', busy: false, error: '', run: null });
+
+  const unlockClosed = { open: false, path: '', busy: false, error: '', run: null };
 
   /** Run `op` on `path`, asking for a key first if the copy turns out to need
    *  one. Everything the operation reports (including "wrong password") comes
    *  back through the dialog while it is open. */
   async function withArchiveKey(
     path: string,
-    op: (secret?: ArchiveSecret) => Promise<void>,
+    op: (secret?: ArchiveSecret, accepted?: () => void) => Promise<void>,
   ): Promise<void> {
     if (!(await needsArchiveKey(path))) {
       // The operation has already put its own failure on the screen; this
@@ -43,17 +47,26 @@
   }
 
   async function submitUnlock(secret: ArchiveSecret) {
-    if (!unlock.run) return;
+    const run = unlock.run;
+    if (!run) return;
     unlock.busy = true;
     unlock.error = '';
+    // Once the key is accepted the dialog has nothing left to say. A check of
+    // a whole chain runs for minutes, and a dialog that stayed up until the
+    // end read as the password still being worked on (2026-09-23) — while the
+    // progress bar behind it was already moving.
+    const close = () => {
+      if (unlock.run === run) unlock = { ...unlockClosed };
+    };
     try {
-      await unlock.run(secret);
-      unlock = { open: false, path: '', busy: false, error: '', run: null };
+      await run(secret, close);
+      close();
     } catch (e) {
       // Stay open: a wrong password is a thing to retype, not a screen to lose.
-      unlock.error = String(e);
+      // A failure after the dialog closed is the card's to show, and it does.
+      if (unlock.run === run) unlock.error = String(e);
     } finally {
-      unlock.busy = false;
+      if (unlock.run === run) unlock.busy = false;
     }
   }
 
@@ -196,12 +209,12 @@
     await withArchiveKey(toolsState.verifyPath, verifyWith);
   }
 
-  async function verifyWith(secret?: ArchiveSecret) {
+  async function verifyWith(secret?: ArchiveSecret, accepted?: () => void) {
     verifyBusy = true;
     verifyMsg = null;
     verifyErr = null;
     try {
-      const v = await runVerify(toolsState.verifyPath, secret);
+      const v = await runVerify(toolsState.verifyPath, secret, accepted);
       verifyMsg = v.valid
         ? `Целостность подтверждена: ${v.blocks_checked} блоков за ${v.duration_secs.toFixed(1)} с.`
         : `ОШИБКА: повреждено блоков — ${v.mismatched_blocks.length} из ${v.blocks_checked}.`;
@@ -220,7 +233,7 @@
   busy={unlock.busy}
   error={unlock.error}
   onUnlock={submitUnlock}
-  onCancel={() => (unlock = { open: false, path: '', busy: false, error: '', run: null })}
+  onCancel={() => (unlock = { ...unlockClosed })}
 />
 
 <div class="page">

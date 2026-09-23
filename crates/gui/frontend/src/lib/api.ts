@@ -20,6 +20,7 @@ import type {
   RestoreRunState,
   ServiceHealth,
   KeyboardLayout,
+  KeyboardState,
   DirEntry,
   DirListing,
   BaseImage,
@@ -188,6 +189,8 @@ export const api = {
   serviceHealth: () => invoke<ServiceHealth>('service_health'),
   /** Active keyboard layout; null where it cannot be told (non-Windows). */
   keyboardLayout: () => invoke<KeyboardLayout | null>('keyboard_layout'),
+  /** Layout and Caps Lock for a password field, taskbar or not. */
+  keyboardState: () => invoke<KeyboardState>('keyboard_state'),
   getServiceStatus: () => invoke<ServiceStatus>('get_service_status'),
   /**
    * «Интерфейс нарисовался» — единственное, что носитель принимает за доказательство.

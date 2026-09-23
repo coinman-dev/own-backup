@@ -231,6 +231,14 @@ export interface KeyboardLayout {
   name: string;
 }
 
+/** What a password field shows beside its eye. Unlike the sidebar strip this
+ *  answers with a taskbar on screen too. */
+export interface KeyboardState {
+  layout: KeyboardLayout | null;
+  /** null where it cannot be told. */
+  caps_lock: boolean | null;
+}
+
 export type ViewName =
   | 'backup'
   | 'restore'

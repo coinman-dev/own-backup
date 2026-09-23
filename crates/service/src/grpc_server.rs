@@ -480,18 +480,31 @@ fn manual_keys(
         )),
         (Some(password), None) => ArchiveKeys::from_image_password(image, password)
             .map(Some)
-            .map_err(|e| Status::permission_denied(e.to_string())),
+            .map_err(refused_secret),
         (None, Some(typed)) => {
             let key = RecoveryKey::parse(typed)
                 .map_err(|e| Status::invalid_argument(e.to_string()))?;
             ArchiveKeys::from_image_recovery(image, &key)
                 .map(Some)
-                .map_err(|e| Status::permission_denied(e.to_string()))
+                .map_err(refused_secret)
         }
         (None, None) => Err(Status::unauthenticated(format!(
             "{}: копия зашифрована — нужен пароль или ключ восстановления",
             image.display()
         ))),
+    }
+}
+
+/// A refused password or recovery key, in the words it was refused with.
+///
+/// The key file reports it as a `Config` error, whose `Display` puts an English
+/// «Configuration error:» in front — and that is what the unlock dialog showed
+/// under a mistyped password.
+#[cfg(target_os = "windows")]
+fn refused_secret(e: own_backup_common::OwnBackupError) -> Status {
+    match e {
+        own_backup_common::OwnBackupError::Config(m) => Status::permission_denied(m),
+        other => Status::permission_denied(other.to_string()),
     }
 }
 

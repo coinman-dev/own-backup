@@ -7,6 +7,10 @@
     onClose: () => void;
     onConfirm?: () => void;
     confirmLabel?: string;
+    /** Keep the confirm button on screen but unavailable (nothing typed yet,
+     *  or already working) — a button that appears only once the form is
+     *  filled in leaves no way to tell what the form is for. */
+    confirmDisabled?: boolean;
     cancelLabel?: string;
     danger?: boolean;
     children: Snippet;
@@ -18,6 +22,7 @@
     onClose,
     onConfirm,
     confirmLabel = 'Confirm',
+    confirmDisabled = false,
     cancelLabel = 'Cancel',
     danger = false,
     children,
@@ -72,6 +77,7 @@
           <button
             class="btn {danger ? 'btn-danger' : 'btn-primary'}"
             onclick={onConfirm}
+            disabled={confirmDisabled}
           >
             {confirmLabel}
           </button>
