@@ -14,7 +14,10 @@ use windows::Win32::Storage::FileSystem::{
     CreateFileW, DeleteVolumeMountPointW, GetLogicalDrives, SetVolumeMountPointW,
     FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
-use windows::Win32::System::Ioctl::FSCTL_EXTEND_VOLUME;
+use windows::Win32::System::Ioctl::{
+    FSCTL_EXTEND_VOLUME, IOCTL_DISK_GET_PARTITION_INFO_EX, PARTITION_INFORMATION_EX,
+    PARTITION_STYLE_GPT, PARTITION_STYLE_MBR,
+};
 use windows::Win32::System::IO::DeviceIoControl;
 
 use own_backup_common::{OwnBackupError, Result};
@@ -53,6 +56,140 @@ pub fn assign_letter(volume_root: &str, letter: char) -> Result<()> {
     )?;
     info!(volume = %volume_root, %letter, "drive letter assigned");
     Ok(())
+}
+
+/// GPT "basic data": the one partition type Windows letters on its own.
+const GPT_BASIC_DATA: u128 = 0xebd0a0a2_b9e5_4433_87c0_68b6b72699c7;
+const GPT_ATTRIBUTE_HIDDEN: u64 = 0x4000_0000_0000_0000;
+const GPT_ATTRIBUTE_NO_DRIVE_LETTER: u64 = 0x8000_0000_0000_0000;
+/// MBR types Windows mounts and letters: FAT12, FAT16, FAT16B, NTFS/exFAT,
+/// FAT32, FAT32 LBA, FAT16 LBA. Recovery (0x27) and the hidden variants are
+/// left out, as Windows leaves them out.
+const MBR_DATA_TYPES: [u8; 7] = [0x01, 0x04, 0x06, 0x07, 0x0B, 0x0C, 0x0E];
+
+/// The partition a volume sits on, as much as deciding on a letter needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PartitionOfVolume {
+    Gpt { basic_data: bool, attributes: u64 },
+    Mbr { kind: u8 },
+}
+
+/// Would Windows give this partition a letter the first time it saw it? Data
+/// partitions yes; EFI, MSR, recovery and anything marked hidden or "no drive
+/// letter", no.
+fn letters_like_windows(p: PartitionOfVolume) -> bool {
+    match p {
+        PartitionOfVolume::Gpt { basic_data, attributes } => {
+            basic_data && attributes & (GPT_ATTRIBUTE_HIDDEN | GPT_ATTRIBUTE_NO_DRIVE_LETTER) == 0
+        }
+        PartitionOfVolume::Mbr { kind } => MBR_DATA_TYPES.contains(&kind),
+    }
+}
+
+fn partition_of_volume(volume_root: &str) -> Option<PartitionOfVolume> {
+    let device = volume_root.trim_end_matches('\\');
+    let wide = to_wide(device);
+    // No access rights: the partition query is FILE_ANY_ACCESS, and asking for
+    // more is refused on a read-only image.
+    // SAFETY: `wide` outlives the call.
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAGS_AND_ATTRIBUTES(0),
+            None,
+        )
+    }
+    .ok()?;
+    let handle = FileHandle(handle);
+    let mut info = PARTITION_INFORMATION_EX::default();
+    let mut returned = 0u32;
+    // SAFETY: the output buffer is a live PARTITION_INFORMATION_EX of the size passed.
+    unsafe {
+        DeviceIoControl(
+            handle.0,
+            IOCTL_DISK_GET_PARTITION_INFO_EX,
+            None,
+            0,
+            Some(&mut info as *mut _ as *mut _),
+            std::mem::size_of::<PARTITION_INFORMATION_EX>() as u32,
+            Some(&mut returned),
+            None,
+        )
+    }
+    .ok()?;
+    // SAFETY: the style says which half of the union the driver filled in.
+    unsafe {
+        if info.PartitionStyle == PARTITION_STYLE_GPT {
+            let gpt = info.Anonymous.Gpt;
+            Some(PartitionOfVolume::Gpt {
+                basic_data: gpt.PartitionType == windows::core::GUID::from_u128(GPT_BASIC_DATA),
+                attributes: gpt.Attributes.0,
+            })
+        } else if info.PartitionStyle == PARTITION_STYLE_MBR {
+            Some(PartitionOfVolume::Mbr { kind: info.Anonymous.Mbr.PartitionType })
+        } else {
+            None
+        }
+    }
+}
+
+/// Give every data volume on `disk_number` a drive letter it does not have.
+/// Returns the letters now on the disk.
+///
+/// For a mounted backup image, whose card promises «тома внутри получают
+/// буквы». Windows does not keep that promise by itself: it letters a volume
+/// only the FIRST time it sees it. A volume it has met before and that had its
+/// letter taken away counts as "the user wants no letter" — and every backup
+/// image met before is exactly that, because the exclusion pass mounts it and
+/// strips its letters so it does not surface in Explorer mid-backup
+/// ([`crate::volume_win::strip_letters_on_disk`]). The `.obk` mounted on
+/// 2026-09-23 came up whole, healthy, and with no letter.
+///
+/// Waits for the volumes to arrive first: the attach returns before PnP has
+/// built them.
+pub fn letter_data_volumes_on_disk(disk_number: u32) -> Vec<String> {
+    const ARRIVAL: std::time::Duration = std::time::Duration::from_secs(10);
+    const STABLE: std::time::Duration = std::time::Duration::from_millis(1500);
+
+    let started = std::time::Instant::now();
+    let mut seen = crate::volume_win::all_volume_roots_on_disk(disk_number);
+    let mut stable_since = std::time::Instant::now();
+    while started.elapsed() < ARRIVAL {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        let now = crate::volume_win::all_volume_roots_on_disk(disk_number);
+        if now != seen {
+            seen = now;
+            stable_since = std::time::Instant::now();
+        } else if !seen.is_empty() && stable_since.elapsed() >= STABLE {
+            break;
+        }
+    }
+
+    for volume in &seen {
+        if !volume_drive_letters(volume).is_empty() {
+            continue;
+        }
+        let Some(partition) = partition_of_volume(volume) else {
+            debug!(%volume, "no partition information — left without a letter");
+            continue;
+        };
+        if !letters_like_windows(partition) {
+            debug!(%volume, ?partition, "not a data partition — left without a letter, as Windows would");
+            continue;
+        }
+        let Some(letter) = next_free_letter('D') else {
+            warn!(%volume, "no free drive letter for a volume of the mounted image");
+            break;
+        };
+        if let Err(e) = assign_letter(volume, letter) {
+            warn!(%volume, %letter, error = %e, "could not letter a volume of the mounted image");
+        }
+    }
+    crate::volume_win::drive_letters_on_disk(disk_number)
 }
 
 /// A drive letter held only for the duration of an operation.
@@ -157,4 +294,21 @@ pub fn extend_volume(volume_root: &str, new_sector_count: u64) -> Result<()> {
     })?;
     info!(volume = %device, new_sector_count, "filesystem extended into its partition");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What a Windows disk image has, and what Windows letters of it.
+    #[test]
+    fn only_data_partitions_get_a_letter() {
+        let gpt = |basic_data, attributes| PartitionOfVolume::Gpt { basic_data, attributes };
+        assert!(letters_like_windows(gpt(true, 0)), "C: of the image");
+        assert!(!letters_like_windows(gpt(false, 0)), "EFI, MSR, recovery by type");
+        assert!(!letters_like_windows(gpt(true, GPT_ATTRIBUTE_HIDDEN)));
+        assert!(!letters_like_windows(gpt(true, GPT_ATTRIBUTE_NO_DRIVE_LETTER)));
+        assert!(letters_like_windows(PartitionOfVolume::Mbr { kind: 0x07 }));
+        assert!(!letters_like_windows(PartitionOfVolume::Mbr { kind: 0x27 }), "WinRE on MBR");
+    }
 }

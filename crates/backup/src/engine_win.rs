@@ -5176,7 +5176,31 @@ pub fn mount_image_with_keys(
             warn!(error = %e, "could not open the mounted image to bring it online");
         }
     }
+    letter_mounted_image(attached.physical_path());
     Ok(attached.physical_path().to_string())
+}
+
+/// Make a mounted image browsable: its disk online for this session, and its
+/// data volumes lettered.
+///
+/// Neither happens by itself. A read-only iSCSI disk is left as the SAN policy
+/// says, which on a server or the boot medium is offline; and Windows letters
+/// only volumes it has never met, which a backup image rarely is — see
+/// [`crate::letters_win::letter_data_volumes_on_disk`].
+fn letter_mounted_image(physical: &str) {
+    let Some(disk) = disk_number_from_physical(physical) else {
+        return;
+    };
+    if let Ok(dev) = open_write_with_retry(physical) {
+        if matches!(dev.is_offline_read_only(), Ok((true, _))) {
+            match dev.set_online_this_session() {
+                Ok(()) => info!(%physical, "mounted image: disk brought online for browsing"),
+                Err(e) => warn!(%physical, error = %e, "mounted image: disk stays offline"),
+            }
+        }
+    }
+    let letters = crate::letters_win::letter_data_volumes_on_disk(disk);
+    info!(%physical, ?letters, "mounted image: drive letters");
 }
 
 /// Detach a previously mounted image.
@@ -5340,6 +5364,7 @@ fn mount_qcow2_via_iscsi(image_path: &Path, read_write: bool) -> Result<String> 
         read_write,
         "qcow2 mounted over iSCSI"
     );
+    letter_mounted_image(&physical);
     qcow2_mounts()
         .lock()
         .unwrap()
@@ -5386,6 +5411,7 @@ fn mount_obk_via_iscsi(
         physical = %physical,
         "encrypted image mounted read-only over iSCSI"
     );
+    letter_mounted_image(&physical);
     qcow2_mounts().lock().unwrap().insert(
         image_path.to_path_buf(),
         MountedImage {
