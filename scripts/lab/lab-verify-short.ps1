@@ -150,12 +150,15 @@ try {
         # (б) НЕВЕРНЫЙ пароль — должно быть «пароль не подходит», а не ошибка ввода-вывода
         $wrongOut = Run "echo Definitely-Not-The-Password|`"$cli`" bitlocker --volume $b --unlock"
         foreach ($l in ($wrongOut -split "`r?`n")) { if ($l.Trim()) { Note "  wrong| $($l.Trim())" } }
-        $looksLikePassword = $wrongOut -match 'парол|password'
-        $looksLikeIo = $wrongOut -match 'ввод|I/O|Io\(|ERROR_|0x8007'
+        # По КАТЕГОРИИ ошибки, а не по русскому тексту: вывод cmd приходит в
+        # кодировке 866, и сравнение с «парол» по нему не срабатывает — прогоны
+        # 3–7 ставили «ОТКАЗ» верному ответу. Категория пишется латиницей.
+        $isEncryption = $wrongOut -match 'Encryption error'
+        $isIo = $wrongOut -match 'Device I/O error'
         Verdict 'BitLocker-неверный-пароль' $(
-            if ($looksLikePassword -and -not $looksLikeIo) { 'сказано про пароль, не про ввод-вывод' }
-            elseif ($looksLikePassword) { 'СМЕШАНО: есть и про пароль, и похожее на ввод-вывод' }
-            else { 'ОТКАЗ: про пароль не сказано' })
+            if ($isEncryption -and -not $isIo) { 'категория Encryption, не ввод-вывод' }
+            elseif ($isIo) { 'ОТКАЗ: подан как ошибка ввода-вывода' }
+            else { 'ОТКАЗ: категория не опознана' })
 
         # (в) ВЕРНЫЙ пароль: копия заблокированного тома и возврат из неё
         $blImg = "$work\bitlocker.qcow2"

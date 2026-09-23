@@ -133,9 +133,26 @@ fn examine(
             let want = (dump_kib * 1024).min(window.len()) as usize;
             let mut buf = vec![0u8; want];
             window.read_at(0, &mut buf).map_err(|e| e.to_string())?;
-            let file = format!("{dump}.{}.bin", label.trim_end_matches(':').replace([' ', '\\'], "_"));
+            let stem = format!("{dump}.{}", label.trim_end_matches(':').replace([' ', '\\'], "_"));
+            let file = format!("{stem}.bin");
             std::fs::write(&file, &buf).map_err(|e| e.to_string())?;
             println!("  записано {} КиБ в {file}", want / 1024);
+
+            // And the metadata blocks themselves, which is where a volume keeps
+            // what it knows about its own conversion — none of it lives in the
+            // first kilobytes above. Headers and wrapped keys only: the keys in
+            // these blocks are sealed, and no volume data is in them.
+            let offsets = own_backup_backup::bitlocker::fve_metadata_offsets(&mut window)
+                .unwrap_or_default();
+            for (i, off) in offsets.iter().enumerate() {
+                let len = (64 * 1024).min(window.len().saturating_sub(*off)) as usize;
+                let mut block = vec![0u8; len];
+                if window.read_at(*off, &mut block).is_ok() {
+                    let file = format!("{stem}.fve{i}@{off}.bin");
+                    std::fs::write(&file, &block).map_err(|e| e.to_string())?;
+                    println!("  блок метаданных №{i} (смещение {off}) → {file}");
+                }
+            }
         }
         own_backup_backup::bitlocker::inspect_bitlocker(&mut window).map_err(|e| e.to_string())
     })();
@@ -480,6 +497,24 @@ fn report(found: Vec<Examined>, json: bool) -> Result<()> {
                 "нечем открыть: ни пароля, ни ключа восстановления среди защит нет".to_string()
             }
         );
+        // Said on its own line, because it overrides the verdict above: a
+        // volume that can be opened but is still converting cannot be COPIED
+        // through our decryption — part of it is not yet (or no longer)
+        // ciphertext. Asked on 2026-09-22 mid-encryption, this probe answered
+        // «можно открыть паролем тома» and nothing else.
+        use own_backup_backup::bitlocker::Conversion;
+        match info.conversion {
+            Some(Conversion::Encrypting) => println!(
+                "  Внимание: шифрование тома ещё идёт (или стоит на паузе) — копировать его \
+                 своей расшифровкой нельзя, откроет только Windows"
+            ),
+            Some(Conversion::Decrypting) => println!(
+                "  Внимание: расшифровка тома ещё идёт (или стоит на паузе) — копировать его \
+                 своей расшифровкой нельзя, откроет только Windows"
+            ),
+            Some(Conversion::Settled) => println!("  Конверсия: не идёт"),
+            None => println!("  Конверсия: признак не найден — состояние не известно"),
+        }
         // For checking our table of codes against a real volume.
         println!("  Заголовок метаданных: {}", info.header_hex);
         println!("  Заголовок набора:     {}", info.dataset_hex);

@@ -467,6 +467,9 @@ pub struct BitLockerParams {
     /// Device byte offset holding those relocated sectors' ciphertext.
     pub boot_backup_addr: u64,
     pub kind: VolumeEncryptionKind,
+    /// A conversion in progress, by the volume's own metadata. `None` when the
+    /// record could not be read — see [`conversion_state`].
+    pub conversion: Option<Conversion>,
 }
 
 impl BitLockerParams {
@@ -549,6 +552,9 @@ pub struct BitLockerInfo {
     /// Which of the three metadata copies parsed (0, 1, 2).
     pub metadata_copy: usize,
     pub protectors: Vec<Protector>,
+    /// Encryption or decryption still in progress, by the volume's own flag.
+    /// `None` when the record was not there or was shaped differently.
+    pub conversion: Option<Conversion>,
     /// The 0x40-byte metadata block header and the 0x30-byte dataset header,
     /// as hex. Printed because the fields we do NOT claim to understand —
     /// among them whatever records a conversion in progress — have to be
@@ -591,6 +597,87 @@ fn cipher_name(alg: u16) -> (String, bool) {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+}
+
+/// Is the volume in the middle of being encrypted or decrypted?
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Conversion {
+    /// No conversion running: the volume is whole in one state.
+    Settled,
+    /// Encryption started and has not finished — running or paused.
+    Encrypting,
+    /// Decryption started and has not finished — running or paused.
+    Decrypting,
+}
+
+/// The flags word in the volume-header-block datum (entry `0x000F`, value
+/// `0x000F`), at this offset into the datum's DATA (past its 8-byte header).
+///
+/// Found by measurement, not taken from a specification, because none of the
+/// ones we read names it. On a live volume (Windows 10 21H2, 2026-09-23,
+/// `scripts/lab/lab-bitlocker-states.ps1`) the whole 64 KiB metadata block was
+/// captured in six states across two volumes. Inside the dataset exactly TWO
+/// bytes differed between them, and they were this word:
+///
+/// ```text
+///   encryption paused at  4 %   0x04a
+///   encryption paused at 10 %   0x04a
+///   encryption paused at 17 %   0x04a
+///   encryption paused at 20 %   0x04a   (the first volume)
+///   fully encrypted             0x00a
+///   decryption paused at  1 %   0x14a
+/// ```
+///
+/// Constant across 4, 10 and 17 % — so a FLAG, not a progress counter — set
+/// through the whole conversion and cleared when it ends, with `0x100` for the
+/// direction. `encrypted_size`, the field the old guard used, was the full
+/// volume size in every one of those states, and the header's 16-bit words at
+/// 0x0C/0x0E were `4` throughout. The samples are paused conversions; one that
+/// is running writes the same metadata (it has to — a crash mid-conversion
+/// must find it), but that exact state was not caught on a live disk.
+const VHB_FLAGS_AT: usize = 0x18;
+/// The nested record the flags live in starts with this word; anything else is
+/// a layout we have not measured, and it decides nothing.
+const VHB_NESTED_MARK: u64 = 0x0005;
+const FLAG_CONVERTING: u64 = 0x40;
+const FLAG_DECRYPTING: u64 = 0x100;
+
+/// What the metadata says about a conversion. `None` when the record is absent
+/// or shaped differently from what was measured — an unknown is reported as
+/// unknown, never guessed into "settled".
+fn conversion_state(entries: &[u8]) -> Option<Conversion> {
+    let d = datums(entries)
+        .into_iter()
+        .find(|d| d.entry_type == 0x000F && d.value_type == 0x000F)?;
+    if d.data.len() < VHB_FLAGS_AT + 4 || u16at(d.data, 0x10) != VHB_NESTED_MARK {
+        return None;
+    }
+    let flags = u32at(d.data, VHB_FLAGS_AT);
+    Some(if flags & FLAG_CONVERTING == 0 {
+        Conversion::Settled
+    } else if flags & FLAG_DECRYPTING != 0 {
+        Conversion::Decrypting
+    } else {
+        Conversion::Encrypting
+    })
+}
+
+/// Where this volume keeps its FVE metadata blocks, best first.
+///
+/// For dumps, not for decisions. The field that records a conversion in
+/// progress has never been identified on a real disk (see
+/// [`verify_covers_volume`]), and `encrypted_size` — the one this code does
+/// use — turned out on 2026-09-22 to hold the FULL size from the first second
+/// of a conversion. Finding the real field means comparing these blocks across
+/// states on a live volume; the volume's first kilobytes, which is all a dump
+/// used to write, do not contain them.
+pub fn fve_metadata_offsets(vol: &mut dyn RawVolume) -> Result<Vec<u64>> {
+    let boot = read_at(vol, 0, 512)?;
+    if !is_bitlocker(&boot) {
+        return Err(bad("not a BitLocker volume"));
+    }
+    Ok(metadata_offsets(&boot, vol.len()))
 }
 
 /// Read what a BitLocker volume declares about itself — cipher, geometry and
@@ -702,6 +789,7 @@ fn inspect_metadata(
         boot_backup_addr: u64at(&head, 0x38),
         metadata_copy: copy,
         protectors,
+        conversion: dataset.get(0x30..).and_then(conversion_state),
         header_hex: hex(&head[..0x40]),
         dataset_hex: hex(&dataset[..0x30.min(dataset.len())]),
     })
@@ -1026,6 +1114,7 @@ fn unlock_from_metadata(
         nb_backup_sectors: nb_backup_sectors as u64,
         boot_backup_addr,
         kind: VolumeEncryptionKind::BitLocker,
+        conversion: conversion_state(entries),
     })
 }
 
@@ -1120,16 +1209,42 @@ pub fn diagnose_first_sector(vol: &mut dyn RawVolume, params: &BitLockerParams) 
 /// fully converted and "encrypt used space only", the encrypted size equals
 /// the partition length exactly.
 ///
-/// The tolerance is deliberately loose. Nothing here can tell an encryption
-/// still in progress from a layout we have not met — the metadata field that
-/// would say so has not been identified on a real disk — so this refuses only
-/// what is unmistakably wrong, and says what it saw.
+/// The size check alone could never catch a conversion in progress, and that
+/// was measured, not suspected: `encrypted_size` holds the FULL volume size
+/// from the first second of a conversion (1 GiB and 8 GiB volumes, 4 to 20 %
+/// done, 2026-09-22/23). Copying such a volume through our own decryption
+/// would decrypt the part BitLocker has not reached yet — plaintext on disk —
+/// as if it were ciphertext, and the copy would carry garbage there without a
+/// word. The conversion flag ([`conversion_state`]) is what answers it now.
+///
+/// A refusal here is not a dead end: the engine then asks Windows to open the
+/// volume, and the Windows driver presents a consistent plain view at any
+/// stage of a conversion.
 fn verify_covers_volume(params: &BitLockerParams, volume_len: u64) -> Result<()> {
+    match params.conversion {
+        Some(Conversion::Encrypting) => {
+            return Err(bad(
+                "шифрование тома ещё не завершено (идёт или стоит на паузе) — часть его \
+                 лежит на диске открытой, и своей расшифровкой такой том не скопировать \
+                 верно. Дождитесь окончания: в Windows — manage-bde -status",
+            ))
+        }
+        Some(Conversion::Decrypting) => {
+            return Err(bad(
+                "расшифровка тома ещё не завершена (идёт или стоит на паузе) — часть его \
+                 уже лежит на диске открытой, и своей расшифровкой такой том не скопировать \
+                 верно. Дождитесь окончания: в Windows — manage-bde -status",
+            ))
+        }
+        Some(Conversion::Settled) | None => {}
+    }
     if volume_len == 0 || params.encrypted_size >= volume_len / 10 * 9 {
         return Ok(());
     }
     Err(bad(format!(
-        "зашифрована лишь часть тома: {} из {} байт ({:.0}%). Похоже, шифрование ещё идёт —          дождитесь его окончания (в Windows: manage-bde -status). Копировать такой том          нельзя: образ вышел бы обрезанным.",
+        "зашифрована лишь часть тома: {} из {} байт ({:.0}%). Копировать такой том \
+         нельзя: образ вышел бы обрезанным. Дождитесь окончания шифрования \
+         (в Windows: manage-bde -status)",
         params.encrypted_size,
         volume_len,
         params.encrypted_size as f64 * 100.0 / volume_len as f64
@@ -1419,6 +1534,7 @@ mod tests {
             nb_backup_sectors: 0,
             boot_backup_addr: 0,
             kind: VolumeEncryptionKind::BitLocker,
+            conversion: None,
         };
         let err = verify_covers_volume(&params, 100 * 1024).unwrap_err().to_string();
         assert!(err.contains("50"), "the message should name what was seen: {err}");
@@ -1429,6 +1545,76 @@ mod tests {
         assert!(verify_covers_volume(&params, 52 * 1024).is_ok());
         // Nothing to compare against is not a reason to refuse.
         assert!(verify_covers_volume(&params, 0).is_ok());
+    }
+
+    /// The record `0x000F/0x000F` exactly as a live volume wrote it
+    /// (2026-09-23, 8 GiB, Windows 10 21H2), with only the flags word varied.
+    /// Everything else in it — the relocated-sector offset and size, the
+    /// nested `05 00 4c 00`, the build number 19044 (`64 4a`) — is verbatim.
+    fn live_header_block_record(flags: u32) -> Vec<u8> {
+        let mut r: Vec<u8> = [
+            0x64, 0x00, 0x0f, 0x00, 0x0f, 0x00, 0x01, 0x00, // size 100, entry 0x0F, value 0x0F, v1
+            0x00, 0x00, 0x11, 0x02, 0x00, 0x00, 0x00, 0x00, // offset 0x02110000
+            0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // size 0x2000
+            0x05, 0x00, 0x4c, 0x00, 0x00, 0x00, 0x00, 0x00, // nested record mark
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // flags go in the first four
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
+            0x00, 0x02, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x64, 0x4a, 0x00, 0x00, // build 19044
+            0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x10, 0x01, 0x01, 0x02, 0x00, 0x20, 0x11, 0x02,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+            0x00, 0x00, 0x00, 0x00,
+        ]
+        .to_vec();
+        r[0x20..0x24].copy_from_slice(&flags.to_le_bytes());
+        r
+    }
+
+    /// The conversion flag, read the way the live states were: every value
+    /// seen on a real disk, and the refusal each one earns.
+    ///
+    /// The old guard compared `encrypted_size` with the volume length, and on a
+    /// real volume mid-conversion that size is ALREADY the full length — the
+    /// guard passed every one of these. This test fails if the decision goes
+    /// back to the size.
+    #[test]
+    fn a_volume_still_converting_is_refused_by_its_own_flag() {
+        for (flags, want) in [
+            (0x04a, Conversion::Encrypting), // paused at 4, 10, 17 and 20 %
+            (0x00a, Conversion::Settled),    // fully encrypted
+            (0x14a, Conversion::Decrypting), // decryption paused at 1 %
+        ] {
+            assert_eq!(conversion_state(&live_header_block_record(flags)), Some(want), "{flags:#x}");
+        }
+
+        let full = 8u64 << 30;
+        let params = |conversion| BitLockerParams {
+            fvek: Zeroizing::new(vec![0u8; 32]),
+            algorithm: ALG_AES_XTS_128,
+            sector_size: 512,
+            // As measured: the full size, whatever the progress.
+            encrypted_size: full,
+            nb_backup_sectors: 16,
+            boot_backup_addr: 0,
+            kind: VolumeEncryptionKind::BitLocker,
+            conversion,
+        };
+        for c in [Conversion::Encrypting, Conversion::Decrypting] {
+            let err = verify_covers_volume(&params(Some(c)), full).unwrap_err().to_string();
+            assert!(err.contains("не завершен"), "{c:?}: {err}");
+        }
+        assert!(verify_covers_volume(&params(Some(Conversion::Settled)), full).is_ok());
+        // Unknown is not "settled", but it is not a refusal either: the size
+        // check still applies, and the flag is simply not there to consult.
+        assert!(verify_covers_volume(&params(None), full).is_ok());
+
+        // A record of another shape decides nothing.
+        let mut other = live_header_block_record(0x04a);
+        other[0x18] = 0x07;
+        assert_eq!(conversion_state(&other), None, "unmeasured layout");
+        assert_eq!(conversion_state(&[]), None, "no record at all");
     }
 
     #[test]
