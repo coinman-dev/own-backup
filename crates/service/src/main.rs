@@ -499,6 +499,18 @@ pub async fn run_main_loop(
         Ok(n) => info!(retired = n, "unreferenced local archive authorizations removed"),
         Err(e) => debug!(error = %e, "local archive key store not swept"),
     }
+    // A mount lives in the process serving it, so whatever was mounted when
+    // the last instance stopped (an update, a crash) is now a session with
+    // nothing behind it: a dead disk in Disk Management, and that image's next
+    // mount refused. On its own thread — a logout can wait out a busy device
+    // for seconds, and nothing else at startup needs to wait for it.
+    #[cfg(target_os = "windows")]
+    std::thread::spawn(|| {
+        let cleared = own_backup_backup::iscsi_win::clear_orphaned_sessions();
+        if cleared > 0 {
+            info!(cleared, "orphaned iSCSI sessions of an earlier run logged out");
+        }
+    });
     let queue = own_backup_core::RunQueue::new();
     // Everything destructive — a copy, a restore, a verify, a read-write
     // mount, deleting a job's images — goes through this one slot (AUD-02).

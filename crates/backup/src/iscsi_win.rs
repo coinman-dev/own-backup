@@ -21,6 +21,7 @@
 
 #![cfg(target_os = "windows")]
 
+use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
 use own_backup_common::{OwnBackupError, Result};
@@ -28,8 +29,9 @@ use tracing::{info, warn};
 use windows::core::PCWSTR;
 use windows::Win32::Storage::IscsiDisc::{
     AddIScsiSendTargetPortalW, AddIScsiStaticTargetW, GetDevicesForIScsiSessionW,
-    LoginIScsiTargetW, LogoutIScsiTarget, RemoveIScsiSendTargetPortalW, RemoveIScsiStaticTargetW,
-    ISCSI_DEVICE_ON_SESSIONW, ISCSI_TARGET_PORTALW, ISCSI_TARGET_PORTAL_GROUPW,
+    GetIScsiSessionListW, LoginIScsiTargetW, LogoutIScsiTarget, RemoveIScsiSendTargetPortalW,
+    RemoveIScsiStaticTargetW, ISCSI_CONNECTION_INFOW, ISCSI_DEVICE_ON_SESSIONW,
+    ISCSI_SESSION_INFOW, ISCSI_TARGET_PORTALW, ISCSI_TARGET_PORTAL_GROUPW,
     ISCSI_UNIQUE_SESSION_ID,
 };
 
@@ -51,6 +53,15 @@ const ANY_INITIATOR_PORT: u32 = u32::MAX;
 const SERVICE_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long PnP is given to produce the disk after a successful login.
 const DISK_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a logout waits out "a device on that session is in use".
+const LOGOUT_PATIENCE: Duration = Duration::from_secs(20);
+/// How long a session's target is given to answer before it counts as gone.
+const TARGET_ANSWER_TIMEOUT: Duration = Duration::from_millis(300);
+
+const ISDSC_INVALID_SESSION_ID: u32 = 0xefff_001c;
+const ISDSC_SESSION_BUSY: u32 = 0xefff_001f;
+const ISDSC_DEVICE_BUSY_ON_SESSION: u32 = 0xefff_0040;
+const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 
 fn dev(msg: impl Into<String>) -> OwnBackupError {
     OwnBackupError::Device(msg.into())
@@ -487,6 +498,7 @@ fn portal_for(address: &str, port: u16) -> ISCSI_TARGET_PORTALW {
 /// Log the initiator in to our target and wait for its disk.
 pub fn login(address: &str, port: u16, target: &str) -> Result<AttachedTarget> {
     ensure_initiator_service()?;
+    clear_stale_sessions(target, (address, port))?;
 
     let iqn = to_wide(target);
     let mut portal = portal_for(address, port);
@@ -646,19 +658,20 @@ fn wait_for_disk(session: &mut ISCSI_UNIQUE_SESSION_ID) -> Result<u32> {
 }
 
 impl AttachedTarget {
-    /// Log the session out and take back what was registered for it.
+    /// Log the session out and take back what was registered for it. `false`
+    /// when the initiator would not let go: the session then outlives this
+    /// mount, and the next login to the same image clears it
+    /// ([`clear_stale_sessions`]).
     ///
     /// Best effort by design: this runs on the failure path too, and a portal
     /// that would not go away must not hide the error that got us here.
-    pub fn logout(mut self) {
-        // SAFETY: the session id came from a successful login.
-        let code = unsafe { LogoutIScsiTarget(&mut self.session) };
-        if code == 0 {
+    pub fn logout(mut self) -> bool {
+        let done = logout_session(&mut self.session, &self.target);
+        if done {
             info!(target = %self.target, disk = self.disk_number, "iSCSI session logged out");
-        } else {
-            warn!(target = %self.target, reason = %describe(code), "iSCSI: logout refused");
         }
         self.cleanup_registrations();
+        done
     }
 
     fn cleanup_registrations(&mut self) {
@@ -690,6 +703,207 @@ impl AttachedTarget {
             self.portal_added = false;
         }
     }
+}
+
+/// Log a session out, waiting out a device that is still being let go.
+///
+/// A disk whose volumes have just been dismounted and which has just been set
+/// offline is not free yet: PnP takes the volume stack down behind our back,
+/// and until it has, the initiator answers `ISDSC_DEVICE_BUSY_ON_SESSION`.
+/// That is what happened on 2026-09-23, 44 ms after the teardown of the
+/// exclusion pass inside an `.obk`: the logout was tried once, the target was
+/// stopped under a session still logged in, and the session outlived three
+/// service restarts — the image's next mount, 47 minutes later, was refused
+/// with `ISDSC_TARGET_ALREADY_LOGGED_IN`.
+fn logout_session(session: &mut ISCSI_UNIQUE_SESSION_ID, target: &str) -> bool {
+    let start = Instant::now();
+    let mut attempts = 0u64;
+    loop {
+        attempts += 1;
+        // SAFETY: the id came from the initiator (a login or its session list).
+        let code = unsafe { LogoutIScsiTarget(session) };
+        let waited_ms = start.elapsed().as_millis() as u64;
+        match code {
+            0 => {
+                if attempts > 1 {
+                    info!(target, attempts, waited_ms, "iSCSI: logout went through once the device was let go");
+                }
+                return true;
+            }
+            // Gone already — which is all a logout is for.
+            ISDSC_INVALID_SESSION_ID => return true,
+            ISDSC_DEVICE_BUSY_ON_SESSION | ISDSC_SESSION_BUSY if start.elapsed() < LOGOUT_PATIENCE => {
+                std::thread::sleep(Duration::from_millis((100 * attempts).min(1000)));
+            }
+            _ => {
+                warn!(target, attempts, waited_ms, reason = %describe(code), "iSCSI: logout refused");
+                return false;
+            }
+        }
+    }
+}
+
+/// One session the initiator holds, as much of it as the cleanup needs.
+struct HeldSession {
+    id: ISCSI_UNIQUE_SESSION_ID,
+    target: String,
+    /// Where its connections go. Empty for a session that has lost them all
+    /// and is trying to reconnect.
+    portals: Vec<(String, u16)>,
+}
+
+/// # Safety
+/// `p` is null or points at a NUL-terminated UTF-16 string.
+unsafe fn wide(p: windows::core::PWSTR) -> String {
+    if p.is_null() {
+        String::new()
+    } else {
+        p.to_string().unwrap_or_default()
+    }
+}
+
+/// Every session the initiator holds right now.
+fn held_sessions() -> Result<Vec<HeldSession>> {
+    // u64, not u8: the buffer holds structs with pointers in them.
+    let mut buf: Vec<u64> = Vec::new();
+    let mut size = 0u32;
+    let mut count = 0u32;
+    for _ in 0..4 {
+        let ptr = if buf.is_empty() {
+            std::ptr::null_mut()
+        } else {
+            buf.as_mut_ptr() as *mut ISCSI_SESSION_INFOW
+        };
+        // SAFETY: `size` is the byte length of `buf` (zero with a null buffer,
+        // which is how the size is asked for).
+        let code = unsafe { GetIScsiSessionListW(&mut size, &mut count, ptr) };
+        match code {
+            0 => break,
+            // A session can appear between the two calls: ask again.
+            ERROR_INSUFFICIENT_BUFFER => buf = vec![0u64; (size as usize).div_ceil(8).max(1)],
+            other => {
+                return Err(dev(format!("iSCSI: GetIScsiSessionList failed with {}", describe(other))))
+            }
+        }
+    }
+    if buf.is_empty() || count == 0 {
+        return Ok(Vec::new());
+    }
+    // SAFETY: the call succeeded, so the buffer starts with `count` session
+    // records whose pointers all point back into the same buffer.
+    let infos = unsafe {
+        std::slice::from_raw_parts(buf.as_ptr() as *const ISCSI_SESSION_INFOW, count as usize)
+    };
+    let mut out = Vec::with_capacity(infos.len());
+    for info in infos {
+        let connections: &[ISCSI_CONNECTION_INFOW] =
+            if info.Connections.is_null() || info.ConnectionCount == 0 {
+                &[]
+            } else {
+                // SAFETY: as above — `ConnectionCount` records inside `buf`.
+                unsafe { std::slice::from_raw_parts(info.Connections, info.ConnectionCount as usize) }
+            };
+        out.push(HeldSession {
+            id: info.SessionId,
+            // SAFETY: pointers into `buf`, NUL-terminated by the initiator.
+            target: unsafe { wide(info.TargetName) },
+            portals: connections
+                .iter()
+                .map(|c| (unsafe { wide(c.TargetAddress) }, c.TargetSocket))
+                .collect(),
+        });
+    }
+    Ok(out)
+}
+
+/// Does anything still serve this session? A target of ours lives exactly as
+/// long as the process serving it, so a port nobody answers on means the
+/// session is an orphan. `skip` is the target about to be logged in to: it
+/// answers, but it is not what the old session was talking to.
+fn target_answers(portals: &[(String, u16)], skip: (&str, u16)) -> bool {
+    portals.iter().any(|(address, port)| {
+        if (address.as_str(), *port) == skip {
+            return false;
+        }
+        let Ok(ip) = address.parse::<IpAddr>() else {
+            return false;
+        };
+        TcpStream::connect_timeout(&SocketAddr::new(ip, *port), TARGET_ANSWER_TIMEOUT).is_ok()
+    })
+}
+
+/// Sessions to `target` that nothing serves any more, logged out before a new
+/// login — which the initiator would otherwise refuse outright with
+/// `ISDSC_TARGET_ALREADY_LOGGED_IN`. A session whose target still answers is a
+/// live mount and is left alone.
+fn clear_stale_sessions(target: &str, ours: (&str, u16)) -> Result<()> {
+    let sessions = match held_sessions() {
+        Ok(s) => s,
+        Err(e) => {
+            // Not knowing is not a reason to refuse the mount: the login says
+            // for itself if something is in the way.
+            warn!(error = %e, "iSCSI: could not list the initiator's sessions");
+            return Ok(());
+        }
+    };
+    for mut s in sessions.into_iter().filter(|s| s.target.eq_ignore_ascii_case(target)) {
+        if target_answers(&s.portals, ours) {
+            return Err(dev(
+                "iSCSI: этот образ уже подключён — его сессия жива. Сначала отключите его.",
+            )
+            .tap(target));
+        }
+        warn!(
+            target,
+            portals = ?s.portals,
+            "iSCSI: a session to this image is left over from an earlier run and nothing serves \
+             it any more — logging it out"
+        );
+        if !logout_session(&mut s.id, target) {
+            return Err(dev(
+                "iSCSI: с прошлого раза осталась сессия к этому образу, и Windows не даёт её \
+                 закрыть — диск этой сессии ещё кем-то занят. Поможет перезагрузка; без неё — от \
+                 имени администратора `iscsicli SessionList`, затем `iscsicli LogoutTarget \
+                 <Session Id>`.",
+            )
+            .tap(target));
+        }
+        info!(target, "iSCSI: the left-over session is gone");
+    }
+    Ok(())
+}
+
+/// At service start: every session to an image of ours that nothing serves any
+/// more. A mount lives in the process that serves it, so after an update or a
+/// crash its session is an orphan — a dead disk in Disk Management, and the
+/// image's next mount refused. Sessions whose target still answers (a mount
+/// the CLI is serving) are left alone. Returns how many were logged out.
+///
+/// The initiator service is not started for this: if it is not running, it
+/// holds no sessions.
+pub fn clear_orphaned_sessions() -> usize {
+    if !status().running {
+        return 0;
+    }
+    let sessions = match held_sessions() {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(error = %e, "iSCSI: could not list the initiator's sessions");
+            return 0;
+        }
+    };
+    let prefix = crate::iscsi::IQN_PREFIX.to_ascii_lowercase();
+    let mut cleared = 0;
+    for mut s in sessions {
+        if !s.target.to_ascii_lowercase().starts_with(&prefix) || target_answers(&s.portals, ("", 0)) {
+            continue;
+        }
+        warn!(target = %s.target, portals = ?s.portals, "iSCSI: orphaned session of an earlier run — logging it out");
+        if logout_session(&mut s.id, &s.target) {
+            cleared += 1;
+        }
+    }
+    cleared
 }
 
 #[cfg(test)]

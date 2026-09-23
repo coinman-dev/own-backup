@@ -68,7 +68,17 @@ impl Attached {
             }
         }
         if let Some(target) = self.target.take() {
-            target.logout();
+            // The target stops below either way: this may be the end of a
+            // backup, which cannot wait forever. What it leaves behind is an
+            // orphaned session, and the next login to this image — or the next
+            // service start — logs it out.
+            if !target.logout() {
+                warn!(
+                    physical = %self.physical,
+                    "attached image: the initiator kept the session — it is left for the next \
+                     login to this image to clear"
+                );
+            }
         }
         self.stop.store(true, Ordering::SeqCst);
         if let Some(server) = self.server.take() {
