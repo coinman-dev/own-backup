@@ -166,7 +166,6 @@
   }
 
   .card {
-    max-width: 720px;
     margin-bottom: 18px;
   }
 

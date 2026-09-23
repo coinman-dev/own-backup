@@ -414,7 +414,7 @@
 
 <style>
   .page { height: 100%; display: flex; flex-direction: column; }
-  .dash { flex: 1; overflow: auto; width: 100%; padding: 34px 44px; max-width: 900px; margin: 0 auto; display: flex; flex-direction: column; }
+  .dash { flex: 1; overflow: auto; width: 100%; padding: 34px 44px; display: flex; flex-direction: column; }
   .flow { display: flex; align-items: stretch; justify-content: center; }
   .card { flex: 1; max-width: 300px; border: 1px solid var(--border); border-radius: 6px; padding: 22px 18px; text-align: center; background: var(--card-bg); display: flex; flex-direction: column; align-items: center; gap: 8px; }
   .card-title { font-size: 20px; font-weight: 600; color: var(--head); }

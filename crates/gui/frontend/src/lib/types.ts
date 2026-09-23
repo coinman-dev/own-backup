@@ -373,6 +373,8 @@ export interface ExclusionsConfig {
 export interface AdvancedConfig {
   sector_by_sector: boolean;
   validate_after: boolean;
+  /** Only the blocks the new copy wrote, not the chain under it. */
+  verify_latest_only: boolean;
   backup_unallocated: boolean;
   password_enabled: boolean;
   pre_command: string;

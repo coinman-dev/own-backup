@@ -2293,7 +2293,7 @@
 
 <style>
   .page { height: 100%; display: flex; flex-direction: column; }
-  .dash { flex: 1; overflow: auto; width: 100%; padding: 34px 44px; max-width: 900px; margin: 0 auto; display: flex; flex-direction: column; }
+  .dash { flex: 1; overflow: auto; width: 100%; padding: 34px 44px; display: flex; flex-direction: column; }
   .sec-head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
   .sec-title { font-size: 15px; font-weight: 700; color: var(--head); }
   .sec-sub { font-size: 13px; color: var(--text-muted); }

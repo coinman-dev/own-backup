@@ -68,7 +68,7 @@
 </div>
 
 <style>
-  .page { padding: 30px 44px; max-width: 940px; height: 100%; overflow: auto; }
+  .page { padding: 30px 44px; height: 100%; overflow: auto; }
   .head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 22px; }
   h1 { font-size: 28px; font-weight: 300; color: var(--head); }
   .refresh { background: none; border: 1px solid var(--border); border-radius: 4px; padding: 7px 16px; font-size: 13px; color: var(--head); cursor: pointer; font-family: var(--font); }

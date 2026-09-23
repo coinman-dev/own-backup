@@ -606,7 +606,12 @@ fn emit_engine<T: serde::Serialize>(
 
 /// Shared save/run validation: name + at least one source, dest non-empty, and
 /// the destination not on ANY of the job's source volumes.
-fn validate_job(job: &own_backup_core::Job) -> Result<(), Status> {
+///
+/// `encrypted` — whether the job WILL write encrypted copies once this
+/// operation lands. It cannot be read off `job` alone: an ordinary save may
+/// arrive without the authorization (the store puts the stored one back), and
+/// the encryption wizard validates the job before the authorization exists.
+fn validate_job(job: &own_backup_core::Job, encrypted: bool) -> Result<(), Status> {
     if job.name.trim().is_empty() {
         return Err(Status::invalid_argument("Укажите имя задания."));
     }
@@ -643,16 +648,38 @@ fn validate_job(job: &own_backup_core::Job) -> Result<(), Status> {
     // 2026-07-08): reject the save right away when the destination already
     // holds this job's backups in a different container. The runners repeat
     // the same check before every run (defence in depth).
+    //
+    // The container is what the RUNNER will write, and for an encrypted job
+    // that is `.obk`, whatever `image_format` says (it stays qcow2 underneath).
+    // Comparing against `image_format` alone refused every save of every
+    // encrypted job that had made a single copy: the check saw the job's own
+    // `.obk` as "another format" — ticking «проверять после создания» was
+    // refused with a message about changing a format nobody had touched.
     let folder = std::path::Path::new(&job.dest_folder);
     if folder.is_dir() {
         if let Ok(chains) = own_backup_backup::chains::list_job_chains(folder, &job.id) {
-            let want = job.image_format.extension();
-            if chains.iter().flat_map(|c| c.images.iter()).any(|i| i.container != want) {
-                return Err(Status::invalid_argument(
+            let want = if encrypted {
+                own_backup_backup::seal::obk::OBK_EXTENSION
+            } else {
+                job.image_format.extension()
+            };
+            let mut images = chains.iter().flat_map(|c| c.images.iter());
+            if let Some(other) = images.find(|i| i.container != want) {
+                // Turning encryption on over plaintext copies IS a format
+                // change, and it used to pass here — then every run after it
+                // failed the runner's own check, at night, with nobody told
+                // why. Said now, while the person is looking at the screen.
+                let msg = if encrypted && other.container != own_backup_backup::seal::obk::OBK_EXTENSION {
+                    "Шифрование нельзя включить у задания, у которого уже есть \
+                     незашифрованные копии: все копии задания должны быть в одном \
+                     формате. Для зашифрованных копий создайте новое задание (или \
+                     удалите существующие копии этого)."
+                } else {
                     "Нельзя изменить формат образа: у задания уже есть резервные копии \
                      в другом формате. Создайте новое задание (или удалите существующие \
-                     копии этого задания).",
-                ));
+                     копии этого задания)."
+                };
+                return Err(Status::invalid_argument(msg));
             }
         }
     }
@@ -677,7 +704,16 @@ impl BackupService for BackupServiceImpl {
         check_auth(&req, &self.service_token)?;
         let job: own_backup_core::Job = serde_json::from_str(&req.into_inner().json)
             .map_err(|e| Status::invalid_argument(format!("bad job JSON: {e}")))?;
-        validate_job(&job)?;
+        // Encrypted if the edit says so or the stored job already is — the
+        // store keeps a stored authorization when a client omits the field, so
+        // the check has to judge the job the store is about to write.
+        let encrypted = job.archive_encryption.is_some()
+            || self
+                .state
+                .store
+                .get(&job.id)
+                .is_some_and(|stored| stored.archive_encryption.is_some());
+        validate_job(&job, encrypted)?;
         // Reported as saved only once it is on disk: a full destination or a
         // read-only data folder used to give a job that lived until the next
         // restart and then vanished (audit AUD-08).
@@ -1674,7 +1710,9 @@ impl BackupService for BackupServiceImpl {
         }
         let p: In = serde_json::from_str(&req.into_inner().json)
             .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
-        validate_job(&p.job)?;
+        // The job as it will be once encrypted: over plaintext copies that is a
+        // format change, and it must be refused now rather than by every run.
+        validate_job(&p.job, true)?;
 
         // Sealing the envelope is Argon2id at the production profile — seconds,
         // not milliseconds, and it must not sit on the async runtime.

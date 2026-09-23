@@ -1780,6 +1780,22 @@
           <div class="adv-group">
             <div class="adv-title">Проверка</div>
             <label class="chk"><input type="checkbox" bind:checked={job.advanced.validate_after} /> Проверять резервную копию после создания <span class="ok-badge">работает</span></label>
+            <!-- Under its parent, and inert without it: "only the latest" is a
+                 way of checking, not a check of its own. -->
+            <label class="chk sub-chk" class:dim={!job.advanced.validate_after}>
+              <input
+                type="checkbox"
+                bind:checked={job.advanced.verify_latest_only}
+                disabled={!job.advanced.validate_after}
+              />
+              Проверять только последнюю копию
+            </label>
+            <div class="sub-hint" class:dim={!job.advanced.validate_after}>
+              Читаются только блоки, которые записала эта копия, а не вся цепочка
+              под ней — на длинной цепочке это в разы быстрее. Но повреждение
+              в более старых копиях такая проверка не заметит, а без них
+              последняя копия не восстановится.
+            </div>
           </div>
           <!-- Encryption. Only ever an on-switch: copies already written cannot
                be un-encrypted by a setting, and replacing an existing key is a
@@ -1921,7 +1937,9 @@
   .link { background: none; border: none; color: var(--primary); font-size: 13px; cursor: pointer; padding: 0; }
 
   /* --- Paragon-style source map (step 0) --- */
-  .src-wrap { max-width: 940px; margin: 0 auto; }
+  /* The whole width: a disk map drawn 940 px wide in the middle of a wide
+     window squeezes every partition label into «Зарезерв…» for no reason. */
+  .src-wrap { width: 100%; }
   .sec-head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
   .sec-title { font-size: 15px; font-weight: 700; color: var(--head); }
   .sec-sub { font-size: 13px; color: var(--text-muted); }
@@ -2061,6 +2079,10 @@
   .at input { padding: 7px 10px; border: 1px solid var(--border); border-radius: 4px; }
   .adv-schedule { margin-top: 20px; display: flex; flex-direction: column; gap: 12px; }
   .chk { display: flex; align-items: center; gap: 9px; font-size: 14px; color: var(--head); cursor: pointer; }
+  /* A way of doing the check above, so it sits under it and greys out with it. */
+  .sub-chk { margin: 8px 0 0 26px; }
+  .sub-hint { margin: 4px 0 0 52px; font-size: 12.5px; line-height: 1.45; color: var(--sub); }
+  .sub-chk.dim, .sub-hint.dim { opacity: 0.45; cursor: default; }
   .field-label { font-size: 15px; font-weight: 600; color: var(--head); margin-bottom: 10px; }
   .field-label.mt { margin-top: 26px; }
   .num { width: 60px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 4px; margin: 0 4px; }

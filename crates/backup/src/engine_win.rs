@@ -4897,6 +4897,100 @@ pub fn verify_image(
 pub fn verify_image_with_keys(
     image_path: &Path,
     keys: Option<&crate::seal::context::ArchiveKeys>,
+    progress: impl FnMut(u64, u64) -> Result<()>,
+) -> Result<VerifySummary> {
+    verify_image_scoped(image_path, keys, VerifyScope::Everything, progress)
+}
+
+/// How much of an image a check reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VerifyScope {
+    /// Every block the restore point is made of, read through the whole chain.
+    /// Catches damage in ANY copy the point depends on — a bad block in the
+    /// base breaks every increment above it, and only this reading notices.
+    #[default]
+    Everything,
+    /// Only the blocks THIS file stores: what the copy just written brought.
+    /// An increment of 2 GiB over a 40 GiB base is checked in 2 GiB of reads,
+    /// not 42. The trade is said out loud in the interface — the older copies
+    /// are not read, so damage in them is not found by this check.
+    /// For a full copy, which has no parent, the two are the same.
+    LatestCopyOnly,
+}
+
+/// Backup block numbers whose data lives in THIS file rather than a parent.
+///
+/// Asked of the container itself, per cluster, without falling through to the
+/// backing file: qcow2 by its L2 descriptor, `.obk` by its authenticated index,
+/// VHDX by its BAT. A cluster the file marks explicitly ZERO counts as stored
+/// here too — in a child that is a write (it hides the parent's data), and a
+/// check that skipped it would never notice a region wrongly emptied.
+///
+/// A backup block covers `[data_offset + n·bs, data_offset + (n+1)·bs)` in
+/// guest bytes; a stored cluster marks every block it touches. Guest bytes
+/// before `data_offset` (a whole-disk image's own metadata) belong to no block.
+fn blocks_stored_in_this_file(
+    image_path: &Path,
+    container: &str,
+    chain_key: Option<&crate::seal::ChainKey>,
+    data_offset: u64,
+    block_size: u64,
+) -> Result<std::collections::HashSet<u64>> {
+    let mut out = std::collections::HashSet::new();
+    let mut mark = |guest_start: u64, len: u64| {
+        let end = guest_start.saturating_add(len);
+        if end <= data_offset || block_size == 0 {
+            return;
+        }
+        let from = guest_start.max(data_offset) - data_offset;
+        let to = end - 1 - data_offset;
+        for n in (from / block_size)..=(to / block_size) {
+            out.insert(n);
+        }
+    };
+    match container {
+        "obk" => {
+            let key = chain_key.ok_or_else(|| {
+                OwnBackupError::Encryption("проверка последней копии: нужен ключ архива".into())
+            })?;
+            let mut image = crate::seal::obk::ObkImage::open_path(image_path, key)?;
+            let cs = image.cluster_size();
+            for c in 0..image.total_clusters() {
+                if image.cluster_state(c)? != crate::seal::obk::ClusterState::Absent {
+                    mark(c * cs, cs);
+                }
+            }
+        }
+        "qcow2" => {
+            let file = std::io::BufReader::new(std::fs::File::open(image_path)?);
+            let mut image = crate::qcow2::reader::Qcow2Reader::open(file)?;
+            let cs = image.cluster_size();
+            for c in 0..image.total_clusters() {
+                if !matches!(image.descriptor(c)?, crate::qcow2::ClusterDescriptor::Unallocated) {
+                    mark(c * cs, cs);
+                }
+            }
+        }
+        "vhdx" | "avhdx" => {
+            let alloc = crate::vhdx_bat::allocated_payload_blocks(image_path)?;
+            for b in alloc.blocks {
+                mark(b * alloc.block_size, alloc.block_size);
+            }
+        }
+        other => {
+            return Err(OwnBackupError::ImageFormat(format!(
+                "проверка последней копии не умеет контейнер «{other}»"
+            )))
+        }
+    }
+    Ok(out)
+}
+
+/// The same check with a chosen scope — see [`VerifyScope`].
+pub fn verify_image_scoped(
+    image_path: &Path,
+    keys: Option<&crate::seal::context::ArchiveKeys>,
+    scope: VerifyScope,
     mut progress: impl FnMut(u64, u64) -> Result<()>,
 ) -> Result<VerifySummary> {
     let started = Instant::now();
@@ -4912,11 +5006,39 @@ pub fn verify_image_with_keys(
     let mut image_dev =
         ImageReadSource::open_with(image_path, &sidecar.info.container, chain_key.as_ref())?;
 
-    let total = sidecar.checksums.len() as u64;
+    // The sidecar of an increment describes the WHOLE state, so reading all
+    // of it walks every copy underneath. For "latest only" the file itself is
+    // asked which blocks it holds, and only those are read.
+    let only: Option<std::collections::HashSet<u64>> = match scope {
+        VerifyScope::Everything => None,
+        VerifyScope::LatestCopyOnly => Some(blocks_stored_in_this_file(
+            image_path,
+            &sidecar.info.container,
+            chain_key.as_ref(),
+            data_offset,
+            block_size,
+        )?),
+    };
+    let entries: Vec<_> = sidecar
+        .checksums
+        .iter()
+        .filter(|e| only.as_ref().is_none_or(|set| set.contains(&e.block_number)))
+        .collect();
+    if let Some(set) = &only {
+        info!(
+            image = %image_path.display(),
+            of_this_copy = entries.len(),
+            of_the_state = sidecar.checksums.len(),
+            stored_here = set.len(),
+            "verify: only the blocks this copy wrote"
+        );
+    }
+
+    let total = entries.len() as u64;
     let mut checked = 0u64;
     let mut mismatched = Vec::new();
 
-    for entry in &sidecar.checksums {
+    for entry in entries {
         let offset = entry.block_number * block_size;
         let len = std::cmp::min(block_size, volume_len - offset) as usize;
 

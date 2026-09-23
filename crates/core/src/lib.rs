@@ -377,6 +377,10 @@ pub fn default_linux_exclusions() -> Vec<String> {
 pub struct AdvancedConfig {
     pub sector_by_sector: bool,
     pub validate_after: bool,
+    /// With `validate_after`: read only the blocks the new copy itself wrote,
+    /// not the whole chain under it. Faster on a long chain, and blind to
+    /// damage in the older copies — which is why it is off by default.
+    pub verify_latest_only: bool,
     // saved-for-later
     pub backup_unallocated: bool,
     pub password_enabled: bool,
@@ -391,7 +395,11 @@ impl Default for AdvancedConfig {
     fn default() -> Self {
         Self {
             sector_by_sector: false,
-            validate_after: false,
+            // On by default: a copy nobody has read back is a copy nobody
+            // knows restores. A job that was saved with it off keeps its
+            // choice — this is the default for new jobs only.
+            validate_after: true,
+            verify_latest_only: false,
             backup_unallocated: false,
             password_enabled: false,
             pre_command: String::new(),
@@ -2032,7 +2040,7 @@ async fn perform_backup(
     keys: Option<own_backup_backup::seal::context::ArchiveKeys>,
 ) -> JobRun {
     use own_backup_backup::engine_win::{
-        backup_volume, verify_image_with_keys, VolumeBackupRequest,
+        backup_volume, verify_image_scoped, VerifyScope, VolumeBackupRequest,
     };
     use own_backup_common::types::BackupType;
     use own_backup_common::OwnBackupError;
@@ -2131,6 +2139,13 @@ async fn perform_backup(
             encryption: keys.clone(),
         };
         let validate_after = job.advanced.validate_after;
+        // Only the blocks this copy wrote, or everything the restore point
+        // stands on — the job says which (default: everything).
+        let verify_scope = if job.advanced.verify_latest_only {
+            VerifyScope::LatestCopyOnly
+        } else {
+            VerifyScope::Everything
+        };
 
         let sink_bg = sink.clone();
         let job_id = job.id.clone();
@@ -2210,9 +2225,10 @@ async fn perform_backup(
                 let mut v_permille = u64::MAX;
                 let mut v_emit = std::time::Instant::now();
                 let mut v_rate = VerifyRate::new(&image_for_verify, keys_for_verify.as_ref());
-                let verified = verify_image_with_keys(
+                let verified = verify_image_scoped(
                     &image_for_verify,
                     keys_for_verify.as_ref(),
+                    verify_scope,
                     |done, total| {
                     // Cancel reaches the check too, not just the copy (audit
                     // AUD-12). Reading back a whole image is minutes of work;
@@ -2399,7 +2415,7 @@ async fn perform_disk_backup(
     mut run: JobRun,
 ) -> JobRun {
     use own_backup_backup::engine_win::{
-        backup_disk, verify_image_with_keys, DiskBackupRequest, DiskPartitionBackup,
+        backup_disk, verify_image_scoped, VerifyScope, DiskBackupRequest, DiskPartitionBackup,
     };
     use own_backup_common::OwnBackupError;
 
@@ -2487,6 +2503,13 @@ async fn perform_disk_backup(
         parent_image: plan.parent_image.clone(),
     };
     let validate_after = job.advanced.validate_after;
+    // Only the blocks this copy wrote, or everything the restore point
+    // stands on — the job says which (default: everything).
+    let verify_scope = if job.advanced.verify_latest_only {
+        VerifyScope::LatestCopyOnly
+    } else {
+        VerifyScope::Everything
+    };
     let image_for_verify = image_path.clone();
     let keys_for_verify = keys.clone();
     let image_name = image_path
@@ -2560,7 +2583,7 @@ async fn perform_disk_backup(
             let mut v_emit = std::time::Instant::now();
             let mut v_rate = VerifyRate::new(&image_for_verify, keys_for_verify.as_ref());
             let verified =
-                verify_image_with_keys(&image_for_verify, keys_for_verify.as_ref(), |done, total| {
+                verify_image_scoped(&image_for_verify, keys_for_verify.as_ref(), verify_scope, |done, total| {
                 if cancel_bg.swap(false, Ordering::SeqCst) {
                     return Err(OwnBackupError::Cancelled);
                 }
