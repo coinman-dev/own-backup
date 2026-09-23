@@ -13,12 +13,15 @@ separate license (`COMMERCIAL-LICENSE.md`). NOT OSI "open source" — say
 `MSiSCSI` initiator Windows already has, so nothing third-party is installed or
 distributed. See `THIRD-PARTY-NOTICES.md`.
 
-**There is one plan: `.ai/PLAN.md`** (consolidated 2026-08-20 — done / done but
-unverified / not done, plus the decisions that must not be reopened). The
-twenty-three plans it replaced are in `.ai/archive-plans-until-2026-08-20.tar.gz`
-— `.ai` is not under git, so that tarball is their only copy. Unpack it for a
-decision log, never as a to-do list: several of those files listed closed work
-as open. Check the code before trusting any of them.
+**There is one plan: `.ai/PLAN.md`** (trimmed 2026-09-23 to three lists: done
+and verified → OK; done but unverified → how to check; not done → in detail).
+Everything it used to hold — run logs, the decisions that must not be
+reopened, the 2026-09-19 audit, the encryption design — is verbatim in
+`.ai/archive-PLAN-until-2026-09-23.md`; the twenty-three plans before that are
+in `.ai/archive-plans-until-2026-08-20.tar.gz`. `.ai` is not under git, so
+those files are the only copies. Read them for the decision log, never as a
+to-do list: they list closed work as open. Check the code before trusting any
+of them.
 
 **BitLocker:** the FVE parser (`backup/src/bitlocker.rs`) opens a real volume —
 confirmed on Windows 10 / XTS-AES 128 on 2026-08-05 via `own-backup-cli
