@@ -4055,9 +4055,7 @@ pub struct VolumeRestoreSummary {
 /// the volume back on top of a restore still in progress, so it is bound to the
 /// write, not to this function.
 #[cfg(target_os = "windows")]
-fn partition_window_for(
-    target: &str,
-) -> (String, Option<crate::volume_win::VolumeDismountGuard>) {
+fn partition_window_for(target: &str) -> (String, Option<TakenVolume>) {
     let plain = normalize_device_path(target);
     if target.starts_with("part:") {
         return (plain, None);
@@ -4088,7 +4086,53 @@ fn partition_window_for(
         length = e.length,
         "restore: writing through the partition rather than the volume device"
     );
-    (format!("part:{}:{}:{}", e.disk_number, e.offset, e.length), Some(guard))
+    let taken = TakenVolume { guard: Some(guard), give_back: drive_letter_of(target).map(|l| (root, l)) };
+    (format!("part:{}:{}:{}", e.disk_number, e.offset, e.length), Some(taken))
+}
+
+/// `H`, from `H:`, `H:\` or `h:`. Nothing for a device path or a mount folder.
+#[cfg(target_os = "windows")]
+fn drive_letter_of(target: &str) -> Option<char> {
+    let mut chars = target.chars();
+    let letter = chars.next()?;
+    (letter.is_ascii_alphabetic() && chars.next() == Some(':')).then(|| letter.to_ascii_uppercase())
+}
+
+/// A volume taken down for a restore, and the letter it is owed back.
+///
+/// The dismount guard strips every letter it takes down — right for a
+/// whole-disk restore, whose plan assigns letters afresh afterwards, and wrong
+/// here: restoring onto `H:` left a volume with the right data and NO letter.
+/// Measured on the stand: `Get-Volume -DriveLetter H` empty straight after, the
+/// restored file still absent from `H:\` sixty seconds later, and all thirty
+/// files present when the same partition was read from outside. The person
+/// would have been looking at a missing drive after a restore that worked.
+///
+/// On drop, in this order: release the lock, then give the letter back. The
+/// order matters — a volume still locked by us cannot be mounted under it. And
+/// it happens on drop so a failed restore returns the letter too: the volume
+/// was theirs before we touched it.
+#[cfg(target_os = "windows")]
+struct TakenVolume {
+    guard: Option<crate::volume_win::VolumeDismountGuard>,
+    give_back: Option<(String, char)>,
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for TakenVolume {
+    fn drop(&mut self) {
+        drop(self.guard.take());
+        if let Some((root, letter)) = self.give_back.take() {
+            match crate::letters_win::assign_letter(&root, letter) {
+                Ok(()) => info!(volume = %root, %letter, "restore: the target has its letter back"),
+                Err(e) => warn!(
+                    volume = %root, %letter, error = %e,
+                    "restore: the target's letter could not be given back — the data is \
+                     written; assign it in Disk Management"
+                ),
+            }
+        }
+    }
 }
 
 /// Restore a volume image onto a target device. Overwrites the target!
@@ -4114,7 +4158,7 @@ pub fn restore_volume(
     // The whole-disk road never had this: it writes through the disk at the
     // partition's offset. This takes the same road, and takes the volume down
     // first so Windows stops guarding those sectors on its behalf.
-    let (target, _dismounted) = partition_window_for(&req.target);
+    let (target, _taken) = partition_window_for(&req.target);
     let mut target_dev = WinRawDevice::open_write(&target)?;
     info!(
         target = %target,
