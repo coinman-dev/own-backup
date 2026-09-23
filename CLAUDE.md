@@ -27,7 +27,13 @@ bitlocker --unlock`, password protector only. It reads the ciphertext off
 refuses reads through its own device (`FVE_E_LOCKED_VOLUME`). **Wired into
 backup** (`engine_win`: `open_bitlocker_source` + `unlock_and_probe` — a locked
 volume is backed up DECRYPTED through a window onto its disk; recovery-key
-protector too; a half-encrypted volume is refused). **The whole path was run on
+protector too). **A volume mid-conversion is refused by our decryption and
+handed to Windows** — by its own flag, bit `0x40` of the flags word in the
+`0x000F/0x000F` metadata record (`0x100` = decrypting), found by measurement
+2026-09-23. `encrypted_size` CANNOT tell: it holds the full volume size from
+the first second of a conversion. Before this, a locked volume paused past ~25 %
+(where the relocated boot sectors sit) was copied silently corrupt — verified
+old-vs-new on the stand: hash mismatch vs match. **The whole path was run on
 the boot medium on 2026-08-19 and works**: a 128 GiB locked system volume opened
 by its 48-digit recovery key, copied decrypted (XTS-AES 128), and the finished
 image mounted — the in-image exclusion pass walked 703 317 entries in it and
