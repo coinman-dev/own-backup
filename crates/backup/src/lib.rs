@@ -7,6 +7,7 @@ pub mod chains;
 pub mod checksum;
 pub mod consolidate;
 pub mod decrypt;
+pub mod dest_folder;
 pub mod efivars;
 pub mod exclusions;
 pub mod esp_fallback;

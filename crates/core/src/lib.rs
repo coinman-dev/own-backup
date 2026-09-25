@@ -1153,6 +1153,15 @@ pub async fn run_queue_worker(
             }
             Ok(keys) => perform_backup(&sink, &job, &cancel, last_success, &passwords, keys).await,
         };
+        // How the run ended goes into the log as well as into its record. A
+        // failure used to be written only to the record: on 2026-09-25 the log
+        // said "Starting queued backup" and then nothing at all, and the reason
+        // existed only as a line on the screen.
+        match run.status.as_str() {
+            "error" => error!(job = %job.name, error = %run.error, "backup run failed"),
+            "cancelled" => info!(job = %job.name, reason = %run.error, "backup run cancelled"),
+            _ => {}
+        }
         if let Err(e) = store.record_run(run.clone()) {
             // The backup happened; only the record of it did not. Saying so is
             // the whole point — the next run plans its chain from this history.

@@ -373,7 +373,7 @@ pub fn backup_volume(
     }
     if let Some(parent) = req.image_path.parent() {
         if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
+            crate::dest_folder::create(parent)?;
         }
     }
 
@@ -2842,7 +2842,7 @@ pub fn backup_disk(
     }
     if let Some(parent) = req.image_path.parent() {
         if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
+            crate::dest_folder::create(parent)?;
         }
     }
     crate::privileges_win::enable_backup_privileges();
