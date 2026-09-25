@@ -3,7 +3,7 @@
   import { api } from '../lib/api';
   import { formatBytes, formatDate, formatClock } from '../lib/format';
   import {
-    jobs, jobStatus, sourceSummary, runJob, cancelRunning, runClock, etaMs,
+    jobs, jobStatus, lastSuccessfulRun, sourceSummary, runJob, cancelRunning, runClock, etaMs,
   } from '../lib/jobStore.svelte';
   import InfoModal from '../components/InfoModal.svelte';
   import type { Job } from '../lib/types';
@@ -34,7 +34,11 @@
   const indetBar = $derived(
     progress?.phase === 'finalize' || (excluding && (progress?.blocks_total ?? 0) === 0),
   );
+  /** How the last attempt ended — the ✓/✕ and the banner under the stats. */
   const lastRun = $derived(job.last_run);
+  /** What the job HAS: the newest copy, its size and what is in it. A failed
+   *  attempt after it changes nothing about that (see `lastSuccessfulRun`). */
+  const lastGood = $derived(lastSuccessfulRun(job));
   // The job asks for exclusions and the copy did not apply them. Reporting
   // "Исключено файлов: 0" for that reads as "the rules matched nothing", which
   // is the opposite of what happened — the rules were never run.
@@ -123,7 +127,7 @@
 
   const catData = $derived.by(() => {
     // Во время копирования — свежая сводка от сканера; после — из результата.
-    const c = liveCategories ?? lastRun?.categories;
+    const c = liveCategories ?? lastGood?.categories;
     if (!c) return null;
     const total = CAT_META.reduce((s, m) => s + (c[m.key] ?? 0), 0);
     if (total <= 0) return null;
@@ -140,7 +144,7 @@
   const barData = $derived.by(() => {
     if (!catData) return null;
     const kept = catData.reduce((s, c) => s + c.bytes, 0);
-    const ex = lastRun?.excluded_bytes ?? 0;
+    const ex = lastGood?.excluded_bytes ?? 0;
     const total = kept + ex;
     if (total <= 0) return null;
     const out: { name: string; color: string; bytes: number; pct: number }[] = catData.map((c) => ({
@@ -303,11 +307,15 @@
     <div class="stats">
       <span>
         Последнее копирование:
-        <b>{lastRun ? formatDate(lastRun.finished_at) : 'ещё не выполнялось'}</b>
+        <b>{lastGood
+          ? formatDate(lastGood.finished_at)
+          : lastRun
+            ? 'копий ещё нет'
+            : 'ещё не выполнялось'}</b>
       </span>
       <span class="reco">
         Данные для восстановления:
-        <b>{lastRun ? formatBytes(lastRun.used_blocks > 0 ? lastRun.used_blocks * 1048576 : lastRun.bytes_copied) : '—'}</b>
+        <b>{lastGood ? formatBytes(lastGood.used_blocks > 0 ? lastGood.used_blocks * 1048576 : lastGood.bytes_copied) : '—'}</b>
         <button class="q" title="О разбивке по типам" onclick={() => (stubMsg = 'Разбивка по типам считается по файлам, вошедшим в копию (по расширениям), во время сканирования тома. Исключённые файлы не учитываются.')}>?</button>
       </span>
     </div>
@@ -325,11 +333,11 @@
             <span class="cat-size">{formatBytes(c.bytes)}</span>
           </div>
         {/each}
-        {#if lastRun && lastRun.excluded_files > 0}
+        {#if lastGood && lastGood.excluded_files > 0}
           <div class="cat">
             <span class="dot" style="background:#c0463f"></span>
             <span class="cat-name">Исключено</span>
-            <span class="cat-size">{formatBytes(lastRun.excluded_bytes)}</span>
+            <span class="cat-size">{formatBytes(lastGood.excluded_bytes)}</span>
           </div>
         {/if}
       </div>
@@ -339,8 +347,8 @@
            the copy knows why — and saying so beats promising it "next time" to
            someone whose next copy will not have it either. -->
       <div class="cats-note">
-        {#if lastRun?.file_scan_skipped}
-          Разбивка по типам для этой копии не считалась: {lastRun.file_scan_skipped}.
+        {#if lastGood?.file_scan_skipped}
+          Разбивка по типам для этой копии не считалась: {lastGood.file_scan_skipped}.
         {:else}
           Разбивка по типам появится после следующего копирования (считается при сканировании тома).
         {/if}
@@ -383,7 +391,9 @@
         </div>
       {/if}
     {:else if lastRun?.status === 'error'}
-      <div class="banner err"><span class="bdot red"></span><span>Ошибка: {lastRun.error}</span></div>
+      <!-- When: the stats above now date the last COPY, and without its own
+           time this banner read as if that copy had failed. -->
+      <div class="banner err"><span class="bdot red"></span><span>Ошибка ({formatDate(lastRun.finished_at)}): {lastRun.error}</span></div>
     {/if}
   {/if}
 

@@ -9,7 +9,7 @@
     refreshVolumes, rememberArchiveSecret, restoreClock, restoreEtaMs,
   } from '../lib/engineStore.svelte';
   import { listen } from '@tauri-apps/api/event';
-  import { jobs } from '../lib/jobStore.svelte';
+  import { jobs, lastSuccessfulRun } from '../lib/jobStore.svelte';
   import { api } from '../lib/api';
   import ArchiveUnlockModal from '../components/ArchiveUnlockModal.svelte';
   import InfoModal from '../components/InfoModal.svelte';
@@ -20,7 +20,7 @@
   import type {
     Job, DiskInfo, PartitionInfo, ImageInfo, RestoreRunState, DryRunResult, OpRecord,
     RestorePlan, RestoreOp, RestoreMode, PartitionSpec, PartRef, FormatFs,
-    CheckContext, CheckResult, LetterChange, ArchiveSecret, LockedImage, JobRun,
+    CheckContext, CheckResult, LetterChange, ArchiveSecret, LockedImage,
   } from '../lib/types';
 
   interface Props {
@@ -39,17 +39,9 @@
   let stubMsg: string | null = $state(null);
 
   const lastRun = $derived(job.last_run);
-  /** The newest run that left a copy behind. `job.last_run` is the newest run
-   *  of ANY outcome, and keying this screen on it meant one failed run hid
-   *  every copy the job had: on 2026-09-25 a run into an empty DVD drive (the
-   *  backup disk had changed its letter) left nothing to read here and
-   *  «Восстановить» greyed out, while the copy sat untouched on the disk. */
-  const lastGood = $derived.by((): JobRun | null => {
-    if (lastRun?.status === 'success') return lastRun;
-    return jobs.activity
-      .filter((r) => r.job_id === job.id && r.status === 'success' && !!r.image_path)
-      .reduce<JobRun | null>((best, r) => (!best || r.finished_at > best.finished_at ? r : best), null);
-  });
+  /** The newest run that left a copy behind — not `lastRun`, which one failed
+   *  run turns into a copy-less record (see `lastSuccessfulRun`). */
+  const lastGood = $derived(lastSuccessfulRun(job));
 
   // The archived-disk card read from the IMAGE FILE's embedded metadata, so it
   // works WITHOUT jobs.json (e.g. a Boot-CD restore). Reloaded whenever the

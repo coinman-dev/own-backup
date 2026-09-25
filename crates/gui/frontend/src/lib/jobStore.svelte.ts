@@ -202,6 +202,21 @@ export function sourceSummary(job: Job): string {
 }
 
 /** Status of a job for the list: running / queued / result of last run. */
+/** The newest run of `job` that left a copy behind.
+ *
+ *  `job.last_run` is the newest run of ANY outcome. Screens that took "what
+ *  the job has" from it went blank after one failed run: on 2026-09-25 a run
+ *  into an empty DVD drive (the backup disk had changed its letter) showed
+ *  «Данные для восстановления: 0 B» and greyed out the restore, while the copy
+ *  from two days earlier sat untouched on the disk. How the last attempt ENDED
+ *  is still `last_run` — this is what there is to restore. */
+export function lastSuccessfulRun(job: Job): JobRun | null {
+  if (job.last_run?.status === 'success') return job.last_run;
+  return jobs.activity
+    .filter((r) => r.job_id === job.id && r.status === 'success' && !!r.image_path)
+    .reduce<JobRun | null>((best, r) => (!best || r.finished_at > best.finished_at ? r : best), null);
+}
+
 export function jobStatus(job: Job): 'running' | 'queued' | 'success' | 'error' | 'never' {
   if (jobs.queue.current === job.id) return 'running';
   if (jobs.queue.pending.includes(job.id)) return 'queued';
