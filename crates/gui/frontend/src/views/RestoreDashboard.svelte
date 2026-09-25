@@ -20,7 +20,7 @@
   import type {
     Job, DiskInfo, PartitionInfo, ImageInfo, RestoreRunState, DryRunResult, OpRecord,
     RestorePlan, RestoreOp, RestoreMode, PartitionSpec, PartRef, FormatFs,
-    CheckContext, CheckResult, LetterChange, ArchiveSecret, LockedImage,
+    CheckContext, CheckResult, LetterChange, ArchiveSecret, LockedImage, JobRun,
   } from '../lib/types';
 
   interface Props {
@@ -39,6 +39,17 @@
   let stubMsg: string | null = $state(null);
 
   const lastRun = $derived(job.last_run);
+  /** The newest run that left a copy behind. `job.last_run` is the newest run
+   *  of ANY outcome, and keying this screen on it meant one failed run hid
+   *  every copy the job had: on 2026-09-25 a run into an empty DVD drive (the
+   *  backup disk had changed its letter) left nothing to read here and
+   *  «Восстановить» greyed out, while the copy sat untouched on the disk. */
+  const lastGood = $derived.by((): JobRun | null => {
+    if (lastRun?.status === 'success') return lastRun;
+    return jobs.activity
+      .filter((r) => r.job_id === job.id && r.status === 'success' && !!r.image_path)
+      .reduce<JobRun | null>((best, r) => (!best || r.finished_at > best.finished_at ? r : best), null);
+  });
 
   // The archived-disk card read from the IMAGE FILE's embedded metadata, so it
   // works WITHOUT jobs.json (e.g. a Boot-CD restore). Reloaded whenever the
@@ -59,32 +70,68 @@
    *  own record instead, labelled the MSR «не в бэкапе», and the restore
    *  stopped at the preview with nowhere to type the password (2026-09-25). */
   let keyNeeded = $state(false);
+  /** The copy this screen reads when the folder scan has none to offer: the
+   *  newest successful run's image — or, when that file is not where the run
+   *  left it (the folder moved, the disk changed its letter), this job's newest
+   *  copy in the folder the job points at now. */
+  let imagePath = $state('');
+  // Strings, so that a reload of the job list or the history — new objects,
+  // same values — does not read the copy again (for an encrypted one that is
+  // a key derivation every time).
+  const recordedPath = $derived(lastGood?.image_path ?? '');
+  const destFolder = $derived(job.dest_folder);
+  const jobId = $derived(job.id);
   $effect(() => {
-    const path = lastRun?.status === 'success' ? lastRun.image_path : '';
-    if (!path) {
-      imageInfo = null;
-      infoLoading = false;
-      keyNeeded = false;
-      return;
-    }
+    const recorded = recordedPath;
+    const folder = destFolder;
+    const jid = jobId;
     let cancelled = false;
     infoLoading = true;
+    void (async () => {
+      let found = recorded ? await readCopy(recorded) : null;
+      // Not where the run left it: look where the job writes now. Only an
+      // encrypted copy needs this — the folder scan below finds the plain ones
+      // in the job's current folder already.
+      if (!found && folder && !jid.startsWith('file:')) {
+        const moved = await newestLockedCopy(folder, jid);
+        if (moved) found = await readCopy(moved);
+      }
+      if (cancelled) return;
+      imagePath = found?.path ?? recorded;
+      imageInfo = found?.info ?? null;
+      keyNeeded = found?.locked ?? false;
+      infoLoading = false;
+    })();
+    return () => { cancelled = true; };
+  });
+
+  /** One copy's description. `locked`: the file is there, encrypted, and no
+   *  key has been typed for it yet. Null when it cannot be read at all. */
+  async function readCopy(
+    path: string,
+  ): Promise<{ path: string; info: ImageInfo | null; locked: boolean } | null> {
     // The key for an encrypted copy is collected once per session; the
     // designer reads the copy several times and must not ask again.
     const secret = archiveSecretFor(path);
-    api.readImageInfo(path, secret).then(
-      (info) => {
-        if (!cancelled) { imageInfo = info; keyNeeded = false; infoLoading = false; }
-      },
-      async () => {
-        // Refused for want of a key is not a broken file: it is a question for
-        // whoever is at the screen, and the screen asks it.
-        const locked = !secret && (await needsArchiveKey(path));
-        if (!cancelled) { imageInfo = null; keyNeeded = locked; infoLoading = false; }
-      },
-    );
-    return () => { cancelled = true; };
-  });
+    try {
+      return { path, info: await api.readImageInfo(path, secret), locked: false };
+    } catch {
+      // Refused for want of a key is not a broken file: it is a question for
+      // whoever is at the screen, and the screen asks it.
+      if (!secret && (await needsArchiveKey(path))) return { path, info: null, locked: true };
+      return null;
+    }
+  }
+
+  /** This job's newest encrypted copy in `folder`, found by its open header. */
+  async function newestLockedCopy(folder: string, jid: string): Promise<string | null> {
+    try {
+      // Listed newest first.
+      return (await api.listLockedImages(folder)).find((l) => l.job_id === jid)?.image_path ?? null;
+    } catch {
+      return null;
+    }
+  }
 
   // All point-in-time copies of THIS job's archive, discovered by scanning its
   // folder for images with a matching embedded job id (no jobs.json), newest
@@ -152,7 +199,7 @@
   }
 
   async function submitUnlock(secret: ArchiveSecret) {
-    const path = lastRun?.image_path ?? '';
+    const path = imagePath;
     if (!path) return;
     unlock.busy = true;
     unlock.error = '';
@@ -208,8 +255,8 @@
   // Excluded-files line: prefer the count embedded in the active image (works
   // from a file without jobs.json), fall back to the run record.
   const excluded = $derived({
-    files: activeInfo?.excluded_files ?? lastRun?.excluded_files ?? 0,
-    bytes: activeInfo?.excluded_bytes ?? lastRun?.excluded_bytes ?? 0,
+    files: activeInfo?.excluded_files ?? lastGood?.excluded_files ?? 0,
+    bytes: activeInfo?.excluded_bytes ?? lastGood?.excluded_bytes ?? 0,
   });
 
   // Real file-category breakdown of the archived data — same source as the
@@ -226,7 +273,7 @@
   const catData = $derived.by(() => {
     // Prefer the breakdown embedded in the image (works without jobs.json);
     // fall back to the run record for images taken before it was embedded.
-    const c = activeInfo?.categories ?? lastRun?.categories;
+    const c = activeInfo?.categories ?? lastGood?.categories;
     if (!c) return null;
     const total = CAT_META.reduce((s, m) => s + (c[m.key] ?? 0), 0);
     if (total <= 0) return null;
@@ -617,7 +664,7 @@
   let luksPwError = $state<Record<number, string>>({});
 
   async function checkLuksPassword(part: number) {
-    const path = activeInfo?.image_path ?? lastRun?.image_path ?? '';
+    const path = activeInfo?.image_path || imagePath;
     const pw = luksPw[part] ?? '';
     if (!path || !pw) return;
     luksPwState[part] = 'checking';
@@ -1398,7 +1445,7 @@
     return {
       id: crypto.randomUUID(),
       target_disk: diskNumber(d),
-      image_path: activeInfo?.image_path ?? lastRun?.image_path ?? '',
+      image_path: activeInfo?.image_path || imagePath,
       verify_after: verifyAfter,
       ops,
     };
@@ -1512,7 +1559,7 @@
     return undefined;
   }
 
-  const canRestore = $derived(lastRun?.status === 'success' && !!lastRun.image_path);
+  const canRestore = $derived(!!(activeInfo?.image_path || imagePath));
   const backupBusy = $derived(
     jobs.queue.current !== null || jobs.queue.pending.length > 0,
   );
@@ -1781,7 +1828,7 @@
       title={activeInfo
         ? `Копию сделала Own Backup ${activeInfo.app_version || '— версия не записана (сборка старше 0.1.1)'}`
         : ''}
-    >{activeInfo ? formatDate(activeInfo.created_at) : lastRun ? formatDate(lastRun.finished_at) : ''}</span>
+    >{activeInfo ? formatDate(activeInfo.created_at) : lastGood ? formatDate(lastGood.finished_at) : ''}</span>
     <!-- Which build wrote this copy. Small, next to the date, and the first
          thing to look at when a copy behaves oddly. -->
     {#if activeInfo}
@@ -1794,7 +1841,7 @@
 
 <ArchiveUnlockModal
   open={unlock.open}
-  imageName={(lastRun?.image_path ?? '').split(/[\\/]/).pop() ?? ''}
+  imageName={imagePath.split(/[\\/]/).pop() ?? ''}
   busy={unlock.busy}
   error={unlock.error}
   onUnlock={submitUnlock}
@@ -2406,7 +2453,7 @@
       <p>
         На диске <b>{targetDisk?.model ?? ''}</b> будет перезаписана разметка и данные
         сопоставленных разделов — копией <b>{job.name}</b> от
-        {activeInfo ? formatDate(activeInfo.created_at) : lastRun ? formatDate(lastRun.finished_at) : ''}.
+        {activeInfo ? formatDate(activeInfo.created_at) : lastGood ? formatDate(lastGood.finished_at) : ''}.
       </p>
       <p><b>Отката нет.</b> Всё, что сейчас на затронутых разделах, будет потеряно.</p>
       <p>Введите <b>ДА</b> (заглавными), чтобы продолжить:</p>
