@@ -25,8 +25,12 @@
 
   interface Props {
     job: Job;
+    /** Whose copies to look for in `job.dest_folder`: the job id their files
+     *  carry. A job's own id for a job; for copies added by hand, the id found
+     *  in the files — they may belong to no job on this machine at all. */
+    chainJobId?: string;
   }
-  let { job }: Props = $props();
+  let { job, chainJobId }: Props = $props();
 
   let confirmOpen = $state(false);
   let confirmText = $state('');
@@ -43,57 +47,124 @@
    *  run turns into a copy-less record (see `lastSuccessfulRun`). */
   const lastGood = $derived(lastSuccessfulRun(job));
 
-  // The archived-disk card read from the IMAGE FILE's embedded metadata, so it
-  // works WITHOUT jobs.json (e.g. a Boot-CD restore). Reloaded whenever the
-  // selected copy's image path changes; null until loaded / for old images.
-  let imageInfo = $state<ImageInfo | null>(null);
-  /** This read is in flight. Separate from `copiesLoading`, and that separation
-   *  is the point: for an imported file the folder scan finishes at once, so
-   *  the only thing still loading is this — and for an ENCRYPTED copy it is
-   *  Argon2id, seconds, not a blink. That is how long the red «диск не
-   *  подключён» stood on screen before withdrawing itself. */
-  let infoLoading = $state(true);
-  /** The copy is encrypted and nobody has typed its key in this session.
-   *
-   *  Everything the image says about itself — which partitions it holds, the
-   *  layout, the build that wrote it — is sealed, and the service refuses to
-   *  restore it without the key (§7.4). A copy added by hand had its key asked
-   *  for on the way in; a JOB's copy never did, so this screen drew the job's
-   *  own record instead, labelled the MSR «не в бэкапе», and the restore
-   *  stopped at the preview with nowhere to type the password (2026-09-25). */
-  let keyNeeded = $state(false);
-  /** The copy this screen reads when the folder scan has none to offer: the
-   *  newest successful run's image — or, when that file is not where the run
-   *  left it (the folder moved, the disk changed its letter), this job's newest
-   *  copy in the folder the job points at now. */
-  let imagePath = $state('');
   // Strings, so that a reload of the job list or the history — new objects,
-  // same values — does not read the copy again (for an encrypted one that is
-  // a key derivation every time).
+  // same values — does not read the copies again (for an encrypted one that
+  // is a key derivation every time).
   const recordedPath = $derived(lastGood?.image_path ?? '');
   const destFolder = $derived(job.dest_folder);
-  const jobId = $derived(job.id);
+  const matchJobId = $derived(chainJobId ?? job.id);
+  const samePath = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+
+  // --- The copies of this job: every point in time the ‹ › arrows page -------
+  //
+  // Found by scanning the job's folder for files that carry its id — no
+  // jobs.json involved, so it works on the boot medium and for copies added by
+  // hand. An ENCRYPTED copy is listed too: its date and job id are in the open
+  // header, only the contents are sealed. It used to be left out until a
+  // password was typed, so a job whose copies are all encrypted had arrows that
+  // never moved (2026-09-25: two copies of C:, one date on screen).
+
+  /** One point-in-time copy. `info` is what the file says about itself: null
+   *  while it is sealed and no key has been typed, or while it is being read. */
+  interface Version {
+    path: string;
+    created_at: string;
+    sealed: boolean;
+    info: ImageInfo | null;
+    reading: boolean;
+  }
+  let versions = $state<Version[]>([]);
+  let copyIndex = $state(0);
+  /** The folder scan is still in flight. Until it lands there is nothing to say
+   *  about the copy — and saying «диск этой копии не подключён» in the meantime
+   *  is a red warning that flashes on every visit and is wrong every time. */
+  let copiesLoading = $state(true);
+  $effect(() => {
+    const folder = destFolder;
+    const jid = matchJobId;
+    const prefer = recordedPath;
+    if (!folder || !jid || jid.startsWith('file:')) {
+      versions = [];
+      copyIndex = 0;
+      copiesLoading = false;
+      return;
+    }
+    let cancelled = false;
+    copiesLoading = true;
+    void (async () => {
+      const [plain, sealed] = await Promise.all([
+        api.listImageBackups(folder).catch(() => [] as ImageInfo[]),
+        api.listLockedImages(folder).catch(() => [] as LockedImage[]),
+      ]);
+      if (cancelled) return;
+      const list: Version[] = [
+        ...plain
+          .filter((i) => i.job_id === jid)
+          .map((i) => ({ path: i.image_path, created_at: i.created_at, sealed: false, info: i, reading: false })),
+        ...sealed
+          .filter((l) => l.job_id === jid)
+          .map((l) => ({ path: l.image_path, created_at: l.created_at, sealed: true, info: null, reading: false })),
+      ].sort((a, b) => (a.created_at < b.created_at ? 1 : -1)); // newest first
+      versions = list;
+      // Open on the copy the job's history names, when it is among them.
+      copyIndex = Math.max(0, list.findIndex((v) => samePath(v.path, prefer)));
+      copiesLoading = false;
+      // Keys typed earlier in this session still open their copies.
+      void openSealed();
+    })();
+    return () => { cancelled = true; };
+  });
+
+  /** Read the sealed copies that are not open yet, with `secret` or with the
+   *  key already typed for each. One job, one key: the password that opened
+   *  one copy opens the rest. Each costs a key derivation (Argon2id, about a
+   *  second), so they are read one by one, in the background. A file that
+   *  refuses the key stays sealed and asks for its own. */
+  async function openSealed(secret?: ArchiveSecret) {
+    for (const v of versions) {
+      if (!v.sealed || v.info || v.reading) continue;
+      const key = secret ?? archiveSecretFor(v.path);
+      if (!key) continue;
+      v.reading = true;
+      try {
+        v.info = await api.readImageInfo(v.path, key);
+        rememberArchiveSecret(v.path, key);
+      } catch {
+        // Not this key's copy, or a damaged one.
+      } finally {
+        v.reading = false;
+      }
+    }
+  }
+
+  /** The copy on screen, when the folder gave any. */
+  const activeVersion = $derived(versions[copyIndex] ?? null);
+  const hasMultiple = $derived(versions.length > 1);
+
+  // --- When the folder gives nothing ------------------------------------------
+  // The folder may be unreadable (a disk that is not plugged in) or the copy an
+  // old one without metadata. Then the one image the history names is read on
+  // its own, as before.
+  let fallbackInfo = $state<ImageInfo | null>(null);
+  let fallbackLocked = $state(false);
+  let fallbackLoading = $state(true);
   $effect(() => {
     const recorded = recordedPath;
-    const folder = destFolder;
-    const jid = jobId;
+    if (copiesLoading) return;
+    if (versions.length > 0 || !recorded) {
+      fallbackInfo = null;
+      fallbackLocked = false;
+      fallbackLoading = false;
+      return;
+    }
     let cancelled = false;
-    infoLoading = true;
-    void (async () => {
-      let found = recorded ? await readCopy(recorded) : null;
-      // Not where the run left it: look where the job writes now. Only an
-      // encrypted copy needs this — the folder scan below finds the plain ones
-      // in the job's current folder already.
-      if (!found && folder && !jid.startsWith('file:')) {
-        const moved = await newestLockedCopy(folder, jid);
-        if (moved) found = await readCopy(moved);
-      }
+    fallbackLoading = true;
+    void readCopy(recorded).then((found) => {
       if (cancelled) return;
-      imagePath = found?.path ?? recorded;
-      imageInfo = found?.info ?? null;
-      keyNeeded = found?.locked ?? false;
-      infoLoading = false;
-    })();
+      fallbackInfo = found?.info ?? null;
+      fallbackLocked = found?.locked ?? false;
+      fallbackLoading = false;
+    });
     return () => { cancelled = true; };
   });
 
@@ -101,80 +172,48 @@
    *  key has been typed for it yet. Null when it cannot be read at all. */
   async function readCopy(
     path: string,
-  ): Promise<{ path: string; info: ImageInfo | null; locked: boolean } | null> {
+  ): Promise<{ info: ImageInfo | null; locked: boolean } | null> {
     // The key for an encrypted copy is collected once per session; the
     // designer reads the copy several times and must not ask again.
     const secret = archiveSecretFor(path);
     try {
-      return { path, info: await api.readImageInfo(path, secret), locked: false };
+      return { info: await api.readImageInfo(path, secret), locked: false };
     } catch {
       // Refused for want of a key is not a broken file: it is a question for
       // whoever is at the screen, and the screen asks it.
-      if (!secret && (await needsArchiveKey(path))) return { path, info: null, locked: true };
+      if (!secret && (await needsArchiveKey(path))) return { info: null, locked: true };
       return null;
     }
   }
 
-  /** This job's newest encrypted copy in `folder`, found by its open header. */
-  async function newestLockedCopy(folder: string, jid: string): Promise<string | null> {
-    try {
-      // Listed newest first.
-      return (await api.listLockedImages(folder)).find((l) => l.job_id === jid)?.image_path ?? null;
-    } catch {
-      return null;
-    }
-  }
-
-  // All point-in-time copies of THIS job's archive, discovered by scanning its
-  // folder for images with a matching embedded job id (no jobs.json), newest
-  // first — with a navigator to page between them. Empty for a single imported
-  // file, in which case the run-record image (imageInfo) is used instead.
-  let copies = $state<ImageInfo[]>([]);
-  let copyIndex = $state(0);
-  /** The folder scan is still in flight. Until it lands there is nothing to say
-   *  about the copy — and saying «диск этой копии не подключён» in the meantime
-   *  is a red warning that flashes on every visit and is wrong every time. */
-  let copiesLoading = $state(true);
-  $effect(() => {
-    const folder = job.dest_folder;
-    const jid = job.id;
-    if (!folder || jid.startsWith('file:')) {
-      copies = [];
-      copyIndex = 0;
-      copiesLoading = false;
-      return;
-    }
-    let cancelled = false;
-    copiesLoading = true;
-    api.listImageBackups(folder).then(
-      (list) => {
-        if (cancelled) return;
-        copies = list
-          .filter((i) => i.job_id === jid)
-          .sort((a, b) => (a.created_at < b.created_at ? 1 : -1)); // newest first
-        copyIndex = 0;
-        copiesLoading = false;
-      },
-      () => {
-        if (!cancelled) {
-          copies = [];
-          copiesLoading = false;
-        }
-      },
-    );
-    return () => { cancelled = true; };
+  /** The file on screen and what it says about itself. */
+  const currentPath = $derived(activeVersion?.path ?? recordedPath);
+  /** When the copy on screen was made. A sealed copy says it in its open
+   *  header, so the date is right before any password too. */
+  const copyDate = $derived.by(() => {
+    const at = activeVersion?.info?.created_at ?? activeVersion?.created_at;
+    if (at) return formatDate(at);
+    if (fallbackInfo) return formatDate(fallbackInfo.created_at);
+    return lastGood ? formatDate(lastGood.finished_at) : '';
   });
-
-  /** The same chain for an ENCRYPTED job, opened with the key typed below. The
-   *  folder scan above has no key and cannot see those copies at all. Kept
-   *  apart from `copies` so that scan, landing late, cannot wipe it. */
-  let unlockedCopies = $state<ImageInfo[]>([]);
-  const chain = $derived(copies.length > 0 ? copies : unlockedCopies);
-
-  // The copy currently shown & restored: the selected point-in-time from the
-  // scan, or the single run-record image when there's no scan.
-  const activeInfo = $derived(chain.length > 0 ? chain[copyIndex] : imageInfo);
-  const hasMultiple = $derived(chain.length > 1);
+  const activeInfo = $derived(activeVersion ? activeVersion.info : fallbackInfo);
+  /** This read is in flight — for an ENCRYPTED copy that is Argon2id, seconds,
+   *  not a blink, and that is how long a red «диск не подключён» used to stand
+   *  on screen before withdrawing itself. */
+  const infoLoading = $derived(activeVersion ? activeVersion.reading : fallbackLoading);
+  /** The copy on screen is encrypted and no key opens it yet.
+   *
+   *  Everything the image says about itself — which partitions it holds, the
+   *  layout, the build that wrote it — is sealed, and the service refuses to
+   *  restore it without the key (§7.4). A JOB's copy never had its key asked
+   *  for, so this screen drew the job's own record instead, labelled the MSR
+   *  «не в бэкапе», and the restore stopped at the preview with nowhere to type
+   *  the password (2026-09-25). */
+  const keyNeeded = $derived(
+    activeVersion
+      ? activeVersion.sealed && !activeVersion.info && !activeVersion.reading
+      : fallbackLocked,
+  );
 
   // --- Opening an encrypted copy (§7.4) ---
   // Asked with a button, not by a dialog that jumps out on arrival: looking at
@@ -191,7 +230,7 @@
   }
 
   async function submitUnlock(secret: ArchiveSecret) {
-    const path = imagePath;
+    const path = currentPath;
     if (!path) return;
     unlock.busy = true;
     unlock.error = '';
@@ -203,45 +242,17 @@
     });
     if (!info) return;
     rememberArchiveSecret(path, secret);
-    imageInfo = info;
-    keyNeeded = false;
+    const v = versions.find((x) => samePath(x.path, path));
+    if (v) v.info = info;
+    else {
+      fallbackInfo = info;
+      fallbackLocked = false;
+    }
     unlock = { ...unlockClosed };
-    void openChain(info, secret);
+    // The rest of the job's copies, on the same key, after the dialog closed
+    // and with the copy the user is looking at already on screen.
+    void openSealed(secret);
     if (unlockThenRestore) await askConfirm();
-  }
-
-  /** The rest of this job's chain, on the key that has just opened one copy.
-   *
-   *  One job, one key: the password that opened the newest copy opens the
-   *  others. Each still costs a key derivation (Argon2id, about a second),
-   *  which is why this runs after the dialog has closed and the newest copy is
-   *  already on screen. A file that refuses the key belongs to something else
-   *  and is left out. */
-  async function openChain(opened: ImageInfo, secret: ArchiveSecret) {
-    if (job.id.startsWith('file:')) return; // one file, no chain
-    let found: LockedImage[];
-    try {
-      found = await api.listLockedImages(job.dest_folder);
-    } catch {
-      return;
-    }
-    const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
-    const list: ImageInfo[] = [opened];
-    for (const l of found) {
-      if (l.job_id !== job.id || same(l.image_path, opened.image_path)) continue;
-      try {
-        list.push(await api.readImageInfo(l.image_path, secret));
-        rememberArchiveSecret(l.image_path, secret);
-      } catch {
-        // Another job's copy in the same folder, or a damaged one.
-      }
-    }
-    if (list.length < 2) return;
-    list.sort((a, b) => (a.created_at < b.created_at ? 1 : -1)); // newest first
-    // Stay on the copy already shown: the user may have started mapping it.
-    const shown = activeInfo?.image_path ?? opened.image_path;
-    unlockedCopies = list;
-    copyIndex = Math.max(0, list.findIndex((c) => same(c.image_path, shown)));
   }
 
   // Excluded-files line: prefer the count embedded in the active image (works
@@ -371,7 +382,7 @@
   // in deliberately.
   let wholeDiskRestore = $state(false);
   $effect(() => {
-    if (!targetDiskId) wholeDiskRestore = isWholeDisk;
+    if (!targetDiskId) wholeDiskRestore = isBootable;
   });
 
   // ---- The machine's boot menu -------------------------------------------
@@ -507,6 +518,19 @@
     (srcDisk?.partitions ?? []).filter(
       (p) => backedUpParts.includes(p.index) || layoutOnlyParts.includes(p.index),
     ),
+  );
+  /** Does this copy hold what a machine starts from — the EFI System Partition,
+   *  or the active partition of an MBR disk (`is_boot` says either)? That, not
+   *  "it is an image of the whole disk", is what «загрузочный» means. Every job
+   *  writes a whole-disk image now, bootable or not, and keying the checkbox on
+   *  that showed a copy of the data volume D: alone as «загрузочный», ticked
+   *  (2026-09-25). A copy made with «Загрузочная копия диска» counts whatever
+   *  it holds — it carries the machine's boot entries too. */
+  const isBootable = $derived(
+    isWholeDisk &&
+      (!!activeInfo?.boot_entries ||
+        !!job.disk_source?.bootable ||
+        srcBackupParts.some((p) => p.is_boot)),
   );
   const srcTotalBytes = $derived(srcBackupParts.reduce((s, p) => s + p.size_bytes, 0));
   /** Room the copy needs on the target — not the same as the sum of its
@@ -656,7 +680,7 @@
   let luksPwError = $state<Record<number, string>>({});
 
   async function checkLuksPassword(part: number) {
-    const path = activeInfo?.image_path || imagePath;
+    const path = activeInfo?.image_path || currentPath;
     const pw = luksPw[part] ?? '';
     if (!path || !pw) return;
     luksPwState[part] = 'checking';
@@ -1437,7 +1461,7 @@
     return {
       id: crypto.randomUUID(),
       target_disk: diskNumber(d),
-      image_path: activeInfo?.image_path || imagePath,
+      image_path: activeInfo?.image_path || currentPath,
       verify_after: verifyAfter,
       ops,
     };
@@ -1551,7 +1575,7 @@
     return undefined;
   }
 
-  const canRestore = $derived(!!(activeInfo?.image_path || imagePath));
+  const canRestore = $derived(!!(activeInfo?.image_path || currentPath));
   const backupBusy = $derived(
     jobs.queue.current !== null || jobs.queue.pending.length > 0,
   );
@@ -1815,16 +1839,22 @@
 {#snippet copyNav()}
   <div class="copynav">
     <button class="cn-btn" title="Более старая копия" aria-label="Более старая копия"
-      disabled={!hasMultiple || copyIndex >= chain.length - 1} onclick={() => { copyIndex += 1; resetMapping(); }}>‹</button>
+      disabled={!hasMultiple || copyIndex >= versions.length - 1} onclick={() => { copyIndex += 1; resetMapping(); }}>‹</button>
     <span class="cn-date"
       title={activeInfo
         ? `Копию сделала Own Backup ${activeInfo.app_version || '— версия не записана (сборка старше 0.1.1)'}`
         : ''}
-    >{activeInfo ? formatDate(activeInfo.created_at) : lastGood ? formatDate(lastGood.finished_at) : ''}</span>
+    >{copyDate}</span>
     <!-- Which build wrote this copy. Small, next to the date, and the first
          thing to look at when a copy behaves oddly. -->
     {#if activeInfo}
       <span class="cn-ver">v{activeInfo.app_version || '?'}</span>
+    {/if}
+    <!-- Which of how many: the arrows alone do not say there is anything to
+         page to, nor where in the chain this copy stands. Oldest is 1. -->
+    {#if hasMultiple}
+      <span class="cn-ver" title="Копия {versions.length - copyIndex} из {versions.length}, по времени создания"
+        >{versions.length - copyIndex}/{versions.length}</span>
     {/if}
     <button class="cn-btn" title="Более новая копия" aria-label="Более новая копия"
       disabled={!hasMultiple || copyIndex <= 0} onclick={() => { copyIndex -= 1; resetMapping(); }}>›</button>
@@ -1833,7 +1863,7 @@
 
 <ArchiveUnlockModal
   open={unlock.open}
-  imageName={imagePath.split(/[\\/]/).pop() ?? ''}
+  imageName={currentPath.split(/[\\/]/).pop() ?? ''}
   busy={unlock.busy}
   error={unlock.error}
   onUnlock={submitUnlock}
@@ -1869,7 +1899,7 @@
             selected={targetDiskId ? [] : job.sources}
             selectedIndices={targetDiskId ? [] : [...(activeInfo?.backed_up_parts ?? []), ...layoutOnlyParts]}
             readonly
-            boot={activeInfo?.is_whole_disk ?? isBootableCopy(d)}
+            boot={i === 0 && isBootable}
             bootChecked={wholeDiskRestore}
             onBootToggle={toggleWholeDisk}
             inBackup={backedUpParts.length > 0 ? [...backedUpParts, ...layoutOnlyParts] : undefined}
@@ -2445,7 +2475,7 @@
       <p>
         На диске <b>{targetDisk?.model ?? ''}</b> будет перезаписана разметка и данные
         сопоставленных разделов — копией <b>{job.name}</b> от
-        {activeInfo ? formatDate(activeInfo.created_at) : lastGood ? formatDate(lastGood.finished_at) : ''}.
+        {copyDate}.
       </p>
       <p><b>Отката нет.</b> Всё, что сейчас на затронутых разделах, будет потеряно.</p>
       <p>Введите <b>ДА</b> (заглавными), чтобы продолжить:</p>

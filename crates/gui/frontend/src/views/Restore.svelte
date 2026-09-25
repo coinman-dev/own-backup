@@ -2,16 +2,36 @@
   import { pickPath } from '../lib/pickPath.svelte';
   import { jobs, jobStatus } from '../lib/jobStore.svelte';
   import { api } from '../lib/api';
-  import ArchiveUnlockModal from '../components/ArchiveUnlockModal.svelte';
-  import { needsArchiveKey, rememberArchiveSecret } from '../lib/engineStore.svelte';
   import RestoreDashboard from './RestoreDashboard.svelte';
-  import type { ArchiveSecret, Job, ImageInfo } from '../lib/types';
+  import type { Job, ImageInfo, LockedImage } from '../lib/types';
 
-  // Copies added by hand via "+ Добавить копию": a backup file picked from disk,
-  // read straight from its embedded metadata — no jobs.json needed (Boot-CD).
-  // Each becomes a synthetic Job whose last_run points at the picked image, so
-  // the existing RestoreDashboard renders its card (from the file) and restores.
-  let imported: { id: string; job: Job }[] = $state([]);
+  // Copies added by hand via «+ Добавить копию»: files picked from disk, read
+  // straight from their own metadata — no jobs.json needed (Boot-CD).
+  //
+  // One entry per JOB, not per file. The files of one job — a full copy and
+  // the increments over it — carry the same job id, and the restore screen
+  // pages between them with ‹ ›. Adding them one by one gave a list of lookalike
+  // lines, each with arrows that could not move (2026-09-25). So whatever is
+  // picked, a file or a folder, the folder is read and its files are grouped by
+  // the job they belong to.
+  //
+  // An encrypted file is grouped without its key: the job id and the date are
+  // in its open header. The contents are the restore screen's to open, and it
+  // asks for the password when they are needed — once for the whole job.
+
+  /** One job's copies found in one folder. */
+  interface Imported {
+    id: string;
+    /** A synthetic job the restore screen renders: its folder is where the
+     *  files are, its last run the newest of them. */
+    job: Job;
+    /** The job id the files carry; the restore screen finds the versions by
+     *  it. Undefined for a file that carries none (the CLI's) — a lone copy. */
+    chainJobId: string | undefined;
+    sealed: boolean;
+    paths: string[];
+  }
+  let imported: Imported[] = $state([]);
   let addError: string | null = $state(null);
   let addOpen = $state(false); // "Файл / Папка с копиями" choice modal
   /** Keep what was added, so it is there next time. On by default: having to
@@ -25,6 +45,9 @@
    *  no job database. */
   let config = $state<Record<string, unknown> | null>(null);
 
+  const samePath = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+  const folderOf = (path: string) => path.replace(/[\\/][^\\/]*$/, '');
+
   $effect(() => {
     let live = true;
     api.getConfig().then(
@@ -32,22 +55,25 @@
         if (!live) return;
         config = cfg;
         const paths = (cfg.remembered_backups as string[] | undefined) ?? [];
-        const missing: string[] = [];
-        for (const path of paths) {
-          try {
-            // An encrypted copy needs a key nobody has typed yet: it drops
-            // out of the remembered list the same way a copy on an unplugged
-            // drive does, and comes back when it is added again.
-            addEntry(makeJobFromInfo(await api.readImageInfo(path)));
-          } catch {
-            // Moved, deleted, or on a drive that is not plugged in. Dropped
-            // quietly rather than nagging: the file is simply not here.
-            missing.push(path);
+        // Read each folder once, however many of its files are remembered.
+        const seen: string[] = [];
+        for (const folder of [...new Set(paths.map((p) => folderOf(p).toLowerCase()))]) {
+          const groups = await groupsIn(folderOf(paths.find((p) => folderOf(p).toLowerCase() === folder)!));
+          if (!live) return;
+          for (const g of groups) {
+            if (g.paths.some((p) => paths.some((r) => samePath(p, r)))) {
+              addEntry(g);
+              seen.push(...g.paths);
+            }
           }
         }
-        if (live && missing.length > 0) {
-          void persistRemembered(paths.filter((p) => !missing.includes(p)));
-        }
+        // Moved, deleted, or on a drive that is not plugged in: dropped quietly
+        // rather than nagging — the file is simply not here. New versions of a
+        // remembered job are remembered with it.
+        const next = [...paths.filter((p) => seen.some((s) => samePath(s, p))), ...seen];
+        const changed =
+          next.length !== paths.length || next.some((p) => !paths.some((q) => samePath(p, q)));
+        if (live && changed) void persistRemembered(next);
       },
       () => {},
     );
@@ -56,7 +82,8 @@
 
   async function persistRemembered(paths: string[]): Promise<void> {
     if (!config) return;
-    const next = { ...config, remembered_backups: Array.from(new Set(paths)) };
+    const unique = paths.filter((p, i) => paths.findIndex((q) => samePath(p, q)) === i);
+    const next = { ...config, remembered_backups: unique };
     config = next;
     try {
       await api.saveConfig(next);
@@ -72,20 +99,19 @@
     await persistRemembered([...current, ...paths]);
   }
 
-  /** Forget one copy — from the list and from the config. */
+  /** Forget one entry — from the list and, with all its files, from the config. */
   async function forget(id: string): Promise<void> {
+    const gone = imported.find((x) => x.id === id);
     imported = imported.filter((x) => x.id !== id);
     if (selectedId === id) selectedId = jobs.list[0]?.id ?? imported[0]?.id ?? null;
-    const path = id.startsWith('file:') ? id.slice(5) : id;
     const current = (config?.remembered_backups as string[] | undefined) ?? [];
-    await persistRemembered(current.filter((p) => p !== path));
+    await persistRemembered(current.filter((p) => !gone?.paths.some((g) => samePath(g, p))));
   }
 
   let selectedId: string | null = $state(null);
+  const selectedImported = $derived(imported.find((x) => x.id === selectedId) ?? null);
   const selectedJob = $derived(
-    imported.find((x) => x.id === selectedId)?.job
-      ?? jobs.list.find((j) => j.id === selectedId)
-      ?? null,
+    selectedImported?.job ?? jobs.list.find((j) => j.id === selectedId) ?? null,
   );
 
   $effect(() => {
@@ -95,13 +121,58 @@
     if (selectedId && !known(selectedId)) selectedId = jobs.list[0]?.id ?? null;
   });
 
-  // Build a synthetic Job from an image's embedded metadata so the existing
-  // RestoreDashboard (which already reads its card from the file) can show and
-  // restore it — no jobs.json involved.
-  function makeJobFromInfo(info: ImageInfo): { id: string; job: Job } {
-    const path = info.image_path;
-    const id = 'file:' + path;
-    const name = info.image_file_name || path.split(/[\\/]/).pop() || path;
+  /** A job's name, back from its files: `<name>_<source>_<kind>_<stamp>.<ext>`
+   *  is how every copy is named. The name itself is not inside an image. */
+  function nameFromFile(path: string): string {
+    const file = path.split(/[\\/]/).pop() ?? path;
+    return file.match(/^(.*)_[^_]+_(?:full|inc|diff)_\d{8}-\d{6}\.[^.]+$/i)?.[1] ?? file;
+  }
+
+  /** «2 копии», «5 копий». */
+  function copiesWord(n: number): string {
+    const d = n % 10;
+    const dd = n % 100;
+    if (d === 1 && dd !== 11) return `${n} копия`;
+    if (d >= 2 && d <= 4 && (dd < 12 || dd > 14)) return `${n} копии`;
+    return `${n} копий`;
+  }
+
+  interface FoundFile {
+    path: string;
+    created_at: string;
+    job_id: string;
+    info: ImageInfo | null;
+    sealed: boolean;
+  }
+
+  /** Every job whose copies lie in `folder`, one entry each, newest file first. */
+  async function groupsIn(folder: string): Promise<Imported[]> {
+    const [plain, sealed] = await Promise.all([
+      api.listImageBackups(folder).catch(() => [] as ImageInfo[]),
+      api.listLockedImages(folder).catch(() => [] as LockedImage[]),
+    ]);
+    const files: FoundFile[] = [
+      ...plain.map((i) => ({ path: i.image_path, created_at: i.created_at, job_id: i.job_id ?? '', info: i, sealed: false })),
+      ...sealed.map((l) => ({ path: l.image_path, created_at: l.created_at, job_id: l.job_id, info: null, sealed: true })),
+    ];
+    const byJob = new Map<string, FoundFile[]>();
+    for (const f of files) {
+      // A copy that names no job (the CLI's) has nothing to be grouped by.
+      const key = f.job_id || `file:${f.path}`;
+      byJob.set(key, [...(byJob.get(key) ?? []), f]);
+    }
+    return [...byJob.entries()].map(([key, list]) =>
+      makeEntry(folder, key.startsWith('file:') ? undefined : key, list),
+    );
+  }
+
+  /** The synthetic job the restore screen renders for one group of files. */
+  function makeEntry(folder: string, jobId: string | undefined, files: FoundFile[]): Imported {
+    const list = [...files].sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+    const newest = list[0];
+    const info = newest.info;
+    const id = jobId ? `import:${folder.toLowerCase()}#${jobId}` : `file:${newest.path}`;
+    const name = nameFromFile(newest.path);
     const job = {
       id,
       name,
@@ -112,20 +183,22 @@
       requires_password: false,
       disk_source: null,
       source_disks: [],
-      dest_folder: path,
-      image_format: path.toLowerCase().endsWith('.qcow2') ? 'qcow2' : 'vhdx',
+      // A job's folder, so the restore screen finds every version in it; a
+      // lone file is its own "folder" and stays a single copy.
+      dest_folder: jobId ? folder : newest.path,
+      image_format: newest.path.toLowerCase().endsWith('.qcow2') ? 'qcow2' : 'vhdx',
       last_run: {
         id,
         job_id: id,
         job_name: name,
         started_at: '',
-        finished_at: info.created_at,
+        finished_at: newest.created_at,
         status: 'success',
-        image_path: path,
-        source_bytes: info.source_bytes,
+        image_path: newest.path,
+        source_bytes: info?.source_bytes ?? 0,
         bytes_copied: 0,
-        used_blocks: info.used_blocks,
-        total_blocks: info.total_blocks,
+        used_blocks: info?.used_blocks ?? 0,
+        total_blocks: info?.total_blocks ?? 0,
         duration_secs: 0,
         smart_mode: true,
         vss_used: false,
@@ -134,18 +207,31 @@
         base_image_path: '',
         increment_index: 0,
         blocks_unchanged: 0,
-        excluded_files: info.excluded_files,
-        excluded_bytes: info.excluded_bytes,
-        categories: info.categories,
+        excluded_files: info?.excluded_files ?? 0,
+        excluded_bytes: info?.excluded_bytes ?? 0,
+        categories: info?.categories ?? null,
       },
     } as unknown as Job;
-    return { id, job };
+    return {
+      id,
+      job,
+      chainJobId: jobId,
+      sealed: list.some((f) => f.sealed),
+      paths: list.map((f) => f.path),
+    };
   }
 
-  // Add an entry if it isn't already listed; returns its id either way.
-  function addEntry(entry: { id: string; job: Job }): string {
-    const dup = imported.some((x) => x.id === entry.id) || jobs.list.some((j) => j.id === entry.id);
-    if (!dup) imported = [...imported, entry];
+  /** Put an entry on the list, or refresh the one already there (the folder
+   *  may have gained a copy since). A job this machine already has, writing
+   *  into this very folder, is not added twice: its own line pages the same
+   *  files. Returns the id to select. */
+  function addEntry(entry: Imported): string {
+    const own = jobs.list.find(
+      (j) => j.id === entry.chainJobId && samePath(j.dest_folder, entry.job.dest_folder),
+    );
+    if (own) return own.id;
+    const at = imported.findIndex((x) => x.id === entry.id);
+    imported = at >= 0 ? imported.map((x, i) => (i === at ? entry : x)) : [...imported, entry];
     return entry.id;
   }
 
@@ -159,75 +245,22 @@
       extensions: ['vhdx', 'avhdx', 'qcow2', 'obk'],
     });
     if (typeof picked !== 'string') return;
-    // Everything this screen shows about a copy — the disk layout, the
-    // partitions, the sizes — is sealed inside an encrypted one. So the key is
-    // asked for before the copy is added, not when a restore is already
-    // running, and it is remembered for the rest of the session.
-    if (await needsArchiveKey(picked)) {
-      unlock = { open: true, paths: [picked], busy: false, error: '' };
-      return;
-    }
     try {
-      await addImage(picked, undefined);
+      // The file's folder holds the rest of its job — the full copy under an
+      // increment, the increments over a full. They come along.
+      const group = (await groupsIn(folderOf(picked))).find((g) =>
+        g.paths.some((p) => samePath(p, picked)),
+      );
+      if (!group) {
+        // Not a copy the listing could read: the file's own error says why.
+        await api.readImageInfo(picked);
+        addError = 'Не удалось прочитать эту копию.';
+        return;
+      }
+      selectedId = addEntry(group);
+      await remember(group.paths);
     } catch (e) {
       addError = String(e);
-    }
-  }
-
-  async function addImage(path: string, secret?: ArchiveSecret) {
-    const info = await api.readImageInfo(path, secret);
-    if (secret) rememberArchiveSecret(path, secret);
-    selectedId = addEntry(makeJobFromInfo(info));
-    await remember([info.image_path]);
-  }
-
-  /** The key dialog for the copies being added.
-   *
-   *  A list, not one path: a folder scan finds a whole chain at once, and they
-   *  share the job key, so one password opens all of them. Asking once per file
-   *  for the same secret would be the worse kind of thoroughness. */
-  let unlock = $state<{ open: boolean; paths: string[]; busy: boolean; error: string }>({
-    open: false,
-    paths: [],
-    busy: false,
-    error: '',
-  });
-  const unlockClosed = { open: false, paths: [] as string[], busy: false, error: '' };
-
-  /** What the dialog is being asked about: one file by name, a chain by count. */
-  function unlockName(paths: string[]): string {
-    const first = paths[0] ?? '';
-    const name = first.split(/[\\/]/).pop() ?? first;
-    return paths.length > 1 ? `${name} (и ещё ${paths.length - 1})` : name;
-  }
-
-  async function submitUnlock(secret: ArchiveSecret) {
-    unlock.busy = true;
-    unlock.error = '';
-    try {
-      // The first one decides whether the password is right; if it is, the rest
-      // of the chain follows on the same key. One that still refuses is named,
-      // rather than failing the whole folder — a folder may hold copies of more
-      // than one job.
-      const [first, ...rest] = unlock.paths;
-      await addImage(first, secret);
-      const refused: string[] = [];
-      for (const path of rest) {
-        try {
-          await addImage(path, secret);
-        } catch {
-          refused.push(path.split(/[\\/]/).pop() ?? path);
-        }
-      }
-      unlock = { ...unlockClosed };
-      addError = refused.length
-        ? `Этим паролем не открылись: ${refused.join(', ')}. Их можно добавить отдельно.`
-        : null;
-    } catch (e) {
-      // Stay open: a wrong password is a thing to retype.
-      unlock.error = String(e);
-    } finally {
-      unlock.busy = false;
     }
   }
 
@@ -245,42 +278,21 @@
     });
     if (typeof picked !== 'string') return;
     try {
-      const list = await api.listImageBackups(picked);
-      // Encrypted copies cannot be described until someone types the password,
-      // so they are scanned separately. Reporting an empty folder when two of
-      // them are sitting in it told the person the product could not read their
-      // backup, which was not true.
-      const locked = await api.listLockedImages(picked);
-      if (list.length === 0 && locked.length === 0) {
+      const groups = await groupsIn(picked);
+      if (groups.length === 0) {
         addError = 'В выбранной папке не найдено копий с метаданными.';
         return;
       }
       let first: string | null = null;
-      for (const info of list) {
-        const id = addEntry(makeJobFromInfo(info));
+      for (const g of groups) {
+        const id = addEntry(g);
         if (!first) first = id;
       }
       if (first) selectedId = first;
-      await remember(list.map((i) => i.image_path));
-      if (locked.length > 0) {
-        // Newest first, and the newest is what a person restores: it opens the
-        // dialog, and the rest of the chain rides on the same answer.
-        unlock = {
-          open: true,
-          paths: locked.map((l) => l.image_path),
-          busy: false,
-          error: '',
-        };
-      }
+      await remember(groups.flatMap((g) => g.paths));
     } catch (e) {
       addError = String(e);
     }
-  }
-
-  /** An encrypted copy is an `.obk` and nothing else is (`OBK_EXTENSION`). A
-   *  file added by hand has no job to carry the flag, so the name answers. */
-  function isSealed(path: string): boolean {
-    return path.toLowerCase().endsWith('.obk');
   }
 
   function statusColor(s: string): string {
@@ -291,15 +303,6 @@
       : 'var(--text-muted)';
   }
 </script>
-
-<ArchiveUnlockModal
-  open={unlock.open}
-  imageName={unlockName(unlock.paths)}
-  busy={unlock.busy}
-  error={unlock.error}
-  onUnlock={submitUnlock}
-  onCancel={() => (unlock = { ...unlockClosed })}
-/>
 
 <div class="restore-root">
 <div class="layout">
@@ -345,16 +348,16 @@
             </div>
             <div class="job-meta">
               <div class="job-name">
-                {it.job.name}{#if isSealed(it.job.dest_folder)}<span
+                {it.job.name}{#if it.sealed}<span
                     class="enc-badge"
                     title="Копия зашифрована — для чтения нужен пароль или ключ восстановления"
                     aria-label="Зашифровано">🔒</span
                   >{/if}
               </div>
-              <div class="job-path">файл копии</div>
+              <div class="job-path" title={it.job.dest_folder}>{it.chainJobId ? `${copiesWord(it.paths.length)} · ${it.job.dest_folder}` : 'файл копии'}</div>
             </div>
           </button>
-          <button class="job-forget" title="Убрать из списка (файл не удаляется)" onclick={() => forget(it.id)}>×</button>
+          <button class="job-forget" title="Убрать из списка (файлы не удаляются)" onclick={() => forget(it.id)}>×</button>
         </div>
       {/each}
     </div>
@@ -369,7 +372,7 @@
   <div class="dash-col">
     {#if selectedJob}
       {#key selectedJob.id}
-        <RestoreDashboard job={selectedJob} />
+        <RestoreDashboard job={selectedJob} chainJobId={selectedImported?.chainJobId} />
       {/key}
     {:else}
       <div class="empty-dash">
