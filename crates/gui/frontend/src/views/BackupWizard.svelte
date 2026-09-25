@@ -5,7 +5,7 @@
   import { media, ensureMediaMode } from '../lib/mediaStore.svelte';
   import { saveJob, runJob, decryptVolume, decryptedVolumes } from '../lib/jobStore.svelte';
   import { formatBytes } from '../lib/format';
-  import { diskSegments } from '../lib/diskLayout';
+  import { diskSegments, msrKept } from '../lib/diskLayout';
   import InfoModal from '../components/InfoModal.svelte';
   import PasswordField from '../components/PasswordField.svelte';
   import ArchiveKeyModal from '../components/ArchiveKeyModal.svelte';
@@ -241,9 +241,9 @@
   /** EFI System Partition — the loader lives here, on Windows and on Linux. */
   const GPT_ESP = 'C12A7328-F81F-11D2-BA4B-00A0C93EC93B';
   /** Microsoft Reserved: Windows expects the slot, there is no filesystem in it.
-   *  A whole-disk copy keeps its GPT entry (`DiskLayout::retain_for_backup`)
-   *  whatever the user selected — so the map must show it as part of the copy,
-   *  not as something left out. */
+   *  A whole-disk copy that carries Windows keeps its GPT entry
+   *  (`DiskLayout::retain_for_backup`) — so the map must show it as part of
+   *  that copy, not as something left out. */
   const MSR_GUID = 'E3C9E316-0B5C-4DB8-817D-F92DF00215AE';
   /** Types that ARE the boot chain, whoever installed the system. */
   const BOOT_TYPES = new Set([
@@ -329,17 +329,20 @@
   }
   function layoutOnlyParts(d: DiskInfo): number[] {
     // Keyed on the captured layout, not on bootability: `retain_for_backup`
-    // keeps the MSR slot in ANY whole-disk copy, so a non-bootable one must
-    // show it as included too.
+    // keeps the MSR slot in a non-bootable whole-disk copy too, so one must
+    // show it as included.
     //
     // But only once there IS a copy — something on the disk chosen. Picking
     // the disk alone selects nothing, and a map that opened with the MSR
     // already ticked (and no way to untick it) read as a selection made for
     // the user (2026-09-17). Every partition starts unselected.
+    //
+    // And only with Windows in it (`msrKept`): D: alone is not Windows.
     if (!isDiskCaptured(d) || !diskHasSelection(d)) return [];
-    return d.partitions
-      .filter((p) => (p.gpt_type_guid || '').replace(/[{}]/g, '').toUpperCase() === MSR_GUID)
-      .map((p) => p.index);
+    return msrKept(d, (p) => {
+      const dev = partDevice(p);
+      return !!dev && job.sources.includes(dev);
+    });
   }
   // The disk a selected source device lives on (matched by volume device).
   function diskOfDevice(dev: string): DiskInfo | null {
@@ -1486,7 +1489,9 @@
                               style="flex: {seg.size} 1 0"
                               title={inLayout
                                 ? segTitle(seg.p) + ' · входит в копию: файловой системы нет, сохраняется только запись в таблице разделов'
-                                : segTitle(seg.p)}
+                                : typeGuid(seg.p) === MSR_GUID
+                                  ? segTitle(seg.p) + ' · раздел Windows: входит в копию вместе с томом Windows или разделом EFI'
+                                  : segTitle(seg.p)}
                             >
                               {@render segInner(seg.p, inLayout, inLayout)}
                             </div>

@@ -160,6 +160,10 @@ pub struct ImageInfoDto {
     /// Partition indices (into `source_disk_layout.partitions`) that this backup
     /// actually contains — the ones the restore card highlights.
     pub backed_up_parts: Vec<u32>,
+    /// Partitions the copy's layout recreates without holding any data for
+    /// them — the Microsoft Reserved slot, when the copy carries Windows
+    /// (`DiskLayout::retain_for_backup`). Empty for a per-volume image.
+    pub layout_only_parts: Vec<u32>,
     /// Filesystem inside each backed-up partition, **as the image records it**.
     ///
     /// For a LUKS or BitLocker source this is the decrypted filesystem, because
@@ -318,6 +322,17 @@ fn read_image_info_at(
         Vec::new()
     };
 
+    let layout_only_parts: Vec<u32> = match &sidecar.disk_manifest {
+        Some(dm) => dm
+            .layout
+            .partitions
+            .iter()
+            .map(|p| p.index)
+            .filter(|i| !backed_up_parts.contains(i))
+            .collect(),
+        None => Vec::new(),
+    };
+
     // Whole-disk images carry a filesystem per partition in the disk manifest;
     // a per-volume image carries the one filesystem it holds.
     let part_filesystems: Vec<PartFsDto> = if let Some(dm) = &sidecar.disk_manifest {
@@ -407,6 +422,7 @@ fn read_image_info_at(
         backup_mode: format!("{:?}", sidecar.manifest.backup_mode),
         source_disk_layout,
         backed_up_parts,
+        layout_only_parts,
         part_filesystems,
         luks_header_parts,
         encrypted_parts,

@@ -310,6 +310,9 @@ export interface ImageInfo {
   source_disk_layout: DiskInfo | null;
   /** Partition indices this backup contains — the card highlights these. */
   backed_up_parts: number[];
+  /** Partitions the copy's layout recreates with no data of their own — the
+   *  MSR slot, when the copy carries Windows. Empty for a per-volume image. */
+  layout_only_parts: number[];
   /** Filesystem inside each backed-up partition, as the IMAGE records it.
    *  For a LUKS/BitLocker source this is the decrypted filesystem — the copy
    *  holds the volume in the clear, so the disk snapshot's "Unknown +

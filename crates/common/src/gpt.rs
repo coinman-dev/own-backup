@@ -53,12 +53,51 @@ pub struct DiskLayout {
 
 impl DiskLayout {
     /// Variant B: keep only the partitions being backed up (their index is in
-    /// `kept`) plus the Microsoft Reserved partition — MSR has no filesystem/
-    /// image but Windows needs its slot. Everything else (deselected data
-    /// volumes) is dropped from the layout; on restore their space is left free.
-    pub fn retain_for_backup(&mut self, kept: &std::collections::HashSet<u32>) {
-        self.partitions
-            .retain(|p| kept.contains(&p.index) || p.type_guid.eq_ignore_ascii_case(GPT_TYPE_MSR));
+    /// `kept`), plus the Microsoft Reserved partition when the copy carries
+    /// Windows ([`Self::copy_carries_windows`]) — MSR has no filesystem/image
+    /// but Windows needs its slot. Everything else (deselected volumes) is
+    /// dropped from the layout; on restore their space is left free.
+    ///
+    /// `source` is the disk as the inventory saw it; it is what tells the
+    /// Windows volume from a data volume, which share one GPT type.
+    pub fn retain_for_backup(
+        &mut self,
+        kept: &std::collections::HashSet<u32>,
+        source: Option<&DiskInfo>,
+    ) {
+        let keep_msr = self.copy_carries_windows(kept, source);
+        self.partitions.retain(|p| {
+            kept.contains(&p.index) || (keep_msr && p.type_guid.eq_ignore_ascii_case(GPT_TYPE_MSR))
+        });
+    }
+
+    /// Does a copy of the `kept` partitions carry Windows — the system the
+    /// Microsoft Reserved partition belongs to?
+    ///
+    /// MSR used to go into EVERY whole-disk copy. A copy of the data volume D:
+    /// alone then carried Windows' reserved slot too, and the wizard showed it
+    /// ticked next to D: with no way to untick it (2026-09-25). It belongs to
+    /// the Windows side of the disk: the EFI System Partition, WinRE, and the
+    /// volume Windows is installed on — which only the inventory can name
+    /// (`is_system` / `has_os`), since C: and D: are both "Basic Data".
+    ///
+    /// With no inventory to ask, keep it, as before: 16 MiB of empty slot is
+    /// cheap, a Windows restored without its MSR is not.
+    pub fn copy_carries_windows(
+        &self,
+        kept: &std::collections::HashSet<u32>,
+        source: Option<&DiskInfo>,
+    ) -> bool {
+        let Some(source) = source else { return true };
+        self.partitions.iter().filter(|p| kept.contains(&p.index)).any(|p| {
+            p.type_guid.eq_ignore_ascii_case(GPT_TYPE_EFI_SYSTEM)
+                || p.type_guid.eq_ignore_ascii_case(GPT_TYPE_WINRE)
+                || source
+                    .partitions
+                    .iter()
+                    .find(|sp| sp.index == p.index)
+                    .is_some_and(|sp| sp.is_system || sp.has_os)
+        })
     }
 }
 
@@ -106,6 +145,8 @@ pub const GPT_TYPE_EFI_SYSTEM: &str = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B";
 /// Microsoft Reserved Partition (MSR) GPT *type* GUID — no filesystem; its GPT
 /// entry is recreated on restore but no data is backed up.
 pub const GPT_TYPE_MSR: &str = "E3C9E316-0B5C-4DB8-817D-F92DF00215AE";
+/// Windows Recovery Environment partition GPT *type* GUID.
+pub const GPT_TYPE_WINRE: &str = "DE94BBA4-06D1-4D40-A16A-BFD50179D6AC";
 
 /// One backed-up partition inside a whole-disk backup: the GPT slot it fills
 /// and the per-partition image that holds its data.
@@ -179,24 +220,90 @@ mod tests {
         }
     }
 
-    #[test]
-    fn retain_for_backup_keeps_kept_plus_msr() {
-        // ESP(1), MSR(2), C:(3), D:(4). Keep ESP + C:, drop D:. MSR stays.
-        let mut layout = DiskLayout {
+    const BASIC_DATA: &str = "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7";
+
+    /// ESP(1), MSR(2), C:(3), D:(4) — a Windows system disk.
+    fn windows_disk() -> DiskLayout {
+        DiskLayout {
             disk_guid: "g".into(),
             sector_size: 512,
             size_bytes: 1 << 40,
             partitions: vec![
                 part(1, GPT_TYPE_EFI_SYSTEM, 2048, 4095),
                 part(2, GPT_TYPE_MSR, 4096, 8191),
-                part(3, "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7", 8192, 100_000),
-                part(4, "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7", 100_001, 500_000),
+                part(3, BASIC_DATA, 8192, 100_000),
+                part(4, BASIC_DATA, 100_001, 500_000),
             ],
-        };
-        let kept: HashSet<u32> = [1u32, 3].into_iter().collect();
-        layout.retain_for_backup(&kept);
-        let idx: Vec<u32> = layout.partitions.iter().map(|p| p.index).collect();
-        assert_eq!(idx, vec![1, 2, 3]); // D: (4) dropped, MSR (2) kept
+        }
+    }
+
+    /// The same disk as the inventory sees it: Windows lives on partition 3.
+    fn windows_inventory(layout: &DiskLayout) -> DiskInfo {
+        DiskInfo {
+            device_id: r"\\.\PhysicalDrive0".into(),
+            model: "m".into(),
+            serial: String::new(),
+            size_bytes: layout.size_bytes,
+            sector_size_logical: 512,
+            sector_size_physical: 512,
+            media_type: String::new(),
+            partition_table: crate::types::PartitionTable::Gpt,
+            disk_guid: layout.disk_guid.clone(),
+            partitions: layout
+                .partitions
+                .iter()
+                .map(|p| crate::disk::PartitionInfo {
+                    index: p.index,
+                    offset_bytes: p.offset_bytes(512),
+                    size_bytes: p.size_bytes(512),
+                    used_bytes: 0,
+                    gpt_type_guid: p.type_guid.clone(),
+                    gpt_partition_guid: p.part_guid.clone(),
+                    filesystem: crate::types::FileSystem::Unknown,
+                    volume_letter: None,
+                    volume_device: String::new(),
+                    volume_label: String::new(),
+                    fs_uuid: String::new(),
+                    is_system: p.index == 3,
+                    has_os: p.index == 3,
+                    is_boot: false,
+                    linux_last_mounted: String::new(),
+                    is_encrypted: false,
+                    unlock_methods: Vec::new(),
+                    unlockable: true,
+                })
+                .collect(),
+        }
+    }
+
+    fn retained(kept: &[u32], with_inventory: bool) -> Vec<u32> {
+        let mut layout = windows_disk();
+        let inv = windows_inventory(&layout);
+        let kept: HashSet<u32> = kept.iter().copied().collect();
+        layout.retain_for_backup(&kept, with_inventory.then_some(&inv));
+        layout.partitions.iter().map(|p| p.index).collect()
+    }
+
+    #[test]
+    fn retain_for_backup_keeps_kept_plus_msr() {
+        // Keep ESP + C:, drop D:. MSR stays: the copy carries Windows.
+        assert_eq!(retained(&[1, 3], true), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn msr_follows_the_windows_volume_not_the_data_one() {
+        // D: alone is not Windows: its copy has no business with the MSR.
+        assert_eq!(retained(&[4], true), vec![4]);
+        // C: alone is: the MSR is Windows' slot.
+        assert_eq!(retained(&[3], true), vec![2, 3]);
+        // So is the ESP alone.
+        assert_eq!(retained(&[1], true), vec![1, 2]);
+    }
+
+    #[test]
+    fn msr_kept_when_nothing_says_which_volume_is_windows() {
+        // No inventory: C: and D: are both Basic Data, so keep it, as before.
+        assert_eq!(retained(&[4], false), vec![2, 4]);
     }
 
     #[test]
@@ -207,7 +314,7 @@ mod tests {
             size_bytes: 1 << 30,
             partitions: vec![part(2, &GPT_TYPE_MSR.to_lowercase(), 4096, 8191)],
         };
-        layout.retain_for_backup(&HashSet::new());
+        layout.retain_for_backup(&HashSet::new(), None);
         assert_eq!(layout.partitions.len(), 1); // MSR kept despite lowercase GUID
     }
 

@@ -15,7 +15,7 @@
   import InfoModal from '../components/InfoModal.svelte';
   import PasswordField from '../components/PasswordField.svelte';
   import DiskMap from '../components/DiskMap.svelte';
-  import { diskSegments } from '../lib/diskLayout';
+  import { diskSegments, msrKept } from '../lib/diskLayout';
   import type { MapSlot } from '../components/DiskMap.svelte';
   import type {
     Job, DiskInfo, PartitionInfo, ImageInfo, RestoreRunState, DryRunResult, OpRecord,
@@ -289,8 +289,8 @@
   /** Is this a whole-disk copy? The copy's own record says. Until it can be
    *  read — an encrypted copy nobody has unlocked yet — the job's does, by the
    *  same rule the wizard shows: a job that captures a disk writes one
-   *  whole-disk image of it, and that image keeps the MSR slot whatever was
-   *  selected (`DiskLayout::retain_for_backup`). */
+   *  whole-disk image of it, and that image keeps the MSR slot when Windows is
+   *  in it (`DiskLayout::retain_for_backup`). */
   const isWholeDisk = $derived(
     activeInfo
       ? activeInfo.is_whole_disk
@@ -385,18 +385,19 @@
     srcSector > 0 && dstSector > 0 && srcSector !== dstSector,
   );
   /** Microsoft Reserved: no filesystem, nothing to copy — but a whole-disk copy
-   *  keeps its GPT entry (`DiskLayout::retain_for_backup`), and the restore
-   *  recreates it. Shown as part of the copy so it does not read as omitted. */
-  const MSR_GUID = 'E3C9E316-0B5C-4DB8-817D-F92DF00215AE';
-  const layoutOnlyParts = $derived(
-    // Only a whole-disk copy keeps the MSR slot; a per-volume copy has nothing
-    // to do with it, and calling it "в копии" there would be a lie.
-    isWholeDisk
-      ? (rawBackedUpDisks[0]?.partitions ?? [])
-          .filter((p) => (p.gpt_type_guid || '').replace(/[{}]/g, '').toUpperCase() === MSR_GUID)
-          .map((p) => p.index)
-      : [],
-  );
+   *  that carries Windows keeps its GPT entry (`DiskLayout::retain_for_backup`),
+   *  and the restore recreates it. Shown as part of the copy so it does not
+   *  read as omitted. */
+  const layoutOnlyParts = $derived.by(() => {
+    // The copy's own layout says, once it can be read.
+    if (activeInfo) return activeInfo.layout_only_parts ?? [];
+    // Until then, the job's record by the engine's rule. Only a whole-disk copy
+    // keeps the MSR slot; a per-volume copy has nothing to do with it, and
+    // calling it "в копии" there would be a lie.
+    const d = rawBackedUpDisks[0];
+    if (!isWholeDisk || !d) return [] as number[];
+    return msrKept(d, (p) => backedUpParts.includes(p.index));
+  });
 
   // What the copy says each encrypted partition's container was.
   function encOf(index: number) {

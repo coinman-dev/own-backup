@@ -74,3 +74,31 @@ export function diskSegments(d: DiskInfo): DiskSeg[] {
   if (tail >= MIN_FREE_GAP) segs.push({ kind: 'free', size: tail, offset: cursor });
   return segs;
 }
+
+/** Microsoft Reserved: no filesystem, nothing to copy, but Windows expects the
+ *  slot. */
+export const GPT_MSR = 'E3C9E316-0B5C-4DB8-817D-F92DF00215AE';
+/** Partition types that are Windows' side of the disk whatever is inside: the
+ *  EFI System Partition and WinRE. */
+const WINDOWS_SIDE = new Set([
+  'C12A7328-F81F-11D2-BA4B-00A0C93EC93B',
+  'DE94BBA4-06D1-4D40-A16A-BFD50179D6AC',
+]);
+
+export function gptType(p: PartitionInfo): string {
+  return (p.gpt_type_guid || '').replace(/[{}]/g, '').toUpperCase();
+}
+
+/** The Microsoft Reserved partitions a whole-disk copy of `inCopy` keeps in its
+ *  partition table — the engine's `DiskLayout::retain_for_backup`, asked the
+ *  same way.
+ *
+ *  The MSR belongs to Windows, so it goes in only with Windows: the ESP, WinRE,
+ *  or the volume Windows is installed on. A copy of the data volume D: alone
+ *  used to show it ticked beside D: with no way to untick it (2026-09-25). */
+export function msrKept(d: DiskInfo, inCopy: (p: PartitionInfo) => boolean): number[] {
+  const windows = d.partitions.some(
+    (p) => inCopy(p) && (WINDOWS_SIDE.has(gptType(p)) || p.is_system || p.has_os),
+  );
+  return windows ? d.partitions.filter((p) => gptType(p) === GPT_MSR).map((p) => p.index) : [];
+}

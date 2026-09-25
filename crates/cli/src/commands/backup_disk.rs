@@ -131,8 +131,9 @@ pub async fn run(args: BackupDiskArgs) -> own_backup_common::Result<()> {
         })?;
 
     // What to copy. Microsoft Reserved has no filesystem and no device, and the
-    // engine keeps its GPT entry regardless: naming it is not an error and not
-    // a source either, so say that instead of failing or dropping it in silence.
+    // engine keeps its GPT entry whenever the copy carries Windows: naming it
+    // is not an error and not a source either, so say that instead of failing
+    // or dropping it in silence.
     let msr = own_backup_common::gpt::GPT_TYPE_MSR;
     let mut chosen = Vec::new();
     if args.partitions.is_empty() {
@@ -145,7 +146,8 @@ pub async fn run(args: BackupDiskArgs) -> own_backup_common::Result<()> {
             if p.volume_device.is_empty() {
                 if p.gpt_type_guid.eq_ignore_ascii_case(msr) {
                     println!(
-                        "  #{}: Microsoft Reserved — остаётся в разметке, копировать в нём нечего",
+                        "  #{}: Microsoft Reserved — копировать в нём нечего; в разметке он \
+                         останется, если в копию входит Windows",
                         p.index
                     );
                     continue;
@@ -184,11 +186,22 @@ pub async fn run(args: BackupDiskArgs) -> own_backup_common::Result<()> {
             p.volume_device
         );
     }
-    let kept: Vec<u32> = chosen.iter().map(|p| p.index).collect();
+    let kept: std::collections::HashSet<u32> = chosen.iter().map(|p| p.index).collect();
+    // The engine's own rule, asked of the same GPT it will read.
+    let msr_kept = own_backup_backup::gpt_reader::read_disk_layout(args.disk)?
+        .copy_carries_windows(&kept, Some(disk));
+    let is_msr = |p: &&own_backup_common::disk::PartitionInfo| {
+        p.gpt_type_guid.eq_ignore_ascii_case(msr)
+    };
+    if msr_kept {
+        for p in disk.partitions.iter().filter(is_msr) {
+            println!("  #{:<2} Microsoft Reserved — только запись в таблице разделов", p.index);
+        }
+    }
     let left_out: Vec<_> = disk
         .partitions
         .iter()
-        .filter(|p| !kept.contains(&p.index) && !p.gpt_type_guid.eq_ignore_ascii_case(msr))
+        .filter(|p| !kept.contains(&p.index) && !(msr_kept && is_msr(p)))
         .collect();
     if !left_out.is_empty() {
         println!("НЕ войдут (при восстановлении их место будет свободно):");

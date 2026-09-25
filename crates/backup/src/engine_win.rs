@@ -2860,7 +2860,8 @@ fn backup_disk_inner(
     let started = Instant::now();
     let bs = req.block_size as u64;
 
-    // 1. Real GPT, filtered to the selected partitions (variant B keeps MSR).
+    // 1. Real GPT, filtered to the selected partitions (variant B keeps MSR
+    // when the copy carries Windows — `DiskLayout::copy_carries_windows`).
     let mut layout = crate::gpt_reader::read_disk_layout(req.disk_number)?;
     let kept: std::collections::HashSet<u32> =
         req.partitions.iter().map(|p| p.part_index).collect();
@@ -2897,7 +2898,7 @@ fn backup_disk_inner(
             "whole-disk backup: partitions are NOT in the copy — their space is free on restore"
         );
     }
-    layout.retain_for_backup(&kept);
+    layout.retain_for_backup(&kept, req.source_disk.as_ref());
     let sector = layout.sector_size as u64;
     if bs == 0 || bs % sector != 0 {
         return Err(OwnBackupError::Config(format!(
