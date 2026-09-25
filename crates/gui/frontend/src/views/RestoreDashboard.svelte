@@ -5,12 +5,13 @@
   // `api.applyRestorePlan`, below, after the dry run has passed with no errors
   // and the user has typed a confirmation.
   import {
-    archiveSecretFor, engine, cancelCurrent, clearRestoreResult, refreshVolumes,
-    restoreClock, restoreEtaMs,
+    archiveSecretFor, engine, cancelCurrent, clearRestoreResult, needsArchiveKey,
+    refreshVolumes, rememberArchiveSecret, restoreClock, restoreEtaMs,
   } from '../lib/engineStore.svelte';
   import { listen } from '@tauri-apps/api/event';
   import { jobs } from '../lib/jobStore.svelte';
   import { api } from '../lib/api';
+  import ArchiveUnlockModal from '../components/ArchiveUnlockModal.svelte';
   import InfoModal from '../components/InfoModal.svelte';
   import PasswordField from '../components/PasswordField.svelte';
   import DiskMap from '../components/DiskMap.svelte';
@@ -19,7 +20,7 @@
   import type {
     Job, DiskInfo, PartitionInfo, ImageInfo, RestoreRunState, DryRunResult, OpRecord,
     RestorePlan, RestoreOp, RestoreMode, PartitionSpec, PartRef, FormatFs,
-    CheckContext, CheckResult, LetterChange,
+    CheckContext, CheckResult, LetterChange, ArchiveSecret, LockedImage,
   } from '../lib/types';
 
   interface Props {
@@ -49,20 +50,38 @@
    *  Argon2id, seconds, not a blink. That is how long the red «диск не
    *  подключён» stood on screen before withdrawing itself. */
   let infoLoading = $state(true);
+  /** The copy is encrypted and nobody has typed its key in this session.
+   *
+   *  Everything the image says about itself — which partitions it holds, the
+   *  layout, the build that wrote it — is sealed, and the service refuses to
+   *  restore it without the key (§7.4). A copy added by hand had its key asked
+   *  for on the way in; a JOB's copy never did, so this screen drew the job's
+   *  own record instead, labelled the MSR «не в бэкапе», and the restore
+   *  stopped at the preview with nowhere to type the password (2026-09-25). */
+  let keyNeeded = $state(false);
   $effect(() => {
     const path = lastRun?.status === 'success' ? lastRun.image_path : '';
     if (!path) {
       imageInfo = null;
       infoLoading = false;
+      keyNeeded = false;
       return;
     }
     let cancelled = false;
     infoLoading = true;
-    // The key for an encrypted copy was collected when it was added; the
+    // The key for an encrypted copy is collected once per session; the
     // designer reads the copy several times and must not ask again.
-    api.readImageInfo(path, archiveSecretFor(path)).then(
-      (info) => { if (!cancelled) { imageInfo = info; infoLoading = false; } },
-      () => { if (!cancelled) { imageInfo = null; infoLoading = false; } },
+    const secret = archiveSecretFor(path);
+    api.readImageInfo(path, secret).then(
+      (info) => {
+        if (!cancelled) { imageInfo = info; keyNeeded = false; infoLoading = false; }
+      },
+      async () => {
+        // Refused for want of a key is not a broken file: it is a question for
+        // whoever is at the screen, and the screen asks it.
+        const locked = !secret && (await needsArchiveKey(path));
+        if (!cancelled) { imageInfo = null; keyNeeded = locked; infoLoading = false; }
+      },
     );
     return () => { cancelled = true; };
   });
@@ -107,10 +126,84 @@
     return () => { cancelled = true; };
   });
 
+  /** The same chain for an ENCRYPTED job, opened with the key typed below. The
+   *  folder scan above has no key and cannot see those copies at all. Kept
+   *  apart from `copies` so that scan, landing late, cannot wipe it. */
+  let unlockedCopies = $state<ImageInfo[]>([]);
+  const chain = $derived(copies.length > 0 ? copies : unlockedCopies);
+
   // The copy currently shown & restored: the selected point-in-time from the
   // scan, or the single run-record image when there's no scan.
-  const activeInfo = $derived(copies.length > 0 ? copies[copyIndex] : imageInfo);
-  const hasMultiple = $derived(copies.length > 1);
+  const activeInfo = $derived(chain.length > 0 ? chain[copyIndex] : imageInfo);
+  const hasMultiple = $derived(chain.length > 1);
+
+  // --- Opening an encrypted copy (§7.4) ---
+  // Asked with a button, not by a dialog that jumps out on arrival: looking at
+  // a copy is not yet deciding to restore it. «Восстановить» asks too, first,
+  // because the map it would restore by is only the job's guess until then.
+  let unlock = $state({ open: false, busy: false, error: '' });
+  const unlockClosed = { open: false, busy: false, error: '' };
+  /** «Восстановить» raised the dialog: carry on with it once the key is in. */
+  let unlockThenRestore = false;
+
+  function askKey(thenRestore = false) {
+    unlockThenRestore = thenRestore;
+    unlock = { open: true, busy: false, error: '' };
+  }
+
+  async function submitUnlock(secret: ArchiveSecret) {
+    const path = lastRun?.image_path ?? '';
+    if (!path) return;
+    unlock.busy = true;
+    unlock.error = '';
+    const info = await api.readImageInfo(path, secret).catch((e) => {
+      // Stay open: a wrong password is a thing to retype.
+      unlock.error = String(e);
+      unlock.busy = false;
+      return null;
+    });
+    if (!info) return;
+    rememberArchiveSecret(path, secret);
+    imageInfo = info;
+    keyNeeded = false;
+    unlock = { ...unlockClosed };
+    void openChain(info, secret);
+    if (unlockThenRestore) await askConfirm();
+  }
+
+  /** The rest of this job's chain, on the key that has just opened one copy.
+   *
+   *  One job, one key: the password that opened the newest copy opens the
+   *  others. Each still costs a key derivation (Argon2id, about a second),
+   *  which is why this runs after the dialog has closed and the newest copy is
+   *  already on screen. A file that refuses the key belongs to something else
+   *  and is left out. */
+  async function openChain(opened: ImageInfo, secret: ArchiveSecret) {
+    if (job.id.startsWith('file:')) return; // one file, no chain
+    let found: LockedImage[];
+    try {
+      found = await api.listLockedImages(job.dest_folder);
+    } catch {
+      return;
+    }
+    const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+    const list: ImageInfo[] = [opened];
+    for (const l of found) {
+      if (l.job_id !== job.id || same(l.image_path, opened.image_path)) continue;
+      try {
+        list.push(await api.readImageInfo(l.image_path, secret));
+        rememberArchiveSecret(l.image_path, secret);
+      } catch {
+        // Another job's copy in the same folder, or a damaged one.
+      }
+    }
+    if (list.length < 2) return;
+    list.sort((a, b) => (a.created_at < b.created_at ? 1 : -1)); // newest first
+    // Stay on the copy already shown: the user may have started mapping it.
+    const shown = activeInfo?.image_path ?? opened.image_path;
+    unlockedCopies = list;
+    copyIndex = Math.max(0, list.findIndex((c) => same(c.image_path, shown)));
+  }
 
   // Excluded-files line: prefer the count embedded in the active image (works
   // from a file without jobs.json), fall back to the run record.
@@ -193,6 +286,16 @@
         ? job.source_disks
         : engine.disks.filter(diskHasSelection),
   );
+  /** Is this a whole-disk copy? The copy's own record says. Until it can be
+   *  read — an encrypted copy nobody has unlocked yet — the job's does, by the
+   *  same rule the wizard shows: a job that captures a disk writes one
+   *  whole-disk image of it, and that image keeps the MSR slot whatever was
+   *  selected (`DiskLayout::retain_for_backup`). */
+  const isWholeDisk = $derived(
+    activeInfo
+      ? activeInfo.is_whole_disk
+      : !!rawBackedUpDisks[0] && isBootableCopy(rawBackedUpDisks[0]),
+  );
   // For a partition that is IN the copy, the image's manifest knows the
   // filesystem better than the disk snapshot does. The snapshot is not wrong —
   // before decryption `Unknown` + "зашифрован" is the only honest reading of a
@@ -229,7 +332,7 @@
   // in deliberately.
   let wholeDiskRestore = $state(false);
   $effect(() => {
-    if (!targetDiskId) wholeDiskRestore = activeInfo?.is_whole_disk ?? false;
+    if (!targetDiskId) wholeDiskRestore = isWholeDisk;
   });
 
   // ---- The machine's boot menu -------------------------------------------
@@ -288,7 +391,7 @@
   const layoutOnlyParts = $derived(
     // Only a whole-disk copy keeps the MSR slot; a per-volume copy has nothing
     // to do with it, and calling it "в копии" there would be a lie.
-    (activeInfo?.is_whole_disk ?? false)
+    isWholeDisk
       ? (rawBackedUpDisks[0]?.partitions ?? [])
           .filter((p) => (p.gpt_type_guid || '').replace(/[{}]/g, '').toUpperCase() === MSR_GUID)
           .map((p) => p.index)
@@ -1439,6 +1542,13 @@
   // nothing on this screen can write to a disk.
   async function askConfirm() {
     formError = null;
+    // Before anything else: the map on screen is the job's guess until the
+    // copy itself can be read, and the service will not restore it without
+    // the key anyway.
+    if (keyNeeded) {
+      askKey(true);
+      return;
+    }
     if (!targetDiskId) {
       fitMsg = 'Шаг 1: выберите диск, на который восстановить.';
       return;
@@ -1665,7 +1775,7 @@
 {#snippet copyNav()}
   <div class="copynav">
     <button class="cn-btn" title="Более старая копия" aria-label="Более старая копия"
-      disabled={!hasMultiple || copyIndex >= copies.length - 1} onclick={() => { copyIndex += 1; resetMapping(); }}>‹</button>
+      disabled={!hasMultiple || copyIndex >= chain.length - 1} onclick={() => { copyIndex += 1; resetMapping(); }}>‹</button>
     <span class="cn-date"
       title={activeInfo
         ? `Копию сделала Own Backup ${activeInfo.app_version || '— версия не записана (сборка старше 0.1.1)'}`
@@ -1681,6 +1791,15 @@
   </div>
 {/snippet}
 
+<ArchiveUnlockModal
+  open={unlock.open}
+  imageName={(lastRun?.image_path ?? '').split(/[\\/]/).pop() ?? ''}
+  busy={unlock.busy}
+  error={unlock.error}
+  onUnlock={submitUnlock}
+  onCancel={() => (unlock = { ...unlockClosed })}
+/>
+
 <div class="page">
 <div class="dash" bind:clientWidth={dashWidth}>
   {#if !running && !planRun}
@@ -1690,6 +1809,14 @@
       <span class="sec-title">Что восстановить</span>
       <span class="sec-sub">разделы, вошедшие в эту копию</span>
     </div>
+
+    {#if keyNeeded}
+      <div class="key-note">
+        <span>🔒 Копия зашифрована. Пока не введён пароль, карта ниже построена по настройкам
+          задания, а не по самой копии, и восстановить её нельзя.</span>
+        <button class="btn ghost tiny" onclick={() => askKey()}>Ввести пароль</button>
+      </div>
+    {/if}
 
     {#if backedUpDisks.length > 0}
       <!-- Map is available (embedded in the file / job snapshot / live) — show it
@@ -2303,6 +2430,9 @@
   .spinner { width: 16px; height: 16px; flex-shrink: 0; border: 2px solid var(--border); border-top-color: var(--primary); border-radius: 50%; animation: spin 0.7s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
   .warn-note { font-size: 13px; color: #8c1d1d; background: rgba(216,74,74,.08); padding: 10px 14px; border-radius: 5px; }
+  .key-note { display: flex; align-items: center; gap: 14px; margin-bottom: 12px; padding: 10px 14px; border-radius: 6px; border: 1px solid var(--border); background: var(--accent-soft); font-size: 13px; color: var(--head); line-height: 1.45; }
+  .key-note span { flex: 1; }
+  .key-note .btn { flex: 0 0 auto; }
   .cat-block { margin-top: 14px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 6px; background: var(--card-bg); }
   .cat-head { font-size: 13px; font-weight: 600; color: var(--head); margin-bottom: 4px; }
   .catbar { height: 9px; border-radius: 5px; overflow: hidden; display: flex; margin-top: 10px; }

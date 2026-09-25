@@ -277,6 +277,12 @@
     }
   }
 
+  /** An encrypted copy is an `.obk` and nothing else is (`OBK_EXTENSION`). A
+   *  file added by hand has no job to carry the flag, so the name answers. */
+  function isSealed(path: string): boolean {
+    return path.toLowerCase().endsWith('.obk');
+  }
+
   function statusColor(s: string): string {
     return s === 'running' ? 'var(--primary)'
       : s === 'queued' ? '#5a8fd8'
@@ -315,7 +321,15 @@
             <span class="status-dot" style="background:{statusColor(jobStatus(job))}"></span>
           </div>
           <div class="job-meta">
-            <div class="job-name">{job.name}</div>
+            <!-- The same padlock as in «Резервное копирование»: here it matters
+                 more, since this is the screen that will ask for the password. -->
+            <div class="job-name">
+              {job.name}{#if job.archive_encryption}<span
+                  class="enc-badge"
+                  title="Копии этого задания зашифрованы — для чтения нужен пароль или ключ восстановления"
+                  aria-label="Зашифровано">🔒</span
+                >{/if}
+            </div>
             <div class="job-path">{job.dest_folder}</div>
           </div>
         </button>
@@ -330,7 +344,13 @@
               <span class="status-dot" style="background:var(--green)"></span>
             </div>
             <div class="job-meta">
-              <div class="job-name">{it.job.name}</div>
+              <div class="job-name">
+                {it.job.name}{#if isSealed(it.job.dest_folder)}<span
+                    class="enc-badge"
+                    title="Копия зашифрована — для чтения нужен пароль или ключ восстановления"
+                    aria-label="Зашифровано">🔒</span
+                  >{/if}
+              </div>
               <div class="job-path">файл копии</div>
             </div>
           </button>
@@ -410,6 +430,7 @@
   .status-dot { position: absolute; right: -2px; bottom: 0; width: 11px; height: 11px; border-radius: 50%; border: 2px solid var(--column-bg); }
   .job-meta { flex: 1; min-width: 0; }
   .job-name { font-size: 14px; font-weight: 600; color: var(--head); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .enc-badge { margin-left: 6px; font-size: 11px; opacity: 0.85; }
   .job-path { font-size: 12px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .add-btn { display: flex; align-items: center; gap: 10px; padding: 15px 18px; background: none; border: none; border-top: 1px solid var(--border); cursor: pointer; font-size: 14px; font-weight: 600; color: var(--head); font-family: var(--font); }
   .add-btn:hover { color: var(--primary); }
