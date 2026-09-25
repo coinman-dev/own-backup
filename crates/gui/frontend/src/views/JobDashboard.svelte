@@ -63,6 +63,17 @@
   };
   const kindLabel = (k: string) => KIND_LABELS[k] ?? 'полная';
 
+  /** What the check after the copy reads, said the way the setting is.
+   *  «Проверять только последнюю копию» reads this file alone; otherwise the
+   *  whole chain the copy stands on is read — which for a full copy, with
+   *  nothing under it, is again this copy alone (`VerifyScope`). Which kind is
+   *  being written is in the file name: `…_{full|inc|diff}_{stamp}.{ext}`. */
+  const verifyLabel = $derived.by(() => {
+    const tag = progress?.image_file_name?.match(/_(full|inc|diff)_\d{8}-\d{6}\.[^.]+$/i)?.[1];
+    const onlyThis = job.advanced.verify_latest_only || tag?.toLowerCase() === 'full';
+    return onlyThis ? 'Проверка этой резервной копии…' : 'Проверка всех резервных копий…';
+  });
+
   // The round indicator spans BOTH phases when "проверять после создания" is on:
   // 0–50 % = backup, 50–100 % = verify. The bar below stays per-phase.
   // "prepare" (exclusion scan) sits at 0 %; "finalize" (flush to disk) means the
@@ -245,7 +256,7 @@
           {volTag}{#if preparing}Подготовка: поиск исключаемых файлов…
           {:else if excluding}Удаление исключённых файлов из образа…
           {:else if finalizing}Завершение: запись образа на диск…
-          {:else if verifying}Проверка резервной копии…
+          {:else if verifying}{verifyLabel}
           {:else}Резервное копирование…{/if}
         </span>
         {#if progress}
