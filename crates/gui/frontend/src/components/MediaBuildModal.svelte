@@ -175,7 +175,9 @@
       {isWindows
         ? 'Носитель на основе Windows Recovery Environment'
         : 'Носитель на основе Linux'}
-      <button class="x" onclick={onClose} disabled={building} title="Закрыть">✕</button>
+      <button class="x" onclick={onClose} disabled={building} title="Закрыть">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18" /></svg>
+      </button>
     </div>
 
     <div class="body">
@@ -355,7 +357,13 @@
                  the running stage animates until it has a real number. -->
             {@const waiting = now && progress.percent === 0}
             <div class="stage" class:done class:now>
-              <span class="mark">{done ? '✓' : now ? '▸' : ''}</span>
+              <span class="mark">
+                {#if done}
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg>
+                {:else if now}
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7" /></svg>
+                {/if}
+              </span>
               <span class="st-title">{st.title}</span>
               <span class="st-bar" class:waiting>
                 {#if waiting}
@@ -440,13 +448,15 @@
 </div>
 
 <style>
-  .backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; z-index: 250; padding: 24px; }
-  .dialog { width: 760px; max-width: 96vw; max-height: 92vh; background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow); display: flex; flex-direction: column; }
-  .head { padding: 14px 18px; font-size: 16px; color: var(--head); border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
-  .x { background: none; border: none; color: var(--text-muted); font-size: 15px; cursor: pointer; padding: 2px 6px; }
+  .backdrop { position: fixed; inset: 0; background: var(--overlay); display: flex; align-items: center; justify-content: center; z-index: 250; padding: 24px; }
+  .dialog { width: 760px; max-width: 96vw; max-height: 92vh; background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow-lg); display: flex; flex-direction: column; }
+  .head { padding: 14px 18px; font-size: 16px; font-weight: 600; color: var(--head); border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+  .x { background: none; border: none; border-radius: 4px; color: var(--text-muted); font-size: 15px; cursor: pointer; padding: 2px 6px; }
+  .x svg { display: block; }
+  .x:hover:not(:disabled) { color: var(--head); background: var(--track); }
   .body { padding: 16px 18px; overflow: auto; flex: 1; min-height: 0; }
-  .intro { font-size: 13px; color: var(--head); line-height: 1.6; }
-  .soon { margin-top: 10px; font-size: 13px; color: var(--warning); line-height: 1.5; }
+  .intro { font-size: 13px; color: var(--text); line-height: 1.6; }
+  .soon { margin-top: 10px; font-size: 13px; color: var(--warning-text); line-height: 1.5; }
   .opt { display: flex; align-items: flex-start; gap: 9px; font-size: 13px; color: var(--head); margin-top: 16px; cursor: pointer; }
   .opt input { margin-top: 2px; flex-shrink: 0; }
   .opt-note { display: block; font-size: 12px; color: var(--text-muted); line-height: 1.4; margin-top: 2px; }
@@ -461,62 +471,73 @@
   .inbox-row { cursor: default; color: var(--text-muted); }
   .inbox-row:hover { background: none; }
   .scan { display: flex; align-items: center; gap: 12px; padding: 8px 0; }
-  .scan-bar { flex: 0 0 120px; height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; }
+  .scan-bar { flex: 0 0 120px; height: 5px; background: var(--track); border-radius: 3px; overflow: hidden; }
   /* Indeterminate on purpose: the count is not known until the walk is done. */
-  .scan-run { display: block; width: 40%; height: 100%; background: var(--green); border-radius: 3px; animation: scan 1.1s ease-in-out infinite; }
+  .scan-run { display: block; width: 40%; height: 100%; background: var(--success); border-radius: 3px; animation: scan 1.1s ease-in-out infinite; }
   @keyframes scan { 0% { transform: translateX(-100%); } 100% { transform: translateX(250%); } }
   .drv-head { display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: var(--text-muted); margin-bottom: 6px; }
   .drv-actions { display: flex; gap: 12px; }
-  .lnk { background: none; border: none; color: var(--primary); font-size: 12px; cursor: pointer; padding: 0; font-family: var(--font); }
-  .drv-list { max-height: 220px; overflow: auto; border: 1px solid var(--border); border-radius: 5px; }
+  .lnk { background: none; border: none; color: var(--accent-text); font-size: 12px; cursor: pointer; padding: 0; font-family: var(--font); }
+  .lnk:hover { text-decoration: underline; }
+  .drv-list { max-height: 220px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; }
   .drv { display: grid; grid-template-columns: 20px 1fr 150px 1fr 80px; gap: 10px; align-items: center; padding: 6px 10px; font-size: 12px; cursor: pointer; color: var(--head); }
-  .drv:hover { background: var(--hover-bg, rgba(127,127,127,.10)); }
+  .drv:hover { background: var(--panel2); }
   .drv-name, .drv-prov { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .drv-class { color: var(--text-muted); }
   .drv-prov { color: var(--text-muted); }
   .drv-size { text-align: right; color: var(--text-muted); }
   /* Pinned below the scrolling body, not inside it. */
-  .dest { display: grid; grid-template-columns: auto 1fr auto auto; gap: 10px; align-items: center; padding: 12px 18px; border-top: 1px solid var(--border); flex-shrink: 0; background: var(--card-bg); border-radius: 0 0 8px 8px; }
-  .lbl { font-size: 12px; color: var(--primary); }
-  .dest input { min-width: 0; background: none; border: 1px solid var(--border); border-radius: 4px; padding: 7px 10px; font-size: 13px; color: var(--head); font-family: var(--font); }
-  .btn { border-radius: 4px; padding: 8px 18px; font-size: 13px; font-family: var(--font); cursor: pointer; border: 1px solid var(--border); background: none; color: var(--head); }
+  /* The dialog's footer: the design's --panel strip, rounded to sit inside
+     the 12 px frame. */
+  .dest { display: grid; grid-template-columns: auto 1fr auto auto; gap: 10px; align-items: center; padding: 12px 18px; border-top: 1px solid var(--border); flex-shrink: 0; background: var(--panel2); border-radius: 0 0 11px 11px; }
+  .lbl { font-size: 12px; color: var(--accent-text); }
+  .dest input { min-width: 0; background: var(--input-bg); border: 1px solid var(--border-strong); border-radius: 6px; padding: 7px 10px; font-size: 13px; color: var(--text); font-family: var(--font); }
+  .dest input::placeholder { color: var(--text-muted); }
+  .dest input:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .dest input:disabled { background: var(--sunken); border-color: var(--border); color: var(--text-muted); }
+  /* «Обзор…» is the design's secondary button, «Начать» / «Готово» the primary. */
+  .btn { border-radius: 6px; padding: 8px 18px; font-size: 13px; font-weight: 600; font-family: var(--font); cursor: pointer; border: 1px solid var(--border-strong); background: var(--card-bg); color: var(--text); transition: background-color .15s ease; }
+  .btn:hover:not(:disabled) { background: var(--panel2); }
   .btn.primary { background: var(--primary); border-color: var(--primary); color: #fff; }
-  .btn:disabled { opacity: .5; cursor: default; }
-  .queue { margin-top: 16px; border: 1px solid var(--border); border-radius: 5px; padding: 10px 12px; }
+  .btn.primary:hover:not(:disabled) { background: var(--primary-hover); border-color: var(--primary-hover); }
+  .btn:disabled { opacity: .45; cursor: default; }
+  .queue { margin-top: 16px; border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; }
   /* The bar takes everything to the right of the title; the running stage's
      detail rides along with the title rather than holding a column of its own,
      which was empty on every other row and cut the bar short of the edge. */
   .stage { display: grid; grid-template-columns: 16px minmax(190px, auto) 1fr; gap: 10px; align-items: center; padding: 3px 0; font-size: 12px; color: var(--text-muted); }
   .st-title { white-space: nowrap; }
   .stage.now, .stage.done { color: var(--head); }
-  .mark { color: var(--green); }
-  .st-bar { position: relative; height: 16px; background: var(--border); border-radius: 3px; overflow: hidden; }
-  .st-fill { display: block; height: 100%; background: var(--green); transition: width .25s; }
+  .mark { color: var(--success); }
+  .mark svg { display: block; }
+  .st-bar { position: relative; height: 16px; background: var(--track); border-radius: 3px; overflow: hidden; }
+  .st-fill { display: block; height: 100%; background: var(--success); transition: width .25s; }
   /* No number to show yet — the stripe says the step is alive without
      claiming a position it does not know. */
-  .st-run { position: absolute; inset: 0 auto 0 0; width: 32%; background: var(--green); opacity: .75; border-radius: 3px; animation: st-slide 1.4s ease-in-out infinite; }
+  .st-run { position: absolute; inset: 0 auto 0 0; width: 32%; background: var(--success); opacity: .75; border-radius: 3px; animation: st-slide 1.4s ease-in-out infinite; }
   @keyframes st-slide { 0% { transform: translateX(-105%); } 100% { transform: translateX(320%); } }
   .st-clock { margin-left: 8px; opacity: .75; font-variant-numeric: tabular-nums; }
   .st-detail { position: absolute; right: 8px; top: 0; line-height: 16px; font-size: 11px; color: var(--head); max-width: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .err { font-size: 12px; color: var(--error); margin-top: 12px; word-break: break-word; }
+  .err { font-size: 12px; color: var(--error-text); margin-top: 12px; word-break: break-word; }
   /* A warning is not a footnote: the build finished, but something the user
      asked for is not on the medium. Framed, so it is not read as prose. */
   .warn {
     font-size: 12px;
-    color: var(--error);
+    color: var(--error-text);
     margin-top: 8px;
     padding: 8px 10px;
     line-height: 1.45;
-    border: 1px solid rgba(200, 60, 60, .45);
-    border-left-width: 3px;
-    border-radius: 4px;
-    background: rgba(200, 60, 60, .07);
+    border: 1px solid var(--error-line);
+    border-left: 3px solid var(--error);
+    border-radius: 8px;
+    background: var(--error-soft);
   }
   .muted { font-size: 13px; color: var(--text-muted); padding: 6px 0; }
-  .report { margin-top: 14px; border: 1px solid var(--border); border-radius: 5px; padding: 12px 14px; }
-  .rep-head { font-size: 14px; color: var(--head); margin-bottom: 8px; }
+  /* The finished medium: the design's neutral "done" summary. */
+  .report { margin-top: 14px; border: 1px solid transparent; border-radius: 8px; padding: 12px 14px; background: var(--accent-soft); }
+  .rep-head { font-size: 14px; font-weight: 600; color: var(--head); margin-bottom: 8px; }
   .rep-row { display: flex; gap: 12px; font-size: 13px; margin-bottom: 4px; }
-  .rep-row > span:first-child { flex: 0 0 90px; color: var(--primary); font-size: 12px; }
+  .rep-row > span:first-child { flex: 0 0 90px; color: var(--accent-text); font-size: 12px; }
   .rep-row > span:last-child { color: var(--head); min-width: 0; word-break: break-word; }
   .rep-note { font-size: 12px; color: var(--text-muted); margin-top: 9px; line-height: 1.5; }
 </style>

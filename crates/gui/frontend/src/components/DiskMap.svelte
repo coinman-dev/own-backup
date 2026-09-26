@@ -201,13 +201,15 @@
   {#if usedPct(p) > 0}<div class="usedfill" style="width: {usedPct(p)}%"></div>{/if}
   <div class="seg-top">
     {#if p.is_system || p.is_boot || p.has_os}
-      <svg class="lock" width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a5 5 0 0 0-5 5v3H6a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-9a1 1 0 0 0-1-1h-1V7a5 5 0 0 0-5-5zm-3 8V7a3 3 0 0 1 6 0v3z"/></svg>
+      <svg class="lock" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
     {/if}
-    {#if p.is_encrypted}<span class="enc" title="Зашифрован">🔒</span>{/if}
+    <!-- The same padlock as the system one, but in the info colour — as on the
+         design's «Копия зашифрована» banner — so the two stay distinguishable. -->
+    {#if p.is_encrypted}<span class="enc" title="Зашифрован"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="var(--info)" stroke-width="2.4" stroke-linecap="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></span>{/if}
     <span class="seg-label">{partLabel(p)}</span>
   </div>
   <div class="seg-meta">{formatBytes(p.size_bytes)}{#if p.used_bytes > 0}<span class="muted">&nbsp;({formatBytes(p.used_bytes)} занято)</span>{/if}{#if partFs(p)}<span class="muted">&nbsp;{partFs(p)}</span>{/if}{#if layoutOnly.includes(p.index)}<span class="muted">&nbsp;· в копии (только разметка)</span>{/if}</div>
-  {#if sel}<div class="check"><svg width="10" height="10" viewBox="0 0 24 24" stroke="#fff" stroke-width="3.6" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></div>{/if}
+  {#if sel}<div class="check"><svg width="10" height="10" viewBox="0 0 24 24" stroke="#fff" stroke-width="3.4" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></div>{/if}
 {/snippet}
 
 <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
@@ -247,7 +249,7 @@
   </div>
   <div class="disk-body">
     <div class="disk-ico">
-      <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="1.3"><path d="M3 8a9 3 0 0 0 18 0M3 8a9 3 0 0 1 18 0v8a9 3 0 0 1-18 0z"/><path d="M3 12a9 3 0 0 0 18 0"/></svg>
+      <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="var(--disk-icon)" stroke-width="1.6"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>
       <div class="disk-name">Диск {diskDigits}</div>
     </div>
     <div class="bar" class:grid={!!slots}>
@@ -336,16 +338,19 @@
 </div>
 
 <style>
-  .disk-card { border: 1px solid var(--border); border-radius: 6px; overflow: hidden; background: var(--card-bg); }
+  .disk-card { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--card-bg); }
   .disk-card.clickable { cursor: pointer; }
   .disk-card.clickable:hover { border-color: var(--primary); box-shadow: 0 0 0 1px var(--primary); }
   /* Restore-mapping partition states. Green pairs share a hue but step 5% in
-     lightness per pair (--pair-l), so source and destination visibly match. */
-  .seg.st-yellow { background: rgba(251,188,5,.24); box-shadow: inset 0 0 0 2px #f5b301; }
-  .seg.st-green { background: hsl(var(--pair-h, 96) 58% var(--pair-l, 28%) / .22); box-shadow: inset 0 0 0 2px hsl(var(--pair-h, 96) 58% var(--pair-l, 28%)); }
-  .seg.st-red { background: rgba(216,74,74,.20); box-shadow: inset 0 0 0 2px var(--error); }
+     lightness per pair (--pair-l), so source and destination visibly match.
+     The green is translucent (.22) over the card, so in the dark theme it stays
+     a dim tint — no pair lightness makes it glow — and the text on it keeps
+     the theme's own colours. */
+  .seg.st-yellow { background: var(--warning-soft); box-shadow: inset 0 0 0 2px var(--warning); }
+  .seg.st-green { background: hsl(var(--pair-h, 96) 58% calc(var(--pair-l, 28%) + var(--pair-lift)) / .22); box-shadow: inset 0 0 0 2px hsl(var(--pair-h, 96) 58% calc(var(--pair-l, 28%) + var(--pair-lift))); }
+  .seg.st-red { background: var(--error-soft); box-shadow: inset 0 0 0 2px var(--error); }
   /* Partitions that will be created by the restore (preview, not on disk yet). */
-  .seg.st-preview { background: rgba(91,75,214,.10); box-shadow: inset 0 0 0 2px var(--primary); border-style: dashed; }
+  .seg.st-preview { background: var(--accent-soft); box-shadow: inset 0 0 0 2px var(--primary); border-style: dashed; }
   .seg.free.free-pick { cursor: pointer; }
   .seg.free.free-pick:hover { box-shadow: inset 0 0 0 2px var(--primary); }
   /* Region too small for the copy: red on hover so it reads as "won't fit". */
@@ -356,8 +361,8 @@
   .absent-lbl { font-size: 11px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
   .absent-who { font-size: 11px; color: var(--text-muted); opacity: .75; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
   .disk-head { width: 100%; display: flex; align-items: center; justify-content: space-between; padding: 6px 12px; background: var(--panel2); border: 0; border-bottom: 1px solid var(--border); margin: 0; font-family: inherit; text-align: left; }
-  .disk-head.whole { background: rgba(45,125,210,.12); color: var(--primary); }
-  .disk-head.whole .disk-model { color: var(--primary); }
+  .disk-head.whole { background: var(--accent-soft); color: var(--accent-text); }
+  .disk-head.whole .disk-model { color: var(--accent-text); }
   .disk-head-center { display: flex; align-items: center; }
   .disk-head-right { display: flex; align-items: center; gap: 10px; }
   .whole-badge { font-size: 11px; font-weight: 700; color: #fff; background: var(--primary); padding: 2px 8px; border-radius: 10px; }
@@ -368,32 +373,36 @@
   .disk-meta { font-size: 12px; color: var(--text-muted); }
   .disk-body { display: flex; align-items: center; gap: 14px; padding: 7px 12px; }
   .disk-ico { width: 52px; flex-shrink: 0; text-align: center; color: var(--text-muted); }
-  .disk-name { font-size: 12px; color: var(--head); margin-top: 1px; }
-  .bar { flex: 1; display: flex; height: 44px; border: 1px solid var(--border); border-radius: 3px; overflow: hidden; background: var(--panel2); }
-  .seg { position: relative; padding: 5px 8px; min-width: 84px; border: 0; border-right: 1px solid var(--border); margin: 0; display: flex; flex-direction: column; gap: 3px; background: rgba(45,125,210,.06); overflow: hidden; text-align: left; font-family: inherit; color: inherit; appearance: none; -webkit-appearance: none; }
+  .disk-name { font-size: 12px; color: var(--text-secondary); margin-top: 1px; }
+  .bar { flex: 1; display: flex; height: 44px; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; background: var(--card-bg); }
+  /* Segments are parted by a 2px strip of the card itself (the design's 2px
+     gap). A border, not a gap: box-sizing keeps the widths exactly as before. */
+  .seg { position: relative; padding: 5px 8px; min-width: 84px; border: 0; border-right: 2px solid var(--card-bg); margin: 0; display: flex; flex-direction: column; gap: 3px; background: var(--seg); overflow: hidden; text-align: left; font-family: inherit; color: inherit; appearance: none; -webkit-appearance: none; }
   .seg:last-child { border-right: none; }
-  .seg.free { min-width: 40px; align-items: center; justify-content: center; background: repeating-linear-gradient(135deg, var(--panel2) 0 6px, var(--border) 6px 7px); }
+  .seg.free { min-width: 40px; align-items: center; justify-content: center; background: repeating-linear-gradient(135deg, var(--hatch) 0 6px, transparent 6px 12px); }
   /* Explicit budget: widths are exact percentages, so the readable floor is
      already baked into each share — min-width would distort them again. */
   .bar.grid .seg { min-width: 0; }
   .free-lbl { font-size: 11px; color: var(--text-muted); white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
   .seg.selectable { cursor: pointer; }
-  .seg.selectable:hover { filter: brightness(0.97); }
+  /* Hover lays one more thin accent tint over whatever the state colour is
+     (only the image layer, so the state's own background-color stays). The old
+     brightness(0.97) was invisible on the dark theme's dark segments. */
+  .seg.selectable:hover { background-image: linear-gradient(var(--seg), var(--seg)); }
   /* Already mapped/placed: shown, but no longer a click target. */
   .seg.selectable.locked { cursor: default; }
-  .seg.selectable.locked:hover { filter: none; }
+  .seg.selectable.locked:hover { background-image: none; }
   .seg.ro { cursor: default; }
   /* Kept in the copy as a table entry only. It looks selected because it IS in
      the copy; the cursor says it is not something to click. */
   .seg.layout-only { cursor: default; }
-  .seg.selected { background: rgba(45,125,210,.16); box-shadow: inset 0 0 0 2px var(--primary); }
-  .usedfill { position: absolute; top: 0; bottom: 0; left: 0; z-index: 0; background: rgba(45,125,210,.14); border-right: 1px solid rgba(45,125,210,.45); pointer-events: none; }
-  .seg.selected .usedfill { background: rgba(45,125,210,.24); border-right-color: rgba(45,125,210,.6); }
-  .seg-top { position: relative; z-index: 1; display: flex; align-items: center; gap: 5px; color: var(--head); }
+  .seg.selected { background: var(--seg-sel); box-shadow: inset 0 0 0 2px var(--primary); }
+  .usedfill { position: absolute; top: 0; bottom: 0; left: 0; z-index: 0; background: var(--seg-used); pointer-events: none; }
+  .seg-top { position: relative; z-index: 1; display: flex; align-items: center; gap: 5px; color: var(--text); }
   .lock { color: var(--text-muted); flex-shrink: 0; }
-  .enc { font-size: 10px; line-height: 1; flex-shrink: 0; }
+  .enc { font-size: 10px; line-height: 1; flex-shrink: 0; display: flex; }
   .seg-label { font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .seg-meta { position: relative; z-index: 1; font-size: 11px; color: var(--head); line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .seg-meta { position: relative; z-index: 1; font-size: 11px; color: var(--text-secondary); line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .seg-meta .muted { color: var(--text-muted); }
   .check { position: absolute; top: 5px; right: 6px; z-index: 2; width: 16px; height: 16px; border-radius: 3px; background: var(--primary); display: flex; align-items: center; justify-content: center; }
 </style>

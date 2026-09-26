@@ -100,7 +100,7 @@
   }
 
   .data-table tbody tr:hover {
-    background: rgba(45, 125, 210, 0.04);
+    background: var(--panel2);
   }
 
   .sort-btn {
@@ -120,7 +120,7 @@
   }
 
   .sort-btn:hover {
-    color: var(--primary);
+    color: var(--accent-text);
   }
 
   .sort-indicator {

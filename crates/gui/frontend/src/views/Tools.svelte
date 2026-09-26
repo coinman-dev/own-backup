@@ -246,7 +246,9 @@
 
   <div class="tool-card">
     <div class="tool-head">
-      <span class="glyph">💽</span>
+      <span class="glyph">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="13" width="18" height="7" rx="2" /><path d="M5 13l2.5-8h9L19 13M7 16.5h.01" /></svg>
+      </span>
       <div>
         <div class="tool-title">Подключить образ как диск</div>
         <div class="tool-desc">
@@ -271,7 +273,9 @@
       <div class="mounted-info">
         {#if isRefreshingDisks}
           <span class="spinner-container">
-            <span class="spinner-icon">🔄</span>
+            <span class="spinner-icon">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4.5 10A8 8 0 0 1 19 8" /><path d="M19.5 3.5V8H15" /><path d="M19.5 14A8 8 0 0 1 5 16" /><path d="M4.5 20.5V16H9" /></svg>
+            </span>
             <span>Поиск примонтированных дисков...</span>
           </span>
         {:else if mountedItems.length === 0}
@@ -312,7 +316,9 @@
 
   <div class="tool-card">
     <div class="tool-head">
-      <span class="glyph">🏅</span>
+      <span class="glyph">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 3v6c0 4.5-3.4 8-8 9-4.6-1-8-4.5-8-9V6z" /><path d="M8.5 12l2.5 2.5 4.5-5" /></svg>
+      </span>
       <div>
         <div class="tool-title">Проверить образ</div>
         <div class="tool-desc">
@@ -360,7 +366,7 @@
   }
 
   h1 {
-    font-size: 28px;
+    font-size: 24px;
     font-weight: 300;
     color: var(--head);
     margin-bottom: 24px;
@@ -370,7 +376,6 @@
     border: 1px solid var(--border);
     border-radius: 8px;
     background: var(--card-bg);
-    box-shadow: var(--shadow);
     padding: 20px 22px;
     margin-bottom: 16px;
   }
@@ -383,20 +388,28 @@
     margin-bottom: 14px;
   }
 
+  /* The tool's icon on a tinted square, as in the design. */
   .glyph {
-    font-size: 22px;
-    color: var(--primary);
+    flex: none;
+    width: 40px;
+    height: 40px;
+    border-radius: 8px;
+    background: var(--accent-soft);
+    color: var(--accent-text);
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
 
   .tool-title {
-    font-size: 15px;
+    font-size: 16px;
     font-weight: 600;
     color: var(--head);
   }
 
   .tool-desc {
     font-size: 12px;
-    color: var(--text-muted);
+    color: var(--text-secondary);
     margin-top: 3px;
     line-height: 1.5;
   }
@@ -418,7 +431,7 @@
 
   .mounted-info {
     font-size: 13px;
-    color: var(--text);
+    color: var(--text-secondary);
   }
 
   .muted-text {
@@ -434,7 +447,7 @@
     justify-content: center !important;
     font-size: 13px !important;
     margin-right: 6px;
-    border-radius: 4px;
+    border-radius: 6px;
     font-weight: 600;
     box-sizing: border-box !important;
   }
@@ -457,6 +470,11 @@
     animation: spin 1s linear infinite;
   }
 
+  /* Block, so it turns about its own centre rather than the text line's. */
+  .spinner-icon svg {
+    display: block;
+  }
+
   .actions-right {
     display: flex;
     align-items: center;
@@ -470,31 +488,49 @@
     font-size: 13px;
     user-select: none;
     cursor: pointer;
-    color: var(--text);
+    color: var(--text-secondary);
   }
 
   .row input {
     flex: 1;
     padding: 9px 12px;
-    border: 1px solid var(--border);
-    border-radius: 4px;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
     font-size: 13px;
     font-family: var(--font);
+    background: var(--input-bg);
+    color: var(--text);
+  }
+
+  .row input::placeholder {
+    color: var(--text-muted);
+  }
+
+  .row input:focus {
+    outline: none;
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+
+  .row input:disabled {
+    background: var(--sunken);
+    border-color: var(--border);
+    color: var(--text-muted);
   }
 
   .btn {
-    border-radius: 4px;
+    border-radius: 6px;
     padding: 9px 20px;
     font-size: 13px;
     font-weight: 600;
     font-family: var(--font);
     cursor: pointer;
-    border: none;
+    border: 1px solid transparent;
     white-space: nowrap;
   }
 
   .btn:disabled {
-    opacity: 0.5;
+    opacity: 0.45;
     cursor: default;
   }
 
@@ -503,41 +539,54 @@
     color: #fff;
   }
 
+  .btn.primary:hover:not(:disabled) {
+    background: var(--primary-hover);
+  }
+
+  /* «Обзор…», «Отключить», a letter that is not the chosen image: the
+     design's secondary button. */
   .btn.outline {
-    background: transparent;
-    border: 1px solid var(--primary);
-    color: var(--primary);
+    background: var(--card-bg);
+    border-color: var(--border-strong);
+    color: var(--text);
+  }
+
+  .btn.outline:hover:not(:disabled) {
+    background: var(--panel2);
   }
 
   .bar {
     height: 8px;
     border-radius: 4px;
-    background: var(--tabbg);
+    background: var(--track);
     overflow: hidden;
     margin-top: 12px;
   }
 
   .bar-fill {
     height: 100%;
-    background: var(--green);
+    border-radius: 4px;
+    background: var(--success);
     transition: width 0.15s linear;
   }
 
   .banner {
     margin-top: 12px;
-    border-radius: 6px;
+    border-radius: 8px;
     padding: 11px 14px;
     font-size: 13px;
     word-break: break-all;
   }
 
   .banner.ok {
-    background: rgba(90, 176, 47, 0.1);
-    color: #2c5b12;
+    background: var(--success-soft);
+    border: 1px solid var(--success-line);
+    color: var(--success-text);
   }
 
   .banner.err {
-    background: rgba(216, 74, 74, 0.08);
-    color: #8c1d1d;
+    background: var(--error-soft);
+    border: 1px solid var(--error-line);
+    color: var(--error-text);
   }
 </style>

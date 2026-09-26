@@ -96,11 +96,11 @@
         <div class="card">
           <div class="ic">
             {#if r.status === 'completed'}
-              <div class="badge ok"><svg width="13" height="13" viewBox="0 0 24 24" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></div>
+              <div class="badge ok"><svg width="14" height="14" viewBox="0 0 24 24" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></div>
             {:else if r.status === 'cancelled'}
-              <div class="badge warn"><svg width="12" height="12" viewBox="0 0 24 24" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round"><line x1="6" y1="12" x2="18" y2="12"/></svg></div>
+              <div class="badge warn"><svg width="12" height="12" viewBox="0 0 24 24" stroke="#fff" stroke-width="3.2" fill="none" stroke-linecap="round"><path d="M6 12h12"/></svg></div>
             {:else}
-              <div class="badge err"><svg width="12" height="12" viewBox="0 0 24 24" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg></div>
+              <div class="badge err"><svg width="12" height="12" viewBox="0 0 24 24" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></svg></div>
             {/if}
           </div>
           <div class="body">
@@ -135,11 +135,11 @@
         <div class="card">
           <div class="ic">
             {#if r.status === 'success'}
-              <div class="badge ok"><svg width="13" height="13" viewBox="0 0 24 24" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></div>
+              <div class="badge ok"><svg width="14" height="14" viewBox="0 0 24 24" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></div>
             {:else if r.status === 'cancelled'}
-              <div class="badge warn"><svg width="12" height="12" viewBox="0 0 24 24" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round"><line x1="6" y1="12" x2="18" y2="12"/></svg></div>
+              <div class="badge warn"><svg width="12" height="12" viewBox="0 0 24 24" stroke="#fff" stroke-width="3.2" fill="none" stroke-linecap="round"><path d="M6 12h12"/></svg></div>
             {:else}
-              <div class="badge err"><svg width="12" height="12" viewBox="0 0 24 24" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg></div>
+              <div class="badge err"><svg width="12" height="12" viewBox="0 0 24 24" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></svg></div>
             {/if}
           </div>
           <div class="body">
@@ -177,24 +177,26 @@
 <style>
   .page { padding: 30px 44px; height: 100%; overflow: auto; }
   .head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 22px; }
-  h1 { font-size: 28px; font-weight: 300; color: var(--head); }
-  .refresh { background: none; border: 1px solid var(--border); border-radius: 4px; padding: 7px 16px; font-size: 13px; color: var(--head); cursor: pointer; font-family: var(--font); }
+  h1 { font-size: 24px; font-weight: 300; color: var(--head); }
+  .refresh { background: var(--card-bg); border: 1px solid var(--border-strong); border-radius: 6px; padding: 7px 16px; font-size: 13px; font-weight: 600; color: var(--text); cursor: pointer; font-family: var(--font); transition: background-color .15s ease; }
+  .refresh:hover { background: var(--panel2); }
   .empty { color: var(--text-muted); font-size: 14px; padding: 20px 0; }
   .list { display: flex; flex-direction: column; gap: 12px; }
-  .card { border: 1px solid var(--border); border-radius: 6px; padding: 16px 20px; display: flex; gap: 16px; background: var(--card-bg); box-shadow: var(--shadow); }
+  .card { border: 1px solid var(--border); border-radius: 8px; padding: 16px 20px; display: flex; gap: 16px; background: var(--card-bg); }
   .badge { width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
-  .badge.ok { background: var(--green); }
+  .badge.ok { background: var(--success); }
   .badge.err { background: var(--error); }
   .badge.warn { background: var(--warning); }
   .body { flex: 1; min-width: 0; }
   .title { font-size: 14px; color: var(--head); }
   .time { color: var(--text-muted); margin-left: 6px; }
-  .note { font-size: 13px; color: var(--text-muted); margin-top: 5px; word-break: break-all; }
+  /* Only ever a failure: the step that broke, or the copy's error. */
+  .note { font-size: 13px; color: var(--error-text); margin-top: 5px; word-break: break-all; }
   .stats { display: flex; gap: 40px; margin-top: 12px; flex-wrap: wrap; }
   .stats > div { display: flex; flex-direction: column; }
-  .k { font-size: 12px; color: var(--primary); }
+  .k { font-size: 12px; color: var(--accent-text); }
   .follow { margin-top: 10px; font-size: 13px; color: var(--head); }
   .follow summary { cursor: pointer; color: var(--text-secondary); }
   .follow ul { margin: 6px 0 0 18px; display: flex; flex-direction: column; gap: 4px; color: var(--text-secondary); }
-  .v { font-size: 14px; color: var(--head); }
+  .v { font-size: 14px; color: var(--text); }
 </style>

@@ -1,33 +1,152 @@
+/* Palette: design/themes/Own Backup.dc.html (the light+dark mockup of 2026-09-26),
+   const THEMES. The names are ours (the whole program already speaks them);
+   where the design calls a colour something else, its name is in the comment,
+   so the next design drop can be matched line by line.
+
+   The theme is `data-theme` on <html>, set by lib/themeStore.svelte.ts before
+   the first paint. Without it (a build that never ran the store) it is light. */
+:root,
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --content-bg: #ffffff; /* --bg */
+  --column-bg: #fafafc; /* --bg-col: the job list beside a dashboard */
+  --panel2: #f6f6fa; /* --panel: a card's header strip, a hovered row */
+  --sunken: #eeeef4; /* a pressed-in area: tab strip, read-only field, code */
+  --card-bg: #ffffff; /* --card */
+  --input-bg: #ffffff; /* --input */
+  --border: #e7e7ef; /* --line */
+  --border-strong: #d4d4e0; /* --line-strong: inputs, secondary buttons */
+  --track: #ebebf2; /* the empty part of a progress bar */
+
+  --text: #2c2c39;
+  --head: #38384a;
+  --text-secondary: #55556a; /* --text2 */
+  --text-muted: #7a7a8e; /* --muted */
+
+  --primary: #5b4bd6; /* --accent */
+  --primary-hover: #4c3ec2; /* --accent-h */
+  --accent-soft: rgba(91, 75, 214, 0.09);
+  --accent-text: #5b4bd6; /* accent as TEXT (links, outline buttons): lighter in dark */
+
+  --green: #46a126; /* --go: «Создать копию», «Восстановить» */
+  --green-hover: #3c8c20; /* --go-h */
+  --success: #5ab02f; /* --ok */
+  --success-soft: rgba(90, 176, 47, 0.1);
+  --success-line: rgba(90, 176, 47, 0.28);
+  --success-text: #2f6a14;
+  --error: #d84a4a; /* --err */
+  --error-soft: rgba(216, 74, 74, 0.07);
+  --error-line: rgba(216, 74, 74, 0.25);
+  --error-text: #8c1d1d;
+  --warning: #e0a100; /* --warn */
+  --warning-soft: rgba(251, 188, 5, 0.1);
+  --warning-line: rgba(224, 161, 0, 0.35);
+  --warning-text: #7a5410;
+  --info: #5a8fd8;
+  --info-soft: rgba(90, 143, 216, 0.08);
+  --info-line: rgba(90, 143, 216, 0.25);
+  --info-text: #2c5790;
+
+  --sidebar-bg: #221d49; /* --side */
+  --sidebar-hover: #2b2560; /* --side-h */
+  --sidebar-line: rgba(255, 255, 255, 0.08); /* --side-line */
+  --logo: #a79dff;
+
+  --folder: #e6b34a;
+  --folder2: #f0c268;
+  --disk-icon: #9a9aae;
+
+  /* Partition segments on the disk maps. */
+  --seg: rgba(91, 75, 214, 0.06);
+  --seg-used: rgba(91, 75, 214, 0.16);
+  --seg-sel: rgba(91, 75, 214, 0.13);
+  --hatch: rgba(56, 56, 74, 0.07);
+  /* Added to the lightness of a mapped source↔target pair (DiskMap, hsl): the
+     pairs start at a dark 28 % green, drawn on a light card. */
+  --pair-lift: 0%;
+
+  --overlay: rgba(20, 16, 50, 0.45);
+  --shadow-lg: 0 20px 50px rgba(30, 30, 60, 0.2);
+  --scrollbar: #c9c9d6;
+  --scrollbar-hover: #a9a9ba;
+  --select-arrow: url("data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%2712%27 height=%2712%27 viewBox=%270 0 12 12%27%3E%3Cpath fill=%27%237a7a8e%27 d=%27M6 8L1 3h10z%27/%3E%3C/svg%3E");
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --content-bg: #17161f;
+  --column-bg: #1c1b26;
+  --panel2: #232230;
+  --sunken: #14131b;
+  --card-bg: #1f1e2a;
+  --input-bg: #15141c;
+  --border: #2e2d3d;
+  --border-strong: #3d3c50;
+  --track: #2c2b3a;
+
+  --text: #e3e3ee;
+  --head: #f1f1f8;
+  --text-secondary: #b4b4c8;
+  --text-muted: #8b8ba2;
+
+  --primary: #6f60ea;
+  --primary-hover: #7e71f0;
+  --accent-soft: rgba(124, 110, 245, 0.14);
+  --accent-text: #aba2ff;
+
+  --green: #46a126;
+  --green-hover: #52b22f;
+  --success: #6cc043;
+  --success-soft: rgba(108, 192, 67, 0.11);
+  --success-line: rgba(108, 192, 67, 0.28);
+  --success-text: #a4dc85;
+  --error: #ec6060;
+  --error-soft: rgba(236, 96, 96, 0.11);
+  --error-line: rgba(236, 96, 96, 0.3);
+  --error-text: #ffb4b4;
+  --warning: #f0b43a;
+  --warning-soft: rgba(240, 180, 58, 0.1);
+  --warning-line: rgba(240, 180, 58, 0.32);
+  --warning-text: #f4d086;
+  --info: #72a6ec;
+  --info-soft: rgba(114, 166, 236, 0.1);
+  --info-line: rgba(114, 166, 236, 0.28);
+  --info-text: #b0cdf6;
+
+  --sidebar-bg: #110f22;
+  --sidebar-hover: #1c1936;
+  --sidebar-line: rgba(255, 255, 255, 0.06);
+  --logo: #a79dff;
+
+  --folder: #d6a23c;
+  --folder2: #e6b75a;
+  --disk-icon: #74748c;
+
+  --seg: rgba(124, 110, 245, 0.08);
+  --seg-used: rgba(124, 110, 245, 0.24);
+  --seg-sel: rgba(124, 110, 245, 0.2);
+  --hatch: rgba(255, 255, 255, 0.05);
+  --pair-lift: 24%;
+
+  --overlay: rgba(4, 3, 12, 0.65);
+  --shadow-lg: 0 20px 50px rgba(0, 0, 0, 0.5);
+  --scrollbar: #3d3c50;
+  --scrollbar-hover: #55546c;
+  --select-arrow: url("data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%2712%27 height=%2712%27 viewBox=%270 0 12 12%27%3E%3Cpath fill=%27%238b8ba2%27 d=%27M6 8L1 3h10z%27/%3E%3C/svg%3E");
+}
+
 :root {
-  /* Design palette (design/Own Backup.dc.html) — violet accent */
+  /* Not colours — the same in both themes. */
   --sidebar-width: 236px;
-  --sidebar-bg: #221d49;
-  --sidebar-active: #5b4bd6;
-  --sidebar-hover: #2b2560;
-  --sidebar-text: rgba(255, 255, 255, 0.72);
+  --sidebar-text: rgba(255, 255, 255, 0.74);
   --sidebar-text-active: #ffffff;
   --sidebar-icon: #8d85c9;
-  --content-bg: #ffffff;
-  --column-bg: #fafafc;
-  --card-bg: #ffffff;
-  --panel2: #f6f6fa;
-  --primary: #5b4bd6;
-  --primary-hover: #4c3ec2;
-  --accent-soft: rgba(91, 75, 214, 0.1);
-  --green: #5ab02f;
-  --green-hover: #4d9a28;
-  --success: #5ab02f;
-  --warning: #fbbc05;
-  --error: #d84a4a;
-  --text: #2c2c39;
-  --text-secondary: #55556a;
-  --text-muted: #8a8a9c;
-  --head: #38384a;
-  --border: #e7e7ef;
-  --tabbg: #eeeef4;
-  --shadow: 0 1px 2px rgba(30, 30, 60, 0.06);
+  --sidebar-active: var(--primary);
   --radius: 6px;
-  --font: 'Segoe UI Variable', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --font: 'Segoe UI Variable Text', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --font-mono: Consolas, 'Cascadia Mono', monospace;
   /* Bottom action bar — single source of truth, used by the global .footer */
   --footer-padding: 20px 34px 34px;
   --footer-gap: 14px;

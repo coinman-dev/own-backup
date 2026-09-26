@@ -63,7 +63,7 @@
   }
 
   .tab-header.active {
-    color: var(--primary);
+    color: var(--accent-text);
     border-bottom-color: var(--primary);
   }
 

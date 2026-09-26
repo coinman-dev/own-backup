@@ -111,7 +111,9 @@
 
       <div class="bar">
         <button class="nav" onclick={roots} title="Список дисков">Диски</button>
-        <button class="nav" disabled={!parent} onclick={() => parent && go(parent)} title="На уровень выше">↑</button>
+        <button class="nav" disabled={!parent} onclick={() => parent && go(parent)} title="На уровень выше">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M6 11l6-6 6 6" /></svg>
+        </button>
         <input
           class="path"
           type="text"
@@ -141,7 +143,13 @@
             class:shown-only={!pickable(e)}
             onclick={() => onRow(e)}
           >
-            <span class="ico">{e.is_dir ? '📁' : '📄'}</span>
+            <span class="ico">
+              {#if e.is_dir}
+                <svg width="16" height="16" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4.2l2 2H19a2 2 0 0 1 2 2v8.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="var(--folder)" /><path d="M3 10h18v7.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="var(--folder2)" /></svg>
+              {:else}
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--disk-icon)" stroke-width="1.6" stroke-linejoin="round"><path d="M7 3h7l5 5v11a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z" /><path d="M14 3v5h5" /></svg>
+              {/if}
+            </span>
             <span class="nm">{e.name}</span>
             <!-- Drives carry a label; a bare "C:, D:, E:" tells the user nothing
                  about which of their disks is which. Without a label the
@@ -179,40 +187,53 @@
 {/if}
 
 <style>
-  .backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; z-index: 200; }
-  .dialog { width: 620px; max-width: 92vw; background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow); display: flex; flex-direction: column; }
-  .head { padding: 14px 18px; font-size: 16px; color: var(--head); border-bottom: 1px solid var(--border); }
+  .backdrop { position: fixed; inset: 0; background: var(--overlay); display: flex; align-items: center; justify-content: center; z-index: 200; }
+  .dialog { width: 620px; max-width: 92vw; background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow-lg); display: flex; flex-direction: column; }
+  .head { padding: 14px 18px; font-size: 16px; font-weight: 600; color: var(--head); border-bottom: 1px solid var(--border); }
   .bar { display: flex; gap: 8px; padding: 12px 18px; align-items: center; }
-  .path { flex: 1; min-width: 0; background: var(--input-bg, transparent); border: 1px solid var(--border); border-radius: 4px; padding: 6px 10px; font-size: 13px; color: var(--head); font-family: var(--font); }
-  .nav { background: none; border: 1px solid var(--border); border-radius: 4px; padding: 6px 12px; font-size: 13px; color: var(--head); cursor: pointer; font-family: var(--font); }
+  .path { flex: 1; min-width: 0; background: var(--input-bg); border: 1px solid var(--border-strong); border-radius: 6px; padding: 6px 10px; font-size: 13px; color: var(--text); font-family: var(--font); }
+  .path::placeholder, .mk input::placeholder { color: var(--text-muted); }
+  .path:focus, .mk input:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--accent-soft); }
+  /* «Диски», «На уровень выше», «Создать папку»: the design's secondary button. */
+  .nav { background: var(--card-bg); border: 1px solid var(--border-strong); border-radius: 6px; padding: 6px 12px; font-size: 13px; font-weight: 600; color: var(--text); cursor: pointer; font-family: var(--font); }
+  /* Inline, so the arrow keeps the text line's height and the buttons stay level. */
+  .nav svg { vertical-align: middle; }
+  .nav:hover:not(:disabled) { background: var(--panel2); }
   .nav:disabled { opacity: .45; cursor: default; }
-  .list { height: 320px; overflow: auto; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+  /* The line under the list belongs to whatever follows it — the new-folder
+     row or the footer — so the two never stack into a double line. */
+  .list { height: 320px; overflow: auto; border-top: 1px solid var(--border); }
   /* Listed for recognition, not for choosing. */
   .shown-only {
     opacity: .62;
     cursor: default;
   }
 
-  .row { display: flex; align-items: center; gap: 10px; padding: 7px 18px; cursor: pointer; font-size: 13px; color: var(--head); }
-  .row:hover { background: var(--hover-bg, rgba(127,127,127,.12)); }
-  .row.sel { background: var(--primary); color: #fff; }
+  .row { display: flex; align-items: center; gap: 10px; padding: 7px 18px; cursor: pointer; font-size: 13px; color: var(--text); }
+  .row:hover { background: var(--panel2); }
+  /* Chosen the way the design marks a chosen item: tinted, with an accent edge. */
+  .row.sel { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--primary); }
   .ico { flex-shrink: 0; }
+  .ico svg { display: block; }
   .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sz { color: var(--text-muted); font-size: 12px; }
-  .tag { color: var(--head); font-size: 12px; opacity: .85; }
+  .tag { color: var(--text-secondary); font-size: 12px; }
   /* On a drive row the label belongs beside the letter - "C: Windows" -
      not pushed to the far edge where it reads as a separate column. */
   .row.drive .nm { flex: 0 0 auto; }
   .row.drive .tag { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .tag.muted-tag { color: var(--text-muted); opacity: 1; }
-  .row.sel .tag { color: #fff; }
-  .mk { display: flex; gap: 8px; padding: 10px 18px; }
-  .mk input { flex: 1; min-width: 0; background: none; border: 1px solid var(--border); border-radius: 4px; padding: 6px 10px; font-size: 13px; color: var(--head); font-family: var(--font); }
-  .foot { display: flex; gap: 10px; align-items: center; padding: 12px 18px; }
+  .tag.muted-tag { color: var(--text-muted); }
+  .mk { display: flex; gap: 8px; padding: 10px 18px; border-top: 1px solid var(--border); }
+  .mk input { flex: 1; min-width: 0; background: var(--input-bg); border: 1px solid var(--border-strong); border-radius: 6px; padding: 6px 10px; font-size: 13px; color: var(--text); font-family: var(--font); }
+  /* The dialog's footer: the design's --panel strip, rounded to sit inside
+     the 12 px frame. */
+  .foot { display: flex; gap: 10px; align-items: center; padding: 12px 18px; border-top: 1px solid var(--border); background: var(--panel2); border-radius: 0 0 11px 11px; }
   .chosen { flex: 1; min-width: 0; font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .btn { border: 1px solid var(--border); background: none; border-radius: 4px; padding: 7px 18px; font-size: 13px; color: var(--head); cursor: pointer; font-family: var(--font); }
+  .btn { border: 1px solid var(--border-strong); background: var(--card-bg); border-radius: 6px; padding: 7px 18px; font-size: 13px; font-weight: 600; color: var(--text); cursor: pointer; font-family: var(--font); }
+  .btn:hover:not(:disabled) { background: var(--panel2); }
   .btn.primary { background: var(--primary); border-color: var(--primary); color: #fff; }
-  .btn:disabled { opacity: .5; cursor: default; }
-  .err { padding: 8px 18px; font-size: 12px; color: var(--error); word-break: break-all; }
+  .btn.primary:hover:not(:disabled) { background: var(--primary-hover); border-color: var(--primary-hover); }
+  .btn:disabled { opacity: .45; cursor: default; }
+  .err { padding: 8px 18px; font-size: 12px; color: var(--error-text); word-break: break-all; }
   .muted { padding: 14px 18px; font-size: 13px; color: var(--text-muted); }
 </style>

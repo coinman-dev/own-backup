@@ -45,9 +45,15 @@
   }
 </script>
 
+{#snippet warnIcon()}
+  <svg class="p-warn-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--warning)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l9 16H3z" /><path d="M12 10v4M12 17h.01" /></svg>
+{/snippet}
+
 <div class="tool-card">
   <div class="tool-head">
-    <span class="glyph">💿</span>
+    <span class="glyph">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="8.5" /><circle cx="12" cy="12" r="2.5" /></svg>
+    </span>
     <div>
       <div class="tool-title">Загрузочный носитель</div>
       <div class="tool-desc">
@@ -100,19 +106,22 @@
       {#if searching}
         <div class="p-meta">поиск образа восстановления…</div>
       {:else if searchError}
-        <div class="p-warn">{searchError}</div>
+        <div class="p-warn">{@render warnIcon()}<span>{searchError}</span></div>
       {:else if windowsBase}
         <div class="p-meta">
           {windowsBase.name} · сборка {windowsBase.build} · {windowsBase.language} ·
           {formatBytes(windowsBase.total_bytes)}
         </div>
-        {#each windowsBase.warnings as w}<div class="p-warn">{w}</div>{/each}
+        {#each windowsBase.warnings as w}<div class="p-warn">{@render warnIcon()}<span>{w}</span></div>{/each}
         <div class="p-go">Нажмите, чтобы настроить и собрать →</div>
       {:else}
         <div class="p-warn">
-          Образ среды восстановления не найден. Включите её командой
-          <code>reagentc /enable</code> или возьмите Winre.wim из установочного
-          образа Windows.
+          {@render warnIcon()}
+          <span>
+            Образ среды восстановления не найден. Включите её командой
+            <code>reagentc /enable</code> или возьмите Winre.wim из установочного
+            образа Windows.
+          </span>
         </div>
       {/if}
     {:else}
@@ -140,24 +149,28 @@
   /* Svelte scopes styles per component, so the card classes defined in Tools
      never reached this one — the heading and the icon sat on the page with no
      frame around them. They live here now, matching Mount and Verify. */
-  .tool-card { border: 1px solid var(--border); border-radius: 8px; background: var(--card-bg); box-shadow: var(--shadow); padding: 20px 22px; margin-bottom: 16px; }
+  .tool-card { border: 1px solid var(--border); border-radius: 8px; background: var(--card-bg); padding: 20px 22px; margin-bottom: 16px; }
   .tool-head { display: flex; gap: 14px; align-items: flex-start; margin-bottom: 14px; }
-  .glyph { font-size: 22px; color: var(--primary); }
-  .tool-title { font-size: 15px; font-weight: 600; color: var(--head); }
-  .tool-desc { font-size: 12px; color: var(--text-muted); margin-top: 3px; line-height: 1.5; }
+  /* The tool's icon on a tinted square, as in the design. */
+  .glyph { flex: none; width: 40px; height: 40px; border-radius: 8px; background: var(--accent-soft); color: var(--accent-text); display: flex; align-items: center; justify-content: center; }
+  .tool-title { font-size: 16px; font-weight: 600; color: var(--head); }
+  .tool-desc { font-size: 12px; color: var(--text-secondary); margin-top: 3px; line-height: 1.5; }
 
+  /* The chosen tab and its panel are one raised surface (--panel2); the line
+     under the strip stops where the chosen tab stands on it. */
   .tabs { display: flex; gap: 4px; margin-top: 4px; border-bottom: 1px solid var(--border); }
-  .tab { display: flex; align-items: center; gap: 8px; padding: 9px 14px; border: 1px solid transparent; border-bottom: none; border-radius: 6px 6px 0 0; background: none; cursor: pointer; font-family: var(--font); font-size: 13px; color: var(--text-muted); margin-bottom: -1px; }
+  .tab { display: flex; align-items: center; gap: 8px; padding: 9px 14px; border: 1px solid transparent; border-bottom: none; border-radius: 8px 8px 0 0; background: none; cursor: pointer; font-family: var(--font); font-size: 13px; color: var(--text-muted); margin-bottom: -1px; }
   .tab:hover { color: var(--head); }
-  .tab.on { color: var(--head); border-color: var(--border); background: var(--card-bg); }
+  .tab.on { color: var(--head); border-color: var(--border); background: var(--panel2); }
   .ico { width: 16px; height: 16px; flex-shrink: 0; }
-  .panel { padding: 14px 16px; border: 1px solid var(--border); border-top: none; border-radius: 0 0 6px 6px; cursor: pointer; }
+  .panel { padding: 14px 16px; border: 1px solid var(--border); border-top: none; border-radius: 0 0 8px 8px; background: var(--panel2); cursor: pointer; }
   .panel:hover:not(.disabled) { border-color: var(--primary); }
   .panel.disabled { cursor: default; }
-  .p-desc { font-size: 12px; color: var(--text-muted); line-height: 1.6; }
-  .p-meta { font-size: 12px; color: var(--text-muted); margin-top: 8px; }
-  .p-meta.soon { color: var(--warning); }
-  .p-warn { font-size: 12px; color: var(--warning); margin-top: 8px; line-height: 1.45; }
+  .p-desc { font-size: 12px; color: var(--text-secondary); line-height: 1.6; }
+  .p-meta { font-size: 12px; font-weight: 600; color: var(--head); margin-top: 8px; }
+  .p-meta.soon { font-weight: 400; color: var(--warning-text); }
+  .p-warn { display: flex; align-items: flex-start; gap: 10px; font-size: 12px; margin-top: 8px; line-height: 1.45; padding: 10px 12px; border-radius: 8px; background: var(--warning-soft); border: 1px solid var(--warning-line); color: var(--warning-text); }
+  .p-warn-icon { flex: none; margin-top: 1px; }
   .p-warn code, .p-desc code { font-family: monospace; }
-  .p-go { font-size: 12px; color: var(--primary); margin-top: 10px; }
+  .p-go { font-size: 12px; font-weight: 600; color: var(--accent-text); margin-top: 10px; }
 </style>

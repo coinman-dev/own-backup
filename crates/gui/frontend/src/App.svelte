@@ -82,7 +82,10 @@
   <main class="content-area">
     {#if serviceWarn}
       <div class="service-warning" role="alert">
-        <span class="sw-icon">⚠️</span>
+        <svg class="sw-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3.5l9 16H3z" />
+          <path d="M12 10v4M12 17h.01" />
+        </svg>
         <span class="sw-text">{serviceWarn}</span>
         <button class="sw-retry" onclick={checkService} disabled={checking}>
           {checking ? 'Проверка…' : 'Повторить'}
@@ -138,35 +141,36 @@
     align-items: center;
     gap: 12px;
     padding: 10px 16px;
-    background: #fdecea;
-    color: #8a1f1f;
-    border-bottom: 1px solid #f0b3b3;
+    background: var(--error-soft);
+    color: var(--error-text);
+    border-bottom: 1px solid var(--error-line);
     font-size: 13px;
   }
 
   .sw-icon {
     flex: 0 0 auto;
-    font-size: 16px;
+    color: var(--error);
   }
 
   .sw-text {
     flex: 1;
-    line-height: 1.4;
+    line-height: 1.45;
   }
 
   .sw-retry {
     flex: 0 0 auto;
     padding: 5px 14px;
-    border: 1px solid #d06a6a;
+    border: 1px solid var(--error);
     border-radius: 6px;
-    background: #f6c4c4;
-    color: #8a1f1f;
+    background: transparent;
+    color: var(--error-text);
     cursor: pointer;
     font-size: 13px;
+    font-weight: 600;
   }
 
   .sw-retry:hover:not(:disabled) {
-    background: #f0a8a8;
+    background: var(--error-soft);
   }
 
   .sw-retry:disabled {

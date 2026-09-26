@@ -27,7 +27,7 @@
   .overlay {
     position: fixed;
     inset: 0;
-    background: rgba(20, 17, 44, 0.5);
+    background: var(--overlay);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -35,10 +35,11 @@
   }
   .dialog {
     width: 420px;
-    background: #fff;
-    border-radius: 8px;
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
     padding: 24px;
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+    box-shadow: var(--shadow-lg);
   }
   .dialog-title {
     font-size: 17px;
@@ -57,7 +58,7 @@
     justify-content: flex-end;
   }
   .btn {
-    border-radius: 4px;
+    border-radius: 6px;
     padding: 9px 22px;
     font-size: 14px;
     font-weight: 600;
@@ -68,5 +69,8 @@
   .btn.primary {
     background: var(--primary);
     color: #fff;
+  }
+  .btn.primary:hover {
+    background: var(--primary-hover);
   }
 </style>

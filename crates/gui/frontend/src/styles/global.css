@@ -36,12 +36,16 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #c0c0c0;
+  background: var(--scrollbar);
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #a0a0a0;
+  background: var(--scrollbar-hover);
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 /* Common utilities */
@@ -66,15 +70,15 @@ body {
 }
 
 .text-success {
-  color: var(--success);
+  color: var(--success-text);
 }
 
 .text-warning {
-  color: var(--warning);
+  color: var(--warning-text);
 }
 
 .text-error {
-  color: var(--error);
+  color: var(--error-text);
 }
 
 button {
@@ -93,7 +97,7 @@ button {
   gap: var(--footer-gap);
   padding: var(--footer-padding);
   border-top: 1px solid var(--border);
-  background: var(--card-bg);
+  background: var(--content-bg);
 }
 
 input,
@@ -103,8 +107,21 @@ textarea {
   font-size: 14px;
 }
 
+/* Checkboxes, radios and sliders take the accent in both themes. */
+input[type='checkbox'],
+input[type='radio'],
+input[type='range'] {
+  accent-color: var(--primary);
+}
+
+code,
+kbd,
+pre {
+  font-family: var(--font-mono);
+}
+
 a {
-  color: var(--primary);
+  color: var(--accent-text);
   text-decoration: none;
 }
 
@@ -118,15 +135,15 @@ a:hover {
   align-items: center;
   gap: 8px;
   padding: 8px 20px;
-  border: none;
+  border: 1px solid transparent;
   border-radius: var(--radius);
   font-size: 14px;
-  font-weight: 500;
-  transition: background-color 0.15s ease, opacity 0.15s ease;
+  font-weight: 600;
+  transition: background-color 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
 }
 
 .btn:disabled {
-  opacity: 0.5;
+  opacity: 0.45;
   cursor: not-allowed;
 }
 
@@ -140,12 +157,13 @@ a:hover {
 }
 
 .btn-secondary {
-  background: var(--border);
+  background: var(--card-bg);
+  border-color: var(--border-strong);
   color: var(--text);
 }
 
 .btn-secondary:hover:not(:disabled) {
-  background: #d0d0d0;
+  background: var(--panel2);
 }
 
 .btn-danger {
@@ -154,14 +172,14 @@ a:hover {
 }
 
 .btn-danger:hover:not(:disabled) {
-  background: #d03025;
+  filter: brightness(0.92);
 }
 
 /* Card utility */
 .card {
   background: var(--card-bg);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
+  border: 1px solid var(--border);
+  border-radius: 8px;
   padding: 24px;
 }
 
@@ -173,38 +191,42 @@ a:hover {
 .form-group label {
   display: block;
   margin-bottom: 6px;
-  font-weight: 500;
-  color: var(--text-secondary);
-  font-size: 13px;
+  font-weight: 600;
+  color: var(--head);
+  font-size: 13.5px;
 }
 
 .form-input {
   width: 100%;
   padding: 8px 12px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: 6px;
   font-size: 14px;
-  background: #ffffff;
+  background: var(--input-bg);
   color: var(--text);
   transition: border-color 0.15s ease;
+}
+
+.form-input::placeholder {
+  color: var(--text-muted);
 }
 
 .form-input:focus {
   outline: none;
   border-color: var(--primary);
-  box-shadow: 0 0 0 3px rgba(45, 125, 210, 0.15);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 .form-select {
   width: 100%;
   padding: 8px 12px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: 6px;
   font-size: 14px;
-  background: #ffffff;
+  background-color: var(--input-bg);
   color: var(--text);
   appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23666' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+  background-image: var(--select-arrow);
   background-repeat: no-repeat;
   background-position: right 12px center;
   padding-right: 32px;
@@ -213,5 +235,5 @@ a:hover {
 .form-select:focus {
   outline: none;
   border-color: var(--primary);
-  box-shadow: 0 0 0 3px rgba(45, 125, 210, 0.15);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }

@@ -153,6 +153,10 @@
    *  while it runs (null until the scan has said), the last copy's after. The
    *  live view used to take the LAST copy's figure — after the rules changed,
    *  the bar showed gigabytes this run was not excluding at all (2026-09-26). */
+  /** «Исключено» — the eighth category colour, the same in both themes as
+   *  the other seven (design: CATS). */
+  const EXCLUDED_COLOR = '#c0463f';
+
   const excludedBytes = $derived.by((): number | null => {
     if (liveCategories) return progress?.excluded_bytes ?? null;
     return lastGood?.excluded_bytes ?? 0;
@@ -173,7 +177,7 @@
       bytes: c.bytes,
       pct: (c.bytes / total) * 100,
     }));
-    if (ex > 0) out.push({ name: 'Исключено', color: '#c0463f', bytes: ex, pct: (ex / total) * 100 });
+    if (ex > 0) out.push({ name: 'Исключено', color: EXCLUDED_COLOR, bytes: ex, pct: (ex / total) * 100 });
     return out;
   });
 
@@ -218,20 +222,24 @@
      while the scan has not said yet; 0 B when the rules took nothing. -->
 {#snippet excludedCell()}
   <div class="cat">
-    <span class="dot" style="background:#c0463f"></span>
+    <span class="dot" style:background={EXCLUDED_COLOR}></span>
     <span class="cat-name">Исключено</span>
     <span class="cat-size">{excludedBytes == null ? '…' : formatBytes(excludedBytes)}</span>
   </div>
+{/snippet}
+
+{#snippet errIcon()}
+  <svg class="bicon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--error)" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5" /><path d="M9 9l6 6M15 9l-6 6" /></svg>
 {/snippet}
 
 <div class="page">
 <div class="dash">
   <div class="flow">
     <div class="card">
-      <svg width="110" height="110" viewBox="0 0 24 24" fill="none" stroke="#9aa0b4" stroke-width="1.1">
-        <rect x="3" y="5" width="18" height="14" rx="2" />
-        <circle cx="12" cy="12" r="4.4" />
-        <circle cx="12" cy="12" r="1" fill="#9aa0b4" />
+      <svg width="110" height="110" viewBox="0 0 24 24" fill="none" stroke="var(--disk-icon)" stroke-width="1.1">
+        <rect x="3" y="5" width="18" height="14" rx="3" />
+        <circle cx="12" cy="12" r="3.5" />
+        <circle cx="12" cy="12" r=".8" fill="var(--disk-icon)" />
       </svg>
       <div class="card-title">{job.name}</div>
       <div class="card-sub">{sourceSummary(job)}</div>
@@ -239,20 +247,27 @@
 
     <div class="connector">
       {#if running && progress}
-        <div class="ring" style="background: conic-gradient(var(--green) {ringPercent}%, var(--border) 0)">
+        <div class="ring" style="background: conic-gradient(var(--success) {ringPercent}%, var(--track) 0)">
           <div class="ring-inner">{ringPercent}%</div>
         </div>
       {:else if running}
-        <div class="ring" style="background: conic-gradient(var(--green) 0%, var(--border) 0)">
+        <div class="ring" style="background: conic-gradient(var(--success) 0%, var(--track) 0)">
           <div class="ring-inner">…</div>
         </div>
       {:else}
         <div class="dash-line"></div>
-        <div class="check" class:ok={lastRun?.status === 'success'} class:err={lastRun?.status === 'error'}>
+        <div
+          class="check"
+          class:ok={lastRun?.status === 'success'}
+          class:err={lastRun?.status === 'error'}
+          class:cancel={lastRun?.status === 'cancelled'}
+        >
           {#if lastRun?.status === 'error'}
-            <svg width="20" height="20" viewBox="0 0 24 24" stroke="#fff" stroke-width="3" fill="none" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>
+            <svg width="22" height="22" viewBox="0 0 24 24" stroke="#fff" stroke-width="2.4" fill="none" stroke-linecap="round"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11" /></svg>
+          {:else if lastRun?.status === 'cancelled'}
+            <svg width="22" height="22" viewBox="0 0 24 24" stroke="#fff" stroke-width="2.6" fill="none" stroke-linecap="round"><path d="M6 12h12" /></svg>
           {:else}
-            <svg width="20" height="20" viewBox="0 0 24 24" stroke="#fff" stroke-width="2.6" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+            <svg width="24" height="24" viewBox="0 0 24 24" stroke="#fff" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg>
           {/if}
         </div>
         <div class="dash-line"></div>
@@ -260,8 +275,9 @@
     </div>
 
     <div class="card">
-      <svg width="110" height="102" viewBox="0 0 24 22" fill="#e6b34a">
-        <path d="M2 5a2 2 0 0 1 2-2h5l2 2.4h7a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2z" />
+      <svg width="110" height="110" viewBox="0 0 24 24">
+        <path d="M3 7a2 2 0 0 1 2-2h4.2l2 2H19a2 2 0 0 1 2 2v8.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="var(--folder)" />
+        <path d="M3 10h18v7.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="var(--folder2)" />
       </svg>
       <div class="card-title">{job.name}</div>
       <div class="card-sub">{job.dest_folder}</div>
@@ -383,11 +399,13 @@
     {#if lastRun?.status === 'success'}
       {#if summaryHidden}
         <button class="summary-show" onclick={() => { summaryHidden = false; rememberSummaryState(false); }}>
-          <span class="bdot small"></span> Показать сведения о копии
+          <span class="bdot small"></span>Показать сведения о копии
         </button>
       {:else}
         <div class="banner ok">
-          <span class="bdot"></span>
+          <span class="bdot">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg>
+          </span>
           <span>
             Копия создана — {kindLabel(lastRun.backup_kind)}{lastRun.vss_used
               ? ', снимок VSS'
@@ -412,18 +430,20 @@
               Всё, что под них попадает, в копии есть.
             {/if}
           </span>
-          <button class="banner-x" title="Скрыть" aria-label="Скрыть" onclick={() => { summaryHidden = true; rememberSummaryState(true); }}>✕</button>
+          <button class="banner-x" title="Скрыть" aria-label="Скрыть" onclick={() => { summaryHidden = true; rememberSummaryState(true); }}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18" /></svg>
+          </button>
         </div>
       {/if}
     {:else if lastRun?.status === 'error'}
       <!-- When: the stats above now date the last COPY, and without its own
            time this banner read as if that copy had failed. -->
-      <div class="banner err"><span class="bdot red"></span><span>Ошибка ({formatDate(lastRun.finished_at)}): {lastRun.error}</span></div>
+      <div class="banner err">{@render errIcon()}<span>Ошибка ({formatDate(lastRun.finished_at)}): {lastRun.error}</span></div>
     {/if}
   {/if}
 
-  {#if actionErr}<div class="banner err"><span class="bdot red"></span><span>{actionErr}</span></div>{/if}
-  {#if actionMsg}<div class="banner info"><span class="bdot blue"></span><span>{actionMsg}</span></div>{/if}
+  {#if actionErr}<div class="banner err">{@render errIcon()}<span>{actionErr}</span></div>{/if}
+  {#if actionMsg}<div class="banner info"><span>{actionMsg}</span></div>{/if}
 </div>
 
   <div class="footer">
@@ -451,21 +471,24 @@
   .page { height: 100%; display: flex; flex-direction: column; }
   .dash { flex: 1; overflow: auto; width: 100%; padding: 34px 44px; display: flex; flex-direction: column; }
   .flow { display: flex; align-items: stretch; justify-content: center; }
-  .card { flex: 1; max-width: 300px; border: 1px solid var(--border); border-radius: 6px; padding: 22px 18px; text-align: center; background: var(--card-bg); display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .card { flex: 1; max-width: 300px; border: 1px solid var(--border); border-radius: 8px; padding: 22px 18px; text-align: center; background: var(--card-bg); display: flex; flex-direction: column; align-items: center; gap: 8px; }
   .card-title { font-size: 20px; font-weight: 600; color: var(--head); }
   .card-sub { font-size: 12px; color: var(--text-muted); word-break: break-all; }
   .connector { width: 130px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; gap: 8px; }
-  .dash-line { width: 26px; height: 2px; background: repeating-linear-gradient(90deg, var(--text-muted) 0 4px, transparent 4px 8px); }
+  .dash-line { width: 26px; height: 2px; background: repeating-linear-gradient(90deg, var(--border-strong) 0 4px, transparent 4px 8px); }
   .check { width: 52px; height: 52px; border-radius: 50%; background: var(--text-muted); display: flex; align-items: center; justify-content: center; }
-  .check.ok { background: var(--green); box-shadow: 0 4px 14px rgba(90,176,47,.4); }
+  .check.ok { background: var(--success); }
   .check.err { background: var(--error); }
+  .check.cancel { background: var(--warning); }
   .ring { width: 60px; height: 60px; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
-  .ring-inner { width: 44px; height: 44px; border-radius: 50%; background: var(--card-bg); display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; color: var(--head); }
+  .ring-inner { width: 44px; height: 44px; border-radius: 50%; background: var(--content-bg); display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; color: var(--head); }
   .progress-wrap { margin-top: 30px; }
   .progress-info { display: flex; justify-content: space-between; font-size: 13px; color: var(--head); margin-bottom: 8px; }
-  .bar { height: 8px; border-radius: 4px; background: var(--tabbg); overflow: hidden; }
-  .bar-fill { height: 100%; background: var(--green); transition: width .15s linear; }
-  .bar-fill.verify { background: #5a8fd8; }
+  .progress-info > span:first-child { font-weight: 600; }
+  .progress-info > span:last-child { color: var(--text-secondary); }
+  .bar { height: 8px; border-radius: 4px; background: var(--track); overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 4px; background: var(--success); transition: width .15s linear; }
+  .bar-fill.verify { background: var(--info); }
   .bar-fill.indet { background-image: linear-gradient(90deg, rgba(255,255,255,.35) 25%, transparent 25%, transparent 50%, rgba(255,255,255,.35) 50%, rgba(255,255,255,.35) 75%, transparent 75%); background-size: 28px 28px; animation: indet-move 0.8s linear infinite; }
   @keyframes indet-move { from { background-position: 0 0; } to { background-position: 28px 0; } }
   .progress-meta { display: flex; justify-content: space-between; gap: 16px; margin-top: 8px; font-size: 12px; color: var(--text-muted); }
@@ -474,16 +497,17 @@
      совсем длинный путь, но включается последней, а не заранее. */
   .progress-meta .route { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; min-width: 0; }
   .progress-meta .times { white-space: nowrap; flex-shrink: 0; }
-  .stats { display: flex; justify-content: space-between; font-size: 13px; color: var(--text-muted); margin-top: 34px; }
+  .stats { display: flex; justify-content: space-between; font-size: 13px; color: var(--text-secondary); margin-top: 34px; }
   .stats b { color: var(--head); font-weight: 600; }
   .reco { display: flex; align-items: center; gap: 6px; }
-  .q { width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--text-muted); background: none; color: var(--text-muted); font-size: 10px; cursor: pointer; padding: 0; }
+  .q { width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--border-strong); background: none; color: var(--text-muted); font-size: 10px; cursor: pointer; padding: 0; }
+  .q:hover { color: var(--head); border-color: var(--text-muted); }
   /* Разбивка под полосой прогресса: тот же вид, что в итоге, но с заголовком —
      во время копирования она отвечает на другой вопрос («что будет в копии»),
      и без подписи это читалось бы как результат. */
   .live-cats { margin-top: 26px; }
-  .live-cats-head { font-size: 13px; color: var(--text-muted); margin-bottom: 4px; }
-  .catbar { height: 9px; border-radius: 5px; overflow: hidden; display: flex; margin-top: 10px; }
+  .live-cats-head { font-size: 13px; font-weight: 600; color: var(--head); margin-bottom: 4px; }
+  .catbar { height: 9px; border-radius: 5px; overflow: hidden; display: flex; gap: 2px; margin-top: 10px; background: var(--track); }
   /* Every present category stays visible: tiny slices keep 5px and the
      large ones shrink to make room, so the bar still totals 100%. */
   .catseg { min-width: 5px; }
@@ -493,26 +517,28 @@
   .cats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px 8px; margin-top: 14px; }
   .cat { min-width: 0; display: flex; align-items: center; gap: 7px; }
   .dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
-  .cat-name { font-size: 13px; color: var(--head); }
+  .cat-name { font-size: 13px; color: var(--text); }
   .cat-size { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
-  .empty-catbar { background: var(--tabbg); }
+  .empty-catbar { background: var(--track); }
   .cats-note { font-size: 12px; color: var(--text-muted); margin-top: 12px; }
-  .banner { margin-top: 22px; border-radius: 6px; padding: 13px 16px; display: flex; align-items: center; gap: 12px; background: var(--accent-soft); font-size: 13px; color: var(--head); }
-  .banner.err { background: rgba(216,74,74,.08); }
-  .bdot { width: 18px; height: 18px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
-  .bdot.red { background: var(--error); }
-  .bdot.small { width: 10px; height: 10px; }
-  .banner .banner-x { margin-left: auto; flex-shrink: 0; width: 22px; height: 22px; border: none; background: none; color: var(--text-muted); font-size: 13px; line-height: 1; cursor: pointer; border-radius: 4px; }
-  .banner .banner-x:hover { background: rgba(0,0,0,.06); color: var(--head); }
-  .summary-show { margin-top: 22px; display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: none; border: 1px dashed var(--border); border-radius: 6px; color: var(--text-muted); font-size: 12px; font-weight: 600; font-family: var(--font); cursor: pointer; align-self: flex-start; }
+  .banner { margin-top: 22px; border-radius: 8px; padding: 13px 16px; display: flex; align-items: center; gap: 12px; background: var(--accent-soft); font-size: 13.5px; line-height: 1.5; color: var(--text); }
+  .banner.err { background: var(--error-soft); border: 1px solid var(--error-line); color: var(--error-text); }
+  .banner.info { background: var(--info-soft); border: 1px solid var(--info-line); color: var(--info-text); }
+  .bdot { width: 20px; height: 20px; border-radius: 50%; background: var(--success); flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
+  .bdot.small { width: 8px; height: 8px; }
+  .bicon { flex-shrink: 0; }
+  .banner .banner-x { margin-left: auto; flex-shrink: 0; width: 22px; height: 22px; border: none; background: none; color: var(--text-muted); cursor: pointer; border-radius: 4px; display: flex; align-items: center; justify-content: center; }
+  .banner .banner-x:hover { background: var(--track); color: var(--head); }
+  .summary-show { margin-top: 22px; display: flex; align-items: center; gap: 8px; padding: 8px 14px; background: none; border: 1px dashed var(--border-strong); border-radius: 8px; color: var(--text-secondary); font-size: 13px; font-family: var(--font); cursor: pointer; align-self: flex-start; }
   .summary-show:hover { color: var(--head); border-color: var(--text-muted); }
-  .bdot.blue { background: #5a8fd8; }
   /* .footer is global (styles/global.css) — full-width bar, same on every page. */
-  .hint { flex: 1; font-size: 12px; color: var(--text-muted); }
-  .btn { border-radius: 4px; padding: 10px 24px; font-size: 14px; font-weight: 600; font-family: var(--font); cursor: pointer; border: none; }
-  .btn:disabled { opacity: .5; cursor: default; }
-  .btn.outline { background: transparent; border: 1px solid var(--primary); color: var(--primary); }
+  .hint { flex: 1; font-size: 13px; color: var(--text-secondary); }
+  .btn { border-radius: 6px; padding: 10px 24px; font-size: 14px; font-weight: 600; font-family: var(--font); cursor: pointer; border: 1px solid transparent; transition: background-color .15s ease; }
+  .btn:disabled { opacity: .45; cursor: default; }
+  .btn.outline { background: transparent; border-color: var(--primary); color: var(--accent-text); }
+  .btn.outline:hover:not(:disabled) { background: var(--accent-soft); }
   .btn.green { background: var(--green); color: #fff; }
-  .btn.green:hover { background: var(--green-hover); }
-  .btn.danger { background: transparent; border: 1px solid var(--error); color: var(--error); }
+  .btn.green:hover:not(:disabled) { background: var(--green-hover); }
+  .btn.danger { background: transparent; border-color: var(--error); color: var(--error-text); }
+  .btn.danger:hover:not(:disabled) { background: var(--error-soft); }
 </style>

@@ -26,10 +26,10 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    font-size: 12px;
-    font-weight: 500;
-    padding: 3px 10px;
-    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 10px;
     white-space: nowrap;
   }
 
@@ -41,32 +41,32 @@
   }
 
   .badge-success {
-    background: rgba(52, 168, 83, 0.1);
-    color: var(--success);
+    background: var(--success-soft);
+    color: var(--success-text);
   }
   .badge-success .dot {
     background: var(--success);
   }
 
   .badge-warning {
-    background: rgba(251, 188, 5, 0.12);
-    color: #c49200;
+    background: var(--warning-soft);
+    color: var(--warning-text);
   }
   .badge-warning .dot {
     background: var(--warning);
   }
 
   .badge-error {
-    background: rgba(234, 67, 53, 0.1);
-    color: var(--error);
+    background: var(--error-soft);
+    color: var(--error-text);
   }
   .badge-error .dot {
     background: var(--error);
   }
 
   .badge-running {
-    background: rgba(45, 125, 210, 0.1);
-    color: var(--primary);
+    background: var(--accent-soft);
+    color: var(--accent-text);
   }
   .badge-running .dot {
     background: var(--primary);
@@ -74,7 +74,7 @@
   }
 
   .badge-idle {
-    background: rgba(153, 153, 153, 0.1);
+    background: var(--sunken);
     color: var(--text-muted);
   }
   .badge-idle .dot {

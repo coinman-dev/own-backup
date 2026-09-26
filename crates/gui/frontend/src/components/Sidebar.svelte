@@ -3,6 +3,7 @@
   import { api } from '../lib/api';
   import { media } from '../lib/mediaStore.svelte';
   import { appVersion, ensureAppVersion } from '../lib/appVersion.svelte';
+  import { effectiveTheme, setTheme } from '../lib/themeStore.svelte';
 
   interface Props {
     currentView: ViewName;
@@ -53,42 +54,56 @@
     icon: string;
   }
 
+  // Icons from the design (Own Backup.dc.html), its <rect>/<circle> spelled
+  // as path data so every item stays one <path>.
+  const rect = (x: number, y: number, w: number, h: number, r: number) =>
+    `M${x + r} ${y}h${w - 2 * r}a${r} ${r} 0 0 1 ${r} ${r}v${h - 2 * r}a${r} ${r} 0 0 1-${r} ${r}` +
+    `h-${w - 2 * r}a${r} ${r} 0 0 1-${r}-${r}v-${h - 2 * r}a${r} ${r} 0 0 1 ${r}-${r}z`;
+  const circle = (cx: number, cy: number, r: number) =>
+    `M${cx - r} ${cy}a${r} ${r} 0 1 0 ${2 * r} 0a${r} ${r} 0 1 0-${2 * r} 0z`;
+
   const navItems: NavItem[] = [
     {
       id: 'backup',
       label: 'РЕЗЕРВНОЕ КОПИРОВАНИЕ',
-      icon: 'M8 8h12v12H8zM16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2',
+      icon: rect(8, 8, 12, 12, 2) + 'M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2',
     },
     {
       id: 'restore',
       label: 'ВОССТАНОВЛЕНИЕ',
-      icon: 'M4 4v5h5M20 20v-5h-5M4 9a8 8 0 0 1 14-4M20 15a8 8 0 0 1-14 4',
+      icon: 'M4.5 10A8 8 0 0 1 19 8M19.5 3.5V8H15M19.5 14A8 8 0 0 1 5 16M4.5 20.5V16H9',
     },
     {
       id: 'boot',
       label: 'ЗАГРУЗКА КОМПЬЮТЕРА',
-      // Материнская плата: корпус с ножками и экраном.
-      icon: 'M4 5h16a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zM7 19h10M9 16v3M15 16v3M7 9h5M7 12h3',
+      // Монитор на подставке, на экране — строки меню загрузки.
+      icon: rect(3, 4, 18, 12, 2) + 'M8 20h8M12 16v4M7 8h6M7 11h4',
     },
     {
       id: 'tools',
       label: 'ИНСТРУМЕНТЫ',
-      icon: 'M4 5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5zm10 0a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1h-4a1 1 0 0 1-1-1V5zM4 15a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-4zm10 0a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1h-4a1 1 0 0 1-1-1v-4z',
+      icon:
+        rect(4, 4, 6.5, 6.5, 1.5) +
+        rect(13.5, 4, 6.5, 6.5, 1.5) +
+        rect(4, 13.5, 6.5, 6.5, 1.5) +
+        rect(13.5, 13.5, 6.5, 6.5, 1.5),
     },
     {
       id: 'activity',
       label: 'АКТИВНОСТЬ',
-      icon: 'M12 6v6l4 2m6-2a10 10 0 1 1-20 0 10 10 0 0 1 20 0z',
+      icon: circle(12, 12, 8.5) + 'M12 7.5V12l3 2',
     },
     {
       id: 'settings',
       label: 'ПАРАМЕТРЫ',
-      icon: 'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zm-1.5-5.3a1.5 1.5 0 0 1 3 0l.2 1.5a7 7 0 0 1 2 1.2l1.4-.6a1.5 1.5 0 0 1 2 .6l.6 1a1.5 1.5 0 0 1-.5 2l-1.2.9a7 7 0 0 1 0 2.4l1.2.9a1.5 1.5 0 0 1 .5 2l-.6 1a1.5 1.5 0 0 1-2 .6l-1.4-.6a7 7 0 0 1-2 1.2l-.2 1.5a1.5 1.5 0 0 1-3 0l-.2-1.5a7 7 0 0 1-2-1.2l-1.4.6a1.5 1.5 0 0 1-2-.6l-.6-1a1.5 1.5 0 0 1 .5-2l1.2-.9a7 7 0 0 1 0-2.4l-1.2-.9a1.5 1.5 0 0 1-.5-2l.6-1a1.5 1.5 0 0 1 2-.6l1.4.6a7 7 0 0 1 2-1.2l.2-1.5z',
+      icon:
+        'M10.3 3h3.4l.5 2.4 1.7.9 2.2-1 2.4 2.4-1 2.2.9 1.7 2.4.5v3.4l-2.4.5-.9 1.7 1 2.2-2.4 2.4-2.2-1-1.7.9-.5 2.4h-3.4l-.5-2.4-1.7-.9-2.2 1-2.4-2.4 1-2.2-.9-1.7L3 13.7v-3.4l2.4-.5.9-1.7-1-2.2 2.4-2.4 2.2 1 1.7-.9z' +
+        circle(12, 12, 3),
     },
     {
       id: 'about',
       label: 'СПРАВКА',
-      icon: 'M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 5a1.25 1.25 0 1 1 0 2.5A1.25 1.25 0 0 1 12 7zm-1 4h2v6h-2v-6z',
+      icon: circle(12, 12, 8.5) + 'M12 11v5M12 8h.01',
     },
   ];
 </script>
@@ -96,10 +111,10 @@
 <nav class="sidebar">
   <div class="sidebar-header">
     <div class="logo">
-      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#2d7dd2" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <rect x="2" y="6" width="20" height="12" rx="2" />
-        <path d="M12 6V2M8 6V4M16 6V4" />
-        <circle cx="12" cy="12" r="3" />
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--logo)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="7" width="18" height="12" rx="2.5" />
+        <path d="M7 7V4.5M12 7V4M17 7V4.5" />
+        <circle cx="12" cy="13" r="3" />
       </svg>
     </div>
     <span class="app-title">OWN BACKUP</span>
@@ -146,6 +161,29 @@
         <span>{layout.code}</span>
       </div>
     {/if}
+    <!-- Quick switch; the three-way choice («Как в Windows» too) is in
+         «Параметры → Оформление». -->
+    <div class="theme-switch" role="group" aria-label="Тема">
+      <button
+        title="Светлая тема"
+        class:on={effectiveTheme() === 'light'}
+        onclick={() => setTheme('light')}
+      >
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
+          <circle cx="12" cy="12" r="4" />
+          <path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4" />
+        </svg>
+      </button>
+      <button
+        title="Тёмная тема"
+        class:on={effectiveTheme() === 'dark'}
+        onclick={() => setTheme('dark')}
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round">
+          <path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" />
+        </svg>
+      </button>
+    </div>
   </div>
 </nav>
 
@@ -165,7 +203,7 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    border-bottom: 1px solid var(--sidebar-line);
   }
 
   .logo {
@@ -199,9 +237,9 @@
     background: none;
     border: none;
     color: var(--sidebar-text);
-    font-size: 12px;
+    font-size: 11.5px;
     font-weight: 700;
-    letter-spacing: 0.03em;
+    letter-spacing: 0.15px;
     text-align: left;
     cursor: pointer;
     transition: background-color 0.12s ease, color 0.12s ease;
@@ -210,13 +248,12 @@
 
   .nav-item:hover {
     background: var(--sidebar-hover);
-    color: #ccdbe8;
   }
 
   .nav-item.active {
     background: var(--sidebar-active);
     color: var(--sidebar-text-active);
-    border-left-color: var(--primary);
+    border-left-color: var(--sidebar-active);
   }
 
   .nav-icon {
@@ -229,17 +266,13 @@
     color: var(--sidebar-text-active);
   }
 
-  .nav-item:hover .nav-icon {
-    color: #8eb4d8;
-  }
-
   .nav-label {
     white-space: nowrap;
   }
 
   .sidebar-footer {
-    padding: 12px 20px;
-    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    padding: 12px 18px 12px 20px;
+    border-top: 1px solid var(--sidebar-line);
     display: flex;
     align-items: center;
     gap: 10px;
@@ -247,8 +280,7 @@
 
   .version-text {
     font-size: 11px;
-    color: var(--sidebar-text);
-    opacity: 0.6;
+    color: rgba(255, 255, 255, 0.6);
   }
 
   /* Layout indicator: same line as the version, pushed to the right. */
@@ -266,5 +298,38 @@
   .kbd svg {
     flex-shrink: 0;
     opacity: 0.75;
+  }
+
+  /* Pushed right on its own; with the layout indicator present it follows it. */
+  .theme-switch {
+    margin-left: auto;
+    display: flex;
+    gap: 2px;
+    padding: 2px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.07);
+    flex-shrink: 0;
+  }
+  .kbd + .theme-switch {
+    margin-left: 0;
+  }
+  .theme-switch button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 26px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: rgba(255, 255, 255, 0.74);
+    transition: background-color 0.12s ease, color 0.12s ease;
+  }
+  .theme-switch button:hover {
+    color: #ffffff;
+  }
+  .theme-switch button.on {
+    background: rgba(255, 255, 255, 0.18);
+    color: #ffffff;
   }
 </style>

@@ -297,8 +297,8 @@
 
   function statusColor(s: string): string {
     return s === 'running' ? 'var(--primary)'
-      : s === 'queued' ? '#5a8fd8'
-      : s === 'success' ? 'var(--green)'
+      : s === 'queued' ? 'var(--info)'
+      : s === 'success' ? 'var(--success)'
       : s === 'error' ? 'var(--error)'
       : 'var(--text-muted)';
   }
@@ -320,7 +320,7 @@
       {#each jobs.list as job (job.id)}
         <button class="job-item" class:sel={selectedId === job.id} onclick={() => (selectedId = job.id)}>
           <div class="job-icon">
-            <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="1.4"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="12" cy="12" r="3.2"/></svg>
+            <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="var(--disk-icon)" stroke-width="1.6"><rect x="3" y="5" width="18" height="14" rx="3"/><circle cx="12" cy="12" r="3.5"/></svg>
             <span class="status-dot" style="background:{statusColor(jobStatus(job))}"></span>
           </div>
           <div class="job-meta">
@@ -330,7 +330,7 @@
               {job.name}{#if job.archive_encryption}<span
                   class="enc-badge"
                   title="Копии этого задания зашифрованы — для чтения нужен пароль или ключ восстановления"
-                  aria-label="Зашифровано">🔒</span
+                  aria-label="Зашифровано"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2.2" stroke-linecap="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></span
                 >{/if}
             </div>
             <div class="job-path">{job.dest_folder}</div>
@@ -343,27 +343,27 @@
         <div class="job-item added" class:sel={selectedId === it.id}>
           <button class="job-pick" onclick={() => (selectedId = it.id)}>
             <div class="job-icon">
-              <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="1.4"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="12" cy="12" r="3.2"/></svg>
-              <span class="status-dot" style="background:var(--green)"></span>
+              <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="var(--disk-icon)" stroke-width="1.6"><rect x="3" y="5" width="18" height="14" rx="3"/><circle cx="12" cy="12" r="3.5"/></svg>
+              <span class="status-dot" style="background:var(--success)"></span>
             </div>
             <div class="job-meta">
               <div class="job-name">
                 {it.job.name}{#if it.sealed}<span
                     class="enc-badge"
                     title="Копия зашифрована — для чтения нужен пароль или ключ восстановления"
-                    aria-label="Зашифровано">🔒</span
+                    aria-label="Зашифровано"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2.2" stroke-linecap="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></span
                   >{/if}
               </div>
               <div class="job-path" title={it.job.dest_folder}>{it.chainJobId ? `${copiesWord(it.paths.length)} · ${it.job.dest_folder}` : 'файл копии'}</div>
             </div>
           </button>
-          <button class="job-forget" title="Убрать из списка (файлы не удаляются)" onclick={() => forget(it.id)}>×</button>
+          <button class="job-forget" title="Убрать из списка (файлы не удаляются)" onclick={() => forget(it.id)}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
         </div>
       {/each}
     </div>
     {#if addError}<div class="add-err">{addError}</div>{/if}
     <button class="add-btn" onclick={() => { addError = null; addOpen = true; }}>
-      <svg width="18" height="18" viewBox="0 0 24 24" stroke="var(--primary)" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
       Добавить копию
     </button>
   </div>
@@ -376,7 +376,7 @@
       {/key}
     {:else}
       <div class="empty-dash">
-        <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="var(--border)" stroke-width="1.4"><path d="M4 4v5h5M20 20v-5h-5M4 9a8 8 0 0 1 14-4M20 15a8 8 0 0 1-14 4"/></svg>
+        <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="var(--border-strong)" stroke-width="1.4"><path d="M4 4v5h5M20 20v-5h-5M4 9a8 8 0 0 1 14-4M20 15a8 8 0 0 1-14 4"/></svg>
         <div>Нет резервных копий для восстановления</div>
       </div>
     {/if}
@@ -393,12 +393,15 @@
       <p>Что открыть?</p>
       <div class="choice-row">
         <button class="choice" onclick={addFile}>
-          <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+          <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="var(--accent-text)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
           <span class="choice-title">Файл</span>
           <span class="choice-sub">один образ копии</span>
         </button>
         <button class="choice" onclick={addFolder}>
-          <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+          <svg width="34" height="34" viewBox="0 0 24 24">
+            <path d="M3 7a2 2 0 0 1 2-2h4.2l2 2H19a2 2 0 0 1 2 2v8.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="var(--folder)" />
+            <path d="M3 10h18v7.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="var(--folder2)" />
+          </svg>
           <span class="choice-title">Папка с копиями</span>
           <span class="choice-sub">найти все копии в папке</span>
         </button>
@@ -422,40 +425,42 @@
   .restore-root { display: flex; flex-direction: column; height: 100%; }
   .layout { display: flex; flex: 1; min-height: 0; }
   .jobs-col { width: 240px; flex-shrink: 0; background: var(--column-bg); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
-  .col-title { font-size: 22px; font-weight: 300; color: var(--head); padding: 22px 18px 12px; }
-  .this-pc { display: flex; align-items: center; gap: 8px; padding: 6px 18px; font-size: 13px; font-weight: 600; color: var(--head); }
+  .col-title { font-size: 24px; font-weight: 300; color: var(--head); padding: 22px 18px 12px; }
+  .this-pc { display: flex; align-items: center; gap: 8px; padding: 6px 18px; font-size: 13px; font-weight: 600; color: var(--text-secondary); }
   .jobs-list { flex: 1; overflow: auto; padding: 8px 8px; }
   .empty-list { text-align: center; color: var(--text-muted); font-size: 13px; padding: 30px 10px; line-height: 1.6; }
-  .job-item { width: 100%; display: flex; align-items: center; gap: 10px; padding: 10px 8px; border: 1px solid transparent; border-radius: 6px; background: none; cursor: pointer; margin-bottom: 4px; text-align: left; font-family: var(--font); }
-  .job-item:hover { background: var(--hover, #f2f2f8); }
+  .job-item { width: 100%; display: flex; align-items: center; gap: 10px; padding: 10px 8px; border: 1px solid transparent; border-radius: 8px; background: none; cursor: pointer; margin-bottom: 4px; text-align: left; font-family: var(--font); }
+  .job-item:hover { background: var(--panel2); }
   .job-item.sel { background: var(--accent-soft); border-color: var(--primary); }
   .job-icon { position: relative; flex-shrink: 0; }
   .status-dot { position: absolute; right: -2px; bottom: 0; width: 11px; height: 11px; border-radius: 50%; border: 2px solid var(--column-bg); }
   .job-meta { flex: 1; min-width: 0; }
-  .job-name { font-size: 14px; font-weight: 600; color: var(--head); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .enc-badge { margin-left: 6px; font-size: 11px; opacity: 0.85; }
+  .job-name { font-size: 14px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .enc-badge { margin-left: 6px; font-size: 11px; }
+  .enc-badge svg { vertical-align: -1px; }
   .job-path { font-size: 12px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .add-btn { display: flex; align-items: center; gap: 10px; padding: 15px 18px; background: none; border: none; border-top: 1px solid var(--border); cursor: pointer; font-size: 14px; font-weight: 600; color: var(--head); font-family: var(--font); }
-  .add-btn:hover { color: var(--primary); }
-  .remember { display: flex; align-items: flex-start; gap: 9px; margin: 4px 0 16px; font-size: 13px; color: var(--head); cursor: pointer; line-height: 1.45; }
+  .add-btn { display: flex; align-items: center; gap: 10px; padding: 15px 18px; background: none; border: none; border-top: 1px solid var(--border); cursor: pointer; font-size: 14px; font-weight: 600; color: var(--accent-text); font-family: var(--font); }
+  .add-btn:hover { background: var(--panel2); }
+  .remember { display: flex; align-items: flex-start; gap: 9px; margin: 4px 0 16px; font-size: 13px; color: var(--text); cursor: pointer; line-height: 1.45; }
   .remember input { width: auto; margin-top: 2px; flex: 0 0 auto; }
   .job-item.added { display: flex; align-items: center; padding: 0; }
   .job-pick { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; padding: 10px 8px; background: none; border: none; cursor: pointer; text-align: left; font-family: var(--font); }
-  .job-forget { flex: 0 0 auto; width: 26px; height: 26px; margin-right: 6px; border: none; background: none; border-radius: 4px; color: var(--text-muted); font-size: 17px; line-height: 1; cursor: pointer; font-family: var(--font); }
-  .job-forget:hover { background: rgba(216,74,74,.12); color: #b32b2b; }
+  .job-forget { flex: 0 0 auto; width: 26px; height: 26px; margin-right: 6px; border: none; background: none; border-radius: 4px; color: var(--text-muted); font-size: 17px; line-height: 1; cursor: pointer; font-family: var(--font); display: flex; align-items: center; justify-content: center; }
+  .job-forget:hover { background: var(--error-soft); color: var(--error-text); }
   .remember em { display: block; font-style: normal; font-size: 12px; color: var(--text-muted); margin-top: 3px; }
-  .add-err { margin: 0 8px 8px; padding: 8px 12px; font-size: 12px; color: #8c1d1d; background: rgba(216,74,74,.08); border-radius: 5px; }
+  .add-err { margin: 0 8px 8px; padding: 8px 12px; font-size: 12px; color: var(--error-text); background: var(--error-soft); border: 1px solid var(--error-line); border-radius: 8px; }
   .dash-col { flex: 1; min-width: 0; overflow: auto; }
   .empty-dash { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; color: var(--text-muted); font-size: 15px; }
-  .overlay { position: fixed; inset: 0; background: rgba(20,17,44,.5); display: flex; align-items: center; justify-content: center; z-index: 150; }
-  .dialog { width: 460px; background: var(--card-bg); border-radius: 8px; padding: 24px; box-shadow: 0 20px 60px rgba(0,0,0,.3); }
+  .overlay { position: fixed; inset: 0; background: var(--overlay); display: flex; align-items: center; justify-content: center; z-index: 150; }
+  .dialog { width: 460px; background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px; padding: 24px; box-shadow: var(--shadow-lg); }
   .dialog-title { font-size: 17px; font-weight: 600; color: var(--head); margin-bottom: 6px; }
-  .dialog p { font-size: 13px; color: var(--text-muted); margin-bottom: 16px; }
+  .dialog p { font-size: 13px; color: var(--text-secondary); margin-bottom: 16px; }
   .choice-row { display: flex; gap: 14px; }
   .choice { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 20px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--card-bg); cursor: pointer; font-family: var(--font); }
   .choice:hover { border-color: var(--primary); background: var(--accent-soft); }
   .choice-title { font-size: 14px; font-weight: 600; color: var(--head); }
   .choice-sub { font-size: 12px; color: var(--text-muted); }
   .dialog-actions { display: flex; justify-content: flex-end; margin-top: 18px; }
-  .dialog-actions .ghost { background: none; border: 1px solid var(--border); color: var(--head); border-radius: 4px; padding: 8px 20px; font-size: 14px; font-weight: 600; font-family: var(--font); cursor: pointer; }
+  .dialog-actions .ghost { background: var(--card-bg); border: 1px solid var(--border-strong); color: var(--text); border-radius: 6px; padding: 8px 20px; font-size: 14px; font-weight: 600; font-family: var(--font); cursor: pointer; }
+  .dialog-actions .ghost:hover { background: var(--panel2); }
 </style>

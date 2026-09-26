@@ -205,15 +205,29 @@
                   </div>
                 </td>
                 <td class="acts">
-                  <button class="mini" title="Выше" disabled={busy || e.in_menu === 1} onclick={() => move(e, -1)}>↑</button>
-                  <button class="mini" title="Ниже" disabled={busy || e.in_menu === inMenu.length} onclick={() => move(e, 1)}>↓</button>
+                  <button class="mini" title="Выше" disabled={busy || e.in_menu === 1} onclick={() => move(e, -1)}>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M6 11l6-6 6 6" /></svg>
+                  </button>
+                  <button class="mini" title="Ниже" disabled={busy || e.in_menu === inMenu.length} onclick={() => move(e, 1)}>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M6 13l6 6 6-6" /></svg>
+                  </button>
                   <button
                     class="mini"
                     title={e.active ? 'Убрать из меню' : 'Показывать в меню'}
                     disabled={busy}
                     onclick={() => act({ action: 'set_active', entry: e.number, on: !e.active })}
-                  >{e.active ? '👁' : '🚫'}</button>
-                  <button class="mini danger" title="Удалить запись" disabled={busy} onclick={() => remove(e)}>✕</button>
+                  >
+                    {#if e.active}
+                      <!-- open eye: shown in the menu -->
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z" /><circle cx="12" cy="12" r="3" /></svg>
+                    {:else}
+                      <!-- struck-through eye: hidden from the menu -->
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.9 5.6A9.6 9.6 0 0 1 12 5.4c6.6 0 10.2 6.6 10.2 6.6a17 17 0 0 1-3.4 4.2M6.2 7.8A17 17 0 0 0 1.8 12S5.4 18.6 12 18.6c1.9 0 3.5-.5 4.9-1.3" /><path d="M10 10a2.8 2.8 0 0 0 4 4" /><path d="M3 3l18 18" /></svg>
+                    {/if}
+                  </button>
+                  <button class="mini danger" title="Удалить запись" disabled={busy} onclick={() => remove(e)}>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18" /></svg>
+                  </button>
                 </td>
               </tr>
             {/each}
@@ -254,7 +268,7 @@
                   {diskLabel(o.esp.disk)}, раздел {o.esp.partition} · {o.loader.path}
                 </div>
               </div>
-              <button class="btn primary" disabled={busy} onclick={() => addEntry(o.esp, o.loader)}>
+              <button class="btn accent" disabled={busy} onclick={() => addEntry(o.esp, o.loader)}>
                 Добавить в меню
               </button>
             </div>
@@ -318,7 +332,7 @@
   .inner { padding: 30px 44px; }
 
   h1 {
-    font-size: 28px;
+    font-size: 24px;
     font-weight: 300;
     color: var(--head);
     margin-bottom: 24px;
@@ -328,33 +342,33 @@
     border: 1px solid var(--border);
     border-radius: 8px;
     background: var(--card-bg);
-    box-shadow: var(--shadow);
     padding: 20px 22px;
     margin-bottom: 16px;
   }
-  .card.warn { border-color: rgba(230, 170, 60, 0.55); }
+  .card.warn { border-color: var(--warning-line); }
 
   .card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
-  .card-title { font-size: 16px; font-weight: 600; }
-  .card-desc { font-size: 13px; opacity: 0.7; margin-top: 4px; }
+  .card-title { font-size: 16px; font-weight: 600; color: var(--head); }
+  .card-desc { font-size: 13px; color: var(--text-secondary); margin-top: 4px; }
 
-  .meta { margin-top: 10px; font-size: 13px; }
-  .dim { opacity: 0.65; }
-  .muted { opacity: 0.7; font-size: 14px; }
+  .meta { margin-top: 10px; font-size: 13px; color: var(--text-secondary); }
+  .meta b { font-weight: 600; color: var(--head); }
+  .dim { color: var(--text-muted); }
+  .muted { color: var(--text-secondary); font-size: 14px; }
 
-  .banner { padding: 10px 14px; border-radius: 6px; margin-bottom: 14px; font-size: 13px; }
-  .banner.ok { background: rgba(60, 160, 90, 0.14); }
-  .banner.err { background: rgba(200, 70, 70, 0.16); }
-  .banner.warn { background: rgba(230, 170, 60, 0.18); }
+  .banner { padding: 10px 14px; border-radius: 8px; margin-bottom: 14px; font-size: 13px; border: 1px solid transparent; }
+  .banner.ok { background: var(--success-soft); border-color: var(--success-line); color: var(--success-text); }
+  .banner.err { background: var(--error-soft); border-color: var(--error-line); color: var(--error-text); }
+  .banner.warn { background: var(--warning-soft); border-color: var(--warning-line); color: var(--warning-text); }
 
   .entries { width: 100%; border-collapse: collapse; margin-top: 12px; }
   .entries td { padding: 8px 4px; vertical-align: top; border-bottom: 1px solid var(--border); }
   .entries tr:last-child td { border-bottom: none; }
   .entries tr.inactive .name { opacity: 0.45; }
-  .pos { width: 26px; opacity: 0.55; font-variant-numeric: tabular-nums; }
-  .name { font-size: 15px; }
+  .pos { width: 26px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+  .name { font-size: 15px; color: var(--head); }
   .acts { width: 150px; text-align: right; white-space: nowrap; }
-  .target { font-size: 12px; opacity: 0.6; margin-top: 3px; word-break: break-all; }
+  .target { font-size: 12px; color: var(--text-muted); margin-top: 3px; word-break: break-all; }
 
   .as-text {
     background: none; border: none; padding: 0; cursor: pointer;
@@ -365,37 +379,45 @@
 
   .name input {
     font: inherit; padding: 2px 6px; width: 100%; max-width: 380px;
-    border: 1px solid var(--border); border-radius: 4px;
-    background: var(--input-bg, transparent); color: inherit;
+    border: 1px solid var(--border-strong); border-radius: 6px;
+    background: var(--input-bg); color: var(--text);
   }
+  .name input:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--accent-soft); }
 
   .mini {
-    background: none; border: 1px solid var(--border); border-radius: 4px;
-    cursor: pointer; padding: 3px 7px; margin-left: 3px; font-size: 12px; color: inherit;
+    background: var(--card-bg); border: 1px solid var(--border); border-radius: 6px;
+    cursor: pointer; padding: 3px 7px; margin-left: 3px; font-size: 12px; color: var(--text-secondary);
   }
-  .mini:disabled { opacity: 0.3; cursor: default; }
-  .mini:hover:not(:disabled) { background: rgba(128, 128, 128, 0.12); }
-  .mini.danger:hover:not(:disabled) { border-color: rgba(200, 70, 70, 0.7); }
+  .mini svg { vertical-align: middle; }
+  .mini:disabled { opacity: 0.45; cursor: default; }
+  .mini:hover:not(:disabled) { background: var(--panel2); color: var(--head); }
+  .mini.danger { color: var(--error); }
+  .mini.danger:hover:not(:disabled) { border-color: var(--error); background: var(--error-soft); color: var(--error); }
 
   .orphan {
     display: flex; align-items: center; justify-content: space-between;
     gap: 16px; margin-top: 12px;
   }
+  .orphan b { font-weight: 600; color: var(--head); }
 
   .esp { margin-top: 12px; }
-  .esp-title { font-size: 13px; font-weight: 600; opacity: 0.85; }
+  .esp-title { font-size: 13px; font-weight: 600; color: var(--head); }
   .file { display: flex; gap: 12px; font-size: 12px; padding: 3px 0; }
   .path { flex: 1 1 auto; word-break: break-all; }
-  .kind { flex: 0 0 210px; opacity: 0.7; }
-  .state { flex: 0 0 200px; opacity: 0.7; }
+  .kind { flex: 0 0 210px; color: var(--text-muted); }
+  .state { flex: 0 0 200px; color: var(--text-muted); }
 
-  .chk { font-size: 13px; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .chk { font-size: 13px; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; color: var(--text-secondary); }
 
+  /* «Обновить»: the design's secondary button. */
   .btn {
     padding: 7px 14px; border-radius: 6px; cursor: pointer;
-    font-size: 13px; border: 1px solid var(--border); background: transparent; color: inherit;
+    font-size: 13px; border: 1px solid var(--border-strong); background: var(--card-bg); color: var(--text);
   }
   .btn:disabled { opacity: 0.45; cursor: default; }
-  .btn.primary { background: var(--accent, #6b5cff); color: #fff; border-color: transparent; }
-  .btn.outline:hover:not(:disabled) { background: rgba(128, 128, 128, 0.1); }
+  .btn.outline:hover:not(:disabled) { background: var(--panel2); }
+  /* «Добавить в меню»: outlined in the accent — one per orphan, so a column
+     of solid buttons would shout. */
+  .btn.accent { background: transparent; border-color: var(--primary); color: var(--accent-text); }
+  .btn.accent:hover:not(:disabled) { background: var(--accent-soft); }
 </style>

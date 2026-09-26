@@ -52,13 +52,13 @@
 >
   <div class="card-header">
     <div class="disk-icon">
-      <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+      <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="var(--accent-text)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
         <rect x="3" y="4" width="18" height="16" rx="2" />
         <circle cx="12" cy="12" r="4" />
         <circle cx="12" cy="12" r="1" />
         <line x1="3" y1="18" x2="21" y2="18" />
-        <circle cx="7" cy="20" r="0.5" fill="var(--primary)" />
-        <circle cx="17" cy="20" r="0.5" fill="var(--primary)" />
+        <circle cx="7" cy="20" r="0.5" fill="var(--accent-text)" />
+        <circle cx="17" cy="20" r="0.5" fill="var(--accent-text)" />
       </svg>
     </div>
     <div class="card-title-area">
@@ -127,16 +127,15 @@
 <style>
   .disk-card {
     background: var(--card-bg);
-    border-radius: var(--radius);
-    box-shadow: var(--shadow);
+    border-radius: 8px;
     padding: 20px;
     cursor: pointer;
-    transition: box-shadow 0.15s ease, transform 0.1s ease;
-    border: 1px solid transparent;
+    transition: border-color 0.15s ease, transform 0.1s ease;
+    border: 1px solid var(--border);
   }
 
   .disk-card:hover {
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+    border-color: var(--primary);
     transform: translateY(-1px);
   }
 
@@ -146,7 +145,7 @@
   }
 
   .disk-card.running {
-    border-color: rgba(45, 125, 210, 0.3);
+    border-color: var(--primary);
   }
 
   .card-header {
@@ -160,7 +159,7 @@
     flex-shrink: 0;
     width: 44px;
     height: 44px;
-    background: rgba(45, 125, 210, 0.08);
+    background: var(--accent-soft);
     border-radius: 10px;
     display: flex;
     align-items: center;
@@ -175,7 +174,7 @@
   .job-name {
     font-size: 16px;
     font-weight: 600;
-    color: var(--text);
+    color: var(--head);
     margin: 0;
     line-height: 1.3;
   }

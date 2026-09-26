@@ -273,6 +273,9 @@
     { key: 'linux', name: 'Linux', color: '#14b8a6' },
     { key: 'other', name: 'Другое', color: '#9aa0ad' },
   ] as const;
+  /** «Исключено» — the eighth category colour, the same in both themes as
+   *  the other seven (design: CATS). */
+  const EXCLUDED_COLOR = '#c0463f';
   const catData = $derived.by(() => {
     // Prefer the breakdown embedded in the image (works without jobs.json);
     // fall back to the run record for images taken before it was embedded.
@@ -301,7 +304,7 @@
       bytes: c.bytes,
       pct: (c.bytes / total) * 100,
     }));
-    if (ex > 0) out.push({ name: 'Исключено', color: '#c0463f', bytes: ex, pct: (ex / total) * 100 });
+    if (ex > 0) out.push({ name: 'Исключено', color: EXCLUDED_COLOR, bytes: ex, pct: (ex / total) * 100 });
     return out;
   });
 
@@ -1830,16 +1833,21 @@
       onclick={() => checkLuksPassword(part)}
     >Проверка</button>
     {#if luksPwState[part] === 'checking'}<span class="pw-note">проверяем…</span>{/if}
-    {#if luksPwState[part] === 'ok'}<span class="pw-ok">✓ подходит</span>{/if}
-    {#if luksPwState[part] === 'bad'}<span class="pw-bad">✕ не подходит</span>{/if}
+    {#if luksPwState[part] === 'ok'}<span class="pw-ok"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg>подходит</span>{/if}
+    {#if luksPwState[part] === 'bad'}<span class="pw-bad"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18" /></svg>не подходит</span>{/if}
     {#if luksPwState[part] === 'error'}<span class="pw-bad" title={luksPwError[part]}>не удалось проверить</span>{/if}
   </span>
+{/snippet}
+
+{#snippet errIcon()}
+  <svg class="bicon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--error)" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5" /><path d="M9 9l6 6M15 9l-6 6" /></svg>
 {/snippet}
 
 {#snippet copyNav()}
   <div class="copynav">
     <button class="cn-btn" title="Более старая копия" aria-label="Более старая копия"
-      disabled={!hasMultiple || copyIndex >= versions.length - 1} onclick={() => { copyIndex += 1; resetMapping(); }}>‹</button>
+      disabled={!hasMultiple || copyIndex >= versions.length - 1} onclick={() => { copyIndex += 1; resetMapping(); }}
+      ><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7" /></svg></button>
     <span class="cn-date"
       title={activeInfo
         ? `Копию сделала Own Backup ${activeInfo.app_version || '— версия не записана (сборка старше 0.1.1)'}`
@@ -1857,7 +1865,8 @@
         >{versions.length - copyIndex}/{versions.length}</span>
     {/if}
     <button class="cn-btn" title="Более новая копия" aria-label="Более новая копия"
-      disabled={!hasMultiple || copyIndex <= 0} onclick={() => { copyIndex -= 1; resetMapping(); }}>›</button>
+      disabled={!hasMultiple || copyIndex <= 0} onclick={() => { copyIndex -= 1; resetMapping(); }}
+      ><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7" /></svg></button>
   </div>
 {/snippet}
 
@@ -1875,14 +1884,15 @@
   {#if !running && !planRun}
     <!-- WHAT: the disk this copy captured — same read-only map as Параметры → Источник -->
     <div class="sec-head">
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="12" cy="12" r="3.4"/></svg>
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent-text)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="3"/><circle cx="12" cy="12" r="3.5"/></svg>
       <span class="sec-title">Что восстановить</span>
       <span class="sec-sub">разделы, вошедшие в эту копию</span>
     </div>
 
     {#if keyNeeded}
       <div class="key-note">
-        <span>🔒 Копия зашифрована. Пока не введён пароль, карта ниже построена по настройкам
+        <svg class="kn-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--info)" stroke-width="2" stroke-linecap="round"><rect x="5" y="11" width="14" height="9" rx="2" /><path d="M8 11V8a4 4 0 0 1 8 0v3" /></svg>
+        <span>Копия зашифрована. Пока не введён пароль, карта ниже построена по настройкам
           задания, а не по самой копии, и восстановить её нельзя.</span>
         <button class="btn ghost tiny" onclick={() => askKey()}>Ввести пароль</button>
       </div>
@@ -1960,7 +1970,7 @@
         {/if}
         {#if !reencrypt}
           <div class="luks-warn inner">
-            <span class="sw-ico">🔓</span>
+            <svg class="sw-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--warning)" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2" /><path d="M8 11V8a4 4 0 0 1 7.7-1.5" /></svg>
             <span>
               Без шифрования в разделе окажется обычная файловая система без контейнера.
               Данные будут целы и читаемы, но <b>Linux с такого раздела не загрузится</b>:
@@ -1974,7 +1984,7 @@
     {:else if decryptedParts.length > 0}
       {@const one = decryptedParts.length === 1}
       <div class="luks-warn">
-        <span class="sw-ico">🔓</span>
+        <svg class="sw-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--warning)" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2" /><path d="M8 11V8a4 4 0 0 1 7.7-1.5" /></svg>
         <span>
           <b>Шифрование не восстановится.</b>
           {one ? 'Раздел' : 'Разделы'}
@@ -2028,7 +2038,7 @@
           {#each catData as c}
             <div class="cat"><span class="dot" style="background:{c.color}"></span><span class="cat-name">{c.name}</span><span class="cat-size">{formatBytes(c.bytes)}</span></div>
           {/each}
-          <div class="cat"><span class="dot" style="background:#c0463f"></span><span class="cat-name">Исключено</span><span class="cat-size">{formatBytes(excluded.bytes)}</span></div>
+          <div class="cat"><span class="dot" style:background={EXCLUDED_COLOR}></span><span class="cat-name">Исключено</span><span class="cat-size">{formatBytes(excluded.bytes)}</span></div>
         </div>
       </div>
     {/if}
@@ -2037,7 +2047,7 @@
     <div class="connector">
       <div class="conn-arrow">
         <div class="v-dash"></div>
-        <div class="arrow-circle"><svg width="20" height="20" viewBox="0 0 24 24" stroke="#fff" stroke-width="2.6" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M19 12l-7 7-7-7"/></svg></div>
+        <div class="arrow-circle"><svg width="20" height="20" viewBox="0 0 24 24" stroke="#fff" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M6 13l6 6 6-6"/></svg></div>
         <div class="v-dash"></div>
       </div>
       <div class="conn-instr">{instr}</div>
@@ -2045,7 +2055,7 @@
 
     <!-- WHERE: step 1 = pick a disk; step 2/3 = map partitions onto it -->
     <div class="sec-head">
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="12" cy="12" r="3.4"/></svg>
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent-text)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="3"/><circle cx="12" cy="12" r="3.5"/></svg>
       <span class="sec-title">Куда восстановить</span>
       <span class="sec-sub">
         {#if !targetDiskId}кликните диск, на который восстановить{:else}кликните раздел — куда скопировать{/if}
@@ -2083,7 +2093,7 @@
       </div>
       {#if sectorMismatch}
         <div class="sector-warn">
-          <span class="sw-ico">⚠</span>
+          <svg class="sw-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--error)" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l9 16H3z" /><path d="M12 10v4M12 17h.01" /></svg>
           <span>
             <b>Разный размер сектора.</b>
             Копия снята с диска с логическим сектором <b>{srcSector} Б</b>, у выбранного диска — <b>{dstSector} Б</b>.
@@ -2138,8 +2148,8 @@
         {#each shownOps(planRun) as o}
           <li class={opClass(o)}>
             <span class="op-mark">
-              {#if o.status === 'done'}✓
-              {:else if o.status === 'failed'}✕
+              {#if o.status === 'done'}<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg>
+              {:else if o.status === 'failed'}<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18" /></svg>
               {:else if o.status === 'running'}▸
               {:else if o.status === 'skipped'}–
               {:else}·{/if}
@@ -2173,7 +2183,7 @@
     </div>
   {/if}
 
-  {#if applyError}<div class="banner err"><span class="bdot red"></span><span>{applyError}</span></div>{/if}
+  {#if applyError}<div class="banner err">{@render errIcon()}<span>{applyError}</span></div>{/if}
 
   {#if running}
     <div class="progress-wrap">
@@ -2192,9 +2202,9 @@
   {/if}
 
   {#if summary && !running}
-    <div class="banner ok"><span class="bdot"></span><span>Восстановление завершено: {formatBytes(summary.bytes_restored)} за {summary.duration_secs.toFixed(1)} с.</span></div>
+    <div class="banner ok"><span class="bdot"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg></span><span>Восстановление завершено: {formatBytes(summary.bytes_restored)} за {summary.duration_secs.toFixed(1)} с.</span></div>
   {/if}
-  {#if errorMsg}<div class="banner err"><span class="bdot red"></span><span>{errorMsg}</span></div>{/if}
+  {#if errorMsg}<div class="banner err">{@render errIcon()}<span>{errorMsg}</span></div>{/if}
 </div>
 
   <div class="footer">
@@ -2475,7 +2485,7 @@
         сопоставленных разделов — копией <b>{job.name}</b> от
         {copyDate}.
       </p>
-      <p><b>Отката нет.</b> Всё, что сейчас на затронутых разделах, будет потеряно.</p>
+      <p class="no-undo"><b>Отката нет.</b> Всё, что сейчас на затронутых разделах, будет потеряно.</p>
       <p>Введите <b>ДА</b> (заглавными), чтобы продолжить:</p>
       <input type="text" bind:value={confirmText} spellcheck="false" />
       <div class="dialog-actions">
@@ -2490,20 +2500,21 @@
   .page { height: 100%; display: flex; flex-direction: column; }
   .dash { flex: 1; overflow: auto; width: 100%; padding: 34px 44px; display: flex; flex-direction: column; }
   .sec-head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
-  .sec-title { font-size: 15px; font-weight: 700; color: var(--head); }
+  .sec-title { font-size: 15px; font-weight: 600; color: var(--head); }
   .sec-sub { font-size: 13px; color: var(--text-muted); }
   .disks { display: flex; flex-direction: column; gap: 14px; }
   .loading-note { font-size: 13px; color: var(--text-muted); padding: 9px 0; }
   .loading-note.searching { display: flex; align-items: center; gap: 10px; }
-  .spinner { width: 16px; height: 16px; flex-shrink: 0; border: 2px solid var(--border); border-top-color: var(--primary); border-radius: 50%; animation: spin 0.7s linear infinite; }
+  .spinner { width: 16px; height: 16px; flex-shrink: 0; border: 2px solid var(--track); border-top-color: var(--primary); border-radius: 50%; animation: spin 0.7s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
-  .warn-note { font-size: 13px; color: #8c1d1d; background: rgba(216,74,74,.08); padding: 10px 14px; border-radius: 5px; }
-  .key-note { display: flex; align-items: center; gap: 14px; margin-bottom: 12px; padding: 10px 14px; border-radius: 6px; border: 1px solid var(--border); background: var(--accent-soft); font-size: 13px; color: var(--head); line-height: 1.45; }
+  .warn-note { font-size: 13px; color: var(--error-text); background: var(--error-soft); border: 1px solid var(--error-line); padding: 10px 14px; border-radius: 8px; }
+  .key-note { display: flex; align-items: center; gap: 14px; margin-bottom: 12px; padding: 10px 14px; border-radius: 8px; border: 1px solid var(--info-line); background: var(--info-soft); font-size: 13px; color: var(--info-text); line-height: 1.45; }
   .key-note span { flex: 1; }
+  .key-note .kn-ico { flex: 0 0 auto; }
   .key-note .btn { flex: 0 0 auto; }
-  .cat-block { margin-top: 14px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 6px; background: var(--card-bg); }
+  .cat-block { margin-top: 14px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 8px; background: var(--card-bg); }
   .cat-head { font-size: 13px; font-weight: 600; color: var(--head); margin-bottom: 4px; }
-  .catbar { height: 9px; border-radius: 5px; overflow: hidden; display: flex; margin-top: 10px; }
+  .catbar { height: 9px; border-radius: 5px; overflow: hidden; display: flex; gap: 2px; margin-top: 10px; background: var(--track); }
   /* Every present category stays visible: tiny slices keep 5px and the
      large ones shrink to make room, so the bar still totals 100%. */
   .catseg { min-width: 5px; }
@@ -2512,14 +2523,14 @@
   .cats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px 8px; margin-top: 14px; }
   .cat { min-width: 0; display: flex; align-items: center; gap: 7px; }
   .dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
-  .cat-name { font-size: 13px; color: var(--head); }
+  .cat-name { font-size: 13px; color: var(--text); }
   .cat-size { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
   /* Copy navigator in the disk-card header: ‹ date › to page between the copies
      of one archive. Buttons disable at the ends / when there's only one copy. */
   .copynav { display: flex; align-items: center; gap: 6px; }
-  .cn-btn { width: 22px; height: 20px; display: flex; align-items: center; justify-content: center; border: 1px solid var(--border); border-radius: 4px; background: var(--card-bg); color: var(--head); font-size: 18px; font-weight: 800; line-height: 1; cursor: pointer; padding: 0 0 3px; font-family: var(--font); }
-  .cn-btn:hover:not(:disabled) { border-color: var(--primary); color: var(--primary); }
-  .cn-btn:disabled { opacity: .4; cursor: default; }
+  .cn-btn { width: 22px; height: 20px; display: flex; align-items: center; justify-content: center; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--card-bg); color: var(--text-secondary); font-size: 18px; font-weight: 800; line-height: 1; cursor: pointer; padding: 0; font-family: var(--font); }
+  .cn-btn:hover:not(:disabled) { border-color: var(--primary); color: var(--accent-text); background: var(--accent-soft); }
+  .cn-btn:disabled { opacity: .45; cursor: default; }
   .cn-date { font-size: 12px; font-weight: 600; color: var(--head); white-space: nowrap; }
   .cn-ver { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
   /* Arrow occupies the left half so it sits at ~25%; the instruction fills the
@@ -2529,18 +2540,18 @@
   .connector { display: flex; align-items: center; margin: 20px 0; gap: 14px; }
   .conn-arrow { flex: 0 0 auto; margin-left: calc(25% - 22px); display: flex; flex-direction: column; align-items: center; }
   .conn-instr { flex: 1; font-size: 15px; font-weight: 600; color: var(--head); line-height: 1.45; }
-  .connector .v-dash { width: 2px; height: 14px; background: repeating-linear-gradient(180deg, var(--text-muted) 0 4px, transparent 4px 8px); }
-  .arrow-circle { width: 44px; height: 44px; border-radius: 50%; background: var(--green); display: flex; align-items: center; justify-content: center; box-shadow: 0 4px 14px rgba(90,176,47,.35); margin: 4px 0; }
+  .connector .v-dash { width: 2px; height: 14px; background: repeating-linear-gradient(180deg, var(--border-strong) 0 4px, transparent 4px 8px); }
+  .arrow-circle { width: 44px; height: 44px; border-radius: 50%; background: var(--success); display: flex; align-items: center; justify-content: center; margin: 4px 0; }
   .under-card { display: flex; justify-content: flex-end; gap: 10px; margin-top: 10px; }
   .btn.small { padding: 7px 18px; font-size: 13px; }
   .btn.icon { display: inline-flex; align-items: center; justify-content: center; padding: 7px 12px; }
   .hint-small { margin-top: 8px; font-size: 12px; color: var(--text-muted); }
-  .sector-warn { display: flex; gap: 10px; margin-top: 12px; padding: 12px 14px; border-radius: 6px; background: rgba(216,74,74,.1); border: 1px solid rgba(216,74,74,.35); font-size: 13px; color: #8c1d1d; line-height: 1.5; }
-  .sw-ico { flex-shrink: 0; font-size: 15px; line-height: 1.3; }
-  .luks-warn { display: flex; gap: 10px; margin-top: 14px; padding: 12px 14px; border-radius: 6px; background: rgba(214,158,46,.12); border: 1px solid rgba(214,158,46,.4); font-size: 13px; color: #7a5a10; line-height: 1.55; }
-  .luks-warn code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; background: rgba(0,0,0,.06); padding: 1px 4px; border-radius: 3px; }
+  .sector-warn { display: flex; gap: 10px; margin-top: 12px; padding: 12px 14px; border-radius: 8px; background: var(--error-soft); border: 1px solid var(--error-line); font-size: 13px; color: var(--error-text); line-height: 1.5; }
+  .sw-ico { flex-shrink: 0; margin-top: 1px; }
+  .luks-warn { display: flex; gap: 10px; margin-top: 14px; padding: 12px 14px; border-radius: 8px; background: var(--warning-soft); border: 1px solid var(--warning-line); font-size: 13px; color: var(--warning-text); line-height: 1.55; }
+  .luks-warn code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; background: var(--sunken); padding: 1px 4px; border-radius: 3px; }
   .luks-warn.inner { margin-top: 10px; }
-  .luks-box { margin-top: 14px; padding: 12px 14px; border-radius: 6px; border: 1px solid var(--border); background: var(--card-bg); }
+  .luks-box { margin-top: 14px; padding: 12px 14px; border-radius: 8px; border: 1px solid var(--border); background: var(--card-bg); }
   .luks-opt { display: flex; align-items: flex-start; gap: 10px; font-size: 13px; color: var(--head); cursor: pointer; line-height: 1.5; }
   .luks-opt input { width: auto; margin-top: 2px; flex: 0 0 auto; }
   .luks-row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 14px; }
@@ -2550,21 +2561,25 @@
   .pw-lbl { white-space: nowrap; }
   /* The field itself (with its eye) is PasswordField, variant="inline". */
   .btn.tiny { padding: 6px 12px; font-size: 12px; }
-  .pw-ok { font-size: 12px; color: #2f7d4f; white-space: nowrap; }
-  .pw-bad { font-size: 12px; color: #b32b2b; white-space: nowrap; }
+  .pw-ok { font-size: 12px; color: var(--success-text); white-space: nowrap; }
+  .pw-bad { font-size: 12px; color: var(--error-text); white-space: nowrap; }
+  /* The tick / cross in front of the verdict, in the verdict's own colour. */
+  .pw-ok svg, .pw-bad svg { vertical-align: -1px; margin-right: 4px; }
   .pw-note { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
   /* Right-click partition menu */
   .menu-backdrop { position: fixed; inset: 0; z-index: 190; }
-  .ctx-menu { position: fixed; z-index: 200; min-width: 180px; background: var(--card-bg); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 10px 30px rgba(0,0,0,.18); padding: 6px; }
+  .ctx-menu { position: fixed; z-index: 200; min-width: 180px; background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow-lg); padding: 6px; }
   .ctx-title { font-size: 11px; font-weight: 700; text-transform: uppercase; color: var(--text-muted); padding: 4px 10px 6px; }
-  .ctx-menu button { display: block; width: 100%; text-align: left; padding: 8px 10px; border: none; background: none; border-radius: 4px; font-size: 13px; font-family: var(--font); color: var(--head); cursor: pointer; }
-  .ctx-menu button:hover { background: var(--accent-soft); color: var(--primary); }
+  .ctx-menu button { display: block; width: 100%; text-align: left; padding: 8px 10px; border: none; background: none; border-radius: 4px; font-size: 13px; font-family: var(--font); color: var(--text); cursor: pointer; }
+  .ctx-menu button:hover { background: var(--accent-soft); color: var(--accent-text); }
   .ctx-menu button.danger { border-top: 1px solid var(--border); border-radius: 0 0 4px 4px; margin-top: 4px; padding-top: 10px; }
-  .ctx-menu button.danger:hover { background: rgba(216,74,74,.1); color: #b32b2b; }
+  .ctx-menu button.danger:hover { background: var(--error-soft); color: var(--error-text); }
   /* Create-partition form */
   .fld { display: block; margin-bottom: 12px; font-size: 13px; color: var(--head); }
   .fld > span:first-child { display: block; margin-bottom: 5px; font-weight: 600; }
-  .fld input, .fld select { padding: 8px 10px; border: 1px solid var(--border); border-radius: 4px; font-size: 13px; font-family: var(--font); background: var(--card-bg); color: var(--text); }
+  .fld input, .fld select { padding: 8px 10px; border: 1px solid var(--border-strong); border-radius: 6px; font-size: 13px; font-family: var(--font); background: var(--input-bg); color: var(--text); }
+  .fld input::placeholder { color: var(--text-muted); }
+  .fld input:focus, .fld select:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--accent-soft); }
   .fld > input { width: 100%; }
   /* Size row: the number takes the whole width, the unit is a narrow box on the
      right. Both are forced to the same box height so they line up exactly. */
@@ -2595,66 +2610,77 @@
   /* Deliberately not `.chk`: that name is a checkbox row in this file, and it
      carries white-space: nowrap — which turned every finding into one long
      line running off the dialog. */
-  .finding { font-size: 13px; line-height: 1.5; padding: 9px 12px; border-radius: 6px; margin-bottom: 8px; overflow-wrap: anywhere; }
+  .finding { font-size: 13px; line-height: 1.5; padding: 9px 12px; border-radius: 8px; margin-bottom: 8px; overflow-wrap: anywhere; }
   .finding-note { font-size: 12px; opacity: .8; margin-top: 4px; }
-  .finding.err { background: rgba(216,74,74,.1); border: 1px solid rgba(216,74,74,.35); color: #8c1d1d; }
-  .finding.warn { background: rgba(214,158,46,.12); border: 1px solid rgba(214,158,46,.4); color: #7a5a10; }
-  .finding.info { background: rgba(45,125,210,.08); border: 1px solid rgba(45,125,210,.28); color: var(--head); }
-  .finding.ok { background: rgba(56,161,105,.1); border: 1px solid rgba(56,161,105,.32); color: #205e3b; }
+  .finding.err { background: var(--error-soft); border: 1px solid var(--error-line); color: var(--error-text); }
+  .finding.warn { background: var(--warning-soft); border: 1px solid var(--warning-line); color: var(--warning-text); }
+  .finding.info { background: var(--info-soft); border: 1px solid var(--info-line); color: var(--info-text); }
+  .finding.ok { background: var(--success-soft); border: 1px solid var(--success-line); color: var(--success-text); }
   .opt { display: flex; align-items: flex-start; gap: 9px; font-size: 13px; color: var(--head); margin: 4px 0 10px; cursor: pointer; }
   .opt input { width: auto; margin-top: 2px; flex: 0 0 auto; }
   .opt em { display: block; font-style: normal; font-size: 12px; color: var(--text-muted); line-height: 1.45; margin-top: 2px; }
   .btn.primary-solid { background: var(--primary); color: #fff; }
-  .fit-msg { margin-top: 10px; padding: 9px 14px; font-size: 13px; border-radius: 5px; background: var(--accent-soft); color: var(--head); }
-  .fit-msg.bad { background: rgba(216,74,74,.1); color: #8c1d1d; font-weight: 600; }
+  .btn.primary-solid:hover:not(:disabled) { background: var(--primary-hover); }
+  .fit-msg { margin-top: 10px; padding: 9px 14px; font-size: 13px; border-radius: 8px; background: var(--accent-soft); color: var(--text); }
+  .fit-msg.bad { background: var(--error-soft); border: 1px solid var(--error-line); color: var(--error-text); font-weight: 600; }
   .progress-wrap { margin-top: 30px; }
   .progress-info { display: flex; justify-content: space-between; font-size: 13px; color: var(--head); margin-bottom: 8px; }
-  .bar { height: 8px; border-radius: 4px; background: var(--tabbg); overflow: hidden; }
-  .bar-fill { height: 100%; background: var(--primary); transition: width .15s linear; }
+  .progress-info > span:first-child { font-weight: 600; }
+  .progress-info > span:last-child:not(:first-child) { color: var(--text-secondary); }
+  .bar { height: 8px; border-radius: 4px; background: var(--track); overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 4px; background: var(--primary); transition: width .15s linear; }
   .opt-cost { color: var(--text-muted); font-weight: 400; }
   /* Plan execution */
   .run { border: 1px solid var(--border); border-radius: 8px; background: var(--card-bg); padding: 18px 20px; }
   .run-head { display: flex; align-items: baseline; justify-content: space-between; gap: 14px; margin-bottom: 12px; }
-  .run-title { font-size: 15px; font-weight: 700; color: var(--head); }
+  .run-title { font-size: 15px; font-weight: 600; color: var(--head); }
   .run-sub { font-size: 12px; color: var(--text-muted); }
   .ops-run { list-style: none; margin: 0; padding: 0; }
   .ops-run .op { display: flex; align-items: flex-start; gap: 10px; padding: 7px 0; border-top: 1px solid var(--border); font-size: 13px; }
   .ops-run .op:first-child { border-top: none; }
   .op-mark { flex: 0 0 16px; text-align: center; color: var(--text-muted); }
-  .op.done .op-mark { color: #2f7d4f; }
-  .op.failed .op-mark { color: #b32b2b; }
-  .op.running .op-mark { color: var(--primary); }
+  .op-mark svg { vertical-align: -1px; }
+  .op.done .op-mark { color: var(--success); }
+  .op.failed .op-mark { color: var(--error); }
+  .op.running .op-mark { color: var(--accent-text); }
   .op-body { flex: 1; min-width: 0; }
   .op-title { display: block; color: var(--head); line-height: 1.45; }
   .op.pending .op-title, .op.skipped .op-title { color: var(--text-muted); }
   .op-msg { display: block; font-size: 12px; color: var(--text-muted); margin-top: 3px; line-height: 1.45; }
-  .op.failed .op-msg { color: #b32b2b; }
-  .op-bar { display: block; height: 4px; border-radius: 2px; background: var(--border); margin-top: 6px; overflow: hidden; }
+  .op.failed .op-msg { color: var(--error-text); }
+  .op-bar { display: block; height: 4px; border-radius: 2px; background: var(--track); margin-top: 6px; overflow: hidden; }
   .op-fill { display: block; height: 100%; background: var(--primary); transition: width .2s; }
   .op-state { flex: 0 0 auto; font-size: 12px; color: var(--text-muted); white-space: nowrap; }
   .run-followups { margin-top: 14px; }
-  .run-fu-head { font-size: 13px; font-weight: 700; color: var(--head); margin-bottom: 8px; }
+  .run-fu-head { font-size: 13px; font-weight: 600; color: var(--head); margin-bottom: 8px; }
   .progress-meta { display: flex; justify-content: space-between; gap: 16px; margin-top: 8px; font-size: 12px; color: var(--text-muted); }
   .progress-meta .route { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; min-width: 0; }
-  .banner { margin-top: 22px; border-radius: 6px; padding: 13px 16px; display: flex; align-items: center; gap: 12px; background: var(--accent-soft); font-size: 13px; color: var(--head); }
-  .banner.err { background: rgba(216,74,74,.08); }
-  .bdot { width: 18px; height: 18px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
-  .bdot.red { background: var(--error); }
+  .banner { margin-top: 22px; border-radius: 8px; padding: 13px 16px; display: flex; align-items: center; gap: 12px; background: var(--accent-soft); font-size: 13px; color: var(--text); }
+  .banner.err { background: var(--error-soft); border: 1px solid var(--error-line); color: var(--error-text); }
+  .bdot { width: 18px; height: 18px; border-radius: 50%; background: var(--success); flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
+  .bicon { flex-shrink: 0; }
   /* .footer is global (styles/global.css) — full-width bar, same on every page. */
-  .hint { flex: 1; font-size: 12px; color: var(--text-muted); }
-  .btn { border-radius: 4px; padding: 10px 24px; font-size: 14px; font-weight: 600; font-family: var(--font); cursor: pointer; border: none; }
-  .btn:disabled { opacity: .5; cursor: default; }
+  .hint { flex: 1; font-size: 13px; color: var(--text-secondary); }
+  .btn { border-radius: 6px; padding: 10px 24px; font-size: 14px; font-weight: 600; font-family: var(--font); cursor: pointer; border: 1px solid transparent; transition: background-color .15s ease; }
+  .btn:disabled { opacity: .45; cursor: default; }
   .btn.green { background: var(--green); color: #fff; }
   .btn.green:hover:not(:disabled) { background: var(--green-hover); }
-  .btn.danger { background: transparent; border: 1px solid var(--error); color: var(--error); }
-  .btn.ghost { background: none; border: 1px solid var(--border); color: var(--head); }
+  .btn.danger { background: transparent; border-color: var(--error); color: var(--error-text); }
+  .btn.danger:hover:not(:disabled) { background: var(--error-soft); }
+  .btn.ghost { background: var(--card-bg); border-color: var(--border-strong); color: var(--text); }
+  .btn.ghost:hover:not(:disabled) { background: var(--panel2); }
   .btn.danger-solid { background: var(--error); color: #fff; }
-  .overlay { position: fixed; inset: 0; background: rgba(20,17,44,.5); display: flex; align-items: center; justify-content: center; z-index: 150; }
-  .dialog { width: 400px; background: #fff; border-radius: 8px; padding: 24px; box-shadow: 0 20px 60px rgba(0,0,0,.3); }
+  .btn.danger-solid:hover:not(:disabled) { filter: brightness(.92); }
+  .overlay { position: fixed; inset: 0; background: var(--overlay); display: flex; align-items: center; justify-content: center; z-index: 150; }
+  .dialog { width: 400px; background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px; padding: 24px; box-shadow: var(--shadow-lg); }
   .dialog-title { font-size: 17px; font-weight: 600; color: var(--head); margin-bottom: 12px; }
-  .dialog p { font-size: 13px; color: var(--text); margin-bottom: 10px; line-height: 1.5; }
+  .dialog p { font-size: 13px; color: var(--text-secondary); margin-bottom: 10px; line-height: 1.5; }
+  .dialog p b { color: var(--head); }
+  /* The point of no return, in the colour of one (design: the red «Отката нет» plate). */
+  .dialog p.no-undo, .dialog p.no-undo b { color: var(--error-text); }
   /* Only the confirm dialog's own text box — a bare `.dialog input` would also
      stretch checkboxes to full width and push their labels out of the dialog. */
-  .dialog > input { width: 100%; padding: 9px 12px; border: 1px solid var(--border); border-radius: 4px; font-size: 14px; margin-bottom: 16px; }
+  .dialog > input { width: 100%; padding: 9px 12px; border: 1px solid var(--border-strong); border-radius: 6px; font-size: 14px; margin-bottom: 16px; background: var(--input-bg); color: var(--text); }
+  .dialog > input:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--accent-soft); }
   .dialog-actions { display: flex; justify-content: flex-end; gap: 10px; }
 </style>

@@ -520,6 +520,9 @@
     { key: 'linux', name: 'Linux', color: '#14b8a6' },
     { key: 'other', name: 'Другое', color: '#9aa0ad' },
   ] as const;
+  /** «Исключено» — the eighth category colour, the same in both themes as
+   *  the other seven (design: CATS). */
+  const EXCLUDED_COLOR = '#c0463f';
   const catData = $derived.by(() => {
     const c = job.last_run?.categories;
     if (!c) return null;
@@ -547,7 +550,7 @@
       bytes: c.bytes,
       pct: (c.bytes / total) * 100,
     }));
-    if (ex > 0) out.push({ name: 'Исключено', color: '#c0463f', bytes: ex, pct: (ex / total) * 100 });
+    if (ex > 0) out.push({ name: 'Исключено', color: EXCLUDED_COLOR, bytes: ex, pct: (ex / total) * 100 });
     return out;
   });
 
@@ -1231,16 +1234,18 @@
   {/if}
   <div class="seg-top">
     {#if p.is_system || p.is_boot || p.has_os}
-      <svg class="lock" width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a5 5 0 0 0-5 5v3H6a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-9a1 1 0 0 0-1-1h-1V7a5 5 0 0 0-5-5zm-3 8V7a3 3 0 0 1 6 0v3z"/></svg>
+      <svg class="lock" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
     {/if}
     {#if p.is_encrypted}
-      <span class="enc" title="Зашифрован — потребуется пароль">🔒</span>
+      <!-- Accent, not muted: next to the grey "system" lock above, the same
+           shape in the same colour would not say which one means encrypted. -->
+      <span class="enc" title="Зашифрован — потребуется пароль"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--accent-text)" stroke-width="2.4" stroke-linecap="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></span>
     {/if}
     <span class="seg-label">{partLabel(p)}</span>
   </div>
   <div class="seg-meta">{formatBytes(p.size_bytes)}{#if partUsed(p) > 0}<span class="muted">&nbsp;({formatBytes(partUsed(p))} занято)</span>{/if}{#if partFs(p)}<span class="muted">&nbsp;{partFs(p)}</span>{/if}{#if layoutOnly}<span class="muted">&nbsp;· в копии (только разметка)</span>{/if}</div>
   {#if selected}
-    <div class="check"><svg width="10" height="10" viewBox="0 0 24 24" stroke="#fff" stroke-width="3.6" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></div>
+    <div class="check"><svg width="11" height="11" viewBox="0 0 24 24" stroke="#fff" stroke-width="3.4" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></div>
   {/if}
 {/snippet}
 
@@ -1248,7 +1253,7 @@
   <div class="pw-panel under-disk">
     <div class="pw-head">
       <span>
-        🔒 Зашифрованные тома — {list.every(needsRecoveryKey)
+        <svg class="ico-inline" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--accent-text)" stroke-width="2.2" stroke-linecap="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg> Зашифрованные тома — {list.every(needsRecoveryKey)
           ? 'введите ключ восстановления'
           : 'введите пароль для расшифровки'}
       </span>
@@ -1314,7 +1319,7 @@
             том из копии.
           </span>
         {:else if decryptedVolumes[e.device]}
-          <span class="pw-done">✓ Расшифровано</span>
+          <span class="pw-done"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--success)" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Расшифровано</span>
         {:else if sharedPw && !needsRecoveryKey(e)}
           <!-- One prompt for all: the per-volume row is only a status line. -->
           <span class="pw-wait">
@@ -1396,7 +1401,7 @@
     <div class="wz-head">
       <span class="wz-title">Параметры резервного копирования диска</span>
       <span class="wz-name">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="1.4"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="12" cy="12" r="3.2"/></svg>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--disk-icon)" stroke-width="1.8"><rect x="3" y="5" width="18" height="14" rx="3"/><circle cx="12" cy="12" r="3.5"/></svg>
         {job.name}
       </span>
     </div>
@@ -1416,7 +1421,7 @@
         <div class="src-wrap">
           <!-- SOURCE -->
           <div class="sec-head">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="12" cy="12" r="3.4"/></svg>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent-text)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="3"/><circle cx="12" cy="12" r="3.5"/></svg>
             <span class="sec-title">{sourceReadonly ? 'Что скопировано' : 'Что копировать'}</span>
             <span class="sec-sub">{sourceReadonly
               ? 'разделы, включённые в эту копию (менять нельзя)'
@@ -1455,7 +1460,7 @@
                     </div>
                     <div class="disk-body">
                       <div class="disk-ico">
-                        <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="1.3"><path d="M3 8a9 3 0 0 0 18 0M3 8a9 3 0 0 1 18 0v8a9 3 0 0 1-18 0z"/><path d="M3 12a9 3 0 0 0 18 0"/></svg>
+                        <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="var(--disk-icon)" stroke-width="1.6"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>
                         <div class="disk-name">Диск {d.device_id.replace(/\D+/g, '') || ''}</div>
                       </div>
                       <div class="bar">
@@ -1497,7 +1502,7 @@
                   </div>
                   <div class="disk-body">
                     <div class="disk-ico">
-                      <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="1.3"><path d="M3 8a9 3 0 0 0 18 0M3 8a9 3 0 0 1 18 0v8a9 3 0 0 1-18 0z"/><path d="M3 12a9 3 0 0 0 18 0"/></svg>
+                      <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="var(--disk-icon)" stroke-width="1.6"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>
                       <div class="disk-name">Диск {d.device_id.replace(/\D+/g, '') || ''}</div>
                     </div>
                     <div class="bar">
@@ -1591,7 +1596,7 @@
                   </div>
                 {/each}
                 <div class="cat">
-                  <span class="dot" style="background:#c0463f"></span>
+                  <span class="dot" style:background={EXCLUDED_COLOR}></span>
                   <span class="cat-name">Исключено</span>
                   <span class="cat-size">{formatBytes(job.last_run?.excluded_bytes ?? 0)}</span>
                 </div>
@@ -1606,18 +1611,18 @@
           <!-- connector -->
           <div class="connector">
             <div class="dash"></div>
-            <div class="arrow-circle"><svg width="20" height="20" viewBox="0 0 24 24" stroke="#fff" stroke-width="2.6" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M19 12l-7 7-7-7"/></svg></div>
+            <div class="arrow-circle"><svg width="20" height="20" viewBox="0 0 24 24" stroke="#fff" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M6 13l6 6 6-6"/></svg></div>
             <div class="dash"></div>
           </div>
 
           <!-- DESTINATION -->
           <div class="sec-head">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6a2 2 0 0 1 2-2h5l2 2h5a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/></svg>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent-text)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6a2 2 0 0 1 2-2h5l2 2h5a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/></svg>
             <span class="sec-title">Куда сохранять</span>
             <span class="sec-sub">папка и имя файла резервной копии</span>
           </div>
           <div class="dest-card">
-            <svg width="42" height="40" viewBox="0 0 24 22" fill="#e6b34a" style="flex-shrink:0"><path d="M4 2h9l2 3h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z"/><rect x="3" y="9" width="18" height="10" rx="1" fill="#f0c268"/></svg>
+            <svg width="42" height="40" viewBox="0 1 24 22" style="flex-shrink:0"><path d="M3 7a2 2 0 0 1 2-2h4.2l2 2H19a2 2 0 0 1 2 2v8.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="var(--folder)"/><path d="M3 10h18v7.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="var(--folder2)"/></svg>
             <div class="dest-fields">
               <input
                 type="text"
@@ -1633,7 +1638,7 @@
             </div>
           </div>
           {#if collisionLetter}
-            <div class="warn-note">⛔ Назначение на том же диске ({collisionLetter}:), что и один из источников. Копию нужно писать на другой диск — выберите другую папку.</div>
+            <div class="warn-note"><svg class="ico-inline" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--error)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M9 9l6 6M15 9l-6 6"/></svg> Назначение на том же диске ({collisionLetter}:), что и один из источников. Копию нужно писать на другой диск — выберите другую папку.</div>
           {/if}
           {/if}
         </div>
@@ -1691,8 +1696,8 @@
           <div class="hint-sm">Число месяца — только 1–28: 29–31 есть не в каждом месяце, поэтому такие даты не выбираются.</div>
         {/if}
         {#if job.schedule.kind === 'event'}
-          <div class="note">
-            ✓ События отслеживает служба «Own Backup».
+          <div class="note info">
+            <svg class="ico-inline" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--info)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg> События отслеживает служба «Own Backup».
             {#if job.schedule.event_trigger === 'dest_connected'}
               Копия начинается в течение 10 секунд после того, как появится
               {driveLetter(job.dest_folder) ? `диск ${driveLetter(job.dest_folder)}:` : 'диск назначения'}.
@@ -1701,7 +1706,7 @@
             {/if}
           </div>
         {:else if job.schedule.kind !== 'none'}
-          <div class="note">✓ Автозапуск выполняет служба «Own Backup» (должна быть установлена и запущена). Для зашифрованных томов сохраните пароль на шаге «Источник».</div>
+          <div class="note info"><svg class="ico-inline" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--info)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg> Автозапуск выполняет служба «Own Backup» (должна быть установлена и запущена). Для зашифрованных томов сохраните пароль на шаге «Источник».</div>
         {/if}
         <div class="adv-schedule">
           <!-- «Копировать только если компьютер заблокирован» и «Предотвращать
@@ -1894,12 +1899,12 @@
 
         <div class="excl-list">
           {#each exclList() as p, i (p + i)}
-            <div class="excl-row"><span>{p}</span><button class="x" onclick={() => removePattern(i)}>×</button></div>
+            <div class="excl-row"><span>{p}</span><button class="x" title="Убрать маску" aria-label="Убрать маску" onclick={() => removePattern(i)}><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
           {/each}
         </div>
         <div class="excl-add">
           <input type="text" bind:value={newPattern} placeholder={exclTab === 'linux' ? 'Путь или маска, напр. var/tmp/**' : 'Путь или маска, напр. *.tmp'} spellcheck="false" onkeydown={(e) => e.key === 'Enter' && addPattern()} />
-          <button class="btn small" onclick={addPattern}>+ Добавить</button>
+          <button class="btn small ghost" onclick={addPattern}>+ Добавить</button>
           <button class="link" onclick={resetExclusions}>Исходный список</button>
         </div>
       {/if}
@@ -1938,7 +1943,7 @@
             <div class="adv-title">Защита резервной копии</div>
             {#if wantEncryption}
               <div class="note">
-                🔒 Копии шифруются: формат OBK{alreadyEncrypted ? '' : ', пароль задаётся'} на шаге
+                <svg class="ico-inline" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--accent-text)" stroke-width="2.2" stroke-linecap="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg> Копии шифруются: формат OBK{alreadyEncrypted ? '' : ', пароль задаётся'} на шаге
                 <button class="link" onclick={() => goToStep('scheme')}>«Схема»</button>.
               </div>
             {:else}
@@ -2091,21 +2096,29 @@
   .tab { padding: 10px 4px 12px; margin-right: 28px; background: none; border: none; border-bottom: 3px solid transparent; color: var(--text-muted); font-size: 14px; font-weight: 600; font-family: var(--font); cursor: pointer; }
   .tab.active { color: var(--head); border-bottom-color: var(--primary); }
   .body { flex: 1; overflow: auto; padding: 26px 34px; }
-  select.wide { width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 4px; font-size: 13px; font-family: var(--font); background: var(--card-bg); color: var(--text); }
-  .link { background: none; border: none; color: var(--primary); font-size: 13px; cursor: pointer; padding: 0; }
+  select.wide { width: 100%; padding: 8px 10px; border: 1px solid var(--border-strong); border-radius: 6px; font-size: 13px; font-family: var(--font); background: var(--input-bg); color: var(--text); }
+  select.wide:disabled { background: var(--sunken); border-color: var(--border); color: var(--text-muted); }
+  .link { background: none; border: none; color: var(--accent-text); font-size: 13px; cursor: pointer; padding: 0; }
+  .link:hover { text-decoration: underline; }
+  /* Every field on this screen: one look, one focus ring (styles/global.css
+     .form-input), whatever the local rule that sizes it. */
+  select.wide:focus, .dest-fields input:focus, .at input:focus, .at select:focus, .delay-min select:focus, .num:focus, .excl-add input:focus, .adv-line select:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .dest-fields input::placeholder, .excl-add input::placeholder { color: var(--text-muted); }
+  /* An icon standing in a line of text, where an emoji used to be. */
+  .ico-inline { vertical-align: -2px; flex-shrink: 0; }
 
   /* --- Paragon-style source map (step 0) --- */
   /* The whole width: a disk map drawn 940 px wide in the middle of a wide
      window squeezes every partition label into «Зарезерв…» for no reason. */
   .src-wrap { width: 100%; }
   .sec-head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
-  .sec-title { font-size: 15px; font-weight: 700; color: var(--head); }
+  .sec-title { font-size: 15px; font-weight: 600; color: var(--head); }
   .sec-sub { font-size: 13px; color: var(--text-muted); }
   .disks { display: flex; flex-direction: column; gap: 14px; }
   /* Kept-files category breakdown, shown under the disk map (read-only). */
-  .cat-block { margin-top: 14px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 6px; background: var(--card-bg); }
+  .cat-block { margin-top: 14px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 8px; background: var(--card-bg); }
   .cat-head { font-size: 13px; font-weight: 600; color: var(--head); margin-bottom: 4px; }
-  .catbar { height: 9px; border-radius: 5px; overflow: hidden; display: flex; margin-top: 10px; }
+  .catbar { height: 9px; border-radius: 5px; overflow: hidden; display: flex; gap: 2px; margin-top: 10px; background: var(--track); }
   /* Every present category stays visible: tiny slices keep 5px and the
      large ones shrink to make room, so the bar still totals 100%. */
   .catseg { min-width: 5px; }
@@ -2114,19 +2127,19 @@
   .cats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px 8px; margin-top: 14px; }
   .cat { min-width: 0; display: flex; align-items: center; gap: 7px; }
   .dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
-  .cat-name { font-size: 13px; color: var(--head); }
+  .cat-name { font-size: 13px; color: var(--text); }
   .cat-size { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
-  .disk-card { border: 1px solid var(--border); border-radius: 6px; overflow: hidden; background: var(--card-bg); }
+  .disk-card { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--card-bg); }
   /* Stage 1: the same card, clickable as a whole. Button defaults (centred
      text, own font, native border) would undo the layout, so they go. */
   button.disk-card { display: block; width: 100%; padding: 0; text-align: left; font: inherit; color: inherit; cursor: pointer; }
   button.disk-card:hover { border-color: var(--primary); }
-  button.disk-card:hover .disk-head { background: var(--hover-bg, rgba(127, 127, 127, 0.1)); }
+  button.disk-card:hover .disk-head { background: var(--accent-soft); }
   /* Back to the disk question — small, next to the instruction it undoes. */
   .back-disk { margin-left: auto; font-size: 12px; }
   .disk-head { width: 100%; display: flex; align-items: center; justify-content: space-between; padding: 6px 12px; background: var(--panel2); border: 0; border-bottom: 1px solid var(--border); margin: 0; font-family: inherit; text-align: left; }
-  .disk-head.whole { background: rgba(45,125,210,.12); color: var(--primary); }
-  .disk-head.whole .disk-model { color: var(--primary); }
+  .disk-head.whole { background: var(--accent-soft); color: var(--accent-text); }
+  .disk-head.whole .disk-model { color: var(--accent-text); }
   .disk-head-right { display: flex; align-items: center; gap: 10px; }
   .boot-toggle { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--head); cursor: pointer; user-select: none; }
   .boot-toggle input { cursor: pointer; margin: 0; }
@@ -2134,46 +2147,51 @@
   .boot-toggle.disabled input { cursor: not-allowed; }
   .whole-badge { font-size: 11px; font-weight: 700; color: #fff; background: var(--primary); padding: 2px 8px; border-radius: 10px; }
   .seg.locked { cursor: default; }
-  .seg.locked:hover { filter: none; }
   .disk-model { font-size: 13px; font-weight: 600; color: var(--head); }
   .disk-meta { font-size: 12px; color: var(--text-muted); }
   .disk-body { display: flex; align-items: center; gap: 14px; padding: 7px 12px; }
   .disk-ico { width: 52px; flex-shrink: 0; text-align: center; color: var(--text-muted); }
-  .disk-name { font-size: 12px; color: var(--head); margin-top: 1px; }
-  .bar { flex: 1; display: flex; height: 44px; border: 1px solid var(--border); border-radius: 3px; overflow: hidden; background: var(--panel2); }
+  .disk-name { font-size: 12px; color: var(--text-secondary); margin-top: 1px; }
+  /* The segments are translucent tints (--seg*): under them lies the card,
+     as in the design, not a second grey. */
+  .bar { flex: 1; display: flex; height: 44px; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; background: var(--card-bg); }
   /* Smallest readable segment width: tiny partitions never shrink below this
      (so their size/FS text stays legible), larger ones grow proportionally. */
-  .seg { position: relative; padding: 5px 8px; min-width: 84px; border: 0; border-right: 1px solid var(--border); margin: 0; display: flex; flex-direction: column; gap: 3px; background: rgba(45,125,210,.06); overflow: hidden; text-align: left; font-family: inherit; color: inherit; appearance: none; -webkit-appearance: none; }
+  .seg { position: relative; padding: 5px 8px; min-width: 84px; border: 0; border-right: 1px solid var(--border); margin: 0; display: flex; flex-direction: column; gap: 3px; background: var(--seg); overflow: hidden; text-align: left; font-family: inherit; color: inherit; appearance: none; -webkit-appearance: none; }
   .seg:last-child { border-right: none; }
-  .seg.free { min-width: 40px; align-items: center; justify-content: center; background: repeating-linear-gradient(135deg, var(--panel2) 0 6px, var(--border) 6px 7px); }
+  .seg.free { min-width: 40px; align-items: center; justify-content: center; background: repeating-linear-gradient(135deg, var(--hatch) 0 6px, transparent 6px 12px); }
   .free-lbl { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
   .seg.selectable { cursor: pointer; }
-  .seg.selectable:hover { filter: brightness(0.97); }
+  /* Hover previews the selected tint (the frame and tick stay the selection's
+     own). A brightness filter did this before and vanished in the dark theme.
+     Not on a read-only map, nor on a volume the boot copy holds fixed. */
+  .seg.selectable:not(.ro):not(.locked):hover { background: var(--seg-sel); }
   /* Kept in the copy as a table entry only. It looks selected because it IS in
      the copy; the cursor says it is not something to click. */
   .seg.layout-only { cursor: default; }
   /* Read-only source map ("Параметры"): the selection is shown, not editable. */
   .seg.ro { cursor: default; }
-  .seg.ro:hover { filter: none; }
-  .seg.selected { background: rgba(45,125,210,.16); box-shadow: inset 0 0 0 2px var(--primary); }
+  .seg.selected { background: var(--seg-sel); box-shadow: inset 0 0 0 2px var(--primary); }
   /* Left-to-right "used space" fill inside a partition — a subtle shaded strip
-     with a defined right edge, so occupancy is readable at a glance. */
-  .usedfill { position: absolute; top: 0; bottom: 0; left: 0; z-index: 0; background: rgba(45,125,210,.14); border-right: 1px solid rgba(45,125,210,.45); pointer-events: none; }
-  .seg.selected .usedfill { background: rgba(45,125,210,.24); border-right-color: rgba(45,125,210,.6); }
-  .seg-top { position: relative; z-index: 1; display: flex; align-items: center; gap: 5px; color: var(--head); }
+     with a defined right edge, so occupancy is readable at a glance. The edge
+     is the same tint laid over the fill, i.e. twice as dense. On a selected
+     segment the fill sits on the denser --seg-sel and darkens with it. */
+  .usedfill { position: absolute; top: 0; bottom: 0; left: 0; z-index: 0; background: var(--seg-used); border-right: 1px solid var(--seg-used); pointer-events: none; }
+  .seg-top { position: relative; z-index: 1; display: flex; align-items: center; gap: 5px; color: var(--text); }
   .lock { color: var(--text-muted); flex-shrink: 0; }
-  .enc { font-size: 10px; line-height: 1; flex-shrink: 0; }
+  .enc { display: inline-flex; line-height: 1; flex-shrink: 0; }
 
-  .pw-panel { margin-top: 16px; padding: 16px 18px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2, rgba(127,127,127,.06)); }
+  .pw-panel { margin-top: 16px; padding: 16px 18px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel2); }
   /* Password panel rendered directly under its disk card: tighter top margin
-     and a primary-tinted border so the association with the disk is clear. */
-  .pw-panel.under-disk { margin-top: 6px; margin-bottom: 4px; border-color: rgba(45,125,210,.35); background: rgba(45,125,210,.05); }
-  .pw-head { display: flex; align-items: center; gap: 16px; font-size: 13px; font-weight: 700; margin-bottom: 12px; }
+     and a primary border on the accent tint (the design's "selected" pair) so
+     the association with the disk is clear. */
+  .pw-panel.under-disk { margin-top: 6px; margin-bottom: 4px; border-color: var(--primary); background: var(--accent-soft); }
+  .pw-head { display: flex; align-items: center; gap: 16px; font-size: 13px; font-weight: 700; color: var(--head); margin-bottom: 12px; }
   .pw-shared-tgl { margin-left: auto; display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; white-space: nowrap; cursor: pointer; }
   .pw-row { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; }
   /* The single "one password for all volumes" prompt, set off from the
      per-volume status lines below it. */
-  .pw-row.shared { padding-bottom: 10px; margin-bottom: 10px; border-bottom: 1px dashed var(--border); }
+  .pw-row.shared { padding-bottom: 10px; margin-bottom: 10px; border-bottom: 1px dashed var(--border-strong); }
   .pw-wait { font-size: 13px; color: var(--text-muted); }
   /* Once decrypted, centre the "<метка> ✓ Расшифровано" pair. */
   .pw-row.done { justify-content: center; gap: 16px; }
@@ -2196,75 +2214,84 @@
      natural width. */
   .pw-remember { flex-shrink: 0; display: flex; align-items: center; gap: 6px; font-size: 13px; white-space: nowrap; }
   .pw-row .btn { flex-shrink: 0; white-space: nowrap; }
-  .pw-done { font-size: 13px; font-weight: 600; color: var(--green, #2e7d32); }
-  .pw-err { font-size: 12px; color: #d84a4a; font-weight: 600; margin: 0 0 6px 204px; }
+  .pw-done { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; font-weight: 600; color: var(--success-text); }
+  .pw-err { font-size: 12px; color: var(--error-text); font-weight: 600; margin: 0 0 6px 204px; }
   /* A volume we cannot open: a sentence in place of the password box. */
   .pw-nokey { flex: 1 1 auto; font-size: 12px; color: var(--text-muted); line-height: 1.4; }
   .pw-hint { font-size: 12px; color: var(--text-muted); margin-top: 10px; }
   /* The consequence of leaving a lock closed reads as a warning, not as
      small print: it changes what the copy contains. */
-  .pw-hint.warn { color: var(--warning); }
-  .pw-hint code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11.5px; padding: 1px 5px; border-radius: 3px; background: rgba(127, 127, 127, 0.16); color: var(--head); }
-  .btn:disabled { opacity: .5; cursor: default; }
+  .pw-hint.warn { color: var(--warning-text); }
+  .pw-hint code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11.5px; padding: 1px 5px; border-radius: 4px; background: var(--sunken); color: var(--text-secondary); }
+  .btn:disabled { opacity: .45; cursor: default; }
   .seg-label { font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .seg-meta { position: relative; z-index: 1; font-size: 11px; color: var(--head); line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .seg-meta { position: relative; z-index: 1; font-size: 11px; color: var(--text-secondary); line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .seg-meta .muted { color: var(--text-muted); }
   .check { position: absolute; top: 5px; right: 6px; z-index: 2; width: 16px; height: 16px; border-radius: 3px; background: var(--primary); display: flex; align-items: center; justify-content: center; }
   .connector { display: flex; flex-direction: column; align-items: center; margin: 20px 0; }
-  .connector .dash { width: 2px; height: 14px; background: repeating-linear-gradient(180deg, var(--text-muted) 0 4px, transparent 4px 8px); }
-  .arrow-circle { width: 44px; height: 44px; border-radius: 50%; background: var(--green); display: flex; align-items: center; justify-content: center; box-shadow: 0 4px 14px rgba(90,176,47,.35); margin: 4px 0; }
-  .dest-card { display: flex; align-items: center; gap: 14px; padding: 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--card-bg); }
+  .connector .dash { width: 2px; height: 14px; background: repeating-linear-gradient(180deg, var(--border-strong) 0 4px, transparent 4px 8px); }
+  .arrow-circle { width: 44px; height: 44px; border-radius: 50%; background: var(--success); display: flex; align-items: center; justify-content: center; margin: 4px 0; }
+  .dest-card { display: flex; align-items: center; gap: 14px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--card-bg); }
   .dest-fields { flex: 1; display: flex; align-items: center; gap: 12px; min-width: 0; }
-  .dest-fields input { flex: 1; min-width: 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: 4px; font-size: 13px; font-family: var(--font); background: var(--card-bg); color: var(--text); }
+  .dest-fields input { flex: 1; min-width: 0; padding: 8px 10px; border: 1px solid var(--border-strong); border-radius: 6px; font-size: 13px; font-family: var(--font); background: var(--input-bg); color: var(--text); }
+  .dest-fields .link { font-weight: 600; }
   .loading-note { font-size: 13px; color: var(--text-muted); padding: 9px 0; }
   .note { font-size: 12px; color: var(--text-muted); margin-top: 18px; }
-  .warn-note { font-size: 13px; color: #8c1d1d; background: rgba(216,74,74,.1); padding: 10px 14px; border-radius: 5px; margin-top: 14px; font-weight: 600; }
+  /* What the service does for the schedule: an information plaque, as in the
+     design — the same shape as .note.warn below. */
+  .note.info { color: var(--info-text); background: var(--info-soft); border: 1px solid var(--info-line); padding: 8px 12px; border-radius: 8px; }
+  .warn-note { font-size: 13px; color: var(--error-text); background: var(--error-soft); border: 1px solid var(--error-line); padding: 10px 14px; border-radius: 8px; margin-top: 14px; font-weight: 600; }
   /* Same warning, docked just above the Отмена/Назад/Далее footer. */
   .footer-warn { margin: 0 34px 12px; }
-  code { background: var(--panel2); padding: 1px 5px; border-radius: 3px; }
+  code { background: var(--sunken); color: var(--text-secondary); padding: 1px 5px; border-radius: 4px; }
   .sched { display: flex; gap: 50px; }
   .sched-kinds { display: flex; flex-direction: column; gap: 14px; }
   .sched-right { display: flex; flex-direction: column; gap: 16px; padding-top: 2px; }
-  .radio { display: flex; align-items: center; gap: 9px; font-size: 14px; color: var(--head); cursor: pointer; }
+  .radio { display: flex; align-items: center; gap: 9px; font-size: 14px; color: var(--text); cursor: pointer; }
   .radio.blk { margin: 10px 0; }
-  .days { display: flex; border: 1px solid var(--border); border-radius: 5px; overflow: hidden; }
-  .day { padding: 9px 12px; border: none; border-right: 1px solid var(--border); background: #fff; color: var(--head); font-size: 13px; cursor: pointer; font-family: var(--font); }
+  .days { display: flex; border: 1px solid var(--border-strong); border-radius: 6px; overflow: hidden; }
+  .day { padding: 9px 12px; border: none; border-right: 1px solid var(--border); background: var(--card-bg); color: var(--text); font-size: 13px; cursor: pointer; font-family: var(--font); }
+  .day:hover:not(.on) { background: var(--panel2); }
   .day.on { background: var(--primary); color: #fff; }
-  .at { display: flex; align-items: center; gap: 10px; font-size: 14px; color: var(--head); }
+  .at { display: flex; align-items: center; gap: 10px; font-size: 14px; color: var(--text-secondary); }
   .hint-sm { font-size: 12px; color: var(--text-muted); margin-top: 8px; }
-  .delay-min { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--head); margin-left: 26px; }
-  .delay-min select, .at select { padding: 3px 6px; }
+  .delay-min { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-secondary); margin-left: 26px; }
+  .delay-min select, .at select { padding: 3px 6px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--input-bg); color: var(--text); }
   .event-opts { display: flex; flex-direction: column; gap: 12px; }
   .event-opts .dev-badge { margin-left: 8px; }
-  .at input { padding: 7px 10px; border: 1px solid var(--border); border-radius: 4px; }
+  .at input { padding: 7px 10px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--input-bg); color: var(--text); }
   .adv-schedule { margin-top: 20px; display: flex; flex-direction: column; gap: 12px; }
-  .chk { display: flex; align-items: center; gap: 9px; font-size: 14px; color: var(--head); cursor: pointer; }
+  .chk { display: flex; align-items: center; gap: 9px; font-size: 14px; color: var(--text); cursor: pointer; }
   /* A way of doing the check above, so it sits under it and greys out with it. */
   .sub-chk { margin: 8px 0 0 26px; }
-  .sub-hint { margin: 4px 0 0 52px; font-size: 12.5px; line-height: 1.45; color: var(--sub); }
+  .sub-hint { margin: 4px 0 0 52px; font-size: 12.5px; line-height: 1.45; color: var(--text-muted); }
   .sub-chk.dim, .sub-hint.dim { opacity: 0.45; cursor: default; }
   .field-label { font-size: 15px; font-weight: 600; color: var(--head); margin-bottom: 10px; }
   .field-label.mt { margin-top: 26px; }
-  .num { width: 60px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 4px; margin: 0 4px; }
+  .num { width: 60px; padding: 5px 8px; border: 1px solid var(--border-strong); border-radius: 6px; margin: 0 4px; background: var(--input-bg); color: var(--text); }
+  .num:disabled { background: var(--sunken); border-color: var(--border); color: var(--text-muted); }
   .excl-tabs { display: flex; gap: 24px; margin-top: 18px; border-bottom: 1px solid var(--border); }
   .excl-tab { padding: 8px 2px 10px; background: none; border: none; border-bottom: 2px solid transparent; color: var(--text-muted); font-size: 13px; font-weight: 600; font-family: var(--font); cursor: pointer; }
   .excl-tab.active { color: var(--head); border-bottom-color: var(--primary); }
   .note.sub { margin-top: 10px; }
   /* A line of prose that happens to contain a number field — reads as a
      sentence, not as a labelled input. */
-  .chk-line { display: flex; align-items: center; font-size: 14px; color: var(--head); }
+  .chk-line { display: flex; align-items: center; font-size: 14px; color: var(--text); }
   /* A checkbox that only makes sense under the one above it. */
   .chk.sub { margin-left: 26px; }
   .chk:has(input:disabled) { color: var(--text-muted); cursor: default; }
-  .note.warn { color: #a06a10; background: rgba(251,188,5,.10); border-left: 3px solid rgba(251,188,5,.55); padding: 8px 12px; border-radius: 0 4px 4px 0; }
-  .boot-hint { margin-top: 10px; font-size: 12.5px; line-height: 1.5; color: #a06a10; background: rgba(251,188,5,.10); border-left: 3px solid rgba(251,188,5,.55); padding: 8px 12px; border-radius: 0 4px 4px 0; }
-  .excl-list { border: 1px solid var(--border); border-radius: 5px; background: #fff; max-height: 260px; overflow: auto; margin-top: 12px; }
+  .note.warn { color: var(--warning-text); background: var(--warning-soft); border: 1px solid var(--warning-line); padding: 8px 12px; border-radius: 8px; }
+  .boot-hint { margin-top: 10px; font-size: 12.5px; line-height: 1.5; color: var(--warning-text); background: var(--warning-soft); border: 1px solid var(--warning-line); padding: 8px 12px; border-radius: 8px; }
+  .excl-list { border: 1px solid var(--border); border-radius: 8px; background: var(--card-bg); max-height: 260px; overflow: auto; margin-top: 12px; }
   .body.fill { display: flex; flex-direction: column; }
   .body.fill .excl-list { flex: 1 1 0; min-height: 180px; max-height: none; }
-  .excl-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 14px; font-size: 13px; color: var(--head); border-bottom: 1px solid var(--border); }
-  .x { background: none; border: none; color: var(--text-muted); font-size: 18px; cursor: pointer; line-height: 1; }
+  .excl-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 14px; font-size: 13px; color: var(--text); border-bottom: 1px solid var(--border); }
+  .excl-row:hover { background: var(--panel2); }
+  /* 18 px square: the line box the old «×» glyph (18px, line-height 1) took. */
+  .x { width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; background: none; border: none; border-radius: 4px; color: var(--text-muted); cursor: pointer; }
+  .x:hover { background: var(--track); color: var(--head); }
   .excl-add { display: flex; gap: 10px; align-items: center; margin-top: 12px; }
-  .excl-add input { flex: 1; padding: 8px 12px; border: 1px solid var(--border); border-radius: 4px; font-size: 13px; }
+  .excl-add input { flex: 1; padding: 8px 12px; border: 1px solid var(--border-strong); border-radius: 6px; font-size: 13px; background: var(--input-bg); color: var(--text); }
   .adv { display: flex; flex-direction: column; gap: 4px; }
   .adv-group { padding: 12px 0; border-bottom: 1px solid var(--border); }
   /* The password form that opens under the encryption switch: indented to the
@@ -2275,20 +2302,22 @@
      to one under the other rather than shrinking into uselessness. */
   .enc-pair { display: flex; gap: 16px; flex-wrap: wrap; }
   .enc-cell { display: flex; flex-direction: column; flex: 1 1 260px; min-width: 240px; }
-  .adv-title { font-size: 13px; font-weight: 600; color: var(--primary); margin-bottom: 8px; }
+  .adv-title { font-size: 13px; font-weight: 700; color: var(--accent-text); margin-bottom: 8px; }
   /* A setting's details, indented to its checkbox's text. */
-  .adv-line { display: flex; align-items: center; gap: 6px; margin: 8px 0 0 26px; font-size: 13px; color: var(--head); }
-  .adv-line select { padding: 4px 6px; border: 1px solid var(--border); border-radius: 4px; font-size: 13px; font-family: var(--font); background: var(--card-bg); color: var(--text); }
-  .adv-hint { margin: 4px 0 8px 26px; font-size: 12.5px; line-height: 1.45; color: var(--sub); }
+  .adv-line { display: flex; align-items: center; gap: 6px; margin: 8px 0 0 26px; font-size: 13px; color: var(--text-secondary); }
+  .adv-line select { padding: 4px 6px; border: 1px solid var(--border-strong); border-radius: 6px; font-size: 13px; font-family: var(--font); background: var(--input-bg); color: var(--text); }
+  .adv-hint { margin: 4px 0 8px 26px; font-size: 12.5px; line-height: 1.45; color: var(--text-muted); }
   .adv-hint.flush { margin-left: 0; margin-top: 6px; }
-  .dev-badge { font-size: 11px; color: #a06a10; background: rgba(251,188,5,.15); padding: 3px 9px; border-radius: 10px; }
-  .wz-error { padding: 8px 34px; color: #8c1d1d; font-size: 13px; background: rgba(216,74,74,.08); }
+  .dev-badge { font-size: 11px; font-weight: 700; color: var(--warning-text); background: var(--warning-soft); padding: 2px 8px; border-radius: 10px; }
+  .wz-error { padding: 8px 34px; color: var(--error-text); font-size: 13px; background: var(--error-soft); }
   /* .footer is global (styles/global.css) — same bar on every page. */
   .spacer { flex: 1; }
-  .btn { border-radius: 4px; padding: 10px 26px; font-size: 14px; font-weight: 600; font-family: var(--font); cursor: pointer; border: none; }
+  .btn { border-radius: 6px; padding: 10px 26px; font-size: 14px; font-weight: 600; font-family: var(--font); cursor: pointer; border: 1px solid transparent; transition: background-color .15s ease; }
   .btn.small { padding: 7px 14px; font-size: 13px; }
-  .btn.ghost { background: none; border: 1px solid var(--border); color: var(--head); }
+  .btn.ghost { background: var(--card-bg); border-color: var(--border-strong); color: var(--text); }
+  .btn.ghost:hover:not(:disabled) { background: var(--panel2); }
   .btn.primary { background: var(--primary); color: #fff; }
+  .btn.primary:hover:not(:disabled) { background: var(--primary-hover); }
   .btn.green { background: var(--green); color: #fff; }
-  .btn.green:hover { background: var(--green-hover); }
+  .btn.green:hover:not(:disabled) { background: var(--green-hover); }
 </style>

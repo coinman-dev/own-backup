@@ -181,7 +181,7 @@
   }
   .field-label {
     font-size: 12px;
-    color: var(--text-muted);
+    color: var(--text-secondary);
     margin: 14px 0 5px;
   }
   .wide-field {
@@ -193,6 +193,7 @@
     color: var(--text-muted);
     line-height: 1.45;
   }
+  /* The one thing in the dialog to copy down: tinted and edged in the accent. */
   .key-box {
     display: flex;
     align-items: center;
@@ -200,8 +201,8 @@
     padding: 12px;
     margin: 4px 0 2px;
     border: 1px solid var(--primary);
-    border-radius: 6px;
-    background: var(--card-bg);
+    border-radius: 8px;
+    background: var(--accent-soft);
   }
   .key-box code {
     flex: 1 1 auto;
@@ -212,18 +213,20 @@
     color: var(--text);
     user-select: all;
   }
+  /* A small secondary button. */
   .copy {
     flex: 0 0 auto;
     padding: 6px 10px;
     font-size: 12px;
-    border: 1px solid var(--border);
-    border-radius: 5px;
-    background: transparent;
-    color: var(--text-muted);
+    font-weight: 600;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    background: var(--card-bg);
+    color: var(--text);
     cursor: pointer;
   }
   .copy:hover {
-    color: var(--text);
+    background: var(--panel2);
   }
   .fp {
     font-family: ui-monospace, 'Cascadia Mono', 'Consolas', monospace;
@@ -233,8 +236,9 @@
     margin: 10px 0 0;
     padding: 8px 10px;
     font-size: 12px;
-    border-radius: 5px;
-    background: rgba(216, 74, 74, 0.12);
-    color: #d84a4a;
+    border: 1px solid var(--error-line);
+    border-radius: 8px;
+    background: var(--error-soft);
+    color: var(--error-text);
   }
 </style>

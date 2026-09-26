@@ -154,8 +154,8 @@
 
   function statusColor(s: string): string {
     return s === 'running' ? 'var(--primary)'
-      : s === 'queued' ? '#5a8fd8'
-      : s === 'success' ? 'var(--green)'
+      : s === 'queued' ? 'var(--info)'
+      : s === 'success' ? 'var(--success)'
       : s === 'error' ? 'var(--error)'
       : 'var(--text-muted)';
   }
@@ -172,7 +172,7 @@
       Этот компьютер
       <div class="sort">
         <button class="sort-btn" title="Сортировка: {SORT_LABELS[sortKey]}" aria-label="Сортировка" onclick={() => (sortOpen = !sortOpen)}>
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><line x1="4" y1="7" x2="16" y2="7"/><line x1="4" y1="12" x2="12" y2="12"/><line x1="4" y1="17" x2="8" y2="17"/></svg>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M4 7h16M7 12h10M10 17h4"/></svg>
         </button>
         {#if sortOpen}
           <button class="sort-backdrop" aria-label="Закрыть" onclick={() => (sortOpen = false)}></button>
@@ -189,7 +189,7 @@
       {#if draftMode === 'wizard' && draftJob}
         <div class="job-item sel draft">
           <div class="job-icon pc">
-            <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.5"><rect x="2" y="4" width="20" height="13" rx="1.5"/><path d="M8 20h8M12 17v3"/></svg>
+            <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="var(--accent-text)" stroke-width="1.5"><rect x="2" y="4" width="20" height="13" rx="1.5"/><path d="M8 20h8M12 17v3"/></svg>
           </div>
           <input class="name-edit" bind:value={draftJob.name} spellcheck="false" placeholder="Имя копии" />
         </div>
@@ -202,7 +202,7 @@
       {#each sortedJobs as job (job.id)}
         <button class="job-item" class:sel={selectedId === job.id && !draftJob || editingId === job.id} onclick={() => selectJob(job.id)}>
           <div class="job-icon">
-            <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="1.4"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="12" cy="12" r="3.2"/></svg>
+            <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="var(--disk-icon)" stroke-width="1.6"><rect x="3" y="5" width="18" height="14" rx="3"/><circle cx="12" cy="12" r="3.5"/></svg>
             <span class="status-dot" style="background:{statusColor(jobStatus(job))}"></span>
           </div>
           {#if editingId === job.id && draftJob}
@@ -213,7 +213,7 @@
                 {job.name}{#if job.archive_encryption}<span
                     class="enc-badge"
                     title="Копии этого задания зашифрованы — для чтения нужен пароль или ключ восстановления"
-                    aria-label="Зашифровано">🔒</span
+                    aria-label="Зашифровано"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2.2" stroke-linecap="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></span
                   >{/if}
               </div>
               <div class="job-path">{job.dest_folder}</div>
@@ -231,7 +231,7 @@
                   e.preventDefault();
                   askDelete(job.id, e);
                 }
-              }}>×</span>
+              }}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></span>
           {/if}
         </button>
       {/each}
@@ -240,7 +240,7 @@
       <div class="add-error">Не удалось открыть мастер: {addError}</div>
     {/if}
     <button class="add-btn" onclick={addJob}>
-      <svg width="18" height="18" viewBox="0 0 24 24" stroke="var(--primary)" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
       Добавить копию
     </button>
   </div>
@@ -255,7 +255,7 @@
       {/key}
     {:else}
       <div class="empty-dash">
-        <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="var(--border)" stroke-width="1.4"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="12" cy="12" r="3.4"/></svg>
+        <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="var(--border-strong)" stroke-width="1.4"><rect x="3" y="5" width="18" height="14" rx="3"/><circle cx="12" cy="12" r="3.5"/></svg>
         <div>Создайте задание резервного копирования</div>
         <button class="add-btn big" onclick={addJob}>+ Добавить копию</button>
       </div>
@@ -307,48 +307,54 @@
 <style>
   .layout { display: flex; height: 100%; }
   .jobs-col { width: 240px; flex-shrink: 0; background: var(--column-bg); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
-  .col-title { font-size: 22px; font-weight: 300; color: var(--head); padding: 22px 18px 12px; }
-  .this-pc { display: flex; align-items: center; gap: 8px; padding: 6px 18px; font-size: 13px; font-weight: 600; color: var(--head); }
+  .col-title { font-size: 24px; font-weight: 300; color: var(--head); padding: 22px 18px 12px; }
+  .this-pc { display: flex; align-items: center; gap: 8px; padding: 6px 18px; font-size: 13px; font-weight: 600; color: var(--text-secondary); }
   .sort { margin-left: auto; position: relative; display: flex; }
   .sort-btn { background: none; border: none; padding: 3px 5px; cursor: pointer; color: var(--text-muted); display: flex; border-radius: 4px; }
-  .sort-btn:hover { color: var(--head); background: var(--hover, #f2f2f8); }
+  .sort-btn:hover { color: var(--head); background: var(--track); }
   .sort-backdrop { position: fixed; inset: 0; z-index: 40; background: none; border: none; cursor: default; }
-  .sort-menu { position: absolute; top: 100%; right: 0; margin-top: 4px; z-index: 50; min-width: 150px; padding: 4px; display: flex; flex-direction: column; background: var(--card-bg); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 6px 20px rgba(0,0,0,.15); }
-  .sort-menu button { text-align: left; background: none; border: none; padding: 8px 12px; font-size: 13px; font-weight: 600; color: var(--head); cursor: pointer; border-radius: 4px; font-family: var(--font); }
-  .sort-menu button:hover { background: var(--hover, #f2f2f8); }
-  .sort-menu button.active { color: var(--primary); }
-  .del-q { font-size: 14px; color: var(--head); margin: 0 0 16px; }
-  .del-files { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--head); cursor: pointer; }
-  .del-warn { font-size: 13px; color: var(--error, #d84a4a); font-weight: 600; margin: 12px 0 0; }
-  .del-left { font-size: 13px; color: var(--error, #d84a4a); margin: 12px 0 0; white-space: pre-wrap; max-height: 240px; overflow: auto; }
+  .sort-menu { position: absolute; top: 100%; right: 0; margin-top: 4px; z-index: 50; min-width: 150px; padding: 4px; display: flex; flex-direction: column; background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow-lg); }
+  .sort-menu button { text-align: left; background: none; border: none; padding: 8px 12px; font-size: 13px; font-weight: 600; color: var(--text); cursor: pointer; border-radius: 4px; font-family: var(--font); }
+  .sort-menu button:hover { background: var(--panel2); }
+  .sort-menu button.active { color: var(--accent-text); }
+  .del-q { font-size: 14px; color: var(--text); margin: 0 0 16px; }
+  .del-files { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--text); cursor: pointer; }
+  .del-warn { font-size: 13px; color: var(--error-text); font-weight: 600; margin: 12px 0 0; }
+  .del-left { font-size: 13px; color: var(--error-text); margin: 12px 0 0; white-space: pre-wrap; max-height: 240px; overflow: auto; }
   .jobs-list { flex: 1; overflow: auto; padding: 8px 8px; }
   .empty-list { text-align: center; color: var(--text-muted); font-size: 13px; padding: 30px 10px; line-height: 1.6; }
-  .job-item { width: 100%; display: flex; align-items: center; gap: 10px; padding: 10px 8px; border: 1px solid transparent; border-radius: 6px; background: none; cursor: pointer; margin-bottom: 4px; text-align: left; font-family: var(--font); }
-  .job-item:hover { background: var(--hover, #f2f2f8); }
+  .job-item { width: 100%; display: flex; align-items: center; gap: 10px; padding: 10px 8px; border: 1px solid transparent; border-radius: 8px; background: none; cursor: pointer; margin-bottom: 4px; text-align: left; font-family: var(--font); }
+  .job-item:hover { background: var(--panel2); }
   .job-item.sel { background: var(--accent-soft); border-color: var(--primary); }
   .job-item.draft { cursor: default; }
   .job-icon { position: relative; flex-shrink: 0; }
   .status-dot { position: absolute; right: -2px; bottom: 0; width: 11px; height: 11px; border-radius: 50%; border: 2px solid var(--column-bg); }
   .job-meta { flex: 1; min-width: 0; }
-  .job-name { font-size: 14px; font-weight: 600; color: var(--head); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .enc-badge { margin-left: 6px; font-size: 11px; opacity: 0.85; }
+  .job-name { font-size: 14px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .enc-badge { margin-left: 6px; font-size: 11px; }
+  .enc-badge svg { vertical-align: -1px; }
   .job-path { font-size: 12px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .name-edit { flex: 1; min-width: 0; font-size: 14px; font-weight: 600; color: var(--head); border: 1px solid var(--primary); border-radius: 4px; padding: 5px 8px; font-family: var(--font); outline: none; background: #fff; }
-  .del { opacity: 0; color: var(--text-muted); font-size: 18px; line-height: 1; padding: 0 4px; }
+  .name-edit { flex: 1; min-width: 0; font-size: 14px; font-weight: 600; color: var(--text); border: 1px solid var(--primary); border-radius: 6px; padding: 5px 8px; font-family: var(--font); outline: none; background: var(--input-bg); }
+  .name-edit:focus { box-shadow: 0 0 0 3px var(--accent-soft); }
+  .name-edit::placeholder { color: var(--text-muted); }
+  .del { opacity: 0; color: var(--text-muted); font-size: 18px; line-height: 1; padding: 0 4px; display: flex; }
+  .del:hover { color: var(--error-text); }
   .job-item:hover .del { opacity: 1; }
   .add-error {
     margin: 0 12px 8px;
     padding: 8px 10px;
-    border-radius: 6px;
-    background: var(--danger-bg, rgba(220, 80, 80, .12));
-    color: var(--danger, #b03030);
+    border-radius: 8px;
+    background: var(--error-soft);
+    border: 1px solid var(--error-line);
+    color: var(--error-text);
     font-size: 12px;
     line-height: 1.35;
   }
 
-  .add-btn { display: flex; align-items: center; gap: 10px; padding: 15px 18px; background: none; border: none; border-top: 1px solid var(--border); cursor: pointer; font-size: 14px; font-weight: 600; color: var(--head); font-family: var(--font); }
-  .add-btn:hover { color: var(--primary); }
+  .add-btn { display: flex; align-items: center; gap: 10px; padding: 15px 18px; background: none; border: none; border-top: 1px solid var(--border); cursor: pointer; font-size: 14px; font-weight: 600; color: var(--accent-text); font-family: var(--font); }
+  .add-btn:hover { background: var(--panel2); }
   .dash-col { flex: 1; min-width: 0; overflow: auto; }
   .empty-dash { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; color: var(--text-muted); font-size: 15px; }
-  .add-btn.big { border: 1px solid var(--primary); border-radius: 4px; color: var(--primary); padding: 10px 24px; }
+  .add-btn.big { border: 1px solid var(--primary); border-radius: 6px; color: var(--accent-text); padding: 10px 24px; }
+  .add-btn.big:hover { background: var(--accent-soft); }
 </style>

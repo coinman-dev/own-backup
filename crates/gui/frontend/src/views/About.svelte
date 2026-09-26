@@ -170,8 +170,8 @@
 
   .page-title {
     font-size: 24px;
-    font-weight: 600;
-    color: var(--text);
+    font-weight: 300;
+    color: var(--head);
     margin: 0;
   }
 
@@ -181,8 +181,8 @@
 
   .app-name {
     font-size: 20px;
-    font-weight: 700;
-    color: var(--text);
+    font-weight: 600;
+    color: var(--head);
     margin: 0 0 8px;
   }
 
@@ -213,15 +213,15 @@
 
   .info-value {
     font-size: 13px;
-    font-weight: 500;
-    color: var(--text);
+    font-weight: 600;
+    color: var(--head);
     text-align: right;
   }
 
   .section-heading {
-    font-size: 15px;
+    font-size: 16px;
     font-weight: 600;
-    color: var(--text);
+    color: var(--head);
     margin: 0 0 10px;
   }
 
@@ -253,9 +253,22 @@
     margin-bottom: 0;
   }
 
+  /* The design's bullets are accent dots. */
+  .hints li::marker {
+    color: var(--primary);
+  }
+
+  .licence b,
+  .hints b {
+    color: var(--head);
+  }
+
   code {
     font-family: var(--font-mono, ui-monospace, monospace);
     font-size: 12px;
     color: var(--text);
+    background: var(--sunken);
+    padding: 1px 5px;
+    border-radius: 4px;
   }
 </style>

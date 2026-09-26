@@ -95,7 +95,7 @@
   .modal-backdrop {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.45);
+    background: var(--overlay);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -105,8 +105,9 @@
 
   .modal-card {
     background: var(--card-bg);
+    border: 1px solid var(--border);
     border-radius: 12px;
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+    box-shadow: var(--shadow-lg);
     width: 90%;
     max-width: 520px;
     max-height: 85vh;
@@ -126,7 +127,7 @@
   .modal-title {
     font-size: 18px;
     font-weight: 600;
-    color: var(--text);
+    color: var(--head);
     margin: 0;
   }
 
@@ -139,11 +140,12 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    transition: color 0.12s ease;
+    transition: color 0.12s ease, background-color 0.12s ease;
   }
 
   .modal-close:hover {
-    color: var(--text);
+    color: var(--head);
+    background: var(--track);
   }
 
   .modal-body {
@@ -152,12 +154,15 @@
     flex: 1;
   }
 
+  /* The design's --panel strip; rounded to sit inside the 12 px frame. */
   .modal-footer {
     display: flex;
     justify-content: flex-end;
     gap: 10px;
     padding: 16px 24px 20px;
     border-top: 1px solid var(--border);
+    background: var(--panel2);
+    border-radius: 0 0 11px 11px;
   }
 
   @keyframes fadeIn {

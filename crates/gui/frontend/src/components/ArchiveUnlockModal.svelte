@@ -127,16 +127,21 @@
   .tab {
     padding: 6px 12px;
     font-size: 12px;
-    border: 1px solid var(--border);
-    border-radius: 5px;
-    background: transparent;
-    color: var(--text-muted);
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    background: var(--card-bg);
+    color: var(--text-secondary);
     cursor: pointer;
   }
+  .tab:hover:not(.active) {
+    background: var(--panel2);
+  }
+  /* Chosen the way the design marks a chosen item: tinted, accent-edged. */
   .tab.active {
-    background: var(--card-bg);
+    background: var(--accent-soft);
     border-color: var(--primary);
-    color: var(--text);
+    color: var(--accent-text);
+    font-weight: 600;
   }
   .wide-field {
     display: flex;
@@ -154,8 +159,9 @@
     margin: 10px 0 0;
     padding: 8px 10px;
     font-size: 12px;
-    border-radius: 5px;
-    background: rgba(216, 74, 74, 0.12);
-    color: #d84a4a;
+    border: 1px solid var(--error-line);
+    border-radius: 8px;
+    background: var(--error-soft);
+    color: var(--error-text);
   }
 </style>

@@ -136,20 +136,31 @@
     /* Room for the eye, the layout and Caps Lock, so a long password never
        runs under them. */
     padding: 8px 88px 8px 12px;
-    border: 1px solid var(--border);
-    border-radius: 5px;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
     font-size: 13px;
     font-family: var(--font);
-    background: var(--card-bg);
+    background: var(--input-bg);
     color: var(--text);
+  }
+  input::placeholder {
+    color: var(--text-muted);
+  }
+  input:focus {
+    outline: none;
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px var(--accent-soft);
   }
   .pw-field.inline input {
     width: 230px;
     padding: 6px 84px 6px 9px;
-    border-radius: 4px;
+    border-radius: 6px;
   }
   input.err {
-    border-color: #d84a4a;
+    border-color: var(--error);
+  }
+  input.err:focus {
+    box-shadow: 0 0 0 3px var(--error-soft);
   }
 
   .tail {
@@ -173,10 +184,10 @@
   }
   .eye:hover {
     color: var(--head);
-    background: rgba(127, 127, 127, 0.14);
+    background: var(--track);
   }
   .eye.on {
-    color: var(--primary);
+    color: var(--accent-text);
   }
 
   .lang {
@@ -207,8 +218,8 @@
     cursor: default;
   }
   .caps.on {
-    color: #b7791f;
-    background: rgba(251, 188, 5, 0.18);
+    color: var(--warning);
+    background: var(--warning-soft);
     opacity: 1;
   }
 </style>

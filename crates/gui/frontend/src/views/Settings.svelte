@@ -2,6 +2,7 @@
   import { pickPath } from '../lib/pickPath.svelte';
   import { api } from '../lib/api';
   import type { ServiceStatus, MountBackendStatus } from '../lib/types';
+  import { theme, setTheme, type ThemeMode } from '../lib/themeStore.svelte';
 
   /** The config as it was loaded, kept whole. Saving edits a copy of it rather
    *  than building a fresh object out of the fields this page shows — which is
@@ -113,6 +114,20 @@
       () => (mountStatus = null),
     );
   });
+
+  /** The three theme tiles, each a small picture of the window in it: menu
+   *  strip, two lines of text and a button. Applied at once — nothing to save. */
+  const themeOptions: { mode: ThemeMode; label: string; side: string; bg: string; line: string }[] = [
+    { mode: 'light', label: 'Светлая', side: '#221d49', bg: '#ffffff', line: '#e3e3ec' },
+    { mode: 'dark', label: 'Тёмная', side: '#110f22', bg: '#1f1e2a', line: '#34334a' },
+    {
+      mode: 'system',
+      label: 'Как в Windows',
+      side: 'linear-gradient(135deg, #221d49 50%, #110f22 50%)',
+      bg: 'linear-gradient(135deg, #ffffff 50%, #1f1e2a 50%)',
+      line: '#9a9ab0',
+    },
+  ];
 
   /** One line on whether a copy can be connected as a disk, and why not. */
   const mountLine = $derived.by((): { ok: boolean; text: string } => {
@@ -233,50 +248,81 @@
         </div>
       </div>
 
-      <div class="card">
-        <h2 class="section-title">Состояние службы</h2>
+      <div class="side-column">
+        <div class="card">
+          <h2 class="section-title">Оформление</h2>
+          <div class="field-label">Тема</div>
+          <div class="theme-options">
+            {#each themeOptions as o (o.mode)}
+              <button
+                class="theme-option"
+                class:selected={theme.mode === o.mode}
+                aria-pressed={theme.mode === o.mode}
+                onclick={() => setTheme(o.mode)}
+              >
+                <span class="theme-preview">
+                  <span class="tp-side" style:background={o.side}></span>
+                  <span class="tp-body" style:background={o.bg}>
+                    <span class="tp-line" style:background={o.line} style:width="60%"></span>
+                    <span class="tp-line" style:background={o.line} style:width="85%"></span>
+                    <span class="tp-button"></span>
+                  </span>
+                </span>
+                <span class="theme-label">{o.label}</span>
+              </button>
+            {/each}
+          </div>
+          <p class="help-text">
+            «Как в Windows» следует системной настройке «Режим приложения» и
+            переключается вместе с ней.
+          </p>
+        </div>
 
-        {#if statusLoading}
-          <div class="status-pending">Опрашиваем службу…</div>
-        {:else if serviceStatus?.connected}
-          <div class="status-grid">
-            <div class="status-item">
-              <span class="status-label">Служба</span>
-              <span class="status-value running">
-                <span class="status-dot"></span>
-                Работает
-              </span>
+        <div class="card">
+          <h2 class="section-title">Состояние службы</h2>
+
+          {#if statusLoading}
+            <div class="status-pending">Опрашиваем службу…</div>
+          {:else if serviceStatus?.connected}
+            <div class="status-grid">
+              <div class="status-item">
+                <span class="status-label">Служба</span>
+                <span class="status-value running">
+                  <span class="status-dot"></span>
+                  Работает
+                </span>
+              </div>
+              <div class="status-item">
+                <span class="status-label">Версия</span>
+                <span class="status-value">{serviceStatus.version}</span>
+              </div>
+              <div class="status-item">
+                <span class="status-label">Время работы</span>
+                <span class="status-value">{formatUptime(serviceStatus.uptime_secs)}</span>
+              </div>
+              <div class="status-item">
+                <span class="status-label">Выполняется заданий</span>
+                <span class="status-value">{serviceStatus.active_jobs}</span>
+              </div>
+              <div class="status-item">
+                <span class="status-label">Копий подключено как диск</span>
+                <span class="status-value">{serviceStatus.active_mounts?.length ?? 0}</span>
+              </div>
+              <div class="status-item">
+                <span class="status-label">Подключение копий как диска</span>
+                <span class="status-value" class:running={mountLine.ok} class:failing={!mountLine.ok}>
+                  <span class="status-dot" class:offline={!mountLine.ok}></span>
+                  {mountLine.text}
+                </span>
+              </div>
             </div>
-            <div class="status-item">
-              <span class="status-label">Версия</span>
-              <span class="status-value">{serviceStatus.version}</span>
+          {:else}
+            <div class="status-offline">
+              <span class="status-dot offline"></span>
+              <span>Служба не запущена или не отвечает.</span>
             </div>
-            <div class="status-item">
-              <span class="status-label">Время работы</span>
-              <span class="status-value">{formatUptime(serviceStatus.uptime_secs)}</span>
-            </div>
-            <div class="status-item">
-              <span class="status-label">Выполняется заданий</span>
-              <span class="status-value">{serviceStatus.active_jobs}</span>
-            </div>
-            <div class="status-item">
-              <span class="status-label">Копий подключено как диск</span>
-              <span class="status-value">{serviceStatus.active_mounts?.length ?? 0}</span>
-            </div>
-            <div class="status-item">
-              <span class="status-label">Подключение копий как диска</span>
-              <span class="status-value" class:running={mountLine.ok} class:failing={!mountLine.ok}>
-                <span class="status-dot" class:offline={!mountLine.ok}></span>
-                {mountLine.text}
-              </span>
-            </div>
-          </div>
-        {:else}
-          <div class="status-offline">
-            <span class="status-dot offline"></span>
-            <span>Служба не запущена или не отвечает.</span>
-          </div>
-        {/if}
+          {/if}
+        </div>
       </div>
     </div>
   {/if}
@@ -295,8 +341,8 @@
 
   .page-title {
     font-size: 24px;
-    font-weight: 600;
-    color: var(--text);
+    font-weight: 300;
+    color: var(--head);
     margin: 0;
   }
 
@@ -305,10 +351,10 @@
     align-items: center;
     gap: 10px;
     padding: 12px 16px;
-    background: rgba(234, 67, 53, 0.08);
-    border: 1px solid rgba(234, 67, 53, 0.2);
-    border-radius: var(--radius);
-    color: var(--error);
+    background: var(--error-soft);
+    border: 1px solid var(--error-line);
+    border-radius: 8px;
+    color: var(--error-text);
     margin-bottom: 20px;
     font-size: 13px;
   }
@@ -318,10 +364,10 @@
     align-items: center;
     gap: 10px;
     padding: 12px 16px;
-    background: rgba(52, 168, 83, 0.08);
-    border: 1px solid rgba(52, 168, 83, 0.2);
-    border-radius: var(--radius);
-    color: var(--success);
+    background: var(--success-soft);
+    border: 1px solid var(--success-line);
+    border-radius: 8px;
+    color: var(--success-text);
     margin-bottom: 20px;
     font-size: 13px;
   }
@@ -366,20 +412,101 @@
   .section-title {
     font-size: 16px;
     font-weight: 600;
-    color: var(--text);
+    color: var(--head);
     margin: 0 0 16px;
   }
 
   .help-text {
-    font-size: 12px;
+    font-size: 12.5px;
+    line-height: 1.5;
     color: var(--text-muted);
-    margin-top: 4px;
+    margin-top: 6px;
   }
 
   /* Shown, not edited: it should not look like a field waiting for input. */
   .form-input[readonly] {
-    color: var(--text-muted);
+    background: var(--sunken);
+    border-color: var(--border);
+    color: var(--text-secondary);
     cursor: default;
+  }
+  .form-input[readonly]:focus {
+    border-color: var(--border);
+    box-shadow: none;
+  }
+
+  /* Right column: «Оформление» above «Состояние службы». */
+  .side-column {
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+    min-width: 0;
+  }
+
+  .field-label {
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--head);
+    margin-bottom: 8px;
+  }
+
+  .theme-options {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .theme-option {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 8px;
+    border-radius: 8px;
+    border: 2px solid var(--border);
+    background: none;
+    color: var(--text);
+    font-size: 13px;
+    transition: border-color 0.12s ease;
+  }
+  .theme-option:hover {
+    border-color: var(--border-strong);
+  }
+  .theme-option.selected {
+    border-color: var(--primary);
+  }
+
+  .theme-preview {
+    height: 54px;
+    border-radius: 5px;
+    overflow: hidden;
+    display: flex;
+    border: 1px solid var(--border);
+  }
+  .tp-side {
+    width: 26%;
+  }
+  .tp-body {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    padding: 8px;
+  }
+  .tp-line {
+    height: 5px;
+    border-radius: 3px;
+  }
+  /* The accent of the light theme on every tile: it is the same violet. */
+  .tp-button {
+    height: 9px;
+    width: 36%;
+    border-radius: 3px;
+    margin-top: auto;
+    align-self: flex-end;
+    background: #5b4bd6;
+  }
+  .theme-label {
+    text-align: center;
   }
 
   /* Path plus its "Обзор…" button: the field takes what is left. */
@@ -402,7 +529,7 @@
   .range-labels {
     display: flex;
     justify-content: space-between;
-    font-size: 11px;
+    font-size: 12px;
     color: var(--text-muted);
     margin-top: 4px;
   }
@@ -433,21 +560,21 @@
   }
 
   .status-label {
-    font-size: 13px;
-    color: var(--text-muted);
+    font-size: 13.5px;
+    color: var(--text-secondary);
   }
 
   .status-value {
-    font-size: 14px;
-    font-weight: 500;
-    color: var(--text);
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--head);
     display: flex;
     align-items: center;
     gap: 8px;
   }
 
   .status-value.running {
-    color: var(--success);
+    color: var(--success-text);
   }
 
   .status-dot {
@@ -473,8 +600,8 @@
     align-items: center;
     gap: 10px;
     padding: 16px;
-    background: rgba(234, 67, 53, 0.06);
-    border-radius: 6px;
+    background: var(--error-soft);
+    border-radius: 8px;
     font-size: 13px;
     color: var(--text-secondary);
   }
@@ -484,7 +611,7 @@
   }
 
   .status-value.failing {
-    color: var(--error);
+    color: var(--error-text);
     text-align: right;
   }
 </style>
