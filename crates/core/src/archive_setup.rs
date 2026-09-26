@@ -98,6 +98,16 @@ impl ArchiveSetup {
         Self::default()
     }
 
+    /// Read the prepared job for a fresh validation at confirmation time.
+    /// The recovery key and private key never leave this store.
+    pub fn pending_job(&self, token: &str) -> Result<Job> {
+        let mut pending = self.lock()?;
+        sweep(&mut pending);
+        pending.get(token).map(|p| p.job.clone()).ok_or_else(|| {
+            OwnBackupError::Config(tr!("archive_setup.request_not_found").into_owned())
+        })
+    }
+
     /// Prepare an authorization. Writes nothing.
     ///
     /// Slow on purpose: sealing the portable envelope runs Argon2id at the
@@ -126,13 +136,8 @@ impl ArchiveSetup {
 
         let pair = JobKeyPair::generate()?;
         let recovery = RecoveryKey::generate()?;
-        let portable = SealedPrivateKey::seal(
-            &job.id,
-            &pair,
-            password,
-            &recovery,
-            &KdfParams::strong(),
-        )?;
+        let portable =
+            SealedPrivateKey::seal(&job.id, &pair, password, &recovery, &KdfParams::strong())?;
         let fingerprint = portable.public_key()?.fingerprint();
         let token = uuid::Uuid::new_v4().to_string();
         let begun = BegunAuthorization {
@@ -163,12 +168,7 @@ impl ArchiveSetup {
     /// The job is persisted as the last step of the key-store transaction, so a
     /// failure anywhere leaves the job exactly as it was — unencrypted, or
     /// absent.
-    pub fn confirm(
-        &self,
-        store: &JobStore,
-        token: &str,
-        recovery_echo: &str,
-    ) -> Result<Job> {
+    pub fn confirm(&self, store: &JobStore, token: &str, recovery_echo: &str) -> Result<Job> {
         // Taken out of the map for the whole attempt: a token is single-use,
         // and only a survivable typo puts it back.
         let mut entry = {
@@ -237,11 +237,9 @@ impl ArchiveSetup {
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, HashMap<String, Pending>>> {
-        self.pending
-            .lock()
-            .map_err(|_| {
-                OwnBackupError::Config(tr!("archive_setup.wizard_state_corrupt").into_owned())
-            })
+        self.pending.lock().map_err(|_| {
+            OwnBackupError::Config(tr!("archive_setup.wizard_state_corrupt").into_owned())
+        })
     }
 }
 
@@ -252,10 +250,9 @@ fn sweep(pending: &mut HashMap<String, Pending>) {
 impl JobStore {
     /// The service's own protected key store, beside the jobs file.
     pub fn service_key_store(&self) -> Result<ServiceKeyStore> {
-        let data_dir = self
-            .jobs_path
-            .parent()
-            .ok_or_else(|| OwnBackupError::Config(tr!("archive_setup.no_state_dir").into_owned()))?;
+        let data_dir = self.jobs_path.parent().ok_or_else(|| {
+            OwnBackupError::Config(tr!("archive_setup.no_state_dir").into_owned())
+        })?;
         ServiceKeyStore::new(data_dir)
     }
 }
@@ -323,7 +320,10 @@ mod tests {
         assert_eq!(prepared.portable.job_id, begun.job_id);
         // The password opens it, and the recovery key opens it independently —
         // the two slots an archive travels with.
-        assert!(prepared.portable.unseal_with_password("пароль архива 1").is_ok());
+        assert!(prepared
+            .portable
+            .unseal_with_password("пароль архива 1")
+            .is_ok());
         let typed = RecoveryKey::parse(&begun.recovery_key).unwrap();
         assert!(prepared.portable.unseal_with_recovery(&typed).is_ok());
     }
@@ -412,7 +412,10 @@ mod tests {
         let (token, shown) = prepare(&setup, job());
         setup.cancel(&token);
         assert_eq!(setup.pending_count(), 0);
-        let e = setup.confirm(&store, &token, &shown).unwrap_err().to_string();
+        let e = setup
+            .confirm(&store, &token, &shown)
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("не найден"), "{e}");
     }
 

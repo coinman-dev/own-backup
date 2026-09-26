@@ -89,6 +89,29 @@ pub fn check_whole_disk_restore(
     }
 }
 
+/// A whole-disk writer must also account for the boot partition that may live
+/// on a different physical disk than the Windows volume.
+pub fn check_whole_disk_protection(
+    target_disk: u32,
+    system_disk: Option<u32>,
+    is_boot_media: bool,
+    protected: &Protection,
+) -> Result<()> {
+    check_whole_disk_restore(target_disk, system_disk, is_boot_media)?;
+    if is_boot_media { return Ok(()); }
+    if let Some(why) = &protected.cannot_tell {
+        return Err(OwnBackupError::RestoreIncompatible(
+            tr!("guard.protection_unknown", reason = why).into_owned(),
+        ));
+    }
+    if !protected.parts.is_empty() {
+        return Err(OwnBackupError::RestoreIncompatible(
+            tr!("guard.disk_has_live_boot_partition", disk = target_disk).into_owned(),
+        ));
+    }
+    Ok(())
+}
+
 /// The physical drive number that hosts the running Windows (`%SystemDrive%`),
 /// or `None` if it can't be determined.
 ///
@@ -128,7 +151,10 @@ pub fn is_boot_media() -> bool {
 /// Guard a whole-disk restore using live Windows detection.
 #[cfg(target_os = "windows")]
 pub fn guard_target_disk(target_disk: u32) -> Result<()> {
-    check_whole_disk_restore(target_disk, system_disk_number(), is_boot_media())
+    let media = is_boot_media();
+    let system_disk = system_disk_number();
+    let protected = if media { Protection::nothing_is_running() } else { protection(target_disk) };
+    check_whole_disk_protection(target_disk, system_disk, media, &protected)
 }
 
 /// May this raw volume be written over?
@@ -149,7 +175,10 @@ pub fn guard_target_volume(target: &str) -> Result<()> {
     let mut live: Vec<(u32, u64)> = Vec::new();
     for path in [
         std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into()),
-        format!("{}\\", std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into())),
+        format!(
+            "{}\\",
+            std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into())
+        ),
     ] {
         if let Some(root) = volume_root_for_path(&path) {
             for e in volume_extents(&root) {
@@ -163,7 +192,9 @@ pub fn guard_target_volume(target: &str) -> Result<()> {
         ));
     }
 
-    let Some(root) = volume_root_for_path(target).or_else(|| volume_root_for_path(&format!("{target}\\"))) else {
+    let Some(root) =
+        volume_root_for_path(target).or_else(|| volume_root_for_path(&format!("{target}\\")))
+    else {
         // An unrecognised target is not obviously safe: it may be a raw device
         // path pointing at the very volume above.
         return Err(OwnBackupError::RestoreIncompatible(
@@ -181,6 +212,28 @@ pub fn guard_target_volume(target: &str) -> Result<()> {
             return Err(OwnBackupError::RestoreIncompatible(
                 tr!("guard.target_is_live_system").into_owned(),
             ));
+        }
+        let protected = protection(e.disk_number);
+        if let Some(why) = protected.cannot_tell {
+            return Err(OwnBackupError::RestoreIncompatible(
+                tr!("guard.protection_unknown", reason = why).into_owned(),
+            ));
+        }
+        if !protected.parts.is_empty() {
+            let layout = own_backup_backup::gpt_reader::read_disk_layout(e.disk_number)?;
+            let sector = layout.sector_size.max(512) as u64;
+            let overlaps = layout.partitions.iter().any(|p| {
+                let start = p.first_lba.saturating_mul(sector);
+                let end = p.last_lba.saturating_add(1).saturating_mul(sector);
+                protected.parts.contains(&p.index)
+                    && e.offset < end
+                    && e.offset.saturating_add(e.length) > start
+            });
+            if overlaps {
+                return Err(OwnBackupError::RestoreIncompatible(
+                    tr!("guard.target_is_live_boot_partition").into_owned(),
+                ));
+            }
         }
     }
     Ok(())
@@ -393,6 +446,15 @@ mod tests {
     fn blocks_live_system_disk_restore() {
         // Target IS the running system disk, not on boot media → denied.
         assert!(check_whole_disk_restore(0, Some(0), false).is_err());
+    }
+
+    #[test]
+    fn a_separate_live_boot_partition_blocks_whole_disk_restore() {
+        let boot = Protection { parts: vec![1], cannot_tell: None };
+        assert!(check_whole_disk_protection(1, Some(0), false, &boot).is_err());
+        assert!(check_whole_disk_protection(1, Some(0), true, &boot).is_ok());
+        let unknown = Protection { parts: vec![], cannot_tell: Some("layout unavailable".into()) };
+        assert!(check_whole_disk_protection(1, Some(0), false, &unknown).is_err());
     }
 
     #[test]

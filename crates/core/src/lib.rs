@@ -757,16 +757,23 @@ fn verify_cancelled_message() -> String {
 
 impl JobStore {
     pub fn load(data_dir: &std::path::Path) -> Arc<Self> {
+        Self::try_load(data_dir).expect("job store must be readable before use")
+    }
+
+    /// Open the store without treating permission or rename failures as an
+    /// empty database. The service uses this so it refuses to start instead of
+    /// overwriting job history it could not read.
+    pub fn try_load(data_dir: &std::path::Path) -> std::io::Result<Arc<Self>> {
         let jobs_path = data_dir.join("jobs.json");
         let activity_path = data_dir.join("activity.json");
-        let jobs = read_json(&jobs_path).unwrap_or_default();
-        let activity = read_json(&activity_path).unwrap_or_default();
-        Arc::new(Self {
+        let jobs = read_json(&jobs_path)?.unwrap_or_default();
+        let activity = read_json(&activity_path)?.unwrap_or_default();
+        Ok(Arc::new(Self {
             jobs_path,
             activity_path,
             jobs: Mutex::new(jobs),
             activity: Mutex::new(activity),
-        })
+        }))
     }
 
     pub fn list(&self) -> Vec<Job> {
@@ -789,16 +796,38 @@ impl JobStore {
         self.upsert_inner(job, false)
     }
 
-    fn upsert_inner(&self, mut job: Job, authorized_encryption: bool) -> std::io::Result<Job> {
+    fn upsert_inner(&self, job: Job, authorized_encryption: bool) -> std::io::Result<Job> {
+        self.upsert_inner_checked(job, authorized_encryption, None)
+    }
+
+    fn upsert_inner_checked(
+        &self,
+        mut job: Job,
+        authorized_encryption: bool,
+        expected_revision: Option<&str>,
+    ) -> std::io::Result<Job> {
         let now = chrono::Utc::now().to_rfc3339();
         let mut jobs = self.jobs.lock().unwrap();
         let previous = jobs.iter().find(|existing| existing.id == job.id);
+        if let Some(expected) = expected_revision {
+            let unchanged = match previous {
+                Some(existing) => existing.updated_at == expected,
+                None => expected.is_empty(),
+            };
+            if !unchanged {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    tr!("lib.job_changed_during_encryption").into_owned(),
+                ));
+            }
+        }
         backup_encryption::validate_update(&mut job, previous, authorized_encryption)?;
         let mut next = jobs.clone();
         if job.id.is_empty() {
             job.id = uuid::Uuid::new_v4().to_string();
             job.created_at = now.clone();
             job.updated_at = now;
+            job.last_run = None; // only the worker may create run history
             next.push(job.clone());
         } else if let Some(existing) = next.iter_mut().find(|j| j.id == job.id) {
             job.created_at = existing.created_at.clone();
@@ -808,6 +837,7 @@ impl JobStore {
         } else {
             job.created_at = now.clone();
             job.updated_at = now;
+            job.last_run = None; // a caller-selected id is still a new job
             next.push(job.clone());
         }
         write_json(&self.jobs_path, &next)?;
@@ -921,24 +951,31 @@ impl JobStore {
 
 }
 
-fn read_json<T: for<'de> Deserialize<'de>>(path: &std::path::Path) -> Option<T> {
-    let data = std::fs::read(path).ok()?;
+fn read_json<T: for<'de> Deserialize<'de>>(path: &std::path::Path) -> std::io::Result<Option<T>> {
+    let data = match std::fs::read(path) {
+        Ok(data) => data,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
     match serde_json::from_slice(&data) {
-        Ok(v) => Some(v),
+        Ok(v) => Ok(Some(v)),
         Err(e) => {
             // Unreadable is not the same as absent, and the difference matters:
             // starting empty means the next save writes an empty list over
             // whatever was there. The file is moved aside first, so the jobs
             // are recoverable by hand instead of gone.
-            let kept = path.with_extension("json.bad");
-            let saved = std::fs::rename(path, &kept).is_ok();
+            let mut kept = path.with_extension("json.bad");
+            if kept.exists() {
+                kept = path.with_extension(format!("json.bad.{}", uuid::Uuid::new_v4()));
+            }
+            std::fs::rename(path, &kept)?;
             error!(
                 path = %path.display(),
                 error = %e,
-                kept = %if saved { kept.display().to_string() } else { "nowhere".into() },
+                kept = %kept.display(),
                 "store file could not be read - starting empty, the old one is kept"
             );
-            None
+            Ok(None)
         }
     }
 }
@@ -1348,12 +1385,25 @@ pub async fn run_queue_worker(
     passwords: Arc<dyn PasswordResolver>,
     mut rx: UnboundedReceiver<String>,
     retry_tx: tokio::sync::mpsc::WeakUnboundedSender<String>,
+    mut stop: tokio::sync::watch::Receiver<bool>,
 ) {
     // Retries used by each job's current run of failures. In memory: a
     // service restart forgets them, and the schedule carries on as usual.
-    let mut retries_used: std::collections::HashMap<String, u32> =
-        std::collections::HashMap::new();
-    while let Some(job_id) = rx.recv().await {
+    let mut retries_used: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    loop {
+        let job_id = tokio::select! {
+            next = rx.recv() => match next { Some(id) => id, None => break },
+            changed = stop.changed() => {
+                if changed.is_err() || *stop.borrow() { break; }
+                continue;
+            }
+        };
+        if *stop.borrow() {
+            break;
+        }
+        // Retire a stop request aimed at the previous run before a NEW run
+        // becomes visible as current. Once it is visible, never reset its flag.
+        cancel.store(false, Ordering::SeqCst);
         // Waiting -> running in one step. Cancelled while it waited, it is no
         // longer in the queue and must not start.
         if !queue.start(&job_id) {
@@ -1377,11 +1427,20 @@ pub async fn run_queue_worker(
         // with a restore should run afterwards, not be dropped (audit
         // AUD-02). Released by Drop at the end of the iteration, including
         // if the engine panics.
-        let _slot = busy
-            .acquire(crate::busy::Doing::new(tr!("lib.doing_backup"), job.name.clone()))
-            .await;
+        let _slot = tokio::select! {
+            slot = busy.acquire(crate::busy::Doing::new(tr!("lib.doing_backup"), job.name.clone())) => slot,
+            _ = stop.changed() => {
+                queue.finish();
+                sink.queue_changed(queue.snapshot());
+                break;
+            }
+        };
+        if *stop.borrow() {
+            queue.finish();
+            sink.queue_changed(queue.snapshot());
+            break;
+        }
 
-        cancel.store(false, Ordering::SeqCst);
         // No sleep while copying — laptops included, verification included.
         // Released when this iteration ends, whatever the outcome.
         #[cfg(target_os = "windows")]
@@ -1394,15 +1453,25 @@ pub async fn run_queue_worker(
         // runs — and if they cannot be opened the run fails saying so, rather
         // than waiting for a password nobody will type at night or writing the
         // copy in the clear (§7.2).
-        let run = match store.archive_keys_for_run(&job) {
-            Err(message) => {
-                let mut run = run_skeleton(&job);
-                run.finished_at = chrono::Utc::now().to_rfc3339();
-                run.status = "error".into();
-                run.error = message;
-                run
+        let run = if cancel.load(Ordering::SeqCst) {
+            let mut run = run_skeleton(&job);
+            run.finished_at = chrono::Utc::now().to_rfc3339();
+            run.status = "cancelled".into();
+            run.error = tr!("lib.cancelled_by_user").into_owned();
+            run
+        } else {
+            match store.archive_keys_for_run(&job) {
+                Err(message) => {
+                    let mut run = run_skeleton(&job);
+                    run.finished_at = chrono::Utc::now().to_rfc3339();
+                    run.status = "error".into();
+                    run.error = message;
+                    run
+                }
+                Ok(keys) => {
+                    perform_backup(&sink, &job, &cancel, last_success, &passwords, keys).await
+                }
             }
-            Ok(keys) => perform_backup(&sink, &job, &cancel, last_success, &passwords, keys).await,
         };
         // How the run ended goes into the log as well as into its record. A
         // failure used to be written only to the record: on 2026-09-25 the log
@@ -1424,7 +1493,7 @@ pub async fn run_queue_worker(
 
         // A failure is tried again, a set number of times; anything else ends
         // the streak.
-        let retrying = if run.status == "error" {
+        let retrying = if run.status == "error" && !*stop.borrow() {
             let used = retries_used.entry(job.id.clone()).or_insert(0);
             if *used < job.advanced.retry_attempts {
                 *used += 1;
@@ -1451,10 +1520,13 @@ pub async fn run_queue_worker(
         };
         // Sleep / shut down — not while a retry is pending, and never after a
         // run someone cancelled: they are at the machine.
-        if !retrying && run.status != "cancelled" {
+        if !retrying && run.status != "cancelled" && !*stop.borrow() {
             after_backup(&job.advanced.after_backup, &job.name, &queue);
         }
         sink.job_finished(run);
+        if *stop.borrow() {
+            break;
+        }
     }
 }
 
@@ -1578,9 +1650,9 @@ pub fn source_token(device: &str) -> String {
 
 /// Filename identifier for a source volume. Same as [`source_token`] for
 /// lettered / GUID volumes; a letterless (encrypted) `part:` source uses its
-/// sanitized volume label when the job knows one — so its image is named
-/// `Job_kubuntu_full_…` like a lettered `Job_C_full_…`, not `Job_P4AB…`. The
-/// result is underscore-free (the token is delimited by `_` in the file name).
+/// sanitized volume label followed by its partition token. The partition
+/// suffix keeps two equally named, letterless volumes in different chains;
+/// the result is underscore-free so the filename parser can recover it.
 /// Distinct from [`source_token`], which stays the stable device key used for
 /// passwords and cross-run identity.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))] // used by the Windows backup path
@@ -1590,7 +1662,7 @@ fn file_token(job: &Job, device: &str) -> String {
         if label != device {
             let safe: String = label.chars().filter(|c| c.is_alphanumeric()).collect();
             if !safe.is_empty() {
-                return safe;
+                return format!("{safe}{}", source_token(device));
             }
         }
     }
@@ -1621,6 +1693,25 @@ fn chain_belongs_to(
     match (identity, &base.source_id) {
         (Some(mine), Some(theirs)) => mine.eq_ignore_ascii_case(theirs),
         _ => true,
+    }
+}
+
+/// Retention and consolidation are destructive: unlike parent lookup, an old
+/// chain with no source identity cannot be assumed to belong to a current
+/// source merely because its (possibly duplicated) label matches.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn chain_source_group_matches(
+    base: &own_backup_backup::chains::ChainImage,
+    token: &str,
+    source_id: Option<&str>,
+) -> bool {
+    if !image_token(&base.image_path).is_some_and(|t| t.eq_ignore_ascii_case(token)) {
+        return false;
+    }
+    match (source_id, base.source_id.as_deref()) {
+        (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+        (None, None) => true,
+        _ => false,
     }
 }
 
@@ -1905,7 +1996,9 @@ pub fn plan_run_for_disk_at(
 /// the images just created (one per volume); their chains are always exempt.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))] // used by the Windows backup path
 fn apply_retention(job: &Job, protected: &[(String, PathBuf)]) {
-    use own_backup_backup::chains::{delete_chain, list_job_chains, plan_retention, RetentionRules};
+    use own_backup_backup::chains::{
+        delete_chain, list_job_chains, plan_retention_protected, RetentionRules,
+    };
 
     let rules = if job.scheme.is_consolidation() {
         // Consolidation means ONE chain. Its age setting does not delete
@@ -1941,26 +2034,38 @@ fn apply_retention(job: &Job, protected: &[(String, PathBuf)]) {
         }
     };
 
-    // One retention pass per distinct volume token, over that volume's chains.
+    // One pass per source identity, not per display label. Old images without
+    // an identity are left alone when the current source has one.
+    let protected_paths: std::collections::HashSet<PathBuf> =
+        protected.iter().map(|(_, path)| path.clone()).collect();
     let mut seen = std::collections::HashSet::new();
     for (token, protect_image) in protected {
-        if !seen.insert(token.clone()) {
+        let Some(current_chain) = all_chains.iter().find(|c| c.contains(protect_image)) else {
+            warn!(job = %job.name, image = %protect_image.display(),
+                "Retention: new image not found in a readable chain; skipping deletion");
+            continue;
+        };
+        let source_id = current_chain
+            .images
+            .first()
+            .and_then(|i| i.source_id.clone());
+        if !seen.insert((token.to_ascii_uppercase(), source_id.clone())) {
             continue;
         }
         let vol_chains: Vec<_> = all_chains
             .iter()
             .filter(|c| {
-                c.images
-                    .first()
-                    .and_then(|i| image_token(&i.image_path))
-                    .is_some_and(|t| t.eq_ignore_ascii_case(token))
+                c.images.first().is_some_and(|base| {
+                    chain_source_group_matches(base, token, source_id.as_deref())
+                })
             })
             .cloned()
             .collect();
         if vol_chains.is_empty() {
             continue;
         }
-        let doomed = plan_retention(&vol_chains, &rules, chrono::Utc::now(), protect_image);
+        let doomed =
+            plan_retention_protected(&vol_chains, &rules, chrono::Utc::now(), &protected_paths);
         for idx in doomed {
             let base = vol_chains[idx]
                 .images
@@ -2043,13 +2148,16 @@ impl JobFilesDeleted {
 pub fn delete_job_files(store: &JobStore, job: &Job) -> JobFilesDeleted {
     use own_backup_backup::chains::{delete_chain, list_job_chains};
 
-    let mut out = JobFilesDeleted { history_truncated: store.history_is_truncated(&job.id), ..Default::default() };
+    let mut out = JobFilesDeleted {
+        history_truncated: store.history_is_truncated(&job.id),
+        ..Default::default()
+    };
 
     // Every folder we have reason to think this job wrote into: the one it is
     // configured for now, plus the parents of everything its history names.
     let from_history = store.job_image_files(&job.id);
     let mut folders: Vec<PathBuf> = Vec::new();
-    let mut push_folder = |p: PathBuf, folders: &mut Vec<PathBuf>| {
+    let push_folder = |p: PathBuf, folders: &mut Vec<PathBuf>| {
         if !p.as_os_str().is_empty() && !folders.contains(&p) {
             folders.push(p);
         }
@@ -2061,6 +2169,7 @@ pub fn delete_job_files(store: &JobStore, job: &Job) -> JobFilesDeleted {
         }
     }
     out.folders = folders.iter().map(|f| f.display().to_string()).collect();
+    let mut classified = std::collections::HashSet::new();
 
     for folder in &folders {
         let chains = match list_job_chains(folder, &job.id) {
@@ -2071,14 +2180,24 @@ pub fn delete_job_files(store: &JobStore, job: &Job) -> JobFilesDeleted {
             }
         };
         for chain in &chains {
+            // A classified image is handled by delete_chain, including its
+            // dependency and consolidation guards. Never retry it by path.
+            classified.extend(chain.images.iter().map(|i| i.image_path.clone()));
             match delete_chain(chain) {
                 Ok(report) => {
-                    out.deleted.extend(report.deleted.iter().map(|p| p.display().to_string()));
+                    out.deleted
+                        .extend(report.deleted.iter().map(|p| p.display().to_string()));
                     out.kept.extend(
-                        report.kept.iter().map(|(p, why)| (p.display().to_string(), why.clone())),
+                        report
+                            .kept
+                            .iter()
+                            .map(|(p, why)| (p.display().to_string(), why.clone())),
                     );
                     out.kept.extend(report.orphan_sidecars.iter().map(|p| {
-                        (p.display().to_string(), tr!("lib.orphan_sidecar").into_owned())
+                        (
+                            p.display().to_string(),
+                            tr!("lib.orphan_sidecar").into_owned(),
+                        )
                     }));
                 }
                 Err(e) => {
@@ -2093,22 +2212,15 @@ pub fn delete_job_files(store: &JobStore, job: &Job) -> JobFilesDeleted {
         }
     }
 
-    // Anything the history names that the chain scan did not reach: an image
-    // whose sidecar has become unreadable, or one left in a folder that holds
-    // nothing else of ours. Still precise — these are paths this job wrote.
+    // History is a hint about folders, not proof that a file belongs to this
+    // job. An unreadable sidecar leaves its chain relationships unknown; a
+    // path-only deletion could remove an unrelated file or a surviving base.
     for path in from_history {
-        if !path.exists() {
-            continue;
-        }
-        match std::fs::remove_file(&path) {
-            Ok(()) => {
-                out.deleted.push(path.display().to_string());
-                let sidecar = own_backup_backup::sidecar_path_for(&path);
-                if std::fs::remove_file(&sidecar).is_ok() {
-                    out.deleted.push(sidecar.display().to_string());
-                }
-            }
-            Err(e) => out.kept.push((path.display().to_string(), e.to_string())),
+        if path.exists() && !classified.contains(&path) {
+            out.kept.push((
+                path.display().to_string(),
+                tr!("lib.history_image_unverified").into_owned(),
+            ));
         }
     }
 
@@ -2226,9 +2338,6 @@ fn apply_consolidation(
         return 0;
     }
     let folder = PathBuf::from(&job.dest_folder);
-    let tokens: std::collections::HashSet<String> =
-        protected.iter().map(|(t, _)| t.to_ascii_uppercase()).collect();
-
     // One step at a time, re-reading the folder after each: a step changes the
     // very chain the next decision is made from. The cap is a backstop against
     // a step that reports success without shortening anything — a loop that
@@ -2243,13 +2352,25 @@ fn apply_consolidation(
                 return folded;
             }
         };
+        let groups: std::collections::HashSet<(String, Option<String>)> = protected
+            .iter()
+            .filter_map(|(token, path)| {
+                chains.iter().find(|c| c.contains(path)).map(|c| {
+                    (
+                        token.to_ascii_uppercase(),
+                        c.images.first().and_then(|i| i.source_id.clone()),
+                    )
+                })
+            })
+            .collect();
         let step = chains
             .iter()
             .filter(|c| {
-                c.images
-                    .first()
-                    .and_then(|i| image_token(&i.image_path))
-                    .is_some_and(|t| tokens.contains(&t.to_ascii_uppercase()))
+                c.images.first().is_some_and(|base| {
+                    groups.iter().any(|(token, source_id)| {
+                        chain_source_group_matches(base, token, source_id.as_deref())
+                    })
+                })
             })
             .find_map(|c| plan_consolidation(c, keep));
         let Some(step) = step else { return folded };
@@ -3361,8 +3482,36 @@ mod tests {
         );
 
         // And a later save does not resurrect the broken file.
-        store.upsert(Job { name: "fresh".into(), ..Default::default() }).unwrap();
+        store
+            .upsert(Job {
+                name: "fresh".into(),
+                ..Default::default()
+            })
+            .unwrap();
         assert_eq!(JobStore::load(dir.path()).list().len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_store_must_not_be_replaced_with_an_empty_one() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let original = JobStore::load(dir.path());
+        original
+            .upsert(Job {
+                id: "original".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        drop(original);
+        let path = dir.path().join("jobs.json");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o200)).unwrap();
+        if std::fs::read(&path).is_err() {
+            assert!(JobStore::try_load(dir.path()).is_err());
+            assert!(path.exists());
+            assert!(!path.with_extension("json.bad").exists());
+        }
     }
 
     /// The queue's two halves used to be two mutexes taken in opposite orders
@@ -3404,6 +3553,65 @@ mod tests {
         readers.join().unwrap();
         writers.join().unwrap();
         assert_eq!(done.load(Ordering::Relaxed), 10_000);
+    }
+
+    #[tokio::test]
+    async fn stopping_a_backup_waiting_for_the_busy_slot_prevents_it_from_starting() {
+        struct QuietSink;
+        impl EventSink for QuietSink {
+            fn job_progress(&self, _: JobProgress) {}
+            fn queue_changed(&self, _: QueueSnapshot) {}
+            fn job_finished(&self, _: JobRun) {}
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = JobStore::load(dir.path());
+        let mut job = Job {
+            id: "waiting".into(),
+            name: "waiting".into(),
+            ..Default::default()
+        };
+        job.advanced.retry_attempts = 0;
+        store.upsert(job).unwrap();
+        let queue = RunQueue::new();
+        let busy = crate::busy::Busy::new();
+        let held = busy
+            .reserve(crate::busy::Doing::new("other", "probe"))
+            .unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let worker = tokio::spawn(run_queue_worker(
+            Arc::new(QuietSink),
+            store.clone(),
+            queue.clone(),
+            busy.clone(),
+            cancel.clone(),
+            Arc::new(NoPasswords),
+            rx,
+            tx.downgrade(),
+            stop_rx,
+        ));
+        queue.enqueue("waiting");
+        tx.send("waiting".into()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while queue.snapshot().current.as_deref() != Some("waiting") {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        cancel.store(true, Ordering::SeqCst);
+        drop(held);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while store.activity().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(store.activity()[0].status, "cancelled");
+        worker.abort();
     }
 
     /// Asking "is it queued?" and queueing it are one step, or two callers
@@ -3676,7 +3884,7 @@ mod tests {
         // A label with an underscore is stripped to an underscore-free token.
         job.source_labels = vec!["kubuntu_boot".into()];
         let token = file_token(&job, dev);
-        assert_eq!(token, "kubuntuboot");
+        assert_eq!(token, "kubuntubootP4100000");
         // The file name round-trips: image_token reads it back (case-insensitive).
         let name = output_path_for(&job, dev, "full");
         assert!(image_token(&name).unwrap().eq_ignore_ascii_case(&token));
@@ -4132,6 +4340,134 @@ mod tests {
 
     fn a_store(dir: &Path) -> Arc<JobStore> {
         JobStore::load(dir)
+    }
+
+    #[test]
+    fn client_run_history_cannot_authorize_deletion_of_an_unrelated_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("images");
+        std::fs::create_dir(&dest).unwrap();
+        let unrelated = dir.path().join("unrelated.txt");
+        std::fs::write(&unrelated, b"keep this").unwrap();
+        let store = a_store(dir.path());
+
+        for id in ["", "caller-selected-id"] {
+            let saved = store
+                .upsert(Job {
+                    id: id.into(),
+                    dest_folder: dest.display().to_string(),
+                    last_run: Some(JobRun {
+                        image_path: unrelated.display().to_string(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })
+                .unwrap();
+            assert!(saved.last_run.is_none());
+            let report = delete_job_files(&store, &saved);
+            assert!(unrelated.exists(), "{report:?}");
+            assert!(report.deleted.is_empty(), "{report:?}");
+        }
+    }
+
+    #[test]
+    fn job_delete_never_retries_a_base_kept_for_a_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("images");
+        let base = put_image_of_job(&dest, "j_C_full_1.vhdx", "job1");
+        let child = put_image_of_job(&dest, "j_C_inc_2.avhdx", "job1");
+        let meta_path = own_backup_backup::sidecar_path_for(&child);
+        let sidecar = own_backup_backup::sidecar::read_sidecar(&meta_path).unwrap();
+        let mut info = sidecar.info;
+        info.chain_role = own_backup_backup::sidecar::ChainRole::Incremental;
+        info.parent_image_file_name = Some("j_C_full_1.vhdx".into());
+        let mut manifest = sidecar.manifest;
+        manifest.created_at = "2026-01-02T00:00:00Z".into();
+        own_backup_backup::sidecar::write_sidecar(&meta_path, &info, &manifest, &[]).unwrap();
+        std::fs::remove_file(&child).unwrap();
+        std::fs::create_dir(&child).unwrap(); // deterministic remove_file failure
+
+        let store = a_store(dir.path());
+        let job = store
+            .upsert(Job {
+                id: "job1".into(),
+                dest_folder: dest.display().to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        store
+            .record_run(JobRun {
+                job_id: job.id.clone(),
+                image_path: child.display().to_string(),
+                base_image_path: base.display().to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        let report = delete_job_files(&store, &job);
+        assert!(child.exists() && base.exists(), "{report:?}");
+        assert!(!report.deleted.contains(&base.display().to_string()));
+    }
+
+    #[test]
+    fn job_delete_never_retries_a_chain_with_a_consolidation_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("images");
+        let base = put_image_of_job(&dest, "j_C_full_1.vhdx", "job1");
+        let marker = own_backup_backup::consolidate::marker_path(&base);
+        std::fs::write(&marker, b"{}").unwrap();
+        let store = a_store(dir.path());
+        let job = store
+            .upsert(Job {
+                id: "job1".into(),
+                dest_folder: dest.display().to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        store
+            .record_run(JobRun {
+                job_id: job.id.clone(),
+                image_path: base.display().to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        let report = delete_job_files(&store, &job);
+        assert!(base.exists() && marker.exists(), "{report:?}");
+        assert!(!report.deleted.contains(&base.display().to_string()));
+    }
+
+    #[test]
+    fn retention_separates_sources_sharing_a_label_and_keeps_both_new_images() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("images");
+        let make = |name: &str, source: &str, stamp: &str| {
+            let path = put_image_of_job(&dest, name, "job1");
+            let sidecar_path = own_backup_backup::sidecar_path_for(&path);
+            let sidecar = own_backup_backup::sidecar::read_sidecar(&sidecar_path).unwrap();
+            let mut info = sidecar.info;
+            info.source_id = Some(source.into());
+            let mut manifest = sidecar.manifest;
+            manifest.created_at = stamp.into();
+            own_backup_backup::sidecar::write_sidecar(&sidecar_path, &info, &manifest, &[])
+                .unwrap();
+            path
+        };
+        let old_a = make("j_DATA_full_1.vhdx", "source-A", "2026-01-01T00:00:00Z");
+        let old_b = make("j_DATA_full_2.vhdx", "source-B", "2026-01-02T00:00:00Z");
+        let new_a = make("j_DATA_full_3.vhdx", "source-A", "2026-01-03T00:00:00Z");
+        let new_b = make("j_DATA_full_4.vhdx", "source-B", "2026-01-04T00:00:00Z");
+        let mut job = Job::default();
+        job.id = "job1".into();
+        job.dest_folder = dest.display().to_string();
+        job.scheme.keep_chains = Some(1);
+        apply_retention(
+            &job,
+            &[
+                ("DATA".into(), new_a.clone()),
+                ("DATA".into(), new_b.clone()),
+            ],
+        );
+        assert!(!old_a.exists() && !old_b.exists());
+        assert!(new_a.exists() && new_b.exists());
     }
 
     /// Копия второго тома тоже уходит. Раньше она оставалась на диске:

@@ -27,6 +27,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use zeroize::Zeroizing;
 
 use own_backup_common::{OwnBackupError, Result};
 use tracing::{info, warn};
@@ -100,7 +101,12 @@ pub fn attach_rw(
     virtual_size: u64,
     serial: &str,
 ) -> Result<Attached> {
-    attach(Lun::read_write(source).with_serial(serial), virtual_size, serial, true)
+    attach(
+        Lun::read_write(source).with_serial(serial),
+        virtual_size,
+        serial,
+        true,
+    )
 }
 
 /// Serve `source` read-only and attach it. Windows sees a write-protected disk,
@@ -110,23 +116,36 @@ pub fn attach_ro(
     virtual_size: u64,
     serial: &str,
 ) -> Result<Attached> {
-    attach(Lun::read_only(source).with_serial(serial), virtual_size, serial, false)
+    attach(
+        Lun::read_only(source).with_serial(serial),
+        virtual_size,
+        serial,
+        false,
+    )
 }
 
 fn attach(lun: Lun, virtual_size: u64, serial: &str, read_write: bool) -> Result<Attached> {
     info!(
         backend = "iscsi",
-        serial,
-        virtual_size,
-        read_write,
-        "attaching the image"
+        serial, virtual_size, read_write, "attaching the image"
     );
     let iqn = iscsi::iqn_for(serial);
     let lun = Arc::new(Mutex::new(lun));
+    let mut raw_secret = [0u8; 16];
+    getrandom::getrandom(&mut raw_secret)
+        .map_err(|e| dev(format!("iSCSI CHAP secret generation failed: {e}")))?;
+    let chap_secret = Arc::new(Zeroizing::new(raw_secret));
 
     let mut last: Option<OwnBackupError> = None;
     for address in candidate_addresses() {
-        match attach_at(address, &iqn, lun.clone(), virtual_size, read_write) {
+        match attach_at(
+            address,
+            &iqn,
+            lun.clone(),
+            virtual_size,
+            read_write,
+            chap_secret.clone(),
+        ) {
             Ok(attached) => return Ok(attached),
             Err(e) => {
                 warn!(%address, error = %e, "iSCSI: this address did not work — trying the next");
@@ -143,6 +162,7 @@ fn attach_at(
     lun: Arc<Mutex<Lun>>,
     virtual_size: u64,
     read_write: bool,
+    chap_secret: Arc<Zeroizing<[u8; 16]>>,
 ) -> Result<Attached> {
     let listener = TcpListener::bind(SocketAddr::new(address, 0))
         .map_err(|e| dev(format!("iSCSI bind {address}: {e}")))?;
@@ -155,10 +175,11 @@ fn attach_at(
     let stop_bg = stop.clone();
     let iqn_bg = iqn.to_string();
     let lun_bg = lun.clone();
+    let chap_bg = chap_secret.clone();
     let server = std::thread::Builder::new()
         .name("iscsi-target".into())
         .spawn(move || {
-            if let Err(e) = iscsi::serve_listener(listener, iqn_bg, lun_bg, stop_bg) {
+            if let Err(e) = iscsi::serve_listener_chap(listener, iqn_bg, lun_bg, stop_bg, chap_bg) {
                 warn!(error = %e, "iSCSI target ended with an error");
             }
         })
@@ -166,7 +187,7 @@ fn attach_at(
 
     // From here on the target is running, so every exit has to stop it.
     let attached = (|| -> Result<Attached> {
-        let target = iscsi_win::login(&address.to_string(), port, iqn)?;
+        let target = iscsi_win::login(&address.to_string(), port, iqn, &chap_secret)?;
         let disk_number = target.disk_number;
         let physical = format!(r"\\.\PhysicalDrive{disk_number}");
 

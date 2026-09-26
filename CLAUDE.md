@@ -53,9 +53,9 @@ tag mismatch — everything else must go to the Windows-unlock road instead;
 must accept FAT32/exFAT/ReFS. Also: the sector size in the BPB is ZERO for
 exFAT and ReFS — take it from the device geometry, never guess 512.
 
-Still open — the negative cases (wrong password, TPM-only volume, AES-CBC
-refusal), restoring such a copy, and the conversion-state field:
-`.ai/PLAN.md` §2–3.
+The remaining BitLocker cases are TPM-only volumes (no TPM on the test stand)
+and showing AES-CBC refusal as a volume state instead of only an error message.
+See `.ai/PLAN.md` for current acceptance work.
 
 ## Branches (decision 2026-08-06)
 
@@ -68,7 +68,7 @@ work landed in `main`; there is no feature-branch-per-task habit here.)
 
 ```bash
 cargo build          # build all crates (Linux, mocks only)
-cargo test           # run all tests (556 pass, 16 #[ignore] need root)
+cargo test           # run all non-ignored workspace tests (count changes with the code)
 cargo xwin check --target x86_64-pc-windows-msvc -p own-backup-backup ...  # fast Windows check
 cargo xwin build --target x86_64-pc-windows-msvc --release  # Windows cross-compile
 ```
@@ -226,11 +226,9 @@ tested on a Windows host — cross-compilation validates compilation only.
   structural invariants in the test harness (parent key == child's first key,
   csums only over allocated extents) and fixtures big enough to have
   MULTI-LEVEL trees — a flat image has no parent node to get wrong.
-- The legacy `.obk` format (zstd + AES-256-GCM + Argon2id) was **deleted**
-  (decision 2026-07-26): it had
-  no writer left in any live path and its dead reader confused the restore work.
-  `ImageManifest` (`common/src/image.rs`) survived it and is now the sidecar's
-  manifest. Do not resurrect the container format.
+- The original `.obk` container was deleted in July 2026. The current `.obk`
+  is a different encrypted qcow2-based format in `backup/src/seal/obk/`.
+  Do not resurrect the removed legacy format.
 
 ## Architecture
 
@@ -243,13 +241,13 @@ Cargo workspace with crates:
 - `backup` — block pipeline, used-sector maps, VHDX/qcow2 handling, checksums,
   exclusion scanners, LUKS/BitLocker
 - `restore` — restore-target guards (system-disk protection)
-- `metadata` — SQLite DB for backup jobs, sets, retention, activity log
+- `metadata` — SQLite metadata and remembered volume secrets; current GUI
+  jobs and run activity live in `jobs.json` and `activity.json` in `core`
 - `scheduler` — cron-based job scheduling (run by the service,
   `service/src/scheduler.rs`; OS events too — logon/logoff/startup)
 - `service` — Windows Service + gRPC server (tonic)
 - `cli` — command-line interface (clap)
-- `gui` — Tauri v2 + Svelte 5 (frontend being rebuilt per `design/` mockup:
-  4 sidebar sections — Backup, Tools, Settings, Help; ru/en, light/dark themes)
+- `gui` — Tauri v2 + Svelte 5; seven sidebar sections, ru/en and light/dark themes
 
 ## Theme and languages (2026-09-26)
 

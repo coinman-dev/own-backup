@@ -154,12 +154,66 @@ impl AppConfig {
     }
 
     pub fn save_to_file(&self, path: &std::path::Path) -> Result<()> {
-        let content = toml::to_string_pretty(self)
-            .map_err(|e| OwnBackupError::Config(e.to_string()))?;
+        Self::with_file_lock(path, || self.write_atomically(path))
+    }
+
+    /// Read and edit the newest settings under an OS file lock shared by GUI
+    /// processes, then replace the file atomically.
+    pub fn update_file(path: &std::path::Path, edit: impl FnOnce(&mut Self)) -> Result<Self> {
+        Self::with_file_lock(path, || {
+            let mut config = match Self::load_from_file(path) {
+                Ok(config) => config,
+                Err(OwnBackupError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
+                Err(e) => return Err(e),
+            };
+            edit(&mut config);
+            config.write_atomically(path)?;
+            Ok(config)
+        })
+    }
+
+    fn with_file_lock<T>(path: &std::path::Path, f: impl FnOnce() -> Result<T>) -> Result<T> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(path, content)?;
+        let lock = std::fs::OpenOptions::new()
+            .read(true).write(true).create(true)
+            .open(path.with_extension("toml.lock"))?;
+        lock.lock()?;
+        let result = f();
+        drop(lock);
+        result
+    }
+
+    fn write_atomically(&self, path: &std::path::Path) -> Result<()> {
+        use std::io::Write;
+
+        let content =
+            toml::to_string_pretty(self).map_err(|e| OwnBackupError::Config(e.to_string()))?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension(format!("toml.tmp.{}", uuid::Uuid::new_v4()));
+        let commit = (|| -> std::io::Result<()> {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)?;
+            file.write_all(content.as_bytes())?;
+            file.sync_all()?;
+            std::fs::rename(&tmp, path)?;
+            #[cfg(unix)]
+            if let Some(parent) = path.parent() {
+                if let Ok(dir) = std::fs::File::open(parent) {
+                    let _ = dir.sync_all();
+                }
+            }
+            Ok(())
+        })();
+        if commit.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        commit?;
         Ok(())
     }
 
@@ -174,9 +228,8 @@ impl AppConfig {
         }
         #[cfg(not(unix))]
         {
-            // Named Pipe path on Windows: \\.\pipe\OwnBackupService
-            // DACL: only Administrators group has access.
-            PathBuf::from(r"\\.\pipe\OwnBackupService")
+            // The same named pipe the service actually creates.
+            PathBuf::from(crate::windows_pipe_path())
         }
     }
 
@@ -184,9 +237,9 @@ impl AppConfig {
     ///
     /// Unix: alongside the UDS in the runtime dir (0o640, root + own-backup
     /// group). Windows: in the data dir, ACL'd by the service so only SYSTEM /
-    /// Administrators / interactive users can read it (the unelevated GUI is an
-    /// interactive process, other sessions and services are not). Regenerated on
-    /// every service start.
+    /// Administrators / interactive users can read it. The named-pipe server
+    /// additionally checks the active console's session and user SID before
+    /// accepting a client. Regenerated on every service start.
     pub fn token_path(&self) -> PathBuf {
         #[cfg(unix)]
         {
@@ -210,8 +263,7 @@ mod tests {
         // Vec<String> declared below `hooks` would come back as
         // `hooks.remembered_backups` — or not come back at all.
         let mut cfg = AppConfig::default();
-        cfg.remembered_backups =
-            vec![r"E:\Backup\one.vhdx".into(), r"E:\Backup\two.qcow2".into()];
+        cfg.remembered_backups = vec![r"E:\Backup\one.vhdx".into(), r"E:\Backup\two.qcow2".into()];
         cfg.default_compression_level = 7;
 
         let text = toml::to_string_pretty(&cfg).expect("config must serialise");
@@ -237,6 +289,35 @@ mod tests {
         let back = AppConfig::load_from_file(&path).unwrap();
         assert_eq!(back.remembered_backups, cfg.remembered_backups);
         assert_eq!(back.log_level, "debug");
+    }
+
+    #[test]
+    fn concurrent_settings_updates_keep_both_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        AppConfig::default().save_to_file(&path).unwrap();
+        let first = path.clone();
+        let second = path.clone();
+        let a = std::thread::spawn(move || {
+            AppConfig::update_file(&first, |c| c.log_level = "debug".into()).unwrap();
+        });
+        let b = std::thread::spawn(move || {
+            AppConfig::update_file(&second, |c| c.ui_language = "en".into()).unwrap();
+        });
+        a.join().unwrap();
+        b.join().unwrap();
+        let saved = AppConfig::load_from_file(&path).unwrap();
+        assert_eq!(saved.log_level, "debug");
+        assert_eq!(saved.ui_language, "en");
+    }
+
+    #[test]
+    fn a_corrupt_config_is_not_overwritten_by_a_settings_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, b"broken TOML = =").unwrap();
+        assert!(AppConfig::update_file(&path, |c| c.log_level = "debug".into()).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"broken TOML = =");
     }
 
     #[test]

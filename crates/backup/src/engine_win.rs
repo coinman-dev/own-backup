@@ -4256,16 +4256,17 @@ pub fn restore_volume(
     let total = sidecar.checksums.len() as u64;
     let mut blocks_restored = 0u64;
     let mut bytes_restored = 0u64;
+    let mut buf = vec![0u8; block_size as usize];
 
     for entry in &sidecar.checksums {
         let offset = entry.block_number * block_size;
         let len = std::cmp::min(block_size, volume_len - offset) as usize;
 
-        let mut buf = vec![0u8; len];
-        image_dev.read_at(data_offset + offset, &mut buf)?;
+        let data = &mut buf[..len];
+        image_dev.read_at(data_offset + offset, data)?;
 
         if req.verify_checksums {
-            let actual = compute_block_checksum(&buf);
+            let actual = compute_block_checksum(data);
             if actual != entry.checksum {
                 return Err(OwnBackupError::ChecksumMismatch {
                     block_index: entry.block_number,
@@ -4275,7 +4276,7 @@ pub fn restore_volume(
             }
         }
 
-        target_dev.write_at(offset, &buf)?;
+        target_dev.write_at(offset, data)?;
         blocks_restored += 1;
         bytes_restored += len as u64;
 
@@ -4441,6 +4442,7 @@ fn restore_disk_from_image(
     let total = sidecar.checksums.len() as u64;
     let mut done = 0u64;
     let mut bytes = 0u64;
+    let mut buf = vec![0u8; bs as usize];
     for entry in &sidecar.checksums {
         let offset = entry.block_number * bs;
         let len = bs.min(image_size - offset) as usize;
@@ -4449,10 +4451,10 @@ fn restore_disk_from_image(
                 "image block at {offset} exceeds the target disk size {target_size}"
             )));
         }
-        let mut buf = vec![0u8; len];
-        image.read_at(offset, &mut buf)?;
+        let data = &mut buf[..len];
+        image.read_at(offset, data)?;
         if req.verify_checksums {
-            let actual = compute_block_checksum(&buf);
+            let actual = compute_block_checksum(data);
             if actual != entry.checksum {
                 return Err(OwnBackupError::ChecksumMismatch {
                     block_index: entry.block_number,
@@ -4461,7 +4463,7 @@ fn restore_disk_from_image(
                 });
             }
         }
-        td.write_at(offset, &buf)?;
+        td.write_at(offset, data)?;
         done += 1;
         bytes += len as u64;
         progress(&DiskRestoreProgress {

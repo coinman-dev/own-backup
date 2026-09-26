@@ -100,6 +100,14 @@
     "ru": "образ удалён, а его описание осталось",
     "en": "the image was deleted, but its description file remained"
   },
+  "lib.history_image_unverified": {
+    "ru": "образ упомянут в истории, но его принадлежность и зависимости не подтверждены; удаление пропущено",
+    "en": "the image is mentioned in history, but its ownership and dependencies could not be verified; deletion was skipped"
+  },
+  "lib.job_changed_during_encryption": {
+    "ru": "задание изменилось после подготовки шифрования; начните настройку заново",
+    "en": "the job changed after encryption setup began; start setup again"
+  },
   "lib.consolidation_unfinished": {
     "ru": "Прерванная консолидация не доведена до конца: %{bases}. Пока состояние цепочки неизвестно, копировать в неё и удалять её нельзя — подробности в журнале службы.",
     "en": "An interrupted consolidation was not finished: %{bases}. Until the chain's state is known, it cannot be backed up to or deleted — see the service log for details."
@@ -189,12 +197,8 @@
     "en": "Windows did not expose the volume of partition %{part} — there is nothing to compare against"
   },
   "restore_exec.verify_files_ok": {
-    "ru": "Файлов: %{files}, суммарно %{size}",
-    "en": "Files: %{files}, %{size} in total"
-  },
-  "restore_exec.verify_files_diff": {
-    "ru": "в копии %{want_files} файлов на %{want_size}, в разделе %{got_files} файлов на %{got_size}",
-    "en": "the backup holds %{want_files} files totalling %{want_size}, the partition holds %{got_files} files totalling %{got_size}"
+    "ru": "Проверены пути, содержимое и потоки %{files} файлов, суммарно %{size}",
+    "en": "Paths, contents and streams verified for %{files} files, %{size} in total"
   },
   "restore_exec.follow_up_files_incomplete": {
     "ru": "Раздел %{part}: перенос файлов неполный — %{text}.",

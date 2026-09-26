@@ -33,9 +33,9 @@ const TICK: std::time::Duration = std::time::Duration::from_secs(60);
 /// seconds: plugging a drive in and seeing nothing happen for a minute reads
 /// as "it does not work".
 const DEST_TICK: std::time::Duration = std::time::Duration::from_secs(10);
-/// A drive that does not answer within this is "not there" for this round —
-/// a network share that is gone can take tens of seconds to say so.
-const DEST_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Give fresh local probes a short chance to finish without making a missing
+/// network share hold up the scheduler or the other destinations.
+const DEST_PROBE_INITIAL_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
 /// Wake this long before the slot: the scheduler ticks once a minute.
 const WAKE_EARLY_SECS: i64 = 60;
 
@@ -72,6 +72,10 @@ pub fn spawn(
         // was looked at. The first look only records: a drive that was
         // already connected when the service started was not just connected.
         let mut dest_seen: HashMap<String, bool> = HashMap::new();
+        let mut dest_probes: HashMap<
+            String,
+            (Option<std::path::PathBuf>, tokio::task::JoinHandle<bool>),
+        > = HashMap::new();
         let wake = WakeArming::start();
         // Let the store/worker settle before the first tick.
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
@@ -84,7 +88,7 @@ pub fn spawn(
                     wake.update(&store.list());
                 }
                 _ = dest_interval.tick() => {
-                    watch_destinations(&store, &queue, &job_tx, &passwords, &mut dest_seen).await;
+                    watch_destinations(&store, &queue, &job_tx, &passwords, &mut dest_seen, &mut dest_probes).await;
                 }
                 Some(ev) = os_rx.recv() => {
                     handle_os_event(ev, &store, &queue, &job_tx, &passwords);
@@ -227,28 +231,57 @@ async fn watch_destinations(
     job_tx: &UnboundedSender<String>,
     passwords: &PasswordStore,
     seen: &mut HashMap<String, bool>,
+    probes: &mut HashMap<String, (Option<std::path::PathBuf>, tokio::task::JoinHandle<bool>)>,
 ) {
-    let jobs: Vec<Job> =
-        store.list().into_iter().filter(|j| j.schedule.is_dest_connected_trigger()).collect();
+    let jobs: Vec<Job> = store
+        .list()
+        .into_iter()
+        .filter(|j| j.schedule.is_dest_connected_trigger())
+        .collect();
     seen.retain(|id, _| jobs.iter().any(|j| &j.id == id));
+    // Keep a started blocking call in this map until it really finishes. A
+    // timeout on its JoinHandle does not cancel std::fs::metadata; forgetting
+    // the handle used to spawn another stuck thread every ten seconds.
+    probes.retain(|id, _| jobs.iter().any(|j| &j.id == id));
     if jobs.is_empty() {
         return;
     }
-    let roots: Vec<(String, Option<std::path::PathBuf>)> =
-        jobs.iter().map(|j| (j.id.clone(), dest_root(&j.dest_folder))).collect();
-    // Off the runtime, and bounded: asking a share that has gone away blocks.
-    let probe = tokio::task::spawn_blocking(move || {
-        roots
-            .into_iter()
-            .map(|(id, root)| (id, root.is_some_and(|r| std::fs::metadata(r).is_ok())))
-            .collect::<HashMap<String, bool>>()
-    });
-    let present = match tokio::time::timeout(DEST_PROBE_TIMEOUT, probe).await {
-        Ok(Ok(p)) => p,
-        _ => return, // no answer this round — nothing changes
-    };
+
+    for job in &jobs {
+        let root = dest_root(&job.dest_folder);
+        if probes
+            .get(&job.id)
+            .is_some_and(|(old, handle)| old != &root && !handle.is_finished())
+        {
+            continue; // old system call still running; never start another one
+        }
+        if probes.get(&job.id).is_some_and(|(old, _)| old != &root) {
+            probes.remove(&job.id); // stale answer for a destination the user changed
+        }
+        if !probes.contains_key(&job.id) {
+            let query = root.clone();
+            probes.insert(
+                job.id.clone(),
+                (
+                    root,
+                    tokio::task::spawn_blocking(move || {
+                        query.is_some_and(|r| std::fs::metadata(r).is_ok())
+                    }),
+                ),
+            );
+        }
+    }
+    tokio::time::sleep(DEST_PROBE_INITIAL_WAIT).await;
     for job in jobs {
-        let now_there = present.get(&job.id).copied().unwrap_or(false);
+        if !probes.get(&job.id).is_some_and(|(root, handle)| {
+            *root == dest_root(&job.dest_folder) && handle.is_finished()
+        }) {
+            continue;
+        }
+        let (_, handle) = probes.remove(&job.id).expect("probe was present");
+        let Ok(now_there) = handle.await else {
+            continue;
+        };
         let before = seen.insert(job.id.clone(), now_there);
         if before == Some(now_there) || before.is_none() {
             continue; // unchanged, or the first look
@@ -337,7 +370,9 @@ impl WakeArming {
         }
         match want {
             Some(at) => info!(at = %at, "wake timer armed for a scheduled copy"),
-            None if armed.is_some() => info!("wake timer disarmed — no copy asks to wake the machine"),
+            None if armed.is_some() => {
+                info!("wake timer disarmed — no copy asks to wake the machine")
+            }
             None => {}
         }
         #[cfg(target_os = "windows")]
@@ -367,10 +402,7 @@ fn ran_today(job: &Job) -> bool {
 /// Both sides are brought into the SAME zone — the one `now` is in — before
 /// the calendar day is taken. Which zone that is does not matter; that it is
 /// one zone does.
-fn started_on_the_same_day<Tz: chrono::TimeZone>(
-    job: &Job,
-    now: chrono::DateTime<Tz>,
-) -> bool {
+fn started_on_the_same_day<Tz: chrono::TimeZone>(job: &Job, now: chrono::DateTime<Tz>) -> bool {
     job.last_run
         .as_ref()
         .and_then(|r| chrono::DateTime::parse_from_rfc3339(&r.started_at).ok())
@@ -432,7 +464,10 @@ mod tests {
         let moscow = FixedOffset::east_opt(3 * 3600).unwrap();
         let job = job_started_at("2026-09-18T22:30:00Z"); // 19 Sep, 01:30 in Moscow
         let now = moscow.with_ymd_and_hms(2026, 9, 19, 2, 0, 0).unwrap();
-        assert!(started_on_the_same_day(&job, now), "the same local day, so not again");
+        assert!(
+            started_on_the_same_day(&job, now),
+            "the same local day, so not again"
+        );
     }
 
     /// And the mirror case, which the old comparison got right by accident and
@@ -443,7 +478,10 @@ mod tests {
         let new_york = FixedOffset::west_opt(4 * 3600).unwrap();
         let job = job_started_at("2026-09-19T02:00:00Z"); // 18 Sep, 22:00 in New York
         let now = new_york.with_ymd_and_hms(2026, 9, 19, 9, 0, 0).unwrap();
-        assert!(!started_on_the_same_day(&job, now), "a different local day - run it");
+        assert!(
+            !started_on_the_same_day(&job, now),
+            "a different local day - run it"
+        );
     }
 
     #[test]
@@ -456,7 +494,10 @@ mod tests {
 
     #[test]
     fn a_job_that_never_ran_has_not_run_today() {
-        assert!(!started_on_the_same_day(&Job::default(), chrono::Utc::now()));
+        assert!(!started_on_the_same_day(
+            &Job::default(),
+            chrono::Utc::now()
+        ));
     }
 
     /// A timestamp that cannot be read is not evidence of a run today: the
@@ -470,10 +511,20 @@ mod tests {
     #[test]
     fn a_destination_is_asked_about_by_its_drive() {
         use std::path::PathBuf;
-        assert_eq!(dest_root(r"F:\Backup\Disk_D (Work)"), Some(PathBuf::from(r"F:\")));
+        assert_eq!(
+            dest_root(r"F:\Backup\Disk_D (Work)"),
+            Some(PathBuf::from(r"F:\"))
+        );
         assert_eq!(dest_root("e:"), Some(PathBuf::from(r"E:\")));
-        assert_eq!(dest_root(r"\\nas\backups\pc1"), Some(PathBuf::from(r"\\nas\backups\")));
-        assert_eq!(dest_root(r"\\nas"), None, "a server with no share names no drive");
+        assert_eq!(
+            dest_root(r"\\nas\backups\pc1"),
+            Some(PathBuf::from(r"\\nas\backups\"))
+        );
+        assert_eq!(
+            dest_root(r"\\nas"),
+            None,
+            "a server with no share names no drive"
+        );
         assert_eq!(dest_root("relative\\path"), None);
         assert_eq!(dest_root(""), None);
     }
@@ -491,12 +542,18 @@ mod tests {
         };
         // Tonight 23:30 wakes; 18:00 does not ask to.
         let jobs = [job("23:30", true), job("18:00", false)];
-        assert_eq!(next_wake(&jobs, now), Some(tz.with_ymd_and_hms(2026, 9, 26, 23, 29, 0).unwrap()));
+        assert_eq!(
+            next_wake(&jobs, now),
+            Some(tz.with_ymd_and_hms(2026, 9, 26, 23, 29, 0).unwrap())
+        );
         // Of two that ask, the earlier — and at 23:45 tonight's 23:30 is gone,
         // so it is tomorrow's, after tomorrow's 03:00.
         let late = tz.with_ymd_and_hms(2026, 9, 26, 23, 45, 0).unwrap();
         let jobs = [job("23:30", true), job("03:00", true)];
-        assert_eq!(next_wake(&jobs, late), Some(tz.with_ymd_and_hms(2026, 9, 27, 2, 59, 0).unwrap()));
+        assert_eq!(
+            next_wake(&jobs, late),
+            Some(tz.with_ymd_and_hms(2026, 9, 27, 2, 59, 0).unwrap())
+        );
         // Nobody asks — nothing to arm; an event job never arms it.
         assert_eq!(next_wake(&[job("23:30", false)], now), None);
         let mut ev = job("23:30", true);

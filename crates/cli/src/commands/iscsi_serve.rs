@@ -23,8 +23,8 @@ pub struct IscsiServeArgs {
 ///
 /// ```text
 /// own-backup-cli iscsi-serve D:\backups\c.qcow2
-/// # then, in another window (or Windows' own iSCSI Initiator applet):
-/// iscsicli QAddTargetPortal 127.0.0.1 3260
+/// # configure one-way CHAP in the initiator with user "ownbackup" and
+/// # the 16-byte secret entered in this command's prompt before logging in.
 /// ```
 ///
 /// Blocks are decompressed on the fly and served from this process, so it has
@@ -37,14 +37,29 @@ pub async fn run(args: IscsiServeArgs) -> own_backup_common::Result<()> {
     use own_backup_backup::qcow2::Qcow2RandomReader;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
+    use zeroize::Zeroizing;
 
     let path = std::path::PathBuf::from(&args.image);
     let reader = Qcow2RandomReader::open(&path)?;
-    let (virtual_size, cluster_size, chain) =
-        (reader.virtual_size(), reader.cluster_size(), reader.chain_len());
+    let (virtual_size, cluster_size, chain) = (
+        reader.virtual_size(),
+        reader.cluster_size(),
+        reader.chain_len(),
+    );
 
     let serial = iscsi::serial_for_image(&path);
     let iqn = iscsi::iqn_for(&serial);
+    let entered = Zeroizing::new(crate::secret_prompt::ask_secret(
+        "CHAP secret (exactly 16 ASCII bytes, configure it in the initiator too): ",
+    )?);
+    if entered.as_bytes().len() != 16 || !entered.is_ascii() {
+        return Err(own_backup_common::OwnBackupError::Config(
+            "CHAP secret must be exactly 16 ASCII bytes".into(),
+        ));
+    }
+    let mut raw_secret = [0u8; 16];
+    raw_secret.copy_from_slice(entered.as_bytes());
+    let chap_secret = Arc::new(Zeroizing::new(raw_secret));
 
     let lun = if args.rw {
         let scratch = path.with_extension("iscsi-scratch");
@@ -76,7 +91,11 @@ pub async fn run(args: IscsiServeArgs) -> own_backup_common::Result<()> {
         virtual_size / (1024 * 1024),
         chain,
         args.listen,
-        if args.rw { "чтение и запись" } else { "только чтение" }
+        if args.rw {
+            "чтение и запись"
+        } else {
+            "только чтение"
+        }
     );
     println!("Имя цели: {iqn}");
     println!("Остановить — Ctrl+C (сначала отключите сессию в инициаторе).");
@@ -88,8 +107,9 @@ pub async fn run(args: IscsiServeArgs) -> own_backup_common::Result<()> {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_bg = stop.clone();
     let lun = Arc::new(Mutex::new(lun));
-    let server =
-        tokio::task::spawn_blocking(move || iscsi::serve_listener(listener, iqn, lun, stop_bg));
+    let server = tokio::task::spawn_blocking(move || {
+        iscsi::serve_listener_chap(listener, iqn, lun, stop_bg, chap_secret)
+    });
 
     let _ = tokio::signal::ctrl_c().await;
     println!("\nОстанавливаю цель…");

@@ -1622,11 +1622,10 @@ impl BackupService for BackupServiceImpl {
             let p: In = serde_json::from_str(&req.into_inner().json)
                 .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
 
-            // Guard the live system disk (unless forced) where the restore runs.
-            if !p.force {
-                own_backup_restore::guard_target_disk(p.target_disk)
-                    .map_err(|e| Status::failed_precondition(e.to_string()))?;
-            }
+            // A client flag cannot override protection of the running system.
+            let _ = p.force;
+            own_backup_restore::guard_target_disk(p.target_disk)
+                .map_err(|e| Status::failed_precondition(e.to_string()))?;
 
             let slot = self.reserve(
                 &tr!("grpc_server.busy_disk_restore"),
@@ -1764,8 +1763,24 @@ impl BackupService for BackupServiceImpl {
             .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
 
         let setup = self.state.archive_setup.clone();
+        let prepared = setup
+            .pending_job(&p.token)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let slot = self.reserve(&tr!("grpc_server.busy_archive_setup"), &prepared.name)?;
+        let queue = self.state.queue.snapshot();
+        if queue.current.as_deref() == Some(prepared.id.as_str())
+            || queue.pending.iter().any(|id| id == &prepared.id)
+        {
+            return Err(Status::failed_precondition(
+                tr!("grpc_server.encryption_job_queued").into_owned(),
+            ));
+        }
+        // The folder may have gained a plaintext copy after Begin, so the
+        // format check must run under the same slot as the key-store commit.
+        validate_job(&prepared, true)?;
         let store = self.state.store.clone();
         let job = tokio::task::spawn_blocking(move || {
+            let _slot = slot;
             setup.confirm(&store, &p.token, &p.recovery_key)
         })
         .await

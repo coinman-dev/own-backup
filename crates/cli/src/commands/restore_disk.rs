@@ -17,7 +17,7 @@ pub struct RestoreDiskArgs {
     #[arg(long)]
     pub no_verify: bool,
 
-    /// Ignore the "don't restore the live system disk" guard (DANGEROUS)
+    /// Accepted for compatibility; live system and boot partitions always stay protected
     #[arg(long)]
     pub force: bool,
 }
@@ -87,7 +87,11 @@ pub async fn run(args: RestoreDiskArgs) -> own_backup_common::Result<()> {
             println!(
                 "  #{:<2} {:<26} {:>10.1} GB  {}",
                 p.index,
-                if p.name.is_empty() { "(no name)" } else { &p.name },
+                if p.name.is_empty() {
+                    "(no name)"
+                } else {
+                    &p.name
+                },
                 p.size_bytes(sector) as f64 / 1e9,
                 img.filesystem
             );
@@ -99,16 +103,17 @@ pub async fn run(args: RestoreDiskArgs) -> own_backup_common::Result<()> {
         args.target_disk
     );
 
-    // Safety guard: never wipe the live system disk unless on boot media (or forced).
-    if !args.force {
-        own_backup_restore::guard_target_disk(args.target_disk)?;
-    }
+    // A flag from a client cannot override protection of the running system.
+    let _ = args.force;
+    own_backup_restore::guard_target_disk(args.target_disk)?;
 
     if !args.yes {
         print!("Type YES (uppercase) to wipe and restore: ");
         std::io::stdout().flush().ok();
         let mut answer = String::new();
-        std::io::stdin().read_line(&mut answer).map_err(OwnBackupError::Io)?;
+        std::io::stdin()
+            .read_line(&mut answer)
+            .map_err(OwnBackupError::Io)?;
         if answer.trim() != "YES" {
             println!("Aborted.");
             return Ok(());

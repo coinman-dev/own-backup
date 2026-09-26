@@ -32,7 +32,7 @@ use windows::Win32::Storage::IscsiDisc::{
     GetIScsiSessionListW, LoginIScsiTargetW, LogoutIScsiTarget, RemoveIScsiSendTargetPortalW,
     RemoveIScsiStaticTargetW, ISCSI_CONNECTION_INFOW, ISCSI_DEVICE_ON_SESSIONW,
     ISCSI_SESSION_INFOW, ISCSI_TARGET_PORTALW, ISCSI_TARGET_PORTAL_GROUPW,
-    ISCSI_UNIQUE_SESSION_ID,
+    ISCSI_UNIQUE_SESSION_ID, ISCSI_LOGIN_OPTIONS, ISCSI_CHAP_AUTH_TYPE,
 };
 
 use crate::win_device::to_wide;
@@ -491,7 +491,12 @@ fn portal_for(address: &str, port: u16) -> ISCSI_TARGET_PORTALW {
 }
 
 /// Log the initiator in to our target and wait for its disk.
-pub fn login(address: &str, port: u16, target: &str) -> Result<AttachedTarget> {
+pub fn login(
+    address: &str,
+    port: u16,
+    target: &str,
+    chap_secret: &[u8; 16],
+) -> Result<AttachedTarget> {
     ensure_initiator_service()?;
     clear_stale_sessions(target, (address, port))?;
 
@@ -523,7 +528,10 @@ pub fn login(address: &str, port: u16, target: &str) -> Result<AttachedTarget> {
         // WITH a portal group: a static target that names no portal leaves the
         // initiator nothing to connect to, and the login then fails with
         // ISDSC_NO_PORTAL_SPECIFIED — which is how this was found.
-        let mut group = ISCSI_TARGET_PORTAL_GROUPW { Count: 1, Portals: [portal] };
+        let mut group = ISCSI_TARGET_PORTAL_GROUPW {
+            Count: 1,
+            Portals: [portal],
+        };
         // SAFETY: `iqn` and `group` outlive the call; no alias or mappings.
         let st = unsafe {
             AddIScsiStaticTargetW(
@@ -541,6 +549,19 @@ pub fn login(address: &str, port: u16, target: &str) -> Result<AttachedTarget> {
 
     let mut session = ISCSI_UNIQUE_SESSION_ID::default();
     let mut connection = ISCSI_UNIQUE_SESSION_ID::default();
+    // Bits 0x20/0x40/0x80 are USERNAME/PASSWORD/AUTH_TYPE from iscsidsc.h.
+    // The password is binary and lives only for this non-persistent login.
+    let username = b"ownbackup";
+    let mut login_options = ISCSI_LOGIN_OPTIONS {
+        Version: 0,
+        InformationSpecified: 0x20 | 0x40 | 0x80,
+        AuthType: ISCSI_CHAP_AUTH_TYPE,
+        UsernameLength: username.len() as u32,
+        PasswordLength: chap_secret.len() as u32,
+        Username: username.as_ptr() as *mut u8,
+        Password: chap_secret.as_ptr() as *mut u8,
+        ..Default::default()
+    };
     // Not informational, not persistent: the session lasts as long as the work
     // does, and nothing of ours survives a reboot in the initiator's database.
     // SAFETY: every pointer either outlives the call or is null by design.
@@ -553,7 +574,7 @@ pub fn login(address: &str, port: u16, target: &str) -> Result<AttachedTarget> {
             &mut portal,
             0,
             std::ptr::null_mut(),
-            std::ptr::null_mut(),
+            &mut login_options,
             None,
             false,
             &mut session,
@@ -576,7 +597,7 @@ pub fn login(address: &str, port: u16, target: &str) -> Result<AttachedTarget> {
                 std::ptr::null_mut(),
                 0,
                 std::ptr::null_mut(),
-                std::ptr::null_mut(),
+                &mut login_options,
                 None,
                 false,
                 &mut session,
@@ -595,8 +616,11 @@ pub fn login(address: &str, port: u16, target: &str) -> Result<AttachedTarget> {
     if code != 0 {
         // The session never came up; take back the portal we added.
         attached.cleanup_registrations();
-        return Err(dev(format!("iSCSI: LoginIScsiTarget failed with {}", describe(code)))
-            .tap(target));
+        return Err(dev(format!(
+            "iSCSI: LoginIScsiTarget failed with {}",
+            describe(code)
+        ))
+        .tap(target));
     }
 
     match wait_for_disk(&mut attached.session) {

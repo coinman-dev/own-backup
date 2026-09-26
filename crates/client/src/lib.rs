@@ -21,6 +21,41 @@ use proto::backup_service_client::BackupServiceClient;
 /// commands) just display them.
 pub type Result<T> = std::result::Result<T, String>;
 
+/// Open the privileged pipe with precisely the rights a client needs.
+/// Tokio's ClientOptions asks for GENERIC_WRITE, which maps to
+/// FILE_CREATE_PIPE_INSTANCE (the same bit as FILE_APPEND_DATA). Requesting
+/// the narrow mask lets the server deny instance creation to clients.
+#[cfg(windows)]
+fn open_service_pipe(
+    path: &str,
+) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeClient> {
+    use tokio::net::windows::named_pipe::NamedPipeClient;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_FLAG_OVERLAPPED, FILE_SHARE_MODE, OPEN_EXISTING, SECURITY_IDENTIFICATION,
+        SECURITY_SQOS_PRESENT,
+    };
+
+    // FILE_GENERIC_READ | FILE_GENERIC_WRITE, minus FILE_APPEND_DATA (0x4).
+    const CLIENT_ACCESS: u32 = 0x0012_019B;
+    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            CLIENT_ACCESS,
+            FILE_SHARE_MODE(0),
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_OVERLAPPED | SECURITY_IDENTIFICATION | SECURITY_SQOS_PRESENT,
+            None,
+        )
+    }
+    .map_err(|_| std::io::Error::last_os_error())?;
+    // SAFETY: CreateFileW returned one owned handle, opened for overlapped
+    // duplex I/O. Tokio takes sole ownership and closes it on failure/drop.
+    unsafe { NamedPipeClient::from_raw_handle(handle.0) }
+}
+
 /// A decoded orchestration event from [`BackupClient::stream_events`].
 #[derive(Debug, Clone)]
 pub enum ClientEvent {
@@ -28,7 +63,10 @@ pub enum ClientEvent {
     Queue(QueueSnapshot),
     Finished(JobRun),
     /// Unrecognized kind or undecodable payload — kept for forward-compat.
-    Unknown { kind: String, json: String },
+    Unknown {
+        kind: String,
+        json: String,
+    },
 }
 
 /// gRPC client wrapper. Cheap to clone (shares the underlying HTTP/2 channel).
@@ -92,7 +130,9 @@ impl BackupClient {
             .connect_timeout(std::time::Duration::from_millis(800))
             .connect_with_connector(service_fn(move |_: Uri| {
                 let socket_path = socket_path.clone();
-                async move { Ok::<_, std::io::Error>(TokioIo::new(UnixStream::connect(socket_path).await?)) }
+                async move {
+                    Ok::<_, std::io::Error>(TokioIo::new(UnixStream::connect(socket_path).await?))
+                }
             }))
             .await
             .map_err(|e| format!("cannot reach service (uds): {e}"))?;
@@ -123,7 +163,6 @@ impl BackupClient {
     #[cfg(windows)]
     async fn connect_pipe(token: String) -> Result<Self> {
         use hyper_util::rt::TokioIo;
-        use tokio::net::windows::named_pipe::ClientOptions;
         use tonic::transport::{Endpoint, Uri};
         use tower::service_fn;
 
@@ -140,7 +179,7 @@ impl BackupClient {
                     // Retry briefly if every instance is momentarily busy (a burst
                     // of connects before the service opened the next instance).
                     for _ in 0..20u32 {
-                        match ClientOptions::new().open(&pipe_path) {
+                        match open_service_pipe(&pipe_path) {
                             Ok(client) => return Ok(TokioIo::new(client)),
                             Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
                                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -376,8 +415,7 @@ impl BackupClient {
         read_write: bool,
         secret: &ArchiveSecret,
     ) -> Result<String> {
-        let mut body =
-            serde_json::json!({ "image_path": image_path, "read_write": read_write });
+        let mut body = serde_json::json!({ "image_path": image_path, "read_write": read_write });
         secret.add_to(&mut body);
         let json = body.to_string();
         let reply = self
@@ -474,7 +512,9 @@ impl BackupClient {
     pub async fn boot_action(&mut self, action: &serde_json::Value) -> Result<serde_json::Value> {
         let reply = self
             .inner
-            .boot_action(self.request(proto::JsonRequest { json: action.to_string() }))
+            .boot_action(self.request(proto::JsonRequest {
+                json: action.to_string(),
+            }))
             .await
             .map_err(status)?
             .into_inner();
@@ -556,8 +596,7 @@ impl BackupClient {
         token: &str,
         recovery_key: &str,
     ) -> Result<Job> {
-        let json =
-            serde_json::json!({ "token": token, "recovery_key": recovery_key }).to_string();
+        let json = serde_json::json!({ "token": token, "recovery_key": recovery_key }).to_string();
         let reply = self
             .inner
             .confirm_archive_encryption(self.request(proto::JsonRequest { json }))
@@ -636,8 +675,8 @@ impl BackupClient {
             "passphrases": passphrases,
         });
         secret.add_to(&mut body);
-        let json = serde_json::to_string(&body)
-            .map_err(|e| format!("serialize plan failed: {e}"))?;
+        let json =
+            serde_json::to_string(&body).map_err(|e| format!("serialize plan failed: {e}"))?;
         let reply = self
             .inner
             .apply_restore_plan(self.request(proto::JsonRequest { json }))
@@ -733,14 +772,26 @@ fn decode_event(ev: proto::Event) -> ClientEvent {
     match ev.kind.as_str() {
         "progress" => serde_json::from_str(&ev.json)
             .map(ClientEvent::Progress)
-            .unwrap_or(ClientEvent::Unknown { kind: ev.kind, json: ev.json }),
+            .unwrap_or(ClientEvent::Unknown {
+                kind: ev.kind,
+                json: ev.json,
+            }),
         "queue" => serde_json::from_str(&ev.json)
             .map(ClientEvent::Queue)
-            .unwrap_or(ClientEvent::Unknown { kind: ev.kind, json: ev.json }),
+            .unwrap_or(ClientEvent::Unknown {
+                kind: ev.kind,
+                json: ev.json,
+            }),
         "finished" => serde_json::from_str(&ev.json)
             .map(ClientEvent::Finished)
-            .unwrap_or(ClientEvent::Unknown { kind: ev.kind, json: ev.json }),
-        _ => ClientEvent::Unknown { kind: ev.kind, json: ev.json },
+            .unwrap_or(ClientEvent::Unknown {
+                kind: ev.kind,
+                json: ev.json,
+            }),
+        _ => ClientEvent::Unknown {
+            kind: ev.kind,
+            json: ev.json,
+        },
     }
 }
 
@@ -789,10 +840,16 @@ impl ArchiveSecret {
     fn add_to(&self, body: &mut serde_json::Value) {
         if let Some(map) = body.as_object_mut() {
             if let Some(password) = &self.password {
-                map.insert("password".into(), serde_json::Value::String(password.clone()));
+                map.insert(
+                    "password".into(),
+                    serde_json::Value::String(password.clone()),
+                );
             }
             if let Some(key) = &self.recovery_key {
-                map.insert("recovery_key".into(), serde_json::Value::String(key.clone()));
+                map.insert(
+                    "recovery_key".into(),
+                    serde_json::Value::String(key.clone()),
+                );
             }
         }
     }

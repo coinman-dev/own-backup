@@ -1,5 +1,13 @@
 {
   "_version": 2,
+  "file_restore_win.verify_listing_diff": {
+    "ru": "Содержимое каталога или тип/размер элемента не совпадает: %{path}",
+    "en": "Directory contents or entry type/size differs: %{path}"
+  },
+  "file_restore_win.verify_content_diff": {
+    "ru": "Содержимое или потоки файла не совпадают: %{path}",
+    "en": "File contents or streams differ: %{path}"
+  },
   "iscsi_win.win32_not_found": {
     "ru": "Win32: не найдено",
     "en": "Win32: not found"

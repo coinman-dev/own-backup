@@ -88,7 +88,8 @@ fn parse_mode(args: &[String]) -> Mode {
 /// colours whichever mode is selected, so it is answered from the whole line
 /// regardless of where it appears.
 fn wants_media(args: &[String]) -> bool {
-    args.iter().any(|a| matches!(a.as_str(), "--media" | "/media"))
+    args.iter()
+        .any(|a| matches!(a.as_str(), "--media" | "/media"))
 }
 
 /// Which mode the command line selects: the first word that names one wins.
@@ -134,10 +135,8 @@ fn start_log_housekeeping() {
     };
     tokio::spawn(async move {
         loop {
-            let removed = own_backup_common::log_files::sweep(
-                &dir,
-                own_backup_common::log_files::KEEP_DAYS,
-            );
+            let removed =
+                own_backup_common::log_files::sweep(&dir, own_backup_common::log_files::KEEP_DAYS);
             if removed > 0 {
                 info!(
                     removed,
@@ -162,12 +161,17 @@ fn init_logging() {
     let config_path = AppConfig::default_path();
     // The boot medium starts with no config at all, and its log is the one
     // that has to explain a restore afterwards.
-    let fallback = if own_backup_common::media_mode::is_windows_pe() { "debug" } else { "info" };
+    let fallback = if own_backup_common::media_mode::is_windows_pe() {
+        "debug"
+    } else {
+        "info"
+    };
     let level = log_level::configured_level(&config_path, fallback);
     let from_env = tracing_subscriber::EnvFilter::try_from_default_env().ok();
     let pinned = from_env.is_some();
-    let filter = from_env
-        .unwrap_or_else(|| tracing_subscriber::EnvFilter::new(log_level::filter_directives(&level)));
+    let filter = from_env.unwrap_or_else(|| {
+        tracing_subscriber::EnvFilter::new(log_level::filter_directives(&level))
+    });
     let (log_path, mirror_path, reload) = match open_service_log() {
         Some((f, path)) => {
             // The second copy, on whatever drive the user named — the only one
@@ -187,13 +191,19 @@ fn init_logging() {
             (Some(path), mirror, Some(handle))
         }
         None => {
-            tracing_subscriber::fmt().with_writer(std::io::stderr).with_env_filter(filter).init();
+            tracing_subscriber::fmt()
+                .with_writer(std::io::stderr)
+                .with_env_filter(filter)
+                .init();
             (None, None, None)
         }
     };
     if let (Some(handle), false) = (reload, pinned) {
         log_level::follow_config(config_path, fallback, level.clone(), move |directives| {
-            if handle.reload(tracing_subscriber::EnvFilter::new(directives)).is_ok() {
+            if handle
+                .reload(tracing_subscriber::EnvFilter::new(directives))
+                .is_ok()
+            {
                 info!(filter = directives, "log level changed in the settings");
             }
         });
@@ -294,7 +304,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Media mode only: a dev `--foreground` run wants its console, and under
     // the SCM there is none to hide.
     #[cfg(target_os = "windows")]
-    if own_backup_common::media_mode::is_media_mode() && matches!(mode, Mode::Daemon | Mode::Service)
+    if own_backup_common::media_mode::is_media_mode()
+        && matches!(mode, Mode::Daemon | Mode::Service)
     {
         hide_own_console();
         disable_winpe_firewall();
@@ -334,7 +345,10 @@ fn print_info() {
     println!("{} v{}", SERVICE_DISPLAY_NAME, env!("CARGO_PKG_VERSION"));
     println!("{SERVICE_DESCRIPTION}");
     println!();
-    println!("{}", tr!("main.info_background", name = SERVICE_DISPLAY_NAME));
+    println!(
+        "{}",
+        tr!("main.info_background", name = SERVICE_DISPLAY_NAME)
+    );
     println!("{}", tr!("main.info_no_manual_run"));
     println!();
     println!("{}", tr!("main.info_commands"));
@@ -354,7 +368,14 @@ fn print_info() {
 /// selects the transport: loopback TCP for dev/foreground, else the OS
 /// production transport (UDS on Unix, a DACL-restricted named pipe on Windows).
 fn run_loop(use_tcp: bool) -> Result<(), Box<dyn std::error::Error>> {
-    info!("Starting {SERVICE_DISPLAY_NAME} ({})", if use_tcp { "foreground/TCP" } else { "daemon/UDS" });
+    info!(
+        "Starting {SERVICE_DISPLAY_NAME} ({})",
+        if use_tcp {
+            "foreground/TCP"
+        } else {
+            "daemon/UDS"
+        }
+    );
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async {
         let (controller, signal) = create_shutdown_channel();
@@ -442,7 +463,11 @@ mod elevate {
         let Ok(exe) = std::env::current_exe() else {
             return false; // can't relaunch — let the op run and report access-denied
         };
-        let exe_w: Vec<u16> = exe.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        let exe_w: Vec<u16> = exe
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
         let params = args.join(" ");
         let params_w: Vec<u16> = params.encode_utf16().chain(std::iter::once(0)).collect();
         let params_ptr = if params.is_empty() {
@@ -505,7 +530,7 @@ pub async fn run_main_loop(
     // Build the orchestrator core: job store, serial run queue, cancel flag,
     // an event fan-out for progress streams, and the background worker that
     // actually drives backups.
-    let store = own_backup_core::JobStore::load(&config.data_dir);
+    let store = own_backup_core::JobStore::try_load(&config.data_dir)?;
     // A local authorization whose job is gone opens an archive on this machine
     // with no password and is accounted for by nothing. Deleting a job retires
     // its own; this catches what older builds and interrupted transactions
@@ -513,7 +538,10 @@ pub async fn run_main_loop(
     // no encrypted job the store does not even exist.
     match store.sweep_local_archive_keys() {
         Ok(0) => {}
-        Ok(n) => info!(retired = n, "unreferenced local archive authorizations removed"),
+        Ok(n) => info!(
+            retired = n,
+            "unreferenced local archive authorizations removed"
+        ),
         Err(e) => debug!(error = %e, "local archive key store not swept"),
     }
     // A mount lives in the process serving it, so whatever was mounted when
@@ -525,7 +553,10 @@ pub async fn run_main_loop(
     std::thread::spawn(|| {
         let cleared = own_backup_backup::iscsi_win::clear_orphaned_sessions();
         if cleared > 0 {
-            info!(cleared, "orphaned iSCSI sessions of an earlier run logged out");
+            info!(
+                cleared,
+                "orphaned iSCSI sessions of an earlier run logged out"
+            );
         }
     });
     let queue = own_backup_core::RunQueue::new();
@@ -534,15 +565,15 @@ pub async fn run_main_loop(
     let busy = own_backup_core::busy::Busy::new();
     let (job_tx, job_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let (events, _bootstrap_rx) =
-        tokio::sync::broadcast::channel::<grpc_server::proto::Event>(256);
+    let (events, _bootstrap_rx) = tokio::sync::broadcast::channel::<grpc_server::proto::Event>(256);
 
     let sink: std::sync::Arc<dyn own_backup_core::EventSink> =
         std::sync::Arc::new(grpc_server::GrpcEventSink { tx: events.clone() });
     // Passwords for encrypted volumes: cached for this session, plus the
     // OS-protected store (metadata DB) for remembered ones.
     let passwords = std::sync::Arc::new(own_backup_core::PasswordStore::new(config.db_path()));
-    tokio::spawn(own_backup_core::run_queue_worker(
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let worker = tokio::spawn(own_backup_core::run_queue_worker(
         sink,
         store.clone(),
         queue.clone(),
@@ -551,8 +582,24 @@ pub async fn run_main_loop(
         passwords.clone(),
         job_rx,
         job_tx.downgrade(),
+        stop_rx,
     ));
-    info!("Backup orchestrator ready ({} job(s) loaded)", store.list().len());
+    let cancel_on_exit = cancel.clone();
+    let busy_on_exit = busy.clone();
+    let mut worker_shutdown = shutdown.clone();
+    let worker_stop = stop_tx.clone();
+    let worker_cancel = cancel.clone();
+    let worker_busy = busy.clone();
+    let shutdown_watcher = tokio::spawn(async move {
+        worker_shutdown.wait_for_shutdown().await;
+        worker_stop.send_replace(true);
+        worker_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        worker_busy.cancel_whatever_is_running();
+    });
+    info!(
+        "Backup orchestrator ready ({} job(s) loaded)",
+        store.list().len()
+    );
 
     // The scheduler enqueues due jobs on a timer (stops on shutdown) and reacts
     // to OS events (logon/logoff/shutdown) forwarded from the service handler.
@@ -565,8 +612,16 @@ pub async fn run_main_loop(
         os_rx,
     );
 
-    let state =
-        AppState::new(config.clone(), store, queue, busy, job_tx, cancel, events, passwords);
+    let state = AppState::new(
+        config.clone(),
+        store,
+        queue,
+        busy,
+        job_tx,
+        cancel,
+        events,
+        passwords,
+    );
 
     // Production transport (no listening TCP port, so no local process can reach
     // the privileged service by opening a socket): Unix Domain Socket on Linux,
@@ -574,11 +629,29 @@ pub async fn run_main_loop(
     // loopback TCP on both.
     #[cfg(unix)]
     if !use_tcp {
-        return serve_uds(config, state, shutdown).await;
+        let served = serve_uds(config, state, shutdown).await;
+        stop_worker(
+            stop_tx,
+            cancel_on_exit,
+            busy_on_exit,
+            worker,
+            shutdown_watcher,
+        )
+        .await?;
+        return served;
     }
     #[cfg(windows)]
     if !use_tcp {
-        return serve_named_pipe(config, state, shutdown).await;
+        let served = serve_named_pipe(config, state, shutdown).await;
+        stop_worker(
+            stop_tx,
+            cancel_on_exit,
+            busy_on_exit,
+            worker,
+            shutdown_watcher,
+        )
+        .await?;
+        return served;
     }
 
     // TCP on loopback. On Windows this is the production transport (until a
@@ -607,15 +680,43 @@ pub async fn run_main_loop(
     #[cfg(windows)]
     let kept_token = token.clone();
     let service = BackupServiceImpl::new(state, token).into_service();
-    Server::builder()
+    let served = Server::builder()
         .add_service(service)
         .serve_with_shutdown(addr, async move {
             shutdown.wait_for_shutdown().await;
         })
-        .await?;
+        .await;
+
+    stop_worker(
+        stop_tx,
+        cancel_on_exit,
+        busy_on_exit,
+        worker,
+        shutdown_watcher,
+    )
+    .await?;
+    served?;
 
     #[cfg(windows)]
     drop_our_token(&config, &kept_token);
+    Ok(())
+}
+
+async fn stop_worker(
+    stop: tokio::sync::watch::Sender<bool>,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    busy: std::sync::Arc<own_backup_core::busy::Busy>,
+    worker: tokio::task::JoinHandle<()>,
+    watcher: tokio::task::JoinHandle<()>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    stop.send_replace(true);
+    cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+    busy.cancel_whatever_is_running();
+    watcher.abort();
+    // The worker owns the backup result and writes its final history before
+    // returning. Aborting it here would release its busy guard while the
+    // blocking disk operation could still be writing.
+    worker.await?;
     Ok(())
 }
 
@@ -642,8 +743,13 @@ fn drop_our_token(config: &AppConfig, ours: &str) {
 /// file, and return it. Windows loopback-TCP transport only.
 #[cfg(windows)]
 fn write_service_token(config: &AppConfig) -> Result<String, Box<dyn std::error::Error>> {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    use std::io::Write;
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::FromRawHandle;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_WRITE, FILE_SHARE_MODE,
+    };
 
     let mut raw = [0u8; 32];
     getrandom::getrandom(&mut raw).map_err(|e| format!("OS RNG failed: {e}"))?;
@@ -660,30 +766,42 @@ fn write_service_token(config: &AppConfig) -> Result<String, Box<dyn std::error:
     // interface was running: `token_len=0` in its log, and every call after it
     // answered "Invalid or missing token" (2026-09-19). A rename cannot be
     // caught half-done.
-    let fresh = path.with_extension("token.new");
-    std::fs::write(&fresh, token.as_bytes())?;
-    std::fs::rename(&fresh, &path)?;
-
-    // Lock down the DACL: strip inheritance (ProgramData grants Users:read),
-    // then allow only SYSTEM + Administrators (full) and INTERACTIVE (read) — so
-    // the unelevated GUI/CLI in the desktop session can read the token, but
-    // services, network logons and other sessions cannot. Best-effort.
-    let ok = std::process::Command::new("icacls")
-        .arg(&path)
-        .args([
-            "/inheritance:r",
-            "/grant:r",
-            "*S-1-5-18:F",     // NT AUTHORITY\SYSTEM
-            "*S-1-5-32-544:F", // BUILTIN\Administrators
-            "*S-1-5-4:R",      // NT AUTHORITY\INTERACTIVE
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    if !ok {
-        tracing::warn!(?path, "icacls failed on token file — it may be world-readable");
+    // Create with a protected DACL from the first instant. The old path wrote
+    // a world-readable inherited file, renamed it, and only then ran icacls;
+    // a failed icacls still let the privileged service start.
+    let fresh = path.with_extension(format!("token.new.{}", uuid::Uuid::new_v4()));
+    let security = PipeSecurity::new("D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GR;;;IU)")?;
+    let sa = security.attributes();
+    let wide: Vec<u16> = fresh
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let written = (|| -> Result<(), Box<dyn std::error::Error>> {
+        let handle = unsafe {
+            CreateFileW(
+                PCWSTR(wide.as_ptr()),
+                FILE_GENERIC_WRITE.0,
+                FILE_SHARE_MODE(0),
+                Some(&sa),
+                CREATE_NEW,
+                FILE_ATTRIBUTE_NORMAL,
+                None,
+            )?
+        };
+        // SAFETY: this is the only owner of CreateFileW's handle; File closes
+        // it after the bytes and metadata have been flushed.
+        let mut file = unsafe { std::fs::File::from_raw_handle(handle.0) };
+        file.write_all(token.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&fresh, &path)?;
+        Ok(())
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&fresh);
     }
+    written?;
 
     info!("Service token written to {:?}", path);
     Ok(token)
@@ -798,10 +916,9 @@ async fn serve_uds(
     let service = BackupServiceImpl::new(state, token).into_service();
     Server::builder()
         .add_service(service)
-        .serve_with_incoming_shutdown(
-            UnixListenerStream::new(uds),
-            async move { shutdown.wait_for_shutdown().await },
-        )
+        .serve_with_incoming_shutdown(UnixListenerStream::new(uds), async move {
+            shutdown.wait_for_shutdown().await
+        })
         .await?;
 
     let _ = std::fs::remove_file(&socket_path);
@@ -855,14 +972,77 @@ impl tokio::io::AsyncWrite for NamedPipeConn {
     }
 }
 
-/// A named-pipe security descriptor granting SYSTEM + Administrators full
-/// control and the interactive desktop user connect/read/write (but NOT the
-/// right to create pipe instances). This mirrors the token-file DACL exactly:
-/// the unelevated GUI/CLI in the console session can reach the service, while
-/// the network, other logon sessions and non-interactive local services cannot.
-/// Freed via `LocalFree` on drop.
+/// An owned Windows security descriptor used when creating the named pipe or
+/// the token file. Freed via `LocalFree` on drop.
 #[cfg(windows)]
 struct PipeSecurity(windows::Win32::Security::PSECURITY_DESCRIPTOR);
+
+#[cfg(windows)]
+fn client_in_active_console(server: &tokio::net::windows::named_pipe::NamedPipeServer) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::Security::{EqualSid, GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+    use windows::Win32::System::Pipes::{GetNamedPipeClientProcessId, GetNamedPipeClientSessionId};
+    use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
+    use windows::Win32::System::Threading::{OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    struct Owned(HANDLE);
+    impl Drop for Owned {
+        fn drop(&mut self) {
+            let _ = unsafe { CloseHandle(self.0) };
+        }
+    }
+    fn user_sid(token: HANDLE) -> Option<Vec<u8>> {
+        let mut needed = 0u32;
+        let _ = unsafe { GetTokenInformation(token, TokenUser, None, 0, &mut needed) };
+        if needed < std::mem::size_of::<TOKEN_USER>() as u32 || needed > 64 * 1024 {
+            return None;
+        }
+        let mut bytes = vec![0u8; needed as usize];
+        unsafe {
+            GetTokenInformation(token, TokenUser, Some(bytes.as_mut_ptr().cast()), needed, &mut needed)
+        }.ok()?;
+        Some(bytes)
+    }
+
+    let active = unsafe { WTSGetActiveConsoleSessionId() };
+    if active == u32::MAX {
+        return false;
+    }
+    let mut client = u32::MAX;
+    let pipe = HANDLE(server.as_raw_handle());
+    if unsafe { GetNamedPipeClientSessionId(pipe, &mut client) }.is_err() || client != active {
+        return false;
+    }
+    let mut process_id = 0u32;
+    if unsafe { GetNamedPipeClientProcessId(pipe, &mut process_id) }.is_err() {
+        return false;
+    }
+    let Ok(process) = (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) }) else {
+        return false;
+    };
+    let process = Owned(process);
+    let mut client_token = HANDLE::default();
+    if unsafe { OpenProcessToken(process.0, TOKEN_QUERY, &mut client_token) }.is_err() {
+        return false;
+    }
+    let client_token = Owned(client_token);
+    let mut console_token = HANDLE::default();
+    if unsafe { WTSQueryUserToken(active, &mut console_token) }.is_err() {
+        // A stripped WinPE may have no WTS token; its single temporary console
+        // session is still distinguished by the check above.
+        return own_backup_common::media_mode::is_media_mode();
+    }
+    let console_token = Owned(console_token);
+    let (Some(a), Some(b)) = (user_sid(client_token.0), user_sid(console_token.0)) else {
+        return false;
+    };
+    // TOKEN_USER is pointer-aligned in the API buffer; read_unaligned avoids
+    // assuming Vec<u8>'s alignment. Both pointed-to SIDs live in a/b below.
+    let a_user = unsafe { std::ptr::read_unaligned(a.as_ptr().cast::<TOKEN_USER>()) };
+    let b_user = unsafe { std::ptr::read_unaligned(b.as_ptr().cast::<TOKEN_USER>()) };
+    unsafe { EqualSid(a_user.User.Sid, b_user.User.Sid).is_ok() }
+}
 
 // The descriptor is immutable after construction; only a raw pointer prevents
 // the auto-derive, so it is safe to move between threads.
@@ -871,19 +1051,14 @@ unsafe impl Send for PipeSecurity {}
 
 #[cfg(windows)]
 impl PipeSecurity {
-    fn new() -> Result<Self, Box<dyn std::error::Error>> {
+    fn new(sddl: &str) -> Result<Self, Box<dyn std::error::Error>> {
         use windows::core::PCWSTR;
         use windows::Win32::Security::Authorization::{
             ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
         };
         use windows::Win32::Security::PSECURITY_DESCRIPTOR;
 
-        // D:P = protected DACL (no inheritance from ProgramData etc.);
-        // GA = GENERIC_ALL, GR|GW = GENERIC_READ|WRITE. SY=SYSTEM, BA=Builtin
-        // Administrators, IU=Interactive Users.
-        let sddl: Vec<u16> = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)\0"
-            .encode_utf16()
-            .collect();
+        let sddl: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
         let mut psd = PSECURITY_DESCRIPTOR::default();
         // SAFETY: `sddl` is a NUL-terminated UTF-16 string; `psd` receives a
         // freshly LocalAlloc'd descriptor that Drop frees.
@@ -943,7 +1118,9 @@ async fn serve_named_pipe(
         tracing::error!(error = %e, "no service token could be written — refusing to start");
         e
     })?;
-    let security = PipeSecurity::new()?;
+    // 0x0012019B is duplex client I/O without FILE_CREATE_PIPE_INSTANCE
+    // (bit 0x4). GENERIC_WRITE would grant that server-only right too.
+    let security = PipeSecurity::new("D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x0012019B;;;IU)")?;
 
     info!(
         "gRPC server (named pipe) listening on {} (auth: {})",
@@ -991,6 +1168,10 @@ async fn serve_named_pipe(
                             return;
                         }
                     };
+                    if !client_in_active_console(&connected) {
+                        tracing::warn!(target: "security", "named-pipe client outside the active console session rejected");
+                        continue;
+                    }
                     yield Ok(NamedPipeConn(connected));
                 }
                 Err(e) => {
@@ -1018,9 +1199,7 @@ async fn serve_named_pipe(
     let service = BackupServiceImpl::new(state, token).into_service();
     Server::builder()
         .add_service(service)
-        .serve_with_incoming_shutdown(incoming, async move {
-            shutdown.wait_for_shutdown().await
-        })
+        .serve_with_incoming_shutdown(incoming, async move { shutdown.wait_for_shutdown().await })
         .await?;
 
     drop_our_token(&config, &kept_token);
@@ -1046,7 +1225,12 @@ mod tests {
 
     #[test]
     fn every_order_of_run_and_media_means_the_same_thing() {
-        for line in ["--run --media", "--media --run", "/media --run", "--run /media"] {
+        for line in [
+            "--run --media",
+            "--media --run",
+            "/media --run",
+            "--run /media",
+        ] {
             assert!(wants_media(&args(line)), "{line}");
             assert_eq!(mode_of(&args(line)), Mode::Daemon, "{line}");
         }
@@ -1056,7 +1240,14 @@ mod tests {
     /// because of a word that merely looks like the flag.
     #[test]
     fn nothing_else_turns_media_mode_on() {
-        for line in ["", "--run", "--foreground", "/install", "--run media", "--mediaX"] {
+        for line in [
+            "",
+            "--run",
+            "--foreground",
+            "/install",
+            "--run media",
+            "--mediaX",
+        ] {
             assert!(!wants_media(&args(line)), "{line}");
         }
     }

@@ -41,12 +41,14 @@ impl JobStore {
         }
         job.image_format = own_backup_common::types::ImageFormat::Qcow2;
         let job_id = job.id.clone();
+        let expected_revision = job.updated_at.clone();
         keys.authorize_and_commit(&job_id, &portable_key, private, |local_key| {
             job.archive_encryption = Some(ArchiveEncryption {
                 portable_key: portable_key.clone(),
                 local_key,
             });
-            self.upsert_inner(job, true).map_err(OwnBackupError::Io)
+            self.upsert_inner_checked(job, true, Some(&expected_revision))
+                .map_err(OwnBackupError::Io)
         })
     }
 
@@ -122,12 +124,9 @@ impl JobStore {
         let Some(encryption) = &job.archive_encryption else {
             return Ok(None);
         };
-        let data_dir = self
-            .jobs_path
-            .parent()
-            .ok_or_else(|| {
-                OwnBackupError::Config(tr!("backup_encryption.no_state_dir").into_owned())
-            })?;
+        let data_dir = self.jobs_path.parent().ok_or_else(|| {
+            OwnBackupError::Config(tr!("backup_encryption.no_state_dir").into_owned())
+        })?;
         let keys = ServiceKeyStore::new(data_dir).map_err(|e| {
             OwnBackupError::Encryption(
                 tr!("backup_encryption.reauthorize_error", error = e).into_owned(),
@@ -235,10 +234,17 @@ mod tests {
         b.archive_encryption.as_mut().unwrap().portable_key.job_id = "second".into();
         b.archive_encryption.as_mut().unwrap().local_key =
             serde_json::from_value(serde_json::json!({ "id": uuid::Uuid::new_v4() })).unwrap();
-        let plain = Job { id: "plain".into(), ..Default::default() };
+        let plain = Job {
+            id: "plain".into(),
+            ..Default::default()
+        };
 
         let keep = referenced_local_keys(&[a.clone(), plain, b.clone()]);
-        assert_eq!(keep.len(), 2, "one per encrypted job, and the plain job adds none");
+        assert_eq!(
+            keep.len(),
+            2,
+            "one per encrypted job, and the plain job adds none"
+        );
         for job in [&a, &b] {
             let id = job.archive_encryption.as_ref().unwrap().local_key.id();
             assert!(keep.contains(&id), "job {} kept its key", job.id);
@@ -255,7 +261,12 @@ mod tests {
         let store = JobStore::load(dir.path());
         assert_eq!(store.sweep_local_archive_keys().unwrap(), 0);
 
-        store.upsert(Job { name: "nightly".into(), ..Default::default() }).unwrap();
+        store
+            .upsert(Job {
+                name: "nightly".into(),
+                ..Default::default()
+            })
+            .unwrap();
         assert!(
             store.sweep_local_archive_keys().is_err(),
             "with a job present it does reach the key store (absent here)"
@@ -380,6 +391,7 @@ mod tests {
         let retry_tx = tx.downgrade();
         drop(tx);
         let sink = Arc::new(Sink(Mutex::new(Vec::new())));
+        let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
         crate::run_queue_worker(
             sink.clone(),
             store.clone(),
@@ -389,6 +401,7 @@ mod tests {
             Arc::new(crate::NoPasswords),
             rx,
             retry_tx,
+            stop_rx,
         )
         .await;
         let runs = sink.0.lock().unwrap();

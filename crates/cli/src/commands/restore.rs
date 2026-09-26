@@ -47,6 +47,8 @@ pub async fn run(args: RestoreArgs) -> own_backup_common::Result<()> {
         encryption: None,
     };
 
+    own_backup_restore::guard_target_volume(&args.target)?;
+
     let summary = tokio::task::spawn_blocking(move || {
         request.encryption =
             crate::commands::archive_key::open_keys_for_image(&request.image_path)?;
@@ -72,7 +74,9 @@ pub async fn run(args: RestoreArgs) -> own_backup_common::Result<()> {
         })
     })
     .await
-    .map_err(|e| own_backup_common::OwnBackupError::Device(format!("restore task panicked: {e}")))??;
+    .map_err(|e| {
+        own_backup_common::OwnBackupError::Device(format!("restore task panicked: {e}"))
+    })??;
 
     println!();
     println!(
@@ -121,14 +125,19 @@ pub async fn run(args: RestoreArgs) -> own_backup_common::Result<()> {
             };
             if percent != last_percent {
                 last_percent = percent;
-                print!("\r  {percent:3}%  {} / {} blocks   ", p.blocks_done, p.blocks_total);
+                print!(
+                    "\r  {percent:3}%  {} / {} blocks   ",
+                    p.blocks_done, p.blocks_total
+                );
                 let _ = std::io::stdout().flush();
             }
             Ok(())
         })
     })
     .await
-    .map_err(|e| own_backup_common::OwnBackupError::Device(format!("restore task panicked: {e}")))??;
+    .map_err(|e| {
+        own_backup_common::OwnBackupError::Device(format!("restore task panicked: {e}"))
+    })??;
 
     println!();
     println!(

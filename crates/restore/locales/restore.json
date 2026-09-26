@@ -8,6 +8,18 @@
     "ru": "Не удалось определить, на каком диске работает Windows, поэтому нельзя убедиться, что выбран не он. Загрузитесь с носителя восстановления — там этот вопрос не стоит.",
     "en": "Could not determine which disk Windows is running from, so there is no way to make sure it is not the one selected. Boot from the bootable media — the question does not arise there."
   },
+  "guard.disk_has_live_boot_partition": {
+    "ru": "На диске %{disk} находится используемый загрузочный раздел Windows. Восстановление всего диска возможно только с носителя восстановления.",
+    "en": "Disk %{disk} contains a boot partition used by Windows. Restore the whole disk from bootable media."
+  },
+  "guard.target_is_live_boot_partition": {
+    "ru": "Это используемый загрузочный раздел Windows. Перезаписать его на работающей системе нельзя.",
+    "en": "This is a boot partition used by Windows. It cannot be overwritten while Windows is running."
+  },
+  "guard.protection_unknown": {
+    "ru": "Не удалось подтвердить безопасность диска назначения: %{reason}",
+    "en": "Could not confirm that the target disk is safe: %{reason}"
+  },
   "guard.live_system_location_unknown": {
     "ru": "Не удалось определить, где стоит работающая Windows, поэтому нельзя убедиться, что запись пойдёт не на неё. Загрузитесь с носителя восстановления.",
     "en": "Could not determine where the running Windows is installed, so there is no way to make sure the write will not land on it. Boot from the bootable media."

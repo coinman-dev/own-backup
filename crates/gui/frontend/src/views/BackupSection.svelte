@@ -54,13 +54,15 @@
     localStorage.setItem(SORT_KEY, sortKey);
   });
 
-  // Total on-disk footprint of a job = sum of every recorded run's written
-  // bytes (full + increments ≈ the size of all its archives), for size sort.
-  function jobSize(job: Job): number {
-    return jobs.activity
-      .filter((r) => r.job_id === job.id)
-      .reduce((s, r) => s + (r.bytes_copied || 0), 0);
-  }
+  // The history records processed source bytes, not the compressed size of
+  // files still present after retention. Compute the totals once per update.
+  const processedByJob = $derived.by(() => {
+    const totals = new Map<string, number>();
+    for (const run of jobs.activity) {
+      totals.set(run.job_id, (totals.get(run.job_id) ?? 0) + (run.bytes_copied || 0));
+    }
+    return totals;
+  });
   const SORT_LABELS: Record<SortKey, () => string> = {
     name: m.bs_sort_name,
     time: m.bs_sort_time,
@@ -75,7 +77,7 @@
     if (sortKey === 'time') {
       list.sort((a, b) => (b.last_run?.finished_at ?? '').localeCompare(a.last_run?.finished_at ?? ''));
     } else if (sortKey === 'size') {
-      list.sort((a, b) => jobSize(b) - jobSize(a));
+      list.sort((a, b) => (processedByJob.get(b.id) ?? 0) - (processedByJob.get(a.id) ?? 0));
     } else {
       list.sort((a, b) => a.name.localeCompare(b.name, intlLocale()));
     }

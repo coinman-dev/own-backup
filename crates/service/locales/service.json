@@ -56,6 +56,14 @@
     "ru": "удаление копий",
     "en": "deleting backups"
   },
+  "grpc_server.busy_archive_setup": {
+    "ru": "подтверждение шифрования архива",
+    "en": "archive encryption confirmation"
+  },
+  "grpc_server.encryption_job_queued": {
+    "ru": "Задание выполняется или стоит в очереди; подтвердите шифрование после завершения.",
+    "en": "The job is running or queued; confirm encryption after it finishes."
+  },
   "grpc_server.job_not_deleted": {
     "ru": "Задание не удалено: %{error}",
     "en": "The job was not deleted: %{error}"

@@ -1,0 +1,56 @@
+name: Validate
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Linux GUI and image test prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libxdo-dev libssl-dev librsvg2-dev protobuf-compiler qemu-utils
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: crates/gui/frontend/package-lock.json
+      - name: Build frontend
+        working-directory: crates/gui/frontend
+        run: |
+          npm ci
+          npm run build
+          npm audit
+      - name: Test Rust workspace
+        run: cargo test --workspace --locked -j 2
+      - name: Check Rust advisories
+        run: |
+          cargo install cargo-audit --locked --version 0.22.2
+          cargo audit
+
+  windows:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v7
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: crates/gui/frontend/package-lock.json
+      - name: Build frontend
+        working-directory: crates/gui/frontend
+        run: |
+          npm ci
+          npm run build
+      - name: Check Windows workspace
+        run: cargo check --workspace --locked --target x86_64-pc-windows-msvc -j 2

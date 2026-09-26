@@ -287,8 +287,29 @@ pub fn plan_retention(
     now: chrono::DateTime<chrono::Utc>,
     protect_image: &Path,
 ) -> Vec<usize> {
+    plan_retention_protected(
+        chains,
+        rules,
+        now,
+        &std::iter::once(protect_image.to_path_buf()).collect(),
+    )
+}
+
+/// As above, but protect every image produced by the current multi-volume run.
+/// A per-source retention pass may see two sources with the same old filename
+/// token; neither newly written chain may become a deletion candidate.
+pub fn plan_retention_protected(
+    chains: &[Chain],
+    rules: &RetentionRules,
+    now: chrono::DateTime<chrono::Utc>,
+    protect_images: &std::collections::HashSet<PathBuf>,
+) -> Vec<usize> {
     let exempt = |idx: usize| -> bool {
-        (rules.keep_first && idx == 0) || chains[idx].contains(protect_image)
+        (rules.keep_first && idx == 0)
+            || chains[idx]
+                .images
+                .iter()
+                .any(|image| protect_images.contains(&image.image_path))
     };
 
     let mut delete = vec![false; chains.len()];
@@ -299,9 +320,7 @@ pub fn plan_retention(
             if exempt(idx) {
                 continue;
             }
-            if let Ok(newest) =
-                chrono::DateTime::parse_from_rfc3339(chain.newest_created_at())
-            {
+            if let Ok(newest) = chrono::DateTime::parse_from_rfc3339(chain.newest_created_at()) {
                 if newest.with_timezone(&chrono::Utc) < cutoff {
                     delete[idx] = true;
                 }

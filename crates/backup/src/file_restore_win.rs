@@ -39,20 +39,21 @@ use std::time::Instant;
 
 use tracing::{debug, info, warn};
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{HANDLE, GENERIC_READ, GENERIC_WRITE};
+use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, HANDLE};
 use windows::Win32::Storage::FileSystem::{
     BackupRead, BackupWrite, CreateDirectoryW, CreateFileW, CreateHardLinkW,
     GetFileInformationByHandle, SetFileAttributesW, SetFileTime, SetVolumeLabelW,
-    BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_ATTRIBUTE_SPARSE_FILE, FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    OPEN_EXISTING, CREATE_ALWAYS,
+    BY_HANDLE_FILE_INFORMATION, CREATE_ALWAYS, FILE_ATTRIBUTE_DIRECTORY,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_SPARSE_FILE, FILE_FLAGS_AND_ATTRIBUTES,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows::Win32::System::Ioctl::FSCTL_SET_SPARSE;
 use windows::Win32::System::IO::DeviceIoControl;
 
 use own_backup_common::cancel::CancelToken;
-use own_backup_common::{OwnBackupError, Result};
+use own_backup_common::{tr, OwnBackupError, Result};
+use sha2::{Digest, Sha256};
 
 use crate::exclusions_win::list_dir_backup;
 use crate::volume_win::FileHandle;
@@ -100,14 +101,14 @@ pub struct TreeSize {
 }
 
 /// Count the files and bytes under `root`.
-pub fn measure_tree(root: &Path, cancel: &CancelToken) -> TreeSize {
+pub fn measure_tree(root: &Path, cancel: &CancelToken) -> Result<TreeSize> {
     let mut out = TreeSize::default();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         if cancel.is_cancelled() {
-            break;
+            return Err(OwnBackupError::Cancelled);
         }
-        let Ok(entries) = list_dir_backup(&dir) else { continue };
+        let entries = list_dir_backup(&dir)?;
         for e in entries {
             if e.name == "." || e.name == ".." {
                 continue;
@@ -126,7 +127,94 @@ pub fn measure_tree(root: &Path, cancel: &CancelToken) -> TreeSize {
             }
         }
     }
-    out
+    Ok(out)
+}
+
+/// Verify the complete directory structure and every BackupRead stream. This
+/// includes alternate streams, reparse data and security descriptors, not just
+/// the ordinary file size. A failed directory walk is an error, never an empty
+/// tree that might compare equal to another failed walk.
+pub fn verify_tree(src_root: &Path, dst_root: &Path, cancel: &CancelToken) -> Result<TreeSize> {
+    crate::privileges_win::enable_backup_privileges();
+    let mut out = TreeSize::default();
+    let mut stack = vec![(src_root.to_path_buf(), dst_root.to_path_buf())];
+    let mut buf = vec![0u8; STREAM_BUF];
+    while let Some((src_dir, dst_dir)) = stack.pop() {
+        if cancel.is_cancelled() {
+            return Err(OwnBackupError::Cancelled);
+        }
+        let mut source = list_dir_backup(&src_dir)?;
+        let mut target = list_dir_backup(&dst_dir)?;
+        source.retain(|e| e.name != "." && e.name != "..");
+        target.retain(|e| e.name != "." && e.name != "..");
+        source.sort_by(|a, b| a.name.cmp(&b.name));
+        target.sort_by(|a, b| a.name.cmp(&b.name));
+        if source.len() != target.len() {
+            return Err(OwnBackupError::RestoreIncompatible(
+                tr!(
+                    "file_restore_win.verify_listing_diff",
+                    path = dst_dir.display()
+                )
+                .into_owned(),
+            ));
+        }
+        for (from, to) in source.into_iter().zip(target) {
+            let src = src_dir.join(&from.name);
+            let dst = dst_dir.join(&to.name);
+            let from_kind =
+                from.attributes & (FILE_ATTRIBUTE_DIRECTORY.0 | FILE_ATTRIBUTE_REPARSE_POINT.0);
+            let to_kind =
+                to.attributes & (FILE_ATTRIBUTE_DIRECTORY.0 | FILE_ATTRIBUTE_REPARSE_POINT.0);
+            if from.name != to.name || from_kind != to_kind || from.size != to.size {
+                return Err(OwnBackupError::RestoreIncompatible(
+                    tr!("file_restore_win.verify_listing_diff", path = dst.display()).into_owned(),
+                ));
+            }
+            if from_kind & FILE_ATTRIBUTE_DIRECTORY.0 != 0
+                && from_kind & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0
+            {
+                stack.push((src, dst));
+            } else {
+                if backup_stream_digest(&src, cancel, &mut buf)?
+                    != backup_stream_digest(&dst, cancel, &mut buf)?
+                {
+                    return Err(OwnBackupError::RestoreIncompatible(
+                        tr!("file_restore_win.verify_content_diff", path = dst.display())
+                            .into_owned(),
+                    ));
+                }
+                out.files += 1;
+                out.bytes += from.size;
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn backup_stream_digest(path: &Path, cancel: &CancelToken, buf: &mut [u8]) -> Result<[u8; 32]> {
+    let handle = open_source(path)?;
+    let mut read_ctx: *mut core::ffi::c_void = std::ptr::null_mut();
+    let result = (|| -> Result<[u8; 32]> {
+        let mut digest = Sha256::new();
+        loop {
+            if cancel.is_cancelled() {
+                return Err(OwnBackupError::Cancelled);
+            }
+            let mut read = 0u32;
+            // SAFETY: the buffer is writable; BackupRead owns read_ctx until
+            // abort_context releases it below, including on an error.
+            unsafe { BackupRead(handle.0, buf, &mut read, false, true, &mut read_ctx) }.map_err(
+                |e| OwnBackupError::Device(format!("BackupRead {}: {e}", path.display())),
+            )?;
+            if read == 0 {
+                break;
+            }
+            digest.update(&buf[..read as usize]);
+        }
+        Ok(digest.finalize().into())
+    })();
+    abort_context(handle.0, &mut read_ctx, true);
+    result
 }
 
 /// Copy everything under `src_root` to `dst_root`, preserving what makes a
@@ -157,7 +245,8 @@ pub fn copy_tree(
         let entries = match list_dir_backup(&src_dir) {
             Ok(e) => e,
             Err(e) => {
-                out.failures.push((src_dir.display().to_string(), e.to_string()));
+                out.failures
+                    .push((src_dir.display().to_string(), e.to_string()));
                 continue;
             }
         };
@@ -194,7 +283,8 @@ pub fn copy_tree(
                     // One unreadable file must not abandon the restore; the
                     // user gets the list at the end.
                     warn!(path = %src.display(), error = %err, "file restore: entry failed");
-                    out.failures.push((src.display().to_string(), err.to_string()));
+                    out.failures
+                        .push((src.display().to_string(), err.to_string()));
                 }
             }
         }
@@ -334,7 +424,10 @@ fn create_dir(path: &Path) -> Result<()> {
         Err(e) if e.code() == windows::Win32::Foundation::ERROR_ALREADY_EXISTS.to_hresult() => {
             Ok(())
         }
-        Err(e) => Err(OwnBackupError::Device(format!("mkdir {}: {e}", path.display()))),
+        Err(e) => Err(OwnBackupError::Device(format!(
+            "mkdir {}: {e}",
+            path.display()
+        ))),
     }
 }
 
@@ -350,7 +443,16 @@ fn set_sparse(h: &FileHandle) -> Result<()> {
     let mut returned = 0u32;
     // SAFETY: no in/out buffers.
     unsafe {
-        DeviceIoControl(h.0, FSCTL_SET_SPARSE, None, 0, None, 0, Some(&mut returned), None)
+        DeviceIoControl(
+            h.0,
+            FSCTL_SET_SPARSE,
+            None,
+            0,
+            None,
+            0,
+            Some(&mut returned),
+            None,
+        )
     }
     .map_err(|e| OwnBackupError::Device(format!("FSCTL_SET_SPARSE: {e}")))
 }
@@ -371,9 +473,7 @@ fn stream_copy(src: &FileHandle, dst: &FileHandle) -> Result<()> {
         let mut read = 0u32;
         // SAFETY: buffer valid for its length; the context pointer is owned by
         // the API between calls and released by the abort calls below.
-        let ok = unsafe {
-            BackupRead(src.0, &mut buf, &mut read, false, true, &mut read_ctx)
-        };
+        let ok = unsafe { BackupRead(src.0, &mut buf, &mut read, false, true, &mut read_ctx) };
         if let Err(e) = ok {
             result = Err(OwnBackupError::Device(format!("BackupRead: {e}")));
             break;
@@ -384,7 +484,14 @@ fn stream_copy(src: &FileHandle, dst: &FileHandle) -> Result<()> {
         let mut written = 0u32;
         // SAFETY: as above; `read` bytes are initialised.
         let ok = unsafe {
-            BackupWrite(dst.0, &buf[..read as usize], &mut written, false, true, &mut write_ctx)
+            BackupWrite(
+                dst.0,
+                &buf[..read as usize],
+                &mut written,
+                false,
+                true,
+                &mut write_ctx,
+            )
         };
         if let Err(e) = ok {
             result = Err(OwnBackupError::Device(format!("BackupWrite: {e}")));
@@ -478,7 +585,10 @@ mod tests {
 
     #[test]
     fn long_path_prefixes_a_drive_path() {
-        assert_eq!(long_path(Path::new(r"C:\Windows")), PathBuf::from(r"\\?\C:\Windows"));
+        assert_eq!(
+            long_path(Path::new(r"C:\Windows")),
+            PathBuf::from(r"\\?\C:\Windows")
+        );
     }
 
     #[test]

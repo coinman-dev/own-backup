@@ -13,10 +13,9 @@
 //!
 //! The protocol served here is the small part of RFC 7143 that one local
 //! initiator uses: login, text (SendTargets), SCSI command, data in and out,
-//! NOP and logout. No digests, no authentication, no error recovery beyond
-//! level 0, one connection per session — all of which is negotiated honestly
-//! in [`session`], and refused rather than faked when the initiator asks for
-//! something else.
+//! NOP and logout. No digests or error recovery beyond level 0, one connection
+//! per session. Production mounts require a fresh one-way CHAP secret; discovery
+//! sessions can list the target but cannot access its blocks.
 //!
 //! Only the listener is here; the wire is in [`session`] and the commands in
 //! [`scsi`]. All three are cross-platform on purpose: the protocol is the part
@@ -30,6 +29,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use zeroize::Zeroizing;
 
 use own_backup_common::{OwnBackupError, Result};
 use tracing::{info, warn};
@@ -59,7 +59,10 @@ pub fn iqn_for(serial: &str) -> String {
         })
         .collect();
     let tail = tail.trim_matches('-').to_string();
-    format!("{IQN_PREFIX}{}", if tail.is_empty() { "unnamed" } else { &tail })
+    format!(
+        "{IQN_PREFIX}{}",
+        if tail.is_empty() { "unnamed" } else { &tail }
+    )
 }
 
 /// A stable, unique name for one image file, for the target's IQN and for the
@@ -67,7 +70,10 @@ pub fn iqn_for(serial: &str) -> String {
 /// write `full.qcow2` in different folders) and the full path is not a legal
 /// iSCSI name, so the name carries a short digest of the path.
 pub fn serial_for_image(path: &std::path::Path) -> String {
-    let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
     let digest = {
         // FNV-1a: a few lines, and all that is needed to tell two paths apart.
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -135,8 +141,11 @@ impl Lun {
     /// The image's own serial, as INQUIRY reports it.
     pub fn with_serial(mut self, serial: &str) -> Self {
         // The field is fixed width on the wire and ASCII by definition.
-        let clean: String =
-            serial.chars().filter(|c| c.is_ascii_graphic()).take(32).collect();
+        let clean: String = serial
+            .chars()
+            .filter(|c| c.is_ascii_graphic())
+            .take(32)
+            .collect();
         if !clean.is_empty() {
             self.serial = clean;
         }
@@ -177,9 +186,9 @@ impl Lun {
 
     pub fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()> {
         match &mut self.backing {
-            Backing::Ro(_) => {
-                Err(OwnBackupError::Device("iSCSI: write to a read-only LUN".into()))
-            }
+            Backing::Ro(_) => Err(OwnBackupError::Device(
+                "iSCSI: write to a read-only LUN".into(),
+            )),
             Backing::Rw(s) => s.write_at(offset, data),
         }
     }
@@ -229,7 +238,27 @@ pub fn serve_listener(
     lun: Arc<Mutex<Lun>>,
     stop: Arc<AtomicBool>,
 ) -> Result<()> {
-    serve_listener_paced(listener, iqn, lun, stop, PDU_DEADLINE, STOP_GRACE)
+    serve_listener_paced(listener, iqn, lun, stop, None, PDU_DEADLINE, STOP_GRACE)
+}
+
+/// Production mount: only an initiator holding this ephemeral per-target CHAP
+/// secret can enter a normal session and read or write image blocks.
+pub fn serve_listener_chap(
+    listener: TcpListener,
+    iqn: String,
+    lun: Arc<Mutex<Lun>>,
+    stop: Arc<AtomicBool>,
+    secret: Arc<Zeroizing<[u8; 16]>>,
+) -> Result<()> {
+    serve_listener_paced(
+        listener,
+        iqn,
+        lun,
+        stop,
+        Some(secret),
+        PDU_DEADLINE,
+        STOP_GRACE,
+    )
 }
 
 /// The same, with the two durations named — so a test does not have to wait
@@ -239,6 +268,7 @@ fn serve_listener_paced(
     iqn: String,
     lun: Arc<Mutex<Lun>>,
     stop: Arc<AtomicBool>,
+    chap_secret: Option<Arc<Zeroizing<[u8; 16]>>>,
     pdu_deadline: Duration,
     stop_grace: Duration,
 ) -> Result<()> {
@@ -294,6 +324,7 @@ fn serve_listener_paced(
 
                 let lun = lun.clone();
                 let iqn = iqn.clone();
+                let chap_secret = chap_secret.clone();
                 let open_bg = open.clone();
                 open.fetch_add(1, Ordering::SeqCst);
                 let spawned = std::thread::Builder::new()
@@ -301,6 +332,9 @@ fn serve_listener_paced(
                     .spawn(move || {
                         let mut stream = stream;
                         let mut sess = session::Session::new(iqn, lun);
+                        if let Some(secret) = chap_secret {
+                            sess = sess.with_chap(secret);
+                        }
                         if let Some(clock) = clock {
                             sess = sess.with_pace(move |pace| {
                                 let t = match pace {
@@ -317,7 +351,11 @@ fn serve_listener_paced(
                         open_bg.fetch_sub(1, Ordering::SeqCst);
                     });
                 match spawned {
-                    Ok(thread) => sessions.push(Accepted { thread, socket: leash, peer }),
+                    Ok(thread) => sessions.push(Accepted {
+                        thread,
+                        socket: leash,
+                        peer,
+                    }),
                     Err(e) => {
                         open.fetch_sub(1, Ordering::SeqCst);
                         warn!(error = %e, "iSCSI session thread: not started");
@@ -423,6 +461,7 @@ mod tests {
                 "iqn.test:one".into(),
                 lun,
                 stop_bg,
+                None,
                 Duration::from_millis(150), // дедлайн на PDU и на вход
                 Duration::from_secs(2),
             )
@@ -433,7 +472,9 @@ mod tests {
         // Дедлайн должен сработать сам, без нашего участия.
         let gave_up = Instant::now() + Duration::from_secs(3);
         let mut buf = [0u8; 1];
-        silent.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+        silent
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
         let mut closed = false;
         while Instant::now() < gave_up {
             match (&silent).read(&mut buf) {
@@ -470,6 +511,7 @@ mod tests {
                 "iqn.test:one".into(),
                 lun,
                 stop_bg,
+                None,
                 Duration::from_secs(60), // долгий дедлайн: проверяем не его
                 Duration::from_secs(3),
             )
@@ -505,6 +547,7 @@ mod tests {
                 "iqn.test:one".into(),
                 lun,
                 stop_bg,
+                None,
                 Duration::from_secs(60),
                 Duration::from_secs(30), // заведомо больше, чем тест готов ждать
             )

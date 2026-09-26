@@ -216,7 +216,8 @@ impl Qcow2RandomReader {
             let cluster = off / cs;
             let within = (off % cs) as usize;
             let take = (cs as usize - within).min(rest.len());
-            match self.read_chain_cluster(cluster)? {
+            self.cache_chain_cluster(cluster)?;
+            match self.cache.get(&cluster).and_then(Option::as_ref) {
                 Some(data) => rest[..take].copy_from_slice(&data[within..within + take]),
                 None => rest[..take].fill(0),
             }
@@ -228,9 +229,9 @@ impl Qcow2RandomReader {
 
     /// First layer that carries the cluster wins; explicit zero clusters stop
     /// the walk too (they override the parent). `None` = zeros.
-    fn read_chain_cluster(&mut self, cluster: u64) -> Result<Option<Vec<u8>>> {
-        if let Some(cached) = self.cache.get(&cluster) {
-            return Ok(cached.clone());
+    fn cache_chain_cluster(&mut self, cluster: u64) -> Result<()> {
+        if self.cache.contains_key(&cluster) {
+            return Ok(());
         }
         let mut result = None;
         for layer in &mut self.layers {
@@ -249,9 +250,9 @@ impl Qcow2RandomReader {
                 self.cache.remove(&evict);
             }
         }
-        self.cache.insert(cluster, result.clone());
+        self.cache.insert(cluster, result);
         self.cache_order.push_back(cluster);
-        Ok(result)
+        Ok(())
     }
 }
 

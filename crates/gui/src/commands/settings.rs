@@ -9,16 +9,28 @@ pub async fn get_config(state: State<'_, GuiState>) -> Result<AppConfig, String>
 }
 
 #[tauri::command]
-pub async fn save_config(state: State<'_, GuiState>, mut config: AppConfig) -> Result<(), String> {
+pub async fn save_config(state: State<'_, GuiState>, config: AppConfig) -> Result<(), String> {
     // The language is not a field of the settings form: it is switched on its
     // own (`set_ui_language`), and a form loaded before the switch would
     // otherwise save the old one back.
-    config.ui_language = state.config.lock().map_err(|e| e.to_string())?.ui_language.clone();
-    config.save_to_file(&state.config_path).map_err(|e| e.to_string())?;
+    let mut current = state.config.lock().map_err(|e| e.to_string())?;
+    let before = current.clone();
+    let saved = AppConfig::update_file(&state.config_path, |fresh| {
+        if config.data_dir != before.data_dir { fresh.data_dir = config.data_dir.clone(); }
+        if config.grpc_address != before.grpc_address { fresh.grpc_address = config.grpc_address.clone(); }
+        if config.log_level != before.log_level { fresh.log_level = config.log_level.clone(); }
+        if config.log_mirror_dir != before.log_mirror_dir { fresh.log_mirror_dir = config.log_mirror_dir.clone(); }
+        if config.default_compression_level != before.default_compression_level {
+            fresh.default_compression_level = config.default_compression_level;
+        }
+        if config.remembered_backups != before.remembered_backups {
+            fresh.remembered_backups = config.remembered_backups.clone();
+        }
+    }).map_err(|e| e.to_string())?;
     // The in-memory copy has to move too. Writing only the file left
     // `get_config` handing back what was loaded at startup, so anything saved
     // came back missing as soon as the user navigated away and returned.
-    *state.config.lock().map_err(|e| e.to_string())? = config;
+    *current = saved;
     Ok(())
 }
 
@@ -28,14 +40,22 @@ pub async fn save_config(state: State<'_, GuiState>, mut config: AppConfig) -> R
 /// only when it changed — the window says it at every start.
 #[tauri::command]
 pub async fn set_ui_language(state: State<'_, GuiState>, lang: String) -> Result<(), String> {
-    own_backup_common::lang::set(&lang);
-    let code = own_backup_common::lang::code();
+    let code = if lang.trim().eq_ignore_ascii_case("en") {
+        "en"
+    } else {
+        "ru"
+    };
     let mut config = state.config.lock().map_err(|e| e.to_string())?;
     if config.ui_language == code {
+        own_backup_common::lang::set(code);
         return Ok(());
     }
-    config.ui_language = code.to_string();
-    config.save_to_file(&state.config_path).map_err(|e| e.to_string())
+    let saved = AppConfig::update_file(&state.config_path, |fresh| {
+        fresh.ui_language = code.to_string();
+    }).map_err(|e| e.to_string())?;
+    *config = saved;
+    own_backup_common::lang::set(code);
+    Ok(())
 }
 
 #[derive(serde::Serialize)]
@@ -79,7 +99,11 @@ pub async fn service_health(state: State<'_, GuiState>) -> Result<ServiceHealth,
             .unwrap_or(false)
     };
     tracing::info!(reachable, installed, media, "service_health check");
-    Ok(ServiceHealth { reachable, installed, media })
+    Ok(ServiceHealth {
+        reachable,
+        installed,
+        media,
+    })
 }
 
 #[tauri::command]

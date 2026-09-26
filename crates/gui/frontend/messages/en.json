@@ -157,7 +157,7 @@
   "bs_sort_title": "Sort: {order}",
   "bs_sort_name": "By name",
   "bs_sort_time": "By time",
-  "bs_sort_size": "By size",
+  "bs_sort_size": "By processed data",
   "bs_name_placeholder": "Backup name",
   "bs_empty": "No jobs yet.",
   "bs_empty_hint": "Click “Add backup”.",

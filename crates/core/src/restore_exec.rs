@@ -490,6 +490,15 @@ pub fn execute_plan(
         );
     }
 
+    if cancel.is_cancelled() {
+        // A cancelled verification is not a verified restore, even when all
+        // earlier writes completed. Preserve their Done records in the report.
+        let after_last = state.ops.len();
+        finish_cancelled(&mut state, after_last);
+        on_update(&state);
+        return Ok(state);
+    }
+
     state.current = None;
     state.cancellable = false;
     state.status = if state.ops.iter().any(|o| o.status == OpStatus::Failed) {
@@ -583,7 +592,7 @@ fn run_verification(
         on_update(state);
 
         if *mode == RestoreMode::Files {
-            verify_files(plan, sidecar, archive, *src_index, dst.index, dst.offset, index, state);
+            verify_files(plan, sidecar, archive, *src_index, dst.index, dst.offset, index, state, cancel);
             on_update(state);
             continue;
         }
@@ -938,22 +947,24 @@ fn verify_files(
     dst_offset: u64,
     index: usize,
     state: &mut RestoreRunState,
+    cancel: &CancelToken,
 ) {
-    use own_backup_backup::file_restore_win::{long_path, measure_tree};
+    use own_backup_backup::file_restore_win::{long_path, verify_tree};
     use own_backup_backup::restore_win::MountedImage;
     use own_backup_backup::volume_win::volume_root_at_offset;
-    use own_backup_common::cancel::CancelToken;
 
     let fail = |state: &mut RestoreRunState, msg: String| {
         state.ops[index].status = OpStatus::Failed;
         state.ops[index].message = msg;
     };
 
-    let quiet = CancelToken::default();
     let image = match MountedImage::open(&plan.image_path, archive) {
         Ok(i) => i,
         Err(e) => {
-            return fail(state, tr!("restore_exec.verify_mount_failed", error = e).into_owned())
+            return fail(
+                state,
+                tr!("restore_exec.verify_mount_failed", error = e).into_owned(),
+            )
         }
     };
     let src_root = match image.volume_root_of(sidecar, src_index) {
@@ -961,38 +972,50 @@ fn verify_files(
         Err(e) => return fail(state, e.to_string()),
     };
     let Some(dst_root) = volume_root_at_offset(plan.target_disk, dst_offset) else {
-        return fail(state, tr!("restore_exec.verify_no_volume", part = dst_index).into_owned());
+        return fail(
+            state,
+            tr!("restore_exec.verify_no_volume", part = dst_index).into_owned(),
+        );
     };
 
-    let want = measure_tree(&long_path(std::path::Path::new(&src_root)), &quiet);
-    let got = measure_tree(&long_path(std::path::Path::new(&dst_root)), &quiet);
-
-    if want.files == got.files && want.bytes == got.bytes {
-        state.ops[index].status = OpStatus::Done;
-        state.ops[index].percent = 100;
-        state.ops[index].message = tr!(
-            "restore_exec.verify_files_ok",
-            files = got.files,
-            size = own_backup_common::units::human_bytes(got.bytes)
-        )
-        .into_owned();
-        info!(part = dst_index, files = got.files, "file verification passed");
-        return;
+    match verify_tree(
+        &long_path(std::path::Path::new(&src_root)),
+        &long_path(std::path::Path::new(&dst_root)),
+        cancel,
+    ) {
+        Ok(got) => {
+            state.ops[index].status = OpStatus::Done;
+            state.ops[index].percent = 100;
+            state.ops[index].message = tr!(
+                "restore_exec.verify_files_ok",
+                files = got.files,
+                size = own_backup_common::units::human_bytes(got.bytes)
+            )
+            .into_owned();
+            info!(
+                part = dst_index,
+                files = got.files,
+                "file verification passed"
+            );
+        }
+        Err(OwnBackupError::Cancelled) => {
+            state.ops[index].status = OpStatus::Skipped;
+            state.ops[index].message = tr!("restore_exec.verify_interrupted").into_owned();
+        }
+        Err(e) => {
+            let text = e.to_string();
+            error!(part = dst_index, %text, "file verification failed");
+            fail(state, text.clone());
+            state.follow_ups.push(
+                tr!(
+                    "restore_exec.follow_up_files_incomplete",
+                    part = dst_index,
+                    text = text
+                )
+                .into_owned(),
+            );
+        }
     }
-
-    let text = tr!(
-        "restore_exec.verify_files_diff",
-        want_files = want.files,
-        want_size = own_backup_common::units::human_bytes(want.bytes),
-        got_files = got.files,
-        got_size = own_backup_common::units::human_bytes(got.bytes)
-    )
-    .into_owned();
-    error!(part = dst_index, %text, "file verification failed");
-    fail(state, text.clone());
-    state.follow_ups.push(
-        tr!("restore_exec.follow_up_files_incomplete", part = dst_index, text = text).into_owned(),
-    );
 }
 
 /// The saved container header for one source partition, if the copy has one.
@@ -1239,7 +1262,7 @@ fn run_op(
             // Counting first costs one metadata pass and buys a progress bar
             // that means something. On a restore that runs for an hour, a
             // spinner is not good enough.
-            let total = measure_tree(&long_path(std::path::Path::new(&src_root)), cancel);
+            let total = measure_tree(&long_path(std::path::Path::new(&src_root)), cancel)?;
             let summary = copy_tree(
                 &long_path(std::path::Path::new(&src_root)),
                 &long_path(std::path::Path::new(&dst_root)),

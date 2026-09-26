@@ -24,8 +24,10 @@
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 
+use md5::{Digest, Md5};
 use own_backup_common::{OwnBackupError, Result};
 use tracing::{info, warn};
+use zeroize::Zeroizing;
 
 use super::{scsi, Lun};
 
@@ -75,6 +77,24 @@ fn padding(len: usize) -> usize {
     (4 - len % 4) % 4
 }
 
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn decode_hex_16(value: &str) -> Option<[u8; 16]> {
+    let text = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))?;
+    if text.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 16];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&text[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
 pub struct Session {
     /// The one target name we answer to.
     iqn: String,
@@ -103,6 +123,9 @@ pub struct Session {
     /// waiting, so whoever owns the socket can change how long it is willing
     /// to wait. See [`Pace`].
     pace: Option<Box<dyn Fn(Pace) + Send>>,
+    chap_secret: Option<Arc<Zeroizing<[u8; 16]>>>,
+    chap_challenge: Option<(u8, [u8; 16])>,
+    chap_authenticated: bool,
 }
 
 /// How patient the socket should be right now (audit AUD-14).
@@ -137,12 +160,30 @@ impl Session {
             initial_r2t: true, // RFC default: ask before anything is sent
             immediate_data: true,
             first_burst: 64 * 1024,
+            chap_secret: None,
+            chap_challenge: None,
+            chap_authenticated: false,
             reads: 0,
             read_bytes: 0,
             writes: 0,
             write_bytes: 0,
             pace: None,
         }
+    }
+
+    pub fn with_chap(mut self, secret: Arc<Zeroizing<[u8; 16]>>) -> Self {
+        self.chap_secret = Some(secret);
+        self
+    }
+
+    fn reject_auth<S: Write>(&mut self, stream: &mut S, bhs: &[u8; BHS]) -> Result<()> {
+        let mut rsp = [0u8; BHS];
+        rsp[0] = OP_LOGIN_RSP;
+        rsp[16..20].copy_from_slice(&bhs[16..20]);
+        rsp[36] = 0x02; // initiator error
+        rsp[37] = 0x01; // authentication failure
+        self.put_sns(&mut rsp, true);
+        self.send(stream, &mut rsp, &[])
     }
 
     /// Hand in the hook that changes the socket's patience. Without one the
@@ -186,6 +227,9 @@ impl Session {
             if !self.logged_in && opcode != OP_LOGIN {
                 return Err(dev(format!("iSCSI: opcode {opcode:#04x} before login")));
             }
+            if self.discovery && matches!(opcode, OP_SCSI_CMD | OP_DATA_OUT) {
+                return Err(dev("iSCSI: discovery session cannot access the image"));
+            }
             match opcode {
                 OP_LOGIN => self.login(stream, &bhs, &data)?,
                 OP_TEXT => self.text(stream, &bhs, &data)?,
@@ -196,7 +240,10 @@ impl Session {
                     return Ok(());
                 }
                 _ => {
-                    warn!(opcode = format!("{opcode:#04x}"), "iSCSI: unsupported PDU, rejecting");
+                    warn!(
+                        opcode = format!("{opcode:#04x}"),
+                        "iSCSI: unsupported PDU, rejecting"
+                    );
                     self.reject(stream, &bhs)?;
                 }
             }
@@ -320,12 +367,17 @@ impl Session {
         let mut answer = String::new();
         let mut initiator = String::new();
         let mut wanted_target = String::new();
+        // Authentication is negotiated while iterating keys, so decide the
+        // session kind first regardless of the order the initiator sent them.
+        if let Some((_, kind)) = keys.iter().find(|(k, _)| k == "SessionType") {
+            self.discovery = kind.eq_ignore_ascii_case("Discovery");
+        }
 
         for (key, value) in &keys {
             match key.as_str() {
                 "InitiatorName" => initiator = value.clone(),
                 "TargetName" => wanted_target = value.clone(),
-                "SessionType" => self.discovery = value.eq_ignore_ascii_case("Discovery"),
+                "SessionType" => {}
                 _ => {}
             }
             if let Some(ours) = self.negotiate(key, value) {
@@ -352,15 +404,63 @@ impl Session {
             return self.send(stream, &mut rsp, &[]);
         }
 
+        if self.chap_secret.is_some() && !self.discovery && !self.chap_authenticated {
+            if keys
+                .iter()
+                .find(|(k, _)| k == "AuthMethod")
+                .is_some_and(|(_, methods)| !methods.split(',').any(|m| m.trim() == "CHAP"))
+            {
+                return self.reject_auth(stream, bhs);
+            }
+            if let Some((id, challenge)) = self.chap_challenge {
+                let name = keys
+                    .iter()
+                    .find(|(k, _)| k == "CHAP_N")
+                    .map(|(_, v)| v.as_str());
+                let response = keys
+                    .iter()
+                    .find(|(k, _)| k == "CHAP_R")
+                    .map(|(_, v)| v.as_str());
+                if name != Some("ownbackup")
+                    || !response.is_some_and(|r| self.chap_response_matches(id, &challenge, r))
+                {
+                    return self.reject_auth(stream, bhs);
+                }
+                self.chap_authenticated = true;
+                self.chap_challenge = None;
+            } else if let Some((_, algorithms)) = keys.iter().find(|(k, _)| k == "CHAP_A") {
+                if !algorithms.split(',').any(|a| a.trim() == "5") {
+                    return self.reject_auth(stream, bhs);
+                }
+                let mut random = [0u8; 17];
+                getrandom::getrandom(&mut random)
+                    .map_err(|e| dev(format!("iSCSI CHAP random challenge failed: {e}")))?;
+                let id = random[0];
+                let mut challenge = [0u8; 16];
+                challenge.copy_from_slice(&random[1..]);
+                self.chap_challenge = Some((id, challenge));
+                answer.push_str("CHAP_A=5\0");
+                answer.push_str(&format!(
+                    "CHAP_I={id}\0CHAP_C=0x{}\0",
+                    hex_bytes(&challenge)
+                ));
+            }
+        }
+
         // The first response of a normal session declares the portal group.
         if !self.discovery && self.stat_sn == 0 {
             answer.push_str("TargetPortalGroupTag=1\0");
         }
 
-        let reached_full_feature = transit && nsg == STAGE_FULL_FEATURE;
+        let authenticated = self.chap_secret.is_none() || self.discovery || self.chap_authenticated;
+        let reached_full_feature = authenticated && transit && nsg == STAGE_FULL_FEATURE;
         let mut rsp = [0u8; BHS];
         rsp[0] = OP_LOGIN_RSP;
-        rsp[1] = if transit { 0x80 | (csg << 2) | nsg } else { csg << 2 };
+        rsp[1] = if authenticated && transit {
+            0x80 | (csg << 2) | nsg
+        } else {
+            csg << 2
+        };
         rsp[2] = 0; // VersionMax
         rsp[3] = 0; // VersionActive
         rsp[8..14].copy_from_slice(&bhs[8..14]); // ISID, echoed
@@ -387,15 +487,39 @@ impl Session {
         Ok(())
     }
 
+    fn chap_response_matches(&self, id: u8, challenge: &[u8; 16], response: &str) -> bool {
+        let Some(secret) = &self.chap_secret else {
+            return false;
+        };
+        let Some(received) = decode_hex_16(response) else {
+            return false;
+        };
+        let mut md5 = Md5::new();
+        md5.update([id]);
+        md5.update(secret.as_ref().as_ref());
+        md5.update(challenge);
+        let expected = md5.finalize();
+        expected
+            .iter()
+            .zip(received)
+            .fold(0u8, |diff, (a, b)| diff | (*a ^ b))
+            == 0
+    }
+
     /// Our side of one negotiated key. `None` for the declarative ones, which
     /// are stated rather than agreed.
     fn negotiate(&mut self, key: &str, value: &str) -> Option<String> {
         let number = |v: &str| v.parse::<u32>().ok();
         match key {
             "InitiatorName" | "InitiatorAlias" | "TargetName" | "SessionType" => None,
-            // No authentication: the target lives on this machine's loopback
-            // and is refused to anyone else ([`super::serve_listener`]).
-            "AuthMethod" => Some("None".into()),
+            "AuthMethod" => Some(
+                if self.chap_secret.is_some() && !self.discovery {
+                    "CHAP"
+                } else {
+                    "None"
+                }
+                .into(),
+            ),
             // Digests would checksum a loopback connection against nothing.
             "HeaderDigest" | "DataDigest" => Some("None".into()),
             "MaxRecvDataSegmentLength" => {
@@ -405,7 +529,9 @@ impl Session {
                 Some(MAX_DATA_SEGMENT.to_string())
             }
             "MaxBurstLength" => {
-                let ours = number(value).unwrap_or(MAX_DATA_SEGMENT).min(MAX_DATA_SEGMENT);
+                let ours = number(value)
+                    .unwrap_or(MAX_DATA_SEGMENT)
+                    .min(MAX_DATA_SEGMENT);
                 self.max_burst = ours;
                 Some(ours.to_string())
             }
@@ -713,6 +839,88 @@ fn parse_keys(data: &[u8]) -> Vec<(String, String)> {
 mod tests {
     use super::*;
     use crate::iscsi::scsi::tests::MemSource;
+
+    #[test]
+    fn chap_protects_a_normal_session_and_accepts_only_the_right_response() {
+        let secret = Arc::new(Zeroizing::new(*b"target-secret-16"));
+        let mut s =
+            session(Lun::read_only(Box::new(MemSource::new(4096)))).with_chap(secret.clone());
+        let request = pdu(OP_LOGIN, 0x83, 1,
+            b"SessionType=Normal\0TargetName=iqn.2026-08.dev.ownbackup:image.test\0AuthMethod=CHAP\0CHAP_A=5\0");
+        let mut first = Wire::new(Vec::new());
+        let bhs: [u8; BHS] = request[..BHS].try_into().unwrap();
+        s.login(
+            &mut first,
+            &bhs,
+            &request[BHS..request.len() - padding(request.len() - BHS)],
+        )
+        .unwrap();
+        assert!(!s.logged_in, "a challenge is not authentication");
+        let (_, reply) = &responses(&first.output)[0];
+        let keys = parse_keys(reply);
+        let id = keys
+            .iter()
+            .find(|(k, _)| k == "CHAP_I")
+            .unwrap()
+            .1
+            .parse::<u8>()
+            .unwrap();
+        let challenge =
+            decode_hex_16(&keys.iter().find(|(k, _)| k == "CHAP_C").unwrap().1).unwrap();
+
+        let mut wrong =
+            session(Lun::read_only(Box::new(MemSource::new(4096)))).with_chap(secret.clone());
+        wrong.chap_challenge = Some((id, challenge));
+        let bad = pdu(
+            OP_LOGIN,
+            0x83,
+            2,
+            b"CHAP_N=ownbackup\0CHAP_R=0x00000000000000000000000000000000\0",
+        );
+        let bad_bhs: [u8; BHS] = bad[..BHS].try_into().unwrap();
+        let mut bad_wire = Wire::new(Vec::new());
+        wrong
+            .login(
+                &mut bad_wire,
+                &bad_bhs,
+                &bad[BHS..bad.len() - padding(bad.len() - BHS)],
+            )
+            .unwrap();
+        assert_eq!(pdus(&bad_wire.output)[0].0[36..38], [0x02, 0x01]);
+        assert!(!wrong.logged_in);
+
+        let mut hash = Md5::new();
+        hash.update([id]);
+        hash.update(secret.as_ref().as_ref());
+        hash.update(challenge);
+        let response = format!(
+            "CHAP_N=ownbackup\0CHAP_R=0x{}\0",
+            hex_bytes(&hash.finalize())
+        );
+        let good = pdu(OP_LOGIN, 0x83, 3, response.as_bytes());
+        let good_bhs: [u8; BHS] = good[..BHS].try_into().unwrap();
+        let mut good_wire = Wire::new(Vec::new());
+        s.login(&mut good_wire, &good_bhs, response.as_bytes())
+            .unwrap();
+        assert!(s.logged_in);
+        assert_eq!(pdus(&good_wire.output)[0].0[36..38], [0, 0]);
+    }
+
+    #[test]
+    fn discovery_can_list_a_chap_target_but_cannot_read_its_blocks() {
+        let secret = Arc::new(Zeroizing::new(*b"target-secret-16"));
+        let mut s = session(Lun::read_only(Box::new(MemSource::new(4096)))).with_chap(secret);
+        let login = pdu(OP_LOGIN, 0x83, 1, b"AuthMethod=None\0SessionType=Discovery\0");
+        let mut cmd = pdu(OP_SCSI_CMD, 0x81, 2, &[]);
+        cmd[20..24].copy_from_slice(&512u32.to_be_bytes());
+        cmd[32..42].copy_from_slice(&[0x28, 0, 0, 0, 0, 1, 0, 0, 1, 0]);
+        let mut wire = Wire::new([login, cmd].concat());
+        let result = s.run(&mut wire);
+        assert!(result.unwrap_err().to_string().contains("discovery session"));
+        assert_eq!(responses(&wire.output)[0].0, OP_LOGIN_RSP);
+        assert!(responses(&wire.output)[0].1.windows(15).any(|w| w == b"AuthMethod=None"));
+        assert_eq!(s.reads, 0);
+    }
 
     /// A connection in memory: what the initiator says, and what it hears back.
     struct Wire {

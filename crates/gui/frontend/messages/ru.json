@@ -159,7 +159,7 @@
   "bs_sort_title": "Сортировка: {order}",
   "bs_sort_name": "По имени",
   "bs_sort_time": "По времени",
-  "bs_sort_size": "По размеру",
+  "bs_sort_size": "По объему обработанных данных",
   "bs_name_placeholder": "Имя копии",
   "bs_empty": "Пока нет заданий.",
   "bs_empty_hint": "Нажмите «Добавить копию».",
