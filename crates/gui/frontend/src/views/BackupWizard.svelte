@@ -40,6 +40,25 @@
   const encryptionReady = $derived(
     encPassword.length >= MIN_ARCHIVE_PASSWORD && encPassword === encPasswordAgain,
   );
+  /** What the archive password still lacks, or '' once it is ready. */
+  function encryptionHint(): string {
+    if (!wantEncryption || alreadyEncrypted || encryptionReady) return '';
+    return encPassword.length < MIN_ARCHIVE_PASSWORD
+      ? `Задайте пароль архива — не короче ${MIN_ARCHIVE_PASSWORD} символов`
+      : 'Пароли архива не совпадают';
+  }
+  /** The format is fixed once copies exist — a chain cannot change container
+   *  midway, and the runner refuses a job whose format no longer matches its
+   *  copies. Encryption is a format (.obk), so it is fixed the same way. */
+  const formatLocked = $derived((mode === 'edit' && job.last_run !== null) || alreadyEncrypted);
+  /** OBK is our sealed container, qcow2 underneath — the service sets the same
+   *  when it commits the key. */
+  function setFormat(v: string) {
+    if (formatLocked) return;
+    wantEncryption = v === 'obk';
+    job.image_format = v === 'vhdx' ? 'vhdx' : 'qcow2';
+    error = null;
+  }
   let keyModalOpen = $state(false);
   /** Set when the save was interrupted to ask for a key: run the job after. */
   let runAfterKey = $state(false);
@@ -64,6 +83,12 @@
   // «Схема» in the tab bar and drew the exclusions, and «Дополнительно» — the
   // last index — could not be reached at all.
   const stepKey = $derived(steps[step]?.key ?? 'source');
+  /** Open a step by its key. A step missing from the list stays put rather
+   *  than leaving the wizard on no step at all. */
+  function goToStep(key: string) {
+    const at = steps.findIndex((s) => s.key === key);
+    if (at >= 0) step = at;
+  }
   // A step can also vanish under us (the medium check answers after the first
   // render), so never leave `step` pointing past the end of the list.
   $effect(() => {
@@ -1138,14 +1163,8 @@
     // confirmed. The dialog does both and hands back the stored job.
     if (wantEncryption && !job.archive_encryption) {
       if (!encryptionReady) {
-        error =
-          encPassword.length < MIN_ARCHIVE_PASSWORD
-            ? `Пароль архива короче ${MIN_ARCHIVE_PASSWORD} символов — «Дополнительно» → «Защита резервной копии».`
-            : 'Пароли архива не совпадают — «Дополнительно» → «Защита резервной копии».';
-        // `advanced` is never filtered out of `steps`, but a -1 would put the
-        // wizard on no step at all — worth one line not to depend on that.
-        const at = steps.findIndex((s) => s.key === 'advanced');
-        if (at >= 0) step = at;
+        error = encryptionHint();
+        goToStep('scheme');
         return;
       }
       runAfterKey = run;
@@ -1677,27 +1696,64 @@
       {#if stepKey === 'scheme'}
         <div class="field-label">Формат образа:</div>
         <select
-          bind:value={job.image_format}
+          value={wantEncryption ? 'obk' : job.image_format}
+          onchange={(e) => setFormat((e.target as HTMLSelectElement).value)}
           class="wide"
-          disabled={(mode === 'edit' && job.last_run !== null) || wantEncryption}
+          disabled={formatLocked}
         >
           <option value="vhdx">VHDX — стандарт Windows (по умолчанию)</option>
           <option value="qcow2">qcow2 — универсальный, со сжатием</option>
+          <option value="obk">OBK — зашифрованный, с паролем</option>
         </select>
-        {#if mode === 'edit' && job.last_run !== null}
+        {#if alreadyEncrypted}
+          <div class="note">
+            Задание уже зашифровано. Выключить шифрование нельзя — уже снятые
+            копии останутся зашифрованными в любом случае, — а смена ключа
+            делается отдельно.
+          </div>
+        {:else if mode === 'edit' && job.last_run !== null}
           <div class="note">У задания уже есть резервные копии — менять формат существующего архива нельзя. Для другого формата создайте новое задание.</div>
         {/if}
-        {#if job.image_format === 'qcow2'}
-          <div class="note">Встроенное сжатие (zstd): копия обычно на 30–50 % меньше, экономия видна сразу. Один и тот же файл одинаково открывается на Windows и Linux. Инкрементные и дифференциальные цепочки поддерживаются. Восстановление, проверка и монтирование копии как диска работают. Исключённые файлы удаляются из копии полностью, в том числе на NTFS/ReFS — как в VHDX.</div>
-        {:else}
-          <div class="note">Копия открывается самой Windows двойным кликом и видна как обычный диск — даже без Own Backup. Инкрементные цепочки и полное удаление исключённых файлов (NTFS/ReFS). Сжатия нет — файл больше; на Linux открывается через qemu-nbd.</div>
-        {/if}
-
-        {#if wantEncryption}
+        {#if wantEncryption && !alreadyEncrypted}
           <div class="note">
-            Формат задан шифрованием: копии пишутся в наш контейнер .obk
-            (см. «Дополнительно» → «Защита резервной копии»).
+            Наш контейнер .obk: внутри qcow2 со сжатием, и каждый кластер
+            запечатан. Прочитать копии можно будет <b>только</b> этим паролем или
+            ключом восстановления — ни служба, ни мы не сможем открыть их иначе.
+            Ключ восстановления программа покажет один раз при сохранении
+            задания, и его нужно будет записать.
           </div>
+          <div class="enc-form">
+            <!-- Side by side: the pair is one decision, and the row is wide
+                 enough to hold it without scrolling past it. -->
+            <div class="enc-pair">
+              <div class="enc-cell">
+                <div class="field-label">Пароль архива:</div>
+                <PasswordField
+                  value={encPassword}
+                  oninput={(v) => (encPassword = v)}
+                  placeholder="Пароль архива"
+                />
+              </div>
+              <div class="enc-cell">
+                <div class="field-label">Ещё раз:</div>
+                <PasswordField
+                  value={encPasswordAgain}
+                  oninput={(v) => (encPasswordAgain = v)}
+                  placeholder="Повторите пароль"
+                  invalid={encPasswordAgain.length > 0 && encPassword !== encPasswordAgain}
+                />
+              </div>
+            </div>
+            {#if encPassword.length > 0 && encPassword.length < MIN_ARCHIVE_PASSWORD}
+              <div class="note warn">Не короче {MIN_ARCHIVE_PASSWORD} символов.</div>
+            {:else if encPasswordAgain.length > 0 && encPassword !== encPasswordAgain}
+              <div class="note warn">Пароли не совпадают.</div>
+            {/if}
+          </div>
+        {:else if job.image_format === 'qcow2' && !wantEncryption}
+          <div class="note">Встроенное сжатие (zstd): копия обычно на 30–50 % меньше, экономия видна сразу. Один и тот же файл одинаково открывается на Windows и Linux. Инкрементные и дифференциальные цепочки поддерживаются. Восстановление, проверка и монтирование копии как диска работают. Исключённые файлы удаляются из копии полностью, в том числе на NTFS/ReFS — как в VHDX.</div>
+        {:else if !wantEncryption}
+          <div class="note">Копия открывается самой Windows двойным кликом и видна как обычный диск — даже без Own Backup. Инкрементные цепочки и полное удаление исключённых файлов (NTFS/ReFS). Сжатия нет — файл больше; на Linux открывается через qemu-nbd.</div>
         {/if}
 
         <div class="field-label mt">Метод резервного копирования:</div>
@@ -1706,7 +1762,9 @@
           <option value="incremental">Инкрементное</option>
           <option value="differential">Дифференциальное</option>
         </select>
-        {#if job.scheme.method === 'incremental'}
+        {#if job.scheme.method === 'full'}
+          <div class="note">Каждый запуск снимает полную копию: каждая копия самостоятельна и восстанавливается без остальных.</div>
+        {:else if job.scheme.method === 'incremental'}
           <div class="note">Каждый запуск сохраняет только изменения относительно предыдущей версии (цепочка: полная → И1 → И2 …).</div>
         {:else if job.scheme.method === 'differential'}
           <div class="note">Каждый запуск сохраняет изменения относительно полной копии (полная → Д1, Д2 …). Объединение для этого метода недоступно: все версии опираются прямо на полную копию, и сдвинуть её нельзя, не сделав остальные неверными.</div>
@@ -1723,12 +1781,23 @@
           <div class="field-label mt">Длина цепочки:</div>
           <label class="chk-line">Делать не более <input type="number" min="1" max="64" bind:value={job.scheme.full_every_n} class="num" /> {job.scheme.method === 'differential' ? 'дифференциальных' : 'инкрементных'} версий в цепочке</label>
           <div class="note">Когда предел достигнут, следующий запуск снимает новую полную копию и начинает новую цепочку. Старые цепочки остаются целыми и удаляются по правилам ниже.<br />Точек восстановления: до {job.scheme.full_every_n + 1} в каждой цепочке.</div>
+        {/if}
 
-          <div class="field-label mt">Правила очистки старых цепочек:</div>
-          <label class="chk"><input type="checkbox" checked={job.scheme.keep_chains !== null} onchange={(e) => (job.scheme.keep_chains = (e.target as HTMLInputElement).checked ? 3 : null)} /> Хранить не более <input type="number" min="1" value={job.scheme.keep_chains ?? 3} oninput={(e) => (job.scheme.keep_chains = +(e.target as HTMLInputElement).value)} class="num" disabled={job.scheme.keep_chains === null} /> последних цепочек</label>
-          <label class="chk"><input type="checkbox" checked={job.scheme.cleanup_older_than_days !== null} onchange={(e) => (job.scheme.cleanup_older_than_days = (e.target as HTMLInputElement).checked ? 90 : null)} /> Удалять цепочки старше <input type="number" min="1" value={job.scheme.cleanup_older_than_days ?? 90} oninput={(e) => (job.scheme.cleanup_older_than_days = +(e.target as HTMLInputElement).value)} class="num" disabled={job.scheme.cleanup_older_than_days === null} /> дней</label>
-          <label class="chk sub"><input type="checkbox" bind:checked={job.scheme.keep_first} disabled={job.scheme.cleanup_older_than_days === null} /> Не удалять первую (самую старую) цепочку</label>
-          <div class="note">Цепочка удаляется целиком — полная копия вместе с её версиями — и только после успешного завершения очередного копирования. Цепочка, к которой относится свежая копия, не удаляется никогда.</div>
+        {#if !isConsolidation}
+          <!-- The engine applies these to a full-only job as well — there every
+               copy is a chain of one — and the template turns "keep 3" on by
+               default. Hiding the block for «Полное» deleted copies by a rule
+               the screen never showed (2026-09-26). -->
+          {@const full = job.scheme.method === 'full'}
+          <div class="field-label mt">{full ? 'Правила очистки старых копий:' : 'Правила очистки старых цепочек:'}</div>
+          <label class="chk"><input type="checkbox" checked={job.scheme.keep_chains !== null} onchange={(e) => (job.scheme.keep_chains = (e.target as HTMLInputElement).checked ? 3 : null)} /> Хранить не более <input type="number" min="1" value={job.scheme.keep_chains ?? 3} oninput={(e) => (job.scheme.keep_chains = +(e.target as HTMLInputElement).value)} class="num" disabled={job.scheme.keep_chains === null} /> {full ? 'последних копий' : 'последних цепочек'}</label>
+          <label class="chk"><input type="checkbox" checked={job.scheme.cleanup_older_than_days !== null} onchange={(e) => (job.scheme.cleanup_older_than_days = (e.target as HTMLInputElement).checked ? 90 : null)} /> Удалять {full ? 'копии' : 'цепочки'} старше <input type="number" min="1" value={job.scheme.cleanup_older_than_days ?? 90} oninput={(e) => (job.scheme.cleanup_older_than_days = +(e.target as HTMLInputElement).value)} class="num" disabled={job.scheme.cleanup_older_than_days === null} /> дней</label>
+          <label class="chk sub"><input type="checkbox" bind:checked={job.scheme.keep_first} disabled={job.scheme.cleanup_older_than_days === null} /> Не удалять {full ? 'первую (самую старую) копию' : 'первую (самую старую) цепочку'}</label>
+          {#if full}
+            <div class="note">Старые копии удаляются только после успешного завершения очередного копирования. Только что снятая копия не удаляется никогда.</div>
+          {:else}
+            <div class="note">Цепочка удаляется целиком — полная копия вместе с её версиями — и только после успешного завершения очередного копирования. Цепочка, к которой относится свежая копия, не удаляется никогда.</div>
+          {/if}
         {/if}
 
         {#if isConsolidation}
@@ -1802,75 +1871,20 @@
               последняя копия не восстановится.
             </div>
           </div>
-          <!-- Encryption. Only ever an on-switch: copies already written cannot
-               be un-encrypted by a setting, and replacing an existing key is a
-               separate operation the service refuses from here. -->
+          <!-- Encryption is a FORMAT (.obk), chosen and given its password on
+               the «Схема» step. Said here too, because this is where people
+               look for it. -->
           <div class="adv-group">
             <div class="adv-title">Защита резервной копии</div>
-            <label class="chk">
-              <input
-                type="checkbox"
-                checked={wantEncryption}
-                disabled={alreadyEncrypted}
-                onchange={(e) => {
-                  wantEncryption = (e.target as HTMLInputElement).checked;
-                  if (wantEncryption) job.image_format = 'qcow2';
-                }}
-              />
-              🔒 Шифровать копии задания (задать пароль)
-              <span class="ok-badge">работает</span>
-            </label>
-
-            {#if alreadyEncrypted}
+            {#if wantEncryption}
               <div class="note">
-                Задание уже зашифровано. Выключить шифрование нельзя — уже снятые
-                копии останутся зашифрованными в любом случае, — а смена ключа
-                делается отдельно.
-              </div>
-            {:else if wantEncryption}
-              <div class="enc-form">
-                <!-- Side by side: the pair is one decision, and the row is
-                     wide enough to hold it without scrolling past it. -->
-                <div class="enc-pair">
-                  <div class="enc-cell">
-                    <div class="field-label">Пароль архива:</div>
-                    <PasswordField
-                      value={encPassword}
-                      oninput={(v) => (encPassword = v)}
-                      placeholder="Пароль архива"
-                    />
-                  </div>
-                  <div class="enc-cell">
-                    <div class="field-label">Ещё раз:</div>
-                    <PasswordField
-                      value={encPasswordAgain}
-                      oninput={(v) => (encPasswordAgain = v)}
-                      placeholder="Повторите пароль"
-                      invalid={encPasswordAgain.length > 0 && encPassword !== encPasswordAgain}
-                    />
-                  </div>
-                </div>
-                {#if encPassword.length > 0 && encPassword.length < MIN_ARCHIVE_PASSWORD}
-                  <div class="note warn">Не короче {MIN_ARCHIVE_PASSWORD} символов.</div>
-                {:else if encPasswordAgain.length > 0 && encPassword !== encPasswordAgain}
-                  <div class="note warn">Пароли не совпадают.</div>
-                {/if}
-                <div class="note">
-                  Прочитать копии можно будет <b>только</b> этим паролем или ключом
-                  восстановления — ни служба, ни мы не сможем открыть их иначе.
-                  Ключ восстановления программа покажет один раз при сохранении
-                  задания, и его нужно будет записать.<br />
-                  Формат образов станет .obk — наш контейнер: каждый кластер
-                  запечатан, сведения о копии лежат внутри него, посторонние
-                  программы откажутся его читать, назвав причину. Уже снятые копии
-                  остаются как есть; шифроваться будут следующие.
-                </div>
+                🔒 Копии шифруются: формат OBK{alreadyEncrypted ? '' : ', пароль задаётся'} на шаге
+                <button class="link" onclick={() => goToStep('scheme')}>«Схема»</button>.
               </div>
             {:else}
               <div class="note">
-                Без пароля копию прочитает кто угодно, у кого есть файл. Шифрование
-                имеет смысл, если копии уезжают с машины — на внешний диск, в
-                сетевую папку, к кому-то ещё.
+                Копии не шифруются. Чтобы задать пароль, выберите формат OBK на шаге
+                <button class="link" onclick={() => goToStep('scheme')}>«Схема»</button>.
               </div>
             {/if}
           </div>
@@ -1902,8 +1916,9 @@
           <button
             class="btn primary"
             onclick={() => (step += 1)}
-            disabled={stepKey === 'source' && !canLeaveSource()}
-            title={stepKey === 'source' ? nextHint() : ''}
+            disabled={(stepKey === 'source' && !canLeaveSource()) ||
+              (stepKey === 'scheme' && !!encryptionHint())}
+            title={stepKey === 'source' ? nextHint() : stepKey === 'scheme' ? encryptionHint() : ''}
           >Дальше</button>
         {:else}
           <button class="btn green" onclick={() => finish(true)}>Создать копию</button>

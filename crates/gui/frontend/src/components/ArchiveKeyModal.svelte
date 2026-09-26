@@ -22,7 +22,7 @@
     /** The job as the wizard has it — saved by the service as part of the
      *  same transaction that stores the key. */
     job: Job;
-    /** What the operator typed on the job's «Дополнительно» screen. */
+    /** What the operator typed on the job's «Схема» screen. */
     password: string;
     /** The stored job, once encryption is on. */
     onDone: (saved: Job) => void;
