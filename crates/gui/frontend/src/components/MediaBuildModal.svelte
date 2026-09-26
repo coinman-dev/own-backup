@@ -39,19 +39,15 @@
   // Third-party programs found on THIS machine. Nothing is downloaded: the
   // copy is made from the user's own installation, which is why they are
   // offered rather than added quietly. Off by default for the same reason.
+  // One switch for all of them: two small programs are not worth a row each.
   let tools: MediaTool[] = $state([]);
-  let chosenTools = $state(new Set<string>());
+  let includeTools = $state(false);
 
   // Compressing the runtime into the image is the default: the ISO is what the
   // user carries around, and the memory it costs only matters on a machine with
   // little of it.
   let runtimeInImage = $state(true);
 
-  // The way back. Our own desktop is the medium's shell by default; ticking
-  // this leaves cmd in that place, the way every medium before this one worked.
-  // It exists because a desktop that fails to start on some machine leaves no
-  // console behind it — and that is a medium that does not come up at all.
-  let classicConsole = $state(false);
   let outputDir = $state('');
   let building = $state(false);
   let progress: MediaProgress | null = $state(null);
@@ -68,9 +64,6 @@
   // Disks and network on Windows' own drivers: nothing to pick, but they are
   // this machine's hardware and the user should see that they were looked at.
   const inbox = $derived(drivers.filter((d) => d.inbox));
-  const toolBytes = $derived(
-    tools.filter((t) => chosenTools.has(t.id)).reduce((sum, t) => sum + t.size_bytes, 0),
-  );
   /** The build is over: the button becomes "Готово" and closes the dialog. */
   const finished = $derived(!!report);
 
@@ -136,12 +129,6 @@
     }
   }
 
-  function toggleTool(id: string) {
-    const next = new Set(chosenTools);
-    if (next.has(id)) next.delete(id); else next.add(id);
-    chosenTools = next;
-  }
-
   function toggle(inf: string) {
     const next = new Set(selected);
     if (next.has(inf)) next.delete(inf); else next.add(inf);
@@ -166,8 +153,11 @@
         output_iso: `${outputDir}${sep}OwnBackup.iso`,
         drivers: includeDrivers ? [...selected] : [],
         extra_drivers: '',
-        tools: [...chosenTools],
-        classic_console: classicConsole,
+        tools: includeTools ? tools.map((t) => t.id) : [],
+        // The desktop is the shell. The way back to cmd, for a machine where
+        // the desktop does not come up, is `own-backup-cli media build
+        // --classic-console`; the dialog no longer offers it (2026-09-26).
+        classic_console: false,
         runtime_in_image: runtimeInImage,
       });
     } catch (e) {
@@ -311,47 +301,24 @@
           </div>
         {/if}
 
-        <div class="shell-choice">
-          <label class="shell-row">
-            <input type="checkbox" bind:checked={classicConsole} disabled={building} />
-            <span>Классическая консоль вместо рабочего стола</span>
-          </label>
-          <div class="shell-note">
-            Обычно носитель загружается в рабочий стол: полоса внизу с меню
-            «Пуск», часами и указателем раскладки — он и показывает, в какой
-            раскладке набирается пароль BitLocker. С этой галочкой оболочкой
-            останется командная строка, как на прежних носителях: видно весь ход
-            загрузки, но панели нет. Пригодится, если на каком-то компьютере
-            рабочий стол не поднимется.
-          </div>
-        </div>
-
         <!-- Third-party programs from this machine. Offered, never assumed:
              they are someone else's software, and the copy is made from the
              user's own installation into their own medium. -->
         {#if tools.length > 0}
-          <div class="tools">
-            <div class="tools-title">Средства на всякий случай</div>
-            <div class="tools-note">
-              Найдены на этом компьютере. Если отметить, они лягут на носитель
-              вместе со своими настройками — теми, что сейчас на машине. Места
-              занимают немного, а неожиданную проблему в среде восстановления
-              решают быстро. Настройки, изменённые на носителе, не сохраняются:
-              диск X: живёт в памяти.
-            </div>
-            {#each tools as t (t.id)}
-              <label class="tool">
-                <input type="checkbox" checked={chosenTools.has(t.id)}
-                       onchange={() => toggleTool(t.id)} disabled={building} />
-                <span class="tool-name">{t.name}</span>
-                <span class="tool-src" title={t.source}>{t.source}</span>
-                <span class="tool-size">{formatBytes(t.size_bytes)} · {t.files} файлов</span>
-              </label>
-            {/each}
-            {#if chosenTools.size > 0}
-              <div class="tools-sum">Добавится к носителю: {formatBytes(toolBytes)}</div>
-            {/if}
-          </div>
+          <label class="opt">
+            <input type="checkbox" bind:checked={includeTools} disabled={building} />
+            <span>
+              Средства на всякий случай
+              <span class="opt-note">
+                программы с этого компьютера, вместе с их настройками
+              </span>
+              <span class="tools-line">
+                {tools
+                  .map((t) => `${t.name} — ${formatBytes(t.size_bytes)} · ${t.files} файлов`)
+                  .join(', ')}
+              </span>
+            </span>
+          </label>
         {/if}
 
         <!-- Not an option: the screen on the medium is the firmware's business,
@@ -483,29 +450,7 @@
   .opt { display: flex; align-items: flex-start; gap: 9px; font-size: 13px; color: var(--head); margin-top: 16px; cursor: pointer; }
   .opt input { margin-top: 2px; flex-shrink: 0; }
   .opt-note { display: block; font-size: 12px; color: var(--text-muted); line-height: 1.4; margin-top: 2px; }
-  .shell-choice { margin-top: 16px; }
-  .shell-row { display: flex; align-items: center; gap: 8px; font-size: 13px; }
-  .shell-note { font-size: 12px; color: var(--muted); margin-top: 4px; }
-
-  .tools { margin-top: 16px; }
-  .tools-title { font-weight: 600; margin-bottom: 4px; }
-  .tools-note { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
-  .tool {
-    display: grid;
-    grid-template-columns: 22px 160px 1fr auto;
-    align-items: center;
-    gap: 8px;
-    padding: 4px 0;
-    font-size: 13px;
-  }
-  .tool-src {
-    color: var(--muted);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .tool-size { color: var(--muted); white-space: nowrap; }
-  .tools-sum { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .tools-line { display: block; font-size: 12px; color: var(--text-muted); margin-top: 4px; }
 
   .drivers { margin-top: 16px; }
   .screen { margin-top: 16px; font-size: 12px; color: var(--text-muted); line-height: 1.5; }
