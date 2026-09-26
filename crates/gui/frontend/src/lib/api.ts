@@ -166,6 +166,8 @@ export const api = {
   /** The restore in progress, or the last one that finished. Survives closing
    *  and reopening the window, and a service restart. */
   getRestoreState: () => invoke<RestoreRunState | null>('get_restore_state'),
+  /** Every restore the service has run, newest first — «Активность». */
+  getRestoreHistory: () => invoke<RestoreRunState[]>('get_restore_history'),
   cancelRestorePlan: (planId: string) =>
     invoke<{ cancelled: boolean; reason: string }>('cancel_restore_plan', { planId }),
   /** The report has been read and closed: `getRestoreState` stops returning it.

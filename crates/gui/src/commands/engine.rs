@@ -871,6 +871,14 @@ pub async fn get_restore_state(
     state.link.client().await?.get_restore_state().await
 }
 
+/// Every restore the service has run, newest first — for «Активность».
+#[tauri::command]
+pub async fn get_restore_history(
+    state: State<'_, GuiState>,
+) -> Result<Vec<RestoreRunState>, String> {
+    state.link.client().await?.get_restore_history().await
+}
+
 /// Ask the named run to stop. The reply says whether it was accepted: while a
 /// non-cancellable operation runs the service refuses outright rather than
 /// accepting the request and ignoring it.

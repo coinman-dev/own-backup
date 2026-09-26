@@ -661,6 +661,19 @@ impl BackupClient {
         parse(&reply.json)
     }
 
+    /// Every restore the service has run, newest first.
+    pub async fn get_restore_history(
+        &mut self,
+    ) -> Result<Vec<own_backup_common::restore_state::RestoreRunState>> {
+        let reply = self
+            .inner
+            .get_restore_history(self.request(proto::Empty {}))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
+
     /// Ask the named run to stop. The reply says whether it was accepted — a
     /// non-cancellable operation refuses outright rather than pretending.
     pub async fn cancel_restore_plan(&mut self, plan_id: &str) -> Result<serde_json::Value> {

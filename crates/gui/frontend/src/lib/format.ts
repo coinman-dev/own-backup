@@ -15,14 +15,16 @@ export function formatBytes(bytes: number): string {
 }
 
 /**
- * Format an ISO date string into "16 Apr 2026, 14:30".
+ * Format an ISO date string into "16 апреля 2026, 14:30" — local time, month
+ * in the genitive the way a Russian date is read. It used to print English
+ * month abbreviations ("16 Apr 2026") in an otherwise Russian interface.
  */
 export function formatDate(iso: string): string {
   const d = new Date(iso);
   if (isNaN(d.getTime())) return iso;
   const months = [
-    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+    'января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
+    'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря',
   ];
   const day = d.getDate();
   const month = months[d.getMonth()];
@@ -33,17 +35,18 @@ export function formatDate(iso: string): string {
 }
 
 /**
- * Format a duration in seconds into a compact string like "5m 32s" or "1h 12m".
+ * Format a duration in seconds into "5 мин 32 с", "1 ч 12 мин" or "45 с"
+ * (it was "5m 32s").
  */
 export function formatDuration(seconds: number): string {
-  if (seconds < 0) return '---';
-  if (seconds < 60) return `${Math.round(seconds)}s`;
+  if (seconds < 0) return '—';
+  if (seconds < 60) return `${Math.round(seconds)} с`;
   const mins = Math.floor(seconds / 60);
   const secs = Math.round(seconds % 60);
-  if (mins < 60) return `${mins}m ${secs}s`;
+  if (mins < 60) return `${mins} мин ${secs} с`;
   const hrs = Math.floor(mins / 60);
   const remainMins = mins % 60;
-  return `${hrs}h ${remainMins}m`;
+  return `${hrs} ч ${remainMins} мин`;
 }
 
 

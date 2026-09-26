@@ -442,6 +442,7 @@ fn main() {
             commands::engine::dry_run_restore_plan,
             commands::engine::apply_restore_plan,
             commands::engine::get_restore_state,
+            commands::engine::get_restore_history,
             commands::engine::cancel_restore_plan,
             commands::engine::ack_restore_run,
             commands::engine::verify_luks_password,

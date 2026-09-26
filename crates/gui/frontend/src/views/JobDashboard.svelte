@@ -444,7 +444,7 @@
 </div>
 
 {#if stubMsg}
-  <InfoModal message={stubMsg} onClose={() => (stubMsg = null)} />
+  <InfoModal title="О разбивке по типам" message={stubMsg} onClose={() => (stubMsg = null)} />
 {/if}
 
 <style>

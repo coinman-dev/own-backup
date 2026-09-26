@@ -11,6 +11,8 @@
      *  or already working) — a button that appears only once the form is
      *  filled in leaves no way to tell what the form is for. */
     confirmDisabled?: boolean;
+    /** An empty string hides the button — a window that only informs has one
+     *  answer, and a second one labelled "Cancel" had nothing to cancel. */
     cancelLabel?: string;
     danger?: boolean;
     children: Snippet;
@@ -21,9 +23,9 @@
     title,
     onClose,
     onConfirm,
-    confirmLabel = 'Confirm',
+    confirmLabel = 'OK',
     confirmDisabled = false,
-    cancelLabel = 'Cancel',
+    cancelLabel = 'Отмена',
     danger = false,
     children,
   }: Props = $props();
@@ -58,7 +60,7 @@
     <div class="modal-card">
       <div class="modal-header">
         <h2 class="modal-title">{title}</h2>
-        <button class="modal-close" onclick={onClose} aria-label="Close">
+        <button class="modal-close" onclick={onClose} aria-label="Закрыть">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
             <path d="M18 6L6 18M6 6l12 12" />
           </svg>
@@ -70,9 +72,11 @@
       </div>
 
       <div class="modal-footer">
-        <button class="btn btn-secondary" onclick={onClose}>
-          {cancelLabel}
-        </button>
+        {#if cancelLabel}
+          <button class="btn btn-secondary" onclick={onClose}>
+            {cancelLabel}
+          </button>
+        {/if}
         {#if onConfirm}
           <button
             class="btn {danger ? 'btn-danger' : 'btn-primary'}"

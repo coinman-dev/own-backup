@@ -4,7 +4,9 @@
     message: string;
     onClose: () => void;
   }
-  let { title = 'В разработке', message, onClose }: Props = $props();
+  // The default was «В разработке», left from when this only announced stubs —
+  // and it headed the type-breakdown help and the restore-cancel refusal too.
+  let { title = 'Сведения', message, onClose }: Props = $props();
 </script>
 
 <div class="overlay" onclick={onClose} role="presentation">

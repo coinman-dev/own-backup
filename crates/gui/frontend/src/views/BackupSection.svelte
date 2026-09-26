@@ -269,7 +269,13 @@
   danger
   confirmLabel="Удалить"
   cancelLabel="Отмена"
-  onClose={() => (deleteId = null)}
+  onClose={() => {
+    // A failure is shown inside this window; closing it closes the failure
+    // too. Left set, it reappeared at once under «Копии удалены не полностью»
+    // — about a job that had not been deleted at all.
+    deleteId = null;
+    deleteError = null;
+  }}
   onConfirm={confirmDelete}
 >
   <p class="del-q">Вы уверены, что Вы хотите удалить это задание{deleteJobObj ? ` «${deleteJobObj.name}»` : ''}?</p>
@@ -290,6 +296,7 @@
     open
     title="Копии удалены не полностью"
     confirmLabel="Понятно"
+    cancelLabel=""
     onClose={() => (deleteError = null)}
     onConfirm={() => (deleteError = null)}
   >

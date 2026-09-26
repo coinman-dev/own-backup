@@ -208,6 +208,11 @@ pub fn initial_state(plan: &RestorePlan) -> RestoreRunState {
         cancellable: true,
         follow_ups: Vec::new(),
         acknowledged: false,
+        image_file: plan
+            .image_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
     }
 }
 

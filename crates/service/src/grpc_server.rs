@@ -2113,6 +2113,15 @@ impl BackupService for BackupServiceImpl {
         json_reply(&run)
     }
 
+    async fn get_restore_history(
+        &self,
+        req: Request<Empty>,
+    ) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        let history = own_backup_core::restore_exec::read_history(&self.state.config.data_dir);
+        json_reply(&history)
+    }
+
     async fn ack_restore_run(&self, req: Request<IdRequest>) -> Result<Response<Empty>, Status> {
         check_auth(&req, &self.service_token)?;
         let id = req.into_inner().id;

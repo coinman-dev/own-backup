@@ -93,6 +93,10 @@ pub struct RestoreRunState {
     /// stays in the history either way.
     #[serde(default)]
     pub acknowledged: bool,
+    /// File name of the copy this run restored — what the «Активность» list
+    /// names it by. Empty in runs recorded before 2026-09-26.
+    #[serde(default)]
+    pub image_file: String,
 }
 
 impl RestoreRunState {

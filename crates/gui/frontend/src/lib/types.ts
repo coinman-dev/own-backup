@@ -855,6 +855,10 @@ export interface RestoreRunState {
   /** Things the restore could not do and the user must (fix crypttab, rerun
    *  bcdboot, …). */
   follow_ups: string[];
+  /** The user read and closed the report on the restore page. */
+  acknowledged?: boolean;
+  /** File name of the copy restored ('' in runs recorded before 2026-09-26). */
+  image_file?: string;
 }
 
 /** One row in the built-in file browser (see commands/files.rs). */

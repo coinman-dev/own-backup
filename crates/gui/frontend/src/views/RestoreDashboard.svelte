@@ -2217,7 +2217,7 @@
   </div>
 </div>
 
-{#if stubMsg}<InfoModal message={stubMsg} onClose={() => (stubMsg = null)} />{/if}
+{#if stubMsg}<InfoModal title="Отменить нельзя" message={stubMsg} onClose={() => (stubMsg = null)} />{/if}
 
 <!-- Right-click menu of the simple partition editor -->
 {#if menu}

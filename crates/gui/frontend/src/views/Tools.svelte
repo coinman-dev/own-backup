@@ -215,9 +215,13 @@
     verifyErr = null;
     try {
       const v = await runVerify(toolsState.verifyPath, secret, accepted);
-      verifyMsg = v.valid
-        ? `Целостность подтверждена: ${v.blocks_checked} блоков за ${v.duration_secs.toFixed(1)} с.`
-        : `ОШИБКА: повреждено блоков — ${v.mismatched_blocks.length} из ${v.blocks_checked}.`;
+      // A damaged copy is a failure, not a result: it goes in the red banner.
+      // It used to share the green one with «Целостность подтверждена».
+      if (v.valid) {
+        verifyMsg = `Целостность подтверждена: ${v.blocks_checked} блоков за ${v.duration_secs.toFixed(1)} с.`;
+      } else {
+        verifyErr = `Копия повреждена: не совпали контрольные суммы у ${v.mismatched_blocks.length} из ${v.blocks_checked} блоков.`;
+      }
     } catch (e) {
       verifyErr = String(e);
       throw e; // see mountWith

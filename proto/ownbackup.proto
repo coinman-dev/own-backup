@@ -86,6 +86,10 @@ service BackupService {
   // The user read the finished run's report and closed it. GetRestoreState
   // stops returning it — the run stays in the history and in Activity.
   rpc AckRestoreRun(IdRequest) returns (Empty);            // in: plan id
+  // Every restore the service has run, newest first (up to 100) — the
+  // «Активность» list. Acknowledged reports included: closing a report on the
+  // restore page does not make the restore not have happened.
+  rpc GetRestoreHistory(Empty) returns (JsonReply);        // JSON: RestoreRunState[]
 
   // --- Boot medium ---
   // Built from what the machine already carries: its recovery image, its

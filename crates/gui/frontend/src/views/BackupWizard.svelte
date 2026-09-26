@@ -758,23 +758,29 @@
     return reserved.test(out) ? out + '_' : out;
   }
 
-  // Full path of the file the first selected volume will produce, so the user
-  // sees the concrete auto-generated name (mirrors the engine's naming; the
-  // <тип> here is shown as "full" — the real type/date are decided at run time).
+  // Full path of the file the first run will produce, so the user sees the
+  // concrete auto-generated name. Mirrors the engine's naming: a whole-disk
+  // job writes `<имя>_disk<N>_<тип>_<дата>.<ext>` (core::perform_disk_backup),
+  // an older per-volume one `<имя>_<том>_…`. The <тип> is shown as "full" —
+  // the real type and date are decided at run time.
+  //
+  // The extension follows the format: it was always ".vhdx", so a qcow2 or an
+  // encrypted job showed a file name it would never write (2026-09-26).
+  const previewExt = $derived(wantEncryption ? 'obk' : job.image_format === 'qcow2' ? 'qcow2' : 'vhdx');
   const previewPath = $derived.by(() => {
     const folder = job.dest_folder.trim();
     if (!folder || job.sources.length === 0) return '';
     const safe = safeFileStem(job.name, 'backup');
-    const token = sourceToken(job.sources[0]);
+    const token = job.disk_source ? `disk${job.disk_source.disk_number}` : sourceToken(job.sources[0]);
     const sep = folder.endsWith('\\') || folder.endsWith('/') ? '' : '\\';
-    return `${folder}${sep}${safe}_${token}_full_${previewStamp}.vhdx`;
+    return `${folder}${sep}${safe}_${token}_full_${previewStamp}.${previewExt}`;
   });
 
   // Universal "folder + file name" field (2-in-1). At rest it shows the full
   // generated path so the whole name is visible; while focused it collapses to
   // the editable "folder\<имя>", and BOTH the folder and the base name can be
   // typed freely (last path segment = base name → job.name, the rest = folder →
-  // job.dest_folder). The engine still appends _<буква>_<тип>_<дата>.vhdx.
+  // job.dest_folder). The engine still appends _<диск>_<тип>_<дата>.<ext>.
   let destFocused = $state(false);
   let pathText = $state('');
 
