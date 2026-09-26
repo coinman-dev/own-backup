@@ -176,7 +176,7 @@ pub struct JobPolicyArgs {
     pub day_of_month: Option<u32>,
 
     /// Событие для schedule=event: startup, logon, logoff, shutdown,
-    /// usb_connect
+    /// dest_connected (подключён диск, куда пишется копия)
     #[arg(long, value_name = "СОБЫТИЕ")]
     pub event: Option<String>,
 }
@@ -441,7 +441,7 @@ fn apply_policy(job: &mut own_backup_core::Job, p: &JobPolicyArgs) -> Result<()>
     }
     if let Some(e) = &p.event {
         let e = e.to_ascii_lowercase();
-        const EVENTS: [&str; 5] = ["usb_connect", "logon", "logoff", "shutdown", "startup"];
+        const EVENTS: [&str; 5] = ["dest_connected", "logon", "logoff", "shutdown", "startup"];
         if !EVENTS.contains(&e.as_str()) {
             return Err(OwnBackupError::Config(format!(
                 "неизвестное событие «{e}» — ожидается одно из: {}",

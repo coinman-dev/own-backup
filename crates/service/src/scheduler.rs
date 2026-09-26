@@ -5,13 +5,19 @@
 //! `RunJob` RPC, so a job that is already pending or running is never queued
 //! twice — even if a slow backup spans several ticks.
 //!
-//! `kind = event` with `event_trigger = "startup"` is handled here too (fire N
-//! minutes after the service/boot, at most once per boot / per day). The other
-//! event triggers (usb_connect / logon / logoff / shutdown) still need OS
-//! session/device/shutdown hooks. Also follow-up: wake-from-sleep and
-//! prevent-sleep during a backup.
+//! `kind = event` jobs fire here too:
+//! - "startup": N minutes after the service (≈ boot), at most once per boot /
+//!   per day;
+//! - "logon" / "logoff" / "shutdown": forwarded by the service control handler
+//!   ([`OsEvent`]);
+//! - "dest_connected": the drive the copy goes to appears — polled every
+//!   [`DEST_TICK`] ([`watch_destinations`]).
+//!
+//! It also arms the wake timer for jobs that ask to wake the machine
+//! (`schedule.wake_to_run`, [`next_wake`]). Keeping the machine awake WHILE a
+//! copy runs is the run's own business (`core::run_queue_worker`).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use chrono::Duration as ChronoDuration;
@@ -23,6 +29,15 @@ use own_backup_core::{Job, JobStore, PasswordStore, RunQueue};
 use crate::shutdown::ShutdownSignal;
 
 const TICK: std::time::Duration = std::time::Duration::from_secs(60);
+/// How often destination drives are looked at for "dest_connected" jobs. Ten
+/// seconds: plugging a drive in and seeing nothing happen for a minute reads
+/// as "it does not work".
+const DEST_TICK: std::time::Duration = std::time::Duration::from_secs(10);
+/// A drive that does not answer within this is "not there" for this round —
+/// a network share that is gone can take tens of seconds to say so.
+const DEST_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Wake this long before the slot: the scheduler ticks once a minute.
+const WAKE_EARLY_SECS: i64 = 60;
 
 /// OS events the Windows service control handler forwards to the scheduler, so
 /// `kind = event` jobs with a matching `event_trigger` can fire. (USB device
@@ -53,13 +68,23 @@ pub fn spawn(
         let started = tokio::time::Instant::now();
         // "startup" event jobs already fired this boot (cleared on restart).
         let mut fired_startup: HashSet<String> = HashSet::new();
+        // Whether each "dest_connected" job's drive was there last time it
+        // was looked at. The first look only records: a drive that was
+        // already connected when the service started was not just connected.
+        let mut dest_seen: HashMap<String, bool> = HashMap::new();
+        let wake = WakeArming::start();
         // Let the store/worker settle before the first tick.
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         let mut interval = tokio::time::interval(TICK);
+        let mut dest_interval = tokio::time::interval(DEST_TICK);
         loop {
             tokio::select! {
                 _ = interval.tick() => {
                     tick(&store, &queue, &job_tx, &passwords, started.elapsed(), &mut fired_startup);
+                    wake.update(&store.list());
+                }
+                _ = dest_interval.tick() => {
+                    watch_destinations(&store, &queue, &job_tx, &passwords, &mut dest_seen).await;
                 }
                 Some(ev) = os_rx.recv() => {
                     handle_os_event(ev, &store, &queue, &job_tx, &passwords);
@@ -131,10 +156,10 @@ fn tick(
     }
 }
 
-/// Handle a `kind = event` job. Only the `startup` trigger fires so far: N
+/// Handle a `kind = event` job on the minute tick — the `startup` trigger: N
 /// minutes after the service (≈ system) starts, once per boot — and, when
 /// `event_once_per_day` is set, only if it has not already run today. The other
-/// triggers (usb_connect / logon / logoff / shutdown) need OS event hooks.
+/// triggers have their own paths ([`handle_os_event`], [`watch_destinations`]).
 fn handle_event(
     job: &own_backup_core::Job,
     uptime: std::time::Duration,
@@ -144,7 +169,7 @@ fn handle_event(
     passwords: &PasswordStore,
 ) {
     if job.schedule.event_trigger != "startup" {
-        return; // other events not wired up yet
+        return; // fired elsewhere — see above
     }
     let delay = std::time::Duration::from_secs(job.schedule.event_startup_delay_min as u64 * 60);
     if uptime < delay || fired_startup.contains(&job.id) {
@@ -191,6 +216,138 @@ fn handle_os_event(
         }
         info!(job = %job.name, trigger, "Scheduler: OS event fired");
         enqueue(queue, job_tx, &job.id, &job.name);
+    }
+}
+
+/// Look at the destination drive of every "dest_connected" job and fire the
+/// ones whose drive has just appeared.
+async fn watch_destinations(
+    store: &JobStore,
+    queue: &RunQueue,
+    job_tx: &UnboundedSender<String>,
+    passwords: &PasswordStore,
+    seen: &mut HashMap<String, bool>,
+) {
+    let jobs: Vec<Job> =
+        store.list().into_iter().filter(|j| j.schedule.is_dest_connected_trigger()).collect();
+    seen.retain(|id, _| jobs.iter().any(|j| &j.id == id));
+    if jobs.is_empty() {
+        return;
+    }
+    let roots: Vec<(String, Option<std::path::PathBuf>)> =
+        jobs.iter().map(|j| (j.id.clone(), dest_root(&j.dest_folder))).collect();
+    // Off the runtime, and bounded: asking a share that has gone away blocks.
+    let probe = tokio::task::spawn_blocking(move || {
+        roots
+            .into_iter()
+            .map(|(id, root)| (id, root.is_some_and(|r| std::fs::metadata(r).is_ok())))
+            .collect::<HashMap<String, bool>>()
+    });
+    let present = match tokio::time::timeout(DEST_PROBE_TIMEOUT, probe).await {
+        Ok(Ok(p)) => p,
+        _ => return, // no answer this round — nothing changes
+    };
+    for job in jobs {
+        let now_there = present.get(&job.id).copied().unwrap_or(false);
+        let before = seen.insert(job.id.clone(), now_there);
+        if before == Some(now_there) || before.is_none() {
+            continue; // unchanged, or the first look
+        }
+        if !now_there {
+            info!(job = %job.name, dest = %job.dest_folder, "destination drive disconnected");
+            continue;
+        }
+        info!(job = %job.name, dest = %job.dest_folder, "destination drive connected");
+        if job.schedule.event_once_per_day && ran_today(&job) {
+            continue;
+        }
+        if !has_passwords(&job, passwords) {
+            continue;
+        }
+        enqueue(queue, job_tx, &job.id, &job.name);
+    }
+}
+
+/// The root that says whether a destination is reachable at all: `E:\` for
+/// `E:\Backup\Job`, `\\server\share\` for a share. The folder itself may not
+/// exist yet — a first copy creates it — so the drive is what is asked about.
+fn dest_root(dest: &str) -> Option<std::path::PathBuf> {
+    let d = dest.trim();
+    if let Some(rest) = d.strip_prefix(r"\\") {
+        let mut parts = rest.split(['\\', '/']).filter(|p| !p.is_empty());
+        let (server, share) = (parts.next()?, parts.next()?);
+        return Some(format!(r"\\{server}\{share}\").into());
+    }
+    let b = d.as_bytes();
+    (b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':')
+        .then(|| format!("{}:\\", (b[0] as char).to_ascii_uppercase()).into())
+}
+
+/// When the machine must be awake next: a minute before the earliest slot of
+/// any daily/weekly/monthly job that asks to wake it. `None` = nothing to wake
+/// for.
+fn next_wake(
+    jobs: &[Job],
+    now: chrono::DateTime<chrono::FixedOffset>,
+) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    jobs.iter()
+        .filter(|j| j.schedule.wake_to_run)
+        .filter_map(|j| {
+            let cron = own_backup_scheduler::schedule_to_cron(&j.schedule)?;
+            let sched = own_backup_scheduler::config_schedule::parse(&cron)?;
+            sched.after(&now).next()
+        })
+        .min()
+        .map(|slot| slot - ChronoDuration::seconds(WAKE_EARLY_SECS))
+}
+
+/// The wake timer, kept pointed at [`next_wake`]. Windows only, and never on
+/// the boot medium (nothing there outlives the session).
+struct WakeArming {
+    #[cfg(target_os = "windows")]
+    timer: Option<Arc<own_backup_backup::power_win::WakeTimer>>,
+    armed: std::sync::Mutex<Option<chrono::DateTime<chrono::FixedOffset>>>,
+}
+
+impl WakeArming {
+    fn start() -> Self {
+        #[cfg(target_os = "windows")]
+        let timer = if own_backup_common::media_mode::is_media_mode() {
+            None
+        } else {
+            // Held awake five minutes after waking: the tick that starts the
+            // copy comes within one, and the copy then holds it itself.
+            own_backup_backup::power_win::WakeTimer::start(std::time::Duration::from_secs(300))
+        };
+        Self {
+            #[cfg(target_os = "windows")]
+            timer,
+            armed: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn update(&self, jobs: &[Job]) {
+        let now = chrono::Local::now().fixed_offset();
+        // A time already passed (the slot is within the minute) needs no timer:
+        // the machine is awake to see it.
+        let want = next_wake(jobs, now).filter(|at| *at > now);
+        let mut armed = self.armed.lock().unwrap();
+        if *armed == want {
+            return;
+        }
+        match want {
+            Some(at) => info!(at = %at, "wake timer armed for a scheduled copy"),
+            None if armed.is_some() => info!("wake timer disarmed — no copy asks to wake the machine"),
+            None => {}
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(timer) = &self.timer {
+            match want {
+                Some(at) => timer.arm(at.with_timezone(&chrono::Utc)),
+                None => timer.disarm(),
+            }
+        }
+        *armed = want;
     }
 }
 
@@ -308,5 +465,42 @@ mod tests {
     fn an_unreadable_timestamp_does_not_count_as_a_run() {
         let job = job_started_at("not a date at all");
         assert!(!started_on_the_same_day(&job, chrono::Utc::now()));
+    }
+
+    #[test]
+    fn a_destination_is_asked_about_by_its_drive() {
+        use std::path::PathBuf;
+        assert_eq!(dest_root(r"F:\Backup\Disk_D (Work)"), Some(PathBuf::from(r"F:\")));
+        assert_eq!(dest_root("e:"), Some(PathBuf::from(r"E:\")));
+        assert_eq!(dest_root(r"\\nas\backups\pc1"), Some(PathBuf::from(r"\\nas\backups\")));
+        assert_eq!(dest_root(r"\\nas"), None, "a server with no share names no drive");
+        assert_eq!(dest_root("relative\\path"), None);
+        assert_eq!(dest_root(""), None);
+    }
+
+    #[test]
+    fn the_machine_is_woken_a_minute_before_the_earliest_slot() {
+        let tz = FixedOffset::east_opt(3 * 3600).unwrap();
+        let now = tz.with_ymd_and_hms(2026, 9, 26, 12, 0, 0).unwrap();
+        let job = |time: &str, wake: bool| {
+            let mut j = Job::default();
+            j.schedule.kind = "daily".into();
+            j.schedule.time = time.into();
+            j.schedule.wake_to_run = wake;
+            j
+        };
+        // Tonight 23:30 wakes; 18:00 does not ask to.
+        let jobs = [job("23:30", true), job("18:00", false)];
+        assert_eq!(next_wake(&jobs, now), Some(tz.with_ymd_and_hms(2026, 9, 26, 23, 29, 0).unwrap()));
+        // Of two that ask, the earlier — and at 23:45 tonight's 23:30 is gone,
+        // so it is tomorrow's, after tomorrow's 03:00.
+        let late = tz.with_ymd_and_hms(2026, 9, 26, 23, 45, 0).unwrap();
+        let jobs = [job("23:30", true), job("03:00", true)];
+        assert_eq!(next_wake(&jobs, late), Some(tz.with_ymd_and_hms(2026, 9, 27, 2, 59, 0).unwrap()));
+        // Nobody asks — nothing to arm; an event job never arms it.
+        assert_eq!(next_wake(&[job("23:30", false)], now), None);
+        let mut ev = job("23:30", true);
+        ev.schedule.kind = "event".into();
+        assert_eq!(next_wake(&[ev], now), None);
     }
 }

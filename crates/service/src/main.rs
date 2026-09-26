@@ -552,6 +552,7 @@ pub async fn run_main_loop(
         cancel.clone(),
         passwords.clone(),
         job_rx,
+        job_tx.downgrade(),
     ));
     info!("Backup orchestrator ready ({} job(s) loaded)", store.list().len());
 

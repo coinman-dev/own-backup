@@ -6,7 +6,6 @@
   import { saveJob, runJob, decryptVolume, decryptedVolumes } from '../lib/jobStore.svelte';
   import { formatBytes } from '../lib/format';
   import { diskSegments, msrKept } from '../lib/diskLayout';
-  import InfoModal from '../components/InfoModal.svelte';
   import PasswordField from '../components/PasswordField.svelte';
   import ArchiveKeyModal from '../components/ArchiveKeyModal.svelte';
   import type { Job, DiskInfo, PartitionInfo } from '../lib/types';
@@ -23,7 +22,6 @@
 
   let step = $state(0);
   let error: string | null = $state(null);
-  let stubMsg: string | null = $state(null);
 
   // --- Archive encryption (§7.5) ---
   // A job that already has a key stays encrypted: the copies written with it
@@ -77,8 +75,6 @@
   let keyModalOpen = $state(false);
   /** Set when the save was interrupted to ask for a key: run the job after. */
   let runAfterKey = $state(false);
-  const stub = () =>
-    (stubMsg = 'Эта настройка сохраняется, но пока не применяется — реализация позже.');
 
   // On the boot medium the schedule step is dropped rather than disabled: the
   // session ends at power-off, so any schedule set here is a promise nothing
@@ -121,11 +117,18 @@
 
   // Event triggers for kind='event'. Third field = badge text ('' = works).
   const eventTriggers: [string, string, string][] = [
-    ['usb_connect', 'После подключения внешнего устройства', 'в разработке'],
+    ['dest_connected', 'При подключении диска, куда пишется копия', ''],
     ['logon', 'При входе пользователя', ''],
     ['logoff', 'При выходе пользователя', ''],
     ['startup', 'При запуске системы (с задержкой)', ''],
   ];
+
+  // «После подключения внешнего устройства» (usb_connect) was never wired;
+  // what it was for — the backup drive being plugged in — is dest_connected.
+  // The service reads both the same; the radio shows the new one.
+  $effect(() => {
+    if (job.schedule.event_trigger === 'usb_connect') job.schedule.event_trigger = 'dest_connected';
+  });
 
   function toggleDay(d: string) {
     job.schedule.days = job.schedule.days.includes(d)
@@ -1682,18 +1685,33 @@
           <div class="hint-sm">Число месяца — только 1–28: 29–31 есть не в каждом месяце, поэтому такие даты не выбираются.</div>
         {/if}
         {#if job.schedule.kind === 'event'}
-          <div class="note">✓ Работают: вход/выход пользователя и запуск системы. Завершение работы фиксируется, но копия может не успеть создаться при выключении. Подключение устройства — в разработке. Все триггеры выполняет служба «Own Backup».</div>
+          <div class="note">
+            ✓ События отслеживает служба «Own Backup».
+            {#if job.schedule.event_trigger === 'dest_connected'}
+              Копия начинается в течение 10 секунд после того, как появится
+              {driveLetter(job.dest_folder) ? `диск ${driveLetter(job.dest_folder)}:` : 'диск назначения'}.
+              Диск, подключённый ещё до запуска службы, не считается —
+              только новое подключение.
+            {/if}
+          </div>
         {:else if job.schedule.kind !== 'none'}
           <div class="note">✓ Автозапуск выполняет служба «Own Backup» (должна быть установлена и запущена). Для зашифрованных томов сохраните пароль на шаге «Источник».</div>
         {/if}
         <div class="adv-schedule">
-          <!-- Служба этих трёх настроек пока не исполняет. Пока это так, они
-               не должны выглядеть работающими переключателями: снятая галочка,
-               которую нельзя поставить, честнее сохранённого значения, которое
-               ничего не делает (аудит AUD-16). -->
-          <label class="chk"><input type="checkbox" checked={false} disabled /> Копировать только если компьютер заблокирован<span class="dev-badge">в разработке</span></label>
-          <label class="chk"><input type="checkbox" checked={false} disabled /> Пробуждать компьютер из спящего режима<span class="dev-badge">в разработке</span></label>
-          <label class="chk"><input type="checkbox" checked={false} disabled /> Предотвращать переход в спящий режим<span class="dev-badge">в разработке</span></label>
+          <!-- «Копировать только если компьютер заблокирован» и «Предотвращать
+               переход в спящий режим» убраны (2026-09-26): первое не нужно,
+               второе больше не выбор — во время копии компьютер не засыпает
+               никогда. -->
+          {#if job.schedule.kind === 'daily' || job.schedule.kind === 'weekly' || job.schedule.kind === 'monthly'}
+            <label class="chk"><input type="checkbox" bind:checked={job.schedule.wake_to_run} /> Пробуждать компьютер из спящего режима</label>
+            {#if job.schedule.wake_to_run}
+              <div class="note sub">
+                Компьютер проснётся за минуту до запуска. Нужно, чтобы в схеме
+                электропитания были разрешены таймеры пробуждения — на ноутбуке
+                от батареи они часто выключены.
+              </div>
+            {/if}
+          {/if}
           <label class="chk"><input type="checkbox" bind:checked={job.schedule.run_missed} /> Выполнять пропущенные операции при запуске системы с задержкой (в минутах)</label>
           {#if job.schedule.run_missed}
             <label class="delay-min">Задержка после запуска системы:
@@ -1924,10 +1942,89 @@
               </div>
             {/if}
           </div>
-          <button class="adv-row" onclick={stub}><span>⌘ Pre/Post-команды</span><span class="dev-badge">в разработке</span></button>
-          <button class="adv-row" onclick={stub}><span>⚠ Обработка ошибок</span><span class="dev-badge">в разработке</span></button>
-          <button class="adv-row" onclick={stub}><span>⏻ Выключение компьютера</span><span class="dev-badge">в разработке</span></button>
-          <button class="adv-row" onclick={stub}><span>⏱ Производительность</span><span class="dev-badge">в разработке</span></button>
+          <!-- «Pre/Post-команды» убраны (2026-09-26): служба работает от имени
+               SYSTEM, а задание может сохранить любой вошедший пользователь —
+               команда в задании была бы запуском чего угодно от SYSTEM. -->
+          <div class="adv-group">
+            <div class="adv-title">Обработка ошибок</div>
+            <label class="chk">
+              <input
+                type="checkbox"
+                checked={job.advanced.retry_attempts > 0}
+                onchange={(e) => (job.advanced.retry_attempts = (e.target as HTMLInputElement).checked ? 2 : 0)}
+              />
+              Повторять неудавшуюся копию
+            </label>
+            {#if job.advanced.retry_attempts > 0}
+              <div class="adv-line">
+                Попыток:
+                <select bind:value={job.advanced.retry_attempts}>
+                  {#each [1, 2, 3, 4, 5] as n (n)}<option value={n}>{n}</option>{/each}
+                </select>
+                через
+                <select bind:value={job.advanced.retry_interval_min}>
+                  {#each [1, 5, 10, 15, 30, 60] as n (n)}<option value={n}>{n}</option>{/each}
+                </select>
+                мин
+              </div>
+            {/if}
+            <div class="adv-hint">
+              Например, когда диск назначения ещё не готов. Остановленная вручную
+              копия не повторяется.
+            </div>
+          </div>
+          {#if !media.active}
+            <div class="adv-group">
+              <div class="adv-title">После копирования</div>
+              <select class="wide" bind:value={job.advanced.after_backup}>
+                <option value="none">Ничего не делать</option>
+                <option value="sleep">Перевести компьютер в спящий режим</option>
+                <option value="shutdown">Выключить компьютер</option>
+              </select>
+              {#if job.advanced.after_backup !== 'none'}
+                <div class="adv-hint flush">
+                  {job.advanced.after_backup === 'sleep'
+                    ? 'Через минуту после окончания.'
+                    : 'Windows предупредит за полторы минуты; отменить — командой shutdown /a. Несохранённые документы принудительно не закрываются.'}
+                  Только если других копий в очереди нет; не после копии,
+                  остановленной вручную, и не пока ждёт повтор.
+                </div>
+              {/if}
+            </div>
+          {/if}
+          <div class="adv-group">
+            <div class="adv-title">Производительность</div>
+            <label class="chk">
+              <input type="checkbox" bind:checked={job.advanced.low_priority} />
+              Низкий приоритет — не мешать работе
+            </label>
+            <div class="adv-hint">
+              Диск и процессор в первую очередь отдаются остальным программам:
+              пока компьютер занят, копия идёт медленнее.
+            </div>
+            <label class="chk">
+              <input
+                type="checkbox"
+                checked={job.advanced.speed_limit_mbps > 0}
+                onchange={(e) => (job.advanced.speed_limit_mbps = (e.target as HTMLInputElement).checked ? 50 : 0)}
+              />
+              Ограничить скорость чтения:
+              <input
+                type="number"
+                min="1"
+                max="10000"
+                class="num"
+                value={job.advanced.speed_limit_mbps || 50}
+                disabled={job.advanced.speed_limit_mbps === 0}
+                oninput={(e) => {
+                  const v = Math.round(Number((e.target as HTMLInputElement).value));
+                  if (v >= 1) job.advanced.speed_limit_mbps = v;
+                }}
+              />
+              МБ/с
+            </label>
+          </div>
+          <div class="note">Во время копирования и восстановления компьютер не уходит в спящий режим.</div>
         </div>
       {/if}
     </div>
@@ -1965,7 +2062,6 @@
     </div>
 </div>
 
-{#if stubMsg}<InfoModal message={stubMsg} onClose={() => (stubMsg = null)} />{/if}
 
 <ArchiveKeyModal
   open={keyModalOpen}
@@ -2174,7 +2270,11 @@
   .enc-pair { display: flex; gap: 16px; flex-wrap: wrap; }
   .enc-cell { display: flex; flex-direction: column; flex: 1 1 260px; min-width: 240px; }
   .adv-title { font-size: 13px; font-weight: 600; color: var(--primary); margin-bottom: 8px; }
-  .adv-row { display: flex; align-items: center; justify-content: space-between; padding: 14px 4px; border-bottom: 1px solid var(--border); background: none; border-top: none; border-left: none; border-right: none; cursor: pointer; font-size: 14px; color: var(--head); font-family: var(--font); width: 100%; }
+  /* A setting's details, indented to its checkbox's text. */
+  .adv-line { display: flex; align-items: center; gap: 6px; margin: 8px 0 0 26px; font-size: 13px; color: var(--head); }
+  .adv-line select { padding: 4px 6px; border: 1px solid var(--border); border-radius: 4px; font-size: 13px; font-family: var(--font); background: var(--card-bg); color: var(--text); }
+  .adv-hint { margin: 4px 0 8px 26px; font-size: 12.5px; line-height: 1.45; color: var(--sub); }
+  .adv-hint.flush { margin-left: 0; margin-top: 6px; }
   .dev-badge { font-size: 11px; color: #a06a10; background: rgba(251,188,5,.15); padding: 3px 9px; border-radius: 10px; }
   .ok-badge { font-size: 11px; color: #2c5b12; background: rgba(90,176,47,.15); padding: 2px 8px; border-radius: 10px; margin-left: 6px; }
   .wz-error { padding: 8px 34px; color: #8c1d1d; font-size: 13px; background: rgba(216,74,74,.08); }

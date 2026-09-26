@@ -349,13 +349,13 @@ export interface ScheduleConfig {
   time: string;
   /** Day of month for `monthly`, 1–28 (limited so it exists in every month). */
   day_of_month: number;
-  /** For kind=event: 'usb_connect'|'logon'|'logoff'|'shutdown'|'startup'. */
+  /** For kind=event: 'dest_connected'|'logon'|'logoff'|'shutdown'|'startup'
+   *  ('usb_connect' in jobs saved before 2026-09-26 means dest_connected). */
   event_trigger: string;
   event_once_per_day: boolean;
   event_startup_delay_min: number;
-  only_when_locked: boolean;
+  /** Wake the machine from sleep for a daily/weekly/monthly run. */
   wake_to_run: boolean;
-  prevent_sleep: boolean;
   run_missed: boolean;
   /** Minutes after system/service start before catching up missed runs, 1–60. */
   missed_delay_min: number;
@@ -386,13 +386,16 @@ export interface AdvancedConfig {
   validate_after: boolean;
   /** Only the blocks the new copy wrote, not the chain under it. */
   verify_latest_only: boolean;
-  backup_unallocated: boolean;
-  password_enabled: boolean;
-  pre_command: string;
-  post_command: string;
-  error_handling: string;
-  shutdown_after: boolean;
-  performance: string;
+  /** A failed run is queued again this many times (0 = off)… */
+  retry_attempts: number;
+  /** …each this many minutes after the previous failure. */
+  retry_interval_min: number;
+  /** After the run, once nothing else is queued. */
+  after_backup: 'none' | 'sleep' | 'shutdown';
+  /** Copy at background disk/CPU priority. */
+  low_priority: boolean;
+  /** Cap on the read speed, MB/s; 0 = none. */
+  speed_limit_mbps: number;
 }
 
 /** Byte totals per file category — real data from the backup walk. */

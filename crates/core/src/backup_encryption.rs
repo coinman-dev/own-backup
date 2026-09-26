@@ -379,6 +379,7 @@ mod tests {
         queue.enqueue(&job.id);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         tx.send(job.id.clone()).unwrap();
+        let retry_tx = tx.downgrade();
         drop(tx);
         let sink = Arc::new(Sink(Mutex::new(Vec::new())));
         crate::run_queue_worker(
@@ -389,6 +390,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(crate::NoPasswords),
             rx,
+            retry_tx,
         )
         .await;
         let runs = sink.0.lock().unwrap();

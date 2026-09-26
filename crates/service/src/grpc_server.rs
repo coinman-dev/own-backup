@@ -1089,6 +1089,7 @@ impl BackupService for BackupServiceImpl {
 
             let summary = tokio::task::spawn_blocking(move || {
                 let _slot = slot;
+                let _awake = keep_awake("восстановление тома");
                 let mut last_permille = u64::MAX;
                 let mut last_emit = std::time::Instant::now();
                 restore_volume(&request, |pr| {
@@ -1651,6 +1652,7 @@ impl BackupService for BackupServiceImpl {
 
             let summary = tokio::task::spawn_blocking(move || {
                 let _slot = slot;
+                let _awake = keep_awake("восстановление диска");
                 let mut last = String::new();
                 restore_disk(&request, |pr| {
                     if cancel.is_cancelled() {
@@ -2019,6 +2021,7 @@ impl BackupService for BackupServiceImpl {
         let plan_id = plan.id;
         let task = tokio::task::spawn_blocking(move || {
             let _slot = slot;
+            let _awake = keep_awake("восстановление");
             let mut last_emit = std::time::Instant::now();
             let outcome = own_backup_core::restore_exec::execute_plan(
                 &plan,
@@ -2764,4 +2767,20 @@ fn write_media_iso(
     )?;
     let _ = std::fs::remove_file(&efisys);
     Ok(len)
+}
+
+/// No sleep while a restore writes a disk: a machine that sleeps halfway leaves
+/// a target that is neither the old disk nor the copy. (A copy holds the same
+/// in `core::run_queue_worker`.) Dropped when the restore ends, however it ends.
+fn keep_awake(what: &str) -> Option<Box<dyn Send>> {
+    #[cfg(target_os = "windows")]
+    {
+        own_backup_backup::power_win::KeepAwake::new(&format!("Own Backup: {what}"))
+            .map(|k| Box::new(k) as Box<dyn Send>)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = what;
+        None
+    }
 }

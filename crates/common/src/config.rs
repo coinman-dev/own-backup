@@ -35,61 +35,24 @@ pub struct AppConfig {
     /// while nothing read the value, wrong the moment something did.
     #[serde(default = "default_compression_level")]
     pub default_compression_level: i32,
-    #[serde(default)]
-    pub hooks: HooksConfig,
-    #[serde(default)]
-    pub credentials: CredentialsConfig,
     /// Backup images added by hand on the restore screen, so they come back on
     /// the next launch instead of having to be picked again. Paths only: the
     /// card itself is read from each image's own embedded metadata, which is
     /// what makes this work on a machine with no job database at all.
     #[serde(default)]
     pub remembered_backups: Vec<String>,
-    // `consolidation_enabled` (a master switch for consolidation) was removed
-    // on 2026-09-26: consolidation is always allowed, and a job that does not
-    // want it simply does not choose it. An old config that still carries the
-    // key loads fine — unknown keys are ignored.
+    // Removed on 2026-09-26, and an old config that still carries them loads
+    // fine — unknown keys are ignored:
+    // - `consolidation_enabled`, a master switch for consolidation: it is
+    //   always allowed, and a job that does not want it does not choose it;
+    // - `[hooks]` (pre/post snapshot commands) and `[credentials]`: saved,
+    //   never read by anything. Commands run by a SYSTEM service from a file
+    //   any interactive user can have the service write are not a feature to
+    //   leave lying around half-built.
 }
 
 fn default_compression_level() -> i32 {
     3
-}
-
-/// Pre/post snapshot hooks for application-consistent backups.
-/// Hooks run around VSS snapshot creation to flush application state.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct HooksConfig {
-    /// Commands to run BEFORE snapshot creation (e.g., flush DB, pause containers).
-    #[serde(default)]
-    pub pre_snapshot: Vec<String>,
-    /// Commands to run AFTER snapshot creation (e.g., resume DB, unpause containers).
-    #[serde(default)]
-    pub post_snapshot: Vec<String>,
-    /// Seconds to wait for a hook command before timing out. Default: 60.
-    #[serde(default = "default_hook_timeout")]
-    pub timeout_seconds: u64,
-    /// Built-in application profiles to activate (e.g., "postgresql", "mysql", "docker").
-    #[serde(default)]
-    pub profiles: Vec<String>,
-}
-
-fn default_hook_timeout() -> u64 {
-    60
-}
-
-/// Credential storage configuration for scheduled (unattended) backups.
-/// When encryption is enabled on a scheduled job, the service needs a way to
-/// retrieve the encryption password without user interaction.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct CredentialsConfig {
-    /// On Windows: store password in Windows Credential Manager.
-    /// The credential is stored under "OwnBackup/<job_id>".
-    #[serde(default)]
-    pub use_windows_credential_manager: bool,
-    /// On Linux: path to a key file readable only by root (chmod 600).
-    /// The file contains the raw password or a key derivation seed.
-    #[serde(default)]
-    pub key_file: Option<PathBuf>,
 }
 
 fn default_data_dir() -> PathBuf {
@@ -146,8 +109,6 @@ impl Default for AppConfig {
             log_level: default_log_level(),
             log_mirror_dir: String::new(),
             default_compression_level: default_compression_level(),
-            hooks: HooksConfig::default(),
-            credentials: CredentialsConfig::default(),
             remembered_backups: Vec::new(),
         }
     }
@@ -245,14 +206,12 @@ mod tests {
         cfg.remembered_backups =
             vec![r"E:\Backup\one.vhdx".into(), r"E:\Backup\two.qcow2".into()];
         cfg.default_compression_level = 7;
-        cfg.hooks.profiles = vec!["postgresql".into()];
 
         let text = toml::to_string_pretty(&cfg).expect("config must serialise");
         let back: AppConfig = toml::from_str(&text).expect("config must parse back");
 
         assert_eq!(back.remembered_backups, cfg.remembered_backups, "\n{text}");
         assert_eq!(back.default_compression_level, 7);
-        assert_eq!(back.hooks.profiles, vec!["postgresql".to_string()]);
     }
 
     #[test]
@@ -287,10 +246,13 @@ mod tests {
     #[test]
     fn a_config_from_before_the_compression_key_reads_level_3() {
         // Written before `default_compression_level` existed, and with the
-        // consolidation switch that has since been removed: both must load,
-        // and the missing level must be the default, not 0.
+        // keys removed since (the consolidation switch, `[hooks]`,
+        // `[credentials]`): it must load, and the missing level must be the
+        // default, not 0.
         let back: AppConfig = toml::from_str(
-            "log_level = \"info\"\nconsolidation_enabled = false\n",
+            "log_level = \"info\"\nconsolidation_enabled = false\n\n\
+             [hooks]\npre_snapshot = [\"net stop x\"]\n\n\
+             [credentials]\nuse_windows_credential_manager = true\n",
         )
         .expect("an old config must still load");
         assert_eq!(back.default_compression_level, 3);

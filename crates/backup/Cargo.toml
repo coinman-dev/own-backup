@@ -66,6 +66,10 @@ windows = { version = "0.58", features = [
     "Win32_System_Ole",
     "Win32_System_Variant",
     "Win32_System_Rpc",
+    # Сон и выключение (power_win.rs): не давать уснуть во время копии,
+    # пробуждать к расписанию, «после копии — сон / выключить».
+    "Win32_System_Power",
+    "Win32_System_Shutdown",
 ] }
 # Driver-install feature (aim_install.rs): download DriverFiles.zip + extract.
 zip = { version = "2", default-features = false, features = ["deflate"] }

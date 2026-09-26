@@ -102,23 +102,23 @@ pub struct ScheduleConfig {
     /// Day of month for `monthly` (1–28 only, so it exists in every month —
     /// avoids the "31st never fires in February" trap).
     pub day_of_month: u32,
-    /// For `kind = event`: which OS event fires the run. One of "usb_connect",
-    /// "logon", "logoff", "shutdown", "startup". Only "startup" is wired up so
-    /// far (the others need session/device/shutdown hooks).
+    /// For `kind = event`: what fires the run. One of "dest_connected" (the
+    /// drive the copy goes to appears — see [`Self::is_dest_connected_trigger`]),
+    /// "logon", "logoff", "shutdown", "startup".
     pub event_trigger: String,
     /// Event runs at most once per calendar day when set (like Acronis).
     pub event_once_per_day: bool,
     /// Minutes to wait after startup before the "startup" event fires. 0–60.
     pub event_startup_delay_min: u32,
-    /// The next three are SAVED BUT NOT HONOURED: nothing in the scheduler or
-    /// the runner reads them (audit AUD-16). They default to false so a new job
-    /// never records a promise the service does not keep, and the wizard shows
-    /// them as unavailable rather than as working switches. Sleep handling, when
-    /// it is built, has to put the machine's state back on cancel and on error
-    /// too, so it lands as its own change rather than as a flag read here.
-    pub only_when_locked: bool,
+    /// Wake the machine from sleep for a daily/weekly/monthly run: the service
+    /// arms a wake timer a minute before the next slot. Needs wake timers
+    /// allowed in the power plan.
+    ///
+    /// `only_when_locked` and `prevent_sleep` used to sit here, saved and never
+    /// read (audit AUD-16). The first is gone; the second is no longer a
+    /// choice — no copy lets the machine sleep while it runs (2026-09-26).
+    /// Old jobs that still carry them load fine: unknown keys are ignored.
     pub wake_to_run: bool,
-    pub prevent_sleep: bool,
     pub run_missed: bool,
     /// Minutes to wait after the service (≈ system) starts before catching up
     /// missed runs — lets the machine settle after boot. 1–60.
@@ -135,12 +135,21 @@ impl Default for ScheduleConfig {
             event_trigger: "startup".into(),
             event_once_per_day: true,
             event_startup_delay_min: 0,
-            only_when_locked: false,
             wake_to_run: false,
-            prevent_sleep: false,
             run_missed: true,
             missed_delay_min: 1,
         }
+    }
+}
+
+impl ScheduleConfig {
+    /// An event job that fires when its destination drive appears. Jobs saved
+    /// before 2026-09-26 say "usb_connect" — "an external device was plugged
+    /// in", which was never wired; the drive the copy goes to appearing is
+    /// what that setting was for.
+    pub fn is_dest_connected_trigger(&self) -> bool {
+        self.kind == "event"
+            && matches!(self.event_trigger.as_str(), "dest_connected" | "usb_connect")
     }
 }
 
@@ -408,8 +417,8 @@ pub fn default_linux_exclusions() -> Vec<String> {
     .collect()
 }
 
-/// Advanced tab. `sector_by_sector` and `validate_after` are enforced now; the
-/// rest are saved for later ("в разработке" in the UI).
+/// Advanced tab. Every field here is read by the run (2026-09-26: the ones
+/// that were saved and never read are gone — see the note at the end).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AdvancedConfig {
@@ -419,14 +428,30 @@ pub struct AdvancedConfig {
     /// not the whole chain under it. Faster on a long chain, and blind to
     /// damage in the older copies — which is why it is off by default.
     pub verify_latest_only: bool,
-    // saved-for-later
-    pub backup_unallocated: bool,
-    pub password_enabled: bool,
-    pub pre_command: String,
-    pub post_command: String,
-    pub error_handling: String,
-    pub shutdown_after: bool,
-    pub performance: String,
+    /// A run that ends in an error is queued again this many times, each
+    /// `retry_interval_min` after the previous failure. 0 = off. A cancelled
+    /// run is never retried: someone stopped it.
+    ///
+    /// The case it is for is in the activity log of the machine it was built
+    /// on: «Устройство не готово (os error 21)» — a destination drive that was
+    /// not there yet, a copy that a second try minutes later would have made.
+    pub retry_attempts: u32,
+    pub retry_interval_min: u32,
+    /// After the run: "none", "sleep" or "shutdown". Only when nothing else is
+    /// queued or running, and not after a run someone cancelled or one that is
+    /// about to be retried. Never on the boot medium.
+    pub after_backup: String,
+    /// Copy at background priority — disk and CPU go to whatever the user is
+    /// doing first. Slower when the machine is busy, unnoticeable when it is not.
+    pub low_priority: bool,
+    /// Cap on how fast the source is read, MB/s. 0 = no cap.
+    pub speed_limit_mbps: u32,
+    // Removed on 2026-09-26, saved and never read: `backup_unallocated`,
+    // `password_enabled` (encryption is the OBK format now), `pre_command` /
+    // `post_command` (a command a SYSTEM service runs, from a job any
+    // interactive user can save, is a privilege escalation, not a feature),
+    // `error_handling`, `shutdown_after` and `performance` (replaced by the
+    // fields above). Old jobs carrying them load fine.
 }
 
 impl Default for AdvancedConfig {
@@ -438,13 +463,14 @@ impl Default for AdvancedConfig {
             // choice — this is the default for new jobs only.
             validate_after: true,
             verify_latest_only: false,
-            backup_unallocated: false,
-            password_enabled: false,
-            pre_command: String::new(),
-            post_command: String::new(),
-            error_handling: "stop".into(),
-            shutdown_after: false,
-            performance: "normal".into(),
+            // On by default — old jobs included, since they load their missing
+            // fields from here: a nightly copy that failed on a drive not yet
+            // spun up is exactly what this is for.
+            retry_attempts: 2,
+            retry_interval_min: 10,
+            after_backup: "none".into(),
+            low_priority: false,
+            speed_limit_mbps: 0,
         }
     }
 }
@@ -1158,8 +1184,154 @@ impl PasswordResolver for PasswordStore {
     }
 }
 
+/// Holds a copy to `speed_limit_mbps` by sleeping in its progress callback.
+///
+/// The engine calls that callback on the copying thread after every block it
+/// reads (1 MiB), so a sleep there is a pause of the copy itself — no second
+/// thread, nothing inside the engine. The pace is measured from the first
+/// block of each copy: a volume of a multi-volume job starts its own.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+struct Pace {
+    bytes_per_sec: f64,
+    block_bytes: f64,
+    started: Option<std::time::Instant>,
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+impl Pace {
+    /// The engine's block: every copy path reads 1 MiB at a time.
+    const BLOCK_BYTES: u64 = 1024 * 1024;
+
+    fn new(speed_limit_mbps: u32) -> Self {
+        Self::with_block(speed_limit_mbps, Self::BLOCK_BYTES)
+    }
+
+    fn with_block(speed_limit_mbps: u32, block_bytes: u64) -> Self {
+        Self {
+            bytes_per_sec: speed_limit_mbps as f64 * 1_000_000.0,
+            block_bytes: block_bytes as f64,
+            started: None,
+        }
+    }
+
+    /// `blocks_done` blocks have been read; wait until that many were allowed.
+    fn after(&mut self, blocks_done: u64) {
+        if self.bytes_per_sec <= 0.0 {
+            return;
+        }
+        let started = *self.started.get_or_insert_with(std::time::Instant::now);
+        let bytes = blocks_done as f64 * self.block_bytes;
+        let allowed_at = std::time::Duration::from_secs_f64(bytes / self.bytes_per_sec);
+        let elapsed = started.elapsed();
+        if allowed_at > elapsed {
+            std::thread::sleep(allowed_at - elapsed);
+        }
+    }
+}
+
+/// The copying thread at background priority for the life of the copy, when
+/// the job asks for it (`AdvancedConfig::low_priority`).
+#[cfg(target_os = "windows")]
+struct QuietCopy(#[allow(dead_code)] Option<own_backup_backup::power_win::BackgroundIo>);
+
+#[cfg(target_os = "windows")]
+impl QuietCopy {
+    fn enter(low_priority: bool) -> Self {
+        Self(low_priority.then(own_backup_backup::power_win::BackgroundIo::enter).flatten())
+    }
+}
+
+/// Queue a failed run again after `delay` — unless something has run since
+/// (a manual copy, a scheduled one), in which case the failure is no longer
+/// the job's last word and there is nothing to retry.
+fn schedule_retry(
+    retry_tx: tokio::sync::mpsc::WeakUnboundedSender<String>,
+    queue: RunQueue,
+    store: Arc<JobStore>,
+    failed: JobRun,
+    delay: std::time::Duration,
+    attempt: u32,
+    of: u32,
+) {
+    tokio::spawn(async move {
+        tokio::time::sleep(delay).await;
+        let still_last = store
+            .get(&failed.job_id)
+            .and_then(|j| j.last_run)
+            .is_some_and(|last| last.id == failed.id);
+        if !still_last {
+            info!(job = %failed.job_name, "retry dropped: the job has run since it failed");
+            return;
+        }
+        let Some(tx) = retry_tx.upgrade() else { return };
+        if queue.enqueue(&failed.job_id) {
+            info!(job = %failed.job_name, attempt, of, "retrying a failed backup");
+            if tx.send(failed.job_id.clone()).is_err() {
+                queue.cancel_pending(&failed.job_id);
+            }
+        }
+    });
+}
+
+/// Seconds the machine is given before it sleeps after a copy — long enough
+/// for the result to be seen, and for a next job to be queued (which cancels
+/// it).
+const SLEEP_AFTER_SECS: u64 = 60;
+/// Grace Windows' own shutdown notice counts down; `shutdown /a` cancels it.
+const SHUTDOWN_GRACE_SECS: u32 = 90;
+
+/// Carry out `AdvancedConfig::after_backup` once the queue is idle.
+fn after_backup(action: &str, job_name: &str, queue: &RunQueue) {
+    if action != "sleep" && action != "shutdown" {
+        return;
+    }
+    if own_backup_common::media_mode::is_media_mode() {
+        info!(job = %job_name, action, "after backup: nothing to do on the boot medium");
+        return;
+    }
+    let idle = |q: &RunQueue| {
+        let snap = q.snapshot();
+        snap.current.is_none() && snap.pending.is_empty()
+    };
+    if !idle(queue) {
+        info!(job = %job_name, action, "after backup: other copies are queued — skipped");
+        return;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let (action, job_name, queue) = (action.to_string(), job_name.to_string(), queue.clone());
+        tokio::spawn(async move {
+            let result = if action == "shutdown" {
+                own_backup_backup::power_win::shutdown_in(
+                    SHUTDOWN_GRACE_SECS,
+                    &format!("Own Backup: копия «{job_name}» готова, компьютер выключится"),
+                )
+            } else {
+                tokio::time::sleep(std::time::Duration::from_secs(SLEEP_AFTER_SECS)).await;
+                if !idle(&queue) {
+                    info!(job = %job_name, "after backup: a copy was queued meanwhile — not sleeping");
+                    return;
+                }
+                own_backup_backup::power_win::sleep_now()
+            };
+            if let Err(e) = result {
+                warn!(job = %job_name, action = %action, error = %e, "after backup: failed");
+            }
+        });
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (SLEEP_AFTER_SECS, SHUTDOWN_GRACE_SECS);
+        info!(job = %job_name, action, "after backup: not implemented on this platform");
+    }
+}
+
 /// Background worker: pulls job ids off the channel and runs them one at a
 /// time. Spawned once at startup.
+///
+/// `retry_tx` is a WEAK sender into its own channel: a failed run is queued
+/// again through it, and a weak one does not keep the channel open — the
+/// worker still ends when everything else that feeds it has gone.
 pub async fn run_queue_worker(
     sink: Arc<dyn EventSink>,
     store: Arc<JobStore>,
@@ -1168,7 +1340,12 @@ pub async fn run_queue_worker(
     cancel: Arc<AtomicBool>,
     passwords: Arc<dyn PasswordResolver>,
     mut rx: UnboundedReceiver<String>,
+    retry_tx: tokio::sync::mpsc::WeakUnboundedSender<String>,
 ) {
+    // Retries used by each job's current run of failures. In memory: a
+    // service restart forgets them, and the schedule carries on as usual.
+    let mut retries_used: std::collections::HashMap<String, u32> =
+        std::collections::HashMap::new();
     while let Some(job_id) = rx.recv().await {
         // Waiting -> running in one step. Cancelled while it waited, it is no
         // longer in the queue and must not start.
@@ -1198,6 +1375,13 @@ pub async fn run_queue_worker(
             .await;
 
         cancel.store(false, Ordering::SeqCst);
+        // No sleep while copying — laptops included, verification included.
+        // Released when this iteration ends, whatever the outcome.
+        #[cfg(target_os = "windows")]
+        let _awake = own_backup_backup::power_win::KeepAwake::new(&format!(
+            "Own Backup: резервное копирование «{}»",
+            job.name
+        ));
         let last_success = store.last_success(&job.id);
         // The keys of an encrypted job are opened here, once, before anything
         // runs — and if they cannot be opened the run fails saying so, rather
@@ -1230,6 +1414,39 @@ pub async fn run_queue_worker(
 
         queue.finish();
         sink.queue_changed(queue.snapshot());
+
+        // A failure is tried again, a set number of times; anything else ends
+        // the streak.
+        let retrying = if run.status == "error" {
+            let used = retries_used.entry(job.id.clone()).or_insert(0);
+            if *used < job.advanced.retry_attempts {
+                *used += 1;
+                let minutes = job.advanced.retry_interval_min.max(1);
+                info!(job = %job.name, attempt = *used, of = job.advanced.retry_attempts,
+                    minutes, "the failed backup will be retried");
+                schedule_retry(
+                    retry_tx.clone(),
+                    queue.clone(),
+                    store.clone(),
+                    run.clone(),
+                    std::time::Duration::from_secs(u64::from(minutes) * 60),
+                    *used,
+                    job.advanced.retry_attempts,
+                );
+                true
+            } else {
+                retries_used.remove(&job.id);
+                false
+            }
+        } else {
+            retries_used.remove(&job.id);
+            false
+        };
+        // Sleep / shut down — not while a retry is pending, and never after a
+        // run someone cancelled: they are at the machine.
+        if !retrying && run.status != "cancelled" {
+            after_backup(&job.advanced.after_backup, &job.name, &queue);
+        }
         sink.job_finished(run);
     }
 }
@@ -2215,6 +2432,8 @@ async fn perform_backup(
         let sink_bg = sink.clone();
         let job_id = job.id.clone();
         let cancel_bg = cancel.clone();
+        let low_priority = job.advanced.low_priority;
+        let speed_limit_mbps = job.advanced.speed_limit_mbps;
         let image_for_verify = image_path.clone();
         // Checking an encrypted copy needs its key: without one there is no
         // sidecar to read and nothing to compare checksums against.
@@ -2228,6 +2447,8 @@ async fn perform_backup(
             .unwrap_or_default();
 
         let result = tokio::task::spawn_blocking(move || {
+            let _quiet = QuietCopy::enter(low_priority);
+            let mut pace = Pace::new(speed_limit_mbps);
             let mut last_permille = u64::MAX;
             let mut last_emit = std::time::Instant::now();
             let summary = backup_volume(&request, |p| {
@@ -2247,6 +2468,9 @@ async fn perform_backup(
                     "exclusions" => "exclusions",
                     _ => "backup",
                 };
+                if phase == "backup" {
+                    pace.after(p.blocks_done);
+                }
                 let permille = if p.blocks_total > 0 {
                     p.blocks_done * 1000 / p.blocks_total
                 } else {
@@ -2590,10 +2814,14 @@ async fn perform_disk_backup(
     let sink_bg = sink.clone();
     let job_id = job.id.clone();
     let cancel_bg = cancel.clone();
+    let low_priority = job.advanced.low_priority;
+    let speed_limit_mbps = job.advanced.speed_limit_mbps;
     let model = ds.disk_model.clone();
     let disk_number = ds.disk_number;
 
     let result = tokio::task::spawn_blocking(move || {
+        let _quiet = QuietCopy::enter(low_priority);
+        let mut pace = Pace::new(speed_limit_mbps);
         let mut last_permille = u64::MAX;
         let mut last_emit = std::time::Instant::now();
         let summary = backup_disk(&request, |p| {
@@ -2611,6 +2839,9 @@ async fn perform_disk_backup(
                 "exclusions" => "exclusions",
                 _ => "backup",
             };
+            if phase == "backup" {
+                pace.after(p.blocks_done);
+            }
             let permille =
                 if p.blocks_total > 0 { p.blocks_done * 1000 / p.blocks_total } else { 0 };
             // "finalize" has no granular progress — always emit it so the UI
@@ -2998,6 +3229,25 @@ async fn perform_backup(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pace_holds_a_copy_to_its_limit() {
+        // 50 blocks of 1 MB at 100 MB/s: the fiftieth may not be done before
+        // half a second has passed.
+        let mut pace = Pace::with_block(100, 1_000_000);
+        let t = std::time::Instant::now();
+        pace.after(1);
+        pace.after(50);
+        let took = t.elapsed();
+        assert!(took >= std::time::Duration::from_millis(480), "{took:?}");
+        assert!(took < std::time::Duration::from_millis(1500), "{took:?}");
+
+        // No limit, no waiting — however much was read.
+        let mut free = Pace::with_block(0, 1_000_000);
+        let t = std::time::Instant::now();
+        free.after(1_000_000);
+        assert!(t.elapsed() < std::time::Duration::from_millis(50));
+    }
+
     /// Every default rule, asked of paths a real Windows volume has: what
     /// must go, and — the part that matters — what must stay.
     #[test]

@@ -37,6 +37,12 @@ pub fn enable_backup_privileges() {
     }
 }
 
+/// Enable `SeShutdownPrivilege` — what putting the machine to sleep or turning
+/// it off asks of the caller, LocalSystem included (held, disabled by default).
+pub fn enable_shutdown_privilege() -> bool {
+    matches!(enable_one(w!("SeShutdownPrivilege")), Ok(true))
+}
+
 /// Enable one privilege by name. `Ok(true)` = enabled, `Ok(false)` = the token
 /// doesn't hold it (ERROR_NOT_ALL_ASSIGNED).
 fn enable_one(name: PCWSTR) -> windows::core::Result<bool> {
