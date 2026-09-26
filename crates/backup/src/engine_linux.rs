@@ -74,7 +74,13 @@ enum LinuxImageWriter {
 }
 
 impl LinuxImageWriter {
-    fn create(format: ImageFormat, path: &Path, disk_size: u64, sector_size: u32) -> Result<Self> {
+    fn create(
+        format: ImageFormat,
+        path: &Path,
+        disk_size: u64,
+        sector_size: u32,
+        zstd_level: i32,
+    ) -> Result<Self> {
         Ok(match format {
             ImageFormat::Vhdx => Self::Vhdx(crate::vhdx_format::VhdxWriter::create(
                 path,
@@ -86,6 +92,9 @@ impl LinuxImageWriter {
                 path,
                 crate::qcow2::Qcow2WriterOptions {
                     virtual_size: disk_size,
+                    compression: crate::qcow2::Qcow2Compression::Zstd {
+                        level: crate::qcow2::zstd_level_or_default(zstd_level),
+                    },
                     ..Default::default()
                 },
             )?),
@@ -245,6 +254,8 @@ pub struct LinuxBackupRequest {
     /// (the service's own, or a password's). The run then asks nobody anything
     /// and writes `.obk` whatever `image_format` says.
     pub encryption: Option<crate::seal::context::ArchiveKeys>,
+    /// zstd level for qcow2 and `.obk` (1–19; anything else is the default).
+    pub zstd_level: i32,
 }
 
 /// Outcome of a completed Linux backup.
@@ -439,11 +450,17 @@ fn backup_inner(
                 consolidated_increments: 0,
                 chain_started_at: None,
                 compression: crate::seal::obk::ObkCompression::Zstd {
-                    level: crate::qcow2::DEFAULT_ZSTD_LEVEL,
+                    level: crate::qcow2::zstd_level_or_default(req.zstd_level),
                 },
             },
         )?,
-        _ => LinuxImageWriter::create(req.image_format, &req.image_path, disk_size, sector_size)?,
+        _ => LinuxImageWriter::create(
+            req.image_format,
+            &req.image_path,
+            disk_size,
+            sector_size,
+            req.zstd_level,
+        )?,
     };
     let data_offset = DEFAULT_PARTITION_OFFSET;
 
@@ -506,7 +523,7 @@ fn backup_inner(
         },
         compression_level: match req.image_format {
             ImageFormat::Vhdx => 0,
-            ImageFormat::Qcow2 => crate::qcow2::DEFAULT_ZSTD_LEVEL,
+            ImageFormat::Qcow2 => crate::qcow2::zstd_level_or_default(req.zstd_level),
         },
         encryption_algo: None,
         encryption_salt: None,
@@ -959,6 +976,7 @@ mod tests {
                 job_id: Some("job-encrypted".into()),
                 image_format: ImageFormat::Qcow2,
                 encryption: Some(test_keys()),
+                zstd_level: crate::qcow2::DEFAULT_ZSTD_LEVEL,
             },
             no_progress,
         )
@@ -1038,6 +1056,7 @@ mod tests {
                 job_id: None,
                 image_format: ImageFormat::Qcow2,
                 encryption: Some(test_keys()),
+                zstd_level: crate::qcow2::DEFAULT_ZSTD_LEVEL,
             },
             no_progress,
         );
@@ -1072,6 +1091,7 @@ mod tests {
             job_id: None,
             image_format: ImageFormat::Vhdx,
             encryption: None,
+            zstd_level: crate::qcow2::DEFAULT_ZSTD_LEVEL,
         };
         let sum = backup_volume(&req, no_progress).unwrap();
         assert!(sum.smart_mode);
@@ -1114,6 +1134,7 @@ mod tests {
                 job_id: None,
                 image_format: ImageFormat::Vhdx,
                 encryption: None,
+                zstd_level: crate::qcow2::DEFAULT_ZSTD_LEVEL,
             },
             no_progress,
         )
@@ -1167,6 +1188,7 @@ mod tests {
                 job_id: None,
                 image_format: ImageFormat::Qcow2,
                 encryption: None,
+                zstd_level: crate::qcow2::DEFAULT_ZSTD_LEVEL,
             },
             no_progress,
         )
@@ -1256,6 +1278,7 @@ mod tests {
                 job_id: None,
                 image_format: ImageFormat::Qcow2,
                 encryption: None,
+                zstd_level: crate::qcow2::DEFAULT_ZSTD_LEVEL,
             },
             no_progress,
         )

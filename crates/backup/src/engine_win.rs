@@ -107,6 +107,9 @@ pub struct VolumeBackupRequest {
     /// run started. Nothing inside the run asks a human anything (§7.4), and
     /// the image written is `.obk` whatever `image_format` says.
     pub encryption: Option<crate::seal::context::ArchiveKeys>,
+    /// zstd level for qcow2 and `.obk` (1–19; anything else is the default,
+    /// see [`crate::qcow2::zstd_level_or_default`]). VHDX is not compressed.
+    pub zstd_level: i32,
 }
 
 /// Outcome of a completed volume backup.
@@ -1410,7 +1413,7 @@ fn backup_volume_inner(
             consolidated_increments: 0,
             chain_started_at: None,
             compression: crate::seal::obk::ObkCompression::Zstd {
-                level: crate::qcow2::DEFAULT_ZSTD_LEVEL,
+                level: crate::qcow2::zstd_level_or_default(req.zstd_level),
             },
         };
         let writer = Box::new(crate::seal::obk::ObkStagedWriter::create(
@@ -1452,6 +1455,9 @@ fn backup_volume_inner(
                 crate::qcow2::Qcow2WriterOptions {
                     virtual_size: disk_size,
                     backing_file,
+                    compression: crate::qcow2::Qcow2Compression::Zstd {
+                        level: crate::qcow2::zstd_level_or_default(req.zstd_level),
+                    },
                     ..Default::default()
                 },
             )?;
@@ -1776,7 +1782,7 @@ fn backup_volume_inner(
                 data_offset,
                 volume_len,
                 req.block_size,
-                Some(crate::qcow2::DEFAULT_ZSTD_LEVEL),
+                Some(crate::qcow2::zstd_level_or_default(req.zstd_level)),
                 &mut checksums,
                 tick,
             )?,
@@ -1856,7 +1862,7 @@ fn backup_volume_inner(
                     data_offset,
                     volume_len,
                     req.block_size,
-                    Some(crate::qcow2::DEFAULT_ZSTD_LEVEL),
+                    Some(crate::qcow2::zstd_level_or_default(req.zstd_level)),
                     &mut checksums,
                     tick,
                 )?
@@ -1903,7 +1909,7 @@ fn backup_volume_inner(
         },
         compression_level: match req.image_format {
             ImageFormat::Vhdx => 0,
-            ImageFormat::Qcow2 => crate::qcow2::DEFAULT_ZSTD_LEVEL,
+            ImageFormat::Qcow2 => crate::qcow2::zstd_level_or_default(req.zstd_level),
         },
         encryption_algo: None,
         encryption_salt: None,
@@ -2110,6 +2116,8 @@ pub struct DiskBackupRequest {
     /// into the image. They are the firmware's, not the disk's, and a copy of a
     /// data disk has no business carrying the boot menu.
     pub bootable: bool,
+    /// zstd level for qcow2 and `.obk` (see [`VolumeBackupRequest::zstd_level`]).
+    pub zstd_level: i32,
 }
 
 /// Read the machine's UEFI boot entries, to be embedded in the image.
@@ -3349,6 +3357,7 @@ fn backup_disk_inner(
                 role: ChainRole::Full,
                 parent: None,
                 disk_number: req.disk_number,
+                zstd_level: crate::qcow2::zstd_level_or_default(req.zstd_level),
             },
         )?,
         Some((pp, sc)) => {
@@ -3391,6 +3400,7 @@ fn backup_disk_inner(
                     },
                     parent: Some((sc.manifest.backup_id, parent_name)),
                     disk_number: req.disk_number,
+                    zstd_level: crate::qcow2::zstd_level_or_default(req.zstd_level),
                 },
             )?
         }
@@ -3597,7 +3607,7 @@ fn backup_disk_inner(
                     &removal,
                     plan.image_size,
                     req.block_size,
-                    Some(crate::qcow2::DEFAULT_ZSTD_LEVEL),
+                    Some(crate::qcow2::zstd_level_or_default(req.zstd_level)),
                     &mut checksums,
                     &mut tick,
                 )?;
@@ -3860,6 +3870,7 @@ fn create_disk_child_target(
                 crate::qcow2::Qcow2WriterOptions {
                     virtual_size: image_size,
                     backing_file: Some(backing),
+                    compression: crate::qcow2::Qcow2Compression::Zstd { level: plan.zstd_level },
                     ..Default::default()
                 },
             )?;
@@ -3885,6 +3896,8 @@ struct DiskImagePlan {
     /// Identity and file name of the parent image, for a child.
     parent: Option<(Uuid, String)>,
     disk_number: u32,
+    /// Already resolved: 1–19.
+    zstd_level: i32,
 }
 
 /// The extension a run's images carry: `.obk` when encrypted, the job's format
@@ -3925,9 +3938,7 @@ fn create_disk_obk_target(
         source_id: Some(format!("disk{}", plan.disk_number)),
         consolidated_increments: 0,
         chain_started_at: None,
-        compression: crate::seal::obk::ObkCompression::Zstd {
-            level: crate::qcow2::DEFAULT_ZSTD_LEVEL,
-        },
+        compression: crate::seal::obk::ObkCompression::Zstd { level: plan.zstd_level },
     };
     let writer = Box::new(crate::seal::obk::ObkStagedWriter::create(
         image_path,
@@ -3952,7 +3963,12 @@ fn create_disk_image_target(
         ImageFormat::Qcow2 => {
             let writer = crate::qcow2::Qcow2StagedWriter::create(
                 image_path,
-                crate::qcow2::Qcow2WriterOptions { virtual_size: disk_size, backing_file: None, ..Default::default() },
+                crate::qcow2::Qcow2WriterOptions {
+                    virtual_size: disk_size,
+                    backing_file: None,
+                    compression: crate::qcow2::Qcow2Compression::Zstd { level: plan.zstd_level },
+                    ..Default::default()
+                },
             )?;
             Ok((ImageTarget::Qcow2 { writer }, sector_size))
         }
@@ -4009,7 +4025,7 @@ fn whole_disk_image_manifest(
         },
         compression_level: match req.image_format {
             ImageFormat::Vhdx => 0,
-            ImageFormat::Qcow2 => crate::qcow2::DEFAULT_ZSTD_LEVEL,
+            ImageFormat::Qcow2 => crate::qcow2::zstd_level_or_default(req.zstd_level),
         },
         encryption_algo: None,
         encryption_salt: None,

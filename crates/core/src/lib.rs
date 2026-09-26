@@ -574,6 +574,12 @@ pub struct Job {
     /// No password, raw private key or DPAPI blob belongs in the job document.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archive_encryption: Option<backup_encryption::ArchiveEncryption>,
+    /// zstd level for this job's qcow2/`.obk` copies (1–19). `None` follows
+    /// the program-wide default in the settings (`default_compression_level`),
+    /// read at each run — changing that default changes every job that has not
+    /// chosen its own. VHDX is not compressed and ignores it.
+    #[serde(default)]
+    pub compression_level: Option<i32>,
     pub schedule: ScheduleConfig,
     pub scheme: SchemeConfig,
     pub exclusions: ExclusionsConfig,
@@ -598,6 +604,7 @@ impl Default for Job {
             dest_folder: String::new(),
             image_format: own_backup_common::types::ImageFormat::default(),
             archive_encryption: None,
+            compression_level: None,
             schedule: ScheduleConfig::default(),
             scheme: SchemeConfig::default(),
             exclusions: ExclusionsConfig::default(),
@@ -610,6 +617,15 @@ impl Default for Job {
 }
 
 impl Job {
+    /// The zstd level this run compresses with: the job's own, else the
+    /// settings' default, always 1–19.
+    pub fn zstd_level(&self) -> i32 {
+        let level = self.compression_level.unwrap_or_else(|| {
+            own_backup_common::config::AppConfig::load_or_default().default_compression_level
+        });
+        own_backup_backup::qcow2::zstd_level_or_default(level)
+    }
+
     /// The volumes this job backs up, normalized across the old single-volume
     /// model (`source`) and the new multi-volume one (`sources`). Never empty
     /// for a valid job; each entry gets its own image/chain within a run.
@@ -1946,11 +1962,6 @@ fn apply_consolidation(
     if job.scheme.method != "incremental" {
         return 0;
     }
-    if !own_backup_common::config::AppConfig::load_or_default().consolidation_enabled {
-        info!(job = %job.name, "Consolidation is switched off globally — skipping");
-        return 0;
-    }
-
     let folder = PathBuf::from(&job.dest_folder);
     let tokens: std::collections::HashSet<String> =
         protected.iter().map(|(t, _)| t.to_ascii_uppercase()).collect();
@@ -2146,6 +2157,7 @@ async fn perform_backup(
             // Each volume of this run gets its own context; they all hold the
             // same job key, opened once before the run started.
             encryption: keys.clone(),
+            zstd_level: job.zstd_level(),
         };
         let validate_after = job.advanced.validate_after;
         // Only the blocks this copy wrote, or everything the restore point
@@ -2497,6 +2509,7 @@ async fn perform_disk_backup(
         partitions,
         source_disk,
         bootable: ds.bootable,
+        zstd_level: job.zstd_level(),
         image_path: image_path.clone(),
         block_size: own_backup_backup::engine_win::DEFAULT_BLOCK_SIZE,
         image_format: job.image_format,
@@ -2788,6 +2801,7 @@ async fn perform_backup(
             job_id: Some(job.id.clone()),
             image_format: job.image_format,
             encryption: None,
+            zstd_level: job.zstd_level(),
         };
         let validate_after = job.advanced.validate_after;
         let sink_bg = sink.clone();

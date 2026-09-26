@@ -43,6 +43,16 @@ pub const REFCOUNT_ORDER: u32 = 4;
 /// Default zstd level for cluster compression (pipeline default, cf.
 /// `compression.rs` block tests): fast enough to keep the copy disk-bound.
 pub const DEFAULT_ZSTD_LEVEL: i32 = 3;
+/// The strongest level offered. zstd goes to 22, but 20+ ("ultra") needs a
+/// window far larger than a 64 KiB cluster can use: slower, no smaller.
+pub const MAX_ZSTD_LEVEL: i32 = 19;
+
+/// The level a job's setting stands for. Anything outside 1..=19 — zero from a
+/// config written before the setting did anything, a hand-edited value — is
+/// the default, never "no compression" and never an error mid-run.
+pub fn zstd_level_or_default(level: i32) -> i32 {
+    if (1..=MAX_ZSTD_LEVEL).contains(&level) { level } else { DEFAULT_ZSTD_LEVEL }
+}
 
 /// Version-3 header length with the `compression_type` field (+ padding).
 pub const HEADER_LENGTH_V3: u32 = 112;
@@ -173,5 +183,17 @@ mod tests {
     fn compressed_entry_never_marked_copied() {
         let entry = encode_compressed_l2_entry(0x10000, 30000, 16).unwrap();
         assert_eq!(entry & OFLAG_COPIED, 0);
+    }
+
+    #[test]
+    fn a_level_outside_1_to_19_is_the_default() {
+        // 0 is what a config written before the setting was read holds; it
+        // must not turn into "no compression".
+        for bad in [0, -1, 20, 22, i32::MAX] {
+            assert_eq!(zstd_level_or_default(bad), DEFAULT_ZSTD_LEVEL, "{bad}");
+        }
+        for good in [1, 3, 9, 19] {
+            assert_eq!(zstd_level_or_default(good), good);
+        }
     }
 }

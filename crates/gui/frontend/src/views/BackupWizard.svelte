@@ -59,6 +59,21 @@
     job.image_format = v === 'vhdx' ? 'vhdx' : 'qcow2';
     error = null;
   }
+  /** The settings' zstd level, which a job without its own follows. Read once;
+   *  only shown, so a stale value costs a wrong number on screen, nothing more. */
+  let defaultLevel = $state(3);
+  $effect(() => {
+    api.getConfig().then(
+      (c) => {
+        const v = Number(c.default_compression_level);
+        if (v >= 1 && v <= 19) defaultLevel = v;
+      },
+      () => {},
+    );
+  });
+  /** Levels offered for a job. The ends and the default get a word; the rest
+   *  are just numbers. */
+  const LEVEL_HINT: Record<number, string> = { 1: 'быстрее всего', 3: 'равновесие', 19: 'наименьший файл' };
   let keyModalOpen = $state(false);
   /** Set when the save was interrupted to ask for a key: run the job after. */
   let runAfterKey = $state(false);
@@ -1754,6 +1769,27 @@
           <div class="note">Встроенное сжатие (zstd): копия обычно на 30–50 % меньше, экономия видна сразу. Один и тот же файл одинаково открывается на Windows и Linux. Инкрементные и дифференциальные цепочки поддерживаются. Восстановление, проверка и монтирование копии как диска работают. Исключённые файлы удаляются из копии полностью, в том числе на NTFS/ReFS — как в VHDX.</div>
         {:else if !wantEncryption}
           <div class="note">Копия открывается самой Windows двойным кликом и видна как обычный диск — даже без Own Backup. Инкрементные цепочки и полное удаление исключённых файлов (NTFS/ReFS). Сжатия нет — файл больше; на Linux открывается через qemu-nbd.</div>
+        {/if}
+
+        {#if wantEncryption || job.image_format === 'qcow2'}
+          <!-- zstd only exists in these two; VHDX has nothing to set. Not
+               locked by existing copies: every cluster is compressed on its
+               own, so a chain may mix levels and still reads the same. -->
+          <div class="field-label mt">Уровень сжатия:</div>
+          <select
+            class="wide"
+            value={job.compression_level == null ? 'default' : String(job.compression_level)}
+            onchange={(e) => {
+              const v = (e.target as HTMLSelectElement).value;
+              job.compression_level = v === 'default' ? null : Number(v);
+            }}
+          >
+            <option value="default">Как в «Параметрах» — {defaultLevel}</option>
+            {#each Array.from({ length: 19 }, (_, i) => i + 1) as n (n)}
+              <option value={String(n)}>{n}{LEVEL_HINT[n] ? ` — ${LEVEL_HINT[n]}` : ''}</option>
+            {/each}
+          </select>
+          <div class="note">Чем выше уровень, тем меньше файл и дольше копирование. Выше 9 копирование заметно медленнее при небольшом выигрыше в размере. Действует со следующего запуска.</div>
         {/if}
 
         <div class="field-label mt">Метод резервного копирования:</div>

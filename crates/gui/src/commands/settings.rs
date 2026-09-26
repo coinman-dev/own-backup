@@ -22,9 +22,12 @@ pub async fn save_config(state: State<'_, GuiState>, config: AppConfig) -> Resul
 pub struct ServiceStatusDto {
     pub connected: bool,
     pub version: String,
-    pub uptime: String,
+    /// Seconds since the service started; the screen words it. 0 when not
+    /// connected.
+    pub uptime_secs: u64,
     pub active_jobs: u32,
-    pub total_backups_completed: u64,
+    // `total_backups_completed` was here, always 0 — nothing counted it. The
+    // screen showed «Total Completed: 0» next to a job list full of copies.
     pub active_mounts: Vec<own_backup_common::engine_dto::ActiveMountDto>,
 }
 
@@ -64,9 +67,8 @@ pub async fn get_service_status(state: State<'_, GuiState>) -> Result<ServiceSta
     let disconnected = || ServiceStatusDto {
         connected: false,
         version: env!("CARGO_PKG_VERSION").into(),
-        uptime: "not connected".into(),
+        uptime_secs: 0,
         active_jobs: 0,
-        total_backups_completed: 0,
         active_mounts: Vec::new(),
     };
 
@@ -101,9 +103,8 @@ pub async fn get_service_status(state: State<'_, GuiState>) -> Result<ServiceSta
     Ok(ServiceStatusDto {
         connected: true,
         version,
-        uptime: format!("{uptime_secs}s"),
+        uptime_secs,
         active_jobs,
-        total_backups_completed: 0,
         active_mounts,
     })
 }

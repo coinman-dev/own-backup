@@ -208,9 +208,9 @@ export interface MountBackendStatus {
 export interface ServiceStatus {
   connected: boolean;
   version: string;
-  uptime: string;
+  /** Seconds since the service started (0 when not connected). */
+  uptime_secs: number;
   active_jobs: number;
-  total_backups_completed: number;
   active_mounts: ActiveMount[];
 }
 
@@ -595,6 +595,9 @@ export interface Job {
    *  there is no route that turns it off — the copies already written would
    *  stay encrypted either way. */
   archive_encryption?: ArchiveEncryption | null;
+  /** zstd level (1–19) for this job's qcow2/OBK copies; null follows the
+   *  settings' default, read at each run. */
+  compression_level?: number | null;
 }
 
 /** Result of decrypting an encrypted source in the wizard. */

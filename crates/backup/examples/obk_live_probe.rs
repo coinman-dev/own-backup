@@ -128,6 +128,7 @@ mod probe {
             passphrase: None,
             image_format: ImageFormat::Qcow2,
             encryption: Some(keys.clone()),
+            zstd_level: own_backup_backup::qcow2::DEFAULT_ZSTD_LEVEL,
             source_disk: None,
         };
 
@@ -363,6 +364,7 @@ mod probe {
                 image_format: ImageFormat::Qcow2,
                 job_id: Some(JOB.into()),
                 encryption: Some(keys.clone()),
+                zstd_level: own_backup_backup::qcow2::DEFAULT_ZSTD_LEVEL,
                 exclusion_patterns_windows: vec![EXCLUDED.to_string()],
                 exclusion_patterns_linux: Vec::new(),
                 kind: BackupType::Full,

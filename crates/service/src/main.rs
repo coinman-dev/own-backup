@@ -148,17 +148,22 @@ fn start_log_housekeeping() {
 
 /// Set up logging to a file next to the exe (so a service running under the SCM,
 /// which has no console, still produces a diagnosable log) and record startup
-/// facts. `RUST_LOG` overrides the default filter.
+/// facts. The level is the settings' «Уровень журнала», followed while running
+/// (`own_backup_common::log_level`); `RUST_LOG` overrides it and then stays put.
 fn init_logging() {
+    use own_backup_common::log_level;
     use own_backup_common::log_mirror::{MirrorLog, TeeLog};
 
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        // The restore engine lives in `core` and `backup`; when a restore goes
-        // wrong those two are the log, so they are on by default rather than
-        // behind a RUST_LOG the user would have to know about.
-        "info,own_backup_service=debug,own_backup_scheduler=debug,own_backup_core=debug".into()
-    });
-    let (log_path, mirror_path) = match open_service_log() {
+    let config_path = AppConfig::default_path();
+    // The boot medium starts with no config at all, and its log is the one
+    // that has to explain a restore afterwards.
+    let fallback = if own_backup_common::media_mode::is_windows_pe() { "debug" } else { "info" };
+    let level = log_level::configured_level(&config_path, fallback);
+    let from_env = tracing_subscriber::EnvFilter::try_from_default_env().ok();
+    let pinned = from_env.is_some();
+    let filter = from_env
+        .unwrap_or_else(|| tracing_subscriber::EnvFilter::new(log_level::filter_directives(&level)));
+    let (log_path, mirror_path, reload) = match open_service_log() {
         Some((f, path)) => {
             // The second copy, on whatever drive the user named — the only one
             // that survives a restore that takes the machine down with it.
@@ -167,18 +172,27 @@ fn init_logging() {
                 MirrorLog::new(AppConfig::default_path(), "own-backup-service.log"),
             );
             let mirror = tee.mirror_path();
-            tracing_subscriber::fmt()
+            let builder = tracing_subscriber::fmt()
                 .with_env_filter(filter)
                 .with_ansi(false)
                 .with_writer(std::sync::Mutex::new(tee))
-                .init();
-            (Some(path), mirror)
+                .with_filter_reloading();
+            let handle = builder.reload_handle();
+            builder.init();
+            (Some(path), mirror, Some(handle))
         }
         None => {
             tracing_subscriber::fmt().with_writer(std::io::stderr).with_env_filter(filter).init();
-            (None, None)
+            (None, None, None)
         }
     };
+    if let (Some(handle), false) = (reload, pinned) {
+        log_level::follow_config(config_path, fallback, level.clone(), move |directives| {
+            if handle.reload(tracing_subscriber::EnvFilter::new(directives)).is_ok() {
+                info!(filter = directives, "log level changed in the settings");
+            }
+        });
+    }
     info!(
         service = SERVICE_DISPLAY_NAME,
         version = env!("CARGO_PKG_VERSION"),
@@ -199,6 +213,11 @@ fn init_logging() {
     match &mirror_path {
         Some(p) => info!(mirror = %p.display(), "log is duplicated here, flushed line by line"),
         None => info!("log is not duplicated (no directory set in параметры)"),
+    }
+    if pinned {
+        info!("log level: RUST_LOG (the settings' level is not followed)");
+    } else {
+        info!(level = %level, filter = log_level::filter_directives(&level), "log level");
     }
 }
 

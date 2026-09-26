@@ -65,13 +65,20 @@ fn elevation_state() -> Option<bool> {
 }
 
 /// Diagnostic log (test-phase channel, decision 2026-07-02). The user sends this
-/// file back when something misbehaves. `RUST_LOG` overrides the default filter.
+/// file back when something misbehaves. The level is the settings' «Уровень
+/// журнала», followed while running (`own_backup_common::log_level`);
+/// `RUST_LOG` overrides it and then stays put.
 fn init_logging() {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        "info,own_backup_gui=debug,own_backup_backup=debug,own_backup_inventory=debug,\
-         own_backup_restore=debug,own_backup_metadata=debug"
-            .into()
-    });
+    use own_backup_common::log_level;
+
+    let config_path = own_backup_common::config::AppConfig::default_path();
+    // The boot medium starts with no config, and its log has to explain itself.
+    let fallback = if own_backup_common::media_mode::is_windows_pe() { "debug" } else { "info" };
+    let level = log_level::configured_level(&config_path, fallback);
+    let from_env = tracing_subscriber::EnvFilter::try_from_default_env().ok();
+    let pinned = from_env.is_some();
+    let filter = from_env
+        .unwrap_or_else(|| tracing_subscriber::EnvFilter::new(log_level::filter_directives(&level)));
 
     let opened = open_log();
     let log_path = opened.as_ref().map(|(_, p)| p.clone());
@@ -89,11 +96,20 @@ fn init_logging() {
                 ),
             );
             mirror_path = tee.mirror_path();
-            tracing_subscriber::fmt()
+            let builder = tracing_subscriber::fmt()
                 .with_env_filter(filter)
                 .with_ansi(false)
                 .with_writer(std::sync::Mutex::new(tee))
-                .init();
+                .with_filter_reloading();
+            let handle = builder.reload_handle();
+            builder.init();
+            if !pinned {
+                log_level::follow_config(config_path, fallback, level.clone(), move |directives| {
+                    if handle.reload(tracing_subscriber::EnvFilter::new(directives)).is_ok() {
+                        tracing::info!(filter = directives, "log level changed in the settings");
+                    }
+                });
+            }
         }
         None => {
             tracing_subscriber::fmt().with_env_filter(filter).init();
@@ -130,6 +146,11 @@ fn init_logging() {
     }
     if let Some(p) = &mirror_path {
         tracing::info!(mirror = %p.display(), "log is duplicated here, flushed line by line");
+    }
+    if pinned {
+        tracing::info!("log level: RUST_LOG (the settings' level is not followed)");
+    } else {
+        tracing::info!(level = %level, filter = log_level::filter_directives(&level), "log level");
     }
     #[cfg(windows)]
     tracing::info!(elevated = ?elevation_state(), "process elevation (expected: Some(false))");

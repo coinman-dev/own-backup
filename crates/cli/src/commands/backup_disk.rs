@@ -247,6 +247,10 @@ pub async fn run(args: BackupDiskArgs) -> own_backup_common::Result<()> {
         image_format: args.format,
         // The command line does not open encrypted archives yet (E5).
         encryption: None,
+        // The settings' default — what a job that has not chosen its own gets.
+        zstd_level: own_backup_backup::qcow2::zstd_level_or_default(
+            own_backup_common::config::AppConfig::load_or_default().default_compression_level,
+        ),
         job_id: None,
         exclusion_patterns_windows: exclusions.clone(),
         exclusion_patterns_linux: exclusions,

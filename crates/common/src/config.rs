@@ -11,6 +11,10 @@ pub struct AppConfig {
     /// In production: Unix Domain Socket (Linux) or Named Pipe (Windows).
     #[serde(default = "default_grpc_addr")]
     pub grpc_address: String,
+    /// `info` — what happened and what went wrong; `debug` — everything our
+    /// code says. Applied on the fly by both processes (see
+    /// [`crate::log_level`]); anything else reads as `info`. `RUST_LOG`, when
+    /// set, still wins.
     #[serde(default = "default_log_level")]
     pub log_level: String,
     /// Second copy of the log, in a directory the user names — a USB stick,
@@ -23,7 +27,13 @@ pub struct AppConfig {
     /// the stick even after a bugcheck (see [`crate::log_mirror`]).
     #[serde(default)]
     pub log_mirror_dir: String,
-    #[serde(default)]
+    /// zstd level (1–19) for qcow2 and `.obk` copies of every job that has not
+    /// chosen its own (`Job::compression_level`). Read at each run.
+    ///
+    /// The default is 3, and so is an absent key: a bare `#[serde(default)]`
+    /// read a config written before this key existed as level 0 — harmless
+    /// while nothing read the value, wrong the moment something did.
+    #[serde(default = "default_compression_level")]
     pub default_compression_level: i32,
     #[serde(default)]
     pub hooks: HooksConfig,
@@ -35,20 +45,14 @@ pub struct AppConfig {
     /// what makes this work on a machine with no job database at all.
     #[serde(default)]
     pub remembered_backups: Vec<String>,
-    /// Master switch for backup-chain consolidation (the sliding increment
-    /// window). Off here means no job consolidates anything, whatever its own
-    /// scheme says.
-    ///
-    /// It exists for support, not for tuning: consolidation is the one
-    /// maintenance step that REWRITES an existing image, so "turn it off and
-    /// tell me whether the problem goes away" has to be one setting away and
-    /// has to override everything below it.
-    #[serde(default = "default_true")]
-    pub consolidation_enabled: bool,
+    // `consolidation_enabled` (a master switch for consolidation) was removed
+    // on 2026-09-26: consolidation is always allowed, and a job that does not
+    // want it simply does not choose it. An old config that still carries the
+    // key loads fine — unknown keys are ignored.
 }
 
-fn default_true() -> bool {
-    true
+fn default_compression_level() -> i32 {
+    3
 }
 
 /// Pre/post snapshot hooks for application-consistent backups.
@@ -141,11 +145,10 @@ impl Default for AppConfig {
             grpc_address: default_grpc_addr(),
             log_level: default_log_level(),
             log_mirror_dir: String::new(),
-            default_compression_level: 3,
+            default_compression_level: default_compression_level(),
             hooks: HooksConfig::default(),
             credentials: CredentialsConfig::default(),
             remembered_backups: Vec::new(),
-            consolidation_enabled: true,
         }
     }
 }
@@ -279,6 +282,18 @@ mod tests {
         let bad = dir.path().join("bad.toml");
         std::fs::write(&bad, "this is not toml = = =").unwrap();
         assert!(AppConfig::load_from_file(&bad).is_err());
+    }
+
+    #[test]
+    fn a_config_from_before_the_compression_key_reads_level_3() {
+        // Written before `default_compression_level` existed, and with the
+        // consolidation switch that has since been removed: both must load,
+        // and the missing level must be the default, not 0.
+        let back: AppConfig = toml::from_str(
+            "log_level = \"info\"\nconsolidation_enabled = false\n",
+        )
+        .expect("an old config must still load");
+        assert_eq!(back.default_compression_level, 3);
     }
 
     #[test]

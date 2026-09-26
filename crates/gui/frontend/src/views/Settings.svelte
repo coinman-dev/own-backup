@@ -1,23 +1,28 @@
 <script lang="ts">
   import { pickPath } from '../lib/pickPath.svelte';
-  import { invoke } from '@tauri-apps/api/core';
   import { api } from '../lib/api';
   import type { ServiceStatus, MountBackendStatus } from '../lib/types';
 
   /** The config as it was loaded, kept whole. Saving edits a copy of it rather
-   *  than building a fresh object out of the four fields this page shows —
-   *  which is how the remembered backups and the hook settings used to
-   *  disappear the first time someone opened Settings and pressed Save. */
+   *  than building a fresh object out of the fields this page shows — which is
+   *  how the remembered backups and the hook settings used to disappear the
+   *  first time someone opened Settings and pressed Save. */
   let loadedConfig: Record<string, unknown> = $state({});
   let dataDirectory = $state('');
   let compressionLevel = $state(3);
-  let logLevel = $state('info');
+  let logLevel = $state<'info' | 'debug'>('info');
   let logMirrorDir = $state('');
-  let consolidationEnabled = $state(true);
   let serviceStatus: ServiceStatus | null = $state(null);
   let isLoading = $state(true);
   let error: string | null = $state(null);
   let saveMessage: string | null = $state(null);
+
+  /** zstd levels offered. 0 is what a config written before the setting did
+   *  anything holds; the engine reads anything outside 1–19 as 3, and so does
+   *  the slider. */
+  const MIN_LEVEL = 1;
+  const MAX_LEVEL = 19;
+  const DEFAULT_LEVEL = 3;
 
   async function loadSettings() {
     isLoading = true;
@@ -32,12 +37,13 @@
         const cfg = configResult.value;
         loadedConfig = cfg;
         dataDirectory = (cfg.data_dir as string) ?? '';
-        compressionLevel = (cfg.default_compression_level as number) ?? 3;
-        logLevel = (cfg.log_level as string) ?? 'info';
+        const level = Number(cfg.default_compression_level);
+        compressionLevel = level >= MIN_LEVEL && level <= MAX_LEVEL ? level : DEFAULT_LEVEL;
+        // Two levels now. The older screen could save warn/error/trace; the
+        // service reads those as the nearest of the two, and so does this.
+        const saved = String(cfg.log_level ?? '').toLowerCase();
+        logLevel = saved === 'debug' || saved === 'trace' ? 'debug' : 'info';
         logMirrorDir = (cfg.log_mirror_dir as string) ?? '';
-        // Absent in configs written before consolidation existed — and the
-        // engine's own default is "on", so the box must agree with it.
-        consolidationEnabled = (cfg.consolidation_enabled as boolean) ?? true;
       }
 
       serviceStatus = statusResult.status === 'fulfilled' ? statusResult.value : null;
@@ -61,74 +67,77 @@
     saveMessage = null;
     error = null;
     try {
+      // `data_dir` is not edited here (see the field), so it goes back as it
+      // came, with the rest of `loadedConfig`.
       await api.saveConfig({
         ...loadedConfig,
-        data_dir: dataDirectory,
         default_compression_level: compressionLevel,
         log_level: logLevel,
         log_mirror_dir: logMirrorDir.trim(),
-        consolidation_enabled: consolidationEnabled,
       });
-      saveMessage = 'Настройки сохранены.';
+      saveMessage = 'Параметры сохранены.';
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : String(e);
     }
+  }
+
+  /** «2 ч 5 мин», not «7500s». */
+  function formatUptime(secs: number): string {
+    const d = Math.floor(secs / 86400);
+    const h = Math.floor((secs % 86400) / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    if (d > 0) return `${d} д ${h} ч`;
+    if (h > 0) return `${h} ч ${m} мин`;
+    if (m > 0) return `${m} мин`;
+    return `${secs} с`;
   }
 
   // --- What mounting a backup image needs here ---
   //
   // No driver of ours is installed on either platform any more: Windows serves
   // the image over an iSCSI target of ours to its own initiator, Linux uses the
-  // in-tree NBD module. "Prepare" starts (or loads) what that needs.
+  // in-tree NBD module. Shown as one line of the service's state; the mount
+  // itself starts what it needs.
   // `$state<T | null>(null)`, not `let x: T | null = $state(null)`: with the
   // annotation on the variable, TypeScript reads the initialiser as literally
-  // `null` and narrows every straight-line use below to `never` — which is how
-  // `mountStatus?.platform` and `draftJob?.id` became type errors nobody saw
-  // (audit AUD-13). The generic form gives the call the union type, so there
-  // is nothing to narrow.
+  // `null` and narrows every straight-line use below to `never` (audit AUD-13).
   let mountStatus = $state<MountBackendStatus | null>(null);
-  const isLinux = $derived(mountStatus?.platform === 'linux');
-  let driverBusy = $state(false);
-  let driverMsg: string | null = $state(null);
-  let driverErr: string | null = $state(null);
-
-  async function refreshDriver() {
-    try {
-      mountStatus = await api.mountBackendStatus();
-    } catch (e) {
-      mountStatus = null;
-      driverErr = String(e);
-    }
-  }
-
-  async function prepareMounting() {
-    driverBusy = true;
-    driverMsg = null;
-    driverErr = null;
-    try {
-      mountStatus = await api.prepareMountBackend();
-      driverMsg = isLinux ? 'Модуль NBD загружен.' : 'Служба инициатора запущена.';
-    } catch (e) {
-      driverErr = String(e);
-    } finally {
-      driverBusy = false;
-    }
-  }
 
   $effect(() => {
-    refreshDriver();
+    api.mountBackendStatus().then(
+      (s) => (mountStatus = s),
+      () => (mountStatus = null),
+    );
+  });
+
+  /** One line on whether a copy can be connected as a disk, and why not. */
+  const mountLine = $derived.by((): { ok: boolean; text: string } => {
+    const s = mountStatus;
+    if (!s) return { ok: false, text: 'неизвестно' };
+    if (s.platform === 'linux') {
+      if (!s.linux?.nbd_ok) return { ok: false, text: 'модуль NBD не загружен' };
+      return s.linux.ntfs_ok
+        ? { ok: true, text: `готово (NBD, NTFS: ${s.linux.ntfs_backend})` }
+        : { ok: true, text: 'готово, но NTFS не поддерживается — нужен ntfs-3g' };
+    }
+    if (!s.iscsi) return { ok: false, text: 'неизвестно' };
+    if (!s.iscsi.ready) return { ok: false, text: s.iscsi.message };
+    return {
+      ok: true,
+      text: s.iscsi.running ? 'готово' : 'готово, служба iSCSI запустится по требованию',
+    };
   });
 </script>
 
 <div class="settings-view">
   <div class="page-header">
-    <h1 class="page-title">Settings</h1>
+    <h1 class="page-title">Параметры</h1>
   </div>
 
   {#if error}
     <div class="error-banner">
       <span>{error}</span>
-      <button class="dismiss-btn" onclick={() => (error = null)}>Dismiss</button>
+      <button class="dismiss-btn" onclick={() => (error = null)}>Закрыть</button>
     </div>
   {/if}
 
@@ -142,55 +151,59 @@
   {#if isLoading}
     <div class="loading-state">
       <div class="spinner"></div>
-      <p>Loading settings...</p>
+      <p>Загрузка параметров…</p>
     </div>
   {:else}
     <div class="settings-grid">
       <div class="card">
-        <h2 class="section-title">General</h2>
+        <h2 class="section-title">Общие</h2>
 
+        <!-- Shown, not edited: the service takes its folder from where it is
+             installed and never read this value, so a field that accepted a
+             new path changed nothing but the text in it (2026-09-26). -->
         <div class="form-group">
-          <label for="data-dir">Data Directory</label>
-          <input
-            id="data-dir"
-            type="text"
-            class="form-input"
-            placeholder="e.g. C:\ProgramData\OwnBackup or /var/lib/own-backup"
-            bind:value={dataDirectory}
-          />
+          <label for="data-dir">Папка программы</label>
+          <input id="data-dir" type="text" class="form-input" value={dataDirectory} readonly />
           <p class="help-text">
-            Directory where backup metadata and database are stored.
+            Здесь лежат задания, журналы и служебные файлы программы. Резервные
+            копии хранятся там, где указано в каждом задании.
           </p>
         </div>
 
         <div class="form-group">
-          <label for="comp-default">Default Compression Level: {compressionLevel}</label>
+          <label for="comp-default">Уровень сжатия по умолчанию: {compressionLevel}</label>
           <input
             id="comp-default"
             type="range"
-            min="0"
-            max="19"
+            min={MIN_LEVEL}
+            max={MAX_LEVEL}
             class="form-range"
             bind:value={compressionLevel}
           />
           <div class="range-labels">
-            <span>0 (none)</span>
-            <span>19 (max)</span>
+            <span>{MIN_LEVEL} — быстрее</span>
+            <span>{MAX_LEVEL} — меньше файл</span>
           </div>
           <p class="help-text">
-            Zstd compression level for new backup jobs. Higher values compress more but are slower.
+            Сжатие zstd для копий в форматах qcow2 и OBK — у заданий, где не
+            выбран свой уровень («Схема» в параметрах задания). VHDX не
+            сжимается. Чем выше уровень, тем меньше файл и дольше копирование;
+            3 — разумное равновесие, выше 9 копирование заметно медленнее при
+            небольшом выигрыше в размере. Действует со следующего запуска.
           </p>
         </div>
 
         <div class="form-group">
-          <label for="log-level">Log Level</label>
+          <label for="log-level">Уровень журнала</label>
           <select id="log-level" class="form-select" bind:value={logLevel}>
-            <option value="error">Error</option>
-            <option value="warn">Warning</option>
-            <option value="info">Info</option>
-            <option value="debug">Debug</option>
-            <option value="trace">Trace</option>
+            <option value="info">Основной — ход работы и ошибки</option>
+            <option value="debug">Подробный — всё, для разбора ошибки</option>
           </select>
+          <p class="help-text">
+            Подробный журнал нужен, когда что-то пошло не так и нужно понять
+            почему; он заметно больше. Применяется на ходу — перезапускать
+            службу не нужно.
+          </p>
         </div>
 
         <div class="form-group">
@@ -215,140 +228,54 @@
           </p>
         </div>
 
-        <div class="form-group">
-          <label class="check-row">
-            <input type="checkbox" bind:checked={consolidationEnabled} />
-            <span>Разрешить объединение резервных копий</span>
-          </label>
-          <p class="help-text">
-            Разрешает заданиям вливать самый старый инкремент в полную копию,
-            когда их становится больше заданного числа (настраивается в самом
-            задании). Это единственная операция обслуживания, которая
-            <b>переписывает уже готовый файл копии</b>, поэтому её можно
-            выключить здесь целиком — тогда ни одно задание ничего объединять не
-            будет, что бы ни стояло в его настройках. Уже объединённые копии от
-            этого не меняются.
-          </p>
-        </div>
-
         <div class="form-actions">
-          <button class="btn btn-primary" onclick={handleSave}>Save Settings</button>
+          <button class="btn btn-primary" onclick={handleSave}>Сохранить</button>
         </div>
       </div>
 
       <div class="card">
-        <h2 class="section-title">Service Status</h2>
+        <h2 class="section-title">Состояние службы</h2>
 
-        {#if serviceStatus}
+        {#if serviceStatus?.connected}
           <div class="status-grid">
             <div class="status-item">
-              <span class="status-label">Status</span>
+              <span class="status-label">Служба</span>
               <span class="status-value running">
                 <span class="status-dot"></span>
-                Running
+                Работает
               </span>
             </div>
             <div class="status-item">
-              <span class="status-label">Version</span>
+              <span class="status-label">Версия</span>
               <span class="status-value">{serviceStatus.version}</span>
             </div>
             <div class="status-item">
-              <span class="status-label">Uptime</span>
-              <span class="status-value">{serviceStatus.uptime}</span>
+              <span class="status-label">Время работы</span>
+              <span class="status-value">{formatUptime(serviceStatus.uptime_secs)}</span>
             </div>
             <div class="status-item">
-              <span class="status-label">Active Jobs</span>
+              <span class="status-label">Выполняется заданий</span>
               <span class="status-value">{serviceStatus.active_jobs}</span>
             </div>
             <div class="status-item">
-              <span class="status-label">Total Completed</span>
-              <span class="status-value">{serviceStatus.total_backups_completed}</span>
+              <span class="status-label">Копий подключено как диск</span>
+              <span class="status-value">{serviceStatus.active_mounts?.length ?? 0}</span>
+            </div>
+            <div class="status-item">
+              <span class="status-label">Подключение копий как диска</span>
+              <span class="status-value" class:running={mountLine.ok} class:failing={!mountLine.ok}>
+                <span class="status-dot" class:offline={!mountLine.ok}></span>
+                {mountLine.text}
+              </span>
             </div>
           </div>
         {:else}
           <div class="status-offline">
             <span class="status-dot offline"></span>
-            <span>Service is not running or unreachable.</span>
+            <span>Служба не запущена или не отвечает.</span>
           </div>
         {/if}
       </div>
-
-      {#if isLinux}
-        <div class="card">
-          <h2 class="section-title">Поддержка монтирования (Linux)</h2>
-          <p class="driver-desc">
-            Отдельный драйвер не нужен: копии (VHDX и qcow2) монтируются через
-            встроенный в ядро модуль <b>NBD</b> — программа сама отдаёт блоки,
-            без qemu. Для просмотра <b>NTFS</b>-копий нужен драйвер ядра
-            <code>ntfs3</code> или пакет <code>ntfs-3g</code>.
-            {#if mountStatus?.linux?.kernel}<span class="kernel">Ядро: {mountStatus.linux?.kernel}</span>{/if}
-          </p>
-
-          <div class="driver-row">
-            <div class="driver-status">
-              {#if mountStatus?.linux?.nbd_ok}
-                <span class="status-dot"></span><span>Модуль NBD доступен</span>
-              {:else}
-                <span class="status-dot offline"></span><span>Модуль NBD не загружен</span>
-              {/if}
-            </div>
-            <div class="driver-actions">
-              {#if !mountStatus?.linux?.nbd_ok}
-                <button class="btn btn-primary" onclick={prepareMounting} disabled={driverBusy}>
-                  {driverBusy ? 'Загрузка…' : 'Загрузить модуль NBD'}
-                </button>
-              {/if}
-            </div>
-          </div>
-
-          <div class="driver-row">
-            <div class="driver-status">
-              {#if mountStatus?.linux?.ntfs_ok}
-                <span class="status-dot"></span><span>NTFS: {mountStatus.linux?.ntfs_backend}</span>
-              {:else}
-                <span class="status-dot offline"></span>
-                <span>NTFS не поддерживается — установите <code>ntfs-3g</code></span>
-              {/if}
-            </div>
-          </div>
-
-          {#if driverMsg}<div class="driver-note ok">{driverMsg}</div>{/if}
-          {#if driverErr}<div class="driver-note err">{driverErr}</div>{/if}
-        </div>
-      {:else}
-        <div class="card">
-          <h2 class="section-title">Подключение копий как диска</h2>
-          <p class="driver-desc">
-            Отдельный драйвер не нужен. Копия отдаётся как <b>iSCSI</b>-цель на
-            этой же машине, а подключает её <b>встроенный в Windows
-            инициатор</b> — служба <code>MSiSCSI</code>, которая есть в каждой
-            Windows и в загрузочном носителе. Ничего стороннего не ставится.
-          </p>
-
-          <div class="driver-row">
-            <div class="driver-status">
-              {#if mountStatus?.iscsi?.ready}
-                <span class="status-dot"></span>
-                <span>{mountStatus.iscsi.running ? 'Готово: служба работает' : 'Готово: служба запустится по требованию'}</span>
-              {:else if mountStatus?.iscsi}
-                <span class="status-dot offline"></span><span>{mountStatus.iscsi.message}</span>
-              {:else}
-                <span class="status-dot offline"></span><span>Статус неизвестен</span>
-              {/if}
-            </div>
-            <div class="driver-actions">
-              {#if mountStatus?.iscsi && !mountStatus.iscsi.running}
-                <button class="btn btn-primary" onclick={prepareMounting} disabled={driverBusy}>
-                  {driverBusy ? 'Запуск…' : 'Запустить службу'}
-                </button>
-              {/if}
-            </div>
-          </div>
-
-          {#if driverMsg}<div class="driver-note ok">{driverMsg}</div>{/if}
-          {#if driverErr}<div class="driver-note err">{driverErr}</div>{/if}
-        </div>
-      {/if}
     </div>
   {/if}
 </div>
@@ -447,19 +374,10 @@
     margin-top: 4px;
   }
 
-  /* A checkbox and its label on one line, the label clickable with it. */
-  .check-row {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-    cursor: pointer;
-    font-size: 13px;
-    color: var(--text);
-  }
-
-  .check-row input {
-    margin: 0;
-    flex: none;
+  /* Shown, not edited: it should not look like a field waiting for input. */
+  .form-input[readonly] {
+    color: var(--text-muted);
+    cursor: default;
   }
 
   /* Path plus its "Обзор…" button: the field takes what is left. */
@@ -557,55 +475,8 @@
     to { transform: rotate(360deg); }
   }
 
-  /* --- driver card --- */
-  .driver-desc {
-    font-size: 13px;
-    color: var(--text-secondary);
-    margin: 0 0 16px;
-    line-height: 1.5;
-  }
-  .driver-desc code {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 12px;
-    background: var(--bg-secondary, rgba(127, 127, 127, 0.15));
-    padding: 1px 5px;
-    border-radius: 4px;
-  }
-  .driver-desc .kernel {
-    display: block;
-    margin-top: 6px;
-    opacity: 0.75;
-  }
-  .driver-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-    margin-bottom: 8px;
-  }
-  .driver-status {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 14px;
-    color: var(--text);
-  }
-  .driver-note {
-    margin-top: 12px;
-    padding: 10px 12px;
-    border-radius: 6px;
-    font-size: 13px;
-  }
-  .driver-note.ok { background: rgba(52, 168, 83, 0.1); color: #2e7d32; }
-  .driver-note.err { background: rgba(234, 67, 53, 0.08); color: #c62828; }
-
-  /* --- install modal --- */
-  /* The vendor's own words about their product, kept as a quotation so it is
-     visibly theirs and not ours. */
-
-  /* --- install progress / error (bottom of the modal) --- */
-  @keyframes indeterminate {
-    0% { left: -32%; }
-    100% { left: 100%; }
+  .status-value.failing {
+    color: var(--error);
+    text-align: right;
   }
 </style>
