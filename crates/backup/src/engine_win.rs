@@ -322,12 +322,15 @@ fn open_write_with_retry(path: &str) -> Result<WinRawDevice> {
 fn report_categories(
     progress: &mut impl FnMut(&BackupProgress) -> Result<()>,
     categories: Option<&crate::exclusions::CategorySizes>,
+    excluded_files: u64,
+    excluded_bytes: u64,
 ) {
     let Some(c) = categories else { return };
     let _ = progress(&BackupProgress {
         backup_id: "prepare".into(),
         status: BackupStatus::Running,
         categories: Some(c.as_pairs()),
+        excluded: Some((excluded_files, excluded_bytes)),
         ..Default::default()
     });
 }
@@ -1036,6 +1039,7 @@ fn backup_volume_inner(
             bytes_written: 0,
             speed_bps: 0,
                 categories: None,
+                excluded: None,
         })
     };
     // Why the file walk did not happen — filled in below by whichever branch
@@ -1102,7 +1106,7 @@ fn backup_volume_inner(
                     // каждый файл с размером. Отправляем её сразу, а не в конце:
                     // человеку, который смотрит на полосу двадцать минут, есть
                     // что почитать, и это ответ на вопрос «а что вообще в копии».
-                    report_categories(&mut progress, categories.as_ref());
+                    report_categories(&mut progress, categories.as_ref(), excluded_files, excluded_bytes);
                     if !mft.ranges.is_empty() {
                         map.apply_excluded_ranges(&mft.ranges);
                         zero_ranges = Some(mft.ranges);
@@ -1162,6 +1166,7 @@ fn backup_volume_inner(
                         bytes_written: 0,
                         speed_bps: 0,
                 categories: None,
+                excluded: None,
                     });
                 };
                 crate::ntfs_scan::scan_mft_with(&mut buffered, &req.exclusion_patterns, &mut report)
@@ -1171,7 +1176,7 @@ fn backup_volume_inner(
                     excluded_files = scan.files_excluded;
                     excluded_bytes = scan.bytes_excluded;
                     categories = Some(scan.categories);
-                    report_categories(&mut progress, categories.as_ref());
+                    report_categories(&mut progress, categories.as_ref(), excluded_files, excluded_bytes);
                     for (path, reason) in &scan.kept {
                         debug!(file = %path, reason = reason.as_str(), "данные остаются в копии");
                     }
@@ -1711,6 +1716,7 @@ fn backup_volume_inner(
         bytes_written: outcome.bytes_copied,
         speed_bps: 0,
                 categories: None,
+                excluded: None,
     });
     // Timed step by step inside finalize(): the stall lives in ONE of the
     // steps (flush of remaining cache vs handle close vs detach for VHDX;
@@ -1753,6 +1759,7 @@ fn backup_volume_inner(
             bytes_written: bytes_copied_so_far,
             speed_bps: 0,
                 categories: None,
+                excluded: None,
         });
     };
 
@@ -3099,6 +3106,7 @@ fn backup_disk_inner(
                 bytes_written: 0,
                 speed_bps: 0,
                 categories: None,
+                excluded: None,
             })
         };
         let pm = match &bitlocker {
@@ -3122,6 +3130,7 @@ fn backup_disk_inner(
                         bytes_written: 0,
                         speed_bps: 0,
                 categories: None,
+                excluded: None,
                     })
                 },
             ),
@@ -3192,7 +3201,7 @@ fn backup_disk_inner(
 
     // Разделы подготовлены — значит сводка по типам файлов посчитана по всем
     // сразу. Отправляем её одним сообщением, до первого скопированного блока.
-    report_categories(&mut progress, categories.as_ref());
+    report_categories(&mut progress, categories.as_ref(), excluded_files, excluded_bytes);
 
     // 3a. Parent chain (plan D5). A non-full kind writes a differencing CHILD
     // over the previous whole-disk image; a broken/incompatible parent falls
@@ -3508,6 +3517,7 @@ fn backup_disk_inner(
         bytes_written: bytes_copied,
         speed_bps: 0,
                 categories: None,
+                excluded: None,
     });
     // A provisional sidecar, so the container has something of the right shape
     // to reserve around. Nothing reads it: the run either replaces it below or
@@ -3573,6 +3583,7 @@ fn backup_disk_inner(
                 bytes_written: bytes_copied,
                 speed_bps: 0,
                 categories: None,
+                excluded: None,
             });
         };
         match (&req.encryption, req.image_format) {

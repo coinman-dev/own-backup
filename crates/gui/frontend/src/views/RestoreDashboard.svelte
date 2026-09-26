@@ -2028,9 +2028,7 @@
           {#each catData as c}
             <div class="cat"><span class="dot" style="background:{c.color}"></span><span class="cat-name">{c.name}</span><span class="cat-size">{formatBytes(c.bytes)}</span></div>
           {/each}
-          {#if excluded.files > 0}
-            <div class="cat"><span class="dot" style="background:#c0463f"></span><span class="cat-name">Исключено</span><span class="cat-size">{formatBytes(excluded.bytes)}</span></div>
-          {/if}
+          <div class="cat"><span class="dot" style="background:#c0463f"></span><span class="cat-name">Исключено</span><span class="cat-size">{formatBytes(excluded.bytes)}</span></div>
         </div>
       </div>
     {/if}
@@ -2509,8 +2507,10 @@
   /* Every present category stays visible: tiny slices keep 5px and the
      large ones shrink to make room, so the bar still totals 100%. */
   .catseg { min-width: 5px; }
-  .cats { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
-  .cat { flex: 1; min-width: 130px; display: flex; align-items: center; gap: 7px; }
+  /* Four to a row, always, with «Исключено» as the eighth cell: two rows that
+     line up column by column (see JobDashboard). */
+  .cats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px 8px; margin-top: 14px; }
+  .cat { min-width: 0; display: flex; align-items: center; gap: 7px; }
   .dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
   .cat-name { font-size: 13px; color: var(--head); }
   .cat-size { font-size: 12px; color: var(--text-muted); white-space: nowrap; }

@@ -57,7 +57,7 @@
   </div>
 
   <div class="card">
-    <h2 class="app-name">My Own Backup</h2>
+    <h2 class="app-name">Own Backup</h2>
     <p class="app-description">
       Копии дисков и томов целиком, блок за блоком: в копию попадают только
       занятые кластеры, а исключённые файлы не попадают вовсе. Из копии можно

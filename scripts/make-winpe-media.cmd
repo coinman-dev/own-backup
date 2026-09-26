@@ -101,7 +101,7 @@ if not "%~1"=="" set "SRC=%~1"
 set "OUT=%HERE%\OwnBackupMedia"
 if not "%~2"=="" set "OUT=%~2"
 
-echo === My Own Backup boot medium (spike) ===
+echo === Own Backup boot medium (spike) ===
 echo     program : %SRC%
 echo     output  : %OUT%
 echo.
@@ -304,7 +304,7 @@ rem API by the GUI itself (see the header); it replaces wry's defaults, so the
 rem msWebOOUI/msPdfOOUI/msSmartScreenProtection features are re-listed here.
 set "SCRIPT=%APP%\start-media.cmd"
 > "%SCRIPT%" echo @echo off
->>"%SCRIPT%" echo title My Own Backup - boot medium
+>>"%SCRIPT%" echo title Own Backup - boot medium
 >>"%SCRIPT%" echo "X:\Program Files\OwnBackup\own-backup-cli.exe" display --min 1280x720
 >>"%SCRIPT%" echo md "X:\Windows\Temp\OwnBackup" 2^>nul
 >>"%SCRIPT%" echo md "X:\Windows\Temp\OwnBackup\Profile\AppData\Local" 2^>nul
@@ -371,7 +371,7 @@ set "SNET=%TREE%\Windows\System32\startnet.cmd"
 > "%SNET%" echo @echo off
 >>"%SNET%" echo wpeinit
 >>"%SNET%" echo echo.
->>"%SNET%" echo echo === My Own Backup ===
+>>"%SNET%" echo echo === Own Backup ===
 >>"%SNET%" echo echo.
 >>"%SNET%" echo call "X:\Program Files\OwnBackup\start-media.cmd"
 >>"%SNET%" echo echo.
@@ -397,7 +397,7 @@ if "%MODE%"=="mount" (
 ) else (
   del /f /q "%WORK%\boot.wim"
   dism /Capture-Image /ImageFile:"%WORK%\boot.wim" /CaptureDir:"%TREE%" ^
-       /Name:"My Own Backup media" /Compress:max /Bootable || (
+       /Name:"Own Backup media" /Compress:max /Bootable || (
     echo [!] Could not capture the image. See %SystemRoot%\Logs\DISM\dism.log
     exit /b 1
   )

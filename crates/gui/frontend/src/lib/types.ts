@@ -645,6 +645,10 @@ export interface JobProgress {
    * файл с размером ещё до копирования, так что ждать конца копии незачем.
    */
   categories?: [string, number][];
+  /** What THIS run's exclusion rules took out — sent once, with
+   *  `categories`. Absent until known. */
+  excluded_files?: number;
+  excluded_bytes?: number;
 }
 
 // ---------------------------------------------------------------------------

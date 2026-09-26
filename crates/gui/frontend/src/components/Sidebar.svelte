@@ -100,7 +100,7 @@
         <circle cx="12" cy="12" r="3" />
       </svg>
     </div>
-    <span class="app-title">MY OWN BACKUP</span>
+    <span class="app-title">OWN BACKUP</span>
   </div>
 
   <ul class="nav-list">

@@ -83,6 +83,11 @@ export async function initJobs(): Promise<void> {
     if (!p.categories?.length && prev?.categories?.length) {
       p.categories = prev.categories;
     }
+    // Same for what the exclusions took out: it arrives in that one message.
+    if (p.excluded_bytes == null && prev?.excluded_bytes != null) {
+      p.excluded_bytes = prev.excluded_bytes;
+      p.excluded_files = prev.excluded_files;
+    }
     jobs.progress[p.job_id] = p;
     keepTime(p);
   });

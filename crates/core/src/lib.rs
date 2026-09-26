@@ -1048,6 +1048,12 @@ pub struct JobProgress {
     /// смотрит на полосу двадцать минут, и это ответ на вопрос «что в копии».
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub categories: Vec<(String, u64)>,
+    /// What this run's exclusion rules took out, sent once with `categories`.
+    /// `None` until known — the screen then says «…», not a number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excluded_files: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excluded_bytes: Option<u64>,
 }
 
 /// Sink for orchestration events. The GUI forwards these to Tauri window
@@ -2272,6 +2278,8 @@ async fn perform_backup(
                         volume: vol_label_bg.clone(),
                         image_file_name: image_name.clone(),
                         categories: p.categories.clone().unwrap_or_default(),
+                        excluded_files: p.excluded.map(|(f, _)| f),
+                        excluded_bytes: p.excluded.map(|(_, b)| b),
                     });
                 }
                 Ok(())
@@ -2313,6 +2321,8 @@ async fn perform_backup(
                             volume: vol_label_bg.clone(),
                             image_file_name: image_name.clone(),
                         categories: Vec::new(),
+                        excluded_files: None,
+                        excluded_bytes: None,
                         });
                     }
                     Ok(())
@@ -2629,6 +2639,8 @@ async fn perform_disk_backup(
                     volume: format!("Диск {disk_number} · {model}"),
                     image_file_name: image_name.clone(),
                     categories: p.categories.clone().unwrap_or_default(),
+                    excluded_files: p.excluded.map(|(f, _)| f),
+                    excluded_bytes: p.excluded.map(|(_, b)| b),
                 });
             }
             Ok(())
@@ -2664,6 +2676,8 @@ async fn perform_disk_backup(
                         volume: format!("Диск {disk_number} · {model}"),
                         image_file_name: image_name.clone(),
                         categories: Vec::new(),
+                        excluded_files: None,
+                        excluded_bytes: None,
                     });
                 }
                 Ok(())
@@ -2879,6 +2893,8 @@ async fn perform_backup(
                         volume: vol_label_bg.clone(),
                         image_file_name: image_name.clone(),
                         categories: Vec::new(),
+                        excluded_files: None,
+                        excluded_bytes: None,
                     });
                 }
                 Ok(())

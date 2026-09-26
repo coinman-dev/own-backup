@@ -18,7 +18,7 @@ const VERSION_LINE: &str = concat!(env!("CARGO_PKG_VERSION"), " (сборка 20
 #[derive(Parser)]
 #[command(
     name = "own-backup",
-    about = "My Own Backup - Open-source block-level backup system",
+    about = "Own Backup — block-level backup (source-available, free for noncommercial use)",
     version = VERSION_LINE
 )]
 struct Cli {

@@ -173,9 +173,9 @@ fn enforce_single_instance() {
     let handle = unsafe { CreateMutexW(None, true, PCWSTR(name.as_ptr())) };
     let already = handle.is_err() || unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
     if already {
-        let title: Vec<u16> = "My Own Backup\0".encode_utf16().collect();
+        let title: Vec<u16> = "Own Backup\0".encode_utf16().collect();
         let text: Vec<u16> =
-            "Программа уже запущена.\nОткройте существующее окно My Own Backup."
+            "Программа уже запущена.\nОткройте существующее окно Own Backup."
                 .encode_utf16()
                 .chain(std::iter::once(0))
                 .collect();
@@ -312,7 +312,7 @@ fn main() {
             let (width, height, min_width, min_height) = window_size(app);
             let mut window =
                 tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
-                    .title("My Own Backup")
+                    .title("Own Backup")
                     .inner_size(width, height)
                     .min_inner_size(min_width, min_height)
                     // Not maximised, on the medium either. It used to be —

@@ -409,7 +409,7 @@ pub fn startnet_cmd(app_dir: &str, start_desktop: bool) -> String {
         // mounted, where DISM cannot write that registry.
         format!("wpeutil SetKeyboardLayout {INPUT_LOCALES} >nul 2>&1"),
         "echo.".to_string(),
-        "echo === My Own Backup ===".to_string(),
+        "echo === Own Backup ===".to_string(),
         "echo.".to_string(),
         format!("call \"{app_dir}\\start-media.cmd\""),
         "echo.".to_string(),
@@ -475,7 +475,7 @@ pub fn no_interface_cmd(app_dir: &str) -> String {
         "rem console's default codepage would turn it into rubbish. The script's",
         "rem own lines stay ASCII, so they read the same either way.",
         "chcp 65001 >nul 2>&1",
-        "title My Own Backup - interface not started",
+        "title Own Backup - interface not started",
         "echo.",
         "echo ==================================================================",
         // Два разных исхода, и говорить о них одним текстом нельзя. Когда не
@@ -522,7 +522,7 @@ pub fn start_media_cmd(app_dir: &str, temp_dir: &str) -> String {
     let logs = format!("{MEDIA_DIR}\\{MEDIA_LOGS_DIR}");
     lines(&[
         "@echo off",
-        "title My Own Backup",
+        "title Own Backup",
         "rem Media mode: state goes to the RAM disk instead of the rescued machine's",
         "rem C:, the engine runs as a process, and no VSS is attempted (the system",
         "rem here is offline, so a direct read is already consistent). Set first:",
@@ -678,14 +678,14 @@ pub fn start_media_cmd(app_dir: &str, temp_dir: &str) -> String {
         ":nowindow",
         "rem The checks passed and no window came: the failure window must say",
         "rem that, not point at checks that are all green.",
-        &format!("start \"My Own Backup\" cmd /k \"\"{app_dir}\\no-interface.cmd\" nowindow\""),
+        &format!("start \"Own Backup\" cmd /k \"\"{app_dir}\\no-interface.cmd\" nowindow\""),
         "goto :aftergui",
         ":nointerface",
         "rem In a window of its OWN, not in this console: the desktop starts this",
         "rem script through cmd with CREATE_NO_WINDOW, so everything printed here",
         "rem goes nowhere. Without this line the user saw an empty desktop and no",
         "rem explanation at all (2026-09-20).",
-        &format!("start \"My Own Backup\" cmd /k \"\"{app_dir}\\no-interface.cmd\"\""),
+        &format!("start \"Own Backup\" cmd /k \"\"{app_dir}\\no-interface.cmd\"\""),
         ":aftergui",
         "echo.",
         "echo The engine runs without a window of its own - its log is the place to look.",
@@ -1073,7 +1073,7 @@ mod tests {
         // И тот и другой исход должны быть ВИДНЫ. Консоль запускателя не
         // видна: рабочий стол зовёт его через cmd с CREATE_NO_WINDOW.
         assert_eq!(
-            s.matches("start \"My Own Backup\" cmd /k").count(),
+            s.matches("start \"Own Backup\" cmd /k").count(),
             2,
             "своё окно нужно обоим исходам: и отказу проверки, и «окна нет»"
         );

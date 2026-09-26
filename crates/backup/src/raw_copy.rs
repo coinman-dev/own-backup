@@ -103,6 +103,7 @@ pub fn copy_used_blocks(
             bytes_written: bytes_copied,
             speed_bps,
             categories: None,
+            excluded: None,
         })?;
     }
 

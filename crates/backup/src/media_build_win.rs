@@ -836,7 +836,7 @@ fn close_image(
             "/Capture-Image",
             &format!("/ImageFile:{}", wim.display()),
             &format!("/CaptureDir:{}", tree.display()),
-            "/Name:My Own Backup media",
+            "/Name:Own Backup media",
             "/Compress:max",
             "/Bootable",
         ],

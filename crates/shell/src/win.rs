@@ -211,7 +211,7 @@ pub fn run() -> windows::core::Result<()> {
         CreateWindowExW(
             WS_EX_NOACTIVATE,
             backdrop_class,
-            w!("My Own Backup"),
+            w!("Own Backup"),
             WS_POPUP,
             0,
             0,
@@ -232,7 +232,7 @@ pub fn run() -> windows::core::Result<()> {
         CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
             bar_class,
-            w!("My Own Backup"),
+            w!("Own Backup"),
             WS_POPUP,
             0,
             h - layout::bar_height(h),
@@ -1046,7 +1046,7 @@ fn tool_path(relative: &str) -> Option<PathBuf> {
 /// where a restart in the middle of a copy costs the copy.
 fn confirm(question: &str) -> bool {
     let text: Vec<u16> = question.encode_utf16().chain(std::iter::once(0)).collect();
-    let title: Vec<u16> = "My Own Backup".encode_utf16().chain(std::iter::once(0)).collect();
+    let title: Vec<u16> = "Own Backup".encode_utf16().chain(std::iter::once(0)).collect();
     unsafe {
         MessageBoxW(
             None,
@@ -1249,7 +1249,7 @@ unsafe fn backdrop_message(
                 SetBkMode(dc, TRANSPARENT);
                 SetTextColor(dc, BACKDROP_TEXT);
                 let band = layout::Slot { x: 0, y: h / 2 - h / 20, w, h: h / 10 };
-                draw_text(dc, &band, "My Own Backup", DT_CENTER.0);
+                draw_text(dc, &band, "Own Backup", DT_CENTER.0);
             }
             let _ = EndPaint(window, &paint);
             LRESULT(0)

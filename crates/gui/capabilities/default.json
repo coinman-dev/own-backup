@@ -1,6 +1,6 @@
 {
   "identifier": "default",
-  "description": "Default capability for My Own Backup",
+  "description": "Default capability for Own Backup",
   "windows": ["main"],
   "permissions": [
     "core:default",

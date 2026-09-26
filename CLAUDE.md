@@ -1,4 +1,4 @@
-# My Own Backup
+# Own Backup
 
 Source-available block-level backup system (Rust). Analogue of Acronis True Image.
 **Windows-first**: Linux support is deferred until the Windows version works end to end.

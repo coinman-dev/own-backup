@@ -149,13 +149,22 @@
     }));
   });
 
+  /** What the exclusions took out of the copy on screen: this run's own figure
+   *  while it runs (null until the scan has said), the last copy's after. The
+   *  live view used to take the LAST copy's figure — after the rules changed,
+   *  the bar showed gigabytes this run was not excluding at all (2026-09-26). */
+  const excludedBytes = $derived.by((): number | null => {
+    if (liveCategories) return progress?.excluded_bytes ?? null;
+    return lastGood?.excluded_bytes ?? 0;
+  });
+
   // The bar covers the whole scanned volume: what the copy holds, plus what the
   // exclusions left out (last segment). Shares are recomputed against that grand
   // total so the bar still adds up to 100%.
   const barData = $derived.by(() => {
     if (!catData) return null;
     const kept = catData.reduce((s, c) => s + c.bytes, 0);
-    const ex = lastGood?.excluded_bytes ?? 0;
+    const ex = excludedBytes ?? 0;
     const total = kept + ex;
     if (total <= 0) return null;
     const out: { name: string; color: string; bytes: number; pct: number }[] = catData.map((c) => ({
@@ -204,6 +213,16 @@
     await cancelRunning();
   }
 </script>
+
+<!-- The eighth cell, always there so the grid keeps its two even rows. «…»
+     while the scan has not said yet; 0 B when the rules took nothing. -->
+{#snippet excludedCell()}
+  <div class="cat">
+    <span class="dot" style="background:#c0463f"></span>
+    <span class="cat-name">Исключено</span>
+    <span class="cat-size">{excludedBytes == null ? '…' : formatBytes(excludedBytes)}</span>
+  </div>
+{/snippet}
 
 <div class="page">
 <div class="dash">
@@ -310,6 +329,7 @@
               <span class="cat-size">{formatBytes(c.bytes)}</span>
             </div>
           {/each}
+          {@render excludedCell()}
         </div>
       </div>
     {/if}
@@ -344,13 +364,7 @@
             <span class="cat-size">{formatBytes(c.bytes)}</span>
           </div>
         {/each}
-        {#if lastGood && lastGood.excluded_files > 0}
-          <div class="cat">
-            <span class="dot" style="background:#c0463f"></span>
-            <span class="cat-name">Исключено</span>
-            <span class="cat-size">{formatBytes(lastGood.excluded_bytes)}</span>
-          </div>
-        {/if}
+        {@render excludedCell()}
       </div>
     {:else}
       <div class="catbar empty-catbar"></div>
@@ -473,8 +487,11 @@
   /* Every present category stays visible: tiny slices keep 5px and the
      large ones shrink to make room, so the bar still totals 100%. */
   .catseg { min-width: 5px; }
-  .cats { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
-  .cat { flex: 1; min-width: 130px; display: flex; align-items: center; gap: 7px; }
+  /* Four to a row, always: eight cells (seven types + «Исключено») make two
+     rows that line up column by column. A wrapping flex row put them wherever
+     they fit, and one cell fewer shifted the whole second row. */
+  .cats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px 8px; margin-top: 14px; }
+  .cat { min-width: 0; display: flex; align-items: center; gap: 7px; }
   .dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
   .cat-name { font-size: 13px; color: var(--head); }
   .cat-size { font-size: 12px; color: var(--text-muted); white-space: nowrap; }

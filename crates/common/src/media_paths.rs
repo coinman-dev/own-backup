@@ -19,7 +19,7 @@ pub const MEDIA_DIR: &str = "OwnBackup";
 /// it on a stick months later.
 pub const MEDIA_MARKER: &str = "media.id";
 pub const MEDIA_MARKER_TEXT: &str =
-    "My Own Backup boot medium. This file marks the volume so the medium can \
+    "Own Backup boot medium. This file marks the volume so the medium can \
      find its own files after boot; its logs are kept in the logs folder beside it.\r\n";
 
 /// Where the running medium keeps the copy of its logs that survives a reboot.
@@ -128,7 +128,7 @@ mod tests {
     /// and is opened years later by someone wondering what put it there.
     #[test]
     fn the_marker_explains_itself() {
-        assert!(MEDIA_MARKER_TEXT.contains("My Own Backup"));
+        assert!(MEDIA_MARKER_TEXT.contains("Own Backup"));
         assert!(MEDIA_MARKER_TEXT.contains("boot medium"));
         assert!(MEDIA_MARKER_TEXT.ends_with("\r\n"), "read by Windows tools");
     }

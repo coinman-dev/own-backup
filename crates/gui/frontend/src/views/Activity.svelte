@@ -9,9 +9,16 @@
   const kindLabel = (k: string) =>
     k === 'incremental' ? 'инкрементная' : k === 'differential' ? 'дифференциальная' : 'полная';
 
-  /** Container format of the produced image, derived from its file name. */
-  const formatLabel = (p: string) =>
-    p.toLowerCase().endsWith('.qcow2') ? 'qcow2 (сжатый)' : 'VHDX';
+  /** Container format of the produced image, derived from its file name.
+   *  Anything unrecognised used to read «VHDX» — an encrypted job's `.obk`
+   *  copies included (2026-09-26). */
+  function formatLabel(p: string): string {
+    const name = (p || '').toLowerCase();
+    if (name.endsWith('.obk')) return 'OBK (зашифрованный)';
+    if (name.endsWith('.qcow2')) return 'qcow2 (сжатый)';
+    if (name.endsWith('.vhdx') || name.endsWith('.avhdx')) return 'VHDX';
+    return '—';
+  }
 </script>
 
 <div class="page">
