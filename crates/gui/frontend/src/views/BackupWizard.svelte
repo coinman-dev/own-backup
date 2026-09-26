@@ -1903,11 +1903,11 @@
         <div class="adv">
           <div class="adv-group">
             <div class="adv-title">Режим создания образа</div>
-            <label class="chk"><input type="checkbox" bind:checked={job.advanced.sector_by_sector} /> Архивировать в посекторном режиме <span class="ok-badge">работает</span></label>
+            <label class="chk"><input type="checkbox" bind:checked={job.advanced.sector_by_sector} /> Архивировать в посекторном режиме</label>
           </div>
           <div class="adv-group">
             <div class="adv-title">Проверка</div>
-            <label class="chk"><input type="checkbox" bind:checked={job.advanced.validate_after} /> Проверять резервную копию после создания <span class="ok-badge">работает</span></label>
+            <label class="chk"><input type="checkbox" bind:checked={job.advanced.validate_after} /> Проверять резервную копию после создания</label>
             <!-- Under its parent, and inert without it: "only the latest" is a
                  way of checking, not a check of its own. -->
             <label class="chk sub-chk" class:dim={!job.advanced.validate_after}>
@@ -2276,7 +2276,6 @@
   .adv-hint { margin: 4px 0 8px 26px; font-size: 12.5px; line-height: 1.45; color: var(--sub); }
   .adv-hint.flush { margin-left: 0; margin-top: 6px; }
   .dev-badge { font-size: 11px; color: #a06a10; background: rgba(251,188,5,.15); padding: 3px 9px; border-radius: 10px; }
-  .ok-badge { font-size: 11px; color: #2c5b12; background: rgba(90,176,47,.15); padding: 2px 8px; border-radius: 10px; margin-left: 6px; }
   .wz-error { padding: 8px 34px; color: #8c1d1d; font-size: 13px; background: rgba(216,74,74,.08); }
   /* .footer is global (styles/global.css) — same bar on every page. */
   .spacer { flex: 1; }
