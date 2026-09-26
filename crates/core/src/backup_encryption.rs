@@ -7,7 +7,7 @@
 use own_backup_backup::seal::context::ArchiveKeys;
 use own_backup_backup::seal::keypair::{JobPrivateKey, SealedPrivateKey};
 use own_backup_backup::seal::local::{LocalKeyRef, ServiceKeyStore};
-use own_backup_common::{OwnBackupError, Result};
+use own_backup_common::{tr, OwnBackupError, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::{Job, JobStore};
@@ -36,7 +36,7 @@ impl JobStore {
         }
         if job.id != portable_key.job_id {
             return Err(OwnBackupError::Config(
-                "ключ принадлежит другому заданию".into(),
+                tr!("backup_encryption.key_other_job").into_owned(),
             ));
         }
         job.image_format = own_backup_common::types::ImageFormat::Qcow2;
@@ -125,11 +125,13 @@ impl JobStore {
         let data_dir = self
             .jobs_path
             .parent()
-            .ok_or_else(|| OwnBackupError::Config("нет каталога состояния службы".into()))?;
+            .ok_or_else(|| {
+                OwnBackupError::Config(tr!("backup_encryption.no_state_dir").into_owned())
+            })?;
         let keys = ServiceKeyStore::new(data_dir).map_err(|e| {
-            OwnBackupError::Encryption(format!(
-                "Нужно заново разрешить автоматическое выполнение задания: {e}"
-            ))
+            OwnBackupError::Encryption(
+                tr!("backup_encryption.reauthorize_error", error = e).into_owned(),
+            )
         })?;
         keys.open(&job.id, &encryption.portable_key, &encryption.local_key)
             .map(Some)
@@ -151,7 +153,7 @@ impl JobStore {
         let private = self
             .scheduled_archive_key(job)
             .map_err(|e| e.to_string())?
-            .ok_or_else(|| "Нужно заново разрешить автоматическое выполнение задания".to_string())?;
+            .ok_or_else(|| tr!("backup_encryption.reauthorize").into_owned())?;
         ArchiveKeys::from_private(encryption.portable_key.clone(), private)
             .map(Some)
             .map_err(|e| e.to_string())
@@ -192,9 +194,7 @@ pub(crate) fn validate_update(
         job.archive_encryption = old.cloned();
     }
     if !authorized && job.archive_encryption.as_ref() != old {
-        return Err(error(
-            "разрешение шифрования изменяется только через службу ключей",
-        ));
+        return Err(error(tr!("backup_encryption.only_via_key_service")));
     }
     if let Some(encryption) = &job.archive_encryption {
         encryption
@@ -202,16 +202,14 @@ pub(crate) fn validate_update(
             .validate()
             .map_err(|e| error(e.to_string()))?;
         if encryption.portable_key.job_id != job.id {
-            return Err(error("переносимый ключ не соответствует заданию"));
+            return Err(error(tr!("backup_encryption.portable_key_mismatch")));
         }
         if job.image_format != own_backup_common::types::ImageFormat::Qcow2 {
-            return Err(error("шифрование поддерживается только для формата qcow2"));
+            return Err(error(tr!("backup_encryption.qcow2_only")));
         }
         if let Some(old) = old {
             if old.portable_key != encryption.portable_key {
-                return Err(error(
-                    "замена ключа существующего задания требует отдельного процесса",
-                ));
+                return Err(error(tr!("backup_encryption.key_replace_separate")));
             }
         }
     }

@@ -8,6 +8,7 @@
   import { api } from '../lib/api';
   import { formatBytes } from '../lib/format';
   import type { DirEntry } from '../lib/types';
+  import { m } from '../lib/paraglide/messages';
 
   let path = $state('');
   let parent: string | null = $state(null);
@@ -107,18 +108,18 @@
   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
   <div class="backdrop" onclick={() => finishPick(null)}>
     <div class="dialog" onclick={(e) => e.stopPropagation()}>
-      <div class="head">{req?.title ?? 'Выбор пути'}</div>
+      <div class="head">{req?.title ?? m.pick_default_title()}</div>
 
       <div class="bar">
-        <button class="nav" onclick={roots} title="Список дисков">Диски</button>
-        <button class="nav" disabled={!parent} onclick={() => parent && go(parent)} title="На уровень выше">
+        <button class="nav" onclick={roots} title={m.pick_drives_title()}>{m.pick_drives()}</button>
+        <button class="nav" disabled={!parent} onclick={() => parent && go(parent)} title={m.pick_up_title()}>
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M6 11l6-6 6 6" /></svg>
         </button>
         <input
           class="path"
           type="text"
           value={path}
-          placeholder="Выберите диск"
+          placeholder={m.pick_path_placeholder()}
           spellcheck="false"
           onkeydown={(e) => e.key === 'Enter' && go((e.currentTarget as HTMLInputElement).value)}
         />
@@ -130,9 +131,9 @@
 
       <div class="list">
         {#if loading}
-          <div class="muted">Чтение…</div>
+          <div class="muted">{m.pick_reading()}</div>
         {:else if entries.length === 0}
-          <div class="muted">{path === '' ? 'Диски не найдены.' : 'Здесь пусто.'}</div>
+          <div class="muted">{path === '' ? m.pick_no_drives() : m.pick_empty()}</div>
         {/if}
         {#each entries as e (e.path)}
           <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
@@ -169,18 +170,18 @@
           <input
             type="text"
             bind:value={newFolder}
-            placeholder="Имя новой папки"
+            placeholder={m.pick_new_folder_placeholder()}
             spellcheck="false"
             onkeydown={(e) => e.key === 'Enter' && makeFolder()}
           />
-          <button class="nav" disabled={!newFolder.trim() || creating} onclick={makeFolder}>Создать папку</button>
+          <button class="nav" disabled={!newFolder.trim() || creating} onclick={makeFolder}>{m.pick_create_folder()}</button>
         </div>
       {/if}
 
       <div class="foot">
         <span class="chosen" title={selectedFile ?? path}>{selectedFile ?? path}</span>
-        <button class="btn" onclick={() => finishPick(null)}>Отмена</button>
-        <button class="btn primary" disabled={!canAccept} onclick={accept}>Выбрать</button>
+        <button class="btn" onclick={() => finishPick(null)}>{m.common_cancel()}</button>
+        <button class="btn primary" disabled={!canAccept} onclick={accept}>{m.pick_select()}</button>
       </div>
     </div>
   </div>

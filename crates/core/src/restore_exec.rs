@@ -32,7 +32,7 @@ use tracing::warn;
 use own_backup_common::cancel::CancelToken;
 use own_backup_common::restore_plan::{RestoreMode, RestoreOp, RestorePlan};
 use own_backup_common::restore_state::{OpRecord, OpStatus, RestoreRunState, RunStatus};
-use own_backup_common::{OwnBackupError, Result};
+use own_backup_common::{tr, OwnBackupError, Result};
 
 /// Where finished restore runs are kept.
 ///
@@ -160,16 +160,22 @@ pub fn initial_state(plan: &RestorePlan) -> RestoreRunState {
             // Two different checks: a sector restore is verified block by block
             // against the copy's checksums, a file restore by comparing what
             // arrived with what was there. Neither substitutes for the other.
-            let (kind, what) = match mode {
-                RestoreMode::Sectors => ("verify_sectors", "записанное"),
-                RestoreMode::Files => ("verify_files", "перенесённые файлы"),
+            let (kind, title) = match mode {
+                RestoreMode::Sectors => (
+                    "verify_sectors",
+                    tr!("restore_exec.op_verify_sectors_title", dst = dst.index, src = src_index),
+                ),
+                RestoreMode::Files => (
+                    "verify_files",
+                    tr!("restore_exec.op_verify_files_title", dst = dst.index, src = src_index),
+                ),
             };
             let record = OpRecord {
                 // Filled in below: these records are placed by where they run,
                 // not by the order they were built in.
                 index: 0,
                 kind: kind.into(),
-                title: format!("Проверить {what} в разделе {} (из раздела {src_index})", dst.index),
+                title: title.into_owned(),
                 part_index: Some(dst.index),
                 status: OpStatus::Pending,
                 percent: 0,
@@ -297,19 +303,17 @@ pub fn execute_plan(
     // be spelled as an empty list, which reads exactly like "nothing to
     // protect here".
     if let Some(why) = &guard.cannot_tell {
-        return Err(OwnBackupError::RestoreIncompatible(format!(
-            "Нельзя проверить, не стоит ли на этом диске работающая система: {why}. \
-             Загрузитесь с носителя восстановления — там этот вопрос не стоит."
-        )));
+        return Err(OwnBackupError::RestoreIncompatible(
+            tr!("restore_exec.cannot_tell_live_system", why = why).into_owned(),
+        ));
     }
     if !guard.parts.is_empty() {
         let hit: Vec<u32> = touched.iter().copied().filter(|i| guard.parts.contains(i)).collect();
         if !hit.is_empty() {
-            return Err(OwnBackupError::RestoreIncompatible(format!(
-                "план затрагивает разделы, на которых стоит работающая Windows: {}. \
-                 Загрузитесь с Boot CD и повторите.",
-                hit.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", ")
-            )));
+            let parts = hit.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
+            return Err(OwnBackupError::RestoreIncompatible(
+                tr!("restore_exec.touches_live_system", parts = parts).into_owned(),
+            ));
         }
     }
     let live_system = system_disk == Some(plan.target_disk) && !boot_media;
@@ -616,7 +620,7 @@ fn run_verification(
             state.ops[index].status = OpStatus::Done;
             state.ops[index].percent = 100;
             state.ops[index].message =
-                "Не проверено: контейнер перешифрован, а открыть его не удалось".into();
+                tr!("restore_exec.verify_not_checked_reencrypted").into_owned();
             on_update(state);
             continue;
         }
@@ -646,12 +650,12 @@ fn run_verification(
                 state.ops[index].status = OpStatus::Done;
                 state.ops[index].percent = 100;
                 state.ops[index].message =
-                    format!("Сверено блоков: {}", v.blocks_checked);
+                    tr!("restore_exec.verify_blocks_ok", count = v.blocks_checked).into_owned();
                 info!(part = dst.index, blocks = v.blocks_checked, "verification passed");
             }
             Ok(v) if v.cancelled => {
                 state.ops[index].status = OpStatus::Skipped;
-                state.ops[index].message = "Проверка прервана.".into();
+                state.ops[index].message = tr!("restore_exec.verify_interrupted").into_owned();
             }
             // The restore itself writes to the ESP after the copy is in place:
             // bcdboot, and the fallback loader at \EFI\BOOT\BOOTX64.EFI. Those
@@ -665,12 +669,12 @@ fn run_verification(
             {
                 state.ops[index].status = OpStatus::Done;
                 state.ops[index].percent = 100;
-                state.ops[index].message = format!(
-                    "Сверено блоков: {}; отличаются {} — в этот раздел после копирования \
-                     дописан загрузчик, это ожидаемо",
-                    v.blocks_checked,
-                    v.mismatches.len()
-                );
+                state.ops[index].message = tr!(
+                    "restore_exec.verify_bootloader_diff",
+                    count = v.blocks_checked,
+                    changed = v.mismatches.len()
+                )
+                .into_owned();
                 info!(
                     part = dst.index,
                     blocks = v.blocks_checked,
@@ -682,28 +686,32 @@ fn run_verification(
                 state.ops[index].status = OpStatus::Failed;
                 let mut parts = Vec::new();
                 if !v.image_corrupt.is_empty() {
-                    parts.push(format!(
-                        "в самой копии повреждено блоков: {} (восстановление честно записало то,                          что в ней лежит)",
-                        v.image_corrupt.len()
-                    ));
+                    parts.push(
+                        tr!("restore_exec.verify_image_corrupt", count = v.image_corrupt.len())
+                            .into_owned(),
+                    );
                 }
                 if !v.mismatches.is_empty() {
-                    parts.push(format!(
-                        "не совпало блоков на диске: {} — запись не легла (проверьте накопитель)",
-                        v.mismatches.len()
-                    ));
+                    parts.push(
+                        tr!("restore_exec.verify_mismatch", count = v.mismatches.len())
+                            .into_owned(),
+                    );
                 }
                 let text = parts.join("; ");
                 error!(part = dst.index, %text, "verification failed");
                 state.ops[index].message = text.clone();
-                state.follow_ups.push(format!("Раздел {}: {text}.", dst.index));
+                state.follow_ups.push(
+                    tr!("restore_exec.follow_up_partition", part = dst.index, text = text)
+                        .into_owned(),
+                );
             }
             Err(e) => {
                 state.ops[index].status = OpStatus::Failed;
                 state.ops[index].message = e.to_string();
-                state
-                    .follow_ups
-                    .push(format!("Раздел {}: проверку выполнить не удалось: {e}", dst.index));
+                state.follow_ups.push(
+                    tr!("restore_exec.follow_up_verify_failed", part = dst.index, error = e)
+                        .into_owned(),
+                );
             }
         }
         on_update(state);
@@ -944,14 +952,16 @@ fn verify_files(
     let quiet = CancelToken::default();
     let image = match MountedImage::open(&plan.image_path, archive) {
         Ok(i) => i,
-        Err(e) => return fail(state, format!("не удалось подключить копию для сверки: {e}")),
+        Err(e) => {
+            return fail(state, tr!("restore_exec.verify_mount_failed", error = e).into_owned())
+        }
     };
     let src_root = match image.volume_root_of(sidecar, src_index) {
         Ok(r) => r,
         Err(e) => return fail(state, e.to_string()),
     };
     let Some(dst_root) = volume_root_at_offset(plan.target_disk, dst_offset) else {
-        return fail(state, format!("Windows не показала том раздела {dst_index} — сверять не с чем"));
+        return fail(state, tr!("restore_exec.verify_no_volume", part = dst_index).into_owned());
     };
 
     let want = measure_tree(&long_path(std::path::Path::new(&src_root)), &quiet);
@@ -960,22 +970,29 @@ fn verify_files(
     if want.files == got.files && want.bytes == got.bytes {
         state.ops[index].status = OpStatus::Done;
         state.ops[index].percent = 100;
-        state.ops[index].message =
-            format!("Файлов: {}, суммарно {}", got.files, own_backup_common::units::human_bytes(got.bytes));
+        state.ops[index].message = tr!(
+            "restore_exec.verify_files_ok",
+            files = got.files,
+            size = own_backup_common::units::human_bytes(got.bytes)
+        )
+        .into_owned();
         info!(part = dst_index, files = got.files, "file verification passed");
         return;
     }
 
-    let text = format!(
-        "в копии {} файлов на {}, в разделе {} файлов на {}",
-        want.files,
-        own_backup_common::units::human_bytes(want.bytes),
-        got.files,
-        own_backup_common::units::human_bytes(got.bytes)
-    );
+    let text = tr!(
+        "restore_exec.verify_files_diff",
+        want_files = want.files,
+        want_size = own_backup_common::units::human_bytes(want.bytes),
+        got_files = got.files,
+        got_size = own_backup_common::units::human_bytes(got.bytes)
+    )
+    .into_owned();
     error!(part = dst_index, %text, "file verification failed");
     fail(state, text.clone());
-    state.follow_ups.push(format!("Раздел {dst_index}: перенос файлов неполный — {text}."));
+    state.follow_ups.push(
+        tr!("restore_exec.follow_up_files_incomplete", part = dst_index, text = text).into_owned(),
+    );
 }
 
 /// The saved container header for one source partition, if the copy has one.
@@ -1013,12 +1030,7 @@ fn encryption_follow_up(
     if !was_encrypted {
         return Vec::new();
     }
-    vec![format!(
-        "Раздел {part_index}: исходный том был зашифрован, а в копии он лежит расшифрованным — \
-         контейнер LUKS не восстанавливается. Данные на месте, но система с этого раздела \
-         не загрузится, пока не убрать запись из /etc/crypttab, не поправить /etc/fstab на \
-         UUID самого раздела и не пересобрать initramfs (с Live CD)."
-    )]
+    vec![tr!("restore_exec.follow_up_decrypted_luks", part = part_index).into_owned()]
 }
 
 /// Anything an operation wants to tell the user afterwards.
@@ -1054,9 +1066,7 @@ fn run_op(
     match op {
         RestoreOp::WritePartitionTable { table } => {
             let session = session.ok_or_else(|| {
-                OwnBackupError::Device(
-                    "нет открытой сессии диска для записи разметки — внутренняя ошибка".into(),
-                )
+                OwnBackupError::Device(tr!("restore_exec.no_disk_session").into_owned())
             })?;
             let taken = identities_in_use(plan.target_disk);
             let (table, identity) = with_captured_gpt_fields(table, plan, sidecar, &taken);
@@ -1080,46 +1090,29 @@ fn run_op(
                 OpNote::default()
             } else {
                 OpNote {
-                    message: "Разметка уже соответствует плану — таблица разделов не менялась"
-                        .into(),
+                    message: tr!("restore_exec.table_unchanged").into_owned(),
                     follow_ups: Vec::new(),
                 }
             };
             if identity.disk_guid_preserved {
                 note.message = if note.message.is_empty() {
-                    "Идентификаторы исходного диска воспроизведены — записи загрузки и среда \
-                     восстановления (WinRE) из копии продолжают работать"
-                        .into()
+                    tr!("restore_exec.disk_ids_preserved").into_owned()
                 } else {
                     note.message
                 };
                 if !identity.partitions_moved.is_empty() {
-                    note.follow_ups.push(format!(
-                        "Разделы {:?} начинаются не там, где на исходном диске. Записи загрузки \
-                         это переживут (они ссылаются на GUID), а среда восстановления WinRE — \
-                         нет: ReAgent.xml помнит смещение раздела. Если «Особые варианты \
-                         загрузки» не работают, выполните в восстановленной системе: reagentc \
-                         /setreimage /path C:\\Recovery\\WindowsRE, затем reagentc /enable.",
-                        identity.partitions_moved
-                    ));
+                    let parts = format!("{:?}", identity.partitions_moved);
+                    note.follow_ups
+                        .push(tr!("restore_exec.partitions_moved", parts = parts).into_owned());
                 }
             } else if let Some(guid) = &identity.disk_guid_taken {
-                note.follow_ups.push(format!(
-                    "Идентификатор исходного диска ({guid}) уже занят другим подключённым диском, \
-                     поэтому восстановленный диск получил новый. Загрузчик пересоздан bcdboot и \
-                     система стартует, но записи загрузки из копии (в том числе среда \
-                     восстановления WinRE) указывают на прежний диск. Чтобы вернуть WinRE, \
-                     выполните в восстановленной системе: reagentc /setreimage /path \
-                     C:\\Recovery\\WindowsRE, затем reagentc /enable."
-                ));
+                note.follow_ups
+                    .push(tr!("restore_exec.disk_guid_taken", guid = guid).into_owned());
             }
             if !identity.partitions_regenerated.is_empty() {
-                note.follow_ups.push(format!(
-                    "Разделам {:?} выданы новые GUID: их идентификаторы из копии уже заняты \
-                     другим подключённым диском, а два раздела с одним GUID путают назначение \
-                     букв дисков.",
-                    identity.partitions_regenerated
-                ));
+                let parts = format!("{:?}", identity.partitions_regenerated);
+                note.follow_ups
+                    .push(tr!("restore_exec.partitions_regenerated", parts = parts).into_owned());
             }
             Ok(note)
         }
@@ -1175,19 +1168,17 @@ fn run_op(
             let summary = if *reencrypt {
                 use own_backup_backup::restore_win::{restore_partition_encrypted, ReencryptRequest};
                 let header = luks_header_for(sidecar, *src_index).ok_or_else(|| {
-                    OwnBackupError::RestoreIncompatible(format!(
-                        "в копии нет сохранённого заголовка контейнера для раздела {src_index} — \
-                         вернуть шифрование нечем"
-                    ))
+                    OwnBackupError::RestoreIncompatible(
+                        tr!("restore_exec.no_luks_header", part = src_index).into_owned(),
+                    )
                 })?;
                 // Keyed by the SOURCE partition: the passphrase belongs to the
                 // container, and the container is identified by where it came
                 // from, not by where it is going.
                 let passphrase = passphrases.get(src_index).ok_or_else(|| {
-                    OwnBackupError::Config(format!(
-                        "для раздела {src_index} копии не передан пароль, а план требует \
-                         вернуть шифрование"
-                    ))
+                    OwnBackupError::Config(
+                        tr!("restore_exec.no_passphrase", part = src_index).into_owned(),
+                    )
                 })?;
                 restore_partition_encrypted(
                     &plan.image_path,
@@ -1223,7 +1214,7 @@ fn run_op(
             }
             if *reencrypt {
                 return Ok(OpNote {
-                    message: "Контейнер восстановлен вместе с прежним паролем".into(),
+                    message: tr!("restore_exec.container_restored").into_owned(),
                     follow_ups: Vec::new(),
                 });
             }
@@ -1240,10 +1231,9 @@ fn run_op(
             let image = MountedImage::open(&plan.image_path, archive)?;
             let src_root = image.volume_root_of(sidecar, *src_index)?;
             let dst_root = volume_root_at_offset(plan.target_disk, dst.offset).ok_or_else(|| {
-                OwnBackupError::Device(format!(
-                    "Windows не показала том раздела {} — копировать файлы некуда",
-                    dst.index
-                ))
+                OwnBackupError::Device(
+                    tr!("restore_exec.no_volume_copy", part = dst.index).into_owned(),
+                )
             })?;
 
             // Counting first costs one metadata pass and buys a progress bar
@@ -1270,41 +1260,39 @@ fn run_op(
                 return Err(OwnBackupError::Cancelled);
             }
 
-            let mut follow_ups = vec![
-                "Серийный номер тома восстановить нельзя — он назначается при форматировании, \
-                 и API для его смены не существует. Программы, чьи лицензии к нему привязаны, \
-                 потребуют повторной активации; ссылки на том в BCD придётся пересоздать."
-                    .into(),
-            ];
+            let mut follow_ups = vec![tr!("restore_exec.serial_not_restorable").into_owned()];
             if !summary.failures.is_empty() {
                 // Naming a few beats a bare count: a user can tell at a glance
                 // whether it was a locked log file or their documents.
                 let sample: Vec<String> =
                     summary.failures.iter().take(5).map(|(p, e)| format!("{p} ({e})")).collect();
-                follow_ups.push(format!(
-                    "Не удалось скопировать объектов: {}. Первые из них: {}",
-                    summary.failures.len(),
-                    sample.join("; ")
-                ));
+                follow_ups.push(
+                    tr!(
+                        "restore_exec.copy_failures",
+                        count = summary.failures.len(),
+                        sample = sample.join("; ")
+                    )
+                    .into_owned(),
+                );
             }
             Ok(OpNote {
-                message: format!(
-                    "Файлов: {}, каталогов: {}, жёстких ссылок: {}, точек соединения: {}",
-                    summary.files_copied,
-                    summary.dirs_created,
-                    summary.hard_links,
-                    summary.reparse_points
-                ),
+                message: tr!(
+                    "restore_exec.files_summary",
+                    files = summary.files_copied,
+                    dirs = summary.dirs_created,
+                    links = summary.hard_links,
+                    reparse = summary.reparse_points
+                )
+                .into_owned(),
                 follow_ups,
             })
         }
 
         RestoreOp::Format { part, fs, label, quick } => {
             let volume = volume_root_at_offset(plan.target_disk, part.offset).ok_or_else(|| {
-                OwnBackupError::Device(format!(
-                    "Windows не показала том для раздела {} — форматировать нечего",
-                    part.index
-                ))
+                OwnBackupError::Device(
+                    tr!("restore_exec.no_volume_format", part = part.index).into_owned(),
+                )
             })?;
             // FormatEx needs a mount point; a partition that has just appeared
             // has none, and should not keep one it did not ask for.
@@ -1315,10 +1303,9 @@ fn run_op(
 
         RestoreOp::ExtendFilesystem { part } => {
             let volume = volume_root_at_offset(plan.target_disk, part.offset).ok_or_else(|| {
-                OwnBackupError::Device(format!(
-                    "Windows не показала том для раздела {} — расширять нечего",
-                    part.index
-                ))
+                OwnBackupError::Device(
+                    tr!("restore_exec.no_volume_extend", part = part.index).into_owned(),
+                )
             })?;
             let sector = plan
                 .table()
@@ -1330,10 +1317,9 @@ fn run_op(
 
         RestoreOp::AssignLetter { part, letter } => {
             let volume = volume_root_at_offset(plan.target_disk, part.offset).ok_or_else(|| {
-                OwnBackupError::Device(format!(
-                    "Windows не показала том для раздела {} — назначать букву нечему",
-                    part.index
-                ))
+                OwnBackupError::Device(
+                    tr!("restore_exec.no_volume_letter", part = part.index).into_owned(),
+                )
             })?;
             assign_letter(&volume, *letter)?;
             Ok(OpNote::default())
@@ -1344,10 +1330,7 @@ fn run_op(
             use own_backup_backup::letters_win::TempDriveLetter;
             let win_volume = volume_root_at_offset(plan.target_disk, windows_part.offset)
                 .ok_or_else(|| {
-                    OwnBackupError::Device(
-                        "Windows не показала том системного раздела — загрузчик не пересоздать"
-                            .into(),
-                    )
+                    OwnBackupError::Device(tr!("restore_exec.no_system_volume").into_owned())
                 })?;
             // bcdboot takes paths, not volume GUIDs: handed
             // `\\?\Volume{…}\Windows` it fails with exit 123
@@ -1359,7 +1342,7 @@ fn run_op(
             let esp_mount = match esp {
                 Some(p) => {
                     let vr = volume_root_at_offset(plan.target_disk, p.offset).ok_or_else(|| {
-                        OwnBackupError::Device("Windows не показала том раздела EFI".into())
+                        OwnBackupError::Device(tr!("restore_exec.no_esp_volume").into_owned())
                     })?;
                     Some(TempDriveLetter::acquire(&vr)?)
                 }
@@ -1372,21 +1355,15 @@ fn run_op(
                 .map(|m| m.mount_point().trim_end_matches('\\').to_string());
             info!(win = %win_arg, esp = ?esp_arg, uefi = *uefi, "bcdboot: recreating the loader");
             let report = finalize_boot(&win_arg, esp_arg.as_deref(), *uefi)?;
-            let mut follow_ups = vec![
-                "Загрузчик пересоздан командой bcdboot. Если система не стартует, \
-                 проверьте порядок загрузки в UEFI."
-                    .into(),
-            ];
+            let mut follow_ups = vec![tr!("restore_exec.bootloader_recreated").into_owned()];
             // The ESP came out of the copy, so its BCD still describes the
             // source disk: those entries point at GPT GUIDs this disk does not
             // have and end in 0xc000000e. They are hidden, not deleted.
             if report.menu_trimmed {
-                follow_ups.push(format!(
-                    "В скопированном хранилище загрузки было записей Windows: {}. В меню оставлена \
-                     одна — созданная bcdboot для восстановленной системы; остальные указывали на \
-                     разделы исходного диска и не загрузились бы. Система стартует без вопросов.",
-                    report.loaders_found
-                ));
+                follow_ups.push(
+                    tr!("restore_exec.boot_menu_trimmed", count = report.loaders_found)
+                        .into_owned(),
+                );
             }
             if let Some(note) = report.note {
                 follow_ups.push(note);
@@ -1396,9 +1373,7 @@ fn run_op(
             // screen (0xc0000001). Removing bootstat.dat is what makes the
             // restored machine start straight into Windows the first time.
             let message = if report.boot_status_cleared {
-                "Снят признак незавершённого выключения — первая загрузка пройдёт без экрана \
-                 восстановления"
-                    .to_string()
+                tr!("restore_exec.boot_status_cleared").into_owned()
             } else {
                 String::new()
             };
@@ -1426,12 +1401,7 @@ fn run_op(
             Ok(OpNote {
                 message: outcome.message,
                 follow_ups: if outcome.copied {
-                    vec![format!(
-                        "На разделе EFI не было \\EFI\\BOOT\\BOOTX64.EFI — единственного пути, \
-                         который UEFI пробует без записи в NVRAM. Скопировали туда загрузчик из \
-                         EFI\\{}, иначе на новой машине диск не стартовал бы.",
-                        outcome.from
-                    )]
+                    vec![tr!("restore_exec.fallback_copied", from = outcome.from).into_owned()]
                 } else {
                     outcome.follow_ups
                 },
@@ -1451,13 +1421,8 @@ fn run_op(
                 // The plan asked for them and the copy has none. Not a failure
                 // of the restore — everything on the disk is written — but the
                 // user was shown a list and is owed the news that it did not go.
-                note.message = "Записей загрузки в копии не оказалось".into();
-                note.follow_ups.push(
-                    "Копия не несёт записей загрузки UEFI, поэтому вернуть их не из чего. \
-                     Если машина не предложит загрузиться, добавьте запись в прошивке \
-                     вручную или через «Записи загрузки»."
-                        .into(),
-                );
+                note.message = tr!("restore_exec.no_boot_entries").into_owned();
+                note.follow_ups.push(tr!("restore_exec.no_boot_entries_follow_up").into_owned());
                 return Ok(note);
             };
 
@@ -1468,22 +1433,20 @@ fn run_op(
             // which of the two it was rather than left to assume.
             match efivars_win::safety_copy() {
                 Ok(copy) => {
-                    note.follow_ups.push(format!(
-                        "Прежние записи загрузки сохранены в {}{}",
-                        copy.path.display(),
+                    let path = copy.path.display();
+                    note.follow_ups.push(
                         if copy.durable {
-                            "."
+                            tr!("restore_exec.entries_saved", path = path)
                         } else {
-                            " — это временный диск, файл не переживёт перезагрузку."
+                            tr!("restore_exec.entries_saved_temporary", path = path)
                         }
-                    ));
+                        .into_owned(),
+                    );
                 }
                 Err(e) => {
                     warn!(error = %e, "restore: could not take a safety copy of the boot entries");
-                    note.follow_ups.push(format!(
-                        "Не удалось сохранить прежние записи загрузки ({e}) — они будут \
-                         заменены без копии."
-                    ));
+                    note.follow_ups
+                        .push(tr!("restore_exec.entries_save_failed", error = e).into_owned());
                 }
             }
 
@@ -1491,33 +1454,30 @@ fn run_op(
             if !here.is_empty() && !saved.machine.eq_ignore_ascii_case(&here) {
                 // The entries name partitions by GUID. From another machine
                 // those GUIDs are somebody else's.
-                note.follow_ups.push(format!(
-                    "Копия снята на машине «{}», а восстановление идёт на «{here}». \
-                     Записи указывают на разделы по их GUID, и здесь таких разделов \
-                     может не быть — пункты появятся в меню и не заработают.",
-                    saved.machine
-                ));
+                note.follow_ups.push(
+                    tr!("restore_exec.entries_other_machine", source = saved.machine, here = here)
+                        .into_owned(),
+                );
             }
 
             match efivars_win::apply_import(&saved) {
                 Ok(written) => {
                     info!(written, machine = %saved.machine, "restore: boot entries written");
-                    note.message = format!(
-                        "Записи загрузки возвращены: изменено {written} из {}",
-                        saved.variables.len()
-                    );
+                    note.message = tr!(
+                        "restore_exec.entries_restored",
+                        written = written,
+                        total = saved.variables.len()
+                    )
+                    .into_owned();
                 }
                 Err(e) => {
                     // The disk is restored; only the menu is not. Raising this
                     // would report a failed restore for a firmware that
                     // refuses writes — which many boards do.
                     warn!(error = %e, "restore: boot entries could not be written");
-                    note.message = "Записи загрузки вернуть не удалось".into();
-                    note.follow_ups.push(format!(
-                        "Прошивка не приняла записи загрузки ({e}). Диск восстановлен \
-                         полностью; добавьте пункт загрузки в настройках прошивки или \
-                         через «Записи загрузки»."
-                    ));
+                    note.message = tr!("restore_exec.entries_not_restored").into_owned();
+                    note.follow_ups
+                        .push(tr!("restore_exec.entries_firmware_refused", error = e).into_owned());
                 }
             }
             Ok(note)
@@ -1534,17 +1494,13 @@ fn run_op(
                 .and_then(|s| s.update_properties())
             {
                 Ok(()) => {
-                    note.message = format!("Диск {} перечитан", plan.target_disk);
+                    note.message =
+                        tr!("restore_exec.disk_reread", disk = plan.target_disk).into_owned();
                 }
                 Err(e) => {
                     warn!(disk = plan.target_disk, error = %e, "restore: disk re-read failed");
-                    note.message = "Диск не удалось перечитать".into();
-                    note.follow_ups.push(
-                        "Windows мог не перечитать разметку восстановленного диска. \
-                         Данные записаны полностью; если раздел не виден в проводнике, \
-                         откройте «Управление дисками» или перезагрузитесь."
-                            .into(),
-                    );
+                    note.message = tr!("restore_exec.disk_reread_failed").into_owned();
+                    note.follow_ups.push(tr!("restore_exec.disk_reread_follow_up").into_owned());
                 }
             }
             Ok(note)
@@ -1565,12 +1521,7 @@ fn finish_cancelled(state: &mut RestoreRunState, index: usize) {
     state.finished_at = Some(Utc::now().to_rfc3339());
     let destroyed = state.ops.iter().any(|o| o.status == OpStatus::Done && o.destroys_data);
     if destroyed {
-        state.follow_ups.push(
-            "Восстановление прервано после того, как данные на диске уже были перезаписаны. \
-             Отката нет: затронутые разделы непригодны, пока восстановление не будет \
-             выполнено заново."
-                .into(),
-        );
+        state.follow_ups.push(tr!("restore_exec.cancelled_after_write").into_owned());
     }
     warn!(cancelled_at = index, destroyed, "restore plan cancelled");
 }
@@ -1582,9 +1533,7 @@ fn add_failure_follow_ups(state: &mut RestoreRunState) {
     let destroyed: Vec<&OpRecord> =
         state.ops.iter().filter(|o| o.status == OpStatus::Done && o.destroys_data).collect();
     if destroyed.is_empty() {
-        state
-            .follow_ups
-            .push("Ничего перезаписать не успели — данные на диске не тронуты.".into());
+        state.follow_ups.push(tr!("restore_exec.nothing_overwritten").into_owned());
         return;
     }
     let parts: Vec<String> = destroyed
@@ -1593,15 +1542,9 @@ fn add_failure_follow_ups(state: &mut RestoreRunState) {
         .map(|i| i.to_string())
         .collect();
     state.follow_ups.push(if parts.is_empty() {
-        "Разметка диска уже перезаписана. Прежнюю таблицу разделов вернуть нельзя — \
-         повторите восстановление целиком."
-            .into()
+        tr!("restore_exec.table_overwritten").into_owned()
     } else {
-        format!(
-            "Данные уже перезаписаны на разделах: {}. Отката нет — эти разделы непригодны, \
-             пока восстановление не будет выполнено заново.",
-            parts.join(", ")
-        )
+        tr!("restore_exec.data_overwritten", parts = parts.join(", ")).into_owned()
     });
 }
 
@@ -1617,9 +1560,7 @@ pub fn execute_plan(
 ) -> Result<RestoreRunState> {
     let state = initial_state(plan);
     on_update(&state);
-    Err(OwnBackupError::NotImplemented(
-        "восстановление по плану реализовано только для Windows".into(),
-    ))
+    Err(OwnBackupError::NotImplemented(tr!("restore_exec.windows_only").into_owned()))
 }
 
 #[cfg(test)]

@@ -15,7 +15,7 @@ use zeroize::Zeroizing;
 
 use super::recovery::RecoveryKey;
 use super::{aead_open, aead_seal, bad, fill_random, SCHEME};
-use own_backup_common::Result;
+use own_backup_common::{tr, Result};
 
 pub const MAX_KEY_FILE_BYTES: usize = 16 * 1024;
 pub const MAX_JOB_ID_BYTES: usize = 128;
@@ -235,7 +235,7 @@ impl SealedPrivateKey {
     pub fn public_key(&self) -> Result<JobPublicKey> {
         let public = JobPublicKey(decode_fixed::<32>(&self.public)?);
         if self.fingerprint != public.fingerprint() {
-            return Err(bad("отпечаток открытого ключа не совпадает"));
+            return Err(bad(tr!("seal_keypair.fingerprint_mismatch")));
         }
         Ok(public)
     }
@@ -243,7 +243,7 @@ impl SealedPrivateKey {
     /// Validate the entire document before doing any expensive work.
     pub fn validate(&self) -> Result<()> {
         if self.format != KEY_FILE_FORMAT || self.scheme != SCHEME {
-            return Err(bad("неизвестный формат/версия схемы файла ключа"));
+            return Err(bad(tr!("seal_keypair.unknown_format")));
         }
         validate_job_id(&self.job_id)?;
         self.public_key()?;
@@ -294,8 +294,8 @@ impl SealedPrivateKey {
         let key = slot.kdf.derive(secret, &salt)?;
         let aad = slot_aad(&self.job_id, &public, kind, &slot.kdf, &salt, &nonce);
         let opened = aead_open(&key, &nonce, &aad, &sealed).map_err(|_| match kind {
-            SlotKind::Password => bad("пароль не подходит или файл ключа повреждён"),
-            SlotKind::Recovery => bad("ключ восстановления не подходит или файл ключа повреждён"),
+            SlotKind::Password => bad(tr!("seal_keypair.wrong_password")),
+            SlotKind::Recovery => bad(tr!("seal_keypair.wrong_recovery_key")),
         })?;
         let mut bytes = [0; 32];
         bytes.copy_from_slice(&opened);

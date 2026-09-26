@@ -14,11 +14,15 @@
   import Settings from './views/Settings.svelte';
   import About from './views/About.svelte';
   import type { ViewName } from './lib/types';
+  import { m } from './lib/paraglide/messages';
+  import { onLocale } from './lib/i18n.svelte';
 
   let currentView: ViewName = $state('backup');
   // Warning shown when the backup service isn't running/installed. Everything
   // (jobs, disks, backups) runs through it, so nothing works until it's up.
-  let serviceWarn: string | null = $state(null);
+  // Kept as a function, not a string: the text is drawn in whatever language
+  // the window speaks when it is drawn.
+  let serviceWarn: (() => string) | null = $state(null);
   let checking = $state(false);
 
   function handleNavigate(view: ViewName) {
@@ -35,28 +39,18 @@
         // WinPE's registry is in RAM, so there is nothing to install into, and
         // a schedule could not outlive the session anyway. Only losing the
         // engine is worth saying anything about.
-        serviceWarn = h.reachable
-          ? null
-          : 'Движок не отвечает. Запустите его: own-backup-service.exe --run --media, ' +
-            'затем нажмите «Повторить».';
+        serviceWarn = h.reachable ? null : m.app_engine_down;
       } else if (!h.installed) {
         // Not installed is always worth flagging: even if a temporary/foreground
         // instance answers, the scheduler only runs from the installed service.
-        serviceWarn = h.reachable
-          ? 'Служба «Own Backup» не установлена (сейчас отвечает временный экземпляр). ' +
-            'Установите её: own-backup-service.exe /install — иначе не будет работать расписание.'
-          : 'Служба «Own Backup» не установлена. Для работы программы установите её: ' +
-            'запустите own-backup-service.exe /install (появится запрос прав администратора), ' +
-            'затем нажмите «Повторить».';
+        serviceWarn = h.reachable ? m.app_not_installed_temp : m.app_not_installed;
       } else if (!h.reachable) {
-        serviceWarn =
-          'Служба «Own Backup» установлена, но не запущена. Запустите её ' +
-          '(нужны права администратора) или перезагрузите компьютер, затем нажмите «Повторить».';
+        serviceWarn = m.app_stopped;
       } else {
         serviceWarn = null;
       }
     } catch (e) {
-      serviceWarn = `Не удалось проверить службу: ${e}`;
+      serviceWarn = () => m.app_check_failed({ error: String(e) });
     } finally {
       checking = false;
     }
@@ -68,6 +62,12 @@
     // носитель на этом основании докладывал, что всё хорошо (2026-09-20).
     // Сказать правду может только код, который выполняется ВНУТРИ окна.
     api.guiReady().catch(() => {});
+    // The service's messages (errors, restore checks, …) come in the window's
+    // language: it is told now and at every switch. A config it cannot write
+    // leaves them Russian, which is not worth a banner.
+    onLocale((l) => {
+      api.setUiLanguage(l).catch(() => {});
+    });
     checkService();
     initEngine();
     initJobs();
@@ -86,9 +86,9 @@
           <path d="M12 3.5l9 16H3z" />
           <path d="M12 10v4M12 17h.01" />
         </svg>
-        <span class="sw-text">{serviceWarn}</span>
+        <span class="sw-text">{serviceWarn()}</span>
         <button class="sw-retry" onclick={checkService} disabled={checking}>
-          {checking ? 'Проверка…' : 'Повторить'}
+          {checking ? m.common_checking() : m.common_retry()}
         </button>
       </div>
     {/if}

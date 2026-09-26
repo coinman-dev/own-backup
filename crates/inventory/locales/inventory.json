@@ -1,0 +1,15 @@
+{
+  "_version": 2,
+  "fs_probe.bitlocker_label": {
+    "ru": "BitLocker (зашифровано)",
+    "en": "BitLocker (encrypted)"
+  },
+  "fs_probe.luks_label": {
+    "ru": "LUKS (зашифровано)",
+    "en": "LUKS (encrypted)"
+  },
+  "win_parse.removable": {
+    "ru": "(съёмный)",
+    "en": "(removable)"
+  }
+}

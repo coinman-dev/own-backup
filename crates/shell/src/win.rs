@@ -71,6 +71,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_TOPMOST, WS_POPUP,
 };
 
+use own_backup_common::tr;
+
 use crate::layout::{self, BarSlots};
 use crate::menu;
 
@@ -90,8 +92,11 @@ const INPUTLANGCHANGE_FORWARD: usize = 0x0002;
 const LAYOUT_SAMPLE: &str = "0000";
 const CLOCK_SAMPLE: &str = "00:00";
 /// The Start button. The product's name is on the backdrop behind it, where it
-/// does not have to be clicked to be read.
-const START_TEXT: &str = "Пуск";
+/// does not have to be clicked to be read. In the window's language, so asked
+/// for each time rather than kept.
+fn start_text() -> std::borrow::Cow<'static, str> {
+    tr!("win.start")
+}
 /// The way out, shown only off the boot medium — see [`BarSlots::close`].
 const CLOSE_TEXT: &str = "\u{2715}";
 
@@ -150,6 +155,9 @@ struct Bar {
     appbar: bool,
     /// The work area as we found it, when we had to set it ourselves.
     saved_work: Option<RECT>,
+    /// The language the Start button was last measured in. The window can
+    /// switch it while the strip is up, and the button's width is its word's.
+    language: &'static str,
 }
 
 thread_local! {
@@ -364,7 +372,7 @@ fn reflow(bar: HWND) {
         bar_h,
         // Roomier than the rest: it is a button, and a button the width of its
         // own word is a word.
-        text_width(font, START_TEXT) + gap * 3,
+        text_width(font, &start_text()) + gap * 3,
         text_width(font, LAYOUT_SAMPLE) + gap,
         text_width(font, CLOCK_SAMPLE) + gap,
         close_w,
@@ -373,6 +381,7 @@ fn reflow(bar: HWND) {
         b.bar_w = width;
         b.slots = slots;
         b.placing = false;
+        b.language = own_backup_common::lang::code();
     });
 
     let back = with_bar(|b| b.back);
@@ -511,6 +520,11 @@ fn undock(bar: HWND) {
 /// and repaint only if either actually changed. The strip is repainted 60 times
 /// a minute otherwise, and every one of them flickers.
 fn tick(bar: HWND) {
+    // The window switched language: the Start button has a new word, and a
+    // new width to go with it.
+    if with_bar(|b| b.language) != own_backup_common::lang::code() {
+        reflow(bar);
+    }
     let now = unsafe { GetLocalTime() };
     let clock = layout::clock_text(now.wHour, now.wMinute);
     let indicator = layout::layout_label(foreground_langid());
@@ -881,12 +895,12 @@ fn chose(window: HWND, id: u32) {
         menu::COMMAND_PROMPT => launch("cmd.exe", &[], None, CREATE_NEW_CONSOLE),
         menu::INTERFACE => start_the_interface(),
         menu::REBOOT => {
-            if confirm("Перезагрузить компьютер?") {
+            if confirm(&tr!("win.confirm_reboot")) {
                 launch("wpeutil", &["reboot"], None, CREATE_NO_WINDOW);
             }
         }
         menu::SHUTDOWN => {
-            if confirm("Выключить компьютер?") {
+            if confirm(&tr!("win.confirm_shutdown")) {
                 launch("wpeutil", &["shutdown"], None, CREATE_NO_WINDOW);
             }
         }
@@ -1391,7 +1405,7 @@ fn paint_bar(window: HWND) {
             SelectObject(dc, font);
             SetBkMode(dc, TRANSPARENT);
             SetTextColor(dc, BAR_TEXT);
-            draw_text(dc, &slots.start, START_TEXT, DT_CENTER.0);
+            draw_text(dc, &slots.start, &start_text(), DT_CENTER.0);
             for (slot, window) in buttons.iter().zip(&windows) {
                 // Inset, so a long title runs out of room before it reaches the
                 // next button rather than after.

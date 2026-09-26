@@ -7,6 +7,8 @@
   } from '../lib/jobStore.svelte';
   import InfoModal from '../components/InfoModal.svelte';
   import type { Job } from '../lib/types';
+  import { m } from '../lib/paraglide/messages';
+  import { intlLocale } from '../lib/i18n.svelte';
 
   interface Props {
     job: Job;
@@ -16,7 +18,8 @@
 
   let actionMsg: string | null = $state(null);
   let actionErr: string | null = $state(null);
-  let stubMsg: string | null = $state(null);
+  // A function, so the help text follows a change of language while it is open.
+  let stubMsg: (() => string) | null = $state(null);
 
   const status = $derived(jobStatus(job));
   const running = $derived(status === 'running');
@@ -54,14 +57,22 @@
     const p = progress;
     if (!p || !p.volume_count || p.volume_count <= 1) return '';
     const n = (p.volume_index ?? 0) + 1;
-    return `Том ${n}/${p.volume_count}${p.volume ? ` · ${p.volume}` : ''} — `;
+    return `${m.dash_vol_tag({ n, count: p.volume_count })}${p.volume ? ` · ${p.volume}` : ''} — `;
   });
 
-  const KIND_LABELS: Record<string, string> = {
-    incremental: 'инкрементная',
-    differential: 'дифференциальная',
+  const KIND_LABELS: Record<string, () => string> = {
+    incremental: m.kind_incremental,
+    differential: m.kind_differential,
   };
-  const kindLabel = (k: string) => KIND_LABELS[k] ?? 'полная';
+  const kindLabel = (k: string) => (KIND_LABELS[k] ?? m.kind_full)();
+
+  const SCHED_LABELS: Record<string, () => string> = {
+    daily: m.dash_sched_daily,
+    weekly: m.dash_sched_weekly,
+    monthly: m.dash_sched_monthly,
+    event: m.dash_sched_event,
+    nonstop: m.dash_sched_nonstop,
+  };
 
   /** What the check after the copy reads, said the way the setting is.
    *  «Проверять только последнюю копию» reads this file alone; otherwise the
@@ -71,7 +82,7 @@
   const verifyLabel = $derived.by(() => {
     const tag = progress?.image_file_name?.match(/_(full|inc|diff)_\d{8}-\d{6}\.[^.]+$/i)?.[1];
     const onlyThis = job.advanced.verify_latest_only || tag?.toLowerCase() === 'full';
-    return onlyThis ? 'Проверка этой резервной копии…' : 'Проверка всех резервных копий…';
+    return onlyThis ? m.dash_verify_this() : m.dash_verify_all();
   });
 
   // The round indicator spans BOTH phases when "проверять после создания" is on:
@@ -120,13 +131,13 @@
 
   // Real data-category breakdown, collected during the backup's file walk.
   const CAT_META = [
-    { key: 'images', name: 'Изображения', color: '#5ab02f' },
-    { key: 'video', name: 'Видео', color: '#d8c81e' },
-    { key: 'audio', name: 'Аудио', color: '#e07a2f' },
-    { key: 'documents', name: 'Документы', color: '#8b5cf6' },
-    { key: 'windows', name: 'Windows', color: '#4f9be8' },
-    { key: 'linux', name: 'Linux', color: '#14b8a6' },
-    { key: 'other', name: 'Другое', color: '#9aa0ad' },
+    { key: 'images', name: m.cat_images, color: '#5ab02f' },
+    { key: 'video', name: m.cat_video, color: '#d8c81e' },
+    { key: 'audio', name: m.cat_audio, color: '#e07a2f' },
+    { key: 'documents', name: m.cat_documents, color: '#8b5cf6' },
+    { key: 'windows', name: m.cat_windows, color: '#4f9be8' },
+    { key: 'linux', name: m.cat_linux, color: '#14b8a6' },
+    { key: 'other', name: m.cat_other, color: '#9aa0ad' },
   ] as const;
   // Сводка, присланная сразу после скана: приходит одним сообщением, а
   // дальше её переносит из сообщения в сообщение хранилище прогона — здесь
@@ -140,12 +151,12 @@
     // Во время копирования — свежая сводка от сканера; после — из результата.
     const c = liveCategories ?? lastGood?.categories;
     if (!c) return null;
-    const total = CAT_META.reduce((s, m) => s + (c[m.key] ?? 0), 0);
+    const total = CAT_META.reduce((s, cm) => s + (c[cm.key] ?? 0), 0);
     if (total <= 0) return null;
-    return CAT_META.map((m) => ({
-      ...m,
-      bytes: c[m.key] ?? 0,
-      pct: ((c[m.key] ?? 0) / total) * 100,
+    return CAT_META.map((cm) => ({
+      ...cm,
+      bytes: c[cm.key] ?? 0,
+      pct: ((c[cm.key] ?? 0) / total) * 100,
     }));
   });
 
@@ -171,13 +182,13 @@
     const ex = excludedBytes ?? 0;
     const total = kept + ex;
     if (total <= 0) return null;
-    const out: { name: string; color: string; bytes: number; pct: number }[] = catData.map((c) => ({
+    const out: { name: () => string; color: string; bytes: number; pct: number }[] = catData.map((c) => ({
       name: c.name,
       color: c.color,
       bytes: c.bytes,
       pct: (c.bytes / total) * 100,
     }));
-    if (ex > 0) out.push({ name: 'Исключено', color: EXCLUDED_COLOR, bytes: ex, pct: (ex / total) * 100 });
+    if (ex > 0) out.push({ name: m.cat_excluded, color: EXCLUDED_COLOR, bytes: ex, pct: (ex / total) * 100 });
     return out;
   });
 
@@ -223,7 +234,7 @@
 {#snippet excludedCell()}
   <div class="cat">
     <span class="dot" style:background={EXCLUDED_COLOR}></span>
-    <span class="cat-name">Исключено</span>
+    <span class="cat-name">{m.cat_excluded()}</span>
     <span class="cat-size">{excludedBytes == null ? '…' : formatBytes(excludedBytes)}</span>
   </div>
 {/snippet}
@@ -288,29 +299,32 @@
     <div class="progress-wrap">
       <div class="progress-info">
         <span>
-          {volTag}{#if preparing}Подготовка: поиск исключаемых файлов…
-          {:else if excluding}Удаление исключённых файлов из образа…
-          {:else if finalizing}Завершение: запись образа на диск…
+          {volTag}{#if preparing}{m.dash_phase_prepare()}
+          {:else if excluding}{m.dash_phase_exclusions()}
+          {:else if finalizing}{m.dash_phase_finalize()}
           {:else if verifying}{verifyLabel}
-          {:else}Резервное копирование…{/if}
+          {:else}{m.dash_phase_backup()}{/if}
         </span>
         {#if progress}
           <span>
             {#if preparing}
-              {progress.blocks_done.toLocaleString('ru-RU')} записей просмотрено
-              {#if progress.blocks_total > 0}из {progress.blocks_total.toLocaleString('ru-RU')}{/if}
+              {#if progress.blocks_total > 0}
+                {m.dash_prep_scanned_of({ done: progress.blocks_done.toLocaleString(intlLocale()), total: progress.blocks_total.toLocaleString(intlLocale()) })}
+              {:else}
+                {m.dash_prep_scanned({ done: progress.blocks_done.toLocaleString(intlLocale()) })}
+              {/if}
             {:else if excluding}
               {#if progress.blocks_total > 0}
-                {progress.blocks_done.toLocaleString('ru-RU')} из {progress.blocks_total.toLocaleString('ru-RU')}
+                {m.dash_n_of_total({ done: progress.blocks_done.toLocaleString(intlLocale()), total: progress.blocks_total.toLocaleString(intlLocale()) })}
               {:else}
-                файлы удаляются и зануляются в готовой копии…
+                {m.dash_excluding_note()}
               {/if}
             {:else if finalizing}
-              сброс кэша на диск, подождите…
+              {m.dash_finalizing_note()}
             {:else}
               <!-- Пробел перед «·» пишется явно: в начале блока {#if} Svelte
                    его срезает, и получалось «блоков· 85.1 МБ/с». -->
-              {progress.blocks_done} / {progress.blocks_total} блоков{#if progress.speed_mbps > 0}{'\u00a0· '}{progress.speed_mbps.toFixed(1)} МБ/с{/if}
+              {m.dash_blocks({ done: progress.blocks_done, total: progress.blocks_total })}{#if progress.speed_mbps > 0}{'\u00a0· '}{m.dash_speed({ speed: progress.speed_mbps.toFixed(1) })}{/if}
             {/if}
           </span>
         {/if}
@@ -321,7 +335,7 @@
           {sourceSummary(job)} → {destPath}
         </span>
         <span class="times">
-          Прошло {formatClock(elapsedMs)} · Осталось {Number.isFinite(eta) ? '~' + formatClock(eta) : 'оценка…'}
+          {m.dash_elapsed({ time: formatClock(elapsedMs) })} · {m.dash_remaining({ time: Number.isFinite(eta) ? '~' + formatClock(eta) : m.dash_estimating() })}
         </span>
       </div>
     </div>
@@ -331,17 +345,17 @@
          не через двадцать. -->
     {#if catData}
       <div class="live-cats">
-        <div class="live-cats-head">Что войдёт в копию — по типам файлов</div>
+        <div class="live-cats-head">{m.dash_live_cats_head()}</div>
         <div class="catbar">
           {#each barData?.filter((c) => c.bytes > 0) ?? [] as c}
-            <div class="catseg" style="width:{c.pct}%; background:{c.color}" title="{c.name}: {formatBytes(c.bytes)}"></div>
+            <div class="catseg" style="width:{c.pct}%; background:{c.color}" title="{c.name()}: {formatBytes(c.bytes)}"></div>
           {/each}
         </div>
         <div class="cats">
           {#each catData as c}
             <div class="cat">
               <span class="dot" style="background:{c.color}"></span>
-              <span class="cat-name">{c.name}</span>
+              <span class="cat-name">{c.name()}</span>
               <span class="cat-size">{formatBytes(c.bytes)}</span>
             </div>
           {/each}
@@ -353,30 +367,30 @@
     <!-- stats row -->
     <div class="stats">
       <span>
-        Последнее копирование:
+        {m.dash_last_backup()}
         <b>{lastGood
           ? formatDate(lastGood.finished_at)
           : lastRun
-            ? 'копий ещё нет'
-            : 'ещё не выполнялось'}</b>
+            ? m.dash_no_backups_yet()
+            : m.dash_never_run()}</b>
       </span>
       <span class="reco">
-        Данные для восстановления:
+        {m.dash_restore_data()}
         <b>{lastGood ? formatBytes(lastGood.used_blocks > 0 ? lastGood.used_blocks * 1048576 : lastGood.bytes_copied) : '—'}</b>
-        <button class="q" title="О разбивке по типам" onclick={() => (stubMsg = 'Разбивка по типам считается по файлам, вошедшим в копию (по расширениям), во время сканирования тома. Исключённые файлы не учитываются.')}>?</button>
+        <button class="q" title={m.dash_cats_about()} onclick={() => (stubMsg = m.dash_cats_about_text)}>?</button>
       </span>
     </div>
     {#if catData}
       <div class="catbar">
         {#each barData?.filter((c) => c.bytes > 0) ?? [] as c}
-          <div class="catseg" style="width:{c.pct}%; background:{c.color}" title="{c.name}: {formatBytes(c.bytes)}"></div>
+          <div class="catseg" style="width:{c.pct}%; background:{c.color}" title="{c.name()}: {formatBytes(c.bytes)}"></div>
         {/each}
       </div>
       <div class="cats">
         {#each catData as c}
           <div class="cat">
             <span class="dot" style="background:{c.color}"></span>
-            <span class="cat-name">{c.name}</span>
+            <span class="cat-name">{c.name()}</span>
             <span class="cat-size">{formatBytes(c.bytes)}</span>
           </div>
         {/each}
@@ -389,9 +403,9 @@
            someone whose next copy will not have it either. -->
       <div class="cats-note">
         {#if lastGood?.file_scan_skipped}
-          Разбивка по типам для этой копии не считалась: {lastGood.file_scan_skipped}.
+          {m.dash_cats_skipped({ reason: lastGood.file_scan_skipped })}
         {:else}
-          Разбивка по типам появится после следующего копирования (считается при сканировании тома).
+          {m.dash_cats_next()}
         {/if}
       </div>
     {/if}
@@ -399,7 +413,7 @@
     {#if lastRun?.status === 'success'}
       {#if summaryHidden}
         <button class="summary-show" onclick={() => { summaryHidden = false; rememberSummaryState(false); }}>
-          <span class="bdot small"></span>Показать сведения о копии
+          <span class="bdot small"></span>{m.dash_show_summary()}
         </button>
       {:else}
         <div class="banner ok">
@@ -407,30 +421,30 @@
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg>
           </span>
           <span>
-            Копия создана — {kindLabel(lastRun.backup_kind)}{lastRun.vss_used
-              ? ', снимок VSS'
+            {lastRun.vss_used
+              ? m.dash_created_vss({ kind: kindLabel(lastRun.backup_kind) })
               : media.active
-                ? ', холодная копия (система офлайн)'
-                : ''}.
-            {lastRun.smart_mode ? 'Только занятые секторы.' : 'Посекторно.'}
+                ? m.dash_created_cold({ kind: kindLabel(lastRun.backup_kind) })
+                : m.dash_created({ kind: kindLabel(lastRun.backup_kind) })}
+            {lastRun.smart_mode ? m.dash_used_only() : m.dash_sector_by_sector()}
             {#if lastRun.backup_kind === 'incremental' || lastRun.backup_kind === 'differential'}
-              Записано только изменённое: {formatBytes(lastRun.bytes_copied)}.
+              {m.dash_changed_only({ size: formatBytes(lastRun.bytes_copied) })}
             {/if}
             {#if lastRun.consolidated_increments > 0}
-              Объединено версий: {lastRun.consolidated_increments} — самые старые
-              инкременты влиты в полную копию, она теперь соответствует более
-              позднему дню.
+              {m.dash_consolidated({ count: lastRun.consolidated_increments })}
             {/if}
             {#if lastRun.excluded_files > 0}
-              Исключено файлов: {lastRun.excluded_files} ({formatBytes(lastRun.excluded_bytes)}).
+              {m.dash_excluded_files({ count: lastRun.excluded_files, size: formatBytes(lastRun.excluded_bytes) })}
             {:else if exclusionsIgnored}
               <br />
-              <b>Исключения не применялись</b> ({job.exclusions.patterns.length}
-              {job.exclusions.patterns.length === 1 ? 'правило' : 'правил'}): {lastRun.file_scan_skipped}.
-              Всё, что под них попадает, в копии есть.
+              <b>{m.dash_excl_ignored()}</b>
+              {m.dash_excl_ignored_rest({
+                rules: m.dash_rules_count({ count: job.exclusions.patterns.length }),
+                reason: lastRun.file_scan_skipped ?? '',
+              })}
             {/if}
           </span>
-          <button class="banner-x" title="Скрыть" aria-label="Скрыть" onclick={() => { summaryHidden = true; rememberSummaryState(true); }}>
+          <button class="banner-x" title={m.common_hide()} aria-label={m.common_hide()} onclick={() => { summaryHidden = true; rememberSummaryState(true); }}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18" /></svg>
           </button>
         </div>
@@ -438,7 +452,7 @@
     {:else if lastRun?.status === 'error'}
       <!-- When: the stats above now date the last COPY, and without its own
            time this banner read as if that copy had failed. -->
-      <div class="banner err">{@render errIcon()}<span>Ошибка ({formatDate(lastRun.finished_at)}): {lastRun.error}</span></div>
+      <div class="banner err">{@render errIcon()}<span>{m.dash_error({ date: formatDate(lastRun.finished_at), error: lastRun.error ?? '' })}</span></div>
     {/if}
   {/if}
 
@@ -449,22 +463,22 @@
   <div class="footer">
     <div class="hint">
       {#if status === 'queued'}
-        В очереди на выполнение…
+        {m.dash_queued()}
       {:else}
-        Расписание: {job.schedule.kind === 'none' ? 'не задано (запуск вручную)' : ({ daily: 'ежедневно', weekly: 'еженедельно', monthly: 'ежемесячно', event: 'по событию', nonstop: 'непрерывно' }[job.schedule.kind] ?? job.schedule.kind)}
+        {m.dash_schedule({ schedule: job.schedule.kind === 'none' ? m.dash_sched_none() : (SCHED_LABELS[job.schedule.kind]?.() ?? job.schedule.kind) })}
       {/if}
     </div>
-    <button class="btn outline" onclick={onEdit} disabled={running}>Параметры</button>
+    <button class="btn outline" onclick={onEdit} disabled={running}>{m.dash_options()}</button>
     {#if running}
-      <button class="btn danger" onclick={cancel}>Отмена</button>
+      <button class="btn danger" onclick={cancel}>{m.common_cancel()}</button>
     {:else}
-      <button class="btn green" onclick={backup}>Создать копию</button>
+      <button class="btn green" onclick={backup}>{m.dash_backup_now()}</button>
     {/if}
   </div>
 </div>
 
 {#if stubMsg}
-  <InfoModal title="О разбивке по типам" message={stubMsg} onClose={() => (stubMsg = null)} />
+  <InfoModal title={m.dash_cats_about()} message={stubMsg()} onClose={() => (stubMsg = null)} />
 {/if}
 
 <style>

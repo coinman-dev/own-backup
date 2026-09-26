@@ -23,7 +23,7 @@ use xts_mode::Xts128;
 use zeroize::Zeroizing;
 
 use own_backup_common::image::VolumeEncryptionKind;
-use own_backup_common::{OwnBackupError, Result};
+use own_backup_common::{tr, OwnBackupError, Result};
 
 use crate::fat_map::RawVolume;
 
@@ -288,12 +288,12 @@ pub fn decode_stored_header(
 ) -> Result<Vec<u8>> {
     let bytes = B64
         .decode(&stored.header_b64)
-        .map_err(|e| bad(format!("повреждён сохранённый заголовок LUKS: {e}")))?;
+        .map_err(|e| bad(tr!("luks.stored_header_corrupt", error = e)))?;
     if bytes.len() as u64 != stored.data_offset {
-        return Err(bad(format!(
-            "сохранённый заголовок LUKS — {} Б, а контейнер начинал данные с {} Б",
-            bytes.len(),
-            stored.data_offset
+        return Err(bad(tr!(
+            "luks.stored_header_length",
+            len = bytes.len(),
+            data_offset = stored.data_offset
         )));
     }
     Ok(bytes)
@@ -433,7 +433,7 @@ pub fn inspect_luks(vol: &mut dyn RawVolume) -> Result<LuksInfo> {
         2 => inspect_luks2(vol, &header),
         v => Ok(LuksInfo {
             version: v,
-            methods: vec![format!("LUKS {v} — этот формат ещё не поддерживается")],
+            methods: vec![tr!("luks.version_unsupported", version = v).into_owned()],
             openable: false,
         }),
     }
@@ -444,7 +444,7 @@ fn inspect_luks1(hdr: &[u8]) -> LuksInfo {
     if hdr.len() < 592 {
         return LuksInfo {
             version: 1,
-            methods: vec!["заголовок LUKS1 обрезан".into()],
+            methods: vec![tr!("luks.luks1_header_truncated").into_owned()],
             openable: false,
         };
     }
@@ -455,16 +455,20 @@ fn inspect_luks1(hdr: &[u8]) -> LuksInfo {
 
     let mut why = Vec::new();
     if check_cipher(&spec).is_err() {
-        why.push(format!("LUKS1: шифр {spec} не поддерживается"));
+        why.push(tr!("luks.luks1_cipher_unsupported", cipher = spec).into_owned());
     }
     if Hash::parse(&hash).is_err() {
-        why.push(format!("LUKS1: хеш {hash} не поддерживается"));
+        why.push(tr!("luks.luks1_hash_unsupported", hash = hash).into_owned());
     }
     if slots == 0 {
-        why.push("LUKS1: нет активных слотов ключа".into());
+        why.push(tr!("luks.luks1_no_active_slots").into_owned());
     }
     if why.is_empty() {
-        LuksInfo { version: 1, methods: vec!["пароль".into()], openable: true }
+        LuksInfo {
+            version: 1,
+            methods: vec![tr!("luks.method_password").into_owned()],
+            openable: true,
+        }
     } else {
         LuksInfo { version: 1, methods: why, openable: false }
     }
@@ -492,10 +496,10 @@ fn inspect_luks2(vol: &mut dyn RawVolume, hdr: &[u8]) -> Result<LuksInfo> {
         Some(seg) => {
             let spec = jstr(seg, "encryption").unwrap_or_default();
             if check_cipher(spec).is_err() {
-                why.push(format!("LUKS2: шифр {spec} не поддерживается"));
+                why.push(tr!("luks.luks2_cipher_unsupported", cipher = spec).into_owned());
             }
         }
-        None => why.push("LUKS2: в заголовке нет зашифрованного сегмента".into()),
+        None => why.push(tr!("luks.luks2_no_crypt_segment").into_owned()),
     }
 
     // A container mid-reencryption is a moving target: half its data is under
@@ -508,7 +512,7 @@ fn inspect_luks2(vol: &mut dyn RawVolume, hdr: &[u8]) -> Result<LuksInfo> {
         .map(|a| a.iter().filter_map(|r| r.as_str().map(str::to_string)).collect())
         .unwrap_or_default();
     for r in &requirements {
-        why.push(format!("LUKS2: {r} — том в особом состоянии, скопировать его целиком нельзя"));
+        why.push(tr!("luks.luks2_requirement", requirement = r).into_owned());
     }
 
     // Keyslots the user can type into. A slot claimed by a token — systemd's
@@ -542,17 +546,20 @@ fn inspect_luks2(vol: &mut dyn RawVolume, hdr: &[u8]) -> Result<LuksInfo> {
         .count();
     if usable_slots == 0 {
         if token_types.is_empty() {
-            why.push("LUKS2: нет слотов, которые открываются паролем".into());
+            why.push(tr!("luks.luks2_no_password_slots").into_owned());
         } else {
-            why.push(format!(
-                "LUKS2: все слоты заняты токенами ({}) — Own Backup умеет только пароль",
-                token_types.join(", ")
-            ));
+            why.push(
+                tr!("luks.luks2_all_slots_tokens", tokens = token_types.join(", ")).into_owned(),
+            );
         }
     }
 
     Ok(if why.is_empty() {
-        LuksInfo { version: 2, methods: vec!["пароль".into()], openable: true }
+        LuksInfo {
+            version: 2,
+            methods: vec![tr!("luks.method_password").into_owned()],
+            openable: true,
+        }
     } else {
         LuksInfo { version: 2, methods: why, openable: false }
     })

@@ -15,6 +15,7 @@
 //! medium's own partition instead, next to `\sources`. The launcher finds that
 //! partition by a marker file, because WinPE assigns it whatever letter it likes.
 
+use own_backup_common::tr;
 use std::path::{Path, PathBuf};
 
 // Where the medium keeps its own files, and how it is recognised. Defined in
@@ -174,18 +175,40 @@ pub const KEEP_LOCALES: [&str; 2] = ["ru.pak", "en-US.pak"];
 /// controller and the Ethernet card — and drops the Logitech receiver, the Canon
 /// and Epson printers, five Intel chipset packages, WireGuard, OpenVPN and the
 /// Avast network filter.
-pub const RESCUE_CLASSES: [(&str, &[&str], &str); 5] = [
+pub const RESCUE_CLASSES: [(&str, &[&str], RescueRole); 5] = [
     // storage controllers — RAID, NVMe, SAS
-    ("{4d36e97b-e325-11ce-bfc1-08002be10318}", &["PCI"], "контроллер дисков"),
+    ("{4d36e97b-e325-11ce-bfc1-08002be10318}", &["PCI"], RescueRole::DiskController),
     // IDE / AHCI controllers
-    ("{4d36e96a-e325-11ce-bfc1-08002be10318}", &["PCI"], "контроллер дисков"),
+    ("{4d36e96a-e325-11ce-bfc1-08002be10318}", &["PCI"], RescueRole::DiskController),
     // the disks themselves, which can hang off either
-    ("{4d36e967-e325-11ce-bfc1-08002be10318}", &["SCSI", "USB"], "диск"),
+    ("{4d36e967-e325-11ce-bfc1-08002be10318}", &["SCSI", "USB"], RescueRole::Disk),
     // network adapters: cards on PCI, dongles on USB
-    ("{4d36e972-e325-11ce-bfc1-08002be10318}", &["PCI", "USB"], "сетевой адаптер"),
+    ("{4d36e972-e325-11ce-bfc1-08002be10318}", &["PCI", "USB"], RescueRole::NetworkAdapter),
     // USB host controllers, which are PCI devices — not what is plugged in
-    ("{36fc9e60-c465-11cf-8056-444553540000}", &["PCI"], "контроллер USB"),
+    ("{36fc9e60-c465-11cf-8056-444553540000}", &["PCI"], RescueRole::UsbController),
 ];
+
+/// What a device of a rescue class is, for the interface to say why its driver
+/// is on the list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RescueRole {
+    DiskController,
+    Disk,
+    NetworkAdapter,
+    UsbController,
+}
+
+impl RescueRole {
+    /// In words, in the window's language.
+    pub fn text(self) -> &'static str {
+        crate::esp_scan::static_text(match self {
+            RescueRole::DiskController => tr!("media_layout.role_disk_controller"),
+            RescueRole::Disk => tr!("media_layout.role_disk"),
+            RescueRole::NetworkAdapter => tr!("media_layout.role_network_adapter"),
+            RescueRole::UsbController => tr!("media_layout.role_usb_controller"),
+        })
+    }
+}
 
 /// Just the GUIDs, for handing to a device query that should not walk classes we
 /// are going to throw away anyway.
@@ -211,12 +234,13 @@ pub fn is_published_inf(inf: &str) -> bool {
 }
 
 /// Does this class/bus pair belong on a rescue medium? Returns what it is, in
-/// words, so the interface can say why a driver is on the list.
+/// words and in the window's language ([`RescueRole::text`]), so the interface
+/// can say why a driver is on the list.
 pub fn rescue_role(class_guid: &str, bus: &str) -> Option<&'static str> {
     let guid = class_guid.trim().to_ascii_lowercase();
     let bus = bus.trim().to_ascii_uppercase();
     RESCUE_CLASSES.iter().find_map(|(g, buses, role)| {
-        (g.eq_ignore_ascii_case(&guid) && buses.iter().any(|b| *b == bus)).then_some(*role)
+        (g.eq_ignore_ascii_case(&guid) && buses.iter().any(|b| *b == bus)).then(|| role.text())
     })
 }
 

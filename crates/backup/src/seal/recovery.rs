@@ -16,7 +16,7 @@ use bech32::{primitives::decode::CheckedHrpstring, Bech32m, Hrp};
 use zeroize::Zeroizing;
 
 use super::{bad, fill_random};
-use own_backup_common::Result;
+use own_backup_common::{tr, Result};
 
 const HRP: &str = "obkr";
 
@@ -59,7 +59,7 @@ impl RecoveryKey {
     /// ловится контрольной суммой.
     pub fn parse(typed: &str) -> Result<Self> {
         if typed.len() > 256 {
-            return Err(bad("ключ восстановления слишком длинный"));
+            return Err(bad(tr!("seal_recovery.too_long")));
         }
         let compact = Zeroizing::new(
             typed
@@ -69,19 +69,19 @@ impl RecoveryKey {
                 .collect::<String>(),
         );
         let checked = CheckedHrpstring::new::<Bech32m>(&compact)
-            .map_err(|_| bad("ключ восстановления не читается: опечатка или не та строка"))?;
+            .map_err(|_| bad(tr!("seal_recovery.unreadable")))?;
         if checked.hrp().as_str() != HRP {
-            return Err(bad("это не ключ восстановления копий"));
+            return Err(bad(tr!("seal_recovery.not_a_recovery_key")));
         }
         let data = Zeroizing::new(checked.byte_iter().collect::<Vec<u8>>());
         if data.len() != 32 {
-            return Err(bad("ключ восстановления должен нести 32 байта"));
+            return Err(bad(tr!("seal_recovery.wrong_length")));
         }
         let mut bytes = Zeroizing::new([0; 32]);
         bytes.copy_from_slice(&data);
         let key = RecoveryKey(bytes);
         if *key.to_string_plain() != *compact {
-            return Err(bad("неканоническая запись ключа восстановления"));
+            return Err(bad(tr!("seal_recovery.not_canonical")));
         }
         Ok(key)
     }

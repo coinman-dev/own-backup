@@ -9,13 +9,33 @@ pub async fn get_config(state: State<'_, GuiState>) -> Result<AppConfig, String>
 }
 
 #[tauri::command]
-pub async fn save_config(state: State<'_, GuiState>, config: AppConfig) -> Result<(), String> {
+pub async fn save_config(state: State<'_, GuiState>, mut config: AppConfig) -> Result<(), String> {
+    // The language is not a field of the settings form: it is switched on its
+    // own (`set_ui_language`), and a form loaded before the switch would
+    // otherwise save the old one back.
+    config.ui_language = state.config.lock().map_err(|e| e.to_string())?.ui_language.clone();
     config.save_to_file(&state.config_path).map_err(|e| e.to_string())?;
     // The in-memory copy has to move too. Writing only the file left
     // `get_config` handing back what was loaded at startup, so anything saved
     // came back missing as soon as the user navigated away and returned.
     *state.config.lock().map_err(|e| e.to_string())? = config;
     Ok(())
+}
+
+/// The window's language, already resolved («Как в Windows» → `ru`/`en`).
+/// This process's own messages switch at once; the config remembers it for
+/// the service, which follows the file (`own_backup_common::lang`). Written
+/// only when it changed — the window says it at every start.
+#[tauri::command]
+pub async fn set_ui_language(state: State<'_, GuiState>, lang: String) -> Result<(), String> {
+    own_backup_common::lang::set(&lang);
+    let code = own_backup_common::lang::code();
+    let mut config = state.config.lock().map_err(|e| e.to_string())?;
+    if config.ui_language == code {
+        return Ok(());
+    }
+    config.ui_language = code.to_string();
+    config.save_to_file(&state.config_path).map_err(|e| e.to_string())
 }
 
 #[derive(serde::Serialize)]

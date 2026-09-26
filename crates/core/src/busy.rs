@@ -32,6 +32,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use own_backup_common::cancel::CancelToken;
+use own_backup_common::tr;
 
 /// What is going on right now.
 #[derive(Debug, Clone)]
@@ -73,7 +74,7 @@ impl Busy {
                 Ok(Reservation { permit: Some(permit), busy: self.clone() })
             }
             Err(_) => Err(self.current().unwrap_or_else(|| Doing {
-                what: "другая операция".into(),
+                what: tr!("busy.another_operation").into_owned(),
                 which: String::new(),
                 cancel: CancelToken::default(),
             })),
@@ -165,12 +166,9 @@ impl Doing {
     /// The sentence a second caller is shown.
     pub fn refusal(&self) -> String {
         if self.which.is_empty() {
-            format!("Сейчас выполняется: {}. Дождитесь окончания или остановите.", self.what)
+            tr!("busy.refusal", what = self.what).into_owned()
         } else {
-            format!(
-                "Сейчас выполняется: {} ({}). Дождитесь окончания или остановите.",
-                self.what, self.which
-            )
+            tr!("busy.refusal_which", what = self.what, which = self.which).into_owned()
         }
     }
 }

@@ -33,7 +33,7 @@
 //! it — which in practice means refusing and offering the boot medium, where
 //! none of these questions arise because nothing is running.
 
-use own_backup_common::{OwnBackupError, Result};
+use own_backup_common::{tr, OwnBackupError, Result};
 
 /// What is protected on one disk, and how sure we are.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -77,19 +77,14 @@ pub fn check_whole_disk_restore(
     }
     match system_disk {
         Some(sys) if sys == target_disk => Err(OwnBackupError::RestoreIncompatible(
-            "Нельзя восстанавливать диск, на котором работает Windows, «на живую». \
-             Загрузитесь с носителя восстановления (WinPE) или выберите другой диск."
-                .into(),
+            tr!("guard.live_system_disk").into_owned(),
         )),
         Some(_) => Ok(()),
         // The check could not be made. Before this, that meant "go ahead" —
         // and the one case where detection fails is an unusual disk setup,
         // which is exactly where being wrong costs the most.
         None => Err(OwnBackupError::RestoreIncompatible(
-            "Не удалось определить, на каком диске работает Windows, поэтому нельзя \
-             убедиться, что выбран не он. Загрузитесь с носителя восстановления — \
-             там этот вопрос не стоит."
-                .into(),
+            tr!("guard.system_disk_unknown").into_owned(),
         )),
     }
 }
@@ -164,34 +159,27 @@ pub fn guard_target_volume(target: &str) -> Result<()> {
     }
     if live.is_empty() {
         return Err(OwnBackupError::RestoreIncompatible(
-            "Не удалось определить, где стоит работающая Windows, поэтому нельзя \
-             убедиться, что запись пойдёт не на неё. Загрузитесь с носителя \
-             восстановления."
-                .into(),
+            tr!("guard.live_system_location_unknown").into_owned(),
         ));
     }
 
     let Some(root) = volume_root_for_path(target).or_else(|| volume_root_for_path(&format!("{target}\\"))) else {
         // An unrecognised target is not obviously safe: it may be a raw device
         // path pointing at the very volume above.
-        return Err(OwnBackupError::RestoreIncompatible(format!(
-            "Не удалось определить, что такое «{target}», поэтому запись на него \
-             не разрешена. Выберите том в списке."
-        )));
+        return Err(OwnBackupError::RestoreIncompatible(
+            tr!("guard.target_unrecognised", target = target).into_owned(),
+        ));
     };
     let target_extents = volume_extents(&root);
     if target_extents.is_empty() {
-        return Err(OwnBackupError::RestoreIncompatible(format!(
-            "Не удалось определить, где на диске лежит «{target}», поэтому нельзя \
-             убедиться, что это не системный том."
-        )));
+        return Err(OwnBackupError::RestoreIncompatible(
+            tr!("guard.target_location_unknown", target = target).into_owned(),
+        ));
     }
     for e in &target_extents {
         if live.contains(&(e.disk_number, e.offset)) {
             return Err(OwnBackupError::RestoreIncompatible(
-                "Это том, с которого работает Windows. Перезаписать его на живой \
-                 системе нельзя — загрузитесь с носителя восстановления."
-                    .into(),
+                tr!("guard.target_is_live_system").into_owned(),
             ));
         }
     }
@@ -230,10 +218,9 @@ pub fn protection(disk: u32) -> Protection {
     let layout = match own_backup_backup::gpt_reader::read_disk_layout(disk) {
         Ok(l) => l,
         Err(e) => {
-            return Protection::unsure(format!(
-                "не удалось прочитать разметку диска {disk} ({e}), \
-                 поэтому неизвестно, есть ли на нём разделы работающей системы"
-            ))
+            return Protection::unsure(
+                tr!("guard.layout_unreadable", disk = disk, error = e).into_owned(),
+            )
         }
     };
     let sector = layout.sector_size.max(512) as u64;
@@ -249,9 +236,9 @@ pub fn protection(disk: u32) -> Protection {
         }
         None if system_disk_number() == Some(disk) => {
             // Windows says it lives on this disk and we cannot find where.
-            return Protection::unsure(format!(
-                "Windows работает с диска {disk}, но найти её раздел не удалось"
-            ));
+            return Protection::unsure(
+                tr!("guard.system_partition_not_found", disk = disk).into_owned(),
+            );
         }
         None => {} // the running system is not on this disk at all
     }

@@ -43,17 +43,19 @@ impl FileSystem {
         matches!(self, FileSystem::Ntfs | FileSystem::Fat32 | FileSystem::ExFat | FileSystem::ReFs)
     }
 
-    /// Display name as users know it.
-    pub fn label(self) -> &'static str {
+    /// Display name as users know it. The names themselves are the same in
+    /// every language; only "unknown" is words.
+    pub fn label(self) -> std::borrow::Cow<'static, str> {
+        use std::borrow::Cow;
         match self {
-            FileSystem::Ntfs => "NTFS",
-            FileSystem::Fat32 => "FAT32",
-            FileSystem::ExFat => "exFAT",
-            FileSystem::Ext4 => "ext4",
-            FileSystem::Xfs => "XFS",
-            FileSystem::Btrfs => "Btrfs",
-            FileSystem::ReFs => "ReFS",
-            FileSystem::Unknown => "неизвестная ФС",
+            FileSystem::Ntfs => Cow::Borrowed("NTFS"),
+            FileSystem::Fat32 => Cow::Borrowed("FAT32"),
+            FileSystem::ExFat => Cow::Borrowed("exFAT"),
+            FileSystem::Ext4 => Cow::Borrowed("ext4"),
+            FileSystem::Xfs => Cow::Borrowed("XFS"),
+            FileSystem::Btrfs => Cow::Borrowed("Btrfs"),
+            FileSystem::ReFs => Cow::Borrowed("ReFS"),
+            FileSystem::Unknown => crate::tr!("types.fs_unknown"),
         }
     }
 }

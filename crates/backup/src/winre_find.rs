@@ -15,7 +15,9 @@
 //! middle of a rescue.
 
 use crate::wim_info::{read_wim_info, WimInfo};
+use own_backup_common::tr;
 use own_backup_common::types::PartitionTable;
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 /// Where a candidate came from. Shown to the user, because "found on D:" and
@@ -35,12 +37,13 @@ pub enum BaseOrigin {
 }
 
 impl BaseOrigin {
-    pub fn describe(&self) -> &'static str {
+    /// In the window's language.
+    pub fn describe(&self) -> Cow<'static, str> {
         match self {
-            BaseOrigin::Registered => "зарегистрирован в среде восстановления",
-            BaseOrigin::SystemRecovery => "лежит в System32\\Recovery",
-            BaseOrigin::RecoveryFolder => "раздел восстановления",
-            BaseOrigin::Manual => "указан вручную",
+            BaseOrigin::Registered => tr!("winre_find.origin_registered"),
+            BaseOrigin::SystemRecovery => tr!("winre_find.origin_system_recovery"),
+            BaseOrigin::RecoveryFolder => tr!("winre_find.origin_recovery_folder"),
+            BaseOrigin::Manual => tr!("winre_find.origin_manual"),
         }
     }
 }
@@ -139,7 +142,10 @@ fn attr(xml: &str, element: &str, attribute: &str) -> Option<String> {
         .match_indices(&key)
         .find(|(i, _)| tag[..*i].ends_with(char::is_whitespace))
         .map(|(i, _)| i + key.len())?;
-    let ve = tag[vs..].find('"')? + vs;
+    // A string, not the char literal: the catalog test (`i18n_catalogs.rs`)
+    // reads this file without knowing char literals, and a lone quote in one
+    // hides every `tr!` below it.
+    let ve = tag[vs..].find("\"")? + vs;
     let v = tag[vs..ve].trim();
     (!v.is_empty()).then(|| v.to_string())
 }
@@ -156,37 +162,42 @@ pub fn inspect_candidate(
     let info = read_wim_info(path).map_err(|e| e.to_string())?;
 
     if !info.is_windows_pe() {
-        return Err(format!(
-            "{}: это установочный образ Windows ({}), а не среда восстановления. \
-             Из него можно достать Winre.wim, но напрямую он не подходит.",
-            path.display(),
-            if info.edition_id.is_empty() { "выпуск не указан" } else { &info.edition_id }
-        ));
+        let edition = if info.edition_id.is_empty() {
+            tr!("winre_find.edition_unknown").into_owned()
+        } else {
+            info.edition_id.clone()
+        };
+        return Err(tr!("winre_find.not_recovery_image", path = path.display(), edition = edition)
+            .into_owned());
     }
     if !info.is_x64() {
-        return Err(format!(
-            "{}: образ для архитектуры {}, а нужен x64.",
-            path.display(),
-            if info.architecture.is_empty() { "неизвестной" } else { &info.architecture }
-        ));
+        let arch = if info.architecture.is_empty() {
+            tr!("winre_find.arch_unknown").into_owned()
+        } else {
+            info.architecture.clone()
+        };
+        return Err(tr!("winre_find.not_x64", path = path.display(), arch = arch).into_owned());
     }
     if info.total_parts > 1 {
-        return Err(format!(
-            "{}: это часть {} из {} разделённого образа (.swm) — сначала соберите его целиком.",
-            path.display(),
-            info.part_number,
-            info.total_parts
-        ));
+        return Err(tr!(
+            "winre_find.split_image",
+            path = path.display(),
+            part = info.part_number,
+            total = info.total_parts
+        )
+        .into_owned());
     }
 
     let mut warnings = Vec::new();
     if running_build > 0 && !info.same_branch_as(running_build) {
-        warnings.push(format!(
-            "Образ собран для Windows {} , а на этой машине {}. Носитель, скорее всего, \
-             заработает, но это неподдерживаемое сочетание: драйверы и компоненты \
-             берутся от текущей системы.",
-            info.build, running_build
-        ));
+        warnings.push(
+            tr!(
+                "winre_find.other_branch",
+                image_build = info.build,
+                running_build = running_build
+            )
+            .into_owned(),
+        );
     }
     Ok(BaseImage { path: path.to_path_buf(), origin, info, warnings })
 }
@@ -196,12 +207,10 @@ pub fn inspect_candidate(
 /// get it.
 pub fn nothing_found_advice() -> Vec<String> {
     vec![
-        "Включить среду восстановления, если образ на диске есть:  reagentc /enable".into(),
-        "Достать Winre.wim из установочного образа Windows: смонтируйте ISO и укажите его — \
-         мастер извлечёт образ сам."
-            .into(),
-        "Указать файл вручную, если Winre.wim лежит где-то ещё.".into(),
-        "Поставить Windows ADK с дополнением WinPE, если своего образа нет вовсе.".into(),
+        tr!("winre_find.advice_enable").into_owned(),
+        tr!("winre_find.advice_extract").into_owned(),
+        tr!("winre_find.advice_manual").into_owned(),
+        tr!("winre_find.advice_adk").into_owned(),
     ]
 }
 

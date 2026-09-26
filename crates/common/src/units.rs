@@ -5,17 +5,31 @@
 /// wrong in the way that makes a 130.28 GiB partition read as "130 GB" and a
 /// user wonder where the rest went.
 pub fn human_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 6] = ["Б", "КиБ", "МиБ", "ГиБ", "ТиБ", "ПиБ"];
     let mut v = bytes as f64;
     let mut i = 0;
-    while v >= 1024.0 && i + 1 < UNITS.len() {
+    while v >= 1024.0 && i + 1 < UNIT_COUNT {
         v /= 1024.0;
         i += 1;
     }
     if i == 0 {
-        format!("{bytes} {}", UNITS[0])
+        format!("{bytes} {}", unit(0))
     } else {
-        format!("{v:.2} {}", UNITS[i])
+        format!("{v:.2} {}", unit(i))
+    }
+}
+
+/// B, KiB … PiB.
+const UNIT_COUNT: usize = 6;
+
+/// The name of the `i`-th binary unit, in the window's language.
+fn unit(i: usize) -> std::borrow::Cow<'static, str> {
+    match i {
+        0 => crate::tr!("units.b"),
+        1 => crate::tr!("units.kib"),
+        2 => crate::tr!("units.mib"),
+        3 => crate::tr!("units.gib"),
+        4 => crate::tr!("units.tib"),
+        _ => crate::tr!("units.pib"),
     }
 }
 

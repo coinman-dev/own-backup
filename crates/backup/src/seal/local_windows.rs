@@ -8,7 +8,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::path::{Path, PathBuf};
 
-use own_backup_common::{OwnBackupError, Result};
+use own_backup_common::{tr, OwnBackupError, Result};
 use uuid::Uuid;
 use windows::core::{HRESULT, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
@@ -122,7 +122,7 @@ fn no_impersonation() -> Result<()> {
     match unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, true, &mut handle) } {
         Ok(()) => {
             drop(Token(handle));
-            Err(bad("хранилище ключей не работает в потоке с impersonation"))
+            Err(bad(tr!("seal_local_windows.impersonating_thread")))
         }
         Err(e) if e.code() == HRESULT::from_win32(ERROR_NO_TOKEN.0) => Ok(()),
         Err(e) => Err(win(e)),
@@ -186,7 +186,7 @@ impl WindowsBackend {
     fn with_owner(data_dir: &Path, owner: Sid) -> Result<Self> {
         no_impersonation()?;
         unsafe { EqualSid(Sid::current()?.ptr(), owner.ptr()) }.map_err(|_| {
-            bad("хранилище ключей архивов открывается только учётной записью службы")
+            bad(tr!("seal_local_windows.service_account_only"))
         })?;
         // Resolve the configured parent once, then pin it and the private directory.
         let parent_path = std::fs::canonicalize(data_dir)?;
@@ -213,7 +213,7 @@ impl WindowsBackend {
     fn check_context(&self) -> Result<()> {
         no_impersonation()?;
         unsafe { EqualSid(Sid::current()?.ptr(), self.owner.ptr()) }
-            .map_err(|_| bad("учётная запись не имеет локального разрешения службы"))?;
+            .map_err(|_| bad(tr!("seal_local_windows.account_not_authorized")))?;
         check_file(&self.directory, &self.owner, true)
     }
 
@@ -342,9 +342,9 @@ impl Backend for WindowsBackend {
         self.check_context()?;
         let mut ids = Vec::new();
         for entry in std::fs::read_dir(&self.root)
-            .map_err(|e| bad(format!("каталог локальных ключей не читается: {e}")))?
+            .map_err(|e| bad(tr!("seal_local_windows.dir_unreadable", error = e)))?
         {
-            let entry = entry.map_err(|e| bad(format!("каталог локальных ключей: {e}")))?;
+            let entry = entry.map_err(|e| bad(tr!("seal_local_windows.dir_entry_error", error = e)))?;
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
             let Some(stem) = name.strip_suffix(".dpapi") else {

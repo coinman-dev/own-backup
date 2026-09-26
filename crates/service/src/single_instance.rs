@@ -58,14 +58,13 @@ pub enum Taken {
 impl std::fmt::Display for Taken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Taken::AlreadyRunning => write!(
-                f,
-                "служба Own Backup уже запущена — второй экземпляр не нужен и ничего не менял"
-            ),
+            Taken::AlreadyRunning => {
+                write!(f, "{}", own_backup_common::tr!("single_instance.already_running"))
+            }
             Taken::CouldNotAsk(why) => write!(
                 f,
-                "не удалось проверить, не запущена ли служба уже ({why}) — \
-                 запуск отменён, чтобы не получилось двух движков сразу"
+                "{}",
+                own_backup_common::tr!("single_instance.could_not_check", reason = why)
             ),
         }
     }

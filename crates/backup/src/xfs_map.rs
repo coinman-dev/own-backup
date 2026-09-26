@@ -15,7 +15,7 @@
 
 use tracing::info;
 
-use own_backup_common::{OwnBackupError, Result};
+use own_backup_common::{tr, OwnBackupError, Result};
 
 use crate::fat_map::RawVolume;
 use crate::used_sectors::UsedSectorMap;
@@ -222,11 +222,11 @@ pub fn build_xfs_used_map(vol: &mut dyn RawVolume, block_size: u32) -> Result<Xf
     let logblocks = u32at(&sb, 0x60);
     let agblklog = sb[0x7C] as u32;
     if logstart == 0 {
-        return Err(bad("внешний журнал xfs — проверить его нечем, копируем посекторно"));
+        return Err(bad(tr!("xfs_map.external_log")));
     }
     let log_off = ((logstart >> agblklog) * agblocks + (logstart & ((1u64 << agblklog) - 1))) * fs_block;
     if !crate::xfs_exclusions::xfs_log_is_clean_at(vol, log_off, logblocks * fs_block, sectsize)? {
-        return Err(bad("журнал xfs не пуст (нечистое завершение) — копируем посекторно"));
+        return Err(bad(tr!("xfs_map.log_dirty")));
     }
 
     let fs_bytes = dblocks

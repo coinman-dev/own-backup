@@ -31,8 +31,10 @@ use sha2::{Digest, Sha256};
 use xts_mode::Xts128;
 use zeroize::Zeroizing;
 
+use std::borrow::Cow;
+
 use own_backup_common::image::VolumeEncryptionKind;
-use own_backup_common::{OwnBackupError, Result};
+use own_backup_common::{tr, OwnBackupError, Result};
 
 use crate::fat_map::RawVolume;
 
@@ -84,26 +86,33 @@ const ALG_AES_XTS_256: u16 = 0x8005;
 /// отправить человека перенабирать то, что он ввёл верно.
 const WRONG_PASSPHRASE: &str = "CCM authentication failed (wrong passphrase?)";
 
-/// То же самое уровнем выше: парольные VMK перебрали все, и ни один тег не
-/// сошёлся.
-///
-/// Именно эта форма и выходит наружу: цикл по VMK отбрасывает ошибку каждой
-/// отдельной попытки (`if let Ok(k)`), так что [`WRONG_PASSPHRASE`] до
-/// вызывающего не доезжает никогда. Пока здесь стоял только он,
-/// [`is_wrong_passphrase`] для BitLocker не срабатывал ни разу — живой прогон
-/// 2026-09-22 это и показал.
-const WRONG_PASSPHRASE_TRIED_ALL: &str = "ни один парольный VMK им не открылся";
+/// Метка, с которой начинается каждая ошибка этого модуля. У «не того пароля»
+/// ([`wrong_passphrase`]) она стоит перед текстом вида `Encryption` — и по этой
+/// паре, а не по тексту, его узнаёт [`is_wrong_passphrase`].
+const TAG: &str = "bitlocker: ";
 
 /// Значит ли эта ошибка, что пароль не тот.
+///
+/// Наружу выходит форма уровнем выше [`WRONG_PASSPHRASE`]: парольные VMK
+/// перебрали все, и ни один тег не сошёлся ([`wrong_passphrase`]). Цикл по VMK
+/// отбрасывает ошибку каждой отдельной попытки (`if let Ok(k)`), так что
+/// [`WRONG_PASSPHRASE`] до вызывающего не доезжает никогда. Пока классификатор
+/// искал только его, для BitLocker он не срабатывал ни разу — живой прогон
+/// 2026-09-22 это и показал.
+///
+/// Верхняя форма узнаётся по виду ошибки, а не по тексту: текст теперь на языке
+/// окна, и сравнение с русской строкой молча перестало бы срабатывать
+/// по-английски.
 pub fn is_wrong_passphrase(e: &OwnBackupError) -> bool {
-    let text = e.to_string();
-    text.contains(WRONG_PASSPHRASE) || text.contains(WRONG_PASSPHRASE_TRIED_ALL)
+    matches!(e, OwnBackupError::Encryption(m) if m.starts_with(TAG))
+        || e.to_string().contains(WRONG_PASSPHRASE)
 }
 
 /// VMK key-protection type for a user passphrase.
 const PROTECT_PASSWORD: u16 = 0x2000;
 
-/// The ways a volume can be unlocked, as the metadata names them.
+/// The ways a volume can be unlocked, as the metadata names them — in the
+/// window's language. `None` for a code we have not seen.
 ///
 /// A volume carries one VMK datum per way in, and each says which one it is.
 /// Reading that list costs nothing — no password, no privileges beyond the
@@ -116,20 +125,26 @@ const PROTECT_PASSWORD: u16 = 0x2000;
 /// reported for the same volumes, name for name. `0x0000` (a suspended volume,
 /// key in the clear) and `0x0100` (TPM alone) have still never been seen here,
 /// so they keep their raw value beside the name and decide nothing.
-pub const PROTECTOR_KINDS: [(u16, &str); 6] = [
-    (0x0000, "защита приостановлена (ключ лежит открыто)"),
-    (0x0100, "TPM"),
-    (0x0200, "внешний ключ (авторазблокировка / ключ запуска)"),
-    (0x0500, "TPM + PIN"),
-    (0x0800, "ключ восстановления (48 цифр)"),
-    (PROTECT_PASSWORD, "пароль"),
-];
+///
+/// Only for showing. Nothing decides by these names: code that needs to know
+/// the kind asks [`Protector::kind`].
+pub fn protector_name(kind: u16) -> Option<Cow<'static, str>> {
+    Some(match kind {
+        0x0000 => tr!("bitlocker.protector_suspended"),
+        0x0100 => Cow::Borrowed("TPM"),
+        0x0200 => tr!("bitlocker.protector_external_key"),
+        0x0500 => Cow::Borrowed("TPM + PIN"),
+        PROTECT_RECOVERY => tr!("bitlocker.protector_recovery_key"),
+        PROTECT_PASSWORD => tr!("bitlocker.protector_password"),
+        _ => return None,
+    })
+}
 
 /// Real BitLocker stretch iteration count (2^20).
 const STRETCH_ITERATIONS: u32 = 0x0010_0000;
 
 fn bad(msg: impl std::fmt::Display) -> OwnBackupError {
-    OwnBackupError::Device(format!("bitlocker: {msg}"))
+    OwnBackupError::Device(format!("{TAG}{msg}"))
 }
 
 /// The one thing "wrong password" is allowed to mean: no password VMK opened,
@@ -141,9 +156,7 @@ fn bad(msg: impl std::fmt::Display) -> OwnBackupError {
 /// and that is the one reading this message must never invite. The
 /// classification was already right; only the label lied.
 fn wrong_passphrase() -> OwnBackupError {
-    OwnBackupError::Encryption(format!(
-        "bitlocker: пароль не подходит к этому тому — {WRONG_PASSPHRASE_TRIED_ALL}"
-    ))
+    OwnBackupError::Encryption(format!("{TAG}{}", tr!("bitlocker.wrong_passphrase")))
 }
 
 fn u16at(b: &[u8], o: usize) -> u64 {
@@ -352,26 +365,26 @@ pub fn parse_recovery_key(text: &str) -> Result<Zeroizing<[u8; 16]>> {
         split
     };
     if groups.len() != 8 {
-        return Err(bad(format!(
-            "ключ восстановления — 8 групп по 6 цифр, а здесь {}",
-            groups.len()
-        )));
+        return Err(bad(tr!("bitlocker.rk_group_count", count = groups.len())));
     }
     let mut out = Zeroizing::new([0u8; 16]);
     for (i, g) in groups.iter().enumerate() {
         if g.len() != 6 || !g.bytes().all(|b| b.is_ascii_digit()) {
-            return Err(bad(format!("группа {} — не шесть цифр: {g:?}", i + 1)));
-        }
-        let n: u32 = g.parse().map_err(|_| bad(format!("группа {} не читается", i + 1)))?;
-        if n % 11 != 0 {
-            return Err(bad(format!(
-                "группа {} ({g}) не делится на 11 — опечатка в ключе",
-                i + 1
+            return Err(bad(tr!(
+                "bitlocker.rk_group_not_digits",
+                group = i + 1,
+                text = format!("{g:?}")
             )));
+        }
+        let n: u32 = g
+            .parse()
+            .map_err(|_| bad(tr!("bitlocker.rk_group_unreadable", group = i + 1)))?;
+        if n % 11 != 0 {
+            return Err(bad(tr!("bitlocker.rk_group_checksum", group = i + 1, text = g)));
         }
         let value = n / 11;
         if value > u16::MAX as u32 {
-            return Err(bad(format!("группа {} ({g}) вне диапазона", i + 1)));
+            return Err(bad(tr!("bitlocker.rk_group_range", group = i + 1, text = g)));
         }
         out[i * 2..i * 2 + 2].copy_from_slice(&(value as u16).to_le_bytes());
     }
@@ -521,7 +534,8 @@ fn read_at(vol: &mut dyn RawVolume, offset: u64, len: usize) -> Result<Vec<u8>> 
 pub struct Protector {
     /// Raw `protection_type` from the VMK datum.
     pub kind: u16,
-    /// What that code means, or "неизвестно" when it is one we have not seen.
+    /// What that code means, or "неизвестно" when it is one we have not seen —
+    /// in the window's language, for showing only; decisions go by `kind`.
     pub name: String,
     /// Can Own Backup open the volume this way today?
     pub usable: bool,
@@ -581,17 +595,27 @@ impl BitLockerInfo {
     pub fn typeable(&self) -> bool {
         self.protectors.iter().any(|p| p.usable)
     }
+
+    /// A recovery key protector and no password one: what a person can type
+    /// into this volume is the 48-digit key and nothing else.
+    pub fn recovery_key_only(&self) -> bool {
+        let has = |kind: u16| self.protectors.iter().any(|p| p.kind == kind);
+        has(PROTECT_RECOVERY) && !has(PROTECT_PASSWORD)
+    }
 }
 
 fn cipher_name(alg: u16) -> (String, bool) {
     match alg {
         ALG_AES_XTS_128 => ("AES-XTS 128".into(), true),
         ALG_AES_XTS_256 => ("AES-XTS 256".into(), true),
-        0x8000 => ("AES-CBC 128 + диффузор (Vista/7)".into(), false),
-        0x8001 => ("AES-CBC 256 + диффузор (Vista/7)".into(), false),
+        0x8000 => (tr!("bitlocker.cipher_cbc128_diffuser").into_owned(), false),
+        0x8001 => (tr!("bitlocker.cipher_cbc256_diffuser").into_owned(), false),
         0x8002 => ("AES-CBC 128".into(), false),
         0x8003 => ("AES-CBC 256".into(), false),
-        other => (format!("неизвестный шифр {other:#06x}"), false),
+        other => (
+            tr!("bitlocker.cipher_unknown", code = format!("{other:#06x}")).into_owned(),
+            false,
+        ),
     }
 }
 
@@ -710,18 +734,24 @@ pub fn inspect_bitlocker_with(
     }
     // Nothing parsed. The answer is in the bytes, so they go into the message:
     // guessing at a layout from the outside is how an evening disappears.
-    Err(bad(format!(
-        "метаданные FVE не прочитаны. Окно {} байт, сектор {sector_size}; \
-         смещения копий: {}; сектор 0 [0x00..0x10]: {}; [0x160..0x190]: {}{}",
-        vol.len(),
-        if offsets.is_empty() {
-            "ни одного правдоподобного".to_string()
-        } else {
-            offsets.iter().map(|o| format!("{o:#x}")).collect::<Vec<_>>().join(", ")
-        },
-        hex(&boot[..0x10]),
-        hex(&boot[0x160..0x190.min(boot.len())]),
-        if last_err.is_empty() { String::new() } else { format!("; последняя ошибка: {last_err}") },
+    let offsets = if offsets.is_empty() {
+        tr!("bitlocker.no_plausible_offsets").into_owned()
+    } else {
+        offsets.iter().map(|o| format!("{o:#x}")).collect::<Vec<_>>().join(", ")
+    };
+    let last_error = if last_err.is_empty() {
+        String::new()
+    } else {
+        tr!("bitlocker.last_error_suffix", error = last_err).into_owned()
+    };
+    Err(bad(tr!(
+        "bitlocker.fve_unreadable_details",
+        window = vol.len(),
+        sector_size = sector_size,
+        offsets = offsets,
+        head = hex(&boot[..0x10]),
+        guid_area = hex(&boot[0x160..0x190.min(boot.len())]),
+        last_error = last_error
     )))
 }
 
@@ -749,12 +779,13 @@ fn inspect_metadata(
             continue;
         }
         let kind = u16at(d.data, 0x1A) as u16;
-        let known = PROTECTOR_KINDS.iter().find(|(k, _)| *k == kind);
         match protectors.iter_mut().find(|p: &&mut Protector| p.kind == kind) {
             Some(seen) => seen.count += 1,
             None => protectors.push(Protector {
                 kind,
-                name: known.map(|(_, n)| (*n).to_string()).unwrap_or_else(|| "неизвестно".into()),
+                name: protector_name(kind)
+                    .unwrap_or_else(|| tr!("bitlocker.protector_unknown"))
+                    .into_owned(),
                 // What the user can type and we can turn into a VMK: the
                 // passphrase and the 48-digit recovery key, both stretched in
                 // software (see `open_bitlocker`). The recovery key belongs
@@ -823,38 +854,47 @@ pub fn describe_vmks(vol: &mut dyn RawVolume) -> Result<Vec<String>> {
                 continue;
             }
             let protection = u16at(d.data, 0x1A) as u16;
-            out.push(format!(
-                "VMK: тип входа {:#06x}, защита {protection:#06x}, данных {} байт",
-                d.entry_type,
-                d.data.len()
-            ));
+            out.push(
+                tr!(
+                    "bitlocker.vmk_line",
+                    entry_type = format!("{:#06x}", d.entry_type),
+                    protection = format!("{protection:#06x}"),
+                    len = d.data.len()
+                )
+                .into_owned(),
+            );
             describe_datums(&d.data[0x1C..], 1, &mut out);
         }
         return Ok(out); // one copy is enough; they are duplicates
     }
-    Err(bad("метаданные FVE не прочитаны"))
+    Err(bad(tr!("bitlocker.fve_unreadable")))
 }
 
 fn describe_datums(buf: &[u8], depth: usize, out: &mut Vec<String>) {
     for d in datums(buf) {
-        let kind = match d.value_type {
-            DATUM_KEY => "ключ",
-            DATUM_STRETCH_KEY => "растяжка",
-            DATUM_AES_CCM => "AES-CCM",
-            DATUM_VMK => "VMK",
-            0x0002 => "UTF-16 строка",
-            0x000F => "смещение+размер",
-            _ => "?",
+        let kind: Cow<'static, str> = match d.value_type {
+            DATUM_KEY => tr!("bitlocker.datum_key"),
+            DATUM_STRETCH_KEY => tr!("bitlocker.datum_stretch"),
+            DATUM_AES_CCM => Cow::Borrowed("AES-CCM"),
+            DATUM_VMK => Cow::Borrowed("VMK"),
+            0x0002 => tr!("bitlocker.datum_utf16"),
+            0x000F => tr!("bitlocker.datum_offset_size"),
+            _ => Cow::Borrowed("?"),
         };
         // The first four bytes of a datum are a method or a counter, never a
         // key: enough to tell a stretch datum's algorithm without exposing one.
         let head4 = if d.data.len() >= 4 { hex(&d.data[..4]) } else { String::new() };
         out.push(format!(
-            "{:indent$}тип {:#06x} ({kind}), вход {:#06x}, данных {} байт, первые 4: {head4}",
+            "{:indent$}{}",
             "",
-            d.value_type,
-            d.entry_type,
-            d.data.len(),
+            tr!(
+                "bitlocker.datum_line",
+                value_type = format!("{:#06x}", d.value_type),
+                kind = kind,
+                entry_type = format!("{:#06x}", d.entry_type),
+                len = d.data.len(),
+                head4 = head4
+            ),
             indent = depth * 2
         ));
         if depth < 4 {
@@ -889,10 +929,7 @@ fn resolve_sector_size(boot: &[u8], hint: Option<u32>) -> Result<u32> {
     }
     match hint {
         Some(h) if plausible(h) => Ok(h),
-        _ => Err(bad(format!(
-            "implausible sector size {from_bpb} в BPB, а геометрия устройства не сообщена \
-             (так выглядит exFAT или ReFS внутри контейнера)"
-        ))),
+        _ => Err(bad(tr!("bitlocker.sector_size_unknown", bpb = from_bpb))),
     }
 }
 
@@ -942,10 +979,7 @@ fn open_bitlocker_with_iters(
 
     // The FVE metadata copies — try each until one parses and unlocks.
     let offsets = metadata_offsets(&boot, vol.len());
-    let mut last_err = bad(format!(
-        "метаданные FVE не найдены (проверено адресов: {})",
-        offsets.len()
-    ));
+    let mut last_err = bad(tr!("bitlocker.fve_not_found", count = offsets.len()));
     for info_off in offsets {
         match unlock_from_metadata(vol, info_off, sector_size, password, iterations) {
             Ok(params) => {
@@ -1067,10 +1101,11 @@ fn unlock_from_metadata(
         // Nothing of that kind to try: not a password problem, and it must not
         // be answered as one. Windows may still open the volume its own way.
         None if of_that_kind == 0 => {
-            return Err(bad(format!(
-                "у тома нет защитника «{}» — этим способом его не открыть",
-                if recovery.is_some() { "ключ восстановления" } else { "пароль" }
-            )))
+            return Err(bad(if recovery.is_some() {
+                tr!("bitlocker.no_recovery_protector")
+            } else {
+                tr!("bitlocker.no_password_protector")
+            }))
         }
         // Tried them all and every AES-CCM tag failed. That IS the one thing
         // "wrong password" may mean.
@@ -1160,39 +1195,41 @@ pub fn diagnose_first_sector(vol: &mut dyn RawVolume, params: &BitLockerParams) 
         let mut buf = match read_at(vol, at, ss) {
             Ok(b) => b,
             Err(e) => {
-                out.push(format!("{label}: прочитать не удалось — {e}"));
+                out.push(tr!("bitlocker.diag_read_failed", label = label, error = e).into_owned());
                 return;
             }
         };
         if let Some(t) = tweak {
             if let Err(e) = params.decrypt(t, &mut buf) {
-                out.push(format!("{label}: расшифровать не удалось — {e}"));
+                out.push(
+                    tr!("bitlocker.diag_decrypt_failed", label = label, error = e).into_owned(),
+                );
                 return;
             }
         }
         out.push(format!(
             "{label}: {}{}",
             hex(&buf[..16.min(buf.len())]),
-            if looks_like_fs(&buf) { "   ← файловая система!" } else { "" }
+            if looks_like_fs(&buf) { tr!("bitlocker.diag_filesystem_mark") } else { Cow::Borrowed("") }
         ));
     };
 
-    attempt("как есть, со смещения 0 (без расшифровки)", 0, None, &mut out);
+    attempt(&tr!("bitlocker.diag_raw_at_zero"), 0, None, &mut out);
     attempt(
-        &format!("как есть, с {backup} (без расшифровки)"),
+        &tr!("bitlocker.diag_raw_at_backup", backup = backup),
         backup,
         None,
         &mut out,
     );
-    attempt("с 0, ключ сектора 0", 0, Some(0), &mut out);
+    attempt(&tr!("bitlocker.diag_zero_tweak_zero"), 0, Some(0), &mut out);
     attempt(
-        &format!("с {backup}, ключ сектора 0"),
+        &tr!("bitlocker.diag_backup_tweak_zero", backup = backup),
         backup,
         Some(0),
         &mut out,
     );
     attempt(
-        &format!("с {backup}, ключ сектора {phys_index} (физического)"),
+        &tr!("bitlocker.diag_backup_tweak_physical", backup = backup, index = phys_index),
         backup,
         Some(phys_index),
         &mut out,
@@ -1222,32 +1259,21 @@ pub fn diagnose_first_sector(vol: &mut dyn RawVolume, params: &BitLockerParams) 
 /// stage of a conversion.
 fn verify_covers_volume(params: &BitLockerParams, volume_len: u64) -> Result<()> {
     match params.conversion {
-        Some(Conversion::Encrypting) => {
-            return Err(bad(
-                "шифрование тома ещё не завершено (идёт или стоит на паузе) — часть его \
-                 лежит на диске открытой, и своей расшифровкой такой том не скопировать \
-                 верно. Дождитесь окончания: в Windows — manage-bde -status",
-            ))
-        }
-        Some(Conversion::Decrypting) => {
-            return Err(bad(
-                "расшифровка тома ещё не завершена (идёт или стоит на паузе) — часть его \
-                 уже лежит на диске открытой, и своей расшифровкой такой том не скопировать \
-                 верно. Дождитесь окончания: в Windows — manage-bde -status",
-            ))
-        }
+        Some(Conversion::Encrypting) => return Err(bad(tr!("bitlocker.still_encrypting"))),
+        Some(Conversion::Decrypting) => return Err(bad(tr!("bitlocker.still_decrypting"))),
         Some(Conversion::Settled) | None => {}
     }
     if volume_len == 0 || params.encrypted_size >= volume_len / 10 * 9 {
         return Ok(());
     }
-    Err(bad(format!(
-        "зашифрована лишь часть тома: {} из {} байт ({:.0}%). Копировать такой том \
-         нельзя: образ вышел бы обрезанным. Дождитесь окончания шифрования \
-         (в Windows: manage-bde -status)",
-        params.encrypted_size,
-        volume_len,
-        params.encrypted_size as f64 * 100.0 / volume_len as f64
+    // The sign rides with the number: a bare `%` in the catalog text would be
+    // read as the start of a placeholder.
+    let percent = format!("{:.0}%", params.encrypted_size as f64 * 100.0 / volume_len as f64);
+    Err(bad(tr!(
+        "bitlocker.partially_encrypted",
+        encrypted = params.encrypted_size,
+        total = volume_len,
+        percent = percent
     )))
 }
 
@@ -1266,10 +1292,7 @@ fn verify_ntfs(vol: &mut dyn RawVolume, params: BitLockerParams) -> Result<BitLo
     // `BitLockerVolume::read_at`.
     params.decrypt(src / params.sector_size.max(1) as u64, &mut sector)?;
     if !decrypts_to_a_filesystem(&sector) {
-        return Err(bad(
-            "расшифрованный сектор 0 не похож ни на одну файловую систему — \
-             не тот ключ или неучтённая раскладка",
-        ));
+        return Err(bad(tr!("bitlocker.sector0_not_fs")));
     }
     Ok(params)
 }

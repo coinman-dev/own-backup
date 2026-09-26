@@ -18,7 +18,7 @@
 //! Everything is laid out in one pass: sizes are known before anything is
 //! written, so the file is produced sequentially and never seeked backwards.
 
-use own_backup_common::{OwnBackupError, Result};
+use own_backup_common::{tr, OwnBackupError, Result};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
@@ -122,10 +122,9 @@ pub fn write_iso_with_progress(
             .map_err(|e| OwnBackupError::ImageFormat(format!("{}: {e}", f.source.display())))?
             .len();
         if size > u32::MAX as u64 {
-            return Err(OwnBackupError::ImageFormat(format!(
-                "{}: файл больше 4 ГБ — в ISO9660 такой не поместится",
-                f.source.display()
-            )));
+            return Err(OwnBackupError::ImageFormat(
+                tr!("iso9660.file_too_big", file = f.source.display()).into_owned(),
+            ));
         }
         dirs[cur].files.push(FileEntry {
             name: (*name).to_string(),
@@ -225,10 +224,9 @@ pub fn write_iso_with_progress(
 
     if let (Some(_), Some(b)) = (boot_catalog_lba, boot.as_ref()) {
         let (img_lba, img_size) = locate(&dirs, &order, &b.image_path).ok_or_else(|| {
-            OwnBackupError::ImageFormat(format!(
-                "{}: загрузочный образ должен быть среди файлов носителя",
-                b.image_path
-            ))
+            OwnBackupError::ImageFormat(
+                tr!("iso9660.boot_image_not_listed", path = b.image_path).into_owned(),
+            )
         })?;
         w.write_all(&boot_catalog(img_lba, img_size))?;
     }
@@ -265,10 +263,9 @@ pub fn write_iso_with_progress(
                 let take = left.min(buf.len());
                 let n = src.read(&mut buf[..take])?;
                 if n == 0 {
-                    return Err(OwnBackupError::ImageFormat(format!(
-                        "{}: файл кончился раньше, чем обещал его размер",
-                        f.source.display()
-                    )));
+                    return Err(OwnBackupError::ImageFormat(
+                        tr!("iso9660.file_ended_early", file = f.source.display()).into_owned(),
+                    ));
                 }
                 w.write_all(&buf[..n])?;
                 left -= n;
@@ -295,11 +292,15 @@ pub fn write_iso_with_progress(
 
     let len = std::fs::metadata(out)?.len();
     if len != total_sectors as u64 * SECTOR as u64 {
-        return Err(OwnBackupError::ImageFormat(format!(
-            "{}: записано {len} байт, а по разметке должно быть {} — образ испорчен",
-            out.display(),
-            total_sectors as u64 * SECTOR as u64
-        )));
+        return Err(OwnBackupError::ImageFormat(
+            tr!(
+                "iso9660.size_mismatch",
+                file = out.display(),
+                written = len,
+                expected = total_sectors as u64 * SECTOR as u64
+            )
+            .into_owned(),
+        ));
     }
     Ok(len)
 }
@@ -653,7 +654,7 @@ pub fn find_file(iso: &Path, path: &str) -> Result<Option<(u32, u32)>> {
     f.seek(SeekFrom::Start(SYSTEM_AREA_SECTORS as u64 * SECTOR as u64))?;
     f.read_exact(&mut pvd)?;
     if &pvd[1..6] != b"CD001" || pvd[0] != 1 {
-        return Err(OwnBackupError::ImageFormat("не ISO9660".into()));
+        return Err(OwnBackupError::ImageFormat(tr!("iso9660.not_iso9660").into_owned()));
     }
     let mut lba = u32::from_le_bytes(pvd[158..162].try_into().unwrap());
     let mut len = u32::from_le_bytes(pvd[166..170].try_into().unwrap());

@@ -13,7 +13,7 @@
 //! partition, and reads past its end are refused rather than wandering into
 //! the next partition.
 
-use own_backup_common::{OwnBackupError, Result};
+use own_backup_common::{tr, OwnBackupError, Result};
 
 use crate::fat_map::RawVolume;
 
@@ -30,9 +30,10 @@ impl VolumeWindow {
     pub fn new(inner: Box<dyn RawVolume + Send>, start: u64, length: u64) -> Result<Self> {
         let device = inner.len();
         if length == 0 || start.checked_add(length).is_none_or(|end| end > device) {
-            return Err(OwnBackupError::Device(format!(
-                "раздел [{start}, +{length}) не помещается в устройство длиной {device}"
-            )));
+            return Err(OwnBackupError::Device(
+                tr!("volume_window.does_not_fit", start = start, length = length, device = device)
+                    .into_owned(),
+            ));
         }
         Ok(Self { inner, start, length })
     }
@@ -42,13 +43,17 @@ impl RawVolume for VolumeWindow {
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
         let end = offset
             .checked_add(buf.len() as u64)
-            .ok_or_else(|| OwnBackupError::Device("длина чтения переполнилась".into()))?;
+            .ok_or_else(|| OwnBackupError::Device(tr!("volume_window.read_overflow").into_owned()))?;
         if end > self.length {
-            return Err(OwnBackupError::Device(format!(
-                "чтение {} байт со смещения {offset} выходит за раздел длиной {}",
-                buf.len(),
-                self.length
-            )));
+            return Err(OwnBackupError::Device(
+                tr!(
+                    "volume_window.read_past_end",
+                    bytes = buf.len(),
+                    offset = offset,
+                    length = self.length
+                )
+                .into_owned(),
+            ));
         }
         self.inner.read_at(self.start + offset, buf)
     }

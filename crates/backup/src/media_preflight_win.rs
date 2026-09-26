@@ -18,6 +18,7 @@
 //! есть только в Windows, а пороги и формулировки проверяются юнит-тестами на
 //! любой машине.
 
+use own_backup_common::tr;
 use std::path::{Path, PathBuf};
 
 /// Насколько плохо то, что нашлось.
@@ -66,14 +67,12 @@ pub fn judge_webview2(found: Option<&Path>, searched: &[PathBuf]) -> Check {
     match found {
         Some(p) => Check::new("webview2", Level::Ok, format!("WebView2: {}", p.display())),
         None => {
-            let mut m = String::from("WebView2 не найден. Искал:");
+            let mut m = tr!("media_preflight_win.webview2_missing").into_owned();
             for s in searched {
                 m.push_str(&format!("\n      {}", s.display()));
             }
-            m.push_str(
-                "\n    Носитель собран без среды выполнения — пересоберите его сборщиком \
-                 или положите папку WebView2 рядом с программой.",
-            );
+            m.push_str("\n    ");
+            m.push_str(&tr!("media_preflight_win.webview2_missing_advice"));
             Check::new("webview2", Level::Fail, m)
         }
     }
@@ -85,50 +84,47 @@ pub fn judge_scratch(free_bytes: Option<u64>, writable: bool, dir: &Path) -> Che
         return Check::new(
             "scratch",
             Level::Fail,
-            format!(
-                "Временный каталог {} недоступен для записи — интерфейсу негде \
-                 распаковать движок.",
-                dir.display()
-            ),
+            tr!("media_preflight_win.scratch_not_writable", dir = dir.display()),
         );
     }
     match free_bytes {
         None => Check::new(
             "scratch",
             Level::Warn,
-            format!("Свободное место в {} узнать не удалось — продолжаю.", dir.display()),
+            tr!("media_preflight_win.scratch_unknown", dir = dir.display()),
         ),
         Some(free) if free < SCRATCH_MIN_BYTES => Check::new(
             "scratch",
             Level::Fail,
-            format!(
-                "В {} свободно {} МиБ, нужно хотя бы {}. Похоже, образ загрузился со \
-                 стандартным для WinPE scratch 32 МБ; сборщик носителя поднимает его до 512 \
-                 (dism /Set-ScratchSpace:512).",
-                dir.display(),
-                mib(free),
-                mib(SCRATCH_MIN_BYTES)
+            tr!(
+                "media_preflight_win.scratch_too_small",
+                dir = dir.display(),
+                free = mib(free),
+                need = mib(SCRATCH_MIN_BYTES)
             ),
         ),
-        Some(free) => {
-            Check::new("scratch", Level::Ok, format!("Место в {}: {} МиБ", dir.display(), mib(free)))
-        }
+        Some(free) => Check::new(
+            "scratch",
+            Level::Ok,
+            tr!("media_preflight_win.scratch_ok", dir = dir.display(), free = mib(free)),
+        ),
     }
 }
 
 /// Вердикт по доступной памяти.
 pub fn judge_memory(available_bytes: Option<u64>) -> Check {
     match available_bytes {
-        None => Check::new("memory", Level::Warn, "Объём памяти узнать не удалось — продолжаю."),
+        None => Check::new("memory", Level::Warn, tr!("media_preflight_win.memory_unknown")),
         Some(a) if a < MEMORY_WARN_BYTES => Check::new(
             "memory",
             Level::Warn,
-            format!(
-                "Доступно {} МиБ памяти — движку интерфейса нужно около 200, будет впритык.",
-                mib(a)
-            ),
+            tr!("media_preflight_win.memory_low", available = mib(a)),
         ),
-        Some(a) => Check::new("memory", Level::Ok, format!("Память: доступно {} МиБ", mib(a))),
+        Some(a) => Check::new(
+            "memory",
+            Level::Ok,
+            tr!("media_preflight_win.memory_ok", available = mib(a)),
+        ),
     }
 }
 
@@ -146,13 +142,7 @@ pub fn worst(checks: &[Check]) -> Level {
 /// Шпаргалка на случай, когда интерфейса не будет: этим CLI копия снимается и
 /// восстанавливается целиком, ради этого всё и затевалось.
 pub fn cli_cheat_sheet() -> String {
-    "Копию можно снять и вернуть отсюда:\n\
-     \x20   own-backup-cli list-disks\n\
-     \x20   own-backup-cli backup --disk 0 --to D:\\Backups\n\
-     \x20   own-backup-cli restore-disk --image D:\\Backups\\<файл>.vhdx --to-disk 1\n\
-     \x20   own-backup-cli finalize-boot --disk 1\n\
-     Подробности: own-backup-cli --help"
-        .to_string()
+    tr!("media_preflight_win.cli_cheat_sheet").into_owned()
 }
 
 /// Файл-маркер «интерфейс поднялся»: GUI создаёт его после того, как окно
@@ -188,7 +178,10 @@ pub fn find_webview2_runtime(program_dir: &Path) -> (Option<PathBuf>, Vec<PathBu
     for base in ["ProgramFiles(x86)", "ProgramFiles"] {
         let Ok(root) = std::env::var(base) else { continue };
         let apps = PathBuf::from(root).join(r"Microsoft\EdgeWebView\Application");
-        searched.push(apps.join("<версия>").join("msedgewebview2.exe"));
+        searched.push(
+            apps.join(tr!("media_preflight_win.version_placeholder").into_owned())
+                .join("msedgewebview2.exe"),
+        );
         let Ok(rd) = std::fs::read_dir(&apps) else { continue };
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().to_string();

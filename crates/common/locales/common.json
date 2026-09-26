@@ -1,0 +1,255 @@
+{
+  "_version": 2,
+  "restore_check.label_quoted": {
+    "ru": "«%{label}»",
+    "en": "“%{label}”"
+  },
+  "restore_check.partition_empty": {
+    "ru": "Раздел %{index}: конец (%{last}) раньше начала (%{first}) — нулевая или отрицательная длина.",
+    "en": "Partition %{index}: the end (%{last}) comes before the start (%{first}) — zero or negative length."
+  },
+  "restore_check.partition_out_of_bounds": {
+    "ru": "Раздел %{index} (%{first}–%{last}) выходит за пределы, доступные на диске (%{usable_first}–%{usable_last} сект.).",
+    "en": "Partition %{index} (%{first}–%{last}) goes beyond what is available on the disk (sectors %{usable_first}–%{usable_last})."
+  },
+  "restore_check.misaligned": {
+    "ru": "Раздел %{index} начинается со смещения %{offset} Б — не кратно 1 МиБ. На дисках 512e/4Kn это стоит производительности: каждая запись превращается в чтение-правку-запись физического сектора. Так была устроена исходная разметка, поэтому ошибкой это не считаем.",
+    "en": "Partition %{index} starts at offset %{offset} B — not a multiple of 1 MiB. On 512e/4Kn disks this costs performance: every write turns into a read-modify-write of the physical sector. The source layout was like this, so it is not treated as an error."
+  },
+  "restore_check.partitions_overlap": {
+    "ru": "Разделы %{a} (%{a_first}–%{a_last}) и %{b} (%{b_first}–%{b_last}) перекрываются.",
+    "en": "Partitions %{a} (%{a_first}–%{a_last}) and %{b} (%{b_first}–%{b_last}) overlap."
+  },
+  "restore_check.mbr_lba_limit": {
+    "ru": "Раздел %{index} заканчивается на секторе %{last} — MBR хранит адреса в 32 битах и дальше %{max} сект. (~2 ТиБ при секторе 512 Б) не адресует. Нужен GPT.",
+    "en": "Partition %{index} ends at sector %{last} — MBR stores addresses in 32 bits and cannot address beyond %{max} sectors (~2 TiB with 512 B sectors). GPT is needed."
+  },
+  "restore_check.mbr_disk_too_big": {
+    "ru": "Диск больше того, что адресует MBR (%{max} сект.) — хвост останется недоступен.",
+    "en": "The disk is larger than MBR can address (%{max} sectors) — the tail will stay unreachable."
+  },
+  "restore_check.mbr_too_many_primaries_ext": {
+    "ru": "Основных разделов %{primaries}, и ещё один слот из четырёх занимает расширенный раздел, внутри которого лежат логические. Основных остаётся не больше трёх.",
+    "en": "There are %{primaries} primary partitions, and one more of the four slots is taken by the extended partition that holds the logical ones. That leaves room for no more than three primary partitions."
+  },
+  "restore_check.mbr_too_many_primaries": {
+    "ru": "Основных разделов %{primaries} — в MBR их не может быть больше четырёх. Лишние надо сделать логическими.",
+    "en": "There are %{primaries} primary partitions — MBR cannot have more than four. The extra ones have to be made logical."
+  },
+  "restore_check.sector_size_mismatch": {
+    "ru": "Копия снята с диска с логическим сектором %{source} Б, у целевого — %{target} Б. Разметку нельзя перенести: сохранённые адреса секторов указывали бы на другие байты.",
+    "en": "The backup was taken from a disk with %{source} B logical sectors, the target has %{target} B. The layout cannot be transferred: the saved sector addresses would point to different bytes."
+  },
+  "restore_check.duplicate_restore": {
+    "ru": "В раздел %{part} пишут данные две операции сразу.",
+    "en": "Two operations write data into partition %{part} at once."
+  },
+  "restore_check.free_space_not_wiped": {
+    "ru": "Раздел %{part}: копируются только занятые блоки, поэтому в промежутках физически останутся прежние данные. Файловая система их не увидит; чтобы стереть — включите затирание свободного места.",
+    "en": "Partition %{part}: only used blocks are copied, so the old data physically remains in the gaps. The file system will not see it; to erase it, turn on “Wipe free space”."
+  },
+  "restore_check.unknown_source_partition": {
+    "ru": "В копии нет раздела с номером %{index}.",
+    "en": "The backup has no partition number %{index}."
+  },
+  "restore_check.missing_esp": {
+    "ru": "Для загрузки UEFI нужен раздел EFI (ESP), а в плане его нет.",
+    "en": "UEFI boot needs an EFI partition (ESP), and the plan has none."
+  },
+  "restore_check.boot_entries_will_be_written": {
+    "ru": "Записи загрузки UEFI из копии будут записаны в память материнской платы, поверх нынешних. Прежние сохранятся в файл перед заменой.",
+    "en": "The UEFI boot entries from the backup will be written to the motherboard's memory, over the current ones. The current ones are saved to a file before they are replaced."
+  },
+  "restore_check.file_mode_needs_format": {
+    "ru": "Раздел %{part} восстанавливается пофайлово, но в плане нет его форматирования — копировать файлы некуда.",
+    "en": "Partition %{part} is restored file by file, but the plan does not format it — there is nowhere to copy the files to."
+  },
+  "restore_check.format_after_sector_restore": {
+    "ru": "Раздел %{part} восстанавливается посекторно и тут же форматируется — форматирование сотрёт всё, что было записано. Посекторное восстановление приносит готовую файловую систему, форматировать не нужно.",
+    "en": "Partition %{part} is restored sector by sector and then formatted — formatting will erase everything that was written. A sector-by-sector restore brings a ready file system, no formatting is needed."
+  },
+  "restore_check.part_ref_no_region": {
+    "ru": "Раздел %{part}: операция адресует %{offset}..+%{size} Б — такой области не существует.",
+    "en": "Partition %{part}: the operation addresses %{offset}..+%{size} B — no such region exists."
+  },
+  "restore_check.part_ref_past_disk": {
+    "ru": "Раздел %{part}: операция пишет до %{end} Б, а диск — %{disk} Б.",
+    "en": "Partition %{part}: the operation writes up to %{end} B, and the disk is %{disk} B."
+  },
+  "restore_check.op_not_in_table": {
+    "ru": "Операция ссылается на раздел %{part}, которого нет в новой разметке.",
+    "en": "An operation refers to partition %{part}, which is not in the new layout."
+  },
+  "restore_check.part_ref_table_mismatch": {
+    "ru": "Раздел %{part}: операция адресует %{offset}..+%{size} Б, а в разметке он лежит по %{table_offset}..+%{table_size} Б.",
+    "en": "Partition %{part}: the operation addresses %{offset}..+%{size} B, but in the layout it lies at %{table_offset}..+%{table_size} B."
+  },
+  "restore_check.part_ref_layout_unknown": {
+    "ru": "Раздел %{index}: не с чем сверить, куда именно пойдёт запись — разметка целевого диска неизвестна.",
+    "en": "Partition %{index}: where exactly the write will go cannot be checked — the target disk's layout is unknown."
+  },
+  "restore_check.part_ref_offset_unknown": {
+    "ru": "Раздел %{index}: в разметке целевого диска не указано, где он начинается, поэтому адрес записи сверить не с чем.",
+    "en": "Partition %{index}: the target disk's layout does not say where it starts, so the write address cannot be checked."
+  },
+  "restore_check.part_ref_disk_mismatch": {
+    "ru": "Раздел %{part}: операция адресует %{offset}..+%{size} Б, а на диске он лежит по %{disk_offset}..+%{disk_size} Б.",
+    "en": "Partition %{part}: the operation addresses %{offset}..+%{size} B, but on the disk it lies at %{disk_offset}..+%{disk_size} B."
+  },
+  "restore_check.too_small_for_sectors": {
+    "ru": "Раздел %{part} меньше исходного тома «%{label}»: %{dst_size} против %{src_size}. Посекторное восстановление переносит том целиком вместе с его файловой системой, поэтому приёмник не может быть меньше. Уместить данные можно только пофайлово.",
+    "en": "Partition %{part} is smaller than source volume “%{label}”: %{dst_size} vs %{src_size}. A sector-by-sector restore moves the whole volume together with its file system, so the destination cannot be smaller. The data can only be fitted in file by file."
+  },
+  "restore_check.file_mode_unsupported_fs": {
+    "ru": "Том «%{label}» размечен как %{fs} — Windows не умеет его читать, значит и скопировать пофайлово нельзя. Такой раздел переносится только посекторно, в приёмник не меньше исходного.",
+    "en": "Volume “%{label}” is formatted as %{fs} — Windows cannot read it, so it cannot be copied file by file either. Such a partition can only be moved sector by sector, into a destination no smaller than the source."
+  },
+  "restore_check.used_size_unknown": {
+    "ru": "Для тома «%{label}» неизвестен объём занятых данных, поэтому проверить, влезут ли они в раздел %{part}, заранее нельзя.",
+    "en": "The amount of used data on volume “%{label}” is unknown, so whether it fits into partition %{part} cannot be checked in advance."
+  },
+  "restore_check.too_small_for_files": {
+    "ru": "В раздел %{part} не влезут данные тома «%{label}»: занято %{used}, а с запасом на служебные структуры файловой системы нужно не меньше %{needed}.",
+    "en": "The data of volume “%{label}” will not fit into partition %{part}: %{used} is used, and with headroom for the file system's own structures at least %{needed} is needed."
+  },
+  "restore_check.live_system_partitions": {
+    "ru": "На этом диске работает загруженная сейчас Windows, и план затрагивает разделы, на которых она стоит: %{list}. Переписать их на ходу невозможно — система остановится посреди записи. Загрузитесь с Boot CD и повторите, либо выберите другие разделы.",
+    "en": "The currently running Windows is on this disk, and the plan touches the partitions it is installed on: %{list}. They cannot be rewritten on the fly — the system would stop in the middle of the write. Boot from the Boot CD and try again, or choose other partitions."
+  },
+  "restore_check.live_system_disk_layout": {
+    "ru": "Диск %{disk} — тот, с которого загружена работающая Windows. Разделы, на которых она стоит, план не трогает, поэтому восстановление возможно: новая разметка будет применена через диспетчер разделов Windows, как это делает «Управление дисками». Затронутые тома будут отключены — закройте открытые в них файлы.",
+    "en": "Disk %{disk} is the one the running Windows booted from. The plan does not touch the partitions Windows is installed on, so the restore is possible: the new layout will be applied through the Windows partition manager, the way “Disk Management” does it. The affected volumes will be dismounted — close any files open on them."
+  },
+  "restore_check.format_choice_ignored": {
+    "ru": "При создании раздела %{part} выбрана файловая система %{chosen}, но она создана не будет: посекторное восстановление приносит файловую систему из копии целиком, и в разделе окажется %{actual}. Форматировать тут нечего — форматирование стёрло бы только что восстановленные данные.",
+    "en": "File system %{chosen} was chosen when partition %{part} was created, but it will not be created: a sector-by-sector restore brings the whole file system from the backup, and the partition will hold %{actual}. There is nothing to format here — formatting would erase the data just restored."
+  },
+  "restore_check.dest_used_part": {
+    "ru": ", занято %{size}",
+    "en": ", %{size} used"
+  },
+  "restore_check.destination_will_be_erased": {
+    "ru": "На разделе %{part} сейчас %{fs}%{label}%{used}. Восстановление перезапишет его целиком — вернуть то, что там лежит, будет нельзя.",
+    "en": "Currently on partition %{part}: %{fs}%{label}%{used}. The restore will overwrite it completely — what is there now cannot be brought back."
+  },
+  "restore_check.becomes_linux": {
+    "ru": "Раздел %{part} перестанет быть разделом Windows: в него ляжет %{fs}, и тип раздела в таблице сменится на Linux. Windows больше не покажет его как диск — это нормально для раздела Linux, но букву %{letter} он потеряет.",
+    "en": "Partition %{part} will stop being a Windows partition: it will receive %{fs}, and its type in the table will change to Linux. Windows will no longer show it as a drive — this is normal for a Linux partition, but it will lose the letter %{letter}."
+  },
+  "restore_check.becomes_windows": {
+    "ru": "Раздел %{part} сейчас размечен как %{current}, а в него ляжет %{incoming} — после восстановления Windows начнёт показывать его как обычный диск.",
+    "en": "Partition %{part} is currently formatted as %{current}, and it will receive %{incoming} — after the restore Windows will show it as an ordinary drive."
+  },
+  "restore_check.no_luks_header": {
+    "ru": "Вернуть шифрование разделу %{part} нельзя: в этой копии не сохранён заголовок контейнера. Так писались копии до того, как заголовок начали сохранять — восстановить её можно только расшифрованной.",
+    "en": "Encryption cannot be put back on partition %{part}: this backup does not keep the container header. Backups were written like this before the header began to be kept — it can only be restored decrypted."
+  },
+  "restore_check.reencrypt_needs_sectors": {
+    "ru": "Раздел %{part}: вернуть шифрование можно только при посекторном восстановлении — пофайловое пишет через файловую систему, а внутри нового контейнера её ещё нет.",
+    "en": "Partition %{part}: encryption can only be put back with a sector-by-sector restore — a file-by-file restore writes through the file system, and there is none yet inside the new container."
+  },
+  "restore_check.remedy_header_available": {
+    "ru": "Заголовок контейнера в копии есть — включите «вернуть шифрование», и раздел восстановится ровно таким, каким был, вместе с прежним паролем.",
+    "en": "The backup keeps the container header — turn on “Put encryption back”, and the partition will be restored exactly as it was, with its previous password."
+  },
+  "restore_check.remedy_no_header": {
+    "ru": "Заголовок контейнера в этой копии не сохранён, поэтому вернуть шифрование нельзя. Понадобится Live CD: убрать запись из /etc/crypttab, поправить /etc/fstab на UUID самого раздела и пересобрать initramfs.",
+    "en": "This backup does not keep the container header, so the encryption cannot be put back. You will need a Live CD to remove the entry from /etc/crypttab, point /etc/fstab at the partition's own UUID and rebuild initramfs."
+  },
+  "restore_check.encryption_not_restored": {
+    "ru": "Том «%{label}» был зашифрован, но в копию он попал расшифрованным — после восстановления в разделе %{part} окажется обычная %{fs} без контейнера LUKS. Данные будут целы и читаемы, но система с этого раздела не загрузится: initramfs и /etc/crypttab ждут зашифрованное устройство, которого больше нет. %{remedy}",
+    "en": "Volume “%{label}” was encrypted, but it went into the backup decrypted — after the restore partition %{part} will hold a plain %{fs} with no LUKS container. The data will be intact and readable, but a system on this partition will not boot: initramfs and /etc/crypttab expect an encrypted device that no longer exists. %{remedy}"
+  },
+  "restore_check.fat32_too_limited": {
+    "ru": "Раздел %{part} форматируется в FAT32, а исходный том — %{fs}. В FAT32 не поместится ни один файл больше 4 ГиБ; такие файлы скопировать не удастся.",
+    "en": "Partition %{part} is formatted as FAT32, and the source volume is %{fs}. FAT32 cannot hold any file larger than 4 GiB; such files will not be copied."
+  },
+  "restore_check.extend_nothing": {
+    "ru": "Расширять раздел %{part} нечего: в него ничего не восстанавливается и он не форматируется, значит файловой системы там не будет.",
+    "en": "There is nothing to extend on partition %{part}: nothing is restored into it and it is not formatted, so there will be no file system on it."
+  },
+  "restore_check.extend_not_ntfs": {
+    "ru": "Раздел %{part} размечен как %{fs} — автоматически расширить Windows умеет только NTFS. Свободный хвост останется неразмеченным внутри раздела; его придётся дорастить средствами самой системы.",
+    "en": "Partition %{part} is formatted as %{fs} — Windows can only extend NTFS automatically. The free tail will stay unallocated inside the partition; it has to be grown with the system's own tools."
+  },
+  "restore_plan.title_write_table": {
+    "ru": "Записать разметку %{scheme} (%{count} разд.)",
+    "en": "Write the %{scheme} partition table (partitions: %{count})"
+  },
+  "restore_plan.title_format": {
+    "ru": "Отформатировать раздел %{part} в %{fs}%{label}%{mode}",
+    "en": "Format partition %{part} as %{fs}%{label}%{mode}"
+  },
+  "restore_plan.title_format_label": {
+    "ru": ", метка «%{label}»",
+    "en": ", label “%{label}”"
+  },
+  "restore_plan.title_format_quick": {
+    "ru": ", быстрое",
+    "en": ", quick"
+  },
+  "restore_plan.title_format_full": {
+    "ru": ", полное",
+    "en": ", full"
+  },
+  "restore_plan.title_restore_sectors": {
+    "ru": "Восстановить раздел %{src} → %{dst} (посекторно)",
+    "en": "Restore partition %{src} → %{dst} (sector by sector)"
+  },
+  "restore_plan.title_restore_files": {
+    "ru": "Восстановить раздел %{src} → %{dst} (пофайлово)",
+    "en": "Restore partition %{src} → %{dst} (file by file)"
+  },
+  "restore_plan.title_extend": {
+    "ru": "Расширить файловую систему раздела %{part} на весь раздел",
+    "en": "Extend the file system of partition %{part} to the whole partition"
+  },
+  "restore_plan.title_assign_letter": {
+    "ru": "Назначить разделу %{part} букву %{letter}:",
+    "en": "Assign letter %{letter}: to partition %{part}"
+  },
+  "restore_plan.title_finalize_boot": {
+    "ru": "Пересоздать загрузчик (%{firmware})",
+    "en": "Recreate the bootloader (%{firmware})"
+  },
+  "restore_plan.title_fallback_bootloader": {
+    "ru": "Положить загрузчик по пути, который UEFI ищет сам (\\EFI\\BOOT\\BOOTX64.EFI)",
+    "en": "Put the bootloader where UEFI looks for it on its own (\\EFI\\BOOT\\BOOTX64.EFI)"
+  },
+  "restore_plan.title_restore_boot_entries": {
+    "ru": "Вернуть записи загрузки UEFI из копии в память материнской платы",
+    "en": "Write the UEFI boot entries from the backup back to the firmware"
+  },
+  "restore_plan.title_refresh_disks": {
+    "ru": "Обновить состояние дисков",
+    "en": "Refresh the disk state"
+  },
+  "types.fs_unknown": {
+    "ru": "неизвестная ФС",
+    "en": "unknown file system"
+  },
+  "units.b": {
+    "ru": "Б",
+    "en": "B"
+  },
+  "units.kib": {
+    "ru": "КиБ",
+    "en": "KiB"
+  },
+  "units.mib": {
+    "ru": "МиБ",
+    "en": "MiB"
+  },
+  "units.gib": {
+    "ru": "ГиБ",
+    "en": "GiB"
+  },
+  "units.tib": {
+    "ru": "ТиБ",
+    "en": "TiB"
+  },
+  "units.pib": {
+    "ru": "ПиБ",
+    "en": "PiB"
+  }
+}

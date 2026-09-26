@@ -27,7 +27,7 @@
 
 #![cfg(target_os = "windows")]
 
-use own_backup_common::{OwnBackupError, Result};
+use own_backup_common::{tr, OwnBackupError, Result};
 use tracing::{debug, info, warn};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{
@@ -123,7 +123,8 @@ pub struct BootConfig {
     pub current: Option<u16>,
     pub next: Option<u16>,
     pub timeout: Option<u16>,
-    /// How the entries were found, in words for the report.
+    /// How the entries were found, in words for the report (the window's
+    /// language).
     pub found_by: &'static str,
     /// Entry numbers named by `BootOrder` that have no variable behind them.
     /// A firmware that lists a boot option it cannot load is worth saying out
@@ -166,12 +167,12 @@ pub fn enable_privilege() -> Result<bool> {
     unsafe {
         let mut token = HANDLE::default();
         OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &mut token)
-            .map_err(|e| dev(format!("не открыть маркер процесса: {e}")))?;
+            .map_err(|e| dev(tr!("efivars_win.token_not_opened", error = e)))?;
 
         let mut luid = LUID::default();
         if let Err(e) = LookupPrivilegeValueW(PCWSTR::null(), w!("SeSystemEnvironmentPrivilege"), &mut luid) {
             let _ = CloseHandle(token);
-            return Err(dev(format!("нет такой привилегии: {e}")));
+            return Err(dev(tr!("efivars_win.no_such_privilege", error = e)));
         }
         let tp = TOKEN_PRIVILEGES {
             PrivilegeCount: 1,
@@ -182,7 +183,7 @@ pub fn enable_privilege() -> Result<bool> {
         // the last error tells them apart.
         let not_held = windows::Win32::Foundation::GetLastError() == ERROR_NOT_ALL_ASSIGNED;
         let _ = CloseHandle(token);
-        adjust.map_err(|e| dev(format!("не включить привилегию: {e}")))?;
+        adjust.map_err(|e| dev(tr!("efivars_win.privilege_not_enabled", error = e)))?;
         Ok(!not_held)
     }
 }
@@ -236,14 +237,16 @@ pub fn read_var_ex(name: &str) -> Result<Option<(Vec<u8>, u32)>> {
             return Ok(None);
         }
         if err == ERROR_INVALID_FUNCTION {
-            return Err(dev("эта машина загружается не через UEFI — записей загрузки нет"));
+            return Err(dev(tr!("efivars_win.not_uefi")));
         }
         if err == windows::Win32::Foundation::ERROR_PRIVILEGE_NOT_HELD {
-            return Err(dev(
-                "нет привилегии SeSystemEnvironmentPrivilege — нужны права администратора",
-            ));
+            return Err(dev(tr!("efivars_win.no_privilege")));
         }
-        return Err(dev(format!("не прочитать переменную {name}: {:?}", err)));
+        return Err(dev(tr!(
+            "efivars_win.read_failed",
+            name = name,
+            error = format!("{:?}", err)
+        )));
     }
     buf.truncate(n as usize);
     Ok(Some((buf, attrs)))
@@ -260,14 +263,14 @@ pub fn read_var_ex(name: &str) -> Result<Option<(Vec<u8>, u32)>> {
 /// construction rather than by care.
 pub fn write_var(name: &str, data: &[u8], attributes: u32) -> Result<()> {
     if !crate::efivars::is_boot_variable(name) {
-        return Err(dev(format!("{name}: не переменная загрузки — записывать её отсюда нельзя")));
+        return Err(dev(tr!("efivars_win.write_not_boot_variable", name = name)));
     }
     ensure_privilege();
     if data.is_empty() {
         // Zero length is how UEFI spells "delete". Not something a restore ever
         // wants by accident, so it is refused here and asked for by name when
         // the time comes.
-        return Err(dev(format!("{name}: пустое значение стёрло бы переменную")));
+        return Err(dev(tr!("efivars_win.empty_value", name = name)));
     }
     let (name_w, guid) = (wide(name), wide(EFI_GLOBAL));
     // SAFETY: both strings are NUL-terminated and outlive the call; the data
@@ -284,7 +287,7 @@ pub fn write_var(name: &str, data: &[u8], attributes: u32) -> Result<()> {
     if !ok.as_bool() {
         // SAFETY: the error belongs to the call just made.
         let err = unsafe { windows::Win32::Foundation::GetLastError() };
-        return Err(dev(format!("не записать {name}: {err:?}")));
+        return Err(dev(tr!("efivars_win.write_failed", name = name, error = format!("{err:?}"))));
     }
     info!(variable = name, bytes = data.len(), attributes, "efivars: variable written");
     Ok(())
@@ -313,9 +316,7 @@ pub enum WriteProbe {
 /// here instead of after editing a boot entry that then does not move.
 pub fn probe_write() -> Result<WriteProbe> {
     let Some((before, attrs)) = read_var_ex("Timeout")? else {
-        return Ok(WriteProbe::NotTested(
-            "у этой прошивки нет переменной Timeout, а заводить новую ради пробы нельзя".into(),
-        ));
+        return Ok(WriteProbe::NotTested(tr!("efivars_win.no_timeout_variable").into_owned()));
     };
     if let Err(e) = write_var("Timeout", &before, attrs) {
         return Ok(WriteProbe::Refused(e.to_string()));
@@ -343,12 +344,10 @@ pub fn read_entry(n: u16) -> Result<Option<LoadOption>> {
 /// Everything the firmware says about booting, in one pass.
 pub fn read_config() -> Result<BootConfig> {
     if !is_uefi() {
-        return Err(dev("эта машина загружается через обычный BIOS — записей UEFI у неё нет"));
+        return Err(dev(tr!("efivars_win.legacy_bios")));
     }
     if !enable_privilege()? {
-        return Err(dev(
-            "нет привилегии SeSystemEnvironmentPrivilege — запустите от имени администратора",
-        ));
+        return Err(dev(tr!("efivars_win.no_privilege_run_as_admin")));
     }
 
     let order = read_var("BootOrder")?.map(|b| efivars::parse_boot_order(&b)).unwrap_or_default();
@@ -359,12 +358,13 @@ pub fn read_config() -> Result<BootConfig> {
     // Every entry that exists, then the order applied on top. Numbers named by
     // BootOrder are looked up too, so a dangling one is noticed instead of
     // silently missing.
+    use crate::esp_scan::static_text;
     let (mut numbers, found_by) = match enumerate_names() {
-        Ok(ns) if !ns.is_empty() => (ns, "перечисление переменных прошивки"),
-        Ok(_) => (scan_numbers(), "перебор Boot0000..Boot00FF (перечисление вернуло пусто)"),
+        Ok(ns) if !ns.is_empty() => (ns, static_text(tr!("efivars_win.found_by_enumeration"))),
+        Ok(_) => (scan_numbers(), static_text(tr!("efivars_win.found_by_scan_empty"))),
         Err(e) => {
             debug!(error = %e, "efivars: enumeration unavailable, scanning instead");
-            (scan_numbers(), "перебор Boot0000..Boot00FF (перечисление недоступно)")
+            (scan_numbers(), static_text(tr!("efivars_win.found_by_scan_unavailable")))
         }
     };
     for n in &order {
@@ -448,7 +448,7 @@ fn enumerate_names() -> Result<Vec<u16>> {
     let status =
         unsafe { NtEnumerateSystemEnvironmentValuesEx(VARIABLE_NAMES, std::ptr::null_mut(), &mut len) };
     if status != STATUS_BUFFER_TOO_SMALL || len == 0 {
-        return Err(dev(format!("перечисление переменных недоступно (0x{status:08X})")));
+        return Err(dev(tr!("efivars_win.enumeration_unavailable", status = format!("{status:08X}"))));
     }
     let mut buf = vec![0u8; len as usize];
     // SAFETY: the buffer is as large as the call just asked for.
@@ -460,7 +460,7 @@ fn enumerate_names() -> Result<Vec<u16>> {
         )
     };
     if status < 0 {
-        return Err(dev(format!("перечисление переменных не удалось (0x{status:08X})")));
+        return Err(dev(tr!("efivars_win.enumeration_failed", status = format!("{status:08X}"))));
     }
 
     // VARIABLE_NAME: u32 NextEntryOffset, GUID VendorGuid (16 bytes), then the
@@ -565,7 +565,7 @@ pub fn plan_import(backup: &crate::efivars::BootBackup) -> Result<Vec<(String, C
     // until this line existed (2026-09-18), while the very same read inside
     // `read_config` worked — because that one enables it first.
     if !enable_privilege()? {
-        return Err(dev("нет привилегии SeSystemEnvironmentPrivilege — нужны права администратора"));
+        return Err(dev(tr!("efivars_win.no_privilege")));
     }
     let mut out = Vec::new();
     for v in &backup.variables {
@@ -629,7 +629,7 @@ fn partition_guids_on_this_machine() -> std::collections::HashSet<String> {
 
 pub fn apply_import(backup: &crate::efivars::BootBackup) -> Result<usize> {
     if !enable_privilege()? {
-        return Err(dev("нет привилегии SeSystemEnvironmentPrivilege — нужны права администратора"));
+        return Err(dev(tr!("efivars_win.no_privilege")));
     }
     let plan = plan_import(backup)?;
     let here = partition_guids_on_this_machine();
@@ -706,7 +706,7 @@ pub fn apply_import(backup: &crate::efivars::BootBackup) -> Result<usize> {
 /// entry and erasing it must never be a length that happened to come out zero.
 pub fn delete_var(name: &str) -> Result<()> {
     if !crate::efivars::is_boot_variable(name) {
-        return Err(dev(format!("{name}: не переменная загрузки")));
+        return Err(dev(tr!("efivars_win.not_boot_variable", name = name)));
     }
     ensure_privilege();
     let (name_w, guid) = (wide(name), wide(EFI_GLOBAL));
@@ -724,7 +724,7 @@ pub fn delete_var(name: &str) -> Result<()> {
     if !ok.as_bool() {
         // SAFETY: the error belongs to the call just made.
         let err = unsafe { windows::Win32::Foundation::GetLastError() };
-        return Err(dev(format!("не удалить {name}: {err:?}")));
+        return Err(dev(tr!("efivars_win.delete_failed", name = name, error = format!("{err:?}"))));
     }
     info!(variable = name, "efivars: variable deleted");
     Ok(())
@@ -796,9 +796,9 @@ pub fn safety_copy() -> Result<SafetyCopy> {
 pub fn write_entry(n: u16, option: &crate::efivars::LoadOption) -> Result<()> {
     let bytes = option.to_bytes();
     let back = crate::efivars::LoadOption::parse(&bytes)
-        .map_err(|e| dev(format!("собранная запись не читается обратно: {e} — не пишем")))?;
+        .map_err(|e| dev(tr!("efivars_win.readback_failed", error = e)))?;
     if &back != option {
-        return Err(dev("собранная запись читается иначе, чем задумана — не пишем"));
+        return Err(dev(tr!("efivars_win.readback_differs")));
     }
     let attributes = read_var_ex(&crate::efivars::entry_name(n))?
         .map(|(_, a)| a)
@@ -814,12 +814,10 @@ pub fn write_entry(n: u16, option: &crate::efivars::LoadOption) -> Result<()> {
 fn entry_for_edit(n: u16) -> Result<crate::efivars::LoadOption> {
     let name = crate::efivars::entry_name(n);
     let Some(option) = read_entry(n)? else {
-        return Err(dev(format!("записи {name} нет")));
+        return Err(dev(tr!("efivars_win.no_such_entry", name = name)));
     };
     if !option.fully_understood() {
-        return Err(dev(format!(
-            "{name}: её путь к устройству разобран не полностью — такую запись мы не переписываем"
-        )));
+        return Err(dev(tr!("efivars_win.not_fully_understood", name = name)));
     }
     Ok(option)
 }
@@ -828,7 +826,7 @@ fn entry_for_edit(n: u16) -> Result<crate::efivars::LoadOption> {
 /// untouched.
 pub fn set_description(n: u16, name: &str) -> Result<()> {
     if name.trim().is_empty() {
-        return Err(dev("пустое название — в меню его будет не отличить от соседей"));
+        return Err(dev(tr!("efivars_win.empty_name")));
     }
     let mut option = entry_for_edit(n)?;
     option.description = name.to_string();
@@ -880,7 +878,7 @@ pub fn create_entry(
     let cfg = read_config()?;
     let used: Vec<u16> = cfg.entries.iter().map(|e| e.number).collect();
     let n = crate::efivars::free_entry_number(&used)
-        .ok_or_else(|| dev("в прошивке не осталось свободных номеров записей"))?;
+        .ok_or_else(|| dev(tr!("efivars_win.no_free_numbers")))?;
 
     let option = crate::efivars::build_entry(description, hd, file);
     write_entry(n, &option)?;
@@ -942,51 +940,59 @@ pub struct Done {
 /// that does not start.
 pub fn apply_action(action: Action) -> Result<Done> {
     // Rule two, before anything else happens.
-    if let Some((entry, force, verb)) = match &action {
-        Action::Delete { entry, force } => Some((*entry, *force, "Удалить")),
-        Action::SetActive { entry, on: false, force } => Some((*entry, *force, "Убрать из меню")),
+    if let Some((entry, force, deleting)) = match &action {
+        Action::Delete { entry, force } => Some((*entry, *force, true)),
+        Action::SetActive { entry, on: false, force } => Some((*entry, *force, false)),
         _ => None,
     } {
         if read_config()?.current == Some(entry) && !force {
-            return Err(dev(format!(
-                "запись {entry:04X} — та, с которой эта машина загружена сейчас. {verb} её без \
-                 другой рабочей записи в меню означает машину, которая не стартует"
-            )));
+            let entry = format!("{entry:04X}");
+            return Err(dev(if deleting {
+                tr!("efivars_win.current_entry_delete", entry = entry)
+            } else {
+                tr!("efivars_win.current_entry_hide", entry = entry)
+            }));
         }
     }
 
     // Rule one. A change that could not be undone is not made.
-    let safety_copy = safety_copy().map_err(|e| {
-        dev(format!("не удалось сохранить копию записей загрузки ({e}) — без неё менять их нельзя"))
-    })?;
+    let safety_copy = safety_copy()
+        .map_err(|e| dev(tr!("efivars_win.safety_copy_failed", error = e)))?;
 
     let mut created = None;
     let message = match action {
         Action::Rename { entry, name } => {
             if name.trim().is_empty() {
-                return Err(dev("пустое название — в меню его будет не отличить от соседей"));
+                return Err(dev(tr!("efivars_win.empty_name")));
             }
             let was = read_entry(entry)?.map(|o| o.description).unwrap_or_default();
             set_description(entry, &name)?;
-            format!("{entry:04X}: «{was}» → «{name}»")
+            tr!("efivars_win.done_renamed", entry = format!("{entry:04X}"), was = was, name = name)
+                .into_owned()
         }
         Action::SetActive { entry, on, .. } => {
             set_active(entry, on)?;
-            format!("{entry:04X}: {}", if on { "показывается в меню" } else { "убрана из меню" })
+            let entry = format!("{entry:04X}");
+            if on {
+                tr!("efivars_win.done_shown", entry = entry).into_owned()
+            } else {
+                tr!("efivars_win.done_hidden", entry = entry).into_owned()
+            }
         }
         Action::Move { entry, to } => {
             let order = read_config()?.order;
             let new_order = crate::efivars::reorder(&order, entry, to);
             set_order(&new_order)?;
-            format!(
-                "Порядок: {}",
-                new_order.iter().map(|x| format!("{x:04X}")).collect::<Vec<_>>().join(" → ")
+            tr!(
+                "efivars_win.done_order",
+                order = new_order.iter().map(|x| format!("{x:04X}")).collect::<Vec<_>>().join(" → ")
             )
+            .into_owned()
         }
         Action::Delete { entry, .. } => {
             let was = read_entry(entry)?.map(|o| o.description).unwrap_or_default();
             delete_entry(entry)?;
-            format!("Запись {entry:04X} «{was}» удалена. Сам загрузчик остался на разделе.")
+            tr!("efivars_win.done_deleted", entry = format!("{entry:04X}"), was = was).into_owned()
         }
         Action::Create { name, disk, partition, file, position } => {
             let layout = crate::gpt_reader::read_disk_layout(disk)?;
@@ -994,31 +1000,34 @@ pub fn apply_action(action: Action) -> Result<Done> {
                 .partitions
                 .iter()
                 .find(|p| p.index == partition)
-                .ok_or_else(|| dev(format!("на диске {disk} нет раздела {partition}")))?;
+                .ok_or_else(|| {
+                    dev(tr!("efivars_win.no_such_partition", disk = disk, partition = partition))
+                })?;
             let hd = crate::efivars::HardDrive::from_gpt(
                 part.index,
                 part.first_lba,
                 part.last_lba,
                 &part.part_guid,
             )
-            .ok_or_else(|| dev(format!("не разобрать GUID раздела: {}", part.part_guid)))?;
+            .ok_or_else(|| dev(tr!("efivars_win.bad_partition_guid", guid = part.part_guid)))?;
             // Firmware spells paths with backslashes and from the root.
             let file = file.replace('/', "\\");
             let file = if file.starts_with('\\') { file } else { format!("\\{file}") };
             let n = create_entry(&name, &hd, &file, position)?;
             created = Some(n);
-            format!("Создана запись {n:04X} «{name}» → {file}")
+            tr!("efivars_win.done_created", entry = format!("{n:04X}"), name = name, file = file)
+                .into_owned()
         }
         Action::BootNext { entry } => {
             set_boot_next(entry)?;
             match entry {
-                Some(n) => format!("Следующая загрузка — с записи {n:04X}, один раз"),
-                None => "Однократная загрузка убрана".to_string(),
+                Some(n) => tr!("efivars_win.done_boot_next", entry = format!("{n:04X}")).into_owned(),
+                None => tr!("efivars_win.done_boot_next_cleared").into_owned(),
             }
         }
         Action::Timeout { secs } => {
             set_timeout(secs)?;
-            format!("Меню платы будет показываться {secs} с")
+            tr!("efivars_win.done_timeout", secs = secs).into_owned()
         }
     };
     Ok(Done { message, safety_copy, created })

@@ -70,7 +70,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use own_backup_common::types::BackupType;
-use own_backup_common::{OwnBackupError, Result};
+use own_backup_common::{tr, OwnBackupError, Result};
 
 use crate::chains::ConsolidationStep;
 use crate::seal::context::ArchiveKeys;
@@ -169,11 +169,9 @@ fn container_of(path: &Path) -> Result<&'static str> {
 /// than the window asked for, which is a correct chain.
 fn chain_key_for(image: &Path, keys: Option<&ArchiveKeys>) -> Result<ChainKey> {
     let keys = keys.ok_or_else(|| {
-        OwnBackupError::Encryption(format!(
-            "объединение копий в зашифрованной цепочке требует ключ задания — \
-цепочка оставлена как есть: {}",
-            image.display()
-        ))
+        OwnBackupError::Encryption(
+            tr!("consolidate.encrypted_needs_job_key", image = image.display()).into_owned(),
+        )
     })?;
     Ok(keys.open_chain_of(image)?.key)
 }
@@ -266,10 +264,9 @@ fn remove_checked(path: &Path) -> Result<()> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(OwnBackupError::ChainBroken(format!(
-            "не удалось удалить {}: {e}",
-            path.display()
-        ))),
+        Err(e) => Err(OwnBackupError::ChainBroken(
+            tr!("consolidate.remove_failed", path = path.display(), error = e).into_owned(),
+        )),
     }
 }
 
@@ -284,9 +281,9 @@ fn name_inside(folder: &Path, name: &str) -> Result<PathBuf> {
     let mut parts = candidate.components();
     let single = matches!(parts.next(), Some(std::path::Component::Normal(_))) && parts.next().is_none();
     if !single {
-        return Err(OwnBackupError::ChainBroken(format!(
-            "маркер консолидации называет {name:?} — это не имя файла в папке копий"
-        )));
+        return Err(OwnBackupError::ChainBroken(
+            tr!("consolidate.marker_bad_name", name = format!("{name:?}")).into_owned(),
+        ));
     }
     Ok(folder.join(name))
 }
@@ -568,10 +565,9 @@ fn execute(
             // would quietly reset how many increments the chain has absorbed
             // and when it started, and an age-based rule would never fire again.
             if container == "obk" && base_header.is_none() {
-                return Err(OwnBackupError::ChainBroken(format!(
-                    "не читается запечатанное описание базовой копии {} — шаг не начат",
-                    base.display()
-                )));
+                return Err(OwnBackupError::ChainBroken(
+                    tr!("consolidate.base_sidecar_unreadable", path = base.display()).into_owned(),
+                ));
             }
             Marker {
                 version: MARKER_VERSION,
@@ -760,7 +756,7 @@ pub fn resume_pending_with_keys(
             warn!(path = %path.display(), "Consolidation: unreadable marker — leaving it in place");
             report.unfinished.push((
                 path.clone(),
-                "маркер консолидации не читается — состояние цепочки неизвестно".into(),
+                tr!("consolidate.marker_unreadable").into_owned(),
             ));
             continue;
         };

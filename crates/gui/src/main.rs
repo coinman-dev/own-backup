@@ -1,6 +1,10 @@
 // Prevents additional console window on Windows in release
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+// Messages in Russian and English (locales/*.json), through
+// own_backup_common::tr! — see common/src/lang.rs.
+rust_i18n::i18n!("locales", fallback = "ru");
+
 mod commands;
 mod jobs;
 mod service_link;
@@ -173,12 +177,16 @@ fn enforce_single_instance() {
     let handle = unsafe { CreateMutexW(None, true, PCWSTR(name.as_ptr())) };
     let already = handle.is_err() || unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
     if already {
+        // Asked before `main` reads the config for itself, so the language is
+        // taken from it here.
+        own_backup_common::lang::set(&own_backup_common::lang::configured(
+            &AppConfig::default_path(),
+        ));
         let title: Vec<u16> = "Own Backup\0".encode_utf16().collect();
-        let text: Vec<u16> =
-            "Программа уже запущена.\nОткройте существующее окно Own Backup."
-                .encode_utf16()
-                .chain(std::iter::once(0))
-                .collect();
+        let text: Vec<u16> = own_backup_common::tr!("main.already_running")
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         // SAFETY: null-terminated strings; simple informational box.
         unsafe {
             MessageBoxW(
@@ -283,6 +291,9 @@ fn main() {
     // so nothing the user changed survived a restart.
     let config_path = AppConfig::default_path();
     let config = AppConfig::load_or_default();
+    // This process's own messages, until the window says which language it
+    // resolved (`set_ui_language`, sent as soon as it starts).
+    own_backup_common::lang::set(&config.ui_language);
 
     // Ensure data directory exists (config.toml is written here).
     let _ = std::fs::create_dir_all(&config.data_dir);
@@ -449,6 +460,7 @@ fn main() {
             // --- misc ---
             commands::settings::get_config,
             commands::settings::save_config,
+            commands::settings::set_ui_language,
             commands::settings::get_service_status,
             commands::settings::service_health,
             // The boot medium has no taskbar to say which layout is active.

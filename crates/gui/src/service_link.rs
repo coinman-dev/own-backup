@@ -15,6 +15,7 @@ use std::time::Duration;
 use tokio::sync::Mutex as AsyncMutex;
 
 use own_backup_client::BackupClient;
+use own_backup_common::tr;
 
 pub struct ServiceLink {
     endpoint: String,
@@ -61,7 +62,7 @@ impl ServiceLink {
             // interface started in the second the service was still writing
             // the file. Counted as "not up yet", so the caller waits for it.
             tracing::debug!(endpoint = %self.endpoint, "no service token yet");
-            return Err("токен службы ещё не записан".into());
+            return Err(tr!("service_link.no_token_yet").into_owned());
         }
         let r = BackupClient::connect(self.endpoint.clone(), token.clone()).await;
         tracing::debug!(
@@ -101,7 +102,7 @@ impl ServiceLink {
         }
         Err(tokio::task::spawn_blocking(unreachable_message)
             .await
-            .unwrap_or_else(|_| "Служба резервного копирования недоступна.".into()))
+            .unwrap_or_else(|_| tr!("service_link.unavailable").into_owned()))
     }
 
     /// The cached client, if it is still holding the token the service is
@@ -157,29 +158,20 @@ fn unreachable_message() -> String {
     let name = own_backup_common::WINDOWS_SERVICE_DISPLAY_NAME;
     // On the medium "install it" is not advice anyone can follow.
     if own_backup_common::media_mode::is_media_mode() {
-        return format!(
-            "Движок «{name}» не отвечает. Запустите его из консоли носителя:\n  \
-             own-backup-service.exe --run --media"
-        );
+        return tr!("service_link.media_engine_silent", name = name).into_owned();
     }
     #[cfg(target_os = "windows")]
-    let (start_hint, install_hint) = (
-        "Запустите её (нужны права администратора) или перезагрузите компьютер.".to_string(),
-        "запустите own-backup-service.exe /install (появится запрос прав администратора).".to_string(),
-    );
+    let (start_hint, install_hint) =
+        (tr!("service_link.win_start_hint"), tr!("service_link.win_install_hint"));
     #[cfg(not(target_os = "windows"))]
     let (start_hint, install_hint) = (
-        "Запустите её:  sudo systemctl start own-backup".to_string(),
-        format!(
-            "установите её:  sudo ./own-backup-service --install\n\
-             (после установки войдите в систему заново — вы будете добавлены в группу «{}»).",
-            own_backup_common::UNIX_ACCESS_GROUP
-        ),
+        tr!("service_link.linux_start_hint"),
+        tr!("service_link.linux_install_hint", group = own_backup_common::UNIX_ACCESS_GROUP),
     );
     if service_installed() {
-        format!("Служба «{name}» установлена, но не запущена. {start_hint}")
+        tr!("service_link.installed_not_running", name = name, hint = start_hint).into_owned()
     } else {
-        format!("Служба «{name}» не установлена. Для работы программы {install_hint}")
+        tr!("service_link.not_installed", name = name, hint = install_hint).into_owned()
     }
 }
 

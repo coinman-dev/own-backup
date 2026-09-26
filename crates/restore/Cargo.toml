@@ -6,6 +6,7 @@ license-file.workspace = true
 
 [dependencies]
 own-backup-common = { workspace = true }
+rust-i18n = { workspace = true }
 own-backup-backup = { workspace = true }
 gpt = { workspace = true }
 serde = { workspace = true }

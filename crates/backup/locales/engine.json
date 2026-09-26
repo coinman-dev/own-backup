@@ -1,0 +1,549 @@
+{
+  "_version": 2,
+  "engine_win.no_patterns": {
+    "ru": "исключения не заданы — файлы не перечислялись",
+    "en": "no exclusions are set — files were not listed"
+  },
+  "engine_win.encrypted_needs_key": {
+    "ru": "%{image}: копия зашифрована — чтобы её открыть, нужен пароль или ключ восстановления",
+    "en": "%{image}: the backup is encrypted — a password or recovery key is needed to open it"
+  },
+  "engine_win.encryption_needs_qcow2": {
+    "ru": "шифрование пишет собственный контейнер .obk — у задания должен быть формат qcow2",
+    "en": "encryption writes its own .obk container — the job's format must be qcow2"
+  },
+  "engine_win.encrypted_image_extension": {
+    "ru": "зашифрованный образ должен называться .%{ext}: %{image}",
+    "en": "an encrypted image must have the .%{ext} extension: %{image}"
+  },
+  "engine_win.bitlocker_multi_extent": {
+    "ru": "%{volume}: том BitLocker занимает %{count} экстентов — такой не поддерживается",
+    "en": "%{volume}: the BitLocker volume spans %{count} extents — this is not supported"
+  },
+  "engine_win.windows_unlock_multi_extent": {
+    "ru": "%{volume}: том занимает %{count} экстентов — открыть его силами Windows нельзя",
+    "en": "%{volume}: the volume spans %{count} extents — Windows cannot be used to open it"
+  },
+  "engine_win.volume_not_mounted_yet": {
+    "ru": "том ещё не смонтирован",
+    "en": "the volume is not mounted yet"
+  },
+  "engine_win.source_not_frozen": {
+    "ru": "источник не заморожен (нет снимка VSS) — читать $MFT нельзя",
+    "en": "the source is not frozen (no VSS snapshot) — $MFT cannot be read"
+  },
+  "engine_win.skip_fat_failed": {
+    "ru": "разбор FAT не удался: %{error}",
+    "en": "FAT parsing failed: %{error}"
+  },
+  "engine_win.skip_sector_mode": {
+    "ru": "копия посекторная — файловая система не разбиралась",
+    "en": "sector-by-sector backup — the file system was not parsed"
+  },
+  "engine_win.skip_bitlocker_locked": {
+    "ru": "том BitLocker был заблокирован — Windows его не смонтировала, а перечислить файлы можно только в смонтированной файловой системе",
+    "en": "the BitLocker volume was locked — Windows did not mount it, and files can be listed only in a mounted file system"
+  },
+  "engine_win.skip_luks": {
+    "ru": "том LUKS Windows не монтирует — перечислить файлы в нём она не может",
+    "en": "Windows does not mount LUKS volumes — it cannot list the files inside"
+  },
+  "engine_win.skip_fs_unsupported": {
+    "ru": "файловые исключения работают на NTFS/ReFS и FAT32, а здесь %{fs}",
+    "en": "file exclusions work on NTFS/ReFS and FAT32, and this is %{fs}"
+  },
+  "engine_win.other_filesystem": {
+    "ru": "другая файловая система",
+    "en": "another file system"
+  },
+  "engine_win.encrypted_in_image_exclusions": {
+    "ru": "исключения в зашифрованной копии этого источника ещё не поддержаны: файлы пришлось бы удалять уже внутри образа, а временный слой для этого пока не шифруется. Копия не создавалась.",
+    "en": "exclusions are not supported yet in an encrypted backup of this source: the files would have to be deleted inside the image, and the temporary layer for that is not encrypted yet. No backup was created."
+  },
+  "engine_win.skip_in_image_failed": {
+    "ru": "том зашифрован, а пройтись по файловой системе внутри готового образа не удалось — файлы из копии не убраны",
+    "en": "the volume is encrypted, and the file system inside the finished image could not be walked — files were not removed from the backup"
+  },
+  "engine_win.skip_mft_failed": {
+    "ru": "перечисление по MFT не удалось: %{error}",
+    "en": "listing files from the MFT failed: %{error}"
+  },
+  "engine_win.skip_ntfs_map_failed": {
+    "ru": "карта NTFS не построена: %{error}",
+    "en": "the NTFS map was not built: %{error}"
+  },
+  "engine_win.skip_list_failed": {
+    "ru": "перечислить файлы %{fs} не удалось",
+    "en": "could not list the %{fs} files"
+  },
+  "engine_win.skip_partition_unreadable": {
+    "ru": "раздел не открылся для чтения",
+    "en": "the partition could not be opened for reading"
+  },
+  "engine_win.skip_fat_only": {
+    "ru": "файловые исключения на этой ФС поддерживаются только для FAT32/exFAT",
+    "en": "file exclusions on this file system are supported only for FAT32/exFAT"
+  },
+  "engine_win.skip_fs_unknown": {
+    "ru": "файловая система не распознана — раздел скопирован посекторно",
+    "en": "file system not recognized — the partition was copied sector by sector"
+  },
+  "engine_win.locked_multi_extent": {
+    "ru": "%{volume}: запертый том занимает %{count} экстентов — такой не поддерживается",
+    "en": "%{volume}: the locked volume spans %{count} extents — this is not supported"
+  },
+  "engine_win.skip_bitlocker_no_password": {
+    "ru": "том BitLocker заперт и пароль не введён — копируется как есть, шифротекстом; правила исключений к нему не применялись",
+    "en": "the BitLocker volume is locked and no password was entered — it is copied as is, as ciphertext; exclusion rules were not applied to it"
+  },
+  "engine_win.skip_partition_line": {
+    "ru": "раздел %{index} (%{fs}): %{why}",
+    "en": "partition %{index} (%{fs}): %{why}"
+  },
+  "engine_win.label_partition_data": {
+    "ru": "Данные разделов",
+    "en": "Partition data"
+  },
+  "engine_win.label_partition_table": {
+    "ru": "Таблица разделов (GPT)",
+    "en": "Partition table (GPT)"
+  },
+  "engine_win.label_partition": {
+    "ru": "Раздел %{index} (%{fs})",
+    "en": "Partition %{index} (%{fs})"
+  },
+  "engine_win.note_no_esp": {
+    "ru": "Раздел EFI не был указан, поэтому меню загрузки не проверялось: если система предлагает несколько одинаковых записей Windows, лишние остались от исходного диска.",
+    "en": "The EFI partition was not specified, so the boot menu was not checked: if the system offers several identical Windows entries, the extra ones are left over from the source disk."
+  },
+  "engine_win.bcdedit_start_failed": {
+    "ru": "не удалось запустить bcdedit: %{error}",
+    "en": "could not start bcdedit: %{error}"
+  },
+  "engine_win.bcdedit_failed": {
+    "ru": "bcdedit %{args} → код %{code}: %{output}",
+    "en": "bcdedit %{args} → exit code %{code}: %{output}"
+  },
+  "engine_win.note_store_not_found": {
+    "ru": "Хранилище загрузки %{store} не найдено — меню не проверялось.",
+    "en": "Boot store %{store} was not found — the menu was not checked."
+  },
+  "engine_win.note_default_unreadable": {
+    "ru": "Не удалось прочитать запись загрузки по умолчанию: %{error}",
+    "en": "Could not read the default boot entry: %{error}"
+  },
+  "engine_win.note_default_unknown": {
+    "ru": "Запись загрузки по умолчанию не удалось определить — меню не менялось.",
+    "en": "Could not identify the default boot entry — the menu was not changed."
+  },
+  "engine_win.note_default_elsewhere": {
+    "ru": "Запись загрузки по умолчанию указывает не на восстановленный раздел — меню оставлено без изменений, проверьте его вручную (bcdedit).",
+    "en": "The default boot entry does not point at the restored partition — the menu was left unchanged; check it manually (bcdedit)."
+  },
+  "engine_win.note_trim_failed": {
+    "ru": "Не удалось сократить меню загрузки: %{error}",
+    "en": "Could not trim the boot menu: %{error}"
+  },
+  "engine_win.verify_latest_needs_key": {
+    "ru": "проверка последней копии: нужен ключ архива",
+    "en": "validating the latest backup: the backup key is needed"
+  },
+  "engine_win.verify_latest_unknown_container": {
+    "ru": "проверка последней копии не умеет контейнер «%{container}»",
+    "en": "validation of the latest backup does not support the “%{container}” container"
+  },
+  "engine_win.not_mounted": {
+    "ru": "%{image} сейчас не подключён — отключать нечего",
+    "en": "%{image} is not mounted — nothing to unmount"
+  },
+  "engine_win.encrypted_read_only": {
+    "ru": "зашифрованную копию можно открыть только для чтения: для записи нужна пересборка шифрованного контейнера, которой пока нет",
+    "en": "an encrypted backup can only be opened read-only: writing would require rebuilding the encrypted container, which is not implemented yet"
+  },
+
+  "bitlocker.protector_suspended": {
+    "ru": "защита приостановлена (ключ лежит открыто)",
+    "en": "protection suspended (key stored in the clear)"
+  },
+  "bitlocker.protector_external_key": {
+    "ru": "внешний ключ (авторазблокировка / ключ запуска)",
+    "en": "external key (auto-unlock / startup key)"
+  },
+  "bitlocker.protector_recovery_key": {
+    "ru": "ключ восстановления (48 цифр)",
+    "en": "recovery key (48 digits)"
+  },
+  "bitlocker.protector_password": {
+    "ru": "пароль",
+    "en": "password"
+  },
+  "bitlocker.protector_unknown": {
+    "ru": "неизвестно",
+    "en": "unknown"
+  },
+  "bitlocker.wrong_passphrase": {
+    "ru": "пароль не подходит к этому тому — ни один парольный VMK им не открылся",
+    "en": "the password does not match this volume — it opened none of the password VMKs"
+  },
+  "bitlocker.rk_group_count": {
+    "ru": "ключ восстановления — 8 групп по 6 цифр, а здесь %{count}",
+    "en": "a recovery key is 8 groups of 6 digits, and this one has %{count}"
+  },
+  "bitlocker.rk_group_not_digits": {
+    "ru": "группа %{group} — не шесть цифр: %{text}",
+    "en": "group %{group} is not six digits: %{text}"
+  },
+  "bitlocker.rk_group_unreadable": {
+    "ru": "группа %{group} не читается",
+    "en": "group %{group} cannot be read"
+  },
+  "bitlocker.rk_group_checksum": {
+    "ru": "группа %{group} (%{text}) не делится на 11 — опечатка в ключе",
+    "en": "group %{group} (%{text}) is not divisible by 11 — the key has a typo"
+  },
+  "bitlocker.rk_group_range": {
+    "ru": "группа %{group} (%{text}) вне диапазона",
+    "en": "group %{group} (%{text}) is out of range"
+  },
+  "bitlocker.cipher_cbc128_diffuser": {
+    "ru": "AES-CBC 128 + диффузор (Vista/7)",
+    "en": "AES-CBC 128 + diffuser (Vista/7)"
+  },
+  "bitlocker.cipher_cbc256_diffuser": {
+    "ru": "AES-CBC 256 + диффузор (Vista/7)",
+    "en": "AES-CBC 256 + diffuser (Vista/7)"
+  },
+  "bitlocker.cipher_unknown": {
+    "ru": "неизвестный шифр %{code}",
+    "en": "unknown cipher %{code}"
+  },
+  "bitlocker.fve_unreadable_details": {
+    "ru": "метаданные FVE не прочитаны. Окно %{window} байт, сектор %{sector_size}; смещения копий: %{offsets}; сектор 0 [0x00..0x10]: %{head}; [0x160..0x190]: %{guid_area}%{last_error}",
+    "en": "FVE metadata could not be read. Window %{window} bytes, sector %{sector_size}; copy offsets: %{offsets}; sector 0 [0x00..0x10]: %{head}; [0x160..0x190]: %{guid_area}%{last_error}"
+  },
+  "bitlocker.no_plausible_offsets": {
+    "ru": "ни одного правдоподобного",
+    "en": "none plausible"
+  },
+  "bitlocker.last_error_suffix": {
+    "ru": "; последняя ошибка: %{error}",
+    "en": "; last error: %{error}"
+  },
+  "bitlocker.vmk_line": {
+    "ru": "VMK: тип входа %{entry_type}, защита %{protection}, данных %{len} байт",
+    "en": "VMK: entry type %{entry_type}, protection %{protection}, %{len} data bytes"
+  },
+  "bitlocker.fve_unreadable": {
+    "ru": "метаданные FVE не прочитаны",
+    "en": "FVE metadata could not be read"
+  },
+  "bitlocker.datum_key": {
+    "ru": "ключ",
+    "en": "key"
+  },
+  "bitlocker.datum_stretch": {
+    "ru": "растяжка",
+    "en": "stretch"
+  },
+  "bitlocker.datum_utf16": {
+    "ru": "UTF-16 строка",
+    "en": "UTF-16 string"
+  },
+  "bitlocker.datum_offset_size": {
+    "ru": "смещение+размер",
+    "en": "offset+size"
+  },
+  "bitlocker.datum_line": {
+    "ru": "тип %{value_type} (%{kind}), вход %{entry_type}, данных %{len} байт, первые 4: %{head4}",
+    "en": "type %{value_type} (%{kind}), entry %{entry_type}, %{len} data bytes, first 4: %{head4}"
+  },
+  "bitlocker.sector_size_unknown": {
+    "ru": "implausible sector size %{bpb} в BPB, а геометрия устройства не сообщена (так выглядит exFAT или ReFS внутри контейнера)",
+    "en": "implausible sector size %{bpb} in the BPB, and the device geometry was not provided (this is how exFAT or ReFS inside a container looks)"
+  },
+  "bitlocker.fve_not_found": {
+    "ru": "метаданные FVE не найдены (проверено адресов: %{count})",
+    "en": "FVE metadata not found (%{count} locations checked)"
+  },
+  "bitlocker.no_recovery_protector": {
+    "ru": "у тома нет защитника «ключ восстановления» — этим способом его не открыть",
+    "en": "the volume has no “recovery key” protector — it cannot be opened this way"
+  },
+  "bitlocker.no_password_protector": {
+    "ru": "у тома нет защитника «пароль» — этим способом его не открыть",
+    "en": "the volume has no “password” protector — it cannot be opened this way"
+  },
+  "bitlocker.diag_read_failed": {
+    "ru": "%{label}: прочитать не удалось — %{error}",
+    "en": "%{label}: could not read — %{error}"
+  },
+  "bitlocker.diag_decrypt_failed": {
+    "ru": "%{label}: расшифровать не удалось — %{error}",
+    "en": "%{label}: could not decrypt — %{error}"
+  },
+  "bitlocker.diag_filesystem_mark": {
+    "ru": "   ← файловая система!",
+    "en": "   ← file system!"
+  },
+  "bitlocker.diag_raw_at_zero": {
+    "ru": "как есть, со смещения 0 (без расшифровки)",
+    "en": "raw, from offset 0 (not decrypted)"
+  },
+  "bitlocker.diag_raw_at_backup": {
+    "ru": "как есть, с %{backup} (без расшифровки)",
+    "en": "raw, from %{backup} (not decrypted)"
+  },
+  "bitlocker.diag_zero_tweak_zero": {
+    "ru": "с 0, ключ сектора 0",
+    "en": "from 0, sector tweak 0"
+  },
+  "bitlocker.diag_backup_tweak_zero": {
+    "ru": "с %{backup}, ключ сектора 0",
+    "en": "from %{backup}, sector tweak 0"
+  },
+  "bitlocker.diag_backup_tweak_physical": {
+    "ru": "с %{backup}, ключ сектора %{index} (физического)",
+    "en": "from %{backup}, sector tweak %{index} (physical)"
+  },
+  "bitlocker.still_encrypting": {
+    "ru": "шифрование тома ещё не завершено (идёт или стоит на паузе) — часть его лежит на диске открытой, и своей расшифровкой такой том не скопировать верно. Дождитесь окончания: в Windows — manage-bde -status",
+    "en": "encryption of the volume has not finished (running or paused) — part of it is still unencrypted on disk, and our own decryption cannot copy such a volume correctly. Wait until it finishes: in Windows — manage-bde -status"
+  },
+  "bitlocker.still_decrypting": {
+    "ru": "расшифровка тома ещё не завершена (идёт или стоит на паузе) — часть его уже лежит на диске открытой, и своей расшифровкой такой том не скопировать верно. Дождитесь окончания: в Windows — manage-bde -status",
+    "en": "decryption of the volume has not finished (running or paused) — part of it is already unencrypted on disk, and our own decryption cannot copy such a volume correctly. Wait until it finishes: in Windows — manage-bde -status"
+  },
+  "bitlocker.partially_encrypted": {
+    "ru": "зашифрована лишь часть тома: %{encrypted} из %{total} байт (%{percent}). Копировать такой том нельзя: образ вышел бы обрезанным. Дождитесь окончания шифрования (в Windows: manage-bde -status)",
+    "en": "only part of the volume is encrypted: %{encrypted} of %{total} bytes (%{percent}). Such a volume cannot be copied: the image would be truncated. Wait for encryption to finish (in Windows: manage-bde -status)"
+  },
+  "bitlocker.sector0_not_fs": {
+    "ru": "расшифрованный сектор 0 не похож ни на одну файловую систему — не тот ключ или неучтённая раскладка",
+    "en": "decrypted sector 0 does not look like any file system — wrong key or an unhandled layout"
+  },
+
+  "luks.stored_header_corrupt": {
+    "ru": "повреждён сохранённый заголовок LUKS: %{error}",
+    "en": "the saved LUKS header is corrupt: %{error}"
+  },
+  "luks.stored_header_length": {
+    "ru": "сохранённый заголовок LUKS — %{len} Б, а контейнер начинал данные с %{data_offset} Б",
+    "en": "the saved LUKS header is %{len} B, but the container's data started at %{data_offset} B"
+  },
+  "luks.version_unsupported": {
+    "ru": "LUKS %{version} — этот формат ещё не поддерживается",
+    "en": "LUKS %{version} — this format is not supported yet"
+  },
+  "luks.luks1_header_truncated": {
+    "ru": "заголовок LUKS1 обрезан",
+    "en": "the LUKS1 header is truncated"
+  },
+  "luks.luks1_cipher_unsupported": {
+    "ru": "LUKS1: шифр %{cipher} не поддерживается",
+    "en": "LUKS1: cipher %{cipher} is not supported"
+  },
+  "luks.luks1_hash_unsupported": {
+    "ru": "LUKS1: хеш %{hash} не поддерживается",
+    "en": "LUKS1: hash %{hash} is not supported"
+  },
+  "luks.luks1_no_active_slots": {
+    "ru": "LUKS1: нет активных слотов ключа",
+    "en": "LUKS1: no active key slots"
+  },
+  "luks.method_password": {
+    "ru": "пароль",
+    "en": "password"
+  },
+  "luks.luks2_cipher_unsupported": {
+    "ru": "LUKS2: шифр %{cipher} не поддерживается",
+    "en": "LUKS2: cipher %{cipher} is not supported"
+  },
+  "luks.luks2_no_crypt_segment": {
+    "ru": "LUKS2: в заголовке нет зашифрованного сегмента",
+    "en": "LUKS2: the header has no encrypted segment"
+  },
+  "luks.luks2_requirement": {
+    "ru": "LUKS2: %{requirement} — том в особом состоянии, скопировать его целиком нельзя",
+    "en": "LUKS2: %{requirement} — the volume is in a special state and cannot be copied whole"
+  },
+  "luks.luks2_no_password_slots": {
+    "ru": "LUKS2: нет слотов, которые открываются паролем",
+    "en": "LUKS2: no key slots open with a password"
+  },
+  "luks.luks2_all_slots_tokens": {
+    "ru": "LUKS2: все слоты заняты токенами (%{tokens}) — Own Backup умеет только пароль",
+    "en": "LUKS2: every key slot is bound to a token (%{tokens}) — Own Backup supports passwords only"
+  },
+
+  "restore_win.sectors_held": {
+    "ru": "Windows не отдаёт секторы раздела (смещение %{offset}, %{size} Б): %{failure}. Их держат тома: %{volumes}. Так бывает, когда от удалённого раздела остался том-призрак — он не отпускает секторы и не поддаётся размонтированию. Перезагрузите машину и повторите восстановление.",
+    "en": "Windows will not release the partition's sectors (offset %{offset}, %{size} B): %{failure}. They are held by volumes: %{volumes}. This happens when a deleted partition leaves a ghost volume behind — it keeps the sectors and cannot be dismounted. Restart the machine and run the restore again."
+  },
+  "restore_win.volumes_unknown": {
+    "ru": "не определены",
+    "en": "unknown"
+  },
+  "restore_win.no_such_partition": {
+    "ru": "в копии нет раздела с номером %{index} (есть: %{present})",
+    "en": "the backup has no partition number %{index} (it has: %{present})"
+  },
+  "restore_win.target_too_small": {
+    "ru": "раздел-приёмник %{target} Б меньше исходного тома %{source} Б — посекторно не поместится",
+    "en": "the target partition (%{target} B) is smaller than the source volume (%{source} B) — a sector-by-sector copy will not fit"
+  },
+  "restore_win.block_not_sector_multiple": {
+    "ru": "размер блока образа %{block_size} не кратен сектору приёмника %{sector}",
+    "en": "the image block size %{block_size} is not a multiple of the target's sector size %{sector}"
+  },
+  "restore_win.volume_not_shown": {
+    "ru": "Windows не показала том раздела %{index} в подключённой копии (смещение %{offset}) — прочитать файлы неоткуда",
+    "en": "Windows did not expose the volume of partition %{index} in the mounted backup (offset %{offset}) — there is nothing to read the files from"
+  },
+  "restore_win.target_too_small_for_container": {
+    "ru": "раздел-приёмник %{target} Б мал для контейнера: заголовок %{header} Б + данные %{payload} Б",
+    "en": "the target partition (%{target} B) is too small for the container: header %{header} B + data %{payload} B"
+  },
+  "restore_win.header_offset_mismatch": {
+    "ru": "восстановленный заголовок сообщает смещение данных %{actual}, ожидалось %{expected}",
+    "en": "the restored header reports data offset %{actual}, expected %{expected}"
+  },
+
+  "format_win.insufficient_rights": {
+    "ru": "недостаточно прав",
+    "en": "insufficient privileges"
+  },
+  "format_win.fs_not_supported": {
+    "ru": "файловая система не поддерживается",
+    "en": "the file system is not supported"
+  },
+  "format_win.volume_in_use": {
+    "ru": "том занят другим процессом",
+    "en": "the volume is in use by another process"
+  },
+  "format_win.cluster_too_small": {
+    "ru": "слишком маленький размер кластера",
+    "en": "the cluster size is too small"
+  },
+  "format_win.callback_code": {
+    "ru": "FormatEx сообщил код %{code}",
+    "en": "FormatEx reported code %{code}"
+  },
+  "format_win.format_failed": {
+    "ru": "не удалось отформатировать %{volume} в %{fs}: %{why}",
+    "en": "could not format %{volume} as %{fs}: %{why}"
+  },
+  "format_win.not_started": {
+    "ru": "форматирование %{volume} в %{fs} не начиналось — FormatEx не сообщил результат",
+    "en": "formatting %{volume} as %{fs} never started — FormatEx reported no result"
+  },
+  "format_win.ended_with_error": {
+    "ru": "форматирование %{volume} в %{fs} завершилось ошибкой",
+    "en": "formatting %{volume} as %{fs} failed"
+  },
+  "format_win.needs_drive_letter": {
+    "ru": "fmifs.dll недоступна, а format.com умеет работать только с буквой диска (получено %{volume})",
+    "en": "fmifs.dll is unavailable, and format.com works only with a drive letter (got %{volume})"
+  },
+  "format_win.format_com_start_failed": {
+    "ru": "не удалось запустить format.com: %{error}",
+    "en": "could not start format.com: %{error}"
+  },
+  "format_win.format_com_failed": {
+    "ru": "format.com %{drive} завершился с кодом %{code}: %{output}",
+    "en": "format.com %{drive} exited with code %{code}: %{output}"
+  },
+
+  "disk_session_win.sector_mismatch": {
+    "ru": "план рассчитан на сектор %{planned} Б, а у диска %{disk} — %{actual} Б",
+    "en": "the plan assumes %{planned} B sectors, but disk %{disk} has %{actual} B"
+  },
+  "disk_session_win.layout_refused": {
+    "ru": "диспетчер разделов отклонил новую разметку диска %{disk}: %{error}. Обычно это значит, что один из затронутых томов занят — закройте открытые в нём файлы и повторите.",
+    "en": "the partition manager refused the new layout of disk %{disk}: %{error}. Usually this means one of the affected volumes is in use — close the files open on it and try again."
+  },
+
+  "windows_unlock_win.wrong_secret": {
+    "ru": "пароль или ключ не подходит этому тому",
+    "en": "the password or key does not match this volume"
+  },
+  "windows_unlock_win.not_bitlocker": {
+    "ru": "том не зашифрован BitLocker",
+    "en": "the volume is not encrypted with BitLocker"
+  },
+  "windows_unlock_win.no_such_protector": {
+    "ru": "у тома нет такого предохранителя: паролем открывают том ДАННЫХ, системный том — только ключом восстановления",
+    "en": "the volume has no such protector: a password opens a DATA volume, a system volume opens only with its recovery key"
+  },
+  "windows_unlock_win.returned_code": {
+    "ru": "BitLocker вернул %{code}",
+    "en": "BitLocker returned %{code}"
+  },
+  "windows_unlock_win.needs_letter": {
+    "ru": "%{volume}: разблокировка средствами Windows работает по букве тома",
+    "en": "%{volume}: unlocking through Windows works by drive letter"
+  },
+  "windows_unlock_win.wmi_unavailable": {
+    "ru": "WMI недоступен: %{error}",
+    "en": "WMI is unavailable: %{error}"
+  },
+  "windows_unlock_win.no_provider": {
+    "ru": "провайдера BitLocker в WMI нет (%{error}) — носитель собран без компонента WinPE-SecureStartup?",
+    "en": "WMI has no BitLocker provider (%{error}) — was the media built without the WinPE-SecureStartup component?"
+  },
+  "windows_unlock_win.volume_query": {
+    "ru": "запрос тома: %{error}",
+    "en": "volume query: %{error}"
+  },
+  "windows_unlock_win.unknown_volume": {
+    "ru": "%{letter}: WMI не знает такого тома — он под BitLocker?",
+    "en": "%{letter}: WMI does not know this volume — is it under BitLocker?"
+  },
+  "windows_unlock_win.volume_path": {
+    "ru": "путь тома: %{error}",
+    "en": "volume path: %{error}"
+  },
+  "windows_unlock_win.no_wmi_path": {
+    "ru": "у тома нет пути в WMI",
+    "en": "the volume has no WMI path"
+  },
+  "windows_unlock_win.volume_class": {
+    "ru": "класс тома: %{error}",
+    "en": "volume class: %{error}"
+  },
+  "windows_unlock_win.volume_class_missing": {
+    "ru": "класс тома не получен",
+    "en": "the volume class was not returned"
+  },
+  "windows_unlock_win.method": {
+    "ru": "метод %{method}: %{error}",
+    "en": "method %{method}: %{error}"
+  },
+  "windows_unlock_win.method_no_params": {
+    "ru": "у метода %{method} нет входных параметров",
+    "en": "method %{method} has no input parameters"
+  },
+  "windows_unlock_win.method_params": {
+    "ru": "параметры %{method}: %{error}",
+    "en": "%{method} parameters: %{error}"
+  },
+  "windows_unlock_win.param": {
+    "ru": "параметр %{name}: %{error}",
+    "en": "parameter %{name}: %{error}"
+  },
+  "windows_unlock_win.call": {
+    "ru": "вызов %{method}: %{error}",
+    "en": "calling %{method}: %{error}"
+  },
+  "windows_unlock_win.no_result": {
+    "ru": "%{method} ничего не вернул",
+    "en": "%{method} returned nothing"
+  },
+  "windows_unlock_win.return_code": {
+    "ru": "код возврата: %{error}",
+    "en": "return code: %{error}"
+  },
+  "windows_unlock_win.error": {
+    "ru": "разблокировка средствами Windows: %{msg}",
+    "en": "unlocking through Windows: %{msg}"
+  }
+}

@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
+  import { m } from '../lib/paraglide/messages';
 
   interface Props {
     open: boolean;
@@ -23,9 +24,12 @@
     title,
     onClose,
     onConfirm,
-    confirmLabel = 'OK',
+    // The two labels have no string defaults: those are computed once and
+    // would keep the language the dialog was created in. Left out, they fall
+    // back in the markup, at render time («OK», «Отмена»).
+    confirmLabel,
     confirmDisabled = false,
-    cancelLabel = 'Отмена',
+    cancelLabel,
     danger = false,
     children,
   }: Props = $props();
@@ -60,7 +64,7 @@
     <div class="modal-card">
       <div class="modal-header">
         <h2 class="modal-title">{title}</h2>
-        <button class="modal-close" onclick={onClose} aria-label="Закрыть">
+        <button class="modal-close" onclick={onClose} aria-label={m.common_close()}>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
             <path d="M18 6L6 18M6 6l12 12" />
           </svg>
@@ -72,9 +76,9 @@
       </div>
 
       <div class="modal-footer">
-        {#if cancelLabel}
+        {#if cancelLabel !== ''}
           <button class="btn btn-secondary" onclick={onClose}>
-            {cancelLabel}
+            {cancelLabel ?? m.common_cancel()}
           </button>
         {/if}
         {#if onConfirm}
@@ -83,7 +87,7 @@
             onclick={onConfirm}
             disabled={confirmDisabled}
           >
-            {confirmLabel}
+            {confirmLabel ?? m.common_ok()}
           </button>
         {/if}
       </div>

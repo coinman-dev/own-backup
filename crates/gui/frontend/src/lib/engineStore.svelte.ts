@@ -4,6 +4,8 @@
 import { listen } from '@tauri-apps/api/event';
 import { api } from './api';
 import { formatBytes } from './format';
+import { m } from './paraglide/messages';
+import { onLocale } from './i18n.svelte';
 import type {
   ArchiveSecret,
   DiskInfo,
@@ -59,6 +61,11 @@ export function restoreEtaMs(): number {
 
 let inited = false;
 
+/** Our own text in `engine.volumesError` (not one the service sent), kept as a
+ *  function: the field stays a string for whoever shows it, and a change of
+ *  language writes it again in the new one. */
+let volumesErrorText: (() => string) | null = null;
+
 /** Told once, by the first progress event of the running verify, that it is
  *  under way — for an encrypted copy that means the password was accepted,
  *  since nothing is read before the key opens. */
@@ -67,6 +74,10 @@ let verifyStarted: (() => void) | null = null;
 export async function initEngine(): Promise<void> {
   if (inited) return;
   inited = true;
+
+  onLocale(() => {
+    if (volumesErrorText) engine.volumesError = volumesErrorText();
+  });
 
   await listen<EngineProgress>('restore-progress', (e) => {
     engine.restoreProgress = e.payload;
@@ -115,12 +126,13 @@ export async function refreshVolumes(): Promise<void> {
   }
   engine.volumesLoading = true;
   engine.volumesError = null;
+  volumesErrorText = null;
   try {
     const disks: DiskInfo[] = await api.listDisks();
     // Show disks in physical-drive order (0, 1, 2, …) rather than WMI order.
     const diskNumber = (d: DiskInfo): number => {
-      const m = d.device_id.match(/(\d+)\s*$/);
-      return m ? parseInt(m[1], 10) : 0;
+      const num = d.device_id.match(/(\d+)\s*$/);
+      return num ? parseInt(num[1], 10) : 0;
     };
     engine.disks = [...disks].sort((a, b) => diskNumber(a) - diskNumber(b));
     engine.volumes = disks
@@ -140,8 +152,8 @@ export async function refreshVolumes(): Promise<void> {
       /* keep */
     }
     if (engine.volumes.length === 0) {
-      engine.volumesError =
-        'Не найдено ни одного тома с буквой. Подробности — в own-backup-gui.log рядом с exe.';
+      volumesErrorText = m.eng_no_volumes;
+      engine.volumesError = volumesErrorText();
     }
   } catch (e) {
     engine.volumesError = String(e);
@@ -203,7 +215,7 @@ export async function runRestore(
   target: string,
   secret?: ArchiveSecret,
 ): Promise<void> {
-  if (engine.op) throw new Error('Уже выполняется другая операция.');
+  if (engine.op) throw new Error(m.eng_busy());
   engine.op = 'restore';
   engine.restoreProgress = null;
   engine.restoreSummary = null;
@@ -227,7 +239,7 @@ export async function runVerify(
   secret?: ArchiveSecret,
   onStarted?: () => void,
 ): Promise<VerifySummary> {
-  if (engine.op) throw new Error('Уже выполняется другая операция.');
+  if (engine.op) throw new Error(m.eng_busy());
   engine.op = 'verify';
   engine.verifyProgress = null;
   verifyStarted = onStarted ?? null;

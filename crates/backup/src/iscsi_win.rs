@@ -24,7 +24,7 @@
 use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
-use own_backup_common::{OwnBackupError, Result};
+use own_backup_common::{tr, OwnBackupError, Result};
 use tracing::{info, warn};
 use windows::core::PCWSTR;
 use windows::Win32::Storage::IscsiDisc::{
@@ -190,12 +190,12 @@ fn describe(code: u32) -> String {
         return format!("{code:#010x} {name} — {text}");
     }
     let win32 = match code {
-        0x0000_0002 => "Win32: не найдено",
-        0x0000_0005 => "Win32: отказано в доступе",
-        0x0000_0057 => "Win32: недопустимый параметр",
-        0x0000_0422 => "Win32: служба отключена",
-        _ if code < 0x0001_0000 => "ошибка Win32, не iSCSI",
-        _ => "нет в таблице iscsierr.h",
+        0x0000_0002 => tr!("iscsi_win.win32_not_found"),
+        0x0000_0005 => tr!("iscsi_win.win32_access_denied"),
+        0x0000_0057 => tr!("iscsi_win.win32_invalid_parameter"),
+        0x0000_0422 => tr!("iscsi_win.win32_service_disabled"),
+        _ if code < 0x0001_0000 => tr!("iscsi_win.win32_not_iscsi"),
+        _ => tr!("iscsi_win.not_in_iscsierr"),
     };
     format!("{code:#010x} — {win32}")
 }
@@ -216,7 +216,9 @@ impl Tap for OwnBackupError {
     fn tap(self, target: &str) -> Self {
         match self {
             OwnBackupError::Device(m) if !target.is_empty() => {
-                OwnBackupError::Device(format!("{m} (цель {target})"))
+                OwnBackupError::Device(
+                    tr!("iscsi_win.with_target", message = m, target = target).into_owned(),
+                )
             }
             other => other,
         }
@@ -446,26 +448,19 @@ pub fn status() -> InitiatorStatus {
     // start it on demand — but it has to exist and be allowed to start.
     let ready = driver_file && service_present && !disabled;
     let message = if !driver_file {
-        format!(
-            "Драйвер инициатора (msiscsi.sys) не найден в {}. Подключать образы нечем.",
-            system32.join("drivers").display()
-        )
+        tr!("iscsi_win.driver_missing", path = system32.join("drivers").display()).into_owned()
     } else if !service_present {
-        let extra = if media_mode {
-            " На носителе службе нужен журнал событий: его включает start-media.cmd."
+        if media_mode {
+            tr!("iscsi_win.service_missing_media", service = INITIATOR_SERVICE).into_owned()
         } else {
-            ""
-        };
-        format!("Службы {INITIATOR_SERVICE} нет в системе.{extra}")
+            tr!("iscsi_win.service_missing", service = INITIATOR_SERVICE).into_owned()
+        }
     } else if disabled {
-        format!(
-            "Служба {INITIATOR_SERVICE} отключена политикой. Включить один раз от имени \
-             администратора: sc config {INITIATOR_SERVICE} start= demand"
-        )
+        tr!("iscsi_win.service_disabled_by_policy", service = INITIATOR_SERVICE).into_owned()
     } else if running {
-        format!("Всё на месте: служба {INITIATOR_SERVICE} работает.")
+        tr!("iscsi_win.ready_running", service = INITIATOR_SERVICE).into_owned()
     } else {
-        format!("Всё на месте: служба {INITIATOR_SERVICE} запустится по требованию.")
+        tr!("iscsi_win.ready_on_demand", service = INITIATOR_SERVICE).into_owned()
     };
 
     InitiatorStatus { ready, driver_file, service_present, running, disabled, media_mode, message }
@@ -848,10 +843,7 @@ fn clear_stale_sessions(target: &str, ours: (&str, u16)) -> Result<()> {
     };
     for mut s in sessions.into_iter().filter(|s| s.target.eq_ignore_ascii_case(target)) {
         if target_answers(&s.portals, ours) {
-            return Err(dev(
-                "iSCSI: этот образ уже подключён — его сессия жива. Сначала отключите его.",
-            )
-            .tap(target));
+            return Err(dev(tr!("iscsi_win.image_already_attached")).tap(target));
         }
         warn!(
             target,
@@ -860,13 +852,7 @@ fn clear_stale_sessions(target: &str, ours: (&str, u16)) -> Result<()> {
              it any more — logging it out"
         );
         if !logout_session(&mut s.id, target) {
-            return Err(dev(
-                "iSCSI: с прошлого раза осталась сессия к этому образу, и Windows не даёт её \
-                 закрыть — диск этой сессии ещё кем-то занят. Поможет перезагрузка; без неё — от \
-                 имени администратора `iscsicli SessionList`, затем `iscsicli LogoutTarget \
-                 <Session Id>`.",
-            )
-            .tap(target));
+            return Err(dev(tr!("iscsi_win.stale_session_busy")).tap(target));
         }
         info!(target, "iSCSI: the left-over session is gone");
     }

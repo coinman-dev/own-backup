@@ -21,7 +21,7 @@
 //! This module is pure arithmetic: no I/O, no platform. [`crate::restore_win`]
 //! does the reading and writing.
 
-use own_backup_common::{OwnBackupError, Result};
+use own_backup_common::{tr, OwnBackupError, Result};
 
 /// The stretch of the image's address space that belongs to one source volume.
 ///
@@ -109,11 +109,15 @@ pub fn plan_block_copy(
 /// follows it.
 pub fn check_fits(copy: &BlockCopy, dst_size: u64) -> Result<()> {
     if copy.dst_end() > dst_size {
-        return Err(OwnBackupError::RestoreIncompatible(format!(
-            "блок образа не помещается в раздел: запись {}..{} при размере раздела {dst_size}",
-            copy.dst_offset,
-            copy.dst_end()
-        )));
+        return Err(OwnBackupError::RestoreIncompatible(
+            tr!(
+                "restore_map.block_does_not_fit",
+                start = copy.dst_offset,
+                end = copy.dst_end(),
+                size = dst_size
+            )
+            .into_owned(),
+        ));
     }
     Ok(())
 }
@@ -139,9 +143,14 @@ pub fn payload_len(window_len: u64, data_offset: u64, whole_disk_image: bool) ->
         return Ok(window_len);
     }
     window_len.checked_sub(data_offset).ok_or_else(|| {
-        OwnBackupError::ImageFormat(format!(
-            "раздел ({window_len} Б) меньше заголовка своего контейнера ({data_offset} Б)"
-        ))
+        OwnBackupError::ImageFormat(
+            tr!(
+                "restore_map.partition_smaller_than_header",
+                window = window_len,
+                header = data_offset
+            )
+            .into_owned(),
+        )
     })
 }
 

@@ -1,0 +1,363 @@
+{
+  "_version": 2,
+  "archive_setup.password_too_short": {
+    "ru": "пароль архива короче %{min} символов",
+    "en": "the backup password is shorter than %{min} characters"
+  },
+  "archive_setup.key_already_set": {
+    "ru": "у задания уже есть ключ архива — замена ключа это отдельный процесс",
+    "en": "the job already has a backup key — replacing the key is a separate process"
+  },
+  "archive_setup.request_not_found": {
+    "ru": "запрос на включение шифрования не найден или устарел — начните заново",
+    "en": "the request to turn on encryption was not found or has expired — start over"
+  },
+  "archive_setup.wrong_recovery_key": {
+    "ru": "это не тот ключ восстановления",
+    "en": "this is not the right recovery key"
+  },
+  "archive_setup.attempts_exhausted": {
+    "ru": "%{error} — попытки исчерпаны, включение шифрования нужно начать заново",
+    "en": "%{error} — no attempts left, turning on encryption has to start over"
+  },
+  "archive_setup.attempts_left": {
+    "ru": "%{error} (осталось попыток: %{left})",
+    "en": "%{error} (attempts left: %{left})"
+  },
+  "archive_setup.wizard_state_corrupt": {
+    "ru": "состояние мастера шифрования повреждено",
+    "en": "the encryption wizard state is corrupted"
+  },
+  "archive_setup.no_state_dir": {
+    "ru": "нет каталога состояния службы",
+    "en": "the service has no state folder"
+  },
+  "backup_encryption.key_other_job": {
+    "ru": "ключ принадлежит другому заданию",
+    "en": "the key belongs to another job"
+  },
+  "backup_encryption.no_state_dir": {
+    "ru": "нет каталога состояния службы",
+    "en": "the service has no state folder"
+  },
+  "backup_encryption.reauthorize_error": {
+    "ru": "Нужно заново разрешить автоматическое выполнение задания: %{error}",
+    "en": "Automatic runs of this job have to be allowed again: %{error}"
+  },
+  "backup_encryption.reauthorize": {
+    "ru": "Нужно заново разрешить автоматическое выполнение задания",
+    "en": "Automatic runs of this job have to be allowed again"
+  },
+  "backup_encryption.only_via_key_service": {
+    "ru": "разрешение шифрования изменяется только через службу ключей",
+    "en": "the encryption authorization can only be changed through the key service"
+  },
+  "backup_encryption.portable_key_mismatch": {
+    "ru": "переносимый ключ не соответствует заданию",
+    "en": "the portable key does not match the job"
+  },
+  "backup_encryption.qcow2_only": {
+    "ru": "шифрование поддерживается только для формата qcow2",
+    "en": "encryption is supported only for the qcow2 format"
+  },
+  "backup_encryption.key_replace_separate": {
+    "ru": "замена ключа существующего задания требует отдельного процесса",
+    "en": "replacing the key of an existing job requires a separate process"
+  },
+  "busy.another_operation": {
+    "ru": "другая операция",
+    "en": "another operation"
+  },
+  "busy.refusal": {
+    "ru": "Сейчас выполняется: %{what}. Дождитесь окончания или остановите.",
+    "en": "Already running: %{what}. Wait for it to finish or stop it."
+  },
+  "busy.refusal_which": {
+    "ru": "Сейчас выполняется: %{what} (%{which}). Дождитесь окончания или остановите.",
+    "en": "Already running: %{what} (%{which}). Wait for it to finish or stop it."
+  },
+  "lib.verify_cancelled": {
+    "ru": "Копия создана, но проверка отменена пользователем — образ не проверен.",
+    "en": "The backup was created, but the validation was cancelled by the user — the image has not been validated."
+  },
+  "lib.shutdown_message": {
+    "ru": "Own Backup: копия «%{job}» готова, компьютер выключится",
+    "en": "Own Backup: backup “%{job}” is done, the computer will shut down"
+  },
+  "lib.doing_backup": {
+    "ru": "резервное копирование",
+    "en": "backup"
+  },
+  "lib.keep_awake_reason": {
+    "ru": "Own Backup: резервное копирование «%{job}»",
+    "en": "Own Backup: backing up “%{job}”"
+  },
+  "lib.format_mismatch": {
+    "ru": "Формат образа задания (%{want}) не совпадает с форматом уже существующих копий (%{found}, например %{name}). Менять формат у задания с копиями нельзя — создайте новое задание (или удалите старые копии этого задания).",
+    "en": "The job's image format (%{want}) does not match the format of its existing backups (%{found}, for example %{name}). The format of a job that already has backups cannot be changed — create a new job (or delete this job's old backups)."
+  },
+  "lib.orphan_sidecar": {
+    "ru": "образ удалён, а его описание осталось",
+    "en": "the image was deleted, but its description file remained"
+  },
+  "lib.consolidation_unfinished": {
+    "ru": "Прерванная консолидация не доведена до конца: %{bases}. Пока состояние цепочки неизвестно, копировать в неё и удалять её нельзя — подробности в журнале службы.",
+    "en": "An interrupted consolidation was not finished: %{bases}. Until the chain's state is known, it cannot be backed up to or deleted — see the service log for details."
+  },
+  "lib.no_source_volume": {
+    "ru": "У задания не выбран ни один том-источник",
+    "en": "The job has no source volume selected"
+  },
+  "lib.verify_failed_volume": {
+    "ru": "проверка после копирования не пройдена (%{volume}): %{count} повреждённых блоков",
+    "en": "validation after backup failed (%{volume}): %{count} damaged blocks"
+  },
+  "lib.verify_failed": {
+    "ru": "проверка после копирования не пройдена: %{count} повреждённых блоков",
+    "en": "validation after backup failed: %{count} damaged blocks"
+  },
+  "lib.cancelled_by_user": {
+    "ru": "Отменено пользователем",
+    "en": "Cancelled by the user"
+  },
+  "lib.task_aborted": {
+    "ru": "задача прервана: %{error}",
+    "en": "the task was aborted: %{error}"
+  },
+  "lib.disk_label": {
+    "ru": "Диск %{disk} · %{model}",
+    "en": "Disk %{disk} · %{model}"
+  },
+  "lib.engine_unavailable": {
+    "ru": "Движок бэкапа доступен только на Windows и Linux",
+    "en": "The backup engine is available only on Windows and Linux"
+  },
+  "restore_exec.op_verify_sectors_title": {
+    "ru": "Проверить записанное в разделе %{dst} (из раздела %{src})",
+    "en": "Verify what was written to partition %{dst} (from partition %{src})"
+  },
+  "restore_exec.op_verify_files_title": {
+    "ru": "Проверить перенесённые файлы в разделе %{dst} (из раздела %{src})",
+    "en": "Verify the copied files on partition %{dst} (from partition %{src})"
+  },
+  "restore_exec.cannot_tell_live_system": {
+    "ru": "Нельзя проверить, не стоит ли на этом диске работающая система: %{why}. Загрузитесь с носителя восстановления — там этот вопрос не стоит.",
+    "en": "Cannot check whether the running system is on this disk: %{why}. Boot from the bootable media — the question does not arise there."
+  },
+  "restore_exec.touches_live_system": {
+    "ru": "план затрагивает разделы, на которых стоит работающая Windows: %{parts}. Загрузитесь с Boot CD и повторите.",
+    "en": "the plan touches partitions the running Windows is installed on: %{parts}. Boot from the Boot CD and try again."
+  },
+  "restore_exec.verify_not_checked_reencrypted": {
+    "ru": "Не проверено: контейнер перешифрован, а открыть его не удалось",
+    "en": "Not validated: the container was re-encrypted and could not be opened"
+  },
+  "restore_exec.verify_blocks_ok": {
+    "ru": "Сверено блоков: %{count}",
+    "en": "Blocks compared: %{count}"
+  },
+  "restore_exec.verify_interrupted": {
+    "ru": "Проверка прервана.",
+    "en": "Validation interrupted."
+  },
+  "restore_exec.verify_bootloader_diff": {
+    "ru": "Сверено блоков: %{count}; отличаются %{changed} — в этот раздел после копирования дописан загрузчик, это ожидаемо",
+    "en": "Blocks compared: %{count}; %{changed} differ — the bootloader was written to this partition after the copy, this is expected"
+  },
+  "restore_exec.verify_image_corrupt": {
+    "ru": "в самой копии повреждено блоков: %{count} (восстановление честно записало то, что в ней лежит)",
+    "en": "damaged blocks in the backup itself: %{count} (the restore faithfully wrote what the backup holds)"
+  },
+  "restore_exec.verify_mismatch": {
+    "ru": "не совпало блоков на диске: %{count} — запись не легла (проверьте накопитель)",
+    "en": "blocks that do not match on the disk: %{count} — the write did not stick (check the drive)"
+  },
+  "restore_exec.follow_up_partition": {
+    "ru": "Раздел %{part}: %{text}.",
+    "en": "Partition %{part}: %{text}."
+  },
+  "restore_exec.follow_up_verify_failed": {
+    "ru": "Раздел %{part}: проверку выполнить не удалось: %{error}",
+    "en": "Partition %{part}: the validation could not be run: %{error}"
+  },
+  "restore_exec.verify_mount_failed": {
+    "ru": "не удалось подключить копию для сверки: %{error}",
+    "en": "could not mount the backup for the comparison: %{error}"
+  },
+  "restore_exec.verify_no_volume": {
+    "ru": "Windows не показала том раздела %{part} — сверять не с чем",
+    "en": "Windows did not expose the volume of partition %{part} — there is nothing to compare against"
+  },
+  "restore_exec.verify_files_ok": {
+    "ru": "Файлов: %{files}, суммарно %{size}",
+    "en": "Files: %{files}, %{size} in total"
+  },
+  "restore_exec.verify_files_diff": {
+    "ru": "в копии %{want_files} файлов на %{want_size}, в разделе %{got_files} файлов на %{got_size}",
+    "en": "the backup holds %{want_files} files totalling %{want_size}, the partition holds %{got_files} files totalling %{got_size}"
+  },
+  "restore_exec.follow_up_files_incomplete": {
+    "ru": "Раздел %{part}: перенос файлов неполный — %{text}.",
+    "en": "Partition %{part}: the file transfer is incomplete — %{text}."
+  },
+  "restore_exec.follow_up_decrypted_luks": {
+    "ru": "Раздел %{part}: исходный том был зашифрован, а в копии он лежит расшифрованным — контейнер LUKS не восстанавливается. Данные на месте, но система с этого раздела не загрузится, пока не убрать запись из /etc/crypttab, не поправить /etc/fstab на UUID самого раздела и не пересобрать initramfs (с Live CD).",
+    "en": "Partition %{part}: the source volume was encrypted, but the backup holds it decrypted — the LUKS container is not restored. The data is in place, but a system on this partition will not boot until the entry is removed from /etc/crypttab, /etc/fstab is pointed at the partition's own UUID and initramfs is rebuilt (from a Live CD)."
+  },
+  "restore_exec.no_disk_session": {
+    "ru": "нет открытой сессии диска для записи разметки — внутренняя ошибка",
+    "en": "no disk session is open for writing the partition table — internal error"
+  },
+  "restore_exec.table_unchanged": {
+    "ru": "Разметка уже соответствует плану — таблица разделов не менялась",
+    "en": "The layout already matches the plan — the partition table was not changed"
+  },
+  "restore_exec.disk_ids_preserved": {
+    "ru": "Идентификаторы исходного диска воспроизведены — записи загрузки и среда восстановления (WinRE) из копии продолжают работать",
+    "en": "The source disk's identifiers were reproduced — the boot entries and Windows RE from the backup keep working"
+  },
+  "restore_exec.partitions_moved": {
+    "ru": "Разделы %{parts} начинаются не там, где на исходном диске. Записи загрузки это переживут (они ссылаются на GUID), а среда восстановления WinRE — нет: ReAgent.xml помнит смещение раздела. Если «Особые варианты загрузки» не работают, выполните в восстановленной системе: reagentc /setreimage /path C:\\Recovery\\WindowsRE, затем reagentc /enable.",
+    "en": "Partitions %{parts} do not start where they did on the source disk. The boot entries will survive this (they refer to GUIDs), but Windows RE will not: ReAgent.xml remembers the partition's offset. If “Advanced startup” does not work, run this in the restored system: reagentc /setreimage /path C:\\Recovery\\WindowsRE, then reagentc /enable."
+  },
+  "restore_exec.disk_guid_taken": {
+    "ru": "Идентификатор исходного диска (%{guid}) уже занят другим подключённым диском, поэтому восстановленный диск получил новый. Загрузчик пересоздан bcdboot и система стартует, но записи загрузки из копии (в том числе среда восстановления WinRE) указывают на прежний диск. Чтобы вернуть WinRE, выполните в восстановленной системе: reagentc /setreimage /path C:\\Recovery\\WindowsRE, затем reagentc /enable.",
+    "en": "The source disk's identifier (%{guid}) is already used by another attached disk, so the restored disk got a new one. The bootloader was recreated by bcdboot and the system starts, but the boot entries from the backup (Windows RE included) point to the old disk. To bring Windows RE back, run this in the restored system: reagentc /setreimage /path C:\\Recovery\\WindowsRE, then reagentc /enable."
+  },
+  "restore_exec.partitions_regenerated": {
+    "ru": "Разделам %{parts} выданы новые GUID: их идентификаторы из копии уже заняты другим подключённым диском, а два раздела с одним GUID путают назначение букв дисков.",
+    "en": "Partitions %{parts} were given new GUIDs: their identifiers from the backup are already used by another attached disk, and two partitions with one GUID confuse drive letter assignment."
+  },
+  "restore_exec.no_luks_header": {
+    "ru": "в копии нет сохранённого заголовка контейнера для раздела %{part} — вернуть шифрование нечем",
+    "en": "the backup has no saved container header for partition %{part} — there is nothing to put the encryption back with"
+  },
+  "restore_exec.no_passphrase": {
+    "ru": "для раздела %{part} копии не передан пароль, а план требует вернуть шифрование",
+    "en": "no password was given for partition %{part} of the backup, and the plan requires putting the encryption back"
+  },
+  "restore_exec.container_restored": {
+    "ru": "Контейнер восстановлен вместе с прежним паролем",
+    "en": "The container was restored together with its previous password"
+  },
+  "restore_exec.no_volume_copy": {
+    "ru": "Windows не показала том раздела %{part} — копировать файлы некуда",
+    "en": "Windows did not expose the volume of partition %{part} — there is nowhere to copy the files to"
+  },
+  "restore_exec.serial_not_restorable": {
+    "ru": "Серийный номер тома восстановить нельзя — он назначается при форматировании, и API для его смены не существует. Программы, чьи лицензии к нему привязаны, потребуют повторной активации; ссылки на том в BCD придётся пересоздать.",
+    "en": "The volume serial number cannot be restored — it is assigned when the volume is formatted, and there is no API to change it. Programs whose licences are tied to it will need to be reactivated; references to the volume in the BCD will have to be recreated."
+  },
+  "restore_exec.copy_failures": {
+    "ru": "Не удалось скопировать объектов: %{count}. Первые из них: %{sample}",
+    "en": "Objects that could not be copied: %{count}. The first of them: %{sample}"
+  },
+  "restore_exec.files_summary": {
+    "ru": "Файлов: %{files}, каталогов: %{dirs}, жёстких ссылок: %{links}, точек соединения: %{reparse}",
+    "en": "Files: %{files}, folders: %{dirs}, hard links: %{links}, reparse points: %{reparse}"
+  },
+  "restore_exec.no_volume_format": {
+    "ru": "Windows не показала том для раздела %{part} — форматировать нечего",
+    "en": "Windows did not expose a volume for partition %{part} — there is nothing to format"
+  },
+  "restore_exec.no_volume_extend": {
+    "ru": "Windows не показала том для раздела %{part} — расширять нечего",
+    "en": "Windows did not expose a volume for partition %{part} — there is nothing to extend"
+  },
+  "restore_exec.no_volume_letter": {
+    "ru": "Windows не показала том для раздела %{part} — назначать букву нечему",
+    "en": "Windows did not expose a volume for partition %{part} — there is nothing to assign a letter to"
+  },
+  "restore_exec.no_system_volume": {
+    "ru": "Windows не показала том системного раздела — загрузчик не пересоздать",
+    "en": "Windows did not expose the volume of the system partition — the bootloader cannot be recreated"
+  },
+  "restore_exec.no_esp_volume": {
+    "ru": "Windows не показала том раздела EFI",
+    "en": "Windows did not expose the volume of the EFI partition"
+  },
+  "restore_exec.bootloader_recreated": {
+    "ru": "Загрузчик пересоздан командой bcdboot. Если система не стартует, проверьте порядок загрузки в UEFI.",
+    "en": "The bootloader was recreated with bcdboot. If the system does not start, check the boot order in the UEFI firmware."
+  },
+  "restore_exec.boot_menu_trimmed": {
+    "ru": "В скопированном хранилище загрузки было записей Windows: %{count}. В меню оставлена одна — созданная bcdboot для восстановленной системы; остальные указывали на разделы исходного диска и не загрузились бы. Система стартует без вопросов.",
+    "en": "Windows entries in the copied boot store: %{count}. One is left in the menu — the one bcdboot created for the restored system; the others pointed to partitions of the source disk and would not have booted. The system starts without asking."
+  },
+  "restore_exec.boot_status_cleared": {
+    "ru": "Снят признак незавершённого выключения — первая загрузка пройдёт без экрана восстановления",
+    "en": "The unclean-shutdown flag was cleared — the first boot will not stop at the recovery screen"
+  },
+  "restore_exec.fallback_copied": {
+    "ru": "На разделе EFI не было \\EFI\\BOOT\\BOOTX64.EFI — единственного пути, который UEFI пробует без записи в NVRAM. Скопировали туда загрузчик из EFI\\%{from}, иначе на новой машине диск не стартовал бы.",
+    "en": "The EFI partition had no \\EFI\\BOOT\\BOOTX64.EFI — the only path UEFI tries without an NVRAM entry. The bootloader from EFI\\%{from} was copied there, otherwise the disk would not start on a new machine."
+  },
+  "restore_exec.no_boot_entries": {
+    "ru": "Записей загрузки в копии не оказалось",
+    "en": "The backup holds no boot entries"
+  },
+  "restore_exec.no_boot_entries_follow_up": {
+    "ru": "Копия не несёт записей загрузки UEFI, поэтому вернуть их не из чего. Если машина не предложит загрузиться, добавьте запись в прошивке вручную или через «Записи загрузки».",
+    "en": "The backup carries no UEFI boot entries, so there is nothing to restore them from. If the machine does not offer to boot, add an entry in the firmware by hand or through “Boot menu”."
+  },
+  "restore_exec.entries_saved": {
+    "ru": "Прежние записи загрузки сохранены в %{path}.",
+    "en": "The previous boot entries were saved to %{path}."
+  },
+  "restore_exec.entries_saved_temporary": {
+    "ru": "Прежние записи загрузки сохранены в %{path} — это временный диск, файл не переживёт перезагрузку.",
+    "en": "The previous boot entries were saved to %{path} — this is a temporary disk, the file will not survive a restart."
+  },
+  "restore_exec.entries_save_failed": {
+    "ru": "Не удалось сохранить прежние записи загрузки (%{error}) — они будут заменены без копии.",
+    "en": "Could not save the previous boot entries (%{error}) — they will be replaced without a copy."
+  },
+  "restore_exec.entries_other_machine": {
+    "ru": "Копия снята на машине «%{source}», а восстановление идёт на «%{here}». Записи указывают на разделы по их GUID, и здесь таких разделов может не быть — пункты появятся в меню и не заработают.",
+    "en": "The backup was taken on machine “%{source}”, and the restore runs on “%{here}”. The entries refer to partitions by their GUIDs, and there may be no such partitions here — the items will appear in the menu and will not work."
+  },
+  "restore_exec.entries_restored": {
+    "ru": "Записи загрузки возвращены: изменено %{written} из %{total}",
+    "en": "Boot entries restored: %{written} of %{total} changed"
+  },
+  "restore_exec.entries_not_restored": {
+    "ru": "Записи загрузки вернуть не удалось",
+    "en": "Could not restore the boot entries"
+  },
+  "restore_exec.entries_firmware_refused": {
+    "ru": "Прошивка не приняла записи загрузки (%{error}). Диск восстановлен полностью; добавьте пункт загрузки в настройках прошивки или через «Записи загрузки».",
+    "en": "The firmware did not accept the boot entries (%{error}). The disk is fully restored; add a boot entry in the firmware settings or through “Boot menu”."
+  },
+  "restore_exec.disk_reread": {
+    "ru": "Диск %{disk} перечитан",
+    "en": "Disk %{disk} re-read"
+  },
+  "restore_exec.disk_reread_failed": {
+    "ru": "Диск не удалось перечитать",
+    "en": "Could not re-read the disk"
+  },
+  "restore_exec.disk_reread_follow_up": {
+    "ru": "Windows мог не перечитать разметку восстановленного диска. Данные записаны полностью; если раздел не виден в проводнике, откройте «Управление дисками» или перезагрузитесь.",
+    "en": "Windows may not have re-read the layout of the restored disk. The data is fully written; if the partition is not visible in Explorer, open “Disk Management” or restart."
+  },
+  "restore_exec.cancelled_after_write": {
+    "ru": "Восстановление прервано после того, как данные на диске уже были перезаписаны. Отката нет: затронутые разделы непригодны, пока восстановление не будет выполнено заново.",
+    "en": "The restore was interrupted after data on the disk had already been overwritten. There is no rollback: the affected partitions are unusable until the restore is run again."
+  },
+  "restore_exec.nothing_overwritten": {
+    "ru": "Ничего перезаписать не успели — данные на диске не тронуты.",
+    "en": "Nothing was overwritten — the data on the disk is untouched."
+  },
+  "restore_exec.table_overwritten": {
+    "ru": "Разметка диска уже перезаписана. Прежнюю таблицу разделов вернуть нельзя — повторите восстановление целиком.",
+    "en": "The disk layout has already been overwritten. The previous partition table cannot be brought back — run the whole restore again."
+  },
+  "restore_exec.data_overwritten": {
+    "ru": "Данные уже перезаписаны на разделах: %{parts}. Отката нет — эти разделы непригодны, пока восстановление не будет выполнено заново.",
+    "en": "Data has already been overwritten on partitions: %{parts}. There is no rollback — these partitions are unusable until the restore is run again."
+  },
+  "restore_exec.windows_only": {
+    "ru": "восстановление по плану реализовано только для Windows",
+    "en": "restoring by plan is implemented only on Windows"
+  }
+}

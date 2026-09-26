@@ -52,7 +52,7 @@ use windows::Win32::System::IO::DeviceIoControl;
 
 use own_backup_common::gpt::DiskLayout;
 use own_backup_common::restore_plan::{PartitionKind, PartitionScheme, PartitionTableSpec};
-use own_backup_common::{OwnBackupError, Result};
+use own_backup_common::{tr, OwnBackupError, Result};
 
 use crate::table_merge::{
     adopt_existing_entries, describe_disk, describe_table, entry_unchanged, same_layout,
@@ -179,10 +179,15 @@ impl DiskSession {
         }
         let device_sector = self.dev.sector_size();
         if spec.sector_size != device_sector {
-            return Err(OwnBackupError::RestoreIncompatible(format!(
-                "план рассчитан на сектор {} Б, а у диска {} — {} Б",
-                spec.sector_size, self.disk_number, device_sector
-            )));
+            return Err(OwnBackupError::RestoreIncompatible(
+                tr!(
+                    "disk_session_win.sector_mismatch",
+                    planned = spec.sector_size,
+                    disk = self.disk_number,
+                    actual = device_sector
+                )
+                .into_owned(),
+            ));
         }
 
         let mut spec = spec.clone();
@@ -464,12 +469,10 @@ impl DiskSession {
             )
         }
         .map_err(|e| {
-            OwnBackupError::Device(format!(
-                "диспетчер разделов отклонил новую разметку диска {}: {e}. \
-                 Обычно это значит, что один из затронутых томов занят — закройте \
-                 открытые в нём файлы и повторите.",
-                self.disk_number
-            ))
+            OwnBackupError::Device(
+                tr!("disk_session_win.layout_refused", disk = self.disk_number, error = e)
+                    .into_owned(),
+            )
         })?;
         self.dev.update_properties()?;
         info!(

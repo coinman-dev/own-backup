@@ -21,7 +21,7 @@
 //! answer, not a quiet yes. A destination that cannot be located is not a
 //! destination that is known to be safe.
 
-use own_backup_common::Result;
+use own_backup_common::{tr, Result};
 
 /// Where something lives: a disk and a byte range on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -205,9 +205,9 @@ pub fn where_the_destination_sits(sources: &[String], dest_folder: &str) -> Dest
         return DestPlacement::Clear; // another machine's disk entirely
     }
     let Some(dest) = extents_of_destination(dest_folder) else {
-        return DestPlacement::CannotTell(format!(
-            "не удалось определить, на каком томе лежит «{dest_folder}»"
-        ));
+        return DestPlacement::CannotTell(
+            tr!("source_identity.dest_volume_unknown", folder = dest_folder).into_owned(),
+        );
     };
     let mut unresolved: Vec<&str> = Vec::new();
     for source in sources {
@@ -220,10 +220,9 @@ pub fn where_the_destination_sits(sources: &[String], dest_folder: &str) -> Dest
         }
     }
     if !unresolved.is_empty() {
-        return DestPlacement::CannotTell(format!(
-            "не удалось определить, где лежат источники: {}",
-            unresolved.join(", ")
-        ));
+        return DestPlacement::CannotTell(
+            tr!("source_identity.sources_unknown", sources = unresolved.join(", ")).into_owned(),
+        );
     }
     DestPlacement::Clear
 }
@@ -232,15 +231,12 @@ pub fn where_the_destination_sits(sources: &[String], dest_folder: &str) -> Dest
 pub fn refuse_destination_on_a_source(sources: &[String], dest_folder: &str) -> Result<()> {
     match where_the_destination_sits(sources, dest_folder) {
         DestPlacement::Clear => Ok(()),
-        DestPlacement::OnSource(s) => Err(own_backup_common::OwnBackupError::Config(format!(
-            "Папка назначения «{dest_folder}» лежит на томе, который копируется ({s}). \
-             Копия росла бы вместе с источником — выберите другое место."
-        ))),
-        DestPlacement::CannotTell(why) => {
-            Err(own_backup_common::OwnBackupError::Config(format!(
-                "Нельзя убедиться, что копия не пишется на копируемый том: {why}."
-            )))
-        }
+        DestPlacement::OnSource(s) => Err(own_backup_common::OwnBackupError::Config(
+            tr!("source_identity.dest_on_source", folder = dest_folder, source = s).into_owned(),
+        )),
+        DestPlacement::CannotTell(why) => Err(own_backup_common::OwnBackupError::Config(
+            tr!("source_identity.cannot_verify_dest", reason = why).into_owned(),
+        )),
     }
 }
 

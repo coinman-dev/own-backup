@@ -42,6 +42,10 @@ export interface PartitionInfo {
   is_encrypted: boolean;
   /** How an encrypted volume can be opened, in its own metadata's words. */
   unlock_methods?: string[];
+  /** Only the 48-digit recovery key can open it (BitLocker, no password
+   *  protector). From the protectors' codes — `unlock_methods` are names in
+   *  the window's language and decide nothing. */
+  recovery_key_only?: boolean;
   /** Can Own Backup open it with something the user can type? */
   unlockable?: boolean;
 }
@@ -147,6 +151,9 @@ export interface EspLoader {
   path: string;
   size: number;
   kind: string;
+  /** Nothing told what it is (`kind` is the generic word). Absent from a
+   *  service older than the flag. */
+  generic?: boolean;
   fallback: boolean;         // запасной путь съёмного носителя
   second_stage: boolean;     // его запускает другой загрузчик
   named_by: string | null;   // номер записи, которая на него ссылается

@@ -13,7 +13,7 @@
 //! 8.3 names are not a limitation here but a requirement: the firmware reads
 //! this volume with its own minimal driver, and `BOOTX64.EFI` is 8.3 already.
 
-use own_backup_common::{OwnBackupError, Result};
+use own_backup_common::{tr, OwnBackupError, Result};
 
 const SECTOR: usize = 512;
 /// One cluster per sector keeps the arithmetic trivial and wastes nothing at
@@ -123,7 +123,7 @@ pub fn build_fat16(files: &[FatFile], label: &str) -> Result<Vec<u8>> {
         for i in 0..count {
             let c = next_free;
             if (c as u32) >= clusters + 2 {
-                return Err(OwnBackupError::ImageFormat("FAT-образ переполнен".into()));
+                return Err(OwnBackupError::ImageFormat(tr!("fat_writer.image_full").into_owned()));
             }
             fat[c as usize] = if i + 1 == count { 0xFFFF } else { c + 1 };
             next_free += 1;

@@ -372,48 +372,63 @@ impl RestoreOp {
     pub fn title(&self) -> String {
         use crate::units::human_bytes;
         let named = |p: &PartRef| format!("{} ({})", p.index, human_bytes(p.size));
-        match self {
-            RestoreOp::WritePartitionTable { table } => format!(
-                "Записать разметку {} ({} разд.)",
-                match table.scheme {
+        let title = match self {
+            RestoreOp::WritePartitionTable { table } => crate::tr!(
+                "restore_plan.title_write_table",
+                scheme = match table.scheme {
                     PartitionScheme::Gpt => "GPT",
                     PartitionScheme::Mbr => "MBR",
                 },
-                table.entries.len()
+                count = table.entries.len()
             ),
-            RestoreOp::Format { part, fs, label, quick } => format!(
-                "Отформатировать раздел {} в {}{}{}",
-                named(part),
-                fs.as_str(),
-                if label.is_empty() { String::new() } else { format!(", метка «{label}»") },
-                if *quick { ", быстрое" } else { ", полное" }
-            ),
-            RestoreOp::RestorePartition { src_index, dst, mode, .. } => format!(
-                "Восстановить раздел {src_index} → {} ({})",
-                named(dst),
-                match mode {
-                    RestoreMode::Sectors => "посекторно",
-                    RestoreMode::Files => "пофайлово",
-                }
-            ),
+            RestoreOp::Format { part, fs, label, quick } => {
+                let label = if label.is_empty() {
+                    String::new()
+                } else {
+                    crate::tr!("restore_plan.title_format_label", label = label).into_owned()
+                };
+                let mode = if *quick {
+                    crate::tr!("restore_plan.title_format_quick")
+                } else {
+                    crate::tr!("restore_plan.title_format_full")
+                };
+                crate::tr!(
+                    "restore_plan.title_format",
+                    part = named(part),
+                    fs = fs.as_str(),
+                    label = label,
+                    mode = mode
+                )
+            }
+            RestoreOp::RestorePartition { src_index, dst, mode, .. } => match mode {
+                RestoreMode::Sectors => crate::tr!(
+                    "restore_plan.title_restore_sectors",
+                    src = src_index,
+                    dst = named(dst)
+                ),
+                RestoreMode::Files => crate::tr!(
+                    "restore_plan.title_restore_files",
+                    src = src_index,
+                    dst = named(dst)
+                ),
+            },
             RestoreOp::ExtendFilesystem { part } => {
-                format!("Расширить файловую систему раздела {} на весь раздел", named(part))
+                crate::tr!("restore_plan.title_extend", part = named(part))
             }
             RestoreOp::AssignLetter { part, letter } => {
-                format!("Назначить разделу {} букву {letter}:", named(part))
+                crate::tr!("restore_plan.title_assign_letter", part = named(part), letter = letter)
             }
-            RestoreOp::FinalizeBoot { uefi, .. } => {
-                format!("Пересоздать загрузчик ({})", if *uefi { "UEFI" } else { "BIOS" })
-            }
+            RestoreOp::FinalizeBoot { uefi, .. } => crate::tr!(
+                "restore_plan.title_finalize_boot",
+                firmware = if *uefi { "UEFI" } else { "BIOS" }
+            ),
             RestoreOp::EnsureFallbackBootloader { .. } => {
-                "Положить загрузчик по пути, который UEFI ищет сам                  (\\EFI\\BOOT\\BOOTX64.EFI)"
-                    .into()
+                crate::tr!("restore_plan.title_fallback_bootloader")
             }
-            RestoreOp::RestoreBootEntries => {
-                "Вернуть записи загрузки UEFI из копии в память материнской платы".into()
-            }
-            RestoreOp::RefreshDiskState => "Обновить состояние дисков".into(),
-        }
+            RestoreOp::RestoreBootEntries => crate::tr!("restore_plan.title_restore_boot_entries"),
+            RestoreOp::RefreshDiskState => crate::tr!("restore_plan.title_refresh_disks"),
+        };
+        title.into_owned()
     }
 
     /// Whether this operation needs the disk online and its volumes mounted.

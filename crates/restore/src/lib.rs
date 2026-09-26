@@ -1,3 +1,7 @@
+// Messages in Russian and English (locales/*.json), through
+// own_backup_common::tr! — see common/src/lang.rs.
+rust_i18n::i18n!("locales", fallback = "ru");
+
 pub mod guard;
 
 pub use guard::{

@@ -26,7 +26,7 @@ use own_backup_common::progress::{BackupProgress, RestoreProgress};
 use own_backup_common::types::{
     BackupMode, BackupStatus, BackupType, BootMode, CompressionAlgo, ImageFormat, PartitionTable,
 };
-use own_backup_common::{OwnBackupError, Result};
+use own_backup_common::{tr, OwnBackupError, Result};
 use own_backup_snapshot::VssSnapshotSession;
 
 use crate::block_reader::BlockReader;
@@ -57,7 +57,9 @@ const MIB: u64 = 1024 * 1024;
 
 /// Why there is no by-type breakdown behind the most ordinary copy of all: the
 /// file walk is the exclusion walk, and with no rules to apply nobody walks.
-const NO_PATTERNS: &str = "исключения не заданы — файлы не перечислялись";
+fn no_patterns() -> String {
+    tr!("engine_win.no_patterns").into_owned()
+}
 
 /// Parameters for a volume backup.
 pub struct VolumeBackupRequest {
@@ -269,10 +271,9 @@ impl ImageReadSource {
             ("obk", Some(key)) => Ok(Self::Obk(Box::new(
                 crate::seal::obk::ObkRandomReader::open(image_path, key)?,
             ))),
-            ("obk", None) => Err(OwnBackupError::Encryption(format!(
-                "{}: копия зашифрована — чтобы её открыть, нужен пароль или ключ восстановления",
-                image_path.display()
-            ))),
+            ("obk", None) => Err(OwnBackupError::Encryption(
+                tr!("engine_win.encrypted_needs_key", image = image_path.display()).into_owned(),
+            )),
             (other, _) => Err(OwnBackupError::ImageFormat(format!(
                 "unknown image container '{other}' in sidecar"
             ))),
@@ -346,8 +347,7 @@ fn check_encrypted_target(
     let Some(_) = encryption else { return Ok(()) };
     if format != ImageFormat::Qcow2 {
         return Err(OwnBackupError::Config(
-            "шифрование пишет собственный контейнер .obk — у задания должен быть формат qcow2"
-                .into(),
+            tr!("engine_win.encryption_needs_qcow2").into_owned(),
         ));
     }
     if image_path
@@ -357,11 +357,14 @@ fn check_encrypted_target(
         .as_deref()
         != Some(crate::seal::obk::OBK_EXTENSION)
     {
-        return Err(OwnBackupError::Config(format!(
-            "зашифрованный образ должен называться .{}: {}",
-            crate::seal::obk::OBK_EXTENSION,
-            image_path.display()
-        )));
+        return Err(OwnBackupError::Config(
+            tr!(
+                "engine_win.encrypted_image_extension",
+                ext = crate::seal::obk::OBK_EXTENSION,
+                image = image_path.display()
+            )
+            .into_owned(),
+        ));
     }
     Ok(())
 }
@@ -529,10 +532,14 @@ fn open_bitlocker_source(read_path: &str, passphrase: &str) -> Result<Option<Bit
 
     let extents = crate::volume_win::volume_extents(read_path);
     let [extent] = extents.as_slice() else {
-        return Err(OwnBackupError::Device(format!(
-            "{read_path}: том BitLocker занимает {} экстентов — такой не поддерживается",
-            extents.len()
-        )));
+        return Err(OwnBackupError::Device(
+            tr!(
+                "engine_win.bitlocker_multi_extent",
+                volume = read_path,
+                count = extents.len()
+            )
+            .into_owned(),
+        ));
     };
     let disk = format!(r"\\.\PhysicalDrive{}", extent.disk_number);
     let mut probe = disk_window(&disk, extent.offset, extent.length)?;
@@ -577,10 +584,14 @@ fn unlock_source_with_windows(
 
     let extents = crate::volume_win::volume_extents(read_path);
     let [extent] = extents.as_slice() else {
-        return Err(OwnBackupError::Device(format!(
-            "{read_path}: том занимает {} экстентов — открыть его силами Windows нельзя",
-            extents.len()
-        )));
+        return Err(OwnBackupError::Device(
+            tr!(
+                "engine_win.windows_unlock_multi_extent",
+                volume = read_path,
+                count = extents.len()
+            )
+            .into_owned(),
+        ));
     };
     let guard = wu::ReadOnlyDisk::arm(extent.disk_number)?;
 
@@ -615,7 +626,9 @@ fn unlock_source_with_windows(
             crate::fat_map::RawVolume::read_at(&mut d, 0, &mut boot)?;
             // Нули значат «устройство есть, а тома на нём ещё нет».
             if boot.iter().all(|&b| b == 0) {
-                return Err(OwnBackupError::Device("том ещё не смонтирован".into()));
+                return Err(OwnBackupError::Device(
+                    tr!("engine_win.volume_not_mounted_yet").into_owned(),
+                ));
             }
             Ok(())
         }) {
@@ -1076,9 +1089,7 @@ fn backup_volume_inner(
             let fast = if frozen {
                 scan_ntfs_exclusions_by_mft(&read_path, &req.exclusion_patterns, &mut prepare_tick)
             } else {
-                Err(OwnBackupError::Device(
-                    "источник не заморожен (нет снимка VSS) — читать $MFT нельзя".into(),
-                ))
+                Err(OwnBackupError::Device(tr!("engine_win.source_not_frozen").into_owned()))
             };
             match fast {
                 Ok(mft) => {
@@ -1134,7 +1145,7 @@ fn backup_volume_inner(
                 }
             }
         } else {
-            file_scan_skipped = Some(NO_PATTERNS.into());
+            file_scan_skipped = Some(no_patterns());
         }
         map.release_bitmap();
     } else if let Some(map) = enc_ntfs_map.as_mut() {
@@ -1146,7 +1157,7 @@ fn backup_volume_inner(
         // образа: скан 16 минут, зануление, merge и пересчёт сумм — прогон
         // 2026-08-19 пользователь отменил.
         if req.exclusion_patterns.is_empty() {
-            file_scan_skipped = Some(NO_PATTERNS.into());
+            file_scan_skipped = Some(no_patterns());
         } else {
             let mut src = open_source(&luks)?;
             let scan_result = {
@@ -1225,7 +1236,7 @@ fn backup_volume_inner(
         // NTFS-сканеру, не нужен ни смонтированный том, ни дескриптор файла.
         // Раньше здесь был отказ: ветка исключений знала только NTFS.
         if req.exclusion_patterns.is_empty() {
-            file_scan_skipped = Some(NO_PATTERNS.into());
+            file_scan_skipped = Some(no_patterns());
         } else {
             let mut src = open_source(&luks)?;
             let mut walk_tick = |n: u64| prepare_tick(n, 0);
@@ -1263,7 +1274,8 @@ fn backup_volume_inner(
                 }
                 Err(e) => {
                     warn!(error = %e, "FAT exclusion scan failed — keeping all files");
-                    file_scan_skipped = Some(format!("разбор FAT не удался: {e}"));
+                    file_scan_skipped =
+                        Some(tr!("engine_win.skip_fat_failed", error = e).into_owned());
                 }
             }
         }
@@ -1289,24 +1301,22 @@ fn backup_volume_inner(
         // Nothing walked the files here. Say which of the reasons it was, in
         // the words the result screen will repeat back to the user.
         let reason = if req.all_sectors {
-            "копия посекторная — файловая система не разбиралась".to_string()
+            tr!("engine_win.skip_sector_mode").into_owned()
         } else if bitlocker.is_some() {
             // `FSCTL_GET_RETRIEVAL_POINTERS` needs a mounted filesystem, and a
             // locked volume has none. Copying the data and deleting only the
             // catalog entries afterwards would leave those bytes in the image's
             // free space — exactly what "true removal" promises not to do.
-            "том BitLocker был заблокирован — Windows его не смонтировала, а \
-             перечислить файлы можно только в смонтированной файловой системе"
-                .to_string()
+            tr!("engine_win.skip_bitlocker_locked").into_owned()
         } else if luks.is_some() {
-            "том LUKS Windows не монтирует — перечислить файлы в нём она не может".to_string()
+            tr!("engine_win.skip_luks").into_owned()
         } else if req.exclusion_patterns.is_empty() {
-            NO_PATTERNS.to_string()
+            no_patterns()
         } else {
-            format!(
-                "файловые исключения работают на NTFS/ReFS и FAT32, а здесь {}",
-                detected_fs.clone().unwrap_or_else(|| "другая файловая система".into())
-            )
+            let fs = detected_fs
+                .clone()
+                .unwrap_or_else(|| tr!("engine_win.other_filesystem").into_owned());
+            tr!("engine_win.skip_fs_unsupported", fs = fs).into_owned()
         };
         if !req.exclusion_patterns.is_empty() {
             warn!(
@@ -1336,10 +1346,7 @@ fn backup_volume_inner(
         // must be encrypted too (§7.4), and it is not yet. Skipping the pass
         // instead would ship a copy that quietly kept the excluded files.
         return Err(OwnBackupError::Encryption(
-            "исключения в зашифрованной копии этого источника ещё не поддержаны: файлы \
-пришлось бы удалять уже внутри образа, а временный слой для этого пока не шифруется. \
-Копия не создавалась."
-                .into(),
+            tr!("engine_win.encrypted_in_image_exclusions").into_owned(),
         ));
     }
 
@@ -1811,11 +1818,7 @@ fn backup_volume_inner(
             }
             None => {
                 // Already logged in detail; the result screen must still say it.
-                file_scan_skipped = Some(
-                    "том зашифрован, а пройтись по файловой системе внутри готового образа \
-                     не удалось — файлы из копии не убраны"
-                        .into(),
-                );
+                file_scan_skipped = Some(tr!("engine_win.skip_in_image_failed").into_owned());
             }
         }
     }
@@ -2363,7 +2366,7 @@ fn prepare_encrypted_partition_map(
     };
 
     let scan = if patterns.is_empty() {
-        out.skipped = Some(NO_PATTERNS.into());
+        out.skipped = Some(no_patterns());
         None
     } else {
         let cur = crate::ntfs_scan::RawVolumeCursor::new(src.as_mut());
@@ -2386,7 +2389,7 @@ fn prepare_encrypted_partition_map(
                 // Грязный том, не NTFS внутри, битая запись — копия делается
                 // целиком, и об этом сказано вслух.
                 warn!(error = %e, "MFT scan failed — this partition keeps every file");
-                out.skipped = Some(format!("перечисление по MFT не удалось: {e}"));
+                out.skipped = Some(tr!("engine_win.skip_mft_failed", error = e).into_owned());
                 None
             }
         }
@@ -2397,7 +2400,8 @@ fn prepare_encrypted_partition_map(
         Ok(map) => out.map = Some(Box::new(map)),
         Err(e) => {
             warn!(error = %e, "no NTFS map over the decrypted partition — copying every block");
-            out.skipped.get_or_insert_with(|| format!("карта NTFS не построена: {e}"));
+            out.skipped
+                .get_or_insert_with(|| tr!("engine_win.skip_ntfs_map_failed", error = e).into_owned());
             return out;
         }
     }
@@ -2478,9 +2482,7 @@ fn prepare_partition_map(
                 let fast = if frozen {
                     scan_ntfs_exclusions_by_mft(read_path, patterns, &mut mft_tick)
                 } else {
-                    Err(OwnBackupError::Device(
-                        "источник не заморожен (нет снимка VSS) — читать $MFT нельзя".into(),
-                    ))
+                    Err(OwnBackupError::Device(tr!("engine_win.source_not_frozen").into_owned()))
                 };
                 match fast {
                     Ok(mft) => {
@@ -2524,12 +2526,13 @@ fn prepare_partition_map(
                             }
                         } else {
                             warn!(part = %read_path, "whole-disk: NTFS exclusion scan failed — keeping all files");
-                            out.skipped = Some("перечислить файлы NTFS не удалось".into());
+                            out.skipped =
+                                Some(tr!("engine_win.skip_list_failed", fs = "NTFS").into_owned());
                         }
                     }
                 }
             } else {
-                out.skipped = Some(NO_PATTERNS.into());
+                out.skipped = Some(no_patterns());
             }
             m.release_bitmap();
             out.map = Some(Box::new(m));
@@ -2537,7 +2540,7 @@ fn prepare_partition_map(
         }
     }
     let Ok(mut src) = open() else {
-        return none_because("unknown", None, "раздел не открылся для чтения");
+        return none_because("unknown", None, &tr!("engine_win.skip_partition_unreadable"));
     };
     if let Ok(m) = crate::fat_map::build_fat_used_map(src.as_mut(), block_size) {
         let fs = m.filesystem.to_lowercase();
@@ -2575,10 +2578,10 @@ fn prepare_partition_map(
         return none_because(
             &fs,
             Some(Box::new(m)),
-            if patterns.is_empty() {
-                NO_PATTERNS
+            &if patterns.is_empty() {
+                no_patterns()
             } else {
-                "файловые исключения на этой ФС поддерживаются только для FAT32/exFAT"
+                tr!("engine_win.skip_fat_only").into_owned()
             },
         );
     }
@@ -2607,12 +2610,13 @@ fn prepare_partition_map(
                     }
                     Err(e) => {
                         warn!(part = %read_path, error = %e, "ext exclusions failed — keeping all files");
-                        out.skipped = Some("перечислить файлы ext не удалось".into());
+                        out.skipped =
+                            Some(tr!("engine_win.skip_list_failed", fs = "ext").into_owned());
                     }
                 }
             }
         } else {
-            out.skipped = Some(NO_PATTERNS.into());
+            out.skipped = Some(no_patterns());
         }
         out.map = Some(Box::new(m));
         return out;
@@ -2663,12 +2667,13 @@ fn prepare_partition_map(
                     }
                     Err(e) => {
                         warn!(part = %read_path, error = %e, "btrfs exclusions failed — keeping all files");
-                        out.skipped = Some("перечислить файлы btrfs не удалось".into());
+                        out.skipped =
+                            Some(tr!("engine_win.skip_list_failed", fs = "btrfs").into_owned());
                     }
                 }
             }
         } else {
-            out.skipped = Some(NO_PATTERNS.into());
+            out.skipped = Some(no_patterns());
         }
         out.map = Some(Box::new(m));
         return out;
@@ -2700,17 +2705,18 @@ fn prepare_partition_map(
                     }
                     Err(e) => {
                         warn!(part = %read_path, error = %e, "xfs exclusions failed — keeping all files");
-                        out.skipped = Some("перечислить файлы xfs не удалось".into());
+                        out.skipped =
+                            Some(tr!("engine_win.skip_list_failed", fs = "xfs").into_owned());
                     }
                 }
             }
         } else {
-            out.skipped = Some(NO_PATTERNS.into());
+            out.skipped = Some(no_patterns());
         }
         out.map = Some(Box::new(m));
         return out;
     }
-    none_because("unknown", None, "файловая система не распознана — раздел скопирован посекторно")
+    none_because("unknown", None, &tr!("engine_win.skip_fs_unknown"))
 }
 
 /// One partition region inside the whole-disk image: its byte offset on the
@@ -3044,10 +3050,14 @@ fn backup_disk_inner(
             match extents.as_slice() {
                 [e] => Some((format!(r"\\.\PhysicalDrive{}", e.disk_number), e.offset, e.length)),
                 _ => {
-                    return Err(OwnBackupError::Device(format!(
-                        "{read_path}: запертый том занимает {} экстентов — такой не поддерживается",
-                        extents.len()
-                    )))
+                    return Err(OwnBackupError::Device(
+                        tr!(
+                            "engine_win.locked_multi_extent",
+                            volume = read_path,
+                            count = extents.len()
+                        )
+                        .into_owned(),
+                    ))
                 }
             }
         } else {
@@ -3136,6 +3146,8 @@ fn backup_disk_inner(
             ),
             None if locked => PreparedMap {
                 map: None, // ключа нет — копируем шифротекст целиком
+                // Уходит в манифест образа (`DiskImageRef::filesystem`) — это
+                // данные копии, не текст окна: не переводится.
                 filesystem: "BitLocker (заперт)".into(),
                 zero_ranges: ByteRanges::new(),
                 patches: Vec::new(),
@@ -3143,11 +3155,7 @@ fn backup_disk_inner(
                 excluded_files: 0,
                 excluded_bytes: 0,
                 categories: None,
-                skipped: Some(
-                    "том BitLocker заперт и пароль не введён — копируется как есть, \
-                     шифротекстом; правила исключений к нему не применялись"
-                        .into(),
-                ),
+                skipped: Some(tr!("engine_win.skip_bitlocker_no_password").into_owned()),
             },
             None => prepare_partition_map(
                 &read_path,
@@ -3168,7 +3176,15 @@ fn backup_disk_inner(
             categories.get_or_insert_with(Default::default).merge(c);
         }
         if let Some(why) = &pm.skipped {
-            scan_skips.push(format!("раздел {} ({}): {why}", p.part_index, pm.filesystem));
+            scan_skips.push(
+                tr!(
+                    "engine_win.skip_partition_line",
+                    index = p.part_index,
+                    fs = pm.filesystem,
+                    why = why
+                )
+                .into_owned(),
+            );
         }
         info!(
             part = p.part_index,
@@ -4452,7 +4468,7 @@ fn restore_disk_from_image(
             phase: "partition".into(),
             partition_index: 0,
             partition_count: dm.images.len(),
-            part_label: "Данные разделов".into(),
+            part_label: tr!("engine_win.label_partition_data").into_owned(),
             blocks_done: done,
             blocks_total: total,
             bytes_written: bytes,
@@ -4465,7 +4481,7 @@ fn restore_disk_from_image(
         phase: "gpt".into(),
         partition_index: dm.images.len(),
         partition_count: dm.images.len(),
-        part_label: "Таблица разделов (GPT)".into(),
+        part_label: tr!("engine_win.label_partition_table").into_owned(),
         blocks_done: total,
         blocks_total: total,
         bytes_written: bytes,
@@ -4535,7 +4551,7 @@ fn restore_disk_legacy(
         phase: "gpt".into(),
         partition_index: 0,
         partition_count: manifest.images.len(),
-        part_label: "Таблица разделов (GPT)".into(),
+        part_label: tr!("engine_win.label_partition_table").into_owned(),
         blocks_done: 0,
         blocks_total: 0,
         bytes_written: 0,
@@ -4571,7 +4587,8 @@ fn restore_disk_legacy(
         let len = (entry.last_lba + 1 - entry.first_lba) * sector;
         let target = format!("part:{}:{off}:{len}", req.target_disk);
         let label = if entry.name.is_empty() {
-            format!("Раздел {} ({})", img.part_index, img.filesystem)
+            tr!("engine_win.label_partition", index = img.part_index, fs = img.filesystem)
+                .into_owned()
         } else {
             format!("{} ({})", entry.name, img.filesystem)
         };
@@ -4699,12 +4716,7 @@ pub fn finalize_boot(
         // store belongs to whatever is running this (WinPE, or the live OS) —
         // never something to edit blind.
         None => BootFinalizeReport {
-            note: Some(
-                "Раздел EFI не был указан, поэтому меню загрузки не проверялось: если система \
-                 предлагает несколько одинаковых записей Windows, лишние остались от исходного \
-                 диска."
-                    .into(),
-            ),
+            note: Some(tr!("engine_win.note_no_esp").into_owned()),
             ..Default::default()
         },
     };
@@ -4771,14 +4783,15 @@ fn bcdedit(args: &[&str]) -> std::result::Result<String, String> {
         .args(args)
         .creation_flags(CREATE_NO_WINDOW)
         .output()
-        .map_err(|e| format!("не удалось запустить bcdedit: {e}"))?;
+        .map_err(|e| tr!("engine_win.bcdedit_start_failed", error = e).into_owned())?;
     if !out.status.success() {
-        return Err(format!(
-            "bcdedit {} → код {}: {}",
-            args.join(" "),
-            out.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+        return Err(tr!(
+            "engine_win.bcdedit_failed",
+            args = args.join(" "),
+            code = out.status.code().unwrap_or(-1),
+            output = String::from_utf8_lossy(&out.stderr).trim()
+        )
+        .into_owned());
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
@@ -4823,7 +4836,7 @@ fn trim_boot_menu(esp_volume: &str, uefi: bool, windows_volume: &str) -> BootFin
     if !std::path::Path::new(&store).exists() {
         warn!(store = %store, "boot menu: store not found where bcdboot should have written it");
         return BootFinalizeReport {
-            note: Some(format!("Хранилище загрузки {store} не найдено — меню не проверялось.")),
+            note: Some(tr!("engine_win.note_store_not_found", store = store).into_owned()),
             ..Default::default()
         };
     }
@@ -4833,7 +4846,7 @@ fn trim_boot_menu(esp_volume: &str, uefi: bool, windows_volume: &str) -> BootFin
         Err(e) => {
             warn!(error = %e, "boot menu: cannot read the default entry");
             return BootFinalizeReport {
-                note: Some(format!("Не удалось прочитать запись загрузки по умолчанию: {e}")),
+                note: Some(tr!("engine_win.note_default_unreadable", error = e).into_owned()),
                 ..Default::default()
             };
         }
@@ -4841,7 +4854,7 @@ fn trim_boot_menu(esp_volume: &str, uefi: bool, windows_volume: &str) -> BootFin
     let Some(default_id) = first_identifier(&default_block) else {
         warn!("boot menu: the default entry has no readable identifier");
         return BootFinalizeReport {
-            note: Some("Запись загрузки по умолчанию не удалось определить — меню не менялось.".into()),
+            note: Some(tr!("engine_win.note_default_unknown").into_owned()),
             ..Default::default()
         };
     };
@@ -4861,11 +4874,7 @@ fn trim_boot_menu(esp_volume: &str, uefi: bool, windows_volume: &str) -> BootFin
         return BootFinalizeReport {
             default_id: Some(default_id),
             loaders_found: menu_loaders,
-            note: Some(
-                "Запись загрузки по умолчанию указывает не на восстановленный раздел — меню \
-                 оставлено без изменений, проверьте его вручную (bcdedit)."
-                    .into(),
-            ),
+            note: Some(tr!("engine_win.note_default_elsewhere").into_owned()),
             menu_trimmed: false,
             ..Default::default()
         };
@@ -4893,7 +4902,7 @@ fn trim_boot_menu(esp_volume: &str, uefi: bool, windows_volume: &str) -> BootFin
                 default_id: Some(default_id),
                 loaders_found: menu_loaders,
                 menu_trimmed: false,
-                note: Some(format!("Не удалось сократить меню загрузки: {e}")),
+                note: Some(tr!("engine_win.note_trim_failed", error = e).into_owned()),
                 ..Default::default()
             }
         }
@@ -4981,7 +4990,7 @@ fn blocks_stored_in_this_file(
     match container {
         "obk" => {
             let key = chain_key.ok_or_else(|| {
-                OwnBackupError::Encryption("проверка последней копии: нужен ключ архива".into())
+                OwnBackupError::Encryption(tr!("engine_win.verify_latest_needs_key").into_owned())
             })?;
             let mut image = crate::seal::obk::ObkImage::open_path(image_path, key)?;
             let cs = image.cluster_size();
@@ -5008,9 +5017,9 @@ fn blocks_stored_in_this_file(
             }
         }
         other => {
-            return Err(OwnBackupError::ImageFormat(format!(
-                "проверка последней копии не умеет контейнер «{other}»"
-            )))
+            return Err(OwnBackupError::ImageFormat(
+                tr!("engine_win.verify_latest_unknown_container", container = other).into_owned(),
+            ))
         }
     }
     Ok(out)
@@ -5244,10 +5253,9 @@ pub fn unmount_image(image_path: &Path) -> Result<()> {
     // file or directory is corrupted" (error 1392) for an image that is
     // perfectly fine (seen 2026-09-18, on a second press of "Отключить").
     if is_qcow2_file(image_path) {
-        return Err(OwnBackupError::Config(format!(
-            "{} сейчас не подключён — отключать нечего",
-            image_path.display()
-        )));
+        return Err(OwnBackupError::Config(
+            tr!("engine_win.not_mounted", image = image_path.display()).into_owned(),
+        ));
     }
 
     let child_path = child_path_for(image_path);
@@ -5414,16 +5422,13 @@ fn mount_obk_via_iscsi(
     keys: Option<&crate::seal::context::ArchiveKeys>,
 ) -> Result<String> {
     let keys = keys.ok_or_else(|| {
-        OwnBackupError::Encryption(format!(
-            "{}: копия зашифрована — чтобы её открыть, нужен пароль или ключ восстановления",
-            image_path.display()
-        ))
+        OwnBackupError::Encryption(
+            tr!("engine_win.encrypted_needs_key", image = image_path.display()).into_owned(),
+        )
     })?;
     if read_write {
         return Err(OwnBackupError::Encryption(
-            "зашифрованную копию можно открыть только для чтения: для записи нужна \
-пересборка шифрованного контейнера, которой пока нет"
-                .into(),
+            tr!("engine_win.encrypted_read_only").into_owned(),
         ));
     }
     if let Some(existing) = qcow2_mounts().lock().unwrap().get(image_path) {
@@ -5584,8 +5589,8 @@ pub struct DecryptedProbe {
 /// direction. Letting the user try costs one rejected passphrase; refusing to
 /// ask costs them the volume.
 #[cfg(target_os = "windows")]
-pub fn describe_encryption(disk: u32, offset: u64, length: u64) -> (Vec<String>, bool) {
-    let unknown = (Vec::new(), true);
+pub fn describe_encryption(disk: u32, offset: u64, length: u64) -> (Vec<String>, bool, bool) {
+    let unknown = (Vec::new(), true, false);
     let path = format!(r"\\.\PhysicalDrive{disk}");
     let Ok(mut window) = disk_window(&path, offset, length) else {
         return unknown;
@@ -5605,10 +5610,10 @@ pub fn describe_encryption(disk: u32, offset: u64, length: u64) -> (Vec<String>,
         // Мастеру важно «есть ли что набрать», а не «справится ли наш разбор»:
         // чего не умеем мы, откроет Windows. Иначе поле пароля не показывается
         // там, где пароль отлично подошёл бы.
-        return (names, info.typeable());
+        return (names, info.typeable(), info.recovery_key_only());
     }
     match crate::luks::inspect_luks(&mut window) {
-        Ok(info) => (info.methods, info.openable),
+        Ok(info) => (info.methods, info.openable, false),
         Err(e) => {
             debug!(disk, offset, error = %e, "encrypted partition described neither as BitLocker nor as LUKS");
             unknown
@@ -5671,10 +5676,14 @@ fn probe_decrypted(view: &mut dyn crate::fat_map::RawVolume) -> Result<Decrypted
 fn probe_bitlocker(volume_device: &str, passphrase: &str) -> Result<DecryptedProbe> {
     let extents = crate::volume_win::volume_extents(volume_device);
     let [extent] = extents.as_slice() else {
-        return Err(OwnBackupError::Device(format!(
-            "{volume_device}: том BitLocker занимает {} экстентов — такой не поддерживается",
-            extents.len()
-        )));
+        return Err(OwnBackupError::Device(
+            tr!(
+                "engine_win.bitlocker_multi_extent",
+                volume = volume_device,
+                count = extents.len()
+            )
+            .into_owned(),
+        ));
     };
     let disk = format!(r"\\.\PhysicalDrive{}", extent.disk_number);
     let mut probe = disk_window(&disk, extent.offset, extent.length)?;

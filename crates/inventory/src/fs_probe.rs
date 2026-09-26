@@ -11,6 +11,7 @@
 //! Windows-only. Reading a physical drive needs administrator rights; when
 //! that fails we return `None` and the caller leaves the filesystem `Unknown`.
 
+use own_backup_common::tr;
 use own_backup_common::types::FileSystem;
 
 /// Enough to reach the btrfs superblock (magic at 0x10040, label at 0x1012B).
@@ -141,7 +142,7 @@ pub fn identify(buf: &[u8]) -> Option<ProbedFs> {
     {
         return Some(ProbedFs {
             fs: FileSystem::Unknown,
-            label: Some("BitLocker (зашифровано)".into()),
+            label: Some(tr!("fs_probe.bitlocker_label").into_owned()),
             used_bytes: None,
             encrypted: true,
             last_mounted: None,
@@ -181,7 +182,7 @@ pub fn identify(buf: &[u8]) -> Option<ProbedFs> {
     if at(0, b"LUKS\xba\xbe") {
         return Some(ProbedFs {
             fs: FileSystem::Unknown,
-            label: Some("LUKS (зашифровано)".into()),
+            label: Some(tr!("fs_probe.luks_label").into_owned()),
             used_bytes: None,
             encrypted: true,
             last_mounted: None,

@@ -24,6 +24,7 @@
 
 #![cfg(target_os = "windows")]
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::ffi::c_void;
 
@@ -33,7 +34,7 @@ use windows::Win32::Foundation::BOOLEAN;
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 
 use own_backup_common::restore_plan::FormatFs;
-use own_backup_common::{OwnBackupError, Result};
+use own_backup_common::{tr, OwnBackupError, Result};
 
 use crate::win_device::to_wide;
 
@@ -69,7 +70,8 @@ struct FormatOutcome {
     /// `Some(true)` once a DONE callback said the format succeeded.
     done: Option<bool>,
     /// The first diagnostic callback, if any — far more informative than DONE.
-    failure: Option<&'static str>,
+    /// Kept as the callback command; [`failure_text`] words it for the window.
+    failure: Option<u32>,
     /// Last decile logged, so a full format leaves a trail without flooding.
     logged_decile: u32,
 }
@@ -101,22 +103,27 @@ unsafe extern "system" fn callback(command: u32, _sub_action: u32, action_info: 
                     o.done = Some(unsafe { *(action_info as *const BOOLEAN) }.0 != 0);
                 }
             }
-            CB_INSUFFICIENT_RIGHTS => {
-                o.failure.get_or_insert("недостаточно прав");
-            }
-            CB_FS_NOT_SUPPORTED => {
-                o.failure.get_or_insert("файловая система не поддерживается");
-            }
-            CB_VOLUME_IN_USE => {
-                o.failure.get_or_insert("том занят другим процессом");
-            }
-            CB_CLUSTER_SIZE_TOO_SMALL => {
-                o.failure.get_or_insert("слишком маленький размер кластера");
+            CB_INSUFFICIENT_RIGHTS
+            | CB_FS_NOT_SUPPORTED
+            | CB_VOLUME_IN_USE
+            | CB_CLUSTER_SIZE_TOO_SMALL => {
+                o.failure.get_or_insert(command);
             }
             _ => {}
         }
     });
     BOOLEAN(1) // keep going
+}
+
+/// A diagnostic callback command in the window's words.
+fn failure_text(command: u32) -> Cow<'static, str> {
+    match command {
+        CB_INSUFFICIENT_RIGHTS => tr!("format_win.insufficient_rights"),
+        CB_FS_NOT_SUPPORTED => tr!("format_win.fs_not_supported"),
+        CB_VOLUME_IN_USE => tr!("format_win.volume_in_use"),
+        CB_CLUSTER_SIZE_TOO_SMALL => tr!("format_win.cluster_too_small"),
+        other => tr!("format_win.callback_code", code = other),
+    }
 }
 
 /// Load `FormatEx` from `fmifs.dll`.
@@ -172,20 +179,24 @@ pub fn format_volume(volume_root: &str, fs: FormatFs, label: &str, quick: bool) 
             info!(volume = %volume_root, fs = fs.as_str(), label, quick, "volume formatted");
             Ok(())
         }
-        (_, Some(why)) => Err(OwnBackupError::Device(format!(
-            "не удалось отформатировать {volume_root} в {}: {why}",
-            fs.as_str()
-        ))),
+        (_, Some(why)) => Err(OwnBackupError::Device(
+            tr!(
+                "format_win.format_failed",
+                volume = volume_root,
+                fs = fs.as_str(),
+                why = failure_text(why)
+            )
+            .into_owned(),
+        )),
         // No DONE at all means FormatEx bailed out before starting. Treating
         // that as success is how an unformatted partition ends up in a restore.
-        (None, None) => Err(OwnBackupError::Device(format!(
-            "форматирование {volume_root} в {} не начиналось — FormatEx не сообщил результат",
-            fs.as_str()
-        ))),
-        (Some(false), None) => Err(OwnBackupError::Device(format!(
-            "форматирование {volume_root} в {} завершилось ошибкой",
-            fs.as_str()
-        ))),
+        (None, None) => Err(OwnBackupError::Device(
+            tr!("format_win.not_started", volume = volume_root, fs = fs.as_str()).into_owned(),
+        )),
+        (Some(false), None) => Err(OwnBackupError::Device(
+            tr!("format_win.ended_with_error", volume = volume_root, fs = fs.as_str())
+                .into_owned(),
+        )),
     }
 }
 
@@ -195,9 +206,9 @@ fn format_via_command(volume_root: &str, fs: FormatFs, label: &str, quick: bool)
     // format.com only understands drive letters.
     let drive = volume_root.trim_end_matches('\\');
     if !(drive.len() == 2 && drive.ends_with(':')) {
-        return Err(OwnBackupError::Device(format!(
-            "fmifs.dll недоступна, а format.com умеет работать только с буквой диска (получено {volume_root})"
-        )));
+        return Err(OwnBackupError::Device(
+            tr!("format_win.needs_drive_letter", volume = volume_root).into_owned(),
+        ));
     }
     let mut cmd = std::process::Command::new("format.com");
     cmd.arg(drive)
@@ -210,14 +221,18 @@ fn format_via_command(volume_root: &str, fs: FormatFs, label: &str, quick: bool)
         cmd.arg(format!("/V:{label}"));
     }
     let out = cmd.output().map_err(|e| {
-        OwnBackupError::Device(format!("не удалось запустить format.com: {e}"))
+        OwnBackupError::Device(tr!("format_win.format_com_start_failed", error = e).into_owned())
     })?;
     if !out.status.success() {
-        return Err(OwnBackupError::Device(format!(
-            "format.com {drive} завершился с кодом {}: {}",
-            out.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
+        return Err(OwnBackupError::Device(
+            tr!(
+                "format_win.format_com_failed",
+                drive = drive,
+                code = out.status.code().unwrap_or(-1),
+                output = String::from_utf8_lossy(&out.stderr).trim()
+            )
+            .into_owned(),
+        ));
     }
     info!(volume = %volume_root, fs = fs.as_str(), "volume formatted via format.com");
     Ok(())

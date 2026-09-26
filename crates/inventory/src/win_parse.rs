@@ -6,6 +6,7 @@
 //! module that sends the IOCTLs ([`crate::win_disks`]) is where the platform
 //! begins.
 
+use own_backup_common::tr;
 use own_backup_common::types::FileSystem;
 
 pub fn u32_at(b: &[u8], off: usize) -> u32 {
@@ -92,8 +93,10 @@ pub fn media_type_of(bus: u32, seek_penalty: Option<bool>, removable: bool) -> S
         None if bus == 17 => "SSD", // NVMe never spins
         None => "",
     };
+    let removable_tag =
+        if removable { tr!("win_parse.removable").into_owned() } else { String::new() };
     let mut out = String::new();
-    for piece in [bus_name(bus), kind, if removable { "(съёмный)" } else { "" }] {
+    for piece in [bus_name(bus), kind, removable_tag.as_str()] {
         if piece.is_empty() {
             continue;
         }

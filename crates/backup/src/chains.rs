@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 use tracing::{info, warn};
 
-use own_backup_common::Result;
+use own_backup_common::{tr, Result};
 
 use crate::sidecar::{read_sidecar_header, ChainRole};
 
@@ -477,12 +477,14 @@ pub fn delete_chain(chain: &Chain) -> Result<DeletionReport> {
     if let Some(base) = chain.images.first() {
         let marker = crate::consolidate::marker_path(&base.image_path);
         if marker.exists() {
-            return Err(own_backup_common::OwnBackupError::ChainBroken(format!(
-                "цепочка {} не дошла до конца предыдущей консолидации ({}) — \
-                 пока это не завершено, удалять её нельзя",
-                base.image_path.display(),
-                marker.display()
-            )));
+            return Err(own_backup_common::OwnBackupError::ChainBroken(
+                tr!(
+                    "chains.consolidation_unfinished",
+                    chain = base.image_path.display(),
+                    marker = marker.display()
+                )
+                .into_owned(),
+            ));
         }
     }
 
@@ -500,7 +502,7 @@ pub fn delete_chain(chain: &Chain) -> Result<DeletionReport> {
         if blocked[i] {
             report.kept.push((
                 image.image_path.clone(),
-                "оставлен: от него всё ещё зависит образ, который не удалось удалить".into(),
+                tr!("chains.kept_dependent").into_owned(),
             ));
             block_parent(&parent, &mut blocked, i);
             continue;

@@ -37,7 +37,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use tracing::{info, warn};
 
-use own_backup_common::{OwnBackupError, Result};
+use own_backup_common::{tr, OwnBackupError, Result};
 
 use crate::btrfs_map::{
     for_each_item, parse_chunk, read_node, walk_tree, ChunkMap, CHUNK_ITEM, HEADER, MAGIC,
@@ -486,11 +486,7 @@ impl EditSet {
                 // Either it was planned for removal, or something predicted
                 // wrong and the whole of Stage 2 is refused.
                 if !self.drop_leaves.contains(&leaf) {
-                    return Err(bad(format!(
-                        "удаление опустошило бы лист дерева (logical {leaf}) — \
-                         родитель остался бы со ссылкой на пустой узел; \
-                         исключения не применяются"
-                    )));
+                    return Err(bad(tr!("btrfs_exclusions.leaf_would_empty", leaf = leaf)));
                 }
                 self.nodes.insert(leaf, node);
                 self.unlink_child(vol, fs, leaf)?;
@@ -513,10 +509,7 @@ impl EditSet {
                 .map(|n| u32at(n, 0x60) == 0)
                 .unwrap_or(false);
             if !empty {
-                return Err(bad(format!(
-                    "лист {leaf} планировался к удалению, но остался непустым — \
-                     исключения не применяются"
-                )));
+                return Err(bad(tr!("btrfs_exclusions.leaf_drop_not_empty", leaf = leaf)));
             }
         }
 
@@ -580,9 +573,10 @@ impl EditSet {
         }
         let need = HEADER + kept.len() * 25 + kept.iter().map(|(_, d)| d.len()).sum::<usize>();
         if need > node.len() {
-            return Err(bad(format!(
-                "лист не вмещает правки ({need} байт из {}) — Stage 2 отменяется",
-                node.len()
+            return Err(bad(tr!(
+                "btrfs_exclusions.leaf_overflow",
+                need = need,
+                size = node.len()
             )));
         }
         // Re-emit: header stays, item array from HEADER, data from the tail.
@@ -644,16 +638,21 @@ impl EditSet {
     /// handles, and reaching it means the plan was wrong.
     fn unlink_child(&mut self, vol: &mut dyn RawVolume, fs: &Fs, child_logical: u64) -> Result<()> {
         let Some(&(parent, slot)) = self.parent.get(&child_logical) else {
-            return Err(bad(format!("нечего отвязывать: у узла {child_logical} нет родителя")));
+            return Err(bad(tr!("btrfs_exclusions.unlink_no_parent", node = child_logical)));
         };
         let nodesize = self.nodesize as usize;
         let node = self.node_mut(vol, fs, parent)?;
         let nritems = u32at(node, 0x60) as usize;
         if slot >= nritems {
-            return Err(bad(format!("слот {slot} вне узла {parent} ({nritems} детей)")));
+            return Err(bad(tr!(
+                "btrfs_exclusions.slot_outside_node",
+                slot = slot,
+                parent = parent,
+                nritems = nritems
+            )));
         }
         if nritems <= 1 {
-            return Err(bad(format!("узел {parent} остался бы без детей")));
+            return Err(bad(tr!("btrfs_exclusions.node_would_be_childless", parent = parent)));
         }
         // key_ptr entries are 33 bytes: key(17) + blockptr(8) + generation(8).
         let from = HEADER + (slot + 1) * 33;
@@ -693,9 +692,9 @@ impl EditSet {
             // leaves changed their first key, no parent was updated, and every
             // read of those leaves died with `tree first key mismatch` — which
             // surfaced as the kernel's init taking SIGBUS on its own pages.
-            return Err(bad(format!(
-                "узел {child_logical} сменил первый ключ, но его дерево не разобрано \
-                 (learn_parents не вызывался) — исключения не применяются"
+            return Err(bad(tr!(
+                "btrfs_exclusions.key_changed_tree_unlearned",
+                node = child_logical
             )));
         };
         let node = self.node_mut(vol, fs, parent)?;
@@ -1415,9 +1414,7 @@ pub fn scan_btrfs_exclusions(
         }
     }
     if !settled {
-        return Err(bad(format!(
-            "набор удаляемых файлов не сошёлся за {MAX_ROUNDS} кругов — исключения не применяются"
-        )));
+        return Err(bad(tr!("btrfs_exclusions.removal_set_not_settled", rounds = MAX_ROUNDS)));
     }
     if spared > 0 {
         info!(spared, "btrfs exclusions: файлы оставлены в дереве ради целостности листов");
@@ -2240,7 +2237,7 @@ fn apply_stage2(
         let bi = bgs
             .iter()
             .position(|b| block >= b.start && block + fs.nodesize <= b.start + b.len)
-            .ok_or_else(|| bad(format!("освобождённый блок дерева {block} вне групп блоков")))?;
+            .ok_or_else(|| bad(tr!("btrfs_exclusions.freed_block_outside_groups", block = block)))?;
         *bg_dec.entry(bi).or_default() += fs.nodesize;
         *freed_meta += fs.nodesize;
     }

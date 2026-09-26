@@ -1,0 +1,751 @@
+{
+  "_version": 2,
+
+  "media_build_win.devices_not_listed": {
+    "ru": "не удалось перечислить устройства этой машины: %{error}",
+    "en": "could not list this machine's devices: %{error}"
+  },
+  "media_build_win.driver_thread_panicked": {
+    "ru": "поток опроса драйверов упал",
+    "en": "the driver query thread crashed"
+  },
+  "media_build_win.drivers_not_listed": {
+    "ru": "не удалось перечислить установленные драйверы: %{error}",
+    "en": "could not list the installed drivers: %{error}"
+  },
+  "media_build_win.role_vm_devices": {
+    "ru": "экран и устройства виртуальной машины",
+    "en": "virtual machine display and devices"
+  },
+  "media_build_win.powershell_not_started": {
+    "ru": "PowerShell не запустился: %{error}",
+    "en": "PowerShell did not start: %{error}"
+  },
+  "media_build_win.powershell_failed": {
+    "ru": "PowerShell завершился с кодом %{code}: %{error}",
+    "en": "PowerShell exited with code %{code}: %{error}"
+  },
+  "media_build_win.powershell_unparsed": {
+    "ru": "ответ PowerShell не разобрался: %{error}",
+    "en": "could not parse PowerShell's answer: %{error}"
+  },
+  "media_build_win.stage_check": {
+    "ru": "Проверка исходных файлов",
+    "en": "Checking the source files"
+  },
+  "media_build_win.stage_open": {
+    "ru": "Открытие образа восстановления",
+    "en": "Opening the recovery image"
+  },
+  "media_build_win.stage_program": {
+    "ru": "Копирование программы",
+    "en": "Copying the program"
+  },
+  "media_build_win.stage_tools": {
+    "ru": "Копирование сторонних средств",
+    "en": "Copying third-party tools"
+  },
+  "media_build_win.stage_runtime": {
+    "ru": "Копирование WebView2",
+    "en": "Copying WebView2"
+  },
+  "media_build_win.stage_drivers": {
+    "ru": "Добавление драйверов",
+    "en": "Adding drivers"
+  },
+  "media_build_win.stage_libs": {
+    "ru": "Системные библиотеки",
+    "en": "System libraries"
+  },
+  "media_build_win.stage_write": {
+    "ru": "Запись образа",
+    "en": "Writing the image"
+  },
+  "media_build_win.stage_boot": {
+    "ru": "Загрузочные файлы",
+    "en": "Boot files"
+  },
+  "media_build_win.stage_iso": {
+    "ru": "Запись ISO",
+    "en": "Writing the ISO"
+  },
+  "media_build_win.stage_clean": {
+    "ru": "Уборка временных файлов",
+    "en": "Cleaning up temporary files"
+  },
+  "media_build_win.detail_reading_image": {
+    "ru": "чтение образа",
+    "en": "reading the image"
+  },
+  "media_build_win.detail_copying_image": {
+    "ru": "копия образа",
+    "en": "copying the image"
+  },
+  "media_build_win.detail_mounting": {
+    "ru": "монтирование",
+    "en": "mounting"
+  },
+  "media_build_win.detail_unpacking": {
+    "ru": "распаковка",
+    "en": "unpacking"
+  },
+  "media_build_win.detail_mounted": {
+    "ru": "смонтирован",
+    "en": "mounted"
+  },
+  "media_build_win.detail_unpacked": {
+    "ru": "распакован",
+    "en": "unpacked"
+  },
+  "media_build_win.detail_runtime_in_image": {
+    "ru": "в образ, со сжатием",
+    "en": "into the image, compressed"
+  },
+  "media_build_win.detail_runtime_on_media": {
+    "ru": "на носитель, без сжатия",
+    "en": "onto the media, uncompressed"
+  },
+  "media_build_win.detail_runtime_trim": {
+    "ru": "лишнее из рантайма",
+    "en": "trimming the runtime"
+  },
+  "media_build_win.detail_exporting_drivers": {
+    "ru": "выгрузка из хранилища",
+    "en": "exporting from the driver store"
+  },
+  "media_build_win.detail_committing": {
+    "ru": "фиксация изменений",
+    "en": "committing changes"
+  },
+  "media_build_win.detail_packing_minutes": {
+    "ru": "упаковка (несколько минут)",
+    "en": "packing (a few minutes)"
+  },
+  "media_build_win.detail_packing": {
+    "ru": "упаковка",
+    "en": "packing"
+  },
+  "media_build_win.detail_installing_drivers": {
+    "ru": "установка в образ",
+    "en": "installing into the image"
+  },
+  "media_build_win.detail_extra_folder": {
+    "ru": "дополнительная папка",
+    "en": "extra folder"
+  },
+  "media_build_win.clean_counting": {
+    "ru": "подсчёт",
+    "en": "measuring"
+  },
+  "media_build_win.clean_unpacked_image": {
+    "ru": "распакованный образ",
+    "en": "unpacked image"
+  },
+  "media_build_win.clean_work_folder": {
+    "ru": "рабочая папка",
+    "en": "work folder"
+  },
+  "media_build_win.clean_media_files": {
+    "ru": "файлы носителя",
+    "en": "media files"
+  },
+  "media_build_win.clean_checking": {
+    "ru": "проверка",
+    "en": "checking"
+  },
+  "media_build_win.program_file_missing": {
+    "ru": "%{file} не найден в %{dir}",
+    "en": "%{file} not found in %{dir}"
+  },
+  "media_build_win.not_webview2": {
+    "ru": "%{dir}: не похоже на рантайм WebView2 (нет msedgewebview2.exe)",
+    "en": "%{dir}: does not look like a WebView2 runtime (no msedgewebview2.exe)"
+  },
+  "media_build_win.warn_tools_not_added": {
+    "ru": "Сторонние средства не добавлены: %{error}",
+    "en": "Third-party tools were not added: %{error}"
+  },
+  "media_build_win.warn_drivers_not_added": {
+    "ru": "Драйверы добавить не удалось: %{reason}. Носитель соберётся, но может не увидеть диски на другом оборудовании.",
+    "en": "Could not add the drivers: %{reason}. The media will still be built, but may not see the disks on other hardware."
+  },
+  "media_build_win.warn_vmware_not_added": {
+    "ru": "Драйверы VMware Tools добавить не удалось: %{reason}. Носитель соберётся, но в виртуальной машине VMware останется разрешение 1024×768.",
+    "en": "Could not add the VMware Tools drivers: %{reason}. The media will still be built, but in a VMware virtual machine the resolution will stay at 1024×768."
+  },
+  "media_build_win.warn_iscsi_missing": {
+    "ru": "На этой машине не нашлось файлов iSCSI-инициатора (%{files}). Носитель соберётся, но подключить копию как диск на нём не выйдет.",
+    "en": "The iSCSI initiator files were not found on this machine (%{files}). The media will still be built, but it will not be able to mount a backup as a disk."
+  },
+  "media_build_win.warn_keyboard_dll_missing": {
+    "ru": "%{dll} нет ни в образе, ни на этой машине — соответствующая раскладка клавиатуры на носителе может не переключаться.",
+    "en": "%{dll} is neither in the image nor on this machine — that keyboard layout may not switch on the media."
+  },
+  "media_build_win.warn_input_locales": {
+    "ru": "Раскладки клавиатуры не записались в образ (%{error}). Носитель загрузится, раскладки выставит скрипт запуска (Alt+Shift).",
+    "en": "The keyboard layouts were not written into the image (%{error}). The media will boot, and the startup script will set the layouts (Alt+Shift)."
+  },
+  "media_build_win.warn_inbox_not_checked": {
+    "ru": "Не удалось проверить, есть ли в образе встроенные драйверы дисков и сети этой машины: %{error}",
+    "en": "Could not check whether the image has this machine's built-in disk and network drivers: %{error}"
+  },
+  "media_build_win.warn_inbox_missing": {
+    "ru": "%{device}: драйвера %{inf} нет в среде восстановления, и в хранилище драйверов этой машины его не нашлось — на носителе это устройство может не работать.",
+    "en": "%{device}: driver %{inf} is not in Windows RE and was not found in this machine's driver store — this device may not work on the media."
+  },
+  "media_build_win.warn_inbox_not_added": {
+    "ru": "%{device}: драйвера %{inf} нет в среде восстановления, и добавить его с этой машины не удалось (%{reason}) — на носителе это устройство может не работать.",
+    "en": "%{device}: driver %{inf} is not in Windows RE, and adding it from this machine failed (%{reason}) — this device may not work on the media."
+  },
+  "media_build_win.vmware_iso_gone": {
+    "ru": "windows.iso (VMware Tools) больше не найден — драйверы VMware пропущены",
+    "en": "windows.iso (VMware Tools) is no longer there — the VMware drivers were skipped"
+  },
+  "media_build_win.warn_boot_stl_missing": {
+    "ru": "На этой машине нет файла %{path} — носитель собран без него и НЕ ЗАГРУЗИТСЯ, пока в прошивке включена безопасная загрузка. Её придётся выключить.",
+    "en": "This machine has no %{path} — the media was built without it and WILL NOT BOOT while Secure Boot is on in the firmware. Secure Boot will have to be turned off."
+  },
+  "media_build_win.tool_exe_missing": {
+    "ru": "%{tool} скопирован, но %{exe} в нём нет",
+    "en": "%{tool} was copied, but %{exe} is not in it"
+  },
+  "media_build_win.tool_incomplete": {
+    "ru": "%{tool} скопирован не полностью: %{files} файлов вместо %{want_files} (%{bytes} вместо %{want_bytes} байт)",
+    "en": "%{tool} was not copied completely: %{files} files instead of %{want_files} (%{bytes} instead of %{want_bytes} bytes)"
+  },
+  "media_build_win.dism_failed": {
+    "ru": "dism завершился с ошибкой: %{output}",
+    "en": "dism failed: %{output}"
+  },
+  "media_build_win.tool_failed": {
+    "ru": "%{program} завершился с ошибкой: %{output}",
+    "en": "%{program} failed: %{output}"
+  },
+
+  "media_guest_drivers_win.mounting_iso": {
+    "ru": "подключение windows.iso",
+    "en": "mounting windows.iso"
+  },
+  "media_guest_drivers_win.drivers_on_image": {
+    "ru": "драйверы на образе",
+    "en": "drivers on the image"
+  },
+  "media_guest_drivers_win.unpacking_installer": {
+    "ru": "распаковка установщика",
+    "en": "unpacking the installer"
+  },
+  "media_guest_drivers_win.no_drivers": {
+    "ru": "на %{root}: не нашлось ни одного подходящего драйвера (экран, диск, сеть) — ни файлами, ни внутри установщика",
+    "en": "no suitable driver (display, disk, network) on %{root} — neither as files nor inside the installer"
+  },
+  "media_guest_drivers_win.none_accepted": {
+    "ru": "ни один драйвер VMware не принят образом",
+    "en": "the image accepted none of the VMware drivers"
+  },
+  "media_guest_drivers_win.unmounting_iso": {
+    "ru": "отключение windows.iso",
+    "en": "unmounting windows.iso"
+  },
+  "media_guest_drivers_win.incomplete": {
+    "ru": "Драйвер %{driver} из VMware Tools распакован не полностью: не хватает %{count} файлов (%{files}%{more}). На носитель он не попал.",
+    "en": "The %{driver} driver from VMware Tools was not unpacked completely: %{count} files are missing (%{files}%{more}). It was left off the media."
+  },
+  "media_guest_drivers_win.not_an_installer": {
+    "ru": "%{file}: внутри нет установочного пакета — это не тот setup.exe",
+    "en": "%{file}: there is no installer package inside — this is not the right setup.exe"
+  },
+  "media_guest_drivers_win.reading_installer": {
+    "ru": "разбор установщика",
+    "en": "reading the installer"
+  },
+  "media_guest_drivers_win.iso_not_mounted": {
+    "ru": "windows.iso не подключился (ответ: %{answer})",
+    "en": "windows.iso did not mount (answer: %{answer})"
+  },
+  "media_guest_drivers_win.tool_failed": {
+    "ru": "%{program} завершился с ошибкой %{code}: %{output}",
+    "en": "%{program} failed with code %{code}: %{output}"
+  },
+
+  "media_preflight_win.webview2_missing": {
+    "ru": "WebView2 не найден. Искал:",
+    "en": "WebView2 not found. Looked in:"
+  },
+  "media_preflight_win.webview2_missing_advice": {
+    "ru": "Носитель собран без среды выполнения — пересоберите его сборщиком или положите папку WebView2 рядом с программой.",
+    "en": "The media was built without the runtime — rebuild it with the media builder, or put the WebView2 folder next to the program."
+  },
+  "media_preflight_win.scratch_not_writable": {
+    "ru": "Временный каталог %{dir} недоступен для записи — интерфейсу негде распаковать движок.",
+    "en": "The temporary folder %{dir} is not writable — the interface has nowhere to unpack its engine."
+  },
+  "media_preflight_win.scratch_unknown": {
+    "ru": "Свободное место в %{dir} узнать не удалось — продолжаю.",
+    "en": "Could not find out the free space in %{dir} — continuing."
+  },
+  "media_preflight_win.scratch_too_small": {
+    "ru": "В %{dir} свободно %{free} МиБ, нужно хотя бы %{need}. Похоже, образ загрузился со стандартным для WinPE scratch 32 МБ; сборщик носителя поднимает его до 512 (dism /Set-ScratchSpace:512).",
+    "en": "%{dir} has %{free} MiB free, at least %{need} is needed. The image seems to have booted with WinPE's default 32 MB of scratch space; the media builder raises it to 512 (dism /Set-ScratchSpace:512)."
+  },
+  "media_preflight_win.scratch_ok": {
+    "ru": "Место в %{dir}: %{free} МиБ",
+    "en": "Free space in %{dir}: %{free} MiB"
+  },
+  "media_preflight_win.memory_unknown": {
+    "ru": "Объём памяти узнать не удалось — продолжаю.",
+    "en": "Could not find out how much memory there is — continuing."
+  },
+  "media_preflight_win.memory_low": {
+    "ru": "Доступно %{available} МиБ памяти — движку интерфейса нужно около 200, будет впритык.",
+    "en": "%{available} MiB of memory available — the interface engine needs about 200, it will be tight."
+  },
+  "media_preflight_win.memory_ok": {
+    "ru": "Память: доступно %{available} МиБ",
+    "en": "Memory: %{available} MiB available"
+  },
+  "media_preflight_win.cli_cheat_sheet": {
+    "ru": "Копию можно снять и вернуть отсюда:\n    own-backup-cli list-disks\n    own-backup-cli backup --disk 0 --to D:\\Backups\n    own-backup-cli restore-disk --image D:\\Backups\\<файл>.vhdx --to-disk 1\n    own-backup-cli finalize-boot --disk 1\nПодробности: own-backup-cli --help",
+    "en": "A backup can be taken and restored from here:\n    own-backup-cli list-disks\n    own-backup-cli backup --disk 0 --to D:\\Backups\n    own-backup-cli restore-disk --image D:\\Backups\\<file>.vhdx --to-disk 1\n    own-backup-cli finalize-boot --disk 1\nMore: own-backup-cli --help"
+  },
+  "media_preflight_win.version_placeholder": {
+    "ru": "<версия>",
+    "en": "<version>"
+  },
+
+  "winre_find.origin_registered": {
+    "ru": "зарегистрирован в среде восстановления",
+    "en": "registered with Windows RE"
+  },
+  "winre_find.origin_system_recovery": {
+    "ru": "лежит в System32\\Recovery",
+    "en": "in System32\\Recovery"
+  },
+  "winre_find.origin_recovery_folder": {
+    "ru": "раздел восстановления",
+    "en": "recovery partition"
+  },
+  "winre_find.origin_manual": {
+    "ru": "указан вручную",
+    "en": "chosen manually"
+  },
+  "winre_find.edition_unknown": {
+    "ru": "выпуск не указан",
+    "en": "edition not given"
+  },
+  "winre_find.not_recovery_image": {
+    "ru": "%{path}: это установочный образ Windows (%{edition}), а не среда восстановления. Из него можно достать Winre.wim, но напрямую он не подходит.",
+    "en": "%{path} is a Windows installation image (%{edition}), not a recovery environment. Winre.wim can be extracted from it, but it cannot be used directly."
+  },
+  "winre_find.arch_unknown": {
+    "ru": "неизвестной",
+    "en": "an unknown architecture"
+  },
+  "winre_find.not_x64": {
+    "ru": "%{path}: образ для архитектуры %{arch}, а нужен x64.",
+    "en": "%{path}: the image is for %{arch}, but x64 is needed."
+  },
+  "winre_find.split_image": {
+    "ru": "%{path}: это часть %{part} из %{total} разделённого образа (.swm) — сначала соберите его целиком.",
+    "en": "%{path} is part %{part} of %{total} of a split image (.swm) — join the parts first."
+  },
+  "winre_find.other_branch": {
+    "ru": "Образ собран для Windows %{image_build} , а на этой машине %{running_build}. Носитель, скорее всего, заработает, но это неподдерживаемое сочетание: драйверы и компоненты берутся от текущей системы.",
+    "en": "The image was built for Windows %{image_build}, and this machine runs %{running_build}. The media will most likely work, but this combination is unsupported: drivers and components come from the running system."
+  },
+  "winre_find.advice_enable": {
+    "ru": "Включить среду восстановления, если образ на диске есть:  reagentc /enable",
+    "en": "Turn Windows RE on, if its image is on the disk:  reagentc /enable"
+  },
+  "winre_find.advice_extract": {
+    "ru": "Достать Winre.wim из установочного образа Windows: смонтируйте ISO и укажите его — мастер извлечёт образ сам.",
+    "en": "Take Winre.wim from a Windows installation image: mount the ISO and point to it — the wizard extracts the image itself."
+  },
+  "winre_find.advice_manual": {
+    "ru": "Указать файл вручную, если Winre.wim лежит где-то ещё.",
+    "en": "Choose the file manually, if Winre.wim is somewhere else."
+  },
+  "winre_find.advice_adk": {
+    "ru": "Поставить Windows ADK с дополнением WinPE, если своего образа нет вовсе.",
+    "en": "Install the Windows ADK with the WinPE add-on, if there is no image at all."
+  },
+
+  "wim_info.too_small": {
+    "ru": "%{path}: файл слишком мал для образа WIM",
+    "en": "%{path}: the file is too small to be a WIM image"
+  },
+  "wim_info.not_wim": {
+    "ru": "%{path}: это не образ WIM (нет сигнатуры MSWIM)",
+    "en": "%{path} is not a WIM image (no MSWIM signature)"
+  },
+  "wim_info.no_images": {
+    "ru": "%{path}: в образе нет ни одной системы",
+    "en": "%{path}: the image contains no systems"
+  },
+  "wim_info.no_description": {
+    "ru": "%{path}: описание образа отсутствует или повреждено",
+    "en": "%{path}: the image description is missing or damaged"
+  },
+  "wim_info.description_cut_short": {
+    "ru": "%{path}: описание образа обрывается — файл неполный",
+    "en": "%{path}: the image description is cut short — the file is incomplete"
+  },
+
+  "media_layout.role_disk_controller": {
+    "ru": "контроллер дисков",
+    "en": "disk controller"
+  },
+  "media_layout.role_disk": {
+    "ru": "диск",
+    "en": "disk"
+  },
+  "media_layout.role_network_adapter": {
+    "ru": "сетевой адаптер",
+    "en": "network adapter"
+  },
+  "media_layout.role_usb_controller": {
+    "ru": "контроллер USB",
+    "en": "USB controller"
+  },
+
+  "iso9660.file_too_big": {
+    "ru": "%{file}: файл больше 4 ГБ — в ISO9660 такой не поместится",
+    "en": "%{file}: the file is larger than 4 GB — ISO9660 cannot hold it"
+  },
+  "iso9660.boot_image_not_listed": {
+    "ru": "%{path}: загрузочный образ должен быть среди файлов носителя",
+    "en": "%{path}: the boot image must be among the media files"
+  },
+  "iso9660.file_ended_early": {
+    "ru": "%{file}: файл кончился раньше, чем обещал его размер",
+    "en": "%{file}: the file ended before reaching its stated size"
+  },
+  "iso9660.size_mismatch": {
+    "ru": "%{file}: записано %{written} байт, а по разметке должно быть %{expected} — образ испорчен",
+    "en": "%{file}: %{written} bytes written, but the layout calls for %{expected} — the image is damaged"
+  },
+  "iso9660.not_iso9660": {
+    "ru": "не ISO9660",
+    "en": "not ISO9660"
+  },
+
+  "efivars.bad_entry": {
+    "ru": "запись загрузки: %{reason}",
+    "en": "boot entry: %{reason}"
+  },
+  "efivars.header_short": {
+    "ru": "всего %{len} байт, а заголовку нужно 6",
+    "en": "only %{len} bytes, and the header needs 6"
+  },
+  "efivars.name_unterminated": {
+    "ru": "название не заканчивается нулём",
+    "en": "the name has no terminating NUL"
+  },
+  "efivars.path_too_long": {
+    "ru": "путь заявлен в %{declared} байт, а осталось %{left}",
+    "en": "the path claims %{declared} bytes, but only %{left} are left"
+  },
+  "efivars.node_header_short": {
+    "ru": "на заголовок узла нужно 4 байта, осталось %{left}",
+    "en": "a node header needs 4 bytes, %{left} left"
+  },
+  "efivars.node_bad_length": {
+    "ru": "узел объявил длину %{len}",
+    "en": "a node claimed a length of %{len}"
+  },
+  "efivars.var_damaged": {
+    "ru": "%{name}: испорчены данные (%{error})",
+    "en": "%{name}: the data is damaged (%{error})"
+  },
+  "efivars.not_a_backup": {
+    "ru": "это не копия записей загрузки: %{error}",
+    "en": "this is not a copy of boot entries: %{error}"
+  },
+  "efivars.foreign_format": {
+    "ru": "чужой формат файла: %{format}",
+    "en": "unknown file format: %{format}"
+  },
+  "efivars.version_too_new": {
+    "ru": "файл версии %{version}, а эта программа понимает до %{supported}",
+    "en": "the file is version %{version}, and this program understands up to %{supported}"
+  },
+  "efivars.no_variables": {
+    "ru": "в копии нет ни одной переменной",
+    "en": "the copy holds no variables"
+  },
+  "efivars.not_boot_variable": {
+    "ru": "%{name}: это не переменная загрузки, восстанавливать её отсюда нельзя",
+    "en": "%{name} is not a boot variable and cannot be restored from here"
+  },
+  "efivars.copy_not_written": {
+    "ru": "не записать копию: %{error}",
+    "en": "could not write the copy: %{error}"
+  },
+
+  "efivars_win.token_not_opened": {
+    "ru": "не открыть маркер процесса: %{error}",
+    "en": "could not open the process token: %{error}"
+  },
+  "efivars_win.no_such_privilege": {
+    "ru": "нет такой привилегии: %{error}",
+    "en": "no such privilege: %{error}"
+  },
+  "efivars_win.privilege_not_enabled": {
+    "ru": "не включить привилегию: %{error}",
+    "en": "could not enable the privilege: %{error}"
+  },
+  "efivars_win.not_uefi": {
+    "ru": "эта машина загружается не через UEFI — записей загрузки нет",
+    "en": "this machine does not boot through UEFI — there are no boot entries"
+  },
+  "efivars_win.no_privilege": {
+    "ru": "нет привилегии SeSystemEnvironmentPrivilege — нужны права администратора",
+    "en": "no SeSystemEnvironmentPrivilege — administrator rights are needed"
+  },
+  "efivars_win.read_failed": {
+    "ru": "не прочитать переменную %{name}: %{error}",
+    "en": "could not read variable %{name}: %{error}"
+  },
+  "efivars_win.write_not_boot_variable": {
+    "ru": "%{name}: не переменная загрузки — записывать её отсюда нельзя",
+    "en": "%{name} is not a boot variable — it cannot be written from here"
+  },
+  "efivars_win.empty_value": {
+    "ru": "%{name}: пустое значение стёрло бы переменную",
+    "en": "%{name}: an empty value would erase the variable"
+  },
+  "efivars_win.write_failed": {
+    "ru": "не записать %{name}: %{error}",
+    "en": "could not write %{name}: %{error}"
+  },
+  "efivars_win.no_timeout_variable": {
+    "ru": "у этой прошивки нет переменной Timeout, а заводить новую ради пробы нельзя",
+    "en": "this firmware has no Timeout variable, and creating one just for a test is not allowed"
+  },
+  "efivars_win.legacy_bios": {
+    "ru": "эта машина загружается через обычный BIOS — записей UEFI у неё нет",
+    "en": "this machine boots through legacy BIOS — it has no UEFI boot entries"
+  },
+  "efivars_win.no_privilege_run_as_admin": {
+    "ru": "нет привилегии SeSystemEnvironmentPrivilege — запустите от имени администратора",
+    "en": "no SeSystemEnvironmentPrivilege — run as administrator"
+  },
+  "efivars_win.found_by_enumeration": {
+    "ru": "перечисление переменных прошивки",
+    "en": "enumerating firmware variables"
+  },
+  "efivars_win.found_by_scan_empty": {
+    "ru": "перебор Boot0000..Boot00FF (перечисление вернуло пусто)",
+    "en": "probing Boot0000..Boot00FF (enumeration returned nothing)"
+  },
+  "efivars_win.found_by_scan_unavailable": {
+    "ru": "перебор Boot0000..Boot00FF (перечисление недоступно)",
+    "en": "probing Boot0000..Boot00FF (enumeration unavailable)"
+  },
+  "efivars_win.enumeration_unavailable": {
+    "ru": "перечисление переменных недоступно (0x%{status})",
+    "en": "variable enumeration is unavailable (0x%{status})"
+  },
+  "efivars_win.enumeration_failed": {
+    "ru": "перечисление переменных не удалось (0x%{status})",
+    "en": "variable enumeration failed (0x%{status})"
+  },
+  "efivars_win.not_boot_variable": {
+    "ru": "%{name}: не переменная загрузки",
+    "en": "%{name} is not a boot variable"
+  },
+  "efivars_win.delete_failed": {
+    "ru": "не удалить %{name}: %{error}",
+    "en": "could not delete %{name}: %{error}"
+  },
+  "efivars_win.readback_failed": {
+    "ru": "собранная запись не читается обратно: %{error} — не пишем",
+    "en": "the assembled entry does not read back: %{error} — not writing it"
+  },
+  "efivars_win.readback_differs": {
+    "ru": "собранная запись читается иначе, чем задумана — не пишем",
+    "en": "the assembled entry reads back differently than intended — not writing it"
+  },
+  "efivars_win.no_such_entry": {
+    "ru": "записи %{name} нет",
+    "en": "there is no entry %{name}"
+  },
+  "efivars_win.not_fully_understood": {
+    "ru": "%{name}: её путь к устройству разобран не полностью — такую запись мы не переписываем",
+    "en": "%{name}: its device path was not fully understood — such an entry is not rewritten"
+  },
+  "efivars_win.empty_name": {
+    "ru": "пустое название — в меню его будет не отличить от соседей",
+    "en": "an empty name — it could not be told apart from the others in the menu"
+  },
+  "efivars_win.no_free_numbers": {
+    "ru": "в прошивке не осталось свободных номеров записей",
+    "en": "the firmware has no free entry numbers left"
+  },
+  "efivars_win.current_entry_delete": {
+    "ru": "запись %{entry} — та, с которой эта машина загружена сейчас. Удалить её без другой рабочей записи в меню означает машину, которая не стартует",
+    "en": "entry %{entry} is the one this machine booted from. Deleting it without another working entry in the menu means a machine that does not start"
+  },
+  "efivars_win.current_entry_hide": {
+    "ru": "запись %{entry} — та, с которой эта машина загружена сейчас. Убрать из меню её без другой рабочей записи в меню означает машину, которая не стартует",
+    "en": "entry %{entry} is the one this machine booted from. Removing it from the menu without another working entry there means a machine that does not start"
+  },
+  "efivars_win.safety_copy_failed": {
+    "ru": "не удалось сохранить копию записей загрузки (%{error}) — без неё менять их нельзя",
+    "en": "could not save a copy of the boot entries (%{error}) — they cannot be changed without one"
+  },
+  "efivars_win.done_renamed": {
+    "ru": "%{entry}: «%{was}» → «%{name}»",
+    "en": "%{entry}: “%{was}” → “%{name}”"
+  },
+  "efivars_win.done_shown": {
+    "ru": "%{entry}: показывается в меню",
+    "en": "%{entry}: shown in the menu"
+  },
+  "efivars_win.done_hidden": {
+    "ru": "%{entry}: убрана из меню",
+    "en": "%{entry}: removed from the menu"
+  },
+  "efivars_win.done_order": {
+    "ru": "Порядок: %{order}",
+    "en": "Order: %{order}"
+  },
+  "efivars_win.done_deleted": {
+    "ru": "Запись %{entry} «%{was}» удалена. Сам загрузчик остался на разделе.",
+    "en": "Entry %{entry} “%{was}” deleted. The loader itself is still on the partition."
+  },
+  "efivars_win.no_such_partition": {
+    "ru": "на диске %{disk} нет раздела %{partition}",
+    "en": "disk %{disk} has no partition %{partition}"
+  },
+  "efivars_win.bad_partition_guid": {
+    "ru": "не разобрать GUID раздела: %{guid}",
+    "en": "could not parse the partition GUID: %{guid}"
+  },
+  "efivars_win.done_created": {
+    "ru": "Создана запись %{entry} «%{name}» → %{file}",
+    "en": "Created entry %{entry} “%{name}” → %{file}"
+  },
+  "efivars_win.done_boot_next": {
+    "ru": "Следующая загрузка — с записи %{entry}, один раз",
+    "en": "Next boot — from entry %{entry}, once"
+  },
+  "efivars_win.done_boot_next_cleared": {
+    "ru": "Однократная загрузка убрана",
+    "en": "One-time boot cleared"
+  },
+  "efivars_win.done_timeout": {
+    "ru": "Меню платы будет показываться %{secs} с",
+    "en": "The firmware menu will be shown for %{secs} s"
+  },
+
+  "esp_fallback_win.no_volume": {
+    "ru": "Windows не показала том раздела EFI (смещение %{offset}) — загрузчик скопировать некуда",
+    "en": "Windows did not expose a volume for the EFI partition (offset %{offset}) — there is nowhere to copy the loader"
+  },
+  "esp_fallback_win.no_efi_dir": {
+    "ru": "На разделе EFI нет каталога \\EFI — копировать нечего",
+    "en": "The EFI partition has no \\EFI folder — nothing to copy"
+  },
+  "esp_fallback_win.no_efi_dir_follow_up": {
+    "ru": "Раздел EFI восстановлен, но каталога \\EFI в нём нет: загрузчика на диске не оказалось. Восстановленная система сама не загрузится.",
+    "en": "The EFI partition was restored, but it has no \\EFI folder: there is no loader on the disk. The restored system will not boot by itself."
+  },
+  "esp_fallback_win.already_there": {
+    "ru": "%{fallback} уже есть (%{kind}, %{size}) — оставили как есть",
+    "en": "%{fallback} already exists (%{kind}, %{size}) — left as it is"
+  },
+  "esp_fallback_win.no_loader": {
+    "ru": "Загрузчика для UEFI на разделе EFI не нашлось",
+    "en": "No UEFI loader found on the EFI partition"
+  },
+  "esp_fallback_win.no_loader_follow_up": {
+    "ru": "На разделе EFI нет ни %{fallback}, ни знакомого загрузчика (shim, GRUB, диспетчер загрузки Windows). Если система с этого диска не стартует, загрузочную запись придётся создать вручную.",
+    "en": "The EFI partition has neither %{fallback} nor a known loader (shim, GRUB, Windows Boot Manager). If the system on this disk does not start, the boot entry will have to be created manually."
+  },
+  "esp_fallback_win.mkdir_failed": {
+    "ru": "не удалось создать %{dir} на разделе EFI: %{error}",
+    "en": "could not create %{dir} on the EFI partition: %{error}"
+  },
+  "esp_fallback_win.copy_failed": {
+    "ru": "не удалось скопировать загрузчик в %{fallback}: %{error}",
+    "en": "could not copy the loader to %{fallback}: %{error}"
+  },
+  "esp_fallback_win.copied_follow_up": {
+    "ru": "Загрузчик EFI\\%{dir}\\%{loader} скопирован в %{fallback} — по этому пути UEFI ищет загрузчик сама, без записи в NVRAM материнской платы. Именно эта запись не переносится вместе с копией, поэтому на другой машине (и в виртуальной) диск иначе не стартует. На прежней машине ничего не изменится: её собственная запись в NVRAM по-прежнему имеет приоритет.",
+    "en": "The loader EFI\\%{dir}\\%{loader} was copied to %{fallback} — the path UEFI searches by itself, without a boot entry in the motherboard's NVRAM. That entry does not travel with the backup, so on another machine (or a virtual one) the disk would not start otherwise. Nothing changes on the original machine: its own NVRAM entry still takes priority."
+  },
+  "esp_fallback_win.several_loaders": {
+    "ru": "На разделе EFI несколько загрузчиков (%{candidates}), и определить по UUID, какой из них от восстановленной системы, не удалось — взят EFI\\%{dir}. Если система не загрузится, запустите из UEFI Shell загрузчик из другого каталога.",
+    "en": "The EFI partition has several loaders (%{candidates}), and which one belongs to the restored system could not be told by UUID — EFI\\%{dir} was taken. If the system does not boot, start a loader from another folder in the UEFI Shell."
+  },
+  "esp_fallback_win.copied": {
+    "ru": "Из EFI\\%{dir} скопировано в %{fallback_dir}: %{files}",
+    "en": "Copied from EFI\\%{dir} to %{fallback_dir}: %{files}"
+  },
+  "esp_fallback_win.loader": {
+    "ru": "загрузчик",
+    "en": "loader"
+  },
+  "esp_fallback_win.windows_boot_manager": {
+    "ru": "диспетчер загрузки Windows",
+    "en": "Windows Boot Manager"
+  },
+
+  "esp_scan.shim": {
+    "ru": "shim, первая ступень Secure Boot",
+    "en": "shim, the first stage of Secure Boot"
+  },
+  "esp_scan.mok_manager": {
+    "ru": "MokManager, ключи Secure Boot",
+    "en": "MokManager, Secure Boot keys"
+  },
+  "esp_scan.fallback": {
+    "ru": "fallback, восстанавливает запись сам",
+    "en": "fallback, recreates the boot entry by itself"
+  },
+  "esp_scan.boot_manager": {
+    "ru": "диспетчер загрузки",
+    "en": "boot manager"
+  },
+  "esp_scan.boot_manager_inner": {
+    "ru": "диспетчер загрузки, внутренняя часть",
+    "en": "boot manager, inner part"
+  },
+  "esp_scan.memtest": {
+    "ru": "проверка памяти",
+    "en": "memory test"
+  },
+  "esp_scan.secure_boot_recovery": {
+    "ru": "восстановление Secure Boot",
+    "en": "Secure Boot recovery"
+  },
+  "esp_scan.windows_boot_manager": {
+    "ru": "диспетчер загрузки Windows",
+    "en": "Windows Boot Manager"
+  },
+  "esp_scan.windows_inner": {
+    "ru": "Windows, внутренняя часть",
+    "en": "Windows, inner part"
+  },
+  "esp_scan.windows_memtest": {
+    "ru": "проверка памяти Windows",
+    "en": "Windows memory test"
+  },
+
+  "esp_scan_win.not_a_volume": {
+    "ru": "Windows не видит здесь тома — раздел помечен как EFI, а внутри что-то другое",
+    "en": "Windows sees no volume here — the partition is marked as EFI but holds something else"
+  },
+  "esp_scan_win.generic": {
+    "ru": "загрузчик",
+    "en": "loader"
+  },
+  "esp_scan_win.looks_like_acronis": {
+    "ru": "похоже на Acronis",
+    "en": "looks like Acronis"
+  },
+  "esp_scan_win.looks_like_rdrive": {
+    "ru": "похоже на R-Drive Image",
+    "en": "looks like R-Drive Image"
+  }
+}

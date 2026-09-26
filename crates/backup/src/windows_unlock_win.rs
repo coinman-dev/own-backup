@@ -39,7 +39,7 @@ use std::path::PathBuf;
 
 use tracing::{info, warn};
 
-use own_backup_common::{OwnBackupError, Result};
+use own_backup_common::{tr, OwnBackupError, Result};
 
 /// Где лежит `manage-bde.exe`, если он вообще есть в этой системе.
 ///
@@ -137,13 +137,13 @@ pub fn unlock_with_windows(volume: &str, secret: Secret<'_>) -> Result<()> {
             info!(volume = %letter, "том открыт средствами Windows (WMI)");
             Ok(())
         }
-        0x8031_0027 => Err(bad("пароль или ключ не подходит этому тому")),
-        0x8031_0008 => Err(bad("том не зашифрован BitLocker")),
-        0x8031_0033 => Err(bad(
-            "у тома нет такого предохранителя: паролем открывают том ДАННЫХ, \
-             системный том — только ключом восстановления",
-        )),
-        other => Err(bad(format!("BitLocker вернул {other:#010x}"))),
+        0x8031_0027 => Err(bad(tr!("windows_unlock_win.wrong_secret"))),
+        0x8031_0008 => Err(bad(tr!("windows_unlock_win.not_bitlocker"))),
+        0x8031_0033 => Err(bad(tr!("windows_unlock_win.no_such_protector"))),
+        other => Err(bad(tr!(
+            "windows_unlock_win.returned_code",
+            code = format!("{other:#010x}")
+        ))),
     }
 }
 
@@ -155,9 +155,7 @@ fn drive_letter(volume: &str) -> Result<String> {
             return Ok(format!("{}:", (b[i - 1] as char).to_ascii_uppercase()));
         }
     }
-    Err(bad(format!(
-        "{volume}: разблокировка средствами Windows работает по букве тома"
-    )))
+    Err(bad(tr!("windows_unlock_win.needs_letter", volume = volume)))
 }
 
 /// Позвать `Win32_EncryptableVolume::UnlockWith…` для тома с этой буквой.
@@ -201,7 +199,7 @@ fn wmi_unlock(letter: &str, secret: &Secret<'_>) -> Result<u32> {
         );
 
         let locator: IWbemLocator = CoCreateInstance(&WbemLocator, None, CLSCTX_INPROC_SERVER)
-            .map_err(|e| bad(format!("WMI недоступен: {e}")))?;
+            .map_err(|e| bad(tr!("windows_unlock_win.wmi_unavailable", error = e)))?;
         let services: IWbemServices = locator
             .ConnectServer(
                 &BSTR::from(r"ROOT\CIMV2\Security\MicrosoftVolumeEncryption"),
@@ -212,12 +210,7 @@ fn wmi_unlock(letter: &str, secret: &Secret<'_>) -> Result<u32> {
                 &BSTR::new(),
                 None,
             )
-            .map_err(|e| {
-                bad(format!(
-                    "провайдера BitLocker в WMI нет ({e}) — носитель собран без \
-                     компонента WinPE-SecureStartup?"
-                ))
-            })?;
+            .map_err(|e| bad(tr!("windows_unlock_win.no_provider", error = e)))?;
         CoSetProxyBlanket(
             &services,
             10, // RPC_C_AUTHN_WINNT
@@ -239,14 +232,12 @@ fn wmi_unlock(letter: &str, secret: &Secret<'_>) -> Result<u32> {
                 WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_WBEM_COMPLETE,
                 None,
             )
-            .map_err(|e| bad(format!("запрос тома: {e}")))?;
+            .map_err(|e| bad(tr!("windows_unlock_win.volume_query", error = e)))?;
         let mut found: [Option<IWbemClassObject>; 1] = [None];
         let mut returned = 0u32;
         let _ = enumerator.Next(WBEM_INFINITE, &mut found, &mut returned);
         let Some(instance) = found[0].take() else {
-            return Err(bad(format!(
-                "{letter}: WMI не знает такого тома — он под BitLocker?"
-            )));
+            return Err(bad(tr!("windows_unlock_win.unknown_volume", letter = letter)));
         };
         let mut path_var = VARIANT::new();
         instance
@@ -257,11 +248,11 @@ fn wmi_unlock(letter: &str, secret: &Secret<'_>) -> Result<u32> {
                 None,
                 None,
             )
-            .map_err(|e| bad(format!("путь тома: {e}")))?;
+            .map_err(|e| bad(tr!("windows_unlock_win.volume_path", error = e)))?;
         // Обёртка VARIANT чистит себя в Drop — ручное освобождение не нужно.
         let obj_path = BSTR::try_from(&path_var).map(|b| b.to_string()).unwrap_or_default();
         if obj_path.is_empty() {
-            return Err(bad("у тома нет пути в WMI"));
+            return Err(bad(tr!("windows_unlock_win.no_wmi_path")));
         }
 
         // 2. Подписи метода: класс отдаёт входные параметры отдельным объектом.
@@ -274,8 +265,9 @@ fn wmi_unlock(letter: &str, secret: &Secret<'_>) -> Result<u32> {
                 Some(&mut class_obj),
                 None,
             )
-            .map_err(|e| bad(format!("класс тома: {e}")))?;
-        let class_obj = class_obj.ok_or_else(|| bad("класс тома не получен"))?;
+            .map_err(|e| bad(tr!("windows_unlock_win.volume_class", error = e)))?;
+        let class_obj =
+            class_obj.ok_or_else(|| bad(tr!("windows_unlock_win.volume_class_missing")))?;
         let mut in_sig: Option<IWbemClassObject> = None;
         let mut out_sig: Option<IWbemClassObject> = None;
         class_obj
@@ -285,11 +277,13 @@ fn wmi_unlock(letter: &str, secret: &Secret<'_>) -> Result<u32> {
                 &mut in_sig,
                 &mut out_sig,
             )
-            .map_err(|e| bad(format!("метод {method}: {e}")))?;
+            .map_err(|e| bad(tr!("windows_unlock_win.method", method = method, error = e)))?;
         let in_params = in_sig
-            .ok_or_else(|| bad(format!("у метода {method} нет входных параметров")))?
+            .ok_or_else(|| bad(tr!("windows_unlock_win.method_no_params", method = method)))?
             .SpawnInstance(0)
-            .map_err(|e| bad(format!("параметры {method}: {e}")))?;
+            .map_err(|e| {
+                bad(tr!("windows_unlock_win.method_params", method = method, error = e))
+            })?;
 
         // 3. Положить секрет и позвать.
         let secret_var = VARIANT::from(arg_value);
@@ -300,7 +294,7 @@ fn wmi_unlock(letter: &str, secret: &Secret<'_>) -> Result<u32> {
                 &secret_var,
                 0,
             )
-            .map_err(|e| bad(format!("параметр {arg_name}: {e}")))?;
+            .map_err(|e| bad(tr!("windows_unlock_win.param", name = arg_name, error = e)))?;
         let mut out: Option<IWbemClassObject> = None;
         let call = services.ExecMethod(
             &BSTR::from(obj_path.as_str()),
@@ -313,9 +307,9 @@ fn wmi_unlock(letter: &str, secret: &Secret<'_>) -> Result<u32> {
         );
         // Секрет уходит из памяти вместе с вариантом (Drop), независимо от исхода.
         drop(secret_var);
-        call.map_err(|e| bad(format!("вызов {method}: {e}")))?;
+        call.map_err(|e| bad(tr!("windows_unlock_win.call", method = method, error = e)))?;
 
-        let out = out.ok_or_else(|| bad(format!("{method} ничего не вернул")))?;
+        let out = out.ok_or_else(|| bad(tr!("windows_unlock_win.no_result", method = method)))?;
         let mut ret = VARIANT::new();
         out.Get(
             PCWSTR::from_raw(wide("ReturnValue").as_ptr()),
@@ -324,7 +318,7 @@ fn wmi_unlock(letter: &str, secret: &Secret<'_>) -> Result<u32> {
             None,
             None,
         )
-        .map_err(|e| bad(format!("код возврата: {e}")))?;
+        .map_err(|e| bad(tr!("windows_unlock_win.return_code", error = e)))?;
         Ok(u32::try_from(&ret).unwrap_or(u32::MAX))
     }
 }
@@ -335,5 +329,5 @@ fn wide(s: &str) -> Vec<u16> {
 }
 
 fn bad(msg: impl std::fmt::Display) -> OwnBackupError {
-    OwnBackupError::Device(format!("разблокировка средствами Windows: {msg}"))
+    OwnBackupError::Device(tr!("windows_unlock_win.error", msg = msg).into_owned())
 }

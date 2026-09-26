@@ -4,6 +4,7 @@
   import { api } from '../lib/api';
   import RestoreDashboard from './RestoreDashboard.svelte';
   import type { Job, ImageInfo, LockedImage } from '../lib/types';
+  import { m } from '../lib/paraglide/messages';
 
   // Copies added by hand via «+ Добавить копию»: files picked from disk, read
   // straight from their own metadata — no jobs.json needed (Boot-CD).
@@ -32,7 +33,8 @@
     paths: string[];
   }
   let imported: Imported[] = $state([]);
-  let addError: string | null = $state(null);
+  // A function, so the text follows a change of language while it is shown.
+  let addError: (() => string) | null = $state(null);
   let addOpen = $state(false); // "Файл / Папка с копиями" choice modal
   /** Keep what was added, so it is there next time. On by default: having to
    *  find the same file again on every launch is the sort of thing nobody asks
@@ -88,7 +90,7 @@
     try {
       await api.saveConfig(next);
     } catch (e) {
-      addError = `Список копий не сохранён: ${e}`;
+      addError = () => m.rl_not_saved({ error: String(e) });
     }
   }
 
@@ -126,15 +128,6 @@
   function nameFromFile(path: string): string {
     const file = path.split(/[\\/]/).pop() ?? path;
     return file.match(/^(.*)_[^_]+_(?:full|inc|diff)_\d{8}-\d{6}\.[^.]+$/i)?.[1] ?? file;
-  }
-
-  /** «2 копии», «5 копий». */
-  function copiesWord(n: number): string {
-    const d = n % 10;
-    const dd = n % 100;
-    if (d === 1 && dd !== 11) return `${n} копия`;
-    if (d >= 2 && d <= 4 && (dd < 12 || dd > 14)) return `${n} копии`;
-    return `${n} копий`;
   }
 
   interface FoundFile {
@@ -241,7 +234,7 @@
     addError = null;
     const picked = await pickPath({
       directory: false,
-      title: 'Резервная копия',
+      title: m.rl_pick_file_title(),
       extensions: ['vhdx', 'avhdx', 'qcow2', 'obk'],
     });
     if (typeof picked !== 'string') return;
@@ -254,13 +247,14 @@
       if (!group) {
         // Not a copy the listing could read: the file's own error says why.
         await api.readImageInfo(picked);
-        addError = 'Не удалось прочитать эту копию.';
+        addError = m.rl_unreadable;
         return;
       }
       selectedId = addEntry(group);
       await remember(group.paths);
     } catch (e) {
-      addError = String(e);
+      const msg = String(e);
+      addError = () => msg;
     }
   }
 
@@ -273,14 +267,14 @@
     // told from the one next to it. Without them it looked empty.
     const picked = await pickPath({
       directory: true,
-      title: 'Папка с копиями',
+      title: m.rl_folder(),
       extensions: ['vhdx', 'avhdx', 'qcow2', 'obk'],
     });
     if (typeof picked !== 'string') return;
     try {
       const groups = await groupsIn(picked);
       if (groups.length === 0) {
-        addError = 'В выбранной папке не найдено копий с метаданными.';
+        addError = m.rl_folder_empty;
         return;
       }
       let first: string | null = null;
@@ -291,7 +285,8 @@
       if (first) selectedId = first;
       await remember(groups.flatMap((g) => g.paths));
     } catch (e) {
-      addError = String(e);
+      const msg = String(e);
+      addError = () => msg;
     }
   }
 
@@ -308,14 +303,14 @@
 <div class="layout">
   <!-- middle column: backups list (same as Backup) -->
   <div class="jobs-col">
-    <div class="col-title">Резервные копии</div>
+    <div class="col-title">{m.rl_title()}</div>
     <div class="this-pc">
       <svg width="11" height="11" viewBox="0 0 24 24" fill="var(--text-muted)"><path d="M6 9l6 6 6-6z"/></svg>
-      Этот компьютер
+      {m.rl_this_pc()}
     </div>
     <div class="jobs-list">
       {#if jobs.list.length === 0 && imported.length === 0}
-        <div class="empty-list">Нет резервных копий.<br/>Создайте их в разделе «Резервное копирование» или нажмите «Добавить копию».</div>
+        <div class="empty-list">{m.rl_empty()}<br/>{m.rl_empty_hint()}</div>
       {/if}
       {#each jobs.list as job (job.id)}
         <button class="job-item" class:sel={selectedId === job.id} onclick={() => (selectedId = job.id)}>
@@ -329,8 +324,8 @@
             <div class="job-name">
               {job.name}{#if job.archive_encryption}<span
                   class="enc-badge"
-                  title="Копии этого задания зашифрованы — для чтения нужен пароль или ключ восстановления"
-                  aria-label="Зашифровано"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2.2" stroke-linecap="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></span
+                  title={m.rl_encrypted_job_title()}
+                  aria-label={m.rl_encrypted()}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2.2" stroke-linecap="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></span
                 >{/if}
             </div>
             <div class="job-path">{job.dest_folder}</div>
@@ -350,21 +345,21 @@
               <div class="job-name">
                 {it.job.name}{#if it.sealed}<span
                     class="enc-badge"
-                    title="Копия зашифрована — для чтения нужен пароль или ключ восстановления"
-                    aria-label="Зашифровано"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2.2" stroke-linecap="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></span
+                    title={m.rl_encrypted_copy_title()}
+                    aria-label={m.rl_encrypted()}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2.2" stroke-linecap="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></span
                   >{/if}
               </div>
-              <div class="job-path" title={it.job.dest_folder}>{it.chainJobId ? `${copiesWord(it.paths.length)} · ${it.job.dest_folder}` : 'файл копии'}</div>
+              <div class="job-path" title={it.job.dest_folder}>{it.chainJobId ? `${m.rl_copies_count({ count: it.paths.length })} · ${it.job.dest_folder}` : m.rl_backup_file()}</div>
             </div>
           </button>
-          <button class="job-forget" title="Убрать из списка (файлы не удаляются)" onclick={() => forget(it.id)}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+          <button class="job-forget" title={m.rl_forget_title()} onclick={() => forget(it.id)}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
         </div>
       {/each}
     </div>
-    {#if addError}<div class="add-err">{addError}</div>{/if}
+    {#if addError}<div class="add-err">{addError()}</div>{/if}
     <button class="add-btn" onclick={() => { addError = null; addOpen = true; }}>
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-      Добавить копию
+      {m.rl_add()}
     </button>
   </div>
 
@@ -377,7 +372,7 @@
     {:else}
       <div class="empty-dash">
         <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="var(--border-strong)" stroke-width="1.4"><path d="M4 4v5h5M20 20v-5h-5M4 9a8 8 0 0 1 14-4M20 15a8 8 0 0 1-14 4"/></svg>
-        <div>Нет резервных копий для восстановления</div>
+        <div>{m.rl_empty_dash()}</div>
       </div>
     {/if}
   </div>
@@ -389,32 +384,32 @@
     <!-- Only a guard: it stops a click inside the dialog from reaching the
          overlay and closing it. Nothing happens that a key could do instead. -->
     <div class="dialog" role="dialog" tabindex="-1" onclick={(e) => e.stopPropagation()}>
-      <div class="dialog-title">Добавить копию</div>
-      <p>Что открыть?</p>
+      <div class="dialog-title">{m.rl_add()}</div>
+      <p>{m.rl_add_what()}</p>
       <div class="choice-row">
         <button class="choice" onclick={addFile}>
           <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="var(--accent-text)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
-          <span class="choice-title">Файл</span>
-          <span class="choice-sub">один образ копии</span>
+          <span class="choice-title">{m.rl_file()}</span>
+          <span class="choice-sub">{m.rl_file_sub()}</span>
         </button>
         <button class="choice" onclick={addFolder}>
           <svg width="34" height="34" viewBox="0 0 24 24">
             <path d="M3 7a2 2 0 0 1 2-2h4.2l2 2H19a2 2 0 0 1 2 2v8.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="var(--folder)" />
             <path d="M3 10h18v7.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="var(--folder2)" />
           </svg>
-          <span class="choice-title">Папка с копиями</span>
-          <span class="choice-sub">найти все копии в папке</span>
+          <span class="choice-title">{m.rl_folder()}</span>
+          <span class="choice-sub">{m.rl_folder_sub()}</span>
         </button>
       </div>
       <label class="remember">
         <input type="checkbox" bind:checked={rememberAdded} />
         <span>
-          Добавить файл(ы) бэкапа в список Резервных копий
-          <em>копия останется в списке после перезапуска — не придётся искать файл заново</em>
+          {m.rl_remember()}
+          <em>{m.rl_remember_sub()}</em>
         </span>
       </label>
       <div class="dialog-actions">
-        <button class="ghost" onclick={() => (addOpen = false)}>Отмена</button>
+        <button class="ghost" onclick={() => (addOpen = false)}>{m.common_cancel()}</button>
       </div>
     </div>
   </div>

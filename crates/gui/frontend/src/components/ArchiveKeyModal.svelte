@@ -16,6 +16,7 @@
   import { api } from '../lib/api';
   import { enableArchiveEncryption } from '../lib/jobStore.svelte';
   import type { BegunArchiveEncryption, Job } from '../lib/types';
+  import { m } from '../lib/paraglide/messages';
 
   interface Props {
     open: boolean;
@@ -117,39 +118,36 @@
 
 <Modal
   {open}
-  title="Ключ восстановления"
+  title={m.akey_title()}
   onClose={cancel}
   onConfirm={commit}
   confirmDisabled={!begun || echo.trim().length === 0 || busy}
-  confirmLabel={busy ? 'Включаю…' : 'Включить шифрование'}
-  cancelLabel="Отмена"
+  confirmLabel={busy ? m.akey_enabling() : m.akey_enable()}
+  cancelLabel={m.common_cancel()}
 >
   {#if !begun}
     <p class="what">
       {#if error}
-        Ключ подготовить не удалось.
+        {m.akey_prepare_failed()}
       {:else}
-        Готовлю ключ задания — это несколько секунд.
+        {m.akey_preparing()}
       {/if}
     </p>
   {:else}
-    <p class="what">
-      Запишите ключ восстановления <b>сейчас</b>. Он показывается один раз и нигде
-      не сохраняется — ни у нас, ни в службе.
-    </p>
+    <p class="what">{@html m.akey_write_down()}</p>
 
     <div class="key-box">
       <code>{begun.recovery_key}</code>
-      <button class="copy" onclick={copyKey} title="Скопировать в буфер обмена">
-        Скопировать
+      <button class="copy" onclick={copyKey} title={m.akey_copy_title()}>
+        {m.akey_copy()}
       </button>
     </div>
 
     <p class="note">
-      Отпечаток ключа задания: <code class="fp">{begun.fingerprint.slice(0, 16)}…</code>
+      {m.akey_fingerprint()} <code class="fp">{begun.fingerprint.slice(0, 16)}…</code>
     </p>
 
-    <div class="field-label">Введите ключ восстановления, чтобы подтвердить:</div>
+    <div class="field-label">{m.akey_confirm_label()}</div>
     <!-- Full width: it is sixty characters of bech32 copied off paper, and a
          box that shows a third of it hides the typo being looked for. -->
     <div class="wide-field">
@@ -162,9 +160,7 @@
         revealed={true}
       />
     </div>
-    <p class="note">
-      Пока он не введён, ничего не сохранено: задание останется без шифрования.
-    </p>
+    <p class="note">{m.akey_not_saved_yet()}</p>
   {/if}
 
   {#if error}

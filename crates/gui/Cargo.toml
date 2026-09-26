@@ -16,6 +16,7 @@ custom-protocol = ["tauri/custom-protocol"]
 
 [dependencies]
 own-backup-common = { workspace = true }
+rust-i18n = { workspace = true }
 own-backup-inventory = { workspace = true }
 own-backup-metadata = { workspace = true }
 own-backup-scheduler = { workspace = true }

@@ -674,6 +674,7 @@ impl super::traits::DiskInventory for WindowsInventory {
                     // on this one. Until then the volume is presumed openable:
                     // "nobody has asked yet" is not "нечем открыть".
                     unlock_methods: Vec::new(),
+                    recovery_key_only: false,
                     unlockable: true,
                 });
             }

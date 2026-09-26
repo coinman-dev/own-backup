@@ -21,10 +21,11 @@
 
 use std::path::Path;
 
-use own_backup_common::Result;
+use own_backup_common::{tr, Result};
 use tracing::debug;
 
 use crate::efivars;
+use crate::esp_scan::static_text;
 
 /// One `.efi` found on a partition.
 #[derive(Debug, Clone)]
@@ -35,8 +36,13 @@ pub struct Loader {
     /// Inside the partition, the way a boot entry would spell it.
     pub path: String,
     pub size: u64,
-    /// What it is, in words.
+    /// What it is, in words — in the window's language.
     pub kind: &'static str,
+    /// Neither its name nor its contents said what it is — `kind` is the
+    /// generic «загрузчик». The boot page then offers the vendor folder's name
+    /// for a new entry instead of that word; a flag, because the word itself is
+    /// shown in the window's language.
+    pub generic: bool,
     /// Whether a boot entry would sensibly name it, or another loader launches
     /// it. See [`crate::esp_scan::role`].
     pub role: crate::esp_scan::Role,
@@ -99,11 +105,7 @@ pub fn scan(entries: &[crate::efivars_win::BootEntry]) -> Result<Vec<Esp>> {
             };
             match root {
                 None => {
-                    esp.unreadable = Some(
-                        "Windows не видит здесь тома — раздел помечен как EFI, \
-                         а внутри что-то другое"
-                            .into(),
-                    )
+                    esp.unreadable = Some(tr!("esp_scan_win.not_a_volume").into_owned())
                 }
                 Some(root) => match collect_loaders(&root, disk, part.index, &part.part_guid) {
                     Ok(mut l) => {
@@ -185,12 +187,13 @@ fn collect_loaders(
                     continue;
                 }
                 let path = format!("\\{prefix}\\{name}");
+                let known = crate::esp_scan::kind_by_name(&path).or_else(|| identify(&f.path()));
                 out.push(Loader {
                     disk,
                     partition,
                     partition_guid: partition_guid.to_string(),
-                    kind: crate::esp_scan::kind_by_name(&path)
-                        .unwrap_or_else(|| identify(&f.path())),
+                    kind: known.unwrap_or_else(|| static_text(tr!("esp_scan_win.generic"))),
+                    generic: known.is_none(),
                     role: crate::esp_scan::role(&path),
                     size: f.metadata().map(|m| m.len()).unwrap_or(0),
                     fallback: efivars::is_fallback_path(&path),
@@ -211,8 +214,8 @@ fn collect_loaders(
 /// three files on this machine they got wrong — so this runs only after the
 /// name and the vendor directory have both come up empty, and its answers stay
 /// vague on purpose.
-fn identify(path: &Path) -> &'static str {
-    let Ok(bytes) = std::fs::read(path) else { return "загрузчик" };
+fn identify(path: &Path) -> Option<&'static str> {
+    let bytes = std::fs::read(path).ok()?;
     let has = |needle: &str| -> bool {
         let wide: Vec<u8> = needle.bytes().flat_map(|b| [b, 0]).collect();
         bytes.windows(wide.len()).any(|w| w == wide)
@@ -221,12 +224,12 @@ fn identify(path: &Path) -> &'static str {
     // Only names that cannot be mistaken for a string another loader carries
     // about its neighbours.
     if has("Acronis") {
-        "похоже на Acronis"
+        Some(static_text(tr!("esp_scan_win.looks_like_acronis")))
     } else if has("R-Drive") || has("RDrive") {
-        "похоже на R-Drive Image"
+        Some(static_text(tr!("esp_scan_win.looks_like_rdrive")))
     } else if has("systemd-boot") {
-        "systemd-boot"
+        Some("systemd-boot")
     } else {
-        "загрузчик"
+        None
     }
 }

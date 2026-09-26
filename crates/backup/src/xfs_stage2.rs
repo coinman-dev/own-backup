@@ -16,7 +16,7 @@
 //! щадим целиком, так что дерево refcount'ов не трогается по построению) и
 //! журнал (вход требует чистого лога, LSN в заголовках оставляем старыми).
 
-use own_backup_common::{OwnBackupError, Result};
+use own_backup_common::{tr, OwnBackupError, Result};
 use tracing::{info, warn};
 
 use crate::fat_map::RawVolume;
@@ -136,7 +136,7 @@ impl<'a> AgReader<'a> {
 
     fn read_block(&self, vol: &mut dyn RawVolume, agbno: u64) -> Result<Vec<u8>> {
         if agbno >= self.sb.agblocks {
-            return Err(bad(format!("AG {} блок {agbno} вне группы", self.ag)));
+            return Err(bad(tr!("xfs_stage2.block_outside_ag", ag = self.ag, agbno = agbno)));
         }
         let mut b = vec![0u8; self.sb.blocksize as usize];
         vol.read_at(self.ag_off() + agbno * self.sb.blocksize, &mut b)?;
@@ -165,10 +165,10 @@ impl<'a> AgReader<'a> {
     pub(crate) fn agf(&self, vol: &mut dyn RawVolume) -> Result<Agf> {
         let b = self.read_sector(vol, 1)?;
         if &b[0..4] != b"XAGF" {
-            return Err(bad(format!("AG {}: нет магии XAGF", self.ag)));
+            return Err(bad(tr!("xfs_stage2.no_agf_magic", ag = self.ag)));
         }
         if be32(&b, 0x08) != self.ag {
-            return Err(bad(format!("AG {}: agf_seqno не совпадает", self.ag)));
+            return Err(bad(tr!("xfs_stage2.agf_seqno_mismatch", ag = self.ag)));
         }
         Ok(Agf {
             bno_root: be32(&b, 0x10),
@@ -187,10 +187,10 @@ impl<'a> AgReader<'a> {
     pub(crate) fn agi(&self, vol: &mut dyn RawVolume) -> Result<Agi> {
         let b = self.read_sector(vol, 2)?;
         if &b[0..4] != b"XAGI" {
-            return Err(bad(format!("AG {}: нет магии XAGI", self.ag)));
+            return Err(bad(tr!("xfs_stage2.no_agi_magic", ag = self.ag)));
         }
         if be32(&b, 0x08) != self.ag {
-            return Err(bad(format!("AG {}: agi_seqno не совпадает", self.ag)));
+            return Err(bad(tr!("xfs_stage2.agi_seqno_mismatch", ag = self.ag)));
         }
         Ok(Agi {
             count: be32(&b, 0x10),
@@ -214,16 +214,17 @@ impl<'a> AgReader<'a> {
         out: &mut Vec<T>,
     ) -> Result<()> {
         if depth > 16 {
-            return Err(bad("дерево глубже 16 уровней — зациклилось"));
+            return Err(bad(tr!("xfs_stage2.tree_too_deep")));
         }
         let (reclen, keylen, overlapped) = shape(magic);
         let blk = self.read_block(vol, root)?;
         if &blk[0..4] != magic {
-            return Err(bad(format!(
-                "AG {} блок {root}: магия {:?} вместо {:?}",
-                self.ag,
-                &blk[0..4],
-                magic
+            return Err(bad(tr!(
+                "xfs_stage2.block_bad_magic",
+                ag = self.ag,
+                block = root,
+                found = format!("{:?}", &blk[0..4]),
+                expected = format!("{magic:?}")
             )));
         }
         let level = be16(&blk, 0x04);
@@ -231,7 +232,7 @@ impl<'a> AgReader<'a> {
         let bs = self.sb.blocksize as usize;
         if level == 0 {
             if BTREE_HDR_V5 + nrecs * reclen > bs {
-                return Err(bad("лист заявляет больше записей, чем влезает"));
+                return Err(bad(tr!("xfs_stage2.leaf_too_many_records")));
             }
             for i in 0..nrecs {
                 out.push(parse(&blk, BTREE_HDR_V5 + i * reclen));
@@ -241,7 +242,7 @@ impl<'a> AgReader<'a> {
         let slot = keylen * if overlapped { 2 } else { 1 };
         let maxrecs = (bs - BTREE_HDR_V5) / (slot + 4);
         if nrecs > maxrecs {
-            return Err(bad("узел заявляет больше указателей, чем влезает"));
+            return Err(bad(tr!("xfs_stage2.node_too_many_pointers")));
         }
         let ptr_off = BTREE_HDR_V5 + maxrecs * slot;
         let children: Vec<u64> = (0..nrecs).map(|i| be32(&blk, ptr_off + i * 4)).collect();
@@ -903,7 +904,7 @@ pub(crate) fn plan_stage2(
     }
     for f in files {
         if !out.spared.iter().any(|(i, _)| *i == f.ino) {
-            out.spared.push((f.ino, "план Stage 2 не сошёлся".into()));
+            out.spared.push((f.ino, tr!("xfs_stage2.plan_not_settled").into_owned()));
         }
     }
     out.patches.clear();

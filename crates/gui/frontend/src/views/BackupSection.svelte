@@ -5,6 +5,8 @@
   import BackupWizard from './BackupWizard.svelte';
   import Modal from '../components/Modal.svelte';
   import type { Job } from '../lib/types';
+  import { m } from '../lib/paraglide/messages';
+  import { intlLocale } from '../lib/i18n.svelte';
 
   let selectedId: string | null = $state(null);
   // Shared draft the wizard edits; its name is also editable in the list.
@@ -25,7 +27,8 @@
   let deleteId: string | null = $state(null);
   let deleteFiles = $state(false);
   /// Что помешало удалить задание или его копии — держится до следующей попытки.
-  let deleteError: string | null = $state(null);
+  // A function, so the text follows a change of language while it is shown.
+  let deleteError: (() => string) | null = $state(null);
   const deleteJobObj = $derived(jobs.list.find((j) => j.id === deleteId) ?? null);
 
   const selectedJob = $derived(jobs.list.find((j) => j.id === selectedId) ?? null);
@@ -58,10 +61,10 @@
       .filter((r) => r.job_id === job.id)
       .reduce((s, r) => s + (r.bytes_copied || 0), 0);
   }
-  const SORT_LABELS: Record<SortKey, string> = {
-    name: 'По имени',
-    time: 'По времени',
-    size: 'По размеру',
+  const SORT_LABELS: Record<SortKey, () => string> = {
+    name: m.bs_sort_name,
+    time: m.bs_sort_time,
+    size: m.bs_sort_size,
   };
   function setSort(k: SortKey) {
     sortKey = k;
@@ -74,7 +77,7 @@
     } else if (sortKey === 'size') {
       list.sort((a, b) => jobSize(b) - jobSize(a));
     } else {
-      list.sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+      list.sort((a, b) => a.name.localeCompare(b.name, intlLocale()));
     }
     return list;
   });
@@ -136,17 +139,17 @@
       // лежать там, где пользователь уверен, что их нет.
       const everythingWent = report.kept.length === 0 && !report.history_truncated;
       if (deleteFiles && !everythingWent) {
-        const lines = report.kept.map(([path, why]) => `${path} — ${why}`);
-        if (report.history_truncated) {
-          lines.push(
-            'Журнал запусков переполнен: папки, которыми задание пользовалось раньше, ' +
-              'могли остаться не просмотренными.',
-          );
-        }
-        deleteError = 'Задание удалено, но не все копии:\n' + lines.join('\n');
+        const kept = report.kept.map(([path, why]) => `${path} — ${why}`);
+        const truncated = report.history_truncated;
+        deleteError = () => {
+          const lines = [...kept];
+          if (truncated) lines.push(m.bs_history_truncated());
+          return m.bs_deleted_partly() + '\n' + lines.join('\n');
+        };
       }
     } catch (e) {
-      deleteError = String(e);
+      const msg = String(e);
+      deleteError = () => msg;
       return; // окно остаётся открытым: задание не удалено
     }
     deleteId = null;
@@ -166,20 +169,20 @@
 <div class="layout">
   <!-- middle column: jobs list -->
   <div class="jobs-col">
-    <div class="col-title">Резервные копии</div>
+    <div class="col-title">{m.bs_title()}</div>
     <div class="this-pc">
       <svg width="11" height="11" viewBox="0 0 24 24" fill="var(--text-muted)"><path d="M6 9l6 6 6-6z"/></svg>
-      Этот компьютер
+      {m.bs_this_pc()}
       <div class="sort">
-        <button class="sort-btn" title="Сортировка: {SORT_LABELS[sortKey]}" aria-label="Сортировка" onclick={() => (sortOpen = !sortOpen)}>
+        <button class="sort-btn" title={m.bs_sort_title({ order: SORT_LABELS[sortKey]() })} aria-label={m.bs_sort()} onclick={() => (sortOpen = !sortOpen)}>
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M4 7h16M7 12h10M10 17h4"/></svg>
         </button>
         {#if sortOpen}
-          <button class="sort-backdrop" aria-label="Закрыть" onclick={() => (sortOpen = false)}></button>
+          <button class="sort-backdrop" aria-label={m.common_close()} onclick={() => (sortOpen = false)}></button>
           <div class="sort-menu">
-            <button class:active={sortKey === 'name'} onclick={() => setSort('name')}>По имени</button>
-            <button class:active={sortKey === 'time'} onclick={() => setSort('time')}>По времени</button>
-            <button class:active={sortKey === 'size'} onclick={() => setSort('size')}>По размеру</button>
+            <button class:active={sortKey === 'name'} onclick={() => setSort('name')}>{m.bs_sort_name()}</button>
+            <button class:active={sortKey === 'time'} onclick={() => setSort('time')}>{m.bs_sort_time()}</button>
+            <button class:active={sortKey === 'size'} onclick={() => setSort('size')}>{m.bs_sort_size()}</button>
           </div>
         {/if}
       </div>
@@ -191,12 +194,12 @@
           <div class="job-icon pc">
             <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="var(--accent-text)" stroke-width="1.5"><rect x="2" y="4" width="20" height="13" rx="1.5"/><path d="M8 20h8M12 17v3"/></svg>
           </div>
-          <input class="name-edit" bind:value={draftJob.name} spellcheck="false" placeholder="Имя копии" />
+          <input class="name-edit" bind:value={draftJob.name} spellcheck="false" placeholder={m.bs_name_placeholder()} />
         </div>
       {/if}
 
       {#if jobs.list.length === 0 && draftMode !== 'wizard'}
-        <div class="empty-list">Пока нет заданий.<br/>Нажмите «Добавить копию».</div>
+        <div class="empty-list">{m.bs_empty()}<br/>{m.bs_empty_hint()}</div>
       {/if}
 
       {#each sortedJobs as job (job.id)}
@@ -212,8 +215,8 @@
               <div class="job-name">
                 {job.name}{#if job.archive_encryption}<span
                     class="enc-badge"
-                    title="Копии этого задания зашифрованы — для чтения нужен пароль или ключ восстановления"
-                    aria-label="Зашифровано"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2.2" stroke-linecap="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></span
+                    title={m.bs_encrypted_title()}
+                    aria-label={m.bs_encrypted()}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2.2" stroke-linecap="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></span
                   >{/if}
               </div>
               <div class="job-path">{job.dest_folder}</div>
@@ -237,11 +240,11 @@
       {/each}
     </div>
     {#if addError}
-      <div class="add-error">Не удалось открыть мастер: {addError}</div>
+      <div class="add-error">{m.bs_add_error({ error: addError })}</div>
     {/if}
     <button class="add-btn" onclick={addJob}>
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-      Добавить копию
+      {m.bs_add()}
     </button>
   </div>
 
@@ -256,8 +259,8 @@
     {:else}
       <div class="empty-dash">
         <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="var(--border-strong)" stroke-width="1.4"><rect x="3" y="5" width="18" height="14" rx="3"/><circle cx="12" cy="12" r="3.5"/></svg>
-        <div>Создайте задание резервного копирования</div>
-        <button class="add-btn big" onclick={addJob}>+ Добавить копию</button>
+        <div>{m.bs_empty_dash()}</div>
+        <button class="add-btn big" onclick={addJob}>+ {m.bs_add()}</button>
       </div>
     {/if}
   </div>
@@ -265,10 +268,10 @@
 
 <Modal
   open={deleteId !== null}
-  title="Удаление задания"
+  title={m.bs_delete_title()}
   danger
-  confirmLabel="Удалить"
-  cancelLabel="Отмена"
+  confirmLabel={m.bs_delete()}
+  cancelLabel={m.common_cancel()}
   onClose={() => {
     // A failure is shown inside this window; closing it closes the failure
     // too. Left set, it reappeared at once under «Копии удалены не полностью»
@@ -278,29 +281,29 @@
   }}
   onConfirm={confirmDelete}
 >
-  <p class="del-q">Вы уверены, что Вы хотите удалить это задание{deleteJobObj ? ` «${deleteJobObj.name}»` : ''}?</p>
+  <p class="del-q">{deleteJobObj ? m.bs_delete_q_named({ name: deleteJobObj.name }) : m.bs_delete_q()}</p>
   <label class="del-files">
     <input type="checkbox" bind:checked={deleteFiles} />
-    Удалить все связанные файлы
+    {m.bs_delete_files()}
   </label>
   {#if deleteFiles}
-    <p class="del-warn">Файлы образов этой копии будут удалены с диска безвозвратно.</p>
+    <p class="del-warn">{m.bs_delete_warn()}</p>
   {/if}
   {#if deleteError}
-    <p class="del-left">{deleteError}</p>
+    <p class="del-left">{deleteError?.()}</p>
   {/if}
 </Modal>
 
 {#if deleteError && deleteId === null}
   <Modal
     open
-    title="Копии удалены не полностью"
-    confirmLabel="Понятно"
+    title={m.bs_partly_title()}
+    confirmLabel={m.common_got_it()}
     cancelLabel=""
     onClose={() => (deleteError = null)}
     onConfirm={() => (deleteError = null)}
   >
-    <p class="del-left">{deleteError}</p>
+    <p class="del-left">{deleteError?.()}</p>
   </Modal>
 {/if}
 

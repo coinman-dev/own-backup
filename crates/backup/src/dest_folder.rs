@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use own_backup_common::{OwnBackupError, Result};
+use own_backup_common::{tr, OwnBackupError, Result};
 
 /// Create `dir` and its parents, or fail with an error that names the folder
 /// and, when it can tell, why the drive under it is not usable.
@@ -22,21 +22,22 @@ pub fn create(dir: &Path) -> Result<()> {
 const ERROR_NOT_READY: i32 = 21;
 
 fn describe(dir: &Path, e: &std::io::Error) -> std::io::Error {
-    let hint = match drive_letter(dir) {
-        Some(d) if e.raw_os_error() == Some(ERROR_NOT_READY) => format!(
-            " Диск {d}: не готов — в нём нет носителя, или у диска назначения сменилась буква. \
-             Проверьте место назначения в параметрах задания."
+    let text = match drive_letter(dir) {
+        Some(d) if e.raw_os_error() == Some(ERROR_NOT_READY) => tr!(
+            "dest_folder.unavailable_drive_not_ready",
+            path = dir.display(),
+            error = e,
+            drive = d
         ),
-        Some(d) if !Path::new(&format!("{d}:\\")).exists() => format!(
-            " Диска {d}: нет — он отключён, или у него сменилась буква. \
-             Проверьте место назначения в параметрах задания."
+        Some(d) if !Path::new(&format!("{d}:\\")).exists() => tr!(
+            "dest_folder.unavailable_drive_missing",
+            path = dir.display(),
+            error = e,
+            drive = d
         ),
-        _ => String::new(),
+        _ => tr!("dest_folder.unavailable", path = dir.display(), error = e),
     };
-    std::io::Error::new(
-        e.kind(),
-        format!("папка назначения {} недоступна: {e}.{hint}", dir.display()),
-    )
+    std::io::Error::new(e.kind(), text.into_owned())
 }
 
 /// The drive letter a Windows path starts with (`F:\…`, `\\?\F:\…`), if any.

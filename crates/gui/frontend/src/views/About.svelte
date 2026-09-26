@@ -18,6 +18,7 @@
   import { media, ensureMediaMode } from '../lib/mediaStore.svelte';
   import { appVersion, ensureAppVersion } from '../lib/appVersion.svelte';
   import type { ServiceStatus, ServiceHealth } from '../lib/types';
+  import { m } from '../lib/paraglide/messages';
 
   let status: ServiceStatus | null = $state(null);
   let health: ServiceHealth | null = $state(null);
@@ -43,65 +44,59 @@
   // Как интерфейс разговаривает со службой. На Windows это именованный канал с
   // ограниченным доступом, и порт при этом не слушается — сказать «gRPC на
   // localhost:50051» было бы неправдой о том, что открыто в системе.
+  const PIPE = '\\\\.\\pipe\\OwnBackup';
   const link = $derived(
-    media.active
-      ? 'канал \\\\.\\pipe\\OwnBackup, служба запущена как процесс носителя'
-      : 'канал \\\\.\\pipe\\OwnBackup с ограниченным доступом (сетевой порт не слушается)',
+    media.active ? m.about_link_media({ pipe: PIPE }) : m.about_link_service({ pipe: PIPE }),
   );
   const serviceState = $derived.by(() => {
-    if (!health) return 'опрашиваем…';
-    if (media.active) return 'режим носителя: служба работает как процесс, в систему не устанавливается';
-    if (health.reachable) return `отвечает${status?.version ? `, версия ${status.version}` : ''}`;
-    if (health.installed) return 'установлена, но не отвечает — проверьте, запущена ли она';
-    return 'не установлена';
+    if (!health) return m.about_svc_asking();
+    if (media.active) return m.about_svc_media();
+    if (health.reachable)
+      return status?.version
+        ? m.about_svc_responding_version({ version: status.version })
+        : m.about_svc_responding();
+    if (health.installed) return m.about_svc_not_responding();
+    return m.about_svc_not_installed();
   });
 </script>
 
 <div class="about-view">
   <div class="page-header">
-    <h1 class="page-title">Справка</h1>
+    <h1 class="page-title">{m.about_title()}</h1>
   </div>
 
   <div class="card">
     <h2 class="app-name">Own Backup</h2>
-    <p class="app-description">
-      Копии дисков и томов целиком, блок за блоком: в копию попадают только
-      занятые кластеры, а исключённые файлы не попадают вовсе. Копию можно
-      зашифровать паролем. Из копии можно восстановить раздел, диск или
-      отдельные файлы, а с загрузочного носителя — и тот диск, с которого
-      система загружается.
-    </p>
+    <p class="app-description">{m.about_description()}</p>
 
     <div class="info-table">
       <div class="info-row">
-        <span class="info-label">Версия интерфейса</span>
+        <span class="info-label">{m.about_ui_version()}</span>
         <span class="info-value">{appVersion.value || '—'}</span>
       </div>
       <div class="info-row">
-        <span class="info-label">Служба</span>
+        <span class="info-label">{m.about_service()}</span>
         <span class="info-value">{serviceState}</span>
       </div>
       <div class="info-row">
-        <span class="info-label">Связь со службой</span>
+        <span class="info-label">{m.about_link()}</span>
         <span class="info-value">{link}</span>
       </div>
       <div class="info-row">
-        <span class="info-label">Формат копий</span>
-        <span class="info-value">
-          VHDX, qcow2 (сжатие zstd) или OBK — зашифрованный (zstd и AES-256-GCM)
-        </span>
+        <span class="info-label">{m.about_format()}</span>
+        <span class="info-value">{m.about_format_value()}</span>
       </div>
       <div class="info-row">
-        <span class="info-label">Контрольные суммы</span>
-        <span class="info-value">xxHash64 на каждый блок, в манифесте внутри образа</span>
+        <span class="info-label">{m.about_checksums()}</span>
+        <span class="info-value">{m.about_checksums_value()}</span>
       </div>
       <div class="info-row">
-        <span class="info-label">Задания и история запусков</span>
-        <span class="info-value">jobs.json и activity.json{dataDir ? ` в ${dataDir}` : ''}</span>
+        <span class="info-label">{m.about_jobs()}</span>
+        <span class="info-value">{dataDir ? m.about_jobs_files_in({ dir: dataDir }) : m.about_jobs_files()}</span>
       </div>
       {#if logMirrorDir}
         <div class="info-row">
-          <span class="info-label">Копия журнала</span>
+          <span class="info-label">{m.about_log_mirror()}</span>
           <span class="info-value">{logMirrorDir}</span>
         </div>
       {/if}
@@ -109,49 +104,25 @@
   </div>
 
   <div class="card">
-    <h3 class="section-heading">Лицензия</h3>
+    <h3 class="section-heading">{m.about_licence()}</h3>
     <p class="licence">
-      <b>PolyForm Noncommercial 1.0.0.</b> Программой можно бесплатно
-      пользоваться в некоммерческих целях — дома, в учёбе, в исследованиях;
-      исходный код открыт, его можно изучать и изменять, и производные работы
-      остаются на тех же условиях.
+      <b>PolyForm Noncommercial 1.0.0.</b> {m.about_licence_terms()}
     </p>
-    <p class="licence">
-      Коммерческое использование требует отдельной лицензии — условия в файле
-      <code>COMMERCIAL-LICENSE.md</code> рядом с программой.
-    </p>
+    <p class="licence">{@html m.about_licence_commercial()}</p>
     <p class="licence muted">
-      Это не лицензия «open source» в смысле OSI: правильнее говорить
-      «исходный код открыт, бесплатно для некоммерческого использования».
-      Сторонние компоненты и их лицензии перечислены в
+      {m.about_licence_osi()}
       <code>THIRD-PARTY-NOTICES.md</code>.
     </p>
   </div>
 
   <div class="card">
-    <h3 class="section-heading">Если что-то не получилось</h3>
+    <h3 class="section-heading">{m.about_trouble()}</h3>
     <ul class="hints">
-      <li>
-        Раздел <b>«Активность»</b> хранит все прогоны — там видно, чем
-        закончился каждый и с какой ошибкой.
-      </li>
-      <li>
-        Подробности — в журналах в папке <code>Logs</code> рядом с программой:
-        <code>own-backup-service-ГГГГ-ММ-ДД.log</code> и
-        <code>own-backup-gui-ГГГГ-ММ-ДД.log</code>, по файлу на день, хранятся
-        30 дней. Время в них записано по UTC. Чтобы разобраться в ошибке,
-        включите в «Параметрах» подробный уровень журнала и повторите.
-      </li>
-      <li>
-        В «Параметрах» можно дублировать журнал на флешку или другой диск —
-        он останется, даже если восстановление унесёт диск, на котором лежит
-        обычный журнал.
-      </li>
+      <li>{@html m.about_hint_activity()}</li>
+      <li>{@html m.about_hint_logs()}</li>
+      <li>{m.about_hint_mirror()}</li>
       {#if !media.active}
-        <li>
-          Восстановить систему, которая не загружается, можно с загрузочного
-          носителя: «Инструменты» → «Загрузочный носитель».
-        </li>
+        <li>{m.about_hint_media()}</li>
       {/if}
     </ul>
   </div>
@@ -258,12 +229,16 @@
     color: var(--primary);
   }
 
-  .licence b,
-  .hints b {
+  /* The <b>/<code> in these come from translated messages ({@html}), which
+     scoped selectors do not reach. */
+  .licence :global(b),
+  .hints :global(b) {
     color: var(--head);
   }
 
-  code {
+  code,
+  .licence :global(code),
+  .hints :global(code) {
     font-family: var(--font-mono, ui-monospace, monospace);
     font-size: 12px;
     color: var(--text);

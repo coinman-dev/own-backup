@@ -3,8 +3,10 @@ import './styles/global.css';
 import App from './App.svelte';
 import { mount } from 'svelte';
 import { initTheme } from './lib/themeStore.svelte';
+import { initI18n } from './lib/i18n.svelte';
 
 initTheme();
+initI18n();
 
 const target = document.getElementById('app')!;
 

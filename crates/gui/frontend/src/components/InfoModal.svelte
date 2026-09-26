@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { m } from '../lib/paraglide/messages';
+
   interface Props {
     title?: string;
     message: string;
@@ -6,7 +8,9 @@
   }
   // The default was «В разработке», left from when this only announced stubs —
   // and it headed the type-breakdown help and the restore-cancel refusal too.
-  let { title = 'Сведения', message, onClose }: Props = $props();
+  // No string default any more: it would be computed once, in the language of
+  // the moment; the markup falls back at render time instead.
+  let { title, message, onClose }: Props = $props();
 </script>
 
 <div class="overlay" onclick={onClose} role="presentation">
@@ -15,10 +19,10 @@
        the user clicks INSIDE it. There is no action to give a key equivalent
        to; the dialog's own button is the keyboard path. -->
   <div class="dialog" onclick={(e) => e.stopPropagation()} role="dialog" tabindex="-1">
-    <div class="dialog-title">{title}</div>
+    <div class="dialog-title">{title ?? m.info_default_title()}</div>
     <p>{message}</p>
     <div class="dialog-actions">
-      <button class="btn primary" onclick={onClose}>Понятно</button>
+      <button class="btn primary" onclick={onClose}>{m.common_got_it()}</button>
     </div>
   </div>
 </div>

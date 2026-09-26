@@ -188,6 +188,9 @@ export const api = {
   // --- misc ---
   getConfig: () => invoke<Record<string, unknown>>('get_config'),
   saveConfig: (config: Record<string, unknown>) => invoke<void>('save_config', { config }),
+  /** The resolved language (`ru`/`en`): the GUI process's own messages and,
+   *  through the config, the service's. */
+  setUiLanguage: (lang: string) => invoke<void>('set_ui_language', { lang }),
   serviceHealth: () => invoke<ServiceHealth>('service_health'),
   /** Active keyboard layout; null where it cannot be told (non-Windows). */
   keyboardLayout: () => invoke<KeyboardLayout | null>('keyboard_layout'),

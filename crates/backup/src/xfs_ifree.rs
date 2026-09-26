@@ -42,7 +42,7 @@
 
 use std::collections::BTreeMap;
 
-use own_backup_common::{OwnBackupError, Result};
+use own_backup_common::{tr, OwnBackupError, Result};
 
 use crate::fat_map::RawVolume;
 use crate::xfs_dirent::{crc_matches, set_crc};
@@ -119,13 +119,18 @@ pub(crate) enum InoRefusal {
 impl std::fmt::Display for InoRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            InoRefusal::NotInTree { ino } => write!(f, "инод {ino}: чанка нет в дереве инодов"),
-            InoRefusal::AlreadyFree { ino } => write!(f, "инод {ino}: уже свободен"),
-            InoRefusal::FinobtLeafFull { ino, ag } => write!(
-                f,
-                "инод {ino}: лист FINOBT в группе {ag} полон, вставка потребовала бы разбиения"
-            ),
-            InoRefusal::Other { ino, why } => write!(f, "инод {ino}: {why}"),
+            InoRefusal::NotInTree { ino } => {
+                f.write_str(&tr!("xfs_ifree.refusal_not_in_tree", ino = ino))
+            }
+            InoRefusal::AlreadyFree { ino } => {
+                f.write_str(&tr!("xfs_ifree.refusal_already_free", ino = ino))
+            }
+            InoRefusal::FinobtLeafFull { ino, ag } => {
+                f.write_str(&tr!("xfs_ifree.refusal_finobt_leaf_full", ino = ino, ag = ag))
+            }
+            InoRefusal::Other { ino, why } => {
+                f.write_str(&tr!("xfs_ifree.refusal_other", ino = ino, why = why))
+            }
         }
     }
 }
@@ -173,17 +178,19 @@ impl AgEdits {
         if !self.blocks.contains_key(&agbno) {
             let blk = AgReader::new(sb, self.ag).read_block_at(vol, agbno)?;
             if &blk[0..4] != magic {
-                return Err(bad(format!(
-                    "группа {} блок {agbno}: магия {:?} вместо {:?}",
-                    self.ag,
-                    &blk[0..4],
-                    magic
+                return Err(bad(tr!(
+                    "xfs_ifree.block_bad_magic",
+                    ag = self.ag,
+                    agbno = agbno,
+                    found = format!("{:?}", &blk[0..4]),
+                    expected = format!("{magic:?}")
                 )));
             }
             if !crc_matches(&blk, BTREE_CRC_OFF) {
-                return Err(bad(format!(
-                    "группа {} блок {agbno}: CRC не сходится — не трогаю",
-                    self.ag
+                return Err(bad(tr!(
+                    "xfs_ifree.block_crc_mismatch",
+                    ag = self.ag,
+                    agbno = agbno
                 )));
             }
             self.blocks.insert(agbno, blk);
@@ -222,7 +229,7 @@ fn descend(
         let nrecs = be16(blk, 0x06) as usize;
         if level == 0 {
             if nrecs > leaf_maxrecs(sb) {
-                return Err(bad("лист заявляет больше записей, чем влезает"));
+                return Err(bad(tr!("xfs_ifree.leaf_too_many_records")));
             }
             let mut idx = nrecs;
             let mut found = false;
@@ -241,7 +248,7 @@ fn descend(
             return Ok(Located { path, leaf: agbno, idx, found });
         }
         if nrecs == 0 || nrecs > node_max {
-            return Err(bad("узел заявляет невозможное число указателей"));
+            return Err(bad(tr!("xfs_ifree.node_bad_pointer_count")));
         }
         let ptr_off = BTREE_HDR + node_max * INO_KEY;
         // Последний ключ, не превышающий искомый; если все больше — первый слот.
@@ -257,7 +264,7 @@ fn descend(
         path.push((agbno, slot));
         agbno = child;
     }
-    Err(bad("дерево глубже 16 уровней — зациклилось"))
+    Err(bad(tr!("xfs_ifree.tree_too_deep")))
 }
 
 /// Прочитать запись INOBT/FINOBT из листа.
@@ -347,7 +354,10 @@ pub(crate) fn plan_inode_freeing(
     for (ag, inos) in by_ag {
         if ag >= sb.agcount {
             for ino in inos {
-                out.refusals.push(InoRefusal::Other { ino, why: format!("группа {ag} не существует") });
+                out.refusals.push(InoRefusal::Other {
+                    ino,
+                    why: tr!("xfs_ifree.group_missing", ag = ag).into_owned(),
+                });
             }
             continue;
         }
@@ -397,7 +407,7 @@ pub(crate) fn plan_inode_freeing(
             if holemask & (1u64 << (bit / 4)) != 0 {
                 out.refusals.push(InoRefusal::Other {
                     ino,
-                    why: "инод попадает в дыру разреженного чанка".into(),
+                    why: tr!("xfs_ifree.inode_in_sparse_hole").into_owned(),
                 });
                 continue;
             }
@@ -491,7 +501,7 @@ pub(crate) fn plan_inode_freeing(
         // Счётчик группы.
         let mut agi_sec = reader.read_sector_at(vol, 2)?;
         if !crc_matches(&agi_sec, AGI_CRC_OFF) {
-            return Err(bad(format!("группа {ag}: CRC AGI не сходится — не трогаю")));
+            return Err(bad(tr!("xfs_ifree.agi_crc_mismatch", ag = ag)));
         }
         let fc = be32(&agi_sec, AGI_FREECOUNT);
         put_be32(&mut agi_sec, AGI_FREECOUNT, (fc + agi_delta) as u32);
@@ -531,7 +541,7 @@ pub(crate) fn patch_superblock(
     let mut sec = vec![0u8; sb.sectsize as usize];
     vol.read_at(0, &mut sec)?;
     if !crc_matches(&sec, SB_CRC_OFF) {
-        return Err(bad("CRC суперблока не сходится — не трогаю"));
+        return Err(bad(tr!("xfs_ifree.superblock_crc_mismatch")));
     }
     let ifree = be64(&sec, SB_IFREE);
     put_be64(&mut sec, SB_IFREE, ifree + ifree_delta);
@@ -546,10 +556,10 @@ fn read_inode_raw(vol: &mut dyn RawVolume, sb: &Sb, ino: u64) -> Result<Vec<u8>>
     let mut buf = vec![0u8; sb.inodesize as usize];
     vol.read_at(off, &mut buf)?;
     if &buf[0..2] != b"IN" {
-        return Err(bad(format!("инод {ino}: нет магии IN")));
+        return Err(bad(tr!("xfs_ifree.inode_no_magic", ino = ino)));
     }
     if !crc_matches(&buf, DI_CRC_OFF) {
-        return Err(bad(format!("инод {ino}: CRC не сходится — не трогаю")));
+        return Err(bad(tr!("xfs_ifree.inode_crc_mismatch", ino = ino)));
     }
     Ok(buf)
 }

@@ -1,0 +1,35 @@
+{
+  "_version": 2,
+  "guard.live_system_disk": {
+    "ru": "Нельзя восстанавливать диск, на котором работает Windows, «на живую». Загрузитесь с носителя восстановления (WinPE) или выберите другой диск.",
+    "en": "The disk Windows is running from cannot be restored while it runs. Boot from the bootable media (WinPE) or choose another disk."
+  },
+  "guard.system_disk_unknown": {
+    "ru": "Не удалось определить, на каком диске работает Windows, поэтому нельзя убедиться, что выбран не он. Загрузитесь с носителя восстановления — там этот вопрос не стоит.",
+    "en": "Could not determine which disk Windows is running from, so there is no way to make sure it is not the one selected. Boot from the bootable media — the question does not arise there."
+  },
+  "guard.live_system_location_unknown": {
+    "ru": "Не удалось определить, где стоит работающая Windows, поэтому нельзя убедиться, что запись пойдёт не на неё. Загрузитесь с носителя восстановления.",
+    "en": "Could not determine where the running Windows is installed, so there is no way to make sure the write will not land on it. Boot from the bootable media."
+  },
+  "guard.target_unrecognised": {
+    "ru": "Не удалось определить, что такое «%{target}», поэтому запись на него не разрешена. Выберите том в списке.",
+    "en": "Could not determine what “%{target}” is, so writing to it is not allowed. Choose a volume from the list."
+  },
+  "guard.target_location_unknown": {
+    "ru": "Не удалось определить, где на диске лежит «%{target}», поэтому нельзя убедиться, что это не системный том.",
+    "en": "Could not determine where “%{target}” lies on the disk, so there is no way to make sure it is not the system volume."
+  },
+  "guard.target_is_live_system": {
+    "ru": "Это том, с которого работает Windows. Перезаписать его на живой системе нельзя — загрузитесь с носителя восстановления.",
+    "en": "This is the volume Windows is running from. It cannot be overwritten on a running system — boot from the bootable media."
+  },
+  "guard.layout_unreadable": {
+    "ru": "не удалось прочитать разметку диска %{disk} (%{error}), поэтому неизвестно, есть ли на нём разделы работающей системы",
+    "en": "could not read the layout of disk %{disk} (%{error}), so it is unknown whether the running system has partitions on it"
+  },
+  "guard.system_partition_not_found": {
+    "ru": "Windows работает с диска %{disk}, но найти её раздел не удалось",
+    "en": "Windows is running from disk %{disk}, but its partition could not be found"
+  }
+}

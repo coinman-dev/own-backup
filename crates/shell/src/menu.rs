@@ -5,6 +5,8 @@
 //! needs to offer besides the product itself: a console, the product, the tools
 //! the build happened to find, and the two ways of ending the session.
 
+use own_backup_common::tr;
+
 /// One line of the menu.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Item {
@@ -43,8 +45,12 @@ pub use own_backup_common::media_tools::MEDIA_TOOLS as TOOLS;
 /// click.
 pub fn items(on_medium: bool, tools_found: &[bool]) -> Vec<Item> {
     let mut out = vec![
-        Item { id: COMMAND_PROMPT, text: "Командная строка".into(), separator_above: false },
-        Item { id: INTERFACE, text: "Резервное копирование".into(), separator_above: false },
+        Item {
+            id: COMMAND_PROMPT,
+            text: tr!("menu.command_prompt").into_owned(),
+            separator_above: false,
+        },
+        Item { id: INTERFACE, text: tr!("menu.interface").into_owned(), separator_above: false },
     ];
 
     let mut first_tool = true;
@@ -60,10 +66,14 @@ pub fn items(on_medium: bool, tools_found: &[bool]) -> Vec<Item> {
     }
 
     if on_medium {
-        out.push(Item { id: REBOOT, text: "Перезагрузка".into(), separator_above: true });
-        out.push(Item { id: SHUTDOWN, text: "Выключение".into(), separator_above: false });
+        out.push(Item { id: REBOOT, text: tr!("menu.reboot").into_owned(), separator_above: true });
+        out.push(Item {
+            id: SHUTDOWN,
+            text: tr!("menu.shutdown").into_owned(),
+            separator_above: false,
+        });
     } else {
-        out.push(Item { id: CLOSE, text: "Закрыть панель".into(), separator_above: true });
+        out.push(Item { id: CLOSE, text: tr!("menu.close").into_owned(), separator_above: true });
     }
     out
 }

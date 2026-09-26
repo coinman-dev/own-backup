@@ -251,6 +251,36 @@ Cargo workspace with crates:
 - `gui` — Tauri v2 + Svelte 5 (frontend being rebuilt per `design/` mockup:
   4 sidebar sections — Backup, Tools, Settings, Help; ru/en, light/dark themes)
 
+## Theme and languages (2026-09-26)
+
+- **Colours only through tokens** in `gui/frontend/src/styles/variables.css`
+  (light + dark, from `design/themes/Own Backup.dc.html`; the design's name of
+  each token is in a comment). No hard-coded colours in components except white
+  on a solid fill and the file-category colours. The theme is `data-theme` on
+  `<html>` (`lib/themeStore.svelte.ts`: light / dark / «Как в Windows»).
+- **Every user-facing string exists in Russian and English.** Frontend:
+  Paraglide JS, `messages/{ru,en}.json` → `m.key()` (`src/lib/paraglide` is
+  generated, git-ignored); `npm run check` fails if the two files disagree
+  (`scripts/i18n-verify.mjs`). Text kept in `$state` is stored as a function
+  (`() => m.x()`) so it follows a language switch. Rust: rust-i18n,
+  `crates/<crate>/locales/*.json` (format v2, `"key": {"ru", "en"}`), called
+  ONLY as `own_backup_common::tr!("module.key", name = value)` — rust-i18n's own
+  default locale is English, ours is Russian until the window says otherwise
+  (`common/src/lang.rs`); tests therefore run in Russian. Placeholders are
+  `%{name}` only, no format specs (pre-format the value). `cargo test` fails via
+  `common/tests/i18n_catalogs.rs` on a missing key/translation, differing
+  `%{params}`, a call passing other arguments, or an unused key.
+- The window resolves the language and writes `ui_language` to `config.toml`
+  (`set_ui_language`); the service and the medium's strip follow the file
+  (`lang::follow_config`). Texts saved into history (`activity.json`, run
+  errors) stay in the language they were written in.
+- **Never decide by a translated text.** Where the window used to match
+  Russian words from the service, there is now a field: `recovery_key_only`
+  (BitLocker), `Loader.generic` (boot page); the restore-check merge regex
+  accepts «Раздел N» and "Partition N". `OwnBackupError` prefixes stay English
+  (`user_reason` strips them by text). Tracing logs, CLI output and data written
+  to disk/firmware are not translated.
+
 ## Key patterns
 
 - **The ~180 s detach stall is GONE because the backup engine no longer

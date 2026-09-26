@@ -12,6 +12,7 @@ path = "src/main.rs"
 # Only for two answers that must not be given twice: am I in WinPE, and where
 # does the medium want logs. Both already have one definition in `common`.
 own-backup-common = { workspace = true }
+rust-i18n = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.58", features = [

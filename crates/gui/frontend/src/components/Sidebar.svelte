@@ -4,6 +4,7 @@
   import { media } from '../lib/mediaStore.svelte';
   import { appVersion, ensureAppVersion } from '../lib/appVersion.svelte';
   import { effectiveTheme, setTheme } from '../lib/themeStore.svelte';
+  import { m } from '../lib/paraglide/messages';
 
   interface Props {
     currentView: ViewName;
@@ -50,7 +51,8 @@
 
   interface NavItem {
     id: ViewName;
-    label: string;
+    /** A function, so the menu follows a change of language. */
+    label: () => string;
     icon: string;
   }
 
@@ -65,23 +67,23 @@
   const navItems: NavItem[] = [
     {
       id: 'backup',
-      label: 'РЕЗЕРВНОЕ КОПИРОВАНИЕ',
+      label: m.nav_backup,
       icon: rect(8, 8, 12, 12, 2) + 'M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2',
     },
     {
       id: 'restore',
-      label: 'ВОССТАНОВЛЕНИЕ',
+      label: m.nav_restore,
       icon: 'M4.5 10A8 8 0 0 1 19 8M19.5 3.5V8H15M19.5 14A8 8 0 0 1 5 16M4.5 20.5V16H9',
     },
     {
       id: 'boot',
-      label: 'ЗАГРУЗКА КОМПЬЮТЕРА',
+      label: m.nav_boot,
       // Монитор на подставке, на экране — строки меню загрузки.
       icon: rect(3, 4, 18, 12, 2) + 'M8 20h8M12 16v4M7 8h6M7 11h4',
     },
     {
       id: 'tools',
-      label: 'ИНСТРУМЕНТЫ',
+      label: m.nav_tools,
       icon:
         rect(4, 4, 6.5, 6.5, 1.5) +
         rect(13.5, 4, 6.5, 6.5, 1.5) +
@@ -90,19 +92,19 @@
     },
     {
       id: 'activity',
-      label: 'АКТИВНОСТЬ',
+      label: m.nav_activity,
       icon: circle(12, 12, 8.5) + 'M12 7.5V12l3 2',
     },
     {
       id: 'settings',
-      label: 'ПАРАМЕТРЫ',
+      label: m.nav_settings,
       icon:
         'M10.3 3h3.4l.5 2.4 1.7.9 2.2-1 2.4 2.4-1 2.2.9 1.7 2.4.5v3.4l-2.4.5-.9 1.7 1 2.2-2.4 2.4-2.2-1-1.7.9-.5 2.4h-3.4l-.5-2.4-1.7-.9-2.2 1-2.4-2.4 1-2.2-.9-1.7L3 13.7v-3.4l2.4-.5.9-1.7-1-2.2 2.4-2.4 2.2 1 1.7-.9z' +
         circle(12, 12, 3),
     },
     {
       id: 'about',
-      label: 'СПРАВКА',
+      label: m.nav_help,
       icon: circle(12, 12, 8.5) + 'M12 11v5M12 8h.01',
     },
   ];
@@ -141,7 +143,7 @@
           >
             <path d={item.icon} />
           </svg>
-          <span class="nav-label">{item.label}</span>
+          <span class="nav-label">{item.label()}</span>
         </button>
       </li>
     {/each}
@@ -152,7 +154,7 @@
     {#if layout}
       <div
         class="kbd"
-        title="Раскладка клавиатуры: {layout.name}. Переключение — Alt+Shift."
+        title={m.nav_kbd_title({ name: layout.name })}
       >
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
           <rect x="2" y="6" width="20" height="12" rx="2" />
@@ -163,9 +165,9 @@
     {/if}
     <!-- Quick switch; the three-way choice («Как в Windows» too) is in
          «Параметры → Оформление». -->
-    <div class="theme-switch" role="group" aria-label="Тема">
+    <div class="theme-switch" role="group" aria-label={m.nav_theme_group()}>
       <button
-        title="Светлая тема"
+        title={m.nav_theme_light()}
         class:on={effectiveTheme() === 'light'}
         onclick={() => setTheme('light')}
       >
@@ -175,7 +177,7 @@
         </svg>
       </button>
       <button
-        title="Тёмная тема"
+        title={m.nav_theme_dark()}
         class:on={effectiveTheme() === 'dark'}
         onclick={() => setTheme('dark')}
       >

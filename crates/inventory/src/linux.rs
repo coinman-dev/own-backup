@@ -107,6 +107,7 @@ fn build_partition(v: &Value, index: u32) -> PartitionInfo {
         // here, so nothing is claimed about how it opens — and "not asked" must
         // not read as "cannot be opened", or the password field never appears.
         unlock_methods: Vec::new(),
+        recovery_key_only: false,
         unlockable: true,
     }
 }

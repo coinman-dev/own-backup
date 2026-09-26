@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 use own_backup_common::cancel::CancelToken;
-use own_backup_common::{OwnBackupError, Result};
+use own_backup_common::{tr, OwnBackupError, Result};
 
 use crate::checksum::compute_block_checksum;
 use crate::engine_win::ImageReadSource;
@@ -138,15 +138,21 @@ impl TargetWriter {
                     self.target.offset,
                     self.target.size,
                 );
-                return Err(OwnBackupError::Device(format!(
-                    "Windows не отдаёт секторы раздела (смещение {}, {} Б): {failure}. \
-                     Их держат тома: {}. Так бывает, когда от удалённого раздела остался \
-                     том-призрак — он не отпускает секторы и не поддаётся размонтированию. \
-                     Перезагрузите машину и повторите восстановление.",
-                    self.target.offset,
-                    self.target.size,
-                    if blocking.is_empty() { "не определены".into() } else { blocking.join(", ") }
-                )));
+                let volumes = if blocking.is_empty() {
+                    tr!("restore_win.volumes_unknown").into_owned()
+                } else {
+                    blocking.join(", ")
+                };
+                return Err(OwnBackupError::Device(
+                    tr!(
+                        "restore_win.sectors_held",
+                        offset = self.target.offset,
+                        size = self.target.size,
+                        failure = failure,
+                        volumes = volumes
+                    )
+                    .into_owned(),
+                ));
             }
             warn!(
                 attempt,
@@ -211,15 +217,20 @@ pub fn source_window_for(sidecar: &Sidecar, src_index: u32) -> Result<SourceWind
         return Ok(SourceWindow::whole(image_len));
     };
     let p = dm.layout.partitions.iter().find(|p| p.index == src_index).ok_or_else(|| {
-        OwnBackupError::RestoreIncompatible(format!(
-            "в копии нет раздела с номером {src_index} (есть: {})",
-            dm.layout
-                .partitions
-                .iter()
-                .map(|p| p.index.to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ))
+        OwnBackupError::RestoreIncompatible(
+            tr!(
+                "restore_win.no_such_partition",
+                index = src_index,
+                present = dm
+                    .layout
+                    .partitions
+                    .iter()
+                    .map(|p| p.index.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+            .into_owned(),
+        )
     })?;
     Ok(SourceWindow::partition(p.first_lba, p.last_lba, dm.layout.sector_size))
 }
@@ -270,10 +281,10 @@ pub fn restore_partition_sectors(
     let window = source_window_for(sidecar, src_index)?;
 
     if target.size < window.len {
-        return Err(OwnBackupError::RestoreIncompatible(format!(
-            "раздел-приёмник {} Б меньше исходного тома {} Б — посекторно не поместится",
-            target.size, window.len
-        )));
+        return Err(OwnBackupError::RestoreIncompatible(
+            tr!("restore_win.target_too_small", target = target.size, source = window.len)
+                .into_owned(),
+        ));
     }
 
     // Nothing may hold the target's sectors while we write them. When the disk
@@ -283,10 +294,14 @@ pub fn restore_partition_sectors(
     let device_path = target.device_path();
     let mut dev = TargetWriter::open(target, !opts.disk_already_offline)?;
     if block_size % dev.sector_size() as u64 != 0 {
-        return Err(OwnBackupError::RestoreIncompatible(format!(
-            "размер блока образа {block_size} не кратен сектору приёмника {}",
-            dev.sector_size()
-        )));
+        return Err(OwnBackupError::RestoreIncompatible(
+            tr!(
+                "restore_win.block_not_sector_multiple",
+                block_size = block_size,
+                sector = dev.sector_size()
+            )
+            .into_owned(),
+        ));
     }
     let chain_key = chain_key_of(image_path, keys)?;
     let mut image =
@@ -634,10 +649,10 @@ impl MountedImage {
         // answers are the window's start.
         let offset = source_window_for(sidecar, src_index)?.start;
         crate::volume_win::volume_root_at_offset(disk, offset).ok_or_else(|| {
-            OwnBackupError::Device(format!(
-                "Windows не показала том раздела {src_index} в подключённой копии \
-                 (смещение {offset}) — прочитать файлы неоткуда"
-            ))
+            OwnBackupError::Device(
+                tr!("restore_win.volume_not_shown", index = src_index, offset = offset)
+                    .into_owned(),
+            )
         })
     }
 }
@@ -714,10 +729,15 @@ pub fn restore_partition_encrypted(
     )?;
     let needed = req.header.data_offset + payload_len;
     if target.size < needed {
-        return Err(OwnBackupError::RestoreIncompatible(format!(
-            "раздел-приёмник {} Б мал для контейнера: заголовок {} Б + данные {} Б",
-            target.size, req.header.data_offset, payload_len
-        )));
+        return Err(OwnBackupError::RestoreIncompatible(
+            tr!(
+                "restore_win.target_too_small_for_container",
+                target = target.size,
+                header = req.header.data_offset,
+                payload = payload_len
+            )
+            .into_owned(),
+        ));
     }
 
     let device_path = target.device_path();
@@ -733,10 +753,14 @@ pub fn restore_partition_encrypted(
         crate::luks::open_luks(&mut probe, req.passphrase.as_bytes())?
     };
     if params.data_offset != req.header.data_offset {
-        return Err(OwnBackupError::ImageFormat(format!(
-            "восстановленный заголовок сообщает смещение данных {}, ожидалось {}",
-            params.data_offset, req.header.data_offset
-        )));
+        return Err(OwnBackupError::ImageFormat(
+            tr!(
+                "restore_win.header_offset_mismatch",
+                actual = params.data_offset,
+                expected = req.header.data_offset
+            )
+            .into_owned(),
+        ));
     }
 
     let chain_key = chain_key_of(image_path, keys)?;

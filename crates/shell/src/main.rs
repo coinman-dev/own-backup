@@ -26,6 +26,10 @@
 // keep theirs: that is where a panic is read by the person who caused it.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+// Messages in Russian and English (locales/*.json), through
+// own_backup_common::tr! — see common/src/lang.rs.
+rust_i18n::i18n!("locales", fallback = "ru");
+
 #[cfg_attr(not(windows), allow(dead_code))]
 mod layout;
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -37,6 +41,9 @@ mod win;
 
 #[cfg(windows)]
 fn main() {
+    // The strip speaks the window's language: `ui_language` in config.toml,
+    // followed for as long as the strip is up.
+    own_backup_common::lang::follow_config(own_backup_common::config::AppConfig::default_path());
     if let Err(error) = win::run() {
         win::log(&format!("the desktop could not start: {error}"));
         win::hold_a_console_instead();

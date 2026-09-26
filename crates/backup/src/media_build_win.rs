@@ -18,7 +18,8 @@
 use crate::media_layout as layout;
 use crate::media_layout::{rescue_role, RESCUE_CLASS_GUIDS};
 use crate::wim_info::read_wim_info;
-use own_backup_common::{OwnBackupError, Result};
+use own_backup_common::{tr, OwnBackupError, Result};
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
@@ -88,7 +89,7 @@ fn present_devices() -> std::result::Result<Vec<PresentDevice>, String> {
              bus = $_.InstanceId.Split('\\')[0]; name = $_.FriendlyName }} }} \
          }} | ConvertTo-Json -Compress"
     ))
-    .map_err(|e| format!("не удалось перечислить устройства этой машины: {e}"))
+    .map_err(|e| tr!("media_build_win.devices_not_listed", error = e).into_owned())
 }
 
 /// Driver packages this machine could put on a rescue medium.
@@ -132,8 +133,8 @@ pub fn list_driver_packages() -> std::result::Result<Vec<DriverPackage>, String>
     let present = present_devices()?;
     let installed: Vec<Raw> = installed_job
         .join()
-        .map_err(|_| "поток опроса драйверов упал".to_string())?
-        .map_err(|e| format!("не удалось перечислить установленные драйверы: {e}"))?;
+        .map_err(|_| tr!("media_build_win.driver_thread_panicked").into_owned())?
+        .map_err(|e| tr!("media_build_win.drivers_not_listed", error = e).into_owned())?;
 
     // inf -> (role, device names) for everything a medium would want. One
     // package can drive several present devices — two identical cards — and
@@ -219,7 +220,7 @@ pub fn list_driver_packages() -> std::result::Result<Vec<DriverPackage>, String>
                 // a dash rather than a made-up number.
                 size_bytes: 0,
                 recommended: true,
-                role: "экран и устройства виртуальной машины".into(),
+                role: tr!("media_build_win.role_vm_devices").into_owned(),
                 device: "VMware Tools (windows.iso)".into(),
                 inbox: false,
             },
@@ -256,7 +257,7 @@ fn ps_json<T: serde::de::DeserializeOwned>(script: &str) -> std::result::Result<
         Ok(o) => o,
         Err(e) => {
             warn!(error = %e, "powershell did not run");
-            return Err(format!("PowerShell не запустился: {e}"));
+            return Err(tr!("media_build_win.powershell_not_started", error = e).into_owned());
         }
     };
     // UTF-8 first; the OEM page only if something still slipped through.
@@ -265,17 +266,18 @@ fn ps_json<T: serde::de::DeserializeOwned>(script: &str) -> std::result::Result<
         if !out.status.success() {
             let err = layout::console_text(&out.stderr);
             warn!(status = ?out.status.code(), "powershell returned nothing");
-            return Err(format!(
-                "PowerShell завершился с кодом {:?}: {}",
-                out.status.code(),
-                err.trim()
-            ));
+            return Err(tr!(
+                "media_build_win.powershell_failed",
+                code = format!("{:?}", out.status.code()),
+                error = err.trim()
+            )
+            .into_owned());
         }
         return Ok(Vec::new()); // спросили, ответ пустой — это законный ответ
     }
     serde_json::from_str::<Vec<T>>(&text)
         .or_else(|_| serde_json::from_str::<T>(&text).map(|one| vec![one]))
-        .map_err(|e| format!("ответ PowerShell не разобрался: {e}"))
+        .map_err(|e| tr!("media_build_win.powershell_unparsed", error = e).into_owned())
 }
 
 /// What to build and how.
@@ -398,19 +400,20 @@ impl BuildStage {
             BuildStage::CleaningUp => "clean",
         }
     }
-    pub fn title(&self) -> &'static str {
+    /// In the window's language.
+    pub fn title(&self) -> Cow<'static, str> {
         match self {
-            BuildStage::Checking => "Проверка исходных файлов",
-            BuildStage::OpeningImage => "Открытие образа восстановления",
-            BuildStage::CopyingProgram => "Копирование программы",
-            BuildStage::CopyingTools => "Копирование сторонних средств",
-            BuildStage::CopyingRuntime => "Копирование WebView2",
-            BuildStage::AddingDrivers => "Добавление драйверов",
-            BuildStage::SystemLibraries => "Системные библиотеки",
-            BuildStage::WritingImage => "Запись образа",
-            BuildStage::BootFiles => "Загрузочные файлы",
-            BuildStage::WritingIso => "Запись ISO",
-            BuildStage::CleaningUp => "Уборка временных файлов",
+            BuildStage::Checking => tr!("media_build_win.stage_check"),
+            BuildStage::OpeningImage => tr!("media_build_win.stage_open"),
+            BuildStage::CopyingProgram => tr!("media_build_win.stage_program"),
+            BuildStage::CopyingTools => tr!("media_build_win.stage_tools"),
+            BuildStage::CopyingRuntime => tr!("media_build_win.stage_runtime"),
+            BuildStage::AddingDrivers => tr!("media_build_win.stage_drivers"),
+            BuildStage::SystemLibraries => tr!("media_build_win.stage_libs"),
+            BuildStage::WritingImage => tr!("media_build_win.stage_write"),
+            BuildStage::BootFiles => tr!("media_build_win.stage_boot"),
+            BuildStage::WritingIso => tr!("media_build_win.stage_iso"),
+            BuildStage::CleaningUp => tr!("media_build_win.stage_clean"),
         }
     }
 
@@ -463,25 +466,27 @@ pub fn build_media(
         p(StageReport { stage, percent, detail });
     };
 
-    at(&mut progress, BuildStage::Checking, 0, "чтение образа");
+    at(&mut progress, BuildStage::Checking, 0, &tr!("media_build_win.detail_reading_image"));
     let info = read_wim_info(&req.base_wim)?;
     report.base_name = info.name.clone();
     report.base_build = info.build;
     report.base_language = info.language.clone();
     for exe in layout::PROGRAM_FILES {
         if !req.program_dir.join(exe).exists() {
-            return Err(OwnBackupError::ImageFormat(format!(
-                "{} не найден в {}",
-                exe,
-                req.program_dir.display()
-            )));
+            return Err(OwnBackupError::ImageFormat(
+                tr!(
+                    "media_build_win.program_file_missing",
+                    file = exe,
+                    dir = req.program_dir.display()
+                )
+                .into_owned(),
+            ));
         }
     }
     if !req.webview2_dir.join("msedgewebview2.exe").exists() {
-        return Err(OwnBackupError::ImageFormat(format!(
-            "{}: не похоже на рантайм WebView2 (нет msedgewebview2.exe)",
-            req.webview2_dir.display()
-        )));
+        return Err(OwnBackupError::ImageFormat(
+            tr!("media_build_win.not_webview2", dir = req.webview2_dir.display()).into_owned(),
+        ));
     }
     at(&mut progress, BuildStage::Checking, 100, "");
 
@@ -492,17 +497,18 @@ pub fn build_media(
     std::fs::create_dir_all(&tree)?;
     std::fs::create_dir_all(&report.media_dir)?;
 
-    at(&mut progress, BuildStage::OpeningImage, 0, "копия образа");
+    at(&mut progress, BuildStage::OpeningImage, 0, &tr!("media_build_win.detail_copying_image"));
     std::fs::copy(&req.base_wim, &staged_wim)?;
     clear_readonly(&staged_wim);
-    at(&mut progress, BuildStage::OpeningImage, 30, "монтирование");
+    at(&mut progress, BuildStage::OpeningImage, 30, &tr!("media_build_win.detail_mounting"));
     // Mounting is quick; unpacking is minutes, and its own percentage is mapped
     // into what is left of this stage's bar rather than restarting it at zero.
+    let unpacking = tr!("media_build_win.detail_unpacking");
     let mounted = open_image(&staged_wim, &tree, &mut |pct| {
         progress(StageReport {
             stage: BuildStage::OpeningImage,
             percent: 30 + pct * 70 / 100,
-            detail: "распаковка",
+            detail: &unpacking,
         });
     })?;
     report.unpacked = !mounted;
@@ -510,7 +516,11 @@ pub fn build_media(
         &mut progress,
         BuildStage::OpeningImage,
         100,
-        if mounted { "смонтирован" } else { "распакован" },
+        &if mounted {
+            tr!("media_build_win.detail_mounted")
+        } else {
+            tr!("media_build_win.detail_unpacked")
+        },
     );
 
     at(&mut progress, BuildStage::CopyingProgram, 0, "");
@@ -540,7 +550,9 @@ pub fn build_media(
             // an hour of someone's evening.
             Err(e) => {
                 warn!(error = %e, "third-party tools were not added");
-                report.warnings.push(format!("Сторонние средства не добавлены: {e}"));
+                report
+                    .warnings
+                    .push(tr!("media_build_win.warn_tools_not_added", error = e).into_owned());
             }
         }
         at(&mut progress, BuildStage::CopyingTools, 100, "");
@@ -550,7 +562,11 @@ pub fn build_media(
         &mut progress,
         BuildStage::CopyingRuntime,
         0,
-        if req.runtime_in_image { "в образ, со сжатием" } else { "на носитель, без сжатия" },
+        &if req.runtime_in_image {
+            tr!("media_build_win.detail_runtime_in_image")
+        } else {
+            tr!("media_build_win.detail_runtime_on_media")
+        },
     );
     // Every medium carries the marker: WinPE assigns its volume whatever letter
     // it likes, and the launcher finds it by this file — for a runtime kept
@@ -565,7 +581,7 @@ pub fn build_media(
     };
     std::fs::create_dir_all(&runtime_dst)?;
     copy_tree(&req.webview2_dir, &runtime_dst)?;
-    at(&mut progress, BuildStage::CopyingRuntime, 80, "лишнее из рантайма");
+    at(&mut progress, BuildStage::CopyingRuntime, 80, &tr!("media_build_win.detail_runtime_trim"));
     report.runtime_files_trimmed = trim_runtime(&runtime_dst);
     for dll in layout::VC_RUNTIME {
         let src = system32().join(dll);
@@ -588,7 +604,7 @@ pub fn build_media(
         req.drivers.iter().cloned().partition(|d| d.starts_with(guest_prefix));
 
     if !store.is_empty() || !guest.is_empty() {
-        at(&mut progress, BuildStage::AddingDrivers, 0, "выгрузка из хранилища");
+        at(&mut progress, BuildStage::AddingDrivers, 0, &tr!("media_build_win.detail_exporting_drivers"));
         if !store.is_empty() {
             match add_drivers(&tree, work, &store, req.extra_drivers.as_deref(), &mut |pct, d| {
                 progress(StageReport { stage: BuildStage::AddingDrivers, percent: pct, detail: d })
@@ -596,11 +612,10 @@ pub fn build_media(
                 Ok(n) => report.drivers_added = n,
                 Err(e) => {
                     warn!(error = %e, "drivers were not added");
-                    report.warnings.push(format!(
-                        "Драйверы добавить не удалось: {}. Носитель соберётся, но может не \
-                         увидеть диски на другом оборудовании.",
-                        user_reason(&e)
-                    ));
+                    report.warnings.push(
+                        tr!("media_build_win.warn_drivers_not_added", reason = user_reason(&e))
+                            .into_owned(),
+                    );
                 }
             }
         }
@@ -614,11 +629,10 @@ pub fn build_media(
                 }
                 Err(e) => {
                     warn!(error = %e, "VMware guest drivers were not added");
-                    report.warnings.push(format!(
-                        "Драйверы VMware Tools добавить не удалось: {}. Носитель соберётся, \
-                         но в виртуальной машине VMware останется разрешение 1024×768.",
-                        user_reason(&e)
-                    ));
+                    report.warnings.push(
+                        tr!("media_build_win.warn_vmware_not_added", reason = user_reason(&e))
+                            .into_owned(),
+                    );
                 }
             }
         }
@@ -664,11 +678,9 @@ pub fn build_media(
     }
     if !missing_iscsi.is_empty() {
         warn!(files = ?missing_iscsi, "media: iSCSI initiator files missing on the build host");
-        report.warnings.push(format!(
-            "На этой машине не нашлось файлов iSCSI-инициатора ({}). Носитель соберётся, \
-             но подключить копию как диск на нём не выйдет.",
-            missing_iscsi.join(", ")
-        ));
+        report.warnings.push(
+            tr!("media_build_win.warn_iscsi_missing", files = missing_iscsi.join(", ")).into_owned(),
+        );
     }
 
     let app_dir_win = r"X:\Program Files\OwnBackup";
@@ -710,14 +722,22 @@ pub fn build_media(
         &mut progress,
         BuildStage::WritingImage,
         0,
-        if mounted { "фиксация изменений" } else { "упаковка (несколько минут)" },
+        &if mounted {
+            tr!("media_build_win.detail_committing")
+        } else {
+            tr!("media_build_win.detail_packing_minutes")
+        },
     );
-    let writing_detail = if mounted { "фиксация изменений" } else { "упаковка" };
+    let writing_detail = if mounted {
+        tr!("media_build_win.detail_committing")
+    } else {
+        tr!("media_build_win.detail_packing")
+    };
     close_image(&staged_wim, &tree, mounted, &mut |pct| {
         progress(StageReport {
             stage: BuildStage::WritingImage,
             percent: pct,
-            detail: writing_detail,
+            detail: &writing_detail,
         });
     })?;
     at(&mut progress, BuildStage::WritingImage, 100, "");
@@ -760,15 +780,15 @@ pub fn clean_up_with_progress(
     out_dir: &Path,
     progress: &mut dyn FnMut(u64, &str),
 ) -> u64 {
-    progress(0, "подсчёт");
+    progress(0, &tr!("media_build_win.clean_counting"));
     let freed = dir_size(work_dir) + dir_size(out_dir);
-    progress(10, "распакованный образ");
+    progress(10, &tr!("media_build_win.clean_unpacked_image"));
     nuke_tree(&work_dir.join("tree"));
-    progress(45, "рабочая папка");
+    progress(45, &tr!("media_build_win.clean_work_folder"));
     nuke_tree(work_dir);
-    progress(75, "файлы носителя");
+    progress(75, &tr!("media_build_win.clean_media_files"));
     nuke_tree(out_dir);
-    progress(95, "проверка");
+    progress(95, &tr!("media_build_win.clean_checking"));
     let left = dir_size(work_dir) + dir_size(out_dir);
     if left > 0 {
         warn!(bytes = left, "some temporary files could not be removed");
@@ -867,9 +887,7 @@ fn add_guest_vmware(
     progress: &mut dyn FnMut(u64, &str),
 ) -> Result<(u32, Vec<String>)> {
     let iso = crate::media_guest_drivers_win::vmware_tools_iso().ok_or_else(|| {
-        OwnBackupError::ImageFormat(
-            "windows.iso (VMware Tools) больше не найден — драйверы VMware пропущены".into(),
-        )
+        OwnBackupError::ImageFormat(tr!("media_build_win.vmware_iso_gone").into_owned())
     })?;
     crate::media_guest_drivers_win::add_vmware_tools_drivers(
         &iso,
@@ -907,10 +925,9 @@ fn set_input_locales(tree: &Path, mounted: bool, report: &mut MediaBuildReport) 
             let _ = std::fs::copy(&src, &dst);
         } else {
             warn!(dll, "keyboard layout DLL is in neither the image nor this machine");
-            report.warnings.push(format!(
-                "{dll} нет ни в образе, ни на этой машине — соответствующая раскладка \
-                 клавиатуры на носителе может не переключаться."
-            ));
+            report
+                .warnings
+                .push(tr!("media_build_win.warn_keyboard_dll_missing", dll = dll).into_owned());
         }
     }
     if mounted {
@@ -919,10 +936,9 @@ fn set_input_locales(tree: &Path, mounted: bool, report: &mut MediaBuildReport) 
             &format!("/Set-InputLocale:{}", layout::INPUT_LOCALES),
         ]) {
             warn!(error = %e, "input locales were not written into the image");
-            report.warnings.push(format!(
-                "Раскладки клавиатуры не записались в образ ({e}). Носитель загрузится, \
-                 раскладки выставит скрипт запуска (Alt+Shift)."
-            ));
+            report
+                .warnings
+                .push(tr!("media_build_win.warn_input_locales", error = e).into_owned());
         }
     }
 }
@@ -978,7 +994,7 @@ fn add_drivers(
         progress(((i + 1) * 70 / chosen.len().max(1)) as u64, inf);
     }
 
-    progress(80, "установка в образ");
+    progress(80, &tr!("media_build_win.detail_installing_drivers"));
     dism(&[
         &format!("/Image:{}", tree.display()),
         "/Add-Driver",
@@ -986,7 +1002,7 @@ fn add_drivers(
         "/Recurse",
     ])?;
     if let Some(dir) = extra.filter(|d| d.is_dir()) {
-        progress(90, "дополнительная папка");
+        progress(90, &tr!("media_build_win.detail_extra_folder"));
         if dism(&[
             &format!("/Image:{}", tree.display()),
             "/Add-Driver",
@@ -1017,10 +1033,9 @@ fn check_inbox_drivers(tree: &Path, report: &mut MediaBuildReport) {
         Ok(d) => d,
         Err(e) => {
             warn!(error = %e, "inbox drivers not checked");
-            report.warnings.push(format!(
-                "Не удалось проверить, есть ли в образе встроенные драйверы дисков и сети \
-                 этой машины: {e}"
-            ));
+            report
+                .warnings
+                .push(tr!("media_build_win.warn_inbox_not_checked", error = e).into_owned());
             return;
         }
     };
@@ -1039,10 +1054,9 @@ fn check_inbox_drivers(tree: &Path, report: &mut MediaBuildReport) {
         }
         let Some(pkg) = host_inbox_package(&inf) else {
             warn!(%inf, device = %name, "inbox driver missing from the base image and from the driver store");
-            report.warnings.push(format!(
-                "{name}: драйвера {inf} нет в среде восстановления, и в хранилище драйверов \
-                 этой машины его не нашлось — на носителе это устройство может не работать."
-            ));
+            report.warnings.push(
+                tr!("media_build_win.warn_inbox_missing", device = name, inf = inf).into_owned(),
+            );
             continue;
         };
         match dism(&[
@@ -1056,11 +1070,15 @@ fn check_inbox_drivers(tree: &Path, report: &mut MediaBuildReport) {
             }
             Err(e) => {
                 warn!(%inf, device = %name, error = %e, "inbox driver could not be added");
-                report.warnings.push(format!(
-                    "{name}: драйвера {inf} нет в среде восстановления, и добавить его с этой \
-                     машины не удалось ({}) — на носителе это устройство может не работать.",
-                    user_reason(&e)
-                ));
+                report.warnings.push(
+                    tr!(
+                        "media_build_win.warn_inbox_not_added",
+                        device = name,
+                        inf = inf,
+                        reason = user_reason(&e)
+                    )
+                    .into_owned(),
+                );
             }
         }
     }
@@ -1142,11 +1160,8 @@ fn lay_out_media(wim: &Path, media: &Path) -> Result<Option<String>> {
             path = %stl.display(),
             "boot.stl not found — the medium will not boot with Secure Boot enabled"
         );
-        missing_stl = Some(format!(
-            "На этой машине нет файла {} — носитель собран без него и НЕ ЗАГРУЗИТСЯ, \
-             пока в прошивке включена безопасная загрузка. Её придётся выключить.",
-            stl.display()
-        ));
+        missing_stl =
+            Some(tr!("media_build_win.warn_boot_stl_missing", path = stl.display()).into_owned());
     }
     // The medium carries no display driver, so the screen is Microsoft Basic
     // Display, and on UEFI that driver draws on the framebuffer the boot
@@ -1243,10 +1258,10 @@ fn add_tools(
         std::fs::create_dir_all(&to)?;
         copy_tree_except(&tool.source, &to, known.skip)?;
         if !to.join(known.exe).is_file() {
-            return Err(OwnBackupError::ImageFormat(format!(
-                "{} скопирован, но {} в нём нет",
-                tool.name, known.exe
-            )));
+            return Err(OwnBackupError::ImageFormat(
+                tr!("media_build_win.tool_exe_missing", tool = tool.name, exe = known.exe)
+                    .into_owned(),
+            ));
         }
         // Counted, not assumed. A program that is nearly all there starts and
         // then fails at something specific — and the failure it reports is
@@ -1254,10 +1269,17 @@ fn add_tools(
         // catch here than on a booted medium.
         let (copied_bytes, copied_files) = crate::media_tools_win::weigh(&to);
         if copied_files < tool.files || copied_bytes < tool.size_bytes {
-            return Err(OwnBackupError::ImageFormat(format!(
-                "{} скопирован не полностью: {} файлов вместо {} ({} вместо {} байт)",
-                tool.name, copied_files, tool.files, copied_bytes, tool.size_bytes
-            )));
+            return Err(OwnBackupError::ImageFormat(
+                tr!(
+                    "media_build_win.tool_incomplete",
+                    tool = tool.name,
+                    files = copied_files,
+                    want_files = tool.files,
+                    bytes = copied_bytes,
+                    want_bytes = tool.size_bytes
+                )
+                .into_owned(),
+            ));
         }
 
         // The settings the person actually uses, which live nowhere near the
@@ -1513,10 +1535,13 @@ fn dism_progress(args: &[&str], progress: &mut dyn FnMut(u64)) -> Result<()> {
         .rev()
         .take(3)
         .collect();
-    Err(OwnBackupError::ImageFormat(format!(
-        "dism завершился с ошибкой: {}",
-        lines.into_iter().rev().collect::<Vec<_>>().join(" ")
-    )))
+    Err(OwnBackupError::ImageFormat(
+        tr!(
+            "media_build_win.dism_failed",
+            output = lines.into_iter().rev().collect::<Vec<_>>().join(" ")
+        )
+        .into_owned(),
+    ))
 }
 
 
@@ -1543,10 +1568,14 @@ fn run(program: &str, args: &[&str]) -> Result<()> {
     }
     let text = layout::console_text(&out.stdout);
     let tail: Vec<&str> = text.lines().rev().filter(|l| !l.trim().is_empty()).take(3).collect();
-    Err(OwnBackupError::ImageFormat(format!(
-        "{program} завершился с ошибкой: {}",
-        tail.into_iter().rev().collect::<Vec<_>>().join(" ")
-    )))
+    Err(OwnBackupError::ImageFormat(
+        tr!(
+            "media_build_win.tool_failed",
+            program = program,
+            output = tail.into_iter().rev().collect::<Vec<_>>().join(" ")
+        )
+        .into_owned(),
+    ))
 }
 
 

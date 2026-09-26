@@ -3,6 +3,8 @@
   import { api } from '../lib/api';
   import type { ServiceStatus, MountBackendStatus } from '../lib/types';
   import { theme, setTheme, type ThemeMode } from '../lib/themeStore.svelte';
+  import { lang, setLanguage, type LangMode } from '../lib/i18n.svelte';
+  import { m } from '../lib/paraglide/messages';
 
   /** The config as it was loaded, kept whole. Saving edits a copy of it rather
    *  than building a fresh object out of the fields this page shows — which is
@@ -16,7 +18,8 @@
   let serviceStatus: ServiceStatus | null = $state(null);
   let isLoading = $state(true);
   let error: string | null = $state(null);
-  let saveMessage: string | null = $state(null);
+  // A function, so the banner follows a change of language made after saving.
+  let saveMessage: (() => string) | null = $state(null);
 
   /** zstd levels offered. 0 is what a config written before the setting did
    *  anything holds; the engine reads anything outside 1–19 as 3, and so does
@@ -64,7 +67,7 @@
   });
 
   async function pickMirrorDir() {
-    const chosen = await pickPath({ directory: true, title: 'Куда дублировать журнал' });
+    const chosen = await pickPath({ directory: true, title: m.set_log_mirror_pick_title() });
     if (typeof chosen === 'string') logMirrorDir = chosen;
   }
 
@@ -80,7 +83,7 @@
         log_level: logLevel,
         log_mirror_dir: logMirrorDir.trim(),
       });
-      saveMessage = 'Параметры сохранены.';
+      saveMessage = m.set_saved;
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : String(e);
     }
@@ -90,11 +93,11 @@
   function formatUptime(secs: number): string {
     const d = Math.floor(secs / 86400);
     const h = Math.floor((secs % 86400) / 3600);
-    const m = Math.floor((secs % 3600) / 60);
-    if (d > 0) return `${d} д ${h} ч`;
-    if (h > 0) return `${h} ч ${m} мин`;
-    if (m > 0) return `${m} мин`;
-    return `${secs} с`;
+    const min = Math.floor((secs % 3600) / 60);
+    if (d > 0) return m.fmt_dur_d_h({ d, h });
+    if (h > 0) return m.fmt_dur_h_min({ h, min });
+    if (min > 0) return m.fmt_dur_min({ min });
+    return m.fmt_dur_s({ s: secs });
   }
 
   // --- What mounting a backup image needs here ---
@@ -117,80 +120,85 @@
 
   /** The three theme tiles, each a small picture of the window in it: menu
    *  strip, two lines of text and a button. Applied at once — nothing to save. */
-  const themeOptions: { mode: ThemeMode; label: string; side: string; bg: string; line: string }[] = [
-    { mode: 'light', label: 'Светлая', side: '#221d49', bg: '#ffffff', line: '#e3e3ec' },
-    { mode: 'dark', label: 'Тёмная', side: '#110f22', bg: '#1f1e2a', line: '#34334a' },
+  const themeOptions: { mode: ThemeMode; label: () => string; side: string; bg: string; line: string }[] = [
+    { mode: 'light', label: m.set_theme_light, side: '#221d49', bg: '#ffffff', line: '#e3e3ec' },
+    { mode: 'dark', label: m.set_theme_dark, side: '#110f22', bg: '#1f1e2a', line: '#34334a' },
     {
       mode: 'system',
-      label: 'Как в Windows',
+      label: m.set_theme_system,
       side: 'linear-gradient(135deg, #221d49 50%, #110f22 50%)',
       bg: 'linear-gradient(135deg, #ffffff 50%, #1f1e2a 50%)',
       line: '#9a9ab0',
     },
   ];
 
+  /** Each language is named in itself, so it can be found by someone who
+   *  cannot read the other one. */
+  const languageOptions: { mode: LangMode; label: () => string }[] = [
+    { mode: 'ru', label: () => 'Русский' },
+    { mode: 'en', label: () => 'English' },
+    { mode: 'system', label: m.set_language_system },
+  ];
+
   /** One line on whether a copy can be connected as a disk, and why not. */
   const mountLine = $derived.by((): { ok: boolean; text: string } => {
     const s = mountStatus;
-    if (!s) return { ok: false, text: 'неизвестно' };
+    if (!s) return { ok: false, text: m.common_unknown() };
     if (s.platform === 'linux') {
-      if (!s.linux?.nbd_ok) return { ok: false, text: 'модуль NBD не загружен' };
+      if (!s.linux?.nbd_ok) return { ok: false, text: m.set_mount_no_nbd() };
       return s.linux.ntfs_ok
-        ? { ok: true, text: `готово (NBD, NTFS: ${s.linux.ntfs_backend})` }
-        : { ok: true, text: 'готово, но NTFS не поддерживается — нужен ntfs-3g' };
+        ? { ok: true, text: m.set_mount_ready_nbd({ backend: s.linux.ntfs_backend ?? '' }) }
+        : { ok: true, text: m.set_mount_no_ntfs() };
     }
-    if (!s.iscsi) return { ok: false, text: 'неизвестно' };
+    if (!s.iscsi) return { ok: false, text: m.common_unknown() };
     if (!s.iscsi.ready) return { ok: false, text: s.iscsi.message };
     return {
       ok: true,
-      text: s.iscsi.running ? 'готово' : 'готово, служба iSCSI запустится по требованию',
+      text: s.iscsi.running ? m.set_mount_ready() : m.set_mount_ready_on_demand(),
     };
   });
 </script>
 
 <div class="settings-view">
   <div class="page-header">
-    <h1 class="page-title">Параметры</h1>
+    <h1 class="page-title">{m.set_title()}</h1>
   </div>
 
   {#if error}
     <div class="error-banner">
       <span>{error}</span>
-      <button class="dismiss-btn" onclick={() => (error = null)}>Закрыть</button>
+      <button class="dismiss-btn" onclick={() => (error = null)}>{m.common_close()}</button>
     </div>
   {/if}
 
   {#if saveMessage}
     <div class="success-banner">
-      <span>{saveMessage}</span>
-      <button class="dismiss-btn" onclick={() => (saveMessage = null)}>OK</button>
+      <span>{saveMessage()}</span>
+      <button class="dismiss-btn" onclick={() => (saveMessage = null)}>{m.common_ok()}</button>
     </div>
   {/if}
 
   {#if isLoading}
     <div class="loading-state">
       <div class="spinner"></div>
-      <p>Загрузка параметров…</p>
+      <p>{m.set_loading()}</p>
     </div>
   {:else}
     <div class="settings-grid">
       <div class="card">
-        <h2 class="section-title">Общие</h2>
+        <h2 class="section-title">{m.set_general()}</h2>
 
         <!-- Shown, not edited: the service takes its folder from where it is
              installed and never read this value, so a field that accepted a
              new path changed nothing but the text in it (2026-09-26). -->
         <div class="form-group">
-          <label for="data-dir">Папка программы</label>
+          <label for="data-dir">{m.set_data_dir()}</label>
           <input id="data-dir" type="text" class="form-input" value={dataDirectory} readonly />
-          <p class="help-text">
-            Здесь лежат задания, журналы и служебные файлы программы. Резервные
-            копии хранятся там, где указано в каждом задании.
-          </p>
+          <p class="help-text">{m.set_data_dir_help()}</p>
         </div>
 
         <div class="form-group">
-          <label for="comp-default">Уровень сжатия по умолчанию: {compressionLevel}</label>
+          <label for="comp-default">{m.set_compression({ level: compressionLevel })}</label>
           <input
             id="comp-default"
             type="range"
@@ -200,58 +208,45 @@
             bind:value={compressionLevel}
           />
           <div class="range-labels">
-            <span>{MIN_LEVEL} — быстрее</span>
-            <span>{MAX_LEVEL} — меньше файл</span>
+            <span>{m.set_compression_fast({ level: MIN_LEVEL })}</span>
+            <span>{m.set_compression_small({ level: MAX_LEVEL })}</span>
           </div>
-          <p class="help-text">
-            Сжатие zstd для копий в форматах qcow2 и OBK — у заданий, где не
-            выбран свой уровень («Схема» в параметрах задания). VHDX не
-            сжимается. Чем выше уровень, тем меньше файл и дольше копирование;
-            3 — разумное равновесие, выше 9 копирование заметно медленнее при
-            небольшом выигрыше в размере. Действует со следующего запуска.
-          </p>
+          <p class="help-text">{m.set_compression_help()}</p>
         </div>
 
         <div class="form-group">
-          <label for="log-level">Уровень журнала</label>
+          <label for="log-level">{m.set_log_level()}</label>
           <select id="log-level" class="form-select" bind:value={logLevel}>
-            <option value="info">Основной — ход работы и ошибки</option>
-            <option value="debug">Подробный — всё, для разбора ошибки</option>
+            <option value="info">{m.set_log_info()}</option>
+            <option value="debug">{m.set_log_debug()}</option>
           </select>
-          <p class="help-text">
-            Подробный журнал нужен, когда что-то пошло не так и нужно понять
-            почему; он заметно больше. Применяется на ходу — перезапускать
-            службу не нужно.
-          </p>
+          <p class="help-text">{m.set_log_level_help()}</p>
         </div>
 
         <div class="form-group">
-          <label for="log-mirror">Дублировать журнал на диск</label>
+          <label for="log-mirror">{m.set_log_mirror()}</label>
           <div class="path-row">
             <input
               id="log-mirror"
               type="text"
               class="form-input"
-              placeholder="например, E:\ — пусто значит «не дублировать»"
+              placeholder={m.set_log_mirror_placeholder()}
               bind:value={logMirrorDir}
             />
-            <button class="btn btn-secondary" onclick={pickMirrorDir}>Обзор…</button>
+            <button class="btn btn-secondary" onclick={pickMirrorDir}>{m.common_browse()}</button>
           </div>
-          <p class="help-text">
-            Копия журнала службы и окна ложится в указанную папку — на флешку или
-            на другой диск.
-          </p>
+          <p class="help-text">{m.set_log_mirror_help()}</p>
         </div>
 
         <div class="form-actions">
-          <button class="btn btn-primary" onclick={handleSave}>Сохранить</button>
+          <button class="btn btn-primary" onclick={handleSave}>{m.common_save()}</button>
         </div>
       </div>
 
       <div class="side-column">
         <div class="card">
-          <h2 class="section-title">Оформление</h2>
-          <div class="field-label">Тема</div>
+          <h2 class="section-title">{m.set_appearance()}</h2>
+          <div class="field-label">{m.set_theme()}</div>
           <div class="theme-options">
             {#each themeOptions as o (o.mode)}
               <button
@@ -268,48 +263,58 @@
                     <span class="tp-button"></span>
                   </span>
                 </span>
-                <span class="theme-label">{o.label}</span>
+                <span class="theme-label">{o.label()}</span>
               </button>
             {/each}
           </div>
-          <p class="help-text">
-            «Как в Windows» следует системной настройке «Режим приложения» и
-            переключается вместе с ней.
-          </p>
+          <p class="help-text">{m.set_theme_help()}</p>
+
+          <div class="field-label lang-label">{m.set_language()}</div>
+          <div class="lang-options" role="group" aria-label={m.set_language()}>
+            {#each languageOptions as o (o.mode)}
+              <button
+                class="lang-option"
+                class:selected={lang.mode === o.mode}
+                aria-pressed={lang.mode === o.mode}
+                onclick={() => setLanguage(o.mode)}
+              >{o.label()}</button>
+            {/each}
+          </div>
+          <p class="help-text">{m.set_language_help()}</p>
         </div>
 
         <div class="card">
-          <h2 class="section-title">Состояние службы</h2>
+          <h2 class="section-title">{m.set_service()}</h2>
 
           {#if statusLoading}
-            <div class="status-pending">Опрашиваем службу…</div>
+            <div class="status-pending">{m.set_service_asking()}</div>
           {:else if serviceStatus?.connected}
             <div class="status-grid">
               <div class="status-item">
-                <span class="status-label">Служба</span>
+                <span class="status-label">{m.set_service_name()}</span>
                 <span class="status-value running">
                   <span class="status-dot"></span>
-                  Работает
+                  {m.set_service_running()}
                 </span>
               </div>
               <div class="status-item">
-                <span class="status-label">Версия</span>
+                <span class="status-label">{m.set_service_version()}</span>
                 <span class="status-value">{serviceStatus.version}</span>
               </div>
               <div class="status-item">
-                <span class="status-label">Время работы</span>
+                <span class="status-label">{m.set_service_uptime()}</span>
                 <span class="status-value">{formatUptime(serviceStatus.uptime_secs)}</span>
               </div>
               <div class="status-item">
-                <span class="status-label">Выполняется заданий</span>
+                <span class="status-label">{m.set_service_jobs()}</span>
                 <span class="status-value">{serviceStatus.active_jobs}</span>
               </div>
               <div class="status-item">
-                <span class="status-label">Копий подключено как диск</span>
+                <span class="status-label">{m.set_service_mounts()}</span>
                 <span class="status-value">{serviceStatus.active_mounts?.length ?? 0}</span>
               </div>
               <div class="status-item">
-                <span class="status-label">Подключение копий как диска</span>
+                <span class="status-label">{m.set_service_mounting()}</span>
                 <span class="status-value" class:running={mountLine.ok} class:failing={!mountLine.ok}>
                   <span class="status-dot" class:offline={!mountLine.ok}></span>
                   {mountLine.text}
@@ -319,7 +324,7 @@
           {:else}
             <div class="status-offline">
               <span class="status-dot offline"></span>
-              <span>Служба не запущена или не отвечает.</span>
+              <span>{m.set_service_offline()}</span>
             </div>
           {/if}
         </div>
@@ -507,6 +512,44 @@
   }
   .theme-label {
     text-align: center;
+  }
+
+  .lang-label {
+    margin-top: 18px;
+  }
+
+  /* One control of three segments, the chosen one filled (the design's
+     segmented choice, as for the backup method). */
+  .lang-options {
+    display: flex;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+
+  .lang-option {
+    flex: 1;
+    min-width: 0;
+    padding: 8px 10px;
+    border: none;
+    border-right: 1px solid var(--border);
+    background: var(--card-bg);
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .lang-option:last-child {
+    border-right: none;
+  }
+  .lang-option:hover:not(.selected) {
+    background: var(--panel2);
+  }
+  .lang-option.selected {
+    background: var(--primary);
+    color: #fff;
   }
 
   /* Path plus its "Обзор…" button: the field takes what is left. */

@@ -17,6 +17,8 @@
   import DiskMap from '../components/DiskMap.svelte';
   import { diskSegments, msrKept } from '../lib/diskLayout';
   import type { MapSlot } from '../components/DiskMap.svelte';
+  import { m } from '../lib/paraglide/messages';
+  import { esc } from '../lib/i18n.svelte';
   import type {
     Job, DiskInfo, PartitionInfo, ImageInfo, RestoreRunState, DryRunResult, OpRecord,
     RestorePlan, RestoreOp, RestoreMode, PartitionSpec, PartRef, FormatFs,
@@ -265,13 +267,13 @@
   // Real file-category breakdown of the archived data — same source as the
   // backup dashboard (collected during the backup's file walk).
   const CAT_META = [
-    { key: 'images', name: 'Изображения', color: '#5ab02f' },
-    { key: 'video', name: 'Видео', color: '#d8c81e' },
-    { key: 'audio', name: 'Аудио', color: '#e07a2f' },
-    { key: 'documents', name: 'Документы', color: '#8b5cf6' },
-    { key: 'windows', name: 'Windows', color: '#4f9be8' },
-    { key: 'linux', name: 'Linux', color: '#14b8a6' },
-    { key: 'other', name: 'Другое', color: '#9aa0ad' },
+    { key: 'images', name: m.cat_images, color: '#5ab02f' },
+    { key: 'video', name: m.cat_video, color: '#d8c81e' },
+    { key: 'audio', name: m.cat_audio, color: '#e07a2f' },
+    { key: 'documents', name: m.cat_documents, color: '#8b5cf6' },
+    { key: 'windows', name: m.cat_windows, color: '#4f9be8' },
+    { key: 'linux', name: m.cat_linux, color: '#14b8a6' },
+    { key: 'other', name: m.cat_other, color: '#9aa0ad' },
   ] as const;
   /** «Исключено» — the eighth category colour, the same in both themes as
    *  the other seven (design: CATS). */
@@ -299,12 +301,12 @@
     const total = kept + ex;
     if (total <= 0) return null;
     const out: { name: string; color: string; bytes: number; pct: number }[] = catData.map((c) => ({
-      name: c.name,
+      name: c.name(),
       color: c.color,
       bytes: c.bytes,
       pct: (c.bytes / total) * 100,
     }));
-    if (ex > 0) out.push({ name: 'Исключено', color: EXCLUDED_COLOR, bytes: ex, pct: (ex / total) * 100 });
+    if (ex > 0) out.push({ name: m.cat_excluded(), color: EXCLUDED_COLOR, bytes: ex, pct: (ex / total) * 100 });
     return out;
   });
 
@@ -378,7 +380,9 @@
   let srcPart = $state<number | null>(null); // yellow source partition index
   let mappings = $state<{ src: number; dst: number }[]>([]);
   let badTarget = $state<number | null>(null); // last destination that didn't fit
-  let fitMsg = $state<string | null>(null);
+  // A function, not a string: the note is drawn in whatever language the
+  // window speaks when it is drawn.
+  let fitMsg = $state<(() => string) | null>(null);
   // "загрузочный" checkbox — restore the whole bootable set (all partitions of
   // the copy + boot data). Pre-checked while no target disk is chosen when the
   // copy actually holds boot data; picking a target clears it so the user opts
@@ -495,7 +499,7 @@
     if (!p) return String(index);
     const bits: string[] = [];
     const label = p.volume_label || (p.volume_letter ? `${p.volume_letter}:` : '');
-    if (label) bits.push(`«${label}»`);
+    if (label) bits.push(m.rd_part_label({ label }));
     if (p.size_bytes > 0) bits.push(formatBytes(p.size_bytes));
     const fs = (p.filesystem || '').replace(/^unknown$/i, '');
     if (fs) bits.push(fs === 'ntfs' ? 'NTFS' : fs.charAt(0).toUpperCase() + fs.slice(1));
@@ -565,13 +569,13 @@
   const TIB = 1024 * GIB;
   /** GPT partition-type GUIDs (the same ones `common::gpt` uses). The firmware
    *  finds the boot partition by this GUID, so it is not cosmetic. */
-  const GPT_TYPES = [
-    { guid: 'EBD0A0A2-B9E5-4433-87C0-68B6B72699C7', name: 'Данные (Basic Data)' },
-    { guid: 'C12A7328-F81F-11D2-BA4B-00A0C93EC93B', name: 'EFI System (ESP)' },
-    { guid: 'E3C9E316-0B5C-4DB8-817D-F92DF00215AE', name: 'Microsoft Reserved (MSR)' },
-    { guid: 'DE94BBA4-06D1-4D40-A16A-BFD50179D6AC', name: 'Windows Recovery' },
-    { guid: '0FC63DAF-8483-4772-8E79-3D69D8477DE4', name: 'Linux filesystem' },
-    { guid: '0657FD6D-A4AB-43C4-84E5-0933C84B4F4F', name: 'Linux swap' },
+  const GPT_TYPES: { guid: string; name: () => string }[] = [
+    { guid: 'EBD0A0A2-B9E5-4433-87C0-68B6B72699C7', name: m.rd_gpt_basic_data },
+    { guid: 'C12A7328-F81F-11D2-BA4B-00A0C93EC93B', name: () => 'EFI System (ESP)' },
+    { guid: 'E3C9E316-0B5C-4DB8-817D-F92DF00215AE', name: () => 'Microsoft Reserved (MSR)' },
+    { guid: 'DE94BBA4-06D1-4D40-A16A-BFD50179D6AC', name: () => 'Windows Recovery' },
+    { guid: '0FC63DAF-8483-4772-8E79-3D69D8477DE4', name: () => 'Linux filesystem' },
+    { guid: '0657FD6D-A4AB-43C4-84E5-0933C84B4F4F', name: () => 'Linux swap' },
   ];
   /** Схему разметки задаёт КОПИЯ, а не то, что лежит на цели сейчас.
    *
@@ -825,12 +829,12 @@
   );
   const instr = $derived(
     step === 1
-      ? 'Шаг 1. Выберите диск, на который восстановить — кликните на него ниже.'
+      ? m.rd_step1()
       : step === 2
         ? wholeDiskRestore
-          ? 'Шаг 2. Кликните свободное (не распределённое) место внизу — туда лягут все разделы копии.'
-          : 'Шаг 2. Кликните раздел сверху (станет жёлтым), затем раздел ниже — куда его скопировать.'
-        : 'Шаг 3. Повторите для остальных разделов и нажмите «Восстановить» или нажмите «Отмена» чтобы начать заново.',
+          ? m.rd_step2_whole()
+          : m.rd_step2_parts()
+        : m.rd_step3(),
   );
 
   function resetMapping() {
@@ -875,11 +879,7 @@
     // paired one to one and nothing looks skipped. What it cannot do is carry
     // blocks, so the plan will hold no copy operation for it — said here as a
     // note, not as a refusal.
-    fitMsg = layoutOnlyParts.includes(p.index)
-      ? 'Раздел «Зарезервировано системой» (MSR) не содержит данных: восстановление ' +
-        'воссоздаёт его вместе с таблицей разделов. Сопоставить его можно — ' +
-        'копировать в нём просто нечего.'
-      : null;
+    fitMsg = layoutOnlyParts.includes(p.index) ? m.rd_fit_msr_no_data : null;
     srcPart = p.index;
   }
 
@@ -891,14 +891,13 @@
     // The copy goes down exactly once — a second click would duplicate every
     // partition into the remaining free space.
     if (previewIdx.length > 0) {
-      fitMsg = 'Разделы копии уже размещены. Отмените последнее действие, чтобы выбрать другое место.';
+      fitMsg = m.rd_fit_already_placed;
       return;
     }
     if (sectorMismatch) {
-      fitMsg =
-        `Несовместимая геометрия: копия снята с диска с сектором ${srcSector} Б, ` +
-        `а у выбранного — ${dstSector} Б. Загрузочную копию нельзя перенести без пересчёта разметки. ` +
-        `Выберите диск с сектором ${srcSector} Б.`;
+      const src = srcSector;
+      const dst = dstSector;
+      fitMsg = () => m.rd_fit_sector_mismatch({ src, dst });
       return;
     }
     const i = slots.findIndex((s) => s.kind === 'free' && s.offset === offset);
@@ -929,9 +928,10 @@
       // Exact numbers + the shortfall: rounded ones read as "нужно 130 GiB,
       // свободно 130 GiB", which tells the user nothing.
       const short = needed - cell.size;
-      fitMsg =
-        `Недостаточно места: нужно ${preciseSize(needed)}, свободно ${preciseSize(cell.size)}` +
-        ` — не хватает ${preciseSize(short)}. Удалите разделы или выберите другой участок.`;
+      const need = preciseSize(needed);
+      const free = preciseSize(cell.size);
+      const lack = preciseSize(short);
+      fitMsg = () => m.rd_fit_no_room({ need, free, short: lack });
       return;
     }
     pushHistory();
@@ -1086,11 +1086,12 @@
     // Round the size down to whole MiB so the NEXT partition also starts aligned.
     let bytes = Math.floor(raw / MIB) * MIB;
     if (bytes <= 0) {
-      fitMsg = 'Размер слишком мал (минимум 1 МиБ).';
+      fitMsg = m.rd_fit_size_too_small;
       return;
     }
     if (bytes > d.max) {
-      fitMsg = `Размер больше свободного места (${formatBytes(d.max)}).`;
+      const free = formatBytes(d.max);
+      fitMsg = () => m.rd_fit_size_too_big({ free });
       return;
     }
     // Normally the region still starts where the menu was opened; if it has been
@@ -1168,21 +1169,29 @@
     const cur = curParts;
     for (const p of orig) {
       if (!cur.some((c) => c.index === p.index)) {
-        ops.push(`Удалить раздел ${p.volume_letter ? p.volume_letter + ': ' : ''}${p.volume_label || '(без метки)'} — ${formatBytes(p.size_bytes)}`);
+        ops.push(
+          m.rd_op_delete({
+            name: `${p.volume_letter ? p.volume_letter + ': ' : ''}${p.volume_label || m.rd_no_label()}`,
+            size: formatBytes(p.size_bytes),
+          }),
+        );
       }
     }
     for (const p of cur) {
       // Same partition, bigger than it was → it was extended into free space.
       const was = orig.find((o) => o.index === p.index);
       if (was && p.size_bytes !== was.size_bytes) {
-        const how = p.size_bytes > was.size_bytes ? 'Расширить' : 'Уменьшить';
+        const how = p.size_bytes > was.size_bytes ? m.rd_op_extend : m.rd_op_shrink;
         ops.push(
-          `${how} раздел ${p.volume_letter ? p.volume_letter + ': ' : ''}${p.volume_label || '(без метки)'}` +
-            ` — ${preciseSize(was.size_bytes)} → ${preciseSize(p.size_bytes)}`,
+          how({
+            name: `${p.volume_letter ? p.volume_letter + ': ' : ''}${p.volume_label || m.rd_no_label()}`,
+            from: preciseSize(was.size_bytes),
+            to: preciseSize(p.size_bytes),
+          }),
         );
       }
       if (was || previewIdx.includes(p.index)) continue;
-      const m = newPartMeta.get(p.index);
+      const meta = newPartMeta.get(p.index);
       // A partition that is about to receive a sector restore is NOT formatted:
       // the filesystem arrives from the copy, and formatting would erase it.
       // Saying otherwise here was the queue promising something the plan never
@@ -1190,48 +1199,45 @@
       const takesData = mappings.some((x) => x.dst === p.index);
       const bits = [formatBytes(p.size_bytes)];
       if (p.filesystem && !takesData) bits.push(p.filesystem.toUpperCase());
-      if (m) {
-        bits.push(isGpt ? (GPT_TYPES.find((t) => t.guid === m.gptType)?.name ?? 'тип') : m.mbrKind === 'primary' ? 'основной' : 'логический');
-        if (!isGpt && m.active) bits.push('активный');
-        if (m.letter) bits.push(`буква ${m.letter}:`);
+      if (meta) {
+        bits.push(isGpt ? (GPT_TYPES.find((t) => t.guid === meta.gptType)?.name() ?? m.rd_op_type()) : meta.mbrKind === 'primary' ? m.rd_op_primary() : m.rd_op_logical());
+        if (!isGpt && meta.active) bits.push(m.rd_op_active());
+        if (meta.letter) bits.push(m.rd_op_letter({ letter: meta.letter }));
         if (takesData) {
-          bits.push('без форматирования: файловая система придёт из копии');
+          bits.push(m.rd_op_no_format_from_copy());
         } else if (p.filesystem) {
-          bits.push(m.quickFormat ? 'быстрое форматирование' : 'полное форматирование');
+          bits.push(meta.quickFormat ? m.rd_op_quick_format() : m.rd_op_full_format());
         } else {
-          bits.push('без форматирования');
+          bits.push(m.rd_op_no_format());
         }
       }
-      bits.push('выравнивание 1 МиБ');
-      ops.push(`Создать раздел ${p.volume_label || '(без метки)'} — ${bits.join(', ')}`);
+      bits.push(m.rd_op_align());
+      ops.push(m.rd_op_create({ name: p.volume_label || m.rd_no_label(), details: bits.join(', ') }));
     }
     if (wholeDiskRestore && previewIdx.length > 0) {
-      ops.push(`Восстановить все разделы копии (${srcBackupParts.length} шт., ${formatBytes(srcTotalBytes)}) и загрузочные данные`);
+      ops.push(m.rd_op_restore_all({ count: srcBackupParts.length, size: formatBytes(srcTotalBytes) }));
     }
-    for (const m of mappings) {
+    for (const mp of mappings) {
       // Mapped, but there is nothing to copy: say what will actually happen
       // instead of promising a restore the plan does not contain.
-      if (layoutOnlyParts.includes(m.src)) {
-        ops.push(
-          `Раздел ${describeSrc(m.src)} — воссоздаётся вместе с таблицей разделов ` +
-            `(«Зарезервировано системой» не содержит данных)`,
-        );
+      if (layoutOnlyParts.includes(mp.src)) {
+        ops.push(m.rd_op_msr({ part: describeSrc(mp.src) }));
         continue;
       }
-      const sp = srcDisk?.partitions.find((x) => x.index === m.src);
-      const dp = cur.find((x) => x.index === m.dst);
+      const sp = srcDisk?.partitions.find((x) => x.index === mp.src);
+      const dp = cur.find((x) => x.index === mp.dst);
       // Same wording as the plan builder's rule, so the list and the plan
       // cannot describe different things.
       const byFiles = !!sp && !!dp && dp.size_bytes < sp.size_bytes;
       const bits = [
         formatBytes(sp?.size_bytes ?? 0),
-        byFiles ? 'пофайлово: приёмник меньше исходного' : 'посекторно, раздел перезаписывается целиком',
+        byFiles ? m.rd_op_by_files() : m.rd_op_by_sectors(),
       ];
-      if (!byFiles && reencrypt && reencryptable.includes(m.src)) {
-        bits.push('с возвратом шифрования');
+      if (!byFiles && reencrypt && reencryptable.includes(mp.src)) {
+        bits.push(m.rd_op_reencrypt());
       }
       ops.push(
-        `Восстановить раздел ${describeSrc(m.src)} → раздел ${describeDst(m.dst)} (${bits.join(', ')})`,
+        m.rd_op_restore_part({ src: describeSrc(mp.src), dst: describeDst(mp.dst), details: bits.join(', ') }),
       );
     }
     return ops;
@@ -1518,12 +1524,12 @@
 
   function clickTargetPart(p: PartitionInfo) {
     if (wholeDiskRestore) {
-      fitMsg = 'В режиме «загрузочный» выберите свободное место, а не существующий раздел.';
+      fitMsg = m.rd_fit_whole_pick_free;
       return;
     }
     if (mappings.some((m) => m.dst === p.index) || previewIdx.includes(p.index)) return; // taken
     if (srcPart == null) {
-      fitMsg = 'Сначала выберите раздел сверху.';
+      fitMsg = m.rd_fit_pick_source_first;
       return;
     }
     const sp = srcDisk?.partitions.find((x) => x.index === srcPart);
@@ -1540,11 +1546,12 @@
         : sp.size_bytes;
     if (p.size_bytes < need) {
       badTarget = p.index;
-      fitMsg =
-        `Раздел не подходит: нужно ≥ ${formatBytes(need)}, а доступно ${formatBytes(p.size_bytes)}.` +
-        (sp.used_bytes > 0
-          ? ' В приёмник меньше исходного тома данные переносятся пофайлово, но и они сюда не влезают.'
-          : '');
+      const needTxt = formatBytes(need);
+      const avail = formatBytes(p.size_bytes);
+      const byFiles = sp.used_bytes > 0;
+      fitMsg = () =>
+        m.rd_fit_too_small({ need: needTxt, avail }) +
+        (byFiles ? ' ' + m.rd_fit_too_small_files() : '');
       return;
     }
     pushHistory();
@@ -1617,17 +1624,17 @@
       return;
     }
     if (!targetDiskId) {
-      fitMsg = 'Шаг 1: выберите диск, на который восстановить.';
+      fitMsg = m.rd_fit_step1;
       return;
     }
     if (operations.length === 0) {
-      fitMsg = wholeDiskRestore
-        ? 'Шаг 2: выберите свободное место для разделов копии.'
-        : 'Шаг 2: сопоставьте хотя бы один раздел.';
+      fitMsg = wholeDiskRestore ? m.rd_fit_step2_whole : m.rd_fit_step2_parts;
       return;
     }
     if (sectorMismatch && wholeDiskRestore) {
-      fitMsg = `Загрузочную копию нельзя восстановить на диск с сектором ${dstSector} Б (копия снята с ${srcSector} Б).`;
+      const src = srcSector;
+      const dst = dstSector;
+      fitMsg = () => m.rd_fit_boot_sector({ dst, src });
       return;
     }
     applyError = null;
@@ -1715,8 +1722,10 @@
   /** "Раздел 5: ..." repeated for 5, 6 and 7 becomes "Разделы 5, 6, 7: ...". */
   function mergedText(g: { message: string; parts: number[] }): string {
     if (g.parts.length < 2) return g.message;
-    const tail = g.message.replace(/^Раздел \d+(\s*\([^)]*\))?/, '').replace(/^\s*:\s*/, ': ');
-    return `Разделы ${g.parts.map(describeDst).join('; ')}${tail}`;
+    // The service words these in the window's language; both openings are
+    // the same shape («Раздел 5 (…)» / "Partition 5 (…)").
+    const tail = g.message.replace(/^(?:Раздел|Partition) \d+(\s*\([^)]*\))?/, '').replace(/^\s*:\s*/, ': ');
+    return m.rd_check_parts_merged({ parts: g.parts.map(describeDst).join('; '), rest: tail });
   }
 
   const checkErrors = $derived(groupByCode(checks.filter((c) => c.level === 'error')));
@@ -1744,19 +1753,19 @@
   /** Why the button is off, in the words that name the thing to fix. */
   const applyBlockedBy = $derived(
     checking
-      ? 'Идёт проверка плана…'
+      ? m.rd_blocked_checking()
       : checkError
-        ? 'План не проверен — запускать нельзя.'
+        ? m.rd_blocked_unchecked()
         : checkErrors.length > 0
-          ? 'Сначала исправьте ошибки выше.'
+          ? m.rd_blocked_errors()
           : !luksReady
-            ? 'Введите пароль контейнера и нажмите «Проверка».'
+            ? m.rd_blocked_luks()
             : '',
   );
 
   /** DESTRUCTIVE — the one place this screen writes to a disk. */
   async function doRestore() {
-    if (confirmText !== 'ДА' || !checkedPlan) return;
+    if (confirmText !== m.common_yes_word() || !checkedPlan) return;
     confirmOpen = false;
     opsOpen = false;
     applyError = null;
@@ -1789,12 +1798,12 @@
     }
   }
 
-  const OP_STATUS_LABEL: Record<string, string> = {
-    pending: 'ожидает',
-    running: 'выполняется',
-    done: 'готово',
-    failed: 'ошибка',
-    skipped: 'пропущено',
+  const OP_STATUS_LABEL: Record<string, () => string> = {
+    pending: m.rd_op_status_pending,
+    running: m.rd_op_status_running,
+    done: m.rd_op_status_done,
+    failed: m.rd_op_status_failed,
+    skipped: m.rd_op_status_skipped,
   };
   // Housekeeping stays out of the queue: a line saying we are about to touch
   // the bootloader raises a question whose answer is usually "nothing
@@ -1831,11 +1840,11 @@
       class="btn ghost tiny"
       disabled={!(luksPw[part] ?? '') || luksPwState[part] === 'checking'}
       onclick={() => checkLuksPassword(part)}
-    >Проверка</button>
-    {#if luksPwState[part] === 'checking'}<span class="pw-note">проверяем…</span>{/if}
-    {#if luksPwState[part] === 'ok'}<span class="pw-ok"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg>подходит</span>{/if}
-    {#if luksPwState[part] === 'bad'}<span class="pw-bad"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18" /></svg>не подходит</span>{/if}
-    {#if luksPwState[part] === 'error'}<span class="pw-bad" title={luksPwError[part]}>не удалось проверить</span>{/if}
+    >{m.rd_pw_check()}</button>
+    {#if luksPwState[part] === 'checking'}<span class="pw-note">{m.rd_pw_checking()}</span>{/if}
+    {#if luksPwState[part] === 'ok'}<span class="pw-ok"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg>{m.rd_pw_ok()}</span>{/if}
+    {#if luksPwState[part] === 'bad'}<span class="pw-bad"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18" /></svg>{m.rd_pw_bad()}</span>{/if}
+    {#if luksPwState[part] === 'error'}<span class="pw-bad" title={luksPwError[part]}>{m.rd_pw_check_failed()}</span>{/if}
   </span>
 {/snippet}
 
@@ -1845,12 +1854,14 @@
 
 {#snippet copyNav()}
   <div class="copynav">
-    <button class="cn-btn" title="Более старая копия" aria-label="Более старая копия"
+    <button class="cn-btn" title={m.rd_older_copy()} aria-label={m.rd_older_copy()}
       disabled={!hasMultiple || copyIndex >= versions.length - 1} onclick={() => { copyIndex += 1; resetMapping(); }}
       ><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7" /></svg></button>
     <span class="cn-date"
       title={activeInfo
-        ? `Копию сделала Own Backup ${activeInfo.app_version || '— версия не записана (сборка старше 0.1.1)'}`
+        ? activeInfo.app_version
+          ? m.rd_made_by({ version: activeInfo.app_version })
+          : m.rd_made_by_unknown()
         : ''}
     >{copyDate}</span>
     <!-- Which build wrote this copy. Small, next to the date, and the first
@@ -1861,10 +1872,10 @@
     <!-- Which of how many: the arrows alone do not say there is anything to
          page to, nor where in the chain this copy stands. Oldest is 1. -->
     {#if hasMultiple}
-      <span class="cn-ver" title="Копия {versions.length - copyIndex} из {versions.length}, по времени создания"
+      <span class="cn-ver" title={m.rd_copy_n_of({ n: versions.length - copyIndex, total: versions.length })}
         >{versions.length - copyIndex}/{versions.length}</span>
     {/if}
-    <button class="cn-btn" title="Более новая копия" aria-label="Более новая копия"
+    <button class="cn-btn" title={m.rd_newer_copy()} aria-label={m.rd_newer_copy()}
       disabled={!hasMultiple || copyIndex <= 0} onclick={() => { copyIndex -= 1; resetMapping(); }}
       ><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7" /></svg></button>
   </div>
@@ -1885,16 +1896,15 @@
     <!-- WHAT: the disk this copy captured — same read-only map as Параметры → Источник -->
     <div class="sec-head">
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent-text)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="3"/><circle cx="12" cy="12" r="3.5"/></svg>
-      <span class="sec-title">Что восстановить</span>
-      <span class="sec-sub">разделы, вошедшие в эту копию</span>
+      <span class="sec-title">{m.rd_what_title()}</span>
+      <span class="sec-sub">{m.rd_what_sub()}</span>
     </div>
 
     {#if keyNeeded}
       <div class="key-note">
         <svg class="kn-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--info)" stroke-width="2" stroke-linecap="round"><rect x="5" y="11" width="14" height="9" rx="2" /><path d="M8 11V8a4 4 0 0 1 8 0v3" /></svg>
-        <span>Копия зашифрована. Пока не введён пароль, карта ниже построена по настройкам
-          задания, а не по самой копии, и восстановить её нельзя.</span>
-        <button class="btn ghost tiny" onclick={() => askKey()}>Ввести пароль</button>
+        <span>{m.rd_key_note()}</span>
+        <button class="btn ghost tiny" onclick={() => askKey()}>{m.rd_enter_password()}</button>
       </div>
     {/if}
 
@@ -1923,14 +1933,14 @@
         {/each}
       </div>
     {:else if copiesLoading || infoLoading || (engine.volumesLoading && engine.disks.length === 0)}
-      <div class="loading-note">Чтение копии…</div>
+      <div class="loading-note">{m.rd_reading_copy()}</div>
     {:else}
       <!-- Only once everything that could describe the copy has been asked and
            answered — BOTH reads, not just the folder scan. Missing the second
            one left this reachable mid-load, so it appeared for a moment on
            every visit and then withdrew itself; on an encrypted copy that
            moment is however long Argon2id takes. -->
-      <div class="warn-note">Диск этой копии сейчас не подключён — карту показать нельзя.</div>
+      <div class="warn-note">{m.rd_disk_not_connected()}</div>
     {/if}
 
     <!-- The copy holds the volume decrypted, so the restore cannot put the
@@ -1948,81 +1958,56 @@
         <div class="luks-row">
           <label class="luks-opt">
             <input type="checkbox" bind:checked={reencrypt} />
-            <b>Вернуть шифрование{reencryptable.length > 1
-              ? ` разделам ${reencryptable.map(describeSrc).join('; ')}`
-              : ` разделу ${describeSrc(reencryptable[0])}`}</b>
+            <b>{reencryptable.length > 1
+              ? m.rd_reencrypt_parts({ parts: reencryptable.map(describeSrc).join('; ') })
+              : m.rd_reencrypt_part({ part: describeSrc(reencryptable[0]) })}</b>
           </label>
           {#if reencrypt && reencryptable.length === 1}
-            {@render pwRow(reencryptable[0], 'Введите пароль:')}
+            {@render pwRow(reencryptable[0], m.rd_pw_enter_label())}
           {/if}
         </div>
-        <div class="luks-note">
-          Заголовок контейнера сохранён в копии. Раздел восстановится ровно таким, каким был —
-          тот же UUID, тот же пароль — и система загрузится без единой правки.
-          В копии пароль не хранится: он нужен только чтобы открыть заголовок и зашифровать
-          данные обратно. Оставите поле пустым — раздел восстановится без шифрования,
-          о последствиях предупредим перед запуском.
-        </div>
+        <div class="luks-note">{m.rd_luks_note()}</div>
         {#if reencrypt && reencryptable.length > 1}
           {#each reencryptable as part}
-            <div class="pw-multi">{@render pwRow(part, `Раздел ${describeSrc(part)} — пароль:`)}</div>
+            <div class="pw-multi">{@render pwRow(part, m.rd_pw_part_label({ part: describeSrc(part) }))}</div>
           {/each}
         {/if}
         {#if !reencrypt}
           <div class="luks-warn inner">
             <svg class="sw-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--warning)" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2" /><path d="M8 11V8a4 4 0 0 1 7.7-1.5" /></svg>
             <span>
-              Без шифрования в разделе окажется обычная файловая система без контейнера.
-              Данные будут целы и читаемы, но <b>Linux с такого раздела не загрузится</b>:
-              initramfs и <code>/etc/crypttab</code> ждут зашифрованное устройство, которого больше нет.
-              Понадобится Live CD: убрать запись из <code>/etc/crypttab</code>, поправить
-              <code>/etc/fstab</code> на UUID самого раздела и пересобрать initramfs.
+              {m.rd_luks_plain_fs()}
+              {@html m.rd_luks_no_boot_html()}
             </span>
           </div>
         {/if}
       </div>
     {:else if decryptedParts.length > 0}
       {@const one = decryptedParts.length === 1}
+      {@const kind = allBitLocker ? ' (BitLocker)' : allLuks ? ' (LUKS)' : ''}
       <div class="luks-warn">
         <svg class="sw-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--warning)" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2" /><path d="M8 11V8a4 4 0 0 1 7.7-1.5" /></svg>
         <span>
-          <b>Шифрование не восстановится.</b>
-          {one ? 'Раздел' : 'Разделы'}
-          {decryptedParts.map(describeSrc).join('; ')}
-          {one ? 'был зашифрован' : 'были зашифрованы'}{allBitLocker
-            ? ' (BitLocker)'
-            : allLuks
-              ? ' (LUKS)'
-              : ''}, но в копию {one ? 'попал' : 'попали'} в расшифрованном виде.
+          <b>{m.rd_enc_lost_title()}</b>
+          {one
+            ? m.rd_enc_lost_one({ part: describeSrc(decryptedParts[0]), kind })
+            : m.rd_enc_lost_many({ parts: decryptedParts.map(describeSrc).join('; '), kind })}
           <br />
           {#if allBitLocker}
             <!-- Windows boots from a decrypted volume without a word: the
                  loader reads plain NTFS. Nothing to repair — only protection to
                  turn back on, and only the user can decide to. -->
-            Данные будут целы и читаемы, и <b>Windows с такого раздела загрузится</b> —
-            загрузчику расшифрованный NTFS подходит. Но диск останется незащищённым:
-            после восстановления включите BitLocker заново («Панель управления» →
-            «Шифрование диска BitLocker»), иначе копия ваших данных лежит открытой.
+            {@html m.rd_bitlocker_boots_html()}
             <br />
-            Заголовок BitLocker в копии не хранится, и вернуть шифрование при
-            восстановлении Own Backup пока не умеет — это делает сама Windows.
+            {m.rd_bitlocker_no_header()}
           {:else if allLuks}
-            Данные будут целы и читаемы, но <b>Linux с такого раздела не загрузится</b>:
-            initramfs и <code>/etc/crypttab</code> ждут зашифрованное устройство, которого больше нет.
-            Понадобится Live CD: убрать запись из <code>/etc/crypttab</code>, поправить
-            <code>/etc/fstab</code> на UUID самого раздела и пересобрать initramfs.
+            {@html m.rd_luks_no_boot_html()}
             <br />
-            Заголовок контейнера в этой копии не сохранён — так писались копии раньше.
-            Следующие копии этого задания сохранят его: тогда раздел восстановится
-            вместе с шифрованием.
+            {m.rd_luks_no_header()}
           {:else}
             <!-- An old copy that did not record what the container was. Naming
                  one would be a guess, and the two fail in opposite ways. -->
-            Данные будут целы и читаемы, но том восстановится без шифрования — какой
-            это был контейнер, копия не записала (так писались копии раньше).
-            Если BitLocker — включите его заново после восстановления. Если LUKS —
-            система с такого раздела не загрузится, пока не убрана запись из
-            <code>/etc/crypttab</code> и не пересобран initramfs.
+            {@html m.rd_enc_unknown_html()}
           {/if}
         </span>
       </div>
@@ -2030,15 +2015,15 @@
 
     {#if catData}
       <div class="cat-block">
-        <div class="cat-head">Что в копии — по типам файлов</div>
+        <div class="cat-head">{m.rd_cat_head()}</div>
         <div class="catbar">
           {#each barData?.filter((c) => c.bytes > 0) ?? [] as c}<div class="catseg" style="width:{c.pct}%; background:{c.color}" title="{c.name}: {formatBytes(c.bytes)}"></div>{/each}
         </div>
         <div class="cats">
           {#each catData as c}
-            <div class="cat"><span class="dot" style="background:{c.color}"></span><span class="cat-name">{c.name}</span><span class="cat-size">{formatBytes(c.bytes)}</span></div>
+            <div class="cat"><span class="dot" style="background:{c.color}"></span><span class="cat-name">{c.name()}</span><span class="cat-size">{formatBytes(c.bytes)}</span></div>
           {/each}
-          <div class="cat"><span class="dot" style:background={EXCLUDED_COLOR}></span><span class="cat-name">Исключено</span><span class="cat-size">{formatBytes(excluded.bytes)}</span></div>
+          <div class="cat"><span class="dot" style:background={EXCLUDED_COLOR}></span><span class="cat-name">{m.cat_excluded()}</span><span class="cat-size">{formatBytes(excluded.bytes)}</span></div>
         </div>
       </div>
     {/if}
@@ -2056,15 +2041,15 @@
     <!-- WHERE: step 1 = pick a disk; step 2/3 = map partitions onto it -->
     <div class="sec-head">
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent-text)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="3"/><circle cx="12" cy="12" r="3.5"/></svg>
-      <span class="sec-title">Куда восстановить</span>
+      <span class="sec-title">{m.rd_where_title()}</span>
       <span class="sec-sub">
-        {#if !targetDiskId}кликните диск, на который восстановить{:else}кликните раздел — куда скопировать{/if}
+        {#if !targetDiskId}{m.rd_where_sub_disk()}{:else}{m.rd_where_sub_part()}{/if}
       </span>
     </div>
     {#if systemDisks.length === 0}
       <div class="loading-note searching">
         <span class="spinner" aria-hidden="true"></span>
-        Поиск дисков для восстановления…
+        {m.rd_searching_disks()}
       </div>
     {:else if !targetDiskId}
       <div class="disks">
@@ -2095,39 +2080,37 @@
         <div class="sector-warn">
           <svg class="sw-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--error)" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l9 16H3z" /><path d="M12 10v4M12 17h.01" /></svg>
           <span>
-            <b>Разный размер сектора.</b>
-            Копия снята с диска с логическим сектором <b>{srcSector} Б</b>, у выбранного диска — <b>{dstSector} Б</b>.
-            Разметка GPT хранит положение разделов в номерах секторов (LBA), поэтому на таком диске она означала бы
-            другие смещения в байтах — воспроизвести её один-в-один нельзя.
+            <b>{m.rd_sector_title()}</b>
+            {@html m.rd_sector_body_html({ src: esc(srcSector), dst: esc(dstSector) })}
             {#if wholeDiskRestore}
-              Восстановление загрузочной копии сюда недоступно: выберите диск с сектором {srcSector} Б.
+              {m.rd_sector_whole({ src: srcSector })}
             {:else}
-              Отдельные разделы восстановить можно, но загрузочную цепочку придётся чинить отдельно.
+              {m.rd_sector_parts()}
             {/if}
           </span>
         </div>
       {/if}
       <div class="hint-small">
         {#if wholeDiskRestore}
-          Правый клик по разделу или свободному месту — создать / удалить раздел.
+          {m.rd_hint_whole()}
         {:else}
-          Клик по свободному месту — создать раздел. Правый клик по разделу — расширить или удалить.
+          {m.rd_hint_parts()}
         {/if}
       </div>
       <!-- Undo everything and go back to step 1 (pick a disk). -->
       <div class="under-card">
         <button
           class="btn ghost small icon"
-          title="Отменить последнее действие"
-          aria-label="Отменить последнее действие"
+          title={m.rd_undo()}
+          aria-label={m.rd_undo()}
           disabled={!canUndo}
           onclick={undo}
         >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14 4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-4"/></svg>
         </button>
-        <button class="btn ghost small" onclick={pickAnotherDisk}>Отмена</button>
+        <button class="btn ghost small" onclick={pickAnotherDisk}>{m.common_cancel()}</button>
       </div>
-      {#if fitMsg}<div class="fit-msg" class:bad={badTarget !== null}>{fitMsg}</div>{/if}
+      {#if fitMsg}<div class="fit-msg" class:bad={badTarget !== null}>{fitMsg()}</div>{/if}
     {/if}
   {/if}
 
@@ -2137,12 +2120,12 @@
     <div class="run">
       <div class="run-head">
         <span class="run-title">
-          {#if planRun.status === 'running'}Восстановление…
-          {:else if planRun.status === 'completed'}Восстановление завершено
-          {:else if planRun.status === 'cancelled'}Восстановление прервано
-          {:else}Восстановление не завершилось{/if}
+          {#if planRun.status === 'running'}{m.rd_run_running()}
+          {:else if planRun.status === 'completed'}{m.rd_run_completed()}
+          {:else if planRun.status === 'cancelled'}{m.rd_run_cancelled()}
+          {:else}{m.rd_run_failed()}{/if}
         </span>
-        <span class="run-sub">Диск {planRun.target_disk} · операций: {shownOps(planRun).length}</span>
+        <span class="run-sub">{m.rd_run_sub({ disk: planRun.target_disk, count: shownOps(planRun).length })}</span>
       </div>
       <ol class="ops-run">
         {#each shownOps(planRun) as o}
@@ -2162,21 +2145,21 @@
               {#if o.message}<span class="op-msg">{o.message}</span>{/if}
             </span>
             <span class="op-state">
-              {#if o.status === 'running' && o.percent > 0}{o.percent}%{:else}{OP_STATUS_LABEL[o.status]}{/if}
+              {#if o.status === 'running' && o.percent > 0}{o.percent}%{:else}{OP_STATUS_LABEL[o.status]?.()}{/if}
             </span>
           </li>
         {/each}
       </ol>
       {#if planRun.follow_ups.length > 0}
         <div class="run-followups">
-          <div class="run-fu-head">Что осталось сделать</div>
+          <div class="run-fu-head">{m.rd_followups_head()}</div>
           {#each planRun.follow_ups as f}<div class="finding warn">{f}</div>{/each}
         </div>
       {/if}
       {#if planRun.status !== 'running'}
         <div class="under-card">
           <button class="btn ghost small" onclick={dismissRun}>
-            Вернуться к выбору
+            {m.rd_back_to_choice()}
           </button>
         </div>
       {/if}
@@ -2188,21 +2171,21 @@
   {#if running}
     <div class="progress-wrap">
       <div class="progress-info">
-        <span>Восстановление…</span>
+        <span>{m.rd_run_running()}</span>
         {#if progress}
-          <span>{progress.blocks_done} / {progress.blocks_total} блоков · {progress.speed_mbps.toFixed(1)} МБ/с</span>
+          <span>{m.rd_progress_blocks({ done: progress.blocks_done, total: progress.blocks_total, speed: progress.speed_mbps.toFixed(1) })}</span>
         {/if}
       </div>
       <div class="bar"><div class="bar-fill" style="width:{progress?.percent ?? 0}%"></div></div>
       <div class="progress-meta">
         <span class="route">{job.name} → {targetLabel}</span>
-        <span class="times">Прошло {formatClock(elapsedMs)} · Осталось {Number.isFinite(eta) ? '~' + formatClock(eta) : 'оценка…'}</span>
+        <span class="times">{m.rd_elapsed_left({ elapsed: formatClock(elapsedMs), left: Number.isFinite(eta) ? '~' + formatClock(eta) : m.rd_estimating() })}</span>
       </div>
     </div>
   {/if}
 
   {#if summary && !running}
-    <div class="banner ok"><span class="bdot"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg></span><span>Восстановление завершено: {formatBytes(summary.bytes_restored)} за {summary.duration_secs.toFixed(1)} с.</span></div>
+    <div class="banner ok"><span class="bdot"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg></span><span>{m.rd_done_summary({ size: formatBytes(summary.bytes_restored), secs: summary.duration_secs.toFixed(1) })}</span></div>
   {/if}
   {#if errorMsg}<div class="banner err">{@render errIcon()}<span>{errorMsg}</span></div>{/if}
 </div>
@@ -2210,41 +2193,41 @@
   <div class="footer">
     <div class="hint">
       {#if backupBusy}
-        Идёт резервное копирование — восстановление недоступно.
+        {m.rd_hint_backup_busy()}
       {:else}
-        Восстанавливается последняя копия. Отдельные файлы — через «Инструменты → Подключить как диск».
+        {m.rd_hint_default()}
       {/if}
     </div>
     {#if planRunning}
       <!-- Dark on a point of no return: the service refuses there, and a button
            that looks alive while nothing happens is worse than one that does not. -->
-      <button class="btn danger" onclick={cancelPlanRun} disabled={!planRun?.cancellable}>Отмена</button>
+      <button class="btn danger" onclick={cancelPlanRun} disabled={!planRun?.cancellable}>{m.common_cancel()}</button>
     {:else if running}
-      <button class="btn danger" onclick={cancelCurrent}>Отмена</button>
+      <button class="btn danger" onclick={cancelCurrent}>{m.common_cancel()}</button>
     {:else if !planRun}
-      <button class="btn green" onclick={askConfirm} disabled={!canRestore || backupBusy}>Восстановить</button>
+      <button class="btn green" onclick={askConfirm} disabled={!canRestore || backupBusy}>{m.rd_restore()}</button>
     {/if}
   </div>
 </div>
 
-{#if stubMsg}<InfoModal title="Отменить нельзя" message={stubMsg} onClose={() => (stubMsg = null)} />{/if}
+{#if stubMsg}<InfoModal title={m.rd_cannot_cancel()} message={stubMsg} onClose={() => (stubMsg = null)} />{/if}
 
 <!-- Right-click menu of the simple partition editor -->
 {#if menu}
   <div class="menu-backdrop" role="presentation" oncontextmenu={(e) => { e.preventDefault(); menu = null; }} onclick={() => (menu = null)}></div>
   <div class="ctx-menu" style="left:{menu.x}px; top:{menu.y}px">
-    <div class="ctx-title">Действия</div>
+    <div class="ctx-title">{m.rd_ctx_actions()}</div>
     {#if menu.part}
       {#if canExtend >= 0}
-        <button onclick={() => extendPart(canExtend)}>Расширить раздел</button>
+        <button onclick={() => extendPart(canExtend)}>{m.rd_ctx_extend()}</button>
       {/if}
       <!-- Last, and set off by a rule: the one item here that destroys
            something should not sit under the cursor by default. -->
-      <button class="danger" onclick={() => { const p = menu!.part!; menu = null; delConfirm = p; }}>Удалить раздел</button>
+      <button class="danger" onclick={() => { const p = menu!.part!; menu = null; delConfirm = p; }}>{m.rd_ctx_delete()}</button>
     {:else}
-      <button onclick={() => openCreate(menu!.offset ?? 0, menu!.size ?? 0)}>Создать раздел</button>
+      <button onclick={() => openCreate(menu!.offset ?? 0, menu!.size ?? 0)}>{m.rd_create_part()}</button>
       {#if canExtend >= 0}
-        <button onclick={() => extendPart(canExtend)}>Присоединить раздел</button>
+        <button onclick={() => extendPart(canExtend)}>{m.rd_ctx_join()}</button>
       {/if}
     {/if}
   </div>
@@ -2254,14 +2237,16 @@
 {#if delConfirm}
   <div class="overlay">
     <div class="dialog">
-      <div class="dialog-title">Удалить раздел?</div>
+      <div class="dialog-title">{m.rd_del_title()}</div>
       <p>
-        Раздел <b>{delConfirm.volume_letter ? delConfirm.volume_letter + ': ' : ''}{delConfirm.volume_label || '(без метки)'}</b>
-        — {formatBytes(delConfirm.size_bytes)}. Место станет не распределённым.
+        {@html m.rd_del_body_html({
+          name: esc(`${delConfirm.volume_letter ? delConfirm.volume_letter + ': ' : ''}${delConfirm.volume_label || m.rd_no_label()}`),
+          size: esc(formatBytes(delConfirm.size_bytes)),
+        })}
       </p>
       <div class="dialog-actions">
-        <button class="btn ghost" onclick={() => (delConfirm = null)}>Нет</button>
-        <button class="btn danger-solid" onclick={doDelete}>Да, удалить</button>
+        <button class="btn ghost" onclick={() => (delConfirm = null)}>{m.rd_no()}</button>
+        <button class="btn danger-solid" onclick={doDelete}>{m.rd_yes_delete()}</button>
       </div>
     </div>
   </div>
@@ -2271,12 +2256,12 @@
 {#if createDlg}
   <div class="overlay">
     <div class="dialog">
-      <div class="dialog-title">Создать раздел</div>
+      <div class="dialog-title">{m.rd_create_part()}</div>
       <!-- Exact, not rounded: `formatBytes` shows 130.28 GiB as "130 GiB", which
            made the pre-filled size look like it covered everything. -->
-      <p>Свободно: <b>{preciseSize(createDlg.max)}</b></p>
+      <p>{m.rd_free_label()} <b>{preciseSize(createDlg.max)}</b></p>
       <label class="fld">
-        <span>Размер</span>
+        <span>{m.rd_size()}</span>
         <span class="fld-row">
           <input type="text" bind:value={createDlg.size} spellcheck="false" />
           <select class="unit" bind:value={createDlg.unit}>
@@ -2288,14 +2273,14 @@
       </label>
       <div class="row2">
         <label class="fld">
-          <span>Файловая система</span>
+          <span>{m.rd_filesystem()}</span>
           <!-- Only filesystems Windows can actually create (D9). A Linux
                partition is made by picking the GPT type on the right and
                leaving this on "не форматировать" — Windows has no mkfs for
                ext4, and offering it here would produce a partition the queue
                claims is formatted and that is in fact empty. -->
           <select value={createDlg.fs} onchange={(e) => onFsChange((e.currentTarget as HTMLSelectElement).value)}>
-            <option value="">Не форматировать</option>
+            <option value="">{m.rd_no_format_opt()}</option>
             <option value="ntfs">NTFS</option>
             <option value="fat32">FAT32</option>
             <option value="exfat">exFAT</option>
@@ -2304,17 +2289,17 @@
         </label>
         {#if isGpt}
           <label class="fld">
-            <span>Тип раздела (GPT)</span>
+            <span>{m.rd_part_type_gpt()}</span>
             <select bind:value={createDlg.gptType}>
-              {#each GPT_TYPES as t}<option value={t.guid}>{t.name}</option>{/each}
+              {#each GPT_TYPES as t}<option value={t.guid}>{t.name()}</option>{/each}
             </select>
           </label>
         {:else}
           <label class="fld">
-            <span>Тип раздела (MBR)</span>
+            <span>{m.rd_part_type_mbr()}</span>
             <select bind:value={createDlg.mbrKind}>
-              <option value="primary">Основной</option>
-              <option value="logical">Логический</option>
+              <option value="primary">{m.rd_mbr_primary()}</option>
+              <option value="logical">{m.rd_mbr_logical()}</option>
             </select>
           </label>
         {/if}
@@ -2322,30 +2307,30 @@
       {#if !isGpt}
         <label class="chk">
           <input type="checkbox" bind:checked={createDlg.active} />
-          Активный (загрузка BIOS с этого раздела)
+          {m.rd_active_bios()}
         </label>
       {/if}
       <div class="row2">
         <label class="fld">
-          <span>Метка тома</span>
-          <input type="text" bind:value={createDlg.label} placeholder="например, Data" spellcheck="false" />
+          <span>{m.rd_volume_label()}</span>
+          <input type="text" bind:value={createDlg.label} placeholder={m.rd_volume_label_ph()} spellcheck="false" />
         </label>
         <label class="fld">
-          <span>Буква диска</span>
+          <span>{m.rd_drive_letter()}</span>
           <select bind:value={createDlg.letter}>
-            <option value="">— не назначать —</option>
+            <option value="">{m.rd_no_letter()}</option>
             {#each freeLetters as l}<option value={l}>{l}:</option>{/each}
           </select>
         </label>
       </div>
       <label class="chk">
         <input type="checkbox" bind:checked={createDlg.quickFormat} />
-        Быстрое форматирование
+        {m.rd_quick_format()}
       </label>
-      <p class="fld-note">Начало раздела выравнивается на 1 МиБ — иначе каждая запись задевала бы два физических сектора и работала бы вдвое медленнее.</p>
+      <p class="fld-note">{m.rd_align_note()}</p>
       <div class="dialog-actions">
-        <button class="btn ghost" onclick={() => (createDlg = null)}>Отмена</button>
-        <button class="btn primary-solid" onclick={doCreate}>Создать</button>
+        <button class="btn ghost" onclick={() => (createDlg = null)}>{m.common_cancel()}</button>
+        <button class="btn primary-solid" onclick={doCreate}>{m.rd_create()}</button>
       </div>
     </div>
   </div>
@@ -2355,18 +2340,18 @@
 {#if opsOpen}
   <div class="overlay">
     <div class="dialog wide">
-      <div class="dialog-title">Проверка плана восстановления</div>
+      <div class="dialog-title">{m.rd_check_title()}</div>
 
       {#if checking}
-        <div class="finding-line"><span class="spinner"></span> Проверяем план…</div>
+        <div class="finding-line"><span class="spinner"></span> {m.rd_check_running()}</div>
       {:else if checkError}
         <div class="finding err">
-          <b>Проверить план не удалось</b>
+          <b>{m.rd_check_failed()}</b>
           <div>{checkError}</div>
-          <div class="finding-note">Ниже — очередь операций, но она не проверена.</div>
+          <div class="finding-note">{m.rd_check_failed_note()}</div>
         </div>
       {:else if checks.length === 0}
-        <div class="finding ok">Проверки не нашли препятствий.</div>
+        <div class="finding ok">{m.rd_check_ok()}</div>
       {:else}
         {#each checkErrors as g}
           <div class="finding err">{mergedText(g)}</div>
@@ -2381,12 +2366,13 @@
 
       {#each letterChanges as lc}
         <div class="finding info">
-          Раздел {lc.part_index}: буква {lc.requested}: занята —
-          {lc.assigned ? `назначим ${lc.assigned}:` : 'свободных букв не осталось'}.
+          {lc.assigned
+            ? m.rd_letter_reassigned({ part: lc.part_index, requested: lc.requested, assigned: lc.assigned })
+            : m.rd_letter_none({ part: lc.part_index, requested: lc.requested })}
         </div>
       {/each}
 
-      <div class="dialog-title sub">Будут выполнены следующие операции</div>
+      <div class="dialog-title sub">{m.rd_ops_title()}</div>
       <ol class="ops">
         {#each operations as op}<li>{op}</li>{/each}
       </ol>
@@ -2394,14 +2380,13 @@
       <label class="opt">
         <input type="checkbox" bind:checked={wipeFreeSpace} />
         <span>
-          Затирать свободное место <span class="opt-cost">(увеличивает время восстановления)</span>
-          <em>копируются только занятые блоки, поэтому в промежутках физически остаются
-            прежние данные — файловая система их не видит</em>
+          {m.rd_wipe()} <span class="opt-cost">{m.rd_wipe_cost()}</span>
+          <em>{m.rd_wipe_note()}</em>
         </span>
       </label>
       <label class="opt">
         <input type="checkbox" bind:checked={verifyAfter} />
-        <span>Проверять записанное после восстановления</span>
+        <span>{m.rd_verify_after()}</span>
       </label>
 
       <!-- The password field is not repeated here. It lives on the page, next
@@ -2412,17 +2397,15 @@
       {#if applyBlockedBy}
         <p class="ops-note">{applyBlockedBy}</p>
       {:else}
-        <p class="ops-note">
-          Дальше данные на диске будут перезаписаны. Отменить это будет нельзя.
-        </p>
+        <p class="ops-note">{m.rd_point_of_no_return()}</p>
       {/if}
       <div class="dialog-actions">
-        <button class="btn ghost" onclick={() => (opsOpen = false)}>Закрыть</button>
+        <button class="btn ghost" onclick={() => (opsOpen = false)}>{m.common_close()}</button>
         <button
           class="btn danger-solid"
           disabled={!canApply}
           onclick={onFinalRestore}
-        >Восстановить</button>
+        >{m.rd_restore()}</button>
       </div>
     </div>
   </div>
@@ -2435,17 +2418,13 @@
 {#if bootDialogOpen && bootEntries}
   <div class="overlay">
     <div class="dialog wide">
-      <div class="dialog-title">Восстановить записи загрузки?</div>
-      <p>
-        В копии сохранено меню загрузки этой машины — то, что предлагает прошивка
-        при включении. Оно лежит в памяти материнской платы, а не на диске,
-        поэтому вместе с разделами не восстанавливается.
-      </p>
+      <div class="dialog-title">{m.rd_boot_title()}</div>
+      <p>{m.rd_boot_intro()}</p>
       <p class="boot-src">
-        Снято {formatDate(bootEntries.taken_at)} на машине <b>{bootEntries.machine}</b>.
+        {m.rd_boot_taken({ date: formatDate(bootEntries.taken_at) })} <b>{bootEntries.machine}</b>.
       </p>
 
-      <div class="dialog-title sub">Будет записано</div>
+      <div class="dialog-title sub">{m.rd_boot_will_write()}</div>
       <ul class="boot-list">
         {#each bootEntries.entries as e}
           <li>
@@ -2455,22 +2434,16 @@
           </li>
         {/each}
       </ul>
-      <p class="ops-note">
-        Всего переменных прошивки: {bootEntries.variables}. Нынешние записи будут
-        сохранены в файл перед заменой.
-      </p>
+      <p class="ops-note">{m.rd_boot_vars({ count: bootEntries.variables })}</p>
       {#if fromAnotherMachine}
         <p class="finding warn">
-          Копия снята на другой машине («{bootEntries.machine}», а эта —
-          «{bootEntries.this_machine}»). Записи указывают на разделы по их GUID,
-          и здесь таких разделов может не быть — пункты появятся в меню и не
-          заработают.
+          {m.rd_boot_other_machine({ machine: bootEntries.machine, this_machine: bootEntries.this_machine })}
         </p>
       {/if}
 
       <div class="dialog-actions">
-        <button class="btn ghost" onclick={() => answerBootEntries(false)}>Нет, не надо</button>
-        <button class="btn danger-solid" onclick={() => answerBootEntries(true)}>Да, восстановить</button>
+        <button class="btn ghost" onclick={() => answerBootEntries(false)}>{m.rd_boot_no()}</button>
+        <button class="btn danger-solid" onclick={() => answerBootEntries(true)}>{m.rd_boot_yes()}</button>
       </div>
     </div>
   </div>
@@ -2479,18 +2452,20 @@
 {#if confirmOpen}
   <div class="overlay">
     <div class="dialog">
-      <div class="dialog-title">Подтверждение восстановления</div>
+      <div class="dialog-title">{m.rd_confirm_title()}</div>
       <p>
-        На диске <b>{targetDisk?.model ?? ''}</b> будет перезаписана разметка и данные
-        сопоставленных разделов — копией <b>{job.name}</b> от
-        {copyDate}.
+        {@html m.rd_confirm_body_html({
+          disk: esc(targetDisk?.model ?? ''),
+          job: esc(job.name),
+          date: esc(copyDate),
+        })}
       </p>
-      <p class="no-undo"><b>Отката нет.</b> Всё, что сейчас на затронутых разделах, будет потеряно.</p>
-      <p>Введите <b>ДА</b> (заглавными), чтобы продолжить:</p>
+      <p class="no-undo"><b>{m.rd_no_undo_bold()}</b> {m.rd_no_undo_rest()}</p>
+      <p>{@html m.rd_confirm_type_html({ word: esc(m.common_yes_word()) })}</p>
       <input type="text" bind:value={confirmText} spellcheck="false" />
       <div class="dialog-actions">
-        <button class="btn ghost" onclick={() => (confirmOpen = false)}>Отмена</button>
-        <button class="btn danger-solid" disabled={confirmText !== 'ДА'} onclick={doRestore}>Восстановить</button>
+        <button class="btn ghost" onclick={() => (confirmOpen = false)}>{m.common_cancel()}</button>
+        <button class="btn danger-solid" disabled={confirmText !== m.common_yes_word()} onclick={doRestore}>{m.rd_restore()}</button>
       </div>
     </div>
   </div>
@@ -2549,7 +2524,7 @@
   .sector-warn { display: flex; gap: 10px; margin-top: 12px; padding: 12px 14px; border-radius: 8px; background: var(--error-soft); border: 1px solid var(--error-line); font-size: 13px; color: var(--error-text); line-height: 1.5; }
   .sw-ico { flex-shrink: 0; margin-top: 1px; }
   .luks-warn { display: flex; gap: 10px; margin-top: 14px; padding: 12px 14px; border-radius: 8px; background: var(--warning-soft); border: 1px solid var(--warning-line); font-size: 13px; color: var(--warning-text); line-height: 1.55; }
-  .luks-warn code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; background: var(--sunken); padding: 1px 4px; border-radius: 3px; }
+  .luks-warn :global(code) { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; background: var(--sunken); padding: 1px 4px; border-radius: 3px; }
   .luks-warn.inner { margin-top: 10px; }
   .luks-box { margin-top: 14px; padding: 12px 14px; border-radius: 8px; border: 1px solid var(--border); background: var(--card-bg); }
   .luks-opt { display: flex; align-items: flex-start; gap: 10px; font-size: 13px; color: var(--head); cursor: pointer; line-height: 1.5; }
@@ -2675,9 +2650,10 @@
   .dialog { width: 400px; background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px; padding: 24px; box-shadow: var(--shadow-lg); }
   .dialog-title { font-size: 17px; font-weight: 600; color: var(--head); margin-bottom: 12px; }
   .dialog p { font-size: 13px; color: var(--text-secondary); margin-bottom: 10px; line-height: 1.5; }
-  .dialog p b { color: var(--head); }
+  /* :global — part of these paragraphs is a translated message ({@html}). */
+  .dialog p :global(b) { color: var(--head); }
   /* The point of no return, in the colour of one (design: the red «Отката нет» plate). */
-  .dialog p.no-undo, .dialog p.no-undo b { color: var(--error-text); }
+  .dialog p.no-undo, .dialog p.no-undo :global(b) { color: var(--error-text); }
   /* Only the confirm dialog's own text box — a bare `.dialog input` would also
      stretch checkboxes to full width and push their labels out of the dialog. */
   .dialog > input { width: 100%; padding: 9px 12px; border: 1px solid var(--border-strong); border-radius: 6px; font-size: 14px; margin-bottom: 16px; background: var(--input-bg); color: var(--text); }

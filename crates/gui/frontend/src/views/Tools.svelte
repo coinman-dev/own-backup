@@ -12,6 +12,7 @@
     refreshVolumes,
   } from '../lib/engineStore.svelte';
   import type { ActiveMount, ArchiveSecret } from '../lib/types';
+  import { m } from '../lib/paraglide/messages';
 
   // --- Opening an encrypted copy (§7.4) ---
   // A manual mount or check never borrows the service's key: whoever is at the
@@ -70,14 +71,16 @@
     }
   }
 
-  let mountMsg: string | null = $state(null);
+  // Functions, not strings: a banner outlives the render it was made in and
+  // must follow a change of language. An error the service sent stays as it is.
+  let mountMsg: (() => string) | null = $state(null);
   let mountErr: string | null = $state(null);
   let mountBusy = $state(false);
 
   let activeMounts: ActiveMount[] = $state([]);
 
-  let verifyMsg: string | null = $state(null);
-  let verifyErr: string | null = $state(null);
+  let verifyMsg: (() => string) | null = $state(null);
+  let verifyErr: (() => string) | null = $state(null);
   let verifyBusy = $state(false);
   const verifyProgress = $derived(engine.verifyProgress);
 
@@ -85,13 +88,13 @@
   let hasLoadedOnce = false;
 
   const mountedItems = $derived(
-    activeMounts.map(m => {
+    activeMounts.map(mnt => {
       // Prefer the letters the service resolved on the mounted disk; fall back
       // to the disk inventory, then to the bare disk number.
-      let letters: string[] = (m.volume_letters ?? []).map(l => l.toUpperCase());
+      let letters: string[] = (mnt.volume_letters ?? []).map(l => l.toUpperCase());
       if (letters.length === 0) {
         const disk = engine.disks.find(d =>
-          d.device_id.toLowerCase() === m.physical_path.toLowerCase()
+          d.device_id.toLowerCase() === mnt.physical_path.toLowerCase()
         );
         if (disk) {
           for (const p of disk.partitions) {
@@ -102,12 +105,12 @@
         }
       }
       if (letters.length === 0) {
-        const mMatch = m.physical_path.match(/PhysicalDrive(\d+)/i);
-        letters.push(mMatch ? `Диск ${mMatch[1]}` : 'Диск');
+        const mMatch = mnt.physical_path.match(/PhysicalDrive(\d+)/i);
+        letters.push(mMatch ? m.tools_disk_n({ n: mMatch[1] }) : m.tools_disk());
       }
-      const active = toolsState.mountPath.toLowerCase() === m.image_path.toLowerCase();
+      const active = toolsState.mountPath.toLowerCase() === mnt.image_path.toLowerCase();
       return {
-        image_path: m.image_path,
+        image_path: mnt.image_path,
         letters,
         active
       };
@@ -115,12 +118,12 @@
   );
 
   const isCurrentPathMounted = $derived(
-    activeMounts.some(m => m.image_path.toLowerCase() === toolsState.mountPath.toLowerCase())
+    activeMounts.some(mnt => mnt.image_path.toLowerCase() === toolsState.mountPath.toLowerCase())
   );
 
   function mountedLettersFor(imagePath: string): string[] {
     const item = mountedItems.find(
-      m => m.image_path.toLowerCase() === imagePath.toLowerCase()
+      it => it.image_path.toLowerCase() === imagePath.toLowerCase()
     );
     return item ? item.letters : [];
   }
@@ -148,7 +151,7 @@
 
   async function browse(setPath: (p: string) => void, extensions = ['vhdx', 'avhdx', 'qcow2', 'obk']) {
     try {
-      const picked = await pickPath({ directory: false, title: 'Выберите образ', extensions });
+      const picked = await pickPath({ directory: false, title: m.tools_pick_image_title(), extensions });
       if (typeof picked === 'string') setPath(picked);
     } catch {
       /* dialog cancelled */
@@ -169,14 +172,18 @@
       await Promise.all([loadData(), refreshVolumes()]);
       // The disk may need a moment for Windows to assign a letter; poll briefly.
       let letters = mountedLettersFor(toolsState.mountPath);
-      for (let i = 0; i < 10 && letters.every(l => l.startsWith('Диск')); i++) {
+      for (let i = 0; i < 10 && letters.every(l => l.startsWith(m.tools_disk())); i++) {
         await new Promise(r => setTimeout(r, 500));
         await loadData();
         letters = mountedLettersFor(toolsState.mountPath);
       }
-      const mode = toolsState.rwMode ? 'чтение и запись' : 'только чтение';
-      const where = letters.length ? letters.join(', ') : 'см. проводник';
-      mountMsg = `Подключено (${mode}): ${where}. Открыть можно в проводнике.`;
+      const rw = toolsState.rwMode;
+      const found = letters.join(', ');
+      mountMsg = () =>
+        m.tools_mounted_msg({
+          mode: rw ? m.tools_mode_rw() : m.tools_mode_ro(),
+          where: found || m.tools_see_explorer(),
+        });
     } catch (e) {
       mountErr = String(e);
       // Rethrown so a wrong password keeps the unlock dialog open with the
@@ -195,7 +202,7 @@
     isRefreshingDisks = true;
     try {
       await api.unmountBackup(toolsState.mountPath);
-      mountMsg = 'Образ отключён.';
+      mountMsg = m.tools_unmounted_msg;
       await Promise.all([loadData(), refreshVolumes()]);
     } catch (e) {
       mountErr = String(e);
@@ -217,13 +224,19 @@
       const v = await runVerify(toolsState.verifyPath, secret, accepted);
       // A damaged copy is a failure, not a result: it goes in the red banner.
       // It used to share the green one with «Целостность подтверждена».
+      const checked = v.blocks_checked;
       if (v.valid) {
-        verifyMsg = `Целостность подтверждена: ${v.blocks_checked} блоков за ${v.duration_secs.toFixed(1)} с.`;
+        const secs = v.duration_secs.toFixed(1);
+        verifyMsg = () =>
+          m.tools_verify_ok({ blocks: m.tools_blocks({ count: checked }), secs });
       } else {
-        verifyErr = `Копия повреждена: не совпали контрольные суммы у ${v.mismatched_blocks.length} из ${v.blocks_checked} блоков.`;
+        const bad = v.mismatched_blocks.length;
+        verifyErr = () =>
+          m.tools_verify_bad({ bad, blocks: m.tools_blocks_of({ count: checked }) });
       }
     } catch (e) {
-      verifyErr = String(e);
+      const text = String(e);
+      verifyErr = () => text;
       throw e; // see mountWith
     } finally {
       verifyBusy = false;
@@ -242,7 +255,7 @@
 
 <div class="page">
   <div class="inner">
-  <h1>Инструменты</h1>
+  <h1>{m.tools_title()}</h1>
 
   <div class="tool-card">
     <div class="tool-head">
@@ -250,11 +263,8 @@
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="13" width="18" height="7" rx="2" /><path d="M5 13l2.5-8h9L19 13M7 16.5h.01" /></svg>
       </span>
       <div>
-        <div class="tool-title">Подключить образ как диск</div>
-        <div class="tool-desc">
-          Образ подключается как диск; тома внутри получают буквы и
-          открываются в проводнике.
-        </div>
+        <div class="tool-title">{m.tools_mount_title()}</div>
+        <div class="tool-desc">{m.tools_mount_desc()}</div>
       </div>
     </div>
     <div class="row">
@@ -266,7 +276,7 @@
         disabled={mountBusy}
       />
       <button class="btn outline btn-browse" onclick={() => browse((p) => (toolsState.mountPath = p), ['vhdx', 'avhdx', 'qcow2', 'obk'])} disabled={mountBusy}>
-        Обзор…
+        {m.common_browse()}
       </button>
     </div>
     <div class="row row-actions">
@@ -276,12 +286,12 @@
             <span class="spinner-icon">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4.5 10A8 8 0 0 1 19 8" /><path d="M19.5 3.5V8H15" /><path d="M19.5 14A8 8 0 0 1 5 16" /><path d="M4.5 20.5V16H9" /></svg>
             </span>
-            <span>Поиск примонтированных дисков...</span>
+            <span>{m.tools_searching_mounts()}</span>
           </span>
         {:else if mountedItems.length === 0}
-          <span class="muted-text">Нет примонтированных дисков</span>
+          <span class="muted-text">{m.tools_no_mounts()}</span>
         {:else}
-          <span>Примонтировано: </span>
+          <span>{m.tools_mounted_label()} </span>
           {#each mountedItems as item, i}
             {#each item.letters as letter, j}
               <button
@@ -301,16 +311,16 @@
           RW Mode
         </label>
         <button class="btn primary" onclick={mount} disabled={mountBusy || !toolsState.mountPath || isCurrentPathMounted}>
-          Подключить
+          {m.tools_mount_btn()}
         </button>
         <!-- Nothing mounted, nothing to detach: the button says so by being
              unavailable, instead of failing on the second press. -->
         <button class="btn outline" onclick={unmount} disabled={mountBusy || !isCurrentPathMounted}>
-          Отключить
+          {m.tools_unmount_btn()}
         </button>
       </div>
     </div>
-    {#if mountMsg}<div class="banner ok">{mountMsg}</div>{/if}
+    {#if mountMsg}<div class="banner ok">{mountMsg()}</div>{/if}
     {#if mountErr}<div class="banner err">{mountErr}</div>{/if}
   </div>
 
@@ -320,10 +330,8 @@
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 3v6c0 4.5-3.4 8-8 9-4.6-1-8-4.5-8-9V6z" /><path d="M8.5 12l2.5 2.5 4.5-5" /></svg>
       </span>
       <div>
-        <div class="tool-title">Проверить образ</div>
-        <div class="tool-desc">
-          Сверяет контрольные суммы каждого блока с метаданными в образе (или файлом .obkm).
-        </div>
+        <div class="tool-title">{m.tools_verify_title()}</div>
+        <div class="tool-desc">{m.tools_verify_desc()}</div>
       </div>
     </div>
     <div class="row">
@@ -335,17 +343,17 @@
         disabled={verifyBusy}
       />
       <button class="btn outline" onclick={() => browse((p) => (toolsState.verifyPath = p))} disabled={verifyBusy}>
-        Обзор…
+        {m.common_browse()}
       </button>
       <button class="btn primary" onclick={verify} disabled={verifyBusy || !toolsState.verifyPath}>
-        {verifyBusy ? 'Проверка…' : 'Проверить'}
+        {verifyBusy ? m.common_checking() : m.tools_verify_btn()}
       </button>
     </div>
     {#if verifyBusy && verifyProgress}
       <div class="bar"><div class="bar-fill" style="width:{verifyProgress.percent}%"></div></div>
     {/if}
-    {#if verifyMsg}<div class="banner ok">{verifyMsg}</div>{/if}
-    {#if verifyErr}<div class="banner err">{verifyErr}</div>{/if}
+    {#if verifyMsg}<div class="banner ok">{verifyMsg()}</div>{/if}
+    {#if verifyErr}<div class="banner err">{verifyErr()}</div>{/if}
   </div>
 
   <BootMediaCard />

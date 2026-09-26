@@ -5,6 +5,7 @@
   import { jobs, reloadActivity } from '../lib/jobStore.svelte';
   import { formatBytes, formatDate, formatDuration } from '../lib/format';
   import type { JobRun, RestoreRunState } from '../lib/types';
+  import { m } from '../lib/paraglide/messages';
 
   // Restores live in the service's own history, not in the job runs: this
   // list used to show copies only, and a finished restore vanished for good
@@ -52,7 +53,7 @@
   }
   /** What the restore was of: the copy's file, or at least the disk. */
   function restoreWhat(r: RestoreRunState): string {
-    return r.image_file || `диск ${r.target_disk}`;
+    return r.image_file || m.act_target_disk({ disk: String(r.target_disk) });
   }
   /** The operation that broke, as the report put it. */
   function restoreFailure(r: RestoreRunState): string {
@@ -65,15 +66,15 @@
     r.duration_secs > 0 ? (r.bytes_copied / r.duration_secs / 1_000_000).toFixed(0) : '0';
 
   const kindLabel = (k: string) =>
-    k === 'incremental' ? 'инкрементная' : k === 'differential' ? 'дифференциальная' : 'полная';
+    k === 'incremental' ? m.kind_incremental() : k === 'differential' ? m.kind_differential() : m.kind_full();
 
   /** Container format of the produced image, derived from its file name.
    *  Anything unrecognised used to read «VHDX» — an encrypted job's `.obk`
    *  copies included (2026-09-26). */
   function formatLabel(p: string): string {
     const name = (p || '').toLowerCase();
-    if (name.endsWith('.obk')) return 'OBK (зашифрованный)';
-    if (name.endsWith('.qcow2')) return 'qcow2 (сжатый)';
+    if (name.endsWith('.obk')) return m.act_fmt_obk();
+    if (name.endsWith('.qcow2')) return m.act_fmt_qcow2();
     if (name.endsWith('.vhdx') || name.endsWith('.avhdx')) return 'VHDX';
     return '—';
   }
@@ -81,12 +82,12 @@
 
 <div class="page">
   <div class="head">
-    <h1>Активность</h1>
-    <button class="refresh" onclick={refresh}>Обновить</button>
+    <h1>{m.act_title()}</h1>
+    <button class="refresh" onclick={refresh}>{m.common_refresh()}</button>
   </div>
 
   {#if items.length === 0}
-    <div class="empty">Здесь появится история резервных копий и восстановлений.</div>
+    <div class="empty">{m.act_empty()}</div>
   {/if}
 
   <div class="list">
@@ -105,7 +106,7 @@
           </div>
           <div class="body">
             <div class="title">
-              {r.status === 'completed' ? 'Восстановление выполнено' : r.status === 'cancelled' ? 'Восстановление отменено' : 'Сбой восстановления'}
+              {r.status === 'completed' ? m.act_restore_done() : r.status === 'cancelled' ? m.act_restore_cancelled() : m.act_restore_failed()}
               — {restoreWhat(r)}
               <span class="time">{formatDate(item.at)}</span>
             </div>
@@ -113,16 +114,16 @@
               <div class="note">{restoreFailure(r)}</div>
             {/if}
             <div class="stats">
-              <div><span class="k">Диск</span><span class="v">{r.target_disk}</span></div>
+              <div><span class="k">{m.act_disk()}</span><span class="v">{r.target_disk}</span></div>
               <div>
-                <span class="k">Операций</span>
-                <span class="v">{visibleOps(r).filter((o) => o.status === 'done').length} из {visibleOps(r).length}</span>
+                <span class="k">{m.act_ops()}</span>
+                <span class="v">{m.act_ops_done({ done: visibleOps(r).filter((o) => o.status === 'done').length, total: visibleOps(r).length })}</span>
               </div>
-              <div><span class="k">Время</span><span class="v">{formatDuration(secondsBetween(r.started_at, r.finished_at))}</span></div>
+              <div><span class="k">{m.act_time()}</span><span class="v">{formatDuration(secondsBetween(r.started_at, r.finished_at))}</span></div>
             </div>
             {#if r.follow_ups.length > 0}
               <details class="follow">
-                <summary>Что осталось сделать ({r.follow_ups.length})</summary>
+                <summary>{m.act_follow_ups({ count: r.follow_ups.length })}</summary>
                 <ul>
                   {#each r.follow_ups as f, i (i)}<li>{f}</li>{/each}
                 </ul>
@@ -144,7 +145,7 @@
           </div>
           <div class="body">
             <div class="title">
-              {r.status === 'success' ? 'Резервное копирование выполнено' : r.status === 'cancelled' ? 'Копирование отменено' : 'Сбой резервного копирования'}
+              {r.status === 'success' ? m.act_backup_done() : r.status === 'cancelled' ? m.act_backup_cancelled() : m.act_backup_failed()}
               — {r.job_name}
               <span class="time">{formatDate(r.finished_at || r.started_at)}</span>
             </div>
@@ -153,17 +154,17 @@
             {/if}
             {#if r.status === 'success'}
               <div class="stats">
-                <div><span class="k">Тип</span><span class="v">{kindLabel(r.backup_kind)}</span></div>
-                <div><span class="k">Формат</span><span class="v">{formatLabel(r.image_path)}</span></div>
-                <div><span class="k">Размер</span><span class="v">{formatBytes(r.bytes_copied)}</span></div>
-                <div><span class="k">Скорость</span><span class="v">{speed(r)} МБ/с</span></div>
-                <div><span class="k">Время</span><span class="v">{formatDuration(r.duration_secs)}</span></div>
-                <div><span class="k">Режим</span><span class="v">{r.smart_mode ? 'занятые' : 'посекторно'}</span></div>
+                <div><span class="k">{m.act_type()}</span><span class="v">{kindLabel(r.backup_kind)}</span></div>
+                <div><span class="k">{m.act_format()}</span><span class="v">{formatLabel(r.image_path)}</span></div>
+                <div><span class="k">{m.act_size()}</span><span class="v">{formatBytes(r.bytes_copied)}</span></div>
+                <div><span class="k">{m.act_speed()}</span><span class="v">{m.act_speed_value({ speed: speed(r) })}</span></div>
+                <div><span class="k">{m.act_time()}</span><span class="v">{formatDuration(r.duration_secs)}</span></div>
+                <div><span class="k">{m.act_mode()}</span><span class="v">{r.smart_mode ? m.act_mode_used() : m.act_mode_sector()}</span></div>
                 <div>
-                  <span class="k">Снимок</span>
+                  <span class="k">{m.act_snapshot()}</span>
                   <!-- "нет" would read as a shortcoming; on the medium the volume
                        is offline, so no snapshot was needed in the first place. -->
-                  <span class="v">{r.vss_used ? 'VSS' : media.active ? 'не нужен (офлайн)' : 'нет'}</span>
+                  <span class="v">{r.vss_used ? 'VSS' : media.active ? m.act_snapshot_not_needed() : m.act_snapshot_none()}</span>
                 </div>
               </div>
             {/if}

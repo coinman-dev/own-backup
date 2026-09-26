@@ -11,6 +11,10 @@
 //! Tauri. Runs are serialized through an mpsc queue processed by one worker,
 //! so a second "run" while a backup is in progress is queued, not rejected.
 
+// Messages in Russian and English (locales/*.json), through
+// own_backup_common::tr! — see common/src/lang.rs.
+rust_i18n::i18n!("locales", fallback = "ru");
+
 pub mod archive_setup;
 pub mod backup_encryption;
 pub mod busy;
@@ -80,6 +84,7 @@ impl VerifyRate {
 }
 
 
+use own_backup_common::tr;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tracing::{error, info, warn};
@@ -745,8 +750,10 @@ const ACTIVITY_CAP: usize = 200;
 /// not run, because a stage the user stopped is no basis for deleting older
 /// versions. So the run is `cancelled`, with the image path recorded and this
 /// sentence saying which half happened.
-const VERIFY_CANCELLED: &str =
-    "Копия создана, но проверка отменена пользователем — образ не проверен.";
+#[cfg_attr(not(any(target_os = "windows", target_os = "linux")), allow(dead_code))]
+fn verify_cancelled_message() -> String {
+    tr!("lib.verify_cancelled").into_owned()
+}
 
 impl JobStore {
     pub fn load(data_dir: &std::path::Path) -> Arc<Self> {
@@ -1304,7 +1311,7 @@ fn after_backup(action: &str, job_name: &str, queue: &RunQueue) {
             let result = if action == "shutdown" {
                 own_backup_backup::power_win::shutdown_in(
                     SHUTDOWN_GRACE_SECS,
-                    &format!("Own Backup: копия «{job_name}» готова, компьютер выключится"),
+                    &tr!("lib.shutdown_message", job = job_name),
                 )
             } else {
                 tokio::time::sleep(std::time::Duration::from_secs(SLEEP_AFTER_SECS)).await;
@@ -1371,16 +1378,16 @@ pub async fn run_queue_worker(
         // AUD-02). Released by Drop at the end of the iteration, including
         // if the engine panics.
         let _slot = busy
-            .acquire(crate::busy::Doing::new("резервное копирование", job.name.clone()))
+            .acquire(crate::busy::Doing::new(tr!("lib.doing_backup"), job.name.clone()))
             .await;
 
         cancel.store(false, Ordering::SeqCst);
         // No sleep while copying — laptops included, verification included.
         // Released when this iteration ends, whatever the outcome.
         #[cfg(target_os = "windows")]
-        let _awake = own_backup_backup::power_win::KeepAwake::new(&format!(
-            "Own Backup: резервное копирование «{}»",
-            job.name
+        let _awake = own_backup_backup::power_win::KeepAwake::new(&tr!(
+            "lib.keep_awake_reason",
+            job = job.name
         ));
         let last_success = store.last_success(&job.id);
         // The keys of an encrypted job are opened here, once, before anything
@@ -1689,12 +1696,10 @@ fn format_change_error(job: &Job, folder: &Path) -> Option<String> {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            return Some(format!(
-                "Формат образа задания ({want}) не совпадает с форматом уже существующих копий ({}, например {name}). \
-                 Менять формат у задания с копиями нельзя — создайте новое задание \
-                 (или удалите старые копии этого задания)."
-                , image.container
-            ));
+            return Some(
+                tr!("lib.format_mismatch", want = want, found = image.container, name = name)
+                    .into_owned(),
+            );
         }
     }
     None
@@ -2073,7 +2078,7 @@ pub fn delete_job_files(store: &JobStore, job: &Job) -> JobFilesDeleted {
                         report.kept.iter().map(|(p, why)| (p.display().to_string(), why.clone())),
                     );
                     out.kept.extend(report.orphan_sidecars.iter().map(|p| {
-                        (p.display().to_string(), "образ удалён, а его описание осталось".into())
+                        (p.display().to_string(), tr!("lib.orphan_sidecar").into_owned())
                     }));
                 }
                 Err(e) => {
@@ -2170,11 +2175,8 @@ fn recover_interrupted_consolidations(
     if ours.is_empty() {
         return None;
     }
-    Some(format!(
-        "Прерванная консолидация не доведена до конца: {}. Пока состояние цепочки \
-         неизвестно, копировать в неё и удалять её нельзя — подробности в журнале службы.",
-        ours.join(", ")
-    ))
+    let bases = ours.join(", ");
+    Some(tr!("lib.consolidation_unfinished", bases = bases).into_owned())
 }
 
 /// Does this image belong to the given job? Asked of the image's own sidecar,
@@ -2334,7 +2336,7 @@ async fn perform_backup(
     if volumes.is_empty() {
         run.finished_at = chrono::Utc::now().to_rfc3339();
         run.status = "error".into();
-        run.error = "У задания не выбран ни один том-источник".into();
+        run.error = tr!("lib.no_source_volume").into_owned();
         return run;
     }
     let folder = PathBuf::from(&job.dest_folder);
@@ -2554,11 +2556,14 @@ async fn perform_backup(
                 );
                 match verified {
                     Ok(v) if !v.valid() => {
-                        return Err(OwnBackupError::ImageFormat(format!(
-                            "проверка после копирования не пройдена ({}): {} повреждённых блоков",
-                            vol_label_bg,
-                            v.mismatched_blocks.len()
-                        )))
+                        return Err(OwnBackupError::ImageFormat(
+                            tr!(
+                                "lib.verify_failed_volume",
+                                volume = vol_label_bg,
+                                count = v.mismatched_blocks.len()
+                            )
+                            .into_owned(),
+                        ))
                     }
                     Ok(_) => {}
                     // The copy itself is finished and on disk; only the reading
@@ -2643,12 +2648,12 @@ async fn perform_backup(
                 // because nobody checked it. Retention and consolidation do not
                 // run — a cancelled read must not delete anything.
                 if verify_cancelled {
-                    fatal = Some(("cancelled".into(), VERIFY_CANCELLED.into()));
+                    fatal = Some(("cancelled".into(), verify_cancelled_message()));
                     break;
                 }
             }
             Ok(Err(OwnBackupError::Cancelled)) => {
-                fatal = Some(("cancelled".into(), "Отменено пользователем".into()));
+                fatal = Some(("cancelled".into(), tr!("lib.cancelled_by_user").into_owned()));
                 break;
             }
             Ok(Err(e)) => {
@@ -2658,7 +2663,7 @@ async fn perform_backup(
                 break;
             }
             Err(e) => {
-                fatal = Some(("error".into(), format!("задача прервана: {e}")));
+                fatal = Some(("error".into(), tr!("lib.task_aborted", error = e).into_owned()));
                 break;
             }
         }
@@ -2867,7 +2872,7 @@ async fn perform_disk_backup(
                     speed_mbps: p.speed_bps as f64 / 1_000_000.0,
                     volume_index: 0,
                     volume_count: 1,
-                    volume: format!("Диск {disk_number} · {model}"),
+                    volume: tr!("lib.disk_label", disk = disk_number, model = model).into_owned(),
                     image_file_name: image_name.clone(),
                     categories: p.categories.clone().unwrap_or_default(),
                     excluded_files: p.excluded.map(|(f, _)| f),
@@ -2904,7 +2909,8 @@ async fn perform_disk_backup(
                         speed_mbps: mbps,
                         volume_index: 0,
                         volume_count: 1,
-                        volume: format!("Диск {disk_number} · {model}"),
+                        volume: tr!("lib.disk_label", disk = disk_number, model = model)
+                            .into_owned(),
                         image_file_name: image_name.clone(),
                         categories: Vec::new(),
                         excluded_files: None,
@@ -2915,10 +2921,9 @@ async fn perform_disk_backup(
             });
             match verified {
                 Ok(v) if !v.valid() => {
-                    return Err(OwnBackupError::ImageFormat(format!(
-                        "проверка после копирования не пройдена: {} повреждённых блоков",
-                        v.mismatched_blocks.len()
-                    )))
+                    return Err(OwnBackupError::ImageFormat(
+                        tr!("lib.verify_failed", count = v.mismatched_blocks.len()).into_owned(),
+                    ))
                 }
                 Ok(_) => {}
                 Err(OwnBackupError::Cancelled) => verify_cancelled = true,
@@ -2981,7 +2986,7 @@ async fn perform_disk_backup(
             // — and the image below is NOT removed, unlike a cancelled copy.
             if verify_cancelled {
                 run.status = "cancelled".into();
-                run.error = VERIFY_CANCELLED.into();
+                run.error = verify_cancelled_message();
                 return run;
             }
             let protected = [(format!("disk{}", ds.disk_number), image_path)];
@@ -2990,7 +2995,7 @@ async fn perform_disk_backup(
         }
         Ok(Err(OwnBackupError::Cancelled)) => {
             run.status = "cancelled".into();
-            run.error = "Отменено пользователем".into();
+            run.error = tr!("lib.cancelled_by_user").into_owned();
             let _ = std::fs::remove_file(&image_path);
         }
         Ok(Err(e)) => {
@@ -2999,7 +3004,7 @@ async fn perform_disk_backup(
         }
         Err(e) => {
             run.status = "error".into();
-            run.error = format!("задача прервана: {e}");
+            run.error = tr!("lib.task_aborted", error = e).into_owned();
         }
     }
     run
@@ -3031,7 +3036,7 @@ async fn perform_backup(
     if volumes.is_empty() {
         run.finished_at = chrono::Utc::now().to_rfc3339();
         run.status = "error".into();
-        run.error = "У задания не выбран ни один том-источник".into();
+        run.error = tr!("lib.no_source_volume").into_owned();
         return run;
     }
     let folder = PathBuf::from(&job.dest_folder);
@@ -3140,10 +3145,10 @@ async fn perform_backup(
                 });
                 match verified {
                     Ok(v) if !v.valid() => {
-                        return Err(OwnBackupError::ImageFormat(format!(
-                            "проверка после копирования не пройдена: {} повреждённых блоков",
-                            v.mismatched_blocks.len()
-                        )))
+                        return Err(OwnBackupError::ImageFormat(
+                            tr!("lib.verify_failed", count = v.mismatched_blocks.len())
+                                .into_owned(),
+                        ))
                     }
                     Ok(_) => {}
                     Err(OwnBackupError::Cancelled) => verify_cancelled = true,
@@ -3179,13 +3184,13 @@ async fn perform_backup(
                 run.backup_kind = "full".into();
                 if verify_cancelled {
                     run.status = "cancelled".into();
-                    run.error = VERIFY_CANCELLED.into();
+                    run.error = verify_cancelled_message();
                     break;
                 }
             }
             Ok(Err(OwnBackupError::Cancelled)) => {
                 run.status = "cancelled".into();
-                run.error = "Отменено пользователем".into();
+                run.error = tr!("lib.cancelled_by_user").into_owned();
                 break;
             }
             Ok(Err(e)) => {
@@ -3196,7 +3201,7 @@ async fn perform_backup(
             }
             Err(e) => {
                 run.status = "error".into();
-                run.error = format!("задача прервана: {e}");
+                run.error = tr!("lib.task_aborted", error = e).into_owned();
                 break;
             }
         }
@@ -3223,7 +3228,7 @@ async fn perform_backup(
     let mut run = run_skeleton(job);
     run.finished_at = chrono::Utc::now().to_rfc3339();
     run.status = "error".into();
-    run.error = "Движок бэкапа доступен только на Windows и Linux".into();
+    run.error = tr!("lib.engine_unavailable").into_owned();
     run
 }
 

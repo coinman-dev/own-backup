@@ -23,7 +23,7 @@ use std::collections::{HashMap, HashSet};
 
 use tracing::{info, warn};
 
-use own_backup_common::{OwnBackupError, Result};
+use own_backup_common::{tr, OwnBackupError, Result};
 
 use crate::exclusions::{parse_patterns, ByteRanges, CategorySizes};
 use crate::fat_map::RawVolume;
@@ -604,9 +604,7 @@ pub fn scan_xfs_exclusions(
     }
     let sb = parse_sb(vol)?;
     if !log_is_clean(vol, &sb)? {
-        return Err(bad(
-            "журнал xfs не пуст (нечистое завершение) — исключения пропущены;              загрузите систему корректно или выполните xfs_repair",
-        ));
+        return Err(bad(tr!("xfs_exclusions.log_dirty")));
     }
     // Shared block set (fs-block ranges) — empty when reflink is off.
     let shared = if sb.reflink { collect_shared(vol, &sb)? } else { ByteRanges::new() };

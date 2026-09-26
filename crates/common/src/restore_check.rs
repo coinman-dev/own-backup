@@ -131,8 +131,8 @@ pub enum CheckCode {
 pub struct CheckResult {
     pub level: CheckLevel,
     pub code: CheckCode,
-    /// User-facing text, Russian — this goes straight into the confirmation
-    /// dialog.
+    /// User-facing text in the window's language — this goes straight into the
+    /// confirmation dialog.
     pub message: String,
     /// Partition on the *target* disk the finding concerns, when it concerns one.
     pub part_index: Option<u32>,
@@ -270,7 +270,7 @@ impl CheckContext {
 fn describe(index: u32, label: &str, size: u64, fs: Option<FileSystem>) -> String {
     let mut bits = Vec::new();
     if !label.trim().is_empty() {
-        bits.push(format!("«{}»", label.trim()));
+        bits.push(crate::tr!("restore_check.label_quoted", label = label.trim()).into_owned());
     }
     if size > 0 {
         bits.push(human(size));
@@ -375,10 +375,13 @@ fn check_table(t: &PartitionTableSpec, out: &mut Vec<CheckResult>) {
                 CheckLevel::Error,
                 CheckCode::PartitionEmpty,
                 Some(e.index),
-                format!(
-                    "Раздел {}: конец ({}) раньше начала ({}) — нулевая или отрицательная длина.",
-                    e.index, e.last_lba, e.first_lba
-                ),
+                crate::tr!(
+                    "restore_check.partition_empty",
+                    index = e.index,
+                    last = e.last_lba,
+                    first = e.first_lba
+                )
+                .into_owned(),
             ));
             continue;
         }
@@ -387,10 +390,15 @@ fn check_table(t: &PartitionTableSpec, out: &mut Vec<CheckResult>) {
                 CheckLevel::Error,
                 CheckCode::PartitionOutOfBounds,
                 Some(e.index),
-                format!(
-                    "Раздел {} ({}–{}) выходит за пределы, доступные на диске ({}–{} сект.).",
-                    e.index, e.first_lba, e.last_lba, first_usable, last_usable
-                ),
+                crate::tr!(
+                    "restore_check.partition_out_of_bounds",
+                    index = e.index,
+                    first = e.first_lba,
+                    last = e.last_lba,
+                    usable_first = first_usable,
+                    usable_last = last_usable
+                )
+                .into_owned(),
             ));
         }
         let offset = e.offset_bytes(t.sector_size);
@@ -399,13 +407,8 @@ fn check_table(t: &PartitionTableSpec, out: &mut Vec<CheckResult>) {
                 CheckLevel::Warning,
                 CheckCode::Misaligned,
                 Some(e.index),
-                format!(
-                    "Раздел {} начинается со смещения {} Б — не кратно 1 МиБ. На дисках 512e/4Kn \
-                     это стоит производительности: каждая запись превращается в чтение-правку-запись \
-                     физического сектора. Так была устроена исходная разметка, поэтому ошибкой это \
-                     не считаем.",
-                    e.index, offset
-                ),
+                crate::tr!("restore_check.misaligned", index = e.index, offset = offset)
+                    .into_owned(),
             ));
         }
     }
@@ -420,10 +423,16 @@ fn check_table(t: &PartitionTableSpec, out: &mut Vec<CheckResult>) {
                 CheckLevel::Error,
                 CheckCode::PartitionsOverlap,
                 Some(b.index),
-                format!(
-                    "Разделы {} ({}–{}) и {} ({}–{}) перекрываются.",
-                    a.index, a.first_lba, a.last_lba, b.index, b.first_lba, b.last_lba
-                ),
+                crate::tr!(
+                    "restore_check.partitions_overlap",
+                    a = a.index,
+                    a_first = a.first_lba,
+                    a_last = a.last_lba,
+                    b = b.index,
+                    b_first = b.first_lba,
+                    b_last = b.last_lba
+                )
+                .into_owned(),
             ));
         }
     }
@@ -443,11 +452,13 @@ fn check_mbr_limits(t: &PartitionTableSpec, disk_sectors: u64, out: &mut Vec<Che
                 CheckLevel::Error,
                 CheckCode::MbrLimit,
                 Some(e.index),
-                format!(
-                    "Раздел {} заканчивается на секторе {} — MBR хранит адреса в 32 битах и \
-                     дальше {} сект. (~2 ТиБ при секторе 512 Б) не адресует. Нужен GPT.",
-                    e.index, e.last_lba, MAX_LBA
-                ),
+                crate::tr!(
+                    "restore_check.mbr_lba_limit",
+                    index = e.index,
+                    last = e.last_lba,
+                    max = MAX_LBA
+                )
+                .into_owned(),
             ));
         }
     }
@@ -456,10 +467,7 @@ fn check_mbr_limits(t: &PartitionTableSpec, disk_sectors: u64, out: &mut Vec<Che
             CheckLevel::Warning,
             CheckCode::MbrLimit,
             None,
-            format!(
-                "Диск больше того, что адресует MBR ({} сект.) — хвост останется недоступен.",
-                MAX_LBA
-            ),
+            crate::tr!("restore_check.mbr_disk_too_big", max = MAX_LBA).into_owned(),
         ));
     }
 
@@ -477,16 +485,11 @@ fn check_mbr_limits(t: &PartitionTableSpec, disk_sectors: u64, out: &mut Vec<Che
             CheckCode::MbrTooManyPrimaries,
             None,
             if has_logicals {
-                format!(
-                    "Основных разделов {primaries}, и ещё один слот из четырёх занимает \
-                     расширенный раздел, внутри которого лежат логические. Основных остаётся \
-                     не больше трёх."
-                )
+                crate::tr!("restore_check.mbr_too_many_primaries_ext", primaries = primaries)
+                    .into_owned()
             } else {
-                format!(
-                    "Основных разделов {primaries} — в MBR их не может быть больше четырёх. \
-                     Лишние надо сделать логическими."
-                )
+                crate::tr!("restore_check.mbr_too_many_primaries", primaries = primaries)
+                    .into_owned()
             },
         ));
     }
@@ -503,11 +506,12 @@ fn check_sector_size(t: &PartitionTableSpec, ctx: &CheckContext, out: &mut Vec<C
         CheckLevel::Error,
         CheckCode::SectorSizeMismatch,
         None,
-        format!(
-            "Копия снята с диска с логическим сектором {} Б, у целевого — {} Б. Разметку \
-             нельзя перенести: сохранённые адреса секторов указывали бы на другие байты.",
-            ctx.source_sector_size, t.sector_size
-        ),
+        crate::tr!(
+            "restore_check.sector_size_mismatch",
+            source = ctx.source_sector_size,
+            target = t.sector_size
+        )
+        .into_owned(),
     ));
 }
 
@@ -537,7 +541,7 @@ fn check_ops(
                         CheckLevel::Error,
                         CheckCode::DuplicateRestore,
                         Some(dst.index),
-                        format!("В раздел {dst_txt} пишут данные две операции сразу."),
+                        crate::tr!("restore_check.duplicate_restore", part = dst_txt).into_owned(),
                     ));
                 }
                 restored.push(dst.index);
@@ -548,11 +552,8 @@ fn check_ops(
                             CheckLevel::Info,
                             CheckCode::FreeSpaceNotWiped,
                             Some(dst.index),
-                            format!(
-                                "Раздел {dst_txt}: копируются только занятые блоки, поэтому в \
-                                 промежутках физически останутся прежние данные. Файловая система \
-                                 их не увидит; чтобы стереть — включите затирание свободного места."
-                            ),
+                            crate::tr!("restore_check.free_space_not_wiped", part = dst_txt)
+                                .into_owned(),
                         ));
                     }
                 }
@@ -562,7 +563,8 @@ fn check_ops(
                         CheckLevel::Error,
                         CheckCode::UnknownSourcePartition,
                         Some(dst.index),
-                        format!("В копии нет раздела с номером {src_index}."),
+                        crate::tr!("restore_check.unknown_source_partition", index = src_index)
+                            .into_owned(),
                     ));
                     continue;
                 };
@@ -584,8 +586,7 @@ fn check_ops(
                         CheckLevel::Error,
                         CheckCode::MissingEsp,
                         Some(windows_part.index),
-                        "Для загрузки UEFI нужен раздел EFI (ESP), а в плане его нет."
-                            .to_string(),
+                        crate::tr!("restore_check.missing_esp").into_owned(),
                     ));
                 }
             }
@@ -601,9 +602,7 @@ fn check_ops(
                 CheckLevel::Info,
                 CheckCode::BootEntriesWillBeWritten,
                 None,
-                "Записи загрузки UEFI из копии будут записаны в память материнской платы, \
-                 поверх нынешних. Прежние сохранятся в файл перед заменой."
-                    .into(),
+                crate::tr!("restore_check.boot_entries_will_be_written").into_owned(),
             )),
             RestoreOp::WritePartitionTable { .. }
             | RestoreOp::AssignLetter { .. }
@@ -620,11 +619,11 @@ fn check_ops(
                 CheckLevel::Error,
                 CheckCode::FileModeNeedsFormat,
                 Some(*index),
-                format!(
-                    "Раздел {} восстанавливается пофайлово, но в плане нет его \
-                     форматирования — копировать файлы некуда.",
-                    ctx.describe_target(*index, table)
-                ),
+                crate::tr!(
+                    "restore_check.file_mode_needs_format",
+                    part = ctx.describe_target(*index, table)
+                )
+                .into_owned(),
             )),
             Some((_, fs)) => {
                 check_format_capacity(*index, &ctx.describe_target(*index, table), *src_fs, *fs, out)
@@ -640,12 +639,11 @@ fn check_ops(
                 CheckLevel::Error,
                 CheckCode::FormatAfterSectorRestore,
                 Some(*index),
-                format!(
-                    "Раздел {} восстанавливается посекторно и тут же форматируется — \
-                     форматирование сотрёт всё, что было записано. Посекторное восстановление \
-                     приносит готовую файловую систему, форматировать не нужно.",
-                    ctx.describe_target(*index, table)
-                ),
+                crate::tr!(
+                    "restore_check.format_after_sector_restore",
+                    part = ctx.describe_target(*index, table)
+                )
+                .into_owned(),
             ));
         }
     }
@@ -678,12 +676,13 @@ fn check_part_ref(
                 CheckLevel::Error,
                 CheckCode::PartRefOutOfRange,
                 Some(part.index),
-                format!(
-                    "Раздел {}: операция адресует {}..+{} Б — такой области не существует.",
-                    ctx.describe_target(part.index, table),
-                    part.offset,
-                    part.size
-                ),
+                crate::tr!(
+                    "restore_check.part_ref_no_region",
+                    part = ctx.describe_target(part.index, table),
+                    offset = part.offset,
+                    size = part.size
+                )
+                .into_owned(),
             ));
             return;
         }
@@ -698,12 +697,13 @@ fn check_part_ref(
                 CheckLevel::Error,
                 CheckCode::PartRefOutOfRange,
                 Some(part.index),
-                format!(
-                    "Раздел {}: операция пишет до {} Б, а диск — {} Б.",
-                    ctx.describe_target(part.index, table),
-                    end,
-                    t.disk_size_bytes
-                ),
+                crate::tr!(
+                    "restore_check.part_ref_past_disk",
+                    part = ctx.describe_target(part.index, table),
+                    end = end,
+                    disk = t.disk_size_bytes
+                )
+                .into_owned(),
             ));
         }
     }
@@ -712,10 +712,11 @@ fn check_part_ref(
             CheckLevel::Error,
             CheckCode::OpNotInTable,
             Some(part.index),
-            format!(
-                "Операция ссылается на раздел {}, которого нет в новой разметке.",
-                ctx.describe_target(part.index, table)
-            ),
+            crate::tr!(
+                "restore_check.op_not_in_table",
+                part = ctx.describe_target(part.index, table)
+            )
+            .into_owned(),
         ));
         return;
     };
@@ -725,14 +726,15 @@ fn check_part_ref(
             CheckLevel::Error,
             CheckCode::PartRefMismatch,
             Some(part.index),
-            format!(
-                "Раздел {}: операция адресует {}..+{} Б, а в разметке он лежит по {}..+{} Б.",
-                ctx.describe_target(part.index, table),
-                part.offset,
-                part.size,
-                offset,
-                size
-            ),
+            crate::tr!(
+                "restore_check.part_ref_table_mismatch",
+                part = ctx.describe_target(part.index, table),
+                offset = part.offset,
+                size = part.size,
+                table_offset = offset,
+                table_size = size
+            )
+            .into_owned(),
         ));
     }
 }
@@ -744,11 +746,7 @@ fn check_part_ref_against_disk(part: PartRef, ctx: &CheckContext, out: &mut Vec<
             CheckLevel::Warning,
             CheckCode::PartRefUnverifiable,
             Some(part.index),
-            format!(
-                "Раздел {}: не с чем сверить, куда именно пойдёт запись — \
-                 разметка целевого диска неизвестна.",
-                part.index
-            ),
+            crate::tr!("restore_check.part_ref_layout_unknown", index = part.index).into_owned(),
         ));
         return;
     };
@@ -759,11 +757,7 @@ fn check_part_ref_against_disk(part: PartRef, ctx: &CheckContext, out: &mut Vec<
             CheckLevel::Warning,
             CheckCode::PartRefUnverifiable,
             Some(part.index),
-            format!(
-                "Раздел {}: в разметке целевого диска не указано, где он начинается, \
-                 поэтому адрес записи сверить не с чем.",
-                part.index
-            ),
+            crate::tr!("restore_check.part_ref_offset_unknown", index = part.index).into_owned(),
         ));
         return;
     }
@@ -772,14 +766,15 @@ fn check_part_ref_against_disk(part: PartRef, ctx: &CheckContext, out: &mut Vec<
             CheckLevel::Error,
             CheckCode::PartRefMismatch,
             Some(part.index),
-            format!(
-                "Раздел {}: операция адресует {}..+{} Б, а на диске он лежит по {}..+{} Б.",
-                describe(part.index, &t.label, t.size_bytes, Some(t.filesystem)),
-                part.offset,
-                part.size,
-                t.offset_bytes,
-                t.size_bytes
-            ),
+            crate::tr!(
+                "restore_check.part_ref_disk_mismatch",
+                part = describe(part.index, &t.label, t.size_bytes, Some(t.filesystem)),
+                offset = part.offset,
+                size = part.size,
+                disk_offset = t.offset_bytes,
+                disk_size = t.size_bytes
+            )
+            .into_owned(),
         ));
     }
 }
@@ -799,15 +794,14 @@ fn check_fit(
                     CheckLevel::Error,
                     CheckCode::TargetTooSmallForSectors,
                     Some(dst.index),
-                    format!(
-                        "Раздел {dst_txt} меньше исходного тома «{}»: {} против {}. Посекторное \
-                         восстановление переносит том целиком вместе с его файловой системой, \
-                         поэтому приёмник не может быть меньше. Уместить данные можно только \
-                         пофайлово.",
-                        src.label,
-                        human(dst.size),
-                        human(src.size_bytes)
-                    ),
+                    crate::tr!(
+                        "restore_check.too_small_for_sectors",
+                        part = dst_txt,
+                        label = src.label,
+                        dst_size = human(dst.size),
+                        src_size = human(src.size_bytes)
+                    )
+                    .into_owned(),
                 ));
             }
         }
@@ -817,13 +811,12 @@ fn check_fit(
                     CheckLevel::Error,
                     CheckCode::FileModeUnsupportedFs,
                     Some(dst.index),
-                    format!(
-                        "Том «{}» размечен как {} — Windows не умеет его читать, значит и \
-                         скопировать пофайлово нельзя. Такой раздел переносится только \
-                         посекторно, в приёмник не меньше исходного.",
-                        src.label,
-                        src.filesystem.label()
-                    ),
+                    crate::tr!(
+                        "restore_check.file_mode_unsupported_fs",
+                        label = src.label,
+                        fs = src.filesystem.label()
+                    )
+                    .into_owned(),
                 ));
                 return;
             }
@@ -832,11 +825,8 @@ fn check_fit(
                     CheckLevel::Warning,
                     CheckCode::UsedSizeUnknown,
                     Some(dst.index),
-                    format!(
-                        "Для тома «{}» неизвестен объём занятых данных, поэтому проверить, \
-                         влезут ли они в раздел {dst_txt}, заранее нельзя.",
-                        src.label
-                    ),
+                    crate::tr!("restore_check.used_size_unknown", label = src.label, part = dst_txt)
+                        .into_owned(),
                 ));
                 return;
             }
@@ -846,13 +836,14 @@ fn check_fit(
                     CheckLevel::Error,
                     CheckCode::TargetTooSmallForFiles,
                     Some(dst.index),
-                    format!(
-                        "В раздел {dst_txt} не влезут данные тома «{}»: занято {}, а с запасом \
-                         на служебные структуры файловой системы нужно не меньше {}.",
-                        src.label,
-                        human(src.used_bytes),
-                        human(needed)
-                    ),
+                    crate::tr!(
+                        "restore_check.too_small_for_files",
+                        part = dst_txt,
+                        label = src.label,
+                        used = human(src.used_bytes),
+                        needed = human(needed)
+                    )
+                    .into_owned(),
                 ));
             }
         }
@@ -915,12 +906,7 @@ fn check_live_system(
             CheckLevel::Error,
             CheckCode::TargetIsLiveSystemPartition,
             hit.first().copied(),
-            format!(
-                "На этом диске работает загруженная сейчас Windows, и план затрагивает \
-                 разделы, на которых она стоит: {list}. Переписать их на ходу невозможно — \
-                 система остановится посреди записи. Загрузитесь с Boot CD и повторите, \
-                 либо выберите другие разделы."
-            ),
+            crate::tr!("restore_check.live_system_partitions", list = list).into_owned(),
         ));
         return; // the rest is noise next to this
     }
@@ -930,13 +916,8 @@ fn check_live_system(
             CheckLevel::Warning,
             CheckCode::LiveSystemDiskLayout,
             None,
-            format!(
-                "Диск {} — тот, с которого загружена работающая Windows. Разделы, на которых \
-                 она стоит, план не трогает, поэтому восстановление возможно: новая разметка \
-                 будет применена через диспетчер разделов Windows, как это делает «Управление \
-                 дисками». Затронутые тома будут отключены — закройте открытые в них файлы.",
-                plan.target_disk
-            ),
+            crate::tr!("restore_check.live_system_disk_layout", disk = plan.target_disk)
+                .into_owned(),
         ));
     }
 }
@@ -972,14 +953,13 @@ fn check_format_choice(
         CheckLevel::Warning,
         CheckCode::FormatChoiceIgnored,
         Some(dst_index),
-        format!(
-            "При создании раздела {dst_txt} выбрана файловая система {}, но она создана не \
-             будет: посекторное восстановление приносит файловую систему из копии целиком, и \
-             в разделе окажется {}. Форматировать тут нечего — форматирование стёрло бы \
-             только что восстановленные данные.",
-            chosen.as_str(),
-            src.filesystem.label()
-        ),
+        crate::tr!(
+            "restore_check.format_choice_ignored",
+            part = dst_txt,
+            chosen = chosen.as_str(),
+            actual = src.filesystem.label()
+        )
+        .into_owned(),
     ));
 }
 
@@ -1010,10 +990,10 @@ fn check_destination(
         let label = if cur.label.trim().is_empty() {
             String::new()
         } else {
-            format!(" «{}»", cur.label)
+            format!(" {}", crate::tr!("restore_check.label_quoted", label = cur.label))
         };
         let used = if cur.used_bytes > 0 {
-            format!(", занято {}", human(cur.used_bytes))
+            crate::tr!("restore_check.dest_used_part", size = human(cur.used_bytes)).into_owned()
         } else {
             String::new()
         };
@@ -1021,11 +1001,14 @@ fn check_destination(
             CheckLevel::Warning,
             CheckCode::DestinationWillBeErased,
             Some(dst.index),
-            format!(
-                "На разделе {dst_txt} сейчас {}{label}{used}. Восстановление перезапишет его \
-                 целиком — вернуть то, что там лежит, будет нельзя.",
-                cur.filesystem.label()
-            ),
+            crate::tr!(
+                "restore_check.destination_will_be_erased",
+                part = dst_txt,
+                fs = cur.filesystem.label(),
+                label = label,
+                used = used
+            )
+            .into_owned(),
         ));
     }
 
@@ -1038,20 +1021,21 @@ fn check_destination(
             CheckCode::PartitionChangesFamily,
             Some(dst.index),
             if becomes_linux {
-                format!(
-                    "Раздел {dst_txt} перестанет быть разделом Windows: в него ляжет {}, и \
-                     тип раздела в таблице сменится на Linux. Windows больше не покажет его \
-                     как диск — это нормально для раздела Linux, но букву {} он потеряет.",
-                    src.filesystem.label(),
-                    cur.label.trim()
+                crate::tr!(
+                    "restore_check.becomes_linux",
+                    part = dst_txt,
+                    fs = src.filesystem.label(),
+                    letter = cur.label.trim()
                 )
+                .into_owned()
             } else {
-                format!(
-                    "Раздел {dst_txt} сейчас размечен как {}, а в него ляжет {} — после \
-                     восстановления Windows начнёт показывать его как обычный диск.",
-                    cur.filesystem.label(),
-                    src.filesystem.label()
+                crate::tr!(
+                    "restore_check.becomes_windows",
+                    part = dst_txt,
+                    current = cur.filesystem.label(),
+                    incoming = src.filesystem.label()
                 )
+                .into_owned()
             },
         ));
     }
@@ -1082,11 +1066,7 @@ fn check_encryption(
                 CheckLevel::Error,
                 CheckCode::NoLuksHeader,
                 Some(dst.index),
-                format!(
-                    "Вернуть шифрование разделу {dst_txt} нельзя: в этой копии не сохранён \
-                     заголовок контейнера. Так писались копии до того, как заголовок начали \
-                     сохранять — восстановить её можно только расшифрованной."
-                ),
+                crate::tr!("restore_check.no_luks_header", part = dst_txt).into_owned(),
             ));
         }
         if mode == RestoreMode::Files {
@@ -1097,11 +1077,7 @@ fn check_encryption(
                 CheckLevel::Error,
                 CheckCode::ReencryptNeedsSectors,
                 Some(dst.index),
-                format!(
-                    "Раздел {dst_txt}: вернуть шифрование можно только при посекторном \
-                     восстановлении — пофайловое пишет через файловую систему, а внутри \
-                     нового контейнера её ещё нет."
-                ),
+                crate::tr!("restore_check.reencrypt_needs_sectors", part = dst_txt).into_owned(),
             ));
         }
         return;
@@ -1111,26 +1087,22 @@ fn check_encryption(
         return;
     }
     let remedy = if src.luks_header_available {
-        "Заголовок контейнера в копии есть — включите «вернуть шифрование», и раздел \
-         восстановится ровно таким, каким был, вместе с прежним паролем."
+        crate::tr!("restore_check.remedy_header_available")
     } else {
-        "Заголовок контейнера в этой копии не сохранён, поэтому вернуть шифрование \
-         нельзя. Понадобится Live CD: убрать запись из /etc/crypttab, поправить \
-         /etc/fstab на UUID самого раздела и пересобрать initramfs."
+        crate::tr!("restore_check.remedy_no_header")
     };
     out.push(CheckResult::new(
         CheckLevel::Warning,
         CheckCode::EncryptionNotRestored,
         Some(dst.index),
-        format!(
-            "Том «{}» был зашифрован, но в копию он попал расшифрованным — после \
-             восстановления в разделе {dst_txt} окажется обычная {} без контейнера LUKS. \
-             Данные будут целы и читаемы, но система с этого раздела не загрузится: \
-             initramfs и /etc/crypttab ждут зашифрованное устройство, которого больше нет. \
-             {remedy}",
-            src.label,
-            src.filesystem.label()
-        ),
+        crate::tr!(
+            "restore_check.encryption_not_restored",
+            label = src.label,
+            part = dst_txt,
+            fs = src.filesystem.label(),
+            remedy = remedy
+        )
+        .into_owned(),
     ));
 }
 
@@ -1151,12 +1123,8 @@ fn check_format_capacity(
             CheckLevel::Warning,
             CheckCode::FormatFsTooLimited,
             Some(index),
-            format!(
-                "Раздел {index_txt} форматируется в FAT32, а исходный том — {}. \
-                 В FAT32 не поместится ни один файл больше 4 ГиБ; такие файлы \
-                 скопировать не удастся.",
-                src_fs.label()
-            ),
+            crate::tr!("restore_check.fat32_too_limited", part = index_txt, fs = src_fs.label())
+                .into_owned(),
         ));
     }
 }
@@ -1194,10 +1162,7 @@ fn check_extend(
                 CheckLevel::Error,
                 CheckCode::ExtendNotNtfs,
                 Some(part.index),
-                format!(
-                    "Расширять раздел {part_txt} нечего: в него ничего не восстанавливается и \
-                     он не форматируется, значит файловой системы там не будет."
-                ),
+                crate::tr!("restore_check.extend_nothing", part = part_txt).into_owned(),
             ));
             return;
         }
@@ -1207,11 +1172,7 @@ fn check_extend(
         CheckLevel::Error,
         CheckCode::ExtendNotNtfs,
         Some(part.index),
-        format!(
-            "Раздел {part_txt} размечен как {fs_name} — автоматически расширить Windows умеет \
-             только NTFS. Свободный хвост останется неразмеченным внутри раздела; его придётся \
-             дорастить средствами самой системы."
-        ),
+        crate::tr!("restore_check.extend_not_ntfs", part = part_txt, fs = fs_name).into_owned(),
     ));
 }
 

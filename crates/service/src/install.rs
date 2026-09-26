@@ -12,6 +12,8 @@
 //! Registration needs Administrator (Windows) / root (Linux); the OS refuses
 //! otherwise with a clear access-denied error that we surface verbatim.
 
+use own_backup_common::tr;
+
 // ---------------------------------------------------------------------------
 // Windows: Service Control Manager
 // ---------------------------------------------------------------------------
@@ -53,14 +55,12 @@ pub fn install() -> Result<(), Box<dyn std::error::Error>> {
     service.set_description(crate::SERVICE_DESCRIPTION)?;
 
     println!(
-        "Служба «{}» ({}) установлена.\n  \
-         Путь: {}\n  \
-         Автозапуск при загрузке, учётная запись LocalSystem.\n  \
-         Запустить сейчас:  sc start {}",
-        crate::SERVICE_DISPLAY_NAME,
-        crate::SERVICE_NAME,
-        exe.display(),
-        crate::SERVICE_NAME,
+        "{}",
+        tr!("install.win_installed",
+            name = crate::SERVICE_DISPLAY_NAME,
+            id = crate::SERVICE_NAME,
+            path = exe.display()
+        )
     );
     Ok(())
 }
@@ -94,9 +94,8 @@ pub fn uninstall() -> Result<(), Box<dyn std::error::Error>> {
 
     service.delete()?;
     println!(
-        "Служба «{}» ({}) удалена.",
-        crate::SERVICE_DISPLAY_NAME,
-        crate::SERVICE_NAME
+        "{}",
+        tr!("install.win_removed", name = crate::SERVICE_DISPLAY_NAME, id = crate::SERVICE_NAME)
     );
     Ok(())
 }
@@ -115,12 +114,12 @@ pub fn start() -> Result<(), Box<dyn std::error::Error>> {
     use windows_service::service::{ServiceAccess, ServiceState};
     let service = open_service(ServiceAccess::QUERY_STATUS | ServiceAccess::START)?;
     if service.query_status()?.current_state == ServiceState::Running {
-        println!("Служба «{}» уже запущена.", crate::SERVICE_DISPLAY_NAME);
+        println!("{}", tr!("install.win_already_running", name = crate::SERVICE_DISPLAY_NAME));
         return Ok(());
     }
     let no_args: [&std::ffi::OsStr; 0] = [];
     service.start(&no_args)?;
-    println!("Служба «{}» запущена.", crate::SERVICE_DISPLAY_NAME);
+    println!("{}", tr!("install.win_started", name = crate::SERVICE_DISPLAY_NAME));
     Ok(())
 }
 
@@ -130,7 +129,7 @@ pub fn stop() -> Result<(), Box<dyn std::error::Error>> {
     use windows_service::service::{ServiceAccess, ServiceState};
     let service = open_service(ServiceAccess::QUERY_STATUS | ServiceAccess::STOP)?;
     if service.query_status()?.current_state == ServiceState::Stopped {
-        println!("Служба «{}» уже остановлена.", crate::SERVICE_DISPLAY_NAME);
+        println!("{}", tr!("install.win_already_stopped", name = crate::SERVICE_DISPLAY_NAME));
         return Ok(());
     }
     service.stop()?;
@@ -142,7 +141,7 @@ pub fn stop() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    println!("Служба «{}» остановлена.", crate::SERVICE_DISPLAY_NAME);
+    println!("{}", tr!("install.win_stopped", name = crate::SERVICE_DISPLAY_NAME));
     Ok(())
 }
 
@@ -152,10 +151,12 @@ pub fn status() -> Result<(), Box<dyn std::error::Error>> {
     let service = open_service(ServiceAccess::QUERY_STATUS)?;
     let s = service.query_status()?;
     println!(
-        "Служба «{}» ({}): {:?}",
-        crate::SERVICE_DISPLAY_NAME,
-        crate::SERVICE_NAME,
-        s.current_state
+        "{}",
+        tr!("install.win_status",
+            name = crate::SERVICE_DISPLAY_NAME,
+            id = crate::SERVICE_NAME,
+            state = format!("{:?}", s.current_state)
+        )
     );
     Ok(())
 }
@@ -195,17 +196,12 @@ pub fn install() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(user) = &member {
         match add_user_to_group(user, group) {
             Ok(()) => {
-                group_note = format!(
-                    "\n  Пользователь «{user}» добавлен в группу «{group}».\n  \
-                     ВАЖНО: членство применяется после нового входа в систему \
-                     (или выполните `newgrp {group}`)."
-                );
+                group_note = tr!("install.linux_user_added", user = user, group = group).into_owned();
             }
             Err(e) => {
-                group_note = format!(
-                    "\n  ВНИМАНИЕ: не удалось добавить «{user}» в группу «{group}»: {e}\n  \
-                     Добавьте вручную:  sudo usermod -aG {group} {user}"
-                );
+                group_note =
+                    tr!("install.linux_user_not_added", user = user, group = group, error = e)
+                        .into_owned();
             }
         }
     }
@@ -216,9 +212,8 @@ pub fn install() -> Result<(), Box<dyn std::error::Error>> {
     systemctl(&["enable", "--now", crate::LINUX_UNIT_NAME])?;
 
     println!(
-        "systemd-юнит установлен и запущен: {unit_path}\n  \
-         Статус:  systemctl status {}.service{group_note}",
-        crate::LINUX_UNIT_NAME
+        "{}{group_note}",
+        tr!("install.linux_installed", path = unit_path, unit = crate::LINUX_UNIT_NAME)
     );
     Ok(())
 }
@@ -289,21 +284,21 @@ pub fn uninstall() -> Result<(), Box<dyn std::error::Error>> {
     let _ = std::process::Command::new("groupdel")
         .arg(own_backup_common::UNIX_ACCESS_GROUP)
         .status();
-    println!("systemd-юнит {}.service удалён.", crate::LINUX_UNIT_NAME);
+    println!("{}", tr!("install.linux_removed", unit = crate::LINUX_UNIT_NAME));
     Ok(())
 }
 
 #[cfg(not(target_os = "windows"))]
 pub fn start() -> Result<(), Box<dyn std::error::Error>> {
     systemctl(&["start", crate::LINUX_UNIT_NAME])?;
-    println!("systemd-юнит {}.service запущен.", crate::LINUX_UNIT_NAME);
+    println!("{}", tr!("install.linux_started", unit = crate::LINUX_UNIT_NAME));
     Ok(())
 }
 
 #[cfg(not(target_os = "windows"))]
 pub fn stop() -> Result<(), Box<dyn std::error::Error>> {
     systemctl(&["stop", crate::LINUX_UNIT_NAME])?;
-    println!("systemd-юнит {}.service остановлен.", crate::LINUX_UNIT_NAME);
+    println!("{}", tr!("install.linux_stopped", unit = crate::LINUX_UNIT_NAME));
     Ok(())
 }
 
@@ -352,15 +347,12 @@ pub fn update_from_here() -> Result<(), Box<dyn std::error::Error>> {
     // it. This is the ordinary answer when somebody runs `/update` twice.
     let same = std::fs::canonicalize(&here).ok() == std::fs::canonicalize(&installed).ok();
     if same {
-        println!(
-            "Этот файл и есть установленный ({}) — обновлять нечего.",
-            installed.display()
-        );
+        println!("{}", tr!("install.update_same_file", path = installed.display()));
         return Ok(());
     }
 
-    println!("Установлена: {}", installed.display());
-    println!("Заменяю на:  {}", here.display());
+    println!("{}", tr!("install.update_installed", path = installed.display()));
+    println!("{}", tr!("install.update_replacing", path = here.display()));
     let _ = stop();
     // The SCM reports Stopped before the process has necessarily exited, and a
     // process that still holds its image file makes the copy fail with a
@@ -383,13 +375,11 @@ pub fn update_from_here() -> Result<(), Box<dyn std::error::Error>> {
         // The service is stopped and the binary is untouched: start it again so
         // the machine is not left without one because an update failed.
         let _ = start();
-        return Err(format!(
-            "не удалось заменить {}: {e} — служба запущена обратно, файл не тронут",
-            installed.display()
-        )
-        .into());
+        return Err(
+            tr!("install.update_failed", path = installed.display(), error = e).into_owned().into(),
+        );
     }
-    println!("Файл заменён.");
+    println!("{}", tr!("install.update_done"));
     start()?;
     // Leaving the staged copy would make the next `/update` a no-op against a
     // stale file; it has done its job.

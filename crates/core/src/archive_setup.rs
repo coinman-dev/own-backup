@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 use own_backup_backup::seal::keypair::{JobKeyPair, JobPrivateKey, KdfParams, SealedPrivateKey};
 use own_backup_backup::seal::local::ServiceKeyStore;
 use own_backup_backup::seal::recovery::RecoveryKey;
-use own_backup_common::{OwnBackupError, Result};
+use own_backup_common::{tr, OwnBackupError, Result};
 use zeroize::Zeroizing;
 
 use crate::{Job, JobStore};
@@ -105,13 +105,13 @@ impl ArchiveSetup {
     /// async runtime.
     pub fn begin(&self, mut job: Job, password: &str) -> Result<BegunAuthorization> {
         if password.chars().count() < MIN_PASSWORD_CHARS {
-            return Err(OwnBackupError::Config(format!(
-                "пароль архива короче {MIN_PASSWORD_CHARS} символов"
-            )));
+            return Err(OwnBackupError::Config(
+                tr!("archive_setup.password_too_short", min = MIN_PASSWORD_CHARS).into_owned(),
+            ));
         }
         if job.archive_encryption.is_some() {
             return Err(OwnBackupError::Config(
-                "у задания уже есть ключ архива — замена ключа это отдельный процесс".into(),
+                tr!("archive_setup.key_already_set").into_owned(),
             ));
         }
         // The portable envelope is sealed against the job's identity, so a new
@@ -175,9 +175,7 @@ impl ArchiveSetup {
             let mut pending = self.lock()?;
             sweep(&mut pending);
             pending.remove(token).ok_or_else(|| {
-                OwnBackupError::Config(
-                    "запрос на включение шифрования не найден или устарел — начните заново".into(),
-                )
+                OwnBackupError::Config(tr!("archive_setup.request_not_found").into_owned())
             })?
         };
 
@@ -189,7 +187,7 @@ impl ArchiveSetup {
             return Err(self.keep_for_retry(
                 token,
                 entry,
-                OwnBackupError::Config("это не тот ключ восстановления".into()),
+                OwnBackupError::Config(tr!("archive_setup.wrong_recovery_key").into_owned()),
             ));
         }
 
@@ -222,15 +220,17 @@ impl ArchiveSetup {
     ) -> OwnBackupError {
         entry.attempts += 1;
         if entry.attempts >= MAX_CONFIRM_ATTEMPTS {
-            return OwnBackupError::Config(format!(
-                "{error} — попытки исчерпаны, включение шифрования нужно начать заново"
-            ));
+            return OwnBackupError::Config(
+                tr!("archive_setup.attempts_exhausted", error = error).into_owned(),
+            );
         }
         let left = MAX_CONFIRM_ATTEMPTS - entry.attempts;
         match self.lock() {
             Ok(mut pending) => {
                 pending.insert(token.to_string(), entry);
-                OwnBackupError::Config(format!("{error} (осталось попыток: {left})"))
+                OwnBackupError::Config(
+                    tr!("archive_setup.attempts_left", error = error, left = left).into_owned(),
+                )
             }
             Err(e) => e,
         }
@@ -239,7 +239,9 @@ impl ArchiveSetup {
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, HashMap<String, Pending>>> {
         self.pending
             .lock()
-            .map_err(|_| OwnBackupError::Config("состояние мастера шифрования повреждено".into()))
+            .map_err(|_| {
+                OwnBackupError::Config(tr!("archive_setup.wizard_state_corrupt").into_owned())
+            })
     }
 }
 
@@ -253,7 +255,7 @@ impl JobStore {
         let data_dir = self
             .jobs_path
             .parent()
-            .ok_or_else(|| OwnBackupError::Config("нет каталога состояния службы".into()))?;
+            .ok_or_else(|| OwnBackupError::Config(tr!("archive_setup.no_state_dir").into_owned()))?;
         ServiceKeyStore::new(data_dir)
     }
 }

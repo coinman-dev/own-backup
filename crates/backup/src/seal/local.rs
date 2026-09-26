@@ -11,7 +11,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use own_backup_common::{OwnBackupError, Result};
+use own_backup_common::{tr, OwnBackupError, Result};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -63,9 +63,7 @@ impl ServiceKeyStore {
     /// thread impersonation token. Foreground GUI/CLI contexts are refused.
     pub fn new(data_dir: &Path) -> Result<Self> {
         if own_backup_common::media_mode::is_media_mode() {
-            return Err(bad(
-                "загрузочный носитель не сохраняет локальный доступ к архивам",
-            ));
+            return Err(bad(tr!("seal_local.media_keeps_no_access")));
         }
         #[cfg(target_os = "windows")]
         {
@@ -78,7 +76,7 @@ impl ServiceKeyStore {
         {
             let _ = data_dir;
             Err(OwnBackupError::NotImplemented(
-                "хранилище ключей архивов службы пока доступно только в Windows".into(),
+                tr!("seal_local.store_windows_only").into_owned(),
             ))
         }
     }
@@ -106,15 +104,13 @@ impl ServiceKeyStore {
             .map_err(|_| bad("key-store transaction is poisoned"))?;
         let public = identity(job_id, portable)?;
         if private.public() != public {
-            return Err(bad(
-                "локальный ключ не соответствует переносимому ключу задания",
-            ));
+            return Err(bad(tr!("seal_local.key_mismatch")));
         }
         let reference = LocalKeyRef { id: Uuid::new_v4() };
         let entropy = entropy(job_id, &public, &reference);
         let protected = self.backend.protect(&entropy, private.storage_bytes())?;
         if protected.is_empty() || protected.len() > MAX_LOCAL_BLOB - MAGIC.len() {
-            return Err(bad("недопустимый размер локальной обёртки ключа"));
+            return Err(bad(tr!("seal_local.bad_wrap_size")));
         }
         let mut blob = Vec::with_capacity(MAGIC.len() + protected.len());
         blob.extend_from_slice(MAGIC);
@@ -141,9 +137,9 @@ impl ServiceKeyStore {
         reference: &LocalKeyRef,
     ) -> Result<JobPrivateKey> {
         self.open_inner(job_id, portable, reference).map_err(|e| {
-            OwnBackupError::Encryption(format!(
-                "Нужно заново разрешить автоматическое выполнение задания: {e}"
-            ))
+            OwnBackupError::Encryption(
+                tr!("seal_local.reauthorize_job", error = e).into_owned(),
+            )
         })
     }
 
@@ -157,19 +153,19 @@ impl ServiceKeyStore {
         let blob = self.backend.read(reference.id)?;
         if blob.len() <= MAGIC.len() || blob.len() > MAX_LOCAL_BLOB || &blob[..MAGIC.len()] != MAGIC
         {
-            return Err(bad("повреждён или неизвестен формат локального ключа"));
+            return Err(bad(tr!("seal_local.bad_format")));
         }
         let secret = self
             .backend
             .unprotect(&entropy(job_id, &public, reference), &blob[MAGIC.len()..])?;
         if secret.len() != 32 {
-            return Err(bad("недопустимая длина локального секретного ключа"));
+            return Err(bad(tr!("seal_local.bad_secret_length")));
         }
         let mut bytes = Zeroizing::new([0; 32]);
         bytes.copy_from_slice(&secret);
         let private = JobPrivateKey::from_bytes(*bytes);
         if private.public() != public {
-            return Err(bad("локальный ключ принадлежит другому заданию"));
+            return Err(bad(tr!("seal_local.local_key_other_job")));
         }
         Ok(private)
     }
@@ -216,7 +212,7 @@ impl ServiceKeyStore {
 fn identity(job_id: &str, portable: &SealedPrivateKey) -> Result<JobPublicKey> {
     portable.validate()?;
     if portable.job_id != job_id {
-        return Err(bad("переносимый ключ принадлежит другому заданию"));
+        return Err(bad(tr!("seal_local.portable_key_other_job")));
     }
     portable.public_key()
 }

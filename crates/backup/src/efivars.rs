@@ -39,7 +39,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
-use own_backup_common::{OwnBackupError, Result};
+use own_backup_common::{tr, OwnBackupError, Result};
 
 /// The entry is offered by the firmware's boot menu. Without this bit the entry
 /// exists, keeps its place in the order, and is skipped — which is what
@@ -49,7 +49,7 @@ pub const LOAD_OPTION_ACTIVE: u32 = 0x0000_0001;
 pub const LOAD_OPTION_HIDDEN: u32 = 0x0000_0008;
 
 fn bad(msg: impl std::fmt::Display) -> OwnBackupError {
-    OwnBackupError::ImageFormat(format!("запись загрузки: {msg}"))
+    OwnBackupError::ImageFormat(tr!("efivars.bad_entry", reason = msg).into_owned())
 }
 
 /// One `Boot####` variable, taken apart.
@@ -69,7 +69,7 @@ pub struct LoadOption {
 impl LoadOption {
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         if bytes.len() < 6 {
-            return Err(bad(format!("всего {} байт, а заголовку нужно 6", bytes.len())));
+            return Err(bad(tr!("efivars.header_short", len = bytes.len())));
         }
         let attributes = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
         let path_len = u16::from_le_bytes(bytes[4..6].try_into().unwrap()) as usize;
@@ -88,7 +88,7 @@ impl LoadOption {
             i += 2;
         }
         let Some(end) = end else {
-            return Err(bad("название не заканчивается нулём"));
+            return Err(bad(tr!("efivars.name_unterminated")));
         };
         let units: Vec<u16> =
             rest[..end].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
@@ -96,9 +96,10 @@ impl LoadOption {
 
         let after_name = end + 2;
         if after_name + path_len > rest.len() {
-            return Err(bad(format!(
-                "путь заявлен в {path_len} байт, а осталось {}",
-                rest.len() - after_name
+            return Err(bad(tr!(
+                "efivars.path_too_long",
+                declared = path_len,
+                left = rest.len() - after_name
             )));
         }
         Ok(Self {
@@ -288,7 +289,7 @@ impl DevicePathNode {
             if at + 4 > bytes.len() {
                 out.push(Self::Unreadable {
                     at,
-                    reason: format!("на заголовок узла нужно 4 байта, осталось {}", bytes.len() - at),
+                    reason: tr!("efivars.node_header_short", left = bytes.len() - at).into_owned(),
                 });
                 break;
             }
@@ -298,7 +299,10 @@ impl DevicePathNode {
             // A node shorter than its own header, or longer than what is left,
             // would send the walk backwards or off the end.
             if len < 4 || at + len > bytes.len() {
-                out.push(Self::Unreadable { at, reason: format!("узел объявил длину {len}") });
+                out.push(Self::Unreadable {
+                    at,
+                    reason: tr!("efivars.node_bad_length", len = len).into_owned(),
+                });
                 break;
             }
             let body = &bytes[at + 4..at + len];
@@ -534,7 +538,8 @@ impl SavedVar {
     }
 
     pub fn bytes(&self) -> Result<Vec<u8>> {
-        B64.decode(&self.data).map_err(|e| bad(format!("{}: испорчены данные ({e})", self.name)))
+        B64.decode(&self.data)
+            .map_err(|e| bad(tr!("efivars.var_damaged", name = self.name, error = e)))
     }
 }
 
@@ -584,25 +589,23 @@ impl BootBackup {
     /// firmware, so none of them is advisory.
     pub fn load(json: &str) -> Result<Self> {
         let me: Self = serde_json::from_str(json)
-            .map_err(|e| bad(format!("это не копия записей загрузки: {e}")))?;
+            .map_err(|e| bad(tr!("efivars.not_a_backup", error = e)))?;
         if me.format != BACKUP_FORMAT {
-            return Err(bad(format!("чужой формат файла: {}", me.format)));
+            return Err(bad(tr!("efivars.foreign_format", format = me.format)));
         }
         if me.version > BACKUP_VERSION {
-            return Err(bad(format!(
-                "файл версии {}, а эта программа понимает до {BACKUP_VERSION}",
-                me.version
+            return Err(bad(tr!(
+                "efivars.version_too_new",
+                version = me.version,
+                supported = BACKUP_VERSION
             )));
         }
         if me.variables.is_empty() {
-            return Err(bad("в копии нет ни одной переменной"));
+            return Err(bad(tr!("efivars.no_variables")));
         }
         for v in &me.variables {
             if !is_boot_variable(&v.name) {
-                return Err(bad(format!(
-                    "{}: это не переменная загрузки, восстанавливать её отсюда нельзя",
-                    v.name
-                )));
+                return Err(bad(tr!("efivars.not_boot_variable", name = v.name)));
             }
             v.bytes()?; // испорченный base64 лучше найти до записи, а не во время
         }
@@ -610,7 +613,7 @@ impl BootBackup {
     }
 
     pub fn to_json(&self) -> Result<String> {
-        serde_json::to_string_pretty(self).map_err(|e| bad(format!("не записать копию: {e}")))
+        serde_json::to_string_pretty(self).map_err(|e| bad(tr!("efivars.copy_not_written", error = e)))
     }
 
     /// The boot entries in it, for showing what a restore would put back.

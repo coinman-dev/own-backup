@@ -8,6 +8,7 @@
   import { formatBytes } from '../lib/format';
   import { diskSegments as computeSegments } from '../lib/diskLayout';
   import type { DiskInfo, PartitionInfo } from '../lib/types';
+  import { m } from '../lib/paraglide/messages';
 
   /** One cell of an explicit layout grid (see the `slots` prop).
    *
@@ -124,21 +125,21 @@
   /** Partitions the system needs but never mounts: no filesystem, no letter, no
    *  label — and previously drawn as a nameless "Раздел 128 MiB" that looks like
    *  a mistake. The GPT type GUID is what they are, so say it. */
-  const GPT_TYPE_NAMES: Record<string, string> = {
-    'C12A7328-F81F-11D2-BA4B-00A0C93EC93B': 'EFI (ESP)',
-    'E3C9E316-0B5C-4DB8-817D-F92DF00215AE': 'Зарезервировано системой (MSR)',
-    'DE94BBA4-06D1-4D40-A16A-BFD50179D6AC': 'Среда восстановления Windows',
-    '0FC63DAF-8483-4772-8E79-3D69D8477DE4': 'Linux',
-    '0657FD6D-A4AB-43C4-84E5-0933C84B4F4F': 'Linux swap',
-    'E6D6D379-F507-44C2-A23C-238F2A3DF928': 'Linux LVM',
-    'A19D880F-05FC-4D3B-A006-743F0F84911E': 'Linux RAID',
-    'CA7D7CCB-63ED-4C53-861C-1742536059CC': 'LUKS',
-    '21686148-6449-6E6F-744E-656564454649': 'BIOS boot',
-    '024DEE41-33E7-11D3-9D69-0008C781F39F': 'MBR-раздел внутри GPT',
+  const GPT_TYPE_NAMES: Record<string, () => string> = {
+    'C12A7328-F81F-11D2-BA4B-00A0C93EC93B': () => 'EFI (ESP)',
+    'E3C9E316-0B5C-4DB8-817D-F92DF00215AE': m.dmap_gpt_msr,
+    'DE94BBA4-06D1-4D40-A16A-BFD50179D6AC': m.dmap_gpt_winre,
+    '0FC63DAF-8483-4772-8E79-3D69D8477DE4': () => 'Linux',
+    '0657FD6D-A4AB-43C4-84E5-0933C84B4F4F': () => 'Linux swap',
+    'E6D6D379-F507-44C2-A23C-238F2A3DF928': () => 'Linux LVM',
+    'A19D880F-05FC-4D3B-A006-743F0F84911E': () => 'Linux RAID',
+    'CA7D7CCB-63ED-4C53-861C-1742536059CC': () => 'LUKS',
+    '21686148-6449-6E6F-744E-656564454649': () => 'BIOS boot',
+    '024DEE41-33E7-11D3-9D69-0008C781F39F': m.dmap_gpt_mbr_in_gpt,
   };
   function gptTypeName(p: PartitionInfo): string {
     const guid = (p.gpt_type_guid || '').replace(/[{}]/g, '').toUpperCase();
-    return GPT_TYPE_NAMES[guid] ?? '';
+    return GPT_TYPE_NAMES[guid]?.() ?? '';
   }
   function tableLabel(t: string): string {
     return t === 'gpt' ? 'GPT' : t === 'mbr' ? 'MBR' : t.toUpperCase();
@@ -148,10 +149,10 @@
   }
   function partLabel(p: PartitionInfo): string {
     if (p.volume_letter) {
-      const name = p.volume_label || fsLabel(p.filesystem) || 'Том';
+      const name = p.volume_label || fsLabel(p.filesystem) || m.dmap_volume();
       return `${p.volume_letter}: ${name}`;
     }
-    return p.volume_label || fsLabel(p.filesystem) || gptTypeName(p) || 'Раздел';
+    return p.volume_label || fsLabel(p.filesystem) || gptTypeName(p) || m.dmap_partition();
   }
   function partFs(p: PartitionInfo): string {
     return fsLabel(p.filesystem);
@@ -162,11 +163,11 @@
   }
   function segTitle(p: PartitionInfo): string {
     let t = partLabel(p) + ' — ' + formatBytes(p.size_bytes);
-    if (p.used_bytes > 0) t += ` (${formatBytes(p.used_bytes)} занято)`;
+    if (p.used_bytes > 0) t += ` (${m.dmap_used({ size: formatBytes(p.used_bytes) })})`;
     const fs = partFs(p);
     if (fs) t += ` ${fs}`;
     if (layoutOnly.includes(p.index)) {
-      t += ' · входит в копию: файловой системы нет, сохраняется только запись в таблице разделов';
+      t += ' · ' + m.dmap_layout_only_title();
     }
     return t;
   }
@@ -205,10 +206,10 @@
     {/if}
     <!-- The same padlock as the system one, but in the info colour — as on the
          design's «Копия зашифрована» banner — so the two stay distinguishable. -->
-    {#if p.is_encrypted}<span class="enc" title="Зашифрован"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="var(--info)" stroke-width="2.4" stroke-linecap="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></span>{/if}
+    {#if p.is_encrypted}<span class="enc" title={m.dmap_encrypted()}><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="var(--info)" stroke-width="2.4" stroke-linecap="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></span>{/if}
     <span class="seg-label">{partLabel(p)}</span>
   </div>
-  <div class="seg-meta">{formatBytes(p.size_bytes)}{#if p.used_bytes > 0}<span class="muted">&nbsp;({formatBytes(p.used_bytes)} занято)</span>{/if}{#if partFs(p)}<span class="muted">&nbsp;{partFs(p)}</span>{/if}{#if layoutOnly.includes(p.index)}<span class="muted">&nbsp;· в копии (только разметка)</span>{/if}</div>
+  <div class="seg-meta">{formatBytes(p.size_bytes)}{#if p.used_bytes > 0}<span class="muted">&nbsp;({m.dmap_used({ size: formatBytes(p.used_bytes) })})</span>{/if}{#if partFs(p)}<span class="muted">&nbsp;{partFs(p)}</span>{/if}{#if layoutOnly.includes(p.index)}<span class="muted">&nbsp;· {m.dmap_layout_only()}</span>{/if}</div>
   {#if sel}<div class="check"><svg width="10" height="10" viewBox="0 0 24 24" stroke="#fff" stroke-width="3.4" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></div>{/if}
 {/snippet}
 
@@ -241,7 +242,7 @@
             checked={bootChecked}
             onchange={(e) => onBootToggle?.((e.currentTarget as HTMLInputElement).checked)}
           />
-          загрузочный
+          {m.dmap_bootable()}
         </label>
       {/if}
       <span class="disk-meta">{formatBytes(disk.size_bytes)} · {tableLabel(disk.partition_table)}</span>
@@ -250,7 +251,7 @@
   <div class="disk-body">
     <div class="disk-ico">
       <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="var(--disk-icon)" stroke-width="1.6"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>
-      <div class="disk-name">Диск {diskDigits}</div>
+      <div class="disk-name">{m.dmap_disk({ n: diskDigits })}</div>
     </div>
     <div class="bar" class:grid={!!slots}>
       {#each segments as seg}
@@ -263,17 +264,17 @@
               class:too-small={!!onFree && needBytes != null && seg.size < needBytes}
               style={flexOf(seg)}
               title={!onFree
-                ? `Не распределено — ${formatBytes(seg.size)}`
+                ? m.dmap_unalloc({ size: formatBytes(seg.size) })
                 : needBytes != null && seg.size < needBytes
-                  ? `Не распределено — ${formatBytes(seg.size)}: не хватает ${formatBytes(needBytes - seg.size)} (нужно ${formatBytes(needBytes)})`
+                  ? m.dmap_unalloc_short({ size: formatBytes(seg.size), short: formatBytes(needBytes - seg.size), need: formatBytes(needBytes) })
                   : freeAction === 'create'
-                    ? `Не распределено — ${formatBytes(seg.size)} (кликните, чтобы создать здесь раздел)`
-                    : `Не распределено — ${formatBytes(seg.size)} (кликните, чтобы разместить здесь копию)`}
+                    ? m.dmap_unalloc_create({ size: formatBytes(seg.size) })
+                    : m.dmap_unalloc_place({ size: formatBytes(seg.size) })}
               onclick={(e) => { e.stopPropagation(); onFree?.(seg.offset ?? 0, seg.size); }}
               oncontextmenu={(e) => { if (onFreeMenu) { e.preventDefault(); e.stopPropagation(); onFreeMenu(seg.offset ?? 0, seg.size, e); } }}
-            ><span class="free-lbl">Не занято · {formatBytes(seg.size)}</span></button>
+            ><span class="free-lbl">{m.dmap_free_size({ size: formatBytes(seg.size) })}</span></button>
           {:else}
-            <div class="seg free" style={flexOf(seg)}><span class="free-lbl">Не занято</span></div>
+            <div class="seg free" style={flexOf(seg)}><span class="free-lbl">{m.dmap_free()}</span></div>
           {/if}
         {:else if seg.p}
           {@const dev = partDevice(seg.p)}
@@ -289,9 +290,9 @@
             <div
               class="seg absent"
               style={flexOf(seg)}
-              title="{partLabel(seg.p)} — {formatBytes(seg.p.size_bytes)}: этот раздел не входит в резервную копию"
+              title={m.dmap_absent_title({ name: partLabel(seg.p), size: formatBytes(seg.p.size_bytes) })}
             >
-              <span class="absent-lbl">не в бэкапе</span>
+              <span class="absent-lbl">{m.dmap_absent()}</span>
               <span class="absent-who">{partLabel(seg.p)} · {formatBytes(seg.p.size_bytes)}</span>
             </div>
           {:else if onPart || onPartMenu}

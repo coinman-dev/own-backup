@@ -17,6 +17,7 @@
     MediaProgress,
     MediaTool,
   } from '../lib/types';
+  import { m } from '../lib/paraglide/messages';
 
   interface Props {
     kind: 'windows' | 'linux';
@@ -136,7 +137,7 @@
   }
 
   async function chooseFolder() {
-    const dir = await pickPath({ directory: true, title: 'Куда сохранить ISO' });
+    const dir = await pickPath({ directory: true, title: m.mb_dest() });
     if (dir) outputDir = dir;
   }
 
@@ -172,10 +173,8 @@
 <div class="backdrop" onclick={() => !building && onClose()}>
   <div class="dialog" onclick={(e) => e.stopPropagation()}>
     <div class="head">
-      {isWindows
-        ? 'Носитель на основе Windows Recovery Environment'
-        : 'Носитель на основе Linux'}
-      <button class="x" onclick={onClose} disabled={building} title="Закрыть">
+      {isWindows ? m.mb_head_windows() : m.mb_head_linux()}
+      <button class="x" onclick={onClose} disabled={building} title={m.common_close()}>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18" /></svg>
       </button>
     </div>
@@ -184,26 +183,17 @@
       <!-- What goes in -->
       <div class="intro">
         {#if isWindows}
-          В образ войдут: среда восстановления Windows
-          {#if base}(сборка {base.build}, {base.language}){/if},
-          программа Own Backup (интерфейс, движок, командная строка),
-          рантайм WebView2 для интерфейса и системные библиотеки, которых нет в
-          WinPE. Носитель загружается сразу в программу; с него можно снять
-          копию выключенной системы и восстановить её обратно.
+          {base
+            ? m.mb_intro_win_build({ build: base.build, language: base.language })
+            : m.mb_intro_win()}
+          {m.mb_intro_win_boot()}
         {:else}
-          В образ войдут: минимальная система Linux, ядро с драйверами дисков и
-          сети, программа Own Backup и её интерфейс. Такой носитель
-          пригодится там, где нет Windows для сборки, а также для машин, чью
-          разметку и файловые системы удобнее читать из Linux (ext4, btrfs,
-          XFS, LUKS).
+          {m.mb_intro_linux()}
         {/if}
       </div>
 
       {#if !isWindows}
-        <div class="soon">
-          Сборка ещё не реализована — здесь пока только описание того, что
-          войдёт в носитель.
-        </div>
+        <div class="soon">{m.mb_linux_soon()}</div>
       {/if}
 
       <!-- Options. Hidden once the build starts: a set of checkboxes that can no
@@ -212,11 +202,9 @@
         <label class="opt">
           <input type="checkbox" bind:checked={runtimeInImage} disabled={building} />
           <span>
-            Сжимать WebView2 в образ
+            {m.mb_compress_runtime()}
             <span class="opt-note">
-              {runtimeInImage
-                ? 'файл ISO примерно на 280 МБ меньше, но при загрузке рантайм занимает около 260 МБ оперативной памяти — WinPE держит образ в памяти целиком'
-                : 'рантайм лежит на носителе несжатым: ISO больше, зато память при загрузке свободна — файлы читаются по мере надобности'}
+              {runtimeInImage ? m.mb_compress_on_note() : m.mb_compress_off_note()}
             </span>
           </span>
         </label>
@@ -224,11 +212,8 @@
         <label class="opt">
           <input type="checkbox" bind:checked={includeDrivers} disabled={building} />
           <span>
-            Добавить драйверы этого компьютера
-            <span class="opt-note">
-              без них носитель может не увидеть диски: именно поэтому
-              «универсальные» носители не находят NVMe и RAID
-            </span>
+            {m.mb_add_drivers()}
+            <span class="opt-note">{m.mb_add_drivers_note()}</span>
           </span>
         </label>
 
@@ -241,26 +226,26 @@
                    how far along it is. -->
               <div class="scan">
                 <span class="scan-bar"><span class="scan-run"></span></span>
-                <span class="muted">Опрос оборудования: диски и сетевые адаптеры…</span>
+                <span class="muted">{m.mb_polling_hw()}</span>
               </div>
             {:else if driverError}
               <div class="err">{driverError}</div>
             {:else if offered.length === 0 && inbox.length === 0}
-              <div class="muted">
-                Дисков и сетевых адаптеров, которым нужен драйвер, на этой машине
-                не нашлось.
-              </div>
+              <div class="muted">{m.mb_no_hw()}</div>
             {:else if offered.length === 0}
               <!-- Nothing to choose: the rows below say why, device by device. -->
             {:else}
               <div class="drv-head">
                 <span>
-                  Найдено оборудования: {offered.length} · выбрано {selected.size} ·
-                  {formatBytes(chosenBytes)}
+                  {m.mb_drv_summary({
+                    found: offered.length,
+                    chosen: selected.size,
+                    size: formatBytes(chosenBytes),
+                  })}
                 </span>
                 <span class="drv-actions">
-                  <button class="lnk" onclick={() => (selected = new Set(offered.map((d) => d.inf)))}>все</button>
-                  <button class="lnk" onclick={() => (selected = new Set())}>ни одного</button>
+                  <button class="lnk" onclick={() => (selected = new Set(offered.map((d) => d.inf)))}>{m.mb_select_all()}</button>
+                  <button class="lnk" onclick={() => (selected = new Set())}>{m.mb_select_none()}</button>
                 </span>
               </div>
               <div class="drv-list">
@@ -284,18 +269,16 @@
             {#if !loadingDrivers && !driverError && inbox.length > 0}
               <div class="inbox">
                 <div class="muted">
-                  {offered.length === 0 ? 'Диски и сеть этой машины работают' : 'Остальные устройства работают'}
-                  на драйверах, встроенных в Windows, — выгружать их не нужно. При
-                  сборке проверится, что они есть и в среде восстановления; если
-                  какого-то нет, он будет добавлен с этой машины.
+                  {offered.length === 0 ? m.mb_inbox_all() : m.mb_inbox_rest()}
+                  {m.mb_inbox_check()}
                 </div>
                 {#each inbox as d (d.inf)}
-                  <div class="drv inbox-row" title="{d.device} — {d.role}, драйвер {d.inf}">
+                  <div class="drv inbox-row" title={m.mb_inbox_title({ device: d.device, role: d.role, inf: d.inf })}>
                     <span></span><!-- the checkbox column: nothing to tick -->
                     <span class="drv-name">{d.device || d.inf}</span>
                     <span class="drv-class">{d.role}</span>
                     <span class="drv-prov">{d.inf}</span>
-                    <span class="drv-size">встроенный</span>
+                    <span class="drv-size">{m.mb_builtin()}</span>
                   </div>
                 {/each}
               </div>
@@ -310,13 +293,17 @@
           <label class="opt">
             <input type="checkbox" bind:checked={includeTools} disabled={building} />
             <span>
-              Средства на всякий случай
-              <span class="opt-note">
-                программы с этого компьютера, вместе с их настройками
-              </span>
+              {m.mb_tools()}
+              <span class="opt-note">{m.mb_tools_note()}</span>
               <span class="tools-line">
                 {tools
-                  .map((t) => `${t.name} — ${formatBytes(t.size_bytes)} · ${t.files} файлов`)
+                  .map((t) =>
+                    m.mb_tool_line({
+                      name: t.name,
+                      size: formatBytes(t.size_bytes),
+                      files: m.mb_files({ count: t.files }),
+                    }),
+                  )
                   .join(', ')}
               </span>
             </span>
@@ -329,18 +316,9 @@
              left WinPE with no picture at all, while switching CSM off gave the
              monitor's recommended mode with no driver (2026-09-18). -->
         <div class="screen">
-          <div class="screen-title">Разрешение экрана на носителе</div>
-          Режим экрана выбирает прошивка компьютера при загрузке, видеодрайверы
-          для этого не нужны. Чтобы носитель открылся в разрешении, которое
-          рекомендует монитор, отключите в настройках BIOS/UEFI модуль CSM
-          (Compatibility Support Module — обычно в разделе загрузки, пункт
-          «Launch CSM» или «CSM Support»). С включённым CSM экран может остаться
-          в 1024×768 или 1280×1024.
-          <span class="screen-warn">
-            Если основная система этого компьютера установлена в режиме Legacy
-            (MBR), без CSM она не загрузится — после работы с носителем включите
-            его обратно.
-          </span>
+          <div class="screen-title">{m.mb_screen_title()}</div>
+          {m.mb_screen_text()}
+          <span class="screen-warn">{m.mb_screen_warn()}</span>
         </div>
       {/if}
 
@@ -390,34 +368,31 @@
 
       {#if report}
         <div class="report">
-          <div class="rep-head">Носитель готов</div>
-          <div class="rep-row"><span>Файл</span><span>{report.iso_path}</span></div>
-          <div class="rep-row"><span>Размер</span><span>{formatBytes(report.iso_bytes)}</span></div>
+          <div class="rep-head">{m.mb_rep_ready()}</div>
+          <div class="rep-row"><span>{m.mb_rep_file()}</span><span>{report.iso_path}</span></div>
+          <div class="rep-row"><span>{m.mb_rep_size()}</span><span>{formatBytes(report.iso_bytes)}</span></div>
           <div class="rep-row">
-            <span>Основа</span>
-            <span>{report.base_name} · сборка {report.base_build} · {report.base_language}</span>
+            <span>{m.mb_rep_base()}</span>
+            <span>{report.base_name} · {m.mb_build({ build: report.base_build })} · {report.base_language}</span>
           </div>
           <div class="rep-row">
-            <span>Драйверы</span>
-            <span>{report.drivers_added > 0 ? `${report.drivers_added} шт.` : 'не добавлялись'}</span>
+            <span>{m.mb_rep_drivers()}</span>
+            <span>{report.drivers_added > 0 ? m.mb_pcs({ n: report.drivers_added }) : m.mb_drivers_none()}</span>
           </div>
           {#if report.tools_added > 0}
             <div class="rep-row">
-              <span>Средства</span>
-              <span>{report.tools_added} шт. · {formatBytes(report.tools_bytes)}</span>
+              <span>{m.mb_rep_tools()}</span>
+              <span>{m.mb_pcs({ n: report.tools_added })} · {formatBytes(report.tools_bytes)}</span>
             </div>
           {/if}
           {#if report.temp_bytes_freed > 0}
             <div class="rep-row">
-              <span>Убрано</span>
-              <span>{formatBytes(report.temp_bytes_freed)} временных файлов</span>
+              <span>{m.mb_rep_cleaned()}</span>
+              <span>{m.mb_temp_freed({ size: formatBytes(report.temp_bytes_freed) })}</span>
             </div>
           {/if}
           {#each report.warnings as w}<div class="warn">{w}</div>{/each}
-          <div class="rep-note">
-            Запишите ISO на флешку (Rufus и подобные) или подключите как привод
-            в виртуальной машине.
-          </div>
+          <div class="rep-note">{m.mb_rep_note()}</div>
         </div>
       {/if}
     </div>
@@ -425,22 +400,22 @@
     <!-- Pinned: the destination and the button stay reachable however long the
          list above grows. -->
     <div class="dest">
-      <span class="lbl">Куда сохранить ISO</span>
+      <span class="lbl">{m.mb_dest()}</span>
       <input type="text" bind:value={outputDir} placeholder="D:\OwnBackup"
              spellcheck="false" disabled={building || finished} />
       <button class="btn outline" onclick={chooseFolder} disabled={building || finished}>
-        Обзор…
+        {m.common_browse()}
       </button>
       {#if finished}
-        <button class="btn primary" onclick={onClose}>Готово</button>
+        <button class="btn primary" onclick={onClose}>{m.mb_done()}</button>
       {:else}
         <button class="btn primary" onclick={start} disabled={!canStart}
                 title={!isWindows
-                  ? 'Сборка Linux-носителя ещё не реализована'
+                  ? m.mb_linux_not_impl()
                   : includeDrivers && loadingDrivers
-                    ? 'Идёт опрос оборудования'
+                    ? m.mb_polling_title()
                     : ''}>
-          {building ? 'Сборка…' : includeDrivers && loadingDrivers ? 'Опрос…' : 'Начать'}
+          {building ? m.mb_building() : includeDrivers && loadingDrivers ? m.mb_polling_btn() : m.mb_start()}
         </button>
       {/if}
     </div>

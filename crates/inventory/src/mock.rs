@@ -37,6 +37,7 @@ impl MockInventory {
             linux_last_mounted: String::new(),
             is_encrypted: false,
             unlock_methods: Vec::new(),
+            recovery_key_only: false,
             unlockable: true,
         };
 
@@ -58,6 +59,7 @@ impl MockInventory {
             linux_last_mounted: String::new(),
             is_encrypted: false,
             unlock_methods: Vec::new(),
+            recovery_key_only: false,
             unlockable: true,
         };
 
@@ -79,6 +81,7 @@ impl MockInventory {
             linux_last_mounted: String::new(),
             is_encrypted: false,
             unlock_methods: Vec::new(),
+            recovery_key_only: false,
             unlockable: true,
         };
 

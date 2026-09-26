@@ -11,12 +11,13 @@
 
 #![cfg(target_os = "windows")]
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use tracing::{info, warn};
 
 use own_backup_common::restore_plan::PartRef;
-use own_backup_common::{OwnBackupError, Result};
+use own_backup_common::{tr, OwnBackupError, Result};
 
 use crate::esp_fallback::{
     choose_loader, copies_for, parse_grub_search_uuid, VendorDir, FALLBACK_DIR, FALLBACK_NAME,
@@ -46,10 +47,9 @@ pub fn ensure_fallback_bootloader(
     restored: &[PartRef],
 ) -> Result<FallbackOutcome> {
     let root = crate::volume_win::volume_root_at_offset(disk_number, esp.offset).ok_or_else(|| {
-        OwnBackupError::Device(format!(
-            "Windows не показала том раздела EFI (смещение {}) — загрузчик скопировать некуда",
-            esp.offset
-        ))
+        OwnBackupError::Device(
+            tr!("esp_fallback_win.no_volume", offset = esp.offset).into_owned(),
+        )
     })?;
     let root = PathBuf::from(&root);
     let efi = root.join("EFI");
@@ -57,14 +57,11 @@ pub fn ensure_fallback_bootloader(
         return Ok(FallbackOutcome {
             copied: false,
             from: String::new(),
-            message: "На разделе EFI нет каталога \\EFI — копировать нечего".into(),
-            follow_ups: vec![
-                "Раздел EFI восстановлен, но каталога \\EFI в нём нет: загрузчика на диске \
-                 не оказалось. Восстановленная система сама не загрузится."
-                    .into(),
-            ],
+            message: tr!("esp_fallback_win.no_efi_dir").into_owned(),
+            follow_ups: vec![tr!("esp_fallback_win.no_efi_dir_follow_up").into_owned()],
         });
     }
+    let fallback_path = format!("{FALLBACK_DIR}\\{FALLBACK_NAME}");
 
     // First question, before anything else: is there already a loader at the
     // path the firmware tries by itself? A disk that boots anywhere needs
@@ -75,14 +72,17 @@ pub fn ensure_fallback_bootloader(
         let size = std::fs::metadata(&fallback).map(|m| m.len()).unwrap_or(0);
         let known = identify_loader(&fallback);
         info!(
-            esp = %root.display(), bytes = size, kind = known,
+            esp = %root.display(), bytes = size, kind = %known,
             "the ESP already has a fallback loader — left alone"
         );
         return Ok(FallbackOutcome {
-            message: format!(
-                "{FALLBACK_DIR}\\{FALLBACK_NAME} уже есть ({known}, {}) — оставили как есть",
-                own_backup_common::units::human_bytes(size)
-            ),
+            message: tr!(
+                "esp_fallback_win.already_there",
+                fallback = fallback_path,
+                kind = known,
+                size = own_backup_common::units::human_bytes(size)
+            )
+            .into_owned(),
             follow_ups: Vec::new(),
             copied: false,
             from: String::new(),
@@ -103,12 +103,10 @@ pub fn ensure_fallback_bootloader(
         return Ok(FallbackOutcome {
             copied: false,
             from: String::new(),
-            message: "Загрузчика для UEFI на разделе EFI не нашлось".into(),
-            follow_ups: vec![format!(
-                "На разделе EFI нет ни {FALLBACK_DIR}\\{FALLBACK_NAME}, ни знакомого загрузчика \
-                 (shim, GRUB, диспетчер загрузки Windows). Если система с этого диска не \
-                 стартует, загрузочную запись придётся создать вручную."
-            )],
+            message: tr!("esp_fallback_win.no_loader").into_owned(),
+            follow_ups: vec![
+                tr!("esp_fallback_win.no_loader_follow_up", fallback = fallback_path).into_owned(),
+            ],
         });
     };
     info!(
@@ -121,10 +119,9 @@ pub fn ensure_fallback_bootloader(
 
     let dest_dir = efi.join("BOOT");
     std::fs::create_dir_all(&dest_dir).map_err(|e| {
-        OwnBackupError::Device(format!(
-            "не удалось создать {} на разделе EFI: {e}",
-            dest_dir.display()
-        ))
+        OwnBackupError::Device(
+            tr!("esp_fallback_win.mkdir_failed", dir = dest_dir.display(), error = e).into_owned(),
+        )
     })?;
 
     let copies = copies_for(&vendors, &choice);
@@ -142,33 +139,40 @@ pub fn ensure_fallback_bootloader(
                 // The loader itself is the one file without which the rest is
                 // pointless, and a half-populated EFI\BOOT is worse than none.
                 if c.to.eq_ignore_ascii_case(FALLBACK_NAME) {
-                    return Err(OwnBackupError::Device(format!(
-                        "не удалось скопировать загрузчик в {FALLBACK_DIR}\\{FALLBACK_NAME}: {e}"
-                    )));
+                    return Err(OwnBackupError::Device(
+                        tr!("esp_fallback_win.copy_failed", fallback = fallback_path, error = e)
+                            .into_owned(),
+                    ));
                 }
             }
         }
     }
 
-    let mut follow_ups = vec![format!(
-        "Загрузчик EFI\\{}\\{} скопирован в {FALLBACK_DIR}\\{FALLBACK_NAME} — по этому пути UEFI \
-         ищет загрузчик сама, без записи в NVRAM материнской платы. Именно эта запись не \
-         переносится вместе с копией, поэтому на другой машине (и в виртуальной) диск иначе не \
-         стартует. На прежней машине ничего не изменится: её собственная запись в NVRAM \
-         по-прежнему имеет приоритет.",
-        choice.dir, choice.loader
-    )];
+    let mut follow_ups = vec![tr!(
+        "esp_fallback_win.copied_follow_up",
+        dir = choice.dir,
+        loader = choice.loader,
+        fallback = fallback_path
+    )
+    .into_owned()];
     if !choice.confirmed_by_uuid && !choice.other_candidates.is_empty() {
-        follow_ups.push(format!(
-            "На разделе EFI несколько загрузчиков ({}), и определить по UUID, какой из них от \
-             восстановленной системы, не удалось — взят EFI\\{}. Если система не загрузится, \
-             запустите из UEFI Shell загрузчик из другого каталога.",
-            choice.other_candidates.join(", "),
-            choice.dir
-        ));
+        follow_ups.push(
+            tr!(
+                "esp_fallback_win.several_loaders",
+                candidates = choice.other_candidates.join(", "),
+                dir = choice.dir
+            )
+            .into_owned(),
+        );
     }
     Ok(FallbackOutcome {
-        message: format!("Из EFI\\{} скопировано в {FALLBACK_DIR}: {}", choice.dir, copied.join(", ")),
+        message: tr!(
+            "esp_fallback_win.copied",
+            dir = choice.dir,
+            fallback_dir = FALLBACK_DIR,
+            files = copied.join(", ")
+        )
+        .into_owned(),
         follow_ups,
         copied: true,
         from: choice.dir.clone(),
@@ -181,8 +185,8 @@ pub fn ensure_fallback_bootloader(
 /// enough to tell a Windows boot manager from shim or GRUB, which is what a
 /// user reading the report wants to know ("что там уже лежит?"). Nothing is
 /// decided from this: the file is kept either way.
-fn identify_loader(path: &Path) -> &'static str {
-    let Ok(bytes) = std::fs::read(path) else { return "загрузчик" };
+fn identify_loader(path: &Path) -> Cow<'static, str> {
+    let Ok(bytes) = std::fs::read(path) else { return tr!("esp_fallback_win.loader") };
     // The strings are UTF-16LE inside the binary; matching on the ASCII bytes
     // interleaved with NULs finds them without decoding the whole file.
     let has = |needle: &str| -> bool {
@@ -191,15 +195,15 @@ fn identify_loader(path: &Path) -> &'static str {
             || bytes.windows(needle.len()).any(|w| w == needle.as_bytes())
     };
     if has("Windows Boot Manager") || has("bootmgfw") || has("BCD") {
-        "диспетчер загрузки Windows"
+        tr!("esp_fallback_win.windows_boot_manager")
     } else if has("shim") || has("MokManager") {
-        "shim (Secure Boot)"
+        Cow::Borrowed("shim (Secure Boot)")
     } else if has("GRUB") || has("grub") {
-        "GRUB"
+        Cow::Borrowed("GRUB")
     } else if has("systemd-boot") {
-        "systemd-boot"
+        Cow::Borrowed("systemd-boot")
     } else {
-        "загрузчик"
+        tr!("esp_fallback_win.loader")
     }
 }
 

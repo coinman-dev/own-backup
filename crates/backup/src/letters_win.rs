@@ -20,7 +20,7 @@ use windows::Win32::System::Ioctl::{
 };
 use windows::Win32::System::IO::DeviceIoControl;
 
-use own_backup_common::{OwnBackupError, Result};
+use own_backup_common::{tr, OwnBackupError, Result};
 
 use crate::volume_win::{volume_drive_letters, FileHandle};
 use crate::win_device::to_wide;
@@ -52,7 +52,12 @@ pub fn assign_letter(volume_root: &str, letter: char) -> Result<()> {
     let volume_w = to_wide(volume_root);
     // SAFETY: both buffers are NUL-terminated and outlive the call.
     unsafe { SetVolumeMountPointW(PCWSTR(mount_w.as_ptr()), PCWSTR(volume_w.as_ptr())) }.map_err(
-        |e| OwnBackupError::Device(format!("не удалось назначить букву {letter}: для {volume_root}: {e}")),
+        |e| {
+            OwnBackupError::Device(
+                tr!("letters_win.assign_failed", letter = letter, volume = volume_root, error = e)
+                    .into_owned(),
+            )
+        },
     )?;
     info!(volume = %volume_root, %letter, "drive letter assigned");
     Ok(())
@@ -218,9 +223,7 @@ impl TempDriveLetter {
             return Ok(Self { letter: None, volume_root: format!("{letter}:\\") });
         }
         let letter = next_free_letter('D').ok_or_else(|| {
-            OwnBackupError::Device(
-                "нет ни одной свободной буквы диска — форматировать раздел не через что".into(),
-            )
+            OwnBackupError::Device(tr!("letters_win.no_free_letter").into_owned())
         })?;
         assign_letter(volume_root, letter)?;
         Ok(Self { letter: Some(letter), volume_root: format!("{letter}:\\") })
@@ -269,7 +272,11 @@ pub fn extend_volume(volume_root: &str, new_sector_count: u64) -> Result<()> {
             None,
         )
     }
-    .map_err(|e| OwnBackupError::Device(format!("не удалось открыть том {device}: {e}")))?;
+    .map_err(|e| {
+        OwnBackupError::Device(
+            tr!("letters_win.open_volume_failed", device = device, error = e).into_owned(),
+        )
+    })?;
     let handle = FileHandle(handle);
 
     let sectors = new_sector_count as i64;
@@ -288,9 +295,15 @@ pub fn extend_volume(volume_root: &str, new_sector_count: u64) -> Result<()> {
         )
     }
     .map_err(|e| {
-        OwnBackupError::Device(format!(
-            "не удалось расширить том {device} до {new_sector_count} секторов: {e}"
-        ))
+        OwnBackupError::Device(
+            tr!(
+                "letters_win.extend_failed",
+                device = device,
+                sectors = new_sector_count,
+                error = e
+            )
+            .into_owned(),
+        )
     })?;
     info!(volume = %device, new_sector_count, "filesystem extended into its partition");
     Ok(())

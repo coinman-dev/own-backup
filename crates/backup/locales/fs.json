@@ -1,0 +1,391 @@
+{
+  "_version": 2,
+  "xfs_dirent.refusal_shortform_to_ino4": {
+    "ru": "каталог %{dir_ino}: удаление потребовало бы перекодировки номеров инодов в 4 байта",
+    "en": "directory %{dir_ino}: the removal would require re-encoding inode numbers to 4 bytes"
+  },
+  "xfs_dirent.refusal_name_not_found": {
+    "ru": "каталог %{dir_ino}: имени %{name} в нём нет",
+    "en": "directory %{dir_ino}: no entry named %{name}"
+  },
+  "xfs_dirent.refusal_would_empty_block": {
+    "ru": "каталог %{dir_ino}: имя %{name} оставлено, иначе блок данных стал бы пустым",
+    "en": "directory %{dir_ino}: name %{name} kept, otherwise the data block would become empty"
+  },
+  "xfs_dirent.refusal_other": {
+    "ru": "каталог %{dir_ino}: %{why}",
+    "en": "directory %{dir_ino}: %{why}"
+  },
+  "xfs_dirent.hole_does_not_fit": {
+    "ru": "дыра длины %{len} по смещению %{offset} не помещается",
+    "en": "a hole of length %{len} at offset %{offset} does not fit"
+  },
+  "xfs_dirent.entry_past_block": {
+    "ru": "запись по смещению %{offset} выходит за блок",
+    "en": "the entry at offset %{offset} runs past the block"
+  },
+  "xfs_dirent.merged_hole_does_not_fit": {
+    "ru": "слитая дыра не помещается в блок",
+    "en": "the merged hole does not fit in the block"
+  },
+  "xfs_dirent.no_hash_entry": {
+    "ru": "в хеш-массиве нет записи с адресом %{addr}",
+    "en": "the hash array has no entry with address %{addr}"
+  },
+  "xfs_dirent.unsupported_format": {
+    "ru": "каталог %{dir_ino}: формат %{format} не поддержан",
+    "en": "directory %{dir_ino}: format %{format} is not supported"
+  },
+  "xfs_dirent.empty_data_fork": {
+    "ru": "пустой фок данных",
+    "en": "empty data fork"
+  },
+  "xfs_dirent.shortform_truncated": {
+    "ru": "каталог %{dir_ino}: shortform обрывается",
+    "en": "directory %{dir_ino}: the shortform data is truncated"
+  },
+  "xfs_dirent.name_past_fork": {
+    "ru": "каталог %{dir_ino}: имя выходит за фок",
+    "en": "directory %{dir_ino}: a name runs past the fork"
+  },
+  "xfs_dirent.inode_number_past_fork": {
+    "ru": "каталог %{dir_ino}: номер инода выходит за фок",
+    "en": "directory %{dir_ino}: an inode number runs past the fork"
+  },
+  "xfs_dirent.count_overflows_byte": {
+    "ru": "count не влезает в байт",
+    "en": "count does not fit in a byte"
+  },
+  "xfs_dirent.i8count_overflows_byte": {
+    "ru": "i8count не влезает в байт",
+    "en": "i8count does not fit in a byte"
+  },
+  "xfs_dirent.data_blocks_no_leaf": {
+    "ru": "%{count} блоков данных и ни одного листа",
+    "en": "%{count} data blocks and no leaf"
+  },
+  "xfs_dirent.leaf_bad_magic": {
+    "ru": "каталог %{dir_ino}: лист с меткой %{magic}",
+    "en": "directory %{dir_ino}: a leaf with magic %{magic}"
+  },
+  "xfs_dirent.leaf_crc_mismatch": {
+    "ru": "каталог %{dir_ino}: CRC листа не сходится — не трогаю",
+    "en": "directory %{dir_ino}: leaf CRC mismatch — leaving it untouched"
+  },
+  "xfs_dirent.free_index_bad_magic": {
+    "ru": "каталог %{dir_ino}: блок индекса с чужой меткой",
+    "en": "directory %{dir_ino}: a free-index block with a foreign magic"
+  },
+  "xfs_dirent.free_index_crc_mismatch": {
+    "ru": "каталог %{dir_ino}: CRC индекса не сходится — не трогаю",
+    "en": "directory %{dir_ino}: free-index CRC mismatch — leaving it untouched"
+  },
+  "xfs_dirent.data_block_bad_magic": {
+    "ru": "каталог %{dir_ino}: блок данных с меткой %{magic}",
+    "en": "directory %{dir_ino}: a data block with magic %{magic}"
+  },
+  "xfs_dirent.data_block_crc_mismatch": {
+    "ru": "каталог %{dir_ino}: CRC блока данных не сходится — не трогаю",
+    "en": "directory %{dir_ino}: data block CRC mismatch — leaving it untouched"
+  },
+  "xfs_dirent.no_leaf_entry": {
+    "ru": "каталог %{dir_ino}: в листьях нет записи с адресом %{addr}",
+    "en": "directory %{dir_ino}: no leaf has an entry with address %{addr}"
+  },
+  "xfs_dirent.data_block_not_indexed": {
+    "ru": "каталог %{dir_ino}: блок данных %{logical} не покрыт индексом свободного места",
+    "en": "directory %{dir_ino}: data block %{logical} is not covered by the free-space index"
+  },
+
+  "xfs_ifree.refusal_not_in_tree": {
+    "ru": "инод %{ino}: чанка нет в дереве инодов",
+    "en": "inode %{ino}: its chunk is not in the inode tree"
+  },
+  "xfs_ifree.refusal_already_free": {
+    "ru": "инод %{ino}: уже свободен",
+    "en": "inode %{ino}: already free"
+  },
+  "xfs_ifree.refusal_finobt_leaf_full": {
+    "ru": "инод %{ino}: лист FINOBT в группе %{ag} полон, вставка потребовала бы разбиения",
+    "en": "inode %{ino}: the FINOBT leaf in AG %{ag} is full, an insert would need a split"
+  },
+  "xfs_ifree.refusal_other": {
+    "ru": "инод %{ino}: %{why}",
+    "en": "inode %{ino}: %{why}"
+  },
+  "xfs_ifree.block_bad_magic": {
+    "ru": "группа %{ag} блок %{agbno}: магия %{found} вместо %{expected}",
+    "en": "AG %{ag} block %{agbno}: magic %{found} instead of %{expected}"
+  },
+  "xfs_ifree.block_crc_mismatch": {
+    "ru": "группа %{ag} блок %{agbno}: CRC не сходится — не трогаю",
+    "en": "AG %{ag} block %{agbno}: CRC mismatch — leaving it untouched"
+  },
+  "xfs_ifree.leaf_too_many_records": {
+    "ru": "лист заявляет больше записей, чем влезает",
+    "en": "a leaf claims more records than fit"
+  },
+  "xfs_ifree.node_bad_pointer_count": {
+    "ru": "узел заявляет невозможное число указателей",
+    "en": "a node claims an impossible number of pointers"
+  },
+  "xfs_ifree.tree_too_deep": {
+    "ru": "дерево глубже 16 уровней — зациклилось",
+    "en": "the tree is deeper than 16 levels — it loops"
+  },
+  "xfs_ifree.group_missing": {
+    "ru": "группа %{ag} не существует",
+    "en": "AG %{ag} does not exist"
+  },
+  "xfs_ifree.inode_in_sparse_hole": {
+    "ru": "инод попадает в дыру разреженного чанка",
+    "en": "the inode falls into a hole of a sparse chunk"
+  },
+  "xfs_ifree.agi_crc_mismatch": {
+    "ru": "группа %{ag}: CRC AGI не сходится — не трогаю",
+    "en": "AG %{ag}: AGI CRC mismatch — leaving it untouched"
+  },
+  "xfs_ifree.superblock_crc_mismatch": {
+    "ru": "CRC суперблока не сходится — не трогаю",
+    "en": "superblock CRC mismatch — leaving it untouched"
+  },
+  "xfs_ifree.inode_no_magic": {
+    "ru": "инод %{ino}: нет магии IN",
+    "en": "inode %{ino}: no IN magic"
+  },
+  "xfs_ifree.inode_crc_mismatch": {
+    "ru": "инод %{ino}: CRC не сходится — не трогаю",
+    "en": "inode %{ino}: CRC mismatch — leaving it untouched"
+  },
+
+  "xfs_exclusions.log_dirty": {
+    "ru": "журнал xfs не пуст (нечистое завершение) — исключения пропущены; загрузите систему корректно или выполните xfs_repair",
+    "en": "the xfs log is not empty (unclean shutdown) — exclusions skipped; boot that system cleanly or run xfs_repair"
+  },
+
+  "xfs_efree.refusal_leaf_full": {
+    "ru": "группа %{ag}: лист %{tree} полон, вставка потребовала бы разбиения",
+    "en": "AG %{ag}: the %{tree} leaf is full, an insert would need a split"
+  },
+  "xfs_efree.refusal_leaf_underflow": {
+    "ru": "группа %{ag}: удаление увело бы лист %{tree} ниже минимума",
+    "en": "AG %{ag}: a delete would take the %{tree} leaf below its minimum"
+  },
+  "xfs_efree.block_wrong_tree": {
+    "ru": "группа %{ag} блок %{agbno}: не %{tree} (%{magic})",
+    "en": "AG %{ag} block %{agbno}: not %{tree} (%{magic})"
+  },
+  "xfs_efree.block_crc_mismatch": {
+    "ru": "группа %{ag} блок %{agbno}: CRC %{tree} не сходится — не трогаю",
+    "en": "AG %{ag} block %{agbno}: %{tree} CRC mismatch — leaving it untouched"
+  },
+  "xfs_efree.rmap_block_empty": {
+    "ru": "RMAPBT: блок опустел — слияние не реализовано",
+    "en": "RMAPBT: a block became empty — merging is not implemented"
+  },
+  "xfs_efree.rmap_node_impossible": {
+    "ru": "RMAPBT: узел заявляет невозможное",
+    "en": "RMAPBT: a node claims an impossible record count"
+  },
+  "xfs_efree.rmap_too_deep": {
+    "ru": "RMAPBT глубже 16 уровней",
+    "en": "RMAPBT is deeper than 16 levels"
+  },
+  "xfs_efree.rmap_too_large": {
+    "ru": "RMAPBT слишком велик — похоже на цикл",
+    "en": "RMAPBT is too large — looks like a loop"
+  },
+  "xfs_efree.leaf_impossible": {
+    "ru": "%{tree}: лист заявляет невозможное",
+    "en": "%{tree}: a leaf claims an impossible record count"
+  },
+  "xfs_efree.node_impossible": {
+    "ru": "%{tree}: узел заявляет невозможное",
+    "en": "%{tree}: a node claims an impossible record count"
+  },
+  "xfs_efree.tree_too_deep": {
+    "ru": "дерево глубже 16 уровней",
+    "en": "the tree is deeper than 16 levels"
+  },
+  "xfs_efree.block_empty": {
+    "ru": "%{tree}: блок %{child} опустел",
+    "en": "%{tree}: block %{child} became empty"
+  },
+  "xfs_efree.tree_too_large": {
+    "ru": "дерево слишком велико — похоже на цикл",
+    "en": "the tree is too large — looks like a loop"
+  },
+  "xfs_efree.extent_already_free": {
+    "ru": "группа %{ag}: экстент %{start}+%{len} уже числится свободным",
+    "en": "AG %{ag}: extent %{start}+%{len} is already free"
+  },
+  "xfs_efree.record_missing": {
+    "ru": "группа %{ag}: в %{tree} нет записи %{start}+%{len}",
+    "en": "AG %{ag}: %{tree} has no record %{start}+%{len}"
+  },
+  "xfs_efree.record_exists": {
+    "ru": "группа %{ag}: в %{tree} уже есть запись %{start}+%{len}",
+    "en": "AG %{ag}: %{tree} already has a record %{start}+%{len}"
+  },
+  "xfs_efree.rmap_owner_missing": {
+    "ru": "группа %{ag}: в RMAPBT нет записи владельца %{owner}",
+    "en": "AG %{ag}: RMAPBT has no record for owner %{owner}"
+  },
+  "xfs_efree.agf_crc_mismatch": {
+    "ru": "группа %{ag}: CRC AGF не сходится — не трогаю",
+    "en": "AG %{ag}: AGF CRC mismatch — leaving it untouched"
+  },
+  "xfs_efree.free_recount_mismatch": {
+    "ru": "группа %{ag}: пересчёт свободного дал %{freeblks}, ожидалось %{expected}",
+    "en": "AG %{ag}: the free-space recount gave %{freeblks}, expected %{expected}"
+  },
+
+  "xfs_stage2.block_outside_ag": {
+    "ru": "AG %{ag} блок %{agbno} вне группы",
+    "en": "AG %{ag} block %{agbno} is outside the group"
+  },
+  "xfs_stage2.no_agf_magic": {
+    "ru": "AG %{ag}: нет магии XAGF",
+    "en": "AG %{ag}: no XAGF magic"
+  },
+  "xfs_stage2.agf_seqno_mismatch": {
+    "ru": "AG %{ag}: agf_seqno не совпадает",
+    "en": "AG %{ag}: agf_seqno mismatch"
+  },
+  "xfs_stage2.no_agi_magic": {
+    "ru": "AG %{ag}: нет магии XAGI",
+    "en": "AG %{ag}: no XAGI magic"
+  },
+  "xfs_stage2.agi_seqno_mismatch": {
+    "ru": "AG %{ag}: agi_seqno не совпадает",
+    "en": "AG %{ag}: agi_seqno mismatch"
+  },
+  "xfs_stage2.tree_too_deep": {
+    "ru": "дерево глубже 16 уровней — зациклилось",
+    "en": "the tree is deeper than 16 levels — it loops"
+  },
+  "xfs_stage2.block_bad_magic": {
+    "ru": "AG %{ag} блок %{block}: магия %{found} вместо %{expected}",
+    "en": "AG %{ag} block %{block}: magic %{found} instead of %{expected}"
+  },
+  "xfs_stage2.leaf_too_many_records": {
+    "ru": "лист заявляет больше записей, чем влезает",
+    "en": "a leaf claims more records than fit"
+  },
+  "xfs_stage2.node_too_many_pointers": {
+    "ru": "узел заявляет больше указателей, чем влезает",
+    "en": "a node claims more pointers than fit"
+  },
+  "xfs_stage2.plan_not_settled": {
+    "ru": "план Stage 2 не сошёлся",
+    "en": "the Stage 2 plan did not converge"
+  },
+
+  "xfs_map.external_log": {
+    "ru": "внешний журнал xfs — проверить его нечем, копируем посекторно",
+    "en": "external xfs log — there is no way to check it, copying sector by sector"
+  },
+  "xfs_map.log_dirty": {
+    "ru": "журнал xfs не пуст (нечистое завершение) — копируем посекторно",
+    "en": "the xfs log is not empty (unclean shutdown) — copying sector by sector"
+  },
+
+  "ntfs_scan.not_ntfs": {
+    "ru": "не NTFS: %{error}",
+    "en": "not NTFS: %{error}"
+  },
+  "ntfs_scan.upcase_table": {
+    "ru": "таблица регистра: %{error}",
+    "en": "upcase table: %{error}"
+  },
+  "ntfs_scan.volume_dirty": {
+    "ru": "том помечен грязным (нужен chkdsk) — исключения по MFT не применяются",
+    "en": "the volume is marked dirty (chkdsk needed) — MFT-based exclusions are not applied"
+  },
+  "ntfs_scan.mft_record_zero": {
+    "ru": "запись 0 MFT: %{error}",
+    "en": "MFT record 0: %{error}"
+  },
+  "ntfs_scan.mft_no_data": {
+    "ru": "у $MFT нет потока данных",
+    "en": "$MFT has no data stream"
+  },
+  "ntfs_scan.attribute": {
+    "ru": "атрибут: %{error}",
+    "en": "attribute: %{error}"
+  },
+  "ntfs_scan.attribute_list": {
+    "ru": "список атрибутов: %{error}",
+    "en": "attribute list: %{error}"
+  },
+  "ntfs_scan.list_entry": {
+    "ru": "запись списка: %{error}",
+    "en": "attribute list entry: %{error}"
+  },
+  "ntfs_scan.extension_record": {
+    "ru": "запись-продолжение: %{error}",
+    "en": "extension record: %{error}"
+  },
+  "ntfs_scan.extension_attribute": {
+    "ru": "атрибут продолжения: %{error}",
+    "en": "extension record attribute: %{error}"
+  },
+  "ntfs_scan.extension_runs_unparsed": {
+    "ru": "run list продолжения не разобран",
+    "en": "the extension record's run list could not be parsed"
+  },
+  "ntfs_scan.extension_value": {
+    "ru": "значение продолжения: %{error}",
+    "en": "extension record value: %{error}"
+  },
+  "ntfs_scan.seek_from_end_unsupported": {
+    "ru": "seek от конца тома не поддержан",
+    "en": "seeking from the end of the volume is not supported"
+  },
+  "ntfs_scan.seek_before_start": {
+    "ru": "seek до начала тома",
+    "en": "seek before the start of the volume"
+  },
+
+  "btrfs_exclusions.leaf_would_empty": {
+    "ru": "удаление опустошило бы лист дерева (logical %{leaf}) — родитель остался бы со ссылкой на пустой узел; исключения не применяются",
+    "en": "the removal would empty a tree leaf (logical %{leaf}) — its parent would be left pointing at an empty node; exclusions are not applied"
+  },
+  "btrfs_exclusions.leaf_drop_not_empty": {
+    "ru": "лист %{leaf} планировался к удалению, но остался непустым — исключения не применяются",
+    "en": "leaf %{leaf} was planned for removal but is not empty — exclusions are not applied"
+  },
+  "btrfs_exclusions.leaf_overflow": {
+    "ru": "лист не вмещает правки (%{need} байт из %{size}) — Stage 2 отменяется",
+    "en": "the leaf cannot hold the edits (%{need} of %{size} bytes) — Stage 2 is cancelled"
+  },
+  "btrfs_exclusions.unlink_no_parent": {
+    "ru": "нечего отвязывать: у узла %{node} нет родителя",
+    "en": "nothing to unlink: node %{node} has no parent"
+  },
+  "btrfs_exclusions.slot_outside_node": {
+    "ru": "слот %{slot} вне узла %{parent} (%{nritems} детей)",
+    "en": "slot %{slot} is outside node %{parent} (%{nritems} children)"
+  },
+  "btrfs_exclusions.node_would_be_childless": {
+    "ru": "узел %{parent} остался бы без детей",
+    "en": "node %{parent} would be left without children"
+  },
+  "btrfs_exclusions.key_changed_tree_unlearned": {
+    "ru": "узел %{node} сменил первый ключ, но его дерево не разобрано (learn_parents не вызывался) — исключения не применяются",
+    "en": "node %{node} changed its first key, but its tree was not parsed (learn_parents was not called) — exclusions are not applied"
+  },
+  "btrfs_exclusions.removal_set_not_settled": {
+    "ru": "набор удаляемых файлов не сошёлся за %{rounds} кругов — исключения не применяются",
+    "en": "the set of files to remove did not converge in %{rounds} rounds — exclusions are not applied"
+  },
+  "btrfs_exclusions.freed_block_outside_groups": {
+    "ru": "освобождённый блок дерева %{block} вне групп блоков",
+    "en": "freed tree block %{block} lies outside every block group"
+  },
+
+  "fat_writer.image_full": {
+    "ru": "FAT-образ переполнен",
+    "en": "the FAT image is full"
+  }
+}

@@ -9,6 +9,7 @@
   import PasswordField from '../components/PasswordField.svelte';
   import ArchiveKeyModal from '../components/ArchiveKeyModal.svelte';
   import type { Job, DiskInfo, PartitionInfo } from '../lib/types';
+  import { m } from '../lib/paraglide/messages';
 
   interface Props {
     mode: 'wizard' | 'edit';
@@ -21,7 +22,9 @@
   let { mode, job, onCancel, onDone }: Props = $props();
 
   let step = $state(0);
-  let error: string | null = $state(null);
+  // A function, not a string: the text is drawn in whatever language the
+  // window speaks when it is drawn. The service's own errors are wrapped as is.
+  let error: (() => string) | null = $state(null);
 
   // --- Archive encryption (§7.5) ---
   // A job that already has a key stays encrypted: the copies written with it
@@ -40,10 +43,15 @@
   );
   /** What the archive password still lacks, or '' once it is ready. */
   function encryptionHint(): string {
-    if (!wantEncryption || alreadyEncrypted || encryptionReady) return '';
+    return encryptionProblem()?.() ?? '';
+  }
+  // The same, as a message rather than a string — for `error`, which keeps it
+  // and draws it in the language of the moment.
+  function encryptionProblem(): (() => string) | null {
+    if (!wantEncryption || alreadyEncrypted || encryptionReady) return null;
     return encPassword.length < MIN_ARCHIVE_PASSWORD
-      ? `Задайте пароль архива — не короче ${MIN_ARCHIVE_PASSWORD} символов`
-      : 'Пароли архива не совпадают';
+      ? () => m.wiz_enc_hint_short({ count: MIN_ARCHIVE_PASSWORD })
+      : m.wiz_enc_hint_mismatch;
   }
   /** The format is fixed once copies exist — a chain cannot change container
    *  midway, and the runner refuses a job whose format no longer matches its
@@ -71,7 +79,11 @@
   });
   /** Levels offered for a job. The ends and the default get a word; the rest
    *  are just numbers. */
-  const LEVEL_HINT: Record<number, string> = { 1: 'быстрее всего', 3: 'равновесие', 19: 'наименьший файл' };
+  const LEVEL_HINT: Record<number, () => string> = {
+    1: m.wiz_level_fastest,
+    3: m.wiz_level_balance,
+    19: m.wiz_level_smallest,
+  };
   let keyModalOpen = $state(false);
   /** Set when the save was interrupted to ask for a key: run the job after. */
   let runAfterKey = $state(false);
@@ -82,11 +94,11 @@
   // "run it now, once" means everywhere else in the program.
   const steps = $derived(
     [
-      { key: 'source', label: 'Источник' },
-      { key: 'schedule', label: 'Расписание' },
-      { key: 'scheme', label: 'Схема' },
-      { key: 'exclusions', label: 'Исключения' },
-      { key: 'advanced', label: 'Дополнительно' },
+      { key: 'source', label: m.wiz_tab_source() },
+      { key: 'schedule', label: m.wiz_tab_schedule() },
+      { key: 'scheme', label: m.wiz_tab_scheme() },
+      { key: 'exclusions', label: m.wiz_tab_exclusions() },
+      { key: 'advanced', label: m.wiz_tab_advanced() },
     ].filter((s) => !(media.active && s.key === 'schedule')),
   );
   // The tab list is filtered (no schedule on the boot medium), so the body must
@@ -106,21 +118,21 @@
     if (step > steps.length - 1) step = steps.length - 1;
   });
 
-  const weekdays = [
-    ['mon', 'Пн'], ['tue', 'Вт'], ['wed', 'Ср'], ['thu', 'Чт'],
-    ['fri', 'Пт'], ['sat', 'Сб'], ['sun', 'Вс'],
+  const weekdays: [string, () => string][] = [
+    ['mon', m.wiz_day_mon], ['tue', m.wiz_day_tue], ['wed', m.wiz_day_wed], ['thu', m.wiz_day_thu],
+    ['fri', m.wiz_day_fri], ['sat', m.wiz_day_sat], ['sun', m.wiz_day_sun],
   ];
-  const scheduleKinds = [
-    ['daily', 'Ежедневно'], ['weekly', 'Еженедельно'], ['monthly', 'Ежемесячно'],
-    ['event', 'По событию'], ['none', 'Не планировать'],
+  const scheduleKinds: [string, () => string][] = [
+    ['daily', m.wiz_sched_daily], ['weekly', m.wiz_sched_weekly], ['monthly', m.wiz_sched_monthly],
+    ['event', m.wiz_sched_event], ['none', m.wiz_sched_none],
   ];
 
   // Event triggers for kind='event'. Third field = badge text ('' = works).
-  const eventTriggers: [string, string, string][] = [
-    ['dest_connected', 'При подключении диска, куда пишется копия', ''],
-    ['logon', 'При входе пользователя', ''],
-    ['logoff', 'При выходе пользователя', ''],
-    ['startup', 'При запуске системы (с задержкой)', ''],
+  const eventTriggers: [string, () => string, string][] = [
+    ['dest_connected', m.wiz_evt_dest_connected, ''],
+    ['logon', m.wiz_evt_logon, ''],
+    ['logoff', m.wiz_evt_logoff, ''],
+    ['startup', m.wiz_evt_startup, ''],
   ];
 
   // «После подключения внешнего устройства» (usb_connect) was never wired;
@@ -167,19 +179,19 @@
   /** Partitions the system needs but never mounts: no filesystem, no letter, no
    *  label. Their GPT type GUID is what they are, so say it instead of drawing
    *  a nameless "Раздел 128 MiB" that reads like a mistake. */
-  const GPT_TYPE_NAMES: Record<string, string> = {
-    'C12A7328-F81F-11D2-BA4B-00A0C93EC93B': 'EFI (ESP)',
-    'E3C9E316-0B5C-4DB8-817D-F92DF00215AE': 'Зарезервировано системой (MSR)',
-    'DE94BBA4-06D1-4D40-A16A-BFD50179D6AC': 'Среда восстановления Windows',
-    '0FC63DAF-8483-4772-8E79-3D69D8477DE4': 'Linux',
-    '0657FD6D-A4AB-43C4-84E5-0933C84B4F4F': 'Linux swap',
-    'E6D6D379-F507-44C2-A23C-238F2A3DF928': 'Linux LVM',
-    'CA7D7CCB-63ED-4C53-861C-1742536059CC': 'LUKS',
-    '21686148-6449-6E6F-744E-656564454649': 'BIOS boot',
+  const GPT_TYPE_NAMES: Record<string, () => string> = {
+    'C12A7328-F81F-11D2-BA4B-00A0C93EC93B': () => 'EFI (ESP)',
+    'E3C9E316-0B5C-4DB8-817D-F92DF00215AE': m.wiz_gpt_msr,
+    'DE94BBA4-06D1-4D40-A16A-BFD50179D6AC': m.wiz_gpt_winre,
+    '0FC63DAF-8483-4772-8E79-3D69D8477DE4': () => 'Linux',
+    '0657FD6D-A4AB-43C4-84E5-0933C84B4F4F': () => 'Linux swap',
+    'E6D6D379-F507-44C2-A23C-238F2A3DF928': () => 'Linux LVM',
+    'CA7D7CCB-63ED-4C53-861C-1742536059CC': () => 'LUKS',
+    '21686148-6449-6E6F-744E-656564454649': () => 'BIOS boot',
   };
   function gptTypeName(p: PartitionInfo): string {
     const guid = (p.gpt_type_guid || '').replace(/[{}]/g, '').toUpperCase();
-    return GPT_TYPE_NAMES[guid] ?? '';
+    return GPT_TYPE_NAMES[guid]?.() ?? '';
   }
 
   function partLabel(p: PartitionInfo): string {
@@ -187,12 +199,12 @@
     const dec = p.volume_device ? decryptedVolumes[p.volume_device] : undefined;
     if (dec?.label) return dec.label;
     if (p.volume_letter) {
-      const name = p.volume_label || fsLabel(p.filesystem) || 'Том';
+      const name = p.volume_label || fsLabel(p.filesystem) || m.wiz_volume_fallback();
       return `${p.volume_letter}: ${name}`;
     }
     // Letterless (EFI / ext4 / hidden): its on-disk label, else the filesystem,
     // else what its GPT type says it is.
-    return p.volume_label || fsLabel(p.filesystem) || gptTypeName(p) || 'Раздел';
+    return p.volume_label || fsLabel(p.filesystem) || gptTypeName(p) || m.wiz_partition_fallback();
   }
   // Used bytes / filesystem for a partition, preferring decrypted info when the
   // volume has been unlocked.
@@ -257,7 +269,7 @@
   // Full text for the segment tooltip (shown when the label/size is truncated).
   function segTitle(p: PartitionInfo): string {
     let t = partLabel(p) + ' — ' + formatBytes(p.size_bytes);
-    if (partUsed(p) > 0) t += ` (${formatBytes(partUsed(p))} занято)`;
+    if (partUsed(p) > 0) t += ' ' + m.wiz_seg_used({ size: formatBytes(partUsed(p)) });
     const fs = partFs(p);
     if (fs) t += ` ${fs}`;
     return t;
@@ -512,13 +524,13 @@
   // under the disk map on the read-only "Параметры" screen so the user sees what
   // kind of files the copy holds without leaving the settings.
   const CAT_META = [
-    { key: 'images', name: 'Изображения', color: '#5ab02f' },
-    { key: 'video', name: 'Видео', color: '#d8c81e' },
-    { key: 'audio', name: 'Аудио', color: '#e07a2f' },
-    { key: 'documents', name: 'Документы', color: '#8b5cf6' },
-    { key: 'windows', name: 'Windows', color: '#4f9be8' },
-    { key: 'linux', name: 'Linux', color: '#14b8a6' },
-    { key: 'other', name: 'Другое', color: '#9aa0ad' },
+    { key: 'images', name: m.cat_images, color: '#5ab02f' },
+    { key: 'video', name: m.cat_video, color: '#d8c81e' },
+    { key: 'audio', name: m.cat_audio, color: '#e07a2f' },
+    { key: 'documents', name: m.cat_documents, color: '#8b5cf6' },
+    { key: 'windows', name: m.cat_windows, color: '#4f9be8' },
+    { key: 'linux', name: m.cat_linux, color: '#14b8a6' },
+    { key: 'other', name: m.cat_other, color: '#9aa0ad' },
   ] as const;
   /** «Исключено» — the eighth category colour, the same in both themes as
    *  the other seven (design: CATS). */
@@ -544,13 +556,13 @@
     const ex = job.last_run?.excluded_bytes ?? 0;
     const total = kept + ex;
     if (total <= 0) return null;
-    const out: { name: string; color: string; bytes: number; pct: number }[] = catData.map((c) => ({
+    const out: { name: () => string; color: string; bytes: number; pct: number }[] = catData.map((c) => ({
       name: c.name,
       color: c.color,
       bytes: c.bytes,
       pct: (c.bytes / total) * 100,
     }));
-    if (ex > 0) out.push({ name: 'Исключено', color: EXCLUDED_COLOR, bytes: ex, pct: (ex / total) * 100 });
+    if (ex > 0) out.push({ name: m.cat_excluded, color: EXCLUDED_COLOR, bytes: ex, pct: (ex / total) * 100 });
     return out;
   });
 
@@ -683,10 +695,10 @@
 
   async function browseDest() {
     try {
-      const picked = await pickPath({ directory: true, title: 'Папка для образов' });
+      const picked = await pickPath({ directory: true, title: m.wiz_dest_pick_title() });
       if (typeof picked === 'string') job.dest_folder = picked;
     } catch (e) {
-      error = String(e);
+      error = () => String(e);
     }
   }
 
@@ -810,24 +822,23 @@
 
   function validate(): boolean {
     if (!job.name.trim()) {
-      error = 'Укажите имя задания.';
+      error = m.wiz_err_no_name;
       step = 0;
       return false;
     }
     if (job.sources.length === 0) {
-      error = diskChosen
-        ? 'Выберите источник (хотя бы один том на диске).'
-        : 'Выберите диск, с которым будет работать копия.';
+      error = diskChosen ? m.wiz_err_no_volume : m.wiz_err_no_disk;
       step = 0;
       return false;
     }
     if (!job.dest_folder.trim()) {
-      error = 'Выберите папку назначения.';
+      error = m.wiz_err_no_dest;
       step = 0;
       return false;
     }
     if (collisionLetter) {
-      error = `Нельзя сохранять копию на тот же диск, который копируется (${collisionLetter}:). Выберите для назначения другой диск.`;
+      const letter = collisionLetter;
+      error = () => m.wiz_err_same_disk({ letter });
       step = 0;
       return false;
     }
@@ -855,6 +866,9 @@
     methods: string[];
     /// Can we open it with something the user can type?
     unlockable: boolean;
+    /// Only the 48-digit recovery key opens it — the service's answer, from
+    /// the protectors' codes. `undefined` from a service older than the field.
+    recoveryKeyOnly: boolean | undefined;
   }
 
   // Selected sources that are encrypted, paired with their display label.
@@ -889,6 +903,7 @@
           // container (or is an older build) — then the user gets the password
           // field, as they did before the field existed.
           unlockable: (p.unlockable ?? true) || (p.unlock_methods?.length ?? 0) === 0,
+          recoveryKeyOnly: p.recovery_key_only,
         };
       });
   }
@@ -897,6 +912,8 @@
   // state of C: — and asking it for "пароль" is asking for something that does
   // not exist on that volume.
   function needsRecoveryKey(e: EncryptedVolume): boolean {
+    if (e.recoveryKeyOnly !== undefined) return e.recoveryKeyOnly;
+    // A service from before the flag names the protectors in Russian, always.
     return (
       !e.methods.includes('пароль') &&
       e.methods.some((m) => m.startsWith('ключ восстановления'))
@@ -904,7 +921,7 @@
   }
   // What to ask this volume for, in the words of its own metadata.
   function promptFor(e: EncryptedVolume): string {
-    return needsRecoveryKey(e) ? '123456-123456-123456-… (48 цифр)' : 'Пароль';
+    return needsRecoveryKey(e) ? m.wiz_rk_placeholder() : m.wiz_pw_placeholder();
   }
 
   // The 48-digit key as a person actually has it: printed in eight groups,
@@ -917,17 +934,19 @@
   // made, instead of after a round trip and a million rounds of SHA-256 that
   // can only report "не подошёл" — which for a mistyped digit is not the
   // useful half of the truth.
-  function normalizeRecoveryKey(text: string): { key: string } | { error: string } {
+  function normalizeRecoveryKey(text: string): { key: string } | { error: () => string } {
     const digits = text.replace(/\D/g, '');
     if (digits.length !== 48) {
+      const count = digits.length;
       return {
-        error: `Ключ восстановления — 48 цифр (8 групп по 6), а введено ${digits.length}`,
+        error: () => m.wiz_rk_wrong_length({ count }),
       };
     }
     const groups = digits.match(/.{6}/g) as string[];
     const bad = groups.findIndex((g) => Number(g) % 11 !== 0 || Number(g) / 11 > 65535);
     if (bad >= 0) {
-      return { error: `Группа ${bad + 1} («${groups[bad]}») не сходится — опечатка в цифрах` };
+      const group = groups[bad];
+      return { error: () => m.wiz_rk_bad_group({ n: bad + 1, group }) };
     }
     return { key: groups.join('-') };
   }
@@ -940,7 +959,7 @@
   let pwErrors = $state<Record<string, boolean>>({});
   // "What you typed is not a 48-digit key" — said before anything is sent, and
   // kept apart from "the key was right in shape and wrong in fact".
-  let pwFormat = $state<Record<string, string>>({});
+  let pwFormat = $state<Record<string, () => string>>({});
   let decrypting = $state<string | null>(null);
 
   // Keep the "needs a password" job flag in sync with the selection.
@@ -1034,7 +1053,7 @@
       job.source = job.sources[0] ?? '';
       job.source_label = job.source_labels[0] ?? '';
     } catch (e) {
-      error = String(e);
+      error = () => String(e);
     } finally {
       decrypting = null;
     }
@@ -1136,25 +1155,26 @@
   function canLeaveSource(): boolean {
     return job.sources.length > 0 && allEncryptedDecrypted() && !!job.dest_folder.trim();
   }
-  function nextHint(): string {
+  function nextHint(): (() => string) | null {
     // The hint names the question the screen is actually asking: at stage 1 it
     // is the disk, and "выберите том" would point at volumes that are not drawn
     // yet.
-    if (!diskChosen) return 'Выберите диск, с которым будет работать копия';
-    if (job.sources.length === 0) return 'Выберите том-источник';
+    if (!diskChosen) return m.wiz_hint_pick_disk;
+    if (job.sources.length === 0) return m.wiz_hint_pick_volume;
     // Name the volume: "расшифруйте зашифрованный том" is no help at all when
     // the screen shows two of them and one is already unlocked.
     const locked = encryptedBlocking().find(({ device }) => !decryptedVolumes[device]);
     // A volume with nothing we can type is not waiting for a password: telling
     // the user to enter one is a dead end, since no field is shown for it.
     if (locked) {
-      if (!locked.unlockable) return `Том «${locked.label}» открыть нечем — снимите с него галочку`;
+      const label = locked.label;
+      if (!locked.unlockable) return () => m.wiz_hint_cannot_open({ label });
       return needsRecoveryKey(locked)
-        ? `Введите ключ восстановления для тома «${locked.label}»`
-        : `Введите пароль для тома «${locked.label}»`;
+        ? () => m.wiz_hint_enter_rk({ label })
+        : () => m.wiz_hint_enter_pw({ label });
     }
-    if (!job.dest_folder.trim()) return 'Выберите папку назначения';
-    return '';
+    if (!job.dest_folder.trim()) return m.wiz_hint_pick_dest;
+    return null;
   }
 
   async function finish(run: boolean) {
@@ -1162,7 +1182,7 @@
     // A run needs every encrypted source unlocked first — the password is
     // stored (and verified) when the user clicks "Расшифровать".
     if (run && !allEncryptedDecrypted()) {
-      error = nextHint() || 'Сначала расшифруйте выбранный зашифрованный том.';
+      error = nextHint() ?? m.wiz_err_decrypt_first;
       step = 0;
       return;
     }
@@ -1190,7 +1210,7 @@
     // confirmed. The dialog does both and hands back the stored job.
     if (wantEncryption && !job.archive_encryption) {
       if (!encryptionReady) {
-        error = encryptionHint();
+        error = encryptionProblem();
         goToStep('scheme');
         return;
       }
@@ -1203,7 +1223,7 @@
       if (run) await runJob(saved.id);
       onDone(saved);
     } catch (e) {
-      error = String(e);
+      error = () => String(e);
     }
   }
 
@@ -1214,7 +1234,7 @@
       if (runAfterKey) await runJob(saved.id);
       onDone(saved);
     } catch (e) {
-      error = String(e);
+      error = () => String(e);
     }
   }
 
@@ -1239,11 +1259,11 @@
     {#if p.is_encrypted}
       <!-- Accent, not muted: next to the grey "system" lock above, the same
            shape in the same colour would not say which one means encrypted. -->
-      <span class="enc" title="Зашифрован — потребуется пароль"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--accent-text)" stroke-width="2.4" stroke-linecap="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></span>
+      <span class="enc" title={m.wiz_seg_encrypted()}><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--accent-text)" stroke-width="2.4" stroke-linecap="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></span>
     {/if}
     <span class="seg-label">{partLabel(p)}</span>
   </div>
-  <div class="seg-meta">{formatBytes(p.size_bytes)}{#if partUsed(p) > 0}<span class="muted">&nbsp;({formatBytes(partUsed(p))} занято)</span>{/if}{#if partFs(p)}<span class="muted">&nbsp;{partFs(p)}</span>{/if}{#if layoutOnly}<span class="muted">&nbsp;· в копии (только разметка)</span>{/if}</div>
+  <div class="seg-meta">{formatBytes(p.size_bytes)}{#if partUsed(p) > 0}<span class="muted">&nbsp;{m.wiz_seg_used({ size: formatBytes(partUsed(p)) })}</span>{/if}{#if partFs(p)}<span class="muted">&nbsp;{partFs(p)}</span>{/if}{#if layoutOnly}<span class="muted">&nbsp;· {m.wiz_seg_layout_only()}</span>{/if}</div>
   {#if selected}
     <div class="check"><svg width="11" height="11" viewBox="0 0 24 24" stroke="#fff" stroke-width="3.4" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></div>
   {/if}
@@ -1253,22 +1273,22 @@
   <div class="pw-panel under-disk">
     <div class="pw-head">
       <span>
-        <svg class="ico-inline" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--accent-text)" stroke-width="2.2" stroke-linecap="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg> Зашифрованные тома — {list.every(needsRecoveryKey)
-          ? 'введите ключ восстановления'
-          : 'введите пароль для расшифровки'}
+        <svg class="ico-inline" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--accent-text)" stroke-width="2.2" stroke-linecap="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg> {list.every(needsRecoveryKey)
+          ? m.wiz_pw_head_rk()
+          : m.wiz_pw_head_pw()}
       </span>
       <!-- One toggle for the whole screen: it lives next to the single shared
            prompt, not once per disk panel. -->
       {#if showShared && sharedCandidates().length > 1}
-        <label class="pw-shared-tgl" title="Один и тот же пароль у всех зашифрованных томов — ввести его один раз и расшифровать все">
-          <input type="checkbox" bind:checked={sharedPw} /> Общий пароль
+        <label class="pw-shared-tgl" title={m.wiz_pw_shared_title()}>
+          <input type="checkbox" bind:checked={sharedPw} /> {m.wiz_pw_shared()}
         </label>
       {/if}
     </div>
 
     {#if sharedPw && showShared}
       <div class="pw-row shared">
-        <span class="pw-vol">Пароль для всех томов</span>
+        <span class="pw-vol">{m.wiz_pw_for_all()}</span>
         <PasswordField
           value={sharedInput.password}
           oninput={setSharedPw}
@@ -1276,19 +1296,18 @@
           invalid={sharedFailed.length > 0}
         />
         <label class="pw-remember">
-          <input type="checkbox" bind:checked={sharedInput.remember} /> Запомнить
+          <input type="checkbox" bind:checked={sharedInput.remember} /> {m.wiz_pw_remember()}
         </label>
         <button
           type="button"
           class="btn small primary"
           onclick={decryptAllShared}
           disabled={sharedBusy || !sharedInput.password}
-        >{sharedBusy ? 'Расшифровка…' : 'Расшифровать все'}</button>
+        >{sharedBusy ? m.wiz_pw_decrypting() : m.wiz_pw_decrypt_all()}</button>
       </div>
       {#if sharedFailed.length > 0 && !sharedBusy}
         <div class="pw-err">
-          Пароль не подошёл: {sharedFailed.map((f) => f.label).join(', ')}. Снимите
-          «Общий пароль», чтобы ввести пароль для этих томов отдельно.
+          {m.wiz_pw_shared_failed({ volumes: sharedFailed.map((f) => f.label).join(', ') })}
         </div>
       {/if}
     {/if}
@@ -1305,7 +1324,7 @@
         class:stacked
       >
         {#if stacked}
-          <div class="pw-ask">{e.label}, введите ключ восстановления:</div>
+          <div class="pw-ask">{m.wiz_pw_ask_rk({ label: e.label })}</div>
         {:else}
           <span class="pw-vol" title={e.device}>{e.label}</span>
         {/if}
@@ -1314,18 +1333,16 @@
                it wrong, is not an error message — it is the wrong question.
                The volume's own metadata says what it does have. -->
           <span class="pw-nokey">
-            Открыть нечем: {e.methods.join(', ')}. Own Backup открывает том паролем
-            или ключом восстановления — снимите блокировку в системе или исключите
-            том из копии.
+            {m.wiz_pw_no_way({ methods: e.methods.join(', ') })}
           </span>
         {:else if decryptedVolumes[e.device]}
-          <span class="pw-done"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--success)" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Расшифровано</span>
+          <span class="pw-done"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--success)" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>{m.wiz_pw_done()}</span>
         {:else if sharedPw && !needsRecoveryKey(e)}
           <!-- One prompt for all: the per-volume row is only a status line. -->
           <span class="pw-wait">
-            {#if decrypting === e.device}Расшифровка…
-            {:else if pwErrors[e.device]}Пароль не подошёл
-            {:else}Ожидает общего пароля{/if}
+            {#if decrypting === e.device}{m.wiz_pw_decrypting()}
+            {:else if pwErrors[e.device]}{m.wiz_pw_wrong_short()}
+            {:else}{m.wiz_pw_waiting_shared()}{/if}
           </span>
         {:else}
           <!-- The entry line: the field takes every spare pixel, the two
@@ -1348,22 +1365,22 @@
                 type="checkbox"
                 checked={pwInputs[e.device]?.remember ?? false}
                 onchange={(ev) => setRemember(e.device, (ev.target as HTMLInputElement).checked)}
-              /> Запомнить
+              /> {m.wiz_pw_remember()}
             </label>
             <button
               type="button"
               class="btn small primary"
               onclick={() => decrypt(e.device)}
               disabled={decrypting === e.device || !pwInputs[e.device]?.password}
-            >{decrypting === e.device ? 'Расшифровка…' : 'Расшифровать'}</button>
+            >{decrypting === e.device ? m.wiz_pw_decrypting() : m.wiz_pw_decrypt()}</button>
           </div>
         {/if}
       </div>
       {#if pwFormat[e.device]}
-        <div class="pw-err">{pwFormat[e.device]}</div>
+        <div class="pw-err">{pwFormat[e.device]()}</div>
       {:else if pwErrors[e.device] && !sharedPw}
         <div class="pw-err">
-          {needsRecoveryKey(e) ? 'Ключ восстановления не подходит этому тому' : 'Пароль не подходит'}
+          {needsRecoveryKey(e) ? m.wiz_pw_rk_wrong() : m.wiz_pw_wrong()}
         </div>
       {/if}
     {/each}
@@ -1371,11 +1388,8 @@
       <!-- Where to get the key, since the answer is on the machine the user is
            standing at — but in the system they are not currently running. -->
       <div class="pw-hint">
-        У системного тома пароля нет — его открывает только 48-значный ключ
-        восстановления. Узнать его в работающей Windows:
-        <code>manage-bde -protectors -get C:</code> — либо на странице учётной
-        записи Microsoft, в AD/Intune, или с распечатки. Вводить можно с дефисами,
-        пробелами или подряд.
+        {m.wiz_pw_rk_hint_before()}
+        <code>manage-bde -protectors -get C:</code> {m.wiz_pw_rk_hint_after()}
       </div>
     {/if}
     {#if whole && list.some((e) => !decryptedVolumes[e.device])}
@@ -1384,22 +1398,18 @@
            partition table too (`DiskLayout::retain_for_backup`), not kept as an
            empty slot. -->
       <div class="pw-hint warn">
-        Тома, оставшиеся зашифрованными, в загрузочную копию НЕ войдут — ни
-        данными, ни записью в таблице разделов: при восстановлении их место
-        останется свободным. Расшифрованные войдут в копию расшифрованными.
+        {m.wiz_pw_locked_dropped()}
       </div>
     {/if}
     <div class="pw-hint">
-      Подходит пароль тома или 48-значный ключ восстановления. Пароль хранится в
-      памяти до закрытия программы. «Запомнить» сохраняет его в защищённом
-      хранилище ОС — это нужно, чтобы копия работала по расписанию.
+      {m.wiz_pw_general_hint()}
     </div>
   </div>
 {/snippet}
 
 <div class="wizard">
     <div class="wz-head">
-      <span class="wz-title">Параметры резервного копирования диска</span>
+      <span class="wz-title">{m.wiz_title()}</span>
       <span class="wz-name">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--disk-icon)" stroke-width="1.8"><rect x="3" y="5" width="18" height="14" rx="3"/><circle cx="12" cy="12" r="3.5"/></svg>
         {job.name}
@@ -1422,26 +1432,26 @@
           <!-- SOURCE -->
           <div class="sec-head">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent-text)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="3"/><circle cx="12" cy="12" r="3.5"/></svg>
-            <span class="sec-title">{sourceReadonly ? 'Что скопировано' : 'Что копировать'}</span>
+            <span class="sec-title">{sourceReadonly ? m.wiz_src_title_ro() : m.wiz_src_title()}</span>
             <span class="sec-sub">{sourceReadonly
-              ? 'разделы, включённые в эту копию (менять нельзя)'
+              ? m.wiz_src_sub_ro()
               : diskChosen
-                ? 'теперь выберите один или несколько томов на диске'
-                : 'вначале выберите диск, с которым будет работать'}</span>
+                ? m.wiz_src_sub_volumes()
+                : m.wiz_src_sub_disk()}</span>
             {#if diskChosen && !sourceReadonly}
-              <button class="link back-disk" onclick={pickAnotherDisk}>← другой диск</button>
+              <button class="link back-disk" onclick={pickAnotherDisk}>{m.wiz_src_other_disk()}</button>
             {/if}
           </div>
 
           {#if engine.volumesLoading && engine.disks.length === 0}
-            <div class="loading-note">Загрузка списка дисков…</div>
+            <div class="loading-note">{m.wiz_disks_loading()}</div>
           {:else if engine.volumesError && engine.disks.length === 0}
             <div class="warn-note">{engine.volumesError}</div>
           {:else if visibleDisks.length === 0}
             <div class="warn-note">
               {sourceReadonly
-                ? 'Диски этой копии сейчас недоступны (не подключены) — источник показать нельзя.'
-                : 'Диски не найдены.'}
+                ? m.wiz_disks_unavailable()
+                : m.wiz_disks_none()}
             </div>
           {:else}
             <div class="disks">
@@ -1461,12 +1471,12 @@
                     <div class="disk-body">
                       <div class="disk-ico">
                         <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="var(--disk-icon)" stroke-width="1.6"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>
-                        <div class="disk-name">Диск {d.device_id.replace(/\D+/g, '') || ''}</div>
+                        <div class="disk-name">{m.wiz_disk_n({ n: d.device_id.replace(/\D+/g, '') || '' })}</div>
                       </div>
                       <div class="bar">
                         {#each diskSegments(d) as seg}
                           {#if seg.kind === 'free'}
-                            <div class="seg free" style="flex: {seg.size} 1 0"><span class="free-lbl">Не занято</span></div>
+                            <div class="seg free" style="flex: {seg.size} 1 0"><span class="free-lbl">{m.wiz_unallocated()}</span></div>
                           {:else if seg.p}
                             <div class="seg" style="flex: {seg.size} 1 0" title={segTitle(seg.p)}>
                               {@render segInner(seg.p, false, false)}
@@ -1481,13 +1491,13 @@
                   <div class="disk-head" class:whole={isBootableCopy(d)}>
                     <span class="disk-model">{d.model || d.device_id}</span>
                     <span class="disk-head-right">
-                      {#if isBootableCopy(d)}<span class="whole-badge">загрузочный</span>{/if}
+                      {#if isBootableCopy(d)}<span class="whole-badge">{m.wiz_badge_bootable()}</span>{/if}
                       <label
                         class="boot-toggle"
                         class:disabled={!isBootableDisk(d)}
                         title={isBootableDisk(d)
-                          ? 'Отметить разделы, из которых система загружается: EFI, раздел загрузчика, сам системный раздел. Разделы с данными не трогаются — их выбираете вы. Зашифрованный раздел сначала попросит пароль: пока он закрыт, понять, система там или данные, невозможно. Таблица разделов (GPT) сохраняется в любом случае — копия диска всегда один файл.'
-                          : 'На этом диске нечему загружаться — ни EFI-раздела, ни системы, ни зашифрованных томов.'}
+                          ? m.wiz_boot_toggle_title()
+                          : m.wiz_boot_toggle_title_none()}
                       >
                         <input
                           type="checkbox"
@@ -1495,7 +1505,7 @@
                           disabled={sourceReadonly || !isBootableDisk(d)}
                           onchange={() => toggleBootableCopy(d)}
                         />
-                        <span>Загрузочная копия диска</span>
+                        <span>{m.wiz_boot_toggle()}</span>
                       </label>
                       <span class="disk-meta">{formatBytes(d.size_bytes)} · {tableLabel(d.partition_table)}</span>
                     </span>
@@ -1503,12 +1513,12 @@
                   <div class="disk-body">
                     <div class="disk-ico">
                       <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="var(--disk-icon)" stroke-width="1.6"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>
-                      <div class="disk-name">Диск {d.device_id.replace(/\D+/g, '') || ''}</div>
+                      <div class="disk-name">{m.wiz_disk_n({ n: d.device_id.replace(/\D+/g, '') || '' })}</div>
                     </div>
                     <div class="bar">
                       {#each diskSegments(d) as seg}
                         {#if seg.kind === 'free'}
-                          <div class="seg free" style="flex: {seg.size} 1 0"><span class="free-lbl">Не занято</span></div>
+                          <div class="seg free" style="flex: {seg.size} 1 0"><span class="free-lbl">{m.wiz_unallocated()}</span></div>
                         {:else if seg.p}
                           {@const dev = partDevice(seg.p)}
                           {#if dev}
@@ -1519,7 +1529,7 @@
                               class:locked={isLockedSource(dev)}
                               class:ro={sourceReadonly}
                               style="flex: {seg.size} 1 0"
-                              title={isLockedSource(dev) ? segTitle(seg.p) + ' · обязателен для загрузки' : segTitle(seg.p)}
+                              title={isLockedSource(dev) ? segTitle(seg.p) + ' · ' + m.wiz_seg_boot_required() : segTitle(seg.p)}
                               onclick={() => toggleSource(dev, partLabel(seg.p!))}
                             >
                               {@render segInner(seg.p, isSelected(dev), false)}
@@ -1538,9 +1548,9 @@
                               class:layout-only={inLayout}
                               style="flex: {seg.size} 1 0"
                               title={inLayout
-                                ? segTitle(seg.p) + ' · входит в копию: файловой системы нет, сохраняется только запись в таблице разделов'
+                                ? segTitle(seg.p) + ' · ' + m.wiz_seg_layout_entry()
                                 : typeGuid(seg.p) === MSR_GUID
-                                  ? segTitle(seg.p) + ' · раздел Windows: входит в копию вместе с томом Windows или разделом EFI'
+                                  ? segTitle(seg.p) + ' · ' + m.wiz_seg_msr()
                                   : segTitle(seg.p)}
                             >
                               {@render segInner(seg.p, inLayout, inLayout)}
@@ -1555,19 +1565,13 @@
                   {@const locked = d.partitions.filter((p) => bootRole(p) === 'locked')}
                   {#if locked.length > 0}
                     <div class="boot-hint">
-                      Отмечено то, из чего диск загружается. Осталось
-                      {locked.length === 1 ? 'закрытый том' : 'закрытых томов'}:
-                      <b>{locked.map((p) => partLabel(p)).join(', ')}</b> — пока
-                      {locked.length === 1 ? 'он зашифрован' : 'они зашифрованы'}, понять,
-                      система там или данные, нельзя. Введите пароль ниже: если внутри
-                      окажется система, том добавится в копию сам. Оставите закрытым —
-                      он в копию не войдёт, и при восстановлении его место останется свободным.
+                      {m.wiz_boot_locked_before({ count: locked.length })}
+                      <b>{locked.map((p) => partLabel(p)).join(', ')}</b>
+                      {m.wiz_boot_locked_after({ count: locked.length })}
                     </div>
                   {:else if !d.partitions.some((p) => p.has_os) && bootParts(d).every((p) => typeGuid(p) === GPT_ESP)}
                     <div class="boot-hint">
-                      На диске найден только EFI-раздел — самой системы не видно.
-                      Если она здесь есть, отметьте её раздел вручную: без него копия
-                      не загрузится.
+                      {m.wiz_boot_esp_only()}
                     </div>
                   {/if}
                 {/if}
@@ -1581,23 +1585,23 @@
 
           {#if sourceReadonly && catData}
             <div class="cat-block">
-              <div class="cat-head">Что в копии — по типам файлов</div>
+              <div class="cat-head">{m.wiz_cat_head()}</div>
               <div class="catbar">
                 {#each barData?.filter((c) => c.bytes > 0) ?? [] as c}
-                  <div class="catseg" style="width:{c.pct}%; background:{c.color}" title="{c.name}: {formatBytes(c.bytes)}"></div>
+                  <div class="catseg" style="width:{c.pct}%; background:{c.color}" title="{c.name()}: {formatBytes(c.bytes)}"></div>
                 {/each}
               </div>
               <div class="cats">
                 {#each catData as c}
                   <div class="cat">
                     <span class="dot" style="background:{c.color}"></span>
-                    <span class="cat-name">{c.name}</span>
+                    <span class="cat-name">{c.name()}</span>
                     <span class="cat-size">{formatBytes(c.bytes)}</span>
                   </div>
                 {/each}
                 <div class="cat">
                   <span class="dot" style:background={EXCLUDED_COLOR}></span>
-                  <span class="cat-name">Исключено</span>
+                  <span class="cat-name">{m.cat_excluded()}</span>
                   <span class="cat-size">{formatBytes(job.last_run?.excluded_bytes ?? 0)}</span>
                 </div>
               </div>
@@ -1618,8 +1622,8 @@
           <!-- DESTINATION -->
           <div class="sec-head">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent-text)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6a2 2 0 0 1 2-2h5l2 2h5a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/></svg>
-            <span class="sec-title">Куда сохранять</span>
-            <span class="sec-sub">папка и имя файла резервной копии</span>
+            <span class="sec-title">{m.wiz_dest_title()}</span>
+            <span class="sec-sub">{m.wiz_dest_sub()}</span>
           </div>
           <div class="dest-card">
             <svg width="42" height="40" viewBox="0 1 24 22" style="flex-shrink:0"><path d="M3 7a2 2 0 0 1 2-2h4.2l2 2H19a2 2 0 0 1 2 2v8.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="var(--folder)"/><path d="M3 10h18v7.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="var(--folder2)"/></svg>
@@ -1634,11 +1638,11 @@
                 spellcheck="false"
                 title={destDisplay}
               />
-              <button class="link" onclick={browseDest}>Обзор…</button>
+              <button class="link" onclick={browseDest}>{m.common_browse()}</button>
             </div>
           </div>
           {#if collisionLetter}
-            <div class="warn-note"><svg class="ico-inline" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--error)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M9 9l6 6M15 9l-6 6"/></svg> Назначение на том же диске ({collisionLetter}:), что и один из источников. Копию нужно писать на другой диск — выберите другую папку.</div>
+            <div class="warn-note"><svg class="ico-inline" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--error)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M9 9l6 6M15 9l-6 6"/></svg> {m.wiz_dest_collision({ letter: collisionLetter ?? '' })}</div>
           {/if}
           {/if}
         </div>
@@ -1649,19 +1653,19 @@
         <div class="sched">
           <div class="sched-kinds">
             {#each scheduleKinds as [k, lbl]}
-              <label class="radio"><input type="radio" name="skind" value={k} checked={job.schedule.kind === k} onchange={() => (job.schedule.kind = k as Job['schedule']['kind'])} /> {lbl}</label>
+              <label class="radio"><input type="radio" name="skind" value={k} checked={job.schedule.kind === k} onchange={() => (job.schedule.kind = k as Job['schedule']['kind'])} /> {lbl()}</label>
             {/each}
           </div>
           <div class="sched-right">
             {#if job.schedule.kind === 'weekly'}
               <div class="days">
                 {#each weekdays as [d, lbl]}
-                  <button class="day" class:on={job.schedule.days.includes(d)} onclick={() => toggleDay(d)}>{lbl}</button>
+                  <button class="day" class:on={job.schedule.days.includes(d)} onclick={() => toggleDay(d)}>{lbl()}</button>
                 {/each}
               </div>
             {/if}
             {#if job.schedule.kind === 'monthly'}
-              <label class="at">Число
+              <label class="at">{m.wiz_sched_day_of_month()}
                 <select bind:value={job.schedule.day_of_month}>
                   {#each Array.from({ length: 28 }, (_, i) => i + 1) as d}
                     <option value={d}>{d}</option>
@@ -1670,21 +1674,21 @@
               </label>
             {/if}
             {#if job.schedule.kind === 'daily' || job.schedule.kind === 'weekly' || job.schedule.kind === 'monthly'}
-              <label class="at">В <input type="time" bind:value={job.schedule.time} /></label>
+              <label class="at">{m.wiz_sched_at()} <input type="time" bind:value={job.schedule.time} /></label>
             {/if}
             {#if job.schedule.kind === 'event'}
               <div class="event-opts">
-                <label class="chk"><input type="checkbox" bind:checked={job.schedule.event_once_per_day} /> Только один раз в день</label>
+                <label class="chk"><input type="checkbox" bind:checked={job.schedule.event_once_per_day} /> {m.wiz_sched_once_a_day()}</label>
                 {#each eventTriggers as [val, lbl, badge]}
                   <label class="radio">
                     <input type="radio" name="evtrig" value={val} checked={job.schedule.event_trigger === val} onchange={() => (job.schedule.event_trigger = val)} />
-                    {lbl}{#if badge}<span class="dev-badge">{badge}</span>{/if}
+                    {lbl()}{#if badge}<span class="dev-badge">{badge}</span>{/if}
                   </label>
                   {#if val === 'startup' && job.schedule.event_trigger === 'startup'}
-                    <label class="delay-min">Задержка:
+                    <label class="delay-min">{m.wiz_delay()}
                       <select bind:value={job.schedule.event_startup_delay_min}>
                         {#each Array.from({ length: 61 }, (_, i) => i) as mn}<option value={mn}>{mn}</option>{/each}
-                      </select> мин
+                      </select> {m.wiz_min()}
                     </label>
                   {/if}
                 {/each}
@@ -1693,20 +1697,20 @@
           </div>
         </div>
         {#if job.schedule.kind === 'monthly'}
-          <div class="hint-sm">Число месяца — только 1–28: 29–31 есть не в каждом месяце, поэтому такие даты не выбираются.</div>
+          <div class="hint-sm">{m.wiz_sched_month_hint()}</div>
         {/if}
         {#if job.schedule.kind === 'event'}
           <div class="note info">
-            <svg class="ico-inline" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--info)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg> События отслеживает служба «Own Backup».
+            <svg class="ico-inline" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--info)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg> {m.wiz_event_note()}
             {#if job.schedule.event_trigger === 'dest_connected'}
-              Копия начинается в течение 10 секунд после того, как появится
-              {driveLetter(job.dest_folder) ? `диск ${driveLetter(job.dest_folder)}:` : 'диск назначения'}.
-              Диск, подключённый ещё до запуска службы, не считается —
-              только новое подключение.
+              {@const destLetter = driveLetter(job.dest_folder)}
+              {destLetter
+                ? m.wiz_event_dest_letter({ letter: destLetter })
+                : m.wiz_event_dest_generic()}
             {/if}
           </div>
         {:else if job.schedule.kind !== 'none'}
-          <div class="note info"><svg class="ico-inline" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--info)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg> Автозапуск выполняет служба «Own Backup» (должна быть установлена и запущена). Для зашифрованных томов сохраните пароль на шаге «Источник».</div>
+          <div class="note info"><svg class="ico-inline" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--info)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg> {m.wiz_sched_service_note()}</div>
         {/if}
         <div class="adv-schedule">
           <!-- «Копировать только если компьютер заблокирован» и «Предотвращать
@@ -1714,23 +1718,21 @@
                второе больше не выбор — во время копии компьютер не засыпает
                никогда. -->
           {#if job.schedule.kind === 'daily' || job.schedule.kind === 'weekly' || job.schedule.kind === 'monthly'}
-            <label class="chk"><input type="checkbox" bind:checked={job.schedule.wake_to_run} /> Пробуждать компьютер из спящего режима</label>
+            <label class="chk"><input type="checkbox" bind:checked={job.schedule.wake_to_run} /> {m.wiz_sched_wake()}</label>
             {#if job.schedule.wake_to_run}
               <div class="note sub">
-                Компьютер проснётся за минуту до запуска. Нужно, чтобы в схеме
-                электропитания были разрешены таймеры пробуждения — на ноутбуке
-                от батареи они часто выключены.
+                {m.wiz_sched_wake_note()}
               </div>
             {/if}
           {/if}
-          <label class="chk"><input type="checkbox" bind:checked={job.schedule.run_missed} /> Выполнять пропущенные операции при запуске системы с задержкой (в минутах)</label>
+          <label class="chk"><input type="checkbox" bind:checked={job.schedule.run_missed} /> {m.wiz_sched_run_missed()}</label>
           {#if job.schedule.run_missed}
-            <label class="delay-min">Задержка после запуска системы:
+            <label class="delay-min">{m.wiz_sched_missed_delay()}
               <select bind:value={job.schedule.missed_delay_min}>
                 {#each Array.from({ length: 60 }, (_, i) => i + 1) as mn}
                   <option value={mn}>{mn}</option>
                 {/each}
-              </select> мин
+              </select> {m.wiz_min()}
             </label>
           {/if}
         </div>
@@ -1738,73 +1740,67 @@
 
       <!-- scheme -->
       {#if stepKey === 'scheme'}
-        <div class="field-label">Формат образа:</div>
+        <div class="field-label">{m.wiz_format()}</div>
         <select
           value={wantEncryption ? 'obk' : job.image_format}
           onchange={(e) => setFormat((e.target as HTMLSelectElement).value)}
           class="wide"
           disabled={formatLocked}
         >
-          <option value="vhdx">VHDX — стандарт Windows (по умолчанию)</option>
-          <option value="qcow2">qcow2 — универсальный, со сжатием</option>
-          <option value="obk">OBK — зашифрованный, с паролем</option>
+          <option value="vhdx">{m.wiz_format_vhdx()}</option>
+          <option value="qcow2">{m.wiz_format_qcow2()}</option>
+          <option value="obk">{m.wiz_format_obk()}</option>
         </select>
         {#if alreadyEncrypted}
           <div class="note">
-            Задание уже зашифровано. Выключить шифрование нельзя — уже снятые
-            копии останутся зашифрованными в любом случае, — а смена ключа
-            делается отдельно.
+            {m.wiz_format_already_encrypted()}
           </div>
         {:else if mode === 'edit' && job.last_run !== null}
-          <div class="note">У задания уже есть резервные копии — менять формат существующего архива нельзя. Для другого формата создайте новое задание.</div>
+          <div class="note">{m.wiz_format_locked()}</div>
         {/if}
         {#if wantEncryption && !alreadyEncrypted}
           <div class="note">
-            Наш контейнер .obk: внутри qcow2 со сжатием, и каждый кластер
-            запечатан. Прочитать копии можно будет <b>только</b> этим паролем или
-            ключом восстановления — ни служба, ни мы не сможем открыть их иначе.
-            Ключ восстановления программа покажет один раз при сохранении
-            задания, и его нужно будет записать.
+            {@html m.wiz_obk_note()}
           </div>
           <div class="enc-form">
             <!-- Side by side: the pair is one decision, and the row is wide
                  enough to hold it without scrolling past it. -->
             <div class="enc-pair">
               <div class="enc-cell">
-                <div class="field-label">Пароль архива:</div>
+                <div class="field-label">{m.wiz_enc_password_label()}</div>
                 <PasswordField
                   value={encPassword}
                   oninput={(v) => (encPassword = v)}
-                  placeholder="Пароль архива"
+                  placeholder={m.wiz_enc_password_ph()}
                 />
               </div>
               <div class="enc-cell">
-                <div class="field-label">Ещё раз:</div>
+                <div class="field-label">{m.wiz_enc_again_label()}</div>
                 <PasswordField
                   value={encPasswordAgain}
                   oninput={(v) => (encPasswordAgain = v)}
-                  placeholder="Повторите пароль"
+                  placeholder={m.wiz_enc_again_ph()}
                   invalid={encPasswordAgain.length > 0 && encPassword !== encPasswordAgain}
                 />
               </div>
             </div>
             {#if encPassword.length > 0 && encPassword.length < MIN_ARCHIVE_PASSWORD}
-              <div class="note warn">Не короче {MIN_ARCHIVE_PASSWORD} символов.</div>
+              <div class="note warn">{m.wiz_enc_too_short({ count: MIN_ARCHIVE_PASSWORD })}</div>
             {:else if encPasswordAgain.length > 0 && encPassword !== encPasswordAgain}
-              <div class="note warn">Пароли не совпадают.</div>
+              <div class="note warn">{m.wiz_enc_mismatch()}</div>
             {/if}
           </div>
         {:else if job.image_format === 'qcow2' && !wantEncryption}
-          <div class="note">Встроенное сжатие (zstd): копия обычно на 30–50 % меньше, экономия видна сразу. Один и тот же файл одинаково открывается на Windows и Linux. Инкрементные и дифференциальные цепочки поддерживаются. Восстановление, проверка и монтирование копии как диска работают. Исключённые файлы удаляются из копии полностью, в том числе на NTFS/ReFS — как в VHDX.</div>
+          <div class="note">{m.wiz_qcow2_note()}</div>
         {:else if !wantEncryption}
-          <div class="note">Копия открывается самой Windows двойным кликом и видна как обычный диск — даже без Own Backup. Инкрементные цепочки и полное удаление исключённых файлов (NTFS/ReFS). Сжатия нет — файл больше; на Linux открывается через qemu-nbd.</div>
+          <div class="note">{m.wiz_vhdx_note()}</div>
         {/if}
 
         {#if wantEncryption || job.image_format === 'qcow2'}
           <!-- zstd only exists in these two; VHDX has nothing to set. Not
                locked by existing copies: every cluster is compressed on its
                own, so a chain may mix levels and still reads the same. -->
-          <div class="field-label mt">Уровень сжатия:</div>
+          <div class="field-label mt">{m.wiz_level()}</div>
           <select
             class="wide"
             value={job.compression_level == null ? 'default' : String(job.compression_level)}
@@ -1813,39 +1809,39 @@
               job.compression_level = v === 'default' ? null : Number(v);
             }}
           >
-            <option value="default">Как в «Параметрах» — {defaultLevel}</option>
+            <option value="default">{m.wiz_level_default({ level: defaultLevel })}</option>
             {#each Array.from({ length: 19 }, (_, i) => i + 1) as n (n)}
-              <option value={String(n)}>{n}{LEVEL_HINT[n] ? ` — ${LEVEL_HINT[n]}` : ''}</option>
+              <option value={String(n)}>{n}{LEVEL_HINT[n] ? ` — ${LEVEL_HINT[n]()}` : ''}</option>
             {/each}
           </select>
-          <div class="note">Чем выше уровень, тем меньше файл и дольше копирование. Выше 9 копирование заметно медленнее при небольшом выигрыше в размере. Действует со следующего запуска.</div>
+          <div class="note">{m.wiz_level_note()}</div>
         {/if}
 
-        <div class="field-label mt">Метод резервного копирования:</div>
+        <div class="field-label mt">{m.wiz_method()}</div>
         <select bind:value={job.scheme.method} onchange={onMethodChange} class="wide">
-          <option value="full">Полное</option>
-          <option value="incremental">Инкрементное</option>
-          <option value="differential">Дифференциальное</option>
+          <option value="full">{m.wiz_method_full()}</option>
+          <option value="incremental">{m.wiz_method_incremental()}</option>
+          <option value="differential">{m.wiz_method_differential()}</option>
         </select>
         {#if job.scheme.method === 'full'}
-          <div class="note">Каждый запуск снимает полную копию: каждая копия самостоятельна и восстанавливается без остальных.</div>
+          <div class="note">{m.wiz_method_full_note()}</div>
         {:else if job.scheme.method === 'incremental'}
-          <div class="note">Каждый запуск сохраняет только изменения относительно предыдущей версии (цепочка: полная → И1 → И2 …).</div>
+          <div class="note">{m.wiz_method_inc_note()}</div>
         {:else if job.scheme.method === 'differential'}
-          <div class="note">Каждый запуск сохраняет изменения относительно полной копии (полная → Д1, Д2 …). Объединение для этого метода недоступно: все версии опираются прямо на полную копию, и сдвинуть её нельзя, не сделав остальные неверными.</div>
+          <div class="note">{m.wiz_method_diff_note()}</div>
         {/if}
 
         {#if job.scheme.method === 'incremental'}
-          <div class="field-label mt">Режим хранения:</div>
-          <label class="radio blk"><input type="radio" checked={!isConsolidation} onchange={() => setSchemeMode('standard')} /> Стандартный — цепочки сменяются</label>
-          <label class="radio blk"><input type="radio" checked={isConsolidation} onchange={() => setSchemeMode('consolidation')} /> Объединение (консолидация) — одна цепочка</label>
+          <div class="field-label mt">{m.wiz_retention_mode()}</div>
+          <label class="radio blk"><input type="radio" checked={!isConsolidation} onchange={() => setSchemeMode('standard')} /> {m.wiz_mode_standard()}</label>
+          <label class="radio blk"><input type="radio" checked={isConsolidation} onchange={() => setSchemeMode('consolidation')} /> {m.wiz_mode_consolidation()}</label>
         {/if}
 
         {#if job.scheme.method !== 'full' && !isConsolidation}
           <!-- Стандартный режим: цепочка растёт до предела, затем начинается новая. -->
-          <div class="field-label mt">Длина цепочки:</div>
-          <label class="chk-line">Делать не более <input type="number" min="1" max="64" bind:value={job.scheme.full_every_n} class="num" /> {job.scheme.method === 'differential' ? 'дифференциальных' : 'инкрементных'} версий в цепочке</label>
-          <div class="note">Когда предел достигнут, следующий запуск снимает новую полную копию и начинает новую цепочку. Старые цепочки остаются целыми и удаляются по правилам ниже.<br />Точек восстановления: до {job.scheme.full_every_n + 1} в каждой цепочке.</div>
+          <div class="field-label mt">{m.wiz_chain_length()}</div>
+          <label class="chk-line">{m.wiz_chain_max_before()} <input type="number" min="1" max="64" bind:value={job.scheme.full_every_n} class="num" /> {job.scheme.method === 'differential' ? m.wiz_chain_max_after_diff({ count: job.scheme.full_every_n ?? 0 }) : m.wiz_chain_max_after_inc({ count: job.scheme.full_every_n ?? 0 })}</label>
+          <div class="note">{m.wiz_chain_note()}<br />{m.wiz_chain_points({ n: job.scheme.full_every_n + 1 })}</div>
         {/if}
 
         {#if !isConsolidation}
@@ -1854,37 +1850,40 @@
                default. Hiding the block for «Полное» deleted copies by a rule
                the screen never showed (2026-09-26). -->
           {@const full = job.scheme.method === 'full'}
-          <div class="field-label mt">{full ? 'Правила очистки старых копий:' : 'Правила очистки старых цепочек:'}</div>
-          <label class="chk"><input type="checkbox" checked={job.scheme.keep_chains !== null} onchange={(e) => (job.scheme.keep_chains = (e.target as HTMLInputElement).checked ? 3 : null)} /> Хранить не более <input type="number" min="1" value={job.scheme.keep_chains ?? 3} oninput={(e) => (job.scheme.keep_chains = +(e.target as HTMLInputElement).value)} class="num" disabled={job.scheme.keep_chains === null} /> {full ? 'последних копий' : 'последних цепочек'}</label>
-          <label class="chk"><input type="checkbox" checked={job.scheme.cleanup_older_than_days !== null} onchange={(e) => (job.scheme.cleanup_older_than_days = (e.target as HTMLInputElement).checked ? 90 : null)} /> Удалять {full ? 'копии' : 'цепочки'} старше <input type="number" min="1" value={job.scheme.cleanup_older_than_days ?? 90} oninput={(e) => (job.scheme.cleanup_older_than_days = +(e.target as HTMLInputElement).value)} class="num" disabled={job.scheme.cleanup_older_than_days === null} /> дней</label>
-          <label class="chk sub"><input type="checkbox" bind:checked={job.scheme.keep_first} disabled={job.scheme.cleanup_older_than_days === null} /> Не удалять {full ? 'первую (самую старую) копию' : 'первую (самую старую) цепочку'}</label>
+          {@const keepN = job.scheme.keep_chains ?? 3}
+          {@const olderDays = job.scheme.cleanup_older_than_days ?? 90}
+          <div class="field-label mt">{full ? m.wiz_cleanup_copies() : m.wiz_cleanup_chains()}</div>
+          <label class="chk"><input type="checkbox" checked={job.scheme.keep_chains !== null} onchange={(e) => (job.scheme.keep_chains = (e.target as HTMLInputElement).checked ? 3 : null)} /> {m.wiz_keep_before()} <input type="number" min="1" value={job.scheme.keep_chains ?? 3} oninput={(e) => (job.scheme.keep_chains = +(e.target as HTMLInputElement).value)} class="num" disabled={job.scheme.keep_chains === null} /> {full ? m.wiz_keep_after_copies({ count: keepN }) : m.wiz_keep_after_chains({ count: keepN })}</label>
+          <label class="chk"><input type="checkbox" checked={job.scheme.cleanup_older_than_days !== null} onchange={(e) => (job.scheme.cleanup_older_than_days = (e.target as HTMLInputElement).checked ? 90 : null)} /> {full ? m.wiz_delete_copies_before() : m.wiz_delete_chains_before()} <input type="number" min="1" value={job.scheme.cleanup_older_than_days ?? 90} oninput={(e) => (job.scheme.cleanup_older_than_days = +(e.target as HTMLInputElement).value)} class="num" disabled={job.scheme.cleanup_older_than_days === null} /> {m.wiz_days({ count: olderDays })}</label>
+          <label class="chk sub"><input type="checkbox" bind:checked={job.scheme.keep_first} disabled={job.scheme.cleanup_older_than_days === null} /> {full ? m.wiz_keep_first_copy() : m.wiz_keep_first_chain()}</label>
           {#if full}
-            <div class="note">Старые копии удаляются только после успешного завершения очередного копирования. Только что снятая копия не удаляется никогда.</div>
+            <div class="note">{m.wiz_cleanup_note_copies()}</div>
           {:else}
-            <div class="note">Цепочка удаляется целиком — полная копия вместе с её версиями — и только после успешного завершения очередного копирования. Цепочка, к которой относится свежая копия, не удаляется никогда.</div>
+            <div class="note">{m.wiz_cleanup_note_chains()}</div>
           {/if}
         {/if}
 
         {#if isConsolidation}
           <!-- Консолидация: цепочка одна, её длину держит объединение. -->
-          <div class="field-label mt">Длина цепочки:</div>
-          <label class="chk-line">Делать объединение после <input type="number" min="1" max="64" value={job.scheme.rolling_incrementals ?? 3} oninput={(e) => (job.scheme.rolling_incrementals = +(e.target as HTMLInputElement).value)} class="num" /> инкрементных версий</label>
-          <div class="note">Новая полная копия не создаётся: когда версий становится больше предела, самая старая вливается в полную копию, а следующая начинает опираться прямо на неё. Место экономится, а восстановление идёт по короткой цепочке.<br />Точек восстановления: {(job.scheme.rolling_incrementals ?? 3) + 1} — полная плюс {job.scheme.rolling_incrementals ?? 3}. Но <b>полная копия перестаёт быть копией того дня, когда её сняли</b>: она сдвигается вперёд, на день влитой версии, и откатиться глубже уже нельзя.</div>
+          {@const rollN = job.scheme.rolling_incrementals ?? 3}
+          <div class="field-label mt">{m.wiz_chain_length()}</div>
+          <label class="chk-line">{m.wiz_consol_before()} <input type="number" min="1" max="64" value={job.scheme.rolling_incrementals ?? 3} oninput={(e) => (job.scheme.rolling_incrementals = +(e.target as HTMLInputElement).value)} class="num" /> {m.wiz_consol_after({ count: rollN })}</label>
+          <div class="note">{m.wiz_consol_note()}<br />{m.wiz_consol_points({ total: rollN + 1, n: rollN })} {@html m.wiz_consol_shift()}</div>
 
-          <div class="field-label mt">Обновление цепочки:</div>
-          <label class="chk"><input type="checkbox" checked={job.scheme.cleanup_older_than_days !== null} onchange={(e) => (job.scheme.cleanup_older_than_days = (e.target as HTMLInputElement).checked ? 90 : null)} /> Начинать цепочку заново, когда ей больше <input type="number" min="1" value={job.scheme.cleanup_older_than_days ?? 90} oninput={(e) => (job.scheme.cleanup_older_than_days = +(e.target as HTMLInputElement).value)} class="num" disabled={job.scheme.cleanup_older_than_days === null} /> дней</label>
+          <div class="field-label mt">{m.wiz_chain_refresh()}</div>
+          <label class="chk"><input type="checkbox" checked={job.scheme.cleanup_older_than_days !== null} onchange={(e) => (job.scheme.cleanup_older_than_days = (e.target as HTMLInputElement).checked ? 90 : null)} /> {m.wiz_restart_before()} <input type="number" min="1" value={job.scheme.cleanup_older_than_days ?? 90} oninput={(e) => (job.scheme.cleanup_older_than_days = +(e.target as HTMLInputElement).value)} class="num" disabled={job.scheme.cleanup_older_than_days === null} /> {m.wiz_days({ count: job.scheme.cleanup_older_than_days ?? 90 })}</label>
           {#if job.scheme.cleanup_older_than_days !== null}
-            <div class="note">Снимается новая полная копия, и только после её успешного завершения старая цепочка удаляется — момента без резервной копии не бывает. Считается возраст цепочки с её начала, а не дата полной копии: объединение сдвигает её вперёд каждый раз.</div>
+            <div class="note">{m.wiz_restart_note()}</div>
           {:else}
-            <div class="note warn">Цепочка не будет обновляться никогда: одна и та же полная копия останется единственным экземпляром этих данных и будет переписываться при каждом объединении. Один сбойный блок в ней заберёт сразу все точки восстановления. Рекомендуется включить обновление.</div>
+            <div class="note warn">{m.wiz_no_restart_warn()}</div>
           {/if}
         {/if}
       {/if}
 
       <!-- exclusions -->
       {#if stepKey === 'exclusions'}
-        <label class="chk"><input type="checkbox" bind:checked={job.exclusions.enabled} /> Исключить файлы по следующим критериям:</label>
-        <div class="note">Маска без пути (<code>*.tmp</code>, <code>pagefile.sys</code>) действует по всему тому; маска с путём (<code>Temp\*.log</code>) — от корня тома. В посекторном режиме исключения не применяются.<br />Исключённые файлы удаляются из копии полностью — как в Acronis: место в архиве и на восстановленном томе освобождается. На <b>NTFS и ReFS</b> данные исключённых файлов в копию не попадают вовсе, а записи каталога в готовом образе удаляет сам драйвер файловой системы Windows; если этот шаг не удался, файлы остаются в каталоге копии пустыми (нулевыми) — резервная копия при этом полностью рабочая.</div>
+        <label class="chk"><input type="checkbox" bind:checked={job.exclusions.enabled} /> {m.wiz_excl_enable()}</label>
+        <div class="note">{@html m.wiz_excl_note_masks()}<br />{@html m.wiz_excl_note_removal()}</div>
 
         <!-- Windows / Linux списки: движок применяет их по типу ФС раздела. -->
         <div class="excl-tabs">
@@ -1892,20 +1891,20 @@
           <button class="excl-tab" class:active={exclTab === 'linux'} onclick={() => (exclTab = 'linux')}>Linux</button>
         </div>
         {#if exclTab === 'windows'}
-          <div class="note sub">Для разделов Windows (NTFS / ReFS / FAT).</div>
+          <div class="note sub">{m.wiz_excl_windows_note()}</div>
         {:else}
-          <div class="note sub">Для разделов Linux. Маски от корня тома (<code>/</code>), напр. <code>var/cache/**</code>. <b>ext2/3/4</b> и <b>btrfs</b> — полностью (данные не попадают в копию + файл удаляется из каталога). <b>xfs</b> — данные исключённых файлов не попадают в копию (сам файл пока остаётся пустым в каталоге). Для btrfs/xfs файлы с общими экстентами (снапшоты/reflink) сохраняются целиком.</div>
+          <div class="note sub">{@html m.wiz_excl_linux_note()}</div>
         {/if}
 
         <div class="excl-list">
           {#each exclList() as p, i (p + i)}
-            <div class="excl-row"><span>{p}</span><button class="x" title="Убрать маску" aria-label="Убрать маску" onclick={() => removePattern(i)}><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+            <div class="excl-row"><span>{p}</span><button class="x" title={m.wiz_excl_remove()} aria-label={m.wiz_excl_remove()} onclick={() => removePattern(i)}><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
           {/each}
         </div>
         <div class="excl-add">
-          <input type="text" bind:value={newPattern} placeholder={exclTab === 'linux' ? 'Путь или маска, напр. var/tmp/**' : 'Путь или маска, напр. *.tmp'} spellcheck="false" onkeydown={(e) => e.key === 'Enter' && addPattern()} />
-          <button class="btn small ghost" onclick={addPattern}>+ Добавить</button>
-          <button class="link" onclick={resetExclusions}>Исходный список</button>
+          <input type="text" bind:value={newPattern} placeholder={exclTab === 'linux' ? m.wiz_excl_ph_linux() : m.wiz_excl_ph_windows()} spellcheck="false" onkeydown={(e) => e.key === 'Enter' && addPattern()} />
+          <button class="btn small ghost" onclick={addPattern}>+ {m.wiz_excl_add()}</button>
+          <button class="link" onclick={resetExclusions}>{m.wiz_excl_reset()}</button>
         </div>
       {/if}
 
@@ -1913,12 +1912,12 @@
       {#if stepKey === 'advanced'}
         <div class="adv">
           <div class="adv-group">
-            <div class="adv-title">Режим создания образа</div>
-            <label class="chk"><input type="checkbox" bind:checked={job.advanced.sector_by_sector} /> Архивировать в посекторном режиме</label>
+            <div class="adv-title">{m.wiz_adv_image_mode()}</div>
+            <label class="chk"><input type="checkbox" bind:checked={job.advanced.sector_by_sector} /> {m.wiz_adv_sector()}</label>
           </div>
           <div class="adv-group">
-            <div class="adv-title">Проверка</div>
-            <label class="chk"><input type="checkbox" bind:checked={job.advanced.validate_after} /> Проверять резервную копию после создания</label>
+            <div class="adv-title">{m.wiz_adv_validation()}</div>
+            <label class="chk"><input type="checkbox" bind:checked={job.advanced.validate_after} /> {m.wiz_adv_validate_after()}</label>
             <!-- Under its parent, and inert without it: "only the latest" is a
                  way of checking, not a check of its own. -->
             <label class="chk sub-chk" class:dim={!job.advanced.validate_after}>
@@ -1927,29 +1926,26 @@
                 bind:checked={job.advanced.verify_latest_only}
                 disabled={!job.advanced.validate_after}
               />
-              Проверять только последнюю копию
+              {m.wiz_adv_validate_latest()}
             </label>
             <div class="sub-hint" class:dim={!job.advanced.validate_after}>
-              Читаются только блоки, которые записала эта копия, а не вся цепочка
-              под ней — на длинной цепочке это в разы быстрее. Но повреждение
-              в более старых копиях такая проверка не заметит, а без них
-              последняя копия не восстановится.
+              {m.wiz_adv_validate_latest_hint()}
             </div>
           </div>
           <!-- Encryption is a FORMAT (.obk), chosen and given its password on
                the «Схема» step. Said here too, because this is where people
                look for it. -->
           <div class="adv-group">
-            <div class="adv-title">Защита резервной копии</div>
+            <div class="adv-title">{m.wiz_adv_protection()}</div>
             {#if wantEncryption}
               <div class="note">
-                <svg class="ico-inline" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--accent-text)" stroke-width="2.2" stroke-linecap="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg> Копии шифруются: формат OBK{alreadyEncrypted ? '' : ', пароль задаётся'} на шаге
-                <button class="link" onclick={() => goToStep('scheme')}>«Схема»</button>.
+                <svg class="ico-inline" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--accent-text)" stroke-width="2.2" stroke-linecap="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg> {alreadyEncrypted ? m.wiz_adv_enc_on_set() : m.wiz_adv_enc_on_pw()}
+                <button class="link" onclick={() => goToStep('scheme')}>{m.wiz_scheme_link()}</button>.
               </div>
             {:else}
               <div class="note">
-                Копии не шифруются. Чтобы задать пароль, выберите формат OBK на шаге
-                <button class="link" onclick={() => goToStep('scheme')}>«Схема»</button>.
+                {m.wiz_adv_enc_off()}
+                <button class="link" onclick={() => goToStep('scheme')}>{m.wiz_scheme_link()}</button>.
               </div>
             {/if}
           </div>
@@ -1957,61 +1953,58 @@
                SYSTEM, а задание может сохранить любой вошедший пользователь —
                команда в задании была бы запуском чего угодно от SYSTEM. -->
           <div class="adv-group">
-            <div class="adv-title">Обработка ошибок</div>
+            <div class="adv-title">{m.wiz_adv_errors()}</div>
             <label class="chk">
               <input
                 type="checkbox"
                 checked={job.advanced.retry_attempts > 0}
                 onchange={(e) => (job.advanced.retry_attempts = (e.target as HTMLInputElement).checked ? 2 : 0)}
               />
-              Повторять неудавшуюся копию
+              {m.wiz_adv_retry()}
             </label>
             {#if job.advanced.retry_attempts > 0}
               <div class="adv-line">
-                Попыток:
+                {m.wiz_adv_attempts()}
                 <select bind:value={job.advanced.retry_attempts}>
                   {#each [1, 2, 3, 4, 5] as n (n)}<option value={n}>{n}</option>{/each}
                 </select>
-                через
+                {m.wiz_adv_every()}
                 <select bind:value={job.advanced.retry_interval_min}>
                   {#each [1, 5, 10, 15, 30, 60] as n (n)}<option value={n}>{n}</option>{/each}
                 </select>
-                мин
+                {m.wiz_min()}
               </div>
             {/if}
             <div class="adv-hint">
-              Например, когда диск назначения ещё не готов. Остановленная вручную
-              копия не повторяется.
+              {m.wiz_adv_retry_hint()}
             </div>
           </div>
           {#if !media.active}
             <div class="adv-group">
-              <div class="adv-title">После копирования</div>
+              <div class="adv-title">{m.wiz_adv_after()}</div>
               <select class="wide" bind:value={job.advanced.after_backup}>
-                <option value="none">Ничего не делать</option>
-                <option value="sleep">Перевести компьютер в спящий режим</option>
-                <option value="shutdown">Выключить компьютер</option>
+                <option value="none">{m.wiz_adv_after_none()}</option>
+                <option value="sleep">{m.wiz_adv_after_sleep()}</option>
+                <option value="shutdown">{m.wiz_adv_after_shutdown()}</option>
               </select>
               {#if job.advanced.after_backup !== 'none'}
                 <div class="adv-hint flush">
                   {job.advanced.after_backup === 'sleep'
-                    ? 'Через минуту после окончания.'
-                    : 'Windows предупредит за полторы минуты; отменить — командой shutdown /a. Несохранённые документы принудительно не закрываются.'}
-                  Только если других копий в очереди нет; не после копии,
-                  остановленной вручную, и не пока ждёт повтор.
+                    ? m.wiz_adv_after_sleep_hint()
+                    : m.wiz_adv_after_shutdown_hint()}
+                  {m.wiz_adv_after_only_if()}
                 </div>
               {/if}
             </div>
           {/if}
           <div class="adv-group">
-            <div class="adv-title">Производительность</div>
+            <div class="adv-title">{m.wiz_adv_performance()}</div>
             <label class="chk">
               <input type="checkbox" bind:checked={job.advanced.low_priority} />
-              Низкий приоритет — не мешать работе
+              {m.wiz_adv_low_priority()}
             </label>
             <div class="adv-hint">
-              Диск и процессор в первую очередь отдаются остальным программам:
-              пока компьютер занят, копия идёт медленнее.
+              {m.wiz_adv_low_priority_hint()}
             </div>
             <label class="chk">
               <input
@@ -2019,7 +2012,7 @@
                 checked={job.advanced.speed_limit_mbps > 0}
                 onchange={(e) => (job.advanced.speed_limit_mbps = (e.target as HTMLInputElement).checked ? 50 : 0)}
               />
-              Ограничить скорость чтения:
+              {m.wiz_adv_speed_limit()}
               <input
                 type="number"
                 min="1"
@@ -2032,43 +2025,41 @@
                   if (v >= 1) job.advanced.speed_limit_mbps = v;
                 }}
               />
-              МБ/с
+              {m.wiz_mb_s()}
             </label>
           </div>
-          <div class="note">Во время копирования и восстановления компьютер не уходит в спящий режим.</div>
+          <div class="note">{m.wiz_adv_no_sleep()}</div>
         </div>
       {/if}
     </div>
 
-    {#if error}<div class="wz-error">{error}</div>{/if}
+    {#if error}<div class="wz-error">{error()}</div>{/if}
 
     {#if mode === 'wizard' && stepKey === 'schedule' && job.schedule.kind !== 'none' && job.requires_password && !allRemembered()}
       <div class="warn-note footer-warn">
-        Среди источников есть зашифрованный том. Чтобы копия запускалась по
-        расписанию, отметьте «Запомнить» для его пароля на шаге «Источник» —
-        иначе служба пропустит запланированный запуск.
+        {m.wiz_footer_remember_warn()}
       </div>
     {/if}
 
     <!-- footer -->
     <div class="footer">
       <div class="spacer"></div>
-      <button class="btn ghost" onclick={onCancel}>Отмена</button>
+      <button class="btn ghost" onclick={onCancel}>{m.common_cancel()}</button>
       {#if mode === 'wizard'}
-        {#if step > 0}<button class="btn ghost" onclick={() => (step -= 1)}>Назад</button>{/if}
+        {#if step > 0}<button class="btn ghost" onclick={() => (step -= 1)}>{m.common_back()}</button>{/if}
         {#if step < steps.length - 1}
           <button
             class="btn primary"
             onclick={() => (step += 1)}
             disabled={(stepKey === 'source' && !canLeaveSource()) ||
               (stepKey === 'scheme' && !!encryptionHint())}
-            title={stepKey === 'source' ? nextHint() : stepKey === 'scheme' ? encryptionHint() : ''}
-          >Дальше</button>
+            title={stepKey === 'source' ? (nextHint()?.() ?? '') : stepKey === 'scheme' ? encryptionHint() : ''}
+          >{m.common_next()}</button>
         {:else}
-          <button class="btn green" onclick={() => finish(true)}>Создать копию</button>
+          <button class="btn green" onclick={() => finish(true)}>{m.wiz_create_backup()}</button>
         {/if}
       {:else}
-        <button class="btn primary" onclick={() => finish(false)}>Сохранить</button>
+        <button class="btn primary" onclick={() => finish(false)}>{m.common_save()}</button>
       {/if}
     </div>
 </div>
@@ -2243,7 +2234,8 @@
   .warn-note { font-size: 13px; color: var(--error-text); background: var(--error-soft); border: 1px solid var(--error-line); padding: 10px 14px; border-radius: 8px; margin-top: 14px; font-weight: 600; }
   /* Same warning, docked just above the Отмена/Назад/Далее footer. */
   .footer-warn { margin: 0 34px 12px; }
-  code { background: var(--sunken); color: var(--text-secondary); padding: 1px 5px; border-radius: 4px; }
+  /* .note's <code> comes from translated messages ({@html}), out of reach of a scoped selector. */
+  code, .note :global(code) { background: var(--sunken); color: var(--text-secondary); padding: 1px 5px; border-radius: 4px; }
   .sched { display: flex; gap: 50px; }
   .sched-kinds { display: flex; flex-direction: column; gap: 14px; }
   .sched-right { display: flex; flex-direction: column; gap: 16px; padding-top: 2px; }

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { kbd, watchKeyboard } from '../lib/keyboardStore.svelte';
+  import { m } from '../lib/paraglide/messages';
 
   // A password box with an eye.
   //
@@ -30,7 +31,9 @@
     value,
     oninput,
     onenter,
-    placeholder = 'Пароль',
+    // No string default: one here is computed once and would keep the language
+    // the field was created in. The markup falls back at render time instead.
+    placeholder,
     invalid = false,
     variant = 'grow',
     revealed = false,
@@ -51,16 +54,14 @@
   $effect(() => watchKeyboard());
 
   const langTitle = $derived(
-    kbd.layout
-      ? `Раскладка клавиатуры: ${kbd.layout.name}. Переключение — Alt+Shift или Win+Пробел.`
-      : '',
+    kbd.layout ? m.pwf_layout_title({ name: kbd.layout.name }) : '',
   );
   const capsTitle = $derived(
     kbd.caps === true
-      ? 'Caps Lock включён — буквы набираются заглавными'
+      ? m.pwf_caps_on()
       : kbd.caps === false
-        ? 'Caps Lock выключен'
-        : 'Caps Lock: станет известно после первого нажатия клавиши',
+        ? m.pwf_caps_off()
+        : m.pwf_caps_unknown(),
   );
 </script>
 
@@ -68,7 +69,7 @@
   <input
     type={shown ? 'text' : 'password'}
     class:err={invalid}
-    {placeholder}
+    placeholder={placeholder ?? m.pwf_placeholder()}
     {value}
     autocomplete="off"
     spellcheck="false"
@@ -85,8 +86,8 @@
       type="button"
       class="eye"
       class:on={shown}
-      title={shown ? 'Скрыть пароль' : 'Показать пароль'}
-      aria-label={shown ? 'Скрыть пароль' : 'Показать пароль'}
+      title={shown ? m.pwf_hide() : m.pwf_show()}
+      aria-label={shown ? m.pwf_hide() : m.pwf_show()}
       onclick={() => (shown = !shown)}
     >
       {#if shown}

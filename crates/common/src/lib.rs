@@ -6,6 +6,7 @@ pub mod error;
 pub mod file_name;
 pub mod gpt;
 pub mod image;
+pub mod lang;
 pub mod log_files;
 pub mod log_level;
 pub mod log_mirror;
@@ -23,6 +24,11 @@ pub mod units;
 pub mod win_registry;
 
 pub use error::{OwnBackupError, Result};
+
+// The message catalogs (locales/*.json) — see [`lang`]. Re-exported so
+// `tr!` works from any crate that depends on this one.
+pub use rust_i18n;
+rust_i18n::i18n!("locales", fallback = "ru");
 
 /// Windows service registration key (used with `sc` and the SCM). No spaces so
 /// `sc start OwnBackup` works unquoted.

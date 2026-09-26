@@ -1,3 +1,7 @@
+// Messages in Russian and English (locales/*.json), through
+// own_backup_common::tr! — see common/src/lang.rs.
+rust_i18n::i18n!("locales", fallback = "ru");
+
 mod app_state;
 mod grpc_server;
 mod install;
@@ -16,6 +20,7 @@ use tracing::{debug, info, warn};
 use app_state::AppState;
 use grpc_server::BackupServiceImpl;
 use own_backup_common::config::AppConfig;
+use own_backup_common::tr;
 use shutdown::{create_shutdown_channel, ShutdownSignal};
 
 /// Service identity — shared by the SCM registration, the systemd unit and the
@@ -280,6 +285,8 @@ fn disable_winpe_firewall() {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_logging();
+    // Messages in the language the window last chose, followed while running.
+    own_backup_common::lang::follow_config(AppConfig::default_path());
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mode = parse_mode(&args);
@@ -327,29 +334,20 @@ fn print_info() {
     println!("{} v{}", SERVICE_DISPLAY_NAME, env!("CARGO_PKG_VERSION"));
     println!("{SERVICE_DESCRIPTION}");
     println!();
-    println!(
-        "Это фоновая служба «{SERVICE_DISPLAY_NAME}». Обычно ею управляет система \
-         (автозапуск при загрузке)."
-    );
-    println!("Запускать вручную из консоли не нужно.");
+    println!("{}", tr!("main.info_background", name = SERVICE_DISPLAY_NAME));
+    println!("{}", tr!("main.info_no_manual_run"));
     println!();
-    println!("Команды (принимаются и /flag, и --flag):");
-    println!("  /install      установить и запустить службу");
-    println!("  /uninstall    остановить и удалить службу");
-    println!("  /start        запустить службу");
-    println!("  /stop         остановить службу");
-    println!("  /restart      перезапустить службу");
-    println!("  /status       показать состояние службы");
-    println!(
-        "  /update       поставить ЭТОТ файл на место установленного: \
-остановить, заменить, запустить"
-    );
-    println!("  --foreground  запустить в консоли для отладки (TCP localhost:50051)");
-    println!("  --run         режим демона (UDS/named pipe) — так её запускает systemd");
-    println!(
-        "  --media       режим загрузочного носителя: состояние на диске носителя, \
-         службу не устанавливать (в WinPE включается сам)"
-    );
+    println!("{}", tr!("main.info_commands"));
+    println!("  /install      {}", tr!("main.cmd_install"));
+    println!("  /uninstall    {}", tr!("main.cmd_uninstall"));
+    println!("  /start        {}", tr!("main.cmd_start"));
+    println!("  /stop         {}", tr!("main.cmd_stop"));
+    println!("  /restart      {}", tr!("main.cmd_restart"));
+    println!("  /status       {}", tr!("main.cmd_status"));
+    println!("  /update       {}", tr!("main.cmd_update"));
+    println!("  --foreground  {}", tr!("main.cmd_foreground"));
+    println!("  --run         {}", tr!("main.cmd_run"));
+    println!("  --media       {}", tr!("main.cmd_media"));
 }
 
 /// Build a tokio runtime and run the gRPC loop until shutdown. `use_tcp`

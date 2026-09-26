@@ -25,6 +25,36 @@
 //! by convention older than any of these tools, and the directory above it
 //! names the vendor. The bytes are consulted only when the name says nothing.
 
+use std::borrow::Cow;
+
+use own_backup_common::tr;
+
+/// A catalog text as `&'static str`, for the names that have always been
+/// handed out that way — [`kind_by_name`], `Loader::kind`, the driver roles of
+/// [`crate::media_layout::rescue_role`] — and are compared as such by their
+/// tests.
+///
+/// A lookup without parameters hands out the catalog's own static text, so in
+/// practice this only unwraps it. Should it ever come back owned, the text is
+/// kept once and reused: a dozen short names per language, not one leak per
+/// call.
+pub(crate) fn static_text(text: Cow<'static, str>) -> &'static str {
+    use std::sync::Mutex;
+    match text {
+        Cow::Borrowed(s) => s,
+        Cow::Owned(s) => {
+            static KEPT: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+            let mut kept = KEPT.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(&same) = kept.iter().find(|k| **k == s) {
+                return same;
+            }
+            let leaked: &'static str = Box::leak(s.into_boxed_str());
+            kept.push(leaked);
+            leaked
+        }
+    }
+}
+
 /// Is this a file a boot entry would sensibly name?
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -69,7 +99,8 @@ pub fn role(path: &str) -> Role {
     }
 }
 
-/// What this file is, in words, from its name and the directory above it.
+/// What this file is, in words (the window's language), from its name and the
+/// directory above it.
 ///
 /// `None` when the name says nothing and the caller should look inside.
 pub fn kind_by_name(path: &str) -> Option<&'static str> {
@@ -92,44 +123,48 @@ pub fn kind_by_name(path: &str) -> Option<&'static str> {
         _ => None,
     };
 
-    let by_file = match file.as_str() {
-        "shimx64.efi" => Some("shim, первая ступень Secure Boot"),
-        "grubx64.efi" => Some("GRUB"),
-        "mmx64.efi" => Some("MokManager, ключи Secure Boot"),
-        "fbx64.efi" => Some("fallback, восстанавливает запись сам"),
-        "bootmgfw.efi" => Some("диспетчер загрузки"),
-        "bootmgr.efi" => Some("диспетчер загрузки, внутренняя часть"),
-        "memtest.efi" => Some("проверка памяти"),
-        "securebootrecovery.efi" => Some("восстановление Secure Boot"),
-        "systemd-bootx64.efi" => Some("systemd-boot"),
-        _ => None,
-    };
-
-    match (by_vendor, by_file) {
-        (Some(v), Some(f)) => Some(join(v, f)),
+    match (by_vendor, file_kind(&file)) {
+        (Some(v), Some(_)) => Some(join(v, &file)),
         (Some(v), None) => Some(v),
         (None, Some(f)) => Some(f),
         (None, None) => None,
     }
 }
 
-/// `"Ubuntu"` + `"GRUB"` → `"Ubuntu · GRUB"`, without allocating at runtime.
+/// What a file is by its name alone. `file` is lower-cased.
+fn file_kind(file: &str) -> Option<&'static str> {
+    Some(match file {
+        "shimx64.efi" => static_text(tr!("esp_scan.shim")),
+        "grubx64.efi" => "GRUB",
+        "mmx64.efi" => static_text(tr!("esp_scan.mok_manager")),
+        "fbx64.efi" => static_text(tr!("esp_scan.fallback")),
+        "bootmgfw.efi" => static_text(tr!("esp_scan.boot_manager")),
+        "bootmgr.efi" => static_text(tr!("esp_scan.boot_manager_inner")),
+        "memtest.efi" => static_text(tr!("esp_scan.memtest")),
+        "securebootrecovery.efi" => static_text(tr!("esp_scan.secure_boot_recovery")),
+        "systemd-bootx64.efi" => "systemd-boot",
+        _ => return None,
+    })
+}
+
+/// `"Ubuntu"` + `grubx64.efi` → `"Ubuntu · GRUB"`, without allocating at
+/// runtime.
 ///
-/// The pairs are few and known, so they are spelled out: a `String` here would
-/// have to be leaked or the return type widened, and neither is worth it for a
-/// column in a list.
-fn join(vendor: &'static str, file: &'static str) -> &'static str {
+/// The pairs are few and known, so they are spelled out. Matched on the file's
+/// NAME, not on what [`file_kind`] calls it: that is in the window's language.
+/// A known vendor with a file not listed here is named by the vendor alone.
+fn join(vendor: &'static str, file: &str) -> &'static str {
     match (vendor, file) {
-        ("Ubuntu", "shim, первая ступень Secure Boot") => "Ubuntu · shim",
-        ("Ubuntu", "GRUB") => "Ubuntu · GRUB",
-        ("Ubuntu", "MokManager, ключи Secure Boot") => "Ubuntu · MokManager",
-        ("Kubuntu", "shim, первая ступень Secure Boot") => "Kubuntu · shim",
-        ("Kubuntu", "GRUB") => "Kubuntu · GRUB",
-        ("Kubuntu", "MokManager, ключи Secure Boot") => "Kubuntu · MokManager",
-        ("Windows", "диспетчер загрузки") => "диспетчер загрузки Windows",
-        ("Windows", "диспетчер загрузки, внутренняя часть") => "Windows, внутренняя часть",
-        ("Windows", "проверка памяти") => "проверка памяти Windows",
-        ("Windows", "восстановление Secure Boot") => "восстановление Secure Boot",
+        ("Ubuntu", "shimx64.efi") => "Ubuntu · shim",
+        ("Ubuntu", "grubx64.efi") => "Ubuntu · GRUB",
+        ("Ubuntu", "mmx64.efi") => "Ubuntu · MokManager",
+        ("Kubuntu", "shimx64.efi") => "Kubuntu · shim",
+        ("Kubuntu", "grubx64.efi") => "Kubuntu · GRUB",
+        ("Kubuntu", "mmx64.efi") => "Kubuntu · MokManager",
+        ("Windows", "bootmgfw.efi") => static_text(tr!("esp_scan.windows_boot_manager")),
+        ("Windows", "bootmgr.efi") => static_text(tr!("esp_scan.windows_inner")),
+        ("Windows", "memtest.efi") => static_text(tr!("esp_scan.windows_memtest")),
+        ("Windows", "securebootrecovery.efi") => static_text(tr!("esp_scan.secure_boot_recovery")),
         (v, _) => v,
     }
 }

@@ -14,6 +14,8 @@
   import Modal from './Modal.svelte';
   import PasswordField from './PasswordField.svelte';
   import type { ArchiveSecret } from '../lib/types';
+  import { m } from '../lib/paraglide/messages';
+  import { esc } from '../lib/i18n.svelte';
 
   interface Props {
     open: boolean;
@@ -52,23 +54,21 @@
 
 <Modal
   {open}
-  title="Копия зашифрована"
+  title={m.aunl_title()}
   onClose={close}
   onConfirm={submit}
   confirmDisabled={!ready || busy}
-  confirmLabel={busy ? 'Открываю…' : 'Открыть'}
-  cancelLabel="Отмена"
+  confirmLabel={busy ? m.aunl_opening() : m.aunl_open()}
+  cancelLabel={m.common_cancel()}
 >
-  <p class="what">
-    Чтобы открыть <b>{imageName}</b>, нужен пароль архива или ключ восстановления.
-  </p>
+  <p class="what">{@html m.aunl_what({ name: esc(imageName) })}</p>
 
   <div class="tabs">
     <button class="tab" class:active={mode === 'password'} onclick={() => (mode = 'password')}>
-      Пароль
+      {m.aunl_tab_password()}
     </button>
     <button class="tab" class:active={mode === 'recovery'} onclick={() => (mode = 'recovery')}>
-      Ключ восстановления
+      {m.aunl_tab_recovery()}
     </button>
   </div>
 
@@ -78,11 +78,11 @@
         value={password}
         oninput={(v) => (password = v)}
         onenter={submit}
-        placeholder="Пароль архива"
+        placeholder={m.aunl_password_placeholder()}
         invalid={!!error}
       />
     </div>
-    <p class="note">Тот пароль, который был задан при включении шифрования этого задания.</p>
+    <p class="note">{m.aunl_password_note()}</p>
   {:else}
     <!-- Shown, not masked, and full width: it is copied off paper, never
          memorised, and a box that shows a third of it hides the typo. -->
@@ -96,17 +96,11 @@
         revealed={true}
       />
     </div>
-    <p class="note">
-      Строка, которую программа показала один раз при включении шифрования.
-      Пробелы и регистр значения не имеют.
-    </p>
+    <p class="note">{m.aunl_recovery_note()}</p>
   {/if}
 
   {#if busy}
-    <p class="note busy">
-      Вывод ключа занимает несколько секунд — так и задумано: это то, что делает
-      подбор пароля дорогим.
-    </p>
+    <p class="note busy">{m.aunl_busy_note()}</p>
   {/if}
   {#if error}
     <p class="err">{error}</p>

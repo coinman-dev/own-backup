@@ -1,0 +1,351 @@
+{
+  "_version": 2,
+  "grpc_server.target_disk_changed": {
+    "ru": "Диск %{disk} сейчас — не тот, для которого составлен план (было: серийный «%{was_serial}», %{was_size} Б; стало: серийный «%{now_serial}», %{now_size} Б). Соберите план заново.",
+    "en": "Disk %{disk} is no longer the one the plan was made for (was: serial “%{was_serial}”, %{was_size} B; now: serial “%{now_serial}”, %{now_size} B). Build the plan again."
+  },
+  "grpc_server.password_or_recovery_key": {
+    "ru": "укажите либо пароль, либо ключ восстановления, но не оба",
+    "en": "give either the backup password or the recovery key, not both"
+  },
+  "grpc_server.image_encrypted_needs_secret": {
+    "ru": "%{image}: копия зашифрована — нужен пароль или ключ восстановления",
+    "en": "%{image}: the backup is encrypted — the backup password or the recovery key is needed"
+  },
+  "grpc_server.engine_windows_only": {
+    "ru": "Эта операция требует Windows (движок VHDX). Поддержка Linux запланирована (план v2, фаза 8).",
+    "en": "This operation requires Windows (VHDX engine). Linux support is planned (plan v2, phase 8)."
+  },
+  "grpc_server.job_name_missing": {
+    "ru": "Укажите имя задания.",
+    "en": "Enter a job name."
+  },
+  "grpc_server.job_source_missing": {
+    "ru": "Выберите источник (том).",
+    "en": "Choose a source (volume)."
+  },
+  "grpc_server.job_dest_missing": {
+    "ru": "Выберите папку назначения.",
+    "en": "Choose a destination folder."
+  },
+  "grpc_server.job_dest_on_source_letter": {
+    "ru": "Нельзя сохранять копию на тот же том, который копируется (%{letter}:). Выберите для назначения другое место.",
+    "en": "The backup cannot be saved to the volume being backed up (%{letter}:). Choose another destination."
+  },
+  "grpc_server.job_dest_on_source_volume": {
+    "ru": "Папка назначения лежит на томе, который копируется (%{source}). Копия росла бы вместе с источником — выберите другое место.",
+    "en": "The destination folder is on the volume being backed up (%{source}). The backup would grow along with its source — choose another destination."
+  },
+  "grpc_server.job_encrypt_over_plain_copies": {
+    "ru": "Шифрование нельзя включить у задания, у которого уже есть незашифрованные копии: все копии задания должны быть в одном формате. Для зашифрованных копий создайте новое задание (или удалите существующие копии этого).",
+    "en": "Encryption cannot be turned on for a job that already has unencrypted backups: all backups of a job must be in one format. Create a new job for encrypted backups (or delete this job’s existing backups)."
+  },
+  "grpc_server.job_format_change": {
+    "ru": "Нельзя изменить формат образа: у задания уже есть резервные копии в другом формате. Создайте новое задание (или удалите существующие копии этого задания).",
+    "en": "The image format cannot be changed: the job already has backups in another format. Create a new job (or delete this job’s existing backups)."
+  },
+  "grpc_server.job_not_saved": {
+    "ru": "Задание не сохранено: %{error}",
+    "en": "The job was not saved: %{error}"
+  },
+  "grpc_server.job_running_cannot_delete": {
+    "ru": "Задание сейчас выполняется. Остановите его и повторите удаление.",
+    "en": "The job is running. Stop it, then delete it again."
+  },
+  "grpc_server.busy_delete_copies": {
+    "ru": "удаление копий",
+    "en": "deleting backups"
+  },
+  "grpc_server.job_not_deleted": {
+    "ru": "Задание не удалено: %{error}",
+    "en": "The job was not deleted: %{error}"
+  },
+  "grpc_server.default_job_name": {
+    "ru": "Этот компьютер",
+    "en": "This computer"
+  },
+  "grpc_server.job_not_found": {
+    "ru": "Задание не найдено.",
+    "en": "Job not found."
+  },
+  "grpc_server.run_dest_on_source_letter": {
+    "ru": "Копия пишется на тот же том (%{letter}:), что и источник — запуск отменён.",
+    "en": "The backup would be written to the source volume itself (%{letter}:) — run cancelled."
+  },
+  "grpc_server.run_dest_on_source_volume": {
+    "ru": "Папка назначения лежит на копируемом томе (%{source}) — запуск отменён.",
+    "en": "The destination folder is on the volume being backed up (%{source}) — run cancelled."
+  },
+  "grpc_server.run_dest_cannot_tell": {
+    "ru": "Нельзя убедиться, что копия не пишется на копируемый том: %{reason}. Запуск отменён.",
+    "en": "Could not make sure the backup is not written to the volume being backed up: %{reason}. Run cancelled."
+  },
+  "grpc_server.busy_volume_restore": {
+    "ru": "восстановление тома",
+    "en": "volume restore"
+  },
+  "grpc_server.busy_validation": {
+    "ru": "проверка образа",
+    "en": "image validation"
+  },
+  "grpc_server.busy_mount": {
+    "ru": "подключение образа",
+    "en": "image mount"
+  },
+  "grpc_server.media_windows_only": {
+    "ru": "Загрузочный носитель собирается только на Windows",
+    "en": "Bootable media can only be built on Windows"
+  },
+  "grpc_server.drivers_list_failed": {
+    "ru": "Драйверы перечислить не удалось: %{error}",
+    "en": "Could not list the drivers: %{error}"
+  },
+  "grpc_server.drivers_windows_only": {
+    "ru": "Драйверы перечисляются только на Windows",
+    "en": "Drivers can only be listed on Windows"
+  },
+  "grpc_server.tools_windows_only": {
+    "ru": "Сторонние средства ищутся только на Windows",
+    "en": "Third-party tools can only be looked for on Windows"
+  },
+  "grpc_server.iso_path_missing": {
+    "ru": "не указан файл ISO",
+    "en": "no ISO file given"
+  },
+  "grpc_server.winre_not_found": {
+    "ru": "На этой машине не нашлось образа среды восстановления. Включите её (reagentc /enable) или укажите Winre.wim вручную.",
+    "en": "No Windows RE image was found on this machine. Enable it (reagentc /enable) or specify Winre.wim manually."
+  },
+  "grpc_server.program_dir_unknown": {
+    "ru": "не удалось определить папку программы",
+    "en": "could not determine the program folder"
+  },
+  "grpc_server.webview2_not_found": {
+    "ru": "Не найден рантайм WebView2. Установите Microsoft Edge WebView2 Runtime или положите папку WebView2 рядом с программой.",
+    "en": "The WebView2 runtime was not found. Install Microsoft Edge WebView2 Runtime or put a WebView2 folder next to the program."
+  },
+  "grpc_server.media_after_error": {
+    "ru": "после ошибки",
+    "en": "after an error"
+  },
+  "grpc_server.media_building_image": {
+    "ru": "сборка образа",
+    "en": "building the image"
+  },
+  "grpc_server.media_writing_files": {
+    "ru": "запись файлов",
+    "en": "writing files"
+  },
+  "grpc_server.busy_disk_restore": {
+    "ru": "восстановление диска",
+    "en": "disk restore"
+  },
+  "grpc_server.busy_which_disk": {
+    "ru": "диск %{disk}",
+    "en": "disk %{disk}"
+  },
+  "grpc_server.plan_refused": {
+    "ru": "План не прошёл проверку — ничего не записано:\n%{refusals}",
+    "en": "The plan did not pass the checks — nothing was written:\n%{refusals}"
+  },
+  "grpc_server.busy_restore": {
+    "ru": "восстановление",
+    "en": "restore"
+  },
+  "grpc_server.restore_did_not_start": {
+    "ru": "Восстановление не запустилось: %{error}",
+    "en": "The restore did not start: %{error}"
+  },
+  "grpc_server.restore_aborted_inside": {
+    "ru": "Восстановление прервалось изнутри. Проверьте диск и журнал службы прежде чем повторять.",
+    "en": "The restore broke off from the inside. Check the disk and the service log before trying again."
+  },
+  "grpc_server.cancel_not_now": {
+    "ru": "Сейчас идёт операция, которую нельзя прервать без потери данных.",
+    "en": "An operation is in progress that cannot be interrupted without losing data."
+  },
+  "grpc_server.run_already_finished": {
+    "ru": "Этот запуск уже завершён.",
+    "en": "This run has already finished."
+  },
+  "grpc_server.boot_bios_machine": {
+    "ru": "эта машина загружается через обычный BIOS — записей UEFI у неё нет",
+    "en": "this machine boots through legacy BIOS — it has no UEFI boot entries"
+  },
+  "grpc_server.boot_read_windows_only": {
+    "ru": "записи загрузки читаются только на Windows",
+    "en": "boot entries can only be read on Windows"
+  },
+  "grpc_server.boot_not_entry_number": {
+    "ru": "не номер записи: «%{value}»",
+    "en": "not a boot entry number: “%{value}”"
+  },
+  "grpc_server.boot_not_given": {
+    "ru": "не сказано: %{what}",
+    "en": "missing: %{what}"
+  },
+  "grpc_server.boot_field_name": {
+    "ru": "название",
+    "en": "name"
+  },
+  "grpc_server.boot_field_loader_path": {
+    "ru": "путь к загрузчику",
+    "en": "loader path"
+  },
+  "grpc_server.boot_disk_not_given": {
+    "ru": "не сказан диск",
+    "en": "no disk given"
+  },
+  "grpc_server.boot_partition_not_given": {
+    "ru": "не сказан раздел",
+    "en": "no partition given"
+  },
+  "grpc_server.boot_secs_not_given": {
+    "ru": "не сказано сколько секунд",
+    "en": "no number of seconds given"
+  },
+  "grpc_server.boot_unknown_action": {
+    "ru": "неизвестное действие: %{action}",
+    "en": "unknown action: %{action}"
+  },
+  "grpc_server.boot_change_windows_only": {
+    "ru": "записи загрузки меняются только на Windows",
+    "en": "boot entries can only be changed on Windows"
+  },
+  "grpc_server.media_build_on_media": {
+    "ru": "Собрать загрузочный носитель можно только из установленной Windows. Здесь, на самом носителе, нет ни хранилища драйверов, ни места для распаковки образа: X: — это диск в оперативной памяти.",
+    "en": "Bootable media can only be built from an installed Windows. The media itself has neither a driver store nor room to unpack the image: X: is a RAM disk."
+  },
+  "install.win_installed": {
+    "ru": "Служба «%{name}» (%{id}) установлена.\n  Путь: %{path}\n  Автозапуск при загрузке, учётная запись LocalSystem.\n  Запустить сейчас:  sc start %{id}",
+    "en": "Service “%{name}” (%{id}) installed.\n  Path: %{path}\n  Starts automatically at boot, account LocalSystem.\n  Start it now:  sc start %{id}"
+  },
+  "install.win_removed": {
+    "ru": "Служба «%{name}» (%{id}) удалена.",
+    "en": "Service “%{name}” (%{id}) removed."
+  },
+  "install.win_already_running": {
+    "ru": "Служба «%{name}» уже запущена.",
+    "en": "Service “%{name}” is already running."
+  },
+  "install.win_started": {
+    "ru": "Служба «%{name}» запущена.",
+    "en": "Service “%{name}” started."
+  },
+  "install.win_already_stopped": {
+    "ru": "Служба «%{name}» уже остановлена.",
+    "en": "Service “%{name}” is already stopped."
+  },
+  "install.win_stopped": {
+    "ru": "Служба «%{name}» остановлена.",
+    "en": "Service “%{name}” stopped."
+  },
+  "install.win_status": {
+    "ru": "Служба «%{name}» (%{id}): %{state}",
+    "en": "Service “%{name}” (%{id}): %{state}"
+  },
+  "install.linux_user_added": {
+    "ru": "\n  Пользователь «%{user}» добавлен в группу «%{group}».\n  ВАЖНО: членство применяется после нового входа в систему (или выполните `newgrp %{group}`).",
+    "en": "\n  User “%{user}” added to group “%{group}”.\n  IMPORTANT: the membership takes effect after signing in again (or run `newgrp %{group}`)."
+  },
+  "install.linux_user_not_added": {
+    "ru": "\n  ВНИМАНИЕ: не удалось добавить «%{user}» в группу «%{group}»: %{error}\n  Добавьте вручную:  sudo usermod -aG %{group} %{user}",
+    "en": "\n  WARNING: could not add “%{user}” to group “%{group}”: %{error}\n  Add it manually:  sudo usermod -aG %{group} %{user}"
+  },
+  "install.linux_installed": {
+    "ru": "systemd-юнит установлен и запущен: %{path}\n  Статус:  systemctl status %{unit}.service",
+    "en": "systemd unit installed and started: %{path}\n  Status:  systemctl status %{unit}.service"
+  },
+  "install.linux_removed": {
+    "ru": "systemd-юнит %{unit}.service удалён.",
+    "en": "systemd unit %{unit}.service removed."
+  },
+  "install.linux_started": {
+    "ru": "systemd-юнит %{unit}.service запущен.",
+    "en": "systemd unit %{unit}.service started."
+  },
+  "install.linux_stopped": {
+    "ru": "systemd-юнит %{unit}.service остановлен.",
+    "en": "systemd unit %{unit}.service stopped."
+  },
+  "install.update_same_file": {
+    "ru": "Этот файл и есть установленный (%{path}) — обновлять нечего.",
+    "en": "This file is the installed one (%{path}) — nothing to update."
+  },
+  "install.update_installed": {
+    "ru": "Установлена: %{path}",
+    "en": "Installed:  %{path}"
+  },
+  "install.update_replacing": {
+    "ru": "Заменяю на:  %{path}",
+    "en": "Replacing:  %{path}"
+  },
+  "install.update_failed": {
+    "ru": "не удалось заменить %{path}: %{error} — служба запущена обратно, файл не тронут",
+    "en": "could not replace %{path}: %{error} — the service was started again, the file is untouched"
+  },
+  "install.update_done": {
+    "ru": "Файл заменён.",
+    "en": "File replaced."
+  },
+  "main.info_background": {
+    "ru": "Это фоновая служба «%{name}». Обычно ею управляет система (автозапуск при загрузке).",
+    "en": "This is the background service “%{name}”. It is normally managed by the system (starts automatically at boot)."
+  },
+  "main.info_no_manual_run": {
+    "ru": "Запускать вручную из консоли не нужно.",
+    "en": "There is no need to run it by hand from a console."
+  },
+  "main.info_commands": {
+    "ru": "Команды (принимаются и /flag, и --flag):",
+    "en": "Commands (both /flag and --flag are accepted):"
+  },
+  "main.cmd_install": {
+    "ru": "установить и запустить службу",
+    "en": "install and start the service"
+  },
+  "main.cmd_uninstall": {
+    "ru": "остановить и удалить службу",
+    "en": "stop and remove the service"
+  },
+  "main.cmd_start": {
+    "ru": "запустить службу",
+    "en": "start the service"
+  },
+  "main.cmd_stop": {
+    "ru": "остановить службу",
+    "en": "stop the service"
+  },
+  "main.cmd_restart": {
+    "ru": "перезапустить службу",
+    "en": "restart the service"
+  },
+  "main.cmd_status": {
+    "ru": "показать состояние службы",
+    "en": "show the service status"
+  },
+  "main.cmd_update": {
+    "ru": "поставить ЭТОТ файл на место установленного: остановить, заменить, запустить",
+    "en": "put THIS file in place of the installed one: stop, replace, start"
+  },
+  "main.cmd_foreground": {
+    "ru": "запустить в консоли для отладки (TCP localhost:50051)",
+    "en": "run in the console for debugging (TCP localhost:50051)"
+  },
+  "main.cmd_run": {
+    "ru": "режим демона (UDS/named pipe) — так её запускает systemd",
+    "en": "daemon mode (UDS/named pipe) — how systemd starts it"
+  },
+  "main.cmd_media": {
+    "ru": "режим загрузочного носителя: состояние на диске носителя, службу не устанавливать (в WinPE включается сам)",
+    "en": "bootable media mode: state kept on the media drive, the service is not installed (turns on by itself in WinPE)"
+  },
+  "single_instance.already_running": {
+    "ru": "служба Own Backup уже запущена — второй экземпляр не нужен и ничего не менял",
+    "en": "the Own Backup service is already running — a second instance is not needed and changed nothing"
+  },
+  "single_instance.could_not_check": {
+    "ru": "не удалось проверить, не запущена ли служба уже (%{reason}) — запуск отменён, чтобы не получилось двух движков сразу",
+    "en": "could not check whether the service is already running (%{reason}) — start cancelled so that two engines never run at once"
+  }
+}

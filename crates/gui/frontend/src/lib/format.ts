@@ -1,3 +1,6 @@
+import { m } from './paraglide/messages';
+import { locale } from './i18n.svelte';
+
 /**
  * Format bytes into a human-readable string such as "1.5 GiB" or "350 MiB".
  *
@@ -15,13 +18,16 @@ export function formatBytes(bytes: number): string {
 }
 
 /**
- * Format an ISO date string into "16 апреля 2026, 14:30" — local time, month
- * in the genitive the way a Russian date is read. It used to print English
- * month abbreviations ("16 Apr 2026") in an otherwise Russian interface.
+ * Format an ISO date string in local time: «16 апреля 2026, 14:30» — month in
+ * the genitive the way a Russian date is read — or "April 16, 2026 at 2:30 PM".
+ * Intl's own Russian long date adds «г. в», which nobody here writes.
  */
 export function formatDate(iso: string): string {
   const d = new Date(iso);
   if (isNaN(d.getTime())) return iso;
+  if (locale() === 'en') {
+    return new Intl.DateTimeFormat('en-US', { dateStyle: 'long', timeStyle: 'short' }).format(d);
+  }
   const months = [
     'января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
     'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря',
@@ -36,17 +42,17 @@ export function formatDate(iso: string): string {
 
 /**
  * Format a duration in seconds into "5 мин 32 с", "1 ч 12 мин" or "45 с"
- * (it was "5m 32s").
+ * (it was "5m 32s"); "5 min 32 s" in English.
  */
 export function formatDuration(seconds: number): string {
   if (seconds < 0) return '—';
-  if (seconds < 60) return `${Math.round(seconds)} с`;
+  if (seconds < 60) return m.fmt_dur_s({ s: Math.round(seconds) });
   const mins = Math.floor(seconds / 60);
   const secs = Math.round(seconds % 60);
-  if (mins < 60) return `${mins} мин ${secs} с`;
+  if (mins < 60) return m.fmt_dur_min_s({ min: mins, s: secs });
   const hrs = Math.floor(mins / 60);
   const remainMins = mins % 60;
-  return `${hrs} ч ${remainMins} мин`;
+  return m.fmt_dur_h_min({ h: hrs, min: remainMins });
 }
 
 

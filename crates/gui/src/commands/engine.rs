@@ -17,6 +17,7 @@ use own_backup_common::engine_dto::{DiskRestoreSummaryDto, RestoreSummaryDto, Ve
 use own_backup_common::restore_check::CheckContext;
 use own_backup_common::restore_plan::RestorePlan;
 use own_backup_common::restore_state::RestoreRunState;
+use own_backup_common::tr;
 
 use crate::state::GuiState;
 
@@ -257,10 +258,7 @@ fn archive_keys(
         let key = RecoveryKey::parse(typed).map_err(|e| e.to_string())?;
         return ArchiveKeys::from_image_recovery(path, &key).map_err(|e| e.to_string());
     }
-    Err(format!(
-        "{}: копия зашифрована — нужен пароль или ключ восстановления",
-        path.display()
-    ))
+    Err(tr!("commands_engine.image_encrypted_needs_secret", image = path.display()).into_owned())
 }
 
 fn load_sidecar(
@@ -282,10 +280,9 @@ fn load_sidecar(
         Err(_) => {
             let sidecar_path = own_backup_backup::sidecar_path_for(path);
             if !sidecar_path.exists() {
-                return Err(format!(
-                    "В образе нет встроенных метаданных и рядом не найден файл метаданных: {}",
-                    sidecar_path.display()
-                ));
+                return Err(
+                    tr!("commands_engine.no_metadata", path = sidecar_path.display()).into_owned(),
+                );
             }
             own_backup_backup::read_sidecar(&sidecar_path).map_err(|e| e.to_string())
         }
@@ -935,12 +932,12 @@ pub async fn verify_luks_password(
             _ => headers.iter().find(|h| h.part_index == src_index),
         }
         .ok_or_else(|| {
-            format!("в копии не сохранён заголовок контейнера для раздела {src_index}")
+            tr!("commands_engine.no_container_header", partition = src_index).into_owned()
         })?;
 
         own_backup_backup::luks::verify_stored_passphrase(header, &password)
             .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("проверка пароля не запустилась: {e}"))?
+    .map_err(|e| tr!("commands_engine.password_check_not_started", error = e).into_owned())?
 }

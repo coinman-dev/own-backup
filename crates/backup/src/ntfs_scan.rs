@@ -41,7 +41,7 @@ use ntfs::structured_values::{NtfsAttributeList, NtfsFileName, NtfsFileNamespace
 use ntfs::{Ntfs, NtfsAttributeType};
 use tracing::{debug, warn};
 
-use own_backup_common::{OwnBackupError, Result};
+use own_backup_common::{tr, OwnBackupError, Result};
 
 use crate::exclusions::{parse_patterns, ByteRanges};
 
@@ -182,9 +182,9 @@ where
         return Ok(scan);
     }
 
-    let mut ntfs = Ntfs::new(fs).map_err(|e| bad(format!("не NTFS: {e}")))?;
+    let mut ntfs = Ntfs::new(fs).map_err(|e| bad(tr!("ntfs_scan.not_ntfs", error = e)))?;
     ntfs.read_upcase_table(fs)
-        .map_err(|e| bad(format!("таблица регистра: {e}")))?;
+        .map_err(|e| bad(tr!("ntfs_scan.upcase_table", error = e)))?;
     let cluster_size = ntfs.cluster_size() as u64;
     let record_size = ntfs.file_record_size() as u64;
 
@@ -196,17 +196,15 @@ where
     // копии, не трогая источник.
     if let Ok(info) = ntfs.volume_info(fs) {
         if info.flags().contains(ntfs::structured_values::NtfsVolumeFlags::IS_DIRTY) {
-            return Err(bad(
-                "том помечен грязным (нужен chkdsk) — исключения по MFT не применяются",
-            ));
+            return Err(bad(tr!("ntfs_scan.volume_dirty")));
         }
     }
 
     // Сколько всего записей: длина данных самой $MFT, делённая на размер записи.
     let mft = ntfs
         .file(fs, 0)
-        .map_err(|e| bad(format!("запись 0 MFT: {e}")))?;
-    let mft_len = data_len(&mft, fs).ok_or_else(|| bad("у $MFT нет потока данных"))?;
+        .map_err(|e| bad(tr!("ntfs_scan.mft_record_zero", error = e)))?;
+    let mft_len = data_len(&mft, fs).ok_or_else(|| bad(tr!("ntfs_scan.mft_no_data")))?;
     let total = mft_len / record_size;
     debug!(total, record_size, cluster_size, "MFT scan: начинаю");
 
@@ -651,7 +649,7 @@ where
 
     let mut list_attr = None;
     for attr in file.attributes_raw() {
-        let attr = attr.map_err(|e| bad(format!("атрибут: {e}")))?;
+        let attr = attr.map_err(|e| bad(tr!("ntfs_scan.attribute", error = e)))?;
         if attr.ty().ok() == Some(NtfsAttributeType::AttributeList) {
             list_attr = Some(attr);
             break;
@@ -662,11 +660,11 @@ where
     };
     let list = attr
         .structured_value::<_, NtfsAttributeList<'_, '_>>(fs)
-        .map_err(|e| bad(format!("список атрибутов: {e}")))?;
+        .map_err(|e| bad(tr!("ntfs_scan.attribute_list", error = e)))?;
 
     let mut entries = list.entries();
     while let Some(entry) = entries.next(fs) {
-        let entry = entry.map_err(|e| bad(format!("запись списка: {e}")))?;
+        let entry = entry.map_err(|e| bad(tr!("ntfs_scan.list_entry", error = e)))?;
         if entry.ty().ok() != Some(NtfsAttributeType::Data) || entry.name_length() != 0 {
             continue;
         }
@@ -676,20 +674,20 @@ where
         }
         let part_file = entry
             .to_file(ntfs, fs)
-            .map_err(|e| bad(format!("запись-продолжение: {e}")))?;
+            .map_err(|e| bad(tr!("ntfs_scan.extension_record", error = e)))?;
         let part_attr = entry
             .to_attribute(&part_file)
-            .map_err(|e| bad(format!("атрибут продолжения: {e}")))?;
+            .map_err(|e| bad(tr!("ntfs_scan.extension_attribute", error = e)))?;
         match part_attr.value(fs) {
             Ok(NtfsAttributeValue::NonResident(v)) => {
                 let mut broken = false;
                 take_runs(v.data_runs(), &mut out, &mut allocated, &mut broken, 0);
                 if broken {
-                    return Err(bad("run list продолжения не разобран"));
+                    return Err(bad(tr!("ntfs_scan.extension_runs_unparsed")));
                 }
             }
             Ok(_) => {}
-            Err(e) => return Err(bad(format!("значение продолжения: {e}"))),
+            Err(e) => return Err(bad(tr!("ntfs_scan.extension_value", error = e))),
         }
     }
     Ok((out, allocated))
@@ -823,7 +821,9 @@ impl<R: Read + Seek> Seek for BufferedVolume<R> {
             SeekFrom::Start(v) => v,
             SeekFrom::Current(v) => (self.pos as i64 + v) as u64,
             SeekFrom::End(_) => {
-                return Err(std::io::Error::other("seek от конца тома не поддержан"))
+                return Err(std::io::Error::other(
+                    tr!("ntfs_scan.seek_from_end_unsupported").into_owned(),
+                ))
             }
         };
         Ok(self.pos)
@@ -868,7 +868,7 @@ impl<R: Read + Seek> Seek for VolumeWindow<R> {
         if new < 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "seek до начала тома",
+                tr!("ntfs_scan.seek_before_start").into_owned(),
             ));
         }
         self.pos = new as u64;

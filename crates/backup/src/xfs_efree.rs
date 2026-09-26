@@ -46,7 +46,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use own_backup_common::{OwnBackupError, Result};
+use own_backup_common::{tr, OwnBackupError, Result};
 
 use crate::fat_map::RawVolume;
 use crate::xfs_dirent::{crc_matches, set_crc};
@@ -150,10 +150,10 @@ impl std::fmt::Display for ExtRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ExtRefusal::LeafFull { ag, tree } => {
-                write!(f, "группа {ag}: лист {tree} полон, вставка потребовала бы разбиения")
+                f.write_str(&tr!("xfs_efree.refusal_leaf_full", ag = ag, tree = tree))
             }
             ExtRefusal::LeafUnderflow { ag, tree } => {
-                write!(f, "группа {ag}: удаление увело бы лист {tree} ниже минимума")
+                f.write_str(&tr!("xfs_efree.refusal_leaf_underflow", ag = ag, tree = tree))
             }
         }
     }
@@ -186,18 +186,20 @@ impl AgEdits {
         if !self.blocks.contains_key(&agbno) {
             let blk = AgReader::new(sb, self.ag).read_block_at(vol, agbno)?;
             if &blk[0..4] != kind.magic() {
-                return Err(bad(format!(
-                    "группа {} блок {agbno}: не {} ({:?})",
-                    self.ag,
-                    kind.name(),
-                    &blk[0..4]
+                return Err(bad(tr!(
+                    "xfs_efree.block_wrong_tree",
+                    ag = self.ag,
+                    agbno = agbno,
+                    tree = kind.name(),
+                    magic = format!("{:?}", &blk[0..4])
                 )));
             }
             if !crc_matches(&blk, BTREE_CRC_OFF) {
-                return Err(bad(format!(
-                    "группа {} блок {agbno}: CRC {} не сходится — не трогаю",
-                    self.ag,
-                    kind.name()
+                return Err(bad(tr!(
+                    "xfs_efree.block_crc_mismatch",
+                    ag = self.ag,
+                    agbno = agbno,
+                    tree = kind.name()
                 )));
             }
             self.blocks.insert(agbno, blk);
@@ -294,7 +296,7 @@ fn rmap_block_keys(blk: &[u8]) -> Result<(RKey, RKey)> {
     let level = be16(blk, 0x04);
     let n = be16(blk, 0x06) as usize;
     if n == 0 {
-        return Err(bad("RMAPBT: блок опустел — слияние не реализовано"));
+        return Err(bad(tr!("xfs_efree.rmap_block_empty")));
     }
     let mut low = [0u8; 20];
     let mut high = [0u8; 20];
@@ -359,7 +361,7 @@ fn descend_rmap(
             return Ok(Located { path, leaf: agbno, idx, found });
         }
         if n == 0 || n > nmax {
-            return Err(bad("RMAPBT: узел заявляет невозможное"));
+            return Err(bad(tr!("xfs_efree.rmap_node_impossible")));
         }
         let ptr_off = BTREE_HDR + nmax * 40;
         let mut slot = 0usize;
@@ -375,7 +377,7 @@ fn descend_rmap(
         path.push((agbno, slot));
         agbno = child;
     }
-    Err(bad("RMAPBT глубже 16 уровней"))
+    Err(bad(tr!("xfs_efree.rmap_too_deep")))
 }
 
 /// Пересчитать пару ключей у всех предков.
@@ -418,7 +420,7 @@ fn read_rmap_recs(
     while let Some(agbno) = stack.pop() {
         seen += 1;
         if seen > 8192 {
-            return Err(bad("RMAPBT слишком велик — похоже на цикл"));
+            return Err(bad(tr!("xfs_efree.rmap_too_large")));
         }
         let nmax = node_maxrecs(sb, Kind::Rmap);
         let blk = edits.get(vol, sb, agbno, Kind::Rmap)?;
@@ -466,7 +468,7 @@ fn descend_alloc(
         let nrecs = be16(blk, 0x06) as usize;
         if level == 0 {
             if nrecs > leaf_maxrecs(sb, kind) {
-                return Err(bad(format!("{}: лист заявляет невозможное", kind.name())));
+                return Err(bad(tr!("xfs_efree.leaf_impossible", tree = kind.name())));
             }
             let mut idx = nrecs;
             let mut found = false;
@@ -488,7 +490,7 @@ fn descend_alloc(
             return Ok(Located { path, leaf: agbno, idx, found });
         }
         if nrecs == 0 || nrecs > nmax {
-            return Err(bad(format!("{}: узел заявляет невозможное", kind.name())));
+            return Err(bad(tr!("xfs_efree.node_impossible", tree = kind.name())));
         }
         let ptr_off = BTREE_HDR + nmax * kind.keyslot();
         let mut slot = 0usize;
@@ -504,7 +506,7 @@ fn descend_alloc(
         path.push((agbno, slot));
         agbno = child;
     }
-    Err(bad("дерево глубже 16 уровней"))
+    Err(bad(tr!("xfs_efree.tree_too_deep")))
 }
 
 /// Вставить запись в лист; `false` — не влезла.
@@ -556,7 +558,7 @@ fn refresh_parent_keys(
             let blk = edits.get(vol, sb, child, kind)?;
             let n = be16(blk, 0x06) as usize;
             if n == 0 {
-                return Err(bad(format!("{}: блок {child} опустел", kind.name())));
+                return Err(bad(tr!("xfs_efree.block_empty", tree = kind.name(), child = child)));
             }
             let level = be16(blk, 0x04);
             // У листа ключ берётся из записи, у узла — из его первого ключа.
@@ -590,7 +592,7 @@ fn read_alloc_recs(
     while let Some(agbno) = stack.pop() {
         seen += 1;
         if seen > 4096 {
-            return Err(bad("дерево слишком велико — похоже на цикл"));
+            return Err(bad(tr!("xfs_efree.tree_too_large")));
         }
         let nmax = node_maxrecs(sb, kind);
         let blk = edits.get(vol, sb, agbno, kind)?;
@@ -661,9 +663,11 @@ pub(crate) fn plan_extent_freeing(
         // посчитали не то, и молча продолжать здесь опаснее, чем отказать.
         for r in runs {
             if old.iter().any(|f| r.agbno < f.agbno + f.len && f.agbno < r.agbno + r.len) {
-                return Err(bad(format!(
-                    "группа {ag}: экстент {}+{} уже числится свободным",
-                    r.agbno, r.len
+                return Err(bad(tr!(
+                    "xfs_efree.extent_already_free",
+                    ag = ag,
+                    start = r.agbno,
+                    len = r.len
                 )));
             }
         }
@@ -683,11 +687,12 @@ pub(crate) fn plan_extent_freeing(
             for f in &to_delete {
                 let loc = descend_alloc(edits, vol, sb, root, kind, *f)?;
                 if !loc.found {
-                    return Err(bad(format!(
-                        "группа {ag}: в {} нет записи {}+{}",
-                        kind.name(),
-                        f.agbno,
-                        f.len
+                    return Err(bad(tr!(
+                        "xfs_efree.record_missing",
+                        ag = ag,
+                        tree = kind.name(),
+                        start = f.agbno,
+                        len = f.len
                     )));
                 }
                 let is_root = loc.leaf == root;
@@ -707,11 +712,12 @@ pub(crate) fn plan_extent_freeing(
             for f in &to_insert {
                 let loc = descend_alloc(edits, vol, sb, root, kind, *f)?;
                 if loc.found {
-                    return Err(bad(format!(
-                        "группа {ag}: в {} уже есть запись {}+{}",
-                        kind.name(),
-                        f.agbno,
-                        f.len
+                    return Err(bad(tr!(
+                        "xfs_efree.record_exists",
+                        ag = ag,
+                        tree = kind.name(),
+                        start = f.agbno,
+                        len = f.len
                     )));
                 }
                 let mut rec = [0u8; 8];
@@ -751,9 +757,10 @@ pub(crate) fn plan_extent_freeing(
                 let key = rmap_low_key(rec);
                 let loc = descend_rmap(&mut rmap_edits, vol, sb, agf.rmap_root, &key)?;
                 if !loc.found {
-                    return Err(bad(format!(
-                        "группа {ag}: в RMAPBT нет записи владельца {}",
-                        be64(rec, 8)
+                    return Err(bad(tr!(
+                        "xfs_efree.rmap_owner_missing",
+                        ag = ag,
+                        owner = be64(rec, 8)
                     )));
                 }
                 let is_root = loc.leaf == agf.rmap_root;
@@ -779,16 +786,18 @@ pub(crate) fn plan_extent_freeing(
         let longest = new.iter().map(|f| f.len).max().unwrap_or(0);
         let mut agf_sec = reader.read_sector_at(vol, 1)?;
         if !crc_matches(&agf_sec, AGF_CRC_OFF) {
-            return Err(bad(format!("группа {ag}: CRC AGF не сходится — не трогаю")));
+            return Err(bad(tr!("xfs_efree.agf_crc_mismatch", ag = ag)));
         }
         let old_freeblks = be32(&agf_sec, AGF_FREEBLKS);
         // Блоки из AGFL в BNOBT не лежат, но в agf_freeblks и не считаются —
         // сверяем, что наш пересчёт совпал со старым значением плюс возврат.
         let returned_here: u64 = runs.iter().map(|f| f.len).sum();
         if freeblks != old_freeblks + returned_here {
-            return Err(bad(format!(
-                "группа {ag}: пересчёт свободного дал {freeblks}, ожидалось {}",
-                old_freeblks + returned_here
+            return Err(bad(tr!(
+                "xfs_efree.free_recount_mismatch",
+                ag = ag,
+                freeblks = freeblks,
+                expected = old_freeblks + returned_here
             )));
         }
         put_be32(&mut agf_sec, AGF_FREEBLKS, freeblks as u32);

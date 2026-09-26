@@ -25,7 +25,7 @@
 //! | 0x2C   | 4    | image count                                    |
 //! | 0x48   | 24   | XML data resource: size, offset, original size |
 
-use own_backup_common::{OwnBackupError, Result};
+use own_backup_common::{tr, OwnBackupError, Result};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
@@ -95,16 +95,12 @@ pub fn read_wim_info(path: &Path) -> Result<WimInfo> {
 
     let mut header = [0u8; 0x60];
     f.read_exact(&mut header).map_err(|_| {
-        OwnBackupError::ImageFormat(format!(
-            "{}: файл слишком мал для образа WIM",
-            path.display()
-        ))
+        OwnBackupError::ImageFormat(tr!("wim_info.too_small", path = path.display()).into_owned())
     })?;
     if &header[..8] != WIM_MAGIC {
-        return Err(OwnBackupError::ImageFormat(format!(
-            "{}: это не образ WIM (нет сигнатуры MSWIM)",
-            path.display()
-        )));
+        return Err(OwnBackupError::ImageFormat(
+            tr!("wim_info.not_wim", path = path.display()).into_owned(),
+        ));
     }
 
     let u16at = |o: usize| u16::from_le_bytes([header[o], header[o + 1]]);
@@ -121,26 +117,23 @@ pub fn read_wim_info(path: &Path) -> Result<WimInfo> {
     let xml_offset = u64at(0x50);
 
     if image_count == 0 {
-        return Err(OwnBackupError::ImageFormat(format!(
-            "{}: в образе нет ни одной системы",
-            path.display()
-        )));
+        return Err(OwnBackupError::ImageFormat(
+            tr!("wim_info.no_images", path = path.display()).into_owned(),
+        ));
     }
     if xml_size == 0 || xml_size > 64 * 1024 * 1024 {
-        return Err(OwnBackupError::ImageFormat(format!(
-            "{}: описание образа отсутствует или повреждено",
-            path.display()
-        )));
+        return Err(OwnBackupError::ImageFormat(
+            tr!("wim_info.no_description", path = path.display()).into_owned(),
+        ));
     }
 
     f.seek(SeekFrom::Start(xml_offset))
         .map_err(|e| OwnBackupError::ImageFormat(format!("{}: {e}", path.display())))?;
     let mut xml_bytes = vec![0u8; xml_size];
     f.read_exact(&mut xml_bytes).map_err(|_| {
-        OwnBackupError::ImageFormat(format!(
-            "{}: описание образа обрывается — файл неполный",
-            path.display()
-        ))
+        OwnBackupError::ImageFormat(
+            tr!("wim_info.description_cut_short", path = path.display()).into_owned(),
+        )
     })?;
 
     let xml = decode_utf16le(&xml_bytes);

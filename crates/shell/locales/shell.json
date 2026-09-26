@@ -1,0 +1,35 @@
+{
+  "_version": 2,
+  "menu.command_prompt": {
+    "ru": "Командная строка",
+    "en": "Command Prompt"
+  },
+  "menu.interface": {
+    "ru": "Резервное копирование",
+    "en": "Backup"
+  },
+  "menu.reboot": {
+    "ru": "Перезагрузка",
+    "en": "Restart"
+  },
+  "menu.shutdown": {
+    "ru": "Выключение",
+    "en": "Shut down"
+  },
+  "menu.close": {
+    "ru": "Закрыть панель",
+    "en": "Close the panel"
+  },
+  "win.start": {
+    "ru": "Пуск",
+    "en": "Start"
+  },
+  "win.confirm_reboot": {
+    "ru": "Перезагрузить компьютер?",
+    "en": "Restart the computer?"
+  },
+  "win.confirm_shutdown": {
+    "ru": "Выключить компьютер?",
+    "en": "Shut down the computer?"
+  }
+}

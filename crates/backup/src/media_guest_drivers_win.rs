@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use tracing::info;
 // Only the parts that run processes report failures of their own.
 #[cfg(target_os = "windows")]
-use own_backup_common::OwnBackupError;
+use own_backup_common::{tr, OwnBackupError};
 #[cfg(target_os = "windows")]
 use tracing::warn;
 
@@ -345,7 +345,7 @@ pub fn add_vmware_tools_drivers(
     mut progress: impl FnMut(u64, &str),
     mut add_driver: impl FnMut(&Path) -> Result<()>,
 ) -> Result<(u32, Vec<String>)> {
-    progress(5, "подключение windows.iso");
+    progress(5, &tr!("media_guest_drivers_win.mounting_iso"));
     let letter = mount_iso(iso)?;
     // From here on the ISO must be released whatever happens, so the work is
     // done in a closure and the result inspected after dismounting.
@@ -361,7 +361,7 @@ pub fn add_vmware_tools_drivers(
         let _ = std::fs::remove_dir_all(&extract);
         std::fs::create_dir_all(&staged)?;
 
-        progress(15, "драйверы на образе");
+        progress(15, &tr!("media_guest_drivers_win.drivers_on_image"));
         let mut packages = stage_wanted_drivers(&root, &staged)?;
 
         // The image carries one driver as files (pvscsi) and keeps the rest —
@@ -390,7 +390,7 @@ pub fn add_vmware_tools_drivers(
         if packages.is_empty() {
             // An older image, where everything is inside an MSI instead.
             if let Some(msi) = find_tools_msi(&root) {
-                progress(45, "распаковка установщика");
+                progress(45, &tr!("media_guest_drivers_win.unpacking_installer"));
                 std::fs::create_dir_all(&extract)?;
                 run(
                     "msiexec",
@@ -405,11 +405,9 @@ pub fn add_vmware_tools_drivers(
             }
         }
         if packages.is_empty() {
-            return Err(OwnBackupError::ImageFormat(format!(
-                "на {}: не нашлось ни одного подходящего драйвера (экран, диск, сеть) — \
-                 ни файлами, ни внутри установщика",
-                root.display()
-            )));
+            return Err(OwnBackupError::ImageFormat(
+                tr!("media_guest_drivers_win.no_drivers", root = root.display()).into_owned(),
+            ));
         }
 
         // One DISM call per package: a package DISM will not take (wrong
@@ -425,14 +423,14 @@ pub fn add_vmware_tools_drivers(
         }
         if added == 0 {
             return Err(OwnBackupError::ImageFormat(
-                "ни один драйвер VMware не принят образом".into(),
+                tr!("media_guest_drivers_win.none_accepted").into_owned(),
             ));
         }
         info!(packages = added, "VMware guest drivers added to the medium");
         Ok(added)
     })();
 
-    progress(95, "отключение windows.iso");
+    progress(95, &tr!("media_guest_drivers_win.unmounting_iso"));
     dismount_iso(iso);
     let _ = std::fs::remove_dir_all(work.join("vmtools"));
     progress(100, "");
@@ -441,13 +439,14 @@ pub fn add_vmware_tools_drivers(
         .into_iter()
         .map(|(driver, missing)| {
             let names: Vec<String> = missing.iter().take(3).cloned().collect();
-            format!(
-                "Драйвер {driver} из VMware Tools распакован не полностью: не хватает {} \
-                 файлов ({}{}). На носитель он не попал.",
-                missing.len(),
-                names.join(", "),
-                if missing.len() > names.len() { ", …" } else { "" }
+            tr!(
+                "media_guest_drivers_win.incomplete",
+                driver = driver,
+                count = missing.len(),
+                files = names.join(", "),
+                more = if missing.len() > names.len() { ", …" } else { "" }
             )
+            .into_owned()
         })
         .collect();
     outcome.map(|n| (n, notes))
@@ -472,10 +471,9 @@ fn mine_setup_exe(
     // of it: their sectors are scattered through the file, so they have to be
     // put back together before they are anything but a valid-looking header.
     let compound = crate::ole_compound::Compound::find(&data).ok_or_else(|| {
-        OwnBackupError::ImageFormat(format!(
-            "{}: внутри нет установочного пакета — это не тот setup.exe",
-            setup.display()
-        ))
+        OwnBackupError::ImageFormat(
+            tr!("media_guest_drivers_win.not_an_installer", file = setup.display()).into_owned(),
+        )
     })?;
     let streams = compound.streams();
     let cabs: Vec<Vec<u8>> = streams
@@ -502,7 +500,7 @@ fn mine_setup_exe(
     let mut out: Vec<(String, PathBuf)> = Vec::new();
     let total = cabs.len().max(1);
     for (i, blob) in cabs.iter().enumerate() {
-        progress((20 + i * 40 / total) as u64, "разбор установщика");
+        progress((20 + i * 40 / total) as u64, &tr!("media_guest_drivers_win.reading_installer"));
 
         // Which Windows variants of an INF does this cabinet hold? The names
         // are read out of the reassembled stream, so a cabinet whose header
@@ -663,9 +661,9 @@ fn mount_iso(iso: &Path) -> Result<String> {
     let out = ps(&script)?;
     let letter = out.trim().trim_matches(['\r', '\n', ' ']).to_string();
     if letter.len() != 1 {
-        return Err(OwnBackupError::ImageFormat(format!(
-            "windows.iso не подключился (ответ: {out:?})"
-        )));
+        return Err(OwnBackupError::ImageFormat(
+            tr!("media_guest_drivers_win.iso_not_mounted", answer = format!("{out:?}")).into_owned(),
+        ));
     }
     Ok(letter)
 }
@@ -977,11 +975,15 @@ fn run(program: &str, args: &[&str]) -> Result<()> {
     // console's own code page.
     let text = crate::media_layout::console_text(&out.stdout);
     let tail: Vec<&str> = text.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).rev().take(2).collect();
-    Err(OwnBackupError::ImageFormat(format!(
-        "{program} завершился с ошибкой {}: {}",
-        out.status.code().unwrap_or(-1),
-        tail.into_iter().rev().collect::<Vec<_>>().join(" ")
-    )))
+    Err(OwnBackupError::ImageFormat(
+        tr!(
+            "media_guest_drivers_win.tool_failed",
+            program = program,
+            code = out.status.code().unwrap_or(-1),
+            output = tail.into_iter().rev().collect::<Vec<_>>().join(" ")
+        )
+        .into_owned(),
+    ))
 }
 
 #[cfg(test)]

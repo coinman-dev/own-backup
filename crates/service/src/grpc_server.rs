@@ -11,6 +11,7 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
+use own_backup_common::tr;
 use tonic::{Request, Response, Status};
 use tracing::info;
 
@@ -100,12 +101,14 @@ impl BackupServiceImpl {
                     found = ?now,
                     "the target disk is not the one the plan was made for"
                 );
-                return Ok(vec![format!(
-                    "Диск {} сейчас — не тот, для которого составлен план \
-                     (было: серийный «{}», {} Б; стало: серийный «{}», {} Б). \
-                     Соберите план заново.",
-                    plan.target_disk, was.serial, was.size_bytes, now.serial, now.size_bytes
-                )]);
+                return Ok(vec![tr!("grpc_server.target_disk_changed",
+                    disk = plan.target_disk,
+                    was_serial = was.serial,
+                    was_size = was.size_bytes,
+                    now_serial = now.serial,
+                    now_size = now.size_bytes
+                )
+                .into_owned()]);
             }
             // Nothing recorded, or nothing comparable: it cannot be checked,
             // and saying so is all that is honestly available. It is not a
@@ -476,7 +479,7 @@ fn manual_keys(
     }
     match (&secret.password, &secret.recovery_key) {
         (Some(_), Some(_)) => Err(Status::invalid_argument(
-            "укажите либо пароль, либо ключ восстановления, но не оба",
+            tr!("grpc_server.password_or_recovery_key").into_owned(),
         )),
         (Some(password), None) => ArchiveKeys::from_image_password(image, password)
             .map(Some)
@@ -488,10 +491,9 @@ fn manual_keys(
                 .map(Some)
                 .map_err(refused_secret)
         }
-        (None, None) => Err(Status::unauthenticated(format!(
-            "{}: копия зашифрована — нужен пароль или ключ восстановления",
-            image.display()
-        ))),
+        (None, None) => Err(Status::unauthenticated(
+            tr!("grpc_server.image_encrypted_needs_secret", image = image.display()).into_owned(),
+        )),
     }
 }
 
@@ -600,8 +602,9 @@ fn correct_disk_size(plan: &mut own_backup_common::restore_plan::RestorePlan) {
 /// Message returned by the direct engine RPCs when built off Windows (the VHDX
 /// engine is Windows-only for now — see plan phase 8).
 #[cfg(not(target_os = "windows"))]
-const ENGINE_MSG: &str = "Эта операция требует Windows (движок VHDX). \
-                          Поддержка Linux запланирована (план v2, фаза 8).";
+fn engine_msg() -> String {
+    tr!("grpc_server.engine_windows_only").into_owned()
+}
 
 /// Broadcast one engine-progress event (`restore` / `verify` / `restore-disk`)
 /// to `StreamEvents` subscribers. Called from the blocking engine thread.
@@ -626,19 +629,18 @@ fn emit_engine<T: serde::Serialize>(
 /// the encryption wizard validates the job before the authorization exists.
 fn validate_job(job: &own_backup_core::Job, encrypted: bool) -> Result<(), Status> {
     if job.name.trim().is_empty() {
-        return Err(Status::invalid_argument("Укажите имя задания."));
+        return Err(Status::invalid_argument(tr!("grpc_server.job_name_missing").into_owned()));
     }
     if job.source_list().is_empty() {
-        return Err(Status::invalid_argument("Выберите источник (том)."));
+        return Err(Status::invalid_argument(tr!("grpc_server.job_source_missing").into_owned()));
     }
     if job.dest_folder.trim().is_empty() {
-        return Err(Status::invalid_argument("Выберите папку назначения."));
+        return Err(Status::invalid_argument(tr!("grpc_server.job_dest_missing").into_owned()));
     }
     if let Some(letter) = own_backup_core::dest_collision_letter(job, &job.dest_folder) {
-        return Err(Status::invalid_argument(format!(
-            "Нельзя сохранять копию на тот же том, который копируется ({letter}:). \
-             Выберите для назначения другое место."
-        )));
+        return Err(Status::invalid_argument(
+            tr!("grpc_server.job_dest_on_source_letter", letter = letter).into_owned(),
+        ));
     }
     // And the same question asked properly: by the sectors each volume
     // occupies, so a source with no drive letter is seen too (audit AUD-10).
@@ -647,10 +649,9 @@ fn validate_job(job: &own_backup_core::Job, encrypted: bool) -> Result<(), Statu
     match own_backup_core::dest_placement(job, &job.dest_folder) {
         own_backup_core::DestPlacement::Clear => {}
         own_backup_core::DestPlacement::OnSource(source) => {
-            return Err(Status::invalid_argument(format!(
-                "Папка назначения лежит на томе, который копируется ({source}). \
-                 Копия росла бы вместе с источником — выберите другое место."
-            )))
+            return Err(Status::invalid_argument(
+                tr!("grpc_server.job_dest_on_source_volume", source = source).into_owned(),
+            ))
         }
         own_backup_core::DestPlacement::CannotTell(why) => {
             tracing::warn!(job = %job.name, dest = %job.dest_folder, reason = %why,
@@ -683,16 +684,11 @@ fn validate_job(job: &own_backup_core::Job, encrypted: bool) -> Result<(), Statu
                 // failed the runner's own check, at night, with nobody told
                 // why. Said now, while the person is looking at the screen.
                 let msg = if encrypted && other.container != own_backup_backup::seal::obk::OBK_EXTENSION {
-                    "Шифрование нельзя включить у задания, у которого уже есть \
-                     незашифрованные копии: все копии задания должны быть в одном \
-                     формате. Для зашифрованных копий создайте новое задание (или \
-                     удалите существующие копии этого)."
+                    tr!("grpc_server.job_encrypt_over_plain_copies")
                 } else {
-                    "Нельзя изменить формат образа: у задания уже есть резервные копии \
-                     в другом формате. Создайте новое задание (или удалите существующие \
-                     копии этого задания)."
+                    tr!("grpc_server.job_format_change")
                 };
-                return Err(Status::invalid_argument(msg));
+                return Err(Status::invalid_argument(msg.into_owned()));
             }
         }
     }
@@ -734,7 +730,7 @@ impl BackupService for BackupServiceImpl {
             .state
             .store
             .upsert(job)
-            .map_err(|e| Status::internal(format!("Задание не сохранено: {e}")))?;
+            .map_err(|e| Status::internal(tr!("grpc_server.job_not_saved", error = e).into_owned()))?;
         json_reply(&saved)
     }
 
@@ -753,7 +749,7 @@ impl BackupService for BackupServiceImpl {
         let queue = self.state.queue.snapshot();
         if queue.current.as_deref() == Some(id.as_str()) {
             return Err(Status::failed_precondition(
-                "Задание сейчас выполняется. Остановите его и повторите удаление.",
+                tr!("grpc_server.job_running_cannot_delete").into_owned(),
             ));
         }
         // Waiting in the queue is a different matter — nothing has started, so
@@ -768,7 +764,7 @@ impl BackupService for BackupServiceImpl {
                     // Deleting a job's images is destructive work on the same
                     // folders a backup writes and a restore reads, so it takes
                     // the machine's slot like the rest (audit AUD-02).
-                    let _slot = self.reserve("удаление копий", &job.name)?;
+                    let _slot = self.reserve(&tr!("grpc_server.busy_delete_copies"), &job.name)?;
                     own_backup_core::delete_job_files(&self.state.store, &job)
                 }
                 None => own_backup_core::JobFilesDeleted::default(),
@@ -783,7 +779,7 @@ impl BackupService for BackupServiceImpl {
         self.state
             .store
             .delete(&id)
-            .map_err(|e| Status::internal(format!("Задание не удалено: {e}")))?;
+            .map_err(|e| Status::internal(tr!("grpc_server.job_not_deleted", error = e).into_owned()))?;
         json_reply(&report)
     }
 
@@ -793,7 +789,7 @@ impl BackupService for BackupServiceImpl {
             .ok()
             .filter(|s| !s.trim().is_empty())
             .or_else(|| std::env::var("HOSTNAME").ok().filter(|s| !s.trim().is_empty()))
-            .unwrap_or_else(|| "Этот компьютер".into());
+            .unwrap_or_else(|| tr!("grpc_server.default_job_name").into_owned());
         json_reply(&own_backup_core::Job {
             name,
             ..Default::default()
@@ -819,29 +815,28 @@ impl BackupService for BackupServiceImpl {
             .state
             .store
             .get(&id)
-            .ok_or_else(|| Status::not_found("Задание не найдено."))?;
+            .ok_or_else(|| Status::not_found(tr!("grpc_server.job_not_found").into_owned()))?;
         // Guard against writing onto any source volume (mirrors save-time
         // check). This is the one that runs immediately before anything is
         // written, so here "cannot tell" is a refusal: not knowing where the
         // copy will land is not knowing that it lands somewhere safe (audit
         // AUD-10, point 2).
         if let Some(letter) = own_backup_core::dest_collision_letter(&job, &job.dest_folder) {
-            return Err(Status::failed_precondition(format!(
-                "Копия пишется на тот же том ({letter}:), что и источник — запуск отменён."
-            )));
+            return Err(Status::failed_precondition(
+                tr!("grpc_server.run_dest_on_source_letter", letter = letter).into_owned(),
+            ));
         }
         match own_backup_core::dest_placement(&job, &job.dest_folder) {
             own_backup_core::DestPlacement::Clear => {}
             own_backup_core::DestPlacement::OnSource(source) => {
-                return Err(Status::failed_precondition(format!(
-                    "Папка назначения лежит на копируемом томе ({source}) — запуск отменён."
-                )))
+                return Err(Status::failed_precondition(
+                    tr!("grpc_server.run_dest_on_source_volume", source = source).into_owned(),
+                ))
             }
             own_backup_core::DestPlacement::CannotTell(why) => {
-                return Err(Status::failed_precondition(format!(
-                    "Нельзя убедиться, что копия не пишется на копируемый том: {why}. \
-                     Запуск отменён."
-                )))
+                return Err(Status::failed_precondition(
+                    tr!("grpc_server.run_dest_cannot_tell", reason = why).into_owned(),
+                ))
             }
         }
         // Asked and added in one step: two requests arriving together used to
@@ -983,13 +978,14 @@ impl BackupService for BackupServiceImpl {
                 continue;
             };
             for part in disk.partitions.iter_mut().filter(|p| p.is_encrypted) {
-                let (methods, unlockable) = own_backup_backup::engine_win::describe_encryption(
+                let (methods, unlockable, recovery_key_only) = own_backup_backup::engine_win::describe_encryption(
                     number,
                     part.offset_bytes,
                     part.size_bytes,
                 );
                 part.unlock_methods = methods;
                 part.unlockable = unlockable;
+                part.recovery_key_only = recovery_key_only;
             }
         }
 
@@ -1074,7 +1070,7 @@ impl BackupService for BackupServiceImpl {
             // machine with a backup, another restore or a verify (audit
             // AUD-02); the guard travels into the blocking closure so it is
             // released even if the engine panics there.
-            let slot = self.reserve("восстановление тома", &p.target)?;
+            let slot = self.reserve(&tr!("grpc_server.busy_volume_restore"), &p.target)?;
             let cancel = slot.cancel();
             let events = self.state.events.clone();
             let image_path = std::path::PathBuf::from(&p.image_path);
@@ -1089,7 +1085,7 @@ impl BackupService for BackupServiceImpl {
 
             let summary = tokio::task::spawn_blocking(move || {
                 let _slot = slot;
-                let _awake = keep_awake("восстановление тома");
+                let _awake = keep_awake(&tr!("grpc_server.busy_volume_restore"));
                 let mut last_permille = u64::MAX;
                 let mut last_emit = std::time::Instant::now();
                 restore_volume(&request, |pr| {
@@ -1132,7 +1128,7 @@ impl BackupService for BackupServiceImpl {
         #[cfg(not(target_os = "windows"))]
         {
             let _ = req;
-            Err(Status::unimplemented(ENGINE_MSG))
+            Err(Status::unimplemented(engine_msg()))
         }
     }
 
@@ -1157,7 +1153,7 @@ impl BackupService for BackupServiceImpl {
             // mid-change is how a good image gets reported as damaged.
             let path = std::path::PathBuf::from(&p.image_path);
             let keys = manual_keys_off_thread(path.clone(), p.secret).await?;
-            let slot = self.reserve("проверка образа", &p.image_path)?;
+            let slot = self.reserve(&tr!("grpc_server.busy_validation"), &p.image_path)?;
             let cancel = slot.cancel();
             let events = self.state.events.clone();
 
@@ -1202,7 +1198,7 @@ impl BackupService for BackupServiceImpl {
         #[cfg(not(target_os = "windows"))]
         {
             let _ = req;
-            Err(Status::unimplemented(ENGINE_MSG))
+            Err(Status::unimplemented(engine_msg()))
         }
     }
 
@@ -1233,7 +1229,7 @@ impl BackupService for BackupServiceImpl {
             // What protects a live mount is the check consolidation already
             // makes: it refuses an image that has a mount beside it.
             let keys = manual_keys_off_thread(path.clone(), p.secret).await?;
-            let slot = self.reserve("подключение образа", &p.image_path)?;
+            let slot = self.reserve(&tr!("grpc_server.busy_mount"), &p.image_path)?;
             let mount_point = tokio::task::spawn_blocking(move || {
                 let _slot = slot;
                 mount_image_with_keys(&path, rw, keys.as_ref())
@@ -1291,7 +1287,7 @@ impl BackupService for BackupServiceImpl {
         #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         {
             let _ = req;
-            Err(Status::unimplemented(ENGINE_MSG))
+            Err(Status::unimplemented(engine_msg()))
         }
     }
 
@@ -1322,9 +1318,7 @@ impl BackupService for BackupServiceImpl {
             return json_reply(&out);
         }
         #[cfg(not(target_os = "windows"))]
-        Err(Status::unimplemented(
-            "Загрузочный носитель собирается только на Windows",
-        ))
+        Err(Status::unimplemented(tr!("grpc_server.media_windows_only").into_owned()))
     }
 
     async fn list_drivers(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
@@ -1340,7 +1334,11 @@ impl BackupService for BackupServiceImpl {
             )
             .await
             .map_err(|e| Status::internal(format!("driver enumeration panicked: {e}")))?
-            .map_err(|e| Status::failed_precondition(format!("Драйверы перечислить не удалось: {e}")))?;
+            .map_err(|e| {
+                Status::failed_precondition(
+                    tr!("grpc_server.drivers_list_failed", error = e).into_owned(),
+                )
+            })?;
             let out: Vec<DriverPackageDto> = list
                 .into_iter()
                 .map(|d| DriverPackageDto {
@@ -1359,7 +1357,7 @@ impl BackupService for BackupServiceImpl {
             return json_reply(&out);
         }
         #[cfg(not(target_os = "windows"))]
-        Err(Status::unimplemented("Драйверы перечисляются только на Windows"))
+        Err(Status::unimplemented(tr!("grpc_server.drivers_windows_only").into_owned()))
     }
 
     async fn list_media_tools(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
@@ -1387,9 +1385,7 @@ impl BackupService for BackupServiceImpl {
             return json_reply(&out);
         }
         #[cfg(not(target_os = "windows"))]
-        Err(Status::unimplemented(
-            "Сторонние средства ищутся только на Windows",
-        ))
+        Err(Status::unimplemented(tr!("grpc_server.tools_windows_only").into_owned()))
     }
 
     async fn build_media(&self, req: Request<JsonRequest>) -> Result<Response<JsonReply>, Status> {
@@ -1407,7 +1403,7 @@ impl BackupService for BackupServiceImpl {
             let opts: MediaBuildOptionsDto = serde_json::from_str(&req.into_inner().json)
                 .map_err(|e| Status::invalid_argument(e.to_string()))?;
             if opts.output_iso.trim().is_empty() {
-                return Err(Status::invalid_argument("не указан файл ISO"));
+                return Err(Status::invalid_argument(tr!("grpc_server.iso_path_missing").into_owned()));
             }
 
             // The base is either what the user picked or the best candidate —
@@ -1421,8 +1417,7 @@ impl BackupService for BackupServiceImpl {
                     .map(|b| b.path)
                     .ok_or_else(|| {
                         Status::failed_precondition(
-                            "На этой машине не нашлось образа среды восстановления. \
-                             Включите её (reagentc /enable) или укажите Winre.wim вручную.",
+                            tr!("grpc_server.winre_not_found").into_owned(),
                         )
                     })?
             } else {
@@ -1432,12 +1427,11 @@ impl BackupService for BackupServiceImpl {
             let program_dir = std::env::current_exe()
                 .ok()
                 .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-                .ok_or_else(|| Status::internal("не удалось определить папку программы"))?;
+                .ok_or_else(|| {
+                    Status::internal(tr!("grpc_server.program_dir_unknown").into_owned())
+                })?;
             let webview2 = find_webview2_runtime(&program_dir).ok_or_else(|| {
-                Status::failed_precondition(
-                    "Не найден рантайм WebView2. Установите Microsoft Edge WebView2 Runtime \
-                     или положите папку WebView2 рядом с программой.",
-                )
+                Status::failed_precondition(tr!("grpc_server.webview2_not_found").into_owned())
             })?;
 
             let out_iso = std::path::PathBuf::from(&opts.output_iso);
@@ -1494,19 +1488,19 @@ impl BackupService for BackupServiceImpl {
                 }) {
                     Ok(b) => b,
                     Err(e) => {
-                        emit("clean", 0, "после ошибки", false);
+                        emit("clean", 0, &tr!("grpc_server.media_after_error"), false);
                         clean_up(&work, &staging);
                         return Err(e);
                     }
                 };
 
-                emit("iso", 0, "сборка образа", false);
+                emit("iso", 0, &tr!("grpc_server.media_building_image"), false);
                 let iso_bytes = match write_media_iso(&built.media_dir, &out_iso, &mut |pct| {
-                    emit("iso", pct, "запись файлов", false);
+                    emit("iso", pct, &tr!("grpc_server.media_writing_files"), false);
                 }) {
                     Ok(n) => n,
                     Err(e) => {
-                        emit("clean", 0, "после ошибки", false);
+                        emit("clean", 0, &tr!("grpc_server.media_after_error"), false);
                         clean_up(&work, &staging);
                         return Err(e);
                     }
@@ -1550,9 +1544,7 @@ impl BackupService for BackupServiceImpl {
         #[cfg(not(target_os = "windows"))]
         {
             let _ = req;
-            Err(Status::unimplemented(
-                "Загрузочный носитель собирается только на Windows",
-            ))
+            Err(Status::unimplemented(tr!("grpc_server.media_windows_only").into_owned()))
         }
     }
 
@@ -1607,7 +1599,7 @@ impl BackupService for BackupServiceImpl {
         #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         {
             let _ = req;
-            Err(Status::unimplemented(ENGINE_MSG))
+            Err(Status::unimplemented(engine_msg()))
         }
     }
 
@@ -1636,8 +1628,10 @@ impl BackupService for BackupServiceImpl {
                     .map_err(|e| Status::failed_precondition(e.to_string()))?;
             }
 
-            let slot =
-                self.reserve("восстановление диска", &format!("диск {}", p.target_disk))?;
+            let slot = self.reserve(
+                &tr!("grpc_server.busy_disk_restore"),
+                &tr!("grpc_server.busy_which_disk", disk = p.target_disk),
+            )?;
             let cancel = slot.cancel();
             let events = self.state.events.clone();
             let manifest_path = std::path::PathBuf::from(&p.manifest_path);
@@ -1652,7 +1646,7 @@ impl BackupService for BackupServiceImpl {
 
             let summary = tokio::task::spawn_blocking(move || {
                 let _slot = slot;
-                let _awake = keep_awake("восстановление диска");
+                let _awake = keep_awake(&tr!("grpc_server.busy_disk_restore"));
                 let mut last = String::new();
                 restore_disk(&request, |pr| {
                     if cancel.is_cancelled() {
@@ -1695,7 +1689,7 @@ impl BackupService for BackupServiceImpl {
         #[cfg(not(target_os = "windows"))]
         {
             let _ = req;
-            Err(Status::unimplemented(ENGINE_MSG))
+            Err(Status::unimplemented(engine_msg()))
         }
     }
 
@@ -1992,10 +1986,9 @@ impl BackupService for BackupServiceImpl {
         // preview is still useful; it is not a permission slip.
         let refusals = self.validate_restore(&mut plan, archive.as_ref()).await?;
         if !refusals.is_empty() {
-            return Err(Status::failed_precondition(format!(
-                "План не прошёл проверку — ничего не записано:\n{}",
-                refusals.join("\n")
-            )));
+            return Err(Status::failed_precondition(
+                tr!("grpc_server.plan_refused", refusals = refusals.join("\n")).into_owned(),
+            ));
         }
 
         // One destructive operation at a time, and the check IS the taking.
@@ -2008,8 +2001,8 @@ impl BackupService for BackupServiceImpl {
         // The token comes with the slot, addressed by plan id, so a cancel
         // that arrives late cannot hit the run that started after it (D18).
         let slot = self.reserve_with_id(
-            "восстановление",
-            &format!("диск {}", plan.target_disk),
+            &tr!("grpc_server.busy_restore"),
+            &tr!("grpc_server.busy_which_disk", disk = plan.target_disk),
             plan.id,
         )?;
         let cancel = slot.cancel();
@@ -2021,7 +2014,7 @@ impl BackupService for BackupServiceImpl {
         let plan_id = plan.id;
         let task = tokio::task::spawn_blocking(move || {
             let _slot = slot;
-            let _awake = keep_awake("восстановление");
+            let _awake = keep_awake(&tr!("grpc_server.busy_restore"));
             let mut last_emit = std::time::Instant::now();
             let outcome = own_backup_core::restore_exec::execute_plan(
                 &plan,
@@ -2058,7 +2051,9 @@ impl BackupService for BackupServiceImpl {
                 if let Some(run) = slot.as_mut() {
                     run.status = RunStatus::Failed;
                     run.cancellable = false;
-                    run.follow_ups.push(format!("Восстановление не запустилось: {e}"));
+                    run.follow_ups.push(
+                        tr!("grpc_server.restore_did_not_start", error = e).into_owned(),
+                    );
                     let _ = events.send(Event {
                         kind: "restore-plan".into(),
                         json: serde_json::to_string(&*run).unwrap_or_default(),
@@ -2081,11 +2076,7 @@ impl BackupService for BackupServiceImpl {
             if let Some(run) = slot.as_mut().filter(|r| r.plan_id == plan_id && !r.is_finished()) {
                 run.status = RunStatus::Failed;
                 run.cancellable = false;
-                run.follow_ups.push(
-                    "Восстановление прервалось изнутри. Проверьте диск и журнал службы \
-                     прежде чем повторять."
-                        .into(),
-                );
+                run.follow_ups.push(tr!("grpc_server.restore_aborted_inside").into_owned());
                 let _ = watcher_events.send(Event {
                     kind: "restore-plan".into(),
                     json: serde_json::to_string(&*run).unwrap_or_default(),
@@ -2165,7 +2156,7 @@ impl BackupService for BackupServiceImpl {
         if !cancellable {
             return json_reply(&serde_json::json!({
                 "cancelled": false,
-                "reason": "Сейчас идёт операция, которую нельзя прервать без потери данных.",
+                "reason": tr!("grpc_server.cancel_not_now").into_owned(),
             }));
         }
 
@@ -2173,7 +2164,7 @@ impl BackupService for BackupServiceImpl {
 
         json_reply(&serde_json::json!({
             "cancelled": matched,
-            "reason": if matched { "" } else { "Этот запуск уже завершён." },
+            "reason": if matched { String::new() } else { tr!("grpc_server.run_already_finished").into_owned() },
         }))
     }
 
@@ -2201,7 +2192,7 @@ impl BackupService for BackupServiceImpl {
         }
         #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         {
-            Err(Status::unimplemented(ENGINE_MSG))
+            Err(Status::unimplemented(engine_msg()))
         }
     }
 
@@ -2235,7 +2226,7 @@ impl BackupService for BackupServiceImpl {
         }
         #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         {
-            Err(Status::unimplemented(ENGINE_MSG))
+            Err(Status::unimplemented(engine_msg()))
         }
     }
 
@@ -2256,7 +2247,7 @@ impl BackupService for BackupServiceImpl {
                 if !efivars_win::is_uefi() {
                     return Ok(serde_json::json!({
                         "uefi": false,
-                        "message": "эта машина загружается через обычный BIOS — записей UEFI у неё нет",
+                        "message": tr!("grpc_server.boot_bios_machine").into_owned(),
                     }));
                 }
                 let cfg = efivars_win::read_config()?;
@@ -2294,6 +2285,7 @@ impl BackupService for BackupServiceImpl {
                             "path": l.path,
                             "size": l.size,
                             "kind": l.kind,
+                            "generic": l.generic,
                             "fallback": l.fallback,
                             "second_stage":
                                 l.role == own_backup_backup::esp_scan::Role::SecondStage,
@@ -2311,7 +2303,7 @@ impl BackupService for BackupServiceImpl {
         {
             json_reply(&serde_json::json!({
                 "uefi": false,
-                "message": "записи загрузки читаются только на Windows",
+                "message": tr!("grpc_server.boot_read_windows_only").into_owned(),
             }))
         }
     }
@@ -2349,16 +2341,22 @@ impl BackupService for BackupServiceImpl {
             let entry = || -> Result<u16, Status> {
                 let s = p.entry.as_deref().unwrap_or_default();
                 u16::from_str_radix(s.trim().trim_start_matches("0x"), 16)
-                    .map_err(|_| Status::invalid_argument(format!("не номер записи: «{s}»")))
+                    .map_err(|_| {
+                        Status::invalid_argument(
+                            tr!("grpc_server.boot_not_entry_number", value = s).into_owned(),
+                        )
+                    })
             };
             let want = |o: Option<String>, what: &str| -> Result<String, Status> {
-                o.ok_or_else(|| Status::invalid_argument(format!("не сказано: {what}")))
+                o.ok_or_else(|| {
+                    Status::invalid_argument(tr!("grpc_server.boot_not_given", what = what).into_owned())
+                })
             };
 
             let action = match p.action.as_str() {
                 "rename" => Action::Rename {
                     entry: entry()?,
-                    name: want(p.name.clone(), "название")?,
+                    name: want(p.name.clone(), &tr!("grpc_server.boot_field_name"))?,
                 },
                 "set_active" => Action::SetActive {
                     entry: entry()?,
@@ -2371,22 +2369,30 @@ impl BackupService for BackupServiceImpl {
                 },
                 "delete" => Action::Delete { entry: entry()?, force: p.force.unwrap_or(false) },
                 "create" => Action::Create {
-                    name: want(p.name.clone(), "название")?,
-                    disk: p.disk.ok_or_else(|| Status::invalid_argument("не сказан диск"))?,
-                    partition: p
-                        .partition
-                        .ok_or_else(|| Status::invalid_argument("не сказан раздел"))?,
-                    file: want(p.file.clone(), "путь к загрузчику")?,
+                    name: want(p.name.clone(), &tr!("grpc_server.boot_field_name"))?,
+                    disk: p.disk.ok_or_else(|| {
+                        Status::invalid_argument(tr!("grpc_server.boot_disk_not_given").into_owned())
+                    })?,
+                    partition: p.partition.ok_or_else(|| {
+                        Status::invalid_argument(
+                            tr!("grpc_server.boot_partition_not_given").into_owned(),
+                        )
+                    })?,
+                    file: want(p.file.clone(), &tr!("grpc_server.boot_field_loader_path"))?,
                     position: p.position.map(|x| x.saturating_sub(1)),
                 },
                 "boot_next" => Action::BootNext {
                     entry: if p.clear.unwrap_or(false) { None } else { Some(entry()?) },
                 },
                 "timeout" => Action::Timeout {
-                    secs: p.secs.ok_or_else(|| Status::invalid_argument("не сказано сколько секунд"))?,
+                    secs: p.secs.ok_or_else(|| {
+                        Status::invalid_argument(tr!("grpc_server.boot_secs_not_given").into_owned())
+                    })?,
                 },
                 other => {
-                    return Err(Status::invalid_argument(format!("неизвестное действие: {other}")))
+                    return Err(Status::invalid_argument(
+                        tr!("grpc_server.boot_unknown_action", action = other).into_owned(),
+                    ))
                 }
             };
 
@@ -2406,7 +2412,7 @@ impl BackupService for BackupServiceImpl {
         }
         #[cfg(not(target_os = "windows"))]
         {
-            Err(Status::unimplemented("записи загрузки меняются только на Windows"))
+            Err(Status::unimplemented(tr!("grpc_server.boot_change_windows_only").into_owned()))
         }
     }
 }
@@ -2672,9 +2678,7 @@ mod tests {
 fn media_build_unavailable() -> Result<(), Status> {
     if own_backup_common::media_mode::is_media_mode() {
         return Err(Status::failed_precondition(
-            "Собрать загрузочный носитель можно только из установленной Windows. \
-             Здесь, на самом носителе, нет ни хранилища драйверов, ни места для \
-             распаковки образа: X: — это диск в оперативной памяти.",
+            tr!("grpc_server.media_build_on_media").into_owned(),
         ));
     }
     Ok(())

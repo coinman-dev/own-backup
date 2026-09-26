@@ -1,0 +1,267 @@
+{
+  "_version": 2,
+  "iscsi_win.win32_not_found": {
+    "ru": "Win32: не найдено",
+    "en": "Win32: not found"
+  },
+  "iscsi_win.win32_access_denied": {
+    "ru": "Win32: отказано в доступе",
+    "en": "Win32: access denied"
+  },
+  "iscsi_win.win32_invalid_parameter": {
+    "ru": "Win32: недопустимый параметр",
+    "en": "Win32: invalid parameter"
+  },
+  "iscsi_win.win32_service_disabled": {
+    "ru": "Win32: служба отключена",
+    "en": "Win32: service disabled"
+  },
+  "iscsi_win.win32_not_iscsi": {
+    "ru": "ошибка Win32, не iSCSI",
+    "en": "a Win32 error, not iSCSI"
+  },
+  "iscsi_win.not_in_iscsierr": {
+    "ru": "нет в таблице iscsierr.h",
+    "en": "not listed in iscsierr.h"
+  },
+  "iscsi_win.with_target": {
+    "ru": "%{message} (цель %{target})",
+    "en": "%{message} (target %{target})"
+  },
+  "iscsi_win.driver_missing": {
+    "ru": "Драйвер инициатора (msiscsi.sys) не найден в %{path}. Подключать образы нечем.",
+    "en": "The initiator driver (msiscsi.sys) was not found in %{path}. There is nothing to mount images with."
+  },
+  "iscsi_win.service_missing": {
+    "ru": "Службы %{service} нет в системе.",
+    "en": "The %{service} service is not installed."
+  },
+  "iscsi_win.service_missing_media": {
+    "ru": "Службы %{service} нет в системе. На носителе службе нужен журнал событий: его включает start-media.cmd.",
+    "en": "The %{service} service is not installed. On the bootable media it needs the event log, which start-media.cmd turns on."
+  },
+  "iscsi_win.service_disabled_by_policy": {
+    "ru": "Служба %{service} отключена политикой. Включить один раз от имени администратора: sc config %{service} start= demand",
+    "en": "The %{service} service is disabled by policy. To enable it, run once as administrator: sc config %{service} start= demand"
+  },
+  "iscsi_win.ready_running": {
+    "ru": "Всё на месте: служба %{service} работает.",
+    "en": "Ready: the %{service} service is running."
+  },
+  "iscsi_win.ready_on_demand": {
+    "ru": "Всё на месте: служба %{service} запустится по требованию.",
+    "en": "Ready: the %{service} service will start on demand."
+  },
+  "iscsi_win.image_already_attached": {
+    "ru": "iSCSI: этот образ уже подключён — его сессия жива. Сначала отключите его.",
+    "en": "iSCSI: this image is already mounted — its session is alive. Unmount it first."
+  },
+  "iscsi_win.stale_session_busy": {
+    "ru": "iSCSI: с прошлого раза осталась сессия к этому образу, и Windows не даёт её закрыть — диск этой сессии ещё кем-то занят. Поможет перезагрузка; без неё — от имени администратора `iscsicli SessionList`, затем `iscsicli LogoutTarget <Session Id>`.",
+    "en": "iSCSI: a session to this image is left over from an earlier run, and Windows will not close it — the session's disk is still in use. A restart will clear it; without one, run as administrator `iscsicli SessionList`, then `iscsicli LogoutTarget <Session Id>`."
+  },
+
+  "consolidate.encrypted_needs_job_key": {
+    "ru": "объединение копий в зашифрованной цепочке требует ключ задания — цепочка оставлена как есть: %{image}",
+    "en": "consolidating an encrypted chain needs the job's key — the chain was left as it is: %{image}"
+  },
+  "consolidate.remove_failed": {
+    "ru": "не удалось удалить %{path}: %{error}",
+    "en": "could not delete %{path}: %{error}"
+  },
+  "consolidate.marker_bad_name": {
+    "ru": "маркер консолидации называет %{name} — это не имя файла в папке копий",
+    "en": "the consolidation marker names %{name} — that is not a file name in the backup folder"
+  },
+  "consolidate.base_sidecar_unreadable": {
+    "ru": "не читается запечатанное описание базовой копии %{path} — шаг не начат",
+    "en": "the sealed description of the base backup %{path} cannot be read — the step was not started"
+  },
+  "consolidate.marker_unreadable": {
+    "ru": "маркер консолидации не читается — состояние цепочки неизвестно",
+    "en": "the consolidation marker cannot be read — the chain's state is unknown"
+  },
+
+  "seal_local.media_keeps_no_access": {
+    "ru": "загрузочный носитель не сохраняет локальный доступ к архивам",
+    "en": "bootable media does not keep local access to encrypted backups"
+  },
+  "seal_local.store_windows_only": {
+    "ru": "хранилище ключей архивов службы пока доступно только в Windows",
+    "en": "the service's backup key store is only available on Windows for now"
+  },
+  "seal_local.key_mismatch": {
+    "ru": "локальный ключ не соответствует переносимому ключу задания",
+    "en": "the local key does not match the job's portable key"
+  },
+  "seal_local.bad_wrap_size": {
+    "ru": "недопустимый размер локальной обёртки ключа",
+    "en": "invalid size of the local key wrapping"
+  },
+  "seal_local.reauthorize_job": {
+    "ru": "Нужно заново разрешить автоматическое выполнение задания: %{error}",
+    "en": "The job has to be authorized to run unattended again: %{error}"
+  },
+  "seal_local.bad_format": {
+    "ru": "повреждён или неизвестен формат локального ключа",
+    "en": "the local key is damaged or its format is unknown"
+  },
+  "seal_local.bad_secret_length": {
+    "ru": "недопустимая длина локального секретного ключа",
+    "en": "invalid length of the local secret key"
+  },
+  "seal_local.local_key_other_job": {
+    "ru": "локальный ключ принадлежит другому заданию",
+    "en": "the local key belongs to another job"
+  },
+  "seal_local.portable_key_other_job": {
+    "ru": "переносимый ключ принадлежит другому заданию",
+    "en": "the portable key belongs to another job"
+  },
+
+  "seal_local_windows.impersonating_thread": {
+    "ru": "хранилище ключей не работает в потоке с impersonation",
+    "en": "the key store does not work on an impersonating thread"
+  },
+  "seal_local_windows.service_account_only": {
+    "ru": "хранилище ключей архивов открывается только учётной записью службы",
+    "en": "the backup key store opens only under the service account"
+  },
+  "seal_local_windows.account_not_authorized": {
+    "ru": "учётная запись не имеет локального разрешения службы",
+    "en": "this account does not have the service's local authorization"
+  },
+  "seal_local_windows.dir_unreadable": {
+    "ru": "каталог локальных ключей не читается: %{error}",
+    "en": "the local key folder cannot be read: %{error}"
+  },
+  "seal_local_windows.dir_entry_error": {
+    "ru": "каталог локальных ключей: %{error}",
+    "en": "local key folder: %{error}"
+  },
+
+  "seal_recovery.too_long": {
+    "ru": "ключ восстановления слишком длинный",
+    "en": "the recovery key is too long"
+  },
+  "seal_recovery.unreadable": {
+    "ru": "ключ восстановления не читается: опечатка или не та строка",
+    "en": "the recovery key cannot be read: a typo or the wrong string"
+  },
+  "seal_recovery.not_a_recovery_key": {
+    "ru": "это не ключ восстановления копий",
+    "en": "this is not a backup recovery key"
+  },
+  "seal_recovery.wrong_length": {
+    "ru": "ключ восстановления должен нести 32 байта",
+    "en": "a recovery key must carry 32 bytes"
+  },
+  "seal_recovery.not_canonical": {
+    "ru": "неканоническая запись ключа восстановления",
+    "en": "the recovery key is not written in canonical form"
+  },
+
+  "seal_keypair.fingerprint_mismatch": {
+    "ru": "отпечаток открытого ключа не совпадает",
+    "en": "the public key fingerprint does not match"
+  },
+  "seal_keypair.unknown_format": {
+    "ru": "неизвестный формат/версия схемы файла ключа",
+    "en": "unknown key file format or scheme version"
+  },
+  "seal_keypair.wrong_password": {
+    "ru": "пароль не подходит или файл ключа повреждён",
+    "en": "wrong password, or the key file is damaged"
+  },
+  "seal_keypair.wrong_recovery_key": {
+    "ru": "ключ восстановления не подходит или файл ключа повреждён",
+    "en": "wrong recovery key, or the key file is damaged"
+  },
+
+  "chains.consolidation_unfinished": {
+    "ru": "цепочка %{chain} не дошла до конца предыдущей консолидации (%{marker}) — пока это не завершено, удалять её нельзя",
+    "en": "chain %{chain} has not finished an earlier consolidation (%{marker}) — it cannot be deleted until that is done"
+  },
+  "chains.kept_dependent": {
+    "ru": "оставлен: от него всё ещё зависит образ, который не удалось удалить",
+    "en": "kept: an image that could not be deleted still depends on it"
+  },
+
+  "source_identity.dest_volume_unknown": {
+    "ru": "не удалось определить, на каком томе лежит «%{folder}»",
+    "en": "could not determine which volume “%{folder}” is on"
+  },
+  "source_identity.sources_unknown": {
+    "ru": "не удалось определить, где лежат источники: %{sources}",
+    "en": "could not determine where the sources are: %{sources}"
+  },
+  "source_identity.dest_on_source": {
+    "ru": "Папка назначения «%{folder}» лежит на томе, который копируется (%{source}). Копия росла бы вместе с источником — выберите другое место.",
+    "en": "The destination folder “%{folder}” is on a volume being backed up (%{source}). The backup would grow along with the source — choose another location."
+  },
+  "source_identity.cannot_verify_dest": {
+    "ru": "Нельзя убедиться, что копия не пишется на копируемый том: %{reason}.",
+    "en": "Cannot confirm that the backup is not written to a volume being backed up: %{reason}."
+  },
+
+  "dest_folder.unavailable": {
+    "ru": "папка назначения %{path} недоступна: %{error}.",
+    "en": "destination folder %{path} is not available: %{error}."
+  },
+  "dest_folder.unavailable_drive_not_ready": {
+    "ru": "папка назначения %{path} недоступна: %{error}. Диск %{drive}: не готов — в нём нет носителя, или у диска назначения сменилась буква. Проверьте место назначения в параметрах задания.",
+    "en": "destination folder %{path} is not available: %{error}. Drive %{drive}: is not ready — there is no media in it, or the destination disk got a different letter. Check the destination in the job settings."
+  },
+  "dest_folder.unavailable_drive_missing": {
+    "ru": "папка назначения %{path} недоступна: %{error}. Диска %{drive}: нет — он отключён, или у него сменилась буква. Проверьте место назначения в параметрах задания.",
+    "en": "destination folder %{path} is not available: %{error}. There is no drive %{drive}: — it is disconnected, or its letter has changed. Check the destination in the job settings."
+  },
+
+  "letters_win.assign_failed": {
+    "ru": "не удалось назначить букву %{letter}: для %{volume}: %{error}",
+    "en": "could not assign letter %{letter}: to %{volume}: %{error}"
+  },
+  "letters_win.no_free_letter": {
+    "ru": "нет ни одной свободной буквы диска — форматировать раздел не через что",
+    "en": "no drive letter is free — there is no way to format the partition"
+  },
+  "letters_win.open_volume_failed": {
+    "ru": "не удалось открыть том %{device}: %{error}",
+    "en": "could not open volume %{device}: %{error}"
+  },
+  "letters_win.extend_failed": {
+    "ru": "не удалось расширить том %{device} до %{sectors} секторов: %{error}",
+    "en": "could not extend volume %{device} to %{sectors} sectors: %{error}"
+  },
+
+  "volume_window.does_not_fit": {
+    "ru": "раздел [%{start}, +%{length}) не помещается в устройство длиной %{device}",
+    "en": "partition [%{start}, +%{length}) does not fit in a device of length %{device}"
+  },
+  "volume_window.read_overflow": {
+    "ru": "длина чтения переполнилась",
+    "en": "read length overflowed"
+  },
+  "volume_window.read_past_end": {
+    "ru": "чтение %{bytes} байт со смещения %{offset} выходит за раздел длиной %{length}",
+    "en": "reading %{bytes} bytes at offset %{offset} runs past the end of a partition of length %{length}"
+  },
+
+  "power_win.no_shutdown_privilege": {
+    "ru": "нет права SeShutdownPrivilege",
+    "en": "SeShutdownPrivilege is not held"
+  },
+  "power_win.wake_reason": {
+    "ru": "Own Backup: пробуждение к копии по расписанию",
+    "en": "Own Backup: waking up for a scheduled backup"
+  },
+
+  "restore_map.block_does_not_fit": {
+    "ru": "блок образа не помещается в раздел: запись %{start}..%{end} при размере раздела %{size}",
+    "en": "an image block does not fit in the partition: write %{start}..%{end} with a partition size of %{size}"
+  },
+  "restore_map.partition_smaller_than_header": {
+    "ru": "раздел (%{window} Б) меньше заголовка своего контейнера (%{header} Б)",
+    "en": "the partition (%{window} B) is smaller than its container's header (%{header} B)"
+  }
+}

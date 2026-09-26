@@ -41,6 +41,12 @@ pub struct AppConfig {
     /// what makes this work on a machine with no job database at all.
     #[serde(default)]
     pub remembered_backups: Vec<String>,
+    /// `ru` or `en` — the language the window speaks, written by it (the
+    /// window resolves «Как в Windows» itself). Empty in a config from before
+    /// the setting: Russian. The service follows it while running
+    /// ([`crate::lang`]).
+    #[serde(default)]
+    pub ui_language: String,
     // Removed on 2026-09-26, and an old config that still carries them loads
     // fine — unknown keys are ignored:
     // - `consolidation_enabled`, a master switch for consolidation: it is
@@ -110,6 +116,7 @@ impl Default for AppConfig {
             log_mirror_dir: String::new(),
             default_compression_level: default_compression_level(),
             remembered_backups: Vec::new(),
+            ui_language: String::new(),
         }
     }
 }

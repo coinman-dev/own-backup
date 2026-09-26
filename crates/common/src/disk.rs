@@ -85,6 +85,13 @@ pub struct PartitionInfo {
     /// a wrong question. Empty for anything we could not read.
     #[serde(default)]
     pub unlock_methods: Vec<String>,
+    /// The only way in a person can type is the 48-digit recovery key — a
+    /// BitLocker volume with no password protector, which is the normal state
+    /// of a system volume. Decided from the protectors' codes, not from the
+    /// names in `unlock_methods`: those are shown in the window's language,
+    /// and the wizard used to find «пароль» in them to decide what to ask for.
+    #[serde(default)]
+    pub recovery_key_only: bool,
     /// Can Own Backup open this volume with something the user can type?
     ///
     /// Defaults to `true`, and the inventory leaves it there: only a positive

@@ -4,7 +4,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "i18n": "paraglide-js compile --project ./project.inlang --outdir ./src/lib/paraglide --strategy globalVariable baseLocale --emit-ts-declarations --output-structure locale-modules --no-emit-readme --no-emit-prettier-ignore --silent",
+    "i18n:verify": "node ./scripts/i18n-verify.mjs",
+    "check": "npm run i18n && npm run i18n:verify && svelte-check --tsconfig ./tsconfig.json",
     "build": "npm run check && vite build",
     "preview": "vite preview"
   },
@@ -13,6 +15,8 @@
     "@tauri-apps/plugin-dialog": "^2"
   },
   "devDependencies": {
+    "@inlang/paraglide-js": "^2.25.4",
+    "@inlang/plugin-message-format": "^4.4.4",
     "@sveltejs/vite-plugin-svelte": "^5",
     "svelte": "^5",
     "svelte-check": "^4.7.6",

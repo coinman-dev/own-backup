@@ -14,6 +14,7 @@
   import { api } from '../lib/api';
   import { engine, refreshVolumes } from '../lib/engineStore.svelte';
   import type { BootStatus, BootEntry, DiskInfo, Esp, EspLoader } from '../lib/types';
+  import { m } from '../lib/paraglide/messages';
 
   let status = $state<BootStatus | null>(null);
   let busy = $state(false);
@@ -22,7 +23,8 @@
   let showAll = $state(false);
   // Предупреждение живёт отдельно от msg: оно про то, куда легла копия, а не
   // про то, что сделано, и должно висеть, пока его не перекроет следующее.
-  let warn = $state<string | null>(null);
+  // A function, so it follows a change of language while it hangs there.
+  let warn = $state<(() => string) | null>(null);
 
   // Переименование правится на месте: номер записи, которую сейчас правят.
   let editing = $state<string | null>(null);
@@ -62,10 +64,8 @@
     try {
       const r = await api.bootAction(action);
       msg = r.message;
-      warn = r.safety_copy_durable
-        ? null
-        : `Копия прежнего состояния легла на временный диск (${r.safety_copy}) и не переживёт ` +
-          'перезагрузку. Сохраните её сами, если она может понадобиться.';
+      const copy = r.safety_copy;
+      warn = r.safety_copy_durable ? null : () => m.boot_copy_not_durable({ path: copy });
       await refresh();
     } catch (e) {
       err = String(e);
@@ -95,15 +95,13 @@
   }
 
   async function remove(e: BootEntry) {
-    const tail = e.file
-      ? `\n\nЗагрузчик ${e.file} останется на разделе — удаляется только запись о нём.`
-      : '';
-    if (!confirm(`Удалить запись «${e.name}»?${tail}`)) return;
+    const tail = e.file ? '\n\n' + m.boot_delete_confirm_file({ file: e.file }) : '';
+    if (!confirm(m.boot_delete_confirm({ name: e.name }) + tail)) return;
     await act({ action: 'delete', entry: e.number });
   }
 
   async function addEntry(esp: Esp, loader: EspLoader) {
-    const name = prompt('Название для меню загрузки:', suggestName(loader));
+    const name = prompt(m.boot_new_entry_prompt(), suggestName(loader));
     if (!name) return;
     await act({
       action: 'create',
@@ -123,13 +121,16 @@
       const tail = x.device_id.match(/(\d+)$/);
       return tail ? Number(tail[1]) === n : false;
     });
-    return d ? `диск ${n}: ${d.model}` : `диск ${n}`;
+    return d ? m.boot_disk_model({ n, model: d.model }) : m.boot_disk({ n });
   }
 
   // Что предложить в качестве названия. Служба уже опознала файл — её ответ
   // ближе к делу, чем путь.
   function suggestName(l: EspLoader): string {
-    return l.kind === 'загрузчик' ? (l.path.split('\\').filter(Boolean)[1] ?? 'Загрузка') : l.kind;
+    // `generic`: the service could not tell what the file is. A service from
+    // before the flag said so with the Russian word, always.
+    const generic = l.generic ?? l.kind === 'загрузчик';
+    return generic ? (l.path.split('\\').filter(Boolean)[1] ?? m.boot_default_entry_name()) : l.kind;
   }
 
   onMount(() => {
@@ -142,34 +143,30 @@
 
 <div class="page">
   <div class="inner">
-    <h1>Загрузка компьютера</h1>
+    <h1>{m.boot_title()}</h1>
 
     {#if err}<div class="banner err">{err}</div>{/if}
     {#if msg}<div class="banner ok">{msg}</div>{/if}
-    {#if warn}<div class="banner warn">{warn}</div>{/if}
+    {#if warn}<div class="banner warn">{warn()}</div>{/if}
 
     {#if status && !status.uefi}
       <div class="card">
-        <div class="muted">{status.message ?? 'Эта машина загружается не через UEFI.'}</div>
+        <div class="muted">{status.message ?? m.boot_not_uefi()}</div>
       </div>
     {:else if status}
       <div class="card">
         <div class="card-head">
           <div>
-            <div class="card-title">Приоритет загрузки</div>
-            <div class="card-desc">
-              Порядок, в котором плата пробует загрузчики. В её настройках это
-              «Приоритет загрузки», Boot Option #1, #2 и далее. Название
-              правится щелчком по нему.
-            </div>
+            <div class="card-title">{m.boot_priority()}</div>
+            <div class="card-desc">{m.boot_priority_desc()}</div>
           </div>
-          <button class="btn outline" disabled={busy} onclick={refresh}>Обновить</button>
+          <button class="btn outline" disabled={busy} onclick={refresh}>{m.common_refresh()}</button>
         </div>
 
         <div class="meta">
-          Загружена сейчас: <b>{status.current ?? '—'}</b>
-          {#if status.timeout_secs != null}· меню показывается {status.timeout_secs} с{/if}
-          {#if status.next}· один раз загрузится с {status.next}{/if}
+          {m.boot_current_label()} <b>{status.current ?? '—'}</b>
+          {#if status.timeout_secs != null}· {m.boot_menu_timeout({ secs: status.timeout_secs })}{/if}
+          {#if status.next}· {m.boot_next_once({ name: status.next })}{/if}
         </div>
 
         <table class="entries">
@@ -192,7 +189,7 @@
                   {:else}
                     <button
                       class="as-text"
-                      title={e.editable ? 'Переименовать' : 'Эту запись править нельзя'}
+                      title={e.editable ? m.boot_rename() : m.boot_not_editable()}
                       onclick={() => startRename(e)}
                       disabled={busy || !e.editable}
                     >
@@ -200,20 +197,20 @@
                     </button>
                   {/if}
                   <div class="target">
-                    {#if e.file}{e.file}{:else}устройство, а не файл{/if}
-                    {#if !e.editable}· разобрана не полностью, править нельзя{/if}
+                    {#if e.file}{e.file}{:else}{m.boot_device_not_file()}{/if}
+                    {#if !e.editable}· {m.boot_partly_parsed()}{/if}
                   </div>
                 </td>
                 <td class="acts">
-                  <button class="mini" title="Выше" disabled={busy || e.in_menu === 1} onclick={() => move(e, -1)}>
+                  <button class="mini" title={m.boot_move_up()} disabled={busy || e.in_menu === 1} onclick={() => move(e, -1)}>
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M6 11l6-6 6 6" /></svg>
                   </button>
-                  <button class="mini" title="Ниже" disabled={busy || e.in_menu === inMenu.length} onclick={() => move(e, 1)}>
+                  <button class="mini" title={m.boot_move_down()} disabled={busy || e.in_menu === inMenu.length} onclick={() => move(e, 1)}>
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M6 13l6 6 6-6" /></svg>
                   </button>
                   <button
                     class="mini"
-                    title={e.active ? 'Убрать из меню' : 'Показывать в меню'}
+                    title={e.active ? m.boot_hide_from_menu() : m.boot_show_in_menu()}
                     disabled={busy}
                     onclick={() => act({ action: 'set_active', entry: e.number, on: !e.active })}
                   >
@@ -225,7 +222,7 @@
                       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.9 5.6A9.6 9.6 0 0 1 12 5.4c6.6 0 10.2 6.6 10.2 6.6a17 17 0 0 1-3.4 4.2M6.2 7.8A17 17 0 0 0 1.8 12S5.4 18.6 12 18.6c1.9 0 3.5-.5 4.9-1.3" /><path d="M10 10a2.8 2.8 0 0 0 4 4" /><path d="M3 3l18 18" /></svg>
                     {/if}
                   </button>
-                  <button class="mini danger" title="Удалить запись" disabled={busy} onclick={() => remove(e)}>
+                  <button class="mini danger" title={m.boot_delete_entry()} disabled={busy} onclick={() => remove(e)}>
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18" /></svg>
                   </button>
                 </td>
@@ -235,84 +232,71 @@
         </table>
 
         {#if notInMenu.length > 0}
-          <div class="meta dim">
-            Записей вне меню: {notInMenu.length}. Они существуют, но плата их не предлагает.
-          </div>
+          <div class="meta dim">{m.boot_not_in_menu({ n: notInMenu.length })}</div>
         {/if}
 
-        <div class="meta dim">
-          Разовое меню выбора по клавише при включении может показывать те же
-          записи в другом порядке — плата строит его по-своему, и на приоритет
-          он не влияет.
-        </div>
+        <div class="meta dim">{m.boot_one_time_menu_note()}</div>
 
-        <div class="meta dim">
-          Записи хранятся в памяти материнской платы, а не на диске, поэтому
-          копия разделов их не сохраняет. Перед каждым изменением снимается
-          копия в C:\ProgramData\OwnBackup\boot.
-        </div>
+        <div class="meta dim">{m.boot_stored_in_firmware_note()}</div>
       </div>
 
       {#if orphans.length > 0}
         <div class="card warn">
-          <div class="card-title">Загрузчики без записи: {orphans.length}</div>
-          <div class="card-desc">
-            Файлы на месте, но ни одна запись на них не указывает — в меню платы
-            их нет.
-          </div>
+          <div class="card-title">{m.boot_orphans_title({ n: orphans.length })}</div>
+          <div class="card-desc">{m.boot_orphans_desc()}</div>
           {#each orphans as o (o.esp.disk + o.loader.path)}
             <div class="orphan">
               <div>
                 <b>{o.loader.kind}</b>
                 <div class="target">
-                  {diskLabel(o.esp.disk)}, раздел {o.esp.partition} · {o.loader.path}
+                  {m.boot_disk_partition({ disk: diskLabel(o.esp.disk), part: o.esp.partition })} · {o.loader.path}
                 </div>
               </div>
               <button class="btn accent" disabled={busy} onclick={() => addEntry(o.esp, o.loader)}>
-                Добавить в меню
+                {m.boot_add_to_menu()}
               </button>
             </div>
           {/each}
         </div>
       {:else if status.esps}
         <div class="card">
-          <div class="muted">На всё, что лежит на разделах EFI, кто-то ссылается.</div>
+          <div class="muted">{m.boot_no_orphans()}</div>
         </div>
       {/if}
 
       <div class="card">
         <div class="card-head">
           <div>
-            <div class="card-title">Разделы EFI</div>
-            <div class="card-desc">Где лежат сами загрузчики.</div>
+            <div class="card-title">{m.boot_esps_title()}</div>
+            <div class="card-desc">{m.boot_esps_desc()}</div>
           </div>
           <label class="chk">
-            <input type="checkbox" bind:checked={showAll} /> показать все файлы
+            <input type="checkbox" bind:checked={showAll} /> {m.boot_show_all_files()}
           </label>
         </div>
 
         {#each status.esps ?? [] as esp (esp.disk + '-' + esp.partition)}
           <div class="esp">
             <div class="esp-title">
-              {diskLabel(esp.disk)}, раздел {esp.partition} ·
-              {Math.round(esp.size_bytes / 1048576)} МиБ
+              {m.boot_disk_partition({ disk: diskLabel(esp.disk), part: esp.partition })} ·
+              {m.boot_size_mib({ n: Math.round(esp.size_bytes / 1048576) })}
             </div>
             {#if esp.unreadable}
               <div class="target">{esp.unreadable}</div>
             {:else if esp.loaders.length === 0}
-              <div class="target">загрузчиков нет</div>
+              <div class="target">{m.boot_no_loaders()}</div>
             {:else if !showAll}
-              <div class="target">файлов: {esp.loaders.length}</div>
+              <div class="target">{m.boot_files_count({ n: esp.loaders.length })}</div>
             {:else}
               {#each esp.loaders as l (l.path)}
                 <div class="file">
                   <span class="path">{l.path}</span>
                   <span class="kind">{l.kind}</span>
                   <span class="state">
-                    {#if l.named_by}запись {l.named_by}
-                    {:else if l.fallback}запасной путь съёмного носителя
-                    {:else if l.second_stage}запускает другой загрузчик
-                    {:else}записи нет{/if}
+                    {#if l.named_by}{m.boot_state_entry({ entry: l.named_by })}
+                    {:else if l.fallback}{m.boot_state_fallback()}
+                    {:else if l.second_stage}{m.boot_state_second_stage()}
+                    {:else}{m.boot_state_no_entry()}{/if}
                   </span>
                 </div>
               {/each}
@@ -321,7 +305,7 @@
         {/each}
       </div>
     {:else}
-      <div class="card"><div class="muted">Читаем…</div></div>
+      <div class="card"><div class="muted">{m.boot_reading()}</div></div>
     {/if}
   </div>
 </div>

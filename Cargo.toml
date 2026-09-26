@@ -78,6 +78,10 @@ gpt = "3"
 # CLI
 clap = { version = "4", features = ["derive"] }
 
+# Messages in Russian and English: each crate's texts in its locales/*.json,
+# compiled in. Called through own_backup_common::tr! (see common/src/lang.rs).
+rust-i18n = "4"
+
 # Cron
 cron = "0.13"
 

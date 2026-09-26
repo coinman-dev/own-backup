@@ -42,7 +42,7 @@
 //! в блок индекса, чей диапазон `firstdb..firstdb+nvalid` накрывает нужный блок
 //! данных. Без этого ФС искала бы место там, где его нет.
 
-use own_backup_common::{OwnBackupError, Result};
+use own_backup_common::{tr, OwnBackupError, Result};
 
 use crate::fat_map::RawVolume;
 use crate::xfs_exclusions::{data_fork, fork_extents_at, read_inode, Sb};
@@ -131,18 +131,22 @@ pub(crate) enum DirRefusal {
 impl std::fmt::Display for DirRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DirRefusal::ShortformToIno4 { dir_ino } => write!(
-                f,
-                "каталог {dir_ino}: удаление потребовало бы перекодировки номеров инодов в 4 байта"
-            ),
-            DirRefusal::NameNotFound { dir_ino, name } => {
-                write!(f, "каталог {dir_ino}: имени {name:?} в нём нет")
+            DirRefusal::ShortformToIno4 { dir_ino } => {
+                f.write_str(&tr!("xfs_dirent.refusal_shortform_to_ino4", dir_ino = dir_ino))
             }
-            DirRefusal::WouldEmptyBlock { dir_ino, name } => write!(
-                f,
-                "каталог {dir_ino}: имя {name:?} оставлено, иначе блок данных стал бы пустым"
-            ),
-            DirRefusal::Other { dir_ino, why } => write!(f, "каталог {dir_ino}: {why}"),
+            DirRefusal::NameNotFound { dir_ino, name } => f.write_str(&tr!(
+                "xfs_dirent.refusal_name_not_found",
+                dir_ino = dir_ino,
+                name = format!("{name:?}")
+            )),
+            DirRefusal::WouldEmptyBlock { dir_ino, name } => f.write_str(&tr!(
+                "xfs_dirent.refusal_would_empty_block",
+                dir_ino = dir_ino,
+                name = format!("{name:?}")
+            )),
+            DirRefusal::Other { dir_ino, why } => {
+                f.write_str(&tr!("xfs_dirent.refusal_other", dir_ino = dir_ino, why = why))
+            }
         }
     }
 }
@@ -218,7 +222,7 @@ fn parse_data(blk: &[u8], sb: &Sb, limit: usize) -> Result<(Vec<DataEnt>, Vec<Ho
         if be16(blk, p) == 0xFFFF {
             let len = be16(blk, p + 2) as usize;
             if len < MIN_UNUSED || p + len > limit {
-                return Err(bad(format!("дыра длины {len} по смещению {p} не помещается")));
+                return Err(bad(tr!("xfs_dirent.hole_does_not_fit", len = len, offset = p)));
             }
             holes.push(Hole { at: p, len });
             p += len;
@@ -231,7 +235,7 @@ fn parse_data(blk: &[u8], sb: &Sb, limit: usize) -> Result<(Vec<DataEnt>, Vec<Ho
         let raw = 8 + 1 + namelen + usize::from(sb.ftype) + 2;
         let len = (raw + 7) & !7;
         if p + len > limit {
-            return Err(bad(format!("запись по смещению {p} выходит за блок")));
+            return Err(bad(tr!("xfs_dirent.entry_past_block", offset = p)));
         }
         let name = String::from_utf8_lossy(&blk[p + 9..p + 9 + namelen]).to_string();
         ents.push(DataEnt { at: p, len, name });
@@ -256,7 +260,7 @@ fn free_entry(blk: &mut [u8], ent: &DataEnt, holes: &[Hole], limit: usize) -> Re
     }
     let len = end - start;
     if end > limit || len > u16::MAX as usize {
-        return Err(bad("слитая дыра не помещается в блок"));
+        return Err(bad(tr!("xfs_dirent.merged_hole_does_not_fit")));
     }
     put_be16(blk, start, 0xFFFF);
     put_be16(blk, start + 2, len as u16);
@@ -313,7 +317,7 @@ fn kill_hash_entry(
             return Ok(());
         }
     }
-    Err(bad(format!("в хеш-массиве нет записи с адресом {addr}")))
+    Err(bad(tr!("xfs_dirent.no_hash_entry", addr = addr)))
 }
 
 // --- планирование -----------------------------------------------------------
@@ -337,7 +341,7 @@ pub(crate) fn plan_dirent_removal(
     match inode[5] {
         FMT_LOCAL => shortform_removal(sb, dir_ino, inode, names, &mut edit),
         FMT_EXTENTS | FMT_BTREE => block_removal(vol, sb, dir_ino, &inode, names, &mut edit),
-        other => Err(bad(format!("каталог {dir_ino}: формат {other} не поддержан"))),
+        other => Err(bad(tr!("xfs_dirent.unsupported_format", dir_ino = dir_ino, format = other))),
     }?;
     Ok(edit)
 }
@@ -353,7 +357,10 @@ fn shortform_removal(
     let (fs, fe) = data_fork(&inode, sb);
     let sf = &inode[fs..fe];
     if sf.len() < 2 {
-        edit.refusals.push(DirRefusal::Other { dir_ino, why: "пустой фок данных".into() });
+        edit.refusals.push(DirRefusal::Other {
+            dir_ino,
+            why: tr!("xfs_dirent.empty_data_fork").into_owned(),
+        });
         return Ok(());
     }
     let count = sf[0] as usize;
@@ -366,12 +373,12 @@ fn shortform_removal(
     let mut p = hdr_len;
     for _ in 0..count {
         if p + 3 > sf.len() {
-            return Err(bad(format!("каталог {dir_ino}: shortform обрывается")));
+            return Err(bad(tr!("xfs_dirent.shortform_truncated", dir_ino = dir_ino)));
         }
         let namelen = sf[p] as usize;
         let name_off = p + 3;
         if name_off + namelen > sf.len() {
-            return Err(bad(format!("каталог {dir_ino}: имя выходит за фок")));
+            return Err(bad(tr!("xfs_dirent.name_past_fork", dir_ino = dir_ino)));
         }
         let name = String::from_utf8_lossy(&sf[name_off..name_off + namelen]).to_string();
         let mut q = name_off + namelen;
@@ -379,7 +386,7 @@ fn shortform_removal(
             q += 1;
         }
         if q + ino_sz > sf.len() {
-            return Err(bad(format!("каталог {dir_ino}: номер инода выходит за фок")));
+            return Err(bad(tr!("xfs_dirent.inode_number_past_fork", dir_ino = dir_ino)));
         }
         let ino = if ino_sz == 8 { be64(sf, q) } else { be32(sf, q) };
         ents.push((p, q + ino_sz - p, name, ino));
@@ -430,9 +437,10 @@ fn shortform_removal(
     let new_used = hdr_len + packed.len();
     let new_count = count - victims.len();
 
-    inode[fs] = u8::try_from(new_count).map_err(|_| bad("count не влезает в байт"))?;
+    inode[fs] =
+        u8::try_from(new_count).map_err(|_| bad(tr!("xfs_dirent.count_overflows_byte")))?;
     inode[fs + 1] = u8::try_from(i8count.saturating_sub(removed_big))
-        .map_err(|_| bad("i8count не влезает в байт"))?;
+        .map_err(|_| bad(tr!("xfs_dirent.i8count_overflows_byte")))?;
     inode[fs + hdr_len..fs + new_used].copy_from_slice(&packed);
     // Хвост за новым концом ядро не чистит, но и мы не обязаны его сохранять:
     // обнулить — честнее, там лежат байты удалённых имён.
@@ -494,7 +502,7 @@ fn block_removal(
     if !single_block && leaf_blocks.is_empty() {
         edit.refusals.push(DirRefusal::Other {
             dir_ino,
-            why: format!("{} блоков данных и ни одного листа", loaded.len()),
+            why: tr!("xfs_dirent.data_blocks_no_leaf", count = loaded.len()).into_owned(),
         });
         return Ok(());
     }
@@ -509,10 +517,14 @@ fn block_removal(
             continue; // индексный узел: ключи не меняются
         }
         if magic != DIR3_LEAF1_MAGIC && magic != DIR3_LEAFN_MAGIC {
-            return Err(bad(format!("каталог {dir_ino}: лист с меткой {magic:#06x}")));
+            return Err(bad(tr!(
+                "xfs_dirent.leaf_bad_magic",
+                dir_ino = dir_ino,
+                magic = format!("{magic:#06x}")
+            )));
         }
         if !crc_matches(&blk, LEAF_CRC_OFF) {
-            return Err(bad(format!("каталог {dir_ino}: CRC листа не сходится — не трогаю")));
+            return Err(bad(tr!("xfs_dirent.leaf_crc_mismatch", dir_ino = dir_ino)));
         }
         leaves.push((*fsb, blk));
     }
@@ -525,10 +537,10 @@ fn block_removal(
         let mut blk = vec![0u8; bs];
         vol.read_at(sb.fsblock_to_phys(*fsb), &mut blk)?;
         if be32(&blk, 0) as u32 != DIR3_FREE_MAGIC {
-            return Err(bad(format!("каталог {dir_ino}: блок индекса с чужой меткой")));
+            return Err(bad(tr!("xfs_dirent.free_index_bad_magic", dir_ino = dir_ino)));
         }
         if !crc_matches(&blk, DATA_CRC_OFF) {
-            return Err(bad(format!("каталог {dir_ino}: CRC индекса не сходится — не трогаю")));
+            return Err(bad(tr!("xfs_dirent.free_index_crc_mismatch", dir_ino = dir_ino)));
         }
         frees.push((*fsb, blk));
     }
@@ -546,10 +558,14 @@ fn block_removal(
         let logical = *logical;
         let magic = be32(blk, 0) as u32;
         if magic != DIR3_DATA_MAGIC && magic != DIR3_BLOCK_MAGIC {
-            return Err(bad(format!("каталог {dir_ino}: блок данных с меткой {magic:#010x}")));
+            return Err(bad(tr!(
+                "xfs_dirent.data_block_bad_magic",
+                dir_ino = dir_ino,
+                magic = format!("{magic:#010x}")
+            )));
         }
         if !crc_matches(blk, DATA_CRC_OFF) {
-            return Err(bad(format!("каталог {dir_ino}: CRC блока данных не сходится — не трогаю")));
+            return Err(bad(tr!("xfs_dirent.data_block_crc_mismatch", dir_ino = dir_ino)));
         }
         // У block-формы записи кончаются перед хеш-массивом.
         let limit = if magic == DIR3_BLOCK_MAGIC {
@@ -606,8 +622,10 @@ fn block_removal(
                     }
                 }
                 if !done {
-                    return Err(bad(format!(
-                        "каталог {dir_ino}: в листьях нет записи с адресом {addr}"
+                    return Err(bad(tr!(
+                        "xfs_dirent.no_leaf_entry",
+                        dir_ino = dir_ino,
+                        addr = addr
                     )));
                 }
             }
@@ -630,8 +648,10 @@ fn block_removal(
                 }
             }
             if !placed {
-                return Err(bad(format!(
-                    "каталог {dir_ino}: блок данных {logical} не покрыт индексом свободного места"
+                return Err(bad(tr!(
+                    "xfs_dirent.data_block_not_indexed",
+                    dir_ino = dir_ino,
+                    logical = logical
                 )));
             }
         } else if let Some((_, lblk)) = leaves.first_mut() {

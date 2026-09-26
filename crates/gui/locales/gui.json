@@ -1,0 +1,59 @@
+{
+  "_version": 2,
+  "service_link.no_token_yet": {
+    "ru": "токен службы ещё не записан",
+    "en": "the service token has not been written yet"
+  },
+  "service_link.unavailable": {
+    "ru": "Служба резервного копирования недоступна.",
+    "en": "The backup service is unavailable."
+  },
+  "service_link.media_engine_silent": {
+    "ru": "Движок «%{name}» не отвечает. Запустите его из консоли носителя:\n  own-backup-service.exe --run --media",
+    "en": "The engine “%{name}” is not responding. Start it from the media console:\n  own-backup-service.exe --run --media"
+  },
+  "service_link.win_start_hint": {
+    "ru": "Запустите её (нужны права администратора) или перезагрузите компьютер.",
+    "en": "Start it (administrator rights are needed) or restart the computer."
+  },
+  "service_link.win_install_hint": {
+    "ru": "запустите own-backup-service.exe /install (появится запрос прав администратора).",
+    "en": "run own-backup-service.exe /install (you will be asked for administrator rights)."
+  },
+  "service_link.linux_start_hint": {
+    "ru": "Запустите её:  sudo systemctl start own-backup",
+    "en": "Start it:  sudo systemctl start own-backup"
+  },
+  "service_link.linux_install_hint": {
+    "ru": "установите её:  sudo ./own-backup-service --install\n(после установки войдите в систему заново — вы будете добавлены в группу «%{group}»).",
+    "en": "install it:  sudo ./own-backup-service --install\n(sign in again after installing — you will be added to the group “%{group}”)."
+  },
+  "service_link.installed_not_running": {
+    "ru": "Служба «%{name}» установлена, но не запущена. %{hint}",
+    "en": "The service “%{name}” is installed but not running. %{hint}"
+  },
+  "service_link.not_installed": {
+    "ru": "Служба «%{name}» не установлена. Для работы программы %{hint}",
+    "en": "The service “%{name}” is not installed. For the program to work, %{hint}"
+  },
+  "commands_engine.image_encrypted_needs_secret": {
+    "ru": "%{image}: копия зашифрована — нужен пароль или ключ восстановления",
+    "en": "%{image}: the backup is encrypted — the backup password or the recovery key is needed"
+  },
+  "commands_engine.no_metadata": {
+    "ru": "В образе нет встроенных метаданных и рядом не найден файл метаданных: %{path}",
+    "en": "The image has no embedded metadata, and no metadata file was found next to it: %{path}"
+  },
+  "commands_engine.no_container_header": {
+    "ru": "в копии не сохранён заголовок контейнера для раздела %{partition}",
+    "en": "the backup did not keep the container header for partition %{partition}"
+  },
+  "commands_engine.password_check_not_started": {
+    "ru": "проверка пароля не запустилась: %{error}",
+    "en": "the password check did not start: %{error}"
+  },
+  "main.already_running": {
+    "ru": "Программа уже запущена.\nОткройте существующее окно Own Backup.",
+    "en": "The program is already running.\nSwitch to the open Own Backup window."
+  }
+}

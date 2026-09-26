@@ -15,6 +15,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use own_backup_common::tr;
 use tracing::{info, warn};
 use windows::core::{HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, BOOLEAN, HANDLE, WAIT_OBJECT_0};
@@ -117,7 +118,7 @@ impl Drop for BackgroundIo {
 /// only hibernates, Windows decides.
 pub fn sleep_now() -> std::result::Result<(), String> {
     if !crate::privileges_win::enable_shutdown_privilege() {
-        return Err("нет права SeShutdownPrivilege".into());
+        return Err(tr!("power_win.no_shutdown_privilege").into_owned());
     }
     info!("after backup: putting the machine to sleep");
     // SAFETY: plain call; returns FALSE on failure.
@@ -133,7 +134,7 @@ pub fn sleep_now() -> std::result::Result<(), String> {
 /// forced closed: on a machine someone is using, their work wins.
 pub fn shutdown_in(grace_secs: u32, message: &str) -> std::result::Result<(), String> {
     if !crate::privileges_win::enable_shutdown_privilege() {
-        return Err("нет права SeShutdownPrivilege".into());
+        return Err(tr!("power_win.no_shutdown_privilege").into_owned());
     }
     info!(grace_secs, "after backup: shutting the machine down");
     let msg = HSTRING::from(message);
@@ -189,7 +190,7 @@ impl WakeTimer {
                 return;
             }
             info!(hold_s = hold.as_secs(), "woken for a scheduled copy — holding the machine awake");
-            let _awake = KeepAwake::new("Own Backup: пробуждение к копии по расписанию");
+            let _awake = KeepAwake::new(&tr!("power_win.wake_reason"));
             std::thread::sleep(hold);
         });
         Some(timer)
