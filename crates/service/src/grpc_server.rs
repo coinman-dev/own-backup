@@ -1015,8 +1015,16 @@ impl BackupService for BackupServiceImpl {
         check_auth(&req, &self.service_token)?;
         let internal_mounts = self.state.active_mounts.lock().unwrap().clone();
 
+        // Off the runtime: on Windows this asks `diskpart` for disks attached
+        // outside the program, a child process that takes seconds — and the
+        // «Инструменты» screen asks every five. Run inline, it held a worker
+        // thread of the gRPC server for the whole time.
         #[cfg(target_os = "windows")]
-        let active_mounts = own_backup_backup::engine_win::get_all_active_mounts(&internal_mounts);
+        let active_mounts = tokio::task::spawn_blocking(move || {
+            own_backup_backup::engine_win::get_all_active_mounts(&internal_mounts)
+        })
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
 
         #[cfg(target_os = "linux")]
         let active_mounts = own_backup_backup::engine_linux::get_all_active_mounts(&internal_mounts);

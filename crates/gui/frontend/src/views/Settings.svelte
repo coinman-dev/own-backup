@@ -24,29 +24,33 @@
   const MAX_LEVEL = 19;
   const DEFAULT_LEVEL = 3;
 
+  /** The service's answer is still on its way. Kept apart from `isLoading`:
+   *  that one is the config, which the window holds itself and answers at once;
+   *  this one crosses to the service, which looks for disks attached outside
+   *  the program (`diskpart`) and takes seconds. The page used to wait for
+   *  both, so every visit began with «Загрузка параметров…» (2026-09-26). */
+  let statusLoading = $state(true);
+
   async function loadSettings() {
     isLoading = true;
     error = null;
+    // Not awaited: the settings are drawn without it, the card fills in.
+    statusLoading = true;
+    api.getServiceStatus().then(
+      (st) => { serviceStatus = st; },
+      () => { serviceStatus = null; },
+    ).finally(() => { statusLoading = false; });
     try {
-      const [configResult, statusResult] = await Promise.allSettled([
-        api.getConfig(),
-        api.getServiceStatus(),
-      ]);
-
-      if (configResult.status === 'fulfilled') {
-        const cfg = configResult.value;
-        loadedConfig = cfg;
-        dataDirectory = (cfg.data_dir as string) ?? '';
-        const level = Number(cfg.default_compression_level);
-        compressionLevel = level >= MIN_LEVEL && level <= MAX_LEVEL ? level : DEFAULT_LEVEL;
-        // Two levels now. The older screen could save warn/error/trace; the
-        // service reads those as the nearest of the two, and so does this.
-        const saved = String(cfg.log_level ?? '').toLowerCase();
-        logLevel = saved === 'debug' || saved === 'trace' ? 'debug' : 'info';
-        logMirrorDir = (cfg.log_mirror_dir as string) ?? '';
-      }
-
-      serviceStatus = statusResult.status === 'fulfilled' ? statusResult.value : null;
+      const cfg = await api.getConfig();
+      loadedConfig = cfg;
+      dataDirectory = (cfg.data_dir as string) ?? '';
+      const level = Number(cfg.default_compression_level);
+      compressionLevel = level >= MIN_LEVEL && level <= MAX_LEVEL ? level : DEFAULT_LEVEL;
+      // Two levels now. The older screen could save warn/error/trace; the
+      // service reads those as the nearest of the two, and so does this.
+      const saved = String(cfg.log_level ?? '').toLowerCase();
+      logLevel = saved === 'debug' || saved === 'trace' ? 'debug' : 'info';
+      logMirrorDir = (cfg.log_mirror_dir as string) ?? '';
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -232,7 +236,9 @@
       <div class="card">
         <h2 class="section-title">Состояние службы</h2>
 
-        {#if serviceStatus?.connected}
+        {#if statusLoading}
+          <div class="status-pending">Опрашиваем службу…</div>
+        {:else if serviceStatus?.connected}
           <div class="status-grid">
             <div class="status-item">
               <span class="status-label">Служба</span>
@@ -454,6 +460,12 @@
 
   .status-dot.offline {
     background: var(--error);
+  }
+
+  .status-pending {
+    font-size: 13px;
+    color: var(--text-muted);
+    padding: 4px 0;
   }
 
   .status-offline {

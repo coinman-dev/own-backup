@@ -2,6 +2,7 @@
   import type { ViewName, KeyboardLayout } from '../lib/types';
   import { api } from '../lib/api';
   import { media } from '../lib/mediaStore.svelte';
+  import { appVersion, ensureAppVersion } from '../lib/appVersion.svelte';
 
   interface Props {
     currentView: ViewName;
@@ -9,6 +10,7 @@
   }
 
   let { currentView, onNavigate }: Props = $props();
+  ensureAppVersion();
 
   // ---- keyboard layout, boot medium only -------------------------------
   //
@@ -131,7 +133,7 @@
   </ul>
 
   <div class="sidebar-footer">
-    <div class="version-text">v0.1.0</div>
+    <div class="version-text">{appVersion.value ? `v${appVersion.value}` : ''}</div>
     {#if layout}
       <div
         class="kbd"

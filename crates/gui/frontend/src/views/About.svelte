@@ -6,12 +6,17 @@
   //
   // До 2026-09-18 тут лежала англоязычная заглушка, и она врала в трёх местах:
   // «MIT / Apache-2.0» вместо PolyForm Noncommercial, «Encryption AES-256-GCM»
-  // (шифрование ушло вместе с форматом .obk) и «gRPC on localhost:50051»
-  // (в бою это именованный канал, а порт не слушается вовсе). Ссылки вели на
-  // github.com/user/own-backup — такого места нет.
+  // (тогдашний .obk был удалён; нынешний — другой контейнер) и «gRPC on
+  // localhost:50051» (в бою это именованный канал, а порт не слушается
+  // вовсе). Ссылки вели на github.com/user/own-backup — такого места нет.
+  //
+  // 2026-09-26 — ещё четыре: «Версия интерфейса» показывала версию СЛУЖБЫ,
+  // «Задания и журнал: SQLite» (задания давно в jobs.json), формата OBK в
+  // списке не было, а журналы назывались по-старому, без даты.
   import { onMount } from 'svelte';
   import { api } from '../lib/api';
   import { media, ensureMediaMode } from '../lib/mediaStore.svelte';
+  import { appVersion, ensureAppVersion } from '../lib/appVersion.svelte';
   import type { ServiceStatus, ServiceHealth } from '../lib/types';
 
   let status: ServiceStatus | null = $state(null);
@@ -20,6 +25,7 @@
   let logMirrorDir = $state('');
 
   onMount(async () => {
+    ensureAppVersion();
     await ensureMediaMode();
     const [st, he, cfg] = await Promise.allSettled([
       api.getServiceStatus(),
@@ -60,35 +66,38 @@
     <h2 class="app-name">Own Backup</h2>
     <p class="app-description">
       Копии дисков и томов целиком, блок за блоком: в копию попадают только
-      занятые кластеры, а исключённые файлы не попадают вовсе. Из копии можно
-      восстановить раздел, диск или отдельные файлы, а с загрузочного носителя —
-      и тот диск, с которого система загружается.
+      занятые кластеры, а исключённые файлы не попадают вовсе. Копию можно
+      зашифровать паролем. Из копии можно восстановить раздел, диск или
+      отдельные файлы, а с загрузочного носителя — и тот диск, с которого
+      система загружается.
     </p>
 
     <div class="info-table">
       <div class="info-row">
         <span class="info-label">Версия интерфейса</span>
-        <span class="info-value">{status?.version ?? '—'}</span>
+        <span class="info-value">{appVersion.value || '—'}</span>
       </div>
       <div class="info-row">
         <span class="info-label">Служба</span>
         <span class="info-value">{serviceState}</span>
       </div>
       <div class="info-row">
-        <span class="info-label">Связь с службой</span>
+        <span class="info-label">Связь со службой</span>
         <span class="info-value">{link}</span>
       </div>
       <div class="info-row">
         <span class="info-label">Формат копий</span>
-        <span class="info-value">динамический VHDX или qcow2 (сжатие zstd)</span>
+        <span class="info-value">
+          VHDX, qcow2 (сжатие zstd) или OBK — зашифрованный (zstd и AES-256-GCM)
+        </span>
       </div>
       <div class="info-row">
         <span class="info-label">Контрольные суммы</span>
         <span class="info-value">xxHash64 на каждый блок, в манифесте внутри образа</span>
       </div>
       <div class="info-row">
-        <span class="info-label">Задания и журнал</span>
-        <span class="info-value">SQLite{dataDir ? ` в ${dataDir}` : ''}</span>
+        <span class="info-label">Задания и история запусков</span>
+        <span class="info-value">jobs.json и activity.json{dataDir ? ` в ${dataDir}` : ''}</span>
       </div>
       {#if logMirrorDir}
         <div class="info-row">
@@ -127,15 +136,16 @@
         закончился каждый и с какой ошибкой.
       </li>
       <li>
-        Подробности — в журналах рядом с программой:
-        <code>own-backup-service.log</code> и <code>own-backup-gui.log</code>.
-        Время в них записано по UTC.
+        Подробности — в журналах в папке <code>Logs</code> рядом с программой:
+        <code>own-backup-service-ГГГГ-ММ-ДД.log</code> и
+        <code>own-backup-gui-ГГГГ-ММ-ДД.log</code>, по файлу на день, хранятся
+        30 дней. Время в них записано по UTC. Чтобы разобраться в ошибке,
+        включите в «Параметрах» подробный уровень журнала и повторите.
       </li>
       <li>
-        В «Параметрах» можно назвать папку для второй копии журнала — например,
-        на флешке. Она пишется строка за строкой и нужна для того единственного
-        случая, который обычный журнал описать не может: восстановление,
-        уносящее машину вместе с диском, на котором лежит журнал.
+        В «Параметрах» можно дублировать журнал на флешку или другой диск —
+        он останется, даже если восстановление унесёт диск, на котором лежит
+        обычный журнал.
       </li>
       {#if !media.active}
         <li>
