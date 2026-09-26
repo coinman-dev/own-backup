@@ -107,6 +107,10 @@ pub struct RebuildOptions<'a> {
     /// Give the image a new identity (consolidation only).
     pub identity: Option<RebuildIdentity>,
     pub previous: PreviousContents,
+    /// zstd level for the clusters this pass re-encodes: the level the image
+    /// was made with, so a rebuilt cluster is not compressed differently from
+    /// its neighbours. `None` (and anything outside 1–19) is the default.
+    pub zstd_level: Option<i32>,
 }
 
 /// Apply `changed` to the image at `path`, optionally replacing its sealed
@@ -189,6 +193,9 @@ pub fn apply_changed_with(
 ) -> Result<RebuildStats> {
     let (root, header, mut states, entries, data_end, existing_sidecar) = read_state(path, chain)?;
     let cluster_size = header.cluster_size;
+    let zstd_level = crate::qcow2::zstd_level_or_default(
+        opts.zstd_level.unwrap_or(crate::qcow2::DEFAULT_ZSTD_LEVEL),
+    );
     let changed: std::collections::BTreeSet<u64> = clusters.iter().copied().collect();
     for cluster in &changed {
         if *cluster >= root.guest_clusters {
@@ -267,7 +274,7 @@ pub fn apply_changed_with(
             continue;
         }
         let compressed = Zeroizing::new(
-            zstd::bulk::compress(&data, crate::qcow2::DEFAULT_ZSTD_LEVEL)
+            zstd::bulk::compress(&data, zstd_level)
                 .map_err(|e| own_backup_common::OwnBackupError::Compression(e.to_string()))?,
         );
         let (encoding, payload) = if (compressed.len() as u64) < cluster_size {

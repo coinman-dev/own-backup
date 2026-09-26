@@ -321,10 +321,50 @@ pub fn default_exclusions() -> Vec<String> {
         "**\\Tmp\\**",
         "*.tmp",
         "*.~",
-        // Our own image files, in case the destination lives on the source.
-        "*.vhdx",
-        "*.avhdx",
-        "*.obkm",
+        // What Windows rebuilds by itself — anchored to the volume root, so they
+        // only ever match on the system volume. A folder is excluded by its
+        // CONTENTS (a trailing `\**`): the directory itself stays, with its
+        // permissions, and Windows fills it again.
+        //
+        // Update downloads and the update database. Emptying this folder is
+        // Microsoft's own "reset Windows Update" step; the history list
+        // starts over, nothing else is lost.
+        "Windows\\SoftwareDistribution\\**",
+        // Launch traces — rebuilt as programs start.
+        "Windows\\Prefetch\\**",
+        // Delivery Optimization's peer cache (update pieces for other PCs).
+        "Windows\\ServiceProfiles\\NetworkService\\AppData\\Local\\Microsoft\\Windows\\DeliveryOptimization\\Cache\\**",
+        // Crash dumps and error reports: Microsoft's own list of files not to
+        // back up (`FilesNotToBackup`: "Kernel Dumps", "WER").
+        "Windows\\MEMORY.DMP",
+        "Windows\\Minidump\\**",
+        "Windows\\LiveKernelReports\\**",
+        "ProgramData\\Microsoft\\Windows\\WER\\**",
+        "Users\\*\\AppData\\Local\\CrashDumps\\**",
+        // Avast / AVG working folder.
+        "$AV_ASW\\**",
+        // Caches every program refills on its own: browsers (every profile),
+        // compiled shaders, Explorer's thumbnails. Gigabytes on a machine
+        // that is used, and nothing a restore needs.
+        "Users\\*\\AppData\\Local\\Microsoft\\Windows\\INetCache\\**",
+        "Users\\*\\AppData\\Local\\Microsoft\\Windows\\Explorer\\thumbcache_*.db",
+        "Users\\*\\AppData\\Local\\Google\\Chrome\\User Data\\*\\Cache\\**",
+        "Users\\*\\AppData\\Local\\Google\\Chrome\\User Data\\*\\Code Cache\\**",
+        "Users\\*\\AppData\\Local\\Google\\Chrome\\User Data\\*\\GPUCache\\**",
+        "Users\\*\\AppData\\Local\\Microsoft\\Edge\\User Data\\*\\Cache\\**",
+        "Users\\*\\AppData\\Local\\Microsoft\\Edge\\User Data\\*\\Code Cache\\**",
+        "Users\\*\\AppData\\Local\\Microsoft\\Edge\\User Data\\*\\GPUCache\\**",
+        "Users\\*\\AppData\\Local\\Mozilla\\Firefox\\Profiles\\*\\cache2\\**",
+        "Users\\*\\AppData\\Local\\D3DSCache\\**",
+        "Users\\*\\AppData\\Local\\NVIDIA\\DXCache\\**",
+        "Users\\*\\AppData\\Local\\NVIDIA\\GLCache\\**",
+        "Users\\*\\AppData\\Local\\AMD\\DxCache\\**",
+        // NOT here, on purpose: `*.vhdx`, `*.avhdx`, `*.obkm` used to be, "in
+        // case the destination lives on the source". A destination on a source
+        // volume is refused outright (`dest_placement`, at save and before
+        // every run), so they guarded nothing — and silently dropped every
+        // virtual machine's disk from the copy (2026-09-26). Nor `Windows.old`
+        // or `$WINDOWS.~BT`: they are an upgrade's way back.
     ]
     .iter()
     .map(|s| s.to_string())
@@ -359,11 +399,9 @@ pub fn default_linux_exclusions() -> Vec<String> {
         "**/.Trash-*/**",
         // fsck leftovers.
         "lost+found",
-        // Our own image files, in case the destination lives on the source.
-        "*.vhdx",
-        "*.avhdx",
-        "*.qcow2",
-        "*.obkm",
+        // No image masks (`*.qcow2`, `*.vhdx`…): a destination on a source
+        // volume is refused, and those masks dropped every VM disk from the
+        // copy — see `default_exclusions`.
     ]
     .iter()
     .map(|s| s.to_string())
@@ -2944,6 +2982,59 @@ async fn perform_backup(
 
 #[cfg(test)]
 mod tests {
+    /// Every default rule, asked of paths a real Windows volume has: what
+    /// must go, and — the part that matters — what must stay.
+    #[test]
+    fn default_exclusions_take_caches_and_leave_the_system() {
+        use own_backup_backup::exclusions::ExclusionPattern;
+        let rules: Vec<ExclusionPattern> =
+            default_exclusions().iter().map(|p| ExclusionPattern::parse(p).expect(p)).collect();
+        let excluded = |path: &str| {
+            let comps: Vec<String> = path.split('\\').map(|c| c.to_lowercase()).collect();
+            let name = comps.last().unwrap().clone();
+            rules.iter().any(|r| r.matches(&name, &comps))
+        };
+        for gone in [
+            r"Windows\SoftwareDistribution\Download\a1b2\update.cab",
+            r"Windows\SoftwareDistribution\DataStore\DataStore.edb",
+            r"Windows\Prefetch\CHROME.EXE-1A2B3C4D.pf",
+            r"Windows\MEMORY.DMP",
+            r"Windows\Minidump\092626-1234-01.dmp",
+            r"$AV_ASW\$VAULT$\file",
+            r"ProgramData\Microsoft\Windows\WER\ReportArchive\x\Report.wer",
+            r"Users\Bob\AppData\Local\Google\Chrome\User Data\Default\Cache\Cache_Data\f_000001",
+            r"Users\Bob\AppData\Local\Google\Chrome\User Data\Profile 1\Code Cache\js\index",
+            r"Users\Bob\AppData\Local\Microsoft\Edge\User Data\Default\Cache\Cache_Data\data_0",
+            r"Users\Bob\AppData\Local\Mozilla\Firefox\Profiles\ab12.default\cache2\entries\X",
+            r"Users\Bob\AppData\Local\Microsoft\Windows\Explorer\thumbcache_256.db",
+            r"Users\Bob\AppData\Local\NVIDIA\DXCache\x.bin",
+            r"Users\Bob\AppData\Local\Temp\setup.log",
+        ] {
+            assert!(excluded(gone), "should be excluded: {gone}");
+        }
+        for kept in [
+            // The folders themselves: Windows expects them, with their ACLs.
+            r"Windows\SoftwareDistribution",
+            r"Windows\Prefetch",
+            r"Users\Bob\AppData\Local\Google\Chrome\User Data\Default\Cache",
+            // The system, the user's data, their browser profile.
+            r"Windows\System32\ntoskrnl.exe",
+            r"Windows\System32\config\SYSTEM",
+            r"Users\Bob\Documents\report.docx",
+            r"Users\Bob\AppData\Local\Google\Chrome\User Data\Default\Bookmarks",
+            r"Users\Bob\AppData\Local\Google\Chrome\User Data\Default\Login Data",
+            // A virtual machine's disk is data (2026-09-26).
+            r"VMs\Win11\Win11.vhdx",
+            r"Hyper-V\disk_2F3A.avhdx",
+            // Only at the root: a user folder named like a system one is theirs.
+            r"Projects\Windows\Prefetch\notes.txt",
+            // An upgrade's way back.
+            r"Windows.old\Windows\System32\kernel32.dll",
+        ] {
+            assert!(!excluded(kept), "must stay in the copy: {kept}");
+        }
+    }
+
     use super::*;
     use std::path::Path;
 

@@ -33,7 +33,7 @@ use crate::overlay::{SealedSlots, WritableOverlaySource};
 use crate::qcow2_removal_win::{
     mount_delete, mount_delete_multi, rehash_touched_through, Qcow2RemovalOutcome,
 };
-use crate::seal::obk::{apply_changed, ObkRandomReader};
+use crate::seal::obk::{apply_changed_with, ObkRandomReader, RebuildOptions};
 use crate::seal::ChainKey;
 use crate::sidecar::BlockChecksum;
 
@@ -68,6 +68,7 @@ pub fn remove_excluded_from_obk(
     data_offset: u64,
     volume_len: u64,
     block_size: u32,
+    zstd_level: i32,
     checksums: &mut Vec<BlockChecksum>,
     tick: &mut dyn FnMut(u64, u64),
 ) -> Result<Option<Qcow2RemovalOutcome>> {
@@ -84,6 +85,7 @@ pub fn remove_excluded_from_obk(
         data_offset,
         volume_len,
         block_size,
+        zstd_level,
         checksums,
         tick,
     )
@@ -101,6 +103,7 @@ pub fn remove_excluded_from_obk_disk_image(
     partitions: &[(u64, Vec<ExcludedPath>)],
     image_size: u64,
     block_size: u32,
+    zstd_level: i32,
     checksums: &mut Vec<BlockChecksum>,
     tick: &mut dyn FnMut(u64, u64),
 ) -> Result<Option<Qcow2RemovalOutcome>> {
@@ -118,6 +121,7 @@ pub fn remove_excluded_from_obk_disk_image(
         0,
         image_size,
         block_size,
+        zstd_level,
         checksums,
         tick,
     )
@@ -134,6 +138,7 @@ fn remove_excluded(
     data_offset: u64,
     volume_len: u64,
     block_size: u32,
+    zstd_level: i32,
     checksums: &mut Vec<BlockChecksum>,
     tick: &mut dyn FnMut(u64, u64),
 ) -> Result<Option<Qcow2RemovalOutcome>> {
@@ -195,12 +200,14 @@ fn remove_excluded(
     let t_rebuild = Instant::now();
     let rebuild = {
         let overlay = overlay.clone();
-        apply_changed(
+        // At the level the copy was just written with, so the rebuilt
+        // clusters match the rest of the image.
+        apply_changed_with(
             image_path,
             chain,
             &touched,
             move |cluster| overlay.lock().unwrap().read_cluster(cluster),
-            None,
+            RebuildOptions { zstd_level: Some(zstd_level), ..Default::default() },
         )
     };
     let _ = std::fs::remove_file(&scratch);

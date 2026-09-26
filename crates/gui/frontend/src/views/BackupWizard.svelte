@@ -1399,7 +1399,9 @@
       {/each}
     </div>
 
-    <div class="body">
+    <!-- The exclusions step stretches its list to the window's height: a
+         fixed 260 px box left half a tall window empty below it. -->
+    <div class="body" class:fill={stepKey === 'exclusions'}>
       <!-- source (top) → destination (bottom) -->
       {#if stepKey === 'source'}
         <div class="src-wrap">
@@ -2155,6 +2157,8 @@
   .note.warn { color: #a06a10; background: rgba(251,188,5,.10); border-left: 3px solid rgba(251,188,5,.55); padding: 8px 12px; border-radius: 0 4px 4px 0; }
   .boot-hint { margin-top: 10px; font-size: 12.5px; line-height: 1.5; color: #a06a10; background: rgba(251,188,5,.10); border-left: 3px solid rgba(251,188,5,.55); padding: 8px 12px; border-radius: 0 4px 4px 0; }
   .excl-list { border: 1px solid var(--border); border-radius: 5px; background: #fff; max-height: 260px; overflow: auto; margin-top: 12px; }
+  .body.fill { display: flex; flex-direction: column; }
+  .body.fill .excl-list { flex: 1 1 0; min-height: 180px; max-height: none; }
   .excl-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 14px; font-size: 13px; color: var(--head); border-bottom: 1px solid var(--border); }
   .x { background: none; border: none; color: var(--text-muted); font-size: 18px; cursor: pointer; line-height: 1; }
   .excl-add { display: flex; gap: 10px; align-items: center; margin-top: 12px; }

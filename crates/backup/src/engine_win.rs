@@ -1845,6 +1845,7 @@ fn backup_volume_inner(
                     data_offset,
                     volume_len,
                     req.block_size,
+                    crate::qcow2::zstd_level_or_default(req.zstd_level),
                     &mut checksums,
                     tick,
                 )?
@@ -3587,6 +3588,7 @@ fn backup_disk_inner(
                     &removal,
                     plan.image_size,
                     req.block_size,
+                    crate::qcow2::zstd_level_or_default(req.zstd_level),
                     &mut checksums,
                     &mut tick,
                 )?;
@@ -5458,7 +5460,14 @@ fn unmount_qcow2_via_iscsi(image_path: &Path) -> Result<()> {
         if !touched.is_empty() {
             info!(image = %image_path.display(), count = touched.len(), "QCOW2 RW mount: merging modified clusters back into base");
             
-            let zstd_level = Some(crate::qcow2::DEFAULT_ZSTD_LEVEL);
+            let ext = image_path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_lowercase();
+            // At the level the copy was made with, from its own manifest, so
+            // the merged clusters match the rest of the image. Unreadable →
+            // the default (`Qcow2InPlaceMerge` falls back to it on `None`).
+            let zstd_level = read_embedded_sidecar(image_path, &ext)
+                .or_else(|_| read_sidecar(&sidecar_path_for(image_path)))
+                .map(|s| crate::qcow2::zstd_level_or_default(s.manifest.compression_level))
+                .ok();
             {
                 let mut ov = overlay_arc.lock().unwrap();
                 let mut merge = crate::qcow2::Qcow2InPlaceMerge::open(image_path, zstd_level)?;
@@ -5470,7 +5479,6 @@ fn unmount_qcow2_via_iscsi(image_path: &Path) -> Result<()> {
             }
 
             // Now rehash the touched regions and update the sidecar (embedded or external)!
-            let ext = image_path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_lowercase();
             let mut read_from_embedded = false;
             let sidecar_attempt = match read_embedded_sidecar(image_path, &ext) {
                 Ok(s) => {

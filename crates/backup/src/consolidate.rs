@@ -644,6 +644,9 @@ fn execute(
                         consolidated_increments: promoted.info.consolidated_increments,
                         chain_started_at: promoted.info.chain_started_at.clone(),
                     },
+                    // The increment's own level, from its manifest: the job's
+                    // setting as it stood when that copy ran.
+                    promoted.manifest.compression_level,
                 )?;
                 bytes_orphaned = stats.bytes_orphaned;
                 info!(
@@ -1567,6 +1570,7 @@ mod tests {
                 consolidated_increments: 1,
                 chain_started_at: Some("2026-01-01T00:00:00Z".into()),
             },
+            promoted.manifest.compression_level,
         )
         .unwrap();
 

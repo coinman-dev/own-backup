@@ -66,7 +66,10 @@ pub struct FoldStats {
 }
 
 /// Fold `victim` into `base`, giving the base `metadata` as its sidecar and
-/// `identity` as its own.
+/// `identity` as its own. The increment's clusters are re-encoded at
+/// `zstd_level` — the caller passes the level the increment was written with,
+/// which is what a qcow2 fold keeps too (it copies the compressed bytes as
+/// they are).
 ///
 /// `metadata` is the increment's sidecar promoted to a full backup's — the
 /// caller builds it, because what a sidecar means is the backup layer's
@@ -79,6 +82,7 @@ pub fn fold_child_into_base(
     chain: &ChainKey,
     metadata: &[u8],
     identity: RebuildIdentity,
+    zstd_level: i32,
 ) -> Result<FoldStats> {
     let mut child = ObkImage::open_path(victim, chain)?;
     let already_applied = {
@@ -117,6 +121,7 @@ pub fn fold_child_into_base(
             metadata: Some(metadata),
             identity: Some(identity),
             previous: PreviousContents::Keep,
+            zstd_level: Some(zstd_level),
         },
     )?;
 
@@ -224,6 +229,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    use crate::qcow2::DEFAULT_ZSTD_LEVEL;
     use crate::seal::obk::container_tests::{cluster_bits, Fixture};
     use crate::seal::obk::{ObkChain, ObkRandomReader, ObkWriter};
 
@@ -298,6 +304,7 @@ mod tests {
             &f.chain,
             b"sidecar of increment 1, promoted to a full",
             identity(inc1_id, 1),
+            DEFAULT_ZSTD_LEVEL,
         )
         .unwrap();
         assert!(!stats.already_applied);
@@ -338,7 +345,7 @@ mod tests {
         let (base, inc1, _, _, inc1_id) = chain_of_three(dir.path(), &f);
 
         let before = std::fs::read(&base).unwrap();
-        fold_child_into_base(&base, &inc1, &f.chain, b"promoted", identity(inc1_id, 1)).unwrap();
+        fold_child_into_base(&base, &inc1, &f.chain, b"promoted", identity(inc1_id, 1), DEFAULT_ZSTD_LEVEL).unwrap();
         let after = std::fs::read(&base).unwrap();
 
         assert!(after.len() > before.len(), "a fold only ever appends");
@@ -358,7 +365,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (base, inc1, _, _, inc1_id) = chain_of_three(dir.path(), &f);
 
-        fold_child_into_base(&base, &inc1, &f.chain, b"promoted", identity(inc1_id, 1)).unwrap();
+        fold_child_into_base(&base, &inc1, &f.chain, b"promoted", identity(inc1_id, 1), DEFAULT_ZSTD_LEVEL).unwrap();
         let contents: Vec<Vec<u8>> = {
             let mut r = ObkRandomReader::open(&base, &f.chain).unwrap();
             (0..4)
@@ -371,7 +378,7 @@ mod tests {
         };
 
         let again =
-            fold_child_into_base(&base, &inc1, &f.chain, b"promoted", identity(inc1_id, 1)).unwrap();
+            fold_child_into_base(&base, &inc1, &f.chain, b"promoted", identity(inc1_id, 1), DEFAULT_ZSTD_LEVEL).unwrap();
         assert!(again.already_applied, "the fold must recognise its own work");
 
         let mut r = ObkRandomReader::open(&base, &f.chain).unwrap();
@@ -390,17 +397,17 @@ mod tests {
         let (base, inc1, inc2, _, inc1_id) = chain_of_three(dir.path(), &f);
 
         // inc2 sits on inc1, not on the base.
-        let e = fold_child_into_base(&base, &inc2, &f.chain, b"x", identity(inc1_id, 1))
+        let e = fold_child_into_base(&base, &inc2, &f.chain, b"x", identity(inc1_id, 1), DEFAULT_ZSTD_LEVEL)
             .expect_err("a grandchild is not foldable into the base");
         assert!(e.to_string().contains("not written against this base"), "{e}");
 
         // The base is not an increment, and an increment is not a base.
-        assert!(fold_child_into_base(&inc1, &base, &f.chain, b"x", identity(inc1_id, 1)).is_err());
+        assert!(fold_child_into_base(&inc1, &base, &f.chain, b"x", identity(inc1_id, 1), DEFAULT_ZSTD_LEVEL).is_err());
 
         // Another chain's key opens neither image and changes nothing.
         let stranger = ChainKey::generate().unwrap();
         let untouched = std::fs::read(&base).unwrap();
-        assert!(fold_child_into_base(&base, &inc1, &stranger, b"x", identity(inc1_id, 1)).is_err());
+        assert!(fold_child_into_base(&base, &inc1, &stranger, b"x", identity(inc1_id, 1), DEFAULT_ZSTD_LEVEL).is_err());
         assert!(set_backing_file(&inc2, &stranger, "full.obk").is_err());
         assert_eq!(std::fs::read(&base).unwrap(), untouched);
     }
