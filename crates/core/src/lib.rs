@@ -1997,7 +1997,7 @@ pub fn plan_run_for_disk_at(
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))] // used by the Windows backup path
 fn apply_retention(job: &Job, protected: &[(String, PathBuf)]) {
     use own_backup_backup::chains::{
-        delete_chain, list_job_chains, plan_retention_protected, RetentionRules,
+        delete_chain, list_job_chains_strict, plan_retention_protected, RetentionRules,
     };
 
     let rules = if job.scheme.is_consolidation() {
@@ -2026,7 +2026,7 @@ fn apply_retention(job: &Job, protected: &[(String, PathBuf)]) {
         return;
     }
     let folder = PathBuf::from(&job.dest_folder);
-    let all_chains = match list_job_chains(&folder, &job.id) {
+    let all_chains = match list_job_chains_strict(&folder, &job.id) {
         Ok(c) => c,
         Err(e) => {
             warn!(job = %job.name, error = %e, "Retention scan failed");
@@ -2146,7 +2146,7 @@ impl JobFilesDeleted {
 /// journal scrolled past it. Rather than pretend, the report says the history
 /// was truncated.
 pub fn delete_job_files(store: &JobStore, job: &Job) -> JobFilesDeleted {
-    use own_backup_backup::chains::{delete_chain, list_job_chains};
+    use own_backup_backup::chains::{delete_chain, list_job_chains_strict};
 
     let mut out = JobFilesDeleted {
         history_truncated: store.history_is_truncated(&job.id),
@@ -2172,7 +2172,7 @@ pub fn delete_job_files(store: &JobStore, job: &Job) -> JobFilesDeleted {
     let mut classified = std::collections::HashSet::new();
 
     for folder in &folders {
-        let chains = match list_job_chains(folder, &job.id) {
+        let chains = match list_job_chains_strict(folder, &job.id) {
             Ok(c) => c,
             Err(e) => {
                 out.kept.push((folder.display().to_string(), e.to_string()));
@@ -2201,12 +2201,17 @@ pub fn delete_job_files(store: &JobStore, job: &Job) -> JobFilesDeleted {
                     }));
                 }
                 Err(e) => {
-                    let base = chain
-                        .images
-                        .first()
-                        .map(|i| i.image_path.display().to_string())
-                        .unwrap_or_default();
-                    out.kept.push((base, e.to_string()));
+                    // `delete_chain` rejects an entire busy or consolidating
+                    // chain before removing any image. Name every surviving
+                    // image and external sidecar in the user-facing report.
+                    let reason = e.to_string();
+                    for image in &chain.images {
+                        for path in [&image.image_path, &image.sidecar_path] {
+                            if path.exists() {
+                                out.kept.push((path.display().to_string(), reason.clone()));
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -2325,7 +2330,7 @@ fn apply_consolidation(
     protected: &[(String, PathBuf)],
     keys: Option<&own_backup_backup::seal::context::ArchiveKeys>,
 ) -> u32 {
-    use own_backup_backup::chains::{list_job_chains, plan_consolidation};
+    use own_backup_backup::chains::{list_job_chains_strict, plan_consolidation};
     use own_backup_backup::consolidate::consolidate_step_with_keys;
 
     let Some(keep) = job.scheme.rolling_incrementals else {
@@ -2345,7 +2350,7 @@ fn apply_consolidation(
     const MAX_STEPS: usize = 64;
     let mut folded = 0u32;
     for _ in 0..MAX_STEPS {
-        let chains = match list_job_chains(&folder, &job.id) {
+        let chains = match list_job_chains_strict(&folder, &job.id) {
             Ok(c) => c,
             Err(e) => {
                 warn!(job = %job.name, error = %e, "Consolidation scan failed");
@@ -4409,10 +4414,58 @@ mod tests {
     }
 
     #[test]
+    fn unreadable_child_cannot_hide_its_dependency_from_deletion() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("images");
+        let base = put_image_of_job(&dest, "j_C_full_1.vhdx", "job1");
+        let unreadable_child = dest.join("j_C_inc_2.qcow2");
+        std::fs::write(&unreadable_child, b"cannot read embedded sidecar").unwrap();
+
+        let store = a_store(dir.path());
+        let job = store
+            .upsert(Job {
+                id: "job1".into(),
+                dest_folder: dest.display().to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        let report = delete_job_files(&store, &job);
+        assert!(base.exists() && unreadable_child.exists(), "{report:?}");
+        assert!(report.deleted.is_empty(), "{report:?}");
+        assert!(!report.complete());
+    }
+
+    #[test]
+    fn retention_does_not_delete_bases_when_an_image_is_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let old_base = put_image_of_job(dir.path(), "j_C_full_1.vhdx", "job1");
+        let new_base = put_image_of_job(dir.path(), "j_C_full_2.vhdx", "job1");
+        std::fs::write(dir.path().join("j_C_inc_3.qcow2"), b"unreadable child").unwrap();
+
+        let mut job = Job::default();
+        job.id = "job1".into();
+        job.dest_folder = dir.path().display().to_string();
+        job.scheme.keep_chains = Some(1);
+        apply_retention(&job, &[("C".into(), new_base.clone())]);
+        assert!(old_base.exists() && new_base.exists());
+    }
+
+    #[test]
     fn job_delete_never_retries_a_chain_with_a_consolidation_marker() {
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("images");
         let base = put_image_of_job(&dest, "j_C_full_1.vhdx", "job1");
+        let child = put_image_of_job(&dest, "j_C_inc_2.avhdx", "job1");
+        let child_sidecar = own_backup_backup::sidecar_path_for(&child);
+        let sidecar = own_backup_backup::sidecar::read_sidecar(&child_sidecar).unwrap();
+        let mut info = sidecar.info;
+        info.chain_role = own_backup_backup::sidecar::ChainRole::Incremental;
+        info.parent_image_file_name = Some("j_C_full_1.vhdx".into());
+        let mut manifest = sidecar.manifest;
+        manifest.created_at = "2026-01-02T00:00:00Z".into();
+        own_backup_backup::sidecar::write_sidecar(
+            &child_sidecar, &info, &manifest, &[],
+        ).unwrap();
         let marker = own_backup_backup::consolidate::marker_path(&base);
         std::fs::write(&marker, b"{}").unwrap();
         let store = a_store(dir.path());
@@ -4431,8 +4484,11 @@ mod tests {
             })
             .unwrap();
         let report = delete_job_files(&store, &job);
-        assert!(base.exists() && marker.exists(), "{report:?}");
-        assert!(!report.deleted.contains(&base.display().to_string()));
+        assert!(base.exists() && child.exists() && marker.exists(), "{report:?}");
+        assert!(report.deleted.is_empty(), "{report:?}");
+        for path in [&base, &child, &own_backup_backup::sidecar_path_for(&base), &child_sidecar] {
+            assert!(report.kept.iter().any(|(kept, _)| kept == &path.display().to_string()), "{path:?}: {report:?}");
+        }
     }
 
     #[test]

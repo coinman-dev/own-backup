@@ -67,6 +67,21 @@ impl Attached {
                 let dismounted = crate::volume_win::dismount_volume_forced(&volume);
                 info!(device = %volume, dismounted, "attached image: volume force-dismounted");
             }
+            // A dismounted volume can still keep the initiator's device busy
+            // while PnP tears its stack down. Offline the disk for this
+            // session before LogoutIScsiTarget; leave its read-only flag and
+            // persisted disk attributes untouched.
+            match open_write_retry(&self.physical) {
+                Ok(device) => {
+                    if let Err(e) = device.set_offline_this_session() {
+                        warn!(physical = %self.physical, error = %e,
+                              "attached image: could not offline disk before iSCSI logout");
+                    }
+                    let _ = device.update_properties();
+                }
+                Err(e) => warn!(physical = %self.physical, error = %e,
+                                "attached image: could not open disk before iSCSI logout"),
+            }
         }
         if let Some(target) = self.target.take() {
             // The target stops below either way: this may be the end of a

@@ -40,7 +40,7 @@ fn first_encrypted_image(folder: &std::path::Path) -> Option<std::path::PathBuf>
 }
 
 pub async fn run(args: ConsolidateArgs) -> own_backup_common::Result<()> {
-    use own_backup_backup::chains::{list_job_chains, plan_consolidation};
+    use own_backup_backup::chains::{list_job_chains_strict, plan_consolidation};
     use own_backup_backup::consolidate::{consolidate_step_with_keys, resume_pending_with_keys};
     use std::path::PathBuf;
 
@@ -81,7 +81,7 @@ pub async fn run(args: ConsolidateArgs) -> own_backup_common::Result<()> {
 
     let mut steps = 0u32;
     loop {
-        let chains = list_job_chains(&folder, &args.job)?;
+        let chains = list_job_chains_strict(&folder, &args.job)?;
         if chains.is_empty() {
             println!("No chains for job {} in {}", args.job, folder.display());
             return Ok(());

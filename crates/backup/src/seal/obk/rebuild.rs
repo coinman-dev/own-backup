@@ -529,6 +529,59 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "H03 fault injection: documents the current torn-header failure"]
+    fn torn_header_cluster_can_make_a_previous_obk_point_unreadable() {
+        use std::io::{Read, Seek, SeekFrom, Write};
+
+        let f = Fixture::new();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("full.obk");
+        let mut writer =
+            ObkWriter::create(&path, &f.chain, f.options(Uuid::new_v4(), ChainRole::Full, None))
+                .unwrap();
+        writer.write_cluster(0, &cluster_of(0xAA)).unwrap();
+        writer.finish(b"before").unwrap();
+        let mut before = ObkRandomReader::open(&path, &f.chain).unwrap();
+        let mut contents = vec![0u8; 1 << cluster_bits()];
+        before.read_at(0, &mut contents).unwrap();
+        assert_eq!(contents, cluster_of(0xAA));
+        let cluster_size = 1usize << cluster_bits();
+        let mut old_header = vec![0u8; cluster_size];
+        std::fs::File::open(&path).unwrap().read_exact(&mut old_header).unwrap();
+
+        let mut changed = ChangedClusters::new();
+        changed.insert(0, cluster_of(0xBB));
+        apply_changed_clusters(&path, &f.chain, &changed, None).unwrap();
+        let mut new_header = vec![0u8; cluster_size];
+        std::fs::File::open(&path).unwrap().read_exact(&mut new_header).unwrap();
+        assert_ne!(old_header, new_header);
+        let mut after = ObkRandomReader::open(&path, &f.chain).unwrap();
+        after.read_at(0, &mut contents).unwrap();
+        assert_eq!(contents, cluster_of(0xBB));
+
+        let mut unreadable = 0;
+        for written in [1usize, 16, 128, 512, 2048, cluster_size - 1] {
+            let torn = dir.path().join(format!("torn-{written}.obk"));
+            std::fs::copy(&path, &torn).unwrap();
+            let mut file = std::fs::OpenOptions::new().write(true).open(&torn).unwrap();
+            file.seek(SeekFrom::Start(0)).unwrap();
+            file.write_all(&new_header[..written]).unwrap();
+            file.write_all(&old_header[written..]).unwrap();
+            file.sync_all().unwrap();
+            let readable = ObkRandomReader::open(&torn, &f.chain)
+                .ok()
+                .and_then(|mut reader| {
+                    let mut bytes = vec![0u8; cluster_size];
+                    reader.read_at(0, &mut bytes).ok().map(|_| bytes)
+                })
+                .is_some_and(|bytes| bytes == cluster_of(0xAA) || bytes == cluster_of(0xBB));
+            println!("H03 written={written} readable={readable}");
+            unreadable += usize::from(!readable);
+        }
+        assert!(unreadable > 0, "this injection did not reproduce H03");
+    }
+
+    #[test]
     fn a_changed_cluster_replaces_the_old_one_and_the_old_bytes_are_gone() {
         let f = Fixture::new();
         let dir = tempfile::tempdir().unwrap();

@@ -116,6 +116,13 @@ pub fn list_job_chains(folder: &Path, job_id: &str) -> Result<Vec<Chain>> {
     list_chains(folder, Some(job_id))
 }
 
+/// A scan for operations that may remove images. If even one candidate cannot
+/// be identified, its missing parent link could make a readable base appear
+/// independent. Leave the folder untouched until the candidate is readable.
+pub fn list_job_chains_strict(folder: &Path, job_id: &str) -> Result<Vec<Chain>> {
+    list_chains_impl(folder, Some(job_id), true)
+}
+
 /// One encrypted image as a listing sees it: the open header, and nothing that
 /// needs a key. `Ok(None)` means the image belongs to another job.
 ///
@@ -151,11 +158,16 @@ fn encrypted_chain_image(path: &Path, job_id: Option<&str>) -> Result<Option<Cha
 /// line writes. Mixing them would let a hand-made image become the parent of a
 /// scheduled job's increment, or the other way round.
 pub fn list_chains(folder: &Path, job_id: Option<&str>) -> Result<Vec<Chain>> {
+    list_chains_impl(folder, job_id, false)
+}
+
+fn list_chains_impl(folder: &Path, job_id: Option<&str>, strict: bool) -> Result<Vec<Chain>> {
     let mut entries: Vec<ChainImage> = Vec::new();
 
     for dir_entry in std::fs::read_dir(folder)? {
         let dir_entry = match dir_entry {
             Ok(e) => e,
+            Err(e) if strict => return Err(e.into()),
             Err(_) => continue,
         };
         let path = dir_entry.path();
@@ -170,9 +182,9 @@ pub fn list_chains(folder: &Path, job_id: Option<&str>) -> Result<Vec<Chain>> {
             match encrypted_chain_image(&path, job_id) {
                 Ok(Some(image)) => entries.push(image),
                 Ok(None) => {}
+                Err(e) if strict => return Err(e),
                 Err(e) => warn!(
-                    path = %path.display(),
-                    error = %e,
+                    path = %path.display(), error = %e,
                     "Skipping unreadable encrypted image"
                 ),
             }
@@ -189,6 +201,7 @@ pub fn list_chains(folder: &Path, job_id: Option<&str>) -> Result<Vec<Chain>> {
                 let sidecar_path = crate::sidecar::sidecar_path_for(&path);
                 match read_sidecar_header(&sidecar_path) {
                     Ok(h) => h,
+                    Err(e) if strict => return Err(e),
                     Err(e) => {
                         warn!(
                             path = %path.display(),

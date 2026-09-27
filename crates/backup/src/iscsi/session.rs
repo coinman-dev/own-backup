@@ -372,6 +372,13 @@ impl Session {
         if let Some((_, kind)) = keys.iter().find(|(k, _)| k == "SessionType") {
             self.discovery = kind.eq_ignore_ascii_case("Discovery");
         }
+        info!(
+            csg, nsg, transit, discovery = self.discovery,
+            chap_required = self.chap_secret.is_some(),
+            chap_challenge_pending = self.chap_challenge.is_some(),
+            chap_response_present = keys.iter().any(|(key, _)| key == "CHAP_R"),
+            "iSCSI login negotiation"
+        );
 
         for (key, value) in &keys {
             match key.as_str() {
@@ -511,7 +518,8 @@ impl Session {
     fn negotiate(&mut self, key: &str, value: &str) -> Option<String> {
         let number = |v: &str| v.parse::<u32>().ok();
         match key {
-            "InitiatorName" | "InitiatorAlias" | "TargetName" | "SessionType" => None,
+            "InitiatorName" | "InitiatorAlias" | "TargetName" | "SessionType"
+            | "CHAP_A" | "CHAP_I" | "CHAP_C" | "CHAP_N" | "CHAP_R" => None,
             "AuthMethod" => Some(
                 if self.chap_secret.is_some() && !self.discovery {
                     "CHAP"
@@ -858,6 +866,8 @@ mod tests {
         assert!(!s.logged_in, "a challenge is not authentication");
         let (_, reply) = &responses(&first.output)[0];
         let keys = parse_keys(reply);
+        assert_eq!(keys.iter().filter(|(key, _)| key == "CHAP_A").count(), 1);
+        assert!(!String::from_utf8_lossy(reply).contains("NotUnderstood"));
         let id = keys
             .iter()
             .find(|(k, _)| k == "CHAP_I")
@@ -904,6 +914,7 @@ mod tests {
             .unwrap();
         assert!(s.logged_in);
         assert_eq!(pdus(&good_wire.output)[0].0[36..38], [0, 0]);
+        assert!(!String::from_utf8_lossy(&pdus(&good_wire.output)[0].1).contains("NotUnderstood"));
     }
 
     #[test]

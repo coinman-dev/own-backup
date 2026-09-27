@@ -110,19 +110,22 @@ mod imp {
         // a DACL-restricted named pipe (no listening TCP port). Foreground/dev
         // (`--foreground`) still uses loopback TCP.
         let runtime = tokio::runtime::Runtime::new()?;
-        runtime.block_on(crate::run_main_loop(shutdown_signal, false, os_rx))?;
+        let run_result = runtime.block_on(crate::run_main_loop(shutdown_signal, false, os_rx));
 
-        // Report Stopped
+        // Startup can fail after Running was reported (for example, when the
+        // job store is unreadable). Report Stopped on that path too so the SCM
+        // does not keep advertising a service that never opened its pipe.
         status_handle.set_service_status(ServiceStatus {
             service_type: ServiceType::OWN_PROCESS,
             current_state: ServiceState::Stopped,
             controls_accepted: ServiceControlAccept::empty(),
-            exit_code: ServiceExitCode::Win32(0),
+            exit_code: ServiceExitCode::Win32(if run_result.is_ok() { 0 } else { 1 }),
             checkpoint: 0,
             wait_hint: Duration::default(),
             process_id: None,
         })?;
 
+        run_result?;
         info!("Service stopped");
         Ok(())
     }

@@ -170,19 +170,23 @@ pub fn verify_tree(src_root: &Path, dst_root: &Path, cancel: &CancelToken) -> Re
                     tr!("file_restore_win.verify_listing_diff", path = dst.display()).into_owned(),
                 ));
             }
+            // A directory's BackupRead streams carry its ACL, ADS and other
+            // metadata. Comparing only its children misses a changed ACL on
+            // an otherwise identical tree. Volume roots are deliberately not
+            // compared: copy_tree does not restore their metadata.
+            if backup_stream_digest(&src, cancel, &mut buf)?
+                != backup_stream_digest(&dst, cancel, &mut buf)?
+            {
+                return Err(OwnBackupError::RestoreIncompatible(
+                    tr!("file_restore_win.verify_content_diff", path = dst.display())
+                        .into_owned(),
+                ));
+            }
             if from_kind & FILE_ATTRIBUTE_DIRECTORY.0 != 0
                 && from_kind & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0
             {
                 stack.push((src, dst));
             } else {
-                if backup_stream_digest(&src, cancel, &mut buf)?
-                    != backup_stream_digest(&dst, cancel, &mut buf)?
-                {
-                    return Err(OwnBackupError::RestoreIncompatible(
-                        tr!("file_restore_win.verify_content_diff", path = dst.display())
-                            .into_owned(),
-                    ));
-                }
                 out.files += 1;
                 out.bytes += from.size;
             }
