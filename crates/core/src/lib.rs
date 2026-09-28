@@ -540,6 +540,13 @@ pub struct JobRun {
     /// with "Исключено файлов: 0" over twelve rules that were never applied.
     #[serde(default)]
     pub file_scan_skipped: String,
+    /// The rules DID run, but the excluded files' catalog entries could not be
+    /// deleted from the image — why, in words; empty when they were. Their
+    /// contents are not in the copy either way. Kept apart from
+    /// `file_scan_skipped` because it means the opposite thing: that one says
+    /// the rules never ran, and this run's "Исключено файлов: N" is true.
+    #[serde(default)]
+    pub excluded_entries_kept: String,
     /// Every image this run produced — one per source volume.
     ///
     /// `image_path` and `base_image_path` above describe only the FIRST volume
@@ -2727,6 +2734,13 @@ async fn perform_backup(
                     }
                     run.file_scan_skipped.push_str(&line);
                 }
+                if let Some(why) = summary.excluded_entries_kept {
+                    let line = if volumes.len() > 1 { format!("{device}: {why}") } else { why };
+                    if !run.excluded_entries_kept.is_empty() {
+                        run.excluded_entries_kept.push_str("; ");
+                    }
+                    run.excluded_entries_kept.push_str(&line);
+                }
 
                 let actual_kind = match summary.backup_kind {
                     BT::Full => "full",
@@ -3080,6 +3094,7 @@ async fn perform_disk_backup(
             run.excluded_bytes = summary.excluded_bytes;
             run.categories = summary.categories;
             run.file_scan_skipped = summary.file_scan_skipped.unwrap_or_default();
+            run.excluded_entries_kept = summary.excluded_entries_kept.unwrap_or_default();
             run.duration_secs = summary.duration.as_secs_f64();
             // Record what was ACTUALLY produced (the engine may have fallen back
             // to a full when the parent chain was unusable) so the next run plans

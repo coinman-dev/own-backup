@@ -343,6 +343,17 @@ Cargo workspace with crates:
   byte (the only way to produce state 7 on Linux) and fails if either reader
   regresses. The write path refuses a partial block outright rather than
   writing bytes that would read back from the parent.
+- **An iSCSI session's disk is chosen by device type AND image size
+  (2026-09-28).** Right after a login the initiator lists the session's device
+  before PnP has filled it in: its `STORAGE_DEVICE_NUMBER` is zeros, and zero
+  is a real disk number — on 2026-09-25 it was the system SSD, and only the
+  size check kept the removal pass from writing to it.
+  `iscsi::initiator::disk_candidates` takes only `FILE_DEVICE_DISK` entries,
+  `iscsi_win::wait_for_disk` only the one of exactly the image's size. Every
+  error after a successful login logs out BEFORE the target stops (a target
+  stopped under a live session leaves it behind, and the next attempt cannot
+  clear it), and an `Attached` is torn down once — its disk number is TAKEN,
+  because after the logout Windows hands that number to the next disk.
 - Windows-specific code gated with `#[cfg(target_os = "windows")]`
 - All traits (`BlockReader`, `BlockWriter`, `UsedSectorMap`, `SnapshotProvider`,
   `DiskInventory`) have mock implementations for Linux testing

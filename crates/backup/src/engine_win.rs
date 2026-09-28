@@ -150,6 +150,16 @@ pub struct VolumeBackupSummary {
     /// tells the user the rules matched nothing — when in fact they were never
     /// applied. That difference is the whole point of having the rules.
     pub file_scan_skipped: Option<String>,
+    /// Why the excluded files' catalog entries were NOT deleted from the
+    /// image, in words for the result screen — `None` when they were, or when
+    /// there was nothing to delete. See [`DiskBackupSummary::excluded_entries_kept`].
+    pub excluded_entries_kept: Option<String>,
+}
+
+/// The result screen's sentence for a removal pass that did not happen: the
+/// pass itself logged why, in detail.
+fn entries_kept_reason() -> String {
+    tr!("engine_win.entries_kept").into_owned()
 }
 
 /// Write target behind the format switch. VHDX goes through the kernel
@@ -1823,12 +1833,13 @@ fn backup_volume_inner(
         }
     }
 
+    let mut excluded_entries_kept: Option<String> = None;
     if !removal_paths.is_empty() {
         let tick = &mut |n, total| phase_tick("exclusions", n, total);
-        match req.image_format {
+        let removed = match req.image_format {
             ImageFormat::Vhdx => {
                 // Differencing child + MergeVirtualDisk via the kernel VHDX driver.
-                if crate::true_removal_win::remove_excluded_from_image(
+                crate::true_removal_win::remove_excluded_from_image(
                     &req.image_path,
                     &removal_paths,
                     data_offset,
@@ -1838,9 +1849,6 @@ fn backup_volume_inner(
                     tick,
                 )?
                 .is_some()
-                {
-                    used_blocks = checksums.len() as u64;
-                }
             }
             // An encrypted image gets the same pass over a SEALED scratch, and
             // the changed clusters go back by rebuilding the container: it is
@@ -1848,7 +1856,7 @@ fn backup_volume_inner(
             ImageFormat::Qcow2 if req.encryption.is_some() => {
                 let keys = req.encryption.as_ref().expect("checked above");
                 let chain = keys.open_chain_of(&req.image_path)?;
-                if crate::obk_removal_win::remove_excluded_from_obk(
+                crate::obk_removal_win::remove_excluded_from_obk(
                     &req.image_path,
                     &chain.key,
                     &removal_paths,
@@ -1860,14 +1868,11 @@ fn backup_volume_inner(
                     tick,
                 )?
                 .is_some()
-                {
-                    used_blocks = checksums.len() as u64;
-                }
             }
             ImageFormat::Qcow2 => {
                 // RW-mount over a CoW overlay, delete, fold the touched
                 // clusters back with Qcow2InPlaceMerge (Q-R3).
-                if crate::qcow2_removal_win::remove_excluded_from_qcow2(
+                crate::qcow2_removal_win::remove_excluded_from_qcow2(
                     &req.image_path,
                     &removal_paths,
                     data_offset,
@@ -1878,10 +1883,12 @@ fn backup_volume_inner(
                     tick,
                 )?
                 .is_some()
-                {
-                    used_blocks = checksums.len() as u64;
-                }
             }
+        };
+        if removed {
+            used_blocks = checksums.len() as u64;
+        } else {
+            excluded_entries_kept = Some(entries_kept_reason());
         }
     }
 
@@ -2068,6 +2075,7 @@ fn backup_volume_inner(
         excluded_bytes,
         categories,
         file_scan_skipped,
+        excluded_entries_kept,
     })
 }
 
@@ -2188,6 +2196,17 @@ pub struct DiskBackupSummary {
     /// partition is barely better than silence. `None` when every partition
     /// was walked.
     pub file_scan_skipped: Option<String>,
+    /// Why the excluded files' catalog entries were NOT deleted from the
+    /// image, in words for the result screen — `None` when they were, or when
+    /// there was nothing to delete.
+    ///
+    /// Their contents never enter the copy either way (the MFT road leaves
+    /// their clusters out); what stays is their names and empty shells in the
+    /// image's filesystem, which the rules promise not to happen (decision of
+    /// 2026-07-28). On 2026-09-25 the pass failed over an iSCSI session left
+    /// behind, 746 paths stayed in that night's copy — and the run was a plain
+    /// success, with the reason in the service log only.
+    pub excluded_entries_kept: Option<String>,
 }
 
 /// One prepared partition: its VSS snapshot, decrypt params, used-map and the
@@ -3586,6 +3605,7 @@ fn backup_disk_inner(
         .filter(|p| !p.removal_paths.is_empty())
         .map(|p| (p.part_offset, std::mem::take(&mut p.removal_paths)))
         .collect();
+    let mut excluded_entries_kept: Option<String> = None;
     if !removal.is_empty() {
         // Каждый проход удаления называет свой итог сам: удаление — пути,
         // зануление — куски, пере-хеширование — блоки. Ноль значит «итог
@@ -3602,7 +3622,7 @@ fn backup_disk_inner(
                 excluded: None,
             });
         };
-        match (&req.encryption, req.image_format) {
+        let removed = match (&req.encryption, req.image_format) {
             // Encrypted: the same mount-and-delete, over a sealed scratch, with
             // the container rebuilt around whatever the driver changed. A
             // plaintext scratch beside an encrypted copy would hold exactly the
@@ -3618,18 +3638,18 @@ fn backup_disk_inner(
                     crate::qcow2::zstd_level_or_default(req.zstd_level),
                     &mut checksums,
                     &mut tick,
-                )?;
+                )?
+                .is_some()
             }
-            (None, ImageFormat::Vhdx) => {
-                crate::true_removal_win::remove_excluded_from_disk_image(
-                    &req.image_path,
-                    &removal,
-                    plan.image_size,
-                    req.block_size,
-                    &mut checksums,
-                    &mut tick,
-                )?;
-            }
+            (None, ImageFormat::Vhdx) => crate::true_removal_win::remove_excluded_from_disk_image(
+                &req.image_path,
+                &removal,
+                plan.image_size,
+                req.block_size,
+                &mut checksums,
+                &mut tick,
+            )?
+            .is_some(),
             (None, ImageFormat::Qcow2) => {
                 crate::qcow2_removal_win::remove_excluded_from_disk_image_qcow2(
                     &req.image_path,
@@ -3639,8 +3659,14 @@ fn backup_disk_inner(
                     Some(crate::qcow2::zstd_level_or_default(req.zstd_level)),
                     &mut checksums,
                     &mut tick,
-                )?;
+                )?
+                .is_some()
             }
+        };
+        // The pass logged why in detail; until this line that log was the
+        // only place it was said, and the run showed a plain success.
+        if !removed {
+            excluded_entries_kept = Some(entries_kept_reason());
         }
     }
 
@@ -3800,6 +3826,7 @@ fn backup_disk_inner(
         } else {
             Some(scan_skips.join("; "))
         },
+        excluded_entries_kept,
     })
 }
 

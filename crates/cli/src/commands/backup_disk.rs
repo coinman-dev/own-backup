@@ -309,6 +309,9 @@ pub async fn run(args: BackupDiskArgs) -> own_backup_common::Result<()> {
     if let Some(skipped) = &summary.file_scan_skipped {
         println!("  Без разбора файлов: {skipped}");
     }
+    if let Some(kept) = &summary.excluded_entries_kept {
+        println!("  Исключённые остались в каталоге копии: {kept}");
+    }
     println!("  Заняло:      {:.1} с", summary.duration.as_secs_f64());
     if args.verify {
         println!();

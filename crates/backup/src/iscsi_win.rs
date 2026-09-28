@@ -17,7 +17,10 @@
 //! * **The disk.** Logging in succeeds before the disk exists: the session is
 //!   up, PnP is still building the device. So the device list is polled, and a
 //!   timeout says the session is alive but the disk never came — which is a
-//!   different problem from a failed login and gets a different message.
+//!   different problem from a failed login and gets a different message. A
+//!   disk counts only when its entry says it is a disk AND it is exactly the
+//!   size we serve: on 2026-09-25 an entry PnP had not filled in yet read as
+//!   "disk 0", the system SSD ([`crate::iscsi::initiator`]).
 
 #![cfg(target_os = "windows")]
 
@@ -30,12 +33,14 @@ use windows::core::PCWSTR;
 use windows::Win32::Storage::IscsiDisc::{
     AddIScsiSendTargetPortalW, AddIScsiStaticTargetW, GetDevicesForIScsiSessionW,
     GetIScsiSessionListW, LoginIScsiTargetW, LogoutIScsiTarget, RemoveIScsiSendTargetPortalW,
-    RemoveIScsiStaticTargetW, ISCSI_CONNECTION_INFOW, ISCSI_DEVICE_ON_SESSIONW,
-    ISCSI_SESSION_INFOW, ISCSI_TARGET_PORTALW, ISCSI_TARGET_PORTAL_GROUPW,
-    ISCSI_UNIQUE_SESSION_ID, ISCSI_LOGIN_OPTIONS, ISCSI_CHAP_AUTH_TYPE,
+    RemoveIScsiStaticTargetW, ReportIScsiSendTargetPortalsW, ISCSI_CONNECTION_INFOW,
+    ISCSI_DEVICE_ON_SESSIONW, ISCSI_SESSION_INFOW, ISCSI_TARGET_PORTALW,
+    ISCSI_TARGET_PORTAL_GROUPW, ISCSI_TARGET_PORTAL_INFOW, ISCSI_UNIQUE_SESSION_ID,
+    ISCSI_LOGIN_OPTIONS, ISCSI_CHAP_AUTH_TYPE,
 };
 
-use crate::win_device::to_wide;
+use crate::iscsi::initiator::{disk_candidates, SessionDevice};
+use crate::win_device::{to_wide, WinRawDevice};
 
 /// The Microsoft iSCSI Initiator service.
 pub const INITIATOR_SERVICE: &str = "MSiSCSI";
@@ -473,6 +478,9 @@ pub fn status() -> InitiatorStatus {
 /// A live session and the disk it produced. Logging out is [`Self::logout`];
 /// dropping it without that leaves the disk attached, so the caller is expected
 /// to call it — which [`crate::attach_win`] does even when its own work failed.
+/// (It did not, until 2026-09-28: a refused size check returned without logging
+/// out, the target stopped under a live session, and the next address found it
+/// and could not clear it.)
 pub struct AttachedTarget {
     session: ISCSI_UNIQUE_SESSION_ID,
     target: String,
@@ -490,15 +498,18 @@ fn portal_for(address: &str, port: u16) -> ISCSI_TARGET_PORTALW {
     portal
 }
 
-/// Log the initiator in to our target and wait for its disk.
+/// Log the initiator in to our target and wait for its disk — the disk of
+/// exactly `image_size` bytes that the session names as a disk.
 pub fn login(
     address: &str,
     port: u16,
     target: &str,
     chap_secret: &[u8; 16],
+    image_size: u64,
 ) -> Result<AttachedTarget> {
     ensure_initiator_service()?;
-    clear_stale_sessions(target, (address, port))?;
+    clear_stale_sessions(target, (address, port), image_size)?;
+    clear_dead_portals();
 
     let iqn = to_wide(target);
     let mut portal = portal_for(address, port);
@@ -623,7 +634,7 @@ pub fn login(
         .tap(target));
     }
 
-    match wait_for_disk(&mut attached.session) {
+    match wait_for_disk(&mut attached.session, target, image_size) {
         Ok(disk) => {
             attached.disk_number = disk;
             info!(target, %address, port, disk, "iSCSI target attached");
@@ -636,40 +647,107 @@ pub fn login(
     }
 }
 
-/// The disk number of the first device on this session, once PnP has made one.
-fn wait_for_disk(session: &mut ISCSI_UNIQUE_SESSION_ID) -> Result<u32> {
+/// The disks a session names, as `(last initiator code, disk numbers)`.
+/// Entries PnP has not filled in yet are not disks
+/// ([`crate::iscsi::initiator::disk_candidates`]).
+fn session_disks(session: &mut ISCSI_UNIQUE_SESSION_ID) -> (u32, Vec<u32>) {
+    let mut count = 0u32;
+    // Ask for the count first: the device list is a few kilobytes per entry
+    // and there is no point guessing.
+    // SAFETY: a null device array with a zero count is how the size is asked for.
+    let code = unsafe { GetDevicesForIScsiSessionW(session, &mut count, std::ptr::null_mut()) };
+    if count == 0 {
+        return (code, Vec::new());
+    }
+    let mut devices = vec![ISCSI_DEVICE_ON_SESSIONW::default(); count as usize];
+    // SAFETY: the array matches the count passed alongside it.
+    let code = unsafe { GetDevicesForIScsiSessionW(session, &mut count, devices.as_mut_ptr()) };
+    if code != 0 {
+        return (code, Vec::new());
+    }
+    let reduced: Vec<SessionDevice> = devices
+        .iter()
+        .take(count as usize)
+        .map(|d| SessionDevice {
+            device_type: d.StorageDeviceNumber.DeviceType,
+            device_number: d.StorageDeviceNumber.DeviceNumber,
+        })
+        .collect();
+    (code, disk_candidates(&reduced))
+}
+
+/// What a disk a session names turned out to be.
+enum DiskCheck {
+    /// Exactly the size we serve.
+    Ours,
+    /// Does not open yet — PnP is still building it. Worth waiting for.
+    NotYet(String),
+    /// Opens, and is some other size: not our image, whatever the list says.
+    NotOurs(String),
+}
+
+/// Is `\\.\PhysicalDrive{disk}` the image? Opened for reading only: this runs
+/// BEFORE the disk is known to be ours.
+fn check_disk(disk: u32, image_size: u64) -> DiskCheck {
+    let physical = format!(r"\\.\PhysicalDrive{disk}");
+    match WinRawDevice::open_read(&physical) {
+        Ok(d) if d.length() == image_size => DiskCheck::Ours,
+        Ok(d) => DiskCheck::NotOurs(format!(
+            "{physical} is {} bytes, the image is {image_size}",
+            d.length()
+        )),
+        Err(e) => DiskCheck::NotYet(format!("{physical} does not open yet: {e}")),
+    }
+}
+
+/// The disk this session produced, once PnP has made it: a device the session
+/// names as a disk, of exactly the image's size. Anything else is waited past,
+/// not taken — the size check that stopped the 2026-09-25 attach from writing
+/// to the system SSD now also keeps it from giving up.
+fn wait_for_disk(
+    session: &mut ISCSI_UNIQUE_SESSION_ID,
+    target: &str,
+    image_size: u64,
+) -> Result<u32> {
     let deadline = Instant::now() + DISK_TIMEOUT;
     // The last code the initiator gave us, for the timeout message: "no disk
     // yet" and "the session is gone" arrive here as different numbers.
     let mut last;
+    // Disks the session named that were not the image, each said once.
+    let mut not_ours: Vec<(u32, String)> = Vec::new();
+    let mut not_yet: Option<String> = None;
     loop {
-        let mut count = 0u32;
-        // Ask for the count first: the device list is a few kilobytes per entry
-        // and there is no point guessing.
-        // SAFETY: a null device array with a zero count is how the size is asked for.
-        last = unsafe { GetDevicesForIScsiSessionW(session, &mut count, std::ptr::null_mut()) };
-        if count > 0 {
-            let mut devices = vec![ISCSI_DEVICE_ON_SESSIONW::default(); count as usize];
-            // SAFETY: the array matches the count passed alongside it.
-            last = unsafe {
-                GetDevicesForIScsiSessionW(session, &mut count, devices.as_mut_ptr())
-            };
-            if last == 0 {
-                if let Some(disk) = devices
-                    .iter()
-                    .map(|d| d.StorageDeviceNumber.DeviceNumber)
-                    .find(|n| *n != u32::MAX)
-                {
-                    return Ok(disk);
+        let (code, disks) = session_disks(session);
+        last = code;
+        for disk in disks {
+            match check_disk(disk, image_size) {
+                DiskCheck::Ours => return Ok(disk),
+                DiskCheck::NotYet(why) => not_yet = Some(why),
+                DiskCheck::NotOurs(why) => {
+                    if !not_ours.iter().any(|(d, _)| *d == disk) {
+                        warn!(target, disk, reason = %why,
+                              "iSCSI: the session names a disk that is not the image — not using it");
+                        not_ours.push((disk, why));
+                    }
                 }
             }
         }
         if Instant::now() >= deadline {
+            if !not_ours.is_empty() {
+                let named: Vec<String> = not_ours.iter().map(|(_, why)| why.clone()).collect();
+                return Err(dev(format!(
+                    "iSCSI: logged in, but within {} s the session named no disk of the image's \
+                     size ({}). Nothing was written to any of them.",
+                    DISK_TIMEOUT.as_secs(),
+                    named.join("; ")
+                )));
+            }
             return Err(dev(format!(
-                "iSCSI: logged in, but no disk appeared within {} s (last code {}). The session \
+                "iSCSI: logged in, but no disk appeared within {} s (last code {}{}). The session \
                  exists — check Disk Management and the initiator's session list.",
                 DISK_TIMEOUT.as_secs(),
-                describe(last)
+                describe(last),
+                not_yet.map(|w| format!("; {w}")).unwrap_or_default()
             )));
         }
         std::thread::sleep(Duration::from_millis(250));
@@ -855,7 +933,15 @@ fn target_answers(portals: &[(String, u16)], skip: (&str, u16)) -> bool {
 /// login — which the initiator would otherwise refuse outright with
 /// `ISDSC_TARGET_ALREADY_LOGGED_IN`. A session whose target still answers is a
 /// live mount and is left alone.
-fn clear_stale_sessions(target: &str, ours: (&str, u16)) -> Result<()> {
+///
+/// A session whose disk Windows still holds — it mounted the image's volumes
+/// before the session was abandoned — refuses the logout with
+/// `ISDSC_DEVICE_BUSY_ON_SESSION` for as long as it likes (65 s on 2026-09-25,
+/// and the copy lost its exclusion pass over it). Its disk is let go of the
+/// way a normal teardown does it, then the logout is tried again. Only a disk
+/// the session names as a disk and of exactly `image_size` bytes is touched:
+/// the session is to this very image, so that is its size.
+fn clear_stale_sessions(target: &str, ours: (&str, u16), image_size: u64) -> Result<()> {
     let sessions = match held_sessions() {
         Ok(s) => s,
         Err(e) => {
@@ -876,11 +962,81 @@ fn clear_stale_sessions(target: &str, ours: (&str, u16)) -> Result<()> {
              it any more — logging it out"
         );
         if !logout_session(&mut s.id, target) {
-            return Err(dev(tr!("iscsi_win.stale_session_busy")).tap(target));
+            let disks: Vec<u32> = session_disks(&mut s.id)
+                .1
+                .into_iter()
+                .filter(|d| matches!(check_disk(*d, image_size), DiskCheck::Ours))
+                .collect();
+            if disks.is_empty() {
+                return Err(dev(tr!("iscsi_win.stale_session_busy")).tap(target));
+            }
+            for disk in &disks {
+                warn!(target, disk, "iSCSI: the left-over session's disk is still held — letting go of it");
+                crate::attach_win::let_go_of_disk(*disk, &format!(r"\\.\PhysicalDrive{disk}"));
+            }
+            if !logout_session(&mut s.id, target) {
+                return Err(dev(tr!("iscsi_win.stale_session_busy")).tap(target));
+            }
         }
         info!(target, "iSCSI: the left-over session is gone");
     }
     Ok(())
+}
+
+/// Where the dynamic port range starts on Windows — where `bind(…:0)` puts our
+/// target, and so where every portal of ours sits.
+const DYNAMIC_PORTS_START: u16 = 49152;
+
+/// Discovery portals of earlier runs that nothing serves any more, removed.
+///
+/// Every mount registers a SendTargets portal on its address and a fresh port,
+/// and takes it back at logout. A run that never logged out — the 2026-09-25
+/// attach, a crash, a killed process — left its portal registered for good:
+/// this machine had sixteen of them on 2026-09-28, each one a place the
+/// initiator goes on trying. Ours are the loopback ones on a dynamic port, and
+/// one whose port nobody answers on serves nothing. A portal on another address
+/// or on a fixed port such as 3260 is somebody else's configuration and is left
+/// alone. Best effort: a portal that stays is a nuisance, not a failure.
+fn clear_dead_portals() -> usize {
+    let mut count = 0u32;
+    // SAFETY: a null array with a zero count is how the count is asked for.
+    let _ = unsafe { ReportIScsiSendTargetPortalsW(&mut count, std::ptr::null_mut()) };
+    if count == 0 {
+        return 0;
+    }
+    let mut portals = vec![ISCSI_TARGET_PORTAL_INFOW::default(); count as usize];
+    // SAFETY: the array matches the count passed alongside it.
+    let code = unsafe { ReportIScsiSendTargetPortalsW(&mut count, portals.as_mut_ptr()) };
+    if code != 0 {
+        warn!(reason = %describe(code), "iSCSI: could not list the discovery portals");
+        return 0;
+    }
+    let mut removed = 0;
+    for p in portals.iter().take(count as usize) {
+        let end = p.Address.iter().position(|&c| c == 0).unwrap_or(p.Address.len());
+        let address = String::from_utf16_lossy(&p.Address[..end]);
+        let port = p.Socket;
+        if address != "127.0.0.1" || port < DYNAMIC_PORTS_START {
+            continue;
+        }
+        if target_answers(&[(address.clone(), port)], ("", 0)) {
+            continue;
+        }
+        let mut portal = portal_for(&address, port);
+        // SAFETY: the portal struct outlives the call.
+        let code = unsafe {
+            RemoveIScsiSendTargetPortalW(PCWSTR::null(), ANY_INITIATOR_PORT, &mut portal)
+        };
+        if code == 0 {
+            removed += 1;
+        } else {
+            warn!(port, reason = %describe(code), "iSCSI: a dead discovery portal was not removed");
+        }
+    }
+    if removed > 0 {
+        info!(removed, "iSCSI: discovery portals of earlier runs that nothing serves — removed");
+    }
+    removed
 }
 
 /// At service start: every session to an image of ours that nothing serves any
@@ -913,6 +1069,7 @@ pub fn clear_orphaned_sessions() -> usize {
             cleared += 1;
         }
     }
+    clear_dead_portals();
     cleared
 }
 

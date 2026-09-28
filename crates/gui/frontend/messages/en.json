@@ -124,6 +124,7 @@
   "dash_consolidated": "Versions consolidated: {count} — the oldest increments were merged into the full backup, which now matches a later day.",
   "dash_excluded_files": "Files excluded: {count} ({size}).",
   "dash_excl_ignored": "Exclusions were not applied",
+  "dash_entries_kept": "Excluded files remain in the backup's catalog:",
   "dash_rules_count": [
     {
       "declarations": [

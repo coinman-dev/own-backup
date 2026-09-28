@@ -444,6 +444,10 @@ export interface JobRun {
   /** Why that walk did not run; '' when it did. Explains both the missing
    *  breakdown and exclusion rules that were never applied. */
   file_scan_skipped: string;
+  /** The rules ran, but the excluded files' catalog entries stayed in the
+   *  image — why; '' when they were deleted. Their contents are not in the
+   *  copy either way. Absent in runs recorded before 2026-09-28. */
+  excluded_entries_kept?: string;
   /** Every image this run produced, one per source volume. `image_path` and
    *  `base_image_path` above describe only the first. Empty in runs recorded
    *  before this field existed. */

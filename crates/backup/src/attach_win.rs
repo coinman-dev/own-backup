@@ -60,28 +60,16 @@ impl Attached {
     }
 
     fn teardown(&mut self) {
+        // Runs twice for every `detach()` — once there, once in `Drop` — so the
+        // disk number is TAKEN, not read. After the logout that number belongs
+        // to nobody, and the next disk Windows numbers gets it: the second run
+        // used to force-dismount and offline whatever disk that was (seen
+        // 2026-09-28 as 11 s of retries on a `\\.\PhysicalDrive5` already gone).
+        let disk_number = std::mem::replace(&mut self.disk_number, u32::MAX);
         // Anything Windows mounted from this disk has to let go first, or the
         // logout leaves a device nobody can remove.
-        if self.disk_number != u32::MAX {
-            for volume in crate::volume_win::all_volume_roots_on_disk(self.disk_number) {
-                let dismounted = crate::volume_win::dismount_volume_forced(&volume);
-                info!(device = %volume, dismounted, "attached image: volume force-dismounted");
-            }
-            // A dismounted volume can still keep the initiator's device busy
-            // while PnP tears its stack down. Offline the disk for this
-            // session before LogoutIScsiTarget; leave its read-only flag and
-            // persisted disk attributes untouched.
-            match open_write_retry(&self.physical) {
-                Ok(device) => {
-                    if let Err(e) = device.set_offline_this_session() {
-                        warn!(physical = %self.physical, error = %e,
-                              "attached image: could not offline disk before iSCSI logout");
-                    }
-                    let _ = device.update_properties();
-                }
-                Err(e) => warn!(physical = %self.physical, error = %e,
-                                "attached image: could not open disk before iSCSI logout"),
-            }
+        if disk_number != u32::MAX {
+            let_go_of_disk(disk_number, &self.physical);
         }
         if let Some(target) = self.target.take() {
             // The target stops below either way: this may be the end of a
@@ -106,6 +94,48 @@ impl Attached {
 impl Drop for Attached {
     fn drop(&mut self) {
         self.teardown();
+    }
+}
+
+/// Take down what Windows built on an attached image's disk, so the initiator
+/// can log the session out: every volume force-dismounted, then the disk
+/// offline for this session (its read-only flag and persisted attributes
+/// untouched).
+///
+/// ONLY for a disk known to be the image. Force-dismounting throws away cached
+/// writes — right for an image, whose volumes are Windows' guesses, and data
+/// loss on a real disk. Callers pass a disk the session named as a disk and
+/// that is exactly the image's size.
+pub(crate) fn let_go_of_disk(disk_number: u32, physical: &str) {
+    for volume in crate::volume_win::all_volume_roots_on_disk(disk_number) {
+        let dismounted = crate::volume_win::dismount_volume_forced(&volume);
+        info!(device = %volume, dismounted, "attached image: volume force-dismounted");
+    }
+    // A dismounted volume can still keep the initiator's device busy while
+    // PnP tears its stack down. Offline the disk for this session before
+    // LogoutIScsiTarget.
+    match open_write_retry(physical) {
+        Ok(device) => {
+            if let Err(e) = device.set_offline_this_session() {
+                warn!(physical = %physical, error = %e,
+                      "attached image: could not offline disk before iSCSI logout");
+            }
+            let _ = device.update_properties();
+        }
+        Err(e) => warn!(physical = %physical, error = %e,
+                        "attached image: could not open disk before iSCSI logout"),
+    }
+}
+
+/// Give up on a session that was logged in but will not be used. Best effort,
+/// like every teardown: the error that brought us here is the one to report.
+fn log_out_unused(target: AttachedTarget, physical: &str) {
+    if !target.logout() {
+        warn!(
+            physical = %physical,
+            "iSCSI: the initiator kept a session we are abandoning — the next login to this \
+             image clears it"
+        );
     }
 }
 
@@ -200,19 +230,37 @@ fn attach_at(
         })
         .map_err(|e| dev(format!("spawn iSCSI target: {e}")))?;
 
-    // From here on the target is running, so every exit has to stop it.
+    // From here on the target is running, so every exit has to stop it — and
+    // once the login succeeded, every exit has to log out BEFORE it stops. A
+    // target stopped under a live session leaves that session behind, and the
+    // next address then found it and could not clear it (2026-09-25).
     let attached = (|| -> Result<Attached> {
-        let target = iscsi_win::login(&address.to_string(), port, iqn, &chap_secret)?;
+        let target =
+            iscsi_win::login(&address.to_string(), port, iqn, &chap_secret, virtual_size)?;
         let disk_number = target.disk_number;
         let physical = format!(r"\\.\PhysicalDrive{disk_number}");
 
-        // The size check, before anything is written through this handle.
-        let device = open_write_retry(&physical)?;
+        // The size check, before anything is written through this handle. The
+        // login chose the disk by the same size, through a read handle; this is
+        // the handle that writes, so it is asked again.
+        let device = match open_write_retry(&physical) {
+            Ok(device) => device,
+            Err(e) => {
+                // The disk is the image (the login measured it), Windows just
+                // will not hand it over: let go of what it built, then log out.
+                let_go_of_disk(disk_number, &physical);
+                log_out_unused(target, &physical);
+                return Err(e);
+            }
+        };
         if device.length() != virtual_size {
+            let length = device.length();
+            drop(device);
+            // Not ours after all: log out without touching this disk.
+            log_out_unused(target, &physical);
             return Err(dev(format!(
-                "{physical} is {} bytes, expected {virtual_size} — refusing to touch a disk \
-                 that is not the attached image",
-                device.length()
+                "{physical} is {length} bytes, expected {virtual_size} — refusing to touch a \
+                 disk that is not the attached image"
             )));
         }
         let _ = device.update_properties();

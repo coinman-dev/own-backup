@@ -20,8 +20,11 @@
 //! Only the listener is here; the wire is in [`session`] and the commands in
 //! [`scsi`]. All three are cross-platform on purpose: the protocol is the part
 //! worth testing, and it tests on the machine the code is written on. Windows
-//! contributes only the initiator side ([`crate::iscsi_win`]).
+//! contributes only the initiator side ([`crate::iscsi_win`]); the one decision
+//! it makes that could hit the wrong disk — which device of a session is ours —
+//! is in [`initiator`], for the same reason.
 
+pub mod initiator;
 pub mod scsi;
 pub mod session;
 
