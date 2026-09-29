@@ -32,6 +32,31 @@ pub fn open_database(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+/// Open the service-only store for remembered volume passwords. The caller is
+/// responsible for creating and validating its private parent directory before
+/// this call; SQLite must never create this file in the public data directory.
+pub fn open_volume_secret_database(path: &Path) -> Result<Connection> {
+    let conn = Connection::open(path).map_err(|e| OwnBackupError::Database(e.to_string()))?;
+    conn.execute_batch(
+        "PRAGMA journal_mode=WAL;
+         PRAGMA synchronous=FULL;
+         PRAGMA secure_delete=ON;
+         CREATE TABLE IF NOT EXISTS volume_secrets (
+             volume_key TEXT PRIMARY KEY,
+             protected_blob BLOB NOT NULL,
+             created_at TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS volume_secret_migration_pending (
+             id INTEGER PRIMARY KEY CHECK (id = 1)
+         );
+         CREATE TABLE IF NOT EXISTS volume_secret_migration_done (
+             id INTEGER PRIMARY KEY CHECK (id = 1)
+         );",
+    )
+    .map_err(|e| OwnBackupError::Database(e.to_string()))?;
+    Ok(conn)
+}
+
 fn run_migrations(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_version (

@@ -524,8 +524,11 @@ pub async fn run_main_loop(
         }
     };
 
-    let _conn = own_backup_metadata::open_database(&config.db_path())?;
+    let conn = own_backup_metadata::open_database(&config.db_path())?;
     info!("Metadata database initialized");
+    // Migration may VACUUM this database. Do not hold an idle connection open
+    // for the rest of the service lifetime.
+    drop(conn);
 
     // Build the orchestrator core: job store, serial run queue, cancel flag,
     // an event fan-out for progress streams, and the background worker that
@@ -569,8 +572,30 @@ pub async fn run_main_loop(
 
     let sink: std::sync::Arc<dyn own_backup_core::EventSink> =
         std::sync::Arc::new(grpc_server::GrpcEventSink { tx: events.clone() });
-    // Passwords for encrypted volumes: cached for this session, plus the
-    // OS-protected store (metadata DB) for remembered ones.
+    // The installed Windows service keeps remembered volume passwords in its
+    // SYSTEM-only directory. Validate and pin that directory before SQLite can
+    // create the private DB or its WAL/SHM files; complete legacy migration
+    // before the worker, scheduler or RPC starts.
+    #[cfg(target_os = "windows")]
+    let _private_secret_guard = if !use_tcp && !own_backup_common::media_mode::is_media_mode() {
+        Some(own_backup_backup::seal::local::PrivateSecretDatabase::new(&config.data_dir)?)
+    } else {
+        None
+    };
+    #[cfg(target_os = "windows")]
+    let passwords = if let Some(guard) = &_private_secret_guard {
+        let store = own_backup_core::PasswordStore::new_private(
+            config.db_path(),
+            guard.path().to_path_buf(),
+        );
+        let moved = store.migrate_legacy(&config.db_path())?;
+        guard.validate_files()?;
+        info!(moved, "legacy volume passwords migrated to private database");
+        std::sync::Arc::new(store)
+    } else {
+        std::sync::Arc::new(own_backup_core::PasswordStore::new(config.db_path()))
+    };
+    #[cfg(not(target_os = "windows"))]
     let passwords = std::sync::Arc::new(own_backup_core::PasswordStore::new(config.db_path()));
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let worker = tokio::spawn(own_backup_core::run_queue_worker(

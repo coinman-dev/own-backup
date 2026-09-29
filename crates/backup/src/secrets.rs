@@ -7,8 +7,10 @@
 //! - **Windows**: DPAPI at machine scope ([`DpapiSecretStore`]). The OS holds
 //!   the key, so the stored blob is bound to this machine — a copied database
 //!   file cannot be decrypted elsewhere — yet the backup service (a service
-//!   account) can still decrypt it for scheduled runs. An app-specific entropy
-//!   value is mixed in as defense in depth.
+//!   account) can still decrypt it for scheduled runs. Machine-scope DPAPI does
+//!   not prevent another local user with the blob from decrypting it: the
+//!   service stores blobs only in its SYSTEM-only private directory. The
+//!   app-specific entropy value is defense in depth, not an access boundary.
 //! - **Linux**: not implemented yet; the methods return an error rather than
 //!   ever writing plaintext. A libsecret / root-only key-file backend will land
 //!   with Linux support.

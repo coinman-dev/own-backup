@@ -202,6 +202,83 @@ fn enforce_single_instance() {
     std::mem::forget(handle);
 }
 
+/// A WebView failure occurs before the frontend exists, so it needs a native
+/// dialog. In particular, a machine without WebView2 must see the preflight
+/// explanation instead of Tauri's bare "Error" window or a panic.
+#[cfg(target_os = "windows")]
+fn show_window_start_error(
+    error: &impl std::fmt::Display,
+    checks: &[own_backup_backup::media_preflight_win::Check],
+) {
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+
+    let failures: Vec<_> = checks
+        .iter()
+        .filter(|check| check.level == own_backup_backup::media_preflight_win::Level::Fail)
+        .map(|check| check.message.as_str())
+        .collect();
+    let detail = error.to_string();
+    let message = if failures.is_empty() {
+        format!("Own Backup: {detail}")
+    } else if detail.is_empty() {
+        failures.join("\n\n")
+    } else {
+        format!("{}\n\n{detail}", failures.join("\n\n"))
+    };
+    let title: Vec<u16> = "Own Backup\0".encode_utf16().collect();
+    let body: Vec<u16> = message.encode_utf16().chain([0]).collect();
+    // SAFETY: both strings are null-terminated and live through the call.
+    unsafe {
+        MessageBoxW(None, PCWSTR(body.as_ptr()), PCWSTR(title.as_ptr()), MB_OK | MB_ICONERROR);
+    }
+}
+
+/// The runtime loader also accepts per-user installs found through EdgeUpdate
+/// registration. Checking those keys avoids refusing a working runtime when
+/// the preflight's filesystem search does not know its installation path.
+#[cfg(target_os = "windows")]
+fn webview2_registered() -> bool {
+    use windows::core::w;
+    use windows::Win32::System::Registry::{
+        RegGetValueW, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ,
+    };
+
+    let keys = [
+        (
+            HKEY_LOCAL_MACHINE,
+            w!("SOFTWARE\\WOW6432Node\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"),
+        ),
+        (
+            HKEY_CURRENT_USER,
+            w!("Software\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"),
+        ),
+    ];
+    keys.into_iter().any(|(root, path)| {
+        let mut version = [0u16; 64];
+        let mut bytes = std::mem::size_of_val(&version) as u32;
+        // SAFETY: the buffer and size are valid for this synchronous registry
+        // read; Windows writes a UTF-16 REG_SZ or reports a nonzero error.
+        let status = unsafe {
+            RegGetValueW(
+                root,
+                path,
+                w!("pv"),
+                RRF_RT_REG_SZ,
+                None,
+                Some(version.as_mut_ptr().cast()),
+                Some(&mut bytes),
+            )
+        };
+        if status.0 != 0 {
+            return false;
+        }
+        let len = version.iter().position(|&ch| ch == 0).unwrap_or(version.len());
+        let pv = String::from_utf16_lossy(&version[..len]);
+        !pv.is_empty() && pv != "0.0.0.0"
+    })
+}
+
 /// The window the interface opens in, in LOGICAL pixels, never larger than the
 /// screen it has to open on.
 ///
@@ -349,7 +426,7 @@ fn main() {
             // with the same words: a missing WebView2 must read as «WebView2 не
             // найден, искал там-то», not as a bare wry HRESULT. On an ordinary
             // Windows this is the only place they run at all.
-            {
+            let checks = {
                 use own_backup_backup::media_preflight_win as pf;
                 let dir = std::env::current_exe()
                     .ok()
@@ -363,25 +440,37 @@ fn main() {
                         pf::Level::Ok => tracing::info!(check = c.name, "{}", c.message),
                     }
                 }
-                // Deliberately NOT a refusal here. The WebView2 loader also
-                // finds a runtime through the registry, which this check does
-                // not read, so a Fail may be our blind spot rather than a
-                // missing runtime — and refusing then would break a machine
-                // that works. The medium is a different matter: there the
-                // launcher (`own-backup-cli media-preflight`) knows the layout
-                // and refuses BEFORE this process is started. So here the
-                // verdict only explains, and the attempt below decides.
-                if pf::worst(&checks) == pf::Level::Fail {
-                    tracing::error!(
-                        "проверка окружения нашла помеху — пробую поднять окно всё равно"
-                    );
-                }
+                // The filesystem check cannot see every per-user install.
+                // Check the loader's documented registry keys as well before
+                // treating a missing runtime as certain.
+                checks
+            };
+
+            #[cfg(target_os = "windows")]
+            if checks.iter().any(|check| {
+                check.name == "webview2"
+                    && check.level == own_backup_backup::media_preflight_win::Level::Fail
+            }) && !webview2_registered()
+            {
+                tracing::error!("WebView2 Runtime is absent; GUI cannot start");
+                show_window_start_error(&"", &checks);
+                std::process::exit(1);
             }
 
-            // A failed build (no WebView2, browser process refused to start)
-            // aborts the app with the error in the log — better than the old
-            // behaviour of running on windowless.
-            let built = window.build()?;
+            // No frontend exists yet to explain a failed build. Show the
+            // preflight diagnosis natively and exit before Tauri's error path
+            // can leave a bare "Error" dialog or re-enter the event handler.
+            let built = match window.build() {
+                Ok(built) => built,
+                Err(error) => {
+                    tracing::error!(%error, checks = ?checks, "GUI window could not be created");
+                    #[cfg(target_os = "windows")]
+                    show_window_start_error(&error, &checks);
+                    #[cfg(not(target_os = "windows"))]
+                    eprintln!("Own Backup: {error}");
+                    std::process::exit(1);
+                }
+            };
             shrink_if_the_screen_is_scaled_hard(app, &built);
 
             // A stale marker from an earlier run of this session would answer

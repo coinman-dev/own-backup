@@ -24,7 +24,8 @@ use windows::Win32::Security::Cryptography::{
 };
 use windows::Win32::Security::{
     AclSizeInformation, CopySid, CreateWellKnownSid, EqualSid, GetAce, GetAclInformation,
-    GetLengthSid, GetSecurityDescriptorControl, GetTokenInformation, TokenUser, WinLocalSystemSid,
+    GetLengthSid, GetSecurityDescriptorControl, GetTokenInformation, TokenUser,
+    WinBuiltinAdministratorsSid, WinLocalSystemSid,
     ACCESS_ALLOWED_ACE, ACE_HEADER, ACL_SIZE_INFORMATION, DACL_SECURITY_INFORMATION,
     OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, SE_DACL_PROTECTED,
     TOKEN_QUERY, TOKEN_USER,
@@ -33,8 +34,8 @@ use windows::Win32::Storage::FileSystem::{
     CreateDirectoryW, CreateFileW, FileDispositionInfo, GetFileInformationByHandle,
     SetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, CREATE_NEW, DELETE, FILE_ALL_ACCESS,
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_INFO,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    OPEN_EXISTING, READ_CONTROL,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL,
 };
 use windows::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentThread, OpenProcessToken, OpenThreadToken,
@@ -68,6 +69,21 @@ impl Sid {
         let mut len = 68;
         unsafe { CreateWellKnownSid(WinLocalSystemSid, PSID::default(), sid.ptr(), &mut len) }
             .map_err(win)?;
+        Ok(sid)
+    }
+
+    fn administrators() -> Result<Self> {
+        let sid = Self(vec![0; 17]);
+        let mut len = 68;
+        unsafe {
+            CreateWellKnownSid(
+                WinBuiltinAdministratorsSid,
+                PSID::default(),
+                sid.ptr(),
+                &mut len,
+            )
+        }
+        .map_err(win)?;
         Ok(sid)
     }
 
@@ -176,6 +192,58 @@ pub(super) struct WindowsBackend {
     _parent: File,
     directory: File,
     owner: Sid,
+}
+
+/// Pins and validates the SYSTEM-only directory before SQLite may create the
+/// private password database and its WAL/SHM files. Existing files are checked
+/// by handle so a permissive ACL, hard link or reparse point fails closed.
+pub struct PrivateSecretDatabase {
+    backend: WindowsBackend,
+    path: PathBuf,
+}
+
+impl PrivateSecretDatabase {
+    pub fn new(data_dir: &Path) -> Result<Self> {
+        let backend = WindowsBackend::new(data_dir)?;
+        let path = backend.root.join("volume-secrets.db");
+        let store = Self { backend, path };
+        store.validate_files()?;
+        Ok(store)
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn validate_files(&self) -> Result<()> {
+        self.backend.check_context()?;
+        for suffix in ["", "-wal", "-shm"] {
+            let path = self.backend.root.join(format!("volume-secrets.db{suffix}"));
+            match std::fs::symlink_metadata(&path) {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
+            }
+            let wide_path = wide(&path)?;
+            let h = unsafe {
+                CreateFileW(
+                    PCWSTR(wide_path.as_ptr()),
+                    READ_CONTROL.0,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    None,
+                    OPEN_EXISTING,
+                    FILE_FLAG_OPEN_REPARSE_POINT,
+                    None,
+                )
+            }
+            .map_err(win)?;
+            let file = unsafe { File::from_raw_handle(h.0) };
+            // SQLite inherits the safe directory's SYSTEM-only ACE. Its owner
+            // and sole full-access ACE must still match the directory.
+            check_file_policy(&file, &self.backend.owner, false, true)?;
+        }
+        Ok(())
+    }
 }
 
 impl WindowsBackend {
@@ -408,6 +476,10 @@ fn wide(path: &Path) -> Result<Vec<u16>> {
 }
 
 fn check_file(file: &File, owner: &Sid, directory: bool) -> Result<()> {
+    check_file_policy(file, owner, directory, false)
+}
+
+fn check_file_policy(file: &File, owner: &Sid, directory: bool, allow_inherited: bool) -> Result<()> {
     let h = HANDLE(file.as_raw_handle());
     let mut info = BY_HANDLE_FILE_INFORMATION::default();
     unsafe { GetFileInformationByHandle(h, &mut info) }.map_err(win)?;
@@ -441,10 +513,15 @@ fn check_file(file: &File, owner: &Sid, directory: bool) -> Result<()> {
     let mut control = 0u16;
     let mut revision = 0u32;
     unsafe {
-        EqualSid(actual_owner, owner.ptr()).map_err(|_| bad("unexpected key-store owner"))?;
+        let owner_is_system = EqualSid(actual_owner, owner.ptr()).is_ok();
+        let owner_is_admins = allow_inherited
+            && EqualSid(actual_owner, Sid::administrators()?.ptr()).is_ok();
+        if !owner_is_system && !owner_is_admins {
+            return Err(bad("unexpected key-store owner"));
+        }
         GetSecurityDescriptorControl(descriptor, &mut control, &mut revision).map_err(win)?;
     }
-    if dacl.is_null() || control & SE_DACL_PROTECTED.0 == 0 {
+    if dacl.is_null() || (!allow_inherited && control & SE_DACL_PROTECTED.0 == 0) {
         return Err(bad("key-store DACL is missing or inherits permissions"));
     }
     let mut acl = ACL_SIZE_INFORMATION::default();

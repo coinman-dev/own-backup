@@ -1158,14 +1158,13 @@ impl PasswordResolver for NoPasswords {
     }
 }
 
-/// Password store for encrypted volumes, shared by the service (scheduled runs)
-/// and the GUI worker. Passwords are cached in memory for the process lifetime;
-/// those the user chose to remember are additionally persisted OS-protected
-/// (DPAPI) in the metadata DB so scheduled backups can unlock the volume with no
-/// one present.
+/// Password store for encrypted volumes. The installed Windows service uses a
+/// private database under its SYSTEM-only key directory; foreground/WinPE
+/// Windows instances can use the memory cache but cannot persist passwords.
 pub struct PasswordStore {
     cache: std::sync::Mutex<std::collections::HashMap<String, zeroize::Zeroizing<String>>>,
     db_path: PathBuf,
+    private: bool,
     /// Key-file path for the OS secret store (used only off Windows).
     key_path: PathBuf,
 }
@@ -1179,8 +1178,81 @@ impl PasswordStore {
         Self {
             cache: std::sync::Mutex::new(std::collections::HashMap::new()),
             db_path,
+            private: false,
             key_path,
         }
+    }
+
+    /// Use a database whose parent directory was validated as service-only
+    /// before SQLite was allowed to create the database or its WAL/SHM files.
+    pub fn new_private(public_db_path: PathBuf, private_db_path: PathBuf) -> Self {
+        let key_path = public_db_path
+            .parent()
+            .map(|d| d.join("secret.key"))
+            .unwrap_or_else(|| PathBuf::from("secret.key"));
+        Self {
+            cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+            db_path: private_db_path,
+            private: true,
+            key_path,
+        }
+    }
+
+    /// Move legacy machine-scope blobs out of the public history database.
+    /// Each private insert is committed and read through another connection
+    /// before its public row is deleted. A durable marker resumes cleanup if a
+    /// crash occurs after the last delete but before VACUUM/checkpoint.
+    pub fn migrate_legacy(&self, public_db_path: &Path) -> own_backup_common::Result<usize> {
+        if !self.private {
+            return Err(own_backup_common::OwnBackupError::Encryption(
+                "private volume-secret database is required for migration".into(),
+            ));
+        }
+        let private = own_backup_metadata::open_volume_secret_database(&self.db_path)?;
+        let public = own_backup_metadata::open_database(public_db_path)?;
+        public
+            .execute_batch("PRAGMA secure_delete=ON;")
+            .map_err(|e| own_backup_common::OwnBackupError::Database(e.to_string()))?;
+        let legacy = own_backup_metadata::list_volume_secrets(&public)?;
+        if legacy.is_empty()
+            && !own_backup_metadata::volume_secret_migration_pending(&private)?
+            && own_backup_metadata::volume_secret_migration_done(&private)?
+        {
+            return Ok(0);
+        }
+        own_backup_metadata::mark_volume_secret_migration_pending(&private)?;
+        let os_store = own_backup_backup::secrets::default_store(&self.key_path);
+        let mut moved = 0;
+        for (key, blob) in legacy {
+            let old_plain = os_store.unprotect(&blob)?;
+            if let Some(existing) = own_backup_metadata::get_volume_secret(&private, &key)? {
+                let existing_plain = os_store.unprotect(&existing)?;
+                if existing_plain.as_slice() != old_plain.as_slice() {
+                    return Err(own_backup_common::OwnBackupError::Encryption(format!(
+                        "conflicting private and legacy passwords for volume {key}"
+                    )));
+                }
+            } else {
+                own_backup_metadata::upsert_volume_secret(&private, &key, &blob)?;
+            }
+            let confirmed = own_backup_metadata::open_volume_secret_database(&self.db_path)?;
+            let persisted = own_backup_metadata::get_volume_secret(&confirmed, &key)?
+                .ok_or_else(|| own_backup_common::OwnBackupError::Database(
+                    format!("private password for volume {key} was not committed"),
+                ))?;
+            if os_store.unprotect(&persisted)?.as_slice() != old_plain.as_slice() {
+                return Err(own_backup_common::OwnBackupError::Encryption(format!(
+                    "private password verification failed for volume {key}"
+                )));
+            }
+            drop(confirmed);
+            own_backup_metadata::delete_volume_secret(&public, &key)?;
+            moved += 1;
+        }
+        own_backup_metadata::purge_legacy_volume_secret_remnants(&public)?;
+        own_backup_metadata::clear_volume_secret_migration_pending(&private)?;
+        own_backup_metadata::mark_volume_secret_migration_done(&private)?;
+        Ok(moved)
     }
 
     /// Record a password for `volume_token` (as computed by [`source_token`]).
@@ -1193,9 +1265,19 @@ impl PasswordStore {
         remember: bool,
     ) -> own_backup_common::Result<()> {
         if remember {
+            #[cfg(target_os = "windows")]
+            if !self.private {
+                return Err(own_backup_common::OwnBackupError::Encryption(
+                    "only the installed service can persist volume passwords".into(),
+                ));
+            }
             let blob = own_backup_backup::secrets::default_store(&self.key_path)
                 .protect(password.as_bytes())?;
-            let conn = own_backup_metadata::open_database(&self.db_path)?;
+            let conn = if self.private {
+                own_backup_metadata::open_volume_secret_database(&self.db_path)?
+            } else {
+                own_backup_metadata::open_database(&self.db_path)?
+            };
             own_backup_metadata::upsert_volume_secret(&conn, volume_token, &blob)?;
         }
         self.cache
@@ -1208,7 +1290,17 @@ impl PasswordStore {
     /// Forget a password (in-memory and persisted).
     pub fn forget(&self, volume_token: &str) -> own_backup_common::Result<()> {
         self.cache.lock().unwrap().remove(volume_token);
-        let conn = own_backup_metadata::open_database(&self.db_path)?;
+        #[cfg(target_os = "windows")]
+        if !self.private {
+            return Err(own_backup_common::OwnBackupError::Encryption(
+                "only the installed service can remove persisted volume passwords".into(),
+            ));
+        }
+        let conn = if self.private {
+            own_backup_metadata::open_volume_secret_database(&self.db_path)?
+        } else {
+            own_backup_metadata::open_database(&self.db_path)?
+        };
         own_backup_metadata::delete_volume_secret(&conn, volume_token)?;
         Ok(())
     }
@@ -1225,8 +1317,16 @@ impl PasswordResolver for PasswordStore {
         if let Some(p) = self.cache.lock().unwrap().get(volume_token) {
             return Some(p.clone());
         }
+        #[cfg(target_os = "windows")]
+        if !self.private {
+            return None;
+        }
         // Fall back to the OS-protected store (a remembered password).
-        let conn = own_backup_metadata::open_database(&self.db_path).ok()?;
+        let conn = if self.private {
+            own_backup_metadata::open_volume_secret_database(&self.db_path).ok()?
+        } else {
+            own_backup_metadata::open_database(&self.db_path).ok()?
+        };
         let blob = own_backup_metadata::get_volume_secret(&conn, volume_token).ok()??;
         let plain = own_backup_backup::secrets::default_store(&self.key_path)
             .unprotect(&blob)
@@ -3705,6 +3805,86 @@ mod tests {
 
         store.forget("V123").unwrap();
         assert!(!PasswordStore::new(db).has("V123"));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn legacy_password_migration_survives_duplicate_and_cleanup_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let public_path = dir.path().join("metadata.db");
+        let private_path = dir.path().join("private").join("volume-secrets.db");
+        std::fs::create_dir(private_path.parent().unwrap()).unwrap();
+        let os_store = own_backup_backup::secrets::default_store(&dir.path().join("secret.key"));
+        let blob = os_store.protect(b"old-password").unwrap();
+        let public = own_backup_metadata::open_database(&public_path).unwrap();
+        own_backup_metadata::upsert_volume_secret(&public, "V123", &blob).unwrap();
+        let private = own_backup_metadata::open_volume_secret_database(&private_path).unwrap();
+        // Crash after the private commit but before the public delete.
+        own_backup_metadata::upsert_volume_secret(&private, "V123", &blob).unwrap();
+        own_backup_metadata::mark_volume_secret_migration_pending(&private).unwrap();
+        drop(private);
+        drop(public);
+
+        let store = PasswordStore::new_private(public_path.clone(), private_path.clone());
+        assert_eq!(store.migrate_legacy(&public_path).unwrap(), 1);
+        assert_eq!(store.resolve("V123").unwrap().as_str(), "old-password");
+        let public = own_backup_metadata::open_database(&public_path).unwrap();
+        assert!(own_backup_metadata::get_volume_secret(&public, "V123")
+            .unwrap()
+            .is_none());
+        let private = own_backup_metadata::open_volume_secret_database(&private_path).unwrap();
+        assert!(!own_backup_metadata::volume_secret_migration_pending(&private).unwrap());
+        assert!(own_backup_metadata::volume_secret_migration_done(&private).unwrap());
+
+        // Crash after the final public delete but before VACUUM/checkpoint.
+        own_backup_metadata::mark_volume_secret_migration_pending(&private).unwrap();
+        drop(private);
+        drop(public);
+        assert_eq!(store.migrate_legacy(&public_path).unwrap(), 0);
+        let private = own_backup_metadata::open_volume_secret_database(&private_path).unwrap();
+        assert!(!own_backup_metadata::volume_secret_migration_pending(&private).unwrap());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn empty_legacy_database_is_scrubbed_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let public_path = dir.path().join("metadata.db");
+        let private_path = dir.path().join("private").join("volume-secrets.db");
+        std::fs::create_dir(private_path.parent().unwrap()).unwrap();
+        own_backup_metadata::open_database(&public_path).unwrap();
+        let store = PasswordStore::new_private(public_path.clone(), private_path.clone());
+        assert_eq!(store.migrate_legacy(&public_path).unwrap(), 0);
+        let private = own_backup_metadata::open_volume_secret_database(&private_path).unwrap();
+        assert!(own_backup_metadata::volume_secret_migration_done(&private).unwrap());
+        assert!(!own_backup_metadata::volume_secret_migration_pending(&private).unwrap());
+        drop(private);
+        assert_eq!(store.migrate_legacy(&public_path).unwrap(), 0);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn legacy_password_migration_refuses_conflicting_private_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let public_path = dir.path().join("metadata.db");
+        let private_path = dir.path().join("private").join("volume-secrets.db");
+        std::fs::create_dir(private_path.parent().unwrap()).unwrap();
+        let os_store = own_backup_backup::secrets::default_store(&dir.path().join("secret.key"));
+        let old_blob = os_store.protect(b"old-password").unwrap();
+        let new_blob = os_store.protect(b"different-password").unwrap();
+        let public = own_backup_metadata::open_database(&public_path).unwrap();
+        own_backup_metadata::upsert_volume_secret(&public, "V123", &old_blob).unwrap();
+        let private = own_backup_metadata::open_volume_secret_database(&private_path).unwrap();
+        own_backup_metadata::upsert_volume_secret(&private, "V123", &new_blob).unwrap();
+        drop(private);
+        drop(public);
+
+        let store = PasswordStore::new_private(public_path.clone(), private_path.clone());
+        assert!(store.migrate_legacy(&public_path).is_err());
+        let public = own_backup_metadata::open_database(&public_path).unwrap();
+        assert_eq!(own_backup_metadata::get_volume_secret(&public, "V123").unwrap(), Some(old_blob));
+        let private = own_backup_metadata::open_volume_secret_database(&private_path).unwrap();
+        assert_eq!(own_backup_metadata::get_volume_secret(&private, "V123").unwrap(), Some(new_blob));
     }
 
     /// A job with `method` plus a successful run that produced `kind` at

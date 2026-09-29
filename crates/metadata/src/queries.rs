@@ -51,6 +51,69 @@ pub fn delete_volume_secret(conn: &Connection, volume_key: &str) -> Result<()> {
     Ok(())
 }
 
+/// Read the legacy rows before moving them to the service-only database.
+pub fn list_volume_secrets(conn: &Connection) -> Result<Vec<(String, Vec<u8>)>> {
+    let mut stmt = conn
+        .prepare("SELECT volume_key, protected_blob FROM volume_secrets ORDER BY volume_key")
+        .map_err(|e| OwnBackupError::Database(e.to_string()))?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(|e| OwnBackupError::Database(e.to_string()))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| OwnBackupError::Database(e.to_string()))
+}
+
+/// Keep a durable marker until the public database's WAL and freed pages have
+/// been cleaned. A crash after deleting its last row then resumes the cleanup.
+pub fn mark_volume_secret_migration_pending(conn: &Connection) -> Result<()> {
+    conn.execute("INSERT OR IGNORE INTO volume_secret_migration_pending (id) VALUES (1)", [])
+        .map_err(|e| OwnBackupError::Database(e.to_string()))?;
+    Ok(())
+}
+
+pub fn volume_secret_migration_pending(conn: &Connection) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM volume_secret_migration_pending WHERE id = 1)",
+        [],
+        |row| row.get(0),
+    )
+    .map_err(|e| OwnBackupError::Database(e.to_string()))
+}
+
+pub fn clear_volume_secret_migration_pending(conn: &Connection) -> Result<()> {
+    conn.execute("DELETE FROM volume_secret_migration_pending WHERE id = 1", [])
+        .map_err(|e| OwnBackupError::Database(e.to_string()))?;
+    Ok(())
+}
+
+pub fn volume_secret_migration_done(conn: &Connection) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM volume_secret_migration_done WHERE id = 1)",
+        [],
+        |row| row.get(0),
+    )
+    .map_err(|e| OwnBackupError::Database(e.to_string()))
+}
+
+pub fn mark_volume_secret_migration_done(conn: &Connection) -> Result<()> {
+    conn.execute("INSERT OR IGNORE INTO volume_secret_migration_done (id) VALUES (1)", [])
+        .map_err(|e| OwnBackupError::Database(e.to_string()))?;
+    Ok(())
+}
+
+/// Run only after every legacy secret has a verified private copy. The delete
+/// pragma scrubs cells as rows are removed; VACUUM and a truncated WAL remove
+/// old copies in the current database files. Older filesystem snapshots remain
+/// outside SQLite's reach.
+pub fn purge_legacy_volume_secret_remnants(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "PRAGMA wal_checkpoint(TRUNCATE);
+         VACUUM;
+         PRAGMA wal_checkpoint(TRUNCATE);",
+    )
+    .map_err(|e| OwnBackupError::Database(e.to_string()))
+}
+
 // ---------------------------------------------------------------------------
 // BackupJob CRUD
 // ---------------------------------------------------------------------------

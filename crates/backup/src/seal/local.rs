@@ -23,6 +23,9 @@ use super::{bad, SCHEME};
 #[path = "local_windows.rs"]
 mod platform;
 
+#[cfg(target_os = "windows")]
+pub use platform::PrivateSecretDatabase;
+
 pub const KEY_DIRECTORY_NAME: &str = ".own-backup-service-keys";
 pub(super) const MAX_LOCAL_BLOB: usize = 16 * 1024;
 const MAGIC: &[u8; 8] = b"OBKDP\0\x01\0";
