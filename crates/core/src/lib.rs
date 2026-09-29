@@ -4606,6 +4606,12 @@ mod tests {
         let report = delete_job_files(&store, &job);
         assert!(child.exists() && base.exists(), "{report:?}");
         assert!(!report.deleted.contains(&base.display().to_string()));
+        let deleted: std::collections::HashSet<&str> =
+            report.deleted.iter().map(String::as_str).collect();
+        assert!(
+            report.kept.iter().all(|(path, _)| !deleted.contains(path.as_str())),
+            "{report:?}"
+        );
     }
 
     #[test]

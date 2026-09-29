@@ -11,8 +11,8 @@
 //!    passes want opposite things here — see [`PreviousContents`];
 //! 2. a new record is appended for each changed cluster, under a fresh nonce;
 //! 3. the index, the sealed sidecar, the root, the cluster tables and the
-//!    header are written again, the header last — the same commit point the
-//!    image was created with.
+//!    header are written again, the header last. A torn write of that header
+//!    is NOT an atomic commit; see H03-HEADER-FAULT-2026-09-27.md.
 //!
 //! # The two modes, and why there are two
 //!
@@ -32,10 +32,10 @@
 //! point in the chain at once, not one run's output. So nothing is erased and
 //! nothing is truncated: the new records go **past the end of the file**, the
 //! old ones stay where they are, and the header cluster written last is the
-//! only byte that changes in place. A crash before it leaves the previous image
-//! exactly as it was, and the step can simply be run again — the same property
-//! the plaintext qcow2 fold has, paid for in the same currency (dead space
-//! inside the file, reported as `bytes_orphaned`).
+//! only byte that changes in place. An interruption BEFORE the header write
+//! leaves the previous image intact. A partial header write can make that image
+//! unreadable; H03 remains open. The append-only part still costs dead space
+//! inside the file, reported as `bytes_orphaned`.
 //!
 //! # What it costs on a large image
 //!
@@ -81,7 +81,7 @@ pub enum PreviousContents {
     #[default]
     Erase,
     /// Leave them where they are, unreferenced. Nothing before the header
-    /// cluster is touched, so a crash leaves the previous image intact.
+    /// cluster is touched, but a torn header write can still lose the image.
     Keep,
 }
 

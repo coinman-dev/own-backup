@@ -31,10 +31,11 @@
 //! 5. repoint the next increment at the base;
 //! 6. **delete the folded increment — last** — and clear the marker.
 //!
-//! Nothing before step 6 destroys anything: the increment is still on disk, so
-//! a crash anywhere in 3–5 can be finished by [`resume_pending`] simply by
-//! running the remaining steps again. Steps 4 and 5 are writes of a known
-//! value, which makes them idempotent for free.
+//! The increment stays on disk until step 6, and the marker allows recovery
+//! from interruptions BETWEEN completed steps. This does not cover a torn
+//! header write in the `.obk` fold or repoint, nor overwritten `.obk` metadata
+//! records: H03 can still make an earlier point unreadable. Steps 4 and 5 are
+//! idempotent only when their individual writes complete.
 //!
 //! Step 3 is the one that needs care, and the two containers differ:
 //!

@@ -8,7 +8,7 @@
 //! inside the container at creation ([`super::writer::ObkWriter::finish_with_reserve`])
 //! and the new sidecar takes the old one's place here.
 //!
-//! What "in place" means, and why it is safe:
+//! What "in place" means (and why this is NOT yet crash safe):
 //!
 //! - the reservation is stored **uncompressed**, so a sidecar of the same size
 //!   produces records of exactly the same length — nothing moves, and no data
@@ -19,9 +19,10 @@
 //! - the root record is replaced too (it names the metadata chunks), and the
 //!   header cluster is rewritten to point at the new root.
 //!
-//! The header cluster is written last, as at creation. A crash between the
-//! records and the header leaves the image reading its OLD sidecar, which is a
-//! valid image describing slightly stale exclusion figures — never a torn one.
+//! The header cluster is written last, but the old encrypted records have
+//! already been overwritten. A crash between those writes and the header can
+//! leave the old root pointing at records it can no longer authenticate. A torn
+//! header can also make the image unreadable. Both failures belong to H03.
 
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
@@ -115,8 +116,8 @@ pub fn update_sealed_metadata(path: &Path, chain: &ChainKey, metadata: &[u8]) ->
     file.seek(SeekFrom::Start(header.open.root.offset))?;
     file.write_all(&root_record.bytes)?;
 
-    // 3. The header cluster, pointing at the new root. Written last: a crash
-    //    before it leaves the image reading its previous sidecar.
+    // 3. The header cluster, pointing at the new root. Written last, but the
+    //    old metadata/root records above were already overwritten (H03).
     let mut open = header.open.clone();
     open.root = ObkRootPointer::new(
         header.open.root.offset,
