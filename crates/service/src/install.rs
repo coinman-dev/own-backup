@@ -142,7 +142,8 @@ pub fn stop() -> Result<(), Box<dyn std::error::Error>> {
     use std::time::Duration;
     use windows_service::service::{ServiceAccess, ServiceState};
     let service = open_service(ServiceAccess::QUERY_STATUS | ServiceAccess::STOP)?;
-    if service.query_status()?.current_state == ServiceState::Stopped {
+    let state = service.query_status()?.current_state;
+    if state == ServiceState::Stopped {
         println!(
             "{}",
             tr!(
@@ -152,20 +153,47 @@ pub fn stop() -> Result<(), Box<dyn std::error::Error>> {
         );
         return Ok(());
     }
-    service.stop()?;
-    for _ in 0..20 {
-        std::thread::sleep(Duration::from_millis(300));
-        if let Ok(s) = service.query_status() {
-            if s.current_state == ServiceState::Stopped {
-                break;
-            }
-        }
+    if state != ServiceState::StopPending {
+        service.stop()?;
     }
+    // A durable consolidation can take far longer than six seconds. Never
+    // report success (or let the updater copy the EXE) while it is draining.
+    wait_until_stopped(
+        || Ok(service.query_status()?.current_state == ServiceState::Stopped),
+        Duration::from_secs(300),
+    )?;
     println!(
         "{}",
         tr!("install.win_stopped", name = crate::SERVICE_DISPLAY_NAME)
     );
     Ok(())
+}
+
+#[cfg(any(windows, test))]
+fn wait_until_stopped(
+    mut stopped: impl FnMut() -> Result<bool, Box<dyn std::error::Error>>,
+    timeout: std::time::Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if stopped()? {
+            return Ok(());
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                tr!(
+                    "install.win_stop_timeout",
+                    name = crate::SERVICE_DISPLAY_NAME,
+                    seconds = timeout.as_secs_f64()
+                )
+                .into_owned(),
+            )
+            .into());
+        }
+        std::thread::sleep(remaining.min(std::time::Duration::from_millis(300)));
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -403,7 +431,7 @@ pub fn update_from_here() -> Result<(), Box<dyn std::error::Error>> {
         tr!("install.update_installed", path = installed.display())
     );
     println!("{}", tr!("install.update_replacing", path = here.display()));
-    let _ = stop();
+    stop()?;
     // The SCM reports Stopped before the process has necessarily exited, and a
     // process that still holds its image file makes the copy fail with a
     // sharing violation. Retry briefly rather than demanding a second attempt.
@@ -456,6 +484,48 @@ fn installed_binary() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> 
     use windows_service::service::ServiceAccess;
     let service = open_service(ServiceAccess::QUERY_CONFIG)?;
     Ok(service.query_config()?.executable_path)
+}
+
+#[cfg(test)]
+mod stop_tests {
+    use super::wait_until_stopped;
+    use std::time::Duration;
+
+    #[test]
+    fn a_service_that_keeps_running_is_a_timeout_not_success() {
+        let error = wait_until_stopped(|| Ok(false), Duration::from_millis(20)).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::TimedOut
+        );
+    }
+
+    #[test]
+    fn stop_waits_for_the_observed_state_transition() {
+        let mut observations = 0;
+        wait_until_stopped(
+            || {
+                observations += 1;
+                Ok(observations == 3)
+            },
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        assert_eq!(observations, 3);
+    }
+
+    #[test]
+    fn an_unreadable_service_status_is_propagated() {
+        let error = wait_until_stopped(
+            || Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied).into()),
+            Duration::from_secs(2),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }
 }
 
 #[cfg(not(target_os = "windows"))]

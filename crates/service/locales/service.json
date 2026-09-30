@@ -248,6 +248,10 @@
     "ru": "Служба «%{name}» остановлена.",
     "en": "Service “%{name}” stopped."
   },
+  "install.win_stop_timeout": {
+    "ru": "Служба «%{name}» не остановилась за %{seconds} с.",
+    "en": "Service “%{name}” did not stop within %{seconds} s."
+  },
   "install.win_status": {
     "ru": "Служба «%{name}» (%{id}): %{state}",
     "en": "Service “%{name}” (%{id}): %{state}"
