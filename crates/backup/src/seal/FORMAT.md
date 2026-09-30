@@ -243,6 +243,10 @@ may overwrite excluded metadata and both headers while finalising; a failed
 run is not a prior restore point. Older single-header images use a synced
 whole-file sibling and rename for updates.
 
+Rebuilds and folds enumerate authenticated index entries rather than every
+possible virtual guest cluster. Their working memory still grows with the
+number of defined clusters, and obsolete appended records are not yet compacted.
+
 ### Open header (`OBKH`, qcow2 header extension 0x4F424B48)
 
 UTF-8 JSON, at most 32 KiB, rejecting unknown fields. It carries `format`

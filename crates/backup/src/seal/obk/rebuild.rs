@@ -36,12 +36,10 @@
 //!
 //! # What it costs on a large image
 //!
-//! [`read_state`] walks every guest cluster and holds the index in memory, so a
-//! pass over a multi-terabyte image needs memory proportional to the clusters
-//! it *defines* — roughly 60 bytes each, so ~60 MiB per million stored
-//! clusters. Both callers run against one volume's used clusters, which keeps
-//! that in hand; a whole-disk encrypted image (not yet written) would want a
-//! streaming index before it is.
+//! [`read_state`] walks authenticated index entries, not every possible guest
+//! cluster. It still holds the defined index in memory — roughly 60 bytes per
+//! stored cluster, or ~60 MiB per million — so very dense multi-terabyte
+//! images will eventually want a streaming index.
 
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
@@ -518,10 +516,9 @@ fn read_state(
     } else {
         header.cluster_size
     };
-    for cluster in 0..root.guest_clusters {
-        let state = image.cluster_state(cluster)?;
+    for (cluster, state) in image.defined_cluster_states()? {
         match state {
-            ClusterState::Absent => continue,
+            ClusterState::Absent => return Err(bad("index listed an absent cluster")),
             ClusterState::Zero => {
                 states.insert(cluster, state);
             }

@@ -150,6 +150,24 @@ impl IndexChunk {
         }
         ClusterState::Absent
     }
+
+    /// Walk only clusters the image defines. This is the rebuild path for a
+    /// sparse virtual disk; iterating every possible guest cluster can mean
+    /// hundreds of millions of needless lookups.
+    pub fn defined_entries(&self) -> impl Iterator<Item = (u64, ClusterState)> + '_ {
+        self.bytes.chunks_exact(INDEX_ENTRY_LEN).map(|entry| {
+            let cluster = u64::from_be_bytes(array(entry, 0));
+            let state = if entry[8] == STATE_ZERO {
+                ClusterState::Zero
+            } else {
+                ClusterState::Present(RecordId {
+                    session: array(entry, 9),
+                    nonce: array(entry, 41),
+                })
+            };
+            (cluster, state)
+        })
+    }
 }
 
 #[cfg(test)]
@@ -181,6 +199,7 @@ mod tests {
         for (cluster, state) in sample() {
             assert_eq!(chunk.lookup(cluster), state, "cluster {cluster}");
         }
+        assert_eq!(chunk.defined_entries().collect::<Vec<_>>(), sample());
         for absent in [1, 2, 4, 8, 10, 999, 1001, u64::MAX] {
             assert_eq!(
                 chunk.lookup(absent),

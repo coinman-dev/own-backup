@@ -198,6 +198,21 @@ impl<R: Read + Seek> ObkImage<R> {
         Ok(self.load_index_chunk(position)?.lookup(cluster))
     }
 
+    /// Authenticated entries only, in cluster order. Holes have no index
+    /// entry and cost no iteration even on a multi-terabyte virtual disk.
+    pub fn defined_cluster_states(&mut self) -> Result<Vec<(u64, ClusterState)>> {
+        let mut states = Vec::new();
+        for position in 0..self.root.index_chunks.len() {
+            states.extend(self.load_index_chunk(position)?.defined_entries());
+        }
+        if states.len() as u64 != self.root.defined_clusters {
+            return Err(bad(
+                "index does not contain its declared number of clusters",
+            ));
+        }
+        Ok(states)
+    }
+
     /// Read one guest cluster. `None` means this image does not define it: the
     /// parent answers, or the cluster is zero when there is no parent.
     pub fn read_cluster(&mut self, cluster: u64) -> Result<Option<Zeroizing<Vec<u8>>>> {

@@ -90,13 +90,11 @@ pub fn fold_child_into_base(
     // "this cluster was emptied since the base was taken". Both have to land in
     // the base, and the zeros land as *nothing*: a full backup with no cluster
     // there reads zeros, which is exactly what the increment meant.
-    let total = child.root().guest_clusters;
-    let mut clusters = Vec::new();
-    for cluster in 0..total {
-        if !matches!(child.cluster_state(cluster)?, super::ClusterState::Absent) {
-            clusters.push(cluster);
-        }
-    }
+    let clusters: Vec<u64> = child
+        .defined_cluster_states()?
+        .into_iter()
+        .map(|(cluster, _)| cluster)
+        .collect();
 
     let stats = apply_changed_with(
         base,
@@ -298,6 +296,52 @@ mod tests {
             consolidated_increments: folded,
             chain_started_at: Some("2026-01-01T00:00:00Z".into()),
         }
+    }
+
+    #[test]
+    fn a_sparse_eight_tib_chain_folds_only_its_defined_clusters() {
+        let f = Fixture::new();
+        let dir = tempfile::tempdir().unwrap();
+        let virtual_size = 8u64 << 40;
+        let high = virtual_size / (1 << 16) - 1;
+        let base_id = Uuid::new_v4();
+        let child_id = Uuid::new_v4();
+        let base = dir.path().join("full.obk");
+        let child = dir.path().join("inc.obk");
+
+        let mut base_options = f.options(base_id, ChainRole::Full, None);
+        base_options.cluster_bits = 16;
+        base_options.virtual_size = virtual_size;
+        let mut writer = ObkWriter::create(&base, &f.chain, base_options).unwrap();
+        writer.write_cluster(0, &vec![0x11; 1 << 16]).unwrap();
+        writer.finish(b"base metadata").unwrap();
+
+        let mut child_options = f.options(
+            child_id,
+            ChainRole::Incremental,
+            Some((base_id, "full.obk")),
+        );
+        child_options.cluster_bits = 16;
+        child_options.virtual_size = virtual_size;
+        let mut writer = ObkWriter::create(&child, &f.chain, child_options).unwrap();
+        writer.write_cluster(high, &vec![0x22; 1 << 16]).unwrap();
+        writer.finish(b"child metadata").unwrap();
+
+        let stats = fold_child_into_base(
+            &base,
+            &child,
+            &f.chain,
+            b"promoted metadata",
+            identity(child_id, 1),
+            DEFAULT_ZSTD_LEVEL,
+        )
+        .unwrap();
+        assert_eq!(stats.clusters, 1);
+        let mut reader = ObkRandomReader::open(&base, &f.chain).unwrap();
+        let mut data = vec![0u8; 1 << 16];
+        reader.read_at(high * (1 << 16), &mut data).unwrap();
+        assert_eq!(data, vec![0x22; 1 << 16]);
+        assert!(std::fs::metadata(&base).unwrap().len() < 10 << 20);
     }
 
     /// base ← inc1 ← inc2, the shape a window step is planned against.
