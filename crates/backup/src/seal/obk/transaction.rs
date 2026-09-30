@@ -42,11 +42,44 @@ pub(super) fn replace<T>(
     ObkImage::open_path(&stage, chain)?;
     // Windows FlushFileBuffers requires a handle opened for writing.
     OpenOptions::new().write(true).open(&stage)?.sync_all()?;
-    stage
-        .persist(&target)
-        .map_err(|e| bad(format!("cannot publish {}: {}", target.display(), e.error)))?;
+    publish(stage, &target)?;
     sync_parent(parent)?;
     Ok(value)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn publish(stage: tempfile::TempPath, target: &Path) -> Result<()> {
+    stage
+        .persist(target)
+        .map_err(|e| bad(format!("cannot publish {}: {}", target.display(), e.error)))
+}
+
+#[cfg(target_os = "windows")]
+fn publish(stage: tempfile::TempPath, target: &Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        MoveFileExW, SetFileAttributesW, FILE_ATTRIBUTE_NORMAL, MOVEFILE_REPLACE_EXISTING,
+        MOVEFILE_WRITE_THROUGH,
+    };
+
+    let source: Vec<u16> = stage.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination: Vec<u16> = target.as_os_str().encode_wide().chain(Some(0)).collect();
+    unsafe {
+        // Match tempfile's persist preparation: temporary file attributes do
+        // not provide the same consistency guarantee as a normal file.
+        SetFileAttributesW(PCWSTR(source.as_ptr()), FILE_ATTRIBUTE_NORMAL)
+            .map_err(|e| bad(format!("cannot prepare {}: {e}", stage.display())))?;
+        MoveFileExW(
+            PCWSTR(source.as_ptr()),
+            PCWSTR(destination.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+        .map_err(|e| bad(format!("cannot publish {}: {e}", target.display())))?;
+    }
+    // The source path was moved; TempPath's cleanup of that name is harmless.
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -170,6 +203,53 @@ mod tests {
         );
     }
 
+    #[test]
+    fn measure_staged_metadata_update_on_a_large_image() {
+        let Ok(root) = std::env::var("OWN_BACKUP_H03_LARGE_DIR") else {
+            return;
+        };
+        let root = Path::new(&root);
+        std::fs::create_dir_all(root).unwrap();
+        let path = root.join("large.obk");
+        let mib: usize = std::env::var("OWN_BACKUP_H03_LARGE_MIB")
+            .unwrap_or_else(|_| "512".into())
+            .parse()
+            .unwrap();
+        assert!((64..=1024).contains(&mib) && mib.is_multiple_of(64));
+        let f = Fixture::new();
+        let mut opts = f.options(Uuid::new_v4(), ChainRole::Full, None);
+        opts.cluster_bits = 16;
+        opts.virtual_size = (mib as u64) * 1024 * 1024;
+        let mut writer = ObkWriter::create(&path, &f.chain, opts).unwrap();
+        let mut state = 0x8293_1045_aa67_34d1u64;
+        let clusters = mib * 16;
+        for index in 0..clusters {
+            let mut data = vec![0u8; 1 << 16];
+            for word in data.chunks_exact_mut(8) {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                word.copy_from_slice(&state.to_le_bytes());
+            }
+            writer.write_cluster(index as u64, &data).unwrap();
+        }
+        writer
+            .finish_with_reserve(b"before", 4096)
+            .unwrap()
+            .into_inner()
+            .unwrap()
+            .sync_all()
+            .unwrap();
+
+        let bytes = std::fs::metadata(&path).unwrap().len();
+        let started = std::time::Instant::now();
+        super::super::metadata::update_sealed_metadata(&path, &f.chain, b"after").unwrap();
+        let elapsed_ms = started.elapsed().as_millis();
+        let mut reader = crate::seal::obk::ObkRandomReader::open(&path, &f.chain).unwrap();
+        assert_eq!(&reader.sealed_metadata().unwrap()[..], b"after");
+        println!("H03-LARGE image_bytes={bytes} staged_update_ms={elapsed_ms}");
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn vm_power_cut_during_staged_write_recovers_the_chain() {
@@ -253,6 +333,103 @@ mod tests {
                 );
             }
             other => panic!("unknown H03 power-cut phase: {other:?}"),
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn vm_power_cut_after_publication_keeps_the_new_chain() {
+        use crate::seal::obk::read_open_header;
+        use crate::seal::obk::rebuild::{apply_changed_with, PreviousContents, RebuildOptions};
+
+        let Ok(root) = std::env::var("OWN_BACKUP_H03_PUBLISHED_DIR") else {
+            return;
+        };
+        let root = Path::new(&root);
+        let base = root.join("full.obk");
+        let leaf = root.join("inc.obk");
+        match std::env::var("OWN_BACKUP_H03_PUBLISHED_PHASE").as_deref() {
+            Ok("publish") => {
+                std::fs::create_dir_all(root).unwrap();
+                let f = Fixture::new();
+                let base_id = Uuid::new_v4();
+                let mut writer =
+                    ObkWriter::create(&base, &f.chain, f.options(base_id, ChainRole::Full, None))
+                        .unwrap();
+                writer
+                    .write_cluster(0, &vec![0x11; 1 << cluster_bits()])
+                    .unwrap();
+                writer
+                    .finish(b"previous base")
+                    .unwrap()
+                    .into_inner()
+                    .unwrap()
+                    .sync_all()
+                    .unwrap();
+
+                let mut writer = ObkWriter::create(
+                    &leaf,
+                    &f.chain,
+                    f.options(
+                        Uuid::new_v4(),
+                        ChainRole::Incremental,
+                        Some((base_id, "full.obk")),
+                    ),
+                )
+                .unwrap();
+                writer
+                    .write_cluster(1, &vec![0x22; 1 << cluster_bits()])
+                    .unwrap();
+                writer
+                    .finish(b"previous child")
+                    .unwrap()
+                    .into_inner()
+                    .unwrap()
+                    .sync_all()
+                    .unwrap();
+
+                apply_changed_with(
+                    &base,
+                    &f.chain,
+                    &[0],
+                    |_| Ok(vec![0x33; 1 << cluster_bits()]),
+                    RebuildOptions {
+                        previous: PreviousContents::Keep,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                let mut chain = ObkChain::open(&leaf, &f.chain).unwrap();
+                assert_eq!(
+                    &chain.read_cluster(0).unwrap()[..],
+                    &vec![0x33; 1 << cluster_bits()]
+                );
+                let mut marker = OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .open(root.join("published-ready"))
+                    .unwrap();
+                marker.write_all(b"new image published").unwrap();
+                marker.sync_all().unwrap();
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
+            }
+            Ok("verify") => {
+                let open = read_open_header(&leaf).unwrap();
+                let key = open.chain_key_with_password("пароль архива").unwrap();
+                let mut chain = ObkChain::open(&leaf, &key).unwrap();
+                assert_eq!(chain.chain_len(), 2);
+                assert_eq!(
+                    &chain.read_cluster(0).unwrap()[..],
+                    &vec![0x33; 1 << cluster_bits()]
+                );
+                assert_eq!(
+                    &chain.read_cluster(1).unwrap()[..],
+                    &vec![0x22; 1 << cluster_bits()]
+                );
+            }
+            other => panic!("unknown H03 publication phase: {other:?}"),
         }
     }
 }
