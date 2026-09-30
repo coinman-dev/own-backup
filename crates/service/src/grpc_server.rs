@@ -1214,7 +1214,13 @@ impl BackupService for BackupServiceImpl {
             })
             .await
             .map_err(|e| Status::internal(format!("verify task panicked: {e}")))?
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| {
+                if matches!(e, own_backup_common::OwnBackupError::Cancelled) {
+                    Status::cancelled(e.to_string())
+                } else {
+                    Status::internal(e.to_string())
+                }
+            })?;
 
             json_reply(&VerifySummaryDto {
                 valid: summary.valid(),

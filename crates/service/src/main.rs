@@ -747,6 +747,7 @@ async fn stop_worker(
     // returning. Aborting it here would release its busy guard while the
     // blocking disk operation could still be writing.
     worker.await?;
+    busy.wait_until_idle().await;
     Ok(())
 }
 
@@ -1239,10 +1240,15 @@ async fn serve_named_pipe(
     };
 
     let kept_token = token.clone();
+    let busy = state.busy.clone();
     let service = BackupServiceImpl::new(state, token).into_service();
     Server::builder()
         .add_service(service)
-        .serve_with_incoming_shutdown(incoming, async move { shutdown.wait_for_shutdown().await })
+        .serve_with_incoming_shutdown(incoming, async move {
+            shutdown.wait_for_shutdown().await;
+            busy.cancel_whatever_is_running();
+            busy.wait_until_idle().await;
+        })
         .await?;
 
     drop_our_token(&config, &kept_token);

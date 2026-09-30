@@ -128,6 +128,19 @@ impl Busy {
             None => false,
         }
     }
+
+    /// Wait for a blocking engine operation to return its reservation before
+    /// the service closes the RPC transport. A stop request first cancels the
+    /// current operation; this wait lets its handler send that result.
+    pub async fn wait_until_idle(&self) {
+        let permit = self
+            .slot
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("the busy slot is never closed");
+        drop(permit);
+    }
 }
 
 /// Proof of holding the slot. Dropping it hands the machine back — on success,
@@ -211,6 +224,24 @@ mod tests {
             busy.reserve(Doing::new("проверка", "image")).is_ok(),
             "released by Drop"
         );
+    }
+
+    #[tokio::test]
+    async fn shutdown_drain_waits_for_the_active_engine_operation() {
+        let busy = Busy::new();
+        let held = busy.reserve(Doing::new("проверка", "image.obk")).unwrap();
+        let waiting = busy.clone();
+        let drain = tokio::spawn(async move { waiting.wait_until_idle().await });
+        tokio::task::yield_now().await;
+        assert!(
+            !drain.is_finished(),
+            "shutdown passed an active reservation"
+        );
+        drop(held);
+        tokio::time::timeout(std::time::Duration::from_secs(1), drain)
+            .await
+            .expect("shutdown did not observe the released reservation")
+            .unwrap();
     }
 
     /// The ending that used to leave the service stuck: the task panics, the
