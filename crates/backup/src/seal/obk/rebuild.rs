@@ -11,8 +11,8 @@
 //!    passes want opposite things here — see [`PreviousContents`];
 //! 2. a new record is appended for each changed cluster, under a fresh nonce;
 //! 3. the index, the sealed sidecar, the root, the cluster tables and the
-//!    header are written again, the header last. A torn write of that header
-//!    is NOT an atomic commit; see H03-HEADER-FAULT-2026-09-27.md.
+//!    header are written again, the header last. Consolidation does this in a
+//!    sibling file, published only after the whole image is synced.
 //!
 //! # The two modes, and why there are two
 //!
@@ -28,14 +28,11 @@
 //!
 //! [`PreviousContents::Keep`] (consolidation) must not make that trade. Folding
 //! an increment into its base rewrites an image the rest of the chain is
-//! hanging off, and a crash that damaged the base would destroy every restore
-//! point in the chain at once, not one run's output. So nothing is erased and
-//! nothing is truncated: the new records go **past the end of the file**, the
-//! old ones stay where they are, and the header cluster written last is the
-//! only byte that changes in place. An interruption BEFORE the header write
-//! leaves the previous image intact. A partial header write can make that image
-//! unreadable; H03 remains open. The append-only part still costs dead space
-//! inside the file, reported as `bytes_orphaned`.
+//! hanging off. It first copies that image to a sibling file. New records are
+//! appended there, without erasing old records; only a complete, synced sibling
+//! is renamed over the base. The append-only part still costs dead space inside
+//! the file, reported as `bytes_orphaned`. Staging also needs temporary space,
+//! potentially as much as the whole image.
 //!
 //! # What it costs on a large image
 //!
@@ -80,8 +77,8 @@ pub enum PreviousContents {
     /// failed pass rather than a half-applied one.
     #[default]
     Erase,
-    /// Leave them where they are, unreferenced. Nothing before the header
-    /// cluster is touched, but a torn header write can still lose the image.
+    /// Leave them where they are, unreferenced. The pass is staged in a sibling
+    /// file, so a torn write there cannot damage the published image.
     Keep,
 }
 
@@ -185,6 +182,24 @@ pub fn apply_changed(
 /// old records of the changed clusters are already gone — and the chain's
 /// previous images are untouched.
 pub fn apply_changed_with(
+    path: &Path,
+    chain: &ChainKey,
+    clusters: &[u64],
+    read_cluster: impl FnMut(u64) -> Result<Vec<u8>>,
+    opts: RebuildOptions<'_>,
+) -> Result<RebuildStats> {
+    // The consolidation path must leave every previous restore point readable
+    // if any byte of the new header is torn. Editing a sibling copy also keeps
+    // earlier metadata and cluster tables intact until publication.
+    if opts.previous == PreviousContents::Keep {
+        return super::transaction::replace(path, chain, |stage| {
+            apply_changed_with_in_place(stage, chain, clusters, read_cluster, opts)
+        });
+    }
+    apply_changed_with_in_place(path, chain, clusters, read_cluster, opts)
+}
+
+fn apply_changed_with_in_place(
     path: &Path,
     chain: &ChainKey,
     clusters: &[u64],

@@ -32,9 +32,9 @@
 //! 6. **delete the folded increment — last** — and clear the marker.
 //!
 //! The increment stays on disk until step 6, and the marker allows recovery
-//! from interruptions BETWEEN completed steps. This does not cover a torn
-//! header write in the `.obk` fold or repoint, nor overwritten `.obk` metadata
-//! records: H03 can still make an earlier point unreadable. Steps 4 and 5 are
+//! from interruptions BETWEEN completed steps. `.obk` folds, metadata edits
+//! and repoints are staged beside the image and published by rename; a torn
+//! write to a stage leaves the preceding image in place. Steps 4 and 5 are
 //! idempotent only when their individual writes complete.
 //!
 //! Step 3 is the one that needs care, and the two containers differ:
@@ -499,13 +499,14 @@ fn repoint_next(
 
     if container == "obk" {
         let key = chain_key_for(next, keys)?;
-        // The sidecar first, the backing name second. Both are writes of a
-        // known value, so either order survives a crash; this one keeps the
-        // container link — the thing a reader follows — as the last change.
         let mut sidecar = crate::sidecar::read_sealed_sidecar(next, &key)?;
         sidecar.info.parent_image_file_name = Some(base_name.clone());
-        crate::seal::obk::update_sealed_metadata(next, &key, &sealed_blob(&sidecar)?)?;
-        return crate::seal::obk::set_backing_file(next, &key, &base_name);
+        return crate::seal::obk::repoint_with_metadata(
+            next,
+            &key,
+            &base_name,
+            &sealed_blob(&sidecar)?,
+        );
     }
 
     match container {

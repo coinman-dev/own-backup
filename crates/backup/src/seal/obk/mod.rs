@@ -42,9 +42,10 @@ pub mod metadata;
 pub mod reader;
 pub mod rebuild;
 pub mod root;
+mod transaction;
 pub mod writer;
 
-pub use fold::{fold_child_into_base, set_backing_file, FoldStats};
+pub use fold::{fold_child_into_base, repoint_with_metadata, set_backing_file, FoldStats};
 pub use header::{ObkOpenHeader, ObkRootPointer};
 pub use index::ClusterState;
 pub use io::{ObkRandomReader, ObkStagedWriter};

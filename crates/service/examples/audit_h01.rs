@@ -9,6 +9,8 @@ const PASSWORD: &[u8] = b"Audit-H01-disposable-volume-password";
 const NEW_TOKEN: &str = "audit-h01-new-volume";
 const NEW_PASSWORD: &str = "Audit-H01-new-disposable-password";
 const FAULT_BLOB: &str = r"C:\Lab\audit-h01-fault-blob.bin";
+const CRASH_PREFIX: &str = "audit-h01-crash-";
+const CRASH_ROWS: usize = 4096;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = AppConfig::default();
@@ -24,6 +26,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let public = own_backup_metadata::open_database(&public_path)?;
             own_backup_metadata::upsert_volume_secret(&public, TOKEN, &blob)?;
             println!("H01-SEED public_blob_bytes={}", blob.len());
+        }
+        Some("seed-crash-batch") => {
+            let blob = default_store(&key_path).protect(PASSWORD)?;
+            let mut public = own_backup_metadata::open_database(&public_path)?;
+            let tx = public.transaction()?;
+            for index in 0..CRASH_ROWS {
+                own_backup_metadata::upsert_volume_secret(
+                    &tx,
+                    &format!("{CRASH_PREFIX}{index:04}"),
+                    &blob,
+                )?;
+            }
+            tx.commit()?;
+            println!("H01-CRASH-SEED rows={CRASH_ROWS}");
+        }
+        Some("count-crash-batch") => {
+            let public = own_backup_metadata::open_database(&public_path)?;
+            let remaining = own_backup_metadata::list_volume_secrets(&public)?
+                .iter()
+                .filter(|(key, _)| key.starts_with(CRASH_PREFIX))
+                .count();
+            println!("{remaining}");
+        }
+        Some("check-crash-batch") => {
+            let public = own_backup_metadata::open_database(&public_path)?;
+            let private = own_backup_metadata::open_volume_secret_database(&private_path)?;
+            let remaining = own_backup_metadata::list_volume_secrets(&public)?
+                .iter()
+                .filter(|(key, _)| key.starts_with(CRASH_PREFIX))
+                .count();
+            let entries = own_backup_metadata::list_volume_secrets(&private)?;
+            let migrated: Vec<_> = entries
+                .iter()
+                .filter(|(key, _)| key.starts_with(CRASH_PREFIX))
+                .collect();
+            let passwords_ok = migrated.iter().all(|(_, blob)| {
+                default_store(&key_path)
+                    .unprotect(blob)
+                    .is_ok_and(|password| password.as_slice() == PASSWORD)
+            });
+            let pending = own_backup_metadata::volume_secret_migration_pending(&private)?;
+            let done = own_backup_metadata::volume_secret_migration_done(&private)?;
+            println!(
+                "H01-CRASH-CHECK private={} public_remaining={remaining} passwords_ok={passwords_ok} pending={pending} done={done}",
+                migrated.len()
+            );
+            if migrated.len() != CRASH_ROWS || remaining != 0 || !passwords_ok || pending || !done {
+                return Err("interrupted migration was not completed".into());
+            }
         }
         #[cfg(target_os = "windows")]
         Some("seed-dual" | "seed-deleted-pending") => {

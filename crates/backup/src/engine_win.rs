@@ -2096,7 +2096,11 @@ fn backup_volume_inner(
             // reserved one inside the container, sealed under the same chain
             // key and with a fresh nonce.
             let chain = keys.open_chain_of(&req.image_path)?;
-            crate::seal::obk::update_sealed_metadata(&req.image_path, &chain.key, &blob_bytes)?;
+            crate::seal::obk::metadata::update_unpublished_sealed_metadata(
+                &req.image_path,
+                &chain.key,
+                &blob_bytes,
+            )?;
         }
         (None, ImageFormat::Vhdx) => {
             crate::vhdx_bat::write_vhdx_guest_at(&req.image_path, meta_offset, &blob_bytes)?;
@@ -3940,7 +3944,11 @@ fn backup_disk_inner(
             // reserved one inside the container, sealed under the same chain
             // key and with a fresh nonce.
             let chain = keys.open_chain_of(&req.image_path)?;
-            crate::seal::obk::update_sealed_metadata(&req.image_path, &chain.key, &blob)?;
+            crate::seal::obk::metadata::update_unpublished_sealed_metadata(
+                &req.image_path,
+                &chain.key,
+                &blob,
+            )?;
         }
         (None, ImageFormat::Vhdx) => {
             crate::vhdx_bat::write_vhdx_guest_at(&req.image_path, meta_offset, &blob)?

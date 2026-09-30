@@ -8,7 +8,7 @@
 //! inside the container at creation ([`super::writer::ObkWriter::finish_with_reserve`])
 //! and the new sidecar takes the old one's place here.
 //!
-//! What "in place" means (and why this is NOT yet crash safe):
+//! Within the staged copy, the edit is made in place:
 //!
 //! - the reservation is stored **uncompressed**, so a sidecar of the same size
 //!   produces records of exactly the same length — nothing moves, and no data
@@ -19,10 +19,9 @@
 //! - the root record is replaced too (it names the metadata chunks), and the
 //!   header cluster is rewritten to point at the new root.
 //!
-//! The header cluster is written last, but the old encrypted records have
-//! already been overwritten. A crash between those writes and the header can
-//! leave the old root pointing at records it can no longer authenticate. A torn
-//! header can also make the image unreadable. Both failures belong to H03.
+//! The staged image is checked and synced before it replaces the published
+//! image by rename. A crash during these writes leaves the published image
+//! intact. The copy needs temporary space up to the image's size.
 
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
@@ -45,6 +44,28 @@ use crate::seal::ChainKey;
 /// Fails without touching the image when it reserved no room, when the new
 /// sidecar does not fit the reservation, or when the key does not open it.
 pub fn update_sealed_metadata(path: &Path, chain: &ChainKey, metadata: &[u8]) -> Result<()> {
+    super::transaction::replace(path, chain, |stage| {
+        update_sealed_metadata_in_place(stage, chain, metadata)
+    })
+}
+
+/// Finalize a newly written image before its backup run is published. There
+/// is no previous restore point at this path to preserve, and this avoids a
+/// second full-size copy on every ordinary encrypted backup.
+#[cfg(target_os = "windows")]
+pub(crate) fn update_unpublished_sealed_metadata(
+    path: &Path,
+    chain: &ChainKey,
+    metadata: &[u8],
+) -> Result<()> {
+    update_sealed_metadata_in_place(path, chain, metadata)
+}
+
+pub(super) fn update_sealed_metadata_in_place(
+    path: &Path,
+    chain: &ChainKey,
+    metadata: &[u8],
+) -> Result<()> {
     let (root, header) = {
         let file = std::fs::File::open(path)
             .map_err(|e| bad(format!("cannot open {}: {e}", path.display())))?;
@@ -116,8 +137,7 @@ pub fn update_sealed_metadata(path: &Path, chain: &ChainKey, metadata: &[u8]) ->
     file.seek(SeekFrom::Start(header.open.root.offset))?;
     file.write_all(&root_record.bytes)?;
 
-    // 3. The header cluster, pointing at the new root. Written last, but the
-    //    old metadata/root records above were already overwritten (H03).
+    // 3. The header cluster, pointing at the new root of the staged image.
     let mut open = header.open.clone();
     open.root = ObkRootPointer::new(
         header.open.root.offset,

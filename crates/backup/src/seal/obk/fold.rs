@@ -15,13 +15,9 @@
 //! # Why nothing is erased
 //!
 //! The rebuild is asked for [`PreviousContents::Keep`]. Consolidation rewrites
-//! the image the rest of the chain hangs off, so a crash that damaged the base
-//! would take every restore point in the chain with it — the one failure this
-//! module exists to make impossible. Keeping means the file only grows, the
-//! header cluster written last is the sole byte that changes in place, and a
-//! crash before it leaves the previous base exactly as it was. The cost is dead
-//! space inside the file, which is what the plaintext qcow2 fold pays too
-//! (`ConsolidationOutcome::bytes_orphaned`).
+//! the image the rest of the chain hangs off, so the entire edit is staged in
+//! a sibling file and published by rename after syncing. The cost is dead
+//! space inside the file and temporary space for the staged copy.
 //!
 //! The clusters the base used to hold at those positions therefore stay in the
 //! file, unreferenced. They are ciphertext under the chain key and no index
@@ -179,6 +175,27 @@ fn check_fold(base: &super::ObkRoot, victim: &super::ObkRoot) -> Result<bool> {
 /// identity the base has inherited. That is why repointing an encrypted chain
 /// needs no rebuild — the link was never the file name.
 pub fn set_backing_file(path: &Path, chain: &ChainKey, name: &str) -> Result<()> {
+    super::transaction::replace(path, chain, |stage| {
+        set_backing_file_in_place(stage, chain, name)
+    })
+}
+
+/// Publish the next increment's sidecar and backing name together. The
+/// consolidation marker can recover either operation, but one publication
+/// avoids an intermediate mismatch and a second copy of the entire image.
+pub fn repoint_with_metadata(
+    path: &Path,
+    chain: &ChainKey,
+    name: &str,
+    metadata: &[u8],
+) -> Result<()> {
+    super::transaction::replace(path, chain, |stage| {
+        super::metadata::update_sealed_metadata_in_place(stage, chain, metadata)?;
+        set_backing_file_in_place(stage, chain, name)
+    })
+}
+
+fn set_backing_file_in_place(path: &Path, chain: &ChainKey, name: &str) -> Result<()> {
     use std::io::{Seek, SeekFrom, Write};
 
     // Opening with the key proves this is our image and that its two halves
@@ -316,11 +333,15 @@ mod tests {
         assert_eq!(stats.clusters, 2, "one changed cluster and one emptied one");
 
         // Repoint the leaf and delete the folded increment, as a step does.
-        set_backing_file(&inc2, &f.chain, "full.obk").unwrap();
+        repoint_with_metadata(&inc2, &f.chain, "full.obk", b"repointed leaf sidecar").unwrap();
         std::fs::remove_file(&inc1).unwrap();
 
         let mut chain = ObkChain::open(&inc2, &f.chain).unwrap();
         assert_eq!(chain.chain_len(), 2, "the chain is one image shorter");
+        assert_eq!(
+            &chain.sealed_metadata().unwrap()[..],
+            b"repointed leaf sidecar"
+        );
         let after: Vec<Vec<u8>> = (0..4)
             .map(|c| chain.read_cluster(c).unwrap().to_vec())
             .collect();
