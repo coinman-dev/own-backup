@@ -105,6 +105,11 @@ pub struct ObkOpenHeader {
     pub consolidated_increments: u32,
     #[serde(default)]
     pub chain_started_at: Option<String>,
+    /// New images alternate two checked header slots. Absent on legacy images.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dual_header: bool,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub header_generation: u64,
     /// Canonical padded base64 of the 102-byte wrapped chain key.
     pub wrapped_chain_key: String,
     /// Portable password/recovery envelope, so any machine can open the image.
@@ -112,11 +117,22 @@ pub struct ObkOpenHeader {
     pub root: ObkRootPointer,
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
 impl ObkOpenHeader {
     /// Structural validation only — it says nothing about authenticity.
     pub fn validate(&self) -> Result<()> {
         if self.format != OBK_OPEN_FORMAT || self.scheme != SCHEME {
             return Err(bad("unknown .obk header format/scheme"));
+        }
+        if !self.dual_header && self.header_generation != 0 {
+            return Err(bad("legacy header has a generation number"));
         }
         if !(MIN_OBK_CLUSTER_BITS..=MAX_OBK_CLUSTER_BITS).contains(&self.cluster_bits) {
             return Err(bad(format!(
@@ -234,6 +250,51 @@ pub struct ObkFileHeader {
 }
 
 impl ObkFileHeader {
+    /// Read one fixed slot as a self-contained header cluster. Offsets inside
+    /// the qcow2 header stay relative to the slot, while root/table pointers
+    /// remain absolute offsets in the image.
+    pub fn read_slot<R: Read + Seek>(r: &mut R, offset: u64) -> Result<Self> {
+        r.seek(SeekFrom::Start(offset))?;
+        let mut prefix = [0u8; HEADER_LENGTH_V3 as usize];
+        r.read_exact(&mut prefix)?;
+        let bits = u32::from_be_bytes(super::array(&prefix, 20));
+        if !(MIN_OBK_CLUSTER_BITS..=MAX_OBK_CLUSTER_BITS).contains(&bits) {
+            return Err(bad("header slot has invalid cluster bits"));
+        }
+        let mut cluster = vec![0u8; 1usize << bits];
+        r.seek(SeekFrom::Start(offset))?;
+        r.read_exact(&mut cluster)?;
+        Self::read(&mut std::io::Cursor::new(cluster))
+    }
+
+    /// Structurally valid candidates, newest first. Authentication of the
+    /// sealed root is the reader's next step before one can be trusted.
+    pub fn candidates<R: Read + Seek>(r: &mut R) -> Result<Vec<Self>> {
+        let primary = Self::read_slot(r, 0);
+        let secondary = if primary
+            .as_ref()
+            .is_ok_and(|header| !header.open.dual_header)
+        {
+            None
+        } else {
+            Self::read_slot(r, super::SECOND_HEADER_OFFSET)
+                .ok()
+                .filter(|header| header.open.dual_header)
+        };
+        let mut headers = Vec::new();
+        if let Ok(header) = primary.as_ref() {
+            headers.push(header.clone());
+        }
+        if let Some(header) = secondary {
+            headers.push(header);
+        }
+        if headers.is_empty() {
+            return Err(primary.err().unwrap_or_else(|| bad("no valid header slot")));
+        }
+        headers.sort_by(|a, b| b.open.header_generation.cmp(&a.open.header_generation));
+        Ok(headers)
+    }
+
     /// Parse the header cluster. Refuses anything that is not exactly the shape
     /// we write: a foreign qcow2, a plaintext image, a file with unknown feature
     /// bits, internal snapshots or qcow2's own encryption.
@@ -329,6 +390,13 @@ impl ObkFileHeader {
         };
 
         let open = ObkOpenHeader::from_json(&read_open_extension(&cluster)?)?;
+        if open.dual_header {
+            let end = cluster.len() - 4;
+            let stored = u32::from_be_bytes(cluster[end..].try_into().unwrap());
+            if crc32fast::hash(&cluster[..end]) != stored {
+                return Err(bad("header slot checksum mismatch"));
+            }
+        }
         if open.cluster_bits != cluster_bits || open.virtual_size != virtual_size {
             return Err(bad("open header and qcow2 header disagree about geometry"));
         }
@@ -348,6 +416,36 @@ impl ObkFileHeader {
             open,
         })
     }
+}
+
+/// Add a torn-write detector to a new header slot. The last four bytes are
+/// outside the extension list and backing name, even at the minimum cluster
+/// size; the sealed root still authenticates the actual image contents.
+pub(crate) fn finish_dual_header(mut cluster: Vec<u8>) -> Result<Vec<u8>> {
+    let mut at = HEADER_LENGTH_V3 as usize;
+    loop {
+        if at + 8 > cluster.len() {
+            return Err(bad("header extensions run past the cluster"));
+        }
+        let kind = u32::from_be_bytes(super::array(&cluster, at));
+        let len = u32::from_be_bytes(super::array(&cluster, at + 4)) as usize;
+        at = at
+            .checked_add(8 + len.div_ceil(8) * 8)
+            .ok_or_else(|| bad("header extension length overflow"))?;
+        if kind == HEXT_END {
+            break;
+        }
+    }
+    let name_offset = u64::from_be_bytes(super::array(&cluster, 8)) as usize;
+    let name_len = u32::from_be_bytes(super::array(&cluster, 16)) as usize;
+    let used = at.max(name_offset.saturating_add(name_len));
+    let crc_at = cluster.len() - 4;
+    if used > crc_at {
+        return Err(bad("header has no room for a checksum"));
+    }
+    let checksum = crc32fast::hash(&cluster[..crc_at]);
+    cluster[crc_at..].copy_from_slice(&checksum.to_be_bytes());
+    Ok(cluster)
 }
 
 /// Walk the header extensions and return the single OBKH document.
@@ -431,6 +529,8 @@ mod tests {
             source_id: None,
             consolidated_increments: 0,
             chain_started_at: None,
+            dual_header: false,
+            header_generation: 0,
             root: ObkRootPointer::new(
                 1 << 16,
                 HEADER_LEN + 10 + TAG_LEN,

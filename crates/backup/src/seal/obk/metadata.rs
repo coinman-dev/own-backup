@@ -8,7 +8,8 @@
 //! inside the container at creation ([`super::writer::ObkWriter::finish_with_reserve`])
 //! and the new sidecar takes the old one's place here.
 //!
-//! Within the staged copy, the edit is made in place:
+//! For a new image before its backup run is published, or within a staged
+//! legacy copy, the edit is made in place:
 //!
 //! - the reservation is stored **uncompressed**, so a sidecar of the same size
 //!   produces records of exactly the same length — nothing moves, and no data
@@ -19,9 +20,10 @@
 //! - the root record is replaced too (it names the metadata chunks), and the
 //!   header cluster is rewritten to point at the new root.
 //!
-//! The staged image is checked and synced before it replaces the published
-//! image by rename. A crash during these writes leaves the published image
-//! intact. The copy needs temporary space up to the image's size.
+//! For a published dual-header image, metadata and root records are appended
+//! and a checked header is written to the inactive slot. The previous records
+//! stay intact until the new slot is durable. A legacy image is copied first;
+//! the staged copy is checked and synced before it replaces the original.
 
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
@@ -30,10 +32,10 @@ use std::path::Path;
 use own_backup_common::Result;
 use zeroize::Zeroizing;
 
-use super::header::{obk_extensions, ObkRootPointer};
+use super::header::{finish_dual_header, obk_extensions, ObkRootPointer};
 use super::reader::ObkImage;
 use super::root::ObkRoot;
-use super::{bad, INCOMPAT_OBK_SEAL};
+use super::{bad, INCOMPAT_OBK_SEAL, SECOND_HEADER_OFFSET};
 use crate::qcow2::layout::{build_header_cluster, HeaderParams, TablesInfo};
 use crate::qcow2::{COMPRESSION_TYPE_ZSTD, INCOMPAT_COMPRESSION_TYPE};
 use crate::seal::cluster::{Purpose, RecordWriter, HEADER_LEN, TAG_LEN};
@@ -44,6 +46,23 @@ use crate::seal::ChainKey;
 /// Fails without touching the image when it reserved no room, when the new
 /// sidecar does not fit the reservation, or when the key does not open it.
 pub fn update_sealed_metadata(path: &Path, chain: &ChainKey, metadata: &[u8]) -> Result<()> {
+    if ObkImage::open_path(path, chain)?.open_header().dual_header {
+        if metadata.len() > reserved_room(path, chain)? {
+            return Err(bad("replacement sidecar exceeds the reserved room"));
+        }
+        return super::rebuild::apply_changed_with(
+            path,
+            chain,
+            &[],
+            |_| unreachable!("no clusters were requested"),
+            super::rebuild::RebuildOptions {
+                metadata: Some(metadata),
+                previous: super::rebuild::PreviousContents::Keep,
+                ..Default::default()
+            },
+        )
+        .map(|_| ());
+    }
     super::transaction::replace(path, chain, |stage| {
         update_sealed_metadata_in_place(stage, chain, metadata)
     })
@@ -139,6 +158,12 @@ pub(super) fn update_sealed_metadata_in_place(
 
     // 3. The header cluster, pointing at the new root of the staged image.
     let mut open = header.open.clone();
+    if open.dual_header {
+        open.header_generation = open
+            .header_generation
+            .checked_add(1)
+            .ok_or_else(|| bad("header generation overflow"))?;
+    }
     open.root = ObkRootPointer::new(
         header.open.root.offset,
         header.open.root.len as usize,
@@ -160,6 +185,15 @@ pub(super) fn update_sealed_metadata_in_place(
             refcount_table_clusters: header.refcount_table_clusters,
         },
     )?;
+    let cluster = if open.dual_header {
+        finish_dual_header(cluster)?
+    } else {
+        cluster
+    };
+    if open.dual_header {
+        file.seek(SeekFrom::Start(SECOND_HEADER_OFFSET))?;
+        file.write_all(&cluster)?;
+    }
     file.seek(SeekFrom::Start(0))?;
     file.write_all(&cluster)?;
     file.sync_all()?;
@@ -207,7 +241,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reserved_sidecar_is_replaced_in_place_and_the_data_is_untouched() {
+    fn a_reserved_sidecar_is_appended_and_the_data_is_untouched() {
         let f = Fixture::new();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("full.obk");
@@ -222,11 +256,8 @@ mod tests {
         let before = std::fs::metadata(&path).unwrap().len();
         let final_sidecar = b"final sidecar: exclusions done, checksums updated".to_vec();
         update_sealed_metadata(&path, &f.chain, &final_sidecar).unwrap();
-        assert_eq!(
-            std::fs::metadata(&path).unwrap().len(),
-            before,
-            "an in-place replacement must not grow the file"
-        );
+        let after = std::fs::metadata(&path).unwrap().len();
+        assert!(after > before && after - before < 1 << 20);
 
         let mut reader = ObkRandomReader::open(&path, &f.chain).unwrap();
         assert_eq!(&reader.sealed_metadata().unwrap()[..], &final_sidecar[..]);
@@ -235,9 +266,9 @@ mod tests {
         reader.read_at(0, &mut data).unwrap();
         assert_eq!(data, vec![9u8; 1 << cluster_bits()]);
 
-        // The old sidecar is gone from the file, not merely unreferenced.
+        // The older sealed records remain for a torn-header fallback.
         let raw = std::fs::read(&path).unwrap();
-        assert!(!raw.windows(13).any(|w| w == b"first sidecar"));
+        assert!(raw.len() as u64 > before);
     }
 
     #[test]
@@ -276,6 +307,12 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for round in 0..3u8 {
             update_sealed_metadata(&path, &f.chain, &[round; 100]).unwrap();
+            assert_eq!(
+                crate::seal::obk::read_open_header(&path)
+                    .unwrap()
+                    .header_generation,
+                u64::from(round) + 1
+            );
             let root = image_root(&path, &f.chain).unwrap();
             for chunk in &root.meta_chunks {
                 assert!(seen.insert(chunk.id), "a record identity came back");

@@ -140,6 +140,8 @@ mod tests {
                 let mut file = std::fs::OpenOptions::new().write(true).open(stage)?;
                 file.seek(SeekFrom::Start(0))?;
                 file.write_all(&vec![0; written])?;
+                file.seek(SeekFrom::Start(super::super::SECOND_HEADER_OFFSET))?;
+                file.write_all(&vec![0; written])?;
                 Ok(())
             })
             .is_err());
@@ -245,9 +247,12 @@ mod tests {
         let started = std::time::Instant::now();
         super::super::metadata::update_sealed_metadata(&path, &f.chain, b"after").unwrap();
         let elapsed_ms = started.elapsed().as_millis();
+        let growth = std::fs::metadata(&path).unwrap().len() - bytes;
         let mut reader = crate::seal::obk::ObkRandomReader::open(&path, &f.chain).unwrap();
         assert_eq!(&reader.sealed_metadata().unwrap()[..], b"after");
-        println!("H03-LARGE image_bytes={bytes} staged_update_ms={elapsed_ms}");
+        println!(
+            "H03-LARGE image_bytes={bytes} metadata_update_ms={elapsed_ms} growth_bytes={growth}"
+        );
     }
 
     #[cfg(target_os = "windows")]
@@ -333,6 +338,90 @@ mod tests {
                 );
             }
             other => panic!("unknown H03 power-cut phase: {other:?}"),
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn vm_power_cut_during_second_header_write_recovers_old_point() {
+        use crate::seal::obk::read_open_header;
+
+        let Ok(root) = std::env::var("OWN_BACKUP_H03_V2_POWER_CUT_DIR") else {
+            return;
+        };
+        let root = Path::new(&root);
+        let base = root.join("full.obk");
+        let leaf = root.join("inc.obk");
+        match std::env::var("OWN_BACKUP_H03_V2_POWER_CUT_PHASE").as_deref() {
+            Ok("tear") => {
+                std::fs::create_dir_all(root).unwrap();
+                let f = Fixture::new();
+                let base_id = Uuid::new_v4();
+                let mut writer =
+                    ObkWriter::create(&base, &f.chain, f.options(base_id, ChainRole::Full, None))
+                        .unwrap();
+                writer
+                    .write_cluster(0, &vec![0x11; 1 << cluster_bits()])
+                    .unwrap();
+                writer
+                    .finish(b"previous base")
+                    .unwrap()
+                    .into_inner()
+                    .unwrap()
+                    .sync_all()
+                    .unwrap();
+                let mut writer = ObkWriter::create(
+                    &leaf,
+                    &f.chain,
+                    f.options(
+                        Uuid::new_v4(),
+                        ChainRole::Incremental,
+                        Some((base_id, "full.obk")),
+                    ),
+                )
+                .unwrap();
+                writer
+                    .write_cluster(1, &vec![0x22; 1 << cluster_bits()])
+                    .unwrap();
+                writer
+                    .finish(b"previous child")
+                    .unwrap()
+                    .into_inner()
+                    .unwrap()
+                    .sync_all()
+                    .unwrap();
+
+                let mut file = OpenOptions::new().write(true).open(&base).unwrap();
+                file.seek(SeekFrom::Start(super::super::SECOND_HEADER_OFFSET))
+                    .unwrap();
+                file.write_all(&[0; 512]).unwrap();
+                file.sync_all().unwrap();
+                let mut marker = OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .open(root.join("torn-ready"))
+                    .unwrap();
+                marker.write_all(b"second header torn").unwrap();
+                marker.sync_all().unwrap();
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
+            }
+            Ok("verify") => {
+                let open = read_open_header(&leaf).unwrap();
+                let key = open.chain_key_with_password("пароль архива").unwrap();
+                let mut chain = ObkChain::open(&leaf, &key).unwrap();
+                assert_eq!(chain.chain_len(), 2);
+                assert_eq!(
+                    &chain.read_cluster(0).unwrap()[..],
+                    &vec![0x11; 1 << cluster_bits()]
+                );
+                assert_eq!(
+                    &chain.read_cluster(1).unwrap()[..],
+                    &vec![0x22; 1 << cluster_bits()]
+                );
+            }
+            other => panic!("unknown H03 v2 tear phase: {other:?}"),
         }
     }
 

@@ -43,8 +43,9 @@ pub fn read_listing(path: &Path) -> Result<ObkListing> {
     let file = std::fs::File::open(path)
         .map_err(|e| bad(format!("cannot open {}: {e}", path.display())))?;
     let mut reader = std::io::BufReader::new(file);
-    let header =
-        ObkFileHeader::read(&mut reader).map_err(|e| bad(format!("{}: {e}", path.display())))?;
+    let header = ObkFileHeader::candidates(&mut reader)
+        .map_err(|e| bad(format!("{}: {e}", path.display())))?
+        .remove(0);
     let open = header.open;
     Ok(ObkListing {
         job_id: open.key_file.job_id.clone(),
@@ -113,6 +114,46 @@ mod tests {
         assert_eq!(child.parent_file_name.as_deref(), Some("full.obk"));
         assert_eq!(child.chain_id, base.chain_id, "same chain");
         assert_ne!(child.backup_id, base.backup_id);
+    }
+
+    #[test]
+    fn a_listing_uses_the_newest_surviving_header_slot() {
+        let f = Fixture::new();
+        let dir = tempfile::tempdir().unwrap();
+        let full_id = Uuid::new_v4();
+        write(
+            &dir.path().join("full.obk"),
+            &f,
+            f.options(full_id, ChainRole::Full, None),
+        );
+        let child = dir.path().join("inc.obk");
+        write(
+            &child,
+            &f,
+            f.options(
+                Uuid::new_v4(),
+                ChainRole::Incremental,
+                Some((full_id, "full.obk")),
+            ),
+        );
+        crate::seal::obk::set_backing_file(&child, &f.chain, "new-full.obk").unwrap();
+        assert_eq!(
+            read_listing(&child).unwrap().parent_file_name.as_deref(),
+            Some("new-full.obk")
+        );
+
+        use std::io::{Seek, SeekFrom, Write};
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&child)
+            .unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(&[0]).unwrap();
+        file.sync_all().unwrap();
+        assert_eq!(
+            read_listing(&child).unwrap().parent_file_name.as_deref(),
+            Some("new-full.obk")
+        );
     }
 
     #[test]

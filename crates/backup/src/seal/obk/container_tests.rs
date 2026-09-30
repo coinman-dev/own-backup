@@ -611,6 +611,13 @@ fn the_open_header_cannot_quietly_relabel_an_image() {
         .expect("the open header carries the backup id");
     let mut relabelled = image.clone();
     relabelled[at..at + json.len()].copy_from_slice(json.as_bytes());
+    let second = super::SECOND_HEADER_OFFSET as usize;
+    relabelled[second + at..second + at + json.len()].copy_from_slice(json.as_bytes());
+    for offset in [0, second] {
+        let end = offset + CLUSTER;
+        let crc = crc32fast::hash(&relabelled[offset..end - 4]);
+        relabelled[end - 4..end].copy_from_slice(&crc.to_be_bytes());
+    }
     let error = f.open_err(&relabelled);
     assert!(error.contains("disagree"), "unexpected: {error}");
 
@@ -631,7 +638,46 @@ fn the_open_header_cannot_quietly_relabel_an_image() {
         .count();
     assert!(digits > 0, "the root offset is a number");
     moved[at] = if image[at] == b'1' { b'2' } else { b'1' };
+    moved[second + at] = moved[at];
+    for offset in [0, second] {
+        let end = offset + CLUSTER;
+        let crc = crc32fast::hash(&moved[offset..end - 4]);
+        moved[end - 4..end].copy_from_slice(&crc.to_be_bytes());
+    }
     assert!(!f.open_err(&moved).is_empty());
+}
+
+#[test]
+fn a_legacy_single_header_image_still_opens_and_updates() {
+    let f = Fixture::new();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy.obk");
+    let mut writer = ObkWriter::new_legacy(
+        Cursor::new(Vec::new()),
+        &f.chain,
+        f.options(Uuid::new_v4(), ChainRole::Full, None),
+    )
+    .unwrap();
+    writer.write_cluster(0, &text(0x31)).unwrap();
+    let bytes = writer
+        .finish_with_reserve(b"old sidecar", 4096)
+        .unwrap()
+        .into_inner();
+    assert!(!bytes
+        .windows(b"dual_header".len())
+        .any(|w| w == b"dual_header"));
+    std::fs::write(&path, bytes).unwrap();
+
+    assert!(!read_open_header(&path).unwrap().dual_header);
+    let mut before = ObkChain::open(&path, &f.chain).unwrap();
+    assert_eq!(&before.read_cluster(0).unwrap()[..], &text(0x31));
+    drop(before);
+
+    super::metadata::update_sealed_metadata(&path, &f.chain, b"new sidecar").unwrap();
+    let mut after = ObkChain::open(&path, &f.chain).unwrap();
+    assert_eq!(&after.read_cluster(0).unwrap()[..], &text(0x31));
+    assert_eq!(&after.sealed_metadata().unwrap()[..], b"new sidecar");
+    assert!(!read_open_header(&path).unwrap().dual_header);
 }
 
 fn read_open_header_from_bytes(image: &[u8]) -> ObkOpenHeader {

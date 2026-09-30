@@ -9,13 +9,16 @@
 //! What lives where:
 //!
 //! ```text
-//! cluster 0     qcow2 header + feature name table + OBKH open header + backing name
-//! clusters 1..  one sealed record per stored guest cluster, packed byte-to-byte
+//! offset 0      qcow2 header + feature name table + OBKH open header + backing name
+//! offset 2 MiB  second checked header slot (new images only)
+//! offset 4 MiB+ one sealed record per stored guest cluster, packed byte-to-byte
 //!   ...         sealed index chunks (guest cluster -> which record is current)
 //!   ...         sealed metadata chunks (the sidecar: disk layout, checksums, …)
 //!   ...         the sealed root record: what the index/metadata chunks must be
 //!   ...         L2 tables, L1 table, refcount blocks, refcount table
 //! ```
+//! Legacy single-header images start records after cluster 0 and are read by
+//! the same reader. Their updates continue to use a whole-file transaction.
 //!
 //! **The authenticated index is the truth, the L2 table is only a pointer.**
 //! Every read cross-checks them: the index says what a guest cluster must be
@@ -93,6 +96,11 @@ pub const MAX_OPEN_HEADER_BYTES: usize = 32 * 1024;
 /// record is one cluster plus 100 bytes of framing and tag.
 pub const MIN_OBK_CLUSTER_BITS: u32 = 12;
 pub const MAX_OBK_CLUSTER_BITS: u32 = 21;
+
+/// New images reserve two maximum-sized header slots before any records.
+/// Legacy images have only the header at offset zero and remain readable.
+pub const SECOND_HEADER_OFFSET: u64 = 1 << MAX_OBK_CLUSTER_BITS;
+pub const DUAL_HEADER_DATA_START: u64 = 2 * SECOND_HEADER_OFFSET;
 
 /// Bytes a record adds to its payload: 84-byte header + 16-byte tag.
 pub const RECORD_OVERHEAD: usize = crate::seal::cluster::HEADER_LEN + crate::seal::cluster::TAG_LEN;

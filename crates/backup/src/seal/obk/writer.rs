@@ -2,11 +2,9 @@
 //! `finish()` lays down the index, the sealed metadata, the root record and
 //! then the qcow2 tables and header.
 //!
-//! The header cluster is written **last**, as in the plaintext writer. That is
-//! the commit boundary for creating an image: a crash before it leaves a file
-//! whose first cluster is still zeros — not a qcow2 image at all, and so never
-//! a half-valid backup that something might try to read. Scratch layers, merges
-//! and their transactions are stage E4.
+//! Both checked header slots are written after the records and tables. The
+//! caller syncs the finished file before publishing the backup run; an image
+//! left by a crash during its initial write is not a completed restore point.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -17,10 +15,13 @@ use own_backup_common::{OwnBackupError, Result};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use super::header::{obk_extensions, ObkOpenHeader, ObkRootPointer};
+use super::header::{finish_dual_header, obk_extensions, ObkOpenHeader, ObkRootPointer};
 use super::index::{encode_chunk, ClusterState, MAX_INDEX_ENTRIES_PER_CHUNK};
 use super::root::{ChunkRef, IndexChunkRef, ObkRoot, MAX_INDEX_CHUNKS, MAX_META_CHUNKS};
-use super::{bad, INCOMPAT_OBK_SEAL, MAX_OBK_CLUSTER_BITS, MIN_OBK_CLUSTER_BITS, OBK_OPEN_FORMAT};
+use super::{
+    bad, DUAL_HEADER_DATA_START, INCOMPAT_OBK_SEAL, MAX_OBK_CLUSTER_BITS, MIN_OBK_CLUSTER_BITS,
+    OBK_OPEN_FORMAT, SECOND_HEADER_OFFSET,
+};
 use crate::qcow2::layout::{build_header_cluster, HeaderParams, Qcow2Tables};
 use crate::qcow2::writer::write_placeholder_header;
 use crate::qcow2::{
@@ -79,6 +80,7 @@ pub struct ObkWriter<W: Write + Seek> {
     /// Guest cluster -> what this image says about it. Absent clusters are not
     /// listed: they inherit from the parent, or read as zeros without one.
     states: BTreeMap<u64, ClusterState>,
+    dual_header: bool,
 }
 
 impl ObkWriter<BufWriter<File>> {
@@ -90,16 +92,40 @@ impl ObkWriter<BufWriter<File>> {
 }
 
 impl<W: Write + Seek> ObkWriter<W> {
-    pub fn new(mut w: W, chain: &ChainKey, opts: ObkWriterOptions) -> Result<Self> {
+    pub fn new(w: W, chain: &ChainKey, opts: ObkWriterOptions) -> Result<Self> {
+        Self::new_with_header_mode(w, chain, opts, true)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_legacy(w: W, chain: &ChainKey, opts: ObkWriterOptions) -> Result<Self> {
+        Self::new_with_header_mode(w, chain, opts, false)
+    }
+
+    fn new_with_header_mode(
+        mut w: W,
+        chain: &ChainKey,
+        opts: ObkWriterOptions,
+        dual_header: bool,
+    ) -> Result<Self> {
         validate_options(&opts)?;
         let cluster_size = 1u64 << opts.cluster_bits;
         let virtual_size = opts.virtual_size.div_ceil(cluster_size) * cluster_size;
         let chain_id = *opts.chain_id.as_bytes();
         write_placeholder_header(&mut w, cluster_size)?;
+        let tables = if dual_header {
+            w.seek(SeekFrom::Start(DUAL_HEADER_DATA_START))?;
+            Qcow2Tables::resume(
+                opts.cluster_bits,
+                virtual_size / cluster_size,
+                DUAL_HEADER_DATA_START,
+            )
+        } else {
+            Qcow2Tables::new(opts.cluster_bits, virtual_size / cluster_size)
+        };
 
         Ok(Self {
             w,
-            tables: Qcow2Tables::new(opts.cluster_bits, virtual_size / cluster_size),
+            tables,
             compression: opts.compression,
             data: RecordWriter::new(chain, chain_id, Purpose::Data)?,
             index: RecordWriter::new(chain, chain_id, Purpose::Index)?,
@@ -109,6 +135,7 @@ impl<W: Write + Seek> ObkWriter<W> {
                 ..opts
             },
             states: BTreeMap::new(),
+            dual_header,
         })
     }
 
@@ -288,6 +315,8 @@ impl<W: Write + Seek> ObkWriter<W> {
             source_id: self.opts.source_id.clone(),
             consolidated_increments: self.opts.consolidated_increments,
             chain_started_at: self.opts.chain_started_at.clone(),
+            dual_header: self.dual_header,
+            header_generation: 0,
             root: ObkRootPointer::new(root_ref.offset, root_ref.len as usize, root_ref.id),
         };
         let extensions = obk_extensions(&open)?;
@@ -304,6 +333,15 @@ impl<W: Write + Seek> ObkWriter<W> {
             },
             &info,
         )?;
+        let header_cluster = if self.dual_header {
+            finish_dual_header(header_cluster)?
+        } else {
+            header_cluster
+        };
+        if self.dual_header {
+            self.w.seek(SeekFrom::Start(SECOND_HEADER_OFFSET))?;
+            self.w.write_all(&header_cluster)?;
+        }
         self.w.seek(SeekFrom::Start(0))?;
         self.w.write_all(&header_cluster)?;
         self.w.flush()?;

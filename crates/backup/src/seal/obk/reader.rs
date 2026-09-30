@@ -62,56 +62,64 @@ impl ObkImage<BufReader<File>> {
 pub fn read_open_header(path: &Path) -> Result<ObkOpenHeader> {
     let file = File::open(path).map_err(|e| bad(format!("cannot open {}: {e}", path.display())))?;
     let mut r = BufReader::new(file);
-    Ok(ObkFileHeader::read(&mut r)?.open)
+    Ok(ObkFileHeader::candidates(&mut r)?.remove(0).open)
 }
 
 impl<R: Read + Seek> ObkImage<R> {
     pub fn open(mut r: R, chain: &ChainKey) -> Result<Self> {
-        let header = ObkFileHeader::read(&mut r)?;
-        let chain_id = *header.open.chain_id.as_bytes();
-
-        // The root record, named by the open header and proved by the key.
-        let pointer = &header.open.root;
-        let bytes = read_bytes(&mut r, pointer.offset, pointer.len as usize)?;
-        if bytes.len() != pointer.len as usize {
-            return Err(bad("root record runs past the end of the image"));
+        let candidates = ObkFileHeader::candidates(&mut r)?;
+        let mut last_error = None;
+        for header in candidates {
+            let opened = (|| -> Result<(ObkRoot, Vec<u64>)> {
+                let chain_id = *header.open.chain_id.as_bytes();
+                // The sealed root authenticates whichever header slot survived.
+                let pointer = &header.open.root;
+                let bytes = read_bytes(&mut r, pointer.offset, pointer.len as usize)?;
+                if bytes.len() != pointer.len as usize {
+                    return Err(bad("root record runs past the end of the image"));
+                }
+                let payload = open_chunk(
+                    chain,
+                    RecordContext {
+                        chain_id,
+                        purpose: Purpose::Manifest,
+                        index: 0,
+                    },
+                    pointer.record_id()?,
+                    &bytes,
+                )?;
+                let root = ObkRoot::decode(&payload)?;
+                let open = &header.open;
+                if root.chain_id != open.chain_id
+                    || root.backup_id != open.backup_id
+                    || root.parent_backup_id != open.parent_backup_id
+                    || root.role != open.role
+                    || root.virtual_size != header.virtual_size
+                    || root.cluster_bits != header.cluster_bits
+                {
+                    return Err(bad(
+                        "the image's open header and its sealed root record disagree",
+                    ));
+                }
+                let l1 = read_l1(&mut r, &header)?;
+                Ok((root, l1))
+            })();
+            match opened {
+                Ok((root, l1)) => {
+                    return Ok(Self {
+                        r,
+                        header,
+                        root,
+                        chain: chain.clone(),
+                        l1,
+                        l2_cache: HashMap::new(),
+                        index_cache: HashMap::new(),
+                    });
+                }
+                Err(error) => last_error = Some(error),
+            }
         }
-        let payload = open_chunk(
-            chain,
-            RecordContext {
-                chain_id,
-                purpose: Purpose::Manifest,
-                index: 0,
-            },
-            pointer.record_id()?,
-            &bytes,
-        )?;
-        let root = ObkRoot::decode(&payload)?;
-
-        // The open half was untrusted until exactly here.
-        let open = &header.open;
-        if root.chain_id != open.chain_id
-            || root.backup_id != open.backup_id
-            || root.parent_backup_id != open.parent_backup_id
-            || root.role != open.role
-            || root.virtual_size != header.virtual_size
-            || root.cluster_bits != header.cluster_bits
-        {
-            return Err(bad(
-                "the image's open header and its sealed root record disagree",
-            ));
-        }
-
-        let l1 = read_l1(&mut r, &header)?;
-        Ok(Self {
-            r,
-            header,
-            root,
-            chain: chain.clone(),
-            l1,
-            l2_cache: HashMap::new(),
-            index_cache: HashMap::new(),
-        })
+        Err(last_error.unwrap_or_else(|| bad("no authenticated header slot")))
     }
 
     pub fn open_header(&self) -> &ObkOpenHeader {

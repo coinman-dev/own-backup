@@ -11,8 +11,8 @@
 //!    passes want opposite things here — see [`PreviousContents`];
 //! 2. a new record is appended for each changed cluster, under a fresh nonce;
 //! 3. the index, the sealed sidecar, the root, the cluster tables and the
-//!    header are written again, the header last. Consolidation does this in a
-//!    sibling file, published only after the whole image is synced.
+//!    header are written again, the header last. New images publish an alternate
+//!    checked header slot; legacy images use a synced sibling file and rename.
 //!
 //! # The two modes, and why there are two
 //!
@@ -28,11 +28,11 @@
 //!
 //! [`PreviousContents::Keep`] (consolidation) must not make that trade. Folding
 //! an increment into its base rewrites an image the rest of the chain is
-//! hanging off. It first copies that image to a sibling file. New records are
-//! appended there, without erasing old records; only a complete, synced sibling
-//! is renamed over the base. The append-only part still costs dead space inside
-//! the file, reported as `bytes_orphaned`. Staging also needs temporary space,
-//! potentially as much as the whole image.
+//! hanging off. New records are appended without erasing old records. A new
+//! header is written to the inactive slot after syncing its dependencies, so
+//! a torn write leaves the older slot readable. A legacy image instead stages
+//! the pass in a sibling file and renames it after sync. Append-only records
+//! cost dead space inside the file, reported as `bytes_orphaned`.
 //!
 //! # What it costs on a large image
 //!
@@ -52,12 +52,12 @@ use own_backup_common::Result;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use super::header::{obk_extensions, ObkRootPointer};
+use super::header::{finish_dual_header, obk_extensions, ObkRootPointer};
 use super::index::{encode_chunk, ClusterState, MAX_INDEX_ENTRIES_PER_CHUNK};
 use super::reader::ObkImage;
 use super::root::{ChunkRef, IndexChunkRef, ObkRoot};
 use super::writer::seal_chunk_with;
-use super::{bad, INCOMPAT_OBK_SEAL};
+use super::{bad, DUAL_HEADER_DATA_START, INCOMPAT_OBK_SEAL, SECOND_HEADER_OFFSET};
 use crate::qcow2::layout::{build_header_cluster, HeaderParams, Qcow2Tables};
 use crate::qcow2::{
     decode_l2_entry, encode_compressed_l2_entry, ClusterDescriptor, COMPRESSION_TYPE_ZSTD,
@@ -77,8 +77,8 @@ pub enum PreviousContents {
     /// failed pass rather than a half-applied one.
     #[default]
     Erase,
-    /// Leave them where they are, unreferenced. The pass is staged in a sibling
-    /// file, so a torn write there cannot damage the published image.
+    /// Leave them where they are, unreferenced. New images publish through the
+    /// inactive header slot; legacy images stage the edit in a sibling file.
     Keep,
 }
 
@@ -101,6 +101,8 @@ pub struct RebuildIdentity {
 pub struct RebuildOptions<'a> {
     /// Replace the sealed sidecar as well. `None` keeps the one the image has.
     pub metadata: Option<&'a [u8]>,
+    /// Repoint an incremental image in the same header commit as its metadata.
+    pub backing_file: Option<&'a str>,
     /// Give the image a new identity (consolidation only).
     pub identity: Option<RebuildIdentity>,
     pub previous: PreviousContents,
@@ -125,11 +127,7 @@ pub fn apply_changed_clusters(
 ) -> Result<RebuildStats> {
     // The map is already in memory, so its shapes can be checked before
     // anything is touched. The streaming form below cannot do that, and says so.
-    let cluster_size = {
-        let file = std::fs::File::open(path)
-            .map_err(|e| bad(format!("cannot open {}: {e}", path.display())))?;
-        super::header::ObkFileHeader::read(&mut std::io::BufReader::new(file))?.cluster_size
-    };
+    let cluster_size = { ObkImage::open_path(path, chain)?.file_header().cluster_size };
     for (cluster, data) in changed {
         if data.len() as u64 != cluster_size {
             return Err(bad(format!(
@@ -188,10 +186,14 @@ pub fn apply_changed_with(
     read_cluster: impl FnMut(u64) -> Result<Vec<u8>>,
     opts: RebuildOptions<'_>,
 ) -> Result<RebuildStats> {
-    // The consolidation path must leave every previous restore point readable
-    // if any byte of the new header is torn. Editing a sibling copy also keeps
-    // earlier metadata and cluster tables intact until publication.
-    if opts.previous == PreviousContents::Keep {
+    // Legacy images have one header slot, so consolidation still needs a
+    // sibling copy. New images can alternate header slots in the same file.
+    if opts.previous == PreviousContents::Keep
+        && !ObkImage::open_path(path, chain)?
+            .file_header()
+            .open
+            .dual_header
+    {
         return super::transaction::replace(path, chain, |stage| {
             apply_changed_with_in_place(stage, chain, clusters, read_cluster, opts)
         });
@@ -384,6 +386,12 @@ fn apply_changed_with_in_place(
     // chain becomes the increment it absorbed. Both halves of the header have
     // to say so, or opening the image fails on the cross-check between them.
     let mut open = header.open.clone();
+    if open.dual_header {
+        open.header_generation = open
+            .header_generation
+            .checked_add(1)
+            .ok_or_else(|| bad("header generation overflow"))?;
+    }
     let mut identity = root.clone();
     if let Some(new) = &opts.identity {
         identity.backup_id = new.backup_id;
@@ -418,17 +426,42 @@ fn apply_changed_with_in_place(
             virtual_size: header.virtual_size,
             incompatible_features: INCOMPAT_OBK_SEAL | INCOMPAT_COMPRESSION_TYPE,
             compression_type: COMPRESSION_TYPE_ZSTD,
-            backing_file: header.backing_file.as_deref(),
+            backing_file: opts.backing_file.or(header.backing_file.as_deref()),
             extensions: &obk_extensions(&open)?,
         },
         &info,
     )?;
+    let cluster = if open.dual_header {
+        finish_dual_header(cluster)?
+    } else {
+        cluster
+    };
     // The header cluster is the commit point, so everything it will point at
     // has to be on the platter before it is written — otherwise a power cut
     // can leave a valid header naming records that never landed.
     file.sync_all()?;
-    file.seek(SeekFrom::Start(0))?;
-    file.write_all(&cluster)?;
+    if open.dual_header {
+        let slot = if header.open.header_generation.is_multiple_of(2) {
+            SECOND_HEADER_OFFSET
+        } else {
+            0
+        };
+        file.seek(SeekFrom::Start(slot))?;
+        file.write_all(&cluster)?;
+        if opts.previous == PreviousContents::Erase {
+            // The old data was deliberately destroyed in this unpublished
+            // image; both slots must name the replacement after success.
+            file.seek(SeekFrom::Start(if slot == 0 {
+                SECOND_HEADER_OFFSET
+            } else {
+                0
+            }))?;
+            file.write_all(&cluster)?;
+        }
+    } else {
+        file.seek(SeekFrom::Start(0))?;
+        file.write_all(&cluster)?;
+    }
     file.sync_all()?;
 
     Ok(RebuildStats {
@@ -480,7 +513,11 @@ fn read_state(
     let mut entries = BTreeMap::new();
     // The first byte past every data record: where new ones may be appended and
     // where the metadata this pass replaces begins.
-    let mut data_end = header.cluster_size;
+    let mut data_end = if header.open.dual_header {
+        DUAL_HEADER_DATA_START
+    } else {
+        header.cluster_size
+    };
     for cluster in 0..root.guest_clusters {
         let state = image.cluster_state(cluster)?;
         match state {
@@ -537,6 +574,73 @@ mod tests {
 
     fn cluster_of(fill: u8) -> Vec<u8> {
         vec![fill; 1 << cluster_bits()]
+    }
+
+    #[test]
+    fn a_torn_new_header_recovers_the_previous_generation() {
+        use std::io::{Seek, SeekFrom, Write};
+
+        let f = Fixture::new();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("full.obk");
+        let mut writer = ObkWriter::create(
+            &path,
+            &f.chain,
+            f.options(Uuid::new_v4(), ChainRole::Full, None),
+        )
+        .unwrap();
+        writer.write_cluster(0, &cluster_of(0x11)).unwrap();
+        writer.finish(b"old").unwrap();
+        let old = std::fs::read(&path).unwrap();
+
+        apply_changed_with(
+            &path,
+            &f.chain,
+            &[0],
+            |_| Ok(cluster_of(0x22)),
+            RebuildOptions {
+                previous: PreviousContents::Keep,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let new = std::fs::read(&path).unwrap();
+        let mut reader = ObkRandomReader::open(&path, &f.chain).unwrap();
+        let mut data = vec![0; 1 << cluster_bits()];
+        reader.read_at(0, &mut data).unwrap();
+        assert_eq!(data, cluster_of(0x22));
+
+        for written in [1usize, 16, 128, 512, 2048, (1 << cluster_bits()) - 1] {
+            let torn = dir.path().join(format!("torn-{written}.obk"));
+            std::fs::write(&torn, &new).unwrap();
+            let mut file = OpenOptions::new().write(true).open(&torn).unwrap();
+            file.seek(SeekFrom::Start(SECOND_HEADER_OFFSET)).unwrap();
+            file.write_all(
+                &new[SECOND_HEADER_OFFSET as usize..SECOND_HEADER_OFFSET as usize + written],
+            )
+            .unwrap();
+            file.write_all(
+                &old[SECOND_HEADER_OFFSET as usize + written
+                    ..SECOND_HEADER_OFFSET as usize + (1 << cluster_bits())],
+            )
+            .unwrap();
+            file.sync_all().unwrap();
+            let mut reader = ObkRandomReader::open(&torn, &f.chain).unwrap();
+            reader.read_at(0, &mut data).unwrap();
+            assert_eq!(data, cluster_of(0x11), "written={written}");
+        }
+
+        // The primary slot may also tear during the next generation; the
+        // already-synced secondary is still a complete restore point.
+        let torn_primary = dir.path().join("torn-primary.obk");
+        std::fs::write(&torn_primary, &new).unwrap();
+        let mut file = OpenOptions::new().write(true).open(&torn_primary).unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(&[0]).unwrap();
+        file.sync_all().unwrap();
+        let mut reader = ObkRandomReader::open(&torn_primary, &f.chain).unwrap();
+        reader.read_at(0, &mut data).unwrap();
+        assert_eq!(data, cluster_of(0x22));
     }
 
     /// A cluster whose content is unmistakable in a hex dump.

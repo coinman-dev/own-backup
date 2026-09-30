@@ -42,6 +42,9 @@ frontend build.
   names can remain as zero-filled entries. Do not assume complete XFS removal.
 - Exclusions inside an encrypted ReFS source may be skipped with an explicit
   warning. See the in-app result before relying on that rule.
+- New `.obk` images use two header generations. Recovery media built from older
+  versions cannot open them; rebuild the medium with this version before relying
+  on newly created encrypted archives.
 - `cargo test` skips tests that need root, loop mounts, real Windows images or
   external lab fixtures. See each ignored test's description.
 

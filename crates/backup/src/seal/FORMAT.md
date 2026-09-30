@@ -209,20 +209,39 @@ what a variable-length record needs. That descriptor can address slightly less
 than two clusters, and a record is one cluster plus 100 bytes of framing, so
 the cluster size is at least 4 KiB (`cluster_bits` 12–21; the default stays 16).
 
-File layout, header written last:
+New-image layout (the two headers are written after records and tables):
 
 ```text
-cluster 0     qcow2 header + feature name table + OBKH open header + backing name
-clusters 1..  one sealed Data record per stored guest cluster
+offset 0      qcow2 header + feature name table + OBKH open header + backing name
+offset 2 MiB  second checked header slot
+offset 4 MiB+ one sealed Data record per stored guest cluster
   ...         sealed Index records (chunk ordinal = record index, from 0)
   ...         sealed Manifest records holding the sealed metadata (index 1..n)
   ...         the sealed root record (Manifest, index 0)
   ...         L2 tables, L1 table, refcount blocks, refcount table
 ```
 
-Creating an image commits when its header cluster is written: until then the
-first cluster is zeros, so an interrupted image is not a qcow2 file at all.
-Scratch layers, merges and their transactions are E4 and are not covered here.
+The writer syncs the finished file before publishing a backup run. The
+second slot has the same qcow2 header structure as the first and uses offsets
+relative to its own cluster for extensions and the backing name; pointers to
+records and tables are absolute file offsets. Older single-header images
+start records after cluster 0 and remain readable.
+
+New headers carry `dual_header=true` and `header_generation` (zero when
+omitted). The last four bytes of each header cluster hold a big-endian CRC32
+of every preceding byte in that cluster. This detects a torn or mixed header;
+it is not an authentication tag. The root record is still authenticated with
+the chain key. Readers try structurally valid slots in descending generation
+order and accept the first whose sealed root and L1 table open correctly.
+Keyless listings use the latest structurally valid slot as an untrusted claim.
+
+An update of a published new image appends records, index, sidecar, root and
+tables without touching the previous records. After syncing those bytes, it
+writes the next generation to the *inactive* header slot and syncs again.
+The older slot remains readable if the new write tears. An unpublished image
+may overwrite excluded metadata and both headers while finalising; a failed
+run is not a prior restore point. Older single-header images use a synced
+whole-file sibling and rename for updates.
 
 ### Open header (`OBKH`, qcow2 header extension 0x4F424B48)
 
@@ -231,6 +250,10 @@ UTF-8 JSON, at most 32 KiB, rejecting unknown fields. It carries `format`
 `role`, `created_at`, `virtual_size`, `cluster_bits`, the base64 wrapped chain
 key, the portable private-job-key document, and `root` = the root record's
 `offset`, `len`, `session` and `nonce`.
+New images also carry `dual_header` and, after the first update,
+`header_generation`; both fields are absent in older images. Older program
+versions reject the new fields, so a recovery medium must be updated before
+it can open a new image.
 
 It exists so a listing can show a backup without any key, and it proves
 nothing: every field is compared with the sealed root record before an image is

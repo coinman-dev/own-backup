@@ -15,9 +15,9 @@
 //! # Why nothing is erased
 //!
 //! The rebuild is asked for [`PreviousContents::Keep`]. Consolidation rewrites
-//! the image the rest of the chain hangs off, so the entire edit is staged in
-//! a sibling file and published by rename after syncing. The cost is dead
-//! space inside the file and temporary space for the staged copy.
+//! the image the rest of the chain hangs off. New images append records and
+//! publish a checked alternate header slot; legacy images stage the edit in a
+//! sibling file. Both preserve the previous point through a torn header write.
 //!
 //! The clusters the base used to hold at those positions therefore stay in the
 //! file, unreferenced. They are ciphertext under the chain key and no index
@@ -39,7 +39,7 @@ use std::path::Path;
 use own_backup_common::Result;
 use uuid::Uuid;
 
-use super::header::obk_extensions;
+use super::header::{finish_dual_header, obk_extensions};
 use super::reader::ObkImage;
 use super::rebuild::{apply_changed_with, PreviousContents, RebuildIdentity, RebuildOptions};
 use super::{bad, INCOMPAT_OBK_SEAL};
@@ -115,6 +115,7 @@ pub fn fold_child_into_base(
         },
         RebuildOptions {
             metadata: Some(metadata),
+            backing_file: None,
             identity: Some(identity),
             previous: PreviousContents::Keep,
             zstd_level: Some(zstd_level),
@@ -175,6 +176,9 @@ fn check_fold(base: &super::ObkRoot, victim: &super::ObkRoot) -> Result<bool> {
 /// identity the base has inherited. That is why repointing an encrypted chain
 /// needs no rebuild — the link was never the file name.
 pub fn set_backing_file(path: &Path, chain: &ChainKey, name: &str) -> Result<()> {
+    if ObkImage::open_path(path, chain)?.open_header().dual_header {
+        return set_backing_file_in_place(path, chain, name);
+    }
     super::transaction::replace(path, chain, |stage| {
         set_backing_file_in_place(stage, chain, name)
     })
@@ -189,6 +193,21 @@ pub fn repoint_with_metadata(
     name: &str,
     metadata: &[u8],
 ) -> Result<()> {
+    if ObkImage::open_path(path, chain)?.open_header().dual_header {
+        return super::rebuild::apply_changed_with(
+            path,
+            chain,
+            &[],
+            |_| unreachable!("no clusters were requested"),
+            RebuildOptions {
+                metadata: Some(metadata),
+                backing_file: Some(name),
+                previous: PreviousContents::Keep,
+                ..Default::default()
+            },
+        )
+        .map(|_| ());
+    }
     super::transaction::replace(path, chain, |stage| {
         super::metadata::update_sealed_metadata_in_place(stage, chain, metadata)?;
         set_backing_file_in_place(stage, chain, name)
@@ -207,6 +226,13 @@ fn set_backing_file_in_place(path: &Path, chain: &ChainKey, name: &str) -> Resul
             path.display()
         )));
     }
+    let mut open = header.open.clone();
+    if open.dual_header {
+        open.header_generation = open
+            .header_generation
+            .checked_add(1)
+            .ok_or_else(|| bad("header generation overflow"))?;
+    }
     let cluster = build_header_cluster(
         HeaderParams {
             cluster_bits: header.cluster_bits,
@@ -214,7 +240,7 @@ fn set_backing_file_in_place(path: &Path, chain: &ChainKey, name: &str) -> Resul
             incompatible_features: INCOMPAT_OBK_SEAL | INCOMPAT_COMPRESSION_TYPE,
             compression_type: COMPRESSION_TYPE_ZSTD,
             backing_file: Some(name),
-            extensions: &obk_extensions(&header.open)?,
+            extensions: &obk_extensions(&open)?,
         },
         &TablesInfo {
             l1_size: header.l1_size,
@@ -223,12 +249,23 @@ fn set_backing_file_in_place(path: &Path, chain: &ChainKey, name: &str) -> Resul
             refcount_table_clusters: header.refcount_table_clusters,
         },
     )?;
+    let cluster = if open.dual_header {
+        finish_dual_header(cluster)?
+    } else {
+        cluster
+    };
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(path)
         .map_err(|e| bad(format!("cannot open {} for writing: {e}", path.display())))?;
-    file.seek(SeekFrom::Start(0))?;
+    file.seek(SeekFrom::Start(
+        if open.dual_header && header.open.header_generation.is_multiple_of(2) {
+            super::SECOND_HEADER_OFFSET
+        } else {
+            0
+        },
+    ))?;
     file.write_all(&cluster)?;
     file.sync_all()?;
     Ok(())
@@ -391,12 +428,9 @@ mod tests {
         let after = std::fs::read(&base).unwrap();
 
         assert!(after.len() > before.len(), "a fold only ever appends");
-        let head = 1usize << cluster_bits(); // the header cluster, the commit point
-        assert_eq!(
-            after[head..before.len()],
-            before[head..],
-            "everything but the header cluster must be untouched"
-        );
+        let data = super::super::DUAL_HEADER_DATA_START as usize;
+        assert!(after[..1usize << cluster_bits()] == before[..1usize << cluster_bits()]);
+        assert!(after[data..before.len()] == before[data..]);
     }
 
     /// The crash between a finished fold and the record of it: the step is run

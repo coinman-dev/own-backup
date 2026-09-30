@@ -32,9 +32,9 @@
 //! 6. **delete the folded increment — last** — and clear the marker.
 //!
 //! The increment stays on disk until step 6, and the marker allows recovery
-//! from interruptions BETWEEN completed steps. `.obk` folds, metadata edits
-//! and repoints are staged beside the image and published by rename; a torn
-//! write to a stage leaves the preceding image in place. Steps 4 and 5 are
+//! from interruptions BETWEEN completed steps. New `.obk` images publish
+//! through alternate header slots; legacy images stage changes beside the
+//! file and publish by rename. Steps 4 and 5 are
 //! idempotent only when their individual writes complete.
 //!
 //! Step 3 is the one that needs care, and the two containers differ:
