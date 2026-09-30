@@ -20,7 +20,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut verifier = client.clone();
     let task = tokio::spawn(async move {
         verifier
-            .verify_image(&image, &own_backup_client::ArchiveSecret::none())
+            .verify_image_with_status(&image, &own_backup_client::ArchiveSecret::none())
             .await
     });
     let active = tokio::time::timeout(std::time::Duration::from_secs(30), async {
@@ -37,11 +37,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !active || task.is_finished() {
         return Err("VerifyImage did not remain active".into());
     }
-    println!("H02-VERIFY-ACTIVE progress_seen=true");
+    println!("H02-VERIFY-ACTIVE progress_seen=true at={}", chrono_time());
     let mut watcher = tokio::net::TcpStream::connect(("127.0.0.1", port)).await?;
     watcher.write_all(b"VERIFY\n").await?;
     watcher.shutdown().await?;
-    println!("H02-VERIFY-STOP-SENT");
+    println!("H02-VERIFY-STOP-SENT at={}", chrono_time());
     let result = tokio::time::timeout(std::time::Duration::from_secs(300), task).await??;
     match result {
         Ok(report) => {
@@ -53,12 +53,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err("verification finished before the service stopped".into())
         }
         Err(error) => {
-            println!("H02-VERIFY-RESULT success=false error={error}");
-            if error.to_ascii_lowercase().contains("cancel") {
+            println!(
+                "H02-VERIFY-RESULT success=false code={:?} at={} error={error}",
+                error.code(),
+                chrono_time()
+            );
+            if error.code() == tonic::Code::Cancelled {
                 Ok(())
             } else {
                 Err(format!("verify did not report cancellation: {error}").into())
             }
         }
     }
+}
+
+fn chrono_time() -> String {
+    // UTC milliseconds, independent of the guest's current locale.
+    let since_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    since_epoch.as_millis().to_string()
 }

@@ -26,15 +26,21 @@ use proto::*;
 
 pub struct BackupServiceImpl {
     state: Arc<AppState>,
+    shutdown: crate::shutdown::ShutdownSignal,
     /// Expected bearer token. Empty string means auth is disabled (dev/TCP mode).
     service_token: String,
 }
 
 impl BackupServiceImpl {
-    pub fn new(state: Arc<AppState>, service_token: String) -> Self {
+    pub fn new(
+        state: Arc<AppState>,
+        service_token: String,
+        shutdown: crate::shutdown::ShutdownSignal,
+    ) -> Self {
         Self {
             state,
             service_token,
+            shutdown,
         }
     }
 
@@ -53,10 +59,18 @@ impl BackupServiceImpl {
         what: &str,
         which: &str,
     ) -> Result<own_backup_core::busy::Reservation, Status> {
-        self.state
+        if self.shutdown.is_shutdown_requested() {
+            return Err(Status::unavailable("service is stopping"));
+        }
+        let slot = self
+            .state
             .busy
             .reserve(own_backup_core::busy::Doing::new(what, which))
-            .map_err(|held| Status::failed_precondition(held.refusal()))
+            .map_err(|held| Status::failed_precondition(held.refusal()))?;
+        if self.shutdown.is_shutdown_requested() {
+            return Err(Status::unavailable("service is stopping"));
+        }
+        Ok(slot)
     }
 
     /// The same, for an operation the client already has an id for — a restore
@@ -67,10 +81,18 @@ impl BackupServiceImpl {
         which: &str,
         id: uuid::Uuid,
     ) -> Result<own_backup_core::busy::Reservation, Status> {
-        self.state
+        if self.shutdown.is_shutdown_requested() {
+            return Err(Status::unavailable("service is stopping"));
+        }
+        let slot = self
+            .state
             .busy
             .reserve(own_backup_core::busy::Doing::with_id(what, which, id))
-            .map_err(|held| Status::failed_precondition(held.refusal()))
+            .map_err(|held| Status::failed_precondition(held.refusal()))?;
+        if self.shutdown.is_shutdown_requested() {
+            return Err(Status::unavailable("service is stopping"));
+        }
+        Ok(slot)
     }
 
     /// Run every plan check against a service-built context and return the
@@ -913,8 +935,28 @@ impl BackupService for BackupServiceImpl {
     ) -> Result<Response<Self::StreamEventsStream>, Status> {
         check_auth(&req, &self.service_token)?;
         // Drop "lagged" notices silently; a slow client just misses old events.
-        let stream =
+        let mut events =
             BroadcastStream::new(self.state.events.subscribe()).filter_map(|r| r.ok().map(Ok));
+        let mut shutdown = self.shutdown.clone();
+        let busy = self.state.busy.clone();
+        let stream = async_stream::stream! {
+            let drained = async move {
+                shutdown.wait_for_shutdown().await;
+                busy.wait_until_idle().await;
+            };
+            tokio::pin!(drained);
+            loop {
+                tokio::select! {
+                    // A subscriber must release its HTTP/2 stream before tonic
+                    // can finish graceful shutdown, even if it stays connected.
+                    _ = &mut drained => break,
+                    event = events.next() => match event {
+                        Some(event) => yield event,
+                        None => break,
+                    },
+                }
+            }
+        };
         Ok(Response::new(Box::pin(stream)))
     }
 
@@ -1182,6 +1224,7 @@ impl BackupService for BackupServiceImpl {
             let path = std::path::PathBuf::from(&p.image_path);
             let keys = manual_keys_off_thread(path.clone(), p.secret).await?;
             let slot = self.reserve(&tr!("grpc_server.busy_validation"), &p.image_path)?;
+            info!(image = %p.image_path, "VerifyImage RPC started");
             let cancel = slot.cancel();
             let events = self.state.events.clone();
 
@@ -1216,6 +1259,7 @@ impl BackupService for BackupServiceImpl {
             .map_err(|e| Status::internal(format!("verify task panicked: {e}")))?
             .map_err(|e| {
                 if matches!(e, own_backup_common::OwnBackupError::Cancelled) {
+                    info!("VerifyImage RPC returning Cancelled");
                     Status::cancelled(e.to_string())
                 } else {
                     Status::internal(e.to_string())
@@ -2506,6 +2550,14 @@ mod tests {
     use super::*;
 
     fn make_service(dir: &std::path::Path) -> BackupServiceImpl {
+        let (_, shutdown) = crate::shutdown::create_shutdown_channel();
+        make_service_with_shutdown(dir, shutdown)
+    }
+
+    fn make_service_with_shutdown(
+        dir: &std::path::Path,
+        shutdown: crate::shutdown::ShutdownSignal,
+    ) -> BackupServiceImpl {
         let mut config = own_backup_common::config::AppConfig::default();
         config.data_dir = dir.to_path_buf();
         let store = own_backup_core::JobStore::load(dir);
@@ -2519,7 +2571,94 @@ mod tests {
         let state = AppState::new(
             config, store, queue, busy, job_tx, cancel, events, passwords,
         );
-        BackupServiceImpl::new(state, String::new())
+        BackupServiceImpl::new(state, String::new(), shutdown)
+    }
+
+    #[tokio::test]
+    async fn shutdown_refuses_new_destructive_operations() {
+        let dir = tempfile::tempdir().unwrap();
+        let (controller, shutdown) = crate::shutdown::create_shutdown_channel();
+        let svc = make_service_with_shutdown(dir.path(), shutdown);
+        controller.trigger_shutdown();
+        assert_eq!(
+            svc.reserve("verify", "image").unwrap_err().code(),
+            tonic::Code::Unavailable
+        );
+        assert_eq!(
+            svc.reserve_with_id("restore", "plan", uuid::Uuid::new_v4())
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unavailable
+        );
+        assert!(svc.state.busy.current().is_none());
+    }
+
+    /// Keep a real HTTP/2 subscriber connected across shutdown. The service
+    /// must drain the operation and close the stream without needing the GUI
+    /// to disconnect first (H02).
+    #[tokio::test]
+    async fn shutdown_drains_operation_and_closes_connected_event_stream() {
+        let dir = tempfile::tempdir().unwrap();
+        let (controller, mut shutdown) = crate::shutdown::create_shutdown_channel();
+        let svc = make_service_with_shutdown(dir.path(), shutdown.clone());
+        let busy = svc.state.busy.clone();
+        let events = svc.state.events.clone();
+        let held = busy
+            .reserve(own_backup_core::busy::Doing::new("verify", "image"))
+            .unwrap();
+        let cancel = held.cancel();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (stopping_tx, stopping_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(svc.into_service())
+                .serve_with_incoming_shutdown(
+                    tokio_stream::wrappers::TcpListenerStream::new(listener),
+                    async move {
+                        shutdown.wait_for_shutdown().await;
+                        busy.cancel_whatever_is_running();
+                        let _ = stopping_tx.send(());
+                        busy.wait_until_idle().await;
+                    },
+                )
+                .await
+        });
+        let mut client =
+            proto::backup_service_client::BackupServiceClient::connect(format!("http://{addr}"))
+                .await
+                .unwrap();
+        let mut stream = client.stream_events(Empty {}).await.unwrap().into_inner();
+        events
+            .send(Event {
+                kind: "verify".into(),
+                json: "{}".into(),
+            })
+            .unwrap();
+        assert_eq!(stream.message().await.unwrap().unwrap().kind, "verify");
+        controller.trigger_shutdown();
+        tokio::time::timeout(std::time::Duration::from_secs(5), stopping_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(cancel.is_cancelled());
+        assert!(
+            !server.is_finished(),
+            "transport closed before the operation drained"
+        );
+        drop(held);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), stream.message())
+                .await
+                .unwrap()
+                .unwrap()
+                .is_none()
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
     }
 
     fn job(name: &str, source: &str, dest: &str) -> String {

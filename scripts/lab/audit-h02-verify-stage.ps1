@@ -8,7 +8,12 @@ function Say([string]$Text) {
 }
 
 $ErrorActionPreference = 'Stop'
-$ready = 'C:\Lab\audit-h02-verify-drain-stage.ready'
+$action = 'stop'
+if (Test-Path -LiteralPath 'C:\Lab\audit-h02-verify.action') {
+    $action = (Get-Content -LiteralPath 'C:\Lab\audit-h02-verify.action' -Raw).Trim()
+}
+if ($action -notin @('stop', 'update')) { throw 'invalid H02 action' }
+$ready = "C:\Lab\audit-h02-verify-stream-shutdown-$action-stage.ready"
 try {
     if (Test-Path -LiteralPath $ready) {
         $watcher = Start-Process powershell.exe -ArgumentList `
@@ -30,6 +35,7 @@ try {
     Say "H02-VERIFY-SERVICE sha256=$have"
     Remove-Item -LiteralPath 'C:\Lab\audit-h02-verify-watch.ready' -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath 'C:\Lab\audit-h02-verify.done' -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath 'C:\Lab\audit-h02-verify-watch.result.json' -ErrorAction SilentlyContinue
     $image = Get-ChildItem 'C:\Lab\audit-2026-09-27\a07-images' -Filter '*.qcow2' -File |
         Sort-Object Length -Descending | Select-Object -First 1
     if (-not $image -or $image.Length -lt 500MB) { throw 'large A07 image missing' }

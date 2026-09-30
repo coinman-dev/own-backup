@@ -131,7 +131,8 @@ impl Busy {
 
     /// Wait for a blocking engine operation to return its reservation before
     /// the service closes the RPC transport. A stop request first cancels the
-    /// current operation; this wait lets its handler send that result.
+    /// current operation. RPC handlers still need transport-level graceful
+    /// shutdown after this wait to send their final responses.
     pub async fn wait_until_idle(&self) {
         let permit = self
             .slot

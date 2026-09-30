@@ -396,16 +396,26 @@ impl BackupClient {
         image_path: &str,
         secret: &ArchiveSecret,
     ) -> Result<own_backup_common::engine_dto::VerifySummaryDto> {
+        self.verify_image_with_status(image_path, secret)
+            .await
+            .map_err(status)
+    }
+
+    /// Verify while retaining the gRPC status code, including `Cancelled`.
+    pub async fn verify_image_with_status(
+        &mut self,
+        image_path: &str,
+        secret: &ArchiveSecret,
+    ) -> std::result::Result<own_backup_common::engine_dto::VerifySummaryDto, tonic::Status> {
         let mut body = serde_json::json!({ "image_path": image_path });
         secret.add_to(&mut body);
         let json = body.to_string();
         let reply = self
             .inner
             .verify_image(self.request(proto::JsonRequest { json }))
-            .await
-            .map_err(status)?
+            .await?
             .into_inner();
-        parse(&reply.json)
+        parse(&reply.json).map_err(tonic::Status::internal)
     }
 
     /// Mount an image; returns where it appeared.

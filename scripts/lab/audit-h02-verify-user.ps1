@@ -44,7 +44,8 @@ try {
     foreach ($line in ($output -split "`r?`n")) {
         if ($line -match 'H02-VERIFY-') { Say $line }
     }
-    if ($code -ne 0) { throw "verify client exit=$code output=$output" }
+    $rpcPassed = $code -eq 0
+    if (-not $rpcPassed) { Say "H02-VERIFY-RPC-FAIL exit=$code output=$output" }
 
     $deadline = [DateTime]::UtcNow.AddMinutes(6)
     while (-not (Test-Path -LiteralPath $done) -and [DateTime]::UtcNow -lt $deadline) {
@@ -54,16 +55,52 @@ try {
         (Get-Content -LiteralPath $done -Raw).Trim() -ne 'pass') {
         throw 'service watcher did not complete'
     }
+    $result = Get-Content -LiteralPath 'C:\Lab\audit-h02-verify-watch.result.json' -Raw | ConvertFrom-Json
+    $cancelled = [regex]::Match($output, 'code=Cancelled at=(\d+)')
+    $beforeStopped = $cancelled.Success -and
+        [long]$cancelled.Groups[1].Value -le [long]$result.stopped_at_ms
+    Say "H02-VERIFY-ORDER cancelled_before_stopped=$beforeStopped"
     $same = (Get-FileHash -LiteralPath $image.FullName -Algorithm SHA256).Hash -eq $expected
     Say "H02-VERIFY-IMAGE-AFTER sha256_unchanged=$same"
     if (-not $same) { throw 'verify stop changed the image' }
-    $null = RunCli @('mount', $image.FullName)
-    $null = RunCli @('unmount', $image.FullName)
+    $mount = RunCli @('mount', $image.FullName)
+    try {
+        $disk = [regex]::Match($mount, 'PhysicalDrive(\d+)')
+        if (-not $disk.Success) { throw 'mounted disk number missing' }
+        $letters = @(Get-Partition -DiskNumber ([int]$disk.Groups[1].Value) |
+            Where-Object { $_.DriveLetter } | ForEach-Object { $_.DriveLetter })
+        $file = $letters | ForEach-Object { "${_}:\a07-data\large.bin" } |
+            Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+        if (-not $file) { throw 'control file absent in mounted point' }
+        $expectedBlock = New-Object byte[] (1MB)
+        ([Random]::new(20260927)).NextBytes($expectedBlock)
+        $hash = [Security.Cryptography.SHA256]::Create()
+        $stream = [IO.File]::OpenRead($file)
+        try {
+            if ($stream.Length -ne 1100MB) { throw 'control file length changed' }
+            $expectedHash = [BitConverter]::ToString($hash.ComputeHash($expectedBlock))
+            foreach ($offset in @(0L, ($stream.Length - 1MB))) {
+                $null = $stream.Seek($offset, [IO.SeekOrigin]::Begin)
+                $block = New-Object byte[] (1MB)
+                $read = 0
+                while ($read -lt $block.Length) {
+                    $got = $stream.Read($block, $read, $block.Length - $read)
+                    if ($got -eq 0) { throw 'control file read ended early' }
+                    $read += $got
+                }
+                if ([BitConverter]::ToString($hash.ComputeHash($block)) -ne $expectedHash) {
+                    throw "control file differs at $offset"
+                }
+            }
+            Say "H02-VERIFY-CONTENTS blocks=2 bytes_checked=2097152 block_sha256=$($expectedHash.Replace('-', ''))"
+        } finally { $stream.Dispose(); $hash.Dispose() }
+    } finally { $null = RunCli @('unmount', $image.FullName) }
     Start-Sleep -Seconds 2
     $sessions = (& iscsicli.exe SessionList 2>&1 | Out-String)
     $orphan = $sessions.ToLowerInvariant().Contains('ownbackup')
     Say "H02-VERIFY-ISCSI-ORPHAN present=$orphan"
     if ($orphan) { throw 'iSCSI session remained after mount/unmount' }
+    if (-not $rpcPassed -or -not $beforeStopped) { throw 'VerifyImage did not return Cancelled before Stopped' }
     Say 'H02-VERIFY-USER-PASS'
 } catch {
     Say "H02-VERIFY-USER-FAIL line=$($_.InvocationInfo.ScriptLineNumber) message=$($_.Exception.Message)"

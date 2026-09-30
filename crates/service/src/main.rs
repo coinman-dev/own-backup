@@ -709,11 +709,14 @@ pub async fn run_main_loop(
     );
     #[cfg(windows)]
     let kept_token = token.clone();
-    let service = BackupServiceImpl::new(state, token).into_service();
+    let busy = state.busy.clone();
+    let service = BackupServiceImpl::new(state, token, shutdown.clone()).into_service();
     let served = Server::builder()
         .add_service(service)
         .serve_with_shutdown(addr, async move {
             shutdown.wait_for_shutdown().await;
+            busy.cancel_whatever_is_running();
+            busy.wait_until_idle().await;
         })
         .await;
 
@@ -944,11 +947,14 @@ async fn serve_uds(
 
     info!("gRPC server (UDS) listening on {:?}", socket_path);
 
-    let service = BackupServiceImpl::new(state, token).into_service();
+    let busy = state.busy.clone();
+    let service = BackupServiceImpl::new(state, token, shutdown.clone()).into_service();
     Server::builder()
         .add_service(service)
         .serve_with_incoming_shutdown(UnixListenerStream::new(uds), async move {
-            shutdown.wait_for_shutdown().await
+            shutdown.wait_for_shutdown().await;
+            busy.cancel_whatever_is_running();
+            busy.wait_until_idle().await;
         })
         .await?;
 
@@ -1241,7 +1247,7 @@ async fn serve_named_pipe(
 
     let kept_token = token.clone();
     let busy = state.busy.clone();
-    let service = BackupServiceImpl::new(state, token).into_service();
+    let service = BackupServiceImpl::new(state, token, shutdown.clone()).into_service();
     Server::builder()
         .add_service(service)
         .serve_with_incoming_shutdown(incoming, async move {
