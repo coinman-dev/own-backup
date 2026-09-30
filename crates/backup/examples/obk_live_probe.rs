@@ -73,16 +73,90 @@ mod probe {
 
     pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         let args: Vec<String> = std::env::args().collect();
-        if args.len() != 5 {
-            return Err("usage: obk_live_probe <volume|disk> <source> <work dir> <target>".into());
+        match args.as_slice() {
+            [_, mode, source, work, target] if mode == "volume" => {
+                let work = PathBuf::from(work);
+                std::fs::create_dir_all(&work)?;
+                run_volume(source.clone(), work, target.clone())
+            }
+            [_, mode, source, work, target] if mode == "disk" => {
+                let work = PathBuf::from(work);
+                std::fs::create_dir_all(&work)?;
+                run_disk(source.parse()?, work, target.parse()?)
+            }
+            [_, mode, image, marker] if mode == "h03-tear" => {
+                run_h03_tear(Path::new(image), Path::new(marker))
+            }
+            [_, mode, image, target] if mode == "h03-restore" => {
+                run_h03_restore(Path::new(image), target.parse()?)
+            }
+            _ => Err("usage: obk_live_probe volume|disk <source> <work dir> <target> | h03-tear <image> <marker> | h03-restore <image> <target disk>".into()),
         }
-        let work = PathBuf::from(&args[3]);
-        std::fs::create_dir_all(&work)?;
-        match args[1].as_str() {
-            "volume" => run_volume(args[2].clone(), work, args[4].clone()),
-            "disk" => run_disk(args[2].parse()?, work, args[4].parse()?),
-            other => Err(format!("unknown mode {other:?}: expected 'volume' or 'disk'").into()),
+    }
+
+    fn run_h03_tear(image: &Path, marker: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        use std::io::{Seek, SeekFrom, Write};
+
+        let keys = ArchiveKeys::from_image_password(image, PASSWORD)?;
+        let key = keys.open_chain_of(image)?.key;
+        let mut reader = ObkRandomReader::open(image, &key)?;
+        let metadata = reader.sealed_metadata()?;
+        drop(reader);
+        own_backup_backup::seal::obk::update_sealed_metadata(image, &key, &metadata)?;
+        let open = own_backup_backup::seal::obk::read_open_header(image)?;
+        if !open.dual_header {
+            return Err("H03 probe needs a dual-header image".into());
         }
+        let slot = if open.header_generation.is_multiple_of(2) {
+            0
+        } else {
+            own_backup_backup::seal::obk::SECOND_HEADER_OFFSET
+        };
+        let mut file = std::fs::OpenOptions::new().write(true).open(image)?;
+        file.seek(SeekFrom::Start(slot))?;
+        file.write_all(&[0; 512])?;
+        file.sync_all()?;
+        let mut ready = std::fs::File::create_new(marker)?;
+        ready.write_all(b"active header torn and synced")?;
+        ready.sync_all()?;
+        say!(
+            "PROBE-H03-TORN generation={} slot={} synced=true",
+            open.header_generation,
+            slot
+        );
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    }
+
+    fn run_h03_restore(image: &Path, target_disk: u32) -> Result<(), Box<dyn std::error::Error>> {
+        use own_backup_backup::engine_win::{restore_disk, DiskRestoreRequest};
+
+        let keys = ArchiveKeys::from_image_password(image, PASSWORD)?;
+        let checked = verify_image_with_keys(image, Some(&keys), |_, _| Ok(()))?;
+        say!(
+            "PROBE-H03-VERIFY blocks={} mismatched={}",
+            checked.blocks_checked,
+            checked.mismatched_blocks.len()
+        );
+        if !checked.mismatched_blocks.is_empty() {
+            return Err("H03 archive block mismatch".into());
+        }
+        let restored = restore_disk(
+            &DiskRestoreRequest {
+                manifest_path: image.to_path_buf(),
+                target_disk,
+                verify_checksums: true,
+                encryption: Some(keys),
+            },
+            |_| Ok(()),
+        )?;
+        say!(
+            "PROBE-H03-RESTORE partitions={} bytes={}",
+            restored.partitions,
+            restored.bytes_written
+        );
+        Ok(())
     }
 
     /// The keys of a throwaway job, made here and gone with the VM. The
