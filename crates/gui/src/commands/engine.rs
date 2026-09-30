@@ -91,7 +91,9 @@ pub async fn list_disk_backups(folder: String) -> Result<Vec<DiskBackupDto>, Str
             .to_lowercase();
         // Whole-disk image (embedded manifest) OR legacy .obdm; skip the rest.
         let m: DiskBackupManifest = if ext == DiskBackupManifest::EXTENSION {
-            let Ok(raw) = std::fs::read(&path) else { continue };
+            let Ok(raw) = std::fs::read(&path) else {
+                continue;
+            };
             let Ok(m) = serde_json::from_slice::<DiskBackupManifest>(&raw) else {
                 continue;
             };
@@ -99,8 +101,8 @@ pub async fn list_disk_backups(folder: String) -> Result<Vec<DiskBackupDto>, Str
         } else if matches!(ext.as_str(), "vhdx" | "avhdx" | "qcow2") {
             match own_backup_backup::read_embedded_sidecar(&path, &ext) {
                 Ok(sc) => match sc.disk_manifest {
-                    Some(m) => m,           // a whole-disk image
-                    None => continue,       // a plain per-volume image
+                    Some(m) => m,     // a whole-disk image
+                    None => continue, // a plain per-volume image
                 },
                 Err(_) => continue,
             }
@@ -254,18 +256,30 @@ fn archive_keys(
     if let Some(password) = secret.password.as_ref().filter(|p| !p.is_empty()) {
         return ArchiveKeys::from_image_password(path, password).map_err(|e| e.to_string());
     }
-    if let Some(typed) = secret.recovery_key.as_ref().filter(|k| !k.trim().is_empty()) {
+    if let Some(typed) = secret
+        .recovery_key
+        .as_ref()
+        .filter(|k| !k.trim().is_empty())
+    {
         let key = RecoveryKey::parse(typed).map_err(|e| e.to_string())?;
         return ArchiveKeys::from_image_recovery(path, &key).map_err(|e| e.to_string());
     }
-    Err(tr!("commands_engine.image_encrypted_needs_secret", image = path.display()).into_owned())
+    Err(tr!(
+        "commands_engine.image_encrypted_needs_secret",
+        image = path.display()
+    )
+    .into_owned())
 }
 
 fn load_sidecar(
     path: &std::path::Path,
     secret: &own_backup_client::ArchiveSecret,
 ) -> Result<own_backup_backup::Sidecar, String> {
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_lowercase();
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_lowercase();
     // An encrypted copy keeps everything this screen shows — the disk layout,
     // the partitions, the sizes — inside the sealed half. Without the key there
     // is nothing here to read, so the key comes in with the request.
@@ -336,12 +350,18 @@ fn read_image_info_at(
         dm.images
             .iter()
             .filter(|i| !i.filesystem.is_empty())
-            .map(|i| PartFsDto { index: i.part_index, filesystem: i.filesystem.clone() })
+            .map(|i| PartFsDto {
+                index: i.part_index,
+                filesystem: i.filesystem.clone(),
+            })
             .collect()
     } else {
         match (&sidecar.info.filesystem, backed_up_parts.first()) {
             (Some(fs), Some(&index)) if !fs.is_empty() => {
-                vec![PartFsDto { index, filesystem: fs.clone() }]
+                vec![PartFsDto {
+                    index,
+                    filesystem: fs.clone(),
+                }]
             }
             _ => Vec::new(),
         }
@@ -349,13 +369,17 @@ fn read_image_info_at(
 
     // A per-volume image records index 0 (there was nothing to disambiguate at
     // backup time), so its lone header answers for the partition it holds.
-    let luks_header_parts: Vec<u32> = if sidecar.disk_manifest.is_none()
-        && sidecar.info.luks_headers.len() == 1
-    {
-        backed_up_parts.clone()
-    } else {
-        sidecar.info.luks_headers.iter().map(|h| h.part_index).collect()
-    };
+    let luks_header_parts: Vec<u32> =
+        if sidecar.disk_manifest.is_none() && sidecar.info.luks_headers.len() == 1 {
+            backed_up_parts.clone()
+        } else {
+            sidecar
+                .info
+                .luks_headers
+                .iter()
+                .map(|h| h.part_index)
+                .collect()
+        };
 
     // What each encrypted partition was. A whole-disk image says it per
     // partition in the disk manifest; a per-volume image says it once, about
@@ -767,7 +791,9 @@ pub async fn mount_backend_status(state: State<'_, GuiState>) -> Result<serde_js
 }
 
 #[tauri::command]
-pub async fn prepare_mount_backend(state: State<'_, GuiState>) -> Result<serde_json::Value, String> {
+pub async fn prepare_mount_backend(
+    state: State<'_, GuiState>,
+) -> Result<serde_json::Value, String> {
     state.link.client().await?.prepare_mount_backend().await
 }
 
@@ -884,15 +910,17 @@ pub async fn cancel_restore_plan(
     state: State<'_, GuiState>,
     plan_id: String,
 ) -> Result<serde_json::Value, String> {
-    state.link.client().await?.cancel_restore_plan(&plan_id).await
+    state
+        .link
+        .client()
+        .await?
+        .cancel_restore_plan(&plan_id)
+        .await
 }
 
 /// The user closed the finished run's report — stop handing it back.
 #[tauri::command]
-pub async fn ack_restore_run(
-    state: State<'_, GuiState>,
-    plan_id: String,
-) -> Result<(), String> {
+pub async fn ack_restore_run(state: State<'_, GuiState>, plan_id: String) -> Result<(), String> {
     state.link.client().await?.ack_restore_run(&plan_id).await
 }
 

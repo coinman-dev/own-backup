@@ -107,10 +107,12 @@ fn ext_used_bytes(buf: &[u8]) -> Option<u64> {
 /// inconsistent.
 fn xfs_used_bytes(buf: &[u8]) -> Option<u64> {
     let be32 = |o: usize| -> Option<u64> {
-        buf.get(o..o + 4).map(|s| u32::from_be_bytes(s.try_into().unwrap()) as u64)
+        buf.get(o..o + 4)
+            .map(|s| u32::from_be_bytes(s.try_into().unwrap()) as u64)
     };
     let be64 = |o: usize| -> Option<u64> {
-        buf.get(o..o + 8).map(|s| u64::from_be_bytes(s.try_into().unwrap()))
+        buf.get(o..o + 8)
+            .map(|s| u64::from_be_bytes(s.try_into().unwrap()))
     };
     let block_size = be32(0x04)?;
     let dblocks = be64(0x08)?;
@@ -130,8 +132,17 @@ const BITLOCKER_TO_GO_GUID: [u8; 16] = [
 /// Match well-known filesystem signatures. `buf` starts at the partition's
 /// very first byte.
 pub fn identify(buf: &[u8]) -> Option<ProbedFs> {
-    let at = |off: usize, tag: &[u8]| buf.len() >= off + tag.len() && &buf[off..off + tag.len()] == tag;
-    let some = |fs, label| Some(ProbedFs { fs, label, used_bytes: None, encrypted: false, last_mounted: None });
+    let at =
+        |off: usize, tag: &[u8]| buf.len() >= off + tag.len() && &buf[off..off + tag.len()] == tag;
+    let some = |fs, label| {
+        Some(ProbedFs {
+            fs,
+            label,
+            used_bytes: None,
+            encrypted: false,
+            last_mounted: None,
+        })
+    };
 
     // BitLocker must be checked before NTFS: Win8+ BitLocker volumes carry an
     // "NTFS    " OEM id but the BitLocker GUID at 0x160 (Vista/7 use the
@@ -352,16 +363,28 @@ mod tests {
     /// partitions with it.
     #[test]
     fn ext_reports_where_it_was_last_mounted() {
-        assert_eq!(identify(&ext_with_mount("/")).unwrap().last_mounted.as_deref(), Some("/"));
         assert_eq!(
-            identify(&ext_with_mount("/mnt/data")).unwrap().last_mounted.as_deref(),
+            identify(&ext_with_mount("/"))
+                .unwrap()
+                .last_mounted
+                .as_deref(),
+            Some("/")
+        );
+        assert_eq!(
+            identify(&ext_with_mount("/mnt/data"))
+                .unwrap()
+                .last_mounted
+                .as_deref(),
             Some("/mnt/data")
         );
         // Never mounted: the field is all zeros, and "no answer" must not read
         // as "mounted at the root".
         assert_eq!(identify(&ext_with_mount("")).unwrap().last_mounted, None);
         // Junk that is not a path is not an answer either.
-        assert_eq!(identify(&ext_with_mount("garbage")).unwrap().last_mounted, None);
+        assert_eq!(
+            identify(&ext_with_mount("garbage")).unwrap().last_mounted,
+            None
+        );
     }
 
     /// Only ext keeps this record — nothing may be invented for the others.

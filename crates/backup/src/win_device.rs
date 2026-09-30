@@ -11,18 +11,17 @@ use std::alloc::{alloc, dealloc, Layout};
 
 use tracing::{debug, warn};
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{BOOLEAN, CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, BOOLEAN, GENERIC_READ, GENERIC_WRITE, HANDLE};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FlushFileBuffers, ReadFile, SetFilePointerEx, WriteFile, FILE_BEGIN,
     FILE_FLAG_NO_BUFFERING, FILE_FLAG_WRITE_THROUGH, FILE_SHARE_READ, FILE_SHARE_WRITE,
     OPEN_EXISTING,
 };
 use windows::Win32::System::Ioctl::{
-    FSCTL_DISMOUNT_VOLUME, FSCTL_LOCK_VOLUME,
-    DISK_ATTRIBUTE_OFFLINE, DISK_ATTRIBUTE_READ_ONLY, DISK_GEOMETRY, GET_DISK_ATTRIBUTES,
-    GET_LENGTH_INFORMATION, IOCTL_DISK_GET_DISK_ATTRIBUTES, IOCTL_DISK_GET_DRIVE_GEOMETRY,
-    IOCTL_DISK_GET_LENGTH_INFO, IOCTL_DISK_SET_DISK_ATTRIBUTES, IOCTL_DISK_UPDATE_PROPERTIES,
-    SET_DISK_ATTRIBUTES,
+    DISK_ATTRIBUTE_OFFLINE, DISK_ATTRIBUTE_READ_ONLY, DISK_GEOMETRY, FSCTL_DISMOUNT_VOLUME,
+    FSCTL_LOCK_VOLUME, GET_DISK_ATTRIBUTES, GET_LENGTH_INFORMATION, IOCTL_DISK_GET_DISK_ATTRIBUTES,
+    IOCTL_DISK_GET_DRIVE_GEOMETRY, IOCTL_DISK_GET_LENGTH_INFO, IOCTL_DISK_SET_DISK_ATTRIBUTES,
+    IOCTL_DISK_UPDATE_PROPERTIES, SET_DISK_ATTRIBUTES,
 };
 use windows::Win32::System::IO::DeviceIoControl;
 
@@ -66,7 +65,9 @@ impl AlignedBuf {
         // SAFETY: layout has non-zero size (callers guarantee size > 0).
         let ptr = unsafe { alloc(layout) };
         if ptr.is_null() {
-            return Err(OwnBackupError::Device("aligned buffer allocation failed".into()));
+            return Err(OwnBackupError::Device(
+                "aligned buffer allocation failed".into(),
+            ));
         }
         Ok(Self { ptr, layout })
     }
@@ -275,9 +276,7 @@ impl WinRawDevice {
                 None,
             )
         }
-        .map_err(|e| {
-            OwnBackupError::Device(format!("CreateFileW({path}) failed: {e}"))
-        })?;
+        .map_err(|e| OwnBackupError::Device(format!("CreateFileW({path}) failed: {e}")))?;
 
         let mut device = Self {
             handle,
@@ -492,7 +491,8 @@ impl WinRawDevice {
     /// Write `data` at `offset`. Both must be sector-aligned; a write must not
     /// extend past the device end.
     pub fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()> {
-        self.try_write_at(offset, data).map_err(|f| f.into_error(&self.path, offset, data.len()))
+        self.try_write_at(offset, data)
+            .map_err(|f| f.into_error(&self.path, offset, data.len()))
     }
 
     /// The same write, with the Win32 error kept intact.
@@ -528,7 +528,8 @@ impl WinRawDevice {
             .map_err(|e| WriteFailure::Refused(e.to_string()))?;
         aligned.as_mut_slice().copy_from_slice(data);
 
-        self.seek(offset).map_err(|e| WriteFailure::Refused(e.to_string()))?;
+        self.seek(offset)
+            .map_err(|e| WriteFailure::Refused(e.to_string()))?;
         let mut written = 0u32;
         // SAFETY: buffer valid for data.len() bytes.
         unsafe {

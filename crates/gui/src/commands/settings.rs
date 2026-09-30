@@ -16,17 +16,26 @@ pub async fn save_config(state: State<'_, GuiState>, config: AppConfig) -> Resul
     let mut current = state.config.lock().map_err(|e| e.to_string())?;
     let before = current.clone();
     let saved = AppConfig::update_file(&state.config_path, |fresh| {
-        if config.data_dir != before.data_dir { fresh.data_dir = config.data_dir.clone(); }
-        if config.grpc_address != before.grpc_address { fresh.grpc_address = config.grpc_address.clone(); }
-        if config.log_level != before.log_level { fresh.log_level = config.log_level.clone(); }
-        if config.log_mirror_dir != before.log_mirror_dir { fresh.log_mirror_dir = config.log_mirror_dir.clone(); }
+        if config.data_dir != before.data_dir {
+            fresh.data_dir = config.data_dir.clone();
+        }
+        if config.grpc_address != before.grpc_address {
+            fresh.grpc_address = config.grpc_address.clone();
+        }
+        if config.log_level != before.log_level {
+            fresh.log_level = config.log_level.clone();
+        }
+        if config.log_mirror_dir != before.log_mirror_dir {
+            fresh.log_mirror_dir = config.log_mirror_dir.clone();
+        }
         if config.default_compression_level != before.default_compression_level {
             fresh.default_compression_level = config.default_compression_level;
         }
         if config.remembered_backups != before.remembered_backups {
             fresh.remembered_backups = config.remembered_backups.clone();
         }
-    }).map_err(|e| e.to_string())?;
+    })
+    .map_err(|e| e.to_string())?;
     // The in-memory copy has to move too. Writing only the file left
     // `get_config` handing back what was loaded at startup, so anything saved
     // came back missing as soon as the user navigated away and returned.
@@ -52,7 +61,8 @@ pub async fn set_ui_language(state: State<'_, GuiState>, lang: String) -> Result
     }
     let saved = AppConfig::update_file(&state.config_path, |fresh| {
         fresh.ui_language = code.to_string();
-    }).map_err(|e| e.to_string())?;
+    })
+    .map_err(|e| e.to_string())?;
     *config = saved;
     own_backup_common::lang::set(code);
     Ok(())

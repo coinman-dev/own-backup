@@ -249,13 +249,19 @@ pub fn choose(modes: &[Mode], min: (u32, u32), prefer: (u32, u32), virt: bool) -
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub fn choose_preferred(modes: &[Mode], preferred: Mode) -> Option<Mode> {
     let (w, h) = (preferred.width, preferred.height);
-    let exact: Vec<&Mode> =
-        modes.iter().filter(|m| m.width == w && m.height == h && m.bpp >= 32).collect();
+    let exact: Vec<&Mode> = modes
+        .iter()
+        .filter(|m| m.width == w && m.height == h && m.bpp >= 32)
+        .collect();
     let pool: Vec<&Mode> = if !exact.is_empty() {
         exact
     } else {
-        let fits = modes.iter().filter(|m| m.usable() && m.width <= w && m.height <= h);
-        let Some(area) = fits.clone().map(|m| m.area()).max() else { return None };
+        let fits = modes
+            .iter()
+            .filter(|m| m.usable() && m.width <= w && m.height <= h);
+        let Some(area) = fits.clone().map(|m| m.area()).max() else {
+            return None;
+        };
         fits.filter(|m| m.area() == area).collect()
     };
     let hz_gap = |m: &Mode| (m.hz as i64 - preferred.hz as i64).unsigned_abs();
@@ -312,7 +318,10 @@ pub async fn run(args: DisplayArgs) -> own_backup_common::Result<()> {
 
     let current = imp::current_mode();
     match &current {
-        Some(m) => println!("Сейчас: {}x{} {} бит, {} Гц", m.width, m.height, m.bpp, m.hz),
+        Some(m) => println!(
+            "Сейчас: {}x{} {} бит, {} Гц",
+            m.width, m.height, m.bpp, m.hz
+        ),
         None => println!("Сейчас: режим определить не удалось"),
     }
     // Масштаб интерфейса. На носителе он замечен увеличенным до 200 %, и это
@@ -320,7 +329,11 @@ pub async fn run(args: DisplayArgs) -> own_backup_common::Result<()> {
     // всё на нём вдвое крупнее. Печатается всегда, потому что узнать это иначе
     // можно только загрузившись с носителя и посмотрев глазами.
     let dpi = imp::screen_dpi();
-    println!("Масштаб интерфейса: {}% ({} точек на дюйм)", dpi * 100 / 96, dpi);
+    println!(
+        "Масштаб интерфейса: {}% ({} точек на дюйм)",
+        dpi * 100 / 96,
+        dpi
+    );
     // Which adapter is actually drawing. "Microsoft Basic Display" here with a
     // vendor driver in the image means the driver did not start — the mode
     // list below belongs to the fallback, not the hardware. A virtual adapter
@@ -357,7 +370,14 @@ pub async fn run(args: DisplayArgs) -> own_backup_common::Result<()> {
     for a in &adapters {
         if !shown.contains(&a) {
             let same = adapters.iter().filter(|x| *x == a).count();
-            println!("Адаптер: {a}{}", if same > 1 { format!(" (и ещё {})", same - 1) } else { String::new() });
+            println!(
+                "Адаптер: {a}{}",
+                if same > 1 {
+                    format!(" (и ещё {})", same - 1)
+                } else {
+                    String::new()
+                }
+            );
             shown.push(a);
         }
     }
@@ -386,7 +406,11 @@ pub async fn run(args: DisplayArgs) -> own_backup_common::Result<()> {
     let modes = imp::available_modes();
     // What the monitor itself declares. Not asked in a virtual machine, whose
     // "monitor" is a window of whatever size the host happens to give it.
-    let preferred = if virt.is_none() { imp::preferred_mode() } else { None };
+    let preferred = if virt.is_none() {
+        imp::preferred_mode()
+    } else {
+        None
+    };
     tracing::info!(
         count = modes.len(),
         preferred = ?preferred,
@@ -399,7 +423,10 @@ pub async fn run(args: DisplayArgs) -> own_backup_common::Result<()> {
         }
         println!("Всего режимов: {}", modes.len());
         match preferred {
-            Some(p) => println!("Монитор предпочитает: {}x{}, {} Гц", p.width, p.height, p.hz),
+            Some(p) => println!(
+                "Монитор предпочитает: {}x{}, {} Гц",
+                p.width, p.height, p.hz
+            ),
             None => println!("Монитор свой режим не сообщил"),
         }
         return Ok(());
@@ -423,8 +450,9 @@ pub async fn run(args: DisplayArgs) -> own_backup_common::Result<()> {
     } else {
         preferred.and_then(|p| choose_preferred(&modes, p))
     };
-    let current_meets_min =
-        current.as_ref().is_some_and(|c| c.width >= min.0 && c.height >= min.1);
+    let current_meets_min = current
+        .as_ref()
+        .is_some_and(|c| c.width >= min.0 && c.height >= min.1);
     let best = match from_monitor {
         Some(m) => {
             let p = preferred.unwrap_or(m);
@@ -478,8 +506,9 @@ pub async fn run(args: DisplayArgs) -> own_backup_common::Result<()> {
     // is deliberately not the biggest one.
     // Only the size matters here: a mode of the same size at another refresh
     // rate is not worth a switch the monitor might not survive.
-    let same_size =
-        current.as_ref().is_some_and(|c| c.width == best.width && c.height == best.height);
+    let same_size = current
+        .as_ref()
+        .is_some_and(|c| c.width == best.width && c.height == best.height);
     if same_size {
         println!("Менять нечего: текущий режим — тот, что нужен.");
         // The scale still might. On the medium the firmware had already set
@@ -498,7 +527,10 @@ pub async fn run(args: DisplayArgs) -> own_backup_common::Result<()> {
 
     match imp::apply(&best) {
         Ok(()) => {
-            println!("Переключено на {}x{} {} бит, {} Гц", best.width, best.height, best.bpp, best.hz);
+            println!(
+                "Переключено на {}x{} {} бит, {} Гц",
+                best.width, best.height, best.bpp, best.hz
+            );
             tracing::info!(mode = ?best, "display: switched");
             if let (false, Some(prev)) = (args.no_confirm, current) {
                 confirm_or_revert(prev, args.confirm_secs);
@@ -619,7 +651,10 @@ fn confirm_or_revert(prev: Mode, secs: u64) {
         Some(false) => {
             tracing::info!(back_to = ?prev, "display: no key in time — reverting");
             match imp::apply(&prev) {
-                Ok(()) => println!("Клавишу не нажали — возвращён режим {}x{}.", prev.width, prev.height),
+                Ok(()) => println!(
+                    "Клавишу не нажали — возвращён режим {}x{}.",
+                    prev.width, prev.height
+                ),
                 Err(e) => {
                     tracing::info!(error = %e, "display: revert failed");
                     println!("Вернуть прежний режим не удалось: {e}");
@@ -654,7 +689,10 @@ pub fn steps_down(current: u32, max: u32) -> Option<(i32, u32)> {
     if current <= max {
         return None;
     }
-    let at = SCALE_STEPS.iter().position(|s| *s >= current).unwrap_or(SCALE_STEPS.len() - 1);
+    let at = SCALE_STEPS
+        .iter()
+        .position(|s| *s >= current)
+        .unwrap_or(SCALE_STEPS.len() - 1);
     let to = SCALE_STEPS.iter().rposition(|s| *s <= max)?;
     (to < at).then(|| (to as i32 - at as i32, SCALE_STEPS[to]))
 }
@@ -673,17 +711,20 @@ fn parse_size(s: &str) -> Option<(u32, u32)> {
 mod imp {
     use super::Mode;
     use windows::core::PCWSTR;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        SYSTEM_PARAMETERS_INFO_ACTION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
-    };
     use windows::Win32::Graphics::Gdi::{
         ChangeDisplaySettingsExW, EnumDisplaySettingsW, CDS_TYPE, CDS_UPDATEREGISTRY, DEVMODEW,
         DEVMODE_FIELD_FLAGS, DISP_CHANGE_SUCCESSFUL, DM_BITSPERPEL, DM_DISPLAYFREQUENCY,
         DM_PELSHEIGHT, DM_PELSWIDTH, ENUM_CURRENT_SETTINGS, ENUM_DISPLAY_SETTINGS_MODE,
     };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SYSTEM_PARAMETERS_INFO_ACTION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    };
 
     fn empty_devmode() -> DEVMODEW {
-        DEVMODEW { dmSize: std::mem::size_of::<DEVMODEW>() as u16, ..Default::default() }
+        DEVMODEW {
+            dmSize: std::mem::size_of::<DEVMODEW>() as u16,
+            ..Default::default()
+        }
     }
 
     fn read(mode: ENUM_DISPLAY_SETTINGS_MODE) -> Option<Mode> {
@@ -783,7 +824,9 @@ mod imp {
     pub fn available_modes() -> Vec<Mode> {
         let mut out = Vec::new();
         for i in 0.. {
-            let Some(m) = read(ENUM_DISPLAY_SETTINGS_MODE(i)) else { break };
+            let Some(m) = read(ENUM_DISPLAY_SETTINGS_MODE(i)) else {
+                break;
+            };
             if !out.contains(&m) {
                 out.push(m);
             }
@@ -856,7 +899,9 @@ mod imp {
 
         // What PnP said. The log is the answer to "installed but not driving":
         // it records the match, the copy, and the start — or which one failed.
-        let log = std::path::Path::new(&windir).join("INF").join("setupapi.dev.log");
+        let log = std::path::Path::new(&windir)
+            .join("INF")
+            .join("setupapi.dev.log");
         println!("\nsetupapi.dev.log — строки про дисплей:");
         match std::fs::read_to_string(&log) {
             Ok(text) => {
@@ -881,10 +926,14 @@ mod imp {
 
     /// An INF as text — ANSI or UTF-16, both must read.
     fn read_inf(p: &std::path::Path) -> String {
-        let Ok(bytes) = std::fs::read(p) else { return String::new() };
+        let Ok(bytes) = std::fs::read(p) else {
+            return String::new();
+        };
         if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
-            let units: Vec<u16> =
-                bytes[2..].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+            let units: Vec<u16> = bytes[2..]
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
             String::from_utf16_lossy(&units)
         } else {
             String::from_utf8_lossy(&bytes).to_string()
@@ -1036,12 +1085,18 @@ mod imp {
             // Logged, not swallowed: "the monitor said nothing" and "we could
             // not ask" lead to the same silence on screen and to very
             // different fixes.
-            tracing::info!(flags = flags.0, code = sizes.0,
-                           "display: GetDisplayConfigBufferSizes failed");
+            tracing::info!(
+                flags = flags.0,
+                code = sizes.0,
+                "display: GetDisplayConfigBufferSizes failed"
+            );
             return None;
         }
         if np == 0 {
-            tracing::info!(flags = flags.0, "display: no display path of this kind at all");
+            tracing::info!(
+                flags = flags.0,
+                "display: no display path of this kind at all"
+            );
             return None;
         }
         let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); np as usize];
@@ -1058,8 +1113,12 @@ mod imp {
             )
         };
         if r != ERROR_SUCCESS {
-            tracing::info!(flags = flags.0, code = r.0, paths = np,
-                           "display: QueryDisplayConfig failed");
+            tracing::info!(
+                flags = flags.0,
+                code = r.0,
+                paths = np,
+                "display: QueryDisplayConfig failed"
+            );
             return None;
         }
         paths.truncate(np as usize);
@@ -1105,9 +1164,17 @@ mod imp {
             } else {
                 0
             };
-            let mode = Mode { width: pref.width, height: pref.height, bpp: 32, hz };
+            let mode = Mode {
+                width: pref.width,
+                height: pref.height,
+                bpp: 32,
+                hz,
+            };
             tracing::info!(source = %source, mode = ?mode, "display: monitor's preferred mode");
-            if primary.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(&source)) {
+            if primary
+                .as_deref()
+                .is_some_and(|n| n.eq_ignore_ascii_case(&source))
+            {
                 return Some(mode);
             }
             first.get_or_insert(mode);
@@ -1120,8 +1187,8 @@ mod imp {
     pub fn wait_for_key(timeout: std::time::Duration) -> Option<bool> {
         use windows::Win32::Foundation::WAIT_OBJECT_0;
         use windows::Win32::System::Console::{
-            FlushConsoleInputBuffer, GetConsoleMode, GetStdHandle, ReadConsoleInputW,
-            CONSOLE_MODE, INPUT_RECORD, KEY_EVENT, STD_INPUT_HANDLE,
+            FlushConsoleInputBuffer, GetConsoleMode, GetStdHandle, ReadConsoleInputW, CONSOLE_MODE,
+            INPUT_RECORD, KEY_EVENT, STD_INPUT_HANDLE,
         };
         use windows::Win32::System::Threading::WaitForSingleObject;
 
@@ -1152,7 +1219,8 @@ mod imp {
             }
             for r in &recs[..n as usize] {
                 // SAFETY: the union is read as the member EventType says it is.
-                if r.EventType as u32 == KEY_EVENT && unsafe { r.Event.KeyEvent.bKeyDown }.as_bool() {
+                if r.EventType as u32 == KEY_EVENT && unsafe { r.Event.KeyEvent.bKeyDown }.as_bool()
+                {
                     return Some(true);
                 }
             }
@@ -1218,7 +1286,10 @@ mod imp {
             tracing::info!(way, code, "display: refused");
             refused.push(format!("{way}: {code}"));
         }
-        Err(format!("ChangeDisplaySettingsEx отказал — {}", refused.join(", ")))
+        Err(format!(
+            "ChangeDisplaySettingsEx отказал — {}",
+            refused.join(", ")
+        ))
     }
 }
 
@@ -1234,7 +1305,12 @@ mod tests {
     use super::*;
 
     fn m(width: u32, height: u32) -> Mode {
-        Mode { width, height, bpp: 32, hz: 60 }
+        Mode {
+            width,
+            height,
+            bpp: 32,
+            hz: 60,
+        }
     }
 
     /// What the complaint was about: a driver that switches to the monitor's
@@ -1244,7 +1320,11 @@ mod tests {
         assert_eq!(steps_down(200, 150), Some((-2, 150)), "200 -> 175 -> 150");
         assert_eq!(steps_down(200, 125), Some((-3, 125)));
         assert_eq!(steps_down(175, 150), Some((-1, 150)));
-        assert_eq!(steps_down(250, 150), Some((-4, 150)), "250 -> 225 -> 200 -> 175 -> 150");
+        assert_eq!(
+            steps_down(250, 150),
+            Some((-4, 150)),
+            "250 -> 225 -> 200 -> 175 -> 150"
+        );
     }
 
     /// A screen already at or below the cap is left alone. Stepping it UP is
@@ -1275,11 +1355,34 @@ mod tests {
     /// The list a VMware guest really offers (2026-08-01, VMware SVGA 3D).
     fn vmware_modes() -> Vec<Mode> {
         [
-            (640, 480), (800, 600), (1024, 768), (1152, 864), (1280, 960), (1400, 1050),
-            (1600, 1200), (1920, 1440), (2048, 1536), (2560, 1920), (854, 480), (720, 480),
-            (720, 576), (800, 480), (1280, 720), (1366, 768), (1920, 1080), (2560, 1440),
-            (3840, 2160), (1280, 800), (1440, 900), (1680, 1050), (1920, 1200), (2560, 1600),
-            (2880, 1800), (3840, 2400), (1280, 768), (1280, 1024),
+            (640, 480),
+            (800, 600),
+            (1024, 768),
+            (1152, 864),
+            (1280, 960),
+            (1400, 1050),
+            (1600, 1200),
+            (1920, 1440),
+            (2048, 1536),
+            (2560, 1920),
+            (854, 480),
+            (720, 480),
+            (720, 576),
+            (800, 480),
+            (1280, 720),
+            (1366, 768),
+            (1920, 1080),
+            (2560, 1440),
+            (3840, 2160),
+            (1280, 800),
+            (1440, 900),
+            (1680, 1050),
+            (1920, 1200),
+            (2560, 1600),
+            (2880, 1800),
+            (3840, 2400),
+            (1280, 768),
+            (1280, 1024),
         ]
         .into_iter()
         .map(|(w, h)| m(w, h))
@@ -1372,7 +1475,12 @@ mod tests {
     }
 
     fn mh(width: u32, height: u32, hz: u32) -> Mode {
-        Mode { width, height, bpp: 32, hz }
+        Mode {
+            width,
+            height,
+            bpp: 32,
+            hz,
+        }
     }
 
     /// The case that blacked the screen: a 32:9 panel in picture-by-picture
@@ -1381,8 +1489,12 @@ mod tests {
     #[test]
     fn the_monitor_preferred_mode_beats_the_biggest() {
         let modes = vec![
-            mh(1920, 1080, 60), mh(2560, 1440, 60), mh(2560, 1440, 120),
-            mh(3840, 2160, 60), mh(5120, 1440, 60), mh(5120, 1440, 240),
+            mh(1920, 1080, 60),
+            mh(2560, 1440, 60),
+            mh(2560, 1440, 120),
+            mh(3840, 2160, 60),
+            mh(5120, 1440, 60),
+            mh(5120, 1440, 240),
         ];
         let chosen = choose_preferred(&modes, mh(2560, 1440, 60)).unwrap();
         assert_eq!(chosen, mh(2560, 1440, 60));
@@ -1398,7 +1510,10 @@ mod tests {
         let modes = vec![mh(1920, 1080, 60), mh(2560, 1080, 60), mh(3840, 2160, 60)];
         let chosen = choose_preferred(&modes, mh(2560, 1440, 60)).unwrap();
         assert_eq!((chosen.width, chosen.height), (2560, 1080));
-        assert_eq!(choose_preferred(&[mh(3840, 2160, 60)], mh(2560, 1440, 60)), None);
+        assert_eq!(
+            choose_preferred(&[mh(3840, 2160, 60)], mh(2560, 1440, 60)),
+            None
+        );
     }
 
     /// A refresh rate that is not listed exactly: the nearest, and on a tie the
@@ -1416,10 +1531,24 @@ mod tests {
     /// nothing in this list describes it, and the largest entry blanked it.
     fn winpe_basic_modes() -> Vec<Mode> {
         [
-            (1024, 768), (640, 480), (800, 600), (1152, 864), (1280, 768), (1280, 800),
-            (1280, 1024), (1440, 900), (1600, 1200), (1680, 1050), (1856, 1392),
-            (1920, 1200), (2560, 1600), (1600, 768), (1600, 900), (1920, 1080),
-            (1024, 600), (1366, 768),
+            (1024, 768),
+            (640, 480),
+            (800, 600),
+            (1152, 864),
+            (1280, 768),
+            (1280, 800),
+            (1280, 1024),
+            (1440, 900),
+            (1600, 1200),
+            (1680, 1050),
+            (1856, 1392),
+            (1920, 1200),
+            (2560, 1600),
+            (1600, 768),
+            (1600, 900),
+            (1920, 1080),
+            (1024, 600),
+            (1366, 768),
         ]
         .into_iter()
         .map(|(w, h)| mh(w, h, 60))
@@ -1437,7 +1566,10 @@ mod tests {
     #[test]
     fn nothing_meets_the_minimum_so_the_biggest_is_better_than_nothing() {
         let modes = vec![mh(800, 600, 60), mh(1024, 768, 60)];
-        assert_eq!(choose_conservative(&modes, (1280, 720)).unwrap().width, 1024);
+        assert_eq!(
+            choose_conservative(&modes, (1280, 720)).unwrap().width,
+            1024
+        );
         assert_eq!(choose_conservative(&[], (1280, 720)), None);
     }
 

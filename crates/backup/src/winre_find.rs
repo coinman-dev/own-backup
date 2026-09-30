@@ -108,7 +108,10 @@ impl ReAgentInfo {
 
 /// `{8f9e951e-…}` → `8F9E951E-…`, for comparison.
 fn bare_guid(g: &str) -> String {
-    g.trim().trim_start_matches('{').trim_end_matches('}').to_ascii_uppercase()
+    g.trim()
+        .trim_start_matches('{')
+        .trim_end_matches('}')
+        .to_ascii_uppercase()
 }
 
 /// Parse `ReAgent.xml`. Attribute soup, no schema: the file is small, flat and
@@ -119,7 +122,11 @@ pub fn parse_reagent_xml(xml: &str) -> ReAgentInfo {
     ReAgentInfo {
         enabled: attr(xml, "InstallState", "state").as_deref() == Some("1"),
         winre_dir: attr(xml, "WinreLocation", "path").unwrap_or_default(),
-        winre_disk_guid: if disk_guid_is_zero { String::new() } else { disk_guid },
+        winre_disk_guid: if disk_guid_is_zero {
+            String::new()
+        } else {
+            disk_guid
+        },
         winre_disk_signature: attr(xml, "WinreLocation", "id")
             .and_then(|v| v.parse().ok())
             .unwrap_or(0),
@@ -167,8 +174,12 @@ pub fn inspect_candidate(
         } else {
             info.edition_id.clone()
         };
-        return Err(tr!("winre_find.not_recovery_image", path = path.display(), edition = edition)
-            .into_owned());
+        return Err(tr!(
+            "winre_find.not_recovery_image",
+            path = path.display(),
+            edition = edition
+        )
+        .into_owned());
     }
     if !info.is_x64() {
         let arch = if info.architecture.is_empty() {
@@ -199,7 +210,12 @@ pub fn inspect_candidate(
             .into_owned(),
         );
     }
-    Ok(BaseImage { path: path.to_path_buf(), origin, info, warnings })
+    Ok(BaseImage {
+        path: path.to_path_buf(),
+        origin,
+        info,
+        warnings,
+    })
 }
 
 /// Advice for when nothing was found. Deliberately instructions rather than an
@@ -271,11 +287,15 @@ pub fn find_base_images() -> Vec<BaseImage> {
             });
             match registered {
                 Some(volume) => consider(
-                    PathBuf::from(volume_root(&volume)).join(dir).join("Winre.wim"),
+                    PathBuf::from(volume_root(&volume))
+                        .join(dir)
+                        .join("Winre.wim"),
                     BaseOrigin::Registered,
                     &mut found,
                 ),
-                None => tracing::info!("the registered recovery partition is not among the volumes"),
+                None => {
+                    tracing::info!("the registered recovery partition is not among the volumes")
+                }
             }
         }
     }
@@ -423,7 +443,10 @@ mod tests {
     #[test]
     fn a_disabled_environment_registers_nothing() {
         let xml = REAGENT_ENABLED
-            .replace(r#"<InstallState state="1"/>"#, r#"<InstallState state="0"/>"#)
+            .replace(
+                r#"<InstallState state="1"/>"#,
+                r#"<InstallState state="0"/>"#,
+            )
             .replace(r#"path="\Recovery\WindowsRE""#, r#"path="""#);
         let ra = parse_reagent_xml(&xml);
         assert!(!ra.enabled);
@@ -470,7 +493,10 @@ mod tests {
 
         let p2 = dir.path().join("same.wim");
         write_wim(&p2, "WindowsPE", "9", 19041, 1);
-        assert!(inspect_candidate(&p2, BaseOrigin::Manual, 19045).unwrap().warnings.is_empty());
+        assert!(inspect_candidate(&p2, BaseOrigin::Manual, 19045)
+            .unwrap()
+            .warnings
+            .is_empty());
     }
 
     #[test]

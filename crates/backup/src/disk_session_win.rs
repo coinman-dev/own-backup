@@ -89,7 +89,12 @@ impl DiskSession {
     /// instead of being written as raw sectors.
     pub fn open(disk_number: u32, live_system: bool) -> Result<Self> {
         let dev = WinRawDevice::open_write(&format!(r"\\.\PhysicalDrive{disk_number}"))?;
-        Ok(Self { dev, disk_number, offline: false, live_system })
+        Ok(Self {
+            dev,
+            disk_number,
+            offline: false,
+            live_system,
+        })
     }
 
     /// Whether this disk hosts the running Windows.
@@ -123,7 +128,10 @@ impl DiskSession {
             // Not an error: the caller asks for isolation, and on this disk the
             // isolation comes from partmgr instead. Refusing here would block a
             // restore that is perfectly safe.
-            debug!(disk = self.disk_number, "live system disk stays online — layout goes through partmgr");
+            debug!(
+                disk = self.disk_number,
+                "live system disk stays online — layout goes through partmgr"
+            );
             return Ok(());
         }
         self.dev.set_offline_writable(false)?;
@@ -366,8 +374,9 @@ impl DiskSession {
                 let first_usable = 34u64 * sector;
                 let last_usable = total.saturating_sub(33) * sector;
                 buf[24..32].copy_from_slice(&(first_usable as i64).to_le_bytes());
-                buf[32..40]
-                    .copy_from_slice(&((last_usable.saturating_sub(first_usable)) as i64).to_le_bytes());
+                buf[32..40].copy_from_slice(
+                    &((last_usable.saturating_sub(first_usable)) as i64).to_le_bytes(),
+                );
                 buf[40..44].copy_from_slice(&128u32.to_le_bytes());
             }
             PartitionScheme::Mbr => {
@@ -385,7 +394,8 @@ impl DiskSession {
             // u8 IsServicePartition, pad, then the style-specific union at UNION.
             let b = HEADER + i * ENTRY;
             buf[b..b + 4].copy_from_slice(&style.to_le_bytes());
-            buf[b + 8..b + 16].copy_from_slice(&(e.offset_bytes(spec.sector_size) as i64).to_le_bytes());
+            buf[b + 8..b + 16]
+                .copy_from_slice(&(e.offset_bytes(spec.sector_size) as i64).to_le_bytes());
             buf[b + 16..b + 24]
                 .copy_from_slice(&(e.size_bytes(spec.sector_size) as i64).to_le_bytes());
             buf[b + 24..b + 28].copy_from_slice(&e.index.to_le_bytes());
@@ -405,7 +415,12 @@ impl DiskSession {
 
             let u = b + UNION;
             match &e.kind {
-                PartitionKind::Gpt { type_guid, part_guid, attributes, name } => {
+                PartitionKind::Gpt {
+                    type_guid,
+                    part_guid,
+                    attributes,
+                    name,
+                } => {
                     // PARTITION_INFORMATION_GPT: Guid PartitionType, Guid PartitionId,
                     // u64 Attributes, u16 Name[36].
                     let ty = parse_guid(type_guid).ok_or_else(|| {
@@ -420,7 +435,11 @@ impl DiskSession {
                         buf[o..o + 2].copy_from_slice(&unit.to_le_bytes());
                     }
                 }
-                PartitionKind::Mbr { type_byte, bootable, .. } => {
+                PartitionKind::Mbr {
+                    type_byte,
+                    bootable,
+                    ..
+                } => {
                     // PARTITION_INFORMATION_MBR: u8 PartitionType, u8 BootIndicator,
                     // u8 RecognizedPartition, u8 pad, u32 HiddenSectors, …
                     buf[u] = *type_byte;
@@ -470,8 +489,12 @@ impl DiskSession {
         }
         .map_err(|e| {
             OwnBackupError::Device(
-                tr!("disk_session_win.layout_refused", disk = self.disk_number, error = e)
-                    .into_owned(),
+                tr!(
+                    "disk_session_win.layout_refused",
+                    disk = self.disk_number,
+                    error = e
+                )
+                .into_owned(),
             )
         })?;
         self.dev.update_properties()?;
@@ -502,7 +525,9 @@ impl DiskSession {
         spec: &PartitionTableSpec,
         current: Option<&DiskLayout>,
     ) -> Vec<crate::volume_win::VolumeDismountGuard> {
-        let Some(cur) = current else { return Vec::new() };
+        let Some(cur) = current else {
+            return Vec::new();
+        };
 
         let mut ranges: Vec<(u64, u64)> = Vec::new();
         for p in &cur.partitions {
@@ -524,13 +549,20 @@ impl DiskSession {
                 .iter()
                 .any(|p| p.first_lba == e.first_lba && p.last_lba == e.last_lba);
             if !existed {
-                ranges.push((e.offset_bytes(spec.sector_size), e.size_bytes(spec.sector_size)));
+                ranges.push((
+                    e.offset_bytes(spec.sector_size),
+                    e.size_bytes(spec.sector_size),
+                ));
             }
         }
         if ranges.is_empty() {
             return Vec::new();
         }
-        info!(disk = self.disk_number, ?ranges, "dismounting what stands on the sectors being changed");
+        info!(
+            disk = self.disk_number,
+            ?ranges,
+            "dismounting what stands on the sectors being changed"
+        );
         ranges
             .into_iter()
             .map(|(offset, len)| {
@@ -561,7 +593,10 @@ impl Drop for DiskSession {
                     "could not bring the disk back online — it will need to be onlined by hand"
                 );
             } else {
-                info!(disk = self.disk_number, "disk brought back online on session teardown");
+                info!(
+                    disk = self.disk_number,
+                    "disk brought back online on session teardown"
+                );
             }
         }
     }

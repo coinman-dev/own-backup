@@ -44,7 +44,11 @@ pub struct Check {
 
 impl Check {
     fn new(name: &'static str, level: Level, message: impl Into<String>) -> Self {
-        Check { name, level, message: message.into() }
+        Check {
+            name,
+            level,
+            message: message.into(),
+        }
     }
 }
 
@@ -84,7 +88,10 @@ pub fn judge_scratch(free_bytes: Option<u64>, writable: bool, dir: &Path) -> Che
         return Check::new(
             "scratch",
             Level::Fail,
-            tr!("media_preflight_win.scratch_not_writable", dir = dir.display()),
+            tr!(
+                "media_preflight_win.scratch_not_writable",
+                dir = dir.display()
+            ),
         );
     }
     match free_bytes {
@@ -106,7 +113,11 @@ pub fn judge_scratch(free_bytes: Option<u64>, writable: bool, dir: &Path) -> Che
         Some(free) => Check::new(
             "scratch",
             Level::Ok,
-            tr!("media_preflight_win.scratch_ok", dir = dir.display(), free = mib(free)),
+            tr!(
+                "media_preflight_win.scratch_ok",
+                dir = dir.display(),
+                free = mib(free)
+            ),
         ),
     }
 }
@@ -114,7 +125,11 @@ pub fn judge_scratch(free_bytes: Option<u64>, writable: bool, dir: &Path) -> Che
 /// Вердикт по доступной памяти.
 pub fn judge_memory(available_bytes: Option<u64>) -> Check {
     match available_bytes {
-        None => Check::new("memory", Level::Warn, tr!("media_preflight_win.memory_unknown")),
+        None => Check::new(
+            "memory",
+            Level::Warn,
+            tr!("media_preflight_win.memory_unknown"),
+        ),
         Some(a) if a < MEMORY_WARN_BYTES => Check::new(
             "memory",
             Level::Warn,
@@ -176,13 +191,17 @@ pub fn find_webview2_runtime(program_dir: &Path) -> (Option<PathBuf>, Vec<PathBu
     }
     let mut best: Option<(String, PathBuf)> = None;
     for base in ["ProgramFiles(x86)", "ProgramFiles"] {
-        let Ok(root) = std::env::var(base) else { continue };
+        let Ok(root) = std::env::var(base) else {
+            continue;
+        };
         let apps = PathBuf::from(root).join(r"Microsoft\EdgeWebView\Application");
         searched.push(
             apps.join(tr!("media_preflight_win.version_placeholder").into_owned())
                 .join("msedgewebview2.exe"),
         );
-        let Ok(rd) = std::fs::read_dir(&apps) else { continue };
+        let Ok(rd) = std::fs::read_dir(&apps) else {
+            continue;
+        };
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
             if !name.starts_with(|c: char| c.is_ascii_digit()) {
@@ -224,7 +243,10 @@ fn free_space(_dir: &Path) -> Option<u64> {
 #[cfg(target_os = "windows")]
 fn available_memory() -> Option<u64> {
     use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
-    let mut st = MEMORYSTATUSEX { dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32, ..Default::default() };
+    let mut st = MEMORYSTATUSEX {
+        dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
+        ..Default::default()
+    };
     // SAFETY: размер структуры проставлен, как требует API.
     let ok = unsafe { GlobalMemoryStatusEx(&mut st) };
     ok.ok().map(|_| st.ullAvailPhys)
@@ -264,11 +286,17 @@ mod tests {
 
     #[test]
     fn a_missing_runtime_fails_and_says_where_it_looked() {
-        let searched = vec![PathBuf::from(r"X:\Program Files\OwnBackup\WebView2\msedgewebview2.exe")];
+        let searched = vec![PathBuf::from(
+            r"X:\Program Files\OwnBackup\WebView2\msedgewebview2.exe",
+        )];
         let c = judge_webview2(None, &searched);
         assert_eq!(c.level, Level::Fail);
         assert!(c.message.contains("WebView2"), "{}", c.message);
-        assert!(c.message.contains(r"X:\Program Files"), "путь должен быть в тексте: {}", c.message);
+        assert!(
+            c.message.contains(r"X:\Program Files"),
+            "путь должен быть в тексте: {}",
+            c.message
+        );
     }
 
     #[test]
@@ -282,21 +310,38 @@ mod tests {
     fn the_default_winpe_scratch_is_refused_with_the_reason() {
         let c = judge_scratch(Some(32 * 1024 * 1024), true, Path::new(r"X:\Windows\Temp"));
         assert_eq!(c.level, Level::Fail);
-        assert!(c.message.contains("32 МБ"), "нужна подсказка про scratch: {}", c.message);
-        assert!(c.message.contains("512"), "нужна подсказка, чем чинить: {}", c.message);
+        assert!(
+            c.message.contains("32 МБ"),
+            "нужна подсказка про scratch: {}",
+            c.message
+        );
+        assert!(
+            c.message.contains("512"),
+            "нужна подсказка, чем чинить: {}",
+            c.message
+        );
     }
 
     #[test]
     fn a_roomy_scratch_passes_and_an_unwritable_one_does_not() {
-        assert_eq!(judge_scratch(Some(600 * 1024 * 1024), true, Path::new("X:")).level, Level::Ok);
-        assert_eq!(judge_scratch(Some(600 * 1024 * 1024), false, Path::new("X:")).level, Level::Fail);
+        assert_eq!(
+            judge_scratch(Some(600 * 1024 * 1024), true, Path::new("X:")).level,
+            Level::Ok
+        );
+        assert_eq!(
+            judge_scratch(Some(600 * 1024 * 1024), false, Path::new("X:")).level,
+            Level::Fail
+        );
     }
 
     /// Неизвестное — не отказ: не всякую машину мы умеем расспросить, а
     /// запретить работу из-за собственного незнания хуже, чем предупредить.
     #[test]
     fn what_cannot_be_measured_only_warns() {
-        assert_eq!(judge_scratch(None, true, Path::new("X:")).level, Level::Warn);
+        assert_eq!(
+            judge_scratch(None, true, Path::new("X:")).level,
+            Level::Warn
+        );
         assert_eq!(judge_memory(None).level, Level::Warn);
     }
 

@@ -46,8 +46,8 @@ pub async fn ask_for_image(
     if !password.is_empty() {
         return Ok(ArchiveSecret::password(password));
     }
-    let recovery = ask_secret("  Ключ восстановления: ")
-        .map_err(|e| OwnBackupError::Config(e.to_string()))?;
+    let recovery =
+        ask_secret("  Ключ восстановления: ").map_err(|e| OwnBackupError::Config(e.to_string()))?;
     if recovery.trim().is_empty() {
         return Err(OwnBackupError::Config(
             "для зашифрованной копии нужен пароль или ключ восстановления".into(),
@@ -81,8 +81,8 @@ pub fn open_keys_for_image(
         println!("  Открываю ключ (это несколько секунд)…");
         return ArchiveKeys::from_image_password(image_path, &password).map(Some);
     }
-    let typed = ask_secret("  Ключ восстановления: ")
-        .map_err(|e| OwnBackupError::Config(e.to_string()))?;
+    let typed =
+        ask_secret("  Ключ восстановления: ").map_err(|e| OwnBackupError::Config(e.to_string()))?;
     if typed.trim().is_empty() {
         return Err(OwnBackupError::Config(
             "для зашифрованной копии нужен пароль или ключ восстановления".into(),
@@ -133,11 +133,8 @@ pub async fn run(args: ArchiveKeyArgs) -> Result<()> {
          Прочитать их можно будет только этим паролем или ключом восстановления —\n\
          ни служба, ни мы не сможем открыть их иначе."
     );
-    let password = ask_secret_twice(
-        "  Пароль архива (не отображается): ",
-        "  Ещё раз: ",
-    )
-    .map_err(|e| OwnBackupError::Config(e.to_string()))?;
+    let password = ask_secret_twice("  Пароль архива (не отображается): ", "  Ещё раз: ")
+        .map_err(|e| OwnBackupError::Config(e.to_string()))?;
 
     println!("  Готовлю ключ (это несколько секунд)…");
     let begun = client

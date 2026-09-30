@@ -51,10 +51,9 @@ pub struct ObkImage<R: Read + Seek> {
 
 impl ObkImage<BufReader<File>> {
     pub fn open_path(path: &Path, chain: &ChainKey) -> Result<Self> {
-        let file = File::open(path)
-            .map_err(|e| bad(format!("cannot open {}: {e}", path.display())))?;
-        Self::open(BufReader::new(file), chain)
-            .map_err(|e| bad(format!("{}: {e}", path.display())))
+        let file =
+            File::open(path).map_err(|e| bad(format!("cannot open {}: {e}", path.display())))?;
+        Self::open(BufReader::new(file), chain).map_err(|e| bad(format!("{}: {e}", path.display())))
     }
 }
 
@@ -272,7 +271,11 @@ impl<R: Read + Seek> ObkImage<R> {
                 .index_chunks
                 .get(position)
                 .ok_or_else(|| bad("index chunk out of range"))?;
-            let bytes = read_bytes(&mut self.r, reference.chunk.offset, reference.chunk.len as usize)?;
+            let bytes = read_bytes(
+                &mut self.r,
+                reference.chunk.offset,
+                reference.chunk.len as usize,
+            )?;
             if bytes.len() != reference.chunk.len as usize {
                 return Err(bad("index chunk runs past the end of the image"));
             }
@@ -408,7 +411,10 @@ impl ObkChain {
         }
         // The walk ends at an image with no backing file; only a full backup
         // may be that image.
-        if images.last().is_some_and(|base| base.root.role != ChainRole::Full) {
+        if images
+            .last()
+            .is_some_and(|base| base.root.role != ChainRole::Full)
+        {
             return Err(bad("the chain does not end in a full backup"));
         }
         Ok(Self { images })
@@ -477,7 +483,9 @@ impl ObkChain {
 /// the file names that led us there.
 fn check_link(child: &ObkImage<BufReader<File>>, parent: &ObkImage<BufReader<File>>) -> Result<()> {
     if child.root.parent_backup_id != Some(parent.root.backup_id) {
-        return Err(bad("backing file is not the parent this image was written against"));
+        return Err(bad(
+            "backing file is not the parent this image was written against",
+        ));
     }
     if child.root.chain_id != parent.root.chain_id {
         return Err(bad("backing file belongs to another chain"));
@@ -488,7 +496,9 @@ fn check_link(child: &ObkImage<BufReader<File>>, parent: &ObkImage<BufReader<Fil
         return Err(bad("backing file has a different geometry"));
     }
     if child.root.role == ChainRole::Differential && parent.root.role != ChainRole::Full {
-        return Err(bad("a differential image must sit directly on a full backup"));
+        return Err(bad(
+            "a differential image must sit directly on a full backup",
+        ));
     }
     if parent.root.role == ChainRole::Differential {
         return Err(bad("a differential image is never a parent"));

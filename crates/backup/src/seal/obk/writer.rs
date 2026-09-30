@@ -20,9 +20,7 @@ use zeroize::Zeroizing;
 use super::header::{obk_extensions, ObkOpenHeader, ObkRootPointer};
 use super::index::{encode_chunk, ClusterState, MAX_INDEX_ENTRIES_PER_CHUNK};
 use super::root::{ChunkRef, IndexChunkRef, ObkRoot, MAX_INDEX_CHUNKS, MAX_META_CHUNKS};
-use super::{
-    bad, INCOMPAT_OBK_SEAL, MAX_OBK_CLUSTER_BITS, MIN_OBK_CLUSTER_BITS, OBK_OPEN_FORMAT,
-};
+use super::{bad, INCOMPAT_OBK_SEAL, MAX_OBK_CLUSTER_BITS, MIN_OBK_CLUSTER_BITS, OBK_OPEN_FORMAT};
 use crate::qcow2::layout::{build_header_cluster, HeaderParams, Qcow2Tables};
 use crate::qcow2::writer::write_placeholder_header;
 use crate::qcow2::{
@@ -211,7 +209,8 @@ impl<W: Write + Seek> ObkWriter<W> {
             Zeroizing::new(sealed_metadata.to_vec())
         };
         let defined_clusters = self.states.len() as u64;
-        let states: Vec<(u64, ClusterState)> = std::mem::take(&mut self.states).into_iter().collect();
+        let states: Vec<(u64, ClusterState)> =
+            std::mem::take(&mut self.states).into_iter().collect();
         if states.len().div_ceil(MAX_INDEX_ENTRIES_PER_CHUNK) > MAX_INDEX_CHUNKS {
             return Err(bad(
                 "image defines more clusters than one root record can index",
@@ -377,7 +376,9 @@ fn validate_options(opts: &ObkWriterOptions) -> Result<()> {
         }
     }
     if opts.parent_backup_id.is_some() != opts.backing_file.is_some() {
-        return Err(bad("a child image needs both a parent identity and a backing file"));
+        return Err(bad(
+            "a child image needs both a parent identity and a backing file",
+        ));
     }
     match (opts.role, opts.parent_backup_id) {
         (ChainRole::Full, None) => {}

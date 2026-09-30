@@ -174,9 +174,12 @@ mod tests {
     use uuid::Uuid;
 
     fn build(path: &Path, f: &Fixture, metadata: &[u8], reserve: usize) {
-        let mut writer =
-            ObkWriter::create(path, &f.chain, f.options(Uuid::new_v4(), ChainRole::Full, None))
-                .unwrap();
+        let mut writer = ObkWriter::create(
+            path,
+            &f.chain,
+            f.options(Uuid::new_v4(), ChainRole::Full, None),
+        )
+        .unwrap();
         writer
             .write_cluster(0, &vec![9u8; 1 << cluster_bits()])
             .unwrap();
@@ -188,7 +191,12 @@ mod tests {
         let f = Fixture::new();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("full.obk");
-        build(&path, &f, b"first sidecar, written before the image closed", 4096);
+        build(
+            &path,
+            &f,
+            b"first sidecar, written before the image closed",
+            4096,
+        );
         assert_eq!(reserved_room(&path, &f.chain).unwrap(), 4096);
 
         let before = std::fs::metadata(&path).unwrap().len();
@@ -209,9 +217,7 @@ mod tests {
 
         // The old sidecar is gone from the file, not merely unreferenced.
         let raw = std::fs::read(&path).unwrap();
-        assert!(!raw
-            .windows(13)
-            .any(|w| w == b"first sidecar"));
+        assert!(!raw.windows(13).any(|w| w == b"first sidecar"));
     }
 
     #[test]

@@ -161,17 +161,32 @@ fn unreachable_message() -> String {
         return tr!("service_link.media_engine_silent", name = name).into_owned();
     }
     #[cfg(target_os = "windows")]
-    let (start_hint, install_hint) =
-        (tr!("service_link.win_start_hint"), tr!("service_link.win_install_hint"));
+    let (start_hint, install_hint) = (
+        tr!("service_link.win_start_hint"),
+        tr!("service_link.win_install_hint"),
+    );
     #[cfg(not(target_os = "windows"))]
     let (start_hint, install_hint) = (
         tr!("service_link.linux_start_hint"),
-        tr!("service_link.linux_install_hint", group = own_backup_common::UNIX_ACCESS_GROUP),
+        tr!(
+            "service_link.linux_install_hint",
+            group = own_backup_common::UNIX_ACCESS_GROUP
+        ),
     );
     if service_installed() {
-        tr!("service_link.installed_not_running", name = name, hint = start_hint).into_owned()
+        tr!(
+            "service_link.installed_not_running",
+            name = name,
+            hint = start_hint
+        )
+        .into_owned()
     } else {
-        tr!("service_link.not_installed", name = name, hint = install_hint).into_owned()
+        tr!(
+            "service_link.not_installed",
+            name = name,
+            hint = install_hint
+        )
+        .into_owned()
     }
 }
 
@@ -204,7 +219,10 @@ fn start_installed_service() {
     }
     #[cfg(target_os = "windows")]
     {
-        let _ = run_hidden("net", &["start", own_backup_common::WINDOWS_SERVICE_DISPLAY_NAME]);
+        let _ = run_hidden(
+            "net",
+            &["start", own_backup_common::WINDOWS_SERVICE_DISPLAY_NAME],
+        );
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -215,7 +233,11 @@ fn start_installed_service() {
         // tells the user to start it. The unit is `enable --now`, so it is
         // normally already running anyway.
         let _ = std::process::Command::new("systemctl")
-            .args(["--no-ask-password", "start", own_backup_common::LINUX_UNIT_NAME])
+            .args([
+                "--no-ask-password",
+                "start",
+                own_backup_common::LINUX_UNIT_NAME,
+            ])
             .status();
     }
 }
@@ -224,11 +246,17 @@ fn start_installed_service() {
 /// medium's equivalent of "start the service". Nothing is installed and nothing
 /// is elevated: on the medium everything already runs as SYSTEM.
 fn start_media_engine() {
-    let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf()))
+    let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
     else {
         return;
     };
-    let exe = dir.join(if cfg!(windows) { "own-backup-service.exe" } else { "own-backup-service" });
+    let exe = dir.join(if cfg!(windows) {
+        "own-backup-service.exe"
+    } else {
+        "own-backup-service"
+    });
     if !exe.exists() {
         tracing::warn!(path = %exe.display(), "engine binary not found next to the interface");
         return;

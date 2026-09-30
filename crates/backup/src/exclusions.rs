@@ -84,8 +84,8 @@ impl CategorySizes {
         };
         // 1. Photo / video / audio / documents — by extension, any location.
         match ext {
-            "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" | "heic" | "heif" | "tif"
-            | "tiff" | "svg" | "ico" | "raw" | "cr2" | "nef" | "arw" | "dng" | "psd" => {
+            "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" | "heic" | "heif" | "tif" | "tiff"
+            | "svg" | "ico" | "raw" | "cr2" | "nef" | "arw" | "dng" | "psd" => {
                 self.images += bytes;
                 return;
             }
@@ -147,7 +147,8 @@ impl CategorySizes {
     fn is_linux_dir(top: &str) -> bool {
         matches!(
             top,
-            "usr" | "bin"
+            "usr"
+                | "bin"
                 | "sbin"
                 | "lib"
                 | "lib32"
@@ -267,7 +268,9 @@ impl ExclusionPattern {
             // the *parent* against the whole pattern says exactly that: the
             // trailing `**` is then left with at least this one component to
             // consume, so a path that IS the directory cannot match.
-            let Some((_, parent)) = rel_components.split_last() else { return false };
+            let Some((_, parent)) = rel_components.split_last() else {
+                return false;
+            };
             return match_path(&self.components, parent);
         }
         match_path(&self.components, rel_components)
@@ -286,7 +289,10 @@ impl ExclusionPattern {
 /// the exclusion list still keeps the directory, and only empties it.
 pub fn is_essential_linux_dir(rel_components: &[String]) -> bool {
     rel_components.len() == 1
-        && matches!(rel_components[0].as_str(), "dev" | "proc" | "sys" | "run" | "tmp")
+        && matches!(
+            rel_components[0].as_str(),
+            "dev" | "proc" | "sys" | "run" | "tmp"
+        )
 }
 
 /// The one excluded path a delete pass inside the image cannot win:
@@ -308,7 +314,8 @@ pub fn is_essential_linux_dir(rel_components: &[String]) -> bool {
 /// Only the root one: a folder of the same name deeper in the tree is a folder
 /// like any other.
 pub fn recreated_by_windows(rel: &str) -> bool {
-    rel.trim_end_matches(['\\', '/']).eq_ignore_ascii_case("System Volume Information")
+    rel.trim_end_matches(['\\', '/'])
+        .eq_ignore_ascii_case("System Volume Information")
 }
 
 /// Match pattern components against path components. A `**` component matches
@@ -583,8 +590,12 @@ mod tests {
         assert!(recreated_by_windows("System Volume Information"));
         assert!(recreated_by_windows("system volume information"));
         assert!(recreated_by_windows(r"System Volume Information\"));
-        assert!(!recreated_by_windows(r"System Volume Information\tracking.log"));
-        assert!(!recreated_by_windows(r"System Volume Information\MasterFileStatus.db"));
+        assert!(!recreated_by_windows(
+            r"System Volume Information\tracking.log"
+        ));
+        assert!(!recreated_by_windows(
+            r"System Volume Information\MasterFileStatus.db"
+        ));
         assert!(!recreated_by_windows("Windows"));
         // Same name deeper in the tree: an ordinary folder, and ours to delete.
         assert!(!recreated_by_windows(r"Users\me\System Volume Information"));
@@ -615,17 +626,29 @@ mod tests {
                 !p.matches(dir, &comps(dir)),
                 "{dir}/** must not match {dir} itself — systemd mounts on it"
             );
-            assert!(p.matches("1", &comps(&format!("{dir}\\1"))), "…but its contents go");
-            assert!(p.matches("x", &comps(&format!("{dir}\\a\\x"))), "…at any depth");
+            assert!(
+                p.matches("1", &comps(&format!("{dir}\\1"))),
+                "…but its contents go"
+            );
+            assert!(
+                p.matches("x", &comps(&format!("{dir}\\a\\x"))),
+                "…at any depth"
+            );
         }
     }
 
     #[test]
     fn the_same_holds_for_a_globstar_in_the_middle() {
         let p = pat("**\\Temp\\**");
-        assert!(!p.matches("temp", &comps("Windows\\Temp")), "the directory survives");
+        assert!(
+            !p.matches("temp", &comps("Windows\\Temp")),
+            "the directory survives"
+        );
         assert!(!p.matches("temp", &comps("Temp")));
-        assert!(p.matches("a.log", &comps("Windows\\Temp\\a.log")), "its contents do not");
+        assert!(
+            p.matches("a.log", &comps("Windows\\Temp\\a.log")),
+            "its contents do not"
+        );
         assert!(p.matches("a.log", &comps("Temp\\deep\\a.log")));
     }
 
@@ -645,7 +668,10 @@ mod tests {
         for dir in ["dev", "proc", "sys", "run", "tmp"] {
             assert!(is_essential_linux_dir(&comps(dir)));
         }
-        assert!(!is_essential_linux_dir(&comps("var\\tmp")), "only at the volume root");
+        assert!(
+            !is_essential_linux_dir(&comps("var\\tmp")),
+            "only at the volume root"
+        );
         assert!(!is_essential_linux_dir(&comps("home")));
         assert!(!is_essential_linux_dir(&[]));
     }
@@ -655,8 +681,16 @@ mod tests {
         // The whole default list against the top-level directories of a Linux
         // root: none of them may be removed.
         let patterns: Vec<ExclusionPattern> = [
-            "proc/**", "sys/**", "dev/**", "run/**", "tmp/**", "var/tmp/**", "var/cache/**",
-            "**/.cache/**", "swapfile", "lost+found",
+            "proc/**",
+            "sys/**",
+            "dev/**",
+            "run/**",
+            "tmp/**",
+            "var/tmp/**",
+            "var/cache/**",
+            "**/.cache/**",
+            "swapfile",
+            "lost+found",
         ]
         .iter()
         .filter_map(|p| ExclusionPattern::parse(p))
@@ -727,7 +761,10 @@ mod tests {
         assert!(!p.matches("temp", &comps("Users\\Bob\\AppData\\Local\\Temp")));
         // ...and files anywhere under it.
         assert!(p.matches("a.txt", &comps("Windows\\Temp\\a.txt")));
-        assert!(p.matches("b.dat", &comps("Users\\Bob\\AppData\\Local\\Temp\\sub\\b.dat")));
+        assert!(p.matches(
+            "b.dat",
+            &comps("Users\\Bob\\AppData\\Local\\Temp\\sub\\b.dat")
+        ));
         // Unrelated paths do not match.
         assert!(!p.matches("temper", &comps("Windows\\Temper")));
         assert!(!p.matches("x", &comps("Windows\\System32\\x")));
@@ -784,12 +821,12 @@ mod tests {
         c.add(&p("clip.mkv"), 200); // video
         c.add(&p("music/song.flac"), 30); // audio
         c.add(&p("windows/media/report.docx"), 40); // documents (media beats folder)
-        // System files by top-level folder (extension is not consulted here).
+                                                    // System files by top-level folder (extension is not consulted here).
         c.add(&p("windows/system32/kernel32.dll"), 50); // windows
         c.add(&p("program files/app/data.pak"), 15); // windows (non-media in tree)
         c.add(&p("usr/lib/libc.so.6"), 12); // linux
         c.add(&p("etc/fstab"), 8); // linux (no extension, in /etc)
-        // Not media/docs and outside any OS tree → other (even a stray .exe).
+                                   // Not media/docs and outside any OS tree → other (even a stray .exe).
         c.add(&p("downloads/setup.exe"), 60); // other
         c.add(&p("readme"), 7); // other
         assert_eq!(c.images, 100);

@@ -166,17 +166,28 @@ pub fn enable_privilege() -> Result<bool> {
     // every path out.
     unsafe {
         let mut token = HANDLE::default();
-        OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &mut token)
-            .map_err(|e| dev(tr!("efivars_win.token_not_opened", error = e)))?;
+        OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+            &mut token,
+        )
+        .map_err(|e| dev(tr!("efivars_win.token_not_opened", error = e)))?;
 
         let mut luid = LUID::default();
-        if let Err(e) = LookupPrivilegeValueW(PCWSTR::null(), w!("SeSystemEnvironmentPrivilege"), &mut luid) {
+        if let Err(e) = LookupPrivilegeValueW(
+            PCWSTR::null(),
+            w!("SeSystemEnvironmentPrivilege"),
+            &mut luid,
+        ) {
             let _ = CloseHandle(token);
             return Err(dev(tr!("efivars_win.no_such_privilege", error = e)));
         }
         let tp = TOKEN_PRIVILEGES {
             PrivilegeCount: 1,
-            Privileges: [LUID_AND_ATTRIBUTES { Luid: luid, Attributes: SE_PRIVILEGE_ENABLED }],
+            Privileges: [LUID_AND_ATTRIBUTES {
+                Luid: luid,
+                Attributes: SE_PRIVILEGE_ENABLED,
+            }],
         };
         let adjust = AdjustTokenPrivileges(token, false, Some(&tp), 0, None, None);
         // The call reports success even when the privilege is not held; only
@@ -287,9 +298,18 @@ pub fn write_var(name: &str, data: &[u8], attributes: u32) -> Result<()> {
     if !ok.as_bool() {
         // SAFETY: the error belongs to the call just made.
         let err = unsafe { windows::Win32::Foundation::GetLastError() };
-        return Err(dev(tr!("efivars_win.write_failed", name = name, error = format!("{err:?}"))));
+        return Err(dev(tr!(
+            "efivars_win.write_failed",
+            name = name,
+            error = format!("{err:?}")
+        )));
     }
-    info!(variable = name, bytes = data.len(), attributes, "efivars: variable written");
+    info!(
+        variable = name,
+        bytes = data.len(),
+        attributes,
+        "efivars: variable written"
+    );
     Ok(())
 }
 
@@ -316,7 +336,9 @@ pub enum WriteProbe {
 /// here instead of after editing a boot entry that then does not move.
 pub fn probe_write() -> Result<WriteProbe> {
     let Some((before, attrs)) = read_var_ex("Timeout")? else {
-        return Ok(WriteProbe::NotTested(tr!("efivars_win.no_timeout_variable").into_owned()));
+        return Ok(WriteProbe::NotTested(
+            tr!("efivars_win.no_timeout_variable").into_owned(),
+        ));
     };
     if let Err(e) = write_var("Timeout", &before, attrs) {
         return Ok(WriteProbe::Refused(e.to_string()));
@@ -337,7 +359,9 @@ fn read_u16_var(name: &str) -> Option<u16> {
 
 /// One boot entry by number.
 pub fn read_entry(n: u16) -> Result<Option<LoadOption>> {
-    let Some(bytes) = read_var(&efivars::entry_name(n))? else { return Ok(None) };
+    let Some(bytes) = read_var(&efivars::entry_name(n))? else {
+        return Ok(None);
+    };
     Ok(Some(LoadOption::parse(&bytes)?))
 }
 
@@ -350,7 +374,9 @@ pub fn read_config() -> Result<BootConfig> {
         return Err(dev(tr!("efivars_win.no_privilege_run_as_admin")));
     }
 
-    let order = read_var("BootOrder")?.map(|b| efivars::parse_boot_order(&b)).unwrap_or_default();
+    let order = read_var("BootOrder")?
+        .map(|b| efivars::parse_boot_order(&b))
+        .unwrap_or_default();
     let current = read_u16_var("BootCurrent");
     let next = read_u16_var("BootNext");
     let timeout = read_u16_var("Timeout");
@@ -361,10 +387,16 @@ pub fn read_config() -> Result<BootConfig> {
     use crate::esp_scan::static_text;
     let (mut numbers, found_by) = match enumerate_names() {
         Ok(ns) if !ns.is_empty() => (ns, static_text(tr!("efivars_win.found_by_enumeration"))),
-        Ok(_) => (scan_numbers(), static_text(tr!("efivars_win.found_by_scan_empty"))),
+        Ok(_) => (
+            scan_numbers(),
+            static_text(tr!("efivars_win.found_by_scan_empty")),
+        ),
         Err(e) => {
             debug!(error = %e, "efivars: enumeration unavailable, scanning instead");
-            (scan_numbers(), static_text(tr!("efivars_win.found_by_scan_unavailable")))
+            (
+                scan_numbers(),
+                static_text(tr!("efivars_win.found_by_scan_unavailable")),
+            )
         }
     };
     for n in &order {
@@ -411,7 +443,15 @@ pub fn read_config() -> Result<BootConfig> {
         found_by,
         "efivars: boot configuration read"
     );
-    Ok(BootConfig { entries, order, current, next, timeout, found_by, dangling })
+    Ok(BootConfig {
+        entries,
+        order,
+        current,
+        next,
+        timeout,
+        found_by,
+        dangling,
+    })
 }
 
 /// `Boot0000`..`Boot00FF`, asked one by one.
@@ -421,7 +461,9 @@ pub fn read_config() -> Result<BootConfig> {
 /// of them is not a machine anyone has. Only used when proper enumeration is
 /// not available.
 fn scan_numbers() -> Vec<u16> {
-    (0u16..=0xFF).filter(|n| matches!(read_var(&efivars::entry_name(*n)), Ok(Some(_)))).collect()
+    (0u16..=0xFF)
+        .filter(|n| matches!(read_var(&efivars::entry_name(*n)), Ok(Some(_))))
+        .collect()
 }
 
 /// Every `Boot####` variable the firmware holds, by name.
@@ -445,22 +487,25 @@ fn enumerate_names() -> Result<Vec<u16>> {
     let mut len: u32 = 0;
     // SAFETY: the documented probing form — a null buffer with a zero length
     // asks only for the size.
-    let status =
-        unsafe { NtEnumerateSystemEnvironmentValuesEx(VARIABLE_NAMES, std::ptr::null_mut(), &mut len) };
+    let status = unsafe {
+        NtEnumerateSystemEnvironmentValuesEx(VARIABLE_NAMES, std::ptr::null_mut(), &mut len)
+    };
     if status != STATUS_BUFFER_TOO_SMALL || len == 0 {
-        return Err(dev(tr!("efivars_win.enumeration_unavailable", status = format!("{status:08X}"))));
+        return Err(dev(tr!(
+            "efivars_win.enumeration_unavailable",
+            status = format!("{status:08X}")
+        )));
     }
     let mut buf = vec![0u8; len as usize];
     // SAFETY: the buffer is as large as the call just asked for.
     let status = unsafe {
-        NtEnumerateSystemEnvironmentValuesEx(
-            VARIABLE_NAMES,
-            buf.as_mut_ptr() as *mut _,
-            &mut len,
-        )
+        NtEnumerateSystemEnvironmentValuesEx(VARIABLE_NAMES, buf.as_mut_ptr() as *mut _, &mut len)
     };
     if status < 0 {
-        return Err(dev(tr!("efivars_win.enumeration_failed", status = format!("{status:08X}"))));
+        return Err(dev(tr!(
+            "efivars_win.enumeration_failed",
+            status = format!("{status:08X}")
+        )));
     }
 
     // VARIABLE_NAME: u32 NextEntryOffset, GUID VendorGuid (16 bytes), then the
@@ -680,8 +725,11 @@ pub fn apply_import(backup: &crate::efivars::BootBackup) -> Result<usize> {
             written += 1;
         }
     }
-    let offered =
-        backup.variables.iter().filter(|v| !crate::efivars::names_removable_device(v)).count();
+    let offered = backup
+        .variables
+        .iter()
+        .filter(|v| !crate::efivars::names_removable_device(v))
+        .count();
     if !orphaned.is_empty() {
         warn!(
             skipped = orphaned.len(),
@@ -724,7 +772,11 @@ pub fn delete_var(name: &str) -> Result<()> {
     if !ok.as_bool() {
         // SAFETY: the error belongs to the call just made.
         let err = unsafe { windows::Win32::Foundation::GetLastError() };
-        return Err(dev(tr!("efivars_win.delete_failed", name = name, error = format!("{err:?}"))));
+        return Err(dev(tr!(
+            "efivars_win.delete_failed",
+            name = name,
+            error = format!("{err:?}")
+        )));
     }
     info!(variable = name, "efivars: variable deleted");
     Ok(())
@@ -763,7 +815,10 @@ pub fn safety_copy_dir() -> (std::path::PathBuf, bool) {
     // In WinPE `ProgramData` is on the RAM disk: the directory exists, the file
     // will be written, and none of it outlives the restart.
     let durable = !own_backup_common::media_mode::is_windows_pe();
-    (std::path::Path::new(&base).join("OwnBackup").join("boot"), durable)
+    (
+        std::path::Path::new(&base).join("OwnBackup").join("boot"),
+        durable,
+    )
 }
 
 /// Copy the whole boot configuration to a file named by the second.
@@ -779,7 +834,10 @@ pub fn safety_copy_dir() -> (std::path::PathBuf, bool) {
 pub fn safety_copy() -> Result<SafetyCopy> {
     let (dir, durable) = safety_copy_dir();
     std::fs::create_dir_all(&dir)?;
-    let path = dir.join(format!("boot-{}.json", chrono::Local::now().format("%Y%m%d-%H%M%S")));
+    let path = dir.join(format!(
+        "boot-{}.json",
+        chrono::Local::now().format("%Y%m%d-%H%M%S")
+    ));
     std::fs::write(&path, export()?.to_json()?)?;
     info!(path = %path.display(), durable, "efivars: safety copy taken");
     Ok(SafetyCopy { path, durable })
@@ -847,9 +905,14 @@ pub fn set_active(n: u16, active: bool) -> Result<()> {
 
 /// Replace the menu order.
 pub fn set_order(order: &[u16]) -> Result<()> {
-    let attributes =
-        read_var_ex("BootOrder")?.map(|(_, a)| a).unwrap_or(BOOT_VARIABLE_ATTRIBUTES);
-    write_var("BootOrder", &crate::efivars::serialize_boot_order(order), attributes)
+    let attributes = read_var_ex("BootOrder")?
+        .map(|(_, a)| a)
+        .unwrap_or(BOOT_VARIABLE_ATTRIBUTES);
+    write_var(
+        "BootOrder",
+        &crate::efivars::serialize_boot_order(order),
+        attributes,
+    )
 }
 
 /// Take an entry out of the menu and out of the firmware.
@@ -857,7 +920,9 @@ pub fn set_order(order: &[u16]) -> Result<()> {
 /// The order is rewritten first: a number left in `BootOrder` with no variable
 /// behind it is an entry the firmware offers and cannot load.
 pub fn delete_entry(n: u16) -> Result<()> {
-    let order = read_var("BootOrder")?.map(|b| crate::efivars::parse_boot_order(&b)).unwrap_or_default();
+    let order = read_var("BootOrder")?
+        .map(|b| crate::efivars::parse_boot_order(&b))
+        .unwrap_or_default();
     if order.contains(&n) {
         let kept: Vec<u16> = order.into_iter().filter(|x| *x != n).collect();
         set_order(&kept)?;
@@ -903,7 +968,9 @@ pub fn set_boot_next(n: Option<u16>) -> Result<()> {
 
 /// How long the firmware shows its menu.
 pub fn set_timeout(secs: u16) -> Result<()> {
-    let attributes = read_var_ex("Timeout")?.map(|(_, a)| a).unwrap_or(BOOT_VARIABLE_ATTRIBUTES);
+    let attributes = read_var_ex("Timeout")?
+        .map(|(_, a)| a)
+        .unwrap_or(BOOT_VARIABLE_ATTRIBUTES);
     write_var("Timeout", &secs.to_le_bytes(), attributes)
 }
 
@@ -912,13 +979,36 @@ pub fn set_timeout(secs: u16) -> Result<()> {
 /// What someone asked to change.
 #[derive(Debug, Clone)]
 pub enum Action {
-    Rename { entry: u16, name: String },
-    SetActive { entry: u16, on: bool, force: bool },
-    Move { entry: u16, to: usize },
-    Delete { entry: u16, force: bool },
-    Create { name: String, disk: u32, partition: u32, file: String, position: Option<usize> },
-    BootNext { entry: Option<u16> },
-    Timeout { secs: u16 },
+    Rename {
+        entry: u16,
+        name: String,
+    },
+    SetActive {
+        entry: u16,
+        on: bool,
+        force: bool,
+    },
+    Move {
+        entry: u16,
+        to: usize,
+    },
+    Delete {
+        entry: u16,
+        force: bool,
+    },
+    Create {
+        name: String,
+        disk: u32,
+        partition: u32,
+        file: String,
+        position: Option<usize>,
+    },
+    BootNext {
+        entry: Option<u16>,
+    },
+    Timeout {
+        secs: u16,
+    },
 }
 
 /// What it did.
@@ -942,7 +1032,11 @@ pub fn apply_action(action: Action) -> Result<Done> {
     // Rule two, before anything else happens.
     if let Some((entry, force, deleting)) = match &action {
         Action::Delete { entry, force } => Some((*entry, *force, true)),
-        Action::SetActive { entry, on: false, force } => Some((*entry, *force, false)),
+        Action::SetActive {
+            entry,
+            on: false,
+            force,
+        } => Some((*entry, *force, false)),
         _ => None,
     } {
         if read_config()?.current == Some(entry) && !force {
@@ -956,8 +1050,8 @@ pub fn apply_action(action: Action) -> Result<Done> {
     }
 
     // Rule one. A change that could not be undone is not made.
-    let safety_copy = safety_copy()
-        .map_err(|e| dev(tr!("efivars_win.safety_copy_failed", error = e)))?;
+    let safety_copy =
+        safety_copy().map_err(|e| dev(tr!("efivars_win.safety_copy_failed", error = e)))?;
 
     let mut created = None;
     let message = match action {
@@ -965,10 +1059,17 @@ pub fn apply_action(action: Action) -> Result<Done> {
             if name.trim().is_empty() {
                 return Err(dev(tr!("efivars_win.empty_name")));
             }
-            let was = read_entry(entry)?.map(|o| o.description).unwrap_or_default();
+            let was = read_entry(entry)?
+                .map(|o| o.description)
+                .unwrap_or_default();
             set_description(entry, &name)?;
-            tr!("efivars_win.done_renamed", entry = format!("{entry:04X}"), was = was, name = name)
-                .into_owned()
+            tr!(
+                "efivars_win.done_renamed",
+                entry = format!("{entry:04X}"),
+                was = was,
+                name = name
+            )
+            .into_owned()
         }
         Action::SetActive { entry, on, .. } => {
             set_active(entry, on)?;
@@ -985,23 +1086,44 @@ pub fn apply_action(action: Action) -> Result<Done> {
             set_order(&new_order)?;
             tr!(
                 "efivars_win.done_order",
-                order = new_order.iter().map(|x| format!("{x:04X}")).collect::<Vec<_>>().join(" → ")
+                order = new_order
+                    .iter()
+                    .map(|x| format!("{x:04X}"))
+                    .collect::<Vec<_>>()
+                    .join(" → ")
             )
             .into_owned()
         }
         Action::Delete { entry, .. } => {
-            let was = read_entry(entry)?.map(|o| o.description).unwrap_or_default();
+            let was = read_entry(entry)?
+                .map(|o| o.description)
+                .unwrap_or_default();
             delete_entry(entry)?;
-            tr!("efivars_win.done_deleted", entry = format!("{entry:04X}"), was = was).into_owned()
+            tr!(
+                "efivars_win.done_deleted",
+                entry = format!("{entry:04X}"),
+                was = was
+            )
+            .into_owned()
         }
-        Action::Create { name, disk, partition, file, position } => {
+        Action::Create {
+            name,
+            disk,
+            partition,
+            file,
+            position,
+        } => {
             let layout = crate::gpt_reader::read_disk_layout(disk)?;
             let part = layout
                 .partitions
                 .iter()
                 .find(|p| p.index == partition)
                 .ok_or_else(|| {
-                    dev(tr!("efivars_win.no_such_partition", disk = disk, partition = partition))
+                    dev(tr!(
+                        "efivars_win.no_such_partition",
+                        disk = disk,
+                        partition = partition
+                    ))
                 })?;
             let hd = crate::efivars::HardDrive::from_gpt(
                 part.index,
@@ -1012,16 +1134,27 @@ pub fn apply_action(action: Action) -> Result<Done> {
             .ok_or_else(|| dev(tr!("efivars_win.bad_partition_guid", guid = part.part_guid)))?;
             // Firmware spells paths with backslashes and from the root.
             let file = file.replace('/', "\\");
-            let file = if file.starts_with('\\') { file } else { format!("\\{file}") };
+            let file = if file.starts_with('\\') {
+                file
+            } else {
+                format!("\\{file}")
+            };
             let n = create_entry(&name, &hd, &file, position)?;
             created = Some(n);
-            tr!("efivars_win.done_created", entry = format!("{n:04X}"), name = name, file = file)
-                .into_owned()
+            tr!(
+                "efivars_win.done_created",
+                entry = format!("{n:04X}"),
+                name = name,
+                file = file
+            )
+            .into_owned()
         }
         Action::BootNext { entry } => {
             set_boot_next(entry)?;
             match entry {
-                Some(n) => tr!("efivars_win.done_boot_next", entry = format!("{n:04X}")).into_owned(),
+                Some(n) => {
+                    tr!("efivars_win.done_boot_next", entry = format!("{n:04X}")).into_owned()
+                }
                 None => tr!("efivars_win.done_boot_next_cleared").into_owned(),
             }
         }
@@ -1030,5 +1163,9 @@ pub fn apply_action(action: Action) -> Result<Done> {
             tr!("efivars_win.done_timeout", secs = secs).into_owned()
         }
     };
-    Ok(Done { message, safety_copy, created })
+    Ok(Done {
+        message,
+        safety_copy,
+        created,
+    })
 }

@@ -44,8 +44,8 @@ use own_backup_common::Result;
 use uuid::Uuid;
 
 use super::header::obk_extensions;
-use super::rebuild::{apply_changed_with, PreviousContents, RebuildIdentity, RebuildOptions};
 use super::reader::ObkImage;
+use super::rebuild::{apply_changed_with, PreviousContents, RebuildIdentity, RebuildOptions};
 use super::{bad, INCOMPAT_OBK_SEAL};
 use crate::qcow2::layout::{build_header_cluster, HeaderParams, TablesInfo};
 use crate::qcow2::{COMPRESSION_TYPE_ZSTD, INCOMPAT_COMPRESSION_TYPE};
@@ -258,7 +258,8 @@ mod tests {
         w.write_cluster(0, &cluster_of(0x11)).unwrap();
         w.write_cluster(1, &cluster_of(0x11)).unwrap();
         w.write_cluster(2, &cluster_of(0x11)).unwrap();
-        w.finish_with_reserve(b"sidecar of the full backup", 4096).unwrap();
+        w.finish_with_reserve(b"sidecar of the full backup", 4096)
+            .unwrap();
 
         let inc1 = dir.join("inc1.obk");
         let mut w = ObkWriter::create(
@@ -269,7 +270,8 @@ mod tests {
         .unwrap();
         w.write_cluster(1, &cluster_of(0x22)).unwrap();
         w.write_zero_cluster(2).unwrap();
-        w.finish_with_reserve(b"sidecar of increment 1", 4096).unwrap();
+        w.finish_with_reserve(b"sidecar of increment 1", 4096)
+            .unwrap();
 
         let inc2 = dir.join("inc2.obk");
         let mut w = ObkWriter::create(
@@ -279,7 +281,8 @@ mod tests {
         )
         .unwrap();
         w.write_cluster(3, &cluster_of(0x33)).unwrap();
-        w.finish_with_reserve(b"sidecar of increment 2", 4096).unwrap();
+        w.finish_with_reserve(b"sidecar of increment 2", 4096)
+            .unwrap();
 
         (base, inc1, inc2, base_id, inc1_id)
     }
@@ -295,7 +298,9 @@ mod tests {
 
         let before: Vec<Vec<u8>> = {
             let mut chain = ObkChain::open(&inc2, &f.chain).unwrap();
-            (0..4).map(|c| chain.read_cluster(c).unwrap().to_vec()).collect()
+            (0..4)
+                .map(|c| chain.read_cluster(c).unwrap().to_vec())
+                .collect()
         };
 
         let stats = fold_child_into_base(
@@ -316,8 +321,13 @@ mod tests {
 
         let mut chain = ObkChain::open(&inc2, &f.chain).unwrap();
         assert_eq!(chain.chain_len(), 2, "the chain is one image shorter");
-        let after: Vec<Vec<u8>> = (0..4).map(|c| chain.read_cluster(c).unwrap().to_vec()).collect();
-        assert_eq!(after, before, "the leaf must read exactly what it read before");
+        let after: Vec<Vec<u8>> = (0..4)
+            .map(|c| chain.read_cluster(c).unwrap().to_vec())
+            .collect();
+        assert_eq!(
+            after, before,
+            "the leaf must read exactly what it read before"
+        );
 
         // And the base is now a standalone full backup of the increment's moment.
         let mut reader = ObkRandomReader::open(&base, &f.chain).unwrap();
@@ -332,7 +342,10 @@ mod tests {
         let open = super::super::read_open_header(&base).unwrap();
         assert_eq!(open.backup_id, inc1_id);
         assert_eq!(open.consolidated_increments, 1);
-        assert_eq!(open.chain_started_at.as_deref(), Some("2026-01-01T00:00:00Z"));
+        assert_eq!(
+            open.chain_started_at.as_deref(),
+            Some("2026-01-01T00:00:00Z")
+        );
     }
 
     /// A fold must not damage the base if it is interrupted, so it may not
@@ -345,7 +358,15 @@ mod tests {
         let (base, inc1, _, _, inc1_id) = chain_of_three(dir.path(), &f);
 
         let before = std::fs::read(&base).unwrap();
-        fold_child_into_base(&base, &inc1, &f.chain, b"promoted", identity(inc1_id, 1), DEFAULT_ZSTD_LEVEL).unwrap();
+        fold_child_into_base(
+            &base,
+            &inc1,
+            &f.chain,
+            b"promoted",
+            identity(inc1_id, 1),
+            DEFAULT_ZSTD_LEVEL,
+        )
+        .unwrap();
         let after = std::fs::read(&base).unwrap();
 
         assert!(after.len() > before.len(), "a fold only ever appends");
@@ -365,7 +386,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (base, inc1, _, _, inc1_id) = chain_of_three(dir.path(), &f);
 
-        fold_child_into_base(&base, &inc1, &f.chain, b"promoted", identity(inc1_id, 1), DEFAULT_ZSTD_LEVEL).unwrap();
+        fold_child_into_base(
+            &base,
+            &inc1,
+            &f.chain,
+            b"promoted",
+            identity(inc1_id, 1),
+            DEFAULT_ZSTD_LEVEL,
+        )
+        .unwrap();
         let contents: Vec<Vec<u8>> = {
             let mut r = ObkRandomReader::open(&base, &f.chain).unwrap();
             (0..4)
@@ -377,14 +406,25 @@ mod tests {
                 .collect()
         };
 
-        let again =
-            fold_child_into_base(&base, &inc1, &f.chain, b"promoted", identity(inc1_id, 1), DEFAULT_ZSTD_LEVEL).unwrap();
-        assert!(again.already_applied, "the fold must recognise its own work");
+        let again = fold_child_into_base(
+            &base,
+            &inc1,
+            &f.chain,
+            b"promoted",
+            identity(inc1_id, 1),
+            DEFAULT_ZSTD_LEVEL,
+        )
+        .unwrap();
+        assert!(
+            again.already_applied,
+            "the fold must recognise its own work"
+        );
 
         let mut r = ObkRandomReader::open(&base, &f.chain).unwrap();
         for (c, expected) in contents.iter().enumerate() {
             let mut buf = vec![0u8; 1 << cluster_bits()];
-            r.read_at(c as u64 * (1u64 << cluster_bits()), &mut buf).unwrap();
+            r.read_at(c as u64 * (1u64 << cluster_bits()), &mut buf)
+                .unwrap();
             assert_eq!(&buf, expected, "cluster {c} changed on a repeated fold");
         }
     }
@@ -397,17 +437,43 @@ mod tests {
         let (base, inc1, inc2, _, inc1_id) = chain_of_three(dir.path(), &f);
 
         // inc2 sits on inc1, not on the base.
-        let e = fold_child_into_base(&base, &inc2, &f.chain, b"x", identity(inc1_id, 1), DEFAULT_ZSTD_LEVEL)
-            .expect_err("a grandchild is not foldable into the base");
-        assert!(e.to_string().contains("not written against this base"), "{e}");
+        let e = fold_child_into_base(
+            &base,
+            &inc2,
+            &f.chain,
+            b"x",
+            identity(inc1_id, 1),
+            DEFAULT_ZSTD_LEVEL,
+        )
+        .expect_err("a grandchild is not foldable into the base");
+        assert!(
+            e.to_string().contains("not written against this base"),
+            "{e}"
+        );
 
         // The base is not an increment, and an increment is not a base.
-        assert!(fold_child_into_base(&inc1, &base, &f.chain, b"x", identity(inc1_id, 1), DEFAULT_ZSTD_LEVEL).is_err());
+        assert!(fold_child_into_base(
+            &inc1,
+            &base,
+            &f.chain,
+            b"x",
+            identity(inc1_id, 1),
+            DEFAULT_ZSTD_LEVEL
+        )
+        .is_err());
 
         // Another chain's key opens neither image and changes nothing.
         let stranger = ChainKey::generate().unwrap();
         let untouched = std::fs::read(&base).unwrap();
-        assert!(fold_child_into_base(&base, &inc1, &stranger, b"x", identity(inc1_id, 1), DEFAULT_ZSTD_LEVEL).is_err());
+        assert!(fold_child_into_base(
+            &base,
+            &inc1,
+            &stranger,
+            b"x",
+            identity(inc1_id, 1),
+            DEFAULT_ZSTD_LEVEL
+        )
+        .is_err());
         assert!(set_backing_file(&inc2, &stranger, "full.obk").is_err());
         assert_eq!(std::fs::read(&base).unwrap(), untouched);
     }

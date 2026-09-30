@@ -49,9 +49,11 @@ pub async fn run(args: MountArgs) -> Result<()> {
     let token = resolve_token(&args.token);
     let mut client = BackupClient::connect(args.endpoint.clone(), token)
         .await
-        .map_err(|e| OwnBackupError::Device(format!(
-            "cannot reach the Own Backup service ({e}). Is it running?"
-        )))?;
+        .map_err(|e| {
+            OwnBackupError::Device(format!(
+                "cannot reach the Own Backup service ({e}). Is it running?"
+            ))
+        })?;
 
     let secret = crate::commands::archive_key::ask_for_image(&mut client, &args.image).await?;
     let physical = client
@@ -59,10 +61,17 @@ pub async fn run(args: MountArgs) -> Result<()> {
         .await
         .map_err(|e| OwnBackupError::Device(e.to_string()))?;
 
-    let mode_str = if args.rw { "чтение и запись" } else { "только чтение" };
+    let mode_str = if args.rw {
+        "чтение и запись"
+    } else {
+        "только чтение"
+    };
     println!("Подключено ({}): {}", mode_str, args.image);
     println!("Виртуальный диск: {physical}");
     println!("Windows назначит буквы томам внутри — смотрите проводник.");
-    println!("Диск смонтирован в фоне (службой). Отключить: own-backup-cli unmount \"{}\"", args.image);
+    println!(
+        "Диск смонтирован в фоне (службой). Отключить: own-backup-cli unmount \"{}\"",
+        args.image
+    );
     Ok(())
 }

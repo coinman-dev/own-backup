@@ -102,8 +102,10 @@ mod probe {
         work: PathBuf,
         target: String,
     ) -> Result<(), Box<dyn std::error::Error>> {
-
-        say!("PROBE-BEGIN source={source} work={} target={target}", work.display());
+        say!(
+            "PROBE-BEGIN source={source} work={} target={target}",
+            work.display()
+        );
         let keys = lab_keys()?;
 
         let full = work.join("lab_C_full_1.obk");
@@ -157,8 +159,14 @@ mod probe {
             Ok(_) => say!("PROBE-PLAIN-READER-FAIL a plaintext reader opened the image"),
             Err(e) => say!("PROBE-PLAIN-READER refused: {e}"),
         }
-        say!("PROBE-SIDECAR-FILE exists={}", work.join("lab_C_full_1.obk.obkm").exists());
-        say!("PROBE-PLAINTEXT-IN-IMAGE {}", marker_in_file(&full, MARKER)?);
+        say!(
+            "PROBE-SIDECAR-FILE exists={}",
+            work.join("lab_C_full_1.obk.obkm").exists()
+        );
+        say!(
+            "PROBE-PLAINTEXT-IN-IMAGE {}",
+            marker_in_file(&full, MARKER)?
+        );
 
         // --- 3. Verify: without a key, with the wrong one, with the right one ---
         match verify_image_with_keys(&full, None, |_, _| Ok(())) {
@@ -201,7 +209,11 @@ mod probe {
                 summary.excluded_files,
                 started.elapsed().as_secs()
             );
-            say!("PROBE-INCREMENT-IMAGE {} bytes={}", n + 1, std::fs::metadata(image)?.len());
+            say!(
+                "PROBE-INCREMENT-IMAGE {} bytes={}",
+                n + 1,
+                std::fs::metadata(image)?.len()
+            );
         }
 
         // --- 5. What the chain reads, block by block, before consolidation ---
@@ -227,11 +239,22 @@ mod probe {
         let step = plan_consolidation(&chain, 1).ok_or("nothing planned: 2 increments, limit 1")?;
         say!(
             "PROBE-CONSOLIDATE-PLAN fold={} into={} repoint={:?}",
-            step.victim.image_path.file_name().unwrap_or_default().to_string_lossy(),
-            step.base.image_path.file_name().unwrap_or_default().to_string_lossy(),
-            step.next
-                .as_ref()
-                .map(|n| n.image_path.file_name().unwrap_or_default().to_string_lossy().into_owned())
+            step.victim
+                .image_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy(),
+            step.base
+                .image_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy(),
+            step.next.as_ref().map(|n| n
+                .image_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned())
         );
         let started = Instant::now();
         let outcome = consolidate_step_with_keys(&step, Some(&keys))?;
@@ -263,7 +286,10 @@ mod probe {
         say!(
             "PROBE-CHAIN-AFTER images={} increments_ever={} base_still_encrypted={}",
             after_chain.as_ref().map(|c| c.images.len()).unwrap_or(0),
-            after_chain.as_ref().map(|c| c.increments_ever()).unwrap_or(0),
+            after_chain
+                .as_ref()
+                .map(|c| c.increments_ever())
+                .unwrap_or(0),
             own_backup_backup::qcow2::Qcow2RandomReader::open(&full).is_err()
         );
 
@@ -335,12 +361,14 @@ mod probe {
                 // has no volume root, so nothing takes a VSS snapshot of it and
                 // nothing can walk its files — the exclusion rules would find
                 // no matches and the copy would silently carry the lot.
-                let device = own_backup_backup::volume_win::volume_root_at_offset(
-                    source_disk,
-                    offset,
-                )
-                .unwrap_or_else(|| format!("part:{source_disk}:{offset}:{}",
-                    p.size_bytes(layout.sector_size)));
+                let device =
+                    own_backup_backup::volume_win::volume_root_at_offset(source_disk, offset)
+                        .unwrap_or_else(|| {
+                            format!(
+                                "part:{source_disk}:{offset}:{}",
+                                p.size_bytes(layout.sector_size)
+                            )
+                        });
                 say!("PROBE-DISK-PART index={} device={device}", p.index);
                 DiskPartitionBackup {
                     device,
@@ -381,7 +409,10 @@ mod probe {
             summary.excluded_files,
             started.elapsed().as_secs()
         );
-        say!("PROBE-DISK-IMAGE bytes={}", std::fs::metadata(&image)?.len());
+        say!(
+            "PROBE-DISK-IMAGE bytes={}",
+            std::fs::metadata(&image)?.len()
+        );
 
         // The same refusals as a volume copy, plus the one that matters here:
         // the restore manifest is INSIDE the sealed half, so a reader without

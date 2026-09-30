@@ -81,7 +81,10 @@ pub fn desktop_is_running() -> bool {
     /// and nothing that would let this touch what it names.
     const SYNCHRONIZE: SYNCHRONIZATION_ACCESS_RIGHTS = SYNCHRONIZATION_ACCESS_RIGHTS(0x0010_0000);
 
-    let name: Vec<u16> = DESKTOP_RUNNING.encode_utf16().chain(std::iter::once(0)).collect();
+    let name: Vec<u16> = DESKTOP_RUNNING
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     unsafe {
         match OpenMutexW(SYNCHRONIZE, false, PCWSTR(name.as_ptr())) {
             Ok(handle) => {

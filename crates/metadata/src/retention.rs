@@ -19,10 +19,7 @@ use crate::queries::{get_retention_policy, list_sets_for_job};
 ///
 /// Note: incremental/differential sets whose parent full backup is deleted
 /// should also be marked for deletion (chain is broken).
-pub fn evaluate_retention(
-    conn: &Connection,
-    job_id: &Uuid,
-) -> Result<Vec<BackupSet>> {
+pub fn evaluate_retention(conn: &Connection, job_id: &Uuid) -> Result<Vec<BackupSet>> {
     let policy = match get_retention_policy(conn, job_id)? {
         Some(p) => p,
         None => return Ok(Vec::new()), // No policy configured — keep everything.

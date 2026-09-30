@@ -44,13 +44,21 @@ pub struct Reply {
 
 impl Reply {
     fn good(data: Vec<u8>) -> Self {
-        Self { data, status: STATUS_GOOD, sense: Vec::new() }
+        Self {
+            data,
+            status: STATUS_GOOD,
+            sense: Vec::new(),
+        }
     }
     fn ok() -> Self {
         Self::good(Vec::new())
     }
     fn fail(key: u8, asc: (u8, u8)) -> Self {
-        Self { data: Vec::new(), status: STATUS_CHECK_CONDITION, sense: sense_data(key, asc) }
+        Self {
+            data: Vec::new(),
+            status: STATUS_CHECK_CONDITION,
+            sense: sense_data(key, asc),
+        }
     }
 }
 
@@ -80,20 +88,20 @@ pub fn execute(lun: &mut Lun, cdb: &[u8], data_out: &[u8]) -> Reply {
         return Reply::fail(KEY_ILLEGAL_REQUEST, ASC_INVALID_OPCODE);
     };
     match opcode {
-        0x00 => Reply::ok(),                       // TEST UNIT READY
-        0x12 => inquiry(lun, cdb),                 // INQUIRY
-        0x1A => mode_sense(lun, cdb, false),       // MODE SENSE(6)
-        0x5A => mode_sense(lun, cdb, true),        // MODE SENSE(10)
-        0x25 => read_capacity_10(lun),             // READ CAPACITY(10)
+        0x00 => Reply::ok(),                 // TEST UNIT READY
+        0x12 => inquiry(lun, cdb),           // INQUIRY
+        0x1A => mode_sense(lun, cdb, false), // MODE SENSE(6)
+        0x5A => mode_sense(lun, cdb, true),  // MODE SENSE(10)
+        0x25 => read_capacity_10(lun),       // READ CAPACITY(10)
         0x9E if cdb.len() >= 2 && cdb[1] & 0x1F == 0x10 => read_capacity_16(lun),
-        0x28 | 0x88 => read(lun, cdb),             // READ(10) / READ(16)
-        0x2A | 0x8A => write(lun, cdb, data_out),  // WRITE(10) / WRITE(16)
-        0x35 | 0x91 => Reply::ok(),                // SYNCHRONIZE CACHE: writes are already through
+        0x28 | 0x88 => read(lun, cdb), // READ(10) / READ(16)
+        0x2A | 0x8A => write(lun, cdb, data_out), // WRITE(10) / WRITE(16)
+        0x35 | 0x91 => Reply::ok(),    // SYNCHRONIZE CACHE: writes are already through
         0x03 => Reply::good(sense_data(KEY_NO_SENSE, (0, 0))), // REQUEST SENSE
-        0xA0 => report_luns(),                     // REPORT LUNS
-        0x1B => Reply::ok(),                       // START STOP UNIT
-        0x1E => Reply::ok(),                       // PREVENT ALLOW MEDIUM REMOVAL
-        0x2F | 0x8F => Reply::ok(),                // VERIFY: the image is what it is
+        0xA0 => report_luns(),         // REPORT LUNS
+        0x1B => Reply::ok(),           // START STOP UNIT
+        0x1E => Reply::ok(),           // PREVENT ALLOW MEDIUM REMOVAL
+        0x2F | 0x8F => Reply::ok(),    // VERIFY: the image is what it is
         _ => {
             // Refusing is the right answer and the initiator takes it as one;
             // the only question is whether anybody wants to read about it.
@@ -213,7 +221,11 @@ fn read_capacity_10(lun: &Lun) -> Reply {
     let mut d = vec![0u8; 8];
     // The 10-byte form cannot express more than 2 TiB; the all-ones answer is
     // how it tells the initiator to ask again with the 16-byte one.
-    let reported = if last > u32::MAX as u64 { u32::MAX } else { last as u32 };
+    let reported = if last > u32::MAX as u64 {
+        u32::MAX
+    } else {
+        last as u32
+    };
     d[0..4].copy_from_slice(&reported.to_be_bytes());
     d[4..8].copy_from_slice(&lun.block_size().to_be_bytes());
     Reply::good(d)
@@ -320,7 +332,13 @@ fn write(lun: &mut Lun, cdb: &[u8], data_out: &[u8]) -> Reply {
     // Short of the data the command promised: writing the part that arrived
     // would leave the rest of those blocks as whatever was there before.
     if data_out.len() < want {
-        warn!(lba, count, got = data_out.len(), want, "iSCSI: write data short of the command");
+        warn!(
+            lba,
+            count,
+            got = data_out.len(),
+            want,
+            "iSCSI: write data short of the command"
+        );
         return Reply::fail(KEY_ILLEGAL_REQUEST, ASC_INVALID_FIELD_IN_CDB);
     }
     match lun.write_at(lba * bs, &data_out[..want]) {
@@ -345,7 +363,9 @@ pub(crate) mod tests {
 
     impl MemSource {
         pub(crate) fn new(size: usize) -> Self {
-            Self { bytes: vec![0u8; size] }
+            Self {
+                bytes: vec![0u8; size],
+            }
         }
     }
 
@@ -404,7 +424,11 @@ pub(crate) mod tests {
         let r = execute(&mut lun, &[0x25, 0, 0, 0, 0, 0, 0, 0, 0, 0], &[]);
         assert_eq!(u32::from_be_bytes(r.data[0..4].try_into().unwrap()), 7);
         assert_eq!(u32::from_be_bytes(r.data[4..8].try_into().unwrap()), 512);
-        let r16 = execute(&mut lun, &[0x9E, 0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 32, 0, 0], &[]);
+        let r16 = execute(
+            &mut lun,
+            &[0x9E, 0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 32, 0, 0],
+            &[],
+        );
         assert_eq!(u64::from_be_bytes(r16.data[0..8].try_into().unwrap()), 7);
     }
 
@@ -448,10 +472,22 @@ pub(crate) mod tests {
     fn a_read_only_lun_is_write_protected_everywhere_it_is_asked() {
         let mut lun = Lun::read_only(Box::new(MemSource::new(4096)));
         let six = execute(&mut lun, &[0x1A, 0, 0x3F, 0, 255, 0], &[]);
-        assert_eq!(six.data[2] & 0x80, 0x80, "write-protect bit in MODE SENSE(6)");
+        assert_eq!(
+            six.data[2] & 0x80,
+            0x80,
+            "write-protect bit in MODE SENSE(6)"
+        );
         let ten = execute(&mut lun, &[0x5A, 0, 0x3F, 0, 0, 0, 0, 0, 255, 0], &[]);
-        assert_eq!(ten.data[3] & 0x80, 0x80, "write-protect bit in MODE SENSE(10)");
-        let w = execute(&mut lun, &[0x2A, 0, 0, 0, 0, 0, 0, 0, 1, 0], &vec![0xFF; 512]);
+        assert_eq!(
+            ten.data[3] & 0x80,
+            0x80,
+            "write-protect bit in MODE SENSE(10)"
+        );
+        let w = execute(
+            &mut lun,
+            &[0x2A, 0, 0, 0, 0, 0, 0, 0, 1, 0],
+            &vec![0xFF; 512],
+        );
         assert_eq!(w.status, STATUS_CHECK_CONDITION);
         assert_eq!(w.sense[2] & 0x0F, KEY_DATA_PROTECT);
     }
@@ -461,9 +497,16 @@ pub(crate) mod tests {
     #[test]
     fn a_write_whose_data_did_not_all_arrive_is_refused() {
         let mut lun = rw_lun(4096);
-        let r = execute(&mut lun, &[0x2A, 0, 0, 0, 0, 0, 0, 0, 2, 0], &vec![0x11; 512]);
+        let r = execute(
+            &mut lun,
+            &[0x2A, 0, 0, 0, 0, 0, 0, 0, 2, 0],
+            &vec![0x11; 512],
+        );
         assert_eq!(r.status, STATUS_CHECK_CONDITION);
-        assert_eq!(execute(&mut lun, &[0x28, 0, 0, 0, 0, 0, 0, 0, 1, 0], &[]).data, vec![0u8; 512]);
+        assert_eq!(
+            execute(&mut lun, &[0x28, 0, 0, 0, 0, 0, 0, 0, 1, 0], &[]).data,
+            vec![0u8; 512]
+        );
     }
 
     #[test]
@@ -486,11 +529,19 @@ pub(crate) mod tests {
     /// so it belongs with them.
     #[test]
     fn a_refusal_nobody_can_help_is_told_apart_from_a_gap() {
-        for op in [0x24u8, 0x85, 0xA1, 0xC0, 0xD8, 0xDF, 0xE0, 0xE4, 0xE6, 0xF8, 0xFF] {
-            assert!(refusal_is_expected(op), "{op:#04x} is nothing to warn about");
+        for op in [
+            0x24u8, 0x85, 0xA1, 0xC0, 0xD8, 0xDF, 0xE0, 0xE4, 0xE6, 0xF8, 0xFF,
+        ] {
+            assert!(
+                refusal_is_expected(op),
+                "{op:#04x} is nothing to warn about"
+            );
         }
         for op in [0x41u8, 0x42, 0x93] {
-            assert!(!refusal_is_expected(op), "{op:#04x} is a command we could have");
+            assert!(
+                !refusal_is_expected(op),
+                "{op:#04x} is a command we could have"
+            );
         }
     }
 
@@ -500,8 +551,14 @@ pub(crate) mod tests {
     fn the_same_refusal_is_reported_once_but_answered_every_time() {
         let mut lun = rw_lun(4096);
         assert!(lun.first_refusal_of(0xDF));
-        assert!(!lun.first_refusal_of(0xDF), "the second one is the same line");
-        assert!(lun.first_refusal_of(0xE4), "another opcode has its own first time");
+        assert!(
+            !lun.first_refusal_of(0xDF),
+            "the second one is the same line"
+        );
+        assert!(
+            lun.first_refusal_of(0xE4),
+            "another opcode has its own first time"
+        );
         for _ in 0..3 {
             let r = execute(&mut lun, &[0xDF, 0, 0, 0, 0, 0], &[]);
             assert_eq!(r.status, STATUS_CHECK_CONDITION);

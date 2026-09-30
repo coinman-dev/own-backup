@@ -20,9 +20,11 @@ pub async fn run(args: UnmountArgs) -> Result<()> {
     let token = crate::commands::mount::resolve_token(&args.token);
     let mut client = BackupClient::connect(args.endpoint.clone(), token)
         .await
-        .map_err(|e| OwnBackupError::Device(format!(
-            "cannot reach the Own Backup service ({e}). Is it running?"
-        )))?;
+        .map_err(|e| {
+            OwnBackupError::Device(format!(
+                "cannot reach the Own Backup service ({e}). Is it running?"
+            ))
+        })?;
 
     client
         .unmount_image(&args.image)

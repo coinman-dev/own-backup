@@ -178,8 +178,7 @@ pub fn verify_tree(src_root: &Path, dst_root: &Path, cancel: &CancelToken) -> Re
                 != backup_stream_digest(&dst, cancel, &mut buf)?
             {
                 return Err(OwnBackupError::RestoreIncompatible(
-                    tr!("file_restore_win.verify_content_diff", path = dst.display())
-                        .into_owned(),
+                    tr!("file_restore_win.verify_content_diff", path = dst.display()).into_owned(),
                 ));
             }
             if from_kind & FILE_ATTRIBUTE_DIRECTORY.0 != 0

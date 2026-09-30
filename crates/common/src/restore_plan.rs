@@ -311,9 +311,15 @@ impl RestoreOp {
     pub fn order_key(&self) -> u8 {
         match self {
             RestoreOp::WritePartitionTable { .. } => Self::ORDER_TABLE,
-            RestoreOp::RestorePartition { mode: RestoreMode::Sectors, .. } => Self::ORDER_RAW,
+            RestoreOp::RestorePartition {
+                mode: RestoreMode::Sectors,
+                ..
+            } => Self::ORDER_RAW,
             RestoreOp::Format { .. } => Self::ORDER_FORMAT,
-            RestoreOp::RestorePartition { mode: RestoreMode::Files, .. } => Self::ORDER_FILES,
+            RestoreOp::RestorePartition {
+                mode: RestoreMode::Files,
+                ..
+            } => Self::ORDER_FILES,
             RestoreOp::ExtendFilesystem { .. } => Self::ORDER_EXTEND,
             RestoreOp::AssignLetter { .. } => Self::ORDER_LETTER,
             RestoreOp::FinalizeBoot { .. } => Self::ORDER_BOOT,
@@ -352,8 +358,14 @@ impl RestoreOp {
         match self {
             RestoreOp::WritePartitionTable { .. } => "write_partition_table",
             RestoreOp::Format { .. } => "format",
-            RestoreOp::RestorePartition { mode: RestoreMode::Sectors, .. } => "restore_sectors",
-            RestoreOp::RestorePartition { mode: RestoreMode::Files, .. } => "restore_files",
+            RestoreOp::RestorePartition {
+                mode: RestoreMode::Sectors,
+                ..
+            } => "restore_sectors",
+            RestoreOp::RestorePartition {
+                mode: RestoreMode::Files,
+                ..
+            } => "restore_files",
             RestoreOp::ExtendFilesystem { .. } => "extend_filesystem",
             RestoreOp::AssignLetter { .. } => "assign_letter",
             RestoreOp::FinalizeBoot { .. } => "finalize_boot",
@@ -381,7 +393,12 @@ impl RestoreOp {
                 },
                 count = table.entries.len()
             ),
-            RestoreOp::Format { part, fs, label, quick } => {
+            RestoreOp::Format {
+                part,
+                fs,
+                label,
+                quick,
+            } => {
                 let label = if label.is_empty() {
                     String::new()
                 } else {
@@ -400,7 +417,12 @@ impl RestoreOp {
                     mode = mode
                 )
             }
-            RestoreOp::RestorePartition { src_index, dst, mode, .. } => match mode {
+            RestoreOp::RestorePartition {
+                src_index,
+                dst,
+                mode,
+                ..
+            } => match mode {
                 RestoreMode::Sectors => crate::tr!(
                     "restore_plan.title_restore_sectors",
                     src = src_index,
@@ -416,7 +438,11 @@ impl RestoreOp {
                 crate::tr!("restore_plan.title_extend", part = named(part))
             }
             RestoreOp::AssignLetter { part, letter } => {
-                crate::tr!("restore_plan.title_assign_letter", part = named(part), letter = letter)
+                crate::tr!(
+                    "restore_plan.title_assign_letter",
+                    part = named(part),
+                    letter = letter
+                )
             }
             RestoreOp::FinalizeBoot { uefi, .. } => crate::tr!(
                 "restore_plan.title_finalize_boot",
@@ -441,7 +467,10 @@ impl RestoreOp {
         matches!(
             self,
             RestoreOp::Format { .. }
-                | RestoreOp::RestorePartition { mode: RestoreMode::Files, .. }
+                | RestoreOp::RestorePartition {
+                    mode: RestoreMode::Files,
+                    ..
+                }
                 | RestoreOp::ExtendFilesystem { .. }
                 | RestoreOp::AssignLetter { .. }
                 | RestoreOp::FinalizeBoot { .. }
@@ -561,7 +590,10 @@ impl TargetDiskId {
         }
         if !self.disk_guid.trim().is_empty() && !now.disk_guid.trim().is_empty() {
             compared = true;
-            same &= self.disk_guid.trim().eq_ignore_ascii_case(now.disk_guid.trim());
+            same &= self
+                .disk_guid
+                .trim()
+                .eq_ignore_ascii_case(now.disk_guid.trim());
         }
         if self.size_bytes > 0 && now.size_bytes > 0 {
             compared = true;
@@ -596,7 +628,9 @@ impl RestorePlan {
     /// disk goes offline for the duration; when it does not, only the volumes
     /// being written are dismounted (D17).
     pub fn touches_partition_table(&self) -> bool {
-        self.ops.iter().any(|op| matches!(op, RestoreOp::WritePartitionTable { .. }))
+        self.ops
+            .iter()
+            .any(|op| matches!(op, RestoreOp::WritePartitionTable { .. }))
     }
 
     /// Index into [`Self::ordered`] of the first operation that destroys data.
@@ -653,7 +687,11 @@ mod tests {
     use super::*;
 
     fn part(index: u32, offset: u64) -> PartRef {
-        PartRef { index, offset, size: 1024 * 1024 * 1024 }
+        PartRef {
+            index,
+            offset,
+            size: 1024 * 1024 * 1024,
+        }
     }
 
     fn gpt_entry(index: u32, first_lba: u64, last_lba: u64) -> PartitionSpec {
@@ -695,8 +733,15 @@ mod tests {
             1,
             "/tmp/img.vhdx".into(),
             vec![
-                RestoreOp::FinalizeBoot { windows_part: part(2, 200), esp: None, uefi: true },
-                RestoreOp::AssignLetter { part: part(2, 200), letter: 'D' },
+                RestoreOp::FinalizeBoot {
+                    windows_part: part(2, 200),
+                    esp: None,
+                    uefi: true,
+                },
+                RestoreOp::AssignLetter {
+                    part: part(2, 200),
+                    letter: 'D',
+                },
                 RestoreOp::RestorePartition {
                     src_index: 2,
                     dst: part(2, 200),
@@ -759,13 +804,26 @@ mod tests {
             0,
             "/tmp/img.vhdx".into(),
             vec![
-                RestoreOp::AssignLetter { part: part(3, 3000), letter: 'F' },
-                RestoreOp::AssignLetter { part: part(1, 1000), letter: 'D' },
-                RestoreOp::AssignLetter { part: part(2, 2000), letter: 'E' },
+                RestoreOp::AssignLetter {
+                    part: part(3, 3000),
+                    letter: 'F',
+                },
+                RestoreOp::AssignLetter {
+                    part: part(1, 1000),
+                    letter: 'D',
+                },
+                RestoreOp::AssignLetter {
+                    part: part(2, 2000),
+                    letter: 'E',
+                },
             ],
         );
-        let offsets: Vec<u64> =
-            plan.ordered().iter().filter_map(|op| op.part()).map(|p| p.offset).collect();
+        let offsets: Vec<u64> = plan
+            .ordered()
+            .iter()
+            .filter_map(|op| op.part())
+            .map(|p| p.offset)
+            .collect();
         assert_eq!(offsets, vec![1000, 2000, 3000]);
     }
 
@@ -778,7 +836,11 @@ mod tests {
             "/tmp/img.vhdx".into(),
             vec![
                 RestoreOp::EnsureFallbackBootloader { esp: part(1, 100) },
-                RestoreOp::FinalizeBoot { windows_part: part(2, 200), esp: None, uefi: true },
+                RestoreOp::FinalizeBoot {
+                    windows_part: part(2, 200),
+                    esp: None,
+                    uefi: true,
+                },
                 RestoreOp::RestorePartition {
                     src_index: 1,
                     dst: part(1, 100),
@@ -789,7 +851,14 @@ mod tests {
             ],
         );
         let kinds: Vec<&str> = plan.ordered().iter().map(|op| op.kind()).collect();
-        assert_eq!(kinds, vec!["restore_sectors", "finalize_boot", "ensure_fallback_bootloader"]);
+        assert_eq!(
+            kinds,
+            vec![
+                "restore_sectors",
+                "finalize_boot",
+                "ensure_fallback_bootloader"
+            ]
+        );
     }
 
     /// The queue shows the user what is happening to their disk. Steps that
@@ -802,7 +871,11 @@ mod tests {
         assert!(RestoreOp::EnsureFallbackBootloader { esp: part(1, 100) }.is_housekeeping());
         for op in [
             RestoreOp::WritePartitionTable { table: table() },
-            RestoreOp::FinalizeBoot { windows_part: part(1, 100), esp: None, uefi: true },
+            RestoreOp::FinalizeBoot {
+                windows_part: part(1, 100),
+                esp: None,
+                uefi: true,
+            },
             RestoreOp::Format {
                 part: part(1, 100),
                 fs: FormatFs::Ntfs,
@@ -817,8 +890,14 @@ mod tests {
     #[test]
     fn copying_a_bootloader_destroys_nothing_and_needs_a_mounted_esp() {
         let op = RestoreOp::EnsureFallbackBootloader { esp: part(1, 100) };
-        assert!(!op.destroys_data(), "it only adds a file that was not there");
-        assert!(op.needs_disk_online(), "the ESP has to be a mounted volume to write to");
+        assert!(
+            !op.destroys_data(),
+            "it only adds a file that was not there"
+        );
+        assert!(
+            op.needs_disk_online(),
+            "the ESP has to be a mounted volume to write to"
+        );
         assert!(!op.cancellable(), "it takes milliseconds");
     }
 
@@ -828,7 +907,10 @@ mod tests {
             1,
             "/tmp/img.vhdx".into(),
             vec![
-                RestoreOp::AssignLetter { part: part(1, 100), letter: 'D' },
+                RestoreOp::AssignLetter {
+                    part: part(1, 100),
+                    letter: 'D',
+                },
                 RestoreOp::WritePartitionTable { table: table() },
             ],
         );
@@ -841,7 +923,10 @@ mod tests {
         let plan = RestorePlan::new(
             1,
             "/tmp/img.vhdx".into(),
-            vec![RestoreOp::AssignLetter { part: part(1, 100), letter: 'D' }],
+            vec![RestoreOp::AssignLetter {
+                part: part(1, 100),
+                letter: 'D',
+            }],
         );
         assert_eq!(plan.point_of_no_return(), None);
         assert!(!plan.touches_partition_table());
@@ -859,7 +944,11 @@ mod tests {
         assert!(restore.cancellable());
         assert!(!RestoreOp::WritePartitionTable { table: table() }.cancellable());
         assert!(!RestoreOp::ExtendFilesystem { part: part(1, 0) }.cancellable());
-        assert!(!RestoreOp::AssignLetter { part: part(1, 0), letter: 'D' }.cancellable());
+        assert!(!RestoreOp::AssignLetter {
+            part: part(1, 0),
+            letter: 'D'
+        }
+        .cancellable());
     }
 
     #[test]
@@ -893,7 +982,9 @@ mod tests {
                     wipe_free_space: true,
                     reencrypt: false,
                 },
-                RestoreOp::ExtendFilesystem { part: part(1, 1024 * 1024) },
+                RestoreOp::ExtendFilesystem {
+                    part: part(1, 1024 * 1024),
+                },
             ],
         );
         let json = serde_json::to_string(&plan).unwrap();
@@ -908,7 +999,13 @@ mod tests {
         let json = r#"{"op":"restore_partition","src_index":1,
             "dst":{"index":1,"offset":0,"size":1024},"mode":"sectors"}"#;
         let op: RestoreOp = serde_json::from_str(json).unwrap();
-        assert!(matches!(op, RestoreOp::RestorePartition { wipe_free_space: false, .. }));
+        assert!(matches!(
+            op,
+            RestoreOp::RestorePartition {
+                wipe_free_space: false,
+                ..
+            }
+        ));
     }
 
     // --- Записи загрузки: своя ступень, в самом конце ----------------------
@@ -930,7 +1027,11 @@ mod tests {
                 RestoreOp::RestoreBootEntries,
                 RestoreOp::RefreshDiskState,
                 RestoreOp::EnsureFallbackBootloader { esp },
-                RestoreOp::FinalizeBoot { windows_part: win, esp: Some(esp), uefi: true },
+                RestoreOp::FinalizeBoot {
+                    windows_part: win,
+                    esp: Some(esp),
+                    uefi: true,
+                },
             ],
         };
         let order: Vec<&str> = plan.ordered().iter().map(|op| op.kind()).collect();

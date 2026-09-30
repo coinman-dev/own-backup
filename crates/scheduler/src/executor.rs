@@ -32,11 +32,7 @@ impl JobExecutor {
     /// 4. If all retries fail, log the error and wait for the next scheduled time.
     ///
     /// The returned `JoinHandle` can be used to cancel the task via `.abort()`.
-    pub fn run(
-        schedule: cron::Schedule,
-        job_id: Uuid,
-        callback: JobCallback,
-    ) -> JoinHandle<()> {
+    pub fn run(schedule: cron::Schedule, job_id: Uuid, callback: JobCallback) -> JoinHandle<()> {
         tokio::spawn(async move {
             loop {
                 // Determine when to run next.

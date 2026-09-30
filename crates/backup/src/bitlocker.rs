@@ -194,8 +194,12 @@ enum Aes {
 impl Aes {
     fn new(key: &[u8]) -> Result<Aes> {
         match key.len() {
-            16 => Ok(Aes::A128(Box::new(Aes128::new(GenericArray::from_slice(key))))),
-            32 => Ok(Aes::A256(Box::new(Aes256::new(GenericArray::from_slice(key))))),
+            16 => Ok(Aes::A128(Box::new(Aes128::new(GenericArray::from_slice(
+                key,
+            ))))),
+            32 => Ok(Aes::A256(Box::new(Aes256::new(GenericArray::from_slice(
+                key,
+            ))))),
             n => Err(bad(format!("unsupported AES key length {n}"))),
         }
     }
@@ -332,7 +336,12 @@ fn stretch_hash(password_hash: &[u8], salt: &[u8], iterations: u32) -> Zeroizing
 }
 
 fn utf16le(password: &str) -> Zeroizing<Vec<u8>> {
-    Zeroizing::new(password.encode_utf16().flat_map(|u| u.to_le_bytes()).collect())
+    Zeroizing::new(
+        password
+            .encode_utf16()
+            .flat_map(|u| u.to_le_bytes())
+            .collect(),
+    )
 }
 
 /// VMK protection type of the 48-digit recovery key.
@@ -355,15 +364,18 @@ pub fn parse_recovery_key(text: &str) -> Result<Zeroizing<[u8; 16]>> {
     // did not think the dashes were part of it. Regrouping is not guessing —
     // the group checksums below still have to hold.
     let regrouped: Vec<String>;
-    let groups: Vec<&str> = if split.len() == 1
-        && split[0].len() == 48
-        && split[0].bytes().all(|b| b.is_ascii_digit())
-    {
-        regrouped = split[0].as_bytes().chunks(6).map(|c| String::from_utf8_lossy(c).into_owned()).collect();
-        regrouped.iter().map(String::as_str).collect()
-    } else {
-        split
-    };
+    let groups: Vec<&str> =
+        if split.len() == 1 && split[0].len() == 48 && split[0].bytes().all(|b| b.is_ascii_digit())
+        {
+            regrouped = split[0]
+                .as_bytes()
+                .chunks(6)
+                .map(|c| String::from_utf8_lossy(c).into_owned())
+                .collect();
+            regrouped.iter().map(String::as_str).collect()
+        } else {
+            split
+        };
     if groups.len() != 8 {
         return Err(bad(tr!("bitlocker.rk_group_count", count = groups.len())));
     }
@@ -380,11 +392,19 @@ pub fn parse_recovery_key(text: &str) -> Result<Zeroizing<[u8; 16]>> {
             .parse()
             .map_err(|_| bad(tr!("bitlocker.rk_group_unreadable", group = i + 1)))?;
         if n % 11 != 0 {
-            return Err(bad(tr!("bitlocker.rk_group_checksum", group = i + 1, text = g)));
+            return Err(bad(tr!(
+                "bitlocker.rk_group_checksum",
+                group = i + 1,
+                text = g
+            )));
         }
         let value = n / 11;
         if value > u16::MAX as u32 {
-            return Err(bad(tr!("bitlocker.rk_group_range", group = i + 1, text = g)));
+            return Err(bad(tr!(
+                "bitlocker.rk_group_range",
+                group = i + 1,
+                text = g
+            )));
         }
         out[i * 2..i * 2 + 2].copy_from_slice(&(value as u16).to_le_bytes());
     }
@@ -620,7 +640,11 @@ fn cipher_name(alg: u16) -> (String, bool) {
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+    bytes
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Is the volume in the middle of being encrypted or decrypted?
@@ -737,7 +761,11 @@ pub fn inspect_bitlocker_with(
     let offsets = if offsets.is_empty() {
         tr!("bitlocker.no_plausible_offsets").into_owned()
     } else {
-        offsets.iter().map(|o| format!("{o:#x}")).collect::<Vec<_>>().join(", ")
+        offsets
+            .iter()
+            .map(|o| format!("{o:#x}"))
+            .collect::<Vec<_>>()
+            .join(", ")
     };
     let last_error = if last_err.is_empty() {
         String::new()
@@ -779,7 +807,10 @@ fn inspect_metadata(
             continue;
         }
         let kind = u16at(d.data, 0x1A) as u16;
-        match protectors.iter_mut().find(|p: &&mut Protector| p.kind == kind) {
+        match protectors
+            .iter_mut()
+            .find(|p: &&mut Protector| p.kind == kind)
+        {
             Some(seen) => seen.count += 1,
             None => protectors.push(Protector {
                 kind,
@@ -883,7 +914,11 @@ fn describe_datums(buf: &[u8], depth: usize, out: &mut Vec<String>) {
         };
         // The first four bytes of a datum are a method or a counter, never a
         // key: enough to tell a stretch datum's algorithm without exposing one.
-        let head4 = if d.data.len() >= 4 { hex(&d.data[..4]) } else { String::new() };
+        let head4 = if d.data.len() >= 4 {
+            hex(&d.data[..4])
+        } else {
+            String::new()
+        };
         out.push(format!(
             "{:indent$}{}",
             "",
@@ -1041,7 +1076,11 @@ fn unlock_from_metadata(
         // VMK head: guid(16) ‖ last_modified(8) ‖ unknown(2) ‖ protection_type(2)
         // ‖ nested datums (at 0x1C).
         let protection = u16at(d.data, 0x1A) as u16;
-        let wanted = if recovery.is_some() { PROTECT_RECOVERY } else { PROTECT_PASSWORD };
+        let wanted = if recovery.is_some() {
+            PROTECT_RECOVERY
+        } else {
+            PROTECT_PASSWORD
+        };
         if protection != wanted {
             continue;
         }
@@ -1119,7 +1158,9 @@ fn unlock_from_metadata(
             fvek_ccm.push(d.data);
         }
     }
-    let fvek_blob = fvek_ccm.first().ok_or_else(|| bad("no FVEK datum in the dataset"))?;
+    let fvek_blob = fvek_ccm
+        .first()
+        .ok_or_else(|| bad("no FVEK datum in the dataset"))?;
     let fvek_key = unwrap_ccm_key(&vmk, fvek_blob)?;
 
     // The unwrapped FVEK key datum: header(8) ‖ algorithm(u32) ‖ key bytes.
@@ -1152,7 +1193,6 @@ fn unlock_from_metadata(
         conversion: conversion_state(entries),
     })
 }
-
 
 /// Unwrap an AES-CCM datum (`nonce(12) ‖ mac(16) ‖ payload`) with `key`, and
 /// return the inner key datum's raw bytes (the plaintext datum).
@@ -1210,7 +1250,11 @@ pub fn diagnose_first_sector(vol: &mut dyn RawVolume, params: &BitLockerParams) 
         out.push(format!(
             "{label}: {}{}",
             hex(&buf[..16.min(buf.len())]),
-            if looks_like_fs(&buf) { tr!("bitlocker.diag_filesystem_mark") } else { Cow::Borrowed("") }
+            if looks_like_fs(&buf) {
+                tr!("bitlocker.diag_filesystem_mark")
+            } else {
+                Cow::Borrowed("")
+            }
         ));
     };
 
@@ -1229,7 +1273,11 @@ pub fn diagnose_first_sector(vol: &mut dyn RawVolume, params: &BitLockerParams) 
         &mut out,
     );
     attempt(
-        &tr!("bitlocker.diag_backup_tweak_physical", backup = backup, index = phys_index),
+        &tr!(
+            "bitlocker.diag_backup_tweak_physical",
+            backup = backup,
+            index = phys_index
+        ),
         backup,
         Some(phys_index),
         &mut out,
@@ -1268,7 +1316,10 @@ fn verify_covers_volume(params: &BitLockerParams, volume_len: u64) -> Result<()>
     }
     // The sign rides with the number: a bare `%` in the catalog text would be
     // read as the start of a placeholder.
-    let percent = format!("{:.0}%", params.encrypted_size as f64 * 100.0 / volume_len as f64);
+    let percent = format!(
+        "{:.0}%",
+        params.encrypted_size as f64 * 100.0 / volume_len as f64
+    );
     Err(bad(tr!(
         "bitlocker.partially_encrypted",
         encrypted = params.encrypted_size,
@@ -1338,7 +1389,11 @@ pub struct BitLockerVolume {
 impl BitLockerVolume {
     pub fn new(inner: Box<dyn RawVolume + Send>, params: BitLockerParams) -> Self {
         let length = params.encrypted_size.min(inner.len());
-        Self { inner, params, length }
+        Self {
+            inner,
+            params,
+            length,
+        }
     }
 
     pub fn params(&self) -> &BitLockerParams {
@@ -1433,13 +1488,9 @@ mod tests {
         let key = hexvec("C0 C1 C2 C3 C4 C5 C6 C7 C8 C9 CA CB CC CD CE CF");
         let nonce = hexvec("00 00 00 03 02 01 00 A0 A1 A2 A3 A4 A5");
         let aad = hexvec("00 01 02 03 04 05 06 07");
-        let ct = hexvec(
-            "58 8C 97 9A 61 C6 63 D2 F0 66 D0 C2 C0 F9 89 80 6D 5F 6B 61 DA C3 84",
-        );
+        let ct = hexvec("58 8C 97 9A 61 C6 63 D2 F0 66 D0 C2 C0 F9 89 80 6D 5F 6B 61 DA C3 84");
         let tag = hexvec("17 E8 D1 2C FD F9 26 E0");
-        let want = hexvec(
-            "08 09 0A 0B 0C 0D 0E 0F 10 11 12 13 14 15 16 17 18 19 1A 1B 1C 1D 1E",
-        );
+        let want = hexvec("08 09 0A 0B 0C 0D 0E 0F 10 11 12 13 14 15 16 17 18 19 1A 1B 1C 1D 1E");
         let got = aes_ccm_decrypt(&key, &nonce, &aad, &ct, &tag).unwrap();
         assert_eq!(&got[..], &want[..]);
 
@@ -1502,10 +1553,8 @@ mod tests {
     #[test]
     fn a_recovery_key_is_eight_numbers_and_a_checksum() {
         // 11 → 1, 22 → 2, … little-endian pairs.
-        let key = parse_recovery_key(
-            "000011-000022-000033-000044-000055-000066-000077-000088",
-        )
-        .unwrap();
+        let key =
+            parse_recovery_key("000011-000022-000033-000044-000055-000066-000077-000088").unwrap();
         assert_eq!(
             &key[..],
             &[1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0, 7, 0, 8, 0],
@@ -1513,22 +1562,26 @@ mod tests {
         );
 
         // The largest value a group may hold: 65535 * 11 = 720885.
-        let max = parse_recovery_key(
-            "720885-720885-720885-720885-720885-720885-720885-720885",
-        )
-        .unwrap();
+        let max =
+            parse_recovery_key("720885-720885-720885-720885-720885-720885-720885-720885").unwrap();
         assert_eq!(&max[..2], &[0xFF, 0xFF]);
 
         // A typo that changes one digit almost always breaks the multiple.
-        let err = parse_recovery_key(
-            "000012-000022-000033-000044-000055-000066-000077-000088",
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("11"), "the checksum failure should say so: {err}");
+        let err = parse_recovery_key("000012-000022-000033-000044-000055-000066-000077-000088")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("11"),
+            "the checksum failure should say so: {err}"
+        );
 
-        assert!(parse_recovery_key("000011-000022").is_err(), "eight groups, not two");
-        assert!(parse_recovery_key("00001a-000022-000033-000044-000055-000066-000077-000088").is_err());
+        assert!(
+            parse_recovery_key("000011-000022").is_err(),
+            "eight groups, not two"
+        );
+        assert!(
+            parse_recovery_key("00001a-000022-000033-000044-000055-000066-000077-000088").is_err()
+        );
         // A passphrase must not be mistaken for a recovery key.
         assert!(parse_recovery_key("hunter2").is_err());
 
@@ -1538,7 +1591,8 @@ mod tests {
         assert_eq!(&run[..], &key[..], "dashes are punctuation, not data");
         // Spaces instead of dashes, and a stray leading/trailing one.
         let spaced =
-            parse_recovery_key(" 000011 000022 000033 000044 000055 000066 000077 000088 ").unwrap();
+            parse_recovery_key(" 000011 000022 000033 000044 000055 000066 000077 000088 ")
+                .unwrap();
         assert_eq!(&spaced[..], &key[..]);
         // Regrouping is not a licence to ignore the checksums.
         assert!(parse_recovery_key("000012000022000033000044000055000066000077000088").is_err());
@@ -1559,8 +1613,13 @@ mod tests {
             kind: VolumeEncryptionKind::BitLocker,
             conversion: None,
         };
-        let err = verify_covers_volume(&params, 100 * 1024).unwrap_err().to_string();
-        assert!(err.contains("50"), "the message should name what was seen: {err}");
+        let err = verify_covers_volume(&params, 100 * 1024)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("50"),
+            "the message should name what was seen: {err}"
+        );
 
         // The real case: encrypted size equal to the partition — and a little
         // slack, because a volume is not obliged to be exact.
@@ -1576,19 +1635,17 @@ mod tests {
     /// nested `05 00 4c 00`, the build number 19044 (`64 4a`) — is verbatim.
     fn live_header_block_record(flags: u32) -> Vec<u8> {
         let mut r: Vec<u8> = [
-            0x64, 0x00, 0x0f, 0x00, 0x0f, 0x00, 0x01, 0x00, // size 100, entry 0x0F, value 0x0F, v1
+            0x64, 0x00, 0x0f, 0x00, 0x0f, 0x00, 0x01,
+            0x00, // size 100, entry 0x0F, value 0x0F, v1
             0x00, 0x00, 0x11, 0x02, 0x00, 0x00, 0x00, 0x00, // offset 0x02110000
             0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // size 0x2000
             0x05, 0x00, 0x4c, 0x00, 0x00, 0x00, 0x00, 0x00, // nested record mark
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // flags go in the first four
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
-            0x00, 0x02, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x64, 0x4a, 0x00, 0x00, // build 19044
-            0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x10, 0x01, 0x01, 0x02, 0x00, 0x20, 0x11, 0x02,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
-            0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
+            0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x64, 0x4a, 0x00, 0x00, // build 19044
+            0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x01, 0x01, 0x02, 0x00, 0x20,
+            0x11, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
         ]
         .to_vec();
         r[0x20..0x24].copy_from_slice(&flags.to_le_bytes());
@@ -1609,7 +1666,11 @@ mod tests {
             (0x00a, Conversion::Settled),    // fully encrypted
             (0x14a, Conversion::Decrypting), // decryption paused at 1 %
         ] {
-            assert_eq!(conversion_state(&live_header_block_record(flags)), Some(want), "{flags:#x}");
+            assert_eq!(
+                conversion_state(&live_header_block_record(flags)),
+                Some(want),
+                "{flags:#x}"
+            );
         }
 
         let full = 8u64 << 30;
@@ -1625,7 +1686,9 @@ mod tests {
             conversion,
         };
         for c in [Conversion::Encrypting, Conversion::Decrypting] {
-            let err = verify_covers_volume(&params(Some(c)), full).unwrap_err().to_string();
+            let err = verify_covers_volume(&params(Some(c)), full)
+                .unwrap_err()
+                .to_string();
             assert!(err.contains("не завершен"), "{c:?}: {err}");
         }
         assert!(verify_covers_volume(&params(Some(Conversion::Settled)), full).is_ok());
@@ -1663,7 +1726,12 @@ mod tests {
 
     /// Encrypt a key datum (algorithm ‖ key) with AES-CCM under `key`, producing
     /// the on-disk `nonce ‖ mac ‖ payload` bytes.
-    fn ccm_encrypt_keydatum(key: &[u8], nonce: &[u8; 12], algorithm: u16, keybytes: &[u8]) -> Vec<u8> {
+    fn ccm_encrypt_keydatum(
+        key: &[u8],
+        nonce: &[u8; 12],
+        algorithm: u16,
+        keybytes: &[u8],
+    ) -> Vec<u8> {
         // Plaintext datum: size(u16) type(u16) valuetype(u16=KEY) ver(u16)
         //                  algorithm(u32) key...
         let mut plain = vec![0u8; 12 + keybytes.len()];
@@ -1720,7 +1788,9 @@ mod tests {
         let salt = [0x11u8; 16];
         let stretch_iters = 64u32; // fast; real volumes use 2^20
         let vmk = [0x55u8; 32];
-        let fvek: Vec<u8> = (0..32u8).map(|i| i.wrapping_mul(7).wrapping_add(1)).collect();
+        let fvek: Vec<u8> = (0..32u8)
+            .map(|i| i.wrapping_mul(7).wrapping_add(1))
+            .collect();
         let sector_size = 512usize;
 
         // Stretched key from the password — CCM-wrap the VMK with it.
@@ -1807,15 +1877,16 @@ mod tests {
 
         let mut relocated = plain[0..512].to_vec();
         let phys0 = boot_backup_addr / 512;
-        xts().encrypt_area(&mut relocated, sector_size, phys0 as u128, |i| i.to_le_bytes());
+        xts().encrypt_area(&mut relocated, sector_size, phys0 as u128, |i| {
+            i.to_le_bytes()
+        });
 
         // --- Device: BitLocker boot sector at 0; virtual sectors 1.. in place;
         // virtual sector 0's ciphertext relocated to boot_backup_addr. ---
         let dev_len = (boot_backup_addr + 512) as usize;
         let mut dev = vec![0u8; dev_len];
         dev[512..encrypted_size as usize].copy_from_slice(&enc[512..encrypted_size as usize]);
-        dev[boot_backup_addr as usize..boot_backup_addr as usize + 512]
-            .copy_from_slice(&relocated);
+        dev[boot_backup_addr as usize..boot_backup_addr as usize + 512].copy_from_slice(&relocated);
 
         // A real volume's encrypted region covers the WHOLE partition — the
         // metadata blocks and the relocated boot sectors live inside it, not
@@ -1865,7 +1936,9 @@ mod tests {
         assert!(info.has_password() && info.openable());
         assert!(!info.header_hex.is_empty() && !info.dataset_hex.is_empty());
 
-        let params = super::open_bitlocker_with_iters(&mut vol, password, stretch_iters, true, None).unwrap();
+        let params =
+            super::open_bitlocker_with_iters(&mut vol, password, stretch_iters, true, None)
+                .unwrap();
         assert_eq!(params.algorithm, ALG_AES_XTS_128);
         assert_eq!(&params.fvek[..], &fvek[..]);
 
@@ -1879,19 +1952,26 @@ mod tests {
         // reader has two addresses and two tweaks to get right.
         let mut got0 = vec![0u8; 512];
         view.read_at(0, &mut got0).unwrap();
-        assert_eq!(got0, &plain[0..512], "the relocated boot sector must come back whole");
+        assert_eq!(
+            got0,
+            &plain[0..512],
+            "the relocated boot sector must come back whole"
+        );
 
         // Wrong password fails.
         let mut vol2 = MemVolume(view.inner_into_vec());
-        assert!(super::open_bitlocker_with_iters(&mut vol2, "nope", stretch_iters, true, None).is_err());
+        assert!(
+            super::open_bitlocker_with_iters(&mut vol2, "nope", stretch_iters, true, None).is_err()
+        );
 
         // --- The layout real volumes actually use ---
         let mut real = MemVolume(real_layout);
         let info = inspect_bitlocker(&mut real).expect("offsets at 0xB0 must be found");
         assert_eq!(info.cipher, ALG_AES_XTS_128);
         assert_eq!(info.protectors.len(), 1);
-        let params = super::open_bitlocker_with_iters(&mut real, password, stretch_iters, true, None)
-            .expect("a volume with the offsets at 0xB0 must unlock");
+        let params =
+            super::open_bitlocker_with_iters(&mut real, password, stretch_iters, true, None)
+                .expect("a volume with the offsets at 0xB0 must unlock");
         assert_eq!(&params.fvek[..], &fvek[..]);
     }
 
@@ -1951,7 +2031,6 @@ mod tests {
         MemVolume(dev)
     }
 
-
     /// Флешка BitLocker To Go: шифр AES-CBC, и пароль у неё есть.
     ///
     /// Windows шифрует съёмные диски в режиме совместимости (AES-CBC 128) ПО
@@ -2000,14 +2079,22 @@ mod tests {
         assert!(decrypts_to_a_filesystem(&fat), "FAT32");
 
         // Дискриминация. Неверный ключ даёт шум — его принимать нельзя.
-        let noise: Vec<u8> = (0..512u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+        let noise: Vec<u8> = (0..512u32)
+            .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
+            .collect();
         assert!(!decrypts_to_a_filesystem(&noise), "шум принят за ФС");
-        assert!(!decrypts_to_a_filesystem(&vec![0u8; 512]), "нули приняты за ФС");
+        assert!(
+            !decrypts_to_a_filesystem(&vec![0u8; 512]),
+            "нули приняты за ФС"
+        );
 
         // Расшифровали и увидели снова BitLocker — значит расшифровали не то.
         let mut still_encrypted = vec![0u8; 512];
         still_encrypted[3..11].copy_from_slice(FVE_SIGNATURE);
-        assert!(!decrypts_to_a_filesystem(&still_encrypted), "контейнер принят за ФС");
+        assert!(
+            !decrypts_to_a_filesystem(&still_encrypted),
+            "контейнер принят за ФС"
+        );
     }
 
     #[test]
@@ -2031,8 +2118,14 @@ mod tests {
         // взять её значило бы считать XTS-tweak по неверной сетке и получить
         // мусор вместо данных — без единой жалобы.
         assert!(resolve_sector_size(&boot, Some(0)).is_err());
-        assert!(resolve_sector_size(&boot, Some(3000)).is_err(), "не степень двойки");
-        assert!(resolve_sector_size(&boot, Some(8192)).is_err(), "вне диапазона");
+        assert!(
+            resolve_sector_size(&boot, Some(3000)).is_err(),
+            "не степень двойки"
+        );
+        assert!(
+            resolve_sector_size(&boot, Some(8192)).is_err(),
+            "вне диапазона"
+        );
     }
 
     #[test]
@@ -2067,10 +2160,20 @@ mod tests {
             PROTECT_RECOVERY,
         ]))
         .unwrap();
-        assert!(!info.has_password(), "an OS volume has no passphrase protector");
-        assert!(info.openable(), "…and is still openable — with the recovery key");
-        let usable: Vec<u16> =
-            info.protectors.iter().filter(|p| p.usable).map(|p| p.kind).collect();
+        assert!(
+            !info.has_password(),
+            "an OS volume has no passphrase protector"
+        );
+        assert!(
+            info.openable(),
+            "…and is still openable — with the recovery key"
+        );
+        let usable: Vec<u16> = info
+            .protectors
+            .iter()
+            .filter(|p| p.usable)
+            .map(|p| p.kind)
+            .collect();
         assert_eq!(usable, vec![PROTECT_RECOVERY]);
     }
 
@@ -2104,7 +2207,10 @@ mod tests {
 
         // Ни одного защитника нужного вида: про пароль это не говорит ничего.
         let none_of_that_kind = bad("у тома нет защитника «пароль» — этим способом его не открыть");
-        assert!(!is_wrong_passphrase(&none_of_that_kind), "{none_of_that_kind}");
+        assert!(
+            !is_wrong_passphrase(&none_of_that_kind),
+            "{none_of_that_kind}"
+        );
 
         // И прежняя, внутренняя форма по-прежнему опознаётся.
         assert!(is_wrong_passphrase(&bad(WRONG_PASSPHRASE)));

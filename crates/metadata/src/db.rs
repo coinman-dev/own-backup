@@ -8,8 +8,7 @@ pub const SCHEMA_VERSION: u32 = 2;
 
 /// Open (or create) the SQLite database at `path`, enable WAL mode, and run migrations.
 pub fn open_database(path: &Path) -> Result<Connection> {
-    let conn = Connection::open(path)
-        .map_err(|e| OwnBackupError::Database(e.to_string()))?;
+    let conn = Connection::open(path).map_err(|e| OwnBackupError::Database(e.to_string()))?;
 
     // Restrict DB file to owner (root) and group (own-backup) only (0o640).
     // The database contains encryption_salt in manifest_json, job configs, and file paths.

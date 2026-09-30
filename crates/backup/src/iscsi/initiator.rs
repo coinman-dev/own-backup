@@ -51,20 +51,29 @@ mod tests {
     use super::*;
 
     fn disk(n: u32) -> SessionDevice {
-        SessionDevice { device_type: FILE_DEVICE_DISK, device_number: n }
+        SessionDevice {
+            device_type: FILE_DEVICE_DISK,
+            device_number: n,
+        }
     }
 
     /// The entry of 2026-09-25: PnP had not filled it in, so everything was
     /// zero — and "disk 0" was the system SSD.
     #[test]
     fn an_entry_pnp_has_not_filled_in_is_not_disk_zero() {
-        let unfilled = SessionDevice { device_type: 0, device_number: 0 };
+        let unfilled = SessionDevice {
+            device_type: 0,
+            device_number: 0,
+        };
         assert!(disk_candidates(&[unfilled]).is_empty());
     }
 
     #[test]
     fn a_disk_is_found_once_pnp_has_filled_it_in() {
-        let unfilled = SessionDevice { device_type: 0, device_number: 0 };
+        let unfilled = SessionDevice {
+            device_type: 0,
+            device_number: 0,
+        };
         assert_eq!(disk_candidates(&[unfilled, disk(5)]), vec![5]);
     }
 
@@ -77,9 +86,18 @@ mod tests {
 
     #[test]
     fn no_number_yet_is_skipped_and_repeats_are_dropped() {
-        let pending = SessionDevice { device_type: FILE_DEVICE_DISK, device_number: u32::MAX };
+        let pending = SessionDevice {
+            device_type: FILE_DEVICE_DISK,
+            device_number: u32::MAX,
+        };
         // FILE_DEVICE_CD_ROM: a LUN can be one, and it is not our disk.
-        let cdrom = SessionDevice { device_type: 0x0000_0002, device_number: 3 };
-        assert_eq!(disk_candidates(&[pending, cdrom, disk(7), disk(7), disk(8)]), vec![7, 8]);
+        let cdrom = SessionDevice {
+            device_type: 0x0000_0002,
+            device_number: 3,
+        };
+        assert_eq!(
+            disk_candidates(&[pending, cdrom, disk(7), disk(7), disk(8)]),
+            vec![7, 8]
+        );
     }
 }

@@ -40,7 +40,9 @@ pub const KEEP_DAYS: i64 = 30;
 /// loggers had before, with one folder added.
 pub fn log_dir(data_dir: &Path) -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf))
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
     {
         candidates.push(dir.join(LOG_DIR_NAME));
     }
@@ -150,7 +152,9 @@ pub fn sweep(dir: &Path, keep_days: i64) -> usize {
     let mut removed = 0;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        let Some(day) = day_in_name(&name) else { continue };
+        let Some(day) = day_in_name(&name) else {
+            continue;
+        };
         if day < cutoff && std::fs::remove_file(entry.path()).is_ok() {
             removed += 1;
         }
@@ -186,10 +190,10 @@ mod tests {
             chrono::NaiveDate::from_ymd_opt(2026, 9, 22)
         );
         for other in [
-            "own-backup-service.log",          // the old, undated name
-            "own-backup-service-2026-09.log",  // not a full date
-            "notes.txt",                       // not a log at all
-            "2026-09-22.log",                  // no program in front of it
+            "own-backup-service.log",         // the old, undated name
+            "own-backup-service-2026-09.log", // not a full date
+            "notes.txt",                      // not a log at all
+            "2026-09-22.log",                 // no program in front of it
             "own-backup-service-not-a-date.log",
         ] {
             assert_eq!(day_in_name(other), None, "{other} должно быть пропущено");
@@ -220,8 +224,14 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
         assert!(left.contains(&format!("own-backup-service-{}.log", day(0))));
-        assert!(left.contains(&format!("own-backup-cli-{}.log", day(29))), "29 дней — в пределах");
-        assert!(left.contains("own-backup-service.log"), "старое имя не наше дело");
+        assert!(
+            left.contains(&format!("own-backup-cli-{}.log", day(29))),
+            "29 дней — в пределах"
+        );
+        assert!(
+            left.contains("own-backup-service.log"),
+            "старое имя не наше дело"
+        );
         assert!(left.contains("заметка.txt"));
         assert_eq!(left.len(), 4);
     }

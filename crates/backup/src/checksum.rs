@@ -84,7 +84,10 @@ mod run_tests {
 
     #[test]
     fn runs_are_capped_so_the_buffer_stays_bounded() {
-        assert_eq!(coalesce_block_runs([10, 11, 12, 13, 14], 2), vec![(10, 2), (12, 2), (14, 1)]);
+        assert_eq!(
+            coalesce_block_runs([10, 11, 12, 13, 14], 2),
+            vec![(10, 2), (12, 2), (14, 1)]
+        );
     }
 
     #[test]
@@ -104,7 +107,11 @@ mod run_tests {
         let mut blocks: Vec<u64> = (100..=1_099).collect(); // 1000 in a row
         blocks.extend([5_000, 7_321, 9_999]);
         let runs = coalesce_block_runs(blocks, 64);
-        assert_eq!(runs.len(), 16 + 3, "1000 blocks in runs of 64, plus three singles");
+        assert_eq!(
+            runs.len(),
+            16 + 3,
+            "1000 blocks in runs of 64, plus three singles"
+        );
         assert_eq!(runs[0], (100, 64));
         assert_eq!(*runs.last().unwrap(), (9_999, 1));
     }

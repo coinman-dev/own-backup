@@ -67,11 +67,19 @@ fn open_for_write(subkey: &str) -> Option<HKEY> {
 
 /// Write a `REG_DWORD` under `HKEY_LOCAL_MACHINE`; `true` on success.
 pub fn write_dword_hklm(subkey: &str, value: &str, data: u32) -> bool {
-    let Some(handle) = open_for_write(subkey) else { return false };
+    let Some(handle) = open_for_write(subkey) else {
+        return false;
+    };
     let name = to_wide(value);
     // SAFETY: name and data outlive the call; the key handle is closed below.
     let status = unsafe {
-        RegSetValueExW(handle, PCWSTR(name.as_ptr()), 0, REG_DWORD, Some(&data.to_le_bytes()))
+        RegSetValueExW(
+            handle,
+            PCWSTR(name.as_ptr()),
+            0,
+            REG_DWORD,
+            Some(&data.to_le_bytes()),
+        )
     };
     // SAFETY: handle from a successful RegOpenKeyExW, closed exactly once.
     let _ = unsafe { RegCloseKey(handle) };
@@ -86,7 +94,9 @@ pub fn write_dword_hklm(subkey: &str, value: &str, data: u32) -> bool {
 /// writing the default value instead would leave the machine carrying an
 /// explicit setting it never had.
 pub fn delete_value_hklm(subkey: &str, value: &str) -> bool {
-    let Some(handle) = open_for_write(subkey) else { return false };
+    let Some(handle) = open_for_write(subkey) else {
+        return false;
+    };
     let name = to_wide(value);
     // SAFETY: `name` outlives the call; the key handle is closed below.
     let status = unsafe { RegDeleteValueW(handle, PCWSTR(name.as_ptr())) };

@@ -31,22 +31,22 @@ use own_backup_snapshot::VssSnapshotSession;
 
 use crate::block_reader::BlockReader;
 use crate::block_reader_win::WinBlockReader;
+use crate::block_source::BlockSource;
 use crate::checksum::compute_block_checksum;
 use crate::exclusions::{ByteRanges, ZeroingBlockReader};
 use crate::exclusions_win::collect_excluded_ranges;
 use crate::gpt_writer::{disk_gpt_write_ops, gpt_write_ops, GptLayout, DEFAULT_PARTITION_OFFSET};
 use crate::raw_copy::copy_used_blocks;
 use crate::sidecar::{
-    read_embedded_sidecar, read_sidecar, sidecar_path_for,
-    write_sidecar, ChainRole, Sidecar, SidecarInfo,
+    read_embedded_sidecar, read_sidecar, sidecar_path_for, write_sidecar, ChainRole, Sidecar,
+    SidecarInfo,
 };
 use crate::used_sectors::{AllUsedMap, UsedSectorMap};
 use crate::used_sectors_win::NtfsUsedSectorMap;
 use crate::vhdx::{
-    attach_vhdx, create_differencing_vhdx, create_dynamic_vhdx, detach_vhdx, merge_into_parent, AttachMode,
-    VhdxCreateOptions,
+    attach_vhdx, create_differencing_vhdx, create_dynamic_vhdx, detach_vhdx, merge_into_parent,
+    AttachMode, VhdxCreateOptions,
 };
-use crate::block_source::BlockSource;
 use crate::vhdx_bat::allocated_payload_blocks;
 use crate::win_device::{normalize_device_path, WinRawDevice};
 
@@ -232,7 +232,10 @@ impl ImageTarget {
                     .into_inner()
                     .map_err(|e| OwnBackupError::Io(e.into_error()))?;
                 file.sync_all()?;
-                info!(finish_ms = t.elapsed().as_millis(), "qcow2 finalize timings");
+                info!(
+                    finish_ms = t.elapsed().as_millis(),
+                    "qcow2 finalize timings"
+                );
             }
         }
         Ok(())
@@ -276,13 +279,21 @@ impl ImageReadSource {
         key: Option<&crate::seal::ChainKey>,
     ) -> Result<Self> {
         match (container, key) {
-            ("qcow2", _) => Ok(Self::Qcow2(crate::qcow2::Qcow2RandomReader::open(image_path)?)),
-            ("vhdx", _) => Ok(Self::Vhdx(Box::new(crate::vhdx_bat::VhdxGuestReader::open(image_path)?))),
+            ("qcow2", _) => Ok(Self::Qcow2(crate::qcow2::Qcow2RandomReader::open(
+                image_path,
+            )?)),
+            ("vhdx", _) => Ok(Self::Vhdx(Box::new(
+                crate::vhdx_bat::VhdxGuestReader::open(image_path)?,
+            ))),
             ("obk", Some(key)) => Ok(Self::Obk(Box::new(
                 crate::seal::obk::ObkRandomReader::open(image_path, key)?,
             ))),
             ("obk", None) => Err(OwnBackupError::Encryption(
-                tr!("engine_win.encrypted_needs_key", image = image_path.display()).into_owned(),
+                tr!(
+                    "engine_win.encrypted_needs_key",
+                    image = image_path.display()
+                )
+                .into_owned(),
             )),
             (other, _) => Err(OwnBackupError::ImageFormat(format!(
                 "unknown image container '{other}' in sidecar"
@@ -314,8 +325,6 @@ fn open_write_with_retry(path: &str) -> Result<WinRawDevice> {
     }
     Err(last_err.unwrap_or_else(|| OwnBackupError::Device(format!("cannot open {path}"))))
 }
-
-
 
 /// Back up a volume into a freshly created, directly mountable VHDX.
 /// Данные исключённых файлов в копию не попадают в любом случае — они
@@ -561,7 +570,12 @@ fn open_bitlocker_source(read_path: &str, passphrase: &str) -> Result<Option<Bit
         offset = extent.offset,
         "BitLocker source unlocked; backing up decrypted data"
     );
-    Ok(Some(BitLockerSource { params, disk, offset: extent.offset, length: extent.length }))
+    Ok(Some(BitLockerSource {
+        params,
+        disk,
+        offset: extent.offset,
+        length: extent.length,
+    }))
 }
 
 /// Открыть заблокированный том силами Windows и закрыть его диск на запись.
@@ -577,7 +591,9 @@ fn open_bitlocker_source(read_path: &str, passphrase: &str) -> Result<Option<Bit
 /// в мусоре. Ошибка чтения значит «не знаем», а не «ReFS».
 #[cfg(target_os = "windows")]
 fn inner_fs_is_refs(src: &BitLockerSource) -> bool {
-    let Ok(window) = src.window() else { return false };
+    let Ok(window) = src.window() else {
+        return false;
+    };
     let mut vol = crate::bitlocker::BitLockerVolume::new(Box::new(window), src.params.clone());
     let mut boot = vec![0u8; 4096];
     if crate::fat_map::RawVolume::read_at(&mut vol, 0, &mut boot).is_err() {
@@ -609,7 +625,9 @@ fn unlock_source_with_windows(
     // остальное считаем парольной фразой.
     let digits: String = passphrase.chars().filter(char::is_ascii_digit).collect();
     let is_key = digits.len() == 48
-        && passphrase.chars().all(|c| c.is_ascii_digit() || c == '-' || c == ' ');
+        && passphrase
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '-' || c == ' ');
     let dashed;
     let secret = if is_key {
         dashed = digits
@@ -656,7 +674,10 @@ fn unlock_source_with_windows(
     if let Some(e) = last_err {
         return Err(e);
     }
-    info!(volume = read_path, "том открыт силами Windows — дальше он обычный");
+    info!(
+        volume = read_path,
+        "том открыт силами Windows — дальше он обычный"
+    );
     Ok(guard)
 }
 
@@ -822,8 +843,7 @@ fn backup_volume_inner(
     // The container's header is stored in the sidecar (D19), and it is measured
     // in megabytes — the meta partition has to be reserved with that in mind or
     // the metadata write at the very end has nowhere to go.
-    let luks_reserve =
-        crate::sidecar::luks_reserve_for(luks.as_ref().map(|p| p.data_offset));
+    let luks_reserve = crate::sidecar::luks_reserve_for(luks.as_ref().map(|p| p.data_offset));
     let meta_size = crate::sidecar::calculate_meta_partition_size(total_blocks, luks_reserve);
 
     // --- Parent chain (incremental / differential) ---
@@ -909,38 +929,39 @@ fn backup_volume_inner(
         // inside the ciphertext, so Windows' own FSCTL cannot reach it while
         // the volume is locked. The reader below can.
         let mut src = open_source(&luks)?;
-        let map: Option<Box<dyn UsedSectorMap>> =
-            if let Ok(m) = crate::ntfs_map::build_ntfs_used_map(src.as_mut(), req.block_size) {
-                info!(fs = "NTFS", "Using NTFS map over decrypted volume");
-                detected_fs = Some("NTFS".into());
-                // НЕ боксим: NTFS внутри контейнера умеет исключения ДО копии
-                // (план exclusions-before-copy, B3), а для этого карту надо
-                // будет перестроить без исключённых кластеров.
-                enc_ntfs_map = Some(m);
-                None
-            } else if let Ok(m) = crate::fat_map::build_fat_used_map(src.as_mut(), req.block_size) {
-                info!(fs = m.filesystem, "Using FAT map over decrypted volume");
-                detected_fs = Some(m.filesystem.to_string());
-                // Как и NTFS, держим типизированной: исключения перестроят её
-                // без исключённых кластеров (этап B4).
-                enc_fat_map = Some(m);
-                None
-            } else if let Ok(m) = crate::ext_map::build_ext_used_map(src.as_mut(), req.block_size) {
-                info!(fs = "ext4", "Using ext map over decrypted volume");
-                detected_fs = Some("ext4".into());
-                Some(Box::new(m))
-            } else if let Ok(m) = crate::btrfs_map::build_btrfs_used_map(src.as_mut(), req.block_size) {
-                info!(fs = "btrfs", "Using btrfs map over decrypted volume");
-                detected_fs = Some("btrfs".into());
-                Some(Box::new(m))
-            } else if let Ok(m) = crate::xfs_map::build_xfs_used_map(src.as_mut(), req.block_size) {
-                info!(fs = "xfs", "Using xfs map over decrypted volume");
-                detected_fs = Some("xfs".into());
-                Some(Box::new(m))
-            } else {
-                warn!("no used-block map for the decrypted volume — sector-by-sector");
-                None
-            };
+        let map: Option<Box<dyn UsedSectorMap>> = if let Ok(m) =
+            crate::ntfs_map::build_ntfs_used_map(src.as_mut(), req.block_size)
+        {
+            info!(fs = "NTFS", "Using NTFS map over decrypted volume");
+            detected_fs = Some("NTFS".into());
+            // НЕ боксим: NTFS внутри контейнера умеет исключения ДО копии
+            // (план exclusions-before-copy, B3), а для этого карту надо
+            // будет перестроить без исключённых кластеров.
+            enc_ntfs_map = Some(m);
+            None
+        } else if let Ok(m) = crate::fat_map::build_fat_used_map(src.as_mut(), req.block_size) {
+            info!(fs = m.filesystem, "Using FAT map over decrypted volume");
+            detected_fs = Some(m.filesystem.to_string());
+            // Как и NTFS, держим типизированной: исключения перестроят её
+            // без исключённых кластеров (этап B4).
+            enc_fat_map = Some(m);
+            None
+        } else if let Ok(m) = crate::ext_map::build_ext_used_map(src.as_mut(), req.block_size) {
+            info!(fs = "ext4", "Using ext map over decrypted volume");
+            detected_fs = Some("ext4".into());
+            Some(Box::new(m))
+        } else if let Ok(m) = crate::btrfs_map::build_btrfs_used_map(src.as_mut(), req.block_size) {
+            info!(fs = "btrfs", "Using btrfs map over decrypted volume");
+            detected_fs = Some("btrfs".into());
+            Some(Box::new(m))
+        } else if let Ok(m) = crate::xfs_map::build_xfs_used_map(src.as_mut(), req.block_size) {
+            info!(fs = "xfs", "Using xfs map over decrypted volume");
+            detected_fs = Some("xfs".into());
+            Some(Box::new(m))
+        } else {
+            warn!("no used-block map for the decrypted volume — sector-by-sector");
+            None
+        };
         let smart = map.is_some() || enc_ntfs_map.is_some() || enc_fat_map.is_some();
         luks_used = map;
         smart
@@ -965,9 +986,10 @@ fn backup_volume_inner(
                         true
                     }
                     Err(fat_err) => {
-                        let ext_attempt = WinRawDevice::open_read(&read_path).and_then(|mut dev| {
-                            crate::ext_map::build_ext_used_map(&mut dev, req.block_size)
-                        });
+                        let ext_attempt =
+                            WinRawDevice::open_read(&read_path).and_then(|mut dev| {
+                                crate::ext_map::build_ext_used_map(&mut dev, req.block_size)
+                            });
                         match ext_attempt {
                             Ok(map) => {
                                 info!(fs = "ext4", "Using ext used-block map");
@@ -978,7 +1000,10 @@ fn backup_volume_inner(
                             Err(ext_err) => {
                                 let btrfs_attempt =
                                     WinRawDevice::open_read(&read_path).and_then(|mut dev| {
-                                        crate::btrfs_map::build_btrfs_used_map(&mut dev, req.block_size)
+                                        crate::btrfs_map::build_btrfs_used_map(
+                                            &mut dev,
+                                            req.block_size,
+                                        )
                                     });
                                 match btrfs_attempt {
                                     Ok(map) => {
@@ -988,9 +1013,12 @@ fn backup_volume_inner(
                                         true
                                     }
                                     Err(btrfs_err) => {
-                                        let xfs_attempt =
-                                            WinRawDevice::open_read(&read_path).and_then(|mut dev| {
-                                                crate::xfs_map::build_xfs_used_map(&mut dev, req.block_size)
+                                        let xfs_attempt = WinRawDevice::open_read(&read_path)
+                                            .and_then(|mut dev| {
+                                                crate::xfs_map::build_xfs_used_map(
+                                                    &mut dev,
+                                                    req.block_size,
+                                                )
                                             });
                                         match xfs_attempt {
                                             Ok(map) => {
@@ -1061,8 +1089,8 @@ fn backup_volume_inner(
             blocks_total: total,
             bytes_written: 0,
             speed_bps: 0,
-                categories: None,
-                excluded: None,
+            categories: None,
+            excluded: None,
         })
     };
     // Why the file walk did not happen — filled in below by whichever branch
@@ -1099,7 +1127,9 @@ fn backup_volume_inner(
             let fast = if frozen {
                 scan_ntfs_exclusions_by_mft(&read_path, &req.exclusion_patterns, &mut prepare_tick)
             } else {
-                Err(OwnBackupError::Device(tr!("engine_win.source_not_frozen").into_owned()))
+                Err(OwnBackupError::Device(
+                    tr!("engine_win.source_not_frozen").into_owned(),
+                ))
             };
             match fast {
                 Ok(mft) => {
@@ -1127,7 +1157,12 @@ fn backup_volume_inner(
                     // каждый файл с размером. Отправляем её сразу, а не в конце:
                     // человеку, который смотрит на полосу двадцать минут, есть
                     // что почитать, и это ответ на вопрос «а что вообще в копии».
-                    report_categories(&mut progress, categories.as_ref(), excluded_files, excluded_bytes);
+                    report_categories(
+                        &mut progress,
+                        categories.as_ref(),
+                        excluded_files,
+                        excluded_bytes,
+                    );
                     if !mft.ranges.is_empty() {
                         map.apply_excluded_ranges(&mft.ranges);
                         zero_ranges = Some(mft.ranges);
@@ -1186,8 +1221,8 @@ fn backup_volume_inner(
                         blocks_total: total,
                         bytes_written: 0,
                         speed_bps: 0,
-                categories: None,
-                excluded: None,
+                        categories: None,
+                        excluded: None,
                     });
                 };
                 crate::ntfs_scan::scan_mft_with(&mut buffered, &req.exclusion_patterns, &mut report)
@@ -1197,7 +1232,12 @@ fn backup_volume_inner(
                     excluded_files = scan.files_excluded;
                     excluded_bytes = scan.bytes_excluded;
                     categories = Some(scan.categories);
-                    report_categories(&mut progress, categories.as_ref(), excluded_files, excluded_bytes);
+                    report_categories(
+                        &mut progress,
+                        categories.as_ref(),
+                        excluded_files,
+                        excluded_bytes,
+                    );
                     for (path, reason) in &scan.kept {
                         debug!(file = %path, reason = reason.as_str(), "данные остаются в копии");
                     }
@@ -1292,15 +1332,20 @@ fn backup_volume_inner(
     } else if fat_exclusions {
         let mut dev = WinRawDevice::open_read(&read_path)?;
         let scan =
-            crate::fat_exclusions::scan_fat_exclusions(&mut dev, &req.exclusion_patterns, |n| prepare_tick(n, 0))?;
+            crate::fat_exclusions::scan_fat_exclusions(&mut dev, &req.exclusion_patterns, |n| {
+                prepare_tick(n, 0)
+            })?;
         excluded_files = scan.files_excluded;
         excluded_bytes = scan.bytes_excluded;
         categories = Some(scan.categories);
         if !scan.ranges.is_empty() {
             // Rebuild the map so excluded clusters drop out (cluster-level).
             let mut dev2 = WinRawDevice::open_read(&read_path)?;
-            let rebuilt =
-                crate::fat_map::build_fat_used_map_excl(&mut dev2, req.block_size, Some(&scan.ranges))?;
+            let rebuilt = crate::fat_map::build_fat_used_map_excl(
+                &mut dev2,
+                req.block_size,
+                Some(&scan.ranges),
+            )?;
             fat_map = Some(rebuilt);
             zero_ranges = Some(scan.ranges);
             // Metadata patches: delete the directory entries + free the FAT
@@ -1409,11 +1454,7 @@ fn backup_volume_inner(
                 // The chain key travels inside the parent image, so continuing
                 // a chain needs the parent and this job's key, nothing else.
                 let chain = keys.open_chain_of(parent_path)?;
-                (
-                    Some(backing),
-                    parent_sidecar.info.volume_data_offset,
-                    chain,
-                )
+                (Some(backing), parent_sidecar.info.volume_data_offset, chain)
             }
         };
         let role = match (&parent, kind) {
@@ -1446,67 +1487,69 @@ fn backup_volume_inner(
         (ImageTarget::Obk { writer }, data_offset)
     } else {
         match req.image_format {
-        ImageFormat::Qcow2 => {
-            // Userspace-written compressed image: no attach, no kernel writer.
-            // A child references its parent by FILE NAME (qemu resolves
-            // relative backing paths against the image's directory), so the
-            // backup folder stays relocatable — same convention as the sidecar.
-            let (backing_file, data_offset) = match &parent {
-                None => (None, DEFAULT_PARTITION_OFFSET),
-                Some((parent_path, parent_sidecar)) => {
-                    // Same folder (the normal case) → bare file name; a parent
-                    // elsewhere falls back to its absolute path.
-                    let backing = if parent_path.parent() == req.image_path.parent() {
-                        parent_path
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .ok_or_else(|| {
-                                OwnBackupError::Config(format!(
-                                    "parent image path has no file name: {}",
-                                    parent_path.display()
-                                ))
-                            })?
-                    } else {
-                        parent_path.to_string_lossy().into_owned()
-                    };
-                    (Some(backing), parent_sidecar.info.volume_data_offset)
-                }
-            };
-            let writer = crate::qcow2::Qcow2StagedWriter::create(
-                &req.image_path,
-                crate::qcow2::Qcow2WriterOptions {
-                    virtual_size: disk_size,
-                    backing_file,
-                    compression: crate::qcow2::Qcow2Compression::Zstd {
-                        level: crate::qcow2::zstd_level_or_default(req.zstd_level),
-                    },
-                    ..Default::default()
-                },
-            )?;
-            (ImageTarget::Qcow2 { writer }, data_offset)
-        }
-        ImageFormat::Vhdx => {
-            let (writer, data_offset) = match &parent {
-                None => {
-                    create_dynamic_vhdx(
-                        &req.image_path,
-                        &VhdxCreateOptions {
-                            max_size: disk_size,
-                            logical_sector_size: sector_size,
-                            physical_sector_size: std::cmp::max(sector_size, 4096),
+            ImageFormat::Qcow2 => {
+                // Userspace-written compressed image: no attach, no kernel writer.
+                // A child references its parent by FILE NAME (qemu resolves
+                // relative backing paths against the image's directory), so the
+                // backup folder stays relocatable — same convention as the sidecar.
+                let (backing_file, data_offset) = match &parent {
+                    None => (None, DEFAULT_PARTITION_OFFSET),
+                    Some((parent_path, parent_sidecar)) => {
+                        // Same folder (the normal case) → bare file name; a parent
+                        // elsewhere falls back to its absolute path.
+                        let backing = if parent_path.parent() == req.image_path.parent() {
+                            parent_path
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .ok_or_else(|| {
+                                    OwnBackupError::Config(format!(
+                                        "parent image path has no file name: {}",
+                                        parent_path.display()
+                                    ))
+                                })?
+                        } else {
+                            parent_path.to_string_lossy().into_owned()
+                        };
+                        (Some(backing), parent_sidecar.info.volume_data_offset)
+                    }
+                };
+                let writer = crate::qcow2::Qcow2StagedWriter::create(
+                    &req.image_path,
+                    crate::qcow2::Qcow2WriterOptions {
+                        virtual_size: disk_size,
+                        backing_file,
+                        compression: crate::qcow2::Qcow2Compression::Zstd {
+                            level: crate::qcow2::zstd_level_or_default(req.zstd_level),
                         },
-                    )?;
-                    let writer = crate::vhdx_format::VhdxWriter::open_existing(&req.image_path)?;
-                    (writer, DEFAULT_PARTITION_OFFSET)
-                }
-                Some((parent_path, parent_sidecar)) => {
-                    create_differencing_vhdx(&req.image_path, parent_path)?;
-                    let writer = crate::vhdx_format::VhdxWriter::open_existing(&req.image_path)?;
-                    (writer, parent_sidecar.info.volume_data_offset)
-                }
-            };
-            (ImageTarget::Vhdx { writer }, data_offset)
-        }
+                        ..Default::default()
+                    },
+                )?;
+                (ImageTarget::Qcow2 { writer }, data_offset)
+            }
+            ImageFormat::Vhdx => {
+                let (writer, data_offset) = match &parent {
+                    None => {
+                        create_dynamic_vhdx(
+                            &req.image_path,
+                            &VhdxCreateOptions {
+                                max_size: disk_size,
+                                logical_sector_size: sector_size,
+                                physical_sector_size: std::cmp::max(sector_size, 4096),
+                            },
+                        )?;
+                        let writer =
+                            crate::vhdx_format::VhdxWriter::open_existing(&req.image_path)?;
+                        (writer, DEFAULT_PARTITION_OFFSET)
+                    }
+                    Some((parent_path, parent_sidecar)) => {
+                        create_differencing_vhdx(&req.image_path, parent_path)?;
+                        let writer =
+                            crate::vhdx_format::VhdxWriter::open_existing(&req.image_path)?;
+                        (writer, parent_sidecar.info.volume_data_offset)
+                    }
+                };
+                (ImageTarget::Vhdx { writer }, data_offset)
+            }
         }
     };
 
@@ -1570,7 +1613,10 @@ fn backup_volume_inner(
     // sector patch below (which only fires for NTFS sources), so ordering is
     // immaterial — the patches win on their own byte ranges either way.
     if !fat_patches.is_empty() {
-        info!(patches = fat_patches.len(), "Applying FAT/exFAT file-removal metadata patches");
+        info!(
+            patches = fat_patches.len(),
+            "Applying FAT/exFAT file-removal metadata patches"
+        );
         reader = Box::new(crate::block_reader::MultiPatchReader::new(
             reader,
             std::mem::take(&mut fat_patches),
@@ -1598,8 +1644,7 @@ fn backup_volume_inner(
         drop(probe);
         if &sector0[3..7] == b"NTFS" {
             let bps = u16::from_le_bytes(sector0[0x0B..0x0D].try_into().unwrap()) as u64;
-            let total_sectors =
-                u64::from_le_bytes(sector0[0x28..0x30].try_into().unwrap());
+            let total_sectors = u64::from_le_bytes(sector0[0x28..0x30].try_into().unwrap());
             let backup_boot_offset = total_sectors.saturating_mul(bps);
             // Sanity: same sector size as the device, and the location must
             // fall within the volume's last MiB — a corrupt BPB must never
@@ -1680,11 +1725,18 @@ fn backup_volume_inner(
         preflight_report: None,
         volume_encryption: None,
     };
-    let temp_image_file_name = req.image_path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let temp_image_file_name = req
+        .image_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let mut temp_info = match &parent {
         None => SidecarInfo::new_full(temp_image_file_name, data_offset),
         Some((parent_path, _)) => {
-            let parent_name = parent_path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let parent_name = parent_path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
             let role = match kind {
                 BackupType::Incremental => ChainRole::Incremental,
                 _ => ChainRole::Differential,
@@ -1701,7 +1753,12 @@ fn backup_volume_inner(
     temp_info.source_id = crate::source_identity::stable_source_id(&req.source);
     temp_info.source_disk_layout = req.source_disk.clone();
     let mut temp_blob = Vec::new();
-    crate::sidecar::write_sidecar_v2_to(&mut temp_blob, &temp_info, &temp_manifest, &outcome.checksums)?;
+    crate::sidecar::write_sidecar_v2_to(
+        &mut temp_blob,
+        &temp_info,
+        &temp_manifest,
+        &outcome.checksums,
+    )?;
 
     // Ensure the placeholder is at least meta_size to cover the entire partition space.
     if req.encryption.is_none() {
@@ -1732,8 +1789,8 @@ fn backup_volume_inner(
         blocks_total: 0,
         bytes_written: outcome.bytes_copied,
         speed_bps: 0,
-                categories: None,
-                excluded: None,
+        categories: None,
+        excluded: None,
     });
     // Timed step by step inside finalize(): the stall lives in ONE of the
     // steps (flush of remaining cache vs handle close vs detach for VHDX;
@@ -1775,8 +1832,8 @@ fn backup_volume_inner(
             blocks_total: total,
             bytes_written: bytes_copied_so_far,
             speed_bps: 0,
-                categories: None,
-                excluded: None,
+            categories: None,
+            excluded: None,
         });
     };
 
@@ -2004,7 +2061,10 @@ fn backup_volume_inner(
             {
                 Ok(bytes) => {
                     use base64::Engine;
-                    info!(bytes = bytes.len(), "LUKS header captured — restore can re-encrypt");
+                    info!(
+                        bytes = bytes.len(),
+                        "LUKS header captured — restore can re-encrypt"
+                    );
                     vec![own_backup_common::image::LuksHeaderBackup {
                         part_index: 0,
                         data_offset: p.data_offset,
@@ -2023,7 +2083,6 @@ fn backup_volume_inner(
     };
     sidecar_info.luks_headers = luks_headers;
     let sidecar_path = sidecar_path_for(&req.image_path);
-
 
     // M0: Write embedded sidecar v2 to the meta partition in the finished image file
     let sector = sector_size as u64;
@@ -2162,7 +2221,10 @@ fn boot_entries_for_image(bootable: bool) -> Option<crate::efivars::BootBackup> 
     }
     match crate::efivars_win::export() {
         Ok(backup) => {
-            info!(entries = backup.readable.len(), "boot entries read into the image");
+            info!(
+                entries = backup.readable.len(),
+                "boot entries read into the image"
+            );
             Some(backup)
         }
         Err(e) => {
@@ -2274,7 +2336,9 @@ fn container_kind(header: &[u8]) -> Option<own_backup_common::image::VolumeEncry
 /// Short display token for a source device (mirrors core's source_token):
 /// a drive letter, `V`+8 hex of a volume GUID, or `P<disk><offsetHex>`.
 fn disk_source_token(device: &str) -> String {
-    let d = device.trim_start_matches(r"\\.\").trim_start_matches(r"\\?\");
+    let d = device
+        .trim_start_matches(r"\\.\")
+        .trim_start_matches(r"\\?\");
     if let Some(rest) = d.strip_prefix("part:") {
         let mut it = rest.split(':');
         if let (Some(disk), Some(off)) = (it.next(), it.next()) {
@@ -2419,8 +2483,9 @@ fn prepare_encrypted_partition_map(
         Ok(map) => out.map = Some(Box::new(map)),
         Err(e) => {
             warn!(error = %e, "no NTFS map over the decrypted partition — copying every block");
-            out.skipped
-                .get_or_insert_with(|| tr!("engine_win.skip_ntfs_map_failed", error = e).into_owned());
+            out.skipped.get_or_insert_with(|| {
+                tr!("engine_win.skip_ntfs_map_failed", error = e).into_owned()
+            });
             return out;
         }
     }
@@ -2469,11 +2534,10 @@ fn prepare_partition_map(
         skipped: None,
     };
     // The same, with the reason nobody walked this partition's files.
-    let none_because =
-        |fs: &str, map: Option<Box<dyn UsedSectorMap>>, why: &str| PreparedMap {
-            skipped: Some(why.into()),
-            ..none(fs, map)
-        };
+    let none_because = |fs: &str, map: Option<Box<dyn UsedSectorMap>>, why: &str| PreparedMap {
+        skipped: Some(why.into()),
+        ..none(fs, map)
+    };
     // Every exclusion scanner reads through this. The alignment wrapper is not
     // a nicety: a raw Windows device refuses reads that do not start on a
     // sector boundary, and ext inodes are 256 bytes — the root inode among the
@@ -2501,7 +2565,9 @@ fn prepare_partition_map(
                 let fast = if frozen {
                     scan_ntfs_exclusions_by_mft(read_path, patterns, &mut mft_tick)
                 } else {
-                    Err(OwnBackupError::Device(tr!("engine_win.source_not_frozen").into_owned()))
+                    Err(OwnBackupError::Device(
+                        tr!("engine_win.source_not_frozen").into_owned(),
+                    ))
                 };
                 match fast {
                     Ok(mft) => {
@@ -2533,7 +2599,9 @@ fn prepare_partition_map(
                         warn!(part = %read_path, error = %e,
                               "whole-disk: MFT scan unavailable — falling back to the directory walk");
                         if let Ok(mut scan) =
-                            collect_excluded_ranges(read_path, m.cluster_size(), patterns, |n| tick(n, 0))
+                            collect_excluded_ranges(read_path, m.cluster_size(), patterns, |n| {
+                                tick(n, 0)
+                            })
                         {
                             out.excluded_files = scan.files_excluded;
                             out.excluded_bytes = scan.bytes_excluded;
@@ -2559,7 +2627,11 @@ fn prepare_partition_map(
         }
     }
     let Ok(mut src) = open() else {
-        return none_because("unknown", None, &tr!("engine_win.skip_partition_unreadable"));
+        return none_because(
+            "unknown",
+            None,
+            &tr!("engine_win.skip_partition_unreadable"),
+        );
     };
     if let Ok(m) = crate::fat_map::build_fat_used_map(src.as_mut(), block_size) {
         let fs = m.filesystem.to_lowercase();
@@ -2568,14 +2640,20 @@ fn prepare_partition_map(
         if is_fat && !patterns.is_empty() {
             let mut out = none(&fs, None);
             if let Ok(mut dev) = WinRawDevice::open_read(read_path) {
-                if let Ok(scan) = crate::fat_exclusions::scan_fat_exclusions(&mut dev, patterns, |n| tick(n, 0)) {
+                if let Ok(scan) =
+                    crate::fat_exclusions::scan_fat_exclusions(&mut dev, patterns, |n| tick(n, 0))
+                {
                     out.excluded_files = scan.files_excluded;
                     out.excluded_bytes = scan.bytes_excluded;
                     out.categories = Some(scan.categories);
                     if !scan.ranges.is_empty() {
                         // Rebuild the map so excluded clusters drop out.
                         if let Ok(mut dev2) = WinRawDevice::open_read(read_path) {
-                            if let Ok(rebuilt) = crate::fat_map::build_fat_used_map_excl(&mut dev2, block_size, Some(&scan.ranges)) {
+                            if let Ok(rebuilt) = crate::fat_map::build_fat_used_map_excl(
+                                &mut dev2,
+                                block_size,
+                                Some(&scan.ranges),
+                            ) {
                                 out.map = Some(Box::new(rebuilt));
                             }
                         }
@@ -2612,7 +2690,11 @@ fn prepare_partition_map(
         let mut out = none("ext4", None);
         if !patterns_linux.is_empty() {
             if let Ok(mut src2) = open() {
-                match crate::ext_exclusions::scan_ext_exclusions(src2.as_mut(), patterns_linux, |n| tick(n, 0)) {
+                match crate::ext_exclusions::scan_ext_exclusions(
+                    src2.as_mut(),
+                    patterns_linux,
+                    |n| tick(n, 0),
+                ) {
                     Ok(scan) => {
                         out.excluded_files = scan.files_excluded;
                         out.excluded_bytes = scan.bytes_excluded;
@@ -2668,7 +2750,12 @@ fn prepare_partition_map(
                 // extents, hardlinks, leaf-breaking edits) down to Stage 1,
                 // and any Stage-2 failure keeps the whole volume on Stage 1 —
                 // see `scan_btrfs_exclusions`.
-                match crate::btrfs_exclusions::scan_btrfs_exclusions(src2.as_mut(), patterns_linux, true, |n| tick(n, 0)) {
+                match crate::btrfs_exclusions::scan_btrfs_exclusions(
+                    src2.as_mut(),
+                    patterns_linux,
+                    true,
+                    |n| tick(n, 0),
+                ) {
                     Ok(scan) => {
                         out.excluded_files = scan.files_excluded;
                         out.excluded_bytes = scan.bytes_excluded;
@@ -2708,7 +2795,12 @@ fn prepare_partition_map(
                 // `true` — Stage 2: записи каталогов, иноды и блоки. План
                 // собирается целиком и применяется только если все три шага
                 // согласились; иначе файл остаётся нулевым призраком.
-                match crate::xfs_exclusions::scan_xfs_exclusions(src2.as_mut(), patterns_linux, true, |n| tick(n, 0)) {
+                match crate::xfs_exclusions::scan_xfs_exclusions(
+                    src2.as_mut(),
+                    patterns_linux,
+                    true,
+                    |n| tick(n, 0),
+                ) {
                     Ok(scan) => {
                         out.excluded_files = scan.files_excluded;
                         out.excluded_bytes = scan.bytes_excluded;
@@ -2853,7 +2945,10 @@ impl DiskUsedMap {
 
 impl UsedSectorMap for DiskUsedMap {
     fn is_block_used(&self, block_number: u64) -> bool {
-        self.used.get(block_number as usize).copied().unwrap_or(false)
+        self.used
+            .get(block_number as usize)
+            .copied()
+            .unwrap_or(false)
     }
     fn used_block_count(&self) -> u64 {
         self.count
@@ -2920,7 +3015,9 @@ fn backup_disk_inner(
         .iter()
         .filter(|p| {
             !kept.contains(&p.index)
-                && !p.type_guid.eq_ignore_ascii_case(own_backup_common::gpt::GPT_TYPE_MSR)
+                && !p
+                    .type_guid
+                    .eq_ignore_ascii_case(own_backup_common::gpt::GPT_TYPE_MSR)
         })
         .map(|p| {
             let mib = p.size_bytes(layout.sector_size) / (1024 * 1024);
@@ -2949,7 +3046,11 @@ fn backup_disk_inner(
     }
 
     // 2. Snapshot + map every partition up front (cross-volume consistency).
-    info!(disk = req.disk_number, parts = req.partitions.len(), "whole-disk backup: preparing partitions");
+    info!(
+        disk = req.disk_number,
+        parts = req.partitions.len(),
+        "whole-disk backup: preparing partitions"
+    );
     let mut prepared: Vec<PreparedPartition> = Vec::new();
     let mut excluded_files = 0u64;
     let mut excluded_bytes = 0u64;
@@ -2963,7 +3064,10 @@ fn backup_disk_inner(
             .iter()
             .find(|e| e.index == p.part_index)
             .ok_or_else(|| {
-                OwnBackupError::Config(format!("partition {} not found in the disk GPT", p.part_index))
+                OwnBackupError::Config(format!(
+                    "partition {} not found in the disk GPT",
+                    p.part_index
+                ))
             })?;
         // Partitions sit at their REAL disk offset (sector-aligned, not
         // necessarily block-aligned — a BOOT partition may start at LBA 34). The
@@ -3005,7 +3109,10 @@ fn backup_disk_inner(
         let mut locked = match probe.read_at(0, &mut header) {
             Ok(()) => false,
             Err(e) if is_bitlocker_locked(&e) => {
-                info!(part = p.part_index, "partition is a locked BitLocker volume");
+                info!(
+                    part = p.part_index,
+                    "partition is a locked BitLocker volume"
+                );
                 true
             }
             Err(e) => return Err(e),
@@ -3044,8 +3151,8 @@ fn backup_disk_inner(
                             Ok(guard) => {
                                 part_ro_guard = Some(guard);
                                 locked = false; // том теперь читается как все
-                                // Перечитать заголовок: под ним уже открытая ФС,
-                                // и по ней дальше определяется всё остальное.
+                                                // Перечитать заголовок: под ним уже открытая ФС,
+                                                // и по ней дальше определяется всё остальное.
                                 drop(probe);
                                 probe = WinRawDevice::open_read(&read_path)?;
                                 let _ = probe.read_at(0, &mut header);
@@ -3067,7 +3174,11 @@ fn backup_disk_inner(
         let locked_extent = if locked && bitlocker.is_none() {
             let extents = crate::volume_win::volume_extents(&read_path);
             match extents.as_slice() {
-                [e] => Some((format!(r"\\.\PhysicalDrive{}", e.disk_number), e.offset, e.length)),
+                [e] => Some((
+                    format!(r"\\.\PhysicalDrive{}", e.disk_number),
+                    e.offset,
+                    e.length,
+                )),
                 _ => {
                     return Err(OwnBackupError::Device(
                         tr!(
@@ -3158,8 +3269,8 @@ fn backup_disk_inner(
                         blocks_total: total,
                         bytes_written: 0,
                         speed_bps: 0,
-                categories: None,
-                excluded: None,
+                        categories: None,
+                        excluded: None,
                     })
                 },
             ),
@@ -3188,7 +3299,9 @@ fn backup_disk_inner(
                 prepare_tick,
             ),
         };
-        let used = pm.map.unwrap_or_else(|| Box::new(AllUsedMap::new(volume_len.div_ceil(bs))));
+        let used = pm
+            .map
+            .unwrap_or_else(|| Box::new(AllUsedMap::new(volume_len.div_ceil(bs))));
         excluded_files += pm.excluded_files;
         excluded_bytes += pm.excluded_bytes;
         if let Some(c) = &pm.categories {
@@ -3236,7 +3349,12 @@ fn backup_disk_inner(
 
     // Разделы подготовлены — значит сводка по типам файлов посчитана по всем
     // сразу. Отправляем её одним сообщением, до первого скопированного блока.
-    report_categories(&mut progress, categories.as_ref(), excluded_files, excluded_bytes);
+    report_categories(
+        &mut progress,
+        categories.as_ref(),
+        excluded_files,
+        excluded_bytes,
+    );
 
     // 3a. Parent chain (plan D5). A non-full kind writes a differencing CHILD
     // over the previous whole-disk image; a broken/incompatible parent falls
@@ -3249,7 +3367,12 @@ fn backup_disk_inner(
                 warn!("no parent image supplied for a {kind} whole-disk backup — creating a full backup");
                 kind = BackupType::Full;
             }
-            Some(pp) => match validate_disk_parent(pp, req.block_size, req.image_format, req.encryption.as_ref()) {
+            Some(pp) => match validate_disk_parent(
+                pp,
+                req.block_size,
+                req.image_format,
+                req.encryption.as_ref(),
+            ) {
                 Ok(sc) => parent = Some((pp.clone(), sc)),
                 Err(e) => {
                     warn!(parent = %pp.display(), error = %e,
@@ -3265,7 +3388,11 @@ fn backup_disk_inner(
     // meta partition is sized from the actual disk-block count: a partition not
     // aligned to the block size straddles two disk-blocks per volume block, so
     // the count can exceed the sum of per-volume used counts.
-    let part_end = prepared.iter().map(|p| p.part_offset + p.volume_len).max().unwrap_or(0);
+    let part_end = prepared
+        .iter()
+        .map(|p| p.part_offset + p.volume_len)
+        .max()
+        .unwrap_or(0);
     let part_end_blocks = part_end.div_ceil(bs);
     let disk_used = DiskUsedMap::build(&prepared, bs, part_end_blocks);
     // A child inherits the parent's virtual size and GPT (the differencing image
@@ -3282,7 +3409,9 @@ fn backup_disk_inner(
     // everything the copy does.
     let boot_entries = boot_entries_for_image(req.bootable);
     let own_reserve = crate::sidecar::luks_reserve_for(
-        prepared.iter().filter_map(|p| p.luks_header.as_ref().map(|h| h.data_offset)),
+        prepared
+            .iter()
+            .filter_map(|p| p.luks_header.as_ref().map(|h| h.data_offset)),
     ) + crate::sidecar::boot_entries_reserve(boot_entries.as_ref());
     let full_used = |used: u64, reserve: u64| {
         crate::sidecar::calculate_meta_partition_size(used.max(1), reserve)
@@ -3481,22 +3610,26 @@ fn backup_disk_inner(
     //    the meta/tail blocks (written separately) are not copied.
     let mut regions: Vec<DiskRegion> = Vec::new();
     for prep in &prepared {
-        let reader: Box<dyn crate::fat_map::RawVolume + Send> = match (&prep.bitlocker, &prep.locked_window) {
-            // Расшифрованное окно на диск: том заперт, его устройство молчит.
-            (Some(b), _) => Box::new(crate::bitlocker::BitLockerVolume::new(
-                Box::new(b.window()?),
-                b.params.clone(),
-            )),
-            // Заперт и без ключа — тот же путь, но без расшифровки.
-            (None, Some((disk, off, len))) => Box::new(disk_window(disk, *off, *len)?),
-            (None, None) => {
-                let dev = WinRawDevice::open_read(&prep.read_path)?;
-                match &prep.luks {
-                    Some(l) => Box::new(crate::decrypt::DecryptingVolume::new(Box::new(dev), l.clone())),
-                    None => Box::new(dev),
+        let reader: Box<dyn crate::fat_map::RawVolume + Send> =
+            match (&prep.bitlocker, &prep.locked_window) {
+                // Расшифрованное окно на диск: том заперт, его устройство молчит.
+                (Some(b), _) => Box::new(crate::bitlocker::BitLockerVolume::new(
+                    Box::new(b.window()?),
+                    b.params.clone(),
+                )),
+                // Заперт и без ключа — тот же путь, но без расшифровки.
+                (None, Some((disk, off, len))) => Box::new(disk_window(disk, *off, *len)?),
+                (None, None) => {
+                    let dev = WinRawDevice::open_read(&prep.read_path)?;
+                    match &prep.luks {
+                        Some(l) => Box::new(crate::decrypt::DecryptingVolume::new(
+                            Box::new(dev),
+                            l.clone(),
+                        )),
+                        None => Box::new(dev),
+                    }
                 }
-            }
-        };
+            };
         regions.push(DiskRegion {
             part_offset: prep.part_offset,
             volume_len: prep.volume_len,
@@ -3515,7 +3648,10 @@ fn backup_disk_inner(
     // the rest resolve through the differencing chain. `outcome.checksums` still
     // covers EVERY used block, so the child's sidecar describes the full image.
     let parent_hashes: Option<HashMap<u64, u64>> = parent.as_ref().map(|(_, sc)| {
-        sc.checksums.iter().map(|c| (c.block_number, c.checksum)).collect()
+        sc.checksums
+            .iter()
+            .map(|c| (c.block_number, c.checksum))
+            .collect()
     });
     let outcome = copy_used_blocks(
         &format!("disk{}", req.disk_number),
@@ -3551,8 +3687,8 @@ fn backup_disk_inner(
         blocks_total: 0,
         bytes_written: bytes_copied,
         speed_bps: 0,
-                categories: None,
-                excluded: None,
+        categories: None,
+        excluded: None,
     });
     // A provisional sidecar, so the container has something of the right shape
     // to reserve around. Nothing reads it: the run either replaces it below or
@@ -3755,7 +3891,10 @@ fn backup_disk_inner(
     // One captured container header per encrypted partition (D19): with them a
     // restore rebuilds the container byte-for-byte, so the restored system's
     // crypttab and initramfs keep working untouched.
-    info.luks_headers = prepared.iter().filter_map(|p| p.luks_header.clone()).collect();
+    info.luks_headers = prepared
+        .iter()
+        .filter_map(|p| p.luks_header.clone())
+        .collect();
     // The machine's boot entries — INSIDE the image, with everything else that
     // describes it. They used to be written to a `.boot.json` beside it: the
     // last piece of a backup that was not in the backup, and the one a user
@@ -3767,7 +3906,13 @@ fn backup_disk_inner(
     info.boot_entries = boot_entries;
 
     let mut blob = Vec::new();
-    crate::sidecar::write_sidecar_v2_full_to(&mut blob, &info, &manifest, &checksums, Some(&disk_manifest))?;
+    crate::sidecar::write_sidecar_v2_full_to(
+        &mut blob,
+        &info,
+        &manifest,
+        &checksums,
+        Some(&disk_manifest),
+    )?;
     // The metadata partition was sized before any of this existed as bytes. If
     // the blob will not fit, the boot entries are the one part of it that can
     // be given up: they are the machine's, identical from run to run, and the
@@ -3781,7 +3926,13 @@ fn backup_disk_inner(
         );
         info.boot_entries = None;
         blob.clear();
-        crate::sidecar::write_sidecar_v2_full_to(&mut blob, &info, &manifest, &checksums, Some(&disk_manifest))?;
+        crate::sidecar::write_sidecar_v2_full_to(
+            &mut blob,
+            &info,
+            &manifest,
+            &checksums,
+            Some(&disk_manifest),
+        )?;
     }
     match (&req.encryption, req.image_format) {
         (Some(keys), _) => {
@@ -3926,7 +4077,9 @@ fn create_disk_child_target(
                 crate::qcow2::Qcow2WriterOptions {
                     virtual_size: image_size,
                     backing_file: Some(backing),
-                    compression: crate::qcow2::Qcow2Compression::Zstd { level: plan.zstd_level },
+                    compression: crate::qcow2::Qcow2Compression::Zstd {
+                        level: plan.zstd_level,
+                    },
                     ..Default::default()
                 },
             )?;
@@ -3994,7 +4147,9 @@ fn create_disk_obk_target(
         source_id: Some(format!("disk{}", plan.disk_number)),
         consolidated_increments: 0,
         chain_started_at: None,
-        compression: crate::seal::obk::ObkCompression::Zstd { level: plan.zstd_level },
+        compression: crate::seal::obk::ObkCompression::Zstd {
+            level: plan.zstd_level,
+        },
     };
     let writer = Box::new(crate::seal::obk::ObkStagedWriter::create(
         image_path,
@@ -4022,7 +4177,9 @@ fn create_disk_image_target(
                 crate::qcow2::Qcow2WriterOptions {
                     virtual_size: disk_size,
                     backing_file: None,
-                    compression: crate::qcow2::Qcow2Compression::Zstd { level: plan.zstd_level },
+                    compression: crate::qcow2::Qcow2Compression::Zstd {
+                        level: plan.zstd_level,
+                    },
                     ..Default::default()
                 },
             )?;
@@ -4147,8 +4304,11 @@ fn partition_window_for(target: &str) -> (String, Option<TakenVolume>) {
         );
         return (plain, None);
     };
-    let guard =
-        crate::volume_win::VolumeDismountGuard::for_restore_range(e.disk_number, e.offset, e.length);
+    let guard = crate::volume_win::VolumeDismountGuard::for_restore_range(
+        e.disk_number,
+        e.offset,
+        e.length,
+    );
     if !guard.failed.is_empty() {
         warn!(volumes = ?guard.failed, "restore: some volumes would not dismount");
     }
@@ -4159,8 +4319,14 @@ fn partition_window_for(target: &str) -> (String, Option<TakenVolume>) {
         length = e.length,
         "restore: writing through the partition rather than the volume device"
     );
-    let taken = TakenVolume { guard: Some(guard), give_back: drive_letter_of(target).map(|l| (root, l)) };
-    (format!("part:{}:{}:{}", e.disk_number, e.offset, e.length), Some(taken))
+    let taken = TakenVolume {
+        guard: Some(guard),
+        give_back: drive_letter_of(target).map(|l| (root, l)),
+    };
+    (
+        format!("part:{}:{}:{}", e.disk_number, e.offset, e.length),
+        Some(taken),
+    )
 }
 
 /// `H`, from `H:`, `H:\` or `h:`. Nothing for a device path or a mount folder.
@@ -4273,11 +4439,8 @@ pub fn restore_volume(
         (Some(keys), "obk") => Some(keys.open_chain_of(&req.image_path)?.key),
         _ => None,
     };
-    let mut image_dev = ImageReadSource::open_with(
-        &req.image_path,
-        &sidecar.info.container,
-        chain_key.as_ref(),
-    )?;
+    let mut image_dev =
+        ImageReadSource::open_with(&req.image_path, &sidecar.info.container, chain_key.as_ref())?;
 
     let restore_id = Uuid::new_v4().to_string();
     let total = sidecar.checksums.len() as u64;
@@ -4397,8 +4560,7 @@ pub fn restore_disk(
         .and_then(|e| e.to_str())
         .unwrap_or_default()
         .to_lowercase();
-    if matches!(ext.as_str(), "vhdx" | "avhdx" | "qcow2")
-        || ext == crate::seal::obk::OBK_EXTENSION
+    if matches!(ext.as_str(), "vhdx" | "avhdx" | "qcow2") || ext == crate::seal::obk::OBK_EXTENSION
     {
         return restore_disk_from_image(req, progress);
     }
@@ -4616,8 +4778,12 @@ fn restore_disk_legacy(
         let len = (entry.last_lba + 1 - entry.first_lba) * sector;
         let target = format!("part:{}:{off}:{len}", req.target_disk);
         let label = if entry.name.is_empty() {
-            tr!("engine_win.label_partition", index = img.part_index, fs = img.filesystem)
-                .into_owned()
+            tr!(
+                "engine_win.label_partition",
+                index = img.part_index,
+                fs = img.filesystem
+            )
+            .into_owned()
         } else {
             format!("{} ({})", entry.name, img.filesystem)
         };
@@ -4768,7 +4934,10 @@ pub fn finalize_boot(
 /// Best-effort — a copy whose Windows directory is spelled differently, or a
 /// file that will not go, simply leaves the one-time recovery screen in place.
 fn clear_boot_status(windows_volume: &str) -> bool {
-    let path = format!(r"{}\Windows\bootstat.dat", windows_volume.trim_end_matches(['\\', '/']));
+    let path = format!(
+        r"{}\Windows\bootstat.dat",
+        windows_volume.trim_end_matches(['\\', '/'])
+    );
     if !std::path::Path::new(&path).exists() {
         debug!(path = %path, "boot status: nothing to clear");
         return false;
@@ -4891,7 +5060,9 @@ fn trim_boot_menu(esp_volume: &str, uefi: bool, windows_volume: &str) -> BootFin
     // The default must be the entry bcdboot just wrote for THIS restore: its
     // device is the restored Windows volume, which is holding a drive letter for
     // exactly this reason.
-    let letter = windows_volume.trim_end_matches(['\\', '/']).to_ascii_uppercase();
+    let letter = windows_volume
+        .trim_end_matches(['\\', '/'])
+        .to_ascii_uppercase();
     let expected = format!("PARTITION={letter}"); // matched against an uppercased block
     let loaders = loader_entries(&store);
     let menu_loaders = loaders.iter().filter(|(_, ramdisk)| !ramdisk).count();
@@ -5034,7 +5205,10 @@ fn blocks_stored_in_this_file(
             let mut image = crate::qcow2::reader::Qcow2Reader::open(file)?;
             let cs = image.cluster_size();
             for c in 0..image.total_clusters() {
-                if !matches!(image.descriptor(c)?, crate::qcow2::ClusterDescriptor::Unallocated) {
+                if !matches!(
+                    image.descriptor(c)?,
+                    crate::qcow2::ClusterDescriptor::Unallocated
+                ) {
                     mark(c * cs, cs);
                 }
             }
@@ -5047,7 +5221,11 @@ fn blocks_stored_in_this_file(
         }
         other => {
             return Err(OwnBackupError::ImageFormat(
-                tr!("engine_win.verify_latest_unknown_container", container = other).into_owned(),
+                tr!(
+                    "engine_win.verify_latest_unknown_container",
+                    container = other
+                )
+                .into_owned(),
             ))
         }
     }
@@ -5090,7 +5268,10 @@ pub fn verify_image_scoped(
     let entries: Vec<_> = sidecar
         .checksums
         .iter()
-        .filter(|e| only.as_ref().is_none_or(|set| set.contains(&e.block_number)))
+        .filter(|e| {
+            only.as_ref()
+                .is_none_or(|set| set.contains(&e.block_number))
+        })
         .collect();
     if let Some(set) = &only {
         info!(
@@ -5290,7 +5471,7 @@ pub fn unmount_image(image_path: &Path) -> Result<()> {
     let child_path = child_path_for(image_path);
     if child_path.exists() {
         info!(image = %image_path.display(), "VHDX RW mount: unmounting child differencing VHDX");
-        
+
         // 1. Detach child first
         detach_vhdx(&child_path)?;
 
@@ -5302,13 +5483,17 @@ pub fn unmount_image(image_path: &Path) -> Result<()> {
 
         if let Some(alloc) = alloc {
             info!(image = %image_path.display(), count = alloc.blocks.len(), "VHDX RW mount: merging modified blocks back into base");
-            
+
             // 3. Merge the child into the parent
             merge_into_parent(&child_path)?;
             let _ = std::fs::remove_file(&child_path);
 
             // 4. Update the sidecar with rehashed checksums (embedded or external)
-            let ext = image_path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_lowercase();
+            let ext = image_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or_default()
+                .to_lowercase();
             let mut read_from_embedded = false;
             let sidecar_attempt = match read_embedded_sidecar(image_path, &ext) {
                 Ok(s) => {
@@ -5338,12 +5523,22 @@ pub fn unmount_image(image_path: &Path) -> Result<()> {
                     let last_lba = (DEFAULT_PARTITION_OFFSET + volume_len).div_ceil(sector) - 1;
                     let meta_offset = (last_lba + 1) * sector;
                     let mut blob_bytes = Vec::new();
-                    crate::sidecar::write_sidecar_v2_to(&mut blob_bytes, &sidecar.info, &sidecar.manifest, &sidecar.checksums)?;
+                    crate::sidecar::write_sidecar_v2_to(
+                        &mut blob_bytes,
+                        &sidecar.info,
+                        &sidecar.manifest,
+                        &sidecar.checksums,
+                    )?;
                     crate::vhdx_bat::write_vhdx_guest_at(image_path, meta_offset, &blob_bytes)?;
                     info!(image = %image_path.display(), "VHDX RW mount: embedded sidecar updated successfully");
                 } else {
                     let sidecar_path = sidecar_path_for(image_path);
-                    write_sidecar(&sidecar_path, &sidecar.info, &sidecar.manifest, &sidecar.checksums)?;
+                    write_sidecar(
+                        &sidecar_path,
+                        &sidecar.info,
+                        &sidecar.manifest,
+                        &sidecar.checksums,
+                    )?;
                     info!(image = %image_path.display(), "VHDX RW mount: .obkm sidecar updated successfully");
                 }
             }
@@ -5381,7 +5576,10 @@ fn qcow2_mounts() -> &'static std::sync::Mutex<HashMap<PathBuf, MountedImage>> {
 /// Is this image (qcow2) currently served to Windows by a mount of ours?
 /// Companion to [`child_path_for`] for the consolidation guard.
 pub fn qcow2_mounted_here(image_path: &Path) -> bool {
-    qcow2_mounts().lock().map(|m| m.contains_key(image_path)).unwrap_or(true)
+    qcow2_mounts()
+        .lock()
+        .map(|m| m.contains_key(image_path))
+        .unwrap_or(true)
 }
 
 /// Present a qcow2 backup (incl. its backing chain) to Windows as a real disk:
@@ -5411,7 +5609,8 @@ fn mount_qcow2_via_iscsi(image_path: &Path, read_write: bool) -> Result<String> 
             .truncate(true)
             .open(&scratch)
             .map_err(|e| OwnBackupError::Device(format!("create scratch file: {e}")))?;
-        let base: Box<dyn BlockSource> = Box::new(crate::qcow2::Qcow2RandomReader::open(image_path)?);
+        let base: Box<dyn BlockSource> =
+            Box::new(crate::qcow2::Qcow2RandomReader::open(image_path)?);
         let overlay = std::sync::Arc::new(std::sync::Mutex::new(
             crate::overlay::WritableOverlaySource::new(base, cluster_size, overlay_file),
         ));
@@ -5452,7 +5651,11 @@ fn mount_obk_via_iscsi(
 ) -> Result<String> {
     let keys = keys.ok_or_else(|| {
         OwnBackupError::Encryption(
-            tr!("engine_win.encrypted_needs_key", image = image_path.display()).into_owned(),
+            tr!(
+                "engine_win.encrypted_needs_key",
+                image = image_path.display()
+            )
+            .into_owned(),
         )
     })?;
     if read_write {
@@ -5504,8 +5707,12 @@ fn unmount_qcow2_via_iscsi(image_path: &Path) -> Result<()> {
         let touched = overlay_arc.lock().unwrap().touched_clusters();
         if !touched.is_empty() {
             info!(image = %image_path.display(), count = touched.len(), "QCOW2 RW mount: merging modified clusters back into base");
-            
-            let ext = image_path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_lowercase();
+
+            let ext = image_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or_default()
+                .to_lowercase();
             // At the level the copy was made with, from its own manifest, so
             // the merged clusters match the rest of the image. Unreadable →
             // the default (`Qcow2InPlaceMerge` falls back to it on `None`).
@@ -5558,12 +5765,26 @@ fn unmount_qcow2_via_iscsi(image_path: &Path) -> Result<()> {
                     let last_lba = (DEFAULT_PARTITION_OFFSET + volume_len).div_ceil(sector) - 1;
                     let meta_offset = (last_lba + 1) * sector;
                     let mut blob_bytes = Vec::new();
-                    crate::sidecar::write_sidecar_v2_to(&mut blob_bytes, &sidecar.info, &sidecar.manifest, &sidecar.checksums)?;
-                    crate::qcow2::merge::write_qcow2_guest_blob(image_path, meta_offset, &blob_bytes)?;
+                    crate::sidecar::write_sidecar_v2_to(
+                        &mut blob_bytes,
+                        &sidecar.info,
+                        &sidecar.manifest,
+                        &sidecar.checksums,
+                    )?;
+                    crate::qcow2::merge::write_qcow2_guest_blob(
+                        image_path,
+                        meta_offset,
+                        &blob_bytes,
+                    )?;
                     info!(image = %image_path.display(), "QCOW2 RW mount: embedded sidecar updated successfully");
                 } else {
                     let sidecar_path = sidecar_path_for(image_path);
-                    write_sidecar(&sidecar_path, &sidecar.info, &sidecar.manifest, &sidecar.checksums)?;
+                    write_sidecar(
+                        &sidecar_path,
+                        &sidecar.info,
+                        &sidecar.manifest,
+                        &sidecar.checksums,
+                    )?;
                     info!(image = %image_path.display(), "QCOW2 RW mount: .obkm sidecar updated successfully");
                 }
             }
@@ -5624,7 +5845,8 @@ pub fn describe_encryption(disk: u32, offset: u64, length: u64) -> (Vec<String>,
     let Ok(mut window) = disk_window(&path, offset, length) else {
         return unknown;
     };
-    if let Ok(info) = crate::bitlocker::inspect_bitlocker_with(&mut window, disk_sector_size(&path)) {
+    if let Ok(info) = crate::bitlocker::inspect_bitlocker_with(&mut window, disk_sector_size(&path))
+    {
         let names = info
             .protectors
             .iter()
@@ -5667,7 +5889,10 @@ fn probe_decrypted(view: &mut dyn crate::fat_map::RawVolume) -> Result<Decrypted
     let mut buf = vec![0u8; want];
     view.read_at(0, &mut buf)?;
     let Some(probed) = own_backup_inventory::fs_probe::identify(&buf) else {
-        return Ok(DecryptedProbe { ok: true, ..Default::default() });
+        return Ok(DecryptedProbe {
+            ok: true,
+            ..Default::default()
+        });
     };
     let filesystem = format!("{:?}", probed.fs).to_lowercase();
     let mut label = probed.label.unwrap_or_default();
@@ -5716,14 +5941,20 @@ fn probe_bitlocker(volume_device: &str, passphrase: &str) -> Result<DecryptedPro
     };
     let disk = format!(r"\\.\PhysicalDrive{}", extent.disk_number);
     let mut probe = disk_window(&disk, extent.offset, extent.length)?;
-    let params = match crate::bitlocker::open_bitlocker_with(&mut probe, passphrase, disk_sector_size(&disk))
-    {
+    let params = match crate::bitlocker::open_bitlocker_with(
+        &mut probe,
+        passphrase,
+        disk_sector_size(&disk),
+    ) {
         Ok(p) => p,
         // Wrong passphrase — a fact for the interface, not an error. AES-CCM
         // verifies its own tag, so this really does mean "not this password".
         Err(e) if crate::bitlocker::is_wrong_passphrase(&e) => {
             info!(error = %e, "BitLocker passphrase rejected");
-            return Ok(DecryptedProbe { ok: false, ..Default::default() });
+            return Ok(DecryptedProbe {
+                ok: false,
+                ..Default::default()
+            });
         }
         // А это НЕ про пароль: шифр вне AES-XTS (панель Windows шифрует съёмные
         // диски в режиме совместимости по умолчанию), ReFS без BPB, нечитаемый
@@ -5764,11 +5995,14 @@ fn probe_by_windows(volume_device: &str, passphrase: &str) -> Result<DecryptedPr
             // отсутствие компонента BitLocker на носителе — точнее сказать
             // нечего, и «не подошёл» здесь честнее, чем молчание.
             info!(error = %e, "Windows не открыла том");
-            return Ok(DecryptedProbe { ok: false, ..Default::default() });
+            return Ok(DecryptedProbe {
+                ok: false,
+                ..Default::default()
+            });
         }
     };
-    let probed = WinRawDevice::open_read(volume_device)
-        .and_then(|mut dev| probe_decrypted(&mut dev));
+    let probed =
+        WinRawDevice::open_read(volume_device).and_then(|mut dev| probe_decrypted(&mut dev));
     drop(guard);
     probed
 }
@@ -5803,14 +6037,20 @@ pub fn unlock_and_probe(device_path: &str, passphrase: &str) -> Result<Decrypted
         return probe_bitlocker(&src, passphrase);
     }
     if !crate::luks::is_luks(&header) {
-        return Ok(DecryptedProbe { ok: true, ..Default::default() });
+        return Ok(DecryptedProbe {
+            ok: true,
+            ..Default::default()
+        });
     }
     let params = match crate::luks::open_luks(&mut dev, passphrase.as_bytes()) {
         Ok(p) => p,
         // No keyslot took it: a fact for the interface, not an error.
         Err(e) if crate::luks::is_wrong_passphrase(&e) => {
             info!(error = %e, "LUKS passphrase rejected");
-            return Ok(DecryptedProbe { ok: false, ..Default::default() });
+            return Ok(DecryptedProbe {
+                ok: false,
+                ..Default::default()
+            });
         }
         // Anything else — a cipher we do not implement, a header we could not
         // read, an Argon2 that could not get its memory — is NOT a wrong
@@ -5896,7 +6136,10 @@ fn get_diskpart_virtual_disks() -> Vec<(u32, String)> {
         }
 
         let line_lower = line_trimmed.to_lowercase();
-        if !line_lower.contains(".vhdx") && !line_lower.contains(".vhd") && !line_lower.contains(".avhdx") {
+        if !line_lower.contains(".vhdx")
+            && !line_lower.contains(".vhd")
+            && !line_lower.contains(".avhdx")
+        {
             continue;
         }
 
@@ -5978,7 +6221,9 @@ pub fn get_all_active_mounts(
 /// called is the user's business, what it is is the file's own.
 fn is_qcow2_file(path: &Path) -> bool {
     use std::io::Read;
-    let Ok(mut f) = std::fs::File::open(path) else { return false };
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
     let mut magic = [0u8; 4];
     f.read_exact(&mut magic).is_ok() && magic == [0x51, 0x46, 0x49, 0xFB]
 }
@@ -5990,6 +6235,3 @@ fn disk_number_from_physical(physical_path: &str) -> Option<u32> {
         .next()
         .and_then(|n| n.trim().parse().ok())
 }
-
-
-

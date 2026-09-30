@@ -175,7 +175,7 @@ fn walk_directory(
         for (i, rec) in buf.chunks_exact(32).enumerate() {
             let rec_offset = base + (i as u64) * 32;
             match rec[0] {
-                0x00 => break 'dir,          // end of directory
+                0x00 => break 'dir, // end of directory
                 0xE5 => {
                     lfn.clear();
                     lfn_offsets.clear();
@@ -229,7 +229,8 @@ fn walk_directory(
                 for off in entry_lfn_offsets {
                     scan.patches.push((off, vec![0xE5]));
                 }
-                let bytes = file_chain_ranges(geom, fat, first_cluster, &mut scan.ranges, freed_clusters);
+                let bytes =
+                    file_chain_ranges(geom, fat, first_cluster, &mut scan.ranges, freed_clusters);
                 scan.files_excluded += 1;
                 scan.bytes_excluded += bytes;
             } else {
@@ -472,7 +473,8 @@ pub fn scan_exfat_exclusions(
                                 if p.name.len() >= p.name_len {
                                     break;
                                 }
-                                p.name.push(u16::from_le_bytes([rec[2 + i * 2], rec[3 + i * 2]]));
+                                p.name
+                                    .push(u16::from_le_bytes([rec[2 + i * 2], rec[3 + i * 2]]));
                             }
                             p.remaining = p.remaining.saturating_sub(1);
                             p.entries.push((rec_offset, EXFAT_NAME));
@@ -488,8 +490,16 @@ pub fn scan_exfat_exclusions(
                 if pending.as_ref().is_some_and(|p| p.remaining == 0) {
                     let p = pending.take().unwrap();
                     finalize_exfat_entry(
-                        &g, &fat, p, &rel, subtree_excluded, &parsed, &mut scan,
-                        &mut freed_clusters, &mut fat_frees, &mut stack,
+                        &g,
+                        &fat,
+                        p,
+                        &rel,
+                        subtree_excluded,
+                        &parsed,
+                        &mut scan,
+                        &mut freed_clusters,
+                        &mut fat_frees,
+                        &mut stack,
                     );
                     scan.entries_scanned += 1;
                     if scan.entries_scanned % 512 == 0 {
@@ -516,7 +526,11 @@ pub fn scan_exfat_exclusions(
     if !freed_clusters.is_empty() {
         match crate::fat_map::read_exfat_bitmap(vol, &g, &fat) {
             Ok(bmp) => append_exfat_removal_patches(
-                &g, bmp, &mut freed_clusters, &mut fat_frees, &mut scan.patches,
+                &g,
+                bmp,
+                &mut freed_clusters,
+                &mut fat_frees,
+                &mut scan.patches,
             ),
             Err(e) => {
                 info!(error = %e, "exFAT: allocation bitmap unavailable — keeping directory entries (zeroing only)");
@@ -628,7 +642,13 @@ fn finalize_exfat_entry(
     let max_clusters = p.data_length.div_ceil(g.cluster_size as u64).max(1);
     if p.is_dir {
         if (2..g.cluster_count + 2).contains(&p.first_cluster) {
-            stack.push((p.first_cluster, p.no_fat_chain, max_clusters, rel_child, matched));
+            stack.push((
+                p.first_cluster,
+                p.no_fat_chain,
+                max_clusters,
+                rel_child,
+                matched,
+            ));
         }
     } else if matched {
         // Clear the in-use bit (0x80) on every entry of the set: 0x85→0x05,
@@ -804,7 +824,10 @@ mod tests {
         let mut vol = fat32_tree();
         let scan = scan_fat32_exclusions(&mut vol, &["*.tmp".into()], |_| Ok(())).unwrap();
         assert_eq!(scan.files_excluded, 1);
-        assert!(!scan.patches.is_empty(), "removal must produce metadata patches");
+        assert!(
+            !scan.patches.is_empty(),
+            "removal must produce metadata patches"
+        );
 
         // Apply the patches to a copy of the image (the source is never touched).
         let mut img = vol.0.clone();
@@ -818,8 +841,11 @@ mod tests {
         // Its FAT entry (cluster 6) is freed; keep.bin (cluster 5) is untouched.
         let fat_off = 4 * 512usize;
         let fat_ent = |img: &[u8], n: usize| {
-            u32::from_le_bytes(img[fat_off + n * 4..fat_off + n * 4 + 4].try_into().unwrap())
-                & 0x0FFF_FFFF
+            u32::from_le_bytes(
+                img[fat_off + n * 4..fat_off + n * 4 + 4]
+                    .try_into()
+                    .unwrap(),
+            ) & 0x0FFF_FFFF
         };
         assert_eq!(fat_ent(&img, 6), 0, "freed cluster's FAT entry should be 0");
         assert_eq!(fat_ent(&img, 5), 0x0FFF_FFFF, "keep.bin's chain intact");
@@ -833,7 +859,10 @@ mod tests {
         use crate::used_sectors::UsedSectorMap;
         let map = crate::fat_map::build_fat_used_map(&mut MemVolume(img), 512).unwrap();
         let c6_block = (data as u64 + (6 - 2) * 512) / 512;
-        assert!(!map.is_block_used(c6_block), "freed cluster's block must be unused");
+        assert!(
+            !map.is_block_used(c6_block),
+            "freed cluster's block must be unused"
+        );
     }
 
     #[test]
@@ -955,15 +984,27 @@ mod tests {
         std::fs::write(&out, &bytes).unwrap();
 
         // --- Validate: fsck.fat clean (both FATs agree, no lost clusters).
-        let fsck = Command::new("fsck.fat").args(["-n", outs]).output().unwrap();
+        let fsck = Command::new("fsck.fat")
+            .args(["-n", outs])
+            .output()
+            .unwrap();
         let report = format!(
             "{}{}",
             String::from_utf8_lossy(&fsck.stdout),
             String::from_utf8_lossy(&fsck.stderr)
         )
         .to_lowercase();
-        for bad in ["lost cluster", "fats differ", "orphan", "truncat", "bad cluster"] {
-            assert!(!report.contains(bad), "fsck.fat reported '{bad}':\n{report}");
+        for bad in [
+            "lost cluster",
+            "fats differ",
+            "orphan",
+            "truncat",
+            "bad cluster",
+        ] {
+            assert!(
+                !report.contains(bad),
+                "fsck.fat reported '{bad}':\n{report}"
+            );
         }
 
         // --- mdir: junk.tmp gone from ::/temp, keep.bin still at root.
@@ -971,12 +1012,17 @@ mod tests {
             &run(Command::new("mdir").args(["-i", outs, "::/temp"])).stdout,
         )
         .to_uppercase();
-        assert!(!temp_ls.contains("JUNK"), "junk.tmp still listed:\n{temp_ls}");
-        let root_ls = String::from_utf8_lossy(
-            &run(Command::new("mdir").args(["-i", outs, "::/"])).stdout,
-        )
-        .to_uppercase();
-        assert!(root_ls.contains("KEEP"), "keep.bin should still be present:\n{root_ls}");
+        assert!(
+            !temp_ls.contains("JUNK"),
+            "junk.tmp still listed:\n{temp_ls}"
+        );
+        let root_ls =
+            String::from_utf8_lossy(&run(Command::new("mdir").args(["-i", outs, "::/"])).stdout)
+                .to_uppercase();
+        assert!(
+            root_ls.contains("KEEP"),
+            "keep.bin should still be present:\n{root_ls}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1000,7 +1046,11 @@ mod tests {
             for (off, count) in slots {
                 for i in 0..count {
                     let p = at + off + i * 2;
-                    let u = chars.get(ci).copied().unwrap_or(if ci == chars.len() { 0 } else { 0xFFFF });
+                    let u = chars.get(ci).copied().unwrap_or(if ci == chars.len() {
+                        0
+                    } else {
+                        0xFFFF
+                    });
                     img[p..p + 2].copy_from_slice(&u.to_le_bytes());
                     ci += 1;
                 }
@@ -1188,16 +1238,24 @@ mod tests {
 
         // Re-scan: junk.tmp gone; keep.log still findable.
         let rescan_tmp =
-            scan_fat_exclusions(&mut MemVolume(img.clone()), &["*.tmp".into()], |_| Ok(())).unwrap();
+            scan_fat_exclusions(&mut MemVolume(img.clone()), &["*.tmp".into()], |_| Ok(()))
+                .unwrap();
         assert_eq!(rescan_tmp.files_excluded, 0, "junk.tmp must be gone");
         let rescan_log =
-            scan_fat_exclusions(&mut MemVolume(img.clone()), &["*.log".into()], |_| Ok(())).unwrap();
-        assert_eq!(rescan_log.files_excluded, 1, "keep.log must still be present");
+            scan_fat_exclusions(&mut MemVolume(img.clone()), &["*.log".into()], |_| Ok(()))
+                .unwrap();
+        assert_eq!(
+            rescan_log.files_excluded, 1,
+            "keep.log must still be present"
+        );
 
         // Used map: cluster 5 freed, cluster 6 still used.
         let map = crate::fat_map::build_fat_used_map(&mut MemVolume(img), 512).unwrap();
         assert!(!map.is_block_used((cl(5) / 512) as u64), "cluster 5 freed");
-        assert!(map.is_block_used((cl(6) / 512) as u64), "cluster 6 still used");
+        assert!(
+            map.is_block_used((cl(6) / 512) as u64),
+            "cluster 6 still used"
+        );
     }
 
     #[test]
@@ -1212,7 +1270,7 @@ mod tests {
         let s = root + 32 + 32; // its Stream entry
         base.0[s + 1] = 0x00; // clear NoFatChain → follow the FAT
         base.0[s + 24..s + 32].copy_from_slice(&600u64.to_le_bytes()); // 2 clusters
-        // FAT chain 5 → 7 → EOC.
+                                                                       // FAT chain 5 → 7 → EOC.
         let fat_off = 4 * bps;
         base.0[fat_off + 5 * 4..fat_off + 5 * 4 + 4].copy_from_slice(&7u32.to_le_bytes());
         base.0[fat_off + 7 * 4..fat_off + 7 * 4 + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
@@ -1226,11 +1284,19 @@ mod tests {
         apply_patches(&mut img, &scan.patches);
         // FAT entries for clusters 5 and 7 must be zeroed.
         let e = |img: &[u8], n: usize| {
-            u32::from_le_bytes(img[fat_off + n * 4..fat_off + n * 4 + 4].try_into().unwrap())
+            u32::from_le_bytes(
+                img[fat_off + n * 4..fat_off + n * 4 + 4]
+                    .try_into()
+                    .unwrap(),
+            )
         };
         assert_eq!(e(&img, 5), 0, "FAT entry for cluster 5 zeroed");
         assert_eq!(e(&img, 7), 0, "FAT entry for cluster 7 zeroed");
         // Bitmap bits for clusters 5 (idx 3) and 7 (idx 5) cleared: 0x3B & ~0x28 = 0x13.
-        assert_eq!(img[cl(3)], 0b0001_0011, "both fragmented clusters freed in bitmap");
+        assert_eq!(
+            img[cl(3)],
+            0b0001_0011,
+            "both fragmented clusters freed in bitmap"
+        );
     }
 }

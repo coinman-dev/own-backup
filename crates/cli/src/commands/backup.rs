@@ -115,7 +115,10 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
         source_disk: None,
     };
 
-    println!("Backing up {} -> {} ({}, {kind:?})", args.source, args.output, args.format);
+    println!(
+        "Backing up {} -> {} ({}, {kind:?})",
+        args.source, args.output, args.format
+    );
     println!(
         "Mode: {}",
         if args.all_sectors {
@@ -130,7 +133,9 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
     let summary = tokio::task::spawn_blocking(move || {
         let mut last_percent = u64::MAX;
         backup_volume(&request, |p| {
-            let percent = (p.blocks_done * 100).checked_div(p.blocks_total).unwrap_or(0);
+            let percent = (p.blocks_done * 100)
+                .checked_div(p.blocks_total)
+                .unwrap_or(0);
             if percent != last_percent {
                 last_percent = percent;
                 print!(
@@ -146,7 +151,9 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
         })
     })
     .await
-    .map_err(|e| own_backup_common::OwnBackupError::Device(format!("backup task panicked: {e}")))??;
+    .map_err(|e| {
+        own_backup_common::OwnBackupError::Device(format!("backup task panicked: {e}"))
+    })??;
 
     println!();
     println!("Backup complete:");
@@ -160,7 +167,11 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
     );
     println!(
         "  VSS:         {}",
-        if summary.vss_used { "shadow copy" } else { "live volume (crash-consistent)" }
+        if summary.vss_used {
+            "shadow copy"
+        } else {
+            "live volume (crash-consistent)"
+        }
     );
     println!("  Image:       {}", summary.image_path.display());
     println!("  Sidecar:     {}", summary.sidecar_path.display());
@@ -179,7 +190,10 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
         println!();
         super::copy_options::verify_after(&summary.image_path)?;
     }
-    println!("\nMount it with: own-backup-cli mount \"{}\"", summary.image_path.display());
+    println!(
+        "\nMount it with: own-backup-cli mount \"{}\"",
+        summary.image_path.display()
+    );
 
     Ok(())
 }
@@ -220,7 +234,10 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
         ),
     };
 
-    println!("Backing up {} -> {} ({})", args.source, args.output, args.format);
+    println!(
+        "Backing up {} -> {} ({})",
+        args.source, args.output, args.format
+    );
     let summary = backup_volume(&request, |_p| Ok(()))?;
     println!(
         "Done: {} of {} blocks used, {:.1} MiB copied in {:.1}s ({})",
@@ -228,7 +245,11 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
         summary.total_blocks,
         summary.bytes_copied as f64 / 1_048_576.0,
         summary.duration.as_secs_f64(),
-        if summary.smart_mode { "used-block" } else { "sector-by-sector" },
+        if summary.smart_mode {
+            "used-block"
+        } else {
+            "sector-by-sector"
+        },
     );
     let v = verify_image(&image_path, |_, _| Ok(()))?;
     println!(

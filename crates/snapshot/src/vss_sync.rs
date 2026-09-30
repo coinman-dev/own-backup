@@ -43,7 +43,10 @@ fn check(hr: HRESULT, what: &str) -> Result<()> {
     if hr.is_ok() {
         Ok(())
     } else {
-        Err(OwnBackupError::Vss(format!("{what} failed: {hr:?} {}", hr.message())))
+        Err(OwnBackupError::Vss(format!(
+            "{what} failed: {hr:?} {}",
+            hr.message()
+        )))
     }
 }
 
@@ -119,7 +122,9 @@ impl VssSnapshotSession {
         let hr = unsafe { (api.create_backup_components)(&mut components) };
         check(hr, "CreateVssBackupComponents")?;
         if components.is_null() {
-            return Err(OwnBackupError::Vss("CreateVssBackupComponents returned null".into()));
+            return Err(OwnBackupError::Vss(
+                "CreateVssBackupComponents returned null".into(),
+            ));
         }
 
         let mut session = Self {
@@ -136,7 +141,12 @@ impl VssSnapshotSession {
     }
 
     fn run_sequence(&mut self, volume_root: &str) -> Result<()> {
-        com_call!(self, initialize_for_backup, "InitializeForBackup", std::ptr::null())?;
+        com_call!(
+            self,
+            initialize_for_backup,
+            "InitializeForBackup",
+            std::ptr::null()
+        )?;
         com_call!(self, set_context, "SetContext", VSS_CTX_BACKUP.0)?;
         com_call!(
             self,
@@ -149,11 +159,21 @@ impl VssSnapshotSession {
         )?;
 
         let mut async_ptr: *mut c_void = null_mut();
-        com_call!(self, gather_writer_metadata, "GatherWriterMetadata", &mut async_ptr)?;
+        com_call!(
+            self,
+            gather_writer_metadata,
+            "GatherWriterMetadata",
+            &mut async_ptr
+        )?;
         wait_async(async_ptr, "GatherWriterMetadata")?;
         com_call!(self, free_writer_metadata, "FreeWriterMetadata")?;
 
-        com_call!(self, start_snapshot_set, "StartSnapshotSet", &mut self.snapshot_set_id)?;
+        com_call!(
+            self,
+            start_snapshot_set,
+            "StartSnapshotSet",
+            &mut self.snapshot_set_id
+        )?;
         debug!(set_id = ?self.snapshot_set_id, "Snapshot set started");
 
         let volume_wide = to_wide(volume_root);

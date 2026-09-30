@@ -25,9 +25,9 @@
 //! when the run fails partway.
 
 use chrono::Utc;
+use tracing::warn;
 #[cfg(target_os = "windows")]
 use tracing::{error, info};
-use tracing::warn;
 
 use own_backup_common::cancel::CancelToken;
 use own_backup_common::restore_plan::{RestoreMode, RestoreOp, RestorePlan};
@@ -146,7 +146,13 @@ pub fn initial_state(plan: &RestorePlan) -> RestoreRunState {
         .ordered()
         .iter()
         .rposition(|op| {
-            matches!(op, RestoreOp::RestorePartition { mode: RestoreMode::Sectors, .. })
+            matches!(
+                op,
+                RestoreOp::RestorePartition {
+                    mode: RestoreMode::Sectors,
+                    ..
+                }
+            )
         })
         .map(|i| i + 1)
         .unwrap_or(ops.len());
@@ -154,7 +160,13 @@ pub fn initial_state(plan: &RestorePlan) -> RestoreRunState {
     if plan.verify_after {
         let mut sector_checks: Vec<OpRecord> = Vec::new();
         for op in plan.ordered() {
-            let RestoreOp::RestorePartition { dst, mode, src_index, .. } = op else {
+            let RestoreOp::RestorePartition {
+                dst,
+                mode,
+                src_index,
+                ..
+            } = op
+            else {
                 continue;
             };
             // Two different checks: a sector restore is verified block by block
@@ -163,11 +175,19 @@ pub fn initial_state(plan: &RestorePlan) -> RestoreRunState {
             let (kind, title) = match mode {
                 RestoreMode::Sectors => (
                     "verify_sectors",
-                    tr!("restore_exec.op_verify_sectors_title", dst = dst.index, src = src_index),
+                    tr!(
+                        "restore_exec.op_verify_sectors_title",
+                        dst = dst.index,
+                        src = src_index
+                    ),
                 ),
                 RestoreMode::Files => (
                     "verify_files",
-                    tr!("restore_exec.op_verify_files_title", dst = dst.index, src = src_index),
+                    tr!(
+                        "restore_exec.op_verify_files_title",
+                        dst = dst.index,
+                        src = src_index
+                    ),
                 ),
             };
             let record = OpRecord {
@@ -308,9 +328,17 @@ pub fn execute_plan(
         ));
     }
     if !guard.parts.is_empty() {
-        let hit: Vec<u32> = touched.iter().copied().filter(|i| guard.parts.contains(i)).collect();
+        let hit: Vec<u32> = touched
+            .iter()
+            .copied()
+            .filter(|i| guard.parts.contains(i))
+            .collect();
         if !hit.is_empty() {
-            let parts = hit.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
+            let parts = hit
+                .iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
             return Err(OwnBackupError::RestoreIncompatible(
                 tr!("restore_exec.touches_live_system", parts = parts).into_owned(),
             ));
@@ -415,11 +443,20 @@ pub fn execute_plan(
             op.title()
         );
 
-        let outcome = run_op(op, plan, &sidecar, passphrases, archive, session.as_mut(), cancel, &mut |percent, bytes| {
-            state.ops[index].percent = percent;
-            state.ops[index].bytes_done = bytes;
-            on_update(&state);
-        });
+        let outcome = run_op(
+            op,
+            plan,
+            &sidecar,
+            passphrases,
+            archive,
+            session.as_mut(),
+            cancel,
+            &mut |percent, bytes| {
+                state.ops[index].percent = percent;
+                state.ops[index].bytes_done = bytes;
+                on_update(&state);
+            },
+        );
 
         match outcome {
             Ok(note) => {
@@ -561,7 +598,15 @@ fn run_verification(
         .collect();
 
     for op in restore_ops.iter() {
-        let RestoreOp::RestorePartition { src_index, dst, mode, .. } = op else { continue };
+        let RestoreOp::RestorePartition {
+            src_index,
+            dst,
+            mode,
+            ..
+        } = op
+        else {
+            continue;
+        };
         // Not this pass: leave it Pending for the other one, untouched.
         let belongs_here = match mode {
             RestoreMode::Files => phase == VerifyPhase::Files,
@@ -576,8 +621,10 @@ fn run_verification(
             RestoreMode::Sectors => "verify_sectors",
             RestoreMode::Files => "verify_files",
         };
-        let Some(index) =
-            state.ops.iter().position(|o| o.kind == kind && o.part_index == Some(dst.index))
+        let Some(index) = state
+            .ops
+            .iter()
+            .position(|o| o.kind == kind && o.part_index == Some(dst.index))
         else {
             continue;
         };
@@ -592,18 +639,29 @@ fn run_verification(
         on_update(state);
 
         if *mode == RestoreMode::Files {
-            verify_files(plan, sidecar, archive, *src_index, dst.index, dst.offset, index, state, cancel);
+            verify_files(
+                plan, sidecar, archive, *src_index, dst.index, dst.offset, index, state, cancel,
+            );
             on_update(state);
             continue;
         }
 
-        let target =
-            PartitionTarget { disk_number: plan.target_disk, offset: dst.offset, size: dst.size };
+        let target = PartitionTarget {
+            disk_number: plan.target_disk,
+            offset: dst.offset,
+            size: dst.size,
+        };
         // A re-encrypted container holds ciphertext past its header: to compare
         // it with the copy the check has to open it the same way the restore
         // wrote it. Without this every block read as different — 12691 of 12691
         // on a partition whose restored system booted fine.
-        let reencrypted = matches!(op, RestoreOp::RestorePartition { reencrypt: true, .. });
+        let reencrypted = matches!(
+            op,
+            RestoreOp::RestorePartition {
+                reencrypt: true,
+                ..
+            }
+        );
         let crypt = if reencrypted {
             match passphrases.get(src_index) {
                 Some(pw) => {
@@ -660,7 +718,11 @@ fn run_verification(
                 state.ops[index].percent = 100;
                 state.ops[index].message =
                     tr!("restore_exec.verify_blocks_ok", count = v.blocks_checked).into_owned();
-                info!(part = dst.index, blocks = v.blocks_checked, "verification passed");
+                info!(
+                    part = dst.index,
+                    blocks = v.blocks_checked,
+                    "verification passed"
+                );
             }
             Ok(v) if v.cancelled => {
                 state.ops[index].status = OpStatus::Skipped;
@@ -696,8 +758,11 @@ fn run_verification(
                 let mut parts = Vec::new();
                 if !v.image_corrupt.is_empty() {
                     parts.push(
-                        tr!("restore_exec.verify_image_corrupt", count = v.image_corrupt.len())
-                            .into_owned(),
+                        tr!(
+                            "restore_exec.verify_image_corrupt",
+                            count = v.image_corrupt.len()
+                        )
+                        .into_owned(),
                     );
                 }
                 if !v.mismatches.is_empty() {
@@ -710,16 +775,24 @@ fn run_verification(
                 error!(part = dst.index, %text, "verification failed");
                 state.ops[index].message = text.clone();
                 state.follow_ups.push(
-                    tr!("restore_exec.follow_up_partition", part = dst.index, text = text)
-                        .into_owned(),
+                    tr!(
+                        "restore_exec.follow_up_partition",
+                        part = dst.index,
+                        text = text
+                    )
+                    .into_owned(),
                 );
             }
             Err(e) => {
                 state.ops[index].status = OpStatus::Failed;
                 state.ops[index].message = e.to_string();
                 state.follow_ups.push(
-                    tr!("restore_exec.follow_up_verify_failed", part = dst.index, error = e)
-                        .into_owned(),
+                    tr!(
+                        "restore_exec.follow_up_verify_failed",
+                        part = dst.index,
+                        error = e
+                    )
+                    .into_owned(),
                 );
             }
         }
@@ -737,7 +810,9 @@ fn run_verification(
 fn touched_after_copy(ordered: &[RestoreOp], part_index: u32) -> bool {
     ordered.iter().any(|op| match op {
         RestoreOp::EnsureFallbackBootloader { esp } => esp.index == part_index,
-        RestoreOp::FinalizeBoot { esp, windows_part, .. } => {
+        RestoreOp::FinalizeBoot {
+            esp, windows_part, ..
+        } => {
             esp.map(|e| e.index == part_index).unwrap_or(false) || windows_part.index == part_index
         }
         _ => false,
@@ -766,7 +841,10 @@ fn with_captured_gpt_fields(
     plan: &RestorePlan,
     sidecar: &own_backup_backup::sidecar::Sidecar,
     taken: &IdentitiesInUse,
-) -> (own_backup_common::restore_plan::PartitionTableSpec, IdentityOutcome) {
+) -> (
+    own_backup_common::restore_plan::PartitionTableSpec,
+    IdentityOutcome,
+) {
     use own_backup_common::restore_plan::{PartitionKind, PartitionScheme};
 
     let mut outcome = IdentityOutcome::default();
@@ -785,7 +863,9 @@ fn with_captured_gpt_fields(
 
     let mut out = table.clone();
     for e in out.entries.iter_mut() {
-        let Some(src_index) = src_of.get(&e.index) else { continue };
+        let Some(src_index) = src_of.get(&e.index) else {
+            continue;
+        };
         let Some(captured) = dm.layout.partitions.iter().find(|p| p.index == *src_index) else {
             continue;
         };
@@ -796,7 +876,13 @@ fn with_captured_gpt_fields(
         if captured.first_lba != e.first_lba {
             outcome.partitions_moved.push(index);
         }
-        if let PartitionKind::Gpt { type_guid, part_guid, attributes, name } = &mut e.kind {
+        if let PartitionKind::Gpt {
+            type_guid,
+            part_guid,
+            attributes,
+            name,
+        } = &mut e.kind
+        {
             *attributes = captured.attributes;
             *name = captured.name.clone();
             // The type GUID and the unique GUID also come from the copy: the
@@ -857,7 +943,10 @@ pub struct IdentitiesInUse {
 
 impl IdentitiesInUse {
     fn normalize(guid: &str) -> String {
-        guid.trim().trim_start_matches('{').trim_end_matches('}').to_ascii_uppercase()
+        guid.trim()
+            .trim_start_matches('{')
+            .trim_end_matches('}')
+            .to_ascii_uppercase()
     }
 
     fn holds_disk(&self, guid: &str) -> bool {
@@ -913,14 +1002,18 @@ fn identities_in_use(except_disk: u32) -> IdentitiesInUse {
         if n == except_disk {
             continue;
         }
-        let Ok(layout) = own_backup_backup::gpt_reader::read_disk_layout(n) else { continue };
+        let Ok(layout) = own_backup_backup::gpt_reader::read_disk_layout(n) else {
+            continue;
+        };
         out.scanned.push(n);
         if !layout.disk_guid.is_empty() {
-            out.disk_guids.insert(IdentitiesInUse::normalize(&layout.disk_guid));
+            out.disk_guids
+                .insert(IdentitiesInUse::normalize(&layout.disk_guid));
         }
         for p in &layout.partitions {
             if !p.part_guid.is_empty() {
-                out.part_guids.insert(IdentitiesInUse::normalize(&p.part_guid));
+                out.part_guids
+                    .insert(IdentitiesInUse::normalize(&p.part_guid));
             }
         }
     }
@@ -1189,7 +1282,9 @@ fn run_op(
             };
 
             let summary = if *reencrypt {
-                use own_backup_backup::restore_win::{restore_partition_encrypted, ReencryptRequest};
+                use own_backup_backup::restore_win::{
+                    restore_partition_encrypted, ReencryptRequest,
+                };
                 let header = luks_header_for(sidecar, *src_index).ok_or_else(|| {
                     OwnBackupError::RestoreIncompatible(
                         tr!("restore_exec.no_luks_header", part = src_index).into_owned(),
@@ -1241,10 +1336,18 @@ fn run_op(
                     follow_ups: Vec::new(),
                 });
             }
-            Ok(OpNote { message: String::new(), follow_ups: encryption_follow_up(sidecar, dst.index) })
+            Ok(OpNote {
+                message: String::new(),
+                follow_ups: encryption_follow_up(sidecar, dst.index),
+            })
         }
 
-        RestoreOp::RestorePartition { src_index, dst, mode: RestoreMode::Files, .. } => {
+        RestoreOp::RestorePartition {
+            src_index,
+            dst,
+            mode: RestoreMode::Files,
+            ..
+        } => {
             use own_backup_backup::file_restore_win::{copy_tree, long_path, measure_tree};
             use own_backup_backup::restore_win::MountedImage;
 
@@ -1253,11 +1356,12 @@ fn run_op(
             // comes along. Detached when `image` drops, including on failure.
             let image = MountedImage::open(&plan.image_path, archive)?;
             let src_root = image.volume_root_of(sidecar, *src_index)?;
-            let dst_root = volume_root_at_offset(plan.target_disk, dst.offset).ok_or_else(|| {
-                OwnBackupError::Device(
-                    tr!("restore_exec.no_volume_copy", part = dst.index).into_owned(),
-                )
-            })?;
+            let dst_root =
+                volume_root_at_offset(plan.target_disk, dst.offset).ok_or_else(|| {
+                    OwnBackupError::Device(
+                        tr!("restore_exec.no_volume_copy", part = dst.index).into_owned(),
+                    )
+                })?;
 
             // Counting first costs one metadata pass and buys a progress bar
             // that means something. On a restore that runs for an hour, a
@@ -1287,8 +1391,12 @@ fn run_op(
             if !summary.failures.is_empty() {
                 // Naming a few beats a bare count: a user can tell at a glance
                 // whether it was a locked log file or their documents.
-                let sample: Vec<String> =
-                    summary.failures.iter().take(5).map(|(p, e)| format!("{p} ({e})")).collect();
+                let sample: Vec<String> = summary
+                    .failures
+                    .iter()
+                    .take(5)
+                    .map(|(p, e)| format!("{p} ({e})"))
+                    .collect();
                 follow_ups.push(
                     tr!(
                         "restore_exec.copy_failures",
@@ -1311,7 +1419,12 @@ fn run_op(
             })
         }
 
-        RestoreOp::Format { part, fs, label, quick } => {
+        RestoreOp::Format {
+            part,
+            fs,
+            label,
+            quick,
+        } => {
             let volume = volume_root_at_offset(plan.target_disk, part.offset).ok_or_else(|| {
                 OwnBackupError::Device(
                     tr!("restore_exec.no_volume_format", part = part.index).into_owned(),
@@ -1348,7 +1461,11 @@ fn run_op(
             Ok(OpNote::default())
         }
 
-        RestoreOp::FinalizeBoot { windows_part, esp, uefi } => {
+        RestoreOp::FinalizeBoot {
+            windows_part,
+            esp,
+            uefi,
+        } => {
             use own_backup_backup::engine_win::finalize_boot;
             use own_backup_backup::letters_win::TempDriveLetter;
             let win_volume = volume_root_at_offset(plan.target_disk, windows_part.offset)
@@ -1364,9 +1481,10 @@ fn run_op(
             let win_mount = TempDriveLetter::acquire(&win_volume)?;
             let esp_mount = match esp {
                 Some(p) => {
-                    let vr = volume_root_at_offset(plan.target_disk, p.offset).ok_or_else(|| {
-                        OwnBackupError::Device(tr!("restore_exec.no_esp_volume").into_owned())
-                    })?;
+                    let vr =
+                        volume_root_at_offset(plan.target_disk, p.offset).ok_or_else(|| {
+                            OwnBackupError::Device(tr!("restore_exec.no_esp_volume").into_owned())
+                        })?;
                     Some(TempDriveLetter::acquire(&vr)?)
                 }
                 None => None,
@@ -1384,8 +1502,11 @@ fn run_op(
             // have and end in 0xc000000e. They are hidden, not deleted.
             if report.menu_trimmed {
                 follow_ups.push(
-                    tr!("restore_exec.boot_menu_trimmed", count = report.loaders_found)
-                        .into_owned(),
+                    tr!(
+                        "restore_exec.boot_menu_trimmed",
+                        count = report.loaders_found
+                    )
+                    .into_owned(),
                 );
             }
             if let Some(note) = report.note {
@@ -1400,7 +1521,10 @@ fn run_op(
             } else {
                 String::new()
             };
-            Ok(OpNote { message, follow_ups })
+            Ok(OpNote {
+                message,
+                follow_ups,
+            })
         }
 
         RestoreOp::EnsureFallbackBootloader { esp } => {
@@ -1445,7 +1569,8 @@ fn run_op(
                 // of the restore — everything on the disk is written — but the
                 // user was shown a list and is owed the news that it did not go.
                 note.message = tr!("restore_exec.no_boot_entries").into_owned();
-                note.follow_ups.push(tr!("restore_exec.no_boot_entries_follow_up").into_owned());
+                note.follow_ups
+                    .push(tr!("restore_exec.no_boot_entries_follow_up").into_owned());
                 return Ok(note);
             };
 
@@ -1478,8 +1603,12 @@ fn run_op(
                 // The entries name partitions by GUID. From another machine
                 // those GUIDs are somebody else's.
                 note.follow_ups.push(
-                    tr!("restore_exec.entries_other_machine", source = saved.machine, here = here)
-                        .into_owned(),
+                    tr!(
+                        "restore_exec.entries_other_machine",
+                        source = saved.machine,
+                        here = here
+                    )
+                    .into_owned(),
                 );
             }
 
@@ -1513,9 +1642,7 @@ fn run_op(
             // costs nothing that a reboot does not fix, and the data is already
             // written — so it is reported, not raised.
             let mut note = OpNote::default();
-            match DiskSession::open(plan.target_disk, false)
-                .and_then(|s| s.update_properties())
-            {
+            match DiskSession::open(plan.target_disk, false).and_then(|s| s.update_properties()) {
                 Ok(()) => {
                     note.message =
                         tr!("restore_exec.disk_reread", disk = plan.target_disk).into_owned();
@@ -1523,7 +1650,8 @@ fn run_op(
                 Err(e) => {
                     warn!(disk = plan.target_disk, error = %e, "restore: disk re-read failed");
                     note.message = tr!("restore_exec.disk_reread_failed").into_owned();
-                    note.follow_ups.push(tr!("restore_exec.disk_reread_follow_up").into_owned());
+                    note.follow_ups
+                        .push(tr!("restore_exec.disk_reread_follow_up").into_owned());
                 }
             }
             Ok(note)
@@ -1542,9 +1670,14 @@ fn finish_cancelled(state: &mut RestoreRunState, index: usize) {
     state.cancellable = false;
     state.current = None;
     state.finished_at = Some(Utc::now().to_rfc3339());
-    let destroyed = state.ops.iter().any(|o| o.status == OpStatus::Done && o.destroys_data);
+    let destroyed = state
+        .ops
+        .iter()
+        .any(|o| o.status == OpStatus::Done && o.destroys_data);
     if destroyed {
-        state.follow_ups.push(tr!("restore_exec.cancelled_after_write").into_owned());
+        state
+            .follow_ups
+            .push(tr!("restore_exec.cancelled_after_write").into_owned());
     }
     warn!(cancelled_at = index, destroyed, "restore plan cancelled");
 }
@@ -1553,10 +1686,15 @@ fn finish_cancelled(state: &mut RestoreRunState, index: usize) {
 /// infer them from a list of statuses.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn add_failure_follow_ups(state: &mut RestoreRunState) {
-    let destroyed: Vec<&OpRecord> =
-        state.ops.iter().filter(|o| o.status == OpStatus::Done && o.destroys_data).collect();
+    let destroyed: Vec<&OpRecord> = state
+        .ops
+        .iter()
+        .filter(|o| o.status == OpStatus::Done && o.destroys_data)
+        .collect();
     if destroyed.is_empty() {
-        state.follow_ups.push(tr!("restore_exec.nothing_overwritten").into_owned());
+        state
+            .follow_ups
+            .push(tr!("restore_exec.nothing_overwritten").into_owned());
         return;
     }
     let parts: Vec<String> = destroyed
@@ -1583,7 +1721,9 @@ pub fn execute_plan(
 ) -> Result<RestoreRunState> {
     let state = initial_state(plan);
     on_update(&state);
-    Err(OwnBackupError::NotImplemented(tr!("restore_exec.windows_only").into_owned()))
+    Err(OwnBackupError::NotImplemented(
+        tr!("restore_exec.windows_only").into_owned(),
+    ))
 }
 
 #[cfg(test)]
@@ -1615,7 +1755,11 @@ mod tests {
     }
 
     fn part() -> PartRef {
-        PartRef { index: 1, offset: 1024 * 1024, size: 1024 * 1024 * 1024 }
+        PartRef {
+            index: 1,
+            offset: 1024 * 1024,
+            size: 1024 * 1024 * 1024,
+        }
     }
 
     #[test]
@@ -1624,13 +1768,19 @@ mod tests {
             1,
             "/tmp/img.vhdx".into(),
             vec![
-                RestoreOp::AssignLetter { part: part(), letter: 'D' },
+                RestoreOp::AssignLetter {
+                    part: part(),
+                    letter: 'D',
+                },
                 RestoreOp::WritePartitionTable { table: table() },
             ],
         );
         let state = initial_state(&plan);
         assert_eq!(state.ops.len(), 2);
-        assert_eq!(state.ops[0].kind, "write_partition_table", "the table is written first");
+        assert_eq!(
+            state.ops[0].kind, "write_partition_table",
+            "the table is written first"
+        );
         assert_eq!(state.ops[1].kind, "assign_letter");
         assert!(state.ops.iter().all(|o| o.status == OpStatus::Pending));
         assert_eq!(state.status, RunStatus::Running);
@@ -1656,7 +1806,10 @@ mod tests {
         let mut state = initial_state(&plan);
         finish_cancelled(&mut state, 0);
         assert_eq!(state.status, RunStatus::Cancelled);
-        assert!(state.follow_ups.is_empty(), "nothing was written, so nothing to warn about");
+        assert!(
+            state.follow_ups.is_empty(),
+            "nothing was written, so nothing to warn about"
+        );
     }
 
     #[test]
@@ -1666,7 +1819,10 @@ mod tests {
             "/tmp/img.vhdx".into(),
             vec![
                 RestoreOp::WritePartitionTable { table: table() },
-                RestoreOp::AssignLetter { part: part(), letter: 'D' },
+                RestoreOp::AssignLetter {
+                    part: part(),
+                    letter: 'D',
+                },
             ],
         );
         let mut state = initial_state(&plan);
@@ -1674,7 +1830,11 @@ mod tests {
         finish_cancelled(&mut state, 1);
         assert_eq!(state.status, RunStatus::Cancelled);
         assert_eq!(state.ops[1].status, OpStatus::Skipped);
-        assert!(state.follow_ups[0].contains("Отката нет"), "{:?}", state.follow_ups);
+        assert!(
+            state.follow_ups[0].contains("Отката нет"),
+            "{:?}",
+            state.follow_ups
+        );
     }
 
     #[test]
@@ -1687,7 +1847,11 @@ mod tests {
         let mut state = initial_state(&plan);
         state.ops[0].status = OpStatus::Failed;
         add_failure_follow_ups(&mut state);
-        assert!(state.follow_ups[0].contains("не тронуты"), "{:?}", state.follow_ups);
+        assert!(
+            state.follow_ups[0].contains("не тронуты"),
+            "{:?}",
+            state.follow_ups
+        );
     }
 
     #[test]
@@ -1710,7 +1874,11 @@ mod tests {
         state.ops[1].status = OpStatus::Done;
         state.ops[0].status = OpStatus::Failed;
         add_failure_follow_ups(&mut state);
-        assert!(state.follow_ups[0].contains(": 1"), "{:?}", state.follow_ups);
+        assert!(
+            state.follow_ups[0].contains(": 1"),
+            "{:?}",
+            state.follow_ups
+        );
     }
 
     #[test]
@@ -1758,7 +1926,11 @@ mod tests {
                     wipe_free_space: false,
                     reencrypt: false,
                 },
-                RestoreOp::FinalizeBoot { windows_part: part(), esp: None, uefi: true },
+                RestoreOp::FinalizeBoot {
+                    windows_part: part(),
+                    esp: None,
+                    uefi: true,
+                },
                 RestoreOp::RefreshDiskState,
             ],
         );
@@ -1776,7 +1948,10 @@ mod tests {
             ]
         );
         // Вставка в середину не должна оставить старую нумерацию.
-        assert!(state.ops.iter().enumerate().all(|(i, o)| o.index == i), "{kinds:?}");
+        assert!(
+            state.ops.iter().enumerate().all(|(i, o)| o.index == i),
+            "{kinds:?}"
+        );
     }
 
     #[test]
@@ -1814,7 +1989,9 @@ mod tests {
         use own_backup_backup::sidecar::SidecarInfo;
         use own_backup_common::gpt::{DiskBackupManifest, DiskLayout};
         use own_backup_common::image::ImageManifest;
-        use own_backup_common::types::{BackupMode, BackupType, BootMode, CompressionAlgo, PartitionTable};
+        use own_backup_common::types::{
+            BackupMode, BackupType, BootMode, CompressionAlgo, PartitionTable,
+        };
 
         let disk = own_backup_common::disk::DiskInfo {
             device_id: String::new(),
@@ -1900,16 +2077,32 @@ mod tests {
                 },
             ],
         );
-        let (patched, _) =
-            with_captured_gpt_fields(&table(), &plan, &sidecar_with(captured), &IdentitiesInUse::default());
-        let PartitionKind::Gpt { attributes, name, type_guid, part_guid } = &patched.entries[0].kind
+        let (patched, _) = with_captured_gpt_fields(
+            &table(),
+            &plan,
+            &sidecar_with(captured),
+            &IdentitiesInUse::default(),
+        );
+        let PartitionKind::Gpt {
+            attributes,
+            name,
+            type_guid,
+            part_guid,
+        } = &patched.entries[0].kind
         else {
             panic!("expected a GPT entry");
         };
-        assert_eq!(*attributes, (1u64 << 63) | 1, "required + no-drive-letter survive");
+        assert_eq!(
+            *attributes,
+            (1u64 << 63) | 1,
+            "required + no-drive-letter survive"
+        );
         assert_eq!(name, "Basic data partition");
         assert_eq!(type_guid, "DE94BBA4-06D1-4D40-A16A-BFD50179D6AC");
-        assert_eq!(part_guid, "11111111-2222-3333-4444-555555555555", "UEFI references this");
+        assert_eq!(
+            part_guid, "11111111-2222-3333-4444-555555555555",
+            "UEFI references this"
+        );
     }
 
     /// A restore onto a disk of its own reproduces the source's identity whole:
@@ -1933,7 +2126,10 @@ mod tests {
         assert_eq!(patched.disk_id, "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE");
         assert!(outcome.disk_guid_preserved);
         assert!(outcome.partitions_regenerated.is_empty());
-        assert!(outcome.partitions_moved.is_empty(), "the partition lands where it came from");
+        assert!(
+            outcome.partitions_moved.is_empty(),
+            "the partition lands where it came from"
+        );
     }
 
     /// A partition that lands at another offset is still the same partition by
@@ -1977,18 +2173,31 @@ mod tests {
         // Written the way the on-disk GPT spells them — braces and case are
         // noise, and a comparison that trips over them would miss a collision.
         let mut taken = IdentitiesInUse::default();
-        taken.disk_guids.insert("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_ascii_uppercase());
-        taken.part_guids.insert("11111111-2222-3333-4444-555555555555".into());
+        taken
+            .disk_guids
+            .insert("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_ascii_uppercase());
+        taken
+            .part_guids
+            .insert("11111111-2222-3333-4444-555555555555".into());
 
         let (patched, outcome) = with_captured_gpt_fields(&table(), &plan, &sidecar, &taken);
-        assert_eq!(patched.disk_id, "", "empty means the writer makes a fresh one");
+        assert_eq!(
+            patched.disk_id, "",
+            "empty means the writer makes a fresh one"
+        );
         assert!(!outcome.disk_guid_preserved);
-        assert_eq!(outcome.disk_guid_taken.as_deref(), Some("AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"));
+        assert_eq!(
+            outcome.disk_guid_taken.as_deref(),
+            Some("AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")
+        );
         assert_eq!(outcome.partitions_regenerated, vec![1]);
         let PartitionKind::Gpt { part_guid, .. } = &patched.entries[0].kind else {
             panic!("expected a GPT entry");
         };
-        assert_eq!(part_guid, "", "the copy's partition GUID is in use here — take a fresh one");
+        assert_eq!(
+            part_guid, "",
+            "the copy's partition GUID is in use here — take a fresh one"
+        );
     }
 
     /// A plan that restores source partition 7 into target partition 1.
@@ -2026,10 +2235,17 @@ mod tests {
             attributes: 1 << 63,
             name: "Recovery".into(),
         };
-        let (patched, outcome) =
-            with_captured_gpt_fields(&table(), &plan, &sidecar_with(captured), &IdentitiesInUse::default());
+        let (patched, outcome) = with_captured_gpt_fields(
+            &table(),
+            &plan,
+            &sidecar_with(captured),
+            &IdentitiesInUse::default(),
+        );
         assert_eq!(patched, table());
-        assert!(!outcome.disk_guid_preserved, "the copy carries no disk GUID here");
+        assert!(
+            !outcome.disk_guid_preserved,
+            "the copy carries no disk GUID here"
+        );
     }
 
     #[test]
@@ -2039,7 +2255,10 @@ mod tests {
             "/tmp/img.vhdx".into(),
             vec![
                 RestoreOp::WritePartitionTable { table: table() },
-                RestoreOp::AssignLetter { part: part(), letter: 'D' },
+                RestoreOp::AssignLetter {
+                    part: part(),
+                    letter: 'D',
+                },
             ],
         );
         let mut state = initial_state(&plan);

@@ -30,7 +30,10 @@ fn first_encrypted_image(folder: &std::path::Path) -> Option<std::path::PathBuf>
         .flatten()
         .map(|e| e.path())
         .filter(|p| {
-            p.extension().and_then(|e| e.to_str()).map(str::to_lowercase).as_deref()
+            p.extension()
+                .and_then(|e| e.to_str())
+                .map(str::to_lowercase)
+                .as_deref()
                 == Some(own_backup_backup::seal::obk::OBK_EXTENSION)
         })
         .collect();
@@ -62,7 +65,10 @@ pub async fn run(args: ConsolidateArgs) -> own_backup_common::Result<()> {
     } else {
         let report = resume_pending_with_keys(&folder, keys.as_ref())?;
         if !report.finished.is_empty() {
-            println!("Finished {} interrupted consolidation step(s).\n", report.finished.len());
+            println!(
+                "Finished {} interrupted consolidation step(s).\n",
+                report.finished.len()
+            );
         }
         // A marker that could not be finished means the chain it names is in
         // an unknown state. Consolidating further would plan against that.
@@ -106,7 +112,10 @@ pub async fn run(args: ConsolidateArgs) -> own_backup_common::Result<()> {
             match &step.next {
                 Some(next) => format!(
                     ", repoint {}",
-                    next.image_path.file_name().unwrap_or_default().to_string_lossy()
+                    next.image_path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
                 ),
                 None => String::new(),
             }
@@ -136,7 +145,10 @@ pub async fn run(args: ConsolidateArgs) -> own_backup_common::Result<()> {
     }
 
     match steps {
-        0 => println!("Nothing to consolidate — every chain is within {} increments.", args.keep),
+        0 => println!(
+            "Nothing to consolidate — every chain is within {} increments.",
+            args.keep
+        ),
         n => println!("\n{n} increment(s) folded in."),
     }
     Ok(())

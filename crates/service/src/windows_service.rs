@@ -87,8 +87,7 @@ mod imp {
             }
         };
 
-        let status_handle =
-            service_control_handler::register(SERVICE_NAME, event_handler)?;
+        let status_handle = service_control_handler::register(SERVICE_NAME, event_handler)?;
 
         // Report Running. Accept session-change (logon/logoff) and shutdown so
         // event-triggered jobs can react to them.

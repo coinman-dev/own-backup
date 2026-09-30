@@ -8,7 +8,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     use own_backup_backup::qcow2::Qcow2RandomReader;
     use own_backup_backup::win_device::WinRawDevice;
 
-    let path = std::env::args().nth(1).ok_or("usage: audit_manual_iscsi.exe <image>")?;
+    let path = std::env::args()
+        .nth(1)
+        .ok_or("usage: audit_manual_iscsi.exe <image>")?;
     let path = std::path::PathBuf::from(path);
     let mut image = Qcow2RandomReader::open(&path)?;
     let size = image.virtual_size();
@@ -34,7 +36,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let logged_out = attached.logout();
     let same_bytes = read?;
     println!("A04-MANUAL-CORRECT-CHAP disk={disk} same_bytes={same_bytes} logout={logged_out}");
-    if !same_bytes || !logged_out { return Err("manual iSCSI data or logout check failed".into()); }
+    if !same_bytes || !logged_out {
+        return Err("manual iSCSI data or logout check failed".into());
+    }
     Ok(())
 }
 

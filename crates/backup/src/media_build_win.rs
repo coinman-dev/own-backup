@@ -145,12 +145,18 @@ pub fn list_driver_packages() -> std::result::Result<Vec<DriverPackage>, String>
     }
     let mut wanted: std::collections::HashMap<String, Wanted> = Default::default();
     for d in &present {
-        let (Some(inf), Some(guid), Some(bus)) = (&d.inf, &d.guid, &d.bus) else { continue };
-        let Some(role) = rescue_role(guid, bus) else { continue };
-        let entry = wanted.entry(inf.to_ascii_lowercase()).or_insert_with(|| Wanted {
-            role: role.to_string(),
-            names: Vec::new(),
-        });
+        let (Some(inf), Some(guid), Some(bus)) = (&d.inf, &d.guid, &d.bus) else {
+            continue;
+        };
+        let Some(role) = rescue_role(guid, bus) else {
+            continue;
+        };
+        let entry = wanted
+            .entry(inf.to_ascii_lowercase())
+            .or_insert_with(|| Wanted {
+                role: role.to_string(),
+                names: Vec::new(),
+            });
         let name = d.name.clone().unwrap_or_default();
         if !name.is_empty() && !entry.names.contains(&name) {
             entry.names.push(name);
@@ -162,7 +168,10 @@ pub fn list_driver_packages() -> std::result::Result<Vec<DriverPackage>, String>
         .filter_map(|r| {
             let inf = r.driver?;
             let original = r.original_file_name.unwrap_or_default();
-            let size = std::path::Path::new(&original).parent().map(dir_size).unwrap_or(0);
+            let size = std::path::Path::new(&original)
+                .parent()
+                .map(dir_size)
+                .unwrap_or(0);
             let hit = wanted.get(&inf.to_ascii_lowercase());
             Some(DriverPackage {
                 original_name: std::path::Path::new(&original)
@@ -201,7 +210,11 @@ pub fn list_driver_packages() -> std::result::Result<Vec<DriverPackage>, String>
         })
         .collect();
     inbox.sort_by(|a, b| a.role.cmp(&b.role).then(a.device.cmp(&b.device)));
-    list.sort_by(|a, b| b.recommended.cmp(&a.recommended).then(b.size_bytes.cmp(&a.size_bytes)));
+    list.sort_by(|a, b| {
+        b.recommended
+            .cmp(&a.recommended)
+            .then(b.size_bytes.cmp(&a.size_bytes))
+    });
 
     // Drivers this machine does not have but a virtual machine booted from the
     // medium will need. They go first: the list is otherwise ordered by size,
@@ -459,14 +472,25 @@ pub fn build_media(
     req: &MediaBuildRequest,
     mut progress: impl FnMut(StageReport),
 ) -> Result<MediaBuildReport> {
-    let mut report =
-        MediaBuildReport { media_dir: req.out_dir.join("media"), ..Default::default() };
+    let mut report = MediaBuildReport {
+        media_dir: req.out_dir.join("media"),
+        ..Default::default()
+    };
     let mut at = |p: &mut dyn FnMut(StageReport), stage, percent, detail: &str| {
         info!(stage = stage_id(stage), percent, detail, "media build");
-        p(StageReport { stage, percent, detail });
+        p(StageReport {
+            stage,
+            percent,
+            detail,
+        });
     };
 
-    at(&mut progress, BuildStage::Checking, 0, &tr!("media_build_win.detail_reading_image"));
+    at(
+        &mut progress,
+        BuildStage::Checking,
+        0,
+        &tr!("media_build_win.detail_reading_image"),
+    );
     let info = read_wim_info(&req.base_wim)?;
     report.base_name = info.name.clone();
     report.base_build = info.build;
@@ -485,7 +509,11 @@ pub fn build_media(
     }
     if !req.webview2_dir.join("msedgewebview2.exe").exists() {
         return Err(OwnBackupError::ImageFormat(
-            tr!("media_build_win.not_webview2", dir = req.webview2_dir.display()).into_owned(),
+            tr!(
+                "media_build_win.not_webview2",
+                dir = req.webview2_dir.display()
+            )
+            .into_owned(),
         ));
     }
     at(&mut progress, BuildStage::Checking, 100, "");
@@ -497,10 +525,20 @@ pub fn build_media(
     std::fs::create_dir_all(&tree)?;
     std::fs::create_dir_all(&report.media_dir)?;
 
-    at(&mut progress, BuildStage::OpeningImage, 0, &tr!("media_build_win.detail_copying_image"));
+    at(
+        &mut progress,
+        BuildStage::OpeningImage,
+        0,
+        &tr!("media_build_win.detail_copying_image"),
+    );
     std::fs::copy(&req.base_wim, &staged_wim)?;
     clear_readonly(&staged_wim);
-    at(&mut progress, BuildStage::OpeningImage, 30, &tr!("media_build_win.detail_mounting"));
+    at(
+        &mut progress,
+        BuildStage::OpeningImage,
+        30,
+        &tr!("media_build_win.detail_mounting"),
+    );
     // Mounting is quick; unpacking is minutes, and its own percentage is mapped
     // into what is left of this stage's bar rather than restarting it at zero.
     let unpacking = tr!("media_build_win.detail_unpacking");
@@ -538,9 +576,14 @@ pub fn build_media(
 
     if !req.tools.is_empty() {
         at(&mut progress, BuildStage::CopyingTools, 0, "");
-        match add_tools(&tree, &req.tools, req.user_appdata.as_deref(), &mut |pct, what| {
-            at(&mut progress, BuildStage::CopyingTools, pct, what);
-        }) {
+        match add_tools(
+            &tree,
+            &req.tools,
+            req.user_appdata.as_deref(),
+            &mut |pct, what| {
+                at(&mut progress, BuildStage::CopyingTools, pct, what);
+            },
+        ) {
             Ok((count, bytes)) => {
                 report.tools_added = count;
                 report.tools_bytes = bytes;
@@ -573,7 +616,10 @@ pub fn build_media(
     // outside the image, and for the copy of the logs it keeps there.
     let media_app = report.media_dir.join(layout::MEDIA_DIR);
     std::fs::create_dir_all(&media_app)?;
-    std::fs::write(media_app.join(layout::MEDIA_MARKER), layout::MEDIA_MARKER_TEXT.as_bytes())?;
+    std::fs::write(
+        media_app.join(layout::MEDIA_MARKER),
+        layout::MEDIA_MARKER_TEXT.as_bytes(),
+    )?;
     let runtime_dst = if req.runtime_in_image {
         app_dir.join("WebView2")
     } else {
@@ -581,7 +627,12 @@ pub fn build_media(
     };
     std::fs::create_dir_all(&runtime_dst)?;
     copy_tree(&req.webview2_dir, &runtime_dst)?;
-    at(&mut progress, BuildStage::CopyingRuntime, 80, &tr!("media_build_win.detail_runtime_trim"));
+    at(
+        &mut progress,
+        BuildStage::CopyingRuntime,
+        80,
+        &tr!("media_build_win.detail_runtime_trim"),
+    );
     report.runtime_files_trimmed = trim_runtime(&runtime_dst);
     for dll in layout::VC_RUNTIME {
         let src = system32().join(dll);
@@ -600,28 +651,56 @@ pub fn build_media(
     // hypervisor's guest tools). They are separated here, before anything hands
     // an id that is not an INF name to `pnputil`.
     let guest_prefix = crate::media_guest_drivers_win::PSEUDO_PREFIX;
-    let (guest, store): (Vec<String>, Vec<String>) =
-        req.drivers.iter().cloned().partition(|d| d.starts_with(guest_prefix));
+    let (guest, store): (Vec<String>, Vec<String>) = req
+        .drivers
+        .iter()
+        .cloned()
+        .partition(|d| d.starts_with(guest_prefix));
 
     if !store.is_empty() || !guest.is_empty() {
-        at(&mut progress, BuildStage::AddingDrivers, 0, &tr!("media_build_win.detail_exporting_drivers"));
+        at(
+            &mut progress,
+            BuildStage::AddingDrivers,
+            0,
+            &tr!("media_build_win.detail_exporting_drivers"),
+        );
         if !store.is_empty() {
-            match add_drivers(&tree, work, &store, req.extra_drivers.as_deref(), &mut |pct, d| {
-                progress(StageReport { stage: BuildStage::AddingDrivers, percent: pct, detail: d })
-            }) {
+            match add_drivers(
+                &tree,
+                work,
+                &store,
+                req.extra_drivers.as_deref(),
+                &mut |pct, d| {
+                    progress(StageReport {
+                        stage: BuildStage::AddingDrivers,
+                        percent: pct,
+                        detail: d,
+                    })
+                },
+            ) {
                 Ok(n) => report.drivers_added = n,
                 Err(e) => {
                     warn!(error = %e, "drivers were not added");
                     report.warnings.push(
-                        tr!("media_build_win.warn_drivers_not_added", reason = user_reason(&e))
-                            .into_owned(),
+                        tr!(
+                            "media_build_win.warn_drivers_not_added",
+                            reason = user_reason(&e)
+                        )
+                        .into_owned(),
                     );
                 }
             }
         }
-        if guest.iter().any(|d| d == crate::media_guest_drivers_win::VMWARE_TOOLS_ID) {
+        if guest
+            .iter()
+            .any(|d| d == crate::media_guest_drivers_win::VMWARE_TOOLS_ID)
+        {
             match add_guest_vmware(&tree, work, &mut |pct, d| {
-                progress(StageReport { stage: BuildStage::AddingDrivers, percent: pct, detail: d })
+                progress(StageReport {
+                    stage: BuildStage::AddingDrivers,
+                    percent: pct,
+                    detail: d,
+                })
             }) {
                 Ok((n, notes)) => {
                     report.drivers_added += n;
@@ -630,8 +709,11 @@ pub fn build_media(
                 Err(e) => {
                     warn!(error = %e, "VMware guest drivers were not added");
                     report.warnings.push(
-                        tr!("media_build_win.warn_vmware_not_added", reason = user_reason(&e))
-                            .into_owned(),
+                        tr!(
+                            "media_build_win.warn_vmware_not_added",
+                            reason = user_reason(&e)
+                        )
+                        .into_owned(),
                     );
                 }
             }
@@ -679,7 +761,11 @@ pub fn build_media(
     if !missing_iscsi.is_empty() {
         warn!(files = ?missing_iscsi, "media: iSCSI initiator files missing on the build host");
         report.warnings.push(
-            tr!("media_build_win.warn_iscsi_missing", files = missing_iscsi.join(", ")).into_owned(),
+            tr!(
+                "media_build_win.warn_iscsi_missing",
+                files = missing_iscsi.join(", ")
+            )
+            .into_owned(),
         );
     }
 
@@ -704,7 +790,10 @@ pub fn build_media(
     // so WinPE falls back to `cmd /k startnet.cmd`.
     let _ = std::fs::remove_file(sys32.join("winpeshl.ini"));
     if !req.classic_console {
-        std::fs::write(sys32.join("winpeshl.ini"), layout::winpeshl_ini(app_dir_win))?;
+        std::fs::write(
+            sys32.join("winpeshl.ini"),
+            layout::winpeshl_ini(app_dir_win),
+        )?;
     }
     // Exactly one of the two starts the desktop — see `startnet_cmd`.
     std::fs::write(
@@ -712,7 +801,11 @@ pub fn build_media(
         layout::startnet_cmd(app_dir_win, req.classic_console),
     )?;
     info!(
-        shell = if req.classic_console { "cmd" } else { "own-backup-shell" },
+        shell = if req.classic_console {
+            "cmd"
+        } else {
+            "own-backup-shell"
+        },
         "the medium's shell"
     );
     set_scratch_space(&tree, mounted);
@@ -806,8 +899,13 @@ fn stage_id(s: BuildStage) -> &'static str {
 /// `progress` reports 0–100 of whichever operation is running — mounting is
 /// quick, unpacking is minutes, and only DISM knows how far along it is.
 fn open_image(wim: &Path, tree: &Path, progress: &mut dyn FnMut(u64)) -> Result<bool> {
-    if dism(&["/Mount-Wim", &format!("/WimFile:{}", wim.display()), "/Index:1",
-              &format!("/MountDir:{}", tree.display())]).is_ok()
+    if dism(&[
+        "/Mount-Wim",
+        &format!("/WimFile:{}", wim.display()),
+        "/Index:1",
+        &format!("/MountDir:{}", tree.display()),
+    ])
+    .is_ok()
     {
         return Ok(true);
     }
@@ -815,22 +913,34 @@ fn open_image(wim: &Path, tree: &Path, progress: &mut dyn FnMut(u64)) -> Result<
     let inf = system32().join("drivers").join("wimmount.inf");
     if inf.exists() {
         info!("mount failed — registering the wimmount driver and retrying");
-        let _ = run("rundll32.exe", &[
-            "setupapi.dll,InstallHinfSection",
-            "DefaultInstall",
-            "132",
-            &inf.display().to_string(),
-        ]);
-        if dism(&["/Mount-Wim", &format!("/WimFile:{}", wim.display()), "/Index:1",
-                  &format!("/MountDir:{}", tree.display())]).is_ok()
+        let _ = run(
+            "rundll32.exe",
+            &[
+                "setupapi.dll,InstallHinfSection",
+                "DefaultInstall",
+                "132",
+                &inf.display().to_string(),
+            ],
+        );
+        if dism(&[
+            "/Mount-Wim",
+            &format!("/WimFile:{}", wim.display()),
+            "/Index:1",
+            &format!("/MountDir:{}", tree.display()),
+        ])
+        .is_ok()
         {
             return Ok(true);
         }
     }
     warn!("WIM mounting unavailable — unpacking instead (slower, needs a few GB)");
     dism_progress(
-        &["/Apply-Image", &format!("/ImageFile:{}", wim.display()), "/Index:1",
-          &format!("/ApplyDir:{}", tree.display())],
+        &[
+            "/Apply-Image",
+            &format!("/ImageFile:{}", wim.display()),
+            "/Index:1",
+            &format!("/ApplyDir:{}", tree.display()),
+        ],
         progress,
     )?;
     Ok(false)
@@ -846,7 +956,11 @@ fn close_image(
         // Committing a mounted image writes back everything that changed —
         // the program, the runtime, the drivers. Minutes, and DISM counts them.
         return dism_progress(
-            &["/Unmount-Wim", &format!("/MountDir:{}", tree.display()), "/Commit"],
+            &[
+                "/Unmount-Wim",
+                &format!("/MountDir:{}", tree.display()),
+                "/Commit",
+            ],
             progress,
         );
     }
@@ -924,7 +1038,10 @@ fn set_input_locales(tree: &Path, mounted: bool, report: &mut MediaBuildReport) 
         if src.exists() {
             let _ = std::fs::copy(&src, &dst);
         } else {
-            warn!(dll, "keyboard layout DLL is in neither the image nor this machine");
+            warn!(
+                dll,
+                "keyboard layout DLL is in neither the image nor this machine"
+            );
             report
                 .warnings
                 .push(tr!("media_build_win.warn_keyboard_dll_missing", dll = dll).into_owned());
@@ -955,13 +1072,26 @@ fn set_scratch_space(tree: &Path, mounted: bool) {
         return;
     }
     let hive = tree.join(r"Windows\System32\config\SYSTEM");
-    if run("reg", &["load", r"HKLM\OwnBackupWpe", &hive.display().to_string()]).is_ok() {
-        let _ = run("reg", &[
-            "add",
-            r"HKLM\OwnBackupWpe\ControlSet001\Services\FBWF",
-            "/v", "WinPECacheThreshold", "/t", "REG_DWORD",
-            "/d", &mb.to_string(), "/f",
-        ]);
+    if run(
+        "reg",
+        &["load", r"HKLM\OwnBackupWpe", &hive.display().to_string()],
+    )
+    .is_ok()
+    {
+        let _ = run(
+            "reg",
+            &[
+                "add",
+                r"HKLM\OwnBackupWpe\ControlSet001\Services\FBWF",
+                "/v",
+                "WinPECacheThreshold",
+                "/t",
+                "REG_DWORD",
+                "/d",
+                &mb.to_string(),
+                "/f",
+            ],
+        );
         let _ = run("reg", &["unload", r"HKLM\OwnBackupWpe"]);
     }
 }
@@ -986,7 +1116,10 @@ fn add_drivers(
     for (i, inf) in chosen.iter().enumerate() {
         let dst = export.join(inf.trim_end_matches(".inf"));
         std::fs::create_dir_all(&dst)?;
-        match run("pnputil", &["/export-driver", inf, &dst.display().to_string()]) {
+        match run(
+            "pnputil",
+            &["/export-driver", inf, &dst.display().to_string()],
+        ) {
             Ok(()) => exported += 1,
             // One driver refusing to export is not a reason to lose the rest.
             Err(e) => warn!(inf = %inf, error = %e, "driver package not exported"),
@@ -1041,9 +1174,13 @@ fn check_inbox_drivers(tree: &Path, report: &mut MediaBuildReport) {
     };
     let mut seen = std::collections::BTreeSet::new();
     for d in &devices {
-        let (Some(inf), Some(guid), Some(bus)) = (&d.inf, &d.guid, &d.bus) else { continue };
+        let (Some(inf), Some(guid), Some(bus)) = (&d.inf, &d.guid, &d.bus) else {
+            continue;
+        };
         let inf = inf.to_ascii_lowercase();
-        if layout::is_published_inf(&inf) || rescue_role(guid, bus).is_none() || !seen.insert(inf.clone())
+        if layout::is_published_inf(&inf)
+            || rescue_role(guid, bus).is_none()
+            || !seen.insert(inf.clone())
         {
             continue;
         }
@@ -1055,7 +1192,12 @@ fn check_inbox_drivers(tree: &Path, report: &mut MediaBuildReport) {
         let Some(pkg) = host_inbox_package(&inf) else {
             warn!(%inf, device = %name, "inbox driver missing from the base image and from the driver store");
             report.warnings.push(
-                tr!("media_build_win.warn_inbox_missing", device = name, inf = inf).into_owned(),
+                tr!(
+                    "media_build_win.warn_inbox_missing",
+                    device = name,
+                    inf = inf
+                )
+                .into_owned(),
             );
             continue;
         };
@@ -1093,20 +1235,35 @@ fn host_inbox_package(inf: &str) -> Option<PathBuf> {
     std::fs::read_dir(&repo)
         .ok()?
         .flatten()
-        .filter(|e| e.file_name().to_string_lossy().to_ascii_lowercase().starts_with(&prefix))
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .to_ascii_lowercase()
+                .starts_with(&prefix)
+        })
         .map(|e| e.path().join(inf))
         .filter(|p| p.exists())
-        .max_by_key(|p| p.parent().and_then(|d| d.metadata().ok()).and_then(|m| m.modified().ok()))
+        .max_by_key(|p| {
+            p.parent()
+                .and_then(|d| d.metadata().ok())
+                .and_then(|m| m.modified().ok())
+        })
 }
 
 fn count_inf(dir: &Path) -> u32 {
     fn walk(dir: &Path, n: &mut u32) {
-        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
         for e in rd.flatten() {
             let p = e.path();
             if p.is_dir() {
                 walk(&p, n);
-            } else if p.extension().map(|x| x.eq_ignore_ascii_case("inf")).unwrap_or(false) {
+            } else if p
+                .extension()
+                .map(|x| x.eq_ignore_ascii_case("inf"))
+                .unwrap_or(false)
+            {
                 *n += 1;
             }
         }
@@ -1128,7 +1285,10 @@ fn lay_out_media(wim: &Path, media: &Path) -> Result<Option<String>> {
     std::fs::create_dir_all(media.join(r"EFI\Microsoft\Boot"))?;
     std::fs::create_dir_all(media.join("boot"))?;
     std::fs::create_dir_all(media.join("sources"))?;
-    std::fs::copy(boot.join(r"EFI\bootmgfw.efi"), media.join(r"EFI\BOOT\BOOTX64.EFI"))?;
+    std::fs::copy(
+        boot.join(r"EFI\bootmgfw.efi"),
+        media.join(r"EFI\BOOT\BOOTX64.EFI"),
+    )?;
     let bcd = media.join(r"EFI\Microsoft\Boot\BCD");
     std::fs::copy(boot.join(r"DVD\EFI\BCD"), &bcd)?;
     clear_readonly(&bcd);
@@ -1160,8 +1320,13 @@ fn lay_out_media(wim: &Path, media: &Path) -> Result<Option<String>> {
             path = %stl.display(),
             "boot.stl not found — the medium will not boot with Secure Boot enabled"
         );
-        missing_stl =
-            Some(tr!("media_build_win.warn_boot_stl_missing", path = stl.display()).into_owned());
+        missing_stl = Some(
+            tr!(
+                "media_build_win.warn_boot_stl_missing",
+                path = stl.display()
+            )
+            .into_owned(),
+        );
     }
     // The medium carries no display driver, so the screen is Microsoft Basic
     // Display, and on UEFI that driver draws on the framebuffer the boot
@@ -1180,9 +1345,17 @@ fn lay_out_media(wim: &Path, media: &Path) -> Result<Option<String>> {
     // video adapter drivers are no longer offered for the medium: the GeForce
     // one never gave a picture in WinPE (four outputs enumerated, none lit), and
     // the firmware gives the right mode by itself once asked properly.
-    if let Err(e) =
-        run("bcdedit", &["/store", &bcd.display().to_string(), "/set", "{default}", "highestmode", "on"])
-    {
+    if let Err(e) = run(
+        "bcdedit",
+        &[
+            "/store",
+            &bcd.display().to_string(),
+            "/set",
+            "{default}",
+            "highestmode",
+            "on",
+        ],
+    ) {
         warn!(error = %e, "highestmode not set — the medium boots at the loader's default resolution");
     }
     // bcdedit opens the store as a registry hive and leaves its transaction
@@ -1235,8 +1408,10 @@ fn add_tools(
     progress: &mut dyn FnMut(u64, &str),
 ) -> Result<(u32, u64)> {
     let found = crate::media_tools_win::find_tools();
-    let picked: Vec<&crate::media_tools_win::FoundTool> =
-        found.iter().filter(|f| wanted.iter().any(|id| id == &f.id)).collect();
+    let picked: Vec<&crate::media_tools_win::FoundTool> = found
+        .iter()
+        .filter(|f| wanted.iter().any(|id| id == &f.id))
+        .collect();
     if picked.len() < wanted.len() {
         // Asked for something this machine does not have. Worth saying out
         // loud: the wizard offered it a moment ago.
@@ -1252,15 +1427,21 @@ fn add_tools(
     let mut count = 0;
     let mut bytes = 0;
     for (n, tool) in picked.iter().enumerate() {
-        let Some(known) = own_backup_common::media_tools::tool(&tool.id) else { continue };
+        let Some(known) = own_backup_common::media_tools::tool(&tool.id) else {
+            continue;
+        };
         let to = root.join(known.folder);
         progress(((n * 100) / picked.len().max(1)) as u64, &tool.name);
         std::fs::create_dir_all(&to)?;
         copy_tree_except(&tool.source, &to, known.skip)?;
         if !to.join(known.exe).is_file() {
             return Err(OwnBackupError::ImageFormat(
-                tr!("media_build_win.tool_exe_missing", tool = tool.name, exe = known.exe)
-                    .into_owned(),
+                tr!(
+                    "media_build_win.tool_exe_missing",
+                    tool = tool.name,
+                    exe = known.exe
+                )
+                .into_owned(),
             ));
         }
         // Counted, not assumed. A program that is nearly all there starts and
@@ -1351,14 +1532,20 @@ fn copy_settings(under: &str, into: &Path, user_appdata: Option<&Path>) -> u32 {
         },
     };
     let from = appdata.join(under);
-    let Ok(entries) = std::fs::read_dir(&from) else { return 0 };
+    let Ok(entries) = std::fs::read_dir(&from) else {
+        return 0;
+    };
     let mut taken = 0;
     for entry in entries.flatten() {
         if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
             continue;
         }
         let name = entry.file_name();
-        if name.to_string_lossy().to_ascii_lowercase().starts_with("session.") {
+        if name
+            .to_string_lossy()
+            .to_ascii_lowercase()
+            .starts_with("session.")
+        {
             continue;
         }
         if std::fs::copy(entry.path(), into.join(&name)).is_ok() {
@@ -1382,7 +1569,10 @@ fn copy_tree_except(src: &Path, dst: &Path, skip: &[&str]) -> Result<()> {
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         let name = entry.file_name();
-        if skip.iter().any(|s| s.eq_ignore_ascii_case(&name.to_string_lossy())) {
+        if skip
+            .iter()
+            .any(|s| s.eq_ignore_ascii_case(&name.to_string_lossy()))
+        {
             info!(folder = %name.to_string_lossy(), "left behind, nothing on a medium reads it");
             continue;
         }
@@ -1412,7 +1602,9 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
 }
 
 fn dir_size(dir: &Path) -> u64 {
-    let Ok(rd) = std::fs::read_dir(dir) else { return 0 };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return 0;
+    };
     rd.flatten()
         .map(|e| match e.file_type() {
             Ok(t) if t.is_dir() => dir_size(&e.path()),
@@ -1446,21 +1638,42 @@ fn nuke_tree(tree: &Path) {
     // still fails, which is how 3 GB were left in ProgramData the first time.
     let empty = std::env::temp_dir().join("ownbackup-empty");
     let _ = std::fs::create_dir_all(&empty);
-    let _ = run("robocopy", &[
-        &empty.display().to_string(),
-        &tree.display().to_string(),
-        "/MIR", "/B", "/R:1", "/W:1", "/NFL", "/NDL", "/NJH", "/NJS", "/NP",
-    ]);
+    let _ = run(
+        "robocopy",
+        &[
+            &empty.display().to_string(),
+            &tree.display().to_string(),
+            "/MIR",
+            "/B",
+            "/R:1",
+            "/W:1",
+            "/NFL",
+            "/NDL",
+            "/NJH",
+            "/NJS",
+            "/NP",
+        ],
+    );
     let _ = std::fs::remove_dir_all(&empty);
     if std::fs::remove_dir_all(tree).is_ok() || !tree.exists() {
         return;
     }
 
-    let _ = run("takeown", &["/f", &tree.display().to_string(), "/r", "/a", "/skipsl"]);
-    let _ = run("icacls", &[
-        &tree.display().to_string(),
-        "/grant", "*S-1-5-32-544:(OI)(CI)F", "/t", "/c", "/q",
-    ]);
+    let _ = run(
+        "takeown",
+        &["/f", &tree.display().to_string(), "/r", "/a", "/skipsl"],
+    );
+    let _ = run(
+        "icacls",
+        &[
+            &tree.display().to_string(),
+            "/grant",
+            "*S-1-5-32-544:(OI)(CI)F",
+            "/t",
+            "/c",
+            "/q",
+        ],
+    );
     if std::fs::remove_dir_all(tree).is_err() {
         warn!(path = %tree.display(), "scratch tree could not be removed");
     }
@@ -1544,7 +1757,6 @@ fn dism_progress(args: &[&str], progress: &mut dyn FnMut(u64)) -> Result<()> {
     ))
 }
 
-
 /// Run a console tool without flashing a window, and turn a non-zero exit into
 /// an error carrying what it printed — DISM's own message is the useful part.
 fn run(program: &str, args: &[&str]) -> Result<()> {
@@ -1567,7 +1779,12 @@ fn run(program: &str, args: &[&str]) -> Result<()> {
         return Ok(());
     }
     let text = layout::console_text(&out.stdout);
-    let tail: Vec<&str> = text.lines().rev().filter(|l| !l.trim().is_empty()).take(3).collect();
+    let tail: Vec<&str> = text
+        .lines()
+        .rev()
+        .filter(|l| !l.trim().is_empty())
+        .take(3)
+        .collect();
     Err(OwnBackupError::ImageFormat(
         tr!(
             "media_build_win.tool_failed",
@@ -1577,5 +1794,3 @@ fn run(program: &str, args: &[&str]) -> Result<()> {
         .into_owned(),
     ))
 }
-
-

@@ -28,7 +28,7 @@ use own_backup_common::Result;
 
 use super::{
     bad, decode_l2_entry, encode_compressed_l2_entry, ClusterDescriptor, COMPRESSION_TYPE_ZSTD,
-    HEADER_LENGTH_V3, INCOMPAT_COMPRESSION_TYPE, OFLAG_COPIED, OFFSET_MASK, QCOW2_MAGIC,
+    HEADER_LENGTH_V3, INCOMPAT_COMPRESSION_TYPE, OFFSET_MASK, OFLAG_COPIED, QCOW2_MAGIC,
 };
 
 pub struct Qcow2InPlaceMerge {
@@ -141,7 +141,11 @@ impl Qcow2InPlaceMerge {
             virtual_size,
             total_guest_clusters,
             l2_per_table,
-            zstd_level: if incompatible & INCOMPAT_COMPRESSION_TYPE != 0 { zstd_level.or(Some(super::DEFAULT_ZSTD_LEVEL)) } else { None },
+            zstd_level: if incompatible & INCOMPAT_COMPRESSION_TYPE != 0 {
+                zstd_level.or(Some(super::DEFAULT_ZSTD_LEVEL))
+            } else {
+                None
+            },
             has_backing,
             header_cluster,
             l2,
@@ -200,7 +204,11 @@ impl Qcow2InPlaceMerge {
             return Err(bad(format!("cluster {index} beyond virtual disk")));
         }
         if data.len() as u64 != self.cluster_size {
-            return Err(bad(format!("cluster data is {} bytes, expected {}", data.len(), self.cluster_size)));
+            return Err(bad(format!(
+                "cluster data is {} bytes, expected {}",
+                data.len(),
+                self.cluster_size
+            )));
         }
         self.written = true;
 
@@ -225,7 +233,11 @@ impl Qcow2InPlaceMerge {
                 // cluster each) — no packing — so refcounts stay a simple count.
                 self.pad()?;
                 let host_offset = self.append_offset;
-                let entry = encode_compressed_l2_entry(host_offset, compressed.len() as u64, self.cluster_bits)?;
+                let entry = encode_compressed_l2_entry(
+                    host_offset,
+                    compressed.len() as u64,
+                    self.cluster_bits,
+                )?;
                 self.file.seek(SeekFrom::Start(host_offset))?;
                 self.file.write_all(&compressed)?;
                 self.append_offset += compressed.len() as u64;
@@ -329,13 +341,17 @@ impl Qcow2InPlaceMerge {
         {
             let mut groups: BTreeMap<u64, Vec<(u64, u64)>> = BTreeMap::new();
             for (&guest, &entry) in &self.l2 {
-                groups.entry(guest / self.l2_per_table).or_default().push((guest % self.l2_per_table, entry));
+                groups
+                    .entry(guest / self.l2_per_table)
+                    .or_default()
+                    .push((guest % self.l2_per_table, entry));
             }
             for (l1_index, entries) in groups {
                 let table_offset = self.append_offset;
                 let mut table = vec![0u8; cs as usize];
                 for (slot, entry) in entries {
-                    table[slot as usize * 8..slot as usize * 8 + 8].copy_from_slice(&entry.to_be_bytes());
+                    table[slot as usize * 8..slot as usize * 8 + 8]
+                        .copy_from_slice(&entry.to_be_bytes());
                 }
                 self.file.seek(SeekFrom::Start(table_offset))?;
                 self.file.write_all(&table)?;
@@ -370,8 +386,13 @@ impl Qcow2InPlaceMerge {
         bump(0, &mut live); // header cluster
         for &entry in self.l2.values() {
             match decode_l2_entry(entry, self.cluster_bits)? {
-                ClusterDescriptor::Standard { host_offset } => bump(host_offset >> self.cluster_bits, &mut live),
-                ClusterDescriptor::Compressed { host_offset, length } => {
+                ClusterDescriptor::Standard { host_offset } => {
+                    bump(host_offset >> self.cluster_bits, &mut live)
+                }
+                ClusterDescriptor::Compressed {
+                    host_offset,
+                    length,
+                } => {
                     let first = host_offset >> self.cluster_bits;
                     let last = (host_offset + length - 1) >> self.cluster_bits;
                     for c in first..=last {
@@ -419,7 +440,8 @@ impl Qcow2InPlaceMerge {
                     break;
                 }
                 let count = live.get(&cluster).copied().unwrap_or(0);
-                let count = u16::try_from(count).map_err(|_| bad(format!("refcount overflow on cluster {cluster}")))?;
+                let count = u16::try_from(count)
+                    .map_err(|_| bad(format!("refcount overflow on cluster {cluster}")))?;
                 buf[slot as usize * 2..slot as usize * 2 + 2].copy_from_slice(&count.to_be_bytes());
             }
             self.file.write_all(&buf)?;
@@ -519,11 +541,15 @@ mod guest_blob_tests {
         let vsize = 8 * cs;
         let mut w = Qcow2Writer::new(
             std::io::Cursor::new(Vec::new()),
-            Qcow2WriterOptions { virtual_size: vsize, ..Default::default() },
+            Qcow2WriterOptions {
+                virtual_size: vsize,
+                ..Default::default()
+            },
         )
         .unwrap();
         for c in 0..8 {
-            w.write_cluster(c, &vec![(c as u8) + 1; cs as usize]).unwrap();
+            w.write_cluster(c, &vec![(c as u8) + 1; cs as usize])
+                .unwrap();
         }
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("img.qcow2");
@@ -557,14 +583,21 @@ mod guest_blob_tests {
 
         let mut pw = Qcow2Writer::new(
             std::io::Cursor::new(Vec::new()),
-            Qcow2WriterOptions { virtual_size: vsize, ..Default::default() },
+            Qcow2WriterOptions {
+                virtual_size: vsize,
+                ..Default::default()
+            },
         )
         .unwrap();
         for c in 0..8 {
-            pw.write_cluster(c, &vec![(c as u8) + 1; cs as usize]).unwrap();
+            pw.write_cluster(c, &vec![(c as u8) + 1; cs as usize])
+                .unwrap();
         }
-        std::fs::write(dir.path().join("parent.qcow2"), pw.finish().unwrap().into_inner())
-            .unwrap();
+        std::fs::write(
+            dir.path().join("parent.qcow2"),
+            pw.finish().unwrap().into_inner(),
+        )
+        .unwrap();
 
         let cw = Qcow2Writer::new(
             std::io::Cursor::new(Vec::new()),
@@ -592,13 +625,22 @@ mod guest_blob_tests {
 
         let mut back = vec![0xFFu8; blob.len()];
         r.read_at(offset, &mut back).unwrap();
-        assert_eq!(back, blob, "blob (incl. its zero middle) must shadow the parent");
+        assert_eq!(
+            back, blob,
+            "blob (incl. its zero middle) must shadow the parent"
+        );
 
         let mut edge = vec![0u8; 16];
         r.read_at(offset - 16, &mut edge).unwrap();
-        assert_eq!(edge, [3u8; 16], "pre-blob bytes come from the parent via RMW");
+        assert_eq!(
+            edge, [3u8; 16],
+            "pre-blob bytes come from the parent via RMW"
+        );
         r.read_at(offset + blob.len() as u64, &mut edge).unwrap();
-        assert_eq!(edge, [5u8; 16], "post-blob bytes come from the parent via RMW");
+        assert_eq!(
+            edge, [5u8; 16],
+            "post-blob bytes come from the parent via RMW"
+        );
 
         // Untouched clusters still fall through to the parent.
         r.read_at(0, &mut edge).unwrap();

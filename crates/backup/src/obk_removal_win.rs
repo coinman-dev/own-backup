@@ -189,7 +189,10 @@ fn remove_excluded(
 
     let touched = overlay.lock().unwrap().touched_clusters();
     if deleted == 0 || touched.is_empty() {
-        warn!(deleted, failed, "obk true removal: nothing deleted — the image is unchanged");
+        warn!(
+            deleted,
+            failed, "obk true removal: nothing deleted — the image is unchanged"
+        );
         let _ = std::fs::remove_file(&scratch);
         return Ok(None);
     }
@@ -207,7 +210,10 @@ fn remove_excluded(
             chain,
             &touched,
             move |cluster| overlay.lock().unwrap().read_cluster(cluster),
-            RebuildOptions { zstd_level: Some(zstd_level), ..Default::default() },
+            RebuildOptions {
+                zstd_level: Some(zstd_level),
+                ..Default::default()
+            },
         )
     };
     let _ = std::fs::remove_file(&scratch);

@@ -50,7 +50,8 @@ fn reading_an_image_never_attaches_it() {
     // offline with, so the volume stack survives and the detach waits out the
     // ~180 s PnP veto (measured: verify finished 15:43:20, the job "finished"
     // 15:46:20). Images are read in userspace, exactly as qcow2 always was.
-    let vhdx = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/vhdx.rs")).unwrap();
+    let vhdx =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/vhdx.rs")).unwrap();
     assert!(
         !vhdx.contains("RawRead"),
         "AttachMode::RawRead is gone on purpose — read images with \

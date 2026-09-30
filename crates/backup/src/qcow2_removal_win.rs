@@ -101,7 +101,11 @@ pub fn exclude_inside_qcow2(
         .truncate(true)
         .open(&scratch)?;
     let base: Box<dyn BlockSource> = Box::new(Qcow2RandomReader::open(image_path)?);
-    let overlay = Arc::new(Mutex::new(WritableOverlaySource::new(base, cluster_size, overlay_file)));
+    let overlay = Arc::new(Mutex::new(WritableOverlaySource::new(
+        base,
+        cluster_size,
+        overlay_file,
+    )));
 
     let mounted = mount_scan_delete(
         overlay.clone(),
@@ -281,7 +285,11 @@ pub fn remove_excluded_from_qcow2(
         .truncate(true)
         .open(&scratch)?;
     let base: Box<dyn BlockSource> = Box::new(Qcow2RandomReader::open(image_path)?);
-    let overlay = Arc::new(Mutex::new(WritableOverlaySource::new(base, cluster_size, overlay_file)));
+    let overlay = Arc::new(Mutex::new(WritableOverlaySource::new(
+        base,
+        cluster_size,
+        overlay_file,
+    )));
 
     // Attach RW, delete, tear down. Best-effort: on ANY failure here the base
     // qcow2 is untouched (writes went to the scratch), so we keep ghosts.
@@ -298,7 +306,10 @@ pub fn remove_excluded_from_qcow2(
 
     let touched = overlay.lock().unwrap().touched_clusters();
     if deleted == 0 || touched.is_empty() {
-        warn!(deleted, failed, "qcow2 true removal: nothing deleted — image left with zero-filled ghosts");
+        warn!(
+            deleted,
+            failed, "qcow2 true removal: nothing deleted — image left with zero-filled ghosts"
+        );
         let _ = std::fs::remove_file(&scratch);
         return Ok(None);
     }
@@ -388,10 +399,13 @@ pub fn remove_excluded_from_disk_image_qcow2(
         .truncate(true)
         .open(&scratch)?;
     let base: Box<dyn BlockSource> = Box::new(Qcow2RandomReader::open(image_path)?);
-    let overlay = Arc::new(Mutex::new(WritableOverlaySource::new(base, cluster_size, overlay_file)));
+    let overlay = Arc::new(Mutex::new(WritableOverlaySource::new(
+        base,
+        cluster_size,
+        overlay_file,
+    )));
 
-    let mount_del =
-        mount_delete_multi(overlay.clone(), virtual_size, image_path, partitions, tick);
+    let mount_del = mount_delete_multi(overlay.clone(), virtual_size, image_path, partitions, tick);
 
     let (deleted, failed) = match mount_del {
         Ok(v) => v,
@@ -404,7 +418,10 @@ pub fn remove_excluded_from_disk_image_qcow2(
 
     let touched = overlay.lock().unwrap().touched_clusters();
     if deleted == 0 || touched.is_empty() {
-        warn!(deleted, failed, "qcow2 true removal: nothing deleted — image left with zero-filled ghosts");
+        warn!(
+            deleted,
+            failed, "qcow2 true removal: nothing deleted — image left with zero-filled ghosts"
+        );
         let _ = std::fs::remove_file(&scratch);
         return Ok(None);
     }
@@ -423,8 +440,16 @@ pub fn remove_excluded_from_disk_image_qcow2(
     let _ = std::fs::remove_file(&scratch);
 
     // Whole-disk image is disk-block absolute: data_offset = 0, len = image_size.
-    let blocks_rehashed =
-        rehash_touched(image_path, &touched, cluster_size, 0, image_size, block_size, checksums, tick)?;
+    let blocks_rehashed = rehash_touched(
+        image_path,
+        &touched,
+        cluster_size,
+        0,
+        image_size,
+        block_size,
+        checksums,
+        tick,
+    )?;
 
     info!(
         deleted,
@@ -588,8 +613,10 @@ pub(crate) fn rehash_touched_through(
         return Ok(0);
     }
 
-    let mut map: BTreeMap<u64, u64> =
-        checksums.iter().map(|c| (c.block_number, c.checksum)).collect();
+    let mut map: BTreeMap<u64, u64> = checksums
+        .iter()
+        .map(|c| (c.block_number, c.checksum))
+        .collect();
     // Runs rather than single blocks: fewer, longer reads, and every one of
     // them decompresses whole qcow2 clusters anyway (see
     // `crate::checksum::coalesce_block_runs`).
@@ -627,7 +654,10 @@ pub(crate) fn rehash_touched_through(
     }
     *checksums = map
         .into_iter()
-        .map(|(block_number, checksum)| BlockChecksum { block_number, checksum })
+        .map(|(block_number, checksum)| BlockChecksum {
+            block_number,
+            checksum,
+        })
         .collect();
     Ok(affected.len() as u64)
 }

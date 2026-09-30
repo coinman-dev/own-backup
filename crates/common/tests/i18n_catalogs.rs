@@ -19,7 +19,10 @@ struct Entry {
 }
 
 fn crates_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .to_path_buf()
 }
 
 fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -56,10 +59,15 @@ fn has_cyrillic(s: &str) -> bool {
 
 fn load_catalog(dir: &Path, errors: &mut Vec<String>) -> BTreeMap<String, Entry> {
     let mut out: BTreeMap<String, Entry> = BTreeMap::new();
-    let Ok(rd) = fs::read_dir(dir) else { return out };
+    let Ok(rd) = fs::read_dir(dir) else {
+        return out;
+    };
     let mut files: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
     files.sort();
-    for f in files.into_iter().filter(|p| p.extension().is_some_and(|x| x == "json")) {
+    for f in files
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+    {
         let name = f.file_name().unwrap().to_string_lossy().to_string();
         let text = fs::read_to_string(&f).unwrap();
         let v: serde_json::Value = match serde_json::from_str(&text) {
@@ -83,14 +91,28 @@ fn load_catalog(dir: &Path, errors: &mut Vec<String>) -> BTreeMap<String, Entry>
             let ru = val.get("ru").and_then(|v| v.as_str());
             let en = val.get("en").and_then(|v| v.as_str());
             let (Some(ru), Some(en)) = (ru, en) else {
-                errors.push(format!("{}: \"{key}\" needs both \"ru\" and \"en\" strings", f.display()));
+                errors.push(format!(
+                    "{}: \"{key}\" needs both \"ru\" and \"en\" strings",
+                    f.display()
+                ));
                 continue;
             };
             if let Some(prev) = out.get(key) {
-                errors.push(format!("{}: \"{key}\" is also in {}", f.display(), prev.file));
+                errors.push(format!(
+                    "{}: \"{key}\" is also in {}",
+                    f.display(),
+                    prev.file
+                ));
                 continue;
             }
-            out.insert(key.clone(), Entry { ru: ru.to_string(), en: en.to_string(), file: name.clone() });
+            out.insert(
+                key.clone(),
+                Entry {
+                    ru: ru.to_string(),
+                    en: en.to_string(),
+                    file: name.clone(),
+                },
+            );
         }
     }
     out
@@ -112,7 +134,14 @@ fn skip_string(s: &[u8], mut i: usize) -> usize {
         }
         i += 1; // opening quote
         while i < s.len() {
-            if s[i] == b'"' && s[i + 1..].iter().take(hashes).filter(|&&c| c == b'#').count() == hashes {
+            if s[i] == b'"'
+                && s[i + 1..]
+                    .iter()
+                    .take(hashes)
+                    .filter(|&&c| c == b'#')
+                    .count()
+                    == hashes
+            {
                 return i + 1 + hashes;
             }
             i += 1;
@@ -208,13 +237,22 @@ fn calls_in(path: &Path, errors: &mut Vec<String>) -> Vec<Call> {
             }
             b'"' => {
                 let end = skip_string(s, i);
-                line += s[i..end.min(s.len())].iter().filter(|&&c| c == b'\n').count();
+                line += s[i..end.min(s.len())]
+                    .iter()
+                    .filter(|&&c| c == b'\n')
+                    .count();
                 i = end;
             }
             b'\'' => i = skip_quote(s, i),
-            b'r' if i + 1 < s.len() && (s[i + 1] == b'"' || s[i + 1] == b'#') && (i == 0 || !s[i - 1].is_ascii_alphanumeric() && s[i - 1] != b'_') => {
+            b'r' if i + 1 < s.len()
+                && (s[i + 1] == b'"' || s[i + 1] == b'#')
+                && (i == 0 || !s[i - 1].is_ascii_alphanumeric() && s[i - 1] != b'_') =>
+            {
                 let end = skip_string(s, i);
-                line += s[i..end.min(s.len())].iter().filter(|&&c| c == b'\n').count();
+                line += s[i..end.min(s.len())]
+                    .iter()
+                    .filter(|&&c| c == b'\n')
+                    .count();
                 i = end;
             }
             b't' if s[i..].starts_with(b"tr!(")
@@ -252,15 +290,24 @@ fn calls_in(path: &Path, errors: &mut Vec<String>) -> Vec<Call> {
                 }
                 let at = format!("{}:{line}", path.display());
                 // The macro's own definition (`$key:literal`) is not a call.
-                if !args.first().is_some_and(|a| a.trim_start().starts_with('$')) {
+                if !args
+                    .first()
+                    .is_some_and(|a| a.trim_start().starts_with('$'))
+                {
                     match args.first().and_then(|a| literal(a)) {
                         Some(key) => {
                             let names = args[1..]
                                 .iter()
                                 .filter(|a| !a.trim().is_empty())
-                                .filter_map(|a| a.split_once('=').map(|(n, _)| n.trim().to_string()))
+                                .filter_map(|a| {
+                                    a.split_once('=').map(|(n, _)| n.trim().to_string())
+                                })
                                 .collect();
-                            out.push(Call { key, args: names, at });
+                            out.push(Call {
+                                key,
+                                args: names,
+                                at,
+                            });
                         }
                         None => errors.push(format!("{at}: tr! key must be a string literal")),
                     }
@@ -310,7 +357,10 @@ fn every_message_in_both_languages_and_every_call_matches_its_text() {
             for c in calls_in(&f, &mut errors) {
                 used.insert(c.key.clone());
                 match catalog.get(&c.key) {
-                    None => errors.push(format!("{}: \"{}\" is in no locales/*.json of this crate", c.at, c.key)),
+                    None => errors.push(format!(
+                        "{}: \"{}\" is in no locales/*.json of this crate",
+                        c.at, c.key
+                    )),
                     Some(e) => {
                         let want = placeholders(&e.ru);
                         if want != c.args {
@@ -324,8 +374,16 @@ fn every_message_in_both_languages_and_every_call_matches_its_text() {
             }
         }
         for key in catalog.keys().filter(|k| !used.contains(*k)) {
-            errors.push(format!("{}/locales: \"{key}\" is used nowhere", krate.display()));
+            errors.push(format!(
+                "{}/locales: \"{key}\" is used nowhere",
+                krate.display()
+            ));
         }
     }
-    assert!(errors.is_empty(), "{} i18n problem(s) in {total} message(s):\n  {}", errors.len(), errors.join("\n  "));
+    assert!(
+        errors.is_empty(),
+        "{} i18n problem(s) in {total} message(s):\n  {}",
+        errors.len(),
+        errors.join("\n  ")
+    );
 }

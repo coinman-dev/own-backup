@@ -146,7 +146,9 @@ pub fn read_wim_info(path: &Path) -> Result<WimInfo> {
         architecture: arch_name(tag(&xml, "ARCH").as_deref()),
         build: tag(&xml, "BUILD").and_then(|b| b.parse().ok()).unwrap_or(0),
         language: tag(&xml, "LANGUAGE").unwrap_or_default(),
-        total_bytes: tag(&xml, "TOTALBYTES").and_then(|b| b.parse().ok()).unwrap_or(0),
+        total_bytes: tag(&xml, "TOTALBYTES")
+            .and_then(|b| b.parse().ok())
+            .unwrap_or(0),
     })
 }
 
@@ -282,8 +284,14 @@ mod tests {
     fn servicing_branches_group_by_release_not_by_build() {
         let (_d, p) = fake_wim(1, WINRE_XML);
         let info = read_wim_info(&p).unwrap(); // 19041
-        assert!(info.same_branch_as(19045), "19041 and 19045 are one Windows 10");
-        assert!(!info.same_branch_as(22621), "Windows 11 is a different branch");
+        assert!(
+            info.same_branch_as(19045),
+            "19041 and 19045 are one Windows 10"
+        );
+        assert!(
+            !info.same_branch_as(22621),
+            "Windows 11 is a different branch"
+        );
         assert!(!info.same_branch_as(17763), "1809 is a different branch");
     }
 }

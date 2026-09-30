@@ -284,8 +284,11 @@ pub fn apply_changed_with(
         };
         let record = data_writer.seal(cluster, encoding, cluster_size as u32, payload)?;
         let host_offset = tables.write_packed(&mut file, &record.bytes)?;
-        let entry =
-            encode_compressed_l2_entry(host_offset, record.bytes.len() as u64, header.cluster_bits)?;
+        let entry = encode_compressed_l2_entry(
+            host_offset,
+            record.bytes.len() as u64,
+            header.cluster_bits,
+        )?;
         tables.set_entry(cluster, entry)?;
         states.insert(cluster, ClusterState::Present(record.id));
     }
@@ -536,9 +539,12 @@ mod tests {
         let f = Fixture::new();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("full.obk");
-        let mut writer =
-            ObkWriter::create(&path, &f.chain, f.options(Uuid::new_v4(), ChainRole::Full, None))
-                .unwrap();
+        let mut writer = ObkWriter::create(
+            &path,
+            &f.chain,
+            f.options(Uuid::new_v4(), ChainRole::Full, None),
+        )
+        .unwrap();
         writer.write_cluster(0, &cluster_of(0xAA)).unwrap();
         writer.finish(b"before").unwrap();
         let mut before = ObkRandomReader::open(&path, &f.chain).unwrap();
@@ -547,13 +553,19 @@ mod tests {
         assert_eq!(contents, cluster_of(0xAA));
         let cluster_size = 1usize << cluster_bits();
         let mut old_header = vec![0u8; cluster_size];
-        std::fs::File::open(&path).unwrap().read_exact(&mut old_header).unwrap();
+        std::fs::File::open(&path)
+            .unwrap()
+            .read_exact(&mut old_header)
+            .unwrap();
 
         let mut changed = ChangedClusters::new();
         changed.insert(0, cluster_of(0xBB));
         apply_changed_clusters(&path, &f.chain, &changed, None).unwrap();
         let mut new_header = vec![0u8; cluster_size];
-        std::fs::File::open(&path).unwrap().read_exact(&mut new_header).unwrap();
+        std::fs::File::open(&path)
+            .unwrap()
+            .read_exact(&mut new_header)
+            .unwrap();
         assert_ne!(old_header, new_header);
         let mut after = ObkRandomReader::open(&path, &f.chain).unwrap();
         after.read_at(0, &mut contents).unwrap();
@@ -586,9 +598,12 @@ mod tests {
         let f = Fixture::new();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("full.obk");
-        let mut writer =
-            ObkWriter::create(&path, &f.chain, f.options(Uuid::new_v4(), ChainRole::Full, None))
-                .unwrap();
+        let mut writer = ObkWriter::create(
+            &path,
+            &f.chain,
+            f.options(Uuid::new_v4(), ChainRole::Full, None),
+        )
+        .unwrap();
         writer.write_cluster(0, &cluster_of(0xAA)).unwrap();
         writer
             .write_cluster(1, &marked(b"catalog-entry-of-a-removed-file"))
@@ -612,13 +627,17 @@ mod tests {
         assert_eq!(buf, cluster_of(0xAA));
         reader.read_at(cs as u64 * 2, &mut buf).unwrap();
         assert_eq!(buf, cluster_of(0xCC));
-        assert_eq!(&reader.sealed_metadata().unwrap()[..], b"sidecar before the pass");
+        assert_eq!(
+            &reader.sealed_metadata().unwrap()[..],
+            b"sidecar before the pass"
+        );
 
         // The point of the pass: what the cluster used to hold is no longer in
         // the file, not merely unreferenced.
         let raw = std::fs::read(&path).unwrap();
         assert!(
-            !raw.windows(31).any(|w| w == b"catalog-entry-of-a-removed-file"),
+            !raw.windows(31)
+                .any(|w| w == b"catalog-entry-of-a-removed-file"),
             "the previous contents of the changed cluster survived"
         );
     }
@@ -628,9 +647,12 @@ mod tests {
         let f = Fixture::new();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("full.obk");
-        let mut writer =
-            ObkWriter::create(&path, &f.chain, f.options(Uuid::new_v4(), ChainRole::Full, None))
-                .unwrap();
+        let mut writer = ObkWriter::create(
+            &path,
+            &f.chain,
+            f.options(Uuid::new_v4(), ChainRole::Full, None),
+        )
+        .unwrap();
         writer.write_cluster(0, &cluster_of(0xAA)).unwrap();
         writer.write_cluster(3, &cluster_of(0xBB)).unwrap();
         writer.finish(b"before").unwrap();
@@ -647,7 +669,10 @@ mod tests {
         let mut reader = ObkRandomReader::open(&path, &f.chain).unwrap();
         let mut buf = vec![0xFFu8; cs];
         reader.read_at(cs as u64 * 3, &mut buf).unwrap();
-        assert!(buf.iter().all(|&b| b == 0), "an emptied cluster reads as zeros");
+        assert!(
+            buf.iter().all(|&b| b == 0),
+            "an emptied cluster reads as zeros"
+        );
         assert_eq!(&reader.sealed_metadata().unwrap()[..], b"after the pass");
     }
 
@@ -686,8 +711,16 @@ mod tests {
         apply_changed_clusters(&child_path, &f.chain, &changed, None).unwrap();
 
         let mut chain = ObkChain::open(&child_path, &f.chain).unwrap();
-        assert_eq!(&chain.read_cluster(0).unwrap()[..], &cluster_of(0x11)[..], "inherited");
-        assert_eq!(&chain.read_cluster(1).unwrap()[..], &cluster_of(0x44)[..], "changed");
+        assert_eq!(
+            &chain.read_cluster(0).unwrap()[..],
+            &cluster_of(0x11)[..],
+            "inherited"
+        );
+        assert_eq!(
+            &chain.read_cluster(1).unwrap()[..],
+            &cluster_of(0x44)[..],
+            "changed"
+        );
         assert!(
             chain.read_cluster(2).unwrap().iter().all(|&b| b == 0),
             "an explicit zero must not turn back into the parent's data"
@@ -699,9 +732,12 @@ mod tests {
         let f = Fixture::new();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("full.obk");
-        let mut writer =
-            ObkWriter::create(&path, &f.chain, f.options(Uuid::new_v4(), ChainRole::Full, None))
-                .unwrap();
+        let mut writer = ObkWriter::create(
+            &path,
+            &f.chain,
+            f.options(Uuid::new_v4(), ChainRole::Full, None),
+        )
+        .unwrap();
         writer.write_cluster(0, &cluster_of(1)).unwrap();
         writer.finish(b"sidecar").unwrap();
 
@@ -732,9 +768,12 @@ mod tests {
         let f = Fixture::new();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("full.obk");
-        let mut writer =
-            ObkWriter::create(&path, &f.chain, f.options(Uuid::new_v4(), ChainRole::Full, None))
-                .unwrap();
+        let mut writer = ObkWriter::create(
+            &path,
+            &f.chain,
+            f.options(Uuid::new_v4(), ChainRole::Full, None),
+        )
+        .unwrap();
         writer.write_cluster(0, &cluster_of(1)).unwrap();
         writer.finish(b"sidecar").unwrap();
         let before = std::fs::read(&path).unwrap();

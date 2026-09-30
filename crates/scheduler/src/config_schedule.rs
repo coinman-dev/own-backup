@@ -143,9 +143,13 @@ mod tests {
     #[test]
     fn weekly_fires_on_configured_weekday() {
         // 2026-07-01 is a Wednesday.
-        let sched = parse(&schedule_to_cron(&cfg("weekly", "14:00", &["wed"], false)).unwrap()).unwrap();
+        let sched =
+            parse(&schedule_to_cron(&cfg("weekly", "14:00", &["wed"], false)).unwrap()).unwrap();
         let next = sched.after(&at(2026, 6, 29, 0, 0, 0)).next().unwrap(); // Mon
-        assert_eq!(next.format("%Y-%m-%d %H:%M").to_string(), "2026-07-01 14:00");
+        assert_eq!(
+            next.format("%Y-%m-%d %H:%M").to_string(),
+            "2026-07-01 14:00"
+        );
     }
 
     #[test]
@@ -154,12 +158,30 @@ mod tests {
         let fresh = Duration::seconds(120);
 
         // 30s after the slot, never run -> due.
-        assert!(is_due(&sched, at(2026, 7, 1, 14, 0, 30), None, false, fresh));
+        assert!(is_due(
+            &sched,
+            at(2026, 7, 1, 14, 0, 30),
+            None,
+            false,
+            fresh
+        ));
         // Already ran this slot -> not due.
         let ran = Some(at(2026, 7, 1, 14, 0, 5));
-        assert!(!is_due(&sched, at(2026, 7, 1, 14, 0, 30), ran, false, fresh));
+        assert!(!is_due(
+            &sched,
+            at(2026, 7, 1, 14, 0, 30),
+            ran,
+            false,
+            fresh
+        ));
         // Two hours later, never run, no catch-up -> not due (missed window).
-        assert!(!is_due(&sched, at(2026, 7, 1, 16, 0, 0), None, false, fresh));
+        assert!(!is_due(
+            &sched,
+            at(2026, 7, 1, 16, 0, 0),
+            None,
+            false,
+            fresh
+        ));
     }
 
     #[test]

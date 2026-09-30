@@ -30,7 +30,9 @@ pub fn parse_disk_layout(buf: &[u8], sector_size: u32, disk_size: u64) -> Result
     let sector = sector_size as usize;
     let hdr_off = sector; // LBA 1
     if buf.len() < hdr_off + 92 {
-        return Err(OwnBackupError::ImageFormat("GPT: buffer too small for header".into()));
+        return Err(OwnBackupError::ImageFormat(
+            "GPT: buffer too small for header".into(),
+        ));
     }
     let hdr = &buf[hdr_off..];
     if &hdr[0..8] != GPT_SIGNATURE {
@@ -110,9 +112,16 @@ pub fn read_disk_layout(disk_number: u32) -> Result<DiskLayout> {
 /// Find the first partition matching the OwnBackupMeta partition type GUID.
 /// Returns its guest offset (in bytes) and size (in bytes), or None if not found.
 pub fn find_meta_partition(layout: &DiskLayout) -> Option<(u64, u64)> {
-    layout.partitions.iter()
+    layout
+        .partitions
+        .iter()
         .find(|p| p.type_guid == crate::gpt_writer::OWN_BACKUP_META_GUID)
-        .map(|p| (p.offset_bytes(layout.sector_size), p.size_bytes(layout.sector_size)))
+        .map(|p| {
+            (
+                p.offset_bytes(layout.sector_size),
+                p.size_bytes(layout.sector_size),
+            )
+        })
 }
 
 #[cfg(test)]
@@ -144,7 +153,8 @@ mod tests {
         // Assemble a whole-disk buffer and apply the writes.
         let mut disk = vec![0u8; disk_size as usize];
         for op in &ops {
-            disk[op.offset as usize..op.offset as usize + op.bytes.len()].copy_from_slice(&op.bytes);
+            disk[op.offset as usize..op.offset as usize + op.bytes.len()]
+                .copy_from_slice(&op.bytes);
         }
 
         let parsed = parse_disk_layout(&disk, sector, disk_size).expect("parse GPT");

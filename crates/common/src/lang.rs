@@ -58,7 +58,9 @@ fn parse(code: &str) -> u8 {
 
 /// The language the config at `path` asks for; Russian when there is none.
 pub fn configured(path: &Path) -> String {
-    AppConfig::load_from_file(path).map(|c| c.ui_language).unwrap_or_default()
+    AppConfig::load_from_file(path)
+        .map(|c| c.ui_language)
+        .unwrap_or_default()
 }
 
 /// How often the config file is consulted for a changed language.
@@ -69,10 +71,12 @@ const RECHECK: Duration = Duration::from_secs(3);
 /// messages are asked for by a window that may switch language at any time.
 pub fn follow_config(path: PathBuf) {
     set(&configured(&path));
-    let _ = std::thread::Builder::new().name("ui-language".into()).spawn(move || loop {
-        std::thread::sleep(RECHECK);
-        set(&configured(&path));
-    });
+    let _ = std::thread::Builder::new()
+        .name("ui-language".into())
+        .spawn(move || loop {
+            std::thread::sleep(RECHECK);
+            set(&configured(&path));
+        });
 }
 
 /// A message from the calling crate's `locales/*.json`, in the language of

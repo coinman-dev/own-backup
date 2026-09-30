@@ -50,7 +50,10 @@ impl PreflightAnalyzer {
     /// working VSS -- the most common configuration we aim to support.
     #[cfg(not(target_os = "windows"))]
     fn collect_raw_data(&self, device_id: &str) -> Result<PreflightReport> {
-        info!(device_id, "Using mock preflight data (non-Windows platform)");
+        info!(
+            device_id,
+            "Using mock preflight data (non-Windows platform)"
+        );
 
         Ok(PreflightReport {
             boot_mode: BootMode::Uefi,
@@ -62,7 +65,7 @@ impl PreflightAnalyzer {
             filesystem: FileSystem::Ntfs,
             vss_service_running: true,
             vss_writers_healthy: true,
-            free_space_on_target: 500_000_000_000, // 500 GB
+            free_space_on_target: 500_000_000_000,  // 500 GB
             estimated_backup_size: 120_000_000_000, // 120 GB
             efi_partition_present: true,
             support_tier: SupportTier::A, // will be recalculated by resolve_support_tier

@@ -76,7 +76,10 @@ pub fn relaunch_elevated() -> Result<i32, String> {
             return Err(if err == 1223 {
                 "запрос повышения прав отклонён (UAC)".into()
             } else {
-                format!("ShellExecuteExW failed: {}", std::io::Error::from_raw_os_error(err as i32))
+                format!(
+                    "ShellExecuteExW failed: {}",
+                    std::io::Error::from_raw_os_error(err as i32)
+                )
             });
         }
         if info.hProcess.is_invalid() {
@@ -133,10 +136,16 @@ mod tests {
     #[test]
     fn quoting_matches_argv_rules() {
         assert_eq!(quote_arg("C:"), "C:");
-        assert_eq!(quote_arg("e:\\backup-test\\c.qcow2"), "e:\\backup-test\\c.qcow2");
+        assert_eq!(
+            quote_arg("e:\\backup-test\\c.qcow2"),
+            "e:\\backup-test\\c.qcow2"
+        );
         assert_eq!(quote_arg("path with spaces"), "\"path with spaces\"");
         assert_eq!(quote_arg("dir\\"), "\"dir\\\\\"");
         assert_eq!(quote_arg("say \"hi\""), "\"say \\\"hi\\\"\"");
-        assert_eq!(quote_arg("back\\\\slash end\\"), "\"back\\\\slash end\\\\\"");
+        assert_eq!(
+            quote_arg("back\\\\slash end\\"),
+            "\"back\\\\slash end\\\\\""
+        );
     }
 }

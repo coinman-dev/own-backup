@@ -91,7 +91,11 @@ pub fn scan(entries: &[crate::efivars_win::BootEntry]) -> Result<Vec<Esp>> {
                 continue;
             }
         };
-        for part in layout.partitions.iter().filter(|p| p.type_guid.eq_ignore_ascii_case(ESP_TYPE)) {
+        for part in layout
+            .partitions
+            .iter()
+            .filter(|p| p.type_guid.eq_ignore_ascii_case(ESP_TYPE))
+        {
             let offset = part.first_lba * layout.sector_size as u64;
             let root = quick_volume_root(disk, offset);
             let mut esp = Esp {
@@ -104,13 +108,12 @@ pub fn scan(entries: &[crate::efivars_win::BootEntry]) -> Result<Vec<Esp>> {
                 loaders: Vec::new(),
             };
             match root {
-                None => {
-                    esp.unreadable = Some(tr!("esp_scan_win.not_a_volume").into_owned())
-                }
+                None => esp.unreadable = Some(tr!("esp_scan_win.not_a_volume").into_owned()),
                 Some(root) => match collect_loaders(&root, disk, part.index, &part.part_guid) {
                     Ok(mut l) => {
                         for loader in &mut l {
-                            loader.named_by = naming_entry(entries, &loader.partition_guid, &loader.path);
+                            loader.named_by =
+                                naming_entry(entries, &loader.partition_guid, &loader.path);
                         }
                         esp.loaders = l;
                     }
@@ -180,7 +183,9 @@ fn collect_loaders(
             dirs.push((nested, format!("EFI\\{vendor_name}\\Boot")));
         }
         for (dir, prefix) in dirs {
-            let Ok(files) = std::fs::read_dir(&dir) else { continue };
+            let Ok(files) = std::fs::read_dir(&dir) else {
+                continue;
+            };
             for f in files.flatten() {
                 let name = f.file_name().to_string_lossy().to_string();
                 if !name.to_lowercase().ends_with(".efi") {

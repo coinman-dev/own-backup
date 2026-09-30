@@ -150,7 +150,10 @@ fn a_chain_written_here_opens_elsewhere_with_nothing_but_the_password() {
         let mut chain = ObkChain::open(&leaf, &key).unwrap();
         assert_eq!(chain.chain_len(), 2);
         assert_eq!(chain.virtual_size(), VIRTUAL_SIZE);
-        assert_eq!(&chain.read_cluster(0).unwrap()[..], &vec![0xAA; CLUSTER][..]);
+        assert_eq!(
+            &chain.read_cluster(0).unwrap()[..],
+            &vec![0xAA; CLUSTER][..]
+        );
         assert_eq!(&chain.read_cluster(1).unwrap()[..], &noise(42)[..]);
         assert_eq!(&chain.read_cluster(2).unwrap()[..], &vec![0u8; CLUSTER][..]);
         assert_eq!(
@@ -212,7 +215,10 @@ fn qemu_img_refuses_an_encrypted_image_by_name() {
         .arg(&raw)
         .output()
         .expect("run qemu-img convert");
-    assert!(!convert.status.success(), "qemu-img converted an encrypted image");
+    assert!(
+        !convert.status.success(),
+        "qemu-img converted an encrypted image"
+    );
     assert!(
         std::fs::metadata(&raw).map(|m| m.len()).unwrap_or(0) == 0,
         "qemu-img wrote data out of an encrypted image"
@@ -243,9 +249,7 @@ fn nothing_in_an_encrypted_image_is_readable_as_plaintext() {
         "plaintext data survived into the image"
     );
     assert!(
-        !raw
-            .windows(12)
-            .any(|w| w == b"machine-name"),
+        !raw.windows(12).any(|w| w == b"machine-name"),
         "sealed metadata survived into the image in the clear"
     );
 }

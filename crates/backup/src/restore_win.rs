@@ -101,11 +101,7 @@ impl TargetWriter {
                 target.size,
                 SETTLE_TIMEOUT,
             );
-            VolumeDismountGuard::for_restore_range(
-                target.disk_number,
-                target.offset,
-                target.size,
-            )
+            VolumeDismountGuard::for_restore_range(target.disk_number, target.offset, target.size)
         });
         if let Some(g) = &guard {
             if !g.failed.is_empty() {
@@ -216,23 +212,32 @@ pub fn source_window_for(sidecar: &Sidecar, src_index: u32) -> Result<SourceWind
     let Some(dm) = sidecar.disk_manifest.as_ref() else {
         return Ok(SourceWindow::whole(image_len));
     };
-    let p = dm.layout.partitions.iter().find(|p| p.index == src_index).ok_or_else(|| {
-        OwnBackupError::RestoreIncompatible(
-            tr!(
-                "restore_win.no_such_partition",
-                index = src_index,
-                present = dm
-                    .layout
-                    .partitions
-                    .iter()
-                    .map(|p| p.index.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+    let p = dm
+        .layout
+        .partitions
+        .iter()
+        .find(|p| p.index == src_index)
+        .ok_or_else(|| {
+            OwnBackupError::RestoreIncompatible(
+                tr!(
+                    "restore_win.no_such_partition",
+                    index = src_index,
+                    present = dm
+                        .layout
+                        .partitions
+                        .iter()
+                        .map(|p| p.index.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+                .into_owned(),
             )
-            .into_owned(),
-        )
-    })?;
-    Ok(SourceWindow::partition(p.first_lba, p.last_lba, dm.layout.sector_size))
+        })?;
+    Ok(SourceWindow::partition(
+        p.first_lba,
+        p.last_lba,
+        dm.layout.sector_size,
+    ))
 }
 
 /// The chain key for an encrypted image, from the job/manual keys the caller
@@ -246,8 +251,9 @@ fn chain_key_of(
     keys: Option<&crate::seal::context::ArchiveKeys>,
 ) -> Result<Option<crate::seal::ChainKey>> {
     match keys {
-        Some(k) if crate::sidecar::detect_container_format(image_path).ok()
-            == Some(crate::seal::obk::OBK_EXTENSION) =>
+        Some(k)
+            if crate::sidecar::detect_container_format(image_path).ok()
+                == Some(crate::seal::obk::OBK_EXTENSION) =>
         {
             Ok(Some(k.open_chain_of(image_path)?.key))
         }
@@ -282,8 +288,12 @@ pub fn restore_partition_sectors(
 
     if target.size < window.len {
         return Err(OwnBackupError::RestoreIncompatible(
-            tr!("restore_win.target_too_small", target = target.size, source = window.len)
-                .into_owned(),
+            tr!(
+                "restore_win.target_too_small",
+                target = target.size,
+                source = window.len
+            )
+            .into_owned(),
         ));
     }
 
@@ -325,8 +335,13 @@ pub fn restore_partition_sectors(
             break;
         }
 
-        let Some(copy) = plan_block_copy(entry.block_number, block_size, image_len, data_offset, window)
-        else {
+        let Some(copy) = plan_block_copy(
+            entry.block_number,
+            block_size,
+            image_len,
+            data_offset,
+            window,
+        ) else {
             continue; // this block belongs to some other partition
         };
         check_fits(&copy, target.size)?;
@@ -348,7 +363,10 @@ pub fn restore_partition_sectors(
             }
         }
 
-        dev.write_at(copy.dst_offset, &buf[copy.slice_start..copy.slice_start + copy.slice_len])?;
+        dev.write_at(
+            copy.dst_offset,
+            &buf[copy.slice_start..copy.slice_start + copy.slice_len],
+        )?;
         blocks_restored += 1;
         bytes_restored += copy.slice_len as u64;
         if opts.wipe_free_space {
@@ -470,7 +488,10 @@ fn wipe_gaps_encrypted(
             wiped += chunk as u64;
         }
     }
-    debug!(bytes = wiped, "free space inside the container zeroed (encrypted)");
+    debug!(
+        bytes = wiped,
+        "free space inside the container zeroed (encrypted)"
+    );
     Ok(wiped)
 }
 
@@ -551,8 +572,13 @@ pub fn verify_partition_sectors(
             out.cancelled = true;
             break;
         }
-        let Some(copy) = plan_block_copy(entry.block_number, block_size, image_len, data_offset, window)
-        else {
+        let Some(copy) = plan_block_copy(
+            entry.block_number,
+            block_size,
+            image_len,
+            data_offset,
+            window,
+        ) else {
             continue;
         };
 
@@ -623,7 +649,10 @@ impl MountedImage {
     ) -> Result<Self> {
         let physical_path = crate::engine_win::mount_image_with_keys(image_path, false, keys)?;
         info!(image = %image_path.display(), device = %physical_path, "image mounted for file restore");
-        Ok(Self { path: image_path.to_path_buf(), physical_path })
+        Ok(Self {
+            path: image_path.to_path_buf(),
+            physical_path,
+        })
     }
 
     /// Physical disk number of the attached image.
@@ -650,8 +679,12 @@ impl MountedImage {
         let offset = source_window_for(sidecar, src_index)?.start;
         crate::volume_win::volume_root_at_offset(disk, offset).ok_or_else(|| {
             OwnBackupError::Device(
-                tr!("restore_win.volume_not_shown", index = src_index, offset = offset)
-                    .into_owned(),
+                tr!(
+                    "restore_win.volume_not_shown",
+                    index = src_index,
+                    offset = offset
+                )
+                .into_owned(),
             )
         })
     }
@@ -785,8 +818,13 @@ pub fn restore_partition_encrypted(
             );
             break;
         }
-        let Some(copy) = plan_block_copy(entry.block_number, block_size, image_len, data_offset, window)
-        else {
+        let Some(copy) = plan_block_copy(
+            entry.block_number,
+            block_size,
+            image_len,
+            data_offset,
+            window,
+        ) else {
             continue;
         };
         // `dst_offset` is where the byte sits inside the *payload*; on disk it
@@ -826,8 +864,14 @@ pub fn restore_partition_encrypted(
     }
 
     if opts.wipe_free_space && !out.cancelled {
-        out.bytes_wiped =
-            wipe_gaps_encrypted(&mut dev, &mut covered, payload_len, &params, req.header.data_offset, cancel)?;
+        out.bytes_wiped = wipe_gaps_encrypted(
+            &mut dev,
+            &mut covered,
+            payload_len,
+            &params,
+            req.header.data_offset,
+            cancel,
+        )?;
     }
 
     dev.flush()?;
@@ -845,4 +889,3 @@ pub fn restore_partition_encrypted(
     );
     Ok(out)
 }
-

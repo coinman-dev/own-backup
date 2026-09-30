@@ -29,7 +29,9 @@ pub fn resolve_support_tier(report: &mut PreflightReport) {
 
     // Tier C blockers
     if report.disk_type == DiskType::Dynamic {
-        report.blockers.push("Dynamic disks are not supported".into());
+        report
+            .blockers
+            .push("Dynamic disks are not supported".into());
     }
     if report.disk_type == DiskType::StorageSpaces {
         report

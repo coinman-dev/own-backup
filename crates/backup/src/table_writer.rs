@@ -42,7 +42,13 @@ pub fn partition_table_write_ops(spec: &PartitionTableSpec) -> Result<Vec<WriteO
 fn gpt_ops(spec: &PartitionTableSpec) -> Result<Vec<WriteOp>> {
     let mut partitions = Vec::with_capacity(spec.entries.len());
     for e in &spec.entries {
-        let PartitionKind::Gpt { type_guid, part_guid, attributes, name } = &e.kind else {
+        let PartitionKind::Gpt {
+            type_guid,
+            part_guid,
+            attributes,
+            name,
+        } = &e.kind
+        else {
             return Err(OwnBackupError::ImageFormat(format!(
                 "partition {} carries MBR attributes but the table is GPT",
                 e.index
@@ -111,7 +117,10 @@ fn erase_stale_gpt(spec: &PartitionTableSpec) -> Vec<WriteOp> {
 
     let tail_start = total_lba.saturating_sub(GPT_STRUCTURE_SECTORS);
     let tail_is_free = tail_start > 0
-        && !spec.entries.iter().any(|e| e.end_lba_exclusive() > tail_start);
+        && !spec
+            .entries
+            .iter()
+            .any(|e| e.end_lba_exclusive() > tail_start);
     if tail_is_free {
         ops.push(WriteOp {
             offset: tail_start * sector,
@@ -159,7 +168,11 @@ mod tests {
                 index: 1,
                 first_lba: 2048,
                 last_lba,
-                kind: PartitionKind::Mbr { type_byte: 0x07, bootable: true, logical: false },
+                kind: PartitionKind::Mbr {
+                    type_byte: 0x07,
+                    bootable: true,
+                    logical: false,
+                },
             }],
         }
     }
@@ -187,7 +200,10 @@ mod tests {
         }
         let parsed = crate::gpt_reader::parse_disk_layout(&disk, 512, disk_size).unwrap();
         assert!(Uuid::parse_str(&parsed.partitions[0].part_guid).is_ok());
-        assert_ne!(parsed.partitions[0].part_guid, Uuid::nil().to_string().to_uppercase());
+        assert_ne!(
+            parsed.partitions[0].part_guid,
+            Uuid::nil().to_string().to_uppercase()
+        );
     }
 
     #[test]
@@ -201,7 +217,9 @@ mod tests {
         }
         assert!(crate::gpt_reader::parse_disk_layout(&disk, 512, disk_size).is_ok());
 
-        for op in partition_table_write_ops(&mbr_spec(disk_size, 2048 + 100 * MIB / 512 - 1)).unwrap() {
+        for op in
+            partition_table_write_ops(&mbr_spec(disk_size, 2048 + 100 * MIB / 512 - 1)).unwrap()
+        {
             disk[op.offset as usize..][..op.bytes.len()].copy_from_slice(&op.bytes);
         }
         assert!(

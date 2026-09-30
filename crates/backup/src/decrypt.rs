@@ -28,7 +28,11 @@ pub struct DecryptingVolume {
 impl DecryptingVolume {
     pub fn new(inner: Box<dyn RawVolume + Send>, params: LuksParams) -> Self {
         let length = inner.len().saturating_sub(params.data_offset);
-        Self { inner, params, length }
+        Self {
+            inner,
+            params,
+            length,
+        }
     }
 
     pub fn params(&self) -> &LuksParams {

@@ -235,8 +235,7 @@ fn attach_at(
     // target stopped under a live session leaves that session behind, and the
     // next address then found it and could not clear it (2026-09-25).
     let attached = (|| -> Result<Attached> {
-        let target =
-            iscsi_win::login(&address.to_string(), port, iqn, &chap_secret, virtual_size)?;
+        let target = iscsi_win::login(&address.to_string(), port, iqn, &chap_secret, virtual_size)?;
         let disk_number = target.disk_number;
         let physical = format!(r"\\.\PhysicalDrive{disk_number}");
 

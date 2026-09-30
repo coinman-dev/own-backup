@@ -99,15 +99,24 @@ impl Fixture {
             compression: ObkCompression::Zstd { level: 3 },
             backing_file: parent.map(|(_, name)| name.to_string()),
             key_file: self.key_file.clone(),
-            wrapped_chain_key: wrap_chain_key(&self.pair.public, self.chain_id.as_bytes(), &self.chain)
-                .unwrap(),
+            wrapped_chain_key: wrap_chain_key(
+                &self.pair.public,
+                self.chain_id.as_bytes(),
+                &self.chain,
+            )
+            .unwrap(),
             source_id: Some("volume-under-test".into()),
             consolidated_increments: 0,
             chain_started_at: None,
         }
     }
 
-    fn build(&self, opts: ObkWriterOptions, clusters: &[(u64, Vec<u8>)], metadata: &[u8]) -> Vec<u8> {
+    fn build(
+        &self,
+        opts: ObkWriterOptions,
+        clusters: &[(u64, Vec<u8>)],
+        metadata: &[u8],
+    ) -> Vec<u8> {
         let mut writer = ObkWriter::new(Cursor::new(Vec::new()), &self.chain, opts).unwrap();
         for (index, data) in clusters {
             writer.write_cluster(*index, data).unwrap();
@@ -117,7 +126,10 @@ impl Fixture {
 
     fn full(&self, clusters: &[(u64, Vec<u8>)], metadata: &[u8]) -> (Uuid, Vec<u8>) {
         let id = Uuid::new_v4();
-        (id, self.build(self.options(id, ChainRole::Full, None), clusters, metadata))
+        (
+            id,
+            self.build(self.options(id, ChainRole::Full, None), clusters, metadata),
+        )
     }
 
     fn open(&self, image: &[u8]) -> ObkImage<Cursor<Vec<u8>>> {
@@ -186,10 +198,10 @@ fn l2_entry_offset(image: &[u8], cluster: u64) -> usize {
 fn every_kind_of_cluster_comes_back_out_of_a_full_image() {
     let f = Fixture::new();
     let clusters = vec![
-        (0, text(0xAA)),          // compresses
-        (1, noise(1)),            // does not
-        (5, vec![0u8; CLUSTER]),  // all zeros: not stored at all
-        (63, noise(2)),           // the last cluster of the disk
+        (0, text(0xAA)),         // compresses
+        (1, noise(1)),           // does not
+        (5, vec![0u8; CLUSTER]), // all zeros: not stored at all
+        (63, noise(2)),          // the last cluster of the disk
     ];
     let metadata = b"sealed sidecar goes here".to_vec();
     let (_, image) = f.full(&clusters, &metadata);
@@ -224,7 +236,10 @@ fn an_image_without_compression_also_round_trips() {
     opts.compression = ObkCompression::None;
     let image = f.build(opts, &[(2, text(0x11)), (3, noise(9))], b"");
     let mut reader = f.open(&image);
-    assert_eq!(&reader.read_cluster(2).unwrap().unwrap()[..], &text(0x11)[..]);
+    assert_eq!(
+        &reader.read_cluster(2).unwrap().unwrap()[..],
+        &text(0x11)[..]
+    );
     assert_eq!(&reader.read_cluster(3).unwrap().unwrap()[..], &noise(9)[..]);
     assert_eq!(&reader.sealed_metadata().unwrap()[..], b"");
 }
@@ -264,11 +279,15 @@ fn the_open_header_lists_a_backup_without_a_key_and_promises_nothing() {
     assert_eq!(open.parent_backup_id, None);
     // Everything needed to open the image elsewhere travels inside it.
     assert_eq!(
-        open.chain_key_with_password("пароль архива").unwrap().as_bytes(),
+        open.chain_key_with_password("пароль архива")
+            .unwrap()
+            .as_bytes(),
         f.chain.as_bytes()
     );
     assert_eq!(
-        open.chain_key_with_recovery(&f.recovery).unwrap().as_bytes(),
+        open.chain_key_with_recovery(&f.recovery)
+            .unwrap()
+            .as_bytes(),
         f.chain.as_bytes()
     );
     assert!(open.chain_key_with_password("не тот пароль").is_err());
@@ -298,10 +317,26 @@ fn a_chain_resolves_parents_and_explicit_zeros_override_them() {
     let mut chain = ObkChain::open(&dir.path().join("inc.obk"), &f.chain).unwrap();
     assert_eq!(chain.chain_len(), 2);
     assert_eq!(chain.virtual_size(), VIRTUAL_SIZE);
-    assert_eq!(&chain.read_cluster(0).unwrap()[..], &text(0xAA)[..], "inherited");
-    assert_eq!(&chain.read_cluster(1).unwrap()[..], &noise(42)[..], "overwritten");
-    assert_eq!(&chain.read_cluster(2).unwrap()[..], &vec![0u8; CLUSTER][..], "zeroed");
-    assert_eq!(&chain.read_cluster(9).unwrap()[..], &vec![0u8; CLUSTER][..], "never written");
+    assert_eq!(
+        &chain.read_cluster(0).unwrap()[..],
+        &text(0xAA)[..],
+        "inherited"
+    );
+    assert_eq!(
+        &chain.read_cluster(1).unwrap()[..],
+        &noise(42)[..],
+        "overwritten"
+    );
+    assert_eq!(
+        &chain.read_cluster(2).unwrap()[..],
+        &vec![0u8; CLUSTER][..],
+        "zeroed"
+    );
+    assert_eq!(
+        &chain.read_cluster(9).unwrap()[..],
+        &vec![0u8; CLUSTER][..],
+        "never written"
+    );
     assert_eq!(&chain.sealed_metadata().unwrap()[..], b"increment metadata");
 
     // A region emptied on the source must not come back from the parent.
@@ -311,18 +346,28 @@ fn a_chain_resolves_parents_and_explicit_zeros_override_them() {
 
     // A differential sits on the full image, not on the increment.
     let diff = f.build(
-        f.options(Uuid::new_v4(), ChainRole::Differential, Some((full_id, "full.obk"))),
+        f.options(
+            Uuid::new_v4(),
+            ChainRole::Differential,
+            Some((full_id, "full.obk")),
+        ),
         &[(0, noise(7))],
         b"differential metadata",
     );
     f.write_file(dir.path(), "diff.obk", &diff);
     let mut chain = ObkChain::open(&dir.path().join("diff.obk"), &f.chain).unwrap();
     assert_eq!(&chain.read_cluster(0).unwrap()[..], &noise(7)[..]);
-    assert_eq!(&chain.read_cluster(1).unwrap()[..], &noise(1)[..], "from the full backup");
+    assert_eq!(
+        &chain.read_cluster(1).unwrap()[..],
+        &noise(1)[..],
+        "from the full backup"
+    );
 
     // Reading part of a cluster, across a boundary, gives the same bytes.
     let mut spanning = vec![0u8; CLUSTER];
-    chain.read_at(CLUSTER as u64 / 2 * 3, &mut spanning).unwrap();
+    chain
+        .read_at(CLUSTER as u64 / 2 * 3, &mut spanning)
+        .unwrap();
     let mut expected = noise(1)[CLUSTER / 2..].to_vec();
     expected.extend_from_slice(&noise(2)[..CLUSTER / 2]);
     assert_eq!(spanning, expected);
@@ -338,7 +383,11 @@ fn a_chain_refuses_a_parent_that_is_not_the_one_the_image_was_written_against() 
     // Another full backup of the same chain, put where the parent should be.
     let (_, other) = f.full(&[(0, noise(2))], b"other full");
     let inc = f.build(
-        f.options(Uuid::new_v4(), ChainRole::Incremental, Some((full_id, "full.obk"))),
+        f.options(
+            Uuid::new_v4(),
+            ChainRole::Incremental,
+            Some((full_id, "full.obk")),
+        ),
         &[(1, noise(3))],
         b"inc",
     );
@@ -381,7 +430,10 @@ fn another_key_opens_nothing_and_says_so_without_returning_bytes() {
         panic!("a wrong chain key must not open an image");
     };
     let error = error.to_string();
-    assert!(error.contains("authentication failed"), "unexpected: {error}");
+    assert!(
+        error.contains("authentication failed"),
+        "unexpected: {error}"
+    );
 }
 
 #[test]
@@ -424,12 +476,18 @@ fn an_older_valid_record_of_the_same_cluster_is_refused() {
     let (_, new) = f.full(&[(4, noise(2))], b"new");
     let (old_at, old_len) = record_at(&old, &f.chain_id, 1, 4);
     let (new_at, new_len) = record_at(&new, &f.chain_id, 1, 4);
-    assert_eq!(old_len, new_len, "both records are raw and one cluster long");
+    assert_eq!(
+        old_len, new_len,
+        "both records are raw and one cluster long"
+    );
 
     let mut spliced = new.clone();
     spliced[new_at..new_at + new_len].copy_from_slice(&old[old_at..old_at + old_len]);
     let mut reader = f.open(&spliced);
-    let error = reader.read_cluster(4).expect_err("replay must be refused").to_string();
+    let error = reader
+        .read_cluster(4)
+        .expect_err("replay must be refused")
+        .to_string();
     assert!(
         error.contains("does not match its authenticated index"),
         "unexpected: {error}"
@@ -448,8 +506,14 @@ fn two_records_of_one_image_cannot_change_places() {
     swapped[a..a + len].copy_from_slice(&image[b..b + len]);
     swapped[b..b + len].copy_from_slice(&image[a..a + len]);
     let mut reader = f.open(&swapped);
-    assert!(reader.read_cluster(4).is_err(), "cluster 4 read a moved record");
-    assert!(reader.read_cluster(5).is_err(), "cluster 5 read a moved record");
+    assert!(
+        reader.read_cluster(4).is_err(),
+        "cluster 4 read a moved record"
+    );
+    assert!(
+        reader.read_cluster(5).is_err(),
+        "cluster 5 read a moved record"
+    );
 }
 
 #[test]
@@ -463,15 +527,24 @@ fn the_cluster_table_cannot_be_pointed_at_another_record() {
     edited[to..to + 8].copy_from_slice(&entry);
 
     let mut reader = f.open(&edited);
-    let error = reader.read_cluster(4).expect_err("a moved pointer must be refused");
-    assert!(error.to_string().contains("does not match its authenticated index"));
+    let error = reader
+        .read_cluster(4)
+        .expect_err("a moved pointer must be refused");
+    assert!(error
+        .to_string()
+        .contains("does not match its authenticated index"));
 
     // Dropping the entry entirely is a disagreement with the index, not a hole.
     let mut cleared = image.clone();
     cleared[to..to + 8].fill(0);
     let mut reader = f.open(&cleared);
-    let error = reader.read_cluster(4).expect_err("a dropped pointer must be refused");
-    assert!(error.to_string().contains("disagree"), "unexpected: {error}");
+    let error = reader
+        .read_cluster(4)
+        .expect_err("a dropped pointer must be refused");
+    assert!(
+        error.to_string().contains("disagree"),
+        "unexpected: {error}"
+    );
 
     // And an entry invented for a cluster the index does not list is refused
     // rather than silently believed.
@@ -496,7 +569,10 @@ fn the_index_and_the_root_cannot_be_replaced_by_valid_records_of_another_backup(
         let mut spliced = new.clone();
         spliced[new_at..new_at + new_len].copy_from_slice(&old[old_at..old_at + old_len]);
         let mut reader = f.open(&spliced);
-        assert!(reader.read_cluster(4).is_err(), "a foreign index chunk was believed");
+        assert!(
+            reader.read_cluster(4).is_err(),
+            "a foreign index chunk was believed"
+        );
     }
 
     // The root record of another backup, likewise.
@@ -549,7 +625,10 @@ fn the_open_header_cannot_quietly_relabel_an_image() {
         .expect("the open header carries the root offset")
         + needle.len();
     let mut moved = image.clone();
-    let digits = image[at..].iter().take_while(|b| b.is_ascii_digit()).count();
+    let digits = image[at..]
+        .iter()
+        .take_while(|b| b.is_ascii_digit())
+        .count();
     assert!(digits > 0, "the root offset is a number");
     moved[at] = if image[at] == b'1' { b'2' } else { b'1' };
     assert!(!f.open_err(&moved).is_empty());
@@ -592,8 +671,14 @@ fn the_writer_refuses_what_would_produce_an_unreadable_image() {
     .unwrap();
     writer.write_cluster(0, &noise(1)).unwrap();
     assert!(writer.write_cluster(0, &noise(2)).is_err(), "write-once");
-    assert!(writer.write_cluster(1, &noise(1)[..10]).is_err(), "partial cluster");
-    assert!(writer.write_cluster(64, &noise(1)).is_err(), "past the disk");
+    assert!(
+        writer.write_cluster(1, &noise(1)[..10]).is_err(),
+        "partial cluster"
+    );
+    assert!(
+        writer.write_cluster(64, &noise(1)).is_err(),
+        "past the disk"
+    );
 }
 
 #[test]
@@ -603,14 +688,21 @@ fn a_zero_cluster_costs_no_record_and_a_child_still_overrides_its_parent() {
     let mut writer = ObkWriter::new(
         Cursor::new(Vec::new()),
         &f.chain,
-        f.options(Uuid::new_v4(), ChainRole::Incremental, Some((full_id, "full.obk"))),
+        f.options(
+            Uuid::new_v4(),
+            ChainRole::Incremental,
+            Some((full_id, "full.obk")),
+        ),
     )
     .unwrap();
     writer.write_zero_cluster(3).unwrap();
     writer.write_cluster(4, &vec![0u8; CLUSTER]).unwrap();
     let image = writer.finish(b"child").unwrap().into_inner();
 
-    assert!(records(&image, &f.chain_id, 1).is_empty(), "zeros cost no record");
+    assert!(
+        records(&image, &f.chain_id, 1).is_empty(),
+        "zeros cost no record"
+    );
     let mut reader = f.open(&image);
     assert_eq!(reader.cluster_state(3).unwrap(), ClusterState::Zero);
     assert_eq!(reader.cluster_state(4).unwrap(), ClusterState::Zero);

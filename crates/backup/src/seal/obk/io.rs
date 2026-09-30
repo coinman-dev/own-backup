@@ -22,9 +22,9 @@ use std::path::Path;
 use own_backup_common::Result;
 use zeroize::Zeroizing;
 
+use super::bad;
 use super::reader::ObkChain;
 use super::writer::{ObkWriter, ObkWriterOptions};
-use super::bad;
 use crate::seal::ChainKey;
 
 /// Staged partial clusters are bounded by GPT structures plus one tail per
@@ -203,7 +203,9 @@ mod tests {
     use uuid::Uuid;
 
     fn pattern(seed: u8, len: usize) -> Vec<u8> {
-        (0..len).map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed)).collect()
+        (0..len)
+            .map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed))
+            .collect()
     }
 
     #[test]
@@ -218,9 +220,12 @@ mod tests {
         let head = pattern(1, 512);
         let body = pattern(2, cluster * 2);
         let tail = pattern(3, 300);
-        let mut writer =
-            ObkStagedWriter::create(&path, &f.chain, f.options(Uuid::new_v4(), ChainRole::Full, None))
-                .unwrap();
+        let mut writer = ObkStagedWriter::create(
+            &path,
+            &f.chain,
+            f.options(Uuid::new_v4(), ChainRole::Full, None),
+        )
+        .unwrap();
         writer.write_at(0, &head).unwrap();
         writer.write_at(cluster as u64, &body).unwrap();
         writer.write_at(cluster as u64 * 5 + 17, &tail).unwrap();
@@ -246,7 +251,9 @@ mod tests {
         reader.read_at(cluster as u64 * 4, &mut zeros).unwrap();
         assert!(zeros.iter().all(|&b| b == 0));
         let mut over = vec![0u8; 16];
-        assert!(reader.read_at(reader.virtual_size() - 8, &mut over).is_err());
+        assert!(reader
+            .read_at(reader.virtual_size() - 8, &mut over)
+            .is_err());
     }
 
     #[test]
@@ -302,7 +309,8 @@ mod tests {
         let cluster = 1usize << cluster_bits();
         let mut opts = f.options(Uuid::new_v4(), ChainRole::Full, None);
         opts.virtual_size = (MAX_STAGED_CLUSTERS as u64 + 4) * cluster as u64;
-        let mut writer = ObkStagedWriter::create(&dir.path().join("full.obk"), &f.chain, opts).unwrap();
+        let mut writer =
+            ObkStagedWriter::create(&dir.path().join("full.obk"), &f.chain, opts).unwrap();
 
         // One tiny write into each of a thousand different clusters: staged,
         // because none of them fills its cluster.

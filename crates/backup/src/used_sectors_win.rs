@@ -126,8 +126,7 @@ impl NtfsUsedSectorMap {
             let data_bytes = returned as usize - header;
             // The kernel returns whole bytes; the last byte of the final chunk
             // may contain padding bits past the end of the volume.
-            let bits_in_chunk =
-                std::cmp::min((data_bytes as u64) * 8, bits_remaining);
+            let bits_in_chunk = std::cmp::min((data_bytes as u64) * 8, bits_remaining);
 
             if starting_lcn != next_lcn {
                 return Err(OwnBackupError::Device(format!(
@@ -154,8 +153,13 @@ impl NtfsUsedSectorMap {
             "volume bitmap loaded"
         );
 
-        let (block_used, used_count) =
-            fold_bitmap(&bitmap, total_clusters, cluster_size, volume_len, block_size);
+        let (block_used, used_count) = fold_bitmap(
+            &bitmap,
+            total_clusters,
+            cluster_size,
+            volume_len,
+            block_size,
+        );
         info!(
             volume = volume_path,
             total_blocks = block_used.len(),
@@ -345,11 +349,7 @@ fn fold_bitmap(
             let end = start + cluster_size as u64 - 1;
             let first_block = (start / block_size as u64) as usize;
             let last_block = (end / block_size as u64) as usize;
-            for b in block_used
-                .iter_mut()
-                .take(last_block + 1)
-                .skip(first_block)
-            {
+            for b in block_used.iter_mut().take(last_block + 1).skip(first_block) {
                 *b = true;
             }
         }

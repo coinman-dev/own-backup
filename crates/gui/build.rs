@@ -38,9 +38,8 @@ const APP_MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="y
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Embed our own manifest so the exe runs as the invoking user (no UAC).
     tauri_build::try_build(
-        tauri_build::Attributes::new().windows_attributes(
-            tauri_build::WindowsAttributes::new().app_manifest(APP_MANIFEST),
-        ),
+        tauri_build::Attributes::new()
+            .windows_attributes(tauri_build::WindowsAttributes::new().app_manifest(APP_MANIFEST)),
     )
     .expect("failed to run tauri-build");
 
@@ -50,9 +49,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .output()
         .is_err()
     {
-        let local_protoc =
-            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
-                .join(".local/protoc/bin/protoc");
+        let local_protoc = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+            .join(".local/protoc/bin/protoc");
         if local_protoc.exists() {
             std::env::set_var("PROTOC", &local_protoc);
         }

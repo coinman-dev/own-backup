@@ -113,7 +113,9 @@ fn build_entries(layout: &GptLayout) -> Result<Vec<u8>> {
     }
 
     // Entry 2: OwnBackupMeta Partition (if present)
-    if let (Some(meta_size), Some(meta_guid)) = (layout.meta_partition_size, layout.meta_partition_guid) {
+    if let (Some(meta_size), Some(meta_guid)) =
+        (layout.meta_partition_size, layout.meta_partition_guid)
+    {
         let meta_first_lba = last_lba + 1;
         let meta_last_lba = meta_first_lba + meta_size.div_ceil(sector) - 1;
 
@@ -237,8 +239,7 @@ pub fn gpt_write_ops(layout: &GptLayout) -> Result<Vec<WriteOp>> {
 
     // Validate the partition fits the usable range.
     let part_first_lba = layout.partition_offset / sector;
-    let part_last_lba =
-        (layout.partition_offset + layout.partition_size).div_ceil(sector) - 1;
+    let part_last_lba = (layout.partition_offset + layout.partition_size).div_ceil(sector) - 1;
     if layout.partition_offset % sector != 0 {
         return Err(OwnBackupError::ImageFormat(
             "partition offset is not sector-aligned".into(),
@@ -380,20 +381,47 @@ pub fn disk_gpt_write_ops(layout: &DiskLayout, target_disk_size: u64) -> Result<
         .map_err(|e| OwnBackupError::ImageFormat(format!("bad disk GUID: {e}")))?;
 
     let primary_header = build_header_raw(
-        sector_size, &disk_guid, 1, backup_header_lba,
-        first_usable_lba, last_usable_lba, primary_entries_lba, entries_crc,
+        sector_size,
+        &disk_guid,
+        1,
+        backup_header_lba,
+        first_usable_lba,
+        last_usable_lba,
+        primary_entries_lba,
+        entries_crc,
     );
     let backup_header = build_header_raw(
-        sector_size, &disk_guid, backup_header_lba, 1,
-        first_usable_lba, last_usable_lba, backup_entries_lba, entries_crc,
+        sector_size,
+        &disk_guid,
+        backup_header_lba,
+        1,
+        first_usable_lba,
+        last_usable_lba,
+        backup_entries_lba,
+        entries_crc,
     );
 
     Ok(vec![
-        WriteOp { offset: 0, bytes: build_protective_mbr_raw(target_disk_size, sector_size) },
-        WriteOp { offset: sector, bytes: primary_header },
-        WriteOp { offset: primary_entries_lba * sector, bytes: entries.clone() },
-        WriteOp { offset: backup_entries_lba * sector, bytes: entries },
-        WriteOp { offset: backup_header_lba * sector, bytes: backup_header },
+        WriteOp {
+            offset: 0,
+            bytes: build_protective_mbr_raw(target_disk_size, sector_size),
+        },
+        WriteOp {
+            offset: sector,
+            bytes: primary_header,
+        },
+        WriteOp {
+            offset: primary_entries_lba * sector,
+            bytes: entries.clone(),
+        },
+        WriteOp {
+            offset: backup_entries_lba * sector,
+            bytes: entries,
+        },
+        WriteOp {
+            offset: backup_header_lba * sector,
+            bytes: backup_header,
+        },
     ])
 }
 
@@ -485,10 +513,7 @@ mod tests {
         assert_eq!(partitions.len(), 1);
         let p = partitions.values().next().unwrap();
         assert_eq!(p.first_lba, DEFAULT_PARTITION_OFFSET / 512);
-        assert_eq!(
-            (p.last_lba - p.first_lba + 1) * 512,
-            part_size
-        );
+        assert_eq!((p.last_lba - p.first_lba + 1) * 512, part_size);
         assert_eq!(p.name, "OwnBackup");
         assert_eq!(
             p.part_type_guid.guid.to_string().to_uppercase(),

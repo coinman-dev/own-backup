@@ -295,7 +295,10 @@ pub fn calculate_meta_partition_size(total_blocks: u64, extra_bytes: u64) -> u64
 /// its own metadata — the estimate is allowed to be generous, and is not
 /// allowed to be optimistic.
 pub fn luks_headers_reserve(headers: &[own_backup_common::image::LuksHeaderBackup]) -> u64 {
-    headers.iter().map(|h| h.data_offset.div_ceil(3) * 4 + 65536).sum()
+    headers
+        .iter()
+        .map(|h| h.data_offset.div_ceil(3) * 4 + 65536)
+        .sum()
 }
 
 /// Room to reserve for the machine's embedded boot entries.
@@ -318,7 +321,10 @@ pub fn boot_entries_reserve(backup: Option<&crate::efivars::BootBackup>) -> u64 
 /// point in a backup where the headers have not been captured yet but their
 /// size is already known.
 pub fn luks_reserve_for(data_offsets: impl IntoIterator<Item = u64>) -> u64 {
-    data_offsets.into_iter().map(|d| d.div_ceil(3) * 4 + 65536).sum()
+    data_offsets
+        .into_iter()
+        .map(|d| d.div_ceil(3) * 4 + 65536)
+        .sum()
 }
 
 #[cfg(test)]
@@ -350,7 +356,10 @@ mod meta_size_tests {
         // 14 219 blocks alone fit in 1 MiB; with the header they need 23.
         let reserve = luks_headers_reserve(&[header(16 * MIB)]);
         let size = calculate_meta_partition_size(14_219, reserve);
-        assert!(size >= 22 * MIB, "reserved only {size} bytes for a 16 MiB header");
+        assert!(
+            size >= 22 * MIB,
+            "reserved only {size} bytes for a 16 MiB header"
+        );
     }
 
     #[test]
@@ -433,7 +442,10 @@ fn read_varint<R: Read>(r: &mut R) -> std::io::Result<u64> {
         }
         shift += 7;
         if shift >= 64 {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "varint overflow"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "varint overflow",
+            ));
         }
     }
     Ok(val)
@@ -494,10 +506,12 @@ pub fn write_sidecar_v2_full_to<W: Write>(
         manifest: manifest.clone(),
         disk_manifest: disk_manifest.cloned(),
     })?;
-    let json_zstd = zstd::bulk::compress(&json, 3)
-        .map_err(|e| OwnBackupError::Compression(e.to_string()))?;
+    let json_zstd =
+        zstd::bulk::compress(&json, 3).map_err(|e| OwnBackupError::Compression(e.to_string()))?;
     if json_zstd.len() > u32::MAX as usize {
-        return Err(OwnBackupError::ImageFormat("compressed sidecar JSON too large".into()));
+        return Err(OwnBackupError::ImageFormat(
+            "compressed sidecar JSON too large".into(),
+        ));
     }
 
     let mut checksums = checksums.to_vec();
@@ -519,7 +533,9 @@ pub fn write_sidecar_v2_full_to<W: Write>(
         Vec::new()
     };
     if table_zstd.len() > u32::MAX as usize {
-        return Err(OwnBackupError::ImageFormat("compressed sidecar checksum table too large".into()));
+        return Err(OwnBackupError::ImageFormat(
+            "compressed sidecar checksum table too large".into(),
+        ));
     }
 
     let mut blob = Vec::new();
@@ -676,7 +692,10 @@ fn open_meta_partition(image_path: &Path, container_format: &str) -> Result<(Gue
     let (mut guest, vsize) = match container_format {
         "vhdx" | "avhdx" => {
             let alloc = crate::vhdx_bat::allocated_payload_blocks(image_path)?;
-            (GuestBlob::Vhdx(image_path.to_path_buf()), alloc.virtual_size)
+            (
+                GuestBlob::Vhdx(image_path.to_path_buf()),
+                alloc.virtual_size,
+            )
         }
         "qcow2" => {
             let reader = crate::qcow2::Qcow2RandomReader::open(image_path)?;
@@ -702,9 +721,10 @@ fn open_meta_partition(image_path: &Path, container_format: &str) -> Result<(Gue
     let mut gpt_buf = vec![0u8; 34 * SECTOR];
     guest.read_at(0, &mut gpt_buf)?;
     let layout = crate::gpt_reader::parse_disk_layout(&gpt_buf, SECTOR as u32, vsize)?;
-    let (meta_offset, meta_size) = crate::gpt_reader::find_meta_partition(&layout).ok_or_else(
-        || OwnBackupError::ImageFormat("OwnBackupMeta partition not found in GPT".into()),
-    )?;
+    let (meta_offset, meta_size) =
+        crate::gpt_reader::find_meta_partition(&layout).ok_or_else(|| {
+            OwnBackupError::ImageFormat("OwnBackupMeta partition not found in GPT".into())
+        })?;
     Ok((guest, meta_offset, meta_size))
 }
 
@@ -716,7 +736,9 @@ fn read_meta_blob(image_path: &Path, container_format: &str, header_only: bool) 
 
     // magic (8) + JSON length (4) — shared by v1 and v2 layouts.
     if meta_size < 12 {
-        return Err(OwnBackupError::ImageFormat("meta partition too small for a sidecar".into()));
+        return Err(OwnBackupError::ImageFormat(
+            "meta partition too small for a sidecar".into(),
+        ));
     }
     let mut head = [0u8; 12];
     guest.read_at(meta_offset, &mut head)?;
@@ -747,7 +769,9 @@ fn read_meta_blob(image_path: &Path, container_format: &str, header_only: bool) 
         }
         12 + json_len + 8 + count * 16
     } else {
-        return Err(OwnBackupError::ImageFormat("no sidecar magic in the meta partition".into()));
+        return Err(OwnBackupError::ImageFormat(
+            "no sidecar magic in the meta partition".into(),
+        ));
     };
     if total > meta_size {
         return Err(OwnBackupError::ImageFormat(format!(
@@ -899,7 +923,11 @@ pub fn read_sidecar_with_keys(
     image_path: &Path,
     keys: Option<&crate::seal::context::ArchiveKeys>,
 ) -> Result<Sidecar> {
-    let ext = image_path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_lowercase();
+    let ext = image_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_lowercase();
     if ext == crate::seal::obk::OBK_EXTENSION {
         let keys = keys.ok_or_else(|| {
             OwnBackupError::Encryption(format!(
@@ -946,10 +974,7 @@ pub fn boot_entries_of_image(image_path: &Path) -> Option<crate::efivars::BootBa
 /// FILE for them again (as [`boot_entries_of_image`] does) gets "none" from an
 /// encrypted copy, and then the screen offers no question and the restore
 /// reports there was nothing to put back.
-pub fn boot_entries_of(
-    sidecar: &Sidecar,
-    image_path: &Path,
-) -> Option<crate::efivars::BootBackup> {
+pub fn boot_entries_of(sidecar: &Sidecar, image_path: &Path) -> Option<crate::efivars::BootBackup> {
     if sidecar.info.boot_entries.is_some() {
         return sidecar.info.boot_entries.clone();
     }
@@ -974,7 +999,10 @@ fn boot_entries_beside(image_path: &Path) -> Option<crate::efivars::BootBackup> 
 pub fn boot_entries_path_beside(image_path: &Path) -> std::path::PathBuf {
     image_path.with_extension(format!(
         "{}.boot.json",
-        image_path.extension().and_then(|e| e.to_str()).unwrap_or("img")
+        image_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("img")
     ))
 }
 
@@ -1022,8 +1050,7 @@ pub fn image_sidecar_readable(image_path: &Path) -> bool {
         .and_then(|e| e.to_str())
         .unwrap_or_default()
         .to_lowercase();
-    read_embedded_sidecar_header(image_path, &ext).is_ok()
-        || sidecar_path_for(image_path).exists()
+    read_embedded_sidecar_header(image_path, &ext).is_ok() || sidecar_path_for(image_path).exists()
 }
 
 /// Read only the JSON header (info + manifest) of a sidecar, skipping the
@@ -1153,12 +1180,15 @@ fn read_sidecar_v2_from_after_magic<R: Read>(r: &mut R) -> Result<Sidecar> {
             // panic (debug) instead of being reported. And a block number past
             // the end of the image is not merely odd: `verify_image` turns it
             // into `volume_len - offset`, which underflows.
-            let block_number = prev.checked_add(delta).filter(|b| *b <= limit).ok_or_else(|| {
-                OwnBackupError::ImageFormat(format!(
-                    "sidecar v2: запись {i} указывает на блок за пределами образа \
+            let block_number =
+                prev.checked_add(delta)
+                    .filter(|b| *b <= limit)
+                    .ok_or_else(|| {
+                        OwnBackupError::ImageFormat(format!(
+                            "sidecar v2: запись {i} указывает на блок за пределами образа \
                      (предыдущий {prev}, шаг {delta}, предел {limit})"
-                ))
-            })?;
+                        ))
+                    })?;
             let mut cksum_buf = [0u8; 8];
             cursor.read_exact(&mut cksum_buf)?;
             let checksum = u64::from_le_bytes(cksum_buf);
@@ -1282,9 +1312,18 @@ mod tests {
         let info = SidecarInfo::new_full("job_full.vhdx", 1024 * 1024);
         let manifest = make_manifest();
         let checksums = vec![
-            BlockChecksum { block_number: 0, checksum: 0xDEAD },
-            BlockChecksum { block_number: 5, checksum: 0xBEEF },
-            BlockChecksum { block_number: 15, checksum: u64::MAX },
+            BlockChecksum {
+                block_number: 0,
+                checksum: 0xDEAD,
+            },
+            BlockChecksum {
+                block_number: 5,
+                checksum: 0xBEEF,
+            },
+            BlockChecksum {
+                block_number: 15,
+                checksum: u64::MAX,
+            },
         ];
 
         let mut buf = Vec::new();
@@ -1323,7 +1362,10 @@ mod tests {
             info: SidecarInfo,
         }
         let doc: Doc = serde_json::from_value(json).unwrap();
-        assert_eq!(doc.info.app_version, "", "an old copy must not borrow our version");
+        assert_eq!(
+            doc.info.app_version, "",
+            "an old copy must not borrow our version"
+        );
         assert_eq!(doc.info.image_file_name, "old.vhdx");
     }
 
@@ -1354,8 +1396,13 @@ mod tests {
     #[test]
     fn sidecar_rejects_bad_magic() {
         let mut buf = Vec::new();
-        write_sidecar_to(&mut buf, &SidecarInfo::new_full("x.vhdx", 0), &make_manifest(), &[])
-            .unwrap();
+        write_sidecar_to(
+            &mut buf,
+            &SidecarInfo::new_full("x.vhdx", 0),
+            &make_manifest(),
+            &[],
+        )
+        .unwrap();
         buf[0] = b'X';
         assert!(read_sidecar_from(&mut Cursor::new(&buf)).is_err());
     }
@@ -1363,9 +1410,17 @@ mod tests {
     #[test]
     fn sidecar_rejects_truncated_checksums() {
         let mut buf = Vec::new();
-        let checksums = vec![BlockChecksum { block_number: 1, checksum: 2 }];
-        write_sidecar_to(&mut buf, &SidecarInfo::new_full("x.vhdx", 0), &make_manifest(), &checksums)
-            .unwrap();
+        let checksums = vec![BlockChecksum {
+            block_number: 1,
+            checksum: 2,
+        }];
+        write_sidecar_to(
+            &mut buf,
+            &SidecarInfo::new_full("x.vhdx", 0),
+            &make_manifest(),
+            &checksums,
+        )
+        .unwrap();
         buf.truncate(buf.len() - 4);
         assert!(read_sidecar_from(&mut Cursor::new(&buf)).is_err());
     }
@@ -1375,9 +1430,18 @@ mod tests {
         let info = SidecarInfo::new_full("job_full.vhdx", 1024 * 1024);
         let manifest = make_manifest();
         let checksums = vec![
-            BlockChecksum { block_number: 0, checksum: 0xDEAD },
-            BlockChecksum { block_number: 5, checksum: 0xBEEF },
-            BlockChecksum { block_number: 15, checksum: u64::MAX },
+            BlockChecksum {
+                block_number: 0,
+                checksum: 0xDEAD,
+            },
+            BlockChecksum {
+                block_number: 5,
+                checksum: 0xBEEF,
+            },
+            BlockChecksum {
+                block_number: 15,
+                checksum: u64::MAX,
+            },
         ];
 
         let mut buf = Vec::new();
@@ -1410,7 +1474,10 @@ mod tests {
         };
         let info = SidecarInfo::new_full("modulator_disk3.vhdx", 1024 * 1024);
         let manifest = make_manifest();
-        let checksums = vec![BlockChecksum { block_number: 0, checksum: 7 }];
+        let checksums = vec![BlockChecksum {
+            block_number: 0,
+            checksum: 7,
+        }];
         let disk = DiskBackupManifest {
             format_version: DiskBackupManifest::FORMAT_VERSION,
             created_at: "2026-07-11T00:00:00Z".into(),
@@ -1449,7 +1516,10 @@ mod tests {
         assert_eq!(got.disk_number, 3);
         assert_eq!(got.disk_model, "Samsung SSD 970 PRO 512GB");
         assert_eq!(got.layout.partitions.len(), 1);
-        assert_eq!(got.layout.partitions[0].type_guid, own_backup_common::gpt::GPT_TYPE_EFI_SYSTEM);
+        assert_eq!(
+            got.layout.partitions[0].type_guid,
+            own_backup_common::gpt::GPT_TYPE_EFI_SYSTEM
+        );
         assert_eq!(got.images[0].token, "VE7F57C39");
         assert_eq!(sidecar.checksums, checksums);
     }
@@ -1470,8 +1540,13 @@ mod tests {
     #[test]
     fn sidecar_v2_rejects_bad_magic() {
         let mut buf = Vec::new();
-        write_sidecar_v2_to(&mut buf, &SidecarInfo::new_full("x.vhdx", 0), &make_manifest(), &[])
-            .unwrap();
+        write_sidecar_v2_to(
+            &mut buf,
+            &SidecarInfo::new_full("x.vhdx", 0),
+            &make_manifest(),
+            &[],
+        )
+        .unwrap();
         buf[0] = b'X';
         assert!(read_sidecar_from(&mut Cursor::new(&buf)).is_err());
     }
@@ -1479,8 +1554,13 @@ mod tests {
     #[test]
     fn sidecar_v2_rejects_corrupted_hash() {
         let mut buf = Vec::new();
-        write_sidecar_v2_to(&mut buf, &SidecarInfo::new_full("x.vhdx", 0), &make_manifest(), &[])
-            .unwrap();
+        write_sidecar_v2_to(
+            &mut buf,
+            &SidecarInfo::new_full("x.vhdx", 0),
+            &make_manifest(),
+            &[],
+        )
+        .unwrap();
         let len = buf.len();
         // Corrupt the xxhash64 at the end of the blob
         buf[len - 1] ^= 0xFF;
@@ -1490,7 +1570,7 @@ mod tests {
     #[test]
     fn test_read_embedded_sidecar_qcow2() {
         use crate::gpt_writer::{gpt_write_ops, GptLayout, DEFAULT_PARTITION_OFFSET};
-        use crate::qcow2::{Qcow2Writer, Qcow2WriterOptions, Qcow2Compression};
+        use crate::qcow2::{Qcow2Compression, Qcow2Writer, Qcow2WriterOptions};
 
         let dir = tempfile::tempdir().unwrap();
         let image_path = dir.path().join("test.qcow2");
@@ -1521,7 +1601,8 @@ mod tests {
 
         // Write the GPT layout
         for op in gpt_write_ops(&layout).unwrap() {
-            disk_buf[op.offset as usize..op.offset as usize + op.bytes.len()].copy_from_slice(&op.bytes);
+            disk_buf[op.offset as usize..op.offset as usize + op.bytes.len()]
+                .copy_from_slice(&op.bytes);
         }
 
         // Setup the sidecar blob
@@ -1529,7 +1610,10 @@ mod tests {
         info.container = "qcow2".into();
         info.job_id = Some("test_job".into());
         let manifest = make_manifest();
-        let checksums = vec![BlockChecksum { block_number: 2, checksum: 12345 }];
+        let checksums = vec![BlockChecksum {
+            block_number: 2,
+            checksum: 12345,
+        }];
 
         let mut sidecar_bytes = Vec::new();
         write_sidecar_v2_to(&mut sidecar_bytes, &info, &manifest, &checksums).unwrap();
@@ -1537,7 +1621,8 @@ mod tests {
         // Write the sidecar blob to the meta partition guest offset in our disk buffer
         let last_lba = (DEFAULT_PARTITION_OFFSET + volume_len) / sector_size as u64 - 1;
         let meta_offset = (last_lba + 1) * sector_size as u64;
-        disk_buf[meta_offset as usize..meta_offset as usize + sidecar_bytes.len()].copy_from_slice(&sidecar_bytes);
+        disk_buf[meta_offset as usize..meta_offset as usize + sidecar_bytes.len()]
+            .copy_from_slice(&sidecar_bytes);
 
         // 2. Build the qcow2 image file using Qcow2Writer
         let file = std::fs::File::create(&image_path).unwrap();
@@ -1548,7 +1633,8 @@ mod tests {
                 compression: Qcow2Compression::None,
                 ..Default::default()
             },
-        ).unwrap();
+        )
+        .unwrap();
 
         let cs = 64 * 1024;
         let mut cluster_index = 0;
@@ -1559,7 +1645,9 @@ mod tests {
             if chunk.iter().any(|&b| b != 0) {
                 let mut cluster_data = vec![0u8; cs as usize];
                 cluster_data[..chunk.len()].copy_from_slice(chunk);
-                qcow_writer.write_cluster(cluster_index, &cluster_data).unwrap();
+                qcow_writer
+                    .write_cluster(cluster_index, &cluster_data)
+                    .unwrap();
             }
             cluster_index += 1;
         }
@@ -1572,7 +1660,8 @@ mod tests {
         assert_eq!(read_sidecar.info.job_id.as_deref(), Some("test_job"));
         assert_eq!(read_sidecar.checksums, checksums);
 
-        let (read_info, read_manifest) = read_embedded_sidecar_header(&image_path, "qcow2").unwrap();
+        let (read_info, read_manifest) =
+            read_embedded_sidecar_header(&image_path, "qcow2").unwrap();
         assert_eq!(read_info.image_file_name, "test.qcow2");
         assert_eq!(read_manifest.block_size, 65536);
 
@@ -1677,7 +1766,10 @@ mod tests {
         let info = SidecarInfo::new_full("x.vhdx", 0);
         let manifest = make_manifest(); // 16 блоков
         let checksums: Vec<_> = (0..16)
-            .map(|i| BlockChecksum { block_number: i, checksum: i * 7 })
+            .map(|i| BlockChecksum {
+                block_number: i,
+                checksum: i * 7,
+            })
             .collect();
 
         for v2 in [false, true] {
@@ -1714,7 +1806,10 @@ mod tests {
     fn a_block_number_past_the_end_of_the_image_is_an_error_not_a_panic() {
         let info = SidecarInfo::new_full("x.vhdx", 0);
         let manifest = make_manifest(); // 16 блоков
-        let checksums = vec![BlockChecksum { block_number: u64::MAX - 1, checksum: 1 }];
+        let checksums = vec![BlockChecksum {
+            block_number: u64::MAX - 1,
+            checksum: 1,
+        }];
 
         for v2 in [false, true] {
             let mut buf = Vec::new();
@@ -1724,10 +1819,7 @@ mod tests {
                 write_sidecar_to(&mut buf, &info, &manifest, &checksums).unwrap();
             }
             let err = read_sidecar_from(&mut Cursor::new(&buf)).unwrap_err();
-            assert!(
-                format!("{err}").contains("за пределами"),
-                "v2={v2}: {err}"
-            );
+            assert!(format!("{err}").contains("за пределами"), "v2={v2}: {err}");
         }
     }
 
@@ -1865,11 +1957,18 @@ mod tests {
     /// читаются до того, как считается размер служебного раздела.
     #[test]
     fn the_room_reserved_for_them_is_measured_not_guessed() {
-        assert_eq!(boot_entries_reserve(None), 0, "нечего — нечего и резервировать");
+        assert_eq!(
+            boot_entries_reserve(None),
+            0,
+            "нечего — нечего и резервировать"
+        );
         let backup = a_boot_backup("MODULATOR");
         let want = boot_entries_reserve(Some(&backup));
         let json = backup.to_json().unwrap().len() as u64;
-        assert!(want > json, "резерв должен покрывать сами данные и обрамление");
+        assert!(
+            want > json,
+            "резерв должен покрывать сами данные и обрамление"
+        );
     }
 
     /// Несколько байт разницы в резерве — это дрожание, а не разница в

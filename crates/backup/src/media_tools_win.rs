@@ -43,7 +43,9 @@ pub struct FoundTool {
 pub fn find_tools() -> Vec<FoundTool> {
     let mut found = Vec::new();
     for tool in MEDIA_TOOLS {
-        let Some(source) = locate(&tool) else { continue };
+        let Some(source) = locate(&tool) else {
+            continue;
+        };
         // What the medium will actually grow by, not what the installation
         // weighs: the folders in `skip` never leave this machine, and a number
         // that counts them is a number the person deciding is misled by.
@@ -53,7 +55,10 @@ pub fn find_tools() -> Vec<FoundTool> {
             .iter()
             .map(|folder| weigh(&source.join(folder)))
             .fold((0, 0), |(b, f), (sb, sf)| (b + sb, f + sf));
-        let (size_bytes, files) = (whole - left.min(whole), whole_files - left_files.min(whole_files));
+        let (size_bytes, files) = (
+            whole - left.min(whole),
+            whole_files - left_files.min(whole_files),
+        );
         info!(
             tool = tool.id,
             path = %source.display(),
@@ -75,7 +80,9 @@ pub fn find_tools() -> Vec<FoundTool> {
 
 /// The first place holding this tool's executable, or nothing.
 fn locate(tool: &MediaTool) -> Option<PathBuf> {
-    candidates(tool).into_iter().find(|dir| dir.join(tool.exe).is_file())
+    candidates(tool)
+        .into_iter()
+        .find(|dir| dir.join(tool.exe).is_file())
 }
 
 /// Where to look, best answer first: what the program itself recorded, then the
@@ -95,8 +102,16 @@ fn candidates(tool: &MediaTool) -> Vec<PathBuf> {
         "totalcmd" => {
             // Ghisler's own key. Per-user first: a Total Commander installed
             // for one account records it there and nowhere else.
-            add(read_string(HKEY_CURRENT_USER, r"Software\Ghisler\Total Commander", "InstallDir"));
-            add(read_string(HKEY_LOCAL_MACHINE, r"SOFTWARE\Ghisler\Total Commander", "InstallDir"));
+            add(read_string(
+                HKEY_CURRENT_USER,
+                r"Software\Ghisler\Total Commander",
+                "InstallDir",
+            ));
+            add(read_string(
+                HKEY_LOCAL_MACHINE,
+                r"SOFTWARE\Ghisler\Total Commander",
+                "InstallDir",
+            ));
             add(program_files().map(|p| p.join("totalcmd").display().to_string()));
             add(program_files_x86().map(|p| p.join("totalcmd").display().to_string()));
             // Its own default since the nineties, and still common.
@@ -105,7 +120,11 @@ fn candidates(tool: &MediaTool) -> Vec<PathBuf> {
         "notepadpp" => {
             // The default value of the key, not a named one.
             add(read_string(HKEY_LOCAL_MACHINE, r"SOFTWARE\Notepad++", ""));
-            add(read_string(HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Notepad++", ""));
+            add(read_string(
+                HKEY_LOCAL_MACHINE,
+                r"SOFTWARE\WOW6432Node\Notepad++",
+                "",
+            ));
             add(program_files().map(|p| p.join("Notepad++").display().to_string()));
             add(program_files_x86().map(|p| p.join("Notepad++").display().to_string()));
         }
@@ -129,7 +148,9 @@ fn program_files_x86() -> Option<PathBuf> {
 /// is a RAM disk, and an installation with a dozen plugins is not the size
 /// anyone expects.
 pub fn weigh(dir: &Path) -> (u64, u32) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return (0, 0) };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return (0, 0);
+    };
     let mut bytes = 0;
     let mut files = 0;
     for entry in entries.flatten() {
@@ -199,7 +220,11 @@ mod tests {
     #[test]
     fn every_tool_in_the_table_has_places_to_look() {
         for tool in MEDIA_TOOLS {
-            assert!(!candidates(&tool).is_empty(), "nowhere to look for {}", tool.id);
+            assert!(
+                !candidates(&tool).is_empty(),
+                "nowhere to look for {}",
+                tool.id
+            );
         }
     }
 }

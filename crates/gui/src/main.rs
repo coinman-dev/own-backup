@@ -77,12 +77,17 @@ fn init_logging() {
 
     let config_path = own_backup_common::config::AppConfig::default_path();
     // The boot medium starts with no config, and its log has to explain itself.
-    let fallback = if own_backup_common::media_mode::is_windows_pe() { "debug" } else { "info" };
+    let fallback = if own_backup_common::media_mode::is_windows_pe() {
+        "debug"
+    } else {
+        "info"
+    };
     let level = log_level::configured_level(&config_path, fallback);
     let from_env = tracing_subscriber::EnvFilter::try_from_default_env().ok();
     let pinned = from_env.is_some();
-    let filter = from_env
-        .unwrap_or_else(|| tracing_subscriber::EnvFilter::new(log_level::filter_directives(&level)));
+    let filter = from_env.unwrap_or_else(|| {
+        tracing_subscriber::EnvFilter::new(log_level::filter_directives(&level))
+    });
 
     let opened = open_log();
     let log_path = opened.as_ref().map(|(_, p)| p.clone());
@@ -109,7 +114,10 @@ fn init_logging() {
             builder.init();
             if !pinned {
                 log_level::follow_config(config_path, fallback, level.clone(), move |directives| {
-                    if handle.reload(tracing_subscriber::EnvFilter::new(directives)).is_ok() {
+                    if handle
+                        .reload(tracing_subscriber::EnvFilter::new(directives))
+                        .is_ok()
+                    {
                         tracing::info!(filter = directives, "log level changed in the settings");
                     }
                 });
@@ -171,7 +179,9 @@ fn enforce_single_instance() {
     use windows::Win32::System::Threading::CreateMutexW;
     use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONINFORMATION, MB_OK};
 
-    let name: Vec<u16> = "Global\\OwnBackupGuiSingleInstance\0".encode_utf16().collect();
+    let name: Vec<u16> = "Global\\OwnBackupGuiSingleInstance\0"
+        .encode_utf16()
+        .collect();
     // SAFETY: name is null-terminated; we intentionally leak the handle so the
     // mutex lives for the whole process (released by the OS on exit).
     let handle = unsafe { CreateMutexW(None, true, PCWSTR(name.as_ptr())) };
@@ -230,7 +240,12 @@ fn show_window_start_error(
     let body: Vec<u16> = message.encode_utf16().chain([0]).collect();
     // SAFETY: both strings are null-terminated and live through the call.
     unsafe {
-        MessageBoxW(None, PCWSTR(body.as_ptr()), PCWSTR(title.as_ptr()), MB_OK | MB_ICONERROR);
+        MessageBoxW(
+            None,
+            PCWSTR(body.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            MB_OK | MB_ICONERROR,
+        );
     }
 }
 
@@ -273,7 +288,10 @@ fn webview2_registered() -> bool {
         if status.0 != 0 {
             return false;
         }
-        let len = version.iter().position(|&ch| ch == 0).unwrap_or(version.len());
+        let len = version
+            .iter()
+            .position(|&ch| ch == 0)
+            .unwrap_or(version.len());
         let pv = String::from_utf16_lossy(&version[..len]);
         !pv.is_empty() && pv != "0.0.0.0"
     })
@@ -340,7 +358,9 @@ const COMFORTABLE_SCALE: f64 = 1.5;
 /// 150 % — the same place the cap was aiming for, for our own window at least.
 /// Everything else on the medium stays as Windows drew it.
 fn shrink_if_the_screen_is_scaled_hard(app: &tauri::App, window: &tauri::WebviewWindow) {
-    let Ok(Some(monitor)) = app.primary_monitor() else { return };
+    let Ok(Some(monitor)) = app.primary_monitor() else {
+        return;
+    };
     let scale = monitor.scale_factor();
     if scale <= COMFORTABLE_SCALE {
         return;

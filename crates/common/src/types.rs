@@ -40,7 +40,10 @@ impl FileSystem {
     /// else can only be moved as raw sectors — Windows has no driver for it and
     /// we are not writing one (D4).
     pub fn is_windows_family(self) -> bool {
-        matches!(self, FileSystem::Ntfs | FileSystem::Fat32 | FileSystem::ExFat | FileSystem::ReFs)
+        matches!(
+            self,
+            FileSystem::Ntfs | FileSystem::Fat32 | FileSystem::ExFat | FileSystem::ReFs
+        )
     }
 
     /// Display name as users know it. The names themselves are the same in
@@ -118,7 +121,9 @@ impl std::str::FromStr for ImageFormat {
         match s.to_ascii_lowercase().as_str() {
             "vhdx" => Ok(ImageFormat::Vhdx),
             "qcow2" => Ok(ImageFormat::Qcow2),
-            other => Err(format!("unknown image format '{other}' (expected vhdx or qcow2)")),
+            other => Err(format!(
+                "unknown image format '{other}' (expected vhdx or qcow2)"
+            )),
         }
     }
 }

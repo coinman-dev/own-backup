@@ -50,7 +50,9 @@ fn bad(msg: impl std::fmt::Display) -> OwnBackupError {
 }
 
 fn guid_le(s: &str) -> [u8; 16] {
-    Uuid::parse_str(s).expect("valid GUID literal").to_bytes_le()
+    Uuid::parse_str(s)
+        .expect("valid GUID literal")
+        .to_bytes_le()
 }
 
 // --- CRC-32C (Castagnoli), reflected, init/xorout 0xFFFFFFFF ---
@@ -59,7 +61,11 @@ fn crc32c(data: &[u8]) -> u32 {
     for &b in data {
         crc ^= b as u32;
         for _ in 0..8 {
-            crc = if crc & 1 != 0 { (crc >> 1) ^ 0x82F6_3B78 } else { crc >> 1 };
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0x82F6_3B78
+            } else {
+                crc >> 1
+            };
         }
     }
     !crc
@@ -128,7 +134,9 @@ impl VhdxWriter {
         sector_size: u32,
     ) -> Result<Self> {
         if block_size < MB || block_size % MB != 0 || !block_size.is_power_of_two() {
-            return Err(bad(format!("block size {block_size} must be a power-of-two ≥ 1 MiB")));
+            return Err(bad(format!(
+                "block size {block_size} must be a power-of-two ≥ 1 MiB"
+            )));
         }
         let chunk_ratio = chunk_ratio(block_size, sector_size);
         let data_blocks = virtual_size.div_ceil(block_size);
@@ -295,8 +303,8 @@ impl VhdxWriter {
         h[8..16].copy_from_slice(&1u64.to_le_bytes()); // SequenceNumber
         h[16..32].copy_from_slice(&Uuid::new_v4().to_bytes_le()); // FileWriteGuid
         h[32..48].copy_from_slice(&Uuid::new_v4().to_bytes_le()); // DataWriteGuid
-        // 48..64 LogGuid = 0 (empty log)
-        // LogVersion(64..66)=0, Version(66..68)=1
+                                                                  // 48..64 LogGuid = 0 (empty log)
+                                                                  // LogVersion(64..66)=0, Version(66..68)=1
         h[66..68].copy_from_slice(&1u16.to_le_bytes());
         h[68..72].copy_from_slice(&(LOG_LEN as u32).to_le_bytes()); // LogLength
         h[72..80].copy_from_slice(&LOG_OFF.to_le_bytes()); // LogOffset
@@ -336,28 +344,57 @@ impl VhdxWriter {
         // Item payloads, placed 64 KiB in.
         let items_off = META_ITEMS_OFF as usize;
         let mut cur = items_off;
-        let push_item = |m: &mut [u8], slot: usize, guid: &str, flags: u32, payload: &[u8], cur: &mut usize| {
-            let e = 32 + slot * 32; // entry in the table
-            m[e..e + 16].copy_from_slice(&guid_le(guid));
-            m[e + 16..e + 20].copy_from_slice(&(*cur as u32).to_le_bytes());
-            m[e + 20..e + 24].copy_from_slice(&(payload.len() as u32).to_le_bytes());
-            m[e + 24..e + 28].copy_from_slice(&flags.to_le_bytes());
-            m[*cur..*cur + payload.len()].copy_from_slice(payload);
-            *cur += payload.len();
-        };
+        let push_item =
+            |m: &mut [u8], slot: usize, guid: &str, flags: u32, payload: &[u8], cur: &mut usize| {
+                let e = 32 + slot * 32; // entry in the table
+                m[e..e + 16].copy_from_slice(&guid_le(guid));
+                m[e + 16..e + 20].copy_from_slice(&(*cur as u32).to_le_bytes());
+                m[e + 20..e + 24].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+                m[e + 24..e + 28].copy_from_slice(&flags.to_le_bytes());
+                m[*cur..*cur + payload.len()].copy_from_slice(payload);
+                *cur += payload.len();
+            };
 
         // File Parameters: BlockSize + flags(0 = not leave-allocated, no parent).
         let mut fp = [0u8; 8];
         fp[0..4].copy_from_slice(&(self.block_size as u32).to_le_bytes());
         push_item(&mut m, 0, MI_FILE_PARAMS, 0x4, &fp, &mut cur); // IsRequired
-        // Virtual Disk Size.
-        push_item(&mut m, 1, MI_VDISK_SIZE, 0x6, &self.virtual_size.to_le_bytes(), &mut cur);
+                                                                  // Virtual Disk Size.
+        push_item(
+            &mut m,
+            1,
+            MI_VDISK_SIZE,
+            0x6,
+            &self.virtual_size.to_le_bytes(),
+            &mut cur,
+        );
         // Virtual Disk ID.
-        push_item(&mut m, 2, MI_VDISK_ID, 0x6, &Uuid::new_v4().to_bytes_le(), &mut cur);
+        push_item(
+            &mut m,
+            2,
+            MI_VDISK_ID,
+            0x6,
+            &Uuid::new_v4().to_bytes_le(),
+            &mut cur,
+        );
         // Logical + Physical sector size.
-        push_item(&mut m, 3, MI_LOG_SECTOR, 0x6, &self.sector_size.to_le_bytes(), &mut cur);
+        push_item(
+            &mut m,
+            3,
+            MI_LOG_SECTOR,
+            0x6,
+            &self.sector_size.to_le_bytes(),
+            &mut cur,
+        );
         let phys = std::cmp::max(self.sector_size, 4096);
-        push_item(&mut m, 4, MI_PHYS_SECTOR, 0x6, &phys.to_le_bytes(), &mut cur);
+        push_item(
+            &mut m,
+            4,
+            MI_PHYS_SECTOR,
+            0x6,
+            &phys.to_le_bytes(),
+            &mut cur,
+        );
 
         self.at(META_OFF, &m)
     }
@@ -376,7 +413,8 @@ impl VhdxWriter {
                 self.bat.resize(bi + 1, 0);
             }
             let entry = self.bat[bi];
-            let is_allocated = (entry & 7) == PAYLOAD_BLOCK_FULLY_PRESENT || (entry != 0 && (entry & 7) == 0);
+            let is_allocated =
+                (entry & 7) == PAYLOAD_BLOCK_FULLY_PRESENT || (entry != 0 && (entry & 7) == 0);
 
             // Zeros into a block nobody has touched cost a megabyte of file for
             // nothing: an unallocated block already reads as zeros. This is what
@@ -403,9 +441,7 @@ impl VhdxWriter {
             } else {
                 let alloc_off = self.next_data_off;
                 self.next_data_off += self.block_size;
-                self.file
-                    .set_len(self.next_data_off)
-                    .map_err(bad)?;
+                self.file.set_len(self.next_data_off).map_err(bad)?;
                 // A newly allocated block is written whole (FULLY_PRESENT), so
                 // the parent stops showing through it — every byte of it must
                 // therefore be filled, not just the part this call carries.
@@ -422,7 +458,10 @@ impl VhdxWriter {
                             let path = self.path.clone();
                             self.seed = Some(crate::vhdx_bat::VhdxGuestReader::open(&path)?);
                         }
-                        self.seed.as_mut().unwrap().read_at(block_start, &mut seed)?;
+                        self.seed
+                            .as_mut()
+                            .unwrap()
+                            .read_at(block_start, &mut seed)?;
                     }
                     self.at(alloc_off, &seed)?;
                 }
@@ -472,7 +511,8 @@ pub struct VhdxReader {
 
 impl VhdxReader {
     pub fn open(path: &Path) -> Result<Self> {
-        let mut file = File::open(path).map_err(|e| bad(format!("open {}: {e}", path.display())))?;
+        let mut file =
+            File::open(path).map_err(|e| bad(format!("open {}: {e}", path.display())))?;
 
         // Region table: find BAT + metadata offsets.
         let mut region = vec![0u8; 64 * 1024];
@@ -536,7 +576,13 @@ impl VhdxReader {
             .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
             .collect();
 
-        Ok(Self { file, virtual_size: vsize, block_size: bsize, chunk_ratio, bat })
+        Ok(Self {
+            file,
+            virtual_size: vsize,
+            block_size: bsize,
+            chunk_ratio,
+            bat,
+        })
     }
 
     pub fn virtual_size(&self) -> u64 {
@@ -554,7 +600,8 @@ impl VhdxReader {
         while done < buf.len() {
             let block = off / self.block_size;
             let in_block = off % self.block_size;
-            let take = std::cmp::min(self.block_size - in_block, (buf.len() - done) as u64) as usize;
+            let take =
+                std::cmp::min(self.block_size - in_block, (buf.len() - done) as u64) as usize;
 
             let bi = bat_index(block, self.chunk_ratio) as usize;
             let entry = self.bat.get(bi).copied().unwrap_or(0);
@@ -618,7 +665,10 @@ mod tests {
         // Block 1 was never written → reads back as zeros.
         let mut buf = vec![0u8; 8192];
         r.read_at(block, &mut buf).unwrap();
-        assert!(buf.iter().all(|&x| x == 0), "unallocated block must read zero");
+        assert!(
+            buf.iter().all(|&x| x == 0),
+            "unallocated block must read zero"
+        );
 
         // The file is sparse: allocated blocks (3) ≪ virtual size.
         let actual = std::fs::metadata(&path).unwrap().len();

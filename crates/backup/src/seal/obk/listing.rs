@@ -16,8 +16,8 @@ use std::path::Path;
 use own_backup_common::Result;
 use uuid::Uuid;
 
-use super::header::ObkFileHeader;
 use super::bad;
+use super::header::ObkFileHeader;
 use crate::sidecar::ChainRole;
 
 /// The open half of one encrypted image, in the terms `chains.rs` works in.
@@ -43,8 +43,8 @@ pub fn read_listing(path: &Path) -> Result<ObkListing> {
     let file = std::fs::File::open(path)
         .map_err(|e| bad(format!("cannot open {}: {e}", path.display())))?;
     let mut reader = std::io::BufReader::new(file);
-    let header = ObkFileHeader::read(&mut reader)
-        .map_err(|e| bad(format!("{}: {e}", path.display())))?;
+    let header =
+        ObkFileHeader::read(&mut reader).map_err(|e| bad(format!("{}: {e}", path.display())))?;
     let open = header.open;
     Ok(ObkListing {
         job_id: open.key_file.job_id.clone(),
@@ -102,7 +102,10 @@ mod tests {
         assert_eq!(base.backup_id, full_id);
         assert_eq!(base.parent_file_name, None);
         assert_eq!(base.consolidated_increments, 3);
-        assert_eq!(base.chain_started_at.as_deref(), Some("2026-09-01T00:00:00Z"));
+        assert_eq!(
+            base.chain_started_at.as_deref(),
+            Some("2026-09-01T00:00:00Z")
+        );
         assert_eq!(base.source_id.as_deref(), Some("volume-under-test"));
 
         let child = read_listing(&dir.path().join("inc.obk")).unwrap();

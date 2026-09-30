@@ -89,15 +89,18 @@ impl DiskLayout {
         source: Option<&DiskInfo>,
     ) -> bool {
         let Some(source) = source else { return true };
-        self.partitions.iter().filter(|p| kept.contains(&p.index)).any(|p| {
-            p.type_guid.eq_ignore_ascii_case(GPT_TYPE_EFI_SYSTEM)
-                || p.type_guid.eq_ignore_ascii_case(GPT_TYPE_WINRE)
-                || source
-                    .partitions
-                    .iter()
-                    .find(|sp| sp.index == p.index)
-                    .is_some_and(|sp| sp.is_system || sp.has_os)
-        })
+        self.partitions
+            .iter()
+            .filter(|p| kept.contains(&p.index))
+            .any(|p| {
+                p.type_guid.eq_ignore_ascii_case(GPT_TYPE_EFI_SYSTEM)
+                    || p.type_guid.eq_ignore_ascii_case(GPT_TYPE_WINRE)
+                    || source
+                        .partitions
+                        .iter()
+                        .find(|sp| sp.index == p.index)
+                        .is_some_and(|sp| sp.is_system || sp.has_os)
+            })
     }
 }
 
@@ -124,7 +127,12 @@ pub fn plan_whole_disk_image(layout: &DiskLayout, meta_size: u64) -> WholeDiskIm
     let mib_lbas = (1024 * 1024) / sector;
     // Start of usable space (past the 1 MiB GPT head) or right after the last
     // real partition, whichever is later — then 1 MiB-align.
-    let last_end = layout.partitions.iter().map(|p| p.last_lba + 1).max().unwrap_or(mib_lbas);
+    let last_end = layout
+        .partitions
+        .iter()
+        .map(|p| p.last_lba + 1)
+        .max()
+        .unwrap_or(mib_lbas);
     let after = last_end.max(mib_lbas);
     let meta_first_lba = after.div_ceil(mib_lbas) * mib_lbas;
     let meta_lbas = meta_size.div_ceil(sector).max(1);
@@ -133,7 +141,11 @@ pub fn plan_whole_disk_image(layout: &DiskLayout, meta_size: u64) -> WholeDiskIm
     // image up to a 1 MiB boundary.
     let raw_end = (meta_last_lba + 1 + 33) * sector;
     let image_size = raw_end.div_ceil(1024 * 1024) * (1024 * 1024);
-    WholeDiskImagePlan { image_size, meta_first_lba, meta_last_lba }
+    WholeDiskImagePlan {
+        image_size,
+        meta_first_lba,
+        meta_last_lba,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -334,10 +346,13 @@ mod tests {
         let meta_size = 2 * 1024 * 1024; // 2 MiB
         let plan = plan_whole_disk_image(&layout, meta_size);
         let mib = 2048u64; // 1 MiB in 512-b sectors
-        // meta starts 1 MiB-aligned at/after LBA 500_001.
+                           // meta starts 1 MiB-aligned at/after LBA 500_001.
         assert_eq!(plan.meta_first_lba % mib, 0);
         assert!(plan.meta_first_lba >= 500_001);
-        assert_eq!(plan.meta_last_lba - plan.meta_first_lba + 1, meta_size / 512);
+        assert_eq!(
+            plan.meta_last_lba - plan.meta_first_lba + 1,
+            meta_size / 512
+        );
         // image size is 1 MiB-rounded and past the meta + secondary GPT.
         assert_eq!(plan.image_size % (1024 * 1024), 0);
         assert!(plan.image_size >= (plan.meta_last_lba + 1) * 512);

@@ -28,7 +28,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         #[cfg(target_os = "windows")]
         Some("seed-dual" | "seed-deleted-pending") => {
             let delete_public = std::env::args().nth(1).as_deref() == Some("seed-deleted-pending");
-            let guard = own_backup_backup::seal::local::PrivateSecretDatabase::new(&config.data_dir)?;
+            let guard =
+                own_backup_backup::seal::local::PrivateSecretDatabase::new(&config.data_dir)?;
             let blob = default_store(&key_path).protect(PASSWORD)?;
             let public = own_backup_metadata::open_database(&public_path)?;
             own_backup_metadata::upsert_volume_secret(&public, TOKEN, &blob)?;
@@ -41,7 +42,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 own_backup_metadata::delete_volume_secret(&public, TOKEN)?;
             }
             guard.validate_files()?;
-            println!("H01-FAULT-SEED private_committed=true public_deleted={delete_public} pending=true");
+            println!(
+                "H01-FAULT-SEED private_committed=true public_deleted={delete_public} pending=true"
+            );
         }
         Some("check") => {
             let public = own_backup_metadata::open_database(&public_path)?;
@@ -88,7 +91,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .resolve(NEW_TOKEN)
                 .is_some_and(|password| password.as_str() == NEW_PASSWORD);
             let public = own_backup_metadata::open_database(&public_path)?;
-            let public_absent = own_backup_metadata::get_volume_secret(&public, NEW_TOKEN)?.is_none();
+            let public_absent =
+                own_backup_metadata::get_volume_secret(&public, NEW_TOKEN)?.is_none();
             store.forget(NEW_TOKEN)?;
             let forgotten = own_backup_core::PasswordStore::new_private(
                 public_path.clone(),
@@ -96,7 +100,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .resolve(NEW_TOKEN)
             .is_none();
-            println!("H01-WRITE resolves={resolves} public_absent={public_absent} forgotten={forgotten}");
+            println!(
+                "H01-WRITE resolves={resolves} public_absent={public_absent} forgotten={forgotten}"
+            );
             if !resolves || !public_absent || !forgotten {
                 return Err("new volume password was not confined to the private database".into());
             }
@@ -106,12 +112,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut found = Vec::new();
             for suffix in ["", "-wal", "-shm", "-journal"] {
                 let path = public_path.with_file_name(format!("metadata.db{suffix}"));
-                if path.exists() && std::fs::read(&path)?.windows(blob.len()).any(|bytes| bytes == blob.as_slice()) {
+                if path.exists()
+                    && std::fs::read(&path)?
+                        .windows(blob.len())
+                        .any(|bytes| bytes == blob.as_slice())
+                {
                     found.push(suffix);
                 }
             }
             println!("H01-FAULT-SCAN public_blob_found={}", !found.is_empty());
-            if !found.is_empty() { return Err("legacy blob survived in current public SQLite files".into()); }
+            if !found.is_empty() {
+                return Err("legacy blob survived in current public SQLite files".into());
+            }
         }
         _ => return Err("usage: audit_h01.exe seed|check".into()),
     }

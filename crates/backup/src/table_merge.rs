@@ -33,12 +33,21 @@ use own_backup_common::restore_plan::{PartitionKind, PartitionSpec, PartitionTab
 /// GUIDs are compared as values, not as strings: `{...}` wrappers, case and
 /// stray spaces are all noise that would otherwise read as a difference.
 fn same_guid(a: &str, b: &str) -> bool {
-    let norm = |s: &str| s.trim().trim_start_matches('{').trim_end_matches('}').to_ascii_uppercase();
+    let norm = |s: &str| {
+        s.trim()
+            .trim_start_matches('{')
+            .trim_end_matches('}')
+            .to_ascii_uppercase()
+    };
     norm(a) == norm(b)
 }
 
 fn is_blank(s: &str) -> bool {
-    s.trim().trim_start_matches('{').trim_end_matches('}').trim().is_empty()
+    s.trim()
+        .trim_start_matches('{')
+        .trim_end_matches('}')
+        .trim()
+        .is_empty()
 }
 
 /// The entry on the disk occupying exactly the same sectors as `spec`.
@@ -109,12 +118,20 @@ pub fn adopt_existing_entries(
         out.kept_disk_id = true;
     }
     for e in spec.entries.iter_mut() {
-        let Some(current) = same_place(e, disk) else { continue };
+        let Some(current) = same_place(e, disk) else {
+            continue;
+        };
         let index = e.index;
         // A partition the plan is not acting on keeps everything it has, not
         // just the fields the plan happens to leave blank.
         let bystander = !owned.contains(&index);
-        let PartitionKind::Gpt { type_guid, part_guid, attributes, name } = &mut e.kind else {
+        let PartitionKind::Gpt {
+            type_guid,
+            part_guid,
+            attributes,
+            name,
+        } = &mut e.kind
+        else {
             continue;
         };
         if (bystander || is_blank(type_guid)) && !current.type_guid.is_empty() {
@@ -152,9 +169,16 @@ pub fn adopt_existing_entries(
 /// identifies a partition here is where it starts, where it ends, and the
 /// identity written in its entry.
 pub fn entry_unchanged(spec: &PartitionSpec, disk: &DiskLayout) -> bool {
-    let Some(current) = same_place(spec, disk) else { return false };
+    let Some(current) = same_place(spec, disk) else {
+        return false;
+    };
     match &spec.kind {
-        PartitionKind::Gpt { type_guid, part_guid, attributes, name } => {
+        PartitionKind::Gpt {
+            type_guid,
+            part_guid,
+            attributes,
+            name,
+        } => {
             same_guid(type_guid, &current.type_guid)
                 // An empty unique GUID means "generate one", which is a change.
                 && !is_blank(part_guid)
@@ -191,18 +215,31 @@ pub fn describe_table(spec: &PartitionTableSpec) -> Vec<String> {
     spec.entries
         .iter()
         .map(|e| match &e.kind {
-            PartitionKind::Gpt { type_guid, part_guid, attributes, name } => format!(
+            PartitionKind::Gpt {
+                type_guid,
+                part_guid,
+                attributes,
+                name,
+            } => format!(
                 "#{} lba {}..={} ({} B) type={} id={} attr=0x{:016x} name={:?}",
                 e.index,
                 e.first_lba,
                 e.last_lba,
                 e.size_bytes(spec.sector_size),
                 type_guid,
-                if is_blank(part_guid) { "<new>" } else { part_guid.as_str() },
+                if is_blank(part_guid) {
+                    "<new>"
+                } else {
+                    part_guid.as_str()
+                },
                 attributes,
                 name
             ),
-            PartitionKind::Mbr { type_byte, bootable, logical } => format!(
+            PartitionKind::Mbr {
+                type_byte,
+                bootable,
+                logical,
+            } => format!(
                 "#{} lba {}..={} ({} B) type=0x{:02x} bootable={} logical={}",
                 e.index,
                 e.first_lba,
@@ -258,7 +295,13 @@ mod tests {
             size_bytes: 512 * 1024 * 1024 * 1024,
             partitions: vec![
                 disk_entry(1, 2048, 411_647, ESP_TYPE, 1),
-                disk_entry(2, 411_648, 673_791, "E3C9E316-0B5C-4DB8-817D-F92DF00215AE", 1 << 63),
+                disk_entry(
+                    2,
+                    411_648,
+                    673_791,
+                    "E3C9E316-0B5C-4DB8-817D-F92DF00215AE",
+                    1 << 63,
+                ),
                 disk_entry(3, 673_792, 134_889_471, DATA_TYPE, 0),
                 disk_entry(4, 134_889_472, 409_600_000, DATA_TYPE, 0),
                 disk_entry(5, 409_600_001, 503_316_479, DATA_TYPE, 0),
@@ -301,12 +344,29 @@ mod tests {
         let mut spec = designed_from(&disk);
         let adopted = adopt_existing_entries(&mut spec, &disk, &[]);
 
-        assert!(adopted.kept_disk_id, "the disk's own GUID too — {{bootmgr}} names it");
+        assert!(
+            adopted.kept_disk_id,
+            "the disk's own GUID too — {{bootmgr}} names it"
+        );
         assert_eq!(spec.disk_id, disk.disk_guid);
-        assert_eq!(adopted.kept_guid, vec![1, 2, 3, 4, 5], "every unique GUID came back");
-        assert_eq!(adopted.kept_attributes, vec![1, 2], "only the two that have flags set");
+        assert_eq!(
+            adopted.kept_guid,
+            vec![1, 2, 3, 4, 5],
+            "every unique GUID came back"
+        );
+        assert_eq!(
+            adopted.kept_attributes,
+            vec![1, 2],
+            "only the two that have flags set"
+        );
         for (e, p) in spec.entries.iter().zip(disk.partitions.iter()) {
-            let PartitionKind::Gpt { part_guid, attributes, name, .. } = &e.kind else {
+            let PartitionKind::Gpt {
+                part_guid,
+                attributes,
+                name,
+                ..
+            } = &e.kind
+            else {
                 panic!("expected GPT");
             };
             assert_eq!(part_guid, &p.part_guid);
@@ -337,10 +397,15 @@ mod tests {
             *part_guid = from_copy.into();
         }
         adopt_existing_entries(&mut spec, &disk, &[5]);
-        let PartitionKind::Gpt { part_guid, .. } = &spec.entries[4].kind else { panic!() };
+        let PartitionKind::Gpt { part_guid, .. } = &spec.entries[4].kind else {
+            panic!()
+        };
         assert_eq!(part_guid, from_copy);
         assert!(!same_layout(&spec, &disk), "that entry does change");
-        assert!(entry_unchanged(&spec.entries[0], &disk), "…and the others do not");
+        assert!(
+            entry_unchanged(&spec.entries[0], &disk),
+            "…and the others do not"
+        );
     }
 
     #[test]
@@ -357,9 +422,14 @@ mod tests {
         }
         let adopted = adopt_existing_entries(&mut spec, &disk, &[5]);
         assert!(adopted.kept_name.contains(&3), "{:?}", adopted.kept_name);
-        let PartitionKind::Gpt { name, .. } = &spec.entries[2].kind else { panic!() };
+        let PartitionKind::Gpt { name, .. } = &spec.entries[2].kind else {
+            panic!()
+        };
         assert_eq!(name, "part3", "the name on the disk won");
-        assert!(entry_unchanged(&spec.entries[2], &disk), "so C: is not rewritten");
+        assert!(
+            entry_unchanged(&spec.entries[2], &disk),
+            "so C: is not rewritten"
+        );
     }
 
     #[test]
@@ -371,7 +441,9 @@ mod tests {
             *name = "kubuntu_boot".into();
         }
         adopt_existing_entries(&mut spec, &disk, &[5]);
-        let PartitionKind::Gpt { name, .. } = &spec.entries[4].kind else { panic!() };
+        let PartitionKind::Gpt { name, .. } = &spec.entries[4].kind else {
+            panic!()
+        };
         assert_eq!(name, "kubuntu_boot");
         assert!(!entry_unchanged(&spec.entries[4], &disk));
     }
@@ -403,7 +475,10 @@ mod tests {
         spec.entries.pop();
         adopt_existing_entries(&mut spec, &disk, &[]);
         assert!(spec.entries.iter().all(|e| entry_unchanged(e, &disk)));
-        assert!(!same_layout(&spec, &disk), "the count differs — one was dropped");
+        assert!(
+            !same_layout(&spec, &disk),
+            "the count differs — one was dropped"
+        );
     }
 
     #[test]
@@ -450,18 +525,29 @@ mod tests {
         let disk = live_disk();
         let mut spec = designed_from(&disk);
         adopt_existing_entries(&mut spec, &disk, &[]);
-        if let PartitionKind::Gpt { part_guid, type_guid, .. } = &mut spec.entries[0].kind {
+        if let PartitionKind::Gpt {
+            part_guid,
+            type_guid,
+            ..
+        } = &mut spec.entries[0].kind
+        {
             *part_guid = format!("{{{}}}", part_guid.to_lowercase());
             *type_guid = type_guid.to_lowercase();
         }
-        assert!(entry_unchanged(&spec.entries[0], &disk), "braces and case are not a difference");
+        assert!(
+            entry_unchanged(&spec.entries[0], &disk),
+            "braces and case are not a difference"
+        );
     }
 
     #[test]
     fn describing_a_table_names_every_field_that_matters() {
         let disk = live_disk();
         let mut spec = designed_from(&disk);
-        assert!(describe_table(&spec)[0].contains("<new>"), "an unset GUID is called out");
+        assert!(
+            describe_table(&spec)[0].contains("<new>"),
+            "an unset GUID is called out"
+        );
         adopt_existing_entries(&mut spec, &disk, &[]);
         let line = &describe_table(&spec)[1];
         assert!(line.contains("attr=0x8000000000000000"), "{line}");

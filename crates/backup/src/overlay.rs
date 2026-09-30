@@ -66,7 +66,13 @@ impl SlotStore for PlainSlots {
         Ok(())
     }
 
-    fn read_in_slot(&mut self, slot: u32, _cluster: u64, within: u64, out: &mut [u8]) -> Result<()> {
+    fn read_in_slot(
+        &mut self,
+        slot: u32,
+        _cluster: u64,
+        within: u64,
+        out: &mut [u8],
+    ) -> Result<()> {
         self.file
             .seek(SeekFrom::Start(slot as u64 * self.cluster_size + within))?;
         self.file.read_exact(out)?;
@@ -138,14 +144,11 @@ impl SealedSlots {
             )
         })?;
         let mut bytes = vec![0u8; self.slot_len as usize];
-        self.file.seek(SeekFrom::Start(slot as u64 * self.slot_len))?;
+        self.file
+            .seek(SeekFrom::Start(slot as u64 * self.slot_len))?;
         self.file.read_exact(&mut bytes)?;
-        let opened = crate::seal::cluster::open_record(
-            &self.chain,
-            self.context(cluster),
-            id,
-            &bytes,
-        )?;
+        let opened =
+            crate::seal::cluster::open_record(&self.chain, self.context(cluster), id, &bytes)?;
         if opened.payload.len() != self.cluster_size as usize {
             return Err(own_backup_common::OwnBackupError::Encryption(
                 "scratch record is not a whole cluster".into(),
@@ -161,7 +164,8 @@ impl SealedSlots {
             self.cluster_size as u32,
             data,
         )?;
-        self.file.seek(SeekFrom::Start(slot as u64 * self.slot_len))?;
+        self.file
+            .seek(SeekFrom::Start(slot as u64 * self.slot_len))?;
         self.file.write_all(&record.bytes)?;
         self.ids.insert(slot, record.id);
         Ok(())
@@ -251,7 +255,9 @@ impl<S: SlotStore> WritableOverlaySource<S> {
 
     /// Cluster indices that received at least one write, ascending.
     pub fn touched_clusters(&self) -> Vec<u64> {
-        (0..self.total_clusters).filter(|&c| self.slots[c as usize] != NO_SLOT).collect()
+        (0..self.total_clusters)
+            .filter(|&c| self.slots[c as usize] != NO_SLOT)
+            .collect()
     }
 
     /// Final content of one cluster (overlay if touched, else base), padded to a
@@ -288,7 +294,10 @@ impl<S: SlotStore> WritableOverlaySource<S> {
     }
 
     fn cluster_range(&self, offset: u64, len: u64) -> (u64, u64) {
-        (offset / self.cluster_size, (offset + len - 1) / self.cluster_size)
+        (
+            offset / self.cluster_size,
+            (offset + len - 1) / self.cluster_size,
+        )
     }
 }
 
@@ -314,7 +323,8 @@ impl<S: SlotStore> BlockSource for WritableOverlaySource<S> {
             let from = cstart.max(offset);
             let to = (cstart + self.cluster_size).min(end);
             let mut tmp = vec![0u8; (to - from) as usize];
-            self.overlay.read_in_slot(slot, c, from - cstart, &mut tmp)?;
+            self.overlay
+                .read_in_slot(slot, c, from - cstart, &mut tmp)?;
             out[(from - offset) as usize..(to - offset) as usize].copy_from_slice(&tmp);
         }
         Ok(())

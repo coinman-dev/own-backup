@@ -40,7 +40,10 @@ pub async fn run(args: MediaToolsArgs) -> Result<()> {
                     })
                 })
                 .collect();
-            println!("{}", serde_json::to_string_pretty(&rows).unwrap_or_default());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&rows).unwrap_or_default()
+            );
             return Ok(());
         }
 
@@ -51,7 +54,10 @@ pub async fn run(args: MediaToolsArgs) -> Result<()> {
         }
         println!("Средства, которые можно положить на носитель");
         println!();
-        println!("  {:<18}  {:>9}  {:>7}  {}", "Название", "Размер", "Файлов", "Откуда");
+        println!(
+            "  {:<18}  {:>9}  {:>7}  {}",
+            "Название", "Размер", "Файлов", "Откуда"
+        );
         println!("  {:-<18}  {:->9}  {:->7}  {:-<40}", "", "", "", "");
         for tool in &found {
             println!(

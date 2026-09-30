@@ -30,7 +30,9 @@ pub async fn run(args: VerifyArgs) -> own_backup_common::Result<()> {
         })
     })
     .await
-    .map_err(|e| own_backup_common::OwnBackupError::Device(format!("verify task panicked: {e}")))??;
+    .map_err(|e| {
+        own_backup_common::OwnBackupError::Device(format!("verify task panicked: {e}"))
+    })??;
 
     println!();
     if summary.valid() {

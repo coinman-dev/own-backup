@@ -57,7 +57,10 @@ pub struct NtfsUsedMap {
 
 impl UsedSectorMap for NtfsUsedMap {
     fn is_block_used(&self, block_number: u64) -> bool {
-        self.block_used.get(block_number as usize).copied().unwrap_or(false)
+        self.block_used
+            .get(block_number as usize)
+            .copied()
+            .unwrap_or(false)
     }
     fn used_block_count(&self) -> u64 {
         self.used_count
@@ -143,12 +146,18 @@ fn read_geometry(vol: &mut dyn RawVolume) -> Result<Geometry> {
     } else if (0xF4..=0xFF).contains(&spc_raw) {
         1u64 << (0x100 - spc_raw)
     } else {
-        return Err(bad(format!("implausible sectors/cluster byte {spc_raw:#x}")));
+        return Err(bad(format!(
+            "implausible sectors/cluster byte {spc_raw:#x}"
+        )));
     };
     let cluster_size = bytes_per_sector
         .checked_mul(spc)
         .filter(|c| c.is_power_of_two() && (512..=MAX_CLUSTER_SIZE).contains(c))
-        .ok_or_else(|| bad(format!("implausible cluster size ({bytes_per_sector}*{spc})")))?;
+        .ok_or_else(|| {
+            bad(format!(
+                "implausible cluster size ({bytes_per_sector}*{spc})"
+            ))
+        })?;
 
     let total_sectors = u64at(&boot, 0x28);
     let mft_lcn = u64at(&boot, 0x30);
@@ -178,8 +187,11 @@ fn read_geometry(vol: &mut dyn RawVolume) -> Result<Geometry> {
     } else {
         1u64 << ((-cpm) as u32)
     };
-    if !mft_record_size.is_power_of_two() || !(256..=MAX_MFT_RECORD_SIZE).contains(&mft_record_size) {
-        return Err(bad(format!("implausible MFT record size {mft_record_size}")));
+    if !mft_record_size.is_power_of_two() || !(256..=MAX_MFT_RECORD_SIZE).contains(&mft_record_size)
+    {
+        return Err(bad(format!(
+            "implausible MFT record size {mft_record_size}"
+        )));
     }
 
     Ok(Geometry {
@@ -214,7 +226,9 @@ fn read_cluster_bitmap(vol: &mut dyn RawVolume, g: &Geometry) -> Result<Vec<u8>>
     // --- Locate the unnamed non-resident $DATA ($Bitmap's cluster bitmap) ---
     let needed = g.total_clusters.div_ceil(8);
     if needed > MAX_BITMAP_BYTES {
-        return Err(bad(format!("bitmap would need {needed} bytes (volume too large)")));
+        return Err(bad(format!(
+            "bitmap would need {needed} bytes (volume too large)"
+        )));
     }
     let bitmap = read_bitmap_stream(vol, &rec, g.cluster_size, needed)?;
 
@@ -222,10 +236,14 @@ fn read_cluster_bitmap(vol: &mut dyn RawVolume, g: &Geometry) -> Result<Vec<u8>>
     // (cluster 0) and the $MFT itself as allocated. If either reads free we
     // misaligned somewhere — refuse and let the engine copy every sector.
     if !cluster_allocated(&bitmap, 0) {
-        return Err(bad("bitmap leaves cluster 0 (boot) free — parse misaligned"));
+        return Err(bad(
+            "bitmap leaves cluster 0 (boot) free — parse misaligned",
+        ));
     }
     if !cluster_allocated(&bitmap, g.mft_lcn) {
-        return Err(bad("bitmap leaves the $MFT cluster free — parse misaligned"));
+        return Err(bad(
+            "bitmap leaves the $MFT cluster free — parse misaligned",
+        ));
     }
     Ok(bitmap)
 }
@@ -549,11 +567,15 @@ fn read_bitmap_stream(
             }
             let start_vcn = u64at(rec, off + 0x10);
             if start_vcn != 0 {
-                return Err(bad("$Bitmap $DATA does not start at VCN 0 (attribute list?)"));
+                return Err(bad(
+                    "$Bitmap $DATA does not start at VCN 0 (attribute list?)",
+                ));
             }
             let real_size = u64at(rec, off + 0x30);
             if real_size < needed {
-                return Err(bad(format!("$Bitmap real size {real_size} < needed {needed}")));
+                return Err(bad(format!(
+                    "$Bitmap real size {real_size} < needed {needed}"
+                )));
             }
             let runs_off = u16at(rec, off + 0x20) as usize;
             if runs_off < 24 || off + alen > rec.len() || runs_off >= alen {
@@ -580,7 +602,10 @@ fn parse_data_runs(runs: &[u8]) -> Result<Vec<Run>> {
         let len_bytes = (header & 0x0F) as usize;
         let off_bytes = (header >> 4) as usize;
         i += 1;
-        if len_bytes == 0 || len_bytes > 8 || off_bytes > 8 || i + len_bytes + off_bytes > runs.len()
+        if len_bytes == 0
+            || len_bytes > 8
+            || off_bytes > 8
+            || i + len_bytes + off_bytes > runs.len()
         {
             return Err(bad("truncated or malformed data run"));
         }
@@ -595,7 +620,11 @@ fn parse_data_runs(runs: &[u8]) -> Result<Vec<Run>> {
         }
 
         if off_bytes == 0 {
-            out.push(Run { lcn: 0, count, hole: true });
+            out.push(Run {
+                lcn: 0,
+                count,
+                hole: true,
+            });
         } else {
             let mut delta: i64 = 0;
             for b in 0..off_bytes {
@@ -605,11 +634,17 @@ fn parse_data_runs(runs: &[u8]) -> Result<Vec<Run>> {
             let shift = 64 - 8 * off_bytes as u32;
             delta = (delta << shift) >> shift;
             i += off_bytes;
-            lcn = lcn.checked_add(delta).ok_or_else(|| bad("data run LCN overflow"))?;
+            lcn = lcn
+                .checked_add(delta)
+                .ok_or_else(|| bad("data run LCN overflow"))?;
             if lcn < 0 {
                 return Err(bad("negative LCN in data run"));
             }
-            out.push(Run { lcn: lcn as u64, count, hole: false });
+            out.push(Run {
+                lcn: lcn as u64,
+                count,
+                hole: false,
+            });
         }
     }
     if out.is_empty() {
@@ -641,7 +676,10 @@ fn assemble_bitmap(
             if disk_off + take > vol.len() {
                 return Err(bad("data run points past the device"));
             }
-            vol.read_at(disk_off, &mut bitmap[filled as usize..(filled + take) as usize])?;
+            vol.read_at(
+                disk_off,
+                &mut bitmap[filled as usize..(filled + take) as usize],
+            )?;
         }
         filled += take;
     }
@@ -710,11 +748,11 @@ mod tests {
         put_u16(&mut img, rec + 6, 3); // USN + two fixups
         put_u16(&mut img, rec + 0x14, 0x38); // first attribute offset
         put_u32(&mut img, rec + 0x18, 0x38 + 0x48 + 4); // used size (attr + end marker)
-        // Update sequence array at 0x30: USN then two saved words (all zero here).
+                                                        // Update sequence array at 0x30: USN then two saved words (all zero here).
         put_u16(&mut img, rec + 0x30, 0x0001); // USN
         put_u16(&mut img, rec + 0x32, 0x0000); // saved word for stride 0
         put_u16(&mut img, rec + 0x34, 0x0000); // saved word for stride 1
-        // Fixup slots (last 2 bytes of each 512-byte stride) carry the USN.
+                                               // Fixup slots (last 2 bytes of each 512-byte stride) carry the USN.
         put_u16(&mut img, rec + 510, 0x0001);
         put_u16(&mut img, rec + 1022, 0x0001);
 
@@ -730,12 +768,12 @@ mod tests {
         put_u64(&mut img, a + 0x28, cluster); // allocated size
         put_u64(&mut img, a + 0x30, 8); // real size = 8 bytes (64 clusters)
         put_u64(&mut img, a + 0x38, 8); // initialized size
-        // Data runs at a+0x40: one run of 1 cluster at LCN 20.
+                                        // Data runs at a+0x40: one run of 1 cluster at LCN 20.
         img[a + 0x40] = 0x11; // 1 length byte, 1 offset byte
         img[a + 0x41] = 0x01; // length = 1 cluster
         img[a + 0x42] = 20; // LCN delta = 20
         img[a + 0x43] = 0x00; // end of runs
-        // Attribute-list end marker just after the attribute.
+                              // Attribute-list end marker just after the attribute.
         put_u32(&mut img, a + 0x48, 0xFFFF_FFFF);
 
         // MFT record #3 ($Volume) at byte 5120, with a resident $VOLUME_NAME.
@@ -849,16 +887,26 @@ mod tests {
         // overwriting the other four would corrupt live metadata.
         let free = ntfs_free_map(&mut tiny_ntfs()).unwrap();
         let parts = free.free_parts_of(&[(16 * 512, 22 * 512)]);
-        assert_eq!(parts, vec![(18 * 512, 20 * 512)], "adjacent free clusters merge into one write");
+        assert_eq!(
+            parts,
+            vec![(18 * 512, 20 * 512)],
+            "adjacent free clusters merge into one write"
+        );
 
         // A range entirely inside free space comes back whole.
         assert_eq!(free.free_parts_of(&[(512, 4 * 512)]), vec![(512, 4 * 512)]);
         // Half a cluster in: the whole cluster is zeroed. Allocation is
         // cluster-granular, so the rest of it was that file's too — and a raw
         // disk would refuse a sub-sector write in any case.
-        assert_eq!(free.free_parts_of(&[(512 + 100, 512 + 200)]), vec![(512, 2 * 512)]);
+        assert_eq!(
+            free.free_parts_of(&[(512 + 100, 512 + 200)]),
+            vec![(512, 2 * 512)]
+        );
         // A range running past the end of the volume stops at the last cluster.
-        assert_eq!(free.free_parts_of(&[(62 * 512, 500 * 512)]), vec![(62 * 512, 64 * 512)]);
+        assert_eq!(
+            free.free_parts_of(&[(62 * 512, 500 * 512)]),
+            vec![(62 * 512, 64 * 512)]
+        );
         // A range entirely in use produces nothing at all.
         assert!(free.free_parts_of(&[(16 * 512, 18 * 512)]).is_empty());
         // Two runs separated by a used cluster stay separate writes.

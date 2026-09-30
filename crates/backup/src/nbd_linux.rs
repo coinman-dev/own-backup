@@ -88,11 +88,16 @@ impl NbdAttachment {
         let (device, nbd_file) = find_free_device()?;
         let size = source.size();
 
-        let (kernel_side, user_side) = UnixStream::pair()
-            .map_err(|e| OwnBackupError::Device(format!("socketpair: {e}")))?;
+        let (kernel_side, user_side) =
+            UnixStream::pair().map_err(|e| OwnBackupError::Device(format!("socketpair: {e}")))?;
 
         ioctl(&nbd_file, NBD_SET_BLKSIZE, 512, "NBD_SET_BLKSIZE")?;
-        ioctl(&nbd_file, NBD_SET_SIZE, size as libc::c_ulong, "NBD_SET_SIZE")?;
+        ioctl(
+            &nbd_file,
+            NBD_SET_SIZE,
+            size as libc::c_ulong,
+            "NBD_SET_SIZE",
+        )?;
         ioctl(
             &nbd_file,
             NBD_SET_FLAGS,
@@ -215,7 +220,11 @@ fn find_free_device() -> Result<(String, File)> {
         if Path::new(&format!("/sys/block/nbd{i}/pid")).exists() {
             continue;
         }
-        match std::fs::OpenOptions::new().read(true).write(true).open(&device) {
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&device)
+        {
             Ok(f) => return Ok((device, f)),
             Err(e) => {
                 debug!(device = %device, error = %e, "cannot open nbd device, trying next");
@@ -254,7 +263,8 @@ pub fn serve_requests<S: Read + Write>(stream: &mut S, source: &mut dyn NbdSourc
 
         match cmd {
             NBD_CMD_READ => {
-                if len > MAX_REQUEST_LEN || from.checked_add(len as u64).is_none_or(|end| end > size)
+                if len > MAX_REQUEST_LEN
+                    || from.checked_add(len as u64).is_none_or(|end| end > size)
                 {
                     reply(stream, libc::EINVAL as u32, &handle, &[])?;
                     continue;
@@ -327,7 +337,10 @@ mod tests {
     fn read_reply(stream: &mut impl Read, data_len: usize) -> (u32, u64, Vec<u8>) {
         let mut head = [0u8; 16];
         stream.read_exact(&mut head).unwrap();
-        assert_eq!(u32::from_be_bytes(head[0..4].try_into().unwrap()), NBD_REPLY_MAGIC);
+        assert_eq!(
+            u32::from_be_bytes(head[0..4].try_into().unwrap()),
+            NBD_REPLY_MAGIC
+        );
         let error = u32::from_be_bytes(head[4..8].try_into().unwrap());
         let handle = u64::from_be_bytes(head[8..16].try_into().unwrap());
         let mut data = vec![0u8; if error == 0 { data_len } else { 0 }];
@@ -347,13 +360,17 @@ mod tests {
         });
 
         // Read 4 KiB from an odd offset.
-        client.write_all(&request(NBD_CMD_READ, 7, 12345, 4096)).unwrap();
+        client
+            .write_all(&request(NBD_CMD_READ, 7, 12345, 4096))
+            .unwrap();
         let (err, h, data) = read_reply(&mut client, 4096);
         assert_eq!((err, h), (0, 7));
         assert_eq!(data, expected[12345..12345 + 4096]);
 
         // Reads beyond the end are rejected, not crashed on.
-        client.write_all(&request(NBD_CMD_READ, 8, 131000, 4096)).unwrap();
+        client
+            .write_all(&request(NBD_CMD_READ, 8, 131000, 4096))
+            .unwrap();
         let (err, h, _) = read_reply(&mut client, 0);
         assert_eq!((err as i32, h), (libc::EINVAL, 8));
 

@@ -12,7 +12,11 @@
 use own_backup_backup::qcow2::Qcow2RandomReader;
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+    bytes
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn summarize(name: &str, sector: &[u8]) {
@@ -38,7 +42,8 @@ fn part_type(guid: &[u8]) -> &'static str {
 
 fn read(r: &mut Qcow2RandomReader, at: u64, len: usize) -> Vec<u8> {
     let mut buf = vec![0u8; len];
-    r.read_at(at, &mut buf).unwrap_or_else(|e| panic!("read {len} bytes at {at}: {e}"));
+    r.read_at(at, &mut buf)
+        .unwrap_or_else(|e| panic!("read {len} bytes at {at}: {e}"));
     buf
 }
 
@@ -46,17 +51,27 @@ fn read(r: &mut Qcow2RandomReader, at: u64, len: usize) -> Vec<u8> {
 fn ntfs(r: &mut Qcow2RandomReader, part_start: u64, part_len: u64, boot: &[u8]) {
     let bps = u16::from_le_bytes(boot[11..13].try_into().unwrap()) as u64;
     let spc_raw = boot[13] as u64;
-    let spc = if spc_raw <= 0x80 { spc_raw } else { 1u64 << (0x100 - spc_raw) };
+    let spc = if spc_raw <= 0x80 {
+        spc_raw
+    } else {
+        1u64 << (0x100 - spc_raw)
+    };
     let total_sectors = u64::from_le_bytes(boot[40..48].try_into().unwrap());
     let mft_lcn = u64::from_le_bytes(boot[48..56].try_into().unwrap());
     let cluster = bps * spc;
     println!("  bps={bps} sectors_per_cluster={spc} cluster={cluster}");
-    println!("  total_sectors={total_sectors} fs_bytes={}", total_sectors * bps);
+    println!(
+        "  total_sectors={total_sectors} fs_bytes={}",
+        total_sectors * bps
+    );
     println!(
         "  partition is {} bytes longer than the filesystem",
         part_len as i64 - (total_sectors * bps) as i64
     );
-    println!("  mft_lcn={mft_lcn} mft_at_disk={}", part_start + mft_lcn * cluster);
+    println!(
+        "  mft_lcn={mft_lcn} mft_at_disk={}",
+        part_start + mft_lcn * cluster
+    );
 
     // The backup boot sector: a copy of sector 0 one sector past the
     // filesystem. It is not in the volume bitmap, so it is only in the image
@@ -71,23 +86,38 @@ fn ntfs(r: &mut Qcow2RandomReader, part_start: u64, part_len: u64, boot: &[u8]) 
     // the filesystem's own catalogue should be.
     let mft_at = part_start + mft_lcn * cluster;
     let mft = read(r, mft_at, 16 * 1024);
-    let records = mft.chunks(1024).take(16).filter(|rec| &rec[..4] == b"FILE").count();
+    let records = mft
+        .chunks(1024)
+        .take(16)
+        .filter(|rec| &rec[..4] == b"FILE")
+        .count();
     println!("  $MFT: {records}/16 first records start with FILE");
     println!("  $MFT head: {}", hex(&mft[..32]));
 
     // How solid the start of the filesystem is: metadata lives there, and a
     // mostly-zero first megabyte means it was never copied.
     let head = read(r, part_start, 1024 * 1024);
-    let nonzero_sectors = head.chunks(512).filter(|s| s.iter().any(|&b| b != 0)).count();
+    let nonzero_sectors = head
+        .chunks(512)
+        .filter(|s| s.iter().any(|&b| b != 0))
+        .count();
     println!("  first MiB: {nonzero_sectors}/2048 sectors carry data");
 }
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let path = args.next().expect("usage: qdump <image.qcow2> [part_offset]");
-    let only: Option<u64> = args.next().map(|a| a.parse().expect("part_offset must be a number"));
+    let path = args
+        .next()
+        .expect("usage: qdump <image.qcow2> [part_offset]");
+    let only: Option<u64> = args
+        .next()
+        .map(|a| a.parse().expect("part_offset must be a number"));
     let mut r = Qcow2RandomReader::open(std::path::Path::new(&path)).expect("open image");
-    println!("virtual_size={} cluster_size={}", r.virtual_size(), r.cluster_size());
+    println!(
+        "virtual_size={} cluster_size={}",
+        r.virtual_size(),
+        r.cluster_size()
+    );
 
     let gpt = read(&mut r, 512, 512);
     println!("GPT header sig: {:?}", String::from_utf8_lossy(&gpt[..8]));

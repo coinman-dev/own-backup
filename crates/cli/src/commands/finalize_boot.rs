@@ -26,12 +26,13 @@ pub async fn run(args: FinalizeBootArgs) -> own_backup_common::Result<()> {
         args.windows,
         if args.bios { "BIOS" } else { "UEFI" }
     );
-    let report =
-        tokio::task::spawn_blocking(move || finalize_boot(&args.windows, args.esp.as_deref(), !args.bios))
-            .await
-            .map_err(|e| {
-                own_backup_common::OwnBackupError::Device(format!("bcdboot task panicked: {e}"))
-            })??;
+    let report = tokio::task::spawn_blocking(move || {
+        finalize_boot(&args.windows, args.esp.as_deref(), !args.bios)
+    })
+    .await
+    .map_err(|e| {
+        own_backup_common::OwnBackupError::Device(format!("bcdboot task panicked: {e}"))
+    })??;
 
     println!("Boot files created — the disk should now boot.");
     if report.menu_trimmed {

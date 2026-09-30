@@ -136,7 +136,11 @@ impl<'a> AgReader<'a> {
 
     fn read_block(&self, vol: &mut dyn RawVolume, agbno: u64) -> Result<Vec<u8>> {
         if agbno >= self.sb.agblocks {
-            return Err(bad(tr!("xfs_stage2.block_outside_ag", ag = self.ag, agbno = agbno)));
+            return Err(bad(tr!(
+                "xfs_stage2.block_outside_ag",
+                ag = self.ag,
+                agbno = agbno
+            )));
         }
         let mut b = vec![0u8; self.sb.blocksize as usize];
         vol.read_at(self.ag_off() + agbno * self.sb.blocksize, &mut b)?;
@@ -252,7 +256,11 @@ impl<'a> AgReader<'a> {
         Ok(())
     }
 
-    pub(crate) fn free_extents(&self, vol: &mut dyn RawVolume, by_size: bool) -> Result<Vec<FreeExt>> {
+    pub(crate) fn free_extents(
+        &self,
+        vol: &mut dyn RawVolume,
+        by_size: bool,
+    ) -> Result<Vec<FreeExt>> {
         let agf = self.agf(vol)?;
         let (root, magic) = if by_size {
             (agf.cnt_root, MAGIC_CNT)
@@ -264,14 +272,21 @@ impl<'a> AgReader<'a> {
             vol,
             root,
             magic,
-            &|b, o| FreeExt { agbno: be32(b, o), len: be32(b, o + 4) },
+            &|b, o| FreeExt {
+                agbno: be32(b, o),
+                len: be32(b, o + 4),
+            },
             0,
             &mut out,
         )?;
         Ok(out)
     }
 
-    pub(crate) fn inode_records(&self, vol: &mut dyn RawVolume, free_tree: bool) -> Result<Vec<InoRec>> {
+    pub(crate) fn inode_records(
+        &self,
+        vol: &mut dyn RawVolume,
+        free_tree: bool,
+    ) -> Result<Vec<InoRec>> {
         let agi = self.agi(vol)?;
         let (root, magic) = if free_tree {
             (agi.free_root, MAGIC_FINO)
@@ -293,7 +308,13 @@ impl<'a> AgReader<'a> {
                 } else {
                     (0, 64, be32(b, o + 4))
                 };
-                InoRec { startino: be32(b, o), holemask, count, freecount, free: be64(b, o + 8) }
+                InoRec {
+                    startino: be32(b, o),
+                    holemask,
+                    count,
+                    freecount,
+                    free: be64(b, o + 8),
+                }
             },
             0,
             &mut out,
@@ -344,7 +365,11 @@ pub enum Refusal {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExtentFate {
     /// Сливается с соседней свободной записью (обновление на месте).
-    Merge { ag: u64, into: FreeExt, result: FreeExt },
+    Merge {
+        ag: u64,
+        into: FreeExt,
+        result: FreeExt,
+    },
     /// Требует вставки новой записи.
     Insert { ag: u64, rec: FreeExt },
 }
@@ -400,9 +425,15 @@ pub(crate) fn plan_removal(
                 inobt_cache.entry(ag).or_insert(r)
             }
         };
-        match recs.iter().find(|r| agino >= r.startino && agino < r.startino + 64) {
+        match recs
+            .iter()
+            .find(|r| agino >= r.startino && agino < r.startino + 64)
+        {
             Some(r) => {
-                per_chunk.entry((ag, r.startino)).or_default().push((f.ino, (agino - r.startino) as u32));
+                per_chunk
+                    .entry((ag, r.startino))
+                    .or_default()
+                    .push((f.ino, (agino - r.startino) as u32));
             }
             None => plan.refusals.push(Refusal::InodeNotInTree { ino: f.ino }),
         }
@@ -458,21 +489,34 @@ pub(crate) fn plan_removal(
                 (Some(l), Some(r)) => ExtentFate::Merge {
                     ag,
                     into: l,
-                    result: FreeExt { agbno: l.agbno, len: l.len + len + r.len },
+                    result: FreeExt {
+                        agbno: l.agbno,
+                        len: l.len + len + r.len,
+                    },
                 },
                 (Some(l), None) => ExtentFate::Merge {
                     ag,
                     into: l,
-                    result: FreeExt { agbno: l.agbno, len: l.len + len },
+                    result: FreeExt {
+                        agbno: l.agbno,
+                        len: l.len + len,
+                    },
                 },
                 (None, Some(r)) => ExtentFate::Merge {
                     ag,
                     into: r,
-                    result: FreeExt { agbno, len: len + r.len },
+                    result: FreeExt {
+                        agbno,
+                        len: len + r.len,
+                    },
                 },
                 (None, None) => {
-                    plan.refusals.push(Refusal::ExtentNeedsInsert { ag, agbno, len });
-                    ExtentFate::Insert { ag, rec: FreeExt { agbno, len } }
+                    plan.refusals
+                        .push(Refusal::ExtentNeedsInsert { ag, agbno, len });
+                    ExtentFate::Insert {
+                        ag,
+                        rec: FreeExt { agbno, len },
+                    }
                 }
             };
             plan.extents.push(fate);
@@ -486,8 +530,11 @@ pub(crate) fn plan_removal(
         if !freed.contains(&f.ino) {
             continue;
         }
-        let ags: std::collections::BTreeSet<u64> =
-            f.extents.iter().map(|e| split_fsb(sb, e.startblock).0).collect();
+        let ags: std::collections::BTreeSet<u64> = f
+            .extents
+            .iter()
+            .map(|e| split_fsb(sb, e.startblock).0)
+            .collect();
         for ag in ags {
             let rl = AgReader::new(sb, ag).rmap_records(vol)?;
             for r in rl.into_iter().filter(|r| r.owner == f.ino) {
@@ -518,7 +565,9 @@ mod tests {
     }
     impl RawVolume for FileVol {
         fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
-            self.f.read_exact_at(buf, offset).map_err(|e| bad(format!("read: {e}")))
+            self.f
+                .read_exact_at(buf, offset)
+                .map_err(|e| bad(format!("read: {e}")))
         }
         fn len(&self) -> u64 {
             self.len
@@ -535,7 +584,11 @@ mod tests {
     fn sb_counters(img: &Path) -> (i64, i64, i64) {
         let mut b = [0u8; 512];
         vol(img).read_at(0, &mut b).unwrap();
-        (be64(&b, 0x80) as i64, be64(&b, 0x88) as i64, be64(&b, 0x90) as i64)
+        (
+            be64(&b, 0x80) as i64,
+            be64(&b, 0x88) as i64,
+            be64(&b, 0x90) as i64,
+        )
     }
 
     /// D1: наш «сухой» план обязан совпасть с тем, что реально сделало ЯДРО.
@@ -568,7 +621,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let img = dir.path().join("a.img");
         let after = dir.path().join("b.img");
-        std::fs::File::create(&img).unwrap().set_len(512 * 1024 * 1024).unwrap();
+        std::fs::File::create(&img)
+            .unwrap()
+            .set_len(512 * 1024 * 1024)
+            .unwrap();
         assert!(std::process::Command::new("mkfs.xfs")
             .args(["-q", "-m", "reflink=1,crc=1"])
             .arg(&img)
@@ -591,11 +647,17 @@ mod tests {
             std::fs::create_dir_all(mnt.join("mix")).unwrap();
             for i in 0..6u32 {
                 let len = if i == 0 { 4 * 1024 * 1024 } else { 256 * 1024 };
-                std::fs::write(mnt.join(format!("mix/c{i}.bin")), corpus::pattern(500 + i, len))
-                    .unwrap();
+                std::fs::write(
+                    mnt.join(format!("mix/c{i}.bin")),
+                    corpus::pattern(500 + i, len),
+                )
+                .unwrap();
                 let _ = std::process::Command::new("sync").status();
-                std::fs::write(mnt.join(format!("mix/k{i}.bin")), corpus::pattern(i, 256 * 1024))
-                    .unwrap();
+                std::fs::write(
+                    mnt.join(format!("mix/k{i}.bin")),
+                    corpus::pattern(i, 256 * 1024),
+                )
+                .unwrap();
                 let _ = std::process::Command::new("sync").status();
             }
         }
@@ -629,13 +691,19 @@ mod tests {
         for r in &plan.refusals {
             eprintln!("  отказ: {r:?}");
         }
-        assert_eq!(plan.freed_inodes.len(), victims.len(), "не все иноды попали в план");
+        assert_eq!(
+            plan.freed_inodes.len(),
+            victims.len(),
+            "не все иноды попали в план"
+        );
 
         let mut vb = vol(&after);
 
         // 1. Иноды: в эталоне тот же бит стал свободным.
         for &(ino, ag, startino, bit) in &plan.freed_inodes {
-            let recs = AgReader::new(&sb, ag).inode_records(&mut vb, false).unwrap();
+            let recs = AgReader::new(&sb, ag)
+                .inode_records(&mut vb, false)
+                .unwrap();
             let rec = recs
                 .iter()
                 .find(|r| r.startino == startino)
@@ -669,7 +737,11 @@ mod tests {
         // 3. Счётчики суперблока.
         let (ica, ifa, fda) = sb_counters(&img);
         let (icb, ifb, fdb) = sb_counters(&after);
-        assert_eq!(icb - ica, 0, "sb_icount не должен меняться, пока чанки целы");
+        assert_eq!(
+            icb - ica,
+            0,
+            "sb_icount не должен меняться, пока чанки целы"
+        );
         assert_eq!(ifb - ifa, plan.sb_ifree, "sb_ifree разошёлся с ядром");
         assert_eq!(fdb - fda, plan.sb_fdblocks, "sb_fdblocks разошёлся с ядром");
 
@@ -694,10 +766,19 @@ mod tests {
         for (ag, rec) in &plan.rmap_deletes {
             let before = AgReader::new(&sb, *ag).rmap_records(&mut v).unwrap();
             let after_r = AgReader::new(&sb, *ag).rmap_records(&mut vb).unwrap();
-            assert!(before.contains(rec), "AG {ag}: записи rmap {rec:?} не было и до удаления");
-            assert!(!after_r.contains(rec), "AG {ag}: ядро оставило запись rmap {rec:?}");
+            assert!(
+                before.contains(rec),
+                "AG {ag}: записи rmap {rec:?} не было и до удаления"
+            );
+            assert!(
+                !after_r.contains(rec),
+                "AG {ag}: ядро оставило запись rmap {rec:?}"
+            );
         }
-        assert!(!plan.rmap_deletes.is_empty(), "план не тронул ни одной записи rmap");
+        assert!(
+            !plan.rmap_deletes.is_empty(),
+            "план не тронул ни одной записи rmap"
+        );
         assert!(
             plan.extents.len() > 1,
             "фикстура выродилась: все экстенты слились в один — слияние не проверено"
@@ -832,7 +913,10 @@ pub(crate) fn plan_stage2(
                 returned
                     .entry(ag)
                     .or_default()
-                    .push(crate::xfs_efree::Free { agbno: e.startblock & mask, len: e.count });
+                    .push(crate::xfs_efree::Free {
+                        agbno: e.startblock & mask,
+                        len: e.count,
+                    });
                 ags_of.entry(*ino).or_default().insert(ag);
             }
         }
@@ -883,7 +967,11 @@ pub(crate) fn plan_stage2(
         out.removed = inos;
         out.blocks_freed = ext.blocks_freed;
         if round > 0 {
-            info!(round, spared = out.spared.len(), "xfs stage2: план собран не с первого круга");
+            info!(
+                round,
+                spared = out.spared.len(),
+                "xfs stage2: план собран не с первого круга"
+            );
         }
         return Ok(out);
     }
@@ -904,7 +992,8 @@ pub(crate) fn plan_stage2(
     }
     for f in files {
         if !out.spared.iter().any(|(i, _)| *i == f.ino) {
-            out.spared.push((f.ino, tr!("xfs_stage2.plan_not_settled").into_owned()));
+            out.spared
+                .push((f.ino, tr!("xfs_stage2.plan_not_settled").into_owned()));
         }
     }
     out.patches.clear();

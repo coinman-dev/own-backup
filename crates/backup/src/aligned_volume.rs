@@ -37,7 +37,10 @@ pub struct AlignedVolume<V: RawVolume> {
 
 impl<V: RawVolume> AlignedVolume<V> {
     pub fn new(inner: V) -> Self {
-        Self { inner, cached: None }
+        Self {
+            inner,
+            cached: None,
+        }
     }
 
     /// Fill `out` from the window starting at `win_start`, reading it if it is
@@ -103,7 +106,9 @@ mod tests {
                 )));
             }
             if buf.len() as u64 % self.sector != 0 {
-                return Err(OwnBackupError::Device("read length not a multiple of the sector".into()));
+                return Err(OwnBackupError::Device(
+                    "read length not a multiple of the sector".into(),
+                ));
             }
             let o = offset as usize;
             if o + buf.len() > self.data.len() {
@@ -121,7 +126,11 @@ mod tests {
     fn picky() -> PickyVolume {
         // Byte i = i mod 251, so every offset is identifiable.
         let data: Vec<u8> = (0..65536usize).map(|i| (i % 251) as u8).collect();
-        PickyVolume { data, sector: 512, reads: 0 }
+        PickyVolume {
+            data,
+            sector: 512,
+            reads: 0,
+        }
     }
 
     /// The tail of a partition: rounding the window up to 4096 would ask for
@@ -133,7 +142,8 @@ mod tests {
         short.data.truncate(5120); // ten sectors: not a multiple of the window
         let mut v = AlignedVolume::new(short);
         let mut buf = [0u8; 16];
-        v.read_at(5100, &mut buf).expect("the last bytes must be readable");
+        v.read_at(5100, &mut buf)
+            .expect("the last bytes must be readable");
         assert_eq!(buf[0], (5100 % 251) as u8);
     }
 
@@ -167,7 +177,10 @@ mod tests {
             let mut buf = [0u8; 256];
             v.read_at(i * 256, &mut buf).unwrap();
         }
-        assert_eq!(v.inner.reads, 1, "16 inodes in one 4 KiB window = one device read");
+        assert_eq!(
+            v.inner.reads, 1,
+            "16 inodes in one 4 KiB window = one device read"
+        );
     }
 
     #[test]
@@ -175,7 +188,10 @@ mod tests {
         let mut v = AlignedVolume::new(picky());
         let mut buf = vec![0u8; 8192];
         v.read_at(4096, &mut buf).unwrap();
-        assert!(v.cached.is_none(), "no window buffer for an already-aligned block");
+        assert!(
+            v.cached.is_none(),
+            "no window buffer for an already-aligned block"
+        );
         assert_eq!(buf[0], (4096 % 251) as u8);
     }
 

@@ -49,8 +49,7 @@ pub struct IVssBackupComponentsVtbl {
     pub initialize_for_restore: usize, // 5
     pub set_restore_state: usize,      // 6
     /// 7: GatherWriterMetadata(IVssAsync **)
-    pub gather_writer_metadata:
-        unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT,
+    pub gather_writer_metadata: unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT,
     pub get_writer_metadata_count: usize, // 8
     pub get_writer_metadata: usize,       // 9
     /// 10: FreeWriterMetadata()
@@ -60,17 +59,17 @@ pub struct IVssBackupComponentsVtbl {
     pub prepare_for_backup: unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT,
     /// 13: AbortBackup()
     pub abort_backup: unsafe extern "system" fn(*mut c_void) -> HRESULT,
-    pub gather_writer_status: usize,    // 14
-    pub get_writer_status_count: usize, // 15
-    pub free_writer_status: usize,      // 16
-    pub get_writer_status: usize,       // 17
-    pub set_backup_succeeded: usize,    // 18
-    pub set_backup_options: usize,      // 19
-    pub set_selected_for_restore: usize, // 20
-    pub set_restore_options: usize,     // 21
-    pub set_additional_restores: usize, // 22
+    pub gather_writer_status: usize,      // 14
+    pub get_writer_status_count: usize,   // 15
+    pub free_writer_status: usize,        // 16
+    pub get_writer_status: usize,         // 17
+    pub set_backup_succeeded: usize,      // 18
+    pub set_backup_options: usize,        // 19
+    pub set_selected_for_restore: usize,  // 20
+    pub set_restore_options: usize,       // 21
+    pub set_additional_restores: usize,   // 22
     pub set_previous_backup_stamp: usize, // 23
-    pub save_as_xml: usize,             // 24
+    pub save_as_xml: usize,               // 24
     /// 25: BackupComplete(IVssAsync **)
     pub backup_complete: unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT,
     pub add_alternative_location_mapping: usize, // 26
@@ -92,7 +91,7 @@ pub struct IVssBackupComponentsVtbl {
     /// 37: DeleteSnapshots(VSS_ID, VSS_OBJECT_TYPE, BOOL, LONG *, VSS_ID *)
     pub delete_snapshots:
         unsafe extern "system" fn(*mut c_void, GUID, i32, i32, *mut i32, *mut GUID) -> HRESULT,
-    pub import_snapshots: usize,  // 38
+    pub import_snapshots: usize,   // 38
     pub break_snapshot_set: usize, // 39
     /// 40: GetSnapshotProperties(VSS_ID, VSS_SNAPSHOT_PROP *)
     pub get_snapshot_properties:
@@ -134,9 +133,8 @@ impl VssApi {
     pub fn load() -> Result<Self> {
         // SAFETY: standard LoadLibrary/GetProcAddress dance with static strings.
         unsafe {
-            let module = LoadLibraryW(w!("VssApi.dll")).map_err(|e| {
-                OwnBackupError::Vss(format!("LoadLibrary(VssApi.dll) failed: {e}"))
-            })?;
+            let module = LoadLibraryW(w!("VssApi.dll"))
+                .map_err(|e| OwnBackupError::Vss(format!("LoadLibrary(VssApi.dll) failed: {e}")))?;
 
             let create = GetProcAddress(module, s!("CreateVssBackupComponentsInternal"))
                 .ok_or_else(|| {

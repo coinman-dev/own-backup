@@ -48,7 +48,9 @@ fn bad(msg: impl std::fmt::Display) -> OwnBackupError {
 }
 
 fn guid_le(s: &str) -> [u8; 16] {
-    Uuid::parse_str(s).expect("valid GUID literal").to_bytes_le()
+    Uuid::parse_str(s)
+        .expect("valid GUID literal")
+        .to_bytes_le()
 }
 
 fn read_exact_at(file: &mut File, off: u64, buf: &mut [u8]) -> Result<()> {
@@ -190,7 +192,11 @@ pub fn allocated_payload_blocks(path: &Path) -> Result<VhdxAllocation> {
         }
     }
 
-    Ok(VhdxAllocation { block_size: bsize, virtual_size: vsize, blocks })
+    Ok(VhdxAllocation {
+        block_size: bsize,
+        virtual_size: vsize,
+        blocks,
+    })
 }
 
 /// Where one guest offset's bytes live, up to the end of its payload block.
@@ -282,7 +288,9 @@ fn guest_to_file_offset_in_file(file: &mut File, guest_offset: u64) -> Result<Gu
 
     // 4. BAT lookup.
     if guest_offset >= vsize {
-        return Err(bad(format!("guest offset {guest_offset} out of bounds (virtual size {vsize})")));
+        return Err(bad(format!(
+            "guest offset {guest_offset} out of bounds (virtual size {vsize})"
+        )));
     }
 
     let payload_block_index = guest_offset / bsize;
@@ -306,7 +314,9 @@ fn guest_to_file_offset_in_file(file: &mut File, guest_offset: u64) -> Result<Gu
     }
     let file_offset = entry & 0xFFFFFFFFFFF00000;
     if file_offset == 0 {
-        return Err(bad(format!("block state {state} with a zero file offset — corrupt BAT")));
+        return Err(bad(format!(
+            "block state {state} with a zero file offset — corrupt BAT"
+        )));
     }
     if state == PAYLOAD_BLOCK_PARTIALLY_PRESENT {
         // Only SOME sectors of this block belong to this file; the rest still
@@ -332,7 +342,9 @@ fn guest_to_file_offset_in_file(file: &mut File, guest_offset: u64) -> Result<Gu
         }
         let bitmap_offset = bm_entry & 0xFFFFFFFFFFF00000;
         if bitmap_offset == 0 {
-            return Err(bad("sector bitmap present with a zero file offset — corrupt BAT"));
+            return Err(bad(
+                "sector bitmap present with a zero file offset — corrupt BAT",
+            ));
         }
         // First sector of THIS guest offset counted from the chunk's start.
         let chunk_first_block = chunk * chunk_ratio;
@@ -347,7 +359,10 @@ fn guest_to_file_offset_in_file(file: &mut File, guest_offset: u64) -> Result<Gu
             sector_skip: block_offset % ssize as u64,
         });
     }
-    Ok(GuestRun::Data { file_offset: file_offset + block_offset, run })
+    Ok(GuestRun::Data {
+        file_offset: file_offset + block_offset,
+        run,
+    })
 }
 
 /// Split a partially-present run into `(bytes, present_in_this_file)` segments
@@ -385,7 +400,11 @@ fn partial_segments(
     let mut out: Vec<(u64, bool)> = Vec::new();
     let mut done = 0u64;
     for i in 0..sectors {
-        let full = if i == 0 { sector_size - sector_skip } else { sector_size };
+        let full = if i == 0 {
+            sector_size - sector_skip
+        } else {
+            sector_size
+        };
         let len = full.min(take - done);
         let p = present(i);
         match out.last_mut() {
@@ -465,7 +484,9 @@ fn parse_parent_locator(meta: &[u8]) -> Option<String> {
         let val_off = u32::from_le_bytes(entry[4..8].try_into().ok()?) as usize;
         let key_len = u16::from_le_bytes(entry[8..10].try_into().ok()?) as usize;
         let val_len = u16::from_le_bytes(entry[10..12].try_into().ok()?) as usize;
-        let Some(key) = read_utf16(key_off, key_len) else { continue };
+        let Some(key) = read_utf16(key_off, key_len) else {
+            continue;
+        };
         let priority = match key.as_str() {
             "relative_path" => 0u8,
             "absolute_win32_path" => 1,
@@ -500,7 +521,9 @@ fn parse_parent_linkages(meta: &[u8]) -> Vec<Uuid> {
     let (mut ioff, mut ilen) = (0usize, 0usize);
     for slot in 0..(mcount as usize).min(2046) {
         let e = 32 + slot * 32;
-        let Some(guid) = meta.get(e..e + 16) else { break };
+        let Some(guid) = meta.get(e..e + 16) else {
+            break;
+        };
         if guid == guid_le(MI_PARENT_LOCATOR) {
             ioff = match meta.get(e + 16..e + 20).and_then(|b| b.try_into().ok()) {
                 Some(b) => u32::from_le_bytes(b) as usize,
@@ -516,7 +539,9 @@ fn parse_parent_linkages(meta: &[u8]) -> Vec<Uuid> {
     if ioff == 0 || ilen < 20 {
         return Vec::new();
     }
-    let Some(locator) = meta.get(ioff..ioff + ilen) else { return Vec::new() };
+    let Some(locator) = meta.get(ioff..ioff + ilen) else {
+        return Vec::new();
+    };
     let Some(count) = locator
         .get(18..20)
         .and_then(|b| b.try_into().ok())
@@ -537,18 +562,24 @@ fn parse_parent_linkages(meta: &[u8]) -> Vec<Uuid> {
     let mut out = Vec::new();
     for i in 0..(count as usize).min(64) {
         let e = 20 + i * 12;
-        let Some(entry) = locator.get(e..e + 12) else { break };
+        let Some(entry) = locator.get(e..e + 12) else {
+            break;
+        };
         let key_off = u32::from_le_bytes(entry[0..4].try_into().unwrap()) as usize;
         let val_off = u32::from_le_bytes(entry[4..8].try_into().unwrap()) as usize;
         let key_len = u16::from_le_bytes(entry[8..10].try_into().unwrap()) as usize;
         let val_len = u16::from_le_bytes(entry[10..12].try_into().unwrap()) as usize;
-        let Some(key) = read_utf16(key_off, key_len) else { continue };
+        let Some(key) = read_utf16(key_off, key_len) else {
+            continue;
+        };
         if key != "parent_linkage" && key != "parent_linkage2" {
             continue;
         }
         // Stored as a braced, lowercase string: "{83ed0ec3-…}".
         if let Some(value) = read_utf16(val_off, val_len) {
-            let trimmed = value.trim().trim_matches(|c| c == '{' || c == '}' || c == '\0');
+            let trimmed = value
+                .trim()
+                .trim_matches(|c| c == '{' || c == '}' || c == '\0');
             if let Ok(id) = Uuid::parse_str(trimmed) {
                 out.push(id);
             }
@@ -650,7 +681,12 @@ enum Placement {
     /// Not in this file: the parent chain, or zeros past a dynamic image.
     Elsewhere,
     /// Partly here: the chunk's sector bitmap decides sector by sector.
-    Split { file_offset: u64, bitmap_offset: u64, sector_in_chunk: u64, sector_skip: u64 },
+    Split {
+        file_offset: u64,
+        bitmap_offset: u64,
+        sector_in_chunk: u64,
+        sector_skip: u64,
+    },
 }
 
 pub struct VhdxGuestReader {
@@ -770,7 +806,9 @@ impl VhdxGuestReader {
         }
         let file_offset = entry & 0xFFFF_FFFF_FFF0_0000;
         if file_offset == 0 {
-            return Err(bad(format!("block state {state} with a zero file offset — corrupt BAT")));
+            return Err(bad(format!(
+                "block state {state} with a zero file offset — corrupt BAT"
+            )));
         }
         if state == PAYLOAD_BLOCK_PARTIALLY_PRESENT {
             // See `guest_to_file_offset_in_file`: the chunk's sector bitmap
@@ -787,7 +825,9 @@ impl VhdxGuestReader {
             }
             let bitmap_offset = bm & 0xFFFF_FFFF_FFF0_0000;
             if bitmap_offset == 0 {
-                return Err(bad("sector bitmap present with a zero file offset — corrupt BAT"));
+                return Err(bad(
+                    "sector bitmap present with a zero file offset — corrupt BAT",
+                ));
             }
             let sector_in_chunk =
                 ((block - chunk * self.chunk_ratio) * self.block_size + within) / self.sector_size;
@@ -830,7 +870,12 @@ impl VhdxGuestReader {
                     off += take as u64;
                     rest = &mut rest[take..];
                 }
-                Placement::Split { file_offset, bitmap_offset, sector_in_chunk, sector_skip } => {
+                Placement::Split {
+                    file_offset,
+                    bitmap_offset,
+                    sector_in_chunk,
+                    sector_skip,
+                } => {
                     let segments = partial_segments(
                         &mut self.file,
                         bitmap_offset,
@@ -876,7 +921,6 @@ impl VhdxGuestReader {
         }
     }
 }
-
 
 /// Read directly from a guest offset of a VHDX file without attaching.
 /// Handles ranges spanning payload-block boundaries (blocks are scattered in
@@ -1107,10 +1151,22 @@ mod tests {
 
         // Locator header at 1024: type GUID (16) + reserved (2) + count (2).
         meta[1042..1044].copy_from_slice(&2u16.to_le_bytes());
-        let key1: Vec<u8> = "relative_path".encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
-        let val1: Vec<u8> = r".\parent.vhdx".encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
-        let key2: Vec<u8> = "parent_linkage".encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
-        let val2: Vec<u8> = "{GUID}".encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        let key1: Vec<u8> = "relative_path"
+            .encode_utf16()
+            .flat_map(|u| u.to_le_bytes())
+            .collect();
+        let val1: Vec<u8> = r".\parent.vhdx"
+            .encode_utf16()
+            .flat_map(|u| u.to_le_bytes())
+            .collect();
+        let key2: Vec<u8> = "parent_linkage"
+            .encode_utf16()
+            .flat_map(|u| u.to_le_bytes())
+            .collect();
+        let val2: Vec<u8> = "{GUID}"
+            .encode_utf16()
+            .flat_map(|u| u.to_le_bytes())
+            .collect();
         // Strings packed after the two 12-byte entries (offsets locator-relative).
         let mut cursor = 20 + 2 * 12;
         let mut put = |bytes: &[u8], meta: &mut Vec<u8>| {
@@ -1137,7 +1193,10 @@ mod tests {
             meta[e + 10..e + 12].copy_from_slice(&(vl as u16).to_le_bytes());
         }
 
-        assert_eq!(parse_parent_locator(&meta).as_deref(), Some(r".\parent.vhdx"));
+        assert_eq!(
+            parse_parent_locator(&meta).as_deref(),
+            Some(r".\parent.vhdx")
+        );
         let resolved = resolve_parent(Path::new("/backups/child.avhdx"), r".\parent.vhdx");
         assert_eq!(resolved, Path::new("/backups/parent.vhdx"));
     }
@@ -1152,7 +1211,11 @@ mod tests {
         let path = dir.path().join("t.vhdx");
         let mut w = VhdxWriter::create(&path, 8 * MB, MB, 512).unwrap();
         w.write_at(MB, &vec![0x11u8; MB as usize]).unwrap();
-        w.write_at(3 * MB, &(0..MB).map(|i| (i % 253) as u8).collect::<Vec<_>>()).unwrap();
+        w.write_at(
+            3 * MB,
+            &(0..MB).map(|i| (i % 253) as u8).collect::<Vec<_>>(),
+        )
+        .unwrap();
         w.finish().unwrap();
 
         let mut reader = VhdxGuestReader::open(&path).unwrap();
@@ -1223,7 +1286,10 @@ mod tests {
         assert!(got.contains(&Uuid::parse_str(a).unwrap()));
         assert!(got.contains(&Uuid::parse_str(b).unwrap()));
         // The path parser must keep working off the same locator.
-        assert_eq!(parse_parent_locator(&meta).as_deref(), Some(r".\parent.vhdx"));
+        assert_eq!(
+            parse_parent_locator(&meta).as_deref(),
+            Some(r".\parent.vhdx")
+        );
     }
 
     #[test]

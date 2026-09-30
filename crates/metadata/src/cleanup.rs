@@ -231,8 +231,14 @@ mod tests {
         assert_eq!(count, 1);
 
         assert!(!backup_file.exists(), "Old backup file should be deleted");
-        assert!(get_set(&conn, &old_set.id).unwrap().is_none(), "Old DB record should be gone");
-        assert!(get_set(&conn, &new_set.id).unwrap().is_some(), "New set should remain");
+        assert!(
+            get_set(&conn, &old_set.id).unwrap().is_none(),
+            "Old DB record should be gone"
+        );
+        assert!(
+            get_set(&conn, &new_set.id).unwrap().is_some(),
+            "New set should remain"
+        );
     }
 
     #[test]
@@ -306,21 +312,35 @@ mod tests {
             manifest_json: None,
         };
         insert_set(&conn, &legit_set).unwrap();
-        update_set_status(&conn, &legit_set.id, &BackupStatus::Completed, Some(Utc::now()), Some(50), None).unwrap();
+        update_set_status(
+            &conn,
+            &legit_set.id,
+            &BackupStatus::Completed,
+            Some(Utc::now()),
+            Some(50),
+            None,
+        )
+        .unwrap();
 
-        set_retention_policy(&conn, &RetentionPolicy {
-            job_id: job.id,
-            max_full_backups: None,
-            max_incremental_per_full: None,
-            max_age_days: Some(30),
-            min_keep_count: 1,
-        }).unwrap();
+        set_retention_policy(
+            &conn,
+            &RetentionPolicy {
+                job_id: job.id,
+                max_full_backups: None,
+                max_incremental_per_full: None,
+                max_age_days: Some(30),
+                min_keep_count: 1,
+            },
+        )
+        .unwrap();
 
         let _ = cleanup_old_backups(&conn, &job.id);
 
         // The outside file must NOT be deleted
-        assert!(std::path::Path::new(outside_path).exists(),
-            "File outside target directory must not be deleted");
+        assert!(
+            std::path::Path::new(outside_path).exists(),
+            "File outside target directory must not be deleted"
+        );
 
         // Cleanup
         let _ = std::fs::remove_file(outside_path);

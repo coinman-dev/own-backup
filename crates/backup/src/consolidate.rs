@@ -171,7 +171,11 @@ fn container_of(path: &Path) -> Result<&'static str> {
 fn chain_key_for(image: &Path, keys: Option<&ArchiveKeys>) -> Result<ChainKey> {
     let keys = keys.ok_or_else(|| {
         OwnBackupError::Encryption(
-            tr!("consolidate.encrypted_needs_job_key", image = image.display()).into_owned(),
+            tr!(
+                "consolidate.encrypted_needs_job_key",
+                image = image.display()
+            )
+            .into_owned(),
         )
     })?;
     Ok(keys.open_chain_of(image)?.key)
@@ -192,7 +196,10 @@ fn read_sidecar_of(image: &Path, keys: Option<&ArchiveKeys>) -> Result<Sidecar> 
 fn read_header_of(
     image: &Path,
     keys: Option<&ArchiveKeys>,
-) -> Option<(crate::sidecar::SidecarInfo, own_backup_common::image::ImageManifest)> {
+) -> Option<(
+    crate::sidecar::SidecarInfo,
+    own_backup_common::image::ImageManifest,
+)> {
     if container_of(image).ok()? == "obk" {
         let sidecar = read_sidecar_of(image, keys).ok()?;
         return Some((sidecar.info, sidecar.manifest));
@@ -266,7 +273,12 @@ fn remove_checked(path: &Path) -> Result<()> {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(OwnBackupError::ChainBroken(
-            tr!("consolidate.remove_failed", path = path.display(), error = e).into_owned(),
+            tr!(
+                "consolidate.remove_failed",
+                path = path.display(),
+                error = e
+            )
+            .into_owned(),
         )),
     }
 }
@@ -280,7 +292,8 @@ fn remove_checked(path: &Path) -> Result<()> {
 fn name_inside(folder: &Path, name: &str) -> Result<PathBuf> {
     let candidate = Path::new(name);
     let mut parts = candidate.components();
-    let single = matches!(parts.next(), Some(std::path::Component::Normal(_))) && parts.next().is_none();
+    let single =
+        matches!(parts.next(), Some(std::path::Component::Normal(_))) && parts.next().is_none();
     if !single {
         return Err(OwnBackupError::ChainBroken(
             tr!("consolidate.marker_bad_name", name = format!("{name:?}")).into_owned(),
@@ -345,7 +358,10 @@ fn fold_vhdx(base: &Path, victim: &Path) -> Result<()> {
             // leave the chain in its one unreadable state (base folded, next
             // not yet repointed) with the resume refusing to finish it — the
             // exact case step 6 is ordered last to make survivable.
-            let stale = matches!(crate::vhdx_bat::vhdx_parent_linkage_matches(victim, base), Ok(false));
+            let stale = matches!(
+                crate::vhdx_bat::vhdx_parent_linkage_matches(victim, base),
+                Ok(false)
+            );
             let applied = stale || merge_already_applied(base, victim).unwrap_or(false);
             if applied {
                 warn!(
@@ -425,7 +441,12 @@ fn write_sidecars(image: &Path, sidecar: &Sidecar) -> Result<()> {
         write_embedded_sidecar(image, &ext, sidecar)?;
     }
     if external.exists() {
-        write_sidecar(&external, &sidecar.info, &sidecar.manifest, &sidecar.checksums)?;
+        write_sidecar(
+            &external,
+            &sidecar.info,
+            &sidecar.manifest,
+            &sidecar.checksums,
+        )?;
     }
     if !embedded && !external.exists() {
         return Err(OwnBackupError::ImageFormat(format!(
@@ -586,7 +607,9 @@ fn execute(
                     .map(|(info, _)| info.consolidated_increments)
                     .unwrap_or(0),
                 chain_started_at: base_header.as_ref().and_then(|(info, manifest)| {
-                    info.chain_started_at.clone().or_else(|| Some(manifest.created_at.clone()))
+                    info.chain_started_at
+                        .clone()
+                        .or_else(|| Some(manifest.created_at.clone()))
                 }),
             }
         }
@@ -731,10 +754,7 @@ pub fn resume_pending(folder: &Path) -> Result<ResumeReport> {
 }
 
 /// The same, for a job whose chain may be encrypted.
-pub fn resume_pending_with_keys(
-    folder: &Path,
-    keys: Option<&ArchiveKeys>,
-) -> Result<ResumeReport> {
+pub fn resume_pending_with_keys(folder: &Path, keys: Option<&ArchiveKeys>) -> Result<ResumeReport> {
     let mut report = ResumeReport::default();
     let entries = match std::fs::read_dir(folder) {
         Ok(e) => e,
@@ -766,7 +786,11 @@ pub fn resume_pending_with_keys(
             Ok((
                 name_inside(folder, &marker.base)?,
                 name_inside(folder, &marker.victim)?,
-                marker.next.as_deref().map(|n| name_inside(folder, n)).transpose()?,
+                marker
+                    .next
+                    .as_deref()
+                    .map(|n| name_inside(folder, n))
+                    .transpose()?,
             ))
         })();
         let (base, victim, next) = match resolved {
@@ -875,13 +899,19 @@ mod tests {
         let mut w = VhdxWriter::create(&base, 8 * mb, mb, 512).unwrap();
         w.write_at(mb, &vec![0x11u8; mb as usize]).unwrap();
         w.finish().unwrap();
-        assert!(!merge_already_applied(&base, &victim).unwrap(), "the fold has NOT happened yet");
+        assert!(
+            !merge_already_applied(&base, &victim).unwrap(),
+            "the fold has NOT happened yet"
+        );
 
         // Now the base carries the victim's bytes — the fold is done.
         let mut w = VhdxWriter::create(&base, 8 * mb, mb, 512).unwrap();
         w.write_at(mb, &payload).unwrap();
         w.finish().unwrap();
-        assert!(merge_already_applied(&base, &victim).unwrap(), "the fold IS already applied");
+        assert!(
+            merge_already_applied(&base, &victim).unwrap(),
+            "the fold IS already applied"
+        );
     }
 
     use crate::chains::{list_job_chains, plan_consolidation};
@@ -987,11 +1017,16 @@ mod tests {
         }
         for &(index, fill) in data_clusters {
             writer
-                .write_at(DEFAULT_PARTITION_OFFSET + index * CS, &vec![fill; CS as usize])
+                .write_at(
+                    DEFAULT_PARTITION_OFFSET + index * CS,
+                    &vec![fill; CS as usize],
+                )
                 .unwrap();
         }
         // Reserve the meta partition so the blob write has clusters to land in.
-        writer.write_at(META_OFFSET, &vec![0xEEu8; META_SIZE as usize]).unwrap();
+        writer
+            .write_at(META_OFFSET, &vec![0xEEu8; META_SIZE as usize])
+            .unwrap();
         writer.finish().unwrap();
 
         let mut info = match backing {
@@ -1029,25 +1064,50 @@ mod tests {
     fn sums(pairs: &[(u64, u64)]) -> Vec<BlockChecksum> {
         pairs
             .iter()
-            .map(|&(block_number, checksum)| BlockChecksum { block_number, checksum })
+            .map(|&(block_number, checksum)| BlockChecksum {
+                block_number,
+                checksum,
+            })
             .collect()
     }
 
     /// base ← inc1 ← inc2 with real sidecars, one window step applied.
     fn three_image_chain(dir: &Path) -> (PathBuf, PathBuf, PathBuf, Uuid) {
         let (base, base_id) = put_image(
-            dir, "j_C_full_1.qcow2", None, ChainRole::Full, "2026-01-01T00:00:00Z",
-            BackupType::Full, None, &[(1, 0x11), (2, 0x11)], &sums(&[(0, 100), (1, 101)]), None,
+            dir,
+            "j_C_full_1.qcow2",
+            None,
+            ChainRole::Full,
+            "2026-01-01T00:00:00Z",
+            BackupType::Full,
+            None,
+            &[(1, 0x11), (2, 0x11)],
+            &sums(&[(0, 100), (1, 101)]),
+            None,
         );
         let (inc1, inc1_id) = put_image(
-            dir, "j_C_inc_2.qcow2", Some("j_C_full_1.qcow2"), ChainRole::Incremental,
-            "2026-01-02T00:00:00Z", BackupType::Incremental, Some(base_id),
-            &[(2, 0x22), (3, 0x22)], &sums(&[(0, 100), (1, 201), (2, 202)]), None,
+            dir,
+            "j_C_inc_2.qcow2",
+            Some("j_C_full_1.qcow2"),
+            ChainRole::Incremental,
+            "2026-01-02T00:00:00Z",
+            BackupType::Incremental,
+            Some(base_id),
+            &[(2, 0x22), (3, 0x22)],
+            &sums(&[(0, 100), (1, 201), (2, 202)]),
+            None,
         );
         let (inc2, _) = put_image(
-            dir, "j_C_inc_3.qcow2", Some("j_C_inc_2.qcow2"), ChainRole::Incremental,
-            "2026-01-03T00:00:00Z", BackupType::Incremental, Some(inc1_id),
-            &[(3, 0x33), (4, 0x33)], &sums(&[(0, 100), (1, 201), (3, 303)]), None,
+            dir,
+            "j_C_inc_3.qcow2",
+            Some("j_C_inc_2.qcow2"),
+            ChainRole::Incremental,
+            "2026-01-03T00:00:00Z",
+            BackupType::Incremental,
+            Some(inc1_id),
+            &[(3, 0x33), (4, 0x33)],
+            &sums(&[(0, 100), (1, 201), (3, 303)]),
+            None,
         );
         (base, inc1, inc2, inc1_id)
     }
@@ -1069,7 +1129,11 @@ mod tests {
         assert_eq!(outcome.repointed.as_deref(), Some(inc2.as_path()));
         assert!(!inc1.exists(), "the folded increment is deleted");
         assert!(!marker_path(&base).exists(), "the marker is cleared");
-        assert_eq!(read_volume(&inc2), leaf_before, "the leaf must read unchanged");
+        assert_eq!(
+            read_volume(&inc2),
+            leaf_before,
+            "the leaf must read unchanged"
+        );
 
         let promoted = read_image_sidecar(&base).unwrap();
         assert_eq!(promoted.info.chain_role, ChainRole::Full);
@@ -1077,7 +1141,10 @@ mod tests {
         assert_eq!(promoted.info.image_file_name, "j_C_full_1.qcow2");
         assert_eq!(promoted.manifest.backup_type, BackupType::Full);
         assert_eq!(promoted.manifest.parent_backup_id, None);
-        assert_eq!(promoted.manifest.backup_id, inc1_id, "the base now IS that point in time");
+        assert_eq!(
+            promoted.manifest.backup_id, inc1_id,
+            "the base now IS that point in time"
+        );
         assert_eq!(
             promoted.checksums,
             sums(&[(0, 100), (1, 201), (2, 202)]),
@@ -1087,7 +1154,10 @@ mod tests {
         // The leaf's own record of its parent follows the container link, and
         // its parent_backup_id still names the id the base has inherited.
         let leaf = read_image_sidecar(&inc2).unwrap();
-        assert_eq!(leaf.info.parent_image_file_name.as_deref(), Some("j_C_full_1.qcow2"));
+        assert_eq!(
+            leaf.info.parent_image_file_name.as_deref(),
+            Some("j_C_full_1.qcow2")
+        );
         assert_eq!(leaf.manifest.parent_backup_id, Some(inc1_id));
 
         // And the shortened chain is what the planner now sees.
@@ -1125,8 +1195,15 @@ mod tests {
         assert_eq!(report.finished.len(), 1);
         assert!(!inc1.exists());
         assert!(!marker_path(&base).exists());
-        assert_eq!(read_volume(&inc2), leaf_before, "the leaf survived the interruption");
-        assert_eq!(read_image_sidecar(&base).unwrap().info.chain_role, ChainRole::Full);
+        assert_eq!(
+            read_volume(&inc2),
+            leaf_before,
+            "the leaf survived the interruption"
+        );
+        assert_eq!(
+            read_image_sidecar(&base).unwrap().info.chain_role,
+            ChainRole::Full
+        );
     }
 
     /// A marker whose increment is already gone means every destructive step
@@ -1158,14 +1235,29 @@ mod tests {
     fn folding_the_leaf_leaves_a_standalone_full() {
         let dir = tempfile::tempdir().unwrap();
         let (base, _) = put_image(
-            dir.path(), "k_C_full_1.qcow2", None, ChainRole::Full, "2026-01-01T00:00:00Z",
-            BackupType::Full, None, &[(1, 0x11)], &sums(&[(0, 1)]), None,
+            dir.path(),
+            "k_C_full_1.qcow2",
+            None,
+            ChainRole::Full,
+            "2026-01-01T00:00:00Z",
+            BackupType::Full,
+            None,
+            &[(1, 0x11)],
+            &sums(&[(0, 1)]),
+            None,
         );
         let base_id = read_image_sidecar(&base).unwrap().manifest.backup_id;
         let (inc, _) = put_image(
-            dir.path(), "k_C_inc_2.qcow2", Some("k_C_full_1.qcow2"), ChainRole::Incremental,
-            "2026-01-02T00:00:00Z", BackupType::Incremental, Some(base_id),
-            &[(2, 0x22)], &sums(&[(0, 1), (1, 2)]), None,
+            dir.path(),
+            "k_C_inc_2.qcow2",
+            Some("k_C_full_1.qcow2"),
+            ChainRole::Incremental,
+            "2026-01-02T00:00:00Z",
+            BackupType::Incremental,
+            Some(base_id),
+            &[(2, 0x22)],
+            &sums(&[(0, 1), (1, 2)]),
+            None,
         );
         let expected = read_volume(&inc);
 
@@ -1175,7 +1267,11 @@ mod tests {
 
         assert!(outcome.repointed.is_none());
         assert!(!inc.exists());
-        assert_eq!(read_volume(&base), expected, "the base now reads like the leaf did");
+        assert_eq!(
+            read_volume(&base),
+            expected,
+            "the base now reads like the leaf did"
+        );
         let sidecar = read_image_sidecar(&base).unwrap();
         assert_eq!(sidecar.info.chain_role, ChainRole::Full);
         assert_eq!(sidecar.checksums, sums(&[(0, 1), (1, 2)]));
@@ -1188,8 +1284,16 @@ mod tests {
     fn promotion_keeps_the_whole_disk_manifest() {
         let dir = tempfile::tempdir().unwrap();
         let (base, base_id) = put_image(
-            dir.path(), "d_disk0_full_1.qcow2", None, ChainRole::Full, "2026-01-01T00:00:00Z",
-            BackupType::Full, None, &[(1, 0x11)], &sums(&[(0, 1)]), None,
+            dir.path(),
+            "d_disk0_full_1.qcow2",
+            None,
+            ChainRole::Full,
+            "2026-01-01T00:00:00Z",
+            BackupType::Full,
+            None,
+            &[(1, 0x11)],
+            &sums(&[(0, 1)]),
+            None,
         );
         let disk_manifest = DiskBackupManifest {
             format_version: DiskBackupManifest::FORMAT_VERSION,
@@ -1213,9 +1317,15 @@ mod tests {
             source_disk: None,
         };
         let (inc, _) = put_image(
-            dir.path(), "d_disk0_inc_2.qcow2", Some("d_disk0_full_1.qcow2"),
-            ChainRole::Incremental, "2026-01-02T00:00:00Z", BackupType::Incremental,
-            Some(base_id), &[(2, 0x22)], &sums(&[(0, 1), (1, 2)]),
+            dir.path(),
+            "d_disk0_inc_2.qcow2",
+            Some("d_disk0_full_1.qcow2"),
+            ChainRole::Incremental,
+            "2026-01-02T00:00:00Z",
+            BackupType::Incremental,
+            Some(base_id),
+            &[(2, 0x22)],
+            &sums(&[(0, 1), (1, 2)]),
             Some(disk_manifest.clone()),
         );
         assert!(inc.exists());
@@ -1225,7 +1335,9 @@ mod tests {
         consolidate_step(&step).unwrap();
 
         let promoted = read_image_sidecar(&base).unwrap();
-        let kept = promoted.disk_manifest.expect("whole-disk manifest must survive promotion");
+        let kept = promoted
+            .disk_manifest
+            .expect("whole-disk manifest must survive promotion");
         assert_eq!(kept.images.len(), 1);
         assert_eq!(kept.images[0].image_file_name, "d_disk0_inc_2.qcow2");
     }
@@ -1244,7 +1356,10 @@ mod tests {
 
         let report = resume_pending(dir.path()).unwrap();
         assert!(!report.all_finished(), "{report:?}");
-        assert!(marker.exists(), "повреждённый маркер сохраняется для разбора");
+        assert!(
+            marker.exists(),
+            "повреждённый маркер сохраняется для разбора"
+        );
         assert_eq!(report.stuck_bases(), vec![base], "{report:?}");
     }
 
@@ -1310,14 +1425,20 @@ mod tests {
         marker.merged = true;
         write_marker(&path, &marker).unwrap();
 
-        assert!(read_marker(&path).unwrap().merged, "перезапись видна целиком");
+        assert!(
+            read_marker(&path).unwrap().merged,
+            "перезапись видна целиком"
+        );
         let leftovers: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
             .flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|n| n.ends_with(".tmp"))
             .collect();
-        assert!(leftovers.is_empty(), "остался временный файл: {leftovers:?}");
+        assert!(
+            leftovers.is_empty(),
+            "остался временный файл: {leftovers:?}"
+        );
     }
 
     /// Удаление свёрнутого инкремента — последняя фаза шага, и её результат
@@ -1443,19 +1564,40 @@ mod tests {
         let session = keys.start_chain().unwrap();
 
         let (base, base_id) = put_obk(
-            dir.path(), "e_C_full_1.obk", &keys, &session, ChainRole::Full,
-            "2026-01-01T00:00:00Z", BackupType::Full, None,
-            &[(1, 0x11), (2, 0x11)], &sums(&[(0, 100), (1, 101)]),
+            dir.path(),
+            "e_C_full_1.obk",
+            &keys,
+            &session,
+            ChainRole::Full,
+            "2026-01-01T00:00:00Z",
+            BackupType::Full,
+            None,
+            &[(1, 0x11), (2, 0x11)],
+            &sums(&[(0, 100), (1, 101)]),
         );
         let (inc1, inc1_id) = put_obk(
-            dir.path(), "e_C_inc_2.obk", &keys, &session, ChainRole::Incremental,
-            "2026-01-02T00:00:00Z", BackupType::Incremental, Some((base_id, "e_C_full_1.obk")),
-            &[(2, 0x22), (3, 0x22)], &sums(&[(0, 100), (1, 201), (2, 202)]),
+            dir.path(),
+            "e_C_inc_2.obk",
+            &keys,
+            &session,
+            ChainRole::Incremental,
+            "2026-01-02T00:00:00Z",
+            BackupType::Incremental,
+            Some((base_id, "e_C_full_1.obk")),
+            &[(2, 0x22), (3, 0x22)],
+            &sums(&[(0, 100), (1, 201), (2, 202)]),
         );
         let (inc2, _) = put_obk(
-            dir.path(), "e_C_inc_3.obk", &keys, &session, ChainRole::Incremental,
-            "2026-01-03T00:00:00Z", BackupType::Incremental, Some((inc1_id, "e_C_inc_2.obk")),
-            &[(3, 0x33), (4, 0x33)], &sums(&[(0, 100), (1, 201), (3, 303)]),
+            dir.path(),
+            "e_C_inc_3.obk",
+            &keys,
+            &session,
+            ChainRole::Incremental,
+            "2026-01-03T00:00:00Z",
+            BackupType::Incremental,
+            Some((inc1_id, "e_C_inc_2.obk")),
+            &[(3, 0x33), (4, 0x33)],
+            &sums(&[(0, 100), (1, 201), (3, 303)]),
         );
 
         let leaf_before = read_obk(&inc2, &keys);
@@ -1468,14 +1610,21 @@ mod tests {
         assert_eq!(outcome.repointed.as_deref(), Some(inc2.as_path()));
         assert!(!inc1.exists(), "the folded increment is deleted");
         assert!(!marker_path(&base).exists(), "the marker is cleared");
-        assert_eq!(read_obk(&inc2, &keys), leaf_before, "the leaf must read unchanged");
+        assert_eq!(
+            read_obk(&inc2, &keys),
+            leaf_before,
+            "the leaf must read unchanged"
+        );
 
         // The base is that point in time now, and still encrypted.
         let promoted = obk_sidecar(&base, &keys);
         assert_eq!(promoted.info.chain_role, ChainRole::Full);
         assert_eq!(promoted.info.parent_image_file_name, None);
         assert_eq!(promoted.info.consolidated_increments, 1);
-        assert_eq!(promoted.info.chain_started_at.as_deref(), Some("2026-01-01T00:00:00Z"));
+        assert_eq!(
+            promoted.info.chain_started_at.as_deref(),
+            Some("2026-01-01T00:00:00Z")
+        );
         assert_eq!(promoted.manifest.backup_type, BackupType::Full);
         assert_eq!(promoted.manifest.backup_id, inc1_id);
         assert_eq!(promoted.checksums, sums(&[(0, 100), (1, 201), (2, 202)]));
@@ -1486,7 +1635,10 @@ mod tests {
 
         // The leaf follows the base by name and by identity.
         let leaf = obk_sidecar(&inc2, &keys);
-        assert_eq!(leaf.info.parent_image_file_name.as_deref(), Some("e_C_full_1.obk"));
+        assert_eq!(
+            leaf.info.parent_image_file_name.as_deref(),
+            Some("e_C_full_1.obk")
+        );
         assert_eq!(leaf.manifest.parent_backup_id, Some(inc1_id));
         let listing = crate::seal::obk::read_listing(&inc2).unwrap();
         assert_eq!(listing.parent_file_name.as_deref(), Some("e_C_full_1.obk"));
@@ -1499,7 +1651,11 @@ mod tests {
         // header — and consolidation is the one thing that can make the files
         // on disk disagree with the chain's history. Two increments have been
         // taken over this chain's life; one of them is now inside the base.
-        assert_eq!(chain.increments_ever(), 2, "a folded increment still counts");
+        assert_eq!(
+            chain.increments_ever(),
+            2,
+            "a folded increment still counts"
+        );
         assert_eq!(
             chain.started_at(),
             "2026-01-01T00:00:00Z",
@@ -1519,19 +1675,40 @@ mod tests {
         let session = keys.start_chain().unwrap();
 
         let (base, base_id) = put_obk(
-            dir.path(), "e_C_full_1.obk", &keys, &session, ChainRole::Full,
-            "2026-01-01T00:00:00Z", BackupType::Full, None,
-            &[(1, 0x11), (2, 0x11)], &sums(&[(0, 100), (1, 101)]),
+            dir.path(),
+            "e_C_full_1.obk",
+            &keys,
+            &session,
+            ChainRole::Full,
+            "2026-01-01T00:00:00Z",
+            BackupType::Full,
+            None,
+            &[(1, 0x11), (2, 0x11)],
+            &sums(&[(0, 100), (1, 101)]),
         );
         let (inc1, inc1_id) = put_obk(
-            dir.path(), "e_C_inc_2.obk", &keys, &session, ChainRole::Incremental,
-            "2026-01-02T00:00:00Z", BackupType::Incremental, Some((base_id, "e_C_full_1.obk")),
-            &[(2, 0x22), (3, 0x22)], &sums(&[(0, 100), (1, 201), (2, 202)]),
+            dir.path(),
+            "e_C_inc_2.obk",
+            &keys,
+            &session,
+            ChainRole::Incremental,
+            "2026-01-02T00:00:00Z",
+            BackupType::Incremental,
+            Some((base_id, "e_C_full_1.obk")),
+            &[(2, 0x22), (3, 0x22)],
+            &sums(&[(0, 100), (1, 201), (2, 202)]),
         );
         let (inc2, _) = put_obk(
-            dir.path(), "e_C_inc_3.obk", &keys, &session, ChainRole::Incremental,
-            "2026-01-03T00:00:00Z", BackupType::Incremental, Some((inc1_id, "e_C_inc_2.obk")),
-            &[(3, 0x33), (4, 0x33)], &sums(&[(0, 100), (1, 201), (3, 303)]),
+            dir.path(),
+            "e_C_inc_3.obk",
+            &keys,
+            &session,
+            ChainRole::Incremental,
+            "2026-01-03T00:00:00Z",
+            BackupType::Incremental,
+            Some((inc1_id, "e_C_inc_2.obk")),
+            &[(3, 0x33), (4, 0x33)],
+            &sums(&[(0, 100), (1, 201), (3, 303)]),
         );
         let leaf_before = read_obk(&inc2, &keys);
 
@@ -1583,10 +1760,17 @@ mod tests {
         assert_eq!(report.finished.len(), 1);
         assert!(!inc1.exists());
         assert!(!marker_path(&base).exists());
-        assert_eq!(read_obk(&inc2, &keys), leaf_before, "the leaf survived the interruption");
+        assert_eq!(
+            read_obk(&inc2, &keys),
+            leaf_before,
+            "the leaf survived the interruption"
+        );
         let promoted = obk_sidecar(&base, &keys);
         assert_eq!(promoted.info.chain_role, ChainRole::Full);
-        assert_eq!(promoted.info.consolidated_increments, 1, "the fold is counted once");
+        assert_eq!(
+            promoted.info.consolidated_increments, 1,
+            "the fold is counted once"
+        );
     }
 
     /// Without the job's key nothing can be folded — and nothing may be
@@ -1598,13 +1782,28 @@ mod tests {
         let keys = obk_keys();
         let session = keys.start_chain().unwrap();
         let (base, base_id) = put_obk(
-            dir.path(), "e_C_full_1.obk", &keys, &session, ChainRole::Full,
-            "2026-01-01T00:00:00Z", BackupType::Full, None, &[(1, 0x11)], &sums(&[(0, 1)]),
+            dir.path(),
+            "e_C_full_1.obk",
+            &keys,
+            &session,
+            ChainRole::Full,
+            "2026-01-01T00:00:00Z",
+            BackupType::Full,
+            None,
+            &[(1, 0x11)],
+            &sums(&[(0, 1)]),
         );
         let (inc, _) = put_obk(
-            dir.path(), "e_C_inc_2.obk", &keys, &session, ChainRole::Incremental,
-            "2026-01-02T00:00:00Z", BackupType::Incremental, Some((base_id, "e_C_full_1.obk")),
-            &[(2, 0x22)], &sums(&[(0, 1), (1, 2)]),
+            dir.path(),
+            "e_C_inc_2.obk",
+            &keys,
+            &session,
+            ChainRole::Incremental,
+            "2026-01-02T00:00:00Z",
+            BackupType::Incremental,
+            Some((base_id, "e_C_full_1.obk")),
+            &[(2, 0x22)],
+            &sums(&[(0, 1), (1, 2)]),
         );
         let before = std::fs::read(&base).unwrap();
 
@@ -1614,7 +1813,11 @@ mod tests {
         assert!(error.contains("ключ задания"), "unexpected: {error}");
 
         assert!(inc.exists(), "the increment stays");
-        assert_eq!(std::fs::read(&base).unwrap(), before, "the base is untouched");
+        assert_eq!(
+            std::fs::read(&base).unwrap(),
+            before,
+            "the base is untouched"
+        );
         assert!(!marker_path(&base).exists(), "and no marker is left behind");
     }
 
@@ -1624,7 +1827,10 @@ mod tests {
         let folder = Path::new("/backups");
         assert!(name_inside(folder, "a_full.qcow2").is_ok());
         for bad in ["../a.qcow2", "sub/a.qcow2", "/etc/passwd", "", "."] {
-            assert!(name_inside(folder, bad).is_err(), "{bad:?} должно быть отвергнуто");
+            assert!(
+                name_inside(folder, bad).is_err(),
+                "{bad:?} должно быть отвергнуто"
+            );
         }
     }
 }

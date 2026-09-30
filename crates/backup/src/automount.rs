@@ -62,7 +62,9 @@ impl AutoMountGuard {
         let previous = is_disabled();
         if run_mountvol("/N") {
             debug!("auto-mount disabled (mountvol /N)");
-            Self { restore: (previous != Some(true)).then_some("/E") }
+            Self {
+                restore: (previous != Some(true)).then_some("/E"),
+            }
         } else {
             warn!("could not disable auto-mount (mountvol /N) — a drive letter may appear briefly");
             Self { restore: None }
@@ -87,7 +89,9 @@ impl AutoMountGuard {
                 "auto-mount was disabled on this machine — enabled for the mount window so the \
                  image's volumes can mount (restored on the way out)"
             );
-            Self { restore: Some("/N") }
+            Self {
+                restore: Some("/N"),
+            }
         } else {
             warn!(
                 "auto-mount is disabled on this machine and could not be enabled (mountvol /E) — \
@@ -111,7 +115,10 @@ impl Drop for AutoMountGuard {
             }
             warn!(attempt, flag, "retrying mountvol");
         }
-        warn!(flag, "FAILED to restore the auto-mount setting — run `mountvol {flag}` manually");
+        warn!(
+            flag,
+            "FAILED to restore the auto-mount setting — run `mountvol {flag}` manually"
+        );
     }
 }
 

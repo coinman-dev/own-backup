@@ -83,7 +83,6 @@ impl VerifyRate {
     }
 }
 
-
 use own_backup_common::tr;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -154,7 +153,10 @@ impl ScheduleConfig {
     /// what that setting was for.
     pub fn is_dest_connected_trigger(&self) -> bool {
         self.kind == "event"
-            && matches!(self.event_trigger.as_str(), "dest_connected" | "usb_connect")
+            && matches!(
+                self.event_trigger.as_str(),
+                "dest_connected" | "usb_connect"
+            )
     }
 }
 
@@ -313,11 +315,11 @@ pub fn dest_collision_letter(job: &Job, dest_folder: &str) -> Option<char> {
 /// be written onto the volume being imaged. And it is by range on purpose: a
 /// DIFFERENT partition of the same disk is a perfectly ordinary destination,
 /// and refusing it would be refusing something that works.
-pub fn dest_placement(job: &Job, dest_folder: &str) -> own_backup_backup::source_identity::DestPlacement {
-    own_backup_backup::source_identity::where_the_destination_sits(
-        &job.source_list(),
-        dest_folder,
-    )
+pub fn dest_placement(
+    job: &Job,
+    dest_folder: &str,
+) -> own_backup_backup::source_identity::DestPlacement {
+    own_backup_backup::source_identity::where_the_destination_sits(&job.source_list(), dest_folder)
 }
 
 pub fn default_exclusions() -> Vec<String> {
@@ -707,7 +709,11 @@ impl Job {
     /// for a valid job; each entry gets its own image/chain within a run.
     pub fn source_list(&self) -> Vec<String> {
         if !self.sources.is_empty() {
-            self.sources.iter().filter(|s| !s.trim().is_empty()).cloned().collect()
+            self.sources
+                .iter()
+                .filter(|s| !s.trim().is_empty())
+                .cloned()
+                .collect()
         } else if !self.source.trim().is_empty() {
             vec![self.source.clone()]
         } else {
@@ -788,7 +794,12 @@ impl JobStore {
     }
 
     pub fn get(&self, id: &str) -> Option<Job> {
-        self.jobs.lock().unwrap().iter().find(|j| j.id == id).cloned()
+        self.jobs
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|j| j.id == id)
+            .cloned()
     }
 
     /// Insert or update a job; returns the stored job once it is ON DISK.
@@ -897,7 +908,11 @@ impl JobStore {
         }
         {
             let jobs = self.jobs.lock().unwrap();
-            if let Some(run) = jobs.iter().find(|j| j.id == job_id).and_then(|j| j.last_run.as_ref()) {
+            if let Some(run) = jobs
+                .iter()
+                .find(|j| j.id == job_id)
+                .and_then(|j| j.last_run.as_ref())
+            {
                 add(&run.image_path, &mut set);
                 add(&run.base_image_path, &mut set);
                 for i in &run.images {
@@ -955,7 +970,6 @@ impl JobStore {
             .find(|r| r.job_id == job_id && r.status == "success")
             .cloned()
     }
-
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &std::path::Path) -> std::io::Result<Option<T>> {
@@ -1032,12 +1046,17 @@ struct QueueState {
 
 impl RunQueue {
     pub fn new() -> Self {
-        Self { state: Arc::new(Mutex::new(QueueState::default())) }
+        Self {
+            state: Arc::new(Mutex::new(QueueState::default())),
+        }
     }
 
     pub fn snapshot(&self) -> QueueSnapshot {
         let q = self.state.lock().unwrap();
-        QueueSnapshot { current: q.current.clone(), pending: q.pending.iter().cloned().collect() }
+        QueueSnapshot {
+            current: q.current.clone(),
+            pending: q.pending.iter().cloned().collect(),
+        }
     }
 
     /// Put a job in the queue unless it is already waiting or running.
@@ -1059,7 +1078,9 @@ impl RunQueue {
     /// arriving, and must not start.
     pub fn start(&self, id: &str) -> bool {
         let mut q = self.state.lock().unwrap();
-        let Some(at) = q.pending.iter().position(|j| j == id) else { return false };
+        let Some(at) = q.pending.iter().position(|j| j == id) else {
+            return false;
+        };
         q.pending.remove(at);
         q.current = Some(id.to_string());
         true
@@ -1236,10 +1257,12 @@ impl PasswordStore {
                 own_backup_metadata::upsert_volume_secret(&private, &key, &blob)?;
             }
             let confirmed = own_backup_metadata::open_volume_secret_database(&self.db_path)?;
-            let persisted = own_backup_metadata::get_volume_secret(&confirmed, &key)?
-                .ok_or_else(|| own_backup_common::OwnBackupError::Database(
-                    format!("private password for volume {key} was not committed"),
-                ))?;
+            let persisted =
+                own_backup_metadata::get_volume_secret(&confirmed, &key)?.ok_or_else(|| {
+                    own_backup_common::OwnBackupError::Database(format!(
+                        "private password for volume {key} was not committed"
+                    ))
+                })?;
             if os_store.unprotect(&persisted)?.as_slice() != old_plain.as_slice() {
                 return Err(own_backup_common::OwnBackupError::Encryption(format!(
                     "private password verification failed for volume {key}"
@@ -1331,7 +1354,9 @@ impl PasswordResolver for PasswordStore {
         let plain = own_backup_backup::secrets::default_store(&self.key_path)
             .unprotect(&blob)
             .ok()?;
-        Some(zeroize::Zeroizing::new(String::from_utf8(plain.to_vec()).ok()?))
+        Some(zeroize::Zeroizing::new(
+            String::from_utf8(plain.to_vec()).ok()?,
+        ))
     }
 }
 
@@ -1388,7 +1413,11 @@ struct QuietCopy(#[allow(dead_code)] Option<own_backup_backup::power_win::Backgr
 #[cfg(target_os = "windows")]
 impl QuietCopy {
     fn enter(low_priority: bool) -> Self {
-        Self(low_priority.then(own_backup_backup::power_win::BackgroundIo::enter).flatten())
+        Self(
+            low_priority
+                .then(own_backup_backup::power_win::BackgroundIo::enter)
+                .flatten(),
+        )
     }
 }
 
@@ -1680,10 +1709,18 @@ pub fn plan_run(job: &Job, last_success: Option<&JobRun>) -> RunPlan {
         return RunPlan::full();
     };
     // Runs recorded before phase 5 have an empty kind — they were all full.
-    let last_kind = if last.backup_kind.is_empty() { "full" } else { &last.backup_kind };
+    let last_kind = if last.backup_kind.is_empty() {
+        "full"
+    } else {
+        &last.backup_kind
+    };
 
     // "Полная версия после каждых N версий": the chain holds at most N children.
-    if job.scheme.rolls_over_after().is_some_and(|n| last.increment_index >= n) {
+    if job
+        .scheme
+        .rolls_over_after()
+        .is_some_and(|n| last.increment_index >= n)
+    {
         return RunPlan::full();
     }
 
@@ -1735,7 +1772,10 @@ pub fn source_token(device: &str) -> String {
         }
     }
     // Volume GUID path → V + first 8 hex of the GUID.
-    if let Some(rest) = d.strip_prefix(r"\\?\Volume{").or_else(|| d.strip_prefix(r"\\.\Volume{")) {
+    if let Some(rest) = d
+        .strip_prefix(r"\\?\Volume{")
+        .or_else(|| d.strip_prefix(r"\\.\Volume{"))
+    {
         let hex: String = rest
             .chars()
             .filter(|c| c.is_ascii_hexdigit())
@@ -1884,8 +1924,7 @@ pub fn container_extension(job: &Job) -> &'static str {
 /// message. A different format means a new job (or removing the old backups).
 #[cfg_attr(not(any(target_os = "windows", target_os = "linux")), allow(dead_code))]
 fn format_change_error(job: &Job, folder: &Path) -> Option<String> {
-    let chains =
-        own_backup_backup::chains::list_job_chains(folder, &job.id).unwrap_or_default();
+    let chains = own_backup_backup::chains::list_job_chains(folder, &job.id).unwrap_or_default();
     let want = container_extension(job);
     for image in chains.iter().flat_map(|c| c.images.iter()) {
         if image.container != want {
@@ -1895,8 +1934,13 @@ fn format_change_error(job: &Job, folder: &Path) -> Option<String> {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
             return Some(
-                tr!("lib.format_mismatch", want = want, found = image.container, name = name)
-                    .into_owned(),
+                tr!(
+                    "lib.format_mismatch",
+                    want = want,
+                    found = image.container,
+                    name = name
+                )
+                .into_owned(),
             );
         }
     }
@@ -1933,7 +1977,9 @@ fn should_start_new_chain(
             None => false,
         };
     }
-    job.scheme.rolls_over_after().is_some_and(|n| chain.increments_ever() >= n)
+    job.scheme
+        .rolls_over_after()
+        .is_some_and(|n| chain.increments_ever() >= n)
 }
 
 /// Any doubt (no chain, rollover reached, parent missing) resolves to a full.
@@ -1972,7 +2018,9 @@ pub fn plan_run_for_volume_at(
     let Some(chain) = chains
         .into_iter()
         .filter(|c| {
-            c.images.first().is_some_and(|base| chain_belongs_to(base, &token, &identity))
+            c.images
+                .first()
+                .is_some_and(|base| chain_belongs_to(base, &token, &identity))
         })
         .next_back()
     else {
@@ -2756,35 +2804,35 @@ async fn perform_backup(
                     keys_for_verify.as_ref(),
                     verify_scope,
                     |done, total| {
-                    // Cancel reaches the check too, not just the copy (audit
-                    // AUD-12). Reading back a whole image is minutes of work;
-                    // before this, pressing Отмена during it did nothing and
-                    // the run then finished as a success.
-                    if cancel_bg.swap(false, std::sync::atomic::Ordering::SeqCst) {
-                        return Err(OwnBackupError::Cancelled);
-                    }
-                    let mbps = v_rate.sample(done);
-                    let permille = if total > 0 { done * 1000 / total } else { 0 };
-                    if permille != v_permille || v_emit.elapsed().as_millis() >= 400 {
-                        v_permille = permille;
-                        v_emit = std::time::Instant::now();
-                        sink_bg.job_progress(JobProgress {
-                            job_id: job_id.clone(),
-                            phase: "verify".into(),
-                            percent: permille / 10,
-                            blocks_done: done,
-                            blocks_total: total,
-                            speed_mbps: mbps,
-                            volume_index: vidx,
-                            volume_count: count,
-                            volume: vol_label_bg.clone(),
-                            image_file_name: image_name.clone(),
-                        categories: Vec::new(),
-                        excluded_files: None,
-                        excluded_bytes: None,
-                        });
-                    }
-                    Ok(())
+                        // Cancel reaches the check too, not just the copy (audit
+                        // AUD-12). Reading back a whole image is minutes of work;
+                        // before this, pressing Отмена during it did nothing and
+                        // the run then finished as a success.
+                        if cancel_bg.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                            return Err(OwnBackupError::Cancelled);
+                        }
+                        let mbps = v_rate.sample(done);
+                        let permille = if total > 0 { done * 1000 / total } else { 0 };
+                        if permille != v_permille || v_emit.elapsed().as_millis() >= 400 {
+                            v_permille = permille;
+                            v_emit = std::time::Instant::now();
+                            sink_bg.job_progress(JobProgress {
+                                job_id: job_id.clone(),
+                                phase: "verify".into(),
+                                percent: permille / 10,
+                                blocks_done: done,
+                                blocks_total: total,
+                                speed_mbps: mbps,
+                                volume_index: vidx,
+                                volume_count: count,
+                                volume: vol_label_bg.clone(),
+                                image_file_name: image_name.clone(),
+                                categories: Vec::new(),
+                                excluded_files: None,
+                                excluded_bytes: None,
+                            });
+                        }
+                        Ok(())
                     },
                 );
                 match verified {
@@ -2828,14 +2876,22 @@ async fn perform_backup(
                 // One line per volume that went unwalked; a run over three
                 // volumes must not report the reason of whichever came last.
                 if let Some(why) = summary.file_scan_skipped {
-                    let line = if volumes.len() > 1 { format!("{device}: {why}") } else { why };
+                    let line = if volumes.len() > 1 {
+                        format!("{device}: {why}")
+                    } else {
+                        why
+                    };
                     if !run.file_scan_skipped.is_empty() {
                         run.file_scan_skipped.push_str("; ");
                     }
                     run.file_scan_skipped.push_str(&line);
                 }
                 if let Some(why) = summary.excluded_entries_kept {
-                    let line = if volumes.len() > 1 { format!("{device}: {why}") } else { why };
+                    let line = if volumes.len() > 1 {
+                        format!("{device}: {why}")
+                    } else {
+                        why
+                    };
                     if !run.excluded_entries_kept.is_empty() {
                         run.excluded_entries_kept.push_str("; ");
                     }
@@ -2893,7 +2949,10 @@ async fn perform_backup(
                 }
             }
             Ok(Err(OwnBackupError::Cancelled)) => {
-                fatal = Some(("cancelled".into(), tr!("lib.cancelled_by_user").into_owned()));
+                fatal = Some((
+                    "cancelled".into(),
+                    tr!("lib.cancelled_by_user").into_owned(),
+                ));
                 break;
             }
             Ok(Err(e)) => {
@@ -2903,7 +2962,10 @@ async fn perform_backup(
                 break;
             }
             Err(e) => {
-                fatal = Some(("error".into(), tr!("lib.task_aborted", error = e).into_owned()));
+                fatal = Some((
+                    "error".into(),
+                    tr!("lib.task_aborted", error = e).into_owned(),
+                ));
                 break;
             }
         }
@@ -2953,7 +3015,7 @@ async fn perform_disk_backup(
     mut run: JobRun,
 ) -> JobRun {
     use own_backup_backup::engine_win::{
-        backup_disk, verify_image_scoped, VerifyScope, DiskBackupRequest, DiskPartitionBackup,
+        backup_disk, verify_image_scoped, DiskBackupRequest, DiskPartitionBackup, VerifyScope,
     };
     use own_backup_common::OwnBackupError;
 
@@ -2982,8 +3044,10 @@ async fn perform_disk_backup(
         _ => ("full", container_extension(job)),
     };
     let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
-    let image_path =
-        folder.join(format!("{safe_name}_disk{}_{tag}_{stamp}.{ext}", ds.disk_number));
+    let image_path = folder.join(format!(
+        "{safe_name}_disk{}_{tag}_{stamp}.{ext}",
+        ds.disk_number
+    ));
 
     let partitions: Vec<DiskPartitionBackup> = ds
         .parts
@@ -3000,7 +3064,10 @@ async fn perform_disk_backup(
     // chosen by filesystem family: Windows masks for NTFS/ReFS/FAT, Linux masks
     // for ext/btrfs/xfs.
     let (excl_win, excl_linux) = if job.exclusions.enabled && !job.advanced.sector_by_sector {
-        (job.exclusions.patterns.clone(), job.exclusions.patterns_linux.clone())
+        (
+            job.exclusions.patterns.clone(),
+            job.exclusions.patterns_linux.clone(),
+        )
     } else {
         (Vec::new(), Vec::new())
     };
@@ -3013,8 +3080,12 @@ async fn perform_disk_backup(
         .source_disks
         .iter()
         .find(|d| {
-            let tail: String =
-                d.device_id.chars().rev().take_while(|c| c.is_ascii_digit()).collect();
+            let tail: String = d
+                .device_id
+                .chars()
+                .rev()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
             let tail: String = tail.chars().rev().collect();
             tail.parse::<u32>().ok() == Some(ds.disk_number)
         })
@@ -3087,8 +3158,11 @@ async fn perform_disk_backup(
             if phase == "backup" {
                 pace.after(p.blocks_done);
             }
-            let permille =
-                if p.blocks_total > 0 { p.blocks_done * 1000 / p.blocks_total } else { 0 };
+            let permille = if p.blocks_total > 0 {
+                p.blocks_done * 1000 / p.blocks_total
+            } else {
+                0
+            };
             // "finalize" has no granular progress — always emit it so the UI
             // leaves the frozen 100 %; "prepare" (permille 0) shows on its first
             // tick then rides the 400 ms throttle, same as the per-volume path.
@@ -3130,35 +3204,39 @@ async fn perform_disk_backup(
             let mut v_permille = u64::MAX;
             let mut v_emit = std::time::Instant::now();
             let mut v_rate = VerifyRate::new(&image_for_verify, keys_for_verify.as_ref());
-            let verified =
-                verify_image_scoped(&image_for_verify, keys_for_verify.as_ref(), verify_scope, |done, total| {
-                if cancel_bg.swap(false, Ordering::SeqCst) {
-                    return Err(OwnBackupError::Cancelled);
-                }
-                let mbps = v_rate.sample(done);
-                let permille = if total > 0 { done * 1000 / total } else { 0 };
-                if permille != v_permille || v_emit.elapsed().as_millis() >= 400 {
-                    v_permille = permille;
-                    v_emit = std::time::Instant::now();
-                    sink_bg.job_progress(JobProgress {
-                        job_id: job_id.clone(),
-                        phase: "verify".into(),
-                        percent: permille / 10,
-                        blocks_done: done,
-                        blocks_total: total,
-                        speed_mbps: mbps,
-                        volume_index: 0,
-                        volume_count: 1,
-                        volume: tr!("lib.disk_label", disk = disk_number, model = model)
-                            .into_owned(),
-                        image_file_name: image_name.clone(),
-                        categories: Vec::new(),
-                        excluded_files: None,
-                        excluded_bytes: None,
-                    });
-                }
-                Ok(())
-            });
+            let verified = verify_image_scoped(
+                &image_for_verify,
+                keys_for_verify.as_ref(),
+                verify_scope,
+                |done, total| {
+                    if cancel_bg.swap(false, Ordering::SeqCst) {
+                        return Err(OwnBackupError::Cancelled);
+                    }
+                    let mbps = v_rate.sample(done);
+                    let permille = if total > 0 { done * 1000 / total } else { 0 };
+                    if permille != v_permille || v_emit.elapsed().as_millis() >= 400 {
+                        v_permille = permille;
+                        v_emit = std::time::Instant::now();
+                        sink_bg.job_progress(JobProgress {
+                            job_id: job_id.clone(),
+                            phase: "verify".into(),
+                            percent: permille / 10,
+                            blocks_done: done,
+                            blocks_total: total,
+                            speed_mbps: mbps,
+                            volume_index: 0,
+                            volume_count: 1,
+                            volume: tr!("lib.disk_label", disk = disk_number, model = model)
+                                .into_owned(),
+                            image_file_name: image_name.clone(),
+                            categories: Vec::new(),
+                            excluded_files: None,
+                            excluded_bytes: None,
+                        });
+                    }
+                    Ok(())
+                },
+            );
             match verified {
                 Ok(v) if !v.valid() => {
                     return Err(OwnBackupError::ImageFormat(
@@ -3499,8 +3577,10 @@ mod tests {
     #[test]
     fn default_exclusions_take_caches_and_leave_the_system() {
         use own_backup_backup::exclusions::ExclusionPattern;
-        let rules: Vec<ExclusionPattern> =
-            default_exclusions().iter().map(|p| ExclusionPattern::parse(p).expect(p)).collect();
+        let rules: Vec<ExclusionPattern> = default_exclusions()
+            .iter()
+            .map(|p| ExclusionPattern::parse(p).expect(p))
+            .collect();
         let excluded = |path: &str| {
             let comps: Vec<String> = path.split('\\').map(|c| c.to_lowercase()).collect();
             let name = comps.last().unwrap().clone();
@@ -3565,13 +3645,19 @@ mod tests {
         std::fs::create_dir(dir.path().join("jobs.json.tmp")).unwrap();
 
         let err = store
-            .upsert(Job { name: "nightly".into(), ..Default::default() })
+            .upsert(Job {
+                name: "nightly".into(),
+                ..Default::default()
+            })
             .expect_err("the write cannot succeed");
         assert!(!err.to_string().is_empty());
 
         // And the store is exactly as it was — no job that will disappear at
         // the next restart.
-        assert!(store.list().is_empty(), "nothing was added in memory either");
+        assert!(
+            store.list().is_empty(),
+            "nothing was added in memory either"
+        );
     }
 
     /// The same for removal: a job is gone from the list only once it is gone
@@ -3580,11 +3666,20 @@ mod tests {
     fn a_job_that_could_not_be_removed_stays_in_the_list() {
         let dir = tempfile::tempdir().unwrap();
         let store = JobStore::load(dir.path());
-        let job = store.upsert(Job { name: "keep".into(), ..Default::default() }).unwrap();
+        let job = store
+            .upsert(Job {
+                name: "keep".into(),
+                ..Default::default()
+            })
+            .unwrap();
 
         std::fs::create_dir(dir.path().join("jobs.json.tmp")).unwrap();
         assert!(store.delete(&job.id).is_err());
-        assert_eq!(store.list().len(), 1, "still there, because the file still has it");
+        assert_eq!(
+            store.list().len(),
+            1,
+            "still there, because the file still has it"
+        );
     }
 
     /// A jobs file that cannot be parsed is kept, not walked over. Starting
@@ -3750,8 +3845,11 @@ mod tests {
                 })
             })
             .collect();
-        let accepted =
-            winners.into_iter().map(|h| h.join().unwrap()).filter(|added| *added).count();
+        let accepted = winners
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .filter(|added| *added)
+            .count();
         assert_eq!(accepted, 1, "exactly one caller may be told it was added");
         assert_eq!(queue.snapshot().pending, vec!["the-one-job".to_string()]);
     }
@@ -3801,7 +3899,10 @@ mod tests {
         // A fresh store (cold cache) recovers it from the DB via the key file.
         let store = PasswordStore::new(db.clone());
         assert!(store.has("V123"));
-        assert_eq!(store.resolve("V123").map(|z| z.to_string()), Some("secret".into()));
+        assert_eq!(
+            store.resolve("V123").map(|z| z.to_string()),
+            Some("secret".into())
+        );
 
         store.forget("V123").unwrap();
         assert!(!PasswordStore::new(db).has("V123"));
@@ -3882,9 +3983,15 @@ mod tests {
         let store = PasswordStore::new_private(public_path.clone(), private_path.clone());
         assert!(store.migrate_legacy(&public_path).is_err());
         let public = own_backup_metadata::open_database(&public_path).unwrap();
-        assert_eq!(own_backup_metadata::get_volume_secret(&public, "V123").unwrap(), Some(old_blob));
+        assert_eq!(
+            own_backup_metadata::get_volume_secret(&public, "V123").unwrap(),
+            Some(old_blob)
+        );
         let private = own_backup_metadata::open_volume_secret_database(&private_path).unwrap();
-        assert_eq!(own_backup_metadata::get_volume_secret(&private, "V123").unwrap(), Some(new_blob));
+        assert_eq!(
+            own_backup_metadata::get_volume_secret(&private, "V123").unwrap(),
+            Some(new_blob)
+        );
     }
 
     /// A job with `method` plus a successful run that produced `kind` at
@@ -3965,7 +4072,8 @@ mod tests {
     #[test]
     fn rollover_after_n_children() {
         let dir = tempfile::tempdir().unwrap();
-        let (mut job, mut run, _) = job_with_last(dir.path(), "incremental", "incremental", 5, true);
+        let (mut job, mut run, _) =
+            job_with_last(dir.path(), "incremental", "incremental", 5, true);
         job.scheme.full_every_n = 5;
         job.scheme.only_incremental = false;
         assert_eq!(plan_run(&job, Some(&run)), RunPlan::full());
@@ -4017,7 +4125,10 @@ mod tests {
         assert_eq!(drive_letter_of(r"\\?\E:\Foo"), Some('E'));
         // No drive letter: UNC shares and VSS/device paths.
         assert_eq!(drive_letter_of(r"\\server\share\Backups"), None);
-        assert_eq!(drive_letter_of(r"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy5"), None);
+        assert_eq!(
+            drive_letter_of(r"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy5"),
+            None
+        );
     }
 
     #[test]
@@ -4056,14 +4167,20 @@ mod tests {
         assert_eq!(source_token("e:\\"), "E");
         assert_eq!(source_token(r"\\.\D:"), "D");
         assert_eq!(source_token(r"\\?\GLOBALROOT\Device\X"), "X"); // no letter → "X"
-        // Letterless volume GUID path → V + first 8 hex of the GUID.
-        assert_eq!(source_token(r"\\?\Volume{1a2b3c4d-5e6f-7089-abcd-ef0123456789}"), "V1A2B3C4D");
+                                                                   // Letterless volume GUID path → V + first 8 hex of the GUID.
+        assert_eq!(
+            source_token(r"\\?\Volume{1a2b3c4d-5e6f-7089-abcd-ef0123456789}"),
+            "V1A2B3C4D"
+        );
         // Physical-offset partition → P<disk><offsetHex> (0x52000000 = 1375731712).
         assert_eq!(source_token("part:3:1375731712:1073741824"), "P352000000");
 
         // Names are `<name>_<token>_<tag>_<stamp>`; token is read from the end
         // so underscores inside <name> do not confuse it.
-        assert_eq!(image_token(Path::new("job_C_full_20260101-000000.vhdx")).as_deref(), Some("C"));
+        assert_eq!(
+            image_token(Path::new("job_C_full_20260101-000000.vhdx")).as_deref(),
+            Some("C")
+        );
         assert_eq!(
             image_token(Path::new("My_Big_Job_V1A2B3C4D_inc_20260101-000000.avhdx")).as_deref(),
             Some("V1A2B3C4D")
@@ -4072,8 +4189,14 @@ mod tests {
 
         // Whole-disk images `<name>_disk<N>_<tag>_<stamp>` → token is `disk<N>`
         // (3rd-from-last), for the full (.vhdx) and its child (.avhdx) alike.
-        assert_eq!(image_token(Path::new("MODULATOR_disk3_full_20260711-104244.vhdx")).as_deref(), Some("DISK3"));
-        assert_eq!(image_token(Path::new("My_Job_disk12_inc_20260711-104244.avhdx")).as_deref(), Some("DISK12"));
+        assert_eq!(
+            image_token(Path::new("MODULATOR_disk3_full_20260711-104244.vhdx")).as_deref(),
+            Some("DISK3")
+        );
+        assert_eq!(
+            image_token(Path::new("My_Job_disk12_inc_20260711-104244.avhdx")).as_deref(),
+            Some("DISK12")
+        );
     }
 
     #[test]
@@ -4113,7 +4236,10 @@ mod tests {
         multi.source = "C:".into();
         multi.sources = vec!["C:".into(), "".into(), "E:".into()];
         multi.source_labels = vec!["C: Win".into(), "".into(), "E: Data".into()];
-        assert_eq!(multi.source_list(), vec!["C:".to_string(), "E:".to_string()]);
+        assert_eq!(
+            multi.source_list(),
+            vec!["C:".to_string(), "E:".to_string()]
+        );
         assert_eq!(multi.label_for("E:"), "E: Data");
         assert_eq!(multi.label_for("Z:"), "Z:"); // unknown → device itself
     }
@@ -4186,8 +4312,22 @@ mod tests {
         let d = dir.path();
 
         // Two volumes, each with its own full backup.
-        put_real_image(d, "job_C_full_20260101-000000.vhdx", ChainRole::Full, None, "job1", "2026-01-01T00:00:00Z");
-        put_real_image(d, "job_E_full_20260101-000000.vhdx", ChainRole::Full, None, "job1", "2026-01-01T00:00:00Z");
+        put_real_image(
+            d,
+            "job_C_full_20260101-000000.vhdx",
+            ChainRole::Full,
+            None,
+            "job1",
+            "2026-01-01T00:00:00Z",
+        );
+        put_real_image(
+            d,
+            "job_E_full_20260101-000000.vhdx",
+            ChainRole::Full,
+            None,
+            "job1",
+            "2026-01-01T00:00:00Z",
+        );
 
         let mut job = Job::default();
         job.id = "job1".into();
@@ -4215,7 +4355,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let d = dir.path();
 
-        put_real_image(d, "job_C_full_20260101-000000.vhdx", ChainRole::Full, None, "job1", "2026-01-01T00:00:00Z");
+        put_real_image(
+            d,
+            "job_C_full_20260101-000000.vhdx",
+            ChainRole::Full,
+            None,
+            "job1",
+            "2026-01-01T00:00:00Z",
+        );
         put_real_image(
             d,
             "job_C_inc_20260102-000000.avhdx",
@@ -4266,7 +4413,9 @@ mod tests {
     }
 
     fn at(rfc3339: &str) -> chrono::DateTime<chrono::Utc> {
-        chrono::DateTime::parse_from_rfc3339(rfc3339).unwrap().with_timezone(&chrono::Utc)
+        chrono::DateTime::parse_from_rfc3339(rfc3339)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
     }
 
     /// Standard mode counts VERSIONS, and consolidation deletes increment
@@ -4280,7 +4429,14 @@ mod tests {
         let d = dir.path();
 
         let base_name = "job_C_full_20260101-000000.vhdx";
-        put_real_image(d, base_name, ChainRole::Full, None, "job1", "2026-01-01T00:00:00Z");
+        put_real_image(
+            d,
+            base_name,
+            ChainRole::Full,
+            None,
+            "job1",
+            "2026-01-01T00:00:00Z",
+        );
         put_real_image(
             d,
             "job_C_inc_20260105-000000.avhdx",
@@ -4321,7 +4477,14 @@ mod tests {
 
         let base_name = "job_C_full_20260401-000000.vhdx";
         // The base was CONSOLIDATED on 1 April, but its chain began 1 January.
-        put_real_image(d, base_name, ChainRole::Full, None, "job1", "2026-04-01T00:00:00Z");
+        put_real_image(
+            d,
+            base_name,
+            ChainRole::Full,
+            None,
+            "job1",
+            "2026-04-01T00:00:00Z",
+        );
         put_real_image(
             d,
             "job_C_inc_20260402-000000.avhdx",
@@ -4372,7 +4535,14 @@ mod tests {
         let d = dir.path();
 
         // Disk 3 chain: full + one incremental child.
-        put_real_image(d, "job_disk3_full_20260101-000000.vhdx", ChainRole::Full, None, "job1", "2026-01-01T00:00:00Z");
+        put_real_image(
+            d,
+            "job_disk3_full_20260101-000000.vhdx",
+            ChainRole::Full,
+            None,
+            "job1",
+            "2026-01-01T00:00:00Z",
+        );
         put_real_image(
             d,
             "job_disk3_inc_20260102-000000.avhdx",
@@ -4382,7 +4552,14 @@ mod tests {
             "2026-01-02T00:00:00Z",
         );
         // A different disk's full must never be picked as disk 3's parent.
-        put_real_image(d, "job_disk4_full_20260103-000000.vhdx", ChainRole::Full, None, "job1", "2026-01-03T00:00:00Z");
+        put_real_image(
+            d,
+            "job_disk4_full_20260103-000000.vhdx",
+            ChainRole::Full,
+            None,
+            "job1",
+            "2026-01-03T00:00:00Z",
+        );
 
         let mut job = Job::default();
         job.id = "job1".into();
@@ -4460,7 +4637,13 @@ mod tests {
             preflight_report: None,
             volume_encryption: None,
         };
-        write_sidecar(&own_backup_backup::sidecar_path_for(&image), &info, &manifest, &[]).unwrap();
+        write_sidecar(
+            &own_backup_backup::sidecar_path_for(&image),
+            &info,
+            &manifest,
+            &[],
+        )
+        .unwrap();
         image
     }
 
@@ -4609,7 +4792,10 @@ mod tests {
         let deleted: std::collections::HashSet<&str> =
             report.deleted.iter().map(String::as_str).collect();
         assert!(
-            report.kept.iter().all(|(path, _)| !deleted.contains(path.as_str())),
+            report
+                .kept
+                .iter()
+                .all(|(path, _)| !deleted.contains(path.as_str())),
             "{report:?}"
         );
     }
@@ -4664,9 +4850,7 @@ mod tests {
         info.parent_image_file_name = Some("j_C_full_1.vhdx".into());
         let mut manifest = sidecar.manifest;
         manifest.created_at = "2026-01-02T00:00:00Z".into();
-        own_backup_backup::sidecar::write_sidecar(
-            &child_sidecar, &info, &manifest, &[],
-        ).unwrap();
+        own_backup_backup::sidecar::write_sidecar(&child_sidecar, &info, &manifest, &[]).unwrap();
         let marker = own_backup_backup::consolidate::marker_path(&base);
         std::fs::write(&marker, b"{}").unwrap();
         let store = a_store(dir.path());
@@ -4685,10 +4869,24 @@ mod tests {
             })
             .unwrap();
         let report = delete_job_files(&store, &job);
-        assert!(base.exists() && child.exists() && marker.exists(), "{report:?}");
+        assert!(
+            base.exists() && child.exists() && marker.exists(),
+            "{report:?}"
+        );
         assert!(report.deleted.is_empty(), "{report:?}");
-        for path in [&base, &child, &own_backup_backup::sidecar_path_for(&base), &child_sidecar] {
-            assert!(report.kept.iter().any(|(kept, _)| kept == &path.display().to_string()), "{path:?}: {report:?}");
+        for path in [
+            &base,
+            &child,
+            &own_backup_backup::sidecar_path_for(&base),
+            &child_sidecar,
+        ] {
+            assert!(
+                report
+                    .kept
+                    .iter()
+                    .any(|(kept, _)| kept == &path.display().to_string()),
+                "{path:?}: {report:?}"
+            );
         }
     }
 
@@ -4746,7 +4944,10 @@ mod tests {
         let report = delete_job_files(&store, &job);
         assert!(report.complete(), "{report:?}");
         assert!(!dest.join("j_C_full_1.vhdx").exists());
-        assert!(!dest.join("j_D_full_1.vhdx").exists(), "второй том тоже принадлежит заданию");
+        assert!(
+            !dest.join("j_D_full_1.vhdx").exists(),
+            "второй том тоже принадлежит заданию"
+        );
     }
 
     /// Чужие копии в той же папке не трогаются — принадлежность читается из
@@ -4767,7 +4968,10 @@ mod tests {
 
         delete_job_files(&store, &job);
         assert!(!dest.join("mine_full_1.vhdx").exists());
-        assert!(dest.join("theirs_full_1.vhdx").exists(), "чужое остаётся нетронутым");
+        assert!(
+            dest.join("theirs_full_1.vhdx").exists(),
+            "чужое остаётся нетронутым"
+        );
     }
 
     /// Папка, в которую задание писало РАНЬШЕ, известна только из журнала —
@@ -4798,8 +5002,14 @@ mod tests {
             .unwrap();
 
         let report = delete_job_files(&store, &store.get("job1").unwrap());
-        assert!(!old.join("j_C_full_1.vhdx").exists(), "старая папка: {report:?}");
-        assert!(!new.join("j_C_full_2.vhdx").exists(), "новая папка: {report:?}");
+        assert!(
+            !old.join("j_C_full_1.vhdx").exists(),
+            "старая папка: {report:?}"
+        );
+        assert!(
+            !new.join("j_C_full_2.vhdx").exists(),
+            "новая папка: {report:?}"
+        );
     }
 
     /// Занятый файл не удаляется — и об этом говорится, а не умалчивается.
@@ -4820,7 +5030,13 @@ mod tests {
 
         let report = delete_job_files(&store, &job);
         assert!(!report.complete(), "{report:?}");
-        assert!(report.kept.iter().any(|(p, _)| p.contains("j_C_full_1.vhdx")), "{report:?}");
+        assert!(
+            report
+                .kept
+                .iter()
+                .any(|(p, _)| p.contains("j_C_full_1.vhdx")),
+            "{report:?}"
+        );
     }
 
     /// Каждый том запуска записывается в history, а не только первый.
@@ -4852,7 +5068,10 @@ mod tests {
             .unwrap();
 
         let found = store.job_image_files("job1");
-        assert!(found.contains(&PathBuf::from("/dest/second.vhdx")), "{found:?}");
+        assert!(
+            found.contains(&PathBuf::from("/dest/second.vhdx")),
+            "{found:?}"
+        );
     }
 
     // --- Цепочка выбирается по тому, ЧТО это за том (аудит AUD-10) ---------
@@ -4918,7 +5137,10 @@ mod tests {
     /// копию после каждого инкремента. Поймано живым прогоном 2026-09-20.
     #[test]
     fn zero_means_never_rolling_over_not_rolling_over_every_time() {
-        let mut s = SchemeConfig { method: "incremental".into(), ..Default::default() };
+        let mut s = SchemeConfig {
+            method: "incremental".into(),
+            ..Default::default()
+        };
         s.full_every_n = 0;
         assert_eq!(s.rolls_over_after(), None, "ноль — это выключено");
 

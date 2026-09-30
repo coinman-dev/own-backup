@@ -14,21 +14,36 @@ fn file_verification_compares_contents_names_and_alternate_streams() {
     std::fs::write(target.join("file.txt"), b"AAAAA").unwrap();
     let cancel = CancelToken::default();
 
-    assert!(verify_tree(&source, &target, &cancel).is_ok(), "identical trees must pass");
+    assert!(
+        verify_tree(&source, &target, &cancel).is_ok(),
+        "identical trees must pass"
+    );
 
     std::fs::write(target.join("file.txt"), b"BBBBB").unwrap();
-    assert!(verify_tree(&source, &target, &cancel).is_err(), "same size, different content");
+    assert!(
+        verify_tree(&source, &target, &cancel).is_err(),
+        "same size, different content"
+    );
     std::fs::write(target.join("file.txt"), b"AAAAA").unwrap();
 
     std::fs::rename(target.join("file.txt"), target.join("renamed.txt")).unwrap();
-    assert!(verify_tree(&source, &target, &cancel).is_err(), "same size, different name");
+    assert!(
+        verify_tree(&source, &target, &cancel).is_err(),
+        "same size, different name"
+    );
     std::fs::rename(target.join("renamed.txt"), target.join("file.txt")).unwrap();
 
     std::fs::write(source.join("file.txt:audit"), b"secret one").unwrap();
     std::fs::write(target.join("file.txt:audit"), b"secret two").unwrap();
-    assert!(verify_tree(&source, &target, &cancel).is_err(), "different ADS");
+    assert!(
+        verify_tree(&source, &target, &cancel).is_err(),
+        "different ADS"
+    );
     std::fs::write(target.join("file.txt:audit"), b"secret one").unwrap();
-    assert!(verify_tree(&source, &target, &cancel).is_ok(), "unchanged tree after repair");
+    assert!(
+        verify_tree(&source, &target, &cancel).is_ok(),
+        "unchanged tree after repair"
+    );
 }
 
 #[test]
@@ -54,13 +69,23 @@ fn file_verification_detects_directory_acl_change() {
         .arg("*S-1-5-32-545:F")
         .output()
         .unwrap();
-    assert!(changed.status.success(), "{}", String::from_utf8_lossy(&changed.stderr));
+    assert!(
+        changed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&changed.stderr)
+    );
     let file_acl_after = std::process::Command::new("icacls")
         .arg(target.join("nested/file.txt"))
         .output()
         .unwrap();
-    assert_eq!(file_acl_before.stdout, file_acl_after.stdout, "child file ACL changed");
-    assert!(verify_tree(&source, &target, &cancel).is_err(), "directory ACL changed");
+    assert_eq!(
+        file_acl_before.stdout, file_acl_after.stdout,
+        "child file ACL changed"
+    );
+    assert!(
+        verify_tree(&source, &target, &cancel).is_err(),
+        "directory ACL changed"
+    );
 }
 
 #[test]
@@ -75,8 +100,14 @@ fn file_restore_round_trip_preserves_ntfs_streams() {
     let cancel = CancelToken::default();
     let total = measure_tree(&source, &cancel).unwrap();
     let result = copy_tree(&source, &target, total, &cancel, |_| Ok(())).unwrap();
-    assert!(!result.cancelled && result.failures.is_empty(), "{result:?}");
-    assert!(verify_tree(&source, &target, &cancel).is_ok(), "restored tree must verify");
+    assert!(
+        !result.cancelled && result.failures.is_empty(),
+        "{result:?}"
+    );
+    assert!(
+        verify_tree(&source, &target, &cancel).is_ok(),
+        "restored tree must verify"
+    );
     std::fs::write(target.join("nested/file.txt:note"), b"corrupted stream").unwrap();
     assert!(verify_tree(&source, &target, &cancel).is_err());
 }
@@ -127,5 +158,8 @@ fn file_verification_detects_reparse_target_change() {
     assert!(verify_tree(&source, &target, &cancel).is_ok());
     std::fs::remove_file(target.join("link")).unwrap();
     symlink_file("b.txt", target.join("link")).unwrap();
-    assert!(verify_tree(&source, &target, &cancel).is_err(), "reparse target changed");
+    assert!(
+        verify_tree(&source, &target, &cancel).is_err(),
+        "reparse target changed"
+    );
 }

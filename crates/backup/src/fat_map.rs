@@ -51,7 +51,10 @@ pub struct FatUsedMap {
 
 impl UsedSectorMap for FatUsedMap {
     fn is_block_used(&self, block_number: u64) -> bool {
-        self.block_used.get(block_number as usize).copied().unwrap_or(false)
+        self.block_used
+            .get(block_number as usize)
+            .copied()
+            .unwrap_or(false)
     }
     fn used_block_count(&self) -> u64 {
         self.used_count
@@ -135,7 +138,9 @@ pub fn parse_fat32_geometry(boot: &[u8], vol_len: u64) -> Result<Fat32Geometry> 
         return Err(bad(format!("implausible sectors/cluster {spc}")));
     }
     if reserved == 0 || nfats == 0 || nfats > 4 {
-        return Err(bad(format!("implausible reserved={reserved} nfats={nfats}")));
+        return Err(bad(format!(
+            "implausible reserved={reserved} nfats={nfats}"
+        )));
     }
     let tot_sec = if tot_sec32 != 0 { tot_sec32 } else { tot_sec16 };
     let data_start_sec = reserved + nfats * fatsz32;
@@ -369,7 +374,11 @@ pub fn read_exfat_bitmap(
     let cluster_size = g.cluster_size;
     let fat_entry = |n: u64| -> u64 {
         let idx = (n * 4) as usize;
-        if idx + 4 <= fat.len() { u32at(fat, idx) } else { 0 }
+        if idx + 4 <= fat.len() {
+            u32at(fat, idx)
+        } else {
+            0
+        }
     };
     let cluster_offset = |n: u64| g.heap_start + (n - 2) * cluster_size as u64;
 
@@ -399,7 +408,9 @@ pub fn read_exfat_bitmap(
         }
     }
     if bitmap_first == 0 {
-        return Err(bad("allocation bitmap entry not found in the root directory"));
+        return Err(bad(
+            "allocation bitmap entry not found in the root directory",
+        ));
     }
     let needed = cluster_count.div_ceil(8);
     if bitmap_len < needed {
@@ -428,7 +439,10 @@ pub fn read_exfat_bitmap(
             next if (2..cluster_count + 2).contains(&next) => next,
             other => {
                 if other != 0xFFFF_FFFF {
-                    debug!(entry = other, "exFAT bitmap chain invalid — assuming contiguous");
+                    debug!(
+                        entry = other,
+                        "exFAT bitmap chain invalid — assuming contiguous"
+                    );
                 } else {
                     warn!("exFAT bitmap chain ended early — assuming contiguous");
                 }
@@ -719,10 +733,26 @@ mod tests {
         };
 
         let bps = g.bytes_per_sector;
-        assert_eq!(g.volume_bytes / bps, field("Volume Length"), "volume length (sectors)");
-        assert_eq!(g.fat_offset / bps, field("FAT Offset"), "fat offset (sectors)");
-        assert_eq!(g.fat_bytes / bps, field("FAT Length"), "fat length (sectors)");
-        assert_eq!(g.heap_start / bps, field("Cluster Heap Offset"), "heap offset (sectors)");
+        assert_eq!(
+            g.volume_bytes / bps,
+            field("Volume Length"),
+            "volume length (sectors)"
+        );
+        assert_eq!(
+            g.fat_offset / bps,
+            field("FAT Offset"),
+            "fat offset (sectors)"
+        );
+        assert_eq!(
+            g.fat_bytes / bps,
+            field("FAT Length"),
+            "fat length (sectors)"
+        );
+        assert_eq!(
+            g.heap_start / bps,
+            field("Cluster Heap Offset"),
+            "heap offset (sectors)"
+        );
         assert_eq!(g.cluster_count, field("Cluster Count"), "cluster count");
         assert_eq!(g.root_cluster, field("Root Cluster"), "root cluster");
         assert_eq!(bps, 1u64 << field("Sector Size Bits"), "bytes/sector");
@@ -736,8 +766,15 @@ mod tests {
         let mut fat = vec![0u8; g.fat_bytes as usize];
         vol.read_at(g.fat_offset, &mut fat).unwrap();
         let bmp = read_exfat_bitmap(&mut vol, &g, &fat).unwrap();
-        assert!(!bmp.clusters.is_empty(), "bitmap should occupy at least one cluster");
-        assert_eq!(bmp.bytes.len() as u64, g.cluster_count.div_ceil(8), "bitmap size");
+        assert!(
+            !bmp.clusters.is_empty(),
+            "bitmap should occupy at least one cluster"
+        );
+        assert_eq!(
+            bmp.bytes.len() as u64,
+            g.cluster_count.div_ceil(8),
+            "bitmap size"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

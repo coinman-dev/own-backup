@@ -39,7 +39,9 @@ pub fn filter_directives(level: &str) -> &'static str {
 /// its config lives on a RAM disk that starts empty, and a session there is
 /// the one whose log has to explain itself afterwards.
 pub fn configured_level(path: &Path, fallback: &str) -> String {
-    AppConfig::load_from_file(path).map(|c| c.log_level).unwrap_or_else(|_| fallback.to_string())
+    AppConfig::load_from_file(path)
+        .map(|c| c.log_level)
+        .unwrap_or_else(|_| fallback.to_string())
 }
 
 /// Watch the config at `path` and call `apply` with the new directives each
@@ -54,17 +56,19 @@ pub fn follow_config(
     current: String,
     apply: impl Fn(&'static str) + Send + 'static,
 ) {
-    let _ = std::thread::Builder::new().name("log-level".into()).spawn(move || {
-        let mut current = filter_directives(&current);
-        loop {
-            std::thread::sleep(RECHECK);
-            let wanted = filter_directives(&configured_level(&path, fallback));
-            if wanted != current {
-                apply(wanted);
-                current = wanted;
+    let _ = std::thread::Builder::new()
+        .name("log-level".into())
+        .spawn(move || {
+            let mut current = filter_directives(&current);
+            loop {
+                std::thread::sleep(RECHECK);
+                let wanted = filter_directives(&configured_level(&path, fallback));
+                if wanted != current {
+                    apply(wanted);
+                    current = wanted;
+                }
             }
-        }
-    });
+        });
 }
 
 #[cfg(test)]
@@ -86,7 +90,10 @@ mod tests {
     #[test]
     fn no_config_means_the_fallback() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(configured_level(&dir.path().join("none.toml"), "debug"), "debug");
+        assert_eq!(
+            configured_level(&dir.path().join("none.toml"), "debug"),
+            "debug"
+        );
         let path = dir.path().join("config.toml");
         let mut cfg = AppConfig::default();
         cfg.log_level = "debug".into();

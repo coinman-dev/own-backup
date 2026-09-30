@@ -49,7 +49,10 @@ mod tests {
     /// Both, and the one that survives the machine first.
     #[test]
     fn the_medium_writes_to_the_stick_and_to_itself() {
-        let written = paths(Some("E:/OwnBackup/logs"), Some("X:/Program Files/OwnBackup"));
+        let written = paths(
+            Some("E:/OwnBackup/logs"),
+            Some("X:/Program Files/OwnBackup"),
+        );
         assert_eq!(
             written,
             vec![

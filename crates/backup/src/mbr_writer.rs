@@ -29,7 +29,9 @@
 //! immediately before its volume, so the sector before every logical volume must
 //! be free.
 
-use own_backup_common::restore_plan::{PartitionKind, PartitionScheme, PartitionSpec, PartitionTableSpec};
+use own_backup_common::restore_plan::{
+    PartitionKind, PartitionScheme, PartitionSpec, PartitionTableSpec,
+};
 use own_backup_common::{OwnBackupError, Result};
 use uuid::Uuid;
 
@@ -164,7 +166,10 @@ fn classify(spec: &PartitionTableSpec) -> Result<Mbr<'_>> {
             "more than one partition is marked active; BIOS boots exactly one".into(),
         ));
     }
-    Ok(Mbr { primaries, logicals })
+    Ok(Mbr {
+        primaries,
+        logicals,
+    })
 }
 
 fn is_active(e: &PartitionSpec) -> bool {
@@ -196,7 +201,10 @@ pub fn mbr_write_ops(spec: &PartitionTableSpec) -> Result<Vec<WriteOp>> {
     }
     let sector = spec.sector_size as u64;
     let total_lba = spec.disk_size_bytes / sector;
-    let Mbr { primaries, logicals } = classify(spec)?;
+    let Mbr {
+        primaries,
+        logicals,
+    } = classify(spec)?;
 
     for e in &spec.entries {
         if e.last_lba < e.first_lba {
@@ -208,8 +216,7 @@ pub fn mbr_write_ops(spec: &PartitionTableSpec) -> Result<Vec<WriteOp>> {
         if e.end_lba_exclusive() > total_lba {
             return Err(OwnBackupError::ImageFormat(format!(
                 "partition {} ends at sector {} but the disk has {total_lba}",
-                e.index,
-                e.last_lba
+                e.index, e.last_lba
             )));
         }
         if e.first_lba == 0 {
@@ -230,7 +237,10 @@ pub fn mbr_write_ops(spec: &PartitionTableSpec) -> Result<Vec<WriteOp>> {
     // 0..=3; the extended container takes the lowest one left over.
     let mut slot_taken = [false; 4];
     for e in &primaries {
-        let slot = usize::try_from(e.index).ok().and_then(|i| i.checked_sub(1)).unwrap_or(usize::MAX);
+        let slot = usize::try_from(e.index)
+            .ok()
+            .and_then(|i| i.checked_sub(1))
+            .unwrap_or(usize::MAX);
         if slot >= 4 {
             return Err(OwnBackupError::ImageFormat(format!(
                 "primary partition index {} is outside the four MBR slots",
@@ -259,7 +269,13 @@ pub fn mbr_write_ops(spec: &PartitionTableSpec) -> Result<Vec<WriteOp>> {
         ops.extend(ebr_ops);
     }
 
-    ops.insert(0, WriteOp { offset: 0, bytes: mbr });
+    ops.insert(
+        0,
+        WriteOp {
+            offset: 0,
+            bytes: mbr,
+        },
+    );
     Ok(ops)
 }
 
@@ -283,7 +299,11 @@ fn build_extended(
                 l.index
             ))
         })?;
-        if let Some(clash) = spec.entries.iter().find(|e| ebr >= e.first_lba && ebr <= e.last_lba) {
+        if let Some(clash) = spec
+            .entries
+            .iter()
+            .find(|e| ebr >= e.first_lba && ebr <= e.last_lba)
+        {
             return Err(OwnBackupError::ImageFormat(format!(
                 "logical partition {} needs sector {} for its EBR, but partition {} occupies it",
                 l.index, ebr, clash.index
@@ -342,7 +362,10 @@ fn build_extended(
             .write_into(&mut ebr[TABLE_OFFSET + ENTRY_SIZE..][..ENTRY_SIZE])?;
         }
 
-        ops.push(WriteOp { offset: ebr_lba * sector, bytes: ebr });
+        ops.push(WriteOp {
+            offset: ebr_lba * sector,
+            bytes: ebr,
+        });
     }
     Ok(ops)
 }
@@ -354,13 +377,23 @@ mod tests {
 
     const MIB: u64 = 1024 * 1024;
 
-    fn part(index: u32, first_mib: u64, size_mib: u64, type_byte: u8, logical: bool) -> PartitionSpec {
+    fn part(
+        index: u32,
+        first_mib: u64,
+        size_mib: u64,
+        type_byte: u8,
+        logical: bool,
+    ) -> PartitionSpec {
         let first_lba = first_mib * MIB / 512;
         PartitionSpec {
             index,
             first_lba,
             last_lba: first_lba + size_mib * MIB / 512 - 1,
-            kind: PartitionKind::Mbr { type_byte, bootable: false, logical },
+            kind: PartitionKind::Mbr {
+                type_byte,
+                bootable: false,
+                logical,
+            },
         }
     }
 
@@ -396,7 +429,11 @@ mod tests {
     #[test]
     fn a_primary_entry_is_byte_exact() {
         let mut p = part(1, 1, 100, 0x07, false);
-        p.kind = PartitionKind::Mbr { type_byte: 0x07, bootable: true, logical: false };
+        p.kind = PartitionKind::Mbr {
+            type_byte: 0x07,
+            bootable: true,
+            logical: false,
+        };
         let ops = mbr_write_ops(&spec(vec![p])).unwrap();
         let e = slot(&ops[0].bytes, 0);
         assert_eq!(e[0], 0x80, "active flag");
@@ -472,7 +509,11 @@ mod tests {
         ]))
         .unwrap();
         let mbr = &ops[0].bytes;
-        assert_eq!(slot(mbr, 1)[4], MBR_TYPE_EXTENDED_LBA, "slot 2 was the lowest free one");
+        assert_eq!(
+            slot(mbr, 1)[4],
+            MBR_TYPE_EXTENDED_LBA,
+            "slot 2 was the lowest free one"
+        );
         assert_eq!(slot(mbr, 3)[4], 0x00);
     }
 
@@ -497,18 +538,30 @@ mod tests {
         let (e1_lba, e2_lba) = (l1.first_lba - 1, l2.first_lba - 1);
         let ext_first = e1_lba;
 
-        let ops = mbr_write_ops(&spec(vec![part(1, 1, 10, 0x07, false), l1.clone(), l2.clone()])).unwrap();
+        let ops = mbr_write_ops(&spec(vec![
+            part(1, 1, 10, 0x07, false),
+            l1.clone(),
+            l2.clone(),
+        ]))
+        .unwrap();
         assert_eq!(ops.len(), 3, "MBR + two EBRs");
 
         let ebr1 = &ops[1];
         assert_eq!(ebr1.offset, e1_lba * 512);
         let vol = &ebr1.bytes[TABLE_OFFSET..][..ENTRY_SIZE];
         assert_eq!(u32_at(vol, 8), 1, "volume sits one sector past its own EBR");
-        assert_eq!(u32_at(vol, 12) as u64, l1.end_lba_exclusive() - l1.first_lba);
+        assert_eq!(
+            u32_at(vol, 12) as u64,
+            l1.end_lba_exclusive() - l1.first_lba
+        );
 
         let link = &ebr1.bytes[TABLE_OFFSET + ENTRY_SIZE..][..ENTRY_SIZE];
         assert_eq!(link[4], MBR_TYPE_EXTENDED_LBA);
-        assert_eq!(u32_at(link, 8) as u64, e2_lba - ext_first, "link is relative to the extended start");
+        assert_eq!(
+            u32_at(link, 8) as u64,
+            e2_lba - ext_first,
+            "link is relative to the extended start"
+        );
         assert_eq!(u32_at(link, 12) as u64, l2.end_lba_exclusive() - e2_lba);
 
         let ebr2 = &ops[2];
@@ -528,7 +581,11 @@ mod tests {
             index: 5,
             first_lba: primary.last_lba + 1,
             last_lba: primary.last_lba + 1000,
-            kind: PartitionKind::Mbr { type_byte: 0x07, bootable: false, logical: true },
+            kind: PartitionKind::Mbr {
+                type_byte: 0x07,
+                bootable: false,
+                logical: true,
+            },
         };
         let err = mbr_write_ops(&spec(vec![primary, logical])).unwrap_err();
         assert!(format!("{err}").contains("EBR"), "{err}");
@@ -538,8 +595,16 @@ mod tests {
     fn two_active_partitions_are_refused() {
         let mut a = part(1, 1, 10, 0x07, false);
         let mut b = part(2, 11, 10, 0x07, false);
-        a.kind = PartitionKind::Mbr { type_byte: 0x07, bootable: true, logical: false };
-        b.kind = PartitionKind::Mbr { type_byte: 0x07, bootable: true, logical: false };
+        a.kind = PartitionKind::Mbr {
+            type_byte: 0x07,
+            bootable: true,
+            logical: false,
+        };
+        b.kind = PartitionKind::Mbr {
+            type_byte: 0x07,
+            bootable: true,
+            logical: false,
+        };
         assert!(mbr_write_ops(&spec(vec![a, b])).is_err());
     }
 
@@ -557,7 +622,11 @@ mod tests {
             index: 1,
             first_lba: 5_000_000_000,
             last_lba: 5_000_002_047,
-            kind: PartitionKind::Mbr { type_byte: 0x07, bootable: false, logical: false },
+            kind: PartitionKind::Mbr {
+                type_byte: 0x07,
+                bootable: false,
+                logical: false,
+            },
         }]);
         s.disk_size_bytes = 4 * 1024 * 1024 * MIB;
         let err = mbr_write_ops(&s).unwrap_err();

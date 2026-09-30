@@ -152,11 +152,17 @@ impl LinuxImageReader {
 
     /// `key` is the chain key of an encrypted image — without it an `.obk` is
     /// refused by name rather than half-read.
-    fn open_with(path: &Path, container: &str, key: Option<&crate::seal::ChainKey>) -> Result<Self> {
+    fn open_with(
+        path: &Path,
+        container: &str,
+        key: Option<&crate::seal::ChainKey>,
+    ) -> Result<Self> {
         match (container, key) {
             ("vhdx", _) => Ok(Self::Vhdx(crate::vhdx_format::VhdxReader::open(path)?)),
             ("qcow2", _) => Ok(Self::Qcow2(crate::qcow2::Qcow2RandomReader::open(path)?)),
-            ("obk", Some(key)) => Ok(Self::Obk(crate::seal::obk::ObkRandomReader::open(path, key)?)),
+            ("obk", Some(key)) => Ok(Self::Obk(crate::seal::obk::ObkRandomReader::open(
+                path, key,
+            )?)),
             ("obk", None) => Err(OwnBackupError::Encryption(format!(
                 "{}: the image is encrypted — a password or the recovery key is needed to open it",
                 path.display()
@@ -334,7 +340,10 @@ fn backup_inner(
                 Unlock::Luks(params)
             } else if crate::bitlocker::is_bitlocker(&header) {
                 let params = crate::bitlocker::open_bitlocker(&mut probe, pass.as_str())?;
-                info!(algo = format!("{:#x}", params.algorithm), "BitLocker source unlocked; backing up decrypted data");
+                info!(
+                    algo = format!("{:#x}", params.algorithm),
+                    "BitLocker source unlocked; backing up decrypted data"
+                );
                 Unlock::BitLocker(params)
             } else {
                 Unlock::None
@@ -365,9 +374,10 @@ fn backup_inner(
         Ok(match unlock {
             Unlock::None => Box::new(dev),
             Unlock::Luks(p) => Box::new(DecryptingVolume::new(Box::new(dev), p.clone())),
-            Unlock::BitLocker(p) => {
-                Box::new(crate::bitlocker::BitLockerVolume::new(Box::new(dev), p.clone()))
-            }
+            Unlock::BitLocker(p) => Box::new(crate::bitlocker::BitLockerVolume::new(
+                Box::new(dev),
+                p.clone(),
+            )),
         })
     };
 
@@ -380,32 +390,32 @@ fn backup_inner(
         (Box::new(AllUsedMap::new(total_blocks)), false)
     } else {
         let mut src = open_source(&unlock)?;
-        let map: Option<Box<dyn UsedSectorMap>> =
-            if let Ok(m) = crate::fat_map::build_fat_used_map(src.as_mut(), req.block_size) {
-                info!(fs = m.filesystem, "Using FAT used-cluster map");
-                detected_fs = Some(m.filesystem.to_string());
-                Some(Box::new(m))
-            } else if let Ok(m) = crate::ext_map::build_ext_used_map(src.as_mut(), req.block_size) {
-                info!(fs = "ext4", "Using ext used-block map");
-                detected_fs = Some("ext4".into());
-                Some(Box::new(m))
-            } else if let Ok(m) = crate::btrfs_map::build_btrfs_used_map(src.as_mut(), req.block_size)
-            {
-                info!(fs = "btrfs", "Using btrfs used-block map");
-                detected_fs = Some("btrfs".into());
-                Some(Box::new(m))
-            } else if let Ok(m) = crate::xfs_map::build_xfs_used_map(src.as_mut(), req.block_size) {
-                info!(fs = "xfs", "Using xfs used-block map");
-                detected_fs = Some("xfs".into());
-                Some(Box::new(m))
-            } else if let Ok(m) = crate::ntfs_map::build_ntfs_used_map(src.as_mut(), req.block_size) {
-                info!(fs = "ntfs", "Using NTFS used-cluster map");
-                detected_fs = Some("NTFS".into());
-                Some(Box::new(m))
-            } else {
-                warn!("no used-block map available (unknown filesystem) — copying every block");
-                None
-            };
+        let map: Option<Box<dyn UsedSectorMap>> = if let Ok(m) =
+            crate::fat_map::build_fat_used_map(src.as_mut(), req.block_size)
+        {
+            info!(fs = m.filesystem, "Using FAT used-cluster map");
+            detected_fs = Some(m.filesystem.to_string());
+            Some(Box::new(m))
+        } else if let Ok(m) = crate::ext_map::build_ext_used_map(src.as_mut(), req.block_size) {
+            info!(fs = "ext4", "Using ext used-block map");
+            detected_fs = Some("ext4".into());
+            Some(Box::new(m))
+        } else if let Ok(m) = crate::btrfs_map::build_btrfs_used_map(src.as_mut(), req.block_size) {
+            info!(fs = "btrfs", "Using btrfs used-block map");
+            detected_fs = Some("btrfs".into());
+            Some(Box::new(m))
+        } else if let Ok(m) = crate::xfs_map::build_xfs_used_map(src.as_mut(), req.block_size) {
+            info!(fs = "xfs", "Using xfs used-block map");
+            detected_fs = Some("xfs".into());
+            Some(Box::new(m))
+        } else if let Ok(m) = crate::ntfs_map::build_ntfs_used_map(src.as_mut(), req.block_size) {
+            info!(fs = "ntfs", "Using NTFS used-cluster map");
+            detected_fs = Some("NTFS".into());
+            Some(Box::new(m))
+        } else {
+            warn!("no used-block map available (unknown filesystem) — copying every block");
+            None
+        };
         match map {
             Some(m) => (m, true),
             None => (Box::new(AllUsedMap::new(total_blocks)), false),
@@ -483,14 +493,18 @@ fn backup_inner(
     }
 
     // --- Copy used blocks into the partition ---
-    let mut reader: Box<dyn BlockReader> =
-        Box::new(RawVolumeBlockReader::new(open_source(&unlock)?, req.block_size)?);
+    let mut reader: Box<dyn BlockReader> = Box::new(RawVolumeBlockReader::new(
+        open_source(&unlock)?,
+        req.block_size,
+    )?);
     let outcome = copy_used_blocks(
         &backup_id.to_string(),
         reader.as_mut(),
         used.as_ref(),
         None,
-        |block_number, data| writer.write_at(data_offset + block_number * req.block_size as u64, data),
+        |block_number, data| {
+            writer.write_at(data_offset + block_number * req.block_size as u64, data)
+        },
         &mut progress,
     )?;
 
@@ -568,12 +582,16 @@ fn backup_inner(
     sidecar_info.filesystem = detected_fs;
     let sidecar_path = sidecar_path_for(&req.image_path);
 
-
     // The sidecar: into the guest meta partition for a plaintext image, sealed
     // inside the container for an encrypted one. Never both, and never in the
     // clear next to an encrypted image.
     let mut blob_bytes = Vec::new();
-    crate::sidecar::write_sidecar_v2_to(&mut blob_bytes, &sidecar_info, &manifest, &outcome.checksums)?;
+    crate::sidecar::write_sidecar_v2_to(
+        &mut blob_bytes,
+        &sidecar_info,
+        &manifest,
+        &outcome.checksums,
+    )?;
     if !encrypted {
         let sector = sector_size as u64;
         let last_lba = (DEFAULT_PARTITION_OFFSET + volume_len).div_ceil(sector) - 1;
@@ -638,11 +656,8 @@ pub fn restore_volume(
     let volume_len = sidecar.manifest.source_disk.size_bytes;
     let data_offset = sidecar.info.volume_data_offset;
 
-    let mut image = LinuxImageReader::open_with(
-        &req.image_path,
-        &sidecar.info.container,
-        chain_key.as_ref(),
-    )?;
+    let mut image =
+        LinuxImageReader::open_with(&req.image_path, &sidecar.info.container, chain_key.as_ref())?;
     let mut target = LinuxRawDevice::open_write(&req.target)?;
     if target.length() < volume_len {
         return Err(OwnBackupError::RestoreIncompatible(format!(
@@ -736,9 +751,14 @@ pub fn mount_support_status() -> MountSupport {
     let kernel_ntfs = std::fs::read_to_string("/proc/filesystems")
         .map(|f| f.split_whitespace().any(|t| t == "ntfs3" || t == "ntfs"))
         .unwrap_or(false);
-    let ntfs3g = ["/sbin/mount.ntfs-3g", "/usr/sbin/mount.ntfs-3g", "/bin/ntfs-3g", "/usr/bin/ntfs-3g"]
-        .iter()
-        .any(|p| Path::new(p).exists());
+    let ntfs3g = [
+        "/sbin/mount.ntfs-3g",
+        "/usr/sbin/mount.ntfs-3g",
+        "/bin/ntfs-3g",
+        "/usr/bin/ntfs-3g",
+    ]
+    .iter()
+    .any(|p| Path::new(p).exists());
     let ntfs_backend = if kernel_ntfs {
         Some("ntfs3".to_string())
     } else if ntfs3g {
@@ -751,7 +771,13 @@ pub fn mount_support_status() -> MountSupport {
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
 
-    MountSupport { platform: "linux", nbd_ok, ntfs_ok: ntfs_backend.is_some(), ntfs_backend, kernel }
+    MountSupport {
+        platform: "linux",
+        nbd_ok,
+        ntfs_ok: ntfs_backend.is_some(),
+        ntfs_backend,
+        kernel,
+    }
 }
 
 /// Best-effort: load the kernel NBD module so `/dev/nbdX` appears. Needs root
@@ -767,8 +793,9 @@ struct ActiveMount {
 
 /// Mounts served by THIS process — the NBD device dies with the serving
 /// process, so mounting only makes sense inside the long-running service.
-static ACTIVE_MOUNTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<PathBuf, ActiveMount>>> =
-    std::sync::OnceLock::new();
+static ACTIVE_MOUNTS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, ActiveMount>>,
+> = std::sync::OnceLock::new();
 
 fn active_mounts() -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, ActiveMount>> {
     ACTIVE_MOUNTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
@@ -785,7 +812,11 @@ pub fn mount_image(image_path: &Path, read_write: bool) -> Result<String> {
         }
     }
 
-    let ext = image_path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_lowercase();
+    let ext = image_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_lowercase();
     let (info, _manifest) = match read_embedded_sidecar_header(image_path, &ext) {
         Ok(h) => h,
         Err(_) => {
@@ -815,7 +846,10 @@ pub fn mount_image(image_path: &Path, read_write: bool) -> Result<String> {
     let mode_str = if read_write { "rw" } else { "ro" };
     let out = std::process::Command::new("mount")
         .arg("-o")
-        .arg(format!("{},loop,offset={}", mode_str, info.volume_data_offset))
+        .arg(format!(
+            "{},loop,offset={}",
+            mode_str, info.volume_data_offset
+        ))
         .arg(&nbd.device)
         .arg(&mount_dir)
         .output()
@@ -830,10 +864,13 @@ pub fn mount_image(image_path: &Path, read_write: bool) -> Result<String> {
     }
 
     info!(image = %image_path.display(), dir = %mount_dir.display(), "backup mounted ({})", mode_str);
-    active_mounts()
-        .lock()
-        .unwrap()
-        .insert(image_path.to_path_buf(), ActiveMount { nbd, mount_dir: mount_dir.clone() });
+    active_mounts().lock().unwrap().insert(
+        image_path.to_path_buf(),
+        ActiveMount {
+            nbd,
+            mount_dir: mount_dir.clone(),
+        },
+    );
     Ok(mount_dir.display().to_string())
 }
 
@@ -854,7 +891,10 @@ pub fn unmount_image(image_path: &Path) -> Result<()> {
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
         // Put the entry back so a later retry can still find it.
-        active_mounts().lock().unwrap().insert(image_path.to_path_buf(), entry);
+        active_mounts()
+            .lock()
+            .unwrap()
+            .insert(image_path.to_path_buf(), entry);
         return Err(OwnBackupError::Device(format!("umount failed: {err}")));
     }
 
@@ -922,7 +962,10 @@ pub fn verify_image_with_keys(
         progress(checked, total)?;
     }
 
-    Ok(VerifySummary { blocks_checked: checked, mismatched_blocks: mismatched })
+    Ok(VerifySummary {
+        blocks_checked: checked,
+        mismatched_blocks: mismatched,
+    })
 }
 
 #[cfg(test)]
@@ -990,7 +1033,10 @@ mod tests {
             !raw.windows(16).any(|w| w == b"secret-payload--"),
             "plaintext data survived into the encrypted image"
         );
-        assert!(!sidecar_path_for(&img).exists(), "no sidecar file beside an .obk");
+        assert!(
+            !sidecar_path_for(&img).exists(),
+            "no sidecar file beside an .obk"
+        );
 
         // A plaintext reader refuses it, and so does verify without a key.
         assert!(crate::qcow2::Qcow2RandomReader::open(&img).is_err());
@@ -1003,7 +1049,11 @@ mod tests {
         let keys =
             crate::seal::context::ArchiveKeys::from_image_password(&img, "пароль архива").unwrap();
         let verified = verify_image_with_keys(&img, Some(&keys), |_, _| Ok(())).unwrap();
-        assert!(verified.valid(), "mismatches: {:?}", verified.mismatched_blocks);
+        assert!(
+            verified.valid(),
+            "mismatches: {:?}",
+            verified.mismatched_blocks
+        );
 
         let target = dir.path().join("restored.bin");
         std::fs::File::create(&target)
@@ -1074,7 +1124,10 @@ mod tests {
     fn backup_and_verify_real_ext4() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src.ext4");
-        std::fs::File::create(&src).unwrap().set_len(64 * 1024 * 1024).unwrap();
+        std::fs::File::create(&src)
+            .unwrap()
+            .set_len(64 * 1024 * 1024)
+            .unwrap();
         assert!(std::process::Command::new("mkfs.ext4")
             .args(["-q", "-F", src.to_str().unwrap()])
             .status()
@@ -1105,7 +1158,8 @@ mod tests {
         let mut dev = crate::vhdx_format::VhdxReader::open(&img).unwrap();
         let mut head = vec![0u8; own_backup_inventory::fs_probe::PROBE_LEN];
         dev.read_at(DEFAULT_PARTITION_OFFSET, &mut head).unwrap();
-        let probed = own_backup_inventory::fs_probe::identify(&head).expect("image holds a filesystem");
+        let probed =
+            own_backup_inventory::fs_probe::identify(&head).expect("image holds a filesystem");
         assert_eq!(probed.fs, own_backup_common::types::FileSystem::Ext4);
     }
 
@@ -1116,7 +1170,10 @@ mod tests {
     fn backup_then_restore_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src.ext4");
-        std::fs::File::create(&src).unwrap().set_len(64 * 1024 * 1024).unwrap();
+        std::fs::File::create(&src)
+            .unwrap()
+            .set_len(64 * 1024 * 1024)
+            .unwrap();
         assert!(std::process::Command::new("mkfs.ext4")
             .args(["-q", "-F", "-L", "roundtrip", src.to_str().unwrap()])
             .status()
@@ -1142,7 +1199,10 @@ mod tests {
 
         // Restore onto a blank target sized to the volume.
         let tgt = dir.path().join("restored.bin");
-        std::fs::File::create(&tgt).unwrap().set_len(sum.source_bytes).unwrap();
+        std::fs::File::create(&tgt)
+            .unwrap()
+            .set_len(sum.source_bytes)
+            .unwrap();
         let r = restore_volume(
             &LinuxRestoreRequest {
                 image_path: img,
@@ -1170,7 +1230,10 @@ mod tests {
     fn qcow2_backup_verify_restore_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src.ext4");
-        std::fs::File::create(&src).unwrap().set_len(64 * 1024 * 1024).unwrap();
+        std::fs::File::create(&src)
+            .unwrap()
+            .set_len(64 * 1024 * 1024)
+            .unwrap();
         assert!(std::process::Command::new("mkfs.ext4")
             .args(["-q", "-F", "-L", "qcowtrip", src.to_str().unwrap()])
             .status()
@@ -1214,7 +1277,10 @@ mod tests {
         assert!(v.valid(), "verify mismatches: {:?}", v.mismatched_blocks);
 
         let tgt = dir.path().join("restored.bin");
-        std::fs::File::create(&tgt).unwrap().set_len(sum.source_bytes).unwrap();
+        std::fs::File::create(&tgt)
+            .unwrap()
+            .set_len(sum.source_bytes)
+            .unwrap();
         let r = restore_volume(
             &LinuxRestoreRequest {
                 image_path: img,
@@ -1243,7 +1309,10 @@ mod tests {
         assert_eq!(unsafe { libc::geteuid() }, 0, "this test needs root");
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src.ext4");
-        std::fs::File::create(&src).unwrap().set_len(64 * 1024 * 1024).unwrap();
+        std::fs::File::create(&src)
+            .unwrap()
+            .set_len(64 * 1024 * 1024)
+            .unwrap();
         assert!(std::process::Command::new("mkfs.ext4")
             .args(["-q", "-F", "-L", "mounttrip", src.to_str().unwrap()])
             .status()
@@ -1255,7 +1324,12 @@ mod tests {
         let srcmnt = dir.path().join("srcmnt");
         std::fs::create_dir(&srcmnt).unwrap();
         assert!(std::process::Command::new("mount")
-            .args(["-o", "loop", src.to_str().unwrap(), srcmnt.to_str().unwrap()])
+            .args([
+                "-o",
+                "loop",
+                src.to_str().unwrap(),
+                srcmnt.to_str().unwrap()
+            ])
             .status()
             .unwrap()
             .success());
@@ -1286,7 +1360,10 @@ mod tests {
 
         let mount_dir = mount_image(&img, false).unwrap();
         let restored = std::fs::read(Path::new(&mount_dir).join("payload.bin")).unwrap();
-        assert_eq!(restored, payload, "file read from the mounted backup differs");
+        assert_eq!(
+            restored, payload,
+            "file read from the mounted backup differs"
+        );
 
         // Read-only is enforced end to end.
         assert!(std::fs::write(Path::new(&mount_dir).join("x"), b"nope").is_err());
@@ -1374,8 +1451,13 @@ mod verify_cancel_tests {
             preflight_report: None,
             volume_encryption: None,
         };
-        write_sidecar(&crate::sidecar::sidecar_path_for(&image), &info, &manifest, &checksums)
-            .unwrap();
+        write_sidecar(
+            &crate::sidecar::sidecar_path_for(&image),
+            &info,
+            &manifest,
+            &checksums,
+        )
+        .unwrap();
         image
     }
 
@@ -1399,7 +1481,10 @@ mod verify_cancel_tests {
             matches!(outcome, Err(OwnBackupError::Cancelled)),
             "the cancellation must come back out, not be swallowed: {outcome:?}"
         );
-        assert_eq!(seen, 3, "reading must stop at the cancelled block, not finish the image");
+        assert_eq!(
+            seen, 3,
+            "reading must stop at the cancelled block, not finish the image"
+        );
     }
 
     #[test]

@@ -36,7 +36,10 @@ impl CancelToken {
     /// A fresh token for a new run. Never reuse one across runs — that is the
     /// bug this type exists to prevent.
     pub fn new(id: Uuid) -> Self {
-        Self { flag: Arc::new(AtomicBool::new(false)), id }
+        Self {
+            flag: Arc::new(AtomicBool::new(false)),
+            id,
+        }
     }
 
     /// The run this token belongs to.

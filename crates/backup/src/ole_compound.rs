@@ -53,10 +53,12 @@ impl<'a> Compound<'a> {
         if base + 512 > data.len() {
             return None;
         }
-        let u16at =
-            |o: usize| u16::from_le_bytes(data[base + o..base + o + 2].try_into().unwrap_or([0; 2]));
-        let u32at =
-            |o: usize| u32::from_le_bytes(data[base + o..base + o + 4].try_into().unwrap_or([0; 4]));
+        let u16at = |o: usize| {
+            u16::from_le_bytes(data[base + o..base + o + 2].try_into().unwrap_or([0; 2]))
+        };
+        let u32at = |o: usize| {
+            u32::from_le_bytes(data[base + o..base + o + 4].try_into().unwrap_or([0; 4]))
+        };
 
         let sector_shift = u16at(30) as u32;
         if !(7..=16).contains(&sector_shift) {
@@ -103,7 +105,8 @@ impl<'a> Compound<'a> {
                 break;
             }
             for i in 0..(c.sector / 4) {
-                c.fat.push(u32::from_le_bytes(s[i * 4..i * 4 + 4].try_into().unwrap()));
+                c.fat
+                    .push(u32::from_le_bytes(s[i * 4..i * 4 + 4].try_into().unwrap()));
             }
         }
         (!c.fat.is_empty()).then_some(c)
@@ -248,6 +251,9 @@ mod tests {
         assert_eq!(blob.len(), 1100);
         assert!(blob[..512].iter().all(|&b| b == b'A'));
         assert!(blob[512..1024].iter().all(|&b| b == b'B'));
-        assert!(blob[1024..].iter().all(|&b| b == b'C'), "the third sector must follow");
+        assert!(
+            blob[1024..].iter().all(|&b| b == b'C'),
+            "the third sector must follow"
+        );
     }
 }

@@ -273,9 +273,11 @@ fn list_chains_impl(folder: &Path, job_id: Option<&str>, strict: bool) -> Result
             Chain { images }
         })
         .collect();
-    chains.sort_by(|a, b| a.oldest_created_at().cmp(b.oldest_created_at()).then(
-        a.newest_created_at().cmp(b.newest_created_at()),
-    ));
+    chains.sort_by(|a, b| {
+        a.oldest_created_at()
+            .cmp(b.oldest_created_at())
+            .then(a.newest_created_at().cmp(b.newest_created_at()))
+    });
     Ok(chains)
 }
 
@@ -504,7 +506,11 @@ impl DeletionReport {
 ///   recovery is a different operation's job, and deleting the files under it
 ///   would take away the only thing it can finish from.
 pub fn delete_chain(chain: &Chain) -> Result<DeletionReport> {
-    let images: Vec<&Path> = chain.images.iter().map(|i| i.image_path.as_path()).collect();
+    let images: Vec<&Path> = chain
+        .images
+        .iter()
+        .map(|i| i.image_path.as_path())
+        .collect();
     crate::consolidate::ensure_idle(&images)?;
     if let Some(base) = chain.images.first() {
         let marker = crate::consolidate::marker_path(&base.image_path);
@@ -577,7 +583,9 @@ fn parent_links(chain: &Chain) -> Vec<Option<usize>> {
         .iter()
         .enumerate()
         .filter_map(|(i, img)| {
-            img.image_path.file_name().map(|n| (n.to_string_lossy().to_lowercase(), i))
+            img.image_path
+                .file_name()
+                .map(|n| (n.to_string_lossy().to_lowercase(), i))
         })
         .collect();
     chain
@@ -687,24 +695,75 @@ mod tests {
         chain
             .images
             .iter()
-            .map(|i| i.image_path.file_name().unwrap().to_string_lossy().into_owned())
+            .map(|i| {
+                i.image_path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
             .collect()
     }
 
     #[test]
     fn groups_incremental_chain_to_its_full() {
         let dir = tempfile::tempdir().unwrap();
-        put_image(dir.path(), "a_full.vhdx", ChainRole::Full, None, Some("j1"), "2026-01-01T00:00:00Z");
-        put_image(dir.path(), "a_inc1.avhdx", ChainRole::Incremental, Some("a_full.vhdx"), Some("j1"), "2026-01-02T00:00:00Z");
-        put_image(dir.path(), "a_inc2.avhdx", ChainRole::Incremental, Some("a_inc1.avhdx"), Some("j1"), "2026-01-03T00:00:00Z");
-        put_image(dir.path(), "b_full.vhdx", ChainRole::Full, None, Some("j1"), "2026-02-01T00:00:00Z");
+        put_image(
+            dir.path(),
+            "a_full.vhdx",
+            ChainRole::Full,
+            None,
+            Some("j1"),
+            "2026-01-01T00:00:00Z",
+        );
+        put_image(
+            dir.path(),
+            "a_inc1.avhdx",
+            ChainRole::Incremental,
+            Some("a_full.vhdx"),
+            Some("j1"),
+            "2026-01-02T00:00:00Z",
+        );
+        put_image(
+            dir.path(),
+            "a_inc2.avhdx",
+            ChainRole::Incremental,
+            Some("a_inc1.avhdx"),
+            Some("j1"),
+            "2026-01-03T00:00:00Z",
+        );
+        put_image(
+            dir.path(),
+            "b_full.vhdx",
+            ChainRole::Full,
+            None,
+            Some("j1"),
+            "2026-02-01T00:00:00Z",
+        );
         // Foreign job + no-job images must be invisible.
-        put_image(dir.path(), "x_full.vhdx", ChainRole::Full, None, Some("other"), "2026-01-05T00:00:00Z");
-        put_image(dir.path(), "y_full.vhdx", ChainRole::Full, None, None, "2026-01-06T00:00:00Z");
+        put_image(
+            dir.path(),
+            "x_full.vhdx",
+            ChainRole::Full,
+            None,
+            Some("other"),
+            "2026-01-05T00:00:00Z",
+        );
+        put_image(
+            dir.path(),
+            "y_full.vhdx",
+            ChainRole::Full,
+            None,
+            None,
+            "2026-01-06T00:00:00Z",
+        );
 
         let chains = list_job_chains(dir.path(), "j1").unwrap();
         assert_eq!(chains.len(), 2);
-        assert_eq!(chain_names(&chains[0]), vec!["a_full.vhdx", "a_inc1.avhdx", "a_inc2.avhdx"]);
+        assert_eq!(
+            chain_names(&chains[0]),
+            vec!["a_full.vhdx", "a_inc1.avhdx", "a_inc2.avhdx"]
+        );
         assert_eq!(chain_names(&chains[1]), vec!["b_full.vhdx"]);
         assert_eq!(chains[0].newest_created_at(), "2026-01-03T00:00:00Z");
     }
@@ -716,7 +775,14 @@ mod tests {
     #[test]
     fn images_without_a_job_are_a_chain_of_their_own() {
         let dir = tempfile::tempdir().unwrap();
-        put_image(dir.path(), "cli_full.vhdx", ChainRole::Full, None, None, "2026-03-01T00:00:00Z");
+        put_image(
+            dir.path(),
+            "cli_full.vhdx",
+            ChainRole::Full,
+            None,
+            None,
+            "2026-03-01T00:00:00Z",
+        );
         put_image(
             dir.path(),
             "cli_inc1.avhdx",
@@ -725,11 +791,21 @@ mod tests {
             None,
             "2026-03-02T00:00:00Z",
         );
-        put_image(dir.path(), "job_full.vhdx", ChainRole::Full, None, Some("j1"), "2026-03-03T00:00:00Z");
+        put_image(
+            dir.path(),
+            "job_full.vhdx",
+            ChainRole::Full,
+            None,
+            Some("j1"),
+            "2026-03-03T00:00:00Z",
+        );
 
         let chains = list_chains(dir.path(), None).unwrap();
         assert_eq!(chains.len(), 1, "the job's image is not ours");
-        assert_eq!(chain_names(&chains[0]), vec!["cli_full.vhdx", "cli_inc1.avhdx"]);
+        assert_eq!(
+            chain_names(&chains[0]),
+            vec!["cli_full.vhdx", "cli_inc1.avhdx"]
+        );
         // And the job still sees only its own.
         let job = list_chains(dir.path(), Some("j1")).unwrap();
         assert_eq!(chain_names(&job[0]), vec!["job_full.vhdx"]);
@@ -744,9 +820,21 @@ mod tests {
         let mut info = SidecarInfo::new_full("q_full.qcow2", 0);
         info.container = "qcow2".into();
         info.job_id = Some("j1".into());
-        write_sidecar(&sidecar_path_for(&image), &info, &manifest("2026-01-01T00:00:00Z"), &[])
-            .unwrap();
-        put_image(dir.path(), "v_full.vhdx", ChainRole::Full, None, Some("j1"), "2026-02-01T00:00:00Z");
+        write_sidecar(
+            &sidecar_path_for(&image),
+            &info,
+            &manifest("2026-01-01T00:00:00Z"),
+            &[],
+        )
+        .unwrap();
+        put_image(
+            dir.path(),
+            "v_full.vhdx",
+            ChainRole::Full,
+            None,
+            Some("j1"),
+            "2026-02-01T00:00:00Z",
+        );
 
         let chains = list_job_chains(dir.path(), "j1").unwrap();
         let containers: Vec<&str> = chains
@@ -760,7 +848,14 @@ mod tests {
     #[test]
     fn orphans_group_into_own_chain() {
         let dir = tempfile::tempdir().unwrap();
-        put_image(dir.path(), "lost_inc.avhdx", ChainRole::Incremental, Some("gone_full.vhdx"), Some("j1"), "2026-01-02T00:00:00Z");
+        put_image(
+            dir.path(),
+            "lost_inc.avhdx",
+            ChainRole::Incremental,
+            Some("gone_full.vhdx"),
+            Some("j1"),
+            "2026-01-02T00:00:00Z",
+        );
         let chains = list_job_chains(dir.path(), "j1").unwrap();
         assert_eq!(chains.len(), 1);
         assert_eq!(chain_names(&chains[0]), vec!["lost_inc.avhdx"]);
@@ -800,7 +895,11 @@ mod tests {
             "2026-03-01T00:00:00Z",
             "2026-04-01T00:00:00Z",
         ]);
-        let rules = RetentionRules { keep_chains: Some(2), cleanup_older_than_days: None, keep_first: false };
+        let rules = RetentionRules {
+            keep_chains: Some(2),
+            cleanup_older_than_days: None,
+            keep_first: false,
+        };
         let del = plan_retention(&chains, &rules, now(), Path::new("c3.vhdx"));
         assert_eq!(del, vec![0, 1]);
     }
@@ -813,7 +912,11 @@ mod tests {
             "2026-03-01T00:00:00Z",
             "2026-04-01T00:00:00Z",
         ]);
-        let rules = RetentionRules { keep_chains: Some(2), cleanup_older_than_days: None, keep_first: true };
+        let rules = RetentionRules {
+            keep_chains: Some(2),
+            cleanup_older_than_days: None,
+            keep_first: true,
+        };
         let del = plan_retention(&chains, &rules, now(), Path::new("c3.vhdx"));
         // First is exempt; c1 deleted to get down to 3... then stop? keep=2 →
         // remaining must be ≤ 2, but first + current are both exempt, so only
@@ -824,7 +927,11 @@ mod tests {
     #[test]
     fn retention_never_deletes_current_chain() {
         let chains = make_chains(&["2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z"]);
-        let rules = RetentionRules { keep_chains: Some(1), cleanup_older_than_days: None, keep_first: false };
+        let rules = RetentionRules {
+            keep_chains: Some(1),
+            cleanup_older_than_days: None,
+            keep_first: false,
+        };
         // Current run went into the OLDEST chain (incremental) — it survives.
         let del = plan_retention(&chains, &rules, now(), Path::new("c0.vhdx"));
         assert_eq!(del, vec![1]);
@@ -836,7 +943,11 @@ mod tests {
             "2026-01-01T00:00:00Z", // ~180 days old → delete
             "2026-06-25T00:00:00Z", // fresh → keep
         ]);
-        let rules = RetentionRules { keep_chains: None, cleanup_older_than_days: Some(30), keep_first: false };
+        let rules = RetentionRules {
+            keep_chains: None,
+            cleanup_older_than_days: Some(30),
+            keep_first: false,
+        };
         let del = plan_retention(&chains, &rules, now(), Path::new("c1.vhdx"));
         assert_eq!(del, vec![0]);
     }
@@ -844,11 +955,28 @@ mod tests {
     #[test]
     fn retention_deletes_files() {
         let dir = tempfile::tempdir().unwrap();
-        put_image(dir.path(), "old_full.vhdx", ChainRole::Full, None, Some("j1"), "2026-01-01T00:00:00Z");
-        put_image(dir.path(), "old_inc.avhdx", ChainRole::Incremental, Some("old_full.vhdx"), Some("j1"), "2026-01-02T00:00:00Z");
+        put_image(
+            dir.path(),
+            "old_full.vhdx",
+            ChainRole::Full,
+            None,
+            Some("j1"),
+            "2026-01-01T00:00:00Z",
+        );
+        put_image(
+            dir.path(),
+            "old_inc.avhdx",
+            ChainRole::Incremental,
+            Some("old_full.vhdx"),
+            Some("j1"),
+            "2026-01-02T00:00:00Z",
+        );
         let chains = list_job_chains(dir.path(), "j1").unwrap();
         let report = delete_chain(&chains[0]).unwrap();
-        assert!(report.complete(), "nothing should have been left: {report:?}");
+        assert!(
+            report.complete(),
+            "nothing should have been left: {report:?}"
+        );
         assert_eq!(report.files_deleted(), 4);
         assert!(!dir.path().join("old_full.vhdx").exists());
         assert!(!dir.path().join("old_inc.avhdx").exists());
@@ -859,7 +987,14 @@ mod tests {
 
     /// Build a chain of `n` increments on a full backup, oldest first.
     fn window_chain(dir: &Path, n: usize, role: ChainRole) -> Chain {
-        put_image(dir, "w_full.vhdx", ChainRole::Full, None, Some("j1"), "2026-01-01T00:00:00Z");
+        put_image(
+            dir,
+            "w_full.vhdx",
+            ChainRole::Full,
+            None,
+            Some("j1"),
+            "2026-01-01T00:00:00Z",
+        );
         for i in 1..=n {
             let parent = match role {
                 ChainRole::Differential => "w_full.vhdx".to_string(),
@@ -882,7 +1017,10 @@ mod tests {
     fn window_within_limit_needs_no_consolidation() {
         let dir = tempfile::tempdir().unwrap();
         let chain = window_chain(dir.path(), 3, ChainRole::Incremental);
-        assert!(plan_consolidation(&chain, 3).is_none(), "3 increments, limit 3");
+        assert!(
+            plan_consolidation(&chain, 3).is_none(),
+            "3 increments, limit 3"
+        );
     }
 
     #[test]
@@ -912,11 +1050,21 @@ mod tests {
         // After that step the chain is full + inc2; the leaf then has no next.
         std::fs::remove_file(dir.path().join("w_inc1.avhdx")).unwrap();
         std::fs::remove_file(sidecar_path_for(&dir.path().join("w_inc1.avhdx"))).unwrap();
-        put_image(dir.path(), "w_inc2.avhdx", ChainRole::Incremental, Some("w_full.vhdx"), Some("j1"), "2026-01-03T00:00:00Z");
+        put_image(
+            dir.path(),
+            "w_inc2.avhdx",
+            ChainRole::Incremental,
+            Some("w_full.vhdx"),
+            Some("j1"),
+            "2026-01-03T00:00:00Z",
+        );
         let chain = list_job_chains(dir.path(), "j1").unwrap().remove(0);
         let step = plan_consolidation(&chain, 0).expect("1 increment, limit 0");
         assert_eq!(step.victim.image_path.file_name().unwrap(), "w_inc2.avhdx");
-        assert!(step.next.is_none(), "the leaf has nothing to repoint after it");
+        assert!(
+            step.next.is_none(),
+            "the leaf has nothing to repoint after it"
+        );
     }
 
     /// Differential siblings each hold "everything since the base". Moving the
@@ -932,11 +1080,32 @@ mod tests {
     #[test]
     fn broken_parent_links_are_refused() {
         let dir = tempfile::tempdir().unwrap();
-        put_image(dir.path(), "b_full.vhdx", ChainRole::Full, None, Some("j1"), "2026-01-01T00:00:00Z");
-        put_image(dir.path(), "b_inc1.avhdx", ChainRole::Incremental, Some("b_full.vhdx"), Some("j1"), "2026-01-02T00:00:00Z");
+        put_image(
+            dir.path(),
+            "b_full.vhdx",
+            ChainRole::Full,
+            None,
+            Some("j1"),
+            "2026-01-01T00:00:00Z",
+        );
+        put_image(
+            dir.path(),
+            "b_inc1.avhdx",
+            ChainRole::Incremental,
+            Some("b_full.vhdx"),
+            Some("j1"),
+            "2026-01-02T00:00:00Z",
+        );
         // inc2 claims the FULL as its parent while sitting after inc1 in time:
         // the timestamp order and the links disagree.
-        put_image(dir.path(), "b_inc2.avhdx", ChainRole::Incremental, Some("b_full.vhdx"), Some("j1"), "2026-01-03T00:00:00Z");
+        put_image(
+            dir.path(),
+            "b_inc2.avhdx",
+            ChainRole::Incremental,
+            Some("b_full.vhdx"),
+            Some("j1"),
+            "2026-01-03T00:00:00Z",
+        );
         let chain = list_job_chains(dir.path(), "j1").unwrap().remove(0);
         assert_eq!(chain.images.len(), 3);
         assert!(plan_consolidation(&chain, 1).is_none());
@@ -945,14 +1114,35 @@ mod tests {
     #[test]
     fn mixed_container_formats_are_refused() {
         let dir = tempfile::tempdir().unwrap();
-        put_image(dir.path(), "m_full.vhdx", ChainRole::Full, None, Some("j1"), "2026-01-01T00:00:00Z");
-        put_image(dir.path(), "m_inc1.avhdx", ChainRole::Incremental, Some("m_full.vhdx"), Some("j1"), "2026-01-02T00:00:00Z");
+        put_image(
+            dir.path(),
+            "m_full.vhdx",
+            ChainRole::Full,
+            None,
+            Some("j1"),
+            "2026-01-01T00:00:00Z",
+        );
+        put_image(
+            dir.path(),
+            "m_inc1.avhdx",
+            ChainRole::Incremental,
+            Some("m_full.vhdx"),
+            Some("j1"),
+            "2026-01-02T00:00:00Z",
+        );
         let image = dir.path().join("m_inc2.qcow2");
         std::fs::write(&image, b"img").unwrap();
-        let mut info = SidecarInfo::new_child("m_inc2.qcow2", ChainRole::Incremental, "m_inc1.avhdx", 0);
+        let mut info =
+            SidecarInfo::new_child("m_inc2.qcow2", ChainRole::Incremental, "m_inc1.avhdx", 0);
         info.container = "qcow2".into();
         info.job_id = Some("j1".into());
-        write_sidecar(&sidecar_path_for(&image), &info, &manifest("2026-01-03T00:00:00Z"), &[]).unwrap();
+        write_sidecar(
+            &sidecar_path_for(&image),
+            &info,
+            &manifest("2026-01-03T00:00:00Z"),
+            &[],
+        )
+        .unwrap();
 
         let chain = list_job_chains(dir.path(), "j1").unwrap().remove(0);
         assert!(plan_consolidation(&chain, 1).is_none());
@@ -972,8 +1162,22 @@ mod tests {
     #[test]
     fn a_child_that_cannot_be_deleted_keeps_its_base() {
         let dir = tempfile::tempdir().unwrap();
-        put_image(dir.path(), "b_full.vhdx", ChainRole::Full, None, Some("j1"), "2026-01-01T00:00:00Z");
-        put_image(dir.path(), "b_inc.avhdx", ChainRole::Incremental, Some("b_full.vhdx"), Some("j1"), "2026-01-02T00:00:00Z");
+        put_image(
+            dir.path(),
+            "b_full.vhdx",
+            ChainRole::Full,
+            None,
+            Some("j1"),
+            "2026-01-01T00:00:00Z",
+        );
+        put_image(
+            dir.path(),
+            "b_inc.avhdx",
+            ChainRole::Incremental,
+            Some("b_full.vhdx"),
+            Some("j1"),
+            "2026-01-02T00:00:00Z",
+        );
         let chains = list_job_chains(dir.path(), "j1").unwrap();
 
         // Делаем ребёнка неудаляемым: каталог вместо файла.
@@ -982,7 +1186,10 @@ mod tests {
         std::fs::create_dir(&leaf).unwrap();
 
         let report = delete_chain(&chains[0]).unwrap();
-        assert!(!report.complete(), "отчёт обязан сказать, что цепочка осталась");
+        assert!(
+            !report.complete(),
+            "отчёт обязан сказать, что цепочка осталась"
+        );
         assert!(
             dir.path().join("b_full.vhdx").exists(),
             "база должна остаться: от неё всё ещё зависит ребёнок"
@@ -1002,9 +1209,30 @@ mod tests {
     #[test]
     fn a_stuck_child_does_not_hold_its_siblings() {
         let dir = tempfile::tempdir().unwrap();
-        put_image(dir.path(), "c_full.vhdx", ChainRole::Full, None, Some("j1"), "2026-01-01T00:00:00Z");
-        put_image(dir.path(), "c_d1.avhdx", ChainRole::Differential, Some("c_full.vhdx"), Some("j1"), "2026-01-02T00:00:00Z");
-        put_image(dir.path(), "c_d2.avhdx", ChainRole::Differential, Some("c_full.vhdx"), Some("j1"), "2026-01-03T00:00:00Z");
+        put_image(
+            dir.path(),
+            "c_full.vhdx",
+            ChainRole::Full,
+            None,
+            Some("j1"),
+            "2026-01-01T00:00:00Z",
+        );
+        put_image(
+            dir.path(),
+            "c_d1.avhdx",
+            ChainRole::Differential,
+            Some("c_full.vhdx"),
+            Some("j1"),
+            "2026-01-02T00:00:00Z",
+        );
+        put_image(
+            dir.path(),
+            "c_d2.avhdx",
+            ChainRole::Differential,
+            Some("c_full.vhdx"),
+            Some("j1"),
+            "2026-01-03T00:00:00Z",
+        );
         let chains = list_job_chains(dir.path(), "j1").unwrap();
 
         let stuck = dir.path().join("c_d1.avhdx");
@@ -1012,8 +1240,14 @@ mod tests {
         std::fs::create_dir(&stuck).unwrap();
 
         let report = delete_chain(&chains[0]).unwrap();
-        assert!(!dir.path().join("c_d2.avhdx").exists(), "сестра не виновата и должна уйти");
-        assert!(dir.path().join("c_full.vhdx").exists(), "база держится застрявшим ребёнком");
+        assert!(
+            !dir.path().join("c_d2.avhdx").exists(),
+            "сестра не виновата и должна уйти"
+        );
+        assert!(
+            dir.path().join("c_full.vhdx").exists(),
+            "база держится застрявшим ребёнком"
+        );
         assert!(!report.complete());
     }
 
@@ -1022,7 +1256,14 @@ mod tests {
     #[test]
     fn the_sidecar_never_goes_before_its_image() {
         let dir = tempfile::tempdir().unwrap();
-        put_image(dir.path(), "d_full.vhdx", ChainRole::Full, None, Some("j1"), "2026-01-01T00:00:00Z");
+        put_image(
+            dir.path(),
+            "d_full.vhdx",
+            ChainRole::Full,
+            None,
+            Some("j1"),
+            "2026-01-01T00:00:00Z",
+        );
         let chains = list_job_chains(dir.path(), "j1").unwrap();
 
         let base = dir.path().join("d_full.vhdx");
@@ -1042,7 +1283,14 @@ mod tests {
     #[test]
     fn a_missing_sidecar_is_not_a_failure() {
         let dir = tempfile::tempdir().unwrap();
-        put_image(dir.path(), "e_full.vhdx", ChainRole::Full, None, Some("j1"), "2026-01-01T00:00:00Z");
+        put_image(
+            dir.path(),
+            "e_full.vhdx",
+            ChainRole::Full,
+            None,
+            Some("j1"),
+            "2026-01-01T00:00:00Z",
+        );
         let chains = list_job_chains(dir.path(), "j1").unwrap();
         std::fs::remove_file(dir.path().join("e_full.vhdx.obkm")).unwrap();
 
@@ -1056,15 +1304,32 @@ mod tests {
     #[test]
     fn a_chain_with_an_unfinished_consolidation_is_refused_whole() {
         let dir = tempfile::tempdir().unwrap();
-        put_image(dir.path(), "f_full.vhdx", ChainRole::Full, None, Some("j1"), "2026-01-01T00:00:00Z");
-        put_image(dir.path(), "f_inc.avhdx", ChainRole::Incremental, Some("f_full.vhdx"), Some("j1"), "2026-01-02T00:00:00Z");
+        put_image(
+            dir.path(),
+            "f_full.vhdx",
+            ChainRole::Full,
+            None,
+            Some("j1"),
+            "2026-01-01T00:00:00Z",
+        );
+        put_image(
+            dir.path(),
+            "f_inc.avhdx",
+            ChainRole::Incremental,
+            Some("f_full.vhdx"),
+            Some("j1"),
+            "2026-01-02T00:00:00Z",
+        );
         let chains = list_job_chains(dir.path(), "j1").unwrap();
 
         let marker = crate::consolidate::marker_path(&dir.path().join("f_full.vhdx"));
         std::fs::write(&marker, b"{}").unwrap();
 
         assert!(delete_chain(&chains[0]).is_err());
-        assert!(dir.path().join("f_full.vhdx").exists(), "ни один файл не должен быть тронут");
+        assert!(
+            dir.path().join("f_full.vhdx").exists(),
+            "ни один файл не должен быть тронут"
+        );
         assert!(dir.path().join("f_inc.avhdx").exists());
     }
 
@@ -1073,8 +1338,22 @@ mod tests {
     #[test]
     fn the_order_comes_from_the_parent_links_not_the_dates() {
         let dir = tempfile::tempdir().unwrap();
-        put_image(dir.path(), "g_full.vhdx", ChainRole::Full, None, Some("j1"), "2026-06-01T00:00:00Z");
-        put_image(dir.path(), "g_inc.avhdx", ChainRole::Incremental, Some("g_full.vhdx"), Some("j1"), "2026-01-01T00:00:00Z");
+        put_image(
+            dir.path(),
+            "g_full.vhdx",
+            ChainRole::Full,
+            None,
+            Some("j1"),
+            "2026-06-01T00:00:00Z",
+        );
+        put_image(
+            dir.path(),
+            "g_inc.avhdx",
+            ChainRole::Incremental,
+            Some("g_full.vhdx"),
+            Some("j1"),
+            "2026-01-01T00:00:00Z",
+        );
         let chains = list_job_chains(dir.path(), "j1").unwrap();
 
         let stuck = dir.path().join("g_inc.avhdx");
@@ -1100,15 +1379,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // Distinct timestamps, as real runs have: images inside a chain are
         // ordered by when they were taken.
-        let write = |name: &str, id: Uuid, role: ChainRole, parent: Option<(Uuid, &str)>, at: &str| {
-            let mut opts = f.options(id, role, parent);
-            opts.created_at = at.to_string();
-            let mut w = ObkWriter::create(&dir.path().join(name), &f.chain, opts).unwrap();
-            w.write_cluster(0, &vec![1u8; 4096]).unwrap();
-            w.finish(b"sealed sidecar").unwrap();
-        };
+        let write =
+            |name: &str, id: Uuid, role: ChainRole, parent: Option<(Uuid, &str)>, at: &str| {
+                let mut opts = f.options(id, role, parent);
+                opts.created_at = at.to_string();
+                let mut w = ObkWriter::create(&dir.path().join(name), &f.chain, opts).unwrap();
+                w.write_cluster(0, &vec![1u8; 4096]).unwrap();
+                w.finish(b"sealed sidecar").unwrap();
+            };
         let full = Uuid::new_v4();
-        write("e_full.obk", full, ChainRole::Full, None, "2026-09-20T01:00:00Z");
+        write(
+            "e_full.obk",
+            full,
+            ChainRole::Full,
+            None,
+            "2026-09-20T01:00:00Z",
+        );
         write(
             "e_inc.obk",
             Uuid::new_v4(),
@@ -1121,9 +1407,15 @@ mod tests {
         assert_eq!(chains.len(), 1, "one chain, not two loose images");
         assert_eq!(chain_names(&chains[0]), vec!["e_full.obk", "e_inc.obk"]);
         assert!(chains[0].images.iter().all(|i| i.container == "obk"));
-        assert_eq!(chains[0].images[0].source_id.as_deref(), Some("volume-under-test"));
+        assert_eq!(
+            chains[0].images[0].source_id.as_deref(),
+            Some("volume-under-test")
+        );
         assert_eq!(chains[0].increments_ever(), 1);
-        assert!(!chains[0].images[0].sidecar_path.exists(), "no sidecar file exists");
+        assert!(
+            !chains[0].images[0].sidecar_path.exists(),
+            "no sidecar file exists"
+        );
 
         // Another job's listing must not see them, and neither must the
         // no-job listing a command-line copy uses.

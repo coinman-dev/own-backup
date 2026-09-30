@@ -76,12 +76,15 @@ pub struct BuildArgs {
 pub async fn run(args: MediaArgs) -> Result<()> {
     let token = if args.token.is_empty() {
         let cfg = own_backup_common::config::AppConfig::default();
-        std::fs::read_to_string(cfg.token_path()).map(|s| s.trim().to_string()).unwrap_or_default()
+        std::fs::read_to_string(cfg.token_path())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
     } else {
         args.token.clone()
     };
-    let mut client =
-        BackupClient::connect(args.endpoint.clone(), token.clone()).await.map_err(|e| {
+    let mut client = BackupClient::connect(args.endpoint.clone(), token.clone())
+        .await
+        .map_err(|e| {
             OwnBackupError::Config(format!(
                 "{e}\nЗапущена ли служба? Для локального теста: \
                  own-backup-service --foreground"
@@ -116,7 +119,11 @@ pub async fn run(args: MediaArgs) -> Result<()> {
                     d.inf,
                     d.class_name,
                     d.original_name,
-                    if d.recommended { "рекомендован" } else { "" }
+                    if d.recommended {
+                        "рекомендован"
+                    } else {
+                        ""
+                    }
                 );
             }
         }
@@ -142,11 +149,15 @@ pub async fn run(args: MediaArgs) -> Result<()> {
             let watcher = if b.quiet {
                 None
             } else {
-                let mut side = BackupClient::connect(args.endpoint.clone(), token).await.ok();
+                let mut side = BackupClient::connect(args.endpoint.clone(), token)
+                    .await
+                    .ok();
                 side.take().map(|mut c| {
                     tokio::spawn(async move {
                         use tokio_stream::StreamExt;
-                        let Ok(stream) = c.stream_events().await else { return };
+                        let Ok(stream) = c.stream_events().await else {
+                            return;
+                        };
                         let mut stream = Box::pin(stream);
                         // Печатать каждый процент — это триста строк «фиксация
                         // изменений» подряд, среди которых не видно ничего.
@@ -155,7 +166,9 @@ pub async fn run(args: MediaArgs) -> Result<()> {
                         let mut last_stage = usize::MAX;
                         let mut last_detail = String::new();
                         while let Some(ev) = stream.next().await {
-                            let ClientEvent::Unknown { kind, json } = ev else { continue };
+                            let ClientEvent::Unknown { kind, json } = ev else {
+                                continue;
+                            };
                             if kind != "media" {
                                 continue;
                             }
@@ -200,9 +213,14 @@ pub async fn run(args: MediaArgs) -> Result<()> {
                 "  основа:  {} (сборка {}, {})",
                 report.base_name, report.base_build, report.base_language
             );
-            println!("  драйверов: {}   средств: {}", report.drivers_added, report.tools_added);
+            println!(
+                "  драйверов: {}   средств: {}",
+                report.drivers_added, report.tools_added
+            );
             if report.unpacked {
-                println!("  образ пришлось распаковать и собрать заново (монтирование WIM недоступно)");
+                println!(
+                    "  образ пришлось распаковать и собрать заново (монтирование WIM недоступно)"
+                );
             }
             for w in &report.warnings {
                 println!("  [!] {w}");

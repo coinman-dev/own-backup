@@ -93,7 +93,11 @@ pub struct BackupDiskArgs {
 /// in the inventory, and the only part of it that is a number.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn disk_number_of(device_id: &str) -> Option<u32> {
-    let tail: String = device_id.chars().rev().take_while(|c| c.is_ascii_digit()).collect();
+    let tail: String = device_id
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
     tail.chars().rev().collect::<String>().parse().ok()
 }
 
@@ -137,12 +141,20 @@ pub async fn run(args: BackupDiskArgs) -> own_backup_common::Result<()> {
     let msr = own_backup_common::gpt::GPT_TYPE_MSR;
     let mut chosen = Vec::new();
     if args.partitions.is_empty() {
-        chosen.extend(disk.partitions.iter().filter(|p| !p.volume_device.is_empty()));
+        chosen.extend(
+            disk.partitions
+                .iter()
+                .filter(|p| !p.volume_device.is_empty()),
+        );
     } else {
         for want in &args.partitions {
-            let p = disk.partitions.iter().find(|p| p.index == *want).ok_or_else(|| {
-                OwnBackupError::Config(format!("на диске {} нет раздела {want}", args.disk))
-            })?;
+            let p = disk
+                .partitions
+                .iter()
+                .find(|p| p.index == *want)
+                .ok_or_else(|| {
+                    OwnBackupError::Config(format!("на диске {} нет раздела {want}", args.disk))
+                })?;
             if p.volume_device.is_empty() {
                 if p.gpt_type_guid.eq_ignore_ascii_case(msr) {
                     println!(
@@ -190,12 +202,14 @@ pub async fn run(args: BackupDiskArgs) -> own_backup_common::Result<()> {
     // The engine's own rule, asked of the same GPT it will read.
     let msr_kept = own_backup_backup::gpt_reader::read_disk_layout(args.disk)?
         .copy_carries_windows(&kept, Some(disk));
-    let is_msr = |p: &&own_backup_common::disk::PartitionInfo| {
-        p.gpt_type_guid.eq_ignore_ascii_case(msr)
-    };
+    let is_msr =
+        |p: &&own_backup_common::disk::PartitionInfo| p.gpt_type_guid.eq_ignore_ascii_case(msr);
     if msr_kept {
         for p in disk.partitions.iter().filter(is_msr) {
-            println!("  #{:<2} Microsoft Reserved — только запись в таблице разделов", p.index);
+            println!(
+                "  #{:<2} Microsoft Reserved — только запись в таблице разделов",
+                p.index
+            );
         }
     }
     let left_out: Vec<_> = disk
@@ -217,8 +231,11 @@ pub async fn run(args: BackupDiskArgs) -> own_backup_common::Result<()> {
     }
 
     let exclusions = {
-        let mut p =
-            if args.exclude_defaults { own_backup_core::default_exclusions() } else { Vec::new() };
+        let mut p = if args.exclude_defaults {
+            own_backup_core::default_exclusions()
+        } else {
+            Vec::new()
+        };
         p.extend(args.exclude.iter().cloned());
         p
     };
@@ -270,10 +287,14 @@ pub async fn run(args: BackupDiskArgs) -> own_backup_common::Result<()> {
             // counter standing still, which reads as a hang unless it is named.
             let line = match p.backup_id.as_str() {
                 "prepare" => "  поиск исключаемых файлов…".to_string(),
-                "finalize" => "  завершение: сброс, отсоединение, удаление исключённых…".to_string(),
+                "finalize" => {
+                    "  завершение: сброс, отсоединение, удаление исключённых…".to_string()
+                }
                 _ => format!(
                     "  {:3}%  {} / {} блоков  ({:.1} МБ/с)",
-                    (p.blocks_done * 100).checked_div(p.blocks_total).unwrap_or(0),
+                    (p.blocks_done * 100)
+                        .checked_div(p.blocks_total)
+                        .unwrap_or(0),
                     p.blocks_done,
                     p.blocks_total,
                     p.speed_bps as f64 / 1_000_000.0

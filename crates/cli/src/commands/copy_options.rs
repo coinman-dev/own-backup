@@ -68,12 +68,17 @@ pub fn resolve_parent(
         ));
     }
 
-    let folder = output.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let folder = output
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
     let chains = own_backup_backup::chains::list_chains(folder, None)?;
     let newest = chains
         .iter()
         .filter(|c| {
-            c.images.iter().all(|i| i.container.eq_ignore_ascii_case(format.extension()))
+            c.images
+                .iter()
+                .all(|i| i.container.eq_ignore_ascii_case(format.extension()))
         })
         .max_by(|a, b| a.newest_created_at().cmp(b.newest_created_at()));
     let Some(chain) = newest else {
@@ -88,7 +93,10 @@ pub fn resolve_parent(
         _ => chain.images.first(),
     };
     let Some(image) = pick else {
-        println!("Цепочка рядом с {} пуста — пишем полную копию.", folder.display());
+        println!(
+            "Цепочка рядом с {} пуста — пишем полную копию.",
+            folder.display()
+        );
         return Ok((BackupType::Full, None));
     };
     println!(
@@ -150,7 +158,10 @@ mod tests {
         assert_eq!(backup_kind("inc").unwrap(), BackupType::Incremental);
         assert_eq!(backup_kind("incremental").unwrap(), BackupType::Incremental);
         assert_eq!(backup_kind("diff").unwrap(), BackupType::Differential);
-        assert_eq!(backup_kind("differential").unwrap(), BackupType::Differential);
+        assert_eq!(
+            backup_kind("differential").unwrap(),
+            BackupType::Differential
+        );
         assert!(backup_kind("weekly").is_err());
     }
 

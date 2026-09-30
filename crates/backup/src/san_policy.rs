@@ -89,8 +89,13 @@ mod imp {
                 return Self { restore: None };
             }
             if write_dword_hklm(KEY, VALUE, OFFLINE_ALL) {
-                debug!(?previous, "new-disk policy set to OfflineAll for the VHDX attach");
-                Self { restore: Some(previous) }
+                debug!(
+                    ?previous,
+                    "new-disk policy set to OfflineAll for the VHDX attach"
+                );
+                Self {
+                    restore: Some(previous),
+                }
             } else {
                 warn!(
                     "could not set the new-disk (SAN) policy to OfflineAll; \

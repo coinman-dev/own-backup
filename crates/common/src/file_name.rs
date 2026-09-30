@@ -64,7 +64,10 @@ mod tests {
     /// Everything a file name may legally hold is kept as typed.
     #[test]
     fn legal_characters_survive() {
-        assert_eq!(safe_file_stem("Копия-1.диск (важное)", "backup"), "Копия-1.диск_(важное)");
+        assert_eq!(
+            safe_file_stem("Копия-1.диск (важное)", "backup"),
+            "Копия-1.диск_(важное)"
+        );
         assert_eq!(safe_file_stem("2026-08-22", "backup"), "2026-08-22");
     }
 

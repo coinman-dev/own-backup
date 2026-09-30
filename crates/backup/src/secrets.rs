@@ -59,7 +59,7 @@ mod imp {
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{LocalFree, HLOCAL};
     use windows::Win32::Security::Cryptography::{
-        CryptProtectData, CryptUnprotectData, CRYPT_INTEGER_BLOB, CRYPTPROTECT_LOCAL_MACHINE,
+        CryptProtectData, CryptUnprotectData, CRYPTPROTECT_LOCAL_MACHINE, CRYPT_INTEGER_BLOB,
     };
 
     fn blob(data: &[u8]) -> CRYPT_INTEGER_BLOB {
@@ -167,7 +167,9 @@ mod keyfile {
 
     impl KeyfileSecretStore {
         pub fn new(key_path: impl Into<PathBuf>) -> Self {
-            Self { key_path: key_path.into() }
+            Self {
+                key_path: key_path.into(),
+            }
         }
 
         /// Read the 32-byte key; when `create`, generate and persist it (0600)
@@ -176,10 +178,9 @@ mod keyfile {
         fn key(&self, create: bool) -> Result<Zeroizing<[u8; 32]>> {
             match std::fs::read(&self.key_path) {
                 Ok(bytes) => {
-                    let arr: [u8; 32] = bytes
-                        .as_slice()
-                        .try_into()
-                        .map_err(|_| err(format!("key file {} is corrupt", self.key_path.display())))?;
+                    let arr: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+                        err(format!("key file {} is corrupt", self.key_path.display()))
+                    })?;
                     Ok(Zeroizing::new(arr))
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound && create => {

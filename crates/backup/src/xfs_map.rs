@@ -48,7 +48,10 @@ pub struct XfsUsedMap {
 
 impl UsedSectorMap for XfsUsedMap {
     fn is_block_used(&self, block_number: u64) -> bool {
-        self.block_used.get(block_number as usize).copied().unwrap_or(false)
+        self.block_used
+            .get(block_number as usize)
+            .copied()
+            .unwrap_or(false)
     }
     fn used_block_count(&self) -> u64 {
         self.used_count
@@ -210,7 +213,9 @@ pub fn build_xfs_used_map(vol: &mut dyn RawVolume, block_size: u32) -> Result<Xf
         return Err(bad(format!("implausible sector size {sectsize}")));
     }
     if agblocks == 0 || agcount == 0 || agcount > MAX_AGS {
-        return Err(bad(format!("implausible geometry: agblocks={agblocks} agcount={agcount}")));
+        return Err(bad(format!(
+            "implausible geometry: agblocks={agblocks} agcount={agcount}"
+        )));
     }
     if dblocks == 0 || dblocks > agblocks * agcount {
         return Err(bad(format!("implausible dblocks {dblocks}")));
@@ -224,7 +229,8 @@ pub fn build_xfs_used_map(vol: &mut dyn RawVolume, block_size: u32) -> Result<Xf
     if logstart == 0 {
         return Err(bad(tr!("xfs_map.external_log")));
     }
-    let log_off = ((logstart >> agblklog) * agblocks + (logstart & ((1u64 << agblklog) - 1))) * fs_block;
+    let log_off =
+        ((logstart >> agblklog) * agblocks + (logstart & ((1u64 << agblklog) - 1))) * fs_block;
     if !crate::xfs_exclusions::xfs_log_is_clean_at(vol, log_off, logblocks * fs_block, sectsize)? {
         return Err(bad(tr!("xfs_map.log_dirty")));
     }
@@ -270,7 +276,14 @@ pub fn build_xfs_used_map(vol: &mut dyn RawVolume, block_size: u32) -> Result<Xf
         }
 
         free_extents.clear();
-        walk_bnobt(vol, fs_block, ag_start_block, bno_root, agf_length, &mut free_extents)?;
+        walk_bnobt(
+            vol,
+            fs_block,
+            ag_start_block,
+            bno_root,
+            agf_length,
+            &mut free_extents,
+        )?;
 
         // The tree must account for exactly the AGF's free block count — our
         // strongest guard against a misparse dropping used data.
@@ -282,7 +295,12 @@ pub fn build_xfs_used_map(vol: &mut dyn RawVolume, block_size: u32) -> Result<Xf
         }
         for &(start, count) in &free_extents {
             let start_b = start * fs_block;
-            unmark_fully_free(&mut used, block_size as u64, start_b, start_b + count * fs_block);
+            unmark_fully_free(
+                &mut used,
+                block_size as u64,
+                start_b,
+                start_b + count * fs_block,
+            );
         }
     }
 
@@ -344,10 +362,10 @@ mod tests {
         put_u64(&mut img, 0x08, 64); // dblocks
         put_u32(&mut img, 0x54, 64); // agblocks
         put_u32(&mut img, 0x58, 1); // agcount
-        // An internal log at blocks 50..54, left all zeros — which is what a
-        // freshly made, never-mounted log looks like, and what the "is the log
-        // clean" check has to accept. logstart = 0 would mean an EXTERNAL log
-        // device, i.e. one this code cannot inspect and must refuse.
+                                    // An internal log at blocks 50..54, left all zeros — which is what a
+                                    // freshly made, never-mounted log looks like, and what the "is the log
+                                    // clean" check has to accept. logstart = 0 would mean an EXTERNAL log
+                                    // device, i.e. one this code cannot inspect and must refuse.
         put_u64(&mut img, 0x30, 50); // logstart (fsblock: ag 0, block 50)
         put_u32(&mut img, 0x60, 4); // logblocks
         img[0x7C] = 6; // agblklog — log2(agblocks); without it fsblock→AG is wrong

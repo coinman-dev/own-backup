@@ -2,6 +2,7 @@
 // own_backup_common::tr! — see common/src/lang.rs.
 rust_i18n::i18n!("locales", fallback = "ru");
 
+pub mod aligned_volume;
 pub mod bitlocker;
 pub mod block_reader;
 pub mod block_source;
@@ -13,33 +14,32 @@ pub mod consolidate;
 pub mod decrypt;
 pub mod dest_folder;
 pub mod efivars;
-pub mod exclusions;
 pub mod esp_fallback;
 pub mod esp_scan;
+pub mod exclusions;
 pub mod ext_exclusions;
 pub mod ext_map;
 pub mod fat_exclusions;
-pub mod aligned_volume;
 pub mod fat_map;
 pub mod fs_uuid;
 pub mod gpt_reader;
 pub mod gpt_writer;
+pub mod iscsi;
 pub mod luks;
 pub mod mbr_writer;
 pub mod ntfs_map;
 pub mod ntfs_scan;
-pub mod iscsi;
 pub mod overlay;
 pub mod qcow2;
 pub mod raw_copy;
-pub mod restore_map;
 pub mod registry_win;
+pub mod restore_map;
 pub mod san_policy;
 /// Шифрование копий: ключи задания, ключ цепочки, шифр кластеров (`.ai/PLAN.md` §7).
 pub mod seal;
 pub mod secrets;
-pub mod source_identity;
 pub mod sidecar;
+pub mod source_identity;
 pub mod table_merge;
 pub mod table_writer;
 pub mod used_sectors;
@@ -55,14 +55,15 @@ pub mod xfs_stage2;
 #[cfg(all(test, target_os = "linux"))]
 pub mod exclusion_corpus;
 
-pub mod vhdx_format;
 #[cfg(target_os = "linux")]
 pub mod engine_linux;
 #[cfg(target_os = "linux")]
 pub mod linux_device;
 #[cfg(target_os = "linux")]
 pub mod nbd_linux;
+pub mod vhdx_format;
 
+pub mod attach_win;
 #[cfg(target_os = "windows")]
 #[cfg(target_os = "windows")]
 #[cfg(target_os = "windows")]
@@ -81,12 +82,21 @@ pub mod esp_fallback_win;
 pub mod esp_scan_win;
 #[cfg(target_os = "windows")]
 pub mod exclusions_win;
+pub mod fat_writer;
 #[cfg(target_os = "windows")]
 pub mod file_restore_win;
 #[cfg(target_os = "windows")]
 pub mod format_win;
+pub mod iscsi_win;
+pub mod iso9660;
 #[cfg(target_os = "windows")]
 pub mod letters_win;
+#[cfg(target_os = "windows")]
+pub mod media_build_win;
+pub mod media_layout;
+pub mod media_preflight_win;
+#[cfg(target_os = "windows")]
+pub mod media_tools_win;
 #[cfg(target_os = "windows")]
 pub mod obk_removal_win;
 #[cfg(target_os = "windows")]
@@ -103,32 +113,22 @@ pub mod true_removal_win;
 pub mod used_sectors_win;
 #[cfg(target_os = "windows")]
 pub mod vhdx;
-pub mod fat_writer;
-pub mod attach_win;
-pub mod iscsi_win;
-pub mod iso9660;
-pub mod media_layout;
-pub mod media_preflight_win;
-#[cfg(target_os = "windows")]
-pub mod media_build_win;
-#[cfg(target_os = "windows")]
-pub mod media_tools_win;
 // Mostly Windows-only, but its INF parsing is plain text and its tests run
 // everywhere — the module is compiled on all platforms, the process calls are
 // gated inside it.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub mod media_guest_drivers_win;
 pub mod ole_compound;
-pub mod volume_window;
-pub mod wim_info;
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-pub mod winre_find;
 #[cfg(target_os = "windows")]
 pub mod volume_win;
+pub mod volume_window;
+pub mod wim_info;
 #[cfg(target_os = "windows")]
 pub mod win_device;
 #[cfg(target_os = "windows")]
 pub mod windows_unlock_win;
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub mod winre_find;
 
 pub use block_reader::{BlockReader, MockBlockReader};
 pub use chains::{delete_chain, list_job_chains, plan_retention, Chain, RetentionRules};

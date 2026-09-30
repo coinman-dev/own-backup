@@ -109,7 +109,10 @@ mod tests {
         std::env::set_var(MEDIA_ENV, "0");
         assert!(!detect());
         std::env::set_var(MEDIA_ENV, "  ");
-        assert!(!detect(), "blank must fall through to detection, not to true");
+        assert!(
+            !detect(),
+            "blank must fall through to detection, not to true"
+        );
         std::env::remove_var(MEDIA_ENV);
     }
 }

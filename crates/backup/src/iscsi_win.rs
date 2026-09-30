@@ -33,10 +33,10 @@ use windows::core::PCWSTR;
 use windows::Win32::Storage::IscsiDisc::{
     AddIScsiSendTargetPortalW, AddIScsiStaticTargetW, GetDevicesForIScsiSessionW,
     GetIScsiSessionListW, LoginIScsiTargetW, LogoutIScsiTarget, RemoveIScsiSendTargetPortalW,
-    RemoveIScsiStaticTargetW, ReportIScsiSendTargetPortalsW, ISCSI_CONNECTION_INFOW,
-    ISCSI_DEVICE_ON_SESSIONW, ISCSI_SESSION_INFOW, ISCSI_TARGET_PORTALW,
-    ISCSI_TARGET_PORTAL_GROUPW, ISCSI_TARGET_PORTAL_INFOW, ISCSI_UNIQUE_SESSION_ID,
-    ISCSI_LOGIN_OPTIONS, ISCSI_CHAP_AUTH_TYPE,
+    RemoveIScsiStaticTargetW, ReportIScsiSendTargetPortalsW, ISCSI_CHAP_AUTH_TYPE,
+    ISCSI_CONNECTION_INFOW, ISCSI_DEVICE_ON_SESSIONW, ISCSI_LOGIN_OPTIONS, ISCSI_SESSION_INFOW,
+    ISCSI_TARGET_PORTALW, ISCSI_TARGET_PORTAL_GROUPW, ISCSI_TARGET_PORTAL_INFOW,
+    ISCSI_UNIQUE_SESSION_ID,
 };
 
 use crate::iscsi::initiator::{disk_candidates, SessionDevice};
@@ -220,11 +220,9 @@ trait Tap {
 impl Tap for OwnBackupError {
     fn tap(self, target: &str) -> Self {
         match self {
-            OwnBackupError::Device(m) if !target.is_empty() => {
-                OwnBackupError::Device(
-                    tr!("iscsi_win.with_target", message = m, target = target).into_owned(),
-                )
-            }
+            OwnBackupError::Device(m) if !target.is_empty() => OwnBackupError::Device(
+                tr!("iscsi_win.with_target", message = m, target = target).into_owned(),
+            ),
             other => other,
         }
     }
@@ -453,22 +451,42 @@ pub fn status() -> InitiatorStatus {
     // start it on demand — but it has to exist and be allowed to start.
     let ready = driver_file && service_present && !disabled;
     let message = if !driver_file {
-        tr!("iscsi_win.driver_missing", path = system32.join("drivers").display()).into_owned()
+        tr!(
+            "iscsi_win.driver_missing",
+            path = system32.join("drivers").display()
+        )
+        .into_owned()
     } else if !service_present {
         if media_mode {
-            tr!("iscsi_win.service_missing_media", service = INITIATOR_SERVICE).into_owned()
+            tr!(
+                "iscsi_win.service_missing_media",
+                service = INITIATOR_SERVICE
+            )
+            .into_owned()
         } else {
             tr!("iscsi_win.service_missing", service = INITIATOR_SERVICE).into_owned()
         }
     } else if disabled {
-        tr!("iscsi_win.service_disabled_by_policy", service = INITIATOR_SERVICE).into_owned()
+        tr!(
+            "iscsi_win.service_disabled_by_policy",
+            service = INITIATOR_SERVICE
+        )
+        .into_owned()
     } else if running {
         tr!("iscsi_win.ready_running", service = INITIATOR_SERVICE).into_owned()
     } else {
         tr!("iscsi_win.ready_on_demand", service = INITIATOR_SERVICE).into_owned()
     };
 
-    InitiatorStatus { ready, driver_file, service_present, running, disabled, media_mode, message }
+    InitiatorStatus {
+        ready,
+        driver_file,
+        service_present,
+        running,
+        disabled,
+        media_mode,
+        message,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -491,8 +509,15 @@ pub struct AttachedTarget {
 }
 
 fn portal_for(address: &str, port: u16) -> ISCSI_TARGET_PORTALW {
-    let mut portal = ISCSI_TARGET_PORTALW { Socket: port, ..Default::default() };
-    for (i, c) in address.encode_utf16().take(portal.Address.len() - 1).enumerate() {
+    let mut portal = ISCSI_TARGET_PORTALW {
+        Socket: port,
+        ..Default::default()
+    };
+    for (i, c) in address
+        .encode_utf16()
+        .take(portal.Address.len() - 1)
+        .enumerate()
+    {
         portal.Address[i] = c;
     }
     portal
@@ -823,13 +848,20 @@ fn logout_session(session: &mut ISCSI_UNIQUE_SESSION_ID, target: &str) -> bool {
         match code {
             0 => {
                 if attempts > 1 {
-                    info!(target, attempts, waited_ms, "iSCSI: logout went through once the device was let go");
+                    info!(
+                        target,
+                        attempts,
+                        waited_ms,
+                        "iSCSI: logout went through once the device was let go"
+                    );
                 }
                 return true;
             }
             // Gone already — which is all a logout is for.
             ISDSC_INVALID_SESSION_ID => return true,
-            ISDSC_DEVICE_BUSY_ON_SESSION | ISDSC_SESSION_BUSY if start.elapsed() < LOGOUT_PATIENCE => {
+            ISDSC_DEVICE_BUSY_ON_SESSION | ISDSC_SESSION_BUSY
+                if start.elapsed() < LOGOUT_PATIENCE =>
+            {
                 std::thread::sleep(Duration::from_millis((100 * attempts).min(1000)));
             }
             _ => {
@@ -879,7 +911,10 @@ fn held_sessions() -> Result<Vec<HeldSession>> {
             // A session can appear between the two calls: ask again.
             ERROR_INSUFFICIENT_BUFFER => buf = vec![0u64; (size as usize).div_ceil(8).max(1)],
             other => {
-                return Err(dev(format!("iSCSI: GetIScsiSessionList failed with {}", describe(other))))
+                return Err(dev(format!(
+                    "iSCSI: GetIScsiSessionList failed with {}",
+                    describe(other)
+                )))
             }
         }
     }
@@ -893,13 +928,14 @@ fn held_sessions() -> Result<Vec<HeldSession>> {
     };
     let mut out = Vec::with_capacity(infos.len());
     for info in infos {
-        let connections: &[ISCSI_CONNECTION_INFOW] =
-            if info.Connections.is_null() || info.ConnectionCount == 0 {
-                &[]
-            } else {
-                // SAFETY: as above — `ConnectionCount` records inside `buf`.
-                unsafe { std::slice::from_raw_parts(info.Connections, info.ConnectionCount as usize) }
-            };
+        let connections: &[ISCSI_CONNECTION_INFOW] = if info.Connections.is_null()
+            || info.ConnectionCount == 0
+        {
+            &[]
+        } else {
+            // SAFETY: as above — `ConnectionCount` records inside `buf`.
+            unsafe { std::slice::from_raw_parts(info.Connections, info.ConnectionCount as usize) }
+        };
         out.push(HeldSession {
             id: info.SessionId,
             // SAFETY: pointers into `buf`, NUL-terminated by the initiator.
@@ -951,7 +987,10 @@ fn clear_stale_sessions(target: &str, ours: (&str, u16), image_size: u64) -> Res
             return Ok(());
         }
     };
-    for mut s in sessions.into_iter().filter(|s| s.target.eq_ignore_ascii_case(target)) {
+    for mut s in sessions
+        .into_iter()
+        .filter(|s| s.target.eq_ignore_ascii_case(target))
+    {
         if target_answers(&s.portals, ours) {
             return Err(dev(tr!("iscsi_win.image_already_attached")).tap(target));
         }
@@ -971,7 +1010,10 @@ fn clear_stale_sessions(target: &str, ours: (&str, u16), image_size: u64) -> Res
                 return Err(dev(tr!("iscsi_win.stale_session_busy")).tap(target));
             }
             for disk in &disks {
-                warn!(target, disk, "iSCSI: the left-over session's disk is still held — letting go of it");
+                warn!(
+                    target,
+                    disk, "iSCSI: the left-over session's disk is still held — letting go of it"
+                );
                 crate::attach_win::let_go_of_disk(*disk, &format!(r"\\.\PhysicalDrive{disk}"));
             }
             if !logout_session(&mut s.id, target) {
@@ -1013,7 +1055,11 @@ fn clear_dead_portals() -> usize {
     }
     let mut removed = 0;
     for p in portals.iter().take(count as usize) {
-        let end = p.Address.iter().position(|&c| c == 0).unwrap_or(p.Address.len());
+        let end = p
+            .Address
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(p.Address.len());
         let address = String::from_utf16_lossy(&p.Address[..end]);
         let port = p.Socket;
         if address != "127.0.0.1" || port < DYNAMIC_PORTS_START {
@@ -1034,7 +1080,10 @@ fn clear_dead_portals() -> usize {
         }
     }
     if removed > 0 {
-        info!(removed, "iSCSI: discovery portals of earlier runs that nothing serves — removed");
+        info!(
+            removed,
+            "iSCSI: discovery portals of earlier runs that nothing serves — removed"
+        );
     }
     removed
 }
@@ -1061,7 +1110,9 @@ pub fn clear_orphaned_sessions() -> usize {
     let prefix = crate::iscsi::IQN_PREFIX.to_ascii_lowercase();
     let mut cleared = 0;
     for mut s in sessions {
-        if !s.target.to_ascii_lowercase().starts_with(&prefix) || target_answers(&s.portals, ("", 0)) {
+        if !s.target.to_ascii_lowercase().starts_with(&prefix)
+            || target_answers(&s.portals, ("", 0))
+        {
             continue;
         }
         warn!(target = %s.target, portals = ?s.portals, "iSCSI: orphaned session of an earlier run — logging it out");
@@ -1082,12 +1133,18 @@ mod tests {
     #[test]
     fn the_initiators_own_status_numbers_are_translated() {
         let no_portal = describe(0xEFFF_003C);
-        assert!(no_portal.contains("ISDSC_NO_PORTAL_SPECIFIED"), "{no_portal}");
+        assert!(
+            no_portal.contains("ISDSC_NO_PORTAL_SPECIFIED"),
+            "{no_portal}"
+        );
         assert!(no_portal.contains("no target portal"), "{no_portal}");
         assert!(describe(0xEFFF_0003).contains("ISDSC_CONNECTION_FAILED"));
         assert!(describe(0x0000_0057).contains("недопустимый параметр"));
         let unknown = describe(0xEFFF_7777);
-        assert!(unknown.contains("0xefff7777") && unknown.contains("iscsierr.h"), "{unknown}");
+        assert!(
+            unknown.contains("0xefff7777") && unknown.contains("iscsierr.h"),
+            "{unknown}"
+        );
     }
 
     /// Zero is a real initiator port number, not "any" — the mistake that made
@@ -1101,8 +1158,9 @@ mod tests {
     fn a_portal_carries_the_address_it_was_given() {
         let p = portal_for("127.0.0.1", 3260);
         assert_eq!(p.Socket, 3260);
-        let text: String =
-            String::from_utf16_lossy(&p.Address).trim_end_matches('\0').to_string();
+        let text: String = String::from_utf16_lossy(&p.Address)
+            .trim_end_matches('\0')
+            .to_string();
         assert_eq!(text, "127.0.0.1");
     }
 }

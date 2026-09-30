@@ -27,7 +27,9 @@ use crate::traits::{Snapshot, SnapshotProvider};
 const PROVIDER: &str = "linux";
 
 /// Filesystems whose driver implements the freeze ioctl (`FIFREEZE`).
-const FREEZABLE: &[&str] = &["ext2", "ext3", "ext4", "xfs", "btrfs", "reiserfs", "jfs", "f2fs"];
+const FREEZABLE: &[&str] = &[
+    "ext2", "ext3", "ext4", "xfs", "btrfs", "reiserfs", "jfs", "f2fs",
+];
 
 /// Snapshot provider using LVM snapshots / `fsfreeze`.
 pub struct LinuxSnapshotProvider;
@@ -64,7 +66,10 @@ impl SnapshotProvider for LinuxSnapshotProvider {
             Err(e) => warn!(volume, error = %e, "fsfreeze failed; crash-consistent copy"),
         }
         // 3) Crash-consistent copy of the live device.
-        info!(volume, "no snapshot facility available — crash-consistent copy");
+        info!(
+            volume,
+            "no snapshot facility available — crash-consistent copy"
+        );
         Ok(none_snapshot(volume))
     }
 
@@ -145,7 +150,11 @@ async fn try_lvm_snapshot(volume: &str) -> Result<Option<Snapshot>> {
 
     let snap = format!("obk-snap-{}", &Uuid::new_v4().simple().to_string()[..12]);
     let args = lvcreate_args(&vg, &lv, &snap);
-    run("lvcreate", &args.iter().map(String::as_str).collect::<Vec<_>>()).await?;
+    run(
+        "lvcreate",
+        &args.iter().map(String::as_str).collect::<Vec<_>>(),
+    )
+    .await?;
 
     let dev = snapshot_device_path(&vg, &snap);
     info!(origin = %format!("{vg}/{lv}"), snapshot = %dev, "LVM snapshot created");
@@ -292,7 +301,10 @@ mod tests {
                 "vg0/data"
             ]
         );
-        assert_eq!(snapshot_device_path("vg0", "obk-snap-abc"), "/dev/vg0/obk-snap-abc");
+        assert_eq!(
+            snapshot_device_path("vg0", "obk-snap-abc"),
+            "/dev/vg0/obk-snap-abc"
+        );
     }
 
     #[test]

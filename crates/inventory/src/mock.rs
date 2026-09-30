@@ -143,10 +143,7 @@ mod tests {
     #[tokio::test]
     async fn get_disk_details_found() {
         let inv = MockInventory::new();
-        let disk = inv
-            .get_disk_details(r"\\.\PhysicalDrive0")
-            .await
-            .unwrap();
+        let disk = inv.get_disk_details(r"\\.\PhysicalDrive0").await.unwrap();
 
         assert_eq!(disk.model, "Samsung SSD 970 EVO Plus 500GB");
         assert_eq!(disk.size_bytes, 500_107_862_016);

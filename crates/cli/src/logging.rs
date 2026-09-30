@@ -65,7 +65,9 @@ fn console_takes_ansi() -> bool {
     };
     // SAFETY: plain console-mode query and set on our own standard handle.
     unsafe {
-        let Ok(h) = GetStdHandle(STD_ERROR_HANDLE) else { return false };
+        let Ok(h) = GetStdHandle(STD_ERROR_HANDLE) else {
+            return false;
+        };
         let mut mode = CONSOLE_MODE(0);
         if GetConsoleMode(h, &mut mode).is_err() {
             return false; // redirected to a file or a pipe: no escapes there
@@ -85,8 +87,8 @@ fn console_takes_ansi() -> bool {
 /// Install the two-sink subscriber and record startup facts. Returns the log
 /// file path when one could be opened.
 pub fn init() -> Option<PathBuf> {
-    let console_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| "warn".into());
+    let console_filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into());
     let ansi = console_takes_ansi();
 
     let log_path = match open_cli_log() {
@@ -156,7 +158,15 @@ mod tests {
     #[test]
     fn password_values_are_masked() {
         // Direct check of the masking logic on a synthetic argv.
-        let args = ["own-backup-cli", "backup", "C:", "--password", "s3cret", "-o", "x.qcow2"];
+        let args = [
+            "own-backup-cli",
+            "backup",
+            "C:",
+            "--password",
+            "s3cret",
+            "-o",
+            "x.qcow2",
+        ];
         let mut out: Vec<String> = Vec::new();
         let mut mask_next = false;
         for arg in args {

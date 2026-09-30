@@ -71,7 +71,10 @@ impl Busy {
         match self.slot.clone().try_acquire_owned() {
             Ok(permit) => {
                 *self.doing.lock().unwrap() = Some(doing);
-                Ok(Reservation { permit: Some(permit), busy: self.clone() })
+                Ok(Reservation {
+                    permit: Some(permit),
+                    busy: self.clone(),
+                })
             }
             Err(_) => Err(self.current().unwrap_or_else(|| Doing {
                 what: tr!("busy.another_operation").into_owned(),
@@ -92,7 +95,10 @@ impl Busy {
             .await
             .expect("the busy slot is never closed");
         *self.doing.lock().unwrap() = Some(doing);
-        Reservation { permit: Some(permit), busy: self.clone() }
+        Reservation {
+            permit: Some(permit),
+            busy: self.clone(),
+        }
     }
 
     /// What is running, if anything.
@@ -135,10 +141,7 @@ pub struct Reservation {
 impl Reservation {
     /// The cancel token of this run, to hand to the engine's callbacks.
     pub fn cancel(&self) -> CancelToken {
-        self.busy
-            .current()
-            .map(|d| d.cancel)
-            .unwrap_or_default()
+        self.busy.current().map(|d| d.cancel).unwrap_or_default()
     }
 }
 
@@ -154,13 +157,21 @@ impl Drop for Reservation {
 impl Doing {
     /// A run of `what` on `which`, with a fresh cancel token.
     pub fn new(what: impl Into<String>, which: impl Into<String>) -> Self {
-        Self { what: what.into(), which: which.into(), cancel: CancelToken::new(uuid::Uuid::new_v4()) }
+        Self {
+            what: what.into(),
+            which: which.into(),
+            cancel: CancelToken::new(uuid::Uuid::new_v4()),
+        }
     }
 
     /// The same, but addressed by an id the caller already has — a restore plan
     /// is cancelled by its plan id, and that is what the window knows.
     pub fn with_id(what: impl Into<String>, which: impl Into<String>, id: uuid::Uuid) -> Self {
-        Self { what: what.into(), which: which.into(), cancel: CancelToken::new(id) }
+        Self {
+            what: what.into(),
+            which: which.into(),
+            cancel: CancelToken::new(id),
+        }
     }
 
     /// The sentence a second caller is shown.
@@ -188,13 +199,18 @@ mod tests {
     #[tokio::test]
     async fn only_one_operation_can_hold_the_machine() {
         let busy = Busy::new();
-        let first = busy.reserve(Doing::new("восстановление", "plan-1")).expect("free");
+        let first = busy
+            .reserve(Doing::new("восстановление", "plan-1"))
+            .expect("free");
         let second = busy.reserve(Doing::new("восстановление", "plan-2"));
         let refused = second.expect_err("the second must be refused");
         assert_eq!(refused.which, "plan-1", "the refusal names who has it");
 
         drop(first);
-        assert!(busy.reserve(Doing::new("проверка", "image")).is_ok(), "released by Drop");
+        assert!(
+            busy.reserve(Doing::new("проверка", "image")).is_ok(),
+            "released by Drop"
+        );
     }
 
     /// The ending that used to leave the service stuck: the task panics, the
@@ -204,11 +220,16 @@ mod tests {
         let busy = Busy::new();
         let held = busy.clone();
         let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = held.reserve(Doing::new("восстановление", "plan-1")).unwrap();
+            let _guard = held
+                .reserve(Doing::new("восстановление", "plan-1"))
+                .unwrap();
             panic!("the engine fell over");
         }));
         assert!(panicked.is_err());
-        assert!(busy.current().is_none(), "nothing should still be marked as running");
+        assert!(
+            busy.current().is_none(),
+            "nothing should still be marked as running"
+        );
         assert!(busy.reserve(Doing::new("копирование", "job-1")).is_ok());
     }
 
@@ -227,13 +248,20 @@ mod tests {
                     // The reservation is RETURNED, not dropped here: a guard
                     // released at the end of the attempt would let the next
                     // thread in and the test would prove nothing.
-                    busy.reserve(Doing::new("восстановление", format!("plan-{i}"))).ok()
+                    busy.reserve(Doing::new("восстановление", format!("plan-{i}")))
+                        .ok()
                 })
             })
             .collect();
-        let held: Vec<_> =
-            attempts.into_iter().filter_map(|h| h.join().unwrap()).collect();
-        assert_eq!(held.len(), 1, "exactly one of eight simultaneous requests may start");
+        let held: Vec<_> = attempts
+            .into_iter()
+            .filter_map(|h| h.join().unwrap())
+            .collect();
+        assert_eq!(
+            held.len(),
+            1,
+            "exactly one of eight simultaneous requests may start"
+        );
     }
 
     /// Cancel is addressed. A stop aimed at a run that has already ended must
@@ -243,13 +271,23 @@ mod tests {
     async fn a_cancel_aimed_at_a_finished_run_does_not_hit_the_next_one() {
         let busy = Busy::new();
         let first_id = uuid::Uuid::new_v4();
-        let first = busy.reserve(Doing::with_id("восстановление", "plan-1", first_id)).unwrap();
+        let first = busy
+            .reserve(Doing::with_id("восстановление", "plan-1", first_id))
+            .unwrap();
         drop(first);
 
         let second_id = uuid::Uuid::new_v4();
-        let second = busy.reserve(Doing::with_id("восстановление", "plan-2", second_id)).unwrap();
-        assert!(!busy.cancel_run(first_id), "the old id belongs to nothing now");
-        assert!(!second.cancel().is_cancelled(), "and it must not have touched this run");
+        let second = busy
+            .reserve(Doing::with_id("восстановление", "plan-2", second_id))
+            .unwrap();
+        assert!(
+            !busy.cancel_run(first_id),
+            "the old id belongs to nothing now"
+        );
+        assert!(
+            !second.cancel().is_cancelled(),
+            "and it must not have touched this run"
+        );
         assert!(busy.cancel_run(second_id));
         assert!(second.cancel().is_cancelled());
     }
@@ -258,10 +296,14 @@ mod tests {
     #[tokio::test]
     async fn a_waiting_caller_gets_the_machine_when_it_is_free() {
         let busy = Busy::new();
-        let held = busy.reserve(Doing::new("восстановление", "plan-1")).unwrap();
+        let held = busy
+            .reserve(Doing::new("восстановление", "plan-1"))
+            .unwrap();
         let waiting = {
             let busy = busy.clone();
-            tokio::spawn(async move { busy.acquire(Doing::new("копирование", "job-1")).await })
+            tokio::spawn(async move {
+                busy.acquire(Doing::new("копирование", "job-1")).await
+            })
         };
         // Still held, so the waiter cannot have got in.
         assert_eq!(busy.current().unwrap().which, "plan-1");

@@ -54,12 +54,36 @@ pub const PROGRAM_FILES: [&str; 4] = [
 /// a black window over a perfectly live page (found 2026-07-31, and it was our
 /// own DLL list that put it there).
 pub const SYSTEM_DLLS: [&str; 30] = [
-    "virtdisk.dll", "newdev.dll", "dwmapi.dll", "comctl32.dll", "shlwapi.dll",
-    "cfgmgr32.dll", "setupapi.dll", "crypt32.dll", "bcrypt.dll", "bcryptprimitives.dll",
-    "mf.dll", "mfplat.dll", "mfreadwrite.dll", "mfcore.dll", "mfsrcsnk.dll",
-    "mfperfhelper.dll", "evr.dll", "d3d11.dll", "d3d10_1.dll", "d3d10.dll",
-    "d3d9.dll", "dxgi.dll", "d2d1.dll", "dwrite.dll", "d3dcompiler_47.dll",
-    "windowscodecs.dll", "propsys.dll", "userenv.dll", "winhttp.dll", "usp10.dll",
+    "virtdisk.dll",
+    "newdev.dll",
+    "dwmapi.dll",
+    "comctl32.dll",
+    "shlwapi.dll",
+    "cfgmgr32.dll",
+    "setupapi.dll",
+    "crypt32.dll",
+    "bcrypt.dll",
+    "bcryptprimitives.dll",
+    "mf.dll",
+    "mfplat.dll",
+    "mfreadwrite.dll",
+    "mfcore.dll",
+    "mfsrcsnk.dll",
+    "mfperfhelper.dll",
+    "evr.dll",
+    "d3d11.dll",
+    "d3d10_1.dll",
+    "d3d10.dll",
+    "d3d9.dll",
+    "dxgi.dll",
+    "d2d1.dll",
+    "dwrite.dll",
+    "d3dcompiler_47.dll",
+    "windowscodecs.dll",
+    "propsys.dll",
+    "userenv.dll",
+    "winhttp.dll",
+    "usp10.dll",
 ];
 
 /// The user-mode half of Windows' own iSCSI initiator — how a backup image
@@ -177,15 +201,35 @@ pub const KEEP_LOCALES: [&str; 2] = ["ru.pak", "en-US.pak"];
 /// Avast network filter.
 pub const RESCUE_CLASSES: [(&str, &[&str], RescueRole); 5] = [
     // storage controllers — RAID, NVMe, SAS
-    ("{4d36e97b-e325-11ce-bfc1-08002be10318}", &["PCI"], RescueRole::DiskController),
+    (
+        "{4d36e97b-e325-11ce-bfc1-08002be10318}",
+        &["PCI"],
+        RescueRole::DiskController,
+    ),
     // IDE / AHCI controllers
-    ("{4d36e96a-e325-11ce-bfc1-08002be10318}", &["PCI"], RescueRole::DiskController),
+    (
+        "{4d36e96a-e325-11ce-bfc1-08002be10318}",
+        &["PCI"],
+        RescueRole::DiskController,
+    ),
     // the disks themselves, which can hang off either
-    ("{4d36e967-e325-11ce-bfc1-08002be10318}", &["SCSI", "USB"], RescueRole::Disk),
+    (
+        "{4d36e967-e325-11ce-bfc1-08002be10318}",
+        &["SCSI", "USB"],
+        RescueRole::Disk,
+    ),
     // network adapters: cards on PCI, dongles on USB
-    ("{4d36e972-e325-11ce-bfc1-08002be10318}", &["PCI", "USB"], RescueRole::NetworkAdapter),
+    (
+        "{4d36e972-e325-11ce-bfc1-08002be10318}",
+        &["PCI", "USB"],
+        RescueRole::NetworkAdapter,
+    ),
     // USB host controllers, which are PCI devices — not what is plugged in
-    ("{36fc9e60-c465-11cf-8056-444553540000}", &["PCI"], RescueRole::UsbController),
+    (
+        "{36fc9e60-c465-11cf-8056-444553540000}",
+        &["PCI"],
+        RescueRole::UsbController,
+    ),
 ];
 
 /// What a device of a rescue class is, for the interface to say why its driver
@@ -348,7 +392,10 @@ RendererCodeIntegrity,RemoveRedirectionBitmap,ForceSWDCompWhenDCompFallbackRequi
 
 /// The same, with Chromium's own log — the diagnostic line, not the default.
 pub fn browser_args_logging(log_path: &str) -> String {
-    format!("{} --enable-logging=file --v=1 --log-file={log_path}", browser_args())
+    format!(
+        "{} --enable-logging=file --v=1 --log-file={log_path}",
+        browser_args()
+    )
 }
 
 /// The whole `webview2-args.txt`: the live line, then the alternatives, because
@@ -478,7 +525,10 @@ pub fn startnet_cmd(app_dir: &str, start_desktop: bool) -> String {
 /// itself in WinPE, and why a desktop that cannot start must end in a console
 /// rather than in a return.
 pub fn winpeshl_ini(app_dir: &str) -> String {
-    lines(&["[LaunchApps]", &format!("\"{app_dir}\\own-backup-shell.exe\"")])
+    lines(&[
+        "[LaunchApps]",
+        &format!("\"{app_dir}\\own-backup-shell.exe\""),
+    ])
 }
 
 /// `no-interface.cmd` — то, что человек ВИДИТ, когда интерфейса не будет.
@@ -757,13 +807,18 @@ fn lines(rows: &[&str]) -> String {
 
 /// Should this locale file be kept?
 pub fn keep_locale(file_name: &str) -> bool {
-    KEEP_LOCALES.iter().any(|k| k.eq_ignore_ascii_case(file_name))
+    KEEP_LOCALES
+        .iter()
+        .any(|k| k.eq_ignore_ascii_case(file_name))
 }
 
 /// Files and folders to remove from a copied WebView2 runtime, given its root.
 /// Returned rather than deleted here so the caller can log and count.
 pub fn runtime_trim_list(runtime_root: &Path) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = RUNTIME_DROP_DIRS.iter().map(|d| runtime_root.join(d)).collect();
+    let mut out: Vec<PathBuf> = RUNTIME_DROP_DIRS
+        .iter()
+        .map(|d| runtime_root.join(d))
+        .collect();
     out.extend(RUNTIME_DROP_FILES.iter().map(|f| runtime_root.join(f)));
     let locales = runtime_root.join("Locales");
     if let Ok(rd) = std::fs::read_dir(&locales) {
@@ -815,7 +870,10 @@ mod tests {
     /// in the console's code page, not UTF-8.
     #[test]
     fn console_output_is_decoded_out_of_its_code_page() {
-        assert_eq!(console_text(b"Error: 2 Cannot find the file"), "Error: 2 Cannot find the file");
+        assert_eq!(
+            console_text(b"Error: 2 Cannot find the file"),
+            "Error: 2 Cannot find the file"
+        );
         // CP866 "Ошибка: 2" — invalid UTF-8, so the fallback decodes it.
         let oem = [0x8E, 0xE8, 0xA8, 0xA1, 0xAA, 0xA0, 0x3A, 0x20, 0x32];
         assert_eq!(console_text(&oem), "Ошибка: 2");
@@ -830,10 +888,19 @@ mod tests {
         // A chunk off the pipe: several redraws, the last one is the answer.
         let chunk = "[=====                      ]  20.0%\r[==========                 ]  40.0%\r";
         assert_eq!(dism_percent(chunk), Some(40));
-        assert_eq!(dism_percent("[==========================] 100.0%"), Some(100));
-        assert_eq!(dism_percent("\r[=                          ]   1.5%"), Some(1));
+        assert_eq!(
+            dism_percent("[==========================] 100.0%"),
+            Some(100)
+        );
+        assert_eq!(
+            dism_percent("\r[=                          ]   1.5%"),
+            Some(1)
+        );
         // Nothing to read: the bar keeps whatever it had.
-        assert_eq!(dism_percent("Deployment Image Servicing and Management tool"), None);
+        assert_eq!(
+            dism_percent("Deployment Image Servicing and Management tool"),
+            None
+        );
         assert_eq!(dism_percent("Version: 10.0.19041.1"), None);
         assert_eq!(dism_percent("100%"), Some(100));
         // A stray sign with no number in front of it is not a percentage.
@@ -845,12 +912,21 @@ mod tests {
     #[test]
     fn boot_starts_the_added_drivers() {
         let s = startnet_cmd(r"X:\Program Files\OwnBackup", true);
-        assert!(s.contains("drvload"), "added drivers must be loaded, not just stored");
-        assert!(s.contains(r"%SystemRoot%\INF\oem*.inf"), "every added package is offered");
+        assert!(
+            s.contains("drvload"),
+            "added drivers must be loaded, not just stored"
+        );
+        assert!(
+            s.contains(r"%SystemRoot%\INF\oem*.inf"),
+            "every added package is offered"
+        );
         // Order matters: the driver first, the mode picker (start-media) after.
         let drv = s.find("drvload").unwrap();
         let start = s.find("start-media.cmd").unwrap();
-        assert!(drv < start, "the display driver must be up before the mode is picked");
+        assert!(
+            drv < start,
+            "the display driver must be up before the mode is picked"
+        );
     }
 
     /// A passphrase that cannot be typed is a medium that cannot restore
@@ -859,8 +935,14 @@ mod tests {
     fn boot_sets_up_the_keyboard_layouts() {
         let s = startnet_cmd(r"X:\Program Files\OwnBackup", true);
         assert!(s.contains("SetKeyboardLayout"));
-        assert!(s.contains(INPUT_LOCALES), "both layouts must be set at boot");
-        assert!(INPUT_LOCALES.contains("0419"), "Russian has to be one of them");
+        assert!(
+            s.contains(INPUT_LOCALES),
+            "both layouts must be set at boot"
+        );
+        assert!(
+            INPUT_LOCALES.contains("0419"),
+            "Russian has to be one of them"
+        );
     }
 
     /// `cmd` reads a batch file in the console's OEM code page, and that page
@@ -871,8 +953,14 @@ mod tests {
         let app = r"X:\Program Files\OwnBackup";
         for (name, text) in [
             ("startnet.cmd", startnet_cmd(app, true)),
-            ("start-media.cmd", start_media_cmd(app, r"X:\Windows\Temp\OwnBackup")),
-            ("webview2-args.txt", webview2_args_file(r"X:\Windows\Temp\OwnBackup\webview2.log")),
+            (
+                "start-media.cmd",
+                start_media_cmd(app, r"X:\Windows\Temp\OwnBackup"),
+            ),
+            (
+                "webview2-args.txt",
+                webview2_args_file(r"X:\Windows\Temp\OwnBackup\webview2.log"),
+            ),
             ("no-interface.cmd", no_interface_cmd(app)),
         ] {
             if let Some(line) = text.lines().find(|l| !l.is_ascii()) {
@@ -887,7 +975,10 @@ mod tests {
     fn the_interface_is_launched_detached() {
         let s = start_media_cmd(r"X:\Program Files\OwnBackup", r"X:\Windows\Temp\OwnBackup");
         assert!(s.contains(r#"start "" "X:\Program Files\OwnBackup\own-backup-gui.exe""#));
-        assert!(s.contains("--run --media"), "the engine must know it is on the medium");
+        assert!(
+            s.contains("--run --media"),
+            "the engine must know it is on the medium"
+        );
         assert!(s.contains("OWN_BACKUP_MEDIA=1"));
     }
 
@@ -898,9 +989,16 @@ mod tests {
     fn the_desktop_starts_detached_and_after_the_work() {
         let app = r"X:\Program Files\OwnBackup";
         let s = startnet_cmd(app, true);
-        let work = s.find("start-media.cmd").expect("the interface still starts");
-        let desktop = s.find("own-backup-shell.exe").expect("the desktop starts too");
-        assert!(desktop > work, "the desktop comes after the work, not before it");
+        let work = s
+            .find("start-media.cmd")
+            .expect("the interface still starts");
+        let desktop = s
+            .find("own-backup-shell.exe")
+            .expect("the desktop starts too");
+        assert!(
+            desktop > work,
+            "the desktop comes after the work, not before it"
+        );
         assert!(
             s.contains(&format!("start \"\" \"{app}\\own-backup-shell.exe\"")),
             "detached, like everything else this medium launches"
@@ -924,17 +1022,34 @@ mod tests {
     #[test]
     fn a_letterless_medium_is_still_found_by_asking_the_volumes() {
         let s = start_media_cmd(r"X:\Program Files\OwnBackup", r"X:\Temp");
-        let by_letter =
-            s.lines().position(|l| l.contains("for %%D in (C D E")).expect("перебор букв");
-        let idx = s.lines().position(|l| l.contains("mountvol")).expect("запасной путь");
+        let by_letter = s
+            .lines()
+            .position(|l| l.contains("for %%D in (C D E"))
+            .expect("перебор букв");
+        let idx = s
+            .lines()
+            .position(|l| l.contains("mountvol"))
+            .expect("запасной путь");
         assert!(idx > by_letter, "сначала буквы, и только потом тома");
 
         let line = s.lines().nth(idx).unwrap();
-        assert!(line.starts_with("if not defined MEDIA"), "только когда буквы не дали: {line}");
-        assert!(line.contains(r"findstr /i /c:"), "поиск по строке, а не по образцу: {line}");
+        assert!(
+            line.starts_with("if not defined MEDIA"),
+            "только когда буквы не дали: {line}"
+        );
+        assert!(
+            line.contains(r"findstr /i /c:"),
+            "поиск по строке, а не по образцу: {line}"
+        );
         assert!(line.contains(r"\\?\Volume"), "ищем пути томов: {line}");
-        assert!(line.contains("if not exist Z:\\"), "занятую букву не трогаем: {line}");
-        assert!(line.contains("mountvol Z: /D"), "промах — букву вернуть: {line}");
+        assert!(
+            line.contains("if not exist Z:\\"),
+            "занятую букву не трогаем: {line}"
+        );
+        assert!(
+            line.contains("mountvol Z: /D"),
+            "промах — букву вернуть: {line}"
+        );
         assert!(
             line.contains(&format!("Z:\\{MEDIA_DIR}\\{MEDIA_MARKER}")),
             "узнаём носитель по его метке: {line}"
@@ -944,8 +1059,14 @@ mod tests {
     #[test]
     fn nothing_in_the_boot_script_waits_for_an_answer() {
         let s = start_media_cmd(r"X:\Program Files\OwnBackup", r"X:\Temp");
-        let pick = s.lines().find(|l| l.contains("display --min")).expect("the mode picker");
-        assert!(pick.contains("--no-confirm"), "nobody can answer it: {pick}");
+        let pick = s
+            .lines()
+            .find(|l| l.contains("display --min"))
+            .expect("the mode picker");
+        assert!(
+            pick.contains("--no-confirm"),
+            "nobody can answer it: {pick}"
+        );
     }
 
     /// The screen's own driver scales to 200 % on a large monitor, which is
@@ -954,7 +1075,10 @@ mod tests {
     #[test]
     fn the_boot_script_caps_how_large_everything_is_drawn() {
         let s = start_media_cmd(r"X:\Program Files\OwnBackup", r"X:\Temp");
-        let pick = s.lines().find(|l| l.contains("display --min")).expect("the mode picker");
+        let pick = s
+            .lines()
+            .find(|l| l.contains("display --min"))
+            .expect("the mode picker");
         assert!(pick.contains("--max-scale 150"), "{pick}");
     }
 
@@ -969,9 +1093,14 @@ mod tests {
     fn asking_for_the_interface_alone_starts_no_second_engine() {
         let s = start_media_cmd(r"X:\Program Files\OwnBackup", r"X:\Temp");
         let guard = s.find("goto :interface").expect("the gui-only path");
-        let engine = s.find("own-backup-service.exe").expect("the engine still starts");
+        let engine = s
+            .find("own-backup-service.exe")
+            .expect("the engine still starts");
         let label = s.find("\r\n:interface").expect("and is jumped over");
-        assert!(guard < engine && engine < label, "the jump has to clear the engine");
+        assert!(
+            guard < engine && engine < label,
+            "the jump has to clear the engine"
+        );
 
         // And the boot-time setup below it is not repeated either: taking the
         // MiniNT key away again under a running system is not a no-op.
@@ -993,8 +1122,15 @@ mod tests {
 
         // The medium where our desktop IS the shell.
         let shell_medium = format!("{}{}", startnet_cmd(app, false), winpeshl_ini(app));
-        assert_eq!(shell_medium.matches(desktop).count(), 1, "once, from winpeshl");
-        assert!(!startnet_cmd(app, false).contains(desktop), "and not from the script");
+        assert_eq!(
+            shell_medium.matches(desktop).count(),
+            1,
+            "once, from winpeshl"
+        );
+        assert!(
+            !startnet_cmd(app, false).contains(desktop),
+            "and not from the script"
+        );
 
         // The medium where `cmd` is still the shell: no winpeshl.ini is written
         // at all, and the script is the only one starting it.
@@ -1012,11 +1148,23 @@ mod tests {
     #[test]
     fn winpeshl_starts_the_desktop_and_nothing_else() {
         let ini = winpeshl_ini(r"X:\Program Files\OwnBackup");
-        assert!(ini.starts_with("[LaunchApps]"), "winpeshl reads nothing else");
-        let apps: Vec<&str> =
-            ini.lines().filter(|l| !l.is_empty() && !l.starts_with('[')).collect();
-        assert_eq!(apps.len(), 1, "one entry, or the desktop cannot be first: {apps:?}");
-        assert!(!ini.contains("startnet.cmd"), "the desktop runs the script itself");
+        assert!(
+            ini.starts_with("[LaunchApps]"),
+            "winpeshl reads nothing else"
+        );
+        let apps: Vec<&str> = ini
+            .lines()
+            .filter(|l| !l.is_empty() && !l.starts_with('['))
+            .collect();
+        assert_eq!(
+            apps.len(),
+            1,
+            "one entry, or the desktop cannot be first: {apps:?}"
+        );
+        assert!(
+            !ini.contains("startnet.cmd"),
+            "the desktop runs the script itself"
+        );
         assert_eq!(
             apps[0], "\"X:\\Program Files\\OwnBackup\\own-backup-shell.exe\"",
             "a path with a space in it has to be quoted"
@@ -1029,7 +1177,10 @@ mod tests {
     #[test]
     fn the_boot_script_is_where_winpe_keeps_it() {
         assert!(BOOT_SCRIPT.ends_with("startnet.cmd"));
-        assert!(BOOT_SCRIPT.starts_with(r"X:\"), "the RAM disk, always X: in WinPE");
+        assert!(
+            BOOT_SCRIPT.starts_with(r"X:\"),
+            "the RAM disk, always X: in WinPE"
+        );
     }
 
     /// A program the boot scripts launch but the build never copies in gives a
@@ -1038,11 +1189,17 @@ mod tests {
     #[test]
     fn every_program_the_boot_scripts_run_is_one_that_is_copied_in() {
         let app = r"X:\Program Files\OwnBackup";
-        let scripts = format!("{}{}", startnet_cmd(app, true), start_media_cmd(app, r"X:\Temp"));
+        let scripts = format!(
+            "{}{}",
+            startnet_cmd(app, true),
+            start_media_cmd(app, r"X:\Temp")
+        );
         let mut rest = scripts.as_str();
         while let Some(at) = rest.find("own-backup-") {
             let tail = &rest[at..];
-            let end = tail.find(|c: char| c == '"' || c.is_whitespace()).unwrap_or(tail.len());
+            let end = tail
+                .find(|c: char| c == '"' || c.is_whitespace())
+                .unwrap_or(tail.len());
             let (name, after) = tail.split_at(end);
             // Log files and window titles share the prefix; only programs count.
             if name.ends_with(".exe") {
@@ -1064,9 +1221,16 @@ mod tests {
     #[test]
     fn the_medium_turns_the_firewall_off_before_starting_anything() {
         let s = start_media_cmd(r"X:\Program Files\OwnBackup", r"X:\Windows\Temp\OwnBackup");
-        let firewall = s.find("wpeutil disablefirewall").expect("firewall must be disabled");
-        let engine = s.find("own-backup-service.exe").expect("the engine must be started");
-        assert!(firewall < engine, "the firewall must be down before the engine comes up");
+        let firewall = s
+            .find("wpeutil disablefirewall")
+            .expect("firewall must be disabled");
+        let engine = s
+            .find("own-backup-service.exe")
+            .expect("the engine must be started");
+        assert!(
+            firewall < engine,
+            "the firewall must be down before the engine comes up"
+        );
     }
 
     /// Проверка окружения обязана стоять ПЕРЕД запуском интерфейса, и её отказ
@@ -1082,17 +1246,29 @@ mod tests {
     #[test]
     fn the_environment_is_checked_before_the_interface_and_the_verdict_is_obeyed() {
         let s = start_media_cmd(r"X:\Program Files\OwnBackup", r"X:\Windows\Temp\OwnBackup");
-        let check = s.find("media-preflight").expect("проверка окружения должна вызываться");
-        let gui = s.find("own-backup-gui.exe").expect("интерфейс должен запускаться");
-        assert!(check < gui, "проверка идёт до запуска, иначе она ничего не решает");
+        let check = s
+            .find("media-preflight")
+            .expect("проверка окружения должна вызываться");
+        let gui = s
+            .find("own-backup-gui.exe")
+            .expect("интерфейс должен запускаться");
+        assert!(
+            check < gui,
+            "проверка идёт до запуска, иначе она ничего не решает"
+        );
         assert!(
             s.contains("if errorlevel 1 goto :nointerface"),
             "отказ проверки должен уводить в обход запуска"
         );
-        assert!(s.contains(":nointerface"), "и эта метка должна существовать");
+        assert!(
+            s.contains(":nointerface"),
+            "и эта метка должна существовать"
+        );
         // Пройденная проверка — ещё не окно: файл движка бывает на месте и
         // битый. Тогда носитель ждёт окна и говорит, если его нет.
-        let wait = s.find("media-wait").expect("после запуска надо дождаться окна");
+        let wait = s
+            .find("media-wait")
+            .expect("после запуска надо дождаться окна");
         assert!(gui < wait, "ждать окна имеет смысл только после запуска");
         // И тот и другой исход должны быть ВИДНЫ. Консоль запускателя не
         // видна: рабочий стол зовёт его через cmd с CREATE_NO_WINDOW.
@@ -1103,19 +1279,28 @@ mod tests {
         );
         // И говорить они должны разное: при «окна нет» проверки зелёные, и
         // обещание «причина напечатана ниже» было бы неправдой.
-        assert!(s.contains("no-interface.cmd\" nowindow"), "второй исход зовётся по имени");
+        assert!(
+            s.contains("no-interface.cmd\" nowindow"),
+            "второй исход зовётся по имени"
+        );
     }
 
     /// Окно неудачи повторяет разбор и оставляет человеку рабочий путь.
     #[test]
     fn the_failure_window_says_what_happened_and_what_still_works() {
         let s = no_interface_cmd(r"X:\Program Files\OwnBackup");
-        assert!(s.contains("media-preflight --report-only"), "разбор повторяется в этом окне");
+        assert!(
+            s.contains("media-preflight --report-only"),
+            "разбор повторяется в этом окне"
+        );
         assert!(
             s.contains("if /i \"%~1\"==\"nowindow\" goto :nowindow"),
             "окно должно различать «не пустила проверка» и «окна так и не появилось»"
         );
-        assert!(s.contains("own-backup-cli.exe\" --help"), "и сказано, чем работать дальше");
+        assert!(
+            s.contains("own-backup-cli.exe\" --help"),
+            "и сказано, чем работать дальше"
+        );
         assert!(s.contains("own-backup-gui.log"), "и где искать подробности");
         // Русский приходит из самой программы, и без UTF-8 консоль покажет
         // кашу. Строки скрипта остаются ASCII — их проверяет соседний тест.
@@ -1128,7 +1313,10 @@ mod tests {
     fn the_runtime_is_found_by_marker_with_a_fallback() {
         let s = start_media_cmd(r"X:\Program Files\OwnBackup", r"X:\Windows\Temp\OwnBackup");
         assert!(s.contains(&format!(r"{MEDIA_DIR}\{MEDIA_MARKER}")));
-        assert!(s.contains(r#"set "WV=X:\Program Files\OwnBackup\WebView2""#), "the in-image runtime is the fallback");
+        assert!(
+            s.contains(r#"set "WV=X:\Program Files\OwnBackup\WebView2""#),
+            "the in-image runtime is the fallback"
+        );
         // The marker is on every medium now, so it alone must not redirect the
         // runtime to a folder that is not there.
         assert!(s.contains(r"WebView2\msedgewebview2.exe"));
@@ -1142,9 +1330,14 @@ mod tests {
         let s = start_media_cmd(r"X:\Program Files\OwnBackup", r"X:\Windows\Temp\OwnBackup");
         let engine = s.find("own-backup-service.exe").unwrap();
         let del = s.find("reg delete").expect("MiniNT taken away");
-        let start = s.find("net start msiscsi").expect("the initiator is started");
+        let start = s
+            .find("net start msiscsi")
+            .expect("the initiator is started");
         let add = s.find("reg add").expect("MiniNT put back");
-        assert!(engine < del, "the product must start before the initiator is touched");
+        assert!(
+            engine < del,
+            "the product must start before the initiator is touched"
+        );
         assert!(del < start && start < add, "key off -> start -> key back");
         // `sc` is not in WinPE: reaching for it once took the whole script down.
         assert!(!s.contains("sc config") && !s.contains("sc start"));
@@ -1158,7 +1351,9 @@ mod tests {
     fn logs_go_to_the_boot_medium_before_anything_runs() {
         let s = start_media_cmd(r"X:\Program Files\OwnBackup", r"X:\Windows\Temp\OwnBackup");
         let media = s.find("OWN_BACKUP_MEDIA=1").unwrap();
-        let mirror = s.find(r#"set "OWN_BACKUP_LOG_MIRROR=%MEDIA%\OwnBackup\logs""#).expect("mirror set");
+        let mirror = s
+            .find(r#"set "OWN_BACKUP_LOG_MIRROR=%MEDIA%\OwnBackup\logs""#)
+            .expect("mirror set");
         let display = s.find("display --min").unwrap();
         let engine = s.find("own-backup-service.exe").unwrap();
         assert!(media < display && mirror < display && display < engine);
@@ -1176,7 +1371,10 @@ mod tests {
             webview2_args_file("X:\\tmp\\webview2.log"),
         ] {
             assert!(s.contains("\r\n"));
-            assert!(!s.replace("\r\n", "").contains('\n'), "a bare LF slipped in");
+            assert!(
+                !s.replace("\r\n", "").contains('\n'),
+                "a bare LF slipped in"
+            );
         }
     }
 
@@ -1185,7 +1383,10 @@ mod tests {
     #[test]
     fn the_default_arguments_ask_for_no_chromium_log() {
         let a = browser_args();
-        assert!(!a.contains("--enable-logging"), "this opens a console window");
+        assert!(
+            !a.contains("--enable-logging"),
+            "this opens a console window"
+        );
         assert!(!a.contains("--log-file"));
         // Still available one line away, for when something needs diagnosing.
         assert!(browser_args_logging("X:\\log").contains("--enable-logging=file"));
@@ -1196,7 +1397,10 @@ mod tests {
     #[test]
     fn the_arguments_carry_what_winpe_needs() {
         let a = browser_args();
-        assert!(a.contains("--allow-run-as-system"), "WinPE runs everything as SYSTEM");
+        assert!(
+            a.contains("--allow-run-as-system"),
+            "WinPE runs everything as SYSTEM"
+        );
         assert!(a.contains("--no-sandbox"), "no sandbox in WinPE");
         // wry's own defaults are replaced by whatever we pass, so they must be here.
         for f in ["msWebOOUI", "msPdfOOUI", "msSmartScreenProtection"] {
@@ -1211,14 +1415,19 @@ mod tests {
         let f = webview2_args_file("X:\\log");
         let first = f.lines().next().unwrap();
         assert!(first.starts_with("--allow-run-as-system"));
-        assert!(f.lines().count() > 5, "the alternatives should be there too");
+        assert!(
+            f.lines().count() > 5,
+            "the alternatives should be there too"
+        );
     }
 
     /// The DLL that made the window black must never be shipped, by any route.
     #[test]
     fn the_composition_dll_is_not_in_the_copy_list() {
         assert!(
-            !SYSTEM_DLLS.iter().any(|d| d.eq_ignore_ascii_case(FORBIDDEN_DLL)),
+            !SYSTEM_DLLS
+                .iter()
+                .any(|d| d.eq_ignore_ascii_case(FORBIDDEN_DLL)),
             "dcomp.dll in the copy list means a black window on the medium"
         );
     }
@@ -1237,18 +1446,20 @@ mod tests {
     #[test]
     fn the_trim_keeps_what_the_runtime_is_linked_against() {
         for keep in [
-            "msedge.dll",             // the engine
-            "msedge_elf.dll",         // static import of the engine
-            "msedgewebview2.exe",     // the host we actually launch
-            "ffmpeg.dll",             // delay-loaded, but loaded
-            "libEGL.dll",             // ANGLE, for software rendering
+            "msedge.dll",         // the engine
+            "msedge_elf.dll",     // static import of the engine
+            "msedgewebview2.exe", // the host we actually launch
+            "ffmpeg.dll",         // delay-loaded, but loaded
+            "libEGL.dll",         // ANGLE, for software rendering
             "libGLESv2.dll",
             "d3dcompiler_47.dll",
             "icudtl.dat",
             "resources.pak",
         ] {
             assert!(
-                !RUNTIME_DROP_FILES.iter().any(|d| d.eq_ignore_ascii_case(keep)),
+                !RUNTIME_DROP_FILES
+                    .iter()
+                    .any(|d| d.eq_ignore_ascii_case(keep)),
                 "{keep} must not be trimmed"
             );
         }
@@ -1263,8 +1474,10 @@ mod tests {
             std::fs::write(root.join("Locales").join(f), b"x").unwrap();
         }
         let list = runtime_trim_list(root);
-        let names: Vec<String> =
-            list.iter().map(|p| p.file_name().unwrap().to_string_lossy().to_string()).collect();
+        let names: Vec<String> = list
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
         assert!(names.contains(&"ResiliencyLinks".to_string()), "{names:?}");
         assert!(names.contains(&"af.pak".to_string()));
         assert!(names.contains(&"de.pak".to_string()));
@@ -1279,11 +1492,23 @@ mod tests {
     #[test]
     fn storage_and_network_on_a_real_bus_are_taken() {
         // Samsung NVMe, Intel AHCI — the two that make disks visible at all.
-        assert_eq!(rescue_role("{4d36e97b-e325-11ce-bfc1-08002be10318}", "PCI"), Some("контроллер дисков"));
-        assert_eq!(rescue_role("{4d36e96a-e325-11ce-bfc1-08002be10318}", "PCI"), Some("контроллер дисков"));
+        assert_eq!(
+            rescue_role("{4d36e97b-e325-11ce-bfc1-08002be10318}", "PCI"),
+            Some("контроллер дисков")
+        );
+        assert_eq!(
+            rescue_role("{4d36e96a-e325-11ce-bfc1-08002be10318}", "PCI"),
+            Some("контроллер дисков")
+        );
         // Intel Ethernet on PCI, and a USB network dongle.
-        assert_eq!(rescue_role("{4d36e972-e325-11ce-bfc1-08002be10318}", "PCI"), Some("сетевой адаптер"));
-        assert_eq!(rescue_role("{4d36e972-e325-11ce-bfc1-08002be10318}", "USB"), Some("сетевой адаптер"));
+        assert_eq!(
+            rescue_role("{4d36e972-e325-11ce-bfc1-08002be10318}", "PCI"),
+            Some("сетевой адаптер")
+        );
+        assert_eq!(
+            rescue_role("{4d36e972-e325-11ce-bfc1-08002be10318}", "USB"),
+            Some("сетевой адаптер")
+        );
     }
 
     /// A VPN adapter is class Net and present, exactly like the card beside it.
@@ -1299,14 +1524,20 @@ mod tests {
         }
         // Software storage controllers register on ROOT — a rescue medium has
         // no use for them, and our own iSCSI disks arrive that way too.
-        assert_eq!(rescue_role("{4d36e97b-e325-11ce-bfc1-08002be10318}", "ROOT"), None);
+        assert_eq!(
+            rescue_role("{4d36e97b-e325-11ce-bfc1-08002be10318}", "ROOT"),
+            None
+        );
     }
 
     /// Class USB holds the host controller AND everything plugged into it. The
     /// controller is a PCI device; a printer is not.
     #[test]
     fn usb_takes_the_controller_and_not_the_printer() {
-        assert_eq!(rescue_role("{36fc9e60-c465-11cf-8056-444553540000}", "PCI"), Some("контроллер USB"));
+        assert_eq!(
+            rescue_role("{36fc9e60-c465-11cf-8056-444553540000}", "PCI"),
+            Some("контроллер USB")
+        );
         assert_eq!(
             rescue_role("{36fc9e60-c465-11cf-8056-444553540000}", "USB"),
             None,
@@ -1319,7 +1550,10 @@ mod tests {
     #[test]
     fn the_system_class_is_not_a_rescue_class() {
         for bus in ["PCI", "ROOT", "ACPI"] {
-            assert_eq!(rescue_role("{4d36e97d-e325-11ce-bfc1-08002be10318}", bus), None);
+            assert_eq!(
+                rescue_role("{4d36e97d-e325-11ce-bfc1-08002be10318}", bus),
+                None
+            );
         }
     }
 
@@ -1331,7 +1565,10 @@ mod tests {
     #[test]
     fn the_query_guids_are_the_table_guids() {
         for (g, _, _) in RESCUE_CLASSES {
-            assert!(RESCUE_CLASS_GUIDS.contains(&g), "{g} missing from the query list");
+            assert!(
+                RESCUE_CLASS_GUIDS.contains(&g),
+                "{g} missing from the query list"
+            );
         }
         assert_eq!(RESCUE_CLASS_GUIDS.len(), RESCUE_CLASSES.len());
     }
@@ -1356,7 +1593,15 @@ mod tests {
         for inf in ["oem3.inf", "OEM12.INF", " oem105.inf "] {
             assert!(is_published_inf(inf), "{inf}");
         }
-        for inf in ["stornvme.inf", "net1ic64.inf", "netrtwlane.inf", "mshdc.inf", "oem.inf", "oemsetup.inf", "oem3.sys"] {
+        for inf in [
+            "stornvme.inf",
+            "net1ic64.inf",
+            "netrtwlane.inf",
+            "mshdc.inf",
+            "oem.inf",
+            "oemsetup.inf",
+            "oem3.sys",
+        ] {
             assert!(!is_published_inf(inf), "{inf}");
         }
     }

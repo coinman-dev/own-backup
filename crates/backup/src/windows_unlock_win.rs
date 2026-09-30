@@ -237,7 +237,10 @@ fn wmi_unlock(letter: &str, secret: &Secret<'_>) -> Result<u32> {
         let mut returned = 0u32;
         let _ = enumerator.Next(WBEM_INFINITE, &mut found, &mut returned);
         let Some(instance) = found[0].take() else {
-            return Err(bad(tr!("windows_unlock_win.unknown_volume", letter = letter)));
+            return Err(bad(tr!(
+                "windows_unlock_win.unknown_volume",
+                letter = letter
+            )));
         };
         let mut path_var = VARIANT::new();
         instance
@@ -250,7 +253,9 @@ fn wmi_unlock(letter: &str, secret: &Secret<'_>) -> Result<u32> {
             )
             .map_err(|e| bad(tr!("windows_unlock_win.volume_path", error = e)))?;
         // Обёртка VARIANT чистит себя в Drop — ручное освобождение не нужно.
-        let obj_path = BSTR::try_from(&path_var).map(|b| b.to_string()).unwrap_or_default();
+        let obj_path = BSTR::try_from(&path_var)
+            .map(|b| b.to_string())
+            .unwrap_or_default();
         if obj_path.is_empty() {
             return Err(bad(tr!("windows_unlock_win.no_wmi_path")));
         }
@@ -282,18 +287,17 @@ fn wmi_unlock(letter: &str, secret: &Secret<'_>) -> Result<u32> {
             .ok_or_else(|| bad(tr!("windows_unlock_win.method_no_params", method = method)))?
             .SpawnInstance(0)
             .map_err(|e| {
-                bad(tr!("windows_unlock_win.method_params", method = method, error = e))
+                bad(tr!(
+                    "windows_unlock_win.method_params",
+                    method = method,
+                    error = e
+                ))
             })?;
 
         // 3. Положить секрет и позвать.
         let secret_var = VARIANT::from(arg_value);
         in_params
-            .Put(
-                PCWSTR::from_raw(wide(arg_name).as_ptr()),
-                0,
-                &secret_var,
-                0,
-            )
+            .Put(PCWSTR::from_raw(wide(arg_name).as_ptr()), 0, &secret_var, 0)
             .map_err(|e| bad(tr!("windows_unlock_win.param", name = arg_name, error = e)))?;
         let mut out: Option<IWbemClassObject> = None;
         let call = services.ExecMethod(

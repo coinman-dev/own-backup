@@ -81,7 +81,11 @@ thread_local! {
 }
 
 /// SAFETY: called by `FormatEx` on the calling thread, synchronously.
-unsafe extern "system" fn callback(command: u32, _sub_action: u32, action_info: *mut c_void) -> BOOLEAN {
+unsafe extern "system" fn callback(
+    command: u32,
+    _sub_action: u32,
+    action_info: *mut c_void,
+) -> BOOLEAN {
     OUTCOME.with(|o| {
         let mut o = o.borrow_mut();
         match command {
@@ -191,11 +195,20 @@ pub fn format_volume(volume_root: &str, fs: FormatFs, label: &str, quick: bool) 
         // No DONE at all means FormatEx bailed out before starting. Treating
         // that as success is how an unformatted partition ends up in a restore.
         (None, None) => Err(OwnBackupError::Device(
-            tr!("format_win.not_started", volume = volume_root, fs = fs.as_str()).into_owned(),
+            tr!(
+                "format_win.not_started",
+                volume = volume_root,
+                fs = fs.as_str()
+            )
+            .into_owned(),
         )),
         (Some(false), None) => Err(OwnBackupError::Device(
-            tr!("format_win.ended_with_error", volume = volume_root, fs = fs.as_str())
-                .into_owned(),
+            tr!(
+                "format_win.ended_with_error",
+                volume = volume_root,
+                fs = fs.as_str()
+            )
+            .into_owned(),
         )),
     }
 }
@@ -211,9 +224,7 @@ fn format_via_command(volume_root: &str, fs: FormatFs, label: &str, quick: bool)
         ));
     }
     let mut cmd = std::process::Command::new("format.com");
-    cmd.arg(drive)
-        .arg(format!("/FS:{}", fs.as_str()))
-        .arg("/Y");
+    cmd.arg(drive).arg(format!("/FS:{}", fs.as_str())).arg("/Y");
     if quick {
         cmd.arg("/Q");
     }

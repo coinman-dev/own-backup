@@ -275,18 +275,24 @@ impl Session {
         let ahs = bhs[4] as usize * 4;
         if ahs > 0 {
             let mut skip = vec![0u8; ahs];
-            stream.read_exact(&mut skip).map_err(|e| dev(format!("iSCSI read AHS: {e}")))?;
+            stream
+                .read_exact(&mut skip)
+                .map_err(|e| dev(format!("iSCSI read AHS: {e}")))?;
         }
         let len = data_len(&bhs);
         if len > MAX_DATA_SEGMENT {
             return Err(dev(format!("iSCSI: data segment of {len} bytes refused")));
         }
         let mut data = vec![0u8; len as usize];
-        stream.read_exact(&mut data).map_err(|e| dev(format!("iSCSI read data: {e}")))?;
+        stream
+            .read_exact(&mut data)
+            .map_err(|e| dev(format!("iSCSI read data: {e}")))?;
         let pad = padding(len as usize);
         if pad > 0 {
             let mut skip = vec![0u8; pad];
-            stream.read_exact(&mut skip).map_err(|e| dev(format!("iSCSI read pad: {e}")))?;
+            stream
+                .read_exact(&mut skip)
+                .map_err(|e| dev(format!("iSCSI read pad: {e}")))?;
         }
         Ok(Some((bhs, data)))
     }
@@ -303,11 +309,17 @@ impl Session {
         bhs[5] = (len >> 16) as u8;
         bhs[6] = (len >> 8) as u8;
         bhs[7] = len as u8;
-        stream.write_all(bhs).map_err(|e| dev(format!("iSCSI write: {e}")))?;
-        stream.write_all(data).map_err(|e| dev(format!("iSCSI write: {e}")))?;
+        stream
+            .write_all(bhs)
+            .map_err(|e| dev(format!("iSCSI write: {e}")))?;
+        stream
+            .write_all(data)
+            .map_err(|e| dev(format!("iSCSI write: {e}")))?;
         let pad = padding(data.len());
         if pad > 0 {
-            stream.write_all(&vec![0u8; pad]).map_err(|e| dev(format!("iSCSI write: {e}")))?;
+            stream
+                .write_all(&vec![0u8; pad])
+                .map_err(|e| dev(format!("iSCSI write: {e}")))?;
         }
         Ok(())
     }
@@ -373,7 +385,10 @@ impl Session {
             self.discovery = kind.eq_ignore_ascii_case("Discovery");
         }
         info!(
-            csg, nsg, transit, discovery = self.discovery,
+            csg,
+            nsg,
+            transit,
+            discovery = self.discovery,
             chap_required = self.chap_secret.is_some(),
             chap_challenge_pending = self.chap_challenge.is_some(),
             chap_response_present = keys.iter().any(|(key, _)| key == "CHAP_R"),
@@ -518,8 +533,8 @@ impl Session {
     fn negotiate(&mut self, key: &str, value: &str) -> Option<String> {
         let number = |v: &str| v.parse::<u32>().ok();
         match key {
-            "InitiatorName" | "InitiatorAlias" | "TargetName" | "SessionType"
-            | "CHAP_A" | "CHAP_I" | "CHAP_C" | "CHAP_N" | "CHAP_R" => None,
+            "InitiatorName" | "InitiatorAlias" | "TargetName" | "SessionType" | "CHAP_A"
+            | "CHAP_I" | "CHAP_C" | "CHAP_N" | "CHAP_R" => None,
             "AuthMethod" => Some(
                 if self.chap_secret.is_some() && !self.discovery {
                     "CHAP"
@@ -650,11 +665,17 @@ impl Session {
         let expected = u32::from_be_bytes([bhs[20], bhs[21], bhs[22], bhs[23]]) as usize;
         let cdb = &bhs[32..48];
 
-        let payload =
-            if writing { self.collect_write(stream, bhs, immediate, expected)? } else { immediate };
+        let payload = if writing {
+            self.collect_write(stream, bhs, immediate, expected)?
+        } else {
+            immediate
+        };
 
         let reply = {
-            let mut lun = self.lun.lock().map_err(|_| dev("iSCSI: the LUN lock is poisoned"))?;
+            let mut lun = self
+                .lun
+                .lock()
+                .map_err(|_| dev("iSCSI: the LUN lock is poisoned"))?;
             scsi::execute(&mut lun, cdb, &payload)
         };
         if writing && reply.status == scsi::STATUS_GOOD {
@@ -705,7 +726,11 @@ impl Session {
         // was there, the system log filled with `{Delayed Write Failed}` on
         // `\:$I30:$INDEX_ALLOCATION` and `disk` event 153 retrying, and our
         // own log had not one failed read or write to show for it.
-        let transferred = if writing { payload.len().min(expected) } else { to_send };
+        let transferred = if writing {
+            payload.len().min(expected)
+        } else {
+            to_send
+        };
         let residual = expected.saturating_sub(transferred) as u32;
         let mut rsp = [0u8; BHS];
         rsp[0] = OP_SCSI_RSP;
@@ -792,7 +817,9 @@ impl Session {
         }
         let offset = u32::from_be_bytes([next[40], next[41], next[42], next[43]]) as usize;
         if offset != at {
-            return Err(dev(format!("iSCSI: Data-Out at offset {offset}, expected {at}")));
+            return Err(dev(format!(
+                "iSCSI: Data-Out at offset {offset}, expected {at}"
+            )));
         }
         Ok((next, data))
     }
@@ -812,13 +839,13 @@ impl Session {
         pdu[1] = 0x80; // an R2T is always final
         pdu[8..16].copy_from_slice(&cmd[8..16]); // LUN
         pdu[16..20].copy_from_slice(&cmd[16..20]); // ITT
-        // Target transfer tag: anything but the all-ones "none", and different
-        // per request so a late Data-Out cannot be mistaken for a fresh one.
+                                                   // Target transfer tag: anything but the all-ones "none", and different
+                                                   // per request so a late Data-Out cannot be mistaken for a fresh one.
         put_u32(&mut pdu, 20, r2t_sn.wrapping_add(1));
         self.put_sns(&mut pdu, false); // an R2T carries no status of its own
-        // And the window closes until the data is in: MaxCmdSN one BELOW the
-        // expected number means "send nothing new yet", which is how a
-        // one-command-at-a-time target keeps a write from being interleaved.
+                                       // And the window closes until the data is in: MaxCmdSN one BELOW the
+                                       // expected number means "send nothing new yet", which is how a
+                                       // one-command-at-a-time target keeps a write from being interleaved.
         put_u32(&mut pdu, 32, self.exp_cmd_sn.wrapping_sub(1));
         put_u32(&mut pdu, 36, r2t_sn);
         put_u32(&mut pdu, 40, offset);
@@ -921,15 +948,26 @@ mod tests {
     fn discovery_can_list_a_chap_target_but_cannot_read_its_blocks() {
         let secret = Arc::new(Zeroizing::new(*b"target-secret-16"));
         let mut s = session(Lun::read_only(Box::new(MemSource::new(4096)))).with_chap(secret);
-        let login = pdu(OP_LOGIN, 0x83, 1, b"AuthMethod=None\0SessionType=Discovery\0");
+        let login = pdu(
+            OP_LOGIN,
+            0x83,
+            1,
+            b"AuthMethod=None\0SessionType=Discovery\0",
+        );
         let mut cmd = pdu(OP_SCSI_CMD, 0x81, 2, &[]);
         cmd[20..24].copy_from_slice(&512u32.to_be_bytes());
         cmd[32..42].copy_from_slice(&[0x28, 0, 0, 0, 0, 1, 0, 0, 1, 0]);
         let mut wire = Wire::new([login, cmd].concat());
         let result = s.run(&mut wire);
-        assert!(result.unwrap_err().to_string().contains("discovery session"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("discovery session"));
         assert_eq!(responses(&wire.output)[0].0, OP_LOGIN_RSP);
-        assert!(responses(&wire.output)[0].1.windows(15).any(|w| w == b"AuthMethod=None"));
+        assert!(responses(&wire.output)[0]
+            .1
+            .windows(15)
+            .any(|w| w == b"AuthMethod=None"));
         assert_eq!(s.reads, 0);
     }
 
@@ -941,7 +979,10 @@ mod tests {
 
     impl Wire {
         fn new(script: Vec<u8>) -> Self {
-            Self { input: std::io::Cursor::new(script), output: Vec::new() }
+            Self {
+                input: std::io::Cursor::new(script),
+                output: Vec::new(),
+            }
         }
     }
 
@@ -1001,7 +1042,10 @@ mod tests {
     }
 
     fn session(lun: Lun) -> Session {
-        Session::new("iqn.2026-08.dev.ownbackup:image.test".into(), Arc::new(Mutex::new(lun)))
+        Session::new(
+            "iqn.2026-08.dev.ownbackup:image.test".into(),
+            Arc::new(Mutex::new(lun)),
+        )
     }
 
     /// Everything we wrote back, header and data, in order.
@@ -1021,7 +1065,10 @@ mod tests {
     }
 
     fn responses(output: &[u8]) -> Vec<(u8, Vec<u8>)> {
-        pdus(output).into_iter().map(|(bhs, data)| (bhs[0], data)).collect()
+        pdus(output)
+            .into_iter()
+            .map(|(bhs, data)| (bhs[0], data))
+            .collect()
     }
 
     /// The initiator says which status number it expects next; answering with
@@ -1039,7 +1086,10 @@ mod tests {
         let stat_sn = u32::from_be_bytes(wire.output[24..28].try_into().unwrap());
         let exp_cmd_sn = u32::from_be_bytes(wire.output[28..32].try_into().unwrap());
         let max_cmd_sn = u32::from_be_bytes(wire.output[32..36].try_into().unwrap());
-        assert_eq!(stat_sn, 7, "the response carries the number that was asked for");
+        assert_eq!(
+            stat_sn, 7,
+            "the response carries the number that was asked for"
+        );
         assert_eq!(exp_cmd_sn, 4, "a login advances the command numbering");
         assert!(max_cmd_sn >= exp_cmd_sn, "the window must not be closed");
         assert_eq!(s.stat_sn, 8, "and the next one follows it");
@@ -1055,7 +1105,11 @@ mod tests {
         assert_eq!(rsp.len(), 1);
         assert_eq!(rsp[0].0, OP_LOGIN_RSP);
         let keys = parse_keys(&rsp[0].1);
-        let get = |k: &str| keys.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone());
+        let get = |k: &str| {
+            keys.iter()
+                .find(|(key, _)| key == k)
+                .map(|(_, v)| v.clone())
+        };
         // The two that make an unsolicited write legal — agreed to here
         // because this initiator asked for exactly that; the pair Windows
         // really sends is the other way round, and
@@ -1094,7 +1148,10 @@ mod tests {
         let rsp = responses(&wire.output);
         assert_eq!(rsp[1].0, OP_TEXT_RSP);
         let text = String::from_utf8_lossy(&rsp[1].1);
-        assert!(text.contains("TargetName=iqn.2026-08.dev.ownbackup:image.test"), "{text}");
+        assert!(
+            text.contains("TargetName=iqn.2026-08.dev.ownbackup:image.test"),
+            "{text}"
+        );
         assert!(s.discovery);
     }
 
@@ -1119,7 +1176,10 @@ mod tests {
 
         let rsp = responses(&wire.output);
         let ops: Vec<u8> = rsp.iter().map(|(op, _)| *op).collect();
-        assert_eq!(ops, vec![OP_LOGIN_RSP, OP_DATA_IN, OP_SCSI_RSP, OP_LOGOUT_RSP]);
+        assert_eq!(
+            ops,
+            vec![OP_LOGIN_RSP, OP_DATA_IN, OP_SCSI_RSP, OP_LOGOUT_RSP]
+        );
         assert_eq!(rsp[1].1, vec![0x5A; 512]);
         assert_eq!(s.reads, 1);
         assert_eq!(s.read_bytes, 512);
@@ -1174,7 +1234,11 @@ mod tests {
         let (bhs, _) = all.last().unwrap();
         assert_eq!(bhs[0], OP_SCSI_RSP);
         assert_eq!(bhs[3], scsi::STATUS_GOOD, "the write itself succeeded");
-        assert_eq!(bhs[1] & 0x02, 0, "a write that took everything must not claim underflow");
+        assert_eq!(
+            bhs[1] & 0x02,
+            0,
+            "a write that took everything must not claim underflow"
+        );
         assert_eq!(
             u32::from_be_bytes(bhs[44..48].try_into().unwrap()),
             0,
@@ -1198,13 +1262,22 @@ mod tests {
         s.run(&mut wire).unwrap();
 
         let all = pdus(&wire.output);
-        let got: usize =
-            all.iter().filter(|(b, _)| b[0] == OP_DATA_IN).map(|(_, d)| d.len()).sum();
+        let got: usize = all
+            .iter()
+            .filter(|(b, _)| b[0] == OP_DATA_IN)
+            .map(|(_, d)| d.len())
+            .sum();
         let (bhs, _) = all.last().unwrap();
         assert_eq!(bhs[0], OP_SCSI_RSP);
-        assert!(got > 0 && got < 255, "INQUIRY answers with less than the room offered: {got}");
+        assert!(
+            got > 0 && got < 255,
+            "INQUIRY answers with less than the room offered: {got}"
+        );
         assert_ne!(bhs[1] & 0x02, 0, "a short answer is an underflow");
-        assert_eq!(u32::from_be_bytes(bhs[44..48].try_into().unwrap()) as usize, 255 - got);
+        assert_eq!(
+            u32::from_be_bytes(bhs[44..48].try_into().unwrap()) as usize,
+            255 - got
+        );
     }
 
     /// The rest of a write arriving as its own PDU, which is what the initiator
@@ -1275,8 +1348,15 @@ mod tests {
             .find(|(bhs, _)| bhs[0] == OP_R2T)
             .expect("the write must have been asked for");
         let (bhs, _) = r2t;
-        assert_eq!(&bhs[16..20], &itt[..], "the R2T names the command it is for");
-        assert_ne!(u32::from_be_bytes(bhs[20..24].try_into().unwrap()), u32::MAX);
+        assert_eq!(
+            &bhs[16..20],
+            &itt[..],
+            "the R2T names the command it is for"
+        );
+        assert_ne!(
+            u32::from_be_bytes(bhs[20..24].try_into().unwrap()),
+            u32::MAX
+        );
         assert_eq!(u32::from_be_bytes(bhs[40..44].try_into().unwrap()), 0);
         assert_eq!(u32::from_be_bytes(bhs[44..48].try_into().unwrap()), 1024);
         // The command window is shut until the data is in: a command sent now
@@ -1386,8 +1466,11 @@ mod tests {
         let mut s = session(lun);
         s.run(&mut wire).unwrap();
         let rsp = responses(&wire.output);
-        let data: Vec<u8> =
-            rsp.iter().filter(|(op, _)| *op == OP_DATA_IN).flat_map(|(_, d)| d.clone()).collect();
+        let data: Vec<u8> = rsp
+            .iter()
+            .filter(|(op, _)| *op == OP_DATA_IN)
+            .flat_map(|(_, d)| d.clone())
+            .collect();
         assert_eq!(data.len(), 8192);
         assert!(data.iter().all(|&b| b == 0x33));
     }

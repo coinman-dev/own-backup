@@ -140,9 +140,7 @@ impl ServiceKeyStore {
         reference: &LocalKeyRef,
     ) -> Result<JobPrivateKey> {
         self.open_inner(job_id, portable, reference).map_err(|e| {
-            OwnBackupError::Encryption(
-                tr!("seal_local.reauthorize_job", error = e).into_owned(),
-            )
+            OwnBackupError::Encryption(tr!("seal_local.reauthorize_job", error = e).into_owned())
         })
     }
 

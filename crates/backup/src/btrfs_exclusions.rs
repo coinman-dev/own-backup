@@ -96,7 +96,11 @@ pub(crate) fn crc32c_raw(seed: u32, data: &[u8]) -> u32 {
     for &b in data {
         crc ^= b as u32;
         for _ in 0..8 {
-            crc = if crc & 1 != 0 { (crc >> 1) ^ 0x82F6_3B78 } else { crc >> 1 };
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0x82F6_3B78
+            } else {
+                crc >> 1
+            };
         }
     }
     crc
@@ -225,10 +229,14 @@ impl Fs {
             // replays it on the next mount, inserting items (csums included)
             // that would collide with anything we rewrite here. Invisible to
             // every static check — the collision appears at first boot.
-            return Err(bad("log tree not empty (unclean shutdown) — exclusions skipped"));
+            return Err(bad(
+                "log tree not empty (unclean shutdown) — exclusions skipped",
+            ));
         }
         if csum_type != 0 {
-            return Err(bad(format!("csum type {csum_type} (not crc32c) — exclusions unsupported")));
+            return Err(bad(format!(
+                "csum type {csum_type} (not crc32c) — exclusions unsupported"
+            )));
         }
         // Same incompat allowance as the used-map builder.
         const INCOMPAT_SUPPORTED: u64 =
@@ -306,7 +314,13 @@ impl Fs {
             })
         })?;
 
-        Ok(Fs { nodesize, sectorsize: sectorsize as u64, chunks, flavor, tree_roots })
+        Ok(Fs {
+            nodesize,
+            sectorsize: sectorsize as u64,
+            chunks,
+            flavor,
+            tree_roots,
+        })
     }
 
     /// Subvolume tree roots to scan: the default FS tree and every subvolume /
@@ -314,7 +328,9 @@ impl Fs {
     fn subvol_roots(&self) -> Vec<(u64, u64)> {
         self.tree_roots
             .iter()
-            .filter(|(&id, _)| id == FS_TREE_OBJECTID || (FIRST_FREE_OBJECTID..=LAST_FREE_OBJECTID).contains(&id))
+            .filter(|(&id, _)| {
+                id == FS_TREE_OBJECTID || (FIRST_FREE_OBJECTID..=LAST_FREE_OBJECTID).contains(&id)
+            })
             .map(|(&id, &root)| (id, root))
             .collect()
     }
@@ -395,7 +411,10 @@ impl EditSet {
     }
 
     fn patch_item(&mut self, leaf: u64, key: Key, field_off: usize, bytes: Vec<u8>) {
-        self.patches.entry(leaf).or_default().push((key, field_off, bytes));
+        self.patches
+            .entry(leaf)
+            .or_default()
+            .push((key, field_off, bytes));
     }
 
     fn insert_item(&mut self, leaf: u64, key: Key, data: Vec<u8>) {
@@ -509,7 +528,10 @@ impl EditSet {
                 .map(|n| u32at(n, 0x60) == 0)
                 .unwrap_or(false);
             if !empty {
-                return Err(bad(tr!("btrfs_exclusions.leaf_drop_not_empty", leaf = leaf)));
+                return Err(bad(tr!(
+                    "btrfs_exclusions.leaf_drop_not_empty",
+                    leaf = leaf
+                )));
             }
         }
 
@@ -638,7 +660,10 @@ impl EditSet {
     /// handles, and reaching it means the plan was wrong.
     fn unlink_child(&mut self, vol: &mut dyn RawVolume, fs: &Fs, child_logical: u64) -> Result<()> {
         let Some(&(parent, slot)) = self.parent.get(&child_logical) else {
-            return Err(bad(tr!("btrfs_exclusions.unlink_no_parent", node = child_logical)));
+            return Err(bad(tr!(
+                "btrfs_exclusions.unlink_no_parent",
+                node = child_logical
+            )));
         };
         let nodesize = self.nodesize as usize;
         let node = self.node_mut(vol, fs, parent)?;
@@ -652,7 +677,10 @@ impl EditSet {
             )));
         }
         if nritems <= 1 {
-            return Err(bad(tr!("btrfs_exclusions.node_would_be_childless", parent = parent)));
+            return Err(bad(tr!(
+                "btrfs_exclusions.node_would_be_childless",
+                parent = parent
+            )));
         }
         // key_ptr entries are 33 bytes: key(17) + blockptr(8) + generation(8).
         let from = HEADER + (slot + 1) * 33;
@@ -682,7 +710,13 @@ impl EditSet {
     /// The child at `child_logical` now begins with `new_key`; update its parent
     /// internal node's key at that slot, cascading if the parent's slot 0 (its
     /// own first key) changed.
-    fn cascade_key(&mut self, vol: &mut dyn RawVolume, fs: &Fs, child_logical: u64, new_key: Key) -> Result<()> {
+    fn cascade_key(
+        &mut self,
+        vol: &mut dyn RawVolume,
+        fs: &Fs,
+        child_logical: u64,
+        new_key: Key,
+    ) -> Result<()> {
         let Some(&(parent, slot)) = self.parent.get(&child_logical) else {
             if self.roots.contains(&child_logical) {
                 return Ok(()); // a tree root: nothing above it holds its key
@@ -787,7 +821,8 @@ fn collect_subvol(vol: &mut dyn RawVolume, fs: &Fs, root: u64) -> Result<SubvolD
                         let size = u64at(data, 16);
                         let nlink = u32at(data, 40) as u32;
                         let mode = u32at(data, 52) as u32;
-                        d.inodes.insert(objectid, (size, nlink, mode & S_IFMT == S_IFDIR));
+                        d.inodes
+                            .insert(objectid, (size, nlink, mode & S_IFMT == S_IFDIR));
                     }
                 }
                 DIR_INDEX => {
@@ -798,13 +833,18 @@ fn collect_subvol(vol: &mut dyn RawVolume, fs: &Fs, root: u64) -> Result<SubvolD
                         let loc_type = data[8];
                         let name_len = u16at(data, 27) as usize;
                         if 30 + name_len <= data.len() {
-                            let name = String::from_utf8_lossy(&data[30..30 + name_len]).to_string();
+                            let name =
+                                String::from_utf8_lossy(&data[30..30 + name_len]).to_string();
                             let child = if loc_type == ROOT_ITEM {
                                 Err(()) // subvolume link
                             } else {
                                 Ok(loc_objectid)
                             };
-                            d.dirents.push(DirEnt { parent: objectid, name, child });
+                            d.dirents.push(DirEnt {
+                                parent: objectid,
+                                name,
+                                child,
+                            });
                         }
                     }
                     let _ = koffset;
@@ -825,10 +865,10 @@ fn collect_subvol(vol: &mut dyn RawVolume, fs: &Fs, root: u64) -> Result<SubvolD
                             let disk_bytenr = u64at(data, 21);
                             let disk_num_bytes = u64at(data, 29);
                             if disk_bytenr != 0 && disk_num_bytes != 0 {
-                                d.extents
-                                    .entry(objectid)
-                                    .or_default()
-                                    .push(DataRef { disk_bytenr, disk_num_bytes });
+                                d.extents.entry(objectid).or_default().push(DataRef {
+                                    disk_bytenr,
+                                    disk_num_bytes,
+                                });
                             }
                         }
                     }
@@ -861,7 +901,9 @@ fn match_subvol(
         if !visited.insert(dir) {
             continue;
         }
-        let Some(entries) = children.get(&dir) else { continue };
+        let Some(entries) = children.get(&dir) else {
+            continue;
+        };
         for e in entries {
             scan.entries_scanned += 1;
             let name_lower = e.name.to_lowercase();
@@ -960,81 +1002,93 @@ fn analyze_extents(
         .ok_or_else(|| bad("no extent tree root"))?;
     let mut own: HashMap<u64, ExtentOwn> = HashMap::new();
 
-    walk_tree(vol, &fs.chunks, extent_root, fs.nodesize, |node, nritems| {
-        for_each_item(node, nritems, |objectid, ktype, koffset, data| {
-            match ktype {
-                EXTENT_ITEM_TYPE => {
-                    let Some(&want_len) = candidates.get(&objectid) else { return Ok(()) };
-                    if data.len() < 24 {
-                        return Err(bad("truncated extent item"));
-                    }
-                    let refs = u64at(data, 0);
-                    let flags = u64at(data, 16);
-                    let mut e = ExtentOwn { refs, matched_count: 0, foreign: false };
-                    if koffset != want_len || flags & EXTENT_FLAG_DATA == 0 {
-                        e.foreign = true; // length mismatch / not a data extent
-                    }
-                    // Inline back-references follow at offset 24.
-                    let mut p = 24usize;
-                    while p < data.len() {
-                        let rt = data[p];
-                        match rt {
-                            EXTENT_DATA_REF => {
-                                if p + 29 > data.len() {
+    walk_tree(
+        vol,
+        &fs.chunks,
+        extent_root,
+        fs.nodesize,
+        |node, nritems| {
+            for_each_item(node, nritems, |objectid, ktype, koffset, data| {
+                match ktype {
+                    EXTENT_ITEM_TYPE => {
+                        let Some(&want_len) = candidates.get(&objectid) else {
+                            return Ok(());
+                        };
+                        if data.len() < 24 {
+                            return Err(bad("truncated extent item"));
+                        }
+                        let refs = u64at(data, 0);
+                        let flags = u64at(data, 16);
+                        let mut e = ExtentOwn {
+                            refs,
+                            matched_count: 0,
+                            foreign: false,
+                        };
+                        if koffset != want_len || flags & EXTENT_FLAG_DATA == 0 {
+                            e.foreign = true; // length mismatch / not a data extent
+                        }
+                        // Inline back-references follow at offset 24.
+                        let mut p = 24usize;
+                        while p < data.len() {
+                            let rt = data[p];
+                            match rt {
+                                EXTENT_DATA_REF => {
+                                    if p + 29 > data.len() {
+                                        e.foreign = true;
+                                        break;
+                                    }
+                                    let root = u64at(data, p + 1);
+                                    let ino = u64at(data, p + 9);
+                                    let count = u32at(data, p + 25);
+                                    if matched.contains(&(root, ino)) {
+                                        e.matched_count += count;
+                                    } else {
+                                        e.foreign = true;
+                                    }
+                                    p += 29;
+                                }
+                                SHARED_DATA_REF => {
+                                    // A CoW-shared leaf reference (snapshots): the
+                                    // owner cannot be attributed — keep the data.
                                     e.foreign = true;
+                                    p += 13;
+                                }
+                                _ => {
+                                    e.foreign = true; // unknown backref kind
                                     break;
                                 }
-                                let root = u64at(data, p + 1);
-                                let ino = u64at(data, p + 9);
-                                let count = u32at(data, p + 25);
+                            }
+                        }
+                        own.insert(objectid, e);
+                    }
+                    EXTENT_DATA_REF => {
+                        // Keyed (non-inline) data backref for some extent.
+                        if let Some(e) = own.get_mut(&objectid) {
+                            if data.len() >= 28 {
+                                let root = u64at(data, 0);
+                                let ino = u64at(data, 8);
+                                let count = u32at(data, 24);
                                 if matched.contains(&(root, ino)) {
                                     e.matched_count += count;
                                 } else {
                                     e.foreign = true;
                                 }
-                                p += 29;
-                            }
-                            SHARED_DATA_REF => {
-                                // A CoW-shared leaf reference (snapshots): the
-                                // owner cannot be attributed — keep the data.
-                                e.foreign = true;
-                                p += 13;
-                            }
-                            _ => {
-                                e.foreign = true; // unknown backref kind
-                                break;
-                            }
-                        }
-                    }
-                    own.insert(objectid, e);
-                }
-                EXTENT_DATA_REF => {
-                    // Keyed (non-inline) data backref for some extent.
-                    if let Some(e) = own.get_mut(&objectid) {
-                        if data.len() >= 28 {
-                            let root = u64at(data, 0);
-                            let ino = u64at(data, 8);
-                            let count = u32at(data, 24);
-                            if matched.contains(&(root, ino)) {
-                                e.matched_count += count;
                             } else {
                                 e.foreign = true;
                             }
-                        } else {
+                        }
+                    }
+                    SHARED_DATA_REF => {
+                        if let Some(e) = own.get_mut(&objectid) {
                             e.foreign = true;
                         }
                     }
+                    _ => {}
                 }
-                SHARED_DATA_REF => {
-                    if let Some(e) = own.get_mut(&objectid) {
-                        e.foreign = true;
-                    }
-                }
-                _ => {}
-            }
-            Ok(())
-        })
-    })?;
+                Ok(())
+            })
+        },
+    )?;
     Ok(own)
 }
 
@@ -1086,9 +1140,17 @@ fn plan_csum_edits(
     // Collect first (the walk borrows vol), apply after.
     enum Op {
         /// Overwrite single entries in place — the item's shape is unchanged.
-        Patch { leaf: u64, key: Key, entries: Vec<usize> },
+        Patch {
+            leaf: u64,
+            key: Key,
+            entries: Vec<usize>,
+        },
         /// Re-emit the item as its surviving segments (start, csum bytes).
-        Reshape { leaf: u64, key: Key, segments: Vec<(u64, Vec<u8>)> },
+        Reshape {
+            leaf: u64,
+            key: Key,
+            segments: Vec<(u64, Vec<u8>)>,
+        },
     }
     let mut ops: Vec<Op> = Vec::new();
     walk_tree(vol, &fs.chunks, csum_root, fs.nodesize, |node, nritems| {
@@ -1129,8 +1191,7 @@ fn plan_csum_edits(
             let mut segments: Vec<(u64, Vec<u8>)> = Vec::new();
             let mut seg_start: Option<u64> = None;
             let slice = |from: u64, to: u64| -> Vec<u8> {
-                data[((from - start) / ss * 4) as usize..((to - start) / ss * 4) as usize]
-                    .to_vec()
+                data[((from - start) / ss * 4) as usize..((to - start) / ss * 4) as usize].to_vec()
             };
             for s in 0..sectors {
                 let a = start + s * ss;
@@ -1152,12 +1213,15 @@ fn plan_csum_edits(
                 for s in 0..n {
                     let a = *b + s * ss;
                     if zeroed.covers(a, a + ss) {
-                        bytes[(s * 4) as usize..(s * 4 + 4) as usize]
-                            .copy_from_slice(&zero_csum);
+                        bytes[(s * 4) as usize..(s * 4 + 4) as usize].copy_from_slice(&zero_csum);
                     }
                 }
             }
-            ops.push(Op::Reshape { leaf, key, segments });
+            ops.push(Op::Reshape {
+                leaf,
+                key,
+                segments,
+            });
         }
         Ok(())
     })?;
@@ -1169,7 +1233,11 @@ fn plan_csum_edits(
                     edits.patch_item(leaf, key, s * 4, zero_csum.to_vec());
                 }
             }
-            Op::Reshape { leaf, key, segments } => {
+            Op::Reshape {
+                leaf,
+                key,
+                segments,
+            } => {
                 edits.delete_item(leaf, key);
                 for (seg_start, bytes) in segments {
                     edits.insert_item(leaf, (EXTENT_CSUM_OBJECTID, EXTENT_CSUM, seg_start), bytes);
@@ -1267,7 +1335,12 @@ pub fn scan_btrfs_exclusions(
                 }
             }
         }
-        subvols.push(Subvol { id, root, data, matched });
+        subvols.push(Subvol {
+            id,
+            root,
+            data,
+            matched,
+        });
     }
     if matched_pairs.is_empty() {
         scan.ranges.finalize();
@@ -1277,7 +1350,9 @@ pub fn scan_btrfs_exclusions(
     // 2. Extent-ownership analysis.
     let own = analyze_extents(vol, &fs, &candidates, &matched_pairs)?;
     let freeable = |bytenr: u64| -> bool {
-        own.get(&bytenr).map(|e| !e.foreign && e.refs > 0 && e.refs == e.matched_count).unwrap_or(false)
+        own.get(&bytenr)
+            .map(|e| !e.foreign && e.refs > 0 && e.refs == e.matched_count)
+            .unwrap_or(false)
     };
 
     // 3. Removability. A FILE is removable iff every data extent is cleanly
@@ -1292,7 +1367,12 @@ pub fn scan_btrfs_exclusions(
         }
         // Files first.
         for &ino in &sv.matched {
-            let is_dir = sv.data.inodes.get(&ino).map(|&(_, _, d)| d).unwrap_or(false);
+            let is_dir = sv
+                .data
+                .inodes
+                .get(&ino)
+                .map(|&(_, _, d)| d)
+                .unwrap_or(false);
             if is_dir {
                 continue;
             }
@@ -1314,13 +1394,22 @@ pub fn scan_btrfs_exclusions(
                 if removable.contains(&(sv.id, ino)) {
                     continue;
                 }
-                let is_dir = sv.data.inodes.get(&ino).map(|&(_, _, d)| d).unwrap_or(false);
+                let is_dir = sv
+                    .data
+                    .inodes
+                    .get(&ino)
+                    .map(|&(_, _, d)| d)
+                    .unwrap_or(false);
                 if !is_dir {
                     continue;
                 }
-                let all_kids_ok = kids.get(&ino).map(|cs| {
-                    cs.iter().all(|c| matches!(c, Ok(ci) if removable.contains(&(sv.id, *ci))))
-                }).unwrap_or(true); // empty dir → removable
+                let all_kids_ok = kids
+                    .get(&ino)
+                    .map(|cs| {
+                        cs.iter()
+                            .all(|c| matches!(c, Ok(ci) if removable.contains(&(sv.id, *ci))))
+                    })
+                    .unwrap_or(true); // empty dir → removable
                 if all_kids_ok {
                     removable.insert((sv.id, ino));
                     changed = true;
@@ -1402,9 +1491,22 @@ pub fn scan_btrfs_exclusions(
         // Stage 2 and let every excluded file into the copy (image 6.8 → 9.4
         // GB). Verdicts that cannot change — `never_drop` — are kept.
         edits.drop_leaves.clear();
-        let a = spare_inodes_that_would_empty_a_leaf(vol, &fs, &subvols, &mut removable, &mut edits)?;
-        let b = spare_files_whose_extents_would_empty_a_leaf(vol, &fs, &mut removable, &file_extents, &mut edits)?;
-        let c = spare_files_whose_csum_edits_break_a_leaf(vol, &fs, &mut removable, &file_extents, &mut edits)?;
+        let a =
+            spare_inodes_that_would_empty_a_leaf(vol, &fs, &subvols, &mut removable, &mut edits)?;
+        let b = spare_files_whose_extents_would_empty_a_leaf(
+            vol,
+            &fs,
+            &mut removable,
+            &file_extents,
+            &mut edits,
+        )?;
+        let c = spare_files_whose_csum_edits_break_a_leaf(
+            vol,
+            &fs,
+            &mut removable,
+            &file_extents,
+            &mut edits,
+        )?;
         let d = spare_parents_of_spared_children(&subvols, &mut removable);
         let e = undrop_leaves_we_cannot_free(vol, &fs, &mut edits)?;
         spared += a + b + c + d;
@@ -1414,10 +1516,16 @@ pub fn scan_btrfs_exclusions(
         }
     }
     if !settled {
-        return Err(bad(tr!("btrfs_exclusions.removal_set_not_settled", rounds = MAX_ROUNDS)));
+        return Err(bad(tr!(
+            "btrfs_exclusions.removal_set_not_settled",
+            rounds = MAX_ROUNDS
+        )));
     }
     if spared > 0 {
-        info!(spared, "btrfs exclusions: файлы оставлены в дереве ради целостности листов");
+        info!(
+            spared,
+            "btrfs exclusions: файлы оставлены в дереве ради целостности листов"
+        );
     }
     let mut freed_logical = ByteRanges::new();
     // Stage 2 removes entries; Stage 1 only zeroes data. They are separate
@@ -1428,8 +1536,16 @@ pub fn scan_btrfs_exclusions(
     let mut freed_meta = 0u64;
     let stage2 = if remove_entries {
         apply_stage2(
-            vol, &fs, &subvols, &removable, &file_extents, &file_sizes,
-            &mut edits, &mut freed_logical, &mut removed_bytes, &mut freed_meta,
+            vol,
+            &fs,
+            &subvols,
+            &removable,
+            &file_extents,
+            &file_sizes,
+            &mut edits,
+            &mut freed_logical,
+            &mut removed_bytes,
+            &mut freed_meta,
         )
     } else {
         // Stage 1 only: nothing is removed, so nothing falls back — every
@@ -1493,7 +1609,9 @@ pub fn scan_btrfs_exclusions(
             if removable.contains(&(sv.id, ino)) {
                 continue; // Stage 2 deletes the item outright
             }
-            let Some(items) = sv.data.inline.get(&ino) else { continue };
+            let Some(items) = sv.data.inline.get(&ino) else {
+                continue;
+            };
             for it in items {
                 if it.data_len == 0 && it.compression == 0 {
                     continue;
@@ -1539,7 +1657,10 @@ pub fn scan_btrfs_exclusions(
     }
     if inline_zeroed > 0 {
         scan.bytes_excluded += inline_zeroed;
-        info!(bytes = inline_zeroed, "btrfs exclusions: inline-данные обнулены внутри листьев");
+        info!(
+            bytes = inline_zeroed,
+            "btrfs exclusions: inline-данные обнулены внутри листьев"
+        );
     }
 
     zeroed_logical.finalize();
@@ -1720,7 +1841,9 @@ fn spare_inodes_that_would_empty_a_leaf(
             if total.get(&leaf).copied().unwrap_or(0) != n {
                 continue; // something survives in this leaf — nothing to do
             }
-            let Some(inodes) = blamed.get(&leaf) else { continue };
+            let Some(inodes) = blamed.get(&leaf) else {
+                continue;
+            };
             // Better than sparing anything: take the leaf out of the tree.
             if edits.try_drop_leaf(vol, fs, leaf)? {
                 continue;
@@ -1817,21 +1940,27 @@ fn spare_files_whose_extents_would_empty_a_leaf(
     let mut total: HashMap<u64, u64> = HashMap::new();
     let mut doomed: HashMap<u64, u64> = HashMap::new();
     let mut blamed: HashMap<u64, HashSet<(u64, u64)>> = HashMap::new();
-    walk_tree(vol, &fs.chunks, extent_root, fs.nodesize, |node, nritems| {
-        let leaf = u64at(node, 0x30);
-        total.insert(leaf, nritems);
-        for_each_item(node, nritems, |objectid, ktype, _koffset, _data| {
-            let hit = matches!(ktype, EXTENT_ITEM_TYPE | EXTENT_DATA_REF | SHARED_DATA_REF)
-                && owners.contains_key(&objectid);
-            if hit {
-                *doomed.entry(leaf).or_default() += 1;
-                if let Some(who) = owners.get(&objectid) {
-                    blamed.entry(leaf).or_default().extend(who.iter().copied());
+    walk_tree(
+        vol,
+        &fs.chunks,
+        extent_root,
+        fs.nodesize,
+        |node, nritems| {
+            let leaf = u64at(node, 0x30);
+            total.insert(leaf, nritems);
+            for_each_item(node, nritems, |objectid, ktype, _koffset, _data| {
+                let hit = matches!(ktype, EXTENT_ITEM_TYPE | EXTENT_DATA_REF | SHARED_DATA_REF)
+                    && owners.contains_key(&objectid);
+                if hit {
+                    *doomed.entry(leaf).or_default() += 1;
+                    if let Some(who) = owners.get(&objectid) {
+                        blamed.entry(leaf).or_default().extend(who.iter().copied());
+                    }
                 }
-            }
-            Ok(())
-        })
-    })?;
+                Ok(())
+            })
+        },
+    )?;
 
     let mut spared = 0u64;
     let mut doomed: Vec<_> = doomed.into_iter().collect();
@@ -1841,7 +1970,9 @@ fn spare_files_whose_extents_would_empty_a_leaf(
         if total.get(&leaf).copied().unwrap_or(0) != n {
             continue;
         }
-        let Some(files) = blamed.get(&leaf) else { continue };
+        let Some(files) = blamed.get(&leaf) else {
+            continue;
+        };
         if edits.try_drop_leaf(vol, fs, leaf)? {
             continue;
         }
@@ -1981,7 +2112,10 @@ fn spare_files_whose_csum_edits_break_a_leaf(
         let mut sorted = blamed;
         sorted.sort_unstable();
         if let Some(&who) = sorted.first() {
-            warn!(leaf, "btrfs exclusions: лист дерева сумм опустел бы — один файл оставлен");
+            warn!(
+                leaf,
+                "btrfs exclusions: лист дерева сумм опустел бы — один файл оставлен"
+            );
             to_spare.insert(who);
         }
     }
@@ -2028,32 +2162,38 @@ fn undrop_leaves_we_cannot_free(
     let mut total: HashMap<u64, u64> = HashMap::new();
     let mut doomed: HashMap<u64, u64> = HashMap::new();
     let mut blamed: HashMap<u64, HashSet<u64>> = HashMap::new();
-    walk_tree(vol, &fs.chunks, extent_root, fs.nodesize, |node, nritems| {
-        let eleaf = u64at(node, 0x30);
-        total.insert(eleaf, nritems);
-        for_each_item(node, nritems, |objectid, ktype, _koffset, data| {
-            if !drops.contains(&objectid) {
-                return Ok(());
-            }
-            match ktype {
-                EXTENT_ITEM_TYPE | METADATA_ITEM => {
-                    let refs = if data.len() >= 8 { u64at(data, 0) } else { 0 };
-                    exclusive.insert(objectid, refs == 1);
-                    *doomed.entry(eleaf).or_default() += 1;
-                    blamed.entry(eleaf).or_default().insert(objectid);
+    walk_tree(
+        vol,
+        &fs.chunks,
+        extent_root,
+        fs.nodesize,
+        |node, nritems| {
+            let eleaf = u64at(node, 0x30);
+            total.insert(eleaf, nritems);
+            for_each_item(node, nritems, |objectid, ktype, _koffset, data| {
+                if !drops.contains(&objectid) {
+                    return Ok(());
                 }
-                TREE_BLOCK_REF => {
-                    *doomed.entry(eleaf).or_default() += 1;
-                    blamed.entry(eleaf).or_default().insert(objectid);
+                match ktype {
+                    EXTENT_ITEM_TYPE | METADATA_ITEM => {
+                        let refs = if data.len() >= 8 { u64at(data, 0) } else { 0 };
+                        exclusive.insert(objectid, refs == 1);
+                        *doomed.entry(eleaf).or_default() += 1;
+                        blamed.entry(eleaf).or_default().insert(objectid);
+                    }
+                    TREE_BLOCK_REF => {
+                        *doomed.entry(eleaf).or_default() += 1;
+                        blamed.entry(eleaf).or_default().insert(objectid);
+                    }
+                    SHARED_BLOCK_REF => {
+                        exclusive.insert(objectid, false); // lives in another tree too
+                    }
+                    _ => {}
                 }
-                SHARED_BLOCK_REF => {
-                    exclusive.insert(objectid, false); // lives in another tree too
-                }
-                _ => {}
-            }
-            Ok(())
-        })
-    })?;
+                Ok(())
+            })
+        },
+    )?;
 
     let mut undropped = 0u64;
     for (&block, &ok) in &exclusive {
@@ -2068,7 +2208,9 @@ fn undrop_leaves_we_cannot_free(
         if total.get(&eleaf).copied().unwrap_or(0) != n {
             continue;
         }
-        let Some(blocks) = blamed.get(&eleaf) else { continue };
+        let Some(blocks) = blamed.get(&eleaf) else {
+            continue;
+        };
         for b in blocks {
             edits.never_drop.insert(*b);
             if edits.drop_leaves.remove(b) {
@@ -2077,7 +2219,10 @@ fn undrop_leaves_we_cannot_free(
         }
     }
     if undropped > 0 {
-        info!(undropped, "btrfs exclusions: удаление листьев отменено (общий блок или лист дерева экстентов)");
+        info!(
+            undropped,
+            "btrfs exclusions: удаление листьев отменено (общий блок или лист дерева экстентов)"
+        );
     }
     Ok(undropped)
 }
@@ -2148,7 +2293,12 @@ fn apply_stage2(
         for (parent, dec) in isize_dec {
             let old = sv.data.inodes.get(&parent).map(|&(s, _, _)| s).unwrap_or(0);
             if let Some(&leaf) = inode_leaf.get(&parent) {
-                edits.patch_item(leaf, (parent, INODE_ITEM, 0), 16, old.saturating_sub(dec).to_le_bytes().to_vec());
+                edits.patch_item(
+                    leaf,
+                    (parent, INODE_ITEM, 0),
+                    16,
+                    old.saturating_sub(dec).to_le_bytes().to_vec(),
+                );
             }
         }
         // Account excluded bytes for removed files.
@@ -2169,7 +2319,10 @@ fn apply_stage2(
     if freed_extents.is_empty() && edits.drop_leaves.is_empty() {
         return Ok(());
     }
-    let extent_root = *fs.tree_roots.get(&crate::btrfs_map::EXTENT_TREE_OBJECTID).ok_or_else(|| bad("no extent tree root"))?;
+    let extent_root = *fs
+        .tree_roots
+        .get(&crate::btrfs_map::EXTENT_TREE_OBJECTID)
+        .ok_or_else(|| bad("no extent tree root"))?;
     edits.learn_parents(vol, fs, extent_root)?;
 
     // Block groups: (start,len,leaf,key,used) — to decrement `used`.
@@ -2188,15 +2341,20 @@ fn apply_stage2(
     const TREE_BLOCK_REF: u8 = 176;
 
     let mut bgs: Vec<Bg> = Vec::new();
-    walk_tree(vol, &fs.chunks, extent_root, fs.nodesize, |node, nritems| {
-        let leaf = u64at(node, 0x30);
-        for_each_item(node, nritems, |objectid, ktype, koffset, data| {
-            if dropped.contains(&objectid)
-                && matches!(ktype, EXTENT_ITEM_TYPE | METADATA_ITEM | TREE_BLOCK_REF)
-            {
-                edits.delete_item(leaf, (objectid, ktype, koffset));
-            }
-            match ktype {
+    walk_tree(
+        vol,
+        &fs.chunks,
+        extent_root,
+        fs.nodesize,
+        |node, nritems| {
+            let leaf = u64at(node, 0x30);
+            for_each_item(node, nritems, |objectid, ktype, koffset, data| {
+                if dropped.contains(&objectid)
+                    && matches!(ktype, EXTENT_ITEM_TYPE | METADATA_ITEM | TREE_BLOCK_REF)
+                {
+                    edits.delete_item(leaf, (objectid, ktype, koffset));
+                }
+                match ktype {
                 EXTENT_ITEM_TYPE => {
                     if freed_extents.contains_key(&objectid) {
                         edits.delete_item(leaf, (objectid, ktype, koffset));
@@ -2215,14 +2373,17 @@ fn apply_stage2(
                 }
                 _ => {}
             }
-            Ok(())
-        })
-    })?;
+                Ok(())
+            })
+        },
+    )?;
 
     // Decrement each block group's `used` by the freed bytes inside it.
     let mut bg_dec: HashMap<usize, u64> = HashMap::new();
     for (&bytenr, &len) in &freed_extents {
-        let bi = bgs.iter().position(|b| bytenr >= b.start && bytenr + len <= b.start + b.len)
+        let bi = bgs
+            .iter()
+            .position(|b| bytenr >= b.start && bytenr + len <= b.start + b.len)
             .ok_or_else(|| bad(format!("freed extent {bytenr} in no block group")))?;
         *bg_dec.entry(bi).or_default() += len;
         // Logical range → physical drop; account bytes.
@@ -2237,13 +2398,23 @@ fn apply_stage2(
         let bi = bgs
             .iter()
             .position(|b| block >= b.start && block + fs.nodesize <= b.start + b.len)
-            .ok_or_else(|| bad(tr!("btrfs_exclusions.freed_block_outside_groups", block = block)))?;
+            .ok_or_else(|| {
+                bad(tr!(
+                    "btrfs_exclusions.freed_block_outside_groups",
+                    block = block
+                ))
+            })?;
         *bg_dec.entry(bi).or_default() += fs.nodesize;
         *freed_meta += fs.nodesize;
     }
     for (bi, dec) in bg_dec {
         let b = &bgs[bi];
-        edits.patch_item(b.leaf, b.key, 0, b.used.saturating_sub(dec).to_le_bytes().to_vec());
+        edits.patch_item(
+            b.leaf,
+            b.key,
+            0,
+            b.used.saturating_sub(dec).to_le_bytes().to_vec(),
+        );
     }
     Ok(())
 }
@@ -2329,7 +2500,9 @@ mod btrfs_integration {
     }
     impl RawVolume for FileVol {
         fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
-            self.f.read_exact_at(buf, offset).map_err(|e| bad(format!("read: {e}")))
+            self.f
+                .read_exact_at(buf, offset)
+                .map_err(|e| bad(format!("read: {e}")))
         }
         fn len(&self) -> u64 {
             self.len
@@ -2337,7 +2510,10 @@ mod btrfs_integration {
     }
 
     fn have(cmd: &str) -> bool {
-        std::process::Command::new(cmd).arg("--version").output().is_ok()
+        std::process::Command::new(cmd)
+            .arg("--version")
+            .output()
+            .is_ok()
     }
 
     /// Populated btrfs image via `mkfs.btrfs --rootdir` (no mount needed).
@@ -2350,9 +2526,18 @@ mod btrfs_integration {
         let dir = tempfile::tempdir().ok()?;
         let src = dir.path().join("src");
         std::fs::create_dir_all(src.join("cache")).ok()?;
-        std::fs::File::create(src.join("keep.txt")).ok()?.write_all(&[0xCD; 65536]).ok()?;
-        std::fs::File::create(src.join("secret.log")).ok()?.write_all(&[0xAB; 98304]).ok()?;
-        std::fs::File::create(src.join("cache/big.bin")).ok()?.write_all(&[0xAB; 196608]).ok()?;
+        std::fs::File::create(src.join("keep.txt"))
+            .ok()?
+            .write_all(&[0xCD; 65536])
+            .ok()?;
+        std::fs::File::create(src.join("secret.log"))
+            .ok()?
+            .write_all(&[0xAB; 98304])
+            .ok()?;
+        std::fs::File::create(src.join("cache/big.bin"))
+            .ok()?
+            .write_all(&[0xAB; 196608])
+            .ok()?;
         let img = dir.path().join("fs.img");
         // 128 MiB — above mkfs.btrfs's minimum device size.
         let f = std::fs::File::create(&img).ok()?;
@@ -2365,7 +2550,10 @@ mod btrfs_integration {
             .output()
             .ok()?;
         if !out.status.success() {
-            eprintln!("mkfs.btrfs failed: {}", String::from_utf8_lossy(&out.stderr));
+            eprintln!(
+                "mkfs.btrfs failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
             return None;
         }
         Some((img, dir))
@@ -2443,7 +2631,10 @@ mod btrfs_integration {
                     let child = u64at(&node, off + 17);
                     let cn = read_node(&mut vol, &fs.chunks, child, fs.nodesize).unwrap();
                     let cn_items = u32at(&cn, 0x60) as usize;
-                    assert!(cn_items > 0, "node {child} is empty but {logical} points at it");
+                    assert!(
+                        cn_items > 0,
+                        "node {child} is empty but {logical} points at it"
+                    );
                     // Leaf items and internal key_ptrs both start with the key.
                     let got = read_key(&cn, HEADER);
                     assert_eq!(
@@ -2468,41 +2659,55 @@ mod btrfs_integration {
         let len = f.metadata().unwrap().len();
         let mut vol = FileVol { f, len };
         let fs = Fs::bootstrap(&mut vol).unwrap();
-        let extent_root =
-            *fs.tree_roots.get(&crate::btrfs_map::EXTENT_TREE_OBJECTID).unwrap();
+        let extent_root = *fs
+            .tree_roots
+            .get(&crate::btrfs_map::EXTENT_TREE_OBJECTID)
+            .unwrap();
         let mut allocated = ByteRanges::new();
-        walk_tree(&mut vol, &fs.chunks, extent_root, fs.nodesize, |node, nritems| {
-            for_each_item(node, nritems, |objectid, ktype, koffset, data| {
-                if ktype == EXTENT_ITEM_TYPE
-                    && data.len() >= 24
-                    && u64at(data, 16) & EXTENT_FLAG_DATA != 0
-                {
-                    allocated.add(objectid, objectid + koffset);
-                }
-                Ok(())
-            })
-        })
+        walk_tree(
+            &mut vol,
+            &fs.chunks,
+            extent_root,
+            fs.nodesize,
+            |node, nritems| {
+                for_each_item(node, nritems, |objectid, ktype, koffset, data| {
+                    if ktype == EXTENT_ITEM_TYPE
+                        && data.len() >= 24
+                        && u64at(data, 16) & EXTENT_FLAG_DATA != 0
+                    {
+                        allocated.add(objectid, objectid + koffset);
+                    }
+                    Ok(())
+                })
+            },
+        )
         .unwrap();
         allocated.finalize();
         let Some(&csum_root) = fs.tree_roots.get(&CSUM_TREE_OBJECTID) else {
             return;
         };
-        walk_tree(&mut vol, &fs.chunks, csum_root, fs.nodesize, |node, nritems| {
-            for i in 0..nritems as usize {
-                let it = HEADER + i * 25;
-                if node[it + 8] != EXTENT_CSUM {
-                    continue;
-                }
-                let start = u64at(node, it + 9);
-                let sectors = (u32at(node, it + 21) / 4) as u64;
-                let end = start + sectors * fs.sectorsize;
-                assert!(
+        walk_tree(
+            &mut vol,
+            &fs.chunks,
+            csum_root,
+            fs.nodesize,
+            |node, nritems| {
+                for i in 0..nritems as usize {
+                    let it = HEADER + i * 25;
+                    if node[it + 8] != EXTENT_CSUM {
+                        continue;
+                    }
+                    let start = u64at(node, it + 9);
+                    let sectors = (u32at(node, it + 21) / 4) as u64;
+                    let end = start + sectors * fs.sectorsize;
+                    assert!(
                     allocated.covers(start, end),
                     "csum entry [{start},{end}) covers unallocated space — the defect-4 time bomb"
                 );
-            }
-            Ok(())
-        })
+                }
+                Ok(())
+            },
+        )
         .unwrap();
     }
 
@@ -2529,12 +2734,27 @@ mod btrfs_integration {
         // Restore: excluded gone, kept file intact.
         let outdir = keep.path().join("restored");
         std::fs::create_dir_all(&outdir).unwrap();
-        let out = std::process::Command::new("btrfs").arg("restore").arg(&patched).arg(&outdir).output().unwrap();
-        assert!(out.status.success(), "btrfs restore failed: {}", String::from_utf8_lossy(&out.stderr));
-        assert!(!outdir.join("secret.log").exists(), "secret.log still present");
+        let out = std::process::Command::new("btrfs")
+            .arg("restore")
+            .arg(&patched)
+            .arg(&outdir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "btrfs restore failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !outdir.join("secret.log").exists(),
+            "secret.log still present"
+        );
         assert!(!outdir.join("cache").exists(), "cache dir still present");
         let kept = std::fs::read(outdir.join("keep.txt")).unwrap();
-        assert!(kept.len() == 65536 && kept.iter().all(|&b| b == 0xCD), "keep.txt damaged");
+        assert!(
+            kept.len() == 65536 && kept.iter().all(|&b| b == 0xCD),
+            "keep.txt damaged"
+        );
     }
 
     /// No patch may leave a live tree node zeroed.
@@ -2570,7 +2790,9 @@ mod btrfs_integration {
         for (off, bytes) in &scan.patches {
             let start = (*off as usize / NODE) * NODE;
             for node_start in (start..(*off as usize + bytes.len())).step_by(NODE) {
-                let Some(node) = data.get(node_start..node_start + NODE) else { continue };
+                let Some(node) = data.get(node_start..node_start + NODE) else {
+                    continue;
+                };
                 // A node is "zeroed" when everything past its 32-byte checksum
                 // field is zero. The checksum itself will match — that is the
                 // whole trap.
@@ -2605,11 +2827,17 @@ mod btrfs_integration {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src");
         std::fs::create_dir_all(src.join("cache")).unwrap();
-        std::fs::File::create(src.join("keep.txt")).unwrap().write_all(&[0xCD; 65536]).unwrap();
+        std::fs::File::create(src.join("keep.txt"))
+            .unwrap()
+            .write_all(&[0xCD; 65536])
+            .unwrap();
         // Long names so each item is fat: fewer files fill a leaf.
         for i in 0..600 {
             let name = format!("cache/entry-{i:04}-{}", "x".repeat(80));
-            std::fs::File::create(src.join(&name)).unwrap().write_all(&[0xAB; 4096]).unwrap();
+            std::fs::File::create(src.join(&name))
+                .unwrap()
+                .write_all(&[0xAB; 4096])
+                .unwrap();
         }
         let img = dir.path().join("dense.img");
         let f = std::fs::File::create(&img).unwrap();
@@ -2622,7 +2850,10 @@ mod btrfs_integration {
             .output()
             .unwrap();
         if !out.status.success() {
-            eprintln!("mkfs.btrfs failed: {}", String::from_utf8_lossy(&out.stderr));
+            eprintln!(
+                "mkfs.btrfs failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
             return;
         }
 
@@ -2633,7 +2864,10 @@ mod btrfs_integration {
         // The filesystem must still be sound. Before the fix this failed with
         // "Wrong key of child node/leaf, wanted: (…), have: (0, 0, 0)".
         let (ok, log) = btrfs_check(&patched, true);
-        assert!(ok, "btrfs check failed after excluding a dense directory:\n{log}");
+        assert!(
+            ok,
+            "btrfs check failed after excluding a dense directory:\n{log}"
+        );
 
         // And the survivor is untouched.
         let outdir = dir.path().join("restored");
@@ -2644,9 +2878,16 @@ mod btrfs_integration {
             .arg(&outdir)
             .output()
             .unwrap();
-        assert!(r.status.success(), "btrfs restore failed: {}", String::from_utf8_lossy(&r.stderr));
+        assert!(
+            r.status.success(),
+            "btrfs restore failed: {}",
+            String::from_utf8_lossy(&r.stderr)
+        );
         let kept = std::fs::read(outdir.join("keep.txt")).unwrap();
-        assert!(kept.len() == 65536 && kept.iter().all(|&b| b == 0xCD), "keep.txt damaged");
+        assert!(
+            kept.len() == 65536 && kept.iter().all(|&b| b == 0xCD),
+            "keep.txt damaged"
+        );
     }
 
     /// The scan's three products are independent, and the weakest must not
@@ -2666,10 +2907,17 @@ mod btrfs_integration {
         };
         let (scan, _) = run_scan(&img, &["secret.log", "cache"]);
         // The walk saw the files that stayed…
-        assert!(scan.categories.total() > 0, "нет разбора по типам: {:?}", scan.categories);
+        assert!(
+            scan.categories.total() > 0,
+            "нет разбора по типам: {:?}",
+            scan.categories
+        );
         // …and the excluded ones are accounted for, however they were handled.
         assert!(scan.bytes_excluded > 0, "исключённые байты не посчитаны");
-        assert!(!scan.ranges.is_empty(), "нечего обнулять — данные попали бы в копию");
+        assert!(
+            !scan.ranges.is_empty(),
+            "нечего обнулять — данные попали бы в копию"
+        );
     }
 
     /// Sparing a child must spare its parent.
@@ -2700,10 +2948,16 @@ mod btrfs_integration {
             std::fs::create_dir_all(src.join("cache").join(sub)).unwrap();
             for i in 0..400 {
                 let name = format!("cache/{sub}/f-{i:04}-{}", "y".repeat(90));
-                std::fs::File::create(src.join(&name)).unwrap().write_all(&[0xAB; 4096]).unwrap();
+                std::fs::File::create(src.join(&name))
+                    .unwrap()
+                    .write_all(&[0xAB; 4096])
+                    .unwrap();
             }
         }
-        std::fs::File::create(src.join("keep.txt")).unwrap().write_all(&[0xCD; 65536]).unwrap();
+        std::fs::File::create(src.join("keep.txt"))
+            .unwrap()
+            .write_all(&[0xCD; 65536])
+            .unwrap();
         let img = dir.path().join("nested.img");
         let f = std::fs::File::create(&img).unwrap();
         f.set_len(768 * 1024 * 1024).unwrap();
@@ -2715,7 +2969,10 @@ mod btrfs_integration {
             .output()
             .unwrap();
         if !out.status.success() {
-            eprintln!("mkfs.btrfs failed: {}", String::from_utf8_lossy(&out.stderr));
+            eprintln!(
+                "mkfs.btrfs failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
             return;
         }
 
@@ -2733,7 +2990,9 @@ mod btrfs_integration {
 
     #[test]
     fn no_patterns_excludes_nothing() {
-        let Some((img, _keep)) = make_btrfs() else { return };
+        let Some((img, _keep)) = make_btrfs() else {
+            return;
+        };
         let (scan, _) = run_scan(&img, &[]);
         assert_eq!(scan.files_excluded, 0);
         assert!(scan.ranges.is_empty());
@@ -2759,11 +3018,25 @@ mod btrfs_integration {
         std::fs::create_dir_all(src.join("cache")).unwrap();
         // Small enough to be stored inline, and unmistakable in a hex dump.
         let secret = b"INLINE-SECRET-THAT-MUST-NOT-TRAVEL".repeat(20); // ~680 B
-        std::fs::File::create(src.join("cache/tiny.txt")).unwrap().write_all(&secret).unwrap();
-        std::fs::File::create(src.join("keep.txt")).unwrap().write_all(&[0xCD; 65536]).unwrap();
+        std::fs::File::create(src.join("cache/tiny.txt"))
+            .unwrap()
+            .write_all(&secret)
+            .unwrap();
+        std::fs::File::create(src.join("keep.txt"))
+            .unwrap()
+            .write_all(&[0xCD; 65536])
+            .unwrap();
         let img = dir.path().join("fs.img");
-        std::fs::File::create(&img).unwrap().set_len(128 * 1024 * 1024).unwrap();
-        let out = std::process::Command::new("mkfs.btrfs").args(["-q", "-r"]).arg(&src).arg(&img).output().unwrap();
+        std::fs::File::create(&img)
+            .unwrap()
+            .set_len(128 * 1024 * 1024)
+            .unwrap();
+        let out = std::process::Command::new("mkfs.btrfs")
+            .args(["-q", "-r"])
+            .arg(&src)
+            .arg(&img)
+            .output()
+            .unwrap();
         if !out.status.success() {
             eprintln!("mkfs.btrfs failed — skipping");
             return;
@@ -2796,10 +3069,22 @@ mod btrfs_integration {
         // …and the file that was not excluded is untouched.
         let outdir = dir.path().join("restored");
         std::fs::create_dir_all(&outdir).unwrap();
-        let r = std::process::Command::new("btrfs").arg("restore").arg(&patched).arg(&outdir).output().unwrap();
-        assert!(r.status.success(), "btrfs restore failed: {}", String::from_utf8_lossy(&r.stderr));
+        let r = std::process::Command::new("btrfs")
+            .arg("restore")
+            .arg(&patched)
+            .arg(&outdir)
+            .output()
+            .unwrap();
+        assert!(
+            r.status.success(),
+            "btrfs restore failed: {}",
+            String::from_utf8_lossy(&r.stderr)
+        );
         let kept = std::fs::read(outdir.join("keep.txt")).unwrap();
-        assert!(kept.len() == 65536 && kept.iter().all(|&b| b == 0xCD), "keep.txt damaged");
+        assert!(
+            kept.len() == 65536 && kept.iter().all(|&b| b == 0xCD),
+            "keep.txt damaged"
+        );
         let ghost = std::fs::read(outdir.join("cache/tiny.txt")).unwrap();
         assert!(ghost.iter().all(|&b| b == 0), "призрак читается не нулями");
     }
@@ -2826,12 +3111,26 @@ mod btrfs_integration {
         // each so the checksum tree fills too.
         for i in 0..400 {
             let name = format!("cache/f-{i:04}-{}", "y".repeat(80));
-            std::fs::File::create(src.join(&name)).unwrap().write_all(&[0xAB; 65536]).unwrap();
+            std::fs::File::create(src.join(&name))
+                .unwrap()
+                .write_all(&[0xAB; 65536])
+                .unwrap();
         }
-        std::fs::File::create(src.join("keep.txt")).unwrap().write_all(&[0xCD; 65536]).unwrap();
+        std::fs::File::create(src.join("keep.txt"))
+            .unwrap()
+            .write_all(&[0xCD; 65536])
+            .unwrap();
         let img = dir.path().join("fs.img");
-        std::fs::File::create(&img).unwrap().set_len(512 * 1024 * 1024).unwrap();
-        let out = std::process::Command::new("mkfs.btrfs").args(["-q", "-r"]).arg(&src).arg(&img).output().unwrap();
+        std::fs::File::create(&img)
+            .unwrap()
+            .set_len(512 * 1024 * 1024)
+            .unwrap();
+        let out = std::process::Command::new("mkfs.btrfs")
+            .args(["-q", "-r"])
+            .arg(&src)
+            .arg(&img)
+            .output()
+            .unwrap();
         if !out.status.success() {
             eprintln!("mkfs.btrfs failed — skipping");
             return;
@@ -2847,16 +3146,30 @@ mod btrfs_integration {
         // that is still there, and every one of them is an apt complaint.
         let outdir = dir.path().join("restored");
         std::fs::create_dir_all(&outdir).unwrap();
-        let r = std::process::Command::new("btrfs").arg("restore").arg(&patched).arg(&outdir).output().unwrap();
-        assert!(r.status.success(), "btrfs restore failed: {}", String::from_utf8_lossy(&r.stderr));
-        let ghosts = std::fs::read_dir(outdir.join("cache")).map(|d| d.count()).unwrap_or(0);
+        let r = std::process::Command::new("btrfs")
+            .arg("restore")
+            .arg(&patched)
+            .arg(&outdir)
+            .output()
+            .unwrap();
+        assert!(
+            r.status.success(),
+            "btrfs restore failed: {}",
+            String::from_utf8_lossy(&r.stderr)
+        );
+        let ghosts = std::fs::read_dir(outdir.join("cache"))
+            .map(|d| d.count())
+            .unwrap_or(0);
         eprintln!("ПРИЗРАКОВ: {ghosts} из 400");
         assert_eq!(
             ghosts, 0,
             "остались призраки: опустевшие листья должны удаляться, а не щадиться"
         );
         let kept = std::fs::read(outdir.join("keep.txt")).unwrap();
-        assert!(kept.len() == 65536 && kept.iter().all(|&b| b == 0xCD), "keep.txt damaged");
+        assert!(
+            kept.len() == 65536 && kept.iter().all(|&b| b == 0xCD),
+            "keep.txt damaged"
+        );
     }
 
     /// The same, on a filesystem mounted with compression.
@@ -2878,11 +3191,25 @@ mod btrfs_integration {
         // Highly compressible and small: mkfs.btrfs --compress stores it as a
         // compressed inline extent.
         let secret = "COMPRESSED-INLINE-SECRET ".repeat(40); // ~1 KiB, compresses well
-        std::fs::File::create(src.join("cache/tiny.txt")).unwrap().write_all(secret.as_bytes()).unwrap();
-        std::fs::File::create(src.join("keep.txt")).unwrap().write_all(&[0xCD; 65536]).unwrap();
+        std::fs::File::create(src.join("cache/tiny.txt"))
+            .unwrap()
+            .write_all(secret.as_bytes())
+            .unwrap();
+        std::fs::File::create(src.join("keep.txt"))
+            .unwrap()
+            .write_all(&[0xCD; 65536])
+            .unwrap();
         let img = dir.path().join("fs.img");
-        std::fs::File::create(&img).unwrap().set_len(128 * 1024 * 1024).unwrap();
-        let out = std::process::Command::new("mkfs.btrfs").args(["-q", "-r"]).arg(&src).arg(&img).output().unwrap();
+        std::fs::File::create(&img)
+            .unwrap()
+            .set_len(128 * 1024 * 1024)
+            .unwrap();
+        let out = std::process::Command::new("mkfs.btrfs")
+            .args(["-q", "-r"])
+            .arg(&src)
+            .arg(&img)
+            .output()
+            .unwrap();
         if !out.status.success() {
             eprintln!("mkfs.btrfs failed — skipping");
             return;
@@ -2917,7 +3244,10 @@ mod btrfs_integration {
             .unwrap();
             let (leaf, key, item) = target.expect("inline-элемент с маркером не найден");
             let packed = zstd::bulk::compress(&item[21..], 3).unwrap();
-            assert!(packed.len() < item.len() - 21, "фикстура: сжатие не уменьшило данные");
+            assert!(
+                packed.len() < item.len() - 21,
+                "фикстура: сжатие не уменьшило данные"
+            );
             let mut new_item = item[..21].to_vec();
             new_item[16] = 3; // BTRFS_COMPRESS_ZSTD
             new_item.extend_from_slice(&packed);
@@ -2939,10 +3269,23 @@ mod btrfs_integration {
         assert!(ok, "фикстура со сжатым inline невалидна:\n{log}");
         let probe = dir.path().join("probe");
         std::fs::create_dir_all(&probe).unwrap();
-        let r = std::process::Command::new("btrfs").arg("restore").arg(&compressed_img).arg(&probe).output().unwrap();
-        assert!(r.status.success(), "btrfs restore фикстуры: {}", String::from_utf8_lossy(&r.stderr));
+        let r = std::process::Command::new("btrfs")
+            .arg("restore")
+            .arg(&compressed_img)
+            .arg(&probe)
+            .output()
+            .unwrap();
+        assert!(
+            r.status.success(),
+            "btrfs restore фикстуры: {}",
+            String::from_utf8_lossy(&r.stderr)
+        );
         let back = std::fs::read(probe.join("cache/tiny.txt")).unwrap();
-        assert_eq!(back, secret.as_bytes(), "фикстура: btrfs не прочитал сжатые данные обратно");
+        assert_eq!(
+            back,
+            secret.as_bytes(),
+            "фикстура: btrfs не прочитал сжатые данные обратно"
+        );
 
         let f = std::fs::File::open(&compressed_img).unwrap();
         let len = f.metadata().unwrap().len();
@@ -2956,13 +3299,28 @@ mod btrfs_integration {
 
         let outdir = dir.path().join("restored");
         std::fs::create_dir_all(&outdir).unwrap();
-        let r = std::process::Command::new("btrfs").arg("restore").arg(&patched).arg(&outdir).output().unwrap();
-        assert!(r.status.success(), "btrfs restore failed: {}", String::from_utf8_lossy(&r.stderr));
+        let r = std::process::Command::new("btrfs")
+            .arg("restore")
+            .arg(&patched)
+            .arg(&outdir)
+            .output()
+            .unwrap();
+        assert!(
+            r.status.success(),
+            "btrfs restore failed: {}",
+            String::from_utf8_lossy(&r.stderr)
+        );
         let ghost = std::fs::read(outdir.join("cache/tiny.txt")).unwrap();
         assert!(!ghost.is_empty(), "файл должен читаться");
-        assert!(ghost.iter().all(|&b| b == 0), "сжатые inline-данные не вычищены");
+        assert!(
+            ghost.iter().all(|&b| b == 0),
+            "сжатые inline-данные не вычищены"
+        );
         let kept = std::fs::read(outdir.join("keep.txt")).unwrap();
-        assert!(kept.len() == 65536 && kept.iter().all(|&b| b == 0xCD), "keep.txt damaged");
+        assert!(
+            kept.len() == 65536 && kept.iter().all(|&b| b == 0xCD),
+            "keep.txt damaged"
+        );
     }
 
     /// A Stage-1 ghost's blocks must stay in the image; only what Stage 2 truly
@@ -3043,11 +3401,20 @@ mod btrfs_integration {
         for i in 0..3000 {
             let ext = if i % 3 == 0 { "log" } else { "keep" };
             let mut f = std::fs::File::create(src.join(format!("f{i:05}.{ext}"))).unwrap();
-            f.write_all(format!("data-{i}-").repeat(8).as_bytes()).unwrap();
+            f.write_all(format!("data-{i}-").repeat(8).as_bytes())
+                .unwrap();
         }
         let img = dir.path().join("fs.img");
-        std::fs::File::create(&img).unwrap().set_len(256 * 1024 * 1024).unwrap();
-        let out = std::process::Command::new("mkfs.btrfs").args(["-q", "-r"]).arg(&src).arg(&img).output().unwrap();
+        std::fs::File::create(&img)
+            .unwrap()
+            .set_len(256 * 1024 * 1024)
+            .unwrap();
+        let out = std::process::Command::new("mkfs.btrfs")
+            .args(["-q", "-r"])
+            .arg(&src)
+            .arg(&img)
+            .output()
+            .unwrap();
         if !out.status.success() {
             eprintln!("mkfs.btrfs failed — skipping");
             return;
@@ -3062,14 +3429,23 @@ mod btrfs_integration {
 
         let outdir = dir.path().join("restored");
         std::fs::create_dir_all(&outdir).unwrap();
-        let out = std::process::Command::new("btrfs").arg("restore").arg(&patched).arg(&outdir).output().unwrap();
+        let out = std::process::Command::new("btrfs")
+            .arg("restore")
+            .arg(&patched)
+            .arg(&outdir)
+            .output()
+            .unwrap();
         assert!(out.status.success());
         let mut logs = 0;
         let mut keeps = 0;
         for e in std::fs::read_dir(&outdir).unwrap().flatten() {
             let n = e.file_name().into_string().unwrap();
-            if n.ends_with(".log") { logs += 1; }
-            if n.ends_with(".keep") { keeps += 1; }
+            if n.ends_with(".log") {
+                logs += 1;
+            }
+            if n.ends_with(".keep") {
+                keeps += 1;
+            }
         }
         assert_eq!(logs, 0, "some .log files survived");
         assert_eq!(keeps, 2000, "kept files lost: {keeps}/2000");
@@ -3098,7 +3474,10 @@ mod btrfs_integration {
             scan.ranges.is_empty(),
             "shared extents were zeroed — CoW safety violated"
         );
-        assert!(scan.files_kept_shared >= 1, "expected shared-kept accounting");
+        assert!(
+            scan.files_kept_shared >= 1,
+            "expected shared-kept accounting"
+        );
     }
 
     /// The plan to remove a leaf must be rebuilt whenever the removal set moves.
@@ -3127,15 +3506,32 @@ mod btrfs_integration {
         // Dense enough that whole leaves fill with this directory's items.
         for i in 0..400 {
             let name = format!("cache/f-{i:04}-{}", "y".repeat(80));
-            std::fs::File::create(src.join(&name)).unwrap().write_all(&[0xAB; 8192]).unwrap();
+            std::fs::File::create(src.join(&name))
+                .unwrap()
+                .write_all(&[0xAB; 8192])
+                .unwrap();
         }
         // …and one file inside it that cannot go: its twin lives outside.
-        std::fs::File::create(src.join("cache/hard.bin")).unwrap().write_all(&[0xEE; 8192]).unwrap();
+        std::fs::File::create(src.join("cache/hard.bin"))
+            .unwrap()
+            .write_all(&[0xEE; 8192])
+            .unwrap();
         std::fs::hard_link(src.join("cache/hard.bin"), src.join("keep_hard.bin")).unwrap();
-        std::fs::File::create(src.join("keep.txt")).unwrap().write_all(&[0xCD; 65536]).unwrap();
+        std::fs::File::create(src.join("keep.txt"))
+            .unwrap()
+            .write_all(&[0xCD; 65536])
+            .unwrap();
         let img = dir.path().join("fs.img");
-        std::fs::File::create(&img).unwrap().set_len(512 * 1024 * 1024).unwrap();
-        let out = std::process::Command::new("mkfs.btrfs").args(["-q", "-r"]).arg(&src).arg(&img).output().unwrap();
+        std::fs::File::create(&img)
+            .unwrap()
+            .set_len(512 * 1024 * 1024)
+            .unwrap();
+        let out = std::process::Command::new("mkfs.btrfs")
+            .args(["-q", "-r"])
+            .arg(&src)
+            .arg(&img)
+            .output()
+            .unwrap();
         if !out.status.success() {
             eprintln!("mkfs.btrfs failed — skipping");
             return;
@@ -3158,10 +3554,22 @@ mod btrfs_integration {
         // The hard link's data must survive: its other name was never excluded.
         let outdir = dir.path().join("restored");
         std::fs::create_dir_all(&outdir).unwrap();
-        let r = std::process::Command::new("btrfs").arg("restore").arg(&patched).arg(&outdir).output().unwrap();
-        assert!(r.status.success(), "btrfs restore failed: {}", String::from_utf8_lossy(&r.stderr));
+        let r = std::process::Command::new("btrfs")
+            .arg("restore")
+            .arg(&patched)
+            .arg(&outdir)
+            .output()
+            .unwrap();
+        assert!(
+            r.status.success(),
+            "btrfs restore failed: {}",
+            String::from_utf8_lossy(&r.stderr)
+        );
         let twin = std::fs::read(outdir.join("keep_hard.bin")).unwrap();
-        assert!(twin.iter().all(|&b| b == 0xEE), "жёсткая ссылка снаружи потеряла данные");
+        assert!(
+            twin.iter().all(|&b| b == 0xEE),
+            "жёсткая ссылка снаружи потеряла данные"
+        );
     }
 
     /// When Stage 2 is refused at assembly time, Stage 1 must still happen.
@@ -3188,8 +3596,14 @@ mod btrfs_integration {
         FAIL_FINALIZE.with(|f| f.set(false));
         let scan = scan.expect("скан обязан выжить: Stage 1 не зависит от Stage 2");
 
-        assert!(!scan.ranges.is_empty(), "данные исключённых файлов не обнулены");
-        assert!(scan.droppable.is_empty(), "призраки нельзя выбрасывать из образа");
+        assert!(
+            !scan.ranges.is_empty(),
+            "данные исключённых файлов не обнулены"
+        );
+        assert!(
+            scan.droppable.is_empty(),
+            "призраки нельзя выбрасывать из образа"
+        );
         assert!(scan.bytes_excluded > 0, "исключённые байты не посчитаны");
 
         let patched = keep.path().join("fallback.img");
@@ -3200,8 +3614,17 @@ mod btrfs_integration {
         // The files are still listed — as ghosts — and read as zeros.
         let outdir = keep.path().join("restored");
         std::fs::create_dir_all(&outdir).unwrap();
-        let r = std::process::Command::new("btrfs").arg("restore").arg(&patched).arg(&outdir).output().unwrap();
-        assert!(r.status.success(), "btrfs restore failed: {}", String::from_utf8_lossy(&r.stderr));
+        let r = std::process::Command::new("btrfs")
+            .arg("restore")
+            .arg(&patched)
+            .arg(&outdir)
+            .output()
+            .unwrap();
+        assert!(
+            r.status.success(),
+            "btrfs restore failed: {}",
+            String::from_utf8_lossy(&r.stderr)
+        );
         let ghost = std::fs::read(outdir.join("secret.log")).unwrap();
         assert!(ghost.iter().all(|&b| b == 0), "призрак читается не нулями");
         let kept = std::fs::read(outdir.join("keep.txt")).unwrap();
@@ -3238,11 +3661,25 @@ mod btrfs_integration {
         for b in swap[page..].iter_mut() {
             *b = 0x5A; // what a used swap area looks like: not zeros
         }
-        std::fs::File::create(src.join("swapfile")).unwrap().write_all(&swap).unwrap();
-        std::fs::File::create(src.join("keep.txt")).unwrap().write_all(&[0xCD; 65536]).unwrap();
+        std::fs::File::create(src.join("swapfile"))
+            .unwrap()
+            .write_all(&swap)
+            .unwrap();
+        std::fs::File::create(src.join("keep.txt"))
+            .unwrap()
+            .write_all(&[0xCD; 65536])
+            .unwrap();
         let img = dir.path().join("fs.img");
-        std::fs::File::create(&img).unwrap().set_len(128 * 1024 * 1024).unwrap();
-        let out = std::process::Command::new("mkfs.btrfs").args(["-q", "-r"]).arg(&src).arg(&img).output().unwrap();
+        std::fs::File::create(&img)
+            .unwrap()
+            .set_len(128 * 1024 * 1024)
+            .unwrap();
+        let out = std::process::Command::new("mkfs.btrfs")
+            .args(["-q", "-r"])
+            .arg(&src)
+            .arg(&img)
+            .output()
+            .unwrap();
         if !out.status.success() {
             eprintln!("mkfs.btrfs failed — skipping");
             return;
@@ -3256,11 +3693,25 @@ mod btrfs_integration {
 
         let outdir = dir.path().join("restored");
         std::fs::create_dir_all(&outdir).unwrap();
-        let r = std::process::Command::new("btrfs").arg("restore").arg(&patched).arg(&outdir).output().unwrap();
-        assert!(r.status.success(), "btrfs restore failed: {}", String::from_utf8_lossy(&r.stderr));
-        let back = std::fs::read(outdir.join("swapfile")).expect("своп-файл удалён — fstab его не найдёт");
+        let r = std::process::Command::new("btrfs")
+            .arg("restore")
+            .arg(&patched)
+            .arg(&outdir)
+            .output()
+            .unwrap();
+        assert!(
+            r.status.success(),
+            "btrfs restore failed: {}",
+            String::from_utf8_lossy(&r.stderr)
+        );
+        let back =
+            std::fs::read(outdir.join("swapfile")).expect("своп-файл удалён — fstab его не найдёт");
         assert_eq!(back.len(), page * pages, "размер своп-файла изменился");
-        assert_eq!(&back[page - 10..page], SWAP_MAGIC, "заголовок свопа потерян — swapon откажет");
+        assert_eq!(
+            &back[page - 10..page],
+            SWAP_MAGIC,
+            "заголовок свопа потерян — swapon откажет"
+        );
         assert!(
             back[page..].iter().all(|&b| b == 0),
             "содержимое свопа уехало в копию"
@@ -3284,7 +3735,11 @@ mod btrfs_integration {
         }
         let dir = tempfile::tempdir().unwrap();
         let img = dir.path().join("shared.img");
-        std::fs::write(&img, zstd::decode_all(std::fs::File::open(&zst).unwrap()).unwrap()).unwrap();
+        std::fs::write(
+            &img,
+            zstd::decode_all(std::fs::File::open(&zst).unwrap()).unwrap(),
+        )
+        .unwrap();
 
         // Exclude broadly, so the walk crosses the snapshot as well as the
         // subvolume it came from.
@@ -3293,7 +3748,10 @@ mod btrfs_integration {
         apply(&img, &scan, &patched); // parent-key + csum-coverage asserts inside
         let (ok, log) = btrfs_check(&patched, true);
         assert!(ok, "btrfs check на образе со снапшотом:\n{log}");
-        assert!(!log.contains("Wrong key"), "ключ родителя оставлен висеть:\n{log}");
+        assert!(
+            !log.contains("Wrong key"),
+            "ключ родителя оставлен висеть:\n{log}"
+        );
     }
 
     /// Set `log_root` (superblock @0x60) to a non-zero value and fix the
@@ -3389,11 +3847,23 @@ mod btrfs_integration {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src");
         std::fs::create_dir_all(&src).unwrap();
-        std::fs::File::create(src.join(&victim)).unwrap().write_all(&[0xAB; 8192]).unwrap();
-        std::fs::File::create(src.join(&innocent)).unwrap().write_all(&[0xCD; 8192]).unwrap();
-        std::fs::File::create(src.join("keep.txt")).unwrap().write_all(&[0xEE; 4096]).unwrap();
+        std::fs::File::create(src.join(&victim))
+            .unwrap()
+            .write_all(&[0xAB; 8192])
+            .unwrap();
+        std::fs::File::create(src.join(&innocent))
+            .unwrap()
+            .write_all(&[0xCD; 8192])
+            .unwrap();
+        std::fs::File::create(src.join("keep.txt"))
+            .unwrap()
+            .write_all(&[0xEE; 4096])
+            .unwrap();
         let img = dir.path().join("fs.img");
-        std::fs::File::create(&img).unwrap().set_len(128 * 1024 * 1024).unwrap();
+        std::fs::File::create(&img)
+            .unwrap()
+            .set_len(128 * 1024 * 1024)
+            .unwrap();
         let out = std::process::Command::new("mkfs.btrfs")
             .args(["-q", "-r"])
             .arg(&src)
@@ -3414,22 +3884,29 @@ mod btrfs_integration {
             let fs = Fs::bootstrap(&mut vol).unwrap();
             let fs_root = *fs.tree_roots.get(&FS_TREE_OBJECTID).unwrap();
             let mut collided = false;
-            walk_tree(&mut vol, &fs.chunks, fs_root, fs.nodesize, |node, nritems| {
-                for_each_item(node, nritems, |_oid, ktype, _koff, data| {
-                    if ktype == DIR_ITEM {
-                        let d = data.to_vec();
-                        let has = |n: &str| {
-                            d.windows(n.len()).any(|w| w == n.as_bytes())
-                        };
-                        if has(&victim) && has(&innocent) {
-                            collided = true;
+            walk_tree(
+                &mut vol,
+                &fs.chunks,
+                fs_root,
+                fs.nodesize,
+                |node, nritems| {
+                    for_each_item(node, nritems, |_oid, ktype, _koff, data| {
+                        if ktype == DIR_ITEM {
+                            let d = data.to_vec();
+                            let has = |n: &str| d.windows(n.len()).any(|w| w == n.as_bytes());
+                            if has(&victim) && has(&innocent) {
+                                collided = true;
+                            }
                         }
-                    }
-                    Ok(())
-                })
-            })
+                        Ok(())
+                    })
+                },
+            )
             .unwrap();
-            assert!(collided, "{victim} and {innocent} did not share a DIR_ITEM — hash formula drifted?");
+            assert!(
+                collided,
+                "{victim} and {innocent} did not share a DIR_ITEM — hash formula drifted?"
+            );
         }
 
         let (scan, _) = run_scan(&img, &[&victim]);
@@ -3441,9 +3918,21 @@ mod btrfs_integration {
 
         let outdir = dir.path().join("restored");
         std::fs::create_dir_all(&outdir).unwrap();
-        let r = std::process::Command::new("btrfs").arg("restore").arg(&patched).arg(&outdir).output().unwrap();
-        assert!(r.status.success(), "btrfs restore failed: {}", String::from_utf8_lossy(&r.stderr));
-        assert!(!outdir.join(&victim).exists(), "victim {victim} still present");
+        let r = std::process::Command::new("btrfs")
+            .arg("restore")
+            .arg(&patched)
+            .arg(&outdir)
+            .output()
+            .unwrap();
+        assert!(
+            r.status.success(),
+            "btrfs restore failed: {}",
+            String::from_utf8_lossy(&r.stderr)
+        );
+        assert!(
+            !outdir.join(&victim).exists(),
+            "victim {victim} still present"
+        );
         let kept = std::fs::read(outdir.join(&innocent)).unwrap();
         assert!(
             kept.len() == 8192 && kept.iter().all(|&b| b == 0xCD),
@@ -3473,8 +3962,16 @@ mod btrfs_integration {
             f.write_all(&vec![fill(i); 8192]).unwrap();
         }
         let img = dir.path().join("fs.img");
-        std::fs::File::create(&img).unwrap().set_len(256 * 1024 * 1024).unwrap();
-        let out = std::process::Command::new("mkfs.btrfs").args(["-q", "-r"]).arg(&src).arg(&img).output().unwrap();
+        std::fs::File::create(&img)
+            .unwrap()
+            .set_len(256 * 1024 * 1024)
+            .unwrap();
+        let out = std::process::Command::new("mkfs.btrfs")
+            .args(["-q", "-r"])
+            .arg(&src)
+            .arg(&img)
+            .output()
+            .unwrap();
         if !out.status.success() {
             eprintln!("mkfs.btrfs failed — skipping");
             return;
@@ -3491,8 +3988,17 @@ mod btrfs_integration {
 
         let outdir = dir.path().join("restored");
         std::fs::create_dir_all(&outdir).unwrap();
-        let r = std::process::Command::new("btrfs").arg("restore").arg(&patched).arg(&outdir).output().unwrap();
-        assert!(r.status.success(), "btrfs restore failed: {}", String::from_utf8_lossy(&r.stderr));
+        let r = std::process::Command::new("btrfs")
+            .arg("restore")
+            .arg(&patched)
+            .arg(&outdir)
+            .output()
+            .unwrap();
+        assert!(
+            r.status.success(),
+            "btrfs restore failed: {}",
+            String::from_utf8_lossy(&r.stderr)
+        );
         for i in 0..600u32 {
             let keep = i % 3 != 0;
             let name = format!("f{i:04}.{}", if keep { "keep" } else { "log" });
@@ -3548,10 +4054,21 @@ mod btrfs_integration {
                 .unwrap();
         }
         let img = dir.path().join("fs.img");
-        std::fs::File::create(&img).unwrap().set_len(1024 * 1024 * 1024).unwrap();
-        let out = std::process::Command::new("mkfs.btrfs").args(["-q", "-r"]).arg(&src).arg(&img).output().unwrap();
+        std::fs::File::create(&img)
+            .unwrap()
+            .set_len(1024 * 1024 * 1024)
+            .unwrap();
+        let out = std::process::Command::new("mkfs.btrfs")
+            .args(["-q", "-r"])
+            .arg(&src)
+            .arg(&img)
+            .output()
+            .unwrap();
         if !out.status.success() {
-            eprintln!("mkfs.btrfs failed: {}", String::from_utf8_lossy(&out.stderr));
+            eprintln!(
+                "mkfs.btrfs failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
             return;
         }
 
@@ -3577,13 +4094,25 @@ mod btrfs_integration {
         apply(&img, &scan, &patched); // parent-key + csum-coverage asserts inside
         let (ok, log) = btrfs_check(&patched, true);
         assert!(ok, "btrfs check on a multi-level csum tree:\n{log}");
-        assert!(!log.contains("Wrong key"), "a parent key was left behind:\n{log}");
+        assert!(
+            !log.contains("Wrong key"),
+            "a parent key was left behind:\n{log}"
+        );
 
         // The kept files must still read back byte-identical.
         let outdir = dir.path().join("restored");
         std::fs::create_dir_all(&outdir).unwrap();
-        let r = std::process::Command::new("btrfs").arg("restore").arg(&patched).arg(&outdir).output().unwrap();
-        assert!(r.status.success(), "btrfs restore failed: {}", String::from_utf8_lossy(&r.stderr));
+        let r = std::process::Command::new("btrfs")
+            .arg("restore")
+            .arg(&patched)
+            .arg(&outdir)
+            .output()
+            .unwrap();
+        assert!(
+            r.status.success(),
+            "btrfs restore failed: {}",
+            String::from_utf8_lossy(&r.stderr)
+        );
         for i in (0..200u32).filter(|i| i % 3 != 0).take(20) {
             let data = std::fs::read(outdir.join(format!("f{i:04}.keep"))).unwrap();
             assert_eq!(data.len(), 1024 * 1024, "f{i:04}.keep truncated");
@@ -3628,7 +4157,10 @@ mod btrfs_integration {
         }
         let dir = tempfile::tempdir().unwrap();
         let img = dir.path().join("fs.img");
-        std::fs::File::create(&img).unwrap().set_len(2 * 1024 * 1024 * 1024).unwrap();
+        std::fs::File::create(&img)
+            .unwrap()
+            .set_len(2 * 1024 * 1024 * 1024)
+            .unwrap();
         // DUP metadata: every metadata block exists twice, and a patch applied
         // to one copy only leaves the mirror stale.
         let out = std::process::Command::new("mkfs.btrfs")
@@ -3636,7 +4168,11 @@ mod btrfs_integration {
             .arg(&img)
             .output()
             .unwrap();
-        assert!(out.status.success(), "mkfs.btrfs: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "mkfs.btrfs: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         let mnt = dir.path().join("mnt");
         std::fs::create_dir_all(&mnt).unwrap();
 
@@ -3659,7 +4195,11 @@ mod btrfs_integration {
             let _m = corpus::mounted(&img, &mnt);
             let c = corpus::populate(&mnt, corpus::Caps::btrfs());
             std::fs::write(mnt.join("keep").join(&victim), corpus::pattern(6001, 8192)).unwrap();
-            std::fs::write(mnt.join("keep").join(&innocent), corpus::pattern(6002, 8192)).unwrap();
+            std::fs::write(
+                mnt.join("keep").join(&innocent),
+                corpus::pattern(6002, 8192),
+            )
+            .unwrap();
             // A subvolume with its own files, and a snapshot of it: their trees
             // share leaves with the main one, and a shared leaf may never be
             // freed no matter what was excluded from it.
@@ -3669,10 +4209,17 @@ mod btrfs_integration {
                 .arg(&sub)
                 .output()
                 .unwrap();
-            assert!(r.status.success(), "subvolume create: {}", String::from_utf8_lossy(&r.stderr));
+            assert!(
+                r.status.success(),
+                "subvolume create: {}",
+                String::from_utf8_lossy(&r.stderr)
+            );
             for i in 0..50u32 {
-                std::fs::write(sub.join(format!("s{i:03}.bin")), corpus::pattern(5000 + i, 65536))
-                    .unwrap();
+                std::fs::write(
+                    sub.join(format!("s{i:03}.bin")),
+                    corpus::pattern(5000 + i, 65536),
+                )
+                .unwrap();
             }
             let _ = std::process::Command::new("sync").status();
             let r = std::process::Command::new("btrfs")
@@ -3681,7 +4228,11 @@ mod btrfs_integration {
                 .arg(mnt.join("keep/snap"))
                 .output()
                 .unwrap();
-            assert!(r.status.success(), "snapshot: {}", String::from_utf8_lossy(&r.stderr));
+            assert!(
+                r.status.success(),
+                "snapshot: {}",
+                String::from_utf8_lossy(&r.stderr)
+            );
             let _ = std::process::Command::new("sync").status();
             (c, sub.join("s000.bin"))
         };
@@ -3696,9 +4247,20 @@ mod btrfs_integration {
             let fs = Fs::bootstrap(&mut vol).unwrap();
             let csum_root = *fs.tree_roots.get(&CSUM_TREE_OBJECTID).unwrap();
             let node = read_node(&mut vol, &fs.chunks, csum_root, fs.nodesize).unwrap();
-            assert!(node[0x64] > 0, "csum tree is a single leaf — fixture too small");
-            let mirrored = fs.chunks.chunks.iter().filter(|c| c.stripes.len() > 1).count();
-            assert!(mirrored > 0, "mkfs проигнорировал -m dup — зеркал нет, проверять нечего");
+            assert!(
+                node[0x64] > 0,
+                "csum tree is a single leaf — fixture too small"
+            );
+            let mirrored = fs
+                .chunks
+                .chunks
+                .iter()
+                .filter(|c| c.stripes.len() > 1)
+                .count();
+            assert!(
+                mirrored > 0,
+                "mkfs проигнорировал -m dup — зеркал нет, проверять нечего"
+            );
             // Every mirror must be patched: the kernel falls back to the second
             // copy when the first fails its checksum, so a stale mirror is a
             // mine that goes off long after the restore.
@@ -3706,7 +4268,11 @@ mod btrfs_integration {
             let mut offs: Vec<u64> = scan.patches.iter().map(|(o, _)| *o).collect();
             offs.sort_unstable();
             offs.dedup();
-            assert_eq!(offs.len(), scan.patches.len(), "патчи по одному смещению дублируются");
+            assert_eq!(
+                offs.len(),
+                scan.patches.len(),
+                "патчи по одному смещению дублируются"
+            );
             let node_len = fs.nodesize;
             let mirrored_patches = scan
                 .patches
@@ -3721,10 +4287,17 @@ mod btrfs_integration {
         }
 
         // The innocent twin is a kept file like any other from here on.
-        c.kept.push((mnt.join("keep").join(&innocent), corpus::pattern(6002, 8192)));
+        c.kept.push((
+            mnt.join("keep").join(&innocent),
+            corpus::pattern(6002, 8192),
+        ));
 
         let (scan, _) = run_scan(&img, &["cache", &victim]);
-        assert!(scan.files_excluded >= 1400, "исключено всего {}", scan.files_excluded);
+        assert!(
+            scan.files_excluded >= 1400,
+            "исключено всего {}",
+            scan.files_excluded
+        );
         let patched = dir.path().join("patched.img");
         apply(&img, &scan, &patched);
         let (ok, log) = btrfs_check(&patched, true);
@@ -3757,8 +4330,15 @@ mod btrfs_integration {
         }
 
         let (ok, log) = btrfs_check(&patched, true);
-        assert!(ok, "btrfs check AFTER mount-and-write — класс дефекта 4 вернулся:\n{log}");
+        assert!(
+            ok,
+            "btrfs check AFTER mount-and-write — класс дефекта 4 вернулся:\n{log}"
+        );
         let complaints = corpus::kernel_complaints(before, &["BTRFS error", "BTRFS critical"]);
-        assert!(complaints.is_empty(), "ядро ругалось на ФС:\n{}", complaints.join("\n"));
+        assert!(
+            complaints.is_empty(),
+            "ядро ругалось на ФС:\n{}",
+            complaints.join("\n")
+        );
     }
 }

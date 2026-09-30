@@ -88,7 +88,6 @@ const AGF_LONGEST: usize = 0x38;
 const AGF_CRC_OFF: usize = 0xD8;
 /// Поле суперблока.
 
-
 /// Дерево группы, которое умеет править этот модуль.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Kind {
@@ -152,9 +151,11 @@ impl std::fmt::Display for ExtRefusal {
             ExtRefusal::LeafFull { ag, tree } => {
                 f.write_str(&tr!("xfs_efree.refusal_leaf_full", ag = ag, tree = tree))
             }
-            ExtRefusal::LeafUnderflow { ag, tree } => {
-                f.write_str(&tr!("xfs_efree.refusal_leaf_underflow", ag = ag, tree = tree))
-            }
+            ExtRefusal::LeafUnderflow { ag, tree } => f.write_str(&tr!(
+                "xfs_efree.refusal_leaf_underflow",
+                ag = ag,
+                tree = tree
+            )),
         }
     }
 }
@@ -358,7 +359,12 @@ fn descend_rmap(
                     std::cmp::Ordering::Less => {}
                 }
             }
-            return Ok(Located { path, leaf: agbno, idx, found });
+            return Ok(Located {
+                path,
+                leaf: agbno,
+                idx,
+                found,
+            });
         }
         if n == 0 || n > nmax {
             return Err(bad(tr!("xfs_efree.rmap_node_impossible")));
@@ -487,7 +493,12 @@ fn descend_alloc(
                     std::cmp::Ordering::Less => {}
                 }
             }
-            return Ok(Located { path, leaf: agbno, idx, found });
+            return Ok(Located {
+                path,
+                leaf: agbno,
+                idx,
+                found,
+            });
         }
         if nrecs == 0 || nrecs > nmax {
             return Err(bad(tr!("xfs_efree.node_impossible", tree = kind.name())));
@@ -558,7 +569,11 @@ fn refresh_parent_keys(
             let blk = edits.get(vol, sb, child, kind)?;
             let n = be16(blk, 0x06) as usize;
             if n == 0 {
-                return Err(bad(tr!("xfs_efree.block_empty", tree = kind.name(), child = child)));
+                return Err(bad(tr!(
+                    "xfs_efree.block_empty",
+                    tree = kind.name(),
+                    child = child
+                )));
             }
             let level = be16(blk, 0x04);
             // У листа ключ берётся из записи, у узла — из его первого ключа.
@@ -601,7 +616,10 @@ fn read_alloc_recs(
         if level == 0 {
             for i in 0..n {
                 let o = BTREE_HDR + i * kind.reclen();
-                out.push(Free { agbno: be32(blk, o), len: be32(blk, o + 4) });
+                out.push(Free {
+                    agbno: be32(blk, o),
+                    len: be32(blk, o + 4),
+                });
             }
         } else {
             let ptr_off = BTREE_HDR + nmax * kind.keyslot();
@@ -655,14 +673,23 @@ pub(crate) fn plan_extent_freeing(
         }
         let reader = AgReader::new(sb, ag);
         let agf = reader.agf(vol)?;
-        let mut bno_edits = AgEdits { ag, blocks: BTreeMap::new() };
-        let mut cnt_edits = AgEdits { ag, blocks: BTreeMap::new() };
+        let mut bno_edits = AgEdits {
+            ag,
+            blocks: BTreeMap::new(),
+        };
+        let mut cnt_edits = AgEdits {
+            ag,
+            blocks: BTreeMap::new(),
+        };
 
         let old = read_alloc_recs(&mut bno_edits, vol, sb, agf.bno_root, Kind::Bno)?;
         // Возвращать уже свободный блок нельзя — это признак, что где-то выше
         // посчитали не то, и молча продолжать здесь опаснее, чем отказать.
         for r in runs {
-            if old.iter().any(|f| r.agbno < f.agbno + f.len && f.agbno < r.agbno + r.len) {
+            if old
+                .iter()
+                .any(|f| r.agbno < f.agbno + f.len && f.agbno < r.agbno + r.len)
+            {
                 return Err(bad(tr!(
                     "xfs_efree.extent_already_free",
                     ag = ag,
@@ -698,7 +725,10 @@ pub(crate) fn plan_extent_freeing(
                 let is_root = loc.leaf == root;
                 let blk = edits.get(vol, sb, loc.leaf, kind)?;
                 if !leaf_delete(blk, sb, kind, loc.idx, is_root) {
-                    out.refusals.push(ExtRefusal::LeafUnderflow { ag, tree: kind.name() });
+                    out.refusals.push(ExtRefusal::LeafUnderflow {
+                        ag,
+                        tree: kind.name(),
+                    });
                     failed = true;
                     break;
                 }
@@ -727,7 +757,10 @@ pub(crate) fn plan_extent_freeing(
                 let _ = is_root;
                 let blk = edits.get(vol, sb, loc.leaf, kind)?;
                 if !leaf_insert(blk, sb, kind, loc.idx, &rec) {
-                    out.refusals.push(ExtRefusal::LeafFull { ag, tree: kind.name() });
+                    out.refusals.push(ExtRefusal::LeafFull {
+                        ag,
+                        tree: kind.name(),
+                    });
                     failed = true;
                     break;
                 }
@@ -746,12 +779,17 @@ pub(crate) fn plan_extent_freeing(
         }
 
         // RMAPBT: убрать записи освобождённых инодов.
-        let mut rmap_edits = AgEdits { ag, blocks: BTreeMap::new() };
+        let mut rmap_edits = AgEdits {
+            ag,
+            blocks: BTreeMap::new(),
+        };
         let mut rmap_touched = false;
         if agf.rmap_root != 0 && !owners.is_empty() {
             let recs = read_rmap_recs(&mut rmap_edits, vol, sb, agf.rmap_root)?;
-            let doomed: Vec<[u8; 24]> =
-                recs.into_iter().filter(|r| owners.contains(&be64(r, 8))).collect();
+            let doomed: Vec<[u8; 24]> = recs
+                .into_iter()
+                .filter(|r| owners.contains(&be64(r, 8)))
+                .collect();
             let mut failed_rmap = false;
             for rec in &doomed {
                 let key = rmap_low_key(rec);
@@ -766,7 +804,8 @@ pub(crate) fn plan_extent_freeing(
                 let is_root = loc.leaf == agf.rmap_root;
                 let blk = rmap_edits.get(vol, sb, loc.leaf, Kind::Rmap)?;
                 if !leaf_delete(blk, sb, Kind::Rmap, loc.idx, is_root) {
-                    out.refusals.push(ExtRefusal::LeafUnderflow { ag, tree: "RMAPBT" });
+                    out.refusals
+                        .push(ExtRefusal::LeafUnderflow { ag, tree: "RMAPBT" });
                     failed_rmap = true;
                     break;
                 }
@@ -841,15 +880,24 @@ mod tests {
     #[test]
     fn merging_covers_all_four_neighbourhoods() {
         // Ни слева, ни справа.
-        assert_eq!(merge_free(&[f(10, 5), f(100, 5)], &[f(50, 5)]), vec![f(10, 5), f(50, 5), f(100, 5)]);
+        assert_eq!(
+            merge_free(&[f(10, 5), f(100, 5)], &[f(50, 5)]),
+            vec![f(10, 5), f(50, 5), f(100, 5)]
+        );
         // Слева.
         assert_eq!(merge_free(&[f(10, 5)], &[f(15, 5)]), vec![f(10, 10)]);
         // Справа.
         assert_eq!(merge_free(&[f(20, 5)], &[f(15, 5)]), vec![f(15, 10)]);
         // С обеих сторон — три записи схлопываются в одну.
-        assert_eq!(merge_free(&[f(10, 5), f(20, 5)], &[f(15, 5)]), vec![f(10, 15)]);
+        assert_eq!(
+            merge_free(&[f(10, 5), f(20, 5)], &[f(15, 5)]),
+            vec![f(10, 15)]
+        );
         // Несколько возвращаемых подряд сливаются и между собой.
-        assert_eq!(merge_free(&[], &[f(10, 5), f(15, 5), f(20, 5)]), vec![f(10, 15)]);
+        assert_eq!(
+            merge_free(&[], &[f(10, 5), f(15, 5), f(20, 5)]),
+            vec![f(10, 15)]
+        );
     }
 
     fn test_sb() -> Sb {
@@ -922,7 +970,10 @@ mod tests {
         let min = minrecs(&sb, Kind::Bno, true);
         let recs: Vec<(u64, u64)> = (0..min as u64).map(|i| (i * 4, 1)).collect();
         let mut b = leaf(Kind::Bno, &recs);
-        assert!(!leaf_delete(&mut b, &sb, Kind::Bno, 0, false), "лист ушёл ниже минимума");
+        assert!(
+            !leaf_delete(&mut b, &sb, Kind::Bno, 0, false),
+            "лист ушёл ниже минимума"
+        );
         // Тот же лист как КОРЕНЬ — можно: у корня минимума нет.
         assert!(leaf_delete(&mut b, &sb, Kind::Bno, 0, true));
     }
@@ -978,7 +1029,9 @@ mod tests {
         }
         impl RawVolume for FileVol {
             fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
-                self.f.read_exact_at(buf, offset).map_err(|e| bad(format!("read: {e}")))
+                self.f
+                    .read_exact_at(buf, offset)
+                    .map_err(|e| bad(format!("read: {e}")))
             }
             fn len(&self) -> u64 {
                 self.len
@@ -987,7 +1040,10 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let img = dir.path().join("fs.img");
-        std::fs::File::create(&img).unwrap().set_len(768 * 1024 * 1024).unwrap();
+        std::fs::File::create(&img)
+            .unwrap()
+            .set_len(768 * 1024 * 1024)
+            .unwrap();
         assert!(std::process::Command::new("mkfs.xfs")
             .args(["-q", "-m", "reflink=1,crc=1"])
             .arg(&img)
@@ -1043,7 +1099,10 @@ mod tests {
                     returned
                         .entry(e.startblock >> sb.agblklog)
                         .or_default()
-                        .push(Free { agbno: e.startblock & mask, len: e.count });
+                        .push(Free {
+                            agbno: e.startblock & mask,
+                            len: e.count,
+                        });
                 }
                 owners.insert(ino);
                 all_inos.push(ino);
@@ -1064,7 +1123,11 @@ mod tests {
         assert!(
             freeing.refusals.is_empty(),
             "D3 пощадил: {:?}",
-            freeing.refusals.iter().map(|r| r.to_string()).collect::<Vec<_>>()
+            freeing
+                .refusals
+                .iter()
+                .map(|r| r.to_string())
+                .collect::<Vec<_>>()
         );
         patches.extend(freeing.patches);
 
@@ -1072,9 +1135,15 @@ mod tests {
         assert!(
             ext.refusals.is_empty(),
             "D4 пощадил: {:?}",
-            ext.refusals.iter().map(|r| r.to_string()).collect::<Vec<_>>()
+            ext.refusals
+                .iter()
+                .map(|r| r.to_string())
+                .collect::<Vec<_>>()
         );
-        assert_eq!(ext.blocks_freed, total_blocks, "вернулось блоков не столько");
+        assert_eq!(
+            ext.blocks_freed, total_blocks,
+            "вернулось блоков не столько"
+        );
         patches.extend(ext.patches);
 
         if let Some(sbp) =
@@ -1114,8 +1183,16 @@ mod tests {
                 .collect()
         };
         let repair = |img: &std::path::Path| -> String {
-            let o = std::process::Command::new("xfs_repair").arg("-n").arg(img).output().unwrap();
-            format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))
+            let o = std::process::Command::new("xfs_repair")
+                .arg("-n")
+                .arg(img)
+                .output()
+                .unwrap();
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            )
         };
 
         let before_mount = repair(&img);
@@ -1159,8 +1236,10 @@ mod tests {
             found.join("\n")
         );
         let complaints = corpus::kernel_complaints(dmesg, &["XFS", "xfs"]);
-        let bad_lines: Vec<&String> =
-            complaints.iter().filter(|l| l.contains("error") || l.contains("corrupt")).collect();
+        let bad_lines: Vec<&String> = complaints
+            .iter()
+            .filter(|l| l.contains("error") || l.contains("corrupt"))
+            .collect();
         assert!(bad_lines.is_empty(), "ядро ругалось:\n{bad_lines:?}");
     }
 }

@@ -50,7 +50,11 @@ pub fn items(on_medium: bool, tools_found: &[bool]) -> Vec<Item> {
             text: tr!("menu.command_prompt").into_owned(),
             separator_above: false,
         },
-        Item { id: INTERFACE, text: tr!("menu.interface").into_owned(), separator_above: false },
+        Item {
+            id: INTERFACE,
+            text: tr!("menu.interface").into_owned(),
+            separator_above: false,
+        },
     ];
 
     let mut first_tool = true;
@@ -66,14 +70,22 @@ pub fn items(on_medium: bool, tools_found: &[bool]) -> Vec<Item> {
     }
 
     if on_medium {
-        out.push(Item { id: REBOOT, text: tr!("menu.reboot").into_owned(), separator_above: true });
+        out.push(Item {
+            id: REBOOT,
+            text: tr!("menu.reboot").into_owned(),
+            separator_above: true,
+        });
         out.push(Item {
             id: SHUTDOWN,
             text: tr!("menu.shutdown").into_owned(),
             separator_above: false,
         });
     } else {
-        out.push(Item { id: CLOSE, text: tr!("menu.close").into_owned(), separator_above: true });
+        out.push(Item {
+            id: CLOSE,
+            text: tr!("menu.close").into_owned(),
+            separator_above: true,
+        });
     }
     out
 }
@@ -92,14 +104,26 @@ mod tests {
     #[test]
     fn only_the_medium_offers_to_restart_the_machine() {
         let medium = items(true, &[false, false]);
-        assert!(ids(&medium).contains(&REBOOT), "the medium ends by restarting");
+        assert!(
+            ids(&medium).contains(&REBOOT),
+            "the medium ends by restarting"
+        );
         assert!(ids(&medium).contains(&SHUTDOWN));
-        assert!(!ids(&medium).contains(&CLOSE), "leaving the shell here IS the restart");
+        assert!(
+            !ids(&medium).contains(&CLOSE),
+            "leaving the shell here IS the restart"
+        );
 
         let desk = items(false, &[false, false]);
-        assert!(!ids(&desk).contains(&REBOOT), "a working machine is never offered this");
+        assert!(
+            !ids(&desk).contains(&REBOOT),
+            "a working machine is never offered this"
+        );
         assert!(!ids(&desk).contains(&SHUTDOWN));
-        assert!(ids(&desk).contains(&CLOSE), "it is offered a way out instead");
+        assert!(
+            ids(&desk).contains(&CLOSE),
+            "it is offered a way out instead"
+        );
     }
 
     #[test]
@@ -129,9 +153,16 @@ mod tests {
     #[test]
     fn the_tools_are_separated_from_the_rest_once() {
         let both = items(true, &[true, true]);
-        let separators: Vec<u32> =
-            both.iter().filter(|i| i.separator_above).map(|i| i.id).collect();
-        assert_eq!(separators, vec![TOOL_BASE, REBOOT], "one above the tools, one below");
+        let separators: Vec<u32> = both
+            .iter()
+            .filter(|i| i.separator_above)
+            .map(|i| i.id)
+            .collect();
+        assert_eq!(
+            separators,
+            vec![TOOL_BASE, REBOOT],
+            "one above the tools, one below"
+        );
     }
 
     #[test]

@@ -69,7 +69,10 @@ pub struct BtrfsUsedMap {
 
 impl UsedSectorMap for BtrfsUsedMap {
     fn is_block_used(&self, block_number: u64) -> bool {
-        self.block_used.get(block_number as usize).copied().unwrap_or(false)
+        self.block_used
+            .get(block_number as usize)
+            .copied()
+            .unwrap_or(false)
     }
     fn used_block_count(&self) -> u64 {
         self.used_count
@@ -159,7 +162,9 @@ impl ChunkMap {
                 return Ok(c.stripes.iter().map(|s| s + delta).collect());
             }
         }
-        Err(bad(format!("logical range [{logical}, {end}) not in any chunk")))
+        Err(bad(format!(
+            "logical range [{logical}, {end}) not in any chunk"
+        )))
     }
 
     /// Physical spans `(offset, len)` covering a logical range that may cross
@@ -207,7 +212,9 @@ pub(crate) fn parse_chunk(logical: u64, data: &[u8], our_devid: u64) -> Result<C
     }
     let profile = ctype & BG_PROFILE_MASK;
     if profile != 0 && profile != BG_DUP {
-        return Err(bad(format!("unsupported chunk profile {profile:#x} (RAID)")));
+        return Err(bad(format!(
+            "unsupported chunk profile {profile:#x} (RAID)"
+        )));
     }
     let expect = if profile == BG_DUP { 2 } else { 1 };
     if num_stripes != expect {
@@ -227,7 +234,11 @@ pub(crate) fn parse_chunk(logical: u64, data: &[u8], our_devid: u64) -> Result<C
         }
         stripes.push(u64at(data, base + 8)); // stripe offset (physical)
     }
-    Ok(Chunk { logical, length, stripes })
+    Ok(Chunk {
+        logical,
+        length,
+        stripes,
+    })
 }
 
 /// Read one B-tree block (`nodesize` bytes) at logical address `logical`.
@@ -287,7 +298,11 @@ pub(crate) fn walk_tree(
 }
 
 /// Iterate a leaf's items as `(key_objectid, key_type, key_offset, data)`.
-pub(crate) fn for_each_item(node: &[u8], nritems: u64, mut f: impl FnMut(u64, u8, u64, &[u8]) -> Result<()>) -> Result<()> {
+pub(crate) fn for_each_item(
+    node: &[u8],
+    nritems: u64,
+    mut f: impl FnMut(u64, u8, u64, &[u8]) -> Result<()>,
+) -> Result<()> {
     for i in 0..nritems as usize {
         let it = HEADER + i * 25;
         let objectid = u64at(node, it);
@@ -332,14 +347,18 @@ pub fn build_btrfs_used_map(vol: &mut dyn RawVolume, block_size: u32) -> Result<
     let our_devid = u64at(&sb, 0xC9);
 
     if num_devices != 1 {
-        return Err(bad(format!("multi-device filesystem ({num_devices} devices)")));
+        return Err(bad(format!(
+            "multi-device filesystem ({num_devices} devices)"
+        )));
     }
     if log_root != 0 {
         // Unreplayed fsync log: its tree blocks are NOT in the extent tree, so
         // a map built from extents would drop them from the copy and the
         // restored system's log replay would read garbage. A full-sector copy
         // carries the log along and replays fine.
-        return Err(bad("log tree not empty (unclean shutdown) — falling back to a full copy"));
+        return Err(bad(
+            "log tree not empty (unclean shutdown) — falling back to a full copy",
+        ));
     }
     // Refuse any incompat feature that could change how allocated space is
     // recorded. Only features that leave the extent-tree walk correct are
@@ -368,7 +387,9 @@ pub fn build_btrfs_used_map(vol: &mut dyn RawVolume, block_size: u32) -> Result<
         )));
     }
     if sys_array_size == 0 || 0x32B + sys_array_size as usize > sb.len() {
-        return Err(bad(format!("implausible sys_chunk_array_size {sys_array_size}")));
+        return Err(bad(format!(
+            "implausible sys_chunk_array_size {sys_array_size}"
+        )));
     }
 
     let nodesize = nodesize as u64;
@@ -384,7 +405,9 @@ pub fn build_btrfs_used_map(vol: &mut dyn RawVolume, block_size: u32) -> Result<
         let ktype = sys[pos + 8];
         let logical = u64at(sys, pos + 9);
         if ktype != CHUNK_ITEM {
-            return Err(bad(format!("unexpected key type {ktype} in sys_chunk_array")));
+            return Err(bad(format!(
+                "unexpected key type {ktype} in sys_chunk_array"
+            )));
         }
         let chunk_data = &sys[pos + 17..];
         if chunk_data.len() < 48 {
@@ -457,8 +480,8 @@ pub fn build_btrfs_used_map(vol: &mut dyn RawVolume, block_size: u32) -> Result<
     walk_tree(vol, &full, extent_root, nodesize, |node, nritems| {
         for_each_item(node, nritems, |objectid, ktype, koffset, _data| {
             let len = match ktype {
-                EXTENT_ITEM => koffset,      // key.offset = extent length
-                METADATA_ITEM => nodesize,   // one tree block
+                EXTENT_ITEM => koffset,    // key.offset = extent length
+                METADATA_ITEM => nodesize, // one tree block
                 _ => return Ok(()),
             };
             if len == 0 {
@@ -596,7 +619,7 @@ mod tests {
         put_u32(&mut b, sb + 0x90, 4096); // sectorsize
         put_u32(&mut b, sb + 0x94, NODESIZE as u32); // nodesize
         put_u64(&mut b, sb + 0xC9, DEVID); // dev_item.devid
-        // sys_chunk_array: one key (CHUNK_ITEM, offset = chunk logical 0) + chunk.
+                                           // sys_chunk_array: one key (CHUNK_ITEM, offset = chunk logical 0) + chunk.
         let sys = sb + 0x32B;
         b[sys + 8] = CHUNK_ITEM;
         put_u64(&mut b, sys + 9, 0); // chunk logical
@@ -619,7 +642,16 @@ mod tests {
         put_leaf_header(&mut b, rt, 1);
         // item 0: key (EXTENT_TREE_OBJECTID=2, ROOT_ITEM, 0); root_item.bytenr@176.
         let rdata = 1024u32;
-        put_item(&mut b, rt, 0, EXTENT_TREE_OBJECTID, ROOT_ITEM, 0, rdata, 256);
+        put_item(
+            &mut b,
+            rt,
+            0,
+            EXTENT_TREE_OBJECTID,
+            ROOT_ITEM,
+            0,
+            rdata,
+            256,
+        );
         put_u64(&mut b, rt + HEADER + rdata as usize + 176, 0x8000); // extent root logical
 
         // --- Extent tree leaf @ logical 0x8000: two allocated extents ---
@@ -644,7 +676,7 @@ mod tests {
         // Reserved first MiB is always kept.
         assert!(map.is_block_used(0));
         assert!(map.is_block_used(block(0xF_F000))); // last block under 1 MiB
-        // Data extent: physical STRIPE + 0xA0_0000.
+                                                     // Data extent: physical STRIPE + 0xA0_0000.
         assert!(map.is_block_used(block(STRIPE + 0xA0_0000)));
         // Metadata extent: physical STRIPE + 0xC0_0000.
         assert!(map.is_block_used(block(STRIPE + 0xC0_0000)));

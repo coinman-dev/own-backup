@@ -45,7 +45,12 @@ impl LinuxRawDevice {
             .open(path)
             .map_err(|e| OwnBackupError::Device(format!("open({path}): {e}")))?;
         let (length, sector_size) = geometry(&file, path)?;
-        Ok(Self { file, path: path.to_string(), length, sector_size })
+        Ok(Self {
+            file,
+            path: path.to_string(),
+            length,
+            sector_size,
+        })
     }
 
     /// Accessible length in bytes.
@@ -120,12 +125,12 @@ fn geometry(file: &File, path: &str) -> Result<(u64, u32)> {
     }
     let mut ss: libc::c_int = 0;
     // SAFETY: as above; failure is tolerated (default 512).
-    let sector = if unsafe { libc::ioctl(fd, BLKSSZGET, &mut ss as *mut libc::c_int) } == 0 && ss > 0
-    {
-        ss as u32
-    } else {
-        512
-    };
+    let sector =
+        if unsafe { libc::ioctl(fd, BLKSSZGET, &mut ss as *mut libc::c_int) } == 0 && ss > 0 {
+            ss as u32
+        } else {
+            512
+        };
     Ok((size, sector))
 }
 
@@ -173,7 +178,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("img.bin");
         let data: Vec<u8> = (0..4096u32).map(|i| i as u8).collect();
-        std::fs::File::create(&path).unwrap().write_all(&data).unwrap();
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(&data)
+            .unwrap();
 
         let mut dev = LinuxRawDevice::open_read(path.to_str().unwrap()).unwrap();
         assert_eq!(dev.length(), 4096);

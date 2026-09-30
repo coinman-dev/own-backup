@@ -163,7 +163,9 @@ impl AppConfig {
         Self::with_file_lock(path, || {
             let mut config = match Self::load_from_file(path) {
                 Ok(config) => config,
-                Err(OwnBackupError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
+                Err(OwnBackupError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                    Self::default()
+                }
                 Err(e) => return Err(e),
             };
             edit(&mut config);
@@ -177,7 +179,9 @@ impl AppConfig {
             std::fs::create_dir_all(parent)?;
         }
         let lock = std::fs::OpenOptions::new()
-            .read(true).write(true).create(true)
+            .read(true)
+            .write(true)
+            .create(true)
             .open(path.with_extension("toml.lock"))?;
         lock.lock()?;
         let result = f();

@@ -131,9 +131,10 @@ pub(crate) enum DirRefusal {
 impl std::fmt::Display for DirRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DirRefusal::ShortformToIno4 { dir_ino } => {
-                f.write_str(&tr!("xfs_dirent.refusal_shortform_to_ino4", dir_ino = dir_ino))
-            }
+            DirRefusal::ShortformToIno4 { dir_ino } => f.write_str(&tr!(
+                "xfs_dirent.refusal_shortform_to_ino4",
+                dir_ino = dir_ino
+            )),
             DirRefusal::NameNotFound { dir_ino, name } => f.write_str(&tr!(
                 "xfs_dirent.refusal_name_not_found",
                 dir_ino = dir_ino,
@@ -144,9 +145,11 @@ impl std::fmt::Display for DirRefusal {
                 dir_ino = dir_ino,
                 name = format!("{name:?}")
             )),
-            DirRefusal::Other { dir_ino, why } => {
-                f.write_str(&tr!("xfs_dirent.refusal_other", dir_ino = dir_ino, why = why))
-            }
+            DirRefusal::Other { dir_ino, why } => f.write_str(&tr!(
+                "xfs_dirent.refusal_other",
+                dir_ino = dir_ino,
+                why = why
+            )),
         }
     }
 }
@@ -222,7 +225,11 @@ fn parse_data(blk: &[u8], sb: &Sb, limit: usize) -> Result<(Vec<DataEnt>, Vec<Ho
         if be16(blk, p) == 0xFFFF {
             let len = be16(blk, p + 2) as usize;
             if len < MIN_UNUSED || p + len > limit {
-                return Err(bad(tr!("xfs_dirent.hole_does_not_fit", len = len, offset = p)));
+                return Err(bad(tr!(
+                    "xfs_dirent.hole_does_not_fit",
+                    len = len,
+                    offset = p
+                )));
             }
             holes.push(Hole { at: p, len });
             p += len;
@@ -272,7 +279,11 @@ fn free_entry(blk: &mut [u8], ent: &DataEnt, holes: &[Hole], limit: usize) -> Re
 /// Пересобрать bestfree блока по фактическим дырам — ровно то, что делает
 /// `xfs_dir2_data_freescan`: три самые большие, по убыванию длины.
 fn rebuild_bestfree(blk: &mut [u8], holes: &[Hole]) -> u16 {
-    let mut sorted: Vec<Hole> = holes.iter().copied().filter(|h| h.len >= MIN_UNUSED).collect();
+    let mut sorted: Vec<Hole> = holes
+        .iter()
+        .copied()
+        .filter(|h| h.len >= MIN_UNUSED)
+        .collect();
     // По убыванию длины; при равных — по возрастанию смещения, чтобы результат
     // не зависел от порядка обхода.
     sorted.sort_by(|a, b| b.len.cmp(&a.len).then(a.at.cmp(&b.at)));
@@ -341,7 +352,11 @@ pub(crate) fn plan_dirent_removal(
     match inode[5] {
         FMT_LOCAL => shortform_removal(sb, dir_ino, inode, names, &mut edit),
         FMT_EXTENTS | FMT_BTREE => block_removal(vol, sb, dir_ino, &inode, names, &mut edit),
-        other => Err(bad(tr!("xfs_dirent.unsupported_format", dir_ino = dir_ino, format = other))),
+        other => Err(bad(tr!(
+            "xfs_dirent.unsupported_format",
+            dir_ino = dir_ino,
+            format = other
+        ))),
     }?;
     Ok(edit)
 }
@@ -373,7 +388,10 @@ fn shortform_removal(
     let mut p = hdr_len;
     for _ in 0..count {
         if p + 3 > sf.len() {
-            return Err(bad(tr!("xfs_dirent.shortform_truncated", dir_ino = dir_ino)));
+            return Err(bad(tr!(
+                "xfs_dirent.shortform_truncated",
+                dir_ino = dir_ino
+            )));
         }
         let namelen = sf[p] as usize;
         let name_off = p + 3;
@@ -386,20 +404,32 @@ fn shortform_removal(
             q += 1;
         }
         if q + ino_sz > sf.len() {
-            return Err(bad(tr!("xfs_dirent.inode_number_past_fork", dir_ino = dir_ino)));
+            return Err(bad(tr!(
+                "xfs_dirent.inode_number_past_fork",
+                dir_ino = dir_ino
+            )));
         }
-        let ino = if ino_sz == 8 { be64(sf, q) } else { be32(sf, q) };
+        let ino = if ino_sz == 8 {
+            be64(sf, q)
+        } else {
+            be32(sf, q)
+        };
         ents.push((p, q + ino_sz - p, name, ino));
         p = q + ino_sz;
     }
     let used = p;
 
     let wanted: std::collections::HashSet<&String> = names.iter().collect();
-    let victims: Vec<&(usize, usize, String, u64)> =
-        ents.iter().filter(|(_, _, n, _)| wanted.contains(n)).collect();
+    let victims: Vec<&(usize, usize, String, u64)> = ents
+        .iter()
+        .filter(|(_, _, n, _)| wanted.contains(n))
+        .collect();
     for n in names {
         if !ents.iter().any(|(_, _, name, _)| name == n) {
-            edit.refusals.push(DirRefusal::NameNotFound { dir_ino, name: n.clone() });
+            edit.refusals.push(DirRefusal::NameNotFound {
+                dir_ino,
+                name: n.clone(),
+            });
         }
     }
     if victims.is_empty() {
@@ -437,8 +467,7 @@ fn shortform_removal(
     let new_used = hdr_len + packed.len();
     let new_count = count - victims.len();
 
-    inode[fs] =
-        u8::try_from(new_count).map_err(|_| bad(tr!("xfs_dirent.count_overflows_byte")))?;
+    inode[fs] = u8::try_from(new_count).map_err(|_| bad(tr!("xfs_dirent.count_overflows_byte")))?;
     inode[fs + 1] = u8::try_from(i8count.saturating_sub(removed_big))
         .map_err(|_| bad(tr!("xfs_dirent.i8count_overflows_byte")))?;
     inode[fs + hdr_len..fs + new_used].copy_from_slice(&packed);
@@ -537,10 +566,16 @@ fn block_removal(
         let mut blk = vec![0u8; bs];
         vol.read_at(sb.fsblock_to_phys(*fsb), &mut blk)?;
         if be32(&blk, 0) as u32 != DIR3_FREE_MAGIC {
-            return Err(bad(tr!("xfs_dirent.free_index_bad_magic", dir_ino = dir_ino)));
+            return Err(bad(tr!(
+                "xfs_dirent.free_index_bad_magic",
+                dir_ino = dir_ino
+            )));
         }
         if !crc_matches(&blk, DATA_CRC_OFF) {
-            return Err(bad(tr!("xfs_dirent.free_index_crc_mismatch", dir_ino = dir_ino)));
+            return Err(bad(tr!(
+                "xfs_dirent.free_index_crc_mismatch",
+                dir_ino = dir_ino
+            )));
         }
         frees.push((*fsb, blk));
     }
@@ -565,7 +600,10 @@ fn block_removal(
             )));
         }
         if !crc_matches(blk, DATA_CRC_OFF) {
-            return Err(bad(tr!("xfs_dirent.data_block_crc_mismatch", dir_ino = dir_ino)));
+            return Err(bad(tr!(
+                "xfs_dirent.data_block_crc_mismatch",
+                dir_ino = dir_ino
+            )));
         }
         // У block-формы записи кончаются перед хеш-массивом.
         let limit = if magic == DIR3_BLOCK_MAGIC {
@@ -576,8 +614,10 @@ fn block_removal(
         };
         let (ents, holes) = parse_data(blk, sb, limit)?;
         let total = ents.len();
-        let mut victims: Vec<DataEnt> =
-            ents.into_iter().filter(|e| wanted.contains(&e.name)).collect();
+        let mut victims: Vec<DataEnt> = ents
+            .into_iter()
+            .filter(|e| wanted.contains(&e.name))
+            .collect();
         if victims.is_empty() {
             continue;
         }
@@ -589,7 +629,10 @@ fn block_removal(
             // «имени нет в каталоге» он не виноват, поэтому учитывается
             // отдельно.
             accounted.insert(keep.name.clone());
-            edit.refusals.push(DirRefusal::WouldEmptyBlock { dir_ino, name: keep.name });
+            edit.refusals.push(DirRefusal::WouldEmptyBlock {
+                dir_ino,
+                name: keep.name,
+            });
             if victims.is_empty() {
                 continue;
             }
@@ -671,7 +714,10 @@ fn block_removal(
 
     for n in names {
         if !found.contains(n) && !accounted.contains(n) {
-            edit.refusals.push(DirRefusal::NameNotFound { dir_ino, name: n.clone() });
+            edit.refusals.push(DirRefusal::NameNotFound {
+                dir_ino,
+                name: n.clone(),
+            });
         }
     }
     if found.is_empty() {
@@ -711,7 +757,9 @@ mod tests {
     }
     impl RawVolume for FileVol {
         fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
-            self.f.read_exact_at(buf, offset).map_err(|e| bad(format!("read: {e}")))
+            self.f
+                .read_exact_at(buf, offset)
+                .map_err(|e| bad(format!("read: {e}")))
         }
         fn len(&self) -> u64 {
             self.len
@@ -723,7 +771,10 @@ mod tests {
     }
 
     fn mkfs(img: &Path, mb: u64) {
-        std::fs::File::create(img).unwrap().set_len(mb * 1024 * 1024).unwrap();
+        std::fs::File::create(img)
+            .unwrap()
+            .set_len(mb * 1024 * 1024)
+            .unwrap();
         assert!(std::process::Command::new("mkfs.xfs")
             .args(["-q", "-m", "reflink=1,crc=1"])
             .arg(img)
@@ -775,7 +826,10 @@ mod tests {
         // Дискриминация: испорченный байт обязан ломать сверку.
         let mut broken = inode.clone();
         broken[200] ^= 0xFF;
-        assert!(!crc_matches(&broken, 0x64), "сверка приняла испорченный инод");
+        assert!(
+            !crc_matches(&broken, 0x64),
+            "сверка приняла испорченный инод"
+        );
     }
 
     /// bestfree — три самые большие дыры по убыванию длины.
@@ -805,10 +859,20 @@ mod tests {
     #[test]
     fn freeing_an_entry_merges_with_both_neighbours() {
         let mut blk = vec![0u8; 4096];
-        let ent = DataEnt { at: 128, len: 32, name: "x".into() };
+        let ent = DataEnt {
+            at: 128,
+            len: 32,
+            name: "x".into(),
+        };
         let holes = [Hole { at: 96, len: 32 }, Hole { at: 160, len: 48 }];
         let merged = free_entry(&mut blk, &ent, &holes, 4096).unwrap();
-        assert_eq!(merged, Hole { at: 96, len: 32 + 32 + 48 });
+        assert_eq!(
+            merged,
+            Hole {
+                at: 96,
+                len: 32 + 32 + 48
+            }
+        );
         assert_eq!(be16(&blk, 96), 0xFFFF);
         assert_eq!(be16(&blk, 98), 112);
         // Хвостовой tag дыры указывает на её начало.
@@ -977,7 +1041,10 @@ mod tests {
                 for k in kept {
                     assert!(listed.contains(k), "каталог {name}: пропал сосед {k}");
                     let body = std::fs::read(d.join(k)).unwrap();
-                    assert!(!body.is_empty(), "каталог {name}: сосед {k} прочитался пустым");
+                    assert!(
+                        !body.is_empty(),
+                        "каталог {name}: сосед {k} прочитался пустым"
+                    );
                 }
                 assert_eq!(
                     listed.len(),
@@ -997,7 +1064,11 @@ mod tests {
         }
 
         // Статика: единственная разрешённая жалоба — оторванный инод.
-        let out = std::process::Command::new("xfs_repair").arg("-n").arg(&img).output().unwrap();
+        let out = std::process::Command::new("xfs_repair")
+            .arg("-n")
+            .arg(&img)
+            .output()
+            .unwrap();
         let text = format!(
             "{}{}",
             String::from_utf8_lossy(&out.stdout),
@@ -1034,8 +1105,10 @@ mod tests {
             "ожидали оторванные иноды (их освобождают D3/D4), а их нет:\n{text}"
         );
         let complaints = corpus::kernel_complaints(before, &["XFS", "xfs"]);
-        let bad: Vec<&String> =
-            complaints.iter().filter(|l| l.contains("error") || l.contains("corrupt")).collect();
+        let bad: Vec<&String> = complaints
+            .iter()
+            .filter(|l| l.contains("error") || l.contains("corrupt"))
+            .collect();
         assert!(bad.is_empty(), "ядро ругалось на ФС:\n{bad:?}");
     }
 
@@ -1095,7 +1168,11 @@ mod tests {
             edit.removed.len(),
             victims.len()
         );
-        eprintln!("  node: убрано {} имён, патчей {}", edit.removed.len(), edit.patches.len());
+        eprintln!(
+            "  node: убрано {} имён, патчей {}",
+            edit.removed.len(),
+            edit.patches.len()
+        );
         drop(v);
         apply(&img, &edit.patches);
 
@@ -1108,13 +1185,21 @@ mod tests {
                 assert!(!d.join(n).exists(), "имя {n} осталось");
             }
             for n in &keepers {
-                assert_eq!(std::fs::read(d.join(n)).unwrap().len(), 64, "сосед {n} испорчен");
+                assert_eq!(
+                    std::fs::read(d.join(n)).unwrap().len(),
+                    64,
+                    "сосед {n} испорчен"
+                );
             }
             for i in 0..500u32 {
                 std::fs::write(d.join(format!("fresh-{i:05}-name.dat")), b"z".repeat(128)).unwrap();
             }
         }
-        let out = std::process::Command::new("xfs_repair").arg("-n").arg(&img).output().unwrap();
+        let out = std::process::Command::new("xfs_repair")
+            .arg("-n")
+            .arg(&img)
+            .output()
+            .unwrap();
         let text = format!(
             "{}{}",
             String::from_utf8_lossy(&out.stdout),
@@ -1137,6 +1222,10 @@ mod tests {
                     && !l.contains("lost+found")
             })
             .collect();
-        assert!(bad.is_empty(), "xfs_repair после правки node-каталога:\n{}", bad.join("\n"));
+        assert!(
+            bad.is_empty(),
+            "xfs_repair после правки node-каталога:\n{}",
+            bad.join("\n")
+        );
     }
 }

@@ -38,13 +38,25 @@ pub struct Caps {
 
 impl Caps {
     pub const fn ext() -> Self {
-        Caps { xattr: true, reflink: false, big_files: 0 }
+        Caps {
+            xattr: true,
+            reflink: false,
+            big_files: 0,
+        }
     }
     pub const fn xfs() -> Self {
-        Caps { xattr: true, reflink: true, big_files: 0 }
+        Caps {
+            xattr: true,
+            reflink: true,
+            big_files: 0,
+        }
     }
     pub const fn btrfs() -> Self {
-        Caps { xattr: true, reflink: true, big_files: 200 }
+        Caps {
+            xattr: true,
+            reflink: true,
+            big_files: 200,
+        }
     }
 }
 
@@ -66,7 +78,9 @@ pub struct Corpus {
 /// Content that says which file it came from, so a block landing in the wrong
 /// file fails a comparison instead of reading as plausible.
 pub fn pattern(seed: u32, len: usize) -> Vec<u8> {
-    (0..len).map(|j| (seed as usize).wrapping_mul(31).wrapping_add(j) as u8).collect()
+    (0..len)
+        .map(|j| (seed as usize).wrapping_mul(31).wrapping_add(j) as u8)
+        .collect()
 }
 
 pub fn mount(img: &Path, mnt: &Path) {
@@ -77,13 +91,24 @@ pub fn mount(img: &Path, mnt: &Path) {
         .arg(mnt)
         .output()
         .unwrap();
-    assert!(out.status.success(), "mount: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "mount: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 pub fn umount(mnt: &Path) {
     let _ = std::process::Command::new("sync").status();
-    let out = std::process::Command::new("umount").arg(mnt).output().unwrap();
-    assert!(out.status.success(), "umount: {}", String::from_utf8_lossy(&out.stderr));
+    let out = std::process::Command::new("umount")
+        .arg(mnt)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "umount: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 /// Unmounts on drop: an assert firing mid-test must not leave a loop mount
@@ -112,9 +137,22 @@ pub fn setxattr(path: &Path, name: &str, value: &[u8]) {
     let p = cstr(path);
     let n = std::ffi::CString::new(name).unwrap();
     // SAFETY: both strings are NUL-terminated and the buffer outlives the call.
-    let rc =
-        unsafe { libc::setxattr(p.as_ptr(), n.as_ptr(), value.as_ptr().cast(), value.len(), 0) };
-    assert_eq!(rc, 0, "setxattr {name} на {}: {}", path.display(), std::io::Error::last_os_error());
+    let rc = unsafe {
+        libc::setxattr(
+            p.as_ptr(),
+            n.as_ptr(),
+            value.as_ptr().cast(),
+            value.len(),
+            0,
+        )
+    };
+    assert_eq!(
+        rc,
+        0,
+        "setxattr {name} на {}: {}",
+        path.display(),
+        std::io::Error::last_os_error()
+    );
 }
 
 pub fn getxattr(path: &Path, name: &str) -> Vec<u8> {
@@ -123,7 +161,11 @@ pub fn getxattr(path: &Path, name: &str) -> Vec<u8> {
     let mut buf = vec![0u8; 65536];
     // SAFETY: as above; the buffer is `buf.len()` bytes long.
     let got = unsafe { libc::getxattr(p.as_ptr(), n.as_ptr(), buf.as_mut_ptr().cast(), buf.len()) };
-    assert!(got >= 0, "getxattr {name}: {}", std::io::Error::last_os_error());
+    assert!(
+        got >= 0,
+        "getxattr {name}: {}",
+        std::io::Error::last_os_error()
+    );
     buf.truncate(got as usize);
     buf
 }
@@ -135,10 +177,18 @@ pub fn lsetxattr(path: &Path, name: &str, value: &[u8]) {
     let p = cstr(path);
     let n = std::ffi::CString::new(name).unwrap();
     // SAFETY: both strings are NUL-terminated and the buffer outlives the call.
-    let rc =
-        unsafe { libc::lsetxattr(p.as_ptr(), n.as_ptr(), value.as_ptr().cast(), value.len(), 0) };
+    let rc = unsafe {
+        libc::lsetxattr(
+            p.as_ptr(),
+            n.as_ptr(),
+            value.as_ptr().cast(),
+            value.len(),
+            0,
+        )
+    };
     assert_eq!(
-        rc, 0,
+        rc,
+        0,
         "lsetxattr {name} на {}: {}",
         path.display(),
         std::io::Error::last_os_error()
@@ -149,14 +199,26 @@ fn mknod(path: &Path, mode: u32, major: u32, minor: u32) {
     let p = cstr(path);
     // SAFETY: the path is NUL-terminated; mknod needs root, which the callers have.
     let rc = unsafe { libc::mknod(p.as_ptr(), mode, libc::makedev(major, minor)) };
-    assert_eq!(rc, 0, "mknod {}: {}", path.display(), std::io::Error::last_os_error());
+    assert_eq!(
+        rc,
+        0,
+        "mknod {}: {}",
+        path.display(),
+        std::io::Error::last_os_error()
+    );
 }
 
 fn mkfifo(path: &Path) {
     let p = cstr(path);
     // SAFETY: as above.
     let rc = unsafe { libc::mkfifo(p.as_ptr(), 0o600) };
-    assert_eq!(rc, 0, "mkfifo {}: {}", path.display(), std::io::Error::last_os_error());
+    assert_eq!(
+        rc,
+        0,
+        "mkfifo {}: {}",
+        path.display(),
+        std::io::Error::last_os_error()
+    );
 }
 
 fn socket(path: &Path) {
@@ -171,7 +233,11 @@ fn reflink(from: &Path, to: &Path) {
         .arg(to)
         .output()
         .unwrap();
-    assert!(out.status.success(), "reflink: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "reflink: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 /// A target too long to live inside an inode (ext's «slow» symlink: ≥ 60 bytes
@@ -202,11 +268,19 @@ pub fn populate(mnt: &Path, caps: Caps) -> Corpus {
     // 300 ordinary kept files, and a nested dense KEPT directory (the leaves of
     // a surviving directory must not be disturbed by a neighbour's removal).
     for i in 0..300u32 {
-        write_kept(&mut c, keep.join(format!("k{i:04}.bin")), pattern(i, 64 * 1024));
+        write_kept(
+            &mut c,
+            keep.join(format!("k{i:04}.bin")),
+            pattern(i, 64 * 1024),
+        );
     }
     std::fs::create_dir_all(keep.join("deep/one")).unwrap();
     for i in 0..400u32 {
-        write_kept(&mut c, keep.join(format!("deep/one/d{i:04}.bin")), pattern(1000 + i, 4096));
+        write_kept(
+            &mut c,
+            keep.join(format!("deep/one/d{i:04}.bin")),
+            pattern(1000 + i, 4096),
+        );
     }
 
     // A dense excluded directory: 600 long names, so its dirent blocks are many
@@ -232,7 +306,8 @@ pub fn populate(mnt: &Path, caps: Caps) -> Corpus {
     // under its kept name), one pair fully inside it (both names go).
     std::fs::write(cache.join("hard_in.bin"), pattern(777, 64 * 1024)).unwrap();
     std::fs::hard_link(cache.join("hard_in.bin"), keep.join("hard_out.bin")).unwrap();
-    c.kept.push((keep.join("hard_out.bin"), pattern(777, 64 * 1024)));
+    c.kept
+        .push((keep.join("hard_out.bin"), pattern(777, 64 * 1024)));
     std::fs::write(cache.join("pair_a.bin"), pattern(778, 32 * 1024)).unwrap();
     std::fs::hard_link(cache.join("pair_a.bin"), cache.join("pair_b.bin")).unwrap();
     c.excluded.push(cache.join("pair_a.bin"));
@@ -265,8 +340,10 @@ pub fn populate(mnt: &Path, caps: Caps) -> Corpus {
     // into a list of block pointers (P2).
     symlink("keep.txt", keep.join("fast_link")).unwrap();
     symlink(SLOW_TARGET, keep.join("slow_link")).unwrap();
-    c.kept_links.push((keep.join("fast_link"), "keep.txt".into()));
-    c.kept_links.push((keep.join("slow_link"), SLOW_TARGET.into()));
+    c.kept_links
+        .push((keep.join("fast_link"), "keep.txt".into()));
+    c.kept_links
+        .push((keep.join("slow_link"), SLOW_TARGET.into()));
     symlink("keep.txt", cache.join("fast_link")).unwrap();
     symlink(SLOW_TARGET, cache.join("slow_link")).unwrap();
     c.excluded.push(cache.join("fast_link"));
@@ -289,7 +366,11 @@ pub fn populate(mnt: &Path, caps: Caps) -> Corpus {
         c.excluded.push(cache.join("shared_xattr.bin"));
         // …and one attribute nobody shares, whose block IS freed with its file.
         std::fs::write(cache.join("private_xattr.bin"), [0xAB; 8192]).unwrap();
-        setxattr(&cache.join("private_xattr.bin"), "user.own", &vec![b'B'; 2048]);
+        setxattr(
+            &cache.join("private_xattr.bin"),
+            "user.own",
+            &vec![b'B'; 2048],
+        );
         c.excluded.push(cache.join("private_xattr.bin"));
     }
 
@@ -298,7 +379,8 @@ pub fn populate(mnt: &Path, caps: Caps) -> Corpus {
         // not a byte of it may be zeroed.
         std::fs::write(cache.join("cloned.bin"), pattern(555, 128 * 1024)).unwrap();
         reflink(&cache.join("cloned.bin"), &keep.join("clone_of_cloned.bin"));
-        c.kept.push((keep.join("clone_of_cloned.bin"), pattern(555, 128 * 1024)));
+        c.kept
+            .push((keep.join("clone_of_cloned.bin"), pattern(555, 128 * 1024)));
         c.excluded.push(cache.join("cloned.bin"));
     }
 
@@ -306,7 +388,11 @@ pub fn populate(mnt: &Path, caps: Caps) -> Corpus {
         // Half kept, half excluded, interleaved — a checksum tree with real
         // internal nodes, and removals scattered across its leaves.
         if i % 2 == 0 {
-            write_kept(&mut c, keep.join(format!("big{i:04}.bin")), pattern(2000 + i, 1024 * 1024));
+            write_kept(
+                &mut c,
+                keep.join(format!("big{i:04}.bin")),
+                pattern(2000 + i, 1024 * 1024),
+            );
         } else {
             let p = cache.join(format!("big{i:04}.bin"));
             std::fs::write(&p, pattern(2000 + i, 1024 * 1024)).unwrap();
@@ -324,8 +410,8 @@ impl Corpus {
     /// free space, because a block freed twice only shows up once it is reused.
     pub fn verify_kept(&self, tag: &str) {
         for (p, want) in &self.kept {
-            let got = std::fs::read(p)
-                .unwrap_or_else(|e| panic!("{tag}: {} нечитаем: {e}", p.display()));
+            let got =
+                std::fs::read(p).unwrap_or_else(|e| panic!("{tag}: {} нечитаем: {e}", p.display()));
             assert!(
                 got == *want,
                 "{tag}: {} повреждён ({} Б вместо {})",
@@ -347,7 +433,11 @@ impl Corpus {
         for (p, target) in &self.kept_links {
             let got = std::fs::read_link(p)
                 .unwrap_or_else(|e| panic!("{tag}: {} пропал: {e}", p.display()));
-            assert_eq!(got.to_string_lossy(), *target, "{tag}: цель симлинка изменилась");
+            assert_eq!(
+                got.to_string_lossy(),
+                *target,
+                "{tag}: цель симлинка изменилась"
+            );
         }
     }
 

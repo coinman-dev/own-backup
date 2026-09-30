@@ -141,8 +141,14 @@ mod tests {
 
     #[test]
     fn the_path_the_shell_looks_at_is_the_one_the_builder_writes() {
-        assert_eq!(tool("totalcmd").unwrap().path_on_medium(), r"totalcmd\TOTALCMD64.EXE");
-        assert_eq!(tool("notepadpp").unwrap().path_on_medium(), r"Notepad++\notepad++.exe");
+        assert_eq!(
+            tool("totalcmd").unwrap().path_on_medium(),
+            r"totalcmd\TOTALCMD64.EXE"
+        );
+        assert_eq!(
+            tool("notepadpp").unwrap().path_on_medium(),
+            r"Notepad++\notepad++.exe"
+        );
     }
 
     /// A 32-bit install has `TOTALCMD.EXE` and not this one. That difference is
@@ -152,7 +158,10 @@ mod tests {
     fn total_commander_is_recognised_by_its_64_bit_executable() {
         let tc = tool("totalcmd").unwrap();
         assert_eq!(tc.exe, "TOTALCMD64.EXE");
-        assert!(!tc.exe.eq_ignore_ascii_case("TOTALCMD.EXE"), "that is the 32-bit one");
+        assert!(
+            !tc.exe.eq_ignore_ascii_case("TOTALCMD.EXE"),
+            "that is the 32-bit one"
+        );
     }
 
     #[test]
@@ -163,8 +172,14 @@ mod tests {
         unique.dedup();
         assert_eq!(ids, unique, "two tools share an id");
         for t in MEDIA_TOOLS {
-            assert!(!t.name.is_empty() && !t.folder.is_empty() && !t.exe.is_empty(), "{t:?}");
-            assert!(!t.folder.contains('/') && !t.folder.contains('\\'), "one folder, not a path");
+            assert!(
+                !t.name.is_empty() && !t.folder.is_empty() && !t.exe.is_empty(),
+                "{t:?}"
+            );
+            assert!(
+                !t.folder.contains('/') && !t.folder.contains('\\'),
+                "one folder, not a path"
+            );
         }
     }
 
@@ -173,7 +188,10 @@ mod tests {
     /// nowhere. Notepad++ has a documented cure and must get it.
     #[test]
     fn notepad_is_told_to_keep_its_settings_beside_itself() {
-        assert_eq!(tool("notepadpp").unwrap().portable_marker, Some("doLocalConf.xml"));
+        assert_eq!(
+            tool("notepadpp").unwrap().portable_marker,
+            Some("doLocalConf.xml")
+        );
     }
 
     /// Neither of these keeps its settings in its own folder, so a medium that
@@ -181,7 +199,11 @@ mod tests {
     #[test]
     fn both_tools_know_where_their_settings_live() {
         for t in MEDIA_TOOLS {
-            assert!(t.settings_in_appdata.is_some(), "{} has nowhere to take settings from", t.id);
+            assert!(
+                t.settings_in_appdata.is_some(),
+                "{} has nowhere to take settings from",
+                t.id
+            );
         }
     }
 
@@ -193,7 +215,10 @@ mod tests {
     fn the_folders_a_medium_has_no_use_for_are_left_behind() {
         let npp = tool("notepadpp").unwrap();
         assert!(npp.skips("themes") && npp.skips("updater"));
-        assert!(npp.skips("Themes"), "a folder name is not case-sensitive on Windows");
+        assert!(
+            npp.skips("Themes"),
+            "a folder name is not case-sensitive on Windows"
+        );
         assert!(!npp.skips("plugins"), "those are part of the program");
         assert!(!npp.skips(""), "and nothing matches nothing");
     }
@@ -206,7 +231,10 @@ mod tests {
     fn the_file_manager_opens_on_the_ram_disk_and_not_on_the_patient() {
         let tc = tool("totalcmd").unwrap();
         assert_eq!(tc.args, [r"/L=X:\", r"/R=X:\"], "both panels");
-        assert!(!tc.args.iter().any(|a| a.contains("C:")), "never the machine being rescued");
+        assert!(
+            !tc.args.iter().any(|a| a.contains("C:")),
+            "never the machine being rescued"
+        );
     }
 
     #[test]

@@ -176,7 +176,11 @@ pub async fn list_dir(
                     || entry
                         .path()
                         .extension()
-                        .map(|e| files_ext.iter().any(|w| w.eq_ignore_ascii_case(&e.to_string_lossy())))
+                        .map(|e| {
+                            files_ext
+                                .iter()
+                                .any(|w| w.eq_ignore_ascii_case(&e.to_string_lossy()))
+                        })
                         .unwrap_or(false);
                 if keep {
                     files.push(DirEntryDto {
@@ -196,7 +200,10 @@ pub async fn list_dir(
 
         Ok(DirListing {
             path: path.clone(),
-            parent: p.parent().map(|x| x.to_string_lossy().to_string()).filter(|s| !s.is_empty()),
+            parent: p
+                .parent()
+                .map(|x| x.to_string_lossy().to_string())
+                .filter(|s| !s.is_empty()),
             entries: dirs,
         })
     })

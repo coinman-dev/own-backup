@@ -27,7 +27,9 @@ fn noise_cluster(seed: u64) -> Vec<u8> {
     let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
     let mut data = vec![0u8; CLUSTER];
     for b in data.iter_mut() {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         *b = (state >> 33) as u8;
     }
     data
@@ -51,8 +53,13 @@ fn sample_clusters() -> Vec<(u64, Vec<u8>)> {
     ]
 }
 
-fn build_image(virtual_size: u64, compression: Qcow2Compression, clusters: &[(u64, Vec<u8>)]) -> Vec<u8> {
-    let mut writer = Qcow2Writer::new(Cursor::new(Vec::new()), opts(virtual_size, compression)).unwrap();
+fn build_image(
+    virtual_size: u64,
+    compression: Qcow2Compression,
+    clusters: &[(u64, Vec<u8>)],
+) -> Vec<u8> {
+    let mut writer =
+        Qcow2Writer::new(Cursor::new(Vec::new()), opts(virtual_size, compression)).unwrap();
     for (index, data) in clusters {
         writer.write_cluster(*index, data).unwrap();
     }
@@ -65,9 +72,16 @@ fn assert_reads_back(image: Vec<u8>, clusters: &[(u64, Vec<u8>)]) {
         let read = reader.read_cluster(*index).unwrap();
         if data.iter().all(|&b| b == 0) {
             // Standalone image: zero clusters are simply not stored.
-            assert!(read.is_none(), "cluster {index}: zeros should be unallocated");
+            assert!(
+                read.is_none(),
+                "cluster {index}: zeros should be unallocated"
+            );
         } else {
-            assert_eq!(read.as_deref(), Some(data.as_slice()), "cluster {index} mismatch");
+            assert_eq!(
+                read.as_deref(),
+                Some(data.as_slice()),
+                "cluster {index} mismatch"
+            );
         }
     }
     // Never-written clusters read as unallocated.
@@ -78,7 +92,11 @@ fn assert_reads_back(image: Vec<u8>, clusters: &[(u64, Vec<u8>)]) {
 #[test]
 fn roundtrip_zstd() {
     let clusters = sample_clusters();
-    let image = build_image(8 * 1024 * 1024, Qcow2Compression::Zstd { level: 3 }, &clusters);
+    let image = build_image(
+        8 * 1024 * 1024,
+        Qcow2Compression::Zstd { level: 3 },
+        &clusters,
+    );
     assert_reads_back(image, &clusters);
 }
 
@@ -99,10 +117,17 @@ fn roundtrip_multiple_l2_tables() {
         (8192, text_cluster(0x22)), // first cluster of the second L2 table
         (12288, noise_cluster(4)),
     ];
-    let image = build_image(1024 * 1024 * 1024, Qcow2Compression::Zstd { level: 3 }, &clusters);
+    let image = build_image(
+        1024 * 1024 * 1024,
+        Qcow2Compression::Zstd { level: 3 },
+        &clusters,
+    );
     let mut reader = Qcow2Reader::open(Cursor::new(image)).unwrap();
     for (index, data) in &clusters {
-        assert_eq!(reader.read_cluster(*index).unwrap().as_deref(), Some(data.as_slice()));
+        assert_eq!(
+            reader.read_cluster(*index).unwrap().as_deref(),
+            Some(data.as_slice())
+        );
     }
 }
 
@@ -125,19 +150,34 @@ fn backing_file_child_semantics() {
 
     let mut reader = Qcow2Reader::open(Cursor::new(image)).unwrap();
     assert_eq!(reader.backing_file(), Some("parent_full.qcow2"));
-    assert_eq!(reader.read_cluster(1).unwrap().as_deref(), Some(text_cluster(0x77).as_slice()));
+    assert_eq!(
+        reader.read_cluster(1).unwrap().as_deref(),
+        Some(text_cluster(0x77).as_slice())
+    );
     assert_eq!(reader.read_cluster(2).unwrap(), Some(vec![0u8; CLUSTER])); // explicit zero
     assert_eq!(reader.read_cluster(3).unwrap(), None); // falls through to parent
 }
 
 #[test]
 fn writer_rejects_misuse() {
-    let mut writer =
-        Qcow2Writer::new(Cursor::new(Vec::new()), opts(1024 * 1024, Qcow2Compression::None)).unwrap();
-    assert!(writer.write_cluster(0, &[0u8; 100]).is_err(), "short cluster");
+    let mut writer = Qcow2Writer::new(
+        Cursor::new(Vec::new()),
+        opts(1024 * 1024, Qcow2Compression::None),
+    )
+    .unwrap();
+    assert!(
+        writer.write_cluster(0, &[0u8; 100]).is_err(),
+        "short cluster"
+    );
     writer.write_cluster(0, &text_cluster(1)).unwrap();
-    assert!(writer.write_cluster(0, &text_cluster(2)).is_err(), "double write");
-    assert!(writer.write_cluster(16, &text_cluster(1)).is_err(), "beyond disk");
+    assert!(
+        writer.write_cluster(0, &text_cluster(2)).is_err(),
+        "double write"
+    );
+    assert!(
+        writer.write_cluster(16, &text_cluster(1)).is_err(),
+        "beyond disk"
+    );
 }
 
 #[test]
@@ -184,7 +224,11 @@ fn chain_read_resolves_through_backing_files() {
         "full.qcow2",
         size,
         None,
-        &[(0, text_cluster(0xA0)), (1, text_cluster(0xA1)), (2, noise_cluster(9))],
+        &[
+            (0, text_cluster(0xA0)),
+            (1, text_cluster(0xA1)),
+            (2, noise_cluster(9)),
+        ],
     );
     write_image_file(
         dir.path(),
@@ -232,7 +276,10 @@ fn chain_read_fails_clearly_on_missing_parent() {
         &[(0, text_cluster(1))],
     );
     let err = Qcow2RandomReader::open(&leaf).unwrap_err().to_string();
-    assert!(err.contains("gone.qcow2"), "error should name the missing parent: {err}");
+    assert!(
+        err.contains("gone.qcow2"),
+        "error should name the missing parent: {err}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -298,7 +345,11 @@ fn qemu_validate(image_path: &Path, virtual_size: u64, clusters: &[(u64, Vec<u8>
     let mut raw = std::fs::read(&raw_path).unwrap();
     // qemu-img may drop trailing sparse zeros on some filesystems; pad back.
     raw.resize(virtual_size as usize, 0);
-    assert_eq!(raw, expected_raw(virtual_size, clusters), "raw contents differ");
+    assert_eq!(
+        raw,
+        expected_raw(virtual_size, clusters),
+        "raw contents differ"
+    );
 }
 
 #[test]
@@ -336,7 +387,11 @@ fn qemu_img_validates_backing_chain() {
     let virtual_size = 8 * 1024 * 1024u64;
 
     let parent_clusters = vec![(0u64, text_cluster(0xAA)), (1, noise_cluster(7))];
-    let parent = build_image(virtual_size, Qcow2Compression::Zstd { level: 3 }, &parent_clusters);
+    let parent = build_image(
+        virtual_size,
+        Qcow2Compression::Zstd { level: 3 },
+        &parent_clusters,
+    );
     let parent_path = dir.path().join("parent.qcow2");
     std::fs::write(&parent_path, parent).unwrap();
 
@@ -407,16 +462,29 @@ fn qemu_and_our_reader_agree_on_relative_backing_chain() {
         .arg(&raw_path)
         .output()
         .expect("run qemu-img convert");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let mut qemu_flat = std::fs::read(&raw_path).unwrap();
     qemu_flat.resize(size as usize, 0);
 
     let mut ours = vec![0u8; size as usize];
-    Qcow2RandomReader::open(&child).unwrap().read_at(0, &mut ours).unwrap();
+    Qcow2RandomReader::open(&child)
+        .unwrap()
+        .read_at(0, &mut ours)
+        .unwrap();
 
     assert_eq!(qemu_flat, ours, "qemu and our chain reader disagree");
-    let expected =
-        expected_raw(size, &[(0, text_cluster(0xB0)), (5, noise_cluster(11)), (7, text_cluster(0x07))]);
+    let expected = expected_raw(
+        size,
+        &[
+            (0, text_cluster(0xB0)),
+            (5, noise_cluster(11)),
+            (7, text_cluster(0x07)),
+        ],
+    );
     assert_eq!(ours, expected);
 }
 
@@ -434,14 +502,25 @@ fn we_read_qemu_produced_images() {
     std::fs::write(&raw_path, expected_raw(virtual_size, &clusters)).unwrap();
 
     // Plain qcow2 from qemu (always available).
-    let mut cases = vec![(dir.path().join("qemu-plain.qcow2"), vec![
-        "convert", "-f", "raw", "-O", "qcow2",
-    ])];
+    let mut cases = vec![(
+        dir.path().join("qemu-plain.qcow2"),
+        vec!["convert", "-f", "raw", "-O", "qcow2"],
+    )];
     // zstd-compressed qcow2 from qemu, when supported.
     if qemu_supports_zstd(dir.path()) {
-        cases.push((dir.path().join("qemu-zstd.qcow2"), vec![
-            "convert", "-f", "raw", "-O", "qcow2", "-c", "-o", "compression_type=zstd",
-        ]));
+        cases.push((
+            dir.path().join("qemu-zstd.qcow2"),
+            vec![
+                "convert",
+                "-f",
+                "raw",
+                "-O",
+                "qcow2",
+                "-c",
+                "-o",
+                "compression_type=zstd",
+            ],
+        ));
     }
 
     for (qcow_path, args) in cases {
@@ -451,13 +530,20 @@ fn we_read_qemu_produced_images() {
             .arg(&qcow_path)
             .output()
             .expect("run qemu-img convert");
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
 
         let file = std::fs::File::open(&qcow_path).unwrap();
         let mut reader = Qcow2Reader::open(std::io::BufReader::new(file)).unwrap();
         assert_eq!(reader.virtual_size(), virtual_size);
         for (index, data) in &clusters {
-            let read = reader.read_cluster(*index).unwrap().unwrap_or_else(|| vec![0u8; CLUSTER]);
+            let read = reader
+                .read_cluster(*index)
+                .unwrap()
+                .unwrap_or_else(|| vec![0u8; CLUSTER]);
             assert_eq!(&read, data, "cluster {index} from {}", qcow_path.display());
         }
     }
@@ -475,7 +561,11 @@ fn assert_file_reads_back(path: &Path, expected: &[(u64, Vec<u8>)]) {
         if data.iter().all(|&b| b == 0) {
             assert!(read.is_none(), "cluster {index}: zeroed → unallocated");
         } else {
-            assert_eq!(read.as_deref(), Some(data.as_slice()), "cluster {index} mismatch after merge");
+            assert_eq!(
+                read.as_deref(),
+                Some(data.as_slice()),
+                "cluster {index} mismatch after merge"
+            );
         }
     }
 }
@@ -511,7 +601,7 @@ fn merge_in_place_overwrite_add_and_zero() {
         merge.write_cluster(0, &text_cluster(0xBB)).unwrap();
         merge.write_cluster(1, &noise_cluster(42)).unwrap();
         merge.write_cluster(100, &vec![0u8; CLUSTER]).unwrap(); // deleted → zeros
-        merge.write_cluster(3, &text_cluster(0x33)).unwrap();   // newly allocated
+        merge.write_cluster(3, &text_cluster(0x33)).unwrap(); // newly allocated
         merge.commit().unwrap();
     }
 
@@ -544,10 +634,17 @@ fn merge_no_writes_is_noop() {
     let original = build_image(virtual_size, Qcow2Compression::None, &clusters);
     std::fs::write(&path, &original).unwrap();
 
-    Qcow2InPlaceMerge::open(&path, None).unwrap().commit().unwrap();
+    Qcow2InPlaceMerge::open(&path, None)
+        .unwrap()
+        .commit()
+        .unwrap();
 
     // Untouched byte-for-byte, and still valid.
-    assert_eq!(std::fs::read(&path).unwrap(), original, "no-write merge must not change the file");
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        original,
+        "no-write merge must not change the file"
+    );
     if qemu_img_available() {
         qemu_validate(&path, virtual_size, &clusters);
     }
@@ -697,4 +794,3 @@ fn qemu_validates_a_consolidated_chain() {
         "qemu-img info does not see the repointed parent:\n{info}"
     );
 }
-

@@ -79,10 +79,19 @@ pub async fn run_wait(args: MediaWaitArgs) -> Result<()> {
         std::thread::sleep(std::time::Duration::from_millis(300));
     }
     println!();
-    println!("[!] Интерфейс не поднялся за {} с — окна нет.", args.timeout);
+    println!(
+        "[!] Интерфейс не поднялся за {} с — окна нет.",
+        args.timeout
+    );
     println!("    Логи:");
-    println!("      {}", program_dir().join("own-backup-gui.log").display());
-    println!("      {}", std::env::temp_dir().join("webview2.log").display());
+    println!(
+        "      {}",
+        program_dir().join("own-backup-gui.log").display()
+    );
+    println!(
+        "      {}",
+        std::env::temp_dir().join("webview2.log").display()
+    );
     println!();
     println!("{}", pf::cli_cheat_sheet());
     tracing::warn!(timeout = args.timeout, "gui did not come up");

@@ -79,7 +79,9 @@ pub(crate) fn validate_geometry(
         return Err(bad("virtual size must be non-zero"));
     }
     if !(9..=21).contains(&cluster_bits) {
-        return Err(bad(format!("cluster_bits {cluster_bits} out of range 9..=21")));
+        return Err(bad(format!(
+            "cluster_bits {cluster_bits} out of range 9..=21"
+        )));
     }
     if let Some(name) = backing_file {
         if name.is_empty() || name.len() > 1023 {
@@ -91,7 +93,10 @@ pub(crate) fn validate_geometry(
 }
 
 /// Write the placeholder header cluster the real header replaces in `finish`.
-pub(crate) fn write_placeholder_header<W: Write + Seek>(w: &mut W, cluster_size: u64) -> Result<()> {
+pub(crate) fn write_placeholder_header<W: Write + Seek>(
+    w: &mut W,
+    cluster_size: u64,
+) -> Result<()> {
     w.seek(SeekFrom::Start(0))?;
     w.write_all(&vec![0u8; cluster_size as usize])?;
     Ok(())
@@ -99,8 +104,11 @@ pub(crate) fn write_placeholder_header<W: Write + Seek>(w: &mut W, cluster_size:
 
 impl<W: Write + Seek> Qcow2Writer<W> {
     pub fn new(mut w: W, opts: Qcow2WriterOptions) -> Result<Self> {
-        let virtual_size =
-            validate_geometry(opts.virtual_size, opts.cluster_bits, opts.backing_file.as_deref())?;
+        let virtual_size = validate_geometry(
+            opts.virtual_size,
+            opts.cluster_bits,
+            opts.backing_file.as_deref(),
+        )?;
         let cluster_size = 1u64 << opts.cluster_bits;
         write_placeholder_header(&mut w, cluster_size)?;
 

@@ -121,7 +121,11 @@ impl RestoreRunState {
         if self.ops.is_empty() {
             return 100;
         }
-        let done = self.ops.iter().filter(|o| o.status == OpStatus::Done).count() as u64;
+        let done = self
+            .ops
+            .iter()
+            .filter(|o| o.status == OpStatus::Done)
+            .count() as u64;
         (done * 100 / self.ops.len() as u64) as u32
     }
 }

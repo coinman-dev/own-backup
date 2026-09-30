@@ -34,7 +34,9 @@ const CHUNK_RATIO: u64 = (1 << 23) * SECTOR / BLOCK;
 
 fn guid_le(s: &str) -> [u8; 16] {
     let hex: String = s.chars().filter(|c| *c != '-').collect();
-    let b: Vec<u8> = (0..16).map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap()).collect();
+    let b: Vec<u8> = (0..16)
+        .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap())
+        .collect();
     let mut o = [0u8; 16];
     o[0..4].copy_from_slice(&[b[3], b[2], b[1], b[0]]);
     o[4..6].copy_from_slice(&[b[5], b[4]]);
@@ -49,7 +51,12 @@ fn put(buf: &mut [u8], off: usize, bytes: &[u8]) {
 
 /// Build a VHDX whose BAT entries are given as `(bat_index, state, file_offset)`
 /// and whose file body is `body` (placed at [`DATA_OFF`]).
-fn build_vhdx(path: &Path, entries: &[(u64, u64, u64)], body: &[(u64, Vec<u8>)], parent: Option<&str>) {
+fn build_vhdx(
+    path: &Path,
+    entries: &[(u64, u64, u64)],
+    body: &[(u64, Vec<u8>)],
+    parent: Option<&str>,
+) {
     let mut file = vec![0u8; (DATA_OFF + 8 * BLOCK) as usize];
     put(&mut file, 0, b"vhdxfile");
 
@@ -57,10 +64,18 @@ fn build_vhdx(path: &Path, entries: &[(u64, u64, u64)], body: &[(u64, Vec<u8>)],
     let r = REGION1_OFF;
     put(&mut file, r, b"regi");
     put(&mut file, r + 8, &2u32.to_le_bytes());
-    put(&mut file, r + 16, &guid_le("2dc27766-f623-4200-9d64-115e9bfd4a08"));
+    put(
+        &mut file,
+        r + 16,
+        &guid_le("2dc27766-f623-4200-9d64-115e9bfd4a08"),
+    );
     put(&mut file, r + 32, &BAT_OFF.to_le_bytes());
     put(&mut file, r + 40, &(1024 * 1024u32).to_le_bytes());
-    put(&mut file, r + 48, &guid_le("8b7ca206-4790-4b9a-b8fe-575f050f886e"));
+    put(
+        &mut file,
+        r + 48,
+        &guid_le("8b7ca206-4790-4b9a-b8fe-575f050f886e"),
+    );
     put(&mut file, r + 64, &META_OFF.to_le_bytes());
     put(&mut file, r + 72, &(1024 * 1024u32).to_le_bytes());
 
@@ -75,7 +90,7 @@ fn build_vhdx(path: &Path, entries: &[(u64, u64, u64)], body: &[(u64, Vec<u8>)],
         (guid_le("8141bf1d-a96f-4709-ba47-f233a8faab5f"), 0x1020, 4),
     ];
     put(&mut file, m + 0x1000, &(BLOCK as u32).to_le_bytes()); // block size
-    // FileParameters flags: bit 1 = has-parent, set only for a real child.
+                                                               // FileParameters flags: bit 1 = has-parent, set only for a real child.
     let flags: u32 = if parent.is_some() { 2 } else { 0 };
     put(&mut file, m + 0x1004, &flags.to_le_bytes());
     put(&mut file, m + 0x1010, &VSIZE.to_le_bytes());
@@ -84,8 +99,14 @@ fn build_vhdx(path: &Path, entries: &[(u64, u64, u64)], body: &[(u64, Vec<u8>)],
     if let Some(parent_name) = parent {
         // Parent locator: one "relative_path" key/value pair, UTF-16LE.
         let base = 0x2000usize;
-        let key: Vec<u8> = "relative_path".encode_utf16().flat_map(u16::to_le_bytes).collect();
-        let val: Vec<u8> = parent_name.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let key: Vec<u8> = "relative_path"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let val: Vec<u8> = parent_name
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
         let key_off = 32u32;
         let val_off = key_off + key.len() as u32;
         put(&mut file, m + base + 18, &1u16.to_le_bytes()); // key/value count
@@ -110,7 +131,11 @@ fn build_vhdx(path: &Path, entries: &[(u64, u64, u64)], body: &[(u64, Vec<u8>)],
 
     for (index, state, file_offset) in entries {
         let entry = (file_offset & 0xFFFF_FFFF_FFF0_0000) | (state & 7);
-        put(&mut file, (BAT_OFF + index * 8) as usize, &entry.to_le_bytes());
+        put(
+            &mut file,
+            (BAT_OFF + index * 8) as usize,
+            &entry.to_le_bytes(),
+        );
     }
     for (off, bytes) in body {
         put(&mut file, *off as usize, bytes);
@@ -170,7 +195,11 @@ fn assert_resolves(mut read: impl FnMut(u64, &mut [u8])) {
             continue; // holds the GPT signature, checked below
         }
         let first = buf[(s * SECTOR) as usize];
-        let expected = if matches!(s, 34 | 35 | 66) { 0xCC } else { 0xAA };
+        let expected = if matches!(s, 34 | 35 | 66) {
+            0xCC
+        } else {
+            0xAA
+        };
         assert_eq!(
             first, expected,
             "sector {s} came from the wrong file (got {first:#04x}, want {expected:#04x})"
@@ -210,8 +239,15 @@ fn unaligned_read_across_a_sector_boundary_follows_the_bitmap() {
     let mut buf = vec![0u8; (SECTOR + 8) as usize];
     read_vhdx_guest_at(&child, start, &mut buf).unwrap();
     let into_34 = (SECTOR - 100) as usize;
-    assert_eq!(buf[into_34], 0xCC, "the byte at the start of sector 34 is the child's");
-    assert_eq!(buf[into_34 - 1], 0x00, "the tail of sector 33 is the parent's padding");
+    assert_eq!(
+        buf[into_34], 0xCC,
+        "the byte at the start of sector 34 is the child's"
+    );
+    assert_eq!(
+        buf[into_34 - 1],
+        0x00,
+        "the tail of sector 33 is the parent's padding"
+    );
     // And the parent's marker byte is where sector 33 began, before our window.
     let mut one = [0u8; 1];
     read_vhdx_guest_at(&child, 33 * SECTOR, &mut one).unwrap();
@@ -228,8 +264,16 @@ fn partial_block_resolves_from_an_offset_inside_it() {
     read_vhdx_guest_at(&child, 33 * SECTOR, &mut buf).unwrap();
     assert_eq!(buf[0], 0xAA, "sector 33 belongs to the parent");
     assert_eq!(buf[SECTOR as usize], 0xCC, "sector 34 belongs to the child");
-    assert_eq!(buf[(2 * SECTOR) as usize], 0xCC, "sector 35 belongs to the child");
-    assert_eq!(buf[(3 * SECTOR) as usize], 0xAA, "sector 36 belongs to the parent");
+    assert_eq!(
+        buf[(2 * SECTOR) as usize],
+        0xCC,
+        "sector 35 belongs to the child"
+    );
+    assert_eq!(
+        buf[(3 * SECTOR) as usize],
+        0xAA,
+        "sector 36 belongs to the parent"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -244,13 +288,18 @@ fn partial_block_resolves_from_an_offset_inside_it() {
 // silent data loss in production: the image looks fine and restores stale
 // bytes.
 
-use own_backup_backup::vhdx_format::{VhdxWriter, VhdxReader};
+use own_backup_backup::vhdx_format::{VhdxReader, VhdxWriter};
 
 /// Build a parent + an empty differencing child over it, both 1 MiB blocks.
 fn diff_pair(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
     let parent = dir.join("p.vhdx");
     let child = dir.join("c.avhdx");
-    build_vhdx(&parent, &[(0, 6, DATA_OFF)], &[(DATA_OFF, parent_block0())], None);
+    build_vhdx(
+        &parent,
+        &[(0, 6, DATA_OFF)],
+        &[(DATA_OFF, parent_block0())],
+        None,
+    );
     // No BAT entries at all: every block of the child comes from the parent.
     build_vhdx(&child, &[], &[], Some("p.vhdx"));
     (parent, child)
@@ -288,12 +337,17 @@ fn a_partial_write_to_a_child_keeps_the_parents_rest_of_the_block() {
 
     // Touch one sector in the middle of block 0; the parent owns the rest.
     let mut w = VhdxWriter::open_existing(&child).unwrap();
-    w.write_at(100 * SECTOR, &vec![0x5Au8; SECTOR as usize]).unwrap();
+    w.write_at(100 * SECTOR, &vec![0x5Au8; SECTOR as usize])
+        .unwrap();
     w.finish().unwrap();
 
     let mut buf = vec![0u8; BLOCK as usize];
     read_vhdx_guest_at(&child, 0, &mut buf).unwrap();
-    assert_eq!(buf[(100 * SECTOR) as usize], 0x5A, "our own write is missing");
+    assert_eq!(
+        buf[(100 * SECTOR) as usize],
+        0x5A,
+        "our own write is missing"
+    );
     assert_eq!(
         &buf[SECTOR as usize..SECTOR as usize + 8],
         b"EFI PART",
@@ -324,5 +378,8 @@ fn zero_writes_to_a_parentless_image_stay_free() {
     r.read_at(0, &mut buf).unwrap();
     assert!(buf.iter().all(|&b| b == 0));
     let len = std::fs::metadata(&path).unwrap().len();
-    assert!(len < 5 * BLOCK, "an all-zero block should not be allocated (file is {len} bytes)");
+    assert!(
+        len < 5 * BLOCK,
+        "an all-zero block should not be allocated (file is {len} bytes)"
+    );
 }

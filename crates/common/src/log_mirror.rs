@@ -138,7 +138,9 @@ impl MirrorLog {
     /// leaves the primary log untouched.
     pub fn write_event(&mut self, buf: &[u8]) {
         self.refresh();
-        let Some(file) = self.file.as_mut() else { return };
+        let Some(file) = self.file.as_mut() else {
+            return;
+        };
         // `sync_data` rather than `flush`: flushing a File is a no-op — the
         // bytes are already in the OS cache, which is exactly what a bugcheck
         // throws away.
@@ -156,12 +158,19 @@ impl MirrorLog {
 fn open_mirror(dir: &Path, name: &str) -> Option<File> {
     std::fs::create_dir_all(dir).ok()?;
     let path = dir.join(name);
-    if std::fs::metadata(&path).map(|m| m.len() > ROTATE_AT).unwrap_or(false) {
+    if std::fs::metadata(&path)
+        .map(|m| m.len() > ROTATE_AT)
+        .unwrap_or(false)
+    {
         let old = path.with_extension("log.old");
         let _ = std::fs::remove_file(&old);
         let _ = std::fs::rename(&path, &old);
     }
-    OpenOptions::new().create(true).append(true).open(&path).ok()
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .ok()
 }
 
 /// The subscriber's writer: the ordinary log file, plus the mirror.
@@ -284,7 +293,10 @@ mod tests {
         mirror.next_check = Instant::now();
         mirror.write_event(b"after\n");
 
-        assert_eq!(std::fs::read_to_string(stick.path().join("test.log")).unwrap(), "after\n");
+        assert_eq!(
+            std::fs::read_to_string(stick.path().join("test.log")).unwrap(),
+            "after\n"
+        );
     }
 
     #[test]
@@ -294,12 +306,18 @@ mod tests {
         config_at(&cfg, Some(Path::new("/proc/nonexistent/own-backup")));
 
         let primary_path = home.path().join("primary.log");
-        let primary =
-            OpenOptions::new().create(true).append(true).open(&primary_path).unwrap();
+        let primary = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&primary_path)
+            .unwrap();
         let mut tee = TeeLog::new(primary, MirrorLog::new(cfg, "test.log"));
         tee.write_all(b"still logged\n").unwrap();
 
-        assert_eq!(std::fs::read_to_string(&primary_path).unwrap(), "still logged\n");
+        assert_eq!(
+            std::fs::read_to_string(&primary_path).unwrap(),
+            "still logged\n"
+        );
         assert!(tee.mirror_path().is_none());
     }
 
@@ -317,6 +335,9 @@ mod tests {
         mirror.write_event(b"fresh\n");
 
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "fresh\n");
-        assert!(stick.path().join("test.log.old").exists(), "the previous one is kept");
+        assert!(
+            stick.path().join("test.log.old").exists(),
+            "the previous one is kept"
+        );
     }
 }

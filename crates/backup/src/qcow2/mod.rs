@@ -51,7 +51,11 @@ pub const MAX_ZSTD_LEVEL: i32 = 19;
 /// config written before the setting did anything, a hand-edited value — is
 /// the default, never "no compression" and never an error mid-run.
 pub fn zstd_level_or_default(level: i32) -> i32 {
-    if (1..=MAX_ZSTD_LEVEL).contains(&level) { level } else { DEFAULT_ZSTD_LEVEL }
+    if (1..=MAX_ZSTD_LEVEL).contains(&level) {
+        level
+    } else {
+        DEFAULT_ZSTD_LEVEL
+    }
 }
 
 /// Version-3 header length with the `compression_type` field (+ padding).
@@ -106,7 +110,10 @@ pub fn decode_l2_entry(entry: u64, cluster_bits: u32) -> Result<ClusterDescripto
         let host_offset = entry & ((1u64 << x) - 1);
         let nb_csectors = ((entry >> x) & ((1u64 << (cluster_bits - 8)) - 1)) + 1;
         let length = nb_csectors * 512 - (host_offset & 511);
-        Ok(ClusterDescriptor::Compressed { host_offset, length })
+        Ok(ClusterDescriptor::Compressed {
+            host_offset,
+            length,
+        })
     } else if entry & OFLAG_ZERO != 0 {
         Ok(ClusterDescriptor::Zero)
     } else {
@@ -130,14 +137,18 @@ pub fn encode_compressed_l2_entry(
 ) -> Result<u64, OwnBackupError> {
     let x = 62 - (cluster_bits - 8);
     if host_offset >= (1u64 << x) {
-        return Err(bad(format!("compressed cluster host offset {host_offset:#x} too large")));
+        return Err(bad(format!(
+            "compressed cluster host offset {host_offset:#x} too large"
+        )));
     }
     // Sectors spanned by [host_offset, host_offset + compressed_len).
     let first_sector = host_offset >> 9;
     let last_sector = (host_offset + compressed_len - 1) >> 9;
     let nb_csectors = last_sector - first_sector + 1;
     if nb_csectors > (1u64 << (cluster_bits - 8)) {
-        return Err(bad(format!("compressed cluster spans {nb_csectors} sectors — does not fit descriptor")));
+        return Err(bad(format!(
+            "compressed cluster spans {nb_csectors} sectors — does not fit descriptor"
+        )));
     }
     Ok(OFLAG_COMPRESSED | ((nb_csectors - 1) << x) | host_offset)
 }
@@ -151,14 +162,22 @@ mod tests {
         let entry = OFLAG_COPIED | 0x50000;
         assert_eq!(
             decode_l2_entry(entry, 16).unwrap(),
-            ClusterDescriptor::Standard { host_offset: 0x50000 }
+            ClusterDescriptor::Standard {
+                host_offset: 0x50000
+            }
         );
     }
 
     #[test]
     fn zero_and_unallocated() {
-        assert_eq!(decode_l2_entry(0, 16).unwrap(), ClusterDescriptor::Unallocated);
-        assert_eq!(decode_l2_entry(OFLAG_ZERO, 16).unwrap(), ClusterDescriptor::Zero);
+        assert_eq!(
+            decode_l2_entry(0, 16).unwrap(),
+            ClusterDescriptor::Unallocated
+        );
+        assert_eq!(
+            decode_l2_entry(OFLAG_ZERO, 16).unwrap(),
+            ClusterDescriptor::Zero
+        );
     }
 
     #[test]
@@ -167,7 +186,10 @@ mod tests {
         for (offset, len) in [(0x10008u64, 1000u64), (0x123456, 65000), (512, 1), (511, 2)] {
             let entry = encode_compressed_l2_entry(offset, len, 16).unwrap();
             match decode_l2_entry(entry, 16).unwrap() {
-                ClusterDescriptor::Compressed { host_offset, length } => {
+                ClusterDescriptor::Compressed {
+                    host_offset,
+                    length,
+                } => {
                     assert_eq!(host_offset, offset);
                     // Decoded length covers at least the real stream (it is
                     // rounded up to the end of the last 512-byte sector).

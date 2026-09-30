@@ -72,12 +72,19 @@ pub async fn run(args: ScanExclusionsArgs) -> Result<()> {
         let cur = own_backup_backup::ntfs_scan::RawVolumeCursor::new(&mut dev);
         let mut buffered = own_backup_backup::ntfs_scan::BufferedVolume::new(cur, 4 << 20, 6);
         let mut last = Instant::now();
-        match own_backup_backup::ntfs_scan::scan_mft_with(&mut buffered, &patterns, |done, total| {
-            if last.elapsed().as_secs() >= 2 {
-                println!("  … {done} из {total} записей MFT, {:.0} с", t.elapsed().as_secs_f64());
-                last = Instant::now();
-            }
-        }) {
+        match own_backup_backup::ntfs_scan::scan_mft_with(
+            &mut buffered,
+            &patterns,
+            |done, total| {
+                if last.elapsed().as_secs() >= 2 {
+                    println!(
+                        "  … {done} из {total} записей MFT, {:.0} с",
+                        t.elapsed().as_secs_f64()
+                    );
+                    last = Instant::now();
+                }
+            },
+        ) {
             Ok(scan) => {
                 let secs = t.elapsed().as_secs_f64();
                 println!("=== чтение $MFT ===");
@@ -88,7 +95,10 @@ pub async fn run(args: ScanExclusionsArgs) -> Result<()> {
                     scan.bytes_excluded,
                     scan.bytes_excluded as f64 / (1024.0 * 1024.0)
                 );
-                println!("Оставлено в копии: {} (резидентные, reparse и пр.)", scan.kept.len());
+                println!(
+                    "Оставлено в копии: {} (резидентные, reparse и пр.)",
+                    scan.kept.len()
+                );
                 println!("Путей к удалению: {}", scan.paths.len());
                 println!("ВРЕМЯ:            {secs:.1} с");
                 if let Some(path) = &args.list {

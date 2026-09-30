@@ -238,8 +238,7 @@ mod tests {
         let mut data = vec![0xAAu8; 1024];
         data[512] = 0xBB;
         let unchanged_hash = compute_block_checksum(&vec![0xAAu8; 256]);
-        let prev: HashMap<u64, u64> =
-            (0..4u64).map(|n| (n, unchanged_hash)).collect();
+        let prev: HashMap<u64, u64> = (0..4u64).map(|n| (n, unchanged_hash)).collect();
 
         let mut reader = MockBlockReader::new(data.clone(), 256);
         let used = AllUsedMap::new(4);

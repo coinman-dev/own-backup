@@ -25,10 +25,9 @@ use windows::Win32::Security::Cryptography::{
 use windows::Win32::Security::{
     AclSizeInformation, CopySid, CreateWellKnownSid, EqualSid, GetAce, GetAclInformation,
     GetLengthSid, GetSecurityDescriptorControl, GetTokenInformation, TokenUser,
-    WinBuiltinAdministratorsSid, WinLocalSystemSid,
-    ACCESS_ALLOWED_ACE, ACE_HEADER, ACL_SIZE_INFORMATION, DACL_SECURITY_INFORMATION,
-    OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, SE_DACL_PROTECTED,
-    TOKEN_QUERY, TOKEN_USER,
+    WinBuiltinAdministratorsSid, WinLocalSystemSid, ACCESS_ALLOWED_ACE, ACE_HEADER,
+    ACL_SIZE_INFORMATION, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+    PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, SE_DACL_PROTECTED, TOKEN_QUERY, TOKEN_USER,
 };
 use windows::Win32::Storage::FileSystem::{
     CreateDirectoryW, CreateFileW, FileDispositionInfo, GetFileInformationByHandle,
@@ -253,9 +252,8 @@ impl WindowsBackend {
 
     fn with_owner(data_dir: &Path, owner: Sid) -> Result<Self> {
         no_impersonation()?;
-        unsafe { EqualSid(Sid::current()?.ptr(), owner.ptr()) }.map_err(|_| {
-            bad(tr!("seal_local_windows.service_account_only"))
-        })?;
+        unsafe { EqualSid(Sid::current()?.ptr(), owner.ptr()) }
+            .map_err(|_| bad(tr!("seal_local_windows.service_account_only")))?;
         // Resolve the configured parent once, then pin it and the private directory.
         let parent_path = std::fs::canonicalize(data_dir)?;
         let parent = directory_handle(&parent_path)?;
@@ -412,7 +410,8 @@ impl Backend for WindowsBackend {
         for entry in std::fs::read_dir(&self.root)
             .map_err(|e| bad(tr!("seal_local_windows.dir_unreadable", error = e)))?
         {
-            let entry = entry.map_err(|e| bad(tr!("seal_local_windows.dir_entry_error", error = e)))?;
+            let entry =
+                entry.map_err(|e| bad(tr!("seal_local_windows.dir_entry_error", error = e)))?;
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
             let Some(stem) = name.strip_suffix(".dpapi") else {
@@ -479,7 +478,12 @@ fn check_file(file: &File, owner: &Sid, directory: bool) -> Result<()> {
     check_file_policy(file, owner, directory, false)
 }
 
-fn check_file_policy(file: &File, owner: &Sid, directory: bool, allow_inherited: bool) -> Result<()> {
+fn check_file_policy(
+    file: &File,
+    owner: &Sid,
+    directory: bool,
+    allow_inherited: bool,
+) -> Result<()> {
     let h = HANDLE(file.as_raw_handle());
     let mut info = BY_HANDLE_FILE_INFORMATION::default();
     unsafe { GetFileInformationByHandle(h, &mut info) }.map_err(win)?;
@@ -514,8 +518,8 @@ fn check_file_policy(file: &File, owner: &Sid, directory: bool, allow_inherited:
     let mut revision = 0u32;
     unsafe {
         let owner_is_system = EqualSid(actual_owner, owner.ptr()).is_ok();
-        let owner_is_admins = allow_inherited
-            && EqualSid(actual_owner, Sid::administrators()?.ptr()).is_ok();
+        let owner_is_admins =
+            allow_inherited && EqualSid(actual_owner, Sid::administrators()?.ptr()).is_ok();
         if !owner_is_system && !owner_is_admins {
             return Err(bad("unexpected key-store owner"));
         }

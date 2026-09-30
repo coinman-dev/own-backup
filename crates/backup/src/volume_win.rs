@@ -78,7 +78,10 @@ pub fn all_volume_roots() -> Vec<String> {
         return out;
     };
     loop {
-        let len = name_buf.iter().position(|&c| c == 0).unwrap_or(name_buf.len());
+        let len = name_buf
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(name_buf.len());
         out.push(String::from_utf16_lossy(&name_buf[..len]));
         name_buf = [0u16; 512];
         // SAFETY: valid find handle and buffer.
@@ -111,7 +114,9 @@ pub fn volume_extents(volume_root: &str) -> Vec<VolumeExtent> {
             None,
         )
     };
-    let Ok(handle) = handle else { return Vec::new() };
+    let Ok(handle) = handle else {
+        return Vec::new();
+    };
     let handle = FileHandle(handle);
 
     // VOLUME_DISK_EXTENTS: u32 count, pad to 8, then 24-byte DISK_EXTENT[]
@@ -153,7 +158,9 @@ pub fn volume_extents(volume_root: &str) -> Vec<VolumeExtent> {
 /// Answers "which volume is `C:\Windows` on" without going through a drive
 /// letter, which can be absent or reassigned.
 pub fn volume_root_for_path(path: &str) -> Option<String> {
-    use windows::Win32::Storage::FileSystem::{GetVolumeNameForVolumeMountPointW, GetVolumePathNameW};
+    use windows::Win32::Storage::FileSystem::{
+        GetVolumeNameForVolumeMountPointW, GetVolumePathNameW,
+    };
 
     let wide = to_wide(path);
     let mut mount = [0u16; 512];
@@ -185,7 +192,10 @@ pub fn volume_start_on_disk(volume_root: &str) -> Option<(u32, u64)> {
 
 /// Every `\\?\Volume{GUID}\` root that lives on `disk_number`.
 pub fn all_volume_roots_on_disk(disk_number: u32) -> Vec<String> {
-    all_volume_roots().into_iter().filter(|vr| volume_on_disk(vr, disk_number)).collect()
+    all_volume_roots()
+        .into_iter()
+        .filter(|vr| volume_on_disk(vr, disk_number))
+        .collect()
 }
 
 /// Volume root of the volume starting exactly at `part_offset` on
@@ -211,7 +221,11 @@ pub fn volume_drive_letters(volume_root: &str) -> Vec<String> {
     let mut needed = 0u32;
     // SAFETY: `wide` outlives the call; buffer sized by `buf.len()`.
     let ok = unsafe {
-        GetVolumePathNamesForVolumeNameW(PCWSTR(wide.as_ptr()), Some(buf.as_mut_slice()), &mut needed)
+        GetVolumePathNamesForVolumeNameW(
+            PCWSTR(wide.as_ptr()),
+            Some(buf.as_mut_slice()),
+            &mut needed,
+        )
     };
     if ok.is_err() {
         // Grow once if the buffer was too small, then give up quietly.
@@ -240,7 +254,10 @@ pub fn volume_drive_letters(volume_root: &str) -> Vec<String> {
             let path = String::from_utf16_lossy(s);
             let bytes = path.as_bytes();
             // "X:\" → "X:"; ignore mount-point folder paths.
-            if bytes.len() == 3 && bytes[1] == b':' && bytes[2] == b'\\' && bytes[0].is_ascii_alphabetic()
+            if bytes.len() == 3
+                && bytes[1] == b':'
+                && bytes[2] == b'\\'
+                && bytes[0].is_ascii_alphabetic()
             {
                 Some(format!("{}:", (bytes[0] as char).to_ascii_uppercase()))
             } else {
@@ -322,7 +339,16 @@ pub fn bring_volume_online(volume_root: &str) -> std::result::Result<(), String>
     let mut returned = 0u32;
     // SAFETY: no in/out buffers; valid volume handle.
     unsafe {
-        DeviceIoControl(handle.0, IOCTL_VOLUME_ONLINE, None, 0, None, 0, Some(&mut returned), None)
+        DeviceIoControl(
+            handle.0,
+            IOCTL_VOLUME_ONLINE,
+            None,
+            0,
+            None,
+            0,
+            Some(&mut returned),
+            None,
+        )
     }
     .map_err(|e| format!("IOCTL_VOLUME_ONLINE: {e}"))
 }
@@ -337,7 +363,10 @@ pub fn strip_letters_on_disk(disk_number: u32) {
 /// Drive letters of every volume on `disk_number`. Empty if Windows has not
 /// assigned any yet — a freshly attached disk can need a moment.
 pub fn drive_letters_on_disk(disk_number: u32) -> Vec<String> {
-    all_volume_roots_on_disk(disk_number).iter().flat_map(|vr| volume_drive_letters(vr)).collect()
+    all_volume_roots_on_disk(disk_number)
+        .iter()
+        .flat_map(|vr| volume_drive_letters(vr))
+        .collect()
 }
 
 /// Partition device objects that still exist on `disk_number`, as openable
@@ -418,7 +447,8 @@ pub fn dismount_volume_forced(volume_root: &str) -> bool {
             )
         }
     };
-    let Ok(handle) = open(GENERIC_READ.0 | GENERIC_WRITE.0).or_else(|_| open(GENERIC_READ.0)) else {
+    let Ok(handle) = open(GENERIC_READ.0 | GENERIC_WRITE.0).or_else(|_| open(GENERIC_READ.0))
+    else {
         warn!(volume = %device, "cannot open the image's volume to dismount it");
         return false;
     };
@@ -427,7 +457,16 @@ pub fn dismount_volume_forced(volume_root: &str) -> bool {
     let t = Instant::now();
     // SAFETY: valid volume handle; no in/out buffers.
     let ok = unsafe {
-        DeviceIoControl(handle.0, FSCTL_DISMOUNT_VOLUME, None, 0, None, 0, Some(&mut returned), None)
+        DeviceIoControl(
+            handle.0,
+            FSCTL_DISMOUNT_VOLUME,
+            None,
+            0,
+            None,
+            0,
+            Some(&mut returned),
+            None,
+        )
     }
     .map_err(|e| warn!(error = %e, volume = %device, "image volume dismount failed"))
     .is_ok();
@@ -496,7 +535,16 @@ pub fn flush_lock_dismount_volume_within(
         attempts += 1;
         // SAFETY: no in/out buffers.
         match unsafe {
-            DeviceIoControl(handle.0, FSCTL_LOCK_VOLUME, None, 0, None, 0, Some(&mut returned), None)
+            DeviceIoControl(
+                handle.0,
+                FSCTL_LOCK_VOLUME,
+                None,
+                0,
+                None,
+                0,
+                Some(&mut returned),
+                None,
+            )
         } {
             Ok(()) => break true,
             Err(e) => {
@@ -517,7 +565,16 @@ pub fn flush_lock_dismount_volume_within(
     // Forced when unlocked — still better than nothing.
     // SAFETY: no in/out buffers.
     let dismounted = unsafe {
-        DeviceIoControl(handle.0, FSCTL_DISMOUNT_VOLUME, None, 0, None, 0, Some(&mut returned), None)
+        DeviceIoControl(
+            handle.0,
+            FSCTL_DISMOUNT_VOLUME,
+            None,
+            0,
+            None,
+            0,
+            Some(&mut returned),
+            None,
+        )
     }
     .map_err(|e| warn!(error = %e, "volume dismount failed"))
     .is_ok();
@@ -590,7 +647,11 @@ impl VolumeDismountGuard {
             taken = ?volumes, failed = ?failed,
             "dismount guard established"
         );
-        Self { _handles: handles, volumes, failed }
+        Self {
+            _handles: handles,
+            volumes,
+            failed,
+        }
     }
 
     /// Take down every volume on the whole disk.

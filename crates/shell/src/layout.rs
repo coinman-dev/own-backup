@@ -100,21 +100,52 @@ pub fn bar_slots(
     close_w: i32,
 ) -> BarSlots {
     let g = gap(bar_h);
-    let start = Slot { x: g, y: 0, w: start_w.max(0), h: bar_h };
+    let start = Slot {
+        x: g,
+        y: 0,
+        w: start_w.max(0),
+        h: bar_h,
+    };
 
     // Right to left: the close button if there is one, then the clock, then
     // the layout.
     let mut edge = bar_w - g;
-    let close = Slot { x: edge - close_w.max(0), y: 0, w: close_w.max(0), h: bar_h };
+    let close = Slot {
+        x: edge - close_w.max(0),
+        y: 0,
+        w: close_w.max(0),
+        h: bar_h,
+    };
     if !close.is_empty() {
         edge = close.x - g;
     }
-    let clock = Slot { x: edge - clock_w.max(0), y: 0, w: clock_w.max(0), h: bar_h };
-    let layout = Slot { x: clock.x - g - layout_w.max(0), y: 0, w: layout_w.max(0), h: bar_h };
+    let clock = Slot {
+        x: edge - clock_w.max(0),
+        y: 0,
+        w: clock_w.max(0),
+        h: bar_h,
+    };
+    let layout = Slot {
+        x: clock.x - g - layout_w.max(0),
+        y: 0,
+        w: layout_w.max(0),
+        h: bar_h,
+    };
 
     let from = start.right() + g;
-    let buttons = Slot { x: from, y: 0, w: (layout.x - g - from).max(0), h: bar_h };
-    BarSlots { start, buttons, layout, clock, close }
+    let buttons = Slot {
+        x: from,
+        y: 0,
+        w: (layout.x - g - from).max(0),
+        h: bar_h,
+    };
+    BarSlots {
+        start,
+        buttons,
+        layout,
+        clock,
+        close,
+    }
 }
 
 /// Keep the buttons where they are: the same windows in the same places they
@@ -127,8 +158,16 @@ pub fn bar_slots(
 /// where you aimed, and the next click lands on something else. Order has to
 /// come from when a window APPEARED, not from where it is in the stack.
 pub fn stable_order<K: Copy + PartialEq>(previous: &[K], current: &[K]) -> Vec<K> {
-    let mut order: Vec<K> = previous.iter().copied().filter(|k| current.contains(k)).collect();
-    let fresh: Vec<K> = current.iter().copied().filter(|k| !order.contains(k)).collect();
+    let mut order: Vec<K> = previous
+        .iter()
+        .copied()
+        .filter(|k| current.contains(k))
+        .collect();
+    let fresh: Vec<K> = current
+        .iter()
+        .copied()
+        .filter(|k| !order.contains(k))
+        .collect();
     order.extend(fresh);
     order
 }
@@ -223,15 +262,28 @@ mod tests {
         let g = gap(48);
         assert_eq!(s.start.x, g, "the start button hugs the left end");
         assert_eq!(s.clock.right(), 1920 - g, "the clock hugs the right end");
-        assert!(s.layout.right() < s.clock.x, "the layout sits left of the clock");
+        assert!(
+            s.layout.right() < s.clock.x,
+            "the layout sits left of the clock"
+        );
     }
 
     #[test]
     fn the_window_buttons_take_what_is_left_and_nothing_overlaps() {
         let s = on_medium(1920);
-        assert!(s.buttons.x > s.start.right(), "buttons start after the start button");
-        assert!(s.buttons.right() < s.layout.x, "buttons end before the layout");
-        assert!(s.buttons.w > 1000, "a wide screen leaves plenty of room: {}", s.buttons.w);
+        assert!(
+            s.buttons.x > s.start.right(),
+            "buttons start after the start button"
+        );
+        assert!(
+            s.buttons.right() < s.layout.x,
+            "buttons end before the layout"
+        );
+        assert!(
+            s.buttons.w > 1000,
+            "a wide screen leaves plenty of room: {}",
+            s.buttons.w
+        );
     }
 
     /// The medium must not offer a way out of the shell, because there it is
@@ -239,12 +291,26 @@ mod tests {
     #[test]
     fn the_close_button_exists_only_when_it_is_asked_for() {
         let medium = on_medium(1920);
-        assert!(medium.close.is_empty(), "no way out of the shell on the medium");
-        assert_eq!(medium.clock.right(), 1920 - gap(48), "the clock takes the edge instead");
+        assert!(
+            medium.close.is_empty(),
+            "no way out of the shell on the medium"
+        );
+        assert_eq!(
+            medium.clock.right(),
+            1920 - gap(48),
+            "the clock takes the edge instead"
+        );
 
         let desk = bar_slots(1920, 48, 160, 40, 60, 30);
-        assert_eq!(desk.close.right(), 1920 - gap(48), "the close button takes the edge");
-        assert!(desk.clock.right() < desk.close.x, "and pushes the clock left of it");
+        assert_eq!(
+            desk.close.right(),
+            1920 - gap(48),
+            "the close button takes the edge"
+        );
+        assert!(
+            desk.clock.right() < desk.close.x,
+            "and pushes the clock left of it"
+        );
         assert_eq!(desk.clock.w, 60, "without taking any of its width");
     }
 
@@ -253,22 +319,44 @@ mod tests {
     #[test]
     fn a_strip_too_narrow_for_everything_gives_up_the_window_buttons_first() {
         let squeezed = bar_slots(320, 32, 160, 40, 60, 0);
-        assert!(squeezed.buttons.w < 40, "barely room for a button: {}", squeezed.buttons.w);
+        assert!(
+            squeezed.buttons.w < 40,
+            "barely room for a button: {}",
+            squeezed.buttons.w
+        );
 
         let crushed = bar_slots(240, 32, 160, 40, 60, 0);
-        assert!(crushed.buttons.is_empty(), "no room left at all for window buttons");
+        assert!(
+            crushed.buttons.is_empty(),
+            "no room left at all for window buttons"
+        );
         assert_eq!(crushed.clock.w, 60, "the clock still keeps its width");
         assert_eq!(crushed.layout.w, 40, "and so does the layout");
-        assert_eq!(crushed.clock.right(), 240 - gap(32), "and the clock its place");
+        assert_eq!(
+            crushed.clock.right(),
+            240 - gap(32),
+            "and the clock its place"
+        );
     }
 
     #[test]
     fn the_strip_is_a_share_of_the_screen_within_reason() {
         assert_eq!(bar_height(1440), 48, "the monitor this is built for");
         assert_eq!(bar_height(1080), 36);
-        assert_eq!(bar_height(768), 32, "small screens stop at the readable floor");
-        assert_eq!(bar_height(2160), 56, "big ones stop before the strip takes over");
-        assert!(font_height(bar_height(768)) >= 11, "still readable at the floor");
+        assert_eq!(
+            bar_height(768),
+            32,
+            "small screens stop at the readable floor"
+        );
+        assert_eq!(
+            bar_height(2160),
+            56,
+            "big ones stop before the strip takes over"
+        );
+        assert!(
+            font_height(bar_height(768)) >= 11,
+            "still readable at the floor"
+        );
     }
 
     #[test]
@@ -313,7 +401,12 @@ mod tests {
 
     #[test]
     fn window_buttons_share_the_room_without_touching_each_other() {
-        let area = Slot { x: 200, y: 0, w: 900, h: 48 };
+        let area = Slot {
+            x: 200,
+            y: 0,
+            w: 900,
+            h: 48,
+        };
         let buttons = window_buttons(area, 3, 48);
         assert_eq!(buttons.len(), 3);
         assert_eq!(buttons[0].x, 200, "the first starts where the room does");
@@ -321,24 +414,40 @@ mod tests {
             assert!(pair[1].x > pair[0].right(), "buttons must not touch");
             assert_eq!(pair[0].w, pair[1].w, "and they are the same width");
         }
-        assert!(buttons[2].right() <= area.right(), "and stay inside the room");
+        assert!(
+            buttons[2].right() <= area.right(),
+            "and stay inside the room"
+        );
     }
 
     /// Two windows on a wide screen should not give two buttons half a metre
     /// wide each.
     #[test]
     fn a_button_stops_growing_once_it_is_wide_enough_to_read() {
-        let area = Slot { x: 200, y: 0, w: 2000, h: 48 };
+        let area = Slot {
+            x: 200,
+            y: 0,
+            w: 2000,
+            h: 48,
+        };
         let buttons = window_buttons(area, 2, 48);
         assert_eq!(buttons[0].w, 48 * 5, "capped");
-        assert!(buttons[1].x < area.right(), "and still laid out left to right");
+        assert!(
+            buttons[1].x < area.right(),
+            "and still laid out left to right"
+        );
     }
 
     /// Slivers help nobody: better to show the ones that fit and leave the rest
     /// to Alt+Tab.
     #[test]
     fn too_many_windows_show_as_many_as_can_still_be_read() {
-        let area = Slot { x: 0, y: 0, w: 300, h: 48 };
+        let area = Slot {
+            x: 0,
+            y: 0,
+            w: 300,
+            h: 48,
+        };
         let buttons = window_buttons(area, 20, 48);
         assert!(buttons.len() < 20, "not all of them");
         assert!(!buttons.is_empty(), "but not none either");
@@ -350,8 +459,21 @@ mod tests {
 
     #[test]
     fn no_windows_means_no_buttons() {
-        assert!(window_buttons(Slot { x: 0, y: 0, w: 900, h: 48 }, 0, 48).is_empty());
-        assert!(window_buttons(Slot::default(), 3, 48).is_empty(), "and no room means none");
+        assert!(window_buttons(
+            Slot {
+                x: 0,
+                y: 0,
+                w: 900,
+                h: 48
+            },
+            0,
+            48
+        )
+        .is_empty());
+        assert!(
+            window_buttons(Slot::default(), 3, 48).is_empty(),
+            "and no room means none"
+        );
     }
 
     #[test]

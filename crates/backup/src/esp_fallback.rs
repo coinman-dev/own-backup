@@ -68,7 +68,9 @@ impl VendorDir {
     /// Whether this directory's stub points at one of the filesystems that were
     /// just restored.
     fn points_at(&self, known_uuids: &[String]) -> bool {
-        let Some(u) = &self.grub_uuid else { return false };
+        let Some(u) = &self.grub_uuid else {
+            return false;
+        };
         known_uuids.iter().any(|k| k.eq_ignore_ascii_case(u))
     }
 }
@@ -80,14 +82,25 @@ impl VendorDir {
 /// works either way. Windows' `bootmgfw.efi` last — a Windows restore normally
 /// gets its boot chain from `bcdboot`, and this is the fallback for the case
 /// where that could not run.
-const CANDIDATES: &[&str] = &["shimx64.efi", "grubx64.efi", "bootmgfw.efi", "systemd-bootx64.efi"];
+const CANDIDATES: &[&str] = &[
+    "shimx64.efi",
+    "grubx64.efi",
+    "bootmgfw.efi",
+    "systemd-bootx64.efi",
+];
 
 /// Files that must accompany a chosen loader, kept under their own names.
 fn companions(loader: &str) -> &'static [&'static str] {
     match loader.to_ascii_lowercase().as_str() {
         // grub.cfg is not optional: GRUB reads it from the directory it was
         // loaded out of, and without it stops at its rescue prompt.
-        "shimx64.efi" => &["grubx64.efi", "grub.cfg", "mmx64.efi", "fbx64.efi", "BOOTX64.CSV"],
+        "shimx64.efi" => &[
+            "grubx64.efi",
+            "grub.cfg",
+            "mmx64.efi",
+            "fbx64.efi",
+            "BOOTX64.CSV",
+        ],
         "grubx64.efi" => &["grub.cfg"],
         _ => &[],
     }
@@ -111,8 +124,10 @@ pub struct Choice {
 pub fn choose_loader(vendors: &[VendorDir], known_uuids: &[String]) -> Option<Choice> {
     // A vendor directory named BOOT is the fallback path itself; taking a
     // loader from there to put it back would be circular.
-    let usable: Vec<&VendorDir> =
-        vendors.iter().filter(|d| !d.path.eq_ignore_ascii_case("BOOT")).collect();
+    let usable: Vec<&VendorDir> = vendors
+        .iter()
+        .filter(|d| !d.path.eq_ignore_ascii_case("BOOT"))
+        .collect();
 
     let mut all_with_loaders: Vec<String> = Vec::new();
     for d in &usable {
@@ -139,8 +154,11 @@ pub fn choose_loader(vendors: &[VendorDir], known_uuids: &[String]) -> Option<Ch
                 .find(|f| f.eq_ignore_ascii_case(candidate))
                 .cloned()
                 .unwrap_or_else(|| (*candidate).to_string());
-            let others: Vec<String> =
-                all_with_loaders.iter().filter(|p| **p != dir.path).cloned().collect();
+            let others: Vec<String> = all_with_loaders
+                .iter()
+                .filter(|p| **p != dir.path)
+                .cloned()
+                .collect();
             return Some(Choice {
                 dir: dir.path.clone(),
                 loader,
@@ -154,14 +172,19 @@ pub fn choose_loader(vendors: &[VendorDir], known_uuids: &[String]) -> Option<Ch
 
 /// The files to copy for `choice`, in order — the loader itself first.
 pub fn copies_for(vendors: &[VendorDir], choice: &Choice) -> Vec<Copy> {
-    let Some(dir) = vendors.iter().find(|d| d.path == choice.dir) else { return Vec::new() };
+    let Some(dir) = vendors.iter().find(|d| d.path == choice.dir) else {
+        return Vec::new();
+    };
     let mut out = vec![Copy {
         from: format!("EFI\\{}\\{}", dir.path, choice.loader),
         to: FALLBACK_NAME.to_string(),
     }];
     for c in companions(&choice.loader) {
         if let Some(name) = dir.files.iter().find(|f| f.eq_ignore_ascii_case(c)) {
-            out.push(Copy { from: format!("EFI\\{}\\{name}", dir.path), to: name.clone() });
+            out.push(Copy {
+                from: format!("EFI\\{}\\{name}", dir.path),
+                to: name.clone(),
+            });
         }
     }
     out
@@ -229,7 +252,13 @@ mod tests {
     /// vendor directories, two of them complete shim+GRUB sets, and only one of
     /// those two belonging to a system that is still installed.
     fn real_esp() -> Vec<VendorDir> {
-        let grub_set = ["grubx64.efi", "shimx64.efi", "mmx64.efi", "BOOTX64.CSV", "grub.cfg"];
+        let grub_set = [
+            "grubx64.efi",
+            "shimx64.efi",
+            "mmx64.efi",
+            "BOOTX64.CSV",
+            "grub.cfg",
+        ];
         vec![
             dir("ubuntu", &grub_set, Some(GONE)),
             dir("acronis", &["bootx64.efi", "bootwiz.efi"], None),
@@ -258,12 +287,18 @@ mod tests {
         // failed restore.
         let choice = choose_loader(&real_esp(), &[KUBUNTU_BOOT.into()]).unwrap();
         let copies = copies_for(&real_esp(), &choice);
-        assert_eq!(copies[0], Copy {
-            from: "EFI\\kubuntu\\shimx64.efi".into(),
-            to: "BOOTX64.EFI".into(),
-        });
+        assert_eq!(
+            copies[0],
+            Copy {
+                from: "EFI\\kubuntu\\shimx64.efi".into(),
+                to: "BOOTX64.EFI".into(),
+            }
+        );
         for wanted in ["grubx64.efi", "grub.cfg", "mmx64.efi"] {
-            assert!(copies.iter().any(|c| c.to == wanted), "{wanted} missing from {copies:#?}");
+            assert!(
+                copies.iter().any(|c| c.to == wanted),
+                "{wanted} missing from {copies:#?}"
+            );
         }
         // Not on this ESP, so nothing pretends it is.
         assert!(!copies.iter().any(|c| c.to == "fbx64.efi"));
@@ -291,7 +326,11 @@ mod tests {
 
     #[test]
     fn windows_falls_back_to_its_own_boot_manager() {
-        let vendors = vec![dir("Microsoft\\Boot", &["bootmgfw.efi", "bootmgr.efi"], None)];
+        let vendors = vec![dir(
+            "Microsoft\\Boot",
+            &["bootmgfw.efi", "bootmgr.efi"],
+            None,
+        )];
         let choice = choose_loader(&vendors, &[]).unwrap();
         assert_eq!(choice.dir, "Microsoft\\Boot");
         let copies = copies_for(&vendors, &choice);
@@ -336,7 +375,8 @@ mod tests {
             parse_grub_search_uuid(modern).as_deref(),
             Some("1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d")
         );
-        let older = "search --no-floppy --fs-uuid --set=root 1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d\n\
+        let older =
+            "search --no-floppy --fs-uuid --set=root 1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d\n\
                      configfile /grub/grub.cfg\n";
         assert_eq!(
             parse_grub_search_uuid(older).as_deref(),

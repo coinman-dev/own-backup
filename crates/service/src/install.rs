@@ -56,7 +56,8 @@ pub fn install() -> Result<(), Box<dyn std::error::Error>> {
 
     println!(
         "{}",
-        tr!("install.win_installed",
+        tr!(
+            "install.win_installed",
             name = crate::SERVICE_DISPLAY_NAME,
             id = crate::SERVICE_NAME,
             path = exe.display()
@@ -95,7 +96,11 @@ pub fn uninstall() -> Result<(), Box<dyn std::error::Error>> {
     service.delete()?;
     println!(
         "{}",
-        tr!("install.win_removed", name = crate::SERVICE_DISPLAY_NAME, id = crate::SERVICE_NAME)
+        tr!(
+            "install.win_removed",
+            name = crate::SERVICE_DISPLAY_NAME,
+            id = crate::SERVICE_NAME
+        )
     );
     Ok(())
 }
@@ -114,12 +119,21 @@ pub fn start() -> Result<(), Box<dyn std::error::Error>> {
     use windows_service::service::{ServiceAccess, ServiceState};
     let service = open_service(ServiceAccess::QUERY_STATUS | ServiceAccess::START)?;
     if service.query_status()?.current_state == ServiceState::Running {
-        println!("{}", tr!("install.win_already_running", name = crate::SERVICE_DISPLAY_NAME));
+        println!(
+            "{}",
+            tr!(
+                "install.win_already_running",
+                name = crate::SERVICE_DISPLAY_NAME
+            )
+        );
         return Ok(());
     }
     let no_args: [&std::ffi::OsStr; 0] = [];
     service.start(&no_args)?;
-    println!("{}", tr!("install.win_started", name = crate::SERVICE_DISPLAY_NAME));
+    println!(
+        "{}",
+        tr!("install.win_started", name = crate::SERVICE_DISPLAY_NAME)
+    );
     Ok(())
 }
 
@@ -129,7 +143,13 @@ pub fn stop() -> Result<(), Box<dyn std::error::Error>> {
     use windows_service::service::{ServiceAccess, ServiceState};
     let service = open_service(ServiceAccess::QUERY_STATUS | ServiceAccess::STOP)?;
     if service.query_status()?.current_state == ServiceState::Stopped {
-        println!("{}", tr!("install.win_already_stopped", name = crate::SERVICE_DISPLAY_NAME));
+        println!(
+            "{}",
+            tr!(
+                "install.win_already_stopped",
+                name = crate::SERVICE_DISPLAY_NAME
+            )
+        );
         return Ok(());
     }
     service.stop()?;
@@ -141,7 +161,10 @@ pub fn stop() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    println!("{}", tr!("install.win_stopped", name = crate::SERVICE_DISPLAY_NAME));
+    println!(
+        "{}",
+        tr!("install.win_stopped", name = crate::SERVICE_DISPLAY_NAME)
+    );
     Ok(())
 }
 
@@ -152,7 +175,8 @@ pub fn status() -> Result<(), Box<dyn std::error::Error>> {
     let s = service.query_status()?;
     println!(
         "{}",
-        tr!("install.win_status",
+        tr!(
+            "install.win_status",
             name = crate::SERVICE_DISPLAY_NAME,
             id = crate::SERVICE_NAME,
             state = format!("{:?}", s.current_state)
@@ -196,12 +220,17 @@ pub fn install() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(user) = &member {
         match add_user_to_group(user, group) {
             Ok(()) => {
-                group_note = tr!("install.linux_user_added", user = user, group = group).into_owned();
+                group_note =
+                    tr!("install.linux_user_added", user = user, group = group).into_owned();
             }
             Err(e) => {
-                group_note =
-                    tr!("install.linux_user_not_added", user = user, group = group, error = e)
-                        .into_owned();
+                group_note = tr!(
+                    "install.linux_user_not_added",
+                    user = user,
+                    group = group,
+                    error = e
+                )
+                .into_owned();
             }
         }
     }
@@ -213,7 +242,11 @@ pub fn install() -> Result<(), Box<dyn std::error::Error>> {
 
     println!(
         "{}{group_note}",
-        tr!("install.linux_installed", path = unit_path, unit = crate::LINUX_UNIT_NAME)
+        tr!(
+            "install.linux_installed",
+            path = unit_path,
+            unit = crate::LINUX_UNIT_NAME
+        )
     );
     Ok(())
 }
@@ -284,21 +317,30 @@ pub fn uninstall() -> Result<(), Box<dyn std::error::Error>> {
     let _ = std::process::Command::new("groupdel")
         .arg(own_backup_common::UNIX_ACCESS_GROUP)
         .status();
-    println!("{}", tr!("install.linux_removed", unit = crate::LINUX_UNIT_NAME));
+    println!(
+        "{}",
+        tr!("install.linux_removed", unit = crate::LINUX_UNIT_NAME)
+    );
     Ok(())
 }
 
 #[cfg(not(target_os = "windows"))]
 pub fn start() -> Result<(), Box<dyn std::error::Error>> {
     systemctl(&["start", crate::LINUX_UNIT_NAME])?;
-    println!("{}", tr!("install.linux_started", unit = crate::LINUX_UNIT_NAME));
+    println!(
+        "{}",
+        tr!("install.linux_started", unit = crate::LINUX_UNIT_NAME)
+    );
     Ok(())
 }
 
 #[cfg(not(target_os = "windows"))]
 pub fn stop() -> Result<(), Box<dyn std::error::Error>> {
     systemctl(&["stop", crate::LINUX_UNIT_NAME])?;
-    println!("{}", tr!("install.linux_stopped", unit = crate::LINUX_UNIT_NAME));
+    println!(
+        "{}",
+        tr!("install.linux_stopped", unit = crate::LINUX_UNIT_NAME)
+    );
     Ok(())
 }
 
@@ -314,7 +356,9 @@ pub fn status() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(not(target_os = "windows"))]
 fn systemctl(args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
-    let status = std::process::Command::new("systemctl").args(args).status()?;
+    let status = std::process::Command::new("systemctl")
+        .args(args)
+        .status()?;
     if !status.success() {
         return Err(format!("`systemctl {}` failed ({status})", args.join(" ")).into());
     }
@@ -347,11 +391,17 @@ pub fn update_from_here() -> Result<(), Box<dyn std::error::Error>> {
     // it. This is the ordinary answer when somebody runs `/update` twice.
     let same = std::fs::canonicalize(&here).ok() == std::fs::canonicalize(&installed).ok();
     if same {
-        println!("{}", tr!("install.update_same_file", path = installed.display()));
+        println!(
+            "{}",
+            tr!("install.update_same_file", path = installed.display())
+        );
         return Ok(());
     }
 
-    println!("{}", tr!("install.update_installed", path = installed.display()));
+    println!(
+        "{}",
+        tr!("install.update_installed", path = installed.display())
+    );
     println!("{}", tr!("install.update_replacing", path = here.display()));
     let _ = stop();
     // The SCM reports Stopped before the process has necessarily exited, and a
@@ -375,15 +425,22 @@ pub fn update_from_here() -> Result<(), Box<dyn std::error::Error>> {
         // The service is stopped and the binary is untouched: start it again so
         // the machine is not left without one because an update failed.
         let _ = start();
-        return Err(
-            tr!("install.update_failed", path = installed.display(), error = e).into_owned().into(),
-        );
+        return Err(tr!(
+            "install.update_failed",
+            path = installed.display(),
+            error = e
+        )
+        .into_owned()
+        .into());
     }
     println!("{}", tr!("install.update_done"));
     start()?;
     // Leaving the staged copy would make the next `/update` a no-op against a
     // stale file; it has done its job.
-    if here.extension().is_some_and(|e| e.eq_ignore_ascii_case("new")) {
+    if here
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("new"))
+    {
         let _ = std::fs::remove_file(&here);
     }
     Ok(())
@@ -405,5 +462,7 @@ fn installed_binary() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> 
 fn installed_binary() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
     // systemd's unit names it; the installer writes the unit, so this is the
     // same path it used.
-    Ok(std::path::PathBuf::from("/usr/local/bin/own-backup-service"))
+    Ok(std::path::PathBuf::from(
+        "/usr/local/bin/own-backup-service",
+    ))
 }

@@ -120,7 +120,11 @@ pub fn list_dir_backup(dir: &std::path::Path) -> Result<Vec<DirEntryInfo>> {
                     .collect();
                 let name = String::from_utf16_lossy(&name);
                 if name != "." && name != ".." {
-                    out.push(DirEntryInfo { name, size, attributes: attrs });
+                    out.push(DirEntryInfo {
+                        name,
+                        size,
+                        attributes: attrs,
+                    });
                 }
             }
             if next == 0 {
@@ -233,8 +237,8 @@ fn collect_excluded_ranges_inner(
             let is_dir = info.attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
             let is_reparse = info.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0;
 
-            let matched = subtree_excluded
-                || parsed.iter().any(|p| p.matches(&name_lower, &rel_child));
+            let matched =
+                subtree_excluded || parsed.iter().any(|p| p.matches(&name_lower, &rel_child));
 
             let child = dir.join(&info.name);
             // Record every entry at its HIGHEST match point (a matched dir is
@@ -248,7 +252,9 @@ fn collect_excluded_ranges_inner(
                         is_dir,
                         is_reparse,
                     }),
-                    _ => warn!(path = %child.display(), "matched path outside the scan root — not recorded for removal"),
+                    _ => {
+                        warn!(path = %child.display(), "matched path outside the scan root — not recorded for removal")
+                    }
                 }
             }
             if is_dir {
@@ -263,8 +269,10 @@ fn collect_excluded_ranges_inner(
                         scan.files_excluded += 1;
                         scan.bytes_excluded += bytes;
                         if collect_file_bytes {
-                            if let Some(rel) =
-                                child.to_string_lossy().strip_prefix(&root).map(str::to_string)
+                            if let Some(rel) = child
+                                .to_string_lossy()
+                                .strip_prefix(&root)
+                                .map(str::to_string)
                             {
                                 scan.file_bytes.push((rel, bytes));
                             }
@@ -325,9 +333,7 @@ fn file_extent_ranges(path: &Path, cluster_size: u32, ranges: &mut ByteRanges) -
             None,
         )
     }
-    .map_err(|e| {
-        own_backup_common::OwnBackupError::Device(format!("CreateFileW failed: {e}"))
-    })?;
+    .map_err(|e| own_backup_common::OwnBackupError::Device(format!("CreateFileW failed: {e}")))?;
     let handle = FileHandle(handle);
 
     let cs = cluster_size as u64;

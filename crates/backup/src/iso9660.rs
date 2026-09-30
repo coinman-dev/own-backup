@@ -93,12 +93,21 @@ pub fn write_iso_with_progress(
     out: &Path,
     progress: &mut dyn FnMut(u64),
 ) -> Result<u64> {
-    let mut dirs: Vec<DirNode> = vec![DirNode { parent: 0, ..Default::default() }];
+    let mut dirs: Vec<DirNode> = vec![DirNode {
+        parent: 0,
+        ..Default::default()
+    }];
 
     // --- build the tree ----------------------------------------------------
     for f in files {
-        let parts: Vec<&str> = f.path.split(['/', '\\']).filter(|p| !p.is_empty()).collect();
-        let Some((name, dir_parts)) = parts.split_last() else { continue };
+        let parts: Vec<&str> = f
+            .path
+            .split(['/', '\\'])
+            .filter(|p| !p.is_empty())
+            .collect();
+        let Some((name, dir_parts)) = parts.split_last() else {
+            continue;
+        };
         let mut cur = 0usize;
         for part in dir_parts {
             let existing = dirs[cur]
@@ -111,7 +120,11 @@ pub fn write_iso_with_progress(
                 None => {
                     let mut path = dirs[cur].path.clone();
                     path.push((*part).to_string());
-                    dirs.push(DirNode { path, parent: cur, ..Default::default() });
+                    dirs.push(DirNode {
+                        path,
+                        parent: cur,
+                        ..Default::default()
+                    });
                     let idx = dirs.len() - 1;
                     dirs[cur].children.push(idx);
                     idx
@@ -139,13 +152,13 @@ pub fn write_iso_with_progress(
     // entitled to give up on them.
     let order = path_table_order(&dirs);
     for d in dirs.iter_mut() {
-        d.files.sort_by(|a, b| iso_name(&a.name, false).cmp(&iso_name(&b.name, false)));
+        d.files
+            .sort_by(|a, b| iso_name(&a.name, false).cmp(&iso_name(&b.name, false)));
     }
 
     // --- work out where everything goes ------------------------------------
     let boot_present = boot.is_some();
-    let mut lba = SYSTEM_AREA_SECTORS
-        + if boot_present { 4 } else { 3 }; // PVD [+ boot record] + Joliet + terminator
+    let mut lba = SYSTEM_AREA_SECTORS + if boot_present { 4 } else { 3 }; // PVD [+ boot record] + Joliet + terminator
     let boot_catalog_lba = boot_present.then(|| {
         let l = lba;
         lba += 1;
@@ -249,7 +262,11 @@ pub fn write_iso_with_progress(
         }
     }
 
-    let total: u64 = order.iter().flat_map(|&i| dirs[i].files.iter()).map(|f| f.size as u64).sum();
+    let total: u64 = order
+        .iter()
+        .flat_map(|&i| dirs[i].files.iter())
+        .map(|f| f.size as u64)
+        .sum();
     let mut written = 0u64;
     let mut last_pct = u64::MAX;
 
@@ -273,7 +290,11 @@ pub fn write_iso_with_progress(
                 // boundary (an event to the interface), and 700 MB in 1 MB
                 // chunks would send seven hundred of them.
                 written += n as u64;
-                let pct = if total == 0 { 100 } else { written * 100 / total };
+                let pct = if total == 0 {
+                    100
+                } else {
+                    written * 100 / total
+                };
                 if pct != last_pct {
                     last_pct = pct;
                     progress(pct);
@@ -284,7 +305,10 @@ pub fn write_iso_with_progress(
             // 2047 bytes: every later file then sat one byte before its LBA and
             // the image was not whole sectors — Windows called it corrupt and
             // Rufus could not extract it (2026-09-17, bcdedit's empty BCD.LOG1/2).
-            write_zeros(&mut w, sectors_for(f.size.max(1)) as usize * SECTOR - f.size as usize)?;
+            write_zeros(
+                &mut w,
+                sectors_for(f.size.max(1)) as usize * SECTOR - f.size as usize,
+            )?;
         }
     }
     w.flush()?;
@@ -375,10 +399,22 @@ fn build_path_table(dirs: &[DirNode], order: &[usize], joliet: bool) -> (Vec<u8>
         for (buf, big) in [(&mut le, false), (&mut be, true)] {
             buf.push(name.len() as u8);
             buf.push(0);
-            let lba = if joliet { dirs[i].joliet_lba } else { dirs[i].iso_lba };
-            buf.extend_from_slice(&if big { lba.to_be_bytes() } else { lba.to_le_bytes() });
+            let lba = if joliet {
+                dirs[i].joliet_lba
+            } else {
+                dirs[i].iso_lba
+            };
+            buf.extend_from_slice(&if big {
+                lba.to_be_bytes()
+            } else {
+                lba.to_le_bytes()
+            });
             let parent = number[dirs[i].parent];
-            buf.extend_from_slice(&if big { parent.to_be_bytes() } else { parent.to_le_bytes() });
+            buf.extend_from_slice(&if big {
+                parent.to_be_bytes()
+            } else {
+                parent.to_le_bytes()
+            });
             buf.extend_from_slice(&name);
             if name.len() % 2 == 1 {
                 buf.push(0);
@@ -422,8 +458,11 @@ fn directory_extent(dirs: &[DirNode], idx: usize, joliet: bool) -> Vec<u8> {
     push(dir_record(dirs, idx, joliet, RecordKind::Parent), &mut out);
     let mut kids = dirs[idx].children.clone();
     kids.sort_by(|&a, &b| {
-        encode_name(dirs[a].path.last().unwrap(), joliet, true)
-            .cmp(&encode_name(dirs[b].path.last().unwrap(), joliet, true))
+        encode_name(dirs[a].path.last().unwrap(), joliet, true).cmp(&encode_name(
+            dirs[b].path.last().unwrap(),
+            joliet,
+            true,
+        ))
     });
     for c in kids {
         push(dir_record(dirs, c, joliet, RecordKind::Child(c)), &mut out);
@@ -440,23 +479,47 @@ fn dir_record(dirs: &[DirNode], idx: usize, joliet: bool, kind: RecordKind) -> V
     let (name, lba, len, is_dir) = match kind {
         RecordKind::SelfRef => (
             vec![0u8],
-            if joliet { dirs[idx].joliet_lba } else { dirs[idx].iso_lba },
-            if joliet { dirs[idx].joliet_len } else { dirs[idx].iso_len },
+            if joliet {
+                dirs[idx].joliet_lba
+            } else {
+                dirs[idx].iso_lba
+            },
+            if joliet {
+                dirs[idx].joliet_len
+            } else {
+                dirs[idx].iso_len
+            },
             true,
         ),
         RecordKind::Parent => {
             let p = dirs[idx].parent;
             (
                 vec![1u8],
-                if joliet { dirs[p].joliet_lba } else { dirs[p].iso_lba },
-                if joliet { dirs[p].joliet_len } else { dirs[p].iso_len },
+                if joliet {
+                    dirs[p].joliet_lba
+                } else {
+                    dirs[p].iso_lba
+                },
+                if joliet {
+                    dirs[p].joliet_len
+                } else {
+                    dirs[p].iso_len
+                },
                 true,
             )
         }
         RecordKind::Child(c) => (
             encode_name(dirs[c].path.last().unwrap(), joliet, true),
-            if joliet { dirs[c].joliet_lba } else { dirs[c].iso_lba },
-            if joliet { dirs[c].joliet_len } else { dirs[c].iso_len },
+            if joliet {
+                dirs[c].joliet_lba
+            } else {
+                dirs[c].iso_lba
+            },
+            if joliet {
+                dirs[c].joliet_len
+            } else {
+                dirs[c].iso_len
+            },
             true,
         ),
         RecordKind::File(f) => {
@@ -637,8 +700,8 @@ fn boot_catalog(image_lba: u32, image_bytes: u32) -> Vec<u8> {
 
     c[32] = 0x88; // bootable
     c[33] = 0; // no emulation
-    // Sector count is in 512-byte units; firmware reads the FAT's own header for
-    // the rest, but a truthful number here costs nothing.
+               // Sector count is in 512-byte units; firmware reads the FAT's own header for
+               // the rest, but a truthful number here costs nothing.
     let sectors = (image_bytes.div_ceil(512)).min(0xFFFF) as u16;
     c[38..40].copy_from_slice(&sectors.to_le_bytes());
     c[40..44].copy_from_slice(&image_lba.to_le_bytes());
@@ -654,7 +717,9 @@ pub fn find_file(iso: &Path, path: &str) -> Result<Option<(u32, u32)>> {
     f.seek(SeekFrom::Start(SYSTEM_AREA_SECTORS as u64 * SECTOR as u64))?;
     f.read_exact(&mut pvd)?;
     if &pvd[1..6] != b"CD001" || pvd[0] != 1 {
-        return Err(OwnBackupError::ImageFormat(tr!("iso9660.not_iso9660").into_owned()));
+        return Err(OwnBackupError::ImageFormat(
+            tr!("iso9660.not_iso9660").into_owned(),
+        ));
     }
     let mut lba = u32::from_le_bytes(pvd[158..162].try_into().unwrap());
     let mut len = u32::from_le_bytes(pvd[166..170].try_into().unwrap());
@@ -716,7 +781,10 @@ mod tests {
                 path: "EFI/BOOT/BOOTX64.EFI".into(),
                 source: mk("bootx64", &vec![0xAA; 4096]),
             },
-            IsoFile { path: "boot/boot.sdi".into(), source: mk("sdi", &vec![0xBB; 2048]) },
+            IsoFile {
+                path: "boot/boot.sdi".into(),
+                source: mk("sdi", &vec![0xBB; 2048]),
+            },
             IsoFile {
                 path: "sources/boot.wim".into(),
                 source: mk("wim", &vec![0xCC; 5000]),
@@ -736,9 +804,21 @@ mod tests {
         write_iso(&sample(dir.path()), "OWNBACKUP", None, &iso).unwrap();
         let data = std::fs::read(&iso).unwrap();
         assert_eq!(&data[16 * SECTOR..16 * SECTOR + 6], b"\x01CD001");
-        assert_eq!(&data[17 * SECTOR..17 * SECTOR + 6], b"\x02CD001", "Joliet descriptor");
-        assert_eq!(&data[18 * SECTOR..18 * SECTOR + 6], b"\xFFCD001", "terminator");
-        assert_eq!(&data[17 * SECTOR + 88..17 * SECTOR + 91], b"%/E", "Joliet escape");
+        assert_eq!(
+            &data[17 * SECTOR..17 * SECTOR + 6],
+            b"\x02CD001",
+            "Joliet descriptor"
+        );
+        assert_eq!(
+            &data[18 * SECTOR..18 * SECTOR + 6],
+            b"\xFFCD001",
+            "terminator"
+        );
+        assert_eq!(
+            &data[17 * SECTOR + 88..17 * SECTOR + 91],
+            b"%/E",
+            "Joliet escape"
+        );
     }
 
     #[test]
@@ -748,17 +828,28 @@ mod tests {
         let mut files = sample(dir.path());
         let efisys = dir.path().join("efisys");
         std::fs::write(&efisys, vec![0x11; 4096]).unwrap();
-        files.push(IsoFile { path: "boot/efisys.bin".into(), source: efisys });
-        let boot = IsoBoot { image_path: "boot/efisys.bin".into() };
+        files.push(IsoFile {
+            path: "boot/efisys.bin".into(),
+            source: efisys,
+        });
+        let boot = IsoBoot {
+            image_path: "boot/efisys.bin".into(),
+        };
         write_iso(&files, "OWNBACKUP", Some(boot), &iso).unwrap();
         let data = std::fs::read(&iso).unwrap();
         // Boot record descriptor sits between the primary and Joliet ones.
         assert_eq!(&data[17 * SECTOR..17 * SECTOR + 6], b"\x00CD001");
-        assert_eq!(&data[17 * SECTOR + 7..17 * SECTOR + 30], b"EL TORITO SPECIFICATION");
+        assert_eq!(
+            &data[17 * SECTOR + 7..17 * SECTOR + 30],
+            b"EL TORITO SPECIFICATION"
+        );
         let cat = u32::from_le_bytes(data[17 * SECTOR + 71..17 * SECTOR + 75].try_into().unwrap());
         let c = &data[cat as usize * SECTOR..cat as usize * SECTOR + 64];
         assert_eq!(c[0], 1);
-        assert_eq!(c[1], 0xEF, "the platform must say EFI or firmware ignores it");
+        assert_eq!(
+            c[1], 0xEF,
+            "the platform must say EFI or firmware ignores it"
+        );
         assert_eq!((c[30], c[31]), (0x55, 0xAA));
         // The validation entry's words must sum to zero.
         let sum = c[..32]
@@ -771,7 +862,10 @@ mod tests {
         // The catalog must point at the file, not at some hole in the image.
         let img_lba = u32::from_le_bytes(c[40..44].try_into().unwrap());
         let (file_lba, _) = find_file(&iso, "boot/efisys.bin").unwrap().unwrap();
-        assert_eq!(img_lba, file_lba, "the boot image must be a real file in the tree");
+        assert_eq!(
+            img_lba, file_lba,
+            "the boot image must be a real file in the tree"
+        );
     }
 
     #[test]
@@ -825,12 +919,18 @@ mod tests {
             // first record there describes itself and carries the same address.
             let rec = &data[lba as usize * SECTOR..];
             let self_lba = u32::from_le_bytes(rec[2..6].try_into().unwrap());
-            assert_eq!(self_lba, lba, "entry {seen} does not land on its own extent");
+            assert_eq!(
+                self_lba, lba,
+                "entry {seen} does not land on its own extent"
+            );
             assert_eq!(rec[25] & 0x02, 0x02, "entry {seen} is not a directory");
             at += 8 + nl + (nl % 2);
             seen += 1;
         }
-        assert!(seen >= 4, "expected the root and its subdirectories, saw {seen}");
+        assert!(
+            seen >= 4,
+            "expected the root and its subdirectories, saw {seen}"
+        );
     }
 
     /// Joliet exists so names survive; a version suffix there defeats the point.
@@ -838,13 +938,17 @@ mod tests {
     fn joliet_names_are_the_real_names() {
         let n = encode_name("boot.wim", true, false);
         let s = String::from_utf16(
-            &n.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect::<Vec<_>>(),
+            &n.chunks_exact(2)
+                .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                .collect::<Vec<_>>(),
         )
         .unwrap();
         assert_eq!(s, "boot.wim", "no ;1, and the case is kept");
         let d = encode_name("Microsoft", true, true);
         let s = String::from_utf16(
-            &d.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect::<Vec<_>>(),
+            &d.chunks_exact(2)
+                .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                .collect::<Vec<_>>(),
         )
         .unwrap();
         assert_eq!(s, "Microsoft");
@@ -865,7 +969,10 @@ mod tests {
                 source: src.clone(),
             })
             .collect();
-        files.push(IsoFile { path: "sources/boot.wim".into(), source: src.clone() });
+        files.push(IsoFile {
+            path: "sources/boot.wim".into(),
+            source: src.clone(),
+        });
         let iso = dir.path().join("big.iso");
         write_iso(&files, "OWNBACKUP", None, &iso).unwrap();
 
@@ -944,22 +1051,35 @@ mod tests {
         for name in ["BCD.LOG1", "BCD.LOG2"] {
             let p = dir.path().join(name);
             std::fs::write(&p, b"").unwrap();
-            files.push(IsoFile { path: format!("EFI/Microsoft/Boot/{name}"), source: p });
+            files.push(IsoFile {
+                path: format!("EFI/Microsoft/Boot/{name}"),
+                source: p,
+            });
         }
         let bcd = dir.path().join("bcd");
         std::fs::write(&bcd, vec![0xEE; 3000]).unwrap();
         // "BCD" sorts before "BCD.LOG1"; "ZZZ" after both, so it is written last.
         let last = dir.path().join("zzz");
         std::fs::write(&last, vec![0x77; 3000]).unwrap();
-        files.push(IsoFile { path: "EFI/Microsoft/Boot/BCD".into(), source: bcd });
-        files.push(IsoFile { path: "EFI/Microsoft/Boot/ZZZ".into(), source: last });
+        files.push(IsoFile {
+            path: "EFI/Microsoft/Boot/BCD".into(),
+            source: bcd,
+        });
+        files.push(IsoFile {
+            path: "EFI/Microsoft/Boot/ZZZ".into(),
+            source: last,
+        });
 
         let len = write_iso(&files, "OWNBACKUP", None, &iso).unwrap();
         assert_eq!(len as usize % SECTOR, 0, "the image must be whole sectors");
         let data = std::fs::read(&iso).unwrap();
         let (lba, size) = find_file(&iso, "EFI/Microsoft/Boot/ZZZ").unwrap().unwrap();
         let at = lba as usize * SECTOR;
-        assert_eq!(&data[at..at + size as usize], &vec![0x77; 3000][..], "shifted by the empty files");
+        assert_eq!(
+            &data[at..at + size as usize],
+            &vec![0x77; 3000][..],
+            "shifted by the empty files"
+        );
     }
 
     #[test]

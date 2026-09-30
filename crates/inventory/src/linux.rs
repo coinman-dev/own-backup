@@ -71,7 +71,8 @@ const GPT_TYPE_EFI_SYSTEM: &str = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B";
 /// Build a `PartitionInfo` from an `lsblk` node (a `part`, or a whole-disk
 /// filesystem). `offset_bytes` is filled later from sysfs.
 fn build_partition(v: &Value, index: u32) -> PartitionInfo {
-    let path = jstr(v, "path").unwrap_or_else(|| format!("/dev/{}", jstr(v, "name").unwrap_or_default()));
+    let path =
+        jstr(v, "path").unwrap_or_else(|| format!("/dev/{}", jstr(v, "name").unwrap_or_default()));
     let (filesystem, is_encrypted) = parse_fs(jstr(v, "fstype").as_deref());
     let gpt_type_guid = jstr(v, "parttype").unwrap_or_default().to_uppercase();
     let mount = jstr(v, "mountpoint");
@@ -122,7 +123,11 @@ fn build_disk(v: &Value) -> Option<DiskInfo> {
     let name = jstr(v, "name")?;
     let path = jstr(v, "path").unwrap_or_else(|| format!("/dev/{name}"));
     let size = ju64(v, "size").unwrap_or(0);
-    let partition_table = match jstr(v, "pttype").unwrap_or_default().to_ascii_lowercase().as_str() {
+    let partition_table = match jstr(v, "pttype")
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "dos" | "mbr" => PartitionTable::Mbr,
         _ => PartitionTable::Gpt,
     };
@@ -316,12 +321,20 @@ mod tests {
         use crate::traits::DiskInventory;
         let disks = LinuxInventory::new().enumerate_disks().await.unwrap();
         for d in &disks {
-            eprintln!("DISK {} '{}' {} bytes {:?}", d.device_id, d.model, d.size_bytes, d.partition_table);
+            eprintln!(
+                "DISK {} '{}' {} bytes {:?}",
+                d.device_id, d.model, d.size_bytes, d.partition_table
+            );
             for p in &d.partitions {
                 eprintln!(
                     "  {} off={} size={} fs={:?} label={:?} used={} enc={}",
-                    p.volume_device, p.offset_bytes, p.size_bytes, p.filesystem,
-                    p.volume_label, p.used_bytes, p.is_encrypted
+                    p.volume_device,
+                    p.offset_bytes,
+                    p.size_bytes,
+                    p.filesystem,
+                    p.volume_label,
+                    p.used_bytes,
+                    p.is_encrypted
                 );
             }
         }

@@ -131,9 +131,13 @@ pub fn cabinets_in(data: &[u8]) -> Vec<Cabinet> {
             if p + 17 > found + size {
                 break;
             }
-            let Some(end) = find(&data[..found + size], b"\0", p + 16) else { break };
+            let Some(end) = find(&data[..found + size], b"\0", p + 16) else {
+                break;
+            };
             let raw = &data[p + 16..end];
-            let Ok(name) = std::str::from_utf8(raw) else { break };
+            let Ok(name) = std::str::from_utf8(raw) else {
+                break;
+            };
             if name.is_empty()
                 || name.len() > 255
                 || !name.chars().all(|c| c.is_ascii_graphic() || c == ' ')
@@ -146,7 +150,11 @@ pub fn cabinets_in(data: &[u8]) -> Vec<Cabinet> {
         if names.is_empty() {
             continue;
         }
-        out.push(Cabinet { offset: found, size, names });
+        out.push(Cabinet {
+            offset: found,
+            size,
+            names,
+        });
         i = found + size;
     }
     out
@@ -289,14 +297,19 @@ pub fn vmware_tools_iso() -> Option<PathBuf> {
         if found.iter().any(|(_, p)| p == &iso) {
             continue;
         }
-        let Ok(meta) = std::fs::metadata(&iso) else { continue };
+        let Ok(meta) = std::fs::metadata(&iso) else {
+            continue;
+        };
         if !meta.is_file() {
             continue;
         }
         found.push((meta.modified().unwrap_or(std::time::UNIX_EPOCH), iso));
     }
     if found.len() > 1 {
-        info!(count = found.len(), "more than one windows.iso — taking the newest");
+        info!(
+            count = found.len(),
+            "more than one windows.iso — taking the newest"
+        );
     }
     found.sort_by(|a, b| b.0.cmp(&a.0));
     found.into_iter().next().map(|(_, p)| p)
@@ -444,7 +457,11 @@ pub fn add_vmware_tools_drivers(
                 driver = driver,
                 count = missing.len(),
                 files = names.join(", "),
-                more = if missing.len() > names.len() { ", …" } else { "" }
+                more = if missing.len() > names.len() {
+                    ", …"
+                } else {
+                    ""
+                }
             )
             .into_owned()
         })
@@ -472,7 +489,11 @@ fn mine_setup_exe(
     // put back together before they are anything but a valid-looking header.
     let compound = crate::ole_compound::Compound::find(&data).ok_or_else(|| {
         OwnBackupError::ImageFormat(
-            tr!("media_guest_drivers_win.not_an_installer", file = setup.display()).into_owned(),
+            tr!(
+                "media_guest_drivers_win.not_an_installer",
+                file = setup.display()
+            )
+            .into_owned(),
         )
     })?;
     let streams = compound.streams();
@@ -500,12 +521,17 @@ fn mine_setup_exe(
     let mut out: Vec<(String, PathBuf)> = Vec::new();
     let total = cabs.len().max(1);
     for (i, blob) in cabs.iter().enumerate() {
-        progress((20 + i * 40 / total) as u64, &tr!("media_guest_drivers_win.reading_installer"));
+        progress(
+            (20 + i * 40 / total) as u64,
+            &tr!("media_guest_drivers_win.reading_installer"),
+        );
 
         // Which Windows variants of an INF does this cabinet hold? The names
         // are read out of the reassembled stream, so a cabinet whose header
         // survived carving but whose data did not cannot get this far.
-        let Some(cab) = cabinets_in(blob).into_iter().next() else { continue };
+        let Some(cab) = cabinets_in(blob).into_iter().next() else {
+            continue;
+        };
         let infs: Vec<(String, Option<String>)> = cab
             .names
             .iter()
@@ -527,7 +553,11 @@ fn mine_setup_exe(
         let driver = infs
             .iter()
             .find(|(_, os)| os.as_deref() == want_os.as_deref())
-            .map(|(name, _)| name.trim_end_matches(".inf").trim_end_matches(".INF").to_string())
+            .map(|(name, _)| {
+                name.trim_end_matches(".inf")
+                    .trim_end_matches(".INF")
+                    .to_string()
+            })
             .unwrap_or_default();
         if driver.is_empty() {
             continue;
@@ -558,7 +588,11 @@ fn mine_setup_exe(
         // where the rule is ours and is tested.
         let expanded = run(
             "expand",
-            &[&cab_path.display().to_string(), "-F:*", &dst.display().to_string()],
+            &[
+                &cab_path.display().to_string(),
+                "-F:*",
+                &dst.display().to_string(),
+            ],
         );
         let _ = std::fs::remove_file(&cab_path);
         if let Err(e) = expanded {
@@ -662,7 +696,11 @@ fn mount_iso(iso: &Path) -> Result<String> {
     let letter = out.trim().trim_matches(['\r', '\n', ' ']).to_string();
     if letter.len() != 1 {
         return Err(OwnBackupError::ImageFormat(
-            tr!("media_guest_drivers_win.iso_not_mounted", answer = format!("{out:?}")).into_owned(),
+            tr!(
+                "media_guest_drivers_win.iso_not_mounted",
+                answer = format!("{out:?}")
+            )
+            .into_owned(),
         ));
     }
     Ok(letter)
@@ -670,7 +708,10 @@ fn mount_iso(iso: &Path) -> Result<String> {
 
 #[cfg(target_os = "windows")]
 fn dismount_iso(iso: &Path) {
-    let _ = ps(&format!("Dismount-DiskImage -ImagePath '{}' | Out-Null", iso.display()));
+    let _ = ps(&format!(
+        "Dismount-DiskImage -ImagePath '{}' | Out-Null",
+        iso.display()
+    ));
 }
 
 /// The tools installer on the image, when there is one at all. Newer images
@@ -684,7 +725,11 @@ fn find_tools_msi(root: &Path) -> Option<PathBuf> {
         .collect();
     // "VMware Tools64.msi" over "VMware Tools.msi": the medium is x64.
     msis.sort_by_key(|p| {
-        let name = p.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+        let name = p
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_lowercase();
         usize::from(!name.contains("64"))
     });
     msis.into_iter().next()
@@ -705,11 +750,15 @@ fn stage_wanted_drivers(from: &Path, staged: &Path) -> Result<Vec<(String, PathB
     // driver name -> (score, inf) — lower score is the better variant.
     let mut best: std::collections::BTreeMap<String, (u8, PathBuf)> = Default::default();
     for inf in infs {
-        let Some(class) = inf_class(&inf) else { continue };
+        let Some(class) = inf_class(&inf) else {
+            continue;
+        };
         if !WANTED_CLASSES.iter().any(|c| *c == class) {
             continue;
         }
-        let Some(arch) = arch_score(&inf) else { continue };
+        let Some(arch) = arch_score(&inf) else {
+            continue;
+        };
         // Architecture first, then the Windows variant: the image is Windows 10
         // x64, and a driver folder holds one of each.
         let score = arch * 10 + os_score(&inf);
@@ -760,7 +809,10 @@ fn os_score(inf: &Path) -> u8 {
     }
     // No variant in the path at all: better than an old Windows, worse than a
     // folder that says Windows 10 outright.
-    if OS_TAGS.iter().any(|t| path.contains(&format!("\\{}\\", t.to_lowercase()))) {
+    if OS_TAGS
+        .iter()
+        .any(|t| path.contains(&format!("\\{}\\", t.to_lowercase())))
+    {
         OS_PREFERENCE.len() as u8 + 1
     } else {
         OS_PREFERENCE.len() as u8
@@ -779,7 +831,10 @@ fn driver_name(inf: &Path) -> String {
             return name.clone();
         }
     }
-    inf.file_stem().unwrap_or_default().to_string_lossy().to_string()
+    inf.file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string()
 }
 
 /// Every `.inf` under `dir`. Bounded depth: the tools image is a handful of
@@ -788,7 +843,9 @@ fn collect_infs(dir: &Path, depth: u32, out: &mut Vec<PathBuf>) {
     if depth > 8 {
         return;
     }
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     for e in rd.flatten() {
         let p = e.path();
         if p.is_dir() {
@@ -802,15 +859,17 @@ fn collect_infs(dir: &Path, depth: u32, out: &mut Vec<PathBuf>) {
 /// An INF as text. They are ANSI or UTF-16, and both have to read.
 fn inf_text(inf: &Path) -> Option<String> {
     let bytes = std::fs::read(inf).ok()?;
-    Some(if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
-        let units: Vec<u16> = bytes[2..]
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
-            .collect();
-        String::from_utf16_lossy(&units)
-    } else {
-        String::from_utf8_lossy(&bytes).to_string()
-    })
+    Some(
+        if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
+            let units: Vec<u16> = bytes[2..]
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            String::from_utf16_lossy(&units)
+        } else {
+            String::from_utf8_lossy(&bytes).to_string()
+        },
+    )
 }
 
 /// The files an INF says its package consists of — the `[SourceDisksFiles]`
@@ -834,7 +893,9 @@ pub fn inf_source_files(text: &str) -> Vec<String> {
             continue;
         }
         // `vm3dmp.sys = 1,,` — the name is what stands before the equals sign.
-        let Some((name, _)) = l.split_once('=') else { continue };
+        let Some((name, _)) = l.split_once('=') else {
+            continue;
+        };
         let name = name.trim();
         if !name.is_empty() && !name.contains(['\\', '/', '%']) {
             out.push(name.to_string());
@@ -857,7 +918,9 @@ pub fn inf_source_files(text: &str) -> Vec<String> {
 /// renamed to it. Only an unambiguous match is taken; anything left over is
 /// reported by name rather than left for DISM to trip over.
 fn reconcile_with_inf(dir: &Path, inf: &Path) -> Vec<String> {
-    let Some(text) = inf_text(inf) else { return Vec::new() };
+    let Some(text) = inf_text(inf) else {
+        return Vec::new();
+    };
     let mut present: std::collections::HashMap<String, String> = std::fs::read_dir(dir)
         .into_iter()
         .flatten()
@@ -911,7 +974,9 @@ fn inf_class(inf: &Path) -> Option<String> {
             continue;
         };
         let rest = rest.trim_start();
-        let Some(v) = rest.strip_prefix('=') else { continue };
+        let Some(v) = rest.strip_prefix('=') else {
+            continue;
+        };
         let v = v.split(';').next().unwrap_or("").trim().to_lowercase();
         if !v.is_empty() {
             return Some(v);
@@ -950,7 +1015,11 @@ fn ps(script: &str) -> Result<String> {
         .map_err(|e| OwnBackupError::ImageFormat(format!("powershell: {e}")))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
-        let tail: Vec<&str> = err.lines().filter(|l| !l.trim().is_empty()).take(2).collect();
+        let tail: Vec<&str> = err
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .take(2)
+            .collect();
         warn!(script, error = %tail.join(" "), "powershell step failed");
         return Err(OwnBackupError::ImageFormat(format!(
             "powershell: {}",
@@ -974,7 +1043,13 @@ fn run(program: &str, args: &[&str]) -> Result<()> {
     // What the tool said is the useful part — decoded, since it says it in the
     // console's own code page.
     let text = crate::media_layout::console_text(&out.stdout);
-    let tail: Vec<&str> = text.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).rev().take(2).collect();
+    let tail: Vec<&str> = text
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .rev()
+        .take(2)
+        .collect();
     Err(OwnBackupError::ImageFormat(
         tr!(
             "media_guest_drivers_win.tool_failed",
@@ -1032,11 +1107,23 @@ mod tests {
 
         let write_inf = |dir: &Path, name: &str, class: &str| {
             std::fs::create_dir_all(dir).unwrap();
-            std::fs::write(dir.join(format!("{name}.inf")), format!("Class={class}\r\n")).unwrap();
+            std::fs::write(
+                dir.join(format!("{name}.inf")),
+                format!("Class={class}\r\n"),
+            )
+            .unwrap();
             std::fs::write(dir.join(format!("{name}.sys")), b"binary").unwrap();
         };
-        write_inf(&drivers.join("pvscsi").join("Win8").join("amd64"), "pvscsi", "SCSIAdapter");
-        write_inf(&drivers.join("pvscsi").join("Win8").join("i386"), "pvscsi", "SCSIAdapter");
+        write_inf(
+            &drivers.join("pvscsi").join("Win8").join("amd64"),
+            "pvscsi",
+            "SCSIAdapter",
+        );
+        write_inf(
+            &drivers.join("pvscsi").join("Win8").join("i386"),
+            "pvscsi",
+            "SCSIAdapter",
+        );
         write_inf(&drivers.join("vm3d").join("amd64"), "vm3d", "Display");
         write_inf(&drivers.join("vmxnet3").join("amd64"), "vmxnet3", "Net");
         // Not a rescue driver: shared folders have no business on the medium.
@@ -1055,8 +1142,14 @@ mod tests {
 
     #[test]
     fn other_architectures_are_left_alone() {
-        assert_eq!(arch_score(Path::new(r"D:\Drivers\pvscsi\Win8\amd64\pvscsi.inf")), Some(0));
-        assert_eq!(arch_score(Path::new(r"D:\Drivers\pvscsi\Win8\i386\pvscsi.inf")), None);
+        assert_eq!(
+            arch_score(Path::new(r"D:\Drivers\pvscsi\Win8\amd64\pvscsi.inf")),
+            Some(0)
+        );
+        assert_eq!(
+            arch_score(Path::new(r"D:\Drivers\pvscsi\Win8\i386\pvscsi.inf")),
+            None
+        );
         assert_eq!(arch_score(Path::new(r"D:\Drivers\arm64\vm3d.inf")), None);
         // No architecture in the path is not a reason to skip it.
         assert_eq!(arch_score(Path::new(r"D:\Drivers\vm3d\vm3d.inf")), Some(1));
@@ -1078,7 +1171,10 @@ mod tests {
             ("7za.exe".into(), None)
         );
         // A plain name is not decoration and must survive untouched.
-        assert_eq!(unmangle("install_rvmSetup.cmd"), ("install_rvmSetup.cmd".into(), None));
+        assert_eq!(
+            unmangle("install_rvmSetup.cmd"),
+            ("install_rvmSetup.cmd".into(), None)
+        );
         assert_eq!(unmangle("vm3d.inf"), ("vm3d.inf".into(), None));
     }
 
@@ -1117,12 +1213,20 @@ mod tests {
         // A coincidence: the signature with nonsense behind it.
         blob.extend_from_slice(b"MSCF");
         blob.extend_from_slice(&[0xFF; 64]);
-        blob.extend_from_slice(&cab(&["_vm3d.inf_Win10.4C60EBF3_7457_440E_A848_1BB27D201892"]));
+        blob.extend_from_slice(&cab(&[
+            "_vm3d.inf_Win10.4C60EBF3_7457_440E_A848_1BB27D201892",
+        ]));
         blob.extend_from_slice(&vec![0x11u8; 128]);
-        blob.extend_from_slice(&cab(&["pvscsi.sys_Win10.9CD0B9A0_B52A_4547_9E49_4A6F72E7F651"]));
+        blob.extend_from_slice(&cab(&[
+            "pvscsi.sys_Win10.9CD0B9A0_B52A_4547_9E49_4A6F72E7F651",
+        ]));
 
         let found = cabinets_in(&blob);
-        assert_eq!(found.len(), 2, "the false signature must not be taken for a cabinet");
+        assert_eq!(
+            found.len(),
+            2,
+            "the false signature must not be taken for a cabinet"
+        );
         assert_eq!(unmangle(&found[0].names[0]).0, "vm3d.inf");
         assert_eq!(unmangle(&found[1].names[0]).0, "pvscsi.sys");
     }
@@ -1135,7 +1239,9 @@ mod tests {
     #[test]
     #[ignore = "needs a real VMware Tools setup.exe via VMTOOLS_SETUP"]
     fn takes_the_display_driver_out_of_a_real_installer() {
-        let Ok(path) = std::env::var("VMTOOLS_SETUP") else { return };
+        let Ok(path) = std::env::var("VMTOOLS_SETUP") else {
+            return;
+        };
         let data = std::fs::read(path).unwrap();
         let compound = crate::ole_compound::Compound::find(&data)
             .expect("the installer carries a compound file");
@@ -1152,7 +1258,9 @@ mod tests {
                 cab_data_intact(&blob),
                 "a reassembled cabinet must match its own checksums"
             );
-            let Some(cab) = cabinets_in(&blob).into_iter().next() else { continue };
+            let Some(cab) = cabinets_in(&blob).into_iter().next() else {
+                continue;
+            };
             for n in &cab.names {
                 let (real, os) = unmangle(n);
                 if real.eq_ignore_ascii_case("vm3d.inf") && os.as_deref() == Some("Win10") {
@@ -1160,9 +1268,15 @@ mod tests {
                 }
             }
         }
-        assert!(cabinets > 5, "a tools installer holds a couple of dozen cabinets");
+        assert!(
+            cabinets > 5,
+            "a tools installer holds a couple of dozen cabinets"
+        );
         let size = display.expect("the WDDM display driver must be in there");
-        println!("{cabinets} cabinets, all intact; vm3d is {} MB", size / 1_048_576);
+        println!(
+            "{cabinets} cabinets, all intact; vm3d is {} MB",
+            size / 1_048_576
+        );
     }
 
     /// The display driver, as it really comes out of the installer: thirteen of
@@ -1175,9 +1289,16 @@ mod tests {
         let d = dir.path();
         // What the cabinet gives us, after the mangled keys are undone.
         for f in [
-            "vm3d.inf", "vm3d.cat", "vm3dmp.sys", "vm3dmp_debug.sys", "vm3dmp_stats.sys",
-            "vm3dmp_loader.sys", "vm3ddevapi64.dll", "vm3ddevapi64_release.dll",
-            "vm3dum64_10.dll", "vm3dum64_10_stats.dll",
+            "vm3d.inf",
+            "vm3d.cat",
+            "vm3dmp.sys",
+            "vm3dmp_debug.sys",
+            "vm3dmp_stats.sys",
+            "vm3dmp_loader.sys",
+            "vm3ddevapi64.dll",
+            "vm3ddevapi64_release.dll",
+            "vm3dum64_10.dll",
+            "vm3dum64_10_stats.dll",
         ] {
             std::fs::write(d.join(f), b"x").unwrap();
         }
@@ -1198,12 +1319,20 @@ mod tests {
         .unwrap();
 
         let missing = reconcile_with_inf(d, &d.join("vm3d.inf"));
-        assert!(missing.is_empty(), "nothing should be left missing: {missing:?}");
+        assert!(
+            missing.is_empty(),
+            "nothing should be left missing: {missing:?}"
+        );
         for f in [
-            "vm3dmp-debug.sys", "vm3dmp-stats.sys", "vm3ddevapi64-release.dll",
+            "vm3dmp-debug.sys",
+            "vm3dmp-stats.sys",
+            "vm3ddevapi64-release.dll",
             "vm3dum64_10-stats.dll",
         ] {
-            assert!(d.join(f).is_file(), "{f} should have been renamed to the INF's name");
+            assert!(
+                d.join(f).is_file(),
+                "{f} should have been renamed to the INF's name"
+            );
         }
         // An underscore the INF itself uses must be left alone.
         assert!(d.join("vm3dmp_loader.sys").is_file());
@@ -1220,12 +1349,18 @@ mod tests {
         )
         .unwrap();
         std::fs::write(d.join("there.sys"), b"x").unwrap();
-        assert_eq!(reconcile_with_inf(d, &d.join("x.inf")), vec!["gone.sys".to_string()]);
+        assert_eq!(
+            reconcile_with_inf(d, &d.join("x.inf")),
+            vec!["gone.sys".to_string()]
+        );
     }
 
     #[test]
     fn the_pseudo_id_is_recognisable_as_one() {
         assert!(VMWARE_TOOLS_ID.starts_with(PSEUDO_PREFIX));
-        assert!(!VMWARE_TOOLS_ID.ends_with(".inf"), "it must not look like a real package");
+        assert!(
+            !VMWARE_TOOLS_ID.ends_with(".inf"),
+            "it must not look like a real package"
+        );
     }
 }

@@ -13,8 +13,7 @@ use std::io::Write;
 use own_backup_common::Result;
 
 use super::{
-    bad, HEADER_LENGTH_V3, HEXT_BACKING_FORMAT, HEXT_END, OFLAG_COPIED, QCOW2_MAGIC,
-    REFCOUNT_ORDER,
+    bad, HEADER_LENGTH_V3, HEXT_BACKING_FORMAT, HEXT_END, OFLAG_COPIED, QCOW2_MAGIC, REFCOUNT_ORDER,
 };
 
 /// Where [`Qcow2Tables::finish_tables`] put the metadata the header points at.

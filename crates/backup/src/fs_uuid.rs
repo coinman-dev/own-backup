@@ -17,7 +17,10 @@ pub const PROBE_LEN: usize = 68 * 1024;
 /// The UUID of whichever filesystem `head` begins with, spelled the way GRUB
 /// spells it in a `search` line.
 pub fn probe(head: &[u8]) -> Option<String> {
-    ext_uuid(head).or_else(|| btrfs_uuid(head)).or_else(|| xfs_uuid(head)).or_else(|| fat_serial(head))
+    ext_uuid(head)
+        .or_else(|| btrfs_uuid(head))
+        .or_else(|| xfs_uuid(head))
+        .or_else(|| fat_serial(head))
 }
 
 /// ext2/3/4: superblock at 1024, magic `0xEF53` at +56, UUID at +104.
@@ -50,7 +53,8 @@ fn xfs_uuid(head: &[u8]) -> Option<String> {
 /// `XXXX-XXXX`. FAT32 keeps it at 0x43, FAT12/16 at 0x27.
 fn fat_serial(head: &[u8]) -> Option<String> {
     let looks_like_fat = |at: usize, tag: &[u8]| {
-        head.get(at..at + tag.len()).is_some_and(|s| s.starts_with(tag))
+        head.get(at..at + tag.len())
+            .is_some_and(|s| s.starts_with(tag))
     };
     let at = if looks_like_fat(0x52, b"FAT32") {
         0x43

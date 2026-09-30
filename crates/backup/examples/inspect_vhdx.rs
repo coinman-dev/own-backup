@@ -87,7 +87,10 @@ impl Vhdx {
                 meta_len = length;
             }
         }
-        assert!(bat_offset > 0 && meta_offset > 0, "missing BAT/metadata region");
+        assert!(
+            bat_offset > 0 && meta_offset > 0,
+            "missing BAT/metadata region"
+        );
 
         // Metadata table.
         let meta = read_at(&mut file, meta_offset, meta_len.min(1024 * 1024));
@@ -175,7 +178,11 @@ fn state_name(s: u8) -> &'static str {
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+    bytes
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn main() {
@@ -195,7 +202,9 @@ fn main() {
             sc.info.chain_role,
             sc.info.volume_data_offset,
             vol_block,
-            entry.map(|e| format!("{:016x}", e.checksum)).unwrap_or("ABSENT".into())
+            entry
+                .map(|e| format!("{:016x}", e.checksum))
+                .unwrap_or("ABSENT".into())
         );
     }
 
@@ -210,17 +219,26 @@ fn main() {
 
     // Parent state + content.
     let (p_state, p_off) = parent.payload_entry(vblock);
-    println!("parent payload: state={} file_offset={p_off}", state_name(p_state));
+    println!(
+        "parent payload: state={} file_offset={p_off}",
+        state_name(p_state)
+    );
     let p_data = match p_state {
         6 => parent.read_block(p_off),
         2 | 0 => vec![0u8; parent.block_size as usize],
         s => panic!("unexpected parent state {s}"),
     };
-    println!("parent block hash = {:016x}", compute_block_checksum(&p_data));
+    println!(
+        "parent block hash = {:016x}",
+        compute_block_checksum(&p_data)
+    );
 
     // Child state + content.
     let (c_state, c_off) = child.payload_entry(vblock);
-    println!("child payload:  state={} file_offset={c_off}", state_name(c_state));
+    println!(
+        "child payload:  state={} file_offset={c_off}",
+        state_name(c_state)
+    );
 
     let sectors_per_block = (child.block_size / child.sector_size) as usize;
     let composed: Vec<u8> = match c_state {
@@ -230,7 +248,10 @@ fn main() {
         }
         6 => {
             let c = child.read_block(c_off);
-            println!("child block (full) hash = {:016x}", compute_block_checksum(&c));
+            println!(
+                "child block (full) hash = {:016x}",
+                compute_block_checksum(&c)
+            );
             c
         }
         7 => {
@@ -258,14 +279,20 @@ fn main() {
         s => panic!("unexpected child state {s}"),
     };
 
-    println!("chain-composed hash    = {:016x}", compute_block_checksum(&composed));
+    println!(
+        "chain-composed hash    = {:016x}",
+        compute_block_checksum(&composed)
+    );
 
     // Where do composed and parent differ?
     let ss = child.sector_size as usize;
     let diff: Vec<usize> = (0..sectors_per_block)
         .filter(|&i| composed[i * ss..(i + 1) * ss] != p_data[i * ss..(i + 1) * ss])
         .collect();
-    println!("sectors differing from parent: {:?}", compress_ranges(&diff));
+    println!(
+        "sectors differing from parent: {:?}",
+        compress_ranges(&diff)
+    );
 
     for &i in diff.iter().take(4) {
         let sec = &composed[i * ss..(i + 1) * ss];
@@ -280,8 +307,10 @@ fn main() {
     // Tail structure of the composed block (last 4096 bytes).
     let tail = &composed[composed.len() - 4096..];
     let tail_nonzero = tail.iter().filter(|&&b| b != 0).count();
-    println!("composed tail4096: nonzero={tail_nonzero} last512_first16=[{}]",
-        hex(&tail[3584..3600]));
+    println!(
+        "composed tail4096: nonzero={tail_nonzero} last512_first16=[{}]",
+        hex(&tail[3584..3600])
+    );
 
     // Volume sector 0 (boot sector) from the parent chain for comparison.
     let (b_state, b_off) = parent.payload_entry(data_offset / MIB);

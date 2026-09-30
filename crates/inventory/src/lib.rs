@@ -11,11 +11,11 @@ pub mod fs_probe;
 pub mod linux;
 #[cfg(target_os = "windows")]
 pub mod preflight_windows;
+#[cfg(target_os = "windows")]
+pub mod win_disks;
 /// Pure parsing of the structures Windows answers with — not gated, so its
 /// tests run wherever this project's tests run.
 pub mod win_parse;
-#[cfg(target_os = "windows")]
-pub mod win_disks;
 
 pub use mock::MockInventory;
 pub use preflight::PreflightAnalyzer;

@@ -31,7 +31,11 @@ pub fn read_string(root: HKEY, subkey: &str, value: &str) -> Option<String> {
             return None;
         }
         let name = wide(value);
-        let name = if value.is_empty() { PCWSTR::null() } else { PCWSTR(name.as_ptr()) };
+        let name = if value.is_empty() {
+            PCWSTR::null()
+        } else {
+            PCWSTR(name.as_ptr())
+        };
         let mut kind = REG_VALUE_TYPE(0);
         let mut size: u32 = 0;
         if RegQueryValueExW(key, name, None, Some(&mut kind), None, Some(&mut size))
@@ -79,7 +83,10 @@ mod tests {
             r"SOFTWARE\Microsoft\Windows NT\CurrentVersion",
             "ProductName",
         );
-        assert!(name.is_some_and(|n| n.contains("Windows")), "ProductName should say Windows");
+        assert!(
+            name.is_some_and(|n| n.contains("Windows")),
+            "ProductName should say Windows"
+        );
     }
 
     #[test]

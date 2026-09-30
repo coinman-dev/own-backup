@@ -119,7 +119,10 @@ impl ObkOpenHeader {
             return Err(bad("unknown .obk header format/scheme"));
         }
         if !(MIN_OBK_CLUSTER_BITS..=MAX_OBK_CLUSTER_BITS).contains(&self.cluster_bits) {
-            return Err(bad(format!("cluster_bits {} out of range", self.cluster_bits)));
+            return Err(bad(format!(
+                "cluster_bits {} out of range",
+                self.cluster_bits
+            )));
         }
         let cluster_size = 1u64 << self.cluster_bits;
         if self.virtual_size == 0 || !self.virtual_size.is_multiple_of(cluster_size) {
@@ -293,7 +296,9 @@ impl ObkFileHeader {
         }
         let l1_table_offset = u64::from_be_bytes(super::array(&prefix, 40));
         if l1_table_offset < cluster_size || !l1_table_offset.is_multiple_of(cluster_size) {
-            return Err(bad("L1 table offset is not a cluster boundary after the header"));
+            return Err(bad(
+                "L1 table offset is not a cluster boundary after the header",
+            ));
         }
 
         // Extensions and the backing file name live in the header cluster.
@@ -395,7 +400,11 @@ mod tests {
     type Edit = Box<dyn Fn(&mut ObkOpenHeader)>;
     use crate::seal::wrap::wrap_chain_key;
 
-    pub(crate) fn sample_header(chain: &ChainKey, chain_id: Uuid, backup_id: Uuid) -> ObkOpenHeader {
+    pub(crate) fn sample_header(
+        chain: &ChainKey,
+        chain_id: Uuid,
+        backup_id: Uuid,
+    ) -> ObkOpenHeader {
         let pair = JobKeyPair::generate().unwrap();
         let recovery = RecoveryKey::generate().unwrap();
         let key_file = SealedPrivateKey::seal(
@@ -446,11 +455,26 @@ mod tests {
         let chain = ChainKey::generate().unwrap();
         let good = sample_header(&chain, Uuid::new_v4(), Uuid::new_v4());
         let cases: Vec<(&str, Edit)> = vec![
-            ("format", Box::new(|h: &mut ObkOpenHeader| h.format = "other".into())),
-            ("scheme", Box::new(|h: &mut ObkOpenHeader| h.scheme = "own-backup/v1".into())),
-            ("cluster bits", Box::new(|h: &mut ObkOpenHeader| h.cluster_bits = 9)),
-            ("virtual size", Box::new(|h: &mut ObkOpenHeader| h.virtual_size += 1)),
-            ("nil chain", Box::new(|h: &mut ObkOpenHeader| h.chain_id = Uuid::nil())),
+            (
+                "format",
+                Box::new(|h: &mut ObkOpenHeader| h.format = "other".into()),
+            ),
+            (
+                "scheme",
+                Box::new(|h: &mut ObkOpenHeader| h.scheme = "own-backup/v1".into()),
+            ),
+            (
+                "cluster bits",
+                Box::new(|h: &mut ObkOpenHeader| h.cluster_bits = 9),
+            ),
+            (
+                "virtual size",
+                Box::new(|h: &mut ObkOpenHeader| h.virtual_size += 1),
+            ),
+            (
+                "nil chain",
+                Box::new(|h: &mut ObkOpenHeader| h.chain_id = Uuid::nil()),
+            ),
             (
                 "role without parent",
                 Box::new(|h: &mut ObkOpenHeader| h.role = ChainRole::Incremental),
@@ -463,7 +487,10 @@ mod tests {
                 "root in the header cluster",
                 Box::new(|h: &mut ObkOpenHeader| h.root.offset = 0),
             ),
-            ("root length", Box::new(|h: &mut ObkOpenHeader| h.root.len = 1)),
+            (
+                "root length",
+                Box::new(|h: &mut ObkOpenHeader| h.root.len = 1),
+            ),
             (
                 "wrapped key of another chain",
                 Box::new(|h: &mut ObkOpenHeader| h.chain_id = Uuid::new_v4()),
@@ -496,15 +523,24 @@ mod tests {
         header.wrapped_chain_key = B64.encode(wrapped.to_bytes());
 
         assert_eq!(
-            header.chain_key_with_password("пароль архива").unwrap().as_bytes(),
+            header
+                .chain_key_with_password("пароль архива")
+                .unwrap()
+                .as_bytes(),
             chain.as_bytes()
         );
         assert_eq!(
-            header.chain_key_with_recovery(&recovery).unwrap().as_bytes(),
+            header
+                .chain_key_with_recovery(&recovery)
+                .unwrap()
+                .as_bytes(),
             chain.as_bytes()
         );
         assert_eq!(
-            header.chain_key_with_private(&pair.private).unwrap().as_bytes(),
+            header
+                .chain_key_with_private(&pair.private)
+                .unwrap()
+                .as_bytes(),
             chain.as_bytes()
         );
         assert!(header.chain_key_with_password("wrong").is_err());

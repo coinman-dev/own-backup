@@ -51,11 +51,11 @@ pub use io::{ObkRandomReader, ObkStagedWriter};
 pub use listing::{read_listing, ObkListing};
 pub use metadata::update_sealed_metadata;
 pub use reader::read_open_header;
+pub use reader::{ObkChain, ObkImage};
 pub use rebuild::{
     apply_changed, apply_changed_clusters, apply_changed_with, ChangedClusters, PreviousContents,
     RebuildIdentity, RebuildOptions, RebuildStats,
 };
-pub use reader::{ObkChain, ObkImage};
 pub use root::ObkRoot;
 pub use writer::{ObkCompression, ObkWriter, ObkWriterOptions};
 
@@ -94,8 +94,7 @@ pub const MIN_OBK_CLUSTER_BITS: u32 = 12;
 pub const MAX_OBK_CLUSTER_BITS: u32 = 21;
 
 /// Bytes a record adds to its payload: 84-byte header + 16-byte tag.
-pub const RECORD_OVERHEAD: usize =
-    crate::seal::cluster::HEADER_LEN + crate::seal::cluster::TAG_LEN;
+pub const RECORD_OVERHEAD: usize = crate::seal::cluster::HEADER_LEN + crate::seal::cluster::TAG_LEN;
 
 /// How deep a chain may be before we call it a loop rather than a chain.
 pub const MAX_CHAIN_DEPTH: usize = 512;
@@ -153,7 +152,10 @@ mod tests {
         assert_eq!(table[0], 0, "incompatible feature");
         assert_eq!(1u64 << table[1], INCOMPAT_OBK_SEAL, "bit number matches");
         assert!(OBK_FEATURE_NAME.len() <= 46, "name fits the entry");
-        assert_eq!(&table[2..2 + OBK_FEATURE_NAME.len()], OBK_FEATURE_NAME.as_bytes());
+        assert_eq!(
+            &table[2..2 + OBK_FEATURE_NAME.len()],
+            OBK_FEATURE_NAME.as_bytes()
+        );
     }
 
     #[test]

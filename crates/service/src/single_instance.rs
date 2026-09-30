@@ -59,7 +59,11 @@ impl std::fmt::Display for Taken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Taken::AlreadyRunning => {
-                write!(f, "{}", own_backup_common::tr!("single_instance.already_running"))
+                write!(
+                    f,
+                    "{}",
+                    own_backup_common::tr!("single_instance.already_running")
+                )
             }
             Taken::CouldNotAsk(why) => write!(
                 f,
@@ -95,7 +99,10 @@ pub fn claim(_data_dir: &Path) -> Result<Ownership, Taken> {
                 if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
                     return Err(Taken::AlreadyRunning);
                 }
-                return Ok(Ownership { _mutex: h, machine_wide });
+                return Ok(Ownership {
+                    _mutex: h,
+                    machine_wide,
+                });
             }
             // Access denied on `Global\` means no SeCreateGlobalPrivilege —
             // try the session-wide name before giving up.
@@ -128,7 +135,10 @@ pub fn claim(data_dir: &Path) -> Result<Ownership, Taken> {
             _ => Err(Taken::CouldNotAsk(err.to_string())),
         };
     }
-    Ok(Ownership { _lock: file, machine_wide: true })
+    Ok(Ownership {
+        _lock: file,
+        machine_wide: true,
+    })
 }
 
 #[cfg(test)]
@@ -154,7 +164,10 @@ mod tests {
 
         // And giving it up lets the next one in — a restart must work.
         drop(first);
-        assert!(claim(dir.path()).is_ok(), "ownership must be released with the guard");
+        assert!(
+            claim(dir.path()).is_ok(),
+            "ownership must be released with the guard"
+        );
     }
 
     /// A data directory that cannot be written is a different answer from
@@ -171,6 +184,8 @@ mod tests {
 
 impl std::fmt::Debug for Ownership {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Ownership").field("machine_wide", &self.machine_wide).finish()
+        f.debug_struct("Ownership")
+            .field("machine_wide", &self.machine_wide)
+            .finish()
     }
 }

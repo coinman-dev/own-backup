@@ -108,12 +108,22 @@ const DI_CHANGECOUNT: usize = 0x68;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum InoRefusal {
     /// Чанка с этим инодом в дереве нет.
-    NotInTree { ino: u64 },
+    NotInTree {
+        ino: u64,
+    },
     /// Инод уже помечен свободным — освобождать нечего.
-    AlreadyFree { ino: u64 },
+    AlreadyFree {
+        ino: u64,
+    },
     /// Вставка записи в FINOBT потребовала бы разбиения листа.
-    FinobtLeafFull { ino: u64, ag: u64 },
-    Other { ino: u64, why: String },
+    FinobtLeafFull {
+        ino: u64,
+        ag: u64,
+    },
+    Other {
+        ino: u64,
+        why: String,
+    },
 }
 
 impl std::fmt::Display for InoRefusal {
@@ -125,9 +135,11 @@ impl std::fmt::Display for InoRefusal {
             InoRefusal::AlreadyFree { ino } => {
                 f.write_str(&tr!("xfs_ifree.refusal_already_free", ino = ino))
             }
-            InoRefusal::FinobtLeafFull { ino, ag } => {
-                f.write_str(&tr!("xfs_ifree.refusal_finobt_leaf_full", ino = ino, ag = ag))
-            }
+            InoRefusal::FinobtLeafFull { ino, ag } => f.write_str(&tr!(
+                "xfs_ifree.refusal_finobt_leaf_full",
+                ino = ino,
+                ag = ag
+            )),
             InoRefusal::Other { ino, why } => {
                 f.write_str(&tr!("xfs_ifree.refusal_other", ino = ino, why = why))
             }
@@ -245,7 +257,12 @@ fn descend(
                     break;
                 }
             }
-            return Ok(Located { path, leaf: agbno, idx, found });
+            return Ok(Located {
+                path,
+                leaf: agbno,
+                idx,
+                found,
+            });
         }
         if nrecs == 0 || nrecs > node_max {
             return Err(bad(tr!("xfs_ifree.node_bad_pointer_count")));
@@ -369,8 +386,14 @@ pub(crate) fn plan_inode_freeing(
             }
             continue;
         }
-        let mut ino_edits = AgEdits { ag, blocks: BTreeMap::new() };
-        let mut fino_edits = AgEdits { ag, blocks: BTreeMap::new() };
+        let mut ino_edits = AgEdits {
+            ag,
+            blocks: BTreeMap::new(),
+        };
+        let mut fino_edits = AgEdits {
+            ag,
+            blocks: BTreeMap::new(),
+        };
         let mut freed_here: Vec<(u64, Vec<u8>)> = Vec::new();
         let mut agi_delta: u64 = 0;
 
@@ -418,7 +441,14 @@ pub(crate) fn plan_inode_freeing(
             let new_freecount = freecount + 1;
             let mut fino_plan: Option<(Located, bool)> = None;
             if agi.free_root != 0 {
-                let floc = descend(&mut fino_edits, vol, sb, agi.free_root, MAGIC_FINO, startino)?;
+                let floc = descend(
+                    &mut fino_edits,
+                    vol,
+                    sb,
+                    agi.free_root,
+                    MAGIC_FINO,
+                    startino,
+                )?;
                 if !floc.found {
                     let fblk = fino_edits.block(vol, sb, floc.leaf, MAGIC_FINO)?;
                     let fnrecs = be16(fblk, 0x06) as usize;
@@ -617,8 +647,9 @@ mod tests {
         put_be32(&mut rec, 0, 150);
         assert!(insert_leaf_rec(&mut blk, &sb, 1, &rec));
         assert_eq!(be16(&blk, 0x06), 4);
-        let keys: Vec<u64> =
-            (0..4).map(|i| be32(&blk, BTREE_HDR + i * INO_REC)).collect();
+        let keys: Vec<u64> = (0..4)
+            .map(|i| be32(&blk, BTREE_HDR + i * INO_REC))
+            .collect();
         assert_eq!(keys, vec![100, 150, 164, 228]);
     }
 
@@ -629,7 +660,10 @@ mod tests {
         let max = leaf_maxrecs(&sb);
         let mut blk = blank_leaf(4096, max as u16);
         let rec = [0u8; INO_REC];
-        assert!(!insert_leaf_rec(&mut blk, &sb, 0, &rec), "полный лист принял запись");
+        assert!(
+            !insert_leaf_rec(&mut blk, &sb, 0, &rec),
+            "полный лист принял запись"
+        );
         assert_eq!(be16(&blk, 0x06), max as u64, "numrecs изменился при отказе");
     }
 
@@ -639,7 +673,10 @@ mod tests {
     #[test]
     fn parent_keys_follow_the_first_key_upwards() {
         let sb = test_sb();
-        let mut edits = AgEdits { ag: 0, blocks: BTreeMap::new() };
+        let mut edits = AgEdits {
+            ag: 0,
+            blocks: BTreeMap::new(),
+        };
         // Два уровня узлов над листом; лист — нулевой слот у обоих.
         for agbno in [10u64, 20] {
             let mut b = vec![0u8; 4096];
@@ -659,13 +696,32 @@ mod tests {
                 0
             }
         }
-        fix_parent_keys(&mut edits, &mut NoVol, &sb, MAGIC_FINO, &[(20, 0), (10, 0)], 320).unwrap();
-        assert_eq!(be32(&edits.blocks[&10], BTREE_HDR), 320, "родитель листа не поехал");
+        fix_parent_keys(
+            &mut edits,
+            &mut NoVol,
+            &sb,
+            MAGIC_FINO,
+            &[(20, 0), (10, 0)],
+            320,
+        )
+        .unwrap();
+        assert_eq!(
+            be32(&edits.blocks[&10], BTREE_HDR),
+            320,
+            "родитель листа не поехал"
+        );
         assert_eq!(be32(&edits.blocks[&20], BTREE_HDR), 320, "дед не поехал");
-        assert_eq!(be32(&edits.blocks[&10], BTREE_HDR + INO_KEY), 900, "сосед сдвинулся");
+        assert_eq!(
+            be32(&edits.blocks[&10], BTREE_HDR + INO_KEY),
+            900,
+            "сосед сдвинулся"
+        );
 
         // А если лист висит НЕ на нулевом слоте, выше подниматься нельзя.
-        let mut edits2 = AgEdits { ag: 0, blocks: BTreeMap::new() };
+        let mut edits2 = AgEdits {
+            ag: 0,
+            blocks: BTreeMap::new(),
+        };
         for agbno in [10u64, 20] {
             let mut b = vec![0u8; 4096];
             b[0..4].copy_from_slice(MAGIC_FINO);
@@ -675,7 +731,15 @@ mod tests {
             put_be32(&mut b, BTREE_HDR + INO_KEY, 900);
             edits2.blocks.insert(agbno, b);
         }
-        fix_parent_keys(&mut edits2, &mut NoVol, &sb, MAGIC_FINO, &[(20, 0), (10, 1)], 800).unwrap();
+        fix_parent_keys(
+            &mut edits2,
+            &mut NoVol,
+            &sb,
+            MAGIC_FINO,
+            &[(20, 0), (10, 1)],
+            800,
+        )
+        .unwrap();
         assert_eq!(be32(&edits2.blocks[&10], BTREE_HDR + INO_KEY), 800);
         assert_eq!(be32(&edits2.blocks[&20], BTREE_HDR), 500, "дед поехал зря");
     }
@@ -717,7 +781,9 @@ mod tests {
         }
         impl RawVolume for FileVol {
             fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
-                self.f.read_exact_at(buf, offset).map_err(|e| bad(format!("read: {e}")))
+                self.f
+                    .read_exact_at(buf, offset)
+                    .map_err(|e| bad(format!("read: {e}")))
             }
             fn len(&self) -> u64 {
                 self.len
@@ -726,7 +792,10 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let img = dir.path().join("fs.img");
-        std::fs::File::create(&img).unwrap().set_len(768 * 1024 * 1024).unwrap();
+        std::fs::File::create(&img)
+            .unwrap()
+            .set_len(768 * 1024 * 1024)
+            .unwrap();
         assert!(std::process::Command::new("mkfs.xfs")
             .args(["-q", "-m", "reflink=1,crc=1"])
             .arg(&img)
@@ -784,9 +853,17 @@ mod tests {
         assert!(
             freeing.refusals.is_empty(),
             "D3 пощадил иноды: {:?}",
-            freeing.refusals.iter().map(|r| r.to_string()).collect::<Vec<_>>()
+            freeing
+                .refusals
+                .iter()
+                .map(|r| r.to_string())
+                .collect::<Vec<_>>()
         );
-        assert_eq!(freeing.freed.len(), all_inos.len(), "освобождены не все иноды");
+        assert_eq!(
+            freeing.freed.len(),
+            all_inos.len(),
+            "освобождены не все иноды"
+        );
         // Суперблок пишется отдельно — D3 отдаёт только дельту.
         if let Some(sbp) = patch_superblock(&mut vol, &sb, freeing.sb_ifree_delta, 0).unwrap() {
             patches.push(sbp);
@@ -809,7 +886,11 @@ mod tests {
 
         // Статика СРАЗУ после правки, до монтирования: иначе не отличить нашу
         // ошибку от того, что ядро сделало со счётчиками за сеанс записи.
-        let pre = std::process::Command::new("xfs_repair").arg("-n").arg(&img).output().unwrap();
+        let pre = std::process::Command::new("xfs_repair")
+            .arg("-n")
+            .arg(&img)
+            .output()
+            .unwrap();
         let pre_text = format!(
             "{}{}",
             String::from_utf8_lossy(&pre.stdout),
@@ -835,7 +916,10 @@ mod tests {
                 assert!(
                     !listed.iter().any(|n| n.starts_with("VICTIM")),
                     "каталог {dname}: жертвы остались: {:?}",
-                    listed.iter().filter(|n| n.starts_with("VICTIM")).collect::<Vec<_>>()
+                    listed
+                        .iter()
+                        .filter(|n| n.starts_with("VICTIM"))
+                        .collect::<Vec<_>>()
                 );
             }
             for (dname, fname) in &kept {
@@ -851,7 +935,11 @@ mod tests {
             assert!(written > 16, "записалось всего {written} МиБ");
         }
 
-        let out = std::process::Command::new("xfs_repair").arg("-n").arg(&img).output().unwrap();
+        let out = std::process::Command::new("xfs_repair")
+            .arg("-n")
+            .arg(&img)
+            .output()
+            .unwrap();
         let text = format!(
             "{}{}",
             String::from_utf8_lossy(&out.stdout),
@@ -882,12 +970,18 @@ mod tests {
             let found = judge(t);
             // Единственный разрешённый остаток — блоки удалённых файлов: они
             // ещё числятся занятыми, и вернёт их D4.
-            let unexpected: Vec<&String> =
-                found.iter().filter(|l| !l.starts_with("unknown block state")).collect();
+            let unexpected: Vec<&String> = found
+                .iter()
+                .filter(|l| !l.starts_with("unknown block state"))
+                .collect();
             assert!(
                 unexpected.is_empty(),
                 "xfs_repair {when} нашёл не только остаток D4:\n{}",
-                unexpected.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n")
+                unexpected
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n")
             );
             assert!(
                 found.iter().any(|l| l.starts_with("unknown block state")),
@@ -896,8 +990,10 @@ mod tests {
             );
         }
         let complaints = corpus::kernel_complaints(before, &["XFS", "xfs"]);
-        let bad: Vec<&String> =
-            complaints.iter().filter(|l| l.contains("error") || l.contains("corrupt")).collect();
+        let bad: Vec<&String> = complaints
+            .iter()
+            .filter(|l| l.contains("error") || l.contains("corrupt"))
+            .collect();
         assert!(bad.is_empty(), "ядро ругалось на ФС:\n{bad:?}");
     }
 }

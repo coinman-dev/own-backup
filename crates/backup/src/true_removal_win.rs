@@ -200,8 +200,15 @@ pub fn remove_excluded_from_image(
     let merge_ms = t_merge.elapsed().as_millis();
 
     let t_rehash = Instant::now();
-    let (rehashed, added) =
-        rehash_touched_blocks(image_path, &alloc, data_offset, volume_len, block_size, checksums, tick)?;
+    let (rehashed, added) = rehash_touched_blocks(
+        image_path,
+        &alloc,
+        data_offset,
+        volume_len,
+        block_size,
+        checksums,
+        tick,
+    )?;
     let rehash_ms = t_rehash.elapsed().as_millis();
 
     let outcome = RemovalOutcome {
@@ -289,19 +296,19 @@ pub fn exclude_inside_image(
 
     // --- Phase A (transactional): everything lands in the temp child. ---
     let t_mount = Instant::now();
-    let scanned = match scan_delete_and_zero(&temp, image_path, patterns, data_offset, volume_len, tick)
-    {
-        Ok(s) => s,
-        Err(e) => {
-            warn!(
-                error = %e,
-                "exclusions inside the image: pass failed — the copy keeps every file, \
-                 including the excluded ones"
-            );
-            let _ = std::fs::remove_file(&temp);
-            return Ok(None);
-        }
-    };
+    let scanned =
+        match scan_delete_and_zero(&temp, image_path, patterns, data_offset, volume_len, tick) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "exclusions inside the image: pass failed — the copy keeps every file, \
+                     including the excluded ones"
+                );
+                let _ = std::fs::remove_file(&temp);
+                return Ok(None);
+            }
+        };
     let mount_ms = t_mount.elapsed().as_millis();
     if scanned.deleted == 0 {
         info!(
@@ -348,8 +355,15 @@ pub fn exclude_inside_image(
     let _ = std::fs::remove_file(&temp);
     let merge_ms = t_merge.elapsed().as_millis();
 
-    let (rehashed, added) =
-        rehash_touched_blocks(image_path, &alloc, data_offset, volume_len, block_size, checksums, tick)?;
+    let (rehashed, added) = rehash_touched_blocks(
+        image_path,
+        &alloc,
+        data_offset,
+        volume_len,
+        block_size,
+        checksums,
+        tick,
+    )?;
 
     let out = InsideRemoval {
         outcome: RemovalOutcome {
@@ -407,8 +421,14 @@ fn scan_delete_and_zero(
     let _ = dev.update_properties();
     dev.set_online_this_session()?;
     let disk_number = disk_number_of(attached.physical_path())?;
-    let scanned =
-        scan_delete_zero_on_disk(disk_number, &mut dev, patterns, data_offset, volume_len, tick)?;
+    let scanned = scan_delete_zero_on_disk(
+        disk_number,
+        &mut dev,
+        patterns,
+        data_offset,
+        volume_len,
+        tick,
+    )?;
     drop(dev);
     drop(attached); // detaches the child
     Ok(scanned)
@@ -476,10 +496,14 @@ pub(crate) fn scan_delete_zero_on_disk(
     // what keeps the detach below from waiting out the ~180 s PnP removal veto
     // (see `delete_paths_on_disk`, whose body this mirrors for a volume we
     // located ourselves).
-    let (deleted, failed) = delete_paths_on_volume_root(&volume_root, &scan.paths, 0, scan.paths.len() as u64, tick)?;
+    let (deleted, failed) =
+        delete_paths_on_volume_root(&volume_root, &scan.paths, 0, scan.paths.len() as u64, tick)?;
     teardown_volume(&volume_root, dev);
     let gone = wait_volume_gone(disk_number, Duration::from_secs(10));
-    debug!(gone, "exclusions inside the image: volume state before the zero pass");
+    debug!(
+        gone,
+        "exclusions inside the image: volume state before the zero pass"
+    );
 
     // 3. With the volume dismounted, nothing is writing to the filesystem any
     // more — so the bitmap read here is final, and zeroing what it calls free
@@ -611,7 +635,10 @@ fn mount_and_delete(
     drop(dev);
     let t_detach = Instant::now();
     drop(attached); // detaches the child
-    info!(detach_ms = t_detach.elapsed().as_millis(), "true removal: temp child detached");
+    info!(
+        detach_ms = t_detach.elapsed().as_millis(),
+        "true removal: temp child detached"
+    );
 
     Ok((deleted, failed))
 }
@@ -668,7 +695,10 @@ pub fn remove_excluded_from_disk_image(
     };
     let mount_delete_ms = t_mount.elapsed().as_millis();
     if deleted.0 == 0 {
-        warn!(failed = deleted.1, "true removal: nothing deleted — image left with zero-filled ghosts");
+        warn!(
+            failed = deleted.1,
+            "true removal: nothing deleted — image left with zero-filled ghosts"
+        );
         let _ = std::fs::remove_file(&temp);
         return Ok(None);
     }
@@ -692,8 +722,9 @@ pub fn remove_excluded_from_disk_image(
     // disk-block absolute (data_offset = 0, volume_len = image_size). ---
     merge_into_parent(&temp)?;
     let _ = std::fs::remove_file(&temp);
-    let (rehashed, added) =
-        rehash_touched_blocks(image_path, &alloc, 0, image_size, block_size, checksums, tick)?;
+    let (rehashed, added) = rehash_touched_blocks(
+        image_path, &alloc, 0, image_size, block_size, checksums, tick,
+    )?;
 
     let outcome = RemovalOutcome {
         entries_deleted: deleted.0,
@@ -739,7 +770,10 @@ fn mount_and_delete_multi(
     drop(dev);
     let t_detach = Instant::now();
     drop(attached); // detaches the child
-    info!(detach_ms = t_detach.elapsed().as_millis(), "true removal: whole-disk temp child detached");
+    info!(
+        detach_ms = t_detach.elapsed().as_millis(),
+        "true removal: whole-disk temp child detached"
+    );
     Ok(counts)
 }
 
@@ -770,18 +804,20 @@ pub(crate) fn delete_paths_on_disk_multi(
             continue;
         }
         match volume_root_at_offset(disk_number, *part_offset) {
-            Some(vr) => match delete_paths_on_volume_root(&vr, paths, paths_done, total_paths_all, tick) {
-                Ok((d, f)) => {
-                    deleted += d;
-                    failed += f;
+            Some(vr) => {
+                match delete_paths_on_volume_root(&vr, paths, paths_done, total_paths_all, tick) {
+                    Ok((d, f)) => {
+                        deleted += d;
+                        failed += f;
+                    }
+                    Err(e) => {
+                        // This volume never mounted (e.g. a filesystem Windows can't
+                        // mount) — keep its files as ghosts, continue with the rest.
+                        warn!(part_offset, error = %e, "true removal: skipping a partition whose volume did not mount");
+                        failed += paths.len() as u64;
+                    }
                 }
-                Err(e) => {
-                    // This volume never mounted (e.g. a filesystem Windows can't
-                    // mount) — keep its files as ghosts, continue with the rest.
-                    warn!(part_offset, error = %e, "true removal: skipping a partition whose volume did not mount");
-                    failed += paths.len() as u64;
-                }
-            },
+            }
             None => {
                 warn!(part_offset, "true removal: no mounted volume at this partition offset — paths kept as ghosts");
                 failed += paths.len() as u64;
@@ -794,7 +830,10 @@ pub(crate) fn delete_paths_on_disk_multi(
     for vr in &roots {
         strip_drive_letters(vr); // stragglers assigned while we were deleting
     }
-    let handles: Vec<_> = roots.iter().filter_map(|vr| flush_lock_dismount_volume(vr)).collect();
+    let handles: Vec<_> = roots
+        .iter()
+        .filter_map(|vr| flush_lock_dismount_volume(vr))
+        .collect();
     if let Err(e) = dev.set_offline_writable(false) {
         warn!(error = %e, "true removal: could not offline the mounted disk before detach");
     }
@@ -802,12 +841,13 @@ pub(crate) fn delete_paths_on_disk_multi(
     drop(handles); // release all locks with the disk already offline
     let t_gone = Instant::now();
     let gone = wait_volume_gone(disk_number, Duration::from_secs(10));
-    info!(gone, gone_ms = t_gone.elapsed().as_millis(), "true removal: volumes torn down before detach");
+    info!(
+        gone,
+        gone_ms = t_gone.elapsed().as_millis(),
+        "true removal: volumes torn down before detach"
+    );
     Ok((deleted, failed))
 }
-
-
-
 
 /// Delete `paths` on one already-mounted volume (identified by its
 /// `\\?\Volume{GUID}\` root), waiting for its filesystem to become ready first.
@@ -901,7 +941,8 @@ pub(crate) fn delete_paths_on_disk(
     tick: &mut dyn FnMut(u64, u64),
 ) -> Result<(u64, u64)> {
     let volume_root = find_volume_on_disk(disk_number)?;
-    let (deleted, failed) = delete_paths_on_volume_root(&volume_root, paths, 0, paths.len() as u64, tick)?;
+    let (deleted, failed) =
+        delete_paths_on_volume_root(&volume_root, paths, 0, paths.len() as u64, tick)?;
 
     // Tear the mounted volume down BEFORE detaching, or DetachVirtualDisk hits
     // the fixed ~180 s PnP removal-veto timeout (the stall the main image
@@ -1201,7 +1242,6 @@ fn delete_one(path: &str) -> Result<()> {
     .map_err(|e| dev_err("set delete disposition", e))
 }
 
-
 /// Cleanly unmount the volume so the subsequent detach is instant:
 /// flush → LOCK (retry) → DISMOUNT → offline the disk while still locked.
 ///
@@ -1222,12 +1262,13 @@ fn teardown_volume(volume_root: &str, dev: &WinRawDevice) {
     if let Err(e) = dev.update_properties() {
         warn!(error = %e, "true removal: could not refresh the partition table after offline");
     }
-    info!(offline_ms = t.elapsed().as_millis(), "true removal: temp disk offlined before detach");
+    info!(
+        offline_ms = t.elapsed().as_millis(),
+        "true removal: temp disk offlined before detach"
+    );
     // `handle` drops here: the lock is released with the disk already offline.
     drop(handle);
 }
-
-
 
 /// Re-read every backup block overlapped by the child's touched regions from
 /// the merged image and update/insert its checksum. New all-zero blocks are
@@ -1284,8 +1325,10 @@ pub(crate) fn rehash_touched_blocks(
         return Ok((0, 0));
     }
 
-    let mut map: BTreeMap<u64, u64> =
-        checksums.iter().map(|c| (c.block_number, c.checksum)).collect();
+    let mut map: BTreeMap<u64, u64> = checksums
+        .iter()
+        .map(|c| (c.block_number, c.checksum))
+        .collect();
     let mut added = 0u64;
     let t_read = Instant::now();
     let mut reader = crate::vhdx_bat::VhdxGuestReader::open(image_path)?;
@@ -1334,7 +1377,10 @@ pub(crate) fn rehash_touched_blocks(
 
     *checksums = map
         .into_iter()
-        .map(|(block_number, checksum)| BlockChecksum { block_number, checksum })
+        .map(|(block_number, checksum)| BlockChecksum {
+            block_number,
+            checksum,
+        })
         .collect();
     Ok((affected.len() as u64, added))
 }

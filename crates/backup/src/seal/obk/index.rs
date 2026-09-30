@@ -182,7 +182,11 @@ mod tests {
             assert_eq!(chunk.lookup(cluster), state, "cluster {cluster}");
         }
         for absent in [1, 2, 4, 8, 10, 999, 1001, u64::MAX] {
-            assert_eq!(chunk.lookup(absent), ClusterState::Absent, "cluster {absent}");
+            assert_eq!(
+                chunk.lookup(absent),
+                ClusterState::Absent,
+                "cluster {absent}"
+            );
         }
     }
 
@@ -190,16 +194,12 @@ mod tests {
     fn encoding_refuses_what_cannot_be_looked_up() {
         assert!(encode_chunk(&[]).is_err());
         assert!(encode_chunk(&[(5, ClusterState::Absent)]).is_err());
-        assert!(encode_chunk(&[
-            (5, ClusterState::Zero),
-            (5, ClusterState::Present(id(1)))
-        ])
-        .is_err());
-        assert!(encode_chunk(&[
-            (6, ClusterState::Zero),
-            (5, ClusterState::Present(id(1)))
-        ])
-        .is_err());
+        assert!(
+            encode_chunk(&[(5, ClusterState::Zero), (5, ClusterState::Present(id(1)))]).is_err()
+        );
+        assert!(
+            encode_chunk(&[(6, ClusterState::Zero), (5, ClusterState::Present(id(1)))]).is_err()
+        );
         let too_many: Vec<_> = (0..=MAX_INDEX_ENTRIES_PER_CHUNK as u64)
             .map(|c| (c, ClusterState::Zero))
             .collect();
@@ -209,7 +209,10 @@ mod tests {
     #[test]
     fn a_chunk_that_lies_about_itself_is_refused() {
         let bytes = encode_chunk(&sample()).unwrap();
-        assert!(IndexChunk::parse(bytes.clone(), 3, 0..1024).is_err(), "entry count");
+        assert!(
+            IndexChunk::parse(bytes.clone(), 3, 0..1024).is_err(),
+            "entry count"
+        );
         assert!(
             IndexChunk::parse(bytes.clone(), 4, 0..1000).is_err(),
             "entry outside the chunk's range"
@@ -221,7 +224,10 @@ mod tests {
 
         let mut unsorted = bytes.clone();
         unsorted[..8].copy_from_slice(&5000u64.to_be_bytes());
-        assert!(IndexChunk::parse(unsorted, 4, 0..1024 * 8).is_err(), "order");
+        assert!(
+            IndexChunk::parse(unsorted, 4, 0..1024 * 8).is_err(),
+            "order"
+        );
 
         let mut zero_with_identity = bytes.clone();
         zero_with_identity[INDEX_ENTRY_LEN + 9] = 7;

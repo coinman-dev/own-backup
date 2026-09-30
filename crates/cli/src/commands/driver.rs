@@ -29,10 +29,17 @@ pub async fn run(args: DriverArgs) -> own_backup_common::Result<()> {
     fn print_status() {
         let s = iscsi_win::status();
         println!("Подключение образов (Windows) — через встроенный iSCSI-инициатор");
-        println!("  Режим носителя (WinPE):  {}", if s.media_mode { "да" } else { "нет" });
+        println!(
+            "  Режим носителя (WinPE):  {}",
+            if s.media_mode { "да" } else { "нет" }
+        );
         println!(
             "  Драйвер msiscsi.sys:     {}",
-            if s.driver_file { "есть" } else { "НЕ НАЙДЕН" }
+            if s.driver_file {
+                "есть"
+            } else {
+                "НЕ НАЙДЕН"
+            }
         );
         println!(
             "  Служба {}:           {}",
@@ -80,11 +87,17 @@ pub async fn run(args: DriverArgs) -> own_backup_common::Result<()> {
         println!("Поддержка монтирования (Linux) — ядро {}", s.kernel);
         println!(
             "  Модуль NBD (/dev/nbd0): {}",
-            if s.nbd_ok { "ДОСТУПЕН" } else { "не загружен — `sudo modprobe nbd`" }
+            if s.nbd_ok {
+                "ДОСТУПЕН"
+            } else {
+                "не загружен — `sudo modprobe nbd`"
+            }
         );
         match &s.ntfs_backend {
             Some(b) => println!("  NTFS: ДОСТУПЕН ({b})"),
-            None => println!("  NTFS: нет — установите `ntfs-3g` (напр. `sudo apt install ntfs-3g`)"),
+            None => {
+                println!("  NTFS: нет — установите `ntfs-3g` (напр. `sudo apt install ntfs-3g`)")
+            }
         }
     }
 

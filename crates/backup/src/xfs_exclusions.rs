@@ -198,9 +198,9 @@ pub(crate) fn parse_sb(vol: &mut dyn RawVolume) -> Result<Sb> {
         inopblog,
         rootino,
         sectsize,
-        reflink: ro_compat & 0x4 != 0,     // XFS_SB_FEAT_RO_COMPAT_REFLINK
-        ftype: incompat & 0x1 != 0,        // XFS_SB_FEAT_INCOMPAT_FTYPE
-        spinodes: incompat & 0x2 != 0,     // XFS_SB_FEAT_INCOMPAT_SPINODES
+        reflink: ro_compat & 0x4 != 0, // XFS_SB_FEAT_RO_COMPAT_REFLINK
+        ftype: incompat & 0x1 != 0,    // XFS_SB_FEAT_INCOMPAT_FTYPE
+        spinodes: incompat & 0x2 != 0, // XFS_SB_FEAT_INCOMPAT_SPINODES
     })
 }
 
@@ -328,14 +328,27 @@ pub(crate) fn read_inode(vol: &mut dyn RawVolume, sb: &Sb, ino: u64) -> Result<V
 /// forkoff==0, to the end of the inode).
 pub(crate) fn data_fork(inode: &[u8], sb: &Sb) -> (usize, usize) {
     let forkoff = inode[0x52] as usize;
-    let end = if forkoff == 0 { sb.inodesize as usize } else { DINODE_CORE_V3 + forkoff * 8 };
+    let end = if forkoff == 0 {
+        sb.inodesize as usize
+    } else {
+        DINODE_CORE_V3 + forkoff * 8
+    };
     (DINODE_CORE_V3, end.min(inode.len()))
 }
 
 /// Resolve a data/attr fork of format EXTENTS or BTREE into extents. `nextents`
 /// bounds the extents-format reads; BTREE walks child bmbt blocks.
-fn fork_extents(vol: &mut dyn RawVolume, sb: &Sb, inode: &[u8], format: u8, nextents: u64) -> Result<Vec<Extent>> {
-    Ok(fork_extents_at(vol, sb, inode, format, nextents)?.into_iter().map(|(_, e)| e).collect())
+fn fork_extents(
+    vol: &mut dyn RawVolume,
+    sb: &Sb,
+    inode: &[u8],
+    format: u8,
+    nextents: u64,
+) -> Result<Vec<Extent>> {
+    Ok(fork_extents_at(vol, sb, inode, format, nextents)?
+        .into_iter()
+        .map(|(_, e)| e)
+        .collect())
 }
 
 /// Same, keeping each extent's LOGICAL offset in the fork. Directory work needs
@@ -387,7 +400,14 @@ pub(crate) fn fork_extents_at(
 }
 
 /// Walk a bmbt btree block (fs-block `fsblock`) collecting leaf extents.
-fn walk_bmbt(vol: &mut dyn RawVolume, sb: &Sb, fsblock: u64, _parent_level: u64, out: &mut Vec<(u64, Extent)>, depth: u32) -> Result<()> {
+fn walk_bmbt(
+    vol: &mut dyn RawVolume,
+    sb: &Sb,
+    fsblock: u64,
+    _parent_level: u64,
+    out: &mut Vec<(u64, Extent)>,
+    depth: u32,
+) -> Result<()> {
     if depth > 16 {
         return Err(bad("bmbt too deep"));
     }
@@ -459,12 +479,22 @@ fn read_dir(vol: &mut dyn RawVolume, sb: &Sb, dir_inode: &[u8]) -> Result<Vec<Di
                 }
                 let name = String::from_utf8_lossy(&sf[name_off..name_off + namelen]).to_string();
                 let mut q = name_off + namelen;
-                let ftype = if sb.ftype { let t = sf.get(q).copied().unwrap_or(0); q += 1; t } else { 0 };
+                let ftype = if sb.ftype {
+                    let t = sf.get(q).copied().unwrap_or(0);
+                    q += 1;
+                    t
+                } else {
+                    0
+                };
                 if q + ino_sz > sf.len() {
                     break;
                 }
                 let ino = if i8 { be64(sf, q) } else { be32(sf, q) };
-                out.push(DirEnt { ino, name, is_dir: ftype == 2 });
+                out.push(DirEnt {
+                    ino,
+                    name,
+                    is_dir: ftype == 2,
+                });
                 p = q + ino_sz; // advance to the next shortform entry
             }
         }
@@ -509,9 +539,17 @@ fn parse_dir2_data(blk: &[u8], sb: &Sb, out: &mut Vec<DirEnt>) -> Result<()> {
             break;
         }
         let name = String::from_utf8_lossy(&blk[p + 9..p + 9 + namelen]).to_string();
-        let ftype = if sb.ftype { blk.get(p + 9 + namelen).copied().unwrap_or(0) } else { 0 };
+        let ftype = if sb.ftype {
+            blk.get(p + 9 + namelen).copied().unwrap_or(0)
+        } else {
+            0
+        };
         if name != "." && name != ".." {
-            out.push(DirEnt { ino, name, is_dir: ftype == 2 });
+            out.push(DirEnt {
+                ino,
+                name,
+                is_dir: ftype == 2,
+            });
         }
         // rec len = 8 + 1 + namelen + (ftype?1:0) + 2, rounded up to 8.
         let raw = 8 + 1 + namelen + if sb.ftype { 1 } else { 0 } + 2;
@@ -543,7 +581,13 @@ fn collect_shared(vol: &mut dyn RawVolume, sb: &Sb) -> Result<ByteRanges> {
     Ok(shared)
 }
 
-fn walk_refcount(vol: &mut dyn RawVolume, sb: &Sb, ag: u64, agblock: u64, shared: &mut ByteRanges) -> Result<()> {
+fn walk_refcount(
+    vol: &mut dyn RawVolume,
+    sb: &Sb,
+    ag: u64,
+    agblock: u64,
+    shared: &mut ByteRanges,
+) -> Result<()> {
     let phys = (ag * sb.agblocks + agblock) * sb.blocksize;
     let mut blk = vec![0u8; sb.blocksize as usize];
     vol.read_at(phys, &mut blk)?;
@@ -607,7 +651,11 @@ pub fn scan_xfs_exclusions(
         return Err(bad(tr!("xfs_exclusions.log_dirty")));
     }
     // Shared block set (fs-block ranges) — empty when reflink is off.
-    let shared = if sb.reflink { collect_shared(vol, &sb)? } else { ByteRanges::new() };
+    let shared = if sb.reflink {
+        collect_shared(vol, &sb)?
+    } else {
+        ByteRanges::new()
+    };
 
     // BFS the directory tree from the root inode.
     let mut visited: HashSet<u64> = HashSet::new();
@@ -697,7 +745,10 @@ pub fn scan_xfs_exclusions(
                 any_shared = true;
                 break;
             }
-            ranges.push((sb.fsblock_to_phys(s), sb.fsblock_to_phys(s) + e.count * sb.blocksize));
+            ranges.push((
+                sb.fsblock_to_phys(s),
+                sb.fsblock_to_phys(s) + e.count * sb.blocksize,
+            ));
         }
         if any_shared {
             scan.files_kept_shared += 1;
@@ -785,7 +836,9 @@ mod xfs_integration {
     }
     impl RawVolume for FileVol {
         fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
-            self.f.read_exact_at(buf, offset).map_err(|e| bad(format!("read: {e}")))
+            self.f
+                .read_exact_at(buf, offset)
+                .map_err(|e| bad(format!("read: {e}")))
         }
         fn len(&self) -> u64 {
             self.len
@@ -827,7 +880,10 @@ mod xfs_integration {
 
         // Exclude the shared file (kept) AND the private one (zeroed).
         let (scan, mut vol) = run(&img, &["secret.log", "cache"]);
-        assert!(scan.files_kept_shared >= 1, "shared file not detected as shared");
+        assert!(
+            scan.files_kept_shared >= 1,
+            "shared file not detected as shared"
+        );
         assert!(!scan.ranges.is_empty(), "private file not zeroed");
 
         // No zeroed byte may be the kept file's 0xCD; must cover the private 0xAB.
@@ -843,7 +899,11 @@ mod xfs_integration {
         }
 
         // Apply zeroing → xfs_repair -n must stay clean (only data touched).
-        if std::process::Command::new("xfs_repair").arg("-V").output().is_err() {
+        if std::process::Command::new("xfs_repair")
+            .arg("-V")
+            .output()
+            .is_err()
+        {
             return;
         }
         let mut data = std::fs::read(&img).unwrap();
@@ -852,8 +912,16 @@ mod xfs_integration {
         }
         let patched = dir.path().join("patched.img");
         std::fs::write(&patched, &data).unwrap();
-        let out = std::process::Command::new("xfs_repair").arg("-n").arg(&patched).output().unwrap();
-        assert!(out.status.success(), "xfs_repair found errors:\n{}", String::from_utf8_lossy(&out.stderr));
+        let out = std::process::Command::new("xfs_repair")
+            .arg("-n")
+            .arg(&patched)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "xfs_repair found errors:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     /// XFS keeps no "needs recovery" flag, so the log itself is the only
@@ -875,7 +943,10 @@ mod xfs_integration {
         // Sanity: a cleanly unmounted filesystem must not read as dirty, or the
         // guard would simply switch xfs exclusions off for everyone.
         let (scan, _) = run(&img, &["cache"]);
-        assert!(scan.files_excluded > 0, "чистый лог принят за грязный — исключения бы отключились");
+        assert!(
+            scan.files_excluded > 0,
+            "чистый лог принят за грязный — исключения бы отключились"
+        );
 
         // Find the unmount record and break its magic.
         let mut data = raw.clone();
@@ -925,7 +996,11 @@ mod xfs_integration {
         }
         let dir = tempfile::tempdir().unwrap();
         let img = dir.path().join("fs.img");
-        std::fs::write(&img, zstd::decode_all(std::fs::File::open(&zst).unwrap()).unwrap()).unwrap();
+        std::fs::write(
+            &img,
+            zstd::decode_all(std::fs::File::open(&zst).unwrap()).unwrap(),
+        )
+        .unwrap();
         let (scan, _) = run(&img, &[]);
         assert_eq!(scan.files_excluded, 0);
         assert!(scan.ranges.is_empty());
@@ -950,13 +1025,19 @@ mod xfs_integration {
         }
         let dir = tempfile::tempdir().unwrap();
         let img = dir.path().join("fs.img");
-        std::fs::write(&img, zstd::decode_all(std::fs::File::open(&zst).unwrap()).unwrap())
-            .unwrap();
+        std::fs::write(
+            &img,
+            zstd::decode_all(std::fs::File::open(&zst).unwrap()).unwrap(),
+        )
+        .unwrap();
 
         // Sanity: a file with ONE name is zeroed — otherwise the assert below
         // would pass on a scanner that excludes nothing at all.
         let (scan, _) = run(&img, &["big.bin"]);
-        assert!(!scan.ranges.is_empty(), "sanity: big.bin should be zeroable when unlinked");
+        assert!(
+            !scan.ranges.is_empty(),
+            "sanity: big.bin should be zeroable when unlinked"
+        );
 
         // One name of the pair excluded, the other not: nothing may be zeroed.
         let (scan, _) = run(&img, &["hard_a.bin"]);
@@ -998,7 +1079,10 @@ mod xfs_integration {
         }
         let dir = tempfile::tempdir().unwrap();
         let img = dir.path().join("fs.img");
-        std::fs::File::create(&img).unwrap().set_len(768 * 1024 * 1024).unwrap();
+        std::fs::File::create(&img)
+            .unwrap()
+            .set_len(768 * 1024 * 1024)
+            .unwrap();
         assert!(std::process::Command::new("mkfs.xfs")
             .args(["-q", "-m", "reflink=1,crc=1"])
             .arg(&img)
@@ -1014,7 +1098,11 @@ mod xfs_integration {
         };
 
         let (scan, _) = run(&img, &["cache"]);
-        assert!(scan.files_excluded >= 1400, "исключено всего {}", scan.files_excluded);
+        assert!(
+            scan.files_excluded >= 1400,
+            "исключено всего {}",
+            scan.files_excluded
+        );
         // The reflink clone and both hard-linked files are shared — nothing of
         // theirs may be zeroed, and the scanner has to say so out loud.
         assert!(
@@ -1039,16 +1127,21 @@ mod xfs_integration {
             c.verify_kept("после заполнения");
         }
 
-        let out =
-            std::process::Command::new("xfs_repair").arg("-n").arg(&patched).output().unwrap();
+        let out = std::process::Command::new("xfs_repair")
+            .arg("-n")
+            .arg(&patched)
+            .output()
+            .unwrap();
         assert!(
             out.status.success(),
             "xfs_repair ПОСЛЕ монтирования и записи:\n{}",
             String::from_utf8_lossy(&out.stderr)
         );
         let complaints = corpus::kernel_complaints(before, &["XFS", "xfs"]);
-        let bad: Vec<&String> =
-            complaints.iter().filter(|l| l.contains("error") || l.contains("corrupt")).collect();
+        let bad: Vec<&String> = complaints
+            .iter()
+            .filter(|l| l.contains("error") || l.contains("corrupt"))
+            .collect();
         assert!(bad.is_empty(), "ядро ругалось на ФС:\n{bad:?}");
     }
 
@@ -1086,7 +1179,10 @@ mod xfs_integration {
         }
         let dir = tempfile::tempdir().unwrap();
         let img = dir.path().join("fs.img");
-        std::fs::File::create(&img).unwrap().set_len(768 * 1024 * 1024).unwrap();
+        std::fs::File::create(&img)
+            .unwrap()
+            .set_len(768 * 1024 * 1024)
+            .unwrap();
         assert!(std::process::Command::new("mkfs.xfs")
             .args(["-q", "-m", "reflink=1,crc=1"])
             .arg(&img)
@@ -1101,7 +1197,11 @@ mod xfs_integration {
         };
 
         let scan = run2(&img, &["cache"]);
-        assert!(scan.files_excluded >= 1400, "исключено всего {}", scan.files_excluded);
+        assert!(
+            scan.files_excluded >= 1400,
+            "исключено всего {}",
+            scan.files_excluded
+        );
         assert!(!scan.patches.is_empty(), "Stage 2 не дал ни одного патча");
         assert!(
             !scan.droppable.is_empty(),
@@ -1129,8 +1229,16 @@ mod xfs_integration {
         drop(data);
 
         let repair = |p: &Path| -> String {
-            let o = std::process::Command::new("xfs_repair").arg("-n").arg(p).output().unwrap();
-            format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))
+            let o = std::process::Command::new("xfs_repair")
+                .arg("-n")
+                .arg(p)
+                .output()
+                .unwrap();
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            )
         };
         let judge = |t: &str| -> Vec<String> {
             t.lines()
@@ -1149,7 +1257,11 @@ mod xfs_integration {
                 .collect()
         };
         let found = judge(&repair(&patched));
-        assert!(found.is_empty(), "xfs_repair после Stage 2 сказал:\n{}", found.join("\n"));
+        assert!(
+            found.is_empty(),
+            "xfs_repair после Stage 2 сказал:\n{}",
+            found.join("\n")
+        );
 
         let before = corpus::dmesg_len();
         let left = {
@@ -1185,7 +1297,10 @@ mod xfs_integration {
         // подряд дали 129, 266 и 306 из 1403. Порог на такой величине был бы
         // не сторожем, а генератором ложных падений. Проверяем то, что
         // устойчиво: удаление произошло, и образ согласован.
-        assert!(removed > 0, "не удалено ни одного файла — Stage 2 перестал работать");
+        assert!(
+            removed > 0,
+            "не удалено ни одного файла — Stage 2 перестал работать"
+        );
         assert!(
             left + removed <= scan.files_excluded + 16,
             "имён осталось {left} при {removed} удалённых — счёт не сходится"
@@ -1198,8 +1313,10 @@ mod xfs_integration {
             found.join("\n")
         );
         let complaints = corpus::kernel_complaints(before, &["XFS", "xfs"]);
-        let bad: Vec<&String> =
-            complaints.iter().filter(|l| l.contains("error") || l.contains("corrupt")).collect();
+        let bad: Vec<&String> = complaints
+            .iter()
+            .filter(|l| l.contains("error") || l.contains("corrupt"))
+            .collect();
         assert!(bad.is_empty(), "ядро ругалось на ФС:\n{bad:?}");
     }
 
@@ -1208,7 +1325,9 @@ mod xfs_integration {
         let mut n = 0;
         let mut stack = vec![root.to_path_buf()];
         while let Some(d) = stack.pop() {
-            let Ok(rd) = std::fs::read_dir(&d) else { continue };
+            let Ok(rd) = std::fs::read_dir(&d) else {
+                continue;
+            };
             for e in rd.flatten() {
                 let p = e.path();
                 if p.is_dir() {

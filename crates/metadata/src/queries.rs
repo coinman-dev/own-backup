@@ -66,8 +66,11 @@ pub fn list_volume_secrets(conn: &Connection) -> Result<Vec<(String, Vec<u8>)>> 
 /// Keep a durable marker until the public database's WAL and freed pages have
 /// been cleaned. A crash after deleting its last row then resumes the cleanup.
 pub fn mark_volume_secret_migration_pending(conn: &Connection) -> Result<()> {
-    conn.execute("INSERT OR IGNORE INTO volume_secret_migration_pending (id) VALUES (1)", [])
-        .map_err(|e| OwnBackupError::Database(e.to_string()))?;
+    conn.execute(
+        "INSERT OR IGNORE INTO volume_secret_migration_pending (id) VALUES (1)",
+        [],
+    )
+    .map_err(|e| OwnBackupError::Database(e.to_string()))?;
     Ok(())
 }
 
@@ -81,8 +84,11 @@ pub fn volume_secret_migration_pending(conn: &Connection) -> Result<bool> {
 }
 
 pub fn clear_volume_secret_migration_pending(conn: &Connection) -> Result<()> {
-    conn.execute("DELETE FROM volume_secret_migration_pending WHERE id = 1", [])
-        .map_err(|e| OwnBackupError::Database(e.to_string()))?;
+    conn.execute(
+        "DELETE FROM volume_secret_migration_pending WHERE id = 1",
+        [],
+    )
+    .map_err(|e| OwnBackupError::Database(e.to_string()))?;
     Ok(())
 }
 
@@ -96,8 +102,11 @@ pub fn volume_secret_migration_done(conn: &Connection) -> Result<bool> {
 }
 
 pub fn mark_volume_secret_migration_done(conn: &Connection) -> Result<()> {
-    conn.execute("INSERT OR IGNORE INTO volume_secret_migration_done (id) VALUES (1)", [])
-        .map_err(|e| OwnBackupError::Database(e.to_string()))?;
+    conn.execute(
+        "INSERT OR IGNORE INTO volume_secret_migration_done (id) VALUES (1)",
+        [],
+    )
+    .map_err(|e| OwnBackupError::Database(e.to_string()))?;
     Ok(())
 }
 
@@ -151,9 +160,7 @@ pub fn get_job(conn: &Connection, id: &Uuid) -> Result<Option<BackupJob>> {
         .map_err(|e| OwnBackupError::Database(e.to_string()))?;
 
     let result = stmt
-        .query_row(params![id.to_string()], |row| {
-            Ok(row_to_job(row))
-        })
+        .query_row(params![id.to_string()], |row| Ok(row_to_job(row)))
         .optional()
         .map_err(|e| OwnBackupError::Database(e.to_string()))?;
 
@@ -199,8 +206,7 @@ fn row_to_job(row: &rusqlite::Row) -> Result<BackupJob> {
         .map_err(|e| OwnBackupError::Database(e.to_string()))?;
 
     Ok(BackupJob {
-        id: Uuid::parse_str(&id_str)
-            .map_err(|e| OwnBackupError::Database(e.to_string()))?,
+        id: Uuid::parse_str(&id_str).map_err(|e| OwnBackupError::Database(e.to_string()))?,
         name: row
             .get(1)
             .map_err(|e| OwnBackupError::Database(e.to_string()))?,
@@ -346,10 +352,7 @@ pub fn get_backup_chain(conn: &Connection, set_id: &Uuid) -> Result<Vec<BackupSe
 }
 
 /// Get the latest completed full backup set for a job.
-pub fn get_latest_full_set(
-    conn: &Connection,
-    job_id: &Uuid,
-) -> Result<Option<BackupSet>> {
+pub fn get_latest_full_set(conn: &Connection, job_id: &Uuid) -> Result<Option<BackupSet>> {
     let mut stmt = conn
         .prepare(
             "SELECT id, job_id, backup_type, parent_set_id, file_path, file_size,
@@ -383,14 +386,23 @@ pub fn delete_set(conn: &Connection, id: &Uuid) -> Result<()> {
 
 pub fn delete_job(conn: &Connection, id: &Uuid) -> Result<()> {
     // First delete all related backup_sets
-    conn.execute("DELETE FROM backup_sets WHERE job_id = ?1", params![id.to_string()])
-        .map_err(|e| OwnBackupError::Database(e.to_string()))?;
+    conn.execute(
+        "DELETE FROM backup_sets WHERE job_id = ?1",
+        params![id.to_string()],
+    )
+    .map_err(|e| OwnBackupError::Database(e.to_string()))?;
     // Delete retention policy
-    conn.execute("DELETE FROM retention_policies WHERE job_id = ?1", params![id.to_string()])
-        .map_err(|e| OwnBackupError::Database(e.to_string()))?;
+    conn.execute(
+        "DELETE FROM retention_policies WHERE job_id = ?1",
+        params![id.to_string()],
+    )
+    .map_err(|e| OwnBackupError::Database(e.to_string()))?;
     // Delete the job
-    conn.execute("DELETE FROM backup_jobs WHERE id = ?1", params![id.to_string()])
-        .map_err(|e| OwnBackupError::Database(e.to_string()))?;
+    conn.execute(
+        "DELETE FROM backup_jobs WHERE id = ?1",
+        params![id.to_string()],
+    )
+    .map_err(|e| OwnBackupError::Database(e.to_string()))?;
     Ok(())
 }
 
@@ -432,10 +444,7 @@ pub fn set_retention_policy(conn: &Connection, policy: &RetentionPolicy) -> Resu
     Ok(())
 }
 
-pub fn get_retention_policy(
-    conn: &Connection,
-    job_id: &Uuid,
-) -> Result<Option<RetentionPolicy>> {
+pub fn get_retention_policy(conn: &Connection, job_id: &Uuid) -> Result<Option<RetentionPolicy>> {
     let mut stmt = conn
         .prepare(
             "SELECT job_id, max_full_backups, max_incremental_per_full,
@@ -447,7 +456,13 @@ pub fn get_retention_policy(
     let result = stmt
         .query_row(params![job_id.to_string()], |row| {
             let job_id_str: String = row.get(0)?;
-            Ok((job_id_str, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+            Ok((
+                job_id_str,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
         })
         .optional()
         .map_err(|e| OwnBackupError::Database(e.to_string()))?;
@@ -496,8 +511,7 @@ fn row_to_set(row: &rusqlite::Row) -> Result<BackupSet> {
         .map_err(|e| OwnBackupError::Database(e.to_string()))?;
 
     Ok(BackupSet {
-        id: Uuid::parse_str(&id_str)
-            .map_err(|e| OwnBackupError::Database(e.to_string()))?,
+        id: Uuid::parse_str(&id_str).map_err(|e| OwnBackupError::Database(e.to_string()))?,
         job_id: Uuid::parse_str(&job_id_str)
             .map_err(|e| OwnBackupError::Database(e.to_string()))?,
         backup_type: str_to_backup_type(&type_str)?,
@@ -604,11 +618,17 @@ mod tests {
         assert_eq!(get_volume_secret(&conn, "vol1").unwrap(), None);
 
         upsert_volume_secret(&conn, "vol1", b"blob-A").unwrap();
-        assert_eq!(get_volume_secret(&conn, "vol1").unwrap().as_deref(), Some(&b"blob-A"[..]));
+        assert_eq!(
+            get_volume_secret(&conn, "vol1").unwrap().as_deref(),
+            Some(&b"blob-A"[..])
+        );
 
         // Upsert replaces.
         upsert_volume_secret(&conn, "vol1", b"blob-B").unwrap();
-        assert_eq!(get_volume_secret(&conn, "vol1").unwrap().as_deref(), Some(&b"blob-B"[..]));
+        assert_eq!(
+            get_volume_secret(&conn, "vol1").unwrap().as_deref(),
+            Some(&b"blob-B"[..])
+        );
 
         delete_volume_secret(&conn, "vol1").unwrap();
         assert_eq!(get_volume_secret(&conn, "vol1").unwrap(), None);

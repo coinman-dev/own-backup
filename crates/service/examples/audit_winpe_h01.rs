@@ -21,12 +21,26 @@ fn say(message: &str) {
 async fn main() {
     if let Err(error) = run().await {
         say(&format!("WINPE-H01-FAIL {error}"));
-        for dir in [r"X:\Windows\System32\Logs", r"X:\Windows\Temp\OwnBackup\Logs"] {
+        for dir in [
+            r"X:\Windows\System32\Logs",
+            r"X:\Windows\Temp\OwnBackup\Logs",
+        ] {
             if let Ok(entries) = std::fs::read_dir(dir) {
                 for entry in entries.flatten() {
-                    if entry.file_name().to_string_lossy().starts_with("own-backup-service-") {
+                    if entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("own-backup-service-")
+                    {
                         if let Ok(log) = std::fs::read_to_string(entry.path()) {
-                            for line in log.lines().rev().take(20).collect::<Vec<_>>().into_iter().rev() {
+                            for line in log
+                                .lines()
+                                .rev()
+                                .take(20)
+                                .collect::<Vec<_>>()
+                                .into_iter()
+                                .rev()
+                            {
                                 say(&format!("WINPE-H01-SERVICE-LINE {line}"));
                             }
                         }
@@ -48,7 +62,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let winpe = media_mode::is_windows_pe();
     let media = media_mode::is_media_mode();
     let config = AppConfig::default();
-    say(&format!("WINPE-H01-MODE winpe={winpe} media={media} data_dir={}", config.data_dir.display()));
+    say(&format!(
+        "WINPE-H01-MODE winpe={winpe} media={media} data_dir={}",
+        config.data_dir.display()
+    ));
     if !winpe || !media || !config.data_dir.to_string_lossy().starts_with("X:\\") {
         return Err("media mode did not select the WinPE RAM disk".into());
     }
@@ -65,10 +82,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             .collect::<Vec<_>>()
     };
     let before = installed_private();
-    say(&format!("WINPE-H01-INSTALLED-PRIVATE-BEFORE count={}", before.len()));
+    say(&format!(
+        "WINPE-H01-INSTALLED-PRIVATE-BEFORE count={}",
+        before.len()
+    ));
 
     let exe = std::env::current_exe()?;
-    let service = exe.parent().ok_or("no executable directory")?.join("own-backup-service.exe");
+    let service = exe
+        .parent()
+        .ok_or("no executable directory")?
+        .join("own-backup-service.exe");
     let mut child = std::process::Command::new(service).arg("--run").spawn()?;
     let result = async {
         let mut connected = None;
@@ -78,10 +101,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 say(&format!("WINPE-H01-SERVICE-EXIT code={:?}", status.code()));
                 break;
             }
-            let Ok(token) = std::fs::read_to_string(config.token_path()) else { continue };
-            if let Ok(mut client) = BackupClient::connect(
-                config.grpc_address.clone(), token.trim().to_string()
-            ).await {
+            let Ok(token) = std::fs::read_to_string(config.token_path()) else {
+                continue;
+            };
+            if let Ok(mut client) =
+                BackupClient::connect(config.grpc_address.clone(), token.trim().to_string()).await
+            {
                 if let Ok(status) = client.service_status_json().await {
                     connected = Some(status);
                     break;
@@ -89,16 +114,29 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         let status = connected.ok_or("WinPE client could not reach the foreground service")?;
-        say(&format!("WINPE-H01-PIPE connected=true uptime={}", status.contains("uptime_secs")));
-        if !status.contains("uptime_secs") { return Err("service status missing uptime".into()); }
+        say(&format!(
+            "WINPE-H01-PIPE connected=true uptime={}",
+            status.contains("uptime_secs")
+        ));
+        if !status.contains("uptime_secs") {
+            return Err("service status missing uptime".into());
+        }
 
         let passwords = own_backup_core::PasswordStore::new(config.db_path());
-        let blocked = passwords.remember("WINPE-H01", "disposable".into(), true).is_err();
+        let blocked = passwords
+            .remember("WINPE-H01", "disposable".into(), true)
+            .is_err();
         let after = installed_private();
-        say(&format!("WINPE-H01-SECRET remember_blocked={blocked} installed_private_after={}", after.len()));
-        if !blocked || before != after { return Err("WinPE wrote a persistent installed-disk secret".into()); }
+        say(&format!(
+            "WINPE-H01-SECRET remember_blocked={blocked} installed_private_after={}",
+            after.len()
+        ));
+        if !blocked || before != after {
+            return Err("WinPE wrote a persistent installed-disk secret".into());
+        }
         Ok::<(), Box<dyn std::error::Error>>(())
-    }.await;
+    }
+    .await;
     let _ = child.kill();
     let _ = child.wait();
     result?;

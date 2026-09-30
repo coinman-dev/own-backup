@@ -37,11 +37,11 @@ use windows::Win32::Foundation::{
     TRUE, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, ClientToScreen, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW,
-    EndPaint, EnumFontFamiliesExW, FillRect, GetDC, GetTextExtentPoint32W, InvalidateRect,
-    ReleaseDC, SelectObject, SetBkMode, SetTextColor, FONT_CHARSET, HDC, HFONT, LOGFONTW,
-    PAINTSTRUCT, TEXTMETRICW, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_RIGHT, DT_SINGLELINE,
-    DT_VCENTER, TRANSPARENT,
+    BeginPaint, ClientToScreen, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint,
+    EnumFontFamiliesExW, FillRect, GetDC, GetTextExtentPoint32W, InvalidateRect, ReleaseDC,
+    SelectObject, SetBkMode, SetTextColor, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_RIGHT,
+    DT_SINGLELINE, DT_VCENTER, FONT_CHARSET, HDC, HFONT, LOGFONTW, PAINTSTRUCT, TEXTMETRICW,
+    TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
 use windows::Win32::System::SystemInformation::GetLocalTime;
@@ -56,19 +56,16 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, EnumWindows, GetClientRect, GetForegroundWindow, GetMessageW,
     GetSystemMetrics, GetWindow, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW,
     GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, LoadCursorW, MessageBoxW,
-    PostMessageW,
-    PostQuitMessage, RegisterClassW, SetForegroundWindow, SetProcessDPIAware, SetTimer,
-    SetWindowPos, ShowWindow, SwitchToThisWindow, SystemParametersInfoW, TrackPopupMenuEx,
-    TranslateMessage,
-    GWL_EXSTYLE, GW_OWNER, HWND_BOTTOM, HWND_TOPMOST, IDC_ARROW, IDYES, MA_NOACTIVATE,
-    MB_ICONQUESTION, MB_SETFOREGROUND, MB_YESNO, MF_SEPARATOR, MF_STRING, MSG, SC_MINIMIZE,
-    SM_CXSCREEN, SM_CYSCREEN, SPIF_SENDCHANGE, SPI_GETWORKAREA, SPI_SETWORKAREA, SWP_NOACTIVATE,
-    SW_MINIMIZE,
-    SW_RESTORE, SW_SHOWNOACTIVATE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, TPM_BOTTOMALIGN,
-    TPM_LEFTALIGN, TPM_LEFTBUTTON, TPM_RETURNCMD, WM_APP, WM_DESTROY, WM_DISPLAYCHANGE,
-    WM_ERASEBKGND, WM_INPUTLANGCHANGEREQUEST, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_NULL, WM_PAINT,
-    WM_SYSCOMMAND, WM_TIMER, WNDCLASSW, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP,
+    PostMessageW, PostQuitMessage, RegisterClassW, SetForegroundWindow, SetProcessDPIAware,
+    SetTimer, SetWindowPos, ShowWindow, SwitchToThisWindow, SystemParametersInfoW,
+    TrackPopupMenuEx, TranslateMessage, GWL_EXSTYLE, GW_OWNER, HWND_BOTTOM, HWND_TOPMOST,
+    IDC_ARROW, IDYES, MA_NOACTIVATE, MB_ICONQUESTION, MB_SETFOREGROUND, MB_YESNO, MF_SEPARATOR,
+    MF_STRING, MSG, SC_MINIMIZE, SM_CXSCREEN, SM_CYSCREEN, SPIF_SENDCHANGE, SPI_GETWORKAREA,
+    SPI_SETWORKAREA, SWP_NOACTIVATE, SW_MINIMIZE, SW_RESTORE, SW_SHOWNOACTIVATE,
+    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_LEFTBUTTON,
+    TPM_RETURNCMD, WM_APP, WM_DESTROY, WM_DISPLAYCHANGE, WM_ERASEBKGND, WM_INPUTLANGCHANGEREQUEST,
+    WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_NULL, WM_PAINT, WM_SYSCOMMAND, WM_TIMER, WNDCLASSW,
+    WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use own_backup_common::tr;
@@ -401,7 +398,12 @@ fn reflow(bar: HWND) {
 /// because WinPE's registry is a RAM disk (see [`reserve_work_area`]).
 fn dock(bar: HWND) {
     let (w, h, bar_h, known) = with_bar(|b| (b.screen_w, b.screen_h, b.bar_h, b.appbar));
-    let want = RECT { left: 0, top: h - bar_h, right: w, bottom: h };
+    let want = RECT {
+        left: 0,
+        top: h - bar_h,
+        right: w,
+        bottom: h,
+    };
     let mut data = APPBARDATA {
         cbSize: size_of::<APPBARDATA>() as u32,
         hWnd: bar,
@@ -478,7 +480,10 @@ fn reserve_work_area(bar: RECT) {
             b.saved_work = Some(before);
         }
     });
-    let mut want = RECT { bottom: bar.top, ..before };
+    let mut want = RECT {
+        bottom: bar.top,
+        ..before
+    };
     unsafe {
         let _ = SystemParametersInfoW(
             SPI_SETWORKAREA,
@@ -532,7 +537,10 @@ fn tick(bar: HWND) {
     // enumerate them in — see `layout::stable_order`.
     let seen = open_windows();
     let previous: Vec<HWND> = with_bar(|b| b.windows.iter().map(|w| w.handle).collect());
-    let order = layout::stable_order(&previous, &seen.iter().map(|w| w.handle).collect::<Vec<_>>());
+    let order = layout::stable_order(
+        &previous,
+        &seen.iter().map(|w| w.handle).collect::<Vec<_>>(),
+    );
     let windows: Vec<OpenWindow> = order
         .iter()
         .filter_map(|handle| seen.iter().find(|w| w.handle == *handle).cloned())
@@ -552,7 +560,14 @@ fn tick(bar: HWND) {
     };
     let shown = windows
         .iter()
-        .map(|w| format!("{:?}{}{}", w.handle.0, if w.handle == front { "*" } else { "" }, w.title))
+        .map(|w| {
+            format!(
+                "{:?}{}{}",
+                w.handle.0,
+                if w.handle == front { "*" } else { "" },
+                w.title
+            )
+        })
         .collect::<Vec<_>>()
         .join("|");
 
@@ -602,7 +617,10 @@ unsafe extern "system" fn collect_window(window: HWND, data: LPARAM) -> BOOL {
     let found = &mut *(data.0 as *mut Vec<OpenWindow>);
     if is_task_window(window) {
         if let Some(title) = window_title(window) {
-            found.push(OpenWindow { handle: window, title });
+            found.push(OpenWindow {
+                handle: window,
+                title,
+            });
         }
     }
     TRUE
@@ -623,7 +641,9 @@ unsafe fn is_task_window(window: HWND) -> bool {
     if extended & WS_EX_TOOLWINDOW.0 != 0 {
         return false;
     }
-    GetWindow(window, GW_OWNER).map(|owner| owner.is_invalid()).unwrap_or(true)
+    GetWindow(window, GW_OWNER)
+        .map(|owner| owner.is_invalid())
+        .unwrap_or(true)
 }
 
 /// Is the compositor holding this window alive but not showing it?
@@ -642,14 +662,22 @@ fn is_cloaked(window: HWND) -> bool {
     let Some(ask) = ASK.get_or_init(|| unsafe {
         let library = LoadLibraryW(w!("dwmapi.dll")).ok()?;
         let found = GetProcAddress(library, s!("DwmGetWindowAttribute"))?;
-        Some(std::mem::transmute::<unsafe extern "system" fn() -> isize, Ask>(found))
+        Some(std::mem::transmute::<
+            unsafe extern "system" fn() -> isize,
+            Ask,
+        >(found))
     }) else {
         return false;
     };
 
     let mut cloaked: u32 = 0;
     let asked = unsafe {
-        ask(window, CLOAKED, &mut cloaked as *mut u32 as *mut c_void, size_of::<u32>() as u32)
+        ask(
+            window,
+            CLOAKED,
+            &mut cloaked as *mut u32 as *mut c_void,
+            size_of::<u32>() as u32,
+        )
     };
     asked == 0 && cloaked != 0
 }
@@ -695,7 +723,11 @@ fn raise_or_hide(window: HWND) {
             GetForegroundWindow().0,
             with_bar(|b| b.front).0,
             IsIconic(window).as_bool(),
-            if front == window { "fold away" } else { "bring forward" }
+            if front == window {
+                "fold away"
+            } else {
+                "bring forward"
+            }
         ));
         if front == window {
             let _ = ShowWindow(window, SW_MINIMIZE);
@@ -802,7 +834,10 @@ fn switch_layout() {
         let current = GetKeyboardLayout(thread);
         let installed = installed_layouts();
         if installed.len() < 2 {
-            log(&format!("layout: only {} installed, nothing to switch to", installed.len()));
+            log(&format!(
+                "layout: only {} installed, nothing to switch to",
+                installed.len()
+            ));
             return;
         }
         let at = installed.iter().position(|l| l.0 == current.0).unwrap_or(0);
@@ -839,7 +874,11 @@ fn show_menu(window: HWND, at: &layout::Slot) {
     let on_medium = own_backup_common::media_mode::is_windows_pe();
     let found: Vec<bool> = menu::TOOLS
         .iter()
-        .map(|tool| tool_path(&tool.path_on_medium()).map(|p| p.exists()).unwrap_or(false))
+        .map(|tool| {
+            tool_path(&tool.path_on_medium())
+                .map(|p| p.exists())
+                .unwrap_or(false)
+        })
         .collect();
     let items = menu::items(on_medium, &found);
     let previously_in_front = unsafe { GetForegroundWindow() };
@@ -917,7 +956,9 @@ fn chose(window: HWND, id: u32) {
                 log(&format!("menu line {other} means nothing here"));
                 return;
             };
-            let Some(path) = tool_path(&tool.path_on_medium()) else { return };
+            let Some(path) = tool_path(&tool.path_on_medium()) else {
+                return;
+            };
             // In its own folder: these programs keep their settings beside
             // themselves and look for them there. And with no console: they
             // have windows of their own, and a black box flashing up first is
@@ -998,7 +1039,9 @@ fn boot_the_medium() {
         return;
     }
     let script = own_backup_common::media_paths::BOOT_SCRIPT;
-    log(&format!("starting the medium's boot script with no window: {script}"));
+    log(&format!(
+        "starting the medium's boot script with no window: {script}"
+    ));
     launch("cmd.exe", &["/c", script], None, CREATE_NO_WINDOW);
 }
 
@@ -1043,7 +1086,10 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// The folder this exe lives in — where the medium keeps everything of ours.
 fn app_dir() -> Option<PathBuf> {
-    std::env::current_exe().ok()?.parent().map(|d| d.to_path_buf())
+    std::env::current_exe()
+        .ok()?
+        .parent()
+        .map(|d| d.to_path_buf())
 }
 
 /// Where an optional tool would be, if the build put one there: beside our own
@@ -1060,7 +1106,10 @@ fn tool_path(relative: &str) -> Option<PathBuf> {
 /// where a restart in the middle of a copy costs the copy.
 fn confirm(question: &str) -> bool {
     let text: Vec<u16> = question.encode_utf16().chain(std::iter::once(0)).collect();
-    let title: Vec<u16> = "Own Backup".encode_utf16().chain(std::iter::once(0)).collect();
+    let title: Vec<u16> = "Own Backup"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     unsafe {
         MessageBoxW(
             None,
@@ -1097,7 +1146,11 @@ const FACES: [&str; 4] = ["Segoe UI", "Tahoma", "Microsoft Sans Serif", "Arial"]
 fn face() -> &'static str {
     static CHOSEN: OnceLock<&'static str> = OnceLock::new();
     CHOSEN.get_or_init(|| {
-        let found = FACES.iter().copied().find(|name| installed(name)).unwrap_or(FACES[1]);
+        let found = FACES
+            .iter()
+            .copied()
+            .find(|name| installed(name))
+            .unwrap_or(FACES[1]);
         log(&format!("drawing the strip in {found}"));
         found
     })
@@ -1115,14 +1168,23 @@ fn installed(name: &str) -> bool {
         0 // stop: one is all the answer needed
     }
 
-    let mut wanted = LOGFONTW { lfCharSet: FONT_CHARSET(1), ..Default::default() };
+    let mut wanted = LOGFONTW {
+        lfCharSet: FONT_CHARSET(1),
+        ..Default::default()
+    };
     for (slot, unit) in wanted.lfFaceName.iter_mut().zip(name.encode_utf16()) {
         *slot = unit;
     }
     let mut found = false;
     unsafe {
         let dc = GetDC(None);
-        EnumFontFamiliesExW(dc, &wanted, Some(seen), LPARAM(&mut found as *mut bool as isize), 0);
+        EnumFontFamiliesExW(
+            dc,
+            &wanted,
+            Some(seen),
+            LPARAM(&mut found as *mut bool as isize),
+            0,
+        );
         ReleaseDC(None, dc);
     }
     found
@@ -1224,7 +1286,9 @@ unsafe fn guarded(
     match attempt {
         Ok(answer) => answer,
         Err(_) => {
-            log(&format!("a handler for message {message:#06x} panicked - carrying on"));
+            log(&format!(
+                "a handler for message {message:#06x} panicked - carrying on"
+            ));
             DefWindowProcW(window, message, wparam, lparam)
         }
     }
@@ -1241,12 +1305,7 @@ unsafe extern "system" fn backdrop_proc(
     })
 }
 
-unsafe fn backdrop_message(
-    window: HWND,
-    message: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
+unsafe fn backdrop_message(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match message {
         WM_ERASEBKGND => LRESULT(1),
         WM_PAINT => {
@@ -1257,12 +1316,26 @@ unsafe fn backdrop_message(
                 let _ = EndPaint(window, &paint);
                 return LRESULT(0);
             }
-            fill(dc, RECT { left: 0, top: 0, right: w, bottom: h }, BACKDROP);
+            fill(
+                dc,
+                RECT {
+                    left: 0,
+                    top: 0,
+                    right: w,
+                    bottom: h,
+                },
+                BACKDROP,
+            );
             if !font.is_invalid() {
                 SelectObject(dc, font);
                 SetBkMode(dc, TRANSPARENT);
                 SetTextColor(dc, BACKDROP_TEXT);
-                let band = layout::Slot { x: 0, y: h / 2 - h / 20, w, h: h / 10 };
+                let band = layout::Slot {
+                    x: 0,
+                    y: h / 2 - h / 20,
+                    w,
+                    h: h / 10,
+                };
                 draw_text(dc, &band, "Own Backup", DT_CENTER.0);
             }
             let _ = EndPaint(window, &paint);
@@ -1376,7 +1449,14 @@ fn paint_bar(window: HWND) {
     // Copied out before any drawing: painting calls into Windows, and Windows
     // can call back into the window procedure that would want this borrow.
     let (slots, font, bar_h, width, clock, indicator) = with_bar(|b| {
-        (b.slots, b.font, b.bar_h, b.bar_w, b.clock.clone(), b.layout.clone())
+        (
+            b.slots,
+            b.font,
+            b.bar_h,
+            b.bar_w,
+            b.clock.clone(),
+            b.layout.clone(),
+        )
     });
     let (buttons, windows, front) =
         with_bar(|b| (b.window_slots.clone(), b.windows.clone(), b.front));
@@ -1389,17 +1469,57 @@ fn paint_bar(window: HWND) {
             let _ = EndPaint(window, &paint);
             return;
         }
-        fill(dc, RECT { left: 0, top: 0, right: width, bottom: bar_h }, BAR_BG);
+        fill(
+            dc,
+            RECT {
+                left: 0,
+                top: 0,
+                right: width,
+                bottom: bar_h,
+            },
+            BAR_BG,
+        );
         // A hairline along the top edge, so the strip reads as a strip and not
         // as the bottom of whatever window happens to be above it.
-        fill(dc, RECT { left: 0, top: 0, right: width, bottom: 1 }, BAR_EDGE);
+        fill(
+            dc,
+            RECT {
+                left: 0,
+                top: 0,
+                right: width,
+                bottom: 1,
+            },
+            BAR_EDGE,
+        );
         if !slots.start.is_empty() {
             let b = &slots.start;
-            fill(dc, RECT { left: b.x, top: 2, right: b.right(), bottom: bar_h }, BAR_BUTTON);
+            fill(
+                dc,
+                RECT {
+                    left: b.x,
+                    top: 2,
+                    right: b.right(),
+                    bottom: bar_h,
+                },
+                BAR_BUTTON,
+            );
         }
         for (slot, window) in buttons.iter().zip(&windows) {
-            let colour = if window.handle == front { BAR_BUTTON_FRONT } else { BAR_BUTTON };
-            fill(dc, RECT { left: slot.x, top: 2, right: slot.right(), bottom: bar_h }, colour);
+            let colour = if window.handle == front {
+                BAR_BUTTON_FRONT
+            } else {
+                BAR_BUTTON
+            };
+            fill(
+                dc,
+                RECT {
+                    left: slot.x,
+                    top: 2,
+                    right: slot.right(),
+                    bottom: bar_h,
+                },
+                colour,
+            );
         }
         if !font.is_invalid() {
             SelectObject(dc, font);
@@ -1446,8 +1566,7 @@ fn log_targets() -> &'static [PathBuf] {
                 if !own_backup_common::media_mode::is_windows_pe() {
                     return None;
                 }
-                own_backup_common::media_paths::find_log_dir()
-                    .map(|dir| dir.display().to_string())
+                own_backup_common::media_paths::find_log_dir().map(|dir| dir.display().to_string())
             });
         let beside = app_dir();
         crate::log::log_paths(mirror.as_deref(), beside.as_deref(), &std::env::temp_dir())
@@ -1463,9 +1582,16 @@ fn log_targets() -> &'static [PathBuf] {
 /// off at the wall is an ordinary end to a session.
 pub fn log(message: &str) {
     let now = unsafe { GetLocalTime() };
-    let line = format!("{:02}:{:02}:{:02} {message}\r\n", now.wHour, now.wMinute, now.wSecond);
+    let line = format!(
+        "{:02}:{:02}:{:02} {message}\r\n",
+        now.wHour, now.wMinute, now.wSecond
+    );
     for path in log_targets() {
-        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
             if file.write_all(line.as_bytes()).is_ok() {
                 let _ = file.sync_data();
             }

@@ -212,14 +212,24 @@ pub async fn run(args: JobsArgs) -> Result<()> {
                     .as_ref()
                     .map(|r| format!("{} {}", r.status, r.finished_at))
                     .unwrap_or_else(|| "ещё не запускалось".into());
-                println!("{:<38} {:<20} {} → {}", j.id, j.name, j.source, j.dest_folder);
+                println!(
+                    "{:<38} {:<20} {} → {}",
+                    j.id, j.name, j.source, j.dest_folder
+                );
                 println!("    последний запуск: {last}");
             }
         }
         JobsCommand::Queue => {
             let q = client.get_queue().await.map_err(cfg)?;
             println!("Выполняется: {}", q.current.as_deref().unwrap_or("—"));
-            println!("В очереди:    {}", if q.pending.is_empty() { "—".into() } else { q.pending.join(", ") });
+            println!(
+                "В очереди:    {}",
+                if q.pending.is_empty() {
+                    "—".into()
+                } else {
+                    q.pending.join(", ")
+                }
+            );
         }
         JobsCommand::Activity { limit } => {
             let runs = client.list_activity().await.map_err(cfg)?;
@@ -323,7 +333,11 @@ pub async fn run(args: JobsArgs) -> Result<()> {
             let report = client.delete_job(&id, delete_files).await.map_err(cfg)?;
             println!(
                 "Задание {id} удалено{}.",
-                if delete_files { " вместе с копиями" } else { ", копии остались на месте" }
+                if delete_files {
+                    " вместе с копиями"
+                } else {
+                    ", копии остались на месте"
+                }
             );
             if delete_files {
                 println!("Удалено файлов: {}", report.deleted.len());
@@ -414,13 +428,19 @@ fn apply_policy(job: &mut own_backup_core::Job, p: &JobPolicyArgs) -> Result<()>
             && at[..2].parse::<u32>().is_ok_and(|h| h < 24)
             && at[3..].parse::<u32>().is_ok_and(|m| m < 60);
         if !ok {
-            return Err(OwnBackupError::Config(format!("время «{at}» — ожидается ЧЧ:ММ")));
+            return Err(OwnBackupError::Config(format!(
+                "время «{at}» — ожидается ЧЧ:ММ"
+            )));
         }
         job.schedule.time = at.clone();
     }
     if !p.days.is_empty() {
         const WEEK: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
-        let days: Vec<String> = p.days.iter().map(|d| d.trim().to_ascii_lowercase()).collect();
+        let days: Vec<String> = p
+            .days
+            .iter()
+            .map(|d| d.trim().to_ascii_lowercase())
+            .collect();
         if let Some(bad) = days.iter().find(|d| !WEEK.contains(&d.as_str())) {
             return Err(OwnBackupError::Config(format!(
                 "неизвестный день «{bad}» — ожидаются: {}",
@@ -542,14 +562,23 @@ mod tests {
                 "schedule" => p.schedule = Some(bad.1.into()),
                 _ => p.event = Some(bad.1.into()),
             }
-            assert!(apply_policy(&mut job, &p).is_err(), "{bad:?} must be refused");
+            assert!(
+                apply_policy(&mut job, &p).is_err(),
+                "{bad:?} must be refused"
+            );
         }
         let mut when = policy();
         when.at = Some("25:00".into());
-        assert!(apply_policy(&mut job, &when).is_err(), "there is no 25th hour");
+        assert!(
+            apply_policy(&mut job, &when).is_err(),
+            "there is no 25th hour"
+        );
         let mut dom = policy();
         dom.day_of_month = Some(31);
-        assert!(apply_policy(&mut job, &dom).is_err(), "the 31st does not exist in February");
+        assert!(
+            apply_policy(&mut job, &dom).is_err(),
+            "the 31st does not exist in February"
+        );
         let mut day = policy();
         day.days = vec!["mon".into(), "funday".into()];
         assert!(apply_policy(&mut job, &day).is_err());
@@ -570,6 +599,9 @@ mod tests {
         let mut back = policy();
         back.default_exclusions = true;
         apply_policy(&mut job, &back).unwrap();
-        assert_eq!(job.exclusions.patterns, own_backup_core::default_exclusions());
+        assert_eq!(
+            job.exclusions.patterns,
+            own_backup_core::default_exclusions()
+        );
     }
 }

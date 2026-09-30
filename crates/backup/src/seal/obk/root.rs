@@ -188,7 +188,10 @@ impl ObkRoot {
         if self.cluster_bits < super::MIN_OBK_CLUSTER_BITS
             || self.cluster_bits > super::MAX_OBK_CLUSTER_BITS
         {
-            return Err(bad(format!("cluster_bits {} out of range", self.cluster_bits)));
+            return Err(bad(format!(
+                "cluster_bits {} out of range",
+                self.cluster_bits
+            )));
         }
         let cluster_size = 1u64 << self.cluster_bits;
         if self.virtual_size == 0 || !self.virtual_size.is_multiple_of(cluster_size) {
@@ -255,7 +258,9 @@ impl ObkRoot {
             total += u64::from(chunk.entries);
         }
         if total != self.defined_clusters {
-            return Err(bad("index chunk entries do not add up to the declared count"));
+            return Err(bad(
+                "index chunk entries do not add up to the declared count",
+            ));
         }
         if self.defined_clusters > self.guest_clusters {
             return Err(bad("more defined clusters than the disk has"));
@@ -327,12 +332,27 @@ mod tests {
     #[test]
     fn a_root_that_does_not_describe_a_possible_image_is_refused() {
         let cases: Vec<(&str, Edit)> = vec![
-            ("geometry", Box::new(|r: &mut ObkRoot| r.guest_clusters += 1)),
-            ("cluster bits", Box::new(|r: &mut ObkRoot| r.cluster_bits = 9)),
-            ("nil chain", Box::new(|r: &mut ObkRoot| r.chain_id = Uuid::nil())),
-            ("self parent", Box::new(|r: &mut ObkRoot| r.parent_backup_id = Some(r.backup_id))),
+            (
+                "geometry",
+                Box::new(|r: &mut ObkRoot| r.guest_clusters += 1),
+            ),
+            (
+                "cluster bits",
+                Box::new(|r: &mut ObkRoot| r.cluster_bits = 9),
+            ),
+            (
+                "nil chain",
+                Box::new(|r: &mut ObkRoot| r.chain_id = Uuid::nil()),
+            ),
+            (
+                "self parent",
+                Box::new(|r: &mut ObkRoot| r.parent_backup_id = Some(r.backup_id)),
+            ),
             ("role", Box::new(|r: &mut ObkRoot| r.role = ChainRole::Full)),
-            ("entry total", Box::new(|r: &mut ObkRoot| r.defined_clusters = 6)),
+            (
+                "entry total",
+                Box::new(|r: &mut ObkRoot| r.defined_clusters = 6),
+            ),
             (
                 "chunk order",
                 Box::new(|r: &mut ObkRoot| r.index_chunks[1].first_cluster = 0),

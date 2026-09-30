@@ -27,7 +27,9 @@ pub async fn run(args: ServiceArgs) -> own_backup_common::Result<()> {
     match args.command {
         ServiceCommand::Install => {
             println!("Установка службы «{name}»:");
-            println!("  own-backup-service.exe /install   (Windows — запросит права администратора)");
+            println!(
+                "  own-backup-service.exe /install   (Windows — запросит права администратора)"
+            );
             println!("  own-backup-service --install       (Linux — от root)");
         }
         ServiceCommand::Uninstall => {
@@ -40,7 +42,10 @@ pub async fn run(args: ServiceArgs) -> own_backup_common::Result<()> {
             println!("own-backup-service.exe /stop    (или: net stop \"{name}\")");
         }
         ServiceCommand::Status => {
-            println!("own-backup-service.exe /status  (или: sc query {})", own_backup_common::WINDOWS_SERVICE_NAME);
+            println!(
+                "own-backup-service.exe /status  (или: sc query {})",
+                own_backup_common::WINDOWS_SERVICE_NAME
+            );
         }
     }
     Ok(())

@@ -238,7 +238,9 @@ mod tests {
             },
         );
         let mut writer = ObkWriter::create(&path, &first.key, options).unwrap();
-        writer.write_cluster(0, &vec![5u8; 1 << OBK_CLUSTER_BITS]).unwrap();
+        writer
+            .write_cluster(0, &vec![5u8; 1 << OBK_CLUSTER_BITS])
+            .unwrap();
         writer.finish(b"sealed sidecar").unwrap();
 
         // The next run opens the same chain from the image alone.
@@ -246,7 +248,10 @@ mod tests {
         assert_eq!(again.chain_id, first.chain_id);
         assert_eq!(again.key.as_bytes(), first.key.as_bytes());
         let mut chain = ObkChain::open(&path, &again.key).unwrap();
-        assert_eq!(&chain.read_cluster(0).unwrap()[..], &vec![5u8; 1 << OBK_CLUSTER_BITS][..]);
+        assert_eq!(
+            &chain.read_cluster(0).unwrap()[..],
+            &vec![5u8; 1 << OBK_CLUSTER_BITS][..]
+        );
 
         // And so does a password or a recovery key on a machine that has
         // neither the service store nor the job database.

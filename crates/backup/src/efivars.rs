@@ -90,8 +90,10 @@ impl LoadOption {
         let Some(end) = end else {
             return Err(bad(tr!("efivars.name_unterminated")));
         };
-        let units: Vec<u16> =
-            rest[..end].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        let units: Vec<u16> = rest[..end]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
         let description = String::from_utf16_lossy(&units);
 
         let after_name = end + 2;
@@ -113,7 +115,8 @@ impl LoadOption {
     /// Back to the bytes the firmware expects. Everything but the name and the
     /// flags travels through untouched.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(6 + self.description.len() * 2 + self.file_path_list.len());
+        let mut out =
+            Vec::with_capacity(6 + self.description.len() * 2 + self.file_path_list.len());
         out.extend_from_slice(&self.attributes.to_le_bytes());
         out.extend_from_slice(&(self.file_path_list.len() as u16).to_le_bytes());
         for u in self.description.encode_utf16() {
@@ -163,7 +166,10 @@ impl LoadOption {
     /// fails this is shown but not offered for editing: re-serialising bytes we
     /// could not read would be guessing with the machine's boot configuration.
     pub fn fully_understood(&self) -> bool {
-        !self.device_path().iter().any(|n| matches!(n, DevicePathNode::Unreadable { .. }))
+        !self
+            .device_path()
+            .iter()
+            .any(|n| matches!(n, DevicePathNode::Unreadable { .. }))
     }
 
     /// Does this entry boot off something a person plugs in — a flash drive, an
@@ -201,10 +207,17 @@ pub enum DevicePathNode {
     HardDrive(HardDrive),
     FilePath(String),
     End,
-    Other { kind: u8, subtype: u8, data: Vec<u8> },
+    Other {
+        kind: u8,
+        subtype: u8,
+        data: Vec<u8>,
+    },
     /// The bytes ran out in the middle of a node, or a node claimed a length
     /// that cannot be true.
-    Unreadable { at: usize, reason: String },
+    Unreadable {
+        at: usize,
+        reason: String,
+    },
 }
 
 /// Media / Hard Drive node (type 4, subtype 1): which partition, named the way
@@ -234,11 +247,20 @@ impl HardDrive {
         // endian, the last eight bytes are in order.
         Some(format!(
             "{:02X}{:02X}{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}-{}",
-            s[3], s[2], s[1], s[0],
-            s[5], s[4],
-            s[7], s[6],
-            s[8], s[9],
-            s[10..16].iter().map(|b| format!("{b:02X}")).collect::<String>()
+            s[3],
+            s[2],
+            s[1],
+            s[0],
+            s[5],
+            s[4],
+            s[7],
+            s[6],
+            s[8],
+            s[9],
+            s[10..16]
+                .iter()
+                .map(|b| format!("{b:02X}"))
+                .collect::<String>()
         ))
     }
 
@@ -326,7 +348,11 @@ impl DevicePathNode {
                         .collect();
                     Self::FilePath(String::from_utf16_lossy(&units))
                 }
-                _ => Self::Other { kind, subtype, data: body.to_vec() },
+                _ => Self::Other {
+                    kind,
+                    subtype,
+                    data: body.to_vec(),
+                },
             });
             if kind == Self::END {
                 break;
@@ -457,8 +483,14 @@ pub fn same_efi_path(a: &str, b: &str) -> bool {
 /// and a list that flags it as "a loader nobody points at" would be reporting
 /// the one file on the partition that is working exactly as intended.
 pub fn is_fallback_path(p: &str) -> bool {
-    let n = p.trim().replace('/', "\\").trim_start_matches('\\').to_lowercase();
-    n == "efi\\boot\\bootx64.efi" || n == "efi\\boot\\bootia32.efi" || n == "efi\\boot\\bootaa64.efi"
+    let n = p
+        .trim()
+        .replace('/', "\\")
+        .trim_start_matches('\\')
+        .to_lowercase();
+    n == "efi\\boot\\bootx64.efi"
+        || n == "efi\\boot\\bootia32.efi"
+        || n == "efi\\boot\\bootaa64.efi"
 }
 
 /// `Boot0007` → 7. The firmware names its entries in hexadecimal, four digits,
@@ -478,7 +510,10 @@ pub fn entry_name(n: u16) -> String {
 
 /// `BootOrder` is an array of entry numbers, little-endian, no header.
 pub fn parse_boot_order(bytes: &[u8]) -> Vec<u16> {
-    bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect()
+    bytes
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect()
 }
 
 pub fn serialize_boot_order(order: &[u16]) -> Vec<u8> {
@@ -534,7 +569,11 @@ pub const BACKUP_VERSION: u32 = 1;
 
 impl SavedVar {
     pub fn new(name: &str, attributes: u32, data: &[u8]) -> Self {
-        Self { name: name.to_string(), attributes, data: B64.encode(data) }
+        Self {
+            name: name.to_string(),
+            attributes,
+            data: B64.encode(data),
+        }
     }
 
     pub fn bytes(&self) -> Result<Vec<u8>> {
@@ -588,8 +627,8 @@ impl BootBackup {
     /// Every check here is a way a restore could write the wrong bytes into
     /// firmware, so none of them is advisory.
     pub fn load(json: &str) -> Result<Self> {
-        let me: Self = serde_json::from_str(json)
-            .map_err(|e| bad(tr!("efivars.not_a_backup", error = e)))?;
+        let me: Self =
+            serde_json::from_str(json).map_err(|e| bad(tr!("efivars.not_a_backup", error = e)))?;
         if me.format != BACKUP_FORMAT {
             return Err(bad(tr!("efivars.foreign_format", format = me.format)));
         }
@@ -613,14 +652,17 @@ impl BootBackup {
     }
 
     pub fn to_json(&self) -> Result<String> {
-        serde_json::to_string_pretty(self).map_err(|e| bad(tr!("efivars.copy_not_written", error = e)))
+        serde_json::to_string_pretty(self)
+            .map_err(|e| bad(tr!("efivars.copy_not_written", error = e)))
     }
 
     /// The boot entries in it, for showing what a restore would put back.
     pub fn entries(&self) -> Vec<(u16, LoadOption)> {
         let mut out = Vec::new();
         for v in &self.variables {
-            let Some(n) = entry_number(&v.name) else { continue };
+            let Some(n) = entry_number(&v.name) else {
+                continue;
+            };
             if let Ok(bytes) = v.bytes() {
                 if let Ok(opt) = LoadOption::parse(&bytes) {
                     out.push((n, opt));
@@ -699,17 +741,21 @@ mod tests {
         path.extend(hard_drive_node(1, guid));
         path.extend(file_path_node(r"\EFI\BOOT\BOOTX64.EFI"));
         path.extend(end_node());
-        let stick = LoadOption::parse(&build(LOAD_OPTION_ACTIVE, "UEFI: SanDisk", &path, &[]))
-            .unwrap();
+        let stick =
+            LoadOption::parse(&build(LOAD_OPTION_ACTIVE, "UEFI: SanDisk", &path, &[])).unwrap();
         assert!(stick.is_removable_device());
 
         // The machine's own Windows, on an internal disk: no USB node anywhere.
         let mut own = hard_drive_node(2, guid);
         own.extend(file_path_node(r"\EFI\Microsoft\Boot\bootmgfw.efi"));
         own.extend(end_node());
-        let windows =
-            LoadOption::parse(&build(LOAD_OPTION_ACTIVE, "Windows Boot Manager", &own, &[]))
-                .unwrap();
+        let windows = LoadOption::parse(&build(
+            LOAD_OPTION_ACTIVE,
+            "Windows Boot Manager",
+            &own,
+            &[],
+        ))
+        .unwrap();
         assert!(!windows.is_removable_device());
     }
 
@@ -721,8 +767,8 @@ mod tests {
             let mut path = vec![0x03, subtype, 0x06, 0x00, 0, 0];
             path.extend(file_path_node(r"\EFI\BOOT\BOOTX64.EFI"));
             path.extend(end_node());
-            let opt = LoadOption::parse(&build(LOAD_OPTION_ACTIVE, "UEFI: Generic", &path, &[]))
-                .unwrap();
+            let opt =
+                LoadOption::parse(&build(LOAD_OPTION_ACTIVE, "UEFI: Generic", &path, &[])).unwrap();
             assert!(opt.is_removable_device(), "subtype {subtype:#04x}");
         }
     }
@@ -737,20 +783,34 @@ mod tests {
         path.extend(hard_drive_node(1, guid));
         path.extend(file_path_node(r"\EFI\BOOT\BOOTX64.EFI"));
         path.extend(end_node());
-        let stick =
-            SavedVar::new("Boot0010", 7, &build(LOAD_OPTION_ACTIVE, "UEFI: JetFlash", &path, &[]));
+        let stick = SavedVar::new(
+            "Boot0010",
+            7,
+            &build(LOAD_OPTION_ACTIVE, "UEFI: JetFlash", &path, &[]),
+        );
         assert!(names_removable_device(&stick));
 
         let mut own = hard_drive_node(2, guid);
         own.extend(file_path_node(r"\EFI\Microsoft\Boot\bootmgfw.efi"));
         own.extend(end_node());
-        let windows =
-            SavedVar::new("Boot0000", 7, &build(LOAD_OPTION_ACTIVE, "Windows 11", &own, &[]));
+        let windows = SavedVar::new(
+            "Boot0000",
+            7,
+            &build(LOAD_OPTION_ACTIVE, "Windows 11", &own, &[]),
+        );
         assert!(!names_removable_device(&windows));
 
         // Порядок и время ожидания — не записи меню, их это не касается.
-        assert!(!names_removable_device(&SavedVar::new("BootOrder", 7, &[0x10, 0x00])));
-        assert!(!names_removable_device(&SavedVar::new("Timeout", 7, &[0x05, 0x00])));
+        assert!(!names_removable_device(&SavedVar::new(
+            "BootOrder",
+            7,
+            &[0x10, 0x00]
+        )));
+        assert!(!names_removable_device(&SavedVar::new(
+            "Timeout",
+            7,
+            &[0x05, 0x00]
+        )));
     }
 
     #[test]
@@ -761,9 +821,13 @@ mod tests {
         let mut path = vec![0x03, MSG_SATA, 0x0A, 0x00, 0, 0, 0, 0, 0, 0];
         path.extend(file_path_node(r"\EFI\Microsoft\Boot\bootmgfw.efi"));
         path.extend(end_node());
-        let opt =
-            LoadOption::parse(&build(LOAD_OPTION_ACTIVE, "Windows Boot Manager", &path, &[]))
-                .unwrap();
+        let opt = LoadOption::parse(&build(
+            LOAD_OPTION_ACTIVE,
+            "Windows Boot Manager",
+            &path,
+            &[],
+        ))
+        .unwrap();
         assert!(!opt.is_removable_device());
     }
 
@@ -771,8 +835,8 @@ mod tests {
     #[test]
     fn an_entry_says_which_partition_and_which_file() {
         let guid = [
-            0xA7, 0x5B, 0xF0, 0xA5, 0xD3, 0xF4, 0x23, 0x4C,
-            0xA2, 0x81, 0x87, 0xC7, 0x1B, 0x09, 0x50, 0xFA,
+            0xA7, 0x5B, 0xF0, 0xA5, 0xD3, 0xF4, 0x23, 0x4C, 0xA2, 0x81, 0x87, 0xC7, 0x1B, 0x09,
+            0x50, 0xFA,
         ];
         let mut path = hard_drive_node(2, guid);
         path.extend(file_path_node(r"\EFI\Microsoft\Boot\bootmgfw.efi"));
@@ -782,10 +846,16 @@ mod tests {
         let opt = LoadOption::parse(&raw).unwrap();
         assert_eq!(opt.description, "Windows Boot Manager");
         assert!(opt.is_active());
-        assert_eq!(opt.file_path().as_deref(), Some(r"\EFI\Microsoft\Boot\bootmgfw.efi"));
+        assert_eq!(
+            opt.file_path().as_deref(),
+            Some(r"\EFI\Microsoft\Boot\bootmgfw.efi")
+        );
         let hd = opt.hard_drive().unwrap();
         assert_eq!(hd.partition_number, 2);
-        assert_eq!(hd.partition_guid().as_deref(), Some("A5F05BA7-F4D3-4C23-A281-87C71B0950FA"));
+        assert_eq!(
+            hd.partition_guid().as_deref(),
+            Some("A5F05BA7-F4D3-4C23-A281-87C71B0950FA")
+        );
         assert!(opt.fully_understood());
     }
 
@@ -808,7 +878,10 @@ mod tests {
         assert_eq!(again.file_path_list, opt.file_path_list);
         assert_eq!(again.optional_data, b"argument bytes");
         assert_eq!(again.attributes, LOAD_OPTION_ACTIVE);
-        assert_eq!(again.file_path().as_deref(), Some(r"\EFI\acronis\bootx64.efi"));
+        assert_eq!(
+            again.file_path().as_deref(),
+            Some(r"\EFI\acronis\bootx64.efi")
+        );
     }
 
     /// An entry the firmware created for a device rather than a file: there is
@@ -849,7 +922,12 @@ mod tests {
         assert!(LoadOption::parse(&[1, 2, 3]).is_err(), "короче заголовка");
         // A name with no terminator: its length is unknowable.
         let mut v = vec![1, 0, 0, 0, 0, 0];
-        v.extend_from_slice(&"name".encode_utf16().flat_map(|u| u.to_le_bytes()).collect::<Vec<_>>());
+        v.extend_from_slice(
+            &"name"
+                .encode_utf16()
+                .flat_map(|u| u.to_le_bytes())
+                .collect::<Vec<_>>(),
+        );
         assert!(LoadOption::parse(&v).is_err(), "название без нуля");
         // A device path longer than the bytes that follow it.
         let mut v = vec![1, 0, 0, 0, 200, 0];
@@ -866,13 +944,22 @@ mod tests {
         path.extend_from_slice(&[0x04, 0x04, 0x00, 0x00]);
         let opt = LoadOption::parse(&build(1, "x", &path, &[])).unwrap();
         let nodes = opt.device_path();
-        assert!(matches!(nodes[0], DevicePathNode::FilePath(_)), "первый узел прочитан");
-        assert!(matches!(nodes.last().unwrap(), DevicePathNode::Unreadable { .. }));
+        assert!(
+            matches!(nodes[0], DevicePathNode::FilePath(_)),
+            "первый узел прочитан"
+        );
+        assert!(matches!(
+            nodes.last().unwrap(),
+            DevicePathNode::Unreadable { .. }
+        ));
         assert!(!opt.fully_understood(), "такую запись править нельзя");
     }
 
     fn unhex(s: &str) -> Vec<u8> {
-        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
     }
 
     /// The two entries a real machine really had, byte for byte, read out of its
@@ -893,16 +980,29 @@ mod tests {
         let w = LoadOption::parse(&raw).unwrap();
         assert_eq!(w.description, "Windows Boot Manager");
         assert!(w.is_active());
-        assert_eq!(w.file_path().as_deref(), Some(r"\EFI\MICROSOFT\BOOT\BOOTMGFW.EFI"));
+        assert_eq!(
+            w.file_path().as_deref(),
+            Some(r"\EFI\MICROSOFT\BOOT\BOOTMGFW.EFI")
+        );
         let hd = w.hard_drive().unwrap();
         assert_eq!(hd.partition_number, 1);
         assert_eq!(hd.start_lba, 2048);
         assert_eq!(hd.size_lba, 204800, "100 МиБ раздела EFI, в секторах");
-        assert_eq!(hd.partition_guid().as_deref(), Some("1D3128FC-790C-4147-B0E3-0767E8B3A4C0"));
+        assert_eq!(
+            hd.partition_guid().as_deref(),
+            Some("1D3128FC-790C-4147-B0E3-0767E8B3A4C0")
+        );
         assert_eq!(hd.format, 2, "GPT");
-        assert!(!w.optional_data.is_empty(), "Windows кладёт туда свой объект BCD");
+        assert!(
+            !w.optional_data.is_empty(),
+            "Windows кладёт туда свой объект BCD"
+        );
         assert!(w.fully_understood());
-        assert_eq!(w.to_bytes(), raw, "сборка обязана вернуть ровно те же байты");
+        assert_eq!(
+            w.to_bytes(),
+            raw,
+            "сборка обязана вернуть ровно те же байты"
+        );
 
         let raw = unhex(UBUNTU);
         let u = LoadOption::parse(&raw).unwrap();
@@ -910,8 +1010,15 @@ mod tests {
         assert_eq!(u.file_path().as_deref(), Some(r"\EFI\UBUNTU\SHIMX64.EFI"));
         let hd = u.hard_drive().unwrap();
         assert_eq!(hd.start_lba, 34, "раздел начинается сразу за разметкой");
-        assert_eq!(hd.partition_guid().as_deref(), Some("245EF510-A193-458D-B01F-D13738760455"));
-        assert_eq!(u.optional_data, vec![0x00, 0x00, 0x42, 0x4F], "хвост от efibootmgr");
+        assert_eq!(
+            hd.partition_guid().as_deref(),
+            Some("245EF510-A193-458D-B01F-D13738760455")
+        );
+        assert_eq!(
+            u.optional_data,
+            vec![0x00, 0x00, 0x42, 0x4F],
+            "хвост от efibootmgr"
+        );
         assert_eq!(u.to_bytes(), raw);
 
         // И то, ради чего всё затевалось: переименовать, не тронув ничего
@@ -920,7 +1027,10 @@ mod tests {
         renamed.description = "Ubuntu 24.04".into();
         let back = LoadOption::parse(&renamed.to_bytes()).unwrap();
         assert_eq!(back.description, "Ubuntu 24.04");
-        assert_eq!(back.file_path_list, u.file_path_list, "путь к загрузчику не тронут");
+        assert_eq!(
+            back.file_path_list, u.file_path_list,
+            "путь к загрузчику не тронут"
+        );
         assert_eq!(back.optional_data, u.optional_data, "чужой хвост не тронут");
         assert_eq!(back.attributes, u.attributes);
     }
@@ -933,7 +1043,10 @@ mod tests {
         let entry = unhex("0100000062007500620075006e0074007500000004012a00010000002200000000000000deff28000000000010f55e2493a18d45b01fd137387604550202040434005c004500460049005c005500420055004e00540055005c005300480049004d005800360034002e0045004600490000007fff04000000424f");
         let saved = BootBackup::new(
             "MODULATOR",
-            vec![SavedVar::new("BootOrder", 7, &order), SavedVar::new("Boot000F", 7, &entry)],
+            vec![
+                SavedVar::new("BootOrder", 7, &order),
+                SavedVar::new("Boot000F", 7, &entry),
+            ],
             vec![SavedNote {
                 name: "Boot000F".into(),
                 description: "ubuntu".into(),
@@ -949,7 +1062,10 @@ mod tests {
         assert_eq!(entries[0].0, 0x000F);
         assert_eq!(entries[0].1.description, "ubuntu");
         assert_eq!(entries[0].1.to_bytes(), entry, "байты записи не изменились");
-        assert_eq!(back.variables[1].attributes, 7, "флаги переменной сохранены");
+        assert_eq!(
+            back.variables[1].attributes, 7,
+            "флаги переменной сохранены"
+        );
     }
 
     /// A restore takes the names of the variables it writes from a FILE. If the
@@ -960,7 +1076,16 @@ mod tests {
         for ok in ["BootOrder", "BootNext", "Timeout", "Boot0000", "BootFFFF"] {
             assert!(is_boot_variable(ok), "{ok}");
         }
-        for no in ["PK", "KEK", "db", "SecureBoot", "SetupMode", "BootCurrent", "Driver0000", ""] {
+        for no in [
+            "PK",
+            "KEK",
+            "db",
+            "SecureBoot",
+            "SetupMode",
+            "BootCurrent",
+            "Driver0000",
+            "",
+        ] {
             assert!(!is_boot_variable(no), "{no}");
         }
 
@@ -970,8 +1095,14 @@ mod tests {
         assert!(err.contains("PK"), "{err}");
 
         // И то же самое для мусора вместо данных.
-        bad_one.variables = vec![SavedVar { name: "Boot0000".into(), attributes: 7, data: "не base64!".into() }];
-        let err = BootBackup::load(&bad_one.to_json().unwrap()).unwrap_err().to_string();
+        bad_one.variables = vec![SavedVar {
+            name: "Boot0000".into(),
+            attributes: 7,
+            data: "не base64!".into(),
+        }];
+        let err = BootBackup::load(&bad_one.to_json().unwrap())
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("Boot0000"), "{err}");
     }
 
@@ -982,12 +1113,21 @@ mod tests {
         assert!(BootBackup::load("не json").is_err());
         let mut b = BootBackup::new("x", vec![SavedVar::new("BootOrder", 7, &[0, 0])], vec![]);
         b.format = "чужой".into();
-        assert!(BootBackup::load(&b.to_json().unwrap()).is_err(), "чужой формат");
+        assert!(
+            BootBackup::load(&b.to_json().unwrap()).is_err(),
+            "чужой формат"
+        );
         let mut b = BootBackup::new("x", vec![SavedVar::new("BootOrder", 7, &[0, 0])], vec![]);
         b.version = BACKUP_VERSION + 1;
-        assert!(BootBackup::load(&b.to_json().unwrap()).is_err(), "версия из будущего");
+        assert!(
+            BootBackup::load(&b.to_json().unwrap()).is_err(),
+            "версия из будущего"
+        );
         let b = BootBackup::new("x", vec![], vec![]);
-        assert!(BootBackup::load(&b.to_json().unwrap()).is_err(), "нечего восстанавливать");
+        assert!(
+            BootBackup::load(&b.to_json().unwrap()).is_err(),
+            "нечего восстанавливать"
+        );
     }
 
     /// An entry we build has to be indistinguishable from one the firmware
@@ -1001,8 +1141,8 @@ mod tests {
             start_lba: 34,
             size_lba: 2686942,
             signature: [
-                0x10, 0xF5, 0x5E, 0x24, 0x93, 0xA1, 0x8D, 0x45,
-                0xB0, 0x1F, 0xD1, 0x37, 0x38, 0x76, 0x04, 0x55,
+                0x10, 0xF5, 0x5E, 0x24, 0x93, 0xA1, 0x8D, 0x45, 0xB0, 0x1F, 0xD1, 0x37, 0x38, 0x76,
+                0x04, 0x55,
             ],
             format: 2,
             signature_type: 2,
@@ -1012,7 +1152,10 @@ mod tests {
 
         assert_eq!(back.description, "Acronis True Image");
         assert!(back.is_active());
-        assert_eq!(back.file_path().as_deref(), Some(r"\EFI\acronis\bootx64.efi"));
+        assert_eq!(
+            back.file_path().as_deref(),
+            Some(r"\EFI\acronis\bootx64.efi")
+        );
         assert_eq!(back.hard_drive().unwrap(), hd, "раздел описан ровно тем же");
         assert!(back.fully_understood());
         // Три узла и ничего лишнего: раздел, файл, конец.
@@ -1035,7 +1178,11 @@ mod tests {
             signature_type: 2,
         };
         let path = build_device_path(&hd, r"\EFI\x.efi");
-        assert_eq!(&path[0..4], &[0x04, 0x01, 42, 0x00], "заголовок узла раздела");
+        assert_eq!(
+            &path[0..4],
+            &[0x04, 0x01, 42, 0x00],
+            "заголовок узла раздела"
+        );
         let file_at = 42;
         assert_eq!(&path[file_at..file_at + 2], &[0x04, 0x04]);
         let file_len = u16::from_le_bytes([path[file_at + 2], path[file_at + 3]]) as usize;
@@ -1065,9 +1212,21 @@ mod tests {
         let order = vec![0x0000, 0x000F, 0x0003];
         assert_eq!(reorder(&order, 0x0003, 0), vec![0x0003, 0x0000, 0x000F]);
         assert_eq!(reorder(&order, 0x0000, 2), vec![0x000F, 0x0003, 0x0000]);
-        assert_eq!(reorder(&order, 0x0000, 99), vec![0x000F, 0x0003, 0x0000], "за конец — в конец");
-        assert_eq!(reorder(&order, 0x0007, 1), vec![0x0000, 0x0007, 0x000F, 0x0003], "новой в списке не было");
-        assert_eq!(reorder(&order, 0x0000, 0), order, "на своём месте — ничего не изменилось");
+        assert_eq!(
+            reorder(&order, 0x0000, 99),
+            vec![0x000F, 0x0003, 0x0000],
+            "за конец — в конец"
+        );
+        assert_eq!(
+            reorder(&order, 0x0007, 1),
+            vec![0x0000, 0x0007, 0x000F, 0x0003],
+            "новой в списке не было"
+        );
+        assert_eq!(
+            reorder(&order, 0x0000, 0),
+            order,
+            "на своём месте — ничего не изменилось"
+        );
     }
 
     /// The GUID goes into the entry byte-swapped and comes out of it the same
@@ -1082,21 +1241,36 @@ mod tests {
         ] {
             let hd = HardDrive::from_gpt(1, 34, 2686975, text).unwrap();
             let back = hd.partition_guid().unwrap();
-            assert_eq!(back, text.trim_matches(|c| c == '{' || c == '}').to_uppercase(), "{text}");
-            assert_eq!(hd.size_lba, 2686975 - 34 + 1, "размер считается по последнему сектору");
+            assert_eq!(
+                back,
+                text.trim_matches(|c| c == '{' || c == '}').to_uppercase(),
+                "{text}"
+            );
+            assert_eq!(
+                hd.size_lba,
+                2686975 - 34 + 1,
+                "размер считается по последнему сектору"
+            );
             assert_eq!(hd.format, 2);
         }
         // Проверено против настоящей записи: байты из прошивки этой машины.
-        let hd = HardDrive::from_gpt(1, 34, 2686975, "245EF510-A193-458D-B01F-D13738760455").unwrap();
+        let hd =
+            HardDrive::from_gpt(1, 34, 2686975, "245EF510-A193-458D-B01F-D13738760455").unwrap();
         assert_eq!(
             hd.signature,
-            [0x10, 0xF5, 0x5E, 0x24, 0x93, 0xA1, 0x8D, 0x45,
-             0xB0, 0x1F, 0xD1, 0x37, 0x38, 0x76, 0x04, 0x55],
+            [
+                0x10, 0xF5, 0x5E, 0x24, 0x93, 0xA1, 0x8D, 0x45, 0xB0, 0x1F, 0xD1, 0x37, 0x38, 0x76,
+                0x04, 0x55
+            ],
             "ровно те байты, что лежат в записи ubuntu"
         );
         assert_eq!(guid_to_bytes("не guid"), None);
         assert_eq!(guid_to_bytes(""), None);
-        assert_eq!(guid_to_bytes("245EF510-A193-458D-B01F-D137387604"), None, "коротко");
+        assert_eq!(
+            guid_to_bytes("245EF510-A193-458D-B01F-D137387604"),
+            None,
+            "коротко"
+        );
     }
 
     /// The spelling difference this machine really has: the firmware holds the
@@ -1104,11 +1278,26 @@ mod tests {
     /// lower. Same file.
     #[test]
     fn the_same_loader_written_two_ways_is_the_same_loader() {
-        assert!(same_efi_path(r"\EFI\UBUNTU\SHIMX64.EFI", r"\EFI\ubuntu\shimx64.efi"));
-        assert!(same_efi_path(r"EFI\acronis\bootx64.efi", r"\EFI\acronis\bootx64.efi"));
-        assert!(same_efi_path("/EFI/acronis/bootx64.efi", r"\EFI\acronis\bootx64.efi"));
-        assert!(!same_efi_path(r"\EFI\acronis\bootx64.efi", r"\EFI\r-drive\bootx64.efi"));
-        assert!(!same_efi_path(r"\EFI\ubuntu\shimx64.efi", r"\EFI\ubuntu\grubx64.efi"));
+        assert!(same_efi_path(
+            r"\EFI\UBUNTU\SHIMX64.EFI",
+            r"\EFI\ubuntu\shimx64.efi"
+        ));
+        assert!(same_efi_path(
+            r"EFI\acronis\bootx64.efi",
+            r"\EFI\acronis\bootx64.efi"
+        ));
+        assert!(same_efi_path(
+            "/EFI/acronis/bootx64.efi",
+            r"\EFI\acronis\bootx64.efi"
+        ));
+        assert!(!same_efi_path(
+            r"\EFI\acronis\bootx64.efi",
+            r"\EFI\r-drive\bootx64.efi"
+        ));
+        assert!(!same_efi_path(
+            r"\EFI\ubuntu\shimx64.efi",
+            r"\EFI\ubuntu\grubx64.efi"
+        ));
     }
 
     /// The fallback loader is not an orphan: nothing names it because every
@@ -1119,7 +1308,10 @@ mod tests {
         assert!(is_fallback_path(r"EFI\boot\bootx64.efi"));
         assert!(is_fallback_path(r"\EFI\Boot\bootia32.efi"));
         assert!(!is_fallback_path(r"\EFI\ubuntu\shimx64.efi"));
-        assert!(!is_fallback_path(r"\EFI\BOOT\grubx64.efi"), "в той же папке, но не тот файл");
+        assert!(
+            !is_fallback_path(r"\EFI\BOOT\grubx64.efi"),
+            "в той же папке, но не тот файл"
+        );
         assert!(!is_fallback_path(r"\EFI\Microsoft\Boot\bootmgfw.efi"));
     }
 

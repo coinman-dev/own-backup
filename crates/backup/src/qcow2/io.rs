@@ -20,9 +20,9 @@ use std::path::Path;
 
 use own_backup_common::Result;
 
+use super::bad;
 use super::reader::Qcow2Reader;
 use super::writer::{Qcow2Writer, Qcow2WriterOptions};
-use super::bad;
 
 /// Staged partial clusters are bounded by GPT structures + one tail per block
 /// write; anything past this cap means the caller streams unaligned data.
@@ -47,7 +47,11 @@ impl<W: Write + Seek> Qcow2StagedWriter<W> {
     pub fn new(w: W, opts: Qcow2WriterOptions) -> Result<Self> {
         let inner = Qcow2Writer::new(w, opts)?;
         let virtual_size = inner.total_guest_clusters() * inner.cluster_size();
-        Ok(Self { inner, staged: BTreeMap::new(), virtual_size })
+        Ok(Self {
+            inner,
+            staged: BTreeMap::new(),
+            virtual_size,
+        })
     }
 
     /// Virtual disk size (rounded up to a whole cluster).
@@ -77,11 +81,12 @@ impl<W: Write + Seek> Qcow2StagedWriter<W> {
                                 "more than {MAX_STAGED_CLUSTERS} partially-written clusters staged — unaligned write pattern"
                             )));
                         }
-                        self.staged.entry(cluster).or_insert_with(|| vec![0u8; cs as usize])
+                        self.staged
+                            .entry(cluster)
+                            .or_insert_with(|| vec![0u8; cs as usize])
                     }
                 };
-                buf[within as usize..within as usize + take]
-                    .copy_from_slice(&rest[..take]);
+                buf[within as usize..within as usize + take].copy_from_slice(&rest[..take]);
             }
             off += take as u64;
             rest = &rest[take..];
@@ -161,14 +166,24 @@ impl Qcow2RandomReader {
             visited.push(here);
 
             let file = File::open(&current).map_err(|e| {
-                bad(format!("cannot open chain image {}: {e}", current.display()))
+                bad(format!(
+                    "cannot open chain image {}: {e}",
+                    current.display()
+                ))
             })?;
-            let layer = Qcow2Reader::open(file)
-                .map_err(|e| bad(format!("{}: {e}", current.display())))?;
-            let beside = current.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+            let layer =
+                Qcow2Reader::open(file).map_err(|e| bad(format!("{}: {e}", current.display())))?;
+            let beside = current
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_default();
             let backing = layer.backing_file().map(|b| {
                 let p = Path::new(b);
-                if p.is_absolute() { p.to_path_buf() } else { beside.join(p) }
+                if p.is_absolute() {
+                    p.to_path_buf()
+                } else {
+                    beside.join(p)
+                }
             });
             layers.push(layer);
             match backing {
@@ -183,7 +198,11 @@ impl Qcow2RandomReader {
         if layers.iter().any(|l| l.cluster_size() != cs) {
             return Err(bad("backing chain mixes cluster sizes — not supported"));
         }
-        Ok(Self { layers, cache: HashMap::new(), cache_order: VecDeque::new() })
+        Ok(Self {
+            layers,
+            cache: HashMap::new(),
+            cache_order: VecDeque::new(),
+        })
     }
 
     /// Virtual size of the leaf image (authoritative for the whole chain).
@@ -274,7 +293,10 @@ mod tests {
     use std::io::Cursor;
 
     fn opts(size: u64) -> Qcow2WriterOptions {
-        Qcow2WriterOptions { virtual_size: size, ..Default::default() }
+        Qcow2WriterOptions {
+            virtual_size: size,
+            ..Default::default()
+        }
     }
 
     /// One image of a chain: `backing` makes it a child, `fill` is what its
@@ -322,7 +344,11 @@ mod tests {
         // And the trap: a different base of the same name beside the leaf.
         layer(&root.join("base.qcow2"), None, Some(0x5A));
 
-        assert_eq!(first_byte(&root.join("leaf.qcow2")), 0xA5, "nested/base.qcow2 is the base");
+        assert_eq!(
+            first_byte(&root.join("leaf.qcow2")),
+            0xA5,
+            "nested/base.qcow2 is the base"
+        );
     }
 
     /// Without a same-named decoy the old behaviour failed outright — a good
@@ -343,7 +369,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path().join("elsewhere/base.qcow2");
         layer(&base, None, Some(0x33));
-        layer(&dir.path().join("child.qcow2"), Some(&base.to_string_lossy()), None);
+        layer(
+            &dir.path().join("child.qcow2"),
+            Some(&base.to_string_lossy()),
+            None,
+        );
         assert_eq!(first_byte(&dir.path().join("child.qcow2")), 0x33);
     }
 
@@ -370,7 +400,8 @@ mod tests {
         // … an aligned full-cluster write …
         w.write_at(1024 * 1024, &vec![0x77u8; 64 * 1024]).unwrap();
         // … a write crossing a cluster boundary (full + partial tail) …
-        w.write_at(2 * 1024 * 1024, &vec![0x55u8; 64 * 1024 + 4096]).unwrap();
+        w.write_at(2 * 1024 * 1024, &vec![0x55u8; 64 * 1024 + 4096])
+            .unwrap();
         // … and a tail write into the image's last sectors.
         w.write_at(4 * 1024 * 1024 - 512, &[0xEE; 512]).unwrap();
         w.finish().unwrap();
@@ -390,7 +421,8 @@ mod tests {
         assert!(buf.iter().all(|&b| b == 0x55));
         // The staged tail cluster is zero-padded past the written range.
         let mut pad = vec![0u8; 4096];
-        r.read_at(2 * 1024 * 1024 + 64 * 1024 + 4096, &mut pad).unwrap();
+        r.read_at(2 * 1024 * 1024 + 64 * 1024 + 4096, &mut pad)
+            .unwrap();
         assert!(pad.iter().all(|&b| b == 0));
 
         let mut buf = vec![0u8; 512];
@@ -410,8 +442,7 @@ mod tests {
         let mut w = Qcow2StagedWriter::new(Cursor::new(Vec::new()), opts(1024 * 1024)).unwrap();
         w.write_at(100, b"hello").unwrap();
         let image = w.finish().unwrap().into_inner();
-        let mut reader =
-            super::super::reader::Qcow2Reader::open(Cursor::new(image)).unwrap();
+        let mut reader = super::super::reader::Qcow2Reader::open(Cursor::new(image)).unwrap();
         let cluster = reader.read_cluster(0).unwrap().unwrap();
         assert_eq!(&cluster[100..105], b"hello");
     }

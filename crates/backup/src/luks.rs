@@ -63,7 +63,12 @@ impl LuksParams {
             return Err(bad("encrypt offset not sector-aligned"));
         }
         let first_512 = data_off / 512 + self.iv_offset;
-        xts_encrypt(&self.master_key, self.sector_size as usize, first_512 as u128, buf)
+        xts_encrypt(
+            &self.master_key,
+            self.sector_size as usize,
+            first_512 as u128,
+            buf,
+        )
     }
 
     /// Decrypt `buf` in place. `data_off` is the byte offset within the data
@@ -79,7 +84,12 @@ impl LuksParams {
         // `data_off / 512 + iv_tweak`, and consecutive `sector_size` units step
         // by `sector_size / 512` (8 for a 4096-byte-sector container).
         let first_512 = data_off / 512 + self.iv_offset;
-        xts_decrypt(&self.master_key, self.sector_size as usize, first_512 as u128, buf)
+        xts_decrypt(
+            &self.master_key,
+            self.sector_size as usize,
+            first_512 as u128,
+            buf,
+        )
     }
 }
 
@@ -321,7 +331,9 @@ pub fn verify_stored_passphrase(
 /// and the initramfs of the restored system keep working untouched.
 pub fn read_header_area(vol: &mut dyn RawVolume, params: &LuksParams) -> Result<Vec<u8>> {
     if params.data_offset == 0 {
-        return Err(bad("container reports a zero data offset — nothing to preserve"));
+        return Err(bad(
+            "container reports a zero data offset — nothing to preserve",
+        ));
     }
     // A LUKS2 header area is 16 MiB by default, LUKS1's around 2 MiB. Refuse
     // anything wilder rather than allocating whatever a corrupt header claims.
@@ -343,7 +355,9 @@ pub fn read_header_area(vol: &mut dyn RawVolume, params: &LuksParams) -> Result<
 /// Only `aes-xts-plain64` is supported; return the master-key byte length.
 fn check_cipher(spec: &str) -> Result<()> {
     if spec.trim() != "aes-xts-plain64" {
-        return Err(bad(format!("unsupported cipher {spec:?} (only aes-xts-plain64)")));
+        return Err(bad(format!(
+            "unsupported cipher {spec:?} (only aes-xts-plain64)"
+        )));
     }
     Ok(())
 }
@@ -451,7 +465,9 @@ fn inspect_luks1(hdr: &[u8]) -> LuksInfo {
     let be32 = |o: usize| u32::from_be_bytes(hdr[o..o + 4].try_into().unwrap());
     let spec = format!("{}-{}", cstr(&hdr[8..40]), cstr(&hdr[40..72]));
     let hash = cstr(&hdr[72..104]);
-    let slots = (0..8).filter(|s| be32(208 + s * 48) == LUKS1_KEY_ENABLED).count();
+    let slots = (0..8)
+        .filter(|s| be32(208 + s * 48) == LUKS1_KEY_ENABLED)
+        .count();
 
     let mut why = Vec::new();
     if check_cipher(&spec).is_err() {
@@ -470,7 +486,11 @@ fn inspect_luks1(hdr: &[u8]) -> LuksInfo {
             openable: true,
         }
     } else {
-        LuksInfo { version: 1, methods: why, openable: false }
+        LuksInfo {
+            version: 1,
+            methods: why,
+            openable: false,
+        }
     }
 }
 
@@ -479,8 +499,15 @@ fn inspect_luks2(vol: &mut dyn RawVolume, hdr: &[u8]) -> Result<LuksInfo> {
     if !(LUKS2_JSON_OFFSET..=16 * 1024 * 1024).contains(&hdr_size) {
         return Err(bad(format!("implausible LUKS2 header size {hdr_size}")));
     }
-    let json_raw = read_at(vol, LUKS2_JSON_OFFSET, (hdr_size - LUKS2_JSON_OFFSET) as usize)?;
-    let end = json_raw.iter().position(|&b| b == 0).unwrap_or(json_raw.len());
+    let json_raw = read_at(
+        vol,
+        LUKS2_JSON_OFFSET,
+        (hdr_size - LUKS2_JSON_OFFSET) as usize,
+    )?;
+    let end = json_raw
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(json_raw.len());
     let meta: Value =
         serde_json::from_slice(&json_raw[..end]).map_err(|e| bad(format!("LUKS2 JSON: {e}")))?;
 
@@ -509,7 +536,11 @@ fn inspect_luks2(vol: &mut dyn RawVolume, hdr: &[u8]) -> Result<LuksInfo> {
         .get("config")
         .and_then(|c| c.get("requirements"))
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|r| r.as_str().map(str::to_string)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|r| r.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default();
     for r in &requirements {
         why.push(tr!("luks.luks2_requirement", requirement = r).into_owned());
@@ -519,8 +550,14 @@ fn inspect_luks2(vol: &mut dyn RawVolume, hdr: &[u8]) -> Result<LuksInfo> {
     // TPM2/FIDO2 enrolments, clevis — holds a secret nobody types, exactly like
     // a BitLocker TPM protector.
     let empty = serde_json::Map::new();
-    let keyslots = meta.get("keyslots").and_then(Value::as_object).unwrap_or(&empty);
-    let tokens = meta.get("tokens").and_then(Value::as_object).unwrap_or(&empty);
+    let keyslots = meta
+        .get("keyslots")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    let tokens = meta
+        .get("tokens")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
     let mut token_slots: Vec<&str> = Vec::new();
     let mut token_types: Vec<String> = Vec::new();
     for t in tokens.values() {
@@ -549,7 +586,11 @@ fn inspect_luks2(vol: &mut dyn RawVolume, hdr: &[u8]) -> Result<LuksInfo> {
             why.push(tr!("luks.luks2_no_password_slots").into_owned());
         } else {
             why.push(
-                tr!("luks.luks2_all_slots_tokens", tokens = token_types.join(", ")).into_owned(),
+                tr!(
+                    "luks.luks2_all_slots_tokens",
+                    tokens = token_types.join(", ")
+                )
+                .into_owned(),
             );
         }
     }
@@ -561,7 +602,11 @@ fn inspect_luks2(vol: &mut dyn RawVolume, hdr: &[u8]) -> Result<LuksInfo> {
             openable: true,
         }
     } else {
-        LuksInfo { version: 2, methods: why, openable: false }
+        LuksInfo {
+            version: 2,
+            methods: why,
+            openable: false,
+        }
     })
 }
 
@@ -606,9 +651,18 @@ fn unlock_luks1(vol: &mut dyn RawVolume, hdr: &[u8], pass: &[u8]) -> Result<Luks
 
         let slot_key = Zeroizing::new(pbkdf2(hash, pass, salt, iters, key_bytes));
         let material_len = key_bytes * stripes;
-        let mut material = Zeroizing::new(read_at(vol, km_off * 512, material_len.next_multiple_of(512))?);
+        let mut material = Zeroizing::new(read_at(
+            vol,
+            km_off * 512,
+            material_len.next_multiple_of(512),
+        )?);
         xts_decrypt(&slot_key, 512, 0, &mut material)?;
-        let mk = Zeroizing::new(af_merge(hash, &material[..material_len], key_bytes, stripes)?);
+        let mk = Zeroizing::new(af_merge(
+            hash,
+            &material[..material_len],
+            key_bytes,
+            stripes,
+        )?);
 
         // Verify against the master-key digest.
         if pbkdf2(hash, &mk, mk_salt, mk_iter, mk_digest.len()) == mk_digest {
@@ -643,7 +697,8 @@ fn jstr<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
 
 fn b64(v: &Value, key: &str) -> Result<Vec<u8>> {
     let s = jstr(v, key).ok_or_else(|| bad(format!("missing base64 field {key}")))?;
-    B64.decode(s).map_err(|e| bad(format!("bad base64 in {key}: {e}")))
+    B64.decode(s)
+        .map_err(|e| bad(format!("bad base64 in {key}: {e}")))
 }
 
 fn unlock_luks2(vol: &mut dyn RawVolume, hdr: &[u8], pass: &[u8]) -> Result<LuksParams> {
@@ -651,38 +706,63 @@ fn unlock_luks2(vol: &mut dyn RawVolume, hdr: &[u8], pass: &[u8]) -> Result<Luks
     if !(LUKS2_JSON_OFFSET..=16 * 1024 * 1024).contains(&hdr_size) {
         return Err(bad(format!("implausible LUKS2 header size {hdr_size}")));
     }
-    let json_raw = read_at(vol, LUKS2_JSON_OFFSET, (hdr_size - LUKS2_JSON_OFFSET) as usize)?;
-    let end = json_raw.iter().position(|&b| b == 0).unwrap_or(json_raw.len());
+    let json_raw = read_at(
+        vol,
+        LUKS2_JSON_OFFSET,
+        (hdr_size - LUKS2_JSON_OFFSET) as usize,
+    )?;
+    let end = json_raw
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(json_raw.len());
     let meta: Value =
         serde_json::from_slice(&json_raw[..end]).map_err(|e| bad(format!("LUKS2 JSON: {e}")))?;
 
     // --- The (single) crypt data segment. ---
-    let segments = meta.get("segments").and_then(Value::as_object).ok_or_else(|| bad("no segments"))?;
+    let segments = meta
+        .get("segments")
+        .and_then(Value::as_object)
+        .ok_or_else(|| bad("no segments"))?;
     let seg = segments
         .values()
         .find(|s| jstr(s, "type") == Some("crypt"))
         .ok_or_else(|| bad("no crypt segment"))?;
     check_cipher(jstr(seg, "encryption").unwrap_or_default())?;
-    let data_offset = jnum(seg.get("offset").unwrap_or(&Value::Null)).ok_or_else(|| bad("segment offset"))?;
+    let data_offset =
+        jnum(seg.get("offset").unwrap_or(&Value::Null)).ok_or_else(|| bad("segment offset"))?;
     let sector_size = seg.get("sector_size").and_then(jnum).unwrap_or(512) as u32;
     let iv_offset = seg.get("iv_tweak").and_then(jnum).unwrap_or(0);
 
-    let keyslots = meta.get("keyslots").and_then(Value::as_object).ok_or_else(|| bad("no keyslots"))?;
-    let digests = meta.get("digests").and_then(Value::as_object).ok_or_else(|| bad("no digests"))?;
+    let keyslots = meta
+        .get("keyslots")
+        .and_then(Value::as_object)
+        .ok_or_else(|| bad("no keyslots"))?;
+    let digests = meta
+        .get("digests")
+        .and_then(Value::as_object)
+        .ok_or_else(|| bad("no digests"))?;
 
     // --- Try each keyslot. ---
     for (id, ks) in keyslots {
         if jstr(ks, "type") != Some("luks2") {
             continue;
         }
-        let key_size = ks.get("key_size").and_then(jnum).ok_or_else(|| bad("keyslot key_size"))? as usize;
+        let key_size = ks
+            .get("key_size")
+            .and_then(jnum)
+            .ok_or_else(|| bad("keyslot key_size"))? as usize;
         let area = ks.get("area").ok_or_else(|| bad("keyslot area"))?;
         check_cipher(jstr(area, "encryption").unwrap_or_default())?;
-        let area_off = jnum(area.get("offset").unwrap_or(&Value::Null)).ok_or_else(|| bad("area offset"))?;
-        let area_size = jnum(area.get("size").unwrap_or(&Value::Null)).ok_or_else(|| bad("area size"))? as usize;
+        let area_off =
+            jnum(area.get("offset").unwrap_or(&Value::Null)).ok_or_else(|| bad("area offset"))?;
+        let area_size = jnum(area.get("size").unwrap_or(&Value::Null))
+            .ok_or_else(|| bad("area size"))? as usize;
         let af = ks.get("af").ok_or_else(|| bad("keyslot af"))?;
         let af_hash = Hash::parse(jstr(af, "hash").unwrap_or("sha256"))?;
-        let stripes = af.get("stripes").and_then(jnum).ok_or_else(|| bad("af stripes"))? as usize;
+        let stripes = af
+            .get("stripes")
+            .and_then(jnum)
+            .ok_or_else(|| bad("af stripes"))? as usize;
 
         // Derive the keyslot key from the passphrase.
         let kdf = ks.get("kdf").ok_or_else(|| bad("keyslot kdf"))?;
@@ -690,11 +770,20 @@ fn unlock_luks2(vol: &mut dyn RawVolume, hdr: &[u8], pass: &[u8]) -> Result<Luks
         let kdf_type = jstr(kdf, "type").unwrap_or_default();
         let slot_key = Zeroizing::new(if kdf_type == "pbkdf2" {
             let h = Hash::parse(jstr(kdf, "hash").unwrap_or("sha256"))?;
-            let iters = kdf.get("iterations").and_then(jnum).ok_or_else(|| bad("pbkdf2 iterations"))? as u32;
+            let iters = kdf
+                .get("iterations")
+                .and_then(jnum)
+                .ok_or_else(|| bad("pbkdf2 iterations"))? as u32;
             pbkdf2(h, pass, &salt, iters, key_size)
         } else {
-            let time = kdf.get("time").and_then(jnum).ok_or_else(|| bad("argon2 time"))? as u32;
-            let mem = kdf.get("memory").and_then(jnum).ok_or_else(|| bad("argon2 memory"))? as u32;
+            let time = kdf
+                .get("time")
+                .and_then(jnum)
+                .ok_or_else(|| bad("argon2 time"))? as u32;
+            let mem = kdf
+                .get("memory")
+                .and_then(jnum)
+                .ok_or_else(|| bad("argon2 memory"))? as u32;
             let cpus = kdf.get("cpus").and_then(jnum).unwrap_or(1) as u32;
             argon2_kdf(kdf_type, pass, &salt, time, mem, cpus, key_size)?
         });
@@ -721,7 +810,10 @@ fn unlock_luks2(vol: &mut dyn RawVolume, hdr: &[u8], pass: &[u8]) -> Result<Luks
                 continue;
             }
             let h = Hash::parse(jstr(digest, "hash").unwrap_or("sha256"))?;
-            let iters = digest.get("iterations").and_then(jnum).ok_or_else(|| bad("digest iterations"))? as u32;
+            let iters = digest
+                .get("iterations")
+                .and_then(jnum)
+                .ok_or_else(|| bad("digest iterations"))? as u32;
             let dsalt = b64(digest, "salt")?;
             let want_digest = b64(digest, "digest")?;
             if pbkdf2(h, &mk, &dsalt, iters, want_digest.len()) == want_digest {
@@ -1006,13 +1098,18 @@ mod tests {
 
     #[test]
     fn luks1_names_what_stands_in_the_way() {
-        let info = inspect_luks(&mut luks1_header("serpent", "xts-plain64", "sha256", true)).unwrap();
+        let info =
+            inspect_luks(&mut luks1_header("serpent", "xts-plain64", "sha256", true)).unwrap();
         assert!(!info.openable);
         assert!(info.methods[0].contains("serpent"), "{:?}", info.methods);
 
         let info = inspect_luks(&mut luks1_header("aes", "xts-plain64", "sha256", false)).unwrap();
         assert!(!info.openable);
-        assert!(info.methods[0].contains("нет активных слотов"), "{:?}", info.methods);
+        assert!(
+            info.methods[0].contains("нет активных слотов"),
+            "{:?}",
+            info.methods
+        );
     }
 
     #[test]
@@ -1031,7 +1128,11 @@ mod tests {
         );
         let info = inspect_luks(&mut luks2_with_json(&json)).unwrap();
         assert!(!info.openable);
-        assert!(info.methods.iter().any(|m| m.contains("serpent")), "{:?}", info.methods);
+        assert!(
+            info.methods.iter().any(|m| m.contains("serpent")),
+            "{:?}",
+            info.methods
+        );
     }
 
     #[test]
@@ -1041,7 +1142,11 @@ mod tests {
         let extra = r#","tokens":{"0":{"type":"systemd-tpm2","keyslots":["0"]}}"#;
         let info = inspect_luks(&mut luks2_with_json(&luks2_json("argon2id", extra))).unwrap();
         assert!(!info.openable);
-        assert!(info.methods[0].contains("systemd-tpm2"), "{:?}", info.methods);
+        assert!(
+            info.methods[0].contains("systemd-tpm2"),
+            "{:?}",
+            info.methods
+        );
 
         // A second, token-free slot puts the passphrase back on the table.
         let two_slots = luks2_json("argon2id", extra).replace(
@@ -1057,7 +1162,11 @@ mod tests {
         let extra = r#","config":{"json_size":"12288","requirements":["online-reencrypt-v3"]}"#;
         let info = inspect_luks(&mut luks2_with_json(&luks2_json("argon2id", extra))).unwrap();
         assert!(!info.openable);
-        assert!(info.methods.iter().any(|m| m.contains("online-reencrypt")), "{:?}", info.methods);
+        assert!(
+            info.methods.iter().any(|m| m.contains("online-reencrypt")),
+            "{:?}",
+            info.methods
+        );
     }
 
     #[test]
@@ -1095,7 +1204,12 @@ mod tests {
                 .stderr(Stdio::piped())
                 .spawn()
                 .expect("spawn cryptsetup");
-            child.stdin.take().unwrap().write_all(password.as_bytes()).unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(password.as_bytes())
+                .unwrap();
             child.wait_with_output().unwrap()
         }
         fn push_hex(s: &str, out: &mut Vec<u8>) {
@@ -1130,23 +1244,45 @@ mod tests {
             (
                 "luks1",
                 vec![
-                    "luksFormat", "-q", "--type", "luks1", "--pbkdf", "pbkdf2",
-                    "--pbkdf-force-iterations", "1000", "--key-file", "-",
+                    "luksFormat",
+                    "-q",
+                    "--type",
+                    "luks1",
+                    "--pbkdf",
+                    "pbkdf2",
+                    "--pbkdf-force-iterations",
+                    "1000",
+                    "--key-file",
+                    "-",
                 ],
             ),
             (
                 "luks2-argon2id",
                 vec![
-                    "luksFormat", "-q", "--type", "luks2", "--pbkdf", "argon2id",
-                    "--pbkdf-force-iterations", "4", "--pbkdf-memory", "32",
-                    "--pbkdf-parallel", "1", "--key-file", "-",
+                    "luksFormat",
+                    "-q",
+                    "--type",
+                    "luks2",
+                    "--pbkdf",
+                    "argon2id",
+                    "--pbkdf-force-iterations",
+                    "4",
+                    "--pbkdf-memory",
+                    "32",
+                    "--pbkdf-parallel",
+                    "1",
+                    "--key-file",
+                    "-",
                 ],
             ),
         ];
 
         for (label, fmt) in cases {
             let path = dir.path().join(format!("{label}.luks"));
-            std::fs::File::create(&path).unwrap().set_len(32 * 1024 * 1024).unwrap();
+            std::fs::File::create(&path)
+                .unwrap()
+                .set_len(32 * 1024 * 1024)
+                .unwrap();
             let mut args = fmt.clone();
             args.push(path.to_str().unwrap());
             let out = cryptsetup(&args, pw);
@@ -1157,18 +1293,36 @@ mod tests {
             );
 
             let dump = cryptsetup(
-                &["luksDump", "--dump-master-key", "-q", "--key-file", "-", path.to_str().unwrap()],
+                &[
+                    "luksDump",
+                    "--dump-master-key",
+                    "-q",
+                    "--key-file",
+                    "-",
+                    path.to_str().unwrap(),
+                ],
                 pw,
             );
-            assert!(dump.status.success(), "{label} dump: {}", String::from_utf8_lossy(&dump.stderr));
+            assert!(
+                dump.status.success(),
+                "{label} dump: {}",
+                String::from_utf8_lossy(&dump.stderr)
+            );
             let mk = parse_mk(&String::from_utf8_lossy(&dump.stdout));
             assert_eq!(mk.len(), 64, "{label}: parsed MK is {} bytes", mk.len());
 
             let mut vol = MemVolume(std::fs::read(&path).unwrap());
             let params = open_luks(&mut vol, pw.as_bytes())
                 .unwrap_or_else(|e| panic!("{label} open_luks: {e}"));
-            assert_eq!(&params.master_key[..], &mk[..], "{label}: master key mismatch");
-            assert!(open_luks(&mut vol, b"wrong pass").is_err(), "{label}: wrong pw must fail");
+            assert_eq!(
+                &params.master_key[..],
+                &mk[..],
+                "{label}: master key mismatch"
+            );
+            assert!(
+                open_luks(&mut vol, b"wrong pass").is_err(),
+                "{label}: wrong pw must fail"
+            );
         }
     }
 }

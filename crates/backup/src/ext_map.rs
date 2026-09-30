@@ -57,7 +57,10 @@ pub struct ExtUsedMap {
 
 impl UsedSectorMap for ExtUsedMap {
     fn is_block_used(&self, block_number: u64) -> bool {
-        self.block_used.get(block_number as usize).copied().unwrap_or(false)
+        self.block_used
+            .get(block_number as usize)
+            .copied()
+            .unwrap_or(false)
     }
     fn used_block_count(&self) -> u64 {
         self.used_count
@@ -113,7 +116,12 @@ fn mark_bytes(map: &mut [bool], block_size: u32, start: u64, end: u64) {
 
 /// Mark `count` filesystem blocks starting at `first` (block numbers) used.
 fn mark_blocks(map: &mut [bool], block_size: u32, fs_block: u64, first: u64, count: u64) {
-    mark_bytes(map, block_size, first * fs_block, (first + count) * fs_block);
+    mark_bytes(
+        map,
+        block_size,
+        first * fs_block,
+        (first + count) * fs_block,
+    );
 }
 
 /// Whether block group `g` carries a backup superblock + descriptor table.
@@ -151,7 +159,9 @@ pub fn build_ext_used_map(vol: &mut dyn RawVolume, block_size: u32) -> Result<Ex
 
     let log_block_size = u32at(sb, 0x18);
     if log_block_size > 6 {
-        return Err(bad(format!("implausible s_log_block_size {log_block_size}")));
+        return Err(bad(format!(
+            "implausible s_log_block_size {log_block_size}"
+        )));
     }
     let fs_block = 1024u64 << log_block_size;
 
@@ -171,7 +181,9 @@ pub fn build_ext_used_map(vol: &mut dyn RawVolume, block_size: u32) -> Result<Ex
         // state — blocks allocated in those transactions may still read as
         // free, and a map built from them would drop live data from the copy.
         // A full-sector copy carries the journal along and replays fine.
-        return Err(bad("journal needs recovery (unclean shutdown) — falling back to a full copy"));
+        return Err(bad(
+            "journal needs recovery (unclean shutdown) — falling back to a full copy",
+        ));
     }
     if ro_compat & RO_COMPAT_BIGALLOC != 0 {
         return Err(bad("bigalloc (cluster) bitmaps not supported"));
@@ -206,7 +218,9 @@ pub fn build_ext_used_map(vol: &mut dyn RawVolume, block_size: u32) -> Result<Ex
 
     // --- Geometry validation ---
     if blocks_count == 0 || blocks_per_group == 0 || inodes_per_group == 0 {
-        return Err(bad("zero blocks_count / blocks_per_group / inodes_per_group"));
+        return Err(bad(
+            "zero blocks_count / blocks_per_group / inodes_per_group",
+        ));
     }
     if blocks_per_group > 8 * fs_block {
         return Err(bad(format!(
@@ -246,7 +260,9 @@ pub fn build_ext_used_map(vol: &mut dyn RawVolume, block_size: u32) -> Result<Ex
         .checked_mul(desc_size)
         .ok_or_else(|| bad("descriptor table size overflows"))?;
     if gdt_byte_len > MAX_STRUCT_BYTES {
-        return Err(bad(format!("descriptor table implausibly large ({gdt_byte_len} bytes)")));
+        return Err(bad(format!(
+            "descriptor table implausibly large ({gdt_byte_len} bytes)"
+        )));
     }
     let gdt_blocks = gdt_byte_len.div_ceil(fs_block);
     let gdt_start = (first_data_block + 1) * fs_block;
@@ -276,7 +292,11 @@ pub fn build_ext_used_map(vol: &mut dyn RawVolume, block_size: u32) -> Result<Ex
         // Metadata pointed to by the descriptors — marked wherever it lives, so
         // flex_bg (which pools several groups' bitmaps/inode tables into one
         // group) is handled without special-casing.
-        for (blk, cnt) in [(block_bitmap, 1), (inode_bitmap, 1), (inode_table, inode_table_blocks)] {
+        for (blk, cnt) in [
+            (block_bitmap, 1),
+            (inode_bitmap, 1),
+            (inode_table, inode_table_blocks),
+        ] {
             if blk < first_data_block || blk + cnt > blocks_count {
                 return Err(bad(format!(
                     "group {g} metadata block {blk}(+{cnt}) outside the filesystem"
@@ -467,7 +487,10 @@ mod tests {
         // Group 1 data blocks 14..16: the garbage bitmap would mark them if we
         // read it — the UNINIT flag must keep them free.
         for b in 14..17 {
-            assert!(!map.is_block_used(b), "uninit data block {b} must stay free");
+            assert!(
+                !map.is_block_used(b),
+                "uninit data block {b} must stay free"
+            );
         }
         // Blocks 0–6 (7) + group-1 metadata 9–13 (5) = 12.
         assert_eq!(map.used_block_count(), 12);
@@ -485,7 +508,11 @@ mod tests {
 
         // Unsupported feature (bigalloc) → fall back.
         let mut img = one_group_fs().0;
-        put_u32(&mut img, 1024 + 0x64, (RO_COMPAT_SPARSE_SUPER | RO_COMPAT_BIGALLOC) as u32);
+        put_u32(
+            &mut img,
+            1024 + 0x64,
+            (RO_COMPAT_SPARSE_SUPER | RO_COMPAT_BIGALLOC) as u32,
+        );
         assert!(build_ext_used_map(&mut MemVolume(img), 1024).is_err());
     }
 

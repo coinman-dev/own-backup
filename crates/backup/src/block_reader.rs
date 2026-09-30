@@ -107,7 +107,9 @@ impl<R: BlockReader> MultiPatchReader<R> {
     pub fn new(inner: R, mut patches: Vec<(u64, Vec<u8>)>) -> Self {
         patches.sort_by_key(|(off, _)| *off);
         debug_assert!(
-            patches.windows(2).all(|w| w[0].0 + w[0].1.len() as u64 <= w[1].0),
+            patches
+                .windows(2)
+                .all(|w| w[0].0 + w[0].1.len() as u64 <= w[1].0),
             "MultiPatchReader patches must not overlap"
         );
         Self { inner, patches }
@@ -239,12 +241,10 @@ impl BlockReader for MockBlockReader {
     fn read_block(&mut self, block_number: u64) -> Result<Vec<u8>> {
         let start = block_number as usize * self.block_size as usize;
         if start >= self.data.len() {
-            return Err(own_backup_common::OwnBackupError::Io(
-                std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    format!("block {block_number} is beyond data length"),
-                ),
-            ));
+            return Err(own_backup_common::OwnBackupError::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("block {block_number} is beyond data length"),
+            )));
         }
         let end = std::cmp::min(start + self.block_size as usize, self.data.len());
         Ok(self.data[start..end].to_vec())
@@ -333,7 +333,11 @@ mod tests {
         // (the backup-boot-sector shape: last sector := sector 0).
         let data: Vec<u8> = (0..1024u32).map(|i| (i % 251) as u8).collect();
         let sector0: Vec<u8> = data[..64].to_vec();
-        let mut reader = PatchReader::new(MockBlockReader::new(data.clone(), 256), 1024 - 64, sector0.clone());
+        let mut reader = PatchReader::new(
+            MockBlockReader::new(data.clone(), 256),
+            1024 - 64,
+            sector0.clone(),
+        );
 
         // Untouched blocks come through verbatim.
         assert_eq!(reader.read_block(0).unwrap(), &data[0..256]);
@@ -375,9 +379,9 @@ mod tests {
         // to prove the reader sorts them.
         let data = vec![0u8; 1024];
         let patches = vec![
-            (800u64, vec![0x33]),          // block 3
-            (10u64, vec![0x11, 0x11]),     // block 0
-            (250u64, vec![0x22; 12]),      // spans block 0/1 boundary at 256
+            (800u64, vec![0x33]),      // block 3
+            (10u64, vec![0x11, 0x11]), // block 0
+            (250u64, vec![0x22; 12]),  // spans block 0/1 boundary at 256
         ];
         let mut r = MultiPatchReader::new(MockBlockReader::new(data, 256), patches);
         assert_eq!(r.patch_count(), 3);
@@ -412,15 +416,16 @@ mod tests {
         // scattered across the block. Every one must land at its exact offset.
         let data = vec![0xFFu8; 4096];
         let offsets: Vec<u64> = (0..64).map(|k| k * 63).collect(); // 0,63,126,... all in-bounds
-        let patches: Vec<(u64, Vec<u8>)> =
-            offsets.iter().map(|&o| (o, vec![0u8; 4])).collect();
+        let patches: Vec<(u64, Vec<u8>)> = offsets.iter().map(|&o| (o, vec![0u8; 4])).collect();
         let mut r = MultiPatchReader::new(MockBlockReader::new(data, 512), patches);
         for blk in 0..8 {
             let b = r.read_block(blk).unwrap();
             let base = blk * 512;
             for i in 0..512usize {
                 let abs = base as usize + i;
-                let patched = offsets.iter().any(|&o| (o as usize..o as usize + 4).contains(&abs));
+                let patched = offsets
+                    .iter()
+                    .any(|&o| (o as usize..o as usize + 4).contains(&abs));
                 assert_eq!(b[i], if patched { 0 } else { 0xFF }, "byte {abs}");
             }
         }

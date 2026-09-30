@@ -20,19 +20,17 @@ use windows::core::{GUID, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WIN32_ERROR};
 use windows::Win32::Storage::Vhd::{
     AttachVirtualDisk, CreateVirtualDisk, DetachVirtualDisk, GetVirtualDiskPhysicalPath,
-    MergeVirtualDisk, OpenVirtualDisk, ATTACH_VIRTUAL_DISK_FLAG,
-    ATTACH_VIRTUAL_DISK_FLAG_NO_DRIVE_LETTER,
-    ATTACH_VIRTUAL_DISK_FLAG_PERMANENT_LIFETIME, ATTACH_VIRTUAL_DISK_FLAG_READ_ONLY,
-    CREATE_VIRTUAL_DISK_FLAG_NONE, CREATE_VIRTUAL_DISK_PARAMETERS,
-    CREATE_VIRTUAL_DISK_VERSION_2, DETACH_VIRTUAL_DISK_FLAG_NONE,
+    MergeVirtualDisk, OpenVirtualDisk, SetVirtualDiskInformation, ATTACH_VIRTUAL_DISK_FLAG,
+    ATTACH_VIRTUAL_DISK_FLAG_NO_DRIVE_LETTER, ATTACH_VIRTUAL_DISK_FLAG_PERMANENT_LIFETIME,
+    ATTACH_VIRTUAL_DISK_FLAG_READ_ONLY, CREATE_VIRTUAL_DISK_FLAG_NONE,
+    CREATE_VIRTUAL_DISK_PARAMETERS, CREATE_VIRTUAL_DISK_VERSION_2, DETACH_VIRTUAL_DISK_FLAG_NONE,
     MERGE_VIRTUAL_DISK_FLAG_NONE, MERGE_VIRTUAL_DISK_PARAMETERS, MERGE_VIRTUAL_DISK_VERSION_1,
-    OPEN_VIRTUAL_DISK_FLAG_NONE, OPEN_VIRTUAL_DISK_FLAG_NO_PARENTS,
-    OPEN_VIRTUAL_DISK_PARAMETERS, OPEN_VIRTUAL_DISK_VERSION_1, OPEN_VIRTUAL_DISK_VERSION_2,
-    SetVirtualDiskInformation, SET_VIRTUAL_DISK_INFO, SET_VIRTUAL_DISK_INFO_PARENT_PATH_WITH_DEPTH,
-    VIRTUAL_DISK_ACCESS_MASK, VIRTUAL_DISK_ACCESS_ATTACH_RO, VIRTUAL_DISK_ACCESS_ATTACH_RW,
-    VIRTUAL_DISK_ACCESS_DETACH, VIRTUAL_DISK_ACCESS_GET_INFO, VIRTUAL_DISK_ACCESS_METAOPS,
-    VIRTUAL_DISK_ACCESS_NONE, VIRTUAL_STORAGE_TYPE, VIRTUAL_STORAGE_TYPE_DEVICE_VHDX,
-    VIRTUAL_STORAGE_TYPE_VENDOR_MICROSOFT,
+    OPEN_VIRTUAL_DISK_FLAG_NONE, OPEN_VIRTUAL_DISK_FLAG_NO_PARENTS, OPEN_VIRTUAL_DISK_PARAMETERS,
+    OPEN_VIRTUAL_DISK_VERSION_1, OPEN_VIRTUAL_DISK_VERSION_2, SET_VIRTUAL_DISK_INFO,
+    SET_VIRTUAL_DISK_INFO_PARENT_PATH_WITH_DEPTH, VIRTUAL_DISK_ACCESS_ATTACH_RO,
+    VIRTUAL_DISK_ACCESS_ATTACH_RW, VIRTUAL_DISK_ACCESS_DETACH, VIRTUAL_DISK_ACCESS_GET_INFO,
+    VIRTUAL_DISK_ACCESS_MASK, VIRTUAL_DISK_ACCESS_METAOPS, VIRTUAL_DISK_ACCESS_NONE,
+    VIRTUAL_STORAGE_TYPE, VIRTUAL_STORAGE_TYPE_DEVICE_VHDX, VIRTUAL_STORAGE_TYPE_VENDOR_MICROSOFT,
 };
 
 use own_backup_common::{OwnBackupError, Result};
@@ -254,9 +252,7 @@ pub fn attach_vhdx(path: &Path, mode: AttachMode) -> Result<AttachedVhdx> {
             VIRTUAL_DISK_ACCESS_MASK(
                 VIRTUAL_DISK_ACCESS_ATTACH_RW.0 | VIRTUAL_DISK_ACCESS_GET_INFO.0,
             ),
-            ATTACH_VIRTUAL_DISK_FLAG(
-                ATTACH_VIRTUAL_DISK_FLAG_PERMANENT_LIFETIME.0,
-            ),
+            ATTACH_VIRTUAL_DISK_FLAG(ATTACH_VIRTUAL_DISK_FLAG_PERMANENT_LIFETIME.0),
             false,
         ),
     };
@@ -293,8 +289,7 @@ fn physical_path_of(handle: HANDLE) -> Result<String> {
     let mut buf = [0u16; 512];
     let mut size = (buf.len() * 2) as u32;
     // SAFETY: buffer valid for `size` bytes.
-    let err =
-        unsafe { GetVirtualDiskPhysicalPath(handle, &mut size, PWSTR(buf.as_mut_ptr())) };
+    let err = unsafe { GetVirtualDiskPhysicalPath(handle, &mut size, PWSTR(buf.as_mut_ptr())) };
     check(err, "GetVirtualDiskPhysicalPath")?;
     let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
     Ok(String::from_utf16_lossy(&buf[..len]))
@@ -390,7 +385,10 @@ pub fn set_parent_path(child: &Path, parent: &Path) -> Result<()> {
             &mut handle,
         )
     };
-    check(err, &format!("OpenVirtualDisk(no-parents {})", child.display()))?;
+    check(
+        err,
+        &format!("OpenVirtualDisk(no-parents {})", child.display()),
+    )?;
 
     let mut info = SET_VIRTUAL_DISK_INFO::default();
     info.Version = SET_VIRTUAL_DISK_INFO_PARENT_PATH_WITH_DEPTH;
@@ -403,7 +401,11 @@ pub fn set_parent_path(child: &Path, parent: &Path) -> Result<()> {
     let err = unsafe { SetVirtualDiskInformation(handle, &info) };
     let result = check(
         err,
-        &format!("SetVirtualDiskInformation(parent {} -> {})", child.display(), parent.display()),
+        &format!(
+            "SetVirtualDiskInformation(parent {} -> {})",
+            child.display(),
+            parent.display()
+        ),
     );
     // SAFETY: handle owned here, closed exactly once.
     let _ = unsafe { CloseHandle(handle) };

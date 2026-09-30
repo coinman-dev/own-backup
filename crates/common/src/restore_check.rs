@@ -140,7 +140,12 @@ pub struct CheckResult {
 
 impl CheckResult {
     fn new(level: CheckLevel, code: CheckCode, part_index: Option<u32>, message: String) -> Self {
-        Self { level, code, message, part_index }
+        Self {
+            level,
+            code,
+            message,
+            part_index,
+        }
     }
 }
 
@@ -243,11 +248,15 @@ impl CheckContext {
         // A partition the plan creates does not exist yet; the table knows how
         // big it will be.
         let size = table
-            .and_then(|t| t.entries.iter().find(|e| e.index == index).map(|e| e.size_bytes(t.sector_size)))
+            .and_then(|t| {
+                t.entries
+                    .iter()
+                    .find(|e| e.index == index)
+                    .map(|e| e.size_bytes(t.sector_size))
+            })
             .unwrap_or(0);
         describe(index, "", size, None)
     }
-
 
     fn source(&self, index: u32) -> Option<&SourcePartition> {
         self.sources.iter().find(|s| s.index == index)
@@ -258,7 +267,10 @@ impl CheckContext {
     }
 
     fn requested_format(&self, index: u32) -> Option<crate::restore_plan::FormatFs> {
-        self.requested_formats.iter().find(|r| r.index == index).map(|r| r.fs)
+        self.requested_formats
+            .iter()
+            .find(|r| r.index == index)
+            .map(|r| r.fs)
     }
 }
 
@@ -306,7 +318,9 @@ pub fn resolve_letter_conflicts(plan: &mut RestorePlan, taken: &[char]) -> Vec<L
     let mut changes = Vec::new();
 
     for op in plan.ops.iter_mut() {
-        let RestoreOp::AssignLetter { part, letter } = op else { continue };
+        let RestoreOp::AssignLetter { part, letter } = op else {
+            continue;
+        };
         let requested = letter.to_ascii_uppercase();
         if !used.contains(&requested) {
             *letter = requested;
@@ -314,7 +328,11 @@ pub fn resolve_letter_conflicts(plan: &mut RestorePlan, taken: &[char]) -> Vec<L
             continue;
         }
         let assigned = next_free_letter(requested, &used);
-        changes.push(LetterChange { part_index: part.index, requested, assigned });
+        changes.push(LetterChange {
+            part_index: part.index,
+            requested,
+            assigned,
+        });
         if let Some(c) = assigned {
             *letter = c;
             used.push(c);
@@ -471,9 +489,7 @@ fn check_mbr_limits(t: &PartitionTableSpec, disk_sectors: u64, out: &mut Vec<Che
         ));
     }
 
-    let logical = |e: &PartitionSpec| {
-        matches!(&e.kind, crate::restore_plan::PartitionKind::Mbr { logical, .. } if *logical)
-    };
+    let logical = |e: &PartitionSpec| matches!(&e.kind, crate::restore_plan::PartitionKind::Mbr { logical, .. } if *logical);
     let primaries = t.entries.iter().filter(|e| !logical(e)).count();
     let has_logicals = t.entries.iter().any(logical);
     // Logical partitions live inside an extended partition, and the extended
@@ -485,11 +501,17 @@ fn check_mbr_limits(t: &PartitionTableSpec, disk_sectors: u64, out: &mut Vec<Che
             CheckCode::MbrTooManyPrimaries,
             None,
             if has_logicals {
-                crate::tr!("restore_check.mbr_too_many_primaries_ext", primaries = primaries)
-                    .into_owned()
+                crate::tr!(
+                    "restore_check.mbr_too_many_primaries_ext",
+                    primaries = primaries
+                )
+                .into_owned()
             } else {
-                crate::tr!("restore_check.mbr_too_many_primaries", primaries = primaries)
-                    .into_owned()
+                crate::tr!(
+                    "restore_check.mbr_too_many_primaries",
+                    primaries = primaries
+                )
+                .into_owned()
             },
         ));
     }
@@ -534,7 +556,13 @@ fn check_ops(
             check_part_ref(part, table, ctx, out);
         }
         match op {
-            RestoreOp::RestorePartition { src_index, dst, mode, wipe_free_space, reencrypt } => {
+            RestoreOp::RestorePartition {
+                src_index,
+                dst,
+                mode,
+                wipe_free_space,
+                reencrypt,
+            } => {
                 let dst_txt = ctx.describe_target(dst.index, table);
                 if restored.contains(&dst.index) {
                     out.push(CheckResult::new(
@@ -578,9 +606,19 @@ fn check_ops(
             }
             RestoreOp::Format { part, fs, .. } => formatted.push((part.index, *fs)),
             RestoreOp::ExtendFilesystem { part } => {
-                check_extend(plan, ctx, part, &ctx.describe_target(part.index, table), out);
+                check_extend(
+                    plan,
+                    ctx,
+                    part,
+                    &ctx.describe_target(part.index, table),
+                    out,
+                );
             }
-            RestoreOp::FinalizeBoot { windows_part, esp, uefi } => {
+            RestoreOp::FinalizeBoot {
+                windows_part,
+                esp,
+                uefi,
+            } => {
                 if *uefi && esp.is_none() {
                     out.push(CheckResult::new(
                         CheckLevel::Error,
@@ -625,9 +663,13 @@ fn check_ops(
                 )
                 .into_owned(),
             )),
-            Some((_, fs)) => {
-                check_format_capacity(*index, &ctx.describe_target(*index, table), *src_fs, *fs, out)
-            }
+            Some((_, fs)) => check_format_capacity(
+                *index,
+                &ctx.describe_target(*index, table),
+                *src_fs,
+                *fs,
+                out,
+            ),
         }
     }
 
@@ -825,8 +867,12 @@ fn check_fit(
                     CheckLevel::Warning,
                     CheckCode::UsedSizeUnknown,
                     Some(dst.index),
-                    crate::tr!("restore_check.used_size_unknown", label = src.label, part = dst_txt)
-                        .into_owned(),
+                    crate::tr!(
+                        "restore_check.used_size_unknown",
+                        label = src.label,
+                        part = dst_txt
+                    )
+                    .into_owned(),
                 ));
                 return;
             }
@@ -894,8 +940,11 @@ fn check_live_system(
     touched.sort_unstable();
     touched.dedup();
 
-    let hit: Vec<u32> =
-        touched.iter().copied().filter(|i| ctx.protected_parts.contains(i)).collect();
+    let hit: Vec<u32> = touched
+        .iter()
+        .copied()
+        .filter(|i| ctx.protected_parts.contains(i))
+        .collect();
     if !hit.is_empty() {
         let list = hit
             .iter()
@@ -916,8 +965,11 @@ fn check_live_system(
             CheckLevel::Warning,
             CheckCode::LiveSystemDiskLayout,
             None,
-            crate::tr!("restore_check.live_system_disk_layout", disk = plan.target_disk)
-                .into_owned(),
+            crate::tr!(
+                "restore_check.live_system_disk_layout",
+                disk = plan.target_disk
+            )
+            .into_owned(),
         ));
     }
 }
@@ -945,7 +997,9 @@ fn check_format_choice(
     if mode != RestoreMode::Sectors {
         return; // a file restore really does format, and the plan says so
     }
-    let Some(chosen) = ctx.requested_format(dst_index) else { return };
+    let Some(chosen) = ctx.requested_format(dst_index) else {
+        return;
+    };
     if chosen.is_same_as(src.filesystem) {
         return;
     }
@@ -984,13 +1038,18 @@ fn check_destination(
     dst_txt: &str,
     out: &mut Vec<CheckResult>,
 ) {
-    let Some(cur) = ctx.target(dst.index) else { return };
+    let Some(cur) = ctx.target(dst.index) else {
+        return;
+    };
     let has_content = cur.filesystem != FileSystem::Unknown || cur.used_bytes > 0;
     if has_content {
         let label = if cur.label.trim().is_empty() {
             String::new()
         } else {
-            format!(" {}", crate::tr!("restore_check.label_quoted", label = cur.label))
+            format!(
+                " {}",
+                crate::tr!("restore_check.label_quoted", label = cur.label)
+            )
         };
         let used = if cur.used_bytes > 0 {
             crate::tr!("restore_check.dest_used_part", size = human(cur.used_bytes)).into_owned()
@@ -1123,8 +1182,12 @@ fn check_format_capacity(
             CheckLevel::Warning,
             CheckCode::FormatFsTooLimited,
             Some(index),
-            crate::tr!("restore_check.fat32_too_limited", part = index_txt, fs = src_fs.label())
-                .into_owned(),
+            crate::tr!(
+                "restore_check.fat32_too_limited",
+                part = index_txt,
+                fs = src_fs.label()
+            )
+            .into_owned(),
         ));
     }
 }
@@ -1140,11 +1203,12 @@ fn check_extend(
     out: &mut Vec<CheckResult>,
 ) {
     let from_image = plan.ops.iter().find_map(|op| match op {
-        RestoreOp::RestorePartition { src_index, dst, mode: RestoreMode::Sectors, .. }
-            if dst.index == part.index =>
-        {
-            ctx.source(*src_index).map(|s| s.filesystem)
-        }
+        RestoreOp::RestorePartition {
+            src_index,
+            dst,
+            mode: RestoreMode::Sectors,
+            ..
+        } if dst.index == part.index => ctx.source(*src_index).map(|s| s.filesystem),
         _ => None,
     });
     let from_format = plan.ops.iter().find_map(|op| match op {
@@ -1172,7 +1236,12 @@ fn check_extend(
         CheckLevel::Error,
         CheckCode::ExtendNotNtfs,
         Some(part.index),
-        crate::tr!("restore_check.extend_not_ntfs", part = part_txt, fs = fs_name).into_owned(),
+        crate::tr!(
+            "restore_check.extend_not_ntfs",
+            part = part_txt,
+            fs = fs_name
+        )
+        .into_owned(),
     ));
 }
 
@@ -1252,7 +1321,11 @@ mod tests {
     }
 
     fn errors(results: &[CheckResult]) -> Vec<CheckCode> {
-        results.iter().filter(|r| r.level == CheckLevel::Error).map(|r| r.code).collect()
+        results
+            .iter()
+            .filter(|r| r.level == CheckLevel::Error)
+            .map(|r| r.code)
+            .collect()
     }
 
     #[test]
@@ -1269,7 +1342,10 @@ mod tests {
                 reencrypt: false,
             }],
         );
-        let results = check_plan(&plan, &ctx(vec![source(1, 100 * MIB, 40 * MIB, FileSystem::Ntfs)]));
+        let results = check_plan(
+            &plan,
+            &ctx(vec![source(1, 100 * MIB, 40 * MIB, FileSystem::Ntfs)]),
+        );
         assert!(errors(&results).is_empty(), "{results:#?}");
     }
 
@@ -1278,7 +1354,10 @@ mod tests {
         // Second starts before the first ends.
         let t = table(vec![entry(1, 1, 100), entry(2, 50, 100)]);
         let results = check_plan(&plan_with(t, vec![]), &ctx(vec![]));
-        assert!(errors(&results).contains(&CheckCode::PartitionsOverlap), "{results:#?}");
+        assert!(
+            errors(&results).contains(&CheckCode::PartitionsOverlap),
+            "{results:#?}"
+        );
     }
 
     #[test]
@@ -1287,7 +1366,10 @@ mod tests {
         let disk_sectors = t.disk_size_bytes / 512;
         t.entries[0].last_lba = disk_sectors - 2; // inside the 33-sector mirror
         let results = check_plan(&plan_with(t, vec![]), &ctx(vec![]));
-        assert!(errors(&results).contains(&CheckCode::PartitionOutOfBounds), "{results:#?}");
+        assert!(
+            errors(&results).contains(&CheckCode::PartitionOutOfBounds),
+            "{results:#?}"
+        );
     }
 
     #[test]
@@ -1315,8 +1397,14 @@ mod tests {
                 reencrypt: false,
             }],
         );
-        let results = check_plan(&plan, &ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ntfs)]));
-        assert!(errors(&results).contains(&CheckCode::TargetTooSmallForSectors), "{results:#?}");
+        let results = check_plan(
+            &plan,
+            &ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ntfs)]),
+        );
+        assert!(
+            errors(&results).contains(&CheckCode::TargetTooSmallForSectors),
+            "{results:#?}"
+        );
     }
 
     #[test]
@@ -1342,7 +1430,10 @@ mod tests {
             ],
         );
         // 40 MiB used * 1.05 = 42 MiB, fits in 50 MiB.
-        let results = check_plan(&plan, &ctx(vec![source(1, 100 * MIB, 40 * MIB, FileSystem::Ntfs)]));
+        let results = check_plan(
+            &plan,
+            &ctx(vec![source(1, 100 * MIB, 40 * MIB, FileSystem::Ntfs)]),
+        );
         assert!(errors(&results).is_empty(), "{results:#?}");
     }
 
@@ -1361,8 +1452,14 @@ mod tests {
             }],
         );
         // 49 MiB * 1.05 = 51.45 MiB > 50 MiB.
-        let results = check_plan(&plan, &ctx(vec![source(1, 100 * MIB, 49 * MIB, FileSystem::Ntfs)]));
-        assert!(errors(&results).contains(&CheckCode::TargetTooSmallForFiles), "{results:#?}");
+        let results = check_plan(
+            &plan,
+            &ctx(vec![source(1, 100 * MIB, 49 * MIB, FileSystem::Ntfs)]),
+        );
+        assert!(
+            errors(&results).contains(&CheckCode::TargetTooSmallForFiles),
+            "{results:#?}"
+        );
     }
 
     #[test]
@@ -1379,8 +1476,14 @@ mod tests {
                 reencrypt: false,
             }],
         );
-        let results = check_plan(&plan, &ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Btrfs)]));
-        assert!(errors(&results).contains(&CheckCode::FileModeUnsupportedFs), "{results:#?}");
+        let results = check_plan(
+            &plan,
+            &ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Btrfs)]),
+        );
+        assert!(
+            errors(&results).contains(&CheckCode::FileModeUnsupportedFs),
+            "{results:#?}"
+        );
     }
 
     fn target(index: u32, fs: FileSystem, used: u64, label: &str) -> TargetPartition {
@@ -1394,7 +1497,10 @@ mod tests {
         }
     }
 
-    fn sector_restore_plan(src_fs: FileSystem, chosen: Option<FormatFs>) -> (RestorePlan, CheckContext) {
+    fn sector_restore_plan(
+        src_fs: FileSystem,
+        chosen: Option<FormatFs>,
+    ) -> (RestorePlan, CheckContext) {
         let t = table(vec![entry(1, 1, 200)]);
         let p1 = part_ref(&t, 1);
         let plan = plan_with(
@@ -1408,8 +1514,10 @@ mod tests {
             }],
         );
         let mut c = ctx(vec![source(1, 100 * MIB, 10 * MIB, src_fs)]);
-        c.requested_formats =
-            chosen.into_iter().map(|fs| RequestedFormat { index: 1, fs }).collect();
+        c.requested_formats = chosen
+            .into_iter()
+            .map(|fs| RequestedFormat { index: 1, fs })
+            .collect();
         (plan, c)
     }
 
@@ -1421,11 +1529,17 @@ mod tests {
         // NTFS.
         let (plan, c) = sector_restore_plan(FileSystem::Btrfs, Some(FormatFs::Ntfs));
         let results = check_plan(&plan, &c);
-        let found = results.iter().find(|r| r.code == CheckCode::FormatChoiceIgnored).unwrap();
+        let found = results
+            .iter()
+            .find(|r| r.code == CheckCode::FormatChoiceIgnored)
+            .unwrap();
         assert_eq!(found.level, CheckLevel::Warning);
         assert!(found.message.contains("NTFS"), "{}", found.message);
         assert!(found.message.contains("Btrfs"), "{}", found.message);
-        assert!(errors(&results).is_empty(), "a misunderstanding, not a mistake");
+        assert!(
+            errors(&results).is_empty(),
+            "a misunderstanding, not a mistake"
+        );
     }
 
     #[test]
@@ -1447,7 +1561,12 @@ mod tests {
         let plan = plan_with(
             t,
             vec![
-                RestoreOp::Format { part: p1, fs: FormatFs::Ntfs, label: String::new(), quick: true },
+                RestoreOp::Format {
+                    part: p1,
+                    fs: FormatFs::Ntfs,
+                    label: String::new(),
+                    quick: true,
+                },
                 RestoreOp::RestorePartition {
                     src_index: 1,
                     dst: p1,
@@ -1458,7 +1577,10 @@ mod tests {
             ],
         );
         let mut c = ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ntfs)]);
-        c.requested_formats = vec![RequestedFormat { index: 1, fs: FormatFs::Ntfs }];
+        c.requested_formats = vec![RequestedFormat {
+            index: 1,
+            fs: FormatFs::Ntfs,
+        }];
         assert!(!codes(&check_plan(&plan, &c)).contains(&CheckCode::FormatChoiceIgnored));
     }
 
@@ -1481,7 +1603,10 @@ mod tests {
         let mut c = ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ntfs)]);
         c.targets = vec![target(1, FileSystem::Ntfs, 93 * MIB, "Данные")];
         let results = check_plan(&plan, &c);
-        let found = results.iter().find(|r| r.code == CheckCode::DestinationWillBeErased).unwrap();
+        let found = results
+            .iter()
+            .find(|r| r.code == CheckCode::DestinationWillBeErased)
+            .unwrap();
         assert!(found.message.contains("Данные"), "{}", found.message);
         assert!(found.message.contains("93"), "{}", found.message);
         assert!(errors(&results).is_empty(), "a warning, not a veto");
@@ -1527,7 +1652,10 @@ mod tests {
         let mut c = ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Btrfs)]);
         c.targets = vec![target(1, FileSystem::Ntfs, 50 * MIB, "NTFS")];
         let results = check_plan(&plan, &c);
-        let found = results.iter().find(|r| r.code == CheckCode::PartitionChangesFamily).unwrap();
+        let found = results
+            .iter()
+            .find(|r| r.code == CheckCode::PartitionChangesFamily)
+            .unwrap();
         assert!(found.message.contains("Windows"), "{}", found.message);
         assert!(errors(&results).is_empty(), "crossing families is allowed");
     }
@@ -1572,9 +1700,15 @@ mod tests {
         src.encrypted_at_source = true;
         let results = check_plan(&plan, &ctx(vec![src]));
         assert!(errors(&results).is_empty(), "{results:#?}");
-        let found = results.iter().find(|r| r.code == CheckCode::EncryptionNotRestored).unwrap();
+        let found = results
+            .iter()
+            .find(|r| r.code == CheckCode::EncryptionNotRestored)
+            .unwrap();
         assert_eq!(found.level, CheckLevel::Warning);
-        assert!(found.message.contains("crypttab"), "the fix must be spelled out");
+        assert!(
+            found.message.contains("crypttab"),
+            "the fix must be spelled out"
+        );
     }
 
     #[test]
@@ -1591,7 +1725,10 @@ mod tests {
                 reencrypt: false,
             }],
         );
-        let results = check_plan(&plan, &ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ntfs)]));
+        let results = check_plan(
+            &plan,
+            &ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ntfs)]),
+        );
         assert!(!codes(&results).contains(&CheckCode::EncryptionNotRestored));
     }
 
@@ -1609,8 +1746,14 @@ mod tests {
                 reencrypt: false,
             }],
         );
-        let results = check_plan(&plan, &ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ntfs)]));
-        assert!(errors(&results).contains(&CheckCode::FileModeNeedsFormat), "{results:#?}");
+        let results = check_plan(
+            &plan,
+            &ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ntfs)]),
+        );
+        assert!(
+            errors(&results).contains(&CheckCode::FileModeNeedsFormat),
+            "{results:#?}"
+        );
     }
 
     #[test]
@@ -1620,7 +1763,12 @@ mod tests {
         let plan = plan_with(
             t,
             vec![
-                RestoreOp::Format { part: p1, fs: FormatFs::Fat32, label: String::new(), quick: true },
+                RestoreOp::Format {
+                    part: p1,
+                    fs: FormatFs::Fat32,
+                    label: String::new(),
+                    quick: true,
+                },
                 RestoreOp::RestorePartition {
                     src_index: 1,
                     dst: p1,
@@ -1630,9 +1778,18 @@ mod tests {
                 },
             ],
         );
-        let results = check_plan(&plan, &ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ntfs)]));
-        assert!(codes(&results).contains(&CheckCode::FormatFsTooLimited), "{results:#?}");
-        assert!(errors(&results).is_empty(), "a limit worth knowing, not a veto");
+        let results = check_plan(
+            &plan,
+            &ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ntfs)]),
+        );
+        assert!(
+            codes(&results).contains(&CheckCode::FormatFsTooLimited),
+            "{results:#?}"
+        );
+        assert!(
+            errors(&results).is_empty(),
+            "a limit worth knowing, not a veto"
+        );
     }
 
     #[test]
@@ -1652,8 +1809,14 @@ mod tests {
                 RestoreOp::ExtendFilesystem { part: p1 },
             ],
         );
-        let results = check_plan(&plan, &ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ext4)]));
-        assert!(errors(&results).contains(&CheckCode::ExtendNotNtfs), "{results:#?}");
+        let results = check_plan(
+            &plan,
+            &ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ext4)]),
+        );
+        assert!(
+            errors(&results).contains(&CheckCode::ExtendNotNtfs),
+            "{results:#?}"
+        );
     }
 
     #[test]
@@ -1673,7 +1836,10 @@ mod tests {
                 RestoreOp::ExtendFilesystem { part: p1 },
             ],
         );
-        let results = check_plan(&plan, &ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ntfs)]));
+        let results = check_plan(
+            &plan,
+            &ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ntfs)]),
+        );
         assert!(errors(&results).is_empty(), "{results:#?}");
     }
 
@@ -1691,11 +1857,22 @@ mod tests {
                     wipe_free_space: false,
                     reencrypt: false,
                 },
-                RestoreOp::Format { part: p1, fs: FormatFs::Ntfs, label: String::new(), quick: true },
+                RestoreOp::Format {
+                    part: p1,
+                    fs: FormatFs::Ntfs,
+                    label: String::new(),
+                    quick: true,
+                },
             ],
         );
-        let results = check_plan(&plan, &ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ntfs)]));
-        assert!(errors(&results).contains(&CheckCode::FormatAfterSectorRestore), "{results:#?}");
+        let results = check_plan(
+            &plan,
+            &ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ntfs)]),
+        );
+        assert!(
+            errors(&results).contains(&CheckCode::FormatAfterSectorRestore),
+            "{results:#?}"
+        );
     }
 
     #[test]
@@ -1704,7 +1881,10 @@ mod tests {
         let mut c = ctx(vec![]);
         c.source_sector_size = 4096;
         let results = check_plan(&plan_with(t, vec![]), &c);
-        assert!(errors(&results).contains(&CheckCode::SectorSizeMismatch), "{results:#?}");
+        assert!(
+            errors(&results).contains(&CheckCode::SectorSizeMismatch),
+            "{results:#?}"
+        );
     }
 
     #[test]
@@ -1712,18 +1892,40 @@ mod tests {
         let t = table(vec![entry(1, 1, 100)]);
         let mut p1 = part_ref(&t, 1);
         p1.size += 1; // designer and plan drifted apart
-        let plan = plan_with(t, vec![RestoreOp::AssignLetter { part: p1, letter: 'D' }]);
+        let plan = plan_with(
+            t,
+            vec![RestoreOp::AssignLetter {
+                part: p1,
+                letter: 'D',
+            }],
+        );
         let results = check_plan(&plan, &ctx(vec![]));
-        assert!(errors(&results).contains(&CheckCode::PartRefMismatch), "{results:#?}");
+        assert!(
+            errors(&results).contains(&CheckCode::PartRefMismatch),
+            "{results:#?}"
+        );
     }
 
     #[test]
     fn an_operation_on_a_partition_outside_the_table_is_caught() {
         let t = table(vec![entry(1, 1, 100)]);
-        let ghost = PartRef { index: 9, offset: 0, size: MIB };
-        let plan = plan_with(t, vec![RestoreOp::AssignLetter { part: ghost, letter: 'D' }]);
+        let ghost = PartRef {
+            index: 9,
+            offset: 0,
+            size: MIB,
+        };
+        let plan = plan_with(
+            t,
+            vec![RestoreOp::AssignLetter {
+                part: ghost,
+                letter: 'D',
+            }],
+        );
         let results = check_plan(&plan, &ctx(vec![]));
-        assert!(errors(&results).contains(&CheckCode::OpNotInTable), "{results:#?}");
+        assert!(
+            errors(&results).contains(&CheckCode::OpNotInTable),
+            "{results:#?}"
+        );
     }
 
     #[test]
@@ -1744,7 +1946,10 @@ mod tests {
         c.target_is_system_disk = true;
         c.protected_parts = vec![1];
         let results = check_plan(&plan, &c);
-        assert!(errors(&results).contains(&CheckCode::TargetIsLiveSystemPartition), "{results:#?}");
+        assert!(
+            errors(&results).contains(&CheckCode::TargetIsLiveSystemPartition),
+            "{results:#?}"
+        );
     }
 
     #[test]
@@ -1782,7 +1987,10 @@ mod tests {
         c.protected_parts = vec![3];
         c.targets = vec![target(3, FileSystem::Ntfs, 40 * MIB, "Windows")];
         let results = check_plan(&plan, &c);
-        assert!(errors(&results).contains(&CheckCode::TargetIsLiveSystemPartition), "{results:#?}");
+        assert!(
+            errors(&results).contains(&CheckCode::TargetIsLiveSystemPartition),
+            "{results:#?}"
+        );
     }
 
     #[test]
@@ -1810,10 +2018,17 @@ mod tests {
         let p1 = part_ref(&t, 1);
         let plan = plan_with(
             t,
-            vec![RestoreOp::FinalizeBoot { windows_part: p1, esp: None, uefi: true }],
+            vec![RestoreOp::FinalizeBoot {
+                windows_part: p1,
+                esp: None,
+                uefi: true,
+            }],
         );
         let results = check_plan(&plan, &ctx(vec![]));
-        assert!(errors(&results).contains(&CheckCode::MissingEsp), "{results:#?}");
+        assert!(
+            errors(&results).contains(&CheckCode::MissingEsp),
+            "{results:#?}"
+        );
     }
 
     fn mbr_table(entries: Vec<PartitionSpec>) -> PartitionTableSpec {
@@ -1831,7 +2046,11 @@ mod tests {
             index,
             first_lba: first_mib * MIB / 512,
             last_lba: (first_mib + 10) * MIB / 512 - 1,
-            kind: PartitionKind::Mbr { type_byte: 0x07, bootable: false, logical },
+            kind: PartitionKind::Mbr {
+                type_byte: 0x07,
+                bootable: false,
+                logical,
+            },
         }
     }
 
@@ -1845,7 +2064,10 @@ mod tests {
             mbr_entry(5, 41, false),
         ]);
         let results = check_plan(&plan_with(t, vec![]), &ctx(vec![]));
-        assert!(errors(&results).contains(&CheckCode::MbrTooManyPrimaries), "{results:#?}");
+        assert!(
+            errors(&results).contains(&CheckCode::MbrTooManyPrimaries),
+            "{results:#?}"
+        );
     }
 
     #[test]
@@ -1871,7 +2093,10 @@ mod tests {
             mbr_entry(5, 42, true),
         ]);
         let results = check_plan(&plan_with(t, vec![]), &ctx(vec![]));
-        assert!(errors(&results).contains(&CheckCode::MbrTooManyPrimaries), "{results:#?}");
+        assert!(
+            errors(&results).contains(&CheckCode::MbrTooManyPrimaries),
+            "{results:#?}"
+        );
     }
 
     #[test]
@@ -1890,12 +2115,21 @@ mod tests {
     fn a_taken_letter_is_swapped_for_the_next_free_one() {
         let t = table(vec![entry(1, 1, 100)]);
         let p1 = part_ref(&t, 1);
-        let mut plan = plan_with(t, vec![RestoreOp::AssignLetter { part: p1, letter: 'D' }]);
+        let mut plan = plan_with(
+            t,
+            vec![RestoreOp::AssignLetter {
+                part: p1,
+                letter: 'D',
+            }],
+        );
         let changes = resolve_letter_conflicts(&mut plan, &['C', 'D', 'E']);
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].requested, 'D');
         assert_eq!(changes[0].assigned, Some('F'));
-        assert!(matches!(plan.ops[1], RestoreOp::AssignLetter { letter: 'F', .. }));
+        assert!(matches!(
+            plan.ops[1],
+            RestoreOp::AssignLetter { letter: 'F', .. }
+        ));
     }
 
     #[test]
@@ -1905,8 +2139,14 @@ mod tests {
         let mut plan = plan_with(
             t,
             vec![
-                RestoreOp::AssignLetter { part: p1, letter: 'D' },
-                RestoreOp::AssignLetter { part: p2, letter: 'D' },
+                RestoreOp::AssignLetter {
+                    part: p1,
+                    letter: 'D',
+                },
+                RestoreOp::AssignLetter {
+                    part: p2,
+                    letter: 'D',
+                },
             ],
         );
         let changes = resolve_letter_conflicts(&mut plan, &[]);
@@ -1918,16 +2158,31 @@ mod tests {
     fn a_free_letter_is_left_alone() {
         let t = table(vec![entry(1, 1, 100)]);
         let p1 = part_ref(&t, 1);
-        let mut plan = plan_with(t, vec![RestoreOp::AssignLetter { part: p1, letter: 'X' }]);
+        let mut plan = plan_with(
+            t,
+            vec![RestoreOp::AssignLetter {
+                part: p1,
+                letter: 'X',
+            }],
+        );
         assert!(resolve_letter_conflicts(&mut plan, &['C']).is_empty());
-        assert!(matches!(plan.ops[1], RestoreOp::AssignLetter { letter: 'X', .. }));
+        assert!(matches!(
+            plan.ops[1],
+            RestoreOp::AssignLetter { letter: 'X', .. }
+        ));
     }
 
     #[test]
     fn letters_wrap_past_z_back_to_d() {
         let t = table(vec![entry(1, 1, 100)]);
         let p1 = part_ref(&t, 1);
-        let mut plan = plan_with(t, vec![RestoreOp::AssignLetter { part: p1, letter: 'Z' }]);
+        let mut plan = plan_with(
+            t,
+            vec![RestoreOp::AssignLetter {
+                part: p1,
+                letter: 'Z',
+            }],
+        );
         // Everything from Z upward is gone; the search wraps and lands on E.
         let taken: Vec<char> = "ABCDZ".chars().collect();
         let changes = resolve_letter_conflicts(&mut plan, &taken);
@@ -1938,7 +2193,13 @@ mod tests {
     fn no_free_letter_is_reported_rather_than_guessed() {
         let t = table(vec![entry(1, 1, 100)]);
         let p1 = part_ref(&t, 1);
-        let mut plan = plan_with(t, vec![RestoreOp::AssignLetter { part: p1, letter: 'D' }]);
+        let mut plan = plan_with(
+            t,
+            vec![RestoreOp::AssignLetter {
+                part: p1,
+                letter: 'D',
+            }],
+        );
         let taken: Vec<char> = ('A'..='Z').collect();
         let changes = resolve_letter_conflicts(&mut plan, &taken);
         assert_eq!(changes[0].assigned, None);
@@ -1958,8 +2219,14 @@ mod tests {
                 reencrypt: false,
             }],
         );
-        let results = check_plan(&plan, &ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ntfs)]));
-        let info: Vec<_> = results.iter().filter(|r| r.code == CheckCode::FreeSpaceNotWiped).collect();
+        let results = check_plan(
+            &plan,
+            &ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ntfs)]),
+        );
+        let info: Vec<_> = results
+            .iter()
+            .filter(|r| r.code == CheckCode::FreeSpaceNotWiped)
+            .collect();
         assert_eq!(info.len(), 1);
         assert_eq!(info[0].level, CheckLevel::Info);
     }
@@ -1977,7 +2244,10 @@ mod tests {
     fn an_offset_that_belongs_to_another_partition_is_refused_without_a_table() {
         let mut ctx = CheckContext::default();
         ctx.sources = vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ntfs)];
-        ctx.targets = vec![target(1, FileSystem::Ntfs, 0, "A"), target(2, FileSystem::Ntfs, 0, "B")];
+        ctx.targets = vec![
+            target(1, FileSystem::Ntfs, 0, "A"),
+            target(2, FileSystem::Ntfs, 0, "B"),
+        ];
 
         // Номер второго раздела, смещение первого.
         let wrong = PartRef {
@@ -2000,7 +2270,10 @@ mod tests {
             }],
         };
         let results = check_plan(&plan, &ctx);
-        assert!(errors(&results).contains(&CheckCode::PartRefMismatch), "{results:#?}");
+        assert!(
+            errors(&results).contains(&CheckCode::PartRefMismatch),
+            "{results:#?}"
+        );
     }
 
     /// Та же операция с ПРАВИЛЬНЫМ адресом проходит: проверка не должна
@@ -2009,7 +2282,10 @@ mod tests {
     fn the_right_offset_for_that_partition_passes() {
         let mut ctx = CheckContext::default();
         ctx.sources = vec![source(2, 100 * MIB, 10 * MIB, FileSystem::Ntfs)];
-        ctx.targets = vec![target(1, FileSystem::Ntfs, 0, "A"), target(2, FileSystem::Ntfs, 0, "B")];
+        ctx.targets = vec![
+            target(1, FileSystem::Ntfs, 0, "A"),
+            target(2, FileSystem::Ntfs, 0, "B"),
+        ];
 
         let right = PartRef {
             index: 2,
@@ -2031,7 +2307,10 @@ mod tests {
             }],
         };
         let results = check_plan(&plan, &ctx);
-        assert!(!errors(&results).contains(&CheckCode::PartRefMismatch), "{results:#?}");
+        assert!(
+            !errors(&results).contains(&CheckCode::PartRefMismatch),
+            "{results:#?}"
+        );
     }
 
     /// Сверить не с чем — это отдельный ответ, а не «всё в порядке».
@@ -2048,7 +2327,11 @@ mod tests {
             target_disk_id: None,
             ops: vec![RestoreOp::RestorePartition {
                 src_index: 1,
-                dst: PartRef { index: 1, offset: MIB, size: 200 * MIB },
+                dst: PartRef {
+                    index: 1,
+                    offset: MIB,
+                    size: 200 * MIB,
+                },
                 mode: RestoreMode::Sectors,
                 reencrypt: false,
                 wipe_free_space: false,
@@ -2056,7 +2339,9 @@ mod tests {
         };
         let results = check_plan(&plan, &ctx);
         assert!(
-            results.iter().any(|r| r.code == CheckCode::PartRefUnverifiable),
+            results
+                .iter()
+                .any(|r| r.code == CheckCode::PartRefUnverifiable),
             "{results:#?}"
         );
     }
@@ -2070,8 +2355,16 @@ mod tests {
         ctx.targets = vec![target(1, FileSystem::Ntfs, 0, "A")];
 
         for bad in [
-            PartRef { index: 1, offset: u64::MAX - 10, size: 1024 },
-            PartRef { index: 1, offset: MIB, size: 0 },
+            PartRef {
+                index: 1,
+                offset: u64::MAX - 10,
+                size: 1024,
+            },
+            PartRef {
+                index: 1,
+                offset: MIB,
+                size: 0,
+            },
         ] {
             let plan = RestorePlan {
                 id: uuid::Uuid::new_v4(),

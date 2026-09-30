@@ -85,9 +85,10 @@ fn same_file(a: &Path, b: &Path) -> bool {
 pub fn merge_child_into_parent(parent: &Path, child: &Path) -> Result<Qcow2MergeStats> {
     // Two handles on the child: the reader decodes L2 entries, the plain file
     // hands out payload bytes at the host offsets the reader reports.
-    let mut desc = Qcow2Reader::open(File::open(child).map_err(|e| {
-        bad(format!("cannot open child {}: {e}", child.display()))
-    })?)?;
+    let mut desc = Qcow2Reader::open(
+        File::open(child)
+            .map_err(|e| bad(format!("cannot open child {}: {e}", child.display())))?,
+    )?;
     let mut raw = File::open(child)?;
     let child_len = raw.seek(SeekFrom::End(0))?;
 
@@ -166,7 +167,10 @@ pub fn merge_child_into_parent(parent: &Path, child: &Path) -> Result<Qcow2Merge
                 merge.graft_raw(index, &buf)?;
                 stats.bytes_copied += cluster_size;
             }
-            ClusterDescriptor::Compressed { host_offset, length } => {
+            ClusterDescriptor::Compressed {
+                host_offset,
+                length,
+            } => {
                 // `length` is rounded up to the end of the last 512-byte
                 // sector the stream touches, so it can name bytes past the
                 // frame — and, for the last cluster of the file, past EOF.
@@ -357,7 +361,9 @@ mod tests {
         let after = read_all(&base);
         assert_eq!(after, before, "merged base must read like the chain did");
         // And specifically: the blanked cluster is zeros, not the base's old 3.
-        assert!(after[2 * CS as usize..3 * CS as usize].iter().all(|&b| b == 0));
+        assert!(after[2 * CS as usize..3 * CS as usize]
+            .iter()
+            .all(|&b| b == 0));
     }
 
     /// A three-image chain consolidated one step at a time, exactly as the
@@ -381,7 +387,10 @@ mod tests {
         std::fs::remove_file(&inc1).unwrap();
 
         let leaf_after = read_all(&inc2);
-        assert_eq!(leaf_after, leaf_before, "the leaf must survive consolidation");
+        assert_eq!(
+            leaf_after, leaf_before,
+            "the leaf must survive consolidation"
+        );
         // Cluster 1 now comes from the merged base (inc1's value), cluster 3
         // still from the leaf, which overrode inc1.
         assert_eq!(leaf_after[CS as usize], 2);
@@ -412,7 +421,11 @@ mod tests {
             growth < 32 * CS,
             "32 compressible clusters grew the base by {growth} bytes — packing is not happening"
         );
-        assert_eq!(read_all(&base)[CS as usize], 1, "cluster 1 came from the child");
+        assert_eq!(
+            read_all(&base)[CS as usize],
+            1,
+            "cluster 1 came from the child"
+        );
     }
 
     /// Merging into the wrong file is the one mistake that silently destroys a
@@ -432,7 +445,11 @@ mod tests {
         let before = std::fs::read(&base).unwrap();
         let err = merge_child_into_parent(&base, &child).unwrap_err();
         assert!(err.to_string().contains("refusing to merge"), "got: {err}");
-        assert_eq!(std::fs::read(&base).unwrap(), before, "base must be untouched");
+        assert_eq!(
+            std::fs::read(&base).unwrap(),
+            before,
+            "base must be untouched"
+        );
     }
 
     /// Repointing must survive a name that is longer than the old one, and
@@ -454,7 +471,11 @@ mod tests {
             let r = Qcow2Reader::open(File::open(&child).unwrap()).unwrap();
             assert_eq!(r.backing_file(), Some("a_much_longer_base_name.qcow2"));
         }
-        assert_eq!(read_all(&child)[0], 7, "reads now fall through to the new base");
+        assert_eq!(
+            read_all(&child)[0],
+            7,
+            "reads now fall through to the new base"
+        );
 
         set_backing_file(&child, Some("a.qcow2")).unwrap();
         assert_eq!(read_all(&child)[0], 1, "and back again");
@@ -462,6 +483,10 @@ mod tests {
         set_backing_file(&child, None).unwrap();
         let r = Qcow2Reader::open(File::open(&child).unwrap()).unwrap();
         assert_eq!(r.backing_file(), None);
-        assert_eq!(read_all(&child)[0], 0, "no backing file → holes read as zeros");
+        assert_eq!(
+            read_all(&child)[0],
+            0,
+            "no backing file → holes read as zeros"
+        );
     }
 }

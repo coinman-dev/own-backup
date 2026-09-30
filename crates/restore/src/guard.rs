@@ -54,7 +54,10 @@ impl Protection {
     }
 
     fn unsure(why: impl Into<String>) -> Self {
-        Self { parts: Vec::new(), cannot_tell: Some(why.into()) }
+        Self {
+            parts: Vec::new(),
+            cannot_tell: Some(why.into()),
+        }
     }
 }
 
@@ -98,7 +101,9 @@ pub fn check_whole_disk_protection(
     protected: &Protection,
 ) -> Result<()> {
     check_whole_disk_restore(target_disk, system_disk, is_boot_media)?;
-    if is_boot_media { return Ok(()); }
+    if is_boot_media {
+        return Ok(());
+    }
     if let Some(why) = &protected.cannot_tell {
         return Err(OwnBackupError::RestoreIncompatible(
             tr!("guard.protection_unknown", reason = why).into_owned(),
@@ -153,7 +158,11 @@ pub fn is_boot_media() -> bool {
 pub fn guard_target_disk(target_disk: u32) -> Result<()> {
     let media = is_boot_media();
     let system_disk = system_disk_number();
-    let protected = if media { Protection::nothing_is_running() } else { protection(target_disk) };
+    let protected = if media {
+        Protection::nothing_is_running()
+    } else {
+        protection(target_disk)
+    };
     check_whole_disk_protection(target_disk, system_disk, media, &protected)
 }
 
@@ -283,7 +292,11 @@ pub fn protection(disk: u32) -> Protection {
     // than by drive letter.
     match system_volume_offset(disk) {
         Some(offset) => {
-            if let Some(p) = layout.partitions.iter().find(|p| p.first_lba * sector == offset) {
+            if let Some(p) = layout
+                .partitions
+                .iter()
+                .find(|p| p.first_lba * sector == offset)
+            {
                 out.push(p.index);
             }
         }
@@ -313,7 +326,8 @@ pub fn protection(disk: u32) -> Protection {
         BootEsp::Unknown => {
             // Cannot ask the firmware which one it was, so none of them may go.
             for p in &layout.partitions {
-                if p.type_guid.eq_ignore_ascii_case(own_backup_common::gpt::GPT_TYPE_EFI_SYSTEM)
+                if p.type_guid
+                    .eq_ignore_ascii_case(own_backup_common::gpt::GPT_TYPE_EFI_SYSTEM)
                     && !out.contains(&p.index)
                 {
                     out.push(p.index);
@@ -323,7 +337,10 @@ pub fn protection(disk: u32) -> Protection {
     }
 
     out.sort_unstable();
-    Protection { parts: out, cannot_tell: None }
+    Protection {
+        parts: out,
+        cannot_tell: None,
+    }
 }
 
 /// The partitions to protect, for callers that only want the list. Prefer
@@ -353,9 +370,15 @@ fn boot_esp_guid() -> BootEsp {
     if !efi::is_uefi() {
         return BootEsp::NotUefi;
     }
-    let Ok(config) = efi::read_config() else { return BootEsp::Unknown };
-    let Some(current) = config.current else { return BootEsp::Unknown };
-    let Ok(Some(entry)) = efi::read_entry(current) else { return BootEsp::Unknown };
+    let Ok(config) = efi::read_config() else {
+        return BootEsp::Unknown;
+    };
+    let Some(current) = config.current else {
+        return BootEsp::Unknown;
+    };
+    let Ok(Some(entry)) = efi::read_entry(current) else {
+        return BootEsp::Unknown;
+    };
     match hard_drive_guid(&entry.file_path_list) {
         Some(g) => BootEsp::Guid(g),
         None => BootEsp::Unknown,
@@ -450,10 +473,16 @@ mod tests {
 
     #[test]
     fn a_separate_live_boot_partition_blocks_whole_disk_restore() {
-        let boot = Protection { parts: vec![1], cannot_tell: None };
+        let boot = Protection {
+            parts: vec![1],
+            cannot_tell: None,
+        };
         assert!(check_whole_disk_protection(1, Some(0), false, &boot).is_err());
         assert!(check_whole_disk_protection(1, Some(0), true, &boot).is_ok());
-        let unknown = Protection { parts: vec![], cannot_tell: Some("layout unavailable".into()) };
+        let unknown = Protection {
+            parts: vec![],
+            cannot_tell: Some("layout unavailable".into()),
+        };
         assert!(check_whole_disk_protection(1, Some(0), false, &unknown).is_err());
     }
 
@@ -497,7 +526,10 @@ mod tests {
 
         let unsure = Protection::unsure("диск не читается");
         assert!(unsure.parts.is_empty());
-        assert!(unsure.cannot_tell.is_some(), "the caller must be able to tell these apart");
+        assert!(
+            unsure.cannot_tell.is_some(),
+            "the caller must be able to tell these apart"
+        );
     }
 
     // --- The firmware's own answer to "which ESP did I boot through?" -------
@@ -549,9 +581,21 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn a_malformed_device_path_ends_the_walk_instead_of_running_away_with_it() {
-        assert_eq!(hard_drive_guid(&[0x04, 0x01, 0x00, 0x00]), None, "zero length");
-        assert_eq!(hard_drive_guid(&[0x04, 0x01, 0xFF, 0xFF]), None, "past the end");
+        assert_eq!(
+            hard_drive_guid(&[0x04, 0x01, 0x00, 0x00]),
+            None,
+            "zero length"
+        );
+        assert_eq!(
+            hard_drive_guid(&[0x04, 0x01, 0xFF, 0xFF]),
+            None,
+            "past the end"
+        );
         assert_eq!(hard_drive_guid(&[]), None);
-        assert_eq!(hard_drive_guid(&[0x7F, 0xFF, 0x04, 0x00]), None, "end marker only");
+        assert_eq!(
+            hard_drive_guid(&[0x7F, 0xFF, 0x04, 0x00]),
+            None,
+            "end marker only"
+        );
     }
 }

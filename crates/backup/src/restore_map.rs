@@ -46,7 +46,10 @@ impl SourceWindow {
     /// One partition of a whole-disk image, from its GPT entry.
     pub fn partition(first_lba: u64, last_lba: u64, sector_size: u32) -> Self {
         let sector = sector_size.max(512) as u64;
-        Self { start: first_lba * sector, len: (last_lba + 1 - first_lba) * sector }
+        Self {
+            start: first_lba * sector,
+            len: (last_lba + 1 - first_lba) * sector,
+        }
     }
 }
 
@@ -221,16 +224,33 @@ mod tests {
         assert_eq!(w.len, 10 * MIB);
 
         let c = plan_block_copy(1, MIB, 500 * MIB, 0, w).unwrap();
-        assert_eq!(c.image_offset, MIB, "read from where it sat on the source disk");
-        assert_eq!(c.dst_offset, 0, "…and write to the start of the target partition");
+        assert_eq!(
+            c.image_offset, MIB,
+            "read from where it sat on the source disk"
+        );
+        assert_eq!(
+            c.dst_offset, 0,
+            "…and write to the start of the target partition"
+        );
     }
 
     #[test]
     fn blocks_outside_the_partition_are_skipped() {
         let w = SourceWindow::partition(2048, 2048 + 10 * MIB / 512 - 1, 512);
-        assert_eq!(plan_block_copy(0, MIB, 500 * MIB, 0, w), None, "the GPT head");
-        assert_eq!(plan_block_copy(11, MIB, 500 * MIB, 0, w), None, "past the partition");
-        assert!(plan_block_copy(10, MIB, 500 * MIB, 0, w).is_some(), "the last block inside");
+        assert_eq!(
+            plan_block_copy(0, MIB, 500 * MIB, 0, w),
+            None,
+            "the GPT head"
+        );
+        assert_eq!(
+            plan_block_copy(11, MIB, 500 * MIB, 0, w),
+            None,
+            "past the partition"
+        );
+        assert!(
+            plan_block_copy(10, MIB, 500 * MIB, 0, w).is_some(),
+            "the last block inside"
+        );
     }
 
     #[test]
@@ -243,7 +263,10 @@ mod tests {
         let w = SourceWindow::partition(first_lba, first_lba + 200 - 1, 512);
 
         let first = plan_block_copy(0, MIB, 500 * MIB, 0, w).unwrap();
-        assert_eq!(first.slice_start, start as usize, "skip the GPT ahead of it");
+        assert_eq!(
+            first.slice_start, start as usize,
+            "skip the GPT ahead of it"
+        );
         assert_eq!(first.slice_len, (200 * sector) as usize);
         assert_eq!(first.dst_offset, 0);
         // The checksum still covers the whole block, so the read is whole too.
@@ -307,7 +330,10 @@ mod tests {
     #[test]
     fn uncovered_ranges_handles_unsorted_and_touching_input() {
         let mut covered = vec![(2 * MIB, MIB), (0, MIB), (MIB, MIB)];
-        assert_eq!(uncovered_ranges(&mut covered, 4 * MIB), vec![(3 * MIB, MIB)]);
+        assert_eq!(
+            uncovered_ranges(&mut covered, 4 * MIB),
+            vec![(3 * MIB, MIB)]
+        );
     }
 
     #[test]

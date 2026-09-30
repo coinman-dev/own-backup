@@ -111,7 +111,11 @@ fn ioctl(handle: HANDLE, code: u32, out: &mut [u8]) -> Option<usize> {
 /// Send an IOCTL with an input buffer; returns the bytes written to `out`.
 fn ioctl_in(handle: HANDLE, code: u32, input: &[u8], out: &mut [u8]) -> Option<usize> {
     let mut returned = 0u32;
-    let in_ptr = if input.is_empty() { None } else { Some(input.as_ptr() as *const _) };
+    let in_ptr = if input.is_empty() {
+        None
+    } else {
+        Some(input.as_ptr() as *const _)
+    };
     // SAFETY: both buffers are valid for the sizes passed.
     let ok = unsafe {
         DeviceIoControl(
@@ -254,8 +258,16 @@ fn disk_facts(handle: HANDLE) -> DiskFacts {
                 let logical = u32_at(&align, 16);
                 let physical = u32_at(&align, 20);
                 (
-                    if logical == 0 { sector_logical } else { logical },
-                    if physical == 0 { sector_logical } else { physical },
+                    if logical == 0 {
+                        sector_logical
+                    } else {
+                        logical
+                    },
+                    if physical == 0 {
+                        sector_logical
+                    } else {
+                        physical
+                    },
                 )
             }
             _ => (sector_logical, sector_logical),
@@ -487,7 +499,12 @@ fn volume_contents(root: &str) -> (FileSystem, String, u64, u64) {
     let (mut size, mut free) = (0u64, 0u64);
     // SAFETY: `wide` outlives the call; both out-pointers are live locals.
     let _ = unsafe {
-        GetDiskFreeSpaceExW(PCWSTR(wide.as_ptr()), None, Some(&mut size), Some(&mut free))
+        GetDiskFreeSpaceExW(
+            PCWSTR(wide.as_ptr()),
+            None,
+            Some(&mut size),
+            Some(&mut free),
+        )
     };
     (filesystem, label, size, free)
 }
@@ -495,7 +512,9 @@ fn volume_contents(root: &str) -> (FileSystem, String, u64, u64) {
 fn enumerate_volumes() -> Vec<VolumeFacts> {
     let mut out = Vec::new();
     for root in volume_roots() {
-        let Some((disk_number, offset)) = volume_extent(&root) else { continue };
+        let Some((disk_number, offset)) = volume_extent(&root) else {
+            continue;
+        };
         let (filesystem, label, size_bytes, free_bytes) = volume_contents(&root);
         out.push(VolumeFacts {
             letter: volume_letter(&root),
@@ -610,7 +629,10 @@ impl super::traits::DiskInventory for WindowsInventory {
                 };
                 let volume_label = match volume.map(|v| v.label.clone()).unwrap_or_default() {
                     l if !l.trim().is_empty() => l,
-                    _ => probed.as_ref().and_then(|p| p.label.clone()).unwrap_or_default(),
+                    _ => probed
+                        .as_ref()
+                        .and_then(|p| p.label.clone())
+                        .unwrap_or_default(),
                 };
                 // Used = size − free where Windows understands the filesystem;
                 // a foreign volume reports meaningless numbers there, so for a
@@ -625,8 +647,10 @@ impl super::traits::DiskInventory for WindowsInventory {
                 // Only a raw probe can answer this: Windows never mounts ext,
                 // so a Linux partition reaches us as a volume it calls RAW and
                 // the superblock is the only thing that speaks.
-                let linux_last_mounted =
-                    probed.as_ref().and_then(|p| p.last_mounted.clone()).unwrap_or_default();
+                let linux_last_mounted = probed
+                    .as_ref()
+                    .and_then(|p| p.last_mounted.clone())
+                    .unwrap_or_default();
                 let letter = volume.and_then(|v| v.letter);
 
                 // Openable device: the drive letter, else the volume GUID path,
@@ -696,7 +720,11 @@ impl super::traits::DiskInventory for WindowsInventory {
                 sector_size_physical: facts.sector_physical,
                 media_type: facts.media_type,
                 partition_table,
-                disk_guid: if disk_guid.is_empty() { format!("disk-{number}") } else { disk_guid },
+                disk_guid: if disk_guid.is_empty() {
+                    format!("disk-{number}")
+                } else {
+                    disk_guid
+                },
                 partitions,
             });
         }
@@ -704,7 +732,11 @@ impl super::traits::DiskInventory for WindowsInventory {
         if disks.is_empty() {
             warn!("no physical drives enumerated");
         }
-        info!(count = disks.len(), ms = started.elapsed().as_millis(), "disk enumeration complete");
+        info!(
+            count = disks.len(),
+            ms = started.elapsed().as_millis(),
+            "disk enumeration complete"
+        );
         Ok(disks)
     }
 
@@ -718,4 +750,3 @@ impl super::traits::DiskInventory for WindowsInventory {
             .ok_or_else(|| OwnBackupError::Device(format!("Disk not found: {device_id}")))
     }
 }
-

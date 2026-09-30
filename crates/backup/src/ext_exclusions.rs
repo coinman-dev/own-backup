@@ -38,7 +38,11 @@ fn crc32c_raw(seed: u32, data: &[u8]) -> u32 {
     for &b in data {
         crc ^= b as u32;
         for _ in 0..8 {
-            crc = if crc & 1 != 0 { (crc >> 1) ^ 0x82F6_3B78 } else { crc >> 1 };
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0x82F6_3B78
+            } else {
+                crc >> 1
+            };
         }
     }
     crc
@@ -321,7 +325,10 @@ fn walk_extent_node(
             if start == 0 || start + len > sb.blocks_count {
                 return Err(bad("extent points outside the filesystem"));
             }
-            out.push(Extent { first: start, count: len });
+            out.push(Extent {
+                first: start,
+                count: len,
+            });
         } else {
             // ext4_extent_idx: ei_block(4) ei_leaf_lo(4) ei_leaf_hi(2) unused(2)
             let leaf = u32at(e, 0x04) | (u16at(e, 0x08) << 32);
@@ -331,7 +338,10 @@ fn walk_extent_node(
             // The interior extent-tree block is allocated to this inode too, so
             // it must be zeroed and freed with the file — otherwise it stays
             // marked in use in the block bitmap after removal (e2fsck errors).
-            out.push(Extent { first: leaf, count: 1 });
+            out.push(Extent {
+                first: leaf,
+                count: 1,
+            });
             let mut child = vec![0u8; sb.fs_block as usize];
             vol.read_at(leaf * sb.fs_block, &mut child)?;
             walk_extent_node(vol, sb, &child, out, depth_guard + 1)?;
@@ -342,9 +352,15 @@ fn walk_extent_node(
 
 /// ext2/3 indirect-block map (no extents flag). Direct + single/double/triple
 /// indirect pointers; a 0 pointer is a hole.
-fn indirect_blocks(vol: &mut dyn RawVolume, sb: &Sb, inode: &[u8], out: &mut Vec<Extent>) -> Result<()> {
+fn indirect_blocks(
+    vol: &mut dyn RawVolume,
+    sb: &Sb,
+    inode: &[u8],
+    out: &mut Vec<Extent>,
+) -> Result<()> {
     let ptrs_per_block = (sb.fs_block / 4) as usize;
-    let block = |b: &[u8], i: usize| u32::from_le_bytes(b[i * 4..i * 4 + 4].try_into().unwrap()) as u64;
+    let block =
+        |b: &[u8], i: usize| u32::from_le_bytes(b[i * 4..i * 4 + 4].try_into().unwrap()) as u64;
     let push = |out: &mut Vec<Extent>, b: u64| -> Result<()> {
         if b == 0 {
             return Ok(());
@@ -360,7 +376,14 @@ fn indirect_blocks(vol: &mut dyn RawVolume, sb: &Sb, inode: &[u8], out: &mut Vec
         push(out, block(iblock, i))?;
     }
     // A generic recursive walk of an indirect block at `level` (1=single…).
-    fn walk(vol: &mut dyn RawVolume, sb: &Sb, ptr: u64, level: u32, ppb: usize, out: &mut Vec<Extent>) -> Result<()> {
+    fn walk(
+        vol: &mut dyn RawVolume,
+        sb: &Sb,
+        ptr: u64,
+        level: u32,
+        ppb: usize,
+        out: &mut Vec<Extent>,
+    ) -> Result<()> {
         if ptr == 0 {
             return Ok(());
         }
@@ -370,7 +393,10 @@ fn indirect_blocks(vol: &mut dyn RawVolume, sb: &Sb, inode: &[u8], out: &mut Vec
         // The indirect block itself belongs to the file (at every level), so it
         // is zeroed and freed along with the data it points at — otherwise it
         // stays marked in use in the block bitmap (e2fsck reports differences).
-        out.push(Extent { first: ptr, count: 1 });
+        out.push(Extent {
+            first: ptr,
+            count: 1,
+        });
         let mut buf = vec![0u8; sb.fs_block as usize];
         vol.read_at(ptr * sb.fs_block, &mut buf)?;
         for i in 0..ppb {
@@ -478,7 +504,10 @@ pub fn scan_ext_exclusions(
         .filter(|ino| !zeroable.contains(ino) && !removable.contains(ino))
         .count();
     if kept_whole > 0 {
-        info!(kept_whole, "ext exclusions: файлы оставлены целиком (уцелевшая жёсткая ссылка)");
+        info!(
+            kept_whole,
+            "ext exclusions: файлы оставлены целиком (уцелевшая жёсткая ссылка)"
+        );
     }
 
     // Phase 3 — emit: Stage-1 ranges + the Stage-2 work lists.
@@ -528,7 +557,10 @@ pub fn scan_ext_exclusions(
             // A swap area keeps its header page and its entry; only what comes
             // after the header is dead weight.
             let swap = size >= SWAP_MIN_SIZE
-                && extents.first().map(|e| looks_like_swap(vol, &sb, e)).unwrap_or(false);
+                && extents
+                    .first()
+                    .map(|e| looks_like_swap(vol, &sb, e))
+                    .unwrap_or(false);
             if swap {
                 swap_kept += 1;
             }
@@ -579,7 +611,10 @@ pub fn scan_ext_exclusions(
             }
             // Unreachable — phase 2 kept such an inode out of `removable` — but
             // a leaked block beats a wrong one: never touched, only reported.
-            None => warn!(block = blk, "ext exclusions: xattr-блок нечитаем — оставлен занятым"),
+            None => warn!(
+                block = blk,
+                "ext exclusions: xattr-блок нечитаем — оставлен занятым"
+            ),
         }
     }
 
@@ -613,7 +648,13 @@ pub fn scan_ext_exclusions(
     // and keep Stage 1, so excluded files remain zero-filled ghosts rather than
     // risking an inconsistent image).
     let stage2 = build_stage2_patches(
-        vol, &sb, &coalesce, &freed_inodes, &freed_blocks, &dir_parents, &xattr_dec,
+        vol,
+        &sb,
+        &coalesce,
+        &freed_inodes,
+        &freed_blocks,
+        &dir_parents,
+        &xattr_dec,
     );
     match stage2 {
         Ok(patches) => {
@@ -626,10 +667,15 @@ pub fn scan_ext_exclusions(
             }
             scan.droppable.finalize();
         }
-        Err(e) => warn!(error = %e, "ext exclusions: Stage-2 metadata removal skipped — keeping zero-filled ghosts"),
+        Err(e) => {
+            warn!(error = %e, "ext exclusions: Stage-2 metadata removal skipped — keeping zero-filled ghosts")
+        }
     }
     if swap_kept > 0 {
-        info!(swap_kept, "ext exclusions: своп-файлы оставлены с заголовком, содержимое обнулено");
+        info!(
+            swap_kept,
+            "ext exclusions: своп-файлы оставлены с заголовком, содержимое обнулено"
+        );
     }
     info!(
         files = scan.files_excluded,
@@ -714,7 +760,10 @@ fn collect_tree(
                                 .as_deref()
                                 .map(|i| u16at(i, 0x00) as u16 & S_IFMT == S_IFDIR)
                                 .unwrap_or(false);
-                            if hit && is_dir && crate::exclusions::is_essential_linux_dir(&child_rel) {
+                            if hit
+                                && is_dir
+                                && crate::exclusions::is_essential_linux_dir(&child_rel)
+                            {
                                 // `/proc`, `/sys`, `/dev`, `/run`, `/tmp` are
                                 // emptied, never removed: systemd mounts on
                                 // them before it can do anything, and a root
@@ -742,8 +791,7 @@ fn collect_tree(
                                     col.matched_inodes.entry(ino).or_insert(inode);
                                 } else if u16at(&inode, 0x00) as u16 & S_IFMT == S_IFREG {
                                     // Kept file — size for the dashboard.
-                                    let size =
-                                        u32at(&inode, 0x04) | (u32at(&inode, 0x6C) << 32);
+                                    let size = u32at(&inode, 0x04) | (u32at(&inode, 0x6C) << 32);
                                     scan.categories.add(&child_rel, size);
                                 }
                             }
@@ -941,8 +989,8 @@ fn set_inode_csum(sb: &Sb, ino: u32, inode: &mut [u8]) {
     if !sb.metadata_csum {
         return;
     }
-    let has_hi = sb.inode_size > 128
-        && u16::from_le_bytes(inode[0x80..0x82].try_into().unwrap()) >= 4;
+    let has_hi =
+        sb.inode_size > 128 && u16::from_le_bytes(inode[0x80..0x82].try_into().unwrap()) >= 4;
     // crc over the inode with the checksum fields zeroed, seeded by ino + gen.
     let gen = u32::from_le_bytes(inode[0x64..0x68].try_into().unwrap());
     let mut tmp = inode.to_vec();
@@ -969,7 +1017,11 @@ fn put_u32(b: &mut [u8], off: usize, v: u32) {
 /// Add `delta` to a 16-bit (optionally +16 high) little-endian count in `d`.
 fn add_split(d: &mut [u8], lo: usize, hi: usize, has_hi: bool, delta: u64) {
     let cur = u16::from_le_bytes(d[lo..lo + 2].try_into().unwrap()) as u64
-        | if has_hi { (u16::from_le_bytes(d[hi..hi + 2].try_into().unwrap()) as u64) << 16 } else { 0 };
+        | if has_hi {
+            (u16::from_le_bytes(d[hi..hi + 2].try_into().unwrap()) as u64) << 16
+        } else {
+            0
+        };
     let v = cur + delta;
     put_u16(d, lo, v as u16);
     if has_hi {
@@ -978,7 +1030,11 @@ fn add_split(d: &mut [u8], lo: usize, hi: usize, has_hi: bool, delta: u64) {
 }
 fn sub_split(d: &mut [u8], lo: usize, hi: usize, has_hi: bool, delta: u64) {
     let cur = u16::from_le_bytes(d[lo..lo + 2].try_into().unwrap()) as u64
-        | if has_hi { (u16::from_le_bytes(d[hi..hi + 2].try_into().unwrap()) as u64) << 16 } else { 0 };
+        | if has_hi {
+            (u16::from_le_bytes(d[hi..hi + 2].try_into().unwrap()) as u64) << 16
+        } else {
+            0
+        };
     let v = cur.saturating_sub(delta);
     put_u16(d, lo, v as u16);
     if has_hi {
@@ -1144,9 +1200,27 @@ fn build_stage2_patches(
     for &g in &touched {
         let base = (g * sb.desc_size as u64) as usize;
         let mut d = gdt[base..base + sb.desc_size as usize].to_vec();
-        add_split(&mut d, 0x0C, 0x2C, sb.has_hi, *freed_blk_ct.get(&g).unwrap_or(&0));
-        add_split(&mut d, 0x0E, 0x2E, sb.has_hi, *freed_ino_ct.get(&g).unwrap_or(&0));
-        sub_split(&mut d, 0x10, 0x30, sb.has_hi, *freed_dir_ct.get(&g).unwrap_or(&0));
+        add_split(
+            &mut d,
+            0x0C,
+            0x2C,
+            sb.has_hi,
+            *freed_blk_ct.get(&g).unwrap_or(&0),
+        );
+        add_split(
+            &mut d,
+            0x0E,
+            0x2E,
+            sb.has_hi,
+            *freed_ino_ct.get(&g).unwrap_or(&0),
+        );
+        sub_split(
+            &mut d,
+            0x10,
+            0x30,
+            sb.has_hi,
+            *freed_dir_ct.get(&g).unwrap_or(&0),
+        );
         if sb.metadata_csum {
             let c = desc_csum(sb, g, &d);
             put_u16(&mut d, 0x1E, c);
@@ -1159,7 +1233,9 @@ fn build_stage2_patches(
     //     a block share one owning directory (inode + generation). ---
     let mut dirs: std::collections::BTreeMap<u64, (u32, u32, Vec<usize>)> = Default::default();
     for c in coalesce {
-        let e = dirs.entry(c.dir_block_off).or_insert((c.owner_ino, c.owner_gen, Vec::new()));
+        let e = dirs
+            .entry(c.dir_block_off)
+            .or_insert((c.owner_ino, c.owner_gen, Vec::new()));
         e.2.push(c.rec_off);
     }
     for (&block_off, (dino, dgen, offs)) in &dirs {
@@ -1190,10 +1266,15 @@ fn build_stage2_patches(
     let mut sbb = read_block(vol, 1024)?; // 1024-byte SB region (block is ≥1 KiB)
     sbb.truncate(1024);
     // s_free_blocks_count (lo 0x0C, hi 0x158 for 64-bit).
-    let is_64 = sb.has_hi || (u32::from_le_bytes(sbb[0x60..0x64].try_into().unwrap()) & INCOMPAT_64BIT as u32 != 0);
+    let is_64 = sb.has_hi
+        || (u32::from_le_bytes(sbb[0x60..0x64].try_into().unwrap()) & INCOMPAT_64BIT as u32 != 0);
     {
         let cur = u32::from_le_bytes(sbb[0x0C..0x10].try_into().unwrap()) as u64
-            | if is_64 { (u32::from_le_bytes(sbb[0x158..0x15C].try_into().unwrap()) as u64) << 32 } else { 0 };
+            | if is_64 {
+                (u32::from_le_bytes(sbb[0x158..0x15C].try_into().unwrap()) as u64) << 32
+            } else {
+                0
+            };
         let v = cur + total_blk;
         put_u32(&mut sbb, 0x0C, v as u32);
         if is_64 {
@@ -1232,7 +1313,9 @@ mod ext_integration {
     }
     impl RawVolume for FileVol {
         fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
-            self.f.read_exact_at(buf, offset).map_err(|e| bad(format!("read: {e}")))
+            self.f
+                .read_exact_at(buf, offset)
+                .map_err(|e| bad(format!("read: {e}")))
         }
         fn len(&self) -> u64 {
             self.len
@@ -1243,16 +1326,29 @@ mod ext_integration {
     /// leaked tempdir) or None if the tools are unavailable.
     fn make_ext4(block_size: u32) -> Option<(std::path::PathBuf, tempfile::TempDir)> {
         use std::io::Write;
-        if std::process::Command::new("mke2fs").arg("-V").output().is_err() {
+        if std::process::Command::new("mke2fs")
+            .arg("-V")
+            .output()
+            .is_err()
+        {
             return None;
         }
         let dir = tempfile::tempdir().ok()?;
         let src = dir.path().join("src");
         std::fs::create_dir_all(src.join("cache")).ok()?;
         // keep.txt (0xCD), secret.log (0xAB, 8 KiB), cache/big.bin (0xAB, 16 KiB).
-        std::fs::File::create(src.join("keep.txt")).ok()?.write_all(&[0xCD; 4096]).ok()?;
-        std::fs::File::create(src.join("secret.log")).ok()?.write_all(&[0xAB; 8192]).ok()?;
-        std::fs::File::create(src.join("cache/big.bin")).ok()?.write_all(&[0xAB; 16384]).ok()?;
+        std::fs::File::create(src.join("keep.txt"))
+            .ok()?
+            .write_all(&[0xCD; 4096])
+            .ok()?;
+        std::fs::File::create(src.join("secret.log"))
+            .ok()?
+            .write_all(&[0xAB; 8192])
+            .ok()?;
+        std::fs::File::create(src.join("cache/big.bin"))
+            .ok()?
+            .write_all(&[0xAB; 16384])
+            .ok()?;
         let img = dir.path().join("fs.img");
         let out = std::process::Command::new("mke2fs")
             .args(["-q", "-F", "-t", "ext4", "-b"])
@@ -1307,10 +1403,14 @@ mod ext_integration {
                 let (mut start, mut len) = (0usize, 0usize);
                 for (i, &b) in img_bytes.iter().chain(std::iter::once(&0u8)).enumerate() {
                     if b == fill {
-                        if len == 0 { start = i; }
+                        if len == 0 {
+                            start = i;
+                        }
                         len += 1;
                     } else {
-                        if len >= min_len { out.push((start as u64, (start + len) as u64)); }
+                        if len >= min_len {
+                            out.push((start as u64, (start + len) as u64));
+                        }
                         len = 0;
                     }
                 }
@@ -1320,11 +1420,13 @@ mod ext_integration {
             let keep_runs = runs(0xCD, 4096);
             let ab_runs = runs(0xAB, 4096);
             assert_eq!(
-                keep_runs.iter().map(|(s, e)| e - s).sum::<u64>(), 4096,
+                keep_runs.iter().map(|(s, e)| e - s).sum::<u64>(),
+                4096,
                 "bs={bs}: keep.txt data not found in the image",
             );
             assert_eq!(
-                ab_runs.iter().map(|(s, e)| e - s).sum::<u64>(), 8192 + 16384,
+                ab_runs.iter().map(|(s, e)| e - s).sum::<u64>(),
+                8192 + 16384,
                 "bs={bs}: excluded files' data not found in the image",
             );
 
@@ -1344,7 +1446,11 @@ mod ext_integration {
                     .iter()
                     .map(|(rs, re)| re.min(ae).saturating_sub(rs.max(as_)))
                     .sum();
-                assert_eq!(covered, ae - as_, "bs={bs}: excluded data [{as_},{ae}) not fully covered");
+                assert_eq!(
+                    covered,
+                    ae - as_,
+                    "bs={bs}: excluded data [{as_},{ae}) not fully covered"
+                );
             }
             assert_eq!(scan.bytes_excluded, 8192 + 16384, "bs={bs}");
         }
@@ -1352,7 +1458,9 @@ mod ext_integration {
 
     #[test]
     fn no_patterns_excludes_nothing() {
-        let Some((img, _keep)) = make_ext4(4096) else { return };
+        let Some((img, _keep)) = make_ext4(4096) else {
+            return;
+        };
         let (scan, _) = run_scan(&img, &[]);
         assert_eq!(scan.files_excluded, 0);
         assert!(scan.ranges.is_empty());
@@ -1363,15 +1471,24 @@ mod ext_integration {
     /// and the excluded files are gone.
     #[test]
     fn stage2_patched_image_is_fsck_clean() {
-        if std::process::Command::new("e2fsck").arg("-V").output().is_err() {
+        if std::process::Command::new("e2fsck")
+            .arg("-V")
+            .output()
+            .is_err()
+        {
             eprintln!("e2fsck unavailable — skipping Stage-2 fsck test");
             return;
         }
         for bs in [1024u32, 4096] {
-            let Some((img, keep)) = make_ext4(bs) else { return };
+            let Some((img, keep)) = make_ext4(bs) else {
+                return;
+            };
             // Exclude the file, the whole cache subtree — leave keep.txt.
             let (scan, _) = run_scan(&img, &["secret.log", "cache"]);
-            assert!(!scan.patches.is_empty(), "bs={bs}: Stage 2 produced no patches");
+            assert!(
+                !scan.patches.is_empty(),
+                "bs={bs}: Stage 2 produced no patches"
+            );
 
             // Apply the metadata patches to a copy of the image.
             let mut data = std::fs::read(&img).unwrap();
@@ -1406,9 +1523,18 @@ mod ext_integration {
                 .output()
                 .unwrap();
             let listing = String::from_utf8_lossy(&ls.stdout);
-            assert!(listing.contains("keep.txt"), "bs={bs}: keep.txt missing:\n{listing}");
-            assert!(!listing.contains("secret.log"), "bs={bs}: secret.log name still present:\n{listing}");
-            assert!(!listing.contains("cache"), "bs={bs}: cache name still present:\n{listing}");
+            assert!(
+                listing.contains("keep.txt"),
+                "bs={bs}: keep.txt missing:\n{listing}"
+            );
+            assert!(
+                !listing.contains("secret.log"),
+                "bs={bs}: secret.log name still present:\n{listing}"
+            );
+            assert!(
+                !listing.contains("cache"),
+                "bs={bs}: cache name still present:\n{listing}"
+            );
             let stat = std::process::Command::new("debugfs")
                 .args(["-R", "stat /secret.log"])
                 .arg(&patched)
@@ -1419,8 +1545,10 @@ mod ext_integration {
                 String::from_utf8_lossy(&stat.stdout),
                 String::from_utf8_lossy(&stat.stderr)
             );
-            assert!(stat_out.contains("not found") || stat_out.contains("File not found"),
-                "bs={bs}: /secret.log still resolvable:\n{stat_out}");
+            assert!(
+                stat_out.contains("not found") || stat_out.contains("File not found"),
+                "bs={bs}: /secret.log still resolvable:\n{stat_out}"
+            );
         }
     }
 
@@ -1429,13 +1557,20 @@ mod ext_integration {
     /// `file_kib` KiB of 0xAB at `/big.bin`, plus a small kept file.
     fn make_ext2(bs: u32, file_kib: usize) -> Option<(std::path::PathBuf, tempfile::TempDir)> {
         use std::io::Write;
-        if std::process::Command::new("mke2fs").arg("-V").output().is_err() {
+        if std::process::Command::new("mke2fs")
+            .arg("-V")
+            .output()
+            .is_err()
+        {
             return None;
         }
         let dir = tempfile::tempdir().ok()?;
         let src = dir.path().join("src");
         std::fs::create_dir_all(&src).ok()?;
-        std::fs::File::create(src.join("keep.txt")).ok()?.write_all(&[0xCD; 4096]).ok()?;
+        std::fs::File::create(src.join("keep.txt"))
+            .ok()?
+            .write_all(&[0xCD; 4096])
+            .ok()?;
         std::fs::File::create(src.join("big.bin"))
             .ok()?
             .write_all(&vec![0xAB; file_kib * 1024])
@@ -1451,7 +1586,10 @@ mod ext_integration {
             .output()
             .ok()?;
         if !out.status.success() {
-            eprintln!("mke2fs (ext2) failed: {}", String::from_utf8_lossy(&out.stderr));
+            eprintln!(
+                "mke2fs (ext2) failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
             return None;
         }
         Some((img, dir))
@@ -1464,11 +1602,17 @@ mod ext_integration {
     /// 52 reached through exactly one single-indirect block.
     #[test]
     fn stage2_ext2_indirect_block_is_freed() {
-        if std::process::Command::new("e2fsck").arg("-V").output().is_err() {
+        if std::process::Command::new("e2fsck")
+            .arg("-V")
+            .output()
+            .is_err()
+        {
             eprintln!("e2fsck unavailable — skipping ext2 indirect-block test");
             return;
         }
-        let Some((img, keep)) = make_ext2(1024, 64) else { return };
+        let Some((img, keep)) = make_ext2(1024, 64) else {
+            return;
+        };
         let (scan, _vol) = run_scan(&img, &["big.bin"]);
         assert_eq!(scan.files_excluded, 1);
 
@@ -1484,7 +1628,11 @@ mod ext_integration {
         }
         let patched = keep.path().join("patched_ext2.img");
         std::fs::write(&patched, &data).unwrap();
-        let out = std::process::Command::new("e2fsck").args(["-fn"]).arg(&patched).output().unwrap();
+        let out = std::process::Command::new("e2fsck")
+            .args(["-fn"])
+            .arg(&patched)
+            .output()
+            .unwrap();
         assert!(
             out.status.success(),
             "e2fsck found problems (exit {:?}):\n{}\n{}",
@@ -1511,7 +1659,12 @@ mod ext_integration {
             .stderr(std::process::Stdio::piped())
             .spawn()
             .unwrap();
-        child.stdin.as_mut().unwrap().write_all(script.as_bytes()).unwrap();
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(script.as_bytes())
+            .unwrap();
         let out = child.wait_with_output().unwrap();
         format!(
             "{}{}",
@@ -1521,7 +1674,11 @@ mod ext_integration {
     }
 
     fn debugfs_r(img: &std::path::Path, req: &str) -> String {
-        let out = std::process::Command::new("debugfs").args(["-R", req]).arg(img).output().unwrap();
+        let out = std::process::Command::new("debugfs")
+            .args(["-R", req])
+            .arg(img)
+            .output()
+            .unwrap();
         format!(
             "{}{}",
             String::from_utf8_lossy(&out.stdout),
@@ -1531,7 +1688,11 @@ mod ext_integration {
 
     /// `e2fsck -fn` → (clean, log).
     fn fsck_ro(img: &std::path::Path) -> (bool, String) {
-        let out = std::process::Command::new("e2fsck").args(["-fn"]).arg(img).output().unwrap();
+        let out = std::process::Command::new("e2fsck")
+            .args(["-fn"])
+            .arg(img)
+            .output()
+            .unwrap();
         let log = format!(
             "{}{}",
             String::from_utf8_lossy(&out.stdout),
@@ -1544,7 +1705,10 @@ mod ext_integration {
     /// then insist the baseline is clean so failures below indict the scanner
     /// alone, not the fixture.
     fn fsck_normalize(img: &std::path::Path) -> bool {
-        let _ = std::process::Command::new("e2fsck").args(["-fy"]).arg(img).output();
+        let _ = std::process::Command::new("e2fsck")
+            .args(["-fy"])
+            .arg(img)
+            .output();
         fsck_ro(img).0
     }
 
@@ -1568,7 +1732,9 @@ mod ext_integration {
             eprintln!("debugfs/e2fsck unavailable — skipping");
             return;
         }
-        let Some((img, keep)) = make_ext4(4096) else { return };
+        let Some((img, keep)) = make_ext4(4096) else {
+            return;
+        };
         debugfs_w(&img, "mkdir /devdir\ncd /devdir\nmknod console c 5 1\n");
         if !fsck_normalize(&img) {
             eprintln!("debugfs left the image inconsistent — skipping");
@@ -1595,7 +1761,10 @@ mod ext_integration {
         apply_patches(&img, &scan, &patched);
         let (ok, log) = fsck_ro(&patched);
         assert!(ok, "e2fsck after device removal:\n{log}");
-        assert!(!debugfs_r(&patched, "ls -l /").contains("devdir"), "devdir survived");
+        assert!(
+            !debugfs_r(&patched, "ls -l /").contains("devdir"),
+            "devdir survived"
+        );
     }
 
     /// A fast symlink with an EXTERNAL xattr block has i_blocks != 0, and the
@@ -1608,9 +1777,14 @@ mod ext_integration {
             eprintln!("debugfs/e2fsck unavailable — skipping");
             return;
         }
-        let Some((img, keep)) = make_ext4(4096) else { return };
+        let Some((img, keep)) = make_ext4(4096) else {
+            return;
+        };
         let big = "A".repeat(300); // does not fit in-inode → external xattr block
-        debugfs_w(&img, &format!("symlink /link shorttarget\nea_set /link user.big {big}\n"));
+        debugfs_w(
+            &img,
+            &format!("symlink /link shorttarget\nea_set /link user.big {big}\n"),
+        );
         if !fsck_normalize(&img) {
             eprintln!("debugfs left the image inconsistent — skipping");
             return;
@@ -1642,7 +1816,10 @@ mod ext_integration {
         apply_patches(&img, &scan, &patched);
         let (ok, log) = fsck_ro(&patched);
         assert!(ok, "e2fsck after symlink removal:\n{log}");
-        assert!(!debugfs_r(&patched, "ls -l /").contains("link"), "symlink survived");
+        assert!(
+            !debugfs_r(&patched, "ls -l /").contains("link"),
+            "symlink survived"
+        );
     }
 
     /// Populated ext4 image from a caller-built source tree.
@@ -1650,7 +1827,11 @@ mod ext_integration {
         bs: u32,
         build: impl FnOnce(&std::path::Path),
     ) -> Option<(std::path::PathBuf, tempfile::TempDir)> {
-        if std::process::Command::new("mke2fs").arg("-V").output().is_err() {
+        if std::process::Command::new("mke2fs")
+            .arg("-V")
+            .output()
+            .is_err()
+        {
             return None;
         }
         let dir = tempfile::tempdir().ok()?;
@@ -1706,7 +1887,10 @@ mod ext_integration {
         let (ok, log) = fsck_ro(&patched);
         assert!(ok, "e2fsck after a spared hardlink:\n{log}");
         let ls = debugfs_r(&patched, "ls -l /cache");
-        assert!(ls.contains("hard_a.bin"), "spared hardlink name lost:\n{ls}");
+        assert!(
+            ls.contains("hard_a.bin"),
+            "spared hardlink name lost:\n{ls}"
+        );
         assert!(!ls.contains("other.bin"), "other.bin entry survived:\n{ls}");
     }
 
@@ -1736,7 +1920,10 @@ mod ext_integration {
         let (ok, log) = fsck_ro(&patched);
         assert!(ok, "e2fsck after removing a hardlink pair:\n{log}");
         let ls = debugfs_r(&patched, "ls -l /");
-        assert!(!ls.contains("c1") && !ls.contains("c2"), "dirs survived:\n{ls}");
+        assert!(
+            !ls.contains("c1") && !ls.contains("c2"),
+            "dirs survived:\n{ls}"
+        );
     }
 
     /// A hand-written `tmp` pattern keeps the mount point and EMPTIES it — the
@@ -1832,27 +2019,49 @@ mod ext_integration {
             eprintln!("debugfs/e2fsck unavailable — skipping");
             return;
         }
-        let Some((img, keep, acl)) = make_shared_xattr_image() else { return };
-        assert_eq!(xattr_refcount_in(&img, acl), 2, "фикстура должна давать общий блок");
+        let Some((img, keep, acl)) = make_shared_xattr_image() else {
+            return;
+        };
+        assert_eq!(
+            xattr_refcount_in(&img, acl),
+            2,
+            "фикстура должна давать общий блок"
+        );
 
         let (scan, _) = run_scan(&img, &["cache"]);
         assert_eq!(scan.files_excluded, 2, "каталог cache и файл в нём");
         // The shared block is neither zeroed nor dropped: the survivor reads it.
         let covers =
             |r: &ByteRanges, b: u64| r.iter().any(|(s, e)| s < (b + 1) * 4096 && e > b * 4096);
-        assert!(!covers(&scan.ranges, acl), "общий xattr-блок {acl} нельзя обнулять");
-        assert!(!covers(&scan.droppable, acl), "общий xattr-блок {acl} нельзя выбрасывать");
+        assert!(
+            !covers(&scan.ranges, acl),
+            "общий xattr-блок {acl} нельзя обнулять"
+        );
+        assert!(
+            !covers(&scan.droppable, acl),
+            "общий xattr-блок {acl} нельзя выбрасывать"
+        );
 
         let patched = keep.path().join("patched.img");
         apply_patches(&img, &scan, &patched);
-        assert_eq!(xattr_refcount_in(&patched, acl), 1, "refcount должен уменьшиться до 1");
+        assert_eq!(
+            xattr_refcount_in(&patched, acl),
+            1,
+            "refcount должен уменьшиться до 1"
+        );
         let (ok, log) = fsck_ro(&patched);
         assert!(ok, "e2fsck после декремента refcount:\n{log}");
         // The surviving owner keeps both its attribute and its data.
         let ea = debugfs_r(&patched, "ea_list /keep_xattr.bin");
-        assert!(ea.contains("user.big"), "уцелевший владелец потерял атрибут:\n{ea}");
+        assert!(
+            ea.contains("user.big"),
+            "уцелевший владелец потерял атрибут:\n{ea}"
+        );
         let ls = debugfs_r(&patched, "ls /cache");
-        assert!(!ls.contains("a.bin"), "исключённый файл должен исчезнуть:\n{ls}");
+        assert!(
+            !ls.contains("a.bin"),
+            "исключённый файл должен исчезнуть:\n{ls}"
+        );
     }
 
     /// The other half of the same rule: when the LAST owner goes, the block is
@@ -1882,7 +2091,10 @@ mod ext_integration {
         let (scan, _) = run_scan(&img, &["cache"]);
         let covers =
             |r: &ByteRanges, b: u64| r.iter().any(|(s, e)| s < (b + 1) * 4096 && e > b * 4096);
-        assert!(covers(&scan.ranges, acl), "последний владелец ушёл — блок {acl} обнуляется");
+        assert!(
+            covers(&scan.ranges, acl),
+            "последний владелец ушёл — блок {acl} обнуляется"
+        );
         assert!(covers(&scan.droppable, acl), "и покидает образ");
 
         let patched = keep.path().join("patched.img");
@@ -1913,7 +2125,10 @@ mod ext_integration {
             return;
         };
         let big = "A".repeat(300);
-        debugfs_w(&img, &format!("ea_set /cache/broken_xattr.bin user.big {big}\n"));
+        debugfs_w(
+            &img,
+            &format!("ea_set /cache/broken_xattr.bin user.big {big}\n"),
+        );
         let acl = file_acl_of(&img, "/cache/broken_xattr.bin");
         if acl == 0 {
             eprintln!("xattr stayed in-inode — skipping");
@@ -1929,7 +2144,10 @@ mod ext_integration {
         let (scan, _) = run_scan(&img, &["cache"]);
         // Both files lose their data…
         let zeroed: u64 = scan.ranges.iter().map(|(s, e)| e - s).sum();
-        assert!(zeroed >= 16384, "оба файла должны быть обнулены, обнулено {zeroed} Б");
+        assert!(
+            zeroed >= 16384,
+            "оба файла должны быть обнулены, обнулено {zeroed} Б"
+        );
         // …but only the removable one's blocks may leave the image.
         let droppable: u64 = scan.droppable.iter().map(|(s, e)| e - s).sum();
         assert!(
@@ -1950,7 +2168,10 @@ mod ext_integration {
             "патчи добавили замечаний e2fsck:\nбыло:\n{before}\nстало:\n{after}"
         );
         let ls = debugfs_r(&patched, "ls -l /cache");
-        assert!(ls.contains("broken_xattr.bin"), "запись пощажённого файла должна остаться:\n{ls}");
+        assert!(
+            ls.contains("broken_xattr.bin"),
+            "запись пощажённого файла должна остаться:\n{ls}"
+        );
     }
 
     /// An unreplayed journal makes both products liars: the on-disk structures
@@ -1962,7 +2183,9 @@ mod ext_integration {
             eprintln!("debugfs unavailable — skipping");
             return;
         }
-        let Some((img, _keep)) = make_ext4(4096) else { return };
+        let Some((img, _keep)) = make_ext4(4096) else {
+            return;
+        };
         debugfs_w(&img, "feature needs_recovery\n");
         let f = std::fs::File::open(&img).unwrap();
         let len = f.metadata().unwrap().len();
@@ -2025,7 +2248,10 @@ mod ext_integration {
         }
         let dir = tempfile::tempdir().unwrap();
         let img = dir.path().join("fs.img");
-        std::fs::File::create(&img).unwrap().set_len(512 * 1024 * 1024).unwrap();
+        std::fs::File::create(&img)
+            .unwrap()
+            .set_len(512 * 1024 * 1024)
+            .unwrap();
         assert!(std::process::Command::new("mkfs.ext4")
             .args(["-q", "-F"])
             .arg(&img)
@@ -2054,13 +2280,24 @@ mod ext_integration {
         assert!(clean, "фикстура нечиста до всякого вмешательства:\n{log}");
 
         let (scan, _) = run_scan(&img, &["cache"]);
-        assert!(scan.files_excluded >= 1400, "исключено всего {}", scan.files_excluded);
-        assert!(!scan.patches.is_empty(), "Stage 2 отказался — проверять было бы нечего");
+        assert!(
+            scan.files_excluded >= 1400,
+            "исключено всего {}",
+            scan.files_excluded
+        );
+        assert!(
+            !scan.patches.is_empty(),
+            "Stage 2 отказался — проверять было бы нечего"
+        );
         let patched = dir.path().join("patched.img");
         apply_full(&img, &scan, &patched);
         let (ok, log) = fsck_ro(&patched);
         assert!(ok, "e2fsck до монтирования:\n{log}");
-        assert_eq!(xattr_refcount_in(&patched, acl_keep), 1, "общий xattr-блок не декрементирован");
+        assert_eq!(
+            xattr_refcount_in(&patched, acl_keep),
+            1,
+            "общий xattr-блок не декрементирован"
+        );
 
         let before = corpus::dmesg_len();
         {
@@ -2082,7 +2319,10 @@ mod ext_integration {
             assert_eq!(left, ["hard_in.bin"], "в /cache осталось лишнее: {left:?}");
 
             let written = corpus::Corpus::fill(&mnt, 512);
-            assert!(written > 32, "записалось всего {written} МиБ — место не переиспользовалось");
+            assert!(
+                written > 32,
+                "записалось всего {written} МиБ — место не переиспользовалось"
+            );
             eprintln!("записано {written} МиБ поверх освобождённого");
             // Reading AFTER the writes is the point: a block freed twice, or a
             // bitmap that lied, shows up here and nowhere else.
@@ -2092,6 +2332,10 @@ mod ext_integration {
         let (ok, log) = fsck_ro(&patched);
         assert!(ok, "e2fsck ПОСЛЕ монтирования и записи:\n{log}");
         let complaints = corpus::kernel_complaints(before, &["EXT4-fs error", "EXT4-fs warning"]);
-        assert!(complaints.is_empty(), "ядро ругалось на ФС:\n{}", complaints.join("\n"));
+        assert!(
+            complaints.is_empty(),
+            "ядро ругалось на ФС:\n{}",
+            complaints.join("\n")
+        );
     }
 }

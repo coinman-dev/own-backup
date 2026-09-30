@@ -31,19 +31,28 @@ impl VolumeWindow {
         let device = inner.len();
         if length == 0 || start.checked_add(length).is_none_or(|end| end > device) {
             return Err(OwnBackupError::Device(
-                tr!("volume_window.does_not_fit", start = start, length = length, device = device)
-                    .into_owned(),
+                tr!(
+                    "volume_window.does_not_fit",
+                    start = start,
+                    length = length,
+                    device = device
+                )
+                .into_owned(),
             ));
         }
-        Ok(Self { inner, start, length })
+        Ok(Self {
+            inner,
+            start,
+            length,
+        })
     }
 }
 
 impl RawVolume for VolumeWindow {
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
-        let end = offset
-            .checked_add(buf.len() as u64)
-            .ok_or_else(|| OwnBackupError::Device(tr!("volume_window.read_overflow").into_owned()))?;
+        let end = offset.checked_add(buf.len() as u64).ok_or_else(|| {
+            OwnBackupError::Device(tr!("volume_window.read_overflow").into_owned())
+        })?;
         if end > self.length {
             return Err(OwnBackupError::Device(
                 tr!(
@@ -111,8 +120,14 @@ mod tests {
 
     #[test]
     fn a_window_that_does_not_fit_is_refused_at_the_door() {
-        assert!(VolumeWindow::new(disk(), 1024, 1024).is_err(), "past the device end");
-        assert!(VolumeWindow::new(disk(), 0, 0).is_err(), "an empty window is a mistake");
+        assert!(
+            VolumeWindow::new(disk(), 1024, 1024).is_err(),
+            "past the device end"
+        );
+        assert!(
+            VolumeWindow::new(disk(), 0, 0).is_err(),
+            "an empty window is a mistake"
+        );
         assert!(VolumeWindow::new(disk(), 1024, 512).is_ok());
     }
 }

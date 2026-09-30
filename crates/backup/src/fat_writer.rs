@@ -70,8 +70,8 @@ pub fn build_fat16(files: &[FatFile], label: &str) -> Result<Vec<u8>> {
 
     let fat_sectors = ((clusters as usize + 2) * 2).div_ceil(SECTOR) as u16;
     let root_sectors = (ROOT_ENTRIES as usize * 32).div_ceil(SECTOR) as u16;
-    let data_start = RESERVED_SECTORS as u32 + FAT_COUNT as u32 * fat_sectors as u32
-        + root_sectors as u32;
+    let data_start =
+        RESERVED_SECTORS as u32 + FAT_COUNT as u32 * fat_sectors as u32 + root_sectors as u32;
     let total_sectors = data_start + clusters * SECTORS_PER_CLUSTER as u32;
 
     let mut img = vec![0u8; total_sectors as usize * SECTOR];
@@ -123,7 +123,9 @@ pub fn build_fat16(files: &[FatFile], label: &str) -> Result<Vec<u8>> {
         for i in 0..count {
             let c = next_free;
             if (c as u32) >= clusters + 2 {
-                return Err(OwnBackupError::ImageFormat(tr!("fat_writer.image_full").into_owned()));
+                return Err(OwnBackupError::ImageFormat(
+                    tr!("fat_writer.image_full").into_owned(),
+                ));
             }
             fat[c as usize] = if i + 1 == count { 0xFFFF } else { c + 1 };
             next_free += 1;
@@ -174,7 +176,11 @@ pub fn build_fat16(files: &[FatFile], label: &str) -> Result<Vec<u8>> {
             .map(|(_, c)| *c)
             .unwrap_or(0);
         let slot = used.entry(parent.clone()).or_insert(0);
-        let base = if parent.is_empty() { root_off } else { cluster_off(parent_cluster) };
+        let base = if parent.is_empty() {
+            root_off
+        } else {
+            cluster_off(parent_cluster)
+        };
         write_entry(&mut img, base + *slot * 32, &name, 0x10, *cluster, 0);
         *slot += 1;
 
@@ -194,8 +200,19 @@ pub fn build_fat16(files: &[FatFile], label: &str) -> Result<Vec<u8>> {
             .map(|(_, c)| *c)
             .unwrap_or(0);
         let slot = used.entry(parent.clone()).or_insert(0);
-        let base = if parent.is_empty() { root_off } else { cluster_off(parent_cluster) };
-        write_entry(&mut img, base + *slot * 32, &name, 0x20, *cluster, f.data.len() as u32);
+        let base = if parent.is_empty() {
+            root_off
+        } else {
+            cluster_off(parent_cluster)
+        };
+        write_entry(
+            &mut img,
+            base + *slot * 32,
+            &name,
+            0x20,
+            *cluster,
+            f.data.len() as u32,
+        );
         *slot += 1;
 
         let at = cluster_off(*cluster);
@@ -247,8 +264,14 @@ mod tests {
 
     fn efi_tree() -> Vec<FatFile> {
         vec![
-            FatFile { path: r"EFI\BOOT\BOOTX64.EFI".into(), data: vec![0xAA; 1_681_904] },
-            FatFile { path: r"EFI\Microsoft\Boot\BCD".into(), data: vec![0xBB; 16_384] },
+            FatFile {
+                path: r"EFI\BOOT\BOOTX64.EFI".into(),
+                data: vec![0xAA; 1_681_904],
+            },
+            FatFile {
+                path: r"EFI\Microsoft\Boot\BCD".into(),
+                data: vec![0xBB; 16_384],
+            },
         ]
     }
 
@@ -265,14 +288,23 @@ mod tests {
     /// nothing but nonsense, so a small image is padded rather than shrunk.
     #[test]
     fn a_tiny_image_is_still_a_valid_fat16() {
-        let img =
-            build_fat16(&[FatFile { path: "A.TXT".into(), data: b"hi".to_vec() }], "T").unwrap();
+        let img = build_fat16(
+            &[FatFile {
+                path: "A.TXT".into(),
+                data: b"hi".to_vec(),
+            }],
+            "T",
+        )
+        .unwrap();
         let total = u16::from_le_bytes([img[19], img[20]]) as u32;
         let reserved = u16::from_le_bytes([img[14], img[15]]) as u32;
         let fats = img[16] as u32 * u16::from_le_bytes([img[22], img[23]]) as u32;
         let root = (u16::from_le_bytes([img[17], img[18]]) as u32 * 32).div_ceil(512);
         let clusters = (total - reserved - fats - root) / img[13] as u32;
-        assert!(clusters > 4085, "only {clusters} clusters — a driver may read this as FAT12");
+        assert!(
+            clusters > 4085,
+            "only {clusters} clusters — a driver may read this as FAT12"
+        );
     }
 
     #[test]
@@ -283,7 +315,11 @@ mod tests {
         let fat_sectors = u16::from_le_bytes([img[22], img[23]]) as usize;
         let root_off = (reserved + img[16] as usize * fat_sectors) * SECTOR;
         // Root: volume label, then the EFI directory.
-        assert_eq!(&img[root_off + 11..root_off + 12], &[0x08], "label entry first");
+        assert_eq!(
+            &img[root_off + 11..root_off + 12],
+            &[0x08],
+            "label entry first"
+        );
         assert_eq!(&img[root_off + 32..root_off + 35], b"EFI");
         assert_eq!(img[root_off + 32 + 11], 0x10, "EFI must be a directory");
     }
@@ -291,10 +327,16 @@ mod tests {
     #[test]
     fn an_oversized_request_fails_instead_of_writing_a_broken_image() {
         // One file larger than the clusters the header can describe.
-        let huge = FatFile { path: "BIG.BIN".into(), data: vec![0; 8] };
+        let huge = FatFile {
+            path: "BIG.BIN".into(),
+            data: vec![0; 8],
+        };
         let mut files = vec![huge];
         for i in 0..10 {
-            files.push(FatFile { path: format!("F{i}.BIN"), data: vec![0; 8] });
+            files.push(FatFile {
+                path: format!("F{i}.BIN"),
+                data: vec![0; 8],
+            });
         }
         // Not an error at this size — the point is that it builds cleanly.
         assert!(build_fat16(&files, "T").is_ok());

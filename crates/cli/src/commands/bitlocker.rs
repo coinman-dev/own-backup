@@ -64,13 +64,20 @@ pub async fn run(args: BitlockerArgs) -> Result<()> {
     let disks = inventory.enumerate_disks().await?;
 
     for disk in &disks {
-        let Some(number) = disk.device_id.rsplit("PhysicalDrive").next().and_then(|n| n.parse::<u32>().ok())
+        let Some(number) = disk
+            .device_id
+            .rsplit("PhysicalDrive")
+            .next()
+            .and_then(|n| n.parse::<u32>().ok())
         else {
             continue;
         };
         for part in &disk.partitions {
             if let Some(want) = &args.volume {
-                let letter = part.volume_letter.map(|c| format!("{c}:")).unwrap_or_default();
+                let letter = part
+                    .volume_letter
+                    .map(|c| format!("{c}:"))
+                    .unwrap_or_default();
                 let dev = part.volume_device.clone();
                 let want_norm = want.trim_end_matches('\\').to_lowercase();
                 if letter.to_lowercase() != want_norm && dev.to_lowercase() != want_norm {
@@ -112,7 +119,11 @@ fn examine(
     disk_id: &str,
     dump: Option<&str>,
     dump_kib: u64,
-) -> (String, String, std::result::Result<own_backup_backup::bitlocker::BitLockerInfo, String>) {
+) -> (
+    String,
+    String,
+    std::result::Result<own_backup_backup::bitlocker::BitLockerInfo, String>,
+) {
     use own_backup_backup::fat_map::RawVolume;
     use own_backup_backup::volume_window::VolumeWindow;
     use own_backup_backup::win_device::WinRawDevice;
@@ -133,7 +144,10 @@ fn examine(
             let want = (dump_kib * 1024).min(window.len()) as usize;
             let mut buf = vec![0u8; want];
             window.read_at(0, &mut buf).map_err(|e| e.to_string())?;
-            let stem = format!("{dump}.{}", label.trim_end_matches(':').replace([' ', '\\'], "_"));
+            let stem = format!(
+                "{dump}.{}",
+                label.trim_end_matches(':').replace([' ', '\\'], "_")
+            );
             let file = format!("{stem}.bin");
             std::fs::write(&file, &buf).map_err(|e| e.to_string())?;
             println!("  записано {} КиБ в {file}", want / 1024);
@@ -142,8 +156,8 @@ fn examine(
             // what it knows about its own conversion — none of it lives in the
             // first kilobytes above. Headers and wrapped keys only: the keys in
             // these blocks are sealed, and no volume data is in them.
-            let offsets = own_backup_backup::bitlocker::fve_metadata_offsets(&mut window)
-                .unwrap_or_default();
+            let offsets =
+                own_backup_backup::bitlocker::fve_metadata_offsets(&mut window).unwrap_or_default();
             for (i, off) in offsets.iter().enumerate() {
                 let len = (64 * 1024).min(window.len().saturating_sub(*off)) as usize;
                 let mut block = vec![0u8; len];
@@ -167,7 +181,9 @@ fn try_unlock(disk: u32, offset: u64, size: u64, label: &str) {
     use own_backup_backup::volume_window::VolumeWindow;
     use own_backup_backup::win_device::WinRawDevice;
 
-    let pass = match crate::secret_prompt::ask_secret(&format!("  Пароль или ключ восстановления для {label} (не отображается): ")) {
+    let pass = match crate::secret_prompt::ask_secret(&format!(
+        "  Пароль или ключ восстановления для {label} (не отображается): "
+    )) {
         Ok(p) if !p.is_empty() => p,
         Ok(_) => {
             println!("  Пароль не введён — пропускаем.");
@@ -194,8 +210,7 @@ fn try_unlock(disk: u32, offset: u64, size: u64, label: &str) {
         let window = own_backup_backup::aligned_volume::AlignedVolume::new(
             VolumeWindow::new(Box::new(dev), offset, size).map_err(|e| e.to_string())?,
         );
-        let mut view =
-            own_backup_backup::bitlocker::BitLockerVolume::new(Box::new(window), params);
+        let mut view = own_backup_backup::bitlocker::BitLockerVolume::new(Box::new(window), params);
         use own_backup_backup::fat_map::RawVolume;
         let want = (own_backup_inventory::fs_probe::PROBE_LEN as u64).min(view.len()) as usize;
         let mut buf = vec![0u8; want];
@@ -226,12 +241,16 @@ fn try_unlock(disk: u32, offset: u64, size: u64, label: &str) {
                 let probed = (|| -> std::result::Result<Vec<String>, String> {
                     let dev = WinRawDevice::open_read(&path).map_err(|e| e.to_string())?;
                     let mut window = own_backup_backup::aligned_volume::AlignedVolume::new(
-                        VolumeWindow::new(Box::new(dev), offset, size).map_err(|e| e.to_string())?,
+                        VolumeWindow::new(Box::new(dev), offset, size)
+                            .map_err(|e| e.to_string())?,
                     );
                     let params =
                         own_backup_backup::bitlocker::open_bitlocker_unverified(&mut window, &pass)
                             .map_err(|e| e.to_string())?;
-                    Ok(own_backup_backup::bitlocker::diagnose_first_sector(&mut window, &params))
+                    Ok(own_backup_backup::bitlocker::diagnose_first_sector(
+                        &mut window,
+                        &params,
+                    ))
                 })();
                 match probed {
                     Ok(lines) => lines.iter().for_each(|l| println!("    {l}")),
@@ -286,7 +305,6 @@ type Examined = (
     std::result::Result<own_backup_backup::bitlocker::BitLockerInfo, String>,
 );
 
-
 /// Стенд этапа B5: проверить, умеет ли ЭТА система открыть том сама.
 ///
 /// Проверяется по одному: есть ли `manage-bde` (он приходит с компонентом
@@ -330,7 +348,10 @@ async fn windows_unlock(args: &BitlockerArgs) -> Result<()> {
             extents.len()
         )));
     };
-    println!("Том:          {volume} (диск {}, смещение {})", extent.disk_number, extent.offset);
+    println!(
+        "Том:          {volume} (диск {}, смещение {})",
+        extent.disk_number, extent.offset
+    );
 
     // Системный диск не трогаем даже так: запрет записи на него — не то, что
     // можно ставить между делом.
@@ -346,7 +367,10 @@ async fn windows_unlock(args: &BitlockerArgs) -> Result<()> {
         .map_err(|e| own_backup_common::OwnBackupError::Config(format!("ввод: {e}")))?;
     let secret = secret.trim().to_string();
     let digits: String = secret.chars().filter(|c| c.is_ascii_digit()).collect();
-    let looks_like_key = digits.len() == 48 && secret.chars().all(|c| c.is_ascii_digit() || c == '-' || c == ' ');
+    let looks_like_key = digits.len() == 48
+        && secret
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '-' || c == ' ');
 
     let guard = wu::ReadOnlyDisk::arm(extent.disk_number)?;
     println!("Диск закрыт на запись — монтирование ничего в нём не изменит.");
@@ -375,7 +399,8 @@ async fn windows_unlock(args: &BitlockerArgs) -> Result<()> {
                     Ok(()) => {
                         let fs = if &boot[3..11] == b"NTFS    " {
                             "NTFS"
-                        } else if &boot[3..11] == b"ReFS\0\0\0\0" || &boot[0..8] == b"\0\0\0ReFS\0" {
+                        } else if &boot[3..11] == b"ReFS\0\0\0\0" || &boot[0..8] == b"\0\0\0ReFS\0"
+                        {
                             "ReFS"
                         } else if &boot[3..11] == b"EXFAT   " {
                             "exFAT"
@@ -406,7 +431,6 @@ fn digits_with_dashes(digits: &str) -> String {
         .collect::<Vec<_>>()
         .join("-")
 }
-
 
 fn report(found: Vec<Examined>, json: bool) -> Result<()> {
     let encrypted: Vec<&Examined> = found.iter().filter(|(_, _, r)| r.is_ok()).collect();
@@ -457,7 +481,11 @@ fn report(found: Vec<Examined>, json: bool) -> Result<()> {
             "  Шифр:            {} [{:#06x}]{}",
             info.cipher_name,
             info.cipher,
-            if info.cipher_supported { "" } else { "  ← не поддерживается" }
+            if info.cipher_supported {
+                ""
+            } else {
+                "  ← не поддерживается"
+            }
         );
         println!(
             "  Размер шифр. области: {} байт ({:.1} GiB)",
@@ -479,7 +507,11 @@ fn report(found: Vec<Examined>, json: bool) -> Result<()> {
                 "    [{:#06x}] {}{}{}",
                 p.kind,
                 p.name,
-                if p.count > 1 { format!(" ×{}", p.count) } else { String::new() },
+                if p.count > 1 {
+                    format!(" ×{}", p.count)
+                } else {
+                    String::new()
+                },
                 if p.usable { "  ← умеем" } else { "" }
             );
         }

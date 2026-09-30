@@ -66,7 +66,11 @@ pub fn parse_part_spec(device: &str) -> Option<Extent> {
     if it.next().is_some() {
         return None;
     }
-    Some(Extent { disk, offset, length })
+    Some(Extent {
+        disk,
+        offset,
+        length,
+    })
 }
 
 /// The volume root VSS wants for a source device, or `None` when the device is
@@ -84,7 +88,9 @@ pub fn parse_part_spec(device: &str) -> Option<Extent> {
 /// AND the loss of the fast `$MFT` exclusion path, which refuses to read raw
 /// metadata of a source nobody froze.
 pub fn volume_root_for_snapshot(device_path: &str) -> Option<String> {
-    let rest = device_path.strip_prefix(r"\\.\").or_else(|| device_path.strip_prefix(r"\\?\"))?;
+    let rest = device_path
+        .strip_prefix(r"\\.\")
+        .or_else(|| device_path.strip_prefix(r"\\?\"))?;
     let trimmed = rest.trim_end_matches('\\');
     let bytes = trimmed.as_bytes();
     // A drive letter: `\\.\C:` → `C:\`
@@ -132,7 +138,11 @@ mod win {
             .or_else(|| volume_root_for_path(&format!("{}\\", device.trim_end_matches('\\'))))?;
         let out: Vec<Extent> = volume_extents(&root)
             .into_iter()
-            .map(|e| Extent { disk: e.disk_number, offset: e.offset, length: e.length })
+            .map(|e| Extent {
+                disk: e.disk_number,
+                offset: e.offset,
+                length: e.length,
+            })
             .collect();
         (!out.is_empty()).then_some(out)
     }
@@ -221,7 +231,11 @@ pub fn where_the_destination_sits(sources: &[String], dest_folder: &str) -> Dest
     }
     if !unresolved.is_empty() {
         return DestPlacement::CannotTell(
-            tr!("source_identity.sources_unknown", sources = unresolved.join(", ")).into_owned(),
+            tr!(
+                "source_identity.sources_unknown",
+                sources = unresolved.join(", ")
+            )
+            .into_owned(),
         );
     }
     DestPlacement::Clear
@@ -232,7 +246,12 @@ pub fn refuse_destination_on_a_source(sources: &[String], dest_folder: &str) -> 
     match where_the_destination_sits(sources, dest_folder) {
         DestPlacement::Clear => Ok(()),
         DestPlacement::OnSource(s) => Err(own_backup_common::OwnBackupError::Config(
-            tr!("source_identity.dest_on_source", folder = dest_folder, source = s).into_owned(),
+            tr!(
+                "source_identity.dest_on_source",
+                folder = dest_folder,
+                source = s
+            )
+            .into_owned(),
         )),
         DestPlacement::CannotTell(why) => Err(own_backup_common::OwnBackupError::Config(
             tr!("source_identity.cannot_verify_dest", reason = why).into_owned(),
@@ -248,11 +267,23 @@ mod tests {
     fn a_partition_spec_is_a_range_on_a_disk() {
         assert_eq!(
             parse_part_spec("part:4:1048576:1000"),
-            Some(Extent { disk: 4, offset: 1048576, length: 1000 })
+            Some(Extent {
+                disk: 4,
+                offset: 1048576,
+                length: 1000
+            })
         );
         assert_eq!(parse_part_spec("C:"), None);
-        assert_eq!(parse_part_spec("part:4:1048576"), None, "a range needs three numbers");
-        assert_eq!(parse_part_spec("part:4:1048576:1000:5"), None, "and no more than three");
+        assert_eq!(
+            parse_part_spec("part:4:1048576"),
+            None,
+            "a range needs three numbers"
+        );
+        assert_eq!(
+            parse_part_spec("part:4:1048576:1000:5"),
+            None,
+            "and no more than three"
+        );
         assert_eq!(parse_part_spec("part:x:1:2"), None);
     }
 
@@ -260,28 +291,56 @@ mod tests {
     /// partition of the same disk is a perfectly good destination.
     #[test]
     fn two_partitions_of_one_disk_do_not_overlap() {
-        let a = Extent { disk: 0, offset: 1024 * 1024, length: 100 * 1024 * 1024 };
-        let b = Extent { disk: 0, offset: 200 * 1024 * 1024, length: 100 * 1024 * 1024 };
+        let a = Extent {
+            disk: 0,
+            offset: 1024 * 1024,
+            length: 100 * 1024 * 1024,
+        };
+        let b = Extent {
+            disk: 0,
+            offset: 200 * 1024 * 1024,
+            length: 100 * 1024 * 1024,
+        };
         assert!(!a.overlaps(&b));
         assert!(!b.overlaps(&a));
     }
 
     #[test]
     fn the_same_range_on_the_same_disk_overlaps() {
-        let a = Extent { disk: 2, offset: 1024, length: 4096 };
+        let a = Extent {
+            disk: 2,
+            offset: 1024,
+            length: 4096,
+        };
         assert!(a.overlaps(&a));
         // Touching but not sharing a byte is not an overlap.
-        let after = Extent { disk: 2, offset: 1024 + 4096, length: 4096 };
+        let after = Extent {
+            disk: 2,
+            offset: 1024 + 4096,
+            length: 4096,
+        };
         assert!(!a.overlaps(&after));
         // One byte inside is.
-        let inside = Extent { disk: 2, offset: 1024 + 4095, length: 4096 };
+        let inside = Extent {
+            disk: 2,
+            offset: 1024 + 4095,
+            length: 4096,
+        };
         assert!(a.overlaps(&inside));
     }
 
     #[test]
     fn the_same_range_on_a_different_disk_is_a_different_place() {
-        let a = Extent { disk: 0, offset: 1024, length: 4096 };
-        let b = Extent { disk: 1, offset: 1024, length: 4096 };
+        let a = Extent {
+            disk: 0,
+            offset: 1024,
+            length: 4096,
+        };
+        let b = Extent {
+            disk: 1,
+            offset: 1024,
+            length: 4096,
+        };
         assert!(!a.overlaps(&b));
     }
 
@@ -289,11 +348,23 @@ mod tests {
     /// into "no overlap".
     #[test]
     fn a_length_that_would_wrap_is_clamped_not_wrapped() {
-        let huge = Extent { disk: 0, offset: u64::MAX - 10, length: u64::MAX };
-        let low = Extent { disk: 0, offset: 0, length: 4096 };
+        let huge = Extent {
+            disk: 0,
+            offset: u64::MAX - 10,
+            length: u64::MAX,
+        };
+        let low = Extent {
+            disk: 0,
+            offset: 0,
+            length: 4096,
+        };
         // Saturating means `huge` reaches the end of the disk, not back to 0.
         assert!(!huge.overlaps(&low));
-        let at_the_top = Extent { disk: 0, offset: u64::MAX - 5, length: 2 };
+        let at_the_top = Extent {
+            disk: 0,
+            offset: u64::MAX - 5,
+            length: 2,
+        };
         assert!(huge.overlaps(&at_the_top));
     }
 
@@ -301,7 +372,9 @@ mod tests {
     fn a_share_on_another_machine_is_not_a_local_volume() {
         assert!(is_network_path(r"\\server\backups"));
         assert!(is_network_path("//server/backups"));
-        assert!(!is_network_path(r"\\?\Volume{12345678-1234-1234-1234-123456789abc}"));
+        assert!(!is_network_path(
+            r"\\?\Volume{12345678-1234-1234-1234-123456789abc}"
+        ));
         assert!(!is_network_path(r"\\.\PhysicalDrive0"));
         assert!(!is_network_path(r"D:\Backups"));
     }
@@ -361,8 +434,16 @@ mod tests {
     fn what_is_not_a_volume_gets_no_snapshot() {
         assert_eq!(volume_root_for_snapshot(r"\\.\PhysicalDrive0"), None);
         assert_eq!(volume_root_for_snapshot("part:4:1048576:1000"), None);
-        assert_eq!(volume_root_for_snapshot("C:"), None, "путь должен быть уже нормализован");
-        assert_eq!(volume_root_for_snapshot(r"\\.\Volume"), None, "без скобок это не GUID");
+        assert_eq!(
+            volume_root_for_snapshot("C:"),
+            None,
+            "путь должен быть уже нормализован"
+        );
+        assert_eq!(
+            volume_root_for_snapshot(r"\\.\Volume"),
+            None,
+            "без скобок это не GUID"
+        );
         assert_eq!(volume_root_for_snapshot(r"\\?\Volume{"), None);
         assert_eq!(volume_root_for_snapshot(""), None);
     }

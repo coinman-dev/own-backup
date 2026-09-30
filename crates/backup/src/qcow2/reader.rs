@@ -59,7 +59,9 @@ impl<R: Read + Seek> Qcow2Reader<R> {
         let virtual_size = u64::from_be_bytes(h[24..32].try_into().unwrap());
         let crypt_method = u32::from_be_bytes(h[32..36].try_into().unwrap());
         if crypt_method != 0 {
-            return Err(bad(format!("encrypted image (crypt_method {crypt_method}) not supported")));
+            return Err(bad(format!(
+                "encrypted image (crypt_method {crypt_method}) not supported"
+            )));
         }
         let l1_size = u32::from_be_bytes(h[36..40].try_into().unwrap());
         let l1_table_offset = u64::from_be_bytes(h[40..48].try_into().unwrap());
@@ -97,7 +99,9 @@ impl<R: Read + Seek> Qcow2Reader<R> {
 
         let backing_file = if backing_file_offset != 0 {
             if backing_file_size == 0 || backing_file_size > 1023 {
-                return Err(bad(format!("backing file name size {backing_file_size} out of range")));
+                return Err(bad(format!(
+                    "backing file name size {backing_file_size} out of range"
+                )));
             }
             let mut name = vec![0u8; backing_file_size as usize];
             r.seek(SeekFrom::Start(backing_file_offset))?;
@@ -190,7 +194,10 @@ impl<R: Read + Seek> Qcow2Reader<R> {
                 self.r.read_exact(&mut data)?;
                 Ok(Some(data))
             }
-            ClusterDescriptor::Compressed { host_offset, length } => {
+            ClusterDescriptor::Compressed {
+                host_offset,
+                length,
+            } => {
                 if self.compression == Compression::Deflate {
                     return Err(bad(
                         "deflate-compressed cluster — only zstd qcow2 images are supported",

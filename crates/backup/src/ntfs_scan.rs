@@ -195,7 +195,10 @@ where
     // на проход внутри образа — там журнал проигрывает сам драйвер Windows, в
     // копии, не трогая источник.
     if let Ok(info) = ntfs.volume_info(fs) {
-        if info.flags().contains(ntfs::structured_values::NtfsVolumeFlags::IS_DIRTY) {
+        if info
+            .flags()
+            .contains(ntfs::structured_values::NtfsVolumeFlags::IS_DIRTY)
+        {
             return Err(bad(tr!("ntfs_scan.volume_dirty")));
         }
     }
@@ -256,9 +259,7 @@ where
                             // Короткое имя 8.3 — псевдоним, а не отдельная ссылка.
                             if fname.namespace() != NtfsFileNamespace::Dos {
                                 names.push(Name {
-                                    parent: fname
-                                        .parent_directory_reference()
-                                        .file_record_number(),
+                                    parent: fname.parent_directory_reference().file_record_number(),
                                     name: fname.name().to_string_lossy(),
                                 });
                             }
@@ -354,10 +355,13 @@ where
     decide(&entries, &parsed, cluster_size, &mut scan);
     scan.ranges.finalize();
     scan.decide_ms = pass2.elapsed().as_millis() as u64;
-    debug!(parse_ms = scan.parse_ms, decide_ms = scan.decide_ms, "MFT scan: готово");
+    debug!(
+        parse_ms = scan.parse_ms,
+        decide_ms = scan.decide_ms,
+        "MFT scan: готово"
+    );
     Ok(scan)
 }
-
 
 /// Правила: что вычесть из копии, что оставить, что записать на удаление.
 ///
@@ -401,7 +405,9 @@ fn decide(
     }
 
     let matches = |comps: &[String]| -> bool {
-        let Some(last) = comps.last() else { return false };
+        let Some(last) = comps.last() else {
+            return false;
+        };
         let lower: Vec<String> = comps.iter().map(|c| c.to_lowercase()).collect();
         let name_lower = last.to_lowercase();
         parsed.iter().any(|p| p.matches(&name_lower, &lower))
@@ -465,7 +471,8 @@ fn decide(
             Some(KeptReason::Reparse)
         } else if e.resident_data {
             Some(KeptReason::Resident)
-        } else if e.names.len() > 1 && !all_names_excluded(e, &entries, &mut path_cache, &matches, &excluded_dirs)
+        } else if e.names.len() > 1
+            && !all_names_excluded(e, &entries, &mut path_cache, &matches, &excluded_dirs)
         {
             Some(KeptReason::OtherNameKept)
         } else if e.data_size > 0 && e.allocated == 0 {
@@ -519,7 +526,6 @@ fn decide(
             "MFT scan: у части совпавших файлов данные остаются в копии"
         );
     }
-
 }
 
 fn under_excluded(
@@ -529,8 +535,12 @@ fn under_excluded(
 ) -> bool {
     let mut cur = n;
     for _ in 0..128 {
-        let Some(e) = entries.get(&cur) else { return false };
-        let Some(name) = e.names.first() else { return false };
+        let Some(e) = entries.get(&cur) else {
+            return false;
+        };
+        let Some(name) = e.names.first() else {
+            return false;
+        };
         if name.parent == cur || name.parent == ROOT_RECORD {
             return false;
         }
@@ -607,7 +617,6 @@ where
     }
     None
 }
-
 
 /// Забрать экстенты из итератора data runs. Дыра разреженного файла места на
 /// диске не занимает, вычитать её нечего.
@@ -841,7 +850,12 @@ pub struct VolumeWindow<R> {
 
 impl<R: Read + Seek> VolumeWindow<R> {
     pub fn new(inner: R, base: u64, len: u64) -> Self {
-        Self { inner, base, pos: 0, len }
+        Self {
+            inner,
+            base,
+            pos: 0,
+            len,
+        }
     }
 }
 
@@ -945,7 +959,10 @@ mod tests {
         let started = std::time::Instant::now();
         let reader = crate::vhdx_bat::VhdxGuestReader::open(std::path::Path::new(&image))
             .expect("открыть образ");
-        let mut cur = VhdxCursor { inner: reader, pos: 0 };
+        let mut cur = VhdxCursor {
+            inner: reader,
+            pos: 0,
+        };
         let base = volume_offset(&mut cur);
         let win = VolumeWindow::new(cur, base, u64::MAX / 2);
         // 4 МиБ × 6 окон: MFT читается последовательно, а прыжки за
@@ -1009,7 +1026,10 @@ mod tests {
             }
             println!("список путей:     {out}");
         }
-        assert!(scan.files_excluded > 0, "не найдено ни одного исключаемого файла");
+        assert!(
+            scan.files_excluded > 0,
+            "не найдено ни одного исключаемого файла"
+        );
     }
 }
 
@@ -1028,7 +1048,10 @@ mod rules_tests {
 
     fn dir(parent: u64, name: &str) -> Entry {
         Entry {
-            names: vec![Name { parent, name: name.into() }],
+            names: vec![Name {
+                parent,
+                name: name.into(),
+            }],
             is_dir: true,
             is_reparse: false,
             data_size: 0,
@@ -1043,7 +1066,10 @@ mod rules_tests {
     /// Файл с одним именем и одним экстентом ровно по размеру.
     fn file(parent: u64, name: &str, lcn: u64, clusters: u64) -> Entry {
         Entry {
-            names: vec![Name { parent, name: name.into() }],
+            names: vec![Name {
+                parent,
+                name: name.into(),
+            }],
             is_dir: false,
             is_reparse: false,
             data_size: clusters * 4096,
@@ -1066,7 +1092,14 @@ mod rules_tests {
 
     fn clone_entry(e: &Entry) -> Entry {
         Entry {
-            names: e.names.iter().map(|n| Name { parent: n.parent, name: n.name.clone() }).collect(),
+            names: e
+                .names
+                .iter()
+                .map(|n| Name {
+                    parent: n.parent,
+                    name: n.name.clone(),
+                })
+                .collect(),
             is_dir: e.is_dir,
             is_reparse: e.is_reparse,
             data_size: e.data_size,
@@ -1088,17 +1121,20 @@ mod rules_tests {
     #[test]
     fn a_hard_link_outside_the_exclusion_keeps_the_data() {
         let mut shared = file(20, "shared.tmp", 100, 2);
-        shared.names.push(Name { parent: ROOT_RECORD, name: "keep-me.bin".into() });
-        let scan = run(
-            &[
-                (20, dir(ROOT_RECORD, "Temp")),
-                (30, shared),
-            ],
-            &["*.tmp"],
+        shared.names.push(Name {
+            parent: ROOT_RECORD,
+            name: "keep-me.bin".into(),
+        });
+        let scan = run(&[(20, dir(ROOT_RECORD, "Temp")), (30, shared)], &["*.tmp"]);
+        assert_eq!(
+            scan.files_excluded, 0,
+            "данные общие с уцелевшим именем — вычитать нельзя"
         );
-        assert_eq!(scan.files_excluded, 0, "данные общие с уцелевшим именем — вычитать нельзя");
         assert_eq!(kept_reasons(&scan), vec![KeptReason::OtherNameKept]);
-        assert!(scan.ranges.is_empty(), "ни один кластер не должен быть вычтен");
+        assert!(
+            scan.ranges.is_empty(),
+            "ни один кластер не должен быть вычтен"
+        );
         // Запись из каталога всё равно убирается — под правило имя попало.
         assert_eq!(scan.paths.len(), 1);
     }
@@ -1107,7 +1143,10 @@ mod rules_tests {
     #[test]
     fn a_hard_link_excluded_under_every_name_is_subtracted() {
         let mut shared = file(20, "a.tmp", 100, 2);
-        shared.names.push(Name { parent: 20, name: "b.tmp".into() });
+        shared.names.push(Name {
+            parent: 20,
+            name: "b.tmp".into(),
+        });
         let scan = run(&[(20, dir(ROOT_RECORD, "Temp")), (30, shared)], &["*.tmp"]);
         assert_eq!(scan.files_excluded, 1);
         assert_eq!(scan.bytes_excluded, 2 * 4096);
@@ -1223,7 +1262,10 @@ mod rules_tests {
         // безопаснее.
         sparse.compressed_or_sparse = true;
         let scan = run(&[(30, sparse)], &["*.tmp"]);
-        assert_eq!(scan.files_excluded, 1, "выделенное кратно кластеру — файл сжат/разрежен");
+        assert_eq!(
+            scan.files_excluded, 1,
+            "выделенное кратно кластеру — файл сжат/разрежен"
+        );
         assert_eq!(scan.bytes_excluded, 2 * 4096);
     }
 

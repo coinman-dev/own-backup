@@ -8,10 +8,10 @@
 use std::pin::Pin;
 use std::sync::Arc;
 
+use own_backup_common::tr;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
-use own_backup_common::tr;
 use tonic::{Request, Response, Status};
 use tracing::info;
 
@@ -32,7 +32,10 @@ pub struct BackupServiceImpl {
 
 impl BackupServiceImpl {
     pub fn new(state: Arc<AppState>, service_token: String) -> Self {
-        Self { state, service_token }
+        Self {
+            state,
+            service_token,
+        }
     }
 
     pub fn into_service(self) -> BackupServiceServer<BackupServiceImpl> {
@@ -91,7 +94,11 @@ impl BackupServiceImpl {
         // unplug a USB disk and plug another in, and the number moves (audit
         // AUD-01, point 5).
         let now = live_disk_id(plan.target_disk).await;
-        match plan.target_disk_id.as_ref().and_then(|was| was.matches(&now)) {
+        match plan
+            .target_disk_id
+            .as_ref()
+            .and_then(|was| was.matches(&now))
+        {
             Some(true) => {}
             Some(false) => {
                 let was = plan.target_disk_id.clone().unwrap_or_default();
@@ -101,7 +108,8 @@ impl BackupServiceImpl {
                     found = ?now,
                     "the target disk is not the one the plan was made for"
                 );
-                return Ok(vec![tr!("grpc_server.target_disk_changed",
+                return Ok(vec![tr!(
+                    "grpc_server.target_disk_changed",
                     disk = plan.target_disk,
                     was_serial = was.serial,
                     was_size = was.size_bytes,
@@ -231,7 +239,12 @@ fn image_sources(
     let source = disk.source_disk.as_ref()?;
 
     // A copy that kept the container's header can be restored still encrypted.
-    let headers: Vec<u32> = sidecar.info.luks_headers.iter().map(|h| h.part_index).collect();
+    let headers: Vec<u32> = sidecar
+        .info
+        .luks_headers
+        .iter()
+        .map(|h| h.part_index)
+        .collect();
 
     Some(
         source
@@ -325,7 +338,10 @@ async fn live_disk_id(disk: u32) -> own_backup_common::restore_plan::TargetDiskI
     if let Ok(inv) = own_backup_inventory::WindowsInventory::new() {
         if let Ok(disks) = inv.enumerate_disks().await {
             let want = format!(r"\\.\PhysicalDrive{disk}");
-            if let Some(info) = disks.iter().find(|d| d.device_id.eq_ignore_ascii_case(&want)) {
+            if let Some(info) = disks
+                .iter()
+                .find(|d| d.device_id.eq_ignore_ascii_case(&want))
+            {
                 id.serial = info.serial.clone();
                 if id.size_bytes == 0 {
                     id.size_bytes = info.size_bytes;
@@ -343,9 +359,7 @@ async fn live_disk_id(_disk: u32) -> own_backup_common::restore_plan::TargetDisk
 
 /// What the target disk holds right now.
 #[cfg(target_os = "windows")]
-fn current_target_partitions(
-    disk: u32,
-) -> Vec<own_backup_common::restore_check::TargetPartition> {
+fn current_target_partitions(disk: u32) -> Vec<own_backup_common::restore_check::TargetPartition> {
     use own_backup_common::restore_check::TargetPartition;
 
     let Ok(layout) = own_backup_backup::gpt_reader::read_disk_layout(disk) else {
@@ -369,9 +383,7 @@ fn current_target_partitions(
 }
 
 #[cfg(not(target_os = "windows"))]
-fn current_target_partitions(
-    _disk: u32,
-) -> Vec<own_backup_common::restore_check::TargetPartition> {
+fn current_target_partitions(_disk: u32) -> Vec<own_backup_common::restore_check::TargetPartition> {
     Vec::new()
 }
 
@@ -426,7 +438,10 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    a.iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
 }
 
 /// Serialize any value into a `JsonReply`.
@@ -485,14 +500,18 @@ fn manual_keys(
             .map(Some)
             .map_err(refused_secret),
         (None, Some(typed)) => {
-            let key = RecoveryKey::parse(typed)
-                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+            let key =
+                RecoveryKey::parse(typed).map_err(|e| Status::invalid_argument(e.to_string()))?;
             ArchiveKeys::from_image_recovery(image, &key)
                 .map(Some)
                 .map_err(refused_secret)
         }
         (None, None) => Err(Status::unauthenticated(
-            tr!("grpc_server.image_encrypted_needs_secret", image = image.display()).into_owned(),
+            tr!(
+                "grpc_server.image_encrypted_needs_secret",
+                image = image.display()
+            )
+            .into_owned(),
         )),
     }
 }
@@ -554,8 +573,7 @@ fn taken_drive_letters() -> Vec<char> {
 /// Informational now, not a refusal: what gets refused is a plan that touches
 /// the partitions that system is standing on (`protected_partitions`).
 fn is_system_disk(disk: u32) -> bool {
-    own_backup_restore::system_disk_number() == Some(disk)
-        && !own_backup_restore::is_boot_media()
+    own_backup_restore::system_disk_number() == Some(disk) && !own_backup_restore::is_boot_media()
 }
 
 /// Replace the plan's idea of the target disk's size with the device's own.
@@ -629,13 +647,19 @@ fn emit_engine<T: serde::Serialize>(
 /// the encryption wizard validates the job before the authorization exists.
 fn validate_job(job: &own_backup_core::Job, encrypted: bool) -> Result<(), Status> {
     if job.name.trim().is_empty() {
-        return Err(Status::invalid_argument(tr!("grpc_server.job_name_missing").into_owned()));
+        return Err(Status::invalid_argument(
+            tr!("grpc_server.job_name_missing").into_owned(),
+        ));
     }
     if job.source_list().is_empty() {
-        return Err(Status::invalid_argument(tr!("grpc_server.job_source_missing").into_owned()));
+        return Err(Status::invalid_argument(
+            tr!("grpc_server.job_source_missing").into_owned(),
+        ));
     }
     if job.dest_folder.trim().is_empty() {
-        return Err(Status::invalid_argument(tr!("grpc_server.job_dest_missing").into_owned()));
+        return Err(Status::invalid_argument(
+            tr!("grpc_server.job_dest_missing").into_owned(),
+        ));
     }
     if let Some(letter) = own_backup_core::dest_collision_letter(job, &job.dest_folder) {
         return Err(Status::invalid_argument(
@@ -683,7 +707,9 @@ fn validate_job(job: &own_backup_core::Job, encrypted: bool) -> Result<(), Statu
                 // change, and it used to pass here — then every run after it
                 // failed the runner's own check, at night, with nobody told
                 // why. Said now, while the person is looking at the screen.
-                let msg = if encrypted && other.container != own_backup_backup::seal::obk::OBK_EXTENSION {
+                let msg = if encrypted
+                    && other.container != own_backup_backup::seal::obk::OBK_EXTENSION
+                {
                     tr!("grpc_server.job_encrypt_over_plain_copies")
                 } else {
                     tr!("grpc_server.job_format_change")
@@ -726,11 +752,9 @@ impl BackupService for BackupServiceImpl {
         // Reported as saved only once it is on disk: a full destination or a
         // read-only data folder used to give a job that lived until the next
         // restart and then vanished (audit AUD-08).
-        let saved = self
-            .state
-            .store
-            .upsert(job)
-            .map_err(|e| Status::internal(tr!("grpc_server.job_not_saved", error = e).into_owned()))?;
+        let saved = self.state.store.upsert(job).map_err(|e| {
+            Status::internal(tr!("grpc_server.job_not_saved", error = e).into_owned())
+        })?;
         json_reply(&saved)
     }
 
@@ -776,10 +800,9 @@ impl BackupService for BackupServiceImpl {
             tracing::warn!(job = %id, path = %path, reason = %why, "delete_job: left on disk");
         }
 
-        self.state
-            .store
-            .delete(&id)
-            .map_err(|e| Status::internal(tr!("grpc_server.job_not_deleted", error = e).into_owned()))?;
+        self.state.store.delete(&id).map_err(|e| {
+            Status::internal(tr!("grpc_server.job_not_deleted", error = e).into_owned())
+        })?;
         json_reply(&report)
     }
 
@@ -788,7 +811,11 @@ impl BackupService for BackupServiceImpl {
         let name = std::env::var("COMPUTERNAME")
             .ok()
             .filter(|s| !s.trim().is_empty())
-            .or_else(|| std::env::var("HOSTNAME").ok().filter(|s| !s.trim().is_empty()))
+            .or_else(|| {
+                std::env::var("HOSTNAME")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+            })
             .unwrap_or_else(|| tr!("grpc_server.default_job_name").into_owned());
         json_reply(&own_backup_core::Job {
             name,
@@ -886,8 +913,8 @@ impl BackupService for BackupServiceImpl {
     ) -> Result<Response<Self::StreamEventsStream>, Status> {
         check_auth(&req, &self.service_token)?;
         // Drop "lagged" notices silently; a slow client just misses old events.
-        let stream = BroadcastStream::new(self.state.events.subscribe())
-            .filter_map(|r| r.ok().map(Ok));
+        let stream =
+            BroadcastStream::new(self.state.events.subscribe()).filter_map(|r| r.ok().map(Ok));
         Ok(Response::new(Box::pin(stream)))
     }
 
@@ -978,11 +1005,12 @@ impl BackupService for BackupServiceImpl {
                 continue;
             };
             for part in disk.partitions.iter_mut().filter(|p| p.is_encrypted) {
-                let (methods, unlockable, recovery_key_only) = own_backup_backup::engine_win::describe_encryption(
-                    number,
-                    part.offset_bytes,
-                    part.size_bytes,
-                );
+                let (methods, unlockable, recovery_key_only) =
+                    own_backup_backup::engine_win::describe_encryption(
+                        number,
+                        part.offset_bytes,
+                        part.size_bytes,
+                    );
                 part.unlock_methods = methods;
                 part.unlockable = unlockable;
                 part.recovery_key_only = recovery_key_only;
@@ -1004,10 +1032,7 @@ impl BackupService for BackupServiceImpl {
         json_reply(&disks)
     }
 
-    async fn get_service_status(
-        &self,
-        req: Request<Empty>,
-    ) -> Result<Response<JsonReply>, Status> {
+    async fn get_service_status(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
         let internal_mounts = self.state.active_mounts.lock().unwrap().clone();
 
@@ -1023,7 +1048,8 @@ impl BackupService for BackupServiceImpl {
         .map_err(|e| Status::internal(e.to_string()))?;
 
         #[cfg(target_os = "linux")]
-        let active_mounts = own_backup_backup::engine_linux::get_all_active_mounts(&internal_mounts);
+        let active_mounts =
+            own_backup_backup::engine_linux::get_all_active_mounts(&internal_mounts);
 
         #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         let active_mounts = internal_mounts;
@@ -1034,7 +1060,9 @@ impl BackupService for BackupServiceImpl {
             "queue": self.state.queue.snapshot(),
             "active_mounts": active_mounts,
         });
-        Ok(Response::new(JsonReply { json: status.to_string() }))
+        Ok(Response::new(JsonReply {
+            json: status.to_string(),
+        }))
     }
 
     // --- Direct engine operations ----------------------------------------
@@ -1298,9 +1326,10 @@ impl BackupService for BackupServiceImpl {
         {
             use own_backup_common::engine_dto::BaseImageDto;
             // Reads several files off disk; keep it off the async runtime.
-            let found = tokio::task::spawn_blocking(own_backup_backup::winre_find::find_base_images)
-                .await
-                .map_err(|e| Status::internal(format!("base image search panicked: {e}")))?;
+            let found =
+                tokio::task::spawn_blocking(own_backup_backup::winre_find::find_base_images)
+                    .await
+                    .map_err(|e| Status::internal(format!("base image search panicked: {e}")))?;
             let out: Vec<BaseImageDto> = found
                 .into_iter()
                 .map(|b| BaseImageDto {
@@ -1318,7 +1347,9 @@ impl BackupService for BackupServiceImpl {
             return json_reply(&out);
         }
         #[cfg(not(target_os = "windows"))]
-        Err(Status::unimplemented(tr!("grpc_server.media_windows_only").into_owned()))
+        Err(Status::unimplemented(
+            tr!("grpc_server.media_windows_only").into_owned(),
+        ))
     }
 
     async fn list_drivers(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
@@ -1357,7 +1388,9 @@ impl BackupService for BackupServiceImpl {
             return json_reply(&out);
         }
         #[cfg(not(target_os = "windows"))]
-        Err(Status::unimplemented(tr!("grpc_server.drivers_windows_only").into_owned()))
+        Err(Status::unimplemented(
+            tr!("grpc_server.drivers_windows_only").into_owned(),
+        ))
     }
 
     async fn list_media_tools(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
@@ -1381,11 +1414,16 @@ impl BackupService for BackupServiceImpl {
                     files: t.files,
                 })
                 .collect();
-            info!(count = out.len(), "third-party tools offered for the medium");
+            info!(
+                count = out.len(),
+                "third-party tools offered for the medium"
+            );
             return json_reply(&out);
         }
         #[cfg(not(target_os = "windows"))]
-        Err(Status::unimplemented(tr!("grpc_server.tools_windows_only").into_owned()))
+        Err(Status::unimplemented(
+            tr!("grpc_server.tools_windows_only").into_owned(),
+        ))
     }
 
     async fn build_media(&self, req: Request<JsonRequest>) -> Result<Response<JsonReply>, Status> {
@@ -1403,7 +1441,9 @@ impl BackupService for BackupServiceImpl {
             let opts: MediaBuildOptionsDto = serde_json::from_str(&req.into_inner().json)
                 .map_err(|e| Status::invalid_argument(e.to_string()))?;
             if opts.output_iso.trim().is_empty() {
-                return Err(Status::invalid_argument(tr!("grpc_server.iso_path_missing").into_owned()));
+                return Err(Status::invalid_argument(
+                    tr!("grpc_server.iso_path_missing").into_owned(),
+                ));
             }
 
             // The base is either what the user picked or the best candidate —
@@ -1416,9 +1456,7 @@ impl BackupService for BackupServiceImpl {
                     .next()
                     .map(|b| b.path)
                     .ok_or_else(|| {
-                        Status::failed_precondition(
-                            tr!("grpc_server.winre_not_found").into_owned(),
-                        )
+                        Status::failed_precondition(tr!("grpc_server.winre_not_found").into_owned())
                     })?
             } else {
                 std::path::PathBuf::from(&opts.base_wim)
@@ -1447,9 +1485,12 @@ impl BackupService for BackupServiceImpl {
                 let work = work_root.join("work");
                 let stages: Vec<MediaStageDto> =
                     BuildStage::plan(!opts.drivers.is_empty(), !opts.tools.is_empty())
-                    .into_iter()
-                    .map(|s| MediaStageDto { id: s.id().into(), title: s.title().into() })
-                    .collect();
+                        .into_iter()
+                        .map(|s| MediaStageDto {
+                            id: s.id().into(),
+                            title: s.title().into(),
+                        })
+                        .collect();
                 let index_of = |id: &str| stages.iter().position(|s| s.id == id).unwrap_or(0);
                 let emit = |stage_id: &str, percent: u64, detail: &str, finished: bool| {
                     emit_engine(
@@ -1544,7 +1585,9 @@ impl BackupService for BackupServiceImpl {
         #[cfg(not(target_os = "windows"))]
         {
             let _ = req;
-            Err(Status::unimplemented(tr!("grpc_server.media_windows_only").into_owned()))
+            Err(Status::unimplemented(
+                tr!("grpc_server.media_windows_only").into_owned(),
+            ))
         }
     }
 
@@ -1868,7 +1911,9 @@ impl BackupService for BackupServiceImpl {
         req: Request<JsonRequest>,
     ) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
-        use own_backup_common::restore_check::{check_plan, resolve_letter_conflicts, CheckContext};
+        use own_backup_common::restore_check::{
+            check_plan, resolve_letter_conflicts, CheckContext,
+        };
         use own_backup_common::restore_plan::RestorePlan;
 
         #[derive(serde::Deserialize)]
@@ -1935,7 +1980,9 @@ impl BackupService for BackupServiceImpl {
                 own_backup_common::restore_check::CheckLevel::Error => {
                     tracing::warn!(code = ?r.code, part = ?r.part_index, "dry run refuses: {}", r.message)
                 }
-                _ => tracing::info!(code = ?r.code, part = ?r.part_index, "dry run notes: {}", r.message),
+                _ => {
+                    tracing::info!(code = ?r.code, part = ?r.part_index, "dry run notes: {}", r.message)
+                }
             }
         }
 
@@ -2053,10 +2100,7 @@ impl BackupService for BackupServiceImpl {
             // Persisted as soon as it ends: a service restart must not erase
             // the record of what was done to the disk (D5).
             if let Ok(final_state) = &outcome {
-                own_backup_core::restore_exec::append_history(
-                    &state.config.data_dir,
-                    final_state,
-                );
+                own_backup_core::restore_exec::append_history(&state.config.data_dir, final_state);
             }
             if let Err(e) = outcome {
                 // The plan never started, so there is no run state describing
@@ -2066,9 +2110,8 @@ impl BackupService for BackupServiceImpl {
                 if let Some(run) = slot.as_mut() {
                     run.status = RunStatus::Failed;
                     run.cancellable = false;
-                    run.follow_ups.push(
-                        tr!("grpc_server.restore_did_not_start", error = e).into_owned(),
-                    );
+                    run.follow_ups
+                        .push(tr!("grpc_server.restore_did_not_start", error = e).into_owned());
                     let _ = events.send(Event {
                         kind: "restore-plan".into(),
                         json: serde_json::to_string(&*run).unwrap_or_default(),
@@ -2088,10 +2131,14 @@ impl BackupService for BackupServiceImpl {
             let Err(e) = task.await else { return };
             tracing::error!(error = %e, plan = %plan_id, "the restore task did not finish normally");
             let mut slot = watcher_state.restore_run.lock().unwrap();
-            if let Some(run) = slot.as_mut().filter(|r| r.plan_id == plan_id && !r.is_finished()) {
+            if let Some(run) = slot
+                .as_mut()
+                .filter(|r| r.plan_id == plan_id && !r.is_finished())
+            {
                 run.status = RunStatus::Failed;
                 run.cancellable = false;
-                run.follow_ups.push(tr!("grpc_server.restore_aborted_inside").into_owned());
+                run.follow_ups
+                    .push(tr!("grpc_server.restore_aborted_inside").into_owned());
                 let _ = watcher_events.send(Event {
                     kind: "restore-plan".into(),
                     json: serde_json::to_string(&*run).unwrap_or_default(),
@@ -2142,8 +2189,10 @@ impl BackupService for BackupServiceImpl {
                 run.acknowledged = true;
             }
         }
-        let found =
-            own_backup_core::restore_exec::acknowledge_in_history(&self.state.config.data_dir, plan_id);
+        let found = own_backup_core::restore_exec::acknowledge_in_history(
+            &self.state.config.data_dir,
+            plan_id,
+        );
         tracing::info!(plan = %plan_id, in_history = found, "restore report acknowledged");
         Ok(Response::new(Empty {}))
     }
@@ -2355,16 +2404,17 @@ impl BackupService for BackupServiceImpl {
 
             let entry = || -> Result<u16, Status> {
                 let s = p.entry.as_deref().unwrap_or_default();
-                u16::from_str_radix(s.trim().trim_start_matches("0x"), 16)
-                    .map_err(|_| {
-                        Status::invalid_argument(
-                            tr!("grpc_server.boot_not_entry_number", value = s).into_owned(),
-                        )
-                    })
+                u16::from_str_radix(s.trim().trim_start_matches("0x"), 16).map_err(|_| {
+                    Status::invalid_argument(
+                        tr!("grpc_server.boot_not_entry_number", value = s).into_owned(),
+                    )
+                })
             };
             let want = |o: Option<String>, what: &str| -> Result<String, Status> {
                 o.ok_or_else(|| {
-                    Status::invalid_argument(tr!("grpc_server.boot_not_given", what = what).into_owned())
+                    Status::invalid_argument(
+                        tr!("grpc_server.boot_not_given", what = what).into_owned(),
+                    )
                 })
             };
 
@@ -2382,11 +2432,16 @@ impl BackupService for BackupServiceImpl {
                     entry: entry()?,
                     to: p.to.unwrap_or(0).saturating_sub(1),
                 },
-                "delete" => Action::Delete { entry: entry()?, force: p.force.unwrap_or(false) },
+                "delete" => Action::Delete {
+                    entry: entry()?,
+                    force: p.force.unwrap_or(false),
+                },
                 "create" => Action::Create {
                     name: want(p.name.clone(), &tr!("grpc_server.boot_field_name"))?,
                     disk: p.disk.ok_or_else(|| {
-                        Status::invalid_argument(tr!("grpc_server.boot_disk_not_given").into_owned())
+                        Status::invalid_argument(
+                            tr!("grpc_server.boot_disk_not_given").into_owned(),
+                        )
                     })?,
                     partition: p.partition.ok_or_else(|| {
                         Status::invalid_argument(
@@ -2397,11 +2452,17 @@ impl BackupService for BackupServiceImpl {
                     position: p.position.map(|x| x.saturating_sub(1)),
                 },
                 "boot_next" => Action::BootNext {
-                    entry: if p.clear.unwrap_or(false) { None } else { Some(entry()?) },
+                    entry: if p.clear.unwrap_or(false) {
+                        None
+                    } else {
+                        Some(entry()?)
+                    },
                 },
                 "timeout" => Action::Timeout {
                     secs: p.secs.ok_or_else(|| {
-                        Status::invalid_argument(tr!("grpc_server.boot_secs_not_given").into_owned())
+                        Status::invalid_argument(
+                            tr!("grpc_server.boot_secs_not_given").into_owned(),
+                        )
                     })?,
                 },
                 other => {
@@ -2427,7 +2488,9 @@ impl BackupService for BackupServiceImpl {
         }
         #[cfg(not(target_os = "windows"))]
         {
-            Err(Status::unimplemented(tr!("grpc_server.boot_change_windows_only").into_owned()))
+            Err(Status::unimplemented(
+                tr!("grpc_server.boot_change_windows_only").into_owned(),
+            ))
         }
     }
 }
@@ -2447,8 +2510,9 @@ mod tests {
         let passwords =
             std::sync::Arc::new(own_backup_core::PasswordStore::new(dir.join("meta.db")));
         let busy = own_backup_core::busy::Busy::new();
-        let state =
-            AppState::new(config, store, queue, busy, job_tx, cancel, events, passwords);
+        let state = AppState::new(
+            config, store, queue, busy, job_tx, cancel, events, passwords,
+        );
         BackupServiceImpl::new(state, String::new())
     }
 
@@ -2468,12 +2532,19 @@ mod tests {
         let svc = make_service(dir.path());
 
         // Empty to start.
-        let json = svc.list_jobs(Request::new(Empty {})).await.unwrap().into_inner().json;
+        let json = svc
+            .list_jobs(Request::new(Empty {}))
+            .await
+            .unwrap()
+            .into_inner()
+            .json;
         assert_eq!(json, "[]");
 
         // Save a job, get a generated id back.
         let saved = svc
-            .save_job(Request::new(JsonRequest { json: job("T", "E:", r"D:\bk") }))
+            .save_job(Request::new(JsonRequest {
+                json: job("T", "E:", r"D:\bk"),
+            }))
             .await
             .unwrap()
             .into_inner()
@@ -2483,12 +2554,18 @@ mod tests {
 
         // It is listed and fetchable.
         let listed: Vec<own_backup_core::Job> = serde_json::from_str(
-            &svc.list_jobs(Request::new(Empty {})).await.unwrap().into_inner().json,
+            &svc.list_jobs(Request::new(Empty {}))
+                .await
+                .unwrap()
+                .into_inner()
+                .json,
         )
         .unwrap();
         assert_eq!(listed.len(), 1);
         let got = svc
-            .get_job(Request::new(IdRequest { id: saved.id.clone() }))
+            .get_job(Request::new(IdRequest {
+                id: saved.id.clone(),
+            }))
             .await
             .unwrap()
             .into_inner()
@@ -2497,16 +2574,26 @@ mod tests {
 
         // dest-on-source is rejected at the boundary.
         let err = svc
-            .save_job(Request::new(JsonRequest { json: job("B", "E:", r"E:\bk") }))
+            .save_job(Request::new(JsonRequest {
+                json: job("B", "E:", r"E:\bk"),
+            }))
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
 
         // Delete it.
-        svc.delete_job(Request::new(DeleteJobRequest { id: saved.id, delete_files: false }))
+        svc.delete_job(Request::new(DeleteJobRequest {
+            id: saved.id,
+            delete_files: false,
+        }))
+        .await
+        .unwrap();
+        let json = svc
+            .list_jobs(Request::new(Empty {}))
             .await
-            .unwrap();
-        let json = svc.list_jobs(Request::new(Empty {})).await.unwrap().into_inner().json;
+            .unwrap()
+            .into_inner()
+            .json;
         assert_eq!(json, "[]");
     }
 
@@ -2526,21 +2613,42 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let svc = make_service(dir.path());
 
-        let status = svc.get_service_status(Request::new(Empty {})).await.unwrap().into_inner().json;
+        let status = svc
+            .get_service_status(Request::new(Empty {}))
+            .await
+            .unwrap()
+            .into_inner()
+            .json;
         assert!(status.contains("version"));
 
         let tmpl: own_backup_core::Job = serde_json::from_str(
-            &svc.new_job_template(Request::new(Empty {})).await.unwrap().into_inner().json,
+            &svc.new_job_template(Request::new(Empty {}))
+                .await
+                .unwrap()
+                .into_inner()
+                .json,
         )
         .unwrap();
         assert!(!tmpl.name.is_empty());
 
         let excl: serde_json::Value = serde_json::from_str(
-            &svc.default_exclusions(Request::new(Empty {})).await.unwrap().into_inner().json,
+            &svc.default_exclusions(Request::new(Empty {}))
+                .await
+                .unwrap()
+                .into_inner()
+                .json,
         )
         .unwrap();
-        assert!(excl["windows"].as_array().unwrap().iter().any(|p| p.as_str().unwrap().contains("Temp")));
-        assert!(excl["linux"].as_array().unwrap().iter().any(|p| p.as_str().unwrap().contains("tmp")));
+        assert!(excl["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p.as_str().unwrap().contains("Temp")));
+        assert!(excl["linux"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p.as_str().unwrap().contains("tmp")));
     }
 
     // --- Один разрушительный ход за раз (аудит AUD-02) ---------------------
@@ -2553,18 +2661,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let svc = make_service(dir.path());
         let saved: own_backup_core::Job = serde_json::from_str(
-            &svc.save_job(Request::new(JsonRequest { json: job("T", "E:", r"D:\bk") }))
-                .await
-                .unwrap()
-                .into_inner()
-                .json,
+            &svc.save_job(Request::new(JsonRequest {
+                json: job("T", "E:", r"D:\bk"),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .json,
         )
         .unwrap();
 
         let held = svc
             .state
             .busy
-            .reserve(own_backup_core::busy::Doing::new("восстановление", "диск 1"))
+            .reserve(own_backup_core::busy::Doing::new(
+                "восстановление",
+                "диск 1",
+            ))
             .expect("свободно");
 
         let refused = svc
@@ -2575,14 +2688,21 @@ mod tests {
             .await
             .expect_err("удаление копий не должно начаться поверх восстановления");
         assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
-        assert!(refused.message().contains("восстановление"), "{}", refused.message());
+        assert!(
+            refused.message().contains("восстановление"),
+            "{}",
+            refused.message()
+        );
 
         // Задание при этом не удалено: отказ должен случиться ДО изменений.
         assert!(svc.state.store.get(&saved.id).is_some());
 
         drop(held);
         assert!(svc
-            .delete_job(Request::new(DeleteJobRequest { id: saved.id, delete_files: true }))
+            .delete_job(Request::new(DeleteJobRequest {
+                id: saved.id,
+                delete_files: true
+            }))
             .await
             .is_ok());
     }
@@ -2594,11 +2714,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let svc = make_service(dir.path());
         let saved: own_backup_core::Job = serde_json::from_str(
-            &svc.save_job(Request::new(JsonRequest { json: job("T", "E:", r"D:\bk") }))
-                .await
-                .unwrap()
-                .into_inner()
-                .json,
+            &svc.save_job(Request::new(JsonRequest {
+                json: job("T", "E:", r"D:\bk"),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .json,
         )
         .unwrap();
 
@@ -2617,7 +2739,10 @@ mod tests {
 
         svc.state.queue.finish();
         assert!(svc
-            .delete_job(Request::new(DeleteJobRequest { id: saved.id, delete_files: false }))
+            .delete_job(Request::new(DeleteJobRequest {
+                id: saved.id,
+                delete_files: false
+            }))
             .await
             .is_ok());
     }
@@ -2629,11 +2754,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let svc = make_service(dir.path());
         let saved: own_backup_core::Job = serde_json::from_str(
-            &svc.save_job(Request::new(JsonRequest { json: job("T", "E:", r"D:\bk") }))
-                .await
-                .unwrap()
-                .into_inner()
-                .json,
+            &svc.save_job(Request::new(JsonRequest {
+                json: job("T", "E:", r"D:\bk"),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .json,
         )
         .unwrap();
 
@@ -2664,7 +2791,10 @@ mod tests {
         let first = svc
             .state
             .busy
-            .reserve(own_backup_core::busy::Doing::new("проверка образа", "a.vhdx"))
+            .reserve(own_backup_core::busy::Doing::new(
+                "проверка образа",
+                "a.vhdx",
+            ))
             .unwrap();
         svc.cancel_engine_op(Request::new(Empty {})).await.unwrap();
         assert!(first.cancel().is_cancelled());
@@ -2675,7 +2805,10 @@ mod tests {
         let second = svc
             .state
             .busy
-            .reserve(own_backup_core::busy::Doing::new("проверка образа", "b.vhdx"))
+            .reserve(own_backup_core::busy::Doing::new(
+                "проверка образа",
+                "b.vhdx",
+            ))
             .unwrap();
         assert!(!second.cancel().is_cancelled());
     }
@@ -2713,9 +2846,13 @@ fn find_webview2_runtime(program_dir: &std::path::Path) -> Option<std::path::Pat
     }
     let mut best: Option<(String, std::path::PathBuf)> = None;
     for base in ["ProgramFiles(x86)", "ProgramFiles"] {
-        let Ok(root) = std::env::var(base) else { continue };
+        let Ok(root) = std::env::var(base) else {
+            continue;
+        };
         let apps = std::path::PathBuf::from(root).join(r"Microsoft\EdgeWebView\Application");
-        let Ok(rd) = std::fs::read_dir(&apps) else { continue };
+        let Ok(rd) = std::fs::read_dir(&apps) else {
+            continue;
+        };
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
             if !name.starts_with(|c: char| c.is_ascii_digit()) {
@@ -2747,7 +2884,9 @@ fn write_media_iso(
     use own_backup_backup::iso9660::{write_iso_with_progress, IsoBoot, IsoFile};
 
     fn walk(dir: &std::path::Path, base: &std::path::Path, out: &mut Vec<IsoFile>) {
-        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
         for e in rd.flatten() {
             let p = e.path();
             if p.is_dir() {
@@ -2768,9 +2907,12 @@ fn write_media_iso(
     // Secure Boot on, the loader looks for it on ITS OWN device, and on an ISO
     // that device is this FAT image rather than the ISO9660 filesystem. Its
     // absence stops the boot at `0xc000000f` (2026-09-20, found by bisection).
-    for rel in
-        ["EFI/BOOT/BOOTX64.EFI", "EFI/Microsoft/Boot/BCD", "EFI/Microsoft/Boot/boot.stl", "boot/boot.sdi"]
-    {
+    for rel in [
+        "EFI/BOOT/BOOTX64.EFI",
+        "EFI/Microsoft/Boot/BCD",
+        "EFI/Microsoft/Boot/boot.stl",
+        "boot/boot.sdi",
+    ] {
         let src = media_dir.join(rel.replace('/', "\\"));
         if src.exists() {
             boot_files.push(FatFile {
@@ -2781,7 +2923,10 @@ fn write_media_iso(
     }
     let efisys = media_dir.join("boot").join("efisys.bin");
     std::fs::write(&efisys, build_fat16(&boot_files, "OWNBOOT")?)?;
-    files.push(IsoFile { path: "boot/efisys.bin".into(), source: efisys.clone() });
+    files.push(IsoFile {
+        path: "boot/efisys.bin".into(),
+        source: efisys.clone(),
+    });
 
     if let Some(parent) = out_iso.parent() {
         std::fs::create_dir_all(parent)?;
@@ -2789,7 +2934,9 @@ fn write_media_iso(
     let len = write_iso_with_progress(
         &files,
         "OWNBACKUP",
-        Some(IsoBoot { image_path: "boot/efisys.bin".into() }),
+        Some(IsoBoot {
+            image_path: "boot/efisys.bin".into(),
+        }),
         out_iso,
         progress,
     )?;

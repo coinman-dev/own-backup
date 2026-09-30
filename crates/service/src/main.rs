@@ -578,7 +578,9 @@ pub async fn run_main_loop(
     // before the worker, scheduler or RPC starts.
     #[cfg(target_os = "windows")]
     let _private_secret_guard = if !use_tcp && !own_backup_common::media_mode::is_media_mode() {
-        Some(own_backup_backup::seal::local::PrivateSecretDatabase::new(&config.data_dir)?)
+        Some(own_backup_backup::seal::local::PrivateSecretDatabase::new(
+            &config.data_dir,
+        )?)
     } else {
         None
     };
@@ -590,7 +592,10 @@ pub async fn run_main_loop(
         );
         let moved = store.migrate_legacy(&config.db_path())?;
         guard.validate_files()?;
-        info!(moved, "legacy volume passwords migrated to private database");
+        info!(
+            moved,
+            "legacy volume passwords migrated to private database"
+        );
         std::sync::Arc::new(store)
     } else {
         std::sync::Arc::new(own_backup_core::PasswordStore::new(config.db_path()))
@@ -1006,10 +1011,14 @@ struct PipeSecurity(windows::Win32::Security::PSECURITY_DESCRIPTOR);
 fn client_in_active_console(server: &tokio::net::windows::named_pipe::NamedPipeServer) -> bool {
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
-    use windows::Win32::Security::{EqualSid, GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+    use windows::Win32::Security::{
+        EqualSid, GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER,
+    };
     use windows::Win32::System::Pipes::{GetNamedPipeClientProcessId, GetNamedPipeClientSessionId};
     use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
-    use windows::Win32::System::Threading::{OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows::Win32::System::Threading::{
+        OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
 
     struct Owned(HANDLE);
     impl Drop for Owned {
@@ -1025,8 +1034,15 @@ fn client_in_active_console(server: &tokio::net::windows::named_pipe::NamedPipeS
         }
         let mut bytes = vec![0u8; needed as usize];
         unsafe {
-            GetTokenInformation(token, TokenUser, Some(bytes.as_mut_ptr().cast()), needed, &mut needed)
-        }.ok()?;
+            GetTokenInformation(
+                token,
+                TokenUser,
+                Some(bytes.as_mut_ptr().cast()),
+                needed,
+                &mut needed,
+            )
+        }
+        .ok()?;
         Some(bytes)
     }
 
@@ -1043,7 +1059,9 @@ fn client_in_active_console(server: &tokio::net::windows::named_pipe::NamedPipeS
     if unsafe { GetNamedPipeClientProcessId(pipe, &mut process_id) }.is_err() {
         return false;
     }
-    let Ok(process) = (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) }) else {
+    let Ok(process) =
+        (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) })
+    else {
         return false;
     };
     let process = Owned(process);

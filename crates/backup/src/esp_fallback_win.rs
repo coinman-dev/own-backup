@@ -46,11 +46,12 @@ pub fn ensure_fallback_bootloader(
     esp: PartRef,
     restored: &[PartRef],
 ) -> Result<FallbackOutcome> {
-    let root = crate::volume_win::volume_root_at_offset(disk_number, esp.offset).ok_or_else(|| {
-        OwnBackupError::Device(
-            tr!("esp_fallback_win.no_volume", offset = esp.offset).into_owned(),
-        )
-    })?;
+    let root =
+        crate::volume_win::volume_root_at_offset(disk_number, esp.offset).ok_or_else(|| {
+            OwnBackupError::Device(
+                tr!("esp_fallback_win.no_volume", offset = esp.offset).into_owned(),
+            )
+        })?;
     let root = PathBuf::from(&root);
     let efi = root.join("EFI");
     if !efi.is_dir() {
@@ -104,9 +105,11 @@ pub fn ensure_fallback_bootloader(
             copied: false,
             from: String::new(),
             message: tr!("esp_fallback_win.no_loader").into_owned(),
-            follow_ups: vec![
-                tr!("esp_fallback_win.no_loader_follow_up", fallback = fallback_path).into_owned(),
-            ],
+            follow_ups: vec![tr!(
+                "esp_fallback_win.no_loader_follow_up",
+                fallback = fallback_path
+            )
+            .into_owned()],
         });
     };
     info!(
@@ -120,7 +123,12 @@ pub fn ensure_fallback_bootloader(
     let dest_dir = efi.join("BOOT");
     std::fs::create_dir_all(&dest_dir).map_err(|e| {
         OwnBackupError::Device(
-            tr!("esp_fallback_win.mkdir_failed", dir = dest_dir.display(), error = e).into_owned(),
+            tr!(
+                "esp_fallback_win.mkdir_failed",
+                dir = dest_dir.display(),
+                error = e
+            )
+            .into_owned(),
         )
     })?;
 
@@ -140,8 +148,12 @@ pub fn ensure_fallback_bootloader(
                 // pointless, and a half-populated EFI\BOOT is worse than none.
                 if c.to.eq_ignore_ascii_case(FALLBACK_NAME) {
                     return Err(OwnBackupError::Device(
-                        tr!("esp_fallback_win.copy_failed", fallback = fallback_path, error = e)
-                            .into_owned(),
+                        tr!(
+                            "esp_fallback_win.copy_failed",
+                            fallback = fallback_path,
+                            error = e
+                        )
+                        .into_owned(),
                     ));
                 }
             }
@@ -186,7 +198,9 @@ pub fn ensure_fallback_bootloader(
 /// user reading the report wants to know ("что там уже лежит?"). Nothing is
 /// decided from this: the file is kept either way.
 fn identify_loader(path: &Path) -> Cow<'static, str> {
-    let Ok(bytes) = std::fs::read(path) else { return tr!("esp_fallback_win.loader") };
+    let Ok(bytes) = std::fs::read(path) else {
+        return tr!("esp_fallback_win.loader");
+    };
     // The strings are UTF-16LE inside the binary; matching on the ASCII bytes
     // interleaved with NULs finds them without decoding the whole file.
     let has = |needle: &str| -> bool {
@@ -244,7 +258,9 @@ fn restored_filesystem_uuids(disk_number: u32, restored: &[PartRef]) -> Vec<Stri
 /// manager and the only nested case worth knowing about.
 fn read_vendor_dirs(efi: &Path) -> Vec<VendorDir> {
     let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir(efi) else { return out };
+    let Ok(entries) = std::fs::read_dir(efi) else {
+        return out;
+    };
     for e in entries.flatten() {
         if !e.path().is_dir() {
             continue;
@@ -275,5 +291,9 @@ fn vendor_dir(path: &str, dir: &Path) -> VendorDir {
         .find(|f| f.eq_ignore_ascii_case("grub.cfg"))
         .and_then(|f| std::fs::read_to_string(dir.join(f)).ok())
         .and_then(|text| parse_grub_search_uuid(&text));
-    VendorDir { path: path.to_string(), files, grub_uuid }
+    VendorDir {
+        path: path.to_string(),
+        files,
+        grub_uuid,
+    }
 }

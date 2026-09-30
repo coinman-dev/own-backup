@@ -27,9 +27,9 @@ use windows::Win32::System::Shutdown::{
     InitiateShutdownW, SHTDN_REASON_FLAG_PLANNED, SHTDN_REASON_MAJOR_OTHER, SHUTDOWN_POWEROFF,
 };
 use windows::Win32::System::Threading::{
-    CancelWaitableTimer, CreateWaitableTimerExW, GetCurrentThread, SetThreadPriority, SetWaitableTimer,
-    WaitForSingleObject, POWER_REQUEST_CONTEXT_SIMPLE_STRING, REASON_CONTEXT, REASON_CONTEXT_0,
-    THREAD_MODE_BACKGROUND_BEGIN, THREAD_MODE_BACKGROUND_END, INFINITE,
+    CancelWaitableTimer, CreateWaitableTimerExW, GetCurrentThread, SetThreadPriority,
+    SetWaitableTimer, WaitForSingleObject, INFINITE, POWER_REQUEST_CONTEXT_SIMPLE_STRING,
+    REASON_CONTEXT, REASON_CONTEXT_0, THREAD_MODE_BACKGROUND_BEGIN, THREAD_MODE_BACKGROUND_END,
 };
 
 /// Windows does not go to sleep while this is alive. The display may still
@@ -50,7 +50,9 @@ impl KeepAwake {
         let ctx = REASON_CONTEXT {
             Version: 0, // POWER_REQUEST_CONTEXT_VERSION
             Flags: POWER_REQUEST_CONTEXT_SIMPLE_STRING,
-            Reason: REASON_CONTEXT_0 { SimpleReasonString: PWSTR(text.as_mut_ptr()) },
+            Reason: REASON_CONTEXT_0 {
+                SimpleReasonString: PWSTR(text.as_mut_ptr()),
+            },
         };
         // SAFETY: `ctx` and the string it points at live across the call; the
         // request copies the string.
@@ -96,7 +98,9 @@ impl BackgroundIo {
     pub fn enter() -> Option<Self> {
         // SAFETY: the pseudo-handle of the current thread.
         match unsafe { SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN) } {
-            Ok(()) => Some(Self { _not_send: std::marker::PhantomData }),
+            Ok(()) => Some(Self {
+                _not_send: std::marker::PhantomData,
+            }),
             Err(e) => {
                 warn!(error = %e, "could not switch the copy to background priority");
                 None
@@ -172,7 +176,12 @@ impl WakeTimer {
     pub fn start(hold: Duration) -> Option<Arc<Self>> {
         // SAFETY: an unnamed, auto-reset timer with default security.
         let handle = match unsafe {
-            CreateWaitableTimerExW(None, PCWSTR::null(), 0, 0x1F0003 /* TIMER_ALL_ACCESS */)
+            CreateWaitableTimerExW(
+                None,
+                PCWSTR::null(),
+                0,
+                0x1F0003, /* TIMER_ALL_ACCESS */
+            )
         } {
             Ok(h) => h,
             Err(e) => {
@@ -182,17 +191,22 @@ impl WakeTimer {
         };
         let timer = Arc::new(Self { handle });
         let waiter = timer.clone();
-        let _ = std::thread::Builder::new().name("wake-timer".into()).spawn(move || loop {
-            // SAFETY: the handle lives as long as `waiter`, i.e. forever.
-            let r = unsafe { WaitForSingleObject(waiter.handle, INFINITE) };
-            if r != WAIT_OBJECT_0 {
-                warn!("wake timer wait failed; wake-ups stop");
-                return;
-            }
-            info!(hold_s = hold.as_secs(), "woken for a scheduled copy — holding the machine awake");
-            let _awake = KeepAwake::new(&tr!("power_win.wake_reason"));
-            std::thread::sleep(hold);
-        });
+        let _ = std::thread::Builder::new()
+            .name("wake-timer".into())
+            .spawn(move || loop {
+                // SAFETY: the handle lives as long as `waiter`, i.e. forever.
+                let r = unsafe { WaitForSingleObject(waiter.handle, INFINITE) };
+                if r != WAIT_OBJECT_0 {
+                    warn!("wake timer wait failed; wake-ups stop");
+                    return;
+                }
+                info!(
+                    hold_s = hold.as_secs(),
+                    "woken for a scheduled copy — holding the machine awake"
+                );
+                let _awake = KeepAwake::new(&tr!("power_win.wake_reason"));
+                std::thread::sleep(hold);
+            });
         Some(timer)
     }
 

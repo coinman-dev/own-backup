@@ -68,7 +68,10 @@ pub enum Role {
 
 /// The last component of an EFI path, lower-cased.
 fn file_name(path: &str) -> String {
-    path.rsplit(['\\', '/']).next().unwrap_or(path).to_lowercase()
+    path.rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(path)
+        .to_lowercase()
 }
 
 /// The directory holding it, lower-cased — the vendor, by convention.
@@ -84,11 +87,11 @@ pub fn role(path: &str) -> Role {
     // Launched by shim, by GRUB, or by the Windows boot manager — never by the
     // firmware, and never worth an entry of its own.
     const SECOND_STAGE: [&str; 7] = [
-        "grubx64.efi",    // shim's second stage
-        "mmx64.efi",      // MokManager, launched by shim
-        "fbx64.efi",      // shim's fallback, rebuilds entries by itself
-        "bootmgr.efi",    // the inner half of the Windows boot manager
-        "memtest.efi",    // a tool Windows offers from its own menu
+        "grubx64.efi", // shim's second stage
+        "mmx64.efi",   // MokManager, launched by shim
+        "fbx64.efi",   // shim's fallback, rebuilds entries by itself
+        "bootmgr.efi", // the inner half of the Windows boot manager
+        "memtest.efi", // a tool Windows offers from its own menu
         "securebootrecovery.efi",
         "shimx64.efi.signed",
     ];
@@ -177,15 +180,27 @@ mod tests {
     /// got right. All four are on this machine's ESP.
     #[test]
     fn the_files_that_lie_about_themselves_are_named_correctly() {
-        assert_eq!(kind_by_name(r"\EFI\kubuntu\shimx64.efi"), Some("Kubuntu · shim"));
-        assert_eq!(kind_by_name(r"\EFI\kubuntu\grubx64.efi"), Some("Kubuntu · GRUB"));
-        assert_eq!(kind_by_name(r"\EFI\r-drive\bootx64.efi"), Some("R-Drive Image"));
+        assert_eq!(
+            kind_by_name(r"\EFI\kubuntu\shimx64.efi"),
+            Some("Kubuntu · shim")
+        );
+        assert_eq!(
+            kind_by_name(r"\EFI\kubuntu\grubx64.efi"),
+            Some("Kubuntu · GRUB")
+        );
+        assert_eq!(
+            kind_by_name(r"\EFI\r-drive\bootx64.efi"),
+            Some("R-Drive Image")
+        );
         assert_eq!(kind_by_name(r"\EFI\acronis\bootx64.efi"), Some("Acronis"));
         assert_eq!(
             kind_by_name(r"\EFI\Microsoft\Boot\bootmgfw.efi"),
             Some("диспетчер загрузки Windows")
         );
-        assert_eq!(kind_by_name(r"\EFI\ubuntu\shimx64.efi"), Some("Ubuntu · shim"));
+        assert_eq!(
+            kind_by_name(r"\EFI\ubuntu\shimx64.efi"),
+            Some("Ubuntu · shim")
+        );
     }
 
     /// A vendor nobody has heard of still gets its name through, and a file
@@ -229,8 +244,14 @@ mod tests {
     /// filesystem holds; neither should change the answer.
     #[test]
     fn spelling_does_not_change_what_a_file_is() {
-        assert_eq!(kind_by_name(r"\efi\UBUNTU\ShimX64.EFI"), Some("Ubuntu · shim"));
-        assert_eq!(kind_by_name("/EFI/ubuntu/shimx64.efi"), Some("Ubuntu · shim"));
+        assert_eq!(
+            kind_by_name(r"\efi\UBUNTU\ShimX64.EFI"),
+            Some("Ubuntu · shim")
+        );
+        assert_eq!(
+            kind_by_name("/EFI/ubuntu/shimx64.efi"),
+            Some("Ubuntu · shim")
+        );
         assert_eq!(role(r"\EFI\UBUNTU\GRUBX64.EFI"), Role::SecondStage);
     }
 }

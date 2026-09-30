@@ -50,7 +50,12 @@ pub async fn delete_backup_job(
     id: String,
     delete_files: bool,
 ) -> Result<own_backup_core::JobFilesDeleted, String> {
-    state.link.client().await?.delete_job(&id, delete_files).await
+    state
+        .link
+        .client()
+        .await?
+        .delete_job(&id, delete_files)
+        .await
 }
 
 // --- Archive encryption (plan §7.5) --------------------------------------
@@ -98,7 +103,12 @@ pub async fn cancel_archive_encryption(
     state: State<'_, GuiState>,
     token: String,
 ) -> Result<(), String> {
-    state.link.client().await?.cancel_archive_encryption(&token).await
+    state
+        .link
+        .client()
+        .await?
+        .cancel_archive_encryption(&token)
+        .await
 }
 
 /// Unlock an encrypted (LUKS/BitLocker) source `volume` with `password`. The

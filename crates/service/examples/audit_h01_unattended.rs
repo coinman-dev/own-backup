@@ -11,7 +11,8 @@ const JOB_ID_FILE: &str = r"C:\Users\lab\AppData\Local\audit-h01-unattended-job-
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = AppConfig::default();
     let token = std::fs::read_to_string(config.token_path())?;
-    let mut client = BackupClient::connect(config.grpc_address.clone(), token.trim().to_string()).await?;
+    let mut client =
+        BackupClient::connect(config.grpc_address.clone(), token.trim().to_string()).await?;
     match std::env::args().nth(1).as_deref() {
         Some("prepare") => {
             let volume = std::env::args().nth(2).ok_or("volume argument missing")?;
@@ -22,7 +23,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if !unlocked.ok {
                 return Err("service did not unlock and validate BitLocker password".into());
             }
-            println!("H01-UNATTENDED-PASSWORD saved=true filesystem={}", unlocked.filesystem);
+            println!(
+                "H01-UNATTENDED-PASSWORD saved=true filesystem={}",
+                unlocked.filesystem
+            );
             let mut job = client.new_job_template().await?;
             job.name = "AuditH01Unattended".into();
             job.source = volume.clone();

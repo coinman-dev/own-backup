@@ -211,7 +211,10 @@ fn loaders(args: LoadersArgs) -> own_backup_common::Result<()> {
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "esps": out }))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({ "esps": out }))?
+        );
         return Ok(());
     }
 
@@ -268,7 +271,9 @@ fn loaders(args: LoadersArgs) -> own_backup_common::Result<()> {
     }
 
     if orphans == 0 {
-        println!("Загрузчиков без записи нет: на всё, что лежит на разделах EFI, кто-то ссылается.");
+        println!(
+            "Загрузчиков без записи нет: на всё, что лежит на разделах EFI, кто-то ссылается."
+        );
     } else {
         println!(
             "Загрузчиков без записи: {orphans}. Файлы на месте, но ни одна запись на них не \
@@ -362,7 +367,14 @@ fn set_shown(args: OneArgs, shown: bool) -> own_backup_common::Result<()> {
         guard_current(n, args.force, "Убрать из меню")?;
     }
     with_safety_copy(|| efivars_win::set_active(n, shown))?;
-    println!("{n:04X}: {}", if shown { "показывается в меню" } else { "убрана из меню" });
+    println!(
+        "{n:04X}: {}",
+        if shown {
+            "показывается в меню"
+        } else {
+            "убрана из меню"
+        }
+    );
     Ok(())
 }
 
@@ -386,8 +398,16 @@ fn move_entry(args: MoveArgs) -> own_backup_common::Result<()> {
     let new_order = reorder(&cfg.order, n, to);
     println!(
         "Порядок: {} → {}",
-        cfg.order.iter().map(|x| format!("{x:04X}")).collect::<Vec<_>>().join(" "),
-        new_order.iter().map(|x| format!("{x:04X}")).collect::<Vec<_>>().join(" ")
+        cfg.order
+            .iter()
+            .map(|x| format!("{x:04X}"))
+            .collect::<Vec<_>>()
+            .join(" "),
+        new_order
+            .iter()
+            .map(|x| format!("{x:04X}"))
+            .collect::<Vec<_>>()
+            .join(" ")
     );
     with_safety_copy(|| efivars_win::set_order(&new_order))?;
     println!("Готово.");
@@ -434,15 +454,27 @@ fn create(args: CreateArgs) -> own_backup_common::Result<()> {
 
     // Путь внутри раздела — с обратными косыми, как его пишет прошивка.
     let file = args.file.replace('/', "\\");
-    let file = if file.starts_with('\\') { file } else { format!("\\{file}") };
+    let file = if file.starts_with('\\') {
+        file
+    } else {
+        format!("\\{file}")
+    };
 
     println!("Новая запись «{}»", args.name);
-    println!("  диск {} раздел {} · {}", args.disk, part.index, part.part_guid);
+    println!(
+        "  диск {} раздел {} · {}",
+        args.disk, part.index, part.part_guid
+    );
     println!("  загрузчик: {file}");
     println!("  есть ли он там на самом деле, эта команда не проверяет: раздел EFI Windows не показывает.");
 
     let n = with_safety_copy(|| {
-        efivars_win::create_entry(&args.name, &hd, &file, args.position.map(|p| p.saturating_sub(1)))
+        efivars_win::create_entry(
+            &args.name,
+            &hd,
+            &file,
+            args.position.map(|p| p.saturating_sub(1)),
+        )
     })?;
     println!("Создана запись {n:04X}. Появится в меню платы после перезагрузки.");
     Ok(())
@@ -481,10 +513,13 @@ fn timeout(args: TimeoutArgs) -> own_backup_common::Result<()> {
 #[cfg(target_os = "windows")]
 fn safety_copy_path() -> std::path::PathBuf {
     let dir = std::env::var("ProgramData").unwrap_or_else(|_| r"C:\ProgramData".into());
-    std::path::Path::new(&dir).join("OwnBackup").join("boot").join(format!(
-        "boot-{}.json",
-        chrono::Local::now().format("%Y%m%d-%H%M%S")
-    ))
+    std::path::Path::new(&dir)
+        .join("OwnBackup")
+        .join("boot")
+        .join(format!(
+            "boot-{}.json",
+            chrono::Local::now().format("%Y%m%d-%H%M%S")
+        ))
 }
 
 #[cfg(target_os = "windows")]
@@ -507,7 +542,9 @@ fn export(args: FileArgs) -> own_backup_common::Result<()> {
         println!(
             "    {n:04X}  {}{}",
             opt.description,
-            opt.file_path().map(|f| format!("  →  {f}")).unwrap_or_default()
+            opt.file_path()
+                .map(|f| format!("  →  {f}"))
+                .unwrap_or_default()
         );
     }
     println!();
@@ -551,7 +588,10 @@ fn import(args: ImportArgs) -> own_backup_common::Result<()> {
     let backup = BootBackup::load(&json)?;
 
     let here = std::env::var("COMPUTERNAME").unwrap_or_default();
-    println!("Копия снята: {} на машине «{}»", backup.taken_at, backup.machine);
+    println!(
+        "Копия снята: {} на машине «{}»",
+        backup.taken_at, backup.machine
+    );
     if !here.is_empty() && !backup.machine.eq_ignore_ascii_case(&here) {
         // Запись указывает на раздел по GUID. С другой машины эти GUID чужие.
         println!(
@@ -654,14 +694,24 @@ fn list(args: ListArgs) -> own_backup_common::Result<()> {
         if cfg.order.is_empty() {
             "пусто".to_string()
         } else {
-            cfg.order.iter().map(|n| format!("{n:04X}")).collect::<Vec<_>>().join(" → ")
+            cfg.order
+                .iter()
+                .map(|n| format!("{n:04X}"))
+                .collect::<Vec<_>>()
+                .join(" → ")
         }
     );
     println!(
         "  Загружены из: {}   Один раз: {}   Меню показывается: {}",
-        cfg.current.map(|n| format!("{n:04X}")).unwrap_or_else(|| "—".into()),
-        cfg.next.map(|n| format!("{n:04X}")).unwrap_or_else(|| "—".into()),
-        cfg.timeout.map(|t| format!("{t} с")).unwrap_or_else(|| "—".into()),
+        cfg.current
+            .map(|n| format!("{n:04X}"))
+            .unwrap_or_else(|| "—".into()),
+        cfg.next
+            .map(|n| format!("{n:04X}"))
+            .unwrap_or_else(|| "—".into()),
+        cfg.timeout
+            .map(|t| format!("{t} с"))
+            .unwrap_or_else(|| "—".into()),
     );
     println!("  Записи найдены: {}", cfg.found_by);
     if !cfg.dangling.is_empty() {
@@ -673,12 +723,16 @@ fn list(args: ListArgs) -> own_backup_common::Result<()> {
     println!();
 
     if cfg.entries.is_empty() {
-        println!("Ни одной записи. Это не бывает на исправной машине — скорее всего, не хватило прав.");
+        println!(
+            "Ни одной записи. Это не бывает на исправной машине — скорее всего, не хватило прав."
+        );
         return Ok(());
     }
 
     println!("  №     Меню  Название                         Куда ведёт");
-    println!("  ----  ----  -------------------------------  --------------------------------------");
+    println!(
+        "  ----  ----  -------------------------------  --------------------------------------"
+    );
     for e in &cfg.entries {
         let menu = match e.order_index {
             Some(i) => format!("{}", i + 1),
@@ -705,7 +759,13 @@ fn list(args: ListArgs) -> own_backup_common::Result<()> {
         if !e.option.fully_understood() {
             marks.push("разобрана не полностью — править нельзя");
         }
-        println!("  {:04X}  {:>4}  {:<31}  {}", e.number, menu, trim(&e.option.description, 31), target);
+        println!(
+            "  {:04X}  {:>4}  {:<31}  {}",
+            e.number,
+            menu,
+            trim(&e.option.description, 31),
+            target
+        );
         if !marks.is_empty() {
             println!("                      └─ {}", marks.join(", "));
         }
@@ -714,12 +774,14 @@ fn list(args: ListArgs) -> own_backup_common::Result<()> {
         }
     }
 
-    let orphans = cfg.entries.iter().filter(|e| e.order_index.is_none()).count();
+    let orphans = cfg
+        .entries
+        .iter()
+        .filter(|e| e.order_index.is_none())
+        .count();
     if orphans > 0 {
         println!();
-        println!(
-            "Записей вне меню: {orphans}. Они существуют, но прошивка их не предлагает."
-        );
+        println!("Записей вне меню: {orphans}. Они существуют, но прошивка их не предлагает.");
     }
     Ok(())
 }

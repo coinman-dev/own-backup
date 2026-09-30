@@ -10,18 +10,24 @@ use own_backup_common::tr;
 use own_backup_common::types::FileSystem;
 
 pub fn u32_at(b: &[u8], off: usize) -> u32 {
-    b.get(off..off + 4).map(|s| u32::from_le_bytes(s.try_into().unwrap())).unwrap_or(0)
+    b.get(off..off + 4)
+        .map(|s| u32::from_le_bytes(s.try_into().unwrap()))
+        .unwrap_or(0)
 }
 
 pub fn u64_at(b: &[u8], off: usize) -> u64 {
-    b.get(off..off + 8).map(|s| u64::from_le_bytes(s.try_into().unwrap())).unwrap_or(0)
+    b.get(off..off + 8)
+        .map(|s| u64::from_le_bytes(s.try_into().unwrap()))
+        .unwrap_or(0)
 }
 
 /// A GUID as Windows stores it in memory — first three fields little-endian,
 /// the last eight bytes in order — formatted the way the rest of this codebase
 /// writes GUIDs: upper case, no braces. An all-zero GUID reads as absent.
 pub fn guid_at(b: &[u8], off: usize) -> String {
-    let Some(g) = b.get(off..off + 16) else { return String::new() };
+    let Some(g) = b.get(off..off + 16) else {
+        return String::new();
+    };
     if g.iter().all(|&x| x == 0) {
         return String::new();
     }
@@ -50,7 +56,11 @@ pub fn ansi_at(buf: &[u8], off: u32) -> String {
     if off == 0 || off >= buf.len() {
         return String::new();
     }
-    let end = buf[off..].iter().position(|&c| c == 0).map(|n| off + n).unwrap_or(buf.len());
+    let end = buf[off..]
+        .iter()
+        .position(|&c| c == 0)
+        .map(|n| off + n)
+        .unwrap_or(buf.len());
     String::from_utf8_lossy(&buf[off..end]).trim().to_string()
 }
 
@@ -93,8 +103,11 @@ pub fn media_type_of(bus: u32, seek_penalty: Option<bool>, removable: bool) -> S
         None if bus == 17 => "SSD", // NVMe never spins
         None => "",
     };
-    let removable_tag =
-        if removable { tr!("win_parse.removable").into_owned() } else { String::new() };
+    let removable_tag = if removable {
+        tr!("win_parse.removable").into_owned()
+    } else {
+        String::new()
+    };
     let mut out = String::new();
     for piece in [bus_name(bus), kind, removable_tag.as_str()] {
         if piece.is_empty() {
@@ -165,7 +178,11 @@ mod tests {
 
     #[test]
     fn an_all_zero_guid_reads_as_absent() {
-        assert_eq!(guid_at(&[0u8; 16], 0), "", "an empty GPT slot, not a partition");
+        assert_eq!(
+            guid_at(&[0u8; 16], 0),
+            "",
+            "an empty GPT slot, not a partition"
+        );
     }
 
     #[test]
@@ -183,12 +200,20 @@ mod tests {
         let mut buf = vec![0u8; 64];
         buf[36..41].copy_from_slice(b"WDC \0");
         assert_eq!(ansi_at(&buf, 36), "WDC");
-        assert_eq!(ansi_at(&buf, 0), "", "offset 0 means the device did not answer");
+        assert_eq!(
+            ansi_at(&buf, 0),
+            "",
+            "offset 0 means the device did not answer"
+        );
     }
 
     #[test]
     fn media_type_says_what_the_disk_actually_is() {
-        assert_eq!(media_type_of(17, None, false), "NVMe SSD", "NVMe never spins");
+        assert_eq!(
+            media_type_of(17, None, false),
+            "NVMe SSD",
+            "NVMe never spins"
+        );
         assert_eq!(media_type_of(11, Some(true), false), "SATA HDD");
         assert_eq!(media_type_of(7, Some(false), true), "USB SSD (съёмный)");
         assert_eq!(media_type_of(0, None, false), "Unknown");

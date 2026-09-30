@@ -29,7 +29,9 @@ use crate::win_device::to_wide;
 pub fn taken_letters() -> Vec<char> {
     // SAFETY: takes no arguments and cannot fail meaningfully.
     let mask = unsafe { GetLogicalDrives() };
-    ('A'..='Z').filter(|c| mask & (1 << (*c as u8 - b'A')) != 0).collect()
+    ('A'..='Z')
+        .filter(|c| mask & (1 << (*c as u8 - b'A')) != 0)
+        .collect()
 }
 
 /// First unused letter at or after `from`, wrapping round to `D`. A, B and C
@@ -54,8 +56,13 @@ pub fn assign_letter(volume_root: &str, letter: char) -> Result<()> {
     unsafe { SetVolumeMountPointW(PCWSTR(mount_w.as_ptr()), PCWSTR(volume_w.as_ptr())) }.map_err(
         |e| {
             OwnBackupError::Device(
-                tr!("letters_win.assign_failed", letter = letter, volume = volume_root, error = e)
-                    .into_owned(),
+                tr!(
+                    "letters_win.assign_failed",
+                    letter = letter,
+                    volume = volume_root,
+                    error = e
+                )
+                .into_owned(),
             )
         },
     )?;
@@ -84,9 +91,10 @@ enum PartitionOfVolume {
 /// letter", no.
 fn letters_like_windows(p: PartitionOfVolume) -> bool {
     match p {
-        PartitionOfVolume::Gpt { basic_data, attributes } => {
-            basic_data && attributes & (GPT_ATTRIBUTE_HIDDEN | GPT_ATTRIBUTE_NO_DRIVE_LETTER) == 0
-        }
+        PartitionOfVolume::Gpt {
+            basic_data,
+            attributes,
+        } => basic_data && attributes & (GPT_ATTRIBUTE_HIDDEN | GPT_ATTRIBUTE_NO_DRIVE_LETTER) == 0,
         PartitionOfVolume::Mbr { kind } => MBR_DATA_TYPES.contains(&kind),
     }
 }
@@ -135,7 +143,9 @@ fn partition_of_volume(volume_root: &str) -> Option<PartitionOfVolume> {
                 attributes: gpt.Attributes.0,
             })
         } else if info.PartitionStyle == PARTITION_STYLE_MBR {
-            Some(PartitionOfVolume::Mbr { kind: info.Anonymous.Mbr.PartitionType })
+            Some(PartitionOfVolume::Mbr {
+                kind: info.Anonymous.Mbr.PartitionType,
+            })
         } else {
             None
         }
@@ -220,13 +230,19 @@ impl TempDriveLetter {
         if let Some(existing) = volume_drive_letters(volume_root).first() {
             let letter = existing.chars().next().unwrap_or('C');
             debug!(volume = %volume_root, %letter, "volume already has a letter; reusing it");
-            return Ok(Self { letter: None, volume_root: format!("{letter}:\\") });
+            return Ok(Self {
+                letter: None,
+                volume_root: format!("{letter}:\\"),
+            });
         }
         let letter = next_free_letter('D').ok_or_else(|| {
             OwnBackupError::Device(tr!("letters_win.no_free_letter").into_owned())
         })?;
         assign_letter(volume_root, letter)?;
-        Ok(Self { letter: Some(letter), volume_root: format!("{letter}:\\") })
+        Ok(Self {
+            letter: Some(letter),
+            volume_root: format!("{letter}:\\"),
+        })
     }
 
     /// Mount point with the trailing backslash `FormatEx` expects.
@@ -316,12 +332,24 @@ mod tests {
     /// What a Windows disk image has, and what Windows letters of it.
     #[test]
     fn only_data_partitions_get_a_letter() {
-        let gpt = |basic_data, attributes| PartitionOfVolume::Gpt { basic_data, attributes };
+        let gpt = |basic_data, attributes| PartitionOfVolume::Gpt {
+            basic_data,
+            attributes,
+        };
         assert!(letters_like_windows(gpt(true, 0)), "C: of the image");
-        assert!(!letters_like_windows(gpt(false, 0)), "EFI, MSR, recovery by type");
+        assert!(
+            !letters_like_windows(gpt(false, 0)),
+            "EFI, MSR, recovery by type"
+        );
         assert!(!letters_like_windows(gpt(true, GPT_ATTRIBUTE_HIDDEN)));
-        assert!(!letters_like_windows(gpt(true, GPT_ATTRIBUTE_NO_DRIVE_LETTER)));
+        assert!(!letters_like_windows(gpt(
+            true,
+            GPT_ATTRIBUTE_NO_DRIVE_LETTER
+        )));
         assert!(letters_like_windows(PartitionOfVolume::Mbr { kind: 0x07 }));
-        assert!(!letters_like_windows(PartitionOfVolume::Mbr { kind: 0x27 }), "WinRE on MBR");
+        assert!(
+            !letters_like_windows(PartitionOfVolume::Mbr { kind: 0x27 }),
+            "WinRE on MBR"
+        );
     }
 }
