@@ -135,7 +135,21 @@ pub fn measure_tree(root: &Path, cancel: &CancelToken) -> Result<TreeSize> {
 /// the ordinary file size. A failed directory walk is an error, never an empty
 /// tree that might compare equal to another failed walk.
 pub fn verify_tree(src_root: &Path, dst_root: &Path, cancel: &CancelToken) -> Result<TreeSize> {
+    verify_tree_with_progress(src_root, dst_root, cancel, |_| Ok(()))
+}
+
+/// Compare BackupRead streams while reporting work across source and target.
+/// Bytes estimate both main data streams; ACL/ADS work can exceed that estimate,
+/// so callers reserve 100% for successful completion.
+pub fn verify_tree_with_progress(
+    src_root: &Path,
+    dst_root: &Path,
+    cancel: &CancelToken,
+    mut progress: impl FnMut(&FileRestoreProgress) -> Result<()>,
+) -> Result<TreeSize> {
     crate::privileges_win::enable_backup_privileges();
+    let total = measure_tree(src_root, cancel)?;
+    let mut bytes_read = 0u64;
     let mut out = TreeSize::default();
     let mut stack = vec![(src_root.to_path_buf(), dst_root.to_path_buf())];
     let mut buf = vec![0u8; STREAM_BUF];
@@ -174,8 +188,17 @@ pub fn verify_tree(src_root: &Path, dst_root: &Path, cancel: &CancelToken) -> Re
             // metadata. Comparing only its children misses a changed ACL on
             // an otherwise identical tree. Volume roots are deliberately not
             // compared: copy_tree does not restore their metadata.
-            if backup_stream_digest(&src, cancel, &mut buf)?
-                != backup_stream_digest(&dst, cancel, &mut buf)?
+            let mut report = |bytes: usize| {
+                bytes_read = bytes_read.saturating_add(bytes as u64);
+                progress(&FileRestoreProgress {
+                    files_done: out.files,
+                    files_total: total.files,
+                    bytes_done: bytes_read,
+                    bytes_total: total.bytes.saturating_mul(2),
+                })
+            };
+            if backup_stream_digest(&src, cancel, &mut buf, &mut report)?
+                != backup_stream_digest(&dst, cancel, &mut buf, &mut report)?
             {
                 return Err(OwnBackupError::RestoreIncompatible(
                     tr!("file_restore_win.verify_content_diff", path = dst.display()).into_owned(),
@@ -194,7 +217,12 @@ pub fn verify_tree(src_root: &Path, dst_root: &Path, cancel: &CancelToken) -> Re
     Ok(out)
 }
 
-fn backup_stream_digest(path: &Path, cancel: &CancelToken, buf: &mut [u8]) -> Result<[u8; 32]> {
+fn backup_stream_digest(
+    path: &Path,
+    cancel: &CancelToken,
+    buf: &mut [u8],
+    progress: &mut impl FnMut(usize) -> Result<()>,
+) -> Result<[u8; 32]> {
     let handle = open_source(path)?;
     let mut read_ctx: *mut core::ffi::c_void = std::ptr::null_mut();
     let result = (|| -> Result<[u8; 32]> {
@@ -213,6 +241,10 @@ fn backup_stream_digest(path: &Path, cancel: &CancelToken, buf: &mut [u8]) -> Re
                 break;
             }
             digest.update(&buf[..read as usize]);
+            progress(read as usize)?;
+            if cancel.is_cancelled() {
+                return Err(OwnBackupError::Cancelled);
+            }
         }
         Ok(digest.finalize().into())
     })();

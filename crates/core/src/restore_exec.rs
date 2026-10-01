@@ -242,6 +242,19 @@ pub fn initial_state(plan: &RestorePlan) -> RestoreRunState {
     }
 }
 
+/// Verification records are inserted into the visible queue but are not
+/// operations from the plan. Keep execution addressed to the original steps.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn execution_slots(state: &RestoreRunState) -> Vec<usize> {
+    state
+        .ops
+        .iter()
+        .enumerate()
+        .filter(|(_, op)| !matches!(op.kind.as_str(), "verify_sectors" | "verify_files"))
+        .map(|(index, _)| index)
+        .collect()
+}
+
 /// Execute `plan`, calling `on_update` whenever the state changes.
 ///
 /// Returns the final state. An operation failing is *not* an `Err` — it is a
@@ -365,6 +378,7 @@ pub fn execute_plan(
         "copy opened"
     );
     let mut state = initial_state(plan);
+    let slots = execution_slots(&state);
     on_update(&state);
 
     let ordered: Vec<RestoreOp> = plan.ordered().into_iter().cloned().collect();
@@ -394,7 +408,8 @@ pub fn execute_plan(
     let held_offline = !online;
     let mut sectors_verified = false;
 
-    for (index, op) in ordered.iter().enumerate() {
+    for (ordered_index, op) in ordered.iter().enumerate() {
+        let index = slots[ordered_index];
         if cancel.is_cancelled() {
             finish_cancelled(&mut state, index);
             on_update(&state);
@@ -423,6 +438,15 @@ pub fn execute_plan(
                     &mut on_update,
                 );
                 sectors_verified = true;
+                if cancel.is_cancelled() {
+                    finish_cancelled(&mut state, index);
+                    if let Some(s) = session.as_mut() {
+                        s.update_properties()?;
+                        s.bring_online()?;
+                    }
+                    on_update(&state);
+                    return Ok(state);
+                }
             }
             if let Some(s) = session.as_mut() {
                 s.update_properties()?;
@@ -465,6 +489,11 @@ pub fn execute_plan(
                 state.ops[index].message = note.message;
                 state.follow_ups.extend(note.follow_ups);
                 info!(op = %op.kind(), index, note = %state.ops[index].message, "restore operation done");
+            }
+            Err(OwnBackupError::Cancelled) => {
+                finish_cancelled(&mut state, index);
+                on_update(&state);
+                return Ok(state);
             }
             Err(e) => {
                 error!(op = %op.kind(), index, error = %e, "restore operation failed");
@@ -641,6 +670,7 @@ fn run_verification(
         if *mode == RestoreMode::Files {
             verify_files(
                 plan, sidecar, archive, *src_index, dst.index, dst.offset, index, state, cancel,
+                on_update,
             );
             on_update(state);
             continue;
@@ -713,6 +743,10 @@ fn run_verification(
         );
 
         match result {
+            Ok(v) if v.cancelled || cancel.is_cancelled() => {
+                state.ops[index].status = OpStatus::Skipped;
+                state.ops[index].message = tr!("restore_exec.verify_interrupted").into_owned();
+            }
             Ok(v) if v.ok() => {
                 state.ops[index].status = OpStatus::Done;
                 state.ops[index].percent = 100;
@@ -723,10 +757,6 @@ fn run_verification(
                     blocks = v.blocks_checked,
                     "verification passed"
                 );
-            }
-            Ok(v) if v.cancelled => {
-                state.ops[index].status = OpStatus::Skipped;
-                state.ops[index].message = tr!("restore_exec.verify_interrupted").into_owned();
             }
             // The restore itself writes to the ESP after the copy is in place:
             // bcdboot, and the fallback loader at \EFI\BOOT\BOOTX64.EFI. Those
@@ -799,6 +829,8 @@ fn run_verification(
         on_update(state);
     }
     state.current = None;
+    state.cancellable = false;
+    on_update(state);
 }
 
 /// Did the plan write into this partition after its data was copied?
@@ -1041,8 +1073,9 @@ fn verify_files(
     index: usize,
     state: &mut RestoreRunState,
     cancel: &CancelToken,
+    on_update: &mut impl FnMut(&RestoreRunState),
 ) {
-    use own_backup_backup::file_restore_win::{long_path, verify_tree};
+    use own_backup_backup::file_restore_win::{long_path, verify_tree_with_progress};
     use own_backup_backup::restore_win::MountedImage;
     use own_backup_backup::volume_win::volume_root_at_offset;
 
@@ -1071,11 +1104,26 @@ fn verify_files(
         );
     };
 
-    match verify_tree(
+    match verify_tree_with_progress(
         &long_path(std::path::Path::new(&src_root)),
         &long_path(std::path::Path::new(&dst_root)),
         cancel,
+        |pr| {
+            state.ops[index].bytes_done = pr.bytes_done;
+            state.ops[index].bytes_total = pr.bytes_total;
+            state.ops[index].percent = if pr.bytes_total > 0 {
+                (pr.bytes_done.saturating_mul(100) / pr.bytes_total).min(99) as u32
+            } else {
+                0
+            };
+            on_update(state);
+            Ok(())
+        },
     ) {
+        Ok(_) if cancel.is_cancelled() => {
+            state.ops[index].status = OpStatus::Skipped;
+            state.ops[index].message = tr!("restore_exec.verify_interrupted").into_owned();
+        }
         Ok(got) => {
             state.ops[index].status = OpStatus::Done;
             state.ops[index].percent = 100;
@@ -1760,6 +1808,76 @@ mod tests {
             offset: 1024 * 1024,
             size: 1024 * 1024 * 1024,
         }
+    }
+
+    #[test]
+    fn sector_verification_does_not_replace_the_following_operation() {
+        let mut plan = RestorePlan::new(
+            1,
+            "image.qcow2".into(),
+            vec![
+                RestoreOp::WritePartitionTable { table: table() },
+                RestoreOp::RestorePartition {
+                    src_index: 1,
+                    dst: part(),
+                    mode: RestoreMode::Sectors,
+                    wipe_free_space: false,
+                    reencrypt: false,
+                },
+                RestoreOp::AssignLetter {
+                    part: part(),
+                    letter: 'T',
+                },
+            ],
+        );
+        plan.verify_after = true;
+        let state = initial_state(&plan);
+        let slots = execution_slots(&state);
+        assert_eq!(slots, vec![0, 1, 3]);
+        for (op, index) in plan.ordered().iter().zip(slots) {
+            assert_eq!(state.ops[index].kind, op.kind());
+        }
+    }
+
+    #[test]
+    fn cancelling_verification_preserves_writes_and_skips_following_steps() {
+        let mut plan = RestorePlan::new(
+            1,
+            "image.qcow2".into(),
+            vec![
+                RestoreOp::WritePartitionTable { table: table() },
+                RestoreOp::RestorePartition {
+                    src_index: 1,
+                    dst: part(),
+                    mode: RestoreMode::Sectors,
+                    wipe_free_space: false,
+                    reencrypt: false,
+                },
+                RestoreOp::AssignLetter {
+                    part: part(),
+                    letter: 'T',
+                },
+            ],
+        );
+        plan.verify_after = true;
+        let mut state = initial_state(&plan);
+        state.ops[0].status = OpStatus::Done;
+        state.ops[1].status = OpStatus::Done;
+        state.ops[2].status = OpStatus::Skipped;
+        state.ops[2].percent = 95;
+        finish_cancelled(&mut state, execution_slots(&initial_state(&plan))[2]);
+        assert_eq!(state.status, RunStatus::Cancelled);
+        assert_eq!(
+            state
+                .completed()
+                .map(|o| o.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["write_partition_table", "restore_sectors"]
+        );
+        assert_eq!(state.ops[2].status, OpStatus::Skipped);
+        assert_eq!(state.ops[2].percent, 95);
+        assert_eq!(state.ops[3].status, OpStatus::Skipped);
+        assert!(!state.cancellable && state.current.is_none());
     }
 
     #[test]

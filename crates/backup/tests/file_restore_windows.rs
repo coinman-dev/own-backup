@@ -4,6 +4,48 @@ use own_backup_backup::file_restore_win::{copy_tree, measure_tree, verify_tree};
 use own_backup_common::cancel::CancelToken;
 
 #[test]
+fn verification_can_be_cancelled_within_one_file_stream() {
+    use own_backup_backup::file_restore_win::verify_tree_with_progress;
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src");
+    let dst = dir.path().join("dst");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(&dst).unwrap();
+    let data = vec![0x5a; 4 * 1024 * 1024];
+    std::fs::write(src.join("large.bin"), &data).unwrap();
+    std::fs::write(dst.join("large.bin"), &data).unwrap();
+    let cancel = CancelToken::default();
+    let mut observed = 0;
+    let error = verify_tree_with_progress(&src, &dst, &cancel, |p| {
+        assert!(p.bytes_done >= observed);
+        observed = p.bytes_done;
+        if p.bytes_done >= 2 * 1024 * 1024 {
+            cancel.cancel();
+        }
+        Ok(())
+    })
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        own_backup_common::OwnBackupError::Cancelled
+    ));
+    assert!(
+        observed < (data.len() * 2) as u64,
+        "comparison finished after cancellation"
+    );
+    let mut previous = 0;
+    let report = verify_tree_with_progress(&src, &dst, &CancelToken::default(), |p| {
+        assert!(p.bytes_done >= previous);
+        previous = p.bytes_done;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(report.files, 1);
+    assert_eq!(report.bytes, data.len() as u64);
+    assert!(previous >= (data.len() * 2) as u64);
+}
+
+#[test]
 fn file_verification_compares_contents_names_and_alternate_streams() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("source");
