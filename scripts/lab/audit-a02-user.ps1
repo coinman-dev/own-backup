@@ -87,8 +87,26 @@ try {
         $paths += $base, $child
     }
     if (@($paths | Sort-Object -Unique).Count -ne 4) { throw 'chains overlap' }
+    $sidecars = @()
+    $mode = (Get-Content -LiteralPath 'C:\Lab\a02-mode.txt' -Raw -ErrorAction SilentlyContinue).Trim()
+    if ($mode -eq 'legacy') {
+        $legacyPaths = @([string]$images[0].base_image_path, [string]$images[0].image_path)
+        $old = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $convertOutput = (& 'C:\Lab\audit_a02_legacy_sidecar.exe' @legacyPaths 2>&1 | Out-String).Trim()
+            $convertCode = [int]$LASTEXITCODE
+        } finally { $ErrorActionPreference = $old }
+        if ($convertCode -ne 0) { throw "legacy sidecar conversion failed: $convertOutput" }
+        $sidecars = @($legacyPaths | ForEach-Object { "${_}.obkm" })
+        if (@($sidecars | Where-Object { -not (Test-Path -LiteralPath $_) }).Count -ne 0) {
+            throw 'one of the external sidecars is absent'
+        }
+        foreach ($line in ($convertOutput -split "`r?`n")) { if ($line) { Say $line } }
+        Say 'A02-LEGACY-READY images=2 external_sidecars=2 embedded_unreadable=true'
+    }
     $hashes = @{}
-    foreach ($path in $paths) {
+    foreach ($path in @($paths + $sidecars)) {
         $hashes[$path] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
         Say "A02-BEFORE file=$([IO.Path]::GetFileName($path)) sha256=$($hashes[$path])"
     }
@@ -112,7 +130,7 @@ try {
     $report = [Text.Encoding]::UTF8.GetString($reportBytes) | ConvertFrom-Json
     Say "A02-REPORT-BASE64 $([Convert]::ToBase64String($reportBytes))"
     $keptPaths = @($report.kept | ForEach-Object { [string]$_[0] })
-    foreach ($path in $paths) {
+    foreach ($path in @($paths + $sidecars)) {
         if ($keptPaths -notcontains $path) { throw "report did not name kept file $path" }
         if (-not (Test-Path -LiteralPath $path)) { throw "a protected file was deleted: $path" }
     }
@@ -121,7 +139,7 @@ try {
 
     $held.Dispose(); $held = $null
     Remove-Item -LiteralPath $marker -Force; $marker = $null
-    foreach ($path in $paths) {
+    foreach ($path in @($paths + $sidecars)) {
         $after = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
         if ($after -ne $hashes[$path]) { throw "file changed during delete: $path" }
         Say "A02-AFTER file=$([IO.Path]::GetFileName($path)) sha256=$after"
@@ -152,6 +170,7 @@ try {
         $found['volume-B.txt'] -ne 'AUDIT-VOLUME-B') {
         throw 'one of the retained points lost its file content'
     }
+    if ($mode -eq 'legacy') { Say 'A02-LEGACY-PASS sidecars=2 mounted=2 contents=2' }
     Say 'A02-PASS retained=4 mounted=2 contents=2'
 } catch {
     Say "A02-FAIL line=$($_.InvocationInfo.ScriptLineNumber) message=$($_.Exception.Message)"
