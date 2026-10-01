@@ -7,7 +7,7 @@ function Say([string]$Text) {
 }
 
 $ErrorActionPreference = 'Stop'
-$ready = 'C:\Lab\audit-a02-stage-v4.ready'
+$ready = 'C:\Lab\audit-a02-stage-2026-10-01.ready'
 if (Test-Path -LiteralPath $ready) { Say 'A02-STAGE-SECOND-BOOT'; return }
 try {
     Say "A02-STAGE-BEGIN $([DateTime]::UtcNow.ToString('o'))"
@@ -19,6 +19,7 @@ try {
     Say "A02-STAGE-SERVICE sha256=$have"
     if ($have -ne $want) { throw 'installed service differs from staged binary' }
     Say "A02-STAGE-CLI sha256=$((Get-FileHash 'C:\Lab\own-backup-cli.exe' -Algorithm SHA256).Hash)"
+    if (-not (Test-Path -LiteralPath 'C:\Lab\audit_delete_report.exe')) { throw 'DeleteJob RPC client missing' }
 
     $answer = New-Object System.Xml.XmlDocument
     $answer.Load('C:\Lab\autounattend.xml')

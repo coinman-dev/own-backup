@@ -3,8 +3,9 @@
 async fn main() {
     let mut args = std::env::args().skip(1);
     let id = args.next().expect("job id");
-    let base = args.next().expect("base image path");
-    let child = args.next().expect("child image path");
+    let report_path = args.next().expect("report path");
+    let protected: Vec<String> = args.collect();
+    assert!(protected.len() >= 2, "protected image paths required");
     let token =
         std::fs::read_to_string(own_backup_common::config::AppConfig::default().token_path())
             .unwrap_or_default();
@@ -13,18 +14,23 @@ async fn main() {
             .await
             .expect("connect to service");
     let report = client.delete_job(&id, true).await.expect("delete job");
-    println!("{}", serde_json::to_string(&report).unwrap());
+    let json = serde_json::to_string_pretty(&report).unwrap();
+    std::fs::write(report_path, &json).expect("save complete DeleteJob reply");
+    println!("{json}");
     let kept: std::collections::HashSet<&str> =
         report.kept.iter().map(|(path, _)| path.as_str()).collect();
     let disjoint = report
         .deleted
         .iter()
         .all(|path| !kept.contains(path.as_str()));
-    let base_kept = kept.contains(base.as_str());
-    let child_kept = kept.contains(child.as_str());
+    let protected_kept = protected
+        .iter()
+        .filter(|path| kept.contains(path.as_str()))
+        .count();
     println!(
-        "disjoint={disjoint} base_kept={base_kept} child_kept={child_kept} deleted={}",
+        "disjoint={disjoint} protected_kept={protected_kept}/{} deleted={}",
+        protected.len(),
         report.deleted.len()
     );
-    assert!(disjoint && base_kept && child_kept && report.deleted.is_empty());
+    assert!(disjoint && protected_kept == protected.len() && report.deleted.is_empty());
 }
