@@ -260,6 +260,7 @@ async fn watch_destinations(
         }
         if !probes.contains_key(&job.id) {
             let query = root.clone();
+            debug!(job = %job.name, root = ?root, "destination probe started");
             probes.insert(
                 job.id.clone(),
                 (
@@ -271,6 +272,12 @@ async fn watch_destinations(
             );
         }
     }
+    debug!(
+        jobs = jobs.len(),
+        probes = probes.len(),
+        pending = probes.values().filter(|(_, h)| !h.is_finished()).count(),
+        "destination probe slots"
+    );
     tokio::time::sleep(DEST_PROBE_INITIAL_WAIT).await;
     for job in jobs {
         if !probes.get(&job.id).is_some_and(|(root, handle)| {
@@ -282,6 +289,7 @@ async fn watch_destinations(
         let Ok(now_there) = handle.await else {
             continue;
         };
+        debug!(job = %job.name, reachable = now_there, "destination probe finished");
         let before = seen.insert(job.id.clone(), now_there);
         if before == Some(now_there) || before.is_none() {
             continue; // unchanged, or the first look
@@ -445,6 +453,55 @@ fn enqueue(queue: &RunQueue, job_tx: &UnboundedSender<String>, id: &str, name: &
 mod tests {
     use super::*;
     use chrono::{FixedOffset, TimeZone};
+
+    #[tokio::test]
+    async fn a_pending_network_probe_is_retained_while_a_local_edge_fires() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JobStore::load(dir.path());
+        let make = |name: &str, dest: &str| {
+            let mut job = Job::default();
+            job.name = name.into();
+            job.dest_folder = dest.into();
+            job.schedule.kind = "event".into();
+            job.schedule.event_trigger = "dest_connected".into();
+            job
+        };
+        let network = store.upsert(make("remote", r"\\nas\share\job")).unwrap();
+        let local = store.upsert(make("local", r"R:\job")).unwrap();
+        let queue = RunQueue::new();
+        let passwords = PasswordStore::new(dir.path().join("metadata.db"));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (release, wait) = tokio::sync::oneshot::channel::<()>();
+        let pending = tokio::spawn(async move {
+            let _ = wait.await;
+            false
+        });
+        let pending_id = pending.id();
+        let done = tokio::spawn(async { true });
+        tokio::task::yield_now().await;
+        let mut probes = HashMap::from([
+            (
+                network.id.clone(),
+                (dest_root(&network.dest_folder), pending),
+            ),
+            (local.id.clone(), (dest_root(&local.dest_folder), done)),
+        ]);
+        let mut seen = HashMap::from([(network.id.clone(), false), (local.id.clone(), false)]);
+        watch_destinations(&store, &queue, &tx, &passwords, &mut seen, &mut probes).await;
+        assert_eq!(rx.try_recv().unwrap(), local.id);
+        for _ in 0..12 {
+            watch_destinations(&store, &queue, &tx, &passwords, &mut seen, &mut probes).await;
+            assert_eq!(
+                probes[&network.id].1.id(),
+                pending_id,
+                "stalled probe was replaced"
+            );
+        }
+        assert_eq!(probes.keys().filter(|id| *id == &network.id).count(), 1);
+        let _ = release.send(());
+        let (_, handle) = probes.remove(&network.id).unwrap();
+        handle.await.unwrap();
+    }
 
     fn job_started_at(utc: &str) -> Job {
         Job {
