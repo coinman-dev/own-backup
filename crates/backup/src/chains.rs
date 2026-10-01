@@ -464,7 +464,7 @@ pub fn plan_consolidation(chain: &Chain, keep_increments: u32) -> Option<Consoli
 pub struct DeletionReport {
     /// Files that are gone now.
     pub deleted: Vec<PathBuf>,
-    /// Images still on disk, each with the reason it is.
+    /// Images and external sidecars still on disk, each with the reason it is.
     pub kept: Vec<(PathBuf, String)>,
     /// Sidecars whose image was deleted but which could not be removed
     /// themselves. Not a danger to anybody's data — nothing depends on a
@@ -480,6 +480,13 @@ impl DeletionReport {
 
     pub fn files_deleted(&self) -> u32 {
         self.deleted.len() as u32
+    }
+}
+
+fn keep_image_with_sidecar(report: &mut DeletionReport, image: &ChainImage, reason: String) {
+    report.kept.push((image.image_path.clone(), reason.clone()));
+    if image.sidecar_path.exists() {
+        report.kept.push((image.sidecar_path.clone(), reason));
     }
 }
 
@@ -538,10 +545,11 @@ pub fn delete_chain(chain: &Chain) -> Result<DeletionReport> {
     for &i in &order {
         let image = &chain.images[i];
         if blocked[i] {
-            report.kept.push((
-                image.image_path.clone(),
+            keep_image_with_sidecar(
+                &mut report,
+                image,
                 tr!("chains.kept_dependent").into_owned(),
-            ));
+            );
             block_parent(&parent, &mut blocked, i);
             continue;
         }
@@ -552,7 +560,7 @@ pub fn delete_chain(chain: &Chain) -> Result<DeletionReport> {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => {
                 warn!(path = %image.image_path.display(), error = %e, "Failed to delete chain image");
-                report.kept.push((image.image_path.clone(), e.to_string()));
+                keep_image_with_sidecar(&mut report, image, e.to_string());
                 block_parent(&parent, &mut blocked, i);
                 continue;
             }
@@ -1201,6 +1209,15 @@ mod tests {
         let kept: Vec<_> = report.kept.iter().map(|(p, _)| p.clone()).collect();
         assert!(kept.contains(&dir.path().join("b_full.vhdx")), "{report:?}");
         assert!(kept.contains(&leaf), "{report:?}");
+        assert!(
+            kept.contains(&dir.path().join("b_full.vhdx.obkm")),
+            "external sidecar of the dependent base must be named: {report:?}"
+        );
+        assert!(
+            kept.contains(&dir.path().join("b_inc.avhdx.obkm")),
+            "external sidecar of the busy child must be named: {report:?}"
+        );
+        assert!(report.deleted.iter().all(|p| !kept.contains(p)));
     }
 
     /// Разностная цепочка — это звезда, а не линия: дети висят на базе
