@@ -9,6 +9,9 @@ $ready = 'C:\Lab\a08-stage.ready'
 try {
     if (Test-Path -LiteralPath $ready) {
         Start-Process powershell.exe -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File C:\Lab\audit-a08-restart.ps1' -WindowStyle Hidden | Out-Null
+        if ((Get-Content 'C:\Lab\a08-mode.txt' -Raw).Trim() -eq 'mutations') {
+            Start-Process powershell.exe -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File C:\Lab\audit-a09-watch.ps1' -WindowStyle Hidden | Out-Null
+        }
         return
     }
     foreach ($file in @('audit-a08-user.ps1')) {
@@ -23,6 +26,23 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "service update failed: $output" }
     }
     Say "A08-SERVICE sha256=$((Get-FileHash 'C:\Lab\own-backup-service.exe' -Algorithm SHA256).Hash)"
+    $mode = (Get-Content 'C:\Lab\a08-mode.txt' -Raw).Trim()
+    if ($mode -in @('letter', 'mutations')) {
+        $sourcePart = Get-Partition -DriveLetter E
+        $env:OWN_BACKUP_A09_SOURCE_OFFSET = [string]$sourcePart.Offset
+        $testOutput = cmd.exe /d /c 'C:\Lab\letters_windows.exe --nocapture 2>&1' | Out-String
+        $testCode = $LASTEXITCODE
+        foreach ($line in ($testOutput -split "`r?`n")) { if ($line) { Say "A09-LETTER-TEST $line" } }
+        if ($testCode -ne 0) { throw 'native drive-letter regression failed' }
+        Say 'A09-LETTER-TEST-PASS'
+        if ($mode -eq 'mutations') {
+            $testOutput = cmd.exe /d /c 'C:\Lab\file_restore_windows.exe --ignored --exact file_verification_detects_reparse_target_change --nocapture 2>&1' | Out-String
+            $testCode = $LASTEXITCODE
+            foreach ($line in ($testOutput -split "`r?`n")) { if ($line) { Say "A09-REPARSE-TEST $line" } }
+            if ($testCode -ne 0) { throw 'native reparse-point regression failed' }
+            Say 'A09-REPARSE-TEST-PASS'
+        }
+    }
     if ((Get-Content 'C:\Lab\a08-mode.txt' -Raw).Trim() -eq 'fixed') {
         $testOutput = cmd.exe /d /c 'C:\Lab\file_restore_windows.exe --nocapture 2>&1' | Out-String
         $testCode = $LASTEXITCODE
@@ -38,6 +58,19 @@ try {
     $devices = Get-Content 'C:\Lab\audit-2026-09-27\devices.json' -Raw | ConvertFrom-Json
     $source = Get-Partition -DriveLetter $devices.source_letter
     if ($source.DiskNumber -ne 1) { throw 'source is not the disposable data disk' }
+    if ($mode -eq 'mutations') {
+        $sourceDir = 'E:\a07-data'
+        $systemFile = 'C:\Windows\System32\kernel32.dll'
+        Copy-Item -LiteralPath $systemFile -Destination "$sourceDir\kernel32.dll" -Force
+        Set-Content -LiteralPath "$sourceDir\large.bin" -Stream a09 -Value 'a09 stream contents' -NoNewline
+        Set-Content -LiteralPath "$sourceDir\kernel32.dll" -Stream a09 -Value 'system dll named stream' -NoNewline
+        $link = "$sourceDir\a09-link"
+        if (Test-Path -LiteralPath $link) { Remove-Item -LiteralPath $link -Force }
+        New-Item -ItemType SymbolicLink -Path $link -Target "$sourceDir\large.bin" | Out-Null
+        $sourceHash = (Get-FileHash -LiteralPath $systemFile -Algorithm SHA256).Hash
+        if ((Get-FileHash -LiteralPath "$sourceDir\kernel32.dll" -Algorithm SHA256).Hash -ne $sourceHash) { throw 'SYSTEM fixture copy differs' }
+        Say "A09-SPECIAL-SOURCE system_file=kernel32.dll sha256=$sourceHash ads=true symlink=true"
+    }
     New-Item -ItemType Directory -Force -Path 'C:\Lab\a08' | Out-Null
     $image = 'C:\Lab\a08\source.qcow2'
     Say "A08-BACKUP disk=$($source.DiskNumber) part=$($source.PartitionNumber) size=$($source.Size) target=$($target[0].Number)"
@@ -45,12 +78,18 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "backup-disk failed: $output" }
     Say "A08-IMAGE bytes=$((Get-Item $image).Length) sha256=$((Get-FileHash $image -Algorithm SHA256).Hash)"
     $cases = @('sectors_early', 'sectors_late', 'sectors_complete', 'files_early', 'files_late', 'files_complete')
-    if ((Get-Content 'C:\Lab\a08-mode.txt' -Raw).Trim() -eq 'baseline') { $cases = @('sectors_early') }
-    [IO.File]::WriteAllText('C:\Lab\a08\config.json', (@{
+    if ($mode -eq 'baseline') { $cases = @('sectors_early') }
+    if ($mode -eq 'letter') { $cases = @('sectors_complete', 'files_complete') }
+    if ($mode -eq 'mutations') {
+        $cases = @('files_special_complete', 'files_corrupt_byte', 'files_corrupt_name', 'files_corrupt_ads', 'files_corrupt_acl', 'files_corrupt_locked_dir', 'files_corrupt_reparse')
+    }
+    $body = @{
         image = $image; source_index = $source.PartitionNumber; source_size = $source.Size
         target_disk = $target[0].Number; target_size = $target[0].Size
         cases = $cases; results = 'C:\Lab\a08\results.json'
-    } | ConvertTo-Json -Depth 5))
+    }
+    if ($mode -in @('letter', 'mutations')) { $body.letter = 'T' }
+    [IO.File]::WriteAllText('C:\Lab\a08\config.json', ($body | ConvertTo-Json -Depth 5))
     New-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce' `
         -Name OwnBackupA08 -PropertyType String -Force `
         -Value 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Lab\audit-a08-user.ps1' | Out-Null

@@ -16,7 +16,7 @@ def used(path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("baseline", "fixed"), default="fixed")
+    parser.add_argument("--mode", choices=("baseline", "fixed", "letter", "mutations"), default="fixed")
     parser.add_argument("--timeout", type=int, default=1800)
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[2]
@@ -30,17 +30,24 @@ def main():
         print(f"BUDGET free={free/2**30:.2f}GiB target={target/2**30:.2f}GiB lab={total/2**30:.2f}GiB active={current/2**30:.2f}GiB", flush=True)
         return free >= 30*2**30 and target <= 30*2**30 and total <= 65*2**30 and current <= 20*2**30
     if not budget() or shutil.disk_usage(repo).free < 38*2**30: raise SystemExit("space reserve insufficient for the estimated 8-GiB peak")
+    service = repo / "target/x86_64-pc-windows-msvc/release/own-backup-service.exe"
+    if args.mode == "mutations" and b"A09 lab gate waiting before file verification" not in service.read_bytes():
+        raise SystemExit("build own-backup-service --features a09-lab-gate before mutations")
     active.mkdir()
     media = base / "media/lab"
-    for part in ("stage", "user", "restart"):
-        source = repo / f"scripts/lab/audit-a08-{part}.ps1"
+    for part in ("stage", "user", "restart") + (("a09-watch",) if args.mode == "mutations" else ()):
+        source = repo / (f"scripts/lab/audit-{part}.ps1" if part == "a09-watch" else f"scripts/lab/audit-a08-{part}.ps1")
         shutil.copyfile(source, media / ("lab-stage2.ps1" if part == "stage" else source.name))
     shutil.copyfile(repo / "target/x86_64-pc-windows-msvc/release/examples/audit_a08_restore_cancel.exe", media / "audit_a08_restore_cancel.exe")
-    if args.mode == "fixed":
-        shutil.copyfile(repo / "target/x86_64-pc-windows-msvc/release/own-backup-service.exe", media / "own-backup-service-h02.exe")
+    if args.mode in ("fixed", "letter", "mutations"):
+        shutil.copyfile(service, media / "own-backup-service-h02.exe")
         tests = list((repo / "target/x86_64-pc-windows-msvc/release/deps").glob("file_restore_windows-*.exe"))
         if len(tests) != 1: raise SystemExit("one Windows file-restore test binary expected")
         shutil.copyfile(tests[0], media / "file_restore_windows.exe")
+    if args.mode in ("letter", "mutations"):
+        tests = list((repo / "target/x86_64-pc-windows-msvc/release/deps").glob("letters_windows-*.exe"))
+        if len(tests) != 1: raise SystemExit("one Windows drive-letter test binary expected")
+        shutil.copyfile(tests[0], media / "letters_windows.exe")
     (media / "a08-mode.txt").write_text(args.mode + "\n")
     (active / "payload-hashes.json").write_text(json.dumps({p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in media.iterdir() if p.suffix in (".exe", ".ps1", ".txt")}, indent=2)+"\n")
     for name in ("windows", "data"):

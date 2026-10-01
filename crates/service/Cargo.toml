@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license-file.workspace = true
 
+[features]
+a09-lab-gate = ["own-backup-core/a09-lab-gate"]
+
 [[bin]]
 name = "own-backup-service"
 path = "src/main.rs"

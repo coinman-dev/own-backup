@@ -52,9 +52,25 @@ pub fn assign_letter(volume_root: &str, letter: char) -> Result<()> {
     let mount = format!("{letter}:\\");
     let mount_w = to_wide(&mount);
     let volume_w = to_wide(volume_root);
-    // SAFETY: both buffers are NUL-terminated and outlive the call.
-    unsafe { SetVolumeMountPointW(PCWSTR(mount_w.as_ptr()), PCWSTR(volume_w.as_ptr())) }.map_err(
-        |e| {
+    let old = volume_drive_letters(volume_root);
+    if old
+        .iter()
+        .any(|s| s.eq_ignore_ascii_case(&format!("{letter}:")))
+    {
+        return Ok(());
+    }
+    // Mountmgr allows only one drive letter per volume. Check the requested
+    // letter before removing the current one, so a collision leaves it usable.
+    if taken_letters().contains(&letter) {
+        return Err(OwnBackupError::Device(
+            tr!("letters_win.letter_in_use", letter = letter).into_owned(),
+        ));
+    }
+    let old_mount = old.first().map(|s| format!("{s}\\"));
+    if let Some(path) = &old_mount {
+        let old_w = to_wide(path);
+        // SAFETY: the UTF-16 buffer is NUL-terminated and lives through the call.
+        unsafe { DeleteVolumeMountPointW(PCWSTR(old_w.as_ptr())) }.map_err(|e| {
             OwnBackupError::Device(
                 tr!(
                     "letters_win.assign_failed",
@@ -64,8 +80,34 @@ pub fn assign_letter(volume_root: &str, letter: char) -> Result<()> {
                 )
                 .into_owned(),
             )
-        },
-    )?;
+        })?;
+    }
+    // SAFETY: both buffers are NUL-terminated and outlive the call.
+    if let Err(e) =
+        unsafe { SetVolumeMountPointW(PCWSTR(mount_w.as_ptr()), PCWSTR(volume_w.as_ptr())) }
+    {
+        if let Some(path) = old_mount {
+            let old_w = to_wide(&path);
+            // Best effort rollback after a race for the requested letter.
+            if let Err(restore) =
+                unsafe { SetVolumeMountPointW(PCWSTR(old_w.as_ptr()), PCWSTR(volume_w.as_ptr())) }
+            {
+                warn!(volume = %volume_root, old = %path, error = %restore, "could not restore the previous drive letter");
+            }
+        }
+        return Err(OwnBackupError::Device(
+            tr!(
+                "letters_win.assign_failed",
+                letter = letter,
+                volume = volume_root,
+                error = e
+            )
+            .into_owned(),
+        ));
+    }
+    if let Some(path) = old.first() {
+        info!(volume = %volume_root, from = %path, to = %letter, "drive letter moved");
+    }
     info!(volume = %volume_root, %letter, "drive letter assigned");
     Ok(())
 }

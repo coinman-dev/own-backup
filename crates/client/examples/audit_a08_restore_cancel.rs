@@ -17,6 +17,8 @@ struct Config {
     target_size: u64,
     cases: Vec<String>,
     results: String,
+    #[serde(default)]
+    letter: Option<char>,
 }
 
 fn plan(config: &Config, files: bool) -> RestorePlan {
@@ -63,7 +65,10 @@ fn plan(config: &Config, files: bool) -> RestorePlan {
         wipe_free_space: false,
         reencrypt: false,
     });
-    ops.push(RestoreOp::RefreshDiskState);
+    ops.push(match config.letter {
+        Some(letter) => RestoreOp::AssignLetter { part, letter },
+        None => RestoreOp::RefreshDiskState,
+    });
     let mut plan = RestorePlan::new(config.target_disk, config.image.clone().into(), ops);
     plan.verify_after = true;
     plan
@@ -75,7 +80,8 @@ async fn run_case(
     name: &str,
 ) -> Result<RestoreRunState, Box<dyn std::error::Error>> {
     let files = name.starts_with("files_");
-    let cancel_requested = !name.ends_with("_complete");
+    let mutation = name.strip_prefix("files_corrupt_");
+    let cancel_requested = name.ends_with("_early") || name.ends_with("_late");
     let threshold = if name.ends_with("_late") { 95 } else { 0 };
     let verify_kind = if files {
         "verify_files"
@@ -91,6 +97,12 @@ async fn run_case(
         .await?;
     println!("A08-PREVIEW case={name} json={preview}");
     let plan: RestorePlan = serde_json::from_value(preview["plan"].clone())?;
+    let gate = std::path::Path::new(r"C:\Lab");
+    if mutation.is_some() {
+        let _ = std::fs::remove_file(gate.join("a09-gate.ready"));
+        let _ = std::fs::remove_file(gate.join("a09-gate.release"));
+        std::fs::write(gate.join("a09-gate.request"), plan.id.to_string())?;
+    }
     client
         .apply_restore_plan(&plan, &Default::default(), &ArchiveSecret::none())
         .await?;
@@ -101,6 +113,8 @@ async fn run_case(
     );
     let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
     let mut accepted = false;
+    let mut mutated = false;
+    let mut held_directory: Option<std::fs::File> = None;
     let final_state = loop {
         if tokio::time::Instant::now() > deadline {
             return Err(format!("case timeout: {name}").into());
@@ -112,10 +126,31 @@ async fn run_case(
             if state.is_finished() {
                 break state;
             }
+            if let Some(change) = mutation {
+                if !mutated
+                    && std::fs::read_to_string(gate.join("a09-gate.ready"))
+                        .map(|value| value.trim() == plan.id.to_string())
+                        .unwrap_or(false)
+                {
+                    let changed = mutate_restored_tree(change);
+                    std::fs::write(gate.join("a09-gate.release"), plan.id.to_string())?;
+                    held_directory = changed?;
+                    mutated = true;
+                    println!("A09-MUTATED case={name} phase=lab_gate");
+                    let at = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)?
+                        .as_millis();
+                    std::fs::write(
+                        r"C:\Lab\a09-mutation.log",
+                        format!("case={name} epoch_ms={at} current={:?}\n", state.current),
+                    )?;
+                }
+            }
             if cancel_requested && !accepted {
                 if let Some(index) = state.current {
                     let op = &state.ops[index];
-                    if op.kind == verify_kind
+                    if cancel_requested
+                        && op.kind == verify_kind
                         && op.status == OpStatus::Running
                         && op.percent >= threshold
                     {
@@ -149,7 +184,15 @@ async fn run_case(
         .iter()
         .find(|o| o.kind == verify_kind)
         .ok_or("verification record missing")?;
-    if cancel_requested {
+    if mutation.is_some() {
+        if !mutated || final_state.status != RunStatus::Failed || verify.status != OpStatus::Failed
+        {
+            return Err("a changed restored tree was not rejected".into());
+        }
+        if final_state.completed().count() != 4 || verify.message.is_empty() {
+            return Err("failed verification lost the completed restore or its reason".into());
+        }
+    } else if cancel_requested {
         if !accepted || final_state.status != RunStatus::Cancelled {
             return Err("restore did not report Cancelled".into());
         }
@@ -200,8 +243,71 @@ async fn run_case(
         final_state.status,
         final_state.completed().count()
     );
+    drop(held_directory);
     tokio::time::sleep(Duration::from_millis(50)).await;
     Ok(final_state)
+}
+
+#[cfg(target_os = "windows")]
+fn mutate_restored_tree(change: &str) -> Result<Option<std::fs::File>, Box<dyn std::error::Error>> {
+    use std::io::{Seek, SeekFrom, Write};
+    use std::os::windows::fs::OpenOptionsExt;
+    let directory = std::path::Path::new(r"T:\a07-data");
+    let large = directory.join("large.bin");
+    match change {
+        "byte" => {
+            let mut file = std::fs::OpenOptions::new().write(true).open(&large)?;
+            file.seek(SeekFrom::Start(0))?;
+            file.write_all(b"X")?;
+            file.sync_all()?;
+        }
+        "name" => std::fs::rename(&large, directory.join("renamed.bin"))?,
+        "ads" => std::fs::write(format!("{}:a09", large.display()), b"changed ADS")?,
+        "acl" => {
+            let before = std::process::Command::new("icacls.exe")
+                .arg(directory)
+                .output()?;
+            let result = std::process::Command::new("icacls.exe")
+                .arg(directory)
+                .args(["/grant", "*S-1-5-32-545:F"])
+                .output()?;
+            let after = std::process::Command::new("icacls.exe")
+                .arg(directory)
+                .output()?;
+            if !before.status.success() || !result.status.success() || before.stdout == after.stdout
+            {
+                return Err("nested directory ACL was not changed".into());
+            }
+        }
+        "reparse" => {
+            use std::io::BufRead;
+            let mut tcp = std::net::TcpStream::connect(("127.0.0.1", 43996))?;
+            tcp.set_read_timeout(Some(Duration::from_secs(15)))?;
+            tcp.write_all(b"reparse\n")?;
+            let mut reply = String::new();
+            std::io::BufReader::new(&mut tcp).read_line(&mut reply)?;
+            if reply != "OK\n" {
+                return Err(format!("SYSTEM reparse mutation failed: {reply:?}").into());
+            }
+        }
+        "locked_dir" => {
+            let handle = std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .custom_flags(0x0200_0000)
+                .open(directory)?;
+            return Ok(Some(handle));
+        }
+        _ => return Err(format!("unknown mutation {change}").into()),
+    }
+    Ok(None)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn mutate_restored_tree(
+    _change: &str,
+) -> Result<Option<std::fs::File>, Box<dyn std::error::Error>> {
+    Err("Windows-only lab mutation".into())
 }
 
 #[tokio::main]

@@ -668,6 +668,13 @@ fn run_verification(
         on_update(state);
 
         if *mode == RestoreMode::Files {
+            #[cfg(feature = "a09-lab-gate")]
+            if let Err(error) = a09_lab_gate(plan.id, cancel) {
+                state.ops[index].status = OpStatus::Failed;
+                state.ops[index].message = error;
+                on_update(state);
+                continue;
+            }
             verify_files(
                 plan, sidecar, archive, *src_index, dst.index, dst.offset, index, state, cancel,
                 on_update,
@@ -831,6 +838,42 @@ fn run_verification(
     state.current = None;
     state.cancellable = false;
     on_update(state);
+}
+
+/// Lab-only pause after all file writes, before the verifier reads the tree.
+/// A released build has no gate or filesystem check.
+#[cfg(all(target_os = "windows", feature = "a09-lab-gate"))]
+fn a09_lab_gate(plan_id: uuid::Uuid, cancel: &CancelToken) -> std::result::Result<(), String> {
+    use std::time::{Duration, Instant};
+    let root = std::path::Path::new(r"C:\Lab");
+    let request = root.join("a09-gate.request");
+    let id = plan_id.to_string();
+    if std::fs::read_to_string(&request)
+        .map(|s| s.trim() == id)
+        .unwrap_or(false)
+    {
+        std::fs::write(root.join("a09-gate.ready"), &id)
+            .map_err(|e| format!("A09 lab gate ready: {e}"))?;
+        info!(%plan_id, "A09 lab gate waiting before file verification");
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            if cancel.is_cancelled() {
+                return Err("A09 lab gate cancelled".into());
+            }
+            if std::fs::read_to_string(root.join("a09-gate.release"))
+                .map(|s| s.trim() == id)
+                .unwrap_or(false)
+            {
+                info!(%plan_id, "A09 lab gate released");
+                return Ok(());
+            }
+            if Instant::now() > deadline {
+                return Err("A09 lab gate timed out".into());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    Ok(())
 }
 
 /// Did the plan write into this partition after its data was copied?

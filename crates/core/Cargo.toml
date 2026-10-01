@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license-file.workspace = true
 
+[features]
+a09-lab-gate = []
+
 [dependencies]
 own-backup-common = { workspace = true }
 rust-i18n = { workspace = true }

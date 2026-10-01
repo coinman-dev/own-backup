@@ -229,6 +229,10 @@
     "ru": "не удалось назначить букву %{letter}: для %{volume}: %{error}",
     "en": "could not assign letter %{letter}: to %{volume}: %{error}"
   },
+  "letters_win.letter_in_use": {
+    "ru": "буква %{letter}: уже занята другим томом",
+    "en": "drive letter %{letter}: is already in use by another volume"
+  },
   "letters_win.no_free_letter": {
     "ru": "нет ни одной свободной буквы диска — форматировать раздел не через что",
     "en": "no drive letter is free — there is no way to format the partition"

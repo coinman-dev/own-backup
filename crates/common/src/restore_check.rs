@@ -314,7 +314,18 @@ pub struct LetterChange {
 /// is not a reason to make the user go back and edit — the correct behaviour is
 /// obvious, and stopping for it would be pedantry.
 pub fn resolve_letter_conflicts(plan: &mut RestorePlan, taken: &[char]) -> Vec<LetterChange> {
+    resolve_letter_conflicts_with_owners(plan, taken, &[])
+}
+
+/// A letter already on the partition being restored belongs to that plan
+/// operation. Other partitions must still treat it as occupied.
+pub fn resolve_letter_conflicts_with_owners(
+    plan: &mut RestorePlan,
+    taken: &[char],
+    owners: &[(u32, char)],
+) -> Vec<LetterChange> {
     let mut used: Vec<char> = taken.iter().map(|c| c.to_ascii_uppercase()).collect();
+    let mut assigned_here = Vec::new();
     let mut changes = Vec::new();
 
     for op in plan.ops.iter_mut() {
@@ -322,9 +333,14 @@ pub fn resolve_letter_conflicts(plan: &mut RestorePlan, taken: &[char]) -> Vec<L
             continue;
         };
         let requested = letter.to_ascii_uppercase();
-        if !used.contains(&requested) {
+        let already_on_target = owners.iter().any(|(part_index, current)| {
+            *part_index == part.index && current.to_ascii_uppercase() == requested
+        });
+        if (!used.contains(&requested) || already_on_target) && !assigned_here.contains(&requested)
+        {
             *letter = requested;
             used.push(requested);
+            assigned_here.push(requested);
             continue;
         }
         let assigned = next_free_letter(requested, &used);
@@ -336,6 +352,7 @@ pub fn resolve_letter_conflicts(plan: &mut RestorePlan, taken: &[char]) -> Vec<L
         if let Some(c) = assigned {
             *letter = c;
             used.push(c);
+            assigned_here.push(c);
         }
     }
     changes
@@ -2129,6 +2146,37 @@ mod tests {
         assert!(matches!(
             plan.ops[1],
             RestoreOp::AssignLetter { letter: 'F', .. }
+        ));
+    }
+
+    #[test]
+    fn current_target_keeps_its_letter_and_another_target_cannot_claim_it() {
+        let t = table(vec![entry(1, 1, 100), entry(2, 101, 100)]);
+        let (p1, p2) = (part_ref(&t, 1), part_ref(&t, 2));
+        let mut plan = plan_with(
+            t,
+            vec![
+                RestoreOp::AssignLetter {
+                    part: p2,
+                    letter: 'T',
+                },
+                RestoreOp::AssignLetter {
+                    part: p1,
+                    letter: 'T',
+                },
+            ],
+        );
+        let changes = resolve_letter_conflicts_with_owners(&mut plan, &['C', 'T'], &[(1, 'T')]);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].part_index, 2);
+        assert_eq!(changes[0].assigned, Some('U'));
+        assert!(matches!(
+            plan.ops[1],
+            RestoreOp::AssignLetter { letter: 'U', .. }
+        ));
+        assert!(matches!(
+            plan.ops[2],
+            RestoreOp::AssignLetter { letter: 'T', .. }
         ));
     }
 

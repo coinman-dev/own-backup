@@ -108,9 +108,7 @@ impl BackupServiceImpl {
         plan: &mut own_backup_common::restore_plan::RestorePlan,
         keys: Option<&own_backup_backup::seal::context::ArchiveKeys>,
     ) -> Result<Vec<String>, Status> {
-        use own_backup_common::restore_check::{
-            check_plan, resolve_letter_conflicts, CheckContext, CheckLevel,
-        };
+        use own_backup_common::restore_check::{check_plan, CheckContext, CheckLevel};
 
         // Which device is under that number NOW. `PhysicalDriveN` is a slot:
         // unplug a USB disk and plug another in, and the number moves (audit
@@ -152,7 +150,12 @@ impl BackupServiceImpl {
         }
 
         let ctx = self.restore_context(plan, CheckContext::default(), keys);
-        let moved = resolve_letter_conflicts(plan, &ctx.taken_letters);
+        let owned = target_owned_letters(plan);
+        let moved = own_backup_common::restore_check::resolve_letter_conflicts_with_owners(
+            plan,
+            &ctx.taken_letters,
+            &owned,
+        );
         for m in &moved {
             tracing::info!(
                 part = m.part_index,
@@ -406,6 +409,39 @@ fn current_target_partitions(disk: u32) -> Vec<own_backup_common::restore_check:
 
 #[cfg(not(target_os = "windows"))]
 fn current_target_partitions(_disk: u32) -> Vec<own_backup_common::restore_check::TargetPartition> {
+    Vec::new()
+}
+
+/// Only the live volume at a planned target offset may keep its letter.
+/// These facts come from the service's disk, never from client-supplied context.
+#[cfg(target_os = "windows")]
+fn target_owned_letters(plan: &own_backup_common::restore_plan::RestorePlan) -> Vec<(u32, char)> {
+    use own_backup_common::restore_plan::RestoreOp;
+    let roots = own_backup_backup::volume_win::all_volume_roots_on_disk(plan.target_disk);
+    plan.ops
+        .iter()
+        .filter_map(|op| {
+            let RestoreOp::AssignLetter { part, letter } = op else {
+                return None;
+            };
+            roots
+                .iter()
+                .find(|root| {
+                    own_backup_backup::volume_win::volume_start_on_disk(root)
+                        == Some((plan.target_disk, part.offset))
+                })
+                .and_then(|root| {
+                    own_backup_backup::volume_win::volume_drive_letters(root)
+                        .into_iter()
+                        .find(|current| current.eq_ignore_ascii_case(&format!("{letter}:")))
+                        .map(|_| (part.index, *letter))
+                })
+        })
+        .collect()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn target_owned_letters(_plan: &own_backup_common::restore_plan::RestorePlan) -> Vec<(u32, char)> {
     Vec::new()
 }
 
@@ -1961,9 +1997,7 @@ impl BackupService for BackupServiceImpl {
         req: Request<JsonRequest>,
     ) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
-        use own_backup_common::restore_check::{
-            check_plan, resolve_letter_conflicts, CheckContext,
-        };
+        use own_backup_common::restore_check::{check_plan, CheckContext};
         use own_backup_common::restore_plan::RestorePlan;
 
         #[derive(serde::Deserialize)]
@@ -1994,7 +2028,12 @@ impl BackupService for BackupServiceImpl {
         // Resolving letters mutates the plan, so the caller gets the adjusted
         // plan back and applies *that* — otherwise the fix would be lost
         // between the dry run and the real one.
-        let letter_changes = resolve_letter_conflicts(&mut p.plan, &ctx.taken_letters);
+        let owned = target_owned_letters(&p.plan);
+        let letter_changes = own_backup_common::restore_check::resolve_letter_conflicts_with_owners(
+            &mut p.plan,
+            &ctx.taken_letters,
+            &owned,
+        );
         correct_disk_size(&mut p.plan);
         // Stamp the plan with WHICH DEVICE the user is looking at. The client
         // sends this plan back to be applied, and by then `PhysicalDriveN` may
