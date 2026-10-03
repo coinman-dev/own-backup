@@ -378,16 +378,28 @@ impl BackupClient {
         target: &str,
         secret: &ArchiveSecret,
     ) -> Result<own_backup_common::engine_dto::RestoreSummaryDto> {
+        self.restore_volume_with_status(image_path, target, secret)
+            .await
+            .map_err(status)
+    }
+
+    /// The same restore, retaining the gRPC status for callers that distinguish
+    /// a safety refusal from transport, cancellation or image failures.
+    pub async fn restore_volume_with_status(
+        &mut self,
+        image_path: &str,
+        target: &str,
+        secret: &ArchiveSecret,
+    ) -> std::result::Result<own_backup_common::engine_dto::RestoreSummaryDto, tonic::Status> {
         let mut body = serde_json::json!({ "image_path": image_path, "target": target });
         secret.add_to(&mut body);
         let json = body.to_string();
         let reply = self
             .inner
             .restore_volume(self.request(proto::JsonRequest { json }))
-            .await
-            .map_err(status)?
+            .await?
             .into_inner();
-        parse(&reply.json)
+        parse(&reply.json).map_err(tonic::Status::internal)
     }
 
     /// Verify an image against its sidecar checksums. Progress arrives as `"verify"`.
@@ -561,6 +573,21 @@ impl BackupClient {
         force: bool,
         secret: &ArchiveSecret,
     ) -> Result<own_backup_common::engine_dto::DiskRestoreSummaryDto> {
+        self.restore_disk_with_status(manifest_path, target_disk, force, secret)
+            .await
+            .map_err(status)
+    }
+
+    /// Whole-disk restore with the original gRPC status, including the guard's
+    /// FailedPrecondition response before any target write.
+    pub async fn restore_disk_with_status(
+        &mut self,
+        manifest_path: &str,
+        target_disk: u32,
+        force: bool,
+        secret: &ArchiveSecret,
+    ) -> std::result::Result<own_backup_common::engine_dto::DiskRestoreSummaryDto, tonic::Status>
+    {
         let mut body = serde_json::json!({
             "manifest_path": manifest_path,
             "target_disk": target_disk,
@@ -571,10 +598,9 @@ impl BackupClient {
         let reply = self
             .inner
             .restore_disk(self.request(proto::JsonRequest { json }))
-            .await
-            .map_err(status)?
+            .await?
             .into_inner();
-        parse(&reply.json)
+        parse(&reply.json).map_err(tonic::Status::internal)
     }
 
     // --- Archive encryption (plan §7.5) -----------------------------------

@@ -117,7 +117,7 @@ pub fn check_whole_disk_protection(
     Ok(())
 }
 
-/// The physical drive number that hosts the running Windows (`%SystemDrive%`),
+/// The physical drive number that hosts the running Windows,
 /// or `None` if it can't be determined.
 ///
 /// Asked of the volume itself rather than of PowerShell: the system drive's
@@ -127,8 +127,7 @@ pub fn check_whole_disk_protection(
 pub fn system_disk_number() -> Option<u32> {
     use own_backup_backup::volume_win::{volume_root_for_path, volume_start_on_disk};
 
-    let sysdrive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
-    let root = volume_root_for_path(&format!("{}\\", sysdrive.trim_end_matches('\\')))?;
+    let root = volume_root_for_path(&windows_directory()?)?;
     // A spanned volume answers with no single disk — and a system on one is not
     // something this guard can reason about anyway.
     volume_start_on_disk(&root).map(|(disk, _)| disk)
@@ -136,21 +135,51 @@ pub fn system_disk_number() -> Option<u32> {
 
 /// True when running under a Windows recovery environment.
 ///
-/// Two ways of asking, because they fail differently. The MiniNT registry key
-/// is what Microsoft documents for exactly this question and is what the rest
-/// of the program uses; `SystemDrive == X:` is the observable symptom, and it
-/// survives a WinPE that has been customised out of recognition. Either is
-/// enough — a false "this is a rescue environment" would DISARM these guards,
-/// so both are deliberately positive-only signals of the same fact rather than
-/// a vote.
+/// This is an OS fact, not the application's `--media`/OWN_BACKUP_MEDIA setting.
+/// A UI/storage override must never authorize writing over installed Windows.
+/// MiniNT identifies PE; a kernel-reported X: Windows directory on the RAM-disk
+/// device also covers the short interval in which PE's launcher hides MiniNT
+/// to start EventLog. Caller-controlled SystemDrive/SystemRoot are not evidence.
 #[cfg(target_os = "windows")]
 pub fn is_boot_media() -> bool {
-    if own_backup_common::media_mode::is_media_mode() {
+    if own_backup_common::media_mode::is_windows_pe() {
         return true;
     }
-    std::env::var("SystemDrive")
-        .map(|d| d.eq_ignore_ascii_case("X:"))
-        .unwrap_or(false)
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::QueryDosDeviceW;
+    let Some(dir) = windows_directory() else {
+        return false;
+    };
+    if !dir.get(..2).is_some_and(|d| d.eq_ignore_ascii_case("X:")) {
+        return false;
+    }
+    let drive: Vec<u16> = "X:".encode_utf16().chain(Some(0)).collect();
+    let mut device = [0u16; 1024];
+    // SAFETY: terminated drive name and a valid writable API buffer.
+    let count = unsafe { QueryDosDeviceW(PCWSTR(drive.as_ptr()), Some(&mut device)) } as usize;
+    if count == 0 || count > device.len() {
+        return false;
+    }
+    let end = device[..count]
+        .iter()
+        .position(|&c| c == 0)
+        .unwrap_or(count);
+    String::from_utf16_lossy(&device[..end])
+        .to_ascii_lowercase()
+        .starts_with(r"\device\ramdisk")
+}
+
+/// Kernel-reported installation directory, independent of the process's env.
+#[cfg(target_os = "windows")]
+fn windows_directory() -> Option<String> {
+    use windows::Win32::System::SystemInformation::GetSystemWindowsDirectoryW;
+    let mut buffer = vec![0u16; 32768];
+    // SAFETY: buffer is sized for the documented maximum Windows path.
+    let count = unsafe { GetSystemWindowsDirectoryW(Some(&mut buffer)) } as usize;
+    if count == 0 || count >= buffer.len() {
+        return None;
+    }
+    Some(String::from_utf16_lossy(&buffer[..count]))
 }
 
 /// Guard a whole-disk restore using live Windows detection.
@@ -182,13 +211,7 @@ pub fn guard_target_volume(target: &str) -> Result<()> {
     // Where the running system stands, by byte offset on a disk — a drive
     // letter can be absent or reassigned, an extent cannot.
     let mut live: Vec<(u32, u64)> = Vec::new();
-    for path in [
-        std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into()),
-        format!(
-            "{}\\",
-            std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into())
-        ),
-    ] {
+    if let Some(path) = windows_directory() {
         if let Some(root) = volume_root_for_path(&path) {
             for e in volume_extents(&root) {
                 live.push((e.disk_number, e.offset));
@@ -274,6 +297,9 @@ pub fn guard_target_volume(_target: &str) -> Result<()> {
 pub fn protection(disk: u32) -> Protection {
     if is_boot_media() {
         return Protection::nothing_is_running();
+    }
+    if system_disk_number().is_none() {
+        return Protection::unsure(tr!("guard.live_system_location_unknown").into_owned());
     }
     // Without the layout nothing below can be answered — and "no partitions
     // protected" would read as a clean bill of health.
@@ -430,8 +456,7 @@ fn hard_drive_guid(path: &[u8]) -> Option<String> {
 /// Byte offset on `disk` of the volume holding `%SystemRoot%`.
 #[cfg(target_os = "windows")]
 fn system_volume_offset(disk: u32) -> Option<u64> {
-    let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
-    let root = own_backup_backup::volume_win::volume_root_for_path(&system_root)?;
+    let root = own_backup_backup::volume_win::volume_root_for_path(&windows_directory()?)?;
     own_backup_backup::volume_win::volume_extents(&root)
         .into_iter()
         .find(|e| e.disk_number == disk)
