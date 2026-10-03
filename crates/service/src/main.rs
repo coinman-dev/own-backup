@@ -778,12 +778,6 @@ fn drop_our_token(config: &AppConfig, ours: &str) {
 #[cfg(windows)]
 fn write_service_token(config: &AppConfig) -> Result<String, Box<dyn std::error::Error>> {
     use std::io::Write;
-    use std::os::windows::ffi::OsStrExt;
-    use std::os::windows::io::FromRawHandle;
-    use windows::core::PCWSTR;
-    use windows::Win32::Storage::FileSystem::{
-        CreateFileW, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_WRITE, FILE_SHARE_MODE,
-    };
 
     let mut raw = [0u8; 32];
     getrandom::getrandom(&mut raw).map_err(|e| format!("OS RNG failed: {e}"))?;
@@ -804,28 +798,8 @@ fn write_service_token(config: &AppConfig) -> Result<String, Box<dyn std::error:
     // a world-readable inherited file, renamed it, and only then ran icacls;
     // a failed icacls still let the privileged service start.
     let fresh = path.with_extension(format!("token.new.{}", uuid::Uuid::new_v4()));
-    let security = PipeSecurity::new("D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GR;;;IU)")?;
-    let sa = security.attributes();
-    let wide: Vec<u16> = fresh
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
     let written = (|| -> Result<(), Box<dyn std::error::Error>> {
-        let handle = unsafe {
-            CreateFileW(
-                PCWSTR(wide.as_ptr()),
-                FILE_GENERIC_WRITE.0,
-                FILE_SHARE_MODE(0),
-                Some(&sa),
-                CREATE_NEW,
-                FILE_ATTRIBUTE_NORMAL,
-                None,
-            )?
-        };
-        // SAFETY: this is the only owner of CreateFileW's handle; File closes
-        // it after the bytes and metadata have been flushed.
-        let mut file = unsafe { std::fs::File::from_raw_handle(handle.0) };
+        let mut file = create_service_token_file(&fresh)?;
         file.write_all(token.as_bytes())?;
         file.sync_all()?;
         drop(file);
@@ -839,6 +813,40 @@ fn write_service_token(config: &AppConfig) -> Result<String, Box<dyn std::error:
 
     info!("Service token written to {:?}", path);
     Ok(token)
+}
+
+/// Create the empty token file with its final protected DACL. Keeping creation
+/// separate lets a native Windows test inspect the handle before the first byte
+/// is written, including when its parent grants inherited access to Everyone.
+#[cfg(windows)]
+fn create_service_token_file(
+    path: &std::path::Path,
+) -> Result<std::fs::File, Box<dyn std::error::Error>> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::FromRawHandle;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_WRITE, FILE_SHARE_MODE,
+    };
+
+    let security = PipeSecurity::new("D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GR;;;IU)")?;
+    let sa = security.attributes();
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: descriptor and terminated path live through CreateFileW. Windows
+    // copies the descriptor into the file object before returning its handle.
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            FILE_GENERIC_WRITE.0,
+            FILE_SHARE_MODE(0),
+            Some(&sa),
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL,
+            None,
+        )?
+    };
+    // SAFETY: File takes sole ownership and closes the native handle once.
+    Ok(unsafe { std::fs::File::from_raw_handle(handle.0) })
 }
 
 /// Generate a random 32-byte token, write it to the well-known path with 0o640 permissions.
@@ -1267,6 +1275,101 @@ mod tests {
 
     fn args(line: &str) -> Vec<String> {
         line.split_whitespace().map(str::to_string).collect()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn service_token_dacl_is_protected_before_first_write() {
+        use std::os::windows::io::AsRawHandle;
+        use windows::core::PWSTR;
+        use windows::Win32::Foundation::{LocalFree, HANDLE, HLOCAL};
+        use windows::Win32::Security::Authorization::{
+            ConvertSidToStringSidW, GetSecurityInfo, SE_FILE_OBJECT,
+        };
+        use windows::Win32::Security::{
+            GetAce, GetSecurityDescriptorControl, ACCESS_ALLOWED_ACE, ACL,
+            DACL_SECURITY_INFORMATION, INHERITED_ACE, PSECURITY_DESCRIPTOR, PSID,
+            SE_DACL_PROTECTED,
+        };
+        use windows::Win32::Storage::FileSystem::{FILE_ALL_ACCESS, FILE_GENERIC_READ};
+
+        let dir = tempfile::tempdir().unwrap();
+        let grant = std::process::Command::new("icacls.exe")
+            .arg(dir.path())
+            .args(["/grant", "*S-1-1-0:(OI)(CI)F"])
+            .output()
+            .unwrap();
+        assert!(
+            grant.status.success(),
+            "cannot prepare inherited Everyone access"
+        );
+        let file = create_service_token_file(&dir.path().join("service.token.new")).unwrap();
+        assert_eq!(
+            file.metadata().unwrap().len(),
+            0,
+            "test must precede the first write"
+        );
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        let mut descriptor = PSECURITY_DESCRIPTOR::default();
+        // SAFETY: live token handle grants READ_CONTROL; out-pointers are valid.
+        unsafe {
+            GetSecurityInfo(
+                HANDLE(file.as_raw_handle()),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                Some(&mut dacl),
+                None,
+                Some(&mut descriptor),
+            )
+            .ok()
+            .unwrap();
+        }
+        struct Owned(PSECURITY_DESCRIPTOR);
+        impl Drop for Owned {
+            fn drop(&mut self) {
+                let _ = unsafe { LocalFree(HLOCAL(self.0 .0)) };
+            }
+        }
+        let descriptor = Owned(descriptor);
+        let mut control = 0;
+        let mut revision = 0;
+        unsafe {
+            GetSecurityDescriptorControl(descriptor.0, &mut control, &mut revision).unwrap();
+        }
+        assert_ne!(control & SE_DACL_PROTECTED.0, 0);
+        assert!(!dacl.is_null(), "a NULL DACL would grant everyone access");
+        let count = unsafe { (*dacl).AceCount };
+        assert_eq!(count, 3, "unexpected inherited or extra ACE");
+        let mut actual = std::collections::BTreeMap::new();
+        for index in 0..u32::from(count) {
+            let mut entry = std::ptr::null_mut();
+            unsafe {
+                GetAce(dacl, index, &mut entry).unwrap();
+            }
+            let ace = unsafe { &*(entry as *const ACCESS_ALLOWED_ACE) };
+            assert_eq!(
+                ace.Header.AceType, 0,
+                "only explicit access-allowed ACEs expected"
+            );
+            assert_eq!(u32::from(ace.Header.AceFlags) & INHERITED_ACE.0, 0);
+            let sid = PSID((&ace.SidStart as *const u32).cast_mut().cast());
+            let mut text = PWSTR::null();
+            unsafe {
+                ConvertSidToStringSidW(sid, &mut text).unwrap();
+            }
+            let sid = unsafe { text.to_string().unwrap() };
+            let _ = unsafe { LocalFree(HLOCAL(text.0.cast())) };
+            assert!(actual.insert(sid, ace.Mask).is_none());
+        }
+        let expected = std::collections::BTreeMap::from([
+            ("S-1-5-18".to_string(), FILE_ALL_ACCESS.0),
+            ("S-1-5-32-544".to_string(), FILE_ALL_ACCESS.0),
+            ("S-1-5-4".to_string(), FILE_GENERIC_READ.0),
+        ]);
+        assert_eq!(actual, expected);
+        println!("A05-TOKEN-CREATE bytes=0 protected=true inherited=false ACEs={actual:?}");
     }
 
     /// The case that failed: the medium's launcher spells it `--run --media`,
