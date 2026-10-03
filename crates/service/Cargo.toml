@@ -6,6 +6,7 @@ license-file.workspace = true
 
 [features]
 a09-lab-gate = ["own-backup-core/a09-lab-gate"]
+a07-lab-gate = ["own-backup-core/a07-lab-gate"]
 
 [[bin]]
 name = "own-backup-service"

@@ -174,6 +174,22 @@ pub fn scan_mft_with<T>(
 where
     T: Read + Seek,
 {
+    scan_mft_with_cancel(fs, patterns, |done, total| {
+        tick(done, total);
+        Ok(())
+    })
+}
+
+/// Scan with a fallible progress callback. Cancellation is returned unchanged
+/// before reading the next MFT record; callers must not retry it as a scan error.
+pub fn scan_mft_with_cancel<T>(
+    fs: &mut T,
+    patterns: &[String],
+    mut tick: impl FnMut(u64, u64) -> Result<()>,
+) -> Result<MftScan>
+where
+    T: Read + Seek,
+{
     let started = std::time::Instant::now();
     let parsed = parse_patterns(patterns);
     let mut scan = MftScan::default();
@@ -217,7 +233,7 @@ where
         scan.records_scanned += 1;
         // Раз в 4096 записей: на миллионе это 260 сообщений, а не миллион.
         if scan.records_scanned % 4096 == 0 {
-            tick(scan.records_scanned, total);
+            tick(scan.records_scanned, total)?;
         }
         let file = match ntfs.file(fs, n) {
             Ok(f) => f,

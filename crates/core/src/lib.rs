@@ -768,6 +768,54 @@ fn verify_cancelled_message() -> String {
     tr!("lib.verify_cancelled").into_owned()
 }
 
+/// Check again after emitting progress: a CancelRunning request can arrive
+/// while the client reacts to that event. Keep cancellation set until the
+/// worker starts a new run, including callbacks the engine must finalize safely.
+#[cfg(target_os = "windows")]
+fn backup_callback_checkpoint(cancel: &AtomicBool) -> own_backup_common::Result<()> {
+    if cancel.load(Ordering::SeqCst) {
+        Err(own_backup_common::OwnBackupError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
+/// Acceptance-only pause at a real production progress callback. It does not
+/// manufacture cancellation: the ordinary checkpoint below observes the RPC flag.
+#[cfg(all(target_os = "windows", feature = "a07-lab-gate"))]
+fn a07_lab_gate(job: &str, phase: &str, done: u64, total: u64) -> own_backup_common::Result<()> {
+    use own_backup_common::OwnBackupError;
+    let root = std::path::Path::new(r"C:\Lab\a07-gate");
+    let Ok(text) = std::fs::read_to_string(root.join("request")) else {
+        return Ok(());
+    };
+    let Ok(request) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Ok(());
+    };
+    if request["job"].as_str() != Some(job) || request["phase"].as_str() != Some(phase) {
+        return Ok(());
+    }
+    let ready = root.join("ready");
+    if ready.exists() {
+        return Ok(());
+    }
+    let report = serde_json::json!({"job":job,"phase":phase,"done":done,"total":total});
+    std::fs::write(&ready, report.to_string()).map_err(OwnBackupError::Io)?;
+    info!(
+        job,
+        phase, done, total, "A07 lab gate waiting at actual progress callback"
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !root.join("release").exists() {
+        if std::time::Instant::now() > deadline {
+            return Err(OwnBackupError::Device("A07 lab gate timeout".into()));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    info!(job, phase, done, total, "A07 lab gate released");
+    Ok(())
+}
+
 impl JobStore {
     pub fn load(data_dir: &std::path::Path) -> Arc<Self> {
         Self::try_load(data_dir).expect("job store must be readable before use")
@@ -2735,7 +2783,7 @@ async fn perform_backup(
             let mut last_permille = u64::MAX;
             let mut last_emit = std::time::Instant::now();
             let summary = backup_volume(&request, |p| {
-                if cancel_bg.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                if cancel_bg.load(std::sync::atomic::Ordering::SeqCst) {
                     return Err(OwnBackupError::Cancelled);
                 }
                 // The engine tags non-copy phases via backup_id: "prepare" for
@@ -2789,7 +2837,9 @@ async fn perform_backup(
                         excluded_bytes: p.excluded.map(|(_, b)| b),
                     });
                 }
-                Ok(())
+                #[cfg(feature = "a07-lab-gate")]
+                a07_lab_gate(&job_id, phase, p.blocks_done, p.blocks_total)?;
+                backup_callback_checkpoint(&cancel_bg)
             })?;
 
             // Optional post-backup verification — emit its own progress so the
@@ -2808,7 +2858,7 @@ async fn perform_backup(
                         // AUD-12). Reading back a whole image is minutes of work;
                         // before this, pressing Отмена during it did nothing and
                         // the run then finished as a success.
-                        if cancel_bg.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                        if cancel_bg.load(std::sync::atomic::Ordering::SeqCst) {
                             return Err(OwnBackupError::Cancelled);
                         }
                         let mbps = v_rate.sample(done);
@@ -2832,7 +2882,9 @@ async fn perform_backup(
                                 excluded_bytes: None,
                             });
                         }
-                        Ok(())
+                        #[cfg(feature = "a07-lab-gate")]
+                        a07_lab_gate(&job_id, "verify", done, total)?;
+                        backup_callback_checkpoint(&cancel_bg)
                     },
                 );
                 match verified {
@@ -3141,7 +3193,7 @@ async fn perform_disk_backup(
         let mut last_permille = u64::MAX;
         let mut last_emit = std::time::Instant::now();
         let summary = backup_disk(&request, |p| {
-            if cancel_bg.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            if cancel_bg.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err(OwnBackupError::Cancelled);
             }
             // The engine tags non-copy phases via backup_id: "prepare" for the
@@ -3193,7 +3245,9 @@ async fn perform_disk_backup(
                     excluded_bytes: p.excluded.map(|(_, b)| b),
                 });
             }
-            Ok(())
+            #[cfg(feature = "a07-lab-gate")]
+            a07_lab_gate(&job_id, phase, p.blocks_done, p.blocks_total)?;
+            backup_callback_checkpoint(&cancel_bg)
         })?;
 
         // Optional post-backup verification — emit "verify" progress so the UI
@@ -3209,7 +3263,7 @@ async fn perform_disk_backup(
                 keys_for_verify.as_ref(),
                 verify_scope,
                 |done, total| {
-                    if cancel_bg.swap(false, Ordering::SeqCst) {
+                    if cancel_bg.load(Ordering::SeqCst) {
                         return Err(OwnBackupError::Cancelled);
                     }
                     let mbps = v_rate.sample(done);
@@ -3234,7 +3288,9 @@ async fn perform_disk_backup(
                             excluded_bytes: None,
                         });
                     }
-                    Ok(())
+                    #[cfg(feature = "a07-lab-gate")]
+                    a07_lab_gate(&job_id, "verify", done, total)?;
+                    backup_callback_checkpoint(&cancel_bg)
                 },
             );
             match verified {

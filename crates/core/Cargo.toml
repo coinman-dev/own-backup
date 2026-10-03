@@ -6,6 +6,7 @@ license-file.workspace = true
 
 [features]
 a09-lab-gate = []
+a07-lab-gate = []
 
 [dependencies]
 own-backup-common = { workspace = true }

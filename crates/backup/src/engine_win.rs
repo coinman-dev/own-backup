@@ -344,15 +344,15 @@ fn report_categories(
     categories: Option<&crate::exclusions::CategorySizes>,
     excluded_files: u64,
     excluded_bytes: u64,
-) {
-    let Some(c) = categories else { return };
-    let _ = progress(&BackupProgress {
+) -> Result<()> {
+    let Some(c) = categories else { return Ok(()) };
+    progress(&BackupProgress {
         backup_id: "prepare".into(),
         status: BackupStatus::Running,
         categories: Some(c.as_pairs()),
         excluded: Some((excluded_files, excluded_bytes)),
         ..Default::default()
-    });
+    })
 }
 
 /// What an encrypted run may be asked to write, checked before anything is
@@ -1162,12 +1162,13 @@ fn backup_volume_inner(
                         categories.as_ref(),
                         excluded_files,
                         excluded_bytes,
-                    );
+                    )?;
                     if !mft.ranges.is_empty() {
                         map.apply_excluded_ranges(&mft.ranges);
                         zero_ranges = Some(mft.ranges);
                     }
                 }
+                Err(OwnBackupError::Cancelled) => return Err(OwnBackupError::Cancelled),
                 Err(e) => {
                     // ReFS (у неё нет MFT), грязный том, неразобранная запись —
                     // всё это законные причины вернуться к обходу дерева.
@@ -1237,7 +1238,7 @@ fn backup_volume_inner(
                         categories.as_ref(),
                         excluded_files,
                         excluded_bytes,
-                    );
+                    )?;
                     for (path, reason) in &scan.kept {
                         debug!(file = %path, reason = reason.as_str(), "данные остаются в копии");
                     }
@@ -1273,6 +1274,7 @@ fn backup_volume_inner(
                     }
                     pre_copy_exclusions = true;
                 }
+                Err(OwnBackupError::Cancelled) => return Err(OwnBackupError::Cancelled),
                 Err(e) => {
                     // Грязный том, битая запись, не NTFS внутри — откат на
                     // проход внутри готового образа (медленный, но рабочий).
@@ -1322,6 +1324,7 @@ fn backup_volume_inner(
                     }
                     pre_copy_exclusions = true;
                 }
+                Err(OwnBackupError::Cancelled) => return Err(OwnBackupError::Cancelled),
                 Err(e) => {
                     warn!(error = %e, "FAT exclusion scan failed — keeping all files");
                     file_scan_skipped =
@@ -2429,9 +2432,7 @@ fn scan_ntfs_exclusions_by_mft(
     let mut dev = WinRawDevice::open_read(read_path)?;
     let cur = crate::ntfs_scan::RawVolumeCursor::new(&mut dev);
     let mut buffered = crate::ntfs_scan::BufferedVolume::new(cur, 4 << 20, 6);
-    crate::ntfs_scan::scan_mft_with(&mut buffered, patterns, |done, total| {
-        let _ = tick(done, total);
-    })
+    crate::ntfs_scan::scan_mft_with_cancel(&mut buffered, patterns, tick)
 }
 
 fn prepare_encrypted_partition_map(
@@ -2439,7 +2440,7 @@ fn prepare_encrypted_partition_map(
     block_size: u32,
     patterns: &[String],
     mut tick: impl FnMut(u64, u64) -> Result<()>,
-) -> PreparedMap {
+) -> Result<PreparedMap> {
     let mut out = PreparedMap {
         map: None,
         filesystem: "NTFS".into(),
@@ -2458,9 +2459,7 @@ fn prepare_encrypted_partition_map(
     } else {
         let cur = crate::ntfs_scan::RawVolumeCursor::new(src.as_mut());
         let mut buffered = crate::ntfs_scan::BufferedVolume::new(cur, 4 << 20, 6);
-        match crate::ntfs_scan::scan_mft_with(&mut buffered, patterns, |n, total| {
-            let _ = tick(n, total);
-        }) {
+        match crate::ntfs_scan::scan_mft_with_cancel(&mut buffered, patterns, &mut tick) {
             Ok(scan) => {
                 info!(
                     files = scan.files_excluded,
@@ -2472,6 +2471,7 @@ fn prepare_encrypted_partition_map(
                 );
                 Some(scan)
             }
+            Err(OwnBackupError::Cancelled) => return Err(OwnBackupError::Cancelled),
             Err(e) => {
                 // Грязный том, не NTFS внутри, битая запись — копия делается
                 // целиком, и об этом сказано вслух.
@@ -2490,7 +2490,7 @@ fn prepare_encrypted_partition_map(
             out.skipped.get_or_insert_with(|| {
                 tr!("engine_win.skip_ntfs_map_failed", error = e).into_owned()
             });
-            return out;
+            return Ok(out);
         }
     }
     if let Some(scan) = scan {
@@ -2508,7 +2508,7 @@ fn prepare_encrypted_partition_map(
             .collect();
         out.zero_ranges = scan.ranges;
     }
-    out
+    Ok(out)
 }
 
 fn prepare_partition_map(
@@ -2523,7 +2523,7 @@ fn prepare_partition_map(
     // `tick(entries_done, entries_total)`; total 0 = «сколько всего, неизвестно»
     // (обход каталога этого не знает, чтение $MFT — знает).
     mut tick: impl FnMut(u64, u64) -> Result<()>,
-) -> PreparedMap {
+) -> Result<PreparedMap> {
     // NTFS/ReFS/FAT use the Windows masks; ext/btrfs/xfs use the Linux masks.
     let patterns = patterns_windows;
     let none = |fs: &str, map: Option<Box<dyn UsedSectorMap>>| PreparedMap {
@@ -2599,14 +2599,18 @@ fn prepare_partition_map(
                             out.zero_ranges = mft.ranges;
                         }
                     }
+                    Err(OwnBackupError::Cancelled) => return Err(OwnBackupError::Cancelled),
                     Err(e) => {
                         warn!(part = %read_path, error = %e,
                               "whole-disk: MFT scan unavailable — falling back to the directory walk");
-                        if let Ok(mut scan) =
+                        let walked =
                             collect_excluded_ranges(read_path, m.cluster_size(), patterns, |n| {
                                 tick(n, 0)
-                            })
-                        {
+                            });
+                        if matches!(&walked, Err(OwnBackupError::Cancelled)) {
+                            return Err(OwnBackupError::Cancelled);
+                        }
+                        if let Ok(mut scan) = walked {
                             out.excluded_files = scan.files_excluded;
                             out.excluded_bytes = scan.bytes_excluded;
                             out.categories = Some(scan.categories);
@@ -2627,15 +2631,15 @@ fn prepare_partition_map(
             }
             m.release_bitmap();
             out.map = Some(Box::new(m));
-            return out;
+            return Ok(out);
         }
     }
     let Ok(mut src) = open() else {
-        return none_because(
+        return Ok(none_because(
             "unknown",
             None,
             &tr!("engine_win.skip_partition_unreadable"),
-        );
+        ));
     };
     if let Ok(m) = crate::fat_map::build_fat_used_map(src.as_mut(), block_size) {
         let fs = m.filesystem.to_lowercase();
@@ -2644,9 +2648,12 @@ fn prepare_partition_map(
         if is_fat && !patterns.is_empty() {
             let mut out = none(&fs, None);
             if let Ok(mut dev) = WinRawDevice::open_read(read_path) {
-                if let Ok(scan) =
-                    crate::fat_exclusions::scan_fat_exclusions(&mut dev, patterns, |n| tick(n, 0))
-                {
+                let scan =
+                    crate::fat_exclusions::scan_fat_exclusions(&mut dev, patterns, |n| tick(n, 0));
+                if matches!(scan, Err(OwnBackupError::Cancelled)) {
+                    return Err(OwnBackupError::Cancelled);
+                }
+                if let Ok(scan) = scan {
                     out.excluded_files = scan.files_excluded;
                     out.excluded_bytes = scan.bytes_excluded;
                     out.categories = Some(scan.categories);
@@ -2674,9 +2681,9 @@ fn prepare_partition_map(
                     }
                 }
             }
-            return out;
+            return Ok(out);
         }
-        return none_because(
+        return Ok(none_because(
             &fs,
             Some(Box::new(m)),
             &if patterns.is_empty() {
@@ -2684,7 +2691,7 @@ fn prepare_partition_map(
             } else {
                 tr!("engine_win.skip_fat_only").into_owned()
             },
-        );
+        ));
     }
     if let Ok(mut m) = crate::ext_map::build_ext_used_map(src.as_mut(), block_size) {
         // ext2/3/4: full file-level exclusions (Stage 1 drop+zero, Stage 2
@@ -2713,6 +2720,7 @@ fn prepare_partition_map(
                             out.zero_ranges = scan.ranges;
                         }
                     }
+                    Err(OwnBackupError::Cancelled) => return Err(OwnBackupError::Cancelled),
                     Err(e) => {
                         warn!(part = %read_path, error = %e, "ext exclusions failed — keeping all files");
                         out.skipped =
@@ -2724,7 +2732,7 @@ fn prepare_partition_map(
             out.skipped = Some(no_patterns());
         }
         out.map = Some(Box::new(m));
-        return out;
+        return Ok(out);
     }
     if let Ok(mut m) = crate::btrfs_map::build_btrfs_used_map(src.as_mut(), block_size) {
         // btrfs: CoW-safe file exclusions. Only extents PROVEN exclusively
@@ -2775,6 +2783,7 @@ fn prepare_partition_map(
                             out.zero_ranges = scan.ranges;
                         }
                     }
+                    Err(OwnBackupError::Cancelled) => return Err(OwnBackupError::Cancelled),
                     Err(e) => {
                         warn!(part = %read_path, error = %e, "btrfs exclusions failed — keeping all files");
                         out.skipped =
@@ -2786,7 +2795,7 @@ fn prepare_partition_map(
             out.skipped = Some(no_patterns());
         }
         out.map = Some(Box::new(m));
-        return out;
+        return Ok(out);
     }
     if let Ok(mut m) = crate::xfs_map::build_xfs_used_map(src.as_mut(), block_size) {
         // xfs: reflink-aware Stage-1 zeroing (data is not checksummed on xfs, so
@@ -2818,6 +2827,7 @@ fn prepare_partition_map(
                             out.zero_ranges = scan.ranges;
                         }
                     }
+                    Err(OwnBackupError::Cancelled) => return Err(OwnBackupError::Cancelled),
                     Err(e) => {
                         warn!(part = %read_path, error = %e, "xfs exclusions failed — keeping all files");
                         out.skipped =
@@ -2829,9 +2839,13 @@ fn prepare_partition_map(
             out.skipped = Some(no_patterns());
         }
         out.map = Some(Box::new(m));
-        return out;
+        return Ok(out);
     }
-    none_because("unknown", None, &tr!("engine_win.skip_fs_unknown"))
+    Ok(none_because(
+        "unknown",
+        None,
+        &tr!("engine_win.skip_fs_unknown"),
+    ))
 }
 
 /// One partition region inside the whole-disk image: its byte offset on the
@@ -3278,7 +3292,7 @@ fn backup_disk_inner(
                     })
                 },
             ),
-            None if locked => PreparedMap {
+            None if locked => Ok(PreparedMap {
                 map: None, // ключа нет — копируем шифротекст целиком
                 // Уходит в манифест образа (`DiskImageRef::filesystem`) — это
                 // данные копии, не текст окна: не переводится.
@@ -3290,7 +3304,7 @@ fn backup_disk_inner(
                 excluded_bytes: 0,
                 categories: None,
                 skipped: Some(tr!("engine_win.skip_bitlocker_no_password").into_owned()),
-            },
+            }),
             None => prepare_partition_map(
                 &read_path,
                 req.block_size,
@@ -3302,7 +3316,7 @@ fn backup_disk_inner(
                 vss.is_some() || own_backup_common::media_mode::is_media_mode(),
                 prepare_tick,
             ),
-        };
+        }?;
         let used = pm
             .map
             .unwrap_or_else(|| Box::new(AllUsedMap::new(volume_len.div_ceil(bs))));
@@ -3358,7 +3372,7 @@ fn backup_disk_inner(
         categories.as_ref(),
         excluded_files,
         excluded_bytes,
-    );
+    )?;
 
     // 3a. Parent chain (plan D5). A non-full kind writes a differencing CHILD
     // over the previous whole-disk image; a broken/incompatible parent falls
