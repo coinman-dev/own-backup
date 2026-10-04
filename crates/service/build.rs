@@ -5,7 +5,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .output()
         .is_err()
     {
-        let local_protoc = std::path::PathBuf::from(env!("HOME")).join(".local/protoc/bin/protoc");
+        let local_protoc = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+            .join(".local/protoc/bin/protoc");
         if local_protoc.exists() {
             std::env::set_var("PROTOC", &local_protoc);
         }
