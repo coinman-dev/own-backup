@@ -130,16 +130,18 @@ pub const RUNTIME_DROP_DIRS: [&str; 8] = [
 
 /// Files in the runtime's root that belong to features the medium has no way to
 /// reach: the full browser and its updaters, Copilot, the PDF viewer, the
-/// shader compilers and Vulkan (the interface runs with the GPU off), telemetry
+/// hardware shader compilers, telemetry
 /// and sign-in, and the Internet Explorer engine adapter.
 ///
 /// Checked before choosing, not guessed: none of these appear in the import
 /// tables of `msedge.dll`, `msedgewebview2.exe` or `EmbeddedBrowserWebView.dll`,
 /// statically or delay-loaded — they are opened by name when a feature asks for
 /// them. `msedge_elf.dll` IS a static import and must stay; so does the ANGLE
-/// set (`libEGL`, `libGLESv2`, `d3dcompiler_47`), which Chromium may still
-/// initialise for software rendering, and `ffmpeg.dll`, which is delay-loaded.
-pub const RUNTIME_DROP_FILES: [&str; 22] = [
+/// set (`libEGL`, `libGLESv2`, `d3dcompiler_47`) and SwiftShader/Vulkan,
+/// which Chromium uses for software rendering even with `--disable-gpu`.
+/// Removing the latter leaves WinPE with EGL_NOT_INITIALIZED and an empty GUI.
+/// `ffmpeg.dll` is delay-loaded and must also stay.
+pub const RUNTIME_DROP_FILES: [&str; 20] = [
     // the full browser and everything that installs or updates it
     "msedge.exe",
     "setup.exe",
@@ -160,11 +162,9 @@ pub const RUNTIME_DROP_FILES: [&str; 22] = [
     "onramp.dll",
     // PDF viewer
     "mspdf.dll",
-    // shader compilers and Vulkan — the interface runs with --disable-gpu
+    // hardware shader compilers; software Vulkan/SwiftShader must stay
     "dxcompiler.dll",
     "dxil.dll",
-    "vk_swiftshader.dll",
-    "vulkan-1.dll",
     // the Internet Explorer engine adapter
     "dual_engine_adapter_x64.dll",
 ];
@@ -573,8 +573,8 @@ pub fn no_interface_cmd(app_dir: &str) -> String {
         &format!("echo   \"{cli}\" --help"),
         "echo.",
         "echo Logs:",
-        &format!("echo   \"{app_dir}\\own-backup-gui.log\""),
-        &format!("echo   \"{app_dir}\\own-backup-service.log\""),
+        &format!("echo   \"{app_dir}\\Logs\\own-backup-gui-*.log\""),
+        &format!("echo   \"{app_dir}\\Logs\\own-backup-service-*.log\""),
         "echo.",
     ])
 }
@@ -764,8 +764,8 @@ pub fn start_media_cmd(app_dir: &str, temp_dir: &str) -> String {
         "echo.",
         "echo The engine runs without a window of its own - its log is the place to look.",
         "echo If no window appears, look at:",
-        &format!("echo   \"{app_dir}\\own-backup-gui.log\""),
-        &format!("echo   \"{app_dir}\\own-backup-service.log\""),
+        &format!("echo   \"{app_dir}\\Logs\\own-backup-gui-*.log\""),
+        &format!("echo   \"{app_dir}\\Logs\\own-backup-service-*.log\""),
         &format!("echo   {temp_dir}\\webview2.log"),
         "",
         "rem Everything below is boot-time setup and is done once. Asked for the",
@@ -1301,7 +1301,10 @@ mod tests {
             s.contains("own-backup-cli.exe\" --help"),
             "и сказано, чем работать дальше"
         );
-        assert!(s.contains("own-backup-gui.log"), "и где искать подробности");
+        assert!(
+            s.contains("Logs\\own-backup-gui-*.log"),
+            "и где искать подробности"
+        );
         // Русский приходит из самой программы, и без UTF-8 консоль покажет
         // кашу. Строки скрипта остаются ASCII — их проверяет соседний тест.
         assert!(s.contains("chcp 65001"), "иначе разбор будет нечитаемым");
@@ -1453,6 +1456,8 @@ mod tests {
             "libEGL.dll",         // ANGLE, for software rendering
             "libGLESv2.dll",
             "d3dcompiler_47.dll",
+            "vk_swiftshader.dll", // Chromium's renderer with --disable-gpu
+            "vulkan-1.dll",
             "icudtl.dat",
             "resources.pak",
         ] {
