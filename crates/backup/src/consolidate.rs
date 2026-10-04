@@ -93,7 +93,7 @@ pub struct ConsolidationOutcome {
     pub folded: PathBuf,
     /// The increment that was repointed at the base, if there was one.
     pub repointed: Option<PathBuf>,
-    /// qcow2 only: bytes in the base that the fold left unreferenced. They are
+    /// Bytes in the base that the fold left unreferenced. They are
     /// free space as far as the format is concerned, but our writers only
     /// append, so they accumulate until the image is rebuilt.
     pub bytes_orphaned: u64,
@@ -697,6 +697,19 @@ fn execute(
 
     if let Some(next) = next {
         repoint_next(next, base, container, keys)?;
+    }
+
+    if container == "obk" {
+        let key = chain_key_for(base, keys)?;
+        // Keep the consolidation marker and victim until optional maintenance
+        // has published safely. After a crash either complete base is readable;
+        // retrying this phase preserves its identity and parent relationships.
+        if let Some(compacted) = crate::seal::obk::compact_if_needed(base, &key)? {
+            bytes_orphaned = 0;
+            info!(base = %base.display(), before = compacted.before_bytes,
+                after = compacted.after_bytes, reclaimed = compacted.reclaimed_bytes(),
+                "Consolidation: obsolete encrypted records reclaimed");
+        }
     }
 
     // Only now is the increment redundant. Its deletion is the step's last
@@ -1602,6 +1615,14 @@ mod tests {
         );
 
         let leaf_before = read_obk(&inc2, &keys);
+        // Model the unreachable tail left by older generations. The marked
+        // coordinator must reclaim it before retiring the increment/marker.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&base)
+            .unwrap()
+            .set_len(128 * 1024 * 1024)
+            .unwrap();
         let chain = list_job_chains(dir.path(), "j1").unwrap().remove(0);
         assert_eq!(chain.images.len(), 3, "the listing needs no key");
         let step = plan_consolidation(&chain, 1).expect("2 increments, limit 1");
@@ -1611,6 +1632,11 @@ mod tests {
         assert_eq!(outcome.repointed.as_deref(), Some(inc2.as_path()));
         assert!(!inc1.exists(), "the folded increment is deleted");
         assert!(!marker_path(&base).exists(), "the marker is cleared");
+        assert!(
+            std::fs::metadata(&base).unwrap().len() < 8 * 1024 * 1024,
+            "automatic cleanup must discard the obsolete tail"
+        );
+        assert_eq!(outcome.bytes_orphaned, 0);
         assert_eq!(
             read_obk(&inc2, &keys),
             leaf_before,

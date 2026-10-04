@@ -24,6 +24,8 @@
 //! names them, which is the same bargain the plaintext fold makes with its own
 //! orphaned clusters — this is retention, not exclusion, and §4's rule about
 //! removed data not surviving a pass is about the latter.
+//! The consolidation coordinator periodically reclaims this dead space with
+//! a validated sibling publication (`compact`) while keeping its crash marker.
 //!
 //! # What identifies the base afterwards
 //!

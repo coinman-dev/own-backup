@@ -276,6 +276,45 @@ impl<R: Read + Seek> ObkImage<R> {
         Ok(payload)
     }
 
+    /// Relocate ciphertext only after authenticating and decoding it in its
+    /// unchanged chain/guest-cluster context. No encryption nonce is reused.
+    pub(super) fn authenticated_data_record(
+        &mut self,
+        cluster: u64,
+    ) -> Result<crate::seal::cluster::SealedRecord> {
+        let ClusterState::Present(id) = self.cluster_state(cluster)? else {
+            return Err(bad("relocation requires a present data record"));
+        };
+        let ClusterDescriptor::Compressed {
+            host_offset,
+            length,
+        } = self.descriptor(cluster)?
+        else {
+            return Err(bad("data index and relocation descriptor disagree"));
+        };
+        let capped = (length as usize).min(HEADER_LEN + MAX_PAYLOAD_LEN + TAG_LEN);
+        let mut bytes = read_bytes(&mut self.r, host_offset, capped)?;
+        let framed = framed_len(&bytes)?;
+        if framed > bytes.len() || framed as u64 > length {
+            return Err(bad("relocation record runs beyond its descriptor"));
+        }
+        bytes.truncate(framed);
+        let decoded = open_chunk(
+            &self.chain,
+            RecordContext {
+                chain_id: *self.root.chain_id.as_bytes(),
+                purpose: Purpose::Data,
+                index: cluster,
+            },
+            id,
+            &bytes,
+        )?;
+        if decoded.len() != self.cluster_size() as usize {
+            return Err(bad("relocation record is not a whole cluster"));
+        }
+        Ok(crate::seal::cluster::SealedRecord { id, bytes })
+    }
+
     /// Index of the chunk that owns `cluster`, if any chunk does.
     fn chunk_for(&self, cluster: u64) -> Option<usize> {
         let chunks = &self.root.index_chunks;

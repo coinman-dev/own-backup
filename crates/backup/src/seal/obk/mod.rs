@@ -34,6 +34,7 @@
 //! field. Whole-file rollback — replacing the entire image with an older, also
 //! valid one — is out of scope here and needs external trusted state (§7.3).
 
+pub mod compact;
 #[cfg(test)]
 pub(crate) mod container_tests;
 pub mod fold;
@@ -48,6 +49,7 @@ pub mod root;
 mod transaction;
 pub mod writer;
 
+pub use compact::{compact_if_needed, compact_image, compact_image_with_progress, CompactionStats};
 pub use fold::{fold_child_into_base, repoint_with_metadata, set_backing_file, FoldStats};
 pub use header::{ObkOpenHeader, ObkRootPointer};
 pub use index::ClusterState;

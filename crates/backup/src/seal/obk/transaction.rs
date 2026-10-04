@@ -38,6 +38,7 @@ pub(super) fn replace<T>(
     // filesystem copy primitive when one is available; the stage may still
     // need as much free space as the complete image.
     std::fs::copy(&target, &stage)?;
+    copy_security(&target, &stage)?;
     let value = edit(&stage)?;
     ObkImage::open_path(&stage, chain)?;
     // Windows FlushFileBuffers requires a handle opened for writing.
@@ -45,6 +46,98 @@ pub(super) fn replace<T>(
     publish(stage, &target)?;
     sync_parent(parent)?;
     Ok(value)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn copy_security(_source: &Path, _stage: &Path) -> Result<()> {
+    Ok(()) // std::fs::copy preserves Unix mode bits
+}
+
+#[cfg(target_os = "windows")]
+fn copy_security(source: &Path, stage: &Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::BOOL;
+    use windows::Win32::Security::Authorization::{SetNamedSecurityInfoW, SE_FILE_OBJECT};
+    use windows::Win32::Security::{
+        GetFileSecurityW, GetSecurityDescriptorControl, GetSecurityDescriptorDacl,
+        GetSecurityDescriptorGroup, GetSecurityDescriptorOwner, DACL_SECURITY_INFORMATION,
+        GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+        PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED,
+        UNPROTECTED_DACL_SECURITY_INFORMATION,
+    };
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let stage: Vec<u16> = stage.as_os_str().encode_wide().chain(Some(0)).collect();
+    let info = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+    let mut needed = 0;
+    // Request the self-relative descriptor size. DWORD storage below keeps the
+    // descriptor aligned; source/archive access failures abort publication.
+    unsafe {
+        GetFileSecurityW(
+            PCWSTR(source.as_ptr()),
+            info.0,
+            PSECURITY_DESCRIPTOR(std::ptr::null_mut()),
+            0,
+            &mut needed,
+        );
+    }
+    if needed == 0 {
+        return Err(bad(format!(
+            "cannot read image security: {}",
+            windows::core::Error::from_win32()
+        )));
+    }
+    let mut buffer = vec![0u32; (needed as usize).div_ceil(4)];
+    let descriptor = PSECURITY_DESCRIPTOR(buffer.as_mut_ptr().cast());
+    let mut control = 0u16;
+    let mut revision = 0u32;
+    // SAFETY: the aligned buffer is large enough, names are terminated, and
+    // the descriptor remains alive through synchronous query/set operations.
+    unsafe {
+        GetFileSecurityW(
+            PCWSTR(source.as_ptr()),
+            info.0,
+            descriptor,
+            needed,
+            &mut needed,
+        )
+        .ok()
+        .map_err(|e| bad(format!("cannot read image security: {e}")))?;
+        GetSecurityDescriptorControl(descriptor, &mut control, &mut revision)
+            .map_err(|e| bad(format!("cannot read image DACL control: {e}")))?;
+        let protection = if control & SE_DACL_PROTECTED.0 != 0 {
+            PROTECTED_DACL_SECURITY_INFORMATION
+        } else {
+            UNPROTECTED_DACL_SECURITY_INFORMATION
+        };
+        let mut owner = PSID::default();
+        let mut group = PSID::default();
+        let mut defaulted = BOOL::default();
+        let mut present = BOOL::default();
+        let mut dacl = std::ptr::null_mut();
+        GetSecurityDescriptorOwner(descriptor, &mut owner, &mut defaulted)
+            .map_err(|e| bad(format!("cannot read image owner: {e}")))?;
+        GetSecurityDescriptorGroup(descriptor, &mut group, &mut defaulted)
+            .map_err(|e| bad(format!("cannot read image group: {e}")))?;
+        GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted)
+            .map_err(|e| bad(format!("cannot read image DACL: {e}")))?;
+        let result = SetNamedSecurityInfoW(
+            PCWSTR(stage.as_ptr()),
+            SE_FILE_OBJECT,
+            info | protection,
+            owner,
+            group,
+            Some(dacl),
+            None,
+        );
+        if result.0 != 0 {
+            return Err(bad(format!(
+                "cannot preserve image security: Windows error {}",
+                result.0
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(not(target_os = "windows"))]

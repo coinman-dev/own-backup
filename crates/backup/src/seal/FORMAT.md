@@ -245,7 +245,15 @@ whole-file sibling and rename for updates.
 
 Rebuilds and folds enumerate authenticated index entries rather than every
 possible virtual guest cluster. Their working memory still grows with the
-number of defined clusters, and obsolete appended records are not yet compacted.
+number of defined clusters. Consolidation can reclaim obsolete records by
+building a sibling containing only the current authenticated data records,
+index and sealed metadata. Data ciphertext and record identities are preserved;
+index/metadata are sealed with fresh sessions. Both replacement header slots
+name the current restore point with an incremented generation. The sibling is
+fully authenticated/read back and synced before atomic publication, so an
+interruption leaves either complete original or complete replacement. This
+uses the existing whole-file transaction: peak space includes a full sibling
+copy of the original, and the defined index still consumes memory.
 
 ### Open header (`OBKH`, qcow2 header extension 0x4F424B48)
 

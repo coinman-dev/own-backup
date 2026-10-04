@@ -81,6 +81,7 @@ pub struct ObkWriter<W: Write + Seek> {
     /// listed: they inherit from the parent, or read as zeros without one.
     states: BTreeMap<u64, ClusterState>,
     dual_header: bool,
+    header_generation: u64,
 }
 
 impl ObkWriter<BufWriter<File>> {
@@ -136,6 +137,7 @@ impl<W: Write + Seek> ObkWriter<W> {
             },
             states: BTreeMap::new(),
             dual_header,
+            header_generation: 0,
         })
     }
 
@@ -195,6 +197,26 @@ impl<W: Write + Seek> ObkWriter<W> {
         self.tables
             .check_new_cluster(index, self.cluster_size() as usize)?;
         self.mark_zero(index)
+    }
+
+    pub(super) fn set_generation(&mut self, generation: u64) {
+        self.header_generation = generation;
+    }
+
+    /// Only compaction calls this, after source authentication and decoding.
+    pub(super) fn relocate_record(
+        &mut self,
+        index: u64,
+        record: crate::seal::cluster::SealedRecord,
+    ) -> Result<()> {
+        self.tables
+            .check_new_cluster(index, self.cluster_size() as usize)?;
+        let offset = self.tables.write_packed(&mut self.w, &record.bytes)?;
+        let entry =
+            encode_compressed_l2_entry(offset, record.bytes.len() as u64, self.opts.cluster_bits)?;
+        self.tables.set_entry(index, entry)?;
+        self.states.insert(index, ClusterState::Present(record.id));
+        Ok(())
     }
 
     fn mark_zero(&mut self, index: u64) -> Result<()> {
@@ -316,7 +338,7 @@ impl<W: Write + Seek> ObkWriter<W> {
             consolidated_increments: self.opts.consolidated_increments,
             chain_started_at: self.opts.chain_started_at.clone(),
             dual_header: self.dual_header,
-            header_generation: 0,
+            header_generation: self.header_generation,
             root: ObkRootPointer::new(root_ref.offset, root_ref.len as usize, root_ref.id),
         };
         let extensions = obk_extensions(&open)?;
