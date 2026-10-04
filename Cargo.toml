@@ -15,6 +15,14 @@ members = [
     "crates/shell",
 ]
 resolver = "2"
+exclude = ["vendor/glib", "vendor/glib-macros", "vendor/gtk3-macros"]
+
+[patch.crates-io]
+# GTK3 requires glib 0.18. Keep its ABI and backport the upstream
+# VariantStrIter fix; provenance is checked by scripts/check-vendor.py.
+glib = { path = "vendor/glib" }
+glib-macros = { path = "vendor/glib-macros" }
+gtk3-macros = { path = "vendor/gtk3-macros" }
 
 [workspace.package]
 version = "0.1.1"

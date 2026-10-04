@@ -24,7 +24,7 @@ own-backup-restore = { workspace = true }
 own-backup-backup = { workspace = true }
 own-backup-core = { workspace = true }
 own-backup-client = { workspace = true }
-tauri = { version = "2", features = ["devtools"] }
+tauri = { version = "2.12.1", features = ["devtools"] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 serde = { workspace = true }
@@ -56,7 +56,10 @@ windows = { version = "0.58", features = [
 [dev-dependencies]
 tempfile = "3"
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+glib = "0.18.5"
+
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2.7.1", features = [] }
 tonic-build = { workspace = true }
 prost-build = "0.13"

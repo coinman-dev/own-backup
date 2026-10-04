@@ -38,8 +38,14 @@ const APP_MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="y
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Embed our own manifest so the exe runs as the invoking user (no UAC).
     tauri_build::try_build(
-        tauri_build::Attributes::new()
-            .windows_attributes(tauri_build::WindowsAttributes::new().app_manifest(APP_MANIFEST)),
+        tauri_build::Attributes::new().windows_attributes(
+            tauri_build::WindowsAttributes::new()
+                .app_manifest(APP_MANIFEST)
+                // .cargo/config.toml already selects the full static CRT.
+                // Tauri's hybrid VC-static/UCRT-dynamic override conflicts
+                // with that policy and leaves C symbols unresolved.
+                .static_vc_runtime(false),
+        ),
     )
     .expect("failed to run tauri-build");
 

@@ -30,10 +30,15 @@ jobs:
           npm audit
       - name: Test Rust workspace
         run: cargo test --workspace --locked -j 2
+      - name: Verify local GTK3 compatibility patches
+        run: |
+          python3 scripts/check-vendor.py
+          cargo test --locked --release -p own-backup-gui --test glib_variant_iter -j 2
       - name: Check Rust advisories
         run: |
           cargo install cargo-audit --locked --version 0.22.2
-          cargo audit
+          cargo audit --deny warnings
+          python3 scripts/check-vendor.py --audit
 
   windows:
     runs-on: windows-2025
@@ -54,3 +59,5 @@ jobs:
           npm run build
       - name: Check Windows workspace
         run: cargo check --workspace --locked --target x86_64-pc-windows-msvc -j 2
+      - name: Link Windows GUI with static CRT
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc -p own-backup-gui -j 2

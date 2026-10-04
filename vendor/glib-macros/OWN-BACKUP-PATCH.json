@@ -1,0 +1,91 @@
+{
+  "advisory": "RUSTSEC-2024-0370",
+  "change": "Use proc-macro-error3 3.1.1 instead of unmaintained proc-macro-error 1.0.4; preserve GTK3 macro API.",
+  "changed_files": {
+    "Cargo.toml": {
+      "after": "e42be2b08f06aecf2814b25b1648640a54601ac9ad78e00ebd3313b5b1ff88da",
+      "before": "1d7cd2a7224a56fed7c8865d76e4837aaad9daabc0b80a2387c0047fe59bc3e3"
+    },
+    "Cargo.toml.orig": {
+      "after": "e3b6881f5d8879c24113843e23a330b934711c635684cccea7323bbca8d91299",
+      "before": "678c7634f90840664c1e1e6179dce0fb1b4fb9bd5a585a42a26154ffb4070ee5"
+    },
+    "src/boxed_derive.rs": {
+      "after": "74cebb3a387e04cdcc289e092f8747f34f8936094d6b0761b4e0f3d57e79294e",
+      "before": "d2fa70be35e220b4fd56dd247b8a4ebc4dad9f39540edb9ce546cd28f4c46d1a"
+    },
+    "src/closure.rs": {
+      "after": "4c3aa84ad56e98406d009d8c1d38d2c6d290f77887af53123f617bbde9d8ad7e",
+      "before": "25816a0369d0d4f155c22aaa7c3157427ae85dbe706f3a9cc700df2e9f1e20d9"
+    },
+    "src/derived_properties_attribute.rs": {
+      "after": "0fee53690fb527dc927e1cd0d815ff37a74810980e6498802668140bf819c4a4",
+      "before": "d70eebeeaa51a70f743f77ee06a7c8d8f41b1d824a12953046e8cb697378bc68"
+    },
+    "src/enum_derive.rs": {
+      "after": "ad83f525b13e49787a6368f1f113f2fb0868e2bab0eb0019d2a876fe2a13c68c",
+      "before": "9219f93d6b8e15b50a20f5e5d76c476267f10aabbd5a09bca16be21e4c03ba78"
+    },
+    "src/error_domain_derive.rs": {
+      "after": "52fa8d58247bd037393c8a456796b0ed4380b6334d7b3c77035899fa166ebd73",
+      "before": "f786236a62a1fc5743a8f9160ddcb752ea84d5dad24fb92c764cf67d03a654d3"
+    },
+    "src/flags_attribute.rs": {
+      "after": "f17e1e6eb4b87f0477f8febba639b4cb3307e8b946e7e657a764013602641b0f",
+      "before": "0bbf0cd43c5c71d28562de9ec1fc2f0e52852daab8c629d794caffb19c076c92"
+    },
+    "src/lib.rs": {
+      "after": "2b6ee732b808f6b85b2c04ceb2ab559f8df027a9df0a501ceb56990466accf34",
+      "before": "5720ec2ca39bbe639ccb50f4a4eb691720e5433eb513276e22ae1ef6efb3f9fa"
+    },
+    "src/object_interface_attribute.rs": {
+      "after": "e9ec90ad213a0aab9e531d56b524c1357cb643a8c5e6aad8aabb08f0ad6b4632",
+      "before": "0264900e1b364145a7d94a484d39c0462cc57cd669ee78b980625180d2342d08"
+    },
+    "src/object_subclass_attribute.rs": {
+      "after": "9ead37c20c107882fc7882cda12e160ed7d850057abc7c97c4de311f74257cae",
+      "before": "5fbcfd8b198032947e5df6e16daef090cdca63e793769a4649d67f35c6a2933e"
+    },
+    "src/shared_boxed_derive.rs": {
+      "after": "9d6ce4710980501aaa3d5f781b57d62cb3ddb87eeead8da428fca9820f1fca2d",
+      "before": "cf797cddd188bb0e36b58d3648d0ea6566dc81c055115f2186429cf236fd6180"
+    },
+    "src/variant_derive.rs": {
+      "after": "1a620f6582c4bb6f955e6501fc9364f9998f6779bd12238257ab8f1b24ad1643",
+      "before": "d59c5ba53b28d843d35b15c1ff5a32d272a0b4143100fd023bca86568469f5da"
+    }
+  },
+  "crate": "glib-macros",
+  "upstream_commit": "42b9caf98e03ded086362d9653ca58fe94dc8658",
+  "upstream_crate_checksum": "0bb0228f477c0900c880fd78c8759b95c7636dbd7842707f49e132378aa2acdc",
+  "upstream_files": {
+    "COPYRIGHT": "dae402989de65164815b7e2b6bc2b9576285434c3785934c8b6ece0fa055960d",
+    "Cargo.toml": "1d7cd2a7224a56fed7c8865d76e4837aaad9daabc0b80a2387c0047fe59bc3e3",
+    "Cargo.toml.orig": "678c7634f90840664c1e1e6179dce0fb1b4fb9bd5a585a42a26154ffb4070ee5",
+    "LICENSE": "8cf56d10131ce201cf69ab74b111d3ebac1acca3833d7efb39ae357224b70edb",
+    "src/boxed_derive.rs": "d2fa70be35e220b4fd56dd247b8a4ebc4dad9f39540edb9ce546cd28f4c46d1a",
+    "src/clone.rs": "5e1b1c5c4c38095733f0f643bce330ed481d65f4ab323abff5a65e830db04e65",
+    "src/closure.rs": "25816a0369d0d4f155c22aaa7c3157427ae85dbe706f3a9cc700df2e9f1e20d9",
+    "src/derived_properties_attribute.rs": "d70eebeeaa51a70f743f77ee06a7c8d8f41b1d824a12953046e8cb697378bc68",
+    "src/downgrade_derive/enums.rs": "f8f9b7eb2045bf85ba551b18cd9f9ece8685e3501dc1b0baf04cbdf728db3db8",
+    "src/downgrade_derive/fields.rs": "cffb119e6da33dcf0acdc378b584ed1b425e923aaaed63dab21dcebc63caf86f",
+    "src/downgrade_derive/mod.rs": "fc97640b70e3a013b4528bb171820494ff44a8367daf762807dfc0ffc63be58e",
+    "src/downgrade_derive/structs.rs": "87a2cf8f9ad8a487c18b734b4faab60948c656b2969172638430b86fd15a204f",
+    "src/enum_derive.rs": "9219f93d6b8e15b50a20f5e5d76c476267f10aabbd5a09bca16be21e4c03ba78",
+    "src/error_domain_derive.rs": "f786236a62a1fc5743a8f9160ddcb752ea84d5dad24fb92c764cf67d03a654d3",
+    "src/flags_attribute.rs": "0bbf0cd43c5c71d28562de9ec1fc2f0e52852daab8c629d794caffb19c076c92",
+    "src/lib.rs": "5720ec2ca39bbe639ccb50f4a4eb691720e5433eb513276e22ae1ef6efb3f9fa",
+    "src/object_interface_attribute.rs": "0264900e1b364145a7d94a484d39c0462cc57cd669ee78b980625180d2342d08",
+    "src/object_subclass_attribute.rs": "5fbcfd8b198032947e5df6e16daef090cdca63e793769a4649d67f35c6a2933e",
+    "src/properties.rs": "b72beab29b9d0bc05b797e7d8f7d07a19d912d646f02fff4e3aff233e35af98f",
+    "src/shared_boxed_derive.rs": "cf797cddd188bb0e36b58d3648d0ea6566dc81c055115f2186429cf236fd6180",
+    "src/utils.rs": "a61024ae6643411569a285331bbe0d2dbce86f12e0f804869347945cb7bbb057",
+    "src/value_delegate_derive.rs": "e265d82a2ea848c56a37a71cafd59050c6aa9461c3d113f54b46164a99de594d",
+    "src/variant_derive.rs": "d59c5ba53b28d843d35b15c1ff5a32d272a0b4143100fd023bca86568469f5da",
+    "tests/clone.rs": "001c141f8e392c905c82fad4b0ce8df8b2e982068e5a59d61ac476495502a550",
+    "tests/properties.rs": "2eb551deb84525305e4f523b7185c28185e28bccb6cd93e34f107b85c3e830db",
+    "tests/test.rs": "9326121fbc5b3de6bfa104c8c263bfbf1fa8fc62b39edef4ab090f2aa86b1cf4",
+    "tests/value_delegate_derive.rs": "16b97a9d67230197bfa18f28382b30b21f118ea168e484f52b43b01e4a530935"
+  },
+  "version": "0.18.5"
+}

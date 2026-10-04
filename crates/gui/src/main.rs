@@ -238,14 +238,26 @@ fn show_window_start_error(
     };
     let title: Vec<u16> = "Own Backup\0".encode_utf16().collect();
     let body: Vec<u16> = message.encode_utf16().chain([0]).collect();
-    // SAFETY: both strings are null-terminated and live through the call.
-    unsafe {
-        MessageBoxW(
-            None,
-            PCWSTR(body.as_ptr()),
-            PCWSTR(title.as_ptr()),
-            MB_OK | MB_ICONERROR,
-        );
+    // setup() runs inside Tao's event handler. A modal box on that thread
+    // pumps messages and re-enters the borrowed handler. Give the ownerless
+    // startup dialog its own thread, then exit only after it is dismissed.
+    match std::thread::Builder::new()
+        .name("startup-error-dialog".into())
+        .spawn(move || {
+            // SAFETY: owned null-terminated strings live through this call.
+            unsafe {
+                MessageBoxW(
+                    None,
+                    PCWSTR(body.as_ptr()),
+                    PCWSTR(title.as_ptr()),
+                    MB_OK | MB_ICONERROR,
+                );
+            }
+        }) {
+        Ok(dialog) => {
+            let _ = dialog.join();
+        }
+        Err(error) => tracing::error!(%error, "could not show startup diagnosis"),
     }
 }
 
