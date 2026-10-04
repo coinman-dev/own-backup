@@ -460,6 +460,10 @@ fn apply_changed_with_in_place(
         file.seek(SeekFrom::Start(0))?;
         file.write_all(&cluster)?;
     }
+    #[cfg(test)]
+    if open.dual_header && opts.previous == PreviousContents::Keep {
+        super::publication_faults::hit(super::publication_faults::Point::HeaderWritten, path);
+    }
     file.sync_all()?;
 
     Ok(RebuildStats {

@@ -142,9 +142,14 @@ fn copy_security(source: &Path, stage: &Path) -> Result<()> {
 
 #[cfg(not(target_os = "windows"))]
 fn publish(stage: tempfile::TempPath, target: &Path) -> Result<()> {
+    #[cfg(test)]
+    super::publication_faults::hit(super::publication_faults::Point::BeforeRename, &stage);
     stage
         .persist(target)
-        .map_err(|e| bad(format!("cannot publish {}: {}", target.display(), e.error)))
+        .map_err(|e| bad(format!("cannot publish {}: {}", target.display(), e.error)))?;
+    #[cfg(test)]
+    super::publication_faults::hit(super::publication_faults::Point::AfterRename, target);
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -164,12 +169,16 @@ fn publish(stage: tempfile::TempPath, target: &Path) -> Result<()> {
         // not provide the same consistency guarantee as a normal file.
         SetFileAttributesW(PCWSTR(source.as_ptr()), FILE_ATTRIBUTE_NORMAL)
             .map_err(|e| bad(format!("cannot prepare {}: {e}", stage.display())))?;
+        #[cfg(test)]
+        super::publication_faults::hit(super::publication_faults::Point::BeforeRename, &stage);
         MoveFileExW(
             PCWSTR(source.as_ptr()),
             PCWSTR(destination.as_ptr()),
             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
         )
         .map_err(|e| bad(format!("cannot publish {}: {e}", target.display())))?;
+        #[cfg(test)]
+        super::publication_faults::hit(super::publication_faults::Point::AfterRename, target);
     }
     // The source path was moved; TempPath's cleanup of that name is harmless.
     Ok(())
