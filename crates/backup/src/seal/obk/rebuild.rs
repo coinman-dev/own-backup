@@ -438,6 +438,10 @@ fn apply_changed_with_in_place(
     // has to be on the platter before it is written — otherwise a power cut
     // can leave a valid header naming records that never landed.
     file.sync_all()?;
+    #[cfg(test)]
+    if open.dual_header && opts.previous == PreviousContents::Keep {
+        super::publication_faults::hit(super::publication_faults::Point::AppendedSynced, path);
+    }
     if open.dual_header {
         let slot = if header.open.header_generation.is_multiple_of(2) {
             SECOND_HEADER_OFFSET
@@ -465,6 +469,10 @@ fn apply_changed_with_in_place(
         super::publication_faults::hit(super::publication_faults::Point::HeaderWritten, path);
     }
     file.sync_all()?;
+    #[cfg(test)]
+    if open.dual_header && opts.previous == PreviousContents::Keep {
+        super::publication_faults::hit(super::publication_faults::Point::HeaderSynced, path);
+    }
 
     Ok(RebuildStats {
         clusters_changed: changed.len() as u64,

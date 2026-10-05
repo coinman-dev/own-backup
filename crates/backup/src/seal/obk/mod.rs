@@ -44,6 +44,8 @@ pub mod io;
 pub mod listing;
 pub mod metadata;
 #[cfg(test)]
+mod metadata_faults;
+#[cfg(test)]
 mod publication_faults;
 pub mod reader;
 pub mod rebuild;

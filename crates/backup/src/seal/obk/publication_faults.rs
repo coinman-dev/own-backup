@@ -19,6 +19,8 @@ pub(super) enum Point {
     BeforeRename,
     AfterRename,
     HeaderWritten,
+    AppendedSynced,
+    HeaderSynced,
 }
 
 type Observer = Box<dyn FnMut(Point, &Path)>;
@@ -34,13 +36,13 @@ pub(super) fn hit(point: Point, path: &Path) {
     });
 }
 
-struct Guard(Option<Observer>);
+pub(super) struct Guard(Option<Observer>);
 impl Drop for Guard {
     fn drop(&mut self) {
         OBSERVER.with_borrow_mut(|observer| *observer = self.0.take());
     }
 }
-fn observe(observer: impl FnMut(Point, &Path) + 'static) -> Guard {
+pub(super) fn observe(observer: impl FnMut(Point, &Path) + 'static) -> Guard {
     Guard(OBSERVER.with_borrow_mut(|previous| previous.replace(Box::new(observer))))
 }
 
@@ -177,7 +179,11 @@ fn the_header_checkpoint_sees_one_coherent_data_and_metadata_generation() {
     drop(guard);
     assert_eq!(
         &seen.borrow()[..],
-        &[(Point::HeaderWritten, generation + 1)]
+        &[
+            (Point::AppendedSynced, generation),
+            (Point::HeaderWritten, generation + 1),
+            (Point::HeaderSynced, generation + 1)
+        ]
     );
     let mut image = ObkImage::open_path(&base, &fixture.chain).unwrap();
     assert_eq!(&image.sealed_metadata().unwrap()[..], b"new metadata");
