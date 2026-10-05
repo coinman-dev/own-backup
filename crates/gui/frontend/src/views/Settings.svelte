@@ -118,6 +118,33 @@
     );
   });
 
+  // --- The icon beside the clock ---
+  //
+  // Null while unknown and where there is nothing to switch (the boot medium,
+  // not Windows): the row is then left out. It is one Windows user's choice
+  // and takes effect at once, so it is not part of the form above and needs
+  // no «Сохранить».
+  let trayIcon = $state<boolean | null>(null);
+
+  $effect(() => {
+    api.trayIconEnabled().then(
+      (on) => (trayIcon = on),
+      () => (trayIcon = null),
+    );
+  });
+
+  async function setTrayIcon(on: boolean) {
+    error = null;
+    try {
+      await api.setTrayIconEnabled(on);
+      trayIcon = on;
+    } catch (e: unknown) {
+      error = e instanceof Error ? e.message : String(e);
+      // The box was already ticked by the click; put it back to the truth.
+      trayIcon = await api.trayIconEnabled().catch(() => null);
+    }
+  }
+
   /** The three theme tiles, each a small picture of the window in it: menu
    *  strip, two lines of text and a button. Applied at once — nothing to save. */
   const themeOptions: { mode: ThemeMode; label: () => string; side: string; bg: string; line: string }[] = [
@@ -326,6 +353,18 @@
               <span class="status-dot offline"></span>
               <span>{m.set_service_offline()}</span>
             </div>
+          {/if}
+
+          {#if trayIcon !== null}
+            <label class="tray-row">
+              <input
+                type="checkbox"
+                checked={trayIcon}
+                onchange={(e) => setTrayIcon(e.currentTarget.checked)}
+              />
+              {m.set_tray()}
+            </label>
+            <p class="help-text">{m.set_tray_help()}</p>
           {/if}
         </div>
       </div>
@@ -647,6 +686,17 @@
     border-radius: 8px;
     font-size: 13px;
     color: var(--text-secondary);
+  }
+
+  .tray-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 18px;
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--head);
+    cursor: pointer;
   }
 
   @keyframes spin {

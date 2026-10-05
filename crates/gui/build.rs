@@ -49,6 +49,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .expect("failed to run tauri-build");
 
+    // tauri-build compiles icons/icon.ico into the exe's resources and does
+    // not tell cargo to watch it. A replaced icon then stays out of the exe
+    // until something else happens to re-run this script — the new logo was
+    // built into nothing at all the first time (2026-10-06).
+    println!("cargo:rerun-if-changed=icons");
+
     // Proto compilation for gRPC client (reuses same proto as service)
     if std::process::Command::new("protoc")
         .arg("--version")

@@ -83,6 +83,8 @@
   "set_service_mounts": "Копий подключено как диск",
   "set_service_mounting": "Подключение копий как диска",
   "set_service_offline": "Служба не запущена или не отвечает.",
+  "set_tray": "Значок в области уведомлений",
+  "set_tray_help": "Значок рядом с часами виден, пока служба работает, и появляется при входе в Windows. Щелчок по нему открывает это окно.",
   "set_mount_no_nbd": "модуль NBD не загружен",
   "set_mount_ready_nbd": "готово (NBD, NTFS: {backend})",
   "set_mount_no_ntfs": "готово, но NTFS не поддерживается — нужен ntfs-3g",

@@ -55,5 +55,17 @@
   "main.already_running": {
     "ru": "Программа уже запущена.\nОткройте существующее окно Own Backup.",
     "en": "The program is already running.\nSwitch to the open Own Backup window."
+  },
+  "tray.tooltip": {
+    "ru": "Own Backup — служба работает",
+    "en": "Own Backup — the service is running"
+  },
+  "tray.open": {
+    "ru": "Открыть Own Backup",
+    "en": "Open Own Backup"
+  },
+  "tray.hide": {
+    "ru": "Скрыть значок",
+    "en": "Hide the icon"
   }
 }

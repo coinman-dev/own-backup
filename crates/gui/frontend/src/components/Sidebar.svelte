@@ -5,6 +5,7 @@
   import { appVersion, ensureAppVersion } from '../lib/appVersion.svelte';
   import { effectiveTheme, setTheme } from '../lib/themeStore.svelte';
   import { m } from '../lib/paraglide/messages';
+  import logoUrl from '../assets/logo.png';
 
   interface Props {
     currentView: ViewName;
@@ -149,6 +150,14 @@
     {/each}
   </ul>
 
+  <!-- The mark, large, in the part of the strip the menu leaves empty. It
+       says nothing the header does not, so it is hidden from readers — and
+       from the page when the window is too short: the menu must never start
+       scrolling to make room for a picture. -->
+  <div class="brand" aria-hidden="true">
+    <img src={logoUrl} alt="" draggable="false" />
+  </div>
+
   <div class="sidebar-footer">
     <div class="version-text">{appVersion.value ? `v${appVersion.value}` : ''}</div>
     {#if layout}
@@ -270,6 +279,26 @@
 
   .nav-label {
     white-space: nowrap;
+  }
+
+  .brand {
+    flex-shrink: 0;
+    display: flex;
+    justify-content: center;
+    padding: 8px 0 22px;
+  }
+
+  .brand img {
+    width: 148px;
+    height: auto;
+  }
+
+  /* Header, seven items and the footer take about 440px; the mark needs 160
+     more. Below that it goes, rather than the menu. */
+  @media (max-height: 640px) {
+    .brand {
+      display: none;
+    }
   }
 
   .sidebar-footer {

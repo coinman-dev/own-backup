@@ -9,6 +9,8 @@ mod commands;
 mod jobs;
 mod service_link;
 mod state;
+#[cfg(target_os = "windows")]
+mod tray;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -168,6 +170,11 @@ fn init_logging() {
     tracing::info!(elevated = ?elevation_state(), "process elevation (expected: Some(false))");
 }
 
+/// The mutex a running window holds. The notification-area icon looks for it
+/// too, to tell «the window is starting» from «there is no window».
+#[cfg(target_os = "windows")]
+const GUI_INSTANCE_MUTEX: &str = "Global\\OwnBackupGuiSingleInstance";
+
 /// Refuse to run a second GUI instance: a named mutex (session-global) is held
 /// for the process lifetime; if it already exists, another instance is up, so
 /// tell the user and exit. Prevents two GUIs fighting over the same private
@@ -179,8 +186,9 @@ fn enforce_single_instance() {
     use windows::Win32::System::Threading::CreateMutexW;
     use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONINFORMATION, MB_OK};
 
-    let name: Vec<u16> = "Global\\OwnBackupGuiSingleInstance\0"
+    let name: Vec<u16> = GUI_INSTANCE_MUTEX
         .encode_utf16()
+        .chain(std::iter::once(0))
         .collect();
     // SAFETY: name is null-terminated; we intentionally leak the handle so the
     // mutex lives for the whole process (released by the OS on exit).
@@ -385,6 +393,15 @@ fn shrink_if_the_screen_is_scaled_hard(app: &tauri::App, window: &tauri::Webview
 }
 
 fn main() {
+    // The icon in the notification area is this same exe with `--tray`: no
+    // window, no WebView, and it must not hold the window's mutex — it is the
+    // thing a click on which starts the window.
+    #[cfg(target_os = "windows")]
+    if std::env::args().any(|arg| arg == "--tray") {
+        tray::run();
+        return;
+    }
+
     // Only one GUI at a time (Windows).
     #[cfg(target_os = "windows")]
     enforce_single_instance();
@@ -406,6 +423,13 @@ fn main() {
 
     // Ensure data directory exists (config.toml is written here).
     let _ = std::fs::create_dir_all(&config.data_dir);
+
+    // The icon beside the clock and its logon entry. Not on the medium: there
+    // is no notification area there and no logon to come back to.
+    #[cfg(target_os = "windows")]
+    if !own_backup_common::media_mode::is_media_mode() {
+        tray::apply();
+    }
 
     // The orchestrator (job store, queue, scheduler, backup worker) lives in the
     // service; connect to it, spawning a private foreground instance if none is
@@ -584,6 +608,8 @@ fn main() {
             commands::settings::set_ui_language,
             commands::settings::get_service_status,
             commands::settings::service_health,
+            commands::settings::tray_icon_enabled,
+            commands::settings::set_tray_icon_enabled,
             // The boot medium has no taskbar to say which layout is active.
             commands::keyboard::keyboard_layout,
             // …and every password field says it too, beside its eye.

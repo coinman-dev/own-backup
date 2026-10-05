@@ -197,6 +197,10 @@ export const api = {
   /** Layout and Caps Lock for a password field, taskbar or not. */
   keyboardState: () => invoke<KeyboardState>('keyboard_state'),
   getServiceStatus: () => invoke<ServiceStatus>('get_service_status'),
+  /** The icon beside the clock; null where there is none to offer (the boot
+   *  medium, not Windows). Applied at once, kept per Windows user. */
+  trayIconEnabled: () => invoke<boolean | null>('tray_icon_enabled'),
+  setTrayIconEnabled: (enabled: boolean) => invoke<void>('set_tray_icon_enabled', { enabled }),
   /**
    * «Интерфейс нарисовался» — единственное, что носитель принимает за доказательство.
    *

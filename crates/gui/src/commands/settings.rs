@@ -68,6 +68,37 @@ pub async fn set_ui_language(state: State<'_, GuiState>, lang: String) -> Result
     Ok(())
 }
 
+/// Whether this person keeps the icon in the notification area. `None` where
+/// there is no such thing to offer — the boot medium, and anything that is not
+/// Windows — so the settings page leaves the switch out instead of showing one
+/// that does nothing.
+#[tauri::command]
+pub fn tray_icon_enabled() -> Option<bool> {
+    #[cfg(target_os = "windows")]
+    {
+        (!own_backup_common::media_mode::is_media_mode()).then(crate::tray::enabled)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
+}
+
+/// Applied at once: the logon entry is written or removed and the icon is
+/// started or told to go.
+#[tauri::command]
+pub fn set_tray_icon_enabled(enabled: bool) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        crate::tray::set_enabled(enabled)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = enabled;
+        Ok(())
+    }
+}
+
 #[derive(serde::Serialize)]
 pub struct ServiceStatusDto {
     pub connected: bool,

@@ -354,6 +354,22 @@ Cargo workspace with crates:
   stopped under a live session leaves it behind, and the next attempt cannot
   clear it), and an `Attached` is torn down once — its disk number is TAKEN,
   because after the logout Windows hands that number to the next disk.
+- **The icon beside the clock is the GUI exe itself, `own-backup-gui.exe
+  --tray` (2026-10-06).** A service in session 0 has no desktop, so the icon
+  belongs to a process of the logged-in user: a hidden Win32 window and a
+  message loop (`gui/src/tray.rs`), no Tauri and no WebView. It is shown
+  exactly while the SCM says `OwnBackup` is RUNNING, and a click opens the
+  window. The wish is one user's, so it lives in `HKCU\Software\OwnBackup\
+  TrayIcon` (absent = on), not in `config.toml`; the window rewrites the `Run`
+  entry at every start (`tray::apply`), never on the medium. Found by running
+  it: the window's process also owns a visible, nameless `Tao Thread Event
+  Target`, so the main window is picked by "titled and not a tool window"; and
+  a double click is two clicks 7 ms apart, hence the grace period after
+  starting the window. **`icons/` is not watched by tauri-build** —
+  `gui/build.rs` emits `rerun-if-changed=icons`; without it a replaced icon
+  never reaches the exe. Verified on the host with the service STOPPED (no
+  icon, switch, clicks); the icon actually appearing while it runs is still to
+  be seen.
 - Windows-specific code gated with `#[cfg(target_os = "windows")]`
 - All traits (`BlockReader`, `BlockWriter`, `UsedSectorMap`, `SnapshotProvider`,
   `DiskInventory`) have mock implementations for Linux testing

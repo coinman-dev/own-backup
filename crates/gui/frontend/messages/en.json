@@ -83,6 +83,8 @@
   "set_service_mounts": "Backups mounted as disks",
   "set_service_mounting": "Mounting backups as disks",
   "set_service_offline": "The service is not running or not responding.",
+  "set_tray": "Icon in the notification area",
+  "set_tray_help": "The icon next to the clock is shown while the service is running and appears when you sign in to Windows. Clicking it opens this window.",
   "set_mount_no_nbd": "the NBD module is not loaded",
   "set_mount_ready_nbd": "ready (NBD, NTFS: {backend})",
   "set_mount_no_ntfs": "ready, but NTFS is not supported — ntfs-3g is needed",
