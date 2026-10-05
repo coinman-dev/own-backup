@@ -22,6 +22,9 @@ LAB = Path.home() / 'lab'
 ACTIVE = LAB / 'active-h03-boundaries'
 EVIDENCE = ACTIVE / 'evidence'
 POINTS = ('before-rename', 'after-rename', 'header-before-sync')
+ARCHIVE_PREFIX = 'continuation/h03-boundaries/'
+STAGE_SCRIPT = 'audit-h03-boundary-stage.ps1'
+GUEST_RESULTS = 'Lab/h03-boundary/*.json'
 
 
 def load_module(name, path):
@@ -80,7 +83,7 @@ def pack():
     import io
     archive = REPO / 'docs/WINDOWS-TEST-EVIDENCE-2026-09-30.tar.gz'
     temporary = archive.with_name('.h03-boundary-evidence.tmp.tar.gz')
-    prefix = 'continuation/h03-boundaries/'
+    prefix = ARCHIVE_PREFIX
     manifest = {}
     with tarfile.open(archive) as old:
         expected = json.load(old.extractfile('SHA256-MANIFEST.json'))
@@ -146,7 +149,7 @@ def extract(point):
                 raise RuntimeError('read-only export timeout')
             run_command([str(LAB / 'tools/usr/lib/7zip/7z'), 'x', '-y', '-r',
                          f'-o{EVIDENCE / point / "guest"}', str(marker),
-                         'Lab/h03-boundary/*.json', 'Lab/boundary-*.log'], point + '-extract.log')
+                         GUEST_RESULTS, 'Lab/namespace-expected.json', 'Lab/boundary-*.log'], point + '-extract.log')
         finally:
             process.terminate()
             process.wait(timeout=15)
@@ -154,10 +157,21 @@ def extract(point):
 
 
 def main():
+    global ACTIVE, EVIDENCE, POINTS, ARCHIVE_PREFIX, STAGE_SCRIPT, GUEST_RESULTS
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('mode', choices=('build', 'run', 'finish'))
-    parser.add_argument('--point', choices=POINTS)
+    parser.add_argument('--point', choices=POINTS + ('namespace-existing-directory','namespace-new-directory','namespace-new-directory-compact'))
+    parser.add_argument('--suite', choices=('publication','namespace'), default='publication')
     args = parser.parse_args()
+    if args.suite == 'namespace':
+        ACTIVE = LAB / 'active-h03-new-names'
+        EVIDENCE = ACTIVE / 'evidence'
+        POINTS = ('namespace-existing-directory','namespace-new-directory','namespace-new-directory-compact')
+        ARCHIVE_PREFIX = 'continuation/h03-new-names/'
+        STAGE_SCRIPT = 'audit-h03-namespace-stage.ps1'
+        GUEST_RESULTS = 'Lab/h03-new-names/*.json'
+    if args.point and args.point not in POINTS:
+        raise SystemExit('point does not belong to the selected suite')
     def interrupted(signum, frame):
         raise KeyboardInterrupt('stop requested')
     signal.signal(signal.SIGTERM, interrupted)
@@ -205,7 +219,7 @@ def main():
         raise SystemExit('native test harness changed since build')
     sources = EVIDENCE / 'sources'
     sources.mkdir(exist_ok=True)
-    for src in [Path(__file__), REPO / 'scripts/lab/audit-h03-boundary-stage.ps1'] + list((REPO / 'crates/backup/src/seal/obk').glob('*.rs')):
+    for src in [Path(__file__), REPO / ('scripts/lab/'+STAGE_SCRIPT), REPO / 'crates/backup/src/engine_win.rs', REPO / 'crates/backup/src/engine_namespace_tests.rs'] + list((REPO / 'crates/backup/src/seal/obk').glob('*.rs')):
         shutil.copyfile(src, sources / src.name)
     monitor = load_module('monitor', REPO / 'scripts/lab/qemu-monitor.py')
     selected = (args.point,) if args.point else POINTS
@@ -215,7 +229,7 @@ def main():
         payload = ACTIVE / 'payload/lab'
         payload.mkdir(parents=True)
         shutil.copyfile(exe, payload / 'obk_boundary_tests.exe')
-        shutil.copyfile(REPO / 'scripts/lab/audit-h03-boundary-stage.ps1', payload / 'lab-stage2.ps1')
+        shutil.copyfile(REPO / ('scripts/lab/'+STAGE_SCRIPT), payload / 'lab-stage2.ps1')
         (payload / 'boundary-point.txt').write_text(point)
         (payload / 'sharing-check.txt').write_text('yes' if point == POINTS[0] else 'no')
         (payload / 'boundary-phase.txt').write_text('prepare')
@@ -257,6 +271,8 @@ def main():
                         process.kill(); process.wait(timeout=15)
                         (evidence / 'cut.json').write_text(json.dumps({'point': point, 'signal': 'SIGKILL', 'checkpoint': cut}, indent=2) + '\n')
                         power_cut = True
+                        if args.suite == 'namespace':
+                            (payload / 'namespace-expected.json').write_text(json.dumps(cut,indent=2)+'\n')
                         set_phase('verify')
                         boots += 1
                         process = subprocess.Popen(command, stdout=log, stderr=log)
@@ -281,7 +297,9 @@ def main():
                     except subprocess.TimeoutExpired:
                         monitor.send(str(ACTIVE / 'monitor.sock'), 'quit'); process.wait(timeout=15)
                 serial = (evidence / 'serial.log').read_text(errors='replace')
-                passed = prepared and power_cut and f'H03-BOUNDARY-BASELINE-PASS point={point}' in serial and f'H03-BOUNDARY-CASE-PASS point={point}' in serial and f'H03-BOUNDARY-RETRY-PASS point={point}' in serial and 'H03-BOUNDARY-FAIL' not in serial
+                complete = (f'H03-NAMESPACE-VALIDATE-PASS point={point}' if args.suite == 'namespace'
+                            else f'H03-BOUNDARY-RETRY-PASS point={point}')
+                passed = prepared and power_cut and f'H03-BOUNDARY-BASELINE-PASS point={point}' in serial and f'H03-BOUNDARY-CASE-PASS point={point}' in serial and complete in serial and 'H03-BOUNDARY-FAIL' not in serial
                 (evidence / 'result.json').write_text(json.dumps({'pass': passed, 'power_cut': power_cut, 'baseline_cold_boot': prepared, 'boots':boots, 'qemu_exit': process.returncode, 'dense_tb_acceptance': False}, indent=2) + '\n')
                 if failure is not None:
                     (evidence / 'runner-error.txt').write_text(f'{type(failure).__name__}: {failure}\n')

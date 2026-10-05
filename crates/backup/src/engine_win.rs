@@ -181,6 +181,10 @@ enum ImageTarget {
     },
 }
 
+#[cfg(test)]
+#[path = "engine_namespace_tests.rs"]
+mod new_image_namespace_tests;
+
 impl ImageTarget {
     /// Virtual disk size of the image being written.
     fn length(&self) -> u64 {
