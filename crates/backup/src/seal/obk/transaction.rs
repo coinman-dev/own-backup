@@ -28,11 +28,9 @@ pub(super) fn replace<T>(
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    let stage = tempfile::Builder::new()
-        .prefix(".own-backup-obk-")
-        .suffix(".tmp")
-        .tempfile_in(parent)?
-        .into_temp_path();
+    super::staging::cleanup(&target, chain)?;
+    // Hold ownership until publication and TempPath cleanup have finished.
+    let (_owner, stage) = super::staging::create(&target, chain)?;
 
     // `copy` keeps the source file's permissions. It also lets the OS use a
     // filesystem copy primitive when one is available; the stage may still
@@ -185,13 +183,13 @@ fn publish(stage: tempfile::TempPath, target: &Path) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn sync_parent(parent: &Path) -> Result<()> {
+pub(super) fn sync_parent(parent: &Path) -> Result<()> {
     File::open(parent)?.sync_all()?;
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn sync_parent(_parent: &Path) -> Result<()> {
+pub(super) fn sync_parent(_parent: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -266,8 +264,11 @@ mod tests {
         const CHILD_PATH: &str = "OWN_BACKUP_OBK_STAGE_EXIT_TEST";
         if let Some(path) = std::env::var_os(CHILD_PATH) {
             let path = Path::new(&path);
-            let unused_key = ChainKey::generate().unwrap();
-            let _: Result<()> = replace(path, &unused_key, |stage| {
+            let key = super::super::read_open_header(path)
+                .unwrap()
+                .chain_key_with_password("пароль архива")
+                .unwrap();
+            let _: Result<()> = replace(path, &key, |stage| {
                 let mut file = std::fs::OpenOptions::new().write(true).open(stage)?;
                 file.seek(SeekFrom::Start(0))?;
                 file.write_all(&[0])?;
@@ -305,6 +306,14 @@ mod tests {
             &chain.read_cluster(0).unwrap()[..],
             &vec![0x62; 1 << cluster_bits()]
         );
+        drop(chain);
+        assert_eq!(
+            super::super::staging::cleanup(&std::fs::canonicalize(&path).unwrap(), &f.chain)
+                .unwrap(),
+            1
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]

@@ -52,6 +52,7 @@ mod publication_faults;
 pub mod reader;
 pub mod rebuild;
 pub mod root;
+mod staging;
 mod transaction;
 pub mod writer;
 

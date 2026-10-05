@@ -22,6 +22,7 @@ pub(super) enum Point {
     AppendedSynced,
     HeaderSynced,
     RecordAppended,
+    OrphanStageRemoved,
 }
 
 type Observer = Box<dyn FnMut(Point, &Path)>;

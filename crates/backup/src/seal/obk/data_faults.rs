@@ -41,7 +41,7 @@ fn bytes(cluster: u64, updated: bool) -> Vec<u8> {
     };
     vec![value; 1 << cluster_bits()]
 }
-fn digest(path: &Path, key: &ChainKey, updated: bool) -> String {
+pub(super) fn digest(path: &Path, key: &ChainKey, updated: bool) -> String {
     let mut chain = ObkChain::open(path, key).unwrap();
     let mut digest = Sha256::new();
     for cluster in 0..64 {
@@ -65,7 +65,7 @@ fn rebuild(base: &Path, key: &ChainKey) {
     )
     .unwrap();
 }
-fn prepare(root: &Path, name: &str) -> Fixture {
+pub(super) fn prepare(root: &Path, name: &str) -> Fixture {
     let f = Fixture::new();
     let id = Uuid::new_v4();
     for (file, role, parent) in [
@@ -118,7 +118,7 @@ fn prepare(root: &Path, name: &str) -> Fixture {
     }
     f
 }
-fn before(root: &Path, key: &ChainKey) -> serde_json::Value {
+pub(super) fn before(root: &Path, key: &ChainKey) -> serde_json::Value {
     let image = ObkImage::open_path(&root.join("base.obk"), key).unwrap();
     serde_json::json!({
         "base_sha256":hash(&root.join("base.obk")), "leaf_sha256":hash(&root.join("leaf.obk")),
@@ -191,17 +191,18 @@ fn validate(
         before["chain_id"]
     );
     assert_eq!(hash(&leaf), before["leaf_sha256"].as_str().unwrap());
-    // Retry must neither consume nor mistake any uncommitted sibling for the source.
+    // Retry never promotes the interrupted candidate. Registered dead siblings
+    // are reclaimed before the new transaction; this fixture has no outsiders.
     let stages_after: Vec<_> = std::fs::read_dir(root)
         .unwrap()
         .map(|p| p.unwrap().file_name().to_string_lossy().into_owned())
         .filter(|p| p.starts_with(".own-backup-obk-"))
         .collect();
-    assert_eq!(stages_after.len(), stages.len());
+    assert!(stages_after.is_empty());
     serde_json::json!({"point":name,"pass":true,"retry_pass":true,"clusters_checked":64,
         "original_file_unchanged":original_unchanged,"generation_before":before["generation"],
         "generation_after_retry":generation,"chain_sha256_before":digest_before,
-        "chain_sha256_after_retry":digest_after,"stale_stages":stages})
+        "chain_sha256_after_retry":digest_after,"stale_stages":stages,"stages_after_retry":stages_after})
 }
 fn run_cut(root: &Path, key: &ChainKey, name: &str, stop: impl Fn() + 'static) {
     if compaction(name) {
