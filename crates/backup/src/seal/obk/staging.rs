@@ -81,8 +81,11 @@ fn open_stage(path: &Path) -> std::io::Result<File> {
     {
         use std::os::windows::fs::OpenOptionsExt;
         use windows::Win32::Foundation::GENERIC_READ;
-        use windows::Win32::Storage::FileSystem::{DELETE, FILE_FLAG_OPEN_REPARSE_POINT};
+        use windows::Win32::Storage::FileSystem::{
+            DELETE, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
         opts.access_mode(GENERIC_READ.0 | DELETE.0)
+            .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE).0)
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0);
     }
     opts.open(path)
@@ -156,7 +159,12 @@ fn open_owner(path: &Path) -> std::io::Result<File> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
-        use windows::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+        use windows::Win32::Storage::FileSystem::{
+            DELETE, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        opts.access_mode(GENERIC_READ.0 | GENERIC_WRITE.0 | DELETE.0)
+            .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE).0);
         opts.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0);
     }
     opts.open(path)
@@ -295,6 +303,12 @@ pub(super) fn cleanup(target: &Path, chain: &ChainKey) -> Result<usize> {
             Err(_) => continue,
         }
         // Retain the lock until the owner is unlinked, after the large sibling.
+        #[cfg(windows)]
+        {
+            remove_stage(file, &path)?;
+            removed += 1;
+        }
+        #[cfg(not(windows))]
         match std::fs::remove_file(&path) {
             Ok(()) => removed += 1,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -424,6 +438,28 @@ mod tests {
         assert_eq!(cleanup(&path, &key).unwrap(), 0);
         assert!(stage.exists() && owner.exists());
         assert_eq!(std::fs::read(&stage).unwrap(), b"published original");
+    }
+    #[cfg(windows)]
+    #[test]
+    fn checked_names_cannot_be_swapped_until_the_delete_handle_closes() {
+        let root = tempfile::tempdir().unwrap();
+        let path = target(root.path(), "base.obk");
+        let key = ChainKey::generate().unwrap();
+        let (owner, stage) = abandon(&path, &key);
+        for (name, open) in [
+            (&owner, open_owner as fn(&Path) -> std::io::Result<File>),
+            (&stage, open_stage),
+        ] {
+            let handle = open(name).unwrap();
+            let moved = root.path().join("swapped-object");
+            assert!(std::fs::rename(name, &moved).is_err());
+            assert!(name.exists());
+            drop(handle);
+            std::fs::rename(name, &moved).unwrap();
+            std::fs::rename(&moved, name).unwrap();
+        }
+        assert_eq!(cleanup(&path, &key).unwrap(), 1);
+        assert!(!owner.exists() && !stage.exists());
     }
     #[cfg(unix)]
     #[test]

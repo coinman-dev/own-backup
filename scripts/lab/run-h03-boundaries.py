@@ -228,7 +228,7 @@ def main():
     global ACTIVE, EVIDENCE, POINTS, ARCHIVE_PREFIX, STAGE_SCRIPT, GUEST_RESULTS
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('mode', choices=('build', 'run', 'recover', 'finish'))
-    parser.add_argument('--point', choices=POINTS + ('namespace-existing-directory','namespace-new-directory','namespace-new-directory-compact','fold-before-marker','repoint-before-delete','victim-deleted-before-marker','marker-deleted-after-commit','metadata-body-synced','metadata-header-synced','repoint-header-pending','legacy-repoint-before-rename','keep-first-record','legacy-keep-first-record','compact-copy-in-progress','compact-readback-in-progress','cleanup-staged-before-rename','cleanup-owner-after-rename','cleanup-between-stage-and-owner'))
+    parser.add_argument('--point', choices=POINTS + ('namespace-existing-directory','namespace-new-directory','namespace-new-directory-compact','fold-before-marker','repoint-before-delete','victim-deleted-before-marker','marker-deleted-after-commit','metadata-body-synced','metadata-header-synced','repoint-header-pending','legacy-repoint-before-rename','keep-first-record','legacy-keep-first-record','compact-copy-in-progress','compact-readback-in-progress','cleanup-staged-before-rename','cleanup-owner-after-rename','cleanup-between-stage-and-owner','cleanup-final-handles-before-rename'))
     parser.add_argument('--suite', choices=('publication','namespace','consolidation','metadata','data','cleanup'), default='publication')
     args = parser.parse_args()
     if args.suite == 'namespace':
@@ -262,7 +262,7 @@ def main():
     elif args.suite == 'cleanup':
         ACTIVE = LAB / 'active-h03-cleanup'
         EVIDENCE = ACTIVE / 'evidence'
-        POINTS = ('cleanup-staged-before-rename','cleanup-owner-after-rename','cleanup-between-stage-and-owner')
+        POINTS = ('cleanup-staged-before-rename','cleanup-owner-after-rename','cleanup-between-stage-and-owner','cleanup-final-handles-before-rename')
         ARCHIVE_PREFIX = 'continuation/h03-cleanup/'
         STAGE_SCRIPT = 'audit-h03-cleanup-stage.ps1'
         GUEST_RESULTS = 'Lab/h03-cleanup/*.json'

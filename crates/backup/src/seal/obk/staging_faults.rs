@@ -22,7 +22,9 @@ fn hash(path: &Path) -> String {
 #[cfg(windows)]
 fn point(name: &str) -> Point {
     match name {
-        "cleanup-staged-before-rename" => Point::BeforeRename,
+        "cleanup-staged-before-rename" | "cleanup-final-handles-before-rename" => {
+            Point::BeforeRename
+        }
         "cleanup-owner-after-rename" => Point::AfterRename,
         "cleanup-between-stage-and-owner" => Point::OrphanStageRemoved,
         _ => panic!("unknown cleanup point"),
