@@ -21,9 +21,17 @@ const CASES: &[&str] = &[
     "legacy-keep-first-record",
     "compact-copy-in-progress",
     "compact-readback-in-progress",
+    "write-index",
+    "write-metadata",
+    "write-root",
+    "write-l2",
+    "write-l1",
+    "write-refcount-block",
+    "write-refcount-table",
+    "legacy-write-refcount-table",
 ];
 fn legacy(name: &str) -> bool {
-    name == "legacy-keep-first-record"
+    name.starts_with("legacy-")
 }
 fn compaction(name: &str) -> bool {
     name.starts_with("compact-")
@@ -215,8 +223,18 @@ fn run_cut(root: &Path, key: &ChainKey, name: &str, stop: impl Fn() + 'static) {
         })
         .unwrap();
     } else {
+        let at = match name {
+            "write-index" => Point::IndexWritten,
+            "write-metadata" => Point::MetadataWritten,
+            "write-root" => Point::RootWritten,
+            "write-l2" => Point::L2Written,
+            "write-l1" => Point::L1Written,
+            "write-refcount-block" => Point::RefcountBlockWritten,
+            "write-refcount-table" | "legacy-write-refcount-table" => Point::RefcountTableWritten,
+            _ => Point::RecordAppended,
+        };
         let _guard = observe(move |point, _| {
-            if point == Point::RecordAppended {
+            if point == at {
                 stop();
             }
         });

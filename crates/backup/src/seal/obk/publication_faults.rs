@@ -23,6 +23,13 @@ pub(super) enum Point {
     HeaderSynced,
     RecordAppended,
     OrphanStageRemoved,
+    IndexWritten,
+    MetadataWritten,
+    RootWritten,
+    L2Written,
+    L1Written,
+    RefcountBlockWritten,
+    RefcountTableWritten,
 }
 
 type Observer = Box<dyn FnMut(Point, &Path)>;
@@ -183,6 +190,13 @@ fn the_header_checkpoint_sees_one_coherent_data_and_metadata_generation() {
         &seen.borrow()[..],
         &[
             (Point::RecordAppended, generation),
+            (Point::IndexWritten, generation),
+            (Point::MetadataWritten, generation),
+            (Point::RootWritten, generation),
+            (Point::L2Written, generation),
+            (Point::L1Written, generation),
+            (Point::RefcountBlockWritten, generation),
+            (Point::RefcountTableWritten, generation),
             (Point::AppendedSynced, generation),
             (Point::HeaderWritten, generation + 1),
             (Point::HeaderSynced, generation + 1)

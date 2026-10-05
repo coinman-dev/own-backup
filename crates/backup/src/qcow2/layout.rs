@@ -24,6 +24,15 @@ pub(crate) struct TablesInfo {
     pub refcount_table_clusters: u32,
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) enum TableWrite {
+    L2,
+    L1,
+    RefcountBlock,
+    RefcountTable,
+}
+
 /// Write-once bookkeeping for one image file: which guest cluster maps to which
 /// L2 entry, how many packed payloads share a host cluster, and where the next
 /// byte goes.
@@ -37,6 +46,8 @@ pub(crate) struct Qcow2Tables {
     compressed_refs: BTreeMap<u64, u64>,
     /// Next free byte in the file.
     current_offset: u64,
+    #[cfg(test)]
+    observer: Option<Box<dyn FnMut(TableWrite)>>,
 }
 
 impl Qcow2Tables {
@@ -51,6 +62,8 @@ impl Qcow2Tables {
             l2_entries: BTreeMap::new(),
             compressed_refs: BTreeMap::new(),
             current_offset: cluster_size,
+            #[cfg(test)]
+            observer: None,
         }
     }
 
@@ -60,6 +73,18 @@ impl Qcow2Tables {
         let mut tables = Self::new(cluster_bits, total_guest_clusters);
         tables.current_offset = at;
         tables
+    }
+
+    #[cfg(test)]
+    pub(crate) fn observe_writes(&mut self, callback: impl FnMut(TableWrite) + 'static) {
+        self.observer = Some(Box::new(callback));
+    }
+
+    #[cfg(test)]
+    fn wrote(&mut self, part: TableWrite) {
+        if let Some(callback) = &mut self.observer {
+            callback(part);
+        }
     }
 
     /// Account for a payload that is already in the file: its host clusters
@@ -206,6 +231,8 @@ impl Qcow2Tables {
                 w.write_all(&table)?;
                 self.current_offset += cluster_size;
                 l1_table[l1_index as usize] = OFLAG_COPIED | table_offset;
+                #[cfg(test)]
+                self.wrote(TableWrite::L2);
             }
         }
 
@@ -219,6 +246,8 @@ impl Qcow2Tables {
             w.write_all(&buf)?;
             self.current_offset += buf.len() as u64;
             self.pad_to_cluster_boundary(w)?;
+            #[cfg(test)]
+            self.wrote(TableWrite::L1);
         }
 
         // --- Refcount structures: fixpoint on the total cluster count, ---
@@ -257,6 +286,8 @@ impl Qcow2Tables {
             }
             w.write_all(&buf)?;
             self.current_offset += cluster_size;
+            #[cfg(test)]
+            self.wrote(TableWrite::RefcountBlock);
         }
         {
             let mut buf = vec![0u8; (rc_table_clusters * cluster_size) as usize];
@@ -267,6 +298,8 @@ impl Qcow2Tables {
             }
             w.write_all(&buf)?;
             self.current_offset += buf.len() as u64;
+            #[cfg(test)]
+            self.wrote(TableWrite::RefcountTable);
         }
 
         Ok(TablesInfo {

@@ -203,7 +203,7 @@ def recover_case(point, suite):
                     monitor.send(str(ACTIVE/'monitor.sock'), 'quit'); process.wait(timeout=15)
     serial = (evidence/'serial.log').read_text(errors='replace')
     complete = (f'H03-CLEANUP-VALIDATE-PASS point={point}' if suite == 'cleanup'
-                else f'H03-DATA-VALIDATE-PASS point={point}' if suite == 'data'
+                else f'H03-DATA-VALIDATE-PASS point={point}' if suite in ('data','writes')
                 else f'H03-CONSOLIDATION-VALIDATE-PASS point={point}' if suite == 'consolidation'
                 else f'H03-NAMESPACE-VALIDATE-PASS point={point}' if suite == 'namespace'
                 else f'H03-BOUNDARY-RETRY-PASS point={point}')
@@ -228,8 +228,8 @@ def main():
     global ACTIVE, EVIDENCE, POINTS, ARCHIVE_PREFIX, STAGE_SCRIPT, GUEST_RESULTS
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('mode', choices=('build', 'run', 'recover', 'finish'))
-    parser.add_argument('--point', choices=POINTS + ('namespace-existing-directory','namespace-new-directory','namespace-new-directory-compact','fold-before-marker','repoint-before-delete','victim-deleted-before-marker','marker-deleted-after-commit','metadata-body-synced','metadata-header-synced','repoint-header-pending','legacy-repoint-before-rename','keep-first-record','legacy-keep-first-record','compact-copy-in-progress','compact-readback-in-progress','cleanup-staged-before-rename','cleanup-owner-after-rename','cleanup-between-stage-and-owner','cleanup-final-handles-before-rename'))
-    parser.add_argument('--suite', choices=('publication','namespace','consolidation','metadata','data','cleanup'), default='publication')
+    parser.add_argument('--point', choices=POINTS + ('namespace-existing-directory','namespace-new-directory','namespace-new-directory-compact','fold-before-marker','repoint-before-delete','victim-deleted-before-marker','marker-deleted-after-commit','metadata-body-synced','metadata-header-synced','repoint-header-pending','legacy-repoint-before-rename','keep-first-record','legacy-keep-first-record','compact-copy-in-progress','compact-readback-in-progress','cleanup-staged-before-rename','cleanup-owner-after-rename','cleanup-between-stage-and-owner','cleanup-final-handles-before-rename','write-index','write-metadata','write-root','write-l2','write-l1','write-refcount-block','write-refcount-table','legacy-write-refcount-table'))
+    parser.add_argument('--suite', choices=('publication','namespace','consolidation','metadata','data','cleanup','writes'), default='publication')
     args = parser.parse_args()
     if args.suite == 'namespace':
         ACTIVE = LAB / 'active-h03-new-names'
@@ -266,6 +266,13 @@ def main():
         ARCHIVE_PREFIX = 'continuation/h03-cleanup/'
         STAGE_SCRIPT = 'audit-h03-cleanup-stage.ps1'
         GUEST_RESULTS = 'Lab/h03-cleanup/*.json'
+    elif args.suite == 'writes':
+        ACTIVE = LAB / 'active-h03-writes'
+        EVIDENCE = ACTIVE / 'evidence'
+        POINTS = ('write-index', 'write-metadata', 'write-root', 'write-l2', 'write-l1', 'write-refcount-block', 'write-refcount-table', 'legacy-write-refcount-table')
+        ARCHIVE_PREFIX = 'continuation/h03-writes/'
+        STAGE_SCRIPT = 'audit-h03-writes-stage.ps1'
+        GUEST_RESULTS = 'Lab/h03-writes/*.json'
     if args.point and args.point not in POINTS:
         raise SystemExit('point does not belong to the selected suite')
     def interrupted(signum, frame):
@@ -399,7 +406,7 @@ def main():
                         monitor.send(str(ACTIVE / 'monitor.sock'), 'quit'); process.wait(timeout=15)
                 serial = (evidence / 'serial.log').read_text(errors='replace')
                 complete = (f'H03-CLEANUP-VALIDATE-PASS point={point}' if args.suite == 'cleanup'
-                            else f'H03-DATA-VALIDATE-PASS point={point}' if args.suite == 'data'
+                            else f'H03-DATA-VALIDATE-PASS point={point}' if args.suite in ('data','writes')
                             else f'H03-METADATA-VALIDATE-PASS point={point}' if args.suite == 'metadata'
                             else f'H03-NAMESPACE-VALIDATE-PASS point={point}' if args.suite == 'namespace'
                             else f'H03-CONSOLIDATION-VALIDATE-PASS point={point}' if args.suite == 'consolidation'

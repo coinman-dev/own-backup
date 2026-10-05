@@ -369,6 +369,8 @@ fn apply_changed_with_in_place(
             entries: slice.len() as u32,
             first_cluster: slice[0].0,
         });
+        #[cfg(test)]
+        super::publication_faults::hit(super::publication_faults::Point::IndexWritten, path);
     }
     let mut meta_chunks: Vec<ChunkRef> = Vec::new();
     for (ordinal, slice) in padded.chunks(MAX_PAYLOAD_LEN).enumerate() {
@@ -380,6 +382,8 @@ fn apply_changed_with_in_place(
             &mut tables,
             &mut file,
         )?);
+        #[cfg(test)]
+        super::publication_faults::hit(super::publication_faults::Point::MetadataWritten, path);
     }
 
     // The one pass that changes who the image is: the base of a consolidated
@@ -418,6 +422,24 @@ fn apply_changed_with_in_place(
         &mut file,
     )?;
 
+    #[cfg(test)]
+    {
+        use super::publication_faults::{hit, Point};
+        use crate::qcow2::layout::TableWrite;
+        hit(Point::RootWritten, path);
+        let watched = path.to_owned();
+        tables.observe_writes(move |part| {
+            hit(
+                match part {
+                    TableWrite::L2 => Point::L2Written,
+                    TableWrite::L1 => Point::L1Written,
+                    TableWrite::RefcountBlock => Point::RefcountBlockWritten,
+                    TableWrite::RefcountTable => Point::RefcountTableWritten,
+                },
+                &watched,
+            )
+        });
+    }
     let info = tables.finish_tables(&mut file)?;
     open.root = ObkRootPointer::new(root_ref.offset, root_ref.len as usize, root_ref.id);
     let cluster = build_header_cluster(
