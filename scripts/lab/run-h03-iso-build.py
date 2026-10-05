@@ -14,8 +14,30 @@ def host_budget(evidence):
     powershell=Path('/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe')
     distribution=os.environ.get('WSL_DISTRO_NAME','Ubuntu').replace("'","''")
     script=r'''$ErrorActionPreference="Stop"; [Console]::OutputEncoding=[Text.UTF8Encoding]::new(); Get-ChildItem HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss | ForEach-Object { $p=Get-ItemProperty $_.PSPath; if ($p.DistributionName -eq '__DISTRO__') { $base=[Environment]::ExpandEnvironmentVariables($p.BasePath); $root=[IO.Path]::GetPathRoot($base).Replace("\\?\",""); $d=[IO.DriveInfo]::new($root); [pscustomobject]@{distribution=$p.DistributionName;base_path=$base;volume=$root;free_bytes=$d.AvailableFreeSpace;total_bytes=$d.TotalSize} | ConvertTo-Json -Compress } }'''.replace('__DISTRO__',distribution)
-    result=subprocess.run([str(powershell),'-NoProfile','-Command',script],capture_output=True,text=True,timeout=15,check=True)
-    row=json.loads(result.stdout)
+    for attempt in range(3):
+        result = None
+        try:
+            result = subprocess.run([str(powershell), '-NoProfile', '-Command', script],
+                                    capture_output=True, timeout=15)
+            if result.returncode:
+                raise RuntimeError(f'Windows budget command exit={result.returncode}')
+            row = json.loads(result.stdout.decode('utf-8-sig'))
+            if not isinstance(row.get('free_bytes'), int):
+                raise ValueError('physical Windows free space missing')
+            break
+        except (subprocess.SubprocessError, OSError, UnicodeError, ValueError, RuntimeError) as error:
+            record = {'utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                      'attempt': attempt + 1, 'error': str(error)}
+            if result is not None:
+                record.update(exit=result.returncode,
+                              stdout_utf8=result.stdout.decode('utf-8', errors='replace'),
+                              stderr_utf8=result.stderr.decode('utf-8', errors='replace'),
+                              stderr_oem=result.stderr.decode('cp866', errors='replace'))
+            with (evidence / 'host-budget-failures.jsonl').open('a') as log:
+                log.write(json.dumps(record) + '\n')
+            if attempt == 2:
+                raise RuntimeError('physical Windows budget unavailable; see host-budget-failures.jsonl') from error
+            time.sleep(1)
     row['utc']=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())
     with (evidence/'host-budget.jsonl').open('a') as log:log.write(json.dumps(row)+'\n')
     if row['free_bytes']<30*2**30:raise RuntimeError('physical Windows volume space budget exceeded')
