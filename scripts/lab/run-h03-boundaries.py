@@ -156,12 +156,78 @@ def extract(point):
     marker.unlink()
 
 
+def recover_case(point, suite):
+    """Continue only the recovery boot of an already recorded owned power cut."""
+    evidence = EVIDENCE / point
+    if not (ACTIVE / 'windows.qcow2').exists() or not (evidence / 'cut.json').exists():
+        raise SystemExit('recorded cut and saved overlay are required')
+    if (ACTIVE / 'payload/lab/boundary-phase.txt').read_text().strip() != 'verify':
+        raise SystemExit('recovery requires the saved verify-phase CD')
+    if (evidence / 'result.json').exists() and json.loads((evidence / 'result.json').read_text())['pass']:
+        raise SystemExit('case already passed; do not repeat it')
+    command = json.loads((evidence / 'command.json').read_text())
+    monitor = load_module('monitor', REPO / 'scripts/lab/qemu-monitor.py')
+    recovery = {'reason': 'External WSL shutdown interrupted recovery boot after recorded cut',
+                'point': point, 'extra_external_interruption': True, 'recovery_only': True}
+    (evidence / 'external-interruption.json').write_text(json.dumps(recovery, indent=2)+'\n')
+    with (evidence / 'qemu-recovery.log').open('a') as log:
+        process = subprocess.Popen(command, stdout=log, stderr=log)
+        started = time.monotonic(); next_budget = 0; offset = 0; failure = None; restarts = 0
+        try:
+            while True:
+                now = time.monotonic()
+                if now >= next_budget:
+                    budget(); next_budget = now + 25
+                serial = (evidence / 'serial.log').read_text(errors='replace')
+                if len(serial) > offset:
+                    print(serial[offset:], end='', flush=True); offset = len(serial)
+                if 'H03-BOUNDARY-FAIL' in serial:
+                    raise RuntimeError('guest recovery failed')
+                if process.poll() is not None:
+                    if f'H03-BOUNDARY-CASE-PASS point={point}' not in serial and restarts < 2:
+                        restarts += 1
+                        process = subprocess.Popen(command, stdout=log, stderr=log)
+                        continue
+                    break
+                if now > started + 600:
+                    raise RuntimeError('recovery timeout')
+                time.sleep(.2)
+        except BaseException as error:
+            failure = error
+        finally:
+            if process.poll() is None:
+                monitor.send(str(ACTIVE/'monitor.sock'), 'system_powerdown')
+                try:
+                    process.wait(timeout=45)
+                except subprocess.TimeoutExpired:
+                    monitor.send(str(ACTIVE/'monitor.sock'), 'quit'); process.wait(timeout=15)
+    serial = (evidence/'serial.log').read_text(errors='replace')
+    complete = (f'H03-CONSOLIDATION-VALIDATE-PASS point={point}' if suite == 'consolidation'
+                else f'H03-NAMESPACE-VALIDATE-PASS point={point}' if suite == 'namespace'
+                else f'H03-BOUNDARY-RETRY-PASS point={point}')
+    passed = complete in serial and f'H03-BOUNDARY-CASE-PASS point={point}' in serial and 'H03-BOUNDARY-FAIL' not in serial
+    (evidence/'result.json').write_text(json.dumps({'pass':passed,'power_cut':True,
+        'baseline_cold_boot':True,'extra_external_interruption':True,'recovery_only':True,
+        'qemu_exit':process.returncode,'dense_tb_acceptance':False},indent=2)+'\n')
+    if failure is not None:
+        (evidence/'runner-error.txt').write_text(f'{type(failure).__name__}: {failure}\n')
+    run_command(['qemu-img','check',str(ACTIVE/'windows.qcow2')],point+'-container-check.log')
+    extract(point); pack()
+    if passed:
+        for path in (ACTIVE/'windows.qcow2',ACTIVE/'answer.iso',ACTIVE/'monitor.sock'):
+            path.unlink(missing_ok=True)
+        shutil.rmtree(ACTIVE/'payload')
+    budget()
+    if not passed:
+        raise SystemExit('recovery failed; keep this one overlay and archived evidence for continuation')
+
+
 def main():
     global ACTIVE, EVIDENCE, POINTS, ARCHIVE_PREFIX, STAGE_SCRIPT, GUEST_RESULTS
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('mode', choices=('build', 'run', 'finish'))
-    parser.add_argument('--point', choices=POINTS + ('namespace-existing-directory','namespace-new-directory','namespace-new-directory-compact'))
-    parser.add_argument('--suite', choices=('publication','namespace'), default='publication')
+    parser.add_argument('mode', choices=('build', 'run', 'recover', 'finish'))
+    parser.add_argument('--point', choices=POINTS + ('namespace-existing-directory','namespace-new-directory','namespace-new-directory-compact','fold-before-marker','repoint-before-delete','victim-deleted-before-marker','marker-deleted-after-commit'))
+    parser.add_argument('--suite', choices=('publication','namespace','consolidation'), default='publication')
     args = parser.parse_args()
     if args.suite == 'namespace':
         ACTIVE = LAB / 'active-h03-new-names'
@@ -170,6 +236,13 @@ def main():
         ARCHIVE_PREFIX = 'continuation/h03-new-names/'
         STAGE_SCRIPT = 'audit-h03-namespace-stage.ps1'
         GUEST_RESULTS = 'Lab/h03-new-names/*.json'
+    elif args.suite == 'consolidation':
+        ACTIVE = LAB / 'active-h03-consolidation'
+        EVIDENCE = ACTIVE / 'evidence'
+        POINTS = ('fold-before-marker','repoint-before-delete','victim-deleted-before-marker','marker-deleted-after-commit')
+        ARCHIVE_PREFIX = 'continuation/h03-consolidation/'
+        STAGE_SCRIPT = 'audit-h03-consolidation-stage.ps1'
+        GUEST_RESULTS = 'Lab/h03-consolidation/*.json'
     if args.point and args.point not in POINTS:
         raise SystemExit('point does not belong to the selected suite')
     def interrupted(signum, frame):
@@ -181,6 +254,11 @@ def main():
         raise SystemExit('stop existing VM/export first')
     EVIDENCE.mkdir(parents=True, exist_ok=True)
     budget()
+    if args.mode == 'recover':
+        if not args.point:
+            raise SystemExit('recover requires --point')
+        recover_case(args.point,args.suite)
+        return
     if args.mode == 'build':
         run_command(['cargo', 'xwin', 'test', '--release', '--locked', '--target',
                      'x86_64-pc-windows-msvc', '-p', 'own-backup-backup', '--lib', '--no-run',
@@ -219,7 +297,7 @@ def main():
         raise SystemExit('native test harness changed since build')
     sources = EVIDENCE / 'sources'
     sources.mkdir(exist_ok=True)
-    for src in [Path(__file__), REPO / ('scripts/lab/'+STAGE_SCRIPT), REPO / 'crates/backup/src/engine_win.rs', REPO / 'crates/backup/src/engine_namespace_tests.rs'] + list((REPO / 'crates/backup/src/seal/obk').glob('*.rs')):
+    for src in [Path(__file__), REPO / ('scripts/lab/'+STAGE_SCRIPT), REPO / 'crates/backup/src/engine_win.rs', REPO / 'crates/backup/src/engine_namespace_tests.rs', REPO / 'crates/backup/src/consolidate.rs', REPO / 'crates/backup/src/consolidate_fault_tests.rs'] + list((REPO / 'crates/backup/src/seal/obk').glob('*.rs')):
         shutil.copyfile(src, sources / src.name)
     monitor = load_module('monitor', REPO / 'scripts/lab/qemu-monitor.py')
     selected = (args.point,) if args.point else POINTS
@@ -298,6 +376,7 @@ def main():
                         monitor.send(str(ACTIVE / 'monitor.sock'), 'quit'); process.wait(timeout=15)
                 serial = (evidence / 'serial.log').read_text(errors='replace')
                 complete = (f'H03-NAMESPACE-VALIDATE-PASS point={point}' if args.suite == 'namespace'
+                            else f'H03-CONSOLIDATION-VALIDATE-PASS point={point}' if args.suite == 'consolidation'
                             else f'H03-BOUNDARY-RETRY-PASS point={point}')
                 passed = prepared and power_cut and f'H03-BOUNDARY-BASELINE-PASS point={point}' in serial and f'H03-BOUNDARY-CASE-PASS point={point}' in serial and complete in serial and 'H03-BOUNDARY-FAIL' not in serial
                 (evidence / 'result.json').write_text(json.dumps({'pass': passed, 'power_cut': power_cut, 'baseline_cold_boot': prepared, 'boots':boots, 'qemu_exit': process.returncode, 'dense_tb_acceptance': False}, indent=2) + '\n')

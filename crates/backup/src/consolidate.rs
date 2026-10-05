@@ -80,6 +80,10 @@ use crate::sidecar::{
     read_image_sidecar, sidecar_path_for, write_embedded_sidecar, write_sidecar, ChainRole, Sidecar,
 };
 
+#[cfg(test)]
+#[path = "consolidate_fault_tests.rs"]
+mod fault_tests;
+
 /// Suffix of the file that says "a consolidation was in flight for this base".
 pub const MARKER_SUFFIX: &str = ".consolidating.json";
 
@@ -685,6 +689,8 @@ fn execute(
                 )))
             }
         }
+        #[cfg(test)]
+        fault_tests::hit(fault_tests::Point::FoldedBeforeMarker, base)?;
         marker.merged = true;
         write_marker(&marker_file, &marker)?;
     }
@@ -698,6 +704,8 @@ fn execute(
     if let Some(next) = next {
         repoint_next(next, base, container, keys)?;
     }
+    #[cfg(test)]
+    fault_tests::hit(fault_tests::Point::RepointedBeforeDelete, base)?;
 
     if container == "obk" {
         let key = chain_key_for(base, keys)?;
@@ -720,8 +728,12 @@ fn execute(
     // idempotent, the marker stays, and the next recovery finishes the
     // deletion.
     remove_checked(victim)?;
+    #[cfg(test)]
+    fault_tests::hit(fault_tests::Point::VictimDeletedBeforeMarker, base)?;
     remove_quietly(&sidecar_path_for(victim)); // a description, not data
     remove_checked(&marker_file)?;
+    #[cfg(test)]
+    fault_tests::hit(fault_tests::Point::MarkerDeletedAfterCommit, base)?;
 
     let outcome = ConsolidationOutcome {
         base: base.to_path_buf(),
@@ -943,7 +955,7 @@ mod tests {
     const VOLUME_LEN: u64 = 1024 * 1024;
     const META_SIZE: u64 = 512 * 1024;
     const META_OFFSET: u64 = DEFAULT_PARTITION_OFFSET + VOLUME_LEN;
-    const VSIZE: u64 = 4 * 1024 * 1024;
+    pub(super) const VSIZE: u64 = 4 * 1024 * 1024;
 
     fn manifest(created_at: &str, kind: BackupType, parent: Option<Uuid>) -> ImageManifest {
         ImageManifest {
@@ -1473,7 +1485,7 @@ mod tests {
 
     /// One job's keys, with the test KDF profile — the production one takes
     /// tens of seconds by design and proves nothing extra here.
-    fn obk_keys() -> crate::seal::context::ArchiveKeys {
+    pub(super) fn obk_keys() -> crate::seal::context::ArchiveKeys {
         use crate::seal::keypair::{JobKeyPair, KdfParams, SealedPrivateKey};
         use crate::seal::recovery::RecoveryKey;
 
@@ -1490,11 +1502,11 @@ mod tests {
         crate::seal::context::ArchiveKeys::from_private(envelope, pair.private).unwrap()
     }
 
-    const OBK_CLUSTER: u64 = 1 << crate::seal::context::OBK_CLUSTER_BITS;
+    pub(super) const OBK_CLUSTER: u64 = 1 << crate::seal::context::OBK_CLUSTER_BITS;
 
     /// One encrypted image of a chain, with a real sealed sidecar.
     #[allow(clippy::too_many_arguments)]
-    fn put_obk(
+    pub(super) fn put_obk(
         dir: &Path,
         name: &str,
         keys: &crate::seal::context::ArchiveKeys,
@@ -1555,7 +1567,7 @@ mod tests {
     }
 
     /// Every cluster of an encrypted chain, read through the chain itself.
-    fn read_obk(path: &Path, keys: &crate::seal::context::ArchiveKeys) -> Vec<Vec<u8>> {
+    pub(super) fn read_obk(path: &Path, keys: &crate::seal::context::ArchiveKeys) -> Vec<Vec<u8>> {
         let key = keys.open_chain_of(path).unwrap().key;
         let mut chain = crate::seal::obk::ObkChain::open(path, &key).unwrap();
         (0..VSIZE / OBK_CLUSTER)
@@ -1563,7 +1575,7 @@ mod tests {
             .collect()
     }
 
-    fn obk_sidecar(path: &Path, keys: &crate::seal::context::ArchiveKeys) -> Sidecar {
+    pub(super) fn obk_sidecar(path: &Path, keys: &crate::seal::context::ArchiveKeys) -> Sidecar {
         let key = keys.open_chain_of(path).unwrap().key;
         crate::sidecar::read_sealed_sidecar(path, &key).unwrap()
     }
