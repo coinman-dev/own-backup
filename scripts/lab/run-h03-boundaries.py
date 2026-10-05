@@ -202,7 +202,8 @@ def recover_case(point, suite):
                 except subprocess.TimeoutExpired:
                     monitor.send(str(ACTIVE/'monitor.sock'), 'quit'); process.wait(timeout=15)
     serial = (evidence/'serial.log').read_text(errors='replace')
-    complete = (f'H03-CONSOLIDATION-VALIDATE-PASS point={point}' if suite == 'consolidation'
+    complete = (f'H03-DATA-VALIDATE-PASS point={point}' if suite == 'data'
+                else f'H03-CONSOLIDATION-VALIDATE-PASS point={point}' if suite == 'consolidation'
                 else f'H03-NAMESPACE-VALIDATE-PASS point={point}' if suite == 'namespace'
                 else f'H03-BOUNDARY-RETRY-PASS point={point}')
     passed = complete in serial and f'H03-BOUNDARY-CASE-PASS point={point}' in serial and 'H03-BOUNDARY-FAIL' not in serial
@@ -226,8 +227,8 @@ def main():
     global ACTIVE, EVIDENCE, POINTS, ARCHIVE_PREFIX, STAGE_SCRIPT, GUEST_RESULTS
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('mode', choices=('build', 'run', 'recover', 'finish'))
-    parser.add_argument('--point', choices=POINTS + ('namespace-existing-directory','namespace-new-directory','namespace-new-directory-compact','fold-before-marker','repoint-before-delete','victim-deleted-before-marker','marker-deleted-after-commit','metadata-body-synced','metadata-header-synced','repoint-header-pending','legacy-repoint-before-rename'))
-    parser.add_argument('--suite', choices=('publication','namespace','consolidation','metadata'), default='publication')
+    parser.add_argument('--point', choices=POINTS + ('namespace-existing-directory','namespace-new-directory','namespace-new-directory-compact','fold-before-marker','repoint-before-delete','victim-deleted-before-marker','marker-deleted-after-commit','metadata-body-synced','metadata-header-synced','repoint-header-pending','legacy-repoint-before-rename','keep-first-record','legacy-keep-first-record','compact-copy-in-progress','compact-readback-in-progress'))
+    parser.add_argument('--suite', choices=('publication','namespace','consolidation','metadata','data'), default='publication')
     args = parser.parse_args()
     if args.suite == 'namespace':
         ACTIVE = LAB / 'active-h03-new-names'
@@ -250,6 +251,13 @@ def main():
         ARCHIVE_PREFIX = 'continuation/h03-meta-link/'
         STAGE_SCRIPT = 'audit-h03-metadata-stage.ps1'
         GUEST_RESULTS = 'Lab/h03-meta-link/*.json'
+    elif args.suite == 'data':
+        ACTIVE = LAB / 'active-h03-data'
+        EVIDENCE = ACTIVE / 'evidence'
+        POINTS = ('keep-first-record','legacy-keep-first-record','compact-copy-in-progress','compact-readback-in-progress')
+        ARCHIVE_PREFIX = 'continuation/h03-data/'
+        STAGE_SCRIPT = 'audit-h03-data-stage.ps1'
+        GUEST_RESULTS = 'Lab/h03-data/*.json'
     if args.point and args.point not in POINTS:
         raise SystemExit('point does not belong to the selected suite')
     def interrupted(signum, frame):
@@ -382,7 +390,8 @@ def main():
                     except subprocess.TimeoutExpired:
                         monitor.send(str(ACTIVE / 'monitor.sock'), 'quit'); process.wait(timeout=15)
                 serial = (evidence / 'serial.log').read_text(errors='replace')
-                complete = (f'H03-METADATA-VALIDATE-PASS point={point}' if args.suite == 'metadata'
+                complete = (f'H03-DATA-VALIDATE-PASS point={point}' if args.suite == 'data'
+                            else f'H03-METADATA-VALIDATE-PASS point={point}' if args.suite == 'metadata'
                             else f'H03-NAMESPACE-VALIDATE-PASS point={point}' if args.suite == 'namespace'
                             else f'H03-CONSOLIDATION-VALIDATE-PASS point={point}' if args.suite == 'consolidation'
                             else f'H03-BOUNDARY-RETRY-PASS point={point}')

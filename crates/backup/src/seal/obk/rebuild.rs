@@ -306,6 +306,8 @@ fn apply_changed_with_in_place(
         )?;
         tables.set_entry(cluster, entry)?;
         states.insert(cluster, ClusterState::Present(record.id));
+        #[cfg(test)]
+        super::publication_faults::hit(super::publication_faults::Point::RecordAppended, path);
     }
 
     // Clusters the pass did not touch keep the records they already had, and

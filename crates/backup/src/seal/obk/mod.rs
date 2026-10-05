@@ -37,6 +37,8 @@
 pub mod compact;
 #[cfg(test)]
 pub(crate) mod container_tests;
+#[cfg(test)]
+mod data_faults;
 pub mod fold;
 pub mod header;
 pub mod index;

@@ -21,6 +21,7 @@ pub(super) enum Point {
     HeaderWritten,
     AppendedSynced,
     HeaderSynced,
+    RecordAppended,
 }
 
 type Observer = Box<dyn FnMut(Point, &Path)>;
@@ -180,6 +181,7 @@ fn the_header_checkpoint_sees_one_coherent_data_and_metadata_generation() {
     assert_eq!(
         &seen.borrow()[..],
         &[
+            (Point::RecordAppended, generation),
             (Point::AppendedSynced, generation),
             (Point::HeaderWritten, generation + 1),
             (Point::HeaderSynced, generation + 1)
