@@ -96,8 +96,8 @@ OEM code page. Acceptance is `scripts/lab/run-installer.py` (throwaway VM).
 
 **Release (2026-10-06):** bump `[workspace.package] version` (+ `cargo update
 --workspace` for the lock), add the version's section to BOTH `CHANGELOG.md`
-and `CHANGELOG.ru_RU.md` (the release description is cut from the Russian one
-by `scripts/release-notes.sh`), update the version in the badges and download
+and `CHANGELOG.ru_RU.md` (the release description is cut from the English one
+by `scripts/release-notes.sh` — the releases page is in English), update the version in the badges and download
 links of both READMEs, fast-forward `main`, tag `vX.Y.Z[-suffix]` there and
 push the tag. `.github/workflows/release.yml` builds on `windows-2025`, packs
 the installer with the same `scripts/build-installer.sh --skip-build` (Git

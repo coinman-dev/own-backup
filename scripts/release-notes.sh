@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Prints the release description of <version> in Russian: the file, the section
-# of CHANGELOG.ru_RU.md for that version, the license note.
+# Prints the release description of <version> in English: the file, the section
+# of CHANGELOG.md for that version, the license note.
 #
 #   scripts/release-notes.sh 0.1.2-beta > notes.md
 set -euo pipefail
@@ -19,7 +19,7 @@ changes="$(awk -v heading="## $version" '
         next
     }
     found
-' "$root/CHANGELOG.ru_RU.md" | sed '/./,$!d' | awk '
+' "$root/CHANGELOG.md" | sed '/./,$!d' | awk '
     function flush() { if (have) print line; have = 0 }
     /^$/ { flush(); print ""; next }
     /^(#|- |[0-9]+\. |\||>)/ { flush(); line = $0; have = 1; next }
@@ -27,24 +27,24 @@ changes="$(awk -v heading="## $version" '
     END { flush() }
 ')"
 if [[ -z "${changes//[[:space:]]/}" ]]; then
-    echo "CHANGELOG.ru_RU.md has no section for $version" >&2
+    echo "CHANGELOG.md has no section for $version" >&2
     exit 1
 fi
 
 if [[ "$version" == *-* ]]; then
-    kind='Предварительная версия'
+    kind='Prerelease'
 else
-    kind='Версия'
+    kind='Release'
 fi
 
 cat <<EOF
-$kind для Windows 10/11 x64.
+$kind for Windows 10/11 x64.
 
-- **own-backup-install.exe** — мастер установки на русском и английском: ставит программу для всех пользователей и запускает её службу, нужны права администратора. Ставится поверх прежней версии, настройки и задания сохраняются.
+- **own-backup-install.exe** — setup wizard in English and Russian: installs the program for all users and starts its backup service; needs administrator rights. It installs over an earlier version, keeping settings and jobs.
 
 $changes
 
-Настройки и задания хранятся в \`C:\\ProgramData\\OwnBackup\`, журнал службы — в папке \`Logs\` рядом с программой. Окну нужен Microsoft Edge WebView2 Runtime: в Windows 11 он есть, а если его нет в Windows 10, установщик об этом скажет.
+Settings and jobs are kept in \`C:\\ProgramData\\OwnBackup\`, the service log in the \`Logs\` folder next to the program. The window needs the Microsoft Edge WebView2 Runtime: Windows 11 has it, and the installer says so if a Windows 10 does not.
 
-Лицензия — PolyForm Noncommercial 1.0.0, сторонние компоненты — под своими лицензиями. Контрольная сумма файла — в SHA256SUMS.txt.
+License: PolyForm Noncommercial 1.0.0; third-party components keep their own licenses. The checksum of the file is in SHA256SUMS.txt.
 EOF
