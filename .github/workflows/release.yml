@@ -27,7 +27,15 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
+  linux-checks:
+    uses: ./.github/workflows/ci.yml
+    with:
+      full: true
+      windows: false
+      ref: ${{ inputs.dry_run && github.sha || inputs.tag || github.sha }}
+
   windows:
+    needs: linux-checks
     runs-on: windows-2025
     timeout-minutes: 120
     env:
@@ -36,7 +44,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.dry_run && github.ref || inputs.tag || github.ref_name }}
+          ref: ${{ inputs.dry_run && github.sha || inputs.tag || github.sha }}
           fetch-depth: 0
       - name: Validate version tag
         shell: pwsh
@@ -72,6 +80,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+      - name: Test Windows workspace
+        run: cargo test --workspace --locked -j 2
       - name: Build Windows x64
         run: cargo build --release --locked --target x86_64-pc-windows-msvc -p own-backup-gui -p own-backup-service -p own-backup-cli -p own-backup-shell -j 2
       - name: Install NSIS
@@ -95,15 +105,16 @@ jobs:
             target/dist/own-backup-install.exe
             target/dist/SHA256SUMS.txt
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 3
       - uses: actions/upload-artifact@v4
         with:
           name: release-notes
           path: target/notes/release-notes.md
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 3
 
   publish:
+    timeout-minutes: 5
     if: github.event_name != 'workflow_dispatch' || !inputs.dry_run
     needs: windows
     runs-on: ubuntu-latest
