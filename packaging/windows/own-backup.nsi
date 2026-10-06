@@ -261,15 +261,28 @@ Section "!${NAME}" SecMain
     Call StopProgram
 
     ; A registered service holds its executable open, wherever it runs from.
-    ; The NEW executable, unpacked aside, does the stopping: it waits for a
-    ; running backup to wind down, which the copy being replaced may be too
-    ; old to do. The same file is packed once and referenced twice.
-    ReadRegStr $0 HKLM "${SERVICE_KEY}" "ImagePath"
-    ${If} $0 != ""
+    ; It is stopped by the executable it is registered with — the one already
+    ; on this computer — which waits for a running backup to wind down.
+    ;
+    ; The first version unpacked the NEW executable into %TEMP% as
+    ; service-control.exe and ran that, so as not to depend on an old copy.
+    ; An unsigned program nobody has seen before, appearing in the temporary
+    ; folder under another name and talking to the service manager, is what an
+    ; antivirus heuristic is written to catch: Avast held it for analysis and
+    ; the installer stood at this line (2026-10-06). Nothing is run from %TEMP%
+    ; now. A registration whose file is gone has nothing running to stop.
+    ReadRegStr $1 HKLM "${SERVICE_KEY}" "ImagePath"
+    StrCpy $2 $1 1
+    ${If} $2 == '"'
+        StrCpy $1 $1 "" 1
+        StrLen $2 $1
+        IntOp $2 $2 - 1
+        StrCpy $1 $1 $2
+    ${EndIf}
+    ${If} $1 != ""
+    ${AndIf} ${FileExists} "$1"
         DetailPrint "$(StoppingService)"
-        InitPluginsDir
-        File "/oname=$PLUGINSDIR\service-control.exe" "${SERVICE_EXE}"
-        nsExec::Exec '"$PLUGINSDIR\service-control.exe" /stop'
+        nsExec::Exec '"$1" /stop'
         Pop $0
         ${If} $0 != "0"
             Abort "$(ServiceStopFailed)"
