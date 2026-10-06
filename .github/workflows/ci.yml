@@ -2,17 +2,76 @@ name: Validate
 
 on:
   push:
-    branches: [dev, main]
+    branches: [main]
+    paths-ignore: ['**/*.md', 'docs/**', 'LICENSE*']
   pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore: ['**/*.md', 'docs/**', 'LICENSE*']
+  workflow_dispatch:
+    inputs:
+      full:
+        description: 'Run the full validation before a release or merge'
+        type: boolean
+        default: true
+      windows:
+        description: 'Include Windows validation'
+        type: boolean
+        default: true
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        default: ""
+      full:
+        type: boolean
+        default: true
+      windows:
+        type: boolean
+        default: true
 
 permissions:
   contents: read
 
+concurrency:
+  group: own-backup-ci-${{ github.workflow }}-${{ inputs.ref || github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
 jobs:
+  quick:
+    name: Frontend and vendor checks
+    if: (github.event_name == 'push' && !inputs.full) || (github.event_name == 'workflow_dispatch' && !inputs.full)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: crates/gui/frontend/package-lock.json
+      - name: Validate frontend
+        working-directory: crates/gui/frontend
+        run: |
+          npm ci
+          npm run build
+      - name: Verify local GTK3 compatibility patches
+        run: python3 scripts/check-vendor.py
+
   linux:
+    timeout-minutes: 60
+    if: (github.event_name == 'pull_request' && !github.event.pull_request.draft) || inputs.full
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
       - name: Install Linux GUI and image test prerequisites
         run: |
           sudo apt-get update
@@ -22,6 +81,9 @@ jobs:
           node-version: 24
           cache: npm
           cache-dependency-path: crates/gui/frontend/package-lock.json
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Build frontend
         working-directory: crates/gui/frontend
         run: |
@@ -41,9 +103,13 @@ jobs:
           python3 scripts/check-vendor.py --audit
 
   windows:
+    timeout-minutes: 60
+    if: ((github.event_name == 'pull_request' && !github.event.pull_request.draft) || inputs.full) && (github.event_name == 'pull_request' || inputs.windows)
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
       - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
@@ -52,6 +118,9 @@ jobs:
           node-version: 24
           cache: npm
           cache-dependency-path: crates/gui/frontend/package-lock.json
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Build frontend
         working-directory: crates/gui/frontend
         run: |
