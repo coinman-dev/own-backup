@@ -58,6 +58,32 @@ pub async fn delete_backup_job(
         .await
 }
 
+/// The copies a job has on disk, grouped by source and chain — what the menu
+/// of a job offers to clean up, mount, verify or save.
+#[tauri::command]
+pub async fn list_job_versions(
+    state: State<'_, GuiState>,
+    id: String,
+) -> Result<own_backup_core::JobVersions, String> {
+    state.link.client().await?.list_job_versions(&id).await
+}
+
+/// Delete the copies ticked in «очистить версии». The reply names what went
+/// and what stayed.
+#[tauri::command]
+pub async fn delete_job_versions(
+    state: State<'_, GuiState>,
+    id: String,
+    images: Vec<String>,
+) -> Result<own_backup_core::JobFilesDeleted, String> {
+    state
+        .link
+        .client()
+        .await?
+        .delete_job_versions(&id, &images)
+        .await
+}
+
 // --- Archive encryption (plan §7.5) --------------------------------------
 //
 // Turning it on is two steps and cannot go through `save_backup_job`: the

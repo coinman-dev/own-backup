@@ -144,7 +144,14 @@
   }
 
   onMount(() => {
-    loadData();
+    // Sent here from a job's menu with the image already chosen: mount it, but
+    // only once the list of mounts is known — an image that is mounted already
+    // must not be attached a second time.
+    const wanted = toolsState.autoMount;
+    toolsState.autoMount = false;
+    loadData().then(() => {
+      if (wanted && toolsState.mountPath && !isCurrentPathMounted) void mount();
+    });
     const interval = setInterval(loadData, 5000);
     return () => clearInterval(interval);
   });

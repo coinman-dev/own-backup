@@ -430,6 +430,74 @@ impl BackupClient {
         parse(&reply.json).map_err(tonic::Status::internal)
     }
 
+    /// The copies a job has on disk, grouped by source and chain.
+    pub async fn list_job_versions(&mut self, id: &str) -> Result<own_backup_core::JobVersions> {
+        let reply = self
+            .inner
+            .list_job_versions(self.request(proto::IdRequest { id: id.into() }))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
+
+    /// Delete the named copies of a job. The reply says what went and what
+    /// stayed, with the reason — a set that would leave an increment without
+    /// the image under it stays whole.
+    pub async fn delete_job_versions(
+        &mut self,
+        id: &str,
+        images: &[String],
+    ) -> Result<own_backup_core::JobFilesDeleted> {
+        let json = serde_json::json!({ "job_id": id, "images": images }).to_string();
+        let reply = self
+            .inner
+            .delete_job_versions(self.request(proto::JsonRequest { json }))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
+
+    /// Verify the latest copy of each source of a job, or all of its copies.
+    /// Progress arrives as `"verify-job"`. Keeps the gRPC status, so a caller
+    /// can tell `Cancelled` from a failure.
+    pub async fn verify_job(
+        &mut self,
+        id: &str,
+        all_versions: bool,
+        secret: &ArchiveSecret,
+    ) -> std::result::Result<own_backup_common::engine_dto::JobVerifySummary, tonic::Status> {
+        let mut body = serde_json::json!({ "job_id": id, "all_versions": all_versions });
+        secret.add_to(&mut body);
+        let json = body.to_string();
+        let reply = self
+            .inner
+            .verify_job(self.request(proto::JsonRequest { json }))
+            .await?
+            .into_inner();
+        parse(&reply.json).map_err(tonic::Status::internal)
+    }
+
+    /// Save the disk one copy shows as a standalone VHDX. Progress arrives as
+    /// `"export"`.
+    pub async fn export_image(
+        &mut self,
+        image_path: &str,
+        target_path: &str,
+        secret: &ArchiveSecret,
+    ) -> std::result::Result<own_backup_common::engine_dto::ExportSummaryDto, tonic::Status> {
+        let mut body = serde_json::json!({ "image_path": image_path, "target_path": target_path });
+        secret.add_to(&mut body);
+        let json = body.to_string();
+        let reply = self
+            .inner
+            .export_image(self.request(proto::JsonRequest { json }))
+            .await?
+            .into_inner();
+        parse(&reply.json).map_err(tonic::Status::internal)
+    }
+
     /// Mount an image; returns where it appeared.
     pub async fn mount_image(
         &mut self,

@@ -1,9 +1,15 @@
 <script lang="ts">
-  import { jobs, jobStatus, deleteJob } from '../lib/jobStore.svelte';
+  import { tick } from 'svelte';
+  import { jobs, jobStatus, deleteJob, saveJob } from '../lib/jobStore.svelte';
   import { api } from '../lib/api';
+  import { media } from '../lib/mediaStore.svelte';
   import JobDashboard from './JobDashboard.svelte';
   import BackupWizard from './BackupWizard.svelte';
   import Modal from '../components/Modal.svelte';
+  import JobVerifyModal from '../components/JobVerifyModal.svelte';
+  import JobVersionsModal from '../components/JobVersionsModal.svelte';
+  import JobExportModal from '../components/JobExportModal.svelte';
+  import JobMountModal from '../components/JobMountModal.svelte';
   import type { Job } from '../lib/types';
   import { m } from '../lib/paraglide/messages';
   import { intlLocale } from '../lib/i18n.svelte';
@@ -12,6 +18,11 @@
   // Shared draft the wizard edits; its name is also editable in the list.
   let draftJob = $state<Job | null>(null);
   let draftMode: 'wizard' | 'edit' | null = $state(null);
+  /** The draft was cloned from an encrypted job (see `cloneJob`). */
+  let draftEncrypted = $state(false);
+  /** Counts the drafts opened. The wizard is rebuilt for each one: it reads
+   *  where to start from the draft once, when it is created. */
+  let draftSerial = $state(0);
 
   // Persisted list prefs.
   const SEL_KEY = 'ob.backup.selectedJobId';
@@ -95,7 +106,9 @@
     addError = null;
     try {
       draftJob = await api.newJobTemplate();
+      draftEncrypted = false;
       draftMode = 'wizard';
+      draftSerial++;
     } catch (e) {
       addError = String(e);
     }
@@ -104,7 +117,9 @@
   function editJob() {
     if (!selectedJob) return;
     draftJob = JSON.parse(JSON.stringify(selectedJob));
+    draftEncrypted = false;
     draftMode = 'edit';
+    draftSerial++;
   }
 
   function cancelWizard() {
@@ -125,10 +140,140 @@
     selectedId = id;
   }
 
-  function askDelete(id: string, e: Event) {
-    e.stopPropagation();
+  function askDelete(id: string) {
     deleteId = id;
     deleteFiles = false;
+  }
+
+  // ---- The menu of a job (the chevron in its row, or a right click) --------
+  //
+  // What can be done with a job and its copies, in one place. The row used to
+  // carry a lone × that deleted; deleting is now the last item of this menu.
+  let menu = $state<{ job: Job; x: number; y: number } | null>(null);
+  let menuEl = $state<HTMLDivElement | null>(null);
+
+  function openMenu(job: Job, e: MouseEvent | KeyboardEvent, anchor?: HTMLElement) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (anchor) {
+      const r = anchor.getBoundingClientRect();
+      menu = { job, x: r.left, y: r.bottom + 4 };
+    } else {
+      const at = e as MouseEvent;
+      menu = { job, x: at.clientX, y: at.clientY };
+    }
+  }
+  // Keep the menu inside the window (a row near the bottom would otherwise
+  // open half of it below the edge), and give it the keyboard.
+  $effect(() => {
+    if (!menu || !menuEl) return;
+    const r = menuEl.getBoundingClientRect();
+    const x = Math.max(8, Math.min(menu.x, window.innerWidth - r.width - 8));
+    const y = Math.max(8, Math.min(menu.y, window.innerHeight - r.height - 8));
+    if (x !== menu.x || y !== menu.y) menu = { ...menu, x, y };
+    if (!menuEl.contains(document.activeElement)) menuEl.focus();
+  });
+  function menuKey(e: KeyboardEvent) {
+    if (e.key === 'Escape') {
+      menu = null;
+      return;
+    }
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    e.preventDefault();
+    const items = [...(menuEl?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? [])];
+    if (items.length === 0) return;
+    const at = items.indexOf(document.activeElement as HTMLButtonElement);
+    const step = e.key === 'ArrowDown' ? 1 : -1;
+    items[(at + step + items.length) % items.length].focus();
+  }
+  /** Run a menu item on the job the menu was opened for. */
+  function pick(action: (job: Job) => void) {
+    const job = menu?.job;
+    menu = null;
+    if (job) action(job);
+  }
+  /** The service works on one thing at a time, and a job that is being copied
+   *  has files that are still changing: nothing reads or deletes them then. */
+  const busyWith = (job: Job) => jobStatus(job) === 'running';
+
+  // Which window of the menu is open, and for which job.
+  let act = $state<
+    | { kind: 'verify'; job: Job; all: boolean }
+    | { kind: 'clean' | 'mount' | 'export'; job: Job }
+    | null
+  >(null);
+  /** What a menu item that has no window of its own could not do. */
+  let menuError: string | null = $state(null);
+
+  // «Переименовать»: only the name changes. Copies are told apart by the id
+  // written inside them, not by the job's name, so the chain carries on.
+  let renameJob = $state<Job | null>(null);
+  let renameText = $state('');
+  let renameError = $state('');
+  let renameBusy = $state(false);
+  let renameInput = $state<HTMLInputElement | null>(null);
+  const renameReady = $derived(
+    !!renameJob && renameText.trim().length > 0 && renameText.trim() !== renameJob.name,
+  );
+  async function askRename(job: Job) {
+    renameJob = job;
+    renameText = job.name;
+    renameError = '';
+    await tick();
+    renameInput?.focus();
+    renameInput?.select();
+  }
+  async function confirmRename() {
+    if (!renameJob || !renameReady || renameBusy) return;
+    renameBusy = true;
+    renameError = '';
+    try {
+      // The stored job, not the row's copy of it: whatever else changed since
+      // the list was drawn must not be written back.
+      const fresh = (await api.getBackupJob(renameJob.id)) ?? renameJob;
+      await saveJob({ ...fresh, name: renameText.trim() });
+      renameJob = null;
+    } catch (e) {
+      renameError = String(e);
+    } finally {
+      renameBusy = false;
+    }
+  }
+
+  /** «Диск C» → «Диск C (2)», and the next free number after that: a name the
+   *  list does not have yet, and no word to translate. */
+  function cloneName(name: string): string {
+    const stem = name.replace(/\s*\(\d+\)$/, '');
+    const taken = new Set(jobs.list.map((j) => j.name));
+    let n = 2;
+    while (taken.has(`${stem} (${n})`)) n++;
+    return `${stem} (${n})`;
+  }
+
+  /** «Клонировать параметры»: a new job with everything this one is set up
+   *  with — source, destination, schedule, scheme, exclusions — opened in the
+   *  wizard so any of it can be changed before the first run. None of the
+   *  original's copies come along, and neither does its key: an encrypted
+   *  job's clone asks for a password of its own. */
+  function cloneJob(job: Job) {
+    const copy: Job = JSON.parse(JSON.stringify(job));
+    copy.id = '';
+    copy.name = cloneName(job.name);
+    copy.last_run = null;
+    copy.created_at = '';
+    copy.updated_at = '';
+    // The disk's layout is photographed again when the clone is saved.
+    copy.source_disks = [];
+    copy.archive_encryption = null;
+    draftEncrypted = !!job.archive_encryption;
+    draftJob = copy;
+    draftMode = 'wizard';
+    draftSerial++;
+  }
+
+  function openStorage(job: Job) {
+    menuError = null;
+    api.openFolder(job.dest_folder).catch((e) => (menuError = String(e)));
   }
   async function confirmDelete() {
     if (!deleteId) return;
@@ -205,7 +350,13 @@
       {/if}
 
       {#each sortedJobs as job (job.id)}
-        <button class="job-item" class:sel={selectedId === job.id && !draftJob || editingId === job.id} onclick={() => selectJob(job.id)}>
+        <button
+          class="job-item"
+          class:sel={selectedId === job.id && !draftJob || editingId === job.id}
+          class:menu-open={menu?.job.id === job.id}
+          onclick={() => selectJob(job.id)}
+          oncontextmenu={(e) => openMenu(job, e)}
+        >
           <div class="job-icon">
             <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="var(--disk-icon)" stroke-width="1.6"><rect x="3" y="5" width="18" height="14" rx="3"/><circle cx="12" cy="12" r="3.5"/></svg>
             <span class="status-dot" style="background:{statusColor(jobStatus(job))}"></span>
@@ -223,20 +374,19 @@
               </div>
               <div class="job-path">{job.dest_folder}</div>
             </div>
-            <!-- Focusable AND activatable: it carried role="button" and a tab
-                 stop but no key handler, so a keyboard user could reach it and
-                 then not press it. -->
+            <!-- A span, because a button cannot hold a button; focusable AND
+                 activatable, so a keyboard user who reaches it can press it. -->
             <span
-              class="del"
+              class="more"
               role="button"
               tabindex="0"
-              onclick={(e) => askDelete(job.id, e)}
+              title={m.bsm_menu()}
+              aria-label={m.bsm_menu()}
+              aria-haspopup="menu"
+              onclick={(e) => openMenu(job, e, e.currentTarget)}
               onkeydown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  e.preventDefault();
-                  askDelete(job.id, e);
-                }
-              }}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></span>
+                if (e.key === 'Enter' || e.key === ' ') openMenu(job, e, e.currentTarget);
+              }}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></span>
           {/if}
         </button>
       {/each}
@@ -253,7 +403,9 @@
   <!-- right: wizard (inline) or dashboard -->
   <div class="dash-col">
     {#if draftJob && draftMode}
-      <BackupWizard mode={draftMode} job={draftJob} onCancel={cancelWizard} onDone={onWizardDone} />
+      {#key draftSerial}
+        <BackupWizard mode={draftMode} job={draftJob} startEncrypted={draftEncrypted} onCancel={cancelWizard} onDone={onWizardDone} />
+      {/key}
     {:else if selectedJob}
       {#key selectedJob.id}
         <JobDashboard job={selectedJob} onEdit={editJob} />
@@ -267,6 +419,95 @@
     {/if}
   </div>
 </div>
+
+{#if menu}
+  {@const job = menu.job}
+  <div
+    class="menu-backdrop"
+    role="presentation"
+    onclick={() => (menu = null)}
+    oncontextmenu={(e) => {
+      e.preventDefault();
+      menu = null;
+    }}
+  ></div>
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+  <div
+    class="ctx-menu"
+    role="menu"
+    tabindex="-1"
+    aria-label={job.name}
+    bind:this={menuEl}
+    style="left:{menu.x}px; top:{menu.y}px"
+    onkeydown={menuKey}
+  >
+    <button role="menuitem" onclick={() => pick(askRename)}>{m.bsm_rename()}</button>
+    <div class="sep"></div>
+    <button role="menuitem" disabled={busyWith(job)} onclick={() => pick((j) => (act = { kind: 'verify', job: j, all: false }))}>{m.bsm_verify_latest()}</button>
+    <button role="menuitem" disabled={busyWith(job)} onclick={() => pick((j) => (act = { kind: 'verify', job: j, all: true }))}>{m.bsm_verify_all()}</button>
+    <button role="menuitem" disabled={busyWith(job)} onclick={() => pick((j) => (act = { kind: 'clean', job: j }))}>{m.bsm_clean()}</button>
+    <div class="sep"></div>
+    <button role="menuitem" onclick={() => pick(cloneJob)}>{m.bsm_clone()}</button>
+    <button role="menuitem" disabled={busyWith(job)} onclick={() => pick((j) => (act = { kind: 'mount', job: j }))}>{m.bsm_mount()}</button>
+    {#if !media.active}
+      <!-- The boot medium has no file manager to open a folder in. -->
+      <button role="menuitem" onclick={() => pick(openStorage)}>{m.bsm_open()}</button>
+    {/if}
+    <button role="menuitem" disabled={busyWith(job)} onclick={() => pick((j) => (act = { kind: 'export', job: j }))}>{m.bsm_export()}</button>
+    <div class="sep"></div>
+    <button role="menuitem" class="danger" onclick={() => pick((j) => askDelete(j.id))}>{m.bsm_delete()}</button>
+  </div>
+{/if}
+
+{#if act?.kind === 'verify'}
+  <JobVerifyModal job={act.job} allVersions={act.all} onClose={() => (act = null)} />
+{:else if act?.kind === 'clean'}
+  <JobVersionsModal job={act.job} onClose={() => (act = null)} />
+{:else if act?.kind === 'mount'}
+  <JobMountModal job={act.job} onClose={() => (act = null)} />
+{:else if act?.kind === 'export'}
+  <JobExportModal job={act.job} onClose={() => (act = null)} />
+{/if}
+
+<Modal
+  open={renameJob !== null}
+  title={m.bsm_rename_title()}
+  confirmLabel={m.bsm_rename()}
+  confirmDisabled={!renameReady || renameBusy}
+  cancelLabel={m.common_cancel()}
+  onClose={() => (renameJob = null)}
+  onConfirm={confirmRename}
+>
+  <input
+    class="form-input"
+    type="text"
+    spellcheck="false"
+    aria-label={m.bs_name_placeholder()}
+    placeholder={m.bs_name_placeholder()}
+    bind:this={renameInput}
+    bind:value={renameText}
+    onkeydown={(e) => {
+      if (e.key === 'Enter') void confirmRename();
+    }}
+  />
+  <p class="rename-note">{m.bsm_rename_note()}</p>
+  {#if renameError}
+    <p class="del-left">{renameError}</p>
+  {/if}
+</Modal>
+
+{#if menuError}
+  <Modal
+    open
+    title={m.bsm_failed_title()}
+    confirmLabel={m.common_got_it()}
+    cancelLabel=""
+    onClose={() => (menuError = null)}
+    onConfirm={() => (menuError = null)}
+  >
+    <p class="del-left plain">{menuError}</p>
+  </Modal>
+{/if}
 
 <Modal
   open={deleteId !== null}
@@ -342,9 +583,21 @@
   .name-edit { flex: 1; min-width: 0; font-size: 14px; font-weight: 600; color: var(--text); border: 1px solid var(--primary); border-radius: 6px; padding: 5px 8px; font-family: var(--font); outline: none; background: var(--input-bg); }
   .name-edit:focus { box-shadow: 0 0 0 3px var(--accent-soft); }
   .name-edit::placeholder { color: var(--text-muted); }
-  .del { opacity: 0; color: var(--text-muted); font-size: 18px; line-height: 1; padding: 0 4px; display: flex; }
-  .del:hover { color: var(--error-text); }
-  .job-item:hover .del { opacity: 1; }
+  /* Shown for the row under the pointer, the chosen one, and the one whose
+     menu is open or which the keyboard has reached. */
+  .more { opacity: 0; color: var(--text-muted); padding: 4px; display: flex; border-radius: 4px; }
+  .more:hover, .job-item.menu-open .more { color: var(--head); background: var(--track); }
+  .job-item:hover .more, .job-item.sel .more, .job-item.menu-open .more, .more:focus-visible { opacity: 1; }
+
+  .menu-backdrop { position: fixed; inset: 0; z-index: 190; }
+  .ctx-menu { position: fixed; z-index: 200; min-width: 230px; background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow-lg); padding: 6px; outline: none; }
+  .ctx-menu button { display: block; width: 100%; text-align: left; padding: 8px 10px; border: none; background: none; border-radius: 4px; font-size: 13px; font-family: var(--font); color: var(--text); cursor: pointer; white-space: nowrap; }
+  .ctx-menu button:hover:not(:disabled), .ctx-menu button:focus-visible { background: var(--accent-soft); color: var(--accent-text); outline: none; }
+  .ctx-menu button:disabled { color: var(--text-muted); opacity: 0.6; cursor: default; }
+  .ctx-menu button.danger:hover, .ctx-menu button.danger:focus-visible { background: var(--error-soft); color: var(--error-text); }
+  .ctx-menu .sep { height: 1px; margin: 5px 4px; background: var(--border); }
+  .rename-note { margin: 10px 0 0; font-size: 12px; color: var(--text-muted); line-height: 1.45; }
+  .del-left.plain { margin-top: 0; }
   .add-error {
     margin: 0 12px 8px;
     padding: 8px 10px;

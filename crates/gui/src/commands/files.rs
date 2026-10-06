@@ -222,3 +222,36 @@ pub async fn create_dir(path: String) -> Result<String, String> {
     .await
     .map_err(|e| e.to_string())?
 }
+
+/// Show a folder in the file manager — «открыть хранилище» of a job.
+///
+/// Started by this process, which is the person's own: the folder opens as
+/// they would open it, with their rights and their network drives. Nothing is
+/// asked of the service, which could only open it as LocalSystem on a desktop
+/// nobody sees.
+#[tauri::command]
+pub async fn open_folder(path: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        if !std::path::Path::new(&path).is_dir() {
+            return Err(
+                own_backup_common::tr!("files.folder_missing", path = path.as_str()).into_owned(),
+            );
+        }
+        #[cfg(target_os = "windows")]
+        let program = "explorer.exe";
+        #[cfg(not(target_os = "windows"))]
+        let program = "xdg-open";
+        // Not waited for: Explorer hands the request to the running shell and
+        // exits with 1 whether or not a window opened.
+        std::process::Command::new(program)
+            .arg(&path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| {
+                own_backup_common::tr!("files.folder_not_opened", path = path.as_str(), error = e)
+                    .into_owned()
+            })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}

@@ -52,6 +52,24 @@ service BackupService {
   rpc RestoreDisk(JsonRequest) returns (JsonReply);    // in: {manifest_path,target_disk,force} -> DiskRestoreSummary
   rpc CancelEngineOp(Empty) returns (Empty);
 
+  // --- What a job has on disk (the menu of a job in the list) ---
+  // The copies of one job, grouped by source and chain, with what each
+  // depends on. Read from the images themselves, not from the run history.
+  rpc ListJobVersions(IdRequest) returns (JsonReply);     // JSON: JobVersions
+  // Delete the copies named. A set that would leave an increment without the
+  // image under it is refused whole.
+  // JSON in: { "job_id": string, "images": [string] } -> JobFilesDeleted
+  rpc DeleteJobVersions(JsonRequest) returns (JsonReply);
+  // Verify the latest copy of each source, or every copy.
+  // JSON in: { "job_id": string, "all_versions": bool, password?/recovery_key? }
+  // JSON out: JobVerifySummary. Progress: kind "verify-job" -> JobVerifyProgress.
+  rpc VerifyJob(JsonRequest) returns (JsonReply);
+  // Write the disk one copy shows — through its whole chain — into a new
+  // standalone VHDX. An encrypted copy comes out NOT encrypted.
+  // JSON in: { "image_path", "target_path", password?/recovery_key? }
+  // JSON out: ExportSummaryDto. Progress: kind "export" -> EngineProgress.
+  rpc ExportImage(JsonRequest) returns (JsonReply);
+
   // --- Archive encryption (plan §7.5) ---
   // Turning encryption on is two steps, and the order is the point: the
   // recovery key is shown once and never stored, so the authorization is

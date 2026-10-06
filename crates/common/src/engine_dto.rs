@@ -35,6 +35,51 @@ pub struct VerifySummaryDto {
     pub duration_secs: f64,
 }
 
+/// Progress of «проверить версии» of a job — several images in one go (Tauri
+/// event `job-verify-progress`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobVerifyProgress {
+    /// Which image is being read, counting from zero, and of how many.
+    pub index: u32,
+    pub count: u32,
+    pub file_name: String,
+    /// Of the whole operation, every image weighing the same.
+    pub percent: u64,
+    pub blocks_done: u64,
+    pub blocks_total: u64,
+}
+
+/// What reading one image of a job found.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobVerifyImage {
+    pub image_path: String,
+    pub file_name: String,
+    pub valid: bool,
+    pub blocks_checked: u64,
+    /// How many blocks do not match their checksum.
+    pub mismatched_blocks: u64,
+    /// Why the image could not be read at all; empty when it could.
+    pub error: String,
+}
+
+/// Outcome of «проверить версии»: every image that was read, good or not.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobVerifySummary {
+    pub valid: bool,
+    pub images: Vec<JobVerifyImage>,
+    pub duration_secs: f64,
+}
+
+/// Outcome of «сохранить как VHDX».
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportSummaryDto {
+    pub target_path: String,
+    pub virtual_size: u64,
+    /// How much of the disk holds data — what the file actually stores.
+    pub bytes_stored: u64,
+    pub duration_secs: f64,
+}
+
 /// Where a mounted image appeared.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MountResultDto {

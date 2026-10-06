@@ -113,8 +113,8 @@ enum Commands {
 /// Commands that touch raw devices, VSS, virtual disks or the SCM directly —
 /// they fail with ERROR_ACCESS_DENIED in a non-elevated console, so the CLI
 /// requests elevation up front instead of surfacing 0x80070005 mid-run.
-/// (Mount/Unmount are NOT here: they are thin clients of the LocalSystem
-/// service, which does the privileged work.)
+/// Mount/Unmount use the LocalSystem service; Verify reads ordinary image
+/// files in userspace. None of those commands requires elevation.
 #[cfg(target_os = "windows")]
 fn needs_admin(command: &Commands) -> bool {
     matches!(
@@ -129,7 +129,6 @@ fn needs_admin(command: &Commands) -> bool {
             | Commands::Restore(_)
             | Commands::RestoreDisk(_)
             | Commands::FinalizeBoot(_)
-            | Commands::Verify(_)
             | Commands::Consolidate(_)
             | Commands::Service(_)
             | Commands::Driver(commands::driver::DriverArgs {

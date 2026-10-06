@@ -566,6 +566,8 @@ fn main() {
             commands::backup_jobs::default_exclusion_patterns,
             commands::backup_jobs::save_backup_job,
             commands::backup_jobs::delete_backup_job,
+            commands::backup_jobs::list_job_versions,
+            commands::backup_jobs::delete_job_versions,
             commands::backup_jobs::begin_archive_encryption,
             commands::backup_jobs::confirm_archive_encryption,
             commands::backup_jobs::cancel_archive_encryption,
@@ -579,6 +581,8 @@ fn main() {
             commands::engine::inspect_backup_image,
             commands::engine::restore_now,
             commands::engine::verify_now,
+            commands::engine::verify_job,
+            commands::engine::export_image,
             commands::engine::mount_backup,
             commands::engine::unmount_backup,
             commands::engine::find_base_images,
@@ -619,6 +623,7 @@ fn main() {
             commands::files::list_roots,
             commands::files::list_dir,
             commands::files::create_dir,
+            commands::files::open_folder,
             // Единственный свидетель того, что интерфейс жив, — он сам.
             gui_ready,
         ])
@@ -682,6 +687,8 @@ async fn bridge_service_events(app: tauri::AppHandle, link: Arc<ServiceLink>) {
                             let tauri_event = match kind.as_str() {
                                 "restore" => "restore-progress",
                                 "verify" => "verify-progress",
+                                "verify-job" => "job-verify-progress",
+                                "export" => "export-progress",
                                 "restore-disk" => "restore-disk-progress",
                                 "restore-plan" => "restore-plan-progress",
                                 "media" => "media-progress",

@@ -17,6 +17,7 @@ pub mod efivars;
 pub mod esp_fallback;
 pub mod esp_scan;
 pub mod exclusions;
+pub mod export;
 pub mod ext_exclusions;
 pub mod ext_map;
 pub mod fat_exclusions;

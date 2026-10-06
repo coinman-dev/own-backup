@@ -18,8 +18,11 @@
     job: Job;
     onCancel: () => void;
     onDone: (job: Job) => void;
+    /** The draft was cloned from an encrypted job: the format starts at OBK.
+     *  The key is not cloned — a job has its own, so the password is asked. */
+    startEncrypted?: boolean;
   }
-  let { mode, job, onCancel, onDone }: Props = $props();
+  let { mode, job, onCancel, onDone, startEncrypted = false }: Props = $props();
 
   let step = $state(0);
   // A function, not a string: the text is drawn in whatever language the
@@ -33,7 +36,7 @@
   // on-switch, and it is locked once it is on.
   const alreadyEncrypted = $derived(!!job.archive_encryption);
   // svelte-ignore state_referenced_locally
-  let wantEncryption = $state(!!job.archive_encryption);
+  let wantEncryption = $state(!!job.archive_encryption || startEncrypted);
   let encPassword = $state('');
   let encPasswordAgain = $state('');
   /** Matches the service's own floor; a slow KDF does not rescue a short one. */
@@ -1235,6 +1238,51 @@
       onDone(saved);
     } catch (e) {
       error = () => String(e);
+    }
+  }
+
+  // «Клонировать параметры» opens the wizard on a draft that already names its
+  // volumes. The first question — which disk — is then answered, but only if
+  // the answer still holds: `PhysicalDriveN` is a slot, so a draft that names a
+  // disk must find it by number AND model, and one that names only volumes (a
+  // job made before disks were asked for, or from the command line) must have
+  // them all on one disk. Otherwise it starts from the first question like any
+  // new job. Volumes that are gone since are dropped; the layout is taken
+  // again from the disk as it is now.
+  // svelte-ignore state_referenced_locally
+  if (mode === 'wizard' && job.sources.length > 0) {
+    const spec = job.disk_source;
+    const owners = [...new Set(job.sources.map((dev) => diskOfDevice(dev)?.device_id ?? ''))];
+    const d = spec
+      ? engine.disks.find(
+          (x) => diskNumber(x) === spec.disk_number && (x.model || x.device_id) === spec.disk_model,
+        )
+      : owners.length === 1
+        ? engine.disks.find((x) => x.device_id === owners[0])
+        : undefined;
+    if (d) {
+      const here = (dev: string) => d.partitions.some((p) => partDevice(p) === dev);
+      const kept = job.sources
+        .map((dev, i) => ({ dev, label: job.source_labels[i] ?? dev }))
+        .filter((s) => here(s.dev));
+      job.sources = kept.map((s) => s.dev);
+      job.source_labels = kept.map((s) => s.label);
+      job.source = job.sources[0] ?? '';
+      job.source_label = job.source_labels[0] ?? '';
+      pickedDiskId = d.device_id;
+      if (spec?.bootable && isBootableDisk(d)) {
+        bootCopyOn = [d.device_id];
+        // The switch put the boot chain in, and turning it off gives it back.
+        for (const p of bootParts(d)) {
+          const dev = partDevice(p);
+          if (dev && job.sources.includes(dev)) autoIncluded.add(dev);
+        }
+      }
+      // One job = one disk = one image file: a clone gets the disk's layout
+      // even when the job it came from had none.
+      captureDiskSource(d);
+    } else {
+      clearSourceSelection();
     }
   }
 

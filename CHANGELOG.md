@@ -4,6 +4,20 @@
 
 ## 0.1.3-beta — 2026-10-06
 
+### Added
+
+- A menu beside each backup job, also available with a right click: rename,
+  check the latest version or all versions, clean up selected versions, clone
+  settings, mount a version as a disk, open the backup folder, save a version
+  as a standalone VHDX, and delete the job.
+- Version cleanup shows chains and their dependencies. Selecting a copy also
+  selects the versions built on it; deletion requires confirmation and refuses
+  to leave a version without its parent.
+- Saving as VHDX follows the selected version's whole chain. The result opens
+  with Windows alone, is independent of the job, and never replaces an existing
+  file. Encrypted copies require a password or recovery key and are exported
+  without encryption, with a warning before saving.
+
 ### Changed
 
 - The bottom strips of the menu, of the list and of the action bar are the same
@@ -13,6 +27,8 @@
 
 ### Fixed
 
+- Checking an image from the command line no longer asks for administrator
+  rights: verification reads image files directly.
 - The installer no longer unpacks a copy of the service program into the
   temporary folder to stop the running service. An antivirus held that copy,
   `service-control.exe`, for analysis, and the installation stood still. The

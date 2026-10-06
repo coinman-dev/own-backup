@@ -476,6 +476,75 @@ export interface JobFilesDeleted {
   history_truncated: boolean;
 }
 
+/** One stored copy of a job, as «Очистить версии» lists it. */
+export interface JobVersion {
+  image_path: string;
+  file_name: string;
+  role: 'full' | 'incremental' | 'differential';
+  /** vhdx | qcow2 | obk */
+  container: string;
+  created_at: string;
+  /** The image file, plus its external sidecar when it has one. */
+  size_bytes: number;
+  /** The image this one cannot be read without (its `image_path`). */
+  depends_on: string | null;
+}
+
+/** A full copy and everything built on it, oldest first. */
+export interface JobVersionChain {
+  /** The source as the file names spell it: `C`, `DISK0`, … */
+  source: string;
+  /** The newest chain of its source — the next increment continues it. */
+  current: boolean;
+  images: JobVersion[];
+}
+
+/** What a job has on disk. */
+export interface JobVersions {
+  chains: JobVersionChain[];
+  folders: string[];
+  /** [folder, reason] for every folder that could not be read. */
+  unreadable: [string, string][];
+  history_truncated: boolean;
+}
+
+/** `job-verify-progress`: several images checked in one go. */
+export interface JobVerifyProgress {
+  /** Which image is being read, from zero, and of how many. */
+  index: number;
+  count: number;
+  file_name: string;
+  /** Of the whole operation. */
+  percent: number;
+  blocks_done: number;
+  blocks_total: number;
+}
+
+export interface JobVerifyImage {
+  image_path: string;
+  file_name: string;
+  valid: boolean;
+  blocks_checked: number;
+  mismatched_blocks: number;
+  /** Why the image could not be read at all; empty when it could. */
+  error: string;
+}
+
+export interface JobVerifySummary {
+  valid: boolean;
+  images: JobVerifyImage[];
+  duration_secs: number;
+}
+
+/** Outcome of «Сохранить как VHDX». */
+export interface ExportSummary {
+  target_path: string;
+  virtual_size: number;
+  /** How much of the disk holds data — what the file actually stores. */
+  bytes_stored: number;
+  duration_secs: number;
+}
+
 /** A whole-disk (`.obdm`) backup discovered for restore. */
 export interface DiskBackupPart {
   index: number;

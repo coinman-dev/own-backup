@@ -269,4 +269,7 @@ export const toolsState = $state({
   mountPath: "",
   rwMode: false,
   verifyPath: "",
+  /** Set by whoever sends the person to «Инструменты» with an image already
+   *  chosen: the page mounts `mountPath` once, as if the button were pressed. */
+  autoMount: false,
 });

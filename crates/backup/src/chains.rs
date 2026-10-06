@@ -12,7 +12,7 @@
 //!   never deleted from the middle of a chain;
 //! - the chain containing the just-created image is always exempt.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use tracing::{info, warn};
@@ -533,6 +533,99 @@ pub fn delete_chain(chain: &Chain) -> Result<DeletionReport> {
         }
     }
 
+    Ok(delete_in_order(chain))
+}
+
+/// Delete SOME of a chain's images: the ones named — and they have to take
+/// along every image that depends on them.
+///
+/// This is «очистить версии»: a person ticks versions in a list. What may be
+/// ticked is not arbitrary. An increment whose parent is gone is not an older
+/// backup, it is an unreadable file, so the set must be closed downwards: if
+/// an image goes, everything built on it goes too. The window ticks the
+/// dependents by itself; this function does not trust it and REFUSES a set
+/// that would leave one behind, rather than quietly deleting more than was
+/// asked for.
+///
+/// Everything else is `delete_chain`'s: nothing is touched while the chain is
+/// in use or an interrupted consolidation has a marker on it, children go
+/// before parents, and a file that will not go keeps its ancestors.
+pub fn delete_chain_images(chain: &Chain, victims: &HashSet<PathBuf>) -> Result<DeletionReport> {
+    let doomed: Vec<bool> = chain
+        .images
+        .iter()
+        .map(|i| victims.contains(&i.image_path))
+        .collect();
+    if let Some(stranger) = victims.iter().find(|v| !chain.contains(v)) {
+        return Err(own_backup_common::OwnBackupError::ChainBroken(
+            tr!("chains.not_in_chain", image = stranger.display()).into_owned(),
+        ));
+    }
+    let parent = parent_links(chain);
+    for (i, image) in chain.images.iter().enumerate() {
+        if doomed[i] {
+            continue;
+        }
+        // A survivor: nothing above it may be on the list.
+        let mut cur = i;
+        let mut steps = 0;
+        while let Some(p) = parent[cur] {
+            if doomed[p] {
+                return Err(own_backup_common::OwnBackupError::ChainBroken(
+                    tr!(
+                        "chains.dependent_would_remain",
+                        image = image.image_path.display(),
+                        parent = chain.images[p].image_path.display()
+                    )
+                    .into_owned(),
+                ));
+            }
+            cur = p;
+            steps += 1;
+            if steps > chain.images.len() {
+                break; // a cycle in the links: `depths` already treats it as one
+            }
+        }
+    }
+
+    let images: Vec<&Path> = chain
+        .images
+        .iter()
+        .map(|i| i.image_path.as_path())
+        .collect();
+    crate::consolidate::ensure_idle(&images)?;
+    if let Some(base) = chain.images.first() {
+        let marker = crate::consolidate::marker_path(&base.image_path);
+        if marker.exists() {
+            return Err(own_backup_common::OwnBackupError::ChainBroken(
+                tr!(
+                    "chains.consolidation_unfinished",
+                    chain = base.image_path.display(),
+                    marker = marker.display()
+                )
+                .into_owned(),
+            ));
+        }
+    }
+
+    // The doomed images alone, in the chain's own order. A link that now
+    // points outside this list makes its image a root of it, which is exactly
+    // the order wanted: deepest first, and a failure stops at the survivors.
+    let part = Chain {
+        images: chain
+            .images
+            .iter()
+            .zip(&doomed)
+            .filter(|(_, d)| **d)
+            .map(|(i, _)| i.clone())
+            .collect(),
+    };
+    Ok(delete_in_order(&part))
+}
+
+/// The deletion itself, children before parents, with no questions asked about
+/// whether it may happen — the two callers above have asked them.
+fn delete_in_order(chain: &Chain) -> DeletionReport {
     let n = chain.images.len();
     let parent = parent_links(chain);
     let mut order: Vec<usize> = (0..n).collect();
@@ -580,7 +673,7 @@ pub fn delete_chain(chain: &Chain) -> Result<DeletionReport> {
         info!(image = %image.image_path.display(), "Retention: deleted backup version");
     }
 
-    Ok(report)
+    report
 }
 
 /// Index of each image's parent inside the chain, by the file name its sidecar
@@ -1444,5 +1537,140 @@ mod tests {
         assert!(report.complete(), "{report:?}");
         assert!(!dir.path().join("e_full.obk").exists());
         assert!(!dir.path().join("e_inc.obk").exists());
+    }
+
+    /// full ← inc1 ← inc2 ← inc3, all of job j1.
+    fn line_of_four(dir: &Path) -> Chain {
+        put_image(
+            dir,
+            "a_full.vhdx",
+            ChainRole::Full,
+            None,
+            Some("j1"),
+            "2026-01-01T00:00:00Z",
+        );
+        for (n, parent) in [(1, "a_full.vhdx"), (2, "a_inc1.avhdx"), (3, "a_inc2.avhdx")] {
+            put_image(
+                dir,
+                &format!("a_inc{n}.avhdx"),
+                ChainRole::Incremental,
+                Some(parent),
+                Some("j1"),
+                &format!("2026-01-0{}T00:00:00Z", n + 1),
+            );
+        }
+        list_job_chains(dir, "j1").unwrap().remove(0)
+    }
+
+    fn victims(dir: &Path, names: &[&str]) -> HashSet<PathBuf> {
+        names.iter().map(|n| dir.join(n)).collect()
+    }
+
+    #[test]
+    fn the_tail_of_a_chain_can_be_deleted_and_the_rest_stays_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain = line_of_four(dir.path());
+        let report = delete_chain_images(
+            &chain,
+            &victims(dir.path(), &["a_inc2.avhdx", "a_inc3.avhdx"]),
+        )
+        .unwrap();
+        assert!(report.complete(), "{report:?}");
+        // Two images and their two sidecars.
+        assert_eq!(report.files_deleted(), 4);
+        let left = list_job_chains(dir.path(), "j1").unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(chain_names(&left[0]), ["a_full.vhdx", "a_inc1.avhdx"]);
+    }
+
+    /// The whole point of the function: it must not be possible to leave an
+    /// increment on disk with the image under it gone.
+    #[test]
+    fn a_selection_that_would_orphan_a_dependent_is_refused_and_nothing_is_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain = line_of_four(dir.path());
+        for names in [
+            &["a_inc1.avhdx"][..],                 // inc2 and inc3 would hang
+            &["a_full.vhdx", "a_inc1.avhdx"][..],  // the same, from the base
+            &["a_inc1.avhdx", "a_inc3.avhdx"][..], // inc2 in the middle would
+        ] {
+            let error = delete_chain_images(&chain, &victims(dir.path(), names)).unwrap_err();
+            assert!(
+                matches!(error, own_backup_common::OwnBackupError::ChainBroken(_)),
+                "{names:?}: {error}"
+            );
+        }
+        let left = list_job_chains(dir.path(), "j1").unwrap();
+        assert_eq!(
+            chain_names(&left[0]).len(),
+            4,
+            "a refusal must delete nothing"
+        );
+    }
+
+    #[test]
+    fn an_image_of_another_chain_is_not_deleted_through_this_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain = line_of_four(dir.path());
+        put_image(
+            dir.path(),
+            "b_full.vhdx",
+            ChainRole::Full,
+            None,
+            Some("j1"),
+            "2026-02-01T00:00:00Z",
+        );
+        let error =
+            delete_chain_images(&chain, &victims(dir.path(), &["b_full.vhdx"])).unwrap_err();
+        assert!(matches!(
+            error,
+            own_backup_common::OwnBackupError::ChainBroken(_)
+        ));
+        assert!(dir.path().join("b_full.vhdx").exists());
+    }
+
+    /// A differential chain is a star: any one child may go alone, the base
+    /// only with all of them.
+    #[test]
+    fn a_differential_child_goes_alone_but_the_base_only_with_all_of_them() {
+        let dir = tempfile::tempdir().unwrap();
+        put_image(
+            dir.path(),
+            "d_full.vhdx",
+            ChainRole::Full,
+            None,
+            Some("j1"),
+            "2026-01-01T00:00:00Z",
+        );
+        for n in 1..=2 {
+            put_image(
+                dir.path(),
+                &format!("d_diff{n}.avhdx"),
+                ChainRole::Differential,
+                Some("d_full.vhdx"),
+                Some("j1"),
+                &format!("2026-01-0{}T00:00:00Z", n + 1),
+            );
+        }
+        let chain = list_job_chains(dir.path(), "j1").unwrap().remove(0);
+        assert!(delete_chain_images(
+            &chain,
+            &victims(dir.path(), &["d_full.vhdx", "d_diff1.avhdx"])
+        )
+        .is_err());
+        let report = delete_chain_images(&chain, &victims(dir.path(), &["d_diff1.avhdx"])).unwrap();
+        assert!(report.complete());
+        let left = list_job_chains(dir.path(), "j1").unwrap();
+        assert_eq!(chain_names(&left[0]), ["d_full.vhdx", "d_diff2.avhdx"]);
+    }
+
+    #[test]
+    fn naming_every_image_deletes_the_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain = line_of_four(dir.path());
+        let all: HashSet<PathBuf> = chain.images.iter().map(|i| i.image_path.clone()).collect();
+        let report = delete_chain_images(&chain, &all).unwrap();
+        assert!(report.complete());
+        assert!(list_job_chains(dir.path(), "j1").unwrap().is_empty());
     }
 }

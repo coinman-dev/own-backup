@@ -194,6 +194,22 @@
     "ru": "оставлен: от него всё ещё зависит образ, который не удалось удалить",
     "en": "kept: an image that could not be deleted still depends on it"
   },
+  "export.target_exists": {
+    "ru": "файл %{path} уже существует — выберите другое имя",
+    "en": "file %{path} already exists — choose another name"
+  },
+  "export.needs_key": {
+    "ru": "копия зашифрована: нужен пароль или ключ восстановления",
+    "en": "the backup is encrypted: a password or a recovery key is needed"
+  },
+  "chains.not_in_chain": {
+    "ru": "образ %{image} не входит в эту цепочку копий",
+    "en": "image %{image} is not part of this chain of backups"
+  },
+  "chains.dependent_would_remain": {
+    "ru": "нельзя удалить %{parent} и оставить %{image}: вторая копия без первой не читается",
+    "en": "cannot delete %{parent} and keep %{image}: the second cannot be read without the first"
+  },
 
   "source_identity.dest_volume_unknown": {
     "ru": "не удалось определить, на каком томе лежит «%{folder}»",

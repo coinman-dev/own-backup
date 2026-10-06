@@ -4,6 +4,7 @@
   import { initJobs } from './lib/jobStore.svelte';
   import { api } from './lib/api';
   import { setMediaMode } from './lib/mediaStore.svelte';
+  import { nav } from './lib/navStore.svelte';
   import Sidebar from './components/Sidebar.svelte';
   import PathPicker from './components/PathPicker.svelte';
   import BackupSection from './views/BackupSection.svelte';
@@ -28,6 +29,14 @@
   function handleNavigate(view: ViewName) {
     currentView = view;
   }
+
+  // A section asked for from inside another one (a job's «Подключить как диск»).
+  $effect(() => {
+    if (nav.request) {
+      currentView = nav.request;
+      nav.request = null;
+    }
+  });
 
   async function checkService() {
     checking = true;

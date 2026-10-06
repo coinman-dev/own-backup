@@ -684,7 +684,6 @@ fn engine_msg() -> String {
 
 /// Broadcast one engine-progress event (`restore` / `verify` / `restore-disk`)
 /// to `StreamEvents` subscribers. Called from the blocking engine thread.
-#[cfg(target_os = "windows")]
 fn emit_engine<T: serde::Serialize>(
     events: &broadcast::Sender<proto::Event>,
     kind: &str,
@@ -1314,6 +1313,302 @@ impl BackupService for BackupServiceImpl {
             let _ = req;
             Err(Status::unimplemented(engine_msg()))
         }
+    }
+
+    /// The copies one job has on disk, for the menu of the job: «очистить
+    /// версии», and choosing a version to mount or to save.
+    async fn list_job_versions(
+        &self,
+        req: Request<IdRequest>,
+    ) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        let id = req.into_inner().id;
+        let job = self
+            .state
+            .store
+            .get(&id)
+            .ok_or_else(|| Status::not_found(tr!("grpc_server.job_not_found").into_owned()))?;
+        let store = self.state.store.clone();
+        // Reading every image's description is file I/O on a folder that may
+        // be a slow disk; it does not belong on a reactor thread.
+        let versions =
+            tokio::task::spawn_blocking(move || own_backup_core::job_versions(&store, &job))
+                .await
+                .map_err(|e| Status::internal(format!("listing task panicked: {e}")))?;
+        json_reply(&versions)
+    }
+
+    /// Delete the copies ticked in «очистить версии».
+    async fn delete_job_versions(
+        &self,
+        req: Request<JsonRequest>,
+    ) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        #[derive(serde::Deserialize)]
+        struct In {
+            job_id: String,
+            images: Vec<String>,
+        }
+        let p: In = serde_json::from_str(&req.into_inner().json)
+            .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+        let job = self
+            .state
+            .store
+            .get(&p.job_id)
+            .ok_or_else(|| Status::not_found(tr!("grpc_server.job_not_found").into_owned()))?;
+
+        // The slot first, the queue second: a run that is waiting for the slot
+        // already calls itself the current one, and it would start writing an
+        // increment onto the very image this is about to delete the moment the
+        // slot is let go.
+        let slot = self.reserve(&tr!("grpc_server.busy_delete_copies"), &job.name)?;
+        if self.state.queue.snapshot().current.as_deref() == Some(p.job_id.as_str()) {
+            return Err(Status::failed_precondition(
+                tr!("grpc_server.job_running_cannot_delete").into_owned(),
+            ));
+        }
+
+        let store = self.state.store.clone();
+        let images: Vec<std::path::PathBuf> = p.images.iter().map(Into::into).collect();
+        let job_id = p.job_id.clone();
+        let report = tokio::task::spawn_blocking(move || {
+            let _slot = slot;
+            own_backup_core::delete_job_versions(&store, &job, &images)
+        })
+        .await
+        .map_err(|e| Status::internal(format!("delete task panicked: {e}")))?;
+        info!(job = %job_id, deleted = report.deleted.len(), kept = report.kept.len(), "DeleteJobVersions");
+        for (path, why) in &report.kept {
+            tracing::warn!(job = %job_id, path = %path, reason = %why, "delete_job_versions: left on disk");
+        }
+        json_reply(&report)
+    }
+
+    /// «Проверить последнюю версию» / «проверить все версии» of a job.
+    async fn verify_job(&self, req: Request<JsonRequest>) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        #[cfg(target_os = "windows")]
+        {
+            use own_backup_backup::engine_win::{verify_image_scoped, VerifyScope};
+            use own_backup_common::engine_dto::{
+                JobVerifyImage, JobVerifyProgress, JobVerifySummary,
+            };
+
+            #[derive(serde::Deserialize)]
+            struct In {
+                job_id: String,
+                #[serde(default)]
+                all_versions: bool,
+                #[serde(flatten)]
+                secret: ManualSecret,
+            }
+            let p: In = serde_json::from_str(&req.into_inner().json)
+                .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+            let job =
+                self.state.store.get(&p.job_id).ok_or_else(|| {
+                    Status::not_found(tr!("grpc_server.job_not_found").into_owned())
+                })?;
+
+            let store = self.state.store.clone();
+            let listed = job.clone();
+            let all = p.all_versions;
+            let targets = tokio::task::spawn_blocking(move || {
+                own_backup_core::job_verify_targets(&store, &listed, all)
+            })
+            .await
+            .map_err(|e| Status::internal(format!("listing task panicked: {e}")))?
+            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+            let Some(first) = targets.first() else {
+                return Err(Status::failed_precondition(
+                    tr!("grpc_server.job_has_no_copies").into_owned(),
+                ));
+            };
+            // One key opens every copy of a job, so it is derived once, from
+            // the first — and before the slot is taken, like any manual verify.
+            let keys = manual_keys_off_thread(first.0.clone(), p.secret).await?;
+            let slot = self.reserve(&tr!("grpc_server.busy_validation"), &job.name)?;
+            info!(job = %p.job_id, images = targets.len(), all_versions = p.all_versions, "VerifyJob RPC started");
+            let cancel = slot.cancel();
+            let events = self.state.events.clone();
+
+            let summary = tokio::task::spawn_blocking(
+                move || -> own_backup_common::Result<JobVerifySummary> {
+                    let _slot = slot;
+                    let started = std::time::Instant::now();
+                    let count = targets.len() as u32;
+                    let mut images = Vec::new();
+                    for (index, (path, own_blocks_only)) in targets.iter().enumerate() {
+                        let file_name = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        let scope = if *own_blocks_only {
+                            VerifyScope::LatestCopyOnly
+                        } else {
+                            VerifyScope::Everything
+                        };
+                        let mut last_permille = u64::MAX;
+                        let mut last_emit = std::time::Instant::now();
+                        let outcome =
+                            verify_image_scoped(path, keys.as_ref(), scope, |done, total| {
+                                if cancel.is_cancelled() {
+                                    return Err(own_backup_common::OwnBackupError::Cancelled);
+                                }
+                                let permille = if total > 0 { done * 1000 / total } else { 0 };
+                                if permille != last_permille
+                                    || last_emit.elapsed().as_millis() >= 400
+                                {
+                                    last_permille = permille;
+                                    last_emit = std::time::Instant::now();
+                                    emit_engine(
+                                        &events,
+                                        "verify-job",
+                                        &JobVerifyProgress {
+                                            index: index as u32,
+                                            count,
+                                            file_name: file_name.clone(),
+                                            percent: (index as u64 * 1000 + permille)
+                                                / (count as u64 * 10),
+                                            blocks_done: done,
+                                            blocks_total: total,
+                                        },
+                                    );
+                                }
+                                Ok(())
+                            });
+                        match outcome {
+                            Ok(found) => images.push(JobVerifyImage {
+                                image_path: path.display().to_string(),
+                                file_name,
+                                valid: found.valid(),
+                                blocks_checked: found.blocks_checked,
+                                mismatched_blocks: found.mismatched_blocks.len() as u64,
+                                error: String::new(),
+                            }),
+                            Err(own_backup_common::OwnBackupError::Cancelled) => {
+                                return Err(own_backup_common::OwnBackupError::Cancelled)
+                            }
+                            // One copy that cannot be read is a finding about
+                            // that copy, not a reason to say nothing about the
+                            // others.
+                            Err(e) => images.push(JobVerifyImage {
+                                image_path: path.display().to_string(),
+                                file_name,
+                                valid: false,
+                                blocks_checked: 0,
+                                mismatched_blocks: 0,
+                                error: e.to_string(),
+                            }),
+                        }
+                    }
+                    Ok(JobVerifySummary {
+                        valid: images.iter().all(|i| i.valid),
+                        images,
+                        duration_secs: started.elapsed().as_secs_f64(),
+                    })
+                },
+            )
+            .await
+            .map_err(|e| Status::internal(format!("verify task panicked: {e}")))?
+            .map_err(|e| {
+                if matches!(e, own_backup_common::OwnBackupError::Cancelled) {
+                    info!("VerifyJob RPC returning Cancelled");
+                    Status::cancelled(e.to_string())
+                } else {
+                    Status::internal(e.to_string())
+                }
+            })?;
+            json_reply(&summary)
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = req;
+            Err(Status::unimplemented(engine_msg()))
+        }
+    }
+
+    /// «Сохранить как VHDX»: one copy, through its chain, into a file that
+    /// stands on its own.
+    async fn export_image(&self, req: Request<JsonRequest>) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        use own_backup_common::engine_dto::{EngineProgress, ExportSummaryDto};
+
+        #[derive(serde::Deserialize)]
+        struct In {
+            image_path: String,
+            target_path: String,
+            #[serde(flatten)]
+            secret: ManualSecret,
+        }
+        let p: In = serde_json::from_str(&req.into_inner().json)
+            .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+        let image = std::path::PathBuf::from(&p.image_path);
+        let target = std::path::PathBuf::from(&p.target_path);
+        // The service writes this file as LocalSystem, so where it goes has to
+        // be said in full: a relative path would land in System32.
+        let folder_exists = target.parent().is_some_and(|f| f.is_dir());
+        if !target.is_absolute() || !folder_exists {
+            return Err(Status::invalid_argument(
+                tr!("grpc_server.export_bad_target", path = target.display()).into_owned(),
+            ));
+        }
+
+        let keys = manual_keys_off_thread(image.clone(), p.secret).await?;
+        let slot = self.reserve(&tr!("grpc_server.busy_export"), &p.image_path)?;
+        info!(image = %p.image_path, target = %p.target_path, "ExportImage RPC started");
+        let cancel = slot.cancel();
+        let events = self.state.events.clone();
+
+        let (summary, took) = tokio::task::spawn_blocking(move || {
+            let _slot = slot;
+            let started = std::time::Instant::now();
+            let mut last_permille = u64::MAX;
+            let mut last_emit = std::time::Instant::now();
+            let result = own_backup_backup::export::export_to_vhdx(
+                &image,
+                keys.as_ref(),
+                &target,
+                &cancel,
+                |done, total| {
+                    let permille = if total > 0 { done * 1000 / total } else { 0 };
+                    if permille != last_permille || last_emit.elapsed().as_millis() >= 400 {
+                        last_permille = permille;
+                        last_emit = std::time::Instant::now();
+                        let secs = started.elapsed().as_secs_f64().max(0.001);
+                        emit_engine(
+                            &events,
+                            "export",
+                            &EngineProgress {
+                                percent: permille / 10,
+                                blocks_done: done >> 20,
+                                blocks_total: total >> 20,
+                                bytes_done: done,
+                                speed_mbps: done as f64 / 1_048_576.0 / secs,
+                            },
+                        );
+                    }
+                    Ok(())
+                },
+            );
+            (result, started.elapsed())
+        })
+        .await
+        .map_err(|e| Status::internal(format!("export task panicked: {e}")))?;
+        let summary = summary.map_err(|e| {
+            if matches!(e, own_backup_common::OwnBackupError::Cancelled) {
+                info!("ExportImage RPC returning Cancelled");
+                Status::cancelled(e.to_string())
+            } else {
+                Status::internal(e.to_string())
+            }
+        })?;
+        info!(target = %summary.target.display(), stored = summary.bytes_stored, "ExportImage RPC done");
+        json_reply(&ExportSummaryDto {
+            target_path: summary.target.display().to_string(),
+            virtual_size: summary.virtual_size,
+            bytes_stored: summary.bytes_stored,
+            duration_secs: took.as_secs_f64(),
+        })
     }
 
     async fn mount_image(&self, req: Request<JsonRequest>) -> Result<Response<JsonReply>, Status> {

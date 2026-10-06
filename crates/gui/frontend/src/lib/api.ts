@@ -10,6 +10,9 @@ import type {
   Job,
   JobFilesDeleted,
   JobRun,
+  JobVersions,
+  JobVerifySummary,
+  ExportSummary,
   QueueSnapshot,
   DecryptResult,
   DiskBackup,
@@ -71,6 +74,21 @@ export const api = {
   saveBackupJob: (job: Job) => invoke<Job>('save_backup_job', { job }),
   deleteBackupJob: (id: string, deleteFiles: boolean) =>
     invoke<JobFilesDeleted>('delete_backup_job', { id, deleteFiles }),
+  // --- the menu of a job: its copies on disk ---
+  listJobVersions: (id: string) => invoke<JobVersions>('list_job_versions', { id }),
+  /** Delete the ticked copies. What a chain refuses stays and is named. */
+  deleteJobVersions: (id: string, images: string[]) =>
+    invoke<JobFilesDeleted>('delete_job_versions', { id, images }),
+  /** Check the latest copy of each source, or every copy the job has.
+   *  Progress arrives as `job-verify-progress`. */
+  verifyJob: (id: string, allVersions: boolean, secret?: ArchiveSecret) =>
+    invoke<JobVerifySummary>('verify_job', { id, allVersions, ...secretArgs(secret) }),
+  /** Save the disk a copy shows as one standalone VHDX. Progress arrives as
+   *  `export-progress`. */
+  exportImage: (imagePath: string, targetPath: string, secret?: ArchiveSecret) =>
+    invoke<ExportSummary>('export_image', { imagePath, targetPath, ...secretArgs(secret) }),
+  /** Open a folder in the file manager, as the person at the screen. */
+  openFolder: (path: string) => invoke<void>('open_folder', { path }),
   decryptVolume: (volume: string, password: string, remember: boolean) =>
     invoke<DecryptResult>('decrypt_volume', { volume, password, remember }),
   runBackupJob: (id: string) => invoke<void>('run_backup_job', { id }),

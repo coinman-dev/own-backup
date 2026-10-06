@@ -655,6 +655,48 @@ pub async fn restore_now(
         .await
 }
 
+/// Verify the latest copy of each source of a job, or every copy it has.
+/// Progress streams as `job-verify-progress`.
+#[tauri::command]
+pub async fn verify_job(
+    state: State<'_, GuiState>,
+    id: String,
+    all_versions: bool,
+    password: Option<String>,
+    recovery_key: Option<String>,
+) -> Result<own_backup_common::engine_dto::JobVerifySummary, String> {
+    state
+        .link
+        .client()
+        .await?
+        .verify_job(&id, all_versions, &secret_of(password, recovery_key))
+        .await
+        .map_err(|status| status.message().to_string())
+}
+
+/// Save the disk one copy shows as a standalone VHDX. Progress streams as
+/// `export-progress`.
+#[tauri::command]
+pub async fn export_image(
+    state: State<'_, GuiState>,
+    image_path: String,
+    target_path: String,
+    password: Option<String>,
+    recovery_key: Option<String>,
+) -> Result<own_backup_common::engine_dto::ExportSummaryDto, String> {
+    state
+        .link
+        .client()
+        .await?
+        .export_image(
+            &image_path,
+            &target_path,
+            &secret_of(password, recovery_key),
+        )
+        .await
+        .map_err(|status| status.message().to_string())
+}
+
 /// Verify an image against its sidecar checksums. Progress streams as `verify-progress`.
 #[tauri::command]
 pub async fn verify_now(

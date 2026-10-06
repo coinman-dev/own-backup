@@ -16,6 +16,8 @@
      *  answer, and a second one labelled "Cancel" had nothing to cancel. */
     cancelLabel?: string;
     danger?: boolean;
+    /** A window that holds a table rather than a sentence. */
+    wide?: boolean;
     children: Snippet;
   }
 
@@ -31,6 +33,7 @@
     confirmDisabled = false,
     cancelLabel,
     danger = false,
+    wide = false,
     children,
   }: Props = $props();
 
@@ -61,7 +64,7 @@
     onclick={handleBackdropClick}
     onkeydown={handleKeydown}
   >
-    <div class="modal-card">
+    <div class="modal-card" class:wide>
       <div class="modal-header">
         <h2 class="modal-title">{title}</h2>
         <button class="modal-close" onclick={onClose} aria-label={m.common_close()}>
@@ -118,6 +121,10 @@
     display: flex;
     flex-direction: column;
     animation: scaleIn 0.15s ease;
+  }
+
+  .modal-card.wide {
+    max-width: 760px;
   }
 
   .modal-header {

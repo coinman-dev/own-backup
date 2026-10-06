@@ -67,5 +67,13 @@
   "tray.hide": {
     "ru": "Скрыть значок",
     "en": "Hide the icon"
+  },
+  "files.folder_missing": {
+    "ru": "Папки нет: %{path}",
+    "en": "There is no such folder: %{path}"
+  },
+  "files.folder_not_opened": {
+    "ru": "Не удалось открыть папку %{path}: %{error}",
+    "en": "The folder %{path} could not be opened: %{error}"
   }
 }

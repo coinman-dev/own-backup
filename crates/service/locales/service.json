@@ -96,6 +96,18 @@
     "ru": "проверка образа",
     "en": "image validation"
   },
+  "grpc_server.busy_export": {
+    "ru": "сохранение копии как VHDX",
+    "en": "saving a backup as VHDX"
+  },
+  "grpc_server.job_has_no_copies": {
+    "ru": "У этого задания пока нет копий — проверять нечего.",
+    "en": "This job has no backups yet — there is nothing to verify."
+  },
+  "grpc_server.export_bad_target": {
+    "ru": "Укажите полный путь к новому файлу в существующей папке: %{path}",
+    "en": "Give the full path of the new file, in a folder that exists: %{path}"
+  },
   "grpc_server.busy_mount": {
     "ru": "подключение образа",
     "en": "image mount"

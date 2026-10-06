@@ -78,6 +78,48 @@ pub enum JobsCommand {
         #[arg(long)]
         delete_files: bool,
     },
+
+    /// Копии задания на диске: по источникам и цепочкам, с размером и с тем,
+    /// от какой копии каждая зависит
+    Versions {
+        /// Job id
+        id: String,
+        /// Печатать как JSON — для сценариев
+        #[arg(long)]
+        json: bool,
+    },
+    /// Удалить названные копии задания. Копию можно удалить только вместе со
+    /// всеми, что на ней построены, — иначе не удаляется ничего
+    Clean {
+        /// Job id
+        id: String,
+        /// Файл копии, как его печатает `versions`; флаг можно повторить
+        #[arg(long = "image", value_name = "ФАЙЛ", required = true)]
+        images: Vec<String>,
+    },
+    /// Проверить последнюю копию каждого источника задания, а с `--all` — все
+    Verify {
+        /// Job id
+        id: String,
+        /// Все копии, а не только последняя
+        #[arg(long)]
+        all: bool,
+        /// Копии зашифрованы: спросить пароль
+        #[arg(long)]
+        ask_key: bool,
+    },
+    /// Сохранить копию отдельным VHDX: весь диск, как его показывает эта
+    /// копия, одним файлом без родителей. Зашифрованная копия сохраняется
+    /// РАСШИФРОВАННОЙ
+    Export {
+        /// Файл копии
+        image: String,
+        /// Полный путь нового файла .vhdx; существующий не заменяется
+        target: String,
+        /// Копия зашифрована: спросить пароль
+        #[arg(long)]
+        ask_key: bool,
+    },
 }
 
 #[derive(Args)]
@@ -352,8 +394,114 @@ pub async fn run(args: JobsArgs) -> Result<()> {
                 }
             }
         }
+        JobsCommand::Versions { id, json } => {
+            let versions = client.list_job_versions(&id).await.map_err(cfg)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&versions)?);
+                return Ok(());
+            }
+            for chain in &versions.chains {
+                println!(
+                    "источник {}{}",
+                    chain.source,
+                    if chain.current {
+                        " — текущая цепочка"
+                    } else {
+                        ""
+                    }
+                );
+                for image in &chain.images {
+                    println!(
+                        "  {:<12} {}  {:>14}  {}",
+                        image.role, image.created_at, image.size_bytes, image.image_path
+                    );
+                }
+            }
+            for (folder, why) in &versions.unreadable {
+                println!("НЕ ПРОЧИТАНО: {folder} — {why}");
+            }
+            let images: usize = versions.chains.iter().map(|c| c.images.len()).sum();
+            println!("Цепочек: {}, копий: {images}", versions.chains.len());
+        }
+        JobsCommand::Clean { id, images } => {
+            let report = client
+                .delete_job_versions(&id, &images)
+                .await
+                .map_err(cfg)?;
+            println!("Удалено файлов: {}", report.deleted.len());
+            for (path, why) in &report.kept {
+                println!("  ОСТАЛОСЬ: {path} — {why}");
+            }
+            // A script has to be able to tell "all of it went" from "some of
+            // it stayed" without reading the text.
+            if !report.kept.is_empty() {
+                return Err(cfg("не все названные копии удалены".to_string()));
+            }
+        }
+        JobsCommand::Verify { id, all, ask_key } => {
+            let secret = archive_secret(ask_key)?;
+            let summary = client
+                .verify_job(&id, all, &secret)
+                .await
+                .map_err(|status| cfg(status.message().to_string()))?;
+            for image in &summary.images {
+                let verdict = if image.valid {
+                    "ЦЕЛА".to_string()
+                } else if image.error.is_empty() {
+                    format!("ПОВРЕЖДЕНА, блоков не сошлось: {}", image.mismatched_blocks)
+                } else {
+                    format!("НЕ ПРОЧИТАНА: {}", image.error)
+                };
+                println!(
+                    "  {}  блоков проверено: {}  — {verdict}",
+                    image.file_name, image.blocks_checked
+                );
+            }
+            println!(
+                "Проверено копий: {} за {:.1} с — {}",
+                summary.images.len(),
+                summary.duration_secs,
+                if summary.valid {
+                    "все целы"
+                } else {
+                    "ЕСТЬ ПОВРЕЖДЁННЫЕ"
+                }
+            );
+            if !summary.valid {
+                return Err(cfg("проверка нашла повреждённые копии".to_string()));
+            }
+        }
+        JobsCommand::Export {
+            image,
+            target,
+            ask_key,
+        } => {
+            let secret = archive_secret(ask_key)?;
+            let summary = client
+                .export_image(&image, &target, &secret)
+                .await
+                .map_err(|status| cfg(status.message().to_string()))?;
+            println!(
+                "Сохранено: {} — диск {} байт, данных в файле {} байт, {:.1} с",
+                summary.target_path,
+                summary.virtual_size,
+                summary.bytes_stored,
+                summary.duration_secs
+            );
+        }
     }
     Ok(())
+}
+
+/// What a person typed to open encrypted copies with — or nothing, when they
+/// are not encrypted. Asked on the console, never taken from the command line:
+/// a password there stays in the shell's history and in the process list.
+fn archive_secret(ask: bool) -> Result<own_backup_client::ArchiveSecret> {
+    if !ask {
+        return Ok(own_backup_client::ArchiveSecret::none());
+    }
+    let typed = crate::secret_prompt::ask_secret("Пароль копии: ")?;
+    Ok(own_backup_client::ArchiveSecret::password(typed))
 }
 
 /// Put the flags onto a job. Absent flags change nothing, which is what makes

@@ -100,6 +100,10 @@
     "ru": "образ удалён, а его описание осталось",
     "en": "the image was deleted, but its description file remained"
   },
+  "lib.version_not_of_job": {
+    "ru": "не найдена среди копий этого задания — не удалена",
+    "en": "not found among this job's backups — not deleted"
+  },
   "lib.history_image_unverified": {
     "ru": "образ упомянут в истории, но его принадлежность и зависимости не подтверждены; удаление пропущено",
     "en": "the image is mentioned in history, but its ownership and dependencies could not be verified; deletion was skipped"

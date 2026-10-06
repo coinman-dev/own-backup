@@ -24,7 +24,7 @@ pub mod restore_exec;
 /// so callers do not have to reach into the backup crate for one enum.
 pub use own_backup_backup::source_identity::DestPlacement;
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -2433,6 +2433,318 @@ pub fn delete_job_files(store: &JobStore, job: &Job) -> JobFilesDeleted {
     }
 
     out
+}
+
+/// Every folder there is reason to think a job wrote into: the one it is
+/// configured for now, plus the parents of everything its history names.
+fn job_folders(store: &JobStore, job: &Job) -> Vec<PathBuf> {
+    let mut folders: Vec<PathBuf> = Vec::new();
+    let mut push = |p: PathBuf| {
+        if !p.as_os_str().is_empty() && !folders.contains(&p) {
+            folders.push(p);
+        }
+    };
+    push(PathBuf::from(&job.dest_folder));
+    for file in store.job_image_files(&job.id) {
+        if let Some(parent) = file.parent() {
+            push(parent.to_path_buf());
+        }
+    }
+    folders
+}
+
+/// One stored copy of a job, as «очистить версии» lists it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobVersion {
+    pub image_path: String,
+    pub file_name: String,
+    /// full | incremental | differential
+    pub role: String,
+    /// vhdx | qcow2 | obk
+    pub container: String,
+    pub created_at: String,
+    /// The image file, plus its external sidecar when it has one.
+    pub size_bytes: u64,
+    /// The image this one cannot be read without, when there is one.
+    pub depends_on: Option<String>,
+}
+
+/// One chain: a full copy and everything built on it, oldest first.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobVersionChain {
+    /// The source these are copies of, as their file names spell it: `C`,
+    /// `DISK0`, `V1A2B3C4D`. One job copies several volumes into one folder,
+    /// and each has chains of its own.
+    pub source: String,
+    /// The newest chain of its source — the one the next increment continues.
+    pub current: bool,
+    pub images: Vec<JobVersion>,
+}
+
+/// What a job has on disk.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct JobVersions {
+    /// Sources in name order, and each source's chains oldest first.
+    pub chains: Vec<JobVersionChain>,
+    pub folders: Vec<String>,
+    /// Folders that could not be read, each with the reason.
+    pub unreadable: Vec<(String, String)>,
+    /// The history is at its cap, so a folder the job wrote into long ago may
+    /// not have been looked at.
+    pub history_truncated: bool,
+}
+
+fn role_word(role: own_backup_backup::sidecar::ChainRole) -> &'static str {
+    use own_backup_backup::sidecar::ChainRole;
+    match role {
+        ChainRole::Full => "full",
+        ChainRole::Incremental => "incremental",
+        ChainRole::Differential => "differential",
+    }
+}
+
+/// The key that says two chains are of one source: the file-name token, and
+/// the source's identity when the copies recorded one.
+fn source_group(base: &own_backup_backup::chains::ChainImage) -> (String, Option<String>) {
+    (
+        image_token(&base.image_path).unwrap_or_default(),
+        base.source_id.as_ref().map(|id| id.to_ascii_lowercase()),
+    )
+}
+
+/// The copies a job has on disk, grouped the way they depend on each other.
+///
+/// Asked of the images themselves — each says in its own sidecar (or, when it
+/// is encrypted, in its open header) whose it is and what it is built on — and
+/// not of the run history, which is capped and remembers only the first volume
+/// of a run. An image that cannot be read is left out here; it is not this
+/// list's to delete either.
+pub fn job_versions(store: &JobStore, job: &Job) -> JobVersions {
+    use own_backup_backup::chains::list_job_chains;
+
+    let folders = job_folders(store, job);
+    let mut out = JobVersions {
+        folders: folders.iter().map(|f| f.display().to_string()).collect(),
+        history_truncated: store.history_is_truncated(&job.id),
+        ..Default::default()
+    };
+    let mut chains = Vec::new();
+    for folder in &folders {
+        if !folder.is_dir() {
+            continue; // a folder the job used once and that is gone: nothing in it
+        }
+        match list_job_chains(folder, &job.id) {
+            Ok(found) => chains.extend(found),
+            Err(e) => out
+                .unreadable
+                .push((folder.display().to_string(), e.to_string())),
+        }
+    }
+
+    // The newest chain of each source: where the next increment will go.
+    let mut newest: HashMap<(String, Option<String>), String> = HashMap::new();
+    for chain in &chains {
+        let Some(base) = chain.images.first() else {
+            continue;
+        };
+        let at = chain.newest_created_at().to_string();
+        let slot = newest.entry(source_group(base)).or_default();
+        if at > *slot {
+            *slot = at;
+        }
+    }
+
+    for chain in &chains {
+        let Some(base) = chain.images.first() else {
+            continue;
+        };
+        let group = source_group(base);
+        let current = newest
+            .get(&group)
+            .is_some_and(|at| at == chain.newest_created_at());
+        let images = chain
+            .images
+            .iter()
+            .map(|image| {
+                let size = |p: &Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+                let depends_on = image.parent_file_name.as_ref().and_then(|parent| {
+                    chain
+                        .images
+                        .iter()
+                        .find(|other| {
+                            other
+                                .image_path
+                                .file_name()
+                                .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(parent))
+                        })
+                        .map(|other| other.image_path.display().to_string())
+                });
+                JobVersion {
+                    image_path: image.image_path.display().to_string(),
+                    file_name: image
+                        .image_path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    role: role_word(image.role).into(),
+                    container: image.container.clone(),
+                    created_at: image.created_at.clone(),
+                    size_bytes: size(&image.image_path) + size(&image.sidecar_path),
+                    depends_on,
+                }
+            })
+            .collect();
+        out.chains.push(JobVersionChain {
+            source: group.0,
+            current,
+            images,
+        });
+    }
+    // Sources side by side, and within a source the order chains were made in.
+    out.chains.sort_by(|a, b| {
+        let first = |c: &JobVersionChain| {
+            c.images
+                .first()
+                .map(|i| i.created_at.clone())
+                .unwrap_or_default()
+        };
+        a.source.cmp(&b.source).then(first(a).cmp(&first(b)))
+    });
+    out
+}
+
+/// Delete the copies a person ticked in «очистить версии».
+///
+/// `images` are paths this job's own listing gave out, and that is checked:
+/// a path is deleted only as a member of one of the job's chains, never as a
+/// path. What a chain refuses — a set that would leave an increment without
+/// the image under it, a chain in use, a consolidation that was interrupted —
+/// stays on disk and is named in the report with the reason.
+pub fn delete_job_versions(store: &JobStore, job: &Job, images: &[PathBuf]) -> JobFilesDeleted {
+    use own_backup_backup::chains::{delete_chain_images, list_job_chains_strict};
+
+    let folders = job_folders(store, job);
+    let mut out = JobFilesDeleted {
+        folders: folders.iter().map(|f| f.display().to_string()).collect(),
+        ..Default::default()
+    };
+    let wanted: std::collections::HashSet<PathBuf> = images.iter().cloned().collect();
+    let mut found = std::collections::HashSet::new();
+
+    for folder in &folders {
+        if !folder.is_dir() {
+            continue;
+        }
+        let chains = match list_job_chains_strict(folder, &job.id) {
+            Ok(c) => c,
+            Err(e) => {
+                out.kept.push((folder.display().to_string(), e.to_string()));
+                continue;
+            }
+        };
+        for chain in &chains {
+            let victims: std::collections::HashSet<PathBuf> = chain
+                .images
+                .iter()
+                .map(|i| i.image_path.clone())
+                .filter(|p| wanted.contains(p))
+                .collect();
+            if victims.is_empty() {
+                continue;
+            }
+            found.extend(victims.iter().cloned());
+            match delete_chain_images(chain, &victims) {
+                Ok(report) => {
+                    out.deleted
+                        .extend(report.deleted.iter().map(|p| p.display().to_string()));
+                    out.kept.extend(
+                        report
+                            .kept
+                            .iter()
+                            .map(|(p, why)| (p.display().to_string(), why.clone())),
+                    );
+                    out.kept.extend(report.orphan_sidecars.iter().map(|p| {
+                        (
+                            p.display().to_string(),
+                            tr!("lib.orphan_sidecar").into_owned(),
+                        )
+                    }));
+                }
+                Err(e) => {
+                    let reason = e.to_string();
+                    let mut names: Vec<&PathBuf> = victims.iter().collect();
+                    names.sort();
+                    for path in names {
+                        out.kept.push((path.display().to_string(), reason.clone()));
+                    }
+                }
+            }
+        }
+    }
+
+    let mut strangers: Vec<&PathBuf> = wanted.difference(&found).collect();
+    strangers.sort();
+    for path in strangers {
+        out.kept.push((
+            path.display().to_string(),
+            tr!("lib.version_not_of_job").into_owned(),
+        ));
+    }
+    out
+}
+
+/// Which files «проверить последнюю версию» and «проверить все версии» read.
+///
+/// The second member says how: `false` — the whole restore point, every block
+/// it is made of, through the chain under it; `true` — only the blocks that
+/// file itself stores.
+///
+/// * the latest version: the newest image of each source, read whole. That
+///   answers the question being asked — can the latest copy be restored;
+/// * all versions: every restore point, read whole through its parents. The
+///   allocation tables of an unencrypted container are not authenticated: a
+///   damaged entry can mark formerly stored data absent. Checking only what
+///   the container still claims to store would skip that missing data and
+///   falsely report success. The manifest's checksums decide what to read.
+///
+/// An image that cannot be read stops the listing with an error rather than
+/// being skipped: "all versions are fine" must not be said about a set with a
+/// hole in it.
+pub fn job_verify_targets(
+    store: &JobStore,
+    job: &Job,
+    all_versions: bool,
+) -> own_backup_common::Result<Vec<(PathBuf, bool)>> {
+    use own_backup_backup::chains::list_job_chains_strict;
+
+    let mut chains = Vec::new();
+    for folder in job_folders(store, job) {
+        if folder.is_dir() {
+            chains.extend(list_job_chains_strict(&folder, &job.id)?);
+        }
+    }
+    if all_versions {
+        return Ok(chains
+            .iter()
+            .flat_map(|c| c.images.iter().map(|i| (i.image_path.clone(), false)))
+            .collect());
+    }
+    let mut newest: HashMap<(String, Option<String>), (String, PathBuf)> = HashMap::new();
+    for chain in &chains {
+        let (Some(base), Some(last)) = (chain.images.first(), chain.images.last()) else {
+            continue;
+        };
+        let slot = newest.entry(source_group(base)).or_default();
+        if last.created_at > slot.0 {
+            *slot = (last.created_at.clone(), last.image_path.clone());
+        }
+    }
+    let mut targets: Vec<(PathBuf, bool)> = newest
+        .into_values()
+        .map(|(_, path)| (path, false))
+        .collect();
+    targets.sort();
+    Ok(targets)
 }
 
 /// Finish whatever a crash left half-done in the destination folder — before
@@ -5224,5 +5536,191 @@ mod tests {
         // А с единицей — начинает, и это по-прежнему работает.
         job.scheme.full_every_n = 1;
         assert_eq!(plan_run(&job, Some(&run)), RunPlan::full());
+    }
+
+    // --- «Очистить версии» и «проверить версии»: что у задания лежит на диске
+
+    /// Задание `job1` с двумя источниками в одной папке:
+    /// `C`: full ← inc1 ← inc2 и следом новая цепочка full;  `D`: full ← inc.
+    fn job_with_versions(dir: &Path) -> (Arc<JobStore>, Job, PathBuf) {
+        use own_backup_backup::sidecar::ChainRole::{Full, Incremental};
+        let dest = dir.join("images");
+        std::fs::create_dir_all(&dest).unwrap();
+        let day = |n: u32| format!("2026-01-{n:02}T00:00:00Z");
+        put_real_image(&dest, "j_C_full_1.vhdx", Full, None, "job1", &day(1));
+        put_real_image(
+            &dest,
+            "j_C_inc_2.avhdx",
+            Incremental,
+            Some("j_C_full_1.vhdx"),
+            "job1",
+            &day(2),
+        );
+        put_real_image(
+            &dest,
+            "j_C_inc_3.avhdx",
+            Incremental,
+            Some("j_C_inc_2.avhdx"),
+            "job1",
+            &day(3),
+        );
+        put_real_image(&dest, "j_C_full_4.vhdx", Full, None, "job1", &day(4));
+        put_real_image(&dest, "j_D_full_1.vhdx", Full, None, "job1", &day(1));
+        put_real_image(
+            &dest,
+            "j_D_inc_5.avhdx",
+            Incremental,
+            Some("j_D_full_1.vhdx"),
+            "job1",
+            &day(5),
+        );
+        // Чужое задание в той же папке не должно попасть ни в один список.
+        put_real_image(&dest, "x_C_full_9.vhdx", Full, None, "other", &day(9));
+        let store = a_store(dir);
+        let job = store
+            .upsert(Job {
+                id: "job1".into(),
+                dest_folder: dest.display().to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        (store, job, dest)
+    }
+
+    #[test]
+    fn versions_are_listed_by_source_and_chain_with_what_each_depends_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, job, dest) = job_with_versions(dir.path());
+        let versions = job_versions(&store, &job);
+        assert!(versions.unreadable.is_empty(), "{versions:?}");
+
+        let shape: Vec<(String, bool, Vec<String>)> = versions
+            .chains
+            .iter()
+            .map(|c| {
+                (
+                    c.source.clone(),
+                    c.current,
+                    c.images.iter().map(|i| i.file_name.clone()).collect(),
+                )
+            })
+            .collect();
+        let names = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            shape,
+            vec![
+                (
+                    "C".to_string(),
+                    false,
+                    names(&["j_C_full_1.vhdx", "j_C_inc_2.avhdx", "j_C_inc_3.avhdx"])
+                ),
+                ("C".to_string(), true, names(&["j_C_full_4.vhdx"])),
+                (
+                    "D".to_string(),
+                    true,
+                    names(&["j_D_full_1.vhdx", "j_D_inc_5.avhdx"])
+                ),
+            ]
+        );
+
+        let inc3 = &versions.chains[0].images[2];
+        assert_eq!(inc3.role, "incremental");
+        assert_eq!(
+            inc3.depends_on.as_deref(),
+            Some(dest.join("j_C_inc_2.avhdx").display().to_string().as_str())
+        );
+        assert!(versions.chains[0].images[0].depends_on.is_none());
+        // Образ и его описание рядом: размер — оба файла, а не ноль.
+        assert!(inc3.size_bytes > 3, "{}", inc3.size_bytes);
+    }
+
+    #[test]
+    fn ticked_versions_are_deleted_and_the_rest_of_the_job_is_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, job, dest) = job_with_versions(dir.path());
+        // Вся старая цепочка C и хвост цепочки D.
+        let ticked: Vec<PathBuf> = [
+            "j_C_full_1.vhdx",
+            "j_C_inc_2.avhdx",
+            "j_C_inc_3.avhdx",
+            "j_D_inc_5.avhdx",
+        ]
+        .iter()
+        .map(|n| dest.join(n))
+        .collect();
+        let report = delete_job_versions(&store, &job, &ticked);
+        assert!(report.kept.is_empty(), "{report:?}");
+        for gone in &ticked {
+            assert!(!gone.exists(), "{}", gone.display());
+        }
+        for stays in ["j_C_full_4.vhdx", "j_D_full_1.vhdx", "x_C_full_9.vhdx"] {
+            assert!(dest.join(stays).exists(), "{stays}");
+        }
+        let left: Vec<String> = job_versions(&store, &job)
+            .chains
+            .iter()
+            .flat_map(|c| c.images.iter().map(|i| i.file_name.clone()))
+            .collect();
+        assert_eq!(left, ["j_C_full_4.vhdx", "j_D_full_1.vhdx"]);
+    }
+
+    /// Окно само отмечает зависимые версии. Служба ему не верит: набор, после
+    /// которого инкремент остался бы без основы, не выполняется вовсе.
+    #[test]
+    fn a_set_that_would_leave_an_increment_without_its_base_deletes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, job, dest) = job_with_versions(dir.path());
+        let report = delete_job_versions(&store, &job, &[dest.join("j_C_inc_2.avhdx")]);
+        assert!(report.deleted.is_empty(), "{report:?}");
+        assert_eq!(report.kept.len(), 1, "{report:?}");
+        assert!(dest.join("j_C_inc_2.avhdx").exists() && dest.join("j_C_inc_3.avhdx").exists());
+    }
+
+    /// Путь удаляется только как член цепочки ЭТОГО задания — не как путь.
+    #[test]
+    fn a_path_that_is_not_this_jobs_copy_is_never_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, job, dest) = job_with_versions(dir.path());
+        let foreign = dest.join("x_C_full_9.vhdx");
+        let plain = dest.join("notes.txt");
+        std::fs::write(&plain, b"mine").unwrap();
+        let report = delete_job_versions(&store, &job, &[foreign.clone(), plain.clone()]);
+        assert!(report.deleted.is_empty(), "{report:?}");
+        assert_eq!(report.kept.len(), 2, "{report:?}");
+        assert!(foreign.exists() && plain.exists());
+    }
+
+    #[test]
+    fn the_latest_version_is_one_image_per_source_and_all_versions_is_every_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, job, dest) = job_with_versions(dir.path());
+
+        let latest = job_verify_targets(&store, &job, false).unwrap();
+        assert_eq!(
+            latest,
+            vec![
+                (dest.join("j_C_full_4.vhdx"), false),
+                (dest.join("j_D_inc_5.avhdx"), false),
+            ]
+        );
+
+        let all = job_verify_targets(&store, &job, true).unwrap();
+        assert_eq!(all.len(), 6, "{all:?}");
+        assert!(all.iter().all(|(_, own_blocks_only)| !*own_blocks_only));
+        assert!(!all.iter().any(|(p, _)| p.ends_with("x_C_full_9.vhdx")));
+    }
+
+    /// «Все версии целы» нельзя сказать про набор с дырой: образ, который не
+    /// читается, останавливает проверку, а не пропускается молча.
+    #[test]
+    fn an_unreadable_image_fails_the_verify_listing_instead_of_being_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, job, dest) = job_with_versions(dir.path());
+        std::fs::write(
+            dest.join("j_C_inc_6.qcow2"),
+            b"cannot read embedded sidecar",
+        )
+        .unwrap();
+        assert!(job_verify_targets(&store, &job, true).is_err());
     }
 }
