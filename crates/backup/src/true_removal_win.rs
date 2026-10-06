@@ -1131,6 +1131,26 @@ fn enumerate_volume_on_disk(disk_number: u32) -> Option<String> {
     all_volume_roots_on_disk(disk_number).into_iter().next()
 }
 
+/// Delete a folder with everything in it, whoever its ACLs admit, and say how
+/// many entries went and how many would not.
+///
+/// The same handle-based delete the removal pass uses inside an image, here
+/// for a folder on the machine itself: the service's data folder holds a key
+/// store only LocalSystem may open, and an administrator's ordinary delete
+/// walks past it (`service/src/install.rs`, `purge_data`).
+pub fn delete_folder_with_backup_rights(path: &Path) -> (u64, u64) {
+    crate::privileges_win::enable_backup_privileges();
+    let (mut deleted, mut failed) = (0u64, 0u64);
+    delete_tree(
+        &path.to_string_lossy(),
+        true,
+        false,
+        &mut deleted,
+        &mut failed,
+    );
+    (deleted, failed)
+}
+
 /// Delete one filesystem entry (recursing into non-reparse directories first).
 /// Failures are counted and warned, never fatal — excluding less than asked is
 /// safe, breaking the pass over one stubborn file is not.

@@ -55,6 +55,9 @@ enum Mode {
     /// deployed, the service kept running the old binary, and the run that was
     /// supposed to prove the fix reproduced the bug instead.
     Update,
+    /// Delete what the service keeps on this machine: settings, jobs, history
+    /// and remembered volume keys. The uninstaller's «удалить также настройки».
+    PurgeData,
     /// Console run for development: loopback TCP, no auth, easy to attach a
     /// debugger/curl. `--foreground` / `-f`.
     Foreground,
@@ -105,6 +108,7 @@ fn mode_of(args: &[String]) -> Mode {
             "/restart" | "--restart" | "restart" => return Mode::Restart,
             "/status" | "--status" | "status" => return Mode::Status,
             "/update" | "--update" | "update" => return Mode::Update,
+            "/purge-data" | "--purge-data" | "purge-data" => return Mode::PurgeData,
             "-f" | "--foreground" => return Mode::Foreground,
             "--run" | "run" | "--daemon" | "daemon" => return Mode::Daemon,
             _ => {}
@@ -316,7 +320,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_os = "windows")]
     if matches!(
         mode,
-        Mode::Install | Mode::Uninstall | Mode::Start | Mode::Stop | Mode::Restart | Mode::Update
+        Mode::Install
+            | Mode::Uninstall
+            | Mode::Start
+            | Mode::Stop
+            | Mode::Restart
+            | Mode::Update
+            | Mode::PurgeData
     ) && elevate::relaunch_elevated(&args)
     {
         return Ok(()); // an elevated copy is doing the work; this one is done
@@ -330,6 +340,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Mode::Restart => install::restart(),
         Mode::Status => install::status(),
         Mode::Update => install::update_from_here(),
+        Mode::PurgeData => install::purge_data(),
         // Foreground/dev uses TCP on localhost for easy debugging.
         Mode::Foreground => run_loop(true),
         // Daemon (systemd) uses the OS production transport (UDS/named pipe).
@@ -359,6 +370,7 @@ fn print_info() {
     println!("  /restart      {}", tr!("main.cmd_restart"));
     println!("  /status       {}", tr!("main.cmd_status"));
     println!("  /update       {}", tr!("main.cmd_update"));
+    println!("  /purge-data   {}", tr!("main.cmd_purge"));
     println!("  --foreground  {}", tr!("main.cmd_foreground"));
     println!("  --run         {}", tr!("main.cmd_run"));
     println!("  --media       {}", tr!("main.cmd_media"));
@@ -1421,6 +1433,7 @@ mod tests {
     #[test]
     fn the_first_mode_word_wins() {
         assert_eq!(mode_of(&args("/install --run")), Mode::Install);
+        assert_eq!(mode_of(&args("/purge-data")), Mode::PurgeData);
         assert_eq!(mode_of(&args("--run /install")), Mode::Daemon);
         assert_eq!(mode_of(&args("")), Mode::Service);
     }

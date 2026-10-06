@@ -9,6 +9,9 @@
 //!
 //! and the matching `/uninstall` / `--uninstall`. Both flag styles are accepted
 //! on either platform (see `parse_mode`), but the work is platform-specific.
+//! On Windows `/install` on a machine that already has the service re-points
+//! the registration at the copy it was run from — that is all the setup
+//! program (`packaging/windows/own-backup.nsi`) does about the service.
 //! Registration needs Administrator (Windows) / root (Linux); the OS refuses
 //! otherwise with a clear access-denied error that we surface verbatim.
 
@@ -17,6 +20,10 @@ use own_backup_common::tr;
 // ---------------------------------------------------------------------------
 // Windows: Service Control Manager
 // ---------------------------------------------------------------------------
+
+/// `CreateService` on a name the SCM already has.
+#[cfg(target_os = "windows")]
+const ERROR_SERVICE_EXISTS: i32 = 1073;
 
 #[cfg(target_os = "windows")]
 pub fn install() -> Result<(), Box<dyn std::error::Error>> {
@@ -50,8 +57,24 @@ pub fn install() -> Result<(), Box<dyn std::error::Error>> {
         account_password: None,
     };
 
-    let service =
-        manager.create_service(&info, ServiceAccess::CHANGE_CONFIG | ServiceAccess::START)?;
+    let access = ServiceAccess::CHANGE_CONFIG | ServiceAccess::START;
+    let service = match manager.create_service(&info, access) {
+        Ok(service) => service,
+        // Already registered — by an earlier version, or by a copy run from
+        // another folder. Point the registration at THIS executable instead of
+        // failing: the installer runs `/install` after every copy, and removing
+        // the service first only to create it again leaves it "marked for
+        // deletion" for as long as anything (services.msc is enough) holds a
+        // handle to it.
+        Err(windows_service::Error::Winapi(error))
+            if error.raw_os_error() == Some(ERROR_SERVICE_EXISTS) =>
+        {
+            let service = manager.open_service(crate::SERVICE_NAME, access)?;
+            service.change_config(&info)?;
+            service
+        }
+        Err(error) => return Err(error.into()),
+    };
     service.set_description(crate::SERVICE_DESCRIPTION)?;
 
     println!(
@@ -399,6 +422,62 @@ pub fn restart() -> Result<(), Box<dyn std::error::Error>> {
     let _ = stop();
     std::thread::sleep(std::time::Duration::from_millis(500));
     start()
+}
+
+/// Delete everything the service keeps on this machine: settings, jobs, run
+/// history and the remembered volume keys. Backups are somewhere else and are
+/// not this command's to touch.
+///
+/// This is the uninstaller's «удалить также настройки», and it is here rather
+/// than in the uninstaller for a reason found by the first run that answered
+/// yes (2026-10-06): the key store, `.own-backup-service-keys`, admits
+/// LocalSystem alone. An administrator's ordinary recursive delete removed the
+/// settings and the jobs and left exactly the keys behind.
+///
+/// Only the DEFAULT data folder goes. A `data_dir` written into `config.toml`
+/// by hand may be anything, a drive root included, and "delete the settings"
+/// must never be able to mean "delete D:\".
+pub fn purge_data() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = own_backup_common::config::AppConfig::default().data_dir;
+
+    // A running service would write half of it back, and would be left without
+    // the key it is using.
+    #[cfg(target_os = "windows")]
+    {
+        use windows_service::service::{ServiceAccess, ServiceState};
+        if let Ok(service) = open_service(ServiceAccess::QUERY_STATUS) {
+            if service.query_status()?.current_state != ServiceState::Stopped {
+                return Err(
+                    tr!("install.purge_running", name = crate::SERVICE_DISPLAY_NAME)
+                        .into_owned()
+                        .into(),
+                );
+            }
+        }
+    }
+
+    if !dir.exists() {
+        println!("{}", tr!("install.purge_nothing", path = dir.display()));
+        return Ok(());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let (_, failed) =
+            own_backup_backup::true_removal_win::delete_folder_with_backup_rights(&dir);
+        if failed > 0 || dir.exists() {
+            return Err(
+                tr!("install.purge_failed", path = dir.display(), count = failed)
+                    .into_owned()
+                    .into(),
+            );
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    std::fs::remove_dir_all(&dir)?;
+
+    println!("{}", tr!("install.purge_done", path = dir.display()));
+    Ok(())
 }
 
 /// Put THIS executable in place of the installed one: stop, replace, start.

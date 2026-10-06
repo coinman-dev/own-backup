@@ -300,6 +300,22 @@
     "ru": "Файл заменён.",
     "en": "File replaced."
   },
+  "install.purge_running": {
+    "ru": "Служба «%{name}» работает. Остановите её: удалять её данные из-под работающей службы нельзя.",
+    "en": "Service “%{name}” is running. Stop it first: its data cannot be deleted from under it."
+  },
+  "install.purge_nothing": {
+    "ru": "Удалять нечего: папки %{path} нет.",
+    "en": "Nothing to delete: there is no folder %{path}."
+  },
+  "install.purge_done": {
+    "ru": "Настройки, задания, история и сохранённые ключи удалены: %{path}",
+    "en": "Settings, jobs, history and remembered keys deleted: %{path}"
+  },
+  "install.purge_failed": {
+    "ru": "Папку %{path} не удалось удалить целиком: не поддалось записей — %{count}.",
+    "en": "Folder %{path} could not be deleted completely: entries that would not go — %{count}."
+  },
   "main.info_background": {
     "ru": "Это фоновая служба «%{name}». Обычно ею управляет система (автозапуск при загрузке).",
     "en": "This is the background service “%{name}”. It is normally managed by the system (starts automatically at boot)."
@@ -339,6 +355,10 @@
   "main.cmd_update": {
     "ru": "поставить ЭТОТ файл на место установленного: остановить, заменить, запустить",
     "en": "put THIS file in place of the installed one: stop, replace, start"
+  },
+  "main.cmd_purge": {
+    "ru": "удалить настройки, задания, историю и сохранённые ключи томов (резервные копии не трогает)",
+    "en": "delete the settings, jobs, history and remembered volume keys (backups are not touched)"
   },
   "main.cmd_foreground": {
     "ru": "запустить в консоли для отладки (TCP localhost:50051)",
