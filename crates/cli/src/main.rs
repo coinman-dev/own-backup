@@ -79,7 +79,7 @@ enum Commands {
     /// Serve a qcow2 backup as an iSCSI target for the OS's own initiator
     IscsiServe(commands::iscsi_serve::IscsiServeArgs),
 
-    /// Mount prerequisites: AIM driver (Windows) / NBD & NTFS status (Linux)
+    /// Mount prerequisites: the iSCSI initiator (Windows) / NBD & NTFS status (Linux)
     Driver(commands::driver::DriverArgs),
 
     /// Pick a screen mode fit for the interface (boot media)

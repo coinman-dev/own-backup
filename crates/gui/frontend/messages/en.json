@@ -936,7 +936,7 @@
   "about_log_mirror": "Log mirror",
   "about_licence": "License",
   "about_licence_terms": "The program is free to use for noncommercial purposes — at home, in education, in research; the source code is available to study and modify, and derivative works stay under the same terms.",
-  "about_licence_commercial": "Commercial use requires a separate license — its terms are in <code>COMMERCIAL-LICENSE.md</code> next to the program.",
+  "about_licence_commercial": "Commercial use requires a separate license — its terms are in <code>COMMERCIAL-LICENSE.txt</code> next to the program.",
   "about_licence_osi": "This is not an “open source” license in the OSI sense: the right words are “source-available, free for noncommercial use”. Third-party components and their licenses are listed in",
   "about_trouble": "If something went wrong",
   "about_hint_activity": "The <b>“Activity”</b> section keeps every run — it shows how each one ended and with what error.",

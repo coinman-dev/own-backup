@@ -5,7 +5,7 @@
   // связь со службой и папка данных спрашиваются у службы и у настроек.
   //
   // До 2026-09-18 тут лежала англоязычная заглушка, и она врала в трёх местах:
-  // «MIT / Apache-2.0» вместо PolyForm Noncommercial, «Encryption AES-256-GCM»
+  // называла не ту лицензию, что у программы, «Encryption AES-256-GCM»
   // (тогдашний .obk был удалён; нынешний — другой контейнер) и «gRPC on
   // localhost:50051» (в бою это именованный канал, а порт не слушается
   // вовсе). Ссылки вели на github.com/user/own-backup — такого места нет.
@@ -111,7 +111,7 @@
     <p class="licence">{@html m.about_licence_commercial()}</p>
     <p class="licence muted">
       {m.about_licence_osi()}
-      <code>THIRD-PARTY-NOTICES.md</code>.
+      <code>THIRD-PARTY-NOTICES.txt</code>.
     </p>
   </div>
 
