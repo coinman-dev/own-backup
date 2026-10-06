@@ -174,11 +174,16 @@
     {/if}
     <!-- Quick switch; the three-way choice («Как в Windows» too) is in
          «Параметры → Оформление». -->
+    <!-- A press on the half that is already lit changes nothing — and must
+         not be remembered either. In «Как в Windows» one of the two is lit
+         by the system, and saving that press as a choice quietly turned
+         «Как в Windows» into «Тёмная» for good: the window looked the same
+         and stopped following Windows. -->
     <div class="theme-switch" role="group" aria-label={m.nav_theme_group()}>
       <button
         title={m.nav_theme_light()}
         class:on={effectiveTheme() === 'light'}
-        onclick={() => setTheme('light')}
+        onclick={() => effectiveTheme() !== 'light' && setTheme('light')}
       >
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
           <circle cx="12" cy="12" r="4" />
@@ -188,7 +193,7 @@
       <button
         title={m.nav_theme_dark()}
         class:on={effectiveTheme() === 'dark'}
-        onclick={() => setTheme('dark')}
+        onclick={() => effectiveTheme() !== 'dark' && setTheme('dark')}
       >
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round">
           <path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" />
@@ -288,9 +293,22 @@
     padding: 8px 0 22px;
   }
 
+  /* A white rim, 3px, that follows the mark's own outline. The picture is a
+     cut-out on a transparent ground, so `border` would frame its box and
+     leave the mark floating inside a rectangle. A drop shadow without blur is
+     a shifted copy of the silhouette, and each one is cast by everything
+     before it: one pixel along both axes and both diagonals, there and back,
+     adds up to three on every side and stays nearly round at the corners.
+     Then the mark and its rim together let a tenth of the strip through. */
   .brand img {
     width: 148px;
     height: auto;
+    filter:
+      drop-shadow(1px 0 0 #ffffff) drop-shadow(-1px 0 0 #ffffff)
+      drop-shadow(0 1px 0 #ffffff) drop-shadow(0 -1px 0 #ffffff)
+      drop-shadow(1px 1px 0 #ffffff) drop-shadow(-1px -1px 0 #ffffff)
+      drop-shadow(1px -1px 0 #ffffff) drop-shadow(-1px 1px 0 #ffffff);
+    opacity: 0.9;
   }
 
   /* Header, seven items and the footer take about 440px; the mark needs 160
