@@ -1,0 +1,136 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version tag, for example v0.1.2-beta (must exist unless dry_run is enabled)'
+        required: true
+        type: string
+      dry_run:
+        description: 'Build and test the selected branch without publishing a release'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 120
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      DRY_RUN: ${{ inputs.dry_run || false }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.dry_run && github.ref || inputs.tag || github.ref_name }}
+          fetch-depth: 0
+      - name: Validate version tag
+        shell: pwsh
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') { throw 'Invalid release tag.' }
+          $version = [regex]::Match((Get-Content Cargo.toml -Raw), '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
+          if ($env:RELEASE_TAG -ne "v$version") { throw "Tag $env:RELEASE_TAG and package version $version differ." }
+          if ($env:DRY_RUN -ne 'true') {
+            $tagCommit = git rev-parse "refs/tags/$env:RELEASE_TAG^{commit}"
+            if ($LASTEXITCODE -ne 0 -or $tagCommit -ne (git rev-parse HEAD)) { throw 'Checkout is not the requested tag.' }
+          }
+      - name: Release notes
+        shell: bash
+        run: |
+          mkdir -p target/notes
+          bash scripts/release-notes.sh "${RELEASE_TAG#v}" > target/notes/release-notes.md
+          cat target/notes/release-notes.md
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: crates/gui/frontend/package-lock.json
+      # The window's pages are compiled into own-backup-gui.exe, so they come first.
+      - name: Build frontend
+        working-directory: crates/gui/frontend
+        shell: bash
+        run: |
+          npm ci
+          npm run build
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Build Windows x64
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc -p own-backup-gui -p own-backup-service -p own-backup-cli -p own-backup-shell -j 2
+      - name: Install NSIS
+        shell: pwsh
+        run: |
+          choco install nsis --no-progress --yes
+          if ($LASTEXITCODE -ne 0) { throw 'NSIS installation failed.' }
+          Add-Content -LiteralPath $env:GITHUB_PATH -Value (Join-Path ${env:ProgramFiles(x86)} 'NSIS')
+      # makensis.exe here is the one that reads a script without a byte-order
+      # mark in the ANSI code page; the script refuses to pack such a copy.
+      - name: Package installer
+        shell: bash
+        run: bash scripts/build-installer.sh --skip-build
+      - name: Installer integration check
+        shell: pwsh
+        run: ./scripts/test-installer.ps1 -Installer target/dist/own-backup-install.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: |
+            target/dist/own-backup-install.exe
+            target/dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: target/notes/release-notes.md
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    if: github.event_name != 'workflow_dispatch' || !inputs.dry_run
+    needs: windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-release
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-notes
+          path: notes
+      - name: Publish complete release
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum --check SHA256SUMS.txt)
+          prerelease=false
+          [[ "$RELEASE_TAG" == *-* ]] && prerelease=true
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "${RELEASE_TAG#v}" --notes-file notes/release-notes.md
+          fi
+          gh release upload "$RELEASE_TAG" dist/* --clobber
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease="$prerelease" --notes-file notes/release-notes.md

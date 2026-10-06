@@ -11,7 +11,15 @@ separate license (`COMMERCIAL-LICENSE.md`). NOT OSI "open source" — say
 `aim_install.rs`, `devio.rs`) and replaced by our own **iSCSI target**
 (`iscsi/`, `iscsi_win.rs`, `attach_win.rs`) — an image is served to the
 `MSiSCSI` initiator Windows already has, so nothing third-party is installed or
-distributed. See `THIRD-PARTY-NOTICES.md`.
+distributed. **License files (2026-10-06):** `LICENSE` is the PolyForm text as
+published, word for word; the `Required Notice:` line is in `NOTICE`; both, with
+`COMMERCIAL-LICENSE.md` and `THIRD-PARTY-NOTICES.md`, go into the installer as
+`.txt` — and the notices file describes what IS in the program, so it no longer
+recounts AIM. Until 2026-07-08 `Cargo.toml` said `license = "MIT"`; nothing
+was ever published under it (the repository is private), and nothing in the
+tree says MIT about our own code any more. **Git history still holds both** —
+the MIT line and the AGPL-derived AIM files (deleted 2026-09-17): making the
+repository public publishes them unless the history is rewritten first.
 
 **There is one plan: `.ai/PLAN.md`** (trimmed 2026-09-23 to three lists: done
 and verified → OK; done but unverified → how to check; not done → in detail).
@@ -71,7 +79,31 @@ cargo build          # build all crates (Linux, mocks only)
 cargo test           # run all non-ignored workspace tests (count changes with the code)
 cargo xwin check --target x86_64-pc-windows-msvc -p own-backup-backup ...  # fast Windows check
 cargo xwin build --target x86_64-pc-windows-msvc --release  # Windows cross-compile
+scripts/build-installer.sh   # frontend + four exes + NSIS → target/dist/own-backup-install.exe
 ```
+
+**Installer (2026-10-06):** `packaging/windows/own-backup.nsi`, modelled on Own
+Keyboard Switch's. All-users only and no folder open to `Users` — the service is
+LocalSystem, so a per-user install or a writable `Logs` would be a way to run
+or write as SYSTEM. The script does nothing about the service itself except run
+`own-backup-service.exe /stop`, `/install`, `/start`, `/uninstall`; `/install`
+on an already registered service re-points it at the copy it was run from.
+**The `.nsi` is UTF-8 WITH a BOM and must stay so** (makensis.exe on Windows
+reads a BOM-less script in the ANSI code page — silent mojibake; the build
+script refuses a copy without it). Never show a child process's output in the
+details pane and never parse `sc`/`taskkill` text: both are localized and in the
+OEM code page. Acceptance is `scripts/lab/run-installer.py` (throwaway VM).
+
+**Release (2026-10-06):** bump `[workspace.package] version` (+ `cargo update
+--workspace` for the lock), add the version's section to BOTH `CHANGELOG.md`
+and `CHANGELOG.ru_RU.md` (the release description is cut from the Russian one
+by `scripts/release-notes.sh`), update the version in the badges and download
+links of both READMEs, fast-forward `main`, tag `vX.Y.Z[-suffix]` there and
+push the tag. `.github/workflows/release.yml` builds on `windows-2025`, packs
+the installer with the same `scripts/build-installer.sh --skip-build` (Git
+Bash), installs/updates/removes it on the runner (`scripts/test-installer.ps1`)
+and publishes; a suffix makes it a prerelease. `workflow_dispatch` with
+`dry_run` builds without publishing.
 
 Real Windows behaviour (VSS, VHDX attach, FSCTL, raw device I/O) can only be
 tested on a Windows host — cross-compilation validates compilation only.
