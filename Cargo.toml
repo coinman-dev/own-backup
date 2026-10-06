@@ -25,7 +25,7 @@ glib-macros = { path = "vendor/glib-macros" }
 gtk3-macros = { path = "vendor/gtk3-macros" }
 
 [workspace.package]
-version = "0.1.2-beta"
+version = "0.1.3-beta"
 edition = "2021"
 # Source-available, free for noncommercial use (PolyForm Noncommercial 1.0.0);
 # commercial use requires a separate license — see LICENSE / COMMERCIAL-LICENSE.md.

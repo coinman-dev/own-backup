@@ -2,6 +2,22 @@
 
 # Changelog
 
+## 0.1.3-beta — 2026-10-06
+
+### Changed
+
+- The bottom strips of the menu, of the list and of the action bar are the same
+  height, so their top lines meet in one line across the window. The buttons of
+  the action bar sit as far from the bottom of the window as from that line;
+  there used to be more room below them than above.
+
+### Fixed
+
+- The installer no longer unpacks a copy of the service program into the
+  temporary folder to stop the running service. An antivirus held that copy,
+  `service-control.exe`, for analysis, and the installation stood still. The
+  service is now stopped by the program that is already installed.
+
 ## 0.1.2-beta — 2026-10-06
 
 The first published build. Earlier versions were handed over as separate
