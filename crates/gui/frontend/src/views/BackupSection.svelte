@@ -356,10 +356,11 @@
     line-height: 1.35;
   }
 
-  .add-btn { display: flex; align-items: center; gap: 10px; padding: 15px 18px; background: none; border: none; border-top: 1px solid var(--border); cursor: pointer; font-size: 14px; font-weight: 600; color: var(--accent-text); font-family: var(--font); }
+  /* As tall as the action bar beside it (--footer-height): one line across. */
+  .add-btn { display: flex; align-items: center; gap: 10px; flex-shrink: 0; height: var(--footer-height); padding: 0 18px; background: none; border: none; border-top: 1px solid var(--border); cursor: pointer; font-size: 14px; font-weight: 600; color: var(--accent-text); font-family: var(--font); }
   .add-btn:hover { background: var(--panel2); }
   .dash-col { flex: 1; min-width: 0; overflow: auto; }
   .empty-dash { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; color: var(--text-muted); font-size: 15px; }
-  .add-btn.big { border: 1px solid var(--primary); border-radius: 6px; color: var(--accent-text); padding: 10px 24px; }
+  .add-btn.big { height: auto; border: 1px solid var(--primary); border-radius: 6px; color: var(--accent-text); padding: 10px 24px; }
   .add-btn.big:hover { background: var(--accent-soft); }
 </style>

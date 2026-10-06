@@ -236,6 +236,13 @@ try {
     # and that it has been written; the theme's key must not be beside it.
     WaitFor { StorageHas 'ob.backup.sortKey' } 120 'the window wrote to its storage'
     Check (-not (StorageHas 'ownbackup.theme')) 'a first start saves no theme: a clean profile follows Windows'
+    # For eyes and for a ruler: the window maximized, so its bottom strips are
+    # on the screen whole (at 1024x768 the window is taller than the desktop).
+    # The three of them -- menu, list, action bar -- must draw one line.
+    Focus $gui
+    Say 'HOST shot= keys=meta_l-up'
+    Start-Sleep -Seconds 5
+    HostDo 'gui-maximized'
     # For eyes: six Tabs reach "Settings" in the side strip.
     Focus $gui
     Say 'HOST shot= keys=tab,tab,tab,tab,tab,tab,ret'

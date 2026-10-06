@@ -311,16 +311,19 @@
     opacity: 0.9;
   }
 
-  /* Header, seven items and the footer take about 440px; the mark needs 160
+  /* Header, seven items and the footer take about 470px; the mark needs 160
      more. Below that it goes, rather than the menu. */
-  @media (max-height: 640px) {
+  @media (max-height: 670px) {
     .brand {
       display: none;
     }
   }
 
+  /* As tall as the action bar of a page, so the two lines are one line. */
   .sidebar-footer {
-    padding: 12px 18px 12px 20px;
+    flex-shrink: 0;
+    height: var(--footer-height);
+    padding: 0 18px 0 20px;
     border-top: 1px solid var(--sidebar-line);
     display: flex;
     align-items: center;

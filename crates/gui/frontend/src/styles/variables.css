@@ -147,7 +147,12 @@
   --radius: 6px;
   --font: 'Segoe UI Variable Text', 'Segoe UI', system-ui, -apple-system, sans-serif;
   --font-mono: Consolas, 'Cascadia Mono', monospace;
-  /* Bottom action bar — single source of truth, used by the global .footer */
-  --footer-padding: 20px 34px 34px;
+  /* Bottom strip — one height for all three columns, so their top lines meet:
+     the action bar of a page (global .footer), the foot of the menu and the
+     «add» row under a list. 83px is the line, then 20px, a 42px button and
+     20px again: the bar used to have 20px above its buttons and 34px below,
+     and each column drew its line at a height of its own. */
+  --footer-height: 83px;
+  --footer-padding: 12px 34px;
   --footer-gap: 14px;
 }

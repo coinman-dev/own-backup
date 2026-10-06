@@ -88,16 +88,27 @@ button {
 
 /* Bottom action bar — identical on every page (Dashboard, Restore, Params).
    Full-width 1px separator, right-aligned buttons. Single source of truth;
-   tune via --footer-padding / --footer-gap in variables.css. Each view's
+   tune via --footer-height / --footer-padding / --footer-gap in variables.css.
+   The height is what places the line; the buttons sit in the middle of it,
+   as far from the bottom of the window as from the line. Each view's
    footer must be a full-width child of a flex-column page shell (not inside a
    centered max-width column) so the border spans the whole pane. */
 .footer {
   display: flex;
   align-items: center;
   gap: var(--footer-gap);
+  min-height: var(--footer-height);
   padding: var(--footer-padding);
   border-top: 1px solid var(--border);
   background: var(--content-bg);
+}
+
+/* A button's height followed the font: 41px in Segoe UI, a fraction under it
+   in Segoe UI Variable, and the bar then had 20px above its buttons and 19
+   below. With the line fixed a button is 42px whatever the font, and what is
+   left of the bar divides in two evenly. */
+.footer .btn {
+  line-height: 20px;
 }
 
 input,

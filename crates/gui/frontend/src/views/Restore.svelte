@@ -434,7 +434,8 @@
   .enc-badge { margin-left: 6px; font-size: 11px; }
   .enc-badge svg { vertical-align: -1px; }
   .job-path { font-size: 12px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .add-btn { display: flex; align-items: center; gap: 10px; padding: 15px 18px; background: none; border: none; border-top: 1px solid var(--border); cursor: pointer; font-size: 14px; font-weight: 600; color: var(--accent-text); font-family: var(--font); }
+  /* As tall as the action bar beside it (--footer-height): one line across. */
+  .add-btn { display: flex; align-items: center; gap: 10px; flex-shrink: 0; height: var(--footer-height); padding: 0 18px; background: none; border: none; border-top: 1px solid var(--border); cursor: pointer; font-size: 14px; font-weight: 600; color: var(--accent-text); font-family: var(--font); }
   .add-btn:hover { background: var(--panel2); }
   .remember { display: flex; align-items: flex-start; gap: 9px; margin: 4px 0 16px; font-size: 13px; color: var(--text); cursor: pointer; line-height: 1.45; }
   .remember input { width: auto; margin-top: 2px; flex: 0 0 auto; }
