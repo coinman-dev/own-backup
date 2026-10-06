@@ -7,7 +7,7 @@
 <h1 align="center">Own Backup</h1>
 <p align="center">Резервное копирование дисков и томов Windows блок за блоком — и загрузочный носитель, с которого их можно вернуть.</p>
 
-[![Релиз](https://img.shields.io/badge/release-0.1.2--beta-orange)](https://github.com/coinman-dev/own-backup/releases/tag/v0.1.2-beta)
+[![Релиз](https://img.shields.io/badge/release-0.1.3--beta-orange)](https://github.com/coinman-dev/own-backup/releases/tag/v0.1.3-beta)
 [![Сборка](https://github.com/coinman-dev/own-backup/actions/workflows/release.yml/badge.svg)](https://github.com/coinman-dev/own-backup/actions/workflows/release.yml)
 [![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011%20x64-blue)](#скачать)
 [![Rust](https://img.shields.io/badge/Rust-1.98-orange)](#сборка)
@@ -19,7 +19,7 @@
 файлы, а с загрузочного носителя — и тот диск, с которого загружается сама
 Windows.
 
-> **0.1.2-beta — предварительный релиз для Windows.** Важную копию проверьте
+> **0.1.3-beta — предварительный релиз для Windows.** Важную копию проверьте
 > восстановлением на запасной диск или в виртуальную машину, прежде чем на неё
 > полагаться. Код для Linux нужен для разработки и тестов; версии для Linux
 > пока нет.
@@ -28,7 +28,7 @@ Windows.
 
 | Вариант | Скачать | Как использовать |
 |---|---|---|
-| Установщик | [own-backup-install.exe](https://github.com/coinman-dev/own-backup/releases/download/v0.1.2-beta/own-backup-install.exe) | Ставит программу для всех пользователей компьютера и запускает её службу. Нужны права администратора. |
+| Установщик | [own-backup-install.exe](https://github.com/coinman-dev/own-backup/releases/download/v0.1.3-beta/own-backup-install.exe) | Ставит программу для всех пользователей компьютера и запускает её службу. Нужны права администратора. |
 
 Windows 10/11, x64. Окну программы нужен Microsoft Edge WebView2 Runtime — в
 Windows 11 он есть, а если его нет в Windows 10, установщик об этом скажет.
@@ -146,7 +146,7 @@ scripts/build-installer.sh      # target/dist/own-backup-install.exe
 
 ## Автоматические релизы
 
-Тег версии, например `v0.1.2-beta`, запускает
+Тег версии, например `v0.1.3-beta`, запускает
 [сборку релиза](.github/workflows/release.yml). Тег должен совпадать с версией
 в `Cargo.toml`. GitHub собирает исполняемые файлы для Windows x64, упаковывает
 установщик, ставит и удаляет его на сборочной машине, считает суммы SHA-256 и
