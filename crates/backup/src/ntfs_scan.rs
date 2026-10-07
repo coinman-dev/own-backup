@@ -52,6 +52,12 @@ const ROOT_RECORD: u64 = 5;
 /// исключать нельзя ни при каком совпадении маски: без них тома не будет.
 const FIRST_USER_RECORD: u64 = 16;
 
+/// Сколько файлов «данные остаются в копии» перечислять в debug поимённо.
+/// Остальные попадают только в сводку по причинам. 2026-10-07: 16 400 строк
+/// из 16 890 в логе службы были именно такими (распакованные PyInstaller
+/// `_MEI*` в %TEMP%), 4.5 МБ на один запуск.
+const KEPT_DEBUG_LIMIT: usize = 50;
+
 /// Что нашёл проход по MFT.
 #[derive(Default)]
 pub struct MftScan {
@@ -503,9 +509,12 @@ fn decide(
 
         match reason {
             Some(r) => {
-                // Пофайлово — в debug: таких на живом томе под сотню, и в логе
-                // они забивают всё остальное. Наружу идёт одна сводка ниже.
-                debug!(file = %rel, reason = r.as_str(), "MFT scan: данные остаются в копии");
+                // Пофайлово — в debug, и только первые KEPT_DEBUG_LIMIT: на томе с
+                // забитым %TEMP% таких десятки тысяч, и лог службы раздувается до
+                // мегабайт. Наружу идёт одна сводка ниже.
+                if scan.kept.len() < KEPT_DEBUG_LIMIT {
+                    debug!(file = %rel, reason = r.as_str(), "MFT scan: данные остаются в копии");
+                }
                 scan.kept.push((rel, r));
             }
             None => {
@@ -541,6 +550,13 @@ fn decide(
             reasons = %summary,
             "MFT scan: у части совпавших файлов данные остаются в копии"
         );
+        if scan.kept.len() > KEPT_DEBUG_LIMIT {
+            debug!(
+                listed = KEPT_DEBUG_LIMIT,
+                total = scan.kept.len(),
+                "MFT scan: поимённо перечислены не все такие файлы, остальные только в сводке"
+            );
+        }
     }
 }
 
