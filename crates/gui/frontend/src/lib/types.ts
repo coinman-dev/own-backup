@@ -416,7 +416,14 @@ export interface CategorySizes {
   other: number;
 }
 
+export interface VerificationConfig {
+  schedule: ScheduleConfig;
+  all_versions: boolean;
+}
+
 export interface JobRun {
+  operation?: string;
+  verification?: JobVerifySummary | null;
   id: string;
   job_id: string;
   job_name: string;
@@ -667,6 +674,10 @@ export interface Job {
   /** Image container: vhdx (Windows-native, chains) or qcow2 (zstd-compressed). */
   image_format: 'vhdx' | 'qcow2';
   schedule: ScheduleConfig;
+  verification: VerificationConfig;
+  last_verification?: JobRun | null;
+  invalid_images?: string[];
+  verification_blocked?: boolean;
   scheme: SchemeConfig;
   exclusions: ExclusionsConfig;
   advanced: AdvancedConfig;

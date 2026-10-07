@@ -1912,7 +1912,7 @@ fn backup_volume_inner(
                     &mut checksums,
                     tick,
                 )?
-                .is_some()
+                .map(|outcome| outcome.entries_failed)
             }
             // An encrypted image gets the same pass over a SEALED scratch, and
             // the changed clusters go back by rebuilding the container: it is
@@ -1931,7 +1931,7 @@ fn backup_volume_inner(
                     &mut checksums,
                     tick,
                 )?
-                .is_some()
+                .map(|outcome| outcome.entries_failed)
             }
             ImageFormat::Qcow2 => {
                 // RW-mount over a CoW overlay, delete, fold the touched
@@ -1946,11 +1946,15 @@ fn backup_volume_inner(
                     &mut checksums,
                     tick,
                 )?
-                .is_some()
+                .map(|outcome| outcome.entries_failed)
             }
         };
-        if removed {
+        if let Some(failed) = removed {
             used_blocks = checksums.len() as u64;
+            if failed > 0 {
+                excluded_entries_kept =
+                    Some(tr!("engine_win.entries_partly_kept", count = failed).into_owned());
+            }
         } else {
             excluded_entries_kept = Some(entries_kept_reason());
         }
@@ -3797,7 +3801,7 @@ fn backup_disk_inner(
                     &mut checksums,
                     &mut tick,
                 )?
-                .is_some()
+                .map(|outcome| outcome.entries_failed)
             }
             (None, ImageFormat::Vhdx) => crate::true_removal_win::remove_excluded_from_disk_image(
                 &req.image_path,
@@ -3807,7 +3811,7 @@ fn backup_disk_inner(
                 &mut checksums,
                 &mut tick,
             )?
-            .is_some(),
+            .map(|outcome| outcome.entries_failed),
             (None, ImageFormat::Qcow2) => {
                 crate::qcow2_removal_win::remove_excluded_from_disk_image_qcow2(
                     &req.image_path,
@@ -3818,14 +3822,18 @@ fn backup_disk_inner(
                     &mut checksums,
                     &mut tick,
                 )?
-                .is_some()
+                .map(|outcome| outcome.entries_failed)
             }
         };
         // The pass logged why in detail; until this line that log was the
         // only place it was said, and the run showed a plain success.
-        if !removed {
-            excluded_entries_kept = Some(entries_kept_reason());
-        }
+        excluded_entries_kept = match removed {
+            None => Some(entries_kept_reason()),
+            Some(0) => None,
+            Some(failed) => {
+                Some(tr!("engine_win.entries_partly_kept", count = failed).into_owned())
+            }
+        };
     }
 
     // 7. Build the embedded manifest + sidecar and write it into the meta region.

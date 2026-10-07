@@ -332,9 +332,10 @@ fn next_wake(
     now: chrono::DateTime<chrono::FixedOffset>,
 ) -> Option<chrono::DateTime<chrono::FixedOffset>> {
     jobs.iter()
-        .filter(|j| j.schedule.wake_to_run)
-        .filter_map(|j| {
-            let cron = own_backup_scheduler::schedule_to_cron(&j.schedule)?;
+        .flat_map(|j| [&j.schedule, &j.verification.schedule])
+        .filter(|schedule| schedule.wake_to_run)
+        .filter_map(|schedule| {
+            let cron = own_backup_scheduler::schedule_to_cron(schedule)?;
             let sched = own_backup_scheduler::config_schedule::parse(&cron)?;
             sched.after(&now).next()
         })
@@ -616,5 +617,14 @@ mod tests {
         let mut ev = job("23:30", true);
         ev.schedule.kind = "event".into();
         assert_eq!(next_wake(&[ev], now), None);
+        let mut verify = job("23:30", false);
+        verify.verification.schedule.kind = "weekly".into();
+        verify.verification.schedule.days = vec!["sat".into()];
+        verify.verification.schedule.time = "22:30".into();
+        verify.verification.schedule.wake_to_run = true;
+        assert_eq!(
+            next_wake(&[verify], now),
+            Some(tz.with_ymd_and_hms(2026, 9, 26, 22, 29, 0).unwrap())
+        );
     }
 }

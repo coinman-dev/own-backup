@@ -260,6 +260,9 @@
     copy.id = '';
     copy.name = cloneName(job.name);
     copy.last_run = null;
+    copy.last_verification = null;
+    copy.invalid_images = [];
+    copy.verification_blocked = false;
     copy.created_at = '';
     copy.updated_at = '';
     // The disk's layout is photographed again when the clone is saved.

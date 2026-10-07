@@ -19,6 +19,7 @@ pub mod archive_setup;
 pub mod backup_encryption;
 pub mod busy;
 pub mod restore_exec;
+pub mod verification;
 
 /// Where a destination folder sits relative to a job's sources — re-exported
 /// so callers do not have to reach into the backup crate for one enum.
@@ -504,6 +505,9 @@ pub struct RunImage {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct JobRun {
+    /// backup (also the default for old history) | verify.
+    pub operation: String,
+    pub verification: Option<own_backup_common::engine_dto::JobVerifySummary>,
     pub id: String,
     pub job_id: String,
     pub job_name: String,
@@ -659,12 +663,18 @@ pub struct Job {
     #[serde(default)]
     pub compression_level: Option<i32>,
     pub schedule: ScheduleConfig,
+    pub verification: verification::VerificationConfig,
     pub scheme: SchemeConfig,
     pub exclusions: ExclusionsConfig,
     pub advanced: AdvancedConfig,
     pub created_at: String,
     pub updated_at: String,
     pub last_run: Option<JobRun>,
+    pub last_verification: Option<JobRun>,
+    /// Images refused as incremental parents after a failed integrity check.
+    pub invalid_images: Vec<String>,
+    /// A check could not enumerate/read the job; require a fresh full copy.
+    pub verification_blocked: bool,
 }
 
 impl Default for Job {
@@ -684,12 +694,16 @@ impl Default for Job {
             archive_encryption: None,
             compression_level: None,
             schedule: ScheduleConfig::default(),
+            verification: verification::VerificationConfig::default(),
             scheme: SchemeConfig::default(),
             exclusions: ExclusionsConfig::default(),
             advanced: AdvancedConfig::default(),
             created_at: String::new(),
             updated_at: String::new(),
             last_run: None,
+            last_verification: None,
+            invalid_images: Vec::new(),
+            verification_blocked: false,
         }
     }
 }
@@ -887,6 +901,9 @@ impl JobStore {
                 ));
             }
         }
+        job.verification
+            .validate()
+            .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
         backup_encryption::validate_update(&mut job, previous, authorized_encryption)?;
         let mut next = jobs.clone();
         if job.id.is_empty() {
@@ -894,16 +911,25 @@ impl JobStore {
             job.created_at = now.clone();
             job.updated_at = now;
             job.last_run = None; // only the worker may create run history
+            job.last_verification = None;
+            job.invalid_images.clear();
+            job.verification_blocked = false;
             next.push(job.clone());
         } else if let Some(existing) = next.iter_mut().find(|j| j.id == job.id) {
             job.created_at = existing.created_at.clone();
             job.last_run = existing.last_run.clone(); // preserve run history
+            job.last_verification = existing.last_verification.clone();
+            job.invalid_images = existing.invalid_images.clone();
+            job.verification_blocked = existing.verification_blocked;
             job.updated_at = now;
             *existing = job.clone();
         } else {
             job.created_at = now.clone();
             job.updated_at = now;
             job.last_run = None; // a caller-selected id is still a new job
+            job.last_verification = None;
+            job.invalid_images.clear();
+            job.verification_blocked = false;
             next.push(job.clone());
         }
         write_json(&self.jobs_path, &next)?;
@@ -990,7 +1016,24 @@ impl JobStore {
         {
             let mut jobs = self.jobs.lock().unwrap();
             if let Some(job) = jobs.iter_mut().find(|j| j.id == run.job_id) {
-                job.last_run = Some(run.clone());
+                if run.operation == "verify" {
+                    job.last_verification = Some(run.clone());
+                    if run.status != "cancelled" {
+                        job.verification_blocked =
+                            run.status == "error" && run.verification.is_none();
+                    }
+                    if let Some(summary) = &run.verification {
+                        for image in &summary.images {
+                            job.invalid_images
+                                .retain(|p| !verification::same_image(p, &image.image_path));
+                            if !image.valid {
+                                job.invalid_images.push(image.image_path.clone());
+                            }
+                        }
+                    }
+                } else {
+                    job.last_run = Some(run.clone());
+                }
             }
         }
         {
@@ -1015,7 +1058,7 @@ impl JobStore {
             .lock()
             .unwrap()
             .iter()
-            .find(|r| r.job_id == job_id && r.status == "success")
+            .find(|r| r.job_id == job_id && r.status == "success" && r.operation != "verify")
             .cloned()
     }
 }
@@ -1090,6 +1133,17 @@ pub struct RunQueue {
 struct QueueState {
     pending: VecDeque<String>,
     current: Option<String>,
+    background_operations: usize,
+}
+
+/// Keeps scheduled checks visible to the after-backup power decision while
+/// they wait for, or hold, the shared operation reservation.
+pub struct BackgroundOperation(RunQueue);
+
+impl Drop for BackgroundOperation {
+    fn drop(&mut self) {
+        self.0.state.lock().unwrap().background_operations -= 1;
+    }
 }
 
 impl RunQueue {
@@ -1097,6 +1151,16 @@ impl RunQueue {
         Self {
             state: Arc::new(Mutex::new(QueueState::default())),
         }
+    }
+
+    pub fn register_background_operation(&self) -> BackgroundOperation {
+        self.state.lock().unwrap().background_operations += 1;
+        BackgroundOperation(self.clone())
+    }
+
+    pub fn is_idle(&self) -> bool {
+        let q = self.state.lock().unwrap();
+        q.current.is_none() && q.pending.is_empty() && q.background_operations == 0
     }
 
     pub fn snapshot(&self) -> QueueSnapshot {
@@ -1517,18 +1581,17 @@ fn after_backup(action: &str, job_name: &str, queue: &RunQueue) {
         info!(job = %job_name, action, "after backup: nothing to do on the boot medium");
         return;
     }
-    let idle = |q: &RunQueue| {
-        let snap = q.snapshot();
-        snap.current.is_none() && snap.pending.is_empty()
-    };
-    if !idle(queue) {
-        info!(job = %job_name, action, "after backup: other copies are queued — skipped");
+    if !queue.is_idle() {
+        info!(job = %job_name, action, "after backup: other work is queued — skipped");
         return;
     }
     #[cfg(target_os = "windows")]
     {
         let (action, job_name, queue) = (action.to_string(), job_name.to_string(), queue.clone());
         tokio::spawn(async move {
+            if !queue.is_idle() {
+                return;
+            }
             let result = if action == "shutdown" {
                 own_backup_backup::power_win::shutdown_in(
                     SHUTDOWN_GRACE_SECS,
@@ -1536,8 +1599,8 @@ fn after_backup(action: &str, job_name: &str, queue: &RunQueue) {
                 )
             } else {
                 tokio::time::sleep(std::time::Duration::from_secs(SLEEP_AFTER_SECS)).await;
-                if !idle(&queue) {
-                    info!(job = %job_name, "after backup: a copy was queued meanwhile — not sleeping");
+                if !queue.is_idle() {
+                    info!(job = %job_name, "after backup: work was queued meanwhile — not sleeping");
                     return;
                 }
                 own_backup_backup::power_win::sleep_now()
@@ -2084,7 +2147,7 @@ pub fn plan_run_for_volume_at(
     // both stop the rollover firing and make the version number go backwards.
     let child_count = chain.increments_ever();
 
-    if should_start_new_chain(job, &chain, now) {
+    if verification::chain_is_invalid(job, &chain) || should_start_new_chain(job, &chain, now) {
         return RunPlan::full();
     }
 
@@ -2167,7 +2230,7 @@ pub fn plan_run_for_disk_at(
     // both stop the rollover firing and make the version number go backwards.
     let child_count = chain.increments_ever();
 
-    if should_start_new_chain(job, &chain, now) {
+    if verification::chain_is_invalid(job, &chain) || should_start_new_chain(job, &chain, now) {
         return RunPlan::full();
     }
 
@@ -4614,7 +4677,7 @@ mod tests {
 
     /// Write a real (parseable) sidecar + dummy image so `list_job_chains`
     /// discovers it. `name` must follow `<n>_<letter>_<tag>_<stamp>.<ext>`.
-    fn put_real_image(
+    pub(super) fn put_real_image(
         dir: &Path,
         name: &str,
         role: own_backup_backup::sidecar::ChainRole,

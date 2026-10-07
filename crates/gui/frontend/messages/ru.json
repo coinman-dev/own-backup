@@ -1115,5 +1115,16 @@
   "pwf_caps_unknown": "Caps Lock: станет известно после первого нажатия клавиши",
   "pwf_hide": "Скрыть пароль",
   "pwf_show": "Показать пароль",
-  "info_default_title": "Сведения"
+  "info_default_title": "Сведения",
+  "wiz_verify_schedule": "Проверять копии по расписанию",
+  "wiz_verify_all_versions": "Проверять все версии",
+  "wiz_verify_schedule_hint": "Без галочки проверяются последние версии каждого источника вместе с их родителями. Результат появится в «Активности».",
+  "act_verify_running": "Проверка копий по расписанию",
+  "act_verify_done": "Копии проверены",
+  "act_verify_cancelled": "Проверка копий отменена",
+  "act_verify_failed": "Проверка копий не пройдена",
+  "act_verify_blocks": "Проверено блоков",
+  "act_verify_images": "Проверено копий: {count}",
+  "act_verify_valid": "Исправна",
+  "act_verify_corrupt": "Повреждённых блоков: {count}"
 }

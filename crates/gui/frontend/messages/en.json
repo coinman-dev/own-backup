@@ -1083,5 +1083,16 @@
   "pwf_caps_unknown": "Caps Lock: known after the first key press",
   "pwf_hide": "Hide password",
   "pwf_show": "Show password",
-  "info_default_title": "Information"
+  "info_default_title": "Information",
+  "wiz_verify_schedule": "Verify copies on a schedule",
+  "wiz_verify_all_versions": "Verify all versions",
+  "wiz_verify_schedule_hint": "When unchecked, verifies the latest version of each source together with its parents. Results appear in Activity.",
+  "act_verify_running": "Scheduled verification in progress",
+  "act_verify_done": "Copies verified",
+  "act_verify_cancelled": "Verification cancelled",
+  "act_verify_failed": "Verification failed",
+  "act_verify_blocks": "Blocks checked",
+  "act_verify_images": "Copies checked: {count}",
+  "act_verify_valid": "Valid",
+  "act_verify_corrupt": "Damaged blocks: {count}"
 }

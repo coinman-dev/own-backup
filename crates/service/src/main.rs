@@ -5,6 +5,7 @@ rust_i18n::i18n!("locales", fallback = "ru");
 mod app_state;
 mod grpc_server;
 mod install;
+mod scheduled_verification;
 mod scheduler;
 mod shutdown;
 mod single_instance;
@@ -615,6 +616,13 @@ pub async fn run_main_loop(
     #[cfg(not(target_os = "windows"))]
     let passwords = std::sync::Arc::new(own_backup_core::PasswordStore::new(config.db_path()));
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let verification_worker = scheduled_verification::spawn(
+        store.clone(),
+        busy.clone(),
+        queue.clone(),
+        sink.clone(),
+        stop_rx.clone(),
+    );
     let worker = tokio::spawn(own_backup_core::run_queue_worker(
         sink,
         store.clone(),
@@ -677,6 +685,7 @@ pub async fn run_main_loop(
             cancel_on_exit,
             busy_on_exit,
             worker,
+            verification_worker,
             shutdown_watcher,
         )
         .await?;
@@ -690,6 +699,7 @@ pub async fn run_main_loop(
             cancel_on_exit,
             busy_on_exit,
             worker,
+            verification_worker,
             shutdown_watcher,
         )
         .await?;
@@ -737,6 +747,7 @@ pub async fn run_main_loop(
         cancel_on_exit,
         busy_on_exit,
         worker,
+        verification_worker,
         shutdown_watcher,
     )
     .await?;
@@ -752,6 +763,7 @@ async fn stop_worker(
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     busy: std::sync::Arc<own_backup_core::busy::Busy>,
     worker: tokio::task::JoinHandle<()>,
+    verification_worker: tokio::task::JoinHandle<()>,
     watcher: tokio::task::JoinHandle<()>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     stop.send_replace(true);
@@ -762,6 +774,7 @@ async fn stop_worker(
     // returning. Aborting it here would release its busy guard while the
     // blocking disk operation could still be writing.
     worker.await?;
+    verification_worker.await?;
     busy.wait_until_idle().await;
     Ok(())
 }
