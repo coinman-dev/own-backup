@@ -43,6 +43,8 @@ pub mod fold;
 pub mod header;
 pub mod index;
 pub mod io;
+#[cfg(all(test, windows))]
+mod io_faults;
 pub mod listing;
 pub mod metadata;
 #[cfg(test)]
