@@ -171,6 +171,13 @@ fn list_chains_impl(folder: &Path, job_id: Option<&str>, strict: bool) -> Result
             Err(_) => continue,
         };
         let path = dir_entry.path();
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(crate::seal::obk::new_image::is_pending_name)
+        {
+            continue;
+        }
         let ext = match path.extension().and_then(|e| e.to_str()) {
             Some(e) => e.to_lowercase(),
             None => continue,

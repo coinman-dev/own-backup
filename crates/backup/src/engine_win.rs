@@ -62,6 +62,7 @@ fn no_patterns() -> String {
 }
 
 /// Parameters for a volume backup.
+#[derive(Clone)]
 pub struct VolumeBackupRequest {
     /// Source volume: `C:`, `\\.\C:` or a VSS snapshot device path.
     pub source: String,
@@ -413,7 +414,24 @@ pub fn backup_volume(
     // paths (System Volume Information, protected app data). Best-effort.
     crate::privileges_win::enable_backup_privileges();
 
-    let result = backup_volume_inner(req, progress);
+    if let Some(keys) = &req.encryption {
+        let pending = crate::seal::obk::new_image::NewImage::create(&req.image_path, keys)?;
+        let staged = VolumeBackupRequest {
+            image_path: pending.path().to_path_buf(),
+            ..req.clone()
+        };
+        let mut summary = backup_volume_inner(
+            &staged,
+            Some(pending.writer_file()?),
+            &req.image_path,
+            progress,
+        )?;
+        pending.publish()?;
+        summary.image_path = req.image_path.clone();
+        summary.sidecar_path = sidecar_path_for(&req.image_path);
+        return Ok(summary);
+    }
+    let result = backup_volume_inner(req, None, &req.image_path, progress);
     if result.is_err() {
         // Best-effort cleanup of a partial image.
         let _ = std::fs::remove_file(&req.image_path);
@@ -687,6 +705,8 @@ fn unlock_source_with_windows(
 
 fn backup_volume_inner(
     req: &VolumeBackupRequest,
+    owned_file: Option<std::fs::File>,
+    published_path: &Path,
     mut progress: impl FnMut(&BackupProgress) -> Result<()>,
 ) -> Result<VolumeBackupSummary> {
     let started = Instant::now();
@@ -1486,11 +1506,20 @@ fn backup_volume_inner(
                 level: crate::qcow2::zstd_level_or_default(req.zstd_level),
             },
         };
-        let writer = Box::new(crate::seal::obk::ObkStagedWriter::create(
-            &req.image_path,
-            &chain.key,
-            keys.writer_options(&chain, plan),
-        )?);
+        let writer = Box::new(match owned_file {
+            Some(file) => {
+                crate::seal::obk::ObkStagedWriter::new(crate::seal::obk::ObkWriter::new(
+                    std::io::BufWriter::new(file),
+                    &chain.key,
+                    keys.writer_options(&chain, plan),
+                )?)?
+            }
+            None => crate::seal::obk::ObkStagedWriter::create(
+                &req.image_path,
+                &chain.key,
+                keys.writer_options(&chain, plan),
+            )?,
+        });
         (ImageTarget::Obk { writer }, data_offset)
     } else {
         match req.image_format {
@@ -1732,8 +1761,7 @@ fn backup_volume_inner(
         preflight_report: None,
         volume_encryption: None,
     };
-    let temp_image_file_name = req
-        .image_path
+    let temp_image_file_name = published_path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
@@ -1964,8 +1992,7 @@ fn backup_volume_inner(
     // Child sidecars carry the FULL state checksums (every used block, written
     // or inherited), so verify/restore/mount treat the leaf exactly like a
     // full image — the VHDX chain resolves inherited blocks.
-    let image_file_name = req
-        .image_path
+    let image_file_name = published_path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
@@ -2158,6 +2185,7 @@ fn backup_volume_inner(
 // ===========================================================================
 
 /// One partition to include in a whole-disk backup.
+#[derive(Clone)]
 pub struct DiskPartitionBackup {
     /// Source volume device (`\\.\Volume{…}`, a drive letter, or `part:…`).
     pub device: String,
@@ -2168,6 +2196,7 @@ pub struct DiskPartitionBackup {
 }
 
 /// Parameters for a whole-disk (bootable) backup into a single image.
+#[derive(Clone)]
 pub struct DiskBackupRequest {
     pub disk_number: u32,
     pub disk_model: String,
@@ -3008,7 +3037,23 @@ pub fn backup_disk(
         }
     }
     crate::privileges_win::enable_backup_privileges();
-    let result = backup_disk_inner(req, progress);
+    if let Some(keys) = &req.encryption {
+        let pending = crate::seal::obk::new_image::NewImage::create(&req.image_path, keys)?;
+        let staged = DiskBackupRequest {
+            image_path: pending.path().to_path_buf(),
+            ..req.clone()
+        };
+        let mut summary = backup_disk_inner(
+            &staged,
+            Some(pending.writer_file()?),
+            &req.image_path,
+            progress,
+        )?;
+        pending.publish()?;
+        summary.image_path = req.image_path.clone();
+        return Ok(summary);
+    }
+    let result = backup_disk_inner(req, None, &req.image_path, progress);
     if result.is_err() {
         let _ = std::fs::remove_file(&req.image_path);
     }
@@ -3017,6 +3062,8 @@ pub fn backup_disk(
 
 fn backup_disk_inner(
     req: &DiskBackupRequest,
+    owned_file: Option<std::fs::File>,
+    published_path: &Path,
     mut progress: impl FnMut(&BackupProgress) -> Result<()>,
 ) -> Result<DiskBackupSummary> {
     let started = Instant::now();
@@ -3559,6 +3606,7 @@ fn backup_disk_inner(
                 disk_number: req.disk_number,
                 zstd_level: crate::qcow2::zstd_level_or_default(req.zstd_level),
             },
+            owned_file,
         )?,
         Some((pp, sc)) => {
             // Child inherits the parent's GPT through the chain — overwrite the
@@ -3602,6 +3650,7 @@ fn backup_disk_inner(
                     disk_number: req.disk_number,
                     zstd_level: crate::qcow2::zstd_level_or_default(req.zstd_level),
                 },
+                owned_file,
             )?
         }
     };
@@ -3837,8 +3886,7 @@ fn backup_disk_inner(
     }
 
     // 7. Build the embedded manifest + sidecar and write it into the meta region.
-    let image_file_name = req
-        .image_path
+    let image_file_name = published_path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
@@ -4083,9 +4131,17 @@ fn create_disk_child_target(
     format: ImageFormat,
     encryption: Option<&crate::seal::context::ArchiveKeys>,
     plan: &DiskImagePlan,
+    owned_file: Option<std::fs::File>,
 ) -> Result<(ImageTarget, u32)> {
     if let Some(keys) = encryption {
-        return create_disk_obk_target(image_path, Some(parent_path), image_size, keys, plan);
+        return create_disk_obk_target(
+            image_path,
+            Some(parent_path),
+            image_size,
+            keys,
+            plan,
+            owned_file,
+        );
     }
     let sector_size = 512u32;
     match format {
@@ -4163,6 +4219,7 @@ fn create_disk_obk_target(
     disk_size: u64,
     keys: &crate::seal::context::ArchiveKeys,
     plan: &DiskImagePlan,
+    owned_file: Option<std::fs::File>,
 ) -> Result<(ImageTarget, u32)> {
     let chain = match parent_path {
         // The chain key travels inside the parent image, so continuing a chain
@@ -4185,11 +4242,18 @@ fn create_disk_obk_target(
             level: plan.zstd_level,
         },
     };
-    let writer = Box::new(crate::seal::obk::ObkStagedWriter::create(
-        image_path,
-        &chain.key,
-        keys.writer_options(&chain, image_plan),
-    )?);
+    let writer = Box::new(match owned_file {
+        Some(file) => crate::seal::obk::ObkStagedWriter::new(crate::seal::obk::ObkWriter::new(
+            std::io::BufWriter::new(file),
+            &chain.key,
+            keys.writer_options(&chain, image_plan),
+        )?)?,
+        None => crate::seal::obk::ObkStagedWriter::create(
+            image_path,
+            &chain.key,
+            keys.writer_options(&chain, image_plan),
+        )?,
+    });
     Ok((ImageTarget::Obk { writer }, 512))
 }
 
@@ -4199,9 +4263,10 @@ fn create_disk_image_target(
     format: ImageFormat,
     encryption: Option<&crate::seal::context::ArchiveKeys>,
     plan: &DiskImagePlan,
+    owned_file: Option<std::fs::File>,
 ) -> Result<(ImageTarget, u32)> {
     if let Some(keys) = encryption {
-        return create_disk_obk_target(image_path, None, disk_size, keys, plan);
+        return create_disk_obk_target(image_path, None, disk_size, keys, plan, owned_file);
     }
     let sector_size = 512u32;
     match format {

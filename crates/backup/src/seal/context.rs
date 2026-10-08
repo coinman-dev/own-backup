@@ -63,6 +63,17 @@ pub struct ImagePlan<'a> {
 }
 
 impl ArchiveKeys {
+    /// Stable, domain-separated ownership key for unfinished NEW images.
+    /// Chain keys cannot reclaim a full image interrupted before its first
+    /// header: that new chain key has not been published anywhere yet.
+    pub(crate) fn new_image_owner_key(&self) -> ChainKey {
+        let mut bytes = zeroize::Zeroizing::new([0u8; 32]);
+        hkdf::Hkdf::<sha2::Sha256>::new(None, self.private.storage_bytes())
+            .expand(b"own-backup/v2/new-image-owner", &mut bytes[..])
+            .expect("fixed-size ownership key");
+        ChainKey::from_bytes(*bytes)
+    }
+
     /// The scheduled path: the service already holds the private key.
     pub fn from_private(key_file: SealedPrivateKey, private: JobPrivateKey) -> Result<Self> {
         key_file.validate()?;

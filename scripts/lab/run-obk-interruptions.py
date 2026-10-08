@@ -29,16 +29,21 @@ def module(name):
 def main():
     global WORK, ACTIVE, EVIDENCE
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--suite', choices=['interruptions', 'installer-live', 'installer-cross-account'], default='interruptions')
+    parser.add_argument('--suite', choices=['interruptions', 'installer-live', 'installer-cross-account', 'service-kill', 'publication-check'], default='interruptions')
+    parser.add_argument('--fixed-service', action='store_true', help='Deploy the current service only inside the service-kill VM')
     args = parser.parse_args()
     live = args.suite == 'installer-live'
     cross = args.suite == 'installer-cross-account'
-    if live or cross:
+    kill = args.suite == 'service-kill'
+    publication = args.suite == 'publication-check'
+    if args.fixed_service and not kill:
+        raise SystemExit('--fixed-service belongs only to the service-kill fixture')
+    if live or cross or kill or publication:
         WORK = REPO / f'tmp/{args.suite}-2026-10-08'
         ACTIVE = WORK / 'active'
         EVIDENCE = WORK / 'evidence'
-    pass_token = 'INSTALLER-CROSS-ACCOUNT-PASS' if cross else 'INSTALLER-LIVE-PASS' if live else 'OBK-FAULT-PASS'
-    fail_token = 'INSTALLER-CROSS-ACCOUNT-FAIL' if cross else 'INSTALLER-LIVE-FAIL' if live else 'OBK-FAULT-FAIL'
+    pass_token = 'PUBLICATION-CHECK-PASS' if publication else 'SERVICE-KILL-PASS' if kill else 'INSTALLER-CROSS-ACCOUNT-PASS' if cross else 'INSTALLER-LIVE-PASS' if live else 'OBK-FAULT-PASS'
+    fail_token = 'PUBLICATION-CHECK-FAIL' if publication else 'SERVICE-KILL-FAIL' if kill else 'INSTALLER-CROSS-ACCOUNT-FAIL' if cross else 'INSTALLER-LIVE-FAIL' if live else 'OBK-FAULT-FAIL'
     if ACTIVE.exists():
         raise SystemExit('preserve the previous interruption attempt before rerun')
     if subprocess.run(['pgrep', '-f', '^qemu-system-|^qemu-storage-daemon'], capture_output=True).returncode == 0:
@@ -56,7 +61,7 @@ def main():
                            ('work', WORK), ('active', ACTIVE), ('target', REPO / 'target')]:
             row[name] = int(subprocess.check_output(['du', '-s', '-B1', str(path)]).split()[0])
         row['other_work'] = 0
-        for name in ['obk-interruptions', 'installer-live', 'installer-cross-account']:
+        for name in ['obk-interruptions', 'installer-live', 'installer-cross-account', 'service-kill', 'publication-check']:
             other = REPO / f'tmp/{name}-2026-10-08'
             if other != WORK and other.exists():
                 row['other_work'] += int(subprocess.check_output(['du', '-s', '-B1', str(other)]).split()[0])
@@ -87,16 +92,34 @@ def main():
             (REPO / 'scripts/lab/acceptance-installer-cross-account-stage.ps1', 'lab-stage2.ps1'),
             (REPO / 'scripts/lab/acceptance-installer-cross-account-user.ps1', 'acceptance-installer-cross-account-user.ps1'),
             (REPO / 'scripts/lab/acceptance-common.ps1', 'acceptance-common.ps1')]
+    if kill:
+        files = [
+            (REPO / 'scripts/lab/acceptance-service-kill-stage.ps1', 'lab-stage2.ps1'),
+            (REPO / 'scripts/lab/acceptance-service-kill-user.ps1', 'acceptance-service-kill-user.ps1'),
+            (REPO / 'scripts/lab/acceptance-common.ps1', 'acceptance-common.ps1'),
+            (REPO / 'scripts/lab/autounattend.xml', 'autounattend.xml'),
+            (REPO / 'target/x86_64-pc-windows-msvc/release/examples/audit_autonomous.exe', 'audit_autonomous.exe')]
+        if args.fixed_service:
+            files.append((REPO / 'target/x86_64-pc-windows-msvc/release/own-backup-service.exe', 'own-backup-service-fixed.exe'))
+    if publication:
+        files = [
+            (REPO / 'scripts/lab/acceptance-publication-check-stage.ps1', 'lab-stage2.ps1'),
+            (REPO / 'scripts/lab/acceptance-publication-check-user.ps1', 'acceptance-publication-check-user.ps1'),
+            (REPO / 'scripts/lab/acceptance-common.ps1', 'acceptance-common.ps1'),
+            (REPO / 'scripts/lab/autounattend.xml', 'autounattend.xml'),
+            (REPO / 'target/x86_64-pc-windows-msvc/release/examples/audit_autonomous.exe', 'audit_autonomous.exe')]
     for source, name in files:
         shutil.copyfile(source, payload / name)
     (EVIDENCE / 'payload-hashes.json').write_text(json.dumps({
         file.name: hashlib.sha256(file.read_bytes()).hexdigest() for file in payload.iterdir()}, indent=2) + '\n')
-    source = REPO / ('tmp/installer-live-2026-10-08/active' if cross else 'tmp/unattended-acceptance-2026-10-07/active')
-    if cross and not json.loads((source.parent / 'evidence/result.json').read_text())['pass']:
+    source = REPO / ('tmp/installer-live-2026-10-08/active' if cross or kill else 'tmp/unattended-acceptance-2026-10-07/active')
+    if publication:
+        source = REPO / 'tmp/service-kill-2026-10-08/active'
+    if (cross or kill or publication) and not json.loads((source.parent / 'evidence/result.json').read_text())['pass']:
         raise SystemExit('cross-account fixture requires an accepted live upgrade')
     subprocess.run(['qemu-img', 'create', '-q', '-f', 'qcow2', '-F', 'qcow2', '-b',
                     str(source / 'windows.qcow2'), str(ACTIVE / 'windows.qcow2')], check=True)
-    if cross:
+    if cross or kill or publication:
         subprocess.run(['qemu-img', 'create', '-q', '-f', 'qcow2', '-F', 'qcow2', '-b',
                         str(source / 'small.qcow2'), str(ACTIVE / 'small.qcow2')], check=True)
     else:
@@ -146,7 +169,8 @@ def main():
                         raise RuntimeError(line)
                 offset = len(lines)
                 if process.poll() is not None:
-                    if live and not rebooted and 'INSTALLER-LIVE-REBOOT' in (EVIDENCE / 'serial.log').read_text(errors='replace'):
+                    reboot_token = 'PUBLICATION-CHECK-REBOOT' if publication else 'SERVICE-KILL-REBOOT' if kill else 'INSTALLER-LIVE-REBOOT'
+                    if (live or kill or publication) and not rebooted and reboot_token in (EVIDENCE / 'serial.log').read_text(errors='replace'):
                         rebooted = True
                         process = subprocess.Popen(cmd, stdout=log, stderr=log)
                         continue
@@ -166,10 +190,10 @@ def main():
                     process.wait(timeout=15)
             budget()
     content = (EVIDENCE / 'serial.log').read_text(errors='replace')
-    native_file = EVIDENCE / ('reports/installer-cross-account-result.json' if cross else 'reports/installer-live-result.json' if live else 'native-result.json')
+    native_file = EVIDENCE / ('reports/publication-check-result.json' if publication else 'reports/service-kill-result.json' if kill else 'reports/installer-cross-account-result.json' if cross else 'reports/installer-live-result.json' if live else 'native-result.json')
     native = json.loads(native_file.read_text()) if native_file.exists() else {}
     passed = (pass_token in content and fail_token not in content and native.get('pass')
-              and (live or cross or len(native.get('cases', [])) == 6) and failure is None and process.returncode == 0)
+              and (live or cross or kill or publication or len(native.get('cases', [])) == 6) and failure is None and process.returncode == 0)
     (EVIDENCE / 'result.json').write_text(json.dumps({'pass': bool(passed), 'error': str(failure) if failure else None,
                                                      'qemu_exit': process.returncode}, indent=2) + '\n')
     for name in ['windows', 'small']:
@@ -177,7 +201,7 @@ def main():
             subprocess.run(['qemu-img', 'check', str(ACTIVE / f'{name}.qcow2')], check=True, stdout=log, stderr=log)
     if not passed:
         raise SystemExit('interruption acceptance failed; preserve evidence')
-    print('INSTALLER-CROSS-ACCOUNT-STAND-PASS' if cross else 'INSTALLER-LIVE-STAND-PASS' if live else 'OBK-INTERRUPTIONS-STAND-PASS', flush=True)
+    print('PUBLICATION-CHECK-STAND-PASS' if publication else 'SERVICE-KILL-STAND-PASS' if kill else 'INSTALLER-CROSS-ACCOUNT-STAND-PASS' if cross else 'INSTALLER-LIVE-STAND-PASS' if live else 'OBK-INTERRUPTIONS-STAND-PASS', flush=True)
 
 
 if __name__ == '__main__':

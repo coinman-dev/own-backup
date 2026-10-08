@@ -204,6 +204,15 @@ async fn execute(client: &mut BackupClient, v: &Value) -> Result<Value, String> 
             .restore_volume(field(v, "image")?, field(v, "target")?, &secret(v)?)
             .await
             .map(|s| serde_json::to_value(s).unwrap()),
+        "verify-job" => client
+            .verify_job(
+                field(v, "id")?,
+                v["all"].as_bool().unwrap_or(true),
+                &secret(v)?,
+            )
+            .await
+            .map(|summary| serde_json::to_value(summary).unwrap())
+            .map_err(|error| error.to_string()),
         "versions" => client
             .list_job_versions(field(v, "id")?)
             .await

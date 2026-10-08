@@ -49,6 +49,7 @@ pub mod listing;
 pub mod metadata;
 #[cfg(test)]
 mod metadata_faults;
+pub mod new_image;
 #[cfg(test)]
 mod publication_faults;
 pub mod reader;
