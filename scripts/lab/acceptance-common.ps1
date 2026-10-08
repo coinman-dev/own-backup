@@ -23,11 +23,19 @@ function Report([string]$name,$value) {
 function Rpc([string]$name,$request) {
     $path = Join-Path $work "$name.request.json"
     JsonFile $path $request
-    $output = (& 'C:\Lab\audit_autonomous.exe' $path 2>&1 | Out-String)
-    if ($LASTEXITCODE -ne 0) {
+    # Keep native stderr from becoming a PowerShell terminating error before
+    # the helper's sanitized JSON can be recorded.
+    $stdout=Join-Path $work "$name.helper.out"
+    $stderr=Join-Path $work "$name.helper.err"
+    $process=Start-Process 'C:\Lab\audit_autonomous.exe' -ArgumentList ('"'+$path+'"') -RedirectStandardOutput $stdout -RedirectStandardError $stderr -NoNewWindow -PassThru
+    $null=$process.Handle
+    if(-not $process.WaitForExit(960000)){$process.Kill();throw "RPC helper timeout: $name"}
+    $process.Refresh()
+    $output=[IO.File]::ReadAllText($stdout)+[IO.File]::ReadAllText($stderr)
+    if ($process.ExitCode -ne 0) {
         $errorFile = [IO.Path]::ChangeExtension($path,'result.json')
         if (Test-Path $errorFile) { Report "$name-error" (Get-Content $errorFile -Raw -Encoding UTF8 | ConvertFrom-Json) }
-        throw "RPC helper failed: $name exit=$LASTEXITCODE output=$output"
+        throw "RPC helper failed: $name exit=$($process.ExitCode) output=$output"
     }
     $result = Get-Content ([IO.Path]::ChangeExtension($path,'result.json')) -Raw -Encoding UTF8 | ConvertFrom-Json
     Report $name $result

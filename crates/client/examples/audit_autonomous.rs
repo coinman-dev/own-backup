@@ -117,6 +117,31 @@ async fn execute(client: &mut BackupClient, v: &Value) -> Result<Value, String> 
             .await
             .map_err(|_| "backup timeout".to_string())?
         }
+        "start-run-at-progress" => {
+            let id = field(v, "id")?;
+            let mut listener = client.clone();
+            let events = listener.stream_events().await?;
+            tokio::pin!(events);
+            client.run_job(id).await?;
+            tokio::time::timeout(Duration::from_secs(180), async {
+                while let Some(event) = events.next().await {
+                    if let ClientEvent::Progress(progress) = event {
+                        if progress.job_id == id
+                            && progress.blocks_done > 0
+                            && progress.blocks_done < progress.blocks_total
+                            && progress.phase != "scheduled-verify"
+                        {
+                            return Ok(json!({"blocks_done":progress.blocks_done,
+                                "blocks_total":progress.blocks_total,"phase":progress.phase,
+                                "percent":progress.percent}));
+                        }
+                    }
+                }
+                Err("stream closed before an active copy was observed".to_string())
+            })
+            .await
+            .map_err(|_| "no active copy progress".to_string())?
+        }
         "cancel-scheduled" => {
             let id = field(v, "id")?;
             let before = job(client, id).await?.last_verification.map(|r| r.id);
