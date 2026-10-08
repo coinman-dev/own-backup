@@ -137,6 +137,27 @@ pub async fn cancel_archive_encryption(
         .await
 }
 
+#[tauri::command]
+pub async fn reauthorize_archive(
+    state: State<'_, GuiState>,
+    id: String,
+    password: Option<String>,
+    recovery_key: Option<String>,
+) -> Result<Job, String> {
+    state
+        .link
+        .client()
+        .await?
+        .reauthorize_archive(
+            &id,
+            &own_backup_client::ArchiveSecret {
+                password,
+                recovery_key,
+            },
+        )
+        .await
+}
+
 /// Unlock an encrypted (LUKS/BitLocker) source `volume` with `password`. The
 /// unlock + inner-filesystem probe opens the raw disk, so it runs in the
 /// privileged service (LocalSystem/root) — never in the unelevated GUI, which

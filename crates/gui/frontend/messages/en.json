@@ -1,4 +1,10 @@
 {
+  "bsm_reauthorize_done_title": "Authorization restored",
+  "bsm_reauthorize_done_message": "This job can run automatically again. The earlier failure remains in history; the next successful backup will update its status.",
+  "bsm_reauthorize": "Authorize automatic backups again…",
+  "aunl_authorize_title": "Authorize automatic backups again",
+  "aunl_authorize_confirm": "Authorize",
+  "aunl_authorize_what": "Enter the archive password or recovery key for <strong>{name}</strong>. The program will be able to run it automatically again. Existing backups and their recovery key are preserved.",
   "$schema": "https://inlang.com/schema/inlang-message-format",
   "common_cancel": "Cancel",
   "common_save": "Save",

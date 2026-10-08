@@ -10,6 +10,7 @@
   import JobVersionsModal from '../components/JobVersionsModal.svelte';
   import JobExportModal from '../components/JobExportModal.svelte';
   import JobMountModal from '../components/JobMountModal.svelte';
+  import ArchiveReauthorizeModal from '../components/ArchiveReauthorizeModal.svelte';
   import type { Job } from '../lib/types';
   import { m } from '../lib/paraglide/messages';
   import { intlLocale } from '../lib/i18n.svelte';
@@ -199,7 +200,7 @@
   // Which window of the menu is open, and for which job.
   let act = $state<
     | { kind: 'verify'; job: Job; all: boolean }
-    | { kind: 'clean' | 'mount' | 'export'; job: Job }
+    | { kind: 'clean' | 'mount' | 'export' | 'authorize'; job: Job }
     | null
   >(null);
   /** What a menu item that has no window of its own could not do. */
@@ -445,6 +446,9 @@
     onkeydown={menuKey}
   >
     <button role="menuitem" onclick={() => pick(askRename)}>{m.bsm_rename()}</button>
+    {#if job.archive_encryption && !media.active}
+      <button role="menuitem" disabled={busyWith(job)} onclick={() => pick((j) => (act = { kind: 'authorize', job: j }))}>{m.bsm_reauthorize()}</button>
+    {/if}
     <div class="sep"></div>
     <button role="menuitem" disabled={busyWith(job)} onclick={() => pick((j) => (act = { kind: 'verify', job: j, all: false }))}>{m.bsm_verify_latest()}</button>
     <button role="menuitem" disabled={busyWith(job)} onclick={() => pick((j) => (act = { kind: 'verify', job: j, all: true }))}>{m.bsm_verify_all()}</button>
@@ -470,6 +474,8 @@
   <JobMountModal job={act.job} onClose={() => (act = null)} />
 {:else if act?.kind === 'export'}
   <JobExportModal job={act.job} onClose={() => (act = null)} />
+{:else if act?.kind === 'authorize'}
+  <ArchiveReauthorizeModal job={act.job} onClose={() => (act = null)} />
 {/if}
 
 <Modal

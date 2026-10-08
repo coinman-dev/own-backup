@@ -27,9 +27,10 @@
     error?: string;
     onUnlock: (secret: ArchiveSecret) => void;
     onCancel: () => void;
+    purpose?: 'open' | 'authorize';
   }
 
-  let { open, imageName, busy = false, error = '', onUnlock, onCancel }: Props = $props();
+  let { open, imageName, busy = false, error = '', onUnlock, onCancel, purpose = 'open' }: Props = $props();
 
   type Mode = 'password' | 'recovery';
   let mode = $state<Mode>('password');
@@ -54,14 +55,14 @@
 
 <Modal
   {open}
-  title={m.aunl_title()}
+  title={purpose === 'authorize' ? m.aunl_authorize_title() : m.aunl_title()}
   onClose={close}
   onConfirm={submit}
   confirmDisabled={!ready || busy}
-  confirmLabel={busy ? m.aunl_opening() : m.aunl_open()}
+  confirmLabel={busy ? m.aunl_opening() : purpose === 'authorize' ? m.aunl_authorize_confirm() : m.aunl_open()}
   cancelLabel={m.common_cancel()}
 >
-  <p class="what">{@html m.aunl_what({ name: esc(imageName) })}</p>
+  <p class="what">{@html purpose === 'authorize' ? m.aunl_authorize_what({ name: esc(imageName) }) : m.aunl_what({ name: esc(imageName) })}</p>
 
   <div class="tabs">
     <button class="tab" class:active={mode === 'password'} onclick={() => (mode = 'password')}>

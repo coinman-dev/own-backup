@@ -2215,6 +2215,57 @@ impl BackupService for BackupServiceImpl {
         json_reply(&job)
     }
 
+    async fn reauthorize_archive(
+        &self,
+        req: Request<JsonRequest>,
+    ) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        #[derive(serde::Deserialize)]
+        struct In {
+            job_id: String,
+            #[serde(flatten)]
+            secret: ManualSecret,
+        }
+        let body = zeroize::Zeroizing::new(req.into_inner().json);
+        let p: In = serde_json::from_str(&body)
+            .map_err(|_| Status::invalid_argument("bad archive authorization request"))?;
+        let job = self
+            .state
+            .store
+            .get(&p.job_id)
+            .ok_or_else(|| Status::not_found(tr!("grpc_server.job_not_found").into_owned()))?;
+        let slot = self.reserve(&tr!("grpc_server.busy_archive_reauthorize"), &job.name)?;
+        let queue = self.state.queue.snapshot();
+        if queue.current.as_deref() == Some(job.id.as_str())
+            || queue.pending.iter().any(|id| id == &job.id)
+        {
+            return Err(Status::failed_precondition(
+                tr!("grpc_server.encryption_job_queued").into_owned(),
+            ));
+        }
+        let store = self.state.store.clone();
+        let saved = tokio::task::spawn_blocking(move || {
+            let _slot = slot;
+            let password = p.secret.password.map(zeroize::Zeroizing::new);
+            let recovery = p.secret.recovery_key.map(zeroize::Zeroizing::new);
+            store.reauthorize_archive(
+                job,
+                password.as_ref().map(|value| value.as_str()),
+                recovery.as_ref().map(|value| value.as_str()),
+            )
+        })
+        .await
+        .map_err(|_| Status::internal("archive authorization task failed"))?
+        .map_err(|error| match error {
+            own_backup_common::OwnBackupError::Config(message) => {
+                Status::permission_denied(message)
+            }
+            other => Status::failed_precondition(other.to_string()),
+        })?;
+        info!(job = %saved.id, "Local archive authorization restored");
+        json_reply(&saved)
+    }
+
     async fn cancel_archive_encryption(
         &self,
         req: Request<JsonRequest>,
@@ -3131,6 +3182,64 @@ mod tests {
     }
 
     // --- Один разрушительный ход за раз (аудит AUD-02) ---------------------
+
+    #[tokio::test]
+    async fn reauthorization_refuses_busy_and_queued_jobs_before_touching_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = make_service(dir.path());
+        let saved = svc
+            .state
+            .store
+            .upsert(serde_json::from_str(&job("Repair", "E:", r"D:\bk")).unwrap())
+            .unwrap();
+        let request = || {
+            Request::new(JsonRequest {
+                json: serde_json::json!({"job_id":saved.id,"password":"synthetic secret"})
+                    .to_string(),
+            })
+        };
+        let before = std::fs::read(dir.path().join("jobs.json")).unwrap();
+        let held = svc
+            .state
+            .busy
+            .reserve(own_backup_core::busy::Doing::new("backup", "disk"))
+            .unwrap();
+        assert_eq!(
+            svc.reauthorize_archive(request()).await.unwrap_err().code(),
+            tonic::Code::FailedPrecondition
+        );
+        drop(held);
+        assert!(svc.state.queue.enqueue(&saved.id));
+        assert_eq!(
+            svc.reauthorize_archive(request()).await.unwrap_err().code(),
+            tonic::Code::FailedPrecondition
+        );
+        assert_eq!(std::fs::read(dir.path().join("jobs.json")).unwrap(), before);
+        assert!(!dir.path().join(".own-backup-service-keys").exists());
+    }
+
+    #[tokio::test]
+    async fn malformed_reauthorization_does_not_echo_secrets_and_missing_jobs_are_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = make_service(dir.path());
+        let secret = "never echo this synthetic secret";
+        let error = svc
+            .reauthorize_archive(Request::new(JsonRequest {
+                json: serde_json::json!({"job_id":{},"password":secret}).to_string(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert!(!error.message().contains(secret));
+        let error = svc
+            .reauthorize_archive(Request::new(JsonRequest {
+                json: serde_json::json!({"job_id":"missing","password":secret}).to_string(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::NotFound);
+        assert!(!dir.path().join("jobs.json").exists());
+    }
 
     /// Проверка «занято?» и захват — одно действие. Раньше план восстановления
     /// читал restore_run под одним замком и писал новое состояние под другим,

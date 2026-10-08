@@ -3176,6 +3176,7 @@ dependencies = [
  "uuid",
  "windows 0.58.0",
  "windows-service",
+ "zeroize",
 ]
 
 [[package]]

@@ -1701,6 +1701,15 @@ pub async fn run_queue_worker(
             break;
         }
 
+        // A key repair can commit while this queued run waits for the busy
+        // slot. Load its new local reference only after acquiring the slot;
+        // otherwise the retired reference from the old snapshot would fail.
+        let Some(job) = store.get(&job_id) else {
+            queue.finish();
+            sink.queue_changed(queue.snapshot());
+            continue;
+        };
+
         // No sleep while copying — laptops included, verification included.
         // Released when this iteration ends, whatever the outcome.
         #[cfg(target_os = "windows")]
@@ -4270,6 +4279,72 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(store.activity()[0].status, "cancelled");
+        worker.abort();
+    }
+
+    #[tokio::test]
+    async fn a_waiting_backup_loads_the_job_again_after_a_key_repair_can_commit() {
+        struct QuietSink;
+        impl EventSink for QuietSink {
+            fn job_progress(&self, _: JobProgress) {}
+            fn queue_changed(&self, _: QueueSnapshot) {}
+            fn job_finished(&self, _: JobRun) {}
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = JobStore::load(dir.path());
+        let mut job = Job {
+            id: "waiting".into(),
+            name: "waiting".into(),
+            ..Default::default()
+        };
+        job.advanced.retry_attempts = 0;
+        store.upsert(job).unwrap();
+        let queue = RunQueue::new();
+        let busy = crate::busy::Busy::new();
+        let held = busy
+            .reserve(crate::busy::Doing::new("other", "probe"))
+            .unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let worker = tokio::spawn(run_queue_worker(
+            Arc::new(QuietSink),
+            store.clone(),
+            queue.clone(),
+            busy.clone(),
+            cancel.clone(),
+            Arc::new(NoPasswords),
+            rx,
+            tx.downgrade(),
+            stop_rx,
+        ));
+        queue.enqueue("waiting");
+        tx.send("waiting".into()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while queue.snapshot().current.as_deref() != Some("waiting") {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let mut updated = store.get("waiting").unwrap();
+        updated.name = "latest settings after key repair".into();
+        store.upsert(updated).unwrap();
+        cancel.store(true, Ordering::SeqCst);
+        drop(held);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while store.activity().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(store.activity()[0].status, "cancelled");
+        assert_eq!(
+            store.activity()[0].job_name,
+            "latest settings after key repair"
+        );
         worker.abort();
     }
 

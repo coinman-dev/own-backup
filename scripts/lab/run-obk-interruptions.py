@@ -29,21 +29,22 @@ def module(name):
 def main():
     global WORK, ACTIVE, EVIDENCE
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--suite', choices=['interruptions', 'installer-live', 'installer-cross-account', 'service-kill', 'publication-check'], default='interruptions')
+    parser.add_argument('--suite', choices=['interruptions', 'installer-live', 'installer-cross-account', 'service-kill', 'publication-check', 'reauthorize'], default='interruptions')
     parser.add_argument('--fixed-service', action='store_true', help='Deploy the current service only inside the service-kill VM')
     args = parser.parse_args()
     live = args.suite == 'installer-live'
     cross = args.suite == 'installer-cross-account'
     kill = args.suite == 'service-kill'
     publication = args.suite == 'publication-check'
+    reauthorize = args.suite == 'reauthorize'
     if args.fixed_service and not kill:
         raise SystemExit('--fixed-service belongs only to the service-kill fixture')
-    if live or cross or kill or publication:
+    if live or cross or kill or publication or reauthorize:
         WORK = REPO / f'tmp/{args.suite}-2026-10-08'
         ACTIVE = WORK / 'active'
         EVIDENCE = WORK / 'evidence'
-    pass_token = 'PUBLICATION-CHECK-PASS' if publication else 'SERVICE-KILL-PASS' if kill else 'INSTALLER-CROSS-ACCOUNT-PASS' if cross else 'INSTALLER-LIVE-PASS' if live else 'OBK-FAULT-PASS'
-    fail_token = 'PUBLICATION-CHECK-FAIL' if publication else 'SERVICE-KILL-FAIL' if kill else 'INSTALLER-CROSS-ACCOUNT-FAIL' if cross else 'INSTALLER-LIVE-FAIL' if live else 'OBK-FAULT-FAIL'
+    pass_token = 'REAUTHORIZE-PASS' if reauthorize else 'PUBLICATION-CHECK-PASS' if publication else 'SERVICE-KILL-PASS' if kill else 'INSTALLER-CROSS-ACCOUNT-PASS' if cross else 'INSTALLER-LIVE-PASS' if live else 'OBK-FAULT-PASS'
+    fail_token = 'REAUTHORIZE-FAIL' if reauthorize else 'PUBLICATION-CHECK-FAIL' if publication else 'SERVICE-KILL-FAIL' if kill else 'INSTALLER-CROSS-ACCOUNT-FAIL' if cross else 'INSTALLER-LIVE-FAIL' if live else 'OBK-FAULT-FAIL'
     if ACTIVE.exists():
         raise SystemExit('preserve the previous interruption attempt before rerun')
     if subprocess.run(['pgrep', '-f', '^qemu-system-|^qemu-storage-daemon'], capture_output=True).returncode == 0:
@@ -61,7 +62,7 @@ def main():
                            ('work', WORK), ('active', ACTIVE), ('target', REPO / 'target')]:
             row[name] = int(subprocess.check_output(['du', '-s', '-B1', str(path)]).split()[0])
         row['other_work'] = 0
-        for name in ['obk-interruptions', 'installer-live', 'installer-cross-account', 'service-kill', 'publication-check']:
+        for name in ['obk-interruptions', 'installer-live', 'installer-cross-account', 'service-kill', 'publication-check', 'reauthorize']:
             other = REPO / f'tmp/{name}-2026-10-08'
             if other != WORK and other.exists():
                 row['other_work'] += int(subprocess.check_output(['du', '-s', '-B1', str(other)]).split()[0])
@@ -108,18 +109,33 @@ def main():
             (REPO / 'scripts/lab/acceptance-common.ps1', 'acceptance-common.ps1'),
             (REPO / 'scripts/lab/autounattend.xml', 'autounattend.xml'),
             (REPO / 'target/x86_64-pc-windows-msvc/release/examples/audit_autonomous.exe', 'audit_autonomous.exe')]
+    if reauthorize:
+        files = [
+            (REPO / 'scripts/lab/acceptance-reauthorize-stage.ps1', 'lab-stage2.ps1'),
+            (REPO / 'scripts/lab/acceptance-reauthorize-user.ps1', 'acceptance-reauthorize-user.ps1'),
+            (REPO / 'scripts/lab/acceptance-common.ps1', 'acceptance-common.ps1'),
+            (REPO / 'scripts/lab/autounattend.xml', 'autounattend.xml'),
+            (REPO / 'target/x86_64-pc-windows-msvc/release/examples/audit_autonomous.exe', 'audit_autonomous.exe')]
+        for name in ['own-backup-service.exe', 'own-backup-gui.exe', 'own-backup-cli.exe']:
+            files.append((REPO / 'target/x86_64-pc-windows-msvc/release' / name, 'current-' + name))
     for source, name in files:
         shutil.copyfile(source, payload / name)
+    if reauthorize:
+        labels = {}
+        for language in ['ru', 'en']:
+            messages = json.loads((REPO / f'crates/gui/frontend/messages/{language}.json').read_text())
+            labels[language] = {name: messages[key] for name, key in {'backup':'nav_backup', 'menu':'bsm_menu', 'action':'bsm_reauthorize', 'title':'aunl_authorize_title', 'confirm':'aunl_authorize_confirm'}.items()}
+        (payload / 'reauthorize-labels.json').write_text(json.dumps(labels, ensure_ascii=False), encoding='utf-8')
     (EVIDENCE / 'payload-hashes.json').write_text(json.dumps({
         file.name: hashlib.sha256(file.read_bytes()).hexdigest() for file in payload.iterdir()}, indent=2) + '\n')
     source = REPO / ('tmp/installer-live-2026-10-08/active' if cross or kill else 'tmp/unattended-acceptance-2026-10-07/active')
-    if publication:
+    if publication or reauthorize:
         source = REPO / 'tmp/service-kill-2026-10-08/active'
-    if (cross or kill or publication) and not json.loads((source.parent / 'evidence/result.json').read_text())['pass']:
+    if (cross or kill or publication or reauthorize) and not json.loads((source.parent / 'evidence/result.json').read_text())['pass']:
         raise SystemExit('cross-account fixture requires an accepted live upgrade')
     subprocess.run(['qemu-img', 'create', '-q', '-f', 'qcow2', '-F', 'qcow2', '-b',
                     str(source / 'windows.qcow2'), str(ACTIVE / 'windows.qcow2')], check=True)
-    if cross or kill or publication:
+    if cross or kill or publication or reauthorize:
         subprocess.run(['qemu-img', 'create', '-q', '-f', 'qcow2', '-F', 'qcow2', '-b',
                         str(source / 'small.qcow2'), str(ACTIVE / 'small.qcow2')], check=True)
     else:
@@ -137,11 +153,12 @@ def main():
            '-display', 'none', '-no-user-config', '-no-reboot', '-boot', 'order=c']
     (EVIDENCE / 'command.json').write_text(json.dumps(cmd, indent=2) + '\n')
     (EVIDENCE / 'serial.log').touch()
-    deadline = time.monotonic() + 900
+    deadline = time.monotonic() + (1800 if reauthorize else 900)
     next_budget = 0
     offset = 0
     failure = None
     rebooted = False
+    reauth_reboots = 0
     with (EVIDENCE / 'qemu.log').open('w') as log:
         process = subprocess.Popen(cmd, stdout=log, stderr=log)
         try:
@@ -163,12 +180,27 @@ def main():
                         data = base64.b64decode(line.split(' ', 1)[1], validate=True)
                         (EVIDENCE / 'native-result.json').write_bytes(data)
                         print('NATIVE-REPORT-SAVED', flush=True)
+                    elif line.startswith('HOST '):
+                        fields = dict(part.split('=', 1) for part in line[5:].split() if '=' in part)
+                        shot = fields.get('shot', '')
+                        if shot:
+                            if Path(shot).name != shot: raise RuntimeError('unsafe screenshot name')
+                            subprocess.run(['python3', str(REPO / 'scripts/lab/qemu-screenshot.py'), str(ACTIVE / 'm.sock'), str(EVIDENCE / f'{shot}.png')], check=True, stdout=subprocess.DEVNULL)
+                        for key in filter(None, fields.get('keys', '').split(',')):
+                            monitor.send(str(ACTIVE / 'm.sock'), 'sendkey ' + key)
                     else:
                         print(line, flush=True)
                     if line.startswith(fail_token):
                         raise RuntimeError(line)
                 offset = len(lines)
                 if process.poll() is not None:
+                    if reauthorize:
+                        content = (EVIDENCE / 'serial.log').read_text(errors='replace')
+                        requests = sum(line.startswith('REAUTHORIZE-REBOOT ') for line in content.splitlines())
+                        if requests > reauth_reboots and reauth_reboots < 4 and fail_token not in content:
+                            reauth_reboots += 1
+                            process = subprocess.Popen(cmd, stdout=log, stderr=log)
+                            continue
                     reboot_token = 'PUBLICATION-CHECK-REBOOT' if publication else 'SERVICE-KILL-REBOOT' if kill else 'INSTALLER-LIVE-REBOOT'
                     if (live or kill or publication) and not rebooted and reboot_token in (EVIDENCE / 'serial.log').read_text(errors='replace'):
                         rebooted = True
@@ -190,10 +222,10 @@ def main():
                     process.wait(timeout=15)
             budget()
     content = (EVIDENCE / 'serial.log').read_text(errors='replace')
-    native_file = EVIDENCE / ('reports/publication-check-result.json' if publication else 'reports/service-kill-result.json' if kill else 'reports/installer-cross-account-result.json' if cross else 'reports/installer-live-result.json' if live else 'native-result.json')
+    native_file = EVIDENCE / ('reports/reauthorize-result.json' if reauthorize else 'reports/publication-check-result.json' if publication else 'reports/service-kill-result.json' if kill else 'reports/installer-cross-account-result.json' if cross else 'reports/installer-live-result.json' if live else 'native-result.json')
     native = json.loads(native_file.read_text()) if native_file.exists() else {}
     passed = (pass_token in content and fail_token not in content and native.get('pass')
-              and (live or cross or kill or publication or len(native.get('cases', [])) == 6) and failure is None and process.returncode == 0)
+              and (live or cross or kill or publication or reauthorize or len(native.get('cases', [])) == 6) and failure is None and process.returncode == 0)
     (EVIDENCE / 'result.json').write_text(json.dumps({'pass': bool(passed), 'error': str(failure) if failure else None,
                                                      'qemu_exit': process.returncode}, indent=2) + '\n')
     for name in ['windows', 'small']:
@@ -201,7 +233,7 @@ def main():
             subprocess.run(['qemu-img', 'check', str(ACTIVE / f'{name}.qcow2')], check=True, stdout=log, stderr=log)
     if not passed:
         raise SystemExit('interruption acceptance failed; preserve evidence')
-    print('PUBLICATION-CHECK-STAND-PASS' if publication else 'SERVICE-KILL-STAND-PASS' if kill else 'INSTALLER-CROSS-ACCOUNT-STAND-PASS' if cross else 'INSTALLER-LIVE-STAND-PASS' if live else 'OBK-INTERRUPTIONS-STAND-PASS', flush=True)
+    print('REAUTHORIZE-STAND-PASS' if reauthorize else 'PUBLICATION-CHECK-STAND-PASS' if publication else 'SERVICE-KILL-STAND-PASS' if kill else 'INSTALLER-CROSS-ACCOUNT-STAND-PASS' if cross else 'INSTALLER-LIVE-STAND-PASS' if live else 'OBK-INTERRUPTIONS-STAND-PASS', flush=True)
 
 
 if __name__ == '__main__':

@@ -1,5 +1,7 @@
 {
   "_version": 2,
+  "archive_setup.reauthorize_not_encrypted": {"ru": "У задания нет зашифрованных копий с локальным разрешением", "en": "The job has no encrypted archive authorization"},
+  "archive_setup.reauthorize_one_secret": {"ru": "Введите только пароль копий или только ключ восстановления задания", "en": "Enter either the archive password or the job recovery key"},
   "lib.job_store_invalid_identities": {"ru": "Файл заданий содержит пустые или повторяющиеся идентификаторы. Служба не запущена; восстановите jobs.json. Локальные ключи сохранены.", "en": "The job file contains missing or duplicate identities. The service did not start; restore jobs.json. Local keys have been preserved."},
   "verification.invalid_schedule": {"ru": "Задайте корректное расписание проверки: время, дни недели или число месяца", "en": "Set a valid verification schedule: time, weekdays or day of month"},
   "verification.windows_only": {"ru": "Проверка образов доступна только в Windows", "en": "Image verification is available only on Windows"},

@@ -101,6 +101,10 @@ async fn execute(client: &mut BackupClient, v: &Value) -> Result<Value, String> 
             )
             .unwrap())
         }
+        "reauthorize" => client
+            .reauthorize_archive(field(v, "id")?, &secret(v)?)
+            .await
+            .map(|saved| serde_json::to_value(saved).unwrap()),
         "run" => {
             let id = field(v, "id")?;
             let before = job(client, id).await?.last_run.map(|r| r.id);
