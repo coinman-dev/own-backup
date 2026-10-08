@@ -444,6 +444,28 @@ mod tests {
     }
 
     #[test]
+    fn malformed_job_rows_and_duplicate_identities_refuse_startup_without_rewriting_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let jobs = dir.path().join("jobs.json");
+        for bytes in [
+            br#"[{"value": [{"id":"real-job"}], "Count":1}]"#.as_slice(),
+            br#"[{"id":"same"}, {"id":"same"}]"#.as_slice(),
+        ] {
+            std::fs::write(&jobs, bytes).unwrap();
+            let result = JobStore::try_load(dir.path());
+            assert!(
+                result.is_err(),
+                "bad rows must not reach the authorization sweep"
+            );
+            assert_eq!(
+                result.err().unwrap().kind(),
+                std::io::ErrorKind::InvalidData
+            );
+            assert_eq!(std::fs::read(&jobs).unwrap(), bytes);
+        }
+    }
+
+    #[test]
     fn invalid_verification_schedules_are_rejected_and_legacy_jobs_stay_manual() {
         let legacy: Job = serde_json::from_str(r#"{"name":"old"}"#).unwrap();
         assert_eq!(legacy.verification.schedule.kind, "none");

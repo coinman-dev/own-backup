@@ -841,7 +841,20 @@ impl JobStore {
     pub fn try_load(data_dir: &std::path::Path) -> std::io::Result<Arc<Self>> {
         let jobs_path = data_dir.join("jobs.json");
         let activity_path = data_dir.join("activity.json");
-        let jobs = read_json(&jobs_path)?.unwrap_or_default();
+        let jobs: Vec<Job> = read_json(&jobs_path)?.unwrap_or_default();
+        // Serde defaults keep old job fields compatible, but also turn a
+        // structurally wrong row into a job with no identity. Starting with
+        // that row would allow the local-key sweep to retire real authorizations.
+        let mut identities = std::collections::HashSet::new();
+        if jobs
+            .iter()
+            .any(|job| job.id.trim().is_empty() || !identities.insert(&job.id))
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                tr!("lib.job_store_invalid_identities").into_owned(),
+            ));
+        }
         let activity = read_json(&activity_path)?.unwrap_or_default();
         Ok(Arc::new(Self {
             jobs_path,

@@ -23,6 +23,25 @@
 
 use own_backup_common::{tr, Result};
 
+/// A drive named directly, including Win32 device aliases. A path inside a
+/// drive is a different question: a mounted volume there may belong to another
+/// disk, so it must not be mistaken for the containing drive's letter.
+pub fn direct_drive_letter(path: &str) -> Option<char> {
+    let path = path
+        .strip_prefix(r"\\.\")
+        .or_else(|| path.strip_prefix(r"\\?\"))
+        .unwrap_or(path);
+    let bytes = path.as_bytes();
+    if (bytes.len() == 2 || (bytes.len() == 3 && matches!(bytes[2], b'\\' | b'/')))
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+    {
+        Some((bytes[0] as char).to_ascii_uppercase())
+    } else {
+        None
+    }
+}
+
 /// Where something lives: a disk and a byte range on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Extent {
@@ -446,5 +465,26 @@ mod tests {
         );
         assert_eq!(volume_root_for_snapshot(r"\\?\Volume{"), None);
         assert_eq!(volume_root_for_snapshot(""), None);
+    }
+}
+
+#[cfg(test)]
+mod restore_letter_tests {
+    use super::direct_drive_letter;
+    #[test]
+    fn restore_remembers_direct_letters_for_both_user_and_device_paths() {
+        for path in ["t:", "T:\\", r"\\.\T:", r"\\?\t:", r"\\.\T:\", "T:/"] {
+            assert_eq!(direct_drive_letter(path), Some('T'), "{path}");
+        }
+        for path in [
+            "",
+            "C:\\mounted\\volume",
+            r"\\?\Volume{abc}\",
+            r"part:1:4096:1024",
+            r"\\.\PhysicalDrive1",
+            r"\\server\share",
+        ] {
+            assert_eq!(direct_drive_letter(path), None, "{path}");
+        }
     }
 }

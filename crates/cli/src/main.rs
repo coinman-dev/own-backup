@@ -117,6 +117,26 @@ enum Commands {
 /// files in userspace. None of those commands requires elevation.
 #[cfg(target_os = "windows")]
 fn needs_admin(command: &Commands) -> bool {
+    if let Commands::Consolidate(args) = command {
+        // qcow2 and OBK merge in userspace. VHDX uses the Windows virtual-disk
+        // driver, which needs elevation. An unreadable folder stays on the
+        // conservative path; the command will report its own error later.
+        let Ok(entries) = std::fs::read_dir(&args.folder) else {
+            return true;
+        };
+        for entry in entries {
+            let Ok(entry) = entry else { return true };
+            let extension = entry
+                .path()
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(str::to_ascii_lowercase);
+            if matches!(extension.as_deref(), Some("vhdx" | "avhdx")) {
+                return true;
+            }
+        }
+        return false;
+    }
     matches!(
         command,
         Commands::Preflight(_)
@@ -129,7 +149,6 @@ fn needs_admin(command: &Commands) -> bool {
             | Commands::Restore(_)
             | Commands::RestoreDisk(_)
             | Commands::FinalizeBoot(_)
-            | Commands::Consolidate(_)
             | Commands::Service(_)
             | Commands::Driver(commands::driver::DriverArgs {
                 action: commands::driver::DriverAction::Prepare,

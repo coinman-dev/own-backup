@@ -4355,20 +4355,12 @@ fn partition_window_for(target: &str) -> (String, Option<TakenVolume>) {
     );
     let taken = TakenVolume {
         guard: Some(guard),
-        give_back: drive_letter_of(target).map(|l| (root, l)),
+        give_back: crate::source_identity::direct_drive_letter(target).map(|l| (root, l)),
     };
     (
         format!("part:{}:{}:{}", e.disk_number, e.offset, e.length),
         Some(taken),
     )
-}
-
-/// `H`, from `H:`, `H:\` or `h:`. Nothing for a device path or a mount folder.
-#[cfg(target_os = "windows")]
-fn drive_letter_of(target: &str) -> Option<char> {
-    let mut chars = target.chars();
-    let letter = chars.next()?;
-    (letter.is_ascii_alphabetic() && chars.next() == Some(':')).then(|| letter.to_ascii_uppercase())
 }
 
 /// A volume taken down for a restore, and the letter it is owed back.
