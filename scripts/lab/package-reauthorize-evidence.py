@@ -8,7 +8,7 @@ import tarfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-OUTPUT = REPO / 'docs/ARCHIVE-REAUTHORIZATION-EVIDENCE-2026-10-08.tar.gz'
+OUTPUT = REPO / '.ai/archive/ARCHIVE-REAUTHORIZATION-EVIDENCE-2026-10-08.tar.gz'
 PREFIX = 'archive-reauthorization-2026-10-08/'
 SUITES = ['reauthorize']
 
@@ -45,7 +45,7 @@ def main():
         'scripts/lab/acceptance-reauthorize-stage.ps1',
         'scripts/lab/acceptance-reauthorize-user.ps1',
         'scripts/lab/package-reauthorize-evidence.py',
-        'docs/ARCHIVE-REAUTHORIZATION-2026-10-08.md',
+        '.ai/archive/ARCHIVE-REAUTHORIZATION-2026-10-08.md',
     ]
     for name in sources:
         payload['sources/' + name] = (REPO / name).read_bytes()

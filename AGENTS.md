@@ -38,7 +38,7 @@ The project lives in two folders that must be kept in sync:
   - **Shutdowns / power events:** check System log for Event 1074 (`User32`) and Event 109 (`Kernel-Power`) before assuming a backup crash.
 
 ### Project architectural decisions (from CLAUDE.md)
-- **Status & plan:** single source of truth is `.ai/PLAN.md`.
+- **Status & plan:** start at `.ai/PLAN.md`; the only other active status files are `.ai/DONE.md` and `.ai/CHECKS.md`.
 - **True removal:** excluded files must be truly unlinked/freed from images, not just zero-filled ghosts.
 - **MFT scan:** exclusions resolved before copy via `$MFT` reading (`ntfs_scan.rs`). The in-image mount-and-delete is only a fallback.
 - **No detach stalls:** backup engine does NOT attach VHDX/qcow2 images during backup — images are written directly in userspace via `VhdxWriter` / userspace writers. Never re-introduce `AttachVirtualDisk` into the backup pipeline.
@@ -64,3 +64,20 @@ The owner requested minimal necessary cloud work on 2026-10-06 after an Actions-
 
 - Main: frontend + vendor checks; full cached Linux/Windows validation on ready PR or manual dispatch.
 - Release: Linux validation gates the Windows build; Windows tests gate publication.
+
+## Keep the plan readable (owner request, 2026-10-08)
+
+- Keep exactly three active files in `.ai/`: `PLAN.md` (remaining implementation and decisions), `DONE.md` (brief accepted results), `CHECKS.md` (unverified behavior, why, and acceptance steps). Historical reports and evidence are in `.ai/archive/`. The entire `.ai/` directory is local-only and git-ignored; keep the two local copies synchronized explicitly, without commits or pushes.
+- Update existing items in place. Do not append session diaries, hashes, commands, build inventories, or repeated reports to these files. Do not create extra plans or handoffs in `.ai/` or `docs/`.
+- Accepted work stays closed unless relevant code changes or a concrete regression appears. Partial coverage is not full acceptance; user-skipped tests stay skipped.
+- Historical reports/evidence live in `.ai/archive/`; old local plans/logs are in ignored `backup/documentation-local-before-2026-10-08.tar.gz`. Neither is an active task list. New raw evidence and a necessary compact checkpoint belong in ignored `tmp/`, not the user-facing plan.
+- Retain useful test scripts, source, vendored dependencies, design assets and current binaries. Do not call VM bases or backing images disposable without checking dependencies.
+
+## Stand resource limits
+
+- Before builds or VM writes, measure both WSL free space and free space on the actual Windows volume containing this distribution's `ext4.vhdx`; keep at least 30 GiB free on both after expected peak growth.
+- Lab plus task work directories: at most 65 GiB; one active run including its media: 20 GiB; the single project `target/`: 30 GiB. Do not silently increase these budgets. Monitor every 25–30 seconds during long writes, and stop new stages if a limit is reached.
+- One running VM. Use read-only accepted backing bases; check the entire backing chain before cleanup. Preserve unfinished failures until their evidence is extracted and verified; clean obsolete disposable attempts after that, including failed attempts.
+- Do not export an entire Windows disk or NTFS partition to RAW just to read logs. Keep one source ISO and the needed current WinPE, avoid duplicate build caches and media.
+- Before repeating a test, identify its still-open acceptance criterion. Finish with verified evidence, VM shutdown, temporary-data cleanup and a space measurement.
+- Dense TiB testing was explicitly skipped by the owner. Do not resume without a new instruction. Never zero-fill WSL free space to compact it; use TRIM where appropriate, and do not stop WSL unexpectedly.

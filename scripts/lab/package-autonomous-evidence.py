@@ -10,7 +10,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 WORK = REPO / "tmp/unattended-acceptance-2026-10-07"
-OUTPUT = REPO / "docs/WINDOWS-AUTONOMOUS-EVIDENCE-2026-10-08.tar.gz"
+OUTPUT = REPO / ".ai/archive/WINDOWS-AUTONOMOUS-EVIDENCE-2026-10-08.tar.gz"
 ROOT = "autonomous-acceptance-2026-10-08"
 
 
@@ -58,7 +58,7 @@ def main():
                  "scripts/lab/run-h03-iso-build.py",
                  "crates/client/examples/audit_autonomous.rs",
                  "crates/backup/examples/audit_winpe_recovery.rs",
-                 "docs/WINDOWS-AUTONOMOUS-TESTS-2026-10-08.md"]:
+                 ".ai/archive/WINDOWS-AUTONOMOUS-TESTS-2026-10-08.md"]:
         files["sources/" + name] = REPO / name
     payload = {name: file.read_bytes() for name, file in sorted(files.items())}
     for name, data in payload.items():

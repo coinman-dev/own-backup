@@ -84,8 +84,8 @@ The interface is in English and Russian, with light, dark and system themes.
 - New `.obk` images use two header generations. A boot medium built by an
   older version cannot open them: rebuild the medium with this version.
 - TPM-only BitLocker volumes are not opened by the program itself.
-- The [Windows acceptance checklist](docs/WINDOWS-TESTS-AND-FIXES-2026-09-26.md)
-  records what was checked live and what was not.
+- On the developer's machine, current plans and historical evidence are kept
+  locally in `.ai/`; this directory is excluded from the repository.
 
 ## Settings and data
 

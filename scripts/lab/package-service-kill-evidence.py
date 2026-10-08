@@ -8,7 +8,7 @@ import tarfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-OUTPUT = REPO / 'docs/WINDOWS-SERVICE-KILL-EVIDENCE-2026-10-08.tar.gz'
+OUTPUT = REPO / '.ai/archive/WINDOWS-SERVICE-KILL-EVIDENCE-2026-10-08.tar.gz'
 PREFIX = 'service-kill-2026-10-08/'
 SUITES = ['service-kill', 'publication-check']
 
@@ -44,7 +44,7 @@ def main():
         'scripts/lab/acceptance-publication-check-stage.ps1',
         'scripts/lab/acceptance-publication-check-user.ps1',
         'scripts/lab/package-service-kill-evidence.py',
-        'docs/WINDOWS-SERVICE-KILL-2026-10-08.md',
+        '.ai/archive/WINDOWS-SERVICE-KILL-2026-10-08.md',
     ]
     for name in sources:
         payload['sources/' + name] = (REPO / name).read_bytes()

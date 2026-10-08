@@ -8,7 +8,7 @@ import tarfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-OUTPUT = REPO / 'docs/WINDOWS-CONTINUED-ACCEPTANCE-EVIDENCE-2026-10-08.tar.gz'
+OUTPUT = REPO / '.ai/archive/WINDOWS-CONTINUED-ACCEPTANCE-EVIDENCE-2026-10-08.tar.gz'
 PREFIX = 'continued-acceptance-2026-10-08/'
 SUITES = ['obk-interruptions', 'installer-live', 'installer-cross-account']
 
@@ -43,7 +43,7 @@ def main():
         'scripts/lab/acceptance-installer-live-user.ps1',
         'scripts/lab/acceptance-installer-cross-account-stage.ps1',
         'scripts/lab/acceptance-installer-cross-account-user.ps1',
-        'docs/WINDOWS-CONTINUED-ACCEPTANCE-2026-10-08.md',
+        '.ai/archive/WINDOWS-CONTINUED-ACCEPTANCE-2026-10-08.md',
     ]
     for name in sources:
         payload['sources/' + name] = (REPO / name).read_bytes()
