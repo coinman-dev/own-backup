@@ -62,8 +62,8 @@ The owner requested minimal necessary cloud work on 2026-10-06 after an Actions-
 
 ## This repository
 
-- Main: frontend + vendor checks; full cached Linux/Windows validation on ready PR or manual dispatch.
-- Release: Linux validation gates the Windows build; Windows tests gate publication.
+- Main: frontend + vendor checks; full cached Windows validation on ready PR or manual dispatch.
+- Release: Windows tests, dependency audits and installer checks gate publication. Do not run Linux Rust tests in GitHub Actions (owner request, 2026-10-10).
 
 ## Keep the plan readable (owner request, 2026-10-08)
 
