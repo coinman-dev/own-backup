@@ -2,6 +2,25 @@
 
 # Changelog
 
+## 0.1.4-beta — 2026-10-09
+
+### Changed
+
+- New VHDX and qcow2 disk chains reserve metadata space for all addressable
+  source blocks, so filling a disk does not prematurely start another full
+  backup. OBK increments reserve their own metadata space as needed.
+
+### Fixed
+
+- Encrypted jobs can regain automatic access after their locally stored
+  authorization is damaged, using the recovery key.
+- Completed OBK images are published only after their data is durable; a
+  restart removes unfinished images without exposing them as restore points.
+- A backup that could not remove every excluded file reports the incomplete
+  result instead of silently claiming full exclusion.
+- Scheduled verification and the recovery of interrupted backup operations
+  have been tightened.
+
 ## 0.1.3-beta — 2026-10-06
 
 ### Added

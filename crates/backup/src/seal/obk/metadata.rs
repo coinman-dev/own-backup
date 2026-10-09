@@ -241,6 +241,65 @@ mod tests {
     }
 
     #[test]
+    fn child_metadata_can_outgrow_the_parent_without_starting_a_full_chain() {
+        use crate::seal::obk::{read_open_header, ObkChain};
+        use crate::sidecar::{calculate_meta_partition_size, whole_disk_metadata_size};
+
+        let f = Fixture::new();
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("full.obk");
+        // Counts from the 2026-10-09 production failure: 1 MiB -> 2 MiB.
+        let parent_room = calculate_meta_partition_size(57_563, 0);
+        let needed = calculate_meta_partition_size(62_142, 0);
+        assert_eq!(parent_room, 1 << 20);
+        assert_eq!(needed, 2 << 20);
+        build(&base, &f, b"parent metadata", parent_room as usize);
+        let parent_header = read_open_header(&base).unwrap();
+        let parent_bytes = std::fs::read(&base).unwrap();
+
+        for role in [ChainRole::Incremental, ChainRole::Differential] {
+            let child = dir.path().join(format!("{role:?}.obk"));
+            let room = whole_disk_metadata_size(true, needed, Some(parent_room))
+                .expect("OBK metadata growth must preserve the parent");
+            let mut writer = ObkWriter::create(
+                &child,
+                &f.chain,
+                f.options(
+                    Uuid::new_v4(),
+                    role,
+                    Some((parent_header.backup_id, "full.obk")),
+                ),
+            )
+            .unwrap();
+            let changed = vec![7u8; 1 << cluster_bits()];
+            writer.write_cluster(1, &changed).unwrap();
+            writer
+                .finish_with_reserve(b"provisional metadata", room as usize)
+                .unwrap();
+            // Exercise the same finalization used by a new Windows backup,
+            // with real metadata larger than the parent's entire reservation.
+            let final_metadata = vec![b'M'; parent_room as usize + 4096];
+            update_sealed_metadata_in_place(&child, &f.chain, &final_metadata).unwrap();
+            assert_eq!(reserved_room(&child, &f.chain).unwrap(), needed as usize);
+
+            let header = read_open_header(&child).unwrap();
+            assert_eq!(header.role, role);
+            assert_eq!(header.parent_backup_id, Some(parent_header.backup_id));
+            assert_eq!(header.chain_id, parent_header.chain_id);
+            assert_eq!(header.virtual_size, parent_header.virtual_size);
+            let mut chain = ObkChain::open(&child, &f.chain).unwrap();
+            assert_eq!(chain.chain_len(), 2);
+            assert_eq!(
+                &chain.read_cluster(0).unwrap()[..],
+                &vec![9u8; 1 << cluster_bits()][..]
+            );
+            assert_eq!(&chain.read_cluster(1).unwrap()[..], &changed[..]);
+            assert_eq!(&chain.sealed_metadata().unwrap()[..], &final_metadata[..]);
+            assert_eq!(std::fs::read(&base).unwrap(), parent_bytes);
+        }
+    }
+
+    #[test]
     fn a_reserved_sidecar_is_appended_and_the_data_is_untouched() {
         let f = Fixture::new();
         let dir = tempfile::tempdir().unwrap();

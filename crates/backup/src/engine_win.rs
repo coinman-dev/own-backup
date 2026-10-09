@@ -3468,18 +3468,10 @@ fn backup_disk_inner(
         .unwrap_or(0);
     let part_end_blocks = part_end.div_ceil(bs);
     let disk_used = DiskUsedMap::build(&prepared, bs, part_end_blocks);
-    // A child inherits the parent's virtual size and GPT (the differencing image
-    // resolves them through the chain), so its geometry MUST match the parent
-    // exactly. Size the meta partition from the geometry the parent committed to
-    // (its full-state used count) — not this run's count, which for an
-    // incremental differs. If the resulting plan no longer matches the parent's
-    // size (the disk was repartitioned), fall back to a full backup.
-    // Stored container headers (D19) are megabytes each, so the reserve has to
-    // include them. A child takes the PARENT's reserve, for the same reason it
-    // takes the parent's block count: its geometry must match exactly.
-    // Read now, not at the end: the size has to be known before the metadata
-    // partition is sized, and reading NVRAM is instant and independent of
-    // everything the copy does.
+    // A plaintext child inherits the parent's GPT. New full images reserve for
+    // every addressable source block, so ordinary growth of used space cannot
+    // exhaust the metadata partition. Children read its actual size from GPT;
+    // recomputing it from the parent's used-block count would lose that reserve.
     let boot_entries = boot_entries_for_image(req.bootable);
     let own_reserve = crate::sidecar::luks_reserve_for(
         prepared
@@ -3489,49 +3481,39 @@ fn backup_disk_inner(
     let full_used = |used: u64, reserve: u64| {
         crate::sidecar::calculate_meta_partition_size(used.max(1), reserve)
     };
-    // What a parent ACTUALLY reserved, measured the way `own_reserve` is: its
-    // container headers AND its boot entries.
-    //
-    // Counting only the first made every bootable chain start over from a full
-    // copy. `own_reserve` includes the boot-entries room — around 18 KiB for a
-    // machine with four UEFI entries — so on a disk without LUKS the test below
-    // read "18730 > 0" every single time, and the run silently wrote a full
-    // backup into a file named `_inc_`. Nothing said so except the warning,
-    // which named two numbers that were never comparable.
-    let reserved_by = |sc: &Sidecar| {
-        crate::sidecar::luks_headers_reserve(&sc.info.luks_headers)
-            + crate::sidecar::boot_entries_reserve(sc.info.boot_entries.as_ref())
+    let encrypted = req.encryption.is_some();
+    let needed_meta = full_used(disk_used.count, own_reserve);
+    let full_meta = crate::sidecar::whole_disk_full_metadata_size(
+        encrypted,
+        disk_used.count,
+        part_end_blocks,
+        own_reserve,
+    );
+    let parent_region = match (&parent, encrypted) {
+        (Some((path, _)), false) => Some(crate::sidecar::embedded_metadata_region(path, "")?),
+        _ => None,
     };
-    let mut meta_size = match &parent {
-        Some((_, sc)) => full_used(sc.manifest.used_blocks, reserved_by(sc)),
-        None => full_used(disk_used.count, own_reserve),
-    };
-    // Does this run's metadata fit the room the parent laid down? The child
-    // cannot grow the image — its geometry is the parent's — so if it does not,
-    // the only honest move is to start a new full backup rather than run for an
-    // hour and fail at the metadata write.
-    //
-    // The comparison is between the two SIZES, not between the reserves they
-    // are computed from, and that is the whole point. The reserve carries
-    // meaningless jitter: it is measured from the serialized boot entries,
-    // whose JSON holds a timestamp whose textual length wobbles by a byte or
-    // three from run to run. Comparing reserves therefore refused a perfectly
-    // good parent over `18730 > 18727` — three bytes, inside a slack of 16
-    // kilobytes — and every copy of the chain came out full. The size rounds to
-    // whole megabytes, where three bytes cannot be seen.
-    //
-    // Sizes also ask the wider question the reserve alone could not: the child's
-    // checksum table grows with the volume, and a source that has gained enough
-    // used blocks genuinely will not fit either.
-    if let Some((pp, sc)) = &parent {
-        let have = full_used(sc.manifest.used_blocks, reserved_by(sc));
-        let want = full_used(disk_used.count, own_reserve);
-        if want > have {
+    let parent_meta = parent_region.map(|(_, size)| size);
+    let metadata_size = crate::sidecar::whole_disk_metadata_size(
+        encrypted,
+        if parent.is_some() {
+            needed_meta
+        } else {
+            full_meta
+        },
+        parent_meta,
+    );
+    let mut meta_size = metadata_size.unwrap_or(full_meta);
+    // Old plaintext chains may still have a small partition. Keep the safe
+    // fallback when their fixed room is insufficient for this run's metadata.
+    // OBK has no guest metadata partition. Each child reserves its own room,
+    // so crossing a metadata-size boundary must not start a new full chain.
+    if metadata_size.is_none() {
+        if let Some((pp, sc)) = &parent {
             warn!(
                 parent = %pp.display(),
-                parent_meta = have,
-                needed_meta = want,
-                parent_reserve = reserved_by(sc),
+                parent_meta = parent_meta.unwrap_or(0),
+                needed_meta,
                 own_reserve,
                 parent_blocks = sc.manifest.used_blocks,
                 own_blocks = disk_used.count,
@@ -3540,18 +3522,18 @@ fn backup_disk_inner(
             );
             kind = BackupType::Full;
             parent = None;
-            meta_size = want;
         }
     }
     // An encrypted image has no guest meta partition: its sidecar is sealed
     // inside the container (§7.3). `meta_size` stays the measure of how much
     // room that sidecar needs — it becomes the container's reservation instead
     // of a partition's size — but the image itself is planned without one.
-    let encrypted = req.encryption.is_some();
     let planned_meta = |bytes: u64| if encrypted { 0 } else { bytes };
     let mut plan = own_backup_common::gpt::plan_whole_disk_image(&layout, planned_meta(meta_size));
     if let Some((pp, sc)) = &parent {
-        if plan.image_size != sc.manifest.source_disk.size_bytes {
+        if plan.image_size != sc.manifest.source_disk.size_bytes
+            || parent_region.is_some_and(|(offset, _)| offset != plan.meta_first_lba * sector)
+        {
             warn!(
                 parent = %pp.display(),
                 planned = plan.image_size,
@@ -3560,7 +3542,7 @@ fn backup_disk_inner(
             );
             kind = BackupType::Full;
             parent = None;
-            meta_size = full_used(disk_used.count, own_reserve);
+            meta_size = full_meta;
             plan = own_backup_common::gpt::plan_whole_disk_image(&layout, planned_meta(meta_size));
         }
     }

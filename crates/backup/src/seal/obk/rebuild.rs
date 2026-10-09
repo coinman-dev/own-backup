@@ -657,6 +657,12 @@ mod tests {
                     ..SECOND_HEADER_OFFSET as usize + (1 << cluster_bits())],
             )
             .unwrap();
+            // The last checksum byte can happen to match in both generations.
+            // Then a one-byte-short write leaves an intact new header, not a
+            // torn one. Make the interrupted checksum unambiguously incomplete.
+            let last = SECOND_HEADER_OFFSET as usize + (1 << cluster_bits()) - 1;
+            file.seek(SeekFrom::Start(last as u64)).unwrap();
+            file.write_all(&[new[last] ^ 1]).unwrap();
             file.sync_all().unwrap();
             let mut reader = ObkRandomReader::open(&torn, &f.chain).unwrap();
             reader.read_at(0, &mut data).unwrap();

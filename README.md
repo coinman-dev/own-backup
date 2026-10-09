@@ -7,7 +7,7 @@
 <h1 align="center">Own Backup</h1>
 <p align="center">Block-level backup of Windows disks and volumes, with a boot medium to restore from.</p>
 
-[![Release](https://img.shields.io/badge/release-0.1.3--beta-orange)](https://github.com/coinman-dev/own-backup/releases/tag/v0.1.3-beta)
+[![Release](https://img.shields.io/badge/release-0.1.4--beta-orange)](https://github.com/coinman-dev/own-backup/releases/tag/v0.1.4-beta)
 [![Build](https://github.com/coinman-dev/own-backup/actions/workflows/release.yml/badge.svg)](https://github.com/coinman-dev/own-backup/actions/workflows/release.yml)
 [![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011%20x64-blue)](#download)
 [![Rust](https://img.shields.io/badge/Rust-1.98-orange)](#building)
@@ -19,7 +19,7 @@ be encrypted with a password. From a backup you can restore a partition, a disk
 or individual files — and, from the boot medium, the disk Windows itself boots
 from.
 
-> **0.1.3-beta is a Windows prerelease.** Check an important backup by
+> **0.1.4-beta is a Windows prerelease.** Check an important backup by
 > restoring it to a spare disk or a virtual machine before you rely on it.
 > Linux code exists for development and tests; there is no Linux version yet.
 
@@ -27,7 +27,7 @@ from.
 
 | Edition | Download | Usage |
 |---|---|---|
-| Installer | [own-backup-install.exe](https://github.com/coinman-dev/own-backup/releases/download/v0.1.3-beta/own-backup-install.exe) | Installs the program for all users of the computer and starts its backup service. Needs administrator rights. |
+| Installer | [own-backup-install.exe](https://github.com/coinman-dev/own-backup/releases/download/v0.1.4-beta/own-backup-install.exe) | Installs the program for all users of the computer and starts its backup service. Needs administrator rights. |
 
 Windows 10/11, x64. The window needs the Microsoft Edge WebView2 Runtime — part
 of Windows 11, and the installer says so if a Windows 10 does not have it. No
@@ -141,7 +141,7 @@ WinPE machine.
 
 ## Automated releases
 
-Pushing a version tag such as `v0.1.3-beta` starts the
+Pushing a version tag such as `v0.1.4-beta` starts the
 [release workflow](.github/workflows/release.yml). The tag must match the
 version in `Cargo.toml`. GitHub builds the Windows x64 executables, packs the
 installer, installs and removes it on the runner, computes SHA-256 checksums
