@@ -399,8 +399,15 @@ mod tests {
     #[test]
     fn an_empty_job_list_sweeps_nothing_at_all() {
         let dir = tempfile::tempdir().unwrap();
+        // An actual store is available to SYSTEM on Windows. Force a storage
+        // error instead of assuming that the platform/context cannot open it.
+        let blocked = dir
+            .path()
+            .join(own_backup_backup::seal::local::KEY_DIRECTORY_NAME);
+        std::fs::write(&blocked, b"not a key directory").unwrap();
         let store = JobStore::load(dir.path());
         assert_eq!(store.sweep_local_archive_keys().unwrap(), 0);
+        assert_eq!(std::fs::read(&blocked).unwrap(), b"not a key directory");
 
         store
             .upsert(Job {
@@ -410,7 +417,7 @@ mod tests {
             .unwrap();
         assert!(
             store.sweep_local_archive_keys().is_err(),
-            "with a job present it does reach the key store (absent here)"
+            "with a job present it does reach the deliberately blocked key store"
         );
     }
 

@@ -2,7 +2,7 @@
 
 # Changelog
 
-## 0.1.4-beta — 2026-10-09
+## 0.1.4-beta — 2026-10-10
 
 ### Changed
 
@@ -12,6 +12,8 @@
 
 ### Fixed
 
+- Stopping an iSCSI target on Windows checks cancellation during socket waits,
+  so an idle session no longer keeps the image open until its read timeout.
 - Encrypted jobs can regain automatic access after their locally stored
   authorization is damaged, using the recovery key.
 - Completed OBK images are published only after their data is durable; a

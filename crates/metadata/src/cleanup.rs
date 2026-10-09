@@ -261,16 +261,21 @@ mod tests {
         insert_job(&conn, &job).unwrap();
 
         // A file path that is outside the target directory
-        let outside_path = "/tmp/definitely_not_in_target.vhdx";
+        let outside = TempDir::new().unwrap();
+        let outside_path = outside
+            .path()
+            .join("important.vhdx")
+            .to_string_lossy()
+            .into_owned();
         // Create the file so canonicalize won't fail due to missing file
-        std::fs::write(outside_path, b"important system file").unwrap();
+        std::fs::write(&outside_path, b"important system file").unwrap();
 
         let bad_set = BackupSet {
             id: Uuid::new_v4(),
             job_id: job.id,
             backup_type: BackupType::Full,
             parent_set_id: None,
-            file_path: outside_path.into(),
+            file_path: outside_path.clone(),
             file_size: Some(100),
             source_size: 10000,
             block_count: 10,
@@ -338,11 +343,16 @@ mod tests {
 
         // The outside file must NOT be deleted
         assert!(
-            std::path::Path::new(outside_path).exists(),
+            std::path::Path::new(&outside_path).exists(),
             "File outside target directory must not be deleted"
         );
+        assert_eq!(
+            std::fs::read(&outside_path).unwrap(),
+            b"important system file"
+        );
+        assert!(get_set(&conn, &bad_set.id).unwrap().is_some());
 
         // Cleanup
-        let _ = std::fs::remove_file(outside_path);
+        let _ = std::fs::remove_file(&outside_path);
     }
 }

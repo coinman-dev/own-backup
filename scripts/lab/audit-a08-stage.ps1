@@ -30,10 +30,10 @@ try {
     if ($mode -in @('letter', 'mutations')) {
         $sourcePart = Get-Partition -DriveLetter E
         $env:OWN_BACKUP_A09_SOURCE_OFFSET = [string]$sourcePart.Offset
-        $testOutput = cmd.exe /d /c 'C:\Lab\letters_windows.exe --nocapture 2>&1' | Out-String
+        $testOutput = cmd.exe /d /c 'C:\Lab\letters_windows.exe --ignored --exact assigning_a_letter_is_idempotent_and_a_taken_letter_leaves_the_old_one --nocapture 2>&1' | Out-String
         $testCode = $LASTEXITCODE
         foreach ($line in ($testOutput -split "`r?`n")) { if ($line) { Say "A09-LETTER-TEST $line" } }
-        if ($testCode -ne 0) { throw 'native drive-letter regression failed' }
+        if ($testCode -ne 0 -or -not $testOutput.Contains('1 passed; 0 failed')) { throw 'native drive-letter regression failed or did not execute' }
         Say 'A09-LETTER-TEST-PASS'
         if ($mode -eq 'mutations') {
             $testOutput = cmd.exe /d /c 'C:\Lab\file_restore_windows.exe --ignored --exact file_verification_detects_reparse_target_change --nocapture 2>&1' | Out-String
