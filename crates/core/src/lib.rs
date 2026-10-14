@@ -19,6 +19,7 @@ pub mod archive_setup;
 pub mod backup_encryption;
 pub mod busy;
 pub mod restore_exec;
+pub mod source_refresh;
 pub mod verification;
 
 /// Where a destination folder sits relative to a job's sources — re-exported
@@ -571,6 +572,13 @@ pub struct JobRun {
     /// told why, in the same place the run is reported.
     #[serde(default)]
     pub consolidated_increments: u32,
+    /// The partitions this job copies moved, grew, shrank or were recreated
+    /// since the previous run, and the job followed them — in words for the
+    /// result screen; empty when nothing changed. Windows Update does this to
+    /// the recovery partition, and the copy that follows is a full one, so the
+    /// person seeing a large copy after a quiet week is told why.
+    #[serde(default)]
+    pub layout_changed: String,
 }
 
 /// A persisted backup job (task).
@@ -948,6 +956,30 @@ impl JobStore {
         write_json(&self.jobs_path, &next)?;
         *jobs = next;
         Ok(job)
+    }
+
+    /// Write back what [`source_refresh`] found: the job's devices, disk number
+    /// and disk snapshot — and nothing else, so an edit saved meanwhile keeps
+    /// its other fields. Returns the stored job.
+    pub fn refresh_sources(&self, refreshed: &Job) -> std::io::Result<Job> {
+        let mut jobs = self.jobs.lock().unwrap();
+        let mut next = jobs.clone();
+        let Some(job) = next.iter_mut().find(|j| j.id == refreshed.id) else {
+            // Deleted while it waited for the slot: nothing left to update.
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "job not found",
+            ));
+        };
+        job.source = refreshed.source.clone();
+        job.sources = refreshed.sources.clone();
+        job.disk_source = refreshed.disk_source.clone();
+        job.source_disks = refreshed.source_disks.clone();
+        job.updated_at = chrono::Utc::now().to_rfc3339();
+        let saved = job.clone();
+        write_json(&self.jobs_path, &next)?;
+        *jobs = next;
+        Ok(saved)
     }
 
     /// Remove a job; the list in memory changes only once the disk agrees.
@@ -1630,6 +1662,42 @@ fn after_backup(action: &str, job_name: &str, queue: &RunQueue) {
     }
 }
 
+/// Bring the job's partitions up to date with the disk before it runs (see
+/// [`source_refresh`]): the job to run, the note for the run record when its
+/// partitions moved, and why it cannot run when one of them is gone.
+#[cfg(target_os = "windows")]
+async fn refresh_job_sources(store: &JobStore, job: Job) -> (Job, String, Option<String>) {
+    use source_refresh::Refreshed;
+    match source_refresh::reconcile_with_live_disks(&job).await {
+        Refreshed::Unchanged => (job, String::new(), None),
+        Refreshed::Missing(why) => (job, String::new(), Some(why)),
+        Refreshed::Updated(r) => {
+            for (old, new) in &r.renamed {
+                info!(job = %job.name, old = %old, new = %new, "a source partition has a new device");
+            }
+            if !r.layout_note.is_empty() {
+                warn!(job = %job.name, note = %r.layout_note, "the source disk was re-partitioned");
+            }
+            // Saved, so the screen and the next run see the disk as it is.
+            // Not saved, the run still goes ahead with what was found: the
+            // check repeats before every run.
+            let job = match store.refresh_sources(&r.job) {
+                Ok(saved) => saved,
+                Err(e) => {
+                    warn!(job = %job.name, error = %e, "the updated partitions could not be saved");
+                    r.job
+                }
+            };
+            (job, r.layout_note, None)
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+async fn refresh_job_sources(_store: &JobStore, job: Job) -> (Job, String, Option<String>) {
+    (job, String::new(), None)
+}
+
 /// Background worker: pulls job ids off the channel and runs them one at a
 /// time. Spawned once at startup.
 ///
@@ -1709,6 +1777,9 @@ pub async fn run_queue_worker(
             sink.queue_changed(queue.snapshot());
             continue;
         };
+        // The partitions as they are NOW, not as they were when the job was
+        // saved — Windows Update re-creates the recovery partition under it.
+        let (job, layout_note, sources_missing) = refresh_job_sources(&store, job).await;
 
         // No sleep while copying — laptops included, verification included.
         // Released when this iteration ends, whatever the outcome.
@@ -1728,6 +1799,12 @@ pub async fn run_queue_worker(
             run.status = "cancelled".into();
             run.error = tr!("lib.cancelled_by_user").into_owned();
             run
+        } else if let Some(why) = sources_missing {
+            let mut run = run_skeleton(&job);
+            run.finished_at = chrono::Utc::now().to_rfc3339();
+            run.status = "error".into();
+            run.error = why;
+            run
         } else {
             match store.archive_keys_for_run(&job) {
                 Err(message) => {
@@ -1742,6 +1819,8 @@ pub async fn run_queue_worker(
                 }
             }
         };
+        let mut run = run;
+        run.layout_changed = layout_note;
         // How the run ended goes into the log as well as into its record. A
         // failure used to be written only to the record: on 2026-09-25 the log
         // said "Starting queued backup" and then nothing at all, and the reason

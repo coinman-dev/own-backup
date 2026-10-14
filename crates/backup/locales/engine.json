@@ -96,6 +96,10 @@
     "ru": "файловая система не распознана — раздел скопирован посекторно",
     "en": "file system not recognized — the partition was copied sector by sector"
   },
+  "engine_win.partition_not_in_slot": {
+    "ru": "%{device} больше не лежит в разделе %{index} диска %{disk}: разметка диска изменилась после настройки задания. Запустите копию ещё раз — задание обновит разделы само",
+    "en": "%{device} is no longer partition %{index} of disk %{disk}: the disk layout changed after the job was set up. Run the backup again — the job will update its partitions itself"
+  },
   "engine_win.locked_multi_extent": {
     "ru": "%{volume}: запертый том занимает %{count} экстентов — такой не поддерживается",
     "en": "%{volume}: the locked volume spans %{count} extents — this is not supported"

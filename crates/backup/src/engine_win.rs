@@ -3148,6 +3148,27 @@ fn backup_disk_inner(
         // fine; the checksum block grid is the image itself.
         let part_offset = entry.first_lba * sector;
 
+        // The device must BE that GPT entry. The job names the partition twice
+        // — by slot and by device — and the two drift apart when the disk is
+        // re-partitioned or renumbered; copying a volume into another slot
+        // would restore a disk nobody had. When Windows cannot tell where the
+        // device lives, the old behaviour stands.
+        if let Some(extents) = crate::source_identity::extents_of_source(&p.device) {
+            let in_slot = matches!(extents.as_slice(),
+                [e] if e.disk == req.disk_number && e.offset == part_offset);
+            if !in_slot {
+                return Err(OwnBackupError::Config(
+                    tr!(
+                        "engine_win.partition_not_in_slot",
+                        device = p.device,
+                        index = p.part_index,
+                        disk = req.disk_number
+                    )
+                    .into_owned(),
+                ));
+            }
+        }
+
         let source = normalize_device_path(&p.device);
         // VSS for a live lettered volume; else read the source directly.
         let mut vss: Option<VssSnapshotSession> = None;
@@ -3446,6 +3467,20 @@ fn backup_disk_inner(
                 req.image_format,
                 req.encryption.as_ref(),
             ) {
+                // The child inherits the parent's GPT: with partitions moved or
+                // resized since (Windows Update servicing WinRE), today's data
+                // would land in yesterday's slots. The image size alone cannot
+                // tell — the last partition may still end in the same place.
+                Ok(sc)
+                    if sc
+                        .disk_manifest
+                        .as_ref()
+                        .is_some_and(|dm| !dm.layout.same_partition_geometry(&layout)) =>
+                {
+                    warn!(parent = %pp.display(),
+                        "the disk layout changed since the parent copy — creating a full backup instead");
+                    kind = BackupType::Full;
+                }
                 Ok(sc) => parent = Some((pp.clone(), sc)),
                 Err(e) => {
                     warn!(parent = %pp.display(), error = %e,

@@ -455,6 +455,10 @@ export interface JobRun {
    *  image — why; '' when they were deleted. Their contents are not in the
    *  copy either way. Absent in runs recorded before 2026-09-28. */
   excluded_entries_kept?: string;
+  /** The copied partitions moved or were recreated since the previous run
+   *  (Windows Update does this to WinRE) and the job followed them — said
+   *  in words; '' or absent when nothing changed. */
+  layout_changed?: string;
   /** Every image this run produced, one per source volume. `image_path` and
    *  `base_image_path` above describe only the first. Empty in runs recorded
    *  before this field existed. */

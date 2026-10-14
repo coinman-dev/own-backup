@@ -900,6 +900,19 @@ impl BackupService for BackupServiceImpl {
             .store
             .get(&id)
             .ok_or_else(|| Status::not_found(tr!("grpc_server.job_not_found").into_owned()))?;
+        // The guard asks where the sources are, so it has to ask about the
+        // partitions as they are now: after Windows Update re-creates the
+        // recovery partition, the saved device names a volume that no longer
+        // exists and "cannot tell" refused every run. The worker saves the
+        // updated job before it copies; here it is only looked at.
+        #[cfg(target_os = "windows")]
+        let job = match own_backup_core::source_refresh::reconcile_with_live_disks(&job).await {
+            own_backup_core::source_refresh::Refreshed::Updated(r) => r.job,
+            own_backup_core::source_refresh::Refreshed::Missing(why) => {
+                return Err(Status::failed_precondition(why))
+            }
+            own_backup_core::source_refresh::Refreshed::Unchanged => job,
+        };
         // Guard against writing onto any source volume (mirrors save-time
         // check). This is the one that runs immediately before anything is
         // written, so here "cannot tell" is a refusal: not knowing where the

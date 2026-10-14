@@ -3029,6 +3029,7 @@ dependencies = [
  "chrono",
  "own-backup-backup",
  "own-backup-common",
+ "own-backup-inventory",
  "own-backup-metadata",
  "own-backup-restore",
  "own-backup-snapshot",

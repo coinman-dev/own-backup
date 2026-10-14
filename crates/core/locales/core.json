@@ -374,5 +374,33 @@
   "restore_exec.windows_only": {
     "ru": "восстановление по плану реализовано только для Windows",
     "en": "restoring by plan is implemented only on Windows"
+  },
+  "source_refresh.winre": {
+    "ru": "среда восстановления",
+    "en": "recovery environment"
+  },
+  "source_refresh.part_number": {
+    "ru": "раздел %{index}",
+    "en": "partition %{index}"
+  },
+  "source_refresh.part_named": {
+    "ru": "раздел %{index} (%{name})",
+    "en": "partition %{index} (%{name})"
+  },
+  "source_refresh.disk_missing": {
+    "ru": "Диск «%{disk}», с которого делается копия, сейчас не найден. Подключите его и запустите копию снова",
+    "en": "The disk “%{disk}” this job copies is not attached. Connect it and run the backup again"
+  },
+  "source_refresh.partition_missing": {
+    "ru": "На диске «%{disk}» больше нет раздела, который копирует задание: %{part}. Его удалили или пересоздали. Создайте задание заново («Клонировать параметры») и выберите разделы",
+    "en": "The disk “%{disk}” no longer has a partition this job copies: %{part}. It was deleted or recreated. Create the job again (“Clone settings”) and choose the partitions"
+  },
+  "source_refresh.partition_unreadable": {
+    "ru": "Раздел, который копирует задание, есть на диске «%{disk}», но в нём нет тома, который Windows может открыть: %{part}",
+    "en": "The partition this job copies is on the disk “%{disk}”, but it holds no volume Windows can open: %{part}"
+  },
+  "source_refresh.layout_changed": {
+    "ru": "Разметка диска «%{disk}» изменилась после прошлой копии (так делает обновление Windows): %{parts}. Задание обновлено, эта копия — полная",
+    "en": "The layout of the disk “%{disk}” changed since the previous backup (Windows Update does this): %{parts}. The job was updated, and this backup is a full one"
   }
 }

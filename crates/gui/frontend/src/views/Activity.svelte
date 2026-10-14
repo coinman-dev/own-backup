@@ -168,6 +168,9 @@
             {#if r.excluded_entries_kept}
               <div class="note">{r.excluded_entries_kept}</div>
             {/if}
+            {#if r.layout_changed}
+              <div class="note">{r.layout_changed}</div>
+            {/if}
             {#if r.operation === 'verify'}
               <div class="stats">
                 <div><span class="k">{m.act_time()}</span><span class="v">{formatDuration(r.duration_secs)}</span></div>
