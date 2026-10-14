@@ -68,6 +68,11 @@ pub struct VolumeBackupRequest {
     pub source: String,
     /// Output image path (`.vhdx`/`.avhdx`). Must not exist yet.
     pub image_path: PathBuf,
+    /// Where the image goes when a child was asked for and a FULL comes out
+    /// (parent unusable, disk re-partitioned): the file name says what the file
+    /// is, and so does the name recorded inside it. `None` keeps `image_path`
+    /// whatever happens.
+    pub full_image_path: Option<PathBuf>,
     /// Backup block size in bytes; use [`DEFAULT_BLOCK_SIZE`].
     pub block_size: u32,
     /// Copy every block even when an NTFS bitmap is available.
@@ -393,17 +398,40 @@ fn check_encrypted_target(
     Ok(())
 }
 
+/// The name an image is published under once its kind is settled:
+/// `full_image_path` when a child was asked for and a full was made.
+fn settled_image_path(
+    image_path: &Path,
+    full_image_path: Option<&Path>,
+    asked: BackupType,
+    made: BackupType,
+) -> PathBuf {
+    match full_image_path {
+        Some(full) if asked != BackupType::Full && made == BackupType::Full => full.to_path_buf(),
+        _ => image_path.to_path_buf(),
+    }
+}
+
+/// Neither name an image may end up under can be taken already: both are
+/// this run's, and the cleanup after a failure removes both.
+fn refuse_existing_outputs(image_path: &Path, full_image_path: Option<&Path>) -> Result<()> {
+    for path in std::iter::once(image_path).chain(full_image_path) {
+        if path.exists() {
+            return Err(OwnBackupError::Config(format!(
+                "output image already exists: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub fn backup_volume(
     req: &VolumeBackupRequest,
     progress: impl FnMut(&BackupProgress) -> Result<()>,
 ) -> Result<VolumeBackupSummary> {
     check_encrypted_target(req.encryption.as_ref(), req.image_format, &req.image_path)?;
-    if req.image_path.exists() {
-        return Err(OwnBackupError::Config(format!(
-            "output image already exists: {}",
-            req.image_path.display()
-        )));
-    }
+    refuse_existing_outputs(&req.image_path, req.full_image_path.as_deref())?;
     if let Some(parent) = req.image_path.parent() {
         if !parent.as_os_str().is_empty() {
             crate::dest_folder::create(parent)?;
@@ -426,15 +454,24 @@ pub fn backup_volume(
             &req.image_path,
             progress,
         )?;
-        pending.publish()?;
-        summary.image_path = req.image_path.clone();
-        summary.sidecar_path = sidecar_path_for(&req.image_path);
+        let published = settled_image_path(
+            &req.image_path,
+            req.full_image_path.as_deref(),
+            req.kind,
+            summary.backup_kind,
+        );
+        pending.publish_as(&published)?;
+        summary.sidecar_path = sidecar_path_for(&published);
+        summary.image_path = published;
         return Ok(summary);
     }
     let result = backup_volume_inner(req, None, &req.image_path, progress);
     if result.is_err() {
-        // Best-effort cleanup of a partial image.
+        // Best-effort cleanup of a partial image, under either name.
         let _ = std::fs::remove_file(&req.image_path);
+        if let Some(full) = &req.full_image_path {
+            let _ = std::fs::remove_file(full);
+        }
     }
     result
 }
@@ -922,6 +959,27 @@ fn backup_volume_inner(
             )));
         }
     }
+
+    // The kind is settled: from here on the image is written, and named inside,
+    // as what it is. An encrypted one is written to its private stage and only
+    // published under this name (see `backup_volume`).
+    let published = settled_image_path(
+        published_path,
+        req.full_image_path.as_deref(),
+        req.kind,
+        kind,
+    );
+    let published_path: &Path = &published;
+    let renamed;
+    let req = if owned_file.is_none() && req.image_path != published {
+        renamed = VolumeBackupRequest {
+            image_path: published.clone(),
+            ..req.clone()
+        };
+        &renamed
+    } else {
+        req
+    };
 
     // --- Used-sector map: NTFS → FAT32/exFAT → ext → btrfs → xfs → full copy ---
     let mut ntfs_map: Option<NtfsUsedSectorMap> = None;
@@ -2202,6 +2260,11 @@ pub struct DiskBackupRequest {
     pub disk_model: String,
     pub partitions: Vec<DiskPartitionBackup>,
     pub image_path: PathBuf,
+    /// Where the image goes when a child was asked for and a FULL comes out
+    /// (parent unusable, disk re-partitioned): the file name says what the file
+    /// is, and so does the name recorded inside it. `None` keeps `image_path`
+    /// whatever happens.
+    pub full_image_path: Option<PathBuf>,
     pub block_size: u32,
     pub image_format: ImageFormat,
     pub job_id: Option<String>,
@@ -3025,12 +3088,7 @@ pub fn backup_disk(
     progress: impl FnMut(&BackupProgress) -> Result<()>,
 ) -> Result<DiskBackupSummary> {
     check_encrypted_target(req.encryption.as_ref(), req.image_format, &req.image_path)?;
-    if req.image_path.exists() {
-        return Err(OwnBackupError::Config(format!(
-            "output image already exists: {}",
-            req.image_path.display()
-        )));
-    }
+    refuse_existing_outputs(&req.image_path, req.full_image_path.as_deref())?;
     if let Some(parent) = req.image_path.parent() {
         if !parent.as_os_str().is_empty() {
             crate::dest_folder::create(parent)?;
@@ -3049,13 +3107,22 @@ pub fn backup_disk(
             &req.image_path,
             progress,
         )?;
-        pending.publish()?;
-        summary.image_path = req.image_path.clone();
+        let published = settled_image_path(
+            &req.image_path,
+            req.full_image_path.as_deref(),
+            req.kind,
+            summary.backup_kind,
+        );
+        pending.publish_as(&published)?;
+        summary.image_path = published;
         return Ok(summary);
     }
     let result = backup_disk_inner(req, None, &req.image_path, progress);
     if result.is_err() {
         let _ = std::fs::remove_file(&req.image_path);
+        if let Some(full) = &req.full_image_path {
+            let _ = std::fs::remove_file(full);
+        }
     }
     result
 }
@@ -3581,6 +3648,25 @@ fn backup_disk_inner(
             plan = own_backup_common::gpt::plan_whole_disk_image(&layout, planned_meta(meta_size));
         }
     }
+    // The kind is settled — the image is written and named as what it is (see
+    // the same step in `backup_volume_inner`).
+    let published = settled_image_path(
+        published_path,
+        req.full_image_path.as_deref(),
+        req.kind,
+        kind,
+    );
+    let published_path: &Path = &published;
+    let renamed;
+    let req = if owned_file.is_none() && req.image_path != published {
+        renamed = DiskBackupRequest {
+            image_path: published.clone(),
+            ..req.clone()
+        };
+        &renamed
+    } else {
+        req
+    };
     let meta_offset = plan.meta_first_lba * sector;
     let meta_guid = (!encrypted).then(Uuid::new_v4);
 

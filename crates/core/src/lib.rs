@@ -2096,12 +2096,24 @@ fn image_token(path: &Path) -> Option<String> {
     }
 }
 
-/// Timestamped output file name for one volume of a run:
-/// `<name>_<token>_<full|inc|diff>_<stamp>.<vhdx|avhdx>`.
+/// Timestamped output file names of one image of a run:
+/// `<name>_<token>_<full|inc|diff>_<stamp>.<ext>`.
+///
+/// The image this run writes, and the name it gets if the engine has to fall
+/// back to a full (parent unusable, disk re-partitioned) — one timestamp for
+/// both. The name says what the file IS: a full named `_inc_` was found in
+/// the owner's folder on 2026-10-14, after a fallback the name never learned.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))] // used by the Windows backup path
-fn output_path_for(job: &Job, device: &str, kind: &str) -> PathBuf {
-    let token = file_token(job, device);
-    let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+fn output_paths_for(job: &Job, token: &str, kind: &str) -> (PathBuf, PathBuf) {
+    let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
+    (
+        image_name(job, token, kind, &stamp),
+        image_name(job, token, "full", &stamp),
+    )
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn image_name(job: &Job, token: &str, kind: &str, stamp: &str) -> PathBuf {
     let safe_name = own_backup_common::file_name::safe_file_stem(&job.name, "backup");
     // VHDX children are AVHDX (the Windows convention); qcow2 children stay
     // .qcow2 (the qemu convention — chain role lives in the sidecar).
@@ -3188,7 +3200,8 @@ async fn perform_backup(
 
     for (idx, device) in volumes.iter().enumerate() {
         let plan = plan_run_for_volume(job, &folder, device);
-        let image_path = output_path_for(job, device, plan.kind);
+        let (image_path, full_image_path) =
+            output_paths_for(job, &file_token(job, device), plan.kind);
         let token = source_token(device);
         let vol_label = job.label_for(device);
         let vidx = idx as u64;
@@ -3206,6 +3219,7 @@ async fn perform_backup(
         let request = VolumeBackupRequest {
             source: device.clone(),
             image_path: image_path.clone(),
+            full_image_path: Some(full_image_path),
             source_disk,
             block_size: own_backup_backup::engine_win::DEFAULT_BLOCK_SIZE,
             all_sectors: job.advanced.sector_by_sector,
@@ -3241,7 +3255,6 @@ async fn perform_backup(
         let cancel_bg = cancel.clone();
         let low_priority = job.advanced.low_priority;
         let speed_limit_mbps = job.advanced.speed_limit_mbps;
-        let image_for_verify = image_path.clone();
         // Checking an encrypted copy needs its key: without one there is no
         // sidecar to read and nothing to compare checksums against.
         let keys_for_verify = keys.clone();
@@ -3324,9 +3337,9 @@ async fn perform_backup(
             if validate_after {
                 let mut v_permille = u64::MAX;
                 let mut v_emit = std::time::Instant::now();
-                let mut v_rate = VerifyRate::new(&image_for_verify, keys_for_verify.as_ref());
+                let mut v_rate = VerifyRate::new(&summary.image_path, keys_for_verify.as_ref());
                 let verified = verify_image_scoped(
-                    &image_for_verify,
+                    &summary.image_path,
                     keys_for_verify.as_ref(),
                     verify_scope,
                     |done, total| {
@@ -3390,6 +3403,9 @@ async fn perform_backup(
         match result {
             Ok(Ok((summary, verify_cancelled))) => {
                 use own_backup_common::types::BackupType as BT;
+                // The name the engine published: a fallback to a full renames
+                // the planned child.
+                let image_path = summary.image_path.clone();
                 run.source_bytes += summary.source_bytes;
                 run.bytes_copied += summary.bytes_copied;
                 run.used_blocks += summary.used_blocks;
@@ -3549,33 +3565,18 @@ async fn perform_disk_backup(
 
     use own_backup_common::types::BackupType;
 
-    let safe_name = own_backup_common::file_name::safe_file_stem(&job.name, "backup");
-
     // Chain planning (plan D5): a scheduled incremental/differential writes a
     // differencing child over the previous whole-disk image of THIS disk; any
     // doubt resolves to a full. VHDX children are `.avhdx` (Windows convention);
     // qcow2 children stay `.qcow2` (the role lives in the sidecar).
     let folder = PathBuf::from(&job.dest_folder);
     let plan = plan_run_for_disk(job, &folder, ds.disk_number);
-    let child_ext = match (job.archive_encryption.is_some(), job.image_format) {
-        (true, _) => own_backup_backup::seal::obk::OBK_EXTENSION,
-        (false, own_backup_common::types::ImageFormat::Vhdx) => "avhdx",
-        (false, own_backup_common::types::ImageFormat::Qcow2) => "qcow2",
-    };
     // Name carries the kind tag (full/inc/diff) so a glance at the folder tells
     // full from child — the extension alone can't (a qcow2 child is still
     // `.qcow2`). Token position matches the per-volume scheme so `image_token`
     // reads `disk<N>` from `<name>_disk<N>_<tag>_<stamp>`.
-    let (tag, ext) = match plan.kind {
-        "incremental" => ("inc", child_ext),
-        "differential" => ("diff", child_ext),
-        _ => ("full", container_extension(job)),
-    };
-    let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
-    let image_path = folder.join(format!(
-        "{safe_name}_disk{}_{tag}_{stamp}.{ext}",
-        ds.disk_number
-    ));
+    let (image_path, full_image_path) =
+        output_paths_for(job, &format!("disk{}", ds.disk_number), plan.kind);
 
     let partitions: Vec<DiskPartitionBackup> = ds
         .parts
@@ -3624,6 +3625,7 @@ async fn perform_disk_backup(
         disk_model: ds.disk_model.clone(),
         partitions,
         source_disk,
+        full_image_path: Some(full_image_path.clone()),
         bootable: ds.bootable,
         zstd_level: job.zstd_level(),
         image_path: image_path.clone(),
@@ -3648,7 +3650,6 @@ async fn perform_disk_backup(
     } else {
         VerifyScope::Everything
     };
-    let image_for_verify = image_path.clone();
     let keys_for_verify = keys.clone();
     let image_name = image_path
         .file_name()
@@ -3733,9 +3734,9 @@ async fn perform_disk_backup(
         if validate_after {
             let mut v_permille = u64::MAX;
             let mut v_emit = std::time::Instant::now();
-            let mut v_rate = VerifyRate::new(&image_for_verify, keys_for_verify.as_ref());
+            let mut v_rate = VerifyRate::new(&summary.image_path, keys_for_verify.as_ref());
             let verified = verify_image_scoped(
-                &image_for_verify,
+                &summary.image_path,
                 keys_for_verify.as_ref(),
                 verify_scope,
                 |done, total| {
@@ -3796,6 +3797,11 @@ async fn perform_disk_backup(
 
     match result {
         Ok(Ok((summary, verify_cancelled))) => {
+            // The name the engine published: a fallback to a full renames the
+            // planned child.
+            let image_path = summary.image_path.clone();
+            run.image_path = image_path.display().to_string();
+            run.base_image_path = run.image_path.clone();
             run.status = "success".into();
             run.bytes_copied = summary.bytes_copied;
             run.used_blocks = summary.blocks_copied;
@@ -3848,6 +3854,7 @@ async fn perform_disk_backup(
             run.status = "cancelled".into();
             run.error = tr!("lib.cancelled_by_user").into_owned();
             let _ = std::fs::remove_file(&image_path);
+            let _ = std::fs::remove_file(&full_image_path);
         }
         Ok(Err(e)) => {
             run.status = "error".into();
@@ -4807,8 +4814,28 @@ mod tests {
         let token = file_token(&job, dev);
         assert_eq!(token, "kubuntubootP4100000");
         // The file name round-trips: image_token reads it back (case-insensitive).
-        let name = output_path_for(&job, dev, "full");
+        let (name, _) = output_paths_for(&job, &token, "full");
         assert!(image_token(&name).unwrap().eq_ignore_ascii_case(&token));
+
+        // A planned child carries the full's name as well, for a fallback:
+        // same stamp, `_full_` and the full's extension.
+        let (child, full) = output_paths_for(&job, "disk4", "incremental");
+        let (child, full) = (
+            child.file_name().unwrap().to_string_lossy().into_owned(),
+            full.file_name().unwrap().to_string_lossy().into_owned(),
+        );
+        assert!(
+            child.contains("_disk4_inc_") && child.ends_with(".avhdx"),
+            "{child}"
+        );
+        assert!(
+            full.contains("_disk4_full_") && full.ends_with(".vhdx"),
+            "{full}"
+        );
+        assert_eq!(
+            child.replace("_inc_", "_full_").replace(".avhdx", ".vhdx"),
+            full
+        );
 
         // No label → falls back to the stable device token.
         let bare = Job::default();

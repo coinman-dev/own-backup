@@ -64,6 +64,17 @@ impl NewImage {
         Ok(self.file.try_clone()?)
     }
 
+    /// [`Self::publish`] under another name in the same folder: the image
+    /// turned out a different kind than its requested name said. The stage
+    /// record keeps the first name; reclaiming a new image goes by its folder.
+    pub(crate) fn publish_as(mut self, target: &Path) -> Result<()> {
+        let name = target
+            .file_name()
+            .ok_or_else(|| super::bad("new image has no name"))?;
+        self.target = self.target.with_file_name(name);
+        self.publish()
+    }
+
     pub(crate) fn publish(self) -> Result<()> {
         let Self {
             _owner,
@@ -157,6 +168,32 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    /// A child that turned out a full is published under the full's name, in
+    /// the same folder, and the child's name never appears.
+    #[test]
+    fn a_new_image_can_be_published_under_the_name_of_what_it_became() {
+        let root = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new();
+        let keys = keys(&fixture);
+        let asked = root.path().join("job_disk4_inc_20261014-151005.obk");
+        let made = root.path().join("job_disk4_full_20261014-151005.obk");
+        let pending = NewImage::create(&asked, &keys).unwrap();
+        pending
+            .writer_file()
+            .unwrap()
+            .write_all(b"image bytes")
+            .unwrap();
+        pending.publish_as(&made).unwrap();
+        assert!(!asked.exists());
+        assert_eq!(std::fs::read(&made).unwrap(), b"image bytes");
+        // Nothing of the stage is left behind.
+        let left: Vec<_> = std::fs::read_dir(root.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(left, vec![made.file_name().unwrap().to_owned()]);
     }
 
     #[test]

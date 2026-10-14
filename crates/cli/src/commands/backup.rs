@@ -88,6 +88,7 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
     let request = VolumeBackupRequest {
         source: args.source.clone(),
         image_path: image_path.clone(),
+        full_image_path: None,
         block_size: args.block_size_mib * 1024 * 1024,
         all_sectors: args.all_sectors,
         use_vss: !args.no_vss,
