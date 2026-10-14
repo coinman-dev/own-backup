@@ -2,7 +2,7 @@
 
 # Changelog
 
-## 0.1.4-beta — 2026-10-10
+## 0.1.4-beta — 2026-10-14
 
 ### Changed
 
@@ -12,6 +12,16 @@
 
 ### Fixed
 
+- A disk backup job follows partitions that Windows Update shrank, moved or
+  recreated, such as the recovery partition. Before each run the job is
+  matched against the disk as it is now and updated; the next copy is a full
+  one, and the result says why. Such jobs used to fail with "file not found".
+  A data partition that disappeared is never replaced by a guess.
+- An incremental disk copy is never written over a parent copy with a
+  different partition layout, which would have restored data into the wrong
+  places.
+- A copy that had to become a full one is named and recorded as a full copy,
+  not with the name of the planned increment.
 - Stopping an iSCSI target on Windows checks cancellation during socket waits,
   so an idle session no longer keeps the image open until its read timeout.
 - Encrypted jobs can regain automatic access after their locally stored
