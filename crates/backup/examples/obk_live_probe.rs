@@ -192,6 +192,7 @@ mod probe {
         let request = |path: &Path, kind: BackupType, parent: Option<&Path>| VolumeBackupRequest {
             source: source.clone(),
             image_path: path.to_path_buf(),
+            full_image_path: None,
             block_size: DEFAULT_BLOCK_SIZE,
             all_sectors: false,
             use_vss: true,
@@ -462,6 +463,7 @@ mod probe {
                 disk_model: "LAB VIRTUAL DISK".into(),
                 partitions,
                 image_path: image.clone(),
+                full_image_path: None,
                 block_size: DEFAULT_BLOCK_SIZE,
                 image_format: ImageFormat::Qcow2,
                 job_id: Some(JOB.into()),

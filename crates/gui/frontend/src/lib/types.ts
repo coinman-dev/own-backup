@@ -416,7 +416,14 @@ export interface CategorySizes {
   other: number;
 }
 
+export interface VerificationConfig {
+  schedule: ScheduleConfig;
+  all_versions: boolean;
+}
+
 export interface JobRun {
+  operation?: string;
+  verification?: JobVerifySummary | null;
   id: string;
   job_id: string;
   job_name: string;
@@ -448,6 +455,10 @@ export interface JobRun {
    *  image — why; '' when they were deleted. Their contents are not in the
    *  copy either way. Absent in runs recorded before 2026-09-28. */
   excluded_entries_kept?: string;
+  /** The copied partitions moved or were recreated since the previous run
+   *  (Windows Update does this to WinRE) and the job followed them — said
+   *  in words; '' or absent when nothing changed. */
+  layout_changed?: string;
   /** Every image this run produced, one per source volume. `image_path` and
    *  `base_image_path` above describe only the first. Empty in runs recorded
    *  before this field existed. */
@@ -667,6 +678,10 @@ export interface Job {
   /** Image container: vhdx (Windows-native, chains) or qcow2 (zstd-compressed). */
   image_format: 'vhdx' | 'qcow2';
   schedule: ScheduleConfig;
+  verification: VerificationConfig;
+  last_verification?: JobRun | null;
+  invalid_images?: string[];
+  verification_blocked?: boolean;
   scheme: SchemeConfig;
   exclusions: ExclusionsConfig;
   advanced: AdvancedConfig;

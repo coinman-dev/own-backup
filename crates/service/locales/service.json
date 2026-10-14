@@ -1,5 +1,7 @@
 {
   "_version": 2,
+  "grpc_server.busy_archive_reauthorize": {"ru": "Восстановление разрешения на автоматические копии", "en": "Restoring automatic backup authorization"},
+  "scheduled_verification.panicked": {"ru": "Проверка прервана внутренней ошибкой. Подробности — в журнале службы.", "en": "Verification stopped due to an internal error. See the service log for details."},
   "grpc_server.target_disk_changed": {
     "ru": "Диск %{disk} сейчас — не тот, для которого составлен план (было: серийный «%{was_serial}», %{was_size} Б; стало: серийный «%{now_serial}», %{now_size} Б). Соберите план заново.",
     "en": "Disk %{disk} is no longer the one the plan was made for (was: serial “%{was_serial}”, %{was_size} B; now: serial “%{now_serial}”, %{now_size} B). Build the plan again."

@@ -24,7 +24,8 @@
   const status = $derived(jobStatus(job));
   const running = $derived(status === 'running');
   const progress = $derived(jobs.progress[job.id] ?? null);
-  const verifying = $derived(progress?.phase === 'verify');
+  const scheduledVerify = $derived(progress?.phase === 'scheduled-verify');
+  const verifying = $derived(progress?.phase === 'verify' || scheduledVerify);
   const preparing = $derived(progress?.phase === 'prepare');
   const finalizing = $derived(progress?.phase === 'finalize');
   // The post-copy exclusion pass (true removal / in-image exclusions): minutes
@@ -39,6 +40,7 @@
   );
   /** How the last attempt ended — the ✓/✕ and the banner under the stats. */
   const lastRun = $derived(job.last_run);
+  const lastVerification = $derived(job.last_verification);
   /** What the job HAS: the newest copy, its size and what is in it. A failed
    *  attempt after it changes nothing about that (see `lastSuccessfulRun`). */
   const lastGood = $derived(lastSuccessfulRun(job));
@@ -80,6 +82,7 @@
    *  nothing under it, is again this copy alone (`VerifyScope`). Which kind is
    *  being written is in the file name: `…_{full|inc|diff}_{stamp}.{ext}`. */
   const verifyLabel = $derived.by(() => {
+    if (scheduledVerify) return m.act_verify_running();
     const tag = progress?.image_file_name?.match(/_(full|inc|diff)_\d{8}-\d{6}\.[^.]+$/i)?.[1];
     const onlyThis = job.advanced.verify_latest_only || tag?.toLowerCase() === 'full';
     return onlyThis ? m.dash_verify_this() : m.dash_verify_all();
@@ -92,6 +95,7 @@
   const ringPercent = $derived.by(() => {
     const p = progress;
     if (!p || p.phase === 'prepare') return 0;
+    if (p.phase === 'scheduled-verify') return p.percent;
     if (p.phase === 'finalize' || p.phase === 'exclusions')
       return job.advanced.validate_after ? 50 : 100;
     if (job.advanced.validate_after) {
@@ -225,7 +229,11 @@
   }
 
   async function cancel() {
-    await cancelRunning();
+    if (scheduledVerify) {
+      try { await api.cancelEngineOp(); } catch (e) { actionErr = String(e); }
+    } else {
+      await cancelRunning();
+    }
   }
 </script>
 
@@ -410,6 +418,9 @@
       </div>
     {/if}
 
+    {#if lastVerification?.status === 'error'}
+      <div class="banner err">{@render errIcon()}<span>{m.act_verify_failed()} — {formatDate(lastVerification.finished_at)}. {lastVerification.error}</span></div>
+    {/if}
     {#if lastRun?.status === 'success'}
       {#if summaryHidden}
         <button class="summary-show" onclick={() => { summaryHidden = false; rememberSummaryState(false); }}>
@@ -447,6 +458,10 @@
               <br />
               <b>{m.dash_entries_kept()}</b>
               {lastRun.excluded_entries_kept}.
+            {/if}
+            {#if lastRun.layout_changed}
+              <br />
+              {lastRun.layout_changed}.
             {/if}
           </span>
           <button class="banner-x" title={m.common_hide()} aria-label={m.common_hide()} onclick={() => { summaryHidden = true; rememberSummaryState(true); }}>

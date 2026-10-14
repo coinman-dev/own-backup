@@ -81,6 +81,10 @@ service BackupService {
   rpc ConfirmArchiveEncryption(JsonRequest) returns (JsonReply);
   // JSON in:  { "token": string } — the operator went back; nothing to undo.
   rpc CancelArchiveEncryption(JsonRequest) returns (Empty);
+  // Restore this machine's automatic access using the EXISTING job key.
+  // JSON in: { "job_id", password?/recovery_key? } -> stored Job JSON.
+  // Does not change archive passwords, recovery keys or chain identity.
+  rpc ReauthorizeArchive(JsonRequest) returns (JsonReply);
   // What a copy is, WITHOUT any key — so a screen can ask for a password
   // before it offers to mount or restore.
   // JSON in:  { "image_path": string }

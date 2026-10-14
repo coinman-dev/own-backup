@@ -286,6 +286,40 @@ pub fn calculate_meta_partition_size(total_blocks: u64, extra_bytes: u64) -> u64
     bytes.div_ceil(mib) * mib
 }
 
+/// Reserve for every source block in a new plaintext whole-disk chain, so
+/// filling previously free space cannot outgrow its guest metadata partition.
+/// OBK's metadata is per-container and only needs room for the current state.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn whole_disk_full_metadata_size(
+    encrypted: bool,
+    used_blocks: u64,
+    addressable_blocks: u64,
+    extra_bytes: u64,
+) -> u64 {
+    let blocks = if encrypted {
+        used_blocks
+    } else {
+        addressable_blocks.max(used_blocks)
+    };
+    calculate_meta_partition_size(blocks.max(1), extra_bytes)
+}
+
+/// Choose the metadata room for a whole-disk image. `None` requires a new
+/// full image: a plaintext child cannot resize its parent's guest partition.
+/// OBK stores metadata in each container independently of the guest geometry,
+/// so its child's reservation may grow or shrink without breaking the chain.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn whole_disk_metadata_size(
+    encrypted: bool,
+    required: u64,
+    parent_size: Option<u64>,
+) -> Option<u64> {
+    match parent_size {
+        Some(size) if !encrypted => (required <= size).then_some(size),
+        _ => Some(required),
+    }
+}
+
 /// Room to reserve for stored container headers (D19).
 ///
 /// They travel base64-encoded inside the sidecar's JSON, which inflates them by
@@ -726,6 +760,17 @@ fn open_meta_partition(image_path: &Path, container_format: &str) -> Result<(Gue
             OwnBackupError::ImageFormat("OwnBackupMeta partition not found in GPT".into())
         })?;
     Ok((guest, meta_offset, meta_size))
+}
+
+/// Actual guest metadata reservation. A child's checksum count describes its
+/// current state, not the capacity originally reserved by the full image.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn embedded_metadata_region(
+    image_path: &Path,
+    container_format: &str,
+) -> Result<(u64, u64)> {
+    let (_, offset, size) = open_meta_partition(image_path, container_format)?;
+    Ok((offset, size))
 }
 
 /// Read the embedded sidecar blob (exact size, derived from its own length
@@ -1266,6 +1311,165 @@ pub fn read_sidecar_from<R: Read>(r: &mut R) -> Result<Sidecar> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn plaintext_metadata_reserve_covers_a_full_source_volume() {
+        use super::{calculate_meta_partition_size, whole_disk_full_metadata_size};
+        let capacity = 1 << 20; // 1 TiB at 1 MiB per checksum block.
+        let reserve = whole_disk_full_metadata_size(false, 57_563, capacity, 18_730);
+        assert_eq!(reserve, 17 << 20);
+        for used in [0, 57_563, 62_142, capacity / 2, capacity] {
+            assert!(calculate_meta_partition_size(used, 18_730) <= reserve);
+        }
+        assert_eq!(
+            whole_disk_full_metadata_size(true, 57_563, capacity, 0),
+            1 << 20
+        );
+    }
+
+    #[test]
+    fn embedded_metadata_reserve_is_read_from_gpt_and_inherited_by_children() {
+        use super::{
+            embedded_metadata_region, whole_disk_full_metadata_size, whole_disk_metadata_size,
+        };
+        use crate::gpt_writer::{gpt_write_ops, GptLayout, DEFAULT_PARTITION_OFFSET};
+        use crate::qcow2::{Qcow2Writer, Qcow2WriterOptions};
+        use crate::vhdx_format::VhdxWriter;
+        use std::collections::BTreeMap;
+
+        const MIB: u64 = 1 << 20;
+        const CLUSTER: usize = 65536;
+        let dir = tempfile::tempdir().unwrap();
+        let volume_len = 128 * 1024 * MIB;
+        let reserve = whole_disk_full_metadata_size(false, 1, volume_len / MIB, 0);
+        assert_eq!(reserve, 3 * MIB);
+        let virtual_size = DEFAULT_PARTITION_OFFSET + volume_len + reserve + MIB;
+        let layout = GptLayout {
+            disk_size: virtual_size,
+            sector_size: 512,
+            partition_offset: DEFAULT_PARTITION_OFFSET,
+            partition_size: volume_len,
+            disk_guid: uuid::Uuid::new_v4(),
+            partition_guid: uuid::Uuid::new_v4(),
+            partition_name: "Data".into(),
+            meta_partition_size: Some(reserve),
+            meta_partition_guid: Some(uuid::Uuid::new_v4()),
+        };
+        let meta_offset = DEFAULT_PARTITION_OFFSET + volume_len;
+        let ops = gpt_write_ops(&layout).unwrap();
+        let mut clusters: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
+        let vhdx = dir.path().join("base.vhdx");
+        let mut writer = VhdxWriter::create(&vhdx, virtual_size, MIB, 512).unwrap();
+        for op in ops {
+            writer.write_at(op.offset, &op.bytes).unwrap();
+            for (i, byte) in op.bytes.into_iter().enumerate() {
+                let off = op.offset + i as u64;
+                clusters
+                    .entry(off / CLUSTER as u64)
+                    .or_insert_with(|| vec![0; CLUSTER])[off as usize % CLUSTER] = byte;
+            }
+        }
+        writer.finish().unwrap();
+        assert_eq!(
+            embedded_metadata_region(&vhdx, "vhdx").unwrap(),
+            (meta_offset, reserve)
+        );
+
+        let base = dir.path().join("base.qcow2");
+        let mut writer = Qcow2Writer::new(
+            File::create(&base).unwrap(),
+            Qcow2WriterOptions {
+                virtual_size,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for (index, bytes) in clusters {
+            writer.write_cluster(index, &bytes).unwrap();
+        }
+        writer.finish().unwrap();
+        assert_eq!(
+            embedded_metadata_region(&base, "qcow2").unwrap(),
+            (meta_offset, reserve)
+        );
+
+        // A child inherits GPT but stores its own larger checksum table. The
+        // source is sparse: this tests the reservation without writing 128 GiB.
+        let checksums: Vec<_> = (0..volume_len / MIB)
+            .map(|block_number| BlockChecksum {
+                block_number,
+                checksum: xxhash_rust::xxh64::xxh64(&block_number.to_le_bytes(), 0),
+            })
+            .collect();
+        let mut manifest = make_manifest();
+        manifest.block_size = MIB as u32;
+        manifest.source_disk.size_bytes = virtual_size;
+        manifest.used_blocks = checksums.len() as u64;
+        let mut info = SidecarInfo::new_full("child.qcow2", DEFAULT_PARTITION_OFFSET);
+        info.chain_role = ChainRole::Incremental;
+        info.parent_image_file_name = Some("base.qcow2".into());
+        info.container = "qcow2".into();
+        let mut blob = Vec::new();
+        write_sidecar_v2_to(&mut blob, &info, &manifest, &checksums).unwrap();
+        assert!(blob.len() > MIB as usize && blob.len() < reserve as usize);
+        assert_eq!(
+            whole_disk_metadata_size(false, reserve, Some(reserve)),
+            Some(reserve)
+        );
+        let child = dir.path().join("child.qcow2");
+        let mut writer = Qcow2Writer::new(
+            File::create(&child).unwrap(),
+            Qcow2WriterOptions {
+                virtual_size,
+                backing_file: Some("base.qcow2".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for (i, bytes) in blob.chunks(CLUSTER).enumerate() {
+            let mut padded = vec![0; CLUSTER];
+            padded[..bytes.len()].copy_from_slice(bytes);
+            writer
+                .write_cluster(meta_offset / CLUSTER as u64 + i as u64, &padded)
+                .unwrap();
+        }
+        writer.finish().unwrap();
+        assert_eq!(
+            embedded_metadata_region(&child, "qcow2").unwrap(),
+            (meta_offset, reserve)
+        );
+        let sidecar = read_embedded_sidecar(&child, "qcow2").unwrap();
+        assert_eq!(sidecar.info.chain_role, ChainRole::Incremental);
+        assert_eq!(sidecar.checksums, checksums);
+    }
+
+    #[test]
+    fn whole_disk_metadata_growth_respects_container_geometry() {
+        use super::whole_disk_metadata_size;
+        const MIB: u64 = 1 << 20;
+        // Each OBK version owns its reservation, including when usage shrinks.
+        assert_eq!(
+            whole_disk_metadata_size(true, 2 * MIB, Some(MIB)),
+            Some(2 * MIB)
+        );
+        assert_eq!(
+            whole_disk_metadata_size(true, MIB, Some(2 * MIB)),
+            Some(MIB)
+        );
+        // Plaintext children must preserve the parent's guest partition size.
+        assert_eq!(whole_disk_metadata_size(false, 2 * MIB, Some(MIB)), None);
+        assert_eq!(
+            whole_disk_metadata_size(false, MIB, Some(2 * MIB)),
+            Some(2 * MIB)
+        );
+        assert_eq!(whole_disk_metadata_size(false, MIB, Some(MIB)), Some(MIB));
+        for encrypted in [false, true] {
+            assert_eq!(
+                whole_disk_metadata_size(encrypted, 2 * MIB, None),
+                Some(2 * MIB)
+            );
+        }
+    }
+
     use super::*;
     use own_backup_common::disk::DiskInfo;
     use own_backup_common::types::*;

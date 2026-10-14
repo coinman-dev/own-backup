@@ -259,6 +259,7 @@ pub async fn run(args: BackupDiskArgs) -> own_backup_common::Result<()> {
             })
             .collect(),
         image_path: image_path.clone(),
+        full_image_path: None,
         bootable: args.bootable,
         block_size: args.block_size_mib * 1024 * 1024,
         image_format: args.format,

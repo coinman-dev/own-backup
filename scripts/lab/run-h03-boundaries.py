@@ -81,7 +81,7 @@ def run_command(command, name):
 def pack():
     import gzip
     import io
-    archive = REPO / 'docs/WINDOWS-TEST-EVIDENCE-2026-09-30.tar.gz'
+    archive = REPO / '.ai/archive/WINDOWS-TEST-EVIDENCE-2026-09-30.tar.gz'
     temporary = archive.with_name('.h03-boundary-evidence.tmp.tar.gz')
     prefix = ARCHIVE_PREFIX
     manifest = {}

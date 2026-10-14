@@ -62,11 +62,17 @@ fn no_patterns() -> String {
 }
 
 /// Parameters for a volume backup.
+#[derive(Clone)]
 pub struct VolumeBackupRequest {
     /// Source volume: `C:`, `\\.\C:` or a VSS snapshot device path.
     pub source: String,
     /// Output image path (`.vhdx`/`.avhdx`). Must not exist yet.
     pub image_path: PathBuf,
+    /// Where the image goes when a child was asked for and a FULL comes out
+    /// (parent unusable, disk re-partitioned): the file name says what the file
+    /// is, and so does the name recorded inside it. `None` keeps `image_path`
+    /// whatever happens.
+    pub full_image_path: Option<PathBuf>,
     /// Backup block size in bytes; use [`DEFAULT_BLOCK_SIZE`].
     pub block_size: u32,
     /// Copy every block even when an NTFS bitmap is available.
@@ -392,17 +398,40 @@ fn check_encrypted_target(
     Ok(())
 }
 
+/// The name an image is published under once its kind is settled:
+/// `full_image_path` when a child was asked for and a full was made.
+fn settled_image_path(
+    image_path: &Path,
+    full_image_path: Option<&Path>,
+    asked: BackupType,
+    made: BackupType,
+) -> PathBuf {
+    match full_image_path {
+        Some(full) if asked != BackupType::Full && made == BackupType::Full => full.to_path_buf(),
+        _ => image_path.to_path_buf(),
+    }
+}
+
+/// Neither name an image may end up under can be taken already: both are
+/// this run's, and the cleanup after a failure removes both.
+fn refuse_existing_outputs(image_path: &Path, full_image_path: Option<&Path>) -> Result<()> {
+    for path in std::iter::once(image_path).chain(full_image_path) {
+        if path.exists() {
+            return Err(OwnBackupError::Config(format!(
+                "output image already exists: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub fn backup_volume(
     req: &VolumeBackupRequest,
     progress: impl FnMut(&BackupProgress) -> Result<()>,
 ) -> Result<VolumeBackupSummary> {
     check_encrypted_target(req.encryption.as_ref(), req.image_format, &req.image_path)?;
-    if req.image_path.exists() {
-        return Err(OwnBackupError::Config(format!(
-            "output image already exists: {}",
-            req.image_path.display()
-        )));
-    }
+    refuse_existing_outputs(&req.image_path, req.full_image_path.as_deref())?;
     if let Some(parent) = req.image_path.parent() {
         if !parent.as_os_str().is_empty() {
             crate::dest_folder::create(parent)?;
@@ -413,10 +442,36 @@ pub fn backup_volume(
     // paths (System Volume Information, protected app data). Best-effort.
     crate::privileges_win::enable_backup_privileges();
 
-    let result = backup_volume_inner(req, progress);
+    if let Some(keys) = &req.encryption {
+        let pending = crate::seal::obk::new_image::NewImage::create(&req.image_path, keys)?;
+        let staged = VolumeBackupRequest {
+            image_path: pending.path().to_path_buf(),
+            ..req.clone()
+        };
+        let mut summary = backup_volume_inner(
+            &staged,
+            Some(pending.writer_file()?),
+            &req.image_path,
+            progress,
+        )?;
+        let published = settled_image_path(
+            &req.image_path,
+            req.full_image_path.as_deref(),
+            req.kind,
+            summary.backup_kind,
+        );
+        pending.publish_as(&published)?;
+        summary.sidecar_path = sidecar_path_for(&published);
+        summary.image_path = published;
+        return Ok(summary);
+    }
+    let result = backup_volume_inner(req, None, &req.image_path, progress);
     if result.is_err() {
-        // Best-effort cleanup of a partial image.
+        // Best-effort cleanup of a partial image, under either name.
         let _ = std::fs::remove_file(&req.image_path);
+        if let Some(full) = &req.full_image_path {
+            let _ = std::fs::remove_file(full);
+        }
     }
     result
 }
@@ -687,6 +742,8 @@ fn unlock_source_with_windows(
 
 fn backup_volume_inner(
     req: &VolumeBackupRequest,
+    owned_file: Option<std::fs::File>,
+    published_path: &Path,
     mut progress: impl FnMut(&BackupProgress) -> Result<()>,
 ) -> Result<VolumeBackupSummary> {
     let started = Instant::now();
@@ -902,6 +959,27 @@ fn backup_volume_inner(
             )));
         }
     }
+
+    // The kind is settled: from here on the image is written, and named inside,
+    // as what it is. An encrypted one is written to its private stage and only
+    // published under this name (see `backup_volume`).
+    let published = settled_image_path(
+        published_path,
+        req.full_image_path.as_deref(),
+        req.kind,
+        kind,
+    );
+    let published_path: &Path = &published;
+    let renamed;
+    let req = if owned_file.is_none() && req.image_path != published {
+        renamed = VolumeBackupRequest {
+            image_path: published.clone(),
+            ..req.clone()
+        };
+        &renamed
+    } else {
+        req
+    };
 
     // --- Used-sector map: NTFS → FAT32/exFAT → ext → btrfs → xfs → full copy ---
     let mut ntfs_map: Option<NtfsUsedSectorMap> = None;
@@ -1486,11 +1564,20 @@ fn backup_volume_inner(
                 level: crate::qcow2::zstd_level_or_default(req.zstd_level),
             },
         };
-        let writer = Box::new(crate::seal::obk::ObkStagedWriter::create(
-            &req.image_path,
-            &chain.key,
-            keys.writer_options(&chain, plan),
-        )?);
+        let writer = Box::new(match owned_file {
+            Some(file) => {
+                crate::seal::obk::ObkStagedWriter::new(crate::seal::obk::ObkWriter::new(
+                    std::io::BufWriter::new(file),
+                    &chain.key,
+                    keys.writer_options(&chain, plan),
+                )?)?
+            }
+            None => crate::seal::obk::ObkStagedWriter::create(
+                &req.image_path,
+                &chain.key,
+                keys.writer_options(&chain, plan),
+            )?,
+        });
         (ImageTarget::Obk { writer }, data_offset)
     } else {
         match req.image_format {
@@ -1732,8 +1819,7 @@ fn backup_volume_inner(
         preflight_report: None,
         volume_encryption: None,
     };
-    let temp_image_file_name = req
-        .image_path
+    let temp_image_file_name = published_path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
@@ -1912,7 +1998,7 @@ fn backup_volume_inner(
                     &mut checksums,
                     tick,
                 )?
-                .is_some()
+                .map(|outcome| outcome.entries_failed)
             }
             // An encrypted image gets the same pass over a SEALED scratch, and
             // the changed clusters go back by rebuilding the container: it is
@@ -1931,7 +2017,7 @@ fn backup_volume_inner(
                     &mut checksums,
                     tick,
                 )?
-                .is_some()
+                .map(|outcome| outcome.entries_failed)
             }
             ImageFormat::Qcow2 => {
                 // RW-mount over a CoW overlay, delete, fold the touched
@@ -1946,11 +2032,15 @@ fn backup_volume_inner(
                     &mut checksums,
                     tick,
                 )?
-                .is_some()
+                .map(|outcome| outcome.entries_failed)
             }
         };
-        if removed {
+        if let Some(failed) = removed {
             used_blocks = checksums.len() as u64;
+            if failed > 0 {
+                excluded_entries_kept =
+                    Some(tr!("engine_win.entries_partly_kept", count = failed).into_owned());
+            }
         } else {
             excluded_entries_kept = Some(entries_kept_reason());
         }
@@ -1960,8 +2050,7 @@ fn backup_volume_inner(
     // Child sidecars carry the FULL state checksums (every used block, written
     // or inherited), so verify/restore/mount treat the leaf exactly like a
     // full image — the VHDX chain resolves inherited blocks.
-    let image_file_name = req
-        .image_path
+    let image_file_name = published_path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
@@ -2154,6 +2243,7 @@ fn backup_volume_inner(
 // ===========================================================================
 
 /// One partition to include in a whole-disk backup.
+#[derive(Clone)]
 pub struct DiskPartitionBackup {
     /// Source volume device (`\\.\Volume{…}`, a drive letter, or `part:…`).
     pub device: String,
@@ -2164,11 +2254,17 @@ pub struct DiskPartitionBackup {
 }
 
 /// Parameters for a whole-disk (bootable) backup into a single image.
+#[derive(Clone)]
 pub struct DiskBackupRequest {
     pub disk_number: u32,
     pub disk_model: String,
     pub partitions: Vec<DiskPartitionBackup>,
     pub image_path: PathBuf,
+    /// Where the image goes when a child was asked for and a FULL comes out
+    /// (parent unusable, disk re-partitioned): the file name says what the file
+    /// is, and so does the name recorded inside it. `None` keeps `image_path`
+    /// whatever happens.
+    pub full_image_path: Option<PathBuf>,
     pub block_size: u32,
     pub image_format: ImageFormat,
     pub job_id: Option<String>,
@@ -2992,27 +3088,49 @@ pub fn backup_disk(
     progress: impl FnMut(&BackupProgress) -> Result<()>,
 ) -> Result<DiskBackupSummary> {
     check_encrypted_target(req.encryption.as_ref(), req.image_format, &req.image_path)?;
-    if req.image_path.exists() {
-        return Err(OwnBackupError::Config(format!(
-            "output image already exists: {}",
-            req.image_path.display()
-        )));
-    }
+    refuse_existing_outputs(&req.image_path, req.full_image_path.as_deref())?;
     if let Some(parent) = req.image_path.parent() {
         if !parent.as_os_str().is_empty() {
             crate::dest_folder::create(parent)?;
         }
     }
     crate::privileges_win::enable_backup_privileges();
-    let result = backup_disk_inner(req, progress);
+    if let Some(keys) = &req.encryption {
+        let pending = crate::seal::obk::new_image::NewImage::create(&req.image_path, keys)?;
+        let staged = DiskBackupRequest {
+            image_path: pending.path().to_path_buf(),
+            ..req.clone()
+        };
+        let mut summary = backup_disk_inner(
+            &staged,
+            Some(pending.writer_file()?),
+            &req.image_path,
+            progress,
+        )?;
+        let published = settled_image_path(
+            &req.image_path,
+            req.full_image_path.as_deref(),
+            req.kind,
+            summary.backup_kind,
+        );
+        pending.publish_as(&published)?;
+        summary.image_path = published;
+        return Ok(summary);
+    }
+    let result = backup_disk_inner(req, None, &req.image_path, progress);
     if result.is_err() {
         let _ = std::fs::remove_file(&req.image_path);
+        if let Some(full) = &req.full_image_path {
+            let _ = std::fs::remove_file(full);
+        }
     }
     result
 }
 
 fn backup_disk_inner(
     req: &DiskBackupRequest,
+    owned_file: Option<std::fs::File>,
+    published_path: &Path,
     mut progress: impl FnMut(&BackupProgress) -> Result<()>,
 ) -> Result<DiskBackupSummary> {
     let started = Instant::now();
@@ -3096,6 +3214,27 @@ fn backup_disk_inner(
         // disk-composite reader below copies whole-disk blocks, so any offset is
         // fine; the checksum block grid is the image itself.
         let part_offset = entry.first_lba * sector;
+
+        // The device must BE that GPT entry. The job names the partition twice
+        // — by slot and by device — and the two drift apart when the disk is
+        // re-partitioned or renumbered; copying a volume into another slot
+        // would restore a disk nobody had. When Windows cannot tell where the
+        // device lives, the old behaviour stands.
+        if let Some(extents) = crate::source_identity::extents_of_source(&p.device) {
+            let in_slot = matches!(extents.as_slice(),
+                [e] if e.disk == req.disk_number && e.offset == part_offset);
+            if !in_slot {
+                return Err(OwnBackupError::Config(
+                    tr!(
+                        "engine_win.partition_not_in_slot",
+                        device = p.device,
+                        index = p.part_index,
+                        disk = req.disk_number
+                    )
+                    .into_owned(),
+                ));
+            }
+        }
 
         let source = normalize_device_path(&p.device);
         // VSS for a live lettered volume; else read the source directly.
@@ -3395,6 +3534,20 @@ fn backup_disk_inner(
                 req.image_format,
                 req.encryption.as_ref(),
             ) {
+                // The child inherits the parent's GPT: with partitions moved or
+                // resized since (Windows Update servicing WinRE), today's data
+                // would land in yesterday's slots. The image size alone cannot
+                // tell — the last partition may still end in the same place.
+                Ok(sc)
+                    if sc
+                        .disk_manifest
+                        .as_ref()
+                        .is_some_and(|dm| !dm.layout.same_partition_geometry(&layout)) =>
+                {
+                    warn!(parent = %pp.display(),
+                        "the disk layout changed since the parent copy — creating a full backup instead");
+                    kind = BackupType::Full;
+                }
                 Ok(sc) => parent = Some((pp.clone(), sc)),
                 Err(e) => {
                     warn!(parent = %pp.display(), error = %e,
@@ -3417,18 +3570,10 @@ fn backup_disk_inner(
         .unwrap_or(0);
     let part_end_blocks = part_end.div_ceil(bs);
     let disk_used = DiskUsedMap::build(&prepared, bs, part_end_blocks);
-    // A child inherits the parent's virtual size and GPT (the differencing image
-    // resolves them through the chain), so its geometry MUST match the parent
-    // exactly. Size the meta partition from the geometry the parent committed to
-    // (its full-state used count) — not this run's count, which for an
-    // incremental differs. If the resulting plan no longer matches the parent's
-    // size (the disk was repartitioned), fall back to a full backup.
-    // Stored container headers (D19) are megabytes each, so the reserve has to
-    // include them. A child takes the PARENT's reserve, for the same reason it
-    // takes the parent's block count: its geometry must match exactly.
-    // Read now, not at the end: the size has to be known before the metadata
-    // partition is sized, and reading NVRAM is instant and independent of
-    // everything the copy does.
+    // A plaintext child inherits the parent's GPT. New full images reserve for
+    // every addressable source block, so ordinary growth of used space cannot
+    // exhaust the metadata partition. Children read its actual size from GPT;
+    // recomputing it from the parent's used-block count would lose that reserve.
     let boot_entries = boot_entries_for_image(req.bootable);
     let own_reserve = crate::sidecar::luks_reserve_for(
         prepared
@@ -3438,49 +3583,39 @@ fn backup_disk_inner(
     let full_used = |used: u64, reserve: u64| {
         crate::sidecar::calculate_meta_partition_size(used.max(1), reserve)
     };
-    // What a parent ACTUALLY reserved, measured the way `own_reserve` is: its
-    // container headers AND its boot entries.
-    //
-    // Counting only the first made every bootable chain start over from a full
-    // copy. `own_reserve` includes the boot-entries room — around 18 KiB for a
-    // machine with four UEFI entries — so on a disk without LUKS the test below
-    // read "18730 > 0" every single time, and the run silently wrote a full
-    // backup into a file named `_inc_`. Nothing said so except the warning,
-    // which named two numbers that were never comparable.
-    let reserved_by = |sc: &Sidecar| {
-        crate::sidecar::luks_headers_reserve(&sc.info.luks_headers)
-            + crate::sidecar::boot_entries_reserve(sc.info.boot_entries.as_ref())
+    let encrypted = req.encryption.is_some();
+    let needed_meta = full_used(disk_used.count, own_reserve);
+    let full_meta = crate::sidecar::whole_disk_full_metadata_size(
+        encrypted,
+        disk_used.count,
+        part_end_blocks,
+        own_reserve,
+    );
+    let parent_region = match (&parent, encrypted) {
+        (Some((path, _)), false) => Some(crate::sidecar::embedded_metadata_region(path, "")?),
+        _ => None,
     };
-    let mut meta_size = match &parent {
-        Some((_, sc)) => full_used(sc.manifest.used_blocks, reserved_by(sc)),
-        None => full_used(disk_used.count, own_reserve),
-    };
-    // Does this run's metadata fit the room the parent laid down? The child
-    // cannot grow the image — its geometry is the parent's — so if it does not,
-    // the only honest move is to start a new full backup rather than run for an
-    // hour and fail at the metadata write.
-    //
-    // The comparison is between the two SIZES, not between the reserves they
-    // are computed from, and that is the whole point. The reserve carries
-    // meaningless jitter: it is measured from the serialized boot entries,
-    // whose JSON holds a timestamp whose textual length wobbles by a byte or
-    // three from run to run. Comparing reserves therefore refused a perfectly
-    // good parent over `18730 > 18727` — three bytes, inside a slack of 16
-    // kilobytes — and every copy of the chain came out full. The size rounds to
-    // whole megabytes, where three bytes cannot be seen.
-    //
-    // Sizes also ask the wider question the reserve alone could not: the child's
-    // checksum table grows with the volume, and a source that has gained enough
-    // used blocks genuinely will not fit either.
-    if let Some((pp, sc)) = &parent {
-        let have = full_used(sc.manifest.used_blocks, reserved_by(sc));
-        let want = full_used(disk_used.count, own_reserve);
-        if want > have {
+    let parent_meta = parent_region.map(|(_, size)| size);
+    let metadata_size = crate::sidecar::whole_disk_metadata_size(
+        encrypted,
+        if parent.is_some() {
+            needed_meta
+        } else {
+            full_meta
+        },
+        parent_meta,
+    );
+    let mut meta_size = metadata_size.unwrap_or(full_meta);
+    // Old plaintext chains may still have a small partition. Keep the safe
+    // fallback when their fixed room is insufficient for this run's metadata.
+    // OBK has no guest metadata partition. Each child reserves its own room,
+    // so crossing a metadata-size boundary must not start a new full chain.
+    if metadata_size.is_none() {
+        if let Some((pp, sc)) = &parent {
             warn!(
                 parent = %pp.display(),
-                parent_meta = have,
-                needed_meta = want,
-                parent_reserve = reserved_by(sc),
+                parent_meta = parent_meta.unwrap_or(0),
+                needed_meta,
                 own_reserve,
                 parent_blocks = sc.manifest.used_blocks,
                 own_blocks = disk_used.count,
@@ -3489,18 +3624,18 @@ fn backup_disk_inner(
             );
             kind = BackupType::Full;
             parent = None;
-            meta_size = want;
         }
     }
     // An encrypted image has no guest meta partition: its sidecar is sealed
     // inside the container (§7.3). `meta_size` stays the measure of how much
     // room that sidecar needs — it becomes the container's reservation instead
     // of a partition's size — but the image itself is planned without one.
-    let encrypted = req.encryption.is_some();
     let planned_meta = |bytes: u64| if encrypted { 0 } else { bytes };
     let mut plan = own_backup_common::gpt::plan_whole_disk_image(&layout, planned_meta(meta_size));
     if let Some((pp, sc)) = &parent {
-        if plan.image_size != sc.manifest.source_disk.size_bytes {
+        if plan.image_size != sc.manifest.source_disk.size_bytes
+            || parent_region.is_some_and(|(offset, _)| offset != plan.meta_first_lba * sector)
+        {
             warn!(
                 parent = %pp.display(),
                 planned = plan.image_size,
@@ -3509,10 +3644,29 @@ fn backup_disk_inner(
             );
             kind = BackupType::Full;
             parent = None;
-            meta_size = full_used(disk_used.count, own_reserve);
+            meta_size = full_meta;
             plan = own_backup_common::gpt::plan_whole_disk_image(&layout, planned_meta(meta_size));
         }
     }
+    // The kind is settled — the image is written and named as what it is (see
+    // the same step in `backup_volume_inner`).
+    let published = settled_image_path(
+        published_path,
+        req.full_image_path.as_deref(),
+        req.kind,
+        kind,
+    );
+    let published_path: &Path = &published;
+    let renamed;
+    let req = if owned_file.is_none() && req.image_path != published {
+        renamed = DiskBackupRequest {
+            image_path: published.clone(),
+            ..req.clone()
+        };
+        &renamed
+    } else {
+        req
+    };
     let meta_offset = plan.meta_first_lba * sector;
     let meta_guid = (!encrypted).then(Uuid::new_v4);
 
@@ -3555,6 +3709,7 @@ fn backup_disk_inner(
                 disk_number: req.disk_number,
                 zstd_level: crate::qcow2::zstd_level_or_default(req.zstd_level),
             },
+            owned_file,
         )?,
         Some((pp, sc)) => {
             // Child inherits the parent's GPT through the chain — overwrite the
@@ -3598,6 +3753,7 @@ fn backup_disk_inner(
                     disk_number: req.disk_number,
                     zstd_level: crate::qcow2::zstd_level_or_default(req.zstd_level),
                 },
+                owned_file,
             )?
         }
     };
@@ -3797,7 +3953,7 @@ fn backup_disk_inner(
                     &mut checksums,
                     &mut tick,
                 )?
-                .is_some()
+                .map(|outcome| outcome.entries_failed)
             }
             (None, ImageFormat::Vhdx) => crate::true_removal_win::remove_excluded_from_disk_image(
                 &req.image_path,
@@ -3807,7 +3963,7 @@ fn backup_disk_inner(
                 &mut checksums,
                 &mut tick,
             )?
-            .is_some(),
+            .map(|outcome| outcome.entries_failed),
             (None, ImageFormat::Qcow2) => {
                 crate::qcow2_removal_win::remove_excluded_from_disk_image_qcow2(
                     &req.image_path,
@@ -3818,19 +3974,22 @@ fn backup_disk_inner(
                     &mut checksums,
                     &mut tick,
                 )?
-                .is_some()
+                .map(|outcome| outcome.entries_failed)
             }
         };
         // The pass logged why in detail; until this line that log was the
         // only place it was said, and the run showed a plain success.
-        if !removed {
-            excluded_entries_kept = Some(entries_kept_reason());
-        }
+        excluded_entries_kept = match removed {
+            None => Some(entries_kept_reason()),
+            Some(0) => None,
+            Some(failed) => {
+                Some(tr!("engine_win.entries_partly_kept", count = failed).into_owned())
+            }
+        };
     }
 
     // 7. Build the embedded manifest + sidecar and write it into the meta region.
-    let image_file_name = req
-        .image_path
+    let image_file_name = published_path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
@@ -4075,9 +4234,17 @@ fn create_disk_child_target(
     format: ImageFormat,
     encryption: Option<&crate::seal::context::ArchiveKeys>,
     plan: &DiskImagePlan,
+    owned_file: Option<std::fs::File>,
 ) -> Result<(ImageTarget, u32)> {
     if let Some(keys) = encryption {
-        return create_disk_obk_target(image_path, Some(parent_path), image_size, keys, plan);
+        return create_disk_obk_target(
+            image_path,
+            Some(parent_path),
+            image_size,
+            keys,
+            plan,
+            owned_file,
+        );
     }
     let sector_size = 512u32;
     match format {
@@ -4155,6 +4322,7 @@ fn create_disk_obk_target(
     disk_size: u64,
     keys: &crate::seal::context::ArchiveKeys,
     plan: &DiskImagePlan,
+    owned_file: Option<std::fs::File>,
 ) -> Result<(ImageTarget, u32)> {
     let chain = match parent_path {
         // The chain key travels inside the parent image, so continuing a chain
@@ -4177,11 +4345,18 @@ fn create_disk_obk_target(
             level: plan.zstd_level,
         },
     };
-    let writer = Box::new(crate::seal::obk::ObkStagedWriter::create(
-        image_path,
-        &chain.key,
-        keys.writer_options(&chain, image_plan),
-    )?);
+    let writer = Box::new(match owned_file {
+        Some(file) => crate::seal::obk::ObkStagedWriter::new(crate::seal::obk::ObkWriter::new(
+            std::io::BufWriter::new(file),
+            &chain.key,
+            keys.writer_options(&chain, image_plan),
+        )?)?,
+        None => crate::seal::obk::ObkStagedWriter::create(
+            image_path,
+            &chain.key,
+            keys.writer_options(&chain, image_plan),
+        )?,
+    });
     Ok((ImageTarget::Obk { writer }, 512))
 }
 
@@ -4191,9 +4366,10 @@ fn create_disk_image_target(
     format: ImageFormat,
     encryption: Option<&crate::seal::context::ArchiveKeys>,
     plan: &DiskImagePlan,
+    owned_file: Option<std::fs::File>,
 ) -> Result<(ImageTarget, u32)> {
     if let Some(keys) = encryption {
-        return create_disk_obk_target(image_path, None, disk_size, keys, plan);
+        return create_disk_obk_target(image_path, None, disk_size, keys, plan, owned_file);
     }
     let sector_size = 512u32;
     match format {
@@ -4347,20 +4523,12 @@ fn partition_window_for(target: &str) -> (String, Option<TakenVolume>) {
     );
     let taken = TakenVolume {
         guard: Some(guard),
-        give_back: drive_letter_of(target).map(|l| (root, l)),
+        give_back: crate::source_identity::direct_drive_letter(target).map(|l| (root, l)),
     };
     (
         format!("part:{}:{}:{}", e.disk_number, e.offset, e.length),
         Some(taken),
     )
-}
-
-/// `H`, from `H:`, `H:\` or `h:`. Nothing for a device path or a mount folder.
-#[cfg(target_os = "windows")]
-fn drive_letter_of(target: &str) -> Option<char> {
-    let mut chars = target.chars();
-    let letter = chars.next()?;
-    (letter.is_ascii_alphabetic() && chars.next() == Some(':')).then(|| letter.to_ascii_uppercase())
 }
 
 /// A volume taken down for a restore, and the letter it is owed back.

@@ -64,6 +64,10 @@
     "ru": "том зашифрован, а пройтись по файловой системе внутри готового образа не удалось — файлы из копии не убраны",
     "en": "the volume is encrypted, and the file system inside the finished image could not be walked — files were not removed from the backup"
   },
+  "engine_win.entries_partly_kept": {
+    "ru": "не удалось удалить %{count} записей файлов или каталогов из образа; подробности — в журнале службы",
+    "en": "%{count} file or directory entries could not be deleted from the image; see the service log for details"
+  },
   "engine_win.entries_kept": {
     "ru": "удалить их из файловой системы образа не удалось — содержимого этих файлов в копии нет, остались только записи в каталоге; следующая копия удалит их снова, подробности — в журнале службы",
     "en": "they could not be deleted from the image's file system — the files' contents are not in the backup, only their catalog entries remain; the next backup deletes them again, details are in the service log"
@@ -91,6 +95,10 @@
   "engine_win.skip_fs_unknown": {
     "ru": "файловая система не распознана — раздел скопирован посекторно",
     "en": "file system not recognized — the partition was copied sector by sector"
+  },
+  "engine_win.partition_not_in_slot": {
+    "ru": "%{device} больше не лежит в разделе %{index} диска %{disk}: разметка диска изменилась после настройки задания. Запустите копию ещё раз — задание обновит разделы само",
+    "en": "%{device} is no longer partition %{index} of disk %{disk}: the disk layout changed after the job was set up. Run the backup again — the job will update its partitions itself"
   },
   "engine_win.locked_multi_extent": {
     "ru": "%{volume}: запертый том занимает %{count} экстентов — такой не поддерживается",

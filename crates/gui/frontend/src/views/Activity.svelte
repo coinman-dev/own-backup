@@ -27,6 +27,7 @@
   type Item =
     | { kind: 'backup'; key: string; at: string; run: JobRun }
     | { kind: 'restore'; key: string; at: string; run: RestoreRunState };
+  const checking = $derived(Object.values(jobs.progress).filter((p) => p.phase === 'scheduled-verify'));
   const items = $derived.by((): Item[] => {
     const all: Item[] = [
       ...jobs.activity.map((r) => ({
@@ -86,7 +87,17 @@
     <button class="refresh" onclick={refresh}>{m.common_refresh()}</button>
   </div>
 
-  {#if items.length === 0}
+  {#each checking as progress (progress.job_id)}
+    <div class="card">
+      <div class="body">
+        <div class="title">{m.act_verify_running()} — {progress.volume}</div>
+        <div class="note">{progress.image_file_name} · {progress.percent}%</div>
+        <progress max="100" value={progress.percent}></progress>
+        <button class="refresh" onclick={() => api.cancelEngineOp()}>{m.common_cancel()}</button>
+      </div>
+    </div>
+  {/each}
+  {#if items.length === 0 && checking.length === 0}
     <div class="empty">{m.act_empty()}</div>
   {/if}
 
@@ -145,14 +156,35 @@
           </div>
           <div class="body">
             <div class="title">
-              {r.status === 'success' ? m.act_backup_done() : r.status === 'cancelled' ? m.act_backup_cancelled() : m.act_backup_failed()}
+              {r.operation === 'verify'
+                ? (r.status === 'success' ? m.act_verify_done() : r.status === 'cancelled' ? m.act_verify_cancelled() : m.act_verify_failed())
+                : (r.status === 'success' ? m.act_backup_done() : r.status === 'cancelled' ? m.act_backup_cancelled() : m.act_backup_failed())}
               — {r.job_name}
               <span class="time">{formatDate(r.finished_at || r.started_at)}</span>
             </div>
             {#if r.status === 'error' && r.error}
               <div class="note">{r.error}</div>
             {/if}
-            {#if r.status === 'success'}
+            {#if r.excluded_entries_kept}
+              <div class="note">{r.excluded_entries_kept}</div>
+            {/if}
+            {#if r.layout_changed}
+              <div class="note">{r.layout_changed}</div>
+            {/if}
+            {#if r.operation === 'verify'}
+              <div class="stats">
+                <div><span class="k">{m.act_time()}</span><span class="v">{formatDuration(r.duration_secs)}</span></div>
+                <div><span class="k">{m.act_verify_blocks()}</span><span class="v">{r.used_blocks}</span></div>
+              </div>
+              {#if r.verification}
+                <details class="follow">
+                  <summary>{m.act_verify_images({ count: r.verification.images.length })}</summary>
+                  <ul>{#each r.verification.images as image (image.image_path)}
+                    <li>{image.file_name}: {image.valid ? m.act_verify_valid() : image.error || m.act_verify_corrupt({ count: image.mismatched_blocks })}</li>
+                  {/each}</ul>
+                </details>
+              {/if}
+            {:else if r.status === 'success'}
               <div class="stats">
                 <div><span class="k">{m.act_type()}</span><span class="v">{kindLabel(r.backup_kind)}</span></div>
                 <div><span class="k">{m.act_format()}</span><span class="v">{formatLabel(r.image_path)}</span></div>

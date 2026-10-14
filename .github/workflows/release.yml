@@ -27,15 +27,7 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
-  linux-checks:
-    uses: ./.github/workflows/ci.yml
-    with:
-      full: true
-      windows: false
-      ref: ${{ inputs.dry_run && github.sha || inputs.tag || github.sha }}
-
   windows:
-    needs: linux-checks
     runs-on: windows-2025
     timeout-minutes: 120
     env:
@@ -77,9 +69,16 @@ jobs:
         run: |
           npm ci
           npm run build
+          npm audit
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+      - name: Check Rust and vendor advisories
+        shell: bash
+        run: |
+          cargo install cargo-audit --locked --version 0.22.2
+          cargo audit --deny warnings
+          python scripts/check-vendor.py --audit
       - name: Test Windows workspace
         run: cargo test --workspace --locked -j 2
       - name: Build Windows x64

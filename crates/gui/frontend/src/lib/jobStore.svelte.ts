@@ -218,12 +218,12 @@ export function sourceSummary(job: Job): string {
 export function lastSuccessfulRun(job: Job): JobRun | null {
   if (job.last_run?.status === 'success') return job.last_run;
   return jobs.activity
-    .filter((r) => r.job_id === job.id && r.status === 'success' && !!r.image_path)
+    .filter((r) => r.job_id === job.id && r.operation !== 'verify' && r.status === 'success' && !!r.image_path)
     .reduce<JobRun | null>((best, r) => (!best || r.finished_at > best.finished_at ? r : best), null);
 }
 
 export function jobStatus(job: Job): 'running' | 'queued' | 'success' | 'error' | 'never' {
-  if (jobs.queue.current === job.id) return 'running';
+  if (jobs.queue.current === job.id || jobs.progress[job.id]?.phase === 'scheduled-verify') return 'running';
   if (jobs.queue.pending.includes(job.id)) return 'queued';
   if (job.last_run?.status === 'success') return 'success';
   if (job.last_run?.status === 'error') return 'error';

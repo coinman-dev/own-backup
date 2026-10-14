@@ -1,4 +1,10 @@
 {
+  "bsm_reauthorize_done_title": "Authorization restored",
+  "bsm_reauthorize_done_message": "This job can run automatically again. The earlier failure remains in history; the next successful backup will update its status.",
+  "bsm_reauthorize": "Authorize automatic backups again…",
+  "aunl_authorize_title": "Authorize automatic backups again",
+  "aunl_authorize_confirm": "Authorize",
+  "aunl_authorize_what": "Enter the archive password or recovery key for <strong>{name}</strong>. The program will be able to run it automatically again. Existing backups and their recovery key are preserved.",
   "$schema": "https://inlang.com/schema/inlang-message-format",
   "common_cancel": "Cancel",
   "common_save": "Save",
@@ -1083,5 +1089,16 @@
   "pwf_caps_unknown": "Caps Lock: known after the first key press",
   "pwf_hide": "Hide password",
   "pwf_show": "Show password",
-  "info_default_title": "Information"
+  "info_default_title": "Information",
+  "wiz_verify_schedule": "Verify copies on a schedule",
+  "wiz_verify_all_versions": "Verify all versions",
+  "wiz_verify_schedule_hint": "When unchecked, verifies the latest version of each source together with its parents. Results appear in Activity.",
+  "act_verify_running": "Scheduled verification in progress",
+  "act_verify_done": "Copies verified",
+  "act_verify_cancelled": "Verification cancelled",
+  "act_verify_failed": "Verification failed",
+  "act_verify_blocks": "Blocks checked",
+  "act_verify_images": "Copies checked: {count}",
+  "act_verify_valid": "Valid",
+  "act_verify_corrupt": "Damaged blocks: {count}"
 }

@@ -157,7 +157,10 @@
   // onto a medium that has no scheduler running.
   $effect(() => {
     ensureMediaMode();
-    if (media.active && job.schedule.kind !== 'none') job.schedule.kind = 'none';
+    if (media.active) {
+      job.schedule.kind = 'none';
+      if (job.verification) job.verification.schedule.kind = 'none';
+    }
   });
 
   // ---- source selection (Paragon-style disk map, multi-volume) ----------
@@ -1980,6 +1983,51 @@
               {m.wiz_adv_validate_latest_hint()}
             </div>
           </div>
+          {#if !media.active && job.verification}
+            <div class="adv-group">
+              <div class="adv-title">{m.wiz_verify_schedule()}</div>
+              <label class="at">
+                <select bind:value={job.verification.schedule.kind}>
+                  <option value="none">{m.wiz_sched_none()}</option>
+                  <option value="daily">{m.wiz_sched_daily()}</option>
+                  <option value="weekly">{m.wiz_sched_weekly()}</option>
+                  <option value="monthly">{m.wiz_sched_monthly()}</option>
+                </select>
+              </label>
+              {#if job.verification.schedule.kind !== 'none'}
+                {#if job.verification.schedule.kind === 'weekly'}
+                  <div class="days">
+                    {#each weekdays as [day, label]}
+                      <button class="day" class:on={job.verification.schedule.days.includes(day)} onclick={() => {
+                        job.verification.schedule.days = job.verification.schedule.days.includes(day)
+                          ? job.verification.schedule.days.filter((d) => d !== day)
+                          : [...job.verification.schedule.days, day];
+                      }}>{label()}</button>
+                    {/each}
+                  </div>
+                {/if}
+                {#if job.verification.schedule.kind === 'monthly'}
+                  <label class="at">{m.wiz_sched_day_of_month()}
+                    <select bind:value={job.verification.schedule.day_of_month}>
+                      {#each Array.from({ length: 28 }, (_, i) => i + 1) as day}<option value={day}>{day}</option>{/each}
+                    </select>
+                  </label>
+                {/if}
+                <label class="at">{m.wiz_sched_at()} <input type="time" bind:value={job.verification.schedule.time} /></label>
+                <label class="chk"><input type="checkbox" bind:checked={job.verification.all_versions} /> {m.wiz_verify_all_versions()}</label>
+                <div class="sub-hint">{m.wiz_verify_schedule_hint()}</div>
+                <label class="chk"><input type="checkbox" bind:checked={job.verification.schedule.run_missed} /> {m.wiz_sched_run_missed()}</label>
+                {#if job.verification.schedule.run_missed}
+                  <label class="delay-min">{m.wiz_sched_missed_delay()}
+                    <select bind:value={job.verification.schedule.missed_delay_min}>
+                      {#each Array.from({ length: 60 }, (_, i) => i + 1) as minute}<option value={minute}>{minute}</option>{/each}
+                    </select> {m.wiz_min()}
+                  </label>
+                {/if}
+                <label class="chk"><input type="checkbox" bind:checked={job.verification.schedule.wake_to_run} /> {m.wiz_sched_wake()}</label>
+              {/if}
+            </div>
+          {/if}
           <!-- Encryption is a FORMAT (.obk), chosen and given its password on
                the «Схема» step. Said here too, because this is where people
                look for it. -->

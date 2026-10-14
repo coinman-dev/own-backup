@@ -25,6 +25,8 @@ struct Record {
     target: PathBuf,
     owner_identity: Option<Identity>,
     stage_identity: Option<Identity>,
+    #[serde(default)]
+    new_image: bool,
 }
 
 #[cfg(unix)]
@@ -170,6 +172,22 @@ fn open_owner(path: &Path) -> std::io::Result<File> {
     opts.open(path)
 }
 pub(super) fn create(target: &Path, chain: &ChainKey) -> Result<(NamedTempFile, TempPath)> {
+    let (owner, stage) = create_kind(target, chain, false)?;
+    Ok((owner, stage.into_temp_path()))
+}
+
+pub(super) fn create_new_image(
+    target: &Path,
+    key: &ChainKey,
+) -> Result<(NamedTempFile, NamedTempFile)> {
+    create_kind(target, key, true)
+}
+
+fn create_kind(
+    target: &Path,
+    chain: &ChainKey,
+    new_image: bool,
+) -> Result<(NamedTempFile, NamedTempFile)> {
     let parent = target
         .parent()
         .ok_or_else(|| super::bad("stage target has no parent"))?;
@@ -188,7 +206,7 @@ pub(super) fn create(target: &Path, chain: &ChainKey) -> Result<(NamedTempFile, 
     // allowed until its target and file identity have been durably recorded.
     let stage = tempfile::Builder::new()
         .prefix(&prefix)
-        .suffix(".tmp")
+        .suffix(if new_image { ".tmp.obk" } else { ".tmp" })
         .rand_bytes(0)
         .tempfile_in(parent)?;
     // Domain-separated key per fresh UUID; this zero nonce is used once.
@@ -196,6 +214,7 @@ pub(super) fn create(target: &Path, chain: &ChainKey) -> Result<(NamedTempFile, 
         target: target.to_owned(),
         owner_identity: identity(owner.as_file()),
         stage_identity: identity(stage.as_file()),
+        new_image,
     })
     .map_err(|e| super::bad(format!("stage target encoding: {e}")))?;
     if plain.len() as u64 + MAGIC.len() as u64 + 16 > LIMIT {
@@ -220,7 +239,7 @@ pub(super) fn create(target: &Path, chain: &ChainKey) -> Result<(NamedTempFile, 
     }
     owner.as_file().sync_all()?;
     super::transaction::sync_parent(parent)?;
-    Ok((owner, stage.into_temp_path()))
+    Ok((owner, stage))
 }
 
 /// Reclaim only a proved, unlocked sibling for this canonical target/key.
@@ -230,6 +249,14 @@ pub(super) fn cleanup(target: &Path, chain: &ChainKey) -> Result<usize> {
     let parent = target
         .parent()
         .ok_or_else(|| super::bad("stage target has no parent"))?;
+    cleanup_in(parent, chain, Some(target))
+}
+
+pub(super) fn cleanup_new_images(parent: &Path, key: &ChainKey) -> Result<usize> {
+    cleanup_in(parent, key, None)
+}
+
+fn cleanup_in(parent: &Path, chain: &ChainKey, target: Option<&Path>) -> Result<usize> {
     let mut removed = 0;
     for entry in std::fs::read_dir(parent)? {
         let entry = entry?;
@@ -266,7 +293,11 @@ pub(super) fn cleanup(target: &Path, chain: &ChainKey) -> Result<usize> {
         let Ok(recorded) = serde_json::from_slice::<Record>(&plain) else {
             continue;
         };
-        if recorded.target != target
+        let matches_target = match target {
+            Some(target) => recorded.target == target,
+            None => recorded.new_image && recorded.target.parent() == Some(parent),
+        };
+        if !matches_target
             || recorded.owner_identity.is_none()
             || identity(&file) != recorded.owner_identity
         {
@@ -274,7 +305,12 @@ pub(super) fn cleanup(target: &Path, chain: &ChainKey) -> Result<usize> {
         }
         // The strictly validated basename determines the sibling, never input
         // from an owner payload. No recursive deletion or stage promotion.
-        let stage = parent.join(format!("{PREFIX}{id}.tmp"));
+        let suffix = if recorded.new_image {
+            ".tmp.obk"
+        } else {
+            ".tmp"
+        };
+        let stage = parent.join(format!("{PREFIX}{id}{suffix}"));
         match std::fs::symlink_metadata(&stage) {
             Ok(meta) => {
                 if !regular(&meta) {

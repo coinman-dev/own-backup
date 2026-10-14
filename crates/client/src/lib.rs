@@ -712,6 +712,24 @@ impl BackupClient {
 
     /// Drop a prepared authorization. Nothing was written, so there is nothing
     /// else to undo.
+    pub async fn reauthorize_archive(
+        &mut self,
+        job_id: &str,
+        secret: &ArchiveSecret,
+    ) -> Result<Job> {
+        let mut body = serde_json::json!({"job_id": job_id});
+        secret.add_to(&mut body);
+        let reply = self
+            .inner
+            .reauthorize_archive(self.request(proto::JsonRequest {
+                json: body.to_string(),
+            }))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
+
     pub async fn cancel_archive_encryption(&mut self, token: &str) -> Result<()> {
         let json = serde_json::json!({ "token": token }).to_string();
         self.inner

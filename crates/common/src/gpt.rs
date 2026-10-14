@@ -102,6 +102,36 @@ impl DiskLayout {
                         .is_some_and(|sp| sp.is_system || sp.has_os)
             })
     }
+
+    /// Do both layouts put the same partitions in the same places?
+    ///
+    /// A differencing child inherits its parent's GPT and writes each partition
+    /// at the offset the disk has NOW. When the two disagree, the chain would
+    /// restore today's bytes into yesterday's slots. Windows Update does exactly
+    /// that while servicing WinRE: on 2026-10-14 it shrank C: by 275 MiB and
+    /// recreated the recovery partition behind it, leaving the end of the last
+    /// partition — and so the image size — where it was.
+    ///
+    /// Unique GUIDs are not compared: a recreated partition gets a new one, but
+    /// the child records the current GUIDs in its own manifest; only where the
+    /// data sits has to match.
+    pub fn same_partition_geometry(&self, other: &DiskLayout) -> bool {
+        if self.sector_size != other.sector_size || self.partitions.len() != other.partitions.len()
+        {
+            return false;
+        }
+        fn sorted(l: &DiskLayout) -> Vec<&GptPartitionEntry> {
+            let mut v: Vec<&GptPartitionEntry> = l.partitions.iter().collect();
+            v.sort_by_key(|p| p.index);
+            v
+        }
+        sorted(self).iter().zip(sorted(other)).all(|(a, b)| {
+            a.index == b.index
+                && a.first_lba == b.first_lba
+                && a.last_lba == b.last_lba
+                && a.type_guid.eq_ignore_ascii_case(&b.type_guid)
+        })
+    }
 }
 
 /// Geometry of a single **whole-disk** backup image: the real partitions sit at
@@ -368,5 +398,37 @@ mod tests {
         };
         let plan = plan_whole_disk_image(&layout, 1024 * 1024);
         assert_eq!(plan.meta_first_lba, 2048); // right after the 1 MiB GPT head
+    }
+
+    /// The 2026-10-14 Windows Update: C: shrinks, WinRE is recreated in the
+    /// freed space with a new GUID, and the end of the last partition stays put.
+    #[test]
+    fn a_shrunk_c_and_moved_winre_is_a_different_geometry() {
+        let before = DiskLayout {
+            disk_guid: "g".into(),
+            sector_size: 512,
+            size_bytes: 1 << 40,
+            partitions: vec![
+                part(1, GPT_TYPE_EFI_SYSTEM, 2048, 206_847),
+                part(3, BASIC_DATA, 239_616, 267_073_535),
+                part(4, GPT_TYPE_WINRE, 267_073_536, 268_386_303),
+            ],
+        };
+        let mut after = before.clone();
+        after.partitions[1].last_lba = 266_510_335;
+        after.partitions[2].first_lba = 266_510_336;
+        after.partitions[2].part_guid = "new".into();
+        assert!(!before.same_partition_geometry(&after));
+
+        // Only GUIDs differ: same places, same geometry.
+        let mut renamed = before.clone();
+        renamed.partitions[2].part_guid = "new".into();
+        renamed.partitions.reverse();
+        assert!(before.same_partition_geometry(&renamed));
+
+        // A partition fewer is not the same disk either.
+        let mut fewer = before.clone();
+        fewer.partitions.pop();
+        assert!(!before.same_partition_geometry(&fewer));
     }
 }

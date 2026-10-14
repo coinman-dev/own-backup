@@ -141,7 +141,9 @@ mod tests {
             "e:\\backup-test\\c.qcow2"
         );
         assert_eq!(quote_arg("path with spaces"), "\"path with spaces\"");
-        assert_eq!(quote_arg("dir\\"), "\"dir\\\\\"");
+        assert_eq!(quote_arg(""), "\"\"");
+        assert_eq!(quote_arg("dir\\"), "dir\\");
+        assert_eq!(quote_arg("dir with spaces\\"), "\"dir with spaces\\\\\"");
         assert_eq!(quote_arg("say \"hi\""), "\"say \\\"hi\\\"\"");
         assert_eq!(
             quote_arg("back\\\\slash end\\"),

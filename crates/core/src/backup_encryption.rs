@@ -20,6 +20,27 @@ pub struct ArchiveEncryption {
 }
 
 impl JobStore {
+    /// Restore only this machine's authorization from the existing portable
+    /// envelope. The caller holds the busy slot and fetched this job from the
+    /// store; the revision check prevents a slow unlock from undoing an edit.
+    pub fn reauthorize_archive(
+        &self,
+        job: Job,
+        password: Option<&str>,
+        recovery_key: Option<&str>,
+    ) -> Result<Job> {
+        let (portable, private) = unlock_existing_archive(&job, password, recovery_key)?;
+        let keys = self.service_key_store()?;
+        let saved = self.upsert_with_archive_key(job, portable, &private, &keys)?;
+        // A shared reference, if any, is still retained. Do not blindly revoke
+        // the previous id: authorization has committed and this full-list sweep
+        // is what proves which old files are no longer referenced.
+        if let Err(error) = self.sweep_local_archive_keys() {
+            tracing::warn!(job = %saved.id, error = %error, "obsolete local archive authorization could not be retired");
+        }
+        Ok(saved)
+    }
+
     /// Service-only caller: confirm recovery delivery, unlock portable_key and
     /// serialize against active/queued jobs before entering (E5). Job persistence
     /// is the last commit step. No raw secret
@@ -165,6 +186,30 @@ impl JobStore {
     }
 }
 
+fn unlock_existing_archive(
+    job: &Job,
+    password: Option<&str>,
+    recovery_key: Option<&str>,
+) -> Result<(SealedPrivateKey, JobPrivateKey)> {
+    let encryption = job.archive_encryption.as_ref().ok_or_else(|| {
+        OwnBackupError::Config(tr!("archive_setup.reauthorize_not_encrypted").into_owned())
+    })?;
+    let portable = encryption.portable_key.clone();
+    let private = match (password, recovery_key) {
+        (Some(password), None) => portable.unseal_with_password(password)?,
+        (None, Some(typed)) => {
+            let recovery = own_backup_backup::seal::recovery::RecoveryKey::parse(typed)?;
+            portable.unseal_with_recovery(&recovery)?
+        }
+        _ => {
+            return Err(OwnBackupError::Config(
+                tr!("archive_setup.reauthorize_one_secret").into_owned(),
+            ))
+        }
+    };
+    Ok((portable, private))
+}
+
 /// Every local key the live jobs name.
 ///
 /// Its own function because a sweep deletes whatever is NOT in it: a job missed
@@ -223,6 +268,102 @@ mod tests {
     };
     use own_backup_backup::seal::SCHEME;
 
+    fn portable_job() -> (Job, own_backup_backup::seal::recovery::RecoveryKey) {
+        use own_backup_backup::seal::keypair::JobKeyPair;
+        let pair = JobKeyPair::generate().unwrap();
+        let recovery = own_backup_backup::seal::recovery::RecoveryKey::generate().unwrap();
+        let portable = SealedPrivateKey::seal(
+            "repair-job",
+            &pair,
+            "archive repair password",
+            &recovery,
+            &KdfParams {
+                algorithm: "argon2id".into(),
+                m_kib: 64 * 1024,
+                t: 3,
+                p: 1,
+            },
+        )
+        .unwrap();
+        let reference =
+            serde_json::from_value(serde_json::json!({"id":uuid::Uuid::new_v4()})).unwrap();
+        (
+            Job {
+                id: "repair-job".into(),
+                name: "repair".into(),
+                image_format: own_backup_common::types::ImageFormat::Qcow2,
+                archive_encryption: Some(ArchiveEncryption {
+                    portable_key: portable,
+                    local_key: reference,
+                }),
+                ..Default::default()
+            },
+            recovery,
+        )
+    }
+
+    #[test]
+    fn reauthorization_unlocks_the_same_portable_identity_by_either_secret() {
+        let (job, recovery) = portable_job();
+        let original = &job.archive_encryption.as_ref().unwrap().portable_key;
+        for (password, key) in [
+            (Some("archive repair password"), None),
+            (None, Some(recovery.to_string_grouped().as_str())),
+        ] {
+            let (portable, private) = unlock_existing_archive(&job, password, key).unwrap();
+            assert_eq!(&portable, original);
+            assert_eq!(private.public(), original.public_key().unwrap());
+        }
+    }
+
+    #[test]
+    fn refused_reauthorization_does_not_rewrite_the_job_or_local_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JobStore::load(dir.path());
+        let (job, recovery) = portable_job();
+        let job = store.upsert_inner(job, true).unwrap();
+        let before = std::fs::read(dir.path().join("jobs.json")).unwrap();
+        let key = recovery.to_string_grouped();
+        for (password, key) in [
+            (None, None),
+            (Some("wrong password"), None),
+            (None, Some("invalid recovery")),
+            (Some("archive repair password"), Some(key.as_str())),
+        ] {
+            assert!(store
+                .reauthorize_archive(job.clone(), password, key)
+                .is_err());
+            assert_eq!(std::fs::read(dir.path().join("jobs.json")).unwrap(), before);
+        }
+        assert!(
+            unlock_existing_archive(&Job::default(), Some("archive repair password"), None)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn stale_reauthorization_cannot_undo_an_edit_or_recreate_a_deleted_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JobStore::load(dir.path());
+        let (job, _) = portable_job();
+        let saved = store.upsert_inner(job, true).unwrap();
+        let mut edit = saved.clone();
+        edit.name = "new name".into();
+        store.upsert(edit).unwrap();
+        let mut repaired = saved.clone();
+        repaired.archive_encryption.as_mut().unwrap().local_key =
+            serde_json::from_value(serde_json::json!({"id":uuid::Uuid::new_v4()})).unwrap();
+        assert!(store
+            .upsert_inner_checked(repaired.clone(), true, Some(&saved.updated_at))
+            .is_err());
+        assert_eq!(store.get(&saved.id).unwrap().name, "new name");
+        store.delete(&saved.id).unwrap();
+        assert!(store
+            .upsert_inner_checked(repaired, true, Some(&saved.updated_at))
+            .is_err());
+        assert!(store.get(&saved.id).is_none());
+    }
+
     /// What the sweep is allowed to keep, from a list that mixes the three
     /// shapes a real `jobs.json` holds: encrypted, plain, and an encrypted one
     /// whose copy of the key differs.
@@ -258,8 +399,15 @@ mod tests {
     #[test]
     fn an_empty_job_list_sweeps_nothing_at_all() {
         let dir = tempfile::tempdir().unwrap();
+        // An actual store is available to SYSTEM on Windows. Force a storage
+        // error instead of assuming that the platform/context cannot open it.
+        let blocked = dir
+            .path()
+            .join(own_backup_backup::seal::local::KEY_DIRECTORY_NAME);
+        std::fs::write(&blocked, b"not a key directory").unwrap();
         let store = JobStore::load(dir.path());
         assert_eq!(store.sweep_local_archive_keys().unwrap(), 0);
+        assert_eq!(std::fs::read(&blocked).unwrap(), b"not a key directory");
 
         store
             .upsert(Job {
@@ -269,7 +417,7 @@ mod tests {
             .unwrap();
         assert!(
             store.sweep_local_archive_keys().is_err(),
-            "with a job present it does reach the key store (absent here)"
+            "with a job present it does reach the deliberately blocked key store"
         );
     }
 

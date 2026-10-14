@@ -571,6 +571,7 @@ fn main() {
             commands::backup_jobs::begin_archive_encryption,
             commands::backup_jobs::confirm_archive_encryption,
             commands::backup_jobs::cancel_archive_encryption,
+            commands::backup_jobs::reauthorize_archive,
             commands::backup_jobs::decrypt_volume,
             commands::backup_jobs::run_backup_job,
             commands::backup_jobs::cancel_queued_job,

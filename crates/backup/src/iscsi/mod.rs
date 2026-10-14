@@ -28,6 +28,7 @@ pub mod initiator;
 pub mod scsi;
 pub mod session;
 
+use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -205,13 +206,96 @@ const PDU_DEADLINE: Duration = Duration::from_secs(30);
 /// How long a stopping target waits for its sessions to notice.
 const STOP_GRACE: Duration = Duration::from_secs(5);
 
+/// Windows may keep a blocking recv alive after shutdown through another
+/// socket handle. Poll cancellation without shortening the protocol deadline.
+const SOCKET_POLL: Duration = Duration::from_millis(250);
+
+struct SessionSocket {
+    socket: TcpStream,
+    stop: Arc<AtomicBool>,
+    read_deadline: Arc<Mutex<Option<Instant>>>,
+    write_deadline: Duration,
+}
+
+impl SessionSocket {
+    fn check_stop(&self) -> io::Result<()> {
+        if self.stop.load(Ordering::SeqCst) {
+            Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "iSCSI target stopped",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Read for SessionSocket {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        loop {
+            self.check_stop()?;
+            let deadline = *self
+                .read_deadline
+                .lock()
+                .map_err(|_| io::Error::other("iSCSI deadline poisoned"))?;
+            if deadline.is_some_and(|end| Instant::now() >= end) {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "iSCSI PDU deadline",
+                ));
+            }
+            match self.socket.read(buf) {
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::TimedOut
+                            | io::ErrorKind::WouldBlock
+                            | io::ErrorKind::Interrupted
+                    ) => {}
+                result => return result,
+            }
+        }
+    }
+}
+
+impl Write for SessionSocket {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let end = Instant::now() + self.write_deadline;
+        loop {
+            self.check_stop()?;
+            if Instant::now() >= end {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "iSCSI write deadline",
+                ));
+            }
+            match self.socket.write(buf) {
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::TimedOut
+                            | io::ErrorKind::WouldBlock
+                            | io::ErrorKind::Interrupted
+                    ) => {}
+                result => return result,
+            }
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.check_stop()?;
+        self.socket.flush()
+    }
+}
+
 /// One accepted connection: the thread serving it, and a second handle on its
 /// socket so the connection can be broken from outside.
 ///
 /// The second handle is the whole point. A session thread spends its life
 /// blocked in `read`, and there is no portable way to interrupt that — but
-/// shutting the socket down makes the read return, and the thread then ends on
-/// its own. Without it, stopping the target left every session running and the
+/// shutdown wakes the read where supported, while SessionSocket also checks
+/// cancellation between bounded waits on Windows. Without it, stopping left
+/// every session running and the
 /// image open behind them (audit AUD-14).
 struct Accepted {
     thread: std::thread::JoinHandle<()>,
@@ -313,40 +397,52 @@ fn serve_listener_paced(
                 stream
                     .set_nonblocking(false)
                     .map_err(|e| OwnBackupError::Device(format!("iSCSI blocking: {e}")))?;
-                // Until this connection has logged in it is on a deadline.
-                let _ = stream.set_read_timeout(Some(pdu_deadline));
+                // Short socket waits check cancellation; the session keeps a
+                // separate deadline for the whole login/PDU, not for each poll.
+                let poll = pdu_deadline.min(SOCKET_POLL);
+                if let Err(e) = stream
+                    .set_read_timeout(Some(poll))
+                    .and_then(|()| stream.set_write_timeout(Some(poll)))
+                {
+                    warn!(%peer, error = %e, "iSCSI: cannot configure bounded socket waits");
+                    continue;
+                }
 
                 // A second handle on the same socket, kept here. It is not for
                 // reading or writing — only for breaking the connection when
                 // the target stops, which is the only way to get a thread out
                 // of a blocking read.
                 let leash = stream.try_clone().ok();
-                // And a third for the session's own use, so it can tighten and
-                // relax its own deadline as PDUs arrive.
-                let clock = stream.try_clone().ok();
+                let deadline = Arc::new(Mutex::new(Some(Instant::now() + pdu_deadline)));
 
                 let lun = lun.clone();
                 let iqn = iqn.clone();
                 let chap_secret = chap_secret.clone();
                 let open_bg = open.clone();
+                let stop_bg = stop.clone();
                 open.fetch_add(1, Ordering::SeqCst);
                 let spawned = std::thread::Builder::new()
                     .name("iscsi-session".into())
                     .spawn(move || {
-                        let mut stream = stream;
+                        let mut stream = SessionSocket {
+                            socket: stream,
+                            stop: stop_bg,
+                            read_deadline: deadline.clone(),
+                            write_deadline: pdu_deadline,
+                        };
                         let mut sess = session::Session::new(iqn, lun);
                         if let Some(secret) = chap_secret {
                             sess = sess.with_chap(secret);
                         }
-                        if let Some(clock) = clock {
-                            sess = sess.with_pace(move |pace| {
-                                let t = match pace {
-                                    session::Pace::Idle => None,
-                                    session::Pace::InPdu => Some(pdu_deadline),
-                                };
-                                let _ = clock.set_read_timeout(t);
-                            });
-                        }
+                        sess = sess.with_pace(move |pace| {
+                            let end = match pace {
+                                session::Pace::Idle => None,
+                                session::Pace::InPdu => Some(Instant::now() + pdu_deadline),
+                            };
+                            if let Ok(mut clock) = deadline.lock() {
+                                *clock = end;
+                            }
+                        });
                         match sess.run(&mut stream) {
                             Ok(()) => info!(%peer, "iSCSI initiator disconnected"),
                             Err(e) => warn!(%peer, error = %e, "iSCSI session ended with an error"),
@@ -450,6 +546,42 @@ mod tests {
         (listener, lun, Arc::new(AtomicBool::new(false)))
     }
 
+    #[test]
+    fn session_socket_enforces_the_pdu_deadline_even_when_data_is_ready() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (socket, _) = listener.accept().unwrap();
+        socket.set_read_timeout(Some(SOCKET_POLL)).unwrap();
+        client.write_all(&[7]).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let deadline = Arc::new(Mutex::new(Some(Instant::now() - Duration::from_secs(1))));
+        let mut paced = SessionSocket {
+            socket,
+            stop: stop.clone(),
+            read_deadline: deadline.clone(),
+            write_deadline: Duration::from_secs(30),
+        };
+        let mut byte = [0];
+        assert_eq!(
+            paced.read(&mut byte).unwrap_err().kind(),
+            io::ErrorKind::TimedOut
+        );
+        // An idle logged-in session has no PDU deadline, so the queued byte
+        // remains readable; the polling interval did not become its lifetime.
+        *deadline.lock().unwrap() = None;
+        assert_eq!(paced.read(&mut byte).unwrap(), 1);
+        assert_eq!(byte, [7]);
+        stop.store(true, Ordering::SeqCst);
+        assert_eq!(
+            paced.read(&mut byte).unwrap_err().kind(),
+            io::ErrorKind::ConnectionAborted
+        );
+        assert_eq!(
+            paced.write(&[8]).unwrap_err().kind(),
+            io::ErrorKind::ConnectionAborted
+        );
+    }
+
     /// Подключение, которое молчит, раньше держало слот сессии до конца жизни
     /// процесса. Четырёх таких хватало, чтобы цель перестала принимать
     /// настоящего инициатора.
@@ -508,32 +640,41 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let stop_bg = stop.clone();
         let watch = lun.clone();
+        let (finished, completion) = std::sync::mpsc::sync_channel(1);
         let server = std::thread::spawn(move || {
-            serve_listener_paced(
+            let result = serve_listener_paced(
                 listener,
                 "iqn.test:one".into(),
                 lun,
                 stop_bg,
                 None,
                 Duration::from_secs(60), // долгий дедлайн: проверяем не его
-                Duration::from_secs(3),
-            )
+                Duration::from_secs(30),
+            );
+            let _ = finished.send(result);
         });
 
         let client = TcpStream::connect(addr).unwrap();
-        // Дать слушателю принять соединение.
-        std::thread::sleep(Duration::from_millis(200));
+        // Wait for an accepted session to own the LUN. A fixed sleep could
+        // stop the listener before it accepted anything on a loaded runner.
+        let accepted_deadline = Instant::now() + Duration::from_secs(10);
+        while Arc::strong_count(&watch) < 3 && Instant::now() < accepted_deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let accepted = Arc::strong_count(&watch) >= 3;
 
         stop.store(true, Ordering::SeqCst);
-        let started = Instant::now();
-        server.join().unwrap().unwrap();
-        assert!(
-            started.elapsed() < Duration::from_secs(3),
-            "остановка не должна упираться в льготный срок, если сессию просто оборвали"
-        );
+        // Completion must precede both the 30-second stop grace and the
+        // 60-second read timeout, without a fragile three-second wall clock.
+        completion
+            .recv_timeout(Duration::from_secs(10))
+            .expect("остановка ждёт льготный срок или дедлайн чтения")
+            .unwrap();
+        server.join().unwrap();
+        assert!(accepted, "слушатель не принял тестовое соединение");
 
         // Никто больше не держит LUN — значит, и образ под ним закрыт.
-        assert!(watch.try_lock().is_ok(), "LUN остался занят потоком сессии");
+        assert_eq!(Arc::strong_count(&watch), 1, "сессия всё ещё держит LUN");
         drop(client);
     }
 

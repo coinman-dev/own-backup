@@ -303,7 +303,9 @@ mod tests {
     fn an_unwritable_target_leaves_the_primary_log_alone() {
         let home = tempfile::tempdir().unwrap();
         let cfg = home.path().join("config.toml");
-        config_at(&cfg, Some(Path::new("/proc/nonexistent/own-backup")));
+        let blocked = home.path().join("not-a-directory");
+        std::fs::write(&blocked, b"keep this file").unwrap();
+        config_at(&cfg, Some(&blocked.join("own-backup")));
 
         let primary_path = home.path().join("primary.log");
         let primary = OpenOptions::new()
@@ -319,6 +321,7 @@ mod tests {
             "still logged\n"
         );
         assert!(tee.mirror_path().is_none());
+        assert_eq!(std::fs::read(&blocked).unwrap(), b"keep this file");
     }
 
     #[test]

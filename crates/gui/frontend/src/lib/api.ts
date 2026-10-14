@@ -143,6 +143,8 @@ export const api = {
   /** The operator went back. Nothing was written, so there is nothing to undo. */
   cancelArchiveEncryption: (token: string) =>
     invoke<void>('cancel_archive_encryption', { token }),
+  reauthorizeArchive: (id: string, secret: ArchiveSecret) =>
+    invoke<Job>('reauthorize_archive', { id, ...secretArgs(secret) }),
 
   // --- restore plans (partition designer) ---
   // Only the dry run is wired up: it validates and writes nothing. Applying a

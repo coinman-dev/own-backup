@@ -19,6 +19,8 @@ pub mod archive_setup;
 pub mod backup_encryption;
 pub mod busy;
 pub mod restore_exec;
+pub mod source_refresh;
+pub mod verification;
 
 /// Where a destination folder sits relative to a job's sources — re-exported
 /// so callers do not have to reach into the backup crate for one enum.
@@ -504,6 +506,9 @@ pub struct RunImage {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct JobRun {
+    /// backup (also the default for old history) | verify.
+    pub operation: String,
+    pub verification: Option<own_backup_common::engine_dto::JobVerifySummary>,
     pub id: String,
     pub job_id: String,
     pub job_name: String,
@@ -567,6 +572,13 @@ pub struct JobRun {
     /// told why, in the same place the run is reported.
     #[serde(default)]
     pub consolidated_increments: u32,
+    /// The partitions this job copies moved, grew, shrank or were recreated
+    /// since the previous run, and the job followed them — in words for the
+    /// result screen; empty when nothing changed. Windows Update does this to
+    /// the recovery partition, and the copy that follows is a full one, so the
+    /// person seeing a large copy after a quiet week is told why.
+    #[serde(default)]
+    pub layout_changed: String,
 }
 
 /// A persisted backup job (task).
@@ -659,12 +671,18 @@ pub struct Job {
     #[serde(default)]
     pub compression_level: Option<i32>,
     pub schedule: ScheduleConfig,
+    pub verification: verification::VerificationConfig,
     pub scheme: SchemeConfig,
     pub exclusions: ExclusionsConfig,
     pub advanced: AdvancedConfig,
     pub created_at: String,
     pub updated_at: String,
     pub last_run: Option<JobRun>,
+    pub last_verification: Option<JobRun>,
+    /// Images refused as incremental parents after a failed integrity check.
+    pub invalid_images: Vec<String>,
+    /// A check could not enumerate/read the job; require a fresh full copy.
+    pub verification_blocked: bool,
 }
 
 impl Default for Job {
@@ -684,12 +702,16 @@ impl Default for Job {
             archive_encryption: None,
             compression_level: None,
             schedule: ScheduleConfig::default(),
+            verification: verification::VerificationConfig::default(),
             scheme: SchemeConfig::default(),
             exclusions: ExclusionsConfig::default(),
             advanced: AdvancedConfig::default(),
             created_at: String::new(),
             updated_at: String::new(),
             last_run: None,
+            last_verification: None,
+            invalid_images: Vec::new(),
+            verification_blocked: false,
         }
     }
 }
@@ -827,7 +849,20 @@ impl JobStore {
     pub fn try_load(data_dir: &std::path::Path) -> std::io::Result<Arc<Self>> {
         let jobs_path = data_dir.join("jobs.json");
         let activity_path = data_dir.join("activity.json");
-        let jobs = read_json(&jobs_path)?.unwrap_or_default();
+        let jobs: Vec<Job> = read_json(&jobs_path)?.unwrap_or_default();
+        // Serde defaults keep old job fields compatible, but also turn a
+        // structurally wrong row into a job with no identity. Starting with
+        // that row would allow the local-key sweep to retire real authorizations.
+        let mut identities = std::collections::HashSet::new();
+        if jobs
+            .iter()
+            .any(|job| job.id.trim().is_empty() || !identities.insert(&job.id))
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                tr!("lib.job_store_invalid_identities").into_owned(),
+            ));
+        }
         let activity = read_json(&activity_path)?.unwrap_or_default();
         Ok(Arc::new(Self {
             jobs_path,
@@ -887,6 +922,9 @@ impl JobStore {
                 ));
             }
         }
+        job.verification
+            .validate()
+            .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
         backup_encryption::validate_update(&mut job, previous, authorized_encryption)?;
         let mut next = jobs.clone();
         if job.id.is_empty() {
@@ -894,21 +932,54 @@ impl JobStore {
             job.created_at = now.clone();
             job.updated_at = now;
             job.last_run = None; // only the worker may create run history
+            job.last_verification = None;
+            job.invalid_images.clear();
+            job.verification_blocked = false;
             next.push(job.clone());
         } else if let Some(existing) = next.iter_mut().find(|j| j.id == job.id) {
             job.created_at = existing.created_at.clone();
             job.last_run = existing.last_run.clone(); // preserve run history
+            job.last_verification = existing.last_verification.clone();
+            job.invalid_images = existing.invalid_images.clone();
+            job.verification_blocked = existing.verification_blocked;
             job.updated_at = now;
             *existing = job.clone();
         } else {
             job.created_at = now.clone();
             job.updated_at = now;
             job.last_run = None; // a caller-selected id is still a new job
+            job.last_verification = None;
+            job.invalid_images.clear();
+            job.verification_blocked = false;
             next.push(job.clone());
         }
         write_json(&self.jobs_path, &next)?;
         *jobs = next;
         Ok(job)
+    }
+
+    /// Write back what [`source_refresh`] found: the job's devices, disk number
+    /// and disk snapshot — and nothing else, so an edit saved meanwhile keeps
+    /// its other fields. Returns the stored job.
+    pub fn refresh_sources(&self, refreshed: &Job) -> std::io::Result<Job> {
+        let mut jobs = self.jobs.lock().unwrap();
+        let mut next = jobs.clone();
+        let Some(job) = next.iter_mut().find(|j| j.id == refreshed.id) else {
+            // Deleted while it waited for the slot: nothing left to update.
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "job not found",
+            ));
+        };
+        job.source = refreshed.source.clone();
+        job.sources = refreshed.sources.clone();
+        job.disk_source = refreshed.disk_source.clone();
+        job.source_disks = refreshed.source_disks.clone();
+        job.updated_at = chrono::Utc::now().to_rfc3339();
+        let saved = job.clone();
+        write_json(&self.jobs_path, &next)?;
+        *jobs = next;
+        Ok(saved)
     }
 
     /// Remove a job; the list in memory changes only once the disk agrees.
@@ -990,7 +1061,24 @@ impl JobStore {
         {
             let mut jobs = self.jobs.lock().unwrap();
             if let Some(job) = jobs.iter_mut().find(|j| j.id == run.job_id) {
-                job.last_run = Some(run.clone());
+                if run.operation == "verify" {
+                    job.last_verification = Some(run.clone());
+                    if run.status != "cancelled" {
+                        job.verification_blocked =
+                            run.status == "error" && run.verification.is_none();
+                    }
+                    if let Some(summary) = &run.verification {
+                        for image in &summary.images {
+                            job.invalid_images
+                                .retain(|p| !verification::same_image(p, &image.image_path));
+                            if !image.valid {
+                                job.invalid_images.push(image.image_path.clone());
+                            }
+                        }
+                    }
+                } else {
+                    job.last_run = Some(run.clone());
+                }
             }
         }
         {
@@ -1015,7 +1103,7 @@ impl JobStore {
             .lock()
             .unwrap()
             .iter()
-            .find(|r| r.job_id == job_id && r.status == "success")
+            .find(|r| r.job_id == job_id && r.status == "success" && r.operation != "verify")
             .cloned()
     }
 }
@@ -1090,6 +1178,17 @@ pub struct RunQueue {
 struct QueueState {
     pending: VecDeque<String>,
     current: Option<String>,
+    background_operations: usize,
+}
+
+/// Keeps scheduled checks visible to the after-backup power decision while
+/// they wait for, or hold, the shared operation reservation.
+pub struct BackgroundOperation(RunQueue);
+
+impl Drop for BackgroundOperation {
+    fn drop(&mut self) {
+        self.0.state.lock().unwrap().background_operations -= 1;
+    }
 }
 
 impl RunQueue {
@@ -1097,6 +1196,16 @@ impl RunQueue {
         Self {
             state: Arc::new(Mutex::new(QueueState::default())),
         }
+    }
+
+    pub fn register_background_operation(&self) -> BackgroundOperation {
+        self.state.lock().unwrap().background_operations += 1;
+        BackgroundOperation(self.clone())
+    }
+
+    pub fn is_idle(&self) -> bool {
+        let q = self.state.lock().unwrap();
+        q.current.is_none() && q.pending.is_empty() && q.background_operations == 0
     }
 
     pub fn snapshot(&self) -> QueueSnapshot {
@@ -1517,18 +1626,17 @@ fn after_backup(action: &str, job_name: &str, queue: &RunQueue) {
         info!(job = %job_name, action, "after backup: nothing to do on the boot medium");
         return;
     }
-    let idle = |q: &RunQueue| {
-        let snap = q.snapshot();
-        snap.current.is_none() && snap.pending.is_empty()
-    };
-    if !idle(queue) {
-        info!(job = %job_name, action, "after backup: other copies are queued — skipped");
+    if !queue.is_idle() {
+        info!(job = %job_name, action, "after backup: other work is queued — skipped");
         return;
     }
     #[cfg(target_os = "windows")]
     {
         let (action, job_name, queue) = (action.to_string(), job_name.to_string(), queue.clone());
         tokio::spawn(async move {
+            if !queue.is_idle() {
+                return;
+            }
             let result = if action == "shutdown" {
                 own_backup_backup::power_win::shutdown_in(
                     SHUTDOWN_GRACE_SECS,
@@ -1536,8 +1644,8 @@ fn after_backup(action: &str, job_name: &str, queue: &RunQueue) {
                 )
             } else {
                 tokio::time::sleep(std::time::Duration::from_secs(SLEEP_AFTER_SECS)).await;
-                if !idle(&queue) {
-                    info!(job = %job_name, "after backup: a copy was queued meanwhile — not sleeping");
+                if !queue.is_idle() {
+                    info!(job = %job_name, "after backup: work was queued meanwhile — not sleeping");
                     return;
                 }
                 own_backup_backup::power_win::sleep_now()
@@ -1552,6 +1660,42 @@ fn after_backup(action: &str, job_name: &str, queue: &RunQueue) {
         let _ = (SLEEP_AFTER_SECS, SHUTDOWN_GRACE_SECS);
         info!(job = %job_name, action, "after backup: not implemented on this platform");
     }
+}
+
+/// Bring the job's partitions up to date with the disk before it runs (see
+/// [`source_refresh`]): the job to run, the note for the run record when its
+/// partitions moved, and why it cannot run when one of them is gone.
+#[cfg(target_os = "windows")]
+async fn refresh_job_sources(store: &JobStore, job: Job) -> (Job, String, Option<String>) {
+    use source_refresh::Refreshed;
+    match source_refresh::reconcile_with_live_disks(&job).await {
+        Refreshed::Unchanged => (job, String::new(), None),
+        Refreshed::Missing(why) => (job, String::new(), Some(why)),
+        Refreshed::Updated(r) => {
+            for (old, new) in &r.renamed {
+                info!(job = %job.name, old = %old, new = %new, "a source partition has a new device");
+            }
+            if !r.layout_note.is_empty() {
+                warn!(job = %job.name, note = %r.layout_note, "the source disk was re-partitioned");
+            }
+            // Saved, so the screen and the next run see the disk as it is.
+            // Not saved, the run still goes ahead with what was found: the
+            // check repeats before every run.
+            let job = match store.refresh_sources(&r.job) {
+                Ok(saved) => saved,
+                Err(e) => {
+                    warn!(job = %job.name, error = %e, "the updated partitions could not be saved");
+                    r.job
+                }
+            };
+            (job, r.layout_note, None)
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+async fn refresh_job_sources(_store: &JobStore, job: Job) -> (Job, String, Option<String>) {
+    (job, String::new(), None)
 }
 
 /// Background worker: pulls job ids off the channel and runs them one at a
@@ -1625,6 +1769,18 @@ pub async fn run_queue_worker(
             break;
         }
 
+        // A key repair can commit while this queued run waits for the busy
+        // slot. Load its new local reference only after acquiring the slot;
+        // otherwise the retired reference from the old snapshot would fail.
+        let Some(job) = store.get(&job_id) else {
+            queue.finish();
+            sink.queue_changed(queue.snapshot());
+            continue;
+        };
+        // The partitions as they are NOW, not as they were when the job was
+        // saved — Windows Update re-creates the recovery partition under it.
+        let (job, layout_note, sources_missing) = refresh_job_sources(&store, job).await;
+
         // No sleep while copying — laptops included, verification included.
         // Released when this iteration ends, whatever the outcome.
         #[cfg(target_os = "windows")]
@@ -1643,6 +1799,12 @@ pub async fn run_queue_worker(
             run.status = "cancelled".into();
             run.error = tr!("lib.cancelled_by_user").into_owned();
             run
+        } else if let Some(why) = sources_missing {
+            let mut run = run_skeleton(&job);
+            run.finished_at = chrono::Utc::now().to_rfc3339();
+            run.status = "error".into();
+            run.error = why;
+            run
         } else {
             match store.archive_keys_for_run(&job) {
                 Err(message) => {
@@ -1657,6 +1819,8 @@ pub async fn run_queue_worker(
                 }
             }
         };
+        let mut run = run;
+        run.layout_changed = layout_note;
         // How the run ended goes into the log as well as into its record. A
         // failure used to be written only to the record: on 2026-09-25 the log
         // said "Starting queued backup" and then nothing at all, and the reason
@@ -1932,12 +2096,24 @@ fn image_token(path: &Path) -> Option<String> {
     }
 }
 
-/// Timestamped output file name for one volume of a run:
-/// `<name>_<token>_<full|inc|diff>_<stamp>.<vhdx|avhdx>`.
+/// Timestamped output file names of one image of a run:
+/// `<name>_<token>_<full|inc|diff>_<stamp>.<ext>`.
+///
+/// The image this run writes, and the name it gets if the engine has to fall
+/// back to a full (parent unusable, disk re-partitioned) — one timestamp for
+/// both. The name says what the file IS: a full named `_inc_` was found in
+/// the owner's folder on 2026-10-14, after a fallback the name never learned.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))] // used by the Windows backup path
-fn output_path_for(job: &Job, device: &str, kind: &str) -> PathBuf {
-    let token = file_token(job, device);
-    let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+fn output_paths_for(job: &Job, token: &str, kind: &str) -> (PathBuf, PathBuf) {
+    let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
+    (
+        image_name(job, token, kind, &stamp),
+        image_name(job, token, "full", &stamp),
+    )
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn image_name(job: &Job, token: &str, kind: &str, stamp: &str) -> PathBuf {
     let safe_name = own_backup_common::file_name::safe_file_stem(&job.name, "backup");
     // VHDX children are AVHDX (the Windows convention); qcow2 children stay
     // .qcow2 (the qemu convention — chain role lives in the sidecar).
@@ -2084,7 +2260,7 @@ pub fn plan_run_for_volume_at(
     // both stop the rollover firing and make the version number go backwards.
     let child_count = chain.increments_ever();
 
-    if should_start_new_chain(job, &chain, now) {
+    if verification::chain_is_invalid(job, &chain) || should_start_new_chain(job, &chain, now) {
         return RunPlan::full();
     }
 
@@ -2167,7 +2343,7 @@ pub fn plan_run_for_disk_at(
     // both stop the rollover firing and make the version number go backwards.
     let child_count = chain.increments_ever();
 
-    if should_start_new_chain(job, &chain, now) {
+    if verification::chain_is_invalid(job, &chain) || should_start_new_chain(job, &chain, now) {
         return RunPlan::full();
     }
 
@@ -3024,7 +3200,8 @@ async fn perform_backup(
 
     for (idx, device) in volumes.iter().enumerate() {
         let plan = plan_run_for_volume(job, &folder, device);
-        let image_path = output_path_for(job, device, plan.kind);
+        let (image_path, full_image_path) =
+            output_paths_for(job, &file_token(job, device), plan.kind);
         let token = source_token(device);
         let vol_label = job.label_for(device);
         let vidx = idx as u64;
@@ -3042,6 +3219,7 @@ async fn perform_backup(
         let request = VolumeBackupRequest {
             source: device.clone(),
             image_path: image_path.clone(),
+            full_image_path: Some(full_image_path),
             source_disk,
             block_size: own_backup_backup::engine_win::DEFAULT_BLOCK_SIZE,
             all_sectors: job.advanced.sector_by_sector,
@@ -3077,7 +3255,6 @@ async fn perform_backup(
         let cancel_bg = cancel.clone();
         let low_priority = job.advanced.low_priority;
         let speed_limit_mbps = job.advanced.speed_limit_mbps;
-        let image_for_verify = image_path.clone();
         // Checking an encrypted copy needs its key: without one there is no
         // sidecar to read and nothing to compare checksums against.
         let keys_for_verify = keys.clone();
@@ -3160,9 +3337,9 @@ async fn perform_backup(
             if validate_after {
                 let mut v_permille = u64::MAX;
                 let mut v_emit = std::time::Instant::now();
-                let mut v_rate = VerifyRate::new(&image_for_verify, keys_for_verify.as_ref());
+                let mut v_rate = VerifyRate::new(&summary.image_path, keys_for_verify.as_ref());
                 let verified = verify_image_scoped(
-                    &image_for_verify,
+                    &summary.image_path,
                     keys_for_verify.as_ref(),
                     verify_scope,
                     |done, total| {
@@ -3226,6 +3403,9 @@ async fn perform_backup(
         match result {
             Ok(Ok((summary, verify_cancelled))) => {
                 use own_backup_common::types::BackupType as BT;
+                // The name the engine published: a fallback to a full renames
+                // the planned child.
+                let image_path = summary.image_path.clone();
                 run.source_bytes += summary.source_bytes;
                 run.bytes_copied += summary.bytes_copied;
                 run.used_blocks += summary.used_blocks;
@@ -3385,33 +3565,18 @@ async fn perform_disk_backup(
 
     use own_backup_common::types::BackupType;
 
-    let safe_name = own_backup_common::file_name::safe_file_stem(&job.name, "backup");
-
     // Chain planning (plan D5): a scheduled incremental/differential writes a
     // differencing child over the previous whole-disk image of THIS disk; any
     // doubt resolves to a full. VHDX children are `.avhdx` (Windows convention);
     // qcow2 children stay `.qcow2` (the role lives in the sidecar).
     let folder = PathBuf::from(&job.dest_folder);
     let plan = plan_run_for_disk(job, &folder, ds.disk_number);
-    let child_ext = match (job.archive_encryption.is_some(), job.image_format) {
-        (true, _) => own_backup_backup::seal::obk::OBK_EXTENSION,
-        (false, own_backup_common::types::ImageFormat::Vhdx) => "avhdx",
-        (false, own_backup_common::types::ImageFormat::Qcow2) => "qcow2",
-    };
     // Name carries the kind tag (full/inc/diff) so a glance at the folder tells
     // full from child — the extension alone can't (a qcow2 child is still
     // `.qcow2`). Token position matches the per-volume scheme so `image_token`
     // reads `disk<N>` from `<name>_disk<N>_<tag>_<stamp>`.
-    let (tag, ext) = match plan.kind {
-        "incremental" => ("inc", child_ext),
-        "differential" => ("diff", child_ext),
-        _ => ("full", container_extension(job)),
-    };
-    let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
-    let image_path = folder.join(format!(
-        "{safe_name}_disk{}_{tag}_{stamp}.{ext}",
-        ds.disk_number
-    ));
+    let (image_path, full_image_path) =
+        output_paths_for(job, &format!("disk{}", ds.disk_number), plan.kind);
 
     let partitions: Vec<DiskPartitionBackup> = ds
         .parts
@@ -3460,6 +3625,7 @@ async fn perform_disk_backup(
         disk_model: ds.disk_model.clone(),
         partitions,
         source_disk,
+        full_image_path: Some(full_image_path.clone()),
         bootable: ds.bootable,
         zstd_level: job.zstd_level(),
         image_path: image_path.clone(),
@@ -3484,7 +3650,6 @@ async fn perform_disk_backup(
     } else {
         VerifyScope::Everything
     };
-    let image_for_verify = image_path.clone();
     let keys_for_verify = keys.clone();
     let image_name = image_path
         .file_name()
@@ -3569,9 +3734,9 @@ async fn perform_disk_backup(
         if validate_after {
             let mut v_permille = u64::MAX;
             let mut v_emit = std::time::Instant::now();
-            let mut v_rate = VerifyRate::new(&image_for_verify, keys_for_verify.as_ref());
+            let mut v_rate = VerifyRate::new(&summary.image_path, keys_for_verify.as_ref());
             let verified = verify_image_scoped(
-                &image_for_verify,
+                &summary.image_path,
                 keys_for_verify.as_ref(),
                 verify_scope,
                 |done, total| {
@@ -3632,6 +3797,11 @@ async fn perform_disk_backup(
 
     match result {
         Ok(Ok((summary, verify_cancelled))) => {
+            // The name the engine published: a fallback to a full renames the
+            // planned child.
+            let image_path = summary.image_path.clone();
+            run.image_path = image_path.display().to_string();
+            run.base_image_path = run.image_path.clone();
             run.status = "success".into();
             run.bytes_copied = summary.bytes_copied;
             run.used_blocks = summary.blocks_copied;
@@ -3684,6 +3854,7 @@ async fn perform_disk_backup(
             run.status = "cancelled".into();
             run.error = tr!("lib.cancelled_by_user").into_owned();
             let _ = std::fs::remove_file(&image_path);
+            let _ = std::fs::remove_file(&full_image_path);
         }
         Ok(Err(e)) => {
             run.status = "error".into();
@@ -4197,6 +4368,72 @@ mod tests {
         worker.abort();
     }
 
+    #[tokio::test]
+    async fn a_waiting_backup_loads_the_job_again_after_a_key_repair_can_commit() {
+        struct QuietSink;
+        impl EventSink for QuietSink {
+            fn job_progress(&self, _: JobProgress) {}
+            fn queue_changed(&self, _: QueueSnapshot) {}
+            fn job_finished(&self, _: JobRun) {}
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = JobStore::load(dir.path());
+        let mut job = Job {
+            id: "waiting".into(),
+            name: "waiting".into(),
+            ..Default::default()
+        };
+        job.advanced.retry_attempts = 0;
+        store.upsert(job).unwrap();
+        let queue = RunQueue::new();
+        let busy = crate::busy::Busy::new();
+        let held = busy
+            .reserve(crate::busy::Doing::new("other", "probe"))
+            .unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let worker = tokio::spawn(run_queue_worker(
+            Arc::new(QuietSink),
+            store.clone(),
+            queue.clone(),
+            busy.clone(),
+            cancel.clone(),
+            Arc::new(NoPasswords),
+            rx,
+            tx.downgrade(),
+            stop_rx,
+        ));
+        queue.enqueue("waiting");
+        tx.send("waiting".into()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while queue.snapshot().current.as_deref() != Some("waiting") {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let mut updated = store.get("waiting").unwrap();
+        updated.name = "latest settings after key repair".into();
+        store.upsert(updated).unwrap();
+        cancel.store(true, Ordering::SeqCst);
+        drop(held);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while store.activity().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(store.activity()[0].status, "cancelled");
+        assert_eq!(
+            store.activity()[0].job_name,
+            "latest settings after key repair"
+        );
+        worker.abort();
+    }
+
     /// Asking "is it queued?" and queueing it are one step, or two callers
     /// arriving together both find it absent and both add it — and the job
     /// runs twice.
@@ -4577,8 +4814,28 @@ mod tests {
         let token = file_token(&job, dev);
         assert_eq!(token, "kubuntubootP4100000");
         // The file name round-trips: image_token reads it back (case-insensitive).
-        let name = output_path_for(&job, dev, "full");
+        let (name, _) = output_paths_for(&job, &token, "full");
         assert!(image_token(&name).unwrap().eq_ignore_ascii_case(&token));
+
+        // A planned child carries the full's name as well, for a fallback:
+        // same stamp, `_full_` and the full's extension.
+        let (child, full) = output_paths_for(&job, "disk4", "incremental");
+        let (child, full) = (
+            child.file_name().unwrap().to_string_lossy().into_owned(),
+            full.file_name().unwrap().to_string_lossy().into_owned(),
+        );
+        assert!(
+            child.contains("_disk4_inc_") && child.ends_with(".avhdx"),
+            "{child}"
+        );
+        assert!(
+            full.contains("_disk4_full_") && full.ends_with(".vhdx"),
+            "{full}"
+        );
+        assert_eq!(
+            child.replace("_inc_", "_full_").replace(".avhdx", ".vhdx"),
+            full
+        );
 
         // No label → falls back to the stable device token.
         let bare = Job::default();
@@ -4614,7 +4871,7 @@ mod tests {
 
     /// Write a real (parseable) sidecar + dummy image so `list_job_chains`
     /// discovers it. `name` must follow `<n>_<letter>_<tag>_<stamp>.<ext>`.
-    fn put_real_image(
+    pub(super) fn put_real_image(
         dir: &Path,
         name: &str,
         role: own_backup_backup::sidecar::ChainRole,

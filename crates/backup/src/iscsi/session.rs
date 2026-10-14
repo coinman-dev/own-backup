@@ -214,15 +214,15 @@ impl Session {
 
     fn serve<S: Read + Write>(&mut self, stream: &mut S) -> Result<()> {
         loop {
-            let Some((bhs, data)) = self.read_pdu(stream)? else {
-                return Ok(()); // the initiator closed the connection
-            };
             // A logged-in session may now sit idle for as long as it likes.
             // Before login it may not: that is the deadline that keeps a
             // connection saying nothing from holding a session slot.
             if self.logged_in {
                 self.set_pace(Pace::Idle);
             }
+            let Some((bhs, data)) = self.read_pdu(stream)? else {
+                return Ok(()); // the initiator closed the connection
+            };
             let opcode = bhs[0] & 0x3F;
             if !self.logged_in && opcode != OP_LOGIN {
                 return Err(dev(format!("iSCSI: opcode {opcode:#04x} before login")));
@@ -969,6 +969,22 @@ mod tests {
             .windows(15)
             .any(|w| w == b"AuthMethod=None"));
         assert_eq!(s.reads, 0);
+    }
+
+    /// The first idle read after login must not inherit the login deadline.
+    #[test]
+    fn a_logged_in_session_clears_the_deadline_before_waiting_for_a_pdu() {
+        let lun = Arc::new(Mutex::new(Lun::read_only(Box::new(
+            super::super::scsi::tests::MemSource::new(4096),
+        ))));
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let record = observed.clone();
+        let mut sess = Session::new("iqn.test:idle".into(), lun).with_pace(move |pace| {
+            record.lock().unwrap().push(pace);
+        });
+        sess.logged_in = true;
+        sess.run(&mut Wire::new(Vec::new())).unwrap();
+        assert_eq!(*observed.lock().unwrap(), vec![Pace::Idle]);
     }
 
     /// A connection in memory: what the initiator says, and what it hears back.

@@ -40,6 +40,13 @@ pub struct ObkListing {
 
 /// Read the open header of an `.obk`. Fails for anything that is not one.
 pub fn read_listing(path: &Path) -> Result<ObkListing> {
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(super::new_image::is_pending_name)
+    {
+        return Err(bad("unfinished backup is not a restore point"));
+    }
     let file = std::fs::File::open(path)
         .map_err(|e| bad(format!("cannot open {}: {e}", path.display())))?;
     let mut reader = std::io::BufReader::new(file);
