@@ -127,6 +127,7 @@
             <div class="where">
               {m.tools_letters_where({
                 disk: v.disk_number,
+                model: v.disk_model.trim(),
                 part: v.part_index,
                 fs: FS[v.filesystem] ?? v.filesystem,
                 size: formatBytes(v.size_bytes),

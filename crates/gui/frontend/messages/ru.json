@@ -911,7 +911,7 @@
   "tools_letters_kind_esp": "Системный раздел EFI",
   "tools_letters_kind_winre": "Среда восстановления Windows",
   "tools_letters_kind_other": "Скрытый раздел",
-  "tools_letters_where": "Диск {disk} · раздел {part} · {fs} · {size}",
+  "tools_letters_where": "Диск {disk} ({model}) · раздел {part} · {fs} · {size}",
   "tools_letters_assign": "Назначить",
   "tools_letters_remove": "Снять букву",
   "tools_letters_no_free": "Свободных букв нет",

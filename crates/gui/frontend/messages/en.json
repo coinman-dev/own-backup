@@ -881,7 +881,7 @@
   "tools_letters_kind_esp": "EFI system partition",
   "tools_letters_kind_winre": "Windows recovery environment",
   "tools_letters_kind_other": "Hidden partition",
-  "tools_letters_where": "Disk {disk} · partition {part} · {fs} · {size}",
+  "tools_letters_where": "Disk {disk} ({model}) · partition {part} · {fs} · {size}",
   "tools_letters_assign": "Assign",
   "tools_letters_remove": "Remove letter",
   "tools_letters_no_free": "No free letters",
