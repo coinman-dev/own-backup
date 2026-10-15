@@ -42,8 +42,11 @@ mod win;
 #[cfg(windows)]
 fn main() {
     // The strip speaks the window's language: `ui_language` in config.toml,
-    // followed for as long as the strip is up.
-    own_backup_common::lang::follow_config(own_backup_common::config::AppConfig::default_path());
+    // followed for as long as the strip is up — and, before the window has
+    // written one, the language the window will choose (see the function).
+    own_backup_common::lang::follow_config_or_system(
+        own_backup_common::config::AppConfig::default_path(),
+    );
     if let Err(error) = win::run() {
         win::log(&format!("the desktop could not start: {error}"));
         win::hold_a_console_instead();
