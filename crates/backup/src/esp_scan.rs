@@ -84,6 +84,14 @@ fn vendor(path: &str) -> String {
 
 /// What launches this, and therefore whether it belongs in a boot menu.
 pub fn role(path: &str) -> Role {
+    // Acronis' boot agent is put on the firmware's "next boot" by Acronis
+    // itself, for one boot, and taken off again by its own `bootwiz.xml`
+    // (`RemoveFakeBootNext`). A permanent entry for it is nothing Acronis
+    // would make; offering one listed it as an orphan beside the real menu
+    // (2026-10-15, this machine).
+    if vendor(path) == "acronis" && file_name(path) == "bootwiz.efi" {
+        return Role::SecondStage;
+    }
     // Launched by shim, by GRUB, or by the Windows boot manager — never by the
     // firmware, and never worth an entry of its own.
     const SECOND_STAGE: [&str; 7] = [
@@ -113,6 +121,7 @@ pub fn kind_by_name(path: &str) -> Option<&'static str> {
     // The vendor directory is the stronger signal when it is one we know: a
     // loader in `EFI\acronis` is Acronis' whatever it is built from.
     let by_vendor = match vendor.as_str() {
+        "ownbackup" => Some("Own Backup"),
         "acronis" => Some("Acronis"),
         "r-drive" | "rdrive" => Some("R-Drive Image"),
         "microsoft" => Some("Windows"),
@@ -126,6 +135,12 @@ pub fn kind_by_name(path: &str) -> Option<&'static str> {
         _ => None,
     };
 
+    // Files a vendor ships under a generic name, told apart by which one it is.
+    if let Some(v) = by_vendor {
+        if let Some(named) = vendor_file(v, &file) {
+            return Some(named);
+        }
+    }
     match (by_vendor, file_kind(&file)) {
         (Some(v), Some(_)) => Some(join(v, &file)),
         (Some(v), None) => Some(v),
@@ -146,6 +161,19 @@ fn file_kind(file: &str) -> Option<&'static str> {
         "memtest.efi" => static_text(tr!("esp_scan.memtest")),
         "securebootrecovery.efi" => static_text(tr!("esp_scan.secure_boot_recovery")),
         "systemd-bootx64.efi" => "systemd-boot",
+        _ => return None,
+    })
+}
+
+/// A vendor's own loaders that all carry a generic name. Acronis keeps three
+/// different programs in one directory; our own boot environment is the
+/// Windows boot manager under our directory name.
+fn vendor_file(vendor: &'static str, file: &str) -> Option<&'static str> {
+    Some(match (vendor, file) {
+        ("Acronis", "bootx64.efi") => static_text(tr!("esp_scan.acronis_recovery_menu")),
+        ("Acronis", "bootia32.efi") => static_text(tr!("esp_scan.acronis_recovery_menu_32")),
+        ("Acronis", "bootwiz.efi") => static_text(tr!("esp_scan.acronis_boot_agent")),
+        ("Own Backup", "bootx64.efi") => static_text(tr!("esp_scan.own_backup_boot")),
         _ => return None,
     })
 }
@@ -192,7 +220,10 @@ mod tests {
             kind_by_name(r"\EFI\r-drive\bootx64.efi"),
             Some("R-Drive Image")
         );
-        assert_eq!(kind_by_name(r"\EFI\acronis\bootx64.efi"), Some("Acronis"));
+        assert_eq!(
+            kind_by_name(r"\EFI\acronis\bootx64.efi"),
+            Some("Acronis · меню восстановления")
+        );
         assert_eq!(
             kind_by_name(r"\EFI\Microsoft\Boot\bootmgfw.efi"),
             Some("диспетчер загрузки Windows")
@@ -210,6 +241,22 @@ mod tests {
         assert_eq!(kind_by_name(r"\EFI\whatever\thing.efi"), None);
         assert_eq!(kind_by_name(r"\EFI\vendor\grubx64.efi"), Some("GRUB"));
         assert_eq!(kind_by_name(r"\EFI\fedora\odd.efi"), Some("Fedora"));
+        assert_eq!(kind_by_name(r"\EFI\acronis\other.efi"), Some("Acronis"));
+    }
+
+    /// The two Acronis programs in one directory are two different things,
+    /// and our own boot environment is ours, not "a loader" (2026-10-15).
+    #[test]
+    fn acronis_files_and_our_own_boot_environment_are_told_apart() {
+        assert_eq!(
+            kind_by_name(r"\EFI\acronis\bootwiz.efi"),
+            Some("Acronis · загрузочный агент")
+        );
+        assert_eq!(
+            kind_by_name(r"\EFI\OwnBackup\bootx64.efi"),
+            Some("Own Backup · загрузочная среда")
+        );
+        assert_eq!(role(r"\EFI\OwnBackup\bootx64.efi"), Role::EntryPoint);
     }
 
     /// Nine of the twelve files on this machine's partitions are launched by
@@ -224,6 +271,8 @@ mod tests {
             r"\EFI\Microsoft\Boot\bootmgr.efi",
             r"\EFI\Microsoft\Boot\memtest.efi",
             r"\EFI\Microsoft\Boot\SecureBootRecovery.efi",
+            // Acronis puts it on "next boot" itself, once.
+            r"\EFI\acronis\bootwiz.efi",
         ] {
             assert_eq!(role(second), Role::SecondStage, "{second}");
         }
@@ -231,7 +280,6 @@ mod tests {
             r"\EFI\ubuntu\shimx64.efi",
             r"\EFI\kubuntu\shimx64.efi",
             r"\EFI\acronis\bootx64.efi",
-            r"\EFI\acronis\bootwiz.efi",
             r"\EFI\r-drive\bootx64.efi",
             r"\EFI\Microsoft\Boot\bootmgfw.efi",
             r"\EFI\Boot\bootx64.efi",

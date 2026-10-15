@@ -727,6 +727,22 @@
     "ru": "Windows, внутренняя часть",
     "en": "Windows, inner part"
   },
+  "esp_scan.acronis_recovery_menu": {
+    "ru": "Acronis · меню восстановления",
+    "en": "Acronis · recovery menu"
+  },
+  "esp_scan.acronis_recovery_menu_32": {
+    "ru": "Acronis · меню восстановления, 32 бита",
+    "en": "Acronis · recovery menu, 32-bit"
+  },
+  "esp_scan.acronis_boot_agent": {
+    "ru": "Acronis · загрузочный агент",
+    "en": "Acronis · boot agent"
+  },
+  "esp_scan.own_backup_boot": {
+    "ru": "Own Backup · загрузочная среда",
+    "en": "Own Backup · boot environment"
+  },
   "esp_scan.windows_memtest": {
     "ru": "проверка памяти Windows",
     "en": "Windows memory test"
