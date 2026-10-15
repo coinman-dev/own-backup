@@ -294,6 +294,50 @@ pub fn strip_drive_letters(volume_root: &str) {
     }
 }
 
+/// Is drive letter `letter` taken in this session — by a volume, a network
+/// drive or a `subst`?
+pub fn drive_letter_in_use(letter: char) -> bool {
+    let Some(bit) = (letter.to_ascii_uppercase() as u32).checked_sub('A' as u32) else {
+        return true;
+    };
+    if bit >= 26 {
+        return true;
+    }
+    // SAFETY: no arguments; returns a bitmask of present drive letters.
+    let mask = unsafe { windows::Win32::Storage::FileSystem::GetLogicalDrives() };
+    mask & (1 << bit) != 0
+}
+
+/// Give `volume_root` (`\\?\Volume{GUID}`, with or without the trailing
+/// backslash) the drive letter `letter`. Windows keeps it across reboots, as
+/// one set in Disk Management. The caller decides whether the volume may have
+/// one; this only does it.
+pub fn assign_drive_letter(volume_root: &str, letter: char) -> std::result::Result<(), String> {
+    use windows::Win32::Storage::FileSystem::SetVolumeMountPointW;
+
+    let letter = letter.to_ascii_uppercase();
+    if !letter.is_ascii_uppercase() {
+        return Err(format!("not a drive letter: {letter}"));
+    }
+    let mount = to_wide(&format!("{letter}:\\"));
+    let volume = to_wide(&format!("{}\\", volume_root.trim_end_matches('\\')));
+    // SAFETY: both strings are NUL-terminated and outlive the call.
+    unsafe { SetVolumeMountPointW(PCWSTR(mount.as_ptr()), PCWSTR(volume.as_ptr())) }
+        .map_err(|e| e.to_string())?;
+    info!(letter = %letter, volume = %volume_root, "drive letter assigned");
+    Ok(())
+}
+
+/// Take drive letter `letter` away from the volume it names, together with
+/// Windows' remembered mapping (see [`strip_drive_letters`]).
+pub fn remove_drive_letter(letter: char) -> std::result::Result<(), String> {
+    let root = to_wide(&format!("{}:\\", letter.to_ascii_uppercase()));
+    // SAFETY: `root` is NUL-terminated and outlives the call.
+    unsafe { DeleteVolumeMountPointW(PCWSTR(root.as_ptr())) }.map_err(|e| e.to_string())?;
+    info!(letter = %letter, "drive letter removed");
+    Ok(())
+}
+
 /// `IOCTL_VOLUME_ONLINE` — absent from the Windows SDK metadata the `windows`
 /// crate is generated from, so it is spelled out here:
 /// `CTL_CODE(IOCTL_VOLUME_BASE = 0x56, 2, METHOD_BUFFERED, FILE_READ_ACCESS |

@@ -110,6 +110,8 @@ fn build_partition(v: &Value, index: u32) -> PartitionInfo {
         unlock_methods: Vec::new(),
         recovery_key_only: false,
         unlockable: true,
+        gpt_attributes: 0,
+        mbr_type: 0,
     }
 }
 

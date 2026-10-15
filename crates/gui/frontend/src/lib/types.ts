@@ -1066,3 +1066,18 @@ export interface MediaProgress {
   detail: string;
   finished: boolean;
 }
+
+/** A hidden system partition — EFI, recovery, vendor tools — that Windows
+ *  keeps without a drive letter (`HiddenVolume` in common/disk.rs). */
+export interface HiddenVolume {
+  /** `S:` with a letter, else `\?\Volume{GUID}`: what the letter calls take. */
+  device: string;
+  letter: string | null;
+  kind: 'esp' | 'winre' | 'other';
+  disk_number: number;
+  disk_model: string;
+  part_index: number;
+  size_bytes: number;
+  filesystem: string;
+  label: string;
+}

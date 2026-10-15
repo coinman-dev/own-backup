@@ -378,6 +378,8 @@ mod tests {
             unlock_methods: Vec::new(),
             recovery_key_only: false,
             unlockable: true,
+            gpt_attributes: 0,
+            mbr_type: 0,
         }
     }
 

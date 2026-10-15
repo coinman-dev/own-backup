@@ -54,6 +54,38 @@
     "ru": "Задание сейчас выполняется. Остановите его и повторите удаление.",
     "en": "The job is running. Stop it, then delete it again."
   },
+  "grpc_server.busy_volume_letter": {
+    "ru": "назначение буквы диска",
+    "en": "changing a drive letter"
+  },
+  "grpc_server.letter_not_hidden_volume": {
+    "ru": "%{device} — не скрытый системный раздел. Буквы обычных томов меняются в «Управлении дисками» Windows",
+    "en": "%{device} is not a hidden system partition. Letters of ordinary volumes are changed in Windows Disk Management"
+  },
+  "grpc_server.letter_bad": {
+    "ru": "«%{letter}» — не буква диска (нужна одна латинская буква от D до Z)",
+    "en": "“%{letter}” is not a drive letter (one Latin letter from D to Z is needed)"
+  },
+  "grpc_server.letter_already_set": {
+    "ru": "У раздела уже есть буква %{letter}:",
+    "en": "The partition already has the letter %{letter}:"
+  },
+  "grpc_server.letter_busy": {
+    "ru": "Буква %{letter}: уже занята. Выберите другую",
+    "en": "The letter %{letter}: is already taken. Choose another one"
+  },
+  "grpc_server.letter_none": {
+    "ru": "У раздела нет буквы — снимать нечего",
+    "en": "The partition has no letter to remove"
+  },
+  "grpc_server.letter_assign_failed": {
+    "ru": "Windows не назначила букву %{letter}: — %{error}",
+    "en": "Windows did not assign the letter %{letter}: — %{error}"
+  },
+  "grpc_server.letter_remove_failed": {
+    "ru": "Windows не сняла букву %{letter}: — %{error}",
+    "en": "Windows did not remove the letter %{letter}: — %{error}"
+  },
   "grpc_server.busy_delete_copies": {
     "ru": "удаление копий",
     "en": "deleting backups"

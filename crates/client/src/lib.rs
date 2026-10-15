@@ -879,6 +879,40 @@ impl BackupClient {
         Ok(reply.json)
     }
 
+    /// EFI, recovery and vendor partitions Windows keeps without a letter.
+    pub async fn list_hidden_volumes(
+        &mut self,
+    ) -> Result<Vec<own_backup_common::disk::HiddenVolume>> {
+        let reply = self
+            .inner
+            .list_hidden_volumes(self.request(proto::Empty {}))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
+
+    /// Give a hidden partition `letter`, or take its letter away (`None`).
+    /// Answers the list as it is afterwards.
+    pub async fn set_volume_letter(
+        &mut self,
+        device: &str,
+        letter: Option<char>,
+    ) -> Result<Vec<own_backup_common::disk::HiddenVolume>> {
+        let json = serde_json::json!({
+            "device": device,
+            "letter": letter.map(|l| l.to_string()),
+        })
+        .to_string();
+        let reply = self
+            .inner
+            .set_volume_letter(self.request(proto::JsonRequest { json }))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
+
     pub async fn service_status_json(&mut self) -> Result<String> {
         let reply = self
             .inner

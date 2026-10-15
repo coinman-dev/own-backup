@@ -295,6 +295,10 @@ struct RawPartition {
     part_guid: String,
     /// MBR active flag.
     bootable: bool,
+    /// GPT attribute flags (`PARTITION_INFORMATION_GPT::Attributes`); 0 on MBR.
+    attributes: u64,
+    /// MBR partition type byte; 0 on GPT.
+    mbr_type: u8,
 }
 
 /// `IOCTL_DISK_GET_DRIVE_LAYOUT_EX` → (scheme, disk id, partitions).
@@ -337,11 +341,18 @@ fn drive_layout(handle: HANDLE) -> Option<(PartitionTable, String, Vec<RawPartit
         }
         let u = UNION;
         // PARTITION_INFORMATION_MBR: PartitionType@0, BootIndicator@1.
+        // PARTITION_INFORMATION_GPT: PartitionType@0, PartitionId@16,
+        // Attributes@32.
         let mbr_type = entry[u];
-        let (type_guid, part_guid, bootable) = if style == STYLE_GPT {
-            (guid_at(entry, u), guid_at(entry, u + 16), false)
+        let (type_guid, part_guid, bootable, attributes) = if style == STYLE_GPT {
+            (
+                guid_at(entry, u),
+                guid_at(entry, u + 16),
+                false,
+                u64_at(entry, u + 32),
+            )
         } else {
-            (String::new(), String::new(), entry[u + 1] != 0)
+            (String::new(), String::new(), entry[u + 1] != 0, 0)
         };
         if style == STYLE_GPT && type_guid.is_empty() {
             continue; // an empty GPT slot
@@ -356,6 +367,8 @@ fn drive_layout(handle: HANDLE) -> Option<(PartitionTable, String, Vec<RawPartit
             type_guid,
             part_guid,
             bootable,
+            attributes,
+            mbr_type: if style == STYLE_MBR { mbr_type } else { 0 },
         });
     }
     parts.sort_by_key(|p| p.offset);
@@ -700,6 +713,8 @@ impl super::traits::DiskInventory for WindowsInventory {
                     unlock_methods: Vec::new(),
                     recovery_key_only: false,
                     unlockable: true,
+                    gpt_attributes: raw.attributes,
+                    mbr_type: raw.mbr_type,
                 });
             }
             partitions.sort_by_key(|p| p.index);

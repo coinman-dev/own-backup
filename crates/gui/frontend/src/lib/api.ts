@@ -3,6 +3,7 @@ import type {
   BootStatus,
   BootActionResult,
   DiskInfo,
+  HiddenVolume,
   RestoreSummary,
   VerifySummary,
   ImageInfo,
@@ -64,6 +65,11 @@ export const api = {
   buildBootMedia: (options: MediaBuildOptions) =>
     invoke<MediaBuildReport>('build_boot_media', { options }),
   driveSignature: () => invoke<number>('drive_signature'),
+  // EFI, recovery and vendor partitions without a letter (the service decides
+  // which), and giving one a letter or taking it away (`letter: null`).
+  listHiddenVolumes: () => invoke<HiddenVolume[]>('list_hidden_volumes'),
+  setVolumeLetter: (device: string, letter: string | null) =>
+    invoke<HiddenVolume[]>('set_volume_letter', { device, letter }),
 
   // --- job model (phase 6) ---
   listBackupJobs: () => invoke<Job[]>('list_backup_jobs'),
