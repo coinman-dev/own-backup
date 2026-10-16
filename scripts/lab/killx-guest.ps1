@@ -17,21 +17,34 @@
 # Everything is reported over COM1. ASCII only (PowerShell 5.1, no BOM).
 param([switch]$User)
 $ErrorActionPreference = 'Stop'
+# Anything that fails before the main try (the setup below) would otherwise
+# end the script without a word: say it on COM1 directly.
+trap {
+    try {
+        $port = New-Object IO.Ports.SerialPort 'COM1',115200,'None',8,'One'
+        $port.Open(); $port.WriteLine("KILLX-FAIL early line=$($_.InvocationInfo.ScriptLineNumber) reason=$($_.Exception.Message)"); $port.Dispose()
+    } catch { }
+    break
+}
 $lab = 'C:\Lab'
 $base = 'C:\Lab\killx'
 $installed = 'C:\Program Files\OwnBackup'
 # One VM, one format at a time; each has its own state, store and job.
 # Line 1 the format, line 2 an optional tag: a new tag is a fresh attempt.
-$spec = if (Test-Path "$lab\killx-format.txt") { @(Get-Content "$lab\killx-format.txt" | Where-Object { $_.Trim() }) } else { @('vhdx') }
+# @() outside the if: an if hands back one line as a bare string, and
+# $spec[0] of a string is its first character.
+$spec = @(if (Test-Path "$lab\killx-format.txt") { Get-Content "$lab\killx-format.txt" | Where-Object { $_.Trim() } } else { 'vhdx' })
 $format = $spec[0].Trim()
 $tag = if ($spec.Count -gt 1) { '-' + $spec[1].Trim() } else { '' }
+# Line 3: the phase run 1 is killed in (exclusions unless said otherwise).
+$killPhase = if ($spec.Count -gt 2) { $spec[2].Trim() } else { 'exclusions' }
 $work = "$base\$format$tag"
 $store = "S:\killx-$format$tag"
-$encrypted = $format -eq 'obk'
+$encrypted = $format -in @('obk', 'consol')
 $private = if ($encrypted) { '.own-backup-obk-*' } else { '.own-backup-new-*' }
-$imageExt = @{ vhdx = 'vhdx'; qcow2 = 'qcow2'; obk = 'obk' }[$format]
-$childExt = @{ vhdx = 'avhdx'; qcow2 = 'qcow2'; obk = 'obk' }[$format]
-$publicPattern = @{ vhdx = '\.(vhdx|avhdx)$'; qcow2 = '\.qcow2$'; obk = '\.obk$' }[$format]
+$imageExt = @{ vhdx = 'vhdx'; qcow2 = 'qcow2'; obk = 'obk'; consol = 'obk' }[$format]
+$childExt = @{ vhdx = 'avhdx'; qcow2 = 'qcow2'; obk = 'obk'; consol = 'obk' }[$format]
+$publicPattern = @{ vhdx = '\.(vhdx|avhdx)$'; qcow2 = '\.qcow2$'; obk = '\.obk$'; consol = '\.obk$' }[$format]
 $jobName = "KillX$format"
 $secret = if ($encrypted) { @{ secret = 'password'; password_file = "$base\$format$tag\password.txt" } } else { @{ secret = 'none' } }
 $seed = 20261017
@@ -129,6 +142,87 @@ function VerifyMounted([string]$root) {
     }
     $left = @(Get-ChildItem -LiteralPath (Join-Path $root 'cache') -Recurse -Force -File -ErrorAction SilentlyContinue)
     Check ($left.Count -eq 0) "no excluded file has a directory entry in the copy ($($left.Count) left)"
+}
+
+# --- Consolidation killed (format 'consol') ----------------------------------
+# A window of one increment: from the third run on, every run folds the oldest
+# increment into the base after its copy. The fold says nothing over the event
+# stream, so the kill waits for its marker file and then a delay. Each run adds
+# its own file to the source, so a fold that lost or doubled anything shows in
+# the last copy's content.
+function RunBytes([int]$k) {
+    $bytes = New-Object byte[] (24MB); (New-Object Random ($seed + 100 + $k)).NextBytes($bytes)
+    return ,$bytes
+}
+function AddRunFile([int]$k) { [IO.File]::WriteAllBytes("P:\keep\run-$k.bin", (RunBytes $k)) }
+function RunJob([string]$name, [string]$id) {
+    $run = Rpc $name @{ op = 'run'; id = $id; timeout_secs = 1800 }
+    Check ($run.status -eq 'success') "$name succeeded: $($run.error)"
+    return $run
+}
+function Consolidation([string]$id) {
+    Get-ChildItem 'P:\keep' -Filter 'run-*.bin' -ErrorAction SilentlyContinue | Remove-Item -Force
+    $stale = @(Names)
+    if ($stale.Count) { Report 'stale-before-run1' @{ files = $stale }; Get-ChildItem -LiteralPath $store -Force | Remove-Item -Force }
+    $k = 1; AddRunFile $k; $null = RunJob "run$k" $id
+    $k++; AddRunFile $k; $null = RunJob "run$k" $id
+    $kills = @()
+    foreach ($delay in @(0, 100, 250, 500)) {
+        $k++; AddRunFile $k
+        $name = "consol-$k"
+        [IO.File]::WriteAllText("$work\kill.request", (ConvertTo-Json -Compress @{ name = $name; pattern = '*.consolidating.json'; delay_ms = $delay; timeout_s = 600 }))
+        # The run's RPC dies with the service.
+        try { $null = Rpc "run$k" @{ op = 'run'; id = $id; timeout_secs = 1800 } } catch { Say "KILLX-NOTE run $k ended with the service: $($_.Exception.Message -replace '\s+', ' ')" }
+        for ($i = 0; $i -lt 1200 -and -not (Test-Path "$work\$name.json"); $i++) { Start-Sleep -Milliseconds 500 }
+        Check (Test-Path "$work\$name.json") "run $k was killed $delay ms after its consolidation marker"
+        $kill = Get-Content "$work\$name.json" -Raw | ConvertFrom-Json
+        Check ([bool]$kill.trigger) "the marker of run $k's consolidation was seen ($($kill.trigger))"
+        $kills += [ordered]@{ run = $k; delay_ms = $delay; at_kill = @($kill.listing | ForEach-Object { $_.name }) }
+        WaitService
+        # A clean run finishes what the kill interrupted, copies, and folds its
+        # own; the next kill then meets a fold of its own run, not a resume.
+        $k++; AddRunFile $k; $null = RunJob "run$k" $id
+        Check (@(Get-ChildItem -LiteralPath $store -Force -Filter '*.consolidating.json').Count -eq 0) "run $k left no consolidation marker"
+        foreach ($image in @(Public)) {
+            $v = Rpc "verify-after-$k-$image" (@{ op = 'verify'; image = "$store\$image" } + $secret)
+            Check $v.valid "after run $k, $image verifies"
+        }
+    }
+    [IO.File]::WriteAllText("$work\kills.done", 'done')
+    # The next run finishes what the kill interrupted, then copies and folds.
+    $k++; AddRunFile $k; $last = RunJob "run$k" $id
+    Check (@(Get-ChildItem -LiteralPath $store -Force -Filter '*.consolidating.json').Count -eq 0) 'no consolidation marker is left'
+    $public = @(Public)
+    Check ($public.Count -eq 2) "the window holds a base and one increment ($($public -join ', '))"
+    Check (@(Pending).Count -eq 0) "no private file is left ($((@(Pending)) -join ', '))"
+    foreach ($image in $public) {
+        $v = Rpc "verify-final-$image" (@{ op = 'verify'; image = "$store\$image" } + $secret)
+        Check $v.valid "$image verifies"
+    }
+    $versions = Rpc 'versions' @{ op = 'versions'; id = $id }
+    Report 'listing-after' @{ files = (Listing); versions = $versions; kills = $kills }
+    $null = Rpc 'mount-last' (@{ op = 'mount'; image = $last.image_path } + $secret)
+    try {
+        $root = $null
+        for ($i = 0; $i -lt 60 -and -not $root; $i++) {
+            $root = Get-Volume | Where-Object { $_.DriveLetter -and $_.DriveLetter -notin @('C', 'P', 'S') } |
+                ForEach-Object { "$($_.DriveLetter):\" } | Where-Object { Test-Path (Join-Path $_ 'killx-marker.txt') } | Select-Object -First 1
+            if (-not $root) { Start-Sleep -Seconds 1 }
+        }
+        Check ([bool]$root) "the last copy is mounted at $root"
+        foreach ($f in Kept) {
+            Check ((Get-FileHash -LiteralPath (Join-Path $root $f.Name) -Algorithm SHA256).Hash -eq (Sha $f.Bytes)) "content of $($f.Name)"
+        }
+        for ($j = 1; $j -le $k; $j++) {
+            Check ((Get-FileHash -LiteralPath (Join-Path $root "keep\run-$j.bin") -Algorithm SHA256).Hash -eq (Sha (RunBytes $j))) "run $j's own file is in the last copy"
+        }
+    } finally {
+        try { $null = Rpc 'unmount-last' @{ op = 'unmount'; image = $last.image_path } } catch { Say "KILLX-NOTE unmount: $($_.Exception.Message)" }
+    }
+    [IO.File]::WriteAllText("$work\passed.txt", 'pass')
+    Report 'result' @{ pass = $true; kills = $kills; last = $last.image_path }
+    Say "KILLX-PASS format=$format"
+    shutdown.exe /s /t 5 | Out-Null
 }
 
 function AutoLogon {
@@ -233,8 +327,8 @@ if ($media) {
             Remove-Item "$base\upgrading" -Force
             Say "KILLX-UPGRADED $want"
         }
-        if (Test-Path "$work\killed.json") {
-            # A reboot after the kill: the user half finishes by itself.
+        if (Test-Path "$work\kills.done") {
+            # A reboot after the kills: the user half finishes by itself.
             $armed = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon').AutoAdminLogon -eq '1'
             if (-not $armed) { AutoLogon; Say 'KILLX-REARM'; shutdown.exe /r /t 5 | Out-Null }
             return
@@ -250,41 +344,65 @@ if ($media) {
             for ($i = 0; $i -lt 120 -and -not (Get-Process explorer -ErrorAction SilentlyContinue); $i++) { Start-Sleep -Seconds 1 }
             if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) { AutoLogon; Say 'KILLX-REARM'; shutdown.exe /r /t 5 | Out-Null; return }
         }
-        Step 'waiting for the kill request'
-        $deadline = [DateTime]::UtcNow.AddMinutes(40)
-        while (-not (Test-Path "$work\kill.request")) {
-            if ([DateTime]::UtcNow -gt $deadline) { throw 'the user half never asked for the kill' }
-            Start-Sleep -Milliseconds 200
+        # Requests one after another until the user half says there are no
+        # more. A request is JSON: the name of the record to write, and
+        # optionally a file pattern in the store to wait for and a delay after
+        # it appears - the consolidation says nothing over the event stream,
+        # so its own marker file is the signal.
+        $deadline = [DateTime]::UtcNow.AddMinutes(60)
+        while (-not (Test-Path "$work\kills.done")) {
+            Step 'waiting for a kill request'
+            while (-not (Test-Path "$work\kill.request") -and -not (Test-Path "$work\kills.done")) {
+                if ([DateTime]::UtcNow -gt $deadline) { throw 'the user half never finished asking' }
+                Start-Sleep -Milliseconds 100
+            }
+            if (Test-Path "$work\kills.done") { break }
+            Start-Sleep -Milliseconds 50
+            $request = Get-Content "$work\kill.request" -Raw | ConvertFrom-Json
+            # Only a file written after the request counts: a marker left by
+            # the previous kill is the resume's, not this run's fold.
+            $asked = (Get-Item "$work\kill.request").LastWriteTimeUtc
+            $name = if ($request.name) { $request.name } else { 'killed' }
+            $seen = $null
+            if ($request.pattern) {
+                $until = [DateTime]::UtcNow.AddSeconds([int]$request.timeout_s)
+                while (-not $seen -and [DateTime]::UtcNow -lt $until) {
+                    $seen = Get-ChildItem -LiteralPath $store -Force -Filter $request.pattern -ErrorAction SilentlyContinue |
+                        Where-Object { $_.LastWriteTimeUtc -gt $asked -or $_.CreationTimeUtc -gt $asked } | Select-Object -First 1
+                    if (-not $seen) { Start-Sleep -Milliseconds 20 }
+                }
+                if ($seen) { Start-Sleep -Milliseconds ([int]$request.delay_ms) }
+            }
+            $service = Get-Process own-backup-service -ErrorAction Stop
+            $at = [DateTime]::UtcNow.ToString('o')
+            Stop-Process -Id $service.Id -Force
+            Say "KILLX-KILLED name=$name pid=$($service.Id) utc=$at trigger=$(if ($seen) { $seen.Name } else { 'none' })"
+            Step "killed ($name)"
+            Start-Sleep -Seconds 2
+            $right = [ordered]@{ utc = $at; pid = $service.Id; trigger = $(if ($seen) { $seen.Name } else { $null }); listing = (Listing) }
+            # The service log names the step the work was in.
+            $log = Get-ChildItem "$installed\Logs" -Filter 'own-backup-service-*.log' -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime | Select-Object -Last 1
+            if ($log) {
+                $copy = Join-Path $work "service-at-$name.log"
+                Copy-Item -LiteralPath $log.FullName $copy -Force
+                # Plain strings: Get-Content's carry PSDrive/PSProvider, which
+                # ConvertTo-Json -Depth 20 walks for minutes (PowerShell 5.1).
+                $right.log_tail = [string[]]@(Get-Content -LiteralPath $copy -Tail 25 | ForEach-Object { "$_" })
+            }
+            for ($i = 0; $i -lt 60 -and (Get-Service OwnBackup).Status -ne 'Running'; $i++) {
+                try { Start-Service OwnBackup -ErrorAction Stop } catch { Start-Sleep -Seconds 1 }
+            }
+            WaitService
+            $right.restarted = @(Get-Process own-backup-service | ForEach-Object { $_.Id })
+            Remove-Item "$work\kill.request" -Force
+            JsonFile "$work\$name.json" $right
+            Step "$name.json written"
+            Report $name $right
         }
-        $service = Get-Process own-backup-service -ErrorAction Stop
-        $at = [DateTime]::UtcNow.ToString('o')
-        Stop-Process -Id $service.Id -Force
-        Say "KILLX-KILLED pid=$($service.Id) utc=$at"
-        Step 'killed'
-        Start-Sleep -Seconds 2
-        $right = [ordered]@{ utc = $at; pid = $service.Id; listing = (Listing) }
-        Step "listed $(@($right.listing).Count) files"
-        # The service log names the step the pass was in.
-        $log = Get-ChildItem "$installed\Logs" -Filter 'own-backup-service-*.log' -ErrorAction SilentlyContinue |
-            Sort-Object LastWriteTime | Select-Object -Last 1
-        if ($log) {
-            $copy = Join-Path $work 'service-at-kill.log'
-            Copy-Item -LiteralPath $log.FullName $copy -Force
-            # Plain strings: Get-Content's carry PSDrive/PSProvider, which
-            # ConvertTo-Json -Depth 20 walks for minutes (PowerShell 5.1).
-            $right.log_tail = [string[]]@(Get-Content -LiteralPath $copy -Tail 25 | ForEach-Object { "$_" })
-        }
-        Step 'log copied'
-        for ($i = 0; $i -lt 60 -and (Get-Service OwnBackup).Status -ne 'Running'; $i++) {
-            try { Start-Service OwnBackup -ErrorAction Stop } catch { Start-Sleep -Seconds 1 }
-        }
-        Step "service $((Get-Service OwnBackup).Status)"
-        WaitService
-        Step 'service answers'
-        $right.restarted = @(Get-Process own-backup-service | ForEach-Object { $_.Id })
-        JsonFile "$work\killed.json" $right
-        Step 'killed.json written'
-        Report 'killed' $right
+        # Armed now for the next attempt's boot: a rearm needs a reboot of its
+        # own, and an OVMF reset of this VM has hung once (2026-10-16).
+        AutoLogon
         return
     }
 
@@ -303,27 +421,31 @@ if ($media) {
                 name = $jobName; source = 'P:'; sources = @('P:'); dest_folder = $store
                 image_format = $(if ($format -eq 'vhdx') { 'vhdx' } else { 'qcow2' });
                 schedule = @{ kind = 'none' };
-                scheme = @{ method = 'incremental'; only_incremental = $false; full_every_n = 1; keep_chains = 1 };
-                exclusions = @{ enabled = $true; patterns = @('*.tmp'); patterns_linux = @() };
+                scheme = $(if ($format -eq 'consol') {
+                    @{ method = 'incremental'; only_incremental = $true; full_every_n = 100; keep_chains = 1; rolling_incrementals = 1 } } else {
+                    @{ method = 'incremental'; only_incremental = $false; full_every_n = 1; keep_chains = 1 } })
+                exclusions = @{ enabled = ($format -ne 'consol'); patterns = @('*.tmp'); patterns_linux = @() };
                 advanced = @{ validate_after = $false; retry_attempts = 0; after_backup = 'none' } } }
             JsonFile "$work\job.json" @{ id = $job.id }
             $state = Get-Content "$work\job.json" -Raw | ConvertFrom-Json
         }
         $id = $state.id
+        if ($format -eq 'consol') { Consolidation $id; return }
 
         # Run 1, killed inside the deletion of the excluded files.
         if (-not (Test-Path "$work\killed.json")) {
             # What an earlier unfinished attempt left; this one starts clean.
             $stale = @(Names)
             if ($stale.Count) { Report 'stale-before-run1' @{ files = $stale }; Get-ChildItem -LiteralPath $store -Force | Remove-Item -Force }
-            $at = Rpc 'run1-at-exclusions' @{ op = 'start-run-at-phase'; id = $id; phase = 'exclusions'; after_ms = 1500; timeout_secs = 1200 }
-            [IO.File]::WriteAllText("$work\kill.request", 'kill')
+            $at = Rpc "run1-at-$killPhase" @{ op = 'start-run-at-phase'; id = $id; phase = $killPhase; after_ms = $(if ($killPhase -eq 'exclusions') { 1500 } else { 0 }); timeout_secs = 1200 }
+            [IO.File]::WriteAllText("$work\kill.request", '{"name":"killed"}')
             for ($i = 0; $i -lt 600 -and -not (Test-Path "$work\killed.json"); $i++) { Start-Sleep -Milliseconds 500 }
             if (-not (Test-Path "$work\killed.json")) {
                 Say "SYS-DIAG work: $((Get-ChildItem $work -Force | ForEach-Object { $_.Name }) -join ', ')"
                 if (Test-Path "$work\system-steps.txt") { Get-Content "$work\system-steps.txt" | ForEach-Object { Say "SYS-DIAG system: $_" } }
             }
-            Check (Test-Path "$work\killed.json") "the service was killed $($at.in_phase_ms) ms into the exclusions phase"
+            Check (Test-Path "$work\killed.json") "the service was killed $($at.in_phase_ms) ms into the $killPhase phase"
+            [IO.File]::WriteAllText("$work\kills.done", 'done')
         }
         $killed = Get-Content "$work\killed.json" -Raw | ConvertFrom-Json
         $atKill = @($killed.listing | ForEach-Object { $_.name })
@@ -388,7 +510,7 @@ if ($media) {
     throw "unknown phase $phase"
 } catch {
     # A failed user half starts over next time: a new job, a clean store.
-    if ($User) { Remove-Item "$work\killed.json", "$work\job.json" -ErrorAction SilentlyContinue }
+    if ($User) { Remove-Item "$work\killed.json", "$work\job.json", "$work\kills.done", "$work\consol-*.json" -ErrorAction SilentlyContinue }
     Say "KILLX-FAIL phase=$phase line=$($_.InvocationInfo.ScriptLineNumber) reason=$($_.Exception.Message)"
     try { Say "SYS-DIAG service=$((Get-Service OwnBackup -ErrorAction SilentlyContinue).Status)" } catch { }
     try {

@@ -5,7 +5,7 @@ retention deletes the old one, and the last copy mounted and compared.
 
     scripts/lab/run-kill-exclusions.py prepare   # answer CD, blank disks
     scripts/lab/run-kill-exclusions.py install   # Windows Setup + product
-    OBK_FORMAT=qcow2 scripts/lab/run-kill-exclusions.py test   # vhdx (default), qcow2, obk
+    OBK_FORMAT=qcow2 scripts/lab/run-kill-exclusions.py test   # vhdx (default), qcow2, obk, consol
 
 The VM, the bounds and the evidence layout are those of run-system-obk.py;
 only the guest script differs (killx-guest.ps1).
@@ -52,9 +52,11 @@ def answer_iso() -> Path:
     (lab / 'sys-marker.txt').write_text('Own Backup kill-during-exclusions acceptance media\n')
     # vhdx | qcow2 | obk: which container the guest's job writes this time.
     fmt = os.environ.get('OBK_FORMAT', 'vhdx')
-    assert fmt in ('vhdx', 'qcow2', 'obk'), fmt
+    assert fmt in ('vhdx', 'qcow2', 'obk', 'consol'), fmt
     # OBK_TAG names a fresh attempt of a format that has already passed.
-    (lab / 'killx-format.txt').write_text(fmt + '\n' + os.environ.get('OBK_TAG', '') + '\n')
+    # OBK_KILL_PHASE: the phase run 1 dies in (default exclusions).
+    (lab / 'killx-format.txt').write_text(fmt + '\n' + os.environ.get('OBK_TAG', '') + '\n'
+                                          + os.environ.get('OBK_KILL_PHASE', '') + '\n')
     shutil.copyfile(REPO / 'target/dist/own-backup-install.exe', lab / 'own-backup-install.exe')
     shutil.copyfile(REPO / 'target/x86_64-pc-windows-msvc/release/examples/audit_autonomous.exe',
                     lab / 'audit_autonomous.exe')
