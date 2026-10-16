@@ -5077,23 +5077,57 @@ pub fn finalize_boot(
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     let win_dir = format!(r"{}\Windows", windows_volume.trim_end_matches(['\\', '/']));
-    let mut cmd = std::process::Command::new("bcdboot");
-    cmd.arg(&win_dir);
-    if let Some(esp) = system_volume {
-        cmd.args(["/s", esp]);
-    }
-    cmd.args(["/f", if uefi { "UEFI" } else { "BIOS" }]);
-    cmd.creation_flags(CREATE_NO_WINDOW);
-
-    let out = cmd
-        .output()
-        .map_err(|e| OwnBackupError::Device(format!("failed to run bcdboot: {e}")))?;
-    if !out.status.success() {
-        return Err(OwnBackupError::RestoreIncompatible(format!(
-            "bcdboot failed (exit {}): {}",
-            out.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
+    let run = |program: &str| -> Result<std::result::Result<(), String>> {
+        let mut cmd = std::process::Command::new(program);
+        cmd.arg(&win_dir);
+        if let Some(esp) = system_volume {
+            cmd.args(["/s", esp]);
+        }
+        cmd.args(["/f", if uefi { "UEFI" } else { "BIOS" }]);
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        let out = cmd
+            .output()
+            .map_err(|e| OwnBackupError::Device(format!("failed to run bcdboot: {e}")))?;
+        if out.status.success() {
+            return Ok(Ok(()));
+        }
+        // bcdboot says what went wrong on STDOUT and leaves stderr empty: the
+        // report used to end in "bcdboot failed (exit -2146885629): " with
+        // nothing after the colon. Both streams, in the console's OEM code page.
+        let said = [out.stdout.as_slice(), out.stderr.as_slice()]
+            .iter()
+            .map(|b| crate::win_device::oem_text(b).trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        warn!(program, win_dir, uefi, exit = ?out.status.code(), output = %said, "bcdboot failed");
+        Ok(Err(format!(
+            "exit {}: {said}",
+            out.status.code().unwrap_or(-1)
+        )))
+    };
+    // The medium's own bcdboot first: its boot files are the newest. That is
+    // also what can go wrong — the bcdboot of WinPE 26100 refused a restored
+    // Windows 10 19041 with "Failure when attempting to copy boot files"
+    // (0x80092003, 2026-10-16). The restored system then gets its OWN bcdboot,
+    // the one that knows its boot files; Microsoft documents running it as
+    // `<drive>\Windows\System32\bcdboot`.
+    if let Err(first) = run("bcdboot")? {
+        let own = format!(r"{win_dir}\System32\bcdboot.exe");
+        if !std::path::Path::new(&own).is_file() {
+            return Err(OwnBackupError::RestoreIncompatible(format!(
+                "bcdboot failed ({first})"
+            )));
+        }
+        if let Err(second) = run(&own)? {
+            return Err(OwnBackupError::RestoreIncompatible(format!(
+                "bcdboot failed ({first}); the restored system's own bcdboot failed too ({second})"
+            )));
+        }
+        info!(
+            win_dir,
+            "bcdboot: the restored system's own bcdboot recreated the boot files"
+        );
     }
     info!(win_dir, uefi, "bcdboot: boot files recreated");
 

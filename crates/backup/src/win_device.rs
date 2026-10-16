@@ -32,6 +32,28 @@ pub(crate) fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// What a console program printed, as text: its output is in the console's
+/// OEM code page (866 on a Russian Windows, 437 in an English WinPE), not
+/// UTF-8. Bytes that are not valid there come out as replacement characters.
+pub fn oem_text(bytes: &[u8]) -> String {
+    use windows::Win32::Globalization::{
+        MultiByteToWideChar, CP_OEMCP, MULTI_BYTE_TO_WIDE_CHAR_FLAGS,
+    };
+    if bytes.is_empty() {
+        return String::new();
+    }
+    // SAFETY: the first call only measures; the second writes into a buffer of
+    // exactly that size.
+    let flags = MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0);
+    let len = unsafe { MultiByteToWideChar(CP_OEMCP, flags, bytes, None) };
+    if len <= 0 {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    let mut wide = vec![0u16; len as usize];
+    let written = unsafe { MultiByteToWideChar(CP_OEMCP, flags, bytes, Some(&mut wide)) };
+    String::from_utf16_lossy(&wide[..written.max(0) as usize])
+}
+
 /// Normalize a user-supplied device spec to a Win32 device path.
 ///
 /// `C:` / `C:\` -> `\\.\C:`; paths already starting with `\\` are kept as-is

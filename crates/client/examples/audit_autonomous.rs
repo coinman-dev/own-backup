@@ -90,6 +90,62 @@ async fn execute(client: &mut BackupClient, v: &Value) -> Result<Value, String> 
             };
             Ok(serde_json::to_value(saved).unwrap())
         }
+        // A bootable whole-disk job for the disk Windows runs from, built the
+        // way the wizard builds it when that disk is picked with every box
+        // ticked: each partition with an openable volume is a source, the disk
+        // snapshot is captured, and the copy carries the boot entries.
+        "create-system-disk-job" => {
+            let disks: Vec<own_backup_common::disk::DiskInfo> =
+                serde_json::from_str(&client.list_disks_json().await?)
+                    .map_err(|e| e.to_string())?;
+            let disk = disks
+                .iter()
+                .find(|d| d.partitions.iter().any(|p| p.is_system))
+                .ok_or("no disk holds the running Windows")?;
+            let number: u32 = disk
+                .device_id
+                .rsplit("PhysicalDrive")
+                .next()
+                .and_then(|n| n.parse().ok())
+                .ok_or("system disk has no number")?;
+            let parts: Vec<&own_backup_common::disk::PartitionInfo> = disk
+                .partitions
+                .iter()
+                .filter(|p| !p.volume_device.is_empty())
+                .collect();
+            let fs = |p: &own_backup_common::disk::PartitionInfo| {
+                serde_json::to_value(p.filesystem)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_string))
+                    .unwrap_or_default()
+            };
+            let sources: Vec<String> = parts.iter().map(|p| p.volume_device.clone()).collect();
+            let mut patch = json!({
+                "source": sources[0],
+                "sources": sources,
+                "source_labels": parts.iter().map(|p| p.volume_device.clone()).collect::<Vec<_>>(),
+                "disk_source": {
+                    "disk_number": number,
+                    "disk_model": disk.model,
+                    "parts": parts.iter().map(|p| json!({
+                        "part_index": p.index,
+                        "device": p.volume_device,
+                        "filesystem": fs(p),
+                    })).collect::<Vec<_>>(),
+                    "bootable": true,
+                },
+                "source_disks": [disk],
+            });
+            merge(&mut patch, &v["job"]);
+            let request = json!({
+                "op": "create",
+                "encrypted": v["encrypted"],
+                "password_file": v["password_file"],
+                "recovery_file": v["recovery_file"],
+                "job": patch,
+            });
+            Box::pin(execute(client, &request)).await
+        }
         "get" => Ok(serde_json::to_value(job(client, field(v, "id")?).await?).unwrap()),
         "save" => {
             let mut value = serde_json::to_value(job(client, field(v, "id")?).await?).unwrap();
@@ -109,7 +165,8 @@ async fn execute(client: &mut BackupClient, v: &Value) -> Result<Value, String> 
             let id = field(v, "id")?;
             let before = job(client, id).await?.last_run.map(|r| r.id);
             client.run_job(id).await?;
-            tokio::time::timeout(Duration::from_secs(900), async {
+            let limit = v["timeout_secs"].as_u64().unwrap_or(900);
+            tokio::time::timeout(Duration::from_secs(limit), async {
                 loop {
                     let current = job(client, id).await?;
                     if let Some(run) = current.last_run.filter(|r| Some(&r.id) != before.as_ref()) {
