@@ -5,7 +5,7 @@ retention deletes the old one, and the last copy mounted and compared.
 
     scripts/lab/run-kill-exclusions.py prepare   # answer CD, blank disks
     scripts/lab/run-kill-exclusions.py install   # Windows Setup + product
-    scripts/lab/run-kill-exclusions.py test      # the kill and runs 2..4
+    OBK_FORMAT=qcow2 scripts/lab/run-kill-exclusions.py test   # vhdx (default), qcow2, obk
 
 The VM, the bounds and the evidence layout are those of run-system-obk.py;
 only the guest script differs (killx-guest.ps1).
@@ -50,6 +50,11 @@ def answer_iso() -> Path:
     (lab / 'autounattend.xml').write_text(unattend, encoding='utf-8')
     shutil.copyfile(REPO / 'scripts/lab/killx-guest.ps1', lab / 'killx-guest.ps1')
     (lab / 'sys-marker.txt').write_text('Own Backup kill-during-exclusions acceptance media\n')
+    # vhdx | qcow2 | obk: which container the guest's job writes this time.
+    fmt = os.environ.get('OBK_FORMAT', 'vhdx')
+    assert fmt in ('vhdx', 'qcow2', 'obk'), fmt
+    # OBK_TAG names a fresh attempt of a format that has already passed.
+    (lab / 'killx-format.txt').write_text(fmt + '\n' + os.environ.get('OBK_TAG', '') + '\n')
     shutil.copyfile(REPO / 'target/dist/own-backup-install.exe', lab / 'own-backup-install.exe')
     shutil.copyfile(REPO / 'target/x86_64-pc-windows-msvc/release/examples/audit_autonomous.exe',
                     lab / 'audit_autonomous.exe')
@@ -88,7 +93,7 @@ def step_test() -> None:
     S.qcow('data.qcow2', '12G')
     cmd = S.base_cmd(S.ACTIVE / 'vars.fd', S.EVIDENCE / 'test-serial.log', S.ACTIVE / 'test.sock')
     cmd += S.disk(S.ACTIVE / 'windows.qcow2', 0) + S.disk(S.ACTIVE / 'data.qcow2', 1) + S.cdrom(S.ACTIVE / 'answer.iso', 2)
-    if S.run_vm('test', cmd, ['KILLX-PASS'], ['KILLX-FAIL'], 7200) != 'done':
+    if S.run_vm('test', cmd, ['KILLX-PASS', 'KILLX-ALREADY-DONE'], ['KILLX-FAIL'], 7200) != 'done':
         raise SystemExit('test failed; evidence kept')
 
 

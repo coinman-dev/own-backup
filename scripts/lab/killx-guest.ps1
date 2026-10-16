@@ -1,11 +1,12 @@
-# The whole service killed while it deletes excluded files inside a plain
-# VHDX (CHECKS 2), guest side. Run by phase: at the first logon after Setup
+# The whole service killed while it deletes excluded files inside a new copy
+# (CHECKS 2), guest side, for the format in C:\Lab\killx-format.txt: vhdx,
+# qcow2 or obk (encrypted). Run by phase: at the first logon after Setup
 # (install), then at every startup as SYSTEM, and in the lab user's session.
 #
 #   install - install the product silently, schedule this script, power off
 #   prepare - (SYSTEM) source P: and store S: on the data disk, the control
 #             data, the lab user's logon, reboot
-#   run     - (user) job: P: -> S:\vhdx, plain VHDX, *.tmp excluded, a new
+#   run     - (user) job: P: -> S:\killx-<format>, *.tmp excluded, a new
 #             chain after one increment, one chain kept. Run 1 is killed in
 #             the exclusions phase by the SYSTEM half; then runs 2..4, each
 #             checked, and the last copy mounted and compared
@@ -17,9 +18,22 @@
 param([switch]$User)
 $ErrorActionPreference = 'Stop'
 $lab = 'C:\Lab'
-$work = 'C:\Lab\killx'
+$base = 'C:\Lab\killx'
 $installed = 'C:\Program Files\OwnBackup'
-$store = 'S:\vhdx'
+# One VM, one format at a time; each has its own state, store and job.
+# Line 1 the format, line 2 an optional tag: a new tag is a fresh attempt.
+$spec = if (Test-Path "$lab\killx-format.txt") { @(Get-Content "$lab\killx-format.txt" | Where-Object { $_.Trim() }) } else { @('vhdx') }
+$format = $spec[0].Trim()
+$tag = if ($spec.Count -gt 1) { '-' + $spec[1].Trim() } else { '' }
+$work = "$base\$format$tag"
+$store = "S:\killx-$format$tag"
+$encrypted = $format -eq 'obk'
+$private = if ($encrypted) { '.own-backup-obk-*' } else { '.own-backup-new-*' }
+$imageExt = @{ vhdx = 'vhdx'; qcow2 = 'qcow2'; obk = 'obk' }[$format]
+$childExt = @{ vhdx = 'avhdx'; qcow2 = 'qcow2'; obk = 'obk' }[$format]
+$publicPattern = @{ vhdx = '\.(vhdx|avhdx)$'; qcow2 = '\.qcow2$'; obk = '\.obk$' }[$format]
+$jobName = "KillX$format"
+$secret = if ($encrypted) { @{ secret = 'password'; password_file = "$base\$format$tag\password.txt" } } else { @{ secret = 'none' } }
 $seed = 20261017
 
 function Say([string]$text) {
@@ -44,7 +58,7 @@ function Step([string]$text) {
     [IO.File]::AppendAllText("$work\system-steps.txt", "$([DateTime]::UtcNow.ToString('o')) $text`r`n")
     try { Say "KILLX-STEP $text" } catch { }
 }
-function Phase([string]$value) { [IO.File]::WriteAllText("$work\phase.txt", $value) }
+function Phase([string]$value) { [IO.File]::WriteAllText("$base\phase.txt", $value) }
 function Rpc([string]$name, $request) {
     $path = Join-Path $work "$name.request.json"
     JsonFile $path $request
@@ -76,8 +90,8 @@ function Listing {
         ForEach-Object { [ordered]@{ name = $_.Name; length = $_.Length } })
 }
 function Names { return @(Get-ChildItem -LiteralPath $store -Force -File | ForEach-Object { $_.Name }) }
-function Pending { return @(Names | Where-Object { $_ -like '.own-backup-new-*' }) }
-function Public { return @(Names | Where-Object { $_ -notlike '.own-backup-new-*' -and $_ -match '\.(vhdx|avhdx)$' }) }
+function Pending { return @(Names | Where-Object { $_ -like $private }) }
+function Public { return @(Names | Where-Object { $_ -notlike $private -and $_ -match $publicPattern }) }
 
 # --- Control data -----------------------------------------------------------
 # Kept files from a generator (so the expectation does not live on a disk
@@ -135,8 +149,11 @@ function NoLogon {
 
 $phase = 'install'
 try {
-    if (Test-Path "$work\phase.txt") { $phase = (Get-Content "$work\phase.txt" -Raw).Trim() }
-    Say "KILLX-BEGIN phase=$phase utc=$([DateTime]::UtcNow.ToString('o')) user=$([Security.Principal.WindowsIdentity]::GetCurrent().Name)"
+    if (Test-Path "$base\phase.txt") { $phase = (Get-Content "$base\phase.txt" -Raw).Trim() }
+    # A format that passed leaves the VM in 'run' for the next one.
+    if ($phase -eq 'done') { $phase = 'run' }
+    New-Item -ItemType Directory -Force $work | Out-Null
+    Say "KILLX-BEGIN format=$format phase=$phase utc=$([DateTime]::UtcNow.ToString('o')) user=$([Security.Principal.WindowsIdentity]::GetCurrent().Name)"
 
     if ($phase -eq 'install') {
         $media = Get-PSDrive -PSProvider FileSystem | ForEach-Object { Join-Path $_.Root 'lab' } |
@@ -190,7 +207,6 @@ if ($media) {
         }
         Check (Test-Path 'P:\') 'source volume at P:'
         Check (Test-Path 'S:\') 'store volume at S:'
-        New-Item -ItemType Directory -Force $store | Out-Null
         if (-not (Test-Path 'P:\killx-marker.txt')) { MakeData }
         Report 'source' @{ files = @(Get-ChildItem P:\ -Recurse -File).Count; excluded = @(Get-ChildItem P:\cache -Recurse -File).Count }
         AutoLogon
@@ -200,8 +216,23 @@ if ($media) {
         return
     }
 
+    if ($phase -eq 'run' -and (Test-Path "$work\passed.txt")) { Say "KILLX-ALREADY-DONE format=$format"; shutdown.exe /s /t 5 | Out-Null; return }
+
     # The SYSTEM half of 'run': the kill, when the user half asks for it.
     if (-not $User -and $phase -eq 'run') {
+        # A newer build on the CD goes over the installed one first; the user
+        # half waits for it (see 'upgrading').
+        $want = (Get-FileHash "$lab\own-backup-install.exe").Hash
+        $have = if (Test-Path "$base\installed.sha256") { (Get-Content "$base\installed.sha256" -Raw).Trim() } else { '' }
+        if ($want -ne $have) {
+            [IO.File]::WriteAllText("$base\upgrading", 'upgrading')
+            $setup = Start-Process "$lab\own-backup-install.exe" -ArgumentList '/S' -Wait -PassThru
+            Check ($setup.ExitCode -eq 0) "upgrade installer exit $($setup.ExitCode)"
+            WaitService
+            [IO.File]::WriteAllText("$base\installed.sha256", $want)
+            Remove-Item "$base\upgrading" -Force
+            Say "KILLX-UPGRADED $want"
+        }
         if (Test-Path "$work\killed.json") {
             # A reboot after the kill: the user half finishes by itself.
             $armed = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon').AutoAdminLogon -eq '1'
@@ -258,11 +289,19 @@ if ($media) {
     }
 
     if ($User -and $phase -eq 'run') {
+        for ($i = 0; $i -lt 600 -and (Test-Path "$base\upgrading"); $i++) { Start-Sleep -Seconds 1 }
+        # The installer's own start of the service is not the end of it.
+        Start-Sleep -Seconds 5
         WaitService
+        New-Item -ItemType Directory -Force $store | Out-Null
         $state = if (Test-Path "$work\job.json") { Get-Content "$work\job.json" -Raw | ConvertFrom-Json } else { $null }
         if (-not $state) {
-            $job = Rpc 'create' @{ op = 'create'; job = @{
-                name = 'KillX'; source = 'P:'; sources = @('P:'); dest_folder = $store; image_format = 'vhdx';
+            # Synthetic secret of a throwaway VM.
+            [IO.File]::WriteAllText("$work\password.txt", 'KillX-Lab-2026-q9')
+            $job = Rpc 'create' @{ op = 'create'; encrypted = $encrypted
+                password_file = "$work\password.txt"; recovery_file = "$work\recovery.txt"; job = @{
+                name = $jobName; source = 'P:'; sources = @('P:'); dest_folder = $store
+                image_format = $(if ($format -eq 'vhdx') { 'vhdx' } else { 'qcow2' });
                 schedule = @{ kind = 'none' };
                 scheme = @{ method = 'incremental'; only_incremental = $false; full_every_n = 1; keep_chains = 1 };
                 exclusions = @{ enabled = $true; patterns = @('*.tmp'); patterns_linux = @() };
@@ -288,8 +327,8 @@ if ($media) {
         }
         $killed = Get-Content "$work\killed.json" -Raw | ConvertFrom-Json
         $atKill = @($killed.listing | ForEach-Object { $_.name })
-        Check (@($atKill | Where-Object { $_ -notlike '.own-backup-new-*' }).Count -eq 0) "nothing under a public name at the kill ($($atKill -join ', '))"
-        Check (@($atKill | Where-Object { $_ -like '.own-backup-new-*.tmp.vhdx' }).Count -eq 1) 'the unfinished image is private'
+        Check (@($atKill | Where-Object { $_ -notlike $private }).Count -eq 0) "nothing under a public name at the kill ($($atKill -join ', '))"
+        Check (@($atKill | Where-Object { $_ -like "$private.tmp.$imageExt" }).Count -eq 1) 'the unfinished image is private'
         WaitService
         $after = Rpc 'job-after-kill' @{ op = 'get'; id = $id }
         Check ($null -eq $after.last_run) 'the killed run left no success in the history'
@@ -299,12 +338,12 @@ if ($media) {
         $run2 = Rpc 'run2' @{ op = 'run'; id = $id; timeout_secs = 1800 }
         Check ($run2.status -eq 'success') "run 2 succeeded: $($run2.error)"
         Check ($run2.backup_kind -eq 'full') "run 2 is a full ($($run2.backup_kind))"
-        Check ($run2.image_path -like "$store\KillX_*_full_*.vhdx") "run 2 published under its public name ($($run2.image_path))"
+        Check ($run2.image_path -like "$store\$($jobName)_*_full_*.$imageExt") "run 2 published under its public name ($($run2.image_path))"
         # Run 3: an increment of run 2.
         $run3 = Rpc 'run3' @{ op = 'run'; id = $id; timeout_secs = 1800 }
         Check ($run3.status -eq 'success') "run 3 succeeded: $($run3.error)"
         Check ($run3.backup_kind -eq 'incremental') "run 3 is an increment ($($run3.backup_kind))"
-        Check ($run3.image_path -like "$store\KillX_*_inc_*.avhdx") "run 3 published as a child ($($run3.image_path))"
+        Check ($run3.image_path -like "$store\$($jobName)_*_inc_*.$childExt") "run 3 published as a child ($($run3.image_path))"
         # Run 4: the chain rolls over; keeping one chain deletes runs 2 and 3,
         # which needs a strict scan of a folder that holds the leftover.
         $run4 = Rpc 'run4' @{ op = 'run'; id = $id; timeout_secs = 1800 }
@@ -315,11 +354,17 @@ if ($media) {
         Check ($public.Count -eq 1 -and "$store\$($public[0])" -eq $run4.image_path) "only run 4 is a public image ($($public -join ', '))"
         $versions = Rpc 'versions' @{ op = 'versions'; id = $id }
         $leftNow = @(Pending)
-        Check (@($leftover | Where-Object { $leftNow -contains $_ }).Count -eq $leftover.Count) 'the killed run leftover is kept, not deleted by guesswork'
-        Report 'listing-after' @{ files = (Listing); versions = $versions }
+        if ($encrypted) {
+            # The stage, its owner record and the exclusion scratch named from
+            # it are proved by the job's key, so the next run reclaims them all.
+            Check (@($leftover | Where-Object { $leftNow -contains $_ }).Count -eq 0) "the killed run's proved leftovers were reclaimed ($($leftover -join ', '))"
+        } else {
+            Check (@($leftover | Where-Object { $leftNow -contains $_ }).Count -eq $leftover.Count) 'the killed run leftover is kept, not deleted by guesswork'
+        }
+        Report 'listing-after' @{ files = (Listing); versions = $versions; left_of_kill = @($leftover | Where-Object { $leftNow -contains $_ }) }
 
-        $verify = Rpc 'verify4' @{ op = 'verify'; image = $run4.image_path; secret = 'none' }
-        $null = Rpc 'mount4' @{ op = 'mount'; image = $run4.image_path; secret = 'none' }
+        $verify = Rpc 'verify4' (@{ op = 'verify'; image = $run4.image_path } + $secret)
+        $null = Rpc 'mount4' (@{ op = 'mount'; image = $run4.image_path } + $secret)
         try {
             $root = $null
             for ($i = 0; $i -lt 60 -and -not $root; $i++) {
@@ -334,13 +379,12 @@ if ($media) {
         }
         # Not NoLogon: HKLM is out of an unelevated user's reach, and
         # Winlogon has already used up the one logon it was armed for.
-        Phase 'done'
+        [IO.File]::WriteAllText("$work\passed.txt", 'pass')
         Report 'result' @{ pass = $true; leftover = $leftover; runs = @($run2.image_path, $run3.image_path, $run4.image_path); verify = $verify }
-        Say 'KILLX-PASS'
+        Say "KILLX-PASS format=$format"
         shutdown.exe /s /t 5 | Out-Null
         return
     }
-    if ($phase -eq 'done') { Say 'KILLX-ALREADY-DONE'; shutdown.exe /s /t 5 | Out-Null; return }
     throw "unknown phase $phase"
 } catch {
     # A failed user half starts over next time: a new job, a clean store.

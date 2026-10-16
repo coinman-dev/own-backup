@@ -208,6 +208,11 @@ mod tests {
             .write_all(b"interrupted ciphertext fixture")
             .unwrap();
         let (owner, stage) = abandoned(first);
+        // What a killed exclusion pass leaves beside its stage.
+        let mut scratch = stage.clone().into_os_string();
+        scratch.push(".excl.scratch");
+        let scratch = PathBuf::from(scratch);
+        std::fs::write(&scratch, b"sealed scratch fixture").unwrap();
         let foreign = root
             .path()
             .join(".own-backup-obk-11111111111111111111111111111111.tmp.obk");
@@ -217,7 +222,7 @@ mod tests {
         assert!(owner.exists() && stage.exists());
         let reopened = keys(&fixture);
         let next = NewImage::create(&root.path().join("next.obk"), &reopened).unwrap();
-        assert!(!owner.exists() && !stage.exists());
+        assert!(!owner.exists() && !stage.exists() && !scratch.exists());
         assert!(foreign.exists() && live_other.path().exists());
         drop(next);
     }
