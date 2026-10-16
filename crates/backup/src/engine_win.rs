@@ -465,15 +465,24 @@ pub fn backup_volume(
         summary.image_path = published;
         return Ok(summary);
     }
-    let result = backup_volume_inner(req, None, &req.image_path, progress);
-    if result.is_err() {
-        // Best-effort cleanup of a partial image, under either name.
-        let _ = std::fs::remove_file(&req.image_path);
-        if let Some(full) = &req.full_image_path {
-            let _ = std::fs::remove_file(full);
-        }
-    }
-    result
+    // Written privately and published last, like the encrypted one above (see
+    // `pending_image`); a failed run's image goes when `pending` is dropped.
+    let pending = crate::pending_image::PendingImage::new(&req.image_path)?;
+    let staged = VolumeBackupRequest {
+        image_path: pending.path().to_path_buf(),
+        ..req.clone()
+    };
+    let mut summary = backup_volume_inner(&staged, None, &req.image_path, progress)?;
+    let published = settled_image_path(
+        &req.image_path,
+        req.full_image_path.as_deref(),
+        req.kind,
+        summary.backup_kind,
+    );
+    pending.publish_as(&published)?;
+    summary.sidecar_path = sidecar_path_for(&published);
+    summary.image_path = published;
+    Ok(summary)
 }
 
 /// The volume-root form VSS expects; None for anything that is not a volume.
@@ -960,9 +969,9 @@ fn backup_volume_inner(
         }
     }
 
-    // The kind is settled: from here on the image is written, and named inside,
-    // as what it is. An encrypted one is written to its private stage and only
-    // published under this name (see `backup_volume`).
+    // The kind is settled: from here on the image is named inside as what it
+    // is. Every container is written to its private stage and only published
+    // under this name (see `backup_volume`).
     let published = settled_image_path(
         published_path,
         req.full_image_path.as_deref(),
@@ -970,16 +979,6 @@ fn backup_volume_inner(
         kind,
     );
     let published_path: &Path = &published;
-    let renamed;
-    let req = if owned_file.is_none() && req.image_path != published {
-        renamed = VolumeBackupRequest {
-            image_path: published.clone(),
-            ..req.clone()
-        };
-        &renamed
-    } else {
-        req
-    };
 
     // --- Used-sector map: NTFS → FAT32/exFAT → ext → btrfs → xfs → full copy ---
     let mut ntfs_map: Option<NtfsUsedSectorMap> = None;
@@ -3117,14 +3116,22 @@ pub fn backup_disk(
         summary.image_path = published;
         return Ok(summary);
     }
-    let result = backup_disk_inner(req, None, &req.image_path, progress);
-    if result.is_err() {
-        let _ = std::fs::remove_file(&req.image_path);
-        if let Some(full) = &req.full_image_path {
-            let _ = std::fs::remove_file(full);
-        }
-    }
-    result
+    // Private until finished, as in `backup_volume`.
+    let pending = crate::pending_image::PendingImage::new(&req.image_path)?;
+    let staged = DiskBackupRequest {
+        image_path: pending.path().to_path_buf(),
+        ..req.clone()
+    };
+    let mut summary = backup_disk_inner(&staged, None, &req.image_path, progress)?;
+    let published = settled_image_path(
+        &req.image_path,
+        req.full_image_path.as_deref(),
+        req.kind,
+        summary.backup_kind,
+    );
+    pending.publish_as(&published)?;
+    summary.image_path = published;
+    Ok(summary)
 }
 
 fn backup_disk_inner(
@@ -3657,16 +3664,6 @@ fn backup_disk_inner(
         kind,
     );
     let published_path: &Path = &published;
-    let renamed;
-    let req = if owned_file.is_none() && req.image_path != published {
-        renamed = DiskBackupRequest {
-            image_path: published.clone(),
-            ..req.clone()
-        };
-        &renamed
-    } else {
-        req
-    };
     let meta_offset = plan.meta_first_lba * sector;
     let meta_guid = (!encrypted).then(Uuid::new_v4);
 

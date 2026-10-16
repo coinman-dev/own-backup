@@ -174,7 +174,10 @@ fn list_chains_impl(folder: &Path, job_id: Option<&str>, strict: bool) -> Result
         if path
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(crate::seal::obk::new_image::is_pending_name)
+            .is_some_and(|name| {
+                crate::seal::obk::new_image::is_pending_name(name)
+                    || crate::pending_image::is_pending_name(name)
+            })
         {
             continue;
         }
@@ -967,6 +970,38 @@ mod tests {
         let chains = list_job_chains(dir.path(), "j1").unwrap();
         assert_eq!(chains.len(), 1);
         assert_eq!(chain_names(&chains[0]), vec!["lost_inc.avhdx"]);
+    }
+
+    /// A killed run's image, with the readable provisional sidecar it carries,
+    /// and the scratch child of its exclusion pass: neither is a version, and
+    /// neither stops the strict scan retention and deletion depend on.
+    #[test]
+    fn an_unfinished_plain_image_is_neither_a_version_nor_a_blocker() {
+        let dir = tempfile::tempdir().unwrap();
+        put_image(
+            dir.path(),
+            "job_C_full_20261016-100000.vhdx",
+            ChainRole::Full,
+            None,
+            Some("j1"),
+            "2026-10-16T10:00:00Z",
+        );
+        let pending = ".own-backup-new-0123456789abcdef0123456789abcdef.tmp.avhdx";
+        for name in [pending.to_string(), format!("{pending}.excl.avhdx")] {
+            put_image(
+                dir.path(),
+                &name,
+                ChainRole::Incremental,
+                Some("job_C_full_20261016-100000.vhdx"),
+                Some("j1"),
+                "2026-10-16T11:00:00Z",
+            );
+        }
+        std::fs::write(dir.path().join(".own-backup-new-ffffffffffffffffffffffffffffffff.tmp.qcow2"), b"half")
+            .unwrap();
+        let chains = list_job_chains_strict(dir.path(), "j1").unwrap();
+        assert_eq!(chains.len(), 1);
+        assert_eq!(chain_names(&chains[0]), vec!["job_C_full_20261016-100000.vhdx"]);
     }
 
     fn make_chains(stamps: &[&str]) -> Vec<Chain> {

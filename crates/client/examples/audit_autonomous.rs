@@ -203,6 +203,45 @@ async fn execute(client: &mut BackupClient, v: &Value) -> Result<Value, String> 
             .await
             .map_err(|_| "no active copy progress".to_string())?
         }
+        // Starts the run and returns once it has spent `after_ms` inside
+        // `phase` — the moment a lab script kills the whole service (CHECKS 2).
+        "start-run-at-phase" => {
+            let id = field(v, "id")?;
+            let phase = field(v, "phase")?.to_string();
+            let after = Duration::from_millis(v["after_ms"].as_u64().unwrap_or(0));
+            let mut listener = client.clone();
+            let events = listener.stream_events().await?;
+            tokio::pin!(events);
+            client.run_job(id).await?;
+            let limit = v["timeout_secs"].as_u64().unwrap_or(900);
+            tokio::time::timeout(Duration::from_secs(limit), async {
+                // The phase can go quiet for minutes (a kernel merge reports
+                // nothing), so the delay runs on a clock, not on events.
+                let mut entered: Option<tokio::time::Instant> = None;
+                let mut events_seen = 0u64;
+                let mut last = json!(null);
+                loop {
+                    let wake = entered.map(|start| start + after);
+                    tokio::select! {
+                        event = events.next() => match event {
+                            Some(ClientEvent::Progress(p)) if p.job_id == id && p.phase == phase => {
+                                events_seen += 1;
+                                last = json!({"blocks_done":p.blocks_done,"blocks_total":p.blocks_total});
+                                entered.get_or_insert_with(tokio::time::Instant::now);
+                            }
+                            Some(_) => {}
+                            None => return Err(format!("stream closed before {after:?} in phase {phase}")),
+                        },
+                        _ = tokio::time::sleep_until(wake.unwrap_or_else(tokio::time::Instant::now)), if wake.is_some() => {
+                            return Ok(json!({"phase":phase,"events":events_seen,
+                                "in_phase_ms":entered.unwrap().elapsed().as_millis() as u64,"last":last}));
+                        }
+                    }
+                }
+            })
+            .await
+            .map_err(|_| "the phase was not reached".to_string())?
+        }
         "cancel-scheduled" => {
             let id = field(v, "id")?;
             let before = job(client, id).await?.last_verification.map(|r| r.id);
