@@ -40,11 +40,15 @@ $tag = if ($spec.Count -gt 1) { '-' + $spec[1].Trim() } else { '' }
 $killPhase = if ($spec.Count -gt 2) { $spec[2].Trim() } else { 'exclusions' }
 $work = "$base\$format$tag"
 $store = "S:\killx-$format$tag"
-$encrypted = $format -in @('obk', 'consol')
+# 'consol', 'consol-vhdx', 'consol-qcow2': the consolidation scenario over
+# OBK, VHDX or qcow2; anything else is the exclusions scenario.
+$mode = if ($format -like 'consol*') { 'consol' } else { 'exclusions' }
+$container = switch ($format) { 'consol' { 'obk' } 'consol-vhdx' { 'vhdx' } 'consol-qcow2' { 'qcow2' } default { $format } }
+$encrypted = $container -eq 'obk'
 $private = if ($encrypted) { '.own-backup-obk-*' } else { '.own-backup-new-*' }
-$imageExt = @{ vhdx = 'vhdx'; qcow2 = 'qcow2'; obk = 'obk'; consol = 'obk' }[$format]
-$childExt = @{ vhdx = 'avhdx'; qcow2 = 'qcow2'; obk = 'obk'; consol = 'obk' }[$format]
-$publicPattern = @{ vhdx = '\.(vhdx|avhdx)$'; qcow2 = '\.qcow2$'; obk = '\.obk$'; consol = '\.obk$' }[$format]
+$imageExt = @{ vhdx = 'vhdx'; qcow2 = 'qcow2'; obk = 'obk' }[$container]
+$childExt = @{ vhdx = 'avhdx'; qcow2 = 'qcow2'; obk = 'obk' }[$container]
+$publicPattern = @{ vhdx = '\.(vhdx|avhdx)$'; qcow2 = '\.qcow2$'; obk = '\.obk$' }[$container]
 $jobName = "KillX$format"
 $secret = if ($encrypted) { @{ secret = 'password'; password_file = "$base\$format$tag\password.txt" } } else { @{ secret = 'none' } }
 $seed = 20261017
@@ -419,18 +423,18 @@ if ($media) {
             $job = Rpc 'create' @{ op = 'create'; encrypted = $encrypted
                 password_file = "$work\password.txt"; recovery_file = "$work\recovery.txt"; job = @{
                 name = $jobName; source = 'P:'; sources = @('P:'); dest_folder = $store
-                image_format = $(if ($format -eq 'vhdx') { 'vhdx' } else { 'qcow2' });
+                image_format = $(if ($container -eq 'vhdx') { 'vhdx' } else { 'qcow2' });
                 schedule = @{ kind = 'none' };
-                scheme = $(if ($format -eq 'consol') {
+                scheme = $(if ($mode -eq 'consol') {
                     @{ method = 'incremental'; only_incremental = $true; full_every_n = 100; keep_chains = 1; rolling_incrementals = 1 } } else {
                     @{ method = 'incremental'; only_incremental = $false; full_every_n = 1; keep_chains = 1 } })
-                exclusions = @{ enabled = ($format -ne 'consol'); patterns = @('*.tmp'); patterns_linux = @() };
+                exclusions = @{ enabled = ($mode -ne 'consol'); patterns = @('*.tmp'); patterns_linux = @() };
                 advanced = @{ validate_after = $false; retry_attempts = 0; after_backup = 'none' } } }
             JsonFile "$work\job.json" @{ id = $job.id }
             $state = Get-Content "$work\job.json" -Raw | ConvertFrom-Json
         }
         $id = $state.id
-        if ($format -eq 'consol') { Consolidation $id; return }
+        if ($mode -eq 'consol') { Consolidation $id; return }
 
         # Run 1, killed inside the deletion of the excluded files.
         if (-not (Test-Path "$work\killed.json")) {
