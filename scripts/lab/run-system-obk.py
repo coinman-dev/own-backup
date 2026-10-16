@@ -20,6 +20,7 @@ import base64
 import hashlib
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -28,7 +29,8 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 LAB = Path.home() / 'lab'
-WORK = REPO / 'tmp/system-obk-2026-10-16'
+# One folder per run; OBK_RUN names it (the accepted CLI-driven run kept its own).
+WORK = REPO / 'tmp' / os.environ.get('OBK_RUN', 'system-obk-2026-10-16')
 ACTIVE = WORK / 'active'
 EVIDENCE = WORK / 'evidence'
 GIB = 2 ** 30
@@ -337,6 +339,141 @@ def step_restore() -> None:
         raise SystemExit('restore failed; evidence kept')
 
 
+CDP_PORT = 19222  # host side; the relay listens on 9223 in the guest
+
+
+def step_pe_gui() -> None:
+    """The product medium as it boots for a person, plus the DevTools relay."""
+    if not PRODUCT_ISO.is_file():
+        raise SystemExit(f'copy the product ISO to {PRODUCT_ISO} first')
+    budget('pe-gui')
+    root = ACTIVE / 'pe'
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir()
+    wim = root / 'boot.wim'
+    subprocess.run(['xorriso', '-osirrox', 'on', '-indev', str(PRODUCT_ISO), '-extract', '/sources/boot.wim',
+                    str(wim)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    wim.chmod(0o644)
+    startnet = root / 'startnet.cmd'
+    subprocess.run(['wimlib-imagex', 'extract', str(wim), '1', '/Windows/System32/startnet.cmd',
+                    f'--dest-dir={root}', '--no-acls'], check=True, stdout=subprocess.DEVNULL)
+    original = startnet.read_bytes()
+    (EVIDENCE / 'pe-gui-startnet-original.cmd').write_bytes(original)
+    # Started before anything of ours, so the port is there when the window is.
+    relay_line = b'start "" X:\\Windows\\System32\\cdp_relay.exe\r\n'
+    lines = original.split(b'\r\n')
+    patched = b'\r\n'.join(lines[:2]) + b'\r\n' + relay_line + b'\r\n'.join(lines[2:])
+    startnet.write_bytes(patched)
+    release = REPO / 'target/x86_64-pc-windows-msvc/release'
+    updates = [(startnet, 'Windows/System32/startnet.cmd'),
+               (release / 'examples/cdp_relay.exe', 'Windows/System32/cdp_relay.exe')]
+    # The window and desktop stay the medium's own unless OBK_GUI_CURRENT=1:
+    # a replaced own-backup-gui.exe failed to create its webview with
+    # 0x800736B1 (side-by-side) on 2026-10-16, which is a question by itself.
+    names = ['own-backup-service.exe', 'own-backup-cli.exe']
+    if os.environ.get('OBK_GUI_CURRENT') == '1':
+        names += ['own-backup-gui.exe', 'own-backup-shell.exe']
+    for name in names:
+        updates.append((release / name, f'Program Files/OwnBackup/{name}'))
+    commands = ''.join(f'add "{src}" "/{dst}"\n' for src, dst in updates)
+    subprocess.run(['wimlib-imagex', 'update', str(wim), '1'], input=commands, text=True, check=True,
+                   stdout=subprocess.DEVNULL)
+    fixture = ACTIVE / 'fixture-gui.iso'
+    if fixture.exists():
+        fixture.unlink()
+    subprocess.run(['xorriso', '-indev', str(PRODUCT_ISO), '-outdev', str(fixture), '-boot_image', 'any', 'replay',
+                    '-map', str(wim), '/sources/boot.wim', '-commit'], check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    hashes = {'product_iso': hashlib.sha256(PRODUCT_ISO.read_bytes()).hexdigest(),
+              'fixture_iso': hashlib.sha256(fixture.read_bytes()).hexdigest(),
+              **{dst: hashlib.sha256(src.read_bytes()).hexdigest() for src, dst in updates}}
+    (EVIDENCE / 'pe-gui-hashes.json').write_text(json.dumps(hashes, indent=2) + '\n')
+    shutil.rmtree(root)
+    budget('pe-gui')
+    print('PE-GUI-FIXTURE-READY', flush=True)
+
+
+def gui_log_disk() -> Path:
+    """FAT disk with the medium's own WebView2 argument override on it."""
+    image = log_disk()
+    sys.path.insert(0, str(REPO / 'scripts/lab'))
+    args = ('--allow-run-as-system --no-sandbox --in-process-gpu --disable-gpu --disable-gpu-compositing '
+            '--disable-direct-composition --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,'
+            'RendererCodeIntegrity,RemoveRedirectionBitmap,ForceSWDCompWhenDCompFallbackRequired --no-first-run '
+            '--remote-debugging-port=9222 --remote-allow-origins=*')
+    if os.environ.get('OBK_NO_DEVTOOLS') == '1':
+        return image  # the medium's own arguments, to compare against
+    override = ACTIVE / 'ownbackup-webview2-args.txt'
+    override.write_bytes(args.encode() + b'\r\n')
+    subprocess.run([str(LAB / 'tools/usr/bin/mcopy'), '-i', str(image), str(override), '::'], check=True)
+    override.unlink()
+    return image
+
+
+def step_restore_gui() -> None:
+    refuse_if_done('restore-gui')
+    if (ACTIVE / 'target.qcow2').exists():
+        (ACTIVE / 'target.qcow2').unlink()
+    qcow('target.qcow2', '40G')
+    if (ACTIVE / 'vars-target.fd').exists():
+        (ACTIVE / 'vars-target.fd').unlink()
+    shutil.copyfile(VARS, ACTIVE / 'vars-target.fd')  # a new machine
+    pelog = gui_log_disk()
+    sock = ACTIVE / 'restore-gui.sock'
+    serial = EVIDENCE / 'restore-gui-serial.log'
+    cmd = base_cmd(ACTIVE / 'vars-target.fd', serial, sock)
+    i = cmd.index('user,id=n0,restrict=on')
+    cmd[i] = f'user,id=n0,restrict=on,hostfwd=tcp:127.0.0.1:{CDP_PORT}-:9223'
+    cmd += disk(ACTIVE / 'store.qcow2', 0) + disk(ACTIVE / 'target.qcow2', 1) + cdrom(ACTIVE / 'fixture-gui.iso', 2)
+    cmd += ['-device', 'qemu-xhci,id=xhci', '-drive', f'file={pelog},format=raw,if=none,id=pelog',
+            '-device', 'usb-storage,drive=pelog,bus=xhci.0,removable=on', '-boot', 'order=d', '-no-reboot']
+    serial.touch()
+    (EVIDENCE / 'restore-gui-command.json').write_text(json.dumps(cmd, indent=2) + '\n')
+    shots = EVIDENCE / 'restore-gui'
+    shots.mkdir(parents=True, exist_ok=True)
+    budget('restore-gui')
+    qm = monitor()
+    sys.path.insert(0, str(REPO / 'scripts/lab'))
+    scenario = importlib.import_module('gui_restore_scenario')
+    verdict = 'fail'
+    with (EVIDENCE / 'restore-gui-qemu.log').open('w') as log:
+        vm = subprocess.Popen(cmd, stdout=log, stderr=log)
+        try:
+            started = time.monotonic()
+            while time.monotonic() - started < 40:  # "Press any key to boot from CD"
+                if sock.exists():
+                    try:
+                        qm.send(str(sock), 'sendkey ret', timeout=2)
+                    except Exception:
+                        pass
+                time.sleep(1)
+            verdict = scenario.run(f'127.0.0.1:{CDP_PORT}', shots, lambda: budget('restore-gui'),
+                                   lambda name: qm.send(str(sock), f'screendump {shots / name}.ppm'))
+        except Exception as error:
+            (shots / 'error.txt').write_text(f'{type(error).__name__}: {error}\n')
+            print(f'SCENARIO-ERROR {error}', flush=True)
+        finally:
+            try:
+                qm.send(str(sock), f'screendump {shots / "final"}.ppm')
+            except Exception:
+                pass
+            if vm.poll() is None:
+                try:
+                    qm.send(str(sock), 'system_powerdown')
+                    vm.wait(timeout=90)
+                except Exception:
+                    vm.kill()
+                    vm.wait(timeout=30)
+            budget('restore-gui')
+    subprocess.run([str(LAB / 'tools/usr/bin/mcopy'), '-o', '-i', str(pelog), '::*.log', str(shots) + '/'],
+                   capture_output=True)
+    (EVIDENCE / 'restore-gui-result.json').write_text(json.dumps({'verdict': verdict}) + '\n')
+    print(f'STEP restore-gui: {verdict}', flush=True)
+    if verdict != 'done':
+        raise SystemExit('the GUI restore did not pass; evidence kept')
+
+
 def step_boot() -> None:
     refuse_if_done('boot')
     sock = ACTIVE / 'boot.sock'
@@ -353,7 +490,8 @@ def step_boot() -> None:
 
 def main() -> None:
     steps = {'prepare': step_prepare, 'install': step_install, 'backup': step_backup,
-             'pe': step_pe, 'restore': step_restore, 'boot': step_boot}
+             'pe': step_pe, 'restore': step_restore, 'boot': step_boot,
+             'pe-gui': step_pe_gui, 'restore-gui': step_restore_gui}
     if len(sys.argv) != 2 or sys.argv[1] not in steps:
         raise SystemExit(__doc__)
     steps[sys.argv[1]]()

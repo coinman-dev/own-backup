@@ -1689,7 +1689,7 @@ fn run_op(
                 }
             }
 
-            let here = std::env::var("COMPUTERNAME").unwrap_or_default();
+            let here = own_backup_common::media_mode::meaningful_machine_name().unwrap_or_default();
             if !here.is_empty() && !saved.machine.eq_ignore_ascii_case(&here) {
                 // The entries name partitions by GUID. From another machine
                 // those GUIDs are somebody else's.

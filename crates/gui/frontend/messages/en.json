@@ -729,6 +729,7 @@
   "rd_what_title": "What to restore",
   "rd_what_sub": "partitions included in this backup",
   "rd_key_note": "This backup is encrypted. Until the password is entered, the map below is drawn from the job's settings, not from the backup itself, and the backup cannot be restored.",
+  "rd_key_note_no_map": "This backup is encrypted. Its disk map is stored inside it — enter the password to see it and restore the backup.",
   "rd_enter_password": "Enter password",
   "rd_reading_copy": "Reading the backup…",
   "rd_disk_not_connected": "The disk with this backup is not connected — the map cannot be shown.",

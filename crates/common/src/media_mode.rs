@@ -43,6 +43,23 @@ pub fn set_media_mode(on: bool) {
     }
 }
 
+/// This machine's name, when it says something about the machine.
+///
+/// WinPE names every computer `MINWINPC`, so on the boot medium "the copy was
+/// taken on OBK-LAB, this is MINWINPC" was said over every restore of a
+/// machine's own boot entries onto that same machine (2026-10-16). There, no
+/// name is the honest answer, and the comparison is not made.
+pub fn meaningful_machine_name() -> Option<String> {
+    if is_media_mode() {
+        return None;
+    }
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .ok()
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty() && !n.eq_ignore_ascii_case("MINWINPC"))
+}
+
 /// True when this process runs from the boot medium.
 pub fn is_media_mode() -> bool {
     *MEDIA_MODE.get_or_init(detect)

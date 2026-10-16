@@ -473,8 +473,8 @@ fn read_image_info_at(
                 .collect();
             BootEntriesDto {
                 machine: b.machine.clone(),
-                this_machine: std::env::var("COMPUTERNAME")
-                    .or_else(|_| std::env::var("HOSTNAME"))
+                // Empty on the boot medium: WinPE calls every machine MINWINPC.
+                this_machine: own_backup_common::media_mode::meaningful_machine_name()
                     .unwrap_or_default(),
                 taken_at: b.taken_at.clone(),
                 variables: b.variables.len() - removable.len(),
