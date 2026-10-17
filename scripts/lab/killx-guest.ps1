@@ -39,11 +39,12 @@ $tag = if ($spec.Count -gt 1) { '-' + $spec[1].Trim() } else { '' }
 # Line 3: the phase run 1 is killed in (exclusions unless said otherwise).
 $killPhase = if ($spec.Count -gt 2) { $spec[2].Trim() } else { 'exclusions' }
 $work = "$base\$format$tag"
-$store = "S:\killx-$format$tag"
+$store = if ($format -like 'flush-*') { "T:\killx-$format$tag" } else { "S:\killx-$format$tag" }
 # 'consol', 'consol-vhdx', 'consol-qcow2': the consolidation scenario over
 # OBK, VHDX or qcow2; anything else is the exclusions scenario.
-$mode = if ($format -like 'consol*') { 'consol' } else { 'exclusions' }
-$container = switch ($format) { 'consol' { 'obk' } 'consol-vhdx' { 'vhdx' } 'consol-qcow2' { 'qcow2' } default { $format } }
+# 'flush-vhdx', 'flush-obk': every flush of the copies' own disk fails.
+$mode = if ($format -like 'consol*') { 'consol' } elseif ($format -like 'flush-*') { 'flush' } else { 'exclusions' }
+$container = switch ($format) { 'consol' { 'obk' } 'consol-vhdx' { 'vhdx' } 'consol-qcow2' { 'qcow2' } 'flush-vhdx' { 'vhdx' } 'flush-obk' { 'obk' } default { $format } }
 $encrypted = $container -eq 'obk'
 $private = if ($encrypted) { '.own-backup-obk-*' } else { '.own-backup-new-*' }
 $imageExt = @{ vhdx = 'vhdx'; qcow2 = 'qcow2'; obk = 'obk' }[$container]
@@ -229,6 +230,97 @@ function Consolidation([string]$id) {
     shutdown.exe /s /t 5 | Out-Null
 }
 
+# --- A device that fails every flush (formats 'flush-*') ---------------------
+# The host slides a blkdebug node under the copies' own disk on
+# KILLX-ARM-FLUSH and removes it on KILLX-DISARM-FLUSH.
+function FlushProbe {
+    try {
+        $fs = [IO.File]::Open('T:\flush-probe.bin', 'OpenOrCreate', 'ReadWrite', 'None')
+        try {
+            $b = New-Object byte[] 4096; (New-Object Random).NextBytes($b)
+            $fs.Write($b, 0, 4096); $fs.Flush($true)
+            return $true
+        } finally { $fs.Dispose() }
+    } catch { return $false }
+}
+function WaitProbe([bool]$want, [string]$text) {
+    for ($i = 0; $i -lt 90 -and (FlushProbe) -ne $want; $i++) { Start-Sleep -Seconds 1 }
+    Check ((FlushProbe) -eq $want) $text
+}
+function FlushFault([string]$id) {
+    [IO.File]::WriteAllText("$work\kills.done", 'done')
+    # T: holds 3 GB: what earlier attempts left there would fill it, and a
+    # full disk is a different failure from the one under test.
+    Get-ChildItem 'T:\' -Directory -Filter 'killx-*' | Where-Object { $_.FullName -ne $store } |
+        ForEach-Object { Report "removed-$($_.Name)" @{ files = @(Get-ChildItem $_.FullName -Force | ForEach-Object { $_.Name }) }; Remove-Item $_.FullName -Recurse -Force }
+    $stale = @(Names)
+    if ($stale.Count) { Report 'stale-before-run1' @{ files = $stale }; Get-ChildItem -LiteralPath $store -Force | Remove-Item -Force }
+    WaitProbe $true 'a flush of T: succeeds before the fault'
+    $run1 = RunJob 'run1' $id
+    Say 'KILLX-ARM-FLUSH'
+    WaitProbe $false 'a flush of T: now fails in Windows'
+    $before = @(Names)
+    $run2 = Rpc 'run2' @{ op = 'run'; id = $id; timeout_secs = 1800 }
+    $new = @(Names | Where-Object { $before -notcontains $_ })
+    Report 'flush-failed-run' @{ status = $run2.status; error = $run2.error; new_files = $new }
+    Check ($run2.status -eq 'error') "the run on a failing disk failed ($($run2.status)): $($run2.error)"
+    Check (@($new | Where-Object { $_ -notlike $private }).Count -eq 0) "it published nothing ($($new -join ', '))"
+    Say 'KILLX-DISARM-FLUSH'
+    WaitProbe $true 'flushes of T: succeed again'
+    $left = @(Pending)
+    $run3 = RunJob 'run3' $id
+    foreach ($image in @($run1.image_path, $run3.image_path)) {
+        $v = Rpc "verify-$([IO.Path]::GetFileName($image))" (@{ op = 'verify'; image = $image } + $secret)
+        Check $v.valid "$image verifies"
+    }
+    # The same fault switched on in the middle of a copy, not at its start.
+    $before = @(Names)
+    # Line 3 of the format file, when a number: how far into the copy (ms).
+    $armDelay = if ($killPhase -match '^\d+$') { [int]$killPhase } else { 2000 }
+    $at = Rpc 'run4-at-copy' @{ op = 'start-run-at-phase'; id = $id; phase = 'backup'; after_ms = $armDelay; timeout_secs = 600 }
+    Say 'KILLX-ARM-FLUSH'
+    $armedAt = [DateTime]::UtcNow
+    function NextRun([int]$seconds) {
+        for ($i = 0; $i -lt $seconds; $i += 2) {
+            $job = Rpc "run4-wait" @{ op = 'get'; id = $id }
+            if ($job.last_run -and $job.last_run.id -ne $run3.id) { return $job.last_run }
+            Start-Sleep -Seconds 2
+        }
+        return $null
+    }
+    # A run that does not end on a failing disk is a finding, not the end of
+    # the scenario: what happens once the disk recovers is recorded too.
+    $run4 = NextRun 300
+    $hung = -not $run4
+    if ($hung) {
+        Say "KILLX-NOTE the run hit $($at.in_phase_ms) ms into its copy has not ended in 5 minutes on the failing disk"
+        Say 'KILLX-DISARM-FLUSH'
+        $run4 = NextRun 600
+    }
+    Check ([bool]$run4) "the run hit in the middle of its copy ended (hung while failing: $hung)"
+    $new = @(Names | Where-Object { $before -notcontains $_ })
+    Report 'midcopy-failed-run' @{ armed_after = $at; hung_while_failing = $hung; ended_s_after_arm = ([DateTime]::UtcNow - $armedAt).TotalSeconds
+        status = $run4.status; error = $run4.error; image = $run4.image_path; new_files = $new }
+    if ($run4.status -eq 'success') {
+        $v = Rpc 'verify-run4' (@{ op = 'verify'; image = $run4.image_path } + $secret)
+        Check $v.valid "the run that outlived the fault published a copy that verifies ($($run4.image_path))"
+    } else {
+        Check (@($new | Where-Object { $_ -notlike $private }).Count -eq 0) "the failed run published nothing ($($new -join ', ')): $($run4.error)"
+    }
+    if (-not $hung) { Say 'KILLX-DISARM-FLUSH' }
+    WaitProbe $true 'flushes of T: succeed again after the second fault'
+    $left = @($left) + @(Pending)
+    $run5 = RunJob 'run5' $id
+    $v = Rpc 'verify-run5' (@{ op = 'verify'; image = $run5.image_path } + $secret)
+    Check $v.valid "$($run5.image_path) verifies"
+    Report 'listing-after' @{ files = (Listing); private_after_failures = $left; private_now = @(Pending) }
+    Check (@(Pending).Count -eq 0) "no private file is left after the next run ($((@(Pending)) -join ', '))"
+    [IO.File]::WriteAllText("$work\passed.txt", 'pass')
+    Report 'result' @{ pass = $true; failed_run_error = $run2.error; runs = @($run1.image_path, $run3.image_path) }
+    Say "KILLX-PASS format=$format"
+    shutdown.exe /s /t 5 | Out-Null
+}
+
 function AutoLogon {
     $answer = New-Object Xml.XmlDocument; $answer.Load("$lab\autounattend.xml")
     $password = $answer.SelectSingleNode("//*[local-name()='AutoLogon']/*[local-name()='Password']/*[local-name()='Value']").InnerText
@@ -331,6 +423,27 @@ if ($media) {
             Remove-Item "$base\upgrading" -Force
             Say "KILLX-UPGRADED $want"
         }
+        # A data disk the host replaced with a blank one (it outgrew the run's
+        # space bound) is prepared again: the source and the store.
+        if (-not (Get-Volume -FileSystemLabel OBKSRC -ErrorAction SilentlyContinue)) {
+            $raw = @(Get-Disk | Where-Object { $_.PartitionStyle -eq 'RAW' -and $_.Size -gt 8GB })
+            Check ($raw.Count -eq 1) 'a blank data disk to prepare again'
+            Initialize-Disk -Number $raw[0].Number -PartitionStyle GPT
+            $src = New-Partition -DiskNumber $raw[0].Number -Size 2GB -DriveLetter P
+            Format-Volume -Partition $src -FileSystem NTFS -NewFileSystemLabel OBKSRC -Confirm:$false | Out-Null
+            $dst = New-Partition -DiskNumber $raw[0].Number -UseMaximumSize -DriveLetter S
+            Format-Volume -Partition $dst -FileSystem NTFS -NewFileSystemLabel OBKSTORE -Confirm:$false | Out-Null
+            MakeData
+            Say 'KILLX-REPREPARED the data disk'
+        }
+        if ($mode -eq 'flush' -and -not (Get-Volume -FileSystemLabel OBKFAULT -ErrorAction SilentlyContinue)) {
+            $raw = @(Get-Disk | Where-Object { $_.PartitionStyle -eq 'RAW' -and $_.Size -lt 8GB })
+            Check ($raw.Count -eq 1) 'one blank fault disk attached'
+            Initialize-Disk -Number $raw[0].Number -PartitionStyle GPT
+            $part = New-Partition -DiskNumber $raw[0].Number -UseMaximumSize -DriveLetter T
+            Format-Volume -Partition $part -FileSystem NTFS -NewFileSystemLabel OBKFAULT -Confirm:$false | Out-Null
+            Say 'KILLX-FAULT-DISK T:'
+        }
         if (Test-Path "$work\kills.done") {
             # A reboot after the kills: the user half finishes by itself.
             $armed = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon').AutoAdminLogon -eq '1'
@@ -347,6 +460,21 @@ if ($media) {
             # when nobody logs on at all.
             for ($i = 0; $i -lt 120 -and -not (Get-Process explorer -ErrorAction SilentlyContinue); $i++) { Start-Sleep -Seconds 1 }
             if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) { AutoLogon; Say 'KILLX-REARM'; shutdown.exe /r /t 5 | Out-Null; return }
+        }
+        # Windows skipped the Startup folder after a hard power-off of this VM
+        # (2026-10-17): the desktop came up and the user half never ran. If it
+        # has not started 90 s after the desktop, start it in that session.
+        $booted = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime()
+        function UserStarted { (Test-Path "$work\user.started") -and (Get-Item "$work\user.started").LastWriteTimeUtc -gt $booted }
+        $wait = [DateTime]::UtcNow.AddMinutes(5)
+        while (-not (Get-Process explorer -ErrorAction SilentlyContinue) -and [DateTime]::UtcNow -lt $wait) { Start-Sleep -Seconds 2 }
+        for ($i = 0; $i -lt 90 -and -not (UserStarted); $i++) { Start-Sleep -Seconds 1 }
+        if (-not (UserStarted) -and (Get-Process explorer -ErrorAction SilentlyContinue)) {
+            $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $lab\killx-guest.ps1 -User"
+            $principal = New-ScheduledTaskPrincipal -UserId "$env:COMPUTERNAME\lab" -LogonType Interactive -RunLevel Limited
+            Register-ScheduledTask -TaskName 'OwnBackupKillxUser' -Action $action -Principal $principal -Force | Out-Null
+            Start-ScheduledTask -TaskName 'OwnBackupKillxUser'
+            Say 'KILLX-NOTE the Startup item did not run; the user half was started by a task'
         }
         # Requests one after another until the user half says there are no
         # more. A request is JSON: the name of the record to write, and
@@ -411,10 +539,12 @@ if ($media) {
     }
 
     if ($User -and $phase -eq 'run') {
+        [IO.File]::WriteAllText("$work\user.started", [DateTime]::UtcNow.ToString('o'))
         for ($i = 0; $i -lt 600 -and (Test-Path "$base\upgrading"); $i++) { Start-Sleep -Seconds 1 }
         # The installer's own start of the service is not the end of it.
         Start-Sleep -Seconds 5
         WaitService
+        if ($mode -eq 'flush') { for ($i = 0; $i -lt 180 -and -not (Test-Path 'T:\'); $i++) { Start-Sleep -Seconds 1 } }
         New-Item -ItemType Directory -Force $store | Out-Null
         $state = if (Test-Path "$work\job.json") { Get-Content "$work\job.json" -Raw | ConvertFrom-Json } else { $null }
         if (-not $state) {
@@ -425,16 +555,17 @@ if ($media) {
                 name = $jobName; source = 'P:'; sources = @('P:'); dest_folder = $store
                 image_format = $(if ($container -eq 'vhdx') { 'vhdx' } else { 'qcow2' });
                 schedule = @{ kind = 'none' };
-                scheme = $(if ($mode -eq 'consol') {
+                scheme = $(if ($mode -eq 'flush') { @{ method = 'full'; keep_chains = 5 } } elseif ($mode -eq 'consol') {
                     @{ method = 'incremental'; only_incremental = $true; full_every_n = 100; keep_chains = 1; rolling_incrementals = 1 } } else {
                     @{ method = 'incremental'; only_incremental = $false; full_every_n = 1; keep_chains = 1 } })
-                exclusions = @{ enabled = ($mode -ne 'consol'); patterns = @('*.tmp'); patterns_linux = @() };
+                exclusions = @{ enabled = ($mode -eq 'exclusions'); patterns = @('*.tmp'); patterns_linux = @() };
                 advanced = @{ validate_after = $false; retry_attempts = 0; after_backup = 'none' } } }
             JsonFile "$work\job.json" @{ id = $job.id }
             $state = Get-Content "$work\job.json" -Raw | ConvertFrom-Json
         }
         $id = $state.id
         if ($mode -eq 'consol') { Consolidation $id; return }
+        if ($mode -eq 'flush') { FlushFault $id; return }
 
         # Run 1, killed inside the deletion of the excluded files.
         if (-not (Test-Path "$work\killed.json")) {
