@@ -428,7 +428,7 @@ fn refuse_existing_outputs(image_path: &Path, full_image_path: Option<&Path>) ->
 
 pub fn backup_volume(
     req: &VolumeBackupRequest,
-    progress: impl FnMut(&BackupProgress) -> Result<()>,
+    mut progress: impl FnMut(&BackupProgress) -> Result<()>,
 ) -> Result<VolumeBackupSummary> {
     check_encrypted_target(req.encryption.as_ref(), req.image_format, &req.image_path)?;
     refuse_existing_outputs(&req.image_path, req.full_image_path.as_deref())?;
@@ -452,7 +452,7 @@ pub fn backup_volume(
             &staged,
             Some(pending.writer_file()?),
             &req.image_path,
-            progress,
+            &mut progress,
         )?;
         let published = settled_image_path(
             &req.image_path,
@@ -460,6 +460,7 @@ pub fn backup_volume(
             req.kind,
             summary.backup_kind,
         );
+        may_publish(&mut progress, summary.bytes_copied)?;
         pending.publish_as(&published)?;
         summary.sidecar_path = sidecar_path_for(&published);
         summary.image_path = published;
@@ -472,17 +473,38 @@ pub fn backup_volume(
         image_path: pending.path().to_path_buf(),
         ..req.clone()
     };
-    let mut summary = backup_volume_inner(&staged, None, &req.image_path, progress)?;
+    let mut summary = backup_volume_inner(&staged, None, &req.image_path, &mut progress)?;
     let published = settled_image_path(
         &req.image_path,
         req.full_image_path.as_deref(),
         req.kind,
         summary.backup_kind,
     );
+    may_publish(&mut progress, summary.bytes_copied)?;
     pending.publish_as(&published)?;
     summary.sidecar_path = sidecar_path_for(&published);
     summary.image_path = published;
     Ok(summary)
+}
+
+/// Asked of the caller right before an image is published. A run that was
+/// cancelled, or that the job runner stopped waiting for (a destination that
+/// stopped answering, see core's `engine_watch`), answers with an error, and
+/// the image goes with its private name instead of becoming a version.
+fn may_publish(
+    progress: &mut impl FnMut(&BackupProgress) -> Result<()>,
+    bytes_written: u64,
+) -> Result<()> {
+    progress(&BackupProgress {
+        backup_id: "publish".into(),
+        status: BackupStatus::Running,
+        blocks_done: 0,
+        blocks_total: 0,
+        bytes_written,
+        speed_bps: 0,
+        categories: None,
+        excluded: None,
+    })
 }
 
 /// The volume-root form VSS expects; None for anything that is not a volume.
@@ -3084,7 +3106,7 @@ impl UsedSectorMap for DiskUsedMap {
 /// excluded NTFS files remain as zero-filled ghosts (data still never leaves).
 pub fn backup_disk(
     req: &DiskBackupRequest,
-    progress: impl FnMut(&BackupProgress) -> Result<()>,
+    mut progress: impl FnMut(&BackupProgress) -> Result<()>,
 ) -> Result<DiskBackupSummary> {
     check_encrypted_target(req.encryption.as_ref(), req.image_format, &req.image_path)?;
     refuse_existing_outputs(&req.image_path, req.full_image_path.as_deref())?;
@@ -3104,7 +3126,7 @@ pub fn backup_disk(
             &staged,
             Some(pending.writer_file()?),
             &req.image_path,
-            progress,
+            &mut progress,
         )?;
         let published = settled_image_path(
             &req.image_path,
@@ -3112,6 +3134,7 @@ pub fn backup_disk(
             req.kind,
             summary.backup_kind,
         );
+        may_publish(&mut progress, summary.bytes_copied)?;
         pending.publish_as(&published)?;
         summary.image_path = published;
         return Ok(summary);
@@ -3122,13 +3145,14 @@ pub fn backup_disk(
         image_path: pending.path().to_path_buf(),
         ..req.clone()
     };
-    let mut summary = backup_disk_inner(&staged, None, &req.image_path, progress)?;
+    let mut summary = backup_disk_inner(&staged, None, &req.image_path, &mut progress)?;
     let published = settled_image_path(
         &req.image_path,
         req.full_image_path.as_deref(),
         req.kind,
         summary.backup_kind,
     );
+    may_publish(&mut progress, summary.bytes_copied)?;
     pending.publish_as(&published)?;
     summary.image_path = published;
     Ok(summary)

@@ -18,6 +18,7 @@ rust_i18n::i18n!("locales", fallback = "ru");
 pub mod archive_setup;
 pub mod backup_encryption;
 pub mod busy;
+mod engine_watch;
 pub mod restore_exec;
 pub mod source_refresh;
 pub mod verification;
@@ -1309,6 +1310,11 @@ pub struct JobProgress {
     pub excluded_files: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub excluded_bytes: Option<u64>,
+    /// Seconds the engine has gone without any progress, once that is long
+    /// enough to say — a destination that stopped taking writes holds a run
+    /// like this for as long as it fails (`engine_watch`). `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stalled_secs: Option<u64>,
 }
 
 /// Sink for orchestration events. The GUI forwards these to Tauri window
@@ -3266,15 +3272,18 @@ async fn perform_backup(
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
 
-        let result = tokio::task::spawn_blocking(move || {
+        let watch = engine_watch::EngineWatch::new();
+        let watch_bg = watch.clone();
+        let handle = tokio::task::spawn_blocking(move || {
             let _quiet = QuietCopy::enter(low_priority);
             let mut pace = Pace::new(speed_limit_mbps);
             let mut last_permille = u64::MAX;
             let mut last_emit = std::time::Instant::now();
             let summary = backup_volume(&request, |p| {
-                if cancel_bg.load(std::sync::atomic::Ordering::SeqCst) {
+                if cancel_bg.load(std::sync::atomic::Ordering::SeqCst) || watch_bg.abandoned() {
                     return Err(OwnBackupError::Cancelled);
                 }
+                watch_bg.alive();
                 // The engine tags non-copy phases via backup_id: "prepare" for
                 // the exclusion scan, "finalize" for the flush/detach at the
                 // end. Both carry blocks_total == 0.
@@ -3286,6 +3295,9 @@ async fn perform_backup(
                     // work that used to hide under "сброс кэша" and read as a
                     // hang.
                     "exclusions" => "exclusions",
+                    // Asked just before the image is published, so a run that
+                    // was cancelled or left behind never publishes.
+                    "publish" => "finalize",
                     _ => "backup",
                 };
                 if phase == "backup" {
@@ -3310,7 +3322,7 @@ async fn perform_backup(
                 {
                     last_permille = permille;
                     last_emit = std::time::Instant::now();
-                    sink_bg.job_progress(JobProgress {
+                    watch_bg.show(&sink_bg, JobProgress {
                         job_id: job_id.clone(),
                         phase: phase.into(),
                         percent: permille / 10,
@@ -3324,6 +3336,7 @@ async fn perform_backup(
                         categories: p.categories.clone().unwrap_or_default(),
                         excluded_files: p.excluded.map(|(f, _)| f),
                         excluded_bytes: p.excluded.map(|(_, b)| b),
+                        stalled_secs: None,
                     });
                 }
                 #[cfg(feature = "a07-lab-gate")]
@@ -3347,15 +3360,16 @@ async fn perform_backup(
                         // AUD-12). Reading back a whole image is minutes of work;
                         // before this, pressing Отмена during it did nothing and
                         // the run then finished as a success.
-                        if cancel_bg.load(std::sync::atomic::Ordering::SeqCst) {
+                        if cancel_bg.load(std::sync::atomic::Ordering::SeqCst) || watch_bg.abandoned() {
                             return Err(OwnBackupError::Cancelled);
                         }
+                        watch_bg.alive();
                         let mbps = v_rate.sample(done);
                         let permille = if total > 0 { done * 1000 / total } else { 0 };
                         if permille != v_permille || v_emit.elapsed().as_millis() >= 400 {
                             v_permille = permille;
                             v_emit = std::time::Instant::now();
-                            sink_bg.job_progress(JobProgress {
+                            watch_bg.show(&sink_bg, JobProgress {
                                 job_id: job_id.clone(),
                                 phase: "verify".into(),
                                 percent: permille / 10,
@@ -3369,6 +3383,7 @@ async fn perform_backup(
                                 categories: Vec::new(),
                                 excluded_files: None,
                                 excluded_bytes: None,
+                                stalled_secs: None,
                             });
                         }
                         #[cfg(feature = "a07-lab-gate")]
@@ -3397,8 +3412,16 @@ async fn perform_backup(
             }
 
             Ok::<_, OwnBackupError>((summary, verify_cancelled))
-        })
-        .await;
+        });
+        let result = match engine_watch::wait_engine(handle, &watch, cancel, sink).await {
+            engine_watch::Waited::Done(result) => result,
+            engine_watch::Waited::LeftBehind => {
+                warn!(job = %job.name, volume = %device,
+                    "cancelled while the engine was not answering; its thread is left behind");
+                fatal = Some(("cancelled".into(), tr!("lib.cancelled_left_behind").into_owned()));
+                break;
+            }
+        };
 
         match result {
             Ok(Ok((summary, verify_cancelled))) => {
@@ -3664,15 +3687,18 @@ async fn perform_disk_backup(
     let model = ds.disk_model.clone();
     let disk_number = ds.disk_number;
 
-    let result = tokio::task::spawn_blocking(move || {
+    let watch = engine_watch::EngineWatch::new();
+    let watch_bg = watch.clone();
+    let handle = tokio::task::spawn_blocking(move || {
         let _quiet = QuietCopy::enter(low_priority);
         let mut pace = Pace::new(speed_limit_mbps);
         let mut last_permille = u64::MAX;
         let mut last_emit = std::time::Instant::now();
         let summary = backup_disk(&request, |p| {
-            if cancel_bg.load(std::sync::atomic::Ordering::SeqCst) {
+            if cancel_bg.load(std::sync::atomic::Ordering::SeqCst) || watch_bg.abandoned() {
                 return Err(OwnBackupError::Cancelled);
             }
+            watch_bg.alive();
             // The engine tags non-copy phases via backup_id: "prepare" for the
             // per-partition exclusion scan ("Поиск исключаемых файлов…"),
             // "finalize" for the flush/detach + true-removal pass. Everything
@@ -3682,6 +3708,7 @@ async fn perform_disk_backup(
                 "finalize" => "finalize",
                 // Post-copy exclusion passes — see the per-volume path.
                 "exclusions" => "exclusions",
+                "publish" => "finalize",
                 _ => "backup",
             };
             if phase == "backup" {
@@ -3706,7 +3733,7 @@ async fn perform_disk_backup(
             {
                 last_permille = permille;
                 last_emit = std::time::Instant::now();
-                sink_bg.job_progress(JobProgress {
+                watch_bg.show(&sink_bg, JobProgress {
                     job_id: job_id.clone(),
                     phase: phase.into(),
                     percent: permille / 10,
@@ -3720,6 +3747,7 @@ async fn perform_disk_backup(
                     categories: p.categories.clone().unwrap_or_default(),
                     excluded_files: p.excluded.map(|(f, _)| f),
                     excluded_bytes: p.excluded.map(|(_, b)| b),
+                    stalled_secs: None,
                 });
             }
             #[cfg(feature = "a07-lab-gate")]
@@ -3740,15 +3768,16 @@ async fn perform_disk_backup(
                 keys_for_verify.as_ref(),
                 verify_scope,
                 |done, total| {
-                    if cancel_bg.load(Ordering::SeqCst) {
+                    if cancel_bg.load(Ordering::SeqCst) || watch_bg.abandoned() {
                         return Err(OwnBackupError::Cancelled);
                     }
+                    watch_bg.alive();
                     let mbps = v_rate.sample(done);
                     let permille = if total > 0 { done * 1000 / total } else { 0 };
                     if permille != v_permille || v_emit.elapsed().as_millis() >= 400 {
                         v_permille = permille;
                         v_emit = std::time::Instant::now();
-                        sink_bg.job_progress(JobProgress {
+                        watch_bg.show(&sink_bg, JobProgress {
                             job_id: job_id.clone(),
                             phase: "verify".into(),
                             percent: permille / 10,
@@ -3763,6 +3792,7 @@ async fn perform_disk_backup(
                             categories: Vec::new(),
                             excluded_files: None,
                             excluded_bytes: None,
+                            stalled_secs: None,
                         });
                     }
                     #[cfg(feature = "a07-lab-gate")]
@@ -3782,8 +3812,17 @@ async fn perform_disk_backup(
             }
         }
         Ok::<_, OwnBackupError>((summary, verify_cancelled))
-    })
-    .await;
+    });
+    let result = match engine_watch::wait_engine(handle, &watch, cancel, sink).await {
+        engine_watch::Waited::Done(result) => result,
+        engine_watch::Waited::LeftBehind => {
+            warn!(job = %job.name, "cancelled while the engine was not answering; its thread is left behind");
+            run.finished_at = chrono::Utc::now().to_rfc3339();
+            run.status = "cancelled".into();
+            run.error = tr!("lib.cancelled_left_behind").into_owned();
+            return run;
+        }
+    };
 
     run.finished_at = chrono::Utc::now().to_rfc3339();
     run.image_path = image_path.display().to_string();
@@ -3989,6 +4028,7 @@ async fn perform_backup(
                         categories: Vec::new(),
                         excluded_files: None,
                         excluded_bytes: None,
+                        stalled_secs: None,
                     });
                 }
                 Ok(())

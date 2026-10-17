@@ -139,6 +139,10 @@
     "ru": "Отменено пользователем",
     "en": "Cancelled by the user"
   },
+  "lib.cancelled_left_behind": {
+    "ru": "Отменено. Запись на диск копий не отвечала; незаконченный файл будет удалён, когда диск ответит",
+    "en": "Cancelled. The backup disk stopped answering writes; the unfinished file will be removed once it answers"
+  },
   "lib.task_aborted": {
     "ru": "задача прервана: %{error}",
     "en": "the task was aborted: %{error}"

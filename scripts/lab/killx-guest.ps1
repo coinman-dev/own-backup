@@ -39,12 +39,12 @@ $tag = if ($spec.Count -gt 1) { '-' + $spec[1].Trim() } else { '' }
 # Line 3: the phase run 1 is killed in (exclusions unless said otherwise).
 $killPhase = if ($spec.Count -gt 2) { $spec[2].Trim() } else { 'exclusions' }
 $work = "$base\$format$tag"
-$store = if ($format -like 'flush-*') { "T:\killx-$format$tag" } else { "S:\killx-$format$tag" }
+$store = if ($format -like 'flush-*' -or $format -like 'stall-*' -or $format -eq 'probe-io') { "T:\killx-$format$tag" } else { "S:\killx-$format$tag" }
 # 'consol', 'consol-vhdx', 'consol-qcow2': the consolidation scenario over
 # OBK, VHDX or qcow2; anything else is the exclusions scenario.
 # 'flush-vhdx', 'flush-obk': every flush of the copies' own disk fails.
-$mode = if ($format -like 'consol*') { 'consol' } elseif ($format -like 'flush-*') { 'flush' } else { 'exclusions' }
-$container = switch ($format) { 'consol' { 'obk' } 'consol-vhdx' { 'vhdx' } 'consol-qcow2' { 'qcow2' } 'flush-vhdx' { 'vhdx' } 'flush-obk' { 'obk' } default { $format } }
+$mode = if ($format -like 'consol*') { 'consol' } elseif ($format -like 'flush-*' -or $format -like 'stall-*' -or $format -eq 'probe-io') { 'flush' } else { 'exclusions' }
+$container = switch ($format) { 'consol' { 'obk' } 'consol-vhdx' { 'vhdx' } 'consol-qcow2' { 'qcow2' } 'flush-vhdx' { 'vhdx' } 'flush-obk' { 'obk' } 'stall-vhdx' { 'vhdx' } 'stall-obk' { 'obk' } 'probe-io' { 'vhdx' } default { $format } }
 $encrypted = $container -eq 'obk'
 $private = if ($encrypted) { '.own-backup-obk-*' } else { '.own-backup-new-*' }
 $imageExt = @{ vhdx = 'vhdx'; qcow2 = 'qcow2'; obk = 'obk' }[$container]
@@ -321,6 +321,103 @@ function FlushFault([string]$id) {
     shutdown.exe /s /t 5 | Out-Null
 }
 
+# --- How Windows itself treats a disk failing writes (format 'probe-io') ----
+# No product code: 300 MB written by a separate PowerShell, buffered and then
+# write-through, while every write of T: fails. Each writer reports how far it
+# got and when; one that is still running after its limit is recorded as hung.
+function WriterScript([bool]$through) {
+    $opt = if ($through) { '[IO.FileOptions]::WriteThrough' } else { '[IO.FileOptions]::None' }
+    return @"
+`$out = '$work\probe-$(if ($through) { 'through' } else { 'buffered' }).txt'
+`$sw = [Diagnostics.Stopwatch]::StartNew(); `$n = 0
+try {
+    `$fs = New-Object IO.FileStream '$store\probe-$through.bin', 'Create', 'Write', 'None', 1048576, $opt
+    `$buf = New-Object byte[] 1048576; (New-Object Random 7).NextBytes(`$buf)
+    for (`$i = 0; `$i -lt 300; `$i++) { `$fs.Write(`$buf, 0, `$buf.Length); `$n++; [IO.File]::WriteAllText(`$out, "writing `$n MB `$(`$sw.ElapsedMilliseconds) ms") }
+    `$fs.Flush(`$true); `$fs.Dispose()
+    [IO.File]::WriteAllText(`$out, "done `$n MB `$(`$sw.ElapsedMilliseconds) ms")
+} catch { [IO.File]::WriteAllText(`$out, "error after `$n MB `$(`$sw.ElapsedMilliseconds) ms: `$(`$_.Exception.Message)") }
+"@
+}
+function ProbeWriter([bool]$through, [int]$limit) {
+    $name = if ($through) { 'through' } else { 'buffered' }
+    $script = "$work\probe-$name.ps1"
+    [IO.File]::WriteAllText($script, (WriterScript $through), [Text.Encoding]::ASCII)
+    Remove-Item "$work\probe-$name.txt" -ErrorAction SilentlyContinue
+    $p = Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$script`"" -WindowStyle Hidden -PassThru
+    $null = $p.Handle
+    $ended = $p.WaitForExit($limit * 1000)
+    $state = if (Test-Path "$work\probe-$name.txt") { Get-Content "$work\probe-$name.txt" -Raw } else { 'no output' }
+    if (-not $ended) { try { $p.Kill() } catch { }; $killed = $p.WaitForExit(30000) } else { $killed = $null }
+    $row = @{ writer = $name; ended_within_limit = $ended; limit_s = $limit; state = "$state".Trim(); kill_took = $killed }
+    Report "probe-$name" $row
+    Say "KILLX-PROBE $name ended=$ended state=$("$state".Trim())"
+    return $row
+}
+function ProbeIo {
+    [IO.File]::WriteAllText("$work\kills.done", 'done')
+    Get-ChildItem 'T:\' -Directory -Filter 'killx-*' | Where-Object { $_.FullName -ne $store } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    Get-ChildItem -LiteralPath $store -Force -ErrorAction SilentlyContinue | Remove-Item -Force
+    WaitProbe $true 'a flush of T: succeeds before the fault'
+    $rows = @()
+    $rows += ProbeWriter $false 120
+    $rows += ProbeWriter $true 120
+    Say 'KILLX-ARM-FLUSH'
+    WaitProbe $false 'a flush of T: now fails in Windows'
+    $rows += ProbeWriter $true 240
+    $rows += ProbeWriter $false 240
+    Say 'KILLX-DISARM-FLUSH'
+    WaitProbe $true 'flushes of T: succeed again'
+    Start-Sleep -Seconds 20
+    foreach ($n in 'buffered', 'through') { $rows += @{ writer = "$n-after-disarm"; state = "$(Get-Content "$work\probe-$n.txt" -Raw -ErrorAction SilentlyContinue)".Trim() } }
+    Report 'result' @{ pass = $true; probes = $rows }
+    [IO.File]::WriteAllText("$work\passed.txt", 'pass')
+    Say "KILLX-PASS format=$format"
+    shutdown.exe /s /t 5 | Out-Null
+}
+
+# --- A run stuck on a failing disk, said and cancelled (formats 'stall-*') ---
+# The service must say the copy stands still, a cancel must end the run while
+# the disk still fails, and the thread left behind must publish nothing.
+function StallCancel([string]$id) {
+    [IO.File]::WriteAllText("$work\kills.done", 'done')
+    Get-ChildItem 'T:\' -Directory -Filter 'killx-*' | Where-Object { $_.FullName -ne $store } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    Get-ChildItem -LiteralPath $store -Force -ErrorAction SilentlyContinue | Remove-Item -Force
+    WaitProbe $true 'a flush of T: succeeds before the fault'
+    $run1 = RunJob 'run1' $id
+    $before = @(Names)
+    $at = Rpc 'run2-at-copy' @{ op = 'start-run-at-phase'; id = $id; phase = 'backup'; after_ms = 300; timeout_secs = 600 }
+    Say 'KILLX-ARM-FLUSH'
+    $stall = Rpc 'wait-stalled' @{ op = 'wait-stalled'; id = $id; timeout_secs = 420 }
+    Check ($stall.stalled_secs -ge 120) "the service said the copy stands still ($($stall.stalled_secs) s at $($stall.blocks_done)/$($stall.blocks_total))"
+    $cancelAt = [DateTime]::UtcNow
+    $null = Rpc 'cancel-run2' @{ op = 'cancel-running' }
+    $run2 = $null
+    for ($i = 0; $i -lt 90 -and -not $run2; $i++) {
+        $job = Rpc 'run2-wait' @{ op = 'get'; id = $id }
+        if ($job.last_run -and $job.last_run.id -ne $run1.id) { $run2 = $job.last_run } else { Start-Sleep -Seconds 1 }
+    }
+    $took = ([DateTime]::UtcNow - $cancelAt).TotalSeconds
+    Check ([bool]$run2) "the cancel ended the run while the disk still fails ($([int]$took) s)"
+    Report 'stall-cancelled-run' @{ stall = $stall; status = $run2.status; error = $run2.error; took_s = $took }
+    Check ($run2.status -eq 'cancelled') "the run is recorded as cancelled ($($run2.status)): $($run2.error)"
+    Say 'KILLX-DISARM-FLUSH'
+    WaitProbe $true 'flushes of T: succeed again'
+    # The thread left behind wakes up now: it must discard, not publish.
+    for ($i = 0; $i -lt 180 -and @(Pending).Count; $i++) { Start-Sleep -Seconds 1 }
+    $new = @(Names | Where-Object { $before -notcontains $_ })
+    Report 'after-left-behind' @{ new_files = $new; private = @(Pending) }
+    Check (@($new | Where-Object { $_ -notlike $private }).Count -eq 0) "the thread left behind published nothing ($($new -join ', '))"
+    Check (@(Pending).Count -eq 0) "and removed its unfinished file ($((@(Pending)) -join ', '))"
+    $run3 = RunJob 'run3' $id
+    $v = Rpc 'verify-run3' (@{ op = 'verify'; image = $run3.image_path } + $secret)
+    Check $v.valid "the next run's copy verifies ($($run3.image_path))"
+    [IO.File]::WriteAllText("$work\passed.txt", 'pass')
+    Report 'result' @{ pass = $true; stall = $stall; cancel_took_s = $took; cancelled_error = $run2.error }
+    Say "KILLX-PASS format=$format"
+    shutdown.exe /s /t 5 | Out-Null
+}
+
 function AutoLogon {
     $answer = New-Object Xml.XmlDocument; $answer.Load("$lab\autounattend.xml")
     $password = $answer.SelectSingleNode("//*[local-name()='AutoLogon']/*[local-name()='Password']/*[local-name()='Value']").InnerText
@@ -565,6 +662,8 @@ if ($media) {
         }
         $id = $state.id
         if ($mode -eq 'consol') { Consolidation $id; return }
+        if ($format -eq 'probe-io') { ProbeIo; return }
+        if ($format -like 'stall-*') { StallCancel $id; return }
         if ($mode -eq 'flush') { FlushFault $id; return }
 
         # Run 1, killed inside the deletion of the excluded files.

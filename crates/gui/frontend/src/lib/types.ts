@@ -737,6 +737,9 @@ export interface JobProgress {
   volume?: string;
   /** File name of the image being written (shown after the destination). */
   image_file_name?: string;
+  /** Seconds without any progress, once the service finds that worth saying
+   *  (a backup disk that stopped taking writes). Absent otherwise. */
+  stalled_secs?: number;
   /**
    * Разбивка оставшихся файлов по типам — приходит ОДИН раз, сразу после
    * скана, и дальше не меняется. Пары «категория → байты»: сканер видит каждый

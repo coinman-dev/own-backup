@@ -288,7 +288,7 @@ pub async fn run(args: BackupDiskArgs) -> own_backup_common::Result<()> {
             // counter standing still, which reads as a hang unless it is named.
             let line = match p.backup_id.as_str() {
                 "prepare" => "  поиск исключаемых файлов…".to_string(),
-                "finalize" => {
+                "finalize" | "publish" => {
                     "  завершение: сброс, отсоединение, удаление исключённых…".to_string()
                 }
                 _ => format!(

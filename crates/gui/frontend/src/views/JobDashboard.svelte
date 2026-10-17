@@ -346,6 +346,14 @@
           {m.dash_elapsed({ time: formatClock(elapsedMs) })} · {m.dash_remaining({ time: Number.isFinite(eta) ? '~' + formatClock(eta) : m.dash_estimating() })}
         </span>
       </div>
+      <!-- The service says when the copy has stood still for minutes: a backup
+           disk that keeps failing writes holds a run like that for as long as
+           it fails, and a bar that merely stops reads as "still working". -->
+      {#if progress?.stalled_secs}
+        <div class="stall-note" role="status">
+          {m.dash_stalled({ min: Math.max(2, Math.floor(progress.stalled_secs / 60)) })}
+        </div>
+      {/if}
     </div>
     <!-- Разбивка по типам — сразу, как только сканер её посчитал, а не в конце.
          Он видит каждый файл с размером ещё ДО копирования, так что ответ на
@@ -531,6 +539,8 @@
      совсем длинный путь, но включается последней, а не заранее. */
   .progress-meta .route { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; min-width: 0; }
   .progress-meta .times { white-space: nowrap; flex-shrink: 0; }
+  .stall-note { margin-top: 8px; padding: 6px 10px; border-radius: 6px; font-size: 12px;
+    background: var(--warning-soft); border: 1px solid var(--warning-line); color: var(--warning-text); }
   .stats { display: flex; justify-content: space-between; font-size: 13px; color: var(--text-secondary); margin-top: 34px; }
   .stats b { color: var(--head); font-weight: 600; }
   .reco { display: flex; align-items: center; gap: 6px; }

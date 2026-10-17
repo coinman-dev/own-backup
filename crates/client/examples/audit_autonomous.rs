@@ -242,6 +242,34 @@ async fn execute(client: &mut BackupClient, v: &Value) -> Result<Value, String> 
             .await
             .map_err(|_| "the phase was not reached".to_string())?
         }
+        // Waits until the service says the job's copy has stood still
+        // (`JobProgress::stalled_secs`) — a backup disk failing every write.
+        "wait-stalled" => {
+            let id = field(v, "id")?.to_string();
+            let mut listener = client.clone();
+            let events = listener.stream_events().await?;
+            tokio::pin!(events);
+            let limit = v["timeout_secs"].as_u64().unwrap_or(600);
+            tokio::time::timeout(Duration::from_secs(limit), async {
+                while let Some(event) = events.next().await {
+                    if let ClientEvent::Progress(p) = event {
+                        if p.job_id == id {
+                            if let Some(secs) = p.stalled_secs {
+                                return Ok(json!({"stalled_secs":secs,"phase":p.phase,
+                                    "blocks_done":p.blocks_done,"blocks_total":p.blocks_total}));
+                            }
+                        }
+                    }
+                }
+                Err("event stream closed".to_string())
+            })
+            .await
+            .map_err(|_| "no stall was reported".to_string())?
+        }
+        "cancel-running" => {
+            client.cancel_running().await?;
+            Ok(json!({"cancel_requested":true}))
+        }
         "cancel-scheduled" => {
             let id = field(v, "id")?;
             let before = job(client, id).await?.last_verification.map(|r| r.id);

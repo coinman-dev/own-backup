@@ -108,6 +108,7 @@
   "dash_n_of_total": "{done} из {total}",
   "dash_excluding_note": "файлы удаляются и зануляются в готовой копии…",
   "dash_finalizing_note": "сброс кэша на диск, подождите…",
+  "dash_stalled": "Копирование не продвигается уже {min} мин. Если диск копий неисправен или отключён, запуск можно отменить.",
   "dash_blocks": "{done} / {total} блоков",
   "dash_speed": "{speed} МБ/с",
   "dash_elapsed": "Прошло {time}",

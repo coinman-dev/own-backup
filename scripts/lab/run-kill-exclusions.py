@@ -55,7 +55,7 @@ def answer_iso() -> Path:
     (lab / 'sys-marker.txt').write_text('Own Backup kill-during-exclusions acceptance media\n')
     # vhdx | qcow2 | obk: which container the guest's job writes this time.
     fmt = os.environ.get('OBK_FORMAT', 'vhdx')
-    assert fmt in ('vhdx', 'qcow2', 'obk', 'consol', 'consol-vhdx', 'consol-qcow2', 'flush-vhdx', 'flush-obk'), fmt
+    assert fmt in ('vhdx', 'qcow2', 'obk', 'consol', 'consol-vhdx', 'consol-qcow2', 'flush-vhdx', 'flush-obk', 'probe-io', 'stall-vhdx', 'stall-obk'), fmt
     # OBK_TAG names a fresh attempt of a format that has already passed.
     # OBK_KILL_PHASE: the phase run 1 dies in (default exclusions).
     (lab / 'killx-format.txt').write_text(fmt + '\n' + os.environ.get('OBK_TAG', '') + '\n'
@@ -181,7 +181,7 @@ def step_test() -> None:
     cmd = S.base_cmd(S.ACTIVE / 'vars.fd', S.EVIDENCE / 'test-serial.log', S.ACTIVE / 'test.sock')
     cmd += S.disk(S.ACTIVE / 'windows.qcow2', 0) + S.disk(S.ACTIVE / 'data.qcow2', 1) + S.cdrom(S.ACTIVE / 'answer.iso', 2)
     watch = None
-    if os.environ.get('OBK_FORMAT', '').startswith('flush'):
+    if os.environ.get('OBK_FORMAT', '').startswith(('flush', 'probe-io', 'stall')):
         # A disk of its own for the copies, so that only it fails: raw under
         # a node that a fault can be slid beneath while the VM runs.
         fault = S.ACTIVE / 'fault.raw'
