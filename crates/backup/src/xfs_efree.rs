@@ -143,6 +143,8 @@ pub(crate) enum ExtRefusal {
     LeafFull { ag: u64, tree: &'static str },
     /// Удаление увело бы лист ниже минимума — потребовалось бы слияние.
     LeafUnderflow { ag: u64, tree: &'static str },
+    /// Листья RMAPBT пришлось бы отдать в AGFL, а места в ней не хватает.
+    AgflFull { ag: u64 },
 }
 
 impl std::fmt::Display for ExtRefusal {
@@ -156,6 +158,9 @@ impl std::fmt::Display for ExtRefusal {
                 ag = ag,
                 tree = tree
             )),
+            ExtRefusal::AgflFull { ag } => {
+                f.write_str(&tr!("xfs_efree.refusal_agfl_full", ag = ag))
+            }
         }
     }
 }
@@ -325,67 +330,6 @@ fn rmap_block_keys(blk: &[u8]) -> Result<(RKey, RKey)> {
     Ok((low, high))
 }
 
-/// Спуск в RMAPBT по низким ключам.
-fn descend_rmap(
-    edits: &mut AgEdits,
-    vol: &mut dyn RawVolume,
-    sb: &Sb,
-    root: u64,
-    target: &RKey,
-) -> Result<Located> {
-    let mut path = Vec::new();
-    let mut agbno = root;
-    for _ in 0..16 {
-        let nmax = node_maxrecs(sb, Kind::Rmap);
-        let blk = edits.get(vol, sb, agbno, Kind::Rmap)?;
-        let level = be16(blk, 0x04);
-        let n = be16(blk, 0x06) as usize;
-        if level == 0 {
-            let mut idx = n;
-            let mut found = false;
-            for i in 0..n {
-                let o = BTREE_HDR + i * 24;
-                let k = rmap_low_key(&blk[o..o + 24]);
-                match rmap_key_cmp(&k, target) {
-                    std::cmp::Ordering::Equal => {
-                        idx = i;
-                        found = true;
-                        break;
-                    }
-                    std::cmp::Ordering::Greater => {
-                        idx = i;
-                        break;
-                    }
-                    std::cmp::Ordering::Less => {}
-                }
-            }
-            return Ok(Located {
-                path,
-                leaf: agbno,
-                idx,
-                found,
-            });
-        }
-        if n == 0 || n > nmax {
-            return Err(bad(tr!("xfs_efree.rmap_node_impossible")));
-        }
-        let ptr_off = BTREE_HDR + nmax * 40;
-        let mut slot = 0usize;
-        for i in 0..n {
-            let o = BTREE_HDR + i * 40;
-            if rmap_key_cmp(&blk[o..o + 20], target) != std::cmp::Ordering::Greater {
-                slot = i;
-            } else {
-                break;
-            }
-        }
-        let child = be32(blk, ptr_off + slot * 4);
-        path.push((agbno, slot));
-        agbno = child;
-    }
-    Err(bad(tr!("xfs_efree.rmap_too_deep")))
-}
-
 /// Пересчитать пару ключей у всех предков.
 ///
 /// У перекрывающегося дерева подниматься надо ДО КОРНЯ, а не «пока правим
@@ -413,40 +357,280 @@ fn rmap_update_keys_upward(
     Ok(())
 }
 
-/// Собрать все записи RMAPBT вместе с блоком, где они лежат.
-fn read_rmap_recs(
+
+// --- RMAPBT: убрать записи и не оставить тощих листьев -------------------------
+//
+// Массовое удаление опускает листья RMAPBT ниже минимума, а `xfs_repair` такого
+// не прощает (см. [`minrecs`]). Ядро в этом случае занимает записи у соседа и
+// сливает листья (эталон `scripts/xfs-free-delta.py`, 600 файлов, 2026-10-17:
+// листья остались на 84–97 записях при минимуме 84, один лист исчез, дерево
+// осталось двухуровневым, новых блоков не понадобилось). Здесь то же, но
+// проще: записи всех листьев одного родителя раскладываются заново по первым
+// m из них — столько, чтобы каждый был не ниже минимума, — а остальные листья
+// уходят в AGFL. Блоки RMAPBT и AGFL принадлежат одному владельцу (OWN_AG),
+// так что сами записи RMAPBT об этом не меняются; меняются счётчики AGF.
+
+/// Конец цепочки соседей.
+const NULL_AGBLOCK: u64 = 0xFFFF_FFFF;
+const BB_LEFTSIB: usize = 0x08;
+const BB_RIGHTSIB: usize = 0x0C;
+
+/// Что пересборка RMAPBT сделала со структурой дерева.
+#[derive(Debug, Default)]
+struct RmapShrink {
+    /// Блоки, ушедшие из дерева, — их место в AGFL.
+    freed: Vec<u64>,
+    /// Новый корень и уровень, если дерево стало ниже.
+    new_root: Option<(u64, u64)>,
+    /// Сколько записей убрано.
+    removed: usize,
+}
+
+/// Узел первого уровня и путь к нему от корня.
+struct Level1 {
+    path: Vec<(u64, usize)>,
+    node: u64,
+}
+
+fn rmap_level1_nodes(
     edits: &mut AgEdits,
     vol: &mut dyn RawVolume,
     sb: &Sb,
     root: u64,
-) -> Result<Vec<[u8; 24]>> {
+) -> Result<Vec<Level1>> {
+    let nmax = node_maxrecs(sb, Kind::Rmap);
     let mut out = Vec::new();
-    let mut stack = vec![root];
+    // Обход в порядке ключей: стек путей, правые дети кладутся первыми.
+    let mut stack: Vec<(Vec<(u64, usize)>, u64)> = vec![(Vec::new(), root)];
     let mut seen = 0;
-    while let Some(agbno) = stack.pop() {
+    while let Some((path, agbno)) = stack.pop() {
         seen += 1;
         if seen > 8192 {
             return Err(bad(tr!("xfs_efree.rmap_too_large")));
         }
-        let nmax = node_maxrecs(sb, Kind::Rmap);
         let blk = edits.get(vol, sb, agbno, Kind::Rmap)?;
         let level = be16(blk, 0x04);
         let n = be16(blk, 0x06) as usize;
-        if level == 0 {
-            for i in 0..n {
-                let o = BTREE_HDR + i * 24;
-                let mut r = [0u8; 24];
-                r.copy_from_slice(&blk[o..o + 24]);
-                out.push(r);
-            }
-        } else {
-            let ptr_off = BTREE_HDR + nmax * 40;
-            for i in 0..n {
-                stack.push(be32(blk, ptr_off + i * 4));
-            }
+        if level == 0 || n == 0 || n > nmax {
+            return Err(bad(tr!("xfs_efree.rmap_node_impossible")));
+        }
+        if level == 1 {
+            out.push(Level1 { path, node: agbno });
+            continue;
+        }
+        let ptr_off = BTREE_HDR + nmax * 40;
+        let kids: Vec<u64> = (0..n).map(|i| be32(blk, ptr_off + i * 4)).collect();
+        for (slot, child) in kids.into_iter().enumerate().rev() {
+            let mut p = path.clone();
+            p.push((agbno, slot));
+            stack.push((p, child));
         }
     }
     Ok(out)
+}
+
+/// Убрать из RMAPBT записи владельцев `owners`, сохранив минимум в листьях.
+/// `Ok(None)` — дерево такое удаление не выдерживает без перестройки выше
+/// первого уровня; ничего не тронуто.
+fn rmap_remove_owners(
+    edits: &mut AgEdits,
+    vol: &mut dyn RawVolume,
+    sb: &Sb,
+    root: u64,
+    level: u64,
+    owners: &BTreeSet<u64>,
+) -> Result<Option<RmapShrink>> {
+    let mut out = RmapShrink::default();
+    let doomed = |r: &[u8]| {
+        let owner = be64(r, 8);
+        owner & RMAP_NON_INODE == 0 && owners.contains(&owner)
+    };
+
+    // Одноуровневое дерево: корень-лист, минимума нет.
+    if level <= 1 {
+        let blk = edits.get(vol, sb, root, Kind::Rmap)?;
+        let n = be16(blk, 0x06) as usize;
+        let keep: Vec<[u8; 24]> = (0..n)
+            .map(|i| {
+                let mut r = [0u8; 24];
+                r.copy_from_slice(&blk[BTREE_HDR + i * 24..BTREE_HDR + i * 24 + 24]);
+                r
+            })
+            .filter(|r| !doomed(r))
+            .collect();
+        out.removed = n - keep.len();
+        if keep.is_empty() {
+            return Ok(None);
+        }
+        write_leaf_recs(blk, &keep);
+        return Ok(Some(out));
+    }
+
+    let leaf_min = minrecs(sb, Kind::Rmap, true);
+    let leaf_max = leaf_maxrecs(sb, Kind::Rmap);
+    let node_min = minrecs(sb, Kind::Rmap, false);
+    let nmax = node_maxrecs(sb, Kind::Rmap);
+    let ptr_off = BTREE_HDR + nmax * 40;
+
+    for group in rmap_level1_nodes(edits, vol, sb, root)? {
+        let kids: Vec<u64> = {
+            let p = edits.get(vol, sb, group.node, Kind::Rmap)?;
+            let n = be16(p, 0x06) as usize;
+            (0..n).map(|i| be32(p, ptr_off + i * 4)).collect()
+        };
+        let mut recs: Vec<[u8; 24]> = Vec::new();
+        let mut before = 0usize;
+        for &kid in &kids {
+            let blk = edits.get(vol, sb, kid, Kind::Rmap)?;
+            if be16(blk, 0x04) != 0 {
+                return Err(bad(tr!("xfs_efree.rmap_node_impossible")));
+            }
+            let n = be16(blk, 0x06) as usize;
+            before += n;
+            for i in 0..n {
+                let mut r = [0u8; 24];
+                r.copy_from_slice(&blk[BTREE_HDR + i * 24..BTREE_HDR + i * 24 + 24]);
+                if !doomed(&r) {
+                    recs.push(r);
+                }
+            }
+        }
+        if recs.len() == before {
+            continue;
+        }
+        out.removed += before - recs.len();
+        let k = kids.len();
+        let total = recs.len();
+        let parent_is_root = group.path.is_empty();
+        // Сколько листьев оставить: каждый не ниже минимума, не больше, чем было.
+        let m = (total / leaf_min).clamp(1, k);
+        if total == 0 || (total < leaf_min && !(parent_is_root && level == 2)) {
+            return Ok(None);
+        }
+        if !parent_is_root && m < node_min {
+            return Ok(None);
+        }
+
+        // Записи — заново по первым m листьям, поровну.
+        let (base, extra) = (total / m, total % m);
+        let mut at = 0;
+        for (i, &kid) in kids.iter().take(m).enumerate() {
+            let take = base + usize::from(i < extra);
+            debug_assert!(take <= leaf_max);
+            let blk = edits.get(vol, sb, kid, Kind::Rmap)?;
+            write_leaf_recs(blk, &recs[at..at + take]);
+            at += take;
+        }
+        debug_assert_eq!(at, total);
+
+        // Цепочка соседей: последний оставленный смотрит туда, куда смотрел
+        // последний лист группы, а тот сосед — обратно на него.
+        if m < k {
+            let last_kept = kids[m - 1];
+            let right = {
+                let blk = edits.get(vol, sb, kids[k - 1], Kind::Rmap)?;
+                be32(blk, BB_RIGHTSIB)
+            };
+            {
+                let blk = edits.get(vol, sb, last_kept, Kind::Rmap)?;
+                put_be32(blk, BB_RIGHTSIB, right as u32);
+            }
+            if right != NULL_AGBLOCK {
+                let blk = edits.get(vol, sb, right, Kind::Rmap)?;
+                put_be32(blk, BB_LEFTSIB, last_kept as u32);
+            }
+            for &gone in &kids[m..] {
+                edits.blocks.remove(&gone);
+                out.freed.push(gone);
+            }
+        }
+
+        if parent_is_root && m == 1 && level == 2 {
+            // У корня остался один ребёнок: дерево становится на уровень ниже.
+            edits.blocks.remove(&group.node);
+            out.freed.push(group.node);
+            out.new_root = Some((kids[0], 1));
+            continue;
+        }
+
+        // Родитель: m слотов с парами ключей и указателями, хвост — нули.
+        let keys: Vec<(RKey, RKey)> = kids[..m]
+            .iter()
+            .map(|&kid| rmap_block_keys(edits.get(vol, sb, kid, Kind::Rmap)?))
+            .collect::<Result<_>>()?;
+        let p = edits.get(vol, sb, group.node, Kind::Rmap)?;
+        for (i, (low, high)) in keys.iter().enumerate() {
+            let o = BTREE_HDR + i * 40;
+            p[o..o + 20].copy_from_slice(low);
+            p[o + 20..o + 40].copy_from_slice(high);
+            put_be32(p, ptr_off + i * 4, kids[i] as u32);
+        }
+        p[BTREE_HDR + m * 40..BTREE_HDR + k * 40].fill(0);
+        p[ptr_off + m * 4..ptr_off + k * 4].fill(0);
+        put_be16(p, 0x06, m as u16);
+        if !group.path.is_empty() {
+            rmap_update_keys_upward(edits, vol, sb, &group.path, group.node)?;
+        }
+    }
+    Ok(Some(out))
+}
+
+/// Записи листа целиком: число, сами записи, нули за ними.
+fn write_leaf_recs(blk: &mut [u8], recs: &[[u8; 24]]) {
+    let end = blk.len();
+    blk[BTREE_HDR..end].fill(0);
+    for (i, r) in recs.iter().enumerate() {
+        blk[BTREE_HDR + i * 24..BTREE_HDR + i * 24 + 24].copy_from_slice(r);
+    }
+    put_be16(blk, 0x06, recs.len() as u16);
+}
+
+/// AGFL: заголовок v5, массив номеров блоков за ним.
+const AGFL_HDR: usize = 36;
+const AGFL_CRC_OFF: usize = 32;
+const AGF_FLFIRST: usize = 0x28;
+const AGF_FLLAST: usize = 0x2C;
+const AGF_BTREEBLKS: usize = 0x3C;
+const AGF_RMAP_ROOT: usize = 0x18;
+const AGF_RMAP_LEVEL: usize = 0x24;
+const AGF_RMAP_BLOCKS: usize = 0x50;
+
+/// Положить ушедшие из RMAPBT блоки в хвост AGFL и поправить AGF — так, как
+/// это делает `xfs_alloc_put_freelist`: `fllast` по кругу, `flcount` +n,
+/// `btreeblks` и `rmap_blocks` −n. `sb_fdblocks` не меняется: ядро считает
+/// его как `freeblks + flcount + btreeblks`.
+/// `false` — в AGFL нет места; ничего не тронуто.
+fn agfl_put(agf: &mut [u8], agfl: &mut [u8], sb: &Sb, shrink: &RmapShrink) -> Result<bool> {
+    if &agfl[0..4] != b"XAFL" || !crc_matches(agfl, AGFL_CRC_OFF) {
+        return Err(bad(tr!("xfs_efree.agfl_unreadable")));
+    }
+    let cap = (sb.sectsize as usize - AGFL_HDR) / 4;
+    let n = shrink.freed.len();
+    let flcount = be32(agf, AGF_FLCOUNT) as usize;
+    if flcount + n > cap {
+        return Ok(false);
+    }
+    let mut last = be32(agf, AGF_FLLAST) as usize;
+    for &b in &shrink.freed {
+        last = (last + 1) % cap;
+        put_be32(agfl, AGFL_HDR + last * 4, b as u32);
+    }
+    let _ = AGF_FLFIRST;
+    put_be32(agf, AGF_FLLAST, last as u32);
+    put_be32(agf, AGF_FLCOUNT, (flcount + n) as u32);
+    let btreeblks = be32(agf, AGF_BTREEBLKS) as usize;
+    let rmap_blocks = be32(agf, AGF_RMAP_BLOCKS) as usize;
+    if btreeblks < n || rmap_blocks < n {
+        return Err(bad(tr!("xfs_efree.agf_counts_too_small")));
+    }
+    put_be32(agf, AGF_BTREEBLKS, (btreeblks - n) as u32);
+    put_be32(agf, AGF_RMAP_BLOCKS, (rmap_blocks - n) as u32);
+    if let Some((root, level)) = shrink.new_root {
+        put_be32(agf, AGF_RMAP_ROOT, root as u32);
+        put_be32(agf, AGF_RMAP_LEVEL, level as u32);
+    }
+    set_crc(agfl, AGFL_CRC_OFF);
+    Ok(true)
 }
 
 /// Спуск к листу по ключу. Возвращает дорогу, лист и место записи.
@@ -778,46 +962,24 @@ pub(crate) fn plan_extent_freeing(
             continue;
         }
 
-        // RMAPBT: убрать записи освобождённых инодов.
+        // RMAPBT: убрать записи освобождённых инодов, переложив оставшиеся так,
+        // чтобы ни один лист не был тоньше минимума (см. `rmap_remove_owners`).
         let mut rmap_edits = AgEdits {
             ag,
             blocks: BTreeMap::new(),
         };
-        let mut rmap_touched = false;
+        let mut shrink: Option<RmapShrink> = None;
         if agf.rmap_root != 0 && !owners.is_empty() {
-            let recs = read_rmap_recs(&mut rmap_edits, vol, sb, agf.rmap_root)?;
-            let doomed: Vec<[u8; 24]> = recs
-                .into_iter()
-                .filter(|r| owners.contains(&be64(r, 8)))
-                .collect();
-            let mut failed_rmap = false;
-            for rec in &doomed {
-                let key = rmap_low_key(rec);
-                let loc = descend_rmap(&mut rmap_edits, vol, sb, agf.rmap_root, &key)?;
-                if !loc.found {
-                    return Err(bad(tr!(
-                        "xfs_efree.rmap_owner_missing",
-                        ag = ag,
-                        owner = be64(rec, 8)
-                    )));
-                }
-                let is_root = loc.leaf == agf.rmap_root;
-                let blk = rmap_edits.get(vol, sb, loc.leaf, Kind::Rmap)?;
-                if !leaf_delete(blk, sb, Kind::Rmap, loc.idx, is_root) {
+            match rmap_remove_owners(&mut rmap_edits, vol, sb, agf.rmap_root, agf.rmap_level, owners)? {
+                Some(done) => shrink = Some(done),
+                None => {
                     out.refusals
                         .push(ExtRefusal::LeafUnderflow { ag, tree: "RMAPBT" });
-                    failed_rmap = true;
-                    break;
+                    continue;
                 }
-                rmap_touched = true;
-                if !loc.path.is_empty() {
-                    rmap_update_keys_upward(&mut rmap_edits, vol, sb, &loc.path, loc.leaf)?;
-                }
-            }
-            if failed_rmap {
-                continue;
             }
         }
+        let rmap_touched = shrink.as_ref().is_some_and(|s| s.removed > 0);
 
         // Счётчики группы: пересчитываем по НОВОМУ набору, а не прибавляем
         // дельту — так расхождение не может накопиться.
@@ -841,6 +1003,15 @@ pub(crate) fn plan_extent_freeing(
         }
         put_be32(&mut agf_sec, AGF_FREEBLKS, freeblks as u32);
         put_be32(&mut agf_sec, AGF_LONGEST, longest as u32);
+        // Ушедшие из RMAPBT блоки — в AGFL, вместе с её счётчиками в AGF.
+        if let Some(done) = shrink.as_ref().filter(|s| !s.freed.is_empty()) {
+            let mut agfl = reader.read_sector_at(vol, 3)?;
+            if !agfl_put(&mut agf_sec, &mut agfl, sb, done)? {
+                out.refusals.push(ExtRefusal::AgflFull { ag });
+                continue;
+            }
+            out.patches.push((reader.sector_offset(3), agfl));
+        }
         set_crc(&mut agf_sec, AGF_CRC_OFF);
         out.patches.push((reader.sector_offset(1), agf_sec));
 

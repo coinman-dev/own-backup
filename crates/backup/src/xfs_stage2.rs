@@ -935,7 +935,8 @@ pub(crate) fn plan_stage2(
             // к самой большой пачке, которую деревья выдерживают.
             let ag = match r {
                 crate::xfs_efree::ExtRefusal::LeafFull { ag, .. }
-                | crate::xfs_efree::ExtRefusal::LeafUnderflow { ag, .. } => *ag,
+                | crate::xfs_efree::ExtRefusal::LeafUnderflow { ag, .. }
+                | crate::xfs_efree::ExtRefusal::AgflFull { ag } => *ag,
             };
             let here: Vec<u64> = ags_of
                 .iter()
