@@ -67,7 +67,11 @@ fn mib(bytes: u64) -> u64 {
 // --- суждения (чистые, проверяются тестами на любой платформе) --------------
 
 /// Вердикт по среде выполнения WebView2.
-pub fn judge_webview2(found: Option<&Path>, searched: &[PathBuf]) -> Check {
+///
+/// Совет зависит от того, где мы: на носителе среда кладётся сборщиком, и
+/// её нет только у плохо собранного носителя; на обычной Windows она ставится
+/// отдельно, и объяснение про сборщик носителя там читалось как бессмыслица.
+pub fn judge_webview2(found: Option<&Path>, searched: &[PathBuf], on_medium: bool) -> Check {
     match found {
         Some(p) => Check::new("webview2", Level::Ok, format!("WebView2: {}", p.display())),
         None => {
@@ -76,7 +80,11 @@ pub fn judge_webview2(found: Option<&Path>, searched: &[PathBuf]) -> Check {
                 m.push_str(&format!("\n      {}", s.display()));
             }
             m.push_str("\n    ");
-            m.push_str(&tr!("media_preflight_win.webview2_missing_advice"));
+            m.push_str(&if on_medium {
+                tr!("media_preflight_win.webview2_missing_advice")
+            } else {
+                tr!("media_preflight_win.webview2_missing_advice_installed")
+            });
             Check::new("webview2", Level::Fail, m)
         }
     }
@@ -274,7 +282,11 @@ pub fn run_preflight(program_dir: &Path) -> Vec<Check> {
     let (found, searched) = find_webview2_runtime(program_dir);
     let tmp = std::env::temp_dir();
     vec![
-        judge_webview2(found.as_deref(), &searched),
+        judge_webview2(
+            found.as_deref(),
+            &searched,
+            own_backup_common::media_mode::is_media_mode(),
+        ),
         judge_scratch(free_space(&tmp), is_writable(&tmp), &tmp),
         judge_memory(available_memory()),
     ]
@@ -289,7 +301,7 @@ mod tests {
         let searched = vec![PathBuf::from(
             r"X:\Program Files\OwnBackup\WebView2\msedgewebview2.exe",
         )];
-        let c = judge_webview2(None, &searched);
+        let c = judge_webview2(None, &searched, true);
         assert_eq!(c.level, Level::Fail);
         assert!(c.message.contains("WebView2"), "{}", c.message);
         assert!(
@@ -302,7 +314,18 @@ mod tests {
     #[test]
     fn a_found_runtime_passes() {
         let p = PathBuf::from(r"X:\Program Files\OwnBackup\WebView2");
-        assert_eq!(judge_webview2(Some(&p), &[]).level, Level::Ok);
+        assert_eq!(judge_webview2(Some(&p), &[], true).level, Level::Ok);
+    }
+
+    /// The medium's advice is about rebuilding the medium; an installed copy
+    /// is told to install the runtime instead.
+    #[test]
+    fn the_advice_fits_where_the_program_runs() {
+        let medium = judge_webview2(None, &[], true).message;
+        let installed = judge_webview2(None, &[], false).message;
+        assert_ne!(medium, installed);
+        assert!(installed.contains("go.microsoft.com"), "{installed}");
+        assert!(!installed.contains(&*tr!("media_preflight_win.webview2_missing_advice")));
     }
 
     /// Тот самый случай: образ загрузился со стандартным для WinPE scratch.

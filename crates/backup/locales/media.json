@@ -271,6 +271,10 @@
     "ru": "WebView2 не найден. Искал:",
     "en": "WebView2 not found. Looked in:"
   },
+  "media_preflight_win.webview2_missing_advice_installed": {
+    "ru": "Окну Own Backup нужна среда Microsoft Edge WebView2. Установите её с https://go.microsoft.com/fwlink/p/?LinkId=2124703 и запустите Own Backup снова.",
+    "en": "The Own Backup window needs the Microsoft Edge WebView2 Runtime. Install it from https://go.microsoft.com/fwlink/p/?LinkId=2124703 and start Own Backup again."
+  },
   "media_preflight_win.webview2_missing_advice": {
     "ru": "Носитель собран без среды выполнения — пересоберите его сборщиком или положите папку WebView2 рядом с программой.",
     "en": "The media was built without the runtime — rebuild it with the media builder, or put the WebView2 folder next to the program."
