@@ -43,14 +43,17 @@ $store = if ($format -like 'flush-*' -or $format -like 'stall-*' -or $format -eq
 # 'consol', 'consol-vhdx', 'consol-qcow2': the consolidation scenario over
 # OBK, VHDX or qcow2; anything else is the exclusions scenario.
 # 'flush-vhdx', 'flush-obk': every flush of the copies' own disk fails.
-$mode = if ($format -like 'consol*') { 'consol' } elseif ($format -like 'flush-*' -or $format -like 'stall-*' -or $format -eq 'probe-io') { 'flush' } else { 'exclusions' }
-$container = switch ($format) { 'consol' { 'obk' } 'consol-vhdx' { 'vhdx' } 'consol-qcow2' { 'qcow2' } 'flush-vhdx' { 'vhdx' } 'flush-obk' { 'obk' } 'stall-vhdx' { 'vhdx' } 'stall-obk' { 'obk' } 'probe-io' { 'vhdx' } default { $format } }
+$mode = if ($format -eq 'history') { 'history' } elseif ($format -like 'consol*') { 'consol' } elseif ($format -like 'flush-*' -or $format -like 'stall-*' -or $format -eq 'probe-io') { 'flush' } else { 'exclusions' }
+$container = switch ($format) { 'consol' { 'obk' } 'consol-vhdx' { 'vhdx' } 'consol-qcow2' { 'qcow2' } 'flush-vhdx' { 'vhdx' } 'flush-obk' { 'obk' } 'stall-vhdx' { 'vhdx' } 'stall-obk' { 'obk' } 'probe-io' { 'vhdx' } 'history' { 'vhdx' } default { $format } }
 $encrypted = $container -eq 'obk'
 $private = if ($encrypted) { '.own-backup-obk-*' } else { '.own-backup-new-*' }
 $imageExt = @{ vhdx = 'vhdx'; qcow2 = 'qcow2'; obk = 'obk' }[$container]
 $childExt = @{ vhdx = 'avhdx'; qcow2 = 'qcow2'; obk = 'obk' }[$container]
 $publicPattern = @{ vhdx = '\.(vhdx|avhdx)$'; qcow2 = '\.qcow2$'; obk = '\.obk$' }[$container]
 $jobName = "KillX$format"
+# What stands where the history's temporary files go (mode 'history'): both
+# files, so that nothing of a run reaches the disk.
+$obstacles = @('C:\ProgramData\OwnBackup\activity.json.tmp', 'C:\ProgramData\OwnBackup\jobs.json.tmp')
 $secret = if ($encrypted) { @{ secret = 'password'; password_file = "$base\$format$tag\password.txt" } } else { @{ secret = 'none' } }
 $seed = 20261017
 
@@ -418,6 +421,42 @@ function StallCancel([string]$id) {
     shutdown.exe /s /t 5 | Out-Null
 }
 
+# --- The history cannot be written (format 'history') -----------------------
+function Ask([string]$name, [string]$action) {
+    [IO.File]::WriteAllText("$work\kill.request", (ConvertTo-Json -Compress @{ name = $name; action = $action }))
+    for ($i = 0; $i -lt 300 -and -not (Test-Path "$work\$name.json"); $i++) { Start-Sleep -Milliseconds 500 }
+    Check (Test-Path "$work\$name.json") "the SYSTEM half did $action"
+    WaitService
+}
+function HistoryUnwritable([string]$id) {
+    Get-ChildItem -LiteralPath $store -Force -ErrorAction SilentlyContinue | Remove-Item -Force
+    Ask 'block' 'block'
+    $run1 = RunJob 'run1' $id
+    Check (-not [string]::IsNullOrEmpty($run1.record_error)) "the run says it is not in the history: $($run1.record_error)"
+    $job = Rpc 'job-after-run1' @{ op = 'get'; id = $id }
+    Check ($job.last_run.id -eq $run1.id -and $job.last_run.record_error) 'the job shows the run with the mark'
+    Ask 'restart-1' 'restart'
+    $job = Rpc 'job-after-restart' @{ op = 'get'; id = $id }
+    $versions = Rpc 'versions-after-restart' @{ op = 'versions'; id = $id }
+    Report 'after-restart' @{ last_run = $job.last_run; versions = $versions }
+    Check ($null -eq $job.last_run) 'a restart before the history could be written loses the record, as the message says'
+    Check (Test-Path -LiteralPath $run1.image_path) "the copy itself stays on disk ($($run1.image_path))"
+    Ask 'unblock' 'unblock'
+    $run2 = RunJob 'run2' $id
+    Check ($run2.backup_kind -eq 'incremental') "the next run continues the chain on disk ($($run2.backup_kind))"
+    Check ([string]::IsNullOrEmpty($run2.record_error)) 'and is in the history'
+    Ask 'restart-2' 'restart'
+    $job = Rpc 'job-after-restart-2' @{ op = 'get'; id = $id }
+    Check ($job.last_run.id -eq $run2.id -and -not $job.last_run.record_error) 'the recorded run survives a restart'
+    $v = Rpc 'verify-run2' @{ op = 'verify'; image = $run2.image_path; secret = 'none' }
+    Check $v.valid "the increment verifies with its parent ($($run2.image_path))"
+    [IO.File]::WriteAllText("$work\kills.done", 'done')
+    [IO.File]::WriteAllText("$work\passed.txt", 'pass')
+    Report 'result' @{ pass = $true; run1 = $run1.image_path; run2 = $run2.image_path; message = $run1.record_error }
+    Say "KILLX-PASS format=$format"
+    shutdown.exe /s /t 5 | Out-Null
+}
+
 function AutoLogon {
     $answer = New-Object Xml.XmlDocument; $answer.Load("$lab\autounattend.xml")
     $password = $answer.SelectSingleNode("//*[local-name()='AutoLogon']/*[local-name()='Password']/*[local-name()='Value']").InnerText
@@ -558,6 +597,8 @@ if ($media) {
             for ($i = 0; $i -lt 120 -and -not (Get-Process explorer -ErrorAction SilentlyContinue); $i++) { Start-Sleep -Seconds 1 }
             if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) { AutoLogon; Say 'KILLX-REARM'; shutdown.exe /r /t 5 | Out-Null; return }
         }
+        # Left by an attempt that failed while the history was blocked.
+        foreach ($o in $obstacles) { if (Test-Path $o) { Remove-Item $o -Recurse -Force } }
         # Windows skipped the Startup folder after a hard power-off of this VM
         # (2026-10-17): the desktop came up and the user half never ran. If it
         # has not started 90 s after the desktop, start it in that session.
@@ -588,6 +629,16 @@ if ($media) {
             if (Test-Path "$work\kills.done") { break }
             Start-Sleep -Milliseconds 50
             $request = Get-Content "$work\kill.request" -Raw | ConvertFrom-Json
+            if ($request.action -in @('restart', 'block', 'unblock')) {
+                $name = $request.name
+                if ($request.action -eq 'restart') { Restart-Service OwnBackup -Force; WaitService }
+                elseif ($request.action -eq 'block') { foreach ($o in $obstacles) { New-Item -ItemType Directory -Force $o | Out-Null } }
+                else { foreach ($o in $obstacles) { Remove-Item $o -Recurse -Force } }
+                Remove-Item "$work\kill.request" -Force
+                JsonFile "$work\$name.json" @{ action = $request.action; utc = [DateTime]::UtcNow.ToString('o') }
+                Step "$($request.action) done ($name)"
+                continue
+            }
             # Only a file written after the request counts: a marker left by
             # the previous kill is the resume's, not this run's fold.
             $asked = (Get-Item "$work\kill.request").LastWriteTimeUtc
@@ -652,7 +703,7 @@ if ($media) {
                 name = $jobName; source = 'P:'; sources = @('P:'); dest_folder = $store
                 image_format = $(if ($container -eq 'vhdx') { 'vhdx' } else { 'qcow2' });
                 schedule = @{ kind = 'none' };
-                scheme = $(if ($mode -eq 'flush') { @{ method = 'full'; keep_chains = 5 } } elseif ($mode -eq 'consol') {
+                scheme = $(if ($mode -eq 'history') { @{ method = 'incremental'; only_incremental = $true; keep_chains = 5 } } elseif ($mode -eq 'flush') { @{ method = 'full'; keep_chains = 5 } } elseif ($mode -eq 'consol') {
                     @{ method = 'incremental'; only_incremental = $true; full_every_n = 100; keep_chains = 1; rolling_incrementals = 1 } } else {
                     @{ method = 'incremental'; only_incremental = $false; full_every_n = 1; keep_chains = 1 } })
                 exclusions = @{ enabled = ($mode -eq 'exclusions'); patterns = @('*.tmp'); patterns_linux = @() };
@@ -663,6 +714,7 @@ if ($media) {
         $id = $state.id
         if ($mode -eq 'consol') { Consolidation $id; return }
         if ($format -eq 'probe-io') { ProbeIo; return }
+        if ($mode -eq 'history') { HistoryUnwritable $id; return }
         if ($format -like 'stall-*') { StallCancel $id; return }
         if ($mode -eq 'flush') { FlushFault $id; return }
 

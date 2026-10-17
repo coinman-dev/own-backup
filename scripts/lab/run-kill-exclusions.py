@@ -55,7 +55,7 @@ def answer_iso() -> Path:
     (lab / 'sys-marker.txt').write_text('Own Backup kill-during-exclusions acceptance media\n')
     # vhdx | qcow2 | obk: which container the guest's job writes this time.
     fmt = os.environ.get('OBK_FORMAT', 'vhdx')
-    assert fmt in ('vhdx', 'qcow2', 'obk', 'consol', 'consol-vhdx', 'consol-qcow2', 'flush-vhdx', 'flush-obk', 'probe-io', 'stall-vhdx', 'stall-obk'), fmt
+    assert fmt in ('vhdx', 'qcow2', 'obk', 'consol', 'consol-vhdx', 'consol-qcow2', 'flush-vhdx', 'flush-obk', 'probe-io', 'stall-vhdx', 'stall-obk', 'history'), fmt
     # OBK_TAG names a fresh attempt of a format that has already passed.
     # OBK_KILL_PHASE: the phase run 1 dies in (default exclusions).
     (lab / 'killx-format.txt').write_text(fmt + '\n' + os.environ.get('OBK_TAG', '') + '\n'

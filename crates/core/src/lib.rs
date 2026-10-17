@@ -580,6 +580,11 @@ pub struct JobRun {
     /// person seeing a large copy after a quiet week is told why.
     #[serde(default)]
     pub layout_changed: String,
+    /// Why this run is not in the history files although it happened — set
+    /// only on what the store hands out while the write keeps failing, never
+    /// written to those files itself (`JobStore::unrecorded`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub record_error: String,
 }
 
 /// A persisted backup job (task).
@@ -772,6 +777,11 @@ pub struct JobStore {
     activity_path: PathBuf,
     jobs: Mutex<Vec<Job>>,
     activity: Mutex<Vec<JobRun>>,
+    /// Runs held in memory whose write to the history files failed, by run
+    /// id, with the error. Until a later write succeeds they exist only here,
+    /// and a restart of the service would lose them; whoever looks at the job
+    /// is told so (`record_error`) rather than shown an ordinary run.
+    unrecorded: Mutex<std::collections::HashMap<String, String>>,
 }
 
 const ACTIVITY_CAP: usize = 200;
@@ -870,20 +880,53 @@ impl JobStore {
             activity_path,
             jobs: Mutex::new(jobs),
             activity: Mutex::new(activity),
+            unrecorded: Mutex::new(std::collections::HashMap::new()),
         }))
     }
 
     pub fn list(&self) -> Vec<Job> {
-        self.jobs.lock().unwrap().clone()
+        let mut jobs = self.jobs.lock().unwrap().clone();
+        for job in &mut jobs {
+            self.mark_unrecorded(job);
+        }
+        jobs
     }
 
     pub fn get(&self, id: &str) -> Option<Job> {
-        self.jobs
+        let mut job = self
+            .jobs
             .lock()
             .unwrap()
             .iter()
             .find(|j| j.id == id)
-            .cloned()
+            .cloned()?;
+        self.mark_unrecorded(&mut job);
+        Some(job)
+    }
+
+    /// Say on the copies handed out which of their runs are not on disk.
+    fn mark_unrecorded(&self, job: &mut Job) {
+        let unrecorded = self.unrecorded.lock().unwrap();
+        if unrecorded.is_empty() {
+            return;
+        }
+        for run in [job.last_run.as_mut(), job.last_verification.as_mut()].into_iter().flatten() {
+            if let Some(error) = unrecorded.get(&run.id) {
+                run.record_error = tr!("lib.run_not_recorded", error = error).into_owned();
+            }
+        }
+    }
+
+    /// Write the history again when a run could not be recorded before.
+    /// `Ok(true)` when something was waiting and is now on disk.
+    pub fn retry_unrecorded(&self) -> std::io::Result<bool> {
+        if self.unrecorded.lock().unwrap().is_empty() {
+            return Ok(false);
+        }
+        write_json(&self.jobs_path, &*self.jobs.lock().unwrap())?;
+        write_json(&self.activity_path, &*self.activity.lock().unwrap())?;
+        self.unrecorded.lock().unwrap().clear();
+        Ok(true)
     }
 
     /// Insert or update a job; returns the stored job once it is ON DISK.
@@ -1082,6 +1125,7 @@ impl JobStore {
                 }
             }
         }
+        let id = run.id.clone();
         {
             let mut activity = self.activity.lock().unwrap();
             activity.insert(0, run);
@@ -1089,11 +1133,28 @@ impl JobStore {
         }
         let jobs = write_json(&self.jobs_path, &*self.jobs.lock().unwrap());
         let activity = write_json(&self.activity_path, &*self.activity.lock().unwrap());
-        jobs.and(activity)
+        match jobs.and(activity) {
+            // Both files hold everything in memory now, earlier failures too.
+            Ok(()) => {
+                self.unrecorded.lock().unwrap().clear();
+                Ok(())
+            }
+            Err(e) => {
+                self.unrecorded.lock().unwrap().insert(id, e.to_string());
+                Err(e)
+            }
+        }
     }
 
     pub fn activity(&self) -> Vec<JobRun> {
-        self.activity.lock().unwrap().clone()
+        let mut activity = self.activity.lock().unwrap().clone();
+        let unrecorded = self.unrecorded.lock().unwrap();
+        for run in activity.iter_mut() {
+            if let Some(error) = unrecorded.get(&run.id) {
+                run.record_error = tr!("lib.run_not_recorded", error = error).into_owned();
+            }
+        }
+        activity
     }
 
     /// Most recent successful run of a job. Chain planning keys on this, not
@@ -1778,6 +1839,12 @@ pub async fn run_queue_worker(
         // A key repair can commit while this queued run waits for the busy
         // slot. Load its new local reference only after acquiring the slot;
         // otherwise the retired reference from the old snapshot would fail.
+        // A run an earlier write could not record is written again first.
+        match store.retry_unrecorded() {
+            Ok(true) => info!("runs that could not be recorded earlier are now in the history"),
+            Ok(false) => {}
+            Err(e) => warn!(error = %e, "the history still cannot be written"),
+        }
         let Some(job) = store.get(&job_id) else {
             queue.finish();
             sink.queue_changed(queue.snapshot());
@@ -1837,9 +1904,11 @@ pub async fn run_queue_worker(
             _ => {}
         }
         if let Err(e) = store.record_run(run.clone()) {
-            // The backup happened; only the record of it did not. Saying so is
-            // the whole point — the next run plans its chain from this history.
+            // The backup happened; only the record of it did not. It stays in
+            // memory, marked, and is written again before the next run; until
+            // then the screen says so instead of showing an ordinary run.
             error!(error = %e, job = %job.name, "the finished run could not be written down");
+            run.record_error = tr!("lib.run_not_recorded", error = e).into_owned();
         }
 
         queue.finish();
@@ -4259,6 +4328,45 @@ mod tests {
             1,
             "still there, because the file still has it"
         );
+    }
+
+    /// A run the history files could not take is not shown as an ordinary run,
+    /// is written once they can take it, and the mark never reaches the files.
+    #[test]
+    fn a_run_the_history_could_not_take_is_marked_and_written_later() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JobStore::load(dir.path());
+        let job = store
+            .upsert(Job {
+                name: "copies".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(!store.retry_unrecorded().unwrap(), "nothing is waiting");
+
+        std::fs::create_dir(dir.path().join("activity.json.tmp")).unwrap();
+        let run = JobRun {
+            id: "run-1".into(),
+            job_id: job.id.clone(),
+            status: "success".into(),
+            ..Default::default()
+        };
+        assert!(store.record_run(run).is_err());
+        let shown = store.get(&job.id).unwrap().last_run.unwrap();
+        assert_eq!(shown.id, "run-1");
+        assert!(!shown.record_error.is_empty(), "the screen is told");
+        assert!(!store.list()[0].last_run.clone().unwrap().record_error.is_empty());
+        assert!(!store.activity()[0].record_error.is_empty());
+        assert!(store.retry_unrecorded().is_err(), "still in the way");
+
+        std::fs::remove_dir(dir.path().join("activity.json.tmp")).unwrap();
+        assert!(store.retry_unrecorded().unwrap());
+        assert!(store.get(&job.id).unwrap().last_run.unwrap().record_error.is_empty());
+        let reloaded = JobStore::load(dir.path());
+        let kept = reloaded.get(&job.id).unwrap().last_run.unwrap();
+        assert_eq!(kept.id, "run-1");
+        assert!(kept.record_error.is_empty(), "the mark is not history");
+        assert_eq!(reloaded.activity()[0].id, "run-1");
     }
 
     /// A jobs file that cannot be parsed is kept, not walked over. Starting

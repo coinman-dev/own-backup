@@ -459,6 +459,9 @@ export interface JobRun {
    *  (Windows Update does this to WinRE) and the job followed them — said
    *  in words; '' or absent when nothing changed. */
   layout_changed?: string;
+  /** Set by the service while this run is not in its history files (the
+   *  write failed and is retried before the next run) — said in words. */
+  record_error?: string;
   /** Every image this run produced, one per source volume. `image_path` and
    *  `base_image_path` above describe only the first. Empty in runs recorded
    *  before this field existed. */

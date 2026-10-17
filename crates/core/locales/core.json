@@ -143,6 +143,10 @@
     "ru": "Отменено. Запись на диск копий не отвечала; незаконченный файл будет удалён, когда диск ответит",
     "en": "Cancelled. The backup disk stopped answering writes; the unfinished file will be removed once it answers"
   },
+  "lib.run_not_recorded": {
+    "ru": "Запуск не записан в историю программы: %{error}. Запись повторится перед следующим запуском; если служба перезапустится раньше, сведения об этом запуске могут пропасть, а сама копия останется на диске и будет видна в версиях",
+    "en": "This run is not in the program's history: %{error}. The write is tried again before the next run; if the service restarts first, the record of this run may be lost, while the copy itself stays on disk and shows among the versions"
+  },
   "lib.task_aborted": {
     "ru": "задача прервана: %{error}",
     "en": "the task was aborted: %{error}"

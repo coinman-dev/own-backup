@@ -484,6 +484,9 @@
     {/if}
   {/if}
 
+  <!-- The run happened but the service could not write it into the history:
+       until a later write succeeds it lives only in the service's memory. -->
+  {#if lastRun?.record_error}<div class="banner err">{@render errIcon()}<span>{lastRun.record_error}</span></div>{/if}
   {#if actionErr}<div class="banner err">{@render errIcon()}<span>{actionErr}</span></div>{/if}
   {#if actionMsg}<div class="banner info"><span>{actionMsg}</span></div>{/if}
 </div>
