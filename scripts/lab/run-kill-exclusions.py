@@ -55,7 +55,10 @@ def answer_iso() -> Path:
     (lab / 'sys-marker.txt').write_text('Own Backup kill-during-exclusions acceptance media\n')
     # vhdx | qcow2 | obk: which container the guest's job writes this time.
     fmt = os.environ.get('OBK_FORMAT', 'vhdx')
-    assert fmt in ('vhdx', 'qcow2', 'obk', 'consol', 'consol-vhdx', 'consol-qcow2', 'flush-vhdx', 'flush-obk', 'probe-io', 'stall-vhdx', 'stall-obk', 'history'), fmt
+    assert fmt in ('vhdx', 'qcow2', 'obk', 'consol', 'consol-vhdx', 'consol-qcow2', 'flush-vhdx', 'flush-obk', 'probe-io', 'stall-vhdx', 'stall-obk', 'history', 'media'), fmt
+    if fmt == 'media':
+        # The medium carries the machine's WebView2; the VM has no network.
+        shutil.copyfile(LAB / 'media/WebView2Runtime-x64.exe', lab / 'WebView2Runtime-x64.exe')
     # OBK_TAG names a fresh attempt of a format that has already passed.
     # OBK_KILL_PHASE: the phase run 1 dies in (default exclusions).
     (lab / 'killx-format.txt').write_text(fmt + '\n' + os.environ.get('OBK_TAG', '') + '\n'
@@ -181,6 +184,13 @@ def step_test() -> None:
     cmd = S.base_cmd(S.ACTIVE / 'vars.fd', S.EVIDENCE / 'test-serial.log', S.ACTIVE / 'test.sock')
     cmd += S.disk(S.ACTIVE / 'windows.qcow2', 0) + S.disk(S.ACTIVE / 'data.qcow2', 1) + S.cdrom(S.ACTIVE / 'answer.iso', 2)
     watch = None
+    if os.environ.get('OBK_FORMAT') == 'media':
+        # A blank disk the guest writes the built ISO onto, raw from sector 0.
+        media = S.ACTIVE / 'media.raw'
+        media.unlink(missing_ok=True)
+        with media.open('wb') as f:
+            f.truncate(2 * 2 ** 30)
+        cmd += ['-drive', f'file={media},format=raw,if=ide,index=3,media=disk']
     if os.environ.get('OBK_FORMAT', '').startswith(('flush', 'probe-io', 'stall')):
         # A disk of its own for the copies, so that only it fails: raw under
         # a node that a fault can be slid beneath while the VM runs.
@@ -207,8 +217,74 @@ def step_test() -> None:
         raise SystemExit('test failed; evidence kept')
 
 
+def step_boot_media() -> None:
+    """Boot the medium the 'media' test built, Secure Boot on, and photograph it.
+
+    Before that, the El Torito FAT image inside it is checked by dosfstools:
+    clean, and the long names (`EFI/Microsoft`, `boot.stl`) whole."""
+    import re
+    serial = (S.EVIDENCE / 'test-serial.log').read_text(errors='replace')
+    found = re.findall(r'KILLX-MEDIA length=(\d+) sha256=([0-9A-F]+)', serial)
+    if not found:
+        raise SystemExit('no medium in the test serial log')
+    length, sha = int(found[-1][0]), found[-1][1].lower()
+    iso = S.ACTIVE / 'media.iso'
+    digest = hashlib.sha256()
+    with (S.ACTIVE / 'media.raw').open('rb') as src, iso.open('wb') as dst:
+        left = length
+        while left:
+            chunk = src.read(min(left, 2 ** 24))
+            digest.update(chunk)
+            dst.write(chunk)
+            left -= len(chunk)
+    if digest.hexdigest() != sha:
+        raise SystemExit(f'the medium read back differs: {digest.hexdigest()} != {sha}')
+    (S.ACTIVE / 'media.raw').unlink()
+    out = S.EVIDENCE / 'media-boot'
+    out.mkdir(parents=True, exist_ok=True)
+
+    efisys = S.ACTIVE / 'efisys.bin'
+    efisys.unlink(missing_ok=True)
+    subprocess.run(['xorriso', '-osirrox', 'on', '-indev', str(iso), '-extract', '/boot/efisys.bin', str(efisys)],
+                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    fsck = subprocess.run(['/usr/sbin/fsck.fat', '-n', '-l', '-v', str(efisys)], capture_output=True, text=True)
+    (out / 'fsck-efisys.txt').write_text(fsck.stdout + fsck.stderr)
+    names = [n for n in ('/EFI/BOOT/BOOTX64.EFI', '/EFI/Microsoft/Boot/BCD', '/EFI/Microsoft/Boot/boot.stl', '/boot/boot.sdi')
+             if n not in fsck.stdout]
+    print(f'FSCK exit={fsck.returncode} missing={names}', flush=True)
+    if fsck.returncode or names:
+        raise SystemExit('the boot image is not clean or lost a name; see fsck-efisys.txt')
+
+    vars_fd = S.ACTIVE / 'vars-media.fd'
+    shutil.copyfile(S.VARS, vars_fd)  # Microsoft keys enrolled: Secure Boot on
+    sock = S.ACTIVE / 'media.sock'
+    sock.unlink(missing_ok=True)
+    cmd = S.base_cmd(vars_fd, S.EVIDENCE / 'media-serial.log', sock) + S.cdrom(iso, 0) + ['-boot', 'order=d']
+    (out / 'command.json').write_text(json.dumps(cmd, indent=2) + '\n')
+    shot = REPO / 'scripts/lab/qemu-screenshot.py'
+    send = REPO / 'scripts/lab/qemu-monitor.py'
+    with (out / 'qemu.log').open('w') as log:
+        vm = subprocess.Popen(cmd, stdout=log, stderr=log)
+        try:
+            for i in range(30):  # "Press any key to boot from CD or DVD"
+                if sock.exists():
+                    subprocess.run([sys.executable, str(send), str(sock), 'sendkey ret'], capture_output=True)
+                time.sleep(1)
+            for i in range(10):
+                time.sleep(30)
+                subprocess.run([sys.executable, str(shot), str(sock), str(out / f'{i:02d}.png')], capture_output=True)
+                print(f'SHOT {out / f"{i:02d}.png"}', flush=True)
+        finally:
+            subprocess.run([sys.executable, str(send), str(sock), 'quit'], capture_output=True)
+            try:
+                vm.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                vm.kill()
+    print('MEDIA-BOOTED (judge the screenshots)', flush=True)
+
+
 def main() -> None:
-    steps = {'prepare': step_prepare, 'install': step_install, 'test': step_test}
+    steps = {'prepare': step_prepare, 'install': step_install, 'test': step_test, 'boot-media': step_boot_media}
     if len(sys.argv) != 2 or sys.argv[1] not in steps:
         raise SystemExit(f'usage: {sys.argv[0]} {"|".join(steps)}')
     steps[sys.argv[1]]()

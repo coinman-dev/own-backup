@@ -428,6 +428,42 @@ function Ask([string]$name, [string]$action) {
     Check (Test-Path "$work\$name.json") "the SYSTEM half did $action"
     WaitService
 }
+# Mode 'media': a hand-chosen Winre.wim judged by the service (InspectBaseImage),
+# a build refused for a file that is no recovery image, then the medium built
+# on the found base and handed raw to the host, which boots it.
+function MediaBuild {
+    # The SYSTEM half installs WebView2 at boot; the build needs it there.
+    $runtime = 'C:\Program Files (x86)\Microsoft\EdgeWebView\Application\*\msedgewebview2.exe'
+    for ($i = 0; $i -lt 600 -and -not (Get-ChildItem $runtime -ErrorAction SilentlyContinue); $i++) { Start-Sleep -Seconds 1 }
+    Check ([bool](Get-ChildItem $runtime -ErrorAction SilentlyContinue)) 'the WebView2 runtime is installed'
+    $bases = @(Rpc 'find-bases' @{ op = 'find-bases' })
+    Check ($bases.Count -ge 1) "a base image is found ($($bases.Count))"
+    $winre = $bases[0].path
+    $good = Rpc 'inspect-winre' @{ op = 'inspect-base'; path = $winre }
+    Check ($good.base.path -eq $winre -and -not $good.refused) "the found Winre.wim chosen by hand is accepted ($($good.base.origin))"
+    $junk = "$work\not-a-wim.wim"
+    [IO.File]::WriteAllBytes($junk, (New-Object byte[] 8192))
+    $bad = Rpc 'inspect-junk' @{ op = 'inspect-base'; path = $junk }
+    Check ([bool]$bad.refused -and $bad.refused -notlike '*Image format error*') "a file that is no WIM is refused plainly: $($bad.refused)"
+    $refusal = $null
+    try { $null = Rpc 'build-junk' @{ op = 'build-media'; base_wim = $junk; output_iso = "$work\junk.iso" } } catch { $refusal = $_.Exception.Message }
+    Check ([bool]$refusal -and -not (Test-Path "$work\junk.iso")) "a build on it is refused before anything is made: $refusal"
+
+    $iso = "$store\media.iso"
+    Remove-Item $iso -ErrorAction SilentlyContinue
+    $report = Rpc 'build-media' @{ op = 'build-media'; base_wim = $winre; output_iso = $iso; runtime_in_image = $true }
+    Check (Test-Path $iso) "the medium is built ($((Get-Item $iso).Length) bytes)"
+    $request = @{ name = 'rawcopy'; action = 'rawcopy'; source = $iso }
+    [IO.File]::WriteAllText("$work\kill.request", (ConvertTo-Json -Compress $request))
+    for ($i = 0; $i -lt 600 -and -not (Test-Path "$work\rawcopy.json"); $i++) { Start-Sleep -Milliseconds 500 }
+    Check (Test-Path "$work\rawcopy.json") 'the SYSTEM half wrote the medium to the media disk'
+    [IO.File]::WriteAllText("$work\kills.done", 'done')
+    Say "KILLX-MEDIA length=$((Get-Item $iso).Length) sha256=$((Get-FileHash $iso).Hash)"
+    [IO.File]::WriteAllText("$work\passed.txt", 'pass')
+    Report 'result' @{ pass = $true; base = $good.base; refused = $bad.refused; build_refused = $refusal; report = $report }
+    Say "KILLX-PASS format=$format"
+    shutdown.exe /s /t 5 | Out-Null
+}
 function HistoryUnwritable([string]$id) {
     Get-ChildItem -LiteralPath $store -Force -ErrorAction SilentlyContinue | Remove-Item -Force
     Ask 'block' 'block'
@@ -581,6 +617,12 @@ if ($media) {
             Format-Volume -Partition $part -FileSystem NTFS -NewFileSystemLabel OBKFAULT -Confirm:$false | Out-Null
             Say 'KILLX-FAULT-DISK T:'
         }
+        # Mode 'media': the medium carries this machine's WebView2, and the VM
+        # has no network — the runtime installer comes on the answer CD.
+        if ($format -eq 'media' -and -not (Get-ChildItem 'C:\Program Files (x86)\Microsoft\EdgeWebView\Application\*\msedgewebview2.exe' -ErrorAction SilentlyContinue)) {
+            $setup = Start-Process "$lab\WebView2Runtime-x64.exe" -ArgumentList '/silent', '/install' -Wait -PassThru
+            Check ($setup.ExitCode -eq 0) "WebView2 runtime installed (exit $($setup.ExitCode))"
+        }
         if (Test-Path "$work\kills.done") {
             # A reboot after the kills: the user half finishes by itself.
             $armed = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon').AutoAdminLogon -eq '1'
@@ -630,6 +672,20 @@ if ($media) {
             if (Test-Path "$work\kills.done") { break }
             Start-Sleep -Milliseconds 50
             $request = Get-Content "$work\kill.request" -Raw | ConvertFrom-Json
+            if ($request.action -eq 'rawcopy') {
+                # The built ISO, byte for byte from sector 0 of the blank 2 GiB
+                # disk, where the host reads it without mounting anything.
+                $name = $request.name
+                $raw = @(Get-Disk | Where-Object { $_.PartitionStyle -eq 'RAW' -and $_.Size -eq 2GB })
+                Check ($raw.Count -eq 1) 'one blank 2 GiB media disk attached'
+                $src = [IO.File]::OpenRead($request.source)
+                $dst = New-Object IO.FileStream "\\.\PhysicalDrive$($raw[0].Number)", 'Open', 'ReadWrite'
+                try { $src.CopyTo($dst, 1MB); $dst.Flush() } finally { $dst.Dispose(); $src.Dispose() }
+                Remove-Item "$work\kill.request" -Force
+                JsonFile "$work\$name.json" @{ action = 'rawcopy'; disk = $raw[0].Number; length = (Get-Item $request.source).Length }
+                Step "rawcopy done ($name)"
+                continue
+            }
             if ($request.action -in @('restart', 'block', 'unblock')) {
                 $name = $request.name
                 if ($request.action -eq 'restart') { Restart-Service OwnBackup -Force; WaitService }
@@ -695,6 +751,7 @@ if ($media) {
         WaitService
         if ($mode -eq 'flush') { for ($i = 0; $i -lt 180 -and -not (Test-Path 'T:\'); $i++) { Start-Sleep -Seconds 1 } }
         New-Item -ItemType Directory -Force $store | Out-Null
+        if ($format -eq 'media') { MediaBuild; return }
         $state = if (Test-Path "$work\job.json") { Get-Content "$work\job.json" -Raw | ConvertFrom-Json } else { $null }
         if (-not $state) {
             # Synthetic secret of a throwaway VM.

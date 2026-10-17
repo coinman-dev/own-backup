@@ -19,6 +19,9 @@
   protected folder before writing it, so only files it has proved its own
   are deleted. Leftovers of earlier versions and of runs outside the service
   stay where they are.
+- The FAT boot image inside the medium's ISO keeps long names
+  (`EFI\Microsoft`, `boot.stl`) instead of cutting them to 8.3.
+- The empty part of the compression slider follows the theme.
 
 ## 0.1.5-beta — 2026-10-17
 

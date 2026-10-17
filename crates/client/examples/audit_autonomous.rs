@@ -353,6 +353,27 @@ async fn execute(client: &mut BackupClient, v: &Value) -> Result<Value, String> 
             .list_activity()
             .await
             .map(|s| serde_json::to_value(s).unwrap()),
+        // A refusal is an answer here, not a failure: the caller checks it.
+        "inspect-base" => match client.inspect_base_image(field(v, "path")?).await {
+            Ok(base) => Ok(json!({"base":base})),
+            Err(why) => Ok(json!({"refused":why})),
+        },
+        "find-bases" => client
+            .find_base_images()
+            .await
+            .map(|s| serde_json::to_value(s).unwrap()),
+        "build-media" => {
+            let options = own_backup_common::engine_dto::MediaBuildOptionsDto {
+                base_wim: v["base_wim"].as_str().unwrap_or_default().into(),
+                output_iso: field(v, "output_iso")?.into(),
+                runtime_in_image: v["runtime_in_image"].as_bool().unwrap_or(true),
+                ..Default::default()
+            };
+            client
+                .build_media(&options)
+                .await
+                .map(|s| serde_json::to_value(s).unwrap())
+        }
         other => Err(format!("unsupported operation {other}")),
     }
 }
