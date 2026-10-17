@@ -4,6 +4,13 @@
 
 ## Unreleased
 
+### Added
+
+- The boot medium card lets you choose a Winre.wim by hand (for example one
+  taken from a Windows installation image). The service reads it first and
+  refuses an installation image, a split or non-x64 image with the reason;
+  a build given such a file is refused the same way.
+
 ### Fixed
 
 - An unfinished VHDX or qcow2 image of a run whose service was killed is now

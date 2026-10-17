@@ -60,6 +60,7 @@ export const api = {
 
   // --- boot medium ---
   findBaseImages: () => invoke<BaseImage[]>('find_base_images'),
+  inspectBaseImage: (path: string) => invoke<BaseImage>('inspect_base_image', { path }),
   listDriverPackages: () => invoke<DriverPackage[]>('list_driver_packages'),
   listMediaTools: () => invoke<MediaTool[]>('list_media_tools'),
   buildBootMedia: (options: MediaBuildOptions) =>

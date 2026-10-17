@@ -125,6 +125,9 @@ service BackupService {
   // than from file names. BuildMedia does the work and streams progress as an
   // engine event of kind "media".
   rpc FindBaseImages(Empty) returns (JsonReply);        // JSON: [BaseImageDto]
+  // A Winre.wim the user chose by hand, read and judged like the found ones;
+  // a file that will not do is refused with the reason (FAILED_PRECONDITION).
+  rpc InspectBaseImage(JsonRequest) returns (JsonReply); // in: {"path"} -> BaseImageDto
   rpc ListDrivers(Empty) returns (JsonReply);           // JSON: [DriverPackageDto]
   // Third-party tools installed on THIS machine that the medium could carry —
   // a file manager and a text editor, copied from the user's own installation

@@ -745,6 +745,16 @@ pub async fn find_base_images(
     Ok(found)
 }
 
+/// A Winre.wim chosen in a file dialog, read by the service; the error is the
+/// reason the file will not do.
+#[tauri::command]
+pub async fn inspect_base_image(
+    state: State<'_, GuiState>,
+    path: String,
+) -> Result<own_backup_common::engine_dto::BaseImageDto, String> {
+    state.link.client().await?.inspect_base_image(&path).await
+}
+
 /// Driver packages this machine could put on the medium. Sizes included: a
 /// display driver can be several hundred megabytes a rescue medium never uses.
 #[tauri::command]

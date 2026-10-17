@@ -9,6 +9,7 @@
   import { media, ensureMediaMode } from '../lib/mediaStore.svelte';
   import { formatBytes } from '../lib/format';
   import MediaBuildModal from './MediaBuildModal.svelte';
+  import { pickPath } from '../lib/pickPath.svelte';
   import type { BaseImage } from '../lib/types';
   import { m } from '../lib/paraglide/messages';
 
@@ -17,8 +18,14 @@
   let searchError: string | null = $state(null);
   let tab: 'windows' | 'linux' = $state('windows');
   let open: 'windows' | 'linux' | null = $state(null);
+  // A Winre.wim the user pointed at — taken from an installation ISO, say —
+  // goes before anything the search found. The service reads it first; a file
+  // that will not do is refused with its reason, not built on.
+  let chosen: BaseImage | null = $state(null);
+  let checking = $state(false);
+  let chooseError: string | null = $state(null);
 
-  const windowsBase = $derived(bases[0] ?? null);
+  const windowsBase = $derived(chosen ?? bases[0] ?? null);
 
   onMount(async () => {
     await ensureMediaMode();
@@ -36,6 +43,20 @@
       searchError = String(e);
     } finally {
       searching = false;
+    }
+  }
+
+  async function chooseBase() {
+    const path = await pickPath({ directory: false, title: m.bmc_pick_title(), extensions: ['wim'] });
+    if (!path) return;
+    checking = true;
+    chooseError = null;
+    try {
+      chosen = await api.inspectBaseImage(path);
+    } catch (e) {
+      chooseError = String(e);
+    } finally {
+      checking = false;
     }
   }
 
@@ -109,6 +130,22 @@
           </span>
         </div>
       {/if}
+      {#if !searching}
+        <!-- Inside the clickable panel: a click here must not open the build. -->
+        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+        <div class="p-choose" onclick={(e) => e.stopPropagation()}>
+          {#if chosen}
+            <span class="p-chosen" title={chosen.path}>{m.bmc_chosen({ path: chosen.path })}</span>
+            <button class="link" onclick={() => { chosen = null; chooseError = null; }}>{m.bmc_chosen_forget()}</button>
+          {/if}
+          <button class="link" disabled={checking} onclick={chooseBase}>
+            {checking ? m.bmc_pick_checking() : m.bmc_pick()}
+          </button>
+        </div>
+        {#if chooseError}
+          <div class="p-warn">{@render warnIcon()}<span>{chooseError}</span></div>
+        {/if}
+      {/if}
     {:else}
       <div class="p-desc">{m.bmc_linux_desc()}</div>
       <div class="p-meta soon">{m.bmc_linux_soon()}</div>
@@ -153,4 +190,8 @@
   .p-warn-icon { flex: none; margin-top: 1px; }
   .p-warn code, .p-desc code { font-family: monospace; }
   .p-go { font-size: 12px; font-weight: 600; color: var(--accent-text); margin-top: 10px; }
+  .p-choose { display: flex; align-items: center; gap: 14px; margin-top: 10px; font-size: 12px; cursor: default; }
+  .p-chosen { color: var(--text-secondary); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .link { flex: none; padding: 0; border: none; background: none; font-family: var(--font); font-size: 12px; color: var(--accent-text); text-decoration: underline; cursor: pointer; }
+  .link:disabled { color: var(--text-muted); cursor: default; text-decoration: none; }
 </style>

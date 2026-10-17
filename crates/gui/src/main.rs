@@ -589,6 +589,7 @@ fn main() {
             commands::engine::mount_backup,
             commands::engine::unmount_backup,
             commands::engine::find_base_images,
+            commands::engine::inspect_base_image,
             commands::engine::list_driver_packages,
             commands::engine::list_media_tools,
             commands::engine::build_boot_media,

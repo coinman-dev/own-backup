@@ -1861,19 +1861,7 @@ impl BackupService for BackupServiceImpl {
                 tokio::task::spawn_blocking(own_backup_backup::winre_find::find_base_images)
                     .await
                     .map_err(|e| Status::internal(format!("base image search panicked: {e}")))?;
-            let out: Vec<BaseImageDto> = found
-                .into_iter()
-                .map(|b| BaseImageDto {
-                    path: b.path.display().to_string(),
-                    origin: b.origin.describe().to_string(),
-                    name: b.info.name,
-                    build: b.info.build,
-                    language: b.info.language,
-                    architecture: b.info.architecture,
-                    total_bytes: b.info.total_bytes,
-                    warnings: b.warnings,
-                })
-                .collect();
+            let out: Vec<BaseImageDto> = found.into_iter().map(base_image_dto).collect();
             info!(count = out.len(), "base images offered");
             return json_reply(&out);
         }
@@ -1881,6 +1869,43 @@ impl BackupService for BackupServiceImpl {
         Err(Status::unimplemented(
             tr!("grpc_server.media_windows_only").into_owned(),
         ))
+    }
+
+    async fn inspect_base_image(
+        &self,
+        req: Request<JsonRequest>,
+    ) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        media_build_unavailable()?;
+        #[cfg(target_os = "windows")]
+        {
+            #[derive(serde::Deserialize)]
+            struct Chosen {
+                path: String,
+            }
+            let chosen: Chosen = serde_json::from_str(&req.into_inner().json)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+            let path = std::path::PathBuf::from(chosen.path.trim());
+            let judged = tokio::task::spawn_blocking(move || {
+                own_backup_backup::winre_find::inspect_chosen(&path)
+            })
+            .await
+            .map_err(|e| Status::internal(format!("base image check panicked: {e}")))?;
+            return match judged {
+                Ok(base) => json_reply(&base_image_dto(base)),
+                Err(why) => {
+                    info!(%why, "chosen base image refused");
+                    Err(Status::failed_precondition(why))
+                }
+            };
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = req;
+            Err(Status::unimplemented(
+                tr!("grpc_server.media_windows_only").into_owned(),
+            ))
+        }
     }
 
     async fn list_drivers(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
@@ -1990,7 +2015,16 @@ impl BackupService for BackupServiceImpl {
                         Status::failed_precondition(tr!("grpc_server.winre_not_found").into_owned())
                     })?
             } else {
-                std::path::PathBuf::from(&opts.base_wim)
+                // Judged like the found ones before anything is unpacked: the
+                // build itself only checks that the file is a WIM.
+                let chosen = std::path::PathBuf::from(opts.base_wim.trim());
+                tokio::task::spawn_blocking(move || {
+                    own_backup_backup::winre_find::inspect_chosen(&chosen)
+                })
+                .await
+                .map_err(|e| Status::internal(format!("base image check panicked: {e}")))?
+                .map_err(Status::failed_precondition)?
+                .path
             };
 
             let program_dir = std::env::current_exe()
@@ -3568,6 +3602,22 @@ fn media_build_unavailable() -> Result<(), Status> {
         ));
     }
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn base_image_dto(
+    b: own_backup_backup::winre_find::BaseImage,
+) -> own_backup_common::engine_dto::BaseImageDto {
+    own_backup_common::engine_dto::BaseImageDto {
+        path: b.path.display().to_string(),
+        origin: b.origin.describe().to_string(),
+        name: b.info.name,
+        build: b.info.build,
+        language: b.info.language,
+        architecture: b.info.architecture,
+        total_bytes: b.info.total_bytes,
+        warnings: b.warnings,
+    }
 }
 
 /// Where the WebView2 runtime lives on this machine.

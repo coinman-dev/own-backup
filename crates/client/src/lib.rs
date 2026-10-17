@@ -532,6 +532,22 @@ impl BackupClient {
         parse(&reply.json)
     }
 
+    /// A Winre.wim the user chose by hand, judged by the service as the found
+    /// ones are; the error is the reason it will not do, ready to show.
+    pub async fn inspect_base_image(
+        &mut self,
+        path: &str,
+    ) -> Result<own_backup_common::engine_dto::BaseImageDto> {
+        let json = serde_json::json!({ "path": path }).to_string();
+        let reply = self
+            .inner
+            .inspect_base_image(self.request(proto::JsonRequest { json }))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
+
     /// Driver packages published on this machine, largest first — with sizes,
     /// because that is what the choice is actually about.
     pub async fn list_drivers(
