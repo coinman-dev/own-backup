@@ -94,6 +94,11 @@ stage_text LICENSE LICENSE.txt
 stage_text NOTICE NOTICE.txt
 stage_text COMMERCIAL-LICENSE.md COMMERCIAL-LICENSE.txt
 stage_text THIRD-PARTY-NOTICES.md THIRD-PARTY-NOTICES.txt
+# The full license texts of every crate and npm package the programs carry,
+# collected from those packages at build time (scripts/third-party-licenses.py).
+# A package without any text stops the build rather than shipping a gap.
+python3 scripts/third-party-licenses.py "$target_dir/THIRD-PARTY-LICENSES.txt"
+stage_text "$target_dir/THIRD-PARTY-LICENSES.txt" THIRD-PARTY-LICENSES.txt
 cp crates/gui/icons/icon.ico "$stage/icon.ico"
 cp "$script" "$stage/own-backup.nsi"
 

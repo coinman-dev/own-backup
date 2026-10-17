@@ -6,9 +6,12 @@ Own Backup is licensed under the PolyForm Noncommercial License 1.0.0
 ## Rust dependencies
 
 Standard crates from crates.io (zstd, aes-gcm, argon2, xxhash-rust, windows,
-tokio, serde, tonic, …) under permissive licenses (MIT / Apache-2.0 / …).
-Their license terms are reproduced in each crate; run `cargo about` or
-`cargo license` for the full list.
+tokio, serde, tonic, …) under permissive licenses (MIT / Apache-2.0 / …), and
+a few under MPL-2.0, BSL-1.0, Unicode-3.0 and Zlib. Their full license texts —
+each crate's own files, with its name, version and source address — are in
+`THIRD-PARTY-LICENSES.txt` beside the program, generated for every build by
+`scripts/third-party-licenses.py`. The MPL-2.0 components are unmodified; their
+source is at the addresses listed there.
 
 The window's page is built with Svelte and Paraglide JS (MIT) and the Tauri
 JavaScript API (MIT / Apache-2.0).

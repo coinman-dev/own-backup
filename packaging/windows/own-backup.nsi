@@ -302,6 +302,7 @@ Section "!${NAME}" SecMain
     File "NOTICE.txt"
     File "COMMERCIAL-LICENSE.txt"
     File "THIRD-PARTY-NOTICES.txt"
+    File "THIRD-PARTY-LICENSES.txt"
 
     ; Before the service is touched, so that a failure below still leaves a
     ; program Windows knows how to remove.
@@ -491,6 +492,7 @@ Section "Uninstall"
     Delete "$INSTDIR\NOTICE.txt"
     Delete "$INSTDIR\COMMERCIAL-LICENSE.txt"
     Delete "$INSTDIR\THIRD-PARTY-NOTICES.txt"
+    Delete "$INSTDIR\THIRD-PARTY-LICENSES.txt"
     RMDir /r "$INSTDIR\Logs"
 
     DeleteRegKey HKLM "${UNINSTALL_KEY}"

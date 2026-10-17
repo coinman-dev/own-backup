@@ -558,6 +558,7 @@ if ($media) {
             [IO.File]::WriteAllText("$base\installed.sha256", $want)
             Remove-Item "$base\upgrading" -Force
             Say "KILLX-UPGRADED $want"
+            Say "KILLX-INSTALLED-TEXTS $((Get-ChildItem "$installed\*.txt" | ForEach-Object { "$($_.Name)=$($_.Length)" }) -join ' ')"
         }
         # A data disk the host replaced with a blank one (it outgrew the run's
         # space bound) is prepared again: the source and the store.
