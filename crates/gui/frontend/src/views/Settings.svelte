@@ -232,6 +232,7 @@
             min={MIN_LEVEL}
             max={MAX_LEVEL}
             class="form-range"
+            style:--fill="{((compressionLevel - MIN_LEVEL) / (MAX_LEVEL - MIN_LEVEL)) * 100}%"
             bind:value={compressionLevel}
           />
           <div class="range-labels">
@@ -603,9 +604,30 @@
     min-width: 0;
   }
 
+  /* Drawn by hand: the WebView's own track left its empty part a light grey
+     strip on the dark theme. Filled to the thumb with the accent, the rest
+     the theme's --track, as the progress bars are. */
   .form-range {
     width: 100%;
-    accent-color: var(--primary);
+    height: 6px;
+    margin: 8px 0;
+    appearance: none;
+    border-radius: 3px;
+    background: linear-gradient(to right, var(--primary) var(--fill), var(--track) var(--fill));
+    cursor: pointer;
+  }
+  .form-range::-webkit-slider-thumb {
+    appearance: none;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--primary);
+    border: 2px solid var(--card-bg);
+    box-shadow: 0 0 0 1px var(--primary);
+  }
+  .form-range:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 4px;
   }
 
   .range-labels {
