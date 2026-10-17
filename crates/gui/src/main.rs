@@ -559,6 +559,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::disks::list_disks,
             commands::disks::drive_signature,
+            commands::disks::list_hidden_volumes,
+            commands::disks::set_volume_letter,
             // --- new job model (phase 6) ---
             commands::backup_jobs::list_backup_jobs,
             commands::backup_jobs::get_backup_job,

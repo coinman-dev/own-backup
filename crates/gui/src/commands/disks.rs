@@ -29,3 +29,27 @@ pub async fn list_disks(state: State<'_, GuiState>) -> Result<Vec<DiskInfo>, Str
 pub async fn drive_signature() -> Result<u32, String> {
     Ok(own_backup_inventory::drive_letters_signature())
 }
+
+/// EFI, recovery and vendor partitions Windows keeps without a letter — the
+/// list on the «Инструменты» page. The service decides what belongs on it.
+#[tauri::command]
+pub async fn list_hidden_volumes(
+    state: State<'_, GuiState>,
+) -> Result<Vec<own_backup_common::disk::HiddenVolume>, String> {
+    state.link.client().await?.list_hidden_volumes().await
+}
+
+/// Give a hidden partition a drive letter, or take it away (`letter: null`).
+#[tauri::command]
+pub async fn set_volume_letter(
+    state: State<'_, GuiState>,
+    device: String,
+    letter: Option<char>,
+) -> Result<Vec<own_backup_common::disk::HiddenVolume>, String> {
+    state
+        .link
+        .client()
+        .await?
+        .set_volume_letter(&device, letter)
+        .await
+}

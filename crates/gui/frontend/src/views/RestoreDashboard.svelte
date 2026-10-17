@@ -1903,7 +1903,10 @@
     {#if keyNeeded}
       <div class="key-note">
         <svg class="kn-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--info)" stroke-width="2" stroke-linecap="round"><rect x="5" y="11" width="14" height="9" rx="2" /><path d="M8 11V8a4 4 0 0 1 8 0v3" /></svg>
-        <span>{m.rd_key_note()}</span>
+        <!-- An imported copy has no job to draw a map from: everything is
+             inside the sealed file, and "the map below" would point at
+             nothing. -->
+        <span>{backedUpDisks.length > 0 ? m.rd_key_note() : m.rd_key_note_no_map()}</span>
         <button class="btn ghost tiny" onclick={() => askKey()}>{m.rd_enter_password()}</button>
       </div>
     {/if}
@@ -1934,12 +1937,16 @@
       </div>
     {:else if copiesLoading || infoLoading || (engine.volumesLoading && engine.disks.length === 0)}
       <div class="loading-note">{m.rd_reading_copy()}</div>
-    {:else}
+    {:else if !keyNeeded}
       <!-- Only once everything that could describe the copy has been asked and
            answered — BOTH reads, not just the folder scan. Missing the second
            one left this reachable mid-load, so it appeared for a moment on
            every visit and then withdrew itself; on an encrypted copy that
-           moment is however long Argon2id takes. -->
+           moment is however long Argon2id takes.
+           And never while the key is still needed: a sealed copy keeps its
+           map inside, so "no map" there means "not opened yet", not "the
+           disk is gone" — the boot medium said exactly that over a copy on a
+           disk it was showing right below (2026-10-16). -->
       <div class="warn-note">{m.rd_disk_not_connected()}</div>
     {/if}
 

@@ -37,6 +37,11 @@ service BackupService {
 
   // --- Inventory ---
   rpc ListDisks(Empty) returns (JsonReply);          // JSON: [DiskInfo]
+  // EFI, recovery and vendor partitions Windows keeps without a letter, and
+  // giving them one (the «Инструменты» page).
+  rpc ListHiddenVolumes(Empty) returns (JsonReply);  // JSON: [HiddenVolume]
+  // JSON in: { "device": string, "letter": "R" | null } -> [HiddenVolume]
+  rpc SetVolumeLetter(JsonRequest) returns (JsonReply);
 
   rpc GetServiceStatus(Empty) returns (JsonReply);   // JSON: { version, uptime_secs, queue }
 

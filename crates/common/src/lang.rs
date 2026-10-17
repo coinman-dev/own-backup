@@ -63,6 +63,57 @@ pub fn configured(path: &Path) -> String {
         .unwrap_or_default()
 }
 
+/// The language of the Windows interface, decided the way the window decides
+/// «Как в Windows»: Russian for a Russian interface, English for any other.
+pub fn system() -> &'static str {
+    #[cfg(windows)]
+    {
+        // SAFETY: no arguments; returns the user's UI language id.
+        from_langid(unsafe { windows::Win32::Globalization::GetUserDefaultUILanguage() })
+    }
+    #[cfg(not(windows))]
+    {
+        "ru"
+    }
+}
+
+/// `ru` for any Russian locale id (primary language 0x19), `en` otherwise.
+fn from_langid(id: u16) -> &'static str {
+    if id & 0x3FF == 0x19 {
+        "ru"
+    } else {
+        "en"
+    }
+}
+
+/// The config's language, or the Windows interface's when the config has
+/// none yet — what the window would choose with its default «Как в Windows».
+fn configured_or_system(path: &Path) -> String {
+    let configured = configured(path);
+    if configured.trim().is_empty() {
+        system().to_string()
+    } else {
+        configured
+    }
+}
+
+/// [`follow_config`] for something on screen that can start before the window
+/// has said its language: the boot medium's taskbar, the tray icon.
+///
+/// The medium boots with no config at all, so the taskbar used to come up in
+/// Russian and turn English a few seconds later, once the window had resolved
+/// «Как в Windows» on an English recovery environment and written it down
+/// (2026-10-15). Deciding the same way from the start leaves nothing to switch.
+pub fn follow_config_or_system(path: PathBuf) {
+    set(&configured_or_system(&path));
+    let _ = std::thread::Builder::new()
+        .name("ui-language".into())
+        .spawn(move || loop {
+            std::thread::sleep(RECHECK);
+            set(&configured_or_system(&path));
+        });
+}
+
 /// How often the config file is consulted for a changed language.
 const RECHECK: Duration = Duration::from_secs(3);
 
@@ -110,5 +161,25 @@ mod tests {
         assert_eq!(parse("ru"), RU);
         assert_eq!(parse(""), RU);
         assert_eq!(parse("de"), RU);
+    }
+
+    #[test]
+    fn the_windows_interface_language_is_russian_or_english() {
+        assert_eq!(from_langid(0x0419), "ru"); // ru-RU
+        assert_eq!(from_langid(0x0819), "ru"); // ru-MD
+        assert_eq!(from_langid(0x0409), "en"); // en-US, the medium's WinPE
+        assert_eq!(from_langid(0x0422), "en"); // uk-UA: not Russian
+        assert_eq!(from_langid(0x0407), "en"); // de-DE
+    }
+
+    #[test]
+    fn an_empty_config_defers_to_windows_and_a_set_one_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        assert_eq!(configured_or_system(&path), system());
+        AppConfig::update_file(&path, |c| c.ui_language = "en".into()).unwrap();
+        assert_eq!(configured_or_system(&path), "en");
+        AppConfig::update_file(&path, |c| c.ui_language = "ru".into()).unwrap();
+        assert_eq!(configured_or_system(&path), "ru");
     }
 }

@@ -125,6 +125,7 @@ pub fn perform(store: &JobStore, job: &Job, cancel: &CancelToken, sink: &dyn Eve
                             categories: vec![],
                             excluded_files: None,
                             excluded_bytes: None,
+                            stalled_secs: None,
                         });
                     }
                     if cancel.is_cancelled() {

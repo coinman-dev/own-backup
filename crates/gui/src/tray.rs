@@ -203,7 +203,7 @@ pub fn run() {
     std::mem::forget(mutex);
 
     init_log();
-    own_backup_common::lang::follow_config(AppConfig::default_path());
+    own_backup_common::lang::follow_config_or_system(AppConfig::default_path());
     tracing::info!(pid = std::process::id(), "tray: started");
     if let Err(error) = message_loop() {
         tracing::error!(%error, "tray: no window, so no icon");

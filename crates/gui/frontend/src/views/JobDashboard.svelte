@@ -38,6 +38,24 @@
   const indetBar = $derived(
     progress?.phase === 'finalize' || (excluding && (progress?.blocks_total ?? 0) === 0),
   );
+  /** The job copies an encrypted container (BitLocker/LUKS) that it opens with
+   *  a password: the copy then holds the volume DECRYPTED. Without archive
+   *  encryption that is the volume's data in the clear on the backup disk —
+   *  said here, on the job, not only in the restore wizard. */
+  const encryptedSource = $derived.by(() => {
+    const wanted = new Set(
+      job.disk_source
+        ? job.disk_source.parts.map((p) => p.device)
+        : job.sources && job.sources.length
+          ? job.sources
+          : job.source
+            ? [job.source]
+            : [],
+    );
+    return (job.source_disks ?? []).some((d) =>
+      d.partitions.some((p) => p.is_encrypted && wanted.has(p.volume_device)),
+    );
+  });
   /** How the last attempt ended — the ✓/✕ and the banner under the stats. */
   const lastRun = $derived(job.last_run);
   const lastVerification = $derived(job.last_verification);
@@ -262,6 +280,11 @@
       </svg>
       <div class="card-title">{job.name}</div>
       <div class="card-sub">{sourceSummary(job)}</div>
+      {#if encryptedSource}
+        <div class="enc-note" class:warn={!job.archive_encryption}>
+          {job.archive_encryption ? m.dash_src_encrypted_sealed() : m.dash_src_encrypted_plain()}
+        </div>
+      {/if}
     </div>
 
     <div class="connector">
@@ -346,6 +369,14 @@
           {m.dash_elapsed({ time: formatClock(elapsedMs) })} · {m.dash_remaining({ time: Number.isFinite(eta) ? '~' + formatClock(eta) : m.dash_estimating() })}
         </span>
       </div>
+      <!-- The service says when the copy has stood still for minutes: a backup
+           disk that keeps failing writes holds a run like that for as long as
+           it fails, and a bar that merely stops reads as "still working". -->
+      {#if progress?.stalled_secs}
+        <div class="stall-note" role="status">
+          {m.dash_stalled({ min: Math.max(2, Math.floor(progress.stalled_secs / 60)) })}
+        </div>
+      {/if}
     </div>
     <!-- Разбивка по типам — сразу, как только сканер её посчитал, а не в конце.
          Он видит каждый файл с размером ещё ДО копирования, так что ответ на
@@ -476,6 +507,9 @@
     {/if}
   {/if}
 
+  <!-- The run happened but the service could not write it into the history:
+       until a later write succeeds it lives only in the service's memory. -->
+  {#if lastRun?.record_error}<div class="banner err">{@render errIcon()}<span>{lastRun.record_error}</span></div>{/if}
   {#if actionErr}<div class="banner err">{@render errIcon()}<span>{actionErr}</span></div>{/if}
   {#if actionMsg}<div class="banner info"><span>{actionMsg}</span></div>{/if}
 </div>
@@ -508,6 +542,8 @@
   .card { flex: 1; max-width: 300px; border: 1px solid var(--border); border-radius: 8px; padding: 22px 18px; text-align: center; background: var(--card-bg); display: flex; flex-direction: column; align-items: center; gap: 8px; }
   .card-title { font-size: 20px; font-weight: 600; color: var(--head); }
   .card-sub { font-size: 12px; color: var(--text-muted); word-break: break-all; }
+  .enc-note { margin-top: 6px; font-size: 11.5px; color: var(--text-muted); max-width: 220px; }
+  .enc-note.warn { color: var(--warning-text); }
   .connector { width: 130px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; gap: 8px; }
   .dash-line { width: 26px; height: 2px; background: repeating-linear-gradient(90deg, var(--border-strong) 0 4px, transparent 4px 8px); }
   .check { width: 52px; height: 52px; border-radius: 50%; background: var(--text-muted); display: flex; align-items: center; justify-content: center; }
@@ -531,6 +567,8 @@
      совсем длинный путь, но включается последней, а не заранее. */
   .progress-meta .route { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; min-width: 0; }
   .progress-meta .times { white-space: nowrap; flex-shrink: 0; }
+  .stall-note { margin-top: 8px; padding: 6px 10px; border-radius: 6px; font-size: 12px;
+    background: var(--warning-soft); border: 1px solid var(--warning-line); color: var(--warning-text); }
   .stats { display: flex; justify-content: space-between; font-size: 13px; color: var(--text-secondary); margin-top: 34px; }
   .stats b { color: var(--head); font-weight: 600; }
   .reco { display: flex; align-items: center; gap: 6px; }

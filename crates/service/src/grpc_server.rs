@@ -473,6 +473,99 @@ impl own_backup_core::EventSink for GrpcEventSink {
     }
 }
 
+/// The hidden system partitions on the disks attached right now.
+#[cfg(target_os = "windows")]
+async fn hidden_volumes_now() -> Result<Vec<own_backup_common::disk::HiddenVolume>, Status> {
+    use own_backup_inventory::DiskInventory;
+    let disks = own_backup_inventory::WindowsInventory::new()
+        .map_err(|e| Status::internal(e.to_string()))?
+        .enumerate_disks()
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+    Ok(own_backup_common::disk::hidden_volumes(&disks))
+}
+
+#[cfg(not(target_os = "windows"))]
+async fn hidden_volumes_now() -> Result<Vec<own_backup_common::disk::HiddenVolume>, Status> {
+    Err(Status::unimplemented(
+        "drive letters for hidden partitions are a Windows feature",
+    ))
+}
+
+/// Assign `letter` to `volume`, or remove its letter when `letter` is `None`.
+#[cfg(target_os = "windows")]
+fn change_volume_letter(
+    volume: &own_backup_common::disk::HiddenVolume,
+    letter: Option<&str>,
+) -> Result<(), Status> {
+    use own_backup_backup::volume_win::{
+        assign_drive_letter, drive_letter_in_use, remove_drive_letter,
+    };
+    match letter {
+        Some(text) => {
+            // D–Z: A and B are the floppy letters Windows still reserves, and
+            // C is the system's.
+            let letter = match text
+                .trim()
+                .trim_end_matches(':')
+                .chars()
+                .collect::<Vec<_>>()[..]
+            {
+                [c] if c.is_ascii_alphabetic() && c.to_ascii_uppercase() >= 'D' => {
+                    c.to_ascii_uppercase()
+                }
+                _ => {
+                    return Err(Status::invalid_argument(
+                        tr!("grpc_server.letter_bad", letter = text).into_owned(),
+                    ))
+                }
+            };
+            if let Some(have) = volume.letter {
+                return Err(Status::failed_precondition(
+                    tr!("grpc_server.letter_already_set", letter = have).into_owned(),
+                ));
+            }
+            if drive_letter_in_use(letter) {
+                return Err(Status::failed_precondition(
+                    tr!("grpc_server.letter_busy", letter = letter).into_owned(),
+                ));
+            }
+            assign_drive_letter(&volume.device, letter).map_err(|e| {
+                Status::internal(
+                    tr!(
+                        "grpc_server.letter_assign_failed",
+                        letter = letter,
+                        error = e
+                    )
+                    .into_owned(),
+                )
+            })
+        }
+        None => {
+            let Some(have) = volume.letter else {
+                return Err(Status::failed_precondition(
+                    tr!("grpc_server.letter_none").into_owned(),
+                ));
+            };
+            remove_drive_letter(have).map_err(|e| {
+                Status::internal(
+                    tr!("grpc_server.letter_remove_failed", letter = have, error = e).into_owned(),
+                )
+            })
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn change_volume_letter(
+    _volume: &own_backup_common::disk::HiddenVolume,
+    _letter: Option<&str>,
+) -> Result<(), Status> {
+    Err(Status::unimplemented(
+        "drive letters for hidden partitions are a Windows feature",
+    ))
+}
+
 /// Authenticate an incoming request via bearer token. Empty expected token =
 /// auth disabled (dev/TCP mode). Constant-time comparison avoids a timing oracle.
 fn check_auth<T>(req: &Request<T>, expected: &str) -> Result<(), Status> {
@@ -888,6 +981,50 @@ impl BackupService for BackupServiceImpl {
             "windows": own_backup_core::default_exclusions(),
             "linux": own_backup_core::default_linux_exclusions(),
         }))
+    }
+
+    // --- Hidden system partitions ---------------------------------------
+
+    async fn list_hidden_volumes(
+        &self,
+        req: Request<Empty>,
+    ) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        json_reply(&hidden_volumes_now().await?)
+    }
+
+    /// Give a hidden system partition a drive letter, or take it away.
+    ///
+    /// Only for what [`own_backup_common::disk::hidden_volumes`] lists: the
+    /// letters of ordinary volumes are what jobs and restores are built on,
+    /// and Disk Management changes those. Re-checked here against the disks
+    /// as they are now — never from what the window last saw.
+    async fn set_volume_letter(
+        &self,
+        req: Request<JsonRequest>,
+    ) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        #[derive(serde::Deserialize)]
+        struct In {
+            device: String,
+            #[serde(default)]
+            letter: Option<String>,
+        }
+        let p: In = serde_json::from_str(&req.into_inner().json)
+            .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+        let _slot = self.reserve(&tr!("grpc_server.busy_volume_letter"), &p.device)?;
+        let volumes = hidden_volumes_now().await?;
+        let Some(volume) = volumes
+            .iter()
+            .find(|v| v.device.eq_ignore_ascii_case(p.device.trim()))
+        else {
+            return Err(Status::failed_precondition(
+                tr!("grpc_server.letter_not_hidden_volume", device = p.device).into_owned(),
+            ));
+        };
+        change_volume_letter(volume, p.letter.as_deref())?;
+        tracing::info!(device = %p.device, letter = ?p.letter, "gRPC: SetVolumeLetter done");
+        json_reply(&hidden_volumes_now().await?)
     }
 
     // --- Queue / runs -----------------------------------------------------

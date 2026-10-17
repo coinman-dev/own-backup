@@ -187,9 +187,17 @@
     "ru": "RMAPBT: узел заявляет невозможное",
     "en": "RMAPBT: a node claims an impossible record count"
   },
-  "xfs_efree.rmap_too_deep": {
-    "ru": "RMAPBT глубже 16 уровней",
-    "en": "RMAPBT is deeper than 16 levels"
+  "xfs_efree.refusal_agfl_full": {
+    "ru": "группа %{ag}: освободившимся листьям RMAPBT нет места в AGFL",
+    "en": "AG %{ag}: no room in the AGFL for the RMAPBT leaves this would free"
+  },
+  "xfs_efree.agfl_unreadable": {
+    "ru": "AGFL не читается: неверная сигнатура или контрольная сумма",
+    "en": "the AGFL is unreadable: wrong magic or checksum"
+  },
+  "xfs_efree.agf_counts_too_small": {
+    "ru": "счётчики блоков деревьев в AGF меньше, чем освобождается",
+    "en": "the AGF btree block counters are smaller than what is being freed"
   },
   "xfs_efree.rmap_too_large": {
     "ru": "RMAPBT слишком велик — похоже на цикл",
@@ -226,10 +234,6 @@
   "xfs_efree.record_exists": {
     "ru": "группа %{ag}: в %{tree} уже есть запись %{start}+%{len}",
     "en": "AG %{ag}: %{tree} already has a record %{start}+%{len}"
-  },
-  "xfs_efree.rmap_owner_missing": {
-    "ru": "группа %{ag}: в RMAPBT нет записи владельца %{owner}",
-    "en": "AG %{ag}: RMAPBT has no record for owner %{owner}"
   },
   "xfs_efree.agf_crc_mismatch": {
     "ru": "группа %{ag}: CRC AGF не сходится — не трогаю",

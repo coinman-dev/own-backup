@@ -2,6 +2,50 @@
 
 # Changelog
 
+## 0.1.5-beta — 2026-10-17
+
+### Added
+
+- Tools assign and remove drive letters of hidden system partitions (EFI,
+  recovery) and show the disk model.
+- When writing to the backup disk stops moving — a failing or disconnected
+  disk that answers with errors — the job panel says so after two minutes.
+  Cancelling such a run works and frees the queue even while the write
+  itself hangs; the unfinished file publishes nothing.
+- The job panel says that the source is an encrypted volume and that the
+  copy holds it decrypted, with a warning when the copy is not encrypted.
+- The full license texts of all third-party components are installed next
+  to the program (THIRD-PARTY-LICENSES.txt).
+
+### Changed
+
+- The boot medium's taskbar speaks the language of Windows from the start.
+- The EFI partition scan tells Acronis loaders apart and recognises the
+  program's own boot environment.
+
+### Fixed
+
+- VHDX and qcow2 are written under a private name and get their real one only
+  when finished. A service stopped while excluded files were being deleted
+  used to leave a half-made image that looked like a finished version and
+  became the parent of the next increment, and after such a crash old copies
+  of that job stopped being cleaned up.
+- After an interrupted exclusion pass in an OBK, the next run also removes
+  its scratch file.
+- A run that could not be written into the program's history is marked on
+  the job panel and written before the next run.
+- Exclusions work again on XFS made by mkfs.xfs 6.x (nrext64) — such volumes
+  used to be copied without them. True removal on XFS no longer backs off from
+  the reverse-mapping tree: on the test set it deletes 1369 of 1403 files
+  instead of 172.
+- Restoring from a new boot medium brings back the boot loader of an older
+  Windows too.
+- Restoring on the medium no longer says the disk is not connected before the
+  password is entered, nor warns about another machine because of the WinPE
+  machine name.
+- Without WebView2, the installed program advises installing the runtime
+  rather than rebuilding the boot medium.
+
 ## 0.1.4-beta — 2026-10-14
 
 ### Changed

@@ -338,6 +338,15 @@ fn cleanup_in(parent: &Path, chain: &ChainKey, target: Option<&Path>) -> Result<
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => continue,
         }
+        // The exclusion pass's sealed scratch beside a new image is named
+        // from the stage (`obk_removal_win`), so the proof covers it too. A
+        // service killed during that pass left it behind (2026-10-16).
+        if recorded.new_image {
+            let scratch = parent.join(format!("{PREFIX}{id}{suffix}.excl.scratch"));
+            if std::fs::symlink_metadata(&scratch).is_ok_and(|meta| regular(&meta)) {
+                std::fs::remove_file(&scratch)?;
+            }
+        }
         // Retain the lock until the owner is unlinked, after the large sibling.
         #[cfg(windows)]
         {

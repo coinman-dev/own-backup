@@ -777,6 +777,13 @@ pub(crate) fn embedded_metadata_region(
 /// fields — never a fixed cap: the checksum table of a large disk runs to tens
 /// of MiB). `header_only` stops after the JSON header.
 fn read_meta_blob(image_path: &Path, container_format: &str, header_only: bool) -> Result<Vec<u8>> {
+    // A run still writing this image (or killed while it did) holds a
+    // provisional sidecar in there; no reader may take it for a version.
+    if crate::pending_image::is_pending_path(image_path) {
+        return Err(OwnBackupError::ImageFormat(
+            "unfinished backup is not a restore point".into(),
+        ));
+    }
     let (mut guest, meta_offset, meta_size) = open_meta_partition(image_path, container_format)?;
 
     // magic (8) + JSON length (4) — shared by v1 and v2 layouts.

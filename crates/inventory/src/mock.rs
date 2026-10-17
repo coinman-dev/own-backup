@@ -39,6 +39,8 @@ impl MockInventory {
             unlock_methods: Vec::new(),
             recovery_key_only: false,
             unlockable: true,
+            gpt_attributes: 0,
+            mbr_type: 0,
         };
 
         let msr_partition = PartitionInfo {
@@ -61,6 +63,8 @@ impl MockInventory {
             unlock_methods: Vec::new(),
             recovery_key_only: false,
             unlockable: true,
+            gpt_attributes: 0,
+            mbr_type: 0,
         };
 
         let ntfs_partition = PartitionInfo {
@@ -83,6 +87,8 @@ impl MockInventory {
             unlock_methods: Vec::new(),
             recovery_key_only: false,
             unlockable: true,
+            gpt_attributes: 0,
+            mbr_type: 0,
         };
 
         DiskInfo {

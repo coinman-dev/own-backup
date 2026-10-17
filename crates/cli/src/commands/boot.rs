@@ -587,7 +587,7 @@ fn import(args: ImportArgs) -> own_backup_common::Result<()> {
     let json = std::fs::read_to_string(&args.file)?;
     let backup = BootBackup::load(&json)?;
 
-    let here = std::env::var("COMPUTERNAME").unwrap_or_default();
+    let here = own_backup_common::media_mode::meaningful_machine_name().unwrap_or_default();
     println!(
         "Копия снята: {} на машине «{}»",
         backup.taken_at, backup.machine

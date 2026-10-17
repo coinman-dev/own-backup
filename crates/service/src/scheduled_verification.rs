@@ -113,6 +113,7 @@ pub fn spawn(
                     blocks_done: 0, blocks_total: 0, speed_mbps: 0.0,
                     volume_index: 0, volume_count: 0, volume: task_job.name.clone(),
                     image_file_name: String::new(), categories: vec![], excluded_files: None, excluded_bytes: None,
+                    stalled_secs: None,
                 });
                 let started_at = chrono::Utc::now().to_rfc3339();
                 let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||

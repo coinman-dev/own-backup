@@ -459,6 +459,9 @@ export interface JobRun {
    *  (Windows Update does this to WinRE) and the job followed them — said
    *  in words; '' or absent when nothing changed. */
   layout_changed?: string;
+  /** Set by the service while this run is not in its history files (the
+   *  write failed and is retried before the next run) — said in words. */
+  record_error?: string;
   /** Every image this run produced, one per source volume. `image_path` and
    *  `base_image_path` above describe only the first. Empty in runs recorded
    *  before this field existed. */
@@ -737,6 +740,9 @@ export interface JobProgress {
   volume?: string;
   /** File name of the image being written (shown after the destination). */
   image_file_name?: string;
+  /** Seconds without any progress, once the service finds that worth saying
+   *  (a backup disk that stopped taking writes). Absent otherwise. */
+  stalled_secs?: number;
   /**
    * Разбивка оставшихся файлов по типам — приходит ОДИН раз, сразу после
    * скана, и дальше не меняется. Пары «категория → байты»: сканер видит каждый
@@ -1065,4 +1071,19 @@ export interface MediaProgress {
   percent: number;
   detail: string;
   finished: boolean;
+}
+
+/** A hidden system partition — EFI, recovery, vendor tools — that Windows
+ *  keeps without a drive letter (`HiddenVolume` in common/disk.rs). */
+export interface HiddenVolume {
+  /** `S:` with a letter, else `\?\Volume{GUID}`: what the letter calls take. */
+  device: string;
+  letter: string | null;
+  kind: 'esp' | 'winre' | 'other';
+  disk_number: number;
+  disk_model: string;
+  part_index: number;
+  size_bytes: number;
+  filesystem: string;
+  label: string;
 }

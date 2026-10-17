@@ -90,6 +90,62 @@ async fn execute(client: &mut BackupClient, v: &Value) -> Result<Value, String> 
             };
             Ok(serde_json::to_value(saved).unwrap())
         }
+        // A bootable whole-disk job for the disk Windows runs from, built the
+        // way the wizard builds it when that disk is picked with every box
+        // ticked: each partition with an openable volume is a source, the disk
+        // snapshot is captured, and the copy carries the boot entries.
+        "create-system-disk-job" => {
+            let disks: Vec<own_backup_common::disk::DiskInfo> =
+                serde_json::from_str(&client.list_disks_json().await?)
+                    .map_err(|e| e.to_string())?;
+            let disk = disks
+                .iter()
+                .find(|d| d.partitions.iter().any(|p| p.is_system))
+                .ok_or("no disk holds the running Windows")?;
+            let number: u32 = disk
+                .device_id
+                .rsplit("PhysicalDrive")
+                .next()
+                .and_then(|n| n.parse().ok())
+                .ok_or("system disk has no number")?;
+            let parts: Vec<&own_backup_common::disk::PartitionInfo> = disk
+                .partitions
+                .iter()
+                .filter(|p| !p.volume_device.is_empty())
+                .collect();
+            let fs = |p: &own_backup_common::disk::PartitionInfo| {
+                serde_json::to_value(p.filesystem)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_string))
+                    .unwrap_or_default()
+            };
+            let sources: Vec<String> = parts.iter().map(|p| p.volume_device.clone()).collect();
+            let mut patch = json!({
+                "source": sources[0],
+                "sources": sources,
+                "source_labels": parts.iter().map(|p| p.volume_device.clone()).collect::<Vec<_>>(),
+                "disk_source": {
+                    "disk_number": number,
+                    "disk_model": disk.model,
+                    "parts": parts.iter().map(|p| json!({
+                        "part_index": p.index,
+                        "device": p.volume_device,
+                        "filesystem": fs(p),
+                    })).collect::<Vec<_>>(),
+                    "bootable": true,
+                },
+                "source_disks": [disk],
+            });
+            merge(&mut patch, &v["job"]);
+            let request = json!({
+                "op": "create",
+                "encrypted": v["encrypted"],
+                "password_file": v["password_file"],
+                "recovery_file": v["recovery_file"],
+                "job": patch,
+            });
+            Box::pin(execute(client, &request)).await
+        }
         "get" => Ok(serde_json::to_value(job(client, field(v, "id")?).await?).unwrap()),
         "save" => {
             let mut value = serde_json::to_value(job(client, field(v, "id")?).await?).unwrap();
@@ -109,7 +165,8 @@ async fn execute(client: &mut BackupClient, v: &Value) -> Result<Value, String> 
             let id = field(v, "id")?;
             let before = job(client, id).await?.last_run.map(|r| r.id);
             client.run_job(id).await?;
-            tokio::time::timeout(Duration::from_secs(900), async {
+            let limit = v["timeout_secs"].as_u64().unwrap_or(900);
+            tokio::time::timeout(Duration::from_secs(limit), async {
                 loop {
                     let current = job(client, id).await?;
                     if let Some(run) = current.last_run.filter(|r| Some(&r.id) != before.as_ref()) {
@@ -145,6 +202,73 @@ async fn execute(client: &mut BackupClient, v: &Value) -> Result<Value, String> 
             })
             .await
             .map_err(|_| "no active copy progress".to_string())?
+        }
+        // Starts the run and returns once it has spent `after_ms` inside
+        // `phase` — the moment a lab script kills the whole service (CHECKS 2).
+        "start-run-at-phase" => {
+            let id = field(v, "id")?;
+            let phase = field(v, "phase")?.to_string();
+            let after = Duration::from_millis(v["after_ms"].as_u64().unwrap_or(0));
+            let mut listener = client.clone();
+            let events = listener.stream_events().await?;
+            tokio::pin!(events);
+            client.run_job(id).await?;
+            let limit = v["timeout_secs"].as_u64().unwrap_or(900);
+            tokio::time::timeout(Duration::from_secs(limit), async {
+                // The phase can go quiet for minutes (a kernel merge reports
+                // nothing), so the delay runs on a clock, not on events.
+                let mut entered: Option<tokio::time::Instant> = None;
+                let mut events_seen = 0u64;
+                let mut last = json!(null);
+                loop {
+                    let wake = entered.map(|start| start + after);
+                    tokio::select! {
+                        event = events.next() => match event {
+                            Some(ClientEvent::Progress(p)) if p.job_id == id && p.phase == phase => {
+                                events_seen += 1;
+                                last = json!({"blocks_done":p.blocks_done,"blocks_total":p.blocks_total});
+                                entered.get_or_insert_with(tokio::time::Instant::now);
+                            }
+                            Some(_) => {}
+                            None => return Err(format!("stream closed before {after:?} in phase {phase}")),
+                        },
+                        _ = tokio::time::sleep_until(wake.unwrap_or_else(tokio::time::Instant::now)), if wake.is_some() => {
+                            return Ok(json!({"phase":phase,"events":events_seen,
+                                "in_phase_ms":entered.unwrap().elapsed().as_millis() as u64,"last":last}));
+                        }
+                    }
+                }
+            })
+            .await
+            .map_err(|_| "the phase was not reached".to_string())?
+        }
+        // Waits until the service says the job's copy has stood still
+        // (`JobProgress::stalled_secs`) — a backup disk failing every write.
+        "wait-stalled" => {
+            let id = field(v, "id")?.to_string();
+            let mut listener = client.clone();
+            let events = listener.stream_events().await?;
+            tokio::pin!(events);
+            let limit = v["timeout_secs"].as_u64().unwrap_or(600);
+            tokio::time::timeout(Duration::from_secs(limit), async {
+                while let Some(event) = events.next().await {
+                    if let ClientEvent::Progress(p) = event {
+                        if p.job_id == id {
+                            if let Some(secs) = p.stalled_secs {
+                                return Ok(json!({"stalled_secs":secs,"phase":p.phase,
+                                    "blocks_done":p.blocks_done,"blocks_total":p.blocks_total}));
+                            }
+                        }
+                    }
+                }
+                Err("event stream closed".to_string())
+            })
+            .await
+            .map_err(|_| "no stall was reported".to_string())?
+        }
+        "cancel-running" => {
+            client.cancel_running().await?;
+            Ok(json!({"cancel_requested":true}))
         }
         "cancel-scheduled" => {
             let id = field(v, "id")?;

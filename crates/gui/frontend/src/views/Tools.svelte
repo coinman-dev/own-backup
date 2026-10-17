@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { pickPath } from '../lib/pickPath.svelte';
   import BootMediaCard from '../components/BootMediaCard.svelte';
+  import HiddenVolumesCard from '../components/HiddenVolumesCard.svelte';
   import { api } from '../lib/api';
   import ArchiveUnlockModal from '../components/ArchiveUnlockModal.svelte';
   import {
@@ -362,6 +363,8 @@
     {#if verifyMsg}<div class="banner ok">{verifyMsg()}</div>{/if}
     {#if verifyErr}<div class="banner err">{verifyErr()}</div>{/if}
   </div>
+
+  <HiddenVolumesCard />
 
   <BootMediaCard />
 </div>

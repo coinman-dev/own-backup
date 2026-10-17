@@ -428,7 +428,7 @@ fn refuse_existing_outputs(image_path: &Path, full_image_path: Option<&Path>) ->
 
 pub fn backup_volume(
     req: &VolumeBackupRequest,
-    progress: impl FnMut(&BackupProgress) -> Result<()>,
+    mut progress: impl FnMut(&BackupProgress) -> Result<()>,
 ) -> Result<VolumeBackupSummary> {
     check_encrypted_target(req.encryption.as_ref(), req.image_format, &req.image_path)?;
     refuse_existing_outputs(&req.image_path, req.full_image_path.as_deref())?;
@@ -452,7 +452,7 @@ pub fn backup_volume(
             &staged,
             Some(pending.writer_file()?),
             &req.image_path,
-            progress,
+            &mut progress,
         )?;
         let published = settled_image_path(
             &req.image_path,
@@ -460,20 +460,51 @@ pub fn backup_volume(
             req.kind,
             summary.backup_kind,
         );
+        may_publish(&mut progress, summary.bytes_copied)?;
         pending.publish_as(&published)?;
         summary.sidecar_path = sidecar_path_for(&published);
         summary.image_path = published;
         return Ok(summary);
     }
-    let result = backup_volume_inner(req, None, &req.image_path, progress);
-    if result.is_err() {
-        // Best-effort cleanup of a partial image, under either name.
-        let _ = std::fs::remove_file(&req.image_path);
-        if let Some(full) = &req.full_image_path {
-            let _ = std::fs::remove_file(full);
-        }
-    }
-    result
+    // Written privately and published last, like the encrypted one above (see
+    // `pending_image`); a failed run's image goes when `pending` is dropped.
+    let pending = crate::pending_image::PendingImage::new(&req.image_path)?;
+    let staged = VolumeBackupRequest {
+        image_path: pending.path().to_path_buf(),
+        ..req.clone()
+    };
+    let mut summary = backup_volume_inner(&staged, None, &req.image_path, &mut progress)?;
+    let published = settled_image_path(
+        &req.image_path,
+        req.full_image_path.as_deref(),
+        req.kind,
+        summary.backup_kind,
+    );
+    may_publish(&mut progress, summary.bytes_copied)?;
+    pending.publish_as(&published)?;
+    summary.sidecar_path = sidecar_path_for(&published);
+    summary.image_path = published;
+    Ok(summary)
+}
+
+/// Asked of the caller right before an image is published. A run that was
+/// cancelled, or that the job runner stopped waiting for (a destination that
+/// stopped answering, see core's `engine_watch`), answers with an error, and
+/// the image goes with its private name instead of becoming a version.
+fn may_publish(
+    progress: &mut impl FnMut(&BackupProgress) -> Result<()>,
+    bytes_written: u64,
+) -> Result<()> {
+    progress(&BackupProgress {
+        backup_id: "publish".into(),
+        status: BackupStatus::Running,
+        blocks_done: 0,
+        blocks_total: 0,
+        bytes_written,
+        speed_bps: 0,
+        categories: None,
+        excluded: None,
+    })
 }
 
 /// The volume-root form VSS expects; None for anything that is not a volume.
@@ -960,9 +991,9 @@ fn backup_volume_inner(
         }
     }
 
-    // The kind is settled: from here on the image is written, and named inside,
-    // as what it is. An encrypted one is written to its private stage and only
-    // published under this name (see `backup_volume`).
+    // The kind is settled: from here on the image is named inside as what it
+    // is. Every container is written to its private stage and only published
+    // under this name (see `backup_volume`).
     let published = settled_image_path(
         published_path,
         req.full_image_path.as_deref(),
@@ -970,16 +1001,6 @@ fn backup_volume_inner(
         kind,
     );
     let published_path: &Path = &published;
-    let renamed;
-    let req = if owned_file.is_none() && req.image_path != published {
-        renamed = VolumeBackupRequest {
-            image_path: published.clone(),
-            ..req.clone()
-        };
-        &renamed
-    } else {
-        req
-    };
 
     // --- Used-sector map: NTFS → FAT32/exFAT → ext → btrfs → xfs → full copy ---
     let mut ntfs_map: Option<NtfsUsedSectorMap> = None;
@@ -3085,7 +3106,7 @@ impl UsedSectorMap for DiskUsedMap {
 /// excluded NTFS files remain as zero-filled ghosts (data still never leaves).
 pub fn backup_disk(
     req: &DiskBackupRequest,
-    progress: impl FnMut(&BackupProgress) -> Result<()>,
+    mut progress: impl FnMut(&BackupProgress) -> Result<()>,
 ) -> Result<DiskBackupSummary> {
     check_encrypted_target(req.encryption.as_ref(), req.image_format, &req.image_path)?;
     refuse_existing_outputs(&req.image_path, req.full_image_path.as_deref())?;
@@ -3105,7 +3126,7 @@ pub fn backup_disk(
             &staged,
             Some(pending.writer_file()?),
             &req.image_path,
-            progress,
+            &mut progress,
         )?;
         let published = settled_image_path(
             &req.image_path,
@@ -3113,18 +3134,28 @@ pub fn backup_disk(
             req.kind,
             summary.backup_kind,
         );
+        may_publish(&mut progress, summary.bytes_copied)?;
         pending.publish_as(&published)?;
         summary.image_path = published;
         return Ok(summary);
     }
-    let result = backup_disk_inner(req, None, &req.image_path, progress);
-    if result.is_err() {
-        let _ = std::fs::remove_file(&req.image_path);
-        if let Some(full) = &req.full_image_path {
-            let _ = std::fs::remove_file(full);
-        }
-    }
-    result
+    // Private until finished, as in `backup_volume`.
+    let pending = crate::pending_image::PendingImage::new(&req.image_path)?;
+    let staged = DiskBackupRequest {
+        image_path: pending.path().to_path_buf(),
+        ..req.clone()
+    };
+    let mut summary = backup_disk_inner(&staged, None, &req.image_path, &mut progress)?;
+    let published = settled_image_path(
+        &req.image_path,
+        req.full_image_path.as_deref(),
+        req.kind,
+        summary.backup_kind,
+    );
+    may_publish(&mut progress, summary.bytes_copied)?;
+    pending.publish_as(&published)?;
+    summary.image_path = published;
+    Ok(summary)
 }
 
 fn backup_disk_inner(
@@ -3657,16 +3688,6 @@ fn backup_disk_inner(
         kind,
     );
     let published_path: &Path = &published;
-    let renamed;
-    let req = if owned_file.is_none() && req.image_path != published {
-        renamed = DiskBackupRequest {
-            image_path: published.clone(),
-            ..req.clone()
-        };
-        &renamed
-    } else {
-        req
-    };
     let meta_offset = plan.meta_first_lba * sector;
     let meta_guid = (!encrypted).then(Uuid::new_v4);
 
@@ -5077,23 +5098,57 @@ pub fn finalize_boot(
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     let win_dir = format!(r"{}\Windows", windows_volume.trim_end_matches(['\\', '/']));
-    let mut cmd = std::process::Command::new("bcdboot");
-    cmd.arg(&win_dir);
-    if let Some(esp) = system_volume {
-        cmd.args(["/s", esp]);
-    }
-    cmd.args(["/f", if uefi { "UEFI" } else { "BIOS" }]);
-    cmd.creation_flags(CREATE_NO_WINDOW);
-
-    let out = cmd
-        .output()
-        .map_err(|e| OwnBackupError::Device(format!("failed to run bcdboot: {e}")))?;
-    if !out.status.success() {
-        return Err(OwnBackupError::RestoreIncompatible(format!(
-            "bcdboot failed (exit {}): {}",
-            out.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
+    let run = |program: &str| -> Result<std::result::Result<(), String>> {
+        let mut cmd = std::process::Command::new(program);
+        cmd.arg(&win_dir);
+        if let Some(esp) = system_volume {
+            cmd.args(["/s", esp]);
+        }
+        cmd.args(["/f", if uefi { "UEFI" } else { "BIOS" }]);
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        let out = cmd
+            .output()
+            .map_err(|e| OwnBackupError::Device(format!("failed to run bcdboot: {e}")))?;
+        if out.status.success() {
+            return Ok(Ok(()));
+        }
+        // bcdboot says what went wrong on STDOUT and leaves stderr empty: the
+        // report used to end in "bcdboot failed (exit -2146885629): " with
+        // nothing after the colon. Both streams, in the console's OEM code page.
+        let said = [out.stdout.as_slice(), out.stderr.as_slice()]
+            .iter()
+            .map(|b| crate::win_device::oem_text(b).trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        warn!(program, win_dir, uefi, exit = ?out.status.code(), output = %said, "bcdboot failed");
+        Ok(Err(format!(
+            "exit {}: {said}",
+            out.status.code().unwrap_or(-1)
+        )))
+    };
+    // The medium's own bcdboot first: its boot files are the newest. That is
+    // also what can go wrong — the bcdboot of WinPE 26100 refused a restored
+    // Windows 10 19041 with "Failure when attempting to copy boot files"
+    // (0x80092003, 2026-10-16). The restored system then gets its OWN bcdboot,
+    // the one that knows its boot files; Microsoft documents running it as
+    // `<drive>\Windows\System32\bcdboot`.
+    if let Err(first) = run("bcdboot")? {
+        let own = format!(r"{win_dir}\System32\bcdboot.exe");
+        if !std::path::Path::new(&own).is_file() {
+            return Err(OwnBackupError::RestoreIncompatible(format!(
+                "bcdboot failed ({first})"
+            )));
+        }
+        if let Err(second) = run(&own)? {
+            return Err(OwnBackupError::RestoreIncompatible(format!(
+                "bcdboot failed ({first}); the restored system's own bcdboot failed too ({second})"
+            )));
+        }
+        info!(
+            win_dir,
+            "bcdboot: the restored system's own bcdboot recreated the boot files"
+        );
     }
     info!(win_dir, uefi, "bcdboot: boot files recreated");
 
