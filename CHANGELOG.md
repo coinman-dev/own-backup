@@ -2,6 +2,17 @@
 
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- An unfinished VHDX or qcow2 image of a run whose service was killed is now
+  deleted when the service starts again (or at the next run, if the backup
+  disk was not connected). The service records each such file in its
+  protected folder before writing it, so only files it has proved its own
+  are deleted. Leftovers of earlier versions and of runs outside the service
+  stay where they are.
+
 ## 0.1.5-beta — 2026-10-17
 
 ### Added

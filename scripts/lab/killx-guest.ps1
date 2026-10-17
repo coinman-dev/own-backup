@@ -738,10 +738,17 @@ if ($media) {
         $atKill = @($killed.listing | ForEach-Object { $_.name })
         Check (@($atKill | Where-Object { $_ -notlike $private }).Count -eq 0) "nothing under a public name at the kill ($($atKill -join ', '))"
         Check (@($atKill | Where-Object { $_ -like "$private.tmp.$imageExt" }).Count -eq 1) 'the unfinished image is private'
+        $leftover = @($atKill | Where-Object { $_ -like $private })
         WaitService
         $after = Rpc 'job-after-kill' @{ op = 'get'; id = $id }
         Check ($null -eq $after.last_run) 'the killed run left no success in the history'
-        $leftover = @(Pending)
+        if (-not $encrypted) {
+            # The service's ledger proves a plain image ours; it sweeps the
+            # connected destinations as it starts, before any run.
+            for ($i = 0; $i -lt 60 -and @(Pending).Count; $i++) { Start-Sleep -Milliseconds 500 }
+            Report 'after-restart' @{ files = (Listing) }
+            Check (@(Pending).Count -eq 0) "the restarted service reclaimed the killed run's image ($((@(Pending)) -join ', '))"
+        }
 
         # Run 2: a full; the leftover is not a parent and not a version.
         $run2 = Rpc 'run2' @{ op = 'run'; id = $id; timeout_secs = 1800 }
@@ -763,13 +770,9 @@ if ($media) {
         Check ($public.Count -eq 1 -and "$store\$($public[0])" -eq $run4.image_path) "only run 4 is a public image ($($public -join ', '))"
         $versions = Rpc 'versions' @{ op = 'versions'; id = $id }
         $leftNow = @(Pending)
-        if ($encrypted) {
-            # The stage, its owner record and the exclusion scratch named from
-            # it are proved by the job's key, so the next run reclaims them all.
-            Check (@($leftover | Where-Object { $leftNow -contains $_ }).Count -eq 0) "the killed run's proved leftovers were reclaimed ($($leftover -join ', '))"
-        } else {
-            Check (@($leftover | Where-Object { $leftNow -contains $_ }).Count -eq $leftover.Count) 'the killed run leftover is kept, not deleted by guesswork'
-        }
+        # An OBK stage, its owner record and the exclusion scratch named from
+        # it are proved by the job's key; a plain image by the service ledger.
+        Check (@($leftover | Where-Object { $leftNow -contains $_ }).Count -eq 0) "the killed run's proved leftovers were reclaimed ($($leftover -join ', '))"
         Report 'listing-after' @{ files = (Listing); versions = $versions; left_of_kill = @($leftover | Where-Object { $leftNow -contains $_ }) }
 
         $verify = Rpc 'verify4' (@{ op = 'verify'; image = $run4.image_path } + $secret)

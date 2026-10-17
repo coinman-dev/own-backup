@@ -613,6 +613,22 @@ pub async fn run_main_loop(
     } else {
         std::sync::Arc::new(own_backup_core::PasswordStore::new(config.db_path()))
     };
+    // Unfinished VHDX/qcow2 images are recorded in the same SYSTEM-only
+    // directory, so that what a killed run left can be proved ours and
+    // deleted (`pending_image`). Destinations connected now are swept at
+    // once; the rest at the next run.
+    #[cfg(target_os = "windows")]
+    if let Some(dir) = _private_secret_guard
+        .as_ref()
+        .and_then(|guard| guard.path().parent())
+    {
+        match own_backup_backup::pending_image::use_ledger(dir.join("pending-images")) {
+            Ok(()) => {
+                std::thread::spawn(own_backup_backup::pending_image::reclaim_abandoned);
+            }
+            Err(e) => tracing::warn!(error = %e, "unfinished images will not be reclaimed"),
+        }
+    }
     #[cfg(not(target_os = "windows"))]
     let passwords = std::sync::Arc::new(own_backup_core::PasswordStore::new(config.db_path()));
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
