@@ -1094,7 +1094,7 @@ mod tests {
         for (_, _, _, inos) in &dirs {
             for &ino in inos {
                 let inode = read_inode(&mut vol, &sb, ino).unwrap();
-                let nextents = u32::from_be_bytes(inode[0x4C..0x50].try_into().unwrap()) as u64;
+                let nextents = crate::xfs_exclusions::data_nextents(&inode);
                 for (_, e) in fork_extents_at(&mut vol, &sb, &inode, inode[5], nextents).unwrap() {
                     returned
                         .entry(e.startblock >> sb.agblklog)

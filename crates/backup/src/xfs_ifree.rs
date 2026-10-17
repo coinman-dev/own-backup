@@ -100,6 +100,7 @@ const DI_NLINK: usize = 0x10;
 const DI_SIZE: usize = 0x38;
 const DI_NBLOCKS: usize = 0x40;
 const DI_NEXTENTS: usize = 0x4C;
+const DI_BIG_NEXTENTS: usize = 0x18;
 const DI_GEN: usize = 0x5C;
 const DI_CRC_OFF: usize = 0x64;
 const DI_CHANGECOUNT: usize = 0x68;
@@ -513,7 +514,13 @@ pub(crate) fn plan_inode_freeing(
             put_be32(&mut core, DI_NLINK, 0);
             put_be64(&mut core, DI_SIZE, 0);
             put_be64(&mut core, DI_NBLOCKS, 0);
-            put_be32(&mut core, DI_NEXTENTS, 0);
+            // The counter this inode uses: on nrext64 the kernel zeroes the
+            // 64-bit one at 0x18 and keeps the NREXT64 flag (probe 2026-10-17).
+            if crate::xfs_exclusions::nrext64(&core) {
+                put_be64(&mut core, DI_BIG_NEXTENTS, 0);
+            } else {
+                put_be32(&mut core, DI_NEXTENTS, 0);
+            }
             let gen = be32(&core, DI_GEN) as u32;
             put_be32(&mut core, DI_GEN, gen.wrapping_add(1));
             let cc = be64(&core, DI_CHANGECOUNT);

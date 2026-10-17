@@ -60,6 +60,33 @@ fn bad(msg: impl std::fmt::Display) -> OwnBackupError {
     OwnBackupError::Device(format!("xfs exclusions: {msg}"))
 }
 
+/// Incompatible features whose on-disk layout this code reads correctly:
+/// FTYPE, SPINODES, META_UUID, BIGTIME and NREXT64. Anything else (exchange
+/// ranges, parent pointers, a metadata directory…) may move what we read, and
+/// a volume we would misread is refused rather than half-understood.
+const KNOWN_INCOMPAT: u64 = 0x1 | 0x2 | 0x4 | 0x8 | 0x20;
+
+/// `XFS_DIFLAG2_NREXT64` in `di_flags2`: the inode keeps its data-fork extent
+/// count in the 64-bit `di_big_nextents` at 0x18, and the old 32-bit field at
+/// 0x4C means the attribute fork's. `mkfs.xfs` 6.x sets `nrext64` by default;
+/// until 2026-10-17 this code read 0x4C regardless, saw no extents even in
+/// directories, and on such a volume excluded nothing at all, silently.
+const DIFLAG2_NREXT64: u64 = 1 << 4;
+
+/// Does this v3 inode use the large extent counters?
+pub(crate) fn nrext64(inode: &[u8]) -> bool {
+    inode.len() >= 0x80 && be64(inode, 0x78) & DIFLAG2_NREXT64 != 0
+}
+
+/// The data fork's extent count, wherever this inode keeps it.
+pub(crate) fn data_nextents(inode: &[u8]) -> u64 {
+    if nrext64(inode) {
+        be64(inode, 0x18)
+    } else {
+        be32(inode, 0x4C)
+    }
+}
+
 fn be16(b: &[u8], o: usize) -> u64 {
     u16::from_be_bytes(b[o..o + 2].try_into().unwrap()) as u64
 }
@@ -183,6 +210,9 @@ pub(crate) fn parse_sb(vol: &mut dyn RawVolume) -> Result<Sb> {
     }
     if agblocks == 0 || agcount == 0 {
         return Err(bad("zero AG geometry"));
+    }
+    if incompat & !KNOWN_INCOMPAT != 0 {
+        return Err(bad(format!("unsupported incompatible features 0x{incompat:x}")));
     }
     if blocksize * agblocks * agcount > vol.len() {
         return Err(bad("filesystem larger than the device"));
@@ -499,7 +529,7 @@ fn read_dir(vol: &mut dyn RawVolume, sb: &Sb, dir_inode: &[u8]) -> Result<Vec<Di
             }
         }
         FMT_EXTENTS | FMT_BTREE => {
-            let nextents = be32(dir_inode, 0x4C);
+            let nextents = data_nextents(dir_inode);
             let extents = fork_extents(vol, sb, dir_inode, format, nextents)?;
             let mut blk = vec![0u8; sb.blocksize as usize];
             for e in extents {
@@ -722,7 +752,7 @@ pub fn scan_xfs_exclusions(
                     }
                     let size = be64(&fi, 0x38);
                     let format = fi[5];
-                    let nextents = be32(&fi, 0x4C);
+                    let nextents = data_nextents(&fi);
                     if let Ok(exts) = fork_extents(vol, &sb, &fi, format, nextents) {
                         matched_files.insert(e.ino, (exts, size, ino, e.name.clone()));
                     }

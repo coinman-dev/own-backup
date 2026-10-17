@@ -496,7 +496,7 @@ fn block_removal(
     names: &[String],
     edit: &mut DirEdit,
 ) -> Result<()> {
-    let nextents = be32(inode, 0x4C);
+    let nextents = crate::xfs_exclusions::data_nextents(inode);
     let extents = fork_extents_at(vol, sb, inode, inode[5], nextents)?;
     let bs = sb.blocksize as usize;
 
