@@ -451,8 +451,19 @@ function MediaBuild {
 
     $iso = "$store\media.iso"
     Remove-Item $iso -ErrorAction SilentlyContinue
-    $report = Rpc 'build-media' @{ op = 'build-media'; base_wim = $winre; output_iso = $iso; runtime_in_image = $true }
+    # 'media-sxs': the runtime beside boot.wim on the medium, the layout whose
+    # window does not open (0x800736B1); the SYSTEM half starts it from the
+    # mounted ISO under sxstrace first.
+    $inImage = $format -eq 'media'
+    $report = Rpc 'build-media' @{ op = 'build-media'; base_wim = $winre; output_iso = $iso; runtime_in_image = $inImage }
     Check (Test-Path $iso) "the medium is built ($((Get-Item $iso).Length) bytes)"
+    if (-not $inImage) {
+        [IO.File]::WriteAllText("$work\kill.request", (ConvertTo-Json -Compress @{ name = 'sxs'; action = 'sxs'; source = $iso }))
+        # Copying the runtime off the CD and three starts take minutes; the
+        # SYSTEM half reports what it saw itself.
+        for ($i = 0; $i -lt 1200 -and -not (Test-Path "$work\sxs.json"); $i++) { Start-Sleep -Seconds 1 }
+        Check (Test-Path "$work\sxs.json") 'the SYSTEM half tried the runtime from the mounted medium'
+    }
     $request = @{ name = 'rawcopy'; action = 'rawcopy'; source = $iso }
     [IO.File]::WriteAllText("$work\kill.request", (ConvertTo-Json -Compress $request))
     for ($i = 0; $i -lt 600 -and -not (Test-Path "$work\rawcopy.json"); $i++) { Start-Sleep -Milliseconds 500 }
@@ -618,8 +629,8 @@ if ($media) {
             Say 'KILLX-FAULT-DISK T:'
         }
         # Mode 'media': the medium carries this machine's WebView2, and the VM
-        # has no network — the runtime installer comes on the answer CD.
-        if ($format -eq 'media' -and -not (Get-ChildItem 'C:\Program Files (x86)\Microsoft\EdgeWebView\Application\*\msedgewebview2.exe' -ErrorAction SilentlyContinue)) {
+        # has no network; the runtime installer comes on the answer CD.
+        if ($format -like 'media*' -and -not (Get-ChildItem 'C:\Program Files (x86)\Microsoft\EdgeWebView\Application\*\msedgewebview2.exe' -ErrorAction SilentlyContinue)) {
             $setup = Start-Process "$lab\WebView2Runtime-x64.exe" -ArgumentList '/silent', '/install' -Wait -PassThru
             Check ($setup.ExitCode -eq 0) "WebView2 runtime installed (exit $($setup.ExitCode))"
         }
@@ -672,6 +683,54 @@ if ($media) {
             if (Test-Path "$work\kills.done") { break }
             Start-Sleep -Milliseconds 50
             $request = Get-Content "$work\kill.request" -Raw | ConvertFrom-Json
+            if ($request.action -eq 'sxs') {
+                # The medium's runtime started from the read-only CD and from a
+                # copy on C:, under sxstrace; with the file lists of both.
+                $name = $request.name
+                $out = [ordered]@{}
+                try {
+                    $img = Mount-DiskImage -ImagePath $request.source -PassThru
+                    $letter = ($img | Get-Volume).DriveLetter
+                    $cd = "${letter}:\OwnBackup\WebView2"
+                    $copy = 'C:\Lab\wv-copy'
+                    if (Test-Path $copy) { Remove-Item $copy -Recurse -Force }
+                    Copy-Item $cd $copy -Recurse
+                    $installedRt = @(Get-ChildItem 'C:\Program Files (x86)\Microsoft\EdgeWebView\Application\*\msedgewebview2.exe')[0].DirectoryName
+                    $rel = { param($root) @(Get-ChildItem $root -Recurse -File -Force | ForEach-Object { $_.FullName.Substring($root.Length + 1) + ' ' + $_.Length }) }
+                    $cdFiles = & $rel $cd; $srcFiles = & $rel $installedRt
+                    $out.cd_count = $cdFiles.Count; $out.src_count = $srcFiles.Count
+                    $out.only_in_source = @($srcFiles | Where-Object { $cdFiles -notcontains $_ } | Select-Object -First 60)
+                    $out.only_on_cd = @($cdFiles | Where-Object { $srcFiles -notcontains $_ } | Select-Object -First 60)
+                    $out.manifests = @(Get-ChildItem $cd -Recurse -Filter *.manifest | ForEach-Object { $_.FullName })
+                    $out.cd_attributes = "$((Get-Item "$cd\msedgewebview2.exe").Attributes)"
+                    $etl = "$work\sxs.etl"
+                    Start-Process sxstrace.exe -ArgumentList 'Trace', "-logfile:$etl", '-nostop' -WindowStyle Hidden
+                    Start-Sleep -Seconds 3
+                    $try = {
+                        param($exe)
+                        try {
+                            $p = Start-Process $exe -ArgumentList '--headless', '--no-sandbox', '--disable-gpu', 'about:blank' -PassThru -ErrorAction Stop
+                            Start-Sleep -Seconds 6
+                            if ($p.HasExited) { "exited $($p.ExitCode)" } else { Stop-Process -Id $p.Id -Force; Get-Process msedgewebview2 -ErrorAction SilentlyContinue | Stop-Process -Force; 'running' }
+                        } catch { "failed: $($_.Exception.Message)" }
+                    }
+                    $out.from_cd = & $try "$cd\msedgewebview2.exe"
+                    $out.from_copy = & $try "$copy\msedgewebview2.exe"
+                    $out.from_installed = & $try "$installedRt\msedgewebview2.exe"
+                    & sxstrace.exe StopTrace | Out-Null
+                    Start-Sleep -Seconds 2
+                    & sxstrace.exe Parse "-logfile:$etl" "-outfile:$work\sxs.txt" | Out-Null
+                    # ASCII only in this file: PowerShell 5.1 reads it as cp1251,
+                    # where a UTF-8 Cyrillic byte can be a quote mark.
+                    if (Test-Path "$work\sxs.txt") { $out.sxstrace = [string[]]@(Get-Content "$work\sxs.txt" | Where-Object { $_.Trim() } | Select-Object -First 200 | ForEach-Object { "$_" }) }
+                    $out.events = [string[]]@(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'SideBySide' } -MaxEvents 5 -ErrorAction SilentlyContinue | ForEach-Object { "$($_.TimeCreated.ToString('o')) $($_.Message)" })
+                } catch { $out.error = "$($_.Exception.Message)" }
+                finally { try { Dismount-DiskImage -ImagePath $request.source | Out-Null } catch { } }
+                Remove-Item "$work\kill.request" -Force
+                Report $name $out
+                Step "sxs done ($name)"
+                continue
+            }
             if ($request.action -eq 'rawcopy') {
                 # The built ISO, byte for byte from sector 0 of the blank 2 GiB
                 # disk, where the host reads it without mounting anything.
@@ -751,7 +810,7 @@ if ($media) {
         WaitService
         if ($mode -eq 'flush') { for ($i = 0; $i -lt 180 -and -not (Test-Path 'T:\'); $i++) { Start-Sleep -Seconds 1 } }
         New-Item -ItemType Directory -Force $store | Out-Null
-        if ($format -eq 'media') { MediaBuild; return }
+        if ($format -like 'media*') { MediaBuild; return }
         $state = if (Test-Path "$work\job.json") { Get-Content "$work\job.json" -Raw | ConvertFrom-Json } else { $null }
         if (-not $state) {
             # Synthetic secret of a throwaway VM.

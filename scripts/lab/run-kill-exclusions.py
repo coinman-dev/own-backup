@@ -55,8 +55,8 @@ def answer_iso() -> Path:
     (lab / 'sys-marker.txt').write_text('Own Backup kill-during-exclusions acceptance media\n')
     # vhdx | qcow2 | obk: which container the guest's job writes this time.
     fmt = os.environ.get('OBK_FORMAT', 'vhdx')
-    assert fmt in ('vhdx', 'qcow2', 'obk', 'consol', 'consol-vhdx', 'consol-qcow2', 'flush-vhdx', 'flush-obk', 'probe-io', 'stall-vhdx', 'stall-obk', 'history', 'media'), fmt
-    if fmt == 'media':
+    assert fmt in ('vhdx', 'qcow2', 'obk', 'consol', 'consol-vhdx', 'consol-qcow2', 'flush-vhdx', 'flush-obk', 'probe-io', 'stall-vhdx', 'stall-obk', 'history', 'media', 'media-sxs'), fmt
+    if fmt.startswith('media'):
         # The medium carries the machine's WebView2; the VM has no network.
         shutil.copyfile(LAB / 'media/WebView2Runtime-x64.exe', lab / 'WebView2Runtime-x64.exe')
     # OBK_TAG names a fresh attempt of a format that has already passed.
@@ -184,7 +184,7 @@ def step_test() -> None:
     cmd = S.base_cmd(S.ACTIVE / 'vars.fd', S.EVIDENCE / 'test-serial.log', S.ACTIVE / 'test.sock')
     cmd += S.disk(S.ACTIVE / 'windows.qcow2', 0) + S.disk(S.ACTIVE / 'data.qcow2', 1) + S.cdrom(S.ACTIVE / 'answer.iso', 2)
     watch = None
-    if os.environ.get('OBK_FORMAT') == 'media':
+    if os.environ.get('OBK_FORMAT', '').startswith('media'):
         # A blank disk the guest writes the built ISO onto, raw from sector 0.
         media = S.ACTIVE / 'media.raw'
         media.unlink(missing_ok=True)
@@ -280,6 +280,9 @@ def step_boot_media() -> None:
                 vm.wait(timeout=30)
             except subprocess.TimeoutExpired:
                 vm.kill()
+    # The run's space bound counts the active folder; the screenshots are the evidence.
+    for leftover in (iso, efisys, vars_fd):
+        leftover.unlink(missing_ok=True)
     print('MEDIA-BOOTED (judge the screenshots)', flush=True)
 
 
