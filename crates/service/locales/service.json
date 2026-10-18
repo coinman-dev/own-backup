@@ -425,5 +425,6 @@
   "single_instance.could_not_check": {
     "ru": "не удалось проверить, не запущена ли служба уже (%{reason}) — запуск отменён, чтобы не получилось двух движков сразу",
     "en": "could not check whether the service is already running (%{reason}) — start cancelled so that two engines never run at once"
-  }
+  },
+  "grpc_server.archive_key_store_missing": {"ru": "Шифрование копий в Linux пока недоступно: нет хранилища ключей службы. Ключ восстановления не выдан — без хранилища разрешение нельзя было бы завершить.", "en": "Archive encryption is not available on Linux yet: the service has no key store. No recovery key was issued — without the store the authorization could never be completed."}
 }

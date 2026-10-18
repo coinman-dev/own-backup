@@ -1184,13 +1184,29 @@ impl BackupService for BackupServiceImpl {
                 linux_last_mounted: probe.linux_last_mounted,
             }
         };
-        #[cfg(not(target_os = "windows"))]
-        let dto = VolumeUnlockDto {
-            ok: true,
-            filesystem: String::new(),
-            label: String::new(),
-            used_bytes: 0,
-            linux_last_mounted: String::new(),
+        #[cfg(target_os = "linux")]
+        let dto = {
+            let (vol, pw) = (p.volume.clone(), p.password.clone());
+            let probe = tokio::task::spawn_blocking(move || {
+                own_backup_backup::engine_linux::unlock_and_probe(&vol, &pw)
+            })
+            .await
+            .map_err(|e| Status::internal(format!("probe task panicked: {e}")))?
+            .map_err(|e| Status::internal(e.to_string()))?;
+            VolumeUnlockDto {
+                ok: probe.ok,
+                filesystem: probe.filesystem,
+                label: probe.label,
+                used_bytes: probe.used_bytes,
+                linux_last_mounted: probe.linux_last_mounted,
+            }
+        };
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+        let dto: VolumeUnlockDto = {
+            let _ = &p;
+            return Err(Status::unimplemented(
+                "volume unlock is not available on this platform",
+            ));
         };
 
         // Only cache a password that actually unlocked the volume. Key by the
@@ -2339,6 +2355,13 @@ impl BackupService for BackupServiceImpl {
         // The job as it will be once encrypted: over plaintext copies that is a
         // format change, and it must be refused now rather than by every run.
         validate_job(&p.job, true)?;
+        // Without a local key store the authorization can never be confirmed:
+        // handing out a recovery key for it would be a promise nobody keeps.
+        if cfg!(not(target_os = "windows")) {
+            return Err(Status::failed_precondition(
+                tr!("grpc_server.archive_key_store_missing").into_owned(),
+            ));
+        }
 
         // Sealing the envelope is Argon2id at the production profile — seconds,
         // not milliseconds, and it must not sit on the async runtime.
@@ -2529,6 +2552,14 @@ impl BackupService for BackupServiceImpl {
         req: Request<JsonRequest>,
     ) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
+        // The plan executor is Windows-only so far. Previewing a plan that can
+        // never be applied — or accepting it and failing later — answers a
+        // question nobody asked (`.ai/PLAN.md` §6, stage 3).
+        if cfg!(not(target_os = "windows")) {
+            return Err(Status::unimplemented(
+                tr!("grpc_server.engine_windows_only").into_owned(),
+            ));
+        }
         use own_backup_common::restore_check::{check_plan, CheckContext};
         use own_backup_common::restore_plan::RestorePlan;
 
@@ -2619,6 +2650,14 @@ impl BackupService for BackupServiceImpl {
         req: Request<JsonRequest>,
     ) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
+        // The plan executor is Windows-only so far. Previewing a plan that can
+        // never be applied — or accepting it and failing later — answers a
+        // question nobody asked (`.ai/PLAN.md` §6, stage 3).
+        if cfg!(not(target_os = "windows")) {
+            return Err(Status::unimplemented(
+                tr!("grpc_server.engine_windows_only").into_owned(),
+            ));
+        }
         use own_backup_common::restore_plan::RestorePlan;
         use own_backup_common::restore_state::RunStatus;
 
@@ -2984,12 +3023,13 @@ impl BackupService for BackupServiceImpl {
             .map_err(|e| Status::internal(e.to_string()))?;
             json_reply(&value)
         }
+        // Not read here yet: answering "not UEFI" on a UEFI machine is a wrong
+        // fact, not a missing feature (`.ai/PLAN.md` §6, stage 3).
         #[cfg(not(target_os = "windows"))]
         {
-            json_reply(&serde_json::json!({
-                "uefi": false,
-                "message": tr!("grpc_server.boot_read_windows_only").into_owned(),
-            }))
+            Err(Status::unimplemented(
+                tr!("grpc_server.boot_read_windows_only").into_owned(),
+            ))
         }
     }
 

@@ -1,15 +1,12 @@
 use own_backup_common::preflight::{resolve_support_tier, PreflightReport};
-#[cfg(not(target_os = "windows"))]
-use own_backup_common::types::{BootMode, DiskType, FileSystem, PartitionTable, SupportTier};
 use own_backup_common::Result;
 use tracing::info;
 
 /// Orchestrates preflight analysis for a target disk.
 ///
 /// On Windows this delegates to [`crate::preflight_windows::collect_windows_preflight`]
-/// which calls real Win32 APIs. On Linux (dev/CI) it uses synthetic mock data
-/// that represents a healthy UEFI/GPT/NTFS system, so the rest of the pipeline
-/// can be tested end-to-end.
+/// which calls real Win32 APIs. Elsewhere there is no analysis yet, and it says
+/// so: it used to return a made-up healthy UEFI/NTFS/VSS report.
 pub struct PreflightAnalyzer {
     _private: (),
 }
@@ -45,33 +42,12 @@ impl PreflightAnalyzer {
         crate::preflight_windows::collect_windows_preflight(device_id)
     }
 
-    /// On non-Windows platforms, return mock data suitable for dev/CI testing.
-    /// This simulates a healthy Windows system with UEFI, GPT, NTFS, and
-    /// working VSS -- the most common configuration we aim to support.
+    /// No analysis off Windows yet — an error, not an invented healthy report.
     #[cfg(not(target_os = "windows"))]
     fn collect_raw_data(&self, device_id: &str) -> Result<PreflightReport> {
-        info!(
-            device_id,
-            "Using mock preflight data (non-Windows platform)"
-        );
-
-        Ok(PreflightReport {
-            boot_mode: BootMode::Uefi,
-            secure_boot: true,
-            partition_table: PartitionTable::Gpt,
-            disk_type: DiskType::Basic,
-            sector_size_logical: 512,
-            sector_size_physical: 4096,
-            filesystem: FileSystem::Ntfs,
-            vss_service_running: true,
-            vss_writers_healthy: true,
-            free_space_on_target: 500_000_000_000,  // 500 GB
-            estimated_backup_size: 120_000_000_000, // 120 GB
-            efi_partition_present: true,
-            support_tier: SupportTier::A, // will be recalculated by resolve_support_tier
-            warnings: vec![],
-            blockers: vec![],
-        })
+        Err(own_backup_common::OwnBackupError::NotImplemented(format!(
+            "preflight analysis of {device_id} is only available on Windows"
+        )))
     }
 }
 
@@ -84,18 +60,13 @@ impl Default for PreflightAnalyzer {
 #[cfg(all(test, not(target_os = "windows")))]
 mod tests {
     use super::*;
-    use own_backup_common::types::SupportTier;
 
     #[test]
-    fn mock_preflight_returns_tier_a() {
-        let analyzer = PreflightAnalyzer::new();
-        let report = analyzer.analyze(r"\\.\PhysicalDrive0").unwrap();
-
-        assert_eq!(report.support_tier, SupportTier::A);
-        assert!(report.blockers.is_empty());
-        assert!(report.warnings.is_empty());
-        assert_eq!(report.boot_mode, BootMode::Uefi);
-        assert_eq!(report.partition_table, PartitionTable::Gpt);
-        assert_eq!(report.filesystem, FileSystem::Ntfs);
+    fn no_invented_report_off_windows() {
+        let err = PreflightAnalyzer::new().analyze("/dev/sda").unwrap_err();
+        assert!(matches!(
+            err,
+            own_backup_common::OwnBackupError::NotImplemented(_)
+        ));
     }
 }

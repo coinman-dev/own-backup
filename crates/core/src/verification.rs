@@ -9,7 +9,6 @@ use own_backup_common::{
 };
 use serde::{Deserialize, Serialize};
 
-#[cfg(target_os = "windows")]
 use crate::JobProgress;
 
 use crate::{EventSink, Job, JobRun, JobStore, ScheduleConfig};
@@ -88,74 +87,93 @@ pub fn perform(store: &JobStore, job: &Job, cancel: &CancelToken, sink: &dyn Eve
         let keys = keys
             .as_ref()
             .map_err(|message| OwnBackupError::Config(message.clone()))?;
-        #[cfg(target_os = "windows")]
-        {
-            use own_backup_backup::engine_win::{verify_image_scoped, VerifyScope};
-            let mut last_percent = u64::MAX;
-            let mut last_emit = std::time::Instant::now();
-            let found = verify_image_scoped(
-                path,
-                keys.as_ref(),
-                VerifyScope::Everything,
-                |done, total| {
-                    if cancel.is_cancelled() {
-                        return Err(OwnBackupError::Cancelled);
-                    }
-                    let percent = (index as u64 * 100
-                        + if total > 0 { done * 100 / total } else { 0 })
-                        / count as u64;
-                    if percent != last_percent || last_emit.elapsed().as_millis() >= 400 {
-                        last_percent = percent;
-                        last_emit = std::time::Instant::now();
-                        sink.job_progress(JobProgress {
-                            job_id: job.id.clone(),
-                            phase: "scheduled-verify".into(),
-                            percent,
-                            blocks_done: done,
-                            blocks_total: total,
-                            speed_mbps: 0.0,
-                            volume_index: index as u64,
-                            volume_count: count as u64,
-                            volume: job.name.clone(),
-                            image_file_name: path
-                                .file_name()
-                                .unwrap_or_default()
-                                .to_string_lossy()
-                                .into_owned(),
-                            categories: vec![],
-                            excluded_files: None,
-                            excluded_bytes: None,
-                            stalled_secs: None,
-                        });
-                    }
-                    if cancel.is_cancelled() {
-                        Err(OwnBackupError::Cancelled)
-                    } else {
-                        Ok(())
-                    }
-                },
-            )?;
-            Ok(JobVerifyImage {
-                image_path: path.display().to_string(),
-                file_name: path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned(),
-                valid: found.valid(),
-                blocks_checked: found.blocks_checked,
-                mismatched_blocks: found.mismatched_blocks.len() as u64,
-                error: String::new(),
-            })
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            let _ = (keys, path, index, count, sink);
-            Err(OwnBackupError::Config(
-                tr!("verification.windows_only").into_owned(),
-            ))
-        }
+        let mut last_percent = u64::MAX;
+        let mut last_emit = std::time::Instant::now();
+        let progress = |done, total| {
+            if cancel.is_cancelled() {
+                return Err(OwnBackupError::Cancelled);
+            }
+            let percent = (index as u64 * 100 + if total > 0 { done * 100 / total } else { 0 })
+                / count as u64;
+            if percent != last_percent || last_emit.elapsed().as_millis() >= 400 {
+                last_percent = percent;
+                last_emit = std::time::Instant::now();
+                sink.job_progress(JobProgress {
+                    job_id: job.id.clone(),
+                    phase: "scheduled-verify".into(),
+                    percent,
+                    blocks_done: done,
+                    blocks_total: total,
+                    speed_mbps: 0.0,
+                    volume_index: index as u64,
+                    volume_count: count as u64,
+                    volume: job.name.clone(),
+                    image_file_name: path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned(),
+                    categories: vec![],
+                    excluded_files: None,
+                    excluded_bytes: None,
+                    stalled_secs: None,
+                });
+            }
+            if cancel.is_cancelled() {
+                Err(OwnBackupError::Cancelled)
+            } else {
+                Ok(())
+            }
+        };
+        let (valid, blocks_checked, mismatched_blocks) =
+            check_image(path, keys.as_ref(), progress)?;
+        Ok(JobVerifyImage {
+            image_path: path.display().to_string(),
+            file_name: path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+            valid,
+            blocks_checked,
+            mismatched_blocks,
+            error: String::new(),
+        })
     })
+}
+
+/// One image against its stored checksums: `(valid, blocks checked, mismatched)`.
+fn check_image(
+    path: &Path,
+    keys: Option<&own_backup_backup::seal::context::ArchiveKeys>,
+    progress: impl FnMut(u64, u64) -> Result<()>,
+) -> Result<(bool, u64, u64)> {
+    #[cfg(target_os = "windows")]
+    {
+        use own_backup_backup::engine_win::{verify_image_scoped, VerifyScope};
+        let found = verify_image_scoped(path, keys, VerifyScope::Everything, progress)?;
+        return Ok((
+            found.valid(),
+            found.blocks_checked,
+            found.mismatched_blocks.len() as u64,
+        ));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let found = own_backup_backup::engine_linux::verify_image_with_keys(path, keys, progress)?;
+        return Ok((
+            found.valid(),
+            found.blocks_checked,
+            found.mismatched_blocks.len() as u64,
+        ));
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        let _ = (path, keys, progress);
+        Err(OwnBackupError::Config(
+            tr!("verification.windows_only").into_owned(),
+        ))
+    }
 }
 
 /// The same driver with a supplied image reader for host-independent tests.
