@@ -6,6 +6,7 @@
 //! `engine_win` and `engine_linux` re-export it under the names their callers
 //! already know — so a fix made here is made once.
 
+pub(crate) mod chain;
 pub(crate) mod disk_image;
 pub(crate) mod read;
 pub(crate) mod target;

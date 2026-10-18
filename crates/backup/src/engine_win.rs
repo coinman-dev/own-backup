@@ -52,6 +52,7 @@ use crate::win_device::{normalize_device_path, WinRawDevice};
 
 // The platform-independent half of this engine lives in `engine_core`, shared
 // with the Linux engine; the `pub` names are the ones this engine's callers know.
+use crate::engine_core::chain::{validate_disk_parent, validate_parent};
 use crate::engine_core::disk_image::{
     container_kind, disk_source_token, DiskCompositeReader, DiskRegion, DiskUsedMap,
 };
@@ -257,36 +258,6 @@ pub fn backup_volume(
     summary.sidecar_path = sidecar_path_for(&published);
     summary.image_path = published;
     Ok(summary)
-}
-
-/// Check that `parent_image` can serve as the parent of a new child image for
-/// the volume being backed up.
-fn validate_parent(
-    parent_image: &Path,
-    block_size: u32,
-    volume_len: u64,
-    keys: Option<&crate::seal::context::ArchiveKeys>,
-) -> Result<Sidecar> {
-    if !parent_image.exists() {
-        return Err(OwnBackupError::Config(format!(
-            "parent image not found: {}",
-            parent_image.display()
-        )));
-    }
-    let sidecar = load_sidecar_with_keys(parent_image, keys)?;
-    if sidecar.manifest.block_size != block_size {
-        return Err(OwnBackupError::Config(format!(
-            "parent block size {} != requested {block_size}",
-            sidecar.manifest.block_size
-        )));
-    }
-    if sidecar.manifest.source_disk.size_bytes != volume_len {
-        return Err(OwnBackupError::Config(format!(
-            "volume size changed since the parent backup ({} -> {volume_len} bytes)",
-            sidecar.manifest.source_disk.size_bytes
-        )));
-    }
-    Ok(sidecar)
 }
 
 /// A BitLocker source: the key, and the window onto the disk its ciphertext
@@ -3738,63 +3709,6 @@ fn backup_disk_inner(
         },
         excluded_entries_kept,
     })
-}
-
-/// Validate that `parent_image` can serve as the parent of a new whole-disk
-/// child: it exists, is itself a whole-disk image (carries an embedded disk
-/// manifest), uses the same block size and container format. The image-size
-/// (geometry) match is checked by the caller once the child's plan is known.
-/// Returns the parent's full sidecar (its checksums seed the incremental skip).
-fn validate_disk_parent(
-    parent_image: &Path,
-    block_size: u32,
-    format: ImageFormat,
-    encryption: Option<&crate::seal::context::ArchiveKeys>,
-) -> Result<Sidecar> {
-    if !parent_image.exists() {
-        return Err(OwnBackupError::Config(format!(
-            "parent whole-disk image not found: {}",
-            parent_image.display()
-        )));
-    }
-    // An encrypted parent keeps its sidecar sealed inside the container, so
-    // continuing that chain needs the job's key — the same key the new image
-    // will be written with.
-    let sidecar = match encryption {
-        Some(keys) => {
-            let chain = keys.open_chain_of(parent_image)?;
-            crate::sidecar::read_sealed_sidecar(parent_image, &chain.key)?
-        }
-        None => {
-            let ext = parent_image
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or_default()
-                .to_lowercase();
-            read_embedded_sidecar(parent_image, &ext)?
-        }
-    };
-    if sidecar.disk_manifest.is_none() {
-        return Err(OwnBackupError::Config(format!(
-            "parent {} is not a whole-disk image (no embedded disk manifest)",
-            parent_image.display()
-        )));
-    }
-    if sidecar.manifest.block_size != block_size {
-        return Err(OwnBackupError::Config(format!(
-            "parent block size {} != requested {block_size}",
-            sidecar.manifest.block_size
-        )));
-    }
-    let want = container_ext(format, encryption);
-    if sidecar.info.container != want {
-        return Err(OwnBackupError::Config(format!(
-            "parent image is '{}' but the requested format is '{want}' — a backup \
-             chain cannot change container format",
-            sidecar.info.container,
-        )));
-    }
-    Ok(sidecar)
 }
 
 /// Create a differencing CHILD target over `parent_path` for an incremental /
