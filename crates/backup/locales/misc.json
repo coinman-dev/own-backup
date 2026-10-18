@@ -227,6 +227,14 @@
     "ru": "Нельзя убедиться, что копия не пишется на копируемый том: %{reason}.",
     "en": "Cannot confirm that the backup is not written to a volume being backed up: %{reason}."
   },
+  "source_identity.dest_not_absolute": {
+    "ru": "путь «%{folder}» не полный (не начинается с /), и по нему не определить диск",
+    "en": "the path “%{folder}” is not absolute (does not start with /), so its disk cannot be determined"
+  },
+  "source_identity.dest_fs_without_disk": {
+    "ru": "«%{folder}» лежит в файловой системе %{fstype} (%{source}), у которой нет определимого диска",
+    "en": "“%{folder}” is on a %{fstype} filesystem (%{source}) that has no disk that can be determined"
+  },
 
   "dest_folder.unavailable": {
     "ru": "папка назначения %{path} недоступна: %{error}.",

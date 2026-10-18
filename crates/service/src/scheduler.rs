@@ -309,10 +309,38 @@ async fn watch_destinations(
     }
 }
 
-/// The root that says whether a destination is reachable at all: `E:\` for
-/// `E:\Backup\Job`, `\\server\share\` for a share. The folder itself may not
-/// exist yet — a first copy creates it — so the drive is what is asked about.
+/// The root that says whether a destination is reachable at all. The folder
+/// itself may not exist yet — a first copy creates it — so the drive is what
+/// is asked about; `None` reads as "not there".
+#[cfg(not(target_os = "linux"))]
 fn dest_root(dest: &str) -> Option<std::path::PathBuf> {
+    drive_root(dest)
+}
+
+/// On Linux the drive is the mount the destination is under, and it is there
+/// only while it is mounted: an unplugged drive leaves its folder under `/run/
+/// media` gone (the tmpfs below answers instead) or its fixed mount point an
+/// empty folder of the system disk. Either way there is no mount of its own,
+/// and `None` — a mount point asked with `metadata` would always be found.
+/// Read from `/proc/self/mountinfo`, which touches no filesystem: this runs on
+/// the scheduler's thread, and a dead network mount must not hang it.
+#[cfg(target_os = "linux")]
+fn dest_root(dest: &str) -> Option<std::path::PathBuf> {
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+    dest_root_in(dest, &mountinfo)
+}
+
+/// [`dest_root`] against a given mount table.
+#[cfg(target_os = "linux")]
+fn dest_root_in(dest: &str, mountinfo: &str) -> Option<std::path::PathBuf> {
+    use own_backup_backup::source_identity::linux::{destination_mount, parse_mountinfo};
+    destination_mount(dest, &parse_mountinfo(mountinfo))
+}
+
+/// The drive of a Windows destination: `E:\` for `E:\Backup\Job`,
+/// `\\server\share\` for a share.
+#[cfg_attr(target_os = "linux", allow(dead_code))] // tested everywhere, used off Linux
+fn drive_root(dest: &str) -> Option<std::path::PathBuf> {
     let d = dest.trim();
     if let Some(rest) = d.strip_prefix(r"\\") {
         let mut parts = rest.split(['\\', '/']).filter(|p| !p.is_empty());
@@ -570,21 +598,55 @@ mod tests {
     fn a_destination_is_asked_about_by_its_drive() {
         use std::path::PathBuf;
         assert_eq!(
-            dest_root(r"F:\Backup\Disk_D (Work)"),
+            drive_root(r"F:\Backup\Disk_D (Work)"),
             Some(PathBuf::from(r"F:\"))
         );
-        assert_eq!(dest_root("e:"), Some(PathBuf::from(r"E:\")));
+        assert_eq!(drive_root("e:"), Some(PathBuf::from(r"E:\")));
         assert_eq!(
-            dest_root(r"\\nas\backups\pc1"),
+            drive_root(r"\\nas\backups\pc1"),
             Some(PathBuf::from(r"\\nas\backups\"))
         );
         assert_eq!(
-            dest_root(r"\\nas"),
+            drive_root(r"\\nas"),
             None,
             "a server with no share names no drive"
         );
-        assert_eq!(dest_root("relative\\path"), None);
-        assert_eq!(dest_root(""), None);
+        assert_eq!(drive_root("relative\\path"), None);
+        assert_eq!(drive_root(""), None);
+    }
+
+    /// On Linux the drive is the mount the destination is under: there while
+    /// the disk is plugged in, `None` once it is not, so the probe sees the
+    /// "destination connected" edge. Before, only `X:` and `\\server` were
+    /// understood and a Linux destination was `None` forever — the event never
+    /// fired.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_linux_destination_is_asked_about_by_its_mount() {
+        use std::path::PathBuf;
+        const BASE: &str = "\
+1 0 0:29 /@ / rw - btrfs /dev/mapper/root rw\n\
+2 1 0:28 / /run rw - tmpfs tmpfs rw\n\
+3 1 0:30 / /mnt/nas rw - nfs4 nas:/export rw\n";
+        let plugged =
+            format!("{BASE}4 2 8:17 / /run/media/u/Backup rw - ntfs3 /dev/sdb1 rw\n5 1 8:33 / /media/usb rw - vfat /dev/sdc1 rw\n");
+        // Removable drives under /run/media and at a fixed /media mount point.
+        for dest in ["/run/media/u/Backup/Jobs/PC", "/media/usb/Jobs"] {
+            assert!(dest_root_in(dest, &plugged).is_some(), "{dest}");
+            assert_eq!(dest_root_in(dest, BASE), None, "{dest} unplugged");
+        }
+        assert_eq!(
+            dest_root_in("/run/media/u/Backup/Jobs/PC", &plugged),
+            Some(PathBuf::from("/run/media/u/Backup"))
+        );
+        assert_eq!(
+            dest_root_in("/mnt/nas/pc1", BASE),
+            Some(PathBuf::from("/mnt/nas"))
+        );
+        // Windows forms mean nothing here.
+        assert_eq!(dest_root_in(r"E:\Backup", &plugged), None);
+        assert_eq!(dest_root_in(r"\\nas\backups", &plugged), None);
+        assert_eq!(dest_root(r"E:\Backup"), None);
     }
 
     #[test]

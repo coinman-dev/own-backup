@@ -137,6 +137,101 @@ pub fn is_network_path(path: &str) -> bool {
         || p.starts_with("//")
 }
 
+/// The file-name token of a Linux source device, or `None` when `device` is
+/// not one. `own_backup_core::source_token` answers for every other form, and
+/// the window mirrors both (`lib/sourceToken.ts`).
+///
+/// * `/dev/disk/by-partuuid/<PARTUUID>` → `U` + its first 8 hex digits, or
+///   all 10 for the MBR form `<disk signature>-<partition number>`: the first
+///   8 of those are the same for every partition of the disk;
+/// * `/dev/disk/by-uuid/<filesystem UUID>` → `F` + its first 8 hex digits;
+/// * any other absolute path (`/dev/mapper/<name>`, `/dev/sdb2`) → `H` + the
+///   top 8 hex digits of an xxh64 of the whole path: the same path always
+///   gives the same token, another path almost never does.
+///
+/// Before this every Linux device was "no drive letter", that is "X": one
+/// saved password, one file name and one chain for all of them. A path that
+/// starts with `//` is a share in Windows' sense and keeps the answer it had.
+pub fn unix_device_token(device: &str) -> Option<String> {
+    let d = device.trim();
+    if !d.starts_with('/') || d.starts_with("//") {
+        return None;
+    }
+    let hex = |id: &str| -> String {
+        id.chars()
+            .filter(char::is_ascii_hexdigit)
+            .collect::<String>()
+            .to_ascii_uppercase()
+    };
+    if let Some(id) = d.strip_prefix("/dev/disk/by-partuuid/") {
+        let digits = hex(id);
+        let take = if is_mbr_partuuid(id) { 10 } else { 8 };
+        if digits.len() >= take {
+            return Some(format!("U{}", &digits[..take]));
+        }
+    }
+    if let Some(id) = d.strip_prefix("/dev/disk/by-uuid/") {
+        let digits = hex(id);
+        if digits.len() >= 8 {
+            return Some(format!("F{}", &digits[..8]));
+        }
+    }
+    let hash = xxhash_rust::xxh64::xxh64(d.as_bytes(), 0);
+    Some(format!("H{:08X}", hash >> 32))
+}
+
+/// `4955b993-01`: an MBR disk's signature and the partition's number, which is
+/// what Linux reports as the PARTUUID of a partition with no GPT behind it.
+fn is_mbr_partuuid(id: &str) -> bool {
+    let b = id.as_bytes();
+    b.len() == 11
+        && b[8] == b'-'
+        && b.iter()
+            .enumerate()
+            .all(|(i, c)| i == 8 || c.is_ascii_hexdigit())
+}
+
+/// Where a destination folder is, as far as [`where_the_destination_sits`]
+/// is concerned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DestLocation {
+    /// On another machine — a share, a network filesystem. No local source
+    /// can be under it.
+    Network,
+    /// These ranges of local disks.
+    Local(Vec<Extent>),
+    /// It could not be worked out. The reason, in words.
+    Unknown(String),
+}
+
+/// Locate the destination folder.
+///
+/// On Windows: a UNC share is another machine, everything else is the volume
+/// the nearest existing ancestor sits on. On Linux the filesystem the folder
+/// is mounted from decides, network or not, and its device is followed down
+/// to the disks under it (see [`linux`]).
+pub fn locate_destination(dest_folder: &str) -> DestLocation {
+    #[cfg(target_os = "linux")]
+    {
+        linux::Host::real().locate_destination(dest_folder)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        if is_network_path(dest_folder) {
+            return DestLocation::Network;
+        }
+        match extents_of_destination(dest_folder) {
+            Some(e) => DestLocation::Local(e),
+            None => DestLocation::Unknown(
+                tr!("source_identity.dest_volume_unknown", folder = dest_folder).into_owned(),
+            ),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub mod linux;
+
 #[cfg(target_os = "windows")]
 mod win {
     use super::*;
@@ -209,17 +304,43 @@ mod win {
 #[cfg(target_os = "windows")]
 pub use win::{extents_of_destination, extents_of_source, stable_source_id};
 
-#[cfg(not(target_os = "windows"))]
+/// The sectors a Linux source device occupies, followed through symlinks
+/// (`/dev/disk/by-partuuid/…`, `/dev/mapper/…`) and stacked devices (LUKS,
+/// LVM) down to the disks — see [`linux::Host::extents_of_source`].
+#[cfg(target_os = "linux")]
+pub fn extents_of_source(device: &str) -> Option<Vec<Extent>> {
+    linux::Host::real().extents_of_source(device)
+}
+
+/// The sectors the filesystem holding the destination folder occupies; `None`
+/// for a network filesystem as much as for one that cannot be resolved —
+/// [`locate_destination`] tells those apart.
+#[cfg(target_os = "linux")]
+pub fn extents_of_destination(folder: &str) -> Option<Vec<Extent>> {
+    match linux::Host::real().locate_destination(folder) {
+        DestLocation::Local(e) => Some(e),
+        DestLocation::Network | DestLocation::Unknown(_) => None,
+    }
+}
+
+/// An identity for this source that survives a reboot and a renamed device
+/// node — see [`linux::Host::stable_source_id`].
+#[cfg(target_os = "linux")]
+pub fn stable_source_id(device: &str) -> Option<String> {
+    linux::Host::real().stable_source_id(device)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub fn extents_of_source(device: &str) -> Option<Vec<Extent>> {
     parse_part_spec(device).map(|e| vec![e])
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub fn extents_of_destination(_folder: &str) -> Option<Vec<Extent>> {
     None
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub fn stable_source_id(_device: &str) -> Option<String> {
     None
 }
@@ -230,13 +351,31 @@ pub fn stable_source_id(_device: &str) -> Option<String> {
 /// the same disk is fine — writing there does not grow what is being read, and
 /// refusing it would be refusing a thing that works (audit AUD-10, point 4).
 pub fn where_the_destination_sits(sources: &[String], dest_folder: &str) -> DestPlacement {
-    if is_network_path(dest_folder) {
-        return DestPlacement::Clear; // another machine's disk entirely
+    #[cfg(target_os = "linux")]
+    {
+        // One look at the mount table for the whole question.
+        let host = linux::Host::real();
+        placement(sources, host.locate_destination(dest_folder), |s| {
+            host.extents_of_source(s)
+        })
     }
-    let Some(dest) = extents_of_destination(dest_folder) else {
-        return DestPlacement::CannotTell(
-            tr!("source_identity.dest_volume_unknown", folder = dest_folder).into_owned(),
-        );
+    #[cfg(not(target_os = "linux"))]
+    {
+        placement(sources, locate_destination(dest_folder), extents_of_source)
+    }
+}
+
+/// [`where_the_destination_sits`] with the two lookups handed in, so the
+/// decision itself can be tested against a made-up machine.
+fn placement(
+    sources: &[String],
+    dest: DestLocation,
+    extents_of_source: impl Fn(&str) -> Option<Vec<Extent>>,
+) -> DestPlacement {
+    let dest = match dest {
+        DestLocation::Network => return DestPlacement::Clear, // another machine's disk entirely
+        DestLocation::Unknown(why) => return DestPlacement::CannotTell(why),
+        DestLocation::Local(extents) => extents,
     };
     let mut unresolved: Vec<&str> = Vec::new();
     for source in sources {
@@ -399,13 +538,123 @@ mod tests {
     }
 
     /// A network destination is answered, not left as "could not tell": it is
-    /// another machine's disk, and no local source can be on it.
+    /// another machine's disk, and no local source can be on it. (On Linux
+    /// `\\nas\backups` is a relative file name, and a network filesystem is
+    /// recognised by its type instead — `linux::tests`.)
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn a_network_destination_is_clear_rather_than_unknown() {
         assert_eq!(
             where_the_destination_sits(&["C:".into()], r"\\nas\backups"),
             DestPlacement::Clear
         );
+    }
+
+    /// The decision itself, the same on every system: a network destination
+    /// is clear without asking about the sources, an unknown one is "cannot
+    /// tell" with its reason, and a local one is compared by ranges.
+    #[test]
+    fn the_placement_follows_where_the_destination_is() {
+        let sources = vec!["A".to_string(), "B".to_string()];
+        let none = |_: &str| -> Option<Vec<Extent>> { panic!("sources need not be asked") };
+        assert_eq!(
+            placement(&sources, DestLocation::Network, none),
+            DestPlacement::Clear
+        );
+        assert_eq!(
+            placement(&sources, DestLocation::Unknown("why".into()), none),
+            DestPlacement::CannotTell("why".into())
+        );
+        let at = |disk, offset| Extent {
+            disk,
+            offset,
+            length: 100,
+        };
+        let src = |s: &str| match s {
+            "A" => Some(vec![at(1, 0)]),
+            "B" => Some(vec![at(2, 0), at(3, 500)]),
+            _ => None,
+        };
+        assert_eq!(
+            placement(&sources, DestLocation::Local(vec![at(3, 550)]), src),
+            DestPlacement::OnSource("B".into())
+        );
+        assert_eq!(
+            placement(&sources, DestLocation::Local(vec![at(1, 100)]), src),
+            DestPlacement::Clear
+        );
+        let with_unknown = vec!["A".to_string(), "?".to_string()];
+        assert!(matches!(
+            placement(&with_unknown, DestLocation::Local(vec![at(1, 100)]), src),
+            DestPlacement::CannotTell(_)
+        ));
+        // A source on the destination wins over one that cannot be located.
+        assert_eq!(
+            placement(&with_unknown, DestLocation::Local(vec![at(1, 50)]), src),
+            DestPlacement::OnSource("A".into())
+        );
+    }
+
+    #[test]
+    fn a_linux_device_gets_a_token_of_its_own() {
+        // GPT PARTUUID: its first 8 hex digits.
+        assert_eq!(
+            unix_device_token("/dev/disk/by-partuuid/2d272048-0d61-4a8c-a715-08d35535ed93")
+                .as_deref(),
+            Some("U2D272048")
+        );
+        // MBR PARTUUID: the disk signature is shared by every partition of the
+        // disk, so the partition number stays in.
+        assert_eq!(
+            unix_device_token("/dev/disk/by-partuuid/4955b993-01").as_deref(),
+            Some("U4955B99301")
+        );
+        assert_eq!(
+            unix_device_token("/dev/disk/by-partuuid/4955b993-02").as_deref(),
+            Some("U4955B99302")
+        );
+        // Filesystem UUIDs come in several shapes; their hex digits are what
+        // counts.
+        assert_eq!(
+            unix_device_token("/dev/disk/by-uuid/060B-E961").as_deref(),
+            Some("F060BE961")
+        );
+        assert_eq!(
+            unix_device_token("/dev/disk/by-uuid/60104DD5104DB2B8").as_deref(),
+            Some("F60104DD5")
+        );
+        assert_eq!(
+            unix_device_token("/dev/disk/by-uuid/a2649700-5dbb-4f7b-833d-f57c7c812ef4").as_deref(),
+            Some("FA2649700")
+        );
+        // Anything else: a hash of the whole path. Pinned values, because the
+        // window computes the same (`lib/sourceToken.ts`) and both must agree.
+        let mapper = "/dev/mapper/luks-16e1f072-b3b5-4aa7-b296-67b738edf0ca";
+        assert_eq!(unix_device_token(mapper).as_deref(), Some("H29CA025F"));
+        assert_eq!(unix_device_token("/dev/sda2").as_deref(), Some("H1BCE3BBF"));
+        assert_ne!(
+            unix_device_token("/dev/sda2"),
+            unix_device_token("/dev/sdb2")
+        );
+        // Too few hex digits to be a UUID's: hashed like any other path.
+        let short = unix_device_token("/dev/disk/by-uuid/zz").unwrap();
+        assert!(short.starts_with('H') && short.len() == 9, "{short}");
+        // Every token is filename-safe and has no underscore (the image name
+        // parser splits on it).
+        for t in [mapper, "/dev/sda2", "/dev/disk/by-uuid/060B-E961"] {
+            let t = unix_device_token(t).unwrap();
+            assert!(t.chars().all(|c| c.is_ascii_alphanumeric()), "{t}");
+        }
+        // Not Linux paths: someone else's question.
+        for d in [
+            "C:",
+            r"\\?\Volume{1a2b}",
+            "part:1:2:3",
+            "//server/share",
+            "",
+        ] {
+            assert_eq!(unix_device_token(d), None, "{d}");
+        }
     }
 
     /// And a local one that cannot be located says so, instead of passing.
