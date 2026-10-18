@@ -324,6 +324,10 @@ pub struct LinuxBackupRequest {
     pub encryption: Option<crate::seal::context::ArchiveKeys>,
     /// zstd level for qcow2 and `.obk` (1–19; anything else is the default).
     pub zstd_level: i32,
+    /// `source` is a snapshot taken with its filesystem frozen (LVM or
+    /// device-mapper): its metadata is the committed state even where a
+    /// journal says otherwise — see `xfs_map::build_xfs_used_map_frozen`.
+    pub source_frozen: bool,
 }
 
 /// Outcome of a completed Linux backup.
@@ -495,7 +499,11 @@ fn backup_inner(
             info!(fs = "btrfs", "Using btrfs used-block map");
             detected_fs = Some("btrfs".into());
             Some(Box::new(m))
-        } else if let Ok(m) = crate::xfs_map::build_xfs_used_map(src.as_mut(), req.block_size) {
+        } else if let Ok(m) = if req.source_frozen {
+            crate::xfs_map::build_xfs_used_map_frozen(src.as_mut(), req.block_size)
+        } else {
+            crate::xfs_map::build_xfs_used_map(src.as_mut(), req.block_size)
+        } {
             info!(fs = "xfs", "Using xfs used-block map");
             detected_fs = Some("xfs".into());
             Some(Box::new(m))
@@ -1111,6 +1119,7 @@ mod tests {
                 image_format: ImageFormat::Qcow2,
                 encryption: Some(test_keys()),
                 zstd_level: crate::qcow2::DEFAULT_ZSTD_LEVEL,
+                source_frozen: false,
             },
             no_progress,
         )
@@ -1198,6 +1207,7 @@ mod tests {
                 image_format: ImageFormat::Qcow2,
                 encryption: Some(test_keys()),
                 zstd_level: crate::qcow2::DEFAULT_ZSTD_LEVEL,
+                source_frozen: false,
             },
             no_progress,
         );
@@ -1236,6 +1246,7 @@ mod tests {
             image_format: ImageFormat::Vhdx,
             encryption: None,
             zstd_level: crate::qcow2::DEFAULT_ZSTD_LEVEL,
+            source_frozen: false,
         };
         let sum = backup_volume(&req, no_progress).unwrap();
         assert!(sum.smart_mode);
@@ -1283,6 +1294,7 @@ mod tests {
                 image_format: ImageFormat::Vhdx,
                 encryption: None,
                 zstd_level: crate::qcow2::DEFAULT_ZSTD_LEVEL,
+                source_frozen: false,
             },
             no_progress,
         )
@@ -1343,6 +1355,7 @@ mod tests {
                 image_format: ImageFormat::Qcow2,
                 encryption: None,
                 zstd_level: crate::qcow2::DEFAULT_ZSTD_LEVEL,
+                source_frozen: false,
             },
             no_progress,
         )
@@ -1444,6 +1457,7 @@ mod tests {
                 image_format: ImageFormat::Qcow2,
                 encryption: None,
                 zstd_level: crate::qcow2::DEFAULT_ZSTD_LEVEL,
+                source_frozen: false,
             },
             no_progress,
         )

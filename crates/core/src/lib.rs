@@ -4237,6 +4237,8 @@ async fn perform_backup(
             image_format: job.image_format,
             encryption: None,
             zstd_level: job.zstd_level(),
+            // An LVM snapshot is taken with the filesystem frozen.
+            source_frozen: snapshot.metadata.get("mode").map(String::as_str) == Some("lvm"),
         };
         let sink_bg = sink.clone();
         let job_id = job.id.clone();

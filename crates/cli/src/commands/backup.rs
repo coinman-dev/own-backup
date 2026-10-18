@@ -238,6 +238,8 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
         zstd_level: own_backup_backup::qcow2::zstd_level_or_default(
             own_backup_common::config::AppConfig::load_or_default().default_compression_level,
         ),
+        // An LVM snapshot is taken with the filesystem frozen.
+        source_frozen: snapshot.metadata.get("mode").map(String::as_str) == Some("lvm"),
     };
 
     println!(

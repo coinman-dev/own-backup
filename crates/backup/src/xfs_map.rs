@@ -194,6 +194,30 @@ fn walk_bnobt(
 /// Detect XFS on `vol` and build the used map. Errors (→ caller falls back to
 /// sector-by-sector) on anything unrecognized or inconsistent.
 pub fn build_xfs_used_map(vol: &mut dyn RawVolume, block_size: u32) -> Result<XfsUsedMap> {
+    build_map(vol, block_size, true)
+}
+
+/// [`build_xfs_used_map`] for a source that was FROZEN when it was captured —
+/// an LVM or device-mapper snapshot, which suspends its origin with the
+/// filesystem frozen.
+///
+/// Freezing XFS quiesces its log: the log is forced, every logged metadata
+/// buffer is written back to its home location, and the log is then covered
+/// by a dummy transaction. What is left is a log WITHOUT an unmount record
+/// (`xfs_logprint` says DIRTY, stand 2026-10-18), but one whose replay changes
+/// nothing: the btrees on disk are already the committed state. The strict
+/// variant would refuse it and the whole volume would be copied sector by
+/// sector. Only for a captured-while-frozen source: a live or crashed
+/// filesystem's dirty log does mean the btrees are behind.
+pub fn build_xfs_used_map_frozen(vol: &mut dyn RawVolume, block_size: u32) -> Result<XfsUsedMap> {
+    build_map(vol, block_size, false)
+}
+
+fn build_map(
+    vol: &mut dyn RawVolume,
+    block_size: u32,
+    require_clean_log: bool,
+) -> Result<XfsUsedMap> {
     // --- Superblock at offset 0 ---
     let mut sb = [0u8; 512];
     vol.read_at(0, &mut sb)?;
@@ -231,7 +255,14 @@ pub fn build_xfs_used_map(vol: &mut dyn RawVolume, block_size: u32) -> Result<Xf
     }
     let log_off =
         ((logstart >> agblklog) * agblocks + (logstart & ((1u64 << agblklog) - 1))) * fs_block;
-    if !crate::xfs_exclusions::xfs_log_is_clean_at(vol, log_off, logblocks * fs_block, sectsize)? {
+    if require_clean_log
+        && !crate::xfs_exclusions::xfs_log_is_clean_at(
+            vol,
+            log_off,
+            logblocks * fs_block,
+            sectsize,
+        )?
+    {
         return Err(bad(tr!("xfs_map.log_dirty")));
     }
 

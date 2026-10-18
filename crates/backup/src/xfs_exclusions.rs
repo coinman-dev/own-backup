@@ -1018,6 +1018,17 @@ mod xfs_integration {
             crate::xfs_map::build_xfs_used_map(&mut vol, 1 << 20).is_err(),
             "карта занятых блоков должна отказать на грязном логе"
         );
+        // Captured while frozen: the same log state is the quiesced one, and
+        // the map is built — the same map the clean image gives.
+        let frozen = crate::xfs_map::build_xfs_used_map_frozen(&mut vol, 1 << 20)
+            .expect("замороженный источник: карта строится");
+        let clean = {
+            let f = std::fs::File::open(&img).unwrap();
+            let len = f.metadata().unwrap().len();
+            crate::xfs_map::build_xfs_used_map(&mut FileVol { f, len }, 1 << 20).unwrap()
+        };
+        use crate::used_sectors::UsedSectorMap;
+        assert_eq!(frozen.used_block_count(), clean.used_block_count());
     }
 
     #[test]
