@@ -3196,6 +3196,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "own-backup-common",
+ "rust-i18n",
  "tempfile",
  "tokio",
  "tracing",

@@ -220,8 +220,13 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
         args.block_size_mib * 1024 * 1024
     };
     let image_path = std::path::PathBuf::from(&args.output);
+    // A point in time to read: an LVM snapshot, or the device itself when
+    // nothing writes to it; a volume in use without a snapshot is refused.
+    use own_backup_snapshot::SnapshotProvider;
+    let provider = own_backup_snapshot::LinuxSnapshotProvider::new();
+    let snapshot = provider.create_snapshot(&args.source).await?;
     let request = LinuxBackupRequest {
-        source: args.source.clone(),
+        source: snapshot.snapshot_device_path.clone(),
         image_path: image_path.clone(),
         block_size,
         all_sectors: args.all_sectors,
@@ -239,7 +244,17 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
         "Backing up {} -> {} ({})",
         args.source, args.output, args.format
     );
-    let summary = backup_volume(&request, |_p| Ok(()))?;
+    let copied = backup_volume(&request, |_p| Ok(()));
+    let intact = provider.check_intact(&snapshot).await;
+    if let Err(e) = provider.release_snapshot(&snapshot).await {
+        eprintln!("warning: snapshot release failed: {e}");
+    }
+    let summary = copied?;
+    if let Err(e) = intact {
+        // What was read is not one point in time: it is not kept.
+        let _ = std::fs::remove_file(&summary.image_path);
+        return Err(e);
+    }
     println!(
         "Done: {} of {} blocks used, {:.1} MiB copied in {:.1}s ({})",
         summary.used_blocks,

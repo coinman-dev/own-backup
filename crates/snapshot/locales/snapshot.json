@@ -1,0 +1,27 @@
+{
+  "_version": 2,
+  "linux.in_use": {
+    "ru": "Том %{volume} сейчас используется (%{users}), а снимок в Linux пока есть только для логических томов LVM. Копия тома, в который идёт запись, может не открыться, поэтому она не сделана. Скопируйте его с загрузочного носителя или отключите (отмонтируйте) перед копированием.",
+    "en": "Volume %{volume} is in use (%{users}), and on Linux a snapshot is only available for LVM logical volumes so far. A copy of a volume that is being written may not open, so none was made. Copy it from the bootable media, or unmount it before the backup."
+  },
+  "linux.usage_mounted": {
+    "ru": "смонтирован: %{mounts}",
+    "en": "mounted at %{mounts}"
+  },
+  "linux.usage_swap": {
+    "ru": "используется для подкачки",
+    "en": "used as swap"
+  },
+  "linux.usage_holders": {
+    "ru": "на нём открыт %{holders}",
+    "en": "opened as %{holders}"
+  },
+  "linux.lvm_failed": {
+    "ru": "Не удалось создать снимок LVM тома %{volume}: %{error}. Копия не сделана: без снимка том, в который идёт запись, не копируется. Проверьте свободное место в группе томов.",
+    "en": "Could not create an LVM snapshot of %{volume}: %{error}. No copy was made: a volume that is being written is not copied without a snapshot. Check the free space in the volume group."
+  },
+  "linux.snapshot_overflowed": {
+    "ru": "Снимок LVM тома %{volume} переполнился во время копирования (в том записали больше, чем вмещает его область изменений). Копия не согласована и не сохранена — повторите, когда на томе меньше записи.",
+    "en": "The LVM snapshot of %{volume} overflowed during the copy (more was written to the volume than its change area holds). The copy is not consistent and was not kept — try again when the volume is less busy."
+  }
+}

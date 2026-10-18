@@ -4115,8 +4115,27 @@ async fn perform_backup(
         run.error = msg;
         return run;
     }
+    // What the Linux engine does not do yet is refused, not skipped: a run that
+    // reports success while ignoring the scheme or the exclusions is a backup
+    // plan that turns out to be something else (`.ai/PLAN.md` §6).
+    if let Some(msg) = linux_unsupported(job) {
+        run.finished_at = chrono::Utc::now().to_rfc3339();
+        run.status = "error".into();
+        run.error = msg;
+        return run;
+    }
+    // Scheduled runs come here without the check `RunJob` makes.
+    if let own_backup_backup::source_identity::DestPlacement::OnSource(source) =
+        dest_placement(job, &job.dest_folder)
+    {
+        run.finished_at = chrono::Utc::now().to_rfc3339();
+        run.status = "error".into();
+        run.error = tr!("lib.linux_dest_on_source", source = source).into_owned();
+        return run;
+    }
     let count = volumes.len() as u64;
     let started = std::time::Instant::now();
+    let mut protected: Vec<(String, PathBuf)> = Vec::new();
 
     for (idx, device) in volumes.iter().enumerate() {
         let vidx = idx as u64;
@@ -4130,18 +4149,22 @@ async fn perform_backup(
             container_extension(job)
         ));
 
-        // Take a point-in-time snapshot (LVM/fsfreeze) so a live filesystem is
-        // read consistently; degrades to a crash-consistent copy of the device
-        // when snapshotting isn't possible (non-root / no LVM / unmounted).
+        // A point in time to read: an LVM snapshot, or the device itself when
+        // nothing writes to it. A volume in use without a snapshot is refused
+        // — never read live, never frozen for the length of the copy.
         let snap_provider = own_backup_snapshot::LinuxSnapshotProvider::new();
-        let snapshot = snap_provider.create_snapshot(device).await.ok();
-        let read_source = snapshot
-            .as_ref()
-            .map(|s| s.snapshot_device_path.clone())
-            .unwrap_or_else(|| device.clone());
+        let snapshot = match snap_provider.create_snapshot(device).await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(job = %job.name, volume = %device, error = %e, "No consistent source");
+                run.status = "error".into();
+                run.error = snapshot_error_text(e);
+                break;
+            }
+        };
 
         let req = LinuxBackupRequest {
-            source: read_source,
+            source: snapshot.snapshot_device_path.clone(),
             image_path: image_path.clone(),
             block_size: DEFAULT_BLOCK_SIZE,
             all_sectors: job.advanced.sector_by_sector,
@@ -4151,21 +4174,19 @@ async fn perform_backup(
             encryption: None,
             zstd_level: job.zstd_level(),
         };
-        let validate_after = job.advanced.validate_after;
         let sink_bg = sink.clone();
         let job_id = job.id.clone();
         let cancel_bg = cancel.clone();
         let vol_label_bg = vol_label.clone();
-        let image_for_verify = image_path.clone();
         let image_name = image_path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
 
-        let result = tokio::task::spawn_blocking(move || {
+        let copied = tokio::task::spawn_blocking(move || {
             let mut last_permille = u64::MAX;
             let mut last_emit = std::time::Instant::now();
-            let summary = backup_volume(&req, |p: &BackupProgress| {
+            backup_volume(&req, |p: &BackupProgress| {
                 if cancel_bg.load(Ordering::SeqCst) {
                     return Err(OwnBackupError::Cancelled);
                 }
@@ -4195,60 +4216,19 @@ async fn perform_backup(
                     });
                 }
                 Ok(())
-            })?;
-            let mut verify_cancelled = false;
-            if validate_after {
-                let verified = verify_image(&image_for_verify, |_, _| {
-                    if cancel_bg.load(Ordering::SeqCst) {
-                        return Err(OwnBackupError::Cancelled);
-                    }
-                    Ok(())
-                });
-                match verified {
-                    Ok(v) if !v.valid() => {
-                        return Err(OwnBackupError::ImageFormat(
-                            tr!("lib.verify_failed", count = v.mismatched_blocks.len())
-                                .into_owned(),
-                        ))
-                    }
-                    Ok(_) => {}
-                    Err(OwnBackupError::Cancelled) => verify_cancelled = true,
-                    Err(e) => return Err(e),
-                }
-            }
-            Ok((summary, verify_cancelled))
+            })
         })
         .await;
 
-        // Release the snapshot (thaw / lvremove) regardless of the outcome.
-        if let Some(s) = &snapshot {
-            if let Err(e) = snap_provider.release_snapshot(s).await {
-                warn!(error = %e, "snapshot release failed");
-            }
+        // The snapshot is only needed while the source is read: ask whether it
+        // held, and give it back before the verification reads the image.
+        let intact = snap_provider.check_intact(&snapshot).await;
+        if let Err(e) = snap_provider.release_snapshot(&snapshot).await {
+            warn!(error = %e, "snapshot release failed");
         }
 
-        match result {
-            Ok(Ok((summary, verify_cancelled))) => {
-                run.image_path = summary.image_path.display().to_string();
-                run.base_image_path = run.image_path.clone();
-                run.images.push(RunImage {
-                    source: device.clone(),
-                    image_path: run.image_path.clone(),
-                    base_image_path: run.image_path.clone(),
-                    kind: "full".into(),
-                });
-                run.source_bytes += summary.source_bytes;
-                run.bytes_copied += summary.bytes_copied;
-                run.used_blocks += summary.used_blocks;
-                run.total_blocks += summary.total_blocks;
-                run.smart_mode = summary.smart_mode;
-                run.backup_kind = "full".into();
-                if verify_cancelled {
-                    run.status = "cancelled".into();
-                    run.error = verify_cancelled_message();
-                    break;
-                }
-            }
+        let summary = match copied {
+            Ok(Ok(summary)) => summary,
             Ok(Err(OwnBackupError::Cancelled)) => {
                 run.status = "cancelled".into();
                 run.error = tr!("lib.cancelled_by_user").into_owned();
@@ -4265,15 +4245,119 @@ async fn perform_backup(
                 run.error = tr!("lib.task_aborted", error = e).into_owned();
                 break;
             }
+        };
+        if let Err(e) = intact {
+            // What was read is not one point in time: it is not kept.
+            let _ = std::fs::remove_file(&summary.image_path);
+            run.status = "error".into();
+            run.error = snapshot_error_text(e);
+            break;
+        }
+
+        let mut verify_cancelled = false;
+        if job.advanced.validate_after {
+            let image = summary.image_path.clone();
+            let cancel_v = cancel.clone();
+            let verified = tokio::task::spawn_blocking(move || {
+                verify_image(&image, |_, _| {
+                    if cancel_v.load(Ordering::SeqCst) {
+                        return Err(OwnBackupError::Cancelled);
+                    }
+                    Ok(())
+                })
+            })
+            .await;
+            match verified {
+                Ok(Ok(v)) if !v.valid() => {
+                    run.status = "error".into();
+                    run.error =
+                        tr!("lib.verify_failed", count = v.mismatched_blocks.len()).into_owned();
+                    break;
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(OwnBackupError::Cancelled)) => verify_cancelled = true,
+                Ok(Err(e)) => {
+                    run.status = "error".into();
+                    run.error = e.to_string();
+                    break;
+                }
+                Err(e) => {
+                    run.status = "error".into();
+                    run.error = tr!("lib.task_aborted", error = e).into_owned();
+                    break;
+                }
+            }
+        }
+
+        run.image_path = summary.image_path.display().to_string();
+        run.base_image_path = run.image_path.clone();
+        run.images.push(RunImage {
+            source: device.clone(),
+            image_path: run.image_path.clone(),
+            base_image_path: run.image_path.clone(),
+            kind: "full".into(),
+        });
+        run.source_bytes += summary.source_bytes;
+        run.bytes_copied += summary.bytes_copied;
+        run.used_blocks += summary.used_blocks;
+        run.total_blocks += summary.total_blocks;
+        run.smart_mode = summary.smart_mode;
+        run.backup_kind = "full".into();
+        protected.push((file_token(job, device), summary.image_path.clone()));
+        if verify_cancelled {
+            run.status = "cancelled".into();
+            run.error = verify_cancelled_message();
+            break;
         }
     }
 
     if run.status.is_empty() {
         run.status = "success".into();
+        // As on Windows: only after a fully successful run, never touching the
+        // images it just wrote; failures are logged, not surfaced.
+        apply_retention(job, &protected);
     }
     run.duration_secs = started.elapsed().as_secs_f64();
     run.finished_at = chrono::Utc::now().to_rfc3339();
     run
+}
+
+/// The job options the Linux engine does not carry out yet, as one refusal —
+/// or `None` when the job asks for nothing it would ignore.
+#[cfg(target_os = "linux")]
+fn linux_unsupported(job: &Job) -> Option<String> {
+    let mut what: Vec<String> = Vec::new();
+    if job.scheme.method != "full" {
+        what.push(tr!("lib.linux_unsupported_scheme").into_owned());
+    }
+    if job.exclusions.enabled
+        && !(job.exclusions.patterns.is_empty() && job.exclusions.patterns_linux.is_empty())
+    {
+        what.push(tr!("lib.linux_unsupported_exclusions").into_owned());
+    }
+    if job.disk_source.is_some() {
+        what.push(tr!("lib.linux_unsupported_whole_disk").into_owned());
+    }
+    if job.advanced.speed_limit_mbps > 0 {
+        what.push(tr!("lib.linux_unsupported_speed_limit").into_owned());
+    }
+    if job.advanced.low_priority {
+        what.push(tr!("lib.linux_unsupported_low_priority").into_owned());
+    }
+    if !matches!(job.advanced.after_backup.as_str(), "" | "none") {
+        what.push(tr!("lib.linux_unsupported_after_backup").into_owned());
+    }
+    (!what.is_empty()).then(|| tr!("lib.linux_unsupported", options = what.join(", ")).into_owned())
+}
+
+/// A snapshot refusal carries its own explanation; anything else is shown as
+/// the error it is.
+#[cfg(target_os = "linux")]
+fn snapshot_error_text(e: own_backup_common::OwnBackupError) -> String {
+    match e {
+        own_backup_common::OwnBackupError::NoSnapshotProvider(msg) => msg,
+        other => other.to_string(),
+    }
 }
 
 /// Backup engine is unavailable on this platform (only Windows and Linux).

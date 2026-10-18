@@ -9,8 +9,8 @@ use std::collections::HashMap;
 /// at the moment of creation. The `snapshot_device_path` can be opened for
 /// raw block reads while the snapshot is held.
 ///
-/// On Windows this corresponds to a VSS shadow copy; on Linux we provide
-/// a mock that points at a temp file.
+/// On Windows this corresponds to a VSS shadow copy; on Linux it is an LVM
+/// snapshot, or the device itself when nothing writes to it (`linux.rs`).
 #[derive(Debug, Clone)]
 pub struct Snapshot {
     /// Name of the provider that created this snapshot (e.g. "VSS", "Mock").
@@ -32,7 +32,7 @@ pub struct Snapshot {
 
 /// Creates and manages snapshots for volumes.
 ///
-/// On Windows this wraps VSS; on Linux we provide a mock for testing.
+/// On Windows this wraps VSS; on Linux see `linux.rs`; `mock.rs` is for tests.
 #[async_trait]
 pub trait SnapshotProvider: Send + Sync {
     /// Human-readable name of the provider (e.g. "VSS", "Mock").
