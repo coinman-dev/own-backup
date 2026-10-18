@@ -1011,6 +1011,40 @@ mod tests {
         );
     }
 
+    /// The copy-on-write store a Linux device-mapper snapshot keeps in the
+    /// destination folder while it copies: never a version, never a blocker
+    /// of the strict scan retention depends on, never deleted with a chain.
+    #[test]
+    fn a_snapshot_store_is_not_an_image() {
+        let store = ".own-backup-cow-0123456789abcdef0123456789abcdef.tmp";
+        #[cfg(target_os = "linux")]
+        assert!(own_backup_snapshot::dm_snapshot::is_cow_name(store));
+        let dir = tempfile::tempdir().unwrap();
+        put_image(
+            dir.path(),
+            "job_C_full_20261019-100000.vhdx",
+            ChainRole::Full,
+            None,
+            Some("j1"),
+            "2026-10-19T10:00:00Z",
+        );
+        // Whatever the store holds — here even an image's own header.
+        std::fs::copy(
+            dir.path().join("job_C_full_20261019-100000.vhdx"),
+            dir.path().join(store),
+        )
+        .unwrap();
+        let chains = list_job_chains_strict(dir.path(), "j1").unwrap();
+        assert_eq!(chains.len(), 1);
+        assert_eq!(
+            chain_names(&chains[0]),
+            vec!["job_C_full_20261019-100000.vhdx"]
+        );
+        assert!(list_chains(dir.path(), None).unwrap().is_empty());
+        delete_chain(&chains[0]).unwrap();
+        assert!(dir.path().join(store).exists());
+    }
+
     fn make_chains(stamps: &[&str]) -> Vec<Chain> {
         stamps
             .iter()

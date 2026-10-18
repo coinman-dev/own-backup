@@ -3197,6 +3197,7 @@ version = "0.1.5-beta"
 dependencies = [
  "async-trait",
  "chrono",
+ "libc",
  "own-backup-common",
  "rust-i18n",
  "tempfile",
@@ -3204,6 +3205,7 @@ dependencies = [
  "tracing",
  "uuid",
  "windows 0.58.0",
+ "zeroize",
 ]
 
 [[package]]

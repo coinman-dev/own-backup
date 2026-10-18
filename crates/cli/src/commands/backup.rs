@@ -220,10 +220,20 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
         args.block_size_mib * 1024 * 1024
     };
     let image_path = std::path::PathBuf::from(&args.output);
-    // A point in time to read: an LVM snapshot, or the device itself when
-    // nothing writes to it; a volume in use without a snapshot is refused.
+    // A point in time to read: an LVM or device-mapper snapshot (its change
+    // area beside the output; an opened LUKS container may need --password
+    // for that), or the device itself when nothing writes to it; a volume in
+    // use without a snapshot is refused.
     use own_backup_snapshot::SnapshotProvider;
-    let provider = own_backup_snapshot::LinuxSnapshotProvider::new();
+    let out_dir = match image_path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => std::path::PathBuf::from("."),
+    };
+    let provider = own_backup_snapshot::LinuxSnapshotProvider::with_cow_dir(out_dir).container_key(
+        own_backup_backup::engine_linux::container_key_from(
+            args.password.clone().map(zeroize::Zeroizing::new),
+        ),
+    );
     let snapshot = provider.create_snapshot(&args.source).await?;
     let request = LinuxBackupRequest {
         source: snapshot.snapshot_device_path.clone(),

@@ -1,8 +1,8 @@
 {
   "_version": 2,
   "linux.in_use": {
-    "ru": "Том %{volume} сейчас используется (%{users}), а снимок в Linux пока есть только для логических томов LVM. Копия тома, в который идёт запись, может не открыться, поэтому она не сделана. Скопируйте его с загрузочного носителя или отключите (отмонтируйте) перед копированием.",
-    "en": "Volume %{volume} is in use (%{users}), and on Linux a snapshot is only available for LVM logical volumes so far. A copy of a volume that is being written may not open, so none was made. Copy it from the bootable media, or unmount it before the backup."
+    "ru": "Том %{volume} сейчас используется (%{users}), а снимок в Linux есть только для логических томов LVM и для открытых томов device-mapper (например, LUKS), на которых файловая система смонтирована напрямую. Копия тома, в который идёт запись, может не открыться, поэтому она не сделана. Скопируйте его с загрузочного носителя или отключите (отмонтируйте) перед копированием.",
+    "en": "Volume %{volume} is in use (%{users}), and on Linux a snapshot is only available for LVM logical volumes and for opened device-mapper volumes (such as LUKS) with the filesystem mounted directly from them. A copy of a volume that is being written may not open, so none was made. Copy it from the bootable media, or unmount it before the backup."
   },
   "linux.usage_mounted": {
     "ru": "смонтирован: %{mounts}",
@@ -23,5 +23,49 @@
   "linux.snapshot_overflowed": {
     "ru": "Снимок LVM тома %{volume} переполнился во время копирования (в том записали больше, чем вмещает его область изменений). Копия не согласована и не сохранена — повторите, когда на томе меньше записи.",
     "en": "The LVM snapshot of %{volume} overflowed during the copy (more was written to the volume than its change area holds). The copy is not consistent and was not kept — try again when the volume is less busy."
+  },
+  "linux.dm_failed": {
+    "ru": "Не удалось создать снимок тома %{volume}: %{error}. Копия не сделана: без снимка том, в который идёт запись, не копируется. Том работает как прежде.",
+    "en": "Could not create a snapshot of %{volume}: %{error}. No copy was made: a volume that is being written is not copied without a snapshot. The volume works as before."
+  },
+  "linux.dm_no_cow_dir": {
+    "ru": "Для снимка тома %{volume} нужна папка, где хранить изменения, сделанные во время копирования, а она не указана. Копия не сделана.",
+    "en": "A snapshot of %{volume} needs a folder for the changes made during the copy, and none was given. No copy was made."
+  },
+  "linux.dm_cow_dir_unusable": {
+    "ru": "Папка %{dir} не подходит для области изменений снимка: %{error}. Копия не сделана.",
+    "en": "Folder %{dir} cannot hold the snapshot's change area: %{error}. No copy was made."
+  },
+  "linux.dm_cow_on_source": {
+    "ru": "Папка %{dir} находится на копируемом томе %{volume} (или на устройстве, из которого он собран). Область изменений снимка хранится в папке назначения и не может лежать на самом томе: выберите папку на другом диске. Копия не сделана.",
+    "en": "Folder %{dir} is on the volume being copied, %{volume} (or on a device it is built from). The snapshot keeps its change area in the destination folder, which cannot be on the volume itself: choose a folder on another disk. No copy was made."
+  },
+  "linux.dm_cow_dir_unknown": {
+    "ru": "Папка %{dir} находится на файловой системе %{fstype}, через которую область изменений снимка писать нельзя (не видно, на каком устройстве она хранит данные, или запись идёт через отдельную программу). Выберите папку на обычном диске (ext4, XFS, btrfs) или в сетевой папке. Копия не сделана.",
+    "en": "Folder %{dir} is on a %{fstype} filesystem, which cannot hold the snapshot's change area (where it keeps its data cannot be told, or its writes go through a separate program). Choose a folder on a regular disk (ext4, XFS, btrfs) or a network share. No copy was made."
+  },
+  "linux.dm_cow_failed": {
+    "ru": "Не удалось создать область изменений снимка в папке %{dir}: %{error}. Копия не сделана.",
+    "en": "Could not create the snapshot's change area in %{dir}: %{error}. No copy was made."
+  },
+  "linux.dm_leftover": {
+    "ru": "На томе %{volume} ещё стоит снимок прерванного копирования. Он снимается при запуске службы или командой own-backup-cli cleanup-snapshots; после этого повторите копирование.",
+    "en": "A snapshot of an interrupted backup is still on %{volume}. It is removed when the service starts, or by own-backup-cli cleanup-snapshots; then run the backup again."
+  },
+  "linux.dm_unsupported": {
+    "ru": "Том %{volume} устроен как %{kinds}; для такого тома device-mapper снимок не делается. Копия не сделана. Скопируйте его с загрузочного носителя или отключите перед копированием.",
+    "en": "Volume %{volume} is a %{kinds} device-mapper volume, which cannot be snapshotted. No copy was made. Copy it from the bootable media, or close it before the backup."
+  },
+  "linux.dm_key_needed": {
+    "ru": "Ключ открытого контейнера %{volume} хранится только в ядре, а для снимка нужна ещё одна его расшифровка. Укажите пароль этого контейнера (в задании или --password в командной строке) — по нему ключ берётся из заголовка контейнера. Копия не сделана.",
+    "en": "The key of the opened container %{volume} is held only by the kernel, and the snapshot needs a second decrypting view of it. Give the container's password (in the job, or --password on the command line): the key is then taken from the container's header. No copy was made."
+  },
+  "linux.dm_key_failed": {
+    "ru": "Не удалось получить ключ контейнера %{volume} для снимка: %{error}. Копия не сделана.",
+    "en": "Could not get the key of container %{volume} for the snapshot: %{error}. No copy was made."
+  },
+  "linux.dm_snapshot_invalid": {
+    "ru": "Снимок тома %{volume} перестал быть целым во время копирования (%{state}): область изменений в папке назначения переполнилась или в неё не удалось записать. Копия не согласована и не сохранена — проверьте свободное место в папке назначения и повторите.",
+    "en": "The snapshot of %{volume} stopped being whole during the copy (%{state}): its change area in the destination folder filled up or could not be written. The copy is not consistent and was not kept — check the free space in the destination folder and try again."
   }
 }

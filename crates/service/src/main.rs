@@ -701,14 +701,16 @@ pub async fn run_main_loop(
             Err(e) => tracing::warn!(error = %e, "unfinished images will not be reclaimed"),
         }
     }
-    // An LVM snapshot a killed run left behind keeps growing with every write
-    // to its origin until it fills the volume group.
+    // A snapshot a killed run left behind keeps growing with every write to
+    // its origin until it fills the volume group (LVM) or its store in the
+    // destination folder (device-mapper); a device-mapper one also keeps the
+    // origin running through our layer.
     #[cfg(target_os = "linux")]
     if installed_service {
         tokio::spawn(async {
             let removed = own_backup_snapshot::linux::remove_orphaned_snapshots().await;
             if removed > 0 {
-                info!(removed, "LVM snapshots left by interrupted runs removed");
+                info!(removed, "snapshots left by interrupted runs removed");
             }
         });
     }

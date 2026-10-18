@@ -6,7 +6,13 @@ pub mod mock;
 pub mod traits;
 
 #[cfg(target_os = "linux")]
+pub mod dm_ioctl;
+#[cfg(target_os = "linux")]
+pub mod dm_snapshot;
+#[cfg(target_os = "linux")]
 pub mod linux;
+#[cfg(target_os = "linux")]
+mod loop_dev;
 
 #[cfg(target_os = "windows")]
 pub mod vss_raw;

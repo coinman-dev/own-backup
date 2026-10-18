@@ -4213,10 +4213,15 @@ async fn perform_backup(
             container_extension(job)
         ));
 
-        // A point in time to read: an LVM snapshot, or the device itself when
-        // nothing writes to it. A volume in use without a snapshot is refused
-        // — never read live, never frozen for the length of the copy.
-        let snap_provider = own_backup_snapshot::LinuxSnapshotProvider::new();
+        // A point in time to read: an LVM or device-mapper snapshot (its
+        // change area in the destination folder; an opened LUKS container may
+        // need its password for that), or the device itself when nothing
+        // writes to it. A volume in use without a snapshot is refused — never
+        // read live, never frozen for the length of the copy.
+        let snap_provider = own_backup_snapshot::LinuxSnapshotProvider::with_cow_dir(&folder)
+            .container_key(own_backup_backup::engine_linux::container_key_from(
+                passwords.resolve(&token),
+            ));
         let snapshot = match snap_provider.create_snapshot(device).await {
             Ok(s) => s,
             Err(e) => {

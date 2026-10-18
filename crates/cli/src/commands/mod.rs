@@ -3,6 +3,7 @@ pub mod backup;
 pub mod backup_disk;
 pub mod bitlocker;
 pub mod boot;
+pub mod cleanup_snapshots;
 pub mod consolidate;
 pub mod copy_options;
 pub mod display;

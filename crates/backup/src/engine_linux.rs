@@ -301,6 +301,37 @@ pub fn unlock_and_probe(
     probe_decrypted(&mut LinuxRawDevice::open_read(device)?)
 }
 
+/// The volume key of the LUKS container on `device`, recovered with
+/// `passphrase` — for a device-mapper snapshot of the container's opened
+/// mapping when the kernel keeps the mapping's key to itself (the snapshot
+/// crate's `ContainerKey`). A device that is not LUKS is an error, so is a
+/// wrong passphrase.
+pub fn luks_volume_key(device: &Path, passphrase: &str) -> Result<Zeroizing<Vec<u8>>> {
+    let path = device
+        .to_str()
+        .ok_or_else(|| OwnBackupError::Device(format!("{} is not UTF-8", device.display())))?;
+    let mut dev = LinuxRawDevice::open_read(path)?;
+    let mut header = vec![0u8; 4096];
+    dev.read_at(0, &mut header)?;
+    if !crate::luks::is_luks(&header) {
+        return Err(OwnBackupError::Device(format!(
+            "{path} has no LUKS header (a detached header is not supported)"
+        )));
+    }
+    Ok(crate::luks::open_luks(&mut dev, passphrase.as_bytes())?.master_key)
+}
+
+/// A snapshot crate `ContainerKey` from the password the run has for its
+/// source, if any: without one the snapshot says it needs it.
+pub fn container_key_from(
+    passphrase: Option<Zeroizing<String>>,
+) -> impl Fn(&Path) -> Result<Option<Zeroizing<Vec<u8>>>> + Send + Sync + 'static {
+    move |device: &Path| match &passphrase {
+        Some(p) => luks_volume_key(device, p).map(Some),
+        None => Ok(None),
+    }
+}
+
 /// Parameters for a Linux volume backup.
 pub struct LinuxBackupRequest {
     /// Source device (`/dev/sdb2`, a loop device, or an image file).
