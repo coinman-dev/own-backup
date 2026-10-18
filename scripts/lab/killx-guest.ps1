@@ -649,6 +649,32 @@ try {
     New-Item -ItemType Directory -Force $work | Out-Null
     Say "KILLX-BEGIN format=$format phase=$phase utc=$([DateTime]::UtcNow.ToString('o')) user=$([Security.Principal.WindowsIdentity]::GetCurrent().Name)"
 
+    # 'view': the VM shown in a window for a person to look at; nothing runs
+    # and nothing shuts it down.
+    if ($format -eq 'view') { Say 'KILLX-VIEW the stand is idle'; return }
+
+    # 'refsprobe': can this Windows make a ReFS volume? A small VHDX through
+    # diskpart, formatted ReFS, a file written and read back.
+    if ($format -eq 'refsprobe' -and -not $User) {
+        $vhd = 'C:\Lab\refs-probe.vhdx'
+        $script = "$work\refs-probe.txt"
+        if (Test-Path $vhd) { "select vdisk file=$vhd`r`ndetach vdisk" | Set-Content $script -Encoding ASCII; & diskpart.exe /s $script | Out-Null; Remove-Item $vhd -Force }
+        "create vdisk file=$vhd maximum=2048 type=expandable`r`nselect vdisk file=$vhd`r`nattach vdisk`r`ncreate partition primary`r`nformat fs=refs quick label=REFSPROBE`r`nassign letter=R" | Set-Content $script -Encoding ASCII
+        $out = [string[]]@(& diskpart.exe /s $script | ForEach-Object { "$_" })
+        $vol = Get-Volume -DriveLetter R -ErrorAction SilentlyContinue
+        $rw = $false
+        if ($vol) { [IO.File]::WriteAllText('R:\probe.txt', 'refs ok'); $rw = ([IO.File]::ReadAllText('R:\probe.txt') -eq 'refs ok') }
+        $os = Get-CimInstance Win32_OperatingSystem
+        Report 'refsprobe' @{ edition = $os.Caption; build = $os.BuildNumber; filesystem = "$($vol.FileSystem)"; size = $vol.Size; read_write = $rw; diskpart = $out }
+        Say "KILLX-REFS filesystem=$($vol.FileSystem) read_write=$rw edition=$($os.Caption) build=$($os.BuildNumber)"
+        "select vdisk file=$vhd`r`ndetach vdisk" | Set-Content $script -Encoding ASCII; & diskpart.exe /s $script | Out-Null
+        Remove-Item $vhd -Force -ErrorAction SilentlyContinue
+        Say "KILLX-PASS format=$format"
+        shutdown.exe /s /t 5 | Out-Null
+        return
+    }
+    if ($format -eq 'refsprobe') { return }
+
     if ($phase -eq 'install') {
         $media = Get-PSDrive -PSProvider FileSystem | ForEach-Object { Join-Path $_.Root 'lab' } |
             Where-Object { Test-Path -LiteralPath (Join-Path $_ 'sys-marker.txt') } | Select-Object -First 1

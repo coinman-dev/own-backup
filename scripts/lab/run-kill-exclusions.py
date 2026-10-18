@@ -55,7 +55,7 @@ def answer_iso() -> Path:
     (lab / 'sys-marker.txt').write_text('Own Backup kill-during-exclusions acceptance media\n')
     # vhdx | qcow2 | obk: which container the guest's job writes this time.
     fmt = os.environ.get('OBK_FORMAT', 'vhdx')
-    assert fmt in ('vhdx', 'qcow2', 'obk', 'consol', 'consol-vhdx', 'consol-qcow2', 'flush-vhdx', 'flush-obk', 'probe-io', 'stall-vhdx', 'stall-obk', 'history', 'media', 'media-sxs', 'checks9', 'nospace', 'aliases'), fmt
+    assert fmt in ('vhdx', 'qcow2', 'obk', 'consol', 'consol-vhdx', 'consol-qcow2', 'flush-vhdx', 'flush-obk', 'probe-io', 'stall-vhdx', 'stall-obk', 'history', 'media', 'media-sxs', 'checks9', 'nospace', 'aliases', 'view', 'refsprobe'), fmt
     if fmt.startswith('media'):
         # The medium carries the machine's WebView2; the VM has no network.
         shutil.copyfile(LAB / 'media/WebView2Runtime-x64.exe', lab / 'WebView2Runtime-x64.exe')
@@ -286,8 +286,25 @@ def step_boot_media() -> None:
     print('MEDIA-BOOTED (judge the screenshots)', flush=True)
 
 
+def step_view() -> None:
+    """The stand in a window (WSLg) for a person to look at and use.
+
+    The guest is told 'view': its script does nothing and shuts nothing
+    down. Close the window, or shut Windows down, to end it."""
+    os.environ['OBK_FORMAT'] = 'view'
+    os.environ['OBK_TAG'] = ''
+    answer_iso()
+    cmd = S.base_cmd(S.ACTIVE / 'vars.fd', S.EVIDENCE / 'view-serial.log', S.ACTIVE / 'view.sock')
+    cmd[cmd.index('-display') + 1] = 'gtk'
+    cmd += S.disk(S.ACTIVE / 'windows.qcow2', 0) + S.cdrom(S.ACTIVE / 'answer.iso', 2)
+    if (S.ACTIVE / 'data.qcow2').exists():
+        cmd += S.disk(S.ACTIVE / 'data.qcow2', 1)
+    print('VIEW starting; close the window to stop', flush=True)
+    subprocess.run(cmd, check=False)
+
+
 def main() -> None:
-    steps = {'prepare': step_prepare, 'install': step_install, 'test': step_test, 'boot-media': step_boot_media}
+    steps = {'prepare': step_prepare, 'install': step_install, 'test': step_test, 'boot-media': step_boot_media, 'view': step_view}
     if len(sys.argv) != 2 or sys.argv[1] not in steps:
         raise SystemExit(f'usage: {sys.argv[0]} {"|".join(steps)}')
     steps[sys.argv[1]]()
