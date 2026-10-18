@@ -1080,63 +1080,12 @@ pub fn get_all_active_mounts(
     internal_mounts.to_vec()
 }
 
-/// Result of verifying an image against its sidecar checksums.
-#[derive(Debug)]
-pub struct VerifySummary {
-    pub blocks_checked: u64,
-    pub mismatched_blocks: Vec<u64>,
-}
-
-impl VerifySummary {
-    pub fn valid(&self) -> bool {
-        self.mismatched_blocks.is_empty()
-    }
-}
-
-/// Verify every recorded block of a raw image against its sidecar checksums.
-pub fn verify_image(
-    image_path: &Path,
-    progress: impl FnMut(u64, u64) -> Result<()>,
-) -> Result<VerifySummary> {
-    verify_image_with_keys(image_path, None, progress)
-}
-
-/// The same check for an encrypted image. With the key this is the full check
-/// §7.4 asks for — the record tags and the authenticated index decide whether
-/// the bytes are ours before their checksums are even computed.
-pub fn verify_image_with_keys(
-    image_path: &Path,
-    keys: Option<&crate::seal::context::ArchiveKeys>,
-    mut progress: impl FnMut(u64, u64) -> Result<()>,
-) -> Result<VerifySummary> {
-    let (sidecar, chain_key) = read_sidecar_for(image_path, keys)?;
-    let block_size = sidecar.manifest.block_size as u64;
-    let volume_len = sidecar.manifest.source_disk.size_bytes;
-    let data_offset = sidecar.info.volume_data_offset;
-
-    let mut dev =
-        LinuxImageReader::open_with(image_path, &sidecar.info.container, chain_key.as_ref())?;
-    let total = sidecar.checksums.len() as u64;
-    let mut checked = 0u64;
-    let mut mismatched = Vec::new();
-
-    for entry in &sidecar.checksums {
-        let offset = entry.block_number * block_size;
-        let len = std::cmp::min(block_size, volume_len - offset) as usize;
-        let mut buf = vec![0u8; len];
-        dev.read_at(data_offset + offset, &mut buf)?;
-        if compute_block_checksum(&buf) != entry.checksum {
-            mismatched.push(entry.block_number);
-        }
-        checked += 1;
-        progress(checked, total)?;
-    }
-
-    Ok(VerifySummary {
-        blocks_checked: checked,
-        mismatched_blocks: mismatched,
-    })
-}
+// Verification is the engine-independent one (`engine_core::verify`): the
+// same reads as on Windows, the same re-read before a block is called damaged,
+// and the same "latest copy only" scope.
+pub use crate::engine_core::verify::{
+    verify_image, verify_image_scoped, verify_image_with_keys, VerifyScope, VerifySummary,
+};
 
 #[cfg(test)]
 mod tests {
@@ -1209,10 +1158,14 @@ mod tests {
             "no sidecar file beside an .obk"
         );
 
-        // A plaintext reader refuses it, and so does verify without a key.
+        // A plaintext reader refuses it, and so does verify without a key. By
+        // kind, not by wording: the message is in the user's language.
         assert!(crate::qcow2::Qcow2RandomReader::open(&img).is_err());
-        let error = verify_image(&img, |_, _| Ok(())).unwrap_err().to_string();
-        assert!(error.contains("encrypted"), "unexpected: {error}");
+        let error = verify_image(&img, |_, _| Ok(())).unwrap_err();
+        assert!(
+            matches!(error, OwnBackupError::Encryption(_)),
+            "unexpected: {error}"
+        );
 
         // With the key the image verifies and restores byte-for-byte. The key
         // comes from the image's own portable envelope and the password — what

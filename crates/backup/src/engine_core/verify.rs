@@ -11,6 +11,7 @@ use super::read::{load_sidecar_with_keys, ImageReadSource};
 use crate::checksum::compute_block_checksum;
 
 /// Result of verifying an image against its sidecar checksums.
+#[derive(Debug)]
 pub struct VerifySummary {
     pub blocks_checked: u64,
     pub mismatched_blocks: Vec<u64>,
