@@ -405,8 +405,19 @@ impl WakeArming {
         if *armed == want {
             return;
         }
+        // Only a timer that exists is "armed": there is none on Linux yet
+        // (`.ai/PLAN.md` §6, stage 4) and none on the boot medium.
+        #[cfg(target_os = "windows")]
+        let can_wake = self.timer.is_some();
+        #[cfg(not(target_os = "windows"))]
+        let can_wake = false;
         match want {
-            Some(at) => info!(at = %at, "wake timer armed for a scheduled copy"),
+            Some(at) if can_wake => info!(at = %at, "wake timer armed for a scheduled copy"),
+            Some(at) => warn!(
+                at = %at,
+                "a scheduled copy asks to wake the machine, but there is no wake timer here — \
+                 a sleeping machine will miss it"
+            ),
             None if armed.is_some() => {
                 info!("wake timer disarmed — no copy asks to wake the machine")
             }

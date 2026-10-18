@@ -2438,8 +2438,9 @@ pub fn plan_run_for_volume_at(
     };
 
     let token = file_token(job, device);
-    // Who this volume is, independently of what it is called. `None` on a
-    // machine that cannot say, and on every non-Windows build.
+    // Who this volume is, independently of what it is called (a volume GUID on
+    // Windows, a PARTUUID / filesystem or device-mapper UUID on Linux). `None`
+    // when the machine cannot say.
     let identity = own_backup_backup::source_identity::stable_source_id(device);
     let chains = match list_job_chains(folder, &job.id) {
         Ok(c) => c,
