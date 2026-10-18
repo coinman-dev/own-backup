@@ -376,7 +376,7 @@ fn opened_luks_container(device: &str) -> Option<String> {
 pub struct LinuxBackupRequest {
     /// Source device (`/dev/sdb2`, a loop device, or an image file).
     pub source: String,
-    /// Output image path (`.img`). Must not exist yet.
+    /// Output image path (`.vhdx`, `.qcow2`, or `.obk` when encrypted). Must not exist yet.
     pub image_path: PathBuf,
     /// Backup block size in bytes; use [`DEFAULT_BLOCK_SIZE`].
     pub block_size: u32,
@@ -1259,7 +1259,7 @@ mod tests {
             .unwrap()
             .success());
 
-        let img = dir.path().join("out.img");
+        let img = dir.path().join("out.vhdx");
         let req = LinuxBackupRequest {
             source: src.to_str().unwrap().to_string(),
             image_path: img.clone(),
@@ -1306,7 +1306,7 @@ mod tests {
             .unwrap()
             .success());
 
-        let img = dir.path().join("out.img");
+        let img = dir.path().join("out.vhdx");
         let sum = backup_volume(
             &LinuxBackupRequest {
                 source: src.to_str().unwrap().to_string(),
