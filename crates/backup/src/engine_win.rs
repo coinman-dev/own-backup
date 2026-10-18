@@ -57,6 +57,9 @@ use crate::engine_core::disk_image::{
     container_kind, disk_source_token, DiskCompositeReader, DiskRegion, DiskUsedMap,
 };
 pub use crate::engine_core::disk_image::{DiskBackupRequest, DiskPartitionBackup};
+use crate::engine_core::partition_prep::{
+    linux_fs_exclusions, prepare_encrypted_partition_map, PreparedMap,
+};
 pub(crate) use crate::engine_core::read::ImageReadSource;
 pub use crate::engine_core::read::{load_sidecar_of, load_sidecar_with_keys};
 pub use crate::engine_core::target::DEFAULT_BLOCK_SIZE;
@@ -2066,35 +2069,6 @@ struct PreparedPartition {
     vss: Option<VssSnapshotSession>, // kept alive until the copy is done
 }
 
-/// A prepared partition used-map plus its file-exclusion outcome (plan D2).
-struct PreparedMap {
-    /// Used-sector map (`None` → sector-by-sector). For NTFS/FAT with exclusions
-    /// the excluded clusters are already dropped from this map.
-    map: Option<Box<dyn UsedSectorMap>>,
-    /// Detected filesystem name for the manifest.
-    filesystem: String,
-    /// Excluded byte ranges (VOLUME-relative, finalized): zeroed in the image
-    /// copy so excluded file DATA never leaves the machine.
-    zero_ranges: ByteRanges,
-    /// FAT/exFAT metadata patches (VOLUME-relative offset → bytes): deleted
-    /// directory entries + freed allocation-table chains, so excluded FAT files
-    /// truly disappear instead of remaining zero-filled ghosts.
-    patches: Vec<(u64, Vec<u8>)>,
-    /// NTFS/ReFS matched paths for the post-copy true-removal pass (plan D2):
-    /// the FS driver deletes them inside the finished image so the catalog
-    /// entry disappears too (not just a zero-filled ghost). Empty for FAT
-    /// (patched directly) and Linux filesystems.
-    removal_paths: Vec<crate::exclusions_win::ExcludedPath>,
-    pub excluded_files: u64,
-    pub excluded_bytes: u64,
-    /// Per-category byte breakdown of the KEPT files on this partition (powers
-    /// the dashboard's data breakdown); `None` when no exclusion walk ran.
-    categories: Option<crate::exclusions::CategorySizes>,
-    /// Why no walk ran over this partition, for the result screen. `None` when
-    /// one did.
-    skipped: Option<String>,
-}
-
 /// Build a partition's used-map and apply file exclusions (plan D2). The
 /// filesystem is determined from the map that parses (over the DECRYPTED view
 /// for a LUKS volume, so an unlocked Linux root reports "btrfs", not "unknown").
@@ -2108,13 +2082,6 @@ struct PreparedMap {
 /// yet acted on; LUKS-decrypted volumes are captured whole.
 ///
 /// `tick` reports "prepare"-phase progress (and can cancel by returning `Err`).
-/// Карта и исключения для раздела, который Windows не монтирует: NTFS внутри
-/// BitLocker, прочитанная через расшифрованное окно.
-///
-/// Исключения решаются ДО копии, по $MFT (план exclusions-before-copy, B3):
-/// перечислить файлы обходом дерева тут нельзя — тома для Windows не
-/// существует, — а по MFT можно, и тогда исключённые кластеры просто не
-/// попадают в карту.
 /// Разобрать исключения по $MFT тома, который Windows смонтировала.
 ///
 /// Том открывается как устройство и читается насквозь — тем же сканером, что
@@ -2134,82 +2101,6 @@ fn scan_ntfs_exclusions_by_mft(
     let cur = crate::ntfs_scan::RawVolumeCursor::new(&mut dev);
     let mut buffered = crate::ntfs_scan::BufferedVolume::new(cur, 4 << 20, 6);
     crate::ntfs_scan::scan_mft_with_cancel(&mut buffered, patterns, tick)
-}
-
-fn prepare_encrypted_partition_map(
-    mut src: Box<dyn crate::fat_map::RawVolume + Send>,
-    block_size: u32,
-    patterns: &[String],
-    mut tick: impl FnMut(u64, u64) -> Result<()>,
-) -> Result<PreparedMap> {
-    let mut out = PreparedMap {
-        map: None,
-        filesystem: "NTFS".into(),
-        zero_ranges: ByteRanges::new(),
-        patches: Vec::new(),
-        removal_paths: Vec::new(),
-        excluded_files: 0,
-        excluded_bytes: 0,
-        categories: None,
-        skipped: None,
-    };
-
-    let scan = if patterns.is_empty() {
-        out.skipped = Some(no_patterns());
-        None
-    } else {
-        let cur = crate::ntfs_scan::RawVolumeCursor::new(src.as_mut());
-        let mut buffered = crate::ntfs_scan::BufferedVolume::new(cur, 4 << 20, 6);
-        match crate::ntfs_scan::scan_mft_with_cancel(&mut buffered, patterns, &mut tick) {
-            Ok(scan) => {
-                info!(
-                    files = scan.files_excluded,
-                    bytes = scan.bytes_excluded,
-                    kept = scan.kept.len(),
-                    paths = scan.paths.len(),
-                    records = scan.records_scanned,
-                    "exclusions resolved from the MFT BEFORE the copy"
-                );
-                Some(scan)
-            }
-            Err(OwnBackupError::Cancelled) => return Err(OwnBackupError::Cancelled),
-            Err(e) => {
-                // Грязный том, не NTFS внутри, битая запись — копия делается
-                // целиком, и об этом сказано вслух.
-                warn!(error = %e, "MFT scan failed — this partition keeps every file");
-                out.skipped = Some(tr!("engine_win.skip_mft_failed", error = e).into_owned());
-                None
-            }
-        }
-    };
-
-    let excluded = scan.as_ref().map(|s| &s.ranges).filter(|r| !r.is_empty());
-    match crate::ntfs_map::build_ntfs_used_map_excl(src.as_mut(), block_size, excluded) {
-        Ok(map) => out.map = Some(Box::new(map)),
-        Err(e) => {
-            warn!(error = %e, "no NTFS map over the decrypted partition — copying every block");
-            out.skipped.get_or_insert_with(|| {
-                tr!("engine_win.skip_ntfs_map_failed", error = e).into_owned()
-            });
-            return Ok(out);
-        }
-    }
-    if let Some(scan) = scan {
-        out.excluded_files = scan.files_excluded;
-        out.excluded_bytes = scan.bytes_excluded;
-        out.categories = Some(scan.categories);
-        out.removal_paths = scan
-            .paths
-            .iter()
-            .map(|p| crate::exclusions_win::ExcludedPath {
-                rel: p.rel.clone(),
-                is_dir: p.is_dir,
-                is_reparse: p.is_reparse,
-            })
-            .collect();
-        out.zero_ranges = scan.ranges;
-    }
-    Ok(out)
 }
 
 fn prepare_partition_map(
@@ -2394,152 +2285,9 @@ fn prepare_partition_map(
             },
         ));
     }
-    if let Ok(mut m) = crate::ext_map::build_ext_used_map(src.as_mut(), block_size) {
-        // ext2/3/4: full file-level exclusions (Stage 1 drop+zero, Stage 2
-        // metadata true-removal) — ext data blocks are exclusively owned, so
-        // this is safe (unlike btrfs). Scanned over the DECRYPTED view for LUKS.
-        drop(src);
-        let mut out = none("ext4", None);
-        if !patterns_linux.is_empty() {
-            if let Ok(mut src2) = open() {
-                match crate::ext_exclusions::scan_ext_exclusions(
-                    src2.as_mut(),
-                    patterns_linux,
-                    |n| tick(n, 0),
-                ) {
-                    Ok(scan) => {
-                        out.excluded_files = scan.files_excluded;
-                        out.excluded_bytes = scan.bytes_excluded;
-                        out.categories = Some(scan.categories);
-                        out.patches = scan.patches;
-                        if !scan.ranges.is_empty() {
-                            // Only what Stage 2 actually freed leaves the image.
-                            // A zero-filled ghost keeps its blocks: the
-                            // filesystem still lists the file, so those sectors
-                            // must be restored as the zeros they became.
-                            m.apply_excluded_ranges(&scan.droppable, block_size);
-                            out.zero_ranges = scan.ranges;
-                        }
-                    }
-                    Err(OwnBackupError::Cancelled) => return Err(OwnBackupError::Cancelled),
-                    Err(e) => {
-                        warn!(part = %read_path, error = %e, "ext exclusions failed — keeping all files");
-                        out.skipped =
-                            Some(tr!("engine_win.skip_list_failed", fs = "ext").into_owned());
-                    }
-                }
-            }
-        } else {
-            out.skipped = Some(no_patterns());
-        }
-        out.map = Some(Box::new(m));
-        return Ok(out);
-    }
-    if let Ok(mut m) = crate::btrfs_map::build_btrfs_used_map(src.as_mut(), block_size) {
-        // btrfs: CoW-safe file exclusions. Only extents PROVEN exclusively
-        // owned by matched files are zeroed + dropped; anything shared with a
-        // snapshot or a reflink is kept. Files whose extents are all private
-        // are removed from the FS tree outright (Stage 2).
-        //
-        // Stage 2 destroyed a copy once (2026-07-28): excluding dense subtrees
-        // (/proc, /sys, /dev, /run, /var/cache) emptied whole FS-tree leaves,
-        // which stayed in the tree with no items while their parents still
-        // pointed at them. The restored system aborted its first mount with
-        // `tree first key mismatch … has=(0,0,0)`; later, stale csum entries
-        // over freed extents corrupted the tree at first write. Three guards
-        // now stand in the way (FS-, extent- and csum-tree leaves: files whose
-        // removal would empty or overflow a leaf are spared to Stage 1), freed
-        // extents LOSE their csum entries (`btrfs_del_csums` contract), and if
-        // a leaf still breaks, the whole Stage 2 is discarded. A failed scan
-        // keeps every file — a bigger image is always better than a corrupt
-        // one.
-        drop(src);
-        let mut out = none("btrfs", None);
-        if !patterns_linux.is_empty() {
-            if let Ok(mut src2) = open() {
-                // `true` = Stage 2: excluded files are REALLY removed from the
-                // catalog (product requirement 2026-07-28, CLAUDE.md). The
-                // scanner spares anything it cannot remove safely (shared
-                // extents, hardlinks, leaf-breaking edits) down to Stage 1,
-                // and any Stage-2 failure keeps the whole volume on Stage 1 —
-                // see `scan_btrfs_exclusions`.
-                match crate::btrfs_exclusions::scan_btrfs_exclusions(
-                    src2.as_mut(),
-                    patterns_linux,
-                    true,
-                    |n| tick(n, 0),
-                ) {
-                    Ok(scan) => {
-                        out.excluded_files = scan.files_excluded;
-                        out.excluded_bytes = scan.bytes_excluded;
-                        out.categories = Some(scan.categories);
-                        out.patches = scan.patches;
-                        if !scan.ranges.is_empty() {
-                            // Stage-2 frees may be dropped; Stage-1 ghosts keep
-                            // their blocks — btrfs rewrote their checksums to
-                            // the checksum of zeros, so a restore that leaves
-                            // the target's old bytes there fails every read
-                            // (EIO) instead of returning an empty file.
-                            m.apply_excluded_ranges(&scan.droppable, block_size);
-                            out.zero_ranges = scan.ranges;
-                        }
-                    }
-                    Err(OwnBackupError::Cancelled) => return Err(OwnBackupError::Cancelled),
-                    Err(e) => {
-                        warn!(part = %read_path, error = %e, "btrfs exclusions failed — keeping all files");
-                        out.skipped =
-                            Some(tr!("engine_win.skip_list_failed", fs = "btrfs").into_owned());
-                    }
-                }
-            }
-        } else {
-            out.skipped = Some(no_patterns());
-        }
-        out.map = Some(Box::new(m));
-        return Ok(out);
-    }
-    if let Ok(mut m) = crate::xfs_map::build_xfs_used_map(src.as_mut(), block_size) {
-        // xfs: reflink-aware Stage-1 zeroing (data is not checksummed on xfs, so
-        // no metadata edits) — only extents proven NOT shared (refcount==1) are
-        // zeroed + dropped. Catalog true-removal (Stage 2) is a follow-up.
-        drop(src);
-        let mut out = none("xfs", None);
-        if !patterns_linux.is_empty() {
-            if let Ok(mut src2) = open() {
-                // `true` — Stage 2: записи каталогов, иноды и блоки. План
-                // собирается целиком и применяется только если все три шага
-                // согласились; иначе файл остаётся нулевым призраком.
-                match crate::xfs_exclusions::scan_xfs_exclusions(
-                    src2.as_mut(),
-                    patterns_linux,
-                    true,
-                    |n| tick(n, 0),
-                ) {
-                    Ok(scan) => {
-                        out.excluded_files = scan.files_excluded;
-                        out.excluded_bytes = scan.bytes_excluded;
-                        out.categories = Some(scan.categories);
-                        out.patches = scan.patches;
-                        if !scan.ranges.is_empty() {
-                            // Из образа уходит только то, что Stage 2 успел
-                            // вернуть в свободное место. Призрак держит свои
-                            // блоки: ФС всё ещё их читает.
-                            m.apply_excluded_ranges(&scan.droppable, block_size);
-                            out.zero_ranges = scan.ranges;
-                        }
-                    }
-                    Err(OwnBackupError::Cancelled) => return Err(OwnBackupError::Cancelled),
-                    Err(e) => {
-                        warn!(part = %read_path, error = %e, "xfs exclusions failed — keeping all files");
-                        out.skipped =
-                            Some(tr!("engine_win.skip_list_failed", fs = "xfs").into_owned());
-                    }
-                }
-            }
-        } else {
-            out.skipped = Some(no_patterns());
-        }
-        out.map = Some(Box::new(m));
+    if let Some(out) =
+        linux_fs_exclusions(src, &open, read_path, block_size, patterns_linux, &mut tick)?
+    {
         return Ok(out);
     }
     Ok(none_because(
