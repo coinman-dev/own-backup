@@ -18,7 +18,8 @@ The owner now works on a native Linux machine (Ubuntu 26.04, KDE Plasma on Wayla
 ### Building and artifacts
 - **Build on the Linux machine, in the working checkout:**
   - Linux checks and unit tests: `cargo test` (root-gated tests stay ignored without root).
-  - `protoc` is not installed system-wide: use `PROTOC=$PWD/tmp/tools/protoc/bin/protoc`. The GUI crate needs the WebKitGTK 4.1 development packages, which are not installed (needs sudo); check the other crates with `--exclude own-backup-gui`.
+  - Tools that are not installed system-wide (no sudo) were unpacked from Ubuntu packages into `tmp/tools/`: `. tmp/tools/env.sh` sets `PROTOC`, puts clang-cl/lld-link (for `cargo xwin`) and QEMU 10.2 with OVMF/SeaBIOS on `PATH`, and points `PKG_CONFIG_PATH` at the WebKitGTK 4.1 development `.pc` files. That is enough for `cargo check -p own-backup-gui` on Linux; linking and running the Linux GUI need the real packages (`libwebkit2gtk-4.1-dev`), which are not installed.
+  - KVM is usable without sudo (`/dev/kvm` ACL). The Linux stand (`scripts/lab/linux-vm.py`) runs guests where root is available for snapshot, guard, systemd and package checks.
   - Windows cross-compilation: `cargo xwin build --target x86_64-pc-windows-msvc --release`
   - Full installer build: `scripts/build-installer.sh` (produces `target/dist/own-backup-install.exe`)
 - **Built Windows `.exe` files go to** `win/` (`own-backup-gui.exe`, `own-backup-service.exe`, `own-backup-cli.exe`, `own-backup-shell.exe`, `own-backup-install.exe`).
