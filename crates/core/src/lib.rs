@@ -301,12 +301,14 @@ pub fn dest_on_source_volume(source: &str, dest_folder: &str) -> bool {
 /// By LETTERS only, so it sees nothing when a source is a volume GUID path, a
 /// `part:` range or a mount point. Kept as the cheap first pass, with the real
 /// answer in [`dest_placement`] — this one never refuses something that is
-/// actually fine, so it costs nothing to ask first.
+/// actually fine, so it costs nothing to ask first. Only a source that IS a
+/// drive counts: a mount point `C:\Mount\Data` is another volume, and read
+/// as `C` it refused copies to `C:\Backups` (stand, 2026-10-18).
 pub fn dest_collision_letter(job: &Job, dest_folder: &str) -> Option<char> {
     let dst = drive_letter_of(dest_folder)?;
     job.source_list()
         .iter()
-        .filter_map(|s| drive_letter_of(s))
+        .filter_map(|s| own_backup_backup::source_identity::direct_drive_letter(s))
         .find(|&src| src == dst)
 }
 
@@ -2108,6 +2110,30 @@ fn file_token(job: &Job, device: &str) -> String {
             }
         }
     }
+    // A mount point (`C:\Mount\Data`) is not the volume of the letter it
+    // starts with: named `C` it shared its file names with a `C:` source of
+    // the same job, run for run. Named by its own volume GUID instead, as a
+    // GUID-path source is; chains still follow the volume's identity.
+    let d = device.trim();
+    if d.len() > 3
+        && d.as_bytes()[1] == b':'
+        && own_backup_backup::source_identity::direct_drive_letter(d).is_none()
+    {
+        if let Some(id) = own_backup_backup::source_identity::stable_source_id(d) {
+            let hex: String = id
+                .split_once('{')
+                .map(|(_, rest)| {
+                    rest.chars()
+                        .filter(char::is_ascii_hexdigit)
+                        .take(8)
+                        .collect()
+                })
+                .unwrap_or_default();
+            if hex.len() == 8 {
+                return format!("V{}", hex.to_ascii_uppercase());
+            }
+        }
+    }
     source_token(device)
 }
 
@@ -2119,22 +2145,22 @@ fn file_token(job: &Job, device: &str) -> String {
 /// an increment written onto a copy of a different disk is not a smaller
 /// mistake than a lost one (audit AUD-10, point 3).
 ///
-/// So when BOTH sides recorded who they are, that decides. When either does
-/// not — an old copy, or a machine that cannot answer — the name is all there
-/// is and the behaviour is exactly what it was. That is the compatible half:
-/// this never starts mixing sources, it only stops.
+/// So when BOTH sides recorded who they are, that decides — alone. The name
+/// is not asked then either: the same volume named `P:` one day and by its
+/// GUID path or a mount point the next (or given a new letter) used to start
+/// a new full chain, because its token changed with the name (stand,
+/// 2026-10-18). When either side has no identity — an old copy, or a machine
+/// that cannot answer — the name is all there is and the behaviour is
+/// exactly what it was.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))] // used by the Windows backup path
 fn chain_belongs_to(
     base: &own_backup_backup::chains::ChainImage,
     token: &str,
     identity: &Option<String>,
 ) -> bool {
-    if !image_token(&base.image_path).is_some_and(|t| t.eq_ignore_ascii_case(token)) {
-        return false;
-    }
     match (identity, &base.source_id) {
         (Some(mine), Some(theirs)) => mine.eq_ignore_ascii_case(theirs),
-        _ => true,
+        _ => image_token(&base.image_path).is_some_and(|t| t.eq_ignore_ascii_case(token)),
     }
 }
 
@@ -2147,12 +2173,12 @@ fn chain_source_group_matches(
     token: &str,
     source_id: Option<&str>,
 ) -> bool {
-    if !image_token(&base.image_path).is_some_and(|t| t.eq_ignore_ascii_case(token)) {
-        return false;
-    }
+    // Identity decides when both have one, as in [`chain_belongs_to`]: a chain
+    // continued under a new name stays in its volume's group.
+    let named = || image_token(&base.image_path).is_some_and(|t| t.eq_ignore_ascii_case(token));
     match (source_id, base.source_id.as_deref()) {
         (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
-        (None, None) => true,
+        (None, None) => named(),
         _ => false,
     }
 }
@@ -4936,6 +4962,22 @@ mod tests {
     }
 
     #[test]
+    fn a_mount_point_source_is_not_its_folders_drive() {
+        let job = Job {
+            source: r"C:\Mount\Data\".into(),
+            sources: vec![r"C:\Mount\Data\".into()],
+            ..Default::default()
+        };
+        assert_eq!(dest_collision_letter(&job, r"C:\Backups"), None);
+        let job = Job {
+            source: "C:".into(),
+            sources: vec![r"\\.\C:".into(), r"D:\".into()],
+            ..Default::default()
+        };
+        assert_eq!(dest_collision_letter(&job, r"d:\Backups"), Some('D'));
+    }
+
+    #[test]
     fn rejects_dest_on_source_volume() {
         assert!(dest_on_source_volume("E:", r"E:\OwnBackup"));
         assert!(dest_on_source_volume(r"\\.\E:", r"e:\backups")); // case-insensitive
@@ -5952,6 +5994,36 @@ mod tests {
         assert!(chain_belongs_to(&base, "C", &None));
         // Имя всё ещё должно совпадать — это не отменяется.
         assert!(!chain_belongs_to(&base, "D", &None));
+    }
+
+    /// Тот же том под другим именем — буквой, путём GUID или точкой
+    /// монтирования, или с новой буквой: идентичность записана с обеих
+    /// сторон, и цепочка его, хотя токен в имени файла другой (стенд,
+    /// 18.10: смена `P:` на путь GUID начинала новую полную копию).
+    #[test]
+    fn the_same_volume_under_another_name_continues_its_chain() {
+        let id = r"\?\VOLUME{99A5A6D1-57E5-4920-9DF1-CA5BF32BE042}";
+        let base = own_backup_backup::chains::ChainImage {
+            image_path: PathBuf::from("j_P_full_1.vhdx"),
+            sidecar_path: PathBuf::from("j_P_full_1.vhdx.obkm"),
+            role: own_backup_backup::sidecar::ChainRole::Full,
+            container: "vhdx".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            parent_file_name: None,
+            source_id: Some(id.into()),
+            consolidated_increments: 0,
+            chain_started_at: None,
+        };
+        assert!(chain_belongs_to(
+            &base,
+            "V99A5A6D1",
+            &Some(id.to_lowercase())
+        ));
+        assert!(chain_source_group_matches(&base, "V99A5A6D1", Some(id)));
+        // Другой том с тем же именем по-прежнему чужой.
+        let other = r"\?\VOLUME{22222222-2222-2222-2222-222222222222}";
+        assert!(!chain_belongs_to(&base, "P", &Some(other.into())));
+        assert!(!chain_source_group_matches(&base, "P", Some(other)));
     }
 
     /// Ноль значит «выключено» — как у keep_chains, cleanup_older_than_days и

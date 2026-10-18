@@ -26,6 +26,12 @@
   leaves a half-written temporary file holding the space.
 - The window and the service exchange messages up to 64 MB: a job list
   past 4 MB (very long exclusion lists) no longer breaks every request.
+- A source volume keeps its chain when it is named differently: by a new
+  drive letter, its volume GUID path or a mount point. It used to start a new
+  full copy, because the chain was matched by the name in the file name.
+- A mount point (`C:\Mount\Data`) works as a source: it is read as the
+  volume mounted there, its images are named by that volume, and a
+  destination elsewhere on C: is no longer refused as "the same volume".
 
 ## 0.1.5-beta — 2026-10-17
 

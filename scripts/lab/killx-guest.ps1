@@ -542,6 +542,60 @@ function Checks9 {
     Say "KILLX-PASS format=$format"
     shutdown.exe /s /t 5 | Out-Null
 }
+# Mode 'aliases' (CHECKS 9): one source named by its letter, its volume GUID
+# path and a mount point continues one chain; a destination on that volume is
+# refused whichever name either side uses, one on another volume is not.
+function SaveRefused([string]$name, $job) {
+    $null = Rpc $name @{ op = 'create'; encrypted = $false; expect_error = $true; job = $job }
+    return (Get-Content "$work\$name.request.result.json" -Raw -Encoding UTF8 | ConvertFrom-Json).error
+}
+function Aliases {
+    Ask 'purge' 'purge'
+    $guid = (Get-Volume -DriveLetter P).Path
+    Check ($guid -like '\\?\Volume{*}\') "the source volume's GUID path ($guid)"
+    $mnt = 'C:\killx-mnt\'
+    $base = @{ schedule = @{ kind = 'none' }; image_format = 'vhdx'
+        scheme = @{ method = 'incremental'; only_incremental = $true; keep_chains = 5 }
+        exclusions = @{ enabled = $false; patterns = @(); patterns_linux = @() }
+        advanced = @{ validate_after = $false; retry_attempts = 0; after_backup = 'none' } }
+    $job = Rpc 'create' @{ op = 'create'; encrypted = $false; job = ($base + @{ name = $jobName; source = 'P:'; sources = @('P:'); dest_folder = $store }) }
+    $run1 = Rpc 'run1' @{ op = 'run'; id = $job.id; timeout_secs = 1800 }
+    Check ($run1.status -eq 'success' -and $run1.backup_kind -eq 'full') "by letter: a full ($($run1.backup_kind) $($run1.error))"
+    $null = Rpc 'to-guid' @{ op = 'save'; id = $job.id; patch = @{ source = $guid; sources = @($guid) } }
+    $run2 = Rpc 'run2' @{ op = 'run'; id = $job.id; timeout_secs = 1800 }
+    Check ($run2.status -eq 'success' -and $run2.backup_kind -eq 'incremental') "by GUID path: an increment of the same chain ($($run2.backup_kind) $($run2.error))"
+    Ask 'mountpoint' 'mountpoint'
+    $null = Rpc 'to-mount' @{ op = 'save'; id = $job.id; patch = @{ source = $mnt; sources = @($mnt) } }
+    $run3 = Rpc 'run3' @{ op = 'run'; id = $job.id; timeout_secs = 1800 }
+    Check ($run3.status -eq 'success' -and $run3.backup_kind -eq 'incremental') "by mount point: an increment of the same chain ($($run3.backup_kind) $($run3.error))"
+    $token = 'V' + $guid.Substring(11, 8).ToUpper()
+    Check ((Split-Path $run3.image_path -Leaf) -like "*_$($token)_inc_*") "a mount point is named by its volume, not by C ($($run3.image_path))"
+    $public = @(Get-ChildItem -LiteralPath $store -File | Where-Object { $_.Name -match '\.(vhdx|avhdx)$' } | ForEach-Object { $_.Name })
+    Check ($public.Count -eq 3 -and @($public | Where-Object { $_ -like '*_full_*' }).Count -eq 1) "one chain: one full and two increments ($($public -join ', '))"
+    $versions = Rpc 'versions' @{ op = 'versions'; id = $job.id }
+
+    $cases = @(
+        @{ n = 'guid-on-self'; source = $guid; dest = 'P:\killx-dest' },
+        @{ n = 'mount-on-self'; source = $mnt; dest = 'P:\killx-dest' },
+        @{ n = 'letter-into-mount'; source = 'P:'; dest = ($mnt + 'killx-dest') },
+        @{ n = 'guid-into-mount'; source = $guid; dest = ($mnt + 'killx-dest') }
+    )
+    $refusals = [ordered]@{}
+    foreach ($c in $cases) {
+        $why = SaveRefused "refuse-$($c.n)" ($base + @{ name = "$jobName-$($c.n)"; source = $c.source; sources = @($c.source); dest_folder = $c.dest })
+        Check ([bool]$why) "a destination on the source is refused ($($c.n)): $why"
+        $refusals[$c.n] = $why
+    }
+    $other = Rpc 'allow-other' @{ op = 'create'; encrypted = $false; job = ($base + @{ name = "$jobName-other"; source = $mnt; sources = @($mnt); dest_folder = 'C:\killx-other' }) }
+    Check ([bool]$other.id) 'a mount-point source with its copies on another volume is accepted'
+    Ask 'unmountpoint' 'unmountpoint'
+
+    [IO.File]::WriteAllText("$work\kills.done", 'done')
+    [IO.File]::WriteAllText("$work\passed.txt", 'pass')
+    Report 'result' @{ pass = $true; guid = $guid; runs = @($run1.image_path, $run2.image_path, $run3.image_path); refusals = $refusals; versions = $versions }
+    Say "KILLX-PASS format=$format"
+    shutdown.exe /s /t 5 | Out-Null
+}
 function HistoryUnwritable([string]$id) {
     Get-ChildItem -LiteralPath $store -Force -ErrorAction SilentlyContinue | Remove-Item -Force
     Ask 'block' 'block'
@@ -800,6 +854,29 @@ if ($media) {
                 Step "sxs done ($name)"
                 continue
             }
+            if ($request.action -in @('mountpoint', 'unmountpoint')) {
+                # P: also reached through an empty folder on C: (mode 'aliases').
+                $name = $request.name
+                $mnt = 'C:\killx-mnt\'
+                $part = Get-Partition -DriveLetter P
+                if ($request.action -eq 'mountpoint') {
+                    # A run that failed before 'unmountpoint' left the folder
+                    # pointing at a data disk since replaced. mountvol /D and
+                    # rmdir drop the link only, never what it led to.
+                    & mountvol.exe $mnt /D 2>$null | Out-Null
+                    if (Test-Path $mnt) { & cmd.exe /c rmdir $mnt.TrimEnd([char]92) | Out-Null }
+                    New-Item -ItemType Directory -Force $mnt | Out-Null
+                    if (@($part.AccessPaths) -notcontains $mnt) { Add-PartitionAccessPath -InputObject $part -AccessPath $mnt }
+                } else {
+                    Remove-PartitionAccessPath -InputObject $part -AccessPath $mnt -ErrorAction SilentlyContinue
+                }
+                Remove-Item "$work\kill.request" -Force
+                $paths = @((Get-Partition -DriveLetter P).AccessPaths)
+                Say "KILLX-NOTE $($request.action): P: is at $($paths -join ', ')"
+                JsonFile "$work\$name.json" @{ action = $request.action; paths = $paths }
+                Step "$($request.action) done ($name)"
+                continue
+            }
             if ($request.action -eq 'purge') {
                 # The stand's jobs, all of formats already passed: one of them
                 # outgrew what a reply may carry (gRPC 4 MB), and every listing
@@ -923,6 +1000,7 @@ if ($media) {
         New-Item -ItemType Directory -Force $store | Out-Null
         if ($format -like 'media*') { MediaBuild; return }
         if ($format -in @('checks9', 'nospace')) { Checks9; return }
+        if ($format -eq 'aliases') { Aliases; return }
         $state = if (Test-Path "$work\job.json") { Get-Content "$work\job.json" -Raw | ConvertFrom-Json } else { $null }
         if (-not $state) {
             # Synthetic secret of a throwaway VM.

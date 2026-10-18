@@ -174,6 +174,25 @@ pub fn volume_root_for_path(path: &str) -> Option<String> {
     Some(String::from_utf16_lossy(&name[..len]))
 }
 
+/// The volume mounted AT this folder (`C:\Mount\Data` → `\\?\Volume{…}\`),
+/// or `None` when the folder is not itself a mount point. An ordinary folder
+/// answers `None`, not the volume it sits in: a source named `C:\Users` must
+/// not quietly become the whole of C:.
+pub fn volume_mounted_at(folder: &str) -> Option<String> {
+    use windows::Win32::Storage::FileSystem::GetVolumePathNameW;
+
+    let wide = to_wide(folder);
+    let mut mount = [0u16; 512];
+    // SAFETY: the buffer is valid for its length; `wide` is NUL-terminated.
+    unsafe { GetVolumePathNameW(PCWSTR(wide.as_ptr()), &mut mount) }.ok()?;
+    let len = mount.iter().position(|&c| c == 0).unwrap_or(mount.len());
+    let mount = String::from_utf16_lossy(&mount[..len]);
+    let same = mount
+        .trim_end_matches('\\')
+        .eq_ignore_ascii_case(folder.trim_end_matches('\\'));
+    same.then(|| volume_root_for_path(&mount)).flatten()
+}
+
 /// Whether every extent of `volume_root` lives on `disk_number`.
 pub fn volume_on_disk(volume_root: &str, disk_number: u32) -> bool {
     let extents = volume_extents(volume_root);

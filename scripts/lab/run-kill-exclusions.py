@@ -55,7 +55,7 @@ def answer_iso() -> Path:
     (lab / 'sys-marker.txt').write_text('Own Backup kill-during-exclusions acceptance media\n')
     # vhdx | qcow2 | obk: which container the guest's job writes this time.
     fmt = os.environ.get('OBK_FORMAT', 'vhdx')
-    assert fmt in ('vhdx', 'qcow2', 'obk', 'consol', 'consol-vhdx', 'consol-qcow2', 'flush-vhdx', 'flush-obk', 'probe-io', 'stall-vhdx', 'stall-obk', 'history', 'media', 'media-sxs', 'checks9', 'nospace'), fmt
+    assert fmt in ('vhdx', 'qcow2', 'obk', 'consol', 'consol-vhdx', 'consol-qcow2', 'flush-vhdx', 'flush-obk', 'probe-io', 'stall-vhdx', 'stall-obk', 'history', 'media', 'media-sxs', 'checks9', 'nospace', 'aliases'), fmt
     if fmt.startswith('media'):
         # The medium carries the machine's WebView2; the VM has no network.
         shutil.copyfile(LAB / 'media/WebView2Runtime-x64.exe', lab / 'WebView2Runtime-x64.exe')

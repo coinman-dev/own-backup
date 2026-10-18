@@ -71,6 +71,14 @@ pub fn normalize_device_path(path: &str) -> String {
     {
         return format!(r"\\.\{}:", bytes[0] as char);
     }
+    // A mount point (`C:\Mount\Data`): the volume mounted there, by its GUID
+    // path. Opened as a folder it answered "path not found" and the run
+    // failed (stand, 2026-10-18).
+    if bytes.len() > 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        if let Some(root) = crate::volume_win::volume_mounted_at(path) {
+            return root.trim_end_matches('\\').to_string();
+        }
+    }
     path.to_string()
 }
 
