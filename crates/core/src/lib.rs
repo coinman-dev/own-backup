@@ -910,7 +910,10 @@ impl JobStore {
         if unrecorded.is_empty() {
             return;
         }
-        for run in [job.last_run.as_mut(), job.last_verification.as_mut()].into_iter().flatten() {
+        for run in [job.last_run.as_mut(), job.last_verification.as_mut()]
+            .into_iter()
+            .flatten()
+        {
             if let Some(error) = unrecorded.get(&run.id) {
                 run.record_error = tr!("lib.run_not_recorded", error = error).into_owned();
             }
@@ -1199,21 +1202,26 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &std::path::Path) -> std::io::R
     }
 }
 
-fn write_json<T: Serialize>(path: &std::path::Path, value: &T) -> std::io::Result<()> {
+pub(crate) fn write_json<T: Serialize>(path: &std::path::Path, value: &T) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    let bytes = serde_json::to_vec_pretty(value)?;
     let tmp = path.with_extension("json.tmp");
-    {
-        // Pushed out of the cache BEFORE the rename. Without it the rename can
-        // land while the bytes have not, and a crash then leaves a file that
-        // exists, is the right size and holds nothing.
-        use std::io::Write as _;
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(&serde_json::to_vec_pretty(value)?)?;
-        f.sync_all()?;
-    }
-    std::fs::rename(&tmp, path)
+    // Pushed out of the cache BEFORE the rename. Without it the rename can
+    // land while the bytes have not, and a crash then leaves a file that
+    // exists, is the right size and holds nothing.
+    use std::io::Write as _;
+    let mut f = std::fs::File::create(&tmp)?;
+    let done = f.write_all(&bytes).and_then(|()| f.sync_all());
+    drop(f);
+    // A disk that filled up mid-write left the half-written file behind,
+    // still holding the space the next save needs (stand, 2026-10-17). Only
+    // a file this call created: a failed create has returned above.
+    done.and_then(|()| std::fs::rename(&tmp, path))
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -3391,22 +3399,25 @@ async fn perform_backup(
                 {
                     last_permille = permille;
                     last_emit = std::time::Instant::now();
-                    watch_bg.show(&sink_bg, JobProgress {
-                        job_id: job_id.clone(),
-                        phase: phase.into(),
-                        percent: permille / 10,
-                        blocks_done: p.blocks_done,
-                        blocks_total: p.blocks_total,
-                        speed_mbps: p.speed_bps as f64 / 1_000_000.0,
-                        volume_index: vidx,
-                        volume_count: count,
-                        volume: vol_label_bg.clone(),
-                        image_file_name: image_name.clone(),
-                        categories: p.categories.clone().unwrap_or_default(),
-                        excluded_files: p.excluded.map(|(f, _)| f),
-                        excluded_bytes: p.excluded.map(|(_, b)| b),
-                        stalled_secs: None,
-                    });
+                    watch_bg.show(
+                        &sink_bg,
+                        JobProgress {
+                            job_id: job_id.clone(),
+                            phase: phase.into(),
+                            percent: permille / 10,
+                            blocks_done: p.blocks_done,
+                            blocks_total: p.blocks_total,
+                            speed_mbps: p.speed_bps as f64 / 1_000_000.0,
+                            volume_index: vidx,
+                            volume_count: count,
+                            volume: vol_label_bg.clone(),
+                            image_file_name: image_name.clone(),
+                            categories: p.categories.clone().unwrap_or_default(),
+                            excluded_files: p.excluded.map(|(f, _)| f),
+                            excluded_bytes: p.excluded.map(|(_, b)| b),
+                            stalled_secs: None,
+                        },
+                    );
                 }
                 #[cfg(feature = "a07-lab-gate")]
                 a07_lab_gate(&job_id, phase, p.blocks_done, p.blocks_total)?;
@@ -3429,7 +3440,9 @@ async fn perform_backup(
                         // AUD-12). Reading back a whole image is minutes of work;
                         // before this, pressing Отмена during it did nothing and
                         // the run then finished as a success.
-                        if cancel_bg.load(std::sync::atomic::Ordering::SeqCst) || watch_bg.abandoned() {
+                        if cancel_bg.load(std::sync::atomic::Ordering::SeqCst)
+                            || watch_bg.abandoned()
+                        {
                             return Err(OwnBackupError::Cancelled);
                         }
                         watch_bg.alive();
@@ -3438,22 +3451,25 @@ async fn perform_backup(
                         if permille != v_permille || v_emit.elapsed().as_millis() >= 400 {
                             v_permille = permille;
                             v_emit = std::time::Instant::now();
-                            watch_bg.show(&sink_bg, JobProgress {
-                                job_id: job_id.clone(),
-                                phase: "verify".into(),
-                                percent: permille / 10,
-                                blocks_done: done,
-                                blocks_total: total,
-                                speed_mbps: mbps,
-                                volume_index: vidx,
-                                volume_count: count,
-                                volume: vol_label_bg.clone(),
-                                image_file_name: image_name.clone(),
-                                categories: Vec::new(),
-                                excluded_files: None,
-                                excluded_bytes: None,
-                                stalled_secs: None,
-                            });
+                            watch_bg.show(
+                                &sink_bg,
+                                JobProgress {
+                                    job_id: job_id.clone(),
+                                    phase: "verify".into(),
+                                    percent: permille / 10,
+                                    blocks_done: done,
+                                    blocks_total: total,
+                                    speed_mbps: mbps,
+                                    volume_index: vidx,
+                                    volume_count: count,
+                                    volume: vol_label_bg.clone(),
+                                    image_file_name: image_name.clone(),
+                                    categories: Vec::new(),
+                                    excluded_files: None,
+                                    excluded_bytes: None,
+                                    stalled_secs: None,
+                                },
+                            );
                         }
                         #[cfg(feature = "a07-lab-gate")]
                         a07_lab_gate(&job_id, "verify", done, total)?;
@@ -3487,7 +3503,10 @@ async fn perform_backup(
             engine_watch::Waited::LeftBehind => {
                 warn!(job = %job.name, volume = %device,
                     "cancelled while the engine was not answering; its thread is left behind");
-                fatal = Some(("cancelled".into(), tr!("lib.cancelled_left_behind").into_owned()));
+                fatal = Some((
+                    "cancelled".into(),
+                    tr!("lib.cancelled_left_behind").into_owned(),
+                ));
                 break;
             }
         };
@@ -3802,22 +3821,26 @@ async fn perform_disk_backup(
             {
                 last_permille = permille;
                 last_emit = std::time::Instant::now();
-                watch_bg.show(&sink_bg, JobProgress {
-                    job_id: job_id.clone(),
-                    phase: phase.into(),
-                    percent: permille / 10,
-                    blocks_done: p.blocks_done,
-                    blocks_total: p.blocks_total,
-                    speed_mbps: p.speed_bps as f64 / 1_000_000.0,
-                    volume_index: 0,
-                    volume_count: 1,
-                    volume: tr!("lib.disk_label", disk = disk_number, model = model).into_owned(),
-                    image_file_name: image_name.clone(),
-                    categories: p.categories.clone().unwrap_or_default(),
-                    excluded_files: p.excluded.map(|(f, _)| f),
-                    excluded_bytes: p.excluded.map(|(_, b)| b),
-                    stalled_secs: None,
-                });
+                watch_bg.show(
+                    &sink_bg,
+                    JobProgress {
+                        job_id: job_id.clone(),
+                        phase: phase.into(),
+                        percent: permille / 10,
+                        blocks_done: p.blocks_done,
+                        blocks_total: p.blocks_total,
+                        speed_mbps: p.speed_bps as f64 / 1_000_000.0,
+                        volume_index: 0,
+                        volume_count: 1,
+                        volume: tr!("lib.disk_label", disk = disk_number, model = model)
+                            .into_owned(),
+                        image_file_name: image_name.clone(),
+                        categories: p.categories.clone().unwrap_or_default(),
+                        excluded_files: p.excluded.map(|(f, _)| f),
+                        excluded_bytes: p.excluded.map(|(_, b)| b),
+                        stalled_secs: None,
+                    },
+                );
             }
             #[cfg(feature = "a07-lab-gate")]
             a07_lab_gate(&job_id, phase, p.blocks_done, p.blocks_total)?;
@@ -3846,23 +3869,26 @@ async fn perform_disk_backup(
                     if permille != v_permille || v_emit.elapsed().as_millis() >= 400 {
                         v_permille = permille;
                         v_emit = std::time::Instant::now();
-                        watch_bg.show(&sink_bg, JobProgress {
-                            job_id: job_id.clone(),
-                            phase: "verify".into(),
-                            percent: permille / 10,
-                            blocks_done: done,
-                            blocks_total: total,
-                            speed_mbps: mbps,
-                            volume_index: 0,
-                            volume_count: 1,
-                            volume: tr!("lib.disk_label", disk = disk_number, model = model)
-                                .into_owned(),
-                            image_file_name: image_name.clone(),
-                            categories: Vec::new(),
-                            excluded_files: None,
-                            excluded_bytes: None,
-                            stalled_secs: None,
-                        });
+                        watch_bg.show(
+                            &sink_bg,
+                            JobProgress {
+                                job_id: job_id.clone(),
+                                phase: "verify".into(),
+                                percent: permille / 10,
+                                blocks_done: done,
+                                blocks_total: total,
+                                speed_mbps: mbps,
+                                volume_index: 0,
+                                volume_count: 1,
+                                volume: tr!("lib.disk_label", disk = disk_number, model = model)
+                                    .into_owned(),
+                                image_file_name: image_name.clone(),
+                                categories: Vec::new(),
+                                excluded_files: None,
+                                excluded_bytes: None,
+                                stalled_secs: None,
+                            },
+                        );
                     }
                     #[cfg(feature = "a07-lab-gate")]
                     a07_lab_gate(&job_id, "verify", done, total)?;
@@ -4308,6 +4334,20 @@ mod tests {
         );
     }
 
+    /// A write that fails after the temporary file exists takes the file with
+    /// it: on a full disk the half-written copy held the space the next save
+    /// needed (stand, 2026-10-17). Here the rename is what fails.
+    #[test]
+    fn a_failed_write_leaves_no_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jobs.json");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("in-the-way"), b"x").unwrap();
+        assert!(write_json(&path, &vec![1, 2, 3]).is_err());
+        assert!(!dir.path().join("jobs.json.tmp").exists());
+        assert!(path.join("in-the-way").exists());
+    }
+
     /// The same for removal: a job is gone from the list only once it is gone
     /// from the file.
     #[test]
@@ -4355,13 +4395,24 @@ mod tests {
         let shown = store.get(&job.id).unwrap().last_run.unwrap();
         assert_eq!(shown.id, "run-1");
         assert!(!shown.record_error.is_empty(), "the screen is told");
-        assert!(!store.list()[0].last_run.clone().unwrap().record_error.is_empty());
+        assert!(!store.list()[0]
+            .last_run
+            .clone()
+            .unwrap()
+            .record_error
+            .is_empty());
         assert!(!store.activity()[0].record_error.is_empty());
         assert!(store.retry_unrecorded().is_err(), "still in the way");
 
         std::fs::remove_dir(dir.path().join("activity.json.tmp")).unwrap();
         assert!(store.retry_unrecorded().unwrap());
-        assert!(store.get(&job.id).unwrap().last_run.unwrap().record_error.is_empty());
+        assert!(store
+            .get(&job.id)
+            .unwrap()
+            .last_run
+            .unwrap()
+            .record_error
+            .is_empty());
         let reloaded = JobStore::load(dir.path());
         let kept = reloaded.get(&job.id).unwrap().last_run.unwrap();
         assert_eq!(kept.id, "run-1");

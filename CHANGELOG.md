@@ -22,6 +22,8 @@
 - The FAT boot image inside the medium's ISO keeps long names
   (`EFI\Microsoft`, `boot.stl`) instead of cutting them to 8.3.
 - The empty part of the compression slider follows the theme.
+- A job or history save that fails (for example on a full disk) no longer
+  leaves a half-written temporary file holding the space.
 
 ## 0.1.5-beta — 2026-10-17
 

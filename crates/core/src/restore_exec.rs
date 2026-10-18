@@ -94,14 +94,9 @@ pub fn acknowledge_in_history(data_dir: &std::path::Path, plan_id: uuid::Uuid) -
 }
 
 fn write_history(path: &std::path::Path, history: &[RestoreRunState]) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
     // Written through a temporary file: a half-written history is worse than
     // none, because it looks readable and is not.
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(history)?)?;
-    std::fs::rename(&tmp, path)
+    crate::write_json(path, &history)
 }
 
 /// Build the initial state for `plan`, with every operation pending.

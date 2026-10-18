@@ -80,7 +80,7 @@ function Step([string]$text) {
     try { Say "KILLX-STEP $text" } catch { }
 }
 function Phase([string]$value) { [IO.File]::WriteAllText("$base\phase.txt", $value) }
-function Rpc([string]$name, $request) {
+function Rpc([string]$name, $request, [switch]$Quiet) {
     $path = Join-Path $work "$name.request.json"
     JsonFile $path $request
     $out = Join-Path $work "$name.out"; $err = Join-Path $work "$name.err"
@@ -90,7 +90,8 @@ function Rpc([string]$name, $request) {
     $p.Refresh()
     $resultPath = [IO.Path]::ChangeExtension($path, 'result.json')
     $result = if (Test-Path $resultPath) { Get-Content $resultPath -Raw -Encoding UTF8 | ConvertFrom-Json } else { $null }
-    if ($result) { Report $name $result }
+    # -Quiet: a result of megabytes would take minutes on the serial line.
+    if ($result -and (-not $Quiet -or -not $result.ok)) { Report $name $result }
     if ($p.ExitCode -ne 0) { throw "RPC failed: $name exit=$($p.ExitCode) $([IO.File]::ReadAllText($err))" }
     return $result.result
 }
@@ -475,6 +476,72 @@ function MediaBuild {
     Say "KILLX-PASS format=$format"
     shutdown.exe /s /t 5 | Out-Null
 }
+# Mode 'checks9' (CHECKS 9): a hundred mounts and unmounts of one copy must
+# not grow the service's handles or threads nor leave an iSCSI session; a job
+# saved while C: is full is refused plainly and jobs.json stays whole.
+function ServiceState([string]$name) {
+    [IO.File]::WriteAllText("$work\kill.request", (ConvertTo-Json -Compress @{ name = $name; action = 'measure' }))
+    for ($i = 0; $i -lt 240 -and -not (Test-Path "$work\$name.json"); $i++) { Start-Sleep -Milliseconds 500 }
+    Check (Test-Path "$work\$name.json") "the SYSTEM half measured ($name)"
+    $m = Get-Content "$work\$name.json" -Raw | ConvertFrom-Json
+    Report $name $m
+    return $m
+}
+function Checks9 {
+    # 'nospace': only the full-disk half, without the hundred mounts.
+    $mounts = $format -eq 'checks9'
+    Ask 'purge' 'purge'
+    $job = Rpc 'create' @{ op = 'create'; encrypted = $false; job = @{
+        name = $jobName; source = 'P:'; sources = @('P:'); dest_folder = $store; image_format = 'vhdx'
+        schedule = @{ kind = 'none' }; scheme = @{ method = 'full'; keep_chains = 5 }
+        exclusions = @{ enabled = $false; patterns = @(); patterns_linux = @() }
+        advanced = @{ validate_after = $false; retry_attempts = 0; after_backup = 'none' } } }
+    if ($mounts) {
+    $run = Rpc 'run1' @{ op = 'run'; id = $job.id; timeout_secs = 1800 }
+    Check ($run.status -eq 'success') "a copy to mount ($($run.error))"
+    $image = $run.image_path
+    $cycle = {
+        param($i)
+        $null = Rpc "mount$i" @{ op = 'mount'; image = $image; secret = 'none' }
+        $null = Rpc "unmount$i" @{ op = 'unmount'; image = $image }
+        Remove-Item "$work\mount$i.*", "$work\unmount$i.*" -ErrorAction SilentlyContinue
+    }
+    # Two to warm up: the first mount loads what stays loaded.
+    & $cycle 0; & $cycle 1
+    $before = ServiceState 'before'
+    for ($i = 2; $i -lt 102; $i++) { & $cycle $i }
+    $after = ServiceState 'after'
+    Check ($after.iscsi_sessions -eq 0) "no iSCSI session is left ($($after.iscsi_sessions))"
+    Check ($after.disks -eq $before.disks) "no disk is left attached ($($before.disks) -> $($after.disks))"
+    Check ($after.handles -le $before.handles + 100) "100 mounts did not grow the service's handles ($($before.handles) -> $($after.handles))"
+    Check ($after.threads -le $before.threads + 5) "100 mounts did not grow the service's threads ($($before.threads) -> $($after.threads))"
+    }
+
+    # jobs.json made 1.5 MB while there is room; on a C: with 256 KB left a small
+    # change still has to rewrite all of it. The request itself stays small.
+    $patterns = @(for ($i = 0; $i -lt 1500; $i++) { "killx-padding-$i-" + ('x' * 1000) })
+    $null = Rpc -Quiet 'save-big' @{ op = 'save'; id = $job.id; patch = @{ exclusions = @{ enabled = $false; patterns = $patterns } } }
+    Remove-Item "$work\save-big.*" -ErrorAction SilentlyContinue
+    $whole = ServiceState 'jobs-before'
+    Ask 'fill' 'fill'
+    Report 'fill' (Get-Content "$work\fill.json" -Raw | ConvertFrom-Json)
+    $null = Rpc 'save-full' @{ op = 'save'; id = $job.id; expect_error = $true; patch = @{ name = "$jobName-renamed" } }
+    $why = (Get-Content "$work\save-full.request.result.json" -Raw -Encoding UTF8 | ConvertFrom-Json).error
+    $full = ServiceState 'jobs-full'
+    Ask 'unfill' 'unfill'
+    Check ($why -like '*os error 112*') "the save on a full disk is refused with the reason: $why"
+    Check ($full.jobs_sha -eq $whole.jobs_sha -and -not $full.jobs_tmp) 'jobs.json is unchanged and no temporary file is left'
+    $got = Rpc -Quiet 'get-after-full' @{ op = 'get'; id = $job.id }
+    Check ($got.name -eq $jobName -and @($got.exclusions.patterns).Count -eq 1500) 'the job reads back as it was'
+    $saved = Rpc 'save-after' @{ op = 'save'; id = $job.id; patch = @{ name = "$jobName-renamed"; exclusions = @{ enabled = $false; patterns = @() } } }
+    Check ($saved.name -eq "$jobName-renamed") 'with room again the same save succeeds'
+
+    [IO.File]::WriteAllText("$work\kills.done", 'done')
+    [IO.File]::WriteAllText("$work\passed.txt", 'pass')
+    Report 'result' @{ pass = $true; before = $before; after = $after; refused = $why }
+    Say "KILLX-PASS format=$format"
+    shutdown.exe /s /t 5 | Out-Null
+}
 function HistoryUnwritable([string]$id) {
     Get-ChildItem -LiteralPath $store -Force -ErrorAction SilentlyContinue | Remove-Item -Force
     Ask 'block' 'block'
@@ -640,6 +707,8 @@ if ($media) {
             if (-not $armed) { AutoLogon; Say 'KILLX-REARM'; shutdown.exe /r /t 5 | Out-Null }
             return
         }
+        # Nor is a full C: (mode 'nospace' killed between fill and unfill).
+        Remove-Item 'C:\killx-fill.bin' -Force -ErrorAction SilentlyContinue
         # A request left by an attempt that did not finish is not this one's.
         Remove-Item "$work\kill.request" -ErrorAction SilentlyContinue
         # AutoLogonCount is one logon: a retried attempt arms it again, which
@@ -731,6 +800,48 @@ if ($media) {
                 Step "sxs done ($name)"
                 continue
             }
+            if ($request.action -eq 'purge') {
+                # The stand's jobs, all of formats already passed: one of them
+                # outgrew what a reply may carry (gRPC 4 MB), and every listing
+                # failed. Emptied with the service stopped.
+                $name = $request.name
+                Stop-Service OwnBackup -Force
+                [IO.File]::WriteAllText('C:\ProgramData\OwnBackup\jobs.json', '[]', [Text.UTF8Encoding]::new($false))
+                Start-Service OwnBackup
+                WaitService
+                Remove-Item "$work\kill.request" -Force
+                JsonFile "$work\$name.json" @{ action = 'purge' }
+                Step "purge done ($name)"
+                continue
+            }
+            if ($request.action -in @('measure', 'fill', 'unfill')) {
+                $name = $request.name
+                $m = [ordered]@{ action = $request.action }
+                $fill = 'C:\killx-fill.bin'
+                if ($request.action -eq 'fill') {
+                    # fsutil sets the length without writing: nothing reaches the qcow2.
+                    Remove-Item $fill -Force -ErrorAction SilentlyContinue
+                    $free = (Get-Volume -DriveLetter C).SizeRemaining
+                    $m.fsutil = "$(& fsutil.exe file createnew $fill ($free - 256KB) 2>&1)"
+                    $m.free = (Get-Volume -DriveLetter C).SizeRemaining
+                } elseif ($request.action -eq 'unfill') {
+                    Remove-Item $fill -Force
+                    $m.free = (Get-Volume -DriveLetter C).SizeRemaining
+                } else {
+                    $p = Get-Process own-backup-service
+                    $m.handles = $p.HandleCount; $m.threads = $p.Threads.Count; $m.working_set = $p.WorkingSet64
+                    $m.iscsi_sessions = @(Get-IscsiSession -ErrorAction SilentlyContinue).Count
+                    $m.disks = @(Get-Disk).Count
+                    $m.jobs_sha = (Get-FileHash 'C:\ProgramData\OwnBackup\jobs.json').Hash
+                    $m.jobs_tmp = Test-Path 'C:\ProgramData\OwnBackup\jobs.json.tmp'
+                    $m.jobs_bytes = (Get-Item 'C:\ProgramData\OwnBackup\jobs.json').Length
+                    $m.c_free = (Get-Volume -DriveLetter C).SizeRemaining
+                }
+                Remove-Item "$work\kill.request" -Force
+                JsonFile "$work\$name.json" $m
+                Step "$($request.action) done ($name)"
+                continue
+            }
             if ($request.action -eq 'rawcopy') {
                 # The built ISO, byte for byte from sector 0 of the blank 2 GiB
                 # disk, where the host reads it without mounting anything.
@@ -811,6 +922,7 @@ if ($media) {
         if ($mode -eq 'flush') { for ($i = 0; $i -lt 180 -and -not (Test-Path 'T:\'); $i++) { Start-Sleep -Seconds 1 } }
         New-Item -ItemType Directory -Force $store | Out-Null
         if ($format -like 'media*') { MediaBuild; return }
+        if ($format -in @('checks9', 'nospace')) { Checks9; return }
         $state = if (Test-Path "$work\job.json") { Get-Content "$work\job.json" -Raw | ConvertFrom-Json } else { $null }
         if (-not $state) {
             # Synthetic secret of a throwaway VM.
