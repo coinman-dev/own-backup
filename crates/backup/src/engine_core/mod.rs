@@ -7,6 +7,7 @@
 //! already know — so a fix made here is made once.
 
 pub(crate) mod read;
+pub(crate) mod target;
 pub(crate) mod verify;
 
 #[cfg(test)]

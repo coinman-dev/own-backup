@@ -50,24 +50,21 @@ use crate::vhdx::{
 use crate::vhdx_bat::allocated_payload_blocks;
 use crate::win_device::{normalize_device_path, WinRawDevice};
 
-// Image reading and verification are shared with the Linux engine; these are
-// the names this engine's callers know them by.
+// The platform-independent half of this engine lives in `engine_core`, shared
+// with the Linux engine; the `pub` names are the ones this engine's callers know.
 pub(crate) use crate::engine_core::read::ImageReadSource;
 pub use crate::engine_core::read::{load_sidecar_of, load_sidecar_with_keys};
+pub use crate::engine_core::target::DEFAULT_BLOCK_SIZE;
+use crate::engine_core::target::{
+    check_encrypted_target, container_ext, entries_kept_reason, may_publish, no_patterns,
+    refuse_existing_outputs, report_categories, settled_image_path, snapshot_wanted,
+    volume_root_of, ImageTarget,
+};
 pub use crate::engine_core::verify::{
     verify_image, verify_image_scoped, verify_image_with_keys, VerifyScope, VerifySummary,
 };
 
-/// Default backup block size: 1 MiB (multiple of every real sector size).
-pub const DEFAULT_BLOCK_SIZE: u32 = 1024 * 1024;
-
 const MIB: u64 = 1024 * 1024;
-
-/// Why there is no by-type breakdown behind the most ordinary copy of all: the
-/// file walk is the exclusion walk, and with no rules to apply nobody walks.
-fn no_patterns() -> String {
-    tr!("engine_win.no_patterns").into_owned()
-}
 
 /// Parameters for a volume backup.
 #[derive(Clone)]
@@ -170,95 +167,9 @@ pub struct VolumeBackupSummary {
     pub excluded_entries_kept: Option<String>,
 }
 
-/// The result screen's sentence for a removal pass that did not happen: the
-/// pass itself logged why, in detail.
-fn entries_kept_reason() -> String {
-    tr!("engine_win.entries_kept").into_owned()
-}
-
-/// Write target behind the format switch. VHDX goes through the kernel
-/// (attach → raw writes to the PhysicalDrive node); qcow2 is written entirely
-/// in userspace with per-cluster zstd compression — no attach, no SAN-policy
-/// juggling, no flush pacing (the OS cache never holds a whole image).
-enum ImageTarget {
-    Vhdx {
-        writer: crate::vhdx_format::VhdxWriter,
-    },
-    Qcow2 {
-        writer: crate::qcow2::Qcow2StagedWriter<std::io::BufWriter<std::fs::File>>,
-    },
-    /// The encrypted container: the qcow2 path with our incompatible
-    /// extension. Its sidecar is sealed inside instead of living in a guest
-    /// meta partition, so `finalize` is where it goes in.
-    Obk {
-        writer: Box<crate::seal::obk::ObkStagedWriter<std::io::BufWriter<std::fs::File>>>,
-    },
-}
-
 #[cfg(test)]
 #[path = "engine_namespace_tests.rs"]
 mod new_image_namespace_tests;
-
-impl ImageTarget {
-    /// Virtual disk size of the image being written.
-    fn length(&self) -> u64 {
-        match self {
-            ImageTarget::Vhdx { writer } => writer.length(),
-            ImageTarget::Qcow2 { writer } => writer.length(),
-            ImageTarget::Obk { writer } => writer.length(),
-        }
-    }
-
-    fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()> {
-        match self {
-            ImageTarget::Vhdx { writer } => writer.write_at(offset, data),
-            ImageTarget::Qcow2 { writer } => writer.write_at(offset, data),
-            ImageTarget::Obk { writer } => writer.write_at(offset, data),
-        }
-    }
-
-    /// Finalize the image and log per-step timings.
-    ///
-    /// `sealed` is the sidecar of an encrypted image, with `reserve` bytes of
-    /// room so the final one — the exclusion figures and the checksums the
-    /// deletion pass touched are known only later — can replace it in place.
-    /// The other two containers keep their sidecar in a guest meta partition
-    /// and ignore both.
-    fn finalize(self, sealed: &[u8], reserve: usize) -> Result<()> {
-        match self {
-            ImageTarget::Obk { writer } => {
-                let t = Instant::now();
-                // Records, index, sealed sidecar, tables, header — the header
-                // last, which is this container's commit point.
-                let buf = writer.finish_with_reserve(sealed, reserve)?;
-                let file = buf
-                    .into_inner()
-                    .map_err(|e| OwnBackupError::Io(e.into_error()))?;
-                file.sync_all()?;
-                info!(finish_ms = t.elapsed().as_millis(), "obk finalize timings");
-            }
-            ImageTarget::Vhdx { writer } => {
-                let t = Instant::now();
-                writer.finish()?;
-                info!(finish_ms = t.elapsed().as_millis(), "VHDX finalize timings");
-            }
-            ImageTarget::Qcow2 { writer } => {
-                let t = Instant::now();
-                // Write L2/L1/refcounts + header, then make the file durable.
-                let buf = writer.finish()?;
-                let file = buf
-                    .into_inner()
-                    .map_err(|e| OwnBackupError::Io(e.into_error()))?;
-                file.sync_all()?;
-                info!(
-                    finish_ms = t.elapsed().as_millis(),
-                    "qcow2 finalize timings"
-                );
-            }
-        }
-        Ok(())
-    }
-}
 
 /// Open a freshly-attached virtual disk for writing; the PhysicalDrive device
 /// node can take a moment to appear after AttachVirtualDisk.
@@ -284,88 +195,6 @@ fn open_write_with_retry(path: &str) -> Result<WinRawDevice> {
 /// Ставить с этим никаких условий больше не нужно: с 2026-09-18 стороннего
 /// драйвера нет, а инициатор есть в любой Windows.
 #[cfg(target_os = "windows")]
-/// Отправить в интерфейс разбивку по типам файлов, как только она посчитана.
-///
-/// Одним сообщением и один раз: гонять её в каждом отчёте о ходе незачем —
-/// она не меняется до конца копирования.
-#[cfg(target_os = "windows")]
-fn report_categories(
-    progress: &mut impl FnMut(&BackupProgress) -> Result<()>,
-    categories: Option<&crate::exclusions::CategorySizes>,
-    excluded_files: u64,
-    excluded_bytes: u64,
-) -> Result<()> {
-    let Some(c) = categories else { return Ok(()) };
-    progress(&BackupProgress {
-        backup_id: "prepare".into(),
-        status: BackupStatus::Running,
-        categories: Some(c.as_pairs()),
-        excluded: Some((excluded_files, excluded_bytes)),
-        ..Default::default()
-    })
-}
-
-/// What an encrypted run may be asked to write, checked before anything is
-/// created. Encryption is the qcow2 path with our incompatible extension, and
-/// listings and retention find those images by their `.obk` name.
-fn check_encrypted_target(
-    encryption: Option<&crate::seal::context::ArchiveKeys>,
-    format: ImageFormat,
-    image_path: &Path,
-) -> Result<()> {
-    let Some(_) = encryption else { return Ok(()) };
-    if format != ImageFormat::Qcow2 {
-        return Err(OwnBackupError::Config(
-            tr!("engine_win.encryption_needs_qcow2").into_owned(),
-        ));
-    }
-    if image_path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_lowercase())
-        .as_deref()
-        != Some(crate::seal::obk::OBK_EXTENSION)
-    {
-        return Err(OwnBackupError::Config(
-            tr!(
-                "engine_win.encrypted_image_extension",
-                ext = crate::seal::obk::OBK_EXTENSION,
-                image = image_path.display()
-            )
-            .into_owned(),
-        ));
-    }
-    Ok(())
-}
-
-/// The name an image is published under once its kind is settled:
-/// `full_image_path` when a child was asked for and a full was made.
-fn settled_image_path(
-    image_path: &Path,
-    full_image_path: Option<&Path>,
-    asked: BackupType,
-    made: BackupType,
-) -> PathBuf {
-    match full_image_path {
-        Some(full) if asked != BackupType::Full && made == BackupType::Full => full.to_path_buf(),
-        _ => image_path.to_path_buf(),
-    }
-}
-
-/// Neither name an image may end up under can be taken already: both are
-/// this run's, and the cleanup after a failure removes both.
-fn refuse_existing_outputs(image_path: &Path, full_image_path: Option<&Path>) -> Result<()> {
-    for path in std::iter::once(image_path).chain(full_image_path) {
-        if path.exists() {
-            return Err(OwnBackupError::Config(format!(
-                "output image already exists: {}",
-                path.display()
-            )));
-        }
-    }
-    Ok(())
-}
-
 pub fn backup_volume(
     req: &VolumeBackupRequest,
     mut progress: impl FnMut(&BackupProgress) -> Result<()>,
@@ -427,33 +256,6 @@ pub fn backup_volume(
     Ok(summary)
 }
 
-/// Asked of the caller right before an image is published. A run that was
-/// cancelled, or that the job runner stopped waiting for (a destination that
-/// stopped answering, see core's `engine_watch`), answers with an error, and
-/// the image goes with its private name instead of becoming a version.
-fn may_publish(
-    progress: &mut impl FnMut(&BackupProgress) -> Result<()>,
-    bytes_written: u64,
-) -> Result<()> {
-    progress(&BackupProgress {
-        backup_id: "publish".into(),
-        status: BackupStatus::Running,
-        blocks_done: 0,
-        blocks_total: 0,
-        bytes_written,
-        speed_bps: 0,
-        categories: None,
-        excluded: None,
-    })
-}
-
-/// The volume-root form VSS expects; None for anything that is not a volume.
-/// See [`crate::source_identity::volume_root_for_snapshot`] — it lives there
-/// because it is pure string work and can be tested without Windows.
-fn volume_root_of(device_path: &str) -> Option<String> {
-    crate::source_identity::volume_root_for_snapshot(device_path)
-}
-
 /// Check that `parent_image` can serve as the parent of a new child image for
 /// the volume being backed up.
 fn validate_parent(
@@ -482,25 +284,6 @@ fn validate_parent(
         )));
     }
     Ok(sidecar)
-}
-
-/// Should we try for a shadow copy at all?
-///
-/// On the boot medium the answer is no, and not because VSS is missing (it is —
-/// WinPE carries no Volume Shadow Copy Service) but because there is nothing for
-/// it to do: the system on that disk is not running, no process holds a file
-/// open, nothing is written while we read. A direct read of an offline volume is
-/// already a consistent copy — that is the whole point of rescue media. Asking
-/// anyway would cost a COM round trip and log a failure that means nothing.
-fn snapshot_wanted(requested: bool) -> bool {
-    if !requested {
-        return false;
-    }
-    if own_backup_common::media_mode::is_media_mode() {
-        info!("boot medium: the system is offline, reading the volume directly (cold copy)");
-        return false;
-    }
-    true
 }
 
 /// A BitLocker source: the key, and the window onto the disk its ciphertext
@@ -4255,19 +4038,6 @@ struct DiskImagePlan {
     disk_number: u32,
     /// Already resolved: 1–19.
     zstd_level: i32,
-}
-
-/// The extension a run's images carry: `.obk` when encrypted, the job's format
-/// otherwise. One place, because listings, chains and the format-change guard
-/// all have to agree with the writer.
-fn container_ext(
-    format: ImageFormat,
-    encryption: Option<&crate::seal::context::ArchiveKeys>,
-) -> String {
-    match encryption {
-        Some(_) => crate::seal::obk::OBK_EXTENSION.into(),
-        None => format.extension().into(),
-    }
 }
 
 /// The encrypted target for a whole-disk image, full or child.
