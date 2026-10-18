@@ -844,6 +844,11 @@ impl VhdxGuestReader {
         Ok((Placement::Here(file_offset + within), run))
     }
 
+    /// Size of the virtual disk in bytes.
+    pub fn virtual_size(&self) -> u64 {
+        self.virtual_size
+    }
+
     /// Read `buf` from `guest_offset`, following the parent chain for absent
     /// blocks; past a dynamic (parentless) image absent blocks read as zeros.
     pub fn read_at(&mut self, guest_offset: u64, buf: &mut [u8]) -> Result<()> {

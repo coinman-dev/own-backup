@@ -129,18 +129,25 @@ impl LinuxImageWriter {
 
     /// `sealed` is the sidecar of an encrypted image. The other two containers
     /// have already written theirs into their guest meta partition.
+    ///
+    /// Each is on disk when this returns: the VHDX writer syncs itself, the
+    /// other two hand back their file for it. A copy that a power cut can
+    /// still take back is not finished.
     fn finish(self, sealed: &[u8]) -> Result<()> {
         match self {
             Self::Vhdx(w) => w.finish(),
-            Self::Qcow2(w) => w.finish().map(|_| ()),
-            Self::Obk(w) => w.finish(sealed).map(|_| ()),
+            Self::Qcow2(w) => Ok(w.finish()?.get_ref().sync_all()?),
+            Self::Obk(w) => Ok(w.finish(sealed)?.get_ref().sync_all()?),
         }
     }
 }
 
 /// Read side of the same switch, picked by the sidecar's `container` field.
 enum LinuxImageReader {
-    Vhdx(crate::vhdx_format::VhdxReader),
+    /// Chain-aware: a differencing VHDX made on Windows reads its absent and
+    /// partially present (BAT state 7) blocks from the parent. The plain
+    /// `vhdx_format::VhdxReader` reads them as zeros.
+    Vhdx(crate::vhdx_bat::VhdxGuestReader),
     Qcow2(crate::qcow2::Qcow2RandomReader),
     Obk(crate::seal::obk::ObkRandomReader),
 }
@@ -158,7 +165,7 @@ impl LinuxImageReader {
         key: Option<&crate::seal::ChainKey>,
     ) -> Result<Self> {
         match (container, key) {
-            ("vhdx", _) => Ok(Self::Vhdx(crate::vhdx_format::VhdxReader::open(path)?)),
+            ("vhdx", _) => Ok(Self::Vhdx(crate::vhdx_bat::VhdxGuestReader::open(path)?)),
             ("qcow2", _) => Ok(Self::Qcow2(crate::qcow2::Qcow2RandomReader::open(path)?)),
             ("obk", Some(key)) => Ok(Self::Obk(crate::seal::obk::ObkRandomReader::open(
                 path, key,
@@ -239,6 +246,61 @@ fn read_sidecar_for(
     Ok((sidecar, None))
 }
 
+/// Does `passphrase` open the encrypted volume at `device`, and what is in it?
+///
+/// The Linux counterpart of `engine_win::unlock_and_probe`, for the service's
+/// `ProvideVolumePassword`: the device is read directly (root has raw access),
+/// LUKS or BitLocker is opened with our own code, and the filesystem inside is
+/// described. A rejected passphrase is `ok: false`; anything that is not about
+/// the passphrase — an unsupported cipher, an unreadable header — is an error,
+/// so nobody is sent to re-type a password that was right.
+pub fn unlock_and_probe(
+    device: &str,
+    passphrase: &str,
+) -> Result<crate::unlock_probe::DecryptedProbe> {
+    use crate::unlock_probe::{probe_decrypted, DecryptedProbe};
+
+    let mut dev = LinuxRawDevice::open_read(device)?;
+    let mut header = vec![0u8; 4096];
+    dev.read_at(0, &mut header)?;
+    if crate::luks::is_luks(&header) {
+        let params = match crate::luks::open_luks(&mut dev, passphrase.as_bytes()) {
+            Ok(p) => p,
+            Err(e) if crate::luks::is_wrong_passphrase(&e) => {
+                info!(error = %e, "LUKS passphrase rejected");
+                return Ok(DecryptedProbe::default());
+            }
+            Err(e) => return Err(e),
+        };
+        let mut view = crate::decrypt::DecryptingVolume::new(
+            Box::new(LinuxRawDevice::open_read(device)?),
+            params,
+        );
+        return probe_decrypted(&mut view);
+    }
+    if crate::bitlocker::is_bitlocker(&header) {
+        let sector = dev.sector_size();
+        let params = match crate::bitlocker::open_bitlocker_with(&mut dev, passphrase, Some(sector))
+        {
+            Ok(p) => p,
+            Err(e) if crate::bitlocker::is_wrong_passphrase(&e) => {
+                info!(error = %e, "BitLocker passphrase rejected");
+                return Ok(DecryptedProbe::default());
+            }
+            Err(e) => return Err(e),
+        };
+        let mut view = crate::bitlocker::BitLockerVolume::new(
+            Box::new(LinuxRawDevice::open_read(device)?),
+            params,
+        );
+        return probe_decrypted(&mut view);
+    }
+    // Not encrypted: there was nothing for the passphrase to open, and the
+    // volume reads as it is.
+    drop(dev);
+    probe_decrypted(&mut LinuxRawDevice::open_read(device)?)
+}
+
 /// Parameters for a Linux volume backup.
 pub struct LinuxBackupRequest {
     /// Source device (`/dev/sdb2`, a loop device, or an image file).
@@ -313,15 +375,40 @@ pub fn backup_volume(
             std::fs::create_dir_all(parent)?;
         }
     }
-    let result = backup_inner(req, progress);
-    if result.is_err() {
-        let _ = std::fs::remove_file(&req.image_path);
+    // VHDX and qcow2 are written under a private name and take their public
+    // one only when complete, as on Windows (`pending_image`): a run killed
+    // half-way must not leave something the next run lists as a version. The
+    // encrypted container has its own private-name machinery, which this
+    // engine does not drive yet; it keeps the old rule of deleting on error.
+    let pending = match req.encryption {
+        None => Some(crate::pending_image::PendingImage::new(&req.image_path)?),
+        Some(_) => None,
+    };
+    let write_to = pending
+        .as_ref()
+        .map(|p| p.path().to_path_buf())
+        .unwrap_or_else(|| req.image_path.clone());
+    let result = backup_inner(req, &write_to, progress);
+    match (result, pending) {
+        (Ok(summary), Some(pending)) => {
+            pending.publish_as(&req.image_path)?;
+            Ok(summary)
+        }
+        (Ok(summary), None) => Ok(summary),
+        // Dropping the private name deletes what was written under it.
+        (Err(e), Some(_)) => Err(e),
+        (Err(e), None) => {
+            let _ = std::fs::remove_file(&req.image_path);
+            Err(e)
+        }
     }
-    result
 }
 
+/// `write_to` is where the bytes go — the private name while the run lasts;
+/// everything recorded inside the image names `req.image_path`.
 fn backup_inner(
     req: &LinuxBackupRequest,
+    write_to: &Path,
     mut progress: impl FnMut(&BackupProgress) -> Result<()>,
 ) -> Result<LinuxBackupSummary> {
     let started = Instant::now();
@@ -339,7 +426,11 @@ fn backup_inner(
                 info!(kind = ?params.kind, "LUKS source unlocked; backing up decrypted data");
                 Unlock::Luks(params)
             } else if crate::bitlocker::is_bitlocker(&header) {
-                let params = crate::bitlocker::open_bitlocker(&mut probe, pass.as_str())?;
+                // The device's sector size: without it a container with exFAT
+                // or ReFS inside does not open.
+                let sector = probe.sector_size();
+                let params =
+                    crate::bitlocker::open_bitlocker_with(&mut probe, pass.as_str(), Some(sector))?;
                 info!(
                     algo = format!("{:#x}", params.algorithm),
                     "BitLocker source unlocked; backing up decrypted data"
@@ -447,7 +538,7 @@ fn backup_inner(
     };
     let mut writer = match (&req.encryption, &chain) {
         (Some(keys), Some(chain)) => LinuxImageWriter::create_encrypted(
-            &req.image_path,
+            write_to,
             keys,
             chain,
             crate::seal::context::ImagePlan {
@@ -466,7 +557,7 @@ fn backup_inner(
         )?,
         _ => LinuxImageWriter::create(
             req.image_format,
-            &req.image_path,
+            write_to,
             disk_size,
             sector_size,
             req.zstd_level,

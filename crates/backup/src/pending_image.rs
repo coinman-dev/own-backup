@@ -33,7 +33,6 @@ use tempfile::TempPath;
 use tracing::{info, warn};
 
 const PREFIX: &str = ".own-backup-new-";
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))] // the Windows engine writes them
 const EXTENSIONS: [&str; 3] = ["vhdx", "avhdx", "qcow2"];
 
 /// A name a run writes privately: the image itself or anything beside it.
@@ -238,14 +237,12 @@ fn remove_image(image: &Path, id: &str) -> std::io::Result<(usize, u64)> {
 }
 
 /// The private name of one new image, deleted with this value unless published.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) struct PendingImage {
     path: TempPath,
     // After `path`: fields drop in order, so the image goes before its record.
     _record: Option<Record>,
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 impl PendingImage {
     /// A name beside `target` that does not exist yet: the writers create the
     /// file themselves, and `CreateVirtualDisk` refuses one that is there.

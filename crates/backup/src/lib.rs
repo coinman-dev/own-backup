@@ -44,6 +44,7 @@ pub mod sidecar;
 pub mod source_identity;
 pub mod table_merge;
 pub mod table_writer;
+pub mod unlock_probe;
 pub mod used_sectors;
 pub mod vhdx_bat;
 pub mod xfs_dirent;
