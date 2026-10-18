@@ -52,6 +52,9 @@ use crate::win_device::{normalize_device_path, WinRawDevice};
 
 // The platform-independent half of this engine lives in `engine_core`, shared
 // with the Linux engine; the `pub` names are the ones this engine's callers know.
+use crate::engine_core::disk_image::{
+    container_kind, disk_source_token, DiskCompositeReader, DiskRegion, DiskUsedMap,
+};
 pub(crate) use crate::engine_core::read::ImageReadSource;
 pub use crate::engine_core::read::{load_sidecar_of, load_sidecar_with_keys};
 pub use crate::engine_core::target::DEFAULT_BLOCK_SIZE;
@@ -2154,55 +2157,6 @@ struct PreparedPartition {
     vss: Option<VssSnapshotSession>, // kept alive until the copy is done
 }
 
-/// Which encrypted container a volume's first sectors say it is.
-///
-/// Costs nothing and needs no password — LUKS puts its magic and version at
-/// offset 0, BitLocker its signature in the boot sector — and it is the only
-/// way to know what a container we could NOT open was. Without it a locked
-/// partition copied as ciphertext and an unlocked one copied in the clear look
-/// the same in the manifest, and the restore screen has to guess which of two
-/// opposite things to tell the user.
-fn container_kind(header: &[u8]) -> Option<own_backup_common::image::VolumeEncryptionKind> {
-    use own_backup_common::image::VolumeEncryptionKind as K;
-    if crate::bitlocker::is_bitlocker(header) {
-        return Some(K::BitLocker);
-    }
-    if crate::luks::is_luks(header) {
-        // Version is the two big-endian bytes right after the magic.
-        return Some(match u16::from_be_bytes([header[6], header[7]]) {
-            1 => K::Luks1,
-            2 => K::Luks2,
-            _ => K::Other,
-        });
-    }
-    None
-}
-
-/// Short display token for a source device (mirrors core's source_token):
-/// a drive letter, `V`+8 hex of a volume GUID, or `P<disk><offsetHex>`.
-fn disk_source_token(device: &str) -> String {
-    let d = device
-        .trim_start_matches(r"\\.\")
-        .trim_start_matches(r"\\?\");
-    if let Some(rest) = d.strip_prefix("part:") {
-        let mut it = rest.split(':');
-        if let (Some(disk), Some(off)) = (it.next(), it.next()) {
-            if let (Ok(dn), Ok(o)) = (disk.parse::<u32>(), off.parse::<u64>()) {
-                return format!("P{dn}{:X}", o);
-            }
-        }
-    }
-    let bytes = d.as_bytes();
-    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
-        return bytes[0].to_ascii_uppercase().to_string();
-    }
-    if let Some(pos) = d.find("Volume{") {
-        let hex: String = d[pos + 7..].chars().take(8).collect();
-        return format!("V{}", hex.to_uppercase());
-    }
-    "X".into()
-}
-
 /// A prepared partition used-map plus its file-exclusion outcome (plan D2).
 struct PreparedMap {
     /// Used-sector map (`None` → sector-by-sector). For NTFS/FAT with exclusions
@@ -2684,131 +2638,6 @@ fn prepare_partition_map(
         None,
         &tr!("engine_win.skip_fs_unknown"),
     ))
-}
-
-/// One partition region inside the whole-disk image: its byte offset on the
-/// disk, its decrypted length, and a reader for its (decrypted) volume data.
-struct DiskRegion {
-    part_offset: u64,
-    volume_len: u64,
-    reader: Box<dyn crate::fat_map::RawVolume + Send>,
-    /// Excluded byte ranges (VOLUME-relative): zeroed after reading so excluded
-    /// file data never enters the image (plan D2).
-    zero_ranges: ByteRanges,
-    /// FAT/exFAT metadata patches (VOLUME-relative offset → bytes): applied over
-    /// the read data so excluded FAT files vanish from the directory/allocation.
-    patches: Vec<(u64, Vec<u8>)>,
-}
-
-/// A [`BlockReader`] over the WHOLE disk image: block `N` (bytes `N*bs..`) is
-/// assembled from the GPT write-ops and the partition regions at their real
-/// offsets; bytes belonging to nothing read as zeros. This lets partitions sit
-/// at any sector offset while the checksum grid stays the image's own blocks.
-struct DiskCompositeReader {
-    block_size: u32,
-    image_size: u64,
-    gpt_ops: Vec<(u64, Vec<u8>)>,
-    regions: Vec<DiskRegion>,
-}
-
-impl BlockReader for DiskCompositeReader {
-    fn read_block(&mut self, n: u64) -> Result<Vec<u8>> {
-        let bs = self.block_size as u64;
-        let start = n * bs;
-        let len = bs.min(self.image_size - start) as usize;
-        let end = start + len as u64;
-        let mut buf = vec![0u8; len];
-        // GPT bytes (protective MBR, primary/backup headers + entry arrays).
-        for (off, bytes) in &self.gpt_ops {
-            let g_end = off + bytes.len() as u64;
-            let from = start.max(*off);
-            let to = end.min(g_end);
-            if from < to {
-                buf[(from - start) as usize..(to - start) as usize]
-                    .copy_from_slice(&bytes[(from - off) as usize..(to - off) as usize]);
-            }
-        }
-        // Partition data (overwrites any overlap — partitions never overlap the
-        // GPT head/tail in a valid layout, so order is immaterial).
-        for r in &mut self.regions {
-            let p_end = r.part_offset + r.volume_len;
-            let from = start.max(r.part_offset);
-            let to = end.min(p_end);
-            if from < to {
-                let vol_off = from - r.part_offset;
-                let dst = &mut buf[(from - start) as usize..(to - start) as usize];
-                r.reader.read_at(vol_off, dst)?;
-                // Plan D2 — content zeroing: excluded file clusters read as zero
-                // so their data never enters the image.
-                r.zero_ranges.zero_overlaps(vol_off, dst);
-                // FAT/exFAT metadata patches (deleted dir entries / freed
-                // chains), applied over the same volume-relative window.
-                let dst_end = vol_off + dst.len() as u64;
-                for (poff, bytes) in &r.patches {
-                    let p_start = *poff;
-                    let p_end2 = poff + bytes.len() as u64;
-                    let ov_start = vol_off.max(p_start);
-                    let ov_end = dst_end.min(p_end2);
-                    if ov_start < ov_end {
-                        let d0 = (ov_start - vol_off) as usize;
-                        let d1 = (ov_end - vol_off) as usize;
-                        let b0 = (ov_start - p_start) as usize;
-                        let b1 = b0 + (d1 - d0);
-                        dst[d0..d1].copy_from_slice(&bytes[b0..b1]);
-                    }
-                }
-            }
-        }
-        Ok(buf)
-    }
-    fn block_size(&self) -> u32 {
-        self.block_size
-    }
-    fn total_blocks(&self) -> u64 {
-        self.image_size.div_ceil(self.block_size as u64)
-    }
-}
-
-/// Whole-disk used-map: a disk-image block is "used" if it overlaps a used
-/// block of any partition (straddling blocks count once).
-struct DiskUsedMap {
-    used: Vec<bool>,
-    count: u64,
-}
-
-impl DiskUsedMap {
-    fn build(prepared: &[PreparedPartition], bs: u64, total_blocks: u64) -> Self {
-        let mut used = vec![false; total_blocks as usize];
-        for prep in prepared {
-            let part_end = prep.part_offset + prep.volume_len;
-            let vblocks = prep.volume_len.div_ceil(bs);
-            for vb in 0..vblocks {
-                if prep.used.is_block_used(vb) {
-                    let d0 = prep.part_offset + vb * bs;
-                    let d1 = part_end.min(d0 + bs); // this volume block's disk byte span
-                    for db in d0 / bs..=(d1 - 1) / bs {
-                        if let Some(slot) = used.get_mut(db as usize) {
-                            *slot = true;
-                        }
-                    }
-                }
-            }
-        }
-        let count = used.iter().filter(|&&u| u).count() as u64;
-        Self { used, count }
-    }
-}
-
-impl UsedSectorMap for DiskUsedMap {
-    fn is_block_used(&self, block_number: u64) -> bool {
-        self.used
-            .get(block_number as usize)
-            .copied()
-            .unwrap_or(false)
-    }
-    fn used_block_count(&self) -> u64 {
-        self.count
-    }
 }
 
 /// Back up a whole disk (several partitions of one physical drive) into ONE
@@ -3317,7 +3146,14 @@ fn backup_disk_inner(
         .max()
         .unwrap_or(0);
     let part_end_blocks = part_end.div_ceil(bs);
-    let disk_used = DiskUsedMap::build(&prepared, bs, part_end_blocks);
+    let disk_used = DiskUsedMap::build(
+        &prepared
+            .iter()
+            .map(|p| (p.part_offset, p.volume_len, p.used.as_ref()))
+            .collect::<Vec<_>>(),
+        bs,
+        part_end_blocks,
+    );
     // A plaintext child inherits the parent's GPT. New full images reserve for
     // every addressable source block, so ordinary growth of used space cannot
     // exhaust the metadata partition. Children read its actual size from GPT;
