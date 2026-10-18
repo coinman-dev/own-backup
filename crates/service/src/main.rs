@@ -676,6 +676,42 @@ pub async fn run_main_loop(
             Err(e) => tracing::warn!(error = %e, "unfinished images will not be reclaimed"),
         }
     }
+    // The same on Linux, in a root-only directory beside the data: only the
+    // installed service, which runs as root, keeps the records.
+    #[cfg(unix)]
+    let installed_service = !use_tcp
+        && !own_backup_common::media_mode::is_media_mode()
+        // SAFETY: geteuid has no preconditions.
+        && unsafe { libc::geteuid() } == 0;
+    #[cfg(unix)]
+    if installed_service {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        let dir = config.data_dir.join("pending-images");
+        let made = std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)
+            .and_then(|()| std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)))
+            .map_err(own_backup_common::OwnBackupError::from)
+            .and_then(|()| own_backup_backup::pending_image::use_ledger(dir));
+        match made {
+            Ok(()) => {
+                std::thread::spawn(own_backup_backup::pending_image::reclaim_abandoned);
+            }
+            Err(e) => tracing::warn!(error = %e, "unfinished images will not be reclaimed"),
+        }
+    }
+    // An LVM snapshot a killed run left behind keeps growing with every write
+    // to its origin until it fills the volume group.
+    #[cfg(target_os = "linux")]
+    if installed_service {
+        tokio::spawn(async {
+            let removed = own_backup_snapshot::linux::remove_orphaned_snapshots().await;
+            if removed > 0 {
+                info!(removed, "LVM snapshots left by interrupted runs removed");
+            }
+        });
+    }
     #[cfg(not(target_os = "windows"))]
     let passwords = std::sync::Arc::new(own_backup_core::PasswordStore::new(config.db_path()));
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
