@@ -47,6 +47,12 @@ pub const LINUX_UNIT_NAME: &str = "own-backup";
 /// use loopback TCP.
 pub const WINDOWS_PIPE_NAME: &str = "OwnBackup";
 
+/// Largest RPC message either side accepts. gRPC's default is 4 MiB, and on
+/// the stand (2026-10-17) one job with thousands of long exclusion patterns
+/// made the job list 6 MB: every request that reads the jobs then failed, so
+/// the window could open none of them. Both ends set this.
+pub const MAX_RPC_MESSAGE: usize = 64 * 1024 * 1024;
+
 /// Full `\\.\pipe\OwnBackup` path built from [`WINDOWS_PIPE_NAME`].
 pub fn windows_pipe_path() -> String {
     format!(r"\\.\pipe\{WINDOWS_PIPE_NAME}")

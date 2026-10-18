@@ -137,7 +137,7 @@ impl BackupClient {
             .await
             .map_err(|e| format!("cannot reach service (uds): {e}"))?;
         Ok(Self {
-            inner: BackupServiceClient::new(channel),
+            inner: client(channel),
             token,
         })
     }
@@ -153,7 +153,7 @@ impl BackupClient {
             .await
             .map_err(|e| format!("cannot reach service: {e}"))?;
         Ok(Self {
-            inner: BackupServiceClient::new(channel),
+            inner: client(channel),
             token,
         })
     }
@@ -196,7 +196,7 @@ impl BackupClient {
             .await
             .map_err(|e| format!("cannot reach service (pipe): {e}"))?;
         Ok(Self {
-            inner: BackupServiceClient::new(channel),
+            inner: client(channel),
             token,
         })
     }
@@ -1054,6 +1054,13 @@ pub struct ImageInfo {
     pub chain_id: String,
     #[serde(default)]
     pub virtual_size: u64,
+}
+
+/// The one place a client is made, so every transport gets the same limits.
+fn client(channel: Channel) -> BackupServiceClient<Channel> {
+    BackupServiceClient::new(channel)
+        .max_decoding_message_size(own_backup_common::MAX_RPC_MESSAGE)
+        .max_encoding_message_size(own_backup_common::MAX_RPC_MESSAGE)
 }
 
 fn status(s: tonic::Status) -> String {

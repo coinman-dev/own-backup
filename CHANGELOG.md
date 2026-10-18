@@ -24,6 +24,8 @@
 - The empty part of the compression slider follows the theme.
 - A job or history save that fails (for example on a full disk) no longer
   leaves a half-written temporary file holding the space.
+- The window and the service exchange messages up to 64 MB: a job list
+  past 4 MB (very long exclusion lists) no longer breaks every request.
 
 ## 0.1.5-beta — 2026-10-17
 

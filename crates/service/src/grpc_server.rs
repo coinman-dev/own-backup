@@ -46,6 +46,8 @@ impl BackupServiceImpl {
 
     pub fn into_service(self) -> BackupServiceServer<BackupServiceImpl> {
         BackupServiceServer::new(self)
+            .max_decoding_message_size(own_backup_common::MAX_RPC_MESSAGE)
+            .max_encoding_message_size(own_backup_common::MAX_RPC_MESSAGE)
     }
 
     /// Take the machine for one destructive operation, or turn the caller away
@@ -3228,6 +3230,40 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
+    }
+
+    /// A job list past gRPC's default 4 MiB still travels both ways through
+    /// the real client: on the stand (2026-10-17) a 6 MB list failed every
+    /// request that read the jobs.
+    #[tokio::test]
+    async fn a_job_list_larger_than_four_megabytes_still_travels() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_controller, shutdown) = crate::shutdown::create_shutdown_channel();
+        let svc = make_service_with_shutdown(dir.path(), shutdown);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(svc.into_service())
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener)),
+        );
+        let mut client = own_backup_client::BackupClient::connect(format!("http://{addr}"), "")
+            .await
+            .unwrap();
+        let mut big = own_backup_core::Job {
+            name: "big".into(),
+            source: "C:".into(),
+            dest_folder: dir.path().display().to_string(),
+            ..Default::default()
+        };
+        big.exclusions.patterns = (0..6000)
+            .map(|i| format!("{i}-{}", "x".repeat(1000)))
+            .collect();
+        let saved = client.save_job(&big).await.unwrap();
+        let listed = client.list_jobs().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, saved.id);
+        assert_eq!(listed[0].exclusions.patterns.len(), 6000);
     }
 
     fn job(name: &str, source: &str, dest: &str) -> String {
