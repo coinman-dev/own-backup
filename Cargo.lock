@@ -2965,6 +2965,7 @@ version = "0.1.5-beta"
 dependencies = [
  "chrono",
  "clap",
+ "libc",
  "own-backup-backup",
  "own-backup-client",
  "own-backup-common",
@@ -3012,6 +3013,7 @@ name = "own-backup-common"
 version = "0.1.5-beta"
 dependencies = [
  "chrono",
+ "libc",
  "rust-i18n",
  "serde",
  "serde_json",

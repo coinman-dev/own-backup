@@ -5,6 +5,8 @@ rust_i18n::i18n!("locales", fallback = "ru");
 mod app_state;
 mod grpc_server;
 mod install;
+#[cfg(unix)]
+mod peer_access;
 mod scheduled_verification;
 mod scheduler;
 mod shutdown;
@@ -120,7 +122,7 @@ fn mode_of(args: &[String]) -> Mode {
 
 /// Today's service log, in the shared `Logs` folder beside the exe (what the
 /// user looks for), else the data dir (LocalSystem can always write there),
-/// else temp.
+/// else temp. On Linux `/var/log/own-backup` (`log_files::log_dir`).
 fn open_service_log() -> Option<(own_backup_common::log_files::DailyLog, std::path::PathBuf)> {
     let dir = own_backup_common::log_files::log_dir(&AppConfig::default().data_dir)?;
     let log = own_backup_common::log_files::DailyLog::new(dir, "own-backup-service");
@@ -392,15 +394,47 @@ fn run_loop(use_tcp: bool) -> Result<(), Box<dyn std::error::Error>> {
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async {
         let (controller, signal) = create_shutdown_channel();
+        // Registered here, before anything is spawned: until a handler exists,
+        // SIGTERM's default action kills the process outright.
+        let stop_requested = stop_signal()?;
         tokio::spawn(async move {
-            let _ = tokio::signal::ctrl_c().await;
-            info!("Ctrl+C received, shutting down...");
+            stop_requested.await;
             controller.trigger_shutdown();
         });
         // No SCM control handler here (foreground/daemon), so no OS events — keep
         // the sender alive so the scheduler's receiver simply never yields.
         let (_os_tx, os_rx) = tokio::sync::mpsc::unbounded_channel::<scheduler::OsEvent>();
         run_main_loop(signal, use_tcp, os_rx).await
+    })
+}
+
+/// Resolves when the process is asked to stop: Ctrl+C everywhere, and on Unix
+/// also SIGTERM and SIGHUP.
+///
+/// SIGTERM is how systemd stops the unit — `systemctl stop`, shutdown, a
+/// package upgrade. Left to its default action it killed the engine in the
+/// middle of writing an image, skipping the worker's final history and the
+/// socket/token cleanup. SIGHUP (the terminal of a `--foreground` run went
+/// away) is treated the same: there is no configuration to reload.
+#[cfg(unix)]
+fn stop_signal() -> std::io::Result<impl std::future::Future<Output = ()>> {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut term = signal(SignalKind::terminate())?;
+    let mut hup = signal(SignalKind::hangup())?;
+    Ok(async move {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => info!("Ctrl+C received, shutting down..."),
+            _ = term.recv() => info!("SIGTERM received, shutting down..."),
+            _ = hup.recv() => info!("SIGHUP received, shutting down..."),
+        }
+    })
+}
+
+#[cfg(not(unix))]
+fn stop_signal() -> std::io::Result<impl std::future::Future<Output = ()>> {
+    Ok(async {
+        let _ = tokio::signal::ctrl_c().await;
+        info!("Ctrl+C received, shutting down...");
     })
 }
 
@@ -510,7 +544,7 @@ pub async fn run_main_loop(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config = AppConfig::default();
 
-    std::fs::create_dir_all(&config.data_dir)?;
+    prepare_data_dir(&config.data_dir)?;
 
     // Everyone's logs, swept by the one process that is always here.
     start_log_housekeeping();
@@ -535,6 +569,19 @@ pub async fn run_main_loop(
             eprintln!("{e}");
             return Err(Box::new(e));
         }
+    };
+    // The lock above is per data directory, but the socket and the token are
+    // machine-wide: an engine started with another data directory got all the
+    // way to the socket — its scheduler already running — and took it over.
+    #[cfg(unix)]
+    let _runtime_ownership = if use_tcp {
+        None
+    } else {
+        claim_runtime_dir(&config).map_err(|e| {
+            warn!(error = %e, "Refusing to start a second engine");
+            eprintln!("{e}");
+            e
+        })?
     };
 
     let conn = own_backup_metadata::open_database(&config.db_path())?;
@@ -939,12 +986,84 @@ fn chown_to_group(path: &std::path::Path, gid: u32) {
     }
 }
 
+/// Create the data directory.
+///
+/// On Unix it is not left to the umask: it holds the job store, the activity
+/// journal (with the Argon2id-sealed archive keys) and the metadata database,
+/// and a default 0755 made them readable by every local user. 0750 with the
+/// access group — members still read `config.toml` — and 0700 for the boot
+/// medium's directory. An existing directory (an older build made it, or the
+/// log fallback got there first) is tightened to that, never widened.
+#[cfg(unix)]
+fn prepare_data_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+    let media = own_backup_common::media_mode::is_media_mode();
+    let allowed = if media { 0o700 } else { 0o750 };
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(allowed)
+        .create(dir)?;
+    let mode = std::fs::metadata(dir)?.permissions().mode() & 0o777;
+    if mode & !allowed != 0 {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode & allowed))?;
+    }
+    // SAFETY: geteuid has no preconditions. Only root may hand the directory
+    // to a group; a development run under OWN_BACKUP_DATA_DIR keeps its own.
+    if !media && unsafe { libc::geteuid() } == 0 {
+        if let Some(gid) = own_backup_group_gid() {
+            chown_to_group(dir, gid);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn prepare_data_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)
+}
+
+/// The runtime directory holding the socket and the token: 0750 and the
+/// access group, so members can traverse to the socket and nobody else can.
+#[cfg(unix)]
+fn prepare_runtime_dir(dir: &std::path::Path, group_gid: Option<u32>) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(dir)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o750))?;
+    if let Some(gid) = group_gid {
+        chown_to_group(dir, gid);
+    }
+    Ok(())
+}
+
+/// Claim the machine-wide runtime directory the way the data directory is
+/// claimed (`single_instance`), before anything else starts.
+///
+/// `None` when there is nothing more to claim: the data directory IS the
+/// runtime directory, and its lock — the same file — is already held.
+#[cfg(unix)]
+fn claim_runtime_dir(
+    config: &AppConfig,
+) -> Result<Option<single_instance::Ownership>, Box<dyn std::error::Error>> {
+    let socket_path = config.socket_path();
+    let Some(dir) = socket_path.parent() else {
+        return Ok(None);
+    };
+    prepare_runtime_dir(dir, own_backup_group_gid())?;
+    if std::fs::canonicalize(dir).ok() == std::fs::canonicalize(&config.data_dir).ok() {
+        return Ok(None);
+    }
+    Ok(Some(single_instance::claim(dir)?))
+}
+
 /// Serve gRPC over Unix Domain Socket.
 ///
 /// Socket: /run/own-backup/service.sock, 0o660, chowned to the `own-backup`
 /// group — group members (added by `--install`) reach the service without
-/// root; everyone else is refused by filesystem permissions. There is no
-/// listening TCP port in this mode.
+/// root; everyone else is refused by filesystem permissions. Each call is
+/// further checked against the caller's login session (`peer_access`), the
+/// counterpart of the Windows console-session check. There is no listening
+/// TCP port in this mode.
 #[cfg(unix)]
 async fn serve_uds(
     config: AppConfig,
@@ -962,17 +1081,41 @@ async fn serve_uds(
     let group_gid = own_backup_group_gid();
 
     if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent)?;
-        // 0o750 + group own-backup so members can traverse to the socket/token.
-        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o750))?;
-        if let Some(gid) = group_gid {
-            chown_to_group(parent, gid);
-        }
+        prepare_runtime_dir(parent, group_gid)?;
     }
 
-    // Remove stale socket from previous run
-    if socket_path.exists() {
-        std::fs::remove_file(&socket_path)?;
+    // A socket left by a killed engine refuses connections and is removed. One
+    // that answers belongs to a live engine — an older build without the
+    // runtime lock, say — and deleting it would cut that engine off from every
+    // client while it keeps running.
+    match std::os::unix::net::UnixStream::connect(&socket_path) {
+        Ok(_) => {
+            let e = tr!("main.socket_in_use", path = socket_path.display()).into_owned();
+            warn!(socket = %socket_path.display(), "Refusing to start a second engine");
+            eprintln!("{e}");
+            return Err(e.into());
+        }
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+            ) =>
+        {
+            match std::fs::remove_file(&socket_path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Err(e) => {
+            return Err(tr!(
+                "main.socket_unknown",
+                path = socket_path.display(),
+                error = e
+            )
+            .into_owned()
+            .into())
+        }
     }
 
     let uds = UnixListener::bind(&socket_path)?;
@@ -998,17 +1141,20 @@ async fn serve_uds(
 
     let busy = state.busy.clone();
     let service = BackupServiceImpl::new(state, token, shutdown.clone()).into_service();
-    Server::builder()
+    let served = Server::builder()
         .add_service(service)
         .serve_with_incoming_shutdown(UnixListenerStream::new(uds), async move {
             shutdown.wait_for_shutdown().await;
             busy.cancel_whatever_is_running();
             busy.wait_until_idle().await;
         })
-        .await?;
+        .await;
 
+    // Ours either way: the runtime lock is held, so no other engine has
+    // published a socket or a token since.
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_file(&config.token_path());
+    served?;
     Ok(())
 }
 

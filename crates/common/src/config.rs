@@ -90,6 +90,17 @@ fn default_data_dir() -> PathBuf {
 /// Where state lives on the boot medium. `%SystemRoot%` is asked rather than
 /// assuming `X:\Windows`, because that is what WinPE itself sets and it costs
 /// nothing to be right if it ever differs.
+///
+/// On Linux it is `/run/own-backup-media`: RAM-backed like WinPE's `X:`, and
+/// only root can create names in `/run` — a fixed name in the world-writable
+/// `/tmp` is one any user can create first, as a link or a directory of
+/// their own, before root writes into it. The engine creates it 0700.
+#[cfg(target_os = "linux")]
+fn media_data_dir() -> PathBuf {
+    PathBuf::from("/run/own-backup-media")
+}
+
+#[cfg(not(target_os = "linux"))]
 fn media_data_dir() -> PathBuf {
     if let Ok(root) = std::env::var("SystemRoot") {
         if !root.trim().is_empty() {

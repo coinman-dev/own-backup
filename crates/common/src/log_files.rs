@@ -1,7 +1,8 @@
 //! Where the program's logs live, and how long they stay there.
 //!
-//! One folder — `Logs` beside the executable — one file per program per day,
-//! thirty days kept. Before this, each of the three executables dropped a
+//! One folder — `Logs` beside the executable; on Linux `/var/log/own-backup`
+//! for root and the user's state directory otherwise — one file per program
+//! per day, thirty days kept. Before this, each of the three executables dropped a
 //! single `own-backup-*.log` next to itself and rotated it by size, so "what
 //! happened on Tuesday" was answerable only if Tuesday happened to be inside
 //! the last four megabytes.
@@ -38,17 +39,83 @@ pub const KEEP_DAYS: i64 = 30;
 /// read-only place (or running off the boot medium) falls back to the data
 /// directory and then to temp, in that order — the same policy the per-binary
 /// loggers had before, with one folder added.
+///
+/// Linux is different (see [`linux_candidates`]): beside the executable is
+/// `/usr/bin`, and temp is a `/tmp` shared by every user.
 pub fn log_dir(data_dir: &Path) -> Option<PathBuf> {
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Some(dir) = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(Path::to_path_buf))
-    {
-        candidates.push(dir.join(LOG_DIR_NAME));
+    #[cfg(target_os = "linux")]
+    let candidates = {
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        let root = unsafe { libc::geteuid() } == 0;
+        linux_candidates(
+            data_dir,
+            root,
+            std::env::var_os("XDG_STATE_HOME"),
+            std::env::var_os("HOME"),
+        )
+    };
+    #[cfg(not(target_os = "linux"))]
+    let candidates = {
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        if let Some(dir) = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(Path::to_path_buf))
+        {
+            candidates.push(dir.join(LOG_DIR_NAME));
+        }
+        candidates.push(data_dir.join(LOG_DIR_NAME));
+        candidates.push(std::env::temp_dir().join(LOG_DIR_NAME));
+        candidates
+    };
+    let chosen = candidates.into_iter().find(|dir| writable(dir))?;
+    // The service sweeps only the folder it writes to itself; a user's own
+    // folder is swept by the user's programs, the one time each starts.
+    #[cfg(target_os = "linux")]
+    if !chosen.starts_with(data_dir) && !chosen.starts_with(LINUX_SYSTEM_LOG_DIR) {
+        sweep(&chosen, KEEP_DAYS);
+    }
+    Some(chosen)
+}
+
+/// The engine's (root's) log folder on Linux.
+#[cfg(target_os = "linux")]
+pub const LINUX_SYSTEM_LOG_DIR: &str = "/var/log/own-backup";
+
+/// Where logs may go on Linux, in order.
+///
+/// Root — the service, or a command run with sudo — writes to
+/// `/var/log/own-backup`. Anyone else to their own state directory,
+/// `$XDG_STATE_HOME/own-backup/Logs` (`~/.local/state/own-backup/Logs` by
+/// default): the window and the command line run as the person, who cannot
+/// write to `/var/log` and should not write to a `/tmp/Logs` every other user
+/// can read, fill, or plant a link in. The data directory is the last resort;
+/// the executable's folder is never one.
+#[cfg(target_os = "linux")]
+fn linux_candidates(
+    data_dir: &Path,
+    root: bool,
+    xdg_state_home: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if root {
+        candidates.push(PathBuf::from(LINUX_SYSTEM_LOG_DIR));
+    } else {
+        // The specification ignores a relative value.
+        let state = xdg_state_home
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .or_else(|| {
+                home.map(PathBuf::from)
+                    .filter(|p| p.is_absolute())
+                    .map(|h| h.join(".local").join("state"))
+            });
+        if let Some(state) = state {
+            candidates.push(state.join("own-backup").join(LOG_DIR_NAME));
+        }
     }
     candidates.push(data_dir.join(LOG_DIR_NAME));
-    candidates.push(std::env::temp_dir().join(LOG_DIR_NAME));
-    candidates.into_iter().find(|dir| writable(dir))
+    candidates
 }
 
 /// Can we create files here? Asked by doing it, because a directory that
@@ -253,8 +320,64 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&first).unwrap(), "first\nsecond\n");
     }
 
+    /// Root's logs in `/var/log`, a person's in their own state directory;
+    /// never beside the executable (`/usr/bin`) and never in a shared `/tmp`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_logs_go_to_var_log_for_root_and_the_users_state_dir_otherwise() {
+        let data = Path::new("/var/lib/own-backup");
+        let os = |s: &str| Some(std::ffi::OsString::from(s));
+        let cases = [
+            (
+                linux_candidates(data, true, os("/home/a/st"), os("/home/a")),
+                vec![PathBuf::from("/var/log/own-backup"), data.join("Logs")],
+            ),
+            (
+                linux_candidates(data, false, None, os("/home/a")),
+                vec![
+                    PathBuf::from("/home/a/.local/state/own-backup/Logs"),
+                    data.join("Logs"),
+                ],
+            ),
+            (
+                linux_candidates(data, false, os("/xdg"), os("/home/a")),
+                vec![PathBuf::from("/xdg/own-backup/Logs"), data.join("Logs")],
+            ),
+            // A relative XDG_STATE_HOME is to be ignored.
+            (
+                linux_candidates(data, false, os("state"), os("/home/a")),
+                vec![
+                    PathBuf::from("/home/a/.local/state/own-backup/Logs"),
+                    data.join("Logs"),
+                ],
+            ),
+            // Nowhere personal to go: the data directory, and nothing shared.
+            (
+                linux_candidates(data, false, None, None),
+                vec![data.join("Logs")],
+            ),
+        ];
+        for (got, want) in cases {
+            assert_eq!(got, want);
+            for dir in &got {
+                assert!(!dir.starts_with("/tmp") && !dir.starts_with("/usr"));
+            }
+        }
+    }
+
+    /// Writability is asked by doing it.
+    #[test]
+    fn writable_means_a_file_could_be_created() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(writable(&dir.path().join("a").join(LOG_DIR_NAME)));
+        #[cfg(target_os = "linux")]
+        assert!(!writable(Path::new("/proc/definitely/not/here")));
+    }
+
     /// A folder that cannot be written to is not chosen, and nothing panics
-    /// when none can be.
+    /// when none can be. (On Linux the first candidate is the user's own
+    /// state directory, which a test must not write into.)
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn an_unwritable_candidate_is_passed_over() {
         let dir = tempfile::tempdir().unwrap();

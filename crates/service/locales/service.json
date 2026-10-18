@@ -426,5 +426,33 @@
     "ru": "не удалось проверить, не запущена ли служба уже (%{reason}) — запуск отменён, чтобы не получилось двух движков сразу",
     "en": "could not check whether the service is already running (%{reason}) — start cancelled so that two engines never run at once"
   },
-  "grpc_server.archive_key_store_missing": {"ru": "Шифрование копий в Linux пока недоступно: нет хранилища ключей службы. Ключ восстановления не выдан — без хранилища разрешение нельзя было бы завершить.", "en": "Archive encryption is not available on Linux yet: the service has no key store. No recovery key was issued — without the store the authorization could never be completed."}
+  "grpc_server.archive_key_store_missing": {"ru": "Шифрование копий в Linux пока недоступно: нет хранилища ключей службы. Ключ восстановления не выдан — без хранилища разрешение нельзя было бы завершить.", "en": "Archive encryption is not available on Linux yet: the service has no key store. No recovery key was issued — without the store the authorization could never be completed."},
+  "main.socket_in_use": {
+    "ru": "сокет %{path} отвечает: служба Own Backup уже запущена — второй экземпляр не запущен и ничего не менял",
+    "en": "socket %{path} answers: the Own Backup service is already running — a second instance did not start and changed nothing"
+  },
+  "main.socket_unknown": {
+    "ru": "не удалось проверить сокет %{path} (%{error}) — запуск отменён, чтобы не отнять сокет у работающей службы",
+    "en": "could not check socket %{path} (%{error}) — start cancelled so as not to take the socket from a running service"
+  },
+  "peer_access.not_local_session": {
+    "ru": "Отказано: управлять службой можно только из активного локального сеанса (за этим компьютером) или от имени root. Удалённые сеансы, в том числе SSH, и неактивные сеансы не допускаются.",
+    "en": "Access denied: the service can be controlled only from an active local session (at this computer) or as root. Remote sessions, SSH included, and inactive sessions are not allowed."
+  },
+  "peer_access.unknown_peer": {
+    "ru": "Отказано: не удалось определить, какой пользователь подключился к службе.",
+    "en": "Access denied: could not determine which user connected to the service."
+  },
+  "install.linux_group_kept": {
+    "ru": "  Группа доступа «%{group}» оставлена вместе с её участниками. Если она больше не нужна:  sudo groupdel %{group}",
+    "en": "  The access group “%{group}” is kept along with its members. If it is no longer needed:  sudo groupdel %{group}"
+  },
+  "install.linux_unit_unreadable": {
+    "ru": "служба не установлена или её юнит не читается (%{path}: %{error}) — обновлять нечего; для установки: --install",
+    "en": "the service is not installed or its unit cannot be read (%{path}: %{error}) — nothing to update; to install: --install"
+  },
+  "install.linux_unit_no_exec": {
+    "ru": "в юните %{path} нет ExecStart — неизвестно, какой файл служба запускает; переустановите: --install",
+    "en": "unit %{path} has no ExecStart — it is unknown which file the service runs; reinstall: --install"
+  }
 }

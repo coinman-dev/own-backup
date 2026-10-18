@@ -570,7 +570,15 @@ fn change_volume_letter(
 
 /// Authenticate an incoming request via bearer token. Empty expected token =
 /// auth disabled (dev/TCP mode). Constant-time comparison avoids a timing oracle.
+/// A call over the Unix socket must also come from root or a user with an
+/// active local session (`peer_access`): the token alone admits every member
+/// of the access group, from anywhere.
 fn check_auth<T>(req: &Request<T>, expected: &str) -> Result<(), Status> {
+    #[cfg(unix)]
+    crate::peer_access::check(
+        req.extensions()
+            .get::<tonic::transport::server::UdsConnectInfo>(),
+    )?;
     if expected.is_empty() {
         return Ok(());
     }

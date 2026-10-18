@@ -1234,8 +1234,10 @@ pub(crate) fn write_json<T: Serialize>(path: &std::path::Path, value: &T) -> std
     // land while the bytes have not, and a crash then leaves a file that
     // exists, is the right size and holds nothing.
     use std::io::Write as _;
-    let mut f = std::fs::File::create(&tmp)?;
-    let done = f.write_all(&bytes).and_then(|()| f.sync_all());
+    let mut f = create_private(&tmp)?;
+    let done = restrict_private(&f)
+        .and_then(|()| f.write_all(&bytes))
+        .and_then(|()| f.sync_all());
     drop(f);
     // A disk that filled up mid-write left the half-written file behind,
     // still holding the space the next save needs (stand, 2026-10-17). Only
@@ -1243,8 +1245,60 @@ pub(crate) fn write_json<T: Serialize>(path: &std::path::Path, value: &T) -> std
     done.and_then(|()| std::fs::rename(&tmp, path))
         .inspect_err(|_| {
             let _ = std::fs::remove_file(&tmp);
-        })
+        })?;
+    sync_parent(path);
+    Ok(())
 }
+
+/// The temporary file of [`write_json`]. On Unix owner-only from the first
+/// instant: the files hold the jobs and the activity journal with their
+/// Argon2id-sealed archive keys, and the umask made them world-readable —
+/// an offline password-guessing target for every local user.
+#[cfg(unix)]
+fn create_private(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn create_private(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::create(path)
+}
+
+/// A temporary file a crash left behind keeps the mode it was created with,
+/// and the rename carries it over to the real file.
+#[cfg(unix)]
+fn restrict_private(file: &std::fs::File) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn restrict_private(_file: &std::fs::File) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Make the rename itself durable. The new contents are already visible, so a
+/// failure here is logged rather than reported as a failed save: the caller
+/// would roll back its memory to the old state while the file holds the new.
+#[cfg(unix)]
+fn sync_parent(path: &std::path::Path) {
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => std::path::Path::new("."),
+    };
+    if let Err(e) = std::fs::File::open(parent).and_then(|d| d.sync_all()) {
+        warn!(path = %path.display(), error = %e, "directory not synced after the rename");
+    }
+}
+
+#[cfg(not(unix))]
+fn sync_parent(_path: &std::path::Path) {}
 
 // ---------------------------------------------------------------------------
 // Run queue + events
@@ -4539,6 +4593,28 @@ mod tests {
         assert!(write_json(&path, &vec![1, 2, 3]).is_err());
         assert!(!dir.path().join("jobs.json.tmp").exists());
         assert!(path.join("in-the-way").exists());
+    }
+
+    /// The store files carry the sealed archive keys: owner-only, also when a
+    /// crash left a world-readable temporary file in the way.
+    #[cfg(unix)]
+    #[test]
+    fn store_files_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jobs.json");
+        let stale = dir.path().join("jobs.json.tmp");
+        std::fs::write(&stale, b"left by a crash").unwrap();
+        std::fs::set_permissions(&stale, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        write_json(&path, &vec![1, 2, 3]).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(
+            serde_json::from_slice::<Vec<i32>>(&std::fs::read(&path).unwrap()).unwrap(),
+            vec![1, 2, 3]
+        );
+        assert!(!stale.exists());
     }
 
     /// The same for removal: a job is gone from the list only once it is gone

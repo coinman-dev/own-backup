@@ -56,6 +56,23 @@ fn open_service_pipe(
     unsafe { NamedPipeClient::from_raw_handle(handle.0) }
 }
 
+/// May a client on Unix fall back to loopback TCP when the service's socket is
+/// absent?
+///
+/// Only when asked: `OWN_BACKUP_TCP=1` in the environment (for a service run
+/// by hand with `--foreground`, which listens on 127.0.0.1:50051), or a debug
+/// build. Otherwise "the service is down" meant sending the token — and the
+/// passwords that follow it — to whatever local process had bound the port
+/// in the meantime; on Unix any user can. A missing socket is an error.
+///
+/// Windows keeps its unconditional fallback for now: the lab scripts start a
+/// release `--foreground` service and reach it through it
+/// (`scripts/lab/lab-verify-short.ps1`).
+#[cfg(unix)]
+fn tcp_fallback_allowed() -> bool {
+    cfg!(debug_assertions) || std::env::var("OWN_BACKUP_TCP").is_ok_and(|v| v.trim() == "1")
+}
+
 /// A decoded orchestration event from [`BackupClient::stream_events`].
 #[derive(Debug, Clone)]
 pub enum ClientEvent {
@@ -82,8 +99,9 @@ impl BackupClient {
     ///
     /// On Windows the production transport is a DACL-restricted named pipe (no
     /// listening TCP port); we try it first and fall back to loopback TCP at
-    /// `endpoint` for foreground/dev service runs. On other platforms `endpoint`
-    /// (e.g. `http://127.0.0.1:50051`) is used directly.
+    /// `endpoint` for foreground/dev service runs. On Unix the service's socket
+    /// is tried first, and loopback TCP only when asked for (`OWN_BACKUP_TCP=1`
+    /// or a debug build — see `tcp_fallback_allowed`).
     pub async fn connect(endpoint: impl Into<String>, token: impl Into<String>) -> Result<Self> {
         let endpoint = endpoint.into();
         let token = token.into();
@@ -102,8 +120,14 @@ impl BackupClient {
             // for a foreground/dev service run (which binds TCP, not the socket).
             match Self::connect_uds(token.clone()).await {
                 Ok(c) => return Ok(c),
-                Err(e) => {
+                Err(e) if tcp_fallback_allowed() => {
                     tracing::debug!(error = %e, "UDS unavailable, falling back to TCP")
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "{e} (a service run with --foreground is reached over TCP only with \
+                         OWN_BACKUP_TCP=1)"
+                    ))
                 }
             }
         }
@@ -142,7 +166,7 @@ impl BackupClient {
         })
     }
 
-    /// Connect over loopback TCP (dev/foreground; the only transport on non-Windows).
+    /// Connect over loopback TCP (a dev/foreground service run).
     async fn connect_tcp(endpoint: String, token: String) -> Result<Self> {
         let channel = Channel::from_shared(endpoint)
             .map_err(|e| format!("bad endpoint: {e}"))?

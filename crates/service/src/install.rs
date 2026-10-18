@@ -264,26 +264,89 @@ pub fn status() -> Result<(), Box<dyn std::error::Error>> {
 // Linux: systemd unit
 // ---------------------------------------------------------------------------
 
+/// Where `--install` writes the unit, and where `--update` reads it back.
 #[cfg(not(target_os = "windows"))]
-pub fn install() -> Result<(), Box<dyn std::error::Error>> {
-    let exe = std::env::current_exe()?;
-    let unit_path = format!("/etc/systemd/system/{}.service", crate::LINUX_UNIT_NAME);
-    let unit = format!(
+fn linux_unit_path() -> String {
+    format!("/etc/systemd/system/{}.service", crate::LINUX_UNIT_NAME)
+}
+
+/// The systemd unit for the engine at `exe`.
+///
+/// - `TimeoutStopSec=330`: a stop waits for the running operation to wind down
+///   — a durable consolidation may take minutes, and Windows waits 300 s for
+///   it (`stop`). systemd's default 90 s would SIGKILL it mid-write.
+/// - `KillMode=mixed`: SIGTERM goes to the engine alone, so the tools it runs
+///   (snapshot, freeze) are not killed under it while it cleans up; whatever
+///   is left when it exits is killed.
+/// - Ordered after the network and remote mounts: destinations may be NFS/SMB.
+#[cfg(not(target_os = "windows"))]
+fn linux_unit(exe: &std::path::Path) -> String {
+    format!(
         "[Unit]\n\
          Description={desc}\n\
-         After=network.target\n\
+         Wants=network-online.target\n\
+         After=network-online.target remote-fs.target\n\
          \n\
          [Service]\n\
          Type=simple\n\
          ExecStart={exe} --run\n\
          Restart=on-failure\n\
-         RestartSec=5\n\
+         RestartSec=10\n\
+         TimeoutStopSec=330\n\
+         KillMode=mixed\n\
          \n\
          [Install]\n\
          WantedBy=multi-user.target\n",
         desc = crate::SERVICE_DESCRIPTION,
-        exe = exe.display(),
-    );
+        exe = unit_quote(&exe.display().to_string()),
+    )
+}
+
+/// A path as one `ExecStart` word: quoted when it holds whitespace or quotes,
+/// as systemd's own quoting rules read it back.
+#[cfg(not(target_os = "windows"))]
+fn unit_quote(path: &str) -> String {
+    if path
+        .chars()
+        .any(|c| c.is_whitespace() || c == '"' || c == '\'' || c == '\\')
+    {
+        format!("\"{}\"", path.replace('\\', "\\\\").replace('"', "\\\""))
+    } else {
+        path.to_string()
+    }
+}
+
+/// The program an installed unit runs: the first word of its `ExecStart=`,
+/// after systemd's `-@:+!` prefixes, unquoted.
+#[cfg(not(target_os = "windows"))]
+fn unit_exec_start(unit: &str) -> Option<std::path::PathBuf> {
+    let line = unit
+        .lines()
+        .rev() // the last assignment is the one in force
+        .find_map(|l| l.trim().strip_prefix("ExecStart="))?;
+    let line = line.trim_start_matches(['-', '@', ':', '+', '!']);
+    let program = if let Some(quoted) = line.strip_prefix('"') {
+        let mut out = String::new();
+        let mut chars = quoted.chars();
+        loop {
+            match chars.next()? {
+                '"' => break,
+                '\\' => out.push(chars.next()?),
+                c => out.push(c),
+            }
+        }
+        out
+    } else {
+        line.split_whitespace().next()?.to_string()
+    };
+    (!program.is_empty()).then(|| std::path::PathBuf::from(program))
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn install() -> Result<(), Box<dyn std::error::Error>> {
+    let exe = std::env::current_exe()?;
+    let unit_path = linux_unit_path();
+    let unit = linux_unit(&exe);
 
     // Access group so the GUI/CLI reach the service's UDS without root (the
     // Unix analogue of the named-pipe DACL). Create it and add the human who
@@ -381,20 +444,26 @@ fn add_user_to_group(user: &str, group: &str) -> Result<(), Box<dyn std::error::
 pub fn uninstall() -> Result<(), Box<dyn std::error::Error>> {
     // Best-effort: disable+stop, then remove the unit file and reload.
     let _ = systemctl(&["disable", "--now", crate::LINUX_UNIT_NAME]);
-    let unit_path = format!("/etc/systemd/system/{}.service", crate::LINUX_UNIT_NAME);
+    let unit_path = linux_unit_path();
     if let Err(e) = std::fs::remove_file(&unit_path) {
         if e.kind() != std::io::ErrorKind::NotFound {
             return Err(format!("cannot remove {unit_path} (run as root?): {e}").into());
         }
     }
     let _ = systemctl(&["daemon-reload"]);
-    // Best-effort: drop the access group we created (ignore if in use / absent).
-    let _ = std::process::Command::new("groupdel")
-        .arg(own_backup_common::UNIX_ACCESS_GROUP)
-        .status();
+    // The access group stays. `--install` may have found it already there, a
+    // reinstall would have to add every member back by hand, and its GID may
+    // still own files; deleting a group is the administrator's decision.
     println!(
         "{}",
         tr!("install.linux_removed", unit = crate::LINUX_UNIT_NAME)
+    );
+    println!(
+        "{}",
+        tr!(
+            "install.linux_group_kept",
+            group = own_backup_common::UNIX_ACCESS_GROUP
+        )
     );
     Ok(())
 }
@@ -480,10 +549,30 @@ pub fn purge_data() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    #[cfg(not(target_os = "windows"))]
+    if linux_unit_running() {
+        return Err(
+            tr!("install.purge_running", name = crate::SERVICE_DISPLAY_NAME)
+                .into_owned()
+                .into(),
+        );
+    }
+
     if !dir.exists() {
         println!("{}", tr!("install.purge_nothing", path = dir.display()));
         return Ok(());
     }
+
+    // An engine started by hand (`--run`, `--foreground`) is no unit of
+    // systemd's, but it holds the data directory's lock for as long as it
+    // runs. Holding it here also keeps one from starting mid-delete.
+    #[cfg(not(target_os = "windows"))]
+    let _ownership = crate::single_instance::claim(&dir).map_err(|e| match e {
+        crate::single_instance::Taken::AlreadyRunning => {
+            tr!("install.purge_running", name = crate::SERVICE_DISPLAY_NAME).into_owned()
+        }
+        other => other.to_string(),
+    })?;
 
     #[cfg(target_os = "windows")]
     {
@@ -631,11 +720,90 @@ mod stop_tests {
     }
 }
 
+/// Where the installed service's binary is: the program the installed unit's
+/// `ExecStart` runs. It used to be a fixed `/usr/local/bin/own-backup-service`
+/// while `--install` writes whatever path it was run from — so `--update`
+/// replaced a file nothing ran, restarted the old one and said "replaced".
 #[cfg(not(target_os = "windows"))]
 fn installed_binary() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
-    // systemd's unit names it; the installer writes the unit, so this is the
-    // same path it used.
-    Ok(std::path::PathBuf::from(
-        "/usr/local/bin/own-backup-service",
-    ))
+    let unit_path = linux_unit_path();
+    let unit = std::fs::read_to_string(&unit_path).map_err(|e| {
+        tr!("install.linux_unit_unreadable", path = unit_path, error = e).into_owned()
+    })?;
+    unit_exec_start(&unit).ok_or_else(|| {
+        tr!("install.linux_unit_no_exec", path = unit_path)
+            .into_owned()
+            .into()
+    })
+}
+
+/// Is the unit running (or starting, or stopping)? `systemctl is-active`
+/// prints the state even when it exits non-zero; no systemctl at all is
+/// "not a unit of ours running".
+#[cfg(not(target_os = "windows"))]
+fn linux_unit_running() -> bool {
+    std::process::Command::new("systemctl")
+        .args(["is-active", crate::LINUX_UNIT_NAME])
+        .output()
+        .map(|o| {
+            matches!(
+                String::from_utf8_lossy(&o.stdout).trim(),
+                "active" | "activating" | "deactivating" | "reloading" | "refreshing"
+            )
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(all(test, not(target_os = "windows")))]
+mod linux_unit_tests {
+    use super::*;
+
+    #[test]
+    fn the_unit_waits_for_a_long_stop_and_for_the_network() {
+        let unit = linux_unit(std::path::Path::new("/usr/bin/own-backup-service"));
+        for line in [
+            "ExecStart=/usr/bin/own-backup-service --run",
+            "TimeoutStopSec=330",
+            "RestartSec=10",
+            "KillMode=mixed",
+            "Wants=network-online.target",
+            "After=network-online.target remote-fs.target",
+        ] {
+            assert!(unit.lines().any(|l| l == line), "{line} missing:\n{unit}");
+        }
+    }
+
+    /// `--update` replaces exactly what `--install` wrote into the unit.
+    #[test]
+    fn update_reads_back_the_program_install_wrote() {
+        for exe in [
+            "/usr/bin/own-backup-service",
+            "/opt/Own Backup/own-backup-service",
+            "/opt/odd \"name\"\\dir/own-backup-service",
+        ] {
+            let unit = linux_unit(std::path::Path::new(exe));
+            assert_eq!(
+                unit_exec_start(&unit),
+                Some(std::path::PathBuf::from(exe)),
+                "{unit}"
+            );
+        }
+    }
+
+    #[test]
+    fn exec_start_is_read_the_way_systemd_reads_it() {
+        let read = |unit: &str| unit_exec_start(unit).map(|p| p.display().to_string());
+        assert_eq!(
+            read("[Service]\nExecStart=-/usr/local/bin/x --run\n").as_deref(),
+            Some("/usr/local/bin/x")
+        );
+        // The last assignment is the one in force.
+        assert_eq!(
+            read("ExecStart=/a --run\nExecStart=/b --run\n").as_deref(),
+            Some("/b")
+        );
+        assert_eq!(read("[Service]\nType=simple\n"), None);
+        assert_eq!(read("ExecStart=\n"), None);
+        assert_eq!(read("ExecStart=\"/unterminated\n"), None);
+    }
 }

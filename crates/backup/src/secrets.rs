@@ -189,8 +189,13 @@ mod keyfile {
                     }
                     let mut k = Zeroizing::new([0u8; 32]);
                     getrandom::getrandom(&mut k[..]).map_err(|e| err(format!("OS RNG: {e}")))?;
-                    write_private(&self.key_path, &k[..])?;
-                    Ok(k)
+                    if publish_private(&self.key_path, &k[..])? {
+                        Ok(k)
+                    } else {
+                        // Another first call got there first: its key is the
+                        // one, and whatever it sealed must stay readable.
+                        self.key(false)
+                    }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     Err(err("no key file — saved secret cannot be recovered"))
@@ -205,18 +210,57 @@ mod keyfile {
         }
     }
 
-    /// Create/truncate `path` owner-only (0600) and write `data`.
-    fn write_private(path: &Path, data: &[u8]) -> Result<()> {
+    /// Put `data` at `path`, owner-only (0600), complete or not at all, and
+    /// never over an existing file. `Ok(false)`: `path` already existed and is
+    /// left as it was.
+    ///
+    /// It used to be created in place with `truncate`: a crash between the
+    /// create and the write left an empty or short key — every secret sealed
+    /// with it lost — and two first calls at once each wrote their own key,
+    /// the loser's secrets sealed under a key that no longer existed. Now the
+    /// bytes go to a private temporary file, are synced, and are linked into
+    /// place; a link refuses an existing name, so the first one wins and the
+    /// other learns that it lost.
+    fn publish_private(path: &Path, data: &[u8]) -> Result<bool> {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
-        f.write_all(data)?;
-        Ok(())
+
+        let dir = match path.parent() {
+            Some(d) if !d.as_os_str().is_empty() => d,
+            _ => Path::new("."),
+        };
+        let name = path
+            .file_name()
+            .ok_or_else(|| err(format!("{} is not a file path", path.display())))?;
+        let mut tmp_name = std::ffi::OsString::from(".");
+        tmp_name.push(name);
+        tmp_name.push(format!(".{}.tmp", uuid::Uuid::new_v4().simple()));
+        let tmp = dir.join(tmp_name);
+
+        let written = (|| -> std::io::Result<()> {
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&tmp)?;
+            f.write_all(data)?;
+            f.sync_all()
+        })();
+        let linked = written.and_then(|()| match std::fs::hard_link(&tmp, path) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            // A filesystem without hard links (FAT): a rename does replace,
+            // so look first. The window is the call-to-call gap, not the
+            // write that used to be unprotected.
+            Err(_) if !path.exists() => std::fs::rename(&tmp, path).map(|()| true),
+            Err(e) => Err(e),
+        });
+        let _ = std::fs::remove_file(&tmp);
+        let created = linked?;
+        if created {
+            std::fs::File::open(dir).and_then(|d| d.sync_all())?;
+        }
+        Ok(created)
     }
 
     impl SecretStore for KeyfileSecretStore {
@@ -271,6 +315,74 @@ mod keyfile {
             // A different key can't decrypt.
             let other = KeyfileSecretStore::new(dir.path().join("other.key"));
             assert!(other.unprotect(&blob).is_err());
+        }
+
+        fn leftovers(dir: &Path) -> Vec<String> {
+            std::fs::read_dir(dir)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.ends_with(".tmp"))
+                .collect()
+        }
+
+        #[test]
+        fn a_key_is_published_whole_and_never_over_another() {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = tempfile::tempdir().unwrap();
+            let key = dir.path().join("secret.key");
+
+            assert!(publish_private(&key, &[7u8; 32]).unwrap());
+            assert_eq!(std::fs::read(&key).unwrap(), [7u8; 32]);
+            let mode = std::fs::metadata(&key).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+
+            // The second one loses and changes nothing.
+            assert!(!publish_private(&key, &[9u8; 32]).unwrap());
+            assert_eq!(std::fs::read(&key).unwrap(), [7u8; 32]);
+            assert!(
+                leftovers(dir.path()).is_empty(),
+                "{:?}",
+                leftovers(dir.path())
+            );
+        }
+
+        /// Two first calls at once used to write two keys, and the secrets
+        /// sealed under the overwritten one were lost. All of them must end
+        /// up sealed under the one key on disk.
+        #[test]
+        fn concurrent_first_calls_agree_on_one_key() {
+            let dir = tempfile::tempdir().unwrap();
+            let key = dir.path().join("secret.key");
+            let start = std::sync::Arc::new(std::sync::Barrier::new(8));
+            let blobs: Vec<Vec<u8>> = (0..8)
+                .map(|i| {
+                    let key = key.clone();
+                    let start = start.clone();
+                    std::thread::spawn(move || {
+                        start.wait();
+                        KeyfileSecretStore::new(&key)
+                            .protect(format!("secret {i}").as_bytes())
+                            .unwrap()
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|t| t.join().unwrap())
+                .collect();
+
+            let store = KeyfileSecretStore::new(&key);
+            for (i, blob) in blobs.iter().enumerate() {
+                assert_eq!(
+                    store.unprotect(blob).unwrap().as_slice(),
+                    format!("secret {i}").as_bytes()
+                );
+            }
+            assert!(
+                leftovers(dir.path()).is_empty(),
+                "{:?}",
+                leftovers(dir.path())
+            );
         }
     }
 }
