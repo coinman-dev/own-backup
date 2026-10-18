@@ -242,3 +242,283 @@ pub fn verify_image_scoped(
         duration: started.elapsed(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::engine_core::testkit::{checksums, manifest, test_keys, write_adjacent_sidecar};
+    use crate::sidecar::{ChainRole, SidecarInfo};
+
+    /// One backup block per qcow2 cluster.
+    const BLOCK: u64 = 64 * 1024;
+    const BLOCKS: u64 = 8;
+
+    /// What block `n` of a full copy holds: distinct and never zero.
+    fn base_fill(n: u64) -> u8 {
+        (n + 1) as u8
+    }
+
+    /// A volume of whole blocks, block `n` filled with `fill(n)`.
+    fn volume(fill: impl Fn(u64) -> u8) -> Vec<u8> {
+        (0..BLOCKS)
+            .flat_map(|n| std::iter::repeat_n(fill(n), BLOCK as usize))
+            .collect()
+    }
+
+    /// A qcow2 of `BLOCKS` clusters storing `written` and nothing else. Raw
+    /// clusters, so a test can find a block's bytes in the file.
+    fn qcow2(path: &Path, backing: Option<&str>, written: &[(u64, u8)]) {
+        let file = std::fs::File::create(path).unwrap();
+        let mut w = crate::qcow2::Qcow2Writer::new(
+            std::io::BufWriter::new(file),
+            crate::qcow2::Qcow2WriterOptions {
+                virtual_size: BLOCK * BLOCKS,
+                backing_file: backing.map(str::to_string),
+                compression: crate::qcow2::Qcow2Compression::None,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for &(n, fill) in written {
+            w.write_cluster(n, &vec![fill; BLOCK as usize]).unwrap();
+        }
+        w.finish().unwrap();
+    }
+
+    fn qcow2_info(info: SidecarInfo) -> SidecarInfo {
+        SidecarInfo {
+            container: "qcow2".into(),
+            ..info
+        }
+    }
+
+    /// A full copy and an increment over it: blocks 2 and 5 changed, block 6
+    /// emptied (an explicit zero cluster — a write in a child, not a hole).
+    fn full_and_child(dir: &Path) -> (PathBuf, PathBuf) {
+        let base = dir.join("base.qcow2");
+        let child = dir.join("child.qcow2");
+        let all: Vec<(u64, u8)> = (0..BLOCKS).map(|n| (n, base_fill(n))).collect();
+        qcow2(&base, None, &all);
+        qcow2(&child, Some("base.qcow2"), &[(2, 0xA2), (5, 0xA5), (6, 0)]);
+        write_adjacent_sidecar(
+            &base,
+            &qcow2_info(SidecarInfo::new_full("base.qcow2", 0)),
+            &volume(base_fill),
+            BLOCK,
+        );
+        // The sidecar of an increment describes the WHOLE state.
+        write_adjacent_sidecar(
+            &child,
+            &qcow2_info(SidecarInfo::new_child(
+                "child.qcow2",
+                ChainRole::Incremental,
+                "base.qcow2",
+                0,
+            )),
+            &volume(|n| match n {
+                2 => 0xA2,
+                5 => 0xA5,
+                6 => 0,
+                n => base_fill(n),
+            }),
+            BLOCK,
+        );
+        (base, child)
+    }
+
+    /// Offset in the file of the raw cluster filled with `fill`.
+    fn raw_cluster_offset(image: &Path, fill: u8) -> usize {
+        let raw = std::fs::read(image).unwrap();
+        (0..raw.len())
+            .step_by(BLOCK as usize)
+            .find(|&at| {
+                raw.get(at..at + BLOCK as usize)
+                    .is_some_and(|c| c.iter().all(|&b| b == fill))
+            })
+            .expect("the cluster is stored raw")
+    }
+
+    fn flip_byte(image: &Path, at: usize) {
+        let mut raw = std::fs::read(image).unwrap();
+        raw[at] ^= 0xFF;
+        std::fs::write(image, raw).unwrap();
+    }
+
+    #[test]
+    fn the_latest_copy_check_reads_only_what_the_child_stores() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, child) = full_and_child(dir.path());
+
+        let mut last = (0, 0);
+        let everything =
+            verify_image_scoped(&child, None, VerifyScope::Everything, |done, total| {
+                last = (done, total);
+                Ok(())
+            })
+            .unwrap();
+        assert!(everything.valid(), "{:?}", everything.mismatched_blocks);
+        assert_eq!(everything.blocks_checked, BLOCKS);
+        assert_eq!(last, (BLOCKS, BLOCKS));
+
+        // Blocks 2, 5 and the explicitly emptied 6 — the zero cluster counts:
+        // a check that skipped it would never notice a region wrongly emptied.
+        let latest =
+            verify_image_scoped(&child, None, VerifyScope::LatestCopyOnly, |done, total| {
+                last = (done, total);
+                Ok(())
+            })
+            .unwrap();
+        assert!(latest.valid(), "{:?}", latest.mismatched_blocks);
+        assert_eq!(latest.blocks_checked, 3);
+        assert_eq!(last, (3, 3), "progress counts the blocks of this copy");
+
+        // A full copy has no parent: both scopes read all of it.
+        let full =
+            verify_image_scoped(&base, None, VerifyScope::LatestCopyOnly, |_, _| Ok(())).unwrap();
+        assert_eq!(full.blocks_checked, BLOCKS);
+    }
+
+    #[test]
+    fn damage_in_the_base_is_found_by_the_whole_check_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, child) = full_and_child(dir.path());
+        // Block 0 is not rewritten by the increment: it is read from the base.
+        flip_byte(&base, raw_cluster_offset(&base, base_fill(0)) + 100);
+
+        let everything =
+            verify_image_scoped(&child, None, VerifyScope::Everything, |_, _| Ok(())).unwrap();
+        assert_eq!(everything.mismatched_blocks, vec![0]);
+        // The trade said out loud in the interface: the older copy is not read.
+        let latest =
+            verify_image_scoped(&child, None, VerifyScope::LatestCopyOnly, |_, _| Ok(())).unwrap();
+        assert!(latest.valid());
+    }
+
+    #[test]
+    fn a_flipped_byte_is_reported_when_the_reread_agrees() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, _) = full_and_child(dir.path());
+        flip_byte(&base, raw_cluster_offset(&base, base_fill(3)) + 4096);
+
+        // The second read sees the same bytes, so this is an image defect and
+        // not a transient read: block 3, and only block 3, is reported.
+        let summary = verify_image(&base, |_, _| Ok(())).unwrap();
+        assert!(!summary.valid());
+        assert_eq!(summary.mismatched_blocks, vec![3]);
+        assert_eq!(summary.blocks_checked, BLOCKS, "the check goes on past it");
+    }
+
+    #[test]
+    fn an_encrypted_image_without_its_key_is_an_encryption_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("full.obk");
+        let keys = test_keys();
+        let chain = keys.start_chain().unwrap();
+        let options = keys.writer_options(
+            &chain,
+            crate::seal::context::ImagePlan {
+                backup_id: Uuid::new_v4(),
+                role: ChainRole::Full,
+                parent: None,
+                created_at: "2026-10-18T00:00:00Z".into(),
+                virtual_size: BLOCK * BLOCKS,
+                source_id: Some("volume".into()),
+                consolidated_increments: 0,
+                chain_started_at: None,
+                compression: crate::seal::obk::ObkCompression::Zstd { level: 3 },
+            },
+        );
+        let mut writer =
+            crate::seal::obk::ObkStagedWriter::create(&image, &chain.key, options).unwrap();
+        let content = volume(base_fill);
+        writer.write_at(0, &content).unwrap();
+        let info = SidecarInfo {
+            container: "obk".into(),
+            ..SidecarInfo::new_full("full.obk", 0)
+        };
+        let mut sealed = Vec::new();
+        crate::sidecar::write_sidecar_v2_to(
+            &mut sealed,
+            &info,
+            &manifest(content.len() as u64, BLOCK),
+            &checksums(&content, BLOCK),
+        )
+        .unwrap();
+        writer.finish(&sealed).unwrap();
+
+        // Without the key: refused by name, never half-read.
+        assert!(matches!(
+            verify_image(&image, |_, _| Ok(())),
+            Err(OwnBackupError::Encryption(_))
+        ));
+        assert!(matches!(
+            ImageReadSource::open(&image, "obk"),
+            Err(OwnBackupError::Encryption(_))
+        ));
+        assert!(matches!(
+            blocks_stored_in_this_file(&image, "obk", None, 0, BLOCK),
+            Err(OwnBackupError::Encryption(_))
+        ));
+
+        // With it, the records are authenticated and every block checks out.
+        let everything = verify_image_with_keys(&image, Some(&keys), |_, _| Ok(())).unwrap();
+        assert!(everything.valid(), "{:?}", everything.mismatched_blocks);
+        assert_eq!(everything.blocks_checked, BLOCKS);
+        let latest =
+            verify_image_scoped(&image, Some(&keys), VerifyScope::LatestCopyOnly, |_, _| {
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(latest.blocks_checked, BLOCKS);
+    }
+
+    #[test]
+    fn a_vhdx_latest_copy_is_found_through_its_allocation_table() {
+        const MIB: u64 = 1 << 20;
+        // A volume image: a GPT head before the volume, which belongs to no
+        // backup block, then 7 MiB of volume in half-MiB backup blocks.
+        let data_offset = MIB;
+        let block = MIB / 2;
+        let volume_len = 7 * MIB;
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("volume.vhdx");
+
+        let mut guest = vec![0u8; (data_offset + volume_len) as usize];
+        let mut writer =
+            crate::vhdx_format::VhdxWriter::create(&image, guest.len() as u64, MIB, 512).unwrap();
+        let mut write = |at: u64, bytes: &[u8]| {
+            writer.write_at(at, bytes).unwrap();
+            guest[at as usize..at as usize + bytes.len()].copy_from_slice(bytes);
+        };
+        write(0, b"GPT head"); // payload block 0: before the volume
+        write(MIB, &vec![0x11; MIB as usize]); // payload block 1: backup blocks 0, 1
+        write(4 * MIB + 4096, &[0x44; 4096]); // payload block 4: backup blocks 6, 7
+        writer.finish().unwrap();
+        write_adjacent_sidecar(
+            &image,
+            &SidecarInfo::new_full("volume.vhdx", data_offset),
+            &guest[data_offset as usize..],
+            block,
+        );
+
+        let everything = verify_image(&image, |_, _| Ok(())).unwrap();
+        assert!(everything.valid(), "{:?}", everything.mismatched_blocks);
+        assert_eq!(everything.blocks_checked, volume_len / block);
+
+        let mut stored: Vec<u64> =
+            blocks_stored_in_this_file(&image, "vhdx", None, data_offset, block)
+                .unwrap()
+                .into_iter()
+                .collect();
+        stored.sort_unstable();
+        assert_eq!(stored, vec![0, 1, 6, 7]);
+        let latest =
+            verify_image_scoped(&image, None, VerifyScope::LatestCopyOnly, |_, _| Ok(())).unwrap();
+        assert!(latest.valid());
+        assert_eq!(latest.blocks_checked, 4);
+    }
+}

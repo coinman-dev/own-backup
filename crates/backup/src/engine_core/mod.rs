@@ -8,3 +8,6 @@
 
 pub(crate) mod read;
 pub(crate) mod verify;
+
+#[cfg(test)]
+pub(crate) mod testkit;
