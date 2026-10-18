@@ -170,8 +170,17 @@ mod tests {
         let waited = wait_engine(handle, &watch, &cancel, &sink).await;
         assert!(matches!(waited, Waited::LeftBehind));
         assert!(watch.abandoned());
-        let stalls: Vec<u64> = shown.0.lock().unwrap().iter().filter_map(|p| p.stalled_secs).collect();
-        assert!(!stalls.is_empty() && stalls.iter().all(|s| *s >= STALL_AFTER.as_secs()), "{stalls:?}");
+        let stalls: Vec<u64> = shown
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p.stalled_secs)
+            .collect();
+        assert!(
+            !stalls.is_empty() && stalls.iter().all(|s| *s >= STALL_AFTER.as_secs()),
+            "{stalls:?}"
+        );
     }
 
     /// A healthy run is waited for to the end and never called stalled.

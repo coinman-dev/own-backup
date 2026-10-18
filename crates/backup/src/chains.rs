@@ -997,11 +997,18 @@ mod tests {
                 "2026-10-16T11:00:00Z",
             );
         }
-        std::fs::write(dir.path().join(".own-backup-new-ffffffffffffffffffffffffffffffff.tmp.qcow2"), b"half")
-            .unwrap();
+        std::fs::write(
+            dir.path()
+                .join(".own-backup-new-ffffffffffffffffffffffffffffffff.tmp.qcow2"),
+            b"half",
+        )
+        .unwrap();
         let chains = list_job_chains_strict(dir.path(), "j1").unwrap();
         assert_eq!(chains.len(), 1);
-        assert_eq!(chain_names(&chains[0]), vec!["job_C_full_20261016-100000.vhdx"]);
+        assert_eq!(
+            chain_names(&chains[0]),
+            vec!["job_C_full_20261016-100000.vhdx"]
+        );
     }
 
     fn make_chains(stamps: &[&str]) -> Vec<Chain> {

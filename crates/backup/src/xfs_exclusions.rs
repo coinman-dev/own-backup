@@ -212,7 +212,9 @@ pub(crate) fn parse_sb(vol: &mut dyn RawVolume) -> Result<Sb> {
         return Err(bad("zero AG geometry"));
     }
     if incompat & !KNOWN_INCOMPAT != 0 {
-        return Err(bad(format!("unsupported incompatible features 0x{incompat:x}")));
+        return Err(bad(format!(
+            "unsupported incompatible features 0x{incompat:x}"
+        )));
     }
     if blocksize * agblocks * agcount > vol.len() {
         return Err(bad("filesystem larger than the device"));

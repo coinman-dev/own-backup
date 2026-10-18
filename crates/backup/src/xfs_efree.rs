@@ -357,7 +357,6 @@ fn rmap_update_keys_upward(
     Ok(())
 }
 
-
 // --- RMAPBT: убрать записи и не оставить тощих листьев -------------------------
 //
 // Массовое удаление опускает листья RMAPBT ниже минимума, а `xfs_repair` такого
@@ -970,7 +969,14 @@ pub(crate) fn plan_extent_freeing(
         };
         let mut shrink: Option<RmapShrink> = None;
         if agf.rmap_root != 0 && !owners.is_empty() {
-            match rmap_remove_owners(&mut rmap_edits, vol, sb, agf.rmap_root, agf.rmap_level, owners)? {
+            match rmap_remove_owners(
+                &mut rmap_edits,
+                vol,
+                sb,
+                agf.rmap_root,
+                agf.rmap_level,
+                owners,
+            )? {
                 Some(done) => shrink = Some(done),
                 None => {
                     out.refusals
