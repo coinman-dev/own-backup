@@ -662,6 +662,12 @@ pub struct Job {
     pub source_disks: Vec<own_backup_common::disk::DiskInfo>,
     /// Destination FOLDER; each run creates `<name>_<letter>_<stamp>.<ext>`.
     pub dest_folder: String,
+    /// Folders this job wrote into before `dest_folder` was changed, oldest
+    /// first. Kept by the store alone — whatever a client sends is ignored —
+    /// so that deleting the job finds the copies there even after the
+    /// activity journal (capped at [`ACTIVITY_CAP`] runs) forgot them.
+    #[serde(default)]
+    pub previous_dest_folders: Vec<String>,
     /// Image container format (decision #13): `vhdx` (default; Windows-native
     /// mounting, chains, true removal) or `qcow2` (zstd-compressed,
     /// cross-platform; full backups only until chains land). Old jobs
@@ -706,6 +712,7 @@ impl Default for Job {
             disk_source: None,
             source_disks: Vec::new(),
             dest_folder: String::new(),
+            previous_dest_folders: Vec::new(),
             image_format: own_backup_common::types::ImageFormat::default(),
             archive_encryption: None,
             compression_level: None,
@@ -984,8 +991,20 @@ impl JobStore {
             job.last_verification = None;
             job.invalid_images.clear();
             job.verification_blocked = false;
+            job.previous_dest_folders.clear();
             next.push(job.clone());
         } else if let Some(existing) = next.iter_mut().find(|j| j.id == job.id) {
+            job.previous_dest_folders = existing.previous_dest_folders.clone();
+            let old = existing.dest_folder.trim();
+            if !old.is_empty()
+                && !old.eq_ignore_ascii_case(job.dest_folder.trim())
+                && !job
+                    .previous_dest_folders
+                    .iter()
+                    .any(|f| f.eq_ignore_ascii_case(old))
+            {
+                job.previous_dest_folders.push(old.to_string());
+            }
             job.created_at = existing.created_at.clone();
             job.last_run = existing.last_run.clone(); // preserve run history
             job.last_verification = existing.last_verification.clone();
@@ -1000,6 +1019,7 @@ impl JobStore {
             job.last_verification = None;
             job.invalid_images.clear();
             job.verification_blocked = false;
+            job.previous_dest_folders.clear();
             next.push(job.clone());
         }
         write_json(&self.jobs_path, &next)?;
@@ -2299,11 +2319,27 @@ fn format_change_error(job: &Job, folder: &Path) -> Option<String> {
 ///   chain starts first and the old one is deleted only once the new full has
 ///   succeeded (see `apply_retention`), so there is never a moment with no
 ///   backup at all.
+/// Images one chain may hold before the next run starts a new one, whatever
+/// the scheme says. The VHDX reader refuses a parent chain deeper than 64
+/// (`vhdx_bat::MAX_CHAIN_DEPTH`): a job of "only increments" with no
+/// consolidation — saved before the modes existed, or made outside the
+/// window — grew past it on the stand (2026-10-18), every newer image read as
+/// unreadable, retention stopped, and each run re-parented on image 63.
+const MAX_CHAIN_IMAGES: usize = 60;
+
 fn should_start_new_chain(
     job: &Job,
     chain: &own_backup_backup::chains::Chain,
     now: chrono::DateTime<chrono::Utc>,
 ) -> bool {
+    if chain.images.len() >= MAX_CHAIN_IMAGES {
+        info!(
+            job = %job.name,
+            images = chain.images.len(),
+            "the chain is as long as it may get — this run starts a new one"
+        );
+        return true;
+    }
     if job.scheme.is_consolidation() {
         return match job.scheme.cleanup_older_than_days {
             Some(days) => chain.age_days(now) >= days as i64,
@@ -2651,6 +2687,9 @@ pub fn delete_job_files(store: &JobStore, job: &Job) -> JobFilesDeleted {
         }
     };
     push_folder(PathBuf::from(&job.dest_folder), &mut folders);
+    for f in &job.previous_dest_folders {
+        push_folder(PathBuf::from(f), &mut folders);
+    }
     for f in &from_history {
         if let Some(parent) = f.parent() {
             push_folder(parent.to_path_buf(), &mut folders);
@@ -2730,6 +2769,9 @@ fn job_folders(store: &JobStore, job: &Job) -> Vec<PathBuf> {
         }
     };
     push(PathBuf::from(&job.dest_folder));
+    for f in &job.previous_dest_folders {
+        push(PathBuf::from(f));
+    }
     for file in store.job_image_files(&job.id) {
         if let Some(parent) = file.parent() {
             push(parent.to_path_buf());
@@ -4357,6 +4399,47 @@ mod tests {
         assert!(
             store.list().is_empty(),
             "nothing was added in memory either"
+        );
+    }
+
+    /// A job remembers every folder it wrote into, whatever a client sends:
+    /// the activity journal forgets them after 200 runs, and deleting the job
+    /// must still find the copies there.
+    #[test]
+    fn a_job_remembers_the_folders_it_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JobStore::load(dir.path());
+        let mut job = store
+            .upsert(Job {
+                name: "j".into(),
+                dest_folder: r"S:\A".into(),
+                previous_dest_folders: vec![r"X:\forged".into()],
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(job.previous_dest_folders.is_empty());
+        for (dest, sent) in [
+            (r"S:\B", vec![]),
+            (r"s:\b", vec![]),
+            (r"S:\A", vec![r"Y:\x".to_string()]),
+            (r"S:\C", vec![]),
+        ] {
+            job.dest_folder = dest.into();
+            job.previous_dest_folders = sent;
+            job = store.upsert(job).unwrap();
+        }
+        // Spelled as the job had it when it moved on.
+        assert_eq!(
+            job.previous_dest_folders,
+            vec![r"S:\A".to_string(), r"s:\b".to_string()]
+        );
+        assert_eq!(
+            job_folders(&store, &job),
+            vec![
+                PathBuf::from(r"S:\C"),
+                PathBuf::from(r"S:\A"),
+                PathBuf::from(r"s:\b")
+            ]
         );
     }
 
@@ -5994,6 +6077,36 @@ mod tests {
         assert!(chain_belongs_to(&base, "C", &None));
         // Имя всё ещё должно совпадать — это не отменяется.
         assert!(!chain_belongs_to(&base, "D", &None));
+    }
+
+    /// Цепочка без предела по схеме («только инкременты», консолидации нет)
+    /// всё равно начинается заново на 60 образах: читатель VHDX глубже 64 не
+    /// идёт, и на стенде 18.10 всё новее 63-го стало нечитаемым.
+    #[test]
+    fn an_endless_scheme_still_starts_over_before_the_reader_limit() {
+        let image = |i: usize| own_backup_backup::chains::ChainImage {
+            image_path: PathBuf::from(format!("j_C_inc_{i}.avhdx")),
+            sidecar_path: PathBuf::from(format!("j_C_inc_{i}.avhdx.obkm")),
+            role: own_backup_backup::sidecar::ChainRole::Incremental,
+            container: "vhdx".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            parent_file_name: None,
+            source_id: None,
+            consolidated_increments: 0,
+            chain_started_at: None,
+        };
+        let mut job = Job::default();
+        job.scheme.method = "incremental".into();
+        job.scheme.only_incremental = true;
+        let now = chrono::Utc::now();
+        let short = own_backup_backup::chains::Chain {
+            images: (0..MAX_CHAIN_IMAGES - 1).map(image).collect(),
+        };
+        assert!(!should_start_new_chain(&job, &short, now));
+        let long = own_backup_backup::chains::Chain {
+            images: (0..MAX_CHAIN_IMAGES).map(image).collect(),
+        };
+        assert!(should_start_new_chain(&job, &long, now));
     }
 
     /// Тот же том под другим именем — буквой, путём GUID или точкой

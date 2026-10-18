@@ -36,6 +36,14 @@
   exclusions applied, locked or unlocked. It used to fail: under BitLocker
   ReFS ends before the device does, the cluster size could not be derived,
   and the sector-by-sector fallback hit the unreadable tail.
+- A job remembers the folders it wrote into before its destination was
+  changed, and deleting the job deletes its copies there too — even after
+  the activity journal (200 runs) has forgotten that folder.
+- A chain never grows past 60 images: the next run starts a new full copy
+  whatever the scheme. A job of "only increments" without consolidation
+  (saved before the modes existed, or made outside the window) used to grow
+  past what the VHDX reader follows (64), after which every new copy was
+  unreadable and retention stopped.
 
 ## 0.1.5-beta — 2026-10-17
 

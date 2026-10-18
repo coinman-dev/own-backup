@@ -617,6 +617,67 @@ function RefsBitLocker {
     shutdown.exe /s /t 5 | Out-Null
 }
 
+# Mode 'deletejob' (CHECKS 9): a two-source job that changed folders and ran
+# past the activity journal's 200 runs is deleted with its files: every copy
+# of it goes, from both folders; another job's copies and a stray file stay;
+# nothing is left unreported.
+function DeleteJob {
+    Ask 'purge' 'purge'
+    Ask 'qvol' 'qvol'
+    $a = "$store\A"; $b = "$store\B"
+    New-Item -ItemType Directory -Force $a, $b | Out-Null
+    foreach ($f in $a, $b) { [IO.File]::WriteAllText("$f\keep-me.txt", 'not a copy') }
+    $base = @{ schedule = @{ kind = 'none' }; image_format = 'vhdx'
+        exclusions = @{ enabled = $false; patterns = @(); patterns_linux = @() }
+        advanced = @{ validate_after = $false; retry_attempts = 0; after_backup = 'none' } }
+    $other = Rpc 'create-other' @{ op = 'create'; encrypted = $false; job = ($base + @{ name = 'KillXotherjob'; source = 'Q:'; sources = @('Q:'); dest_folder = $a; scheme = @{ method = 'full'; keep_chains = 5 } }) }
+    $r = Rpc 'other-a' @{ op = 'run'; id = $other.id; timeout_secs = 900 }
+    Check ($r.status -eq 'success') "another job's copy in A ($($r.error))"
+    $null = Rpc 'other-to-b' @{ op = 'save'; id = $other.id; patch = @{ dest_folder = $b } }
+    $r = Rpc 'other-b' @{ op = 'run'; id = $other.id; timeout_secs = 900 }
+    Check ($r.status -eq 'success') "another job's copy in B ($($r.error))"
+
+    $own = Rpc 'create-own' @{ op = 'create'; encrypted = $false; job = ($base + @{ name = 'KillXownjob'; source = 'P:'; sources = @('P:', 'Q:'); dest_folder = $a
+        scheme = @{ method = 'incremental'; only_incremental = $false; full_every_n = 20; keep_chains = 2 } }) }
+    for ($i = 1; $i -le 3; $i++) {
+        $r = Rpc -Quiet "own-a$i" @{ op = 'run'; id = $own.id; timeout_secs = 900 }
+        Check ($r.status -eq 'success') "own run $i in A ($($r.error))"
+    }
+    $inA = @(Get-ChildItem -LiteralPath $a -File | Where-Object { $_.Name -like 'KillXownjob_*' } | ForEach-Object { $_.Name })
+    Check ($inA.Count -eq 6) "two sources, three runs: six copies in A ($($inA.Count))"
+    $moved = Rpc 'own-to-b' @{ op = 'save'; id = $own.id; patch = @{ dest_folder = $b } }
+    Check (@($moved.previous_dest_folders) -contains $a) "the job remembers it wrote into A ($(@($moved.previous_dest_folders) -join ', '))"
+    for ($i = 1; $i -le 202; $i++) {
+        $r = Rpc -Quiet "own-b$i" @{ op = 'run'; id = $own.id; timeout_secs = 900 }
+        if ($r.status -ne 'success') { Check $false "own run $i in B ($($r.error))" }
+        Remove-Item "$work\own-b$i.*" -ErrorAction SilentlyContinue
+        if ($i % 25 -eq 0) { Say "KILLX-NOTE $i runs in B" }
+    }
+    $activity = @(Rpc -Quiet 'activity' @{ op = 'activity' })
+    # Every path in every run, as JSON spells it (backslashes doubled).
+    $journal = ConvertTo-Json -InputObject $activity -Depth 8 -Compress
+    $needle = ($a + '\').Replace('\', '\\')
+    Check (-not $journal.Contains($needle)) "the activity journal no longer names folder A ($($activity.Count) runs)"
+
+    $report = Rpc 'delete-own' @{ op = 'delete'; id = $own.id; files = $true }
+    Report 'delete-own' $report
+    $ownLeft = @(Get-ChildItem -LiteralPath $a, $b -File | Where-Object { $_.Name -like 'KillXownjob_*' } | ForEach-Object { $_.FullName })
+    Check ($ownLeft.Count -eq 0) "every copy of the job is gone from both folders ($($ownLeft -join ', '))"
+    $otherLeft = @(Get-ChildItem -LiteralPath $a, $b -File | Where-Object { $_.Name -like 'KillXotherjob_*' -and $_.Name -match '\.vhdx$' })
+    Check ($otherLeft.Count -eq 2) "the other job's copies stay ($($otherLeft.Count))"
+    Check ((Test-Path "$a\keep-me.txt") -and (Test-Path "$b\keep-me.txt")) 'the stray files stay'
+    Check (@($report.kept).Count -eq 0) "nothing was left behind unreported ($(@($report.kept) | ConvertTo-Json -Compress))"
+    Check (@($report.folders) -contains $a) "folder A was searched ($(@($report.folders) -join ', '))"
+    Say "KILLX-NOTE deleted=$(@($report.deleted).Count) history_truncated=$($report.history_truncated)"
+    Ask 'qvol-detach' 'qvol-detach'
+
+    [IO.File]::WriteAllText("$work\kills.done", 'done')
+    [IO.File]::WriteAllText("$work\passed.txt", 'pass')
+    Report 'result' @{ pass = $true; deleted = @($report.deleted).Count; truncated = $report.history_truncated; folders = $report.folders }
+    Say "KILLX-PASS format=$format"
+    shutdown.exe /s /t 5 | Out-Null
+}
+
 # Mode 'aliases' (CHECKS 9): one source named by its letter, its volume GUID
 # path and a mount point continues one chain; a destination on that volume is
 # refused whichever name either side uses, one on another volume is not.
@@ -749,6 +810,48 @@ try {
         return
     }
     if ($format -eq 'refsprobe') { return }
+
+    # 'bootlog': why did Windows restart last time? The System log's crash and
+    # unexpected-shutdown events, bugcheck details and minidumps.
+    if ($format -eq 'bootlog') {
+        if (-not $User) {
+            $events = [string[]]@(Get-WinEvent -FilterHashtable @{ LogName = 'System'; Id = 41, 1001, 6008, 1074, 109, 6006 } -MaxEvents 30 -ErrorAction SilentlyContinue |
+                ForEach-Object { "$($_.TimeCreated.ToString('o')) id=$($_.Id) $($_.ProviderName): $(($_.Message -replace '\s+', ' ').Substring(0, [Math]::Min(400, ($_.Message -replace '\s+', ' ').Length)))" })
+            $dumps = [string[]]@(Get-ChildItem 'C:\Windows\Minidump', 'C:\Windows\MEMORY.DMP' -ErrorAction SilentlyContinue | ForEach-Object { "$($_.FullName) $($_.Length) $($_.LastWriteTime.ToString('o'))" })
+            $wu = [string[]]@(Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-WindowsUpdateClient' } -MaxEvents 5 -ErrorAction SilentlyContinue | ForEach-Object { "$($_.TimeCreated.ToString('o')) id=$($_.Id)" })
+            # Event 41 carries the bugcheck code and its parameters (0 = none).
+            $k41 = [string[]]@(Get-WinEvent -FilterHashtable @{ LogName = 'System'; Id = 41 } -MaxEvents 5 -ErrorAction SilentlyContinue |
+                ForEach-Object { "$($_.TimeCreated.ToString('o')) " + (($_.Properties | ForEach-Object { '{0}' -f $_.Value }) -join ' ') })
+            $crash = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl' -ErrorAction SilentlyContinue
+            # Enabled for the next time: a small dump that survives the reboot.
+            Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl' -Name CrashDumpEnabled -Value 3 -ErrorAction SilentlyContinue
+            # The service log around the stall: the newest file, last lines; and
+            # the one before it (the boot just now starts a new one).
+            $logs = @(Get-ChildItem "$installed\Logs" -Filter 'own-backup-service-*.log' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
+            $tail = @()
+            foreach ($l in $logs | Select-Object -First 2) {
+                $copy = Join-Path $env:TEMP "bootlog-$($l.Name)"
+                Copy-Item -LiteralPath $l.FullName $copy -Force
+                $tail += "== $($l.Name) $($l.Length)"
+                $tail += [string[]]@(Get-Content -LiteralPath $copy -Tail 150 | ForEach-Object { ("$_" -replace '\x1b\[[0-9;]*m', '') })
+            }
+            # Around the first unreadable image, and what the folders hold.
+            $first = @()
+            foreach ($l in $logs | Select-Object -First 1) {
+                $copy = Join-Path $env:TEMP "bootlog-full-$($l.Name)"
+                Copy-Item -LiteralPath $l.FullName $copy -Force
+                $all = [string[]]@(Get-Content -LiteralPath $copy)
+                $hit = -1
+                for ($i = 0; $i -lt $all.Count; $i++) { if ($all[$i] -like '*Skipping unreadable image*') { $hit = $i; break } }
+                if ($hit -ge 0) { $first = [string[]]@($all[[Math]::Max(0, $hit - 60)..[Math]::Min($all.Count - 1, $hit + 10)] | ForEach-Object { ("$_" -replace '\x1b\[[0-9;]*m', '') }) }
+            }
+            $listing = [string[]]@(Get-ChildItem 'S:\killx-deletejob-d3' -Recurse -File -ErrorAction SilentlyContinue | Sort-Object FullName | ForEach-Object { "$($_.FullName) $($_.Length) $($_.LastWriteTime.ToString('HH:mm:ss'))" } | Select-Object -First 80)
+            Report 'bootlog' @{ first_unreadable = $first; listing = $listing; service_log = [string[]]$tail; events = $events; k41 = $k41; crash_dump_enabled = $crash.CrashDumpEnabled; dumps = $dumps; windows_update = $wu; boot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToString('o') }
+            Say "KILLX-PASS format=$format"
+            shutdown.exe /s /t 5 | Out-Null
+        }
+        return
+    }
 
     if ($phase -eq 'install') {
         $media = Get-PSDrive -PSProvider FileSystem | ForEach-Object { Join-Path $_.Root 'lab' } |
@@ -897,7 +1000,7 @@ if ($media) {
         # optionally a file pattern in the store to wait for and a delay after
         # it appears - the consolidation says nothing over the event stream,
         # so its own marker file is the signal.
-        $deadline = [DateTime]::UtcNow.AddMinutes(60)
+        $deadline = [DateTime]::UtcNow.AddMinutes(240)
         while (-not (Test-Path "$work\kills.done")) {
             Step 'waiting for a kill request'
             while (-not (Test-Path "$work\kill.request") -and -not (Test-Path "$work\kills.done")) {
@@ -953,6 +1056,27 @@ if ($media) {
                 Remove-Item "$work\kill.request" -Force
                 Report $name $out
                 Step "sxs done ($name)"
+                continue
+            }
+            if ($request.action -in @('qvol', 'qvol-detach')) {
+                # Mode 'deletejob': Q: is a small NTFS volume in a VHDX on C:.
+                $name = $request.name
+                $vhd = 'C:\Lab\q-src.vhdx'
+                $dp = "$work\q-diskpart.txt"
+                if (Test-Path $vhd) {
+                    "select vdisk file=$vhd`r`ndetach vdisk" | Set-Content $dp -Encoding ASCII
+                    & diskpart.exe /s $dp | Out-Null
+                    Remove-Item $vhd -Force
+                }
+                if ($request.action -eq 'qvol') {
+                    "create vdisk file=$vhd maximum=128 type=expandable`r`nselect vdisk file=$vhd`r`nattach vdisk`r`ncreate partition primary`r`nformat fs=ntfs quick label=QSRC`r`nassign letter=Q" | Set-Content $dp -Encoding ASCII
+                    & diskpart.exe /s $dp | Out-Null
+                    $rng = New-Object Random 7
+                    for ($i = 1; $i -le 5; $i++) { $bytes = New-Object byte[] 1MB; $rng.NextBytes($bytes); [IO.File]::WriteAllBytes("Q:\q$i.bin", $bytes) }
+                }
+                Remove-Item "$work\kill.request" -Force
+                JsonFile "$work\$name.json" @{ action = $request.action; q = [bool](Get-Volume -DriveLetter Q -ErrorAction SilentlyContinue) }
+                Step "$($request.action) done ($name)"
                 continue
             }
             if ($request.action -in @('refs-prepare', 'refs-unlock', 'refs-detach')) {
@@ -1157,6 +1281,7 @@ if ($media) {
         if ($format -in @('checks9', 'nospace')) { Checks9; return }
         if ($format -eq 'aliases') { Aliases; return }
         if ($format -eq 'refsbl') { RefsBitLocker; return }
+        if ($format -eq 'deletejob') { DeleteJob; return }
         $state = if (Test-Path "$work\job.json") { Get-Content "$work\job.json" -Raw | ConvertFrom-Json } else { $null }
         if (-not $state) {
             # Synthetic secret of a throwaway VM.
