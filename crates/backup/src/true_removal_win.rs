@@ -41,6 +41,7 @@ use own_backup_common::{OwnBackupError, Result};
 
 use crate::checksum::compute_block_checksum;
 use crate::exclusions_win::{list_dir_backup, ExcludedPath};
+pub use crate::removal_types::{InsideRemoval, RemovalOutcome};
 use crate::sidecar::BlockChecksum;
 use crate::vhdx::{attach_vhdx, create_differencing_vhdx, merge_into_parent, AttachMode};
 use crate::vhdx_bat::allocated_payload_blocks;
@@ -81,20 +82,6 @@ const FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE: u32 = 0x10;
 #[repr(C)]
 struct FileDispositionInfoRaw {
     delete_file: u8, // BOOLEAN
-}
-
-/// What the removal pass did to the image.
-pub struct RemovalOutcome {
-    /// Filesystem entries deleted (files + directories + reparse points,
-    /// including everything inside recursively deleted directories).
-    pub entries_deleted: u64,
-    /// Entries that could not be deleted (kept in the image; warned).
-    pub entries_failed: u64,
-    /// Backup blocks whose checksum was recomputed after the merge.
-    pub blocks_rehashed: u64,
-    /// Checksum entries newly added (driver wrote into previously-free space,
-    /// e.g. USN journal growth).
-    pub blocks_added: u64,
 }
 
 fn dev_err(what: &str, e: impl std::fmt::Display) -> OwnBackupError {
@@ -230,18 +217,6 @@ pub fn remove_excluded_from_image(
         "true removal: excluded files deleted from the image by the FS driver"
     );
     Ok(Some(outcome))
-}
-
-/// What the "exclude inside the finished image" pass did — the removal outcome
-/// plus the figures the result screen shows, which on this path can only be
-/// learned from the image's own filesystem.
-pub struct InsideRemoval {
-    pub outcome: RemovalOutcome,
-    pub files_excluded: u64,
-    pub bytes_excluded: u64,
-    pub categories: crate::exclusions::CategorySizes,
-    /// Bytes actually overwritten with zeros inside the image.
-    pub bytes_zeroed: u64,
 }
 
 /// Apply file exclusions to an image whose SOURCE could not be walked.

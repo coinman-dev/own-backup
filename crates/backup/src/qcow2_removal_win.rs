@@ -32,16 +32,9 @@ use crate::checksum::compute_block_checksum;
 use crate::exclusions_win::ExcludedPath;
 use crate::overlay::WritableOverlaySource;
 use crate::qcow2::{Qcow2InPlaceMerge, Qcow2RandomReader};
+pub use crate::removal_types::Qcow2RemovalOutcome;
 use crate::sidecar::BlockChecksum;
 use crate::win_device::WinRawDevice;
-
-/// What the qcow2 removal pass did.
-pub struct Qcow2RemovalOutcome {
-    pub entries_deleted: u64,
-    pub entries_failed: u64,
-    pub clusters_merged: u64,
-    pub blocks_rehashed: u64,
-}
 
 fn dev(msg: impl std::fmt::Display) -> OwnBackupError {
     OwnBackupError::Device(format!("qcow2 true removal: {msg}"))

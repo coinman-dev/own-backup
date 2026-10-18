@@ -39,6 +39,7 @@ pub mod pending_image;
 pub mod qcow2;
 pub mod raw_copy;
 pub mod registry_win;
+pub mod removal_types;
 pub mod restore_map;
 pub mod san_policy;
 /// Шифрование копий: ключи задания, ключ цепочки, шифр кластеров (`.ai/PLAN.md` §7).

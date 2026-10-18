@@ -31,6 +31,7 @@ use windows::Win32::System::IO::DeviceIoControl;
 use own_backup_common::Result;
 
 use crate::exclusions::{parse_patterns, ByteRanges, CategorySizes};
+pub use crate::exclusions::{ExcludedPath, ExclusionScan};
 use crate::win_device::to_wide;
 
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
@@ -43,18 +44,6 @@ pub struct DirEntryInfo {
     pub name: String,
     pub size: u64,
     pub attributes: u32,
-}
-
-/// A matched entry, recorded at its highest match point (a matched directory
-/// is one record — its contents are implied). Fed to the mount-&-delete pass
-/// ([`crate::true_removal_win`]) that truly removes NTFS/ReFS exclusions from
-/// the finished image.
-pub struct ExcludedPath {
-    /// Path relative to the volume root, original case, `\`-separated.
-    pub rel: String,
-    pub is_dir: bool,
-    /// Junction/symlink: delete the reparse entry itself, never its target.
-    pub is_reparse: bool,
 }
 
 /// List a directory using `FILE_FLAG_BACKUP_SEMANTICS` + a directory handle, so
@@ -137,32 +126,6 @@ pub fn list_dir_backup(dir: &std::path::Path) -> Result<Vec<DirEntryInfo>> {
         }
     }
     Ok(out)
-}
-
-/// Outcome of an exclusion scan over a volume.
-pub struct ExclusionScan {
-    /// Merged excluded byte ranges (volume offsets), finalized.
-    pub ranges: ByteRanges,
-    pub files_excluded: u64,
-    pub entries_scanned: u64,
-    /// Total bytes of excluded extents (before merging).
-    pub bytes_excluded: u64,
-    /// Byte totals per file category for the files that STAY in the backup
-    /// (excluded files are not part of the archive). Powers the dashboard
-    /// breakdown — the walk visits every file anyway, so this is free.
-    pub categories: CategorySizes,
-    /// Matched entries at their highest match point, for the true-removal
-    /// (mount-&-delete) pass over the finished image. Includes entries the
-    /// zeroing step cannot handle (resident files, reparse points, files
-    /// whose extents failed to resolve) — the driver deletes them all the
-    /// same.
-    pub paths: Vec<ExcludedPath>,
-    /// Per-file resolved extent bytes, filled only when the caller asks for it
-    /// (`scan-exclusions --list`). Diagnostics for the B0 comparison against
-    /// `scripts/ntfs-mft-probe.py`: the two methods agreed on the file set to
-    /// 0.26% and disagreed on the byte total by a third, and a per-file diff is
-    /// the only thing that says which one is lying.
-    pub file_bytes: Vec<(String, u64)>,
 }
 
 /// Walk `volume_read_path` (`\\.\E:` or a VSS snapshot device path) and
