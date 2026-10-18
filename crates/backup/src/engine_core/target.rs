@@ -6,10 +6,18 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use tracing::info;
+use uuid::Uuid;
 
+use own_backup_common::disk::DiskInfo;
+use own_backup_common::image::ImageManifest;
 use own_backup_common::progress::BackupProgress;
-use own_backup_common::types::{BackupStatus, BackupType, ImageFormat};
+use own_backup_common::types::{
+    BackupMode, BackupStatus, BackupType, BootMode, CompressionAlgo, ImageFormat, PartitionTable,
+};
 use own_backup_common::{tr, OwnBackupError, Result};
+
+use super::disk_image::DiskBackupRequest;
+use crate::sidecar::ChainRole;
 
 /// Default backup block size: 1 MiB (multiple of every real sector size).
 pub const DEFAULT_BLOCK_SIZE: u32 = 1024 * 1024;
@@ -249,14 +257,122 @@ pub(crate) fn container_ext(
     }
 }
 
+/// What distinguishes one whole-disk image of a chain from the next. The
+/// per-volume path carries the same thing in [`crate::seal::context::ImagePlan`];
+/// this is the disk-shaped half of it, so the two constructors below can build
+/// an encrypted target without the volume path's arguments.
+pub(crate) struct DiskImagePlan {
+    pub(crate) backup_id: Uuid,
+    pub(crate) role: ChainRole,
+    /// Identity and file name of the parent image, for a child.
+    pub(crate) parent: Option<(Uuid, String)>,
+    pub(crate) disk_number: u32,
+    /// Already resolved: 1–19.
+    pub(crate) zstd_level: i32,
+}
+
+/// The encrypted target for a whole-disk image, full or child.
+pub(crate) fn create_disk_obk_target(
+    image_path: &Path,
+    parent_path: Option<&Path>,
+    disk_size: u64,
+    keys: &crate::seal::context::ArchiveKeys,
+    plan: &DiskImagePlan,
+    owned_file: Option<std::fs::File>,
+) -> Result<(ImageTarget, u32)> {
+    let chain = match parent_path {
+        // The chain key travels inside the parent image, so continuing a chain
+        // needs the parent and this job's key, nothing else.
+        Some(parent) => keys.open_chain_of(parent)?,
+        None => keys.start_chain()?,
+    };
+    let image_plan = crate::seal::context::ImagePlan {
+        backup_id: plan.backup_id,
+        role: plan.role,
+        parent: plan.parent.as_ref().map(|(id, name)| (*id, name.as_str())),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        virtual_size: disk_size,
+        // A whole-disk copy is identified by the disk it came from, the way a
+        // volume copy is by its volume.
+        source_id: Some(format!("disk{}", plan.disk_number)),
+        consolidated_increments: 0,
+        chain_started_at: None,
+        compression: crate::seal::obk::ObkCompression::Zstd {
+            level: plan.zstd_level,
+        },
+    };
+    let writer = Box::new(match owned_file {
+        Some(file) => crate::seal::obk::ObkStagedWriter::new(crate::seal::obk::ObkWriter::new(
+            std::io::BufWriter::new(file),
+            &chain.key,
+            keys.writer_options(&chain, image_plan),
+        )?)?,
+        None => crate::seal::obk::ObkStagedWriter::create(
+            image_path,
+            &chain.key,
+            keys.writer_options(&chain, image_plan),
+        )?,
+    });
+    Ok((ImageTarget::Obk { writer }, 512))
+}
+
+/// Build the embedded [`ImageManifest`] describing the whole-disk image.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn whole_disk_image_manifest(
+    layout: &own_backup_common::gpt::DiskLayout,
+    req: &DiskBackupRequest,
+    sector_size: u32,
+    image_size: u64,
+    total_blocks: u64,
+    used_blocks: u64,
+    kind: BackupType,
+    parent_backup_id: Option<Uuid>,
+) -> ImageManifest {
+    ImageManifest {
+        backup_id: Uuid::new_v4(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        backup_type: kind,
+        parent_backup_id,
+        source_os: "windows".into(),
+        source_disk: DiskInfo {
+            device_id: format!(r"\\.\PhysicalDrive{}", req.disk_number),
+            model: req.disk_model.clone(),
+            serial: String::new(),
+            size_bytes: image_size,
+            sector_size_logical: sector_size,
+            sector_size_physical: std::cmp::max(sector_size, 4096),
+            media_type: "Disk".into(),
+            partition_table: PartitionTable::Gpt,
+            disk_guid: layout.disk_guid.clone(),
+            partitions: vec![],
+        },
+        boot_mode: BootMode::Uefi,
+        partition_table: PartitionTable::Gpt,
+        compression_algo: match req.image_format {
+            ImageFormat::Vhdx => CompressionAlgo::None,
+            ImageFormat::Qcow2 => CompressionAlgo::Zstd,
+        },
+        compression_level: match req.image_format {
+            ImageFormat::Vhdx => 0,
+            ImageFormat::Qcow2 => crate::qcow2::zstd_level_or_default(req.zstd_level),
+        },
+        encryption_algo: None,
+        encryption_salt: None,
+        block_size: req.block_size,
+        total_blocks,
+        used_blocks,
+        backup_mode: BackupMode::UsedSectors,
+        checksum_algorithm: "xxhash64".into(),
+        preflight_report: None,
+        volume_encryption: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use uuid::Uuid;
-
     use super::*;
     use crate::engine_core::read::ImageReadSource;
     use crate::engine_core::testkit::test_keys;
-    use crate::sidecar::ChainRole;
 
     const MIB: u64 = 1 << 20;
     const SIZE: u64 = 4 * MIB;
@@ -425,5 +541,137 @@ mod tests {
         let sizes = crate::exclusions::CategorySizes::default();
         report_categories(&mut progress, Some(&sizes), 3, 4096).unwrap();
         assert_eq!(seen, vec![("prepare".to_string(), true, Some((3, 4096)))]);
+    }
+
+    fn disk_request(format: ImageFormat, zstd_level: i32) -> DiskBackupRequest {
+        DiskBackupRequest {
+            disk_number: 3,
+            disk_model: "Test disk".into(),
+            partitions: vec![],
+            image_path: PathBuf::from("disk.qcow2"),
+            full_image_path: None,
+            block_size: MIB as u32,
+            image_format: format,
+            job_id: None,
+            encryption: None,
+            exclusion_patterns_windows: vec![],
+            exclusion_patterns_linux: vec![],
+            kind: BackupType::Incremental,
+            parent_image: None,
+            source_disk: None,
+            bootable: false,
+            zstd_level,
+        }
+    }
+
+    #[test]
+    fn the_whole_disk_manifest_describes_the_disk_and_its_container() {
+        let layout = own_backup_common::gpt::DiskLayout {
+            disk_guid: "D15C-GU1D".into(),
+            sector_size: 512,
+            size_bytes: SIZE,
+            partitions: vec![],
+        };
+        let parent = Uuid::new_v4();
+        let m = whole_disk_image_manifest(
+            &layout,
+            &disk_request(ImageFormat::Qcow2, 0),
+            512,
+            SIZE,
+            4,
+            3,
+            BackupType::Incremental,
+            Some(parent),
+        );
+        assert_eq!(m.source_disk.device_id, r"\\.\PhysicalDrive3");
+        assert_eq!(m.source_disk.model, "Test disk");
+        assert_eq!(m.source_disk.size_bytes, SIZE);
+        assert_eq!(m.source_disk.disk_guid, "D15C-GU1D");
+        assert_eq!(m.source_disk.sector_size_physical, 4096);
+        assert_eq!(m.backup_type, BackupType::Incremental);
+        assert_eq!(m.parent_backup_id, Some(parent));
+        assert_eq!(
+            (m.block_size, m.total_blocks, m.used_blocks),
+            (MIB as u32, 4, 3)
+        );
+        // A setting outside 1..=19 means the default level, never "none".
+        assert_eq!(m.compression_algo, CompressionAlgo::Zstd);
+        assert_eq!(m.compression_level, crate::qcow2::DEFAULT_ZSTD_LEVEL);
+
+        let vhdx = whole_disk_image_manifest(
+            &layout,
+            &disk_request(ImageFormat::Vhdx, 9),
+            512,
+            SIZE,
+            4,
+            3,
+            BackupType::Full,
+            None,
+        );
+        assert_eq!(vhdx.compression_algo, CompressionAlgo::None);
+        assert_eq!(vhdx.compression_level, 0);
+    }
+
+    #[test]
+    fn an_encrypted_disk_target_starts_a_chain_and_a_child_continues_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = test_keys();
+        let full_id = Uuid::new_v4();
+        let full = dir.path().join("full.obk");
+        let plan = |backup_id, role, parent| DiskImagePlan {
+            backup_id,
+            role,
+            parent,
+            disk_number: 3,
+            zstd_level: 3,
+        };
+
+        // A full one, written into the file the caller already holds open.
+        let (mut target, sector) = create_disk_obk_target(
+            &full,
+            None,
+            SIZE,
+            &keys,
+            &plan(full_id, ChainRole::Full, None),
+            Some(std::fs::File::create(&full).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(sector, 512);
+        target.write_at(0, &vec![0x11; MIB as usize]).unwrap();
+        target.write_at(MIB, &vec![0x22; MIB as usize]).unwrap();
+        target.finalize(b"sidecar", 0).unwrap();
+        let header = crate::seal::obk::reader::read_open_header(&full).unwrap();
+        assert_eq!(header.source_id.as_deref(), Some("disk3"));
+
+        // A child: the chain key comes from the parent, the bytes it does not
+        // write come from the parent too.
+        let child = dir.path().join("inc.obk");
+        let (mut target, _) = create_disk_obk_target(
+            &child,
+            Some(&full),
+            SIZE,
+            &keys,
+            &plan(
+                Uuid::new_v4(),
+                ChainRole::Incremental,
+                Some((full_id, "full.obk".into())),
+            ),
+            None,
+        )
+        .unwrap();
+        target.write_at(MIB, &vec![0x33; MIB as usize]).unwrap();
+        target.finalize(b"sidecar", 0).unwrap();
+
+        let chain = keys.open_chain_of(&child).unwrap();
+        assert_eq!(chain.chain_id, keys.open_chain_of(&full).unwrap().chain_id);
+        let mut image = ImageReadSource::open_with(&child, "obk", Some(&chain.key)).unwrap();
+        let mut block = vec![0u8; MIB as usize];
+        image.read_at(0, &mut block).unwrap();
+        assert!(
+            block.iter().all(|&b| b == 0x11),
+            "inherited from the parent"
+        );
+        image.read_at(MIB, &mut block).unwrap();
+        assert!(block.iter().all(|&b| b == 0x33), "written by the child");
     }
 }

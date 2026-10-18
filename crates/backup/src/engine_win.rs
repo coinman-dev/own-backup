@@ -56,13 +56,14 @@ use crate::engine_core::chain::{validate_disk_parent, validate_parent};
 use crate::engine_core::disk_image::{
     container_kind, disk_source_token, DiskCompositeReader, DiskRegion, DiskUsedMap,
 };
+pub use crate::engine_core::disk_image::{DiskBackupRequest, DiskPartitionBackup};
 pub(crate) use crate::engine_core::read::ImageReadSource;
 pub use crate::engine_core::read::{load_sidecar_of, load_sidecar_with_keys};
 pub use crate::engine_core::target::DEFAULT_BLOCK_SIZE;
 use crate::engine_core::target::{
-    check_encrypted_target, container_ext, entries_kept_reason, may_publish, no_patterns,
-    refuse_existing_outputs, report_categories, settled_image_path, snapshot_wanted,
-    volume_root_of, ImageTarget,
+    check_encrypted_target, container_ext, create_disk_obk_target, entries_kept_reason,
+    may_publish, no_patterns, refuse_existing_outputs, report_categories, settled_image_path,
+    snapshot_wanted, volume_root_of, whole_disk_image_manifest, DiskImagePlan, ImageTarget,
 };
 pub use crate::engine_core::verify::{
     verify_image, verify_image_scoped, verify_image_with_keys, VerifyScope, VerifySummary,
@@ -1954,69 +1955,6 @@ fn backup_volume_inner(
 // Whole-disk backup: one image per disk (plan D1, .ai/whole-disk-single-image)
 // ===========================================================================
 
-/// One partition to include in a whole-disk backup.
-#[derive(Clone)]
-pub struct DiskPartitionBackup {
-    /// Source volume device (`\\.\Volume{…}`, a drive letter, or `part:…`).
-    pub device: String,
-    /// GPT slot (matches [`own_backup_common::gpt::GptPartitionEntry::index`]).
-    pub part_index: u32,
-    /// Passphrase for a LUKS partition (its decrypted data is captured).
-    pub passphrase: Option<Zeroizing<String>>,
-}
-
-/// Parameters for a whole-disk (bootable) backup into a single image.
-#[derive(Clone)]
-pub struct DiskBackupRequest {
-    pub disk_number: u32,
-    pub disk_model: String,
-    pub partitions: Vec<DiskPartitionBackup>,
-    pub image_path: PathBuf,
-    /// Where the image goes when a child was asked for and a FULL comes out
-    /// (parent unusable, disk re-partitioned): the file name says what the file
-    /// is, and so does the name recorded inside it. `None` keeps `image_path`
-    /// whatever happens.
-    pub full_image_path: Option<PathBuf>,
-    pub block_size: u32,
-    pub image_format: ImageFormat,
-    pub job_id: Option<String>,
-    /// Present for an encrypted job: the whole-disk image is written as `.obk`,
-    /// with its sidecar — including the restore manifest — sealed inside the
-    /// container instead of in a guest meta partition (§7.3).
-    pub encryption: Option<crate::seal::context::ArchiveKeys>,
-    /// File-exclusion glob patterns for Windows-family filesystems (NTFS/ReFS/
-    /// FAT), applied per partition (plan D2): NTFS/ReFS drop + zero the matched
-    /// clusters (data never leaves the machine; the catalog entry stays as a
-    /// zero-filled ghost); FAT32/exFAT also patch the metadata so the files
-    /// fully disappear.
-    pub exclusion_patterns_windows: Vec<String>,
-    /// File-exclusion masks for Linux filesystems (ext/btrfs/xfs). Selected per
-    /// partition by filesystem; enforcement on ext/btrfs/xfs is a follow-up
-    /// (stored/passed now, applied once the Linux-FS exclusion scanner lands).
-    pub exclusion_patterns_linux: Vec<String>,
-    /// Full / Incremental / Differential (plan D5). A non-full kind needs
-    /// `parent_image` to be the previous whole-disk image of the SAME disk; if
-    /// the chain turns out unusable (missing parent, geometry changed, format
-    /// mismatch) the engine falls back to a full backup and reports it in the
-    /// summary.
-    pub kind: BackupType,
-    /// Parent whole-disk image for an incremental (the previous version) or
-    /// differential (the chain's full). A differencing child is written over it.
-    pub parent_image: Option<PathBuf>,
-    /// Full source-disk layout snapshot (from the GUI's live inventory) to embed
-    /// in the disk manifest, so a bare-metal restore can identify the archived
-    /// disk without jobs.json. `None` for CLI runs (the manifest then omits it).
-    pub source_disk: Option<own_backup_common::disk::DiskInfo>,
-    /// The user ticked "Загрузочная копия диска" for this disk.
-    ///
-    /// It decides one thing here: whether the machine's UEFI boot entries go
-    /// into the image. They are the firmware's, not the disk's, and a copy of a
-    /// data disk has no business carrying the boot menu.
-    pub bootable: bool,
-    /// zstd level for qcow2 and `.obk` (see [`VolumeBackupRequest::zstd_level`]).
-    pub zstd_level: i32,
-}
-
 /// Read the machine's UEFI boot entries, to be embedded in the image.
 ///
 /// Why this is worth anything after a restore: [`crate::gpt_writer`] recreates
@@ -3776,65 +3714,6 @@ fn create_disk_child_target(
 
 /// Create an image target of `disk_size` bytes with no parent (full backup).
 /// Returns the target and its logical sector size.
-/// What distinguishes one whole-disk image of a chain from the next. The
-/// per-volume path carries the same thing in [`crate::seal::context::ImagePlan`];
-/// this is the disk-shaped half of it, so the two constructors below can build
-/// an encrypted target without the volume path's arguments.
-struct DiskImagePlan {
-    backup_id: Uuid,
-    role: ChainRole,
-    /// Identity and file name of the parent image, for a child.
-    parent: Option<(Uuid, String)>,
-    disk_number: u32,
-    /// Already resolved: 1–19.
-    zstd_level: i32,
-}
-
-/// The encrypted target for a whole-disk image, full or child.
-fn create_disk_obk_target(
-    image_path: &Path,
-    parent_path: Option<&Path>,
-    disk_size: u64,
-    keys: &crate::seal::context::ArchiveKeys,
-    plan: &DiskImagePlan,
-    owned_file: Option<std::fs::File>,
-) -> Result<(ImageTarget, u32)> {
-    let chain = match parent_path {
-        // The chain key travels inside the parent image, so continuing a chain
-        // needs the parent and this job's key, nothing else.
-        Some(parent) => keys.open_chain_of(parent)?,
-        None => keys.start_chain()?,
-    };
-    let image_plan = crate::seal::context::ImagePlan {
-        backup_id: plan.backup_id,
-        role: plan.role,
-        parent: plan.parent.as_ref().map(|(id, name)| (*id, name.as_str())),
-        created_at: chrono::Utc::now().to_rfc3339(),
-        virtual_size: disk_size,
-        // A whole-disk copy is identified by the disk it came from, the way a
-        // volume copy is by its volume.
-        source_id: Some(format!("disk{}", plan.disk_number)),
-        consolidated_increments: 0,
-        chain_started_at: None,
-        compression: crate::seal::obk::ObkCompression::Zstd {
-            level: plan.zstd_level,
-        },
-    };
-    let writer = Box::new(match owned_file {
-        Some(file) => crate::seal::obk::ObkStagedWriter::new(crate::seal::obk::ObkWriter::new(
-            std::io::BufWriter::new(file),
-            &chain.key,
-            keys.writer_options(&chain, image_plan),
-        )?)?,
-        None => crate::seal::obk::ObkStagedWriter::create(
-            image_path,
-            &chain.key,
-            keys.writer_options(&chain, image_plan),
-        )?,
-    });
-    Ok((ImageTarget::Obk { writer }, 512))
-}
-
 fn create_disk_image_target(
     image_path: &Path,
     disk_size: u64,
@@ -3874,58 +3753,6 @@ fn create_disk_image_target(
             let writer = crate::vhdx_format::VhdxWriter::open_existing(image_path)?;
             Ok((ImageTarget::Vhdx { writer }, sector_size))
         }
-    }
-}
-
-/// Build the embedded [`ImageManifest`] describing the whole-disk image.
-#[allow(clippy::too_many_arguments)]
-fn whole_disk_image_manifest(
-    layout: &own_backup_common::gpt::DiskLayout,
-    req: &DiskBackupRequest,
-    sector_size: u32,
-    image_size: u64,
-    total_blocks: u64,
-    used_blocks: u64,
-    kind: BackupType,
-    parent_backup_id: Option<Uuid>,
-) -> ImageManifest {
-    ImageManifest {
-        backup_id: Uuid::new_v4(),
-        created_at: chrono::Utc::now().to_rfc3339(),
-        backup_type: kind,
-        parent_backup_id,
-        source_os: "windows".into(),
-        source_disk: DiskInfo {
-            device_id: format!(r"\\.\PhysicalDrive{}", req.disk_number),
-            model: req.disk_model.clone(),
-            serial: String::new(),
-            size_bytes: image_size,
-            sector_size_logical: sector_size,
-            sector_size_physical: std::cmp::max(sector_size, 4096),
-            media_type: "Disk".into(),
-            partition_table: PartitionTable::Gpt,
-            disk_guid: layout.disk_guid.clone(),
-            partitions: vec![],
-        },
-        boot_mode: BootMode::Uefi,
-        partition_table: PartitionTable::Gpt,
-        compression_algo: match req.image_format {
-            ImageFormat::Vhdx => CompressionAlgo::None,
-            ImageFormat::Qcow2 => CompressionAlgo::Zstd,
-        },
-        compression_level: match req.image_format {
-            ImageFormat::Vhdx => 0,
-            ImageFormat::Qcow2 => crate::qcow2::zstd_level_or_default(req.zstd_level),
-        },
-        encryption_algo: None,
-        encryption_salt: None,
-        block_size: req.block_size,
-        total_blocks,
-        used_blocks,
-        backup_mode: BackupMode::UsedSectors,
-        checksum_algorithm: "xxhash64".into(),
-        preflight_report: None,
-        volume_encryption: None,
     }
 }
 

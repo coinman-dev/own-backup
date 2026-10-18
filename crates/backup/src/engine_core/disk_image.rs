@@ -2,11 +2,79 @@
 //! token a partition is listed under, and the reader and used-map that turn
 //! several partitions at their real offsets into one disk image.
 
+use std::path::PathBuf;
+
+use zeroize::Zeroizing;
+
+use own_backup_common::types::{BackupType, ImageFormat};
 use own_backup_common::Result;
 
 use crate::block_reader::BlockReader;
 use crate::exclusions::ByteRanges;
 use crate::used_sectors::UsedSectorMap;
+
+/// One partition to include in a whole-disk backup.
+#[derive(Clone)]
+pub struct DiskPartitionBackup {
+    /// Source volume device (`\\.\Volume{…}`, a drive letter, or `part:…`).
+    pub device: String,
+    /// GPT slot (matches [`own_backup_common::gpt::GptPartitionEntry::index`]).
+    pub part_index: u32,
+    /// Passphrase for a LUKS partition (its decrypted data is captured).
+    pub passphrase: Option<Zeroizing<String>>,
+}
+
+/// Parameters for a whole-disk (bootable) backup into a single image.
+#[derive(Clone)]
+pub struct DiskBackupRequest {
+    pub disk_number: u32,
+    pub disk_model: String,
+    pub partitions: Vec<DiskPartitionBackup>,
+    pub image_path: PathBuf,
+    /// Where the image goes when a child was asked for and a FULL comes out
+    /// (parent unusable, disk re-partitioned): the file name says what the file
+    /// is, and so does the name recorded inside it. `None` keeps `image_path`
+    /// whatever happens.
+    pub full_image_path: Option<PathBuf>,
+    pub block_size: u32,
+    pub image_format: ImageFormat,
+    pub job_id: Option<String>,
+    /// Present for an encrypted job: the whole-disk image is written as `.obk`,
+    /// with its sidecar — including the restore manifest — sealed inside the
+    /// container instead of in a guest meta partition (§7.3).
+    pub encryption: Option<crate::seal::context::ArchiveKeys>,
+    /// File-exclusion glob patterns for Windows-family filesystems (NTFS/ReFS/
+    /// FAT), applied per partition (plan D2): NTFS/ReFS drop + zero the matched
+    /// clusters (data never leaves the machine; the catalog entry stays as a
+    /// zero-filled ghost); FAT32/exFAT also patch the metadata so the files
+    /// fully disappear.
+    pub exclusion_patterns_windows: Vec<String>,
+    /// File-exclusion masks for Linux filesystems (ext/btrfs/xfs). Selected per
+    /// partition by filesystem; enforcement on ext/btrfs/xfs is a follow-up
+    /// (stored/passed now, applied once the Linux-FS exclusion scanner lands).
+    pub exclusion_patterns_linux: Vec<String>,
+    /// Full / Incremental / Differential (plan D5). A non-full kind needs
+    /// `parent_image` to be the previous whole-disk image of the SAME disk; if
+    /// the chain turns out unusable (missing parent, geometry changed, format
+    /// mismatch) the engine falls back to a full backup and reports it in the
+    /// summary.
+    pub kind: BackupType,
+    /// Parent whole-disk image for an incremental (the previous version) or
+    /// differential (the chain's full). A differencing child is written over it.
+    pub parent_image: Option<PathBuf>,
+    /// Full source-disk layout snapshot (from the GUI's live inventory) to embed
+    /// in the disk manifest, so a bare-metal restore can identify the archived
+    /// disk without jobs.json. `None` for CLI runs (the manifest then omits it).
+    pub source_disk: Option<own_backup_common::disk::DiskInfo>,
+    /// The user ticked "Загрузочная копия диска" for this disk.
+    ///
+    /// It decides one thing here: whether the machine's UEFI boot entries go
+    /// into the image. They are the firmware's, not the disk's, and a copy of a
+    /// data disk has no business carrying the boot menu.
+    pub bootable: bool,
+    /// zstd level for qcow2 and `.obk` (see [`VolumeBackupRequest::zstd_level`]).
+    pub zstd_level: i32,
+}
 
 /// Which encrypted container a volume's first sectors say it is.
 ///
