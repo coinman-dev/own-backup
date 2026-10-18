@@ -260,6 +260,24 @@ pub fn unlock_and_probe(
 ) -> Result<crate::unlock_probe::DecryptedProbe> {
     use crate::unlock_probe::{probe_decrypted, DecryptedProbe};
 
+    // An OPENED LUKS container (`/dev/mapper/…`) reads as plain data, but its
+    // password still matters: a device-mapper snapshot of it needs the
+    // container key, which after `cryptsetup open` lives only in the kernel.
+    // Asked of the header on the device underneath, or every password would
+    // "open" it.
+    if let Some(container) = opened_luks_container(device) {
+        let mut under = LinuxRawDevice::open_read(&container)?;
+        match crate::luks::open_luks(&mut under, passphrase.as_bytes()) {
+            Ok(_) => {}
+            Err(e) if crate::luks::is_wrong_passphrase(&e) => {
+                info!(error = %e, "LUKS passphrase rejected");
+                return Ok(DecryptedProbe::default());
+            }
+            Err(e) => return Err(e),
+        }
+        return probe_decrypted(&mut LinuxRawDevice::open_read(device)?);
+    }
+
     let mut dev = LinuxRawDevice::open_read(device)?;
     let mut header = vec![0u8; 4096];
     dev.read_at(0, &mut header)?;
@@ -329,6 +347,28 @@ pub fn container_key_from(
     move |device: &Path| match &passphrase {
         Some(p) => luks_volume_key(device, p).map(Some),
         None => Ok(None),
+    }
+}
+
+/// The LUKS container under an opened mapping: `/dev/<slave>` when `device`
+/// is a dm-crypt device whose device-mapper UUID says LUKS (`CRYPT-LUKS1-…`,
+/// `CRYPT-LUKS2-…`) and it sits on exactly one device.
+fn opened_luks_container(device: &str) -> Option<String> {
+    use own_backup_common::linux_block as lb;
+    let name = lb::kernel_name(std::path::Path::new(device))?;
+    let sys = std::path::Path::new(lb::SYS_CLASS_BLOCK);
+    let uuid = std::fs::read_to_string(sys.join(&name).join("dm/uuid")).ok()?;
+    if !uuid.trim().starts_with("CRYPT-LUKS") {
+        return None;
+    }
+    let slaves: Vec<String> = std::fs::read_dir(sys.join(&name).join("slaves"))
+        .ok()?
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    match slaves.as_slice() {
+        [one] => Some(format!("/dev/{one}")),
+        _ => None,
     }
 }
 
