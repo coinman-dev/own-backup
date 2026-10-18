@@ -166,6 +166,8 @@
     if (p.used_bytes > 0) t += ` (${m.dmap_used({ size: formatBytes(p.used_bytes) })})`;
     const fs = partFs(p);
     if (fs) t += ` ${fs}`;
+    // Linux: the name the system's own tools show (`/dev/nvme0n1p2`).
+    if (p.kernel_device) t += ` · ${p.kernel_device}`;
     if (layoutOnly.includes(p.index)) {
       t += ' · ' + m.dmap_layout_only_title();
     }

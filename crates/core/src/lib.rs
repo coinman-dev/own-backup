@@ -2121,14 +2121,17 @@ pub fn plan_run(job: &Job, last_success: Option<&JobRun>) -> RunPlan {
     }
 }
 
-/// Uppercase drive letter of a source device string ("C:" / `\\.\C:` → 'C').
 /// A short, filename-safe, underscore-free token identifying a source volume
 /// within a job's images/chains. A lettered volume is its letter ("C:" → "C").
 /// A letterless volume addressed by a GUID path (`\\?\Volume{1a2b…}`) becomes
 /// `V` + the first 8 hex digits of the GUID — unique per volume, so several
-/// letterless partitions (e.g. two EFI parts) never collide. Falls back to "X".
-/// Stable key for a source volume, used both for chain planning and to look up
-/// a saved password. The GUI/service compute the same token to store passwords.
+/// letterless partitions (e.g. two EFI parts) never collide. A Linux device
+/// path becomes `U`/`F` with hex digits of its PARTUUID / filesystem UUID, or
+/// `H` with a hash of the path (`/dev/mapper/…`) — see
+/// [`own_backup_backup::source_identity::unix_device_token`]. Falls back to
+/// "X". Stable key for a source volume, used both for chain planning and to
+/// look up a saved password. The GUI/service compute the same token to store
+/// passwords; the window mirrors it in `lib/sourceToken.ts`.
 pub fn source_token(device: &str) -> String {
     let d = device.trim();
     // Windowed partition source `part:<disk>:<offset>:<len>` → P<disk> + offset
@@ -2156,6 +2159,12 @@ pub fn source_token(device: &str) -> String {
         if !hex.is_empty() {
             return format!("V{hex}");
         }
+    }
+    // A Linux device path. Asked before the letter, which read `/dev/sda2` as
+    // "no letter": every Linux volume was "X" — one saved password, one file
+    // name and one chain for all of them.
+    if let Some(token) = own_backup_backup::source_identity::unix_device_token(d) {
+        return token;
     }
     // Lettered volume ("C:", "\\.\C:") → the letter.
     d.trim_start_matches(r"\\.\")
@@ -5263,6 +5272,38 @@ mod tests {
         );
         // Physical-offset partition → P<disk><offsetHex> (0x52000000 = 1375731712).
         assert_eq!(source_token("part:3:1375731712:1073741824"), "P352000000");
+        // Something that is not a volume at all still reads as "X".
+        assert_eq!(source_token(""), "X");
+        assert_eq!(source_token("//server/share"), "X");
+
+        // Linux devices: one token per volume, never "X", the same on every
+        // run and on every machine that names the volume the same way.
+        assert_eq!(
+            source_token("/dev/disk/by-partuuid/2d272048-0d61-4a8c-a715-08d35535ed93"),
+            "U2D272048"
+        );
+        assert_eq!(
+            source_token("/dev/disk/by-partuuid/4955b993-01"),
+            "U4955B99301"
+        );
+        assert_eq!(source_token("/dev/disk/by-uuid/060B-E961"), "F060BE961");
+        assert_eq!(
+            source_token(" /dev/mapper/luks-16e1f072-b3b5-4aa7-b296-67b738edf0ca "),
+            "H29CA025F"
+        );
+        assert_eq!(source_token("/dev/sda2"), "H1BCE3BBF");
+        assert_ne!(source_token("/dev/sda2"), source_token("/dev/sdb2"));
+        // And the file name round-trips through the image-name parser.
+        let dev = "/dev/mapper/vg0-home";
+        let linux = Job {
+            sources: vec![dev.into()],
+            source_labels: vec!["home".into()],
+            ..Default::default()
+        };
+        let token = file_token(&linux, dev);
+        assert_eq!(token, source_token(dev));
+        let (name, _) = output_paths_for(&linux, &token, "full");
+        assert_eq!(image_token(&name).as_deref(), Some(token.as_str()));
 
         // Names are `<name>_<token>_<tag>_<stamp>`; token is read from the end
         // so underscores inside <name> do not confuse it.

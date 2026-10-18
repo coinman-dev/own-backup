@@ -316,6 +316,8 @@ mod tests {
                     unlockable: true,
                     gpt_attributes: 0,
                     mbr_type: 0,
+                    kernel_device: String::new(),
+                    mapper_kind: String::new(),
                 })
                 .collect(),
         }

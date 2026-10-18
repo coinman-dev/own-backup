@@ -48,6 +48,15 @@ export interface PartitionInfo {
   recovery_key_only?: boolean;
   /** Can Own Backup open it with something the user can type? */
   unlockable?: boolean;
+  /** Linux: the kernel's name for the device (`/dev/nvme0n1p2`, `/dev/dm-0`),
+   *  for showing. `volume_device` is then a name that survives a reboot
+   *  (`/dev/disk/by-partuuid/…`, `/dev/mapper/…`) and is what a job keeps.
+   *  Absent on Windows. */
+  kernel_device?: string;
+  /** Linux: `crypt` (an opened LUKS/BitLocker container — the filesystem
+   *  inside) or `lvm` (a logical volume) for a device-mapper volume, listed
+   *  as a disk of its own; absent for a partition. */
+  mapper_kind?: string;
 }
 
 export interface BackupJob {

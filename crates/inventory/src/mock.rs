@@ -41,6 +41,8 @@ impl MockInventory {
             unlockable: true,
             gpt_attributes: 0,
             mbr_type: 0,
+            kernel_device: String::new(),
+            mapper_kind: String::new(),
         };
 
         let msr_partition = PartitionInfo {
@@ -65,6 +67,8 @@ impl MockInventory {
             unlockable: true,
             gpt_attributes: 0,
             mbr_type: 0,
+            kernel_device: String::new(),
+            mapper_kind: String::new(),
         };
 
         let ntfs_partition = PartitionInfo {
@@ -89,6 +93,8 @@ impl MockInventory {
             unlockable: true,
             gpt_attributes: 0,
             mbr_type: 0,
+            kernel_device: String::new(),
+            mapper_kind: String::new(),
         };
 
         DiskInfo {

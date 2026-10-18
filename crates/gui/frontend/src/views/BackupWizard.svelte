@@ -6,6 +6,8 @@
   import { saveJob, runJob, decryptVolume, decryptedVolumes } from '../lib/jobStore.svelte';
   import { formatBytes } from '../lib/format';
   import { diskSegments, msrKept } from '../lib/diskLayout';
+  // Per-source token of the file-name preview — core's source_token, mirrored.
+  import { sourceToken } from '../lib/sourceToken';
   import PasswordField from '../components/PasswordField.svelte';
   import ArchiveKeyModal from '../components/ArchiveKeyModal.svelte';
   import type { Job, DiskInfo, PartitionInfo } from '../lib/types';
@@ -222,17 +224,6 @@
     const dec = p.volume_device ? decryptedVolumes[p.volume_device] : undefined;
     return fsLabel(dec ? dec.filesystem : p.filesystem);
   }
-  // Per-source token used in the file-name preview (mirrors core's source_token:
-  // letter for lettered volumes, V+8 hex of the GUID for letterless volumes,
-  // P<disk><offsetHex> for physical-offset partitions).
-  function sourceToken(device: string): string {
-    const pm = device.match(/^part:(\d+):(\d+):/);
-    if (pm) return `P${pm[1]}${BigInt(pm[2]).toString(16).toUpperCase()}`;
-    const m = device.match(/Volume\{([0-9a-fA-F]+)/);
-    if (m) return 'V' + m[1].slice(0, 8).toUpperCase();
-    return driveLetter(device) ?? 'X';
-  }
-
   function isSelected(dev: string): boolean {
     return job.sources.includes(dev);
   }
@@ -278,6 +269,8 @@
     if (partUsed(p) > 0) t += ' ' + m.wiz_seg_used({ size: formatBytes(partUsed(p)) });
     const fs = partFs(p);
     if (fs) t += ` ${fs}`;
+    // Linux: the name the system's own tools show (`/dev/nvme0n1p2`).
+    if (p.kernel_device) t += ` · ${p.kernel_device}`;
     return t;
   }
 

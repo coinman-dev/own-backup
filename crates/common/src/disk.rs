@@ -110,6 +110,20 @@ pub struct PartitionInfo {
     /// MBR partition type byte (0x07 NTFS, 0x27 hidden recovery, …); 0 on GPT.
     #[serde(default)]
     pub mbr_type: u8,
+    /// Linux: the kernel's own name for this volume's device (`/dev/nvme0n1p2`,
+    /// `/dev/dm-0`) — what the system's tools show, and what sysfs is asked
+    /// about. [`Self::volume_device`] is then a name that survives a reboot
+    /// (`/dev/disk/by-partuuid/…`, `/dev/mapper/…`), and that is what a job
+    /// keeps: `sda` and `sdb` can swap places from one boot to the next.
+    /// Empty on Windows, and not written then.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kernel_device: String,
+    /// Linux: the volume is not a partition but a device-mapper device on top
+    /// of one — `crypt` (an opened LUKS or BitLocker container: the filesystem
+    /// inside it) or `lvm` (a logical volume). Empty for a partition, and
+    /// always on Windows.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mapper_kind: String,
 }
 
 /// GPT "hidden" attribute (bit 62).
@@ -268,6 +282,8 @@ mod tests {
             unlockable: true,
             gpt_attributes: 0,
             mbr_type: 0,
+            kernel_device: String::new(),
+            mapper_kind: String::new(),
         }
     }
 
