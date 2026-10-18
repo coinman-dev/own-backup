@@ -48,6 +48,8 @@
   corpus, was 1369). A directory data block that would be left empty is taken
   out of the directory and returned to free space, as the kernel does, and
   is zeroed so the deleted names do not stay behind.
+- The service restarts by itself after a crash (in 10 s, then 1 and 5 min).
+  It used to stay stopped until the next reboot, and scheduled copies with it.
 
 ## 0.1.5-beta — 2026-10-17
 

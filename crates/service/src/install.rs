@@ -77,6 +77,30 @@ pub fn install() -> Result<(), Box<dyn std::error::Error>> {
     };
     service.set_description(crate::SERVICE_DESCRIPTION)?;
 
+    // Start again after a crash. Without it a service that died — a panic, a
+    // driver call that took it down — stayed stopped until the next reboot,
+    // and scheduled copies stopped with it, silently (stand, 2026-10-18: a
+    // killed service was found Stopped). A stop someone asked for is not a
+    // failure and is left alone. Not worth failing the install over.
+    {
+        use std::time::Duration;
+        use windows_service::service::{
+            ServiceAction, ServiceActionType, ServiceFailureActions, ServiceFailureResetPeriod,
+        };
+        let restart = |secs| ServiceAction {
+            action_type: ServiceActionType::Restart,
+            delay: Duration::from_secs(secs),
+        };
+        if let Err(e) = service.update_failure_actions(ServiceFailureActions {
+            reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(24 * 3600)),
+            reboot_msg: None,
+            command: None,
+            actions: Some(vec![restart(10), restart(60), restart(300)]),
+        }) {
+            eprintln!("could not set the service to restart after a failure: {e}");
+        }
+    }
+
     println!(
         "{}",
         tr!(

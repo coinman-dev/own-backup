@@ -98,7 +98,10 @@ function Rpc([string]$name, $request, [switch]$Quiet) {
 function WaitService {
     for ($i = 0; $i -lt 180; $i++) {
         $s = Get-Service OwnBackup -ErrorAction SilentlyContinue
-        if ($s -and $s.Status -eq 'Running' -and (Test-Path 'C:\ProgramData\OwnBackup\service.token')) { Start-Sleep -Seconds 3; return }
+        # The pipe, not the token file: a token outlives the service that wrote
+        # it, and a restarted service answers only once its pipe is there.
+        $pipe = [IO.Directory]::GetFiles('\\.\pipe\') -contains '\\.\pipe\OwnBackup'
+        if ($s -and $s.Status -eq 'Running' -and $pipe -and (Test-Path 'C:\ProgramData\OwnBackup\service.token')) { Start-Sleep -Seconds 3; return }
         Start-Sleep -Seconds 1
     }
     throw 'the OwnBackup service did not come up'
@@ -811,6 +814,37 @@ try {
     }
     if ($format -eq 'refsprobe') { return }
 
+    # 'failrestart': the service is set to restart after a crash; a killed
+    # service comes back by itself, without anyone starting it.
+    if ($format -eq 'failrestart') {
+        if (-not $User) {
+            # This build first: the setting is written by its installer.
+            $want = (Get-FileHash "$lab\own-backup-install.exe").Hash
+            $have = if (Test-Path "$base\installed.sha256") { (Get-Content "$base\installed.sha256" -Raw).Trim() } else { '' }
+            if ($want -ne $have) {
+                $setup = Start-Process "$lab\own-backup-install.exe" -ArgumentList '/S' -Wait -PassThru
+                Check ($setup.ExitCode -eq 0) "upgrade installer exit $($setup.ExitCode)"
+                [IO.File]::WriteAllText("$base\installed.sha256", $want)
+            }
+            WaitService
+            $q = [string[]]@(& sc.exe qfailure OwnBackup | ForEach-Object { "$_" })
+            $old = (Get-Process own-backup-service).Id
+            Stop-Process -Id $old -Force
+            Wait-Process -Id $old -Timeout 180 -ErrorAction SilentlyContinue
+            $back = $null
+            for ($i = 0; $i -lt 90 -and -not $back; $i++) {
+                Start-Sleep -Seconds 1
+                $p = Get-Process own-backup-service -ErrorAction SilentlyContinue
+                if ($p -and $p.Id -ne $old -and (Get-Service OwnBackup).Status -eq 'Running') { $back = $p.Id }
+            }
+            Report 'failrestart' @{ qfailure = $q; old_pid = $old; new_pid = $back; seconds = $i }
+            if ($back) { Say "KILLX-OK the killed service came back by itself in $i s (pid $old -> $back)"; Say "KILLX-PASS format=$format" }
+            else { Say "KILLX-FAIL phase=run line=0 reason=the killed service did not come back by itself" }
+            shutdown.exe /s /t 5 | Out-Null
+        }
+        return
+    }
+
     # 'bootlog': why did Windows restart last time? The System log's crash and
     # unexpected-shutdown events, bugcheck details and minidumps.
     if ($format -eq 'bootlog') {
@@ -846,7 +880,12 @@ try {
                 if ($hit -ge 0) { $first = [string[]]@($all[[Math]::Max(0, $hit - 60)..[Math]::Min($all.Count - 1, $hit + 10)] | ForEach-Object { ("$_" -replace '\x1b\[[0-9;]*m', '') }) }
             }
             $listing = [string[]]@(Get-ChildItem 'S:\killx-deletejob-d3' -Recurse -File -ErrorAction SilentlyContinue | Sort-Object FullName | ForEach-Object { "$($_.FullName) $($_.Length) $($_.LastWriteTime.ToString('HH:mm:ss'))" } | Select-Object -First 80)
-            Report 'bootlog' @{ first_unreadable = $first; listing = $listing; service_log = [string[]]$tail; events = $events; k41 = $k41; crash_dump_enabled = $crash.CrashDumpEnabled; dumps = $dumps; windows_update = $wu; boot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToString('o') }
+            # Why the service did not come back: the service manager and crashes.
+            $scm = [string[]]@(Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Service Control Manager'; Id = 7000, 7009, 7011, 7023, 7024, 7031, 7034 } -MaxEvents 15 -ErrorAction SilentlyContinue |
+                ForEach-Object { "$($_.TimeCreated.ToString('o')) id=$($_.Id) $(($_.Message -replace '\s+', ' '))" })
+            $crash = [string[]]@(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; Id = 1000, 1001, 1026 } -MaxEvents 10 -ErrorAction SilentlyContinue |
+                ForEach-Object { "$($_.TimeCreated.ToString('o')) id=$($_.Id) $(($_.Message -replace '\s+', ' ').Substring(0, [Math]::Min(700, ($_.Message -replace '\s+', ' ').Length)))" })
+            Report 'bootlog' @{ scm = $scm; app_crash = $crash; first_unreadable = $first; listing = $listing; service_log = [string[]]$tail; events = $events; k41 = $k41; crash_dump_enabled = $crash.CrashDumpEnabled; dumps = $dumps; windows_update = $wu; boot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToString('o') }
             Say "KILLX-PASS format=$format"
             shutdown.exe /s /t 5 | Out-Null
         }
@@ -967,8 +1006,12 @@ if ($media) {
         }
         # Nor is a full C: (mode 'nospace' killed between fill and unfill).
         Remove-Item 'C:\killx-fill.bin' -Force -ErrorAction SilentlyContinue
-        # A request left by an attempt that did not finish is not this one's.
-        Remove-Item "$work\kill.request" -ErrorAction SilentlyContinue
+        # A request left by an attempt that did not finish is not this one's;
+        # one written since this boot is (the user half can be first).
+        $bootedAt = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime()
+        if ((Test-Path "$work\kill.request") -and (Get-Item "$work\kill.request").LastWriteTimeUtc -lt $bootedAt) {
+            Remove-Item "$work\kill.request" -ErrorAction SilentlyContinue
+        }
         # AutoLogonCount is one logon: a retried attempt arms it again, which
         # only counts from the next boot.
         $armed = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon').AutoAdminLogon -eq '1'
@@ -1239,7 +1282,11 @@ if ($media) {
             $service = Get-Process own-backup-service -ErrorAction Stop
             $at = [DateTime]::UtcNow.ToString('o')
             Stop-Process -Id $service.Id -Force
-            Say "KILLX-KILLED name=$name pid=$($service.Id) utc=$at trigger=$(if ($seen) { $seen.Name } else { 'none' })"
+            # A process inside a driver call dies only when the call returns:
+            # 13 s once (2026-10-18), while the service still showed Running.
+            $exitWait = [Diagnostics.Stopwatch]::StartNew()
+            Wait-Process -Id $service.Id -Timeout 180 -ErrorAction SilentlyContinue
+            Say "KILLX-KILLED name=$name pid=$($service.Id) utc=$at exit_ms=$($exitWait.ElapsedMilliseconds) trigger=$(if ($seen) { $seen.Name } else { 'none' })"
             Step "killed ($name)"
             Start-Sleep -Seconds 2
             $right = [ordered]@{ utc = $at; pid = $service.Id; trigger = $(if ($seen) { $seen.Name } else { $null }); listing = (Listing) }
