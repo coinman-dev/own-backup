@@ -14,6 +14,10 @@ pub mod consolidate;
 pub mod decrypt;
 pub mod dest_folder;
 pub mod efivars;
+// Shared by both engines. Until Linux runs the shared pipeline, parts of it
+// are reached from Windows code only.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+mod engine_core;
 pub mod esp_fallback;
 pub mod esp_scan;
 pub mod exclusions;
