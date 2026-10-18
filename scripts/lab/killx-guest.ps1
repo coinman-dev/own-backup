@@ -425,7 +425,7 @@ function StallCancel([string]$id) {
 # --- The history cannot be written (format 'history') -----------------------
 function Ask([string]$name, [string]$action) {
     [IO.File]::WriteAllText("$work\kill.request", (ConvertTo-Json -Compress @{ name = $name; action = $action }))
-    for ($i = 0; $i -lt 300 -and -not (Test-Path "$work\$name.json"); $i++) { Start-Sleep -Milliseconds 500 }
+    for ($i = 0; $i -lt 1200 -and -not (Test-Path "$work\$name.json"); $i++) { Start-Sleep -Milliseconds 500 }
     Check (Test-Path "$work\$name.json") "the SYSTEM half did $action"
     WaitService
 }
@@ -542,6 +542,81 @@ function Checks9 {
     Say "KILLX-PASS format=$format"
     shutdown.exe /s /t 5 | Out-Null
 }
+# Mode 'refsbl' (PLAN 1, ReFS inside an encrypted source): a ReFS volume under
+# BitLocker, copied locked and unlocked with '*.tmp' excluded. The copy must
+# hold the kept files whole, no '*.tmp' in its catalog, and the excluded
+# files' content nowhere in the image's raw bytes.
+$refsSecret = 'KILLX-REFS-SECRET-'
+function ImageHolds([string]$path, [string]$needle) {
+    $enc = [Text.Encoding]::GetEncoding(28591)
+    $want = $enc.GetBytes($needle)
+    $stream = [IO.File]::OpenRead($path)
+    try {
+        $buf = New-Object byte[] (16MB + $want.Length)
+        $carry = 0
+        while (($n = $stream.Read($buf, $carry, 16MB)) -gt 0) {
+            $total = $carry + $n
+            $text = $enc.GetString($buf, 0, $total)
+            if ($text.IndexOf($needle, [StringComparison]::Ordinal) -ge 0) { return $true }
+            # The tail goes to the front: a needle split between two reads.
+            $keep = [Math]::Min($want.Length - 1, $total)
+            [Array]::Copy($buf, $total - $keep, $buf, 0, $keep)
+            $carry = $keep
+        }
+    } finally { $stream.Dispose() }
+    return $false
+}
+function RefsCopyChecks([string]$tag, $run, $kept) {
+    Check ($run.status -eq 'success') "$($tag): the copy succeeded ($($run.error))"
+    Check ([string]::IsNullOrEmpty($run.file_scan_skipped)) "$($tag): exclusions were applied, not skipped ($($run.file_scan_skipped))"
+    Check ($run.excluded_files -eq 12) "$($tag): twelve files excluded ($($run.excluded_files))"
+    $null = Rpc "$tag-mount" @{ op = 'mount'; image = $run.image_path; secret = 'none' }
+    try {
+        $root = $null
+        for ($i = 0; $i -lt 60 -and -not $root; $i++) {
+            $root = Get-Volume | Where-Object { $_.DriveLetter -and $_.DriveLetter -notin @('C', 'P', 'S', 'R') } |
+                ForEach-Object { "$($_.DriveLetter):\" } | Where-Object { Test-Path (Join-Path $_ 'refs-marker.txt') } | Select-Object -First 1
+            if (-not $root) { Start-Sleep -Seconds 1 }
+        }
+        Check ([bool]$root) "$($tag): the copy mounts ($root, $((Get-Volume -FilePath $root -ErrorAction SilentlyContinue).FileSystem))"
+        $bad = @($kept.PSObject.Properties | Where-Object { (Get-FileHash -LiteralPath (Join-Path $root $_.Name)).Hash -ne $_.Value } | ForEach-Object { $_.Name })
+        Check ($bad.Count -eq 0) "$($tag): every kept file is whole ($($bad -join ', '))"
+        $left = @(Get-ChildItem -LiteralPath $root -Recurse -Force -File -Filter '*.tmp' -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+        Check ($left.Count -eq 0) "$($tag): no excluded file in the copy's catalog ($($left -join ', '))"
+    } finally {
+        try { $null = Rpc "$tag-unmount" @{ op = 'unmount'; image = $run.image_path } } catch { Say "KILLX-NOTE unmount: $($_.Exception.Message)" }
+    }
+    Check (-not (ImageHolds $run.image_path $refsSecret)) "$($tag): the excluded content is nowhere in the image's bytes"
+}
+function RefsBitLocker {
+    Ask 'purge' 'purge'
+    Ask 'refs-prepare' 'refs-prepare'
+    $prep = Get-Content "$work\refs-prepare.json" -Raw | ConvertFrom-Json
+    Report 'refs-prepare' $prep
+    Check ($prep.filesystem -eq 'ReFS' -and $prep.lock -eq 'Locked') "a locked BitLocker volume with ReFS inside ($($prep.filesystem), $($prep.method), $($prep.lock))"
+    [IO.File]::WriteAllText("$work\refs-password.txt", 'KillX-Refs-2026!')
+    $base = @{ schedule = @{ kind = 'none' }; image_format = 'vhdx'; requires_password = $true
+        source = 'R:'; sources = @('R:'); dest_folder = $store
+        scheme = @{ method = 'full'; keep_chains = 5 }
+        exclusions = @{ enabled = $true; patterns = @('*.tmp'); patterns_linux = @() }
+        advanced = @{ validate_after = $false; retry_attempts = 0; after_backup = 'none' } }
+    $null = Rpc 'refs-password' @{ op = 'provide-source-password'; volume = 'R:'; source_password_file = "$work\refs-password.txt"; remember = $true }
+    $locked = Rpc 'create-locked' @{ op = 'create'; encrypted = $false; job = ($base + @{ name = "$jobName-locked" }) }
+    $run1 = Rpc 'run-locked' @{ op = 'run'; id = $locked.id; timeout_secs = 1800 }
+    RefsCopyChecks 'locked' $run1 $prep.kept
+    Ask 'refs-unlock' 'refs-unlock'
+    $open = Rpc 'create-open' @{ op = 'create'; encrypted = $false; job = ($base + @{ name = "$jobName-open" }) }
+    $run2 = Rpc 'run-open' @{ op = 'run'; id = $open.id; timeout_secs = 1800 }
+    RefsCopyChecks 'unlocked' $run2 $prep.kept
+    Ask 'refs-detach' 'refs-detach'
+
+    [IO.File]::WriteAllText("$work\kills.done", 'done')
+    [IO.File]::WriteAllText("$work\passed.txt", 'pass')
+    Report 'result' @{ pass = $true; locked = $run1; unlocked = $run2 }
+    Say "KILLX-PASS format=$format"
+    shutdown.exe /s /t 5 | Out-Null
+}
+
 # Mode 'aliases' (CHECKS 9): one source named by its letter, its volume GUID
 # path and a mount point continues one chain; a destination on that volume is
 # refused whichever name either side uses, one on another volume is not.
@@ -880,6 +955,60 @@ if ($media) {
                 Step "sxs done ($name)"
                 continue
             }
+            if ($request.action -in @('refs-prepare', 'refs-unlock', 'refs-detach')) {
+                # Mode 'refsbl': R: is ReFS in a VHDX on C:, under BitLocker.
+                $name = $request.name
+                $vhd = 'C:\Lab\refs-src.vhdx'
+                $dp = "$work\refs-diskpart.txt"
+                $out = [ordered]@{ action = $request.action }
+                $secure = ConvertTo-SecureString 'KillX-Refs-2026!' -AsPlainText -Force
+                if ($request.action -eq 'refs-prepare') {
+                    if (Test-Path $vhd) {
+                        "select vdisk file=$vhd`r`ndetach vdisk" | Set-Content $dp -Encoding ASCII
+                        & diskpart.exe /s $dp | Out-Null
+                        Remove-Item $vhd -Force
+                    }
+                    "create vdisk file=$vhd maximum=1536 type=expandable`r`nselect vdisk file=$vhd`r`nattach vdisk`r`ncreate partition primary`r`nformat fs=refs quick label=REFSSRC`r`nassign letter=R" | Set-Content $dp -Encoding ASCII
+                    & diskpart.exe /s $dp | Out-Null
+                    [IO.File]::WriteAllText('R:\refs-marker.txt', 'Own Backup ReFS-in-BitLocker acceptance source')
+                    New-Item -ItemType Directory -Force 'R:\keep', 'R:\cache', 'R:\docs' | Out-Null
+                    $rng = New-Object Random 20261018
+                    $kept = [ordered]@{}
+                    for ($i = 1; $i -le 20; $i++) {
+                        $bytes = New-Object byte[] ($rng.Next(64KB, 2MB)); $rng.NextBytes($bytes)
+                        $rel = 'keep\k{0:D2}.bin' -f $i
+                        [IO.File]::WriteAllBytes("R:\$rel", $bytes)
+                        $kept[$rel] = (Get-FileHash -LiteralPath "R:\$rel").Hash
+                    }
+                    [IO.File]::WriteAllText('R:\docs\notes.txt', ('kept text ' * 5000))
+                    $kept['docs\notes.txt'] = (Get-FileHash -LiteralPath 'R:\docs\notes.txt').Hash
+                    $secret = 'KILLX-REFS-SECRET-'
+                    for ($i = 1; $i -le 12; $i++) {
+                        $rel = if ($i -le 8) { 'cache\c{0:D2}.tmp' -f $i } else { 'x{0:D2}.tmp' -f $i }
+                        $text = (($secret + $i + '-') * 16000)
+                        [IO.File]::WriteAllText("R:\$rel", $text)
+                    }
+                    Enable-BitLocker -MountPoint 'R:' -PasswordProtector -Password $secure -EncryptionMethod XtsAes128 -UsedSpaceOnly -SkipHardwareTest -ErrorAction Stop | Out-Null
+                    for ($t = 0; $t -lt 300 -and (Get-BitLockerVolume -MountPoint 'R:').VolumeStatus -ne 'FullyEncrypted'; $t++) { Start-Sleep -Seconds 2 }
+                    $out.filesystem = (Get-Volume -DriveLetter R).FileSystem
+                    $bl = Get-BitLockerVolume -MountPoint 'R:'
+                    $out.method = "$($bl.EncryptionMethod)"; $out.status = "$($bl.VolumeStatus)"
+                    Lock-BitLocker -MountPoint 'R:' -ForceDismount -ErrorAction Stop | Out-Null
+                    $out.lock = "$((Get-BitLockerVolume -MountPoint 'R:').LockStatus)"
+                    $out.kept = $kept
+                } elseif ($request.action -eq 'refs-unlock') {
+                    Unlock-BitLocker -MountPoint 'R:' -Password $secure -ErrorAction Stop | Out-Null
+                    $out.lock = "$((Get-BitLockerVolume -MountPoint 'R:').LockStatus)"
+                } else {
+                    "select vdisk file=$vhd`r`ndetach vdisk" | Set-Content $dp -Encoding ASCII
+                    & diskpart.exe /s $dp | Out-Null
+                    Remove-Item $vhd -Force -ErrorAction SilentlyContinue
+                }
+                Remove-Item "$work\kill.request" -Force
+                JsonFile "$work\$name.json" $out
+                Step "$($request.action) done ($name)"
+                continue
+            }
             if ($request.action -in @('mountpoint', 'unmountpoint')) {
                 # P: also reached through an empty folder on C: (mode 'aliases').
                 $name = $request.name
@@ -1027,6 +1156,7 @@ if ($media) {
         if ($format -like 'media*') { MediaBuild; return }
         if ($format -in @('checks9', 'nospace')) { Checks9; return }
         if ($format -eq 'aliases') { Aliases; return }
+        if ($format -eq 'refsbl') { RefsBitLocker; return }
         $state = if (Test-Path "$work\job.json") { Get-Content "$work\job.json" -Raw | ConvertFrom-Json } else { $null }
         if (-not $state) {
             # Synthetic secret of a throwaway VM.

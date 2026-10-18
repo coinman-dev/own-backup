@@ -32,6 +32,10 @@
 - A mount point (`C:\Mount\Data`) works as a source: it is read as the
   volume mounted there, its images are named by that volume, and a
   destination elsewhere on C: is no longer refused as "the same volume".
+- A ReFS volume inside BitLocker is copied with its used-block map and its
+  exclusions applied, locked or unlocked. It used to fail: under BitLocker
+  ReFS ends before the device does, the cluster size could not be derived,
+  and the sector-by-sector fallback hit the unreadable tail.
 
 ## 0.1.5-beta — 2026-10-17
 
