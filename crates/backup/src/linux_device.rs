@@ -36,8 +36,22 @@ impl LinuxRawDevice {
     }
 
     /// Open `path` for reading and writing (restore target / image writer).
+    ///
+    /// A block device is opened with `O_EXCL`: the kernel then refuses it while
+    /// a filesystem on it is mounted or a device-mapper/md device holds it
+    /// (`EBUSY`), and refuses to mount it while we write. Without the flag a
+    /// write lands under a mounted filesystem's feet.
     pub fn open_write(path: &str) -> Result<Self> {
-        Self::open(OpenOptions::new().read(true).write(true), path)
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut opts = OpenOptions::new();
+        opts.read(true).write(true);
+        let is_block = std::fs::metadata(path)
+            .map(|m| m.file_type().is_block_device())
+            .unwrap_or(false);
+        if is_block {
+            opts.custom_flags(libc::O_EXCL);
+        }
+        Self::open(&opts, path)
     }
 
     fn open(opts: &OpenOptions, path: &str) -> Result<Self> {

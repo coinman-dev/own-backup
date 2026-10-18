@@ -7,6 +7,7 @@ pub mod file_name;
 pub mod gpt;
 pub mod image;
 pub mod lang;
+pub mod linux_block;
 pub mod log_files;
 pub mod log_level;
 pub mod log_mirror;

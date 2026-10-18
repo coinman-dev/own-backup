@@ -94,6 +94,10 @@ pub async fn run(args: RestoreArgs) -> own_backup_common::Result<()> {
     use own_backup_backup::engine_linux::{restore_volume, LinuxRestoreRequest};
     use std::io::Write;
 
+    // Before anything is asked: the running system's devices are refused here,
+    // and the restore then holds the target with `O_EXCL` while it writes.
+    own_backup_restore::guard_target_volume(&args.target)?;
+
     println!("Restoring {} -> {}", args.input, args.target);
     println!("!! ALL DATA ON {} WILL BE OVERWRITTEN !!", args.target);
     if !args.yes {

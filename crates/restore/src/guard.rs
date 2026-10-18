@@ -271,9 +271,145 @@ pub fn guard_target_volume(target: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "windows"))]
-pub fn guard_target_volume(_target: &str) -> Result<()> {
+/// May this device be written over (Linux)?
+///
+/// Only when nothing at all sits on it: no filesystem mounted from it or from
+/// anything stacked on it (read-only included — the kernel caches what it
+/// read), no swap, no opened LUKS/LVM/md on top. And never the EFI System
+/// Partition the machine booted through: systemd may mount that one only on
+/// access, so it can look idle while it is what the next boot needs. The
+/// restore itself then opens the device with `O_EXCL`, which keeps it that way
+/// for as long as it writes.
+#[cfg(target_os = "linux")]
+pub fn guard_target_volume(target: &str) -> Result<()> {
+    use own_backup_common::linux_block as lb;
+    use std::path::Path;
+
+    if is_boot_media() {
+        return Ok(()); // nothing here is running
+    }
+    let path = Path::new(target);
+    let usage = lb::device_usage(path).map_err(|e| {
+        OwnBackupError::RestoreIncompatible(
+            tr!("guard.linux_cannot_tell", target = target, reason = e).into_owned(),
+        )
+    })?;
+    let Some(usage) = usage else {
+        // Not a block device — an image file: nothing runs from it.
+        return Ok(());
+    };
+    if !usage.idle() {
+        return Err(OwnBackupError::RestoreIncompatible(
+            tr!(
+                "guard.linux_target_in_use",
+                target = target,
+                users = linux_usage_text(&usage)
+            )
+            .into_owned(),
+        ));
+    }
+    let sys = Path::new(lb::SYS_CLASS_BLOCK);
+    let Some(name) = lb::kernel_name(path) else {
+        return Err(OwnBackupError::RestoreIncompatible(
+            tr!("guard.target_unrecognised", target = target).into_owned(),
+        ));
+    };
+    let stack = lb::stack_above(sys, &name);
+    match linux_boot_esp() {
+        LinuxBootEsp::NotUefi => {}
+        LinuxBootEsp::PartUuid(boot) => {
+            if stack
+                .iter()
+                .any(|n| lb::partuuid(sys, n).as_deref() == Some(boot.as_str()))
+            {
+                return Err(OwnBackupError::RestoreIncompatible(
+                    tr!("guard.linux_target_is_boot_esp").into_owned(),
+                ));
+            }
+        }
+        LinuxBootEsp::Unknown => {
+            // Which ESP started the machine is not known: any ESP — or any
+            // partition whose type udev does not know — might be it.
+            let udev = Path::new(lb::UDEV_DATA);
+            let maybe_esp = stack.iter().filter(|n| lb::is_partition(sys, n)).any(|n| {
+                lb::dev_numbers(sys, n)
+                    .and_then(|(ma, mi)| lb::partition_type(udev, ma, mi))
+                    .is_none_or(|t| t == lb::ESP_TYPE_GUID)
+            });
+            if maybe_esp {
+                return Err(OwnBackupError::RestoreIncompatible(
+                    tr!("guard.linux_boot_esp_unknown").into_owned(),
+                ));
+            }
+        }
+    }
     Ok(())
+}
+
+/// Mount points, swap and stacked devices, for a refusal.
+#[cfg(target_os = "linux")]
+fn linux_usage_text(usage: &own_backup_common::linux_block::Usage) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mounts: Vec<&str> = usage
+        .mounted_rw
+        .iter()
+        .chain(&usage.mounted_ro)
+        .map(String::as_str)
+        .collect();
+    if !mounts.is_empty() {
+        parts.push(tr!("guard.linux_usage_mounted", mounts = mounts.join(", ")).into_owned());
+    }
+    if !usage.swap.is_empty() {
+        parts.push(tr!("guard.linux_usage_swap").into_owned());
+    }
+    if !usage.holders.is_empty() {
+        parts.push(
+            tr!(
+                "guard.linux_usage_holders",
+                holders = usage.holders.join(", ")
+            )
+            .into_owned(),
+        );
+    }
+    parts.join("; ")
+}
+
+#[cfg(target_os = "linux")]
+enum LinuxBootEsp {
+    /// A BIOS machine: there is no ESP to protect.
+    NotUefi,
+    /// The PARTUUID (lowercase) out of `BootCurrent`'s device path.
+    PartUuid(String),
+    /// UEFI, but the firmware variables could not be read or understood.
+    Unknown,
+}
+
+/// `BootCurrent` → `Boot####` → the GPT partition GUID of its Hard Drive node,
+/// read from efivarfs (world-readable: four bytes of attributes, then data).
+#[cfg(target_os = "linux")]
+fn linux_boot_esp() -> LinuxBootEsp {
+    const EFI_GLOBAL: &str = "8be4df61-93ca-11d2-aa0d-00e098032b8c";
+    let vars = std::path::Path::new("/sys/firmware/efi/efivars");
+    if !std::path::Path::new("/sys/firmware/efi").exists() {
+        return LinuxBootEsp::NotUefi;
+    }
+    let read = |name: &str| -> Option<Vec<u8>> {
+        let raw = std::fs::read(vars.join(format!("{name}-{EFI_GLOBAL}"))).ok()?;
+        (raw.len() > 4).then(|| raw[4..].to_vec())
+    };
+    let Some(current) = read("BootCurrent").filter(|b| b.len() >= 2) else {
+        return LinuxBootEsp::Unknown;
+    };
+    let number = u16::from_le_bytes([current[0], current[1]]);
+    let Some(entry) = read(&own_backup_backup::efivars::entry_name(number)) else {
+        return LinuxBootEsp::Unknown;
+    };
+    own_backup_backup::efivars::LoadOption::parse(&entry)
+        .ok()
+        .and_then(|o| o.hard_drive())
+        .and_then(|hd| hd.partition_guid())
+        .map(|g| LinuxBootEsp::PartUuid(g.to_ascii_lowercase()))
+        .unwrap_or(LinuxBootEsp::Unknown)
 }
 
 /// Partition indices on `disk` that the running Windows is standing on, and
@@ -463,9 +599,15 @@ fn system_volume_offset(disk: u32) -> Option<u64> {
         .map(|e| e.offset)
 }
 
+/// Not knowing is not permission: Linux disks have no stable number yet that
+/// the plan's disk could be matched against, so nothing is certain here —
+/// which makes every plan check refuse rather than wave a disk through.
 #[cfg(not(target_os = "windows"))]
 pub fn protection(_disk: u32) -> Protection {
-    Protection::nothing_is_running()
+    if is_boot_media() {
+        return Protection::nothing_is_running();
+    }
+    Protection::unsure(tr!("guard.linux_disk_numbers").into_owned())
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -477,13 +619,27 @@ pub fn protected_partitions(_disk: u32) -> Vec<u32> {
 pub fn system_disk_number() -> Option<u32> {
     None
 }
-#[cfg(not(target_os = "windows"))]
+
+/// Running from our own Linux boot medium: its kernel command line carries
+/// `own-backup.media` (`.ai/PLAN.md` §6, stage 6). Anywhere else, the system
+/// we run on is a live one.
+#[cfg(target_os = "linux")]
+pub fn is_boot_media() -> bool {
+    std::fs::read_to_string("/proc/cmdline")
+        .is_ok_and(|c| c.split_whitespace().any(|w| w == "own-backup.media"))
+}
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub fn is_boot_media() -> bool {
     false
 }
+
+/// Whole-disk restore by number: refused outside the boot medium until Linux
+/// disks are addressed by a stable identity (see [`protection`]).
 #[cfg(not(target_os = "windows"))]
-pub fn guard_target_disk(_target_disk: u32) -> Result<()> {
-    Ok(())
+pub fn guard_target_disk(target_disk: u32) -> Result<()> {
+    let media = is_boot_media();
+    let protected = protection(target_disk);
+    check_whole_disk_protection(target_disk, system_disk_number(), media, &protected)
 }
 
 #[cfg(test)]

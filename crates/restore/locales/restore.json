@@ -43,5 +43,13 @@
   "guard.system_partition_not_found": {
     "ru": "Windows работает с диска %{disk}, но найти её раздел не удалось",
     "en": "Windows is running from disk %{disk}, but its partition could not be found"
-  }
+  },
+  "guard.linux_cannot_tell": {"ru": "Не удалось проверить, что использует %{target} (%{reason}), поэтому запись на него не разрешена.", "en": "Could not check what is using %{target} (%{reason}), so writing to it is not allowed."},
+  "guard.linux_target_in_use": {"ru": "%{target} сейчас используется (%{users}). Восстанавливать на него можно только когда он свободен: отмонтируйте его и закройте открытые на нём тома, либо восстановите с загрузочного носителя.", "en": "%{target} is in use (%{users}). It can only be restored onto when nothing uses it: unmount it and close the volumes opened on it, or restore from the bootable media."},
+  "guard.linux_usage_mounted": {"ru": "смонтирован: %{mounts}", "en": "mounted at %{mounts}"},
+  "guard.linux_usage_swap": {"ru": "используется для подкачки", "en": "used as swap"},
+  "guard.linux_usage_holders": {"ru": "на нём открыт %{holders}", "en": "opened as %{holders}"},
+  "guard.linux_target_is_boot_esp": {"ru": "Это системный раздел EFI, с которого загрузился этот компьютер. Перезаписать его на работающей системе нельзя — восстановите с загрузочного носителя.", "en": "This is the EFI System Partition this computer booted from. It cannot be overwritten while the system runs — restore from the bootable media."},
+  "guard.linux_boot_esp_unknown": {"ru": "Не удалось определить, с какого системного раздела EFI загрузился компьютер, а цель может им быть. Запись не разрешена — восстановите с загрузочного носителя.", "en": "Could not determine which EFI System Partition this computer booted from, and the target may be it. Writing is not allowed — restore from the bootable media."},
+  "guard.linux_disk_numbers": {"ru": "в Linux диски пока не опознаются по номеру, и проверить диск назначения нельзя", "en": "on Linux, disks cannot be matched by number yet, so the target disk cannot be checked"}
 }
