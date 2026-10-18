@@ -114,6 +114,17 @@ fn dm_of(volume: &str) -> Option<DmIdentity> {
     Some(DmIdentity { kernel, uuid })
 }
 
+/// Was `snapshot` captured with its filesystem frozen? An LVM snapshot and a
+/// device-mapper snapshot both suspend the origin with the filesystem frozen
+/// for the instant they are taken, so what they show is quiesced: metadata
+/// written back, a journal at most "covered". A device read directly is not.
+pub fn taken_frozen(snapshot: &Snapshot) -> bool {
+    matches!(
+        snapshot.metadata.get("mode").map(String::as_str),
+        Some("lvm" | "dm")
+    )
+}
+
 /// Snapshot provider for Linux volumes (see the module comment).
 #[derive(Default)]
 pub struct LinuxSnapshotProvider {
