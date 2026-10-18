@@ -44,6 +44,10 @@
   (saved before the modes existed, or made outside the window) used to grow
   past what the VHDX reader follows (64), after which every new copy was
   unreadable and retention stopped.
+- XFS: every excluded file is now truly removed (1403 of 1403 on the test
+  corpus, was 1369). A directory data block that would be left empty is taken
+  out of the directory and returned to free space, as the kernel does, and
+  is zeroed so the deleted names do not stay behind.
 
 ## 0.1.5-beta — 2026-10-17
 

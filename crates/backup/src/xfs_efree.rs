@@ -136,6 +136,77 @@ pub(crate) struct Free {
     pub(crate) len: u64,
 }
 
+/// Кусок отображения одного владельца, который уходит из RMAPBT, — блок,
+/// изъятый из каталога (D2), а не инод целиком. Запись владельца, из которой
+/// он вырезан, становится нулём, одной или двумя записями.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RmapTrim {
+    pub(crate) owner: u64,
+    pub(crate) agbno: u64,
+    pub(crate) len: u64,
+}
+
+/// Что станет с записью RMAPBT: `None` — не трогаем, иначе её замена.
+fn rmap_edit_rec(
+    r: &[u8; 24],
+    owners: &BTreeSet<u64>,
+    trims: &[RmapTrim],
+) -> Option<Vec<[u8; 24]>> {
+    let owner = be64(r, 8);
+    if owner & RMAP_NON_INODE != 0 {
+        return None;
+    }
+    if owners.contains(&owner) {
+        return Some(Vec::new());
+    }
+    let offset = be64(r, 16);
+    if offset & RMAP_OFF_UNADJUSTABLE != 0 {
+        return None;
+    }
+    let mine: Vec<&RmapTrim> = trims.iter().filter(|t| t.owner == owner).collect();
+    if mine.is_empty() {
+        return None;
+    }
+    // Куски записи: (начало, длина, логическое смещение).
+    let flags = offset & !RMAP_OFF_MASK;
+    let mut pieces = vec![(be32(r, 0), be32(r, 4), offset & RMAP_OFF_MASK)];
+    let mut changed = false;
+    for t in mine {
+        let mut next = Vec::new();
+        for (start, len, off) in pieces {
+            let end = start + len;
+            let (cut_from, cut_to) = (t.agbno.max(start), (t.agbno + t.len).min(end));
+            if cut_from >= cut_to {
+                next.push((start, len, off));
+                continue;
+            }
+            changed = true;
+            if cut_from > start {
+                next.push((start, cut_from - start, off));
+            }
+            if cut_to < end {
+                next.push((cut_to, end - cut_to, off + (cut_to - start)));
+            }
+        }
+        pieces = next;
+    }
+    if !changed {
+        return None;
+    }
+    Some(
+        pieces
+            .into_iter()
+            .map(|(start, len, off)| {
+                let mut n = *r;
+                put_be32(&mut n, 0, start as u32);
+                put_be32(&mut n, 4, len as u32);
+                n[16..24].copy_from_slice(&(off | flags).to_be_bytes());
+                n
+            })
+            .collect(),
+    )
+}
+
 /// Почему экстент остался занятым.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ExtRefusal {
@@ -383,6 +454,8 @@ struct RmapShrink {
     new_root: Option<(u64, u64)>,
     /// Сколько записей убрано.
     removed: usize,
+    /// Изменилась ли хоть одна запись (обрезка не уменьшает их числа).
+    changed: bool,
 }
 
 /// Узел первого уровня и путь к нему от корня.
@@ -428,9 +501,10 @@ fn rmap_level1_nodes(
     Ok(out)
 }
 
-/// Убрать из RMAPBT записи владельцев `owners`, сохранив минимум в листьях.
-/// `Ok(None)` — дерево такое удаление не выдерживает без перестройки выше
-/// первого уровня; ничего не тронуто.
+/// Убрать из RMAPBT записи владельцев `owners` и вырезать куски `trims`,
+/// сохранив минимум в листьях. `Ok(None)` — дерево такую правку не
+/// выдерживает без перестройки выше первого уровня (или записей стало больше,
+/// чем вмещают листья группы); ничего не тронуто.
 fn rmap_remove_owners(
     edits: &mut AgEdits,
     vol: &mut dyn RawVolume,
@@ -438,27 +512,40 @@ fn rmap_remove_owners(
     root: u64,
     level: u64,
     owners: &BTreeSet<u64>,
+    trims: &[RmapTrim],
 ) -> Result<Option<RmapShrink>> {
     let mut out = RmapShrink::default();
-    let doomed = |r: &[u8]| {
-        let owner = be64(r, 8);
-        owner & RMAP_NON_INODE == 0 && owners.contains(&owner)
+    // Записи листа после правки и признак, что что-то поменялось.
+    let edit_all = |recs: Vec<[u8; 24]>| -> (Vec<[u8; 24]>, bool) {
+        let mut changed = false;
+        let mut kept = Vec::with_capacity(recs.len() + 1);
+        for r in recs {
+            match rmap_edit_rec(&r, owners, trims) {
+                None => kept.push(r),
+                Some(new) => {
+                    changed = true;
+                    kept.extend(new);
+                }
+            }
+        }
+        (kept, changed)
     };
 
     // Одноуровневое дерево: корень-лист, минимума нет.
     if level <= 1 {
         let blk = edits.get(vol, sb, root, Kind::Rmap)?;
         let n = be16(blk, 0x06) as usize;
-        let keep: Vec<[u8; 24]> = (0..n)
+        let all: Vec<[u8; 24]> = (0..n)
             .map(|i| {
                 let mut r = [0u8; 24];
                 r.copy_from_slice(&blk[BTREE_HDR + i * 24..BTREE_HDR + i * 24 + 24]);
                 r
             })
-            .filter(|r| !doomed(r))
             .collect();
-        out.removed = n - keep.len();
-        if keep.is_empty() {
+        let (keep, changed) = edit_all(all);
+        out.removed = n.saturating_sub(keep.len());
+        out.changed = changed;
+        if keep.is_empty() || keep.len() > leaf_maxrecs(sb, Kind::Rmap) {
             return Ok(None);
         }
         write_leaf_recs(blk, &keep);
@@ -477,33 +564,36 @@ fn rmap_remove_owners(
             let n = be16(p, 0x06) as usize;
             (0..n).map(|i| be32(p, ptr_off + i * 4)).collect()
         };
-        let mut recs: Vec<[u8; 24]> = Vec::new();
-        let mut before = 0usize;
+        let mut all: Vec<[u8; 24]> = Vec::new();
         for &kid in &kids {
             let blk = edits.get(vol, sb, kid, Kind::Rmap)?;
             if be16(blk, 0x04) != 0 {
                 return Err(bad(tr!("xfs_efree.rmap_node_impossible")));
             }
             let n = be16(blk, 0x06) as usize;
-            before += n;
             for i in 0..n {
                 let mut r = [0u8; 24];
                 r.copy_from_slice(&blk[BTREE_HDR + i * 24..BTREE_HDR + i * 24 + 24]);
-                if !doomed(&r) {
-                    recs.push(r);
-                }
+                all.push(r);
             }
         }
-        if recs.len() == before {
+        let before = all.len();
+        let (recs, changed) = edit_all(all);
+        if !changed {
             continue;
         }
-        out.removed += before - recs.len();
+        out.changed = true;
+        out.removed += before.saturating_sub(recs.len());
         let k = kids.len();
         let total = recs.len();
         let parent_is_root = group.path.is_empty();
         // Сколько листьев оставить: каждый не ниже минимума, не больше, чем было.
         let m = (total / leaf_min).clamp(1, k);
         if total == 0 || (total < leaf_min && !(parent_is_root && level == 2)) {
+            return Ok(None);
+        }
+        // Разрезанная запись добавляет одну: группе может не хватить листьев.
+        if total.div_ceil(m) > leaf_max {
             return Ok(None);
         }
         if !parent_is_root && m < node_min {
@@ -846,6 +936,7 @@ pub(crate) fn plan_extent_freeing(
     sb: &Sb,
     returned: &BTreeMap<u64, Vec<Free>>,
     owners: &BTreeSet<u64>,
+    trims: &BTreeMap<u64, Vec<RmapTrim>>,
 ) -> Result<ExtentFreeing> {
     let mut out = ExtentFreeing::default();
     let mut fdblocks_delta: u64 = 0;
@@ -968,7 +1059,8 @@ pub(crate) fn plan_extent_freeing(
             blocks: BTreeMap::new(),
         };
         let mut shrink: Option<RmapShrink> = None;
-        if agf.rmap_root != 0 && !owners.is_empty() {
+        let trims_here: &[RmapTrim] = trims.get(&ag).map(Vec::as_slice).unwrap_or(&[]);
+        if agf.rmap_root != 0 && (!owners.is_empty() || !trims_here.is_empty()) {
             match rmap_remove_owners(
                 &mut rmap_edits,
                 vol,
@@ -976,6 +1068,7 @@ pub(crate) fn plan_extent_freeing(
                 agf.rmap_root,
                 agf.rmap_level,
                 owners,
+                trims_here,
             )? {
                 Some(done) => shrink = Some(done),
                 None => {
@@ -985,7 +1078,7 @@ pub(crate) fn plan_extent_freeing(
                 }
             }
         }
-        let rmap_touched = shrink.as_ref().is_some_and(|s| s.removed > 0);
+        let rmap_touched = shrink.as_ref().is_some_and(|s| s.changed);
 
         // Счётчики группы: пересчитываем по НОВОМУ набору, а не прибавляем
         // дельту — так расхождение не может накопиться.
@@ -1042,6 +1135,107 @@ pub(crate) fn plan_extent_freeing(
     debug_assert_eq!(fdblocks_delta, out.blocks_freed);
     let _ = AGF_FLCOUNT;
     Ok(out)
+}
+
+#[cfg(test)]
+mod rmap_trim_tests {
+    use super::*;
+
+    fn rec(start: u32, len: u32, owner: u64, off: u64) -> [u8; 24] {
+        let mut r = [0u8; 24];
+        put_be32(&mut r, 0, start);
+        put_be32(&mut r, 4, len);
+        r[8..16].copy_from_slice(&owner.to_be_bytes());
+        r[16..24].copy_from_slice(&off.to_be_bytes());
+        r
+    }
+    fn parts(v: &[[u8; 24]]) -> Vec<(u64, u64, u64)> {
+        v.iter()
+            .map(|r| (be32(r, 0), be32(r, 4), be64(r, 16)))
+            .collect()
+    }
+
+    /// Блок 103 из отображения каталога 100..110 (логические 0..10).
+    #[test]
+    fn a_block_cut_out_of_a_mapping_leaves_the_rest_with_its_offsets() {
+        let none = BTreeSet::new();
+        let r = rec(100, 10, 77, 0);
+        let mid = [RmapTrim {
+            owner: 77,
+            agbno: 103,
+            len: 1,
+        }];
+        assert_eq!(
+            parts(&rmap_edit_rec(&r, &none, &mid).unwrap()),
+            vec![(100, 3, 0), (104, 6, 4)]
+        );
+        let front = [RmapTrim {
+            owner: 77,
+            agbno: 100,
+            len: 1,
+        }];
+        assert_eq!(
+            parts(&rmap_edit_rec(&r, &none, &front).unwrap()),
+            vec![(101, 9, 1)]
+        );
+        let back = [RmapTrim {
+            owner: 77,
+            agbno: 109,
+            len: 1,
+        }];
+        assert_eq!(
+            parts(&rmap_edit_rec(&r, &none, &back).unwrap()),
+            vec![(100, 9, 0)]
+        );
+        let two = [
+            RmapTrim {
+                owner: 77,
+                agbno: 102,
+                len: 1,
+            },
+            RmapTrim {
+                owner: 77,
+                agbno: 105,
+                len: 1,
+            },
+        ];
+        assert_eq!(
+            parts(&rmap_edit_rec(&r, &none, &two).unwrap()),
+            vec![(100, 2, 0), (103, 2, 3), (106, 4, 6)]
+        );
+        let single = rec(50, 1, 77, 12);
+        let all = [RmapTrim {
+            owner: 77,
+            agbno: 50,
+            len: 1,
+        }];
+        assert!(rmap_edit_rec(&single, &none, &all).unwrap().is_empty());
+    }
+
+    #[test]
+    fn other_owners_flags_and_whole_inodes() {
+        let none = BTreeSet::new();
+        let trim = [RmapTrim {
+            owner: 77,
+            agbno: 103,
+            len: 1,
+        }];
+        // Другой владелец, тот же диапазон — не наш.
+        assert!(rmap_edit_rec(&rec(100, 10, 78, 0), &none, &trim).is_none());
+        // Блок вне записи.
+        assert!(rmap_edit_rec(&rec(200, 10, 77, 0), &none, &trim).is_none());
+        // Форк атрибутов и блоки bmbt не трогаем.
+        assert!(rmap_edit_rec(&rec(100, 10, 77, 1 << 63), &none, &trim).is_none());
+        // Флаг «unwritten» (бит 61) сохраняется в обоих кусках.
+        let unwritten = 1u64 << 61;
+        let got = rmap_edit_rec(&rec(100, 10, 77, unwritten), &none, &trim).unwrap();
+        assert!(got.iter().all(|r| be64(r, 16) & unwritten != 0));
+        // Инод, освобождаемый целиком, уходит весь.
+        let owners: BTreeSet<u64> = [77].into_iter().collect();
+        assert!(rmap_edit_rec(&rec(100, 10, 77, 0), &owners, &[])
+            .unwrap()
+            .is_empty());
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -1308,7 +1502,7 @@ mod tests {
         );
         patches.extend(freeing.patches);
 
-        let ext = plan_extent_freeing(&mut vol, &sb, &returned, &owners).unwrap();
+        let ext = plan_extent_freeing(&mut vol, &sb, &returned, &owners, &BTreeMap::new()).unwrap();
         assert!(
             ext.refusals.is_empty(),
             "D4 пощадил: {:?}",

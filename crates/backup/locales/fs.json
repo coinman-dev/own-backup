@@ -92,6 +92,14 @@
     "ru": "каталог %{dir_ino}: в листьях нет записи с адресом %{addr}",
     "en": "directory %{dir_ino}: no leaf has an entry with address %{addr}"
   },
+  "xfs_dirent.extent_list_past_fork": {
+    "ru": "список экстентов каталога выходит за форк инода",
+    "en": "the directory's extent list runs past the inode fork"
+  },
+  "xfs_dirent.block_not_mapped": {
+    "ru": "блок каталога %{block} не найден в его карте блоков",
+    "en": "directory block %{block} is not in its block map"
+  },
   "xfs_dirent.data_block_not_indexed": {
     "ru": "каталог %{dir_ino}: блок данных %{logical} не покрыт индексом свободного места",
     "en": "directory %{dir_ino}: data block %{logical} is not covered by the free-space index"

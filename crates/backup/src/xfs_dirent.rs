@@ -117,12 +117,11 @@ pub(crate) enum DirRefusal {
     ShortformToIno4 { dir_ino: u64 },
     /// Имени в каталоге нет (уже удалено или каталог не тот).
     NameNotFound { dir_ino: u64, name: String },
-    /// Блок данных остался бы совсем пустым.
-    ///
-    /// Такой блок XFS не оставляет — она изымает его из каталога и возвращает
-    /// в свободное место. Мы этого не делаем, а `xfs_repair` пустой блок
-    /// замечает («empty data block N: would junk block») и заодно объявляет
-    /// негодным хвост листа. Поэтому одно имя в блоке остаётся жить.
+    /// Блок данных остался бы совсем пустым, а изъять его из каталога здесь
+    /// нельзя: карта блоков каталога — B-дерево, или опустел бы и блок индекса
+    /// свободного места. Пустой блок XFS не оставляет (`xfs_repair`: «empty
+    /// data block N: would junk block»), поэтому одно имя в блоке остаётся.
+    /// В остальных случаях блок изымается — как `xfs_dir2_shrink_inode`.
     WouldEmptyBlock { dir_ino: u64, name: String },
     /// Всё остальное — с текстом.
     Other { dir_ino: u64, why: String },
@@ -154,6 +153,17 @@ impl std::fmt::Display for DirRefusal {
     }
 }
 
+/// Блок данных, изъятый из каталога: он опустел, и его место — в свободном
+/// пространстве (это делает D4 вместе с блоками файлов).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FreedBlock {
+    pub(crate) dir_ino: u64,
+    /// Номер блока ФС (agno<<agblklog | agbno).
+    pub(crate) fsb: u64,
+    /// Имена, чьё удаление его опустошило: если D4 откажет, щадить их.
+    pub(crate) names: Vec<String>,
+}
+
 /// Результат планирования: байтовые патчи и перечень отказов.
 #[derive(Debug, Default)]
 pub(crate) struct DirEdit {
@@ -161,6 +171,8 @@ pub(crate) struct DirEdit {
     pub(crate) patches: Vec<(u64, Vec<u8>)>,
     pub(crate) removed: Vec<String>,
     pub(crate) refusals: Vec<DirRefusal>,
+    /// Опустевшие блоки данных, уже изъятые из каталога в `patches`.
+    pub(crate) freed_blocks: Vec<FreedBlock>,
 }
 
 // --- CRC32C -----------------------------------------------------------------
@@ -587,6 +599,8 @@ fn block_removal(
     let mut touched: Vec<usize> = Vec::new();
     let mut leaves_touched = false;
     let mut frees_touched = false;
+    // Опустевшие блоки: (логический, fsb, имена).
+    let mut emptied: Vec<(u64, u64, Vec<String>)> = Vec::new();
 
     for idx in 0..loaded.len() {
         let (logical, _, blk) = &loaded[idx];
@@ -621,9 +635,39 @@ fn block_removal(
         if victims.is_empty() {
             continue;
         }
-        // Пустой блок данных — не наш случай: изымать его из каталога умеет
-        // только ядро. Оставляем одно имя, и оно становится нулевым призраком.
-        if victims.len() == total {
+        // Блок пустеет. Блок 0 так не может (в нём «.» и «..»); прочий
+        // изымается из каталога ниже, после всех блоков, — если карта блоков
+        // каталога это позволяет. Иначе одно имя остаётся нулевым призраком.
+        let empties = victims.len() == total;
+        if empties && logical != 0 && inode[5] == FMT_EXTENTS && magic == DIR3_DATA_MAGIC {
+            for v in &victims {
+                let addr = dataptr(sb, logical, v.at);
+                let mut done = false;
+                for (_, lblk) in leaves.iter_mut() {
+                    let count = be16(lblk, BLKINFO) as usize;
+                    if kill_hash_entry(LEAF_HDR, count, BLKINFO + 2, lblk, addr).is_ok() {
+                        done = true;
+                        leaves_touched = true;
+                        break;
+                    }
+                }
+                if !done {
+                    return Err(bad(tr!(
+                        "xfs_dirent.no_leaf_entry",
+                        dir_ino = dir_ino,
+                        addr = addr
+                    )));
+                }
+                found.insert(v.name.clone());
+            }
+            emptied.push((
+                logical,
+                loaded[idx].1,
+                victims.iter().map(|v| v.name.clone()).collect(),
+            ));
+            continue;
+        }
+        if empties {
             let keep = victims.pop().expect("victims непуст");
             // В `removed` его класть НЕЛЬЗЯ — он остался жить. Но и в
             // «имени нет в каталоге» он не виноват, поэтому учитывается
@@ -712,6 +756,46 @@ fn block_removal(
         touched.push(idx);
     }
 
+    // Опустевшие блоки уходят из каталога: из массива лучших дыр (у leaf —
+    // в хвосте листа, у node — в блоке индекса) и из карты блоков инода.
+    if !emptied.is_empty() {
+        let mut gone: Vec<u64> = emptied.iter().map(|e| e.0).collect();
+        gone.sort_unstable();
+        let index_ok = if frees.is_empty() {
+            let (_, lblk) = leaves
+                .first_mut()
+                .ok_or_else(|| bad(tr!("xfs_dirent.data_blocks_no_leaf", count = loaded.len())))?;
+            drop_bests_leaf(lblk, bs, &gone);
+            leaves_touched = true;
+            true
+        } else {
+            drop_bests_free(&mut frees, &gone)
+        };
+        if index_ok {
+            frees_touched |= !frees.is_empty();
+            let mut dinode = inode.to_vec();
+            if unmap_dir_blocks(&mut dinode, sb, &gone, leaf_first)? {
+                set_crc(&mut dinode, 0x64);
+                edit.patches.push((sb.inode_offset(dir_ino), dinode));
+                for (_, fsb, names_here) in &emptied {
+                    // Имена удалённых файлов не остаются в свободном месте.
+                    edit.patches.push((sb.fsblock_to_phys(*fsb), vec![0u8; bs]));
+                    edit.freed_blocks.push(FreedBlock {
+                        dir_ino,
+                        fsb: *fsb,
+                        names: names_here.clone(),
+                    });
+                }
+            } else {
+                spare_emptied(edit, dir_ino, &emptied);
+                return Ok(());
+            }
+        } else {
+            spare_emptied(edit, dir_ino, &emptied);
+            return Ok(());
+        }
+    }
+
     for n in names {
         if !found.contains(n) && !accounted.contains(n) {
             edit.refusals.push(DirRefusal::NameNotFound {
@@ -742,6 +826,172 @@ fn block_removal(
     }
     edit.removed.extend(found);
     Ok(())
+}
+
+/// Изъять блоки не вышло: каждому опустевшему блоку — отказ по одному
+/// имени, как раньше. Каталог в этом круге не правится вовсе: следующий круг
+/// (`xfs_stage2`) пересчитает его без пощажённых имён.
+fn spare_emptied(edit: &mut DirEdit, dir_ino: u64, emptied: &[(u64, u64, Vec<String>)]) {
+    for (_, _, names) in emptied {
+        if let Some(name) = names.last() {
+            edit.refusals.push(DirRefusal::WouldEmptyBlock {
+                dir_ino,
+                name: name.clone(),
+            });
+        }
+    }
+}
+
+/// Leaf-форма: `bests[db]` опустевших блоков становится «нет места», а хвост
+/// из таких записей отрезается — как `xfs_dir2_leaf_removename`: массив
+/// прижат к концу листа, поэтому оставшиеся записи сдвигаются к нему.
+fn drop_bests_leaf(lblk: &mut [u8], bs: usize, gone: &[u64]) {
+    let count = be32(lblk, bs - 4) as usize;
+    let at = bs - 4 - count * 2;
+    let mut bests: Vec<u16> = (0..count).map(|i| be16(lblk, at + i * 2) as u16).collect();
+    for &db in gone {
+        if (db as usize) < bests.len() {
+            bests[db as usize] = NULL_BEST;
+        }
+    }
+    while bests.len() > 1 && *bests.last().unwrap() == NULL_BEST {
+        bests.pop();
+    }
+    lblk[at..bs - 4].fill(0);
+    let new_at = bs - 4 - bests.len() * 2;
+    for (i, b) in bests.iter().enumerate() {
+        put_be16(lblk, new_at + i * 2, *b);
+    }
+    put_be32(lblk, bs - 4, bests.len() as u32);
+}
+
+/// Node-форма: запись блока в индексе свободного места — «нет места», хвост
+/// `nvalid` подрезается, `nused` уменьшается (`xfs_dir3_data_block_free`).
+/// `false` — опустел бы сам блок индекса; ничего не тронуто.
+fn drop_bests_free(frees: &mut [(u64, Vec<u8>)], gone: &[u64]) -> bool {
+    let mut plan: Vec<(usize, u64)> = Vec::new();
+    for &db in gone {
+        let Some(i) = frees.iter().position(|(_, f)| {
+            let first = be32(f, 48);
+            db >= first && db < first + be32(f, 52)
+        }) else {
+            return false;
+        };
+        plan.push((i, db));
+    }
+    for (i, (_, f)) in frees.iter().enumerate() {
+        let here = plan.iter().filter(|(j, _)| *j == i).count() as u64;
+        if here > 0 && be32(f, 56) <= here {
+            return false;
+        }
+    }
+    for (i, db) in plan {
+        let f = &mut frees[i].1;
+        let first = be32(f, 48);
+        put_be16(f, FREE_HDR + (db - first) as usize * 2, NULL_BEST);
+        let nused = be32(f, 56);
+        put_be32(f, 56, (nused - 1) as u32);
+    }
+    for (_, f) in frees.iter_mut() {
+        let mut nvalid = be32(f, 52) as usize;
+        while nvalid > 1 && be16(f, FREE_HDR + (nvalid - 1) * 2) as u16 == NULL_BEST {
+            put_be16(f, FREE_HDR + (nvalid - 1) * 2, 0);
+            nvalid -= 1;
+        }
+        put_be32(f, 52, nvalid as u32);
+    }
+    true
+}
+
+/// Один экстент форка с флагом «unwritten», как он лежит в иноде.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Rec {
+    flag: bool,
+    off: u64,
+    start: u64,
+    count: u64,
+}
+
+fn decode_rec(b: &[u8], o: usize) -> Rec {
+    let l0 = be64(b, o);
+    let l1 = be64(b, o + 8);
+    Rec {
+        flag: l0 >> 63 != 0,
+        off: (l0 >> 9) & ((1u64 << 54) - 1),
+        start: ((l0 & 0x1FF) << 43) | (l1 >> 21),
+        count: l1 & ((1u64 << 21) - 1),
+    }
+}
+
+fn encode_rec(b: &mut [u8], o: usize, r: &Rec) {
+    let l0 = (u64::from(r.flag) << 63) | (r.off << 9) | (r.start >> 43);
+    let l1 = ((r.start & ((1u64 << 43) - 1)) << 21) | r.count;
+    put_be64(b, o, l0);
+    put_be64(b, o + 8, l1);
+}
+
+/// Вырезать логические блоки `gone` из карты блоков каталога (форма
+/// EXTENTS) и поправить инод: число экстентов, `di_nblocks`, а если ушёл
+/// последний блок данных — `di_size` (как `xfs_dir2_shrink_inode`).
+/// `false` — разрезанные экстенты не помещаются в форк; инод не тронут.
+fn unmap_dir_blocks(inode: &mut [u8], sb: &Sb, gone: &[u64], leaf_first: u64) -> Result<bool> {
+    let (fs, fe) = data_fork(inode, sb);
+    let n = crate::xfs_exclusions::data_nextents(inode) as usize;
+    if fs + n * 16 > fe {
+        return Err(bad(tr!("xfs_dirent.extent_list_past_fork")));
+    }
+    let mut recs: Vec<Rec> = (0..n).map(|i| decode_rec(inode, fs + i * 16)).collect();
+    for &db in gone {
+        let Some(i) = recs
+            .iter()
+            .position(|r| db >= r.off && db < r.off + r.count)
+        else {
+            return Err(bad(tr!("xfs_dirent.block_not_mapped", block = db)));
+        };
+        let r = recs[i];
+        let left = Rec {
+            count: db - r.off,
+            ..r
+        };
+        let right = Rec {
+            off: db + 1,
+            start: r.start + (db - r.off) + 1,
+            count: r.off + r.count - db - 1,
+            ..r
+        };
+        let pieces: Vec<Rec> = [left, right].into_iter().filter(|p| p.count > 0).collect();
+        recs.splice(i..=i, pieces);
+    }
+    if fs + recs.len() * 16 > fe {
+        return Ok(false);
+    }
+    inode[fs..fe].fill(0);
+    for (i, r) in recs.iter().enumerate() {
+        encode_rec(inode, fs + i * 16, r);
+    }
+    if crate::xfs_exclusions::nrext64(inode) {
+        put_be64(inode, 0x18, recs.len() as u64);
+    } else {
+        put_be32(inode, 0x4C, recs.len() as u32);
+    }
+    let nblocks = be64(inode, 0x40);
+    put_be64(inode, 0x40, nblocks.saturating_sub(gone.len() as u64));
+    // Размер каталога — до конца последнего блока ДАННЫХ (листья и индекс
+    // живут выше 32 ГиБ и в него не входят).
+    let last_data = recs
+        .iter()
+        .filter(|r| r.off < leaf_first)
+        .map(|r| (r.off + r.count).min(leaf_first))
+        .max()
+        .unwrap_or(0);
+    let size = be64(inode, 0x38);
+    let new_size = last_data * sb.blocksize;
+    if new_size < size {
+        put_be64(inode, 0x38, new_size);
+    }
+    let cc = be64(inode, 0x68);
+    put_be64(inode, 0x68, cc.wrapping_add(1));
+    Ok(true)
 }
 
 #[cfg(all(test, target_os = "linux"))]
