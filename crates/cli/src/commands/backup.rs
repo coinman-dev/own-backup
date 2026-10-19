@@ -23,8 +23,15 @@ pub struct BackupArgs {
 
     /// Passphrase for an encrypted (LUKS) source. When given and the source is
     /// a LUKS container, its decrypted data is backed up (used blocks only).
-    #[arg(long)]
+    /// Visible to every user in the process list: prefer --password-stdin or
+    /// the prompt the command shows when the source needs a passphrase.
+    #[arg(long, conflicts_with = "password_stdin")]
     pub password: Option<String>,
+
+    /// Read the source's passphrase as one line from standard input (a pipe,
+    /// a file) instead of the command line or a prompt.
+    #[arg(long)]
+    pub password_stdin: bool,
 
     /// Image container format: vhdx (Windows-native mounting, no compression)
     /// or qcow2 (zstd-compressed, cross-platform)
@@ -228,6 +235,10 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
         args.block_size_mib * 1024 * 1024
     };
     let image_path = std::path::PathBuf::from(&args.output);
+    // The source's passphrase: given, piped, asked now (a container the engine
+    // decrypts itself) or asked only if a snapshot of an opened mapping
+    // turns out to need it — never required on the command line.
+    let passphrase = std::sync::Arc::new(SourcePassphrase::resolve(&args)?);
     // Which version this is and what it is written over: --parent, or the
     // newest command-line chain beside the output (`copy_options`).
     let (kind, parent_image) = super::copy_options::resolve_parent(
@@ -246,11 +257,14 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
         Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
         _ => std::path::PathBuf::from("."),
     };
-    let provider = own_backup_snapshot::LinuxSnapshotProvider::with_cow_dir(out_dir).container_key(
-        own_backup_backup::engine_linux::container_key_from(
-            args.password.clone().map(zeroize::Zeroizing::new),
-        ),
-    );
+    let provider = own_backup_snapshot::LinuxSnapshotProvider::with_cow_dir(out_dir)
+        .container_key({
+            let passphrase = passphrase.clone();
+            move |device: &std::path::Path| match passphrase.get_or_ask()? {
+                Some(p) => own_backup_backup::engine_linux::luks_volume_key(device, &p).map(Some),
+                None => Ok(None),
+            }
+        });
     let snapshot = provider.create_snapshot(&args.source).await?;
     let request = VolumeBackupRequest {
         // The device itself; the engine reads the snapshot of it.
@@ -284,7 +298,7 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
             p
         },
         job_id: None,
-        passphrase: args.password.clone().map(zeroize::Zeroizing::new),
+        passphrase: passphrase.known(),
         image_format: args.format,
         // The command line does not open encrypted archives yet (E5).
         encryption: None,
@@ -388,6 +402,79 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
         }
     );
     Ok(())
+}
+
+/// The passphrase of an encrypted Linux source, obtained the least visible way
+/// the invocation allows: `--password` (warned about), `--password-stdin`, a
+/// prompt at once when the engine will decrypt the device itself, or a prompt
+/// only when a device-mapper snapshot of an opened LUKS mapping asks for its
+/// container key. Asked at most once.
+#[cfg(target_os = "linux")]
+struct SourcePassphrase {
+    value: std::sync::Mutex<Option<zeroize::Zeroizing<String>>>,
+    /// May still be asked for on the terminal.
+    may_ask: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl SourcePassphrase {
+    fn resolve(args: &BackupArgs) -> own_backup_common::Result<Self> {
+        use own_backup_backup::engine_linux::{has_encryption_header, is_opened_luks_mapping};
+        let err = |e: std::io::Error| own_backup_common::OwnBackupError::Config(e.to_string());
+        let known = if let Some(p) = &args.password {
+            eprintln!(
+                "warning: --password is visible to every user in the process list; \
+                 use --password-stdin or the prompt instead"
+            );
+            Some(zeroize::Zeroizing::new(p.clone()))
+        } else if args.password_stdin {
+            let mut line = zeroize::Zeroizing::new(String::new());
+            std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut line).map_err(err)?;
+            let trimmed = line.trim_end_matches(['\r', '\n']);
+            if trimmed.is_empty() {
+                return Err(own_backup_common::OwnBackupError::Config(
+                    "--password-stdin: standard input held no passphrase".into(),
+                ));
+            }
+            Some(zeroize::Zeroizing::new(trimmed.to_string()))
+        } else if has_encryption_header(&args.source) {
+            Some(Self::ask(&args.source)?)
+        } else {
+            None
+        };
+        Ok(Self {
+            may_ask: known.is_none() && is_opened_luks_mapping(&args.source),
+            value: std::sync::Mutex::new(known),
+        })
+    }
+
+    fn ask(source: &str) -> own_backup_common::Result<zeroize::Zeroizing<String>> {
+        let typed = zeroize::Zeroizing::new(
+            crate::secret_prompt::ask_secret(&format!(
+                "Passphrase of the encrypted source {source} (not shown): "
+            ))
+            .map_err(|e| own_backup_common::OwnBackupError::Config(e.to_string()))?,
+        );
+        if typed.is_empty() {
+            return Err(own_backup_common::OwnBackupError::Config(
+                "no passphrase was typed".into(),
+            ));
+        }
+        Ok(typed)
+    }
+
+    fn known(&self) -> Option<zeroize::Zeroizing<String>> {
+        self.value.lock().unwrap().clone()
+    }
+
+    /// For the snapshot's container key: what is known, else one prompt.
+    fn get_or_ask(&self) -> own_backup_common::Result<Option<zeroize::Zeroizing<String>>> {
+        let mut value = self.value.lock().unwrap();
+        if value.is_none() && self.may_ask {
+            *value = Some(Self::ask("(opened LUKS mapping)")?);
+        }
+        Ok(value.clone())
+    }
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]

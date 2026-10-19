@@ -536,6 +536,10 @@ export interface JobRun {
    *  (Windows Update does this to WinRE) and the job followed them — said
    *  in words; '' or absent when nothing changed. */
   layout_changed?: string;
+  /** Other things to know about how the copy was made, one sentence each
+   *  (a snapshot store allocated in full, the service's key directory left
+   *  out). Absent when there is nothing to say. */
+  notes?: string[];
   /** Set by the service while this run is not in its history files (the
    *  write failed and is retried before the next run) — said in words. */
   record_error?: string;

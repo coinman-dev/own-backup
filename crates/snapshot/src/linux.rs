@@ -184,6 +184,12 @@ pub fn is_partition_hold(snapshot: &Snapshot) -> bool {
 /// still for the length of the copy — see [`assert_file_frozen`].
 pub const FILE_FROZEN: &str = "file_frozen";
 
+/// Metadata key of a device-mapper snapshot whose store had to be allocated
+/// in full (no sparse files at the destination — FAT, exFAT, ntfs3): its size
+/// in bytes. Smaller than the volume, so heavy writes during the copy can
+/// overflow it; the run's summary says so.
+pub const DENSE_STORE_BYTES: &str = "cow_dense_bytes";
+
 /// Vouch that the image file `snapshot` reads is not written while it is
 /// copied (decision R5). Only the caller can know that: a file does not say
 /// who else has it open. A snapshot of a device is left as it is.
@@ -427,6 +433,9 @@ impl LinuxSnapshotProvider {
         metadata.insert("dm_origin".into(), session.origin.clone());
         metadata.insert("dm_snapshot".into(), session.snap.clone());
         metadata.insert("cow_file".into(), session.cow_path.display().to_string());
+        if let Some(bytes) = session.dense_store {
+            metadata.insert(DENSE_STORE_BYTES.into(), bytes.to_string());
+        }
         let snapshot = Snapshot {
             provider_name: PROVIDER.into(),
             source_device: volume.into(),

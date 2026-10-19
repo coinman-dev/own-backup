@@ -338,6 +338,27 @@ pub fn container_key_from(
     }
 }
 
+/// Whether `device` itself starts with a LUKS or BitLocker header: the engine
+/// then decrypts it while copying and needs the passphrase before it starts.
+/// An unreadable device answers `false`; the copy reports the real error.
+pub fn has_encryption_header(device: &str) -> bool {
+    let Ok(dev) = LinuxRawDevice::open_read(device) else {
+        return false;
+    };
+    let mut header = vec![0u8; 4096];
+    if dev.read_at(0, &mut header).is_err() {
+        return false;
+    }
+    crate::luks::is_luks(&header) || crate::bitlocker::is_bitlocker(&header)
+}
+
+/// Whether `device` is an opened LUKS mapping (`/dev/mapper/…` over one LUKS
+/// container). Its data reads as plain, but a device-mapper snapshot of it
+/// needs the container's password (the key lives only in the kernel).
+pub fn is_opened_luks_mapping(device: &str) -> bool {
+    opened_luks_container(device).is_some()
+}
+
 /// The LUKS container under an opened mapping: `/dev/<slave>` when `device`
 /// is a dm-crypt device whose device-mapper UUID says LUKS (`CRYPT-LUKS1-…`,
 /// `CRYPT-LUKS2-…`) and it sits on exactly one device.

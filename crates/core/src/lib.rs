@@ -581,6 +581,19 @@ pub struct JobRun {
     /// person seeing a large copy after a quiet week is told why.
     #[serde(default)]
     pub layout_changed: String,
+    /// Other things the person should know about how this copy was made, one
+    /// sentence each, for the result screen: a snapshot store that had to be
+    /// allocated in full on a destination without sparse files, the service's
+    /// key directory left out of the copy. Empty when there is nothing to say.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+    /// The run was refused before anything was touched, for a reason in the
+    /// job itself (an option this engine does not carry out, a format change
+    /// over existing copies, the destination on the source). Trying again
+    /// cannot change that answer, so such a run is not retried — only an edit
+    /// of the job can.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub refused: bool,
     /// Why this run is not in the history files although it happened — set
     /// only on what the store hands out while the write keeps failing, never
     /// written to those files itself (`JobStore::unrecorded`).
@@ -2071,7 +2084,7 @@ pub async fn run_queue_worker(
 
         // A failure is tried again, a set number of times; anything else ends
         // the streak.
-        let retrying = if run.status == "error" && !*stop.borrow() {
+        let retrying = if run.status == "error" && !run.refused && !*stop.borrow() {
             let used = retries_used.entry(job.id.clone()).or_insert(0);
             if *used < job.advanced.retry_attempts {
                 *used += 1;
@@ -3866,6 +3879,7 @@ async fn perform_backup(
         run.finished_at = chrono::Utc::now().to_rfc3339();
         run.status = "error".into();
         run.error = msg;
+        run.refused = true;
         return run;
     }
     // What the Linux engine does not do yet is refused, not skipped: a run that
@@ -3875,6 +3889,7 @@ async fn perform_backup(
         run.finished_at = chrono::Utc::now().to_rfc3339();
         run.status = "error".into();
         run.error = msg;
+        run.refused = true;
         return run;
     }
     // Scheduled runs come here without the check `RunJob` makes; a whole
@@ -3889,6 +3904,7 @@ async fn perform_backup(
         run.finished_at = chrono::Utc::now().to_rfc3339();
         run.status = "error".into();
         run.error = tr!("lib.linux_dest_on_source", source = source).into_owned();
+        run.refused = true;
         return run;
     }
     // A whole disk → one image with its GPT and restore manifest.
@@ -3942,6 +3958,7 @@ async fn perform_backup(
                 break;
             }
         };
+        note_dense_store(&mut run, &snapshot, &folder);
 
         let request = VolumeBackupRequest {
             // The device itself: the image's identity comes from it, and the
@@ -4084,6 +4101,31 @@ async fn perform_backup(
     totals.finish(run, fatal, job, None)
 }
 
+/// A device-mapper snapshot whose store the destination could not keep
+/// sparse (FAT, exFAT, NTFS through ntfs3) is allocated in full and capped —
+/// fine, but the person is told in the summary, not only in the log: heavy
+/// writes to the volume during the copy overflow such a store and the run is
+/// refused.
+#[cfg(target_os = "linux")]
+fn note_dense_store(run: &mut JobRun, snapshot: &own_backup_snapshot::Snapshot, folder: &Path) {
+    let Some(bytes) = snapshot
+        .metadata
+        .get(own_backup_snapshot::linux::DENSE_STORE_BYTES)
+        .and_then(|b| b.parse::<u64>().ok())
+    else {
+        return;
+    };
+    run.notes.push(
+        tr!(
+            "lib.snapshot_store_dense",
+            volume = snapshot.source_device,
+            folder = folder.display(),
+            size = own_backup_common::units::human_bytes(bytes)
+        )
+        .into_owned(),
+    );
+}
+
 /// Linux whole-disk driver: every partition is held first — an LVM or
 /// device-mapper snapshot, a short hold, or the idle device — so the image is
 /// as close to one point in time as the disk allows, then the shared engine
@@ -4121,7 +4163,10 @@ async fn perform_disk_backup(
         let provider_for_part = own_backup_snapshot::LinuxSnapshotProvider::with_cow_dir(&folder)
             .container_key(container_key_from(passwords.resolve(&token)));
         match provider_for_part.create_snapshot(&part.device).await {
-            Ok(s) => snapshots.push(s),
+            Ok(s) => {
+                note_dense_store(&mut run, &s, &folder);
+                snapshots.push(s)
+            }
             Err(e) => {
                 warn!(job = %job.name, partition = %part.device, error = %e, "No consistent source");
                 for s in &snapshots {
@@ -6862,5 +6907,8 @@ mod linux_run_tests {
             "{}",
             refused.error
         );
+        // Refused by the job itself: not a failure a retry could turn around.
+        assert!(refused.refused);
+        assert!(!second.refused && !first.refused);
     }
 }

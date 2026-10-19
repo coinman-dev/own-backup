@@ -3273,6 +3273,20 @@ impl BackupService for BackupServiceImpl {
 
 #[cfg(test)]
 mod tests {
+    /// The English text of this refusal once belonged to another message (the
+    /// destination-on-source one, REPORT-cloud-gui2). It must speak of what
+    /// it refuses.
+    #[test]
+    fn encrypting_over_plain_copies_is_explained_in_both_languages() {
+        let catalog: serde_json::Value =
+            serde_json::from_str(include_str!("../locales/service.json")).unwrap();
+        let entry = &catalog["grpc_server.job_encrypt_over_plain_copies"];
+        assert!(entry["ru"].as_str().unwrap().contains("Шифрование"));
+        let en = entry["en"].as_str().unwrap();
+        assert!(en.starts_with("Encryption cannot be turned on"), "{en}");
+        assert!(!en.contains("destination"), "{en}");
+    }
+
     use super::*;
 
     fn make_service(dir: &std::path::Path) -> BackupServiceImpl {

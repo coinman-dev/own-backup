@@ -495,6 +495,10 @@
               <br />
               {lastRun.layout_changed}.
             {/if}
+            {#each lastRun.notes ?? [] as note}
+              <br />
+              {note}
+            {/each}
           </span>
           <button class="banner-x" title={m.common_hide()} aria-label={m.common_hide()} onclick={() => { summaryHidden = true; rememberSummaryState(true); }}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18" /></svg>

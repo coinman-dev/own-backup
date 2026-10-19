@@ -436,12 +436,16 @@ fn backup_volume_inner<P: EnginePlatform>(
         &mut progress,
     )?;
 
-    // Notify VSS writers of success and release the shadow copy.
+    // Tell the snapshot the copy succeeded and release it: VSS writers'
+    // BackupComplete on Windows, the dm/LVM snapshot or freeze on Linux.
     let t = Instant::now();
     if let Some(Err(e)) = session.complete() {
-        warn!(error = %e, "VSS BackupComplete failed (backup data is already safe)");
+        warn!(error = %e, "snapshot completion failed (backup data is already safe)");
     }
-    info!(vss_release_ms = t.elapsed().as_millis(), "VSS released");
+    info!(
+        snapshot_release_ms = t.elapsed().as_millis(),
+        "snapshot released"
+    );
 
     // --- True removal of excluded files (NTFS/ReFS) ---
     // The FS driver deletes the recorded paths inside the image copy (the

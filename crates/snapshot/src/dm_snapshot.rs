@@ -441,8 +441,13 @@ pub(crate) fn dense_store_size(full: u64, free: u64) -> u64 {
 
 /// A new store, locked for as long as it is used: a sparse file as large as
 /// the origin (one chunk per chunk of it at most), or [`dense_store_size`]
-/// where the filesystem allocates what a file is extended to.
-fn create_cow(dir: &Path, id: &str, origin_bytes: u64) -> io::Result<(PathBuf, File)> {
+/// where the filesystem allocates what a file is extended to — then its size
+/// is returned too.
+fn create_cow(
+    dir: &Path,
+    id: &str,
+    origin_bytes: u64,
+) -> io::Result<(PathBuf, File, Option<u64>)> {
     let path = dir.join(cow_file_name(id));
     let file = OpenOptions::new()
         .read(true)
@@ -463,7 +468,7 @@ fn create_cow(dir: &Path, id: &str, origin_bytes: u64) -> io::Result<(PathBuf, F
         file.set_len(probe)?;
         let allocated = std::os::unix::fs::MetadataExt::blocks(&file.metadata()?) * 512;
         if allocated < probe / 2 {
-            return file.set_len(full);
+            return file.set_len(full).map(|()| None);
         }
         // SAFETY: fstatvfs into a zeroed struct.
         let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
@@ -481,13 +486,15 @@ fn create_cow(dir: &Path, id: &str, origin_bytes: u64) -> io::Result<(PathBuf, F
             "the destination filesystem has no sparse files: the snapshot's store is \
              allocated in full and smaller than the volume"
         );
-        file.set_len(size)
+        file.set_len(size).map(|()| Some(size))
     })();
-    if let Err(e) = made {
-        let _ = std::fs::remove_file(&path);
-        return Err(e);
+    match made {
+        Ok(dense) => Ok((path, file, dense)),
+        Err(e) => {
+            let _ = std::fs::remove_file(&path);
+            Err(e)
+        }
     }
-    Ok((path, file))
 }
 
 // ---------------------------------------------------------------------------
@@ -705,6 +712,10 @@ pub struct Session {
     /// `/dev/dm-N` of the snapshot: what the copy reads.
     pub snap_path: String,
     pub cow_path: PathBuf,
+    /// Bytes of a store allocated in full because the destination has no
+    /// sparse files ([`dense_store_size`]); `None` for a sparse store. The
+    /// run says so in its summary: such a store is capped and can overflow.
+    pub dense_store: Option<u64>,
     ctl: Control,
     /// `obk-snap` held open: the proof that this run is alive.
     holder: Option<File>,
@@ -848,7 +859,7 @@ pub fn create(
     sweep_cow_files(&cow_dir);
 
     let id = Uuid::new_v4().simple().to_string();
-    let (cow_path, cow) = create_cow(&cow_dir, &id, size * 512).map_err(|e| {
+    let (cow_path, cow, dense_store) = create_cow(&cow_dir, &id, size * 512).map_err(|e| {
         refuse(tr!(
             "linux.dm_cow_failed",
             dir = cow_dir.display(),
@@ -862,6 +873,7 @@ pub fn create(
         origin,
         snap_path: String::new(),
         cow_path,
+        dense_store,
         ctl,
         holder: None,
         lo: None,
@@ -1743,7 +1755,8 @@ mod tests {
         let stale = dir.path().join(cow_file_name(ID));
         std::fs::write(&stale, b"").unwrap();
         let other = "fedcba9876543210fedcba9876543210";
-        let (busy, held) = create_cow(dir.path(), other, 1 << 20).unwrap();
+        let (busy, held, dense) = create_cow(dir.path(), other, 1 << 20).unwrap();
+        assert_eq!(dense, None, "a tmpfs/ext4 test directory has sparse files");
         // Sparse, and one chunk larger than the origin rounded to chunks.
         assert_eq!(held.metadata().unwrap().len(), (1 << 20) + 4096);
         let image = dir.path().join("job_full_20261019.vhdx");
@@ -1772,7 +1785,7 @@ mod tests {
         assert_eq!(swept, 1);
         assert!(!busy.exists());
         // A second store of the same name is never made over one in place.
-        let (_p, _f) = create_cow(dir.path(), ID, 4096).unwrap();
+        let (_p, _f, _) = create_cow(dir.path(), ID, 4096).unwrap();
         assert!(create_cow(dir.path(), ID, 4096).is_err());
     }
 }
