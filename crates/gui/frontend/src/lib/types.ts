@@ -242,6 +242,9 @@ export interface ServiceHealth {
   /** Reachable, and refusing this window on every call (`PermissionDenied`):
    *  on Linux, a window outside the active local session (SSH, say). */
   access_denied?: boolean;
+  /** Not reachable because the access group keeps this user out (Linux):
+   *  not a member, or added after this session began. `ok` otherwise. */
+  group_access?: 'ok' | 'not_member' | 'relogin';
 }
 
 /** Where the window runs (the `platform_info` command). */

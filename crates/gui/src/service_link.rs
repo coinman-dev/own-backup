@@ -89,6 +89,13 @@ impl ServiceLink {
             self.store(c.clone()).await;
             return Ok(c);
         }
+        // Kept out by the access group: starting the service and waiting for
+        // it would only end in "installed but not running" about a service
+        // that is running.
+        #[cfg(unix)]
+        if let Some(why) = self.group_message() {
+            return Err(why);
+        }
         // Not reachable — try to start the installed service, then wait (~5s).
         // `sc`/`net` block, so run them off the async runtime.
         tracing::info!("service not reachable; attempting to start the installed service");
@@ -162,6 +169,27 @@ impl ServiceLink {
             client.get_queue_with_status().await,
             Err(status) if status.code() == tonic::Code::PermissionDenied
         )
+    }
+
+    /// Whether the access group keeps this user from the socket and token.
+    #[cfg(unix)]
+    pub fn group_access(&self) -> crate::unix_group::GroupAccess {
+        crate::unix_group::group_access(&self.token_path)
+    }
+
+    /// What to tell a user the group keeps out, or `None`.
+    #[cfg(unix)]
+    fn group_message(&self) -> Option<String> {
+        let group = own_backup_common::UNIX_ACCESS_GROUP;
+        match self.group_access() {
+            crate::unix_group::GroupAccess::Ok => None,
+            crate::unix_group::GroupAccess::NotMember => {
+                Some(tr!("service_link.not_in_group", group = group).into_owned())
+            }
+            crate::unix_group::GroupAccess::Relogin => {
+                Some(tr!("service_link.relogin_for_group", group = group).into_owned())
+            }
+        }
     }
 
     /// Quick probe: can we reach the service right now? Always does a fresh

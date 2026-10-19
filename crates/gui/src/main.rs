@@ -11,6 +11,8 @@ mod service_link;
 mod state;
 #[cfg(target_os = "windows")]
 mod tray;
+#[cfg(unix)]
+mod unix_group;
 
 use std::path::PathBuf;
 use std::sync::Arc;

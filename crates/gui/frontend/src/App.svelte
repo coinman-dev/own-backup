@@ -52,6 +52,10 @@
         // There, answering, and refusing every call: said as what it is
         // rather than as an empty job list and «service not running».
         serviceWarn = m.app_access_denied;
+      } else if (h.group_access === 'not_member' || h.group_access === 'relogin') {
+        // Running, and closed to this user by the socket's group: «not
+        // running» would send them to start a service that is up.
+        serviceWarn = h.group_access === 'relogin' ? m.app_relogin_group : m.app_not_in_group;
       } else if (h.media) {
         // On the boot medium the engine deliberately runs as a plain process:
         // WinPE's registry is in RAM, so there is nothing to install into, and

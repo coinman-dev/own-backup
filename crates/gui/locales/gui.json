@@ -75,5 +75,13 @@
   "files.folder_not_opened": {
     "ru": "Не удалось открыть папку %{path}: %{error}",
     "en": "The folder %{path} could not be opened: %{error}"
+  },
+  "service_link.not_in_group": {
+    "ru": "Ваш пользователь не входит в группу «%{group}», поэтому окно не может подключиться к службе. Добавьте его:  sudo usermod -aG %{group} $USER  — и войдите в систему заново.",
+    "en": "Your user is not in the group “%{group}”, so the window cannot connect to the service. Add it:  sudo usermod -aG %{group} $USER  — and sign in again."
+  },
+  "service_link.relogin_for_group": {
+    "ru": "Ваш пользователь уже добавлен в группу «%{group}», но этот сеанс начат раньше и её не видит. Выйдите из системы и войдите снова.",
+    "en": "Your user has been added to the group “%{group}”, but this session started earlier and does not have it yet. Sign out and sign in again."
   }
 }

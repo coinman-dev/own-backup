@@ -232,6 +232,10 @@ pub struct ServiceHealth {
     /// on Linux, a window outside the active local session. Without it the
     /// screens showed an empty job list and «service not running».
     pub access_denied: bool,
+    /// Not reachable because the access group keeps this user out: `ok`,
+    /// `not_member` or `relogin` (added, but this session predates it).
+    /// Always `ok` on Windows.
+    pub group_access: &'static str,
 }
 
 #[tauri::command]
@@ -253,11 +257,24 @@ pub async fn service_health(state: State<'_, GuiState>) -> Result<ServiceHealth,
     let access_denied = reachable && state.link.access_refused().await;
     #[cfg(not(unix))]
     let access_denied = false;
+    #[cfg(unix)]
+    let group_access = if reachable {
+        "ok"
+    } else {
+        match state.link.group_access() {
+            crate::unix_group::GroupAccess::Ok => "ok",
+            crate::unix_group::GroupAccess::NotMember => "not_member",
+            crate::unix_group::GroupAccess::Relogin => "relogin",
+        }
+    };
+    #[cfg(not(unix))]
+    let group_access = "ok";
     tracing::info!(
         reachable,
         installed,
         media,
         access_denied,
+        group_access,
         "service_health check"
     );
     Ok(ServiceHealth {
@@ -265,6 +282,7 @@ pub async fn service_health(state: State<'_, GuiState>) -> Result<ServiceHealth,
         installed,
         media,
         access_denied,
+        group_access,
     })
 }
 
