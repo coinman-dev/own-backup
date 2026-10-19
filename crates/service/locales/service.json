@@ -454,5 +454,37 @@
   "install.linux_unit_no_exec": {
     "ru": "в юните %{path} нет ExecStart — неизвестно, какой файл служба запускает; переустановите: --install",
     "en": "unit %{path} has no ExecStart — it is unknown which file the service runs; reinstall: --install"
+  },
+  "settings.not_saved": {
+    "ru": "Параметры не сохранены: %{error}",
+    "en": "The settings were not saved: %{error}"
+  },
+  "settings.mirror_not_absolute": {
+    "ru": "Папку для копии журнала нужно указать полным путём, без «.» и «..»: «%{path}».",
+    "en": "The log mirror folder must be a full path, without “.” or “..”: “%{path}”."
+  },
+  "settings.mirror_unknown_caller": {
+    "ru": "Не удалось определить, кто меняет папку копии журнала, — служба пишет туда от имени администратора, поэтому изменение не принято. Выключить копию можно и так.",
+    "en": "Could not tell who is changing the log mirror folder — the service writes there as an administrator, so the change was not accepted. Switching the mirror off is still possible."
+  },
+  "settings.mirror_missing": {
+    "ru": "Папки «%{path}» нет. Подключите диск или флешку, создайте на нём папку и сохраните снова.",
+    "en": "There is no folder “%{path}”. Connect the disk or USB stick, create the folder on it and save again."
+  },
+  "settings.mirror_unreadable": {
+    "ru": "Папку «%{path}» не удалось проверить: %{error}",
+    "en": "The folder “%{path}” could not be checked: %{error}"
+  },
+  "settings.mirror_symlink": {
+    "ru": "Путь «%{path}» проходит через символьную ссылку %{link}. Укажите настоящий путь к папке.",
+    "en": "The path “%{path}” goes through the symbolic link %{link}. Give the real path of the folder."
+  },
+  "settings.mirror_not_dir": {
+    "ru": "«%{path}» — не папка.",
+    "en": "“%{path}” is not a folder."
+  },
+  "settings.mirror_not_yours": {
+    "ru": "Служба пишет копию журнала от имени администратора, поэтому указать можно только свою папку — владельцем «%{path}» должны быть вы (например, папка в домашнем каталоге или на флешке, подключённой в вашем сеансе).",
+    "en": "The service writes the log mirror as an administrator, so only a folder of your own can be named — you must be the owner of “%{path}” (for example, a folder in your home directory or on a USB stick mounted in your session)."
   }
 }

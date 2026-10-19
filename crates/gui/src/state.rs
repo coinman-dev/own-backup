@@ -17,6 +17,9 @@ pub struct GuiState {
     /// `get_config` handed back the copy loaded at startup and every change
     /// looked lost the moment the user left the page.
     pub config: std::sync::Mutex<AppConfig>,
+    /// Written by the window only on Windows; on Linux the service owns the
+    /// file (see `commands::settings`).
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub config_path: PathBuf,
     /// Connection to the backup service.
     pub link: Arc<ServiceLink>,

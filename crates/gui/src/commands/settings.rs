@@ -3,8 +3,34 @@ use tauri::State;
 
 use crate::state::GuiState;
 
+// Where the settings are written differs by platform, and only Linux moved.
+//
+// Windows: the window writes `C:\ProgramData\OwnBackup\config.toml` itself,
+// as it always has — ProgramData lets the person at the console create and
+// replace files there, it works without the service, and that path has its
+// native acceptance behind it. Nothing about it changes here.
+//
+// Linux: the data folder is root's (0750 with the access group), so the same
+// write ended in «Permission denied», and the language never reached the
+// service. The service owns the file there and is asked (`GetSettings` /
+// `SaveSettings`); it also checks the one field that is more than a
+// preference — the log mirror folder, a place root creates a file in.
+
 #[tauri::command]
 pub async fn get_config(state: State<'_, GuiState>) -> Result<AppConfig, String> {
+    // The service's copy is the one that counts; the window's is what it read
+    // at start, kept for when the service cannot be asked.
+    #[cfg(not(target_os = "windows"))]
+    match state.link.client().await {
+        Ok(mut client) => match client.get_settings().await {
+            Ok(fresh) => {
+                *state.config.lock().map_err(|e| e.to_string())? = fresh.clone();
+                return Ok(fresh);
+            }
+            Err(error) => tracing::warn!(%error, "settings: the service did not answer"),
+        },
+        Err(error) => tracing::debug!(%error, "settings: no service to ask"),
+    }
     Ok(state.config.lock().map_err(|e| e.to_string())?.clone())
 }
 
@@ -13,37 +39,54 @@ pub async fn save_config(state: State<'_, GuiState>, config: AppConfig) -> Resul
     // The language is not a field of the settings form: it is switched on its
     // own (`set_ui_language`), and a form loaded before the switch would
     // otherwise save the old one back.
-    let mut current = state.config.lock().map_err(|e| e.to_string())?;
-    let before = current.clone();
-    let saved = AppConfig::update_file(&state.config_path, |fresh| {
-        if config.data_dir != before.data_dir {
-            fresh.data_dir = config.data_dir.clone();
+    #[cfg(target_os = "windows")]
+    {
+        let mut current = state.config.lock().map_err(|e| e.to_string())?;
+        let before = current.clone();
+        let saved = AppConfig::update_file(&state.config_path, |fresh| {
+            if config.data_dir != before.data_dir {
+                fresh.data_dir = config.data_dir.clone();
+            }
+            if config.grpc_address != before.grpc_address {
+                fresh.grpc_address = config.grpc_address.clone();
+            }
+            if config.log_level != before.log_level {
+                fresh.log_level = config.log_level.clone();
+            }
+            if config.log_mirror_dir != before.log_mirror_dir {
+                fresh.log_mirror_dir = config.log_mirror_dir.clone();
+            }
+            if config.default_compression_level != before.default_compression_level {
+                fresh.default_compression_level = config.default_compression_level;
+            }
+            if config.remembered_backups != before.remembered_backups {
+                fresh.remembered_backups = config.remembered_backups.clone();
+            }
+        })
+        .map_err(|e| e.to_string())?;
+        // The in-memory copy has to move too. Writing only the file left
+        // `get_config` handing back what was loaded at startup, so anything saved
+        // came back missing as soon as the user navigated away and returned.
+        *current = saved;
+        Ok(())
+    }
+    // Only what the person changed travels, so a second window saving another
+    // field is not undone. The language is left out for the reason above.
+    #[cfg(not(target_os = "windows"))]
+    {
+        let before = state.config.lock().map_err(|e| e.to_string())?.clone();
+        let mut patch = own_backup_common::config::SettingsPatch::between(&before, &config);
+        patch.ui_language = None;
+        if patch.is_empty() {
+            return Ok(());
         }
-        if config.grpc_address != before.grpc_address {
-            fresh.grpc_address = config.grpc_address.clone();
-        }
-        if config.log_level != before.log_level {
-            fresh.log_level = config.log_level.clone();
-        }
-        if config.log_mirror_dir != before.log_mirror_dir {
-            fresh.log_mirror_dir = config.log_mirror_dir.clone();
-        }
-        if config.default_compression_level != before.default_compression_level {
-            fresh.default_compression_level = config.default_compression_level;
-        }
-        if config.remembered_backups != before.remembered_backups {
-            fresh.remembered_backups = config.remembered_backups.clone();
-        }
-    })
-    .map_err(|e| e.to_string())?;
-    // The in-memory copy has to move too. Writing only the file left
-    // `get_config` handing back what was loaded at startup, so anything saved
-    // came back missing as soon as the user navigated away and returned.
-    *current = saved;
-    Ok(())
+        let saved = state.link.client().await?.save_settings(&patch).await?;
+        *state.config.lock().map_err(|e| e.to_string())? = saved;
+        Ok(())
+    }
 }
 
-/// The window's language, already resolved («Как в Windows» → `ru`/`en`).
+/// The window's language, already resolved («Как в системе» → `ru`/`en`).
 /// This process's own messages switch at once; the config remembers it for
 /// the service, which follows the file (`own_backup_common::lang`). Written
 /// only when it changed — the window says it at every start.
@@ -54,18 +97,37 @@ pub async fn set_ui_language(state: State<'_, GuiState>, lang: String) -> Result
     } else {
         "ru"
     };
-    let mut config = state.config.lock().map_err(|e| e.to_string())?;
-    if config.ui_language == code {
+    #[cfg(target_os = "windows")]
+    {
+        let mut config = state.config.lock().map_err(|e| e.to_string())?;
+        if config.ui_language == code {
+            own_backup_common::lang::set(code);
+            return Ok(());
+        }
+        let saved = AppConfig::update_file(&state.config_path, |fresh| {
+            fresh.ui_language = code.to_string();
+        })
+        .map_err(|e| e.to_string())?;
+        *config = saved;
         own_backup_common::lang::set(code);
-        return Ok(());
+        Ok(())
     }
-    let saved = AppConfig::update_file(&state.config_path, |fresh| {
-        fresh.ui_language = code.to_string();
-    })
-    .map_err(|e| e.to_string())?;
-    *config = saved;
-    own_backup_common::lang::set(code);
-    Ok(())
+    // Through the service, which switches its own messages the moment it has
+    // written the file.
+    #[cfg(not(target_os = "windows"))]
+    {
+        own_backup_common::lang::set(code);
+        if state.config.lock().map_err(|e| e.to_string())?.ui_language == code {
+            return Ok(());
+        }
+        let patch = own_backup_common::config::SettingsPatch {
+            ui_language: Some(code.to_string()),
+            ..Default::default()
+        };
+        let saved = state.link.client().await?.save_settings(&patch).await?;
+        *state.config.lock().map_err(|e| e.to_string())? = saved;
+        Ok(())
+    }
 }
 
 /// Whether this person keeps the icon in the notification area. `None` where

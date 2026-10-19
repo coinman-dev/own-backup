@@ -962,6 +962,36 @@ impl BackupClient {
             .into_inner();
         Ok(reply.json)
     }
+
+    // --- Settings (config.toml) ---------------------------------------------
+
+    /// The settings as the service reads them.
+    pub async fn get_settings(&mut self) -> Result<own_backup_common::config::AppConfig> {
+        let reply = self
+            .inner
+            .get_settings(self.request(proto::Empty {}))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
+
+    /// Have the service change the fields present in `patch`; what it stored
+    /// comes back. Refusals (a log mirror folder the caller may not name) are
+    /// in the user's words.
+    pub async fn save_settings(
+        &mut self,
+        patch: &own_backup_common::config::SettingsPatch,
+    ) -> Result<own_backup_common::config::AppConfig> {
+        let json = serde_json::to_string(patch).map_err(json_err)?;
+        let reply = self
+            .inner
+            .save_settings(self.request(proto::JsonRequest { json }))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
 }
 
 fn decode_event(ev: proto::Event) -> ClientEvent {

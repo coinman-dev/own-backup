@@ -28,8 +28,15 @@
 //! disk that starts empty — so the launcher names the target instead, in
 //! [`LOG_MIRROR_ENV`]: the stick the medium booted from. That is where the logs
 //! of a session that ended in a dark screen or a reboot can still be read.
+//!
+//! On Linux the service is root and the folder is one a user named (through
+//! the service, which checks it — `crates/service/src/settings.rs`). So the
+//! file is reached there without following a symbolic link at any step, is
+//! never a second name of another file, and a folder named in the config is
+//! not created: a missing one is a stick that is not plugged in, and creating
+//! its path would put directories on the root filesystem in its place.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -127,7 +134,10 @@ impl MirrorLog {
         // stick that is plugged in halfway through starts receiving lines.
         if self.file.is_none() {
             if let Some(dir) = self.dir.clone() {
-                self.file = open_mirror(&dir, &self.file_name);
+                // Only the launcher's own choice is created; see the module
+                // note on Linux.
+                let create = self.fixed_dir.is_some();
+                self.file = open_mirror(&dir, &self.file_name, create);
             }
         }
     }
@@ -155,7 +165,8 @@ impl MirrorLog {
 }
 
 /// Open (and rotate) `<dir>/<name>`, or `None` if the drive is not there.
-fn open_mirror(dir: &Path, name: &str) -> Option<File> {
+#[cfg(not(target_os = "linux"))]
+fn open_mirror(dir: &Path, name: &str, _create: bool) -> Option<File> {
     std::fs::create_dir_all(dir).ok()?;
     let path = dir.join(name);
     if std::fs::metadata(&path)
@@ -166,11 +177,133 @@ fn open_mirror(dir: &Path, name: &str) -> Option<File> {
         let _ = std::fs::remove_file(&old);
         let _ = std::fs::rename(&path, &old);
     }
-    OpenOptions::new()
+    std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
         .ok()
+}
+
+/// Open (and rotate) `<dir>/<name>` without following a link anywhere on the
+/// way, or `None` if it is not there or is not a plain file of its own.
+#[cfg(target_os = "linux")]
+fn open_mirror(dir: &Path, name: &str, create: bool) -> Option<File> {
+    if create {
+        std::fs::create_dir_all(dir).ok()?;
+    }
+    let at = nofollow::open_dir(dir).ok()?;
+    nofollow::rotate(&at, name, ROTATE_AT);
+    nofollow::open_append(&at, name).ok()
+}
+
+/// Reaching a file by a path that a user may have built, from a process that
+/// may be root.
+///
+/// Checking a path and then opening it by name leaves a gap: whoever owns a
+/// folder along the way can swap it for a link in between. So every step is
+/// opened relative to the one before it, with `O_NOFOLLOW`, and the file is
+/// judged by the descriptor that was actually opened.
+#[cfg(target_os = "linux")]
+mod nofollow {
+    use std::ffi::{CString, OsStr};
+    use std::fs::File;
+    use std::io;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+    use std::path::{Component, Path};
+
+    fn c_name(name: &OsStr) -> io::Result<CString> {
+        CString::new(name.as_bytes()).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
+    }
+
+    fn open_at(dir: libc::c_int, name: &CString, flags: libc::c_int) -> io::Result<OwnedFd> {
+        // SAFETY: `name` is NUL-terminated and outlives the call; a
+        // non-negative result is a new descriptor owned by nobody else.
+        let fd = unsafe { libc::openat(dir, name.as_ptr(), flags | libc::O_CLOEXEC, 0o644) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: just opened, see above.
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+
+    /// `path` opened as a directory, refusing a link at any component and
+    /// any `.`/`..`: an absolute path that means exactly what it says.
+    pub(super) fn open_dir(path: &Path) -> io::Result<OwnedFd> {
+        if !path.is_absolute() {
+            return Err(io::Error::from(io::ErrorKind::InvalidInput));
+        }
+        let mut at = open_at(
+            libc::AT_FDCWD,
+            &c_name(OsStr::new("/"))?,
+            libc::O_RDONLY | libc::O_DIRECTORY,
+        )?;
+        for part in path.components() {
+            match part {
+                Component::RootDir => {}
+                Component::Normal(name) => {
+                    at = open_at(
+                        at.as_raw_fd(),
+                        &c_name(name)?,
+                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+                    )?;
+                }
+                _ => return Err(io::Error::from(io::ErrorKind::InvalidInput)),
+            }
+        }
+        Ok(at)
+    }
+
+    /// Append to `name` in `dir`, creating it. A link, a FIFO, a device, or a
+    /// file that has a second name somewhere else is refused: appending to
+    /// any of those writes somewhere other than this folder.
+    pub(super) fn open_append(dir: &OwnedFd, name: &str) -> io::Result<File> {
+        let file = File::from(open_at(
+            dir.as_raw_fd(),
+            &c_name(OsStr::new(name))?,
+            // Non-blocking so a FIFO planted under the name fails at once
+            // instead of stalling every log line waiting for a reader.
+            libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+        )?);
+        let meta = file.metadata()?;
+        if !meta.file_type().is_file() || meta.nlink() != 1 {
+            return Err(io::Error::from(io::ErrorKind::InvalidInput));
+        }
+        Ok(file)
+    }
+
+    /// Keep one previous file when `name` has grown past `limit`. Renaming and
+    /// removing act on the names in `dir` themselves, never on what a link
+    /// points to.
+    pub(super) fn rotate(dir: &OwnedFd, name: &str, limit: u64) {
+        let Ok(cur) = c_name(OsStr::new(name)) else {
+            return;
+        };
+        let old_name = Path::new(name).with_extension("log.old");
+        let Ok(old) = c_name(old_name.as_os_str()) else {
+            return;
+        };
+        // SAFETY: an all-zero `stat` is a valid value for fstatat to overwrite.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: valid descriptor, NUL-terminated name, writable `st`.
+        let rc = unsafe {
+            libc::fstatat(
+                dir.as_raw_fd(),
+                cur.as_ptr(),
+                &mut st,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if rc != 0 || st.st_mode & libc::S_IFMT != libc::S_IFREG || (st.st_size as u64) <= limit {
+            return;
+        }
+        // SAFETY: as above; both act on entries of `dir` only.
+        unsafe {
+            libc::unlinkat(dir.as_raw_fd(), old.as_ptr(), 0);
+            libc::renameat(dir.as_raw_fd(), cur.as_ptr(), dir.as_raw_fd(), old.as_ptr());
+        }
+    }
 }
 
 /// The subscriber's writer: the ordinary log file, plus the mirror.
@@ -213,6 +346,7 @@ impl<W: Write> Write for TeeLog<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::OpenOptions;
 
     /// A config file naming `dir` as the mirror target.
     fn config_at(path: &Path, dir: Option<&Path>) {
@@ -342,5 +476,61 @@ mod tests {
             stick.path().join("test.log.old").exists(),
             "the previous one is kept"
         );
+    }
+
+    /// The service is root, and the folder is one a user named: a link
+    /// anywhere on the way must not carry its writes somewhere else.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_link_on_the_way_or_under_the_name_is_not_followed() {
+        use std::os::unix::fs::symlink;
+
+        let home = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let cfg = home.path().join("config.toml");
+
+        // The folder itself is a link.
+        let linked = home.path().join("stick");
+        symlink(elsewhere.path(), &linked).unwrap();
+        config_at(&cfg, Some(&linked));
+        let mut mirror = MirrorLog::new(cfg.clone(), "test.log");
+        mirror.write_event(b"through a link\n");
+        assert!(mirror.active_path().is_none());
+        assert!(!elsewhere.path().join("test.log").exists());
+
+        // A real folder, with the file name planted as a link.
+        let real = home.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let victim = elsewhere.path().join("victim");
+        std::fs::write(&victim, b"keep").unwrap();
+        symlink(&victim, real.join("test.log")).unwrap();
+        config_at(&cfg, Some(&real));
+        let mut mirror = MirrorLog::new(cfg.clone(), "test.log");
+        mirror.write_event(b"into the victim\n");
+        assert!(mirror.active_path().is_none());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep");
+
+        // The name as a second name of another file.
+        std::fs::remove_file(real.join("test.log")).unwrap();
+        std::fs::hard_link(&victim, real.join("test.log")).unwrap();
+        let mut mirror = MirrorLog::new(cfg, "test.log");
+        mirror.write_event(b"into the victim\n");
+        assert!(mirror.active_path().is_none());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep");
+    }
+
+    /// A folder named in the config that is not there is a stick that is not
+    /// plugged in; its path is not built on the root filesystem instead.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_missing_configured_folder_is_not_created() {
+        let home = tempfile::tempdir().unwrap();
+        let cfg = home.path().join("config.toml");
+        let absent = home.path().join("media").join("STICK");
+        config_at(&cfg, Some(&absent));
+        let mut mirror = MirrorLog::new(cfg, "test.log");
+        mirror.write_event(b"nowhere\n");
+        assert!(mirror.active_path().is_none());
+        assert!(!home.path().join("media").exists());
     }
 }

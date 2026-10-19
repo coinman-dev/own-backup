@@ -1318,6 +1318,42 @@ impl BackupService for BackupServiceImpl {
         }))
     }
 
+    // --- Settings (config.toml) -------------------------------------------
+
+    /// The config as this service reads it. On Linux the window cannot always
+    /// read root's data folder itself, and this is the copy that counts.
+    async fn get_settings(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        let config =
+            tokio::task::spawn_blocking(own_backup_common::config::AppConfig::load_or_default)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+        json_reply(&config)
+    }
+
+    /// Change the fields present in the request (`SettingsPatch`), checked
+    /// for this caller (`settings`), and return what is stored now.
+    async fn save_settings(
+        &self,
+        req: Request<JsonRequest>,
+    ) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        let caller = crate::settings::caller_of(&req);
+        let patch: own_backup_common::config::SettingsPatch =
+            serde_json::from_str(&req.into_inner().json)
+                .map_err(|e| Status::invalid_argument(format!("bad settings JSON: {e}")))?;
+        let saved = tokio::task::spawn_blocking(move || {
+            crate::settings::save(
+                &own_backup_common::config::AppConfig::default_path(),
+                &patch,
+                caller,
+            )
+        })
+        .await
+        .map_err(|e| Status::internal(e.to_string()))??;
+        json_reply(&saved)
+    }
+
     // --- Direct engine operations ----------------------------------------
 
     async fn restore_volume(

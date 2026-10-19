@@ -45,6 +45,14 @@ service BackupService {
 
   rpc GetServiceStatus(Empty) returns (JsonReply);   // JSON: { version, uptime_secs, queue }
 
+  // --- Settings (config.toml) ---
+  // On Linux the file is in root's data folder, so the window cannot write it
+  // and asks the service instead. The service checks what it is given: the
+  // log mirror folder is a place root will create a file in. Only the fields
+  // present in the request change; data_dir and grpc_address are not settable.
+  rpc GetSettings(Empty) returns (JsonReply);         // JSON: AppConfig
+  rpc SaveSettings(JsonRequest) returns (JsonReply);  // in: SettingsPatch -> AppConfig
+
   // --- Direct engine operations (run in the privileged service) ---
   // Long-running; progress is streamed on StreamEvents with kinds
   //   "restore" / "verify" -> EngineProgress, "restore-disk" -> DiskRestoreProgress.

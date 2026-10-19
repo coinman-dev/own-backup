@@ -9,6 +9,7 @@ mod install;
 mod peer_access;
 mod scheduled_verification;
 mod scheduler;
+mod settings;
 mod shutdown;
 mod single_instance;
 

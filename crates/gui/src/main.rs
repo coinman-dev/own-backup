@@ -421,7 +421,10 @@ fn main() {
     // resolved (`set_ui_language`, sent as soon as it starts).
     own_backup_common::lang::set(&config.ui_language);
 
-    // Ensure data directory exists (config.toml is written here).
+    // Ensure data directory exists (config.toml is written here). Windows
+    // only: on Linux it is root's, made by the service, which also writes
+    // the config (`commands::settings`).
+    #[cfg(target_os = "windows")]
     let _ = std::fs::create_dir_all(&config.data_dir);
 
     // The icon beside the clock and its logon entry. Not on the medium: there

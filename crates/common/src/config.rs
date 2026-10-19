@@ -57,6 +57,76 @@ pub struct AppConfig {
     //   leave lying around half-built.
 }
 
+/// The settings a client may change through the service (`SaveSettings`):
+/// a field that is present is a change, an absent one keeps what the file
+/// has. Built from what the user actually changed ([`Self::between`]), so two
+/// windows saving different fields do not undo each other.
+///
+/// `data_dir` and `grpc_address` are not here on purpose: they say where the
+/// service keeps its state and where it listens, and a client of that service
+/// has no business moving either.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SettingsPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_level: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_mirror_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_compression_level: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remembered_backups: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_language: Option<String>,
+}
+
+impl SettingsPatch {
+    /// The fields that differ between `before` and `after`.
+    pub fn between(before: &AppConfig, after: &AppConfig) -> Self {
+        fn changed<T: PartialEq + Clone>(a: &T, b: &T) -> Option<T> {
+            (a != b).then(|| b.clone())
+        }
+        Self {
+            log_level: changed(&before.log_level, &after.log_level),
+            log_mirror_dir: changed(&before.log_mirror_dir, &after.log_mirror_dir),
+            default_compression_level: changed(
+                &before.default_compression_level,
+                &after.default_compression_level,
+            ),
+            remembered_backups: changed(&before.remembered_backups, &after.remembered_backups),
+            ui_language: changed(&before.ui_language, &after.ui_language),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Write the present fields into `config`. The language is kept to the
+    /// two codes the catalogs have; anything else reads as Russian, as
+    /// [`crate::lang::set`] would read it.
+    pub fn apply(&self, config: &mut AppConfig) {
+        if let Some(v) = &self.log_level {
+            config.log_level = v.clone();
+        }
+        if let Some(v) = &self.log_mirror_dir {
+            config.log_mirror_dir = v.trim().to_string();
+        }
+        if let Some(v) = self.default_compression_level {
+            config.default_compression_level = v;
+        }
+        if let Some(v) = &self.remembered_backups {
+            config.remembered_backups = v.clone();
+        }
+        if let Some(v) = &self.ui_language {
+            config.ui_language = if v.trim().eq_ignore_ascii_case("en") {
+                "en".into()
+            } else {
+                "ru".into()
+            };
+        }
+    }
+}
+
 fn default_compression_level() -> i32 {
     3
 }
@@ -359,6 +429,50 @@ mod tests {
         )
         .expect("an old config must still load");
         assert_eq!(back.default_compression_level, 3);
+    }
+
+    #[test]
+    fn a_settings_patch_carries_only_what_changed() {
+        let before = AppConfig::default();
+        let mut after = before.clone();
+        after.log_level = "debug".into();
+        after.data_dir = PathBuf::from("/elsewhere");
+        let patch = SettingsPatch::between(&before, &after);
+        assert_eq!(patch.log_level.as_deref(), Some("debug"));
+        assert!(patch.log_mirror_dir.is_none());
+        assert!(patch.remembered_backups.is_none());
+        // Not a field a client may move.
+        let json = serde_json::to_string(&patch).unwrap();
+        assert!(!json.contains("data_dir"), "{json}");
+        assert!(SettingsPatch::between(&before, &before).is_empty());
+
+        // Another window's change to a different field survives the apply.
+        let mut file = AppConfig::default();
+        file.remembered_backups = vec!["/mnt/b/one.qcow2".into()];
+        patch.apply(&mut file);
+        assert_eq!(file.log_level, "debug");
+        assert_eq!(
+            file.remembered_backups,
+            vec!["/mnt/b/one.qcow2".to_string()]
+        );
+        assert_eq!(file.data_dir, AppConfig::default().data_dir);
+    }
+
+    #[test]
+    fn a_settings_patch_keeps_the_language_to_the_two_codes() {
+        let mut cfg = AppConfig::default();
+        SettingsPatch {
+            ui_language: Some("EN ".into()),
+            ..Default::default()
+        }
+        .apply(&mut cfg);
+        assert_eq!(cfg.ui_language, "en");
+        SettingsPatch {
+            ui_language: Some("de".into()),
+            ..Default::default()
+        }
+        .apply(&mut cfg);
+        assert_eq!(cfg.ui_language, "ru");
     }
 
     #[test]

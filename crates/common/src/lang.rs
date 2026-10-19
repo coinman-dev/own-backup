@@ -1,11 +1,12 @@
 //! The language of every message a person reads: Russian or English.
 //!
-//! Chosen in the window («Параметры → Оформление → Язык»); «Как в Windows» is
+//! Chosen in the window («Параметры → Оформление → Язык»); «Как в системе» is
 //! resolved there, and the result — `ru` or `en` — is written to
-//! `config.toml` as `ui_language` and handed to the GUI process directly. The
-//! service follows the file while running, the same way it follows the log
-//! level ([`crate::log_level`]), so a job that runs at night reports in the
-//! language the window last spoke.
+//! `config.toml` as `ui_language` (by the window on Windows, by the service
+//! on its behalf on Linux, where the file is root's) and handed to the GUI
+//! process directly. The service follows the file while running, the same way
+//! it follows the log level ([`crate::log_level`]), so a job that runs at
+//! night reports in the language the window last spoke.
 //!
 //! Russian until told otherwise: the CLI, every test, and a config written
 //! before the setting existed. That is also why messages go through
