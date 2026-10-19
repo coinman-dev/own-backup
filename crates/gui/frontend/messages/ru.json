@@ -1183,5 +1183,6 @@
   "disk_mapper_crypt": "Открытый LUKS",
   "disk_mapper_lvm": "Том LVM",
   "disk_mapper_crypt_meta": "расшифрованный том",
-  "disk_mapper_lvm_meta": "логический том"
+  "disk_mapper_lvm_meta": "логический том",
+  "rd_target_running_hidden": "Диск работающей системы ({disks}) здесь не предлагается: его восстанавливают с загрузочного носителя."
 }

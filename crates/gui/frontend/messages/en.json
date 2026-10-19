@@ -1151,5 +1151,6 @@
   "disk_mapper_crypt": "Opened LUKS",
   "disk_mapper_lvm": "LVM volume",
   "disk_mapper_crypt_meta": "decrypted volume",
-  "disk_mapper_lvm_meta": "logical volume"
+  "disk_mapper_lvm_meta": "logical volume",
+  "rd_target_running_hidden": "The disk of the running system ({disks}) is not offered here: it is restored from the boot medium."
 }

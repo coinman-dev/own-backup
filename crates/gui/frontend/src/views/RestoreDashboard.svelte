@@ -15,6 +15,8 @@
   import InfoModal from '../components/InfoModal.svelte';
   import PasswordField from '../components/PasswordField.svelte';
   import DiskMap from '../components/DiskMap.svelte';
+  import { mapperKind, diskCaption } from '../lib/diskNames';
+  import { isWindows } from '../lib/platformStore.svelte';
   import { diskSegments, msrKept } from '../lib/diskLayout';
   import type { MapSlot } from '../components/DiskMap.svelte';
   import { m } from '../lib/paraglide/messages';
@@ -322,12 +324,37 @@
   function isBootableCopy(d: DiskInfo): boolean {
     return job.disk_source != null && job.disk_source.disk_number === diskNumber(d);
   }
+  /** The volumes this copy was made of. A job says; a copy added by hand
+   *  (made by the CLI, or elsewhere) has no job, and then its own record does
+   *  (`source_device`). Without that a copy of a volume that is right here
+   *  read "диск этой копии не подключён", and with no map there was nothing
+   *  to click for step 2 — no restore at all. */
+  const copySources = $derived(
+    job.sources.length > 0
+      ? job.sources
+      : activeInfo?.source_device
+        ? [activeInfo.source_device]
+        : [],
+  );
+  /** Is this partition one the copy was made of? By the name the job keeps
+   *  (`/dev/disk/by-partuuid/…`, `C:`) or, on Linux, by the kernel's name — a
+   *  copy made from the command line names `/dev/vdb1`. */
+  function isCopySource(p: PartitionInfo): boolean {
+    const dev = partDevice(p);
+    return (
+      (!!dev && copySources.includes(dev)) ||
+      (!!p.kernel_device && copySources.includes(p.kernel_device))
+    );
+  }
+  /** The same, as the devices the map highlights. */
+  const copySourceDevices = $derived(
+    engine.disks.flatMap((d) =>
+      d.partitions.filter(isCopySource).map((p) => partDevice(p) ?? ''),
+    ).filter((dev) => dev !== '').concat(copySources),
+  );
   function diskHasSelection(d: DiskInfo): boolean {
     if (isBootableCopy(d)) return true;
-    return d.partitions.some((p) => {
-      const dev = partDevice(p);
-      return !!dev && job.sources.includes(dev);
-    });
+    return d.partitions.some(isCopySource);
   }
   // The archived disk map, in priority order:
   //  1. the snapshot embedded in the IMAGE FILE (works without jobs.json / on a
@@ -370,6 +397,23 @@
     }));
   });
   const systemDisks = $derived(engine.disks);
+  /** Disks a copy can be restored onto. Not a device-mapper volume: the
+   *  inventory lists an opened LUKS container or an LVM volume as a "disk" of
+   *  its own, but it has no partition table to write and is a view of another
+   *  disk. And on Linux not the disk the running system stands on — the
+   *  running root, its /boot and ESP are there, and that disk is restored
+   *  from the boot medium. (Windows keeps its own rule: the service protects
+   *  the running system's partitions and its ESP, and a data partition of
+   *  that disk is still a target.) */
+  function isRunningSystemDisk(d: DiskInfo): boolean {
+    return !isWindows() && d.partitions.some((p) => p.is_system);
+  }
+  const targetDisks = $derived(
+    systemDisks.filter((d) => !mapperKind(d) && !isRunningSystemDisk(d)),
+  );
+  const hiddenSystemDisks = $derived(
+    systemDisks.filter((d) => !mapperKind(d) && isRunningSystemDisk(d)),
+  );
 
   // --- Restore-mapping wizard (what → where) --------------------------------
   // Step 1: pick a target disk below (others collapse; source selection clears).
@@ -425,11 +469,11 @@
     const d = backedUpDisks[0];
     if (!d) return [] as number[];
     return d.partitions
-      .filter((p) => !!p.volume_device && job.sources.includes(p.volume_device))
+      .filter(isCopySource)
       .map((p) => p.index);
   });
 
-  const targetDisk = $derived(systemDisks.find((d) => d.device_id === targetDiskId) ?? null);
+  const targetDisk = $derived(targetDisks.find((d) => d.device_id === targetDiskId) ?? null);
   const srcDisk = $derived(backedUpDisks[0] ?? null);
 
   // A GPT stores partition positions as LBA numbers, so the same table means
@@ -1919,7 +1963,7 @@
           <DiskMap
             disk={d}
             center={i === 0 ? copyNav : undefined}
-            selected={targetDiskId ? [] : job.sources}
+            selected={targetDiskId ? [] : copySourceDevices}
             selectedIndices={targetDiskId ? [] : [...(activeInfo?.backed_up_parts ?? []), ...layoutOnlyParts]}
             readonly
             boot={i === 0 && isBootable}
@@ -2053,6 +2097,11 @@
         {#if !targetDiskId}{m.rd_where_sub_disk()}{:else}{m.rd_where_sub_part()}{/if}
       </span>
     </div>
+    {#if hiddenSystemDisks.length > 0 && !targetDiskId}
+      <div class="hint-small">
+        {m.rd_target_running_hidden({ disks: hiddenSystemDisks.map((d) => diskCaption(d)).join(', ') })}
+      </div>
+    {/if}
     {#if systemDisks.length === 0}
       <div class="loading-note searching">
         <span class="spinner" aria-hidden="true"></span>
@@ -2060,7 +2109,7 @@
       </div>
     {:else if !targetDiskId}
       <div class="disks">
-        {#each systemDisks as d (d.device_id)}
+        {#each targetDisks as d (d.device_id)}
           <DiskMap disk={d} onDisk={() => selectTargetDisk(d)} />
         {/each}
       </div>
