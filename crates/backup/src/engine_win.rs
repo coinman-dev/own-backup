@@ -9,107 +9,77 @@
 //! volume — directly mountable by Windows. Whole-disk backups and VSS
 //! integration come in later phases.
 //!
-//! The volume pipeline is the shared one (`engine_core::volume`), run on the
-//! Windows platform; everything else here is Windows-only, item by item.
+//! The volume copy itself is the shared one (`engine_core::volume`), run on
+//! [`WinPlatform`].
 
-// Until the module is Windows-only again, its Linux test build has nothing
-// left to use most of these imports with.
-#![cfg_attr(not(target_os = "windows"), allow(unused_imports))]
+#![cfg(target_os = "windows")]
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "windows")]
-use std::time::Duration;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-#[cfg(target_os = "windows")]
-use tracing::debug;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-#[cfg(target_os = "windows")]
 use own_backup_common::gpt::DiskBackupManifest;
-use own_backup_common::progress::BackupProgress;
-#[cfg(target_os = "windows")]
-use own_backup_common::progress::RestoreProgress;
+use own_backup_common::progress::{BackupProgress, RestoreProgress};
 use own_backup_common::types::{BackupStatus, BackupType, ImageFormat};
 use own_backup_common::{tr, OwnBackupError, Result};
-#[cfg(target_os = "windows")]
 use own_backup_snapshot::VssSnapshotSession;
 
-#[cfg(target_os = "windows")]
 use crate::block_source::BlockSource;
-#[cfg(target_os = "windows")]
 use crate::checksum::compute_block_checksum;
-#[cfg(target_os = "windows")]
 use crate::exclusions::ByteRanges;
-#[cfg(target_os = "windows")]
 use crate::exclusions_win::collect_excluded_ranges;
-#[cfg(target_os = "windows")]
-use crate::gpt_writer::disk_gpt_write_ops;
-use crate::gpt_writer::DEFAULT_PARTITION_OFFSET;
+use crate::gpt_writer::{disk_gpt_write_ops, DEFAULT_PARTITION_OFFSET};
 use crate::raw_copy::copy_used_blocks;
-#[cfg(target_os = "windows")]
-use crate::sidecar::{read_embedded_sidecar, read_sidecar, write_sidecar};
-use crate::sidecar::{sidecar_path_for, ChainRole, Sidecar, SidecarInfo};
-#[cfg(target_os = "windows")]
+use crate::sidecar::{
+    read_embedded_sidecar, read_sidecar, sidecar_path_for, write_sidecar, ChainRole, Sidecar,
+    SidecarInfo,
+};
 use crate::used_sectors::{AllUsedMap, UsedSectorMap};
-#[cfg(target_os = "windows")]
 use crate::used_sectors_win::NtfsUsedSectorMap;
-#[cfg(target_os = "windows")]
 use crate::vhdx::{
     attach_vhdx, create_differencing_vhdx, create_dynamic_vhdx, detach_vhdx, merge_into_parent,
     AttachMode, VhdxCreateOptions,
 };
-#[cfg(target_os = "windows")]
 use crate::vhdx_bat::allocated_payload_blocks;
-#[cfg(target_os = "windows")]
 use crate::win_device::{normalize_device_path, WinRawDevice};
 
 // The platform-independent half of this engine lives in `engine_core`, shared
 // with the Linux engine; the `pub` names are the ones this engine's callers know.
-#[cfg(target_os = "windows")]
 use crate::engine_core::chain::validate_disk_parent;
-#[cfg(target_os = "windows")]
 use crate::engine_core::disk_image::{
     container_kind, disk_source_token, DiskCompositeReader, DiskRegion, DiskUsedMap,
 };
 pub use crate::engine_core::disk_image::{DiskBackupRequest, DiskPartitionBackup};
-#[cfg(target_os = "windows")]
 use crate::engine_core::partition_prep::{
     linux_fs_exclusions, prepare_encrypted_partition_map, PreparedMap,
 };
-#[cfg(target_os = "windows")]
 pub(crate) use crate::engine_core::read::ImageReadSource;
 pub use crate::engine_core::read::{load_sidecar_of, load_sidecar_with_keys};
-#[cfg(target_os = "windows")]
 use crate::engine_core::source::{
     disk_sector_size, disk_window, is_bitlocker_locked, open_bitlocker_source, BitLockerSource,
 };
-use crate::engine_core::target::settled_image_path;
 pub use crate::engine_core::target::DEFAULT_BLOCK_SIZE;
-#[cfg(target_os = "windows")]
 use crate::engine_core::target::{
     check_encrypted_target, container_ext, create_disk_obk_target, entries_kept_reason,
-    may_publish, no_patterns, refuse_existing_outputs, report_categories, snapshot_wanted,
-    volume_root_of, whole_disk_image_manifest, DiskImagePlan, ImageTarget,
+    may_publish, no_patterns, refuse_existing_outputs, report_categories, settled_image_path,
+    snapshot_wanted, volume_root_of, whole_disk_image_manifest, DiskImagePlan, ImageTarget,
 };
 pub use crate::engine_core::verify::{
     verify_image, verify_image_scoped, verify_image_with_keys, VerifyScope, VerifySummary,
 };
 pub use crate::engine_core::volume::{VolumeBackupRequest, VolumeBackupSummary};
-#[cfg(target_os = "windows")]
 use crate::engine_core::volume_exclusions::scan_ntfs_exclusions_by_mft;
-#[cfg(target_os = "windows")]
 use crate::engine_platform_win::WinPlatform;
 
-#[cfg(all(test, target_os = "windows"))]
+#[cfg(test)]
 #[path = "engine_namespace_tests.rs"]
 mod new_image_namespace_tests;
 
 /// Open a freshly-attached virtual disk for writing; the PhysicalDrive device
 /// node can take a moment to appear after AttachVirtualDisk.
-#[cfg(target_os = "windows")]
 fn open_write_with_retry(path: &str) -> Result<WinRawDevice> {
     let mut last_err: Option<OwnBackupError> = None;
     for attempt in 0..20 {
@@ -144,7 +114,6 @@ pub fn backup_volume(
 /// Возвращает стража: пока он жив, диск нельзя изменить. Держать его надо до
 /// конца копирования — том остаётся смонтированным, и Windows пишет в него,
 /// когда ей вздумается (журнал, метки времени, System Volume Information).
-#[cfg(target_os = "windows")]
 pub(crate) fn unlock_source_with_windows(
     read_path: &str,
     passphrase: &str,
@@ -244,7 +213,6 @@ pub(crate) fn unlock_source_with_windows(
 /// `None` is not an error. A machine on a plain BIOS has no such entries, and
 /// an unelevated run cannot read them; neither is a reason to spoil a backup
 /// that succeeded.
-#[cfg(target_os = "windows")]
 fn boot_entries_for_image(bootable: bool) -> Option<crate::efivars::BootBackup> {
     if !bootable {
         info!("not a bootable copy — the machine's boot entries are not part of it");
@@ -266,7 +234,6 @@ fn boot_entries_for_image(bootable: bool) -> Option<crate::efivars::BootBackup> 
 }
 
 /// Outcome of a completed whole-disk backup.
-#[cfg(target_os = "windows")]
 pub struct DiskBackupSummary {
     pub image_path: PathBuf,
     pub bytes_copied: u64,
@@ -306,7 +273,6 @@ pub struct DiskBackupSummary {
 /// One prepared partition: its VSS snapshot, decrypt params, used-map and the
 /// GPT entry it fills. Snapshots for all partitions are taken up front so the
 /// image is cross-volume consistent, then copied in one pass.
-#[cfg(target_os = "windows")]
 struct PreparedPartition {
     part_index: u32,
     device: String,
@@ -355,7 +321,6 @@ struct PreparedPartition {
 /// yet acted on; LUKS-decrypted volumes are captured whole.
 ///
 /// `tick` reports "prepare"-phase progress (and can cancel by returning `Err`).
-#[cfg(target_os = "windows")]
 fn prepare_partition_map(
     read_path: &str,
     block_size: u32,
@@ -560,7 +525,6 @@ fn prepare_partition_map(
 /// partition, and patch FAT/exFAT metadata; NTFS/ReFS catalog true-removal
 /// inside the whole-disk image (mount-&-delete across volumes) is not yet done —
 /// excluded NTFS files remain as zero-filled ghosts (data still never leaves).
-#[cfg(target_os = "windows")]
 pub fn backup_disk(
     req: &DiskBackupRequest,
     mut progress: impl FnMut(&BackupProgress) -> Result<()>,
@@ -615,7 +579,6 @@ pub fn backup_disk(
     Ok(summary)
 }
 
-#[cfg(target_os = "windows")]
 fn backup_disk_inner(
     req: &DiskBackupRequest,
     owned_file: Option<std::fs::File>,
@@ -1658,7 +1621,6 @@ fn backup_disk_inner(
 /// differential whole-disk backup. The child inherits the parent's virtual size
 /// and its GPT (resolved through the chain), so no GPT is written here.
 /// `image_size` is the parent's virtual size (used only to size the qcow2 child).
-#[cfg(target_os = "windows")]
 fn create_disk_child_target(
     image_path: &Path,
     parent_path: &Path,
@@ -1720,7 +1682,6 @@ fn create_disk_child_target(
 
 /// Create an image target of `disk_size` bytes with no parent (full backup).
 /// Returns the target and its logical sector size.
-#[cfg(target_os = "windows")]
 fn create_disk_image_target(
     image_path: &Path,
     disk_size: u64,
@@ -1764,7 +1725,6 @@ fn create_disk_image_target(
 }
 
 /// Parameters for a volume restore.
-#[cfg(target_os = "windows")]
 pub struct VolumeRestoreRequest {
     /// Backup image (`.vhdx`) with its `.obkm` sidecar next to it.
     pub image_path: PathBuf,
@@ -1778,7 +1738,6 @@ pub struct VolumeRestoreRequest {
 }
 
 /// Outcome of a completed restore.
-#[cfg(target_os = "windows")]
 pub struct VolumeRestoreSummary {
     pub blocks_restored: u64,
     pub bytes_restored: u64,
@@ -1880,7 +1839,6 @@ impl Drop for TakenVolume {
 }
 
 /// Restore a volume image onto a target device. Overwrites the target!
-#[cfg(target_os = "windows")]
 pub fn restore_volume(
     req: &VolumeRestoreRequest,
     mut progress: impl FnMut(&RestoreProgress) -> Result<()>,
@@ -2014,7 +1972,6 @@ pub fn restore_volume(
 
 /// Restore a whole disk from a `.obdm` manifest onto a target physical drive.
 /// DESTRUCTIVE — the target is repartitioned and every partition overwritten.
-#[cfg(target_os = "windows")]
 pub struct DiskRestoreRequest {
     /// Path to the `.obdm` disk-backup manifest (its images live alongside).
     pub manifest_path: PathBuf,
@@ -2028,7 +1985,6 @@ pub struct DiskRestoreRequest {
 }
 
 /// Progress for a whole-disk restore.
-#[cfg(target_os = "windows")]
 pub struct DiskRestoreProgress {
     /// "gpt" while writing the partition table, "partition" while copying data.
     pub phase: String,
@@ -2042,7 +1998,6 @@ pub struct DiskRestoreProgress {
     pub bytes_written: u64,
 }
 
-#[cfg(target_os = "windows")]
 pub struct DiskRestoreSummary {
     pub partitions: usize,
     pub bytes_written: u64,
@@ -2057,7 +2012,6 @@ pub struct DiskRestoreSummary {
 ///
 /// The caller is responsible for the destructive confirmation and the
 /// [`crate`]-external system-disk guard (`own_backup_restore::guard`).
-#[cfg(target_os = "windows")]
 pub fn restore_disk(
     req: &DiskRestoreRequest,
     progress: impl FnMut(&DiskRestoreProgress) -> Result<()>,
@@ -2082,7 +2036,6 @@ pub fn restore_disk(
 /// the REAL GPT (real disk + partition GUIDs from the manifest — the image
 /// itself carries random GUIDs to avoid colliding with the live source disk).
 /// The real GUIDs keep a UEFI system bootable without touching the BCD.
-#[cfg(target_os = "windows")]
 fn restore_disk_from_image(
     req: &DiskRestoreRequest,
     mut progress: impl FnMut(&DiskRestoreProgress) -> Result<()>,
@@ -2215,7 +2168,6 @@ fn restore_disk_from_image(
 }
 
 /// Legacy whole-disk restore from a `.obdm` manifest + per-volume images.
-#[cfg(target_os = "windows")]
 fn restore_disk_legacy(
     req: &DiskRestoreRequest,
     mut progress: impl FnMut(&DiskRestoreProgress) -> Result<()>,
@@ -2351,7 +2303,6 @@ fn restore_disk_legacy(
 
 /// What [`finalize_boot`] left behind, for the restore report.
 #[derive(Debug, Default)]
-#[cfg(target_os = "windows")]
 pub struct BootFinalizeReport {
     /// The entry `bcdboot` left as the store's default — the one that boots the
     /// restored Windows. `None` when the store could not be read.
@@ -2387,7 +2338,6 @@ pub struct BootFinalizeReport {
 /// with `0xc000000e \Windows\system32\winload.efi` (2026-07-30). Trimming the
 /// display order to the default hides them without deleting anything: the
 /// entries stay in the store for anyone who wants to look.
-#[cfg(target_os = "windows")]
 pub fn finalize_boot(
     windows_volume: &str,
     system_volume: Option<&str>,
@@ -2481,7 +2431,6 @@ pub fn finalize_boot(
 ///
 /// Best-effort — a copy whose Windows directory is spelled differently, or a
 /// file that will not go, simply leaves the one-time recovery screen in place.
-#[cfg(target_os = "windows")]
 fn clear_boot_status(windows_volume: &str) -> bool {
     let path = format!(
         r"{}\Windows\bootstat.dat",
@@ -2522,7 +2471,6 @@ fn clear_boot_status(windows_volume: &str) -> bool {
 /// failure. The output is read as lossy UTF-8 on purpose: everything this code
 /// looks for (identifiers, `partition=X:`) is ASCII, while bcdedit's prose is
 /// localised and in the console code page.
-#[cfg(target_os = "windows")]
 fn bcdedit(args: &[&str]) -> std::result::Result<String, String> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -2545,7 +2493,6 @@ fn bcdedit(args: &[&str]) -> std::result::Result<String, String> {
 }
 
 /// The first `{guid}` in `text`, as bcdedit prints identifiers.
-#[cfg(target_os = "windows")]
 fn first_identifier(text: &str) -> Option<String> {
     let start = text.find('{')?;
     let end = text[start..].find('}')? + start;
@@ -2557,7 +2504,6 @@ fn first_identifier(text: &str) -> Option<String> {
 /// Loader entries in a store, as `(identifier, is_ramdisk)` pairs. A ramdisk
 /// loader is the Recovery Environment: it never appears in the boot menu and
 /// must not be counted with the menu entries.
-#[cfg(target_os = "windows")]
 fn loader_entries(store: &str) -> Vec<(String, bool)> {
     let Ok(text) = bcdedit(&["/store", store, "/enum", "osloader", "/v"]) else {
         return Vec::new();
@@ -2576,7 +2522,6 @@ fn loader_entries(store: &str) -> Vec<(String, bool)> {
 /// point at the Windows volume that was just restored, nothing is changed and
 /// the reason is reported — a wrong guess here is an unbootable machine, while
 /// an untouched menu is merely the extra question the user already sees.
-#[cfg(target_os = "windows")]
 fn trim_boot_menu(esp_volume: &str, uefi: bool, windows_volume: &str) -> BootFinalizeReport {
     let esp = esp_volume.trim_end_matches(['\\', '/']);
     let store = if uefi {
@@ -2666,14 +2611,12 @@ fn trim_boot_menu(esp_volume: &str, uefi: bool, windows_volume: &str) -> BootFin
 /// Its existence is what says "this image is mounted RW right now" — the
 /// consolidation guard reads it, because folding an increment into a base
 /// somebody is writing through would corrupt both.
-#[cfg(target_os = "windows")]
 pub fn child_path_for(image_path: &Path) -> PathBuf {
     let mut name = image_path.file_name().unwrap_or_default().to_os_string();
     name.push(".mount_rw.avhdx");
     image_path.with_file_name(name)
 }
 
-#[cfg(target_os = "windows")]
 fn scratch_path_for(image_path: &Path) -> PathBuf {
     let mut name = image_path.file_name().unwrap_or_default().to_os_string();
     name.push(".mount_rw.scratch");
@@ -2682,7 +2625,6 @@ fn scratch_path_for(image_path: &Path) -> PathBuf {
 
 /// Mount an image; volumes inside get drive letters from Windows.
 /// The attachment survives process exit — use [`unmount_image`] to detach.
-#[cfg(target_os = "windows")]
 pub fn mount_image(image_path: &Path, read_write: bool) -> Result<String> {
     mount_image_with_keys(image_path, read_write, None)
 }
@@ -2690,7 +2632,6 @@ pub fn mount_image(image_path: &Path, read_write: bool) -> Result<String> {
 /// The same, able to mount an encrypted image. Manual mounting is where a
 /// person types a password (§7.4); the service passes its own keys for the
 /// maintenance mounts it does inside a job.
-#[cfg(target_os = "windows")]
 pub fn mount_image_with_keys(
     image_path: &Path,
     read_write: bool,
@@ -2760,7 +2701,6 @@ pub fn mount_image_with_keys(
 /// says, which on a server or the boot medium is offline; and Windows letters
 /// only volumes it has never met, which a backup image rarely is — see
 /// [`crate::letters_win::letter_data_volumes_on_disk`].
-#[cfg(target_os = "windows")]
 fn letter_mounted_image(physical: &str) {
     let Some(disk) = disk_number_from_physical(physical) else {
         return;
@@ -2778,7 +2718,6 @@ fn letter_mounted_image(physical: &str) {
 }
 
 /// Detach a previously mounted image.
-#[cfg(target_os = "windows")]
 pub fn unmount_image(image_path: &Path) -> Result<()> {
     // qcow2 mounts are tracked in-process (the target dies with us).
     if qcow2_mounts().lock().unwrap().contains_key(image_path) {
@@ -2884,7 +2823,6 @@ pub fn unmount_image(image_path: &Path) -> Result<()> {
 
 /// One qcow2 image currently shown to Windows as a disk, and the scratch
 /// overlay behind it when the mount is writable.
-#[cfg(target_os = "windows")]
 struct MountedImage {
     attached: crate::attach_win::Attached,
     overlay: Option<std::sync::Arc<std::sync::Mutex<crate::overlay::WritableOverlaySource>>>,
@@ -2893,18 +2831,15 @@ struct MountedImage {
 /// qcow2 mounts served by THIS process: the target dies with the process, so
 /// this only makes sense inside the long-running service (or a foreground CLI
 /// command).
-#[cfg(target_os = "windows")]
 static QCOW2_MOUNTS: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, MountedImage>>> =
     std::sync::OnceLock::new();
 
-#[cfg(target_os = "windows")]
 fn qcow2_mounts() -> &'static std::sync::Mutex<HashMap<PathBuf, MountedImage>> {
     QCOW2_MOUNTS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
 /// Is this image (qcow2) currently served to Windows by a mount of ours?
 /// Companion to [`child_path_for`] for the consolidation guard.
-#[cfg(target_os = "windows")]
 pub fn qcow2_mounted_here(image_path: &Path) -> bool {
     qcow2_mounts()
         .lock()
@@ -2916,7 +2851,6 @@ pub fn qcow2_mounted_here(image_path: &Path) -> bool {
 /// serve it over an iSCSI target of ours and have Windows' own initiator log
 /// in. Windows mounts the filesystem inside and assigns a drive letter.
 /// Returns the physical disk path (`\\.\PhysicalDriveN`).
-#[cfg(target_os = "windows")]
 fn mount_qcow2_via_iscsi(image_path: &Path, read_write: bool) -> Result<String> {
     if let Some(existing) = qcow2_mounts().lock().unwrap().get(image_path) {
         return Ok(existing.attached.physical.clone());
@@ -2975,7 +2909,6 @@ fn mount_qcow2_via_iscsi(image_path: &Path, read_write: bool) -> Result<String> 
 /// everything the filesystem driver writes into a scratch file beside the
 /// image, and for an encrypted image that file would be plaintext — the one
 /// thing §7.4 says must not happen. The encrypted scratch is still to come.
-#[cfg(target_os = "windows")]
 fn mount_obk_via_iscsi(
     image_path: &Path,
     read_write: bool,
@@ -3021,7 +2954,6 @@ fn mount_obk_via_iscsi(
     Ok(physical)
 }
 
-#[cfg(target_os = "windows")]
 fn unmount_qcow2_via_iscsi(image_path: &Path) -> Result<()> {
     let entry = qcow2_mounts().lock().unwrap().remove(image_path);
     let Some(entry) = entry else {
@@ -3131,9 +3063,7 @@ fn unmount_qcow2_via_iscsi(image_path: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
 use crate::unlock_probe::probe_decrypted;
-#[cfg(target_os = "windows")]
 pub use crate::unlock_probe::DecryptedProbe;
 
 /// How an encrypted partition can be opened, asked of the volume itself.
@@ -3291,7 +3221,6 @@ fn probe_by_windows(volume_device: &str, passphrase: &str) -> Result<DecryptedPr
 /// подходит" to a question about something else. A source that is not an
 /// encrypted container at all returns `ok = true` with empty info — there was
 /// nothing to unlock.
-#[cfg(target_os = "windows")]
 pub fn unlock_and_probe(device_path: &str, passphrase: &str) -> Result<DecryptedProbe> {
     let src = normalize_device_path(device_path);
     let mut dev = WinRawDevice::open_read(&src)?;
@@ -3341,7 +3270,6 @@ pub fn unlock_and_probe(device_path: &str, passphrase: &str) -> Result<Decrypted
     probe_decrypted(&mut view)
 }
 
-#[cfg(target_os = "windows")]
 fn get_diskpart_virtual_disks() -> Vec<(u32, String)> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -3440,7 +3368,6 @@ fn get_diskpart_virtual_disks() -> Vec<(u32, String)> {
     results
 }
 
-#[cfg(target_os = "windows")]
 pub fn get_all_active_mounts(
     internal_mounts: &[own_backup_common::engine_dto::ActiveMountDto],
 ) -> Vec<own_backup_common::engine_dto::ActiveMountDto> {
@@ -3478,7 +3405,6 @@ pub fn get_all_active_mounts(
 
 /// Is this file a qcow2? By its magic, not by its extension: what a backup is
 /// called is the user's business, what it is is the file's own.
-#[cfg(target_os = "windows")]
 fn is_qcow2_file(path: &Path) -> bool {
     use std::io::Read;
     let Ok(mut f) = std::fs::File::open(path) else {
@@ -3489,7 +3415,6 @@ fn is_qcow2_file(path: &Path) -> bool {
 }
 
 /// Parse `\\.\PhysicalDriveN` → `N`.
-#[cfg(target_os = "windows")]
 fn disk_number_from_physical(physical_path: &str) -> Option<u32> {
     physical_path
         .rsplit("PhysicalDrive")
