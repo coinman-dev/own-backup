@@ -67,5 +67,69 @@
   "linux.dm_snapshot_invalid": {
     "ru": "Снимок тома %{volume} перестал быть целым во время копирования (%{state}): область изменений в папке назначения переполнилась или в неё не удалось записать. Копия не согласована и не сохранена — проверьте свободное место в папке назначения и повторите.",
     "en": "The snapshot of %{volume} stopped being whole during the copy (%{state}): its change area in the destination folder filled up or could not be written. The copy is not consistent and was not kept — check the free space in the destination folder and try again."
+  },
+  "linux.in_use_partition": {
+    "ru": "Раздел %{volume} сейчас используется (%{users}). Снимка обычного раздела в Linux нет; на время своего копирования неизменным удерживается только небольшой раздел (не больше 4 ГиБ — например, /boot или ESP), на котором нет ни корня системы, ни данных и журналов программы, ни папки назначения. Этот раздел не подходит: %{reason}. Копия тома, в который идёт запись, может не открыться, поэтому она не сделана. Скопируйте его с загрузочного носителя или отключите (отмонтируйте) перед копированием.",
+    "en": "Partition %{volume} is in use (%{users}). Linux has no snapshot of a plain partition; only a small one (up to 4 GiB, such as /boot or the ESP) that holds neither the system root, nor the program's data and logs, nor the destination folder is held still for the length of its own copy. This one does not qualify: %{reason}. A copy of a volume that is being written may not open, so none was made. Copy it from the bootable media, or unmount it before the backup."
+  },
+  "linux.short_swap": {
+    "ru": "он используется для подкачки",
+    "en": "it is used as swap"
+  },
+  "linux.short_holders": {
+    "ru": "на нём открыт %{holders} — копируйте открытый том, а не раздел под ним",
+    "en": "%{holders} is opened on it — back up the opened volume rather than the partition under it"
+  },
+  "linux.short_no_mount": {
+    "ru": "не удалось найти, где он смонтирован",
+    "en": "where it is mounted could not be found"
+  },
+  "linux.short_root": {
+    "ru": "на нём корень системы (/)",
+    "en": "it holds the system root (/)"
+  },
+  "linux.short_no_destination": {
+    "ru": "неизвестна папка назначения копии",
+    "en": "the destination folder of the copy is not known"
+  },
+  "linux.short_holds": {
+    "ru": "в его точке монтирования %{mount} находится %{path}, куда программа пишет во время копирования",
+    "en": "its mount point %{mount} holds %{path}, which the program writes to during the copy"
+  },
+  "linux.short_too_big": {
+    "ru": "он больше %{limit} (%{size})",
+    "en": "it is larger than %{limit} (%{size})"
+  },
+  "linux.short_size_unknown": {
+    "ru": "не удалось узнать его размер",
+    "en": "its size could not be read"
+  },
+  "linux.short_filesystem": {
+    "ru": "файловую систему %{fstype} нельзя ни заморозить, ни на время перемонтировать только для чтения",
+    "en": "a %{fstype} filesystem can be neither frozen nor remounted read-only for a while"
+  },
+  "linux.hold_failed": {
+    "ru": "Не удалось удержать раздел %{volume} (%{mount}) неизменным на время копирования: %{error}. Копия не сделана; раздел работает как прежде.",
+    "en": "Could not hold partition %{volume} (%{mount}) still for its copy: %{error}. No copy was made; the partition works as before."
+  },
+  "linux.hold_marker_failed": {
+    "ru": "Не удалось записать отметку об удержании раздела %{volume} в %{dir}: %{error}. Без неё раздел нельзя было бы отпустить после аварийного завершения, поэтому он не заморожен и копия не сделана.",
+    "en": "Could not write the hold marker of partition %{volume} into %{dir}: %{error}. Without it the partition could not be released after a crash, so it was not frozen and no copy was made."
+  },
+  "linux.freeze_busy": {
+    "ru": "Файловая система раздела %{volume} (%{mount}) уже заморожена кем-то другим — другим копированием или командой fsfreeze. Копия не сделана: удержать её до конца копирования нельзя. Повторите, когда её разморозят.",
+    "en": "The filesystem of partition %{volume} (%{mount}) is already frozen by someone else — another backup, or fsfreeze. No copy was made: it cannot be held until the copy ends. Try again once it is thawed."
+  },
+  "linux.readonly_busy": {
+    "ru": "Файловую систему %{fstype} раздела %{volume} (%{mount}) нельзя заморозить, а перемонтировать её только для чтения на время копирования не удалось: на ней открыты файлы для записи. Копия не сделана: раздел не читается, пока в него пишут. Закройте программы, которые пишут на него, или отмонтируйте его и повторите.",
+    "en": "The %{fstype} filesystem of partition %{volume} (%{mount}) cannot be frozen, and it could not be remounted read-only for the copy: files on it are open for writing. No copy was made: a partition is not read while it is written. Close the programs writing to it, or unmount it, and try again."
+  },
+  "linux.freeze_lost": {
+    "ru": "Файловую систему раздела %{volume} (%{mount}) разморозили во время копирования — не эта программа. Копия не согласована и не сохранена; повторите.",
+    "en": "The filesystem of partition %{volume} (%{mount}) was thawed during the copy, not by this program. The copy is not consistent and was not kept; try again."
+  },
+  "linux.readonly_lost": {
+    "ru": "Раздел %{volume} (%{mount}) перемонтировали для записи во время копирования — не эта программа. Копия не согласована и не сохранена; повторите.",
+    "en": "Partition %{volume} (%{mount}) was remounted read-write during the copy, not by this program. The copy is not consistent and was not kept; try again."
   }
 }

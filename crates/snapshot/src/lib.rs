@@ -13,6 +13,8 @@ pub mod dm_snapshot;
 pub mod linux;
 #[cfg(target_os = "linux")]
 mod loop_dev;
+#[cfg(target_os = "linux")]
+pub mod quiesce;
 
 #[cfg(target_os = "windows")]
 pub mod vss_raw;

@@ -6,12 +6,14 @@
 //! or through a snapshot: an LVM snapshot when it is a logical volume, a
 //! device-mapper snapshot built by hand when it is another device-mapper device
 //! with the filesystem directly on it — above all an opened LUKS container
-//! (`dm_snapshot.rs`). Anything else in use is refused, with the reason:
-//! reading a filesystem while it is written gives an image that may not even
-//! mount, and freezing it for the length of the copy — what this provider used
-//! to do — can hang the whole machine when the frozen filesystem is the root,
-//! where the service keeps its own data and log. A busy plain partition would
-//! need a kernel module and stays refused.
+//! (`dm_snapshot.rs`). A busy plain partition has no snapshot short of a
+//! kernel module; a SHORT one that holds nothing the program writes to — `/boot`,
+//! the ESP — is held still (frozen, or remounted read-only) for the length of
+//! its own copy instead (`quiesce.rs`). Anything else in use is refused, with
+//! the reason: reading a filesystem while it is written gives an image that may
+//! not even mount, and freezing a big one for the length of its copy can hang
+//! the whole machine — above all the root, where the service keeps its own
+//! data and log.
 //!
 //! Command construction and the decisions are pure and unit-tested; `lvcreate`
 //! and `lvremove` need root and are exercised on a real host.
@@ -32,6 +34,7 @@ use own_backup_common::linux_block::{self, Usage};
 use own_backup_common::{tr, OwnBackupError, Result};
 
 use crate::dm_snapshot::{self, ContainerKey, Session, SnapState};
+use crate::quiesce;
 use crate::traits::{Snapshot, SnapshotProvider};
 
 const PROVIDER: &str = "linux";
@@ -56,6 +59,12 @@ pub enum Assessment {
     /// nothing stacked on it (an opened LUKS container with the filesystem
     /// mounted from it): take a device-mapper snapshot.
     DeviceMapper { kernel: String },
+    /// In use, a short plain partition that holds nothing written to during
+    /// the copy: held still — frozen, or remounted read-only — while it is
+    /// read (`quiesce.rs`).
+    Hold(quiesce::Plan),
+    /// In use, a plain partition that does not qualify for a hold, and why.
+    NotShort(Usage, quiesce::NotShort),
     /// In use, and there is no way to hold a point in time.
     InUse(Usage),
 }
@@ -68,14 +77,50 @@ pub struct DmIdentity {
     pub uuid: String,
 }
 
-/// Decide how `volume` can be copied consistently.
-pub async fn assess(volume: &str) -> Result<Assessment> {
+/// Decide how `volume` can be copied consistently into the folder `dest`
+/// (`None`: unknown — then no partition is held still, since nobody can tell
+/// whether the copy would write onto it).
+pub async fn assess(volume: &str, dest: Option<&Path>) -> Result<Assessment> {
     let usage = linux_block::device_usage(Path::new(volume))
         .map_err(|e| bad(format!("cannot tell what uses {volume}: {e}")))?;
     let Some(usage) = usage else {
         return Ok(Assessment::File);
     };
-    Ok(decide(usage, lv_of(volume).await, dm_of(volume)))
+    let lv = lv_of(volume).await;
+    let dm = dm_of(volume);
+    let plain = lv.is_none() && dm.is_none();
+    match decide(usage, lv, dm) {
+        Assessment::InUse(usage) if plain => {
+            let (volume, dest) = (volume.to_string(), dest.map(Path::to_path_buf));
+            // Reads sysfs, mountinfo and the configuration.
+            tokio::task::spawn_blocking(move || {
+                let facts = linux_block::kernel_name(Path::new(&volume))
+                    .and_then(|k| quiesce::facts_of(&k).ok().flatten());
+                let protected = dest.as_deref().map(quiesce::protected_paths);
+                judge_partition(usage, facts, protected.as_deref())
+            })
+            .await
+            .map_err(|e| bad(format!("assessment task: {e}")))
+        }
+        other => Ok(other),
+    }
+}
+
+/// A busy device that is neither a logical volume nor a device-mapper device:
+/// a short plain partition (`facts`: `None` for anything else) is held still,
+/// anything else refused.
+fn judge_partition(
+    usage: Usage,
+    facts: Option<quiesce::Facts>,
+    protected: Option<&[PathBuf]>,
+) -> Assessment {
+    let Some(facts) = facts else {
+        return Assessment::InUse(usage);
+    };
+    match quiesce::qualify(&usage, &facts, protected) {
+        Ok(plan) => Assessment::Hold(plan),
+        Err(why) => Assessment::NotShort(usage, why),
+    }
 }
 
 /// The decision itself: idle and read-only devices are read directly, a busy
@@ -117,11 +162,13 @@ fn dm_of(volume: &str) -> Option<DmIdentity> {
 /// Was `snapshot` captured with its filesystem frozen? An LVM snapshot and a
 /// device-mapper snapshot both suspend the origin with the filesystem frozen
 /// for the instant they are taken, so what they show is quiesced: metadata
-/// written back, a journal at most "covered". A device read directly is not.
+/// written back, a journal at most "covered". So is a partition held still
+/// for its copy — frozen, or remounted read-only, which writes everything
+/// back too. A device read directly is not.
 pub fn taken_frozen(snapshot: &Snapshot) -> bool {
     matches!(
         snapshot.metadata.get("mode").map(String::as_str),
-        Some("lvm" | "dm")
+        Some("lvm" | "dm" | "freeze" | "readonly-remount")
     )
 }
 
@@ -142,6 +189,8 @@ pub fn assert_file_frozen(snapshot: &mut Snapshot) {
 /// metadata (the MFT, ext, btrfs and xfs structures) may be parsed?
 ///
 /// * `lvm`, `dm` — a snapshot: yes.
+/// * `freeze`, `readonly-remount` — a partition held still until it is
+///   released, which the caller does after the copy: yes.
 /// * `idle` — nothing used the device when it was assessed, and the reader
 ///   holds it `O_EXCL` for the length of the copy (decision R5), so nothing
 ///   can mount it meanwhile. This answer counts on that hold.
@@ -153,7 +202,7 @@ pub fn assert_file_frozen(snapshot: &mut Snapshot) {
 /// is behind.
 pub fn is_frozen(snapshot: &Snapshot) -> bool {
     match snapshot.metadata.get("mode").map(String::as_str) {
-        Some("lvm" | "dm" | "idle" | "readonly") => true,
+        Some("lvm" | "dm" | "freeze" | "readonly-remount" | "idle" | "readonly") => true,
         Some("file") => snapshot
             .metadata
             .get(FILE_FROZEN)
@@ -171,6 +220,22 @@ pub fn is_frozen(snapshot: &Snapshot) -> bool {
 pub fn check_intact_blocking(snapshot: &Snapshot) -> Result<()> {
     if let Some(snap) = snapshot.metadata.get("dm_snapshot") {
         return dm_verdict(snapshot, dm_snapshot::snapshot_state(snap));
+    }
+    if let Some(method) = hold_method(snapshot) {
+        let mount_point = snapshot.metadata.get("mount_point");
+        let fs_dev = snapshot
+            .metadata
+            .get("fs_dev")
+            .and_then(|d| d.split_once(':'))
+            .and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)));
+        let (Some(mount_point), Some(fs_dev)) = (mount_point, fs_dev) else {
+            return Err(bad("a held partition's snapshot without its mount"));
+        };
+        return hold_verdict(
+            snapshot,
+            method,
+            quiesce::still_held_at(method, mount_point, fs_dev),
+        );
     }
     let Some(lv) = snapshot.metadata.get("lv_snapshot") else {
         return Ok(());
@@ -197,6 +262,49 @@ fn dm_verdict(snapshot: &Snapshot, state: std::io::Result<SnapState>) -> Result<
     }
 }
 
+/// How a held partition's snapshot is held, from its `mode`.
+fn hold_method(snapshot: &Snapshot) -> Option<quiesce::Method> {
+    snapshot
+        .metadata
+        .get("mode")
+        .and_then(|m| quiesce::Method::parse(m))
+}
+
+/// Was a held partition held all through its copy?
+fn hold_verdict(
+    snapshot: &Snapshot,
+    method: quiesce::Method,
+    held: std::io::Result<bool>,
+) -> Result<()> {
+    let mount = snapshot
+        .metadata
+        .get("mount_point")
+        .cloned()
+        .unwrap_or_default();
+    match (held, method) {
+        (Ok(true), _) => Ok(()),
+        (Ok(false), quiesce::Method::Freeze) => Err(OwnBackupError::NoSnapshotProvider(
+            tr!(
+                "linux.freeze_lost",
+                volume = snapshot.source_device,
+                mount = mount
+            )
+            .into_owned(),
+        )),
+        (Ok(false), quiesce::Method::ReadOnlyRemount) => Err(OwnBackupError::NoSnapshotProvider(
+            tr!(
+                "linux.readonly_lost",
+                volume = snapshot.source_device,
+                mount = mount
+            )
+            .into_owned(),
+        )),
+        (Err(e), _) => Err(bad(format!(
+            "cannot tell whether {mount} stayed held during the copy: {e}"
+        ))),
+    }
+}
+
 /// Is an LVM snapshot whose `lv_attr` is `attr` still one point in time?
 fn lv_verdict(snapshot: &Snapshot, attr: &str) -> Result<()> {
     if snapshot_invalid(attr) {
@@ -216,11 +324,15 @@ pub struct LinuxSnapshotProvider {
     container_key: Option<Arc<ContainerKey>>,
     /// Device-mapper snapshots held by this provider, by id.
     sessions: Mutex<HashMap<String, Session>>,
+    /// Partitions held still by this provider, by id. One dropped here is
+    /// released (thawed, remounted read-write) on the way.
+    holds: Mutex<HashMap<String, quiesce::Hold>>,
 }
 
 impl LinuxSnapshotProvider {
     /// A provider that reads idle volumes and takes LVM snapshots, but has no
-    /// place for a device-mapper snapshot's store.
+    /// place for a device-mapper snapshot's store and does not know where the
+    /// copy goes (so it holds no partition still either).
     pub fn new() -> Self {
         Self::default()
     }
@@ -228,7 +340,8 @@ impl LinuxSnapshotProvider {
     /// A provider that can also take a device-mapper snapshot, with its
     /// copy-on-write store in `dir` — the destination folder of the copy. The
     /// store grows with what is written to the volume during the copy and is
-    /// deleted on release.
+    /// deleted on release. Knowing the destination, it also holds a short
+    /// partition still for its copy when nothing goes onto it meanwhile.
     pub fn with_cow_dir(dir: impl Into<PathBuf>) -> Self {
         LinuxSnapshotProvider {
             cow_dir: Some(dir.into()),
@@ -251,6 +364,17 @@ impl LinuxSnapshotProvider {
     /// kernel, and what was read from it is not one point in time. Ask before
     /// releasing it.
     pub async fn check_intact(&self, snapshot: &Snapshot) -> Result<()> {
+        if let (Some(id), Some(method)) = (snapshot.metadata.get("hold_id"), hold_method(snapshot))
+        {
+            let held = {
+                let holds = self.holds.lock().unwrap_or_else(|e| e.into_inner());
+                holds.get(id).map(quiesce::Hold::still_held)
+            };
+            return match held {
+                Some(held) => hold_verdict(snapshot, method, held),
+                None => Err(bad(format!("partition hold {id} is not this provider's"))),
+            };
+        }
         if let Some(id) = snapshot.metadata.get("dm_id") {
             let state = {
                 let sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
@@ -308,6 +432,39 @@ impl LinuxSnapshotProvider {
             .insert(session.id.clone(), session);
         Ok(snapshot)
     }
+
+    /// Hold the short partition `volume` still as `plan` says; the copy reads
+    /// the device itself, and [`Self::release_snapshot`] lets it go.
+    async fn hold(&self, volume: &str, plan: quiesce::Plan) -> Result<Snapshot> {
+        let vol = volume.to_string();
+        // Blocking: the freeze writes back what the filesystem has cached. A
+        // hold whose task is dropped before it gets here is released on drop.
+        let hold = tokio::task::spawn_blocking(move || {
+            quiesce::take(&vol, &plan, Path::new(quiesce::MARKER_DIR))
+        })
+        .await
+        .map_err(|e| bad(format!("hold task: {e}")))??;
+
+        let (major, minor) = hold.fs_dev();
+        let mut metadata = HashMap::new();
+        metadata.insert("mode".into(), hold.method().as_str().into());
+        metadata.insert("hold_id".into(), hold.id.clone());
+        metadata.insert("mount_point".into(), hold.mount_point().into());
+        metadata.insert("fs_dev".into(), format!("{major}:{minor}"));
+        metadata.insert("fstype".into(), hold.fstype().into());
+        let snapshot = Snapshot {
+            provider_name: PROVIDER.into(),
+            source_device: volume.into(),
+            snapshot_device_path: volume.into(),
+            created_at: Utc::now(),
+            metadata,
+        };
+        self.holds
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(hold.id.clone(), hold);
+        Ok(snapshot)
+    }
 }
 
 #[async_trait]
@@ -317,12 +474,22 @@ impl SnapshotProvider for LinuxSnapshotProvider {
     }
 
     async fn create_snapshot(&self, volume: &str) -> Result<Snapshot> {
-        match assess(volume).await? {
+        match assess(volume, self.cow_dir.as_deref()).await? {
             Assessment::File => Ok(direct(volume, "file")),
             Assessment::Idle => Ok(direct(volume, "idle")),
             Assessment::ReadOnly => Ok(direct(volume, "readonly")),
             Assessment::Lvm { vg, lv, thin } => lvm_snapshot(volume, &vg, &lv, thin).await,
             Assessment::DeviceMapper { kernel } => self.dm_snapshot(volume, kernel).await,
+            Assessment::Hold(plan) => self.hold(volume, plan).await,
+            Assessment::NotShort(usage, why) => Err(OwnBackupError::NoSnapshotProvider(
+                tr!(
+                    "linux.in_use_partition",
+                    volume = volume,
+                    users = describe_usage(&usage),
+                    reason = describe_not_short(&why)
+                )
+                .into_owned(),
+            )),
             Assessment::InUse(usage) => Err(OwnBackupError::NoSnapshotProvider(
                 tr!(
                     "linux.in_use",
@@ -335,6 +502,19 @@ impl SnapshotProvider for LinuxSnapshotProvider {
     }
 
     async fn release_snapshot(&self, snapshot: &Snapshot) -> Result<()> {
+        if let Some(id) = snapshot.metadata.get("hold_id") {
+            let hold = self
+                .holds
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(id);
+            let Some(hold) = hold else {
+                return Err(bad(format!("partition hold {id} is not this provider's")));
+            };
+            return tokio::task::spawn_blocking(move || hold.release())
+                .await
+                .map_err(|e| bad(format!("release task: {e}")))?;
+        }
         if let Some(id) = snapshot.metadata.get("dm_id") {
             let session = self
                 .sessions
@@ -359,21 +539,25 @@ impl SnapshotProvider for LinuxSnapshotProvider {
     }
 }
 
-/// Remove the snapshots killed runs left behind: LVM snapshot volumes, and
-/// device-mapper snapshots — each origin put back on its own table, the
-/// layers removed, their loop devices detached and stores deleted (a
-/// device-mapper snapshot its run still holds is left alone). Called at
-/// service start, before any run can create a new one, and by `own-backup-cli
+/// Remove the snapshots killed runs left behind: partitions they held still
+/// (thawed, or remounted read-write — first, since their writers wait), LVM
+/// snapshot volumes, and device-mapper snapshots — each origin put back on its
+/// own table, the layers removed, their loop devices detached and stores
+/// deleted. What a live run still holds is left alone. Called at service
+/// start, before any run can create a new one, and by `own-backup-cli
 /// cleanup-snapshots`; a snapshot left in place keeps growing with every write
-/// to its origin.
+/// to its origin, and a frozen partition keeps its writers waiting.
 pub async fn remove_orphaned_snapshots() -> usize {
+    let held = tokio::task::spawn_blocking(quiesce::undo_leftovers)
+        .await
+        .unwrap_or(0);
     let dm = tokio::task::spawn_blocking(dm_snapshot::remove_orphans)
         .await
         .unwrap_or(0);
     let Ok(listed) = run("lvs", &["--noheadings", "-o", "vg_name,lv_name"]).await else {
-        return dm; // no lvm2, no permission, or no volume groups
+        return held + dm; // no lvm2, no permission, or no volume groups
     };
-    let mut removed = dm;
+    let mut removed = held + dm;
     for (vg, lv) in orphaned_snapshots(&listed) {
         let name = format!("{vg}/{lv}");
         match run("lvremove", &["-f", &name]).await {
@@ -430,6 +614,34 @@ fn describe_usage(usage: &Usage) -> String {
         parts.push(tr!("linux.usage_holders", holders = names.join(", ")).into_owned());
     }
     parts.join("; ")
+}
+
+/// Why a busy plain partition is not held still for its copy, for the refusal.
+fn describe_not_short(why: &quiesce::NotShort) -> String {
+    use quiesce::NotShort;
+    match why {
+        NotShort::Swap => tr!("linux.short_swap"),
+        NotShort::Holders(h) => {
+            let names: Vec<String> = h.iter().map(|h| dm_name(h)).collect();
+            tr!("linux.short_holders", holders = names.join(", "))
+        }
+        NotShort::NoMount => tr!("linux.short_no_mount"),
+        NotShort::Root => tr!("linux.short_root"),
+        NotShort::NoDestination => tr!("linux.short_no_destination"),
+        NotShort::Holds { mount_point, path } => tr!(
+            "linux.short_holds",
+            mount = mount_point,
+            path = path.display()
+        ),
+        NotShort::TooBig(size) => tr!(
+            "linux.short_too_big",
+            size = own_backup_common::units::human_bytes(*size),
+            limit = own_backup_common::units::human_bytes(quiesce::SHORT_LIMIT)
+        ),
+        NotShort::SizeUnknown => tr!("linux.short_size_unknown"),
+        NotShort::Filesystem(fstype) => tr!("linux.short_filesystem", fstype = fstype),
+    }
+    .into_owned()
 }
 
 /// `/dev/mapper` name of a device-mapper device (`dm-0` → `luks-…`), else the
@@ -718,9 +930,21 @@ mod tests {
 
     #[test]
     fn frozen_means_nothing_writes_what_is_read() {
-        for mode in ["lvm", "dm", "idle", "readonly"] {
+        for mode in [
+            "lvm",
+            "dm",
+            "freeze",
+            "readonly-remount",
+            "idle",
+            "readonly",
+        ] {
             assert!(is_frozen(&direct("/dev/sdz1", mode)), "{mode}");
         }
+        // A held partition was quiesced like a snapshot: its metadata is written back.
+        for mode in ["lvm", "dm", "freeze", "readonly-remount"] {
+            assert!(taken_frozen(&direct("/dev/sdz1", mode)), "{mode}");
+        }
+        assert!(!taken_frozen(&direct("/dev/sdz1", "readonly")));
         // Held still is not taken frozen: nobody froze an idle device's filesystem.
         assert!(!taken_frozen(&direct("/dev/sdz1", "idle")));
         assert!(!is_frozen(&direct("/dev/sdz1", "mystery")));
@@ -781,6 +1005,138 @@ mod tests {
             "obk-no-such-vg/obk-snap-000000000000".into(),
         );
         assert!(check_intact_blocking(&lv).is_err());
+
+        // A held partition whose mount cannot be asked is never "intact"
+        // either, nor one whose snapshot does not say where it was held.
+        for mode in ["freeze", "readonly-remount"] {
+            let mut held = direct("/dev/sdz1", mode);
+            assert!(check_intact_blocking(&held).is_err(), "{mode}");
+            held.metadata
+                .insert("mount_point".into(), "/no/such/mount/point".into());
+            held.metadata.insert("fs_dev".into(), "8:1".into());
+            assert!(check_intact_blocking(&held).is_err(), "{mode}");
+        }
+        // A directory that is not the filesystem that was held.
+        let dir = tempfile::tempdir().unwrap();
+        let mut moved = direct("/dev/sdz1", "freeze");
+        moved
+            .metadata
+            .insert("mount_point".into(), dir.path().display().to_string());
+        moved.metadata.insert("fs_dev".into(), "4095:4095".into());
+        assert!(check_intact_blocking(&moved).is_err());
+    }
+
+    fn mount(mp: &str, fstype: &str) -> quiesce::Mount {
+        quiesce::Mount {
+            dev: (259, 2),
+            root: "/".into(),
+            mount_point: mp.into(),
+            options: "rw,relatime".into(),
+            fstype: fstype.into(),
+            source: "/dev/nvme0n1p2".into(),
+            super_options: "rw".into(),
+        }
+    }
+
+    #[test]
+    fn busy_partitions_held_or_refused() {
+        let protected = ["/tmp", "/var", "/run", "/home", "/usr", "/mnt/backup"].map(PathBuf::from);
+        let boot = Usage {
+            mounted_rw: vec!["/boot".into()],
+            ..Usage::default()
+        };
+        let facts = |mp: &str, fstype: &str, size: u64| {
+            Some(quiesce::Facts {
+                size: Some(size),
+                mounts: vec![mount(mp, fstype)],
+            })
+        };
+        match judge_partition(
+            boot.clone(),
+            facts("/boot", "ext4", 1 << 30),
+            Some(&protected),
+        ) {
+            Assessment::Hold(plan) => {
+                assert_eq!(plan.method, quiesce::Method::Freeze);
+                assert_eq!(plan.mount_point, "/boot");
+            }
+            other => panic!("{other:?}"),
+        }
+        match judge_partition(
+            boot.clone(),
+            facts("/boot/efi", "vfat", 300 << 20),
+            Some(&protected),
+        ) {
+            Assessment::Hold(plan) => assert_eq!(plan.method, quiesce::Method::ReadOnlyRemount),
+            other => panic!("{other:?}"),
+        }
+        // Not a plain partition (a whole disk, a loop device): as before.
+        assert_eq!(
+            judge_partition(boot.clone(), None, Some(&protected)),
+            Assessment::InUse(boot.clone())
+        );
+        assert_eq!(
+            judge_partition(boot.clone(), facts("/", "ext4", 1 << 30), Some(&protected)),
+            Assessment::NotShort(boot.clone(), quiesce::NotShort::Root)
+        );
+        assert_eq!(
+            judge_partition(
+                boot.clone(),
+                facts("/data", "ext4", 6 << 30),
+                Some(&protected)
+            ),
+            Assessment::NotShort(boot.clone(), quiesce::NotShort::TooBig(6 << 30))
+        );
+        assert_eq!(
+            judge_partition(boot.clone(), facts("/boot", "ext4", 1 << 30), None),
+            Assessment::NotShort(boot, quiesce::NotShort::NoDestination)
+        );
+    }
+
+    #[test]
+    fn refusal_says_why_a_partition_is_not_held() {
+        use quiesce::NotShort;
+        let cases = [
+            (NotShort::Root, "/"),
+            (
+                NotShort::Holds {
+                    mount_point: "/mnt/b".into(),
+                    path: "/mnt/b/images".into(),
+                },
+                "/mnt/b/images",
+            ),
+            (NotShort::TooBig(6 << 30), "6.00"),
+            (NotShort::Filesystem("ntfs3".into()), "ntfs3"),
+            (NotShort::Holders(vec!["no-such-dm".into()]), "no-such-dm"),
+        ];
+        for (why, needle) in cases {
+            let text = describe_not_short(&why);
+            assert!(text.contains(needle), "{why:?}: {text}");
+            assert!(!text.contains("%{"), "{why:?}: {text}");
+        }
+        for why in [
+            NotShort::Swap,
+            NotShort::NoMount,
+            NotShort::NoDestination,
+            NotShort::SizeUnknown,
+        ] {
+            let text = describe_not_short(&why);
+            assert!(
+                !text.is_empty() && !text.contains("linux."),
+                "{why:?}: {text}"
+            );
+        }
+    }
+
+    /// A hold this provider does not have is neither "intact" nor released
+    /// as if it were.
+    #[tokio::test]
+    async fn a_foreign_hold_is_not_vouched_for() {
+        let p = LinuxSnapshotProvider::new();
+        let mut s = direct("/dev/sdz1", "freeze");
+        s.metadata.insert("hold_id".into(), "0".repeat(32));
+        assert!(p.check_intact(&s).await.is_err());
+        assert!(p.release_snapshot(&s).await.is_err());
     }
 
     /// An image file is read as it is, and releasing that is a no-op.
