@@ -237,10 +237,14 @@
     white-space: nowrap;
   }
 
+  /* Never sideways: `overflow-y: auto` alone makes the other axis scroll too,
+     and a label one font wider than Segoe UI (DejaVu Sans on Linux) put a
+     horizontal scrollbar under the menu. */
   .nav-list {
     list-style: none;
     padding: 8px 0;
     flex: 1;
+    overflow-x: hidden;
     overflow-y: auto;
   }
 
@@ -282,8 +286,14 @@
     color: var(--sidebar-text-active);
   }
 
+  /* A label that does not fit goes onto a second line rather than under the
+     edge: «РЕЗЕРВНОЕ КОПИРОВАНИЕ» in DejaVu Sans is wider than the strip and
+     was cut to «…КОПИРОВАНИ». With Segoe UI every label still fits on one. */
   .nav-label {
-    white-space: nowrap;
+    min-width: 0;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    line-height: 1.3;
   }
 
   .brand {

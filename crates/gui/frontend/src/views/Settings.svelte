@@ -580,9 +580,10 @@
     color: var(--text);
     font-size: 13px;
     font-weight: 600;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    /* Wrapped, not cut: «Как в системе» in a wider font did not fit its
+       third of the control and read «Как в систе…». */
+    line-height: 1.25;
+    overflow-wrap: anywhere;
   }
   .lang-option:last-child {
     border-right: none;
