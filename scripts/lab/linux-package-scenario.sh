@@ -179,6 +179,19 @@ guest_steps() {
     job=$(job_id_named pkg-scenario)
     [[ -n $job ]]
     check job-created "$(verdict $?)" "job $job"
+    # Held to 100 MB/s by the job's speed limit (carried out on Linux too),
+    # the 4 GiB copy lasts about 40 s whatever the disk: long enough for the
+    # upgrade below to cut it. Unpaced, a fast disk finishes first.
+    cli jobs show "$job" >"$EV/job-paced.json" 2>/dev/null
+    python3 - "$EV/job-paced.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+j = json.load(open(p))
+j.setdefault("advanced", {})["speed_limit_mbps"] = 100
+json.dump(j, open(p, "w"))
+PY
+    run job-paced cli jobs save --file "$EV/job-paced.json"
+    check job-paced "$(verdict $?)" "speed limit 100 MB/s saved"
 
     make_upgrade "$deb" "$up"
     check upgrade-package-made "$(verdict $?)" "$(dpkg-deb -f "$up" Version)"
@@ -206,12 +219,18 @@ guest_steps() {
     check no-lock-left "$(verdict $?)" "no sleep lock left by the stopped engine"
 
     # --- after-backup poweroff -------------------------------------------------
+    # A fast copy can be past its last byte when the upgrade stops the engine
+    # (then only the check after it is cut, and the run says so): its image is
+    # published and leaves no room for a second full copy on the small
+    # destination disk. It is not needed any more.
+    find "$IMG" -maxdepth 1 -type f -name 'pkg-scenario_*' -delete
     cli jobs show "$job" >"$EV/job.json" 2>/dev/null
     python3 - "$EV/job.json" <<'PY'
 import json, sys
 p = sys.argv[1]
 j = json.load(open(p))
 j.setdefault("advanced", {})["after_backup"] = "shutdown"
+j["advanced"]["speed_limit_mbps"] = 0
 json.dump(j, open(p, "w"))
 PY
     run job-shutdown cli jobs save --file "$EV/job.json"
@@ -233,7 +252,9 @@ PY
     shutdown -c
     run scheduled-cancelled busctl get-property org.freedesktop.login1 /org/freedesktop/login1 \
         org.freedesktop.login1.Manager ScheduledShutdown
-    grep -q '"" 0' "$EV/scheduled-cancelled.out"
+    # Nothing scheduled any more: an empty kind (the time is 0 or, in newer
+    # systemd, USEC_INFINITY).
+    grep -qE '^\(st\) "" ' "$EV/scheduled-cancelled.out"
     check poweroff-cancellable "$(verdict $?)" "shutdown -c cancels it"
 
     # --- remove, then purge ------------------------------------------------------
