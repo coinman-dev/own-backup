@@ -12,10 +12,6 @@
 //! so in its own implementation (`NotImplemented`, `Ok(None)` for a pass that
 //! honestly did not run), where the reason can be read next to the code.
 
-// Nothing drives the engine through these traits yet: the volume pipeline is
-// made generic over them in the next phase (C1), and this goes with it.
-#![allow(dead_code)]
-
 use std::path::Path;
 
 use own_backup_common::gpt::DiskLayout;
@@ -51,7 +47,7 @@ pub(crate) trait SourceDevice: RawVolume + Send + Sized + 'static {
 ///
 /// It is kept typed, not boxed, until exclusions are settled: removing the
 /// excluded clusters needs the map's own cluster knowledge.
-pub(crate) trait NativeUsedMap: UsedSectorMap + Sized {
+pub(crate) trait NativeUsedMap: UsedSectorMap + Sized + 'static {
     /// Build the map of the volume at `read_path` in `block_size` blocks. An
     /// error means "not this filesystem" as much as "cannot read": the engine
     /// goes on to its own parsers either way.
@@ -125,6 +121,8 @@ pub(crate) struct VolumeSpan {
 /// `CreateVirtualDisk` gives ours (`vhdx::create_dynamic_vhdx`): 1 MiB payload
 /// blocks and the size rounded up to a whole MiB. The same image then comes out
 /// of either system.
+// The Linux and test platforms make their VHDX here; Windows asks its driver.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub(crate) fn userspace_vhdx(path: &Path, size: u64, sector_size: u32) -> Result<VhdxWriter> {
     const MIB: u64 = 1024 * 1024;
     VhdxWriter::create(path, size.div_ceil(MIB) * MIB, MIB, sector_size)
@@ -150,6 +148,8 @@ pub(crate) trait EnginePlatform {
     /// does. On Windows they read volumes Windows does not mount, which nothing
     /// writes; on Linux they read what the session gives, and only a frozen
     /// session holds still.
+    // Asked by the Linux volume path (L1/L3); Windows has no use for it.
+    #[allow(dead_code)]
     const METADATA_NEEDS_FROZEN: bool;
 
     /// The canonical form of a source path, before anything opens it.
@@ -225,6 +225,8 @@ pub(crate) trait EnginePlatform {
 
 /// A whole disk, as a job names it: Windows by number, Linux by its stable
 /// `/dev/disk/by-id/…` path (decision R1). `number` is all Windows has.
+// The whole-disk types below are driven through the traits from phase E on.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DiskRef {
     pub(crate) number: u32,
@@ -233,6 +235,7 @@ pub(crate) struct DiskRef {
 
 impl DiskRef {
     /// A disk known by its number only, as on Windows.
+    #[allow(dead_code)]
     pub(crate) fn number(number: u32) -> Self {
         Self {
             number,
@@ -242,6 +245,7 @@ impl DiskRef {
 }
 
 /// Who a whole disk is, in the two places an image records it.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DiskIdentity {
     /// The device the disk is read through: the manifest's `device_id`.
@@ -252,6 +256,7 @@ pub(crate) struct DiskIdentity {
 }
 
 /// The system half of a whole-disk backup.
+#[allow(dead_code)]
 pub(crate) trait DiskPlatform: EnginePlatform {
     /// Hold the partition `device` (already normalized) for the copy. All
     /// partitions of a disk are held at once, so the image is one point in

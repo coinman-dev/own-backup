@@ -90,10 +90,8 @@ pub mod disk_session_win;
 pub mod efivars_win;
 #[cfg(target_os = "windows")]
 pub mod engine_win;
-// The engine's Windows platform. Nothing drives the engine through it until
-// the volume pipeline is made generic (C1).
+// The engine's Windows platform: the volume pipeline runs on it.
 #[cfg(target_os = "windows")]
-#[allow(dead_code)]
 mod engine_platform_win;
 #[cfg(target_os = "windows")]
 pub mod esp_fallback_win;

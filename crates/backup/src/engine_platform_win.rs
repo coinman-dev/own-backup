@@ -1,12 +1,13 @@
 //! The Windows answers to the shared engine's questions
 //! ([`crate::engine_core::platform`]).
 //!
-//! Thin wrappers over the code `engine_win` runs today: VSS for a live volume,
+//! Thin wrappers over the Windows code the engine runs: VSS for a live volume,
 //! `FSCTL_GET_VOLUME_BITMAP` for the used map, the volume manager for where a
 //! locked volume's ciphertext lies, Windows itself for a cipher our reader does
 //! not know, `CreateVirtualDisk` for new images and the filesystem driver for
-//! deleting excluded files inside them. Each body is the one the engine uses,
-//! so moving the engine onto this platform changes nothing it does.
+//! deleting excluded files inside them. Each body is the one the volume
+//! pipeline used to run inline (moved here verbatim when it was made generic),
+//! so running the engine on this platform changes nothing it does.
 
 #![cfg(target_os = "windows")]
 
