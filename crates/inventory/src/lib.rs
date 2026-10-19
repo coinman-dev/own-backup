@@ -37,8 +37,9 @@ pub fn drive_letters_signature() -> u32 {
     unsafe { windows::Win32::Storage::FileSystem::GetLogicalDrives() }
 }
 
-/// Non-Windows stub: no cheap equivalent wired up yet, so report a constant
-/// (callers fall back to explicit refresh).
+/// Non-Windows: there are no letters. The window listens to udev and the
+/// mount table itself (`own-backup-gui`'s `device_watch`); this constant is
+/// for anything else that asks.
 #[cfg(not(target_os = "windows"))]
 pub fn drive_letters_signature() -> u32 {
     0

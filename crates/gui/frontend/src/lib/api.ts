@@ -85,6 +85,10 @@ export const api = {
   backupCapabilities: () => invoke<BackupCapabilities>('backup_capabilities'),
   /** Where a destination folder sits relative to these sources — the check the
    *  save makes, asked while the folder is being chosen. */
+  /** Linux: the mount point of the drive the folder is on, the one the
+   *  «destination connected» trigger waits for; null on the system disk, for
+   *  a drive not mounted now, and on Windows. */
+  destinationMount: (folder: string) => invoke<string | null>('destination_mount', { folder }),
   checkDestination: (sources: string[], destFolder: string) =>
     invoke<DestinationCheck>('check_destination', { sources, destFolder }),
   saveBackupJob: (job: Job) => invoke<Job>('save_backup_job', { job }),

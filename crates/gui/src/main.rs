@@ -6,6 +6,8 @@
 rust_i18n::i18n!("locales", fallback = "ru");
 
 mod commands;
+#[cfg(target_os = "linux")]
+mod device_watch;
 mod jobs;
 mod service_link;
 mod state;
@@ -661,6 +663,7 @@ fn main() {
             commands::files::list_dir,
             commands::files::create_dir,
             commands::files::open_folder,
+            commands::files::destination_mount,
             // Единственный свидетель того, что интерфейс жив, — он сам.
             gui_ready,
         ])

@@ -23,11 +23,20 @@ pub async fn list_disks(state: State<'_, GuiState>) -> Result<Vec<DiskInfo>, Str
     Ok(disks)
 }
 
-/// Cheap signature of present drive letters — the frontend polls this to
+/// Cheap signature of what is plugged in — the frontend polls this to
 /// detect USB insert/eject and re-enumerate only when it actually changes.
+/// Windows: the present drive letters. Linux: a generation that udev's disk
+/// events and mounts move on (`device_watch`).
 #[tauri::command]
 pub async fn drive_signature() -> Result<u32, String> {
-    Ok(own_backup_inventory::drive_letters_signature())
+    #[cfg(target_os = "linux")]
+    {
+        Ok(crate::device_watch::generation())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(own_backup_inventory::drive_letters_signature())
+    }
 }
 
 /// EFI, recovery and vendor partitions Windows keeps without a letter — the

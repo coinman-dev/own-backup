@@ -844,6 +844,32 @@
     }, 400);
     return () => clearTimeout(timer);
   });
+  // Linux: which mount the «destination connected» trigger waits for — the
+  // drive the folder is on, by the rule the service fires by. A letter says
+  // that on Windows; here it is asked as the folder is typed.
+  let destMount = $state<string | null>(null);
+  let destMountSerial = 0;
+  $effect(() => {
+    const folder = job.dest_folder.trim();
+    const wanted =
+      !isWindows() && job.schedule.kind === 'event' && job.schedule.event_trigger === 'dest_connected';
+    const serial = ++destMountSerial;
+    if (!wanted || !folder) {
+      destMount = null;
+      return;
+    }
+    const timer = setTimeout(() => {
+      api.destinationMount(folder).then(
+        (mount) => {
+          if (serial === destMountSerial) destMount = mount;
+        },
+        () => {
+          if (serial === destMountSerial) destMount = null;
+        },
+      );
+    }, 300);
+    return () => clearTimeout(timer);
+  });
   /** The source the destination sits on, as the service named it. */
   const destOnSource = $derived(
     destCheck?.placement === 'on_source' && !collisionLetter ? destCheck.source : null,
@@ -1875,10 +1901,16 @@
           <div class="note info">
             <svg class="ico-inline" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--info)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg> {m.wiz_event_note()}
             {#if job.schedule.event_trigger === 'dest_connected'}
-              {@const destLetter = driveLetter(job.dest_folder)}
-              {destLetter
-                ? m.wiz_event_dest_letter({ letter: destLetter })
-                : m.wiz_event_dest_generic()}
+              {#if isWindows()}
+                {@const destLetter = driveLetter(job.dest_folder)}
+                {destLetter
+                  ? m.wiz_event_dest_letter({ letter: destLetter })
+                  : m.wiz_event_dest_generic()}
+              {:else if destMount}
+                {m.wiz_event_dest_mount({ mount: destMount })}
+              {:else}
+                {m.wiz_event_dest_no_mount()}
+              {/if}
             {/if}
           </div>
         {:else if job.schedule.kind !== 'none'}

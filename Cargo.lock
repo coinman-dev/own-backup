@@ -3270,6 +3270,7 @@ version = "0.1.5-beta"
 dependencies = [
  "chrono",
  "glib",
+ "libc",
  "own-backup-backup",
  "own-backup-client",
  "own-backup-common",

@@ -473,6 +473,8 @@
   "wiz_event_note": "Events are watched by the “Own Backup” service.",
   "wiz_event_dest_letter": "The backup starts within 10 seconds after drive {letter}: appears. A disk connected before the service started does not count — only a new connection does.",
   "wiz_event_dest_generic": "The backup starts within 10 seconds after the destination disk appears. A disk connected before the service started does not count — only a new connection does.",
+  "wiz_event_dest_mount": "The backup starts within 10 seconds after the volume {mount} is mounted — the desktop mounts it when the drive is plugged in, or /etc/fstab does. A volume mounted before the service started does not count — only a new connection.",
+  "wiz_event_dest_no_mount": "The destination folder is not on a separately mounted volume right now: it is on the system disk, or its drive is not connected. The backup starts within 10 seconds after a volume is mounted under this folder; on the system disk this event never happens.",
   "wiz_sched_service_note": "Scheduled runs are started by the “Own Backup” service (it must be installed and running). For encrypted volumes, save the password on the “Source” step.",
   "wiz_sched_wake": "Wake the computer from sleep",
   "wiz_sched_wake_note": "The computer wakes a minute before the run. Wake timers must be allowed in the power plan — on a laptop running on battery they are often off.",
