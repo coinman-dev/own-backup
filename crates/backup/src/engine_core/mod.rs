@@ -12,6 +12,8 @@ pub(crate) mod chain;
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) mod disk_image;
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) mod disk_prepare;
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) mod partition_prep;
 pub(crate) mod platform;
 pub(crate) mod read;
