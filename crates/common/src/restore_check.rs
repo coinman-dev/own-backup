@@ -974,16 +974,31 @@ fn check_live_system(
             .map(|i| ctx.describe_target(*i, table))
             .collect::<Vec<_>>()
             .join("; ");
+        let message = if cfg!(target_os = "linux") {
+            crate::tr!("restore_check.live_system_partitions_linux", list = list)
+        } else {
+            crate::tr!("restore_check.live_system_partitions", list = list)
+        };
         out.push(CheckResult::new(
             CheckLevel::Error,
             CheckCode::TargetIsLiveSystemPartition,
             hit.first().copied(),
-            crate::tr!("restore_check.live_system_partitions", list = list).into_owned(),
+            message.into_owned(),
         ));
         return; // the rest is noise next to this
     }
 
-    if ctx.target_is_system_disk && table.is_some() {
+    // Windows applies a new layout on its system disk through the partition
+    // manager; Linux holds a disk whole to write its table, which a disk the
+    // running system stands on cannot be.
+    if ctx.target_is_system_disk && table.is_some() && cfg!(target_os = "linux") {
+        out.push(CheckResult::new(
+            CheckLevel::Error,
+            CheckCode::LiveSystemDiskLayout,
+            None,
+            crate::tr!("restore_check.live_system_disk_layout_linux").into_owned(),
+        ));
+    } else if ctx.target_is_system_disk && table.is_some() {
         out.push(CheckResult::new(
             CheckLevel::Warning,
             CheckCode::LiveSystemDiskLayout,
@@ -1995,8 +2010,19 @@ mod tests {
         c.target_is_system_disk = true;
         c.protected_parts = vec![1, 3];
         let results = check_plan(&plan, &c);
-        assert!(errors(&results).is_empty(), "{results:#?}");
-        assert!(codes(&results).contains(&CheckCode::LiveSystemDiskLayout));
+        if cfg!(target_os = "linux") {
+            // Linux holds a disk whole to write its table, which a disk the
+            // running system stands on cannot be: the layout change is the
+            // refusal, not the partition.
+            assert_eq!(
+                errors(&results),
+                vec![CheckCode::LiveSystemDiskLayout],
+                "{results:#?}"
+            );
+        } else {
+            assert!(errors(&results).is_empty(), "{results:#?}");
+            assert!(codes(&results).contains(&CheckCode::LiveSystemDiskLayout));
+        }
     }
 
     #[test]

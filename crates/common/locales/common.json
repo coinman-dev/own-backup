@@ -251,5 +251,13 @@
   "units.pib": {
     "ru": "ПиБ",
     "en": "PiB"
+  },
+  "restore_check.live_system_partitions_linux": {
+    "ru": "Работающая система использует разделы этого диска, которые затрагивает план: %{list} (смонтированы, подкачка, открыты как LUKS/LVM/md или это ESP загрузки). Переписать их на ходу нельзя. Восстановите с загрузочного носителя, либо выберите другие разделы.",
+    "en": "The running system uses partitions of this disk that the plan touches: %{list} (mounted, swap, opened as LUKS/LVM/md, or the boot ESP). They cannot be rewritten on the fly. Restore from the bootable media, or choose other partitions."
+  },
+  "restore_check.live_system_disk_layout_linux": {
+    "ru": "Работающая система использует разделы этого диска, поэтому менять его разметку нельзя. Восстановите в существующий свободный раздел без изменения разметки или с загрузочного носителя.",
+    "en": "The running system uses partitions of this disk, so its partition table cannot be changed. Restore into an existing unused partition without changing the table, or from the bootable media."
   }
 }

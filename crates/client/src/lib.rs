@@ -441,6 +441,31 @@ impl BackupClient {
         parse(&reply.json).map_err(tonic::Status::internal)
     }
 
+    /// A volume restore with the person's choice about duplicate identities
+    /// (Linux). The reply is the summary plus the `identity_clashes` kept.
+    #[allow(clippy::result_large_err)] // the caller reads the status's details
+    pub async fn restore_volume_choosing(
+        &mut self,
+        image_path: &str,
+        target: &str,
+        identity_choice: Option<own_backup_common::engine_dto::IdentityChoice>,
+        secret: &ArchiveSecret,
+    ) -> std::result::Result<serde_json::Value, tonic::Status> {
+        let mut body = serde_json::json!({
+            "image_path": image_path,
+            "target": target,
+            "identity_choice": identity_choice,
+        });
+        secret.add_to(&mut body);
+        let json = body.to_string();
+        let reply = self
+            .inner
+            .restore_volume(self.request(proto::JsonRequest { json }))
+            .await?
+            .into_inner();
+        parse(&reply.json).map_err(tonic::Status::internal)
+    }
+
     /// Verify an image against its sidecar checksums. Progress arrives as `"verify"`.
     pub async fn verify_image(
         &mut self,
@@ -554,6 +579,33 @@ impl BackupClient {
             .map_err(status)?
             .into_inner();
         let m: own_backup_common::engine_dto::MountResultDto = parse(&reply.json)?;
+        Ok(m.mount_point)
+    }
+
+    /// [`Self::mount_image`] with the person's choice about identities the
+    /// copy shares with this machine's devices (Linux), keeping the status.
+    #[allow(clippy::result_large_err)] // the caller reads the status's details
+    pub async fn mount_image_choosing(
+        &mut self,
+        image_path: &str,
+        read_write: bool,
+        identity_choice: Option<own_backup_common::engine_dto::IdentityChoice>,
+        secret: &ArchiveSecret,
+    ) -> std::result::Result<String, tonic::Status> {
+        let mut body = serde_json::json!({
+            "image_path": image_path,
+            "read_write": read_write,
+            "identity_choice": identity_choice,
+        });
+        secret.add_to(&mut body);
+        let json = body.to_string();
+        let reply = self
+            .inner
+            .mount_image(self.request(proto::JsonRequest { json }))
+            .await?
+            .into_inner();
+        let m: own_backup_common::engine_dto::MountResultDto =
+            parse(&reply.json).map_err(tonic::Status::internal)?;
         Ok(m.mount_point)
     }
 
@@ -736,6 +788,7 @@ impl BackupClient {
 
     /// Restore a whole disk named by its device (Linux: `/dev/disk/by-id/…`;
     /// Linux disks have no stable number). DESTRUCTIVE.
+    /// The reply is the summary plus `identity_clashes` kept and `warnings`.
     #[allow(clippy::result_large_err)] // the caller reads the status's details
     pub async fn restore_device_with_status(
         &mut self,
@@ -743,8 +796,7 @@ impl BackupClient {
         target_device: &str,
         identity_choice: Option<own_backup_common::engine_dto::IdentityChoice>,
         secret: &ArchiveSecret,
-    ) -> std::result::Result<own_backup_common::engine_dto::DiskRestoreSummaryDto, tonic::Status>
-    {
+    ) -> std::result::Result<serde_json::Value, tonic::Status> {
         let mut body = serde_json::json!({
             "manifest_path": image_path,
             "target_device": target_device,
@@ -895,21 +947,35 @@ impl BackupClient {
         secret: &ArchiveSecret,
         identity_choice: Option<own_backup_common::engine_dto::IdentityChoice>,
     ) -> Result<own_backup_common::restore_state::RestoreRunState> {
+        self.apply_restore_plan_with_status(plan, passphrases, secret, identity_choice)
+            .await
+            .map_err(status)
+    }
+
+    /// The same, retaining the gRPC status (its details carry the duplicate
+    /// identities a refusal asks about, [`identity_clashes_in`]).
+    #[allow(clippy::result_large_err)] // the caller reads the status's details
+    pub async fn apply_restore_plan_with_status(
+        &mut self,
+        plan: &own_backup_common::restore_plan::RestorePlan,
+        passphrases: &std::collections::HashMap<u32, String>,
+        secret: &ArchiveSecret,
+        identity_choice: Option<own_backup_common::engine_dto::IdentityChoice>,
+    ) -> std::result::Result<own_backup_common::restore_state::RestoreRunState, tonic::Status> {
         let mut body = serde_json::json!({
             "plan": plan,
             "passphrases": passphrases,
             "identity_choice": identity_choice,
         });
         secret.add_to(&mut body);
-        let json =
-            serde_json::to_string(&body).map_err(|e| format!("serialize plan failed: {e}"))?;
+        let json = serde_json::to_string(&body)
+            .map_err(|e| tonic::Status::internal(format!("serialize plan failed: {e}")))?;
         let reply = self
             .inner
             .apply_restore_plan(self.request(proto::JsonRequest { json }))
-            .await
-            .map_err(status)?
+            .await?
             .into_inner();
-        parse(&reply.json)
+        parse(&reply.json).map_err(tonic::Status::internal)
     }
 
     /// State of the restore in progress, or the last one that finished.
@@ -1222,6 +1288,21 @@ fn client(channel: Channel) -> BackupServiceClient<Channel> {
 
 fn status(s: tonic::Status) -> String {
     s.message().to_string()
+}
+
+/// The duplicate identities a `FAILED_PRECONDITION` asks about (Linux restore
+/// and mount): empty when the status carries none.
+pub fn identity_clashes_in(
+    s: &tonic::Status,
+) -> Vec<own_backup_common::engine_dto::IdentityClashDto> {
+    serde_json::from_slice::<serde_json::Value>(s.details())
+        .ok()
+        .and_then(|v| {
+            v.get(own_backup_common::engine_dto::IDENTITY_CLASHES_DETAIL)
+                .cloned()
+        })
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default()
 }
 
 fn json_err(e: serde_json::Error) -> String {

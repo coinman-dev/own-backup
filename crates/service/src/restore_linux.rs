@@ -279,8 +279,14 @@ pub(super) fn live_disk_id(plan: &RestorePlan) -> TargetDiskId {
 }
 
 /// The machine's half of the plan checks on Linux: what the target disk
-/// holds now and which of its partitions the running system stands on.
-pub(super) fn fill_context(plan: &RestorePlan, ctx: &mut CheckContext) {
+/// holds now and which of its partitions the running system stands on — and,
+/// for a volume copy, the one volume it holds, under whichever source number
+/// the plan gives it (a volume copy has no partition table to number it by,
+/// and the executor reads the whole image for it).
+pub(super) fn fill_context(plan: &RestorePlan, ctx: &mut CheckContext, keys: Option<&ArchiveKeys>) {
+    if ctx.sources.is_empty() {
+        ctx.sources = volume_sources(plan, keys);
+    }
     use own_backup_common::linux_block as lb;
     use own_backup_common::restore_check::TargetPartition;
 
@@ -326,6 +332,46 @@ pub(super) fn fill_context(plan: &RestorePlan, ctx: &mut CheckContext) {
             ctx.targets.iter().map(|t| t.index).collect()
         }
     };
+}
+
+fn volume_sources(
+    plan: &RestorePlan,
+    keys: Option<&ArchiveKeys>,
+) -> Vec<own_backup_common::restore_check::SourcePartition> {
+    use own_backup_common::restore_check::SourcePartition;
+    let Ok(sidecar) = own_backup_backup::sidecar::read_sidecar_with_keys(&plan.image_path, keys)
+    else {
+        return Vec::new();
+    };
+    if sidecar.disk_manifest.is_some() {
+        return Vec::new();
+    }
+    let mut indices: Vec<u32> = plan
+        .ops
+        .iter()
+        .filter_map(|op| match op {
+            RestoreOp::RestorePartition { src_index, .. } => Some(*src_index),
+            _ => None,
+        })
+        .collect();
+    indices.dedup();
+    let captured_plain = sidecar
+        .manifest
+        .volume_encryption
+        .as_ref()
+        .is_some_and(|v| v.capture_mode == own_backup_common::image::VolumeCaptureMode::Plaintext);
+    indices
+        .into_iter()
+        .map(|index| SourcePartition {
+            index,
+            size_bytes: sidecar.manifest.source_disk.size_bytes,
+            used_bytes: 0,
+            filesystem: own_backup_common::types::FileSystem::Unknown,
+            label: String::new(),
+            encrypted_at_source: captured_plain,
+            luks_header_available: !sidecar.info.luks_headers.is_empty(),
+        })
+        .collect()
 }
 
 /// The plan's disk size from the device itself (see `correct_disk_size`).
@@ -522,6 +568,8 @@ impl BackupServiceImpl {
             summary: DiskRestoreSummaryDto,
             #[serde(skip_serializing_if = "Vec::is_empty")]
             identity_clashes: Vec<IdentityClashDto>,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            warnings: Vec<String>,
         }
         json_reply(&Out {
             summary: DiskRestoreSummaryDto {
@@ -530,6 +578,7 @@ impl BackupServiceImpl {
                 duration_secs: summary.duration.as_secs_f64(),
             },
             identity_clashes: kept,
+            warnings: summary.warnings,
         })
     }
 }

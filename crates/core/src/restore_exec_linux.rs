@@ -912,4 +912,215 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, OwnBackupError::RestoreIncompatible(_)));
     }
+
+    // --- on a real loop disk (root; run explicitly with --ignored) ---------
+
+    const MIB: u64 = 1024 * 1024;
+
+    fn run(cmd: &str, args: &[&str]) -> String {
+        let out = std::process::Command::new(cmd).args(args).output().unwrap();
+        assert!(
+            out.status.success(),
+            "{cmd} {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// An ext4 volume with known content and a qcow2 copy of it made by the
+    /// Linux engine.
+    fn copy_of_ext4(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        use own_backup_backup::engine_linux::{backup_volume, VolumeBackupRequest};
+        use own_backup_common::types::{BackupType, ImageFormat};
+
+        let content = dir.join("content");
+        std::fs::create_dir_all(content.join("nested")).unwrap();
+        let payload: Vec<u8> = (0..700_000u32).flat_map(|i| i.to_le_bytes()).collect();
+        std::fs::write(content.join("payload.bin"), &payload).unwrap();
+        std::fs::write(content.join("nested/hello.txt"), b"restored by the plan\n").unwrap();
+        let src = dir.join("src.ext4");
+        std::fs::File::create(&src)
+            .unwrap()
+            .set_len(64 * MIB)
+            .unwrap();
+        run(
+            "mkfs.ext4",
+            &[
+                "-q",
+                "-F",
+                "-L",
+                "planned",
+                "-d",
+                content.to_str().unwrap(),
+                src.to_str().unwrap(),
+            ],
+        );
+        let image = dir.join("copy.qcow2");
+        let mut snapshot = own_backup_snapshot::Snapshot {
+            provider_name: "linux".into(),
+            source_device: src.to_str().unwrap().into(),
+            snapshot_device_path: src.to_str().unwrap().into(),
+            created_at: Utc::now(),
+            metadata: [("mode".to_string(), "file".to_string())].into(),
+        };
+        own_backup_snapshot::linux::assert_file_frozen(&mut snapshot);
+        backup_volume(
+            &VolumeBackupRequest {
+                source: src.to_str().unwrap().into(),
+                image_path: image.clone(),
+                full_image_path: None,
+                block_size: own_backup_backup::engine_linux::DEFAULT_BLOCK_SIZE,
+                all_sectors: false,
+                use_vss: true,
+                kind: BackupType::Full,
+                parent_image: None,
+                exclusion_patterns: Vec::new(),
+                exclusion_patterns_linux: Vec::new(),
+                job_id: None,
+                passphrase: None,
+                image_format: ImageFormat::Qcow2,
+                source_disk: None,
+                encryption: None,
+                zstd_level: own_backup_backup::qcow2::DEFAULT_ZSTD_LEVEL,
+            },
+            &snapshot,
+            |_| Ok(()),
+        )
+        .unwrap();
+        (src, image)
+    }
+
+    struct Loop(String);
+    impl Drop for Loop {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("losetup")
+                .args(["-d", &self.0])
+                .status();
+        }
+    }
+
+    fn plan_onto(device: &str, image: &std::path::Path) -> RestorePlan {
+        use own_backup_common::restore_plan::{
+            PartitionKind, PartitionScheme, PartitionSpec, PartitionTableSpec,
+        };
+        let dst = PartRef {
+            index: 1,
+            offset: MIB,
+            size: 80 * MIB,
+        };
+        let mut plan = RestorePlan::new(
+            0,
+            image.to_path_buf(),
+            vec![
+                RestoreOp::WritePartitionTable {
+                    table: PartitionTableSpec {
+                        scheme: PartitionScheme::Gpt,
+                        sector_size: 512,
+                        disk_size_bytes: 128 * MIB,
+                        disk_id: String::new(),
+                        entries: vec![PartitionSpec {
+                            index: 1,
+                            first_lba: 2048,
+                            last_lba: 2048 + 80 * 2048 - 1,
+                            kind: PartitionKind::Gpt {
+                                type_guid: "0FC63DAF-8483-4772-8E79-3D69D8477DE4".into(),
+                                part_guid: String::new(),
+                                attributes: 0,
+                                name: "restored".into(),
+                            },
+                        }],
+                    },
+                },
+                RestoreOp::RestorePartition {
+                    src_index: 1,
+                    dst,
+                    mode: RestoreMode::Sectors,
+                    wipe_free_space: true,
+                    reencrypt: false,
+                },
+                RestoreOp::RefreshDiskState,
+            ],
+        );
+        plan.verify_after = true;
+        plan.target_device = Some(device.to_string());
+        plan
+    }
+
+    #[test]
+    #[ignore]
+    fn real_loop_disk_plan_restore() {
+        assert_eq!(libc_geteuid(), 0, "this test needs root");
+        let dir = tempfile::tempdir().unwrap();
+        let (src, image) = copy_of_ext4(dir.path());
+        let disk = dir.path().join("disk.img");
+        std::fs::File::create(&disk)
+            .unwrap()
+            .set_len(128 * MIB)
+            .unwrap();
+        let lo = Loop(run(
+            "losetup",
+            &["-f", "--show", "-P", disk.to_str().unwrap()],
+        ));
+
+        let plan = plan_onto(&lo.0, &image);
+        let state = execute_plan(
+            &plan,
+            &Default::default(),
+            None,
+            &CancelToken::new(plan.id),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(state.status, RunStatus::Completed, "{state:#?}");
+        assert!(
+            state.ops.iter().all(|o| o.status == OpStatus::Done),
+            "{state:#?}"
+        );
+        assert!(
+            state.ops.iter().any(|o| o.kind == "verify_sectors"),
+            "the read-back ran"
+        );
+
+        // The partition holds the volume byte for byte, and the table is GPT.
+        let restored = std::fs::read(&disk).unwrap();
+        let original = std::fs::read(&src).unwrap();
+        assert_eq!(
+            &restored[MIB as usize..(MIB + 64 * MIB) as usize],
+            &original[..]
+        );
+        assert_eq!(&restored[512..520], b"EFI PART");
+        // The kernel shows the partition the plan wrote.
+        let name = std::path::Path::new(&lo.0)
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let start =
+            std::fs::read_to_string(format!("/sys/class/block/{name}/{name}p1/start")).unwrap();
+        assert_eq!(start.trim(), "2048");
+
+        // Mounted, the partition is the running system's: the same plan is
+        // refused before anything is written.
+        let mnt = dir.path().join("mnt");
+        std::fs::create_dir_all(&mnt).unwrap();
+        let node = format!("/dev/{name}p1");
+        run("mount", &["-o", "ro", &node, mnt.to_str().unwrap()]);
+        let refused = execute_plan(
+            &plan,
+            &Default::default(),
+            None,
+            &CancelToken::new(plan.id),
+            |_| {},
+        );
+        run("umount", &[mnt.to_str().unwrap()]);
+        let err = refused.unwrap_err().to_string();
+        assert!(err.contains('1'), "names the partition: {err}");
+    }
+
+    fn libc_geteuid() -> u32 {
+        std::fs::metadata("/proc/self")
+            .map(|m| std::os::unix::fs::MetadataExt::uid(&m))
+            .unwrap_or(u32::MAX)
+    }
 }

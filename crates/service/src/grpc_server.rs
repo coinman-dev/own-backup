@@ -263,7 +263,7 @@ impl BackupServiceImpl {
         // Linux disks are named by device, not number: the facts above came
         // back empty or unsure, and these replace them.
         #[cfg(target_os = "linux")]
-        restore_linux::fill_context(plan, &mut ctx);
+        restore_linux::fill_context(plan, &mut ctx, keys);
         ctx
     }
 }

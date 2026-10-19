@@ -260,20 +260,30 @@ impl HostView {
         self.run_udev.join("queue").exists()
     }
 
+    /// Whether udevd runs at all: it listens on `/run/udev/control`. Without
+    /// it (a container, a minimal medium) no database record will ever
+    /// appear, and only the kernel's own `/dev` nodes are worth waiting for.
+    pub fn udev_running(&self) -> bool {
+        self.run_udev.join("control").exists()
+    }
+
     /// Partitions of `disk` that udev has not finished with: no `/dev` node or
-    /// no database record yet.
+    /// no database record yet (the record only while udevd runs).
     pub fn partitions_without_udev(&self, disk: &str) -> Vec<String> {
+        let udev = self.udev_running();
         own_backup_common::linux_block::partitions_of(&self.sys_block, disk)
             .into_iter()
             .filter(|p| {
                 let node = self.dev.join(p).exists();
-                let record = own_backup_common::linux_block::dev_numbers(&self.sys_block, p)
-                    .is_some_and(|(ma, mi)| {
-                        self.run_udev
-                            .join("data")
-                            .join(format!("b{ma}:{mi}"))
-                            .exists()
-                    });
+                let record = !udev
+                    || own_backup_common::linux_block::dev_numbers(&self.sys_block, p).is_some_and(
+                        |(ma, mi)| {
+                            self.run_udev
+                                .join("data")
+                                .join(format!("b{ma}:{mi}"))
+                                .exists()
+                        },
+                    );
                 !(node && record)
             })
             .collect()
@@ -869,6 +879,8 @@ mod tests {
         std::fs::create_dir_all(&disk).unwrap();
         std::fs::create_dir_all(&host.dev).unwrap();
         std::fs::create_dir_all(host.run_udev.join("data")).unwrap();
+        // udevd is running.
+        std::fs::write(host.run_udev.join("control"), "").unwrap();
         for p in parts {
             let name = format!("sdz{}", p.number);
             let dir = disk.join(&name);
@@ -1124,6 +1136,23 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("sdz1"), "{err}");
+    }
+
+    #[test]
+    fn without_udevd_only_the_kernel_nodes_are_awaited() {
+        let size = 64 * MIB;
+        let (opener, _, root) = fake(size);
+        let p1 = KernelPartition {
+            number: 1,
+            start: 2048,
+            size: 2048,
+        };
+        let host = host_with(root.path(), &[p1], false);
+        std::fs::remove_file(host.run_udev.join("control")).unwrap();
+        std::fs::write(host.dev.join("sdz1"), "").unwrap();
+        let s = LinuxDiskSession::open(&opener, "/dev/fake", host).unwrap();
+        s.finish(Some(&[p1]), Duration::ZERO, |_| panic!("waited"))
+            .unwrap();
     }
 
     #[test]

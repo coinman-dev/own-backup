@@ -15,5 +15,9 @@
   "restore_disk_linux.block_past_disk": {
     "ru": "Блок копии по смещению %{offset} не помещается на диск назначения (%{size} байт).",
     "en": "The copy's block at offset %{offset} does not fit the target disk (%{size} bytes)."
+  },
+  "restore_disk_linux.udev_not_settled": {
+    "ru": "Диск записан, но система не успела показать его разделы (%{error}). Если их не видно, переподключите диск или перезагрузитесь.",
+    "en": "The disk is written, but the system did not finish showing its partitions (%{error}). If they are not visible, reconnect the disk or restart."
   }
 }

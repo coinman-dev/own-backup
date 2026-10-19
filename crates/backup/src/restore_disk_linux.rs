@@ -206,6 +206,8 @@ pub struct DiskRestoreSummary {
     pub partitions: usize,
     pub bytes_written: u64,
     pub duration: Duration,
+    /// Said, not raised: everything is written by the time these arise.
+    pub warnings: Vec<String>,
 }
 
 /// Copy every stored block of the image to the same offset on the target,
@@ -323,7 +325,11 @@ pub fn restore_disk(
         bytes_written: bytes,
     })?;
     let written = session.write_partition_table(&spec_from_layout(&dm.layout, target_size))?;
-    session.finish(Some(&written.expected), UDEV_TIMEOUT, std::thread::sleep)?;
+    let mut warnings = Vec::new();
+    if let Err(e) = session.finish(Some(&written.expected), UDEV_TIMEOUT, std::thread::sleep) {
+        tracing::warn!(error = %e, "the disk is written, but udev did not settle on it");
+        warnings.push(tr!("restore_disk_linux.udev_not_settled", error = e).into_owned());
+    }
     info!(
         target = %req.target_device,
         partitions = count,
@@ -336,6 +342,7 @@ pub fn restore_disk(
         partitions: count,
         bytes_written: bytes,
         duration: started.elapsed(),
+        warnings,
     })
 }
 
