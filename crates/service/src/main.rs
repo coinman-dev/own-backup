@@ -168,6 +168,60 @@ fn start_log_housekeeping() {
     });
 }
 
+/// The service log file, and — when systemd started the service with its
+/// output going to the journal (`$JOURNAL_STREAM`, Linux) — the same lines on
+/// stderr, so `journalctl -u own-backup` shows them too. Each line carries
+/// the `<N>` syslog prefix of its level, which journald reads as the priority
+/// (`SyslogLevelPrefix=`, on by default). Anywhere else it is the file alone.
+struct JournalCopy<W> {
+    file: W,
+    journal: bool,
+}
+
+impl<W> JournalCopy<W> {
+    fn new(file: W) -> Self {
+        Self {
+            file,
+            journal: cfg!(target_os = "linux") && std::env::var_os("JOURNAL_STREAM").is_some(),
+        }
+    }
+}
+
+impl<W: std::io::Write> std::io::Write for JournalCopy<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // The file is the log that must exist; the journal copy is best-effort.
+        let n = self.file.write(buf)?;
+        if self.journal {
+            let mut stderr = std::io::stderr().lock();
+            for line in buf[..n].split_inclusive(|b| *b == b'\n') {
+                let _ = stderr.write_all(syslog_prefix(line).as_bytes());
+                let _ = stderr.write_all(line);
+            }
+        }
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
+/// `<N>` for a formatted tracing line — `2026-10-19T…Z  WARN target: …` — by
+/// its level word: err 3, warning 4, info 6, debug 7.
+fn syslog_prefix(line: &[u8]) -> &'static str {
+    let level = std::str::from_utf8(line)
+        .ok()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .unwrap_or("");
+    match level {
+        "ERROR" => "<3>",
+        "WARN" => "<4>",
+        "INFO" => "<6>",
+        "DEBUG" | "TRACE" => "<7>",
+        _ => "<6>",
+    }
+}
+
 /// Set up logging to a file next to the exe (so a service running under the SCM,
 /// which has no console, still produces a diagnosable log) and record startup
 /// facts. The level is the settings' «Уровень журнала», followed while running
@@ -195,7 +249,7 @@ fn init_logging() {
             // The second copy, on whatever drive the user named — the only one
             // that survives a restore that takes the machine down with it.
             let tee = TeeLog::new(
-                f,
+                JournalCopy::new(f),
                 MirrorLog::new(AppConfig::default_path(), "own-backup-service.log"),
             );
             let mirror = tee.mirror_path();
@@ -1704,6 +1758,27 @@ mod tests {
         assert_eq!(mode_of(&args("--media /status")), Mode::Status);
         // On its own it selects nothing: the SCM launches us with no words.
         assert_eq!(mode_of(&args("--media")), Mode::Service);
+    }
+
+    #[test]
+    fn journal_lines_carry_their_level_as_a_syslog_priority() {
+        let line = |level: &str| format!("2026-10-19T16:26:28.486128Z {level} security: text\n");
+        assert_eq!(syslog_prefix(line("ERROR").as_bytes()), "<3>");
+        assert_eq!(syslog_prefix(line(" WARN").as_bytes()), "<4>");
+        assert_eq!(syslog_prefix(line(" INFO").as_bytes()), "<6>");
+        assert_eq!(syslog_prefix(line("DEBUG").as_bytes()), "<7>");
+        assert_eq!(syslog_prefix(b"continuation of a message\n"), "<6>");
+    }
+
+    #[test]
+    fn without_a_journal_the_copy_is_the_file_alone() {
+        use std::io::Write;
+        let mut copy = JournalCopy {
+            file: Vec::new(),
+            journal: false,
+        };
+        copy.write_all(b"one\ntwo\n").unwrap();
+        assert_eq!(copy.file, b"one\ntwo\n");
     }
 
     #[test]
