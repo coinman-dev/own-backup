@@ -35,6 +35,7 @@ fn request(source: &str, image: &Path, format: ImageFormat) -> VolumeBackupReque
         kind: BackupType::Full,
         parent_image: None,
         exclusion_patterns: Vec::new(),
+        exclusion_patterns_linux: Vec::new(),
         job_id: Some("job-volume-tests".into()),
         passphrase: None,
         image_format: format,

@@ -223,6 +223,89 @@ stage_l2() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+# L3: Linux exclusions (ext4, xfs, btrfs) on a source that holds still.
+# ---------------------------------------------------------------------------
+L3_RULES=(--exclude 'data/cache/**' --exclude '*.tmp')
+
+# l3_mounted_checks ID FS DEVICE: the restored DEVICE holds no excluded name, keeps the
+# rest bit for bit, survives a write and is still clean afterwards.
+l3_mounted_checks() {
+    local id=$1 fs=$2 dev=$3
+    mnt "$dev" "$WORK/rst" || { check "$id-mount" FAIL "restored $fs does not mount"; return; }
+    [[ ! -e $WORK/rst/data/cache/junk.bin && ! -e $WORK/rst/data/keep/report.tmp \
+        && -d $WORK/rst/data/cache ]]
+    check "$id-gone" "$(verdict $?)" "excluded files are gone, their directory stays"
+    (cd "$WORK/rst" && grep -v -e 'cache/junk.bin' -e 'report.tmp' "$WORK/l3.sums" \
+        | sha256sum -c --quiet) >/dev/null 2>&1
+    check "$id-kept" "$(verdict $?)" "every kept file matches its hash"
+    head -c 8M /dev/urandom >"$WORK/rst/data/after-restore.bin" && sync
+    check "$id-write" "$(verdict $?)" "the restored $fs takes new data"
+    umnt "$WORK/rst"
+    run "$id-fsck2" fsck_of "$fs" "$dev"
+    check "$id-fsck2" "$(verdict $?)" "$fs checker clean after the write"
+}
+
+stage_l3() {
+    local src dst out=$WORK/out/l3 fs
+    mkdir -p "$out"
+    loopdev src l3-src 400 && loopdev dst l3-dst 400 || return
+    for fs in ext4 xfs; do
+        mkfs_of "$fs" "$src" && mnt "$src" "$WORK/m-l3" && populate "$WORK/m-l3" \
+            && hashes "$WORK/m-l3" "$WORK/l3.sums" && mount -o remount,ro "$WORK/m-l3"
+        run "l3-$fs" "$CLI" backup "$src" -o "$out/$fs.qcow2" --format qcow2 "${L3_RULES[@]}"
+        check "l3-$fs-copy" "$(verdict $?)" "$fs read-only: copied with the Linux rules"
+        grep -q '^Excluded: 2 files' "$EV/l3-$fs.out"
+        check "l3-$fs-count" "$(verdict $?)" "both matched files were excluded"
+        ! grep -q '^Exclusions not applied\|^Excluded names kept' "$EV/l3-$fs.out"
+        check "l3-$fs-removed" "$(verdict $?)" "nothing reported as skipped or kept"
+        umnt "$WORK/m-l3"
+        run "l3-$fs-restore" "$CLI" restore "$out/$fs.qcow2" -t "$dst" --yes
+        check "l3-$fs-restore" "$(verdict $?)" "restore onto $dst"
+        run "l3-$fs-fsck" fsck_of "$fs" "$dst"
+        check "l3-$fs-fsck" "$(verdict $?)" "$fs checker clean after restore"
+        l3_mounted_checks "l3-$fs" "$fs" "$dst"
+    done
+
+    # Mounted read-write: no snapshot, refused as in l1 — exclusions never
+    # turn a refusal into a live read.
+    mkfs_of ext4 "$src" && mnt "$src" "$WORK/m-l3"
+    run l3-busy "$CLI" backup "$src" -o "$out/busy.qcow2" --format qcow2 "${L3_RULES[@]}"
+    [[ $? -ne 0 ]]
+    check l3-busy-refused "$(verdict $?)" "a volume in use is still refused"
+    umnt "$WORK/m-l3"
+
+    # btrfs: built from a folder, idle. The kernel here may not mount it, so
+    # the trees are inspected instead; a spared name must be reported.
+    if command -v mkfs.btrfs >/dev/null; then
+        rm -rf "$WORK/btrfs-root" && mkdir -p "$WORK/btrfs-root" && populate "$WORK/btrfs-root"
+        hashes "$WORK/btrfs-root" "$WORK/l3.sums"
+        mkfs.btrfs -q -f -r "$WORK/btrfs-root" "$src" >/dev/null 2>&1
+        run l3-btrfs "$CLI" backup "$src" -o "$out/btrfs.qcow2" --format qcow2 "${L3_RULES[@]}"
+        check l3-btrfs-copy "$(verdict $?)" "idle btrfs: copied with the Linux rules"
+        grep -q '^Excluded: 2 files' "$EV/l3-btrfs.out"
+        check l3-btrfs-count "$(verdict $?)" "both matched files were excluded"
+        run l3-btrfs-restore "$CLI" restore "$out/btrfs.qcow2" -t "$dst" --yes
+        check l3-btrfs-restore "$(verdict $?)" "restore onto $dst"
+        run l3-btrfs-fsck fsck_of btrfs "$dst"
+        check l3-btrfs-fsck "$(verdict $?)" "btrfs check clean after restore"
+        btrfs inspect-internal dump-tree -t fs "$dst" >"$EV/l3-btrfs-tree.out" 2>&1
+        local named=0
+        grep -q 'name: junk.bin\|name: report.tmp' "$EV/l3-btrfs-tree.out" && named=1
+        local said=0
+        grep -q '^Excluded names kept' "$EV/l3-btrfs.out" && said=1
+        [[ $named -eq $said ]]
+        check l3-btrfs-honest "$(verdict $?)" "names left in the trees ($named) are reported ($said)"
+        if fs_mountable btrfs; then
+            l3_mounted_checks l3-btrfs btrfs "$dst"
+        else
+            check l3-btrfs-mount SKIP "kernel cannot mount btrfs here"
+        fi
+    else
+        check l3-btrfs SKIP "no mkfs.btrfs"
+    fi
+}
+
 for stage in "${STAGES[@]}"; do
     if declare -F "stage_$stage" >/dev/null; then
         echo "== $stage"

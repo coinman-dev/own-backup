@@ -105,6 +105,15 @@ pub fn scan_fat32_exclusions(
 
     // Free every excluded cluster's FAT entry in all FAT copies.
     append_fat32_free_patches(&geom, &mut freed_clusters, &mut scan.patches);
+    // …and count them free in FSInfo, or the filesystem says it has less
+    // space than it has (fsck.fat: «Free cluster summary wrong»).
+    append_fsinfo_patches(
+        vol,
+        &boot,
+        &geom,
+        freed_clusters.len() as u64,
+        &mut scan.patches,
+    )?;
 
     scan.ranges.finalize();
     info!(
@@ -145,6 +154,50 @@ fn append_fat32_free_patches(
         }
         i = j + 1;
     }
+}
+
+/// Add `freed` clusters to the free count of the FSInfo sector and of its
+/// backup copy (FAT32 §6). Only a sector that carries all three FSInfo
+/// signatures and a known count (not `0xFFFFFFFF`) is touched; the next-free
+/// hint stays as it is — it is only a hint.
+fn append_fsinfo_patches(
+    vol: &mut dyn RawVolume,
+    boot: &[u8; 512],
+    geom: &Fat32Geometry,
+    freed: u64,
+    patches: &mut Vec<(u64, Vec<u8>)>,
+) -> Result<()> {
+    if freed == 0 {
+        return Ok(());
+    }
+    let fsinfo = u16::from_le_bytes([boot[48], boot[49]]) as u64;
+    let backup_boot = u16::from_le_bytes([boot[50], boot[51]]) as u64;
+    if fsinfo == 0 || fsinfo == 0xFFFF {
+        return Ok(());
+    }
+    let mut sectors = vec![fsinfo];
+    if backup_boot != 0 && backup_boot != 0xFFFF {
+        sectors.push(backup_boot + fsinfo);
+    }
+    let le32 = |b: &[u8], o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+    let mut sector = [0u8; 512];
+    for n in sectors {
+        let at = n * geom.bytes_per_sector;
+        if at + 512 > vol.len() {
+            continue;
+        }
+        vol.read_at(at, &mut sector)?;
+        let signed = le32(&sector, 0) == 0x4161_5252
+            && le32(&sector, 484) == 0x6141_7272
+            && le32(&sector, 508) == 0xAA55_0000;
+        let count = le32(&sector, 488);
+        if !signed || count == 0xFFFF_FFFF {
+            continue;
+        }
+        let new = (count as u64 + freed).min(geom.cluster_count) as u32;
+        patches.push((at + 488, new.to_le_bytes().to_vec()));
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -76,6 +76,11 @@ pub struct VolumeBackupRequest {
     /// mode; excluded clusters are dropped from the used map and zeroed
     /// inside blocks that are still copied.
     pub exclusion_patterns: Vec<String>,
+    /// The job's rules for Linux filesystems (ext, btrfs, xfs): case as
+    /// written, `/` as the separator, applied only where the session holds
+    /// still. Windows never sets them (decision R6): its volume path does not
+    /// apply Linux rules, as before.
+    pub exclusion_patterns_linux: Vec<String>,
     /// GUI job id, stamped into the sidecar so retention can find this
     /// job's chains later.
     pub job_id: Option<String>,
@@ -332,11 +337,12 @@ fn backup_volume_inner<P: EnginePlatform>(
         mut excluded_files,
         mut excluded_bytes,
         zero_ranges,
-        fat_patches,
+        meta_patches,
         mut categories,
         mut file_scan_skipped,
         removal_paths,
         in_image_exclusions,
+        entries_kept,
     } = resolve_exclusions(
         platform,
         &session,
@@ -388,8 +394,14 @@ fn backup_volume_inner<P: EnginePlatform>(
             .collect()
     });
 
-    let mut reader =
-        volume_block_reader(platform, &opened, &read_path, req, zero_ranges, fat_patches)?;
+    let mut reader = volume_block_reader(
+        platform,
+        &opened,
+        &read_path,
+        req,
+        zero_ranges,
+        meta_patches,
+    )?;
 
     let outcome = copy_used_blocks(
         &backup_id.to_string(),
@@ -506,7 +518,7 @@ fn backup_volume_inner<P: EnginePlatform>(
         }
     }
 
-    let mut excluded_entries_kept: Option<String> = None;
+    let mut excluded_entries_kept: Option<String> = entries_kept;
     if !removal_paths.is_empty() {
         let tick = &mut |n, total| phase_tick("exclusions", n, total);
         let removed =

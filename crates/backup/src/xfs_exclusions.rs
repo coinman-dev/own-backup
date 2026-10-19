@@ -670,6 +670,33 @@ pub fn scan_xfs_exclusions(
     vol: &mut dyn RawVolume,
     patterns: &[String],
     stage2: bool,
+    tick: impl FnMut(u64) -> Result<()>,
+) -> Result<XfsExclusionScan> {
+    scan_xfs(vol, patterns, stage2, false, tick)
+}
+
+/// [`scan_xfs_exclusions`] for a filesystem captured while FROZEN (an LVM or
+/// device-mapper snapshot, a partition frozen for its copy): its log reads as
+/// dirty, but freezing wrote every logged buffer home and covered the log, so
+/// the btrees are the committed state (`xfs_map::build_xfs_used_map_frozen`).
+/// The files are found and their exclusive data zeroed (Stage 1) as on a
+/// clean filesystem. Stage 2 edits the metadata a replay of that log would
+/// meet on the first mount, so it runs only when the log is clean after all;
+/// otherwise the files stay in the catalog with zeroed contents, and the
+/// caller reports them.
+pub fn scan_xfs_exclusions_quiesced(
+    vol: &mut dyn RawVolume,
+    patterns: &[String],
+    tick: impl FnMut(u64) -> Result<()>,
+) -> Result<XfsExclusionScan> {
+    scan_xfs(vol, patterns, true, true, tick)
+}
+
+fn scan_xfs(
+    vol: &mut dyn RawVolume,
+    patterns: &[String],
+    stage2: bool,
+    quiesced: bool,
     mut tick: impl FnMut(u64) -> Result<()>,
 ) -> Result<XfsExclusionScan> {
     let mut scan = XfsExclusionScan::empty();
@@ -679,9 +706,11 @@ pub fn scan_xfs_exclusions(
         return Ok(scan);
     }
     let sb = parse_sb(vol)?;
-    if !log_is_clean(vol, &sb)? {
+    let clean = log_is_clean(vol, &sb)?;
+    if !clean && !quiesced {
         return Err(bad(tr!("xfs_exclusions.log_dirty")));
     }
+    let stage2 = stage2 && clean;
     // Shared block set (fs-block ranges) — empty when reflink is off.
     let shared = if sb.reflink {
         collect_shared(vol, &sb)?
@@ -1029,6 +1058,32 @@ mod xfs_integration {
         };
         use crate::used_sectors::UsedSectorMap;
         assert_eq!(frozen.used_block_count(), clean.used_block_count());
+
+        // The exclusions of a frozen capture: the files are found and their
+        // data zeroed, exactly as on the clean image — but nothing a replay
+        // of that log could meet is edited (no Stage 2), and nothing is
+        // dropped from the copy: the names stay, with zeros behind them.
+        let pats = ["cache".to_string()];
+        let quiesced = scan_xfs_exclusions_quiesced(&mut vol, &pats, |_| Ok(())).unwrap();
+        let stage1 = run(&img, &["cache"]).0;
+        assert_eq!(quiesced.files_excluded, stage1.files_excluded);
+        assert_eq!(quiesced.bytes_excluded, stage1.bytes_excluded);
+        assert_eq!(
+            quiesced.ranges.iter().collect::<Vec<_>>(),
+            stage1.ranges.iter().collect::<Vec<_>>()
+        );
+        assert!(quiesced.patches.is_empty() && quiesced.droppable.is_empty());
+        // A clean log under the same call: Stage 2 as usual.
+        let f = std::fs::File::open(&img).unwrap();
+        let len = f.metadata().unwrap().len();
+        let on_clean =
+            scan_xfs_exclusions_quiesced(&mut FileVol { f, len }, &pats, |_| Ok(())).unwrap();
+        let stage2 = run2(&img, &["cache"]);
+        assert_eq!(on_clean.patches, stage2.patches);
+        assert_eq!(
+            on_clean.droppable.iter().collect::<Vec<_>>(),
+            stage2.droppable.iter().collect::<Vec<_>>()
+        );
     }
 
     #[test]

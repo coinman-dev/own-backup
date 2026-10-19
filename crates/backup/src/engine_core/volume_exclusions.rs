@@ -24,8 +24,9 @@ pub(crate) struct VolumeExclusions {
     /// Excluded byte ranges of the volume, zeroed inside the blocks that are
     /// still copied.
     pub(crate) zero_ranges: Option<ByteRanges>,
-    /// FAT/exFAT metadata patches that delete the excluded files.
-    pub(crate) fat_patches: Vec<(u64, Vec<u8>)>,
+    /// Metadata patches that delete the excluded files: FAT/exFAT entries and
+    /// tables; on Linux also the ext, btrfs and xfs Stage-2 edits.
+    pub(crate) meta_patches: Vec<(u64, Vec<u8>)>,
     /// By-type breakdown of the files in the copy; `None` when nobody walked
     /// them.
     pub(crate) categories: Option<crate::exclusions::CategorySizes>,
@@ -37,6 +38,10 @@ pub(crate) struct VolumeExclusions {
     /// The rules are applied inside the finished image instead: an encrypted
     /// source whose files could not be walked before the copy.
     pub(crate) in_image_exclusions: bool,
+    /// Why some excluded files are still listed in the copy's catalog (with
+    /// their contents zeroed), in words for the result screen; `None` when
+    /// every one of them was removed or none was left behind.
+    pub(crate) entries_kept: Option<String>,
 }
 
 /// Apply `req`'s exclusion rules to the source before the copy: the matched
@@ -80,7 +85,7 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
     // Byte-level metadata edits that make excluded FAT/exFAT files truly
     // disappear (delete the directory entry, free the allocation table). Empty
     // for NTFS/ReFS, which still use zeroing for now.
-    let mut fat_patches: Vec<(u64, Vec<u8>)> = Vec::new();
+    let mut meta_patches: Vec<(u64, Vec<u8>)> = Vec::new();
     let mut categories: Option<crate::exclusions::CategorySizes> = None;
     // "prepare"-phase progress tick. `total` is the number of MFT records the
     // scan will look at, known up front; 0 when whatever is scanning cannot say
@@ -114,6 +119,10 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
     // Исключения решены ДО копии по $MFT — проход внутри образа не нужен:
     // исключённых данных в образе нет, осталось убрать записи из каталога.
     let mut pre_copy_exclusions = false;
+    let mut entries_kept: Option<String> = None;
+    // A Linux filesystem the engine parsed itself (its map exists only when
+    // the session holds still) and rules written for it.
+    let linux_fs = maps.ext_map.is_some() || maps.btrfs_map.is_some() || maps.xfs_map.is_some();
     if let Some(map) = maps.ntfs_map.as_mut() {
         if !req.exclusion_patterns.is_empty() {
             // Сначала по $MFT: последовательное чтение вместо обхода дерева.
@@ -344,7 +353,7 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
                         // Правки метаданных: запись каталога помечается
                         // удалённой, цепочка в таблице освобождается — файл
                         // исчезает, а не остаётся нулевым призраком.
-                        fat_patches = scan.patches;
+                        meta_patches = scan.patches;
                     }
                     pre_copy_exclusions = true;
                 }
@@ -377,7 +386,76 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
             zero_ranges = Some(scan.ranges);
             // Metadata patches: delete the directory entries + free the FAT
             // chains so the files vanish instead of remaining zero-filled ghosts.
-            fat_patches = scan.patches;
+            meta_patches = scan.patches;
+        }
+    } else if linux_fs && !req.exclusion_patterns_linux.is_empty() {
+        // ext, btrfs, xfs under the Linux rules — the scanners Windows runs on
+        // these filesystems inside a whole disk (`partition_prep`), here on a
+        // volume the session holds still (only then is there a map at all):
+        // the matched files' entries removed where that is safe (Stage 2),
+        // their exclusive data zeroed in any case (Stage 1).
+        let mut dev = P::Dev::open_read(read_path)?;
+        let patterns = &req.exclusion_patterns_linux;
+        let mut walk_tick = |n: u64| prepare_tick(n, 0);
+        let scanned = if maps.ext_map.is_some() {
+            crate::ext_exclusions::scan_ext_exclusions(&mut dev, patterns, &mut walk_tick)
+                .map(|s| LinuxFsScan::from_ext("ext", s))
+        } else if maps.btrfs_map.is_some() {
+            crate::btrfs_exclusions::scan_btrfs_exclusions(&mut dev, patterns, true, &mut walk_tick)
+                .map(|s| LinuxFsScan::from_btrfs("btrfs", s))
+        } else if P::METADATA_NEEDS_FROZEN && session.quiesced() {
+            // Frozen when captured: the log reads dirty but is covered.
+            crate::xfs_exclusions::scan_xfs_exclusions_quiesced(&mut dev, patterns, &mut walk_tick)
+                .map(|s| LinuxFsScan::from_xfs("xfs", s))
+        } else {
+            crate::xfs_exclusions::scan_xfs_exclusions(&mut dev, patterns, true, &mut walk_tick)
+                .map(|s| LinuxFsScan::from_xfs("xfs", s))
+        };
+        match scanned {
+            Ok(scan) => {
+                excluded_files = scan.files;
+                excluded_bytes = scan.bytes;
+                categories = Some(scan.categories);
+                info!(
+                    fs = scan.fs,
+                    files = scan.files,
+                    bytes = scan.bytes,
+                    patches = scan.patches.len(),
+                    removed_bytes = scan.droppable.total_bytes(),
+                    "exclusions resolved from the filesystem BEFORE the copy"
+                );
+                report_categories(
+                    &mut progress,
+                    categories.as_ref(),
+                    excluded_files,
+                    excluded_bytes,
+                )?;
+                if !scan.ranges.is_empty() {
+                    // Only what Stage 2 freed leaves the map: a file it spared
+                    // is still listed, and its blocks must be stored as the
+                    // zeros they became.
+                    let bs = req.block_size;
+                    if let Some(m) = maps.ext_map.as_mut() {
+                        m.apply_excluded_ranges(&scan.droppable, bs);
+                    } else if let Some(m) = maps.btrfs_map.as_mut() {
+                        m.apply_excluded_ranges(&scan.droppable, bs);
+                    } else if let Some(m) = maps.xfs_map.as_mut() {
+                        m.apply_excluded_ranges(&scan.droppable, bs);
+                    }
+                    if scan.ranges.total_bytes() > scan.droppable.total_bytes() {
+                        entries_kept =
+                            Some(tr!("engine.entries_kept_zeroed", fs = scan.fs).into_owned());
+                    }
+                    zero_ranges = Some(scan.ranges);
+                    meta_patches = scan.patches;
+                }
+            }
+            Err(OwnBackupError::Cancelled) => return Err(OwnBackupError::Cancelled),
+            Err(e) => {
+                let fs = maps.detected_fs.clone().unwrap_or_default();
+                warn!(fs = %fs, error = %e, "exclusion scan failed — keeping all files");
+                file_scan_skipped = Some(tr!("engine_win.skip_list_failed", fs = fs).into_owned());
+            }
         }
     } else {
         // Nothing walked the files here. Say which of the reasons it was, in
@@ -441,12 +519,64 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
         excluded_files,
         excluded_bytes,
         zero_ranges,
-        fat_patches,
+        meta_patches,
         categories,
         file_scan_skipped,
         removal_paths,
         in_image_exclusions,
+        entries_kept,
     })
+}
+
+/// One Linux filesystem's exclusion scan, in the terms the pipeline uses.
+struct LinuxFsScan {
+    fs: &'static str,
+    files: u64,
+    bytes: u64,
+    categories: crate::exclusions::CategorySizes,
+    /// Excluded data, zeroed in the copy.
+    ranges: ByteRanges,
+    /// The part of `ranges` Stage 2 freed: left out of the copy entirely.
+    droppable: ByteRanges,
+    patches: Vec<(u64, Vec<u8>)>,
+}
+
+impl LinuxFsScan {
+    fn from_ext(fs: &'static str, s: crate::ext_exclusions::ExtExclusionScan) -> Self {
+        Self {
+            fs,
+            files: s.files_excluded,
+            bytes: s.bytes_excluded,
+            categories: s.categories,
+            ranges: s.ranges,
+            droppable: s.droppable,
+            patches: s.patches,
+        }
+    }
+
+    fn from_btrfs(fs: &'static str, s: crate::btrfs_exclusions::BtrfsExclusionScan) -> Self {
+        Self {
+            fs,
+            files: s.files_excluded,
+            bytes: s.bytes_excluded,
+            categories: s.categories,
+            ranges: s.ranges,
+            droppable: s.droppable,
+            patches: s.patches,
+        }
+    }
+
+    fn from_xfs(fs: &'static str, s: crate::xfs_exclusions::XfsExclusionScan) -> Self {
+        Self {
+            fs,
+            files: s.files_excluded,
+            bytes: s.bytes_excluded,
+            categories: s.categories,
+            ranges: s.ranges,
+            droppable: s.droppable,
+            patches: s.patches,
+        }
+    }
 }
 
 /// Разобрать исключения по $MFT тома, который Windows смонтировала.

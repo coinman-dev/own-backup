@@ -103,6 +103,8 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
             p.extend(args.exclude.iter().cloned());
             p
         },
+        // Windows applies no Linux rules to a volume (decision R6).
+        exclusion_patterns_linux: Vec::new(),
         job_id: None,
         passphrase: args.password.clone().map(zeroize::Zeroizing::new),
         image_format: args.format,
@@ -220,14 +222,6 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
                 .into(),
         ));
     }
-    // Nor exclusions: a copy that ignored the rules it was given would look
-    // like one that applied them.
-    if !args.exclude.is_empty() || args.exclude_defaults {
-        return Err(OwnBackupError::Config(
-            "исключения файлов (--exclude, --exclude-defaults) на Linux пока не поддерживаются"
-                .into(),
-        ));
-    }
     let block_size = if args.block_size_mib == 0 {
         DEFAULT_BLOCK_SIZE
     } else {
@@ -268,7 +262,27 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
         use_vss: true,
         kind,
         parent_image,
-        exclusion_patterns: Vec::new(),
+        // A mask typed here is meant for whatever the volume holds: it goes
+        // to both families. The defaults are each family's own, as a new job
+        // gets them.
+        exclusion_patterns: {
+            let mut p = if args.exclude_defaults {
+                own_backup_core::default_exclusions()
+            } else {
+                Vec::new()
+            };
+            p.extend(args.exclude.iter().cloned());
+            p
+        },
+        exclusion_patterns_linux: {
+            let mut p = if args.exclude_defaults {
+                own_backup_core::default_linux_exclusions()
+            } else {
+                Vec::new()
+            };
+            p.extend(args.exclude.iter().cloned());
+            p
+        },
         job_id: None,
         passphrase: args.password.clone().map(zeroize::Zeroizing::new),
         image_format: args.format,
@@ -340,6 +354,19 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
             "sector-by-sector"
         },
     );
+    if summary.excluded_files > 0 {
+        println!(
+            "Excluded: {} files, {:.1} MiB",
+            summary.excluded_files,
+            summary.excluded_bytes as f64 / 1_048_576.0
+        );
+    }
+    if let Some(why) = &summary.file_scan_skipped {
+        println!("Exclusions not applied: {why}");
+    }
+    if let Some(why) = &summary.excluded_entries_kept {
+        println!("Excluded names kept: {why}");
+    }
     if summary.backup_kind != kind {
         println!(
             "The parent could not be continued — a {:?} copy was written instead (see the log).",

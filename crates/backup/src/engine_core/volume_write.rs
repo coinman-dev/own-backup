@@ -219,7 +219,7 @@ pub(crate) fn volume_block_reader<P: EnginePlatform>(
     read_path: &str,
     req: &VolumeBackupRequest,
     zero_ranges: Option<ByteRanges>,
-    mut fat_patches: Vec<(u64, Vec<u8>)>,
+    mut meta_patches: Vec<(u64, Vec<u8>)>,
 ) -> Result<Box<dyn BlockReader>> {
     let (luks, bitlocker) = (&opened.luks, &opened.bitlocker);
     let (volume_len, sector_size) = (opened.volume_len, opened.sector_size);
@@ -240,14 +240,14 @@ pub(crate) fn volume_block_reader<P: EnginePlatform>(
     // table). Disjoint from the zeroed data clusters and from the NTFS boot-
     // sector patch below (which only fires for NTFS sources), so ordering is
     // immaterial — the patches win on their own byte ranges either way.
-    if !fat_patches.is_empty() {
+    if !meta_patches.is_empty() {
         info!(
-            patches = fat_patches.len(),
-            "Applying FAT/exFAT file-removal metadata patches"
+            patches = meta_patches.len(),
+            "Applying file-removal metadata patches"
         );
         reader = Box::new(crate::block_reader::MultiPatchReader::new(
             reader,
-            std::mem::take(&mut fat_patches),
+            std::mem::take(&mut meta_patches),
         ));
     }
 

@@ -201,6 +201,7 @@ mod probe {
             // The rule belongs to the job, so every run carries it — including
             // the increments, whose in-image deletion pass runs over a child.
             exclusion_patterns: vec![EXCLUDED.to_string()],
+            exclusion_patterns_linux: Vec::new(),
             job_id: Some(JOB.into()),
             passphrase: None,
             image_format: ImageFormat::Qcow2,

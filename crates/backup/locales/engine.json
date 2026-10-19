@@ -72,6 +72,10 @@
     "ru": "удалить их из файловой системы образа не удалось — содержимого этих файлов в копии нет, остались только записи в каталоге; следующая копия удалит их снова, подробности — в журнале службы",
     "en": "they could not be deleted from the image's file system — the files' contents are not in the backup, only their catalog entries remain; the next backup deletes them again, details are in the service log"
   },
+  "engine.entries_kept_zeroed": {
+    "ru": "часть исключённых файлов %{fs} осталась в каталоге образа под своими именами — их содержимое в копии обнулено, а убрать сами записи безопасно не удалось",
+    "en": "some excluded %{fs} files are still listed in the image's catalog under their names — their contents in the backup are zeroed, but removing the entries themselves was not safe"
+  },
   "engine.entries_kept_linux": {
     "ru": "в Linux их пока не удалить из файловой системы образа — содержимого этих файлов в копии нет, остались только записи в каталоге",
     "en": "on Linux they cannot be deleted from the image's file system yet — the files' contents are not in the backup, only their catalog entries remain"

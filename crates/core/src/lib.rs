@@ -3425,6 +3425,8 @@ async fn perform_backup(
             },
             parent_image: plan.parent_image.clone(),
             exclusion_patterns: exclusion_patterns.clone(),
+            // A Windows volume gets no Linux rules (decision R6).
+            exclusion_patterns_linux: Vec::new(),
             job_id: Some(job.id.clone()),
             // A saved/cached passphrase for this volume, if any. The engine uses
             // it only when the source is actually a LUKS container.
@@ -3728,9 +3730,9 @@ async fn perform_disk_backup(
 /// (`engine_linux::backup_volume`) through the snapshot taken of it here, with
 /// the progress, verification and accounting the Windows driver has
 /// (`backup_run`): chains planned from the folder, retention and consolidation
-/// after a fully successful run. What the Linux engine does not do yet — VHDX
-/// chains, exclusions, a whole disk — is refused by [`linux_unsupported`]
-/// before anything is touched.
+/// after a fully successful run; the job's exclusions on a source that holds
+/// still. What the Linux engine does not do yet — VHDX chains, a whole disk —
+/// is refused by [`linux_unsupported`] before anything is touched.
 #[cfg(target_os = "linux")]
 async fn perform_backup(
     sink: &Arc<dyn EventSink>,
@@ -3794,6 +3796,17 @@ async fn perform_backup(
     let count = volumes.len() as u64;
     let mut totals = backup_run::VolumeTotals::new(volumes.len());
     let mut fatal: Option<(String, String)> = None; // (status, message)
+                                                    // As for a Windows whole disk, by filesystem family: the Windows rules for
+                                                    // NTFS and FAT, the Linux rules for ext, btrfs and xfs. The engine applies
+                                                    // them only to a source that holds still, and says when it did not.
+    let (excl_win, excl_linux) = if job.exclusions.enabled && !job.advanced.sector_by_sector {
+        (
+            job.exclusions.patterns.clone(),
+            job.exclusions.patterns_linux.clone(),
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
 
     for (idx, device) in volumes.iter().enumerate() {
         // Full, or the next version of this volume's chain (qcow2).
@@ -3843,8 +3856,8 @@ async fn perform_backup(
                 _ => BackupType::Full,
             },
             parent_image: plan.parent_image.clone(),
-            // Refused above while the Linux exclusions do not exist.
-            exclusion_patterns: Vec::new(),
+            exclusion_patterns: excl_win.clone(),
+            exclusion_patterns_linux: excl_linux.clone(),
             job_id: Some(job.id.clone()),
             // For a LUKS or BitLocker source: its decrypted data is copied.
             passphrase: passwords.resolve(&token),
@@ -4007,11 +4020,6 @@ fn linux_unsupported(job: &Job) -> Option<String> {
         && job.image_format == own_backup_common::types::ImageFormat::Vhdx
     {
         what.push(tr!("lib.linux_unsupported_scheme").into_owned());
-    }
-    if job.exclusions.enabled
-        && !(job.exclusions.patterns.is_empty() && job.exclusions.patterns_linux.is_empty())
-    {
-        what.push(tr!("lib.linux_unsupported_exclusions").into_owned());
     }
     if job.disk_source.is_some() {
         what.push(tr!("lib.linux_unsupported_whole_disk").into_owned());
@@ -6344,5 +6352,42 @@ mod linux_run_tests {
             run.error
         );
         assert_eq!(std::fs::read_dir(&fresh).unwrap().count(), 0);
+    }
+
+    /// A job with its default exclusion rules is run, not refused (plan L3):
+    /// a source nobody holds still is copied whole, and the run says the
+    /// rules were not applied — rather than "0 files excluded".
+    #[tokio::test]
+    async fn exclusions_on_a_source_not_held_still_are_reported_not_applied() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("volume.img");
+        std::fs::write(&src, vec![3u8; 2 << 20]).unwrap();
+        let dest = dir.path().join("backups");
+        std::fs::create_dir(&dest).unwrap();
+        let job = Job {
+            id: "linux-excl".into(),
+            name: "linux excl".into(),
+            source: src.to_str().unwrap().into(),
+            dest_folder: dest.to_str().unwrap().into(),
+            image_format: own_backup_common::types::ImageFormat::Qcow2,
+            ..Default::default()
+        };
+        assert!(job.exclusions.enabled && !job.exclusions.patterns_linux.is_empty());
+        let sink: Arc<dyn EventSink> = Arc::new(Phases::default());
+        let passwords: Arc<dyn PasswordResolver> = Arc::new(NoPasswords);
+        let run = perform_backup(
+            &sink,
+            &job,
+            &Arc::new(AtomicBool::new(false)),
+            None,
+            &passwords,
+            None,
+        )
+        .await;
+        assert_eq!(run.status, "success", "{}", run.error);
+        assert_eq!(run.excluded_files, 0);
+        // The engine's own sentence (its catalog, not this crate's).
+        assert!(!run.file_scan_skipped.is_empty());
+        assert!(run.excluded_entries_kept.is_empty());
     }
 }

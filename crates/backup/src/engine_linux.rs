@@ -733,6 +733,7 @@ mod tests {
             kind: BackupType::Full,
             parent_image: None,
             exclusion_patterns: Vec::new(),
+            exclusion_patterns_linux: Vec::new(),
             job_id: None,
             passphrase: None,
             image_format: format,
@@ -1240,6 +1241,287 @@ mod tests {
         )
         .unwrap();
         assert_eq!(s.backup_kind, BackupType::Full);
+    }
+
+    /// A filesystem image made by `tool` from a folder (no mount, no root):
+    /// `data/cache/junk.bin` and `data/keep/report.tmp` for the rules to take,
+    /// `data/keep/report.txt` to keep.
+    fn linux_fs_with_junk(dir: &Path, tool: &str, args: &[&str], size: u64) -> Option<PathBuf> {
+        let content = dir.join("content");
+        std::fs::create_dir_all(content.join("data/cache")).unwrap();
+        std::fs::create_dir_all(content.join("data/keep")).unwrap();
+        let junk: Vec<u8> = (0..3 * MIB as u32).map(|i| (i % 211) as u8 | 1).collect();
+        std::fs::write(content.join("data/cache/junk.bin"), &junk).unwrap();
+        std::fs::write(content.join("data/keep/report.tmp"), vec![0x5A; 300_000]).unwrap();
+        std::fs::write(content.join("data/keep/report.txt"), b"kept on purpose\n").unwrap();
+        let src = dir.join(format!("src.{tool}"));
+        blank(&src, size);
+        let mut all: Vec<&str> = args.to_vec();
+        let d = content.to_str().unwrap().to_string();
+        all.push(&d);
+        mkfs(tool, &all, &src).then_some(src)
+    }
+
+    fn linux_rules() -> Vec<String> {
+        vec!["data/cache/**".into(), "*.tmp".into()]
+    }
+
+    /// Does any 64 KiB-aligned window of `path` hold `needle` 4 KiB long? The
+    /// excluded files' bytes must not be anywhere in the restored volume.
+    fn holds_run(path: &Path, byte: u8) -> bool {
+        let data = std::fs::read(path).unwrap();
+        data.chunks(4096)
+            .any(|c| c.len() == 4096 && c.iter().all(|&b| b == byte))
+    }
+
+    /// ext4 under the Linux rules (plan L3), from a source that holds still:
+    /// the files leave the catalog and their blocks leave the copy (Stage 2),
+    /// the restored filesystem is clean, the kept file reads back.
+    #[test]
+    fn ext4_exclusions_remove_the_files_from_a_frozen_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(src) = linux_fs_with_junk(
+            dir.path(),
+            "mkfs.ext4",
+            &["-q", "-F", "-b", "4096", "-d"],
+            64 * MIB,
+        ) else {
+            return;
+        };
+        let img = dir.path().join("x.qcow2");
+        let req = VolumeBackupRequest {
+            exclusion_patterns_linux: linux_rules(),
+            // Windows rules are not for ext.
+            exclusion_patterns: vec!["*.txt".into()],
+            ..request(&src, &img, ImageFormat::Qcow2)
+        };
+        let sum = backup_volume(&req, &file_snapshot(&src, true), no_progress).unwrap();
+        assert_eq!(sum.excluded_files, 2, "{:?}", sum.file_scan_skipped);
+        assert_eq!(sum.excluded_bytes, 3 * MIB + 300_000);
+        assert!(sum.file_scan_skipped.is_none() && sum.excluded_entries_kept.is_none());
+        assert!(sum.categories.is_some());
+        let (target, _) = restore_to_blank(&img, sum.source_bytes, None);
+        let fsck = std::process::Command::new("e2fsck")
+            .args(["-fn"])
+            .arg(&target)
+            .output();
+        if let Ok(out) = fsck {
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stdout)
+            );
+        }
+        let ls = |path: &str| {
+            std::process::Command::new("debugfs")
+                .args(["-R", &format!("ls -l {path}")])
+                .arg(&target)
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        };
+        if let Ok(keep) = ls("/data/keep") {
+            assert!(
+                keep.contains("report.txt") && !keep.contains("report.tmp"),
+                "{keep}"
+            );
+            assert!(!ls("/data/cache").unwrap().contains("junk.bin"));
+        }
+        assert!(
+            !holds_run(&target, 0x5A),
+            "the excluded file's bytes are gone"
+        );
+
+        // Not held still: nothing parsed, nothing excluded, and it says so.
+        let img2 = dir.path().join("y.qcow2");
+        let sum = backup_volume(
+            &VolumeBackupRequest {
+                image_path: img2.clone(),
+                ..req.clone()
+            },
+            &file_snapshot(&src, false),
+            no_progress,
+        )
+        .unwrap();
+        assert_eq!(sum.excluded_files, 0);
+        assert_eq!(
+            sum.file_scan_skipped.as_deref(),
+            Some(&*own_backup_common::tr!("engine.skip_not_frozen"))
+        );
+    }
+
+    /// btrfs under the Linux rules: removed from the trees where Stage 2 may
+    /// (a file it spares keeps its name over zeroed data, and the result says
+    /// so), and the restored filesystem passes `btrfs check`.
+    #[test]
+    fn btrfs_exclusions_remove_the_files_from_a_frozen_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(src) =
+            linux_fs_with_junk(dir.path(), "mkfs.btrfs", &["-q", "-f", "-r"], 128 * MIB)
+        else {
+            return;
+        };
+        let img = dir.path().join("b.qcow2");
+        let req = VolumeBackupRequest {
+            exclusion_patterns_linux: linux_rules(),
+            ..request(&src, &img, ImageFormat::Qcow2)
+        };
+        let sum = backup_volume(&req, &file_snapshot(&src, true), no_progress).unwrap();
+        assert_eq!(sum.excluded_files, 2, "{:?}", sum.file_scan_skipped);
+        let (target, _) = restore_to_blank(&img, sum.source_bytes, None);
+        let btrfs = |args: &[&str]| {
+            std::process::Command::new("btrfs")
+                .args(args)
+                .arg(&target)
+                .output()
+        };
+        if let Ok(out) = btrfs(&["check", "--readonly"]) {
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        assert!(!holds_run(&target, 0x5A), "no excluded byte is left");
+        // The report matches the trees: a name the scanner had to spare
+        // (Stage 1 — its data zeroed) is said to be kept, and only then.
+        if let Ok(out) = btrfs(&["inspect-internal", "dump-tree", "-t", "fs"]) {
+            let tree = String::from_utf8_lossy(&out.stdout);
+            assert!(tree.contains("name: report.txt"));
+            let kept = tree.contains("name: junk.bin") || tree.contains("name: report.tmp");
+            assert_eq!(sum.excluded_entries_kept.is_some(), kept, "{tree}");
+        }
+    }
+
+    /// FAT32 (an ESP, a stick) under the job's Windows-family rules, as on
+    /// Windows: the entries are deleted and the clusters freed, and the
+    /// restored filesystem passes its checker.
+    #[test]
+    fn fat32_exclusions_delete_the_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("esp.fat32");
+        blank(&src, 64 * MIB);
+        if !mkfs("mkfs.vfat", &["-F", "32", "-n", "OBKESP"], &src) {
+            return;
+        }
+        let put = |name: &str, data: &[u8]| {
+            let file = dir.path().join(name.replace('/', "_"));
+            std::fs::write(&file, data).unwrap();
+            std::process::Command::new("mcopy")
+                .arg("-i")
+                .arg(&src)
+                .arg(&file)
+                .arg(format!("::{name}"))
+                .output()
+        };
+        let mmd = std::process::Command::new("mmd")
+            .arg("-i")
+            .arg(&src)
+            .arg("::/EFI")
+            .output();
+        if mmd.is_err() {
+            return; // no mtools
+        }
+        put("EFI/BOOTX64.EFI", &vec![0x42; 200_000]).unwrap();
+        put("EFI/CRASH.TMP", &vec![0x5A; 300_000]).unwrap();
+        let img = dir.path().join("esp.qcow2");
+        let req = VolumeBackupRequest {
+            exclusion_patterns: vec!["*.tmp".into()],
+            exclusion_patterns_linux: vec!["*.efi".into()],
+            ..request(&src, &img, ImageFormat::Qcow2)
+        };
+        let sum = backup_volume(&req, &file_snapshot(&src, true), no_progress).unwrap();
+        assert_eq!(sum.excluded_files, 1, "{:?}", sum.file_scan_skipped);
+        assert!(sum.excluded_entries_kept.is_none());
+        let (target, _) = restore_to_blank(&img, sum.source_bytes, None);
+        if let Ok(out) = std::process::Command::new("fsck.vfat")
+            .arg("-n")
+            .arg(&target)
+            .output()
+        {
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stdout)
+            );
+        }
+        let dir_list = std::process::Command::new("mdir")
+            .arg("-i")
+            .arg(&target)
+            .arg("::/EFI")
+            .output()
+            .unwrap();
+        let listing = String::from_utf8_lossy(&dir_list.stdout).to_uppercase();
+        assert!(
+            listing.contains("BOOTX64") && !listing.contains("CRASH"),
+            "{listing}"
+        );
+        assert!(!holds_run(&target, 0x5A));
+    }
+
+    /// xfs captured frozen (an LVM or dm snapshot): its log reads dirty, so
+    /// the excluded files are zeroed but stay listed — and the result says
+    /// so instead of claiming them removed.
+    #[test]
+    fn xfs_from_a_frozen_capture_zeroes_and_reports_the_names_kept() {
+        let zst = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/xfs_reflink.img.zst");
+        if !zst.exists() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("xfs.img");
+        let mut raw = zstd::decode_all(std::fs::File::open(&zst).unwrap()).unwrap();
+        // Break the unmount record, as freezing leaves the log.
+        let sect = u16::from_be_bytes(raw[0x66..0x68].try_into().unwrap()) as usize;
+        let bs = u32::from_be_bytes(raw[0x04..0x08].try_into().unwrap()) as u64;
+        let logstart = u64::from_be_bytes(raw[0x30..0x38].try_into().unwrap());
+        let agblocks = u32::from_be_bytes(raw[0x54..0x58].try_into().unwrap()) as u64;
+        let agblklog = raw[0x7C] as u32;
+        let log_off =
+            ((logstart >> agblklog) * agblocks + (logstart & ((1u64 << agblklog) - 1))) * bs;
+        let logblocks = u32::from_be_bytes(raw[0x60..0x64].try_into().unwrap()) as u64;
+        let mut best: Option<(u64, usize)> = None;
+        let mut o = log_off as usize;
+        while o + sect <= (log_off + logblocks * bs) as usize {
+            if u32::from_be_bytes(raw[o..o + 4].try_into().unwrap()) == 0xFEED_BABE {
+                let lsn = u64::from_be_bytes(raw[o + 0x10..o + 0x18].try_into().unwrap());
+                if best.map(|(b, _)| lsn > b).unwrap_or(true) {
+                    best = Some((lsn, o));
+                }
+            }
+            o += sect;
+        }
+        raw[best.unwrap().1 + sect + 12] ^= 0xFF;
+        std::fs::write(&src, &raw).unwrap();
+
+        let source = src.to_str().unwrap();
+        let req = VolumeBackupRequest {
+            exclusion_patterns_linux: vec!["cache".into()],
+            ..request(&src, &dir.path().join("q.qcow2"), ImageFormat::Qcow2)
+        };
+        // An LVM snapshot of it: taken frozen.
+        let sum = backup_volume(&req, &snapshot_of(source, &src, "lvm"), no_progress).unwrap();
+        assert!(sum.excluded_files >= 1, "{:?}", sum.file_scan_skipped);
+        assert!(sum.excluded_bytes > 0);
+        assert_eq!(
+            sum.excluded_entries_kept.as_deref(),
+            Some(&*own_backup_common::tr!(
+                "engine.entries_kept_zeroed",
+                fs = "xfs"
+            ))
+        );
+        // Only vouched to hold still, not captured frozen: the dirty log may
+        // be a crash's, and the scan refuses — said, not hidden.
+        let sum = backup_volume(
+            &VolumeBackupRequest {
+                image_path: dir.path().join("r.qcow2"),
+                ..req.clone()
+            },
+            &file_snapshot(&src, true),
+            no_progress,
+        )
+        .unwrap();
+        assert_eq!(sum.excluded_files, 0);
+        assert!(sum.file_scan_skipped.is_some());
     }
 
     /// A snapshot that did not hold to the end of the copy: the check comes
