@@ -11,6 +11,8 @@ mod device_watch;
 #[cfg(target_os = "linux")]
 mod instance_linux;
 mod jobs;
+#[cfg(target_os = "linux")]
+mod linux_display;
 mod service_link;
 mod state;
 #[cfg(target_os = "windows")]
@@ -359,6 +361,17 @@ fn webview2_registered() -> bool {
     })
 }
 
+/// The screen the window opens on: the primary one, or — where there is no
+/// such thing, as under Wayland, whose GTK names no primary monitor — the
+/// first one. Without it the window opened at its full wanted size whatever
+/// the screen.
+fn screen(app: &tauri::App) -> Option<tauri::Monitor> {
+    if let Ok(Some(primary)) = app.primary_monitor() {
+        return Some(primary);
+    }
+    app.available_monitors().ok()?.into_iter().next()
+}
+
 /// The window the interface opens in, in LOGICAL pixels, never larger than the
 /// screen it has to open on.
 ///
@@ -381,7 +394,7 @@ fn window_size(app: &tauri::App) -> (f64, f64, f64, f64) {
     // Room for the frame and for not sitting flush against the edges.
     const MARGIN: f64 = 40.0;
 
-    let Ok(Some(monitor)) = app.primary_monitor() else {
+    let Some(monitor) = screen(app) else {
         return (WANT.0, WANT.1, LEAST.0, LEAST.1);
     };
     let scale = monitor.scale_factor().max(0.5);
@@ -420,7 +433,13 @@ const COMFORTABLE_SCALE: f64 = 1.5;
 /// 150 % — the same place the cap was aiming for, for our own window at least.
 /// Everything else on the medium stays as Windows drew it.
 fn shrink_if_the_screen_is_scaled_hard(app: &tauri::App, window: &tauri::WebviewWindow) {
-    let Ok(Some(monitor)) = app.primary_monitor() else {
+    // On a Linux desktop the scale is the person's own choice in the
+    // system's settings (a HiDPI screen at 200 % is meant to be drawn so);
+    // the cap is for Windows and for the boot medium.
+    if !cfg!(target_os = "windows") && !own_backup_common::media_mode::is_media_mode() {
+        return;
+    }
+    let Some(monitor) = screen(app) else {
         return;
     };
     let scale = monitor.scale_factor();
@@ -451,17 +470,29 @@ fn main() {
         return;
     }
 
+    // How WebKitGTK draws, while this is still one thread (`set_var`).
+    #[cfg(target_os = "linux")]
+    let render = linux_display::prepare();
+
     // Only one GUI at a time.
     #[cfg(target_os = "windows")]
     enforce_single_instance();
     #[cfg(target_os = "linux")]
     let instance = enforce_single_instance();
+    #[cfg(target_os = "linux")]
+    linux_display::starting();
 
     // No UAC elevation at startup: backups, disk enumeration and passwords all
     // run in the privileged service (LocalSystem), which the GUI reaches over
     // gRPC. The GUI itself runs as the normal user. (In-process restore/verify
     // still need the service — see plan stage 2e.)
     init_logging();
+    #[cfg(target_os = "linux")]
+    tracing::info!(
+        ?render,
+        wayland = std::env::var_os("WAYLAND_DISPLAY").is_some(),
+        "how the page is drawn"
+    );
 
     // Read config.toml. This used to be `AppConfig::default()` with a comment
     // claiming otherwise: settings were written to a file nothing ever opened,
@@ -742,6 +773,8 @@ fn main() {
 /// доживает до своего срока и объясняет человеку, что произошло.
 #[tauri::command]
 fn gui_ready() -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    linux_display::drawn();
     if !gui_up_marker_wanted() {
         return Ok(());
     }
