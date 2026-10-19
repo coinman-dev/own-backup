@@ -323,6 +323,13 @@ pub fn extents_of_destination(folder: &str) -> Option<Vec<Extent>> {
     }
 }
 
+/// The disk (as [`linux::disk_key`]) and byte offset of the partition slot
+/// `device` is — see [`linux::Host::partition_slot`].
+#[cfg(target_os = "linux")]
+pub fn partition_slot(device: &str) -> Option<(u32, u64)> {
+    linux::Host::real().partition_slot(device)
+}
+
 /// An identity for this source that survives a reboot and a renamed device
 /// node — see [`linux::Host::stable_source_id`].
 #[cfg(target_os = "linux")]

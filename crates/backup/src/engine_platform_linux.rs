@@ -346,10 +346,10 @@ impl DiskPlatform for LinuxPlatform {
         }
         let rdev = meta.rdev();
         let key = crate::source_identity::linux::disk_key(libc::major(rdev), libc::minor(rdev));
-        crate::source_identity::extents_of_source(device).map(|extents| {
-            matches!(extents.as_slice(),
-                [e] if e.disk == key && e.offset == offset)
-        })
+        // The slot on this disk itself: `extents_of_source` would follow a
+        // loop disk to its backing file's filesystem, and no partition of a
+        // loop disk would ever be in its slot.
+        crate::source_identity::partition_slot(device).map(|(disk, at)| disk == key && at == offset)
     }
 
     /// The by-id path (decision R1): it names the same disk after a reboot,

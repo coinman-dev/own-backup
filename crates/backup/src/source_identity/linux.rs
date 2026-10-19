@@ -385,6 +385,25 @@ impl Host {
         self.extents_of_block(&name, 0)
     }
 
+    /// The disk a partition is a slot of (its device number, as
+    /// [`disk_key`]) and the slot's byte offset — straight from sysfs, without
+    /// following what the disk itself sits on. A partition of a loop device is
+    /// at its offset on that loop device, which is the question a whole-disk
+    /// copy asks; [`Self::extents_of_source`] instead answers where the bytes
+    /// finally are (the backing file's filesystem). `None` for anything that
+    /// is not a partition.
+    pub fn partition_slot(&self, device: &str) -> Option<(u32, u64)> {
+        let name = self.block_name(device)?;
+        let dir = self.class_dir(&name);
+        if !dir.join("partition").is_file() {
+            return None;
+        }
+        let start = read_u64(&dir.join("start"))?;
+        let disk_dir = std::fs::canonicalize(&dir).ok()?.parent()?.to_path_buf();
+        let (major, minor) = read_dev(&disk_dir.join("dev"))?;
+        Some((disk_key(major, minor), start.checked_mul(512)?))
+    }
+
     /// Where the destination folder is.
     pub fn locate_destination(&self, folder: &str) -> DestLocation {
         let path = Path::new(folder.trim());
@@ -1038,6 +1057,28 @@ mod tests {
         assert_eq!(host.extents_of_source("/dev/loop0"), Some(luks.clone()));
         assert_eq!(host.extents_of_source("/dev/loop0p1"), Some(luks));
         assert_eq!(host.extents_of_source("/dev/nbd0"), None);
+    }
+
+    /// A whole-disk copy asks which slot of which disk a partition is: for a
+    /// partitioned loop device that is the loop device, not the filesystem
+    /// its file is on.
+    #[test]
+    fn a_partition_slot_is_on_its_own_disk_even_for_a_loop_device() {
+        let f = owner_machine();
+        let lp = f.disk("virtual/loop6", "loop6", "7:6", 819_200);
+        f.write(&lp.join("loop/backing_file"), "/home/u/disk.img\n");
+        f.part(&lp, "loop6p1", "259:20", 2048, 131_072);
+        let host = f.host(MOUNTINFO);
+        assert_eq!(
+            host.partition_slot("/dev/loop6p1"),
+            Some((disk_key(7, 6), 2048 * 512))
+        );
+        assert_eq!(
+            host.partition_slot("/dev/sdc1"),
+            Some((disk_key(8, 32), 2048 * 512))
+        );
+        assert_eq!(host.partition_slot("/dev/sdc"), None);
+        assert_eq!(host.partition_slot("/dev/loop6"), None);
     }
 
     #[test]
