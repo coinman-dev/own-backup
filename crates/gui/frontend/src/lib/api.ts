@@ -24,6 +24,8 @@ import type {
   RestoreRunState,
   ServiceHealth,
   PlatformInfo,
+  BackupCapabilities,
+  DestinationCheck,
   KeyboardLayout,
   KeyboardState,
   DirEntry,
@@ -79,6 +81,12 @@ export const api = {
   newJobTemplate: () => invoke<Job>('new_job_template'),
   defaultExclusionPatterns: () =>
     invoke<{ windows: string[]; linux: string[] }>('default_exclusion_patterns'),
+  /** What the service's engine carries out; the wizard offers only that. */
+  backupCapabilities: () => invoke<BackupCapabilities>('backup_capabilities'),
+  /** Where a destination folder sits relative to these sources — the check the
+   *  save makes, asked while the folder is being chosen. */
+  checkDestination: (sources: string[], destFolder: string) =>
+    invoke<DestinationCheck>('check_destination', { sources, destFolder }),
   saveBackupJob: (job: Job) => invoke<Job>('save_backup_job', { job }),
   deleteBackupJob: (id: string, deleteFiles: boolean) =>
     invoke<JobFilesDeleted>('delete_backup_job', { id, deleteFiles }),

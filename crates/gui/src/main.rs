@@ -594,6 +594,8 @@ fn main() {
             commands::backup_jobs::get_backup_job,
             commands::backup_jobs::new_job_template,
             commands::backup_jobs::default_exclusion_patterns,
+            commands::backup_jobs::backup_capabilities,
+            commands::backup_jobs::check_destination,
             commands::backup_jobs::save_backup_job,
             commands::backup_jobs::delete_backup_job,
             commands::backup_jobs::list_job_versions,

@@ -256,6 +256,36 @@ export interface PlatformInfo {
   service_log_dir: string | null;
 }
 
+/** What the service's backup engine and scheduler carry out
+ *  (`BackupCapabilities` in the service). Windows: everything. */
+export interface BackupCapabilities {
+  os: string;
+  /** `full`, `incremental`, `differential` — those a run carries out. */
+  methods: string[];
+  exclusions: boolean;
+  /** One image of a whole disk (`disk_source`); without it, one per volume. */
+  whole_disk: boolean;
+  speed_limit: boolean;
+  low_priority: boolean;
+  after_backup: boolean;
+  /** Encrypted archives (OBK). */
+  archive_encryption: boolean;
+  /** `schedule.event_trigger` values the scheduler fires. */
+  schedule_events: string[];
+  wake_to_run: boolean;
+  /** The machine does not sleep while a copy runs. */
+  keeps_awake: boolean;
+}
+
+/** The service's answer to "is this destination on a source?". */
+export interface DestinationCheck {
+  placement: 'clear' | 'on_source' | 'cannot_tell';
+  /** The source it is on (`on_source`). */
+  source: string;
+  /** Why it could not be told, in the service's words (`cannot_tell`). */
+  reason: string;
+}
+
 /** A command failure with a kind to act on (`CodedError` in the GUI crate):
  *  `code` is decided on, `message` is only shown. */
 export interface CodedError {

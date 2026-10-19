@@ -976,6 +976,35 @@ impl BackupClient {
         parse(&reply.json)
     }
 
+    /// What this service's engine and scheduler carry out (`BackupCapabilities`).
+    pub async fn backup_capabilities(&mut self) -> Result<serde_json::Value> {
+        let reply = self
+            .inner
+            .backup_capabilities(self.request(proto::Empty {}))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
+
+    /// Where `dest_folder` sits relative to `sources`:
+    /// `{ placement: clear | on_source | cannot_tell, source, reason }`.
+    pub async fn check_destination(
+        &mut self,
+        sources: &[String],
+        dest_folder: &str,
+    ) -> Result<serde_json::Value> {
+        let json =
+            serde_json::json!({ "sources": sources, "dest_folder": dest_folder }).to_string();
+        let reply = self
+            .inner
+            .check_destination(self.request(proto::JsonRequest { json }))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
+
     pub async fn service_status_json(&mut self) -> Result<String> {
         self.service_status_json_with_status().await.map_err(status)
     }

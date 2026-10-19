@@ -45,6 +45,19 @@ service BackupService {
 
   rpc GetServiceStatus(Empty) returns (JsonReply);   // JSON: { version, uptime_secs, queue }
 
+  // --- What the backup engine of THIS service does ---
+  // The wizard offers only what a run will carry out: on Linux the engine
+  // refuses chains, exclusions, whole-disk copies, pacing and after-backup
+  // actions for now, and the scheduler has no logon/logoff events or wake
+  // timer. Asked of the service, not decided by the window's own platform.
+  rpc BackupCapabilities(Empty) returns (JsonReply);  // JSON: BackupCapabilities
+  // Where a destination folder sits relative to the sources, asked while the
+  // wizard is open — the same check SaveJob and RunJob make.
+  // JSON in: { "sources": [string], "dest_folder": string }
+  // JSON out: { "placement": "clear" | "on_source" | "cannot_tell",
+  //             "source": string, "reason": string }
+  rpc CheckDestination(JsonRequest) returns (JsonReply);
+
   // --- Settings (config.toml) ---
   // On Linux the file is in root's data folder, so the window cannot write it
   // and asks the service instead. The service checks what it is given: the

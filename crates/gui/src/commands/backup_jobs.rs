@@ -36,6 +36,28 @@ pub async fn default_exclusion_patterns(
     state.link.client().await?.default_exclusions().await
 }
 
+/// What the service's engine carries out, for the wizard to offer only that.
+#[tauri::command]
+pub async fn backup_capabilities(state: State<'_, GuiState>) -> Result<serde_json::Value, String> {
+    state.link.client().await?.backup_capabilities().await
+}
+
+/// Is this destination on one of these sources? Asked while the wizard is
+/// open; the service answers as its save check would.
+#[tauri::command]
+pub async fn check_destination(
+    state: State<'_, GuiState>,
+    sources: Vec<String>,
+    dest_folder: String,
+) -> Result<serde_json::Value, String> {
+    state
+        .link
+        .client()
+        .await?
+        .check_destination(&sources, &dest_folder)
+        .await
+}
+
 /// Create or update a job. Returns the stored job (with generated id/dates).
 /// The service validates name / source / dest-not-on-source and rejects invalid
 /// jobs with a message we surface verbatim.

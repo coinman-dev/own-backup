@@ -798,6 +798,34 @@ fn emit_engine<T: serde::Serialize>(
     });
 }
 
+/// `CheckDestination`: the destination question of [`validate_job`], asked
+/// before there is a job to save. The same two checks in the same order, so
+/// the wizard says what the save would say. `placement` is decided on, the
+/// texts are only shown.
+fn destination_answer(sources: &[String], dest_folder: &str) -> serde_json::Value {
+    let answer = |placement: &str, source: &str, reason: &str| serde_json::json!({ "placement": placement, "source": source, "reason": reason });
+    let sources: Vec<String> = sources
+        .iter()
+        .filter(|s| !s.trim().is_empty())
+        .cloned()
+        .collect();
+    if sources.is_empty() || dest_folder.trim().is_empty() {
+        return answer("clear", "", "");
+    }
+    let job = own_backup_core::Job {
+        sources,
+        ..Default::default()
+    };
+    if let Some(letter) = own_backup_core::dest_collision_letter(&job, dest_folder) {
+        return answer("on_source", &format!("{letter}:"), "");
+    }
+    match own_backup_core::dest_placement(&job, dest_folder) {
+        own_backup_core::DestPlacement::Clear => answer("clear", "", ""),
+        own_backup_core::DestPlacement::OnSource(source) => answer("on_source", &source, ""),
+        own_backup_core::DestPlacement::CannotTell(why) => answer("cannot_tell", "", &why),
+    }
+}
+
 /// Shared save/run validation: name + at least one source, dest non-empty, and
 /// the destination not on ANY of the job's source volumes.
 ///
@@ -1320,6 +1348,39 @@ impl BackupService for BackupServiceImpl {
         });
         Ok(Response::new(JsonReply {
             json: status.to_string(),
+        }))
+    }
+
+    async fn backup_capabilities(
+        &self,
+        req: Request<Empty>,
+    ) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        let json = serde_json::to_string(&crate::capabilities::current())
+            .map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(JsonReply { json }))
+    }
+
+    async fn check_destination(
+        &self,
+        req: Request<JsonRequest>,
+    ) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        #[derive(serde::Deserialize)]
+        struct In {
+            sources: Vec<String>,
+            dest_folder: String,
+        }
+        let p: In = serde_json::from_str(&req.into_inner().json)
+            .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+        // Off the runtime: the answer reads the mount table and sysfs on Linux
+        // and opens volumes on Windows, and the wizard asks as the user types.
+        let answer =
+            tokio::task::spawn_blocking(move || destination_answer(&p.sources, &p.dest_folder))
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(JsonReply {
+            json: answer.to_string(),
         }))
     }
 
@@ -3237,6 +3298,39 @@ mod tests {
             config, store, queue, busy, job_tx, cancel, events, passwords,
         );
         BackupServiceImpl::new(state, String::new(), shutdown)
+    }
+
+    /// The wizard's destination check says what the save would: a letter
+    /// collision first, by name, before anything is looked up.
+    #[test]
+    fn destination_answer_is_the_save_check() {
+        let on = destination_answer(&["C:".into()], r"C:\Backups");
+        assert_eq!(on["placement"], "on_source");
+        assert_eq!(on["source"], "C:");
+        // Nothing to compare yet: no answer to give, and no refusal either.
+        assert_eq!(destination_answer(&[], r"C:\Backups")["placement"], "clear");
+        assert_eq!(
+            destination_answer(&["C:".into()], "  ")["placement"],
+            "clear"
+        );
+        assert_eq!(
+            destination_answer(&["  ".into()], r"C:\Backups")["placement"],
+            "clear"
+        );
+    }
+
+    #[tokio::test]
+    async fn capabilities_are_served_as_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = make_service(dir.path());
+        let reply = svc
+            .backup_capabilities(Request::new(Empty {}))
+            .await
+            .unwrap()
+            .into_inner();
+        let v: serde_json::Value = serde_json::from_str(&reply.json).unwrap();
+        assert_eq!(v["os"], crate::capabilities::current().os);
+        assert!(v["methods"].as_array().unwrap().contains(&"full".into()));
     }
 
     #[tokio::test]

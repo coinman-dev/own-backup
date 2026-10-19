@@ -3,6 +3,7 @@
 rust_i18n::i18n!("locales", fallback = "ru");
 
 mod app_state;
+mod capabilities;
 mod grpc_server;
 mod install;
 #[cfg(target_os = "linux")]
