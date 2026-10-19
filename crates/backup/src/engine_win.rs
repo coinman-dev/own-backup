@@ -79,7 +79,6 @@ pub use crate::engine_core::disk_image::{DiskBackupRequest, DiskPartitionBackup}
 use crate::engine_core::partition_prep::{
     linux_fs_exclusions, prepare_encrypted_partition_map, PreparedMap,
 };
-use crate::engine_core::platform::EnginePlatform;
 #[cfg(target_os = "windows")]
 pub(crate) use crate::engine_core::read::ImageReadSource;
 pub use crate::engine_core::read::{load_sidecar_of, load_sidecar_with_keys};
@@ -98,7 +97,6 @@ use crate::engine_core::target::{
 pub use crate::engine_core::verify::{
     verify_image, verify_image_scoped, verify_image_with_keys, VerifyScope, VerifySummary,
 };
-use crate::engine_core::volume::backup_volume_inner;
 pub use crate::engine_core::volume::{VolumeBackupRequest, VolumeBackupSummary};
 #[cfg(target_os = "windows")]
 use crate::engine_core::volume_exclusions::scan_ntfs_exclusions_by_mft;
@@ -108,10 +106,6 @@ use crate::engine_platform_win::WinPlatform;
 #[cfg(all(test, target_os = "windows"))]
 #[path = "engine_namespace_tests.rs"]
 mod new_image_namespace_tests;
-
-#[cfg(test)]
-#[path = "engine_volume_tests.rs"]
-mod volume_tests;
 
 /// Open a freshly-attached virtual disk for writing; the PhysicalDrive device
 /// node can take a moment to appear after AttachVirtualDisk.
@@ -140,66 +134,9 @@ fn open_write_with_retry(path: &str) -> Result<WinRawDevice> {
 #[cfg(target_os = "windows")]
 pub fn backup_volume(
     req: &VolumeBackupRequest,
-    mut progress: impl FnMut(&BackupProgress) -> Result<()>,
+    progress: impl FnMut(&BackupProgress) -> Result<()>,
 ) -> Result<VolumeBackupSummary> {
-    check_encrypted_target(req.encryption.as_ref(), req.image_format, &req.image_path)?;
-    refuse_existing_outputs(&req.image_path, req.full_image_path.as_deref())?;
-    if let Some(parent) = req.image_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            crate::dest_folder::create(parent)?;
-        }
-    }
-
-    let platform = WinPlatform;
-    // Enable SeBackupPrivilege so the exclusion scan can read/list ACL-protected
-    // paths (System Volume Information, protected app data). Best-effort.
-    platform.prepare_privileges();
-
-    if let Some(keys) = &req.encryption {
-        let pending = crate::seal::obk::new_image::NewImage::create(&req.image_path, keys)?;
-        let staged = VolumeBackupRequest {
-            image_path: pending.path().to_path_buf(),
-            ..req.clone()
-        };
-        let mut summary = backup_volume_inner(
-            &platform,
-            &staged,
-            Some(pending.writer_file()?),
-            &req.image_path,
-            &mut progress,
-        )?;
-        let published = settled_image_path(
-            &req.image_path,
-            req.full_image_path.as_deref(),
-            req.kind,
-            summary.backup_kind,
-        );
-        may_publish(&mut progress, summary.bytes_copied)?;
-        pending.publish_as(&published)?;
-        summary.sidecar_path = sidecar_path_for(&published);
-        summary.image_path = published;
-        return Ok(summary);
-    }
-    // Written privately and published last, like the encrypted one above (see
-    // `pending_image`); a failed run's image goes when `pending` is dropped.
-    let pending = crate::pending_image::PendingImage::new(&req.image_path)?;
-    let staged = VolumeBackupRequest {
-        image_path: pending.path().to_path_buf(),
-        ..req.clone()
-    };
-    let mut summary =
-        backup_volume_inner(&platform, &staged, None, &req.image_path, &mut progress)?;
-    let published = settled_image_path(
-        &req.image_path,
-        req.full_image_path.as_deref(),
-        req.kind,
-        summary.backup_kind,
-    );
-    may_publish(&mut progress, summary.bytes_copied)?;
-    pending.publish_as(&published)?;
-    summary.sidecar_path = sidecar_path_for(&published);
-    summary.image_path = published;
-    Ok(summary)
+    crate::engine_core::volume::backup_volume(&WinPlatform, req, progress)
 }
 
 /// Открыть заблокированный том силами Windows и закрыть его диск на запись.

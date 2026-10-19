@@ -27,7 +27,9 @@ use own_backup_common::{tr, OwnBackupError, Result};
 use super::chain::validate_parent;
 use super::platform::{EnginePlatform, FinishedImage, SourceDevice, SourceSession, VolumeSpan};
 use super::source::VolumeSource;
-use super::target::settled_image_path;
+use super::target::{
+    check_encrypted_target, may_publish, refuse_existing_outputs, settled_image_path,
+};
 use super::volume_exclusions::{resolve_exclusions, VolumeExclusions};
 use super::volume_maps::VolumeMaps;
 use super::volume_write::{
@@ -139,7 +141,76 @@ pub struct VolumeBackupSummary {
     pub excluded_entries_kept: Option<String>,
 }
 
-pub(crate) fn backup_volume_inner<P: EnginePlatform>(
+/// Back up a volume into a fresh image, on `platform`.
+///
+/// The image is written under a private name and becomes a version under its
+/// settled name only once the whole pipeline has finished and the caller,
+/// asked last ([`may_publish`]), still wants it; a run that fails or is
+/// cancelled leaves nothing under a public name.
+pub(crate) fn backup_volume<P: EnginePlatform>(
+    platform: &P,
+    req: &VolumeBackupRequest,
+    mut progress: impl FnMut(&BackupProgress) -> Result<()>,
+) -> Result<VolumeBackupSummary> {
+    check_encrypted_target(req.encryption.as_ref(), req.image_format, &req.image_path)?;
+    refuse_existing_outputs(&req.image_path, req.full_image_path.as_deref())?;
+    if let Some(parent) = req.image_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            crate::dest_folder::create(parent)?;
+        }
+    }
+
+    // Enable SeBackupPrivilege so the exclusion scan can read/list ACL-protected
+    // paths (System Volume Information, protected app data). Best-effort.
+    platform.prepare_privileges();
+
+    if let Some(keys) = &req.encryption {
+        let pending = crate::seal::obk::new_image::NewImage::create(&req.image_path, keys)?;
+        let staged = VolumeBackupRequest {
+            image_path: pending.path().to_path_buf(),
+            ..req.clone()
+        };
+        let mut summary = backup_volume_inner(
+            platform,
+            &staged,
+            Some(pending.writer_file()?),
+            &req.image_path,
+            &mut progress,
+        )?;
+        let published = settled_image_path(
+            &req.image_path,
+            req.full_image_path.as_deref(),
+            req.kind,
+            summary.backup_kind,
+        );
+        may_publish(&mut progress, summary.bytes_copied)?;
+        pending.publish_as(&published)?;
+        summary.sidecar_path = sidecar_path_for(&published);
+        summary.image_path = published;
+        return Ok(summary);
+    }
+    // Written privately and published last, like the encrypted one above (see
+    // `pending_image`); a failed run's image goes when `pending` is dropped.
+    let pending = crate::pending_image::PendingImage::new(&req.image_path)?;
+    let staged = VolumeBackupRequest {
+        image_path: pending.path().to_path_buf(),
+        ..req.clone()
+    };
+    let mut summary = backup_volume_inner(platform, &staged, None, &req.image_path, &mut progress)?;
+    let published = settled_image_path(
+        &req.image_path,
+        req.full_image_path.as_deref(),
+        req.kind,
+        summary.backup_kind,
+    );
+    may_publish(&mut progress, summary.bytes_copied)?;
+    pending.publish_as(&published)?;
+    summary.sidecar_path = sidecar_path_for(&published);
+    summary.image_path = published;
+    Ok(summary)
+}
+
+fn backup_volume_inner<P: EnginePlatform>(
     platform: &P,
     req: &VolumeBackupRequest,
     owned_file: Option<std::fs::File>,
@@ -621,3 +692,7 @@ pub(crate) fn backup_volume_inner<P: EnginePlatform>(
         excluded_entries_kept,
     })
 }
+
+#[cfg(test)]
+#[path = "volume_tests.rs"]
+mod tests;
