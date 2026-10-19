@@ -11,6 +11,7 @@ pub(crate) mod disk_image;
 pub(crate) mod partition_prep;
 pub(crate) mod platform;
 pub(crate) mod read;
+pub(crate) mod source;
 pub(crate) mod target;
 pub(crate) mod verify;
 pub(crate) mod volume;
