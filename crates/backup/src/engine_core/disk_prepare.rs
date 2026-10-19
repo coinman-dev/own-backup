@@ -258,7 +258,7 @@ pub(crate) fn prepare_partition_map<P: EnginePlatform>(
         ));
     }
     if let Some(out) =
-        linux_fs_exclusions(src, &open, read_path, block_size, patterns_linux, &mut tick)?
+        linux_fs_exclusions(src, open, read_path, block_size, patterns_linux, &mut tick)?
     {
         return Ok(out);
     }
