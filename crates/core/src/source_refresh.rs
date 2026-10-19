@@ -455,6 +455,7 @@ mod tests {
             sources: sources.clone(),
             disk_source: Some(DiskSourceSpec {
                 disk_number: 4,
+                device: None,
                 disk_model: snapshot.model.clone(),
                 parts: vec![
                     DiskPartSpec {

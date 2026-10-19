@@ -413,7 +413,7 @@
   },
   "lib.linux_unsupported": {"ru": "В Linux копирование пока умеет не всё, что умеет в Windows, а в задании включено: %{options}. Копия не сделана, чтобы не выдать за выполненное то, что не сделано. Отключите эти настройки в задании или дождитесь их поддержки в Linux.", "en": "On Linux, backup cannot yet do everything it does on Windows, and the job asks for: %{options}. No copy was made, so as not to report as done what was not done. Turn these settings off in the job or wait for their Linux support."},
   "lib.linux_unsupported_scheme": {"ru": "инкрементные или дифференциальные копии в формате VHDX (в Linux цепочки пишутся в qcow2)", "en": "incremental or differential copies in VHDX format (on Linux, chains are written as qcow2)"},
-  "lib.linux_unsupported_whole_disk": {"ru": "копия всего диска", "en": "a whole-disk copy"},
+  "lib.linux_unsupported_whole_disk": {"ru": "копия всего диска, названного только номером (в Linux диск называется устройством /dev/disk/by-id)", "en": "a copy of a whole disk named only by its number (on Linux a disk is named by its /dev/disk/by-id device)"},
   "lib.linux_unsupported_speed_limit": {"ru": "ограничение скорости", "en": "a speed limit"},
   "lib.linux_unsupported_low_priority": {"ru": "низкий приоритет", "en": "low priority"},
   "lib.linux_unsupported_after_backup": {"ru": "действие после копии (сон или выключение)", "en": "an action after the backup (sleep or shut down)"},

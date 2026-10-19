@@ -306,6 +306,70 @@ stage_l3() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+# E6: a whole disk on Linux — GPT, FAT32 "ESP" and ext4 — into one image.
+# Needs partition nodes of a loop device (`losetup -P`); a kernel or container
+# that does not make them skips the stage.
+# ---------------------------------------------------------------------------
+stage_e6() {
+    local out=$WORK/out/e6 disk
+    mkdir -p "$out"
+    truncate -s 400M "$WORK/e6-disk.img" || return
+    printf 'label: gpt\nstart=2048, size=64MiB, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B\nsize=320MiB, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4\n' \
+        | sfdisk -q "$WORK/e6-disk.img" || { check e6 SKIP "no sfdisk"; return; }
+    disk=$(losetup -f --show -P "$WORK/e6-disk.img") || return
+    LOOPS+=("$disk")
+    udevadm settle -t 5 2>/dev/null
+    if [[ ! -b ${disk}p1 || ! -b ${disk}p2 ]]; then
+        check e6 SKIP "no partition nodes for $disk (losetup -P); run on the stand"
+        return
+    fi
+    mkfs_of vfat "${disk}p1" && mkfs_of ext4 "${disk}p2" && mnt "${disk}p2" "$WORK/m-e6" \
+        && populate "$WORK/m-e6" && hashes "$WORK/m-e6" "$WORK/e6-v1.sums" && umnt "$WORK/m-e6"
+    run e6-full "$CLI" backup-disk --device "$disk" -o "$out/disk.qcow2" --format qcow2 \
+        "${L3_RULES[@]}" --verify
+    check e6-full "$(verdict $?)" "the whole disk (FAT32 + ext4, idle) into one qcow2, verified"
+    grep -q '^Done: 2 partitions' "$EV/e6-full.out" && grep -q '^Excluded: 2 files' "$EV/e6-full.out"
+    check e6-full-what "$(verdict $?)" "both partitions copied, the Linux rules applied to ext4"
+
+    mnt "${disk}p2" "$WORK/m-e6" && echo "version 2" >"$WORK/m-e6/data/v2.txt" \
+        && hashes "$WORK/m-e6" "$WORK/e6-v2.sums" && umnt "$WORK/m-e6"
+    run e6-inc "$CLI" backup-disk --device "$disk" -o "$out/disk-inc.qcow2" --format qcow2 \
+        --kind incremental --parent-auto "${L3_RULES[@]}" --verify
+    check e6-inc "$(verdict $?)" "an increment of the disk over the chain beside it"
+    grep -q 'Incremental' "$EV/e6-inc.out" && ! grep -q 'could not be continued' "$EV/e6-inc.out"
+    check e6-inc-child "$(verdict $?)" "it is a child, not a full in disguise"
+
+    # The chain as qemu reads it: converted to a raw disk, its partitions
+    # pass their checkers and hold the files of version 2.
+    if command -v qemu-img >/dev/null; then
+        run e6-convert qemu-img convert -O raw "$out/disk-inc.qcow2" "$WORK/e6-back.img"
+        check e6-convert "$(verdict $?)" "qemu-img reads the whole-disk chain"
+        local back
+        back=$(losetup -f --show -P "$WORK/e6-back.img") && LOOPS+=("$back")
+        udevadm settle -t 5 2>/dev/null
+        run e6-fsck1 fsck_of vfat "${back}p1"
+        check e6-fsck1 "$(verdict $?)" "FAT32 partition clean"
+        run e6-fsck2 fsck_of ext4 "${back}p2"
+        check e6-fsck2 "$(verdict $?)" "ext4 partition clean"
+        mnt "${back}p2" "$WORK/rst" ro
+        [[ ! -e $WORK/rst/data/cache/junk.bin ]] && (cd "$WORK/rst" \
+            && grep -v -e 'cache/junk.bin' -e 'report.tmp' "$WORK/e6-v2.sums" | sha256sum -c --quiet) \
+            >/dev/null 2>&1
+        check e6-data "$(verdict $?)" "version 2 files intact, excluded files gone"
+        umnt "$WORK/rst"
+    else
+        check e6-convert SKIP "no qemu-img"
+    fi
+
+    # A partition in use without a snapshot refuses the whole disk.
+    mnt "${disk}p2" "$WORK/m-e6"
+    run e6-busy "$CLI" backup-disk --device "$disk" -o "$out/busy.qcow2" --format qcow2
+    [[ $? -ne 0 && ! -e $out/busy.qcow2 ]]
+    check e6-busy-refused "$(verdict $?)" "a mounted partition without a snapshot refuses the disk"
+    umnt "$WORK/m-e6"
+}
+
 for stage in "${STAGES[@]}"; do
     if declare -F "stage_$stage" >/dev/null; then
         echo "== $stage"

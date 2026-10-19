@@ -595,6 +595,11 @@ pub struct JobRun {
 pub struct DiskSourceSpec {
     /// Physical drive number (`\\.\PhysicalDrive{disk_number}`).
     pub disk_number: u32,
+    /// The disk on Linux: its stable device, `/dev/disk/by-id/…` (decision
+    /// R1) — a number names no particular disk there. `None` on Windows and
+    /// in every job saved before Linux copied whole disks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
     pub disk_model: String,
     pub parts: Vec<DiskPartSpec>,
     /// The user ticked "Загрузочная копия диска" for this disk.
@@ -608,6 +613,23 @@ pub struct DiskSourceSpec {
     /// simply carry no entries, exactly as if the switch had been off.
     #[serde(default)]
     pub bootable: bool,
+}
+
+impl DiskSourceSpec {
+    /// The token the disk's images are named and chained by: `disk<N>` on
+    /// Windows; on Linux `disk` and the token of its device
+    /// (`source_identity::unix_device_token`), which a by-id name keeps
+    /// across reboots while `sdb` does not.
+    pub fn file_tag(&self) -> String {
+        match self
+            .device
+            .as_deref()
+            .and_then(own_backup_backup::source_identity::unix_device_token)
+        {
+            Some(token) => format!("disk{token}"),
+            None => format!("disk{}", self.disk_number),
+        }
+    }
 }
 
 /// One partition of a whole-disk backup: its GPT slot and its source device.
@@ -2502,6 +2524,22 @@ pub fn plan_run_for_disk_at(
     disk_number: u32,
     now: chrono::DateTime<chrono::Utc>,
 ) -> RunPlan {
+    plan_run_for_disk_tag_at(job, folder, &format!("disk{disk_number}"), now)
+}
+
+/// [`plan_run_for_disk`] for the disk whose images carry `tag`
+/// ([`DiskSourceSpec::file_tag`]): how Linux names a disk (decision R1).
+pub fn plan_run_for_disk_tag(job: &Job, folder: &Path, tag: &str) -> RunPlan {
+    plan_run_for_disk_tag_at(job, folder, tag, chrono::Utc::now())
+}
+
+/// [`plan_run_for_disk_tag`] with the clock passed in.
+pub fn plan_run_for_disk_tag_at(
+    job: &Job,
+    folder: &Path,
+    tag: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> RunPlan {
     use own_backup_backup::chains::list_job_chains;
 
     let method: &'static str = match job.scheme.method.as_str() {
@@ -2510,7 +2548,6 @@ pub fn plan_run_for_disk_at(
         _ => return RunPlan::full(),
     };
 
-    let tag = format!("disk{disk_number}");
     let chains = match list_job_chains(folder, &job.id) {
         Ok(c) => c,
         Err(_) => return RunPlan::full(),
@@ -2522,7 +2559,7 @@ pub fn plan_run_for_disk_at(
             c.images
                 .first()
                 .and_then(|i| image_token(&i.image_path))
-                .is_some_and(|t| t.eq_ignore_ascii_case(&tag))
+                .is_some_and(|t| t.eq_ignore_ascii_case(tag))
         })
         .next_back()
     else {
@@ -3650,7 +3687,7 @@ async fn perform_disk_backup(
         volume_index: 0,
         volume_count: 1,
         volume: backup_run::ProgressLabel::Disk {
-            number: ds.disk_number,
+            name: ds.disk_number.to_string(),
             model: ds.disk_model.clone(),
         },
         image_file_name: image_name,
@@ -3754,7 +3791,8 @@ async fn perform_backup(
 
     let mut run = run_skeleton(job);
     let volumes = job.source_list();
-    if volumes.is_empty() {
+    // A whole disk names its partitions in `disk_source`, not in `sources`.
+    if volumes.is_empty() && job.disk_source.is_none() {
         run.finished_at = chrono::Utc::now().to_rfc3339();
         run.status = "error".into();
         run.error = tr!("lib.no_source_volume").into_owned();
@@ -3785,14 +3823,23 @@ async fn perform_backup(
         run.error = msg;
         return run;
     }
-    // Scheduled runs come here without the check `RunJob` makes.
+    // Scheduled runs come here without the check `RunJob` makes; a whole
+    // disk's partitions are its sources here.
+    let sources: Vec<String> = match &job.disk_source {
+        Some(ds) => ds.parts.iter().map(|p| p.device.clone()).collect(),
+        None => volumes.clone(),
+    };
     if let own_backup_backup::source_identity::DestPlacement::OnSource(source) =
-        dest_placement(job, &job.dest_folder)
+        own_backup_backup::source_identity::where_the_destination_sits(&sources, &job.dest_folder)
     {
         run.finished_at = chrono::Utc::now().to_rfc3339();
         run.status = "error".into();
         run.error = tr!("lib.linux_dest_on_source", source = source).into_owned();
         return run;
+    }
+    // A whole disk → one image with its GPT and restore manifest.
+    if let Some(ds) = job.disk_source.clone() {
+        return perform_disk_backup(sink, job, &ds, cancel, passwords, run).await;
     }
     let count = volumes.len() as u64;
     let mut totals = backup_run::VolumeTotals::new(volumes.len());
@@ -3981,6 +4028,262 @@ async fn perform_backup(
     totals.finish(run, fatal, job, None)
 }
 
+/// Linux whole-disk driver: every partition is held first — an LVM or
+/// device-mapper snapshot, a short hold, or the idle device — so the image is
+/// as close to one point in time as the disk allows, then the shared engine
+/// copies the disk (`engine_linux::backup_disk`), checks every hold before it
+/// publishes, and the holds are let go before the image is read back.
+#[cfg(target_os = "linux")]
+async fn perform_disk_backup(
+    sink: &Arc<dyn EventSink>,
+    job: &Job,
+    ds: &DiskSourceSpec,
+    cancel: &Arc<AtomicBool>,
+    passwords: &Arc<dyn PasswordResolver>,
+    mut run: JobRun,
+) -> JobRun {
+    use own_backup_backup::engine_linux::{
+        backup_disk, container_key_from, DiskBackupRequest, DiskPartitionBackup, DEFAULT_BLOCK_SIZE,
+    };
+    use own_backup_common::types::BackupType;
+    use own_backup_common::OwnBackupError;
+    use own_backup_snapshot::SnapshotProvider;
+
+    let folder = PathBuf::from(&job.dest_folder);
+    let tag = ds.file_tag();
+    let plan = plan_run_for_disk_tag(job, &folder, &tag);
+    let (image_path, full_image_path) = output_paths_for(job, &tag, plan.kind);
+
+    // Every partition held before a block is copied; one that cannot be is
+    // the end of the run, and those already held are let go.
+    let provider = Arc::new(own_backup_snapshot::LinuxSnapshotProvider::with_cow_dir(
+        &folder,
+    ));
+    let mut snapshots: Vec<own_backup_snapshot::Snapshot> = Vec::new();
+    for part in &ds.parts {
+        let token = source_token(&part.device);
+        let provider_for_part = own_backup_snapshot::LinuxSnapshotProvider::with_cow_dir(&folder)
+            .container_key(container_key_from(passwords.resolve(&token)));
+        match provider_for_part.create_snapshot(&part.device).await {
+            Ok(s) => snapshots.push(s),
+            Err(e) => {
+                warn!(job = %job.name, partition = %part.device, error = %e, "No consistent source");
+                for s in &snapshots {
+                    if let Err(e) = provider.release_snapshot(s).await {
+                        warn!(volume = %s.source_device, error = %e, "snapshot release failed");
+                    }
+                }
+                run.finished_at = chrono::Utc::now().to_rfc3339();
+                run.status = "error".into();
+                run.error = snapshot_error_text(e);
+                return run;
+            }
+        }
+    }
+    run.vss_used = snapshots.iter().any(|s| {
+        matches!(
+            s.metadata.get("mode").map(String::as_str),
+            Some("lvm" | "dm")
+        )
+    });
+
+    let (excl_win, excl_linux) = if job.exclusions.enabled && !job.advanced.sector_by_sector {
+        (
+            job.exclusions.patterns.clone(),
+            job.exclusions.patterns_linux.clone(),
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    // The disk as the window captured it at job save, matched by its device.
+    let source_disk = job
+        .source_disks
+        .iter()
+        .find(|d| Some(d.device_id.as_str()) == ds.device.as_deref())
+        .cloned();
+    let request = DiskBackupRequest {
+        disk_number: ds.disk_number,
+        disk_device: ds.device.clone(),
+        disk_model: ds.disk_model.clone(),
+        partitions: ds
+            .parts
+            .iter()
+            .map(|p| DiskPartitionBackup {
+                device: p.device.clone(),
+                part_index: p.part_index,
+                passphrase: passwords.resolve(&source_token(&p.device)),
+            })
+            .collect(),
+        image_path: image_path.clone(),
+        full_image_path: Some(full_image_path.clone()),
+        block_size: DEFAULT_BLOCK_SIZE,
+        image_format: job.image_format,
+        job_id: Some(job.id.clone()),
+        // The local key store is Windows-only: an encrypted job fails earlier.
+        encryption: None,
+        exclusion_patterns_windows: excl_win,
+        exclusion_patterns_linux: excl_linux,
+        kind: match plan.kind {
+            "incremental" => BackupType::Incremental,
+            "differential" => BackupType::Differential,
+            _ => BackupType::Full,
+        },
+        parent_image: plan.parent_image.clone(),
+        source_disk,
+        bootable: ds.bootable,
+        zstd_level: job.zstd_level(),
+    };
+    let watch = engine_watch::EngineWatch::new();
+    let progress = Arc::new(backup_run::RunProgress {
+        sink: sink.clone(),
+        watch: watch.clone(),
+        cancel: cancel.clone(),
+        job_id: job.id.clone(),
+        volume_index: 0,
+        volume_count: 1,
+        volume: backup_run::ProgressLabel::Disk {
+            name: ds
+                .device
+                .as_deref()
+                .and_then(|d| d.rsplit('/').next())
+                .unwrap_or_default()
+                .to_string(),
+            model: ds.disk_model.clone(),
+        },
+        image_file_name: image_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    });
+
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+    let handle = {
+        let progress = progress.clone();
+        let snapshots = snapshots.clone();
+        let speed_limit_mbps = job.advanced.speed_limit_mbps;
+        tokio::task::spawn_blocking(move || {
+            let mut copy = backup_run::CopyProgress::new(&progress, speed_limit_mbps);
+            let copied = backup_disk(&request, &snapshots, |p| copy.report(p));
+            let _ = done_tx.send(());
+            copied
+        })
+    };
+    let copied = match engine_watch::wait_engine(handle, &watch, cancel, sink).await {
+        engine_watch::Waited::Done(result) => result,
+        engine_watch::Waited::LeftBehind => {
+            warn!(job = %job.name, "cancelled while the engine was not answering; its thread is left behind");
+            release_all_left_behind(provider, snapshots, done_rx);
+            run.finished_at = chrono::Utc::now().to_rfc3339();
+            run.status = "cancelled".into();
+            run.error = tr!("lib.cancelled_left_behind").into_owned();
+            return run;
+        }
+    };
+    // Every hold was checked before the image was published; they are let go
+    // now, whatever came of the copy, before the image is read back.
+    for s in &snapshots {
+        if let Err(e) = provider.release_snapshot(s).await {
+            warn!(job = %job.name, volume = %s.source_device, error = %e, "snapshot release failed");
+        }
+    }
+    run.finished_at = chrono::Utc::now().to_rfc3339();
+    let summary = match copied {
+        Ok(Ok(summary)) => summary,
+        Ok(Err(OwnBackupError::Cancelled)) => {
+            run.status = "cancelled".into();
+            run.error = tr!("lib.cancelled_by_user").into_owned();
+            return run;
+        }
+        Ok(Err(e)) => {
+            warn!(job = %job.name, error = %e, "Whole-disk backup failed");
+            run.status = "error".into();
+            run.error = snapshot_error_text(e);
+            return run;
+        }
+        Err(e) => {
+            run.status = "error".into();
+            run.error = tr!("lib.task_aborted", error = e).into_owned();
+            return run;
+        }
+    };
+
+    let mut verify_cancelled = false;
+    if job.advanced.validate_after {
+        let image = summary.image_path.clone();
+        let scope = backup_run::verify_scope(job);
+        let handle = {
+            let progress = progress.clone();
+            tokio::task::spawn_blocking(move || {
+                backup_run::verify_copy(&progress, &image, None, scope)
+            })
+        };
+        match engine_watch::wait_engine(handle, &watch, cancel, sink).await {
+            engine_watch::Waited::Done(Ok(Ok(cancelled))) => verify_cancelled = cancelled,
+            engine_watch::Waited::Done(Ok(Err(e))) => {
+                run.status = "error".into();
+                run.error = e.to_string();
+                return run;
+            }
+            engine_watch::Waited::Done(Err(e)) => {
+                run.status = "error".into();
+                run.error = tr!("lib.task_aborted", error = e).into_owned();
+                return run;
+            }
+            engine_watch::Waited::LeftBehind => verify_cancelled = true,
+        }
+    }
+    run.smart_mode = true;
+    let image_path = backup_run::record_disk(&mut run, job, &plan, &tag, summary);
+    // Recorded first, so the finished image is findable in the history; a
+    // check the user stopped is no reason to delete older versions.
+    if verify_cancelled {
+        run.status = "cancelled".into();
+        run.error = verify_cancelled_message();
+        return run;
+    }
+    let protected = [(tag, image_path)];
+    backup_run::retain_and_consolidate(&mut run, job, &protected, None);
+    run
+}
+
+/// [`release_left_behind`] for every partition of a whole disk: the
+/// partitions held still are let go at once, the snapshot devices once the
+/// thread that reads them is done.
+#[cfg(target_os = "linux")]
+fn release_all_left_behind(
+    provider: Arc<own_backup_snapshot::LinuxSnapshotProvider>,
+    snapshots: Vec<own_backup_snapshot::Snapshot>,
+    done: tokio::sync::oneshot::Receiver<()>,
+) {
+    use own_backup_snapshot::SnapshotProvider;
+    let (holds, devices): (Vec<_>, Vec<_>) = snapshots
+        .into_iter()
+        .partition(own_backup_snapshot::linux::is_partition_hold);
+    tokio::spawn(async move {
+        let release = |s: own_backup_snapshot::Snapshot| {
+            let provider = provider.clone();
+            async move {
+                match provider.release_snapshot(&s).await {
+                    Ok(()) => {
+                        info!(volume = %s.source_device, "snapshot of a left-behind copy released")
+                    }
+                    Err(e) => warn!(volume = %s.source_device, error = %e,
+                        "snapshot of a left-behind copy not released"),
+                }
+            }
+        };
+        for s in holds {
+            release(s).await;
+        }
+        if !devices.is_empty() {
+            let _ = done.await;
+        }
+        for s in devices {
+            release(s).await;
+        }
+    });
+}
+
 /// A copy left behind — cancelled while its thread did not answer — still
 /// holds its source. A partition held still is let go at once: its writers
 /// wait, and a thaw does not disturb a read of the device itself. A snapshot
@@ -4022,7 +4325,13 @@ fn linux_unsupported(job: &Job) -> Option<String> {
     {
         what.push(tr!("lib.linux_unsupported_scheme").into_owned());
     }
-    if job.disk_source.is_some() {
+    // A disk is named by its device here (decision R1); a job that names it
+    // by number only was made for Windows.
+    if job
+        .disk_source
+        .as_ref()
+        .is_some_and(|ds| ds.device.is_none())
+    {
         what.push(tr!("lib.linux_unsupported_whole_disk").into_owned());
     }
     if job.advanced.speed_limit_mbps > 0 {
@@ -6390,5 +6699,114 @@ mod linux_run_tests {
         // The engine's own sentence (its catalog, not this crate's).
         assert!(!run.file_scan_skipped.is_empty());
         assert!(run.excluded_entries_kept.is_empty());
+    }
+
+    /// A whole disk on Linux through a job (plan E6): named by its device,
+    /// its images by the device's token, a chain planned from them; a disk
+    /// named by number only is refused.
+    #[tokio::test]
+    async fn a_whole_disk_job_names_its_images_by_the_device() {
+        use std::os::unix::fs::FileExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mib = 1u64 << 20;
+        // Two "partitions" as files, and the disk holding them behind a GPT.
+        let p1 = dir.path().join("p1.img");
+        let p2 = dir.path().join("p2.img");
+        std::fs::write(&p1, vec![0x11; 2 * mib as usize]).unwrap();
+        std::fs::write(&p2, vec![0x22; 3 * mib as usize]).unwrap();
+        let layout = own_backup_common::gpt::DiskLayout {
+            disk_guid: "0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0".into(),
+            sector_size: 512,
+            size_bytes: 8 * mib,
+            partitions: [(1u32, mib, 2 * mib), (2, 3 * mib, 3 * mib)]
+                .iter()
+                .map(
+                    |&(index, at, len)| own_backup_common::gpt::GptPartitionEntry {
+                        index,
+                        type_guid: "0FC63DAF-8483-4772-8E79-3D69D8477DE4".into(),
+                        part_guid: format!("11111111-0000-0000-0000-00000000000{index}"),
+                        first_lba: at / 512,
+                        last_lba: (at + len) / 512 - 1,
+                        attributes: 0,
+                        name: String::new(),
+                    },
+                )
+                .collect(),
+        };
+        let disk = dir.path().join("disk.img");
+        let f = std::fs::File::create(&disk).unwrap();
+        f.set_len(layout.size_bytes).unwrap();
+        for op in
+            own_backup_backup::gpt_writer::disk_gpt_write_ops(&layout, layout.size_bytes).unwrap()
+        {
+            f.write_all_at(&op.bytes, op.offset).unwrap();
+        }
+        drop(f);
+        let dest = dir.path().join("backups");
+        std::fs::create_dir(&dest).unwrap();
+        let ds = DiskSourceSpec {
+            disk_number: 0,
+            device: Some(disk.to_str().unwrap().into()),
+            disk_model: "file disk".into(),
+            parts: [(1, &p1), (2, &p2)]
+                .iter()
+                .map(|(i, p)| DiskPartSpec {
+                    part_index: *i,
+                    device: p.to_str().unwrap().into(),
+                    filesystem: String::new(),
+                })
+                .collect(),
+            bootable: false,
+        };
+        let mut job = Job {
+            id: "linux-disk".into(),
+            name: "linux disk".into(),
+            dest_folder: dest.to_str().unwrap().into(),
+            image_format: own_backup_common::types::ImageFormat::Qcow2,
+            disk_source: Some(ds.clone()),
+            ..Default::default()
+        };
+        job.scheme.method = "incremental".into();
+        job.scheme.only_incremental = true;
+        job.exclusions.enabled = false;
+        job.advanced.validate_after = true;
+        let sink: Arc<dyn EventSink> = Arc::new(Phases::default());
+        let passwords: Arc<dyn PasswordResolver> = Arc::new(NoPasswords);
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        let first = perform_backup(&sink, &job, &cancel, None, &passwords, None).await;
+        assert_eq!(first.status, "success", "{}", first.error);
+        assert_eq!(first.backup_kind, "full");
+        let tag = ds.file_tag();
+        assert!(tag.starts_with("diskH"), "{tag}");
+        let name = PathBuf::from(&first.image_path);
+        assert_eq!(image_token(&name).unwrap(), tag.to_ascii_uppercase());
+        assert_eq!(first.images.len(), 1);
+        assert_eq!(first.images[0].source, tag);
+
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&p2)
+            .unwrap()
+            .write_all_at(&[0x33; 100], mib)
+            .unwrap();
+        let second = perform_backup(&sink, &job, &cancel, None, &passwords, None).await;
+        assert_eq!(second.status, "success", "{}", second.error);
+        assert_eq!(second.backup_kind, "incremental");
+        assert_eq!(second.base_image_path, first.image_path);
+        assert_eq!(second.increment_index, 1);
+
+        // Named by number only: made for Windows, refused here.
+        job.disk_source.as_mut().unwrap().device = None;
+        let refused = perform_backup(&sink, &job, &cancel, None, &passwords, None).await;
+        assert_eq!(refused.status, "error");
+        assert!(
+            refused
+                .error
+                .contains(&*tr!("lib.linux_unsupported_whole_disk")),
+            "{}",
+            refused.error
+        );
     }
 }

@@ -18,9 +18,14 @@ use clap::Args;
 
 #[derive(Args)]
 pub struct BackupDiskArgs {
-    /// Physical drive number, as `list-disks` prints it.
-    #[arg(long, value_name = "N")]
-    pub disk: u32,
+    /// Physical drive number, as `list-disks` prints it (Windows).
+    #[arg(long, value_name = "N", required_unless_present = "device")]
+    pub disk: Option<u32>,
+
+    /// The disk's device (Linux): `/dev/disk/by-id/…` — the name that stays
+    /// the same after a reboot — or any path to the whole disk.
+    #[arg(long, value_name = "УСТРОЙСТВО", conflicts_with = "disk")]
+    pub device: Option<String>,
 
     /// GPT partition numbers to copy, e.g. 1,2,4. Left out: every partition the
     /// inventory found something openable on, which is the wizard with all
@@ -111,6 +116,9 @@ pub async fn run(args: BackupDiskArgs) -> own_backup_common::Result<()> {
     if args.block_size_mib == 0 || args.block_size_mib > 64 {
         return Err(OwnBackupError::Config("block size must be 1-64 MiB".into()));
     }
+    let disk_number = args.disk.ok_or_else(|| {
+        OwnBackupError::Config("на Windows диск называется номером: --disk N".into())
+    })?;
     let image_path = std::path::PathBuf::from(&args.output);
     // Which version this is and what it is written over — the same rules the
     // single-volume copy follows (`super::copy_options`).
@@ -126,11 +134,11 @@ pub async fn run(args: BackupDiskArgs) -> own_backup_common::Result<()> {
     let disks = inventory.enumerate_disks().await?;
     let disk = disks
         .iter()
-        .find(|d| disk_number_of(&d.device_id) == Some(args.disk))
+        .find(|d| disk_number_of(&d.device_id) == Some(disk_number))
         .ok_or_else(|| {
             OwnBackupError::Config(format!(
                 "диск {} не найден — посмотрите own-backup-cli list-disks",
-                args.disk
+                disk_number
             ))
         })?;
 
@@ -153,7 +161,7 @@ pub async fn run(args: BackupDiskArgs) -> own_backup_common::Result<()> {
                 .iter()
                 .find(|p| p.index == *want)
                 .ok_or_else(|| {
-                    OwnBackupError::Config(format!("на диске {} нет раздела {want}", args.disk))
+                    OwnBackupError::Config(format!("на диске {} нет раздела {want}", disk_number))
                 })?;
             if p.volume_device.is_empty() {
                 if p.gpt_type_guid.eq_ignore_ascii_case(msr) {
@@ -183,7 +191,7 @@ pub async fn run(args: BackupDiskArgs) -> own_backup_common::Result<()> {
     // both halves of the selection go on screen.
     println!(
         "Диск {} — {} ({:.1} ГБ, разделов: {})",
-        args.disk,
+        disk_number,
         disk.model,
         disk.size_bytes as f64 / 1e9,
         disk.partitions.len()
@@ -200,7 +208,7 @@ pub async fn run(args: BackupDiskArgs) -> own_backup_common::Result<()> {
     }
     let kept: std::collections::HashSet<u32> = chosen.iter().map(|p| p.index).collect();
     // The engine's own rule, asked of the same GPT it will read.
-    let msr_kept = own_backup_backup::gpt_reader::read_disk_layout(args.disk)?
+    let msr_kept = own_backup_backup::gpt_reader::read_disk_layout(disk_number)?
         .copy_carries_windows(&kept, Some(disk));
     let is_msr =
         |p: &&own_backup_common::disk::PartitionInfo| p.gpt_type_guid.eq_ignore_ascii_case(msr);
@@ -248,7 +256,7 @@ pub async fn run(args: BackupDiskArgs) -> own_backup_common::Result<()> {
     }
 
     let request = DiskBackupRequest {
-        disk_number: args.disk,
+        disk_number,
         disk_device: None,
         disk_model: disk.model.clone(),
         partitions: chosen
@@ -343,10 +351,261 @@ pub async fn run(args: BackupDiskArgs) -> own_backup_common::Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "windows"))]
+/// The device of partition `index` of `disk`: its stable
+/// `/dev/disk/by-partuuid/…` name when udev made one, the kernel's name
+/// otherwise (`sdb2`, `nvme0n1p2`, `loop0p2`).
+#[cfg(target_os = "linux")]
+fn partition_device(disk: &str, index: u32, part_guid: &str) -> Option<String> {
+    use std::os::unix::fs::FileTypeExt;
+    let is_block = |p: &str| {
+        std::fs::metadata(p)
+            .map(|m| m.file_type().is_block_device())
+            .unwrap_or(false)
+    };
+    let stable = format!("/dev/disk/by-partuuid/{}", part_guid.to_ascii_lowercase());
+    if is_block(&stable) {
+        return Some(stable);
+    }
+    let canon = std::fs::canonicalize(disk).ok()?;
+    let canon = canon.to_str()?;
+    let name = if canon.ends_with(|c: char| c.is_ascii_digit()) {
+        format!("{canon}p{index}")
+    } else {
+        format!("{canon}{index}")
+    };
+    is_block(&name).then_some(name)
+}
+
+#[cfg(target_os = "linux")]
+pub async fn run(args: BackupDiskArgs) -> own_backup_common::Result<()> {
+    use own_backup_backup::engine_linux::{
+        backup_disk, container_key_from, verify_image, DiskBackupRequest, DiskPartitionBackup,
+    };
+    use own_backup_common::OwnBackupError;
+    use own_backup_snapshot::SnapshotProvider;
+
+    if args.block_size_mib == 0 || args.block_size_mib > 64 {
+        return Err(OwnBackupError::Config("block size must be 1-64 MiB".into()));
+    }
+    let device = args.device.clone().ok_or_else(|| {
+        OwnBackupError::Config(
+            "на Linux диск называется устройством: --device /dev/disk/by-id/…".into(),
+        )
+    })?;
+    let kind = super::copy_options::backup_kind(&args.kind)?;
+    if kind != own_backup_common::types::BackupType::Full
+        && args.format == own_backup_common::types::ImageFormat::Vhdx
+    {
+        return Err(OwnBackupError::Config(
+            "цепочки VHDX (incremental/differential) на Linux пока не пишутся — \
+             используйте --format qcow2"
+                .into(),
+        ));
+    }
+    let image_path = std::path::PathBuf::from(&args.output);
+    let (kind, parent_image) = super::copy_options::resolve_parent(
+        kind,
+        args.parent.as_deref(),
+        args.parent_auto,
+        &image_path,
+        args.format,
+    )?;
+
+    // The disk's own GPT, read off the disk.
+    let layout = {
+        let dev = own_backup_backup::linux_device::LinuxRawDevice::open_read(&device)?;
+        let sector = dev.sector_size();
+        let want = (34 * sector as u64).min(dev.length()) as usize;
+        let mut head = vec![0u8; want];
+        dev.read_at(0, &mut head)?;
+        own_backup_backup::gpt_reader::parse_disk_layout(&head, sector, dev.length())?
+    };
+    let chosen: Vec<&own_backup_common::gpt::GptPartitionEntry> = if args.partitions.is_empty() {
+        layout.partitions.iter().collect()
+    } else {
+        args.partitions
+            .iter()
+            .map(|want| {
+                layout
+                    .partitions
+                    .iter()
+                    .find(|p| p.index == *want)
+                    .ok_or_else(|| {
+                        OwnBackupError::Config(format!("на диске {device} нет раздела {want}"))
+                    })
+            })
+            .collect::<Result<_, _>>()?
+    };
+    let mut parts = Vec::new();
+    for p in &chosen {
+        let dev = partition_device(&device, p.index, &p.part_guid).ok_or_else(|| {
+            OwnBackupError::Config(format!(
+                "раздел {} диска {device}: устройства раздела нет (ядро не перечитало таблицу?)",
+                p.index
+            ))
+        })?;
+        parts.push((p.index, dev, p.size_bytes(layout.sector_size)));
+    }
+    println!(
+        "Диск {device} ({:.1} ГБ, разделов: {})",
+        layout.size_bytes as f64 / 1e9,
+        layout.partitions.len()
+    );
+    println!("В копию войдут:");
+    for (index, dev, size) in &parts {
+        println!("  #{index:<2} {:>8.1} ГБ  {dev}", *size as f64 / 1e9);
+    }
+    if args.dry_run {
+        return Ok(());
+    }
+
+    // Every partition held before a block is copied: a snapshot, a short
+    // hold, or the idle device; a partition in use without one is refused.
+    let out_dir = match image_path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => std::path::PathBuf::from("."),
+    };
+    let provider = own_backup_snapshot::LinuxSnapshotProvider::with_cow_dir(&out_dir)
+        .container_key(container_key_from(
+            args.password.clone().map(zeroize::Zeroizing::new),
+        ));
+    let mut snapshots = Vec::new();
+    for (_, dev, _) in &parts {
+        match provider.create_snapshot(dev).await {
+            Ok(s) => snapshots.push(s),
+            Err(e) => {
+                for s in &snapshots {
+                    let _ = provider.release_snapshot(s).await;
+                }
+                return Err(e);
+            }
+        }
+    }
+
+    // A mask typed here is meant for whatever the partition holds: both
+    // families; the defaults are each family's own.
+    let rules = |defaults: Vec<String>| {
+        let mut p = if args.exclude_defaults {
+            defaults
+        } else {
+            Vec::new()
+        };
+        p.extend(args.exclude.iter().cloned());
+        p
+    };
+    let request = DiskBackupRequest {
+        disk_number: 0,
+        disk_device: Some(device.clone()),
+        disk_model: String::new(),
+        partitions: parts
+            .iter()
+            .map(|(index, dev, _)| DiskPartitionBackup {
+                device: dev.clone(),
+                part_index: *index,
+                passphrase: args.password.clone().map(zeroize::Zeroizing::new),
+            })
+            .collect(),
+        image_path: image_path.clone(),
+        full_image_path: None,
+        block_size: args.block_size_mib * 1024 * 1024,
+        image_format: args.format,
+        job_id: None,
+        encryption: None,
+        exclusion_patterns_windows: rules(own_backup_core::default_exclusions()),
+        exclusion_patterns_linux: rules(own_backup_core::default_linux_exclusions()),
+        kind,
+        parent_image,
+        source_disk: None,
+        bootable: args.bootable,
+        zstd_level: own_backup_backup::qcow2::zstd_level_or_default(
+            own_backup_common::config::AppConfig::load_or_default().default_compression_level,
+        ),
+    };
+
+    // Ctrl+C, SIGTERM or a closed terminal: the copy stops at its next block
+    // and every hold is let go below, as after any other failure.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut term = signal(SignalKind::terminate())?;
+        let mut hup = signal(SignalKind::hangup())?;
+        let stop = stop.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = term.recv() => {}
+                _ = hup.recv() => {}
+            }
+            eprintln!("stopping: the copy ends at its next block and the snapshots are released");
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+    }
+    let copied = {
+        let stop = stop.clone();
+        let snapshots = snapshots.clone();
+        tokio::task::spawn_blocking(move || {
+            backup_disk(&request, &snapshots, |_p| {
+                if stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    Err(OwnBackupError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            })
+        })
+        .await
+        .map_err(|e| OwnBackupError::Config(format!("backup task: {e}")))?
+    };
+    for s in &snapshots {
+        if let Err(e) = provider.release_snapshot(s).await {
+            eprintln!("warning: snapshot release failed: {e}");
+        }
+    }
+    let summary = copied?;
+    println!(
+        "Done: {} partitions, {:.1} MiB copied in {:.1}s ({:?})",
+        summary.partitions,
+        summary.bytes_copied as f64 / 1_048_576.0,
+        summary.duration.as_secs_f64(),
+        summary.backup_kind
+    );
+    if summary.excluded_files > 0 {
+        println!(
+            "Excluded: {} files, {:.1} MiB",
+            summary.excluded_files,
+            summary.excluded_bytes as f64 / 1_048_576.0
+        );
+    }
+    if let Some(why) = &summary.file_scan_skipped {
+        println!("Exclusions not applied: {why}");
+    }
+    if let Some(why) = &summary.excluded_entries_kept {
+        println!("Excluded names kept: {why}");
+    }
+    if summary.backup_kind != kind {
+        println!(
+            "The parent could not be continued — a {:?} copy was written instead (see the log).",
+            summary.backup_kind
+        );
+    }
+    println!("Image: {}", summary.image_path.display());
+    if args.verify {
+        let v = verify_image(&summary.image_path, |_, _| Ok(()))?;
+        if !v.valid() {
+            return Err(OwnBackupError::ImageFormat(format!(
+                "{}: {} blocks do not match their checksums",
+                summary.image_path.display(),
+                v.mismatched_blocks.len()
+            )));
+        }
+        println!("Verify: OK ({} blocks)", v.blocks_checked);
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub async fn run(_args: BackupDiskArgs) -> own_backup_common::Result<()> {
     Err(own_backup_common::OwnBackupError::Config(
-        "Копия целого диска собирается только на Windows.".into(),
+        "Копия целого диска собирается только на Windows и Linux.".into(),
     ))
 }
 

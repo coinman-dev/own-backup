@@ -7,17 +7,21 @@
 //! identical copy of these steps, and the Linux driver needs the same ones —
 //! so they are here, once.
 //!
-//! A volume copy's summary is the shared engine's on both systems; the
-//! whole-disk one is still Windows-only.
+//! A copy's summary — a volume's or a whole disk's — is the shared engine's
+//! on both systems.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 #[cfg(target_os = "linux")]
-use own_backup_backup::engine_linux::{verify_image_scoped, VerifyScope, VolumeBackupSummary};
+use own_backup_backup::engine_linux::{
+    verify_image_scoped, DiskBackupSummary, VerifyScope, VolumeBackupSummary,
+};
 #[cfg(target_os = "windows")]
-use own_backup_backup::engine_win::{verify_image_scoped, VerifyScope, VolumeBackupSummary};
+use own_backup_backup::engine_win::{
+    verify_image_scoped, DiskBackupSummary, VerifyScope, VolumeBackupSummary,
+};
 use own_backup_backup::seal::context::ArchiveKeys;
 use own_backup_common::progress::BackupProgress;
 use own_backup_common::{tr, OwnBackupError};
@@ -46,18 +50,17 @@ pub(crate) struct RunProgress {
 pub(crate) enum ProgressLabel {
     /// A volume, by the label the job has for it.
     Volume(String),
-    /// A whole disk, by number and model — worded each time it is shown.
-    // Whole-disk copies run on Windows only until phase E6.
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-    Disk { number: u32, model: String },
+    /// A whole disk, by its name (Windows: its number; Linux: its device)
+    /// and model — worded each time it is shown.
+    Disk { name: String, model: String },
 }
 
 impl ProgressLabel {
     fn text(&self) -> String {
         match self {
             Self::Volume(label) => label.clone(),
-            Self::Disk { number, model } => {
-                tr!("lib.disk_label", disk = number, model = model).into_owned()
+            Self::Disk { name, model } => {
+                tr!("lib.disk_label", disk = name, model = model).into_owned()
             }
         }
     }
@@ -411,14 +414,14 @@ impl VolumeTotals {
 }
 
 /// Record a finished whole-disk copy in its run; returns the image the
-/// engine published. `disk_token` is the disk's file-name token (`disk<N>`).
-#[cfg(target_os = "windows")]
+/// engine published. `disk_token` is the disk's file-name token
+/// ([`crate::DiskSourceSpec::file_tag`]).
 pub(crate) fn record_disk(
     run: &mut JobRun,
     job: &Job,
     plan: &crate::RunPlan,
     disk_token: &str,
-    summary: own_backup_backup::engine_win::DiskBackupSummary,
+    summary: DiskBackupSummary,
 ) -> PathBuf {
     use crate::RunImage;
     use own_backup_common::types::BackupType;
