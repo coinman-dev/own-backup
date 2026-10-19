@@ -17,6 +17,7 @@ pub(crate) mod verify;
 pub(crate) mod volume;
 pub(crate) mod volume_exclusions;
 pub(crate) mod volume_maps;
+pub(crate) mod volume_write;
 
 #[cfg(test)]
 pub(crate) mod test_platform;
