@@ -13,7 +13,7 @@
   import type { Job, DiskInfo, PartitionInfo } from '../lib/types';
   import { m } from '../lib/paraglide/messages';
   import { examplePath, joinPath } from '../lib/paths';
-  import { caps, ensureCapabilities, dropUnsupported } from '../lib/capabilitiesStore.svelte';
+  import { caps, ensureCapabilities, dropUnsupported, canChain, offersWholeDisk } from '../lib/capabilitiesStore.svelte';
   import { isWindows } from '../lib/platformStore.svelte';
   import { diskCaption, diskTableText } from '../lib/diskNames';
   import type { DestinationCheck } from '../lib/types';
@@ -34,11 +34,14 @@
   let step = $state(0);
   // What the service's engine carries out: anything else is not offered, since
   // a job holding it is refused at run time (Linux, for now — see
-  // `capabilities.rs` in the service).
+  // `own_backup_core::capabilities`, the table the run refuses by).
   $effect(() => {
     void ensureCapabilities();
   });
   const cap = $derived(caps.value);
+  /** Whole-disk jobs are built here only where a disk is named by number —
+   *  see `offersWholeDisk`. */
+  const wholeDisk = $derived(offersWholeDisk(cap));
   // A new draft (template or clone) starts as a job this engine runs: the
   // template turns exclusions on, a clone may carry a chain. A saved job is
   // left as it is until it is saved again (`finish`).
@@ -57,6 +60,16 @@
   const alreadyEncrypted = $derived(!!job.archive_encryption);
   // svelte-ignore state_referenced_locally
   let wantEncryption = $state(!!job.archive_encryption || startEncrypted);
+  /** This engine writes chains in the chosen container (Linux: not VHDX). */
+  const chainOk = $derived(canChain(cap, wantEncryption ? 'obk' : job.image_format));
+  /** The containers it does write chains in, as the format list names them;
+   *  OBK only where it is offered at all. */
+  const chainFormatNames = $derived(
+    cap.chain_formats
+      .filter((f) => f !== 'obk' || cap.archive_encryption)
+      .map((f) => (f === 'vhdx' ? 'VHDX' : f === 'obk' ? 'OBK' : f))
+      .join(', '),
+  );
   let encPassword = $state('');
   let encPasswordAgain = $state('');
   /** Matches the service's own floor; a slow KDF does not rescue a short one. */
@@ -86,6 +99,13 @@
     if (formatLocked) return;
     wantEncryption = v === 'obk';
     job.image_format = v === 'vhdx' ? 'vhdx' : 'qcow2';
+    // A chain this engine does not write in the new container (Linux: VHDX)
+    // falls back to full copies here, visibly, not at run time.
+    if (job.scheme.method !== 'full' && !canChain(cap, v)) {
+      job.scheme.method = 'full';
+      job.scheme.rolling_incrementals = null;
+      job.scheme.only_incremental = false;
+    }
     error = null;
   }
   /** The settings' zstd level, which a job without its own follows. Read once;
@@ -517,7 +537,7 @@
   function captureDiskSource(d: DiskInfo) {
     // An engine without whole-disk copies writes one image per volume; a
     // `disk_source` would only get the job refused.
-    if (!cap.whole_disk) {
+    if (!wholeDisk) {
       job.disk_source = null;
       return;
     }
@@ -694,7 +714,7 @@
    *  survives the switch being flicked twice. */
   function toggleBootableCopy(d: DiskInfo) {
     if (sourceReadonly) return; // fixed source on the "Параметры" screen
-    if (!cap.whole_disk) return; // a bootable copy IS a whole-disk copy
+    if (!wholeDisk) return; // a bootable copy IS a whole-disk copy
     if (!isBootableDisk(d)) return; // nothing on this disk boots
     if (isBootableCopy(d)) {
       bootCopyOn = bootCopyOn.filter((id) => id !== d.device_id);
@@ -1634,7 +1654,7 @@
                     <span class="disk-model">{d.model || d.device_id}</span>
                     <span class="disk-head-right">
                       {#if isBootableCopy(d)}<span class="whole-badge">{m.wiz_badge_bootable()}</span>{/if}
-                      {#if cap.whole_disk}
+                      {#if wholeDisk}
                       <label
                         class="boot-toggle"
                         class:disabled={!isBootableDisk(d)}
@@ -1792,7 +1812,7 @@
           {:else if destCheck?.placement === 'cannot_tell'}
             <div class="note">{m.wiz_dest_cannot_tell({ reason: destCheck.reason })}</div>
           {/if}
-          {#if !cap.whole_disk && !sourceReadonly && job.sources.length > 1}
+          {#if !wholeDisk && !sourceReadonly && job.sources.length > 1}
             <div class="note">{m.wiz_volumes_separate()}</div>
           {/if}
           {/if}
@@ -1973,15 +1993,17 @@
         <div class="field-label mt">{m.wiz_method()}</div>
         <select bind:value={job.scheme.method} onchange={onMethodChange} class="wide">
           <option value="full">{m.wiz_method_full()}</option>
-          {#if cap.methods.includes('incremental') || job.scheme.method === 'incremental'}
+          {#if (chainOk && cap.methods.includes('incremental')) || job.scheme.method === 'incremental'}
             <option value="incremental">{m.wiz_method_incremental()}</option>
           {/if}
-          {#if cap.methods.includes('differential') || job.scheme.method === 'differential'}
+          {#if (chainOk && cap.methods.includes('differential')) || job.scheme.method === 'differential'}
             <option value="differential">{m.wiz_method_differential()}</option>
           {/if}
         </select>
         {#if !cap.methods.includes('incremental') && !cap.methods.includes('differential')}
           <div class="note">{m.wiz_method_full_note()} {m.wiz_method_only_full()}</div>
+        {:else if !chainOk && job.scheme.method === 'full'}
+          <div class="note">{m.wiz_method_full_note()} {m.wiz_method_chain_formats({ formats: chainFormatNames })}</div>
         {:else if job.scheme.method === 'full'}
           <div class="note">{m.wiz_method_full_note()}</div>
         {:else if job.scheme.method === 'incremental'}

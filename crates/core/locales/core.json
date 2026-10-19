@@ -412,7 +412,11 @@
     "en": "The layout of the disk “%{disk}” changed since the previous backup (Windows Update does this): %{parts}. The job was updated, and this backup is a full one"
   },
   "lib.linux_unsupported": {"ru": "В Linux копирование пока умеет не всё, что умеет в Windows, а в задании включено: %{options}. Копия не сделана, чтобы не выдать за выполненное то, что не сделано. Отключите эти настройки в задании или дождитесь их поддержки в Linux.", "en": "On Linux, backup cannot yet do everything it does on Windows, and the job asks for: %{options}. No copy was made, so as not to report as done what was not done. Turn these settings off in the job or wait for their Linux support."},
-  "lib.linux_unsupported_scheme": {"ru": "инкрементные или дифференциальные копии в формате VHDX (в Linux цепочки пишутся в qcow2)", "en": "incremental or differential copies in VHDX format (on Linux, chains are written as qcow2)"},
+  "lib.linux_unsupported_scheme": {"ru": "инкрементные или дифференциальные копии в формате %{format} (здесь цепочки пишутся в: %{chains})", "en": "incremental or differential copies in %{format} format (chains are written here as: %{chains})"},
+  "lib.linux_unsupported_exclusions": {"ru": "исключения файлов", "en": "file exclusions"},
+  "lib.linux_unsupported_disk": {"ru": "копия всего диска одним образом", "en": "a copy of a whole disk as one image"},
+  "lib.linux_unsupported_after_backup": {"ru": "сон или выключение после копии", "en": "sleep or power off after the copy"},
+  "lib.linux_unsupported_encryption": {"ru": "шифрование копии (в Linux пока нет хранилища ключей)", "en": "encrypted copies (Linux has no key store yet)"},
   "lib.linux_unsupported_whole_disk": {"ru": "копия всего диска, названного только номером (в Linux диск называется устройством /dev/disk/by-id)", "en": "a copy of a whole disk named only by its number (on Linux a disk is named by its /dev/disk/by-id device)"},
   "lib.linux_unsupported_speed_limit": {"ru": "ограничение скорости", "en": "a speed limit"},
   "lib.linux_unsupported_low_priority": {"ru": "низкий приоритет", "en": "low priority"},

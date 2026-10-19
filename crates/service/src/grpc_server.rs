@@ -1356,7 +1356,7 @@ impl BackupService for BackupServiceImpl {
         req: Request<Empty>,
     ) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
-        let json = serde_json::to_string(&crate::capabilities::current())
+        let json = serde_json::to_string(&own_backup_core::capabilities::current())
             .map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(JsonReply { json }))
     }
@@ -3329,7 +3329,7 @@ mod tests {
             .unwrap()
             .into_inner();
         let v: serde_json::Value = serde_json::from_str(&reply.json).unwrap();
-        assert_eq!(v["os"], crate::capabilities::current().os);
+        assert_eq!(v["os"], own_backup_core::capabilities::current().os);
         assert!(v["methods"].as_array().unwrap().contains(&"full".into()));
     }
 

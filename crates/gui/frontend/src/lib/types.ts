@@ -260,14 +260,21 @@ export interface PlatformInfo {
 }
 
 /** What the service's backup engine and scheduler carry out
- *  (`BackupCapabilities` in the service). Windows: everything. */
+ *  (`own_backup_core::capabilities`, served by the service). Windows:
+ *  everything. */
 export interface BackupCapabilities {
   os: string;
-  /** `full`, `incremental`, `differential` — those a run carries out. */
+  /** `full`, `incremental`, `differential` — those a run carries out. A chain
+   *  also needs its container in `chain_formats`. */
   methods: string[];
+  /** Containers a chain is written in: `vhdx`, `qcow2`, `obk` (encrypted). */
+  chain_formats: string[];
   exclusions: boolean;
   /** One image of a whole disk (`disk_source`); without it, one per volume. */
   whole_disk: boolean;
+  /** How `disk_source` names the disk: `number` (Windows) or `device`
+   *  (Linux: `disk_source.device`, a `/dev/disk/by-id/…` path). */
+  disk_named_by: 'number' | 'device';
   speed_limit: boolean;
   low_priority: boolean;
   after_backup: boolean;
@@ -664,6 +671,9 @@ export interface DiskPartSpec {
 /** Whole-disk (bootable) backup metadata attached to a job. */
 export interface DiskSourceSpec {
   disk_number: number;
+  /** Linux: the disk's `/dev/disk/by-id/…` device (a number names no disk
+   *  there). Absent on Windows. */
+  device?: string | null;
   disk_model: string;
   parts: DiskPartSpec[];
   /** "Загрузочная копия диска" is on for this disk. Decides whether the

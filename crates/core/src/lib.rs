@@ -20,6 +20,7 @@ pub mod backup_encryption;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 mod backup_run;
 pub mod busy;
+pub mod capabilities;
 mod engine_watch;
 pub mod restore_exec;
 pub mod source_refresh;
@@ -1741,6 +1742,21 @@ impl QuietCopy {
         Self(
             low_priority
                 .then(own_backup_backup::power_win::BackgroundIo::enter)
+                .flatten(),
+        )
+    }
+}
+
+/// The same on Linux: `ioprio`/`nice` of the copying thread.
+#[cfg(target_os = "linux")]
+struct QuietCopy(#[allow(dead_code)] Option<own_backup_backup::power_linux::BackgroundIo>);
+
+#[cfg(target_os = "linux")]
+impl QuietCopy {
+    fn enter(low_priority: bool) -> Self {
+        Self(
+            low_priority
+                .then(own_backup_backup::power_linux::BackgroundIo::enter)
                 .flatten(),
         )
     }
@@ -3975,7 +3991,9 @@ async fn perform_backup(
             let progress = progress.clone();
             let snapshot = snapshot.clone();
             let speed_limit_mbps = job.advanced.speed_limit_mbps;
+            let low_priority = job.advanced.low_priority;
             tokio::task::spawn_blocking(move || {
+                let _quiet = QuietCopy::enter(low_priority);
                 let mut copy = backup_run::CopyProgress::new(&progress, speed_limit_mbps);
                 let copied = backup_volume(&request, &snapshot, |p| copy.report(p));
                 let _ = done_tx.send(());
@@ -4199,7 +4217,9 @@ async fn perform_disk_backup(
         let progress = progress.clone();
         let snapshots = snapshots.clone();
         let speed_limit_mbps = job.advanced.speed_limit_mbps;
+        let low_priority = job.advanced.low_priority;
         tokio::task::spawn_blocking(move || {
+            let _quiet = QuietCopy::enter(low_priority);
             let mut copy = backup_run::CopyProgress::new(&progress, speed_limit_mbps);
             let copied = backup_disk(&request, &snapshots, |p| copy.report(p));
             let _ = done_tx.send(());
@@ -4351,33 +4371,11 @@ fn release_left_behind(
 }
 
 /// The job options the Linux engine does not carry out yet, as one refusal —
-/// or `None` when the job asks for nothing it would ignore.
+/// or `None` when the job asks for nothing it would ignore. The list is the
+/// same table the window is told to offer from (`capabilities::linux`).
 #[cfg(target_os = "linux")]
 fn linux_unsupported(job: &Job) -> Option<String> {
-    let mut what: Vec<String> = Vec::new();
-    // qcow2 (and .obk) chains are the shared engine's; a VHDX child made on
-    // Linux waits for its Windows check (CHECKS 12), and quietly writing full
-    // copies where a chain was asked for would be a plan that is not one.
-    if job.scheme.method != "full"
-        && job.image_format == own_backup_common::types::ImageFormat::Vhdx
-    {
-        what.push(tr!("lib.linux_unsupported_scheme").into_owned());
-    }
-    // A disk is named by its device here (decision R1); a job that names it
-    // by number only was made for Windows.
-    if job
-        .disk_source
-        .as_ref()
-        .is_some_and(|ds| ds.device.is_none())
-    {
-        what.push(tr!("lib.linux_unsupported_whole_disk").into_owned());
-    }
-    if job.advanced.speed_limit_mbps > 0 {
-        what.push(tr!("lib.linux_unsupported_speed_limit").into_owned());
-    }
-    if job.advanced.low_priority {
-        what.push(tr!("lib.linux_unsupported_low_priority").into_owned());
-    }
+    let what = capabilities::refusals(job, &capabilities::linux());
     (!what.is_empty()).then(|| tr!("lib.linux_unsupported", options = what.join(", ")).into_owned())
 }
 
@@ -6691,11 +6689,9 @@ mod linux_run_tests {
         job.dest_folder = fresh.to_str().unwrap().into();
         let run = perform_backup(&sink, &job, &cancel, None, &passwords, None).await;
         assert_eq!(run.status, "error");
-        assert!(
-            run.error.contains(&*tr!("lib.linux_unsupported_scheme")),
-            "{}",
-            run.error
-        );
+        let reasons = crate::capabilities::refusals(&job, &crate::capabilities::linux());
+        assert_eq!(reasons.len(), 1, "{reasons:?}");
+        assert!(run.error.contains(&reasons[0]), "{}", run.error);
         assert_eq!(std::fs::read_dir(&fresh).unwrap().count(), 0);
     }
 

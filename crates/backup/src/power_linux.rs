@@ -110,6 +110,121 @@ impl KeepAwake {
     }
 }
 
+/// The calling thread reads and writes at background priority while this is
+/// alive — the counterpart of Windows' `THREAD_MODE_BACKGROUND_BEGIN`: the
+/// lowest best-effort I/O priority (`ioprio_set`, class BE level 7, what
+/// `ionice -c2 -n7` sets) and, for root, the lowest CPU priority (`nice` 19).
+/// Both are per-thread on Linux. Not the idle I/O class: under a disk that is
+/// never idle it would starve the copy until the engine watch gave up on it.
+///
+/// Must be dropped on the thread that made it; the blocking pool reuses
+/// threads, and one left at background priority would slow whatever it runs
+/// next. That is also why `nice` is touched only as root: an unprivileged
+/// process cannot raise it back.
+pub struct BackgroundIo {
+    tid: libc::pid_t,
+    ioprio: Option<libc::c_long>,
+    nice: Option<libc::c_int>,
+    _not_send: std::marker::PhantomData<*const ()>,
+}
+
+const IOPRIO_WHO_PROCESS: libc::c_long = 1;
+const IOPRIO_CLASS_BE: libc::c_long = 2;
+const IOPRIO_CLASS_SHIFT: libc::c_long = 13;
+
+impl BackgroundIo {
+    pub fn enter() -> Option<Self> {
+        // SAFETY: plain syscalls on the calling thread's own id.
+        let tid = unsafe { libc::syscall(libc::SYS_gettid) } as libc::pid_t;
+        let old_io = unsafe {
+            libc::syscall(
+                libc::SYS_ioprio_get,
+                IOPRIO_WHO_PROCESS,
+                tid as libc::c_long,
+            )
+        };
+        let ioprio = if old_io >= 0 {
+            let lowest = (IOPRIO_CLASS_BE << IOPRIO_CLASS_SHIFT) | 7;
+            let set = unsafe {
+                libc::syscall(
+                    libc::SYS_ioprio_set,
+                    IOPRIO_WHO_PROCESS,
+                    tid as libc::c_long,
+                    lowest,
+                )
+            };
+            if set == 0 {
+                Some(old_io)
+            } else {
+                warn!(error = %std::io::Error::last_os_error(),
+                    "could not lower the copy's I/O priority");
+                None
+            }
+        } else {
+            warn!(error = %std::io::Error::last_os_error(),
+                "could not read the copy's I/O priority");
+            None
+        };
+        // SAFETY: plain calls; getpriority may legitimately return -1, so the
+        // error is told by errno, cleared first.
+        let nice = if unsafe { libc::geteuid() } == 0 {
+            unsafe { *libc::__errno_location() = 0 };
+            let old = unsafe { libc::getpriority(libc::PRIO_PROCESS, tid as libc::id_t) };
+            let read = std::io::Error::last_os_error().raw_os_error() == Some(0) || old != -1;
+            if read && unsafe { libc::setpriority(libc::PRIO_PROCESS, tid as libc::id_t, 19) } == 0
+            {
+                Some(old)
+            } else {
+                warn!(error = %std::io::Error::last_os_error(),
+                    "could not lower the copy's CPU priority");
+                None
+            }
+        } else {
+            None
+        };
+        if ioprio.is_none() && nice.is_none() {
+            return None;
+        }
+        info!(
+            io = ioprio.is_some(),
+            cpu = nice.is_some(),
+            "copy runs at background priority"
+        );
+        Some(Self {
+            tid,
+            ioprio,
+            nice,
+            _not_send: std::marker::PhantomData,
+        })
+    }
+}
+
+impl Drop for BackgroundIo {
+    fn drop(&mut self) {
+        // SAFETY: same thread (the type is !Send); restoring what was read.
+        unsafe {
+            if let Some(old) = self.ioprio {
+                if libc::syscall(
+                    libc::SYS_ioprio_set,
+                    IOPRIO_WHO_PROCESS,
+                    self.tid as libc::c_long,
+                    old,
+                ) != 0
+                {
+                    warn!(error = %std::io::Error::last_os_error(),
+                        "could not restore the I/O priority after the copy");
+                }
+            }
+            if let Some(old) = self.nice {
+                if libc::setpriority(libc::PRIO_PROCESS, self.tid as libc::id_t, old) != 0 {
+                    warn!(error = %std::io::Error::last_os_error(),
+                        "could not restore the CPU priority after the copy");
+                }
+            }
+        }
+    }
+}
+
 /// Put the machine to sleep now.
 pub fn sleep_now() -> std::result::Result<(), String> {
     info!("after backup: putting the machine to sleep");
@@ -360,6 +475,30 @@ impl WakeTimer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn thread_ioprio() -> libc::c_long {
+        // SAFETY: plain syscalls on this thread's own id.
+        unsafe {
+            let tid = libc::syscall(libc::SYS_gettid);
+            libc::syscall(libc::SYS_ioprio_get, IOPRIO_WHO_PROCESS, tid)
+        }
+    }
+
+    /// The copy thread is at the lowest best-effort I/O priority while the
+    /// guard lives and back where it was after — the blocking pool reuses it.
+    #[test]
+    fn background_io_lowers_and_restores_the_thread() {
+        std::thread::spawn(|| {
+            let before = thread_ioprio();
+            assert!(before >= 0);
+            let guard = BackgroundIo::enter().expect("ioprio_set needs no privilege");
+            assert_eq!(thread_ioprio(), (IOPRIO_CLASS_BE << IOPRIO_CLASS_SHIFT) | 7);
+            drop(guard);
+            assert_eq!(thread_ioprio(), before);
+        })
+        .join()
+        .unwrap();
+    }
 
     #[test]
     fn the_shutdown_time_is_grace_seconds_from_now_in_microseconds() {
