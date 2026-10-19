@@ -102,6 +102,12 @@ fn volume_clashes_against(
     Ok(identity_check_linux::clashes_here(&restored, overwritten))
 }
 
+/// What mounting `image` here would duplicate: everything it carries
+/// against every device of the machine.
+pub(super) fn image_clashes(image: &Path) -> own_backup_common::Result<Vec<IdentityClashDto>> {
+    volume_clashes_against(image, None, &[], false)
+}
+
 /// The volume restore's reply: the shared summary, and the duplicates the
 /// person chose to keep.
 #[derive(serde::Serialize)]

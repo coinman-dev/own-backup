@@ -1979,23 +1979,37 @@ impl BackupService for BackupServiceImpl {
         }
         #[cfg(target_os = "linux")]
         {
-            use own_backup_backup::engine_linux::mount_image;
+            use own_backup_backup::engine_linux::mount_image_with_options;
             use own_backup_common::engine_dto::MountResultDto;
 
             #[derive(serde::Deserialize)]
             struct In {
                 image_path: String,
                 read_write: Option<bool>,
+                /// What to do about identities the mounted copy shares with
+                /// this machine's own devices (`restore_linux::identity_gate`).
+                #[serde(default)]
+                identity_choice: Option<own_backup_common::engine_dto::IdentityChoice>,
             }
             let p: In = serde_json::from_str(&req.into_inner().json)
                 .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
             let path = std::path::PathBuf::from(&p.image_path);
             let rw = p.read_write.unwrap_or(false);
             let image_path = p.image_path.clone();
-            let mount_point = tokio::task::spawn_blocking(move || mount_image(&path, rw))
-                .await
-                .map_err(|e| Status::internal(format!("mount task panicked: {e}")))?
-                .map_err(|e| Status::internal(e.to_string()))?;
+            let probed = path.clone();
+            let clashes =
+                tokio::task::spawn_blocking(move || restore_linux::image_clashes(&probed))
+                    .await
+                    .map_err(|e| Status::internal(format!("identity check panicked: {e}")))?
+                    .map_err(|e| Status::internal(e.to_string()))?;
+            let kept = restore_linux::identity_gate(clashes, p.identity_choice)?;
+            // XFS refuses a second filesystem of one UUID unless told.
+            let extra = own_backup_backup::identity_check_linux::mount_options_for(&kept);
+            let mount_point =
+                tokio::task::spawn_blocking(move || mount_image_with_options(&path, rw, &extra))
+                    .await
+                    .map_err(|e| Status::internal(format!("mount task panicked: {e}")))?
+                    .map_err(|e| Status::internal(e.to_string()))?;
 
             {
                 let mut mounts = self.state.active_mounts.lock().unwrap();

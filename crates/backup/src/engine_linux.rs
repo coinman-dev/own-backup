@@ -626,6 +626,16 @@ fn active_mounts() -> &'static std::sync::Mutex<std::collections::HashMap<PathBu
 /// the mount point. Requires root (mount(2) + /dev/nbdX). The volume inside
 /// is found via the sidecar's `volume_data_offset` — no partition probing.
 pub fn mount_image(image_path: &Path, read_write: bool) -> Result<String> {
+    mount_image_with_options(image_path, read_write, "")
+}
+
+/// [`mount_image`] with extra mount options (`nouuid` for an XFS copy beside
+/// the original, from `identity_check_linux::mount_options_for`).
+pub fn mount_image_with_options(
+    image_path: &Path,
+    read_write: bool,
+    extra: &str,
+) -> Result<String> {
     {
         let mounts = active_mounts().lock().unwrap();
         if let Some(existing) = mounts.get(image_path) {
@@ -668,8 +678,11 @@ pub fn mount_image(image_path: &Path, read_write: bool) -> Result<String> {
     let out = std::process::Command::new("mount")
         .arg("-o")
         .arg(format!(
-            "{},loop,offset={}",
-            mode_str, info.volume_data_offset
+            "{},loop,offset={}{}{}",
+            mode_str,
+            info.volume_data_offset,
+            if extra.is_empty() { "" } else { "," },
+            extra
         ))
         .arg(&nbd.device)
         .arg(&mount_dir)

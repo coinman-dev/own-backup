@@ -79,6 +79,10 @@ pub struct NbdAttachment {
     nbd_file: File,
     doit_thread: Option<JoinHandle<()>>,
     serve_thread: Option<JoinHandle<()>>,
+    /// Keeps udisks, LVM, md and systemd off the device for as long as it is
+    /// served: a backup of this machine's own volumes carries their UUIDs
+    /// (`udev_hold_linux`). Released after the device is.
+    _hold: Option<crate::udev_hold_linux::UdevHold>,
 }
 
 impl NbdAttachment {
@@ -87,6 +91,11 @@ impl NbdAttachment {
         ensure_nbd_module()?;
         let (device, nbd_file) = find_free_device()?;
         let size = source.size();
+        // Before the device has any content: udev probes it the moment the
+        // kernel sees the size.
+        let hold = crate::udev_hold_linux::UdevHold::install(&[device.trim_start_matches("/dev/")])
+            .map_err(|e| warn!(device = %device, error = %e, "udev hold not installed"))
+            .ok();
 
         let (kernel_side, user_side) =
             UnixStream::pair().map_err(|e| OwnBackupError::Device(format!("socketpair: {e}")))?;
@@ -166,6 +175,7 @@ impl NbdAttachment {
             nbd_file,
             doit_thread: Some(doit_thread),
             serve_thread: Some(serve_thread),
+            _hold: hold,
         })
     }
 
