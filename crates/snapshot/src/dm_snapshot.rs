@@ -766,11 +766,7 @@ impl Session {
 
     /// Is the snapshot still one point in time?
     pub fn state(&self) -> io::Result<SnapState> {
-        let status = self.ctl.target_status(&self.snap)?;
-        Ok(match status.as_slice() {
-            [t] if t.kind == "snapshot" => parse_snapshot_status(&t.params),
-            _ => SnapState::Other(format!("{} targets", status.len())),
-        })
+        state_of(&self.ctl, &self.snap)
     }
 
     /// Put the origin back on its own table and remove everything else.
@@ -1383,6 +1379,21 @@ pub fn remove_orphans() -> usize {
         }
     }
     done
+}
+
+/// The state of the snapshot device `snap`.
+fn state_of(ctl: &Control, snap: &str) -> io::Result<SnapState> {
+    let status = ctl.target_status(snap)?;
+    Ok(match status.as_slice() {
+        [t] if t.kind == "snapshot" => parse_snapshot_status(&t.params),
+        _ => SnapState::Other(format!("{} targets", status.len())),
+    })
+}
+
+/// The state of the snapshot device `snap` (`obk-snap-…`) as the kernel shows
+/// it, for a check without the [`Session`] that holds it.
+pub fn snapshot_state(snap: &str) -> io::Result<SnapState> {
+    state_of(&Control::open()?, snap)
 }
 
 /// Release snapshot `id` from what the kernel shows, for a release without

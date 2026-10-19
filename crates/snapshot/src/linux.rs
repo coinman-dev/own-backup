@@ -31,7 +31,7 @@ use uuid::Uuid;
 use own_backup_common::linux_block::{self, Usage};
 use own_backup_common::{tr, OwnBackupError, Result};
 
-use crate::dm_snapshot::{self, ContainerKey, Session};
+use crate::dm_snapshot::{self, ContainerKey, Session, SnapState};
 use crate::traits::{Snapshot, SnapshotProvider};
 
 const PROVIDER: &str = "linux";
@@ -125,6 +125,88 @@ pub fn taken_frozen(snapshot: &Snapshot) -> bool {
     )
 }
 
+/// Metadata key by which a caller vouches that the file a snapshot reads holds
+/// still for the length of the copy — see [`assert_file_frozen`].
+pub const FILE_FROZEN: &str = "file_frozen";
+
+/// Vouch that the image file `snapshot` reads is not written while it is
+/// copied (decision R5). Only the caller can know that: a file does not say
+/// who else has it open. A snapshot of a device is left as it is.
+pub fn assert_file_frozen(snapshot: &mut Snapshot) {
+    if snapshot.metadata.get("mode").map(String::as_str) == Some("file") {
+        snapshot.metadata.insert(FILE_FROZEN.into(), "true".into());
+    }
+}
+
+/// Does what `snapshot` reads hold still while it is read, so that its raw
+/// metadata (the MFT, ext, btrfs and xfs structures) may be parsed?
+///
+/// * `lvm`, `dm` — a snapshot: yes.
+/// * `idle` — nothing used the device when it was assessed, and the reader
+///   holds it `O_EXCL` for the length of the copy (decision R5), so nothing
+///   can mount it meanwhile. This answer counts on that hold.
+/// * `readonly` — only read-only mounts, which do not write.
+/// * `file` — only when the caller vouched for it ([`assert_file_frozen`]).
+///
+/// Not the question [`taken_frozen`] answers: an idle device holds still, but
+/// nobody froze its filesystem, and a journal on it may still say the metadata
+/// is behind.
+pub fn is_frozen(snapshot: &Snapshot) -> bool {
+    match snapshot.metadata.get("mode").map(String::as_str) {
+        Some("lvm" | "dm" | "idle" | "readonly") => true,
+        Some("file") => snapshot
+            .metadata
+            .get(FILE_FROZEN)
+            .is_some_and(|v| v == "true"),
+        _ => false,
+    }
+}
+
+/// [`LinuxSnapshotProvider::check_intact`] for a thread that may block and has
+/// no runtime — the backup engine's, right before it publishes an image: a copy
+/// read from a snapshot that broke during the copy must not become a version.
+/// The kernel is asked directly (device-mapper status, `lvs`), so it works for
+/// a snapshot whichever provider took it. A state that cannot be read is an
+/// error, never "intact".
+pub fn check_intact_blocking(snapshot: &Snapshot) -> Result<()> {
+    if let Some(snap) = snapshot.metadata.get("dm_snapshot") {
+        return dm_verdict(snapshot, dm_snapshot::snapshot_state(snap));
+    }
+    let Some(lv) = snapshot.metadata.get("lv_snapshot") else {
+        return Ok(());
+    };
+    lv_verdict(
+        snapshot,
+        &run_blocking("lvs", &["--noheadings", "-o", "lv_attr", lv])?,
+    )
+}
+
+/// Is a device-mapper snapshot in `state` still one point in time?
+fn dm_verdict(snapshot: &Snapshot, state: std::io::Result<SnapState>) -> Result<()> {
+    match state {
+        Ok(s) if s.intact() => Ok(()),
+        Ok(s) => Err(OwnBackupError::NoSnapshotProvider(
+            tr!(
+                "linux.dm_snapshot_invalid",
+                volume = snapshot.source_device,
+                state = format!("{s:?}")
+            )
+            .into_owned(),
+        )),
+        Err(e) => Err(bad(format!("cannot read the snapshot's state: {e}"))),
+    }
+}
+
+/// Is an LVM snapshot whose `lv_attr` is `attr` still one point in time?
+fn lv_verdict(snapshot: &Snapshot, attr: &str) -> Result<()> {
+    if snapshot_invalid(attr) {
+        return Err(OwnBackupError::NoSnapshotProvider(
+            tr!("linux.snapshot_overflowed", volume = snapshot.source_device).into_owned(),
+        ));
+    }
+    Ok(())
+}
+
 /// Snapshot provider for Linux volumes (see the module comment).
 #[derive(Default)]
 pub struct LinuxSnapshotProvider {
@@ -175,16 +257,7 @@ impl LinuxSnapshotProvider {
                 sessions.get(id).map(Session::state)
             };
             return match state {
-                Some(Ok(s)) if s.intact() => Ok(()),
-                Some(Ok(s)) => Err(OwnBackupError::NoSnapshotProvider(
-                    tr!(
-                        "linux.dm_snapshot_invalid",
-                        volume = snapshot.source_device,
-                        state = format!("{s:?}")
-                    )
-                    .into_owned(),
-                )),
-                Some(Err(e)) => Err(bad(format!("cannot read the snapshot's state: {e}"))),
+                Some(state) => dm_verdict(snapshot, state),
                 None => Err(bad(format!("snapshot {id} is not held by this provider"))),
             };
         }
@@ -192,12 +265,7 @@ impl LinuxSnapshotProvider {
             return Ok(());
         };
         let attr = run("lvs", &["--noheadings", "-o", "lv_attr", lv]).await?;
-        if snapshot_invalid(&attr) {
-            return Err(OwnBackupError::NoSnapshotProvider(
-                tr!("linux.snapshot_overflowed", volume = snapshot.source_device).into_owned(),
-            ));
-        }
-        Ok(())
+        lv_verdict(snapshot, &attr)
     }
 
     async fn dm_snapshot(&self, volume: &str, kernel: String) -> Result<Snapshot> {
@@ -381,6 +449,19 @@ async fn run(cmd: &str, args: &[&str]) -> Result<String> {
         .output()
         .await
         .map_err(|e| bad(format!("cannot run {cmd}: {e}")))?;
+    stdout_of(cmd, args, out)
+}
+
+/// [`run`] on a thread with no runtime.
+fn run_blocking(cmd: &str, args: &[&str]) -> Result<String> {
+    let out = std::process::Command::new(cmd)
+        .args(args)
+        .output()
+        .map_err(|e| bad(format!("cannot run {cmd}: {e}")))?;
+    stdout_of(cmd, args, out)
+}
+
+fn stdout_of(cmd: &str, args: &[&str], out: std::process::Output) -> Result<String> {
     if !out.status.success() {
         return Err(bad(format!(
             "`{cmd} {}` failed: {}",
@@ -633,6 +714,73 @@ mod tests {
         });
         assert!(text.contains("/, /home"), "{text}");
         assert!(text.contains("no-such-dm-device"), "{text}");
+    }
+
+    #[test]
+    fn frozen_means_nothing_writes_what_is_read() {
+        for mode in ["lvm", "dm", "idle", "readonly"] {
+            assert!(is_frozen(&direct("/dev/sdz1", mode)), "{mode}");
+        }
+        // Held still is not taken frozen: nobody froze an idle device's filesystem.
+        assert!(!taken_frozen(&direct("/dev/sdz1", "idle")));
+        assert!(!is_frozen(&direct("/dev/sdz1", "mystery")));
+
+        let mut file = direct("/srv/disk.img", "file");
+        assert!(
+            !is_frozen(&file),
+            "a file holds still only on the caller's word"
+        );
+        assert_file_frozen(&mut file);
+        assert!(is_frozen(&file));
+
+        // The word is about files: on a device it means nothing and says nothing.
+        let mut busy = direct("/dev/sdz1", "mystery");
+        assert_file_frozen(&mut busy);
+        assert!(!busy.metadata.contains_key(FILE_FROZEN));
+        assert!(!is_frozen(&busy));
+    }
+
+    #[test]
+    fn verdicts_on_snapshot_states() {
+        let s = direct("/dev/vg/root", "lvm");
+        assert!(lv_verdict(&s, "  swi-a-s---\n").is_ok());
+        assert!(matches!(
+            lv_verdict(&s, "  swi-I-s---\n"),
+            Err(OwnBackupError::NoSnapshotProvider(_))
+        ));
+        assert!(dm_verdict(&s, Ok(SnapState::Valid { used: 8, total: 64 })).is_ok());
+        for broken in [
+            SnapState::Invalid,
+            SnapState::Overflow,
+            SnapState::Valid {
+                used: 64,
+                total: 64,
+            },
+            SnapState::Other("2 targets".into()),
+        ] {
+            assert!(dm_verdict(&s, Ok(broken)).is_err());
+        }
+        assert!(dm_verdict(&s, Err(std::io::Error::other("no permission"))).is_err());
+    }
+
+    /// Without a provider and without a runtime: a direct read has nothing to
+    /// break, and a snapshot whose state cannot be read is never "intact".
+    #[test]
+    fn blocking_check_needs_no_provider() {
+        check_intact_blocking(&direct("/srv/disk.img", "file")).unwrap();
+        check_intact_blocking(&direct("/dev/sdz1", "idle")).unwrap();
+
+        let mut dm = direct("/dev/dm-99", "dm");
+        dm.metadata
+            .insert("dm_snapshot".into(), "obk-snap-no-such-device".into());
+        assert!(check_intact_blocking(&dm).is_err());
+
+        let mut lv = direct("/dev/vg/root", "lvm");
+        lv.metadata.insert(
+            "lv_snapshot".into(),
+            "obk-no-such-vg/obk-snap-000000000000".into(),
+        );
+        assert!(check_intact_blocking(&lv).is_err());
     }
 
     /// An image file is read as it is, and releasing that is a no-op.
