@@ -30,6 +30,8 @@ pub(crate) fn no_patterns() -> String {
 
 /// The result screen's sentence for a removal pass that did not happen: the
 /// pass itself logged why, in detail.
+// The Windows platform's answer; Linux has its own words.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn entries_kept_reason() -> String {
     tr!("engine_win.entries_kept").into_owned()
 }
@@ -221,6 +223,7 @@ pub(crate) fn may_publish(
 /// The volume-root form VSS expects; None for anything that is not a volume.
 /// See [`crate::source_identity::volume_root_for_snapshot`] — it lives there
 /// because it is pure string work and can be tested without Windows.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))] // VSS
 pub(crate) fn volume_root_of(device_path: &str) -> Option<String> {
     crate::source_identity::volume_root_for_snapshot(device_path)
 }
@@ -233,6 +236,7 @@ pub(crate) fn volume_root_of(device_path: &str) -> Option<String> {
 /// open, nothing is written while we read. A direct read of an offline volume is
 /// already a consistent copy — that is the whole point of rescue media. Asking
 /// anyway would cost a COM round trip and log a failure that means nothing.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))] // VSS
 pub(crate) fn snapshot_wanted(requested: bool) -> bool {
     if !requested {
         return false;
@@ -247,6 +251,7 @@ pub(crate) fn snapshot_wanted(requested: bool) -> bool {
 /// The extension a run's images carry: `.obk` when encrypted, the job's format
 /// otherwise. One place, because listings, chains and the format-change guard
 /// all have to agree with the writer.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))] // whole disk, until phase E6
 pub(crate) fn container_ext(
     format: ImageFormat,
     encryption: Option<&crate::seal::context::ArchiveKeys>,
@@ -261,6 +266,7 @@ pub(crate) fn container_ext(
 /// per-volume path carries the same thing in [`crate::seal::context::ImagePlan`];
 /// this is the disk-shaped half of it, so the two constructors below can build
 /// an encrypted target without the volume path's arguments.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))] // whole disk, until phase E6
 pub(crate) struct DiskImagePlan {
     pub(crate) backup_id: Uuid,
     pub(crate) role: ChainRole,
@@ -272,6 +278,7 @@ pub(crate) struct DiskImagePlan {
 }
 
 /// The encrypted target for a whole-disk image, full or child.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))] // whole disk, until phase E6
 pub(crate) fn create_disk_obk_target(
     image_path: &Path,
     parent_path: Option<&Path>,
@@ -318,6 +325,7 @@ pub(crate) fn create_disk_obk_target(
 
 /// Build the embedded [`ImageManifest`] describing the whole-disk image.
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))] // whole disk, until phase E6
 pub(crate) fn whole_disk_image_manifest(
     layout: &own_backup_common::gpt::DiskLayout,
     req: &DiskBackupRequest,

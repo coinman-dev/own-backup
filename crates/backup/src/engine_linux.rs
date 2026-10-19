@@ -1,148 +1,83 @@
-//! Linux volume backup engine — the `/dev` counterpart of [`crate::engine_win`].
+//! Linux volume backup — the `/dev` counterpart of [`crate::engine_win`].
 //!
-//! Produces a **raw disk image** (a 1 MiB GPT head + the volume + a GPT tail)
-//! plus the `.obkm` sidecar, writing only used blocks. The image is a plain
-//! sparse file, mountable with `losetup -P`. It reuses every cross-platform
-//! building block: the used-block maps (FAT/ext/btrfs/xfs), the LUKS decrypt
-//! layer, the GPT writer, the block copier and the sidecar.
+//! A volume is copied by the shared engine ([`crate::engine_core::volume`]) on
+//! the Linux platform (`engine_platform_linux`): the pipeline, the containers,
+//! the private publication and the sidecar are the ones Windows runs. What is
+//! Linux's own is how the source is held — through the snapshot its caller
+//! prepared (`own_backup_snapshot::linux`) — and the check, made right before
+//! the image is published, that the snapshot held to the end of the copy.
 //!
-//! v1 scope: full backups. No snapshot (reads the live device — crash
-//! consistent) and no incremental chains yet. Used-block maps cover FAT/exFAT,
-//! ext, btrfs, xfs and NTFS (via [`crate::ntfs_map`]'s `$Bitmap` reader);
-//! anything else is copied whole. Output is a dynamic VHDX for Windows-side
-//! mounting.
+//! Restore, mounting through the in-process NBD server and the unlock probe
+//! are here too; verification is the shared one.
 
 #![cfg(target_os = "linux")]
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use tracing::{info, warn};
-use uuid::Uuid;
+use tracing::info;
 use zeroize::Zeroizing;
 
-use own_backup_common::disk::DiskInfo;
-use own_backup_common::image::ImageManifest;
 use own_backup_common::progress::{BackupProgress, RestoreProgress};
-use own_backup_common::types::{
-    BackupMode, BackupStatus, BackupType, BootMode, CompressionAlgo, ImageFormat, PartitionTable,
-};
+use own_backup_common::types::BackupStatus;
 use own_backup_common::{OwnBackupError, Result};
+use own_backup_snapshot::Snapshot;
 
-use crate::block_reader::{BlockReader, RawVolumeBlockReader};
 use crate::checksum::compute_block_checksum;
-use crate::decrypt::DecryptingVolume;
-use crate::fat_map::RawVolume;
-use crate::gpt_writer::{gpt_write_ops, GptLayout, DEFAULT_PARTITION_OFFSET};
+use crate::engine_platform_linux::LinuxPlatform;
 use crate::linux_device::LinuxRawDevice;
-use crate::luks::LuksParams;
-use crate::raw_copy::copy_used_blocks;
 use crate::sidecar::{
     read_embedded_sidecar, read_embedded_sidecar_header, read_sidecar, sidecar_path_for,
-    SidecarInfo,
 };
-use crate::used_sectors::{AllUsedMap, UsedSectorMap};
 
-/// An unlocked encryption layer under the source volume, if any.
-enum Unlock {
-    None,
-    Luks(LuksParams),
-    BitLocker(crate::bitlocker::BitLockerParams),
+pub use crate::engine_core::target::DEFAULT_BLOCK_SIZE;
+pub use crate::engine_core::volume::{VolumeBackupRequest, VolumeBackupSummary};
+
+/// Back up the volume `req.source` through `snapshot`: the point in time its
+/// caller prepared for it (`LinuxSnapshotProvider::create_snapshot` of
+/// `req.source`). `req.source` names the device itself — the image records
+/// who it is from that — and the snapshot is what is read.
+///
+/// The image is written under a private name and published only when the
+/// whole copy is done, the caller's progress callback (asked last, with
+/// `backup_id == "publish"`) still wants it, and the snapshot is still whole.
+/// An overflowed snapshot, or a partition thawed or remounted read-write
+/// meanwhile, means what was read is not one point in time: the private image
+/// is dropped and the snapshot's error returned. The snapshot stays the
+/// caller's: it releases it after this returns, whatever the outcome, and
+/// before the image is read back.
+pub fn backup_volume(
+    req: &VolumeBackupRequest,
+    snapshot: &Snapshot,
+    progress: impl FnMut(&BackupProgress) -> Result<()>,
+) -> Result<VolumeBackupSummary> {
+    backup_volume_checked(
+        req,
+        snapshot,
+        own_backup_snapshot::linux::check_intact_blocking,
+        progress,
+    )
 }
 
-impl Unlock {
-    fn is_encrypted(&self) -> bool {
-        !matches!(self, Unlock::None)
-    }
-}
-
-/// Default backup block size: 1 MiB.
-pub const DEFAULT_BLOCK_SIZE: u32 = 1024 * 1024;
-const MIB: u64 = 1024 * 1024;
-/// VHDX payload block size (allocation granularity of the dynamic image).
-const VHDX_BLOCK_SIZE: u64 = 2 * MIB;
-
-/// Image writer behind the format switch: dynamic VHDX (pure-Rust writer) or
-/// zstd-compressed qcow2 — both expose the byte-granular `write_at` the
-/// GPT/block pipeline uses.
-enum LinuxImageWriter {
-    Vhdx(crate::vhdx_format::VhdxWriter),
-    Qcow2(crate::qcow2::Qcow2StagedWriter<std::io::BufWriter<std::fs::File>>),
-    /// The encrypted container. Its sidecar is not written into the guest at
-    /// all — it is handed to `finish` and sealed inside the image.
-    Obk(Box<crate::seal::obk::ObkStagedWriter<std::io::BufWriter<std::fs::File>>>),
-}
-
-impl LinuxImageWriter {
-    fn create(
-        format: ImageFormat,
-        path: &Path,
-        disk_size: u64,
-        sector_size: u32,
-        zstd_level: i32,
-    ) -> Result<Self> {
-        Ok(match format {
-            ImageFormat::Vhdx => Self::Vhdx(crate::vhdx_format::VhdxWriter::create(
-                path,
-                disk_size,
-                VHDX_BLOCK_SIZE,
-                sector_size,
-            )?),
-            ImageFormat::Qcow2 => Self::Qcow2(crate::qcow2::Qcow2StagedWriter::create(
-                path,
-                crate::qcow2::Qcow2WriterOptions {
-                    virtual_size: disk_size,
-                    compression: crate::qcow2::Qcow2Compression::Zstd {
-                        level: crate::qcow2::zstd_level_or_default(zstd_level),
-                    },
-                    ..Default::default()
-                },
-            )?),
-        })
-    }
-
-    /// Encryption is not a third format the user picks — it is the qcow2 path
-    /// with our incompatible extension, so a job that encrypts always writes
-    /// `.obk` whatever `image_format` says (§7.1).
-    fn create_encrypted(
-        path: &Path,
-        keys: &crate::seal::context::ArchiveKeys,
-        chain: &crate::seal::context::ChainSession,
-        plan: crate::seal::context::ImagePlan<'_>,
-    ) -> Result<Self> {
-        Ok(Self::Obk(Box::new(
-            crate::seal::obk::ObkStagedWriter::create(
-                path,
-                &chain.key,
-                keys.writer_options(chain, plan),
-            )?,
-        )))
-    }
-
-    fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()> {
-        match self {
-            Self::Vhdx(w) => w.write_at(offset, data),
-            Self::Qcow2(w) => w.write_at(offset, data),
-            Self::Obk(w) => w.write_at(offset, data),
+/// [`backup_volume`] with the intactness check passed in.
+fn backup_volume_checked(
+    req: &VolumeBackupRequest,
+    snapshot: &Snapshot,
+    mut check_intact: impl FnMut(&Snapshot) -> Result<()>,
+    mut progress: impl FnMut(&BackupProgress) -> Result<()>,
+) -> Result<VolumeBackupSummary> {
+    let platform = LinuxPlatform::new([snapshot.clone()]);
+    crate::engine_core::volume::backup_volume(&platform, req, |p| {
+        progress(p)?;
+        if p.backup_id == "publish" {
+            check_intact(snapshot)?;
+            info!(source = %snapshot.source_device, "the snapshot held to the end of the copy");
         }
-    }
-
-    /// `sealed` is the sidecar of an encrypted image. The other two containers
-    /// have already written theirs into their guest meta partition.
-    ///
-    /// Each is on disk when this returns: the VHDX writer syncs itself, the
-    /// other two hand back their file for it. A copy that a power cut can
-    /// still take back is not finished.
-    fn finish(self, sealed: &[u8]) -> Result<()> {
-        match self {
-            Self::Vhdx(w) => w.finish(),
-            Self::Qcow2(w) => Ok(w.finish()?.get_ref().sync_all()?),
-            Self::Obk(w) => Ok(w.finish(sealed)?.get_ref().sync_all()?),
-        }
-    }
+        Ok(())
+    })
 }
 
-/// Read side of the same switch, picked by the sidecar's `container` field.
+/// The reader of a finished image, picked by the sidecar's `container` field.
 enum LinuxImageReader {
     /// Chain-aware: a differencing VHDX made on Windows reads its absent and
     /// partially present (BAT state 7) blocks from the parent. The plain
@@ -370,426 +305,6 @@ fn opened_luks_container(device: &str) -> Option<String> {
         [one] => Some(format!("/dev/{one}")),
         _ => None,
     }
-}
-
-/// Parameters for a Linux volume backup.
-pub struct LinuxBackupRequest {
-    /// Source device (`/dev/sdb2`, a loop device, or an image file).
-    pub source: String,
-    /// Output image path (`.vhdx`, `.qcow2`, or `.obk` when encrypted). Must not exist yet.
-    pub image_path: PathBuf,
-    /// Backup block size in bytes; use [`DEFAULT_BLOCK_SIZE`].
-    pub block_size: u32,
-    /// Copy every block even when a used-block map is available.
-    pub all_sectors: bool,
-    /// Passphrase for an encrypted source (LUKS or BitLocker) — its decrypted
-    /// data is backed up (used blocks only). Ignored for non-encrypted sources.
-    pub passphrase: Option<Zeroizing<String>>,
-    /// GUI job id, stamped into the sidecar.
-    pub job_id: Option<String>,
-    /// Image container format: VHDX (default) or zstd-compressed qcow2.
-    pub image_format: ImageFormat,
-    /// Present for an encrypted job: the keys opened before the run started
-    /// (the service's own, or a password's). The run then asks nobody anything
-    /// and writes `.obk` whatever `image_format` says.
-    pub encryption: Option<crate::seal::context::ArchiveKeys>,
-    /// zstd level for qcow2 and `.obk` (1–19; anything else is the default).
-    pub zstd_level: i32,
-    /// `source` is a snapshot taken with its filesystem frozen (LVM or
-    /// device-mapper): its metadata is the committed state even where a
-    /// journal says otherwise — see `xfs_map::build_xfs_used_map_frozen`.
-    pub source_frozen: bool,
-}
-
-/// Outcome of a completed Linux backup.
-pub struct LinuxBackupSummary {
-    pub image_path: PathBuf,
-    pub sidecar_path: PathBuf,
-    pub source_bytes: u64,
-    pub total_blocks: u64,
-    pub used_blocks: u64,
-    pub blocks_copied: u64,
-    pub bytes_copied: u64,
-    pub duration: Duration,
-    /// True when a used-block map was applied (false = whole-device copy).
-    pub smart_mode: bool,
-    /// True when the source was decrypted (LUKS) before backup.
-    pub encrypted: bool,
-}
-
-/// Back up a volume into a raw disk image + sidecar.
-pub fn backup_volume(
-    req: &LinuxBackupRequest,
-    progress: impl FnMut(&BackupProgress) -> Result<()>,
-) -> Result<LinuxBackupSummary> {
-    if req.encryption.is_some()
-        && req
-            .image_path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.to_lowercase())
-            .as_deref()
-            != Some(crate::seal::obk::OBK_EXTENSION)
-    {
-        // Listings and retention find encrypted images by this extension; a
-        // differently named one would be invisible to both.
-        return Err(OwnBackupError::Config(format!(
-            "an encrypted image must be named .{}: {}",
-            crate::seal::obk::OBK_EXTENSION,
-            req.image_path.display()
-        )));
-    }
-    if req.image_path.exists() {
-        return Err(OwnBackupError::Config(format!(
-            "output image already exists: {}",
-            req.image_path.display()
-        )));
-    }
-    if let Some(parent) = req.image_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
-    }
-    // VHDX and qcow2 are written under a private name and take their public
-    // one only when complete, as on Windows (`pending_image`): a run killed
-    // half-way must not leave something the next run lists as a version. The
-    // encrypted container has its own private-name machinery, which this
-    // engine does not drive yet; it keeps the old rule of deleting on error.
-    let pending = match req.encryption {
-        None => Some(crate::pending_image::PendingImage::new(&req.image_path)?),
-        Some(_) => None,
-    };
-    let write_to = pending
-        .as_ref()
-        .map(|p| p.path().to_path_buf())
-        .unwrap_or_else(|| req.image_path.clone());
-    let result = backup_inner(req, &write_to, progress);
-    match (result, pending) {
-        (Ok(summary), Some(pending)) => {
-            pending.publish_as(&req.image_path)?;
-            Ok(summary)
-        }
-        (Ok(summary), None) => Ok(summary),
-        // Dropping the private name deletes what was written under it.
-        (Err(e), Some(_)) => Err(e),
-        (Err(e), None) => {
-            let _ = std::fs::remove_file(&req.image_path);
-            Err(e)
-        }
-    }
-}
-
-/// `write_to` is where the bytes go — the private name while the run lasts;
-/// everything recorded inside the image names `req.image_path`.
-fn backup_inner(
-    req: &LinuxBackupRequest,
-    write_to: &Path,
-    mut progress: impl FnMut(&BackupProgress) -> Result<()>,
-) -> Result<LinuxBackupSummary> {
-    let started = Instant::now();
-    let read_path = req.source.clone();
-
-    // --- Optional unlock of an encrypted source (LUKS or BitLocker); the
-    // decrypted data is what gets backed up (used blocks only) ---
-    let mut probe = LinuxRawDevice::open_read(&read_path)?;
-    let unlock: Unlock = match &req.passphrase {
-        Some(pass) => {
-            let mut header = vec![0u8; 4096];
-            probe.read_at(0, &mut header)?;
-            if crate::luks::is_luks(&header) {
-                let params = crate::luks::open_luks(&mut probe, pass.as_bytes())?;
-                info!(kind = ?params.kind, "LUKS source unlocked; backing up decrypted data");
-                Unlock::Luks(params)
-            } else if crate::bitlocker::is_bitlocker(&header) {
-                // The device's sector size: without it a container with exFAT
-                // or ReFS inside does not open.
-                let sector = probe.sector_size();
-                let params =
-                    crate::bitlocker::open_bitlocker_with(&mut probe, pass.as_str(), Some(sector))?;
-                info!(
-                    algo = format!("{:#x}", params.algorithm),
-                    "BitLocker source unlocked; backing up decrypted data"
-                );
-                Unlock::BitLocker(params)
-            } else {
-                Unlock::None
-            }
-        }
-        None => Unlock::None,
-    };
-    let device_len = probe.length();
-    let sector_size = probe.sector_size();
-    drop(probe);
-
-    let volume_len = match &unlock {
-        Unlock::None => device_len,
-        Unlock::Luks(p) => device_len.saturating_sub(p.data_offset),
-        Unlock::BitLocker(p) => p.encrypted_size.min(device_len),
-    };
-    if req.block_size == 0 || req.block_size % sector_size != 0 {
-        return Err(OwnBackupError::Config(format!(
-            "block size {} is not a multiple of the source sector size {sector_size}",
-            req.block_size
-        )));
-    }
-    let total_blocks = volume_len.div_ceil(req.block_size as u64);
-
-    // A fresh read source (device, or a decrypting view over it).
-    let open_source = |unlock: &Unlock| -> Result<Box<dyn RawVolume + Send>> {
-        let dev = LinuxRawDevice::open_read(&read_path)?;
-        Ok(match unlock {
-            Unlock::None => Box::new(dev),
-            Unlock::Luks(p) => Box::new(DecryptingVolume::new(Box::new(dev), p.clone())),
-            Unlock::BitLocker(p) => Box::new(crate::bitlocker::BitLockerVolume::new(
-                Box::new(dev),
-                p.clone(),
-            )),
-        })
-    };
-
-    // The filesystem found INSIDE the volume — the decrypted one for a LUKS or
-    // BitLocker source, since that is what the image holds (R8).
-    let mut detected_fs: Option<String> = None;
-    // --- Used-block map: FAT/exFAT → ext → btrfs → xfs → NTFS (else whole) ---
-    let (used, smart_mode): (Box<dyn UsedSectorMap>, bool) = if req.all_sectors {
-        info!("Sector-by-sector mode requested; copying all blocks");
-        (Box::new(AllUsedMap::new(total_blocks)), false)
-    } else {
-        let mut src = open_source(&unlock)?;
-        let map: Option<Box<dyn UsedSectorMap>> = if let Ok(m) =
-            crate::fat_map::build_fat_used_map(src.as_mut(), req.block_size)
-        {
-            info!(fs = m.filesystem, "Using FAT used-cluster map");
-            detected_fs = Some(m.filesystem.to_string());
-            Some(Box::new(m))
-        } else if let Ok(m) = crate::ext_map::build_ext_used_map(src.as_mut(), req.block_size) {
-            info!(fs = "ext4", "Using ext used-block map");
-            detected_fs = Some("ext4".into());
-            Some(Box::new(m))
-        } else if let Ok(m) = crate::btrfs_map::build_btrfs_used_map(src.as_mut(), req.block_size) {
-            info!(fs = "btrfs", "Using btrfs used-block map");
-            detected_fs = Some("btrfs".into());
-            Some(Box::new(m))
-        } else if let Ok(m) = if req.source_frozen {
-            crate::xfs_map::build_xfs_used_map_frozen(src.as_mut(), req.block_size)
-        } else {
-            crate::xfs_map::build_xfs_used_map(src.as_mut(), req.block_size)
-        } {
-            info!(fs = "xfs", "Using xfs used-block map");
-            detected_fs = Some("xfs".into());
-            Some(Box::new(m))
-        } else if let Ok(m) = crate::ntfs_map::build_ntfs_used_map(src.as_mut(), req.block_size) {
-            info!(fs = "ntfs", "Using NTFS used-cluster map");
-            detected_fs = Some("NTFS".into());
-            Some(Box::new(m))
-        } else {
-            warn!("no used-block map available (unknown filesystem) — copying every block");
-            None
-        };
-        match map {
-            Some(m) => (m, true),
-            None => (Box::new(AllUsedMap::new(total_blocks)), false),
-        }
-    };
-    let used_blocks = used.used_block_count();
-
-    // --- Create the image: 1 MiB GPT head + volume + meta partition + 1 MiB tail ---
-    // The container's header goes into the sidecar (D19) and is measured in
-    // megabytes; reserve for it or the final metadata write has nowhere to go.
-    let luks_reserve = crate::sidecar::luks_reserve_for(match &unlock {
-        Unlock::Luks(p) => Some(p.data_offset),
-        _ => None,
-    });
-    // An encrypted image keeps its sidecar sealed inside the container, so it
-    // needs no guest meta partition and no room for one (§7.3).
-    let encrypted = req.encryption.is_some();
-    let meta_size = if encrypted {
-        0
-    } else {
-        crate::sidecar::calculate_meta_partition_size(total_blocks, luks_reserve)
-    };
-    let disk_size = DEFAULT_PARTITION_OFFSET + volume_len.div_ceil(MIB) * MIB + meta_size + MIB;
-    let backup_id = Uuid::new_v4();
-    let created_at = chrono::Utc::now().to_rfc3339();
-    let chain = match &req.encryption {
-        Some(keys) => Some(keys.start_chain()?),
-        None => None,
-    };
-    let mut writer = match (&req.encryption, &chain) {
-        (Some(keys), Some(chain)) => LinuxImageWriter::create_encrypted(
-            write_to,
-            keys,
-            chain,
-            crate::seal::context::ImagePlan {
-                backup_id,
-                role: crate::sidecar::ChainRole::Full,
-                parent: None,
-                created_at: created_at.clone(),
-                virtual_size: disk_size,
-                source_id: None,
-                consolidated_increments: 0,
-                chain_started_at: None,
-                compression: crate::seal::obk::ObkCompression::Zstd {
-                    level: crate::qcow2::zstd_level_or_default(req.zstd_level),
-                },
-            },
-        )?,
-        _ => LinuxImageWriter::create(
-            req.image_format,
-            write_to,
-            disk_size,
-            sector_size,
-            req.zstd_level,
-        )?,
-    };
-    let data_offset = DEFAULT_PARTITION_OFFSET;
-
-    // --- GPT with Basic Data partition + OwnBackupMeta partition ---
-    let disk_guid = Uuid::new_v4();
-    let meta_partition_guid = Uuid::new_v4();
-    let layout = GptLayout {
-        disk_size,
-        sector_size,
-        partition_offset: DEFAULT_PARTITION_OFFSET,
-        partition_size: volume_len,
-        disk_guid,
-        partition_guid: Uuid::new_v4(),
-        partition_name: "OwnBackup".into(),
-        meta_partition_size: (!encrypted).then_some(meta_size),
-        meta_partition_guid: (!encrypted).then_some(meta_partition_guid),
-    };
-    for op in gpt_write_ops(&layout)? {
-        writer.write_at(op.offset, &op.bytes)?;
-    }
-
-    // --- Copy used blocks into the partition ---
-    let mut reader: Box<dyn BlockReader> = Box::new(RawVolumeBlockReader::new(
-        open_source(&unlock)?,
-        req.block_size,
-    )?);
-    let outcome = copy_used_blocks(
-        &backup_id.to_string(),
-        reader.as_mut(),
-        used.as_ref(),
-        None,
-        |block_number, data| {
-            writer.write_at(data_offset + block_number * req.block_size as u64, data)
-        },
-        &mut progress,
-    )?;
-
-    // --- Sidecar + manifest ---
-    let manifest = ImageManifest {
-        backup_id,
-        // The same stamp the open header carries, so a reader holding the key
-        // can check the two halves against each other.
-        created_at: created_at.clone(),
-        backup_type: BackupType::Full,
-        parent_backup_id: None,
-        source_os: "linux".into(),
-        source_disk: DiskInfo {
-            device_id: req.source.clone(),
-            model: String::new(),
-            serial: String::new(),
-            size_bytes: volume_len,
-            sector_size_logical: sector_size,
-            sector_size_physical: std::cmp::max(sector_size, 4096),
-            media_type: "Volume".into(),
-            partition_table: PartitionTable::Gpt,
-            disk_guid: disk_guid.to_string(),
-            partitions: vec![],
-        },
-        boot_mode: BootMode::Uefi,
-        partition_table: PartitionTable::Gpt,
-        compression_algo: match req.image_format {
-            ImageFormat::Vhdx => CompressionAlgo::None,
-            ImageFormat::Qcow2 => CompressionAlgo::Zstd,
-        },
-        compression_level: match req.image_format {
-            ImageFormat::Vhdx => 0,
-            ImageFormat::Qcow2 => crate::qcow2::zstd_level_or_default(req.zstd_level),
-        },
-        encryption_algo: None,
-        encryption_salt: None,
-        block_size: req.block_size,
-        total_blocks,
-        used_blocks,
-        backup_mode: if smart_mode {
-            BackupMode::UsedSectors
-        } else {
-            BackupMode::SectorBySector
-        },
-        checksum_algorithm: "xxhash64".into(),
-        preflight_report: None,
-        volume_encryption: {
-            use own_backup_common::image::{VolumeCaptureMode, VolumeEncryptionState};
-            let state = |kind| VolumeEncryptionState {
-                kind,
-                capture_mode: VolumeCaptureMode::Plaintext,
-                luks_header_backup_b64: None,
-                note: Some("Decrypted at backup; re-enable encryption after restore".into()),
-            };
-            match &unlock {
-                Unlock::None => None,
-                Unlock::Luks(p) => Some(state(p.kind.clone())),
-                Unlock::BitLocker(p) => Some(state(p.kind.clone())),
-            }
-        },
-    };
-
-    let image_file_name = req
-        .image_path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let mut sidecar_info = SidecarInfo::new_full(image_file_name, data_offset);
-    sidecar_info.container = if encrypted {
-        crate::seal::obk::OBK_EXTENSION.into()
-    } else {
-        req.image_format.extension().into()
-    };
-    sidecar_info.job_id = req.job_id.clone();
-    sidecar_info.filesystem = detected_fs;
-    let sidecar_path = sidecar_path_for(&req.image_path);
-
-    // The sidecar: into the guest meta partition for a plaintext image, sealed
-    // inside the container for an encrypted one. Never both, and never in the
-    // clear next to an encrypted image.
-    let mut blob_bytes = Vec::new();
-    crate::sidecar::write_sidecar_v2_to(
-        &mut blob_bytes,
-        &sidecar_info,
-        &manifest,
-        &outcome.checksums,
-    )?;
-    if !encrypted {
-        let sector = sector_size as u64;
-        let last_lba = (DEFAULT_PARTITION_OFFSET + volume_len).div_ceil(sector) - 1;
-        let meta_offset = (last_lba + 1) * sector;
-        writer.write_at(meta_offset, &blob_bytes)?;
-    }
-    writer.finish(&blob_bytes)?;
-
-    info!(
-        image = %req.image_path.display(),
-        blocks = outcome.blocks_copied,
-        bytes = outcome.bytes_copied,
-        secs = started.elapsed().as_secs(),
-        "Linux volume backup complete"
-    );
-
-    Ok(LinuxBackupSummary {
-        image_path: req.image_path.clone(),
-        sidecar_path,
-        source_bytes: volume_len,
-        total_blocks,
-        used_blocks,
-        blocks_copied: outcome.blocks_copied,
-        bytes_copied: outcome.bytes_copied,
-        duration: started.elapsed(),
-        smart_mode,
-        encrypted: unlock.is_encrypted(),
-    })
 }
 
 /// Parameters for a Linux volume restore. DESTRUCTIVE to the target.
@@ -1089,7 +604,14 @@ pub use crate::engine_core::verify::{
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use own_backup_common::types::{BackupMode, BackupType, FileSystem, ImageFormat};
+
     use super::*;
+    use crate::gpt_writer::DEFAULT_PARTITION_OFFSET;
+
+    const MIB: u64 = 1024 * 1024;
 
     fn no_progress(_p: &BackupProgress) -> Result<()> {
         Ok(())
@@ -1115,6 +637,124 @@ mod tests {
         crate::seal::context::ArchiveKeys::from_private(envelope, pair.private).unwrap()
     }
 
+    /// The point in time of `source` as the snapshot crate describes one:
+    /// `mode` as it decided, the data read at `read`.
+    fn snapshot_of(source: &str, read: &Path, mode: &str) -> Snapshot {
+        Snapshot {
+            provider_name: "linux".into(),
+            source_device: source.into(),
+            snapshot_device_path: read.to_str().unwrap().into(),
+            created_at: chrono::Utc::now(),
+            metadata: HashMap::from([("mode".to_string(), mode.to_string())]),
+        }
+    }
+
+    /// An image file as a source, read as it is; `vouched`: its caller says
+    /// nothing writes it meanwhile (decision R5), so its metadata may be read.
+    fn file_snapshot(path: &Path, vouched: bool) -> Snapshot {
+        let mut s = snapshot_of(path.to_str().unwrap(), path, "file");
+        if vouched {
+            own_backup_snapshot::linux::assert_file_frozen(&mut s);
+        }
+        s
+    }
+
+    fn request(source: &Path, image: &Path, format: ImageFormat) -> VolumeBackupRequest {
+        VolumeBackupRequest {
+            source: source.to_str().unwrap().into(),
+            image_path: image.to_path_buf(),
+            full_image_path: None,
+            block_size: DEFAULT_BLOCK_SIZE,
+            all_sectors: false,
+            use_vss: true,
+            kind: BackupType::Full,
+            parent_image: None,
+            exclusion_patterns: Vec::new(),
+            job_id: None,
+            passphrase: None,
+            image_format: format,
+            source_disk: None,
+            encryption: None,
+            zstd_level: crate::qcow2::DEFAULT_ZSTD_LEVEL,
+        }
+    }
+
+    /// A sparse `size`-byte file at `path`.
+    fn blank(path: &Path, size: u64) {
+        std::fs::File::create(path).unwrap().set_len(size).unwrap();
+    }
+
+    /// Run `tool args… path`; `false` when the tool is not installed, so a
+    /// test can say it was skipped instead of failing for want of mkfs.
+    fn mkfs(tool: &str, args: &[&str], path: &Path) -> bool {
+        match std::process::Command::new(tool)
+            .args(args)
+            .arg(path)
+            .output()
+        {
+            Ok(out) => {
+                assert!(
+                    out.status.success(),
+                    "{tool} failed: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                true
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("skipped: {tool} is not installed");
+                false
+            }
+            Err(e) => panic!("{tool}: {e}"),
+        }
+    }
+
+    /// A 64 MiB ext4 holding a few known files, made without mounting
+    /// (`mkfs.ext4 -d`). `None` without mkfs.ext4.
+    fn ext4_volume(dir: &Path, label: &str) -> Option<PathBuf> {
+        let content = dir.join("content");
+        std::fs::create_dir_all(content.join("nested")).unwrap();
+        let payload: Vec<u8> = (0..700_000u32).flat_map(|i| i.to_le_bytes()).collect();
+        std::fs::write(content.join("payload.bin"), &payload).unwrap();
+        std::fs::write(content.join("nested/hello.txt"), b"Own Backup on Linux\n").unwrap();
+        let src = dir.join(format!("{label}.ext4"));
+        blank(&src, 64 * MIB);
+        let d = content.to_str().unwrap().to_string();
+        mkfs("mkfs.ext4", &["-q", "-F", "-L", label, "-d", &d], &src).then_some(src)
+    }
+
+    /// Restore `image` onto a blank file the size of the volume it holds.
+    fn restore_to_blank(
+        image: &Path,
+        size: u64,
+        keys: Option<crate::seal::context::ArchiveKeys>,
+    ) -> (PathBuf, LinuxRestoreSummary) {
+        let target = image.with_extension("restored");
+        blank(&target, size);
+        let summary = restore_volume(
+            &LinuxRestoreRequest {
+                image_path: image.to_path_buf(),
+                target: target.to_str().unwrap().into(),
+                verify_checksums: true,
+                encryption: keys,
+            },
+            |_| Ok(()),
+        )
+        .unwrap();
+        (target, summary)
+    }
+
+    /// Every name in `dir` but the sources the test made there.
+    fn images_in(dir: &Path, sources: &[&Path]) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| !sources.contains(&p.as_path()))
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
     /// A whole encrypted backup, end to end: the image is not readable without
     /// the key, holds none of the source's plaintext, is listed as a chain
     /// without any key at all, and restores byte-for-byte with one.
@@ -1128,23 +768,15 @@ mod tests {
         std::fs::write(&src, &content).unwrap();
 
         let img = dir.path().join("full.obk");
-        let summary = backup_volume(
-            &LinuxBackupRequest {
-                source: src.to_str().unwrap().to_string(),
-                image_path: img.clone(),
-                block_size: DEFAULT_BLOCK_SIZE,
-                all_sectors: false,
-                passphrase: None,
-                job_id: Some("job-encrypted".into()),
-                image_format: ImageFormat::Qcow2,
-                encryption: Some(test_keys()),
-                zstd_level: crate::qcow2::DEFAULT_ZSTD_LEVEL,
-                source_frozen: false,
-            },
-            no_progress,
-        )
-        .unwrap();
+        let req = VolumeBackupRequest {
+            job_id: Some("job-encrypted".into()),
+            image_format: ImageFormat::Qcow2,
+            encryption: Some(test_keys()),
+            ..request(&src, &img, ImageFormat::Qcow2)
+        };
+        let summary = backup_volume(&req, &file_snapshot(&src, false), no_progress).unwrap();
         assert!(summary.bytes_copied >= content.len() as u64);
+        assert_eq!(summary.image_path, img);
 
         // Nothing of the source survives in the clear, and no plaintext
         // sidecar was written beside the image.
@@ -1178,25 +810,7 @@ mod tests {
             "mismatches: {:?}",
             verified.mismatched_blocks
         );
-
-        let target = dir.path().join("restored.bin");
-        std::fs::File::create(&target)
-            .unwrap()
-            .set_len(content.len() as u64)
-            .unwrap();
-        let restored = restore_volume(
-            &LinuxRestoreRequest {
-                image_path: img.clone(),
-                target: target.to_str().unwrap().to_string(),
-                verify_checksums: true,
-                encryption: Some(
-                    crate::seal::context::ArchiveKeys::from_image_password(&img, "пароль архива")
-                        .unwrap(),
-                ),
-            },
-            |_| Ok(()),
-        )
-        .unwrap();
+        let (target, restored) = restore_to_blank(&img, content.len() as u64, Some(keys));
         assert_eq!(restored.blocks_restored, summary.used_blocks);
         assert_eq!(std::fs::read(&target).unwrap(), content);
 
@@ -1220,211 +834,270 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src.bin");
         std::fs::write(&src, vec![3u8; 1 << 20]).unwrap();
-        let error = backup_volume(
-            &LinuxBackupRequest {
-                source: src.to_str().unwrap().to_string(),
-                image_path: dir.path().join("full.qcow2"),
-                block_size: DEFAULT_BLOCK_SIZE,
-                all_sectors: false,
-                passphrase: None,
-                job_id: None,
-                image_format: ImageFormat::Qcow2,
-                encryption: Some(test_keys()),
-                zstd_level: crate::qcow2::DEFAULT_ZSTD_LEVEL,
-                source_frozen: false,
-            },
-            no_progress,
-        );
-        let Err(error) = error else {
+        let img = dir.path().join("full.qcow2");
+        let req = VolumeBackupRequest {
+            encryption: Some(test_keys()),
+            ..request(&src, &img, ImageFormat::Qcow2)
+        };
+        let Err(error) = backup_volume(&req, &file_snapshot(&src, false), no_progress) else {
             panic!("an encrypted image named .qcow2 must be refused");
         };
         let error = error.to_string();
         assert!(error.contains(".obk"), "unexpected: {error}");
+        assert!(images_in(dir.path(), &[&src]).is_empty());
     }
 
-    /// End-to-end on a real ext4 image: back up used blocks into a raw image and
-    /// verify. `cargo test -p own-backup-backup -- --ignored` (needs mkfs.ext4).
+    /// An ext4 read through a snapshot is copied by its used map into a VHDX
+    /// with Windows' geometry, verifies, and records the device it is a copy
+    /// OF — not the snapshot it was read from.
     #[test]
-    #[ignore]
-    fn backup_and_verify_real_ext4() {
+    fn ext4_through_a_snapshot_is_copied_by_its_used_map() {
         let dir = tempfile::tempdir().unwrap();
-        let src = dir.path().join("src.ext4");
-        std::fs::File::create(&src)
-            .unwrap()
-            .set_len(64 * 1024 * 1024)
-            .unwrap();
-        assert!(std::process::Command::new("mkfs.ext4")
-            .args(["-q", "-F", src.to_str().unwrap()])
-            .status()
-            .unwrap()
-            .success());
-
-        let img = dir.path().join("out.vhdx");
-        let req = LinuxBackupRequest {
-            source: src.to_str().unwrap().to_string(),
-            image_path: img.clone(),
-            block_size: DEFAULT_BLOCK_SIZE,
-            all_sectors: false,
-            passphrase: None,
-            job_id: None,
-            image_format: ImageFormat::Vhdx,
-            encryption: None,
-            zstd_level: crate::qcow2::DEFAULT_ZSTD_LEVEL,
-            source_frozen: false,
+        let Some(src) = ext4_volume(dir.path(), "smart") else {
+            return;
         };
-        let sum = backup_volume(&req, no_progress).unwrap();
-        assert!(sum.smart_mode);
+        let origin = "/dev/obk-test/origin";
+        let img = dir.path().join("out.vhdx");
+        let req = VolumeBackupRequest {
+            source: origin.into(),
+            job_id: Some("job-ext4".into()),
+            ..request(&src, &img, ImageFormat::Vhdx)
+        };
+        let mut phases = Vec::new();
+        let sum = backup_volume(&req, &snapshot_of(origin, &src, "lvm"), |p| {
+            if p.backup_id.len() < 16 {
+                phases.push(p.backup_id.clone());
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert!(sum.smart_mode && sum.vss_used);
+        assert_eq!(sum.backup_kind, BackupType::Full);
         assert!(sum.used_blocks > 0 && sum.used_blocks < sum.total_blocks);
+        assert_eq!(sum.total_blocks, 64);
+        assert_eq!(
+            sum.file_scan_skipped.as_deref(),
+            Some(&*crate::engine_core::target::no_patterns())
+        );
+        assert_eq!(phases.last().map(String::as_str), Some("publish"));
 
         let v = verify_image(&img, |_, _| Ok(())).unwrap();
         assert!(v.valid(), "verify mismatches: {:?}", v.mismatched_blocks);
 
+        let sidecar = read_embedded_sidecar(&img, "vhdx").unwrap();
+        assert_eq!(sidecar.manifest.source_os, "linux");
+        assert_eq!(sidecar.manifest.source_disk.device_id, origin);
+        assert_eq!(sidecar.manifest.backup_mode, BackupMode::UsedSectors);
+        assert_eq!(sidecar.info.container, "vhdx");
+        assert_eq!(sidecar.info.filesystem.as_deref(), Some("ext4"));
+        assert_eq!(sidecar.info.job_id.as_deref(), Some("job-ext4"));
+
+        // 1 MiB payload blocks, as CreateVirtualDisk makes them on Windows.
+        let alloc = crate::vhdx_bat::allocated_payload_blocks(&img).unwrap();
+        assert_eq!(alloc.block_size, MIB);
+
         // The image's partition (at the 1 MiB GPT head) holds a recognisable
-        // ext4 — proof the superblock/metadata were copied to the right place.
+        // ext4 — the superblock and metadata were copied to the right place.
         let mut dev = crate::vhdx_format::VhdxReader::open(&img).unwrap();
         let mut head = vec![0u8; own_backup_inventory::fs_probe::PROBE_LEN];
         dev.read_at(DEFAULT_PARTITION_OFFSET, &mut head).unwrap();
         let probed =
             own_backup_inventory::fs_probe::identify(&head).expect("image holds a filesystem");
-        assert_eq!(probed.fs, own_backup_common::types::FileSystem::Ext4);
+        assert_eq!(probed.fs, FileSystem::Ext4);
     }
 
-    /// Full round trip: back up a real ext4, restore to a blank target, and
-    /// confirm the target is a valid ext4. `--ignored` (needs mkfs.ext4).
+    /// Back up a real ext4, restore it onto a blank target: the target is the
+    /// source byte for byte — every block the filesystem uses was copied, and
+    /// the rest was never written on either side.
     #[test]
-    #[ignore]
-    fn backup_then_restore_round_trip() {
-        let dir = tempfile::tempdir().unwrap();
-        let src = dir.path().join("src.ext4");
-        std::fs::File::create(&src)
-            .unwrap()
-            .set_len(64 * 1024 * 1024)
+    fn ext4_round_trips_through_vhdx_and_qcow2() {
+        for format in [ImageFormat::Vhdx, ImageFormat::Qcow2] {
+            let dir = tempfile::tempdir().unwrap();
+            let Some(src) = ext4_volume(dir.path(), "roundtrip") else {
+                return;
+            };
+            let img = dir.path().join(format!("out.{}", format.extension()));
+            let sum = backup_volume(
+                &request(&src, &img, format),
+                &file_snapshot(&src, true),
+                no_progress,
+            )
             .unwrap();
-        assert!(std::process::Command::new("mkfs.ext4")
-            .args(["-q", "-F", "-L", "roundtrip", src.to_str().unwrap()])
-            .status()
-            .unwrap()
-            .success());
+            assert!(sum.smart_mode, "{format}");
+            assert!(!sum.vss_used, "a file is read as it is");
+            assert!(sum.used_blocks < sum.total_blocks);
 
-        let img = dir.path().join("out.vhdx");
-        let sum = backup_volume(
-            &LinuxBackupRequest {
-                source: src.to_str().unwrap().to_string(),
-                image_path: img.clone(),
-                block_size: DEFAULT_BLOCK_SIZE,
-                all_sectors: false,
-                passphrase: None,
-                job_id: None,
-                image_format: ImageFormat::Vhdx,
-                encryption: None,
-                zstd_level: crate::qcow2::DEFAULT_ZSTD_LEVEL,
-                source_frozen: false,
-            },
-            no_progress,
-        )
-        .unwrap();
+            let sidecar = read_embedded_sidecar(&img, format.extension()).unwrap();
+            assert_eq!(sidecar.info.container, format.extension());
+            if format == ImageFormat::Qcow2 {
+                assert_eq!(
+                    sidecar.manifest.compression_algo,
+                    own_backup_common::types::CompressionAlgo::Zstd
+                );
+                // ext4 metadata compresses well.
+                let image_len = std::fs::metadata(&img).unwrap().len();
+                assert!(
+                    image_len < sum.bytes_copied,
+                    "{image_len} >= {}",
+                    sum.bytes_copied
+                );
+            }
+            let v = verify_image(&img, |_, _| Ok(())).unwrap();
+            assert!(v.valid(), "{format}: {:?}", v.mismatched_blocks);
 
-        // Restore onto a blank target sized to the volume.
-        let tgt = dir.path().join("restored.bin");
-        std::fs::File::create(&tgt)
-            .unwrap()
-            .set_len(sum.source_bytes)
-            .unwrap();
-        let r = restore_volume(
-            &LinuxRestoreRequest {
-                image_path: img,
-                target: tgt.to_str().unwrap().to_string(),
-                verify_checksums: true,
-                encryption: None,
-            },
-            |_| Ok(()),
-        )
-        .unwrap();
-        assert_eq!(r.blocks_restored, sum.used_blocks);
-
-        // The restored target is a valid ext4 with the original label.
-        let probed =
-            own_backup_inventory::fs_probe::probe_partition_path(tgt.to_str().unwrap()).unwrap();
-        assert_eq!(probed.fs, own_backup_common::types::FileSystem::Ext4);
-        assert_eq!(probed.label.as_deref(), Some("roundtrip"));
+            let (target, restored) = restore_to_blank(&img, sum.source_bytes, None);
+            assert_eq!(restored.blocks_restored, sum.used_blocks);
+            assert!(
+                std::fs::read(&target).unwrap() == std::fs::read(&src).unwrap(),
+                "{format}: the restored volume differs from the source"
+            );
+            let probed =
+                own_backup_inventory::fs_probe::probe_partition_path(target.to_str().unwrap())
+                    .unwrap();
+            assert_eq!(probed.fs, FileSystem::Ext4);
+            assert_eq!(probed.label.as_deref(), Some("roundtrip"));
+        }
     }
 
-    /// Same full round trip through the **qcow2** container: backup → verify →
-    /// restore → valid ext4. Also checks the sidecar records the container and
-    /// that compression actually shrinks the image. `--ignored` (needs mkfs.ext4).
+    /// FAT32, made by mkfs.vfat: copied by its own map, restored byte for
+    /// byte.
     #[test]
-    #[ignore]
-    fn qcow2_backup_verify_restore_round_trip() {
+    fn fat32_round_trips_through_qcow2() {
         let dir = tempfile::tempdir().unwrap();
-        let src = dir.path().join("src.ext4");
-        std::fs::File::create(&src)
-            .unwrap()
-            .set_len(64 * 1024 * 1024)
-            .unwrap();
-        assert!(std::process::Command::new("mkfs.ext4")
-            .args(["-q", "-F", "-L", "qcowtrip", src.to_str().unwrap()])
-            .status()
-            .unwrap()
-            .success());
-
+        let src = dir.path().join("src.fat32");
+        blank(&src, 64 * MIB);
+        if !mkfs(
+            "mkfs.vfat",
+            &["-F", "32", "-S", "512", "-s", "1", "-n", "OBKFAT"],
+            &src,
+        ) {
+            return;
+        }
         let img = dir.path().join("out.qcow2");
         let sum = backup_volume(
-            &LinuxBackupRequest {
-                source: src.to_str().unwrap().to_string(),
-                image_path: img.clone(),
-                block_size: DEFAULT_BLOCK_SIZE,
-                all_sectors: false,
-                passphrase: None,
-                job_id: None,
-                image_format: ImageFormat::Qcow2,
-                encryption: None,
-                zstd_level: crate::qcow2::DEFAULT_ZSTD_LEVEL,
-                source_frozen: false,
-            },
+            &request(&src, &img, ImageFormat::Qcow2),
+            &file_snapshot(&src, true),
             no_progress,
         )
         .unwrap();
         assert!(sum.smart_mode);
-
-        // Sidecar must say qcow2 + zstd, and the image must be smaller than
-        // the bytes that went in (ext4 metadata compresses well).
+        assert!(sum.used_blocks < sum.total_blocks);
         let sidecar = read_embedded_sidecar(&img, "qcow2").unwrap();
-        assert_eq!(sidecar.info.container, "qcow2");
-        assert_eq!(
-            sidecar.manifest.compression_algo,
-            own_backup_common::types::CompressionAlgo::Zstd
-        );
-        let image_len = std::fs::metadata(&img).unwrap().len();
-        assert!(
-            image_len < sum.bytes_copied,
-            "qcow2 image ({image_len} B) not smaller than copied data ({} B)",
-            sum.bytes_copied
-        );
+        assert_eq!(sidecar.info.filesystem.as_deref(), Some("FAT32"));
+        assert!(verify_image(&img, |_, _| Ok(())).unwrap().valid());
 
-        let v = verify_image(&img, |_, _| Ok(())).unwrap();
-        assert!(v.valid(), "verify mismatches: {:?}", v.mismatched_blocks);
+        let (target, restored) = restore_to_blank(&img, sum.source_bytes, None);
+        assert_eq!(restored.blocks_restored, sum.used_blocks);
+        assert!(std::fs::read(&target).unwrap() == std::fs::read(&src).unwrap());
+        let probed =
+            own_backup_inventory::fs_probe::probe_partition_path(target.to_str().unwrap()).unwrap();
+        assert_eq!(probed.fs, FileSystem::Fat32);
+    }
 
-        let tgt = dir.path().join("restored.bin");
-        std::fs::File::create(&tgt)
-            .unwrap()
-            .set_len(sum.source_bytes)
-            .unwrap();
-        let r = restore_volume(
-            &LinuxRestoreRequest {
-                image_path: img,
-                target: tgt.to_str().unwrap().to_string(),
-                verify_checksums: true,
-                encryption: None,
-            },
-            |_| Ok(()),
+    /// Nobody vouched that the file holds still: its metadata is not parsed,
+    /// every block is copied, and the result says why (decision R5).
+    #[test]
+    fn a_source_that_may_change_is_copied_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(src) = ext4_volume(dir.path(), "unfrozen") else {
+            return;
+        };
+        let img = dir.path().join("out.qcow2");
+        let sum = backup_volume(
+            &request(&src, &img, ImageFormat::Qcow2),
+            &file_snapshot(&src, false),
+            no_progress,
         )
         .unwrap();
-        assert_eq!(r.blocks_restored, sum.used_blocks);
+        assert!(!sum.smart_mode);
+        assert_eq!(sum.used_blocks, sum.total_blocks);
+        assert_eq!(
+            sum.file_scan_skipped.as_deref(),
+            Some(&*own_backup_common::tr!("engine.skip_not_frozen"))
+        );
+        let sidecar = read_embedded_sidecar(&img, "qcow2").unwrap();
+        assert_eq!(sidecar.manifest.backup_mode, BackupMode::SectorBySector);
+        assert_eq!(sidecar.info.filesystem, None, "nothing parsed it");
+        assert!(verify_image(&img, |_, _| Ok(())).unwrap().valid());
+        let (target, _) = restore_to_blank(&img, sum.source_bytes, None);
+        assert!(std::fs::read(&target).unwrap() == std::fs::read(&src).unwrap());
+    }
 
-        let probed =
-            own_backup_inventory::fs_probe::probe_partition_path(tgt.to_str().unwrap()).unwrap();
-        assert_eq!(probed.fs, own_backup_common::types::FileSystem::Ext4);
-        assert_eq!(probed.label.as_deref(), Some("qcowtrip"));
+    /// A snapshot that did not hold to the end of the copy: the check comes
+    /// after the whole copy, right before publication, and what was written
+    /// is gone — for the plain containers and for the encrypted one.
+    #[test]
+    fn a_snapshot_that_did_not_hold_publishes_nothing() {
+        for (name, encryption) in [("out.qcow2", None), ("out.obk", Some(test_keys()))] {
+            let dir = tempfile::tempdir().unwrap();
+            let src = dir.path().join("src.bin");
+            std::fs::write(&src, vec![7u8; 3 << 20]).unwrap();
+            let img = dir.path().join(name);
+            let req = VolumeBackupRequest {
+                encryption,
+                ..request(&src, &img, ImageFormat::Qcow2)
+            };
+            let mut seen = Vec::new();
+            let mut checked = 0;
+            let result = backup_volume_checked(
+                &req,
+                &file_snapshot(&src, false),
+                |_| {
+                    checked += 1;
+                    Err(OwnBackupError::NoSnapshotProvider(
+                        "the snapshot overflowed".into(),
+                    ))
+                },
+                |p| {
+                    seen.push(p.backup_id.clone());
+                    Ok(())
+                },
+            );
+            let Err(OwnBackupError::NoSnapshotProvider(why)) = result else {
+                panic!("{name}: the snapshot's error must come back");
+            };
+            assert_eq!(why, "the snapshot overflowed");
+            assert_eq!(checked, 1, "asked once, at publication");
+            assert_eq!(seen.last().map(String::as_str), Some("publish"));
+            assert!(seen.iter().any(|id| id == "finalize"), "after the copy");
+            assert_eq!(
+                images_in(dir.path(), &[&src]),
+                Vec::<String>::new(),
+                "{name}"
+            );
+        }
+    }
+
+    /// The real check, for a partition held still whose hold cannot be
+    /// confirmed: an error, and no image.
+    #[test]
+    fn a_hold_that_cannot_be_confirmed_publishes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.bin");
+        std::fs::write(&src, vec![9u8; 2 << 20]).unwrap();
+        let img = dir.path().join("out.vhdx");
+        let held = snapshot_of(src.to_str().unwrap(), &src, "freeze");
+        let result = backup_volume(&request(&src, &img, ImageFormat::Vhdx), &held, no_progress);
+        assert!(result.is_err(), "a hold without its mount is not intact");
+        assert_eq!(images_in(dir.path(), &[&src]), Vec::<String>::new());
+    }
+
+    /// A source with no snapshot of its own is refused, not read live.
+    #[test]
+    fn a_source_without_its_snapshot_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.bin");
+        std::fs::write(&src, vec![1u8; 1 << 20]).unwrap();
+        let other = dir.path().join("other.bin");
+        std::fs::write(&other, vec![2u8; 1 << 20]).unwrap();
+        let img = dir.path().join("out.vhdx");
+        let result = backup_volume(
+            &request(&src, &img, ImageFormat::Vhdx),
+            &file_snapshot(&other, true),
+            no_progress,
+        );
+        assert!(matches!(result, Err(OwnBackupError::Config(_))));
+        assert_eq!(images_in(dir.path(), &[&src, &other]), Vec::<String>::new());
     }
 
     /// The whole Q4 stack live: ext4 with a real file → qcow2 backup →
@@ -1436,53 +1109,14 @@ mod tests {
     fn qcow2_mount_roundtrip_via_nbd() {
         assert_eq!(unsafe { libc::geteuid() }, 0, "this test needs root");
         let dir = tempfile::tempdir().unwrap();
-        let src = dir.path().join("src.ext4");
-        std::fs::File::create(&src)
-            .unwrap()
-            .set_len(64 * 1024 * 1024)
-            .unwrap();
-        assert!(std::process::Command::new("mkfs.ext4")
-            .args(["-q", "-F", "-L", "mounttrip", src.to_str().unwrap()])
-            .status()
-            .unwrap()
-            .success());
-
-        // Put a recognisable file into the source volume.
-        let payload: Vec<u8> = (0..1_000_000u32).flat_map(|i| i.to_le_bytes()).collect();
-        let srcmnt = dir.path().join("srcmnt");
-        std::fs::create_dir(&srcmnt).unwrap();
-        assert!(std::process::Command::new("mount")
-            .args([
-                "-o",
-                "loop",
-                src.to_str().unwrap(),
-                srcmnt.to_str().unwrap()
-            ])
-            .status()
-            .unwrap()
-            .success());
-        std::fs::write(srcmnt.join("payload.bin"), &payload).unwrap();
-        assert!(std::process::Command::new("umount")
-            .arg(&srcmnt)
-            .status()
-            .unwrap()
-            .success());
+        let src = ext4_volume(dir.path(), "mounttrip").expect("mkfs.ext4");
+        let payload = std::fs::read(dir.path().join("content/payload.bin")).unwrap();
 
         // Back up into qcow2 and mount the backup through our NBD server.
         let img = dir.path().join("backup.qcow2");
         backup_volume(
-            &LinuxBackupRequest {
-                source: src.to_str().unwrap().to_string(),
-                image_path: img.clone(),
-                block_size: DEFAULT_BLOCK_SIZE,
-                all_sectors: false,
-                passphrase: None,
-                job_id: None,
-                image_format: ImageFormat::Qcow2,
-                encryption: None,
-                zstd_level: crate::qcow2::DEFAULT_ZSTD_LEVEL,
-                source_frozen: false,
-            },
+            &request(&src, &img, ImageFormat::Qcow2),
+            &file_snapshot(&src, true),
             no_progress,
         )
         .unwrap();
@@ -1515,6 +1149,12 @@ mod tests {
 mod verify_cancel_tests {
     use super::*;
     use crate::sidecar::{write_sidecar, BlockChecksum, SidecarInfo};
+    use own_backup_common::disk::DiskInfo;
+    use own_backup_common::image::ImageManifest;
+    use own_backup_common::types::{
+        BackupMode, BackupType, BootMode, CompressionAlgo, PartitionTable,
+    };
+    use uuid::Uuid;
 
     const BLOCK: u64 = 64 * 1024;
     const BLOCKS: u64 = 8;

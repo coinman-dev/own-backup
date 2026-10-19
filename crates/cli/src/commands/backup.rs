@@ -202,15 +202,25 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
 #[cfg(target_os = "linux")]
 pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
     use own_backup_backup::engine_linux::{
-        backup_volume, verify_image, LinuxBackupRequest, DEFAULT_BLOCK_SIZE,
+        backup_volume, verify_image, VolumeBackupRequest, DEFAULT_BLOCK_SIZE,
     };
+    use own_backup_common::OwnBackupError;
 
-    // The Linux engine has no chains: its request carries no parent and no
-    // kind. Refusing is the honest answer — quietly writing a full copy where
-    // an increment was asked for is how a backup plan turns out to be one file.
-    if super::copy_options::backup_kind(&args.kind)? != own_backup_common::types::BackupType::Full {
-        return Err(own_backup_common::OwnBackupError::Config(
+    // The Linux engine has no chains yet. Refusing is the honest answer —
+    // quietly writing a full copy where an increment was asked for is how a
+    // backup plan turns out to be one file.
+    let kind = super::copy_options::backup_kind(&args.kind)?;
+    if kind != own_backup_common::types::BackupType::Full {
+        return Err(OwnBackupError::Config(
             "цепочки (incremental/differential) на Linux пока не поддерживаются — только full"
+                .into(),
+        ));
+    }
+    // Nor exclusions: a copy that ignored the rules it was given would look
+    // like one that applied them.
+    if !args.exclude.is_empty() || args.exclude_defaults {
+        return Err(OwnBackupError::Config(
+            "исключения файлов (--exclude, --exclude-defaults) на Linux пока не поддерживаются"
                 .into(),
         ));
     }
@@ -222,8 +232,8 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
     let image_path = std::path::PathBuf::from(&args.output);
     // A point in time to read: an LVM or device-mapper snapshot (its change
     // area beside the output; an opened LUKS container may need --password
-    // for that), or the device itself when nothing writes to it; a volume in
-    // use without a snapshot is refused.
+    // for that), a short partition held still, or the device itself when
+    // nothing writes to it; a volume in use without one is refused.
     use own_backup_snapshot::SnapshotProvider;
     let out_dir = match image_path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
@@ -235,20 +245,28 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
         ),
     );
     let snapshot = provider.create_snapshot(&args.source).await?;
-    let request = LinuxBackupRequest {
-        source: snapshot.snapshot_device_path.clone(),
+    let request = VolumeBackupRequest {
+        // The device itself; the engine reads the snapshot of it.
+        source: args.source.clone(),
         image_path: image_path.clone(),
+        full_image_path: None,
         block_size,
         all_sectors: args.all_sectors,
-        passphrase: args.password.clone().map(zeroize::Zeroizing::new),
+        use_vss: true,
+        kind,
+        parent_image: None,
+        exclusion_patterns: Vec::new(),
         job_id: None,
+        passphrase: args.password.clone().map(zeroize::Zeroizing::new),
         image_format: args.format,
+        // The command line does not open encrypted archives yet (E5).
         encryption: None,
         // The settings' default — what a job that has not chosen its own gets.
         zstd_level: own_backup_backup::qcow2::zstd_level_or_default(
             own_backup_common::config::AppConfig::load_or_default().default_compression_level,
         ),
-        source_frozen: own_backup_snapshot::linux::taken_frozen(&snapshot),
+        // No live disk-layout snapshot to embed (that comes from the GUI).
+        source_disk: None,
     };
 
     println!(
@@ -275,30 +293,28 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
             stop.store(true, std::sync::atomic::Ordering::SeqCst);
         });
     }
+    // The engine checks, right before it publishes the image, that the
+    // snapshot held to the end of the copy; one that did not leaves no image.
     let copied = {
         let stop = stop.clone();
+        let snapshot = snapshot.clone();
         tokio::task::spawn_blocking(move || {
-            backup_volume(&request, |_p| {
+            backup_volume(&request, &snapshot, |_p| {
                 if stop.load(std::sync::atomic::Ordering::SeqCst) {
-                    Err(own_backup_common::OwnBackupError::Cancelled)
+                    Err(OwnBackupError::Cancelled)
                 } else {
                     Ok(())
                 }
             })
         })
         .await
-        .map_err(|e| own_backup_common::OwnBackupError::Config(format!("backup task: {e}")))?
+        .map_err(|e| OwnBackupError::Config(format!("backup task: {e}")))?
     };
-    let intact = provider.check_intact(&snapshot).await;
+    // Given back whatever came of the copy, before the image is read back.
     if let Err(e) = provider.release_snapshot(&snapshot).await {
         eprintln!("warning: snapshot release failed: {e}");
     }
     let summary = copied?;
-    if let Err(e) = intact {
-        // What was read is not one point in time: it is not kept.
-        let _ = std::fs::remove_file(&summary.image_path);
-        return Err(e);
-    }
     println!(
         "Done: {} of {} blocks used, {:.1} MiB copied in {:.1}s ({})",
         summary.used_blocks,
@@ -311,7 +327,7 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
             "sector-by-sector"
         },
     );
-    let v = verify_image(&image_path, |_, _| Ok(()))?;
+    let v = verify_image(&summary.image_path, |_, _| Ok(()))?;
     println!(
         "Verify: {}",
         if v.valid() {

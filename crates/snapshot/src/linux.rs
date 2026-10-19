@@ -172,6 +172,14 @@ pub fn taken_frozen(snapshot: &Snapshot) -> bool {
     )
 }
 
+/// Is `snapshot` a partition held still — frozen, or remounted read-only —
+/// rather than a snapshot device? Its copy reads the device itself, and
+/// releasing it (a thaw, a remount read-write) does not disturb a read still
+/// running, while its writers wait until it is released.
+pub fn is_partition_hold(snapshot: &Snapshot) -> bool {
+    hold_method(snapshot).is_some()
+}
+
 /// Metadata key by which a caller vouches that the file a snapshot reads holds
 /// still for the length of the copy — see [`assert_file_frozen`].
 pub const FILE_FROZEN: &str = "file_frozen";
@@ -948,6 +956,20 @@ mod tests {
         // Held still is not taken frozen: nobody froze an idle device's filesystem.
         assert!(!taken_frozen(&direct("/dev/sdz1", "idle")));
         assert!(!is_frozen(&direct("/dev/sdz1", "mystery")));
+        // Only a held partition is released without waiting for its reader.
+        for (mode, held) in [
+            ("freeze", true),
+            ("readonly-remount", true),
+            ("lvm", false),
+            ("dm", false),
+            ("idle", false),
+        ] {
+            assert_eq!(
+                is_partition_hold(&direct("/dev/sdz1", mode)),
+                held,
+                "{mode}"
+            );
+        }
 
         let mut file = direct("/srv/disk.img", "file");
         assert!(

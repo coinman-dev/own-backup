@@ -44,6 +44,7 @@ pub(crate) fn validate_parent(
 /// manifest), uses the same block size and container format. The image-size
 /// (geometry) match is checked by the caller once the child's plan is known.
 /// Returns the parent's full sidecar (its checksums seed the incremental skip).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))] // whole disk, until phase E6
 pub(crate) fn validate_disk_parent(
     parent_image: &Path,
     block_size: u32,

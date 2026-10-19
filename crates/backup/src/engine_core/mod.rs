@@ -8,7 +8,10 @@
 //! callers already know — so a fix made here is made once.
 
 pub(crate) mod chain;
+// The whole-disk building blocks run on Windows only until phase E6.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) mod disk_image;
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) mod partition_prep;
 pub(crate) mod platform;
 pub(crate) mod read;

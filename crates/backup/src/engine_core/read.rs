@@ -32,6 +32,7 @@ pub(crate) enum ImageReadSource {
 }
 
 impl ImageReadSource {
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))] // Windows restore
     pub(crate) fn open(image_path: &Path, container: &str) -> Result<Self> {
         Self::open_with(image_path, container, None)
     }
@@ -77,6 +78,7 @@ impl ImageReadSource {
 
 /// Read an image's sidecar: embedded first, adjacent `.obkm` as a fallback
 /// for images written before the sidecar moved inside the container.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))] // re-exported by engine_win
 pub fn load_sidecar_of(image_path: &Path) -> Result<Sidecar> {
     load_sidecar_with_keys(image_path, None)
 }

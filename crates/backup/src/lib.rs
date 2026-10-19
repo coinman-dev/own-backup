@@ -14,9 +14,7 @@ pub mod consolidate;
 pub mod decrypt;
 pub mod dest_folder;
 pub mod efivars;
-// Shared by both engines. Until Linux runs the shared pipeline, parts of it
-// are reached from Windows code only.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+// Shared by both engines.
 mod engine_core;
 pub mod esp_fallback;
 pub mod esp_scan;
@@ -66,10 +64,8 @@ pub mod exclusion_corpus;
 
 #[cfg(target_os = "linux")]
 pub mod engine_linux;
-// The engine's Linux platform. Nothing drives the engine through it until
-// Linux moves onto the shared pipeline (L1).
+// The engine's Linux platform: the volume pipeline runs on it.
 #[cfg(target_os = "linux")]
-#[allow(dead_code)]
 mod engine_platform_linux;
 #[cfg(target_os = "linux")]
 pub mod linux_device;

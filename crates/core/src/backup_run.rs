@@ -7,17 +7,17 @@
 //! identical copy of these steps, and the Linux driver needs the same ones —
 //! so they are here, once.
 //!
-//! What reads an engine's summary is Windows-only while the summary types
-//! live in `engine_win`.
+//! A volume copy's summary is the shared engine's on both systems; the
+//! whole-disk one is still Windows-only.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 #[cfg(target_os = "linux")]
-use own_backup_backup::engine_linux::{verify_image_scoped, VerifyScope};
+use own_backup_backup::engine_linux::{verify_image_scoped, VerifyScope, VolumeBackupSummary};
 #[cfg(target_os = "windows")]
-use own_backup_backup::engine_win::{verify_image_scoped, VerifyScope};
+use own_backup_backup::engine_win::{verify_image_scoped, VerifyScope, VolumeBackupSummary};
 use own_backup_backup::seal::context::ArchiveKeys;
 use own_backup_common::progress::BackupProgress;
 use own_backup_common::{tr, OwnBackupError};
@@ -30,7 +30,6 @@ use crate::{
 
 /// The run a progress report belongs to and where it goes — the same for the
 /// copy and for the check that reads the copy back.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) struct RunProgress {
     pub(crate) sink: Arc<dyn EventSink>,
     pub(crate) watch: Arc<EngineWatch>,
@@ -44,15 +43,15 @@ pub(crate) struct RunProgress {
 }
 
 /// What the progress line calls the thing being copied.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) enum ProgressLabel {
     /// A volume, by the label the job has for it.
     Volume(String),
     /// A whole disk, by number and model — worded each time it is shown.
+    // Whole-disk copies run on Windows only until phase E6.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     Disk { number: u32, model: String },
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 impl ProgressLabel {
     fn text(&self) -> String {
         match self {
@@ -67,7 +66,6 @@ impl ProgressLabel {
 /// The copy's progress callback: the engine's progress in, the screen's out,
 /// the job's speed limit held, a cancel answered. A whole-disk copy reports
 /// the same phases, its exclusion scan once per partition.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) struct CopyProgress<'a> {
     progress: &'a RunProgress,
     pace: Pace,
@@ -75,7 +73,6 @@ pub(crate) struct CopyProgress<'a> {
     last_emit: std::time::Instant,
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 impl<'a> CopyProgress<'a> {
     pub(crate) fn new(progress: &'a RunProgress, speed_limit_mbps: u32) -> Self {
         Self {
@@ -166,7 +163,6 @@ impl<'a> CopyProgress<'a> {
 
 /// Only the blocks this copy wrote, or everything the restore point
 /// stands on — the job says which (default: everything).
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn verify_scope(job: &Job) -> VerifyScope {
     if job.advanced.verify_latest_only {
         VerifyScope::LatestCopyOnly
@@ -178,7 +174,6 @@ pub(crate) fn verify_scope(job: &Job) -> VerifyScope {
 /// Read the finished image back, reporting progress as the copy did, and fail
 /// on any checksum mismatch. `Ok(true)` when the user cancelled the check
 /// rather than the copy.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn verify_copy(
     progress: &RunProgress,
     image: &Path,
@@ -260,7 +255,6 @@ pub(crate) fn verify_copy(
 
 /// What a run over volumes adds up as each of them finishes, for the end of
 /// the run.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) struct VolumeTotals {
     /// Each finished copy by its file-name token: the chains retention and
     /// consolidation must leave alone.
@@ -271,7 +265,6 @@ pub(crate) struct VolumeTotals {
     volume_count: usize,
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 impl VolumeTotals {
     pub(crate) fn new(volume_count: usize) -> Self {
         Self {
@@ -285,7 +278,6 @@ impl VolumeTotals {
 
     /// Add one finished volume to the run's record; returns the image the
     /// engine published.
-    #[cfg(target_os = "windows")]
     pub(crate) fn record(
         &mut self,
         run: &mut JobRun,
@@ -293,7 +285,7 @@ impl VolumeTotals {
         plan: &crate::RunPlan,
         idx: usize,
         device: &str,
-        summary: own_backup_backup::engine_win::VolumeBackupSummary,
+        summary: VolumeBackupSummary,
     ) -> PathBuf {
         use crate::{file_token, merge_categories, RunImage};
         use own_backup_common::types::BackupType as BT;
@@ -480,7 +472,6 @@ pub(crate) fn record_disk(
 /// After a fully successful run: retention first, then consolidation (see
 /// [`apply_consolidation`] for why in that order). `protected` holds the
 /// images the run just wrote, by file-name token.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn retain_and_consolidate(
     run: &mut JobRun,
     job: &Job,
