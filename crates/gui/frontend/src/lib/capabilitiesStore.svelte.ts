@@ -1,7 +1,8 @@
 // What the service's backup engine carries out. The wizard offers only that:
 // a job asking for more is refused at run time — after it was saved,
 // scheduled and queued. On Linux that is, for now, VHDX chains (R2),
-// encrypted archives (no key store yet) and a disk named by number.
+// encrypted archives (no key store yet) and a disk named by number rather
+// than by its `/dev/disk/by-id` device.
 //
 // The service answers (`backup_capabilities`) from the same table its engine
 // refuses by (`own_backup_core::capabilities`); the window does not decide
@@ -10,7 +11,8 @@
 
 import { api } from './api';
 import { isWindows } from './platformStore.svelte';
-import type { BackupCapabilities, Job } from './types';
+import { mapperKind } from './diskNames';
+import type { BackupCapabilities, DiskInfo, Job } from './types';
 
 const EVERYTHING: BackupCapabilities = {
   os: 'windows',
@@ -87,13 +89,20 @@ export function canChain(c: BackupCapabilities, format: string): boolean {
   return c.chain_formats.includes(format) && c.methods.some((x) => x !== 'full');
 }
 
-/** Does the window build whole-disk jobs for this engine? Where a disk is
- *  named by its device (Linux: `/dev/disk/by-id/…`), not yet: the disk list
- *  carries the kernel name, which is not stable across reboots, and the map
- *  tells disks apart by number. The engine itself copies such a disk
- *  (`own-backup-cli backup-disk --device`). */
+/** Does this engine write one image of a whole disk? */
 export function offersWholeDisk(c: BackupCapabilities): boolean {
-  return c.whole_disk && c.disk_named_by === 'number';
+  return c.whole_disk;
+}
+
+/** Can a whole-disk job be built for THIS disk? Where a disk is named by its
+ *  device (Linux), it needs the name udev keeps for it in `/dev/disk/by-id`
+ *  — the kernel name (`/dev/sdb`) can be another disk after the next boot —
+ *  and a device-mapper volume is no disk at all. Such a disk is copied one
+ *  image per volume, and the wizard says why. */
+export function wholeDiskOf(c: BackupCapabilities, d: DiskInfo): boolean {
+  if (!c.whole_disk) return false;
+  if (c.disk_named_by === 'number') return true;
+  return !!d.stable_device && !mapperKind(d);
 }
 
 /** Take out of a job what this engine would refuse it for, and say what was

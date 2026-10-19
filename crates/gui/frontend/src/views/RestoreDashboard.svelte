@@ -15,7 +15,7 @@
   import InfoModal from '../components/InfoModal.svelte';
   import PasswordField from '../components/PasswordField.svelte';
   import DiskMap from '../components/DiskMap.svelte';
-  import { mapperKind, diskCaption } from '../lib/diskNames';
+  import { mapperKind, diskCaption, isSpecDisk } from '../lib/diskNames';
   import { isWindows } from '../lib/platformStore.svelte';
   import { diskSegments, msrKept } from '../lib/diskLayout';
   import type { MapSlot } from '../components/DiskMap.svelte';
@@ -322,7 +322,7 @@
     return p.volume_device ? p.volume_device : null;
   }
   function isBootableCopy(d: DiskInfo): boolean {
-    return job.disk_source != null && job.disk_source.disk_number === diskNumber(d);
+    return job.disk_source != null && isSpecDisk(job.disk_source, d);
   }
   /** The volumes this copy was made of. A job says; a copy added by hand
    *  (made by the CLI, or elsewhere) has no job, and then its own record does

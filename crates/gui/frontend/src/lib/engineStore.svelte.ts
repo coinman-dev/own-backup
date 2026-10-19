@@ -7,6 +7,7 @@ import { formatBytes } from './format';
 import { m } from './paraglide/messages';
 import { onLocale } from './i18n.svelte';
 import { isWindows } from './platformStore.svelte';
+import { diskNumber } from './diskNames';
 import type {
   ArchiveSecret,
   DiskInfo,
@@ -131,10 +132,8 @@ export async function refreshVolumes(): Promise<void> {
   try {
     const disks: DiskInfo[] = await api.listDisks();
     // Show disks in physical-drive order (0, 1, 2, …) rather than WMI order.
-    const diskNumber = (d: DiskInfo): number => {
-      const num = d.device_id.match(/(\d+)\s*$/);
-      return num ? parseInt(num[1], 10) : 0;
-    };
+    // Linux disks have no number and keep the inventory's order (real disks,
+    // then device-mapper volumes): the sort is stable.
     engine.disks = [...disks].sort((a, b) => diskNumber(a) - diskNumber(b));
     engine.volumes = disks
       .flatMap((d) =>

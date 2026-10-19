@@ -13,9 +13,9 @@
   import type { Job, DiskInfo, PartitionInfo } from '../lib/types';
   import { m } from '../lib/paraglide/messages';
   import { examplePath, joinPath } from '../lib/paths';
-  import { caps, ensureCapabilities, dropUnsupported, canChain, offersWholeDisk } from '../lib/capabilitiesStore.svelte';
+  import { caps, ensureCapabilities, dropUnsupported, canChain, offersWholeDisk, wholeDiskOf } from '../lib/capabilitiesStore.svelte';
   import { isWindows } from '../lib/platformStore.svelte';
-  import { diskCaption, diskTableText } from '../lib/diskNames';
+  import { diskCaption, diskTableText, diskNumber, isSpecDisk, diskFileTag, mapperKind } from '../lib/diskNames';
   import type { DestinationCheck } from '../lib/types';
 
   interface Props {
@@ -39,9 +39,10 @@
     void ensureCapabilities();
   });
   const cap = $derived(caps.value);
-  /** Whole-disk jobs are built here only where a disk is named by number —
-   *  see `offersWholeDisk`. */
+  /** The engine writes one image of a whole disk; whether THIS disk can be
+   *  named for it is `wholeDiskOf` (Linux: it needs a by-id name). */
   const wholeDisk = $derived(offersWholeDisk(cap));
+  const diskWhole = (d: DiskInfo) => wholeDiskOf(cap, d);
   // A new draft (template or clone) starts as a job this engine runs: the
   // template turns exclusions on, a clone may carry a chain. A saved job is
   // left as it is until it is saved again (`finish`).
@@ -312,11 +313,6 @@
     return t;
   }
 
-  // Physical drive number from the device id (`\\.\PhysicalDrive3` → 3).
-  function diskNumber(d: DiskInfo): number {
-    const m = d.device_id.match(/(\d+)\s*$/);
-    return m ? parseInt(m[1], 10) : 0;
-  }
   // ---- What belongs to booting (rewritten from scratch 2026-08-21) ----------
   //
   // The old switch answered this by taking EVERY volume of the disk, on the
@@ -417,7 +413,7 @@
    *  True for every disk a new job picks; false for jobs saved before that
    *  became unconditional, which still hold one image per volume. */
   function isDiskCaptured(d: DiskInfo): boolean {
-    return job.disk_source != null && job.disk_source.disk_number === diskNumber(d);
+    return job.disk_source != null && isSpecDisk(job.disk_source, d);
   }
   function layoutOnlyParts(d: DiskInfo): number[] {
     // Keyed on the captured layout, not on bootability: `retain_for_backup`
@@ -537,12 +533,15 @@
   function captureDiskSource(d: DiskInfo) {
     // An engine without whole-disk copies writes one image per volume; a
     // `disk_source` would only get the job refused.
-    if (!wholeDisk) {
+    if (!diskWhole(d)) {
       job.disk_source = null;
       return;
     }
+    // Linux names the disk by its by-id device; its number means nothing.
+    const byDevice = cap.disk_named_by === 'device';
     job.disk_source = {
-      disk_number: diskNumber(d),
+      disk_number: byDevice ? 0 : diskNumber(d),
+      device: byDevice ? d.stable_device : undefined,
       disk_model: d.model || d.device_id,
       parts: [],
       bootable: isBootableCopy(d),
@@ -612,7 +611,7 @@
   // Keep disk_source.parts in sync with the currently-selected backable
   // partitions of a disk (behaviour B: only kept volumes stay in the layout).
   function syncDiskSourceParts(d: DiskInfo) {
-    if (!job.disk_source || job.disk_source.disk_number !== diskNumber(d)) return;
+    if (!job.disk_source || !isSpecDisk(job.disk_source, d)) return;
     const parts = d.partitions
       .filter((p) => { const dev = partDevice(p); return !!dev && job.sources.includes(dev); })
       .map((p) => ({ part_index: p.index, device: partDevice(p)!, filesystem: p.filesystem }));
@@ -714,7 +713,7 @@
    *  survives the switch being flicked twice. */
   function toggleBootableCopy(d: DiskInfo) {
     if (sourceReadonly) return; // fixed source on the "Параметры" screen
-    if (!wholeDisk) return; // a bootable copy IS a whole-disk copy
+    if (!diskWhole(d)) return; // a bootable copy IS a whole-disk copy
     if (!isBootableDisk(d)) return; // nothing on this disk boots
     if (isBootableCopy(d)) {
       bootCopyOn = bootCopyOn.filter((id) => id !== d.device_id);
@@ -886,7 +885,7 @@
     const folder = job.dest_folder.trim();
     if (!folder || job.sources.length === 0) return '';
     const safe = safeFileStem(job.name, 'backup');
-    const token = job.disk_source ? `disk${job.disk_source.disk_number}` : sourceToken(job.sources[0]);
+    const token = job.disk_source ? diskFileTag(job.disk_source) : sourceToken(job.sources[0]);
     return joinPath(folder, `${safe}_${token}_full_${previewStamp}.${previewExt}`);
   });
 
@@ -1318,7 +1317,7 @@
     // boot entries. `isBootableCopy` reads what the job ACTUALLY captures in
     // that mode, which is the honest answer to the same question.
     if (job.disk_source) {
-      const d = engine.disks.find((x) => diskNumber(x) === job.disk_source!.disk_number);
+      const d = engine.disks.find((x) => isSpecDisk(job.disk_source!, x));
       if (d) job.disk_source = { ...job.disk_source, bootable: isBootableCopy(d) };
     }
     // Turning encryption on cannot go through an ordinary save: the service
@@ -1368,9 +1367,7 @@
     const spec = job.disk_source;
     const owners = [...new Set(job.sources.map((dev) => diskOfDevice(dev)?.device_id ?? ''))];
     const d = spec
-      ? engine.disks.find(
-          (x) => diskNumber(x) === spec.disk_number && (x.model || x.device_id) === spec.disk_model,
-        )
+      ? engine.disks.find((x) => isSpecDisk(spec, x, true))
       : owners.length === 1
         ? engine.disks.find((x) => x.device_id === owners[0])
         : undefined;
@@ -1654,7 +1651,7 @@
                     <span class="disk-model">{d.model || d.device_id}</span>
                     <span class="disk-head-right">
                       {#if isBootableCopy(d)}<span class="whole-badge">{m.wiz_badge_bootable()}</span>{/if}
-                      {#if wholeDisk}
+                      {#if diskWhole(d)}
                       <label
                         class="boot-toggle"
                         class:disabled={!isBootableDisk(d)}
@@ -1812,8 +1809,12 @@
           {:else if destCheck?.placement === 'cannot_tell'}
             <div class="note">{m.wiz_dest_cannot_tell({ reason: destCheck.reason })}</div>
           {/if}
-          {#if !wholeDisk && !sourceReadonly && job.sources.length > 1}
-            <div class="note">{m.wiz_volumes_separate()}</div>
+          {#if !sourceReadonly && activeDisk && !diskWhole(activeDisk)}
+            {#if wholeDisk && !mapperKind(activeDisk)}
+              <div class="note">{m.wiz_volumes_separate_no_id()}</div>
+            {:else if job.sources.length > 1}
+              <div class="note">{m.wiz_volumes_separate()}</div>
+            {/if}
           {/if}
           {/if}
         </div>

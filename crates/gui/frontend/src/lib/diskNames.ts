@@ -10,7 +10,8 @@
 // listed as a «disk» of its own by the inventory, with one volume covering it.
 // It is not a disk and has no partition table: it is named for what it is.
 
-import type { DiskInfo } from './types';
+import type { DiskInfo, DiskSourceSpec } from './types';
+import { linuxDeviceToken } from './sourceToken';
 import { m } from './paraglide/messages';
 
 /** `crypt` / `lvm` for a device-mapper volume listed as a disk, else ''. */
@@ -44,4 +45,28 @@ export function diskTableText(d: DiskInfo): string {
   if (kind === 'lvm') return m.disk_mapper_lvm_meta();
   const t = d.partition_table;
   return t === 'gpt' ? 'GPT' : t === 'mbr' ? 'MBR' : t.toUpperCase();
+}
+
+/** Windows: the number of `\\.\PhysicalDriveN`. Elsewhere 0 — a Linux disk
+ *  has no number, and the digits in its name (`nvme0n1`) are not one. */
+export function diskNumber(d: DiskInfo): number {
+  const win = d.device_id.trim().match(/PhysicalDrive(\d+)\s*$/i);
+  return win ? parseInt(win[1], 10) : 0;
+}
+
+/** Is `d` the disk this whole-disk spec names? By its by-id device where
+ *  the spec has one (Linux), else by number — and by model too when asked
+ *  (`PhysicalDriveN` is a slot another disk can take). */
+export function isSpecDisk(spec: DiskSourceSpec, d: DiskInfo, checkModel = false): boolean {
+  if (spec.device) return !!d.stable_device && d.stable_device === spec.device;
+  if (d.device_id.startsWith('/')) return false;
+  if (diskNumber(d) !== spec.disk_number) return false;
+  return !checkModel || (d.model || d.device_id) === spec.disk_model;
+}
+
+/** The disk's part of an image file name — `own_backup_core::DiskSourceSpec::file_tag`:
+ *  `disk<N>` on Windows, `disk` + the token of its by-id device on Linux. */
+export function diskFileTag(spec: DiskSourceSpec): string {
+  const token = spec.device ? linuxDeviceToken(spec.device) : null;
+  return token ? `disk${token}` : `disk${spec.disk_number}`;
 }

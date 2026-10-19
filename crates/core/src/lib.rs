@@ -4151,12 +4151,15 @@ async fn perform_disk_backup(
     } else {
         (Vec::new(), Vec::new())
     };
-    // The disk as the window captured it at job save, matched by its device.
-    let source_disk = job
-        .source_disks
-        .iter()
-        .find(|d| Some(d.device_id.as_str()) == ds.device.as_deref())
-        .cloned();
+    // The disk as the window captured it at job save, matched by its device:
+    // the window keeps the kernel name in `device_id` and the by-id one the
+    // job names in `stable_device`.
+    let source_disk = ds.device.as_deref().and_then(|device| {
+        job.source_disks
+            .iter()
+            .find(|d| d.device_id == device || d.stable_device == device)
+            .cloned()
+    });
     let request = DiskBackupRequest {
         disk_number: ds.disk_number,
         disk_device: ds.device.clone(),
@@ -4408,6 +4411,24 @@ async fn perform_backup(
 
 #[cfg(test)]
 mod tests {
+    /// The window previews the file name with its own copy of this rule
+    /// (`diskFileTag` in `diskNames.ts`), which gives the same token for the
+    /// same by-id device: `diskH8B343557` for `ata-TEST`.
+    #[test]
+    fn a_disk_named_by_its_device_is_tagged_by_its_token() {
+        let mut ds = super::DiskSourceSpec {
+            disk_number: 0,
+            device: Some("/dev/disk/by-id/ata-TEST".into()),
+            disk_model: String::new(),
+            parts: Vec::new(),
+            bootable: false,
+        };
+        assert_eq!(ds.file_tag(), "diskH8B343557");
+        ds.device = None;
+        ds.disk_number = 3;
+        assert_eq!(ds.file_tag(), "disk3");
+    }
+
     #[test]
     fn pace_holds_a_copy_to_its_limit() {
         // 50 blocks of 1 MB at 100 MB/s: the fiftieth may not be done before
