@@ -418,3 +418,89 @@ fn a_source_the_platform_does_not_hold_is_refused() {
     );
     assert!(!image.exists(), "nothing was written");
 }
+
+/// Every name in `dir`, sorted.
+fn names_in(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn backup_volume_publishes_plain_and_encrypted_images_under_their_names_only() {
+    let keys = crate::engine_core::testkit::test_keys();
+    for encrypted in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let volume = fat16_volume(b"published");
+        let source = unique_path("published");
+        register_device(&source, volume.clone(), 512);
+        let platform = TestPlatform::new().source(&source, TestSource::Direct { frozen: true });
+        let name = if encrypted { "full.obk" } else { "full.qcow2" };
+        let image = dir.path().join(name);
+        let mut req = request(&source, &image, ImageFormat::Qcow2);
+        if encrypted {
+            req.encryption = Some(keys.clone());
+        }
+        let mut phases = Vec::new();
+
+        let summary = super::backup_volume(&platform, &req, |p| {
+            phases.push(p.backup_id.clone());
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(summary.image_path, image, "encrypted: {encrypted}");
+        assert_eq!(
+            summary.sidecar_path,
+            crate::sidecar::sidecar_path_for(&image)
+        );
+        // Asked last, after the copy and the final sidecar.
+        assert_eq!(phases.last().map(String::as_str), Some("publish"));
+        // Nothing private is left beside the published image.
+        assert_eq!(names_in(dir.path()), [name], "encrypted: {encrypted}");
+        let verified = crate::engine_core::verify::verify_image_with_keys(
+            &image,
+            req.encryption.as_ref(),
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        assert!(verified.valid(), "encrypted: {encrypted}: {verified:?}");
+        assert_eq!(verified.blocks_checked, blocks_of(&volume, BS));
+    }
+}
+
+#[test]
+fn backup_volume_refused_at_publication_leaves_no_image() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = unique_path("refused");
+    register_device(&source, fat16_volume(b"refused"), 512);
+    let platform = TestPlatform::new().source(&source, TestSource::Direct { frozen: true });
+    let image = dir.path().join("full.qcow2");
+
+    let err = super::backup_volume(
+        &platform,
+        &request(&source, &image, ImageFormat::Qcow2),
+        |p| {
+            if p.backup_id == "publish" {
+                Err(own_backup_common::OwnBackupError::Cancelled)
+            } else {
+                Ok(())
+            }
+        },
+    )
+    .err()
+    .expect("a refused publication fails the run");
+
+    assert!(
+        matches!(err, own_backup_common::OwnBackupError::Cancelled),
+        "{err}"
+    );
+    assert!(
+        names_in(dir.path()).is_empty(),
+        "{:?}",
+        names_in(dir.path())
+    );
+}
