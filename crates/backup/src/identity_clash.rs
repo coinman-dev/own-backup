@@ -207,12 +207,12 @@ pub fn find_clashes(
 /// Reads `len` bytes at `offset` of the restored device or image; `None` past
 /// the end or on error.
 pub trait Probe {
-    fn len(&self) -> u64;
+    fn size(&self) -> u64;
     fn read(&mut self, offset: u64, len: usize) -> Option<Vec<u8>>;
 }
 
 impl Probe for &[u8] {
-    fn len(&self) -> u64 {
+    fn size(&self) -> u64 {
         <[u8]>::len(self) as u64
     }
     fn read(&mut self, offset: u64, len: usize) -> Option<Vec<u8>> {
@@ -228,7 +228,7 @@ impl Probe for &[u8] {
 pub fn identities_of(p: &mut dyn Probe) -> Vec<Identity> {
     let mut out = Vec::new();
     if let Some(head) = p.read(0, 68 * 1024).or_else(|| {
-        let n = p.len().min(68 * 1024) as usize;
+        let n = p.size().min(68 * 1024) as usize;
         p.read(0, n)
     }) {
         if let Some(u) = luks_uuid(&head) {
@@ -414,7 +414,7 @@ const MD_MAGIC: u32 = 0xa92b_4efc;
 /// md array UUID from a v1.1 (offset 0), v1.2 (4 KiB), v1.0 (end − 8..12 KiB)
 /// or v0.90 (last 64 KiB-aligned 64 KiB) superblock.
 fn md_uuid(p: &mut dyn Probe) -> Option<String> {
-    let sectors = p.len() / 512;
+    let sectors = p.size() / 512;
     let mut v1 = vec![0u64, 4096];
     if sectors > 16 {
         v1.push(((sectors - 16) & !7) * 512);
@@ -430,7 +430,7 @@ fn md_uuid(p: &mut dyn Probe) -> Option<String> {
             return Some(md_colons(&sb[16..32]));
         }
     }
-    let len = p.len();
+    let len = p.size();
     if len >= 128 * 1024 {
         let off = (len & !0xFFFF) - 0x10000;
         if let Some(sb) = p.read(off, 64) {
@@ -721,7 +721,7 @@ mod tests {
     fn btrfs_is_critical_before_6_7_and_unknown_kernels_count_as_old() {
         let b = Identity::new(IdentityKind::Btrfs, TEXT);
         let host = present(&[("sda2", b.clone())]);
-        let sev = |k| find_clashes(&[b.clone()], &host, &[], k)[0].severity;
+        let sev = |k| find_clashes(std::slice::from_ref(&b), &host, &[], k)[0].severity;
         assert_eq!(sev(Some((6, 6))), Severity::Critical);
         assert_eq!(sev(None), Severity::Critical);
         assert_eq!(sev(Some((6, 7))), Severity::Ambiguous);
