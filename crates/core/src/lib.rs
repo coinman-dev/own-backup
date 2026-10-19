@@ -17,6 +17,8 @@ rust_i18n::i18n!("locales", fallback = "ru");
 
 pub mod archive_setup;
 pub mod backup_encryption;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+mod backup_run;
 pub mod busy;
 mod engine_watch;
 pub mod restore_exec;
@@ -3347,9 +3349,7 @@ async fn perform_backup(
     passwords: &Arc<dyn PasswordResolver>,
     keys: Option<own_backup_backup::seal::context::ArchiveKeys>,
 ) -> JobRun {
-    use own_backup_backup::engine_win::{
-        backup_volume, verify_image_scoped, VerifyScope, VolumeBackupRequest,
-    };
+    use own_backup_backup::engine_win::{backup_volume, VolumeBackupRequest};
     use own_backup_common::types::BackupType;
     use own_backup_common::OwnBackupError;
 
@@ -3450,23 +3450,13 @@ async fn perform_backup(
             zstd_level: job.zstd_level(),
         };
         let validate_after = job.advanced.validate_after;
-        // Only the blocks this copy wrote, or everything the restore point
-        // stands on — the job says which (default: everything).
-        let verify_scope = if job.advanced.verify_latest_only {
-            VerifyScope::LatestCopyOnly
-        } else {
-            VerifyScope::Everything
-        };
+        let verify_scope = backup_run::verify_scope(job);
 
-        let sink_bg = sink.clone();
-        let job_id = job.id.clone();
-        let cancel_bg = cancel.clone();
         let low_priority = job.advanced.low_priority;
         let speed_limit_mbps = job.advanced.speed_limit_mbps;
         // Checking an encrypted copy needs its key: without one there is no
         // sidecar to read and nothing to compare checksums against.
         let keys_for_verify = keys.clone();
-        let vol_label_bg = vol_label.clone();
         // The file this run is writing — named in the progress line, because
         // "WorkDisk-2 → D:\Temp" alone does not say WHAT is appearing there.
         let image_name = image_path
@@ -3475,150 +3465,31 @@ async fn perform_backup(
             .unwrap_or_default();
 
         let watch = engine_watch::EngineWatch::new();
-        let watch_bg = watch.clone();
+        let progress = backup_run::RunProgress {
+            sink: sink.clone(),
+            watch: watch.clone(),
+            cancel: cancel.clone(),
+            job_id: job.id.clone(),
+            volume_index: vidx,
+            volume_count: count,
+            volume: backup_run::ProgressLabel::Volume(vol_label),
+            image_file_name: image_name,
+        };
         let handle = tokio::task::spawn_blocking(move || {
             let _quiet = QuietCopy::enter(low_priority);
-            let mut pace = Pace::new(speed_limit_mbps);
-            let mut last_permille = u64::MAX;
-            let mut last_emit = std::time::Instant::now();
-            let summary = backup_volume(&request, |p| {
-                if cancel_bg.load(std::sync::atomic::Ordering::SeqCst) || watch_bg.abandoned() {
-                    return Err(OwnBackupError::Cancelled);
-                }
-                watch_bg.alive();
-                // The engine tags non-copy phases via backup_id: "prepare" for
-                // the exclusion scan, "finalize" for the flush/detach at the
-                // end. Both carry blocks_total == 0.
-                let phase = match p.backup_id.as_str() {
-                    "prepare" => "prepare",
-                    "finalize" => "finalize",
-                    // The post-copy exclusion passes (true removal, and the
-                    // in-image pass for an encrypted source) — minutes of real
-                    // work that used to hide under "сброс кэша" and read as a
-                    // hang.
-                    "exclusions" => "exclusions",
-                    // Asked just before the image is published, so a run that
-                    // was cancelled or left behind never publishes.
-                    "publish" => "finalize",
-                    _ => "backup",
-                };
-                if phase == "backup" {
-                    pace.after(p.blocks_done);
-                }
-                let permille = if p.blocks_total > 0 {
-                    p.blocks_done * 1000 / p.blocks_total
-                } else {
-                    0
-                };
-                // "finalize" has no granular progress — always emit it so the UI
-                // leaves the frozen 100% state; otherwise throttle as usual.
-                // Сообщение со сводкой по типам приходит одно и в единственный
-                // момент — сразу после скана. Через троттлинг его пропускать
-                // нельзя: другого такого не будет.
-                let has_categories = p.categories.is_some();
-                if has_categories
-                    || phase == "finalize"
-                    || phase == "exclusions"
-                    || permille != last_permille
-                    || last_emit.elapsed().as_millis() >= 400
-                {
-                    last_permille = permille;
-                    last_emit = std::time::Instant::now();
-                    watch_bg.show(
-                        &sink_bg,
-                        JobProgress {
-                            job_id: job_id.clone(),
-                            phase: phase.into(),
-                            percent: permille / 10,
-                            blocks_done: p.blocks_done,
-                            blocks_total: p.blocks_total,
-                            speed_mbps: p.speed_bps as f64 / 1_000_000.0,
-                            volume_index: vidx,
-                            volume_count: count,
-                            volume: vol_label_bg.clone(),
-                            image_file_name: image_name.clone(),
-                            categories: p.categories.clone().unwrap_or_default(),
-                            excluded_files: p.excluded.map(|(f, _)| f),
-                            excluded_bytes: p.excluded.map(|(_, b)| b),
-                            stalled_secs: None,
-                        },
-                    );
-                }
-                #[cfg(feature = "a07-lab-gate")]
-                a07_lab_gate(&job_id, phase, p.blocks_done, p.blocks_total)?;
-                backup_callback_checkpoint(&cancel_bg)
-            })?;
+            let mut copy = backup_run::CopyProgress::new(&progress, speed_limit_mbps);
+            let summary = backup_volume(&request, |p| copy.report(p))?;
 
             // Optional post-backup verification — emit its own progress so the
             // UI shows "Проверка…" instead of freezing at 100%.
             let mut verify_cancelled = false;
             if validate_after {
-                let mut v_permille = u64::MAX;
-                let mut v_emit = std::time::Instant::now();
-                let mut v_rate = VerifyRate::new(&summary.image_path, keys_for_verify.as_ref());
-                let verified = verify_image_scoped(
+                verify_cancelled = backup_run::verify_copy(
+                    &progress,
                     &summary.image_path,
                     keys_for_verify.as_ref(),
                     verify_scope,
-                    |done, total| {
-                        // Cancel reaches the check too, not just the copy (audit
-                        // AUD-12). Reading back a whole image is minutes of work;
-                        // before this, pressing Отмена during it did nothing and
-                        // the run then finished as a success.
-                        if cancel_bg.load(std::sync::atomic::Ordering::SeqCst)
-                            || watch_bg.abandoned()
-                        {
-                            return Err(OwnBackupError::Cancelled);
-                        }
-                        watch_bg.alive();
-                        let mbps = v_rate.sample(done);
-                        let permille = if total > 0 { done * 1000 / total } else { 0 };
-                        if permille != v_permille || v_emit.elapsed().as_millis() >= 400 {
-                            v_permille = permille;
-                            v_emit = std::time::Instant::now();
-                            watch_bg.show(
-                                &sink_bg,
-                                JobProgress {
-                                    job_id: job_id.clone(),
-                                    phase: "verify".into(),
-                                    percent: permille / 10,
-                                    blocks_done: done,
-                                    blocks_total: total,
-                                    speed_mbps: mbps,
-                                    volume_index: vidx,
-                                    volume_count: count,
-                                    volume: vol_label_bg.clone(),
-                                    image_file_name: image_name.clone(),
-                                    categories: Vec::new(),
-                                    excluded_files: None,
-                                    excluded_bytes: None,
-                                    stalled_secs: None,
-                                },
-                            );
-                        }
-                        #[cfg(feature = "a07-lab-gate")]
-                        a07_lab_gate(&job_id, "verify", done, total)?;
-                        backup_callback_checkpoint(&cancel_bg)
-                    },
-                );
-                match verified {
-                    Ok(v) if !v.valid() => {
-                        return Err(OwnBackupError::ImageFormat(
-                            tr!(
-                                "lib.verify_failed_volume",
-                                volume = vol_label_bg,
-                                count = v.mismatched_blocks.len()
-                            )
-                            .into_owned(),
-                        ))
-                    }
-                    Ok(_) => {}
-                    // The copy itself is finished and on disk; only the reading
-                    // back was stopped. That is a different outcome from a
-                    // cancelled copy, and the image must survive it.
-                    Err(OwnBackupError::Cancelled) => verify_cancelled = true,
-                    Err(e) => return Err(e),
-                }
+                )?;
             }
 
             Ok::<_, OwnBackupError>((summary, verify_cancelled))
@@ -3794,9 +3665,7 @@ async fn perform_disk_backup(
     keys: Option<own_backup_backup::seal::context::ArchiveKeys>,
     mut run: JobRun,
 ) -> JobRun {
-    use own_backup_backup::engine_win::{
-        backup_disk, verify_image_scoped, DiskBackupRequest, DiskPartitionBackup, VerifyScope,
-    };
+    use own_backup_backup::engine_win::{backup_disk, DiskBackupRequest, DiskPartitionBackup};
     use own_backup_common::OwnBackupError;
 
     use own_backup_common::types::BackupType;
@@ -3879,157 +3748,46 @@ async fn perform_disk_backup(
         parent_image: plan.parent_image.clone(),
     };
     let validate_after = job.advanced.validate_after;
-    // Only the blocks this copy wrote, or everything the restore point
-    // stands on — the job says which (default: everything).
-    let verify_scope = if job.advanced.verify_latest_only {
-        VerifyScope::LatestCopyOnly
-    } else {
-        VerifyScope::Everything
-    };
+    let verify_scope = backup_run::verify_scope(job);
     let keys_for_verify = keys.clone();
     let image_name = image_path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
 
-    let sink_bg = sink.clone();
-    let job_id = job.id.clone();
-    let cancel_bg = cancel.clone();
     let low_priority = job.advanced.low_priority;
     let speed_limit_mbps = job.advanced.speed_limit_mbps;
-    let model = ds.disk_model.clone();
-    let disk_number = ds.disk_number;
 
     let watch = engine_watch::EngineWatch::new();
-    let watch_bg = watch.clone();
+    let progress = backup_run::RunProgress {
+        sink: sink.clone(),
+        watch: watch.clone(),
+        cancel: cancel.clone(),
+        job_id: job.id.clone(),
+        volume_index: 0,
+        volume_count: 1,
+        volume: backup_run::ProgressLabel::Disk {
+            number: ds.disk_number,
+            model: ds.disk_model.clone(),
+        },
+        image_file_name: image_name,
+    };
     let handle = tokio::task::spawn_blocking(move || {
         let _quiet = QuietCopy::enter(low_priority);
-        let mut pace = Pace::new(speed_limit_mbps);
-        let mut last_permille = u64::MAX;
-        let mut last_emit = std::time::Instant::now();
-        let summary = backup_disk(&request, |p| {
-            if cancel_bg.load(std::sync::atomic::Ordering::SeqCst) || watch_bg.abandoned() {
-                return Err(OwnBackupError::Cancelled);
-            }
-            watch_bg.alive();
-            // The engine tags non-copy phases via backup_id: "prepare" for the
-            // per-partition exclusion scan ("Поиск исключаемых файлов…"),
-            // "finalize" for the flush/detach + true-removal pass. Everything
-            // else is the block copy.
-            let phase = match p.backup_id.as_str() {
-                "prepare" => "prepare",
-                "finalize" => "finalize",
-                // Post-copy exclusion passes — see the per-volume path.
-                "exclusions" => "exclusions",
-                "publish" => "finalize",
-                _ => "backup",
-            };
-            if phase == "backup" {
-                pace.after(p.blocks_done);
-            }
-            let permille = if p.blocks_total > 0 {
-                p.blocks_done * 1000 / p.blocks_total
-            } else {
-                0
-            };
-            // "finalize" has no granular progress — always emit it so the UI
-            // leaves the frozen 100 %; "prepare" (permille 0) shows on its first
-            // tick then rides the 400 ms throttle, same as the per-volume path.
-            // Сводка по типам приходит один раз, сразу после скана раздела —
-            // через троттлинг её пропускать нельзя, другой такой не будет.
-            let has_categories = p.categories.is_some();
-            if has_categories
-                || phase == "finalize"
-                || phase == "exclusions"
-                || permille != last_permille
-                || last_emit.elapsed().as_millis() >= 400
-            {
-                last_permille = permille;
-                last_emit = std::time::Instant::now();
-                watch_bg.show(
-                    &sink_bg,
-                    JobProgress {
-                        job_id: job_id.clone(),
-                        phase: phase.into(),
-                        percent: permille / 10,
-                        blocks_done: p.blocks_done,
-                        blocks_total: p.blocks_total,
-                        speed_mbps: p.speed_bps as f64 / 1_000_000.0,
-                        volume_index: 0,
-                        volume_count: 1,
-                        volume: tr!("lib.disk_label", disk = disk_number, model = model)
-                            .into_owned(),
-                        image_file_name: image_name.clone(),
-                        categories: p.categories.clone().unwrap_or_default(),
-                        excluded_files: p.excluded.map(|(f, _)| f),
-                        excluded_bytes: p.excluded.map(|(_, b)| b),
-                        stalled_secs: None,
-                    },
-                );
-            }
-            #[cfg(feature = "a07-lab-gate")]
-            a07_lab_gate(&job_id, phase, p.blocks_done, p.blocks_total)?;
-            backup_callback_checkpoint(&cancel_bg)
-        })?;
+        let mut copy = backup_run::CopyProgress::new(&progress, speed_limit_mbps);
+        let summary = backup_disk(&request, |p| copy.report(p))?;
 
         // Optional post-backup verification — emit "verify" progress so the UI
         // shows "Проверка…", and FAIL the run on any checksum mismatch (a bad
         // image must never be reported as success).
         let mut verify_cancelled = false;
         if validate_after {
-            let mut v_permille = u64::MAX;
-            let mut v_emit = std::time::Instant::now();
-            let mut v_rate = VerifyRate::new(&summary.image_path, keys_for_verify.as_ref());
-            let verified = verify_image_scoped(
+            verify_cancelled = backup_run::verify_copy(
+                &progress,
                 &summary.image_path,
                 keys_for_verify.as_ref(),
                 verify_scope,
-                |done, total| {
-                    if cancel_bg.load(Ordering::SeqCst) || watch_bg.abandoned() {
-                        return Err(OwnBackupError::Cancelled);
-                    }
-                    watch_bg.alive();
-                    let mbps = v_rate.sample(done);
-                    let permille = if total > 0 { done * 1000 / total } else { 0 };
-                    if permille != v_permille || v_emit.elapsed().as_millis() >= 400 {
-                        v_permille = permille;
-                        v_emit = std::time::Instant::now();
-                        watch_bg.show(
-                            &sink_bg,
-                            JobProgress {
-                                job_id: job_id.clone(),
-                                phase: "verify".into(),
-                                percent: permille / 10,
-                                blocks_done: done,
-                                blocks_total: total,
-                                speed_mbps: mbps,
-                                volume_index: 0,
-                                volume_count: 1,
-                                volume: tr!("lib.disk_label", disk = disk_number, model = model)
-                                    .into_owned(),
-                                image_file_name: image_name.clone(),
-                                categories: Vec::new(),
-                                excluded_files: None,
-                                excluded_bytes: None,
-                                stalled_secs: None,
-                            },
-                        );
-                    }
-                    #[cfg(feature = "a07-lab-gate")]
-                    a07_lab_gate(&job_id, "verify", done, total)?;
-                    backup_callback_checkpoint(&cancel_bg)
-                },
-            );
-            match verified {
-                Ok(v) if !v.valid() => {
-                    return Err(OwnBackupError::ImageFormat(
-                        tr!("lib.verify_failed", count = v.mismatched_blocks.len()).into_owned(),
-                    ))
-                }
-                Ok(_) => {}
-                Err(OwnBackupError::Cancelled) => verify_cancelled = true,
-                Err(e) => return Err(e),
-            }
+            )?;
         }
         Ok::<_, OwnBackupError>((summary, verify_cancelled))
     });
