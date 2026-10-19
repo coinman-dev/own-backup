@@ -72,6 +72,10 @@
     "ru": "удалить их из файловой системы образа не удалось — содержимого этих файлов в копии нет, остались только записи в каталоге; следующая копия удалит их снова, подробности — в журнале службы",
     "en": "they could not be deleted from the image's file system — the files' contents are not in the backup, only their catalog entries remain; the next backup deletes them again, details are in the service log"
   },
+  "engine.entries_kept_linux": {
+    "ru": "в Linux их пока не удалить из файловой системы образа — содержимого этих файлов в копии нет, остались только записи в каталоге",
+    "en": "on Linux they cannot be deleted from the image's file system yet — the files' contents are not in the backup, only their catalog entries remain"
+  },
   "engine_win.skip_mft_failed": {
     "ru": "перечисление по MFT не удалось: %{error}",
     "en": "listing files from the MFT failed: %{error}"

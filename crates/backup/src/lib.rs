@@ -66,6 +66,11 @@ pub mod exclusion_corpus;
 
 #[cfg(target_os = "linux")]
 pub mod engine_linux;
+// The engine's Linux platform. Nothing drives the engine through it until
+// Linux moves onto the shared pipeline (L1).
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+mod engine_platform_linux;
 #[cfg(target_os = "linux")]
 pub mod linux_device;
 #[cfg(target_os = "linux")]
