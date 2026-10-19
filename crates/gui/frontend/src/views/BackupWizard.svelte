@@ -2257,7 +2257,9 @@
                 <div class="adv-hint flush">
                   {job.advanced.after_backup === 'sleep'
                     ? m.wiz_adv_after_sleep_hint()
-                    : m.wiz_adv_after_shutdown_hint()}
+                    : isWindows()
+                      ? m.wiz_adv_after_shutdown_hint()
+                      : m.wiz_adv_after_shutdown_hint_linux()}
                   {m.wiz_adv_after_only_if()}
                 </div>
               {/if}

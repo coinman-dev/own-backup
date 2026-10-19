@@ -108,8 +108,12 @@
         }
       }
       if (letters.length === 0) {
+        // Windows numbers the disk; Linux names it (`/dev/nbd0` → «Диск nbd0»).
         const mMatch = mnt.physical_path.match(/PhysicalDrive(\d+)/i);
-        letters.push(mMatch ? m.tools_disk_n({ n: mMatch[1] }) : m.tools_disk());
+        const linuxName = mnt.physical_path.startsWith('/') ? mnt.physical_path.split('/').pop() : '';
+        letters.push(
+          mMatch ? m.tools_disk_n({ n: mMatch[1] }) : linuxName ? m.tools_disk_n({ n: linuxName }) : m.tools_disk(),
+        );
       }
       const active = toolsState.mountPath.toLowerCase() === mnt.image_path.toLowerCase();
       return {

@@ -667,6 +667,7 @@
   "wiz_adv_after_shutdown": "Shut down the computer",
   "wiz_adv_after_sleep_hint": "A minute after it finishes.",
   "wiz_adv_after_shutdown_hint": "Windows warns a minute and a half ahead; cancel with the command shutdown /a. Unsaved documents are not force-closed.",
+  "wiz_adv_after_shutdown_hint_linux": "The system warns everyone logged in a minute and a half ahead; cancel with the command shutdown -c. Unsaved documents may be lost: programs close with the session.",
   "wiz_adv_after_only_if": "Only if no other backups are queued; not after a backup stopped by hand, and not while a retry is pending.",
   "wiz_adv_performance": "Performance",
   "wiz_adv_low_priority": "Low priority — stay out of the way",

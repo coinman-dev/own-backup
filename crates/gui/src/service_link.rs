@@ -216,7 +216,10 @@ fn unreachable_message() -> String {
     let name = own_backup_common::WINDOWS_SERVICE_DISPLAY_NAME;
     // On the medium "install it" is not advice anyone can follow.
     if own_backup_common::media_mode::is_media_mode() {
+        #[cfg(target_os = "windows")]
         return tr!("service_link.media_engine_silent", name = name).into_owned();
+        #[cfg(not(target_os = "windows"))]
+        return tr!("service_link.media_engine_silent_linux", name = name).into_owned();
     }
     #[cfg(target_os = "windows")]
     let (start_hint, install_hint) = (

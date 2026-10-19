@@ -12,6 +12,10 @@
     "ru": "Движок «%{name}» не отвечает. Запустите его из консоли носителя:\n  own-backup-service.exe --run --media",
     "en": "The engine “%{name}” is not responding. Start it from the media console:\n  own-backup-service.exe --run --media"
   },
+  "service_link.media_engine_silent_linux": {
+    "ru": "Движок «%{name}» не отвечает. Запустите его из консоли носителя:\n  own-backup-service --run --media",
+    "en": "The engine “%{name}” is not responding. Start it from the media console:\n  own-backup-service --run --media"
+  },
   "service_link.win_start_hint": {
     "ru": "Запустите её (нужны права администратора) или перезагрузите компьютер.",
     "en": "Start it (administrator rights are needed) or restart the computer."
@@ -26,7 +30,7 @@
   },
   "service_link.linux_install_hint": {
     "ru": "установите пакет:  sudo apt install ./own-backup_*.deb\nДоступ из окна:  sudo /usr/libexec/own-backup/own-backup-service --grant-access $USER\n(затем войдите в систему заново — вы будете в группе «%{group}»).",
-    "en": "install it:  sudo ./own-backup-service --install\n(sign in again after installing — you will be added to the group “%{group}”)."
+    "en": "install the package:  sudo apt install ./own-backup_*.deb\nAccess from the window:  sudo /usr/libexec/own-backup/own-backup-service --grant-access $USER\n(then sign in again — you will be in the group “%{group}”)."
   },
   "service_link.installed_not_running": {
     "ru": "Служба «%{name}» установлена, но не запущена. %{hint}",
