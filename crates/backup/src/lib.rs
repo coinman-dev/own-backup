@@ -47,6 +47,7 @@ pub mod san_policy;
 /// Шифрование копий: ключи задания, ключ цепочки, шифр кластеров (`.ai/PLAN.md` §7).
 pub mod seal;
 pub mod secrets;
+pub mod sector_restore;
 pub mod sidecar;
 pub mod source_identity;
 pub mod table_merge;
