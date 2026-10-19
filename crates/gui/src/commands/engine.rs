@@ -713,6 +713,9 @@ pub async fn verify_now(
         .await
 }
 
+/// A refusal that asks about duplicate identities (Linux) comes back as JSON
+/// — `{"identity_clashes": [...], "message": "..."}` — so the window decides
+/// from the list, not from the words.
 #[tauri::command]
 pub async fn mount_backup(
     state: State<'_, GuiState>,
@@ -720,17 +723,28 @@ pub async fn mount_backup(
     read_write: Option<bool>,
     password: Option<String>,
     recovery_key: Option<String>,
+    identity_choice: Option<own_backup_common::engine_dto::IdentityChoice>,
 ) -> Result<String, String> {
     state
         .link
         .client()
         .await?
-        .mount_image(
+        .mount_image_choosing(
             &image_path,
             read_write.unwrap_or(false),
+            identity_choice,
             &secret_of(password, recovery_key),
         )
         .await
+        .map_err(|s| {
+            let clashes = own_backup_client::identity_clashes_in(&s);
+            if clashes.is_empty() {
+                s.message().to_string()
+            } else {
+                serde_json::json!({ "identity_clashes": clashes, "message": s.message() })
+                    .to_string()
+            }
+        })
 }
 
 /// Base images the machine can build a boot medium on. Empty is not an error:

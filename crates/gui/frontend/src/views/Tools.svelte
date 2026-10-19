@@ -78,6 +78,21 @@
   // must follow a change of language. An error the service sent stays as it is.
   let mountMsg: (() => string) | null = $state(null);
   let mountErr: string | null = $state(null);
+  /** The service asked about identities the copy shares with this machine's
+   *  own devices (Linux): what it said, and the secret to retry with. */
+  let mountClash: { message: string; secret?: ArchiveSecret } | null = $state(null);
+
+  /** The structured refusal `mount_backup` returns for duplicate identities. */
+  function identityClashOf(e: unknown): string | null {
+    try {
+      const v = JSON.parse(String(e));
+      return Array.isArray(v?.identity_clashes) && v.identity_clashes.length > 0
+        ? String(v.message ?? '')
+        : null;
+    } catch {
+      return null;
+    }
+  }
   let mountBusy = $state(false);
 
   let activeMounts: ActiveMount[] = $state([]);
@@ -173,16 +188,17 @@
   }
 
   async function mount() {
-    await withArchiveKey(toolsState.mountPath, mountWith);
+    await withArchiveKey(toolsState.mountPath, (secret) => mountWith(secret));
   }
 
-  async function mountWith(secret?: ArchiveSecret) {
+  async function mountWith(secret?: ArchiveSecret, identityChoice?: 'keep') {
     mountBusy = true;
     mountMsg = null;
     mountErr = null;
+    mountClash = null;
     isRefreshingDisks = true;
     try {
-      await api.mountBackup(toolsState.mountPath, toolsState.rwMode, secret);
+      await api.mountBackup(toolsState.mountPath, toolsState.rwMode, secret, identityChoice);
       await Promise.all([loadData(), refreshVolumes()]);
       // The disk may need a moment for Windows to assign a letter; poll briefly.
       let letters = mountedLettersFor(toolsState.mountPath);
@@ -199,6 +215,12 @@
           where: found || m.tools_see_explorer(),
         });
     } catch (e) {
+      const clash = identityClashOf(e);
+      if (clash !== null) {
+        // Not a failure of the password: a question for the person.
+        mountClash = { message: clash, secret };
+        return;
+      }
       mountErr = String(e);
       // Rethrown so a wrong password keeps the unlock dialog open with the
       // reason in it, instead of closing as though the mount had worked.
@@ -207,6 +229,11 @@
       mountBusy = false;
       isRefreshingDisks = false;
     }
+  }
+
+  async function mountKeepingDuplicates() {
+    const secret = mountClash?.secret;
+    await mountWith(secret, 'keep').catch(() => {});
   }
 
   async function unmount() {
@@ -336,6 +363,13 @@
     </div>
     {#if mountMsg}<div class="banner ok">{mountMsg()}</div>{/if}
     {#if mountErr}<div class="banner err">{mountErr}</div>{/if}
+    {#if mountClash}
+      <div class="banner err">
+        {mountClash.message}
+        <div><button class="btn" disabled={mountBusy} onclick={mountKeepingDuplicates}
+          >{m.tools_mount_keep_duplicates()}</button></div>
+      </div>
+    {/if}
   </div>
 
   <div class="tool-card">

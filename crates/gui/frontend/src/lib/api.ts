@@ -125,8 +125,20 @@ export const api = {
     invoke<RestoreSummary>('restore_now', { imagePath, target, ...secretArgs(secret) }),
   verifyNow: (imagePath: string, secret?: ArchiveSecret) =>
     invoke<VerifySummary>('verify_now', { imagePath, ...secretArgs(secret) }),
-  mountBackup: (imagePath: string, readWrite?: boolean, secret?: ArchiveSecret) =>
-    invoke<string>('mount_backup', { imagePath, readWrite, ...secretArgs(secret) }),
+  /** A refusal about duplicate identities (Linux) rejects with a JSON string
+   *  `{identity_clashes, message}`; `identityChoice: 'keep'` mounts anyway. */
+  mountBackup: (
+    imagePath: string,
+    readWrite?: boolean,
+    secret?: ArchiveSecret,
+    identityChoice?: 'keep',
+  ) =>
+    invoke<string>('mount_backup', {
+      imagePath,
+      readWrite,
+      ...secretArgs(secret),
+      identityChoice,
+    }),
   unmountBackup: (imagePath: string) => invoke<void>('unmount_backup', { imagePath }),
   readImageInfo: (imagePath: string, secret?: ArchiveSecret) =>
     invoke<ImageInfo>('read_image_info', { imagePath, ...secretArgs(secret) }),

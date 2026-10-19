@@ -846,6 +846,7 @@
   "tools_see_explorer": "see File Explorer",
   "tools_mounted_msg": "Mounted ({mode}): {where}. You can open it in File Explorer.",
   "tools_unmounted_msg": "Image unmounted.",
+  "tools_mount_keep_duplicates": "Mount, keeping the duplicates",
   "tools_blocks": [
     {
       "declarations": [

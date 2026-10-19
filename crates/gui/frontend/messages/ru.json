@@ -872,6 +872,7 @@
   "tools_see_explorer": "см. проводник",
   "tools_mounted_msg": "Подключено ({mode}): {where}. Открыть можно в проводнике.",
   "tools_unmounted_msg": "Образ отключён.",
+  "tools_mount_keep_duplicates": "Смонтировать, оставив повторы",
   "tools_blocks": [
     {
       "declarations": [
