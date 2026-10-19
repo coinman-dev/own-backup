@@ -7,6 +7,7 @@
   import type { Snippet } from 'svelte';
   import { formatBytes } from '../lib/format';
   import { diskSegments as computeSegments } from '../lib/diskLayout';
+  import { diskCaption, diskTableText } from '../lib/diskNames';
   import type { DiskInfo, PartitionInfo } from '../lib/types';
   import { m } from '../lib/paraglide/messages';
 
@@ -141,9 +142,6 @@
     const guid = (p.gpt_type_guid || '').replace(/[{}]/g, '').toUpperCase();
     return GPT_TYPE_NAMES[guid]?.() ?? '';
   }
-  function tableLabel(t: string): string {
-    return t === 'gpt' ? 'GPT' : t === 'mbr' ? 'MBR' : t.toUpperCase();
-  }
   function partDevice(p: PartitionInfo): string | null {
     return p.volume_device ? p.volume_device : null;
   }
@@ -192,7 +190,6 @@
   const flexOf = (seg: DiskSeg) =>
     seg.share != null ? `flex: 0 0 ${seg.share}%` : `flex: ${seg.size} 1 0`;
 
-  const diskDigits = $derived(disk.device_id.replace(/\D+/g, '') || '');
   // A partition is highlighted if its device is in `selected` OR its index is
   // in `selectedIndices` (the latter also covers letterless partitions).
   function isSelP(p: PartitionInfo, dev: string | null): boolean {
@@ -247,13 +244,13 @@
           {m.dmap_bootable()}
         </label>
       {/if}
-      <span class="disk-meta">{formatBytes(disk.size_bytes)} · {tableLabel(disk.partition_table)}</span>
+      <span class="disk-meta">{formatBytes(disk.size_bytes)} · {diskTableText(disk)}</span>
     </span>
   </div>
   <div class="disk-body">
     <div class="disk-ico">
       <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="var(--disk-icon)" stroke-width="1.6"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>
-      <div class="disk-name">{m.dmap_disk({ n: diskDigits })}</div>
+      <div class="disk-name">{diskCaption(disk)}</div>
     </div>
     <div class="bar" class:grid={!!slots}>
       {#each segments as seg}

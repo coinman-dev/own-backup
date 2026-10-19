@@ -15,6 +15,7 @@
   import { examplePath, joinPath } from '../lib/paths';
   import { caps, ensureCapabilities, dropUnsupported } from '../lib/capabilitiesStore.svelte';
   import { isWindows } from '../lib/platformStore.svelte';
+  import { diskCaption, diskTableText } from '../lib/diskNames';
   import type { DestinationCheck } from '../lib/types';
 
   interface Props {
@@ -194,9 +195,6 @@
   // Unknown / unformatted → empty string (the UI shows nothing, not "—").
   function fsLabel(fs: string): string {
     return FS_LABELS[fs] ?? (fs === 'unknown' ? '' : fs);
-  }
-  function tableLabel(t: string): string {
-    return t === 'gpt' ? 'GPT' : t === 'mbr' ? 'MBR' : t.toUpperCase();
   }
 
   // Openable device for a partition (letter "C:" or a `\\?\Volume{GUID}` path
@@ -1609,13 +1607,13 @@
                     <div class="disk-head">
                       <span class="disk-model">{d.model || d.device_id}</span>
                       <span class="disk-head-right">
-                        <span class="disk-meta">{formatBytes(d.size_bytes)} · {tableLabel(d.partition_table)}</span>
+                        <span class="disk-meta">{formatBytes(d.size_bytes)} · {diskTableText(d)}</span>
                       </span>
                     </div>
                     <div class="disk-body">
                       <div class="disk-ico">
                         <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="var(--disk-icon)" stroke-width="1.6"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>
-                        <div class="disk-name">{m.wiz_disk_n({ n: d.device_id.replace(/\D+/g, '') || '' })}</div>
+                        <div class="disk-name">{diskCaption(d)}</div>
                       </div>
                       <div class="bar">
                         {#each diskSegments(d) as seg}
@@ -1653,13 +1651,13 @@
                         <span>{m.wiz_boot_toggle()}</span>
                       </label>
                       {/if}
-                      <span class="disk-meta">{formatBytes(d.size_bytes)} · {tableLabel(d.partition_table)}</span>
+                      <span class="disk-meta">{formatBytes(d.size_bytes)} · {diskTableText(d)}</span>
                     </span>
                   </div>
                   <div class="disk-body">
                     <div class="disk-ico">
                       <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="var(--disk-icon)" stroke-width="1.6"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>
-                      <div class="disk-name">{m.wiz_disk_n({ n: d.device_id.replace(/\D+/g, '') || '' })}</div>
+                      <div class="disk-name">{diskCaption(d)}</div>
                     </div>
                     <div class="bar">
                       {#each diskSegments(d) as seg}
