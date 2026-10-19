@@ -625,6 +625,227 @@ pub fn partition_guids_here(sys_class_block: &Path) -> std::collections::HashSet
         .collect()
 }
 
+// ---- one door for every change ---------------------------------------------
+
+/// The copy of the boot configuration taken before a change, and whether it
+/// will still be there after a restart.
+#[derive(Debug, Clone)]
+pub struct SafetyCopy {
+    pub path: PathBuf,
+    /// False on the boot medium, whose files live in RAM.
+    pub durable: bool,
+}
+
+/// What someone asked to change. Partitions are named by their device, not
+/// by a disk number: Linux has none that lasts.
+#[derive(Debug, Clone)]
+pub enum Action {
+    Rename {
+        entry: u16,
+        name: String,
+    },
+    SetActive {
+        entry: u16,
+        on: bool,
+        force: bool,
+    },
+    Move {
+        entry: u16,
+        to: usize,
+    },
+    Delete {
+        entry: u16,
+        force: bool,
+    },
+    /// A new entry for a loader on the partition `hd` describes.
+    Create {
+        name: String,
+        hd: HardDrive,
+        file: String,
+        position: Option<usize>,
+    },
+    BootNext {
+        entry: Option<u16>,
+    },
+    Timeout {
+        secs: u16,
+    },
+}
+
+/// What [`Efivarfs::apply_action`] did.
+#[derive(Debug, Clone)]
+pub struct Done {
+    pub message: String,
+    pub safety_copy: SafetyCopy,
+    pub created: Option<u16>,
+}
+
+impl Efivarfs {
+    /// Copy the whole boot configuration into `dir`, named by the second, in
+    /// the format both systems read (`BootBackup`).
+    pub fn safety_copy(&self, dir: &Path, durable: bool) -> Result<SafetyCopy> {
+        std::fs::create_dir_all(dir)?;
+        let path = dir.join(format!(
+            "boot-{}.json",
+            chrono::Local::now().format("%Y%m%d-%H%M%S%.3f")
+        ));
+        let machine = own_backup_common::media_mode::meaningful_machine_name().unwrap_or_default();
+        std::fs::write(&path, self.export(&machine)?.to_json()?)?;
+        info!(path = %path.display(), durable, "efivars: safety copy taken");
+        Ok(SafetyCopy { path, durable })
+    }
+
+    /// Every change to the boot configuration goes through here, for the same
+    /// two rules as on Windows (`efivars_win::apply_action`): a copy is taken
+    /// before anything is written, and the entry this machine booted from is
+    /// not removed or hidden unless someone says so out loud (`force`).
+    pub fn apply_action(&self, action: Action, copy_dir: &Path, durable: bool) -> Result<Done> {
+        if let Some((entry, force, deleting)) = match &action {
+            Action::Delete { entry, force } => Some((*entry, *force, true)),
+            Action::SetActive {
+                entry,
+                on: false,
+                force,
+            } => Some((*entry, *force, false)),
+            _ => None,
+        } {
+            if self.read_config()?.current == Some(entry) && !force {
+                let entry = format!("{entry:04X}");
+                return Err(dev(if deleting {
+                    tr!("efivars_win.current_entry_delete", entry = entry)
+                } else {
+                    tr!("efivars_win.current_entry_hide", entry = entry)
+                }));
+            }
+        }
+        let safety_copy = self
+            .safety_copy(copy_dir, durable)
+            .map_err(|e| dev(tr!("efivars_win.safety_copy_failed", error = e)))?;
+
+        let mut created = None;
+        let message = match action {
+            Action::Rename { entry, name } => {
+                let was = self
+                    .read_entry(entry)?
+                    .map(|o| o.description)
+                    .unwrap_or_default();
+                self.set_description(entry, &name)?;
+                tr!(
+                    "efivars_win.done_renamed",
+                    entry = format!("{entry:04X}"),
+                    was = was,
+                    name = name
+                )
+                .into_owned()
+            }
+            Action::SetActive { entry, on, .. } => {
+                self.set_active(entry, on)?;
+                let entry = format!("{entry:04X}");
+                if on {
+                    tr!("efivars_win.done_shown", entry = entry).into_owned()
+                } else {
+                    tr!("efivars_win.done_hidden", entry = entry).into_owned()
+                }
+            }
+            Action::Move { entry, to } => {
+                let order = self.read_config()?.order;
+                let new_order = efivars::reorder(&order, entry, to);
+                self.set_order(&new_order)?;
+                tr!(
+                    "efivars_win.done_order",
+                    order = new_order
+                        .iter()
+                        .map(|x| format!("{x:04X}"))
+                        .collect::<Vec<_>>()
+                        .join(" → ")
+                )
+                .into_owned()
+            }
+            Action::Delete { entry, .. } => {
+                let was = self
+                    .read_entry(entry)?
+                    .map(|o| o.description)
+                    .unwrap_or_default();
+                self.delete_entry(entry)?;
+                tr!(
+                    "efivars_win.done_deleted",
+                    entry = format!("{entry:04X}"),
+                    was = was
+                )
+                .into_owned()
+            }
+            Action::Create {
+                name,
+                hd,
+                file,
+                position,
+            } => {
+                let file = file.replace('/', "\\");
+                let file = if file.starts_with('\\') {
+                    file
+                } else {
+                    format!("\\{file}")
+                };
+                let n = self.create_entry(&name, &hd, &file, position)?;
+                created = Some(n);
+                tr!(
+                    "efivars_win.done_created",
+                    entry = format!("{n:04X}"),
+                    name = name,
+                    file = file
+                )
+                .into_owned()
+            }
+            Action::BootNext { entry } => {
+                self.set_boot_next(entry)?;
+                match entry {
+                    Some(n) => {
+                        tr!("efivars_win.done_boot_next", entry = format!("{n:04X}")).into_owned()
+                    }
+                    None => tr!("efivars_win.done_boot_next_cleared").into_owned(),
+                }
+            }
+            Action::Timeout { secs } => {
+                self.set_timeout(secs)?;
+                tr!("efivars_win.done_timeout", secs = secs).into_owned()
+            }
+        };
+        Ok(Done {
+            message,
+            safety_copy,
+            created,
+        })
+    }
+
+    /// The entry that already starts `file` from the partition `hd` names,
+    /// if there is one.
+    pub fn entry_for(&self, hd: &HardDrive, file: &str) -> Result<Option<u16>> {
+        let want = hd.partition_guid().map(|g| g.to_ascii_uppercase());
+        Ok(self.read_config()?.entries.iter().find_map(|e| {
+            let same_part = e
+                .option
+                .hard_drive()
+                .and_then(|h| h.partition_guid())
+                .map(|g| g.to_ascii_uppercase())
+                == want;
+            let same_file = e
+                .option
+                .file_path()
+                .is_some_and(|f| efivars::same_efi_path(&f, file));
+            (same_part && same_file).then_some(e.number)
+        }))
+    }
+}
+
+/// Where the safety copies go: the service's data directory on an installed
+/// system, the medium's RAM elsewhere (and then said to be temporary).
+pub fn safety_copy_dir(data_dir: &Path) -> (PathBuf, bool) {
+    (
+        data_dir.join("boot"),
+        !own_backup_common::media_mode::is_media_mode(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -828,5 +1049,66 @@ mod tests {
         let got = partition_guids_here(root.path());
         assert_eq!(got.len(), 1);
         assert!(got.contains(&ESP_GUID.to_uppercase()));
+    }
+
+    #[test]
+    fn every_change_takes_a_copy_first_and_spares_the_entry_booted_from() {
+        let (root, fs) = fake();
+        entry(&fs, 0, "debian");
+        entry(&fs, 1, "old");
+        put(&fs, "BootOrder", 7, &efivars::serialize_boot_order(&[0, 1]));
+        put(&fs, "BootCurrent", 6, &0u16.to_le_bytes());
+        let copies = root.path().join("copies");
+
+        let refused = fs
+            .apply_action(
+                Action::Delete {
+                    entry: 0,
+                    force: false,
+                },
+                &copies,
+                true,
+            )
+            .unwrap_err();
+        assert!(refused.to_string().contains("0000"), "{refused}");
+        assert!(fs.read_entry(0).unwrap().is_some());
+        assert!(!copies.exists(), "nothing was done, so nothing was copied");
+
+        let done = fs
+            .apply_action(
+                Action::Delete {
+                    entry: 1,
+                    force: false,
+                },
+                &copies,
+                true,
+            )
+            .unwrap();
+        assert!(done.safety_copy.path.is_file());
+        let saved =
+            BootBackup::load(&std::fs::read_to_string(&done.safety_copy.path).unwrap()).unwrap();
+        assert!(saved.variables.iter().any(|v| v.name == "Boot0001"));
+        assert!(fs.read_entry(1).unwrap().is_none());
+
+        let created = fs
+            .apply_action(
+                Action::Create {
+                    name: "Windows Boot Manager".into(),
+                    hd: hd(),
+                    file: "EFI/Microsoft/Boot/bootmgfw.efi".into(),
+                    position: None,
+                },
+                &copies,
+                true,
+            )
+            .unwrap()
+            .created
+            .unwrap();
+        assert_eq!(
+            fs.entry_for(&hd(), r"\EFI\Microsoft\Boot\bootmgfw.efi")
+                .unwrap(),
+            Some(created)
+        );
+        assert_eq!(fs.read_config().unwrap().order, vec![0, created]);
     }
 }

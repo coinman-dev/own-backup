@@ -555,6 +555,11 @@ pub struct RestorePlan {
     /// compare against and the mismatch cannot be detected, only said.
     #[serde(default)]
     pub target_disk_id: Option<TargetDiskId>,
+    /// Linux: the target disk's device (`/dev/disk/by-id/…`, `/dev/sdb`).
+    /// Linux disks have no stable number, so there `target_disk` names
+    /// nothing and this is the target; Windows ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_device: Option<String>,
     pub ops: Vec<RestoreOp>,
 }
 
@@ -611,6 +616,7 @@ impl RestorePlan {
             image_path,
             verify_after: false,
             target_disk_id: None,
+            target_device: None,
             ops,
         }
     }
@@ -1023,6 +1029,7 @@ mod tests {
             image_path: "x.vhdx".into(),
             verify_after: false,
             target_disk_id: None,
+            target_device: None,
             ops: vec![
                 RestoreOp::RestoreBootEntries,
                 RestoreOp::RefreshDiskState,

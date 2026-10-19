@@ -1,0 +1,19 @@
+{
+  "_version": 2,
+  "restore_disk_linux.past_partition_end": {
+    "ru": "Запись за конец раздела: смещение %{offset}, длина %{len}, размер раздела %{size} байт.",
+    "en": "Write past the end of the partition: offset %{offset}, length %{len}, partition size %{size} bytes."
+  },
+  "restore_disk_linux.legacy_manifest": {
+    "ru": "Это набор старого формата (.obdm с отдельными образами томов); в Linux восстанавливается только копия диска одним образом (.vhdx, .qcow2, .obk).",
+    "en": "This is an old-format set (.obdm with separate volume images); on Linux only a single-image disk copy (.vhdx, .qcow2, .obk) can be restored."
+  },
+  "restore_disk_linux.not_a_disk_image": {
+    "ru": "В образе нет описания целого диска — это копия тома, а не загрузочная копия диска.",
+    "en": "The image has no whole-disk manifest — it is a volume copy, not a bootable disk copy."
+  },
+  "restore_disk_linux.block_past_disk": {
+    "ru": "Блок копии по смещению %{offset} не помещается на диск назначения (%{size} байт).",
+    "en": "The copy's block at offset %{offset} does not fit the target disk (%{size} bytes)."
+  }
+}

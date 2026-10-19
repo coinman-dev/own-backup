@@ -126,7 +126,10 @@ impl BackupServiceImpl {
         // Which device is under that number NOW. `PhysicalDriveN` is a slot:
         // unplug a USB disk and plug another in, and the number moves (audit
         // AUD-01, point 5).
+        #[cfg(not(target_os = "linux"))]
         let now = live_disk_id(plan.target_disk).await;
+        #[cfg(target_os = "linux")]
+        let now = restore_linux::live_disk_id(plan);
         match plan
             .target_disk_id
             .as_ref()
@@ -179,7 +182,10 @@ impl BackupServiceImpl {
         }
         correct_disk_size(plan);
 
-        let results = check_plan(plan, &ctx);
+        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+        let mut results = check_plan(plan, &ctx);
+        #[cfg(target_os = "linux")]
+        results.extend(own_backup_core::restore_exec::linux_refusals(plan));
         for r in &results {
             match r.level {
                 CheckLevel::Error => tracing::warn!(
@@ -254,6 +260,10 @@ impl BackupServiceImpl {
                 ctx.targets.iter().map(|t| t.index).collect()
             }
         };
+        // Linux disks are named by device, not number: the facts above came
+        // back empty or unsure, and these replace them.
+        #[cfg(target_os = "linux")]
+        restore_linux::fill_context(plan, &mut ctx);
         ctx
     }
 }
@@ -390,7 +400,7 @@ async fn live_disk_id(disk: u32) -> own_backup_common::restore_plan::TargetDiskI
     id
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 async fn live_disk_id(_disk: u32) -> own_backup_common::restore_plan::TargetDiskId {
     own_backup_common::restore_plan::TargetDiskId::default()
 }
@@ -783,7 +793,9 @@ fn correct_disk_size(plan: &mut own_backup_common::restore_plan::RestorePlan) {
             }
         }
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    restore_linux::correct_disk_size(plan);
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         let _ = plan;
     }
@@ -791,7 +803,7 @@ fn correct_disk_size(plan: &mut own_backup_common::restore_plan::RestorePlan) {
 
 /// Message returned by the direct engine RPCs when built off Windows (the VHDX
 /// engine is Windows-only for now — see plan phase 8).
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn engine_msg() -> String {
     tr!("grpc_server.engine_windows_only").into_owned()
 }
@@ -2448,7 +2460,11 @@ impl BackupService for BackupServiceImpl {
                 duration_secs: summary.duration.as_secs_f64(),
             })
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "linux")]
+        {
+            self.restore_disk_linux(req).await
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         {
             let _ = req;
             Err(Status::unimplemented(engine_msg()))
@@ -2713,10 +2729,9 @@ impl BackupService for BackupServiceImpl {
         req: Request<JsonRequest>,
     ) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
-        // The plan executor is Windows-only so far. Previewing a plan that can
-        // never be applied — or accepting it and failing later — answers a
-        // question nobody asked (`.ai/PLAN.md` §6, stage 3).
-        if cfg!(not(target_os = "windows")) {
+        // No plan executor here: previewing a plan that can never be applied
+        // answers a question nobody asked.
+        if cfg!(not(any(target_os = "windows", target_os = "linux"))) {
             return Err(Status::unimplemented(
                 tr!("grpc_server.engine_windows_only").into_owned(),
             ));
@@ -2762,8 +2777,35 @@ impl BackupService for BackupServiceImpl {
         // Stamp the plan with WHICH DEVICE the user is looking at. The client
         // sends this plan back to be applied, and by then `PhysicalDriveN` may
         // point somewhere else entirely (audit AUD-01, point 5).
-        p.plan.target_disk_id = Some(live_disk_id(p.plan.target_disk).await);
-        let results = check_plan(&p.plan, &ctx);
+        #[cfg(not(target_os = "linux"))]
+        {
+            p.plan.target_disk_id = Some(live_disk_id(p.plan.target_disk).await);
+        }
+        #[cfg(target_os = "linux")]
+        {
+            p.plan.target_disk_id = Some(restore_linux::live_disk_id(&p.plan));
+        }
+        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+        let mut results = check_plan(&p.plan, &ctx);
+        // What this engine does not do, and what the restore would duplicate
+        // on this machine — said by the preview, not halfway through the run.
+        #[cfg(target_os = "linux")]
+        let identity_clashes = {
+            results.extend(own_backup_core::restore_exec::linux_refusals(&p.plan));
+            let plan = p.plan.clone();
+            let (archive, found) = tokio::task::spawn_blocking(move || {
+                let found = restore_linux::plan_clashes(&plan, archive.as_ref());
+                (archive, found)
+            })
+            .await
+            .map_err(|e| Status::internal(format!("identity check panicked: {e}")))?;
+            let _ = archive;
+            let found = found.map_err(|e| Status::internal(e.to_string()))?;
+            results.extend(restore_linux::clash_findings(&found));
+            found
+        };
+        #[cfg(not(target_os = "linux"))]
+        let identity_clashes: Vec<own_backup_common::engine_dto::IdentityClashDto> = Vec::new();
 
         // The dry run is where a restore usually stops, and until now it left no
         // trace at all: the user saw a red box in a dialog and the log had
@@ -2803,6 +2845,7 @@ impl BackupService for BackupServiceImpl {
             "plan": p.plan,
             "results": results,
             "letter_changes": letter_changes,
+            "identity_clashes": identity_clashes,
         }))
     }
 
@@ -2811,14 +2854,14 @@ impl BackupService for BackupServiceImpl {
         req: Request<JsonRequest>,
     ) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
-        // The plan executor is Windows-only so far. Previewing a plan that can
-        // never be applied — or accepting it and failing later — answers a
-        // question nobody asked (`.ai/PLAN.md` §6, stage 3).
-        if cfg!(not(target_os = "windows")) {
+        // No plan executor here.
+        if cfg!(not(any(target_os = "windows", target_os = "linux"))) {
             return Err(Status::unimplemented(
                 tr!("grpc_server.engine_windows_only").into_owned(),
             ));
         }
+        #[cfg(target_os = "linux")]
+        crate::polkit::authorize(&req, crate::polkit::Action::Restore).await?;
         use own_backup_common::restore_plan::RestorePlan;
         use own_backup_common::restore_state::RunStatus;
 
@@ -2834,6 +2877,11 @@ impl BackupService for BackupServiceImpl {
             /// `passphrases`, which put a source volume's own container back.
             #[serde(default, flatten)]
             secret: ManualSecret,
+            /// Linux: what to do about identities the restore would duplicate
+            /// on this machine (`restore_linux::identity_gate`).
+            #[serde(default)]
+            #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+            identity_choice: Option<own_backup_common::engine_dto::IdentityChoice>,
         }
         let raw = req.into_inner().json;
         // A bare plan is still accepted — nothing needs a passphrase unless it
@@ -2842,12 +2890,14 @@ impl BackupService for BackupServiceImpl {
             mut plan,
             passphrases,
             secret,
+            identity_choice,
         } = serde_json::from_str::<In>(&raw)
             .or_else(|_| {
                 serde_json::from_str::<RestorePlan>(&raw).map(|plan| In {
                     plan,
                     passphrases: Default::default(),
                     secret: Default::default(),
+                    identity_choice: None,
                 })
             })
             .map_err(|e| Status::invalid_argument(format!("bad plan JSON: {e}")))?;
@@ -2873,6 +2923,23 @@ impl BackupService for BackupServiceImpl {
                 tr!("grpc_server.plan_refused", refusals = refusals.join("\n")).into_owned(),
             ));
         }
+        // What the restore would duplicate here needs the person's choice,
+        // asked before the machine is reserved.
+        #[cfg(target_os = "linux")]
+        let archive = {
+            let checked = plan.clone();
+            let (archive, found) = tokio::task::spawn_blocking(move || {
+                let found = restore_linux::plan_clashes(&checked, archive.as_ref());
+                (archive, found)
+            })
+            .await
+            .map_err(|e| Status::internal(format!("identity check panicked: {e}")))?;
+            let found = found.map_err(|e| Status::internal(e.to_string()))?;
+            restore_linux::identity_gate(found, identity_choice)?;
+            archive
+        };
+        #[cfg(not(target_os = "linux"))]
+        let _ = identity_choice;
 
         // One destructive operation at a time, and the check IS the taking.
         // The old version read `restore_run` under one lock and wrote the new

@@ -29,10 +29,25 @@ use tracing::warn;
 #[cfg(target_os = "windows")]
 use tracing::{error, info};
 
+/// The Linux executor and its boot steps (PLAN §6, stage 3).
+#[cfg(target_os = "linux")]
+#[path = "restore_boot_linux.rs"]
+mod boot_linux;
+#[cfg(target_os = "linux")]
+#[path = "restore_exec_linux.rs"]
+mod linux;
+#[cfg(target_os = "linux")]
+pub use linux::{execute_plan, linux_refusals};
+
+// The Linux executor has its own (`linux`), and the shared helpers here do
+// not need these there.
+#[cfg(not(target_os = "linux"))]
 use own_backup_common::cancel::CancelToken;
 use own_backup_common::restore_plan::{RestoreMode, RestoreOp, RestorePlan};
 use own_backup_common::restore_state::{OpRecord, OpStatus, RestoreRunState, RunStatus};
-use own_backup_common::{tr, OwnBackupError, Result};
+use own_backup_common::tr;
+#[cfg(not(target_os = "linux"))]
+use own_backup_common::{OwnBackupError, Result};
 
 /// Where finished restore runs are kept.
 ///
@@ -876,7 +891,7 @@ fn a09_lab_gate(plan_id: uuid::Uuid, cancel: &CancelToken) -> std::result::Resul
 /// Only the boot steps do: `bcdboot` rebuilds the Windows loader, and the
 /// fallback step drops `\EFI\BOOT\BOOTX64.EFI` on the ESP. Both are asked for
 /// deliberately, and both make the partition differ from the copy on purpose.
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn touched_after_copy(ordered: &[RestoreOp], part_index: u32) -> bool {
     ordered.iter().any(|op| match op {
         RestoreOp::EnsureFallbackBootloader { esp } => esp.index == part_index,
@@ -1219,7 +1234,7 @@ pub fn luks_header_for(
 /// the backup holds is a plain filesystem where a LUKS container used to be. A
 /// Linux system on such a partition mounts fine from a Live CD and refuses to
 /// boot on its own, which is a confusing failure unless someone says why.
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn encryption_follow_up(
     sidecar: &own_backup_backup::sidecar::Sidecar,
     part_index: u32,
@@ -1797,7 +1812,7 @@ fn add_failure_follow_ups(state: &mut RestoreRunState) {
 
 /// Linux has no restore engine yet (D15). Refusing outright is the honest
 /// answer; a stub that returned success would be worse than useless.
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub fn execute_plan(
     plan: &RestorePlan,
     _passphrases: &std::collections::HashMap<u32, String>,

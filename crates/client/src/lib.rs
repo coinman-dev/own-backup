@@ -734,6 +734,32 @@ impl BackupClient {
         parse(&reply.json).map_err(tonic::Status::internal)
     }
 
+    /// Restore a whole disk named by its device (Linux: `/dev/disk/by-id/…`;
+    /// Linux disks have no stable number). DESTRUCTIVE.
+    #[allow(clippy::result_large_err)] // the caller reads the status's details
+    pub async fn restore_device_with_status(
+        &mut self,
+        image_path: &str,
+        target_device: &str,
+        identity_choice: Option<own_backup_common::engine_dto::IdentityChoice>,
+        secret: &ArchiveSecret,
+    ) -> std::result::Result<own_backup_common::engine_dto::DiskRestoreSummaryDto, tonic::Status>
+    {
+        let mut body = serde_json::json!({
+            "manifest_path": image_path,
+            "target_device": target_device,
+            "identity_choice": identity_choice,
+        });
+        secret.add_to(&mut body);
+        let json = body.to_string();
+        let reply = self
+            .inner
+            .restore_disk(self.request(proto::JsonRequest { json }))
+            .await?
+            .into_inner();
+        parse(&reply.json).map_err(tonic::Status::internal)
+    }
+
     // --- Archive encryption (plan §7.5) -----------------------------------
 
     /// Prepare encryption for a job. **Nothing is written**: the recovery key
@@ -855,9 +881,24 @@ impl BackupClient {
         passphrases: &std::collections::HashMap<u32, String>,
         secret: &ArchiveSecret,
     ) -> Result<own_backup_common::restore_state::RestoreRunState> {
+        self.apply_restore_plan_choosing(plan, passphrases, secret, None)
+            .await
+    }
+
+    /// [`Self::apply_restore_plan`] with the person's choice about identities
+    /// the restore would duplicate on this machine (Linux; without one such a
+    /// plan is refused with the list in the status details).
+    pub async fn apply_restore_plan_choosing(
+        &mut self,
+        plan: &own_backup_common::restore_plan::RestorePlan,
+        passphrases: &std::collections::HashMap<u32, String>,
+        secret: &ArchiveSecret,
+        identity_choice: Option<own_backup_common::engine_dto::IdentityChoice>,
+    ) -> Result<own_backup_common::restore_state::RestoreRunState> {
         let mut body = serde_json::json!({
             "plan": plan,
             "passphrases": passphrases,
+            "identity_choice": identity_choice,
         });
         secret.add_to(&mut body);
         let json =

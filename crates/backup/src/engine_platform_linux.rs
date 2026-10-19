@@ -373,10 +373,11 @@ impl DiskPlatform for LinuxPlatform {
         }
     }
 
+    /// From efivarfs, in the format both systems write. A BIOS machine has
+    /// none, which the caller reports and the copy simply goes without.
     fn export_boot_entries(&self) -> Result<BootBackup> {
-        Err(OwnBackupError::NotImplemented(
-            "reading the firmware boot entries (efivarfs) on Linux".into(),
-        ))
+        let machine = own_backup_common::media_mode::meaningful_machine_name().unwrap_or_default();
+        crate::efivars_linux::Efivarfs::default().export(&machine)
     }
 
     fn remove_from_disk_image(
@@ -649,7 +650,9 @@ mod tests {
             .walk_exclusions(&file, 4096, &["*.tmp".into()], &mut |_| Ok(()))
             .unwrap()
             .is_none());
-        assert!(matches!(
+        // The boot entries are read from efivarfs now; a machine without
+        // it (BIOS, a container) says why, and is never told "not done".
+        assert!(!matches!(
             p.export_boot_entries(),
             Err(OwnBackupError::NotImplemented(_))
         ));

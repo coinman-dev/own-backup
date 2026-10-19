@@ -197,11 +197,15 @@ export const api = {
     plan: RestorePlan,
     passphrases?: Record<number, string>,
     secret?: ArchiveSecret,
+    /** Linux: 'keep' once the preview showed duplicate identities and the
+     *  person went ahead with them in front of them. */
+    identityChoice?: 'keep',
   ) =>
     invoke<RestoreRunState>('apply_restore_plan', {
       plan,
       passphrases,
       ...secretArgs(secret),
+      identityChoice,
     }),
   /** The restore in progress, or the last one that finished. Survives closing
    *  and reopening the window, and a service restart. */

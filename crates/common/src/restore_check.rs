@@ -125,6 +125,12 @@ pub enum CheckCode {
     FormatChoiceIgnored,
     /// The plan puts the machine's UEFI boot entries back from the copy.
     BootEntriesWillBeWritten,
+    /// An operation this system's restore engine does not do (Linux: format,
+    /// extend, drive letters, file-by-file restore).
+    OpUnsupportedHere,
+    /// The restored data carries an identity a device of this machine already
+    /// has (a filesystem, LUKS, LVM or md UUID, a PARTUUID).
+    IdentityClash,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2309,6 +2315,7 @@ mod tests {
             image_path: "x.vhdx".into(),
             verify_after: false,
             target_disk_id: None,
+            target_device: None,
             ops: vec![RestoreOp::RestorePartition {
                 src_index: 1,
                 dst: wrong,
@@ -2346,6 +2353,7 @@ mod tests {
             image_path: "x.vhdx".into(),
             verify_after: false,
             target_disk_id: None,
+            target_device: None,
             ops: vec![RestoreOp::RestorePartition {
                 src_index: 2,
                 dst: right,
@@ -2373,6 +2381,7 @@ mod tests {
             image_path: "x.vhdx".into(),
             verify_after: false,
             target_disk_id: None,
+            target_device: None,
             ops: vec![RestoreOp::RestorePartition {
                 src_index: 1,
                 dst: PartRef {
@@ -2420,6 +2429,7 @@ mod tests {
                 image_path: "x.vhdx".into(),
                 verify_after: false,
                 target_disk_id: None,
+                target_device: None,
                 ops: vec![RestoreOp::RestorePartition {
                     src_index: 1,
                     dst: bad,

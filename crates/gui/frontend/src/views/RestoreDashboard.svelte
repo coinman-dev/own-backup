@@ -711,6 +711,9 @@
   /** Findings from the last dry run, shown above the queue. */
   let checks = $state<CheckResult[]>([]);
   let letterChanges = $state<LetterChange[]>([]);
+  /** The last preview showed identities the restore would duplicate here
+   *  (Linux); going ahead after seeing them is the choice to keep them. */
+  let identityClashesShown = $state(false);
   let checking = $state(false);
   let checkError: string | null = $state(null);
   /** D16 — off by default: a sector restore writes only the used blocks, so old
@@ -1514,6 +1517,9 @@
     return {
       id: crypto.randomUUID(),
       target_disk: diskNumber(d),
+      // On Linux the disk is named by its device: a number derived from
+      // `/dev/sda` names nothing.
+      target_device: d.device_id,
       image_path: activeInfo?.image_path || currentPath,
       verify_after: verifyAfter,
       ops,
@@ -1707,6 +1713,7 @@
       );
       checks = res.results;
       letterChanges = res.letter_changes;
+      identityClashesShown = (res.identity_clashes?.length ?? 0) > 0;
       // Apply the plan that came BACK: the dry run resolves drive-letter
       // conflicts by editing it, and applying the one we sent would throw the
       // fix away.
@@ -1826,6 +1833,8 @@
         { ...checkedPlan, verify_after: verifyAfter },
         passphrases,
         archiveSecretFor(checkedPlan.image_path),
+        // The duplicates were in the checks the person confirmed.
+        identityClashesShown ? 'keep' : undefined,
       );
     } catch (e) {
       applyError = String(e);

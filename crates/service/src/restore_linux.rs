@@ -76,17 +76,30 @@ fn volume_clashes(
     keys: Option<&ArchiveKeys>,
     target: &str,
 ) -> own_backup_common::Result<Vec<IdentityClashDto>> {
+    let overwritten: Vec<String> = own_backup_common::linux_block::kernel_name(Path::new(target))
+        .into_iter()
+        .collect();
+    volume_clashes_against(image, keys, &overwritten, false)
+}
+
+/// Every identity the copy carries against this machine's devices, leaving
+/// out the `overwritten` ones; `with_partuuids` for a restore that writes the
+/// copy's own partition table.
+fn volume_clashes_against(
+    image: &Path,
+    keys: Option<&ArchiveKeys>,
+    overwritten: &[String],
+    with_partuuids: bool,
+) -> own_backup_common::Result<Vec<IdentityClashDto>> {
     let sidecar = own_backup_backup::sidecar::read_sidecar_with_keys(image, keys)?;
     let all: Vec<u32> = sidecar
         .disk_manifest
         .as_ref()
         .map(|d| d.layout.partitions.iter().map(|p| p.index).collect())
         .unwrap_or_default();
-    let restored = identity_check_linux::restored_identities(image, keys, &sidecar, &all, false)?;
-    let overwritten: Vec<String> = own_backup_common::linux_block::kernel_name(Path::new(target))
-        .into_iter()
-        .collect();
-    Ok(identity_check_linux::clashes_here(&restored, &overwritten))
+    let restored =
+        identity_check_linux::restored_identities(image, keys, &sidecar, &all, with_partuuids)?;
+    Ok(identity_check_linux::clashes_here(&restored, overwritten))
 }
 
 /// The volume restore's reply: the shared summary, and the duplicates the
@@ -207,6 +220,307 @@ impl BackupServiceImpl {
             summary: RestoreSummaryDto {
                 blocks_restored: summary.blocks_restored,
                 bytes_restored: summary.bytes_restored,
+                duration_secs: summary.duration.as_secs_f64(),
+            },
+            identity_clashes: kept,
+        })
+    }
+}
+
+// --- restore plans and whole-disk restore ------------------------------------
+
+use own_backup_common::restore_check::{CheckCode, CheckContext, CheckLevel, CheckResult};
+use own_backup_common::restore_plan::{RestoreOp, RestorePlan, TargetDiskId};
+
+/// Kernel name of the plan's target disk.
+fn target_name(plan: &RestorePlan) -> Option<String> {
+    plan.target_device
+        .as_deref()
+        .and_then(|d| own_backup_common::linux_block::kernel_name(Path::new(d)))
+}
+
+/// One udev property of a device (`E:<key>=` in its database record).
+fn udev_property(name: &str, key: &str) -> Option<String> {
+    use own_backup_common::linux_block as lb;
+    let (ma, mi) = lb::dev_numbers(Path::new(lb::SYS_CLASS_BLOCK), name)?;
+    let text =
+        std::fs::read_to_string(Path::new(lb::UDEV_DATA).join(format!("b{ma}:{mi}"))).ok()?;
+    let prefix = format!("E:{key}=");
+    text.lines()
+        .find_map(|l| l.strip_prefix(&prefix))
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// Who the disk the plan names is right now: serial and table GUID from the
+/// udev database, size from sysfs — the Linux answer to `live_disk_id`.
+pub(super) fn live_disk_id(plan: &RestorePlan) -> TargetDiskId {
+    let mut id = TargetDiskId::default();
+    let Some(name) = target_name(plan) else {
+        return id;
+    };
+    let sys = Path::new(own_backup_common::linux_block::SYS_CLASS_BLOCK);
+    id.size_bytes = std::fs::read_to_string(sys.join(&name).join("size"))
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .map(|s| s * 512)
+        .unwrap_or(0);
+    id.serial = udev_property(&name, "ID_SERIAL_SHORT")
+        .or_else(|| udev_property(&name, "ID_SERIAL"))
+        .unwrap_or_default();
+    id.disk_guid = udev_property(&name, "ID_PART_TABLE_UUID").unwrap_or_default();
+    id
+}
+
+/// The machine's half of the plan checks on Linux: what the target disk
+/// holds now and which of its partitions the running system stands on.
+pub(super) fn fill_context(plan: &RestorePlan, ctx: &mut CheckContext) {
+    use own_backup_common::linux_block as lb;
+    use own_backup_common::restore_check::TargetPartition;
+
+    let sys = Path::new(lb::SYS_CLASS_BLOCK);
+    ctx.targets = target_name(plan)
+        .map(|disk| {
+            lb::partitions_of(sys, &disk)
+                .into_iter()
+                .filter_map(|p| {
+                    let read = |f: &str| -> Option<u64> {
+                        std::fs::read_to_string(sys.join(&p).join(f))
+                            .ok()?
+                            .trim()
+                            .parse()
+                            .ok()
+                    };
+                    Some(TargetPartition {
+                        index: read("partition")? as u32,
+                        offset_bytes: read("start")? * 512,
+                        size_bytes: read("size")? * 512,
+                        // Knowing how full it is means mounting it; 0 is
+                        // "unknown" to the checks.
+                        used_bytes: 0,
+                        filesystem: own_backup_common::types::FileSystem::Unknown,
+                        label: String::new(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let guard = match plan.target_device.as_deref() {
+        Some(device) => own_backup_restore::protection_of_device(device),
+        None => own_backup_restore::Protection {
+            parts: Vec::new(),
+            cannot_tell: Some(tr!("restore_exec_linux_service.no_device").into_owned()),
+        },
+    };
+    ctx.target_is_system_disk = !guard.parts.is_empty();
+    ctx.protected_parts = match &guard.cannot_tell {
+        None => guard.parts,
+        Some(why) => {
+            warn!(reason = %why, "the running system's partitions on the target could not be determined — treating the whole disk as protected");
+            ctx.targets.iter().map(|t| t.index).collect()
+        }
+    };
+}
+
+/// The plan's disk size from the device itself (see `correct_disk_size`).
+pub(super) fn correct_disk_size(plan: &mut RestorePlan) {
+    let Some(device) = plan.target_device.clone() else {
+        return;
+    };
+    let Ok(dev) = own_backup_backup::linux_device::LinuxRawDevice::open_read(&device) else {
+        return;
+    };
+    let actual = dev.length();
+    for op in plan.ops.iter_mut() {
+        if let RestoreOp::WritePartitionTable { table } = op {
+            table.disk_size_bytes = actual;
+        }
+    }
+}
+
+/// Kernel names a plan overwrites: the partitions it writes into, and the
+/// whole disk when it rewrites the table.
+fn overwritten_by(plan: &RestorePlan) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(device) = plan.target_device.as_deref() else {
+        return out;
+    };
+    if plan.touches_partition_table() {
+        out.extend(target_name(plan));
+    }
+    for op in &plan.ops {
+        if let RestoreOp::RestorePartition { dst, .. } = op {
+            if let Some(node) =
+                own_backup_backup::restore_disk_linux::partition_node(device, dst.index)
+            {
+                out.extend(own_backup_common::linux_block::kernel_name(Path::new(
+                    &node,
+                )));
+            }
+        }
+    }
+    out
+}
+
+/// What applying `plan` would duplicate on this machine.
+pub(super) fn plan_clashes(
+    plan: &RestorePlan,
+    keys: Option<&ArchiveKeys>,
+) -> own_backup_common::Result<Vec<IdentityClashDto>> {
+    let sources: Vec<u32> = plan
+        .ops
+        .iter()
+        .filter_map(|op| match op {
+            RestoreOp::RestorePartition { src_index, .. } => Some(*src_index),
+            _ => None,
+        })
+        .collect();
+    if sources.is_empty() {
+        return Ok(Vec::new());
+    }
+    let sidecar = own_backup_backup::sidecar::read_sidecar_with_keys(&plan.image_path, keys)?;
+    let restored = identity_check_linux::restored_identities(
+        &plan.image_path,
+        keys,
+        &sidecar,
+        &sources,
+        plan.touches_partition_table(),
+    )?;
+    Ok(identity_check_linux::clashes_here(
+        &restored,
+        &overwritten_by(plan),
+    ))
+}
+
+/// Warnings for the preview: one per duplicate. The apply asks for the choice.
+pub(super) fn clash_findings(clashes: &[IdentityClashDto]) -> Vec<CheckResult> {
+    clashes
+        .iter()
+        .map(|c| CheckResult {
+            level: CheckLevel::Warning,
+            code: CheckCode::IdentityClash,
+            message: tr!(
+                "restore_exec_linux_service.identity_clash",
+                kind = c.kind.as_str(),
+                value = c.value.as_str(),
+                on = c.already_on.join(", ")
+            )
+            .into_owned(),
+            part_index: None,
+        })
+        .collect()
+}
+
+impl BackupServiceImpl {
+    pub(super) async fn restore_disk_linux(
+        &self,
+        req: Request<JsonRequest>,
+    ) -> Result<Response<JsonReply>, Status> {
+        use own_backup_backup::restore_disk_linux::{restore_disk, LinuxDiskRestoreRequest};
+        use own_backup_common::engine_dto::{DiskRestoreProgressDto, DiskRestoreSummaryDto};
+
+        crate::polkit::authorize(&req, crate::polkit::Action::Restore).await?;
+        #[derive(serde::Deserialize)]
+        struct In {
+            manifest_path: String,
+            /// The disk: Linux disks have no stable number.
+            target_device: String,
+            #[serde(default)]
+            identity_choice: Option<IdentityChoice>,
+            #[serde(flatten)]
+            secret: ManualSecret,
+        }
+        let p: In = serde_json::from_str(&req.into_inner().json)
+            .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+        own_backup_restore::guard_target_disk_device(&p.target_device)
+            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+
+        let image_path = PathBuf::from(&p.manifest_path);
+        let keys = manual_keys_off_thread(image_path.clone(), p.secret).await?;
+        let disk = own_backup_common::linux_block::kernel_name(Path::new(&p.target_device))
+            .ok_or_else(|| {
+                Status::failed_precondition(
+                    tr!(
+                        "restore_exec_linux_service.not_a_device",
+                        device = p.target_device.as_str()
+                    )
+                    .into_owned(),
+                )
+            })?;
+        let (keys, clashes) = {
+            let image = image_path.clone();
+            let disk = disk.clone();
+            tokio::task::spawn_blocking(move || {
+                let found = volume_clashes_against(&image, keys.as_ref(), &[disk], true);
+                (keys, found)
+            })
+            .await
+            .map_err(|e| Status::internal(format!("identity check panicked: {e}")))?
+        };
+        let clashes = clashes.map_err(|e| Status::internal(e.to_string()))?;
+        let kept = identity_gate(clashes, p.identity_choice)?;
+
+        let slot = self.reserve(&tr!("grpc_server.busy_disk_restore"), &p.target_device)?;
+        let cancel = slot.cancel();
+        let events = self.state.events.clone();
+        info!(image = %p.manifest_path, target = %p.target_device, "RestoreDisk RPC started");
+        let request = LinuxDiskRestoreRequest {
+            image_path,
+            target_device: p.target_device.clone(),
+            verify_checksums: true,
+            encryption: keys,
+        };
+        let summary = tokio::task::spawn_blocking(move || {
+            let _slot = slot;
+            let _awake = keep_awake(&tr!("grpc_server.busy_disk_restore"));
+            let _hold = own_backup_backup::udev_hold_linux::UdevHold::install(&[disk.as_str()])
+                .map_err(|e| warn!(error = %e, "udev hold not installed"))
+                .ok();
+            let mut last = String::new();
+            restore_disk(&request, |pr| {
+                if cancel.is_cancelled() {
+                    return Err(own_backup_common::OwnBackupError::Cancelled);
+                }
+                let percent = (pr.blocks_done * 100)
+                    .checked_div(pr.blocks_total)
+                    .unwrap_or(0);
+                let key = format!("{}:{}:{}", pr.phase, pr.partition_index, percent);
+                if key != last {
+                    last = key;
+                    emit_engine(
+                        &events,
+                        "restore-disk",
+                        &DiskRestoreProgressDto {
+                            phase: pr.phase.clone(),
+                            partition_index: pr.partition_index as u64,
+                            partition_count: pr.partition_count as u64,
+                            part_label: pr.part_label.clone(),
+                            percent,
+                            bytes_written: pr.bytes_written,
+                        },
+                    );
+                }
+                Ok(())
+            })
+        })
+        .await
+        .map_err(|e| Status::internal(format!("disk restore task panicked: {e}")))?
+        .map_err(|e| match e {
+            own_backup_common::OwnBackupError::Cancelled => Status::cancelled(e.to_string()),
+            other => Status::internal(other.to_string()),
+        })?;
+
+        #[derive(serde::Serialize)]
+        struct Out {
+            #[serde(flatten)]
+            summary: DiskRestoreSummaryDto,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            identity_clashes: Vec<IdentityClashDto>,
+        }
+        json_reply(&Out {
+            summary: DiskRestoreSummaryDto {
+                partitions: summary.partitions as u64,
+                bytes_written: summary.bytes_written,
                 duration_secs: summary.duration.as_secs_f64(),
             },
             identity_clashes: kept,

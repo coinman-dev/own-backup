@@ -1,0 +1,538 @@
+//! The boot steps of a restore plan on Linux (PLAN §6, stage 3): the fallback
+//! loader on the ESP, the machine's boot entries from the copy, and making a
+//! Windows restored from Linux start.
+//!
+//! They run after the disk was let go (`restore_exec_linux`), through the
+//! partitions' own device nodes, each mounted for the duration of the step
+//! under `/run/own-backup/restore-mnt` and unmounted when it ends, however it
+//! ends.
+//!
+//! ## Windows from Linux
+//!
+//! `bcdboot` does not exist here, and there is no need for it while the
+//! restored disk carries the copy's own GUIDs: the BCD names the Windows
+//! partition and the ESP by partition GUID and disk GUID, so a disk that
+//! reproduces both is the disk its BCD describes. Then three things remain,
+//! and they are what `engine_win::finalize_boot` does after `bcdboot` too:
+//! remove `\Windows\bootstat.dat` (a copy of a running system records a
+//! shutdown that never happened, and the first boot stops at the recovery
+//! screen), make sure `\EFI\BOOT\BOOTX64.EFI` exists, and give this machine's
+//! firmware an entry for the Windows Boot Manager. A disk whose GUIDs had to
+//! change, or a BIOS Windows, needs the BCD itself edited — not done yet, and
+//! refused with a way forward.
+
+use std::path::{Path, PathBuf};
+
+use tracing::{info, warn};
+
+use own_backup_backup::efivars_linux::{safety_copy_dir, Action, Efivarfs};
+use own_backup_backup::restore_disk_linux::partition_node;
+use own_backup_common::restore_plan::{PartRef, RestoreOp, RestorePlan};
+use own_backup_common::{tr, OwnBackupError, Result};
+
+/// Where the Windows Boot Manager lives on an ESP.
+const BOOTMGFW: &str = "\\EFI\\Microsoft\\Boot\\bootmgfw.efi";
+
+pub(super) struct BootNote {
+    pub(super) message: String,
+    pub(super) follow_ups: Vec<String>,
+}
+
+pub(super) fn run_boot_op(
+    op: &RestoreOp,
+    plan: &RestorePlan,
+    sidecar: &own_backup_backup::sidecar::Sidecar,
+    device: &str,
+) -> Result<BootNote> {
+    match op {
+        RestoreOp::EnsureFallbackBootloader { esp } => ensure_fallback(plan, device, *esp),
+        RestoreOp::RestoreBootEntries => restore_boot_entries(plan, sidecar),
+        RestoreOp::FinalizeBoot {
+            windows_part,
+            esp,
+            uefi,
+        } => finalize_windows(plan, sidecar, device, *windows_part, *esp, *uefi),
+        _ => Err(OwnBackupError::Config(format!(
+            "not a boot step: {}",
+            op.kind()
+        ))),
+    }
+}
+
+/// A filesystem mounted for one step. Unmounted on drop.
+struct TempMount {
+    dir: PathBuf,
+}
+
+impl TempMount {
+    /// Mount `node` with the first of `types` that takes it.
+    fn mount(node: &str, types: &[(&str, &str)]) -> Result<Self> {
+        let name = Path::new(node)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "part".into());
+        let dir = Path::new("/run/own-backup/restore-mnt").join(name);
+        std::fs::create_dir_all(&dir)?;
+        let mut tried = Vec::new();
+        for (fstype, opts) in types {
+            let out = std::process::Command::new("mount")
+                .args(["-t", fstype, "-o", &format!("{opts},nosuid,nodev,noexec")])
+                .arg(node)
+                .arg(&dir)
+                .output();
+            match out {
+                Ok(o) if o.status.success() => {
+                    info!(node, fstype, dir = %dir.display(), "partition mounted for a boot step");
+                    return Ok(Self { dir });
+                }
+                Ok(o) => tried.push(format!(
+                    "{fstype}: {}",
+                    String::from_utf8_lossy(&o.stderr).trim()
+                )),
+                Err(e) => tried.push(format!("{fstype}: {e}")),
+            }
+        }
+        let _ = std::fs::remove_dir(&dir);
+        Err(OwnBackupError::Device(
+            tr!(
+                "restore_boot_linux.mount_failed",
+                node = node,
+                tried = tried.join("; ")
+            )
+            .into_owned(),
+        ))
+    }
+
+    fn path(&self) -> &Path {
+        &self.dir
+    }
+}
+
+impl Drop for TempMount {
+    fn drop(&mut self) {
+        let ok = std::process::Command::new("umount")
+            .arg(&self.dir)
+            .status()
+            .is_ok_and(|s| s.success());
+        if !ok {
+            // Busy for a moment (a scan that has not let go): detach it now,
+            // the kernel finishes when the last user leaves.
+            warn!(dir = %self.dir.display(), "umount refused — detaching lazily");
+            let _ = std::process::Command::new("umount")
+                .arg("-l")
+                .arg(&self.dir)
+                .status();
+        }
+        let _ = std::fs::remove_dir(&self.dir);
+    }
+}
+
+fn node_of(device: &str, part: PartRef) -> Result<String> {
+    partition_node(device, part.index).ok_or_else(|| {
+        OwnBackupError::Device(
+            tr!("restore_exec_linux.no_partition_node", part = part.index).into_owned(),
+        )
+    })
+}
+
+fn mount_esp(device: &str, esp: PartRef) -> Result<TempMount> {
+    TempMount::mount(&node_of(device, esp)?, &[("vfat", "rw")])
+}
+
+/// Filesystem UUIDs of the partitions the plan wrote, read off the disk.
+fn restored_uuids(plan: &RestorePlan, device: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for op in &plan.ops {
+        let RestoreOp::RestorePartition { dst, .. } = op else {
+            continue;
+        };
+        let Some(node) = partition_node(device, dst.index) else {
+            continue;
+        };
+        let Ok(dev) = own_backup_backup::linux_device::LinuxRawDevice::open_read(&node) else {
+            continue;
+        };
+        let mut head = vec![0u8; own_backup_backup::fs_uuid::PROBE_LEN.min(dst.size as usize)];
+        if dev.read_at(0, &mut head).is_ok() {
+            if let Some(uuid) = own_backup_backup::fs_uuid::probe(&head) {
+                info!(part = dst.index, %uuid, "restored filesystem identified");
+                out.push(uuid);
+            }
+        }
+    }
+    out
+}
+
+fn ensure_fallback(plan: &RestorePlan, device: &str, esp: PartRef) -> Result<BootNote> {
+    let mount = mount_esp(device, esp)?;
+    let outcome = own_backup_backup::esp_fallback_tree::ensure_at_root(
+        mount.path(),
+        &restored_uuids(plan, device),
+        &format!("{device} #{}", esp.index),
+    )?;
+    Ok(BootNote {
+        message: outcome.message,
+        follow_ups: if outcome.copied {
+            vec![tr!("restore_exec.fallback_copied", from = outcome.from).into_owned()]
+        } else {
+            outcome.follow_ups
+        },
+    })
+}
+
+fn data_dir() -> PathBuf {
+    own_backup_common::config::AppConfig::default().data_dir
+}
+
+fn restore_boot_entries(
+    plan: &RestorePlan,
+    sidecar: &own_backup_backup::sidecar::Sidecar,
+) -> Result<BootNote> {
+    let mut note = BootNote {
+        message: String::new(),
+        follow_ups: Vec::new(),
+    };
+    let Some(saved) = own_backup_backup::sidecar::boot_entries_of(sidecar, &plan.image_path) else {
+        note.message = tr!("restore_exec.no_boot_entries").into_owned();
+        note.follow_ups
+            .push(tr!("restore_exec.no_boot_entries_follow_up").into_owned());
+        return Ok(note);
+    };
+    let efi = Efivarfs::default();
+    let (dir, durable) = safety_copy_dir(&data_dir());
+    match efi.safety_copy(&dir, durable) {
+        Ok(copy) => {
+            let path = copy.path.display();
+            note.follow_ups.push(
+                if copy.durable {
+                    tr!("restore_exec.entries_saved", path = path)
+                } else {
+                    tr!("restore_exec.entries_saved_temporary", path = path)
+                }
+                .into_owned(),
+            );
+        }
+        Err(e) => {
+            warn!(error = %e, "restore: could not take a safety copy of the boot entries");
+            note.follow_ups
+                .push(tr!("restore_exec.entries_save_failed", error = e).into_owned());
+        }
+    }
+    let here = own_backup_common::media_mode::meaningful_machine_name().unwrap_or_default();
+    if !here.is_empty() && !saved.machine.eq_ignore_ascii_case(&here) {
+        note.follow_ups.push(
+            tr!(
+                "restore_exec.entries_other_machine",
+                source = saved.machine,
+                here = here
+            )
+            .into_owned(),
+        );
+    }
+    let here_parts = own_backup_backup::efivars_linux::partition_guids_here(Path::new(
+        own_backup_common::linux_block::SYS_CLASS_BLOCK,
+    ));
+    match efi.apply_import(&saved, &here_parts) {
+        Ok(done) => {
+            info!(written = done.written, machine = %saved.machine, "restore: boot entries written");
+            note.message = tr!(
+                "restore_exec.entries_restored",
+                written = done.written,
+                total = saved.variables.len()
+            )
+            .into_owned();
+            if !done.skipped_orphaned.is_empty() {
+                note.follow_ups.push(
+                    tr!(
+                        "restore_boot_linux.entries_orphaned",
+                        entries = done.skipped_orphaned.join("; ")
+                    )
+                    .into_owned(),
+                );
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, "restore: boot entries could not be written");
+            note.message = tr!("restore_exec.entries_not_restored").into_owned();
+            note.follow_ups
+                .push(tr!("restore_exec.entries_firmware_refused", error = e).into_owned());
+        }
+    }
+    Ok(note)
+}
+
+/// The GPT on the target now.
+fn target_layout(device: &str) -> Result<own_backup_common::gpt::DiskLayout> {
+    let dev = own_backup_backup::linux_device::LinuxRawDevice::open_read(device)?;
+    let sector = dev.sector_size();
+    let want = (34 * sector as u64).min(dev.length()) as usize;
+    let mut head = vec![0u8; want];
+    dev.read_at(0, &mut head)?;
+    own_backup_backup::gpt_reader::parse_disk_layout(&head, sector, dev.length())
+}
+
+fn same_guid(a: &str, b: &str) -> bool {
+    let n = |s: &str| {
+        s.trim()
+            .trim_matches(|c| c == '{' || c == '}')
+            .to_ascii_uppercase()
+    };
+    !a.trim().is_empty() && n(a) == n(b)
+}
+
+/// Does the restored disk carry the copy's own disk GUID, and do `parts`
+/// (target index, source index) carry the copy's own partition GUIDs? Only
+/// then does the copy's BCD still describe this disk.
+fn guids_preserved(
+    captured: Option<&own_backup_common::gpt::DiskLayout>,
+    now: &own_backup_common::gpt::DiskLayout,
+    parts: &[(u32, u32)],
+) -> bool {
+    let Some(captured) = captured else {
+        return false;
+    };
+    if !same_guid(&captured.disk_guid, &now.disk_guid) {
+        return false;
+    }
+    parts.iter().all(|(dst, src)| {
+        let was = captured.partitions.iter().find(|p| p.index == *src);
+        let is = now.partitions.iter().find(|p| p.index == *dst);
+        matches!((was, is), (Some(w), Some(i)) if same_guid(&w.part_guid, &i.part_guid))
+    })
+}
+
+fn source_of(plan: &RestorePlan, dst: u32) -> Option<u32> {
+    plan.ops.iter().find_map(|op| match op {
+        RestoreOp::RestorePartition {
+            src_index, dst: d, ..
+        } if d.index == dst => Some(*src_index),
+        _ => None,
+    })
+}
+
+/// Remove `Windows\bootstat.dat` under `root`, matching names the way Windows
+/// does (case-insensitively). `Ok(false)` when it was not there.
+fn remove_boot_status(root: &Path) -> std::io::Result<bool> {
+    let find = |dir: &Path, name: &str| -> Option<PathBuf> {
+        std::fs::read_dir(dir).ok()?.flatten().find_map(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(name)
+                .then(|| e.path())
+        })
+    };
+    let Some(windows) = find(root, "Windows") else {
+        return Ok(false);
+    };
+    let Some(file) = find(&windows, "bootstat.dat") else {
+        return Ok(false);
+    };
+    std::fs::remove_file(file)?;
+    Ok(true)
+}
+
+fn finalize_windows(
+    plan: &RestorePlan,
+    sidecar: &own_backup_backup::sidecar::Sidecar,
+    device: &str,
+    windows_part: PartRef,
+    esp: Option<PartRef>,
+    uefi: bool,
+) -> Result<BootNote> {
+    if !uefi {
+        return Err(OwnBackupError::RestoreIncompatible(
+            tr!("restore_boot_linux.windows_bios").into_owned(),
+        ));
+    }
+    let esp = esp.ok_or_else(|| {
+        OwnBackupError::RestoreIncompatible(tr!("restore_boot_linux.windows_no_esp").into_owned())
+    })?;
+    // Only a whole-disk copy says which GUIDs its BCD names.
+    if sidecar.disk_manifest.is_none() {
+        return Err(OwnBackupError::RestoreIncompatible(
+            tr!("restore_boot_linux.windows_not_disk_copy").into_owned(),
+        ));
+    }
+    let now = target_layout(device)?;
+    let pairs: Vec<(u32, u32)> = [windows_part.index, esp.index]
+        .iter()
+        .filter_map(|d| source_of(plan, *d).map(|s| (*d, s)))
+        .collect();
+    let captured = sidecar.disk_manifest.as_ref().map(|d| &d.layout);
+    if pairs.len() != 2 || !guids_preserved(captured, &now, &pairs) {
+        return Err(OwnBackupError::RestoreIncompatible(
+            tr!("restore_boot_linux.windows_guids_changed").into_owned(),
+        ));
+    }
+
+    let mut follow_ups = Vec::new();
+    // The boot status first: of the three it is the one a restart cannot
+    // repair by itself.
+    let cleared = match TempMount::mount(
+        &node_of(device, windows_part)?,
+        &[("ntfs3", "rw"), ("ntfs-3g", "rw")],
+    ) {
+        Ok(m) => match remove_boot_status(m.path()) {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(error = %e, "bootstat.dat could not be removed");
+                follow_ups.push(tr!("restore_boot_linux.boot_status_kept", error = e).into_owned());
+                false
+            }
+        },
+        Err(e) => {
+            warn!(error = %e, "the Windows partition could not be mounted to clear its boot status");
+            follow_ups.push(tr!("restore_boot_linux.boot_status_kept", error = e).into_owned());
+            false
+        }
+    };
+
+    let esp_mount = mount_esp(device, esp)?;
+    let loader = BOOTMGFW
+        .split('\\')
+        .filter(|c| !c.is_empty())
+        .fold(esp_mount.path().to_path_buf(), |p, c| p.join(c));
+    if !loader.is_file() {
+        return Err(OwnBackupError::RestoreIncompatible(
+            tr!("restore_boot_linux.no_windows_loader", path = BOOTMGFW).into_owned(),
+        ));
+    }
+    let fallback = own_backup_backup::esp_fallback_tree::ensure_at_root(
+        esp_mount.path(),
+        &[],
+        &format!("{device} #{}", esp.index),
+    )?;
+    if fallback.copied {
+        follow_ups.push(tr!("restore_exec.fallback_copied", from = fallback.from).into_owned());
+    }
+    drop(esp_mount);
+
+    // This machine's firmware: an entry for the Windows Boot Manager on the
+    // restored ESP, unless one already names exactly that file there.
+    let efi = Efivarfs::default();
+    let esp_entry = now.partitions.iter().find(|p| p.index == esp.index);
+    match (efi.is_uefi(), esp_entry) {
+        (true, Some(p)) => {
+            let hd = own_backup_backup::efivars::HardDrive::from_gpt(
+                p.index,
+                p.first_lba,
+                p.last_lba,
+                &p.part_guid,
+            )
+            .ok_or_else(|| {
+                OwnBackupError::Device(
+                    tr!(
+                        "restore_boot_linux.bad_partition_guid",
+                        guid = p.part_guid.as_str()
+                    )
+                    .into_owned(),
+                )
+            })?;
+            match efi.entry_for(&hd, BOOTMGFW) {
+                Ok(Some(n)) => follow_ups.push(
+                    tr!(
+                        "restore_boot_linux.entry_present",
+                        entry = format!("{n:04X}")
+                    )
+                    .into_owned(),
+                ),
+                Ok(None) => {
+                    let (dir, durable) = safety_copy_dir(&data_dir());
+                    match efi.apply_action(
+                        Action::Create {
+                            name: "Windows Boot Manager".into(),
+                            hd,
+                            file: BOOTMGFW.into(),
+                            position: None,
+                        },
+                        &dir,
+                        durable,
+                    ) {
+                        Ok(done) => {
+                            follow_ups.push(done.message);
+                            follow_ups
+                                .push(tr!("restore_boot_linux.entry_last_in_menu").into_owned());
+                        }
+                        Err(e) => follow_ups.push(
+                            tr!("restore_exec.entries_firmware_refused", error = e).into_owned(),
+                        ),
+                    }
+                }
+                Err(e) => follow_ups
+                    .push(tr!("restore_exec.entries_firmware_refused", error = e).into_owned()),
+            }
+        }
+        _ => follow_ups.push(tr!("restore_boot_linux.no_firmware_entry").into_owned()),
+    }
+
+    Ok(BootNote {
+        message: if cleared {
+            tr!("restore_exec.boot_status_cleared").into_owned()
+        } else {
+            String::new()
+        },
+        follow_ups,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use own_backup_common::gpt::{DiskLayout, GptPartitionEntry};
+
+    fn entry(index: u32, guid: &str) -> GptPartitionEntry {
+        GptPartitionEntry {
+            index,
+            type_guid: String::new(),
+            part_guid: guid.into(),
+            first_lba: 2048 * index as u64,
+            last_lba: 2048 * index as u64 + 2047,
+            attributes: 0,
+            name: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_boot_status_is_found_whatever_its_case() {
+        let root = tempfile::tempdir().unwrap();
+        let win = root.path().join("WINDOWS");
+        std::fs::create_dir_all(&win).unwrap();
+        std::fs::write(win.join("BootStat.DAT"), b"x").unwrap();
+        assert!(remove_boot_status(root.path()).unwrap());
+        assert!(!win.join("BootStat.DAT").exists());
+        assert!(!remove_boot_status(root.path()).unwrap(), "gone now");
+    }
+
+    #[test]
+    fn guids_count_as_preserved_only_when_disk_and_partitions_match() {
+        let mut sidecar_layout = DiskLayout {
+            disk_guid: "{AAAA0000-0000-0000-0000-000000000001}".into(),
+            sector_size: 512,
+            size_bytes: 1 << 30,
+            partitions: vec![entry(1, "E5P"), entry(3, "W1N")],
+        };
+        let now = DiskLayout {
+            disk_guid: "aaaa0000-0000-0000-0000-000000000001".into(),
+            partitions: vec![entry(1, "e5p"), entry(2, "w1n")],
+            ..sidecar_layout.clone()
+        };
+        // Target 2 received source 3.
+        assert!(guids_preserved(
+            Some(&sidecar_layout),
+            &now,
+            &[(1, 1), (2, 3)]
+        ));
+        assert!(!guids_preserved(
+            Some(&sidecar_layout),
+            &now,
+            &[(1, 1), (2, 1)]
+        ));
+        assert!(!guids_preserved(None, &now, &[(1, 1), (2, 3)]));
+        sidecar_layout.disk_guid = "{BBBB0000-0000-0000-0000-000000000001}".into();
+        assert!(!guids_preserved(
+            Some(&sidecar_layout),
+            &now,
+            &[(1, 1), (2, 3)]
+        ));
+    }
+}

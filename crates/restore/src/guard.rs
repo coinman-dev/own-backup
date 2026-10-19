@@ -412,6 +412,161 @@ fn linux_boot_esp() -> LinuxBootEsp {
         .unwrap_or(LinuxBootEsp::Unknown)
 }
 
+/// Partition numbers of the whole disk at `device` that the running Linux
+/// stands on, and whether that answer can be trusted — the device-named
+/// counterpart of [`protection`] (Linux disks have no stable number).
+///
+/// Protected: every partition that is mounted, used as swap, or held by a
+/// device-mapper/md device (an opened LUKS container, an LVM physical volume,
+/// a RAID member), and the ESP the machine booted through (`BootCurrent`).
+/// When which ESP that was cannot be told, every partition that is or may be
+/// an ESP is protected instead. A disk whose own device is in use (a
+/// filesystem or a PV straight on it) protects all of it.
+#[cfg(target_os = "linux")]
+pub fn protection_of_device(device: &str) -> Protection {
+    use own_backup_common::linux_block as lb;
+    use std::path::Path;
+
+    if is_boot_media() {
+        return Protection::nothing_is_running();
+    }
+    let sys = Path::new(lb::SYS_CLASS_BLOCK);
+    let Some(name) = lb::kernel_name(Path::new(device)) else {
+        return Protection::unsure(tr!("guard.target_unrecognised", target = device).into_owned());
+    };
+    if lb::is_partition(sys, &name) {
+        return Protection::unsure(tr!("guard.linux_not_a_disk", target = device).into_owned());
+    }
+    let mounts = match std::fs::read_to_string("/proc/self/mountinfo") {
+        Ok(t) => lb::parse_mountinfo(&t),
+        Err(e) => {
+            return Protection::unsure(
+                tr!("guard.linux_cannot_tell", target = device, reason = e).into_owned(),
+            )
+        }
+    };
+    let swaps = lb::parse_swaps(&std::fs::read_to_string("/proc/swaps").unwrap_or_default());
+    let usage = |n: &str| {
+        let stack: Vec<(String, Option<(u32, u32)>)> = lb::stack_above(sys, n)
+            .into_iter()
+            .map(|x| {
+                let d = lb::dev_numbers(sys, &x);
+                (x, d)
+            })
+            .collect();
+        lb::usage_of(n, &stack, &mounts, &swaps, |p| {
+            lb::kernel_name(Path::new(p))
+        })
+    };
+    let partitions = lb::partitions_of(sys, &name);
+    let number = |p: &str| -> Option<u32> {
+        std::fs::read_to_string(sys.join(p).join("partition"))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    };
+
+    // The disk's own device: anything on it other than its partitions.
+    let own = usage(&name);
+    let own_users = Usage {
+        holders: own
+            .holders
+            .iter()
+            .filter(|h| !partitions.contains(h))
+            .filter(|h| {
+                // A holder of a partition is that partition's business.
+                !partitions
+                    .iter()
+                    .any(|p| lb::stack_above(sys, p).contains(h))
+            })
+            .cloned()
+            .collect(),
+        ..Default::default()
+    };
+    let direct_mounts = mounts.iter().any(|m| {
+        lb::dev_numbers(sys, &name) == Some((m.major, m.minor))
+            || (m.source.starts_with('/')
+                && lb::kernel_name(Path::new(&m.source)).as_deref() == Some(name.as_str()))
+    });
+    if direct_mounts || !own_users.holders.is_empty() {
+        let all: Vec<u32> = partitions.iter().filter_map(|p| number(p)).collect();
+        if all.is_empty() {
+            return Protection::unsure(
+                tr!(
+                    "guard.linux_target_in_use",
+                    target = device,
+                    users = linux_usage_text(&own)
+                )
+                .into_owned(),
+            );
+        }
+        return Protection {
+            parts: all,
+            cannot_tell: None,
+        };
+    }
+
+    let esp = linux_boot_esp();
+    let udev = Path::new(lb::UDEV_DATA);
+    let mut parts = Vec::new();
+    for p in &partitions {
+        let Some(n) = number(p) else {
+            return Protection::unsure(
+                tr!("guard.linux_cannot_tell", target = device, reason = p).into_owned(),
+            );
+        };
+        let busy = !usage(p).idle();
+        let boot_esp = match &esp {
+            LinuxBootEsp::NotUefi => false,
+            LinuxBootEsp::PartUuid(boot) => lb::partuuid(sys, p).as_deref() == Some(boot.as_str()),
+            LinuxBootEsp::Unknown => lb::dev_numbers(sys, p)
+                .and_then(|(ma, mi)| lb::partition_type(udev, ma, mi))
+                .is_none_or(|t| t == lb::ESP_TYPE_GUID),
+        };
+        if busy || boot_esp {
+            parts.push(n);
+        }
+    }
+    parts.sort_unstable();
+    Protection {
+        parts,
+        cannot_tell: None,
+    }
+}
+
+#[cfg(target_os = "linux")]
+use own_backup_common::linux_block::Usage;
+
+/// May the whole disk at `device` be recreated? Only when the running system
+/// stands on none of it, or from the boot medium.
+#[cfg(target_os = "linux")]
+pub fn guard_target_disk_device(device: &str) -> Result<()> {
+    let protected = protection_of_device(device);
+    if let Some(why) = &protected.cannot_tell {
+        return Err(OwnBackupError::RestoreIncompatible(
+            tr!("guard.protection_unknown", reason = why).into_owned(),
+        ));
+    }
+    if !protected.parts.is_empty() {
+        let parts = protected
+            .parts
+            .iter()
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(OwnBackupError::RestoreIncompatible(
+            tr!(
+                "guard.linux_disk_has_live_partitions",
+                disk = device,
+                parts = parts
+            )
+            .into_owned(),
+        ));
+    }
+    Ok(())
+}
+
 /// Partition indices on `disk` that the running Windows is standing on, and
 /// whether that answer can be trusted.
 ///

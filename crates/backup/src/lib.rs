@@ -19,6 +19,7 @@ pub mod efivars;
 // Shared by both engines.
 mod engine_core;
 pub mod esp_fallback;
+pub mod esp_fallback_tree;
 pub mod esp_scan;
 pub mod exclusions;
 pub mod export;
@@ -82,6 +83,8 @@ mod engine_platform_linux;
 pub mod linux_device;
 #[cfg(target_os = "linux")]
 pub mod nbd_linux;
+#[cfg(target_os = "linux")]
+pub mod restore_disk_linux;
 #[cfg(target_os = "linux")]
 pub mod udev_hold_linux;
 pub mod vhdx_format;

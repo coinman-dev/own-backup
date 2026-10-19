@@ -940,6 +940,9 @@ export type RestoreOp =
 export interface RestorePlan {
   id: string;
   target_disk: number;
+  /** Linux: the target disk's device. Linux disks have no stable number, so
+   *  there `target_disk` names nothing; Windows ignores this. */
+  target_device?: string;
   image_path: string;
   verify_after: boolean;
   ops: RestoreOp[];
@@ -1007,6 +1010,9 @@ export interface DryRunResult {
   plan: RestorePlan;
   results: CheckResult[];
   letter_changes: LetterChange[];
+  /** Linux: identities the restore would duplicate on this machine. Shown as
+   *  warnings in `results`; applying after they were shown keeps them. */
+  identity_clashes?: unknown[];
 }
 
 // ---------------------------------------------------------------------------
