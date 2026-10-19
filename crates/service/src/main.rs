@@ -5,6 +5,8 @@ rust_i18n::i18n!("locales", fallback = "ru");
 mod app_state;
 mod grpc_server;
 mod install;
+#[cfg(target_os = "linux")]
+mod logind_events;
 #[cfg(unix)]
 mod peer_access;
 mod scheduled_verification;
@@ -433,16 +435,33 @@ fn run_loop(use_tcp: bool) -> Result<(), Box<dyn std::error::Error>> {
         // Registered here, before anything is spawned: until a handler exists,
         // SIGTERM's default action kills the process outright.
         let stop_requested = stop_signal()?;
+        // A second way to be asked to stop: logind announcing a shutdown.
+        let (os_stop_tx, mut os_stop_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
         tokio::spawn(async move {
-            stop_requested.await;
+            tokio::select! {
+                _ = stop_requested => {}
+                Some(()) = os_stop_rx.recv() => {}
+            }
             #[cfg(unix)]
             sd_notify::stopping();
             controller.trigger_shutdown();
         });
-        // No SCM control handler here (foreground/daemon), so no OS events — keep
-        // the sender alive so the scheduler's receiver simply never yields.
-        let (_os_tx, os_rx) = tokio::sync::mpsc::unbounded_channel::<scheduler::OsEvent>();
-        run_main_loop(signal, use_tcp, os_rx).await
+        // No SCM control handler here. On Linux the installed engine hears
+        // logind instead (shutdown, logon, logoff); elsewhere, and for a
+        // foreground or boot-medium run, the sender is only kept alive so the
+        // scheduler's receiver simply never yields.
+        let (os_tx, os_rx) = tokio::sync::mpsc::unbounded_channel::<scheduler::OsEvent>();
+        #[cfg(target_os = "linux")]
+        let cancelled_shutdown = (!use_tcp && !own_backup_common::media_mode::is_media_mode())
+            .then(|| logind_events::spawn(os_tx.clone(), os_stop_tx.clone()));
+        let _keep = (os_tx, os_stop_tx);
+        run_main_loop(signal, use_tcp, os_rx).await?;
+        #[cfg(target_os = "linux")]
+        if cancelled_shutdown.is_some_and(|c| c.happened()) {
+            // An error exit, so that systemd starts the engine again.
+            return Err(tr!("main.shutdown_cancelled").into_owned().into());
+        }
+        Ok(())
     })
 }
 

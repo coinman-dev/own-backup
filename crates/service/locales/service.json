@@ -502,5 +502,9 @@
   "main.cmd_grant_access": {
     "ru": "дать пользователю доступ к службе из окна и CLI (Linux, от root)",
     "en": "give a user access to the service from the window and the CLI (Linux, as root)"
+  },
+  "main.shutdown_cancelled": {
+    "ru": "Выключение компьютера отменено, когда служба уже останавливалась; служба завершается с ошибкой, чтобы systemd запустил её снова.",
+    "en": "The shutdown was called off after the service had begun stopping; the service exits with an error so that systemd starts it again."
   }
 }

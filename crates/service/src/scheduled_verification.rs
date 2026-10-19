@@ -108,6 +108,8 @@ pub fn spawn(
                 let _slot = slot;
                 #[cfg(target_os = "windows")]
                 let _awake = own_backup_backup::power_win::KeepAwake::new(&task_job.name);
+                #[cfg(target_os = "linux")]
+                let _awake = own_backup_backup::power_linux::KeepAwake::new(&task_job.name);
                 task_sink.job_progress(JobProgress {
                     job_id: task_job.id.clone(), phase: "scheduled-verify".into(), percent: 0,
                     blocks_done: 0, blocks_total: 0, speed_mbps: 0.0,

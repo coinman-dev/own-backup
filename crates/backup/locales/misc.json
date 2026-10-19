@@ -295,6 +295,18 @@
     "en": "reading %{bytes} bytes at offset %{offset} runs past the end of a partition of length %{length}"
   },
 
+  "power_linux.logind_failed": {
+    "ru": "systemd-logind не выполнил запрос: %{error}",
+    "en": "systemd-logind did not carry out the request: %{error}"
+  },
+  "power_linux.clock_before_epoch": {
+    "ru": "Системные часы показывают время до 1970 года — выключение по времени не назначено.",
+    "en": "The system clock reads a time before 1970 — no timed shutdown was scheduled."
+  },
+  "power_linux.wake_reason": {
+    "ru": "Own Backup: пробуждение для копии по расписанию",
+    "en": "Own Backup: woken for a scheduled backup"
+  },
   "power_win.no_shutdown_privilege": {
     "ru": "нет права SeShutdownPrivilege",
     "en": "SeShutdownPrivilege is not held"

@@ -3861,7 +3861,12 @@ fn keep_awake(what: &str) -> Option<Box<dyn Send>> {
         own_backup_backup::power_win::KeepAwake::new(&format!("Own Backup: {what}"))
             .map(|k| Box::new(k) as Box<dyn Send>)
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    {
+        own_backup_backup::power_linux::KeepAwake::new(&format!("Own Backup: {what}"))
+            .map(|k| Box::new(k) as Box<dyn Send>)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         let _ = what;
         None

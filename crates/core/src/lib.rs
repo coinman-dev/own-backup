@@ -1823,7 +1823,40 @@ fn after_backup(action: &str, job_name: &str, queue: &RunQueue) {
             }
         });
     }
-    #[cfg(not(target_os = "windows"))]
+    // The same through systemd-logind: a scheduled poweroff that logind
+    // announces to everyone signed in (`shutdown -c` cancels it), or a
+    // suspend after the same minute's wait. The D-Bus calls block briefly,
+    // so they run off the runtime's threads.
+    #[cfg(target_os = "linux")]
+    {
+        let (action, job_name, queue) = (action.to_string(), job_name.to_string(), queue.clone());
+        tokio::spawn(async move {
+            if !queue.is_idle() {
+                return;
+            }
+            let result = if action == "shutdown" {
+                let message = tr!("lib.shutdown_message", job = job_name).into_owned();
+                tokio::task::spawn_blocking(move || {
+                    own_backup_backup::power_linux::shutdown_in(SHUTDOWN_GRACE_SECS, &message)
+                })
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()))
+            } else {
+                tokio::time::sleep(std::time::Duration::from_secs(SLEEP_AFTER_SECS)).await;
+                if !queue.is_idle() {
+                    info!(job = %job_name, "after backup: work was queued meanwhile — not sleeping");
+                    return;
+                }
+                tokio::task::spawn_blocking(own_backup_backup::power_linux::sleep_now)
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()))
+            };
+            if let Err(e) = result {
+                warn!(job = %job_name, action = %action, error = %e, "after backup: failed");
+            }
+        });
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         let _ = (SLEEP_AFTER_SECS, SHUTDOWN_GRACE_SECS);
         info!(job = %job_name, action, "after backup: not implemented on this platform");
@@ -1959,6 +1992,11 @@ pub async fn run_queue_worker(
         // Released when this iteration ends, whatever the outcome.
         #[cfg(target_os = "windows")]
         let _awake = own_backup_backup::power_win::KeepAwake::new(&tr!(
+            "lib.keep_awake_reason",
+            job = job.name
+        ));
+        #[cfg(target_os = "linux")]
+        let _awake = own_backup_backup::power_linux::KeepAwake::new(&tr!(
             "lib.keep_awake_reason",
             job = job.name
         ));
@@ -4339,9 +4377,6 @@ fn linux_unsupported(job: &Job) -> Option<String> {
     }
     if job.advanced.low_priority {
         what.push(tr!("lib.linux_unsupported_low_priority").into_owned());
-    }
-    if !matches!(job.advanced.after_backup.as_str(), "" | "none") {
-        what.push(tr!("lib.linux_unsupported_after_backup").into_owned());
     }
     (!what.is_empty()).then(|| tr!("lib.linux_unsupported", options = what.join(", ")).into_owned())
 }

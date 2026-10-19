@@ -416,6 +416,5 @@
   "lib.linux_unsupported_whole_disk": {"ru": "копия всего диска, названного только номером (в Linux диск называется устройством /dev/disk/by-id)", "en": "a copy of a whole disk named only by its number (on Linux a disk is named by its /dev/disk/by-id device)"},
   "lib.linux_unsupported_speed_limit": {"ru": "ограничение скорости", "en": "a speed limit"},
   "lib.linux_unsupported_low_priority": {"ru": "низкий приоритет", "en": "low priority"},
-  "lib.linux_unsupported_after_backup": {"ru": "действие после копии (сон или выключение)", "en": "an action after the backup (sleep or shut down)"},
   "lib.linux_dest_on_source": {"ru": "Папка назначения находится на копируемом томе %{source}. Копия этого тома росла бы во время копирования — выберите папку на другом томе.", "en": "The destination folder is on the volume being copied, %{source}. A copy of that volume would grow while it is made — choose a folder on another volume."}
 }

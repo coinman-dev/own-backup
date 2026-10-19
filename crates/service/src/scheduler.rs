@@ -371,11 +371,14 @@ fn next_wake(
         .map(|slot| slot - ChronoDuration::seconds(WAKE_EARLY_SECS))
 }
 
-/// The wake timer, kept pointed at [`next_wake`]. Windows only, and never on
-/// the boot medium (nothing there outlives the session).
+/// The wake timer, kept pointed at [`next_wake`]: a waitable timer on
+/// Windows, a `CLOCK_REALTIME_ALARM` timer on Linux; never on the boot medium
+/// (nothing there outlives the session).
 struct WakeArming {
     #[cfg(target_os = "windows")]
     timer: Option<Arc<own_backup_backup::power_win::WakeTimer>>,
+    #[cfg(target_os = "linux")]
+    timer: Option<Arc<own_backup_backup::power_linux::WakeTimer>>,
     armed: std::sync::Mutex<Option<chrono::DateTime<chrono::FixedOffset>>>,
 }
 
@@ -389,8 +392,14 @@ impl WakeArming {
             // copy comes within one, and the copy then holds it itself.
             own_backup_backup::power_win::WakeTimer::start(std::time::Duration::from_secs(300))
         };
+        #[cfg(target_os = "linux")]
+        let timer = if own_backup_common::media_mode::is_media_mode() {
+            None
+        } else {
+            own_backup_backup::power_linux::WakeTimer::start(std::time::Duration::from_secs(300))
+        };
         Self {
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
             timer,
             armed: std::sync::Mutex::new(None),
         }
@@ -405,11 +414,12 @@ impl WakeArming {
         if *armed == want {
             return;
         }
-        // Only a timer that exists is "armed": there is none on Linux yet
-        // (`.ai/PLAN.md` §6, stage 4) and none on the boot medium.
-        #[cfg(target_os = "windows")]
+        // Only a timer that exists is "armed": there is none on the boot
+        // medium, and none where the alarm clock is refused (no RTC alarm,
+        // no CAP_WAKE_ALARM).
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         let can_wake = self.timer.is_some();
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         let can_wake = false;
         match want {
             Some(at) if can_wake => info!(at = %at, "wake timer armed for a scheduled copy"),
@@ -423,7 +433,7 @@ impl WakeArming {
             }
             None => {}
         }
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         if let Some(timer) = &self.timer {
             match want {
                 Some(at) => timer.arm(at.with_timezone(&chrono::Utc)),

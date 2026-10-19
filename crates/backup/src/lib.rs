@@ -120,6 +120,8 @@ pub mod media_preflight_win;
 pub mod media_tools_win;
 #[cfg(target_os = "windows")]
 pub mod obk_removal_win;
+#[cfg(target_os = "linux")]
+pub mod power_linux;
 #[cfg(target_os = "windows")]
 pub mod power_win;
 #[cfg(target_os = "windows")]
