@@ -157,6 +157,16 @@ impl crate::fat_map::RawVolume for LinuxRawDevice {
     }
 }
 
+impl crate::engine_core::platform::SourceDevice for LinuxRawDevice {
+    fn open_read(path: &str) -> Result<Self> {
+        LinuxRawDevice::open_read(path)
+    }
+
+    fn sector_size(&self) -> u32 {
+        LinuxRawDevice::sector_size(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

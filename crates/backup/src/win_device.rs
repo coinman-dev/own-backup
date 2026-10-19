@@ -793,3 +793,13 @@ impl Drop for WinRawDevice {
         let _ = unsafe { CloseHandle(self.handle) };
     }
 }
+
+impl crate::engine_core::platform::SourceDevice for WinRawDevice {
+    fn open_read(path: &str) -> Result<Self> {
+        WinRawDevice::open_read(path)
+    }
+
+    fn sector_size(&self) -> u32 {
+        WinRawDevice::sector_size(self)
+    }
+}

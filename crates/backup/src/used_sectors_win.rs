@@ -428,3 +428,23 @@ impl UsedSectorMap for NtfsUsedSectorMap {
         self.used_count
     }
 }
+
+impl crate::engine_core::platform::NativeUsedMap for NtfsUsedSectorMap {
+    fn open(read_path: &str, block_size: u32) -> Result<Self> {
+        NtfsUsedSectorMap::open(read_path, block_size)
+    }
+
+    fn cluster_size(&self) -> u32 {
+        NtfsUsedSectorMap::cluster_size(self)
+    }
+
+    /// Clears the retained bitmap's bits — nothing here can fail.
+    fn apply_excluded_ranges(&mut self, ranges: &ByteRanges) -> Result<()> {
+        NtfsUsedSectorMap::apply_excluded_ranges(self, ranges);
+        Ok(())
+    }
+
+    fn release_bitmap(&mut self) {
+        NtfsUsedSectorMap::release_bitmap(self)
+    }
+}
