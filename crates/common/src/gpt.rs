@@ -319,6 +319,7 @@ mod tests {
                     mbr_type: 0,
                     kernel_device: String::new(),
                     mapper_kind: String::new(),
+                    container_password: false,
                 })
                 .collect(),
         }

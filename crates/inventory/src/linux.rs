@@ -160,6 +160,7 @@ fn build_partition(v: &Value, index: u32) -> PartitionInfo {
         mbr_type: 0,
         kernel_device: path,
         mapper_kind: String::new(),
+        container_password: false,
     }
 }
 
@@ -278,6 +279,7 @@ fn build_mapper_disk(v: &Value, kind: &str) -> DiskInfo {
     // does not change from boot to boot the way `dm-N` does.
     p.volume_device = jstr(v, "path").unwrap_or_else(|| p.kernel_device.clone());
     p.mapper_kind = kind.to_string();
+    p.container_password = kind == "crypt" && is_luks_mapping(&p.kernel_device);
     let name = jstr(v, "name").unwrap_or_default();
     DiskInfo {
         device_id: p.volume_device.clone(),
@@ -292,6 +294,25 @@ fn build_mapper_disk(v: &Value, kind: &str) -> DiskInfo {
         disk_guid: format!("disk-{name}"),
         partitions: vec![p],
     }
+}
+
+/// An opened LUKS container: its device-mapper UUID says so
+/// (`CRYPT-LUKS1-…`, `CRYPT-LUKS2-…`; BitLocker opened by cryptsetup is
+/// `CRYPT-BITLK-…`, and its key is not one the engine recovers).
+fn is_luks_mapping(kernel_device: &str) -> bool {
+    let Some(name) = std::path::Path::new(kernel_device).file_name() else {
+        return false;
+    };
+    std::fs::read_to_string(
+        std::path::Path::new("/sys/class/block")
+            .join(name)
+            .join("dm/uuid"),
+    )
+    .is_ok_and(|u| luks_dm_uuid(&u))
+}
+
+fn luks_dm_uuid(uuid: &str) -> bool {
+    uuid.trim().starts_with("CRYPT-LUKS")
 }
 
 /// Walk everything below a disk for device-mapper volumes. `parts` is the
@@ -569,6 +590,15 @@ mod tests {
         { "name": "sr0", "type": "rom", "size": 0 }
       ]
     }"#;
+
+    #[test]
+    fn only_a_luks_mapping_asks_for_its_container_password() {
+        assert!(luks_dm_uuid("CRYPT-LUKS2-0123456789abcdef-root\n"));
+        assert!(luks_dm_uuid("CRYPT-LUKS1-0123-data"));
+        assert!(!luks_dm_uuid("CRYPT-BITLK-0123-win"));
+        assert!(!luks_dm_uuid("LVM-abcdef"));
+        assert!(!is_luks_mapping("/dev/own-backup-no-such-dm"));
+    }
 
     #[test]
     fn parses_disks_partitions_and_encryption() {

@@ -68,8 +68,8 @@ impl<P: EnginePlatform> VolumeMaps<P> {
         let mut ext_map: Option<crate::ext_map::ExtUsedMap> = None;
         let mut btrfs_map: Option<crate::btrfs_map::BtrfsUsedMap> = None;
         let mut xfs_map: Option<crate::xfs_map::XfsUsedMap> = None;
-        // For an encrypted source the map is built over the decrypting view and
-        // returned boxed directly (no exclusions apply to a Linux volume).
+        // For an encrypted source the map is built over the decrypting view; a
+        // map no exclusion scanner edits is returned boxed directly.
         let mut luks_used: Option<Box<dyn UsedSectorMap>> = None;
         // NTFS внутри LUKS/BitLocker: карта держится типизированной, пока не
         // решится вопрос исключений — их вычитание перестраивает её.
@@ -119,22 +119,33 @@ impl<P: EnginePlatform> VolumeMaps<P> {
             } else if let Ok(m) = crate::ext_map::build_ext_used_map(src.as_mut(), req.block_size) {
                 info!(fs = "ext4", "Using ext map over decrypted volume");
                 detected_fs = Some("ext4".into());
-                Some(Box::new(m))
+                // Typed, like NTFS and FAT inside a container: the Linux
+                // exclusion scanners read the decrypting view before the copy
+                // and take the excluded blocks out of this map.
+                ext_map = Some(m);
+                None
             } else if let Ok(m) =
                 crate::btrfs_map::build_btrfs_used_map(src.as_mut(), req.block_size)
             {
                 info!(fs = "btrfs", "Using btrfs map over decrypted volume");
                 detected_fs = Some("btrfs".into());
-                Some(Box::new(m))
+                btrfs_map = Some(m);
+                None
             } else if let Ok(m) = parse_xfs(src.as_mut()) {
                 info!(fs = "xfs", "Using xfs map over decrypted volume");
                 detected_fs = Some("xfs".into());
-                Some(Box::new(m))
+                xfs_map = Some(m);
+                None
             } else {
                 warn!("no used-block map for the decrypted volume — sector-by-sector");
                 None
             };
-            let smart = map.is_some() || enc_ntfs_map.is_some() || enc_fat_map.is_some();
+            let smart = map.is_some()
+                || enc_ntfs_map.is_some()
+                || enc_fat_map.is_some()
+                || ext_map.is_some()
+                || btrfs_map.is_some()
+                || xfs_map.is_some();
             luks_used = map;
             smart
         } else {

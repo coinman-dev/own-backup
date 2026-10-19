@@ -700,3 +700,50 @@ fn a_copy_that_would_keep_the_key_directory_is_refused() {
     let summary = run(&platform, &request(&still, &image, ImageFormat::Qcow2));
     assert!(summary.key_store_excluded && summary.categories.is_some());
 }
+
+/// LUKS inside a volume (the engine decrypts the container itself): the
+/// Linux rules run over the decrypting view before the copy, as NTFS and FAT
+/// do — the excluded file's data is not in the image, the rest of the
+/// decrypted filesystem is; and the service's key directory inside such a
+/// container is left out too.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_rules_apply_inside_a_luks_container() {
+    let Some(ext4) = ext4_with_key_store() else {
+        eprintln!("skipped: no mke2fs");
+        return;
+    };
+    let container = crate::luks::test_luks1_container(b"luks words", &ext4);
+    let dir = tempfile::tempdir().unwrap();
+    let source = unique_path("luks-volume");
+    register_device(&source, container, 512);
+    let platform = TestPlatform::new()
+        .source(&source, TestSource::Direct { frozen: true })
+        .key_store_on(&source);
+    let image = dir.path().join("luks.qcow2");
+    let summary = run(
+        &platform,
+        &VolumeBackupRequest {
+            passphrase: Some(zeroize::Zeroizing::new("luks words".into())),
+            exclusion_patterns_linux: vec!["jobs.json".into()],
+            ..request(&source, &image, ImageFormat::Qcow2)
+        },
+    );
+    assert!(summary.smart_mode);
+    assert_eq!(summary.file_scan_skipped, None, "the rules ran");
+    assert!(summary.key_store_excluded);
+    assert!(summary.excluded_files >= 2, "{}", summary.excluded_files);
+    let copied = volume_in(&image, ext4.len());
+    for (fill, what) in [(0x6Bu8, "the key bytes"), (0x4A, "the excluded file")] {
+        assert!(
+            ext4.chunks(4096).any(|c| c == [fill; 4096]),
+            "{what}: in the fixture"
+        );
+        assert!(
+            !copied.chunks(4096).any(|c| c == [fill; 4096]),
+            "{what}: not in the copy"
+        );
+    }
+    // The decrypted filesystem is what the image holds.
+    assert_eq!(&copied[1024 + 56..1024 + 58], &[0x53, 0xEF], "ext magic");
+}

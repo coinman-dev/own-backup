@@ -830,6 +830,67 @@ fn unlock_luks2(vol: &mut dyn RawVolume, hdr: &[u8], pass: &[u8]) -> Result<Luks
     Err(bad(format!("{NO_KEYSLOT_MATCHED} any LUKS2 keyslot")))
 }
 
+/// A LUKS1 container (aes-xts-plain64, one keyslot, small iteration counts)
+/// holding `payload` encrypted under a fixed master key, openable with
+/// `pass` — for tests of the engine over a container it decrypts itself.
+#[cfg(test)]
+pub(crate) fn test_luks1_container(pass: &[u8], payload: &[u8]) -> Vec<u8> {
+    use xts_mode::get_tweak_default;
+    let hash = Hash::Sha256;
+    let key_bytes = 64usize;
+    let stripes = 8usize;
+    let mk: Vec<u8> = (0..key_bytes as u16).map(|i| (i * 7 + 3) as u8).collect();
+    let km_off_sectors = 8u32;
+    let header_len = 4096usize * 512; // payload at 2 MiB
+    let mut b = vec![0u8; header_len];
+    b[0..6].copy_from_slice(LUKS_MAGIC);
+    b[6..8].copy_from_slice(&1u16.to_be_bytes());
+    b[8..11].copy_from_slice(b"aes");
+    b[40..51].copy_from_slice(b"xts-plain64");
+    b[72..78].copy_from_slice(b"sha256");
+    b[104..108].copy_from_slice(&4096u32.to_be_bytes());
+    b[108..112].copy_from_slice(&(key_bytes as u32).to_be_bytes());
+    let mk_salt = [5u8; 32];
+    let mk_iter = 500u32;
+    b[132..164].copy_from_slice(&mk_salt);
+    b[164..168].copy_from_slice(&mk_iter.to_be_bytes());
+    let mk_digest = pbkdf2(hash, &mk, &mk_salt, mk_iter, 20);
+    b[112..132].copy_from_slice(&mk_digest);
+    let slot_salt = [6u8; 32];
+    let slot_iter = 500u32;
+    b[208..212].copy_from_slice(&LUKS1_KEY_ENABLED.to_be_bytes());
+    b[212..216].copy_from_slice(&slot_iter.to_be_bytes());
+    b[216..248].copy_from_slice(&slot_salt);
+    b[248..252].copy_from_slice(&km_off_sectors.to_be_bytes());
+    b[252..256].copy_from_slice(&(stripes as u32).to_be_bytes());
+    let slot_key = pbkdf2(hash, pass, &slot_salt, slot_iter, key_bytes);
+    let mut material = tests::af_split(hash, &mk, stripes);
+    let c1 = Aes256::new(GenericArray::from_slice(&slot_key[..32]));
+    let c2 = Aes256::new(GenericArray::from_slice(&slot_key[32..]));
+    Xts128::new(c1, c2).encrypt_area(&mut material, 512, 0, get_tweak_default);
+    let at = (km_off_sectors * 512) as usize;
+    b[at..at + material.len()].copy_from_slice(&material);
+    let mut header = b.clone();
+    header.resize(header_len + 512, 0);
+    struct Mem(Vec<u8>);
+    impl RawVolume for Mem {
+        fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
+            let s = offset as usize;
+            buf.copy_from_slice(&self.0[s..s + buf.len()]);
+            Ok(())
+        }
+        fn len(&self) -> u64 {
+            self.0.len() as u64
+        }
+    }
+    let params = open_luks(&mut Mem(header), pass).expect("test container opens");
+    let mut data = payload.to_vec();
+    data.resize(payload.len().next_multiple_of(512), 0);
+    params.encrypt(0, &mut data).unwrap();
+    b.extend_from_slice(&data);
+    b
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -852,7 +913,7 @@ mod tests {
 
     /// Test-only inverse of [`af_merge`]: split `mk` into `stripes` blocks whose
     /// AF-merge reproduces `mk`. The first stripes are deterministic filler.
-    fn af_split(hash: Hash, mk: &[u8], stripes: usize) -> Vec<u8> {
+    pub(super) fn af_split(hash: Hash, mk: &[u8], stripes: usize) -> Vec<u8> {
         let bs = mk.len();
         let mut out = vec![0u8; bs * stripes];
         let mut d = vec![0u8; bs];

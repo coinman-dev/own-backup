@@ -61,6 +61,10 @@ export interface PartitionInfo {
    *  inside) or `lvm` (a logical volume) for a device-mapper volume, listed
    *  as a disk of its own; absent for a partition. */
   mapper_kind?: string;
+  /** Linux: an opened LUKS mapping. Its filesystem reads as it is, but a
+   *  snapshot of it while it is in use needs the container's password — the
+   *  wizard asks for it as for an encrypted volume. */
+  container_password?: boolean;
 }
 
 export interface BackupJob {
@@ -284,6 +288,10 @@ export interface BackupCapabilities {
   after_backup: boolean;
   /** Encrypted archives (OBK). */
   archive_encryption: boolean;
+  /** What keeps this machine's archive keys: `dpapi` (Windows), `tpm2` or
+   *  `host` (Linux, systemd-creds); empty when there is no key store. Absent
+   *  from an older service. */
+  archive_key_protection?: string;
   /** `schedule.event_trigger` values the scheduler fires. */
   schedule_events: string[];
   wake_to_run: boolean;

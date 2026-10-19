@@ -995,6 +995,9 @@
   interface EncryptedVolume {
     device: string;
     label: string;
+    /// Linux: an opened LUKS mapping. It reads as it is; its password is for
+    /// the snapshot taken of it while it is in use.
+    mapping: boolean;
     /// "пароль", "ключ восстановления (48 цифр)", "TPM + PIN"… Empty when the
     /// service could not read the volume's metadata (or is an older build).
     methods: string[];
@@ -1009,7 +1012,10 @@
   function encryptedSelected(): { device: string; label: string }[] {
     return job.sources
       .map((dev, i) => ({ device: dev, label: job.source_labels[i] ?? dev }))
-      .filter(({ device }) => findPart(device)?.is_encrypted);
+      .filter(({ device }) => {
+        const p = findPart(device);
+        return !!(p?.is_encrypted || p?.container_password);
+      });
   }
   // Encrypted volumes shown in the password panel UNDER a disk: those already
   // selected, plus — when the disk is a bootable copy — any still-unselected
@@ -1023,7 +1029,7 @@
   function encryptedForDisk(d: DiskInfo): EncryptedVolume[] {
     const boot = isBootableCopy(d);
     return d.partitions
-      .filter((p) => p.is_encrypted && partDevice(p))
+      .filter((p) => (p.is_encrypted || p.container_password) && partDevice(p))
       .filter((p) => boot || job.sources.includes(partDevice(p)!))
       .map((p) => {
         const dev = partDevice(p)!;
@@ -1031,6 +1037,7 @@
         return {
           device: dev,
           label: i >= 0 ? (job.source_labels[i] ?? partLabel(p)) : partLabel(p),
+          mapping: !p.is_encrypted && !!p.container_password,
           methods: p.unlock_methods ?? [],
           // "Открыть нечем" is only believed when the volume said WHY. A bare
           // `false` with no reason means the service could not read the
@@ -1470,6 +1477,9 @@
         </label>
       {/if}
     </div>
+    {#if list.some((e) => e.mapping)}
+      <div class="pw-hint">{m.wiz_pw_mapping_hint()}</div>
+    {/if}
 
     {#if sharedPw && showShared}
       <div class="pw-row shared">

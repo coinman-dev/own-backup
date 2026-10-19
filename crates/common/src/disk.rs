@@ -132,6 +132,13 @@ pub struct PartitionInfo {
     /// always on Windows.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub mapper_kind: String,
+    /// Linux: an opened LUKS mapping. Its filesystem reads as it is, but a
+    /// device-mapper snapshot of it while it is in use needs the container's
+    /// password (after `cryptsetup open` the key lives only in the kernel),
+    /// so the wizard asks for one as for an encrypted volume. Always false on
+    /// Windows.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub container_password: bool,
 }
 
 /// GPT "hidden" attribute (bit 62).
@@ -292,6 +299,7 @@ mod tests {
             mbr_type: 0,
             kernel_device: String::new(),
             mapper_kind: String::new(),
+            container_password: false,
         }
     }
 

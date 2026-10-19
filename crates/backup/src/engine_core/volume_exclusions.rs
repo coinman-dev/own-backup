@@ -412,8 +412,14 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
         // these filesystems inside a whole disk (`partition_prep`), here on a
         // volume the session holds still (only then is there a map at all):
         // the matched files' entries removed where that is safe (Stage 2),
-        // their exclusive data zeroed in any case (Stage 1).
-        let mut dev = P::Dev::open_read(read_path)?;
+        // their exclusive data zeroed in any case (Stage 1). Inside a LUKS or
+        // BitLocker container they read its decrypting view, as NTFS and FAT
+        // do: the files are found before the copy, and what the image gets is
+        // the decrypted filesystem with them taken out. The view is aligned:
+        // ext inodes are 256 bytes, and a decrypting reader works in sectors.
+        let mut dev = AlignedSource(crate::aligned_volume::AlignedVolume::new(BoxedVolume(
+            opened.open_source()?,
+        )));
         let patterns = &patterns_linux;
         let mut walk_tick = |n: u64| prepare_tick(n, 0);
         let scanned = if maps.ext_map.is_some() {
@@ -578,6 +584,30 @@ pub(crate) fn key_store_refusal(source: &str, why: &str) -> OwnBackupError {
         )
         .into_owned(),
     )
+}
+
+/// The source as the engine opened it — the device, or the decrypting view of
+/// a container — for the scanners that take a concrete volume.
+struct BoxedVolume(Box<dyn crate::fat_map::RawVolume + Send>);
+
+impl crate::fat_map::RawVolume for BoxedVolume {
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        self.0.read_at(offset, buf)
+    }
+    fn len(&self) -> u64 {
+        self.0.len()
+    }
+}
+
+struct AlignedSource(crate::aligned_volume::AlignedVolume<BoxedVolume>);
+
+impl crate::fat_map::RawVolume for AlignedSource {
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        self.0.read_at(offset, buf)
+    }
+    fn len(&self) -> u64 {
+        self.0.len()
+    }
 }
 
 /// One Linux filesystem's exclusion scan, in the terms the pipeline uses.

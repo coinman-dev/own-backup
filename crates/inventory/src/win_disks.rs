@@ -717,6 +717,7 @@ impl super::traits::DiskInventory for WindowsInventory {
                     mbr_type: raw.mbr_type,
                     kernel_device: String::new(),
                     mapper_kind: String::new(),
+                    container_password: false,
                 });
             }
             partitions.sort_by_key(|p| p.index);

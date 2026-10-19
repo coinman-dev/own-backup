@@ -396,6 +396,7 @@
   "wiz_rk_bad_group": "Group {n} (“{group}”) does not check out — a typo in the digits",
   "wiz_pw_head_rk": "Encrypted volumes — enter the recovery key",
   "wiz_pw_head_pw": "Encrypted volumes — enter the password to unlock them",
+  "wiz_pw_mapping_hint": "An opened LUKS container reads as it is, but a copy while it is in use (a snapshot) needs the container's password — after cryptsetup open the key exists only in the kernel. Tick “remember” for scheduled copies.",
   "wiz_pw_shared_title": "All encrypted volumes share one password — enter it once and unlock them all",
   "wiz_pw_shared": "Shared password",
   "wiz_pw_for_all": "Password for all volumes",
