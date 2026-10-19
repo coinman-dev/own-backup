@@ -813,7 +813,7 @@ fn verify_cancelled_message() -> String {
 /// Check again after emitting progress: a CancelRunning request can arrive
 /// while the client reacts to that event. Keep cancellation set until the
 /// worker starts a new run, including callbacks the engine must finalize safely.
-#[cfg(target_os = "windows")]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn backup_callback_checkpoint(cancel: &AtomicBool) -> own_backup_common::Result<()> {
     if cancel.load(Ordering::SeqCst) {
         Err(own_backup_common::OwnBackupError::Cancelled)
@@ -2182,7 +2182,6 @@ pub fn source_token(device: &str) -> String {
 /// the result is underscore-free so the filename parser can recover it.
 /// Distinct from [`source_token`], which stays the stable device key used for
 /// passwords and cross-run identity.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))] // used by the Windows backup path
 fn file_token(job: &Job, device: &str) -> String {
     if device.trim_start().starts_with("part:") {
         let label = job.label_for(device);
@@ -2235,7 +2234,6 @@ fn file_token(job: &Job, device: &str) -> String {
 /// 2026-10-18). When either side has no identity — an old copy, or a machine
 /// that cannot answer — the name is all there is and the behaviour is
 /// exactly what it was.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))] // used by the Windows backup path
 fn chain_belongs_to(
     base: &own_backup_backup::chains::ChainImage,
     token: &str,
@@ -2250,7 +2248,7 @@ fn chain_belongs_to(
 /// Retention and consolidation are destructive: unlike parent lookup, an old
 /// chain with no source identity cannot be assumed to belong to a current
 /// source merely because its (possibly duplicated) label matches.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "windows", target_os = "linux")), allow(dead_code))]
 fn chain_source_group_matches(
     base: &own_backup_backup::chains::ChainImage,
     token: &str,
@@ -2270,7 +2268,6 @@ fn chain_source_group_matches(
 /// `<name>_<token>_<tag>_<stamp>.<ext>`; token/tag/stamp are always the last
 /// three underscore-separated segments, so we read from the end — robust even
 /// when `<name>` itself contains underscores.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))] // used by the Windows backup path
 fn image_token(path: &Path) -> Option<String> {
     let stem = path.file_stem()?.to_str()?;
     let mut it = stem.rsplit('_');
@@ -2415,14 +2412,12 @@ fn should_start_new_chain(
 }
 
 /// Any doubt (no chain, rollover reached, parent missing) resolves to a full.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))] // used by the Windows backup path
 pub fn plan_run_for_volume(job: &Job, folder: &Path, device: &str) -> RunPlan {
     plan_run_for_volume_at(job, folder, device, chrono::Utc::now())
 }
 
 /// [`plan_run_for_volume`] with the clock passed in, so the age-based rollover
 /// can be tested without waiting three months.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub fn plan_run_for_volume_at(
     job: &Job,
     folder: &Path,
@@ -2503,13 +2498,11 @@ pub fn plan_run_for_volume_at(
 /// instead of a volume token: the newest chain of whole-disk images for this disk
 /// determines full vs incremental/differential. Any doubt (no chain, rollover,
 /// parent missing) resolves to a full — a whole-disk full is always self-contained.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))] // used by the Windows backup path
 pub fn plan_run_for_disk(job: &Job, folder: &Path, disk_number: u32) -> RunPlan {
     plan_run_for_disk_at(job, folder, disk_number, chrono::Utc::now())
 }
 
 /// [`plan_run_for_disk`] with the clock passed in (see the volume twin).
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub fn plan_run_for_disk_at(
     job: &Job,
     folder: &Path,
@@ -2582,7 +2575,7 @@ pub fn plan_run_for_disk_at(
 /// chains *for each volume* — a two-volume job never lets one volume's backups
 /// evict the other's. Failures are logged, never propagated. `protected` lists
 /// the images just created (one per volume); their chains are always exempt.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))] // used by the Windows backup path
+#[cfg_attr(not(any(target_os = "windows", target_os = "linux")), allow(dead_code))]
 fn apply_retention(job: &Job, protected: &[(String, PathBuf)]) {
     use own_backup_backup::chains::{
         delete_chain, list_job_chains_strict, plan_retention_protected, RetentionRules,
@@ -3159,7 +3152,7 @@ pub fn job_verify_targets(
 /// marker means the chain's parent is possibly mid-rewrite, and writing an
 /// increment onto it — or deleting it by retention — is how a broken chain
 /// becomes a lost one.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))] // used by the Windows backup path
+#[cfg_attr(not(any(target_os = "windows", target_os = "linux")), allow(dead_code))]
 fn recover_interrupted_consolidations(
     job: &Job,
     folder: &Path,
@@ -3204,7 +3197,7 @@ fn recover_interrupted_consolidations(
 
 /// Does this image belong to the given job? Asked of the image's own sidecar,
 /// which is the source of truth for ownership (the job history is not).
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "windows", target_os = "linux")), allow(dead_code))]
 fn belongs_to_job(image: &Path, job_id: &str) -> bool {
     let ext = image
         .extension()
@@ -3325,7 +3318,7 @@ fn run_skeleton(job: &Job) -> JobRun {
 
 /// Sum two optional category breakdowns field-by-field (multi-volume runs
 /// combine each volume's walk into one dashboard total).
-#[cfg(target_os = "windows")]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn merge_categories(
     acc: Option<own_backup_backup::exclusions::CategorySizes>,
     add: Option<own_backup_backup::exclusions::CategorySizes>,
