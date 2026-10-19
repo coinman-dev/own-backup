@@ -77,6 +77,9 @@ pub(crate) fn prepare_partition_map<P: EnginePlatform>(
     // Источник заморожен (снимок VSS или офлайн на носителе) — только тогда
     // можно разбирать сырые метаданные: том под записью для этого не годится.
     frozen: bool,
+    // Captured with the filesystem frozen: XFS is read past a log that is
+    // dirty only because of the freeze (`xfs_map::build_xfs_used_map_frozen`).
+    quiesced: bool,
     // `tick(entries_done, entries_total)`; total 0 = «сколько всего, неизвестно»
     // (обход каталога этого не знает, чтение $MFT — знает).
     mut tick: impl FnMut(u64, u64) -> Result<()>,
@@ -270,9 +273,15 @@ pub(crate) fn prepare_partition_map<P: EnginePlatform>(
             },
         ));
     }
-    if let Some(out) =
-        linux_fs_exclusions(src, open, read_path, block_size, patterns_linux, &mut tick)?
-    {
+    if let Some(out) = linux_fs_exclusions(
+        src,
+        open,
+        read_path,
+        block_size,
+        patterns_linux,
+        quiesced,
+        &mut tick,
+    )? {
         return Ok(out);
     }
     Ok(none_because(

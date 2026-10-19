@@ -243,8 +243,6 @@ pub(crate) trait EnginePlatform {
 
 /// A whole disk, as a job names it: Windows by number, Linux by its stable
 /// `/dev/disk/by-id/…` path (decision R1). `number` is all Windows has.
-// The whole-disk types below are driven through the traits from phase E on.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DiskRef {
     pub(crate) number: u32,
@@ -253,7 +251,7 @@ pub(crate) struct DiskRef {
 
 impl DiskRef {
     /// A disk known by its number only, as on Windows.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn number(number: u32) -> Self {
         Self {
             number,
@@ -263,7 +261,6 @@ impl DiskRef {
 }
 
 /// Who a whole disk is, in the two places an image records it.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DiskIdentity {
     /// The device the disk is read through: the manifest's `device_id`.
@@ -274,7 +271,6 @@ pub(crate) struct DiskIdentity {
 }
 
 /// The system half of a whole-disk backup.
-#[allow(dead_code)]
 pub(crate) trait DiskPlatform: EnginePlatform {
     /// Hold the partition `device` (already normalized) for the copy. All
     /// partitions of a disk are held at once, so the image is one point in

@@ -134,6 +134,11 @@ pub(crate) fn linux_fs_exclusions(
     read_path: &str,
     block_size: u32,
     patterns_linux: &[String],
+    // The partition was captured with its filesystem frozen (never on
+    // Windows): an XFS log dirty only from the freeze is read past, and its
+    // exclusions stop at Stage 1 unless the log is clean
+    // (`xfs_exclusions::scan_xfs_exclusions_quiesced`).
+    quiesced: bool,
     tick: &mut impl FnMut(u64, u64) -> Result<()>,
 ) -> Result<Option<PreparedMap>> {
     // The caller's starting point: a map, nothing excluded yet.
@@ -252,7 +257,12 @@ pub(crate) fn linux_fs_exclusions(
         out.map = Some(Box::new(m));
         return Ok(Some(out));
     }
-    if let Ok(mut m) = crate::xfs_map::build_xfs_used_map(src.as_mut(), block_size) {
+    let xfs_map = if quiesced {
+        crate::xfs_map::build_xfs_used_map_frozen(src.as_mut(), block_size)
+    } else {
+        crate::xfs_map::build_xfs_used_map(src.as_mut(), block_size)
+    };
+    if let Ok(mut m) = xfs_map {
         // xfs: reflink-aware Stage-1 zeroing (data is not checksummed on xfs, so
         // no metadata edits) — only extents proven NOT shared (refcount==1) are
         // zeroed + dropped. Catalog true-removal (Stage 2) is a follow-up.
@@ -263,12 +273,21 @@ pub(crate) fn linux_fs_exclusions(
                 // `true` — Stage 2: записи каталогов, иноды и блоки. План
                 // собирается целиком и применяется только если все три шага
                 // согласились; иначе файл остаётся нулевым призраком.
-                match crate::xfs_exclusions::scan_xfs_exclusions(
-                    src2.as_mut(),
-                    patterns_linux,
-                    true,
-                    |n| tick(n, 0),
-                ) {
+                let scanned = if quiesced {
+                    crate::xfs_exclusions::scan_xfs_exclusions_quiesced(
+                        src2.as_mut(),
+                        patterns_linux,
+                        |n| tick(n, 0),
+                    )
+                } else {
+                    crate::xfs_exclusions::scan_xfs_exclusions(
+                        src2.as_mut(),
+                        patterns_linux,
+                        true,
+                        |n| tick(n, 0),
+                    )
+                };
+                match scanned {
                     Ok(scan) => {
                         out.excluded_files = scan.files_excluded;
                         out.excluded_bytes = scan.bytes_excluded;
@@ -360,6 +379,7 @@ mod tests {
             "fixture",
             BLOCK,
             &patterns(masks),
+            false,
             &mut |_, _| Ok(()),
         )
     }
@@ -432,6 +452,7 @@ mod tests {
             "fixture",
             BLOCK,
             &patterns(&["orig.bin"]),
+            false,
             &mut |_, _| Err(OwnBackupError::Cancelled),
         );
         assert!(matches!(outcome, Err(OwnBackupError::Cancelled)));
@@ -486,6 +507,7 @@ mod tests {
             "zeros",
             BLOCK,
             &patterns(&["cache"]),
+            false,
             &mut |_, _| Ok(()),
         )
         .unwrap();

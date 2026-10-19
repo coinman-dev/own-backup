@@ -15,7 +15,7 @@ use own_backup_common::progress::BackupProgress;
 use own_backup_common::types::{BackupStatus, BackupType, ImageFormat};
 use own_backup_common::{tr, OwnBackupError, Result};
 
-use super::chain::validate_disk_parent;
+use super::chain::{child_refusal, validate_disk_parent};
 use super::disk_image::{
     container_kind, disk_source_token, DiskBackupRequest, DiskCompositeReader, DiskRegion,
     DiskUsedMap,
@@ -416,6 +416,10 @@ fn backup_disk_inner<P: DiskPlatform>(
                 // Снимок этого раздела взят, или мы на носителе и система
                 // офлайн — только тогда сырые метаданные не движутся.
                 session.frozen(),
+                // Taken with the filesystem frozen (an LVM or dm snapshot): a
+                // dirty but covered XFS log. Asked only where the platform's
+                // parsers need a still source — never on Windows.
+                P::METADATA_NEEDS_FROZEN && session.quiesced(),
                 prepare_tick,
             ),
         }?;
@@ -507,7 +511,21 @@ fn backup_disk_inner<P: DiskPlatform>(
                         "the disk layout changed since the parent copy — creating a full backup instead");
                     kind = BackupType::Full;
                 }
-                Ok(sc) => parent = Some((pp.clone(), sc)),
+                Ok(sc) => match child_refusal(
+                    req.image_format,
+                    req.encryption.is_some(),
+                    req.block_size,
+                    &sc,
+                    P::SOURCE_OS,
+                    P::VHDX_CHAINS,
+                ) {
+                    None => parent = Some((pp.clone(), sc)),
+                    Some(why) => {
+                        warn!(parent = %pp.display(), reason = %why,
+                            "not continuing this whole-disk chain — creating a full backup instead");
+                        kind = BackupType::Full;
+                    }
+                },
                 Err(e) => {
                     warn!(parent = %pp.display(), error = %e,
                         "whole-disk parent chain unusable — creating a full backup instead");

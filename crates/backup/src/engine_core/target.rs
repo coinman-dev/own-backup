@@ -251,7 +251,6 @@ pub(crate) fn snapshot_wanted(requested: bool) -> bool {
 /// The extension a run's images carry: `.obk` when encrypted, the job's format
 /// otherwise. One place, because listings, chains and the format-change guard
 /// all have to agree with the writer.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))] // whole disk, until phase E6
 pub(crate) fn container_ext(
     format: ImageFormat,
     encryption: Option<&crate::seal::context::ArchiveKeys>,
@@ -266,7 +265,6 @@ pub(crate) fn container_ext(
 /// per-volume path carries the same thing in [`crate::seal::context::ImagePlan`];
 /// this is the disk-shaped half of it, so the two constructors below can build
 /// an encrypted target without the volume path's arguments.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))] // whole disk, until phase E6
 pub(crate) struct DiskImagePlan {
     pub(crate) backup_id: Uuid,
     pub(crate) role: ChainRole,
@@ -280,7 +278,6 @@ pub(crate) struct DiskImagePlan {
 }
 
 /// The encrypted target for a whole-disk image, full or child.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))] // whole disk, until phase E6
 pub(crate) fn create_disk_obk_target(
     image_path: &Path,
     parent_path: Option<&Path>,
@@ -327,7 +324,6 @@ pub(crate) fn create_disk_obk_target(
 
 /// Build the embedded [`ImageManifest`] describing the whole-disk image.
 #[allow(clippy::too_many_arguments)]
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))] // whole disk, until phase E6
 pub(crate) fn whole_disk_image_manifest(
     layout: &own_backup_common::gpt::DiskLayout,
     req: &DiskBackupRequest,

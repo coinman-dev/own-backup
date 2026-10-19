@@ -30,6 +30,8 @@ use crate::sidecar::{
     read_embedded_sidecar, read_embedded_sidecar_header, read_sidecar, sidecar_path_for,
 };
 
+pub use crate::engine_core::disk_image::{DiskBackupRequest, DiskPartitionBackup};
+pub use crate::engine_core::disk_target::DiskBackupSummary;
 pub use crate::engine_core::target::DEFAULT_BLOCK_SIZE;
 pub use crate::engine_core::volume::{VolumeBackupRequest, VolumeBackupSummary};
 
@@ -72,6 +74,57 @@ fn backup_volume_checked(
         if p.backup_id == "publish" {
             check_intact(snapshot)?;
             info!(source = %snapshot.source_device, "the snapshot held to the end of the copy");
+        }
+        Ok(())
+    })
+}
+
+/// Back up a whole disk (`req.disk_device`, a `/dev/disk/by-id/…` path — R1)
+/// into one image with its GPT and restore manifest, each partition read
+/// through its snapshot in `snapshots` (one per `req.partitions[].device`,
+/// taken by the caller up front, so the partitions are copied as close to
+/// one point in time as Linux allows). A partition without one is refused.
+///
+/// As for a volume, the image is published only when every snapshot is
+/// still whole at the end of the copy; the snapshots stay the caller's to
+/// release, after this returns and before the image is read back.
+pub fn backup_disk(
+    req: &DiskBackupRequest,
+    snapshots: &[Snapshot],
+    progress: impl FnMut(&BackupProgress) -> Result<()>,
+) -> Result<DiskBackupSummary> {
+    backup_disk_checked(
+        req,
+        snapshots,
+        own_backup_snapshot::linux::check_intact_blocking,
+        progress,
+    )
+}
+
+/// [`backup_disk`] with the intactness check passed in.
+fn backup_disk_checked(
+    req: &DiskBackupRequest,
+    snapshots: &[Snapshot],
+    mut check_intact: impl FnMut(&Snapshot) -> Result<()>,
+    mut progress: impl FnMut(&BackupProgress) -> Result<()>,
+) -> Result<DiskBackupSummary> {
+    if req.disk_device.is_none() {
+        return Err(OwnBackupError::Config(
+            "a whole disk on Linux is named by its device (/dev/disk/by-id/…), not by a number"
+                .into(),
+        ));
+    }
+    let platform = LinuxPlatform::new(snapshots.iter().cloned());
+    crate::engine_core::disk::backup_disk(&platform, req, |p| {
+        progress(p)?;
+        if p.backup_id == "publish" {
+            for snapshot in snapshots {
+                check_intact(snapshot)?;
+            }
+            info!(
+                partitions = snapshots.len(),
+                "every partition's snapshot held to the end of the copy"
+            );
         }
         Ok(())
     })
@@ -1567,6 +1620,263 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    /// A disk image file with a GPT and two partitions — FAT32 at 1 MiB and
+    /// ext4 at 66 MiB, each also its own file (what its snapshot reads).
+    /// `None` without mkfs.vfat/mkfs.ext4.
+    struct LinuxTestDisk {
+        disk: PathBuf,
+        parts: Vec<(u32, PathBuf, u64)>,
+    }
+
+    impl LinuxTestDisk {
+        fn new(dir: &Path) -> Option<Self> {
+            let fat = dir.join("p1.fat32");
+            blank(&fat, 64 * MIB);
+            if !mkfs("mkfs.vfat", &["-F", "32", "-n", "OBKESP"], &fat) {
+                return None;
+            }
+            let content = dir.join("ext-content");
+            std::fs::create_dir_all(content.join("data")).unwrap();
+            std::fs::write(content.join("data/keep.txt"), b"kept\n").unwrap();
+            std::fs::write(content.join("data/junk.tmp"), vec![0x5A; 400_000]).unwrap();
+            let ext = dir.join("p2.ext4");
+            blank(&ext, 32 * MIB);
+            let d = content.to_str().unwrap().to_string();
+            if !mkfs("mkfs.ext4", &["-q", "-F", "-b", "4096", "-d", &d], &ext) {
+                return None;
+            }
+            let parts = vec![(1u32, fat, MIB), (2u32, ext, 66 * MIB)];
+            let disk = dir.join("disk.img");
+            let size = 100 * MIB;
+            let layout = own_backup_common::gpt::DiskLayout {
+                disk_guid: "0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0".into(),
+                sector_size: 512,
+                size_bytes: size,
+                partitions: parts
+                    .iter()
+                    .map(
+                        |(index, path, offset)| own_backup_common::gpt::GptPartitionEntry {
+                            index: *index,
+                            type_guid: "0FC63DAF-8483-4772-8E79-3D69D8477DE4".into(),
+                            part_guid: format!("11111111-0000-0000-0000-00000000000{index}"),
+                            first_lba: offset / 512,
+                            last_lba: (offset + std::fs::metadata(path).unwrap().len()) / 512 - 1,
+                            attributes: 0,
+                            name: format!("part{index}"),
+                        },
+                    )
+                    .collect(),
+            };
+            let this = Self { disk, parts };
+            this.write_disk(&layout);
+            Some(this)
+        }
+
+        /// The disk file as the partitions are now.
+        fn write_disk(&self, layout: &own_backup_common::gpt::DiskLayout) {
+            use std::os::unix::fs::FileExt;
+            let file = std::fs::File::create(&self.disk).unwrap();
+            file.set_len(layout.size_bytes).unwrap();
+            for op in crate::gpt_writer::disk_gpt_write_ops(layout, layout.size_bytes).unwrap() {
+                file.write_all_at(&op.bytes, op.offset).unwrap();
+            }
+            for (_, path, offset) in &self.parts {
+                file.write_all_at(&std::fs::read(path).unwrap(), *offset)
+                    .unwrap();
+            }
+        }
+
+        fn snapshots(&self) -> Vec<Snapshot> {
+            self.parts
+                .iter()
+                .map(|(_, p, _)| file_snapshot(p, true))
+                .collect()
+        }
+
+        fn request(&self, image: &Path) -> DiskBackupRequest {
+            DiskBackupRequest {
+                disk_number: 0,
+                disk_device: Some(self.disk.to_str().unwrap().into()),
+                disk_model: "test disk".into(),
+                partitions: self
+                    .parts
+                    .iter()
+                    .map(|(index, path, _)| DiskPartitionBackup {
+                        device: path.to_str().unwrap().into(),
+                        part_index: *index,
+                        passphrase: None,
+                    })
+                    .collect(),
+                image_path: image.to_path_buf(),
+                full_image_path: None,
+                block_size: DEFAULT_BLOCK_SIZE,
+                image_format: ImageFormat::Qcow2,
+                job_id: Some("linux-disk".into()),
+                encryption: None,
+                exclusion_patterns_windows: Vec::new(),
+                exclusion_patterns_linux: Vec::new(),
+                kind: BackupType::Full,
+                parent_image: None,
+                source_disk: None,
+                bootable: false,
+                zstd_level: crate::qcow2::DEFAULT_ZSTD_LEVEL,
+            }
+        }
+    }
+
+    /// The bytes of `image` at `offset`, read through its chain.
+    fn image_at(image: &Path, offset: u64, len: usize) -> Vec<u8> {
+        let sidecar = read_embedded_sidecar(image, "qcow2").unwrap();
+        let mut r = LinuxImageReader::open(image, &sidecar.info.container).unwrap();
+        let mut out = vec![0u8; len];
+        r.read_at(offset, &mut out).unwrap();
+        out
+    }
+
+    /// A whole disk on Linux (plan E6): one image, each partition at its
+    /// offset, the disk named by its device, the Linux rules applied to ext4,
+    /// an increment holding only the change.
+    #[test]
+    fn a_whole_disk_is_copied_through_its_partitions_snapshots() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(disk) = LinuxTestDisk::new(dir.path()) else {
+            return;
+        };
+        let out = dir.path().join("out");
+        let full = out.join("disk_full.qcow2");
+        let req = with_rules(disk.request(&full));
+        let sum = backup_disk(&req, &disk.snapshots(), no_progress).unwrap();
+        assert_eq!(sum.partitions, 2);
+        let sidecar = read_embedded_sidecar(&full, "qcow2").unwrap();
+        assert_eq!(sum.excluded_files, 1, "{:?}", sum.file_scan_skipped);
+        assert!(
+            sum.file_scan_skipped.is_none(),
+            "{:?}",
+            sum.file_scan_skipped
+        );
+        assert_eq!(sidecar.manifest.source_os, "linux");
+        assert_eq!(
+            sidecar.manifest.source_disk.device_id,
+            disk.disk.to_str().unwrap()
+        );
+        let manifest = sidecar.disk_manifest.unwrap();
+        let fs: Vec<_> = manifest
+            .images
+            .iter()
+            .map(|i| i.filesystem.as_str())
+            .collect();
+        assert_eq!(fs, ["fat32", "ext4"]);
+        // FAT32 is in the image as it is on its partition.
+        let (_, fat, fat_at) = &disk.parts[0];
+        let want = std::fs::read(fat).unwrap();
+        assert!(
+            image_at(&full, *fat_at, want.len()) == want,
+            "the FAT32 partition"
+        );
+        // ext4: no byte of the excluded file is left.
+        let (_, ext, ext_at) = &disk.parts[1];
+        let ext_len = std::fs::metadata(ext).unwrap().len() as usize;
+        let got = image_at(&full, *ext_at, ext_len);
+        assert!(!got.chunks(4096).any(|c| c.iter().all(|&b| b == 0x5A)));
+        assert!(verify_image(&full, |_, _| Ok(())).unwrap().valid());
+
+        // An increment: one used block of the FAT32 partition changes (its
+        // label, in the boot sector; free space is never copied at all).
+        {
+            use std::os::unix::fs::FileExt;
+            let f = std::fs::OpenOptions::new().write(true).open(fat).unwrap();
+            f.write_all_at(b"CHANGED    ", 0x47).unwrap();
+        }
+        let inc = out.join("disk_inc.qcow2");
+        let child = backup_disk(
+            &DiskBackupRequest {
+                kind: BackupType::Incremental,
+                parent_image: Some(full.clone()),
+                ..with_rules(disk.request(&inc))
+            },
+            &disk.snapshots(),
+            no_progress,
+        )
+        .unwrap();
+        assert_eq!(child.backup_kind, BackupType::Incremental);
+        assert_eq!(child.blocks_copied, 1);
+        let want = std::fs::read(fat).unwrap();
+        assert!(image_at(&inc, *fat_at, want.len()) == want, "the child");
+        assert!(verify_image(&inc, |_, _| Ok(())).unwrap().valid());
+
+        // VHDX: no child on Linux yet — a full copy.
+        let vfull = out.join("disk_full.vhdx");
+        let vreq = DiskBackupRequest {
+            image_format: ImageFormat::Vhdx,
+            ..disk.request(&vfull)
+        };
+        backup_disk(&vreq, &disk.snapshots(), no_progress).unwrap();
+        let v = backup_disk(
+            &DiskBackupRequest {
+                kind: BackupType::Incremental,
+                parent_image: Some(vfull.clone()),
+                image_format: ImageFormat::Vhdx,
+                ..disk.request(&out.join("disk_inc.avhdx"))
+            },
+            &disk.snapshots(),
+            no_progress,
+        )
+        .unwrap();
+        assert_eq!(v.backup_kind, BackupType::Full);
+    }
+
+    /// `req` with a Windows rule (not for ext4: keep.txt stays) and a Linux
+    /// one (junk.tmp goes).
+    fn with_rules(req: DiskBackupRequest) -> DiskBackupRequest {
+        DiskBackupRequest {
+            exclusion_patterns_windows: vec!["*.txt".into()],
+            exclusion_patterns_linux: vec!["*.tmp".into()],
+            ..req
+        }
+    }
+
+    /// What a Linux disk copy refuses, and what it publishes nothing for.
+    #[test]
+    fn a_whole_disk_needs_its_device_its_snapshots_and_their_hold() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(disk) = LinuxTestDisk::new(dir.path()) else {
+            return;
+        };
+        let out = dir.path().join("out");
+        std::fs::create_dir(&out).unwrap();
+        let image = out.join("disk.qcow2");
+        // Named by a number only: refused.
+        let by_number = DiskBackupRequest {
+            disk_device: None,
+            ..disk.request(&image)
+        };
+        assert!(matches!(
+            backup_disk(&by_number, &disk.snapshots(), no_progress),
+            Err(OwnBackupError::Config(_))
+        ));
+        // A partition without its snapshot: refused.
+        let one = &disk.snapshots()[..1];
+        assert!(backup_disk(&disk.request(&image), one, no_progress).is_err());
+        // A snapshot that did not hold: asked at publication, nothing left.
+        let mut asked = 0;
+        let r = backup_disk_checked(
+            &disk.request(&image),
+            &disk.snapshots(),
+            |s| {
+                asked += 1;
+                if s.source_device.ends_with("p2.ext4") {
+                    Err(OwnBackupError::NoSnapshotProvider("overflowed".into()))
+                } else {
+                    Ok(())
+                }
+            },
+            no_progress,
+        );
+        assert!(matches!(r, Err(OwnBackupError::NoSnapshotProvider(_))));
+        assert_eq!(asked, 2);
+        assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0);
     }
 
     /// The real check, for a partition held still whose hold cannot be
