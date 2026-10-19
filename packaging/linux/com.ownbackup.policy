@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!--
+  Own Backup. The engine runs as root; a person reaches it through the
+  own-backup group from an active local session. The actions below are the
+  ones that also ask for an administrator: the engine asks polkit before it
+  does them for anyone but root (crates/service/src/polkit.rs), and pkexec
+  asks before it adds a person to the group.
+-->
+<policyconfig>
+  <vendor>Own Backup</vendor>
+
+  <action id="com.ownbackup.grant-access">
+    <description>Give a user access to the backup service</description>
+    <description xml:lang="ru">Дать пользователю доступ к службе резервного копирования</description>
+    <message>Authentication is required to let this user control Own Backup</message>
+    <message xml:lang="ru">Чтобы этот пользователь мог управлять Own Backup, нужна проверка подлинности</message>
+    <icon_name>own-backup</icon_name>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/own-backup/own-backup-service</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">--grant-access</annotate>
+  </action>
+
+  <action id="com.ownbackup.restore">
+    <description>Restore a backup onto a disk or partition</description>
+    <description xml:lang="ru">Восстановить копию на диск или раздел</description>
+    <message>Authentication is required to overwrite a disk or partition with a backup</message>
+    <message xml:lang="ru">Чтобы записать копию поверх диска или раздела, нужна проверка подлинности</message>
+    <icon_name>own-backup</icon_name>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+
+  <action id="com.ownbackup.delete-backups">
+    <description>Delete backup versions</description>
+    <description xml:lang="ru">Удалить версии резервных копий</description>
+    <message>Authentication is required to delete backups</message>
+    <message xml:lang="ru">Чтобы удалить резервные копии, нужна проверка подлинности</message>
+    <icon_name>own-backup</icon_name>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+
+  <action id="com.ownbackup.manage-keys">
+    <description>Change the encryption keys of backups</description>
+    <description xml:lang="ru">Изменить ключи шифрования копий</description>
+    <message>Authentication is required to change backup encryption keys</message>
+    <message xml:lang="ru">Чтобы изменить ключи шифрования копий, нужна проверка подлинности</message>
+    <icon_name>own-backup</icon_name>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+
+  <action id="com.ownbackup.boot-config">
+    <description>Change the boot configuration</description>
+    <description xml:lang="ru">Изменить настройки загрузки</description>
+    <message>Authentication is required to change how this computer boots</message>
+    <message xml:lang="ru">Чтобы изменить загрузку компьютера, нужна проверка подлинности</message>
+    <icon_name>own-backup</icon_name>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+</policyconfig>

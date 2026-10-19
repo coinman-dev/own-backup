@@ -4,7 +4,7 @@
 #
 #   scripts/lab/linux-gui-shot.sh deps               # пакеты сборки и дисплея
 #   scripts/lab/linux-gui-shot.sh build <archive>    # исходники (git archive) → сборка
-#   scripts/lab/linux-gui-shot.sh install            # служба в /usr/local/bin + --install
+#   scripts/lab/linux-gui-shot.sh install            # служба как из пакета (scripts/install-linux-dev.sh)
 #   scripts/lab/linux-gui-shot.sh seat               # автологин на tty1: сеанс seat0
 #   scripts/lab/linux-gui-shot.sh relogin            # новый вход lab: группа own-backup
 #   scripts/lab/linux-gui-shot.sh display [WxH]      # Xvfb :99 (user-unit ob-xvfb)
@@ -78,9 +78,9 @@ build)
        rc=\$?; tail -5 /tmp/cargo-build.log; exit \$rc"
     ;;
 install)
-    g "sudo install -m755 $SRC/target/debug/own-backup-service $SRC/target/debug/own-backup-cli \
-         /usr/local/bin/ && sudo /usr/local/bin/own-backup-service --install &&
-       systemctl is-active own-backup"
+    # Laid out as the .deb does it (unit, sysusers, tmpfiles, polkit); lab joins
+    # the access group.
+    g "sudo $SRC/scripts/install-linux-dev.sh $SRC/target/debug lab"
     ;;
 seat)
     # Автологин на tty1 даёт сеанс SEAT=seat0 TTY=tty1 REMOTE=0 ACTIVE=1 —
@@ -92,7 +92,7 @@ seat)
        loginctl list-sessions --no-legend'
     ;;
 relogin)
-    # `--install` добавляет lab в own-backup, но user@1000 (откуда запускается
+    # `--grant-access` добавляет lab в own-backup, но user@1000 (откуда запускается
     # окно) и сеанс tty1 получают группу только при новом входе.
     g 'sudo systemd-run --quiet --no-block sh -c "sleep 1; loginctl terminate-user lab"' || true
     sleep 6

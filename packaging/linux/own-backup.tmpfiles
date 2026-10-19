@@ -1,0 +1,6 @@
+# Own Backup engine directories. The unit's StateDirectory/LogsDirectory/
+# RuntimeDirectory create them too; these lines give them the access group
+# from boot on, before the engine has started and set it itself.
+d /var/lib/own-backup 0750 root own-backup -
+d /var/log/own-backup 0750 root root -
+d /run/own-backup     0750 root own-backup -

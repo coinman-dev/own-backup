@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Own Backup
+GenericName=Disk and partition backup
+GenericName[ru]=Резервное копирование дисков и разделов
+Comment=Back up and restore disks and partitions
+Comment[ru]=Резервные копии и восстановление дисков и разделов
+Exec=own-backup-gui
+Icon=own-backup
+Terminal=false
+Categories=Utility;Archiving;
+Keywords=backup;restore;image;disk;partition;
+Keywords[ru]=резервная копия;восстановление;образ;диск;раздел;
+StartupWMClass=own-backup-gui

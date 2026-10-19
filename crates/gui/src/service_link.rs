@@ -231,7 +231,16 @@ pub fn service_installed() -> bool {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        std::path::Path::new("/etc/systemd/system/own-backup.service").exists()
+        // The package puts the unit in /usr/lib; an administrator's copy in
+        // /etc overrides it.
+        let name = own_backup_common::LINUX_UNIT_NAME;
+        [
+            format!("/etc/systemd/system/{name}.service"),
+            format!("/usr/lib/systemd/system/{name}.service"),
+            format!("/lib/systemd/system/{name}.service"),
+        ]
+        .iter()
+        .any(|p| std::path::Path::new(p).exists())
     }
 }
 

@@ -410,6 +410,13 @@ fn main() {
         tray::run();
         return;
     }
+    // The package's autostart entry (/etc/xdg/autostart) starts `--tray` at
+    // every login. There is no Linux icon yet (plan §6, stage 5), and opening
+    // the whole window at login instead is not what that entry asks for.
+    #[cfg(not(target_os = "windows"))]
+    if std::env::args().any(|arg| arg == "--tray") {
+        return;
+    }
 
     // Only one GUI at a time (Windows).
     #[cfg(target_os = "windows")]

@@ -25,7 +25,7 @@
     "en": "Start it:  sudo systemctl start own-backup"
   },
   "service_link.linux_install_hint": {
-    "ru": "установите её:  sudo ./own-backup-service --install\n(после установки войдите в систему заново — вы будете добавлены в группу «%{group}»).",
+    "ru": "установите пакет:  sudo apt install ./own-backup_*.deb\nДоступ из окна:  sudo /usr/libexec/own-backup/own-backup-service --grant-access $USER\n(затем войдите в систему заново — вы будете в группе «%{group}»).",
     "en": "install it:  sudo ./own-backup-service --install\n(sign in again after installing — you will be added to the group “%{group}”)."
   },
   "service_link.installed_not_running": {

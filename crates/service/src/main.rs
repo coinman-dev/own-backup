@@ -9,6 +9,8 @@ mod install;
 mod peer_access;
 mod scheduled_verification;
 mod scheduler;
+#[cfg(unix)]
+mod sd_notify;
 mod settings;
 mod shutdown;
 mod single_instance;
@@ -62,6 +64,9 @@ enum Mode {
     /// Delete what the service keeps on this machine: settings, jobs, history
     /// and remembered volume keys. The uninstaller's «удалить также настройки».
     PurgeData,
+    /// Add a person to the access group (Linux): `--grant-access [USER]`, as
+    /// root — by `pkexec` from the window, by `sudo`, or by hand.
+    GrantAccess,
     /// Console run for development: loopback TCP, no auth, easy to attach a
     /// debugger/curl. `--foreground` / `-f`.
     Foreground,
@@ -113,6 +118,7 @@ fn mode_of(args: &[String]) -> Mode {
             "/status" | "--status" | "status" => return Mode::Status,
             "/update" | "--update" | "update" => return Mode::Update,
             "/purge-data" | "--purge-data" | "purge-data" => return Mode::PurgeData,
+            "/grant-access" | "--grant-access" | "grant-access" => return Mode::GrantAccess,
             "-f" | "--foreground" => return Mode::Foreground,
             "--run" | "run" | "--daemon" | "daemon" => return Mode::Daemon,
             _ => {}
@@ -345,12 +351,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Mode::Status => install::status(),
         Mode::Update => install::update_from_here(),
         Mode::PurgeData => install::purge_data(),
+        Mode::GrantAccess => grant_access(&args),
         // Foreground/dev uses TCP on localhost for easy debugging.
         Mode::Foreground => run_loop(true),
         // Daemon (systemd) uses the OS production transport (UDS/named pipe).
         Mode::Daemon => run_loop(false),
         Mode::Service => run_service_mode(),
     }
+}
+
+/// `--grant-access [USER]`: the word after the flag, unless it is another flag.
+fn grant_access(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let user = grant_access_user(args);
+    #[cfg(not(target_os = "windows"))]
+    {
+        install::grant_access(user)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = user;
+        Err("--grant-access is for Linux; on Windows access follows the console session".into())
+    }
+}
+
+fn grant_access_user(args: &[String]) -> Option<&str> {
+    let at = args.iter().position(|a| {
+        matches!(
+            a.as_str(),
+            "/grant-access" | "--grant-access" | "grant-access"
+        )
+    })?;
+    args.get(at + 1)
+        .map(String::as_str)
+        .filter(|a| !a.starts_with('-') && !a.starts_with('/'))
 }
 
 /// Human-facing description printed when the binary is launched directly in a
@@ -375,6 +408,8 @@ fn print_info() {
     println!("  /status       {}", tr!("main.cmd_status"));
     println!("  /update       {}", tr!("main.cmd_update"));
     println!("  /purge-data   {}", tr!("main.cmd_purge"));
+    #[cfg(not(target_os = "windows"))]
+    println!("  --grant-access [USER]  {}", tr!("main.cmd_grant_access"));
     println!("  --foreground  {}", tr!("main.cmd_foreground"));
     println!("  --run         {}", tr!("main.cmd_run"));
     println!("  --media       {}", tr!("main.cmd_media"));
@@ -400,6 +435,8 @@ fn run_loop(use_tcp: bool) -> Result<(), Box<dyn std::error::Error>> {
         let stop_requested = stop_signal()?;
         tokio::spawn(async move {
             stop_requested.await;
+            #[cfg(unix)]
+            sd_notify::stopping();
             controller.trigger_shutdown();
         });
         // No SCM control handler here (foreground/daemon), so no OS events — keep
@@ -1177,6 +1214,10 @@ async fn serve_uds(
     }
 
     info!("gRPC server (UDS) listening on {:?}", socket_path);
+    // The socket answers and the token is readable: only now is the unit
+    // "active" (Type=notify), so a client started right after `systemctl
+    // start` finds both.
+    crate::sd_notify::ready();
 
     let busy = state.busy.clone();
     let service = BackupServiceImpl::new(state, token, shutdown.clone()).into_service();
@@ -1642,6 +1683,18 @@ mod tests {
         assert_eq!(mode_of(&args("--media /status")), Mode::Status);
         // On its own it selects nothing: the SCM launches us with no words.
         assert_eq!(mode_of(&args("--media")), Mode::Service);
+    }
+
+    #[test]
+    fn grant_access_takes_the_user_after_it_and_nothing_else() {
+        assert_eq!(mode_of(&args("--grant-access alice")), Mode::GrantAccess);
+        assert_eq!(
+            grant_access_user(&args("--grant-access alice")),
+            Some("alice")
+        );
+        assert_eq!(grant_access_user(&args("--grant-access")), None);
+        assert_eq!(grant_access_user(&args("--grant-access --media")), None);
+        assert_eq!(grant_access_user(&args("--run")), None);
     }
 
     #[test]

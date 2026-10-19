@@ -261,59 +261,62 @@ pub fn status() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 // ---------------------------------------------------------------------------
-// Linux: systemd unit
+// Linux: the packaged systemd unit
 // ---------------------------------------------------------------------------
 
-/// Where `--install` writes the unit, and where `--update` reads it back.
+/// Where the unit is, in the order systemd itself prefers them: an
+/// administrator's copy in `/etc` over the package's in `/usr/lib`.
 #[cfg(not(target_os = "windows"))]
-fn linux_unit_path() -> String {
-    format!("/etc/systemd/system/{}.service", crate::LINUX_UNIT_NAME)
+fn linux_unit_candidates() -> [String; 3] {
+    let name = crate::LINUX_UNIT_NAME;
+    [
+        format!("/etc/systemd/system/{name}.service"),
+        format!("/usr/lib/systemd/system/{name}.service"),
+        format!("/lib/systemd/system/{name}.service"),
+    ]
 }
 
-/// The systemd unit for the engine at `exe`.
-///
-/// - `TimeoutStopSec=330`: a stop waits for the running operation to wind down
-///   — a durable consolidation may take minutes, and Windows waits 300 s for
-///   it (`stop`). systemd's default 90 s would SIGKILL it mid-write.
-/// - `KillMode=mixed`: SIGTERM goes to the engine alone, so the tools it runs
-///   (snapshot, freeze) are not killed under it while it cleans up; whatever
-///   is left when it exits is killed.
-/// - Ordered after the network and remote mounts: destinations may be NFS/SMB.
+/// The unit file systemd uses, if there is one.
 #[cfg(not(target_os = "windows"))]
-fn linux_unit(exe: &std::path::Path) -> String {
-    format!(
-        "[Unit]\n\
-         Description={desc}\n\
-         Wants=network-online.target\n\
-         After=network-online.target remote-fs.target\n\
-         \n\
-         [Service]\n\
-         Type=simple\n\
-         ExecStart={exe} --run\n\
-         Restart=on-failure\n\
-         RestartSec=10\n\
-         TimeoutStopSec=330\n\
-         KillMode=mixed\n\
-         \n\
-         [Install]\n\
-         WantedBy=multi-user.target\n",
-        desc = crate::SERVICE_DESCRIPTION,
-        exe = unit_quote(&exe.display().to_string()),
-    )
+fn linux_unit_path() -> Option<String> {
+    linux_unit_candidates()
+        .into_iter()
+        .find(|p| std::path::Path::new(p).is_file())
 }
 
-/// A path as one `ExecStart` word: quoted when it holds whitespace or quotes,
-/// as systemd's own quoting rules read it back.
+/// The description line of the unit older builds wrote into `/etc` from
+/// `--install`. A unit in `/etc` shadows the packaged one, so such a leftover
+/// would keep systemd running whatever binary that build was started from.
 #[cfg(not(target_os = "windows"))]
-fn unit_quote(path: &str) -> String {
-    if path
-        .chars()
-        .any(|c| c.is_whitespace() || c == '"' || c == '\'' || c == '\\')
-    {
-        format!("\"{}\"", path.replace('\\', "\\\\").replace('"', "\\\""))
-    } else {
-        path.to_string()
+fn legacy_unit_description() -> String {
+    format!("Description={}", crate::SERVICE_DESCRIPTION)
+}
+
+/// Is this unit text one that `--install` generated before the package
+/// shipped its own? Recognised by the exact description it was written with
+/// and the `Type=simple` the packaged unit no longer uses; an administrator's
+/// own unit is left alone.
+#[cfg(not(target_os = "windows"))]
+fn is_legacy_generated_unit(text: &str) -> bool {
+    let description = legacy_unit_description();
+    text.lines().any(|l| l.trim() == description) && text.lines().any(|l| l.trim() == "Type=simple")
+}
+
+/// Remove a unit an older `--install` left in `/etc`, so the packaged one is
+/// in force. `Ok(Some(path))` when one was removed.
+#[cfg(not(target_os = "windows"))]
+fn remove_legacy_unit() -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let path = format!("/etc/systemd/system/{}.service", crate::LINUX_UNIT_NAME);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("cannot read {path}: {e}").into()),
+    };
+    if !is_legacy_generated_unit(&text) {
+        return Ok(None);
     }
+    std::fs::remove_file(&path).map_err(|e| format!("cannot remove {path}: {e}"))?;
+    Ok(Some(path))
 }
 
 /// The program an installed unit runs: the first word of its `ExecStart=`,
@@ -342,44 +345,31 @@ fn unit_exec_start(unit: &str) -> Option<std::path::PathBuf> {
     (!program.is_empty()).then(|| std::path::PathBuf::from(program))
 }
 
+/// Enable and start the unit the package installed.
+///
+/// The unit, the access group (sysusers.d) and the directories (tmpfiles.d)
+/// all come from the package now. This used to write its own unit into
+/// `/etc` pointing at wherever it was run from, create the group and add
+/// `$SUDO_USER` to it — none of which a package manager can undo, and the
+/// unit in `/etc` silently overrode the packaged one. Who gets access is
+/// `--grant-access`'s question.
 #[cfg(not(target_os = "windows"))]
 pub fn install() -> Result<(), Box<dyn std::error::Error>> {
-    let exe = std::env::current_exe()?;
-    let unit_path = linux_unit_path();
-    let unit = linux_unit(&exe);
-
-    // Access group so the GUI/CLI reach the service's UDS without root (the
-    // Unix analogue of the named-pipe DACL). Create it and add the human who
-    // ran `sudo … --install` (SUDO_USER), else the current user.
-    let group = own_backup_common::UNIX_ACCESS_GROUP;
-    ensure_group(group)?;
-    let member = install_target_user();
-    let mut group_note = String::new();
-    if let Some(user) = &member {
-        match add_user_to_group(user, group) {
-            Ok(()) => {
-                group_note =
-                    tr!("install.linux_user_added", user = user, group = group).into_owned();
-            }
-            Err(e) => {
-                group_note = tr!(
-                    "install.linux_user_not_added",
-                    user = user,
-                    group = group,
-                    error = e
-                )
-                .into_owned();
-            }
-        }
+    if let Some(removed) = remove_legacy_unit()? {
+        println!(
+            "{}",
+            tr!("install.linux_legacy_unit_removed", path = removed)
+        );
     }
-
-    std::fs::write(&unit_path, unit)
-        .map_err(|e| format!("cannot write {unit_path} (run as root?): {e}"))?;
+    let Some(unit_path) = linux_unit_path() else {
+        return Err(tr!("install.linux_no_unit", unit = crate::LINUX_UNIT_NAME)
+            .into_owned()
+            .into());
+    };
     systemctl(&["daemon-reload"])?;
     systemctl(&["enable", "--now", crate::LINUX_UNIT_NAME])?;
-
     println!(
-        "{}{group_note}",
+        "{}",
         tr!(
             "install.linux_installed",
             path = unit_path,
@@ -389,43 +379,66 @@ pub fn install() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Create the access group if it does not exist (idempotent). A system group
-/// (no login, low GID). Missing `groupadd` is a hard error — without the group
-/// only root could reach the service.
+/// Give a person access to the engine: membership in the access group.
+///
+/// Run as root, by `pkexec` (the polkit action `com.ownbackup.grant-access`
+/// lets the window ask for it), by `sudo`, or by hand with a user name. The
+/// package cannot do it at install time: under PackageKit or unattended
+/// upgrades there is no `SUDO_USER` to say who the person is.
 #[cfg(not(target_os = "windows"))]
-fn ensure_group(group: &str) -> Result<(), Box<dyn std::error::Error>> {
-    // `getent group <g>` exits 0 if it exists; skip creation then.
-    let exists = std::process::Command::new("getent")
-        .args(["group", group])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if exists {
-        return Ok(());
+pub fn grant_access(user: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    let group = own_backup_common::UNIX_ACCESS_GROUP;
+    let user = match user {
+        Some(user) => user.to_string(),
+        None => grant_target_user().ok_or_else(|| tr!("install.linux_no_user").into_owned())?,
+    };
+    if user == "root" {
+        return Err(tr!("install.linux_root_needs_no_group").into_owned().into());
     }
-    let status = std::process::Command::new("groupadd")
-        .args(["--system", group])
-        .status()
-        .map_err(|e| format!("cannot run groupadd (run as root?): {e}"))?;
-    if !status.success() {
-        return Err(format!("`groupadd --system {group}` failed ({status})").into());
-    }
+    add_user_to_group(&user, group).map_err(|e| {
+        tr!(
+            "install.linux_user_not_added",
+            user = user,
+            group = group,
+            error = e
+        )
+        .into_owned()
+    })?;
+    println!(
+        "{}",
+        tr!("install.linux_user_added", user = user, group = group)
+    );
     Ok(())
 }
 
-/// The human to grant service access to: the user behind `sudo` if present,
-/// else `$USER`/`LOGNAME`. `None` when only a bare-root context is available.
+/// Who `--grant-access` without a name means: the user `pkexec` was asked by
+/// (`PKEXEC_UID`), else the one behind `sudo`. Never `$USER`: under both it
+/// is root.
 #[cfg(not(target_os = "windows"))]
-fn install_target_user() -> Option<String> {
-    for var in ["SUDO_USER", "USER", "LOGNAME"] {
-        if let Ok(v) = std::env::var(var) {
-            let v = v.trim();
-            if !v.is_empty() && v != "root" {
-                return Some(v.to_string());
-            }
-        }
+fn grant_target_user() -> Option<String> {
+    if let Some(uid) = std::env::var("PKEXEC_UID")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+    {
+        return user_name_of(uid);
     }
-    None
+    std::env::var("SUDO_USER")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty() && v != "root")
+}
+
+#[cfg(not(target_os = "windows"))]
+fn user_name_of(uid: u32) -> Option<String> {
+    // SAFETY: getpwuid returns a pointer into a static buffer (read at once,
+    // not kept) or null when there is no such user.
+    let pw = unsafe { libc::getpwuid(uid) };
+    if pw.is_null() {
+        return None;
+    }
+    // SAFETY: non-null pw points at a valid passwd whose pw_name is a C string.
+    let name = unsafe { std::ffi::CStr::from_ptr((*pw).pw_name) };
+    name.to_str().ok().map(str::to_string)
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -440,30 +453,24 @@ fn add_user_to_group(user: &str, group: &str) -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
+/// Stop and disable the unit. The unit file belongs to the package and is
+/// removed with it; only a unit an older `--install` wrote is removed here.
 #[cfg(not(target_os = "windows"))]
 pub fn uninstall() -> Result<(), Box<dyn std::error::Error>> {
-    // Best-effort: disable+stop, then remove the unit file and reload.
-    let _ = systemctl(&["disable", "--now", crate::LINUX_UNIT_NAME]);
-    let unit_path = linux_unit_path();
-    if let Err(e) = std::fs::remove_file(&unit_path) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            return Err(format!("cannot remove {unit_path} (run as root?): {e}").into());
-        }
+    // `disable --now` waits for the stop, consolidation included
+    // (TimeoutStopSec in the unit).
+    let disabled = systemctl(&["disable", "--now", crate::LINUX_UNIT_NAME]);
+    if let Some(removed) = remove_legacy_unit()? {
+        println!(
+            "{}",
+            tr!("install.linux_legacy_unit_removed", path = removed)
+        );
+        let _ = systemctl(&["daemon-reload"]);
     }
-    let _ = systemctl(&["daemon-reload"]);
-    // The access group stays. `--install` may have found it already there, a
-    // reinstall would have to add every member back by hand, and its GID may
-    // still own files; deleting a group is the administrator's decision.
+    disabled?;
     println!(
         "{}",
         tr!("install.linux_removed", unit = crate::LINUX_UNIT_NAME)
-    );
-    println!(
-        "{}",
-        tr!(
-            "install.linux_group_kept",
-            group = own_backup_common::UNIX_ACCESS_GROUP
-        )
     );
     Ok(())
 }
@@ -720,13 +727,17 @@ mod stop_tests {
     }
 }
 
-/// Where the installed service's binary is: the program the installed unit's
-/// `ExecStart` runs. It used to be a fixed `/usr/local/bin/own-backup-service`
-/// while `--install` writes whatever path it was run from — so `--update`
+/// Where the installed service's binary is: the program the unit in force
+/// runs (`ExecStart`). It used to be a fixed `/usr/local/bin/own-backup-service`
+/// while the unit named whatever path it was installed from — so `--update`
 /// replaced a file nothing ran, restarted the old one and said "replaced".
 #[cfg(not(target_os = "windows"))]
 fn installed_binary() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
-    let unit_path = linux_unit_path();
+    let Some(unit_path) = linux_unit_path() else {
+        return Err(tr!("install.linux_no_unit", unit = crate::LINUX_UNIT_NAME)
+            .into_owned()
+            .into());
+    };
     let unit = std::fs::read_to_string(&unit_path).map_err(|e| {
         tr!("install.linux_unit_unreadable", path = unit_path, error = e).into_owned()
     })?;
@@ -758,36 +769,73 @@ fn linux_unit_running() -> bool {
 mod linux_unit_tests {
     use super::*;
 
+    const PACKAGED_UNIT: &str = include_str!("../../../packaging/linux/own-backup.service");
+
+    /// The unit the package ships, checked here because nothing else reads
+    /// it before it is on a machine.
     #[test]
-    fn the_unit_waits_for_a_long_stop_and_for_the_network() {
-        let unit = linux_unit(std::path::Path::new("/usr/bin/own-backup-service"));
+    fn the_packaged_unit_waits_for_a_long_stop_and_for_the_network() {
         for line in [
-            "ExecStart=/usr/bin/own-backup-service --run",
+            "Type=notify",
+            "NotifyAccess=main",
+            "ExecStart=/usr/libexec/own-backup/own-backup-service --run",
             "TimeoutStopSec=330",
             "RestartSec=10",
             "KillMode=mixed",
             "Wants=network-online.target",
             "After=network-online.target remote-fs.target",
+            "StateDirectory=own-backup",
+            "LogsDirectory=own-backup",
+            "RuntimeDirectory=own-backup",
+            // The freeze markers in /run/own-backup must outlive a crash.
+            "RuntimeDirectoryPreserve=yes",
         ] {
-            assert!(unit.lines().any(|l| l == line), "{line} missing:\n{unit}");
+            assert!(
+                PACKAGED_UNIT.lines().any(|l| l == line),
+                "{line} missing:\n{PACKAGED_UNIT}"
+            );
         }
     }
 
-    /// `--update` replaces exactly what `--install` wrote into the unit.
+    /// Any of these gives the service a mount namespace of its own, where
+    /// the images it mounts and the read-only remount of a busy ESP would
+    /// stay invisible to the rest of the system.
     #[test]
-    fn update_reads_back_the_program_install_wrote() {
-        for exe in [
-            "/usr/bin/own-backup-service",
-            "/opt/Own Backup/own-backup-service",
-            "/opt/odd \"name\"\\dir/own-backup-service",
+    fn the_packaged_unit_shares_the_mount_namespace() {
+        for option in [
+            "PrivateTmp=",
+            "PrivateDevices=",
+            "PrivateMounts=",
+            "ProtectSystem=",
+            "ProtectHome=",
+            "ProtectKernelTunables=",
+            "ProtectKernelModules=",
+            "ProtectKernelLogs=",
+            "ProtectControlGroups=",
+            "ProtectClock=",
+            "ReadOnlyPaths=",
+            "ReadWritePaths=",
+            "InaccessiblePaths=",
+            "TemporaryFileSystem=",
+            "MountFlags=",
         ] {
-            let unit = linux_unit(std::path::Path::new(exe));
-            assert_eq!(
-                unit_exec_start(&unit),
-                Some(std::path::PathBuf::from(exe)),
-                "{unit}"
+            assert!(
+                !PACKAGED_UNIT
+                    .lines()
+                    .any(|l| l.trim_start().starts_with(option)),
+                "{option} would give the engine a private mount namespace"
             );
         }
+    }
+
+    #[test]
+    fn update_reads_back_the_program_the_packaged_unit_runs() {
+        assert_eq!(
+            unit_exec_start(PACKAGED_UNIT),
+            Some(std::path::PathBuf::from(
+                "/usr/libexec/own-backup/own-backup-service"
+            ))
+        );
     }
 
     #[test]
@@ -797,6 +845,14 @@ mod linux_unit_tests {
             read("[Service]\nExecStart=-/usr/local/bin/x --run\n").as_deref(),
             Some("/usr/local/bin/x")
         );
+        assert_eq!(
+            read("ExecStart=\"/opt/Own Backup/own-backup-service\" --run\n").as_deref(),
+            Some("/opt/Own Backup/own-backup-service")
+        );
+        assert_eq!(
+            read("ExecStart=\"/opt/odd \\\"name\\\"\\\\dir/x\" --run\n").as_deref(),
+            Some("/opt/odd \"name\"\\dir/x")
+        );
         // The last assignment is the one in force.
         assert_eq!(
             read("ExecStart=/a --run\nExecStart=/b --run\n").as_deref(),
@@ -805,5 +861,20 @@ mod linux_unit_tests {
         assert_eq!(read("[Service]\nType=simple\n"), None);
         assert_eq!(read("ExecStart=\n"), None);
         assert_eq!(read("ExecStart=\"/unterminated\n"), None);
+    }
+
+    /// What an older `--install` wrote, byte for byte, is recognised and
+    /// removed; an administrator's own unit, or the packaged one, is not.
+    #[test]
+    fn only_a_unit_an_older_install_generated_counts_as_legacy() {
+        let legacy = format!(
+            "[Unit]\n{}\nWants=network-online.target\n\n[Service]\nType=simple\n\
+             ExecStart=/usr/local/bin/own-backup-service --run\n",
+            legacy_unit_description()
+        );
+        assert!(is_legacy_generated_unit(&legacy));
+        assert!(!is_legacy_generated_unit(PACKAGED_UNIT));
+        let admins = "[Unit]\nDescription=my own engine\n[Service]\nType=simple\n";
+        assert!(!is_legacy_generated_unit(admins));
     }
 }
