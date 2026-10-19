@@ -66,6 +66,8 @@ pub mod exclusion_corpus;
 #[cfg(target_os = "linux")]
 pub mod disk_session_linux;
 #[cfg(target_os = "linux")]
+pub mod efivars_linux;
+#[cfg(target_os = "linux")]
 pub mod engine_linux;
 // The engine's Linux platform: the volume pipeline runs on it.
 #[cfg(target_os = "linux")]

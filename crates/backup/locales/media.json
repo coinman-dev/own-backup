@@ -513,6 +513,18 @@
     "ru": "%{name}: не переменная загрузки — записывать её отсюда нельзя",
     "en": "%{name} is not a boot variable — it cannot be written from here"
   },
+  "efivars_linux.not_mounted": {
+    "ru": "машина загружена через UEFI, но efivarfs не подключена (%{path}) — записи загрузки не видны. Подключите: mount -t efivarfs efivarfs /sys/firmware/efi/efivars",
+    "en": "the machine booted through UEFI, but efivarfs is not mounted (%{path}) — the boot entries cannot be seen. Mount it: mount -t efivarfs efivarfs /sys/firmware/efi/efivars"
+  },
+  "efivars_linux.read_failed": {
+    "ru": "не прочитать %{name}: %{error}",
+    "en": "could not read %{name}: %{error}"
+  },
+  "efivars_linux.write_short": {
+    "ru": "прошивка приняла %{written} из %{total} байт",
+    "en": "the firmware accepted %{written} of %{total} bytes"
+  },
   "efivars_win.empty_value": {
     "ru": "%{name}: пустое значение стёрло бы переменную",
     "en": "%{name}: an empty value would erase the variable"
