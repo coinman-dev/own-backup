@@ -6,7 +6,8 @@
 # loop device or store is left and the mapping has its own table back; each copy
 # is restored and compared by sha256 and checked by its filesystem's checker.
 # Refusals: no password for a kernel-only key, a store folder on the volume
-# itself, a busy plain partition. Kill test: the CLI is killed with SIGKILL
+# itself, a busy plain partition that cannot be held still (the copy would go
+# onto it). Kill test: the CLI is killed with SIGKILL
 # while the snapshot is in place; the volume must stay writable, and
 # `own-backup-cli cleanup-snapshots` must put the mapping back.
 #
@@ -329,7 +330,8 @@ guest_steps() {
 
     run busy-partition-mount bash -c "mkdir -p /mnt/obk-busy && mount ${R[1]} /mnt/obk-busy 2>/dev/null || (mkfs.ext4 -q ${R[1]} && mount ${R[1]} /mnt/obk-busy)"
     out=$EV/refuse-busy-partition.out
-    timeout 120 "$CLI" backup "${R[1]}" -o "$IMG/busy.vhdx" >"$out" 2>&1
+    # Short enough to be held still for its copy, were the copy not going onto it.
+    timeout 120 "$CLI" backup "${R[1]}" -o /mnt/obk-busy/busy.vhdx >"$out" 2>&1
     rc=$?
     plain "$out"
     [[ $rc -ne 0 ]] && grep -Eq 'сейчас используется|is in use' "$out" && [[ -z $(dmsetup ls | grep -E '^obk-(real|snap)-') ]]

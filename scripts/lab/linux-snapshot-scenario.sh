@@ -2,9 +2,11 @@
 # First Linux acceptance scenario: a mounted logical volume is copied through an
 # LVM snapshot (classic LV/ext4 -> qcow2, thin LV/xfs -> VHDX), each copy is
 # restored onto a fresh LV and compared by sha256, and the refusals hold: a busy
-# plain partition is not copied (and nothing is frozen), and restore will not
-# write over a mounted LV, the root partition or the ESP the guest booted from,
-# while an idle partition is accepted.
+# plain partition that cannot be held still for its copy (here: the copy would
+# go onto it — a short one that can is linux-shortfreeze-scenario.sh's) is not
+# copied and nothing is frozen, and restore will not write over a mounted LV,
+# the root partition or the ESP the guest booted from, while an idle partition
+# is accepted.
 #
 #   python3 -I scripts/lab/linux-vm.py up --disks 3 [--size 2]
 #   scripts/lab/linux-snapshot-scenario.sh
@@ -273,10 +275,11 @@ guest_steps() {
     fi
 
     # --- d. refusals
-    # A mounted plain partition: no snapshot exists for it, so no copy.
+    # A mounted plain partition: no snapshot exists for it, and a short one is
+    # held still for its copy only when nothing the copy writes is on it.
     local out=$EV/backup-busy.out t0=$SECONDS
-    echo "### backup $BUSY (mounted rw at /mnt/obk-busy)" >"$out"
-    timeout 120 "$CLI" backup "$BUSY" -o "$IMG/busy.vhdx" >>"$out" 2>&1
+    echo "### backup $BUSY (mounted rw at /mnt/obk-busy) onto itself" >"$out"
+    timeout 120 "$CLI" backup "$BUSY" -o /mnt/obk-busy/busy.vhdx >>"$out" 2>&1
     rc=$?
     local took=$((SECONDS - t0))
     echo "### exit $rc after $took s" >>"$out"
@@ -284,8 +287,8 @@ guest_steps() {
     sed 's/^/    /' "$out"
     [[ $rc -ne 0 && $rc -ne 124 ]] && grep -Eq "$IN_USE" "$out" && grep -q '/mnt/obk-busy' "$out"
     check refuse-backup-busy-partition "$(verdict $?)" "exit $rc in $took s: $(grep -m1 '^Error:' "$out" | cut -c1-160)"
-    ! ls -a "$IMG" | grep -q 'busy\|^\.own-backup-new-'
-    check refuse-backup-left-nothing "$(verdict $?)" "no busy.vhdx and no private image in $IMG"
+    ! ls -a "$IMG" /mnt/obk-busy | grep -q 'busy\.vhdx\|^\.own-backup-new-'
+    check refuse-backup-left-nothing "$(verdict $?)" "no busy.vhdx and no private image in $IMG or /mnt/obk-busy"
     timeout 10 bash -c 'echo after >/mnt/obk-busy/after-refusal.txt && sync -f /mnt/obk-busy/after-refusal.txt' &&
         timeout 10 touch /var/tmp/obk-alive && timeout 10 sync
     check guest-responsive-after-refusal "$(verdict $?)" "busy fs and root writable within 10 s each after the refusal"
