@@ -362,11 +362,27 @@ stage_e6() {
         check e6-convert SKIP "no qemu-img"
     fi
 
-    # A partition in use without a snapshot refuses the whole disk.
+    # A small ext4 partition in use is held still for its own copy (decision
+    # 10, FIFREEZE), so the disk copy goes through, and the partition takes
+    # writes again afterwards.
     mnt "${disk}p2" "$WORK/m-e6"
+    run e6-busy-frozen "$CLI" backup-disk --device "$disk" -o "$out/frozen.qcow2" --format qcow2 \
+        --verify
+    [[ $? -eq 0 && -e $out/frozen.qcow2 ]] && echo after >"$WORK/m-e6/data/after.txt" && sync
+    check e6-busy-frozen "$(verdict $?)" "a small mounted ext4 is held still for its copy and thawed"
+
+    # A FAT partition with a file open for writing can be neither frozen nor
+    # remounted read-only: the whole disk is refused and nothing is written.
+    mnt "${disk}p1" "$WORK/m-e6-esp"
+    (exec -a obk-holder bash -c "exec 7>>$WORK/m-e6-esp/held-open.txt; sleep 300") &
+    local holder=$!
+    sleep 0.5
     run e6-busy "$CLI" backup-disk --device "$disk" -o "$out/busy.qcow2" --format qcow2
     [[ $? -ne 0 && ! -e $out/busy.qcow2 ]]
-    check e6-busy-refused "$(verdict $?)" "a mounted partition without a snapshot refuses the disk"
+    check e6-busy-refused "$(verdict $?)" "a partition that cannot be held still refuses the disk"
+    kill "$holder" 2>/dev/null
+    wait "$holder" 2>/dev/null
+    umnt "$WORK/m-e6-esp"
     umnt "$WORK/m-e6"
 }
 
