@@ -6,6 +6,7 @@ import { api } from './api';
 import { formatBytes } from './format';
 import { m } from './paraglide/messages';
 import { onLocale } from './i18n.svelte';
+import { isWindows } from './platformStore.svelte';
 import type {
   ArchiveSecret,
   DiskInfo,
@@ -152,7 +153,7 @@ export async function refreshVolumes(): Promise<void> {
       /* keep */
     }
     if (engine.volumes.length === 0) {
-      volumesErrorText = m.eng_no_volumes;
+      volumesErrorText = isWindows() ? m.eng_no_volumes : m.eng_no_volumes_linux;
       engine.volumesError = volumesErrorText();
     }
   } catch (e) {

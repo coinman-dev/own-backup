@@ -1154,5 +1154,9 @@
   "disk_mapper_lvm_meta": "logical volume",
   "rd_target_running_hidden": "The disk of the running system ({disks}) is not offered here: it is restored from the boot medium.",
   "app_not_in_group": "The service is running, but your user is not in the own-backup group, so the window cannot connect to it. Add it: sudo usermod -aG own-backup $USER — then sign out, sign in again and click “Retry”.",
-  "app_relogin_group": "Your user is already in the own-backup group, but this session started earlier and does not have it yet, so the window cannot connect to the service. Sign out, sign in again and click “Retry”."
+  "app_relogin_group": "Your user is already in the own-backup group, but this session started earlier and does not have it yet, so the window cannot connect to the service. Sign out, sign in again and click “Retry”.",
+  "tools_mount_desc_linux": "The image is mounted read-only; its volume is mounted into a folder and opens in the file manager.",
+  "jmt_intro_linux": "The chosen version is mounted read-only and its volume is mounted into a folder. The “Tools” section opens — the image is unmounted there too.",
+  "eng_no_volumes_linux": "No volume was found. Details are in the logs (their folders are named in “About”).",
+  "about_licence_commercial_linux": "Commercial use requires a separate license — its terms are in the COMMERCIAL-LICENSE file in <code>/usr/share/doc/own-backup</code>."
 }

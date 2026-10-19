@@ -129,7 +129,7 @@
     <p class="licence">
       <b>PolyForm Noncommercial 1.0.0.</b> {m.about_licence_terms()}
     </p>
-    <p class="licence">{@html m.about_licence_commercial()}</p>
+    <p class="licence">{@html isWindows() ? m.about_licence_commercial() : m.about_licence_commercial_linux()}</p>
     <p class="licence muted">
       {m.about_licence_osi()}
       <code>THIRD-PARTY-NOTICES.txt</code>.

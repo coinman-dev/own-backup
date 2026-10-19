@@ -274,7 +274,7 @@
       </span>
       <div>
         <div class="tool-title">{m.tools_mount_title()}</div>
-        <div class="tool-desc">{m.tools_mount_desc()}</div>
+        <div class="tool-desc">{isWindows() ? m.tools_mount_desc() : m.tools_mount_desc_linux()}</div>
       </div>
     </div>
     <div class="row">
