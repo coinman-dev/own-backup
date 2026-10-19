@@ -393,7 +393,7 @@ fn inner_fs_is_refs(src: &BitLockerSource) -> bool {
     &boot[3..7] == b"ReFS" && &boot[0x10..0x14] == b"FSRS"
 }
 
-fn unlock_source_with_windows(
+pub(crate) fn unlock_source_with_windows(
     read_path: &str,
     passphrase: &str,
 ) -> Result<crate::windows_unlock_win::ReadOnlyDisk> {
