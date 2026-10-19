@@ -5394,6 +5394,7 @@ mod tests {
             source_os: "windows".into(),
             source_disk: DiskInfo {
                 device_id: r"\\.\C:".into(),
+                stable_device: String::new(),
                 model: String::new(),
                 serial: String::new(),
                 size_bytes: 1024,
@@ -5729,6 +5730,7 @@ mod tests {
             source_os: "windows".into(),
             source_disk: own_backup_common::disk::DiskInfo {
                 device_id: r"\.\E:".into(),
+                stable_device: String::new(),
                 model: String::new(),
                 serial: String::new(),
                 size_bytes: 1024 * 1024,

@@ -23,6 +23,7 @@ pub(crate) fn manifest(volume_len: u64, block_size: u64) -> ImageManifest {
         source_os: "windows".into(),
         source_disk: DiskInfo {
             device_id: "test".into(),
+            stable_device: String::new(),
             model: "test".into(),
             serial: String::new(),
             size_bytes: volume_len,

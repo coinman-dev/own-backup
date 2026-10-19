@@ -2151,6 +2151,7 @@ mod tests {
 
         let disk = own_backup_common::disk::DiskInfo {
             device_id: String::new(),
+            stable_device: String::new(),
             model: String::new(),
             serial: String::new(),
             size_bytes: 0,

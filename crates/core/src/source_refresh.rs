@@ -388,6 +388,7 @@ mod tests {
     fn disk(number: u32, parts: Vec<PartitionInfo>) -> DiskInfo {
         DiskInfo {
             device_id: format!(r"\\.\PhysicalDrive{number}"),
+            stable_device: String::new(),
             model: "Samsung SSD 970 PRO 1TB".into(),
             serial: "S".into(),
             size_bytes: 1_024_209_543_168,

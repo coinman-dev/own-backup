@@ -364,6 +364,7 @@ pub(crate) fn finish_volume_image<P: EnginePlatform>(
         source_os: P::SOURCE_OS.into(),
         source_disk: DiskInfo {
             device_id: source.clone(),
+            stable_device: String::new(),
             model: String::new(),
             serial: String::new(),
             size_bytes: volume_len,

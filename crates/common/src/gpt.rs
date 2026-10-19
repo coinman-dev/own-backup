@@ -283,6 +283,7 @@ mod tests {
     fn windows_inventory(layout: &DiskLayout) -> DiskInfo {
         DiskInfo {
             device_id: r"\\.\PhysicalDrive0".into(),
+            stable_device: String::new(),
             model: "m".into(),
             serial: String::new(),
             size_bytes: layout.size_bytes,

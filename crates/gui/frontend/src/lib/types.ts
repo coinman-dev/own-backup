@@ -1,5 +1,9 @@
 export interface DiskInfo {
   device_id: string;
+  /** Linux: `/dev/disk/by-id/…`, the name a whole-disk job keeps (it names
+   *  the same disk after a reboot, `device_id` may not). Absent on Windows,
+   *  for a device-mapper volume and for a disk udev gave no such name. */
+  stable_device?: string;
   model: string;
   serial: string;
   size_bytes: number;

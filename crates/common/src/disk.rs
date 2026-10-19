@@ -10,6 +10,14 @@ fn yes() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiskInfo {
     pub device_id: String,
+    /// Linux: the disk's name that survives a reboot, `/dev/disk/by-id/…` —
+    /// what a whole-disk job keeps in `disk_source.device` (decision R1).
+    /// [`Self::device_id`] stays the kernel name (`/dev/sda`), which the
+    /// window shows and which can name another disk after the next boot.
+    /// Empty when udev gave the disk no such name (a virtio disk without a
+    /// serial, a loop device), for a device-mapper volume, and on Windows.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stable_device: String,
     pub model: String,
     pub serial: String,
     pub size_bytes: u64,
@@ -290,6 +298,7 @@ mod tests {
     fn disk(model: &str, table: PartitionTable, parts: Vec<PartitionInfo>) -> DiskInfo {
         DiskInfo {
             device_id: r"\\.\PhysicalDrive4".into(),
+            stable_device: String::new(),
             model: model.into(),
             serial: String::new(),
             size_bytes: 1 << 40,

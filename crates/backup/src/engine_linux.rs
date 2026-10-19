@@ -2007,6 +2007,7 @@ mod verify_cancel_tests {
             source_os: "linux".into(),
             source_disk: DiskInfo {
                 device_id: "/dev/null".into(),
+                stable_device: String::new(),
                 model: "test".into(),
                 serial: "test".into(),
                 size_bytes: BLOCK * BLOCKS,

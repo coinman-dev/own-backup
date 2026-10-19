@@ -99,6 +99,7 @@ impl MockInventory {
 
         DiskInfo {
             device_id: r"\\.\PhysicalDrive0".into(),
+            stable_device: String::new(),
             model: "Samsung SSD 970 EVO Plus 500GB".into(),
             serial: "S4EWNX0R123456".into(),
             size_bytes: 500_107_862_016, // ~500 GB

@@ -230,6 +230,7 @@ fn build_disk(v: &Value) -> Option<DiskInfo> {
         // that are not one; a stable disk identity is model + serial +
         // `disk_guid` until the disk number goes from the shared types.
         device_id: path,
+        stable_device: String::new(),
         model: jstr(v, "model").unwrap_or_default(),
         serial: jstr(v, "serial").unwrap_or_default(),
         size_bytes: size,
@@ -280,6 +281,7 @@ fn build_mapper_disk(v: &Value, kind: &str) -> DiskInfo {
     let name = jstr(v, "name").unwrap_or_default();
     DiskInfo {
         device_id: p.volume_device.clone(),
+        stable_device: String::new(),
         model: String::new(),
         serial: String::new(),
         size_bytes: size,
@@ -388,6 +390,68 @@ fn assign_stable_names(disks: &mut [DiskInfo], resolve: &dyn Fn(&str) -> Option<
     }
 }
 
+/// Where udev keeps the names a disk is known by whatever order it appeared in.
+const BY_ID: &str = "/dev/disk/by-id";
+
+/// How good a `/dev/disk/by-id` name is for a whole-disk job; `None` for one
+/// that never names a disk (a partition, a device-mapper or md device, an
+/// LVM physical volume). The names made of the model and serial (`ata-…`,
+/// `nvme-…`, `usb-…`, `virtio-…`) come first: they read as the disk they
+/// are. The hardware ids (`wwn-…`, `nvme-eui.…`) name the same disk just as
+/// well, and are taken when there is nothing else.
+fn by_id_rank(name: &str) -> Option<u8> {
+    let partition = name
+        .rsplit_once("-part")
+        .is_some_and(|(_, n)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    let not_a_disk = ["dm-", "md-", "lvm-"];
+    if partition || not_a_disk.iter().any(|p| name.starts_with(p)) {
+        return None;
+    }
+    let hardware = ["wwn-", "nvme-eui.", "nvme-nvme."];
+    Some(u8::from(hardware.iter().any(|p| name.starts_with(p))))
+}
+
+/// The by-id name of the disk `disk` (its kernel path), out of `links`
+/// (name → the device it leads to). The best rank wins, then the smallest
+/// name, so the same disk gets the same name at every enumeration: an NVMe
+/// disk is `nvme-<model>_<serial>` and also `…_1` for its namespace, and the
+/// job must keep whichever it was saved with.
+fn pick_by_id(disk: &str, links: &[(String, String)]) -> Option<String> {
+    links
+        .iter()
+        .filter(|(_, target)| target == disk)
+        .filter_map(|(name, _)| by_id_rank(name).map(|rank| (rank, name)))
+        .min()
+        .map(|(_, name)| format!("{BY_ID}/{name}"))
+}
+
+/// Give every real disk its by-id name ([`DiskInfo::stable_device`]); a
+/// device-mapper volume listed as a disk has none.
+fn assign_disk_names(disks: &mut [DiskInfo], links: &[(String, String)]) {
+    for disk in disks.iter_mut() {
+        let mapped = disk.partitions.len() == 1 && !disk.partitions[0].mapper_kind.is_empty();
+        if !mapped {
+            disk.stable_device = pick_by_id(&disk.device_id, links).unwrap_or_default();
+        }
+    }
+}
+
+/// `/dev/disk/by-id`, each name with the device it leads to. Empty when udev
+/// keeps no such folder (a container, the boot medium before udev settled).
+fn read_by_id_links() -> Vec<(String, String)> {
+    let Ok(entries) = std::fs::read_dir(BY_ID) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let target = std::fs::canonicalize(e.path()).ok()?;
+            Some((name, target.to_string_lossy().into_owned()))
+        })
+        .collect()
+}
+
 /// Partition start offset in bytes, from `/sys/class/block/<name>/start`
 /// (kernel reports it in 512-byte units). 0 when unavailable.
 fn sysfs_offset_bytes(dev_path: &str) -> u64 {
@@ -461,6 +525,7 @@ impl super::traits::DiskInventory for LinuxInventory {
                 .ok()
                 .map(|p| p.to_string_lossy().into_owned())
         });
+        assign_disk_names(&mut disks, &read_by_id_links());
         for disk in &mut disks {
             for part in &mut disk.partitions {
                 enrich(part);
@@ -719,6 +784,64 @@ mod tests {
         // And the kernel name is still there to show.
         let p2 = disks[0].partitions.iter().find(|p| p.index == 2).unwrap();
         assert_eq!(p2.kernel_device, "/dev/nvme0n1p2");
+    }
+
+    #[test]
+    fn a_disk_is_named_by_its_by_id_link() {
+        let mut disks = parse_lsblk(OWNER).unwrap();
+        let link = |name: &str, target: &str| (name.to_string(), target.to_string());
+        let links = [
+            link("nvme-eui.0025385b71b0aa01", "/dev/nvme0n1"),
+            link("nvme-Samsung_SSD_970_PRO_1TB_S462NF0K_1", "/dev/nvme0n1"),
+            link("nvme-Samsung_SSD_970_PRO_1TB_S462NF0K", "/dev/nvme0n1"),
+            link(
+                "nvme-Samsung_SSD_970_PRO_1TB_S462NF0K-part2",
+                "/dev/nvme0n1p2",
+            ),
+            link("wwn-0x5000c500a1b2c3d4", "/dev/sda"),
+            link("dm-name-WorkDisk-2", "/dev/dm-1"),
+        ];
+        assign_disk_names(&mut disks, &links);
+        let name = |kernel: &str| {
+            disks
+                .iter()
+                .find(|d| d.device_id == kernel)
+                .unwrap()
+                .stable_device
+                .clone()
+        };
+        // Model and serial before the hardware id; the shortest of the two
+        // namespace spellings, every time.
+        assert_eq!(
+            name("/dev/nvme0n1"),
+            "/dev/disk/by-id/nvme-Samsung_SSD_970_PRO_1TB_S462NF0K"
+        );
+        // Only the hardware id: that is the name.
+        assert_eq!(name("/dev/sda"), "/dev/disk/by-id/wwn-0x5000c500a1b2c3d4");
+        // No link at all: nothing, never the kernel name.
+        let mapped = disks
+            .iter()
+            .filter(|d| d.device_id.starts_with("/dev/mapper/"));
+        for d in mapped {
+            assert!(d.stable_device.is_empty(), "{}", d.device_id);
+        }
+        assert!(disks
+            .iter()
+            .filter(|d| !d.device_id.starts_with("/dev/nvme0n1") && d.device_id != "/dev/sda")
+            .all(|d| d.stable_device.is_empty()));
+    }
+
+    #[test]
+    fn partitions_and_mapper_devices_are_not_disk_names() {
+        assert_eq!(by_id_rank("ata-WDC_WD20-part1"), None);
+        assert_eq!(by_id_rank("dm-uuid-CRYPT-LUKS2-abc"), None);
+        assert_eq!(by_id_rank("lvm-pv-uuid-xyz"), None);
+        assert_eq!(by_id_rank("md-uuid-1"), None);
+        assert_eq!(by_id_rank("ata-WDC_WD20"), Some(0));
+        assert_eq!(by_id_rank("usb-Kingston_DataTraveler-0:0"), Some(0));
+        assert_eq!(by_id_rank("wwn-0x50014ee"), Some(1));
+        // A model that happens to contain "-part" but no number after it.
+        assert_eq!(by_id_rank("usb-Some-partner_Disk"), Some(0));
     }
 
     // Runs against the real system; `cargo test -p own-backup-inventory -- --ignored`.

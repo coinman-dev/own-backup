@@ -730,6 +730,7 @@ impl super::traits::DiskInventory for WindowsInventory {
             );
             disks.push(DiskInfo {
                 device_id,
+                stable_device: String::new(),
                 model: facts.model,
                 serial: facts.serial,
                 size_bytes: facts.size_bytes,

@@ -983,6 +983,7 @@ mod tests {
             source_os: "windows".into(),
             source_disk: DiskInfo {
                 device_id: r"\\.\E:".into(),
+                stable_device: String::new(),
                 model: String::new(),
                 serial: String::new(),
                 // The volume this fixture actually builds. It used to say 4096

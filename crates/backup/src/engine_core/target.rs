@@ -344,6 +344,7 @@ pub(crate) fn whole_disk_image_manifest(
         source_os: source_os.into(),
         source_disk: DiskInfo {
             device_id: device_id.into(),
+            stable_device: String::new(),
             model: req.disk_model.clone(),
             serial: String::new(),
             size_bytes: image_size,
