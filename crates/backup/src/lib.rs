@@ -88,7 +88,9 @@ pub mod block_reader_win;
 pub mod disk_session_win;
 #[cfg(target_os = "windows")]
 pub mod efivars_win;
-#[cfg(target_os = "windows")]
+// Its volume pipeline is generic over the engine platform and is built for the
+// tests everywhere; the rest of the module is Windows-only, item by item.
+#[cfg(any(target_os = "windows", test))]
 pub mod engine_win;
 // The engine's Windows platform: the volume pipeline runs on it.
 #[cfg(target_os = "windows")]
