@@ -52,6 +52,7 @@ pub mod table_writer;
 pub mod unlock_probe;
 pub mod used_sectors;
 pub mod vhdx_bat;
+pub mod vhdx_chain;
 pub mod xfs_dirent;
 pub mod xfs_efree;
 pub mod xfs_exclusions;

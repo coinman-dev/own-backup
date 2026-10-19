@@ -72,21 +72,9 @@ fn guid_le(s: &str) -> [u8; 16] {
         .to_bytes_le()
 }
 
-// --- CRC-32C (Castagnoli), reflected, init/xorout 0xFFFFFFFF ---
-fn crc32c(data: &[u8]) -> u32 {
-    let mut crc: u32 = 0xFFFF_FFFF;
-    for &b in data {
-        crc ^= b as u32;
-        for _ in 0..8 {
-            crc = if crc & 1 != 0 {
-                (crc >> 1) ^ 0x82F6_3B78
-            } else {
-                crc >> 1
-            };
-        }
-    }
-    !crc
-}
+// CRC-32C (Castagnoli), reflected, init/xorout 0xFFFFFFFF — shared with the
+// readers, which check it on every region table.
+use crate::vhdx_bat::crc32c;
 
 /// Number of payload blocks per sector-bitmap block.
 fn chunk_ratio(block_size: u64, sector_size: u32) -> u64 {
@@ -257,12 +245,7 @@ impl VhdxWriter {
             .map_err(|e| bad(format!("open {}: {e}", path.display())))?;
 
         // Region table: locate BAT and metadata offsets.
-        let mut region = vec![0u8; 64 * 1024];
-        file.seek(SeekFrom::Start(REGION1_OFF)).map_err(bad)?;
-        file.read_exact(&mut region).map_err(bad)?;
-        if &region[0..4] != b"regi" {
-            return Err(bad("no region table signature"));
-        }
+        let region = crate::vhdx_bat::read_region_table(&mut file)?;
         let entry_count = u32::from_le_bytes(region[8..12].try_into().unwrap()) as usize;
         let (mut bat_off, mut bat_len, mut meta_off) = (0u64, 0u64, 0u64);
         for slot in 0..entry_count.min(2047) {
@@ -574,6 +557,14 @@ impl VhdxWriter {
         Ok(())
     }
 
+    /// Flush the payload written so far, before [`Self::finish`] writes the
+    /// BAT that points at it. A caller that must survive a crash between the
+    /// two (the userspace fold, `vhdx_chain`) needs the order; a backup does
+    /// not — its unfinished image is never published.
+    pub fn flush_payload(&mut self) -> Result<()> {
+        self.file.sync_data().map_err(bad)
+    }
+
     /// Write the BAT and flush. Consumes the writer.
     ///
     /// Entries this writer did not allocate go back exactly as they were read.
@@ -747,12 +738,7 @@ impl VhdxReader {
             File::open(path).map_err(|e| bad(format!("open {}: {e}", path.display())))?;
 
         // Region table: find BAT + metadata offsets.
-        let mut region = vec![0u8; 64 * 1024];
-        file.seek(SeekFrom::Start(REGION1_OFF)).map_err(bad)?;
-        file.read_exact(&mut region).map_err(bad)?;
-        if &region[0..4] != b"regi" {
-            return Err(bad("no region table signature"));
-        }
+        let region = crate::vhdx_bat::read_region_table(&mut file)?;
         let entry_count = u32::from_le_bytes(region[8..12].try_into().unwrap()) as usize;
         let (mut bat_off, mut bat_len, mut meta_off) = (0u64, 0u64, 0u64);
         for slot in 0..entry_count.min(2047) {

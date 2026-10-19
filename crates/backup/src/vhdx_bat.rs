@@ -19,8 +19,10 @@ use uuid::Uuid;
 
 use own_backup_common::{OwnBackupError, Result};
 
-/// Region table 1 lives at a spec-fixed offset.
-const REGION1_OFF: u64 = 192 * 1024;
+/// The two copies of the region table live at spec-fixed offsets.
+pub(crate) const REGION1_OFF: u64 = 192 * 1024;
+pub(crate) const REGION2_OFF: u64 = 256 * 1024;
+const REGION_LEN: usize = 64 * 1024;
 
 // Region / metadata-item GUIDs (same literals as vhdx_format.rs).
 const BAT_GUID: &str = "2dc27766-f623-4200-9d64-115e9bfd4a08";
@@ -57,6 +59,84 @@ fn guid_le(s: &str) -> [u8; 16] {
 fn read_exact_at(file: &mut File, off: u64, buf: &mut [u8]) -> Result<()> {
     file.seek(SeekFrom::Start(off)).map_err(bad)?;
     file.read_exact(buf).map_err(bad)
+}
+
+/// CRC-32C (Castagnoli) lookup table, reflected polynomial 0x82F63B78.
+const CRC32C_TABLE: [u32; 256] = {
+    let mut table = [0u32; 256];
+    let mut i = 0;
+    while i < 256 {
+        let mut c = i as u32;
+        let mut k = 0;
+        while k < 8 {
+            c = if c & 1 != 0 {
+                (c >> 1) ^ 0x82F6_3B78
+            } else {
+                c >> 1
+            };
+            k += 1;
+        }
+        table[i] = c;
+        i += 1;
+    }
+    table
+};
+
+/// CRC-32C as VHDX uses it for headers and region tables (init and final xor
+/// 0xFFFFFFFF). Table-driven: every region-table read checksums 64 KiB.
+pub(crate) fn crc32c(data: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &b in data {
+        crc = CRC32C_TABLE[((crc ^ b as u32) & 0xFF) as usize] ^ (crc >> 8);
+    }
+    !crc
+}
+
+/// A region table copy whose signature and checksum both hold.
+fn region_table_is_valid(table: &[u8]) -> bool {
+    if table.len() != REGION_LEN || &table[0..4] != b"regi" {
+        return false;
+    }
+    let stored = u32::from_le_bytes(table[4..8].try_into().unwrap());
+    let mut copy = table.to_vec();
+    copy[4..8].fill(0);
+    crc32c(&copy) == stored
+}
+
+/// The region table copy to believe, when one has a valid checksum: the
+/// primary (192 KiB) if it checks out, else the backup (256 KiB).
+///
+/// The order matters to a repoint ([`crate::vhdx_chain::repoint`]): it moves
+/// the metadata region by rewriting the backup copy first and the primary
+/// last, so a primary torn by a crash fails its checksum and the backup —
+/// already complete — is read. Every reader takes the same copy, so none of
+/// them can see the new parent locator while another sees the old one.
+pub(crate) fn read_valid_region_table(file: &mut File) -> Result<Option<Vec<u8>>> {
+    for off in [REGION1_OFF, REGION2_OFF] {
+        let mut table = vec![0u8; REGION_LEN];
+        if read_exact_at(file, off, &mut table).is_ok() && region_table_is_valid(&table) {
+            return Ok(Some(table));
+        }
+    }
+    Ok(None)
+}
+
+/// The region table to parse: [`read_valid_region_table`], and only when
+/// neither copy has a valid checksum, the primary as it lies (what every
+/// reader here did before checksums were checked; hand-built test fixtures
+/// carry no checksum). Neither Windows nor our writers produce such a file,
+/// and a repoint never leaves one behind: when it writes the primary, the
+/// backup is already valid.
+pub(crate) fn read_region_table(file: &mut File) -> Result<Vec<u8>> {
+    if let Some(table) = read_valid_region_table(file)? {
+        return Ok(table);
+    }
+    let mut table = vec![0u8; REGION_LEN];
+    read_exact_at(file, REGION1_OFF, &mut table)?;
+    if &table[0..4] != b"regi" {
+        return Err(bad("no region table signature"));
+    }
+    Ok(table)
 }
 
 /// Refuse a VHDX whose log still holds entries to replay.
@@ -125,11 +205,7 @@ pub fn allocated_payload_blocks(path: &Path) -> Result<VhdxAllocation> {
     }
 
     // Region table: locate the BAT and metadata regions.
-    let mut region = vec![0u8; 64 * 1024];
-    read_exact_at(&mut file, REGION1_OFF, &mut region)?;
-    if &region[0..4] != b"regi" {
-        return Err(bad("no region table signature"));
-    }
+    let region = read_region_table(&mut file)?;
     let entry_count = u32::from_le_bytes(region[8..12].try_into().unwrap()) as usize;
     let (mut bat_off, mut bat_len, mut meta_off, mut meta_len) = (0u64, 0u64, 0u64, 0u64);
     for slot in 0..entry_count.min(2047) {
@@ -238,11 +314,7 @@ fn guest_to_file_offset_in_file(file: &mut File, guest_offset: u64) -> Result<Gu
     }
 
     // 2. Region table.
-    let mut region = vec![0u8; 64 * 1024];
-    read_exact_at(file, REGION1_OFF, &mut region)?;
-    if &region[0..4] != b"regi" {
-        return Err(bad("no region table signature"));
-    }
+    let region = read_region_table(file)?;
     let entry_count = u32::from_le_bytes(region[8..12].try_into().unwrap()) as usize;
     let (mut bat_off, mut bat_len, mut meta_off, mut meta_len) = (0u64, 0u64, 0u64, 0u64);
     for slot in 0..entry_count.min(2047) {
@@ -427,11 +499,7 @@ fn read_metadata_region(file: &mut File) -> Result<Vec<u8>> {
     if &id != b"vhdxfile" {
         return Err(bad("not a VHDX file (no signature)"));
     }
-    let mut region = vec![0u8; 64 * 1024];
-    read_exact_at(file, REGION1_OFF, &mut region)?;
-    if &region[0..4] != b"regi" {
-        return Err(bad("no region table signature"));
-    }
+    let region = read_region_table(file)?;
     let entry_count = u32::from_le_bytes(region[8..12].try_into().unwrap()) as usize;
     for slot in 0..entry_count.min(2047) {
         let base = 16 + slot * 32;
@@ -789,11 +857,7 @@ impl VhdxGuestReader {
         if &id != b"vhdxfile" {
             return Err(bad("not a VHDX file (no signature)"));
         }
-        let mut region = vec![0u8; 64 * 1024];
-        read_exact_at(&mut file, REGION1_OFF, &mut region)?;
-        if &region[0..4] != b"regi" {
-            return Err(bad("no region table signature"));
-        }
+        let region = read_region_table(&mut file)?;
         let entry_count = u32::from_le_bytes(region[8..12].try_into().unwrap()) as usize;
         let (mut bat_off, mut bat_len) = (0u64, 0u64);
         for slot in 0..entry_count.min(2047) {
